@@ -13,7 +13,6 @@ import asyncio
 import contextvars
 import pytest
 from pathlib import Path
-from unittest.mock import patch
 
 # Import the functions we're testing
 from copaw.constant import (
@@ -336,8 +335,7 @@ class TestFileOperations:
     @pytest.mark.asyncio
     async def test_file_io_uses_user_directory(self, tmp_copaw_dirs):
         """Test that file read/write operations use user directory."""
-        import importlib
-        from copaw.agents import tools
+        from copaw.agents.tools.file_io import _resolve_file_path
 
         working_dir, _ = tmp_copaw_dirs
 
@@ -464,6 +462,67 @@ class TestBackwardCompatibility:
 
         result = get_working_dir("explicituser")
         assert result == working_dir / "explicituser"
+
+
+class TestAutoInitialization:
+    """Test automatic user directory initialization."""
+
+    def test_initialize_new_user_directory(self, tmp_copaw_dirs):
+        """Test that new user directory is properly initialized."""
+        from copaw.agents.utils.setup_utils import initialize_user_directory
+
+        working_dir, secret_dir = tmp_copaw_dirs
+        user_id = "newuser"
+
+        # Should return True for new user
+        result = initialize_user_directory(user_id, language="en")
+        assert result is True
+
+        # Verify directories and files created
+        user_wd = working_dir / user_id
+        user_secret = secret_dir / user_id
+
+        assert (user_wd / "config.json").exists()
+        assert (user_secret / "providers.json").exists()
+        # Note: active_skills directory is created by sync_skills_to_working_dir
+        # but may be empty if no builtin skills exist in test environment
+
+    def test_initialize_existing_user_returns_false(self, tmp_copaw_dirs):
+        """Test that initialization returns False for existing user."""
+        from copaw.agents.utils.setup_utils import initialize_user_directory
+        from copaw.config import Config, save_config
+
+        working_dir, _ = tmp_copaw_dirs
+        user_id = "existinguser"
+
+        # Create config.json first
+        user_wd = working_dir / user_id
+        user_wd.mkdir(parents=True, exist_ok=True)
+        save_config(Config(), user_wd / "config.json")
+
+        # Should return False for existing user
+        result = initialize_user_directory(user_id)
+        assert result is False
+
+    def test_ensure_providers_json_creates_default(self, tmp_copaw_dirs):
+        """Test that ensure_providers_json creates default config."""
+        from copaw.providers.store import ensure_providers_json
+
+        _, secret_dir = tmp_copaw_dirs
+        user_id = "testuser"
+
+        # Create new providers.json
+        result_path = ensure_providers_json(user_id)
+
+        expected_path = secret_dir / user_id / "providers.json"
+        assert result_path == expected_path
+        assert result_path.exists()
+
+        # Verify content is valid JSON
+        import json
+        with open(result_path) as f:
+            data = json.load(f)
+        assert "providers" in data or "active_llm" in data
 
 
 if __name__ == "__main__":

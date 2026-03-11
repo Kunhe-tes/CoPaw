@@ -8,6 +8,7 @@ are sanitized before being used as filenames.
 """
 import os
 import re
+from pathlib import Path
 
 from agentscope.session import JSONSession
 
@@ -40,12 +41,26 @@ class SafeJSONSession(JSONSession):
 
         Overrides the parent implementation to ensure the generated
         filename is valid on Windows, macOS and Linux.
+        Also uses user-specific subdirectory for better isolation.
         """
-        os.makedirs(self.save_dir, exist_ok=True)
-        safe_sid = sanitize_filename(session_id)
+        # Sanitize user_id for use in path
         safe_uid = sanitize_filename(user_id) if user_id else ""
+
+        # Use user-specific subdirectory if user_id is provided
+        if safe_uid:
+            # Use request-scoped directory for user isolation
+            from ...constant import get_request_working_dir
+            sessions_dir = get_request_working_dir() / "sessions"
+            sessions_dir.mkdir(parents=True, exist_ok=True)
+        else:
+            # Fallback to global sessions directory for backward compatibility
+            from ...constant import get_runtime_working_dir
+            sessions_dir = get_runtime_working_dir() / "sessions"
+            sessions_dir.mkdir(parents=True, exist_ok=True)
+
+        safe_sid = sanitize_filename(session_id)
         if safe_uid:
             file_path = f"{safe_uid}_{safe_sid}.json"
         else:
             file_path = f"{safe_sid}.json"
-        return os.path.join(self.save_dir, file_path)
+        return os.path.join(sessions_dir, file_path)

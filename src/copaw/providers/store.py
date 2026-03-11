@@ -1465,3 +1465,66 @@ async def test_model_connection(
             "success": False,
             "message": f"Model test failed: {error_msg}",
         }
+
+
+def ensure_providers_json(user_id: str | None = None) -> Path:
+    """Ensure providers.json exists, create default if missing.
+
+    This function is used during auto-initialization of new user directories.
+    It creates a minimal providers.json configuration without API keys.
+    The user must configure API keys via CLI or Web UI.
+
+    Args:
+        user_id: User identifier, None uses request context
+
+    Returns:
+        Path to providers.json
+    """
+    providers_path = get_providers_json_path(user_id)
+
+    if providers_path.exists():
+        return providers_path
+
+    # Create default providers configuration
+    # Use first available provider as default (dashscope preferred)
+    default_provider_key = "dashscope" if "dashscope" in PROVIDERS else next(iter(PROVIDERS.keys()), None)
+    default_provider = PROVIDERS.get(default_provider_key) if default_provider_key else None
+
+    if default_provider:
+        providers_data = ProvidersData(
+            providers={
+                default_provider_key: ProviderSettings(
+                    enabled=True,
+                    api_key_env=None,  # User must set via UI/CLI
+                    models=default_provider.models,
+                )
+            },
+            custom_providers={},
+            active_llm=ModelSlotConfig(
+                provider_id=default_provider_key,
+                model=default_provider.models[0].id if default_provider.models else None,
+            ),
+        )
+    else:
+        # Fallback if no providers defined
+        providers_data = ProvidersData(
+            providers={},
+            custom_providers={},
+            active_llm=ModelSlotConfig(),
+        )
+
+    providers_path.parent.mkdir(parents=True, exist_ok=True)
+    with open(providers_path, "w", encoding="utf-8") as f:
+        json.dump(
+            providers_data.model_dump(mode="json", by_alias=True),
+            f,
+            indent=2,
+            ensure_ascii=False,
+        )
+
+    # Set restrictive permissions for secrets
+    _chmod_best_effort(providers_path, 0o600)
+    _chmod_best_effort(providers_path.parent, 0o700)
+
+    logger.info("Created default providers.json at %s", providers_path)
+    return providers_path

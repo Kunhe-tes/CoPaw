@@ -11,6 +11,63 @@ from pathlib import Path
 logger = logging.getLogger(__name__)
 
 
+def initialize_user_directory(
+    user_id: str,
+    language: str = "en",
+) -> bool:
+    """Initialize user directory with minimal required files.
+
+    This function is called automatically when a request is received
+    from a new user. It creates the minimum set of files and directories
+    required for the agent to function.
+
+    Args:
+        user_id: User identifier
+        language: Language code for default config (default: "en")
+
+    Returns:
+        True if initialization was performed, False if directory already existed
+    """
+    from ...constant import get_working_dir, get_secret_dir
+    from ...config import Config, save_config
+    from ...providers.store import ensure_providers_json
+    from ...agents.skills_manager import sync_skills_to_working_dir
+
+    working_dir = get_working_dir(user_id)
+    secret_dir = get_secret_dir(user_id)
+
+    # Check if already initialized (config.json exists)
+    config_path = working_dir / "config.json"
+    if config_path.exists():
+        logger.debug("User %s directory already initialized", user_id)
+        return False
+
+    # Create base directories
+    working_dir.mkdir(parents=True, exist_ok=True)
+    secret_dir.mkdir(parents=True, exist_ok=True)
+
+    # Create default config.json
+    config = Config()
+    config.agents.language = language
+    save_config(config, config_path)
+    logger.info("Created default config.json for user %s", user_id)
+
+    # Create default providers.json (without API keys)
+    ensure_providers_json(user_id)
+    logger.info("Created default providers.json for user %s", user_id)
+
+    # Sync built-in skills to active_skills (required for agent to work)
+    sync_skills_to_working_dir(force=False)
+    logger.info("Synced built-in skills for user %s", user_id)
+
+    logger.info(
+        "User %s directory initialized at %s",
+        user_id,
+        working_dir,
+    )
+    return True
+
+
 def copy_md_files(
     language: str,
     skip_existing: bool = False,

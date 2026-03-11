@@ -68,8 +68,30 @@ class AgentRunner(Runner):
         **kwargs,
     ):
         """Handle agent query with per-request user isolation."""
+        from ...agents.utils.setup_utils import initialize_user_directory
+
         # Set request context for user-specific directory routing
         user_token = set_request_user_id(request.user_id if request else None)
+
+        # Auto-initialize user directory if this is a new user
+        user_id = request.user_id if request else None
+        if user_id:
+            try:
+                config = load_config()  # Uses request-scoped directory
+                initialized = initialize_user_directory(
+                    user_id=user_id,
+                    language=config.agents.language,
+                )
+                if initialized:
+                    logger.info("Auto-initialized directory for new user: %s", user_id)
+            except Exception as e:
+                logger.warning(
+                    "Auto-initialization failed for user %s: %s",
+                    user_id,
+                    e,
+                )
+                # Continue anyway - let the request proceed and fail naturally
+                # if config is truly missing
 
         # Command path: do not create agent; yield from run_command_path
         query = _get_last_user_text(msgs)
