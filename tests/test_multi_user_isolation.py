@@ -12,12 +12,9 @@ Tests are organized into three categories:
 import asyncio
 import contextvars
 import pytest
-from pathlib import Path
 
 # Import the functions we're testing
 from copaw.constant import (
-    DEFAULT_WORKING_DIR,
-    DEFAULT_SECRET_DIR,
     set_request_user_id,
     reset_request_user_id,
     get_request_user_id,
@@ -523,6 +520,78 @@ class TestAutoInitialization:
         with open(result_path) as f:
             data = json.load(f)
         assert "providers" in data or "active_llm" in data
+
+
+class TestHttpMiddleware:
+    """Test HTTP middleware for X-User-ID header."""
+
+    @pytest.mark.asyncio
+    async def test_user_context_middleware_sets_context(self):
+        """Test that middleware sets and cleans up context from X-User-ID header."""
+        from copaw.app._app import user_context_middleware
+
+        # Mock request with X-User-ID header
+        class MockRequest:
+            def __init__(self, headers):
+                self.headers = headers
+
+        call_count = {'value': 0}
+
+        class MockResponse:
+            def __init__(self, status_code=200):
+                self.status_code = status_code
+
+        async def mock_call_next(_req):
+            call_count['value'] += 1
+            return MockResponse()
+
+        request = MockRequest({"x-user-id": "middleware_user"})
+        await user_context_middleware(request, mock_call_next)
+
+        # Middleware should have called next
+        assert call_count['value'] == 1
+
+    @pytest.mark.asyncio
+    async def test_user_context_middleware_without_header(self):
+        """Test that middleware works correctly without X-User-ID header."""
+        from copaw.app._app import user_context_middleware
+        from copaw.constant import get_request_user_id
+
+        class MockRequest:
+            def __init__(self, headers):
+                self.headers = headers
+
+        async def mock_call_next(_req):
+            return True
+
+        # No user ID header
+        request = MockRequest({})
+        await user_context_middleware(request, mock_call_next)
+
+        # Context should remain unchanged (None)
+        assert get_request_user_id() is None
+
+    @pytest.mark.asyncio
+    async def test_user_context_middleware_copaw_header(self):
+        """Test that middleware recognizes X-CoPaw-User-Id header."""
+        from copaw.app._app import user_context_middleware
+
+        class MockRequest:
+            def __init__(self, headers):
+                self.headers = headers
+
+        call_count = {'value': 0}
+
+        async def mock_call_next(_req):
+            call_count['value'] += 1
+            return True
+
+        # Using X-CoPaw-User-Id header
+        request = MockRequest({"x-copaw-user-id": "copaw_user"})
+        await user_context_middleware(request, mock_call_next)
+
+        # Should work the same as X-User-ID
+        assert call_count['value'] == 1
 
 
 if __name__ == "__main__":

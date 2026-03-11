@@ -19,7 +19,14 @@ from ..config import (  # pylint: disable=no-name-in-module
     ConfigWatcher,
 )
 from ..config.utils import get_jobs_path, get_chats_path, get_config_path
-from ..constant import DOCS_ENABLED, LOG_LEVEL_ENV, CORS_ORIGINS, get_runtime_working_dir
+from ..constant import (
+    DOCS_ENABLED,
+    LOG_LEVEL_ENV,
+    CORS_ORIGINS,
+    get_runtime_working_dir,
+    set_request_user_id,
+    reset_request_user_id,
+)
 from ..__version__ import __version__
 from ..utils.logging import setup_logger, add_copaw_file_handler
 from .channels import ChannelManager  # pylint: disable=no-name-in-module
@@ -445,6 +452,33 @@ if CORS_ORIGINS:
         allow_methods=["*"],
         allow_headers=["*"],
     )
+
+
+# User context middleware: reads X-User-ID header and sets request context
+async def user_context_middleware(request, call_next):
+    """从 HTTP Header 读取 user_id 并设置请求上下文。
+
+    支持多个可能的 Header 名称，按优先级：
+    1. X-User-ID (标准)
+    2. X-CoPaw-User-Id (项目特定)
+    """
+    # 从 Header 获取 user_id
+    user_id = request.headers.get("X-User-ID") or request.headers.get("X-CoPaw-User-Id")
+
+    if user_id:
+        # 设置请求上下文
+        token = set_request_user_id(user_id)
+        try:
+            response = await call_next(request)
+            return response
+        finally:
+            # 恢复上下文
+            reset_request_user_id(token)
+    else:
+        return await call_next(request)
+
+
+app.middleware("http")(user_context_middleware)
 
 
 # Console static dir: env, or copaw package data (console), or cwd.
