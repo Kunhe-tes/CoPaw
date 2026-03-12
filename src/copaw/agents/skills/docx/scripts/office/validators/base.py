@@ -143,9 +143,16 @@ class BaseSchemaValidator:
     def validate_xml(self):
         errors = []
 
+        secure_parser = lxml.etree.XMLParser(
+            resolve_entities=False,
+            no_network=True,
+            dtd_validation=False,
+            dtd_loading=False
+        )
+
         for xml_file in self.xml_files:
             try:
-                lxml.etree.parse(str(xml_file))
+                lxml.etree.parse(str(xml_file), parser=secure_parser)
             except lxml.etree.XMLSyntaxError as e:
                 errors.append(
                     f"  {xml_file.relative_to(self.unpacked_dir)}: "
@@ -170,9 +177,16 @@ class BaseSchemaValidator:
     def validate_namespaces(self):
         errors = []
 
+        secure_parser = lxml.etree.XMLParser(
+            resolve_entities=False,
+            no_network=True,
+            dtd_validation=False,
+            dtd_loading=False
+        )
+
         for xml_file in self.xml_files:
             try:
-                root = lxml.etree.parse(str(xml_file)).getroot()
+                root = lxml.etree.parse(str(xml_file), parser=secure_parser).getroot()
                 declared = set(root.nsmap.keys()) - {None}  
 
                 for attr_val in [
@@ -198,11 +212,18 @@ class BaseSchemaValidator:
 
     def validate_unique_ids(self):
         errors = []
-        global_ids = {}  
+        global_ids = {}
+
+        secure_parser = lxml.etree.XMLParser(
+            resolve_entities=False,
+            no_network=True,
+            dtd_validation=False,
+            dtd_loading=False
+        )
 
         for xml_file in self.xml_files:
             try:
-                root = lxml.etree.parse(str(xml_file)).getroot()
+                root = lxml.etree.parse(str(xml_file), parser=secure_parser).getroot()
                 file_ids = {}  
 
                 mc_elements = root.xpath(
@@ -314,7 +335,13 @@ class BaseSchemaValidator:
 
         for rels_file in rels_files:
             try:
-                rels_root = lxml.etree.parse(str(rels_file)).getroot()
+                secure_parser = lxml.etree.XMLParser(
+                    resolve_entities=False,
+                    no_network=True,
+                    dtd_validation=False,
+                    dtd_loading=False
+                )
+                rels_root = lxml.etree.parse(str(rels_file), parser=secure_parser).getroot()
 
                 rels_dir = rels_file.parent
 
@@ -398,7 +425,13 @@ class BaseSchemaValidator:
                 continue
 
             try:
-                rels_root = lxml.etree.parse(str(rels_file)).getroot()
+                secure_parser = lxml.etree.XMLParser(
+                    resolve_entities=False,
+                    no_network=True,
+                    dtd_validation=False,
+                    dtd_loading=False
+                )
+                rels_root = lxml.etree.parse(str(rels_file), parser=secure_parser).getroot()
                 rid_to_type = {}
 
                 for rel in rels_root.findall(
@@ -418,7 +451,7 @@ class BaseSchemaValidator:
                         )
                         rid_to_type[rid] = type_name
 
-                xml_root = lxml.etree.parse(str(xml_file)).getroot()
+                xml_root = lxml.etree.parse(str(xml_file), parser=secure_parser).getroot()
 
                 r_ns = self.OFFICE_RELATIONSHIPS_NAMESPACE
                 rid_attrs_to_check = ["id", "embed", "link"]
@@ -498,7 +531,13 @@ class BaseSchemaValidator:
             return False
 
         try:
-            root = lxml.etree.parse(str(content_types_file)).getroot()
+            secure_parser = lxml.etree.XMLParser(
+                resolve_entities=False,
+                no_network=True,
+                dtd_validation=False,
+                dtd_loading=False
+            )
+            root = lxml.etree.parse(str(content_types_file), parser=secure_parser).getroot()
             declared_parts = set()
             declared_extensions = set()
 
@@ -553,7 +592,13 @@ class BaseSchemaValidator:
                     continue
 
                 try:
-                    root_tag = lxml.etree.parse(str(xml_file)).getroot().tag
+                    secure_parser = lxml.etree.XMLParser(
+                        resolve_entities=False,
+                        no_network=True,
+                        dtd_validation=False,
+                        dtd_loading=False
+                    )
+                    root_tag = lxml.etree.parse(str(xml_file), parser=secure_parser).getroot().tag
                     root_name = root_tag.split("}")[-1] if "}" in root_tag else root_tag
 
                     if root_name in declarable_roots and path_str not in declared_parts:
@@ -750,18 +795,29 @@ class BaseSchemaValidator:
     def _validate_single_file_xsd(self, xml_file, base_path):
         schema_path = self._get_schema_path(xml_file)
         if not schema_path:
-            return None, None  
+            return None, None
 
         try:
             with open(schema_path, "rb") as xsd_file:
-                parser = lxml.etree.XMLParser()
+                parser = lxml.etree.XMLParser(
+                    resolve_entities=False,
+                    no_network=True,
+                    dtd_validation=False,
+                    dtd_loading=False
+                )
                 xsd_doc = lxml.etree.parse(
                     xsd_file, parser=parser, base_url=str(schema_path)
                 )
                 schema = lxml.etree.XMLSchema(xsd_doc)
 
             with open(xml_file, "r") as f:
-                xml_doc = lxml.etree.parse(f)
+                secure_parser = lxml.etree.XMLParser(
+                    resolve_entities=False,
+                    no_network=True,
+                    dtd_validation=False,
+                    dtd_loading=False
+                )
+                xml_doc = lxml.etree.parse(f, parser=secure_parser)
 
             xml_doc, _ = self._remove_template_tags_from_text_nodes(xml_doc)
             xml_doc = self._preprocess_for_mc_ignorable(xml_doc)
