@@ -30,6 +30,7 @@ from copaw.constant import (
     set_current_user,
     get_runtime_working_dir,
 )
+from copaw.config.utils import get_chats_path
 
 
 @pytest.fixture(autouse=True)
@@ -890,6 +891,258 @@ class TestMemoryManagerLRUCache:
             assert len(runner._memory_manager_cache) == 0
         finally:
             pass  # Already cleaned up by shutdown_handler
+
+
+class TestChatsIsolation:
+    """Test chat management isolation for multi-user support."""
+
+    def test_get_chats_path_with_user_id(self, tmp_copaw_dirs):
+        """Test that chats.json path is user-isolated."""
+        working_dir, _ = tmp_copaw_dirs
+
+        # With explicit user_id
+        result = get_chats_path("alice")
+        assert result == working_dir / "alice" / "chats.json"
+
+    def test_get_chats_path_with_request_context(self, tmp_copaw_dirs):
+        """Test that chats.json path uses request context when user_id=None."""
+        working_dir, _ = tmp_copaw_dirs
+
+        # With request context
+        token = set_request_user_id("bob")
+        try:
+            result = get_chats_path()
+            assert result == working_dir / "bob" / "chats.json"
+        finally:
+            reset_request_user_id(token)
+
+    @pytest.mark.asyncio
+    async def test_chat_manager_uses_user_isolated_repo(self, tmp_copaw_dirs):
+        """Test that ChatManager uses user-isolated repository."""
+        from copaw.app.runner.manager import ChatManager
+        from copaw.app.runner.repo.json_repo import JsonChatRepository
+
+        working_dir, _ = tmp_copaw_dirs
+
+        chat_manager = ChatManager()
+
+        # Test that _get_repo_for_user returns correct repo
+        token = set_request_user_id("testuser")
+        try:
+            repo = chat_manager._get_repo_for_user("testuser")
+            assert isinstance(repo, JsonChatRepository)
+            assert repo.path == working_dir / "testuser" / "chats.json"
+        finally:
+            reset_request_user_id(token)
+
+    @pytest.mark.asyncio
+    async def test_list_chats_returns_only_user_chats(self, tmp_copaw_dirs):
+        """Test that list_chats returns only the current user's chats."""
+        from copaw.app.runner.manager import ChatManager
+        from copaw.app.runner.models import ChatSpec
+
+        working_dir, _ = tmp_copaw_dirs
+
+        # Create user directories
+        (working_dir / "alice").mkdir(parents=True, exist_ok=True)
+        (working_dir / "bob").mkdir(parents=True, exist_ok=True)
+
+        chat_manager = ChatManager()
+
+        # Create chats for Alice
+        token_alice = set_request_user_id("alice")
+        try:
+            alice_repo = chat_manager._get_repo_for_user("alice")
+            alice_chat = ChatSpec(
+                name="Alice's Chat",
+                session_id="alice:session1",
+                user_id="alice",
+                channel="test",
+            )
+            await alice_repo.upsert_chat(alice_chat)
+        finally:
+            reset_request_user_id(token_alice)
+
+        # Create chats for Bob
+        token_bob = set_request_user_id("bob")
+        try:
+            bob_repo = chat_manager._get_repo_for_user("bob")
+            bob_chat = ChatSpec(
+                name="Bob's Chat",
+                session_id="bob:session1",
+                user_id="bob",
+                channel="test",
+            )
+            await bob_repo.upsert_chat(bob_chat)
+        finally:
+            reset_request_user_id(token_bob)
+
+        # Alice should only see her own chats
+        token_alice = set_request_user_id("alice")
+        try:
+            alice_chats = await chat_manager.list_chats(user_id="alice")
+            assert len(alice_chats) == 1
+            assert alice_chats[0].user_id == "alice"
+            assert alice_chats[0].name == "Alice's Chat"
+        finally:
+            reset_request_user_id(token_alice)
+
+        # Bob should only see his own chats
+        token_bob = set_request_user_id("bob")
+        try:
+            bob_chats = await chat_manager.list_chats(user_id="bob")
+            assert len(bob_chats) == 1
+            assert bob_chats[0].user_id == "bob"
+            assert bob_chats[0].name == "Bob's Chat"
+        finally:
+            reset_request_user_id(token_bob)
+
+    @pytest.mark.asyncio
+    async def test_create_chat_uses_user_directory(self, tmp_copaw_dirs):
+        """Test that create_chat saves to user's chats.json."""
+        from copaw.app.runner.manager import ChatManager
+        from copaw.app.runner.models import ChatSpec
+
+        working_dir, _ = tmp_copaw_dirs
+
+        # Create user directories
+        (working_dir / "testuser").mkdir(parents=True, exist_ok=True)
+
+        chat_manager = ChatManager()
+
+        # Create a chat for testuser
+        chat_spec = ChatSpec(
+            name="Test Chat",
+            session_id="testuser:session1",
+            user_id="testuser",
+            channel="test",
+        )
+
+        token = set_request_user_id("testuser")
+        try:
+            result = await chat_manager.create_chat(chat_spec, user_id="testuser")
+            assert result is not None
+
+            # Verify the chat was saved to user's directory
+            chats_path = working_dir / "testuser" / "chats.json"
+            assert chats_path.exists()
+
+            # Verify we can load it back
+            repo = chat_manager._get_repo_for_user("testuser")
+            chats = await repo.load()
+            assert len(chats.chats) == 1
+            assert chats.chats[0].user_id == "testuser"
+        finally:
+            reset_request_user_id(token)
+
+    @pytest.mark.asyncio
+    async def test_get_chat_not_found_for_other_user(self, tmp_copaw_dirs):
+        """Test that get_chat returns None when accessing another user's chat."""
+        from copaw.app.runner.manager import ChatManager
+        from copaw.app.runner.models import ChatSpec
+
+        working_dir, _ = tmp_copaw_dirs
+
+        # Create user directories
+        (working_dir / "owner").mkdir(parents=True, exist_ok=True)
+        (working_dir / "other").mkdir(parents=True, exist_ok=True)
+
+        chat_manager = ChatManager()
+
+        # Create a chat for owner
+        owner_chat = ChatSpec(
+            name="Owner's Chat",
+            session_id="owner:session1",
+            user_id="owner",
+            channel="test",
+        )
+
+        token_owner = set_request_user_id("owner")
+        try:
+            owner_repo = chat_manager._get_repo_for_user("owner")
+            await owner_repo.upsert_chat(owner_chat)
+        finally:
+            reset_request_user_id(token_owner)
+
+        # Other user should not be able to access owner's chat
+        # (different files, so chat won't exist in other's repo)
+        token_other = set_request_user_id("other")
+        try:
+            result = await chat_manager.get_chat(owner_chat.id, user_id="other")
+            # Should return None since the chat doesn't exist in other's file
+            assert result is None
+        finally:
+            reset_request_user_id(token_other)
+
+    @pytest.mark.asyncio
+    async def test_delete_chat_only_affects_user_chats(self, tmp_copaw_dirs):
+        """Test that delete_chat only affects the current user's chats."""
+        from copaw.app.runner.manager import ChatManager
+        from copaw.app.runner.models import ChatSpec
+
+        working_dir, _ = tmp_copaw_dirs
+
+        # Create user directories
+        (working_dir / "user1").mkdir(parents=True, exist_ok=True)
+        (working_dir / "user2").mkdir(parents=True, exist_ok=True)
+
+        chat_manager = ChatManager()
+
+        # Create chats for both users
+        user1_chat = ChatSpec(
+            name="User1 Chat",
+            session_id="user1:session1",
+            user_id="user1",
+            channel="test",
+        )
+        user2_chat = ChatSpec(
+            name="User2 Chat",
+            session_id="user2:session1",
+            user_id="user2",
+            channel="test",
+        )
+
+        token_user1 = set_request_user_id("user1")
+        try:
+            user1_repo = chat_manager._get_repo_for_user("user1")
+            await user1_repo.upsert_chat(user1_chat)
+        finally:
+            reset_request_user_id(token_user1)
+
+        token_user2 = set_request_user_id("user2")
+        try:
+            user2_repo = chat_manager._get_repo_for_user("user2")
+            await user2_repo.upsert_chat(user2_chat)
+        finally:
+            reset_request_user_id(token_user2)
+
+        # Delete user1's chat
+        token_user1 = set_request_user_id("user1")
+        try:
+            deleted = await chat_manager.delete_chats(
+                chat_ids=[user1_chat.id],
+                user_id="user1",
+            )
+            assert deleted is True
+        finally:
+            reset_request_user_id(token_user1)
+
+        # Verify user1's chat is deleted
+        token_user1 = set_request_user_id("user1")
+        try:
+            user1_chats = await chat_manager.list_chats(user_id="user1")
+            assert len(user1_chats) == 0
+        finally:
+            reset_request_user_id(token_user1)
+
+        # Verify user2's chat is still there
+        token_user2 = set_request_user_id("user2")
+        try:
+            user2_chats = await chat_manager.list_chats(user_id="user2")
+            assert len(user2_chats) == 1
+            assert user2_chats[0].user_id == "user2"
+        finally:
+            reset_request_user_id(token_user2)
 
 
 if __name__ == "__main__":

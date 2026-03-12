@@ -15,6 +15,7 @@ from .models import (
     ChatHistory,
 )
 from .utils import agentscope_msg_to_message
+from ...constant import get_request_user_id
 
 
 router = APIRouter(prefix="/chats", tags=["chats"])
@@ -64,23 +65,30 @@ def get_session(request: Request) -> JSONSession:
 
 @router.get("", response_model=list[ChatSpec])
 async def list_chats(
-    user_id: Optional[str] = Query(None, description="Filter by user ID"),
     channel: Optional[str] = Query(None, description="Filter by channel"),
+    request: Request = None,
     mgr: ChatManager = Depends(get_chat_manager),
 ):
     """List all chats with optional filters.
 
     Args:
-        user_id: Optional user ID to filter chats
         channel: Optional channel name to filter chats
+        request: FastAPI request for getting user_id from context
         mgr: Chat manager dependency
     """
+    user_id = get_request_user_id()
+    if user_id is None:
+        raise HTTPException(
+            status_code=400,
+            detail="X-User-ID header required",
+        )
     return await mgr.list_chats(user_id=user_id, channel=channel)
 
 
 @router.post("", response_model=ChatSpec)
 async def create_chat(
-    request: ChatSpec,
+    request_body: ChatSpec,
+    request: Request = None,
     mgr: ChatManager = Depends(get_chat_manager),
 ):
     """Create a new chat.
@@ -88,45 +96,61 @@ async def create_chat(
     Server generates chat_id (UUID) automatically.
 
     Args:
-        request: Chat creation request
+        request_body: Chat creation request
+        request: FastAPI request for getting user_id from context
         mgr: Chat manager dependency
 
     Returns:
         Created chat spec with UUID
     """
+    user_id = get_request_user_id()
+    if user_id is None:
+        raise HTTPException(
+            status_code=400,
+            detail="X-User-ID header required",
+        )
     chat_id = str(uuid4())
     spec = ChatSpec(
         id=chat_id,
-        name=request.name,
-        session_id=request.session_id,
-        user_id=request.user_id,
-        channel=request.channel,
-        meta=request.meta,
+        name=request_body.name,
+        session_id=request_body.session_id,
+        user_id=user_id,
+        channel=request_body.channel,
+        meta=request_body.meta,
     )
-    return await mgr.create_chat(spec)
+    return await mgr.create_chat(spec, user_id=user_id)
 
 
 @router.post("/batch-delete", response_model=dict)
 async def batch_delete_chats(
     chat_ids: list[str],
+    request: Request = None,
     mgr: ChatManager = Depends(get_chat_manager),
 ):
     """Delete chats by chat IDs.
 
     Args:
         chat_ids: List of chat IDs
+        request: FastAPI request for getting user_id from context
         mgr: Chat manager dependency
     Returns:
         True if deleted, False if failed
 
     """
-    deleted = await mgr.delete_chats(chat_ids=chat_ids)
+    user_id = get_request_user_id()
+    if user_id is None:
+        raise HTTPException(
+            status_code=400,
+            detail="X-User-ID header required",
+        )
+    deleted = await mgr.delete_chats(chat_ids=chat_ids, user_id=user_id)
     return {"deleted": deleted}
 
 
 @router.get("/{chat_id}", response_model=ChatHistory)
 async def get_chat(
     chat_id: str,
+    request: Request = None,
     mgr: ChatManager = Depends(get_chat_manager),
     session: JSONSession = Depends(get_session),
 ):
@@ -134,6 +158,7 @@ async def get_chat(
 
     Args:
         chat_id: Chat UUID
+        request: FastAPI request for getting user_id from context
         mgr: Chat manager dependency
         session: JSONSession  dependency
 
@@ -143,7 +168,13 @@ async def get_chat(
     Raises:
         HTTPException: If chat not found (404)
     """
-    chat_spec = await mgr.get_chat(chat_id)
+    user_id = get_request_user_id()
+    if user_id is None:
+        raise HTTPException(
+            status_code=400,
+            detail="X-User-ID header required",
+        )
+    chat_spec = await mgr.get_chat(chat_id, user_id=user_id)
     if not chat_spec:
         raise HTTPException(
             status_code=404,
@@ -174,6 +205,7 @@ async def get_chat(
 async def update_chat(
     chat_id: str,
     spec: ChatSpec,
+    request: Request = None,
     mgr: ChatManager = Depends(get_chat_manager),
 ):
     """Update an existing chat.
@@ -181,6 +213,7 @@ async def update_chat(
     Args:
         chat_id: Chat UUID
         spec: Updated chat specification
+        request: FastAPI request for getting user_id from context
         mgr: Chat manager dependency
 
     Returns:
@@ -189,6 +222,12 @@ async def update_chat(
     Raises:
         HTTPException: If chat_id mismatch (400) or not found (404)
     """
+    user_id = get_request_user_id()
+    if user_id is None:
+        raise HTTPException(
+            status_code=400,
+            detail="X-User-ID header required",
+        )
     if spec.id != chat_id:
         raise HTTPException(
             status_code=400,
@@ -196,20 +235,21 @@ async def update_chat(
         )
 
     # Check if exists
-    existing = await mgr.get_chat(chat_id)
+    existing = await mgr.get_chat(chat_id, user_id=user_id)
     if not existing:
         raise HTTPException(
             status_code=404,
             detail=f"Chat not found: {chat_id}",
         )
 
-    updated = await mgr.update_chat(spec)
+    updated = await mgr.update_chat(spec, user_id=user_id)
     return updated
 
 
 @router.delete("/{chat_id}", response_model=dict)
 async def delete_chat(
     chat_id: str,
+    request: Request = None,
     mgr: ChatManager = Depends(get_chat_manager),
 ):
     """Delete a chat by UUID.
@@ -219,6 +259,7 @@ async def delete_chat(
 
     Args:
         chat_id: Chat UUID
+        request: FastAPI request for getting user_id from context
         mgr: Chat manager dependency
 
     Returns:
@@ -227,7 +268,13 @@ async def delete_chat(
     Raises:
         HTTPException: If chat not found (404)
     """
-    deleted = await mgr.delete_chats(chat_ids=[chat_id])
+    user_id = get_request_user_id()
+    if user_id is None:
+        raise HTTPException(
+            status_code=400,
+            detail="X-User-ID header required",
+        )
+    deleted = await mgr.delete_chats(chat_ids=[chat_id], user_id=user_id)
     if not deleted:
         raise HTTPException(
             status_code=404,

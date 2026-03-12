@@ -350,7 +350,7 @@ class AgentRunner(Runner):
                     )
 
                 if self._chat_manager is not None and chat is not None:
-                    await self._chat_manager.update_chat(chat)
+                    await self._chat_manager.update_chat(chat, user_id=user_id)
             finally:
                 # Always restore previous context
                 reset_request_user_id(user_token)

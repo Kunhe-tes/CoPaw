@@ -18,7 +18,7 @@ from ..config import (  # pylint: disable=no-name-in-module
     update_last_dispatch,
     ConfigWatcher,
 )
-from ..config.utils import get_jobs_path, get_chats_path, get_config_path
+from ..config.utils import get_jobs_path, get_config_path
 from ..constant import (
     DOCS_ENABLED,
     LOG_LEVEL_ENV,
@@ -26,13 +26,14 @@ from ..constant import (
     get_runtime_working_dir,
     set_request_user_id,
     reset_request_user_id,
+    get_request_user_id,
+    get_working_dir,
 )
 from ..__version__ import __version__
 from ..utils.logging import setup_logger, add_copaw_file_handler
 from .channels import ChannelManager  # pylint: disable=no-name-in-module
 from .channels.utils import make_process_from_runner
 from .mcp import MCPClientManager, MCPConfigWatcher  # MCP hot-reload support
-from .runner.repo.json_repo import JsonChatRepository
 from .crons.repo.json_repo import JsonJobRepository
 from .crons.manager import CronManager
 from .runner.manager import ChatManager
@@ -103,14 +104,11 @@ async def lifespan(
     await cron_manager.start()
 
     # --- chat manager init and connect to runner.session ---
-    chat_repo = JsonChatRepository(get_chats_path())
-    chat_manager = ChatManager(
-        repo=chat_repo,
-    )
+    chat_manager = ChatManager()
 
     runner.set_chat_manager(chat_manager)
 
-    # --- config file watcher (channels + heartbeat hot-reload on change) ---
+    # --- config file watcher (channels + heartbeat hot-reloa on change) ---
     config_watcher = ConfigWatcher(
         channel_manager=channel_manager,
         cron_manager=cron_manager,
@@ -132,6 +130,10 @@ async def lifespan(
             if isinstance(e, (KeyboardInterrupt, SystemExit)):
                 raise
             logger.exception("Failed to start MCP watcher")
+
+    # Note: Static file mounting for user-specific static files is handled
+    # via a dynamic route below that resolves the user directory per-request.
+    # This avoids issues with mounting directories that may not exist at startup.
 
     # expose to endpoints
     app.state.runner = runner
@@ -567,6 +569,47 @@ app.include_router(
 # Voice channel: Twilio-facing endpoints at root level (not under /api/).
 # POST /voice/incoming, WS /voice/ws, POST /voice/status-callback
 app.include_router(voice_router, tags=["voice"])
+
+# User-specific static files: /static/{user_id}/{path}
+# This route dynamically resolves the user directory per-request.
+# The directory is created on-demand if it doesn't exist.
+@app.get("/static/{user_id}/{file_path:path}")
+async def serve_user_static(
+    user_id: str,
+    file_path: str,
+):
+    """Serve static files from user's static directory.
+
+    Args:
+        user_id: User identifier (used to determine static directory)
+        file_path: Relative path within user's static directory
+
+    Returns:
+        FileResponse if file exists, 404 otherwise
+    """
+    user_static_dir = get_working_dir(user_id) / "static"
+
+    # Create directory if it doesn't exist (on-demand creation)
+    user_static_dir.mkdir(parents=True, exist_ok=True)
+
+    target_file = user_static_dir / file_path
+
+    # Security: ensure resolved path is still within user's static dir
+    try:
+        target_file.resolve().relative_to(user_static_dir.resolve())
+    except ValueError:
+        # Path traversal attempt detected
+        raise HTTPException(status_code=400, detail="Invalid file path")
+
+    if not target_file.exists() or not target_file.is_file():
+        raise HTTPException(status_code=404, detail="File not found")
+
+    # Guess MIME type
+    mime_type, _ = mimetypes.guess_type(str(target_file))
+    media_type = mime_type or "application/octet-stream"
+
+    return FileResponse(target_file, media_type=media_type)
+
 
 # Mount console: root static files (logo.png etc.) then assets, then SPA
 # fallback.
