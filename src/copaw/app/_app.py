@@ -18,7 +18,7 @@ from ..config import (  # pylint: disable=no-name-in-module
     update_last_dispatch,
     ConfigWatcher,
 )
-from ..config.utils import get_jobs_path, get_config_path
+from ..config.utils import get_config_path
 from ..constant import (
     DOCS_ENABLED,
     LOG_LEVEL_ENV,
@@ -34,7 +34,6 @@ from ..utils.logging import setup_logger, add_copaw_file_handler
 from .channels import ChannelManager  # pylint: disable=no-name-in-module
 from .channels.utils import make_process_from_runner
 from .mcp import MCPClientManager, MCPConfigWatcher  # MCP hot-reload support
-from .crons.repo.json_repo import JsonJobRepository
 from .crons.manager import CronManager
 from .runner.manager import ChatManager
 from .routers import router as api_router
@@ -94,9 +93,7 @@ async def lifespan(
     await channel_manager.start_all()
 
     # --- cron init/start ---
-    repo = JsonJobRepository(get_jobs_path())
     cron_manager = CronManager(
-        repo=repo,
         runner=runner,
         channel_manager=channel_manager,
         timezone="UTC",
@@ -327,9 +324,7 @@ async def lifespan(
             await _teardown_new_stack(mcp_mgr=new_mcp_manager)
             return
 
-        job_repo = JsonJobRepository(get_jobs_path())
         new_cron_manager = CronManager(
-            repo=job_repo,
             runner=runner,
             channel_manager=new_channel_manager,
             timezone="UTC",

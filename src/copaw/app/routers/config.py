@@ -218,7 +218,9 @@ async def put_heartbeat(
 
     cron_manager = getattr(request.app.state, "cron_manager", None)
     if cron_manager is not None:
-        await cron_manager.reschedule_heartbeat()
+        from ...constant import get_request_user_id
+        user_id = get_request_user_id() or "default"
+        await cron_manager.reschedule_heartbeat(user_id)
 
     return hb.model_dump(mode="json", by_alias=True)
 

@@ -80,7 +80,7 @@ TaskType = Literal["text", "agent"]
 
 
 class CronJobSpec(BaseModel):
-    id: str
+    id: str = ""
     name: str
     enabled: bool = True
 
