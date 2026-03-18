@@ -190,3 +190,92 @@ def copy_md_files(
         )
 
     return copied_files
+
+
+def copy_init_config_files(
+    user_id: str | None = None,
+    force: bool = False,
+    skip_existing: bool = False,
+) -> tuple[bool, bool]:
+    """Copy config.json and providers.json from md_files to user directories.
+
+    This function copies the template configuration files to initialize
+    model, MCP, and channel settings for a user.
+
+    Args:
+        user_id: User identifier for subdirectory isolation.
+                  None uses the current runtime user directory.
+        force: If True, overwrite existing files.
+        skip_existing: If True, skip files that already exist (takes precedence
+                       over force when both are True).
+
+    Returns:
+        Tuple of (config_copied, providers_copied) indicating which files were copied.
+    """
+    import os
+
+    from ...constant import get_working_dir, get_secret_dir
+
+    # Get md_files directory (root level, not language subdirectory)
+    md_files_dir = Path(__file__).parent.parent / "md_files"
+
+    # Determine target directories
+    if user_id is not None:
+        working_dir = get_working_dir(user_id)
+        secret_dir = get_secret_dir(user_id)
+    else:
+        from ...constant import get_request_working_dir, get_request_secret_dir
+        working_dir = get_request_working_dir()
+        secret_dir = get_request_secret_dir()
+
+    # Create directories if needed
+    working_dir.mkdir(parents=True, exist_ok=True)
+    secret_dir.mkdir(parents=True, exist_ok=True)
+
+    # Set secure permissions on secret directory
+    try:
+        os.chmod(secret_dir, 0o700)
+    except OSError:
+        pass
+
+    config_copied = False
+    providers_copied = False
+
+    # Copy config.json to working directory
+    src_config = md_files_dir / "config.json"
+    dst_config = working_dir / "config.json"
+    if src_config.exists():
+        if skip_existing and dst_config.exists():
+            logger.debug("Skipped existing config.json")
+        elif force or not dst_config.exists():
+            try:
+                shutil.copy2(src_config, dst_config)
+                config_copied = True
+                logger.info("Copied config.json to %s", dst_config)
+            except Exception as e:
+                logger.error("Failed to copy config.json: %s", e)
+    else:
+        logger.warning("Source config.json not found: %s", src_config)
+
+    # Copy providers.json to secret directory
+    src_providers = md_files_dir / "providers.json"
+    dst_providers = secret_dir / "providers.json"
+    if src_providers.exists():
+        if skip_existing and dst_providers.exists():
+            logger.debug("Skipped existing providers.json")
+        elif force or not dst_providers.exists():
+            try:
+                shutil.copy2(src_providers, dst_providers)
+                # Set secure permissions on providers.json
+                try:
+                    os.chmod(dst_providers, 0o600)
+                except OSError:
+                    pass
+                providers_copied = True
+                logger.info("Copied providers.json to %s", dst_providers)
+            except Exception as e:
+                logger.error("Failed to copy providers.json: %s", e)
+    else:
+        logger.warning("Source providers.json not found: %s", src_providers)
+
+    return config_copied, providers_copied

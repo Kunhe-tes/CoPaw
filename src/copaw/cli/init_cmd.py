@@ -150,6 +150,24 @@ def init_cmd(
             raise click.Abort()
     working_dir.mkdir(parents=True, exist_ok=True)
 
+    # --- Copy init config files (config.json and providers.json) ---
+    from ..agents.utils.setup_utils import copy_init_config_files
+
+    click.echo("\n=== Initial Configuration Files ===")
+    config_copied, providers_copied = copy_init_config_files(
+        user_id=user_id,
+        force=force,
+        skip_existing=use_defaults and not force,
+    )
+    if config_copied:
+        click.echo("✓ Copied config.json template (channels, MCP settings)")
+    else:
+        click.echo("✓ config.json already exists or not copied")
+    if providers_copied:
+        click.echo("✓ Copied providers.json template (model provider settings)")
+    else:
+        click.echo("✓ providers.json already exists or not copied")
+
     # --- config.json ---
     write_config = True
     if config_path.is_file() and not force and not use_defaults:
