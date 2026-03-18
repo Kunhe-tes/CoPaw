@@ -13,7 +13,34 @@ from typing import Optional
 from agentscope.tool import ToolResponse
 from agentscope.message import TextBlock
 
-from ...constant import get_request_working_dir
+from ...constant import get_request_working_dir, get_request_user_id
+
+
+def _inject_user_id_for_copaw_cron(cmd: str) -> str:
+    """If command is 'copaw cron ...', auto-append --user-id if missing.
+
+    Args:
+        cmd: Original shell command
+
+    Returns:
+        Modified command with --user-id injected if applicable
+    """
+    stripped = cmd.strip()
+    # Check if it's a copaw cron command
+    if not stripped.startswith("copaw cron"):
+        return cmd
+
+    # Check if --user-id already exists
+    if "--user-id" in stripped:
+        return cmd
+
+    # Get current user_id from request context
+    user_id = get_request_user_id()
+    if user_id is None:
+        return cmd
+
+    # Append --user-id to the command
+    return f"{cmd} --user-id {user_id}"
 
 
 def _execute_subprocess_sync(
@@ -96,8 +123,13 @@ async def execute_shell_command(
 
     cmd = (command or "").strip()
 
+    # Inject --user-id for copaw cron commands
+    cmd = _inject_user_id_for_copaw_cron(cmd)
+
     # Set working directory
-    working_dir = cwd if cwd is not None else get_request_working_dir()  # Use request-scoped
+    working_dir = (
+        cwd if cwd is not None else get_request_working_dir()
+    )  # Use request-scoped
 
     try:
         if sys.platform == "win32":

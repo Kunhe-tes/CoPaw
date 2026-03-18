@@ -36,6 +36,7 @@ from ...constant import (
     set_request_user_id,
     reset_request_user_id,
     get_request_working_dir,
+    get_request_user_id,
 )
 
 logger = logging.getLogger(__name__)
@@ -145,7 +146,9 @@ class AgentRunner(Runner):
         from ...agents.utils.setup_utils import initialize_user_directory
 
         # Set request context for user-specific directory routing
-        user_token = set_request_user_id(request.user_id if request else None)
+        # 优先使用 request 中的 user_id，否则使用当前请求上下文中的 user_id（支持 cron 任务）
+        user_id = (request.user_id if request else None) or get_request_user_id()
+        user_token = set_request_user_id(user_id)
 
         # Auto-initialize user directory if this is a new user.
         # Channel requests bypass HTTP middleware, so initialization
