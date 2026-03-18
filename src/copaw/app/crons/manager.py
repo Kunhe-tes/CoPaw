@@ -410,7 +410,11 @@ class CronManager:
             if session_id:
                 error_text = f"❌ Cron job [{job.name}] failed: {exc}"
                 asyncio.ensure_future(
-                    push_store_append(session_id, error_text),
+                    push_store_append(
+                        job.dispatch.target.user_id,  # Add user_id
+                        session_id,
+                        error_text,
+                    ),
                 )
 
     # ----- internal -----
