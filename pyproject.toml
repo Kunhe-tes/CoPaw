@@ -67,11 +67,8 @@ mlx = [
     "copaw[local]",
     "mlx-lm>=0.10.0; sys_platform == 'darwin'",
 ]
-ollama = [
-    "ollama>=0.6.1",
-]
 full = [
-    "copaw[local,ollama,llamacpp]",
+    "copaw[local,llamacpp]",
     "mlx-lm>=0.10.0; sys_platform == 'darwin'",
 ]
 

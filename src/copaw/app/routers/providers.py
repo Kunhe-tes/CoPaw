@@ -127,12 +127,11 @@ async def configure_provider(
     if provider is None:
         raise HTTPException(404, detail=f"Provider '{provider_id}' not found")
 
-    # Allow base_url for custom providers, providers without a default
-    # base URL (e.g. Azure OpenAI), and Ollama (user may override).
+    # Allow base_url for custom providers and providers without a default
+    # base URL (e.g. Azure OpenAI).
     allow_base_url = (
         provider.is_custom
         or not provider.default_base_url
-        or provider.id == "ollama"
     )
     base_url = body.base_url if allow_base_url else None
     try:
@@ -372,14 +371,6 @@ async def set_active_model(
     # Validation based on provider type
     if provider.is_custom:
         # Custom providers need base_url
-        if not base_url:
-            msg = (
-                f"Provider '{provider.name}' has no base_url configured. "
-                "Please configure the base URL first."
-            )
-            raise HTTPException(status_code=400, detail=msg)
-    elif provider.id == "ollama":
-        # Ollama needs base_url to connect to daemon
         if not base_url:
             msg = (
                 f"Provider '{provider.name}' has no base_url configured. "
