@@ -129,8 +129,6 @@ class AgentMdManager:
 
         Creates the file if it doesn't exist.
         """
-        if not md_name.endswith(".md"):
-            md_name += ".md"
         file_path = self.working_dir / md_name
 
         # If file exists, read existing content and add newline if needed
