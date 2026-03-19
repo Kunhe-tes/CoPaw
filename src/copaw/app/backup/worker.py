@@ -253,6 +253,12 @@ class BackupWorker:
                 for file in user_dir.rglob("*"):
                     if file.is_file():
                         zf.write(file, file.relative_to(user_dir))
+                    elif file.is_dir() and not any(file.iterdir()):
+                        # 添加空文件夹
+                        zf.writestr(
+                            str(file.relative_to(user_dir)) + "/",
+                            "",
+                        )
             return str(zip_path)
 
         return await asyncio.to_thread(_do_compress)
@@ -278,6 +284,12 @@ class BackupWorker:
                 for file in user_dir.rglob("*"):
                     if file.is_file():
                         zf.write(file, file.relative_to(user_dir))
+                    elif file.is_dir() and not any(file.iterdir()):
+                        # 添加空文件夹
+                        zf.writestr(
+                            str(file.relative_to(user_dir)) + "/",
+                            "",
+                        )
             return str(zip_path)
 
         await asyncio.to_thread(_do_compress)

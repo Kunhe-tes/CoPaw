@@ -16,6 +16,20 @@ def get_backup_config_path() -> Path:
 
     Returns ~/.copaw/backup.json
     """
+    # 1. 环境变量优先
+    if env_path := os.environ.get("COPAW_BACKUP_CONFIG"):
+        return Path(env_path).expanduser().resolve()
+
+    # 2. 从当前文件往上找项目根目录（假设在 src/copaw/app/backup/config.py）
+    # 往上 4 级到仓库根目录
+    current_file = Path(__file__).resolve()
+    repo_root = current_file.parent.parent.parent.parent.parent
+
+    repo_config = repo_root / "backup.json"
+    if repo_config.exists():
+        return repo_config
+
+    # 3. 默认路径
     return Path.home() / ".copaw" / "backup.json"
 
 
@@ -58,6 +72,7 @@ class BackupEnvironmentConfig(BaseModel):
     s3_bucket: str
     s3_prefix: str = "cmbswe"
     s3_region: str = "cn-north-1"
+    endpoint_url: str = ""  # 可选，用于阿里云 ECS 等自定义 S3 端点
 
 
 class BackupCompressionConfig(BaseModel):

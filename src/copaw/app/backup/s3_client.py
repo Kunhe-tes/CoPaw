@@ -17,12 +17,14 @@ class S3BackupClient:
 
     def __init__(self, config: BackupEnvironmentConfig):
         self.config = config
-        self._s3 = boto3.client(
-            "s3",
-            aws_access_key_id=config.aws_access_key_id,
-            aws_secret_access_key=config.aws_secret_access_key,
-            region_name=config.s3_region,
-        )
+        client_kwargs = {
+            "aws_access_key_id": config.aws_access_key_id,
+            "aws_secret_access_key": config.aws_secret_access_key,
+            "region_name": config.s3_region,
+        }
+        if config.endpoint_url:
+            client_kwargs["endpoint_url"] = config.endpoint_url
+        self._s3 = boto3.client("s3", **client_kwargs)
         self.bucket = config.s3_bucket
         self.prefix = config.s3_prefix
 
