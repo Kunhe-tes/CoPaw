@@ -96,7 +96,7 @@ async def lifespan(
     cron_manager = CronManager(
         runner=runner,
         channel_manager=channel_manager,
-        timezone="UTC",
+        timezone="Asia/Shanghai",
     )
     await cron_manager.start()
 
@@ -327,7 +327,7 @@ async def lifespan(
         new_cron_manager = CronManager(
             runner=runner,
             channel_manager=new_channel_manager,
-            timezone="UTC",
+            timezone="Asia/Shanghai",
         )
         try:
             await new_cron_manager.start()

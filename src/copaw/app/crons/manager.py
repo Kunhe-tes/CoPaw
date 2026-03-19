@@ -36,7 +36,7 @@ class CronManager:
         *,
         runner: Any,
         channel_manager: Any,
-        timezone: str = "UTC",
+        timezone: str = "Asia/Shanghai",
     ):
         self._runner = runner
         self._channel_manager = channel_manager
