@@ -164,7 +164,9 @@ def init_cmd(
     else:
         click.echo("✓ config.json already exists or not copied")
     if providers_copied:
-        click.echo("✓ Copied providers.json template (model provider settings)")
+        click.echo(
+            "✓ Copied providers.json template (model provider settings)"
+        )
     else:
         click.echo("✓ providers.json already exists or not copied")
 

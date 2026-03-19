@@ -38,6 +38,7 @@ def temp_base_dir() -> Path:
 @pytest.fixture
 def mock_runner() -> Any:
     """Mock runner for testing."""
+
     class MockRunner:
         async def stream_query(self, req: dict) -> Any:
             yield {"type": "text", "content": "test response"}
@@ -48,6 +49,7 @@ def mock_runner() -> Any:
 @pytest.fixture
 def mock_channel_manager() -> Any:
     """Mock channel manager for testing."""
+
     class MockChannelManager:
         async def send_text(self, **kwargs) -> None:
             pass
@@ -60,7 +62,8 @@ def mock_channel_manager() -> Any:
 
 @pytest.fixture
 async def cron_manager(
-    mock_runner: Any, mock_channel_manager: Any
+    mock_runner: Any,
+    mock_channel_manager: Any,
 ) -> AsyncGenerator[CronManager, None]:
     """Create a CronManager instance for testing."""
     manager = CronManager(
@@ -104,6 +107,7 @@ async def test_user_isolated_jobs(
     """Test that users have isolated cron jobs."""
     # Override the working dir by patching get_jobs_path
     from copaw.config import utils as config_utils
+
     original_get_jobs_path = config_utils.get_jobs_path
 
     def mock_get_jobs_path(user_id: str | None = None) -> Path:
@@ -163,6 +167,7 @@ async def test_delete_job_isolation(
 ) -> None:
     """Test that deleting a job only affects the user's own jobs."""
     from copaw.config import utils as config_utils
+
     original_get_jobs_path = config_utils.get_jobs_path
 
     def mock_get_jobs_path(user_id: str | None = None) -> Path:
@@ -203,6 +208,7 @@ async def test_get_job_isolation(
 ) -> None:
     """Test that getting a job returns None for other users' jobs."""
     from copaw.config import utils as config_utils
+
     original_get_jobs_path = config_utils.get_jobs_path
 
     def mock_get_jobs_path(user_id: str | None = None) -> Path:
@@ -235,6 +241,7 @@ async def test_default_user_backward_compat(
 ) -> None:
     """Test that default user works for backward compatibility."""
     from copaw.config import utils as config_utils
+
     original_get_jobs_path = config_utils.get_jobs_path
 
     def mock_get_jobs_path(user_id: str | None = None) -> Path:
@@ -269,6 +276,7 @@ async def test_state_isolation(
 ) -> None:
     """Test that job states are isolated per user."""
     from copaw.config import utils as config_utils
+
     original_get_jobs_path = config_utils.get_jobs_path
 
     def mock_get_jobs_path(user_id: str | None = None) -> Path:
@@ -304,6 +312,7 @@ async def test_state_isolation(
 async def test_repo_for_user(temp_base_dir: Path) -> None:
     """Test that _get_repo_for_user returns correct repos."""
     from copaw.config import utils as config_utils
+
     original_get_jobs_path = config_utils.get_jobs_path
 
     def mock_get_jobs_path(user_id: str | None = None) -> Path:
@@ -336,6 +345,7 @@ async def test_job_update_isolation(
 ) -> None:
     """Test that updating a job doesn't affect other users."""
     from copaw.config import utils as config_utils
+
     original_get_jobs_path = config_utils.get_jobs_path
 
     def mock_get_jobs_path(user_id: str | None = None) -> Path:

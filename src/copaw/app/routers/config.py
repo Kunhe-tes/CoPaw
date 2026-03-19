@@ -26,7 +26,9 @@ router = APIRouter(prefix="/config", tags=["config"])
     summary="List all channels",
     description="Retrieve configuration for all available channels",
 )
-async def list_channels(x_user_id: str | None = Header(None, alias="X-User-ID")) -> dict:
+async def list_channels(
+    x_user_id: str | None = Header(None, alias="X-User-ID")
+) -> dict:
     """List all channel configs (filtered by available channels)."""
     user_id = x_user_id or "default"
     config_path = get_config_path(user_id)
@@ -202,11 +204,17 @@ async def put_channel(
     summary="Get heartbeat config",
     description="Return current heartbeat config (interval, target, etc.)",
 )
-async def get_heartbeat(x_user_id: str | None = Header(None, alias="X-User-ID")) -> Any:
+async def get_heartbeat(
+    x_user_id: str | None = Header(None, alias="X-User-ID")
+) -> Any:
     """Return effective heartbeat config (from file or default)."""
     user_id = x_user_id or "default"
     config_path = get_config_path(user_id)
-    hb = get_heartbeat_config() if not config_path.exists() else load_config(config_path).agents.defaults.heartbeat
+    hb = (
+        get_heartbeat_config()
+        if not config_path.exists()
+        else load_config(config_path).agents.defaults.heartbeat
+    )
     if hb is None:
         hb = get_heartbeat_config()
     return hb.model_dump(mode="json", by_alias=True)

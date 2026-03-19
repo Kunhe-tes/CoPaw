@@ -1317,8 +1317,14 @@ def ensure_providers_json(user_id: str | None = None) -> Path:
 
     # Create default providers configuration
     # Use first available provider as default (dashscope preferred)
-    default_provider_key = "dashscope" if "dashscope" in PROVIDERS else next(iter(PROVIDERS.keys()), None)
-    default_provider = PROVIDERS.get(default_provider_key) if default_provider_key else None
+    default_provider_key = (
+        "dashscope"
+        if "dashscope" in PROVIDERS
+        else next(iter(PROVIDERS.keys()), None)
+    )
+    default_provider = (
+        PROVIDERS.get(default_provider_key) if default_provider_key else None
+    )
 
     if default_provider:
         providers_data = ProvidersData(
@@ -1327,12 +1333,14 @@ def ensure_providers_json(user_id: str | None = None) -> Path:
                     enabled=True,
                     api_key_env=None,  # User must set via UI/CLI
                     models=default_provider.models,
-                )
+                ),
             },
             custom_providers={},
             active_llm=ModelSlotConfig(
                 provider_id=default_provider_key,
-                model=default_provider.models[0].id if default_provider.models else None,
+                model=default_provider.models[0].id
+                if default_provider.models
+                else None,
             ),
         )
     else:

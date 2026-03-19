@@ -279,7 +279,7 @@ class TestMultiUserBrowserIsolation:
 
     def test_max_pages_per_user_constant(self):
         """Test that max pages per user constant is defined."""
-        assert hasattr(browser_control, '_MAX_PAGES_PER_USER')
+        assert hasattr(browser_control, "_MAX_PAGES_PER_USER")
         assert browser_control._MAX_PAGES_PER_USER == 10
 
     def test_user_browser_state_dataclass(self):
@@ -360,16 +360,23 @@ class TestBrowserUseUserIsolation:
             response = await browser_control.browser_use(action="")
             assert response is not None
             # ToolResponse content is a list
-            if hasattr(response, 'content') and isinstance(response.content, list):
+            if hasattr(response, "content") and isinstance(
+                response.content, list
+            ):
                 # Content may be TextBlock objects or dicts
                 item = response.content[0] if response.content else {}
                 if isinstance(item, dict):
-                    content_text = item.get('text', str(item))
+                    content_text = item.get("text", str(item))
                 else:
-                    content_text = item.text if hasattr(item, 'text') else str(item)
+                    content_text = (
+                        item.text if hasattr(item, "text") else str(item)
+                    )
             else:
                 content_text = str(response)
-            assert "action required" in content_text.lower() or "error" in content_text.lower()
+            assert (
+                "action required" in content_text.lower()
+                or "error" in content_text.lower()
+            )
         finally:
             reset_request_user_id(token)
 
@@ -378,15 +385,21 @@ class TestBrowserUseUserIsolation:
         """Test browser_use handles unknown action."""
         token = set_request_user_id("test_user")
         try:
-            response = await browser_control.browser_use(action="unknown_action_xyz")
+            response = await browser_control.browser_use(
+                action="unknown_action_xyz"
+            )
             # ToolResponse content is a list
-            if hasattr(response, 'content') and isinstance(response.content, list):
+            if hasattr(response, "content") and isinstance(
+                response.content, list
+            ):
                 # Content may be TextBlock objects or dicts
                 item = response.content[0] if response.content else {}
                 if isinstance(item, dict):
-                    content_text = item.get('text', str(item))
+                    content_text = item.get("text", str(item))
                 else:
-                    content_text = item.text if hasattr(item, 'text') else str(item)
+                    content_text = (
+                        item.text if hasattr(item, "text") else str(item)
+                    )
             else:
                 content_text = str(response)
             assert "unknown action" in content_text.lower()
@@ -398,7 +411,9 @@ class TestBrowserUseUserIsolation:
         """Test browser_use with install action (no browser needed)."""
         token = set_request_user_id("test_user")
         try:
-            with patch.object(browser_control, '_action_install', new_callable=AsyncMock) as mock_install:
+            with patch.object(
+                browser_control, "_action_install", new_callable=AsyncMock
+            ) as mock_install:
                 mock_install.return_value = MagicMock(content='{"ok": true}')
                 response = await browser_control.browser_use(action="install")
                 mock_install.assert_called_once()
@@ -450,7 +465,7 @@ class TestBrowserIsolationIntegration:
         try:
             state_a = browser_control._get_user_state()
             state_a.refs[page_id] = {
-                ref_id: {"role": "button", "name": "Submit for User A"}
+                ref_id: {"role": "button", "name": "Submit for User A"},
             }
         finally:
             reset_request_user_id(token_a)
@@ -460,7 +475,7 @@ class TestBrowserIsolationIntegration:
         try:
             state_b = browser_control._get_user_state()
             state_b.refs[page_id] = {
-                ref_id: {"role": "button", "name": "Submit for User B"}
+                ref_id: {"role": "button", "name": "Submit for User B"},
             }
         finally:
             reset_request_user_id(token_b)
@@ -490,14 +505,14 @@ class TestBrowserIsolationIntegration:
         token_x = set_request_user_id("user_x")
         try:
             state_x = browser_control._get_user_state()
-            assert state_x.page_counter == ord('x')
+            assert state_x.page_counter == ord("x")
         finally:
             reset_request_user_id(token_x)
 
         token_z = set_request_user_id("user_z")
         try:
             state_z = browser_control._get_user_state()
-            assert state_z.page_counter == ord('z')
+            assert state_z.page_counter == ord("z")
         finally:
             reset_request_user_id(token_z)
 
@@ -534,4 +549,3 @@ class TestBrowserIsolationIntegration:
         current_state = browser_control._get_user_state()
         assert current_state.headless is True
         reset_request_user_id(token2)
-

@@ -8,7 +8,6 @@ from typing import Optional
 from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel
 
-from ...config import load_config
 from .models import BackupTaskStatus
 from .service import BackupService
 
@@ -62,8 +61,7 @@ class ListBackupsResponse(BaseModel):
 
 def get_backup_service() -> BackupService:
     """Get backup service instance."""
-    config = load_config()
-    return BackupService(config)
+    return BackupService()
 
 
 @router.post(
@@ -75,7 +73,7 @@ def get_backup_service() -> BackupService:
 async def create_backup(request: CreateBackupRequest) -> CreateBackupResponse:
     service = get_backup_service()
     task = await service.create_backup_task(
-        target_user_id=request.target_user_id
+        target_user_id=request.target_user_id,
     )
     return CreateBackupResponse(
         task_id=task.task_id,
@@ -130,7 +128,10 @@ async def list_tasks(
     status: Optional[str] = Query(None, description="Filter by status"),
     task_type: Optional[str] = Query(None, description="Filter by task type"),
     limit: int = Query(
-        50, ge=1, le=100, description="Maximum number of tasks"
+        50,
+        ge=1,
+        le=100,
+        description="Maximum number of tasks",
     ),
 ) -> TaskListResponse:
     service = get_backup_service()
@@ -185,7 +186,8 @@ async def delete_task(task_id: str) -> DeleteTaskResponse:
 async def list_backups(
     user_id: Optional[str] = Query(None, description="Filter by user ID"),
     date: Optional[str] = Query(
-        None, description="Filter by date (YYYY-MM-DD)"
+        None,
+        description="Filter by date (YYYY-MM-DD)",
     ),
 ) -> ListBackupsResponse:
     service = get_backup_service()

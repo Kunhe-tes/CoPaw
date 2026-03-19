@@ -9,6 +9,7 @@ from unittest.mock import AsyncMock, patch, MagicMock
 async def cleanup_store():
     """Clean up store after each test."""
     from copaw.app.console_push_store import _store, _lock
+
     async with _lock:
         _store.clear()
     yield

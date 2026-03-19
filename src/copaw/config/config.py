@@ -4,7 +4,6 @@ from typing import Optional, Union, Dict, List, Literal
 from pydantic import BaseModel, Field, ConfigDict, model_validator
 
 from ..providers.models import ModelSlotConfig
-from ..app.backup.config import BackupConfig
 from ..constant import (
     HEARTBEAT_DEFAULT_EVERY,
     HEARTBEAT_DEFAULT_TARGET,
@@ -311,7 +310,6 @@ class Config(BaseModel):
     last_dispatch: Optional[LastDispatchConfig] = None
     # When False, channel output hides tool call/result details (show "...").
     show_tool_details: bool = True
-    backup: Optional[BackupConfig] = None
 
 
 ChannelConfigUnion = Union[

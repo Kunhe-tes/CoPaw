@@ -129,10 +129,7 @@ async def configure_provider(
 
     # Allow base_url for custom providers and providers without a default
     # base URL (e.g. Azure OpenAI).
-    allow_base_url = (
-        provider.is_custom
-        or not provider.default_base_url
-    )
+    allow_base_url = provider.is_custom or not provider.default_base_url
     base_url = body.base_url if allow_base_url else None
     try:
         data = update_provider_settings(

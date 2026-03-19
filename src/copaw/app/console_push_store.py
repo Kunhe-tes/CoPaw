@@ -30,13 +30,15 @@ async def append(user_id: str | None, session_id: str, text: str) -> None:
         if uid not in _store:
             _store[uid] = []
 
-        _store[uid].append({
-            "id": str(uuid.uuid4()),
-            "text": text,
-            "ts": time.time(),
-            "session_id": session_id,
-            "user_id": uid,
-        })
+        _store[uid].append(
+            {
+                "id": str(uuid.uuid4()),
+                "text": text,
+                "ts": time.time(),
+                "session_id": session_id,
+                "user_id": uid,
+            }
+        )
 
         # Keep only _MAX_MESSAGES per user
         if len(_store[uid]) > _MAX_MESSAGES:
@@ -54,7 +56,9 @@ async def take(user_id: str | None, session_id: str) -> List[Dict[str, Any]]:
     async with _lock:
         user_messages = _store.get(uid, [])
         out = [m for m in user_messages if m.get("session_id") == session_id]
-        _store[uid] = [m for m in user_messages if m.get("session_id") != session_id]
+        _store[uid] = [
+            m for m in user_messages if m.get("session_id") != session_id
+        ]
         return _strip_ts(out)
 
 

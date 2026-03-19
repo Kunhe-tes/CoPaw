@@ -9,8 +9,7 @@ from datetime import datetime
 
 from fastapi import HTTPException
 
-from ...config.config import Config
-from .config import BackupConfig
+from .config import BackupConfig, load_backup_config
 from .models import BackupTask, BackupTaskStatus, BackupTaskType
 from .task_store import TaskStore
 from .worker import BackupWorker
@@ -19,19 +18,20 @@ from .worker import BackupWorker
 class BackupService:
     """Backup business logic service."""
 
-    def __init__(self, config: Config):
-        self.config = config
+    def __init__(self):
         self.task_store = TaskStore()
         self._worker: BackupWorker | None = None
         self._lock = asyncio.Lock()
 
     def _get_backup_config(self) -> BackupConfig:
-        """Get backup config from app config."""
-        if not hasattr(self.config, "backup") or self.config.backup is None:
+        """Get backup config from file."""
+        config = load_backup_config()
+        if config is None:
             raise HTTPException(
-                status_code=400, detail="Backup not configured"
+                status_code=400,
+                detail="Backup not configured",
             )
-        return self.config.backup
+        return config
 
     def _get_worker(self) -> BackupWorker:
         """Get or create worker instance."""
@@ -47,7 +47,8 @@ class BackupService:
         return self._worker
 
     async def create_backup_task(
-        self, target_user_id: str | None = None
+        self,
+        target_user_id: str | None = None,
     ) -> BackupTask:
         """Create a new backup task."""
         async with self._lock:
@@ -111,7 +112,9 @@ class BackupService:
     ) -> list[BackupTask]:
         """List tasks with filters."""
         return self.task_store.get_all(
-            status=status, task_type=task_type, limit=limit
+            status=status,
+            task_type=task_type,
+            limit=limit,
         )
 
     def delete_task(self, task_id: str) -> bool:

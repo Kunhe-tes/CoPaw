@@ -10,6 +10,7 @@ from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
+
 def _copy_default_config_files(
     src_dir: Path,
     dst_dir: Path,
@@ -82,9 +83,13 @@ def _copy_default_working_files(
             try:
                 shutil.copy2(md_file, dst_file)
                 copied_files.append(md_file.name)
-                logger.debug("Copied md file from default user: %s", md_file.name)
+                logger.debug(
+                    "Copied md file from default user: %s", md_file.name
+                )
             except Exception as e:
-                logger.error("Failed to copy md file '%s': %s", md_file.name, e)
+                logger.error(
+                    "Failed to copy md file '%s': %s", md_file.name, e
+                )
 
     return copied_files
 
@@ -137,7 +142,12 @@ def initialize_user_directory(
     Returns:
         True if initialization was performed, False if directory already existed
     """
-    from ...constant import get_working_dir, get_secret_dir, DEFAULT_WORKING_DIR, DEFAULT_SECRET_DIR
+    from ...constant import (
+        get_working_dir,
+        get_secret_dir,
+        DEFAULT_WORKING_DIR,
+        DEFAULT_SECRET_DIR,
+    )
     from ...config import Config, save_config, get_heartbeat_query_path
     from ...providers.store import ensure_providers_json
     from ...agents.skills_manager import sync_skills_to_working_dir
@@ -166,10 +176,17 @@ def initialize_user_directory(
         if config_copied:
             logger.info("Copied config.json from templates for default user")
         if providers_copied:
-            logger.info("Copied providers.json from templates for default user")
+            logger.info(
+                "Copied providers.json from templates for default user"
+            )
 
         # Copy MD files from templates for default user
-        copied_md = copy_md_files(language, skip_existing=True, target_dir=working_dir, exclude_files=["HEARTBEAT.md"])
+        copied_md = copy_md_files(
+            language,
+            skip_existing=True,
+            target_dir=working_dir,
+            exclude_files=["HEARTBEAT.md"],
+        )
         if copied_md:
             md_copied = True
             logger.info(
@@ -187,10 +204,14 @@ def initialize_user_directory(
 
         # Try to copy from default user's working directory (config.json + md files)
         if default_working_dir.exists():
-            copied_working = _copy_default_working_files(default_working_dir, working_dir)
+            copied_working = _copy_default_working_files(
+                default_working_dir, working_dir
+            )
             if "config.json" in copied_working:
                 config_copied = True
-                logger.info("Copied config.json from default user for user %s", user_id)
+                logger.info(
+                    "Copied config.json from default user for user %s", user_id
+                )
 
             # Check if md files were copied
             md_files_copied = [f for f in copied_working if f.endswith(".md")]
@@ -205,10 +226,15 @@ def initialize_user_directory(
 
         # Try to copy from default user's secret directory (providers.json)
         if default_secret_dir.exists():
-            copied_secret = _copy_default_config_files(default_secret_dir, secret_dir)
+            copied_secret = _copy_default_config_files(
+                default_secret_dir, secret_dir
+            )
             if "providers.json" in copied_secret:
                 providers_copied = True
-                logger.info("Copied providers.json from default user for user %s", user_id)
+                logger.info(
+                    "Copied providers.json from default user for user %s",
+                    user_id,
+                )
 
         # Fallback to templates if default user doesn't exist or copy failed
         if not config_copied or not providers_copied:
@@ -218,14 +244,23 @@ def initialize_user_directory(
             )
             if not config_copied and template_config:
                 config_copied = True
-                logger.info("Copied config.json from templates for user %s", user_id)
+                logger.info(
+                    "Copied config.json from templates for user %s", user_id
+                )
             if not providers_copied and template_providers:
                 providers_copied = True
-                logger.info("Copied providers.json from templates for user %s", user_id)
+                logger.info(
+                    "Copied providers.json from templates for user %s", user_id
+                )
 
         # Fallback to templates for md files if not copied from default user
         if not md_copied:
-            copied_md = copy_md_files(language, skip_existing=True, target_dir=working_dir, exclude_files=["HEARTBEAT.md"])
+            copied_md = copy_md_files(
+                language,
+                skip_existing=True,
+                target_dir=working_dir,
+                exclude_files=["HEARTBEAT.md"],
+            )
             if copied_md:
                 md_copied = True
                 logger.info(
@@ -307,6 +342,7 @@ def copy_md_files(
         working_dir = target_dir
     else:
         from ...constant import get_request_working_dir
+
         working_dir = get_request_working_dir()
 
     working_dir.mkdir(parents=True, exist_ok=True)
@@ -381,6 +417,7 @@ def copy_init_config_files(
         secret_dir = get_secret_dir(user_id)
     else:
         from ...constant import get_request_working_dir, get_request_secret_dir
+
         working_dir = get_request_working_dir()
         secret_dir = get_request_secret_dir()
 

@@ -653,7 +653,10 @@ async def browser_use(  # pylint: disable=R0911,R0912
             )
         if action == "resize":
             return await _action_resize(
-                page_id, width, height, user_id=user_id
+                page_id,
+                width,
+                height,
+                user_id=user_id,
             )
         if action == "console_messages":
             return await _action_console_messages(
@@ -664,15 +667,22 @@ async def browser_use(  # pylint: disable=R0911,R0912
             )
         if action == "handle_dialog":
             return await _action_handle_dialog(
-                page_id, accept, prompt_text, user_id=user_id
+                page_id,
+                accept,
+                prompt_text,
+                user_id=user_id,
             )
         if action == "file_upload":
             return await _action_file_upload(
-                page_id, paths_json, user_id=user_id
+                page_id,
+                paths_json,
+                user_id=user_id,
             )
         if action == "fill_form":
             return await _action_fill_form(
-                page_id, fields_json, user_id=user_id
+                page_id,
+                fields_json,
+                user_id=user_id,
             )
         if action == "install":
             return await _action_install()
@@ -719,11 +729,18 @@ async def browser_use(  # pylint: disable=R0911,R0912
             )
         if action == "tabs":
             return await _action_tabs(
-                page_id, tab_action, index, user_id=user_id
+                page_id,
+                tab_action,
+                index,
+                user_id=user_id,
             )
         if action == "wait_for":
             return await _action_wait_for(
-                page_id, wait_time, text, text_gone, user_id=user_id
+                page_id,
+                wait_time,
+                text,
+                text_gone,
+                user_id=user_id,
             )
         if action == "pdf":
             return await _action_pdf(page_id, path, user_id=user_id)
@@ -777,7 +794,9 @@ def _get_locator_by_ref(
 
 
 def _attach_page_listeners(
-    page, page_id: str, user_state: UserBrowserState
+    page,
+    page_id: str,
+    user_state: UserBrowserState,
 ) -> None:
     """Attach console and request listeners for a page."""
     logs = user_state.console_logs.setdefault(page_id, [])
@@ -1584,7 +1603,11 @@ async def _action_type(
     try:
         if ref:
             locator = _get_locator_by_ref(
-                page, page_id, ref, frame_selector, user_id
+                page,
+                page_id,
+                ref,
+                frame_selector,
+                user_id,
             )
             if locator is None:
                 return _tool_response(
@@ -1664,7 +1687,9 @@ async def _action_type(
 
 
 async def _action_eval(
-    page_id: str, code: str, user_id: str | None = None
+    page_id: str,
+    code: str,
+    user_id: str | None = None,
 ) -> ToolResponse:
     code = (code or "").strip()
     if not code:
@@ -1723,7 +1748,9 @@ async def _action_eval(
 
 
 async def _action_pdf(
-    page_id: str, path: str, user_id: str | None = None
+    page_id: str,
+    path: str,
+    user_id: str | None = None,
 ) -> ToolResponse:
     path = (path or "page.pdf").strip() or "page.pdf"
     page = _get_page(page_id, user_id)
@@ -1759,7 +1786,8 @@ async def _action_pdf(
 
 
 async def _action_close(
-    page_id: str, user_id: str | None = None
+    page_id: str,
+    user_id: str | None = None,
 ) -> ToolResponse:
     """Close a page for a specific user."""
     if user_id is None:
@@ -1896,7 +1924,8 @@ async def _action_snapshot(
 
 
 async def _action_navigate_back(
-    page_id: str, user_id: str | None = None
+    page_id: str,
+    user_id: str | None = None,
 ) -> ToolResponse:
     page = _get_page(page_id, user_id)
     if not page:
@@ -2201,7 +2230,9 @@ async def _action_handle_dialog(
 
 
 async def _action_file_upload(
-    page_id: str, paths_json: str, user_id: str | None = None
+    page_id: str,
+    paths_json: str,
+    user_id: str | None = None,
 ) -> ToolResponse:
     user_state = (
         _get_user_state() if user_id is None else _state["users"].get(user_id)
@@ -2276,7 +2307,9 @@ async def _action_file_upload(
 
 
 async def _action_fill_form(
-    page_id: str, fields_json: str, user_id: str | None = None
+    page_id: str,
+    fields_json: str,
+    user_id: str | None = None,
 ) -> ToolResponse:
     user_state = (
         _get_user_state() if user_id is None else _state["users"].get(user_id)
@@ -2451,7 +2484,9 @@ async def _action_install() -> ToolResponse:
 
 
 async def _action_press_key(
-    page_id: str, key: str, user_id: str | None = None
+    page_id: str,
+    key: str,
+    user_id: str | None = None,
 ) -> ToolResponse:
     key = (key or "").strip()
     if not key:
@@ -2555,7 +2590,9 @@ async def _action_network_requests(
 
 
 async def _action_run_code(
-    page_id: str, code: str, user_id: str | None = None
+    page_id: str,
+    code: str,
+    user_id: str | None = None,
 ) -> ToolResponse:
     """Run JS in page (like eval). Use evaluate for element (ref)."""
     code = (code or "").strip()
@@ -2733,7 +2770,11 @@ async def _action_hover(
     try:
         if ref:
             locator = _get_locator_by_ref(
-                page, page_id, ref, frame_selector, user_id
+                page,
+                page_id,
+                ref,
+                frame_selector,
+                user_id,
             )
             if locator is None:
                 return _tool_response(

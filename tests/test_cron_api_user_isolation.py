@@ -27,6 +27,7 @@ def temp_base_dir() -> Path:
 @pytest.fixture
 def mock_runner() -> Any:
     """Mock runner for testing."""
+
     class MockRunner:
         async def stream_query(self, req: dict) -> Any:
             yield {"type": "text", "content": "test response"}
@@ -37,6 +38,7 @@ def mock_runner() -> Any:
 @pytest.fixture
 def mock_channel_manager() -> Any:
     """Mock channel manager for testing."""
+
     class MockChannelManager:
         async def send_text(self, **kwargs) -> None:
             pass
@@ -80,7 +82,8 @@ async def client(
     application.include_router(cron_router, prefix="/api")
 
     async with AsyncClient(
-        transport=ASGITransport(app=application), base_url="http://test"
+        transport=ASGITransport(app=application),
+        base_url="http://test",
     ) as ac:
         yield ac
 
@@ -132,7 +135,9 @@ async def test_list_jobs_with_user_id(client: AsyncClient) -> None:
     job_b_id = response.json()["id"]
 
     # List jobs for user_a - should only see user_a's job
-    response = await client.get("/api/cron/jobs", headers={"X-User-ID": "user_a"})
+    response = await client.get(
+        "/api/cron/jobs", headers={"X-User-ID": "user_a"}
+    )
     assert response.status_code == 200
     jobs = response.json()
     assert len(jobs) == 1
@@ -140,7 +145,9 @@ async def test_list_jobs_with_user_id(client: AsyncClient) -> None:
     assert jobs[0]["id"] == job_a_id
 
     # List jobs for user_b - should only see user_b's job
-    response = await client.get("/api/cron/jobs", headers={"X-User-ID": "user_b"})
+    response = await client.get(
+        "/api/cron/jobs", headers={"X-User-ID": "user_b"}
+    )
     assert response.status_code == 200
     jobs = response.json()
     assert len(jobs) == 1

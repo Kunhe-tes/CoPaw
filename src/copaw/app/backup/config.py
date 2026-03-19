@@ -3,7 +3,51 @@
 
 from __future__ import annotations
 
+import json
+import os
+from pathlib import Path
+from typing import Optional
+
 from pydantic import BaseModel, Field
+
+
+def get_backup_config_path() -> Path:
+    """Get the path to the backup configuration file.
+
+    Returns ~/.copaw/backup.json
+    """
+    return Path.home() / ".copaw" / "backup.json"
+
+
+def load_backup_config() -> Optional[BackupConfig]:
+    """Load backup configuration from file.
+
+    Returns None if file doesn't exist or is invalid.
+    """
+    config_path = get_backup_config_path()
+    if not config_path.exists():
+        return None
+
+    try:
+        with open(config_path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        return BackupConfig(**data)
+    except (json.JSONDecodeError, ValueError):
+        return None
+
+
+def save_backup_config(config: BackupConfig) -> None:
+    """Save backup configuration to file.
+
+    Creates parent directory if it doesn't exist.
+    """
+    config_path = get_backup_config_path()
+    config_path.parent.mkdir(parents=True, exist_ok=True)
+
+    with open(config_path, "w", encoding="utf-8") as f:
+        json.dump(
+            config.model_dump(mode="json"), f, indent=2, ensure_ascii=False
+        )
 
 
 class BackupEnvironmentConfig(BaseModel):
@@ -34,10 +78,10 @@ class BackupConfig(BaseModel):
     """Root backup configuration."""
 
     environments: dict[str, BackupEnvironmentConfig] = Field(
-        default_factory=dict
+        default_factory=dict,
     )
     compression: BackupCompressionConfig = Field(
-        default_factory=BackupCompressionConfig
+        default_factory=BackupCompressionConfig,
     )
     timeout: BackupTimeoutConfig = Field(default_factory=BackupTimeoutConfig)
 

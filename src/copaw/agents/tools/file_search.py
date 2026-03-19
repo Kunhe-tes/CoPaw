@@ -112,7 +112,9 @@ async def grep_search(  # pylint: disable=too-many-branches
             ],
         )
 
-    search_root = Path(_resolve_file_path(path)) if path else get_request_working_dir()  # Use request-scoped
+    search_root = (
+        Path(_resolve_file_path(path)) if path else get_request_working_dir()
+    )  # Use request-scoped
 
     if not search_root.exists():
         return ToolResponse(
@@ -236,7 +238,9 @@ async def glob_search(
             ],
         )
 
-    search_root = Path(_resolve_file_path(path)) if path else get_request_working_dir()  # Use request-scoped
+    search_root = (
+        Path(_resolve_file_path(path)) if path else get_request_working_dir()
+    )  # Use request-scoped
 
     if not search_root.exists():
         return ToolResponse(
