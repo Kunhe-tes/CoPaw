@@ -56,6 +56,13 @@ class FeishuConfig(BaseChannelConfig):
     verification_token: str = ""
     media_dir: str = "~/.copaw/media"
 
+class ZhaohuConfig(BaseChannelConfig):
+    push_url: str = ""
+    sys_id: str = ""
+    robot_open_id: str = ""
+    channel: str = "ZH"
+    net: str = "DMZ"
+    request_timeout: float = 15.0
 
 class QQConfig(BaseChannelConfig):
     app_id: str = ""
@@ -99,6 +106,7 @@ class ChannelConfig(BaseModel):
     discord: DiscordConfig = DiscordConfig()
     dingtalk: DingTalkConfig = DingTalkConfig()
     feishu: FeishuConfig = FeishuConfig()
+    zhaohu: ZhaohuConfig = ZhaohuConfig()
     qq: QQConfig = QQConfig()
     telegram: TelegramConfig = TelegramConfig()
     console: ConsoleConfig = ConsoleConfig()
@@ -319,6 +327,7 @@ ChannelConfigUnion = Union[
     DiscordConfig,
     DingTalkConfig,
     FeishuConfig,
+    ZhaohuConfig,
     QQConfig,
     TelegramConfig,
     ConsoleConfig,
