@@ -1,2 +1,6 @@
 # -*- coding: utf-8 -*-
-"""Backup module for CoPaw."""
+"""Backup module."""
+
+from .router import router
+
+__all__ = ["router"]
