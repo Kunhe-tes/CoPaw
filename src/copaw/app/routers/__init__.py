@@ -14,6 +14,7 @@ from .users import router as users_router
 from .workspace import router as workspace_router
 from ..crons.api import router as cron_router
 from ..runner.api import router as runner_router
+from ..backup import router as backup_router
 
 
 router = APIRouter()
@@ -31,5 +32,6 @@ router.include_router(skills_router)
 router.include_router(users_router)
 router.include_router(workspace_router)
 router.include_router(envs_router)
+router.include_router(backup_router)
 
 __all__ = ["router"]

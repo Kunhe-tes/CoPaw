@@ -18,7 +18,7 @@ from ..channels.schema import DEFAULT_CHANNEL
 class ScheduleSpec(BaseModel):
     type: Literal["cron"] = "cron"
     cron: str = Field(...)
-    timezone: str = "UTC"
+    timezone: str = "Asia/Shanghai"
 
     @field_validator("cron")
     @classmethod
