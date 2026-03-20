@@ -15,7 +15,45 @@
 | File | Responsibility |
 |------|----------------|
 | `src/copaw/app/console_push_store.py` | Core storage module with consume-on-read semantics |
+| `src/copaw/app/routers/console.py` | Console router with updated documentation |
 | `tests/test_console_push_store.py` | Unit tests for all storage operations |
+| `tests/test_console_user_isolation_integration.py` | Integration tests for consume-once behavior |
+
+---
+
+## Task 0.5: Update Console Router Documentation
+
+**Files:**
+- Modify: `src/copaw/app/routers/console.py:15-19`
+
+### Step 0.5.1: Update docstring
+
+Change:
+```python
+    """
+    Return pending push messages. With user_id only: returns recent messages
+    for that user (not consumed). With user_id and session_id: returns messages
+    for that user's session (consumed).
+    """
+```
+
+To:
+```python
+    """
+    Return pending push messages. All read operations consume messages.
+    With user_id only: returns and removes recent messages for that user.
+    With user_id and session_id: returns and removes messages for that user's session.
+    """
+```
+
+### Step 0.5.2: Commit
+
+```bash
+git add src/copaw/app/routers/console.py
+git commit -m "docs: update console router for consume-on-read semantics
+
+Co-Authored-By: Claude Sonnet 4.6 <noreply@anthropic.com>"
+```
 
 ---
 
@@ -91,41 +129,7 @@ async def get_recent(
         user_messages = _store.get(uid, [])
         # Messages within time window to be returned and removed
         to_return = [m for m in user_messages if m["ts"] >= cutoff]
-        # Messages outside time window to be dropped
-        to_expire = [m for m in user_messages if m["ts"] < cutoff]
-
-        # Keep only messages that are neither returned nor expired
-        remaining = [
-            m for m in user_messages
-            if m["ts"] < cutoff  # Will be removed (expired)
-            and m not in to_expire  # Actually we want: not in to_return and not expired
-        ]
-        # Simpler: remaining = [m for m in user_messages if m["ts"] < cutoff]
-        # Actually: remaining should be empty - all messages either returned or expired
-        remaining = []  # All messages are either consumed or expired
-
-        if to_return or to_expire:
-            _store[uid] = remaining
-
-        return _strip_ts(to_return)
-```
-
-Wait, that's wrong. Let me rewrite more carefully:
-
-```python
-async def get_recent(
-    user_id: str | None = None,
-    max_age_seconds: int = _MAX_AGE_SECONDS,
-) -> List[Dict[str, Any]]:
-    """Return and remove recent messages for the user."""
-    uid = user_id or "default"
-    now = time.time()
-    cutoff = now - max_age_seconds
-
-    async with _lock:
-        user_messages = _store.get(uid, [])
-        # Separate: messages to return (within window) vs messages to drop (expired)
-        to_return = [m for m in user_messages if m["ts"] >= cutoff]
+        # Messages outside time window to be dropped (expired)
         to_drop = [m for m in user_messages if m["ts"] < cutoff]
 
         # Remove all messages (either returned to caller or expired)
@@ -139,9 +143,9 @@ async def get_recent(
 
 **Expected:** PASS
 
-### Step 1.3: Update existing test that assumes non-consuming behavior
+### Step 1.3: Delete old non-consuming test
 
-In `tests/test_console_push_store.py`, replace the test `test_get_recent_non_consuming` with `test_get_recent_consumes_messages` from step 1.1.
+In `tests/test_console_push_store.py`, delete the test `test_get_recent_non_consuming` at lines 66-79. This test assumed non-consuming behavior which is no longer correct. The new test `test_get_recent_consumes_messages` from Step 1.1 replaces it.
 
 **Run:** `pytest tests/test_console_push_store.py::test_get_recent_consumes_messages -v`
 
@@ -207,6 +211,84 @@ async def test_message_consumed_once_across_methods():
 ```bash
 git add tests/test_console_push_store.py
 git commit -m "test: verify consume-once semantics across methods
+
+Co-Authored-By: Claude Sonnet 4.6 <noreply@anthropic.com>"
+```
+
+---
+
+## Task 2.5: Update Integration Test for Consume-Once Behavior
+
+**Files:**
+- Modify: `tests/test_console_user_isolation_integration.py:129-150`
+
+### Step 2.5.1: Update test to verify consume-once semantics
+
+Replace:
+```python
+@pytest.mark.asyncio
+async def test_api_router_with_user_id_header():
+    """测试 API 路由正确处理 x-user-id header"""
+    from copaw.app.console_push_store import append, get_recent
+
+    # Add messages for different users
+    await append("alice", "session_1", "Alice's message")
+    await append("bob", "session_1", "Bob's message")
+
+    # Simulate API call with alice's user_id
+    alice_messages = await get_recent("alice")
+    assert len(alice_messages) == 1
+    assert alice_messages[0]["text"] == "Alice's message"
+
+    # Simulate API call with bob's user_id
+    bob_messages = await get_recent("bob")
+    assert len(bob_messages) == 1
+    assert bob_messages[0]["text"] == "Bob's message"
+
+    # Simulate API call with default user_id
+    default_messages = await get_recent("default")
+    assert len(default_messages) == 0  # No messages for default user
+```
+
+With:
+```python
+@pytest.mark.asyncio
+async def test_api_router_with_user_id_header():
+    """测试 API 路由正确处理 x-user-id header 及消费语义"""
+    from copaw.app.console_push_store import append, get_recent
+
+    # Add messages for different users
+    await append("alice", "session_1", "Alice's message")
+    await append("bob", "session_1", "Bob's message")
+
+    # First call for alice - should return and consume message
+    alice_messages = await get_recent("alice")
+    assert len(alice_messages) == 1
+    assert alice_messages[0]["text"] == "Alice's message"
+
+    # Second call for alice - should return empty (message consumed)
+    alice_messages_2 = await get_recent("alice")
+    assert len(alice_messages_2) == 0
+
+    # First call for bob - should return and consume message
+    bob_messages = await get_recent("bob")
+    assert len(bob_messages) == 1
+    assert bob_messages[0]["text"] == "Bob's message"
+
+    # Simulate API call with default user_id
+    default_messages = await get_recent("default")
+    assert len(default_messages) == 0  # No messages for default user
+```
+
+**Run:** `pytest tests/test_console_user_isolation_integration.py::test_api_router_with_user_id_header -v`
+
+**Expected:** PASS
+
+### Step 2.5.2: Commit
+
+```bash
+git add tests/test_console_user_isolation_integration.py
+git commit -m "test: update integration test for consume-once behavior
 
 Co-Authored-By: Claude Sonnet 4.6 <noreply@anthropic.com>"
 ```
