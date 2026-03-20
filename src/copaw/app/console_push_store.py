@@ -76,7 +76,11 @@ async def get_recent(
     user_id: str | None = None,
     max_age_seconds: int = _MAX_AGE_SECONDS,
 ) -> List[Dict[str, Any]]:
-    """Return and remove recent messages for the user."""
+    """Return and remove recent messages for the user.
+
+    Messages returned are immediately removed from storage and will not
+    be available for subsequent calls.
+    """
     uid = user_id or "default"
     now = time.time()
     cutoff = now - max_age_seconds
