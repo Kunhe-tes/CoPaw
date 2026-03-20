@@ -55,10 +55,17 @@ async def take(user_id: str | None, session_id: str) -> List[Dict[str, Any]]:
 
     async with _lock:
         user_messages = _store.get(uid, [])
-        out = [m for m in user_messages if m.get("session_id") == session_id]
-        _store[uid] = [
-            m for m in user_messages if m.get("session_id") != session_id
-        ]
+        out = []
+        remaining = []
+        for m in user_messages:
+            if m.get("session_id") == session_id:
+                out.append(m)
+            else:
+                remaining.append(m)
+        if remaining:
+            _store[uid] = remaining
+        else:
+            _store.pop(uid, None)
         return _strip_ts(out)
 
 
@@ -67,8 +74,7 @@ async def take_all(user_id: str | None = None) -> List[Dict[str, Any]]:
     uid = user_id or "default"
 
     async with _lock:
-        out = _store.get(uid, [])
-        _store[uid] = []
+        out = _store.pop(uid, [])
         return _strip_ts(out)
 
 
@@ -86,16 +92,8 @@ async def get_recent(
     cutoff = now - max_age_seconds
 
     async with _lock:
-        user_messages = _store.get(uid, [])
-        # Messages within time window to be returned and removed
+        user_messages = _store.pop(uid, [])
         to_return = [m for m in user_messages if m["ts"] >= cutoff]
-        # Messages outside time window to be dropped (expired)
-        to_drop = [m for m in user_messages if m["ts"] < cutoff]
-
-        # Remove all messages (either returned to caller or expired)
-        if to_return or to_drop:
-            _store[uid] = []
-
         return _strip_ts(to_return)
 
 
