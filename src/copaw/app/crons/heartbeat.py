@@ -102,7 +102,8 @@ async def run_heartbeat_once(
 
     if not _in_active_hours(hb.active_hours):
         logger.debug(
-            "heartbeat skipped for user=%s: outside active hours", user_id
+            "heartbeat skipped for user=%s: outside active hours",
+            user_id,
         )
         return
 
@@ -110,14 +111,17 @@ async def run_heartbeat_once(
     path = get_heartbeat_query_path(user_id)
     if not path.is_file():
         logger.debug(
-            "heartbeat skipped for user=%s: no file at %s", user_id, path
+            "heartbeat skipped for user=%s: no file at %s",
+            user_id,
+            path,
         )
         return
 
     query_text = path.read_text(encoding="utf-8").strip()
     if not query_text:
         logger.debug(
-            "heartbeat skipped for user=%s: empty query file", user_id
+            "heartbeat skipped for user=%s: empty query file",
+            user_id,
         )
         return
 

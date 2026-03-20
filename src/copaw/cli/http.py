@@ -12,7 +12,8 @@ DEFAULT_BASE_URL = "http://127.0.0.1:8088"
 
 
 def client(
-    base_url: str, headers: Optional[Dict[str, str]] = None
+    base_url: str,
+    headers: Optional[Dict[str, str]] = None,
 ) -> httpx.Client:
     """Create HTTP client with /api prefix added to all requests."""
     # Ensure base_url ends with /api

@@ -27,7 +27,7 @@ router = APIRouter(prefix="/config", tags=["config"])
     description="Retrieve configuration for all available channels",
 )
 async def list_channels(
-    x_user_id: str | None = Header(None, alias="X-User-ID")
+    x_user_id: str | None = Header(None, alias="X-User-ID"),
 ) -> dict:
     """List all channel configs (filtered by available channels)."""
     user_id = x_user_id or "default"
@@ -205,7 +205,7 @@ async def put_channel(
     description="Return current heartbeat config (interval, target, etc.)",
 )
 async def get_heartbeat(
-    x_user_id: str | None = Header(None, alias="X-User-ID")
+    x_user_id: str | None = Header(None, alias="X-User-ID"),
 ) -> Any:
     """Return effective heartbeat config (from file or default)."""
     user_id = x_user_id or "default"

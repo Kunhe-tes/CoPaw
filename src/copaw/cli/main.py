@@ -122,7 +122,10 @@ def log_init_timings() -> None:
 )
 @click.pass_context
 def cli(
-    ctx: click.Context, host: str | None, port: int | None, user_id: str | None
+    ctx: click.Context,
+    host: str | None,
+    port: int | None,
+    user_id: str | None,
 ) -> None:
     """CoPaw CLI."""
     # Set runtime user directory

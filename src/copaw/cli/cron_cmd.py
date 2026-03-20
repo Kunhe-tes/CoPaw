@@ -57,7 +57,9 @@ def cron_group() -> None:
 )
 @click.pass_context
 def list_jobs(
-    ctx: click.Context, base_url: Optional[str], user_id: Optional[str]
+    ctx: click.Context,
+    base_url: Optional[str],
+    user_id: Optional[str],
 ) -> None:
     """List all cron jobs. Output is JSON from GET /cron/jobs."""
     base_url = _base_url(ctx, base_url)

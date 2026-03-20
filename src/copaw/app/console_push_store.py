@@ -37,7 +37,7 @@ async def append(user_id: str | None, session_id: str, text: str) -> None:
                 "ts": time.time(),
                 "session_id": session_id,
                 "user_id": uid,
-            }
+            },
         )
 
         # Keep only _MAX_MESSAGES per user

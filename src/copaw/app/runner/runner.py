@@ -54,7 +54,8 @@ class AgentRunner(Runner):
         self.memory_manager: MemoryManager | None = None
         # Per-user MemoryManager cache for performance optimization
         self._memory_manager_cache: OrderedDict[
-            str, MemoryManager
+            str,
+            MemoryManager,
         ] = OrderedDict()
         self._mm_cache_lock = asyncio.Lock()
         self._mm_cache_max_size = COPAW_MM_CACHE_MAX_SIZE
@@ -121,13 +122,14 @@ class AgentRunner(Runner):
             await mm.start()
             self._memory_manager_cache[user_id] = mm
             logger.info(
-                "Created and cached MemoryManager for user: %s", user_id
+                "Created and cached MemoryManager for user: %s",
+                user_id,
             )
 
             # Evict oldest if over limit
             while len(self._memory_manager_cache) > self._mm_cache_max_size:
                 oldest_user, oldest_mm = self._memory_manager_cache.popitem(
-                    last=False
+                    last=False,
                 )
                 try:
                     await oldest_mm.close()
@@ -137,7 +139,8 @@ class AgentRunner(Runner):
                     )
                 except Exception as e:
                     logger.warning(
-                        "Failed to close evicted MemoryManager: %s", e
+                        "Failed to close evicted MemoryManager: %s",
+                        e,
                     )
 
             return mm
@@ -247,7 +250,7 @@ class AgentRunner(Runner):
                 user_id=user_id,
                 channel=channel,
                 working_dir=str(
-                    get_request_working_dir()
+                    get_request_working_dir(),
                 ),  # Use request-scoped
             )
 

@@ -163,12 +163,14 @@ def _init_from_default_user(
 
     if default_working_dir.exists():
         copied_working = _copy_default_working_files(
-            default_working_dir, working_dir
+            default_working_dir,
+            working_dir,
         )
         if "config.json" in copied_working:
             config_copied = True
             logger.info(
-                "Copied config.json from default user for user %s", user_id
+                "Copied config.json from default user for user %s",
+                user_id,
             )
 
         md_files_copied = [f for f in copied_working if f.endswith(".md")]
@@ -183,7 +185,8 @@ def _init_from_default_user(
 
     if default_secret_dir.exists():
         copied_secret = _copy_default_config_files(
-            default_secret_dir, secret_dir
+            default_secret_dir,
+            secret_dir,
         )
         if "providers.json" in copied_secret:
             providers_copied = True
@@ -215,10 +218,14 @@ def _fallback_to_templates(
         )
         if not config_copied and template_config:
             config_copied = True
-            logger.info("Copied config.json from templates for user %s", user_id)
+            logger.info(
+                "Copied config.json from templates for user %s", user_id
+            )
         if not providers_copied and template_providers:
             providers_copied = True
-            logger.info("Copied providers.json from templates for user %s", user_id)
+            logger.info(
+                "Copied providers.json from templates for user %s", user_id
+            )
 
     if not md_copied:
         copied_md = copy_md_files(
@@ -327,12 +334,19 @@ def initialize_user_directory(
         default_secret_dir = DEFAULT_SECRET_DIR / "default"
 
         config_copied, providers_copied, md_copied = _init_from_default_user(
-            user_id, working_dir, secret_dir,
-            default_working_dir, default_secret_dir
+            user_id,
+            working_dir,
+            secret_dir,
+            default_working_dir,
+            default_secret_dir,
         )
         _fallback_to_templates(
-            user_id, working_dir, language,
-            config_copied, providers_copied, md_copied
+            user_id,
+            working_dir,
+            language,
+            config_copied,
+            providers_copied,
+            md_copied,
         )
 
     # Create default files if missing

@@ -361,7 +361,8 @@ class TestBrowserUseUserIsolation:
             assert response is not None
             # ToolResponse content is a list
             if hasattr(response, "content") and isinstance(
-                response.content, list
+                response.content,
+                list,
             ):
                 # Content may be TextBlock objects or dicts
                 item = response.content[0] if response.content else {}
@@ -386,11 +387,12 @@ class TestBrowserUseUserIsolation:
         token = set_request_user_id("test_user")
         try:
             response = await browser_control.browser_use(
-                action="unknown_action_xyz"
+                action="unknown_action_xyz",
             )
             # ToolResponse content is a list
             if hasattr(response, "content") and isinstance(
-                response.content, list
+                response.content,
+                list,
             ):
                 # Content may be TextBlock objects or dicts
                 item = response.content[0] if response.content else {}
@@ -412,7 +414,9 @@ class TestBrowserUseUserIsolation:
         token = set_request_user_id("test_user")
         try:
             with patch.object(
-                browser_control, "_action_install", new_callable=AsyncMock
+                browser_control,
+                "_action_install",
+                new_callable=AsyncMock,
             ) as mock_install:
                 mock_install.return_value = MagicMock(content='{"ok": true}')
                 response = await browser_control.browser_use(action="install")

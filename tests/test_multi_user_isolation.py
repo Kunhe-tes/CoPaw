@@ -318,7 +318,8 @@ class TestConfigIsolation:
         assert result == secret_dir / "alice" / "providers.json"
 
     def test_get_providers_json_path_with_request_context(
-        self, tmp_copaw_dirs
+        self,
+        tmp_copaw_dirs,
     ):
         """Test that providers.json path uses request context."""
         from copaw.providers.store import get_providers_json_path
@@ -707,7 +708,8 @@ class TestMemoryManagerIsolation:
             reset_request_user_id(token)
 
     def test_memory_manager_path_override_in_query_handler(
-        self, tmp_copaw_dirs
+        self,
+        tmp_copaw_dirs,
     ):
         """Test that query_handler properly overrides MemoryManager paths."""
         from unittest.mock import MagicMock, PropertyMock
@@ -802,7 +804,8 @@ class TestMemoryManagerLRUCache:
 
     @pytest.mark.asyncio
     async def test_cache_hit_returns_existing_memory_manager(
-        self, tmp_copaw_dirs
+        self,
+        tmp_copaw_dirs,
     ):
         """Test that cache hit returns existing MemoryManager."""
         from copaw.app.runner.runner import AgentRunner
@@ -832,7 +835,9 @@ class TestMemoryManagerLRUCache:
 
     @pytest.mark.asyncio
     async def test_lru_eviction_when_cache_full(
-        self, tmp_copaw_dirs, monkeypatch
+        self,
+        tmp_copaw_dirs,
+        monkeypatch,
     ):
         """Test LRU eviction when cache exceeds max size."""
         from copaw.app.runner.runner import AgentRunner
@@ -841,7 +846,8 @@ class TestMemoryManagerLRUCache:
 
         # Set small cache size for testing
         monkeypatch.setattr(
-            "copaw.app.runner.runner.COPAW_MM_CACHE_MAX_SIZE", 3
+            "copaw.app.runner.runner.COPAW_MM_CACHE_MAX_SIZE",
+            3,
         )
 
         runner = AgentRunner()
@@ -892,23 +898,28 @@ class TestMemoryManagerLRUCache:
         try:
             # Add users in order
             await runner._get_memory_manager_for_user(
-                "userA", working_dir / "userA"
+                "userA",
+                working_dir / "userA",
             )
             await runner._get_memory_manager_for_user(
-                "userB", working_dir / "userB"
+                "userB",
+                working_dir / "userB",
             )
             await runner._get_memory_manager_for_user(
-                "userC", working_dir / "userC"
+                "userC",
+                working_dir / "userC",
             )
 
             # Access userA again - moves to end
             await runner._get_memory_manager_for_user(
-                "userA", working_dir / "userA"
+                "userA",
+                working_dir / "userA",
             )
 
             # Now add userD - should evict userB (oldest)
             await runner._get_memory_manager_for_user(
-                "userD", working_dir / "userD"
+                "userD",
+                working_dir / "userD",
             )
 
             # userB should be evicted, userA should remain
@@ -919,7 +930,8 @@ class TestMemoryManagerLRUCache:
 
     @pytest.mark.asyncio
     async def test_shutdown_closes_all_cached_memory_managers(
-        self, tmp_copaw_dirs
+        self,
+        tmp_copaw_dirs,
     ):
         """Test that shutdown closes all cached MemoryManager instances."""
         from copaw.app.runner.runner import AgentRunner
@@ -931,10 +943,12 @@ class TestMemoryManagerLRUCache:
         try:
             # Create multiple MemoryManagers
             await runner._get_memory_manager_for_user(
-                "shutdownuser1", working_dir / "shutdownuser1"
+                "shutdownuser1",
+                working_dir / "shutdownuser1",
             )
             await runner._get_memory_manager_for_user(
-                "shutdownuser2", working_dir / "shutdownuser2"
+                "shutdownuser2",
+                working_dir / "shutdownuser2",
             )
 
             assert len(runner._memory_manager_cache) == 2
@@ -1076,7 +1090,8 @@ class TestChatsIsolation:
         token = set_request_user_id("testuser")
         try:
             result = await chat_manager.create_chat(
-                chat_spec, user_id="testuser"
+                chat_spec,
+                user_id="testuser",
             )
             assert result is not None
 
@@ -1126,7 +1141,8 @@ class TestChatsIsolation:
         token_other = set_request_user_id("other")
         try:
             result = await chat_manager.get_chat(
-                owner_chat.id, user_id="other"
+                owner_chat.id,
+                user_id="other",
             )
             # Should return None since the chat doesn't exist in other's file
             assert result is None

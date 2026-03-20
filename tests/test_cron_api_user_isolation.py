@@ -136,7 +136,8 @@ async def test_list_jobs_with_user_id(client: AsyncClient) -> None:
 
     # List jobs for user_a - should only see user_a's job
     response = await client.get(
-        "/api/cron/jobs", headers={"X-User-ID": "user_a"}
+        "/api/cron/jobs",
+        headers={"X-User-ID": "user_a"},
     )
     assert response.status_code == 200
     jobs = response.json()
@@ -146,7 +147,8 @@ async def test_list_jobs_with_user_id(client: AsyncClient) -> None:
 
     # List jobs for user_b - should only see user_b's job
     response = await client.get(
-        "/api/cron/jobs", headers={"X-User-ID": "user_b"}
+        "/api/cron/jobs",
+        headers={"X-User-ID": "user_b"},
     )
     assert response.status_code == 200
     jobs = response.json()

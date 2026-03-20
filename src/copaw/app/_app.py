@@ -466,7 +466,7 @@ async def user_context_middleware(request, call_next):
 
     # 从 Header 获取 user_id
     user_id = request.headers.get("X-User-ID") or request.headers.get(
-        "X-CoPaw-User-Id"
+        "X-CoPaw-User-Id",
     )
 
     if user_id:

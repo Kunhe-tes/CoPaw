@@ -69,7 +69,9 @@ class ChatManager:
             )
 
     async def get_chat(
-        self, chat_id: str, user_id: Optional[str] = None
+        self,
+        chat_id: str,
+        user_id: Optional[str] = None,
     ) -> Optional[ChatSpec]:
         """Get chat spec by chat_id (UUID).
 

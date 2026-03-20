@@ -60,7 +60,10 @@ def save_backup_config(config: BackupConfig) -> None:
 
     with open(config_path, "w", encoding="utf-8") as f:
         json.dump(
-            config.model_dump(mode="json"), f, indent=2, ensure_ascii=False
+            config.model_dump(mode="json"),
+            f,
+            indent=2,
+            ensure_ascii=False,
         )
 
 

@@ -497,13 +497,15 @@ class SkillService:
 
         # Add builtin skills first
         for skill in _read_skills_from_dir(
-            get_builtin_skills_dir(), "builtin"
+            get_builtin_skills_dir(),
+            "builtin",
         ):
             skills[skill.name] = skill
 
         # Add customized skills (overrides builtin with same name)
         for skill in _read_skills_from_dir(
-            get_customized_skills_dir(), "customized"
+            get_customized_skills_dir(),
+            "customized",
         ):
             skills[skill.name] = skill
 

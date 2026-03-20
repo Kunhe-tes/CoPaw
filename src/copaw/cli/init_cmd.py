@@ -137,11 +137,12 @@ def _copy_from_default_user(
 
     if default_working_dir.exists():
         copied_working = _copy_default_working_files(
-            default_working_dir, working_dir
+            default_working_dir,
+            working_dir,
         )
         if copied_working:
             click.echo(
-                f"✓ Copied from default working dir: {', '.join(copied_working)}"
+                f"✓ Copied from default working dir: {', '.join(copied_working)}",
             )
 
     if default_secret_dir.exists():
@@ -151,7 +152,7 @@ def _copy_from_default_user(
         )
         if copied_secret:
             click.echo(
-                f"✓ Copied from default secret dir: {', '.join(copied_secret)}"
+                f"✓ Copied from default secret dir: {', '.join(copied_secret)}",
             )
 
     if copied_working or copied_secret:
@@ -223,9 +224,7 @@ def _configure_main_config(
         return False
 
     hb = _configure_heartbeat_interactive(use_defaults)
-    existing = (
-        load_config(config_path) if config_path.is_file() else Config()
-    )
+    existing = load_config(config_path) if config_path.is_file() else Config()
     existing.agents.defaults.heartbeat = hb
 
     # show_tool_details
@@ -248,8 +247,7 @@ def _configure_main_config(
 
     # channels
     if not use_defaults and prompt_confirm(
-        "Configure channels? "
-        "(iMessage/Discord/DingTalk/Feishu/QQ/Console)",
+        "Configure channels? " "(iMessage/Discord/DingTalk/Feishu/QQ/Console)",
         default=False,
     ):
         configure_channels_interactive(existing)
@@ -481,7 +479,10 @@ def init_cmd(
         default_working_dir = DEFAULT_WORKING_DIR / "default"
         default_secret_dir = DEFAULT_SECRET_DIR / "default"
         if _copy_from_default_user(
-            user_id, working_dir, default_working_dir, default_secret_dir
+            user_id,
+            working_dir,
+            default_working_dir,
+            default_secret_dir,
         ):
             click.echo("\n✓ Initialization complete!")
             return
@@ -498,12 +499,12 @@ def init_cmd(
     click.echo(
         "✓ Copied config.json template (channels, MCP settings)"
         if config_copied
-        else "✓ config.json already exists or not copied"
+        else "✓ config.json already exists or not copied",
     )
     click.echo(
         "✓ Copied providers.json template (model provider settings)"
         if providers_copied
-        else "✓ providers.json already exists or not copied"
+        else "✓ providers.json already exists or not copied",
     )
 
     # Configure main config.json
