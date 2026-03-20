@@ -63,19 +63,20 @@ async def test_take_all_for_user():
 
 
 @pytest.mark.asyncio
-async def test_get_recent_non_consuming():
-    """测试 get_recent 不消费消息"""
+async def test_get_recent_consumes_messages():
+    """测试 get_recent 消费消息 - 返回后消息被删除"""
     from copaw.app.console_push_store import append, get_recent
 
     await append("alice", "session_1", "Recent message")
 
-    # First call - should return message but not consume
+    # First call - should return and consume message
     messages1 = await get_recent("alice", max_age_seconds=60)
     assert len(messages1) == 1
+    assert messages1[0]["text"] == "Recent message"
 
-    # Second call - should still return the same message
+    # Second call - should return empty (message already consumed)
     messages2 = await get_recent("alice", max_age_seconds=60)
-    assert len(messages2) == 1
+    assert len(messages2) == 0
 
 
 @pytest.mark.asyncio

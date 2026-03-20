@@ -76,21 +76,23 @@ async def get_recent(
     user_id: str | None = None,
     max_age_seconds: int = _MAX_AGE_SECONDS,
 ) -> List[Dict[str, Any]]:
-    """Return recent messages (not consumed) for the user."""
+    """Return and remove recent messages for the user."""
     uid = user_id or "default"
     now = time.time()
     cutoff = now - max_age_seconds
 
     async with _lock:
-        # Clean up expired messages for this user
         user_messages = _store.get(uid, [])
-        valid = [m for m in user_messages if m["ts"] >= cutoff]
-        expired = [m for m in user_messages if m["ts"] < cutoff]
+        # Messages within time window to be returned and removed
+        to_return = [m for m in user_messages if m["ts"] >= cutoff]
+        # Messages outside time window to be dropped (expired)
+        to_drop = [m for m in user_messages if m["ts"] < cutoff]
 
-        if expired:
-            _store[uid] = valid
+        # Remove all messages (either returned to caller or expired)
+        if to_return or to_drop:
+            _store[uid] = []
 
-        return _strip_ts(valid)
+        return _strip_ts(to_return)
 
 
 def _strip_ts(msgs: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
