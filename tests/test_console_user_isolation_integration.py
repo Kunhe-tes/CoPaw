@@ -127,19 +127,23 @@ async def test_console_channel_send_content_parts_with_user_id():
 
 @pytest.mark.asyncio
 async def test_api_router_with_user_id_header():
-    """测试 API 路由正确处理 x-user-id header"""
+    """测试 API 路由正确处理 x-user-id header 及消费语义"""
     from copaw.app.console_push_store import append, get_recent
 
     # Add messages for different users
     await append("alice", "session_1", "Alice's message")
     await append("bob", "session_1", "Bob's message")
 
-    # Simulate API call with alice's user_id
+    # First call for alice - should return and consume message
     alice_messages = await get_recent("alice")
     assert len(alice_messages) == 1
     assert alice_messages[0]["text"] == "Alice's message"
 
-    # Simulate API call with bob's user_id
+    # Second call for alice - should return empty (message consumed)
+    alice_messages_2 = await get_recent("alice")
+    assert len(alice_messages_2) == 0
+
+    # First call for bob - should return and consume message
     bob_messages = await get_recent("bob")
     assert len(bob_messages) == 1
     assert bob_messages[0]["text"] == "Bob's message"
