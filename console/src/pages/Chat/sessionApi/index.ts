@@ -2,7 +2,7 @@ import {
   IAgentScopeRuntimeWebUISession,
   IAgentScopeRuntimeWebUISessionAPI,
   IAgentScopeRuntimeWebUIMessage,
-} from "@agentscope-ai/chat";
+} from "@/chat";
 import api, { type ChatSpec, type Message } from "../../../api";
 
 interface CustomWindow extends Window {
