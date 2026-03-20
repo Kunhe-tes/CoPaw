@@ -1,7 +1,7 @@
 import {
   AgentScopeRuntimeWebUI,
   IAgentScopeRuntimeWebUIOptions,
-} from "@agentscope-ai/chat";
+} from "@/chat";
 import { useMemo, useState } from "react";
 import { Modal, Button, Result } from "antd";
 import { ExclamationCircleOutlined, SettingOutlined } from "@ant-design/icons";
