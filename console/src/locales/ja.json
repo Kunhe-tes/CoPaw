@@ -168,6 +168,7 @@
     "pleaseInputName": "ジョブ名を入力してください",
     "pleaseInputCron": "Cron式を入力してください",
     "pleaseSelectTaskType": "タスクタイプを選択してください",
+    "pleaseInputText": "タスク説明を入力してください",
     "pleaseInputRequest": "リクエスト内容を入力してください",
     "pleaseInputChannel": "対象チャンネルを入力してください",
     "pleaseInputUserId": "対象ユーザーIDを入力してください",

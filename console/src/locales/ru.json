@@ -168,6 +168,7 @@
     "pleaseInputName": "Пожалуйста, введите название задачи",
     "pleaseInputCron": "Пожалуйста, введите cron-выражение",
     "pleaseSelectTaskType": "Пожалуйста, выберите тип задачи",
+    "pleaseInputText": "Пожалуйста, введите описание задачи",
     "pleaseInputRequest": "Пожалуйста, введите содержимое запроса",
     "pleaseInputChannel": "Пожалуйста, введите целевой канал",
     "pleaseInputUserId": "Пожалуйста, введите ID целевого пользователя",

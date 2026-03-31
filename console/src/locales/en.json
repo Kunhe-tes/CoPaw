@@ -168,6 +168,7 @@
     "pleaseInputName": "Please input job name",
     "pleaseInputCron": "Please input cron expression",
     "pleaseSelectTaskType": "Please select task type",
+    "pleaseInputText": "Please input task description",
     "pleaseInputRequest": "Please input request content",
     "pleaseInputChannel": "Please input target channel",
     "pleaseInputUserId": "Please input target user ID",

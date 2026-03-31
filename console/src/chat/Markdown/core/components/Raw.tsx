@@ -12,7 +12,7 @@ export default function Raw(props: RawProps) {
 
   return <div
     className={prefixCls}
-    style={{ fontSize: props.baseFontSize, lineHeight: props.baseLineHeight }}>
+    style={{ fontSize: props.baseFontSize, lineHeight: props.baseLineHeight, whiteSpace: 'pre-wrap' }}>
     {props.content}
   </div>
 }

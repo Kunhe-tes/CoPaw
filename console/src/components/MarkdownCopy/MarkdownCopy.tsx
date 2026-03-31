@@ -5,6 +5,7 @@ import { XMarkdown } from "@ant-design/x-markdown";
 import { useTranslation } from "react-i18next";
 import type { CSSProperties } from "react";
 import { stripFrontmatter } from "../../utils/markdown";
+import { copy as copyToClipboardUtil } from "../../chat/Util/copy";
 import styles from "./index.module.less";
 
 interface MarkdownCopyProps {
@@ -84,22 +85,8 @@ export function MarkdownCopy({
 
     setIsCopying(true);
     try {
-      if (navigator.clipboard && window.isSecureContext) {
-        await navigator.clipboard.writeText(contentToCopy);
-        message.success(t("common.copied"));
-      } else {
-        const textArea = document.createElement("textarea");
-        textArea.value = contentToCopy;
-        textArea.style.position = "fixed";
-        textArea.style.left = "-999999px";
-        textArea.style.top = "-999999px";
-        document.body.appendChild(textArea);
-        textArea.focus();
-        textArea.select();
-        document.execCommand("copy");
-        textArea.remove();
-        message.success(t("common.copied"));
-      }
+      await copyToClipboardUtil(contentToCopy);
+      message.success(t("common.copied"));
     } catch (err) {
       console.error("Failed to copy text: ", err);
       message.error(t("common.copyFailed"));

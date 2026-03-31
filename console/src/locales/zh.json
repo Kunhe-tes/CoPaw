@@ -168,6 +168,7 @@
     "pleaseInputName": "请输入任务名称",
     "pleaseInputCron": "请输入Cron表达式",
     "pleaseSelectTaskType": "请选择任务类型",
+    "pleaseInputText": "请输入任务描述",
     "pleaseInputRequest": "请输入请求内容",
     "pleaseInputChannel": "请输入目标频道",
     "pleaseInputUserId": "请输入目标用户ID",
