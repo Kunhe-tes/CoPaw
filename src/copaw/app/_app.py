@@ -20,6 +20,7 @@ from ..__version__ import __version__
 from ..utils.logging import setup_logger, add_copaw_file_handler
 from .auth import AuthMiddleware
 from .middleware.tenant_identity import TenantIdentityMiddleware
+from .middleware.tenant_workspace import TenantWorkspaceMiddleware
 from .routers import router as api_router, create_agent_scoped_router
 from .routers.agent_scoped import AgentContextMiddleware
 from .routers.voice import voice_router
@@ -293,6 +294,9 @@ app = FastAPI(
 
 # Add tenant identity middleware first (extracts tenant/user from headers)
 app.add_middleware(TenantIdentityMiddleware)
+
+# Add tenant workspace middleware second (loads workspace from pool)
+app.add_middleware(TenantWorkspaceMiddleware)
 
 # Add agent context middleware for agent-scoped routes
 app.add_middleware(AgentContextMiddleware)
