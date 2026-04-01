@@ -43,6 +43,11 @@ export interface IAgentScopeRuntimeWebUIMessage<T = string | any> {
    * @descriptionEn Processing status of the message, affects display effects
    */
   msgStatus?: 'finished' | 'interrupted' | 'generating' | 'error';
+  /**
+   * @description 消息的创建时间戳
+   * @descriptionEn Timestamp of when the message was created
+   */
+  createdAt?: number;
 }
 
 export interface IAgentScopeRuntimeWebUIMessagesContext {

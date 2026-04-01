@@ -9,6 +9,8 @@ interface ICardProps {
   index?: number,
   id?: string,
   isLast?: boolean,
+  messageId?: string;
+  createdAt?: number;
 }
 
 const Card = React.memo(function (props: ICardProps) {
@@ -36,6 +38,8 @@ export default function Cards(props: {
   id: string,
   className?: string,
   isLast?: boolean,
+  messageId?: string;
+  createdAt?: number;
 }) {
   const { cards } = props;
   if (!cards?.length) return null;
@@ -45,6 +49,8 @@ export default function Cards(props: {
       index={index}
       id={props.id}
       isLast={props.isLast}
+      messageId={props.messageId}
+      createdAt={props.createdAt}
       {...card}
     />;
 

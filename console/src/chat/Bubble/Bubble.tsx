@@ -41,8 +41,8 @@ const Bubble: React.FC<BubbleProps> = (props) => {
     msgStatus,
     id,
     role,
-    // @ts-ignore
     variant,
+    createdAt,
   } = props;
 
   const placement = {
@@ -80,7 +80,7 @@ const Bubble: React.FC<BubbleProps> = (props) => {
       style={!isAssistant && contentNode ? { flexDirection: 'column-reverse' } : {}}
       className={`${prefixCls}-content-wrapper`}
     >
-      <Cards cards={cards} id={id} isLast={isLast} className={classnames(
+      <Cards cards={cards} id={id} isLast={isLast} messageId={id} createdAt={createdAt} className={classnames(
         `${prefixCls}-content`,
         `${prefixCls}-content-wrapper-card`,
         variantClassname,

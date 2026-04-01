@@ -2,7 +2,7 @@ import { createContext, useContextSelector } from 'use-context-selector';
 import { IAgentScopeRuntimeWebUISessionsContext } from '../types/ISessions';
 import { useGetState, useMount } from 'ahooks';
 import { IAgentScopeRuntimeWebUISession } from '../types/ISessions';
-import React, { useEffect } from "react";
+import React from "react";
 import { ChatAnywhereMessagesContext } from './ChatAnywhereMessagesContext';
 import { useChatAnywhereOptions } from './ChatAnywhereOptionsContext';
 import ReactDOM from 'react-dom';
@@ -97,9 +97,11 @@ export const useChatAnywhereSessions = () => {
 
     const messages = (await options.api.getSession(currentSessionId))?.messages || [];
     setMessages(messages.map(item => {
+      const message = item as any;
       return {
         ...item,
         history: true,
+        createdAt: message.created_at ? new Date(message.created_at).getTime() : undefined,
       }
     }));
   }, [currentSessionId]);

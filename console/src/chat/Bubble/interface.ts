@@ -68,4 +68,22 @@ export interface BubbleProps<ContentType extends BubbleContentType = string>
    * @descriptionEn Whether the message is the last message
    */
   isLast?: boolean;
+
+  /**
+   * @description 消息创建时间戳
+   * @descriptionEn Message creation timestamp
+   */
+  createdAt?: number;
+
+  /**
+   * @description 消息角色
+   * @descriptionEn Message role
+   */
+  role?: 'user' | 'assistant' | string;
+
+  /**
+   * @description 消息变体
+   * @descriptionEn Message variant
+   */
+  variant?: string;
 }

@@ -30,6 +30,7 @@ export default function useChatMessageHandler(options: UseChatMessageHandlerOpti
     currentQARef.current.request = {
       id: uuid(),
       role: 'user',
+      createdAt: Date.now(),
       cards: [{
         code: 'AgentScopeRuntimeRequestCard',
         data: new AgentScopeRuntimeRequestBuilder().handle(data),
@@ -50,6 +51,7 @@ export default function useChatMessageHandler(options: UseChatMessageHandlerOpti
     currentQARef.current.request = {
       id: uuid(),
       role: 'user',
+      createdAt: Date.now(),
       cards: [{
         code: 'AgentScopeRuntimeRequestCard',
         data: new AgentScopeRuntimeRequestBuilder().handleApproval(data),

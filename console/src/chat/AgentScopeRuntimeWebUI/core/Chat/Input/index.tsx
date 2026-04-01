@@ -1,4 +1,4 @@
-import { useCallback, useRef } from "react";
+import { useCallback, useRef, forwardRef, useImperativeHandle } from "react";
 import { useProviderContext, ChatInput, Disclaimer } from '@/chat';
 import { useChatAnywhereOptions } from "../../Context/ChatAnywhereOptionsContext";
 import { useGetState } from 'ahooks';
@@ -15,13 +15,22 @@ export interface InputProps {
   onSubmit: (data: IAgentScopeRuntimeWebUIInputData) => void;
 }
 
-export default function Input(props: InputProps) {
+export interface InputRef {
+  setContent: (content: string) => void;
+}
+
+const Input = forwardRef<InputRef, InputProps>((props, ref) => {
   const [content, setContent, getContent] = useGetState('');
   const prefixCls = useProviderContext().getPrefixCls('chat-anywhere-input');
   const senderOptions = useChatAnywhereOptions(v => v.sender);
   const inputContext = useChatAnywhereInput(v => v);
   const { t } = useTranslation();
   const fileInputRef = useRef<HTMLInputElement>(null);
+
+  // Expose setContent to parent
+  useImperativeHandle(ref, () => ({
+    setContent
+  }), [setContent]);
 
   const {
     placeholder = '',
@@ -145,4 +154,6 @@ export default function Input(props: InputProps) {
       title="Select a ZIP file (max 100MB)"
     />
   </div>;
-}
+});
+
+export default Input;

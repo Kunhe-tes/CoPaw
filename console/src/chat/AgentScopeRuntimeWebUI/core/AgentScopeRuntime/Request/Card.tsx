@@ -1,11 +1,18 @@
 
-import { AgentScopeRuntimeContentType, IAgentScopeRuntimeRequest } from '../types';
+import { AgentScopeRuntimeContentType, IAgentScopeRuntimeRequest, ITextContent } from '../types';
 import { useMemo } from 'react';
 import { Bubble } from '@/chat';
+import MessageActions from './MessageActions';
 
 export default function AgentScopeRuntimeRequestCard(props: {
   data: IAgentScopeRuntimeRequest;
+  messageId?: string;
+  createdAt?: number;
 }) {
+  const textContent = useMemo(() => {
+    return props.data.input[0].content.find(c => c.type === AgentScopeRuntimeContentType.TEXT);
+  }, [props.data.input]);
+
   const cards = useMemo(() => {
 
     return props.data.input[0].content.reduce<any>((p, c) => {
@@ -49,6 +56,25 @@ export default function AgentScopeRuntimeRequestCard(props: {
 
   if (!cards?.length) return null;
 
-  return <Bubble role="user" cards={cards}></Bubble>;
+  const text = (textContent as ITextContent | undefined)?.text || '';
+
+  return (
+    <div className="request-card-container">
+      <Bubble role="user" cards={cards} createdAt={props.createdAt}></Bubble>
+      {props.createdAt && (
+        <MessageActions
+          content={text}
+          timestamp={props.createdAt}
+        />
+      )}
+      <style>{`
+        .request-card-container {
+          display: flex;
+          flex-direction: column;
+          align-items: flex-end;
+        }
+      `}</style>
+    </div>
+  );
 }
 

@@ -1,6 +1,8 @@
 import { Layout, Space } from "antd";
 import LanguageSwitcher from "../components/LanguageSwitcher";
+import AccountSwitcher from "../components/AccountSwitcher";
 import { useTranslation } from "react-i18next";
+import { useState } from "react";
 import {
   FileTextOutlined,
   BookOutlined,
@@ -40,11 +42,17 @@ interface HeaderProps {
 
 export default function Header({ selectedKey }: HeaderProps) {
   const { t } = useTranslation();
+  const [selectedAccountId, setSelectedAccountId] = useState<string>("");
 
   const handleNavClick = (url: string) => {
     if (url) {
       window.open(url, "_blank");
     }
+  };
+
+  const handleAccountSelect = (userId: string) => {
+    setSelectedAccountId(userId);
+    console.log("Selected account userId:", userId);
   };
 
   return (
@@ -53,7 +61,8 @@ export default function Header({ selectedKey }: HeaderProps) {
         {t(keyToLabel[selectedKey] || "nav.chat")}
       </span>
       <Space size="middle">
-        <Tooltip title={t("header.changelog")}>
+        <AccountSwitcher onSelect={handleAccountSelect} />
+        {/* <Tooltip title={t("header.changelog")}>
           <Button
             icon={<FileTextOutlined />}
             type="text"
@@ -89,7 +98,7 @@ export default function Header({ selectedKey }: HeaderProps) {
             {t("header.github")}
           </Button>
         </Tooltip>
-        <LanguageSwitcher />
+        <LanguageSwitcher /> */}
       </Space>
     </AntHeader>
   );
