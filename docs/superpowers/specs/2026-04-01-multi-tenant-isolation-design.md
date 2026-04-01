@@ -1,1057 +1,746 @@
-# Multi-Tenant Isolation Design Specification
+# CoPaw 多租户隔离整体设计方案
 
-**Date:** 2026-04-01
-**Status:** Draft
-**Scope:** User isolation and permission control for CoPaw multi-tenant deployment
+## 1. 目标与范围
 
----
+本方案的目标不是简单地区分用户，而是建立一条严格、可验证的多租户隔离主线：
 
-## 1. Overview
+> 任意请求只要带上 `X-Tenant-Id`，后续所有配置、文件、会话、定时任务、记忆、工具输出、推送消息，都只能落到该租户自己的边界内。
 
-This document specifies the complete design for implementing multi-tenant isolation in CoPaw, enabling multiple independent users/organizations to share a single CoPaw instance while maintaining complete data and runtime isolation.
+本期实现范围：
 
-### 1.1 Key Requirements
+- 租户级磁盘隔离
+- 请求级上下文隔离
+- Workspace 级运行时隔离
+- Console 请求隔离
+- Cron 隔离
+- 配置 / 记忆 / 上传文件隔离
+- 为 Workspace Pool 扩展能力预留接口和元数据
 
-- **Tenant Identification:** Via `X-Tenant-Id` HTTP header
-- **Complete Data Isolation:** Each tenant has independent working directory
-- **Runtime Isolation:** Each tenant runs in separate Workspace instance
-- **Resource Management:** Configurable limits per tenant (concurrency, storage)
-- **Security:** Tenant access control and cross-tenant leakage prevention
+本期不实现：
 
----
+- 空闲自动回收
+- LRU 驱逐逻辑生效
+- 复杂租户配额策略
 
-## 2. Architecture
-
-### 2.1 High-Level Architecture
-
-```
-┌─────────────────────────────────────────────────────────────┐
-│                      FastAPI Application                     │
-├─────────────────────────────────────────────────────────────┤
-│  Middleware Layer                                            │
-│  ┌─────────────────────────────────────────────────────┐   │
-│  │ 1. TenantSecurityMiddleware                          │   │
-│  │    - Validate X-Tenant-Id format                     │   │
-│  │    - Check tenant allowlist/blocklist                │   │
-│  │    - Set contextvars.current_tenant_id               │   │
-│  └─────────────────────────────────────────────────────┘   │
-│  ┌─────────────────────────────────────────────────────┐   │
-│  │ 2. TenantContextMiddleware                           │   │
-│  │    - Set contextvars.current_user_id                 │   │
-│  │    - Initialize/request tenant workspace             │   │
-│  │    - Rate limiting per tenant                        │   │
-│  └─────────────────────────────────────────────────────┘   │
-├─────────────────────────────────────────────────────────────┤
-│  Router Layer                                                │
-│  ┌─────────────┐ ┌─────────────┐ ┌─────────────────────┐   │
-│  │   Console   │ │    Cron     │ │      Settings       │   │
-│  │   Router    │ │    Router   │ │      Router         │   │
-│  └──────┬──────┘ └──────┬──────┘ └──────────┬──────────┘   │
-│         │               │                   │              │
-│         └───────────────┼───────────────────┘              │
-│                         │                                   │
-├─────────────────────────┼───────────────────────────────────┤
-│                         ▼                                   │
-│  ┌─────────────────────────────────────────────────────┐   │
-│  │              TenantWorkspacePool                     │   │
-│  │  ┌─────────────────────────────────────────────┐   │   │
-│  │  │  tenant-1: Workspace (agent_id, runtime)    │   │   │
-│  │  │  tenant-2: Workspace (agent_id, runtime)    │   │   │
-│  │  │  tenant-3: Workspace (agent_id, runtime)    │   │   │
-│  │  └─────────────────────────────────────────────┘   │   │
-│  │  - Lazy loading / eviction                         │   │
-│  │  - Resource limits enforcement                     │   │
-│  └─────────────────────────────────────────────────────┘   │
-└─────────────────────────────────────────────────────────────┘
-```
-
-### 2.2 Data Flow
-
-```
-Request → Security Check → Context Setup → Get Workspace → Process → Response
-                ↓                ↓              ↓
-           Validate ID    Set context    Lazy init if
-           Check ACL      tenant/user    not exists
-```
+但本方案会为后续回收、驱逐、资源治理保留演进位。
 
 ---
 
-## 3. Core Components
+## 2. 核心原则
 
-### 3.1 Context Variables
+系统遵循一条不可绕开的主线：
 
-**File:** `src/copaw/config/context.py`
+`tenant_id -> TenantWorkspacePool -> tenant Workspace -> current_workspace_dir -> tenant-scoped storage/runtime`
 
-```python
-from contextvars import ContextVar
-from typing import Optional
+落地原则如下：
 
-# Existing (keep)
-current_workspace_dir: ContextVar[Path | None] = ContextVar(...)
-current_recent_max_bytes: ContextVar[int | None] = ContextVar(...)
+- **入口层**负责识别租户身份
+  - HTTP 请求：来自 `X-Tenant-Id`
+  - 外部 channel 回调：来自该 channel 所属 workspace
+  - Cron / heartbeat：来自 job 元数据或所属 workspace
+- **绑定层**负责把当前执行流绑定到租户 workspace
+- **业务层和工具层**默认不直接理解 tenant，而是依赖当前 `workspace` / `workspace_dir`
+- **强隔离优先**：只要当前执行链需要租户上下文却未绑定成功，就立即报错
+- **禁止静默回退**：多租户模式下，不允许回退到全局 `WORKING_DIR`
 
-# NEW: Tenant identification
-current_tenant_id: ContextVar[str | None] = ContextVar(
-    "current_tenant_id",
-    default=None,
-)
-
-# NEW: User identification within tenant
-current_user_id: ContextVar[str | None] = ContextVar(
-    "current_user_id",
-    default=None,
-)
-
-# NEW: Tenant workspace reference (for quick access)
-current_tenant_workspace: ContextVar["Workspace" | None] = ContextVar(
-    "current_tenant_workspace",
-    default=None,
-)
-
-
-# Access functions
-def get_current_tenant_id() -> str:
-    """Get current tenant ID or 'default'."""
-    return current_tenant_id.get() or "default"
-
-
-def get_current_user_id() -> str:
-    """Get current user ID or 'anonymous'."""
-    return current_user_id.get() or "anonymous"
-
-
-def get_current_tenant_workspace() -> Optional["Workspace"]:
-    """Get current tenant's workspace instance."""
-    return current_tenant_workspace.get()
-```
-
-### 3.2 Tenant Workspace Pool
-
-**File:** `src/copaw/app/workspace/tenant_pool.py`
-
-```python
-import asyncio
-import logging
-from datetime import datetime, timedelta
-from pathlib import Path
-from typing import Dict, Optional, Set
-
-from .workspace import Workspace
-from ...config.context import (
-    current_tenant_workspace,
-    current_tenant_id,
-)
-
-logger = logging.getLogger(__name__)
-
-
-class TenantWorkspacePool:
-    """Manages tenant workspace lifecycle with resource limits.
-
-    Features:
-    - Lazy initialization (create on first access)
-    - LRU eviction (remove least recently used when at capacity)
-    - Idle timeout (auto-cleanup inactive workspaces)
-    - Resource tracking (memory, connections per tenant)
-    """
-
-    def __init__(
-        self,
-        base_working_dir: Path,
-        max_tenants: int = 100,
-        max_concurrent_per_tenant: int = 10,
-        idle_timeout: timedelta = timedelta(hours=1),
-    ):
-        self._base = base_working_dir
-        self._max_tenants = max_tenants
-        self._max_concurrent = max_concurrent_per_tenant
-        self._idle_timeout = idle_timeout
-
-        # Active workspaces
-        self._workspaces: Dict[str, Workspace] = {}
-        self._last_access: Dict[str, datetime] = {}
-        self._semaphores: Dict[str, asyncio.Semaphore] = {}
-
-        # Synchronization
-        self._lock = asyncio.Lock()
-        self._cleanup_task: Optional[asyncio.Task] = None
-        self._shutdown = False
-
-    async def start(self) -> None:
-        """Start background cleanup task."""
-        self._cleanup_task = asyncio.create_task(
-            self._cleanup_loop()
-        )
-        logger.info(
-            f"TenantWorkspacePool started: "
-            f"max_tenants={self._max_tenants}, "
-            f"idle_timeout={self._idle_timeout}"
-        )
-
-    async def stop(self) -> None:
-        """Stop all workspaces and cleanup."""
-        self._shutdown = True
-
-        if self._cleanup_task:
-            self._cleanup_task.cancel()
-            try:
-                await self._cleanup_task
-            except asyncio.CancelledError:
-                pass
-
-        async with self._lock:
-            # Stop all workspaces
-            stop_tasks = [
-                ws.stop() for ws in self._workspaces.values()
-            ]
-            if stop_tasks:
-                await asyncio.gather(*stop_tasks, return_exceptions=True)
-
-            self._workspaces.clear()
-            self._last_access.clear()
-            self._semaphores.clear()
-
-        logger.info("TenantWorkspacePool stopped")
-
-    async def get_or_create(
-        self,
-        tenant_id: str,
-        agent_id: Optional[str] = None,
-    ) -> Workspace:
-        """Get existing or create new workspace for tenant.
-
-        Args:
-            tenant_id: Unique tenant identifier
-            agent_id: Optional agent ID (defaults to tenant_id)
-
-        Returns:
-            Workspace instance for the tenant
-
-        Raises:
-            TenantLimitExceeded: If max tenants reached and can't evict
-            TenantBlocked: If tenant is in blocklist
-        """
-        if self._shutdown:
-            raise RuntimeError("Pool is shutting down")
-
-        async with self._lock:
-            # Check if exists
-            if tenant_id in self._workspaces:
-                self._last_access[tenant_id] = datetime.now()
-                return self._workspaces[tenant_id]
-
-            # Check capacity
-            if len(self._workspaces) >= self._max_tenants:
-                await self._evict_lru_tenant()
-
-            # Create workspace
-            workspace_dir = self._get_tenant_dir(tenant_id)
-            workspace_dir.mkdir(parents=True, exist_ok=True)
-
-            # Initialize tenant structure if new
-            await self._init_tenant_structure(workspace_dir)
-
-            # Create and start workspace
-            actual_agent_id = agent_id or tenant_id
-            workspace = Workspace(
-                agent_id=actual_agent_id,
-                workspace_dir=str(workspace_dir),
-            )
-            await workspace.start()
-
-            self._workspaces[tenant_id] = workspace
-            self._last_access[tenant_id] = datetime.now()
-            self._semaphores[tenant_id] = asyncio.Semaphore(
-                self._max_concurrent
-            )
-
-            logger.info(
-                f"Created workspace for tenant: {tenant_id} "
-                f"at {workspace_dir}"
-            )
-            return workspace
-
-    async def get_semaphore(self, tenant_id: str) -> asyncio.Semaphore:
-        """Get concurrency semaphore for tenant."""
-        async with self._lock:
-            if tenant_id not in self._semaphores:
-                self._semaphores[tenant_id] = asyncio.Semaphore(
-                    self._max_concurrent
-                )
-            return self._semaphores[tenant_id]
-
-    async def get_workspace(self, tenant_id: str) -> Optional[Workspace]:
-        """Get workspace if exists (doesn't create)."""
-        async with self._lock:
-            return self._workspaces.get(tenant_id)
-
-    async def remove_tenant(self, tenant_id: str) -> bool:
-        """Remove and stop a tenant's workspace."""
-        async with self._lock:
-            if tenant_id not in self._workspaces:
-                return False
-
-            workspace = self._workspaces.pop(tenant_id)
-            self._last_access.pop(tenant_id, None)
-            self._semaphores.pop(tenant_id, None)
-
-        # Stop outside lock
-        await workspace.stop()
-        logger.info(f"Removed workspace for tenant: {tenant_id}")
-        return True
-
-    def _get_tenant_dir(self, tenant_id: str) -> Path:
-        """Get working directory for tenant."""
-        if tenant_id == "default":
-            return self._base / "default"
-        # Sanitize tenant_id for filesystem
-        safe_id = "".join(
-            c for c in tenant_id
-            if c.isalnum() or c in "_-"
-        )
-        return self._base / f"tenant-{safe_id}"
-
-    async def _init_tenant_structure(self, tenant_dir: Path) -> None:
-        """Initialize directory structure for new tenant."""
-        # Core directories
-        (tenant_dir / "skills").mkdir(exist_ok=True)
-        (tenant_dir / "customized_skills").mkdir(exist_ok=True)
-        (tenant_dir / "memory").mkdir(exist_ok=True)
-        (tenant_dir / "media").mkdir(exist_ok=True)
-        (tenant_dir / "files").mkdir(exist_ok=True)
-
-        # Config and data files will be created on first use
-
-    async def _evict_lru_tenant(self) -> None:
-        """Evict least recently used tenant when at capacity."""
-        if not self._last_access:
-            raise TenantLimitExceeded(
-                f"Max tenants ({self._max_tenants}) reached, "
-                "no tenants available for eviction"
-            )
-
-        # Find LRU tenant
-        lru_tenant = min(
-            self._last_access.keys(),
-            key=lambda k: self._last_access[k]
-        )
-
-        # Check if it's been idle long enough
-        idle_time = datetime.now() - self._last_access[lru_tenant]
-        if idle_time < timedelta(minutes=5):
-            raise TenantLimitExceeded(
-                f"Max tenants ({self._max_tenants}) reached "
-                f"and all tenants are active"
-            )
-
-        await self.remove_tenant(lru_tenant)
-        logger.info(f"Evicted idle tenant: {lru_tenant} (idle={idle_time})")
-
-    async def _cleanup_loop(self) -> None:
-        """Background task to cleanup idle workspaces."""
-        while not self._shutdown:
-            try:
-                await asyncio.sleep(60)  # Check every minute
-
-                async with self._lock:
-                    now = datetime.now()
-                    to_evict = []
-
-                    for tenant_id, last_access in self._last_access.items():
-                        if now - last_access > self._idle_timeout:
-                            to_evict.append(tenant_id)
-
-                # Evict outside lock
-                for tenant_id in to_evict:
-                    await self.remove_tenant(tenant_id)
-
-            except asyncio.CancelledError:
-                break
-            except Exception:
-                logger.exception("Cleanup loop error")
-
-    async def get_stats(self) -> dict:
-        """Get pool statistics."""
-        async with self._lock:
-            return {
-                "total_tenants": len(self._workspaces),
-                "max_tenants": self._max_tenants,
-                "active_semaphores": len(self._semaphores),
-                "tenant_ids": list(self._workspaces.keys()),
-            }
-
-
-class TenantLimitExceeded(Exception):
-    """Raised when tenant limit is reached."""
-    pass
-
-
-class TenantBlocked(Exception):
-    """Raised when tenant is blocked."""
-    pass
-```
+这保证隔离是结构性成立，而不是依赖每个模块显式传递 tenant 参数。
 
 ---
 
-## 4. Middleware Implementation
+## 3. 隔离边界定义
 
-### 4.1 Tenant Security Middleware
+### 3.1 全局共享对象
 
-**File:** `src/copaw/app/middleware/tenant_security.py`
+以下对象继续保持进程级共享：
 
-```python
-import re
-from fastapi import Request, Response
-from starlette.middleware.base import BaseHTTPMiddleware
+- FastAPI app
+- provider manager
+- local model manager
+- 内置 skills
+- 应用代码与静态资源
+- Python 依赖
+- 系统级环境变量与服务运行参数
 
-from ...config.context import current_tenant_id, current_user_id
+### 3.2 租户隔离对象
 
+以下对象必须进入 `tenant Workspace`：
 
-class TenantSecurityMiddleware(BaseHTTPMiddleware):
-    """Validates tenant headers and sets security context.
+- runner
+- chat manager
+- cron manager
+- task tracker
+- memory manager
+- channel manager
+- agent state / active agent
+- config / jobs / chats / uploads / screenshots / secrets
 
-    Order: Must be early in middleware stack (before routing).
-    """
+即：
 
-    # Valid tenant ID pattern: alphanumeric, underscore, hyphen
-    TENANT_ID_PATTERN = re.compile(r'^[a-zA-Z0-9_-]{1,64}$')
-
-    def __init__(
-        self,
-        app,
-        allow_list: Optional[Set[str]] = None,
-        block_list: Optional[Set[str]] = None,
-    ):
-        super().__init__(app)
-        self._allow_list = allow_list
-        self._block_list = block_list or set()
-
-    async def dispatch(self, request: Request, call_next) -> Response:
-        tenant_id = request.headers.get("X-Tenant-Id", "default")
-        user_id = request.headers.get("X-User-Id", "anonymous")
-
-        # Validate tenant ID format
-        if not self._validate_tenant_id(tenant_id):
-            return Response(
-                status_code=400,
-                content=json.dumps({
-                    "error": "Invalid tenant ID format",
-                    "detail": "Must be 1-64 alphanumeric, underscore, or hyphen"
-                }),
-                media_type="application/json"
-            )
-
-        # Check block/allow lists
-        if tenant_id in self._block_list:
-            return Response(
-                status_code=403,
-                content=json.dumps({
-                    "error": "Tenant access denied",
-                    "detail": f"Tenant '{tenant_id}' is blocked"
-                }),
-                media_type="application/json"
-            )
-
-        if self._allow_list and tenant_id not in self._allow_list:
-            return Response(
-                status_code=403,
-                content=json.dumps({
-                    "error": "Tenant not authorized",
-                    "detail": f"Tenant '{tenant_id}' not in allow list"
-                }),
-                media_type="application/json"
-            )
-
-        # Set context for this request
-        tenant_token = current_tenant_id.set(tenant_id)
-        user_token = current_user_id.set(user_id)
-
-        try:
-            response = await call_next(request)
-            # Add tenant info to response headers for debugging
-            response.headers["X-Tenant-Id-Processed"] = tenant_id
-            return response
-        finally:
-            current_tenant_id.reset(tenant_token)
-            current_user_id.reset(user_token)
-
-    def _validate_tenant_id(self, tenant_id: str) -> bool:
-        """Validate tenant ID format."""
-        if not tenant_id:
-            return False
-        return bool(self.TENANT_ID_PATTERN.match(tenant_id))
-```
-
-### 4.2 Tenant Context Middleware
-
-**File:** `src/copaw/app/middleware/tenant_context.py`
-
-```python
-from fastapi import Request, Response
-from starlette.middleware.base import BaseHTTPMiddleware
-
-from ...config.context import (
-    current_tenant_workspace,
-    get_current_tenant_id,
-)
-from ..workspace.tenant_pool import TenantWorkspacePool
-
-
-class TenantContextMiddleware(BaseHTTPMiddleware):
-    """Sets up tenant workspace and manages request-level context.
-
-    Must run after TenantSecurityMiddleware.
-    """
-
-    def __init__(self, app, tenant_pool: TenantWorkspacePool):
-        super().__init__(app)
-        self._pool = tenant_pool
-
-    async def dispatch(self, request: Request, call_next) -> Response:
-        tenant_id = get_current_tenant_id()
-
-        # Get or create workspace (may raise TenantLimitExceeded)
-        try:
-            workspace = await self._pool.get_or_create(tenant_id)
-        except TenantLimitExceeded as e:
-            return Response(
-                status_code=503,
-                content=json.dumps({
-                    "error": "Service overloaded",
-                    "detail": str(e)
-                }),
-                media_type="application/json"
-            )
-
-        # Set workspace in context for quick access
-        workspace_token = current_tenant_workspace.set(workspace)
-        request.state.workspace = workspace
-
-        # Get semaphore for concurrency control
-        semaphore = await self._pool.get_semaphore(tenant_id)
-
-        try:
-            # Limit concurrent requests per tenant
-            async with semaphore:
-                response = await call_next(request)
-                return response
-        finally:
-            current_tenant_workspace.reset(workspace_token)
-```
+> 租户边界定义在 Workspace 实例本身，而不是定义在 router 或某个路径函数里。
 
 ---
 
-## 5. Router Adaptations
+## 4. 磁盘隔离设计
 
-### 5.1 Console Router
+### 4.1 目录结构
 
-**File:** `src/copaw/app/routers/console.py`
+所有租户数据统一落在 `WORKING_DIR` 下的租户子目录中：
 
-```python
-@router.post("/chat")
-async def post_console_chat(
-    request_data: Union[AgentRequest, dict],
-    request: Request,
-) -> StreamingResponse:
-    """Stream agent response with tenant isolation."""
-
-    # Get workspace from context (set by middleware)
-    workspace = request.state.workspace
-
-    # Get tenant/user info from context
-    tenant_id = get_current_tenant_id()
-    user_id = get_current_user_id()
-
-    console_channel = await workspace.channel_manager.get_channel("console")
-    if console_channel is None:
-        raise HTTPException(
-            status_code=503,
-            detail="Channel Console not found",
-        )
-
-    # Build payload with tenant context
-    native_payload = _extract_session_and_payload(request_data)
-
-    # Session ID includes tenant for isolation
-    session_id = f"console:{tenant_id}:{user_id}:{uuid.uuid4().hex[:8]}"
-
-    # Create chat with tenant-scoped session
-    chat = await workspace.chat_manager.get_or_create_chat(
-        session_id=session_id,
-        user_id=user_id,
-        channel_id="console",
-        name=f"Chat-{tenant_id}-{user_id[:8]}",
-    )
-
-    # ... rest of implementation
-```
-
-### 5.2 Cron Router
-
-**File:** `src/copaw/app/routers/cron.py`
-
-```python
-@router.get("/crons")
-async def list_cron_jobs(request: Request) -> list[CronJobView]:
-    """List cron jobs for current tenant only."""
-    workspace = request.state.workspace
-
-    # CronManager is tenant-scoped via Workspace
-    jobs = await workspace.cron_manager.list_jobs()
-
-    # Add state information
-    views = []
-    for job in jobs:
-        state = workspace.cron_manager.get_state(job.id)
-        views.append(CronJobView(spec=job, state=state))
-
-    return views
-
-
-@router.post("/crons")
-async def create_cron_job(
-    request: Request,
-    spec: CronJobSpec,
-) -> dict:
-    """Create cron job for current tenant."""
-    workspace = request.state.workspace
-    tenant_id = get_current_tenant_id()
-
-    # Ensure job is tagged with tenant
-    spec.meta["tenant_id"] = tenant_id
-
-    await workspace.cron_manager.create_or_replace_job(spec)
-    return {"id": spec.id, "status": "created"}
-```
-
----
-
-## 6. Tenant-Aware Components
-
-### 6.1 Token Usage Manager
-
-**File:** `src/copaw/token_usage/tenant_manager.py`
-
-```python
-from pathlib import Path
-from typing import Dict, Optional
-import asyncio
-
-from .manager import TokenManager
-
-
-class TenantTokenManager:
-    """Manages token usage tracking per tenant with isolation."""
-
-    def __init__(self, base_dir: Path):
-        self._base = base_dir
-        self._managers: Dict[str, TokenManager] = {}
-        self._lock = asyncio.Lock()
-
-    async def get_manager(self, tenant_id: str) -> TokenManager:
-        """Get or create token manager for tenant."""
-        async with self._lock:
-            if tenant_id not in self._managers:
-                tenant_dir = self._base / f"tenant-{tenant_id}"
-                tenant_dir.mkdir(parents=True, exist_ok=True)
-
-                self._managers[tenant_id] = TokenManager(
-                    storage_dir=tenant_dir
-                )
-            return self._managers[tenant_id]
-
-    async def record_usage(
-        self,
-        tenant_id: str,
-        model: str,
-        input_tokens: int,
-        output_tokens: int,
-    ) -> None:
-        """Record token usage for tenant."""
-        manager = await self.get_manager(tenant_id)
-        await manager.record_usage(model, input_tokens, output_tokens)
-
-    async def get_usage_stats(
-        self,
-        tenant_id: str,
-        period: str = "day",
-    ) -> dict:
-        """Get token usage stats for tenant."""
-        manager = await self.get_manager(tenant_id)
-        return await manager.get_stats(period)
-
-    async def check_quota(self, tenant_id: str) -> bool:
-        """Check if tenant has exceeded quota."""
-        # TODO: Implement quota checking
-        stats = await self.get_usage_stats(tenant_id)
-        # Compare against tenant-specific limits
-        return True
-```
-
-### 6.2 Tool Guard Configuration
-
-**File:** `src/copaw/security/tenant_tool_guard.py`
-
-```python
-from pathlib import Path
-from typing import Dict, Optional, Any
-import yaml
-
-from .tool_guard import ToolGuard
-
-
-class TenantToolGuard:
-    """Tenant-specific tool guard with custom policies."""
-
-    def __init__(self, base_config_dir: Path):
-        self._base = base_config_dir
-        self._guards: Dict[str, ToolGuard] = {}
-
-    def get_guard(self, tenant_id: str) -> ToolGuard:
-        """Get or load tool guard for tenant."""
-        if tenant_id not in self._guards:
-            config_path = self._get_tenant_config_path(tenant_id)
-
-            if config_path.exists():
-                config = yaml.safe_load(config_path.read_text())
-            else:
-                # Use default config
-                config = self._load_default_config()
-
-            self._guards[tenant_id] = ToolGuard(config)
-
-        return self._guards[tenant_id]
-
-    def _get_tenant_config_path(self, tenant_id: str) -> Path:
-        tenant_dir = self._base / f"tenant-{tenant_id}"
-        return tenant_dir / "tool_guard.yaml"
-
-    def _load_default_config(self) -> dict:
-        """Load default tool guard configuration."""
-        default_path = self._base / "default" / "tool_guard.yaml"
-        if default_path.exists():
-            return yaml.safe_load(default_path.read_text())
-        return {}
-
-    async def check_tool_execution(
-        self,
-        tenant_id: str,
-        tool_name: str,
-        params: dict,
-    ) -> ToolGuardResult:
-        """Check if tool execution is allowed for tenant."""
-        guard = self.get_guard(tenant_id)
-        return await guard.check(tool_name, params)
-```
-
-### 6.3 Screenshot Storage Isolation
-
-**File:** `src/copaw/agents/tools/desktop_screenshot.py`
-
-```python
-from ...config.context import get_current_tenant_id
-from ...constant import get_tenant_working_dir
-
-
-def get_screenshot_storage_path() -> Path:
-    """Get tenant-isolated screenshot storage path."""
-    tenant_id = get_current_tenant_id()
-    tenant_dir = get_tenant_working_dir(tenant_id)
-    screenshot_dir = tenant_dir / "screenshots"
-    screenshot_dir.mkdir(parents=True, exist_ok=True)
-    return screenshot_dir
-
-
-async def desktop_screenshot() -> ToolResponse:
-    """Capture screenshot with tenant isolation."""
-    # ... capture logic ...
-
-    # Store in tenant-specific directory
-    storage_dir = get_screenshot_storage_path()
-    filename = f"screenshot_{datetime.now():%Y%m%d_%H%M%S}.png"
-    filepath = storage_dir / filename
-
-    # ... save screenshot ...
-```
-
----
-
-## 7. Directory Structure
-
-### 7.1 Tenant Directory Layout
-
-```
-~/.copaw/  # or COPAW_WORKING_DIR
-├── default/                          # Default tenant (backward compatible)
-│   ├── config.yaml
+```text
+WORKING_DIR/
+├── default/
 │   ├── config.json
-│   ├── skills/
-│   ├── customized_skills/
-│   ├── memory/
-│   ├── media/
-│   ├── files/
-│   ├── screenshots/
 │   ├── jobs.json
 │   ├── chats.json
-│   ├── token_usage.json
-│   └── tool_guard.yaml
-├── tenant-acme-corp/                 # Tenant: acme-corp
-│   ├── config.yaml
-│   ├── config.json
-│   ├── skills/
-│   ├── customized_skills/
 │   ├── memory/
 │   ├── media/
-│   ├── files/
+│   ├── customized_skills/
+│   ├── custom_channels/
+│   ├── models/
 │   ├── screenshots/
-│   ├── jobs.json
-│   ├── chats.json
-│   ├── token_usage.json
-│   └── tool_guard.yaml
-└── tenant-startup-inc/               # Tenant: startup-inc
-    └── ... (same structure)
+│   ├── files/
+│   └── secrets/
+├── tenant-acme/
+│   └── ...
+└── tenant-foo/
+    └── ...
 ```
 
-### 7.2 Tenant-Aware Path Utilities
+### 4.2 必须 tenant-scoped 的持久化数据
 
-**File:** `src/copaw/config/tenant_paths.py`
+以下内容必须按租户隔离：
+
+- 配置文件
+- cron jobs
+- chats / session 持久化
+- memory 数据
+- media 上传文件
+- 工具输出文件（截图、浏览器快照、导出文件等）
+- customized skills
+- custom channels
+- token usage 数据
+- tool guard 的租户配置
+- tenant 业务密钥 / secret
+- heartbeat 相关文件
+
+### 4.3 共享但不隔离的内容
+
+以下内容继续共享：
+
+- 应用代码 `src/copaw/...`
+- 内置 skills
+- 安全扫描规则
+- 前端静态资源
+- Python 依赖
+- 系统级运行配置
+
+### 4.4 路径访问规则
+
+禁止业务代码直接使用全局路径：
 
 ```python
-from pathlib import Path
-from .constant import WORKING_DIR
-from .context import get_current_tenant_id
-
-
-def get_tenant_working_dir(tenant_id: Optional[str] = None) -> Path:
-    """Get working directory for tenant.
-
-    Args:
-        tenant_id: Tenant ID (defaults to current context)
-
-    Returns:
-        Path to tenant's working directory
-    """
-    if tenant_id is None:
-        tenant_id = get_current_tenant_id()
-
-    if tenant_id == "default":
-        return WORKING_DIR / "default"
-
-    # Sanitize for filesystem safety
-    safe_id = "".join(
-        c for c in tenant_id
-        if c.isalnum() or c in "_-"
-    )
-    return WORKING_DIR / f"tenant-{safe_id}"
-
-
-def get_tenant_config_path(tenant_id: Optional[str] = None) -> Path:
-    """Get config file path for tenant."""
-    return get_tenant_working_dir(tenant_id) / "config.yaml"
-
-
-def get_tenant_memory_dir(tenant_id: Optional[str] = None) -> Path:
-    """Get memory directory for tenant."""
-    return get_tenant_working_dir(tenant_id) / "memory"
-
-
-def get_tenant_media_dir(tenant_id: Optional[str] = None) -> Path:
-    """Get media directory for tenant."""
-    return get_tenant_working_dir(tenant_id) / "media"
-
-
-def get_tenant_jobs_path(tenant_id: Optional[str] = None) -> Path:
-    """Get cron jobs file path for tenant."""
-    return get_tenant_working_dir(tenant_id) / "jobs.json"
+WORKING_DIR / "jobs.json"
+WORKING_DIR / "memory"
+WORKING_DIR / "media"
 ```
+
+统一改为租户感知路径函数，例如：
+
+```python
+get_tenant_working_dir()
+get_tenant_jobs_path()
+get_tenant_memory_dir()
+get_tenant_media_dir()
+get_tenant_config_path()
+```
+
+同时，多租户模式下禁止如下静默 fallback：
+
+```python
+get_current_workspace_dir() or WORKING_DIR
+```
+
+缺少 `workspace` 上下文时应直接报错。
 
 ---
 
-## 8. Migration Strategy
+## 5. 请求级上下文隔离
 
-### 8.1 Backward Compatibility
+### 5.1 contextvars
 
-Existing single-tenant deployments should continue to work:
+在 `src/copaw/config/context.py` 现有 `current_workspace_dir` 基础上新增：
 
-```python
-# src/copaw/config/context.py
+- `current_tenant_id`
+- `current_user_id`
 
-def get_current_tenant_id() -> str:
-    """Get current tenant ID with backward compatibility.
+保留：
 
-    Returns 'default' if not in multi-tenant context.
-    """
-    tenant_id = current_tenant_id.get()
-    if tenant_id is None:
-        # Not in multi-tenant context, use legacy behavior
-        return "default"
-    return tenant_id
-```
+- `current_workspace_dir`
+- `current_recent_max_bytes`
 
-### 8.2 Data Migration
+如继续保留 agent 上下文，则同时保留 `current_agent_id`，但解析顺序改为：
 
-```python
-# migration script
-async def migrate_existing_to_tenant():
-    """Migrate existing default data to tenant-default structure."""
-    source = WORKING_DIR  # Legacy flat structure
-    target = WORKING_DIR / "default"  # New tenant structure
+`tenant -> workspace -> active agent`
 
-    if target.exists():
-        return  # Already migrated
+即 agent 不再是全局命名空间，而是租户内命名空间。
 
-    target.mkdir(parents=True, exist_ok=True)
+### 5.2 HTTP 中间件链
 
-    # Move existing files
-    for item in source.iterdir():
-        if item.name.startswith("tenant-"):
-            continue  # Skip existing tenant directories
-        if item.name == "default":
-            continue  # Skip target itself
+建议拆分为两个职责清晰的 middleware。
 
-        shutil.move(str(item), str(target / item.name))
-```
+#### TenantIdentityMiddleware
 
----
+职责：
 
-## 9. Security Considerations
+- 解析 `X-Tenant-Id`
+- 解析 `X-User-Id`
+- 校验 `tenant_id` 格式
+- 设置 `current_tenant_id/current_user_id`
 
-### 9.1 Tenant Isolation Enforcement
+失败策略：
 
-| Layer | Enforcement Mechanism |
-|-------|----------------------|
-| Filesystem | Path resolution through `get_tenant_working_dir()` |
-| Memory | Separate Workspace instances per tenant |
-| Network | N/A (shared HTTP server) |
-| Database | Separate JSON files per tenant |
-| Process | Same process, context-based isolation |
+- 缺少 `X-Tenant-Id` 时返回 4xx
+- `tenant_id` 非法时返回 4xx
+- 不默认回退到 `default`
 
-### 9.2 Cross-Tenant Attack Prevention
+#### TenantWorkspaceMiddleware
 
-1. **Path Traversal:** Sanitize tenant_id, validate resolved paths
-2. **Resource Exhaustion:** Per-tenant semaphores and limits
-3. **Information Leakage:** Clear context between requests
-4. **Privilege Escalation:** No tenant can access "default" without permission
+职责：
+
+- 从 `app.state.tenant_workspace_pool` 获取当前 tenant workspace
+- 将 workspace 放入 `request.state.workspace`
+- 设置 `current_workspace_dir = workspace.workspace_dir`
+- 在请求结束时恢复 / 清理上下文
+
+要求：
+
+- 默认所有有状态 API 都必须经过该 middleware
+- 未来若存在公开、无状态接口，可显式排除，但不能默许绕过
+
+### 5.3 非 HTTP 执行链
+
+cron、background task、外部 channel callback 不经过 HTTP middleware，因此必须提供统一的上下文恢复入口，例如一个 context manager 或 helper：
+
+- 设置 `current_tenant_id`
+- 设置 `current_workspace_dir`
+- 必要时设置 `current_user_id/current_agent_id`
+- 执行完成后恢复旧上下文
+
+该机制需要在 cron executor、heartbeat、channel webhook 等路径中复用，避免各处重复实现。
 
 ---
 
-## 10. Performance Considerations
+## 6. Workspace 隔离设计
 
-### 10.1 Resource Overhead
+### 6.1 设计原则
 
-| Metric | Single-Tenant | Multi-Tenant |
-|--------|---------------|--------------|
-| Memory | 1x | ~1.5-2x (workspace pool) |
-| Startup | Fast | Slower (lazy init) |
-| Per-request | Minimal | +context switch |
-| Storage | 1x | Nx (per tenant) |
+一个租户对应一个独立 Workspace 实例：
 
-### 10.2 Optimization Strategies
+> tenant -> workspace
 
-1. **Workspace Pooling:** Reuse workspace instances with LRU eviction
-2. **Lazy Loading:** Only create workspace on first tenant access
-3. **Connection Pooling:** Share DB connections where safe
-4. **Caching:** Tenant-scoped caches with TTL
+这与当前 `Workspace` 已经封装 runner、memory manager、channel manager、cron manager、chat manager、task tracker 等运行时组件的事实相契合，是侵入最小且隔离最稳的方案。
 
----
+### 6.2 TenantWorkspacePool
 
-## 11. Testing Strategy
+新增：
 
-### 11.1 Unit Tests
+- `src/copaw/app/workspace/tenant_pool.py`
 
-```python
-# tests/unit/test_tenant_isolation.py
+该组件本质上不是资源池，而是 **tenant -> Workspace 的并发安全注册表 / 缓存层**。
 
-async def test_tenant_workspace_isolation():
-    """Verify workspaces are properly isolated."""
-    pool = TenantWorkspacePool(base_dir=tmp_path)
-    await pool.start()
+第一版职责：
 
-    ws1 = await pool.get_or_create("tenant-1")
-    ws2 = await pool.get_or_create("tenant-2")
+- `get_or_create(tenant_id)`
+- `get(tenant_id)`
+- `remove(tenant_id)`
+- `stop_all()`
+- `mark_access(tenant_id)`
 
-    # Workspaces should be different instances
-    assert ws1 is not ws2
+内部建议维护：
 
-    # Working directories should be different
-    assert ws1.workspace_dir != ws2.workspace_dir
+- `workspaces_by_tenant`
+- `creation_locks_by_tenant`
+- `last_access_by_tenant`
 
-    await pool.stop()
+虽然当前不实现空闲回收，但 `last_access` 应先保留，避免后续接口再次变更。
 
+### 6.3 创建语义
 
-async def test_tenant_context_propagation():
-    """Verify context variables propagate correctly."""
-    token = current_tenant_id.set("test-tenant")
+`get_or_create(tenant_id)` 应执行：
 
-    try:
-        # Simulate async call
-        async def inner():
-            return get_current_tenant_id()
+1. 计算 tenant working dir
+2. 基于该目录构建 tenant-scoped Workspace
+3. 启动 workspace 内部组件并缓存
 
-        result = await inner()
-        assert result == "test-tenant"
-    finally:
-        current_tenant_id.reset(token)
-```
+关键要求：
 
-### 11.2 Integration Tests
+- 同一 tenant 并发请求只能创建一次
+- 创建失败时不得缓存半初始化对象
+- workspace 的启动与停止必须完整对称
 
-```python
-# tests/integrated/test_tenant_api.py
+### 6.4 与现有 MultiAgentManager 的关系
 
-async def test_tenant_api_isolation(client):
-    """Test that API calls respect tenant boundaries."""
+现有 app 初始化主链以 `MultiAgentManager` 为中心，按 `agent_id` 获取 workspace。多租户后需要改为：
 
-    # Create file as tenant-1
-    response = await client.post(
-        "/api/files",
-        headers={"X-Tenant-Id": "tenant-1"},
-        data={"content": "secret"}
-    )
-    file_id = response.json()["id"]
+- **租户是第一层命名空间**
+- **agent 是租户内第二层命名空间**
 
-    # Try to access as tenant-2
-    response = await client.get(
-        f"/api/files/{file_id}",
-        headers={"X-Tenant-Id": "tenant-2"}
-    )
-    assert response.status_code == 404
-```
+推荐方案：
+
+- `TenantWorkspacePool` 持有 tenant runtime
+- tenant runtime 内部管理该租户自己的 agent list / active agent 状态
+
+不建议继续保留“app 全局一个 MultiAgentManager，所有 agent 跨 tenant 共享命名空间”的结构，因为这会直接破坏隔离边界。
+
+### 6.5 app 初始化原则
+
+`src/copaw/app/_app.py` 目前在应用启动时统一启动全部 agent。多租户后建议改为：
+
+- app 启动时仅初始化：
+  - `TenantWorkspacePool`
+  - provider / local model 等真正全局共享组件
+- tenant workspace 按需懒创建
+- app shutdown 时统一执行 `tenant_workspace_pool.stop_all()`
+
+这样更符合多租户模型，也避免启动阶段预热不存在的 tenant。
 
 ---
 
-## 12. Deployment Configuration
+## 7. Router 与接口隔离设计
 
-### 12.1 Environment Variables
+总原则：
 
-| Variable | Description | Default |
-|----------|-------------|---------|
-| `COPAW_MULTI_TENANT` | Enable multi-tenant mode | `false` |
-| `COPAW_MAX_TENANTS` | Maximum concurrent tenants | `100` |
-| `COPAW_TENANT_IDLE_TIMEOUT` | Minutes before eviction | `60` |
-| `COPAW_MAX_CONCURRENT_PER_TENANT` | Max concurrent requests | `10` |
+- router 不直接拼 tenant 路径
+- router 不直接读取全局 `WORKING_DIR`
+- router 统一从 `request.state.workspace` 获取运行时对象
+- 所有有状态接口都必须先绑定 tenant workspace，再做业务处理
 
-### 12.2 Feature Flag
+### 7.1 Console Chat
 
-```python
-# src/copaw/config/constant.py
+当前 `src/copaw/app/routers/console.py` 已通过 `get_agent_for_request(request)` 取 workspace，但需要改为 tenant 优先语义。
 
-MULTI_TENANT_ENABLED = EnvVarLoader.get_bool(
-    "COPAW_MULTI_TENANT",
-    False
-)
+设计要求：
+
+- `request.state.workspace` 成为唯一来源
+- 如保留 agent 选择，则只在当前 tenant workspace 内解析 agent
+- `session_id` 必须带租户边界，最少为：
+
+```text
+console:<tenant_id>:<user_id>
 ```
+
+- `chat_manager` 必须是 tenant workspace 内实例
+- reconnect / stop 只能作用于当前 tenant 的 `workspace.task_tracker`
+
+效果：
+
+- tenant A 无法 attach tenant B 的 chat
+- tenant A 无法 stop tenant B 的任务
+- chats.json 自然落在各自 tenant 目录
+
+### 7.2 Console Upload
+
+`ConsoleChannel` 初始化时绑定 tenant workspace_dir，采用：
+
+- `media_dir = tenant_workspace_dir / "media"`
+
+这样上传链路天然隔离，无需 router 自己再理解 tenant。
+
+### 7.3 Push Messages
+
+当前 `console_push_store` 是进程级全局列表，且 `GET /console/push-messages` 在未提供 `session_id` 时会返回所有 recent messages。这是明确的跨租户泄露风险。
+
+设计要求：
+
+- push message 主键至少包含：
+  - `tenant_id`
+  - `session_id`
+- 读取时只允许返回“当前 tenant + 当前 session”的消息
+- 禁止暴露全局 `get_recent()` 语义
+- 若前端确实需要 recent，也必须是 tenant-scoped recent
+
+更稳妥的接口收敛方式：
+
+- `session_id` 必填
+- 接口仅返回当前 tenant 下该 session 的消息
+
+### 7.4 Settings
+
+`src/copaw/app/routers/settings.py` 的读取与保存必须只作用于当前 tenant config。
+
+要求：
+
+- tenant A 的模型配置、渠道配置、UI 设置，对 tenant B 完全不可见
+
+### 7.5 Agents
+
+`src/copaw/app/routers/agents.py` 需改为 **tenant 内 agent 命名空间**。
+
+要求：
+
+- agent list 是 tenant 内的
+- active_agent 是 tenant 内的
+- `X-Agent-Id` 只在当前 tenant 下解析
+- agent config 路径基于 tenant config path
+
+解析顺序应为：
+
+`current_tenant -> tenant config -> tenant agents -> active/current agent`
+
+### 7.6 Workspace / Files / Status
+
+`src/copaw/app/routers/workspace.py` 以及任何返回文件列表、运行状态、存储占用的接口，都只能返回当前 tenant workspace 视图。
+
+禁止：
+
+- 全局工作目录浏览
+- 全局文件统计
+- 跨 tenant 的存储占用聚合
+
+若未来需要管理员视角，应设计成完全独立的管理员接口和权限模型。
 
 ---
 
-## 13. Summary
+## 8. Cron 与异步执行链
 
-This design provides comprehensive multi-tenant isolation through:
+### 8.1 租户内独立 CronManager
 
-1. **Workspace Pool Pattern:** Each tenant gets independent Workspace instance
-2. **Context-Based Routing:** `contextvars` propagate tenant identity
-3. **Path Isolation:** All file operations use tenant-scoped directories
-4. **Resource Management:** Per-tenant limits with LRU eviction
-5. **Backward Compatibility:** Existing deployments work without changes
+`src/copaw/app/crons/manager.py` 当前是 agent 维度。多租户后必须改为 tenant workspace 内独立 `CronManager`，并在初始化时绑定：
 
-The design balances isolation strength with resource efficiency, allowing CoPaw to serve multiple users from a single instance while maintaining security boundaries.
+- tenant workspace_dir
+- tenant channel_manager
+- tenant runner / active agent resolver
+
+### 8.2 jobs.json 与 job 元数据
+
+要求：
+
+- `jobs.json` 位于 `tenant_workspace_dir / "jobs.json"`
+- `CronJobSpec.meta["tenant_id"] = tenant_id`
+
+虽然 tenant 理论上可从 workspace 推导，但冗余记录能提高调试、导出、恢复上下文时的可靠性。
+
+### 8.3 执行前恢复上下文
+
+cron 不经过 HTTP middleware，因此在 `executor.py` 真正执行任务前，必须显式恢复：
+
+- `current_tenant_id`
+- `current_workspace_dir`
+- 必要时 `current_agent_id`
+
+否则 file tool、shell、memory、config 等能力可能误落到共享目录。
+
+### 8.4 Heartbeat
+
+heartbeat 也必须 tenant-scoped：
+
+- 每个 tenant workspace 自己决定是否启用 heartbeat
+- heartbeat 文件写到 tenant working dir
+- dispatch target、配置读取、执行上下文都绑定 tenant
+
+不能再有全局 heartbeat 文件或全局 heartbeat 运行语义。
+
+### 8.5 Background Task / Reconnect / Stop
+
+`task_tracker` 必须始终作为 `workspace.task_tracker` 使用，不能再有全局共享 tracker。
+
+这样才能保证：
+
+- tenant A 的 attach / reconnect / stop 只作用于 tenant A
+- tenant B 无法影响 tenant A 的后台执行链
+
+---
+
+## 9. 配置、Secrets、Memory、工具输出隔离
+
+### 9.1 Config 分层
+
+`src/copaw/config/utils.py` 当前仍围绕全局 `WORKING_DIR` 展开。多租户后应拆分为两层：
+
+#### 系统级配置
+
+只保留真正系统级内容：
+
+- 服务监听参数
+- 日志级别
+- 运行模式
+- 全局 provider 能力开关
+
+#### 租户级配置
+
+全部迁移到 tenant working dir，包括：
+
+- config.json
+- chats.json
+- jobs.json
+- agent config
+- heartbeat / last_api / last_dispatch
+- token usage
+- tool guard tenant config
+
+因此，`get_config_path()` 一类的全局默认入口不能再作为业务路径默认值。
+
+### 9.2 Secrets / Envs
+
+必须区分两类配置：
+
+#### 系统 env
+
+继续来自真实环境变量，用于服务进程本身运行。
+
+#### tenant secrets
+
+必须存入 tenant secret store，例如：
+
+- tenant secret file
+- 或 tenant config 下的专门 secrets 区域
+
+使用规则：
+
+- router / API 读写的是 tenant secret store
+- provider / channel 初始化时从 tenant workspace 加载
+- 不写回全局 `os.environ`
+
+这样才能保证 tenant A 与 tenant B 的 API key、token、provider 配置互不可见。
+
+### 9.3 Memory
+
+Memory 必须 tenant-scoped，但隔离应主要在 workspace 层完成，而不是在 memory 层显式引入 tenant 语义。
+
+设计原则：
+
+- memory manager 继续只理解 `working_dir`
+- `working_dir` 必须是 tenant workspace_dir
+- memory 相关文件、索引、摘要产物都从 tenant workspace_dir 派生
+- memory 依赖的 config / agent config 读取接口也必须先 tenant-scoped
+
+这意味着：
+
+- `memory/` 目录天然位于 `tenant_workspace_dir / "memory"`
+- ReMeLight 的底层 file store / index / watcher 也应随 tenant working_dir 隔离
+- memory summary 中触发的文件工具必须运行在当前 tenant workspace context 下
+
+特别要求：
+
+- 不要求 memory 模块到处显式传递 `tenant_id`
+- 但必须保证创建 `MemoryManager` 时传入的是 tenant workspace_dir
+- `load_agent_config()` 一类依赖接口不能再按全局 agent 命名空间解析，否则会导致 memory 读取错误配置或把异常产物写到错误目录
+- 若 `load_config()` 中存在租户级设置（例如 user timezone），则该读取也必须改为 tenant-scoped；若属于系统级设置，则可继续全局共享
+
+因此，本方案对 memory 的改造重点不是重写 memory 模块，而是保证：
+
+1. memory manager 绑定到正确的 tenant workspace_dir
+2. memory 运行时恢复了正确的 workspace context
+3. memory 依赖的 agent/config 读取链路已经 tenant-scoped
+
+只要这三条成立，memory 基本可以在低侵入前提下完成可靠隔离。
+
+### 9.4 工具输出目录
+
+截图、浏览器快照、导出文件、临时附件等都必须统一从 tenant workspace_dir 派生，例如：
+
+- `screenshots/`
+- `files/`
+- `browser-artifacts/`
+- `exports/`
+
+关键约束：
+
+- 所有工具输出都必须从当前 workspace_dir 推导
+- 不得 fallback 到全局 `WORKING_DIR`
+
+---
+
+## 10. 非 HTTP 入口隔离
+
+外部 IM / channel webhook 不一定带 `X-Tenant-Id`，因此租户来源必须改为：
+
+- 根据该 channel 配置属于哪个 tenant workspace
+- 事件进入后先绑定对应 tenant workspace
+- 再进入 runner / task / memory / file 相关逻辑
+
+即：
+
+- HTTP 入口按 header 定 tenant
+- 外部 channel 入口按 workspace 归属定 tenant
+- 最终都在“绑定当前 workspace 上下文”这一层汇合
+
+---
+
+## 11. 实施顺序
+
+建议按 4 个阶段实施，每个阶段都能独立验证隔离是否成立。
+
+### 第一阶段：建立租户主链路
+
+改动范围：
+
+- `config/context.py`
+- tenant middleware
+- `TenantWorkspacePool`
+- app 初始化入口
+- `request.state.workspace` 打通
+
+阶段目标：
+
+- 有状态 HTTP 请求必须带合法 `X-Tenant-Id`
+- 当前请求能够稳定获得 tenant workspace
+- `current_workspace_dir` 来自 tenant workspace，而不是全局目录
+
+### 第二阶段：打通核心交互接口
+
+优先顺序：
+
+1. `routers/console.py`
+2. `console_push_store.py`
+3. `routers/settings.py`
+4. `routers/agents.py`
+5. `routers/workspace.py`
+
+目的：先封住最容易直接串租户的用户可见入口。
+
+### 第三阶段：打通异步链路
+
+范围：
+
+- `app/crons/*`
+- heartbeat
+- background task / reconnect / stop
+- 外部 channel callback 的 tenant 绑定逻辑
+
+目的：封住“不走 HTTP 但仍会落盘 / 发消息”的路径。
+
+### 第四阶段：收紧配置与文件边界
+
+范围：
+
+- `config/utils.py`
+- tenant path helpers
+- secret / envs 存储
+- uploads / screenshots / browser artifacts / exports
+- customized_skills / custom_channels
+- token usage / tool guard tenant config
+
+目的：彻底清理所有仍可能偷偷走全局路径的能力。
+
+---
+
+## 12. 风险清单
+
+以下问题必须专项检查：
+
+### 12.1 全局内存态泄露
+
+重点检查：
+
+- `console_push_store`
+- 全局缓存
+- 全局 tracker / manager 单例
+- 任何 module-level dict / list
+
+判断标准：
+
+- key 是否显式带 tenant
+- 或该状态是否已被收进 tenant workspace
+
+### 12.2 静默 fallback
+
+重点检查：
+
+- `get_current_workspace_dir() or WORKING_DIR`
+- `load_config()` 默认全局路径
+- agent / config / job / chat 的默认读取路径
+
+在强隔离模式下，这些都应视为漏洞入口。
+
+### 12.3 agent 与 tenant 命名空间混用
+
+重点检查：
+
+- active_agent 是否全局共享
+- `X-Agent-Id` 是否跨 tenant 可见
+- agent config 是否仍写到全局位置
+
+### 12.4 异步上下文丢失
+
+重点检查：
+
+- cron callback
+- background task
+- stream reconnect
+- webhook handler
+- heartbeat task
+
+只要执行流可能脱离原始请求，就必须显式恢复 tenant / workspace context。
+
+### 12.5 磁盘目录遗漏
+
+重点检查：
+
+- `jobs.json`
+- `chats.json`
+- `memory/`
+- `media/`
+- `customized_skills/`
+- `custom_channels/`
+- `screenshots/`
+- `files/`
+- heartbeat 相关文件
+- token usage
+- tenant secrets
+
+只要其中任意一项仍落在全局目录，多租户隔离就没有闭环。
+
+---
+
+## 13. 验收标准
+
+验收标准应写成可验证断言，而不是泛泛描述。
+
+### 13.1 请求隔离
+
+- 不带 `X-Tenant-Id` 的有状态请求返回 4xx
+- tenant A 请求不能读取 tenant B 的聊天、配置、任务、文件
+- 同一用户在不同 tenant 下的 session_id 不冲突
+
+### 13.2 磁盘隔离
+
+- tenant A / B 分别产生独立的 `config.json`、`jobs.json`、`chats.json`
+- 上传、截图、导出文件落在各自 tenant 目录
+- 不再出现新的共享全局业务数据文件
+
+### 13.3 运行时隔离
+
+- tenant A 的 `task_tracker` 无法 stop / attach tenant B 的任务
+- tenant A 的 cron 不会向 tenant B 的 console / session 推消息
+- tenant A 切换 active agent 不影响 tenant B
+
+### 13.4 上下文正确性
+
+- HTTP 请求中工具相对路径解析到当前 tenant workspace
+- cron / heartbeat / webhook 中工具相对路径同样解析到正确 tenant workspace
+- 缺失 workspace context 时直接报错，而不是回退到全局目录
+
+### 13.5 单租户回归兼容
+
+单租户场景下，统一以 `tenant_id=default` 运行：
+
+- 原有能力仍可正常工作
+- 但底层不保留旧的“全局业务目录”语义
+- 单租户只是多租户架构下的 `default tenant`
+
+---
+
+## 14. 最终结论
+
+本方案的最终架构结论是：
+
+> 把 tenant 作为顶层运行时边界，把 Workspace 作为唯一隔离容器，把 workspace_dir 作为所有持久化与工具执行的唯一落点。
+
+该方案的优势：
+
+- 架构主线清晰
+- 与现有 Workspace 模型高度契合
+- 对 memory / file tool / shell 等底层能力侵入最小
+- 能建立“强隔离默认正确”的结构约束
+- 为未来 idle cleanup、tenant quota、workspace eviction 保留扩展位
