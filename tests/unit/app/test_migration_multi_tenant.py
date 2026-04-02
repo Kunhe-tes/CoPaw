@@ -7,12 +7,19 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent.parent.parent / "src"))
 
+import copaw.app.migration as migration_module
+import copaw.constant as constant_module
 from copaw.agents.skills_manager import ensure_skill_pool_initialized
 from copaw.app.migration import ensure_default_agent_exists, ensure_qa_agent_exists
 
 
-def test_ensure_default_agent_exists_uses_tenant_working_dir(tmp_path):
+def test_ensure_default_agent_exists_uses_tenant_working_dir(
+    tmp_path,
+    monkeypatch,
+):
     tenant_dir = tmp_path / "tenant-alpha"
+    global_dir = tmp_path / "global-default"
+    monkeypatch.setattr(migration_module, "WORKING_DIR", global_dir)
 
     ensure_default_agent_exists(working_dir=tenant_dir)
 
@@ -29,9 +36,14 @@ def test_ensure_default_agent_exists_uses_tenant_working_dir(tmp_path):
     default_profile = profiles.get("default") or {}
     assert default_profile.get("workspace_dir") == str(default_workspace)
 
+    assert not (global_dir / "config.json").exists()
+    assert not (global_dir / "workspaces").exists()
 
-def test_ensure_qa_agent_exists_uses_tenant_working_dir(tmp_path):
+
+def test_ensure_qa_agent_exists_uses_tenant_working_dir(tmp_path, monkeypatch):
     tenant_dir = tmp_path / "tenant-bravo"
+    global_dir = tmp_path / "global-default"
+    monkeypatch.setattr(migration_module, "WORKING_DIR", global_dir)
 
     ensure_qa_agent_exists(working_dir=tenant_dir)
 
@@ -48,11 +60,20 @@ def test_ensure_qa_agent_exists_uses_tenant_working_dir(tmp_path):
     qa_profile = profiles.get("qa") or {}
     assert qa_profile.get("workspace_dir") == str(qa_workspace)
 
+    assert not (global_dir / "config.json").exists()
+    assert not (global_dir / "workspaces").exists()
 
-def test_ensure_skill_pool_initialized_uses_tenant_working_dir(tmp_path):
+
+def test_ensure_skill_pool_initialized_uses_tenant_working_dir(
+    tmp_path,
+    monkeypatch,
+):
     tenant_dir = tmp_path / "tenant-charlie"
+    global_dir = tmp_path / "global-default"
+    monkeypatch.setattr(constant_module, "WORKING_DIR", global_dir)
 
     created = ensure_skill_pool_initialized(working_dir=tenant_dir)
 
     assert (tenant_dir / "skill_pool").is_dir()
     assert created in (True, False)
+    assert not (global_dir / "skill_pool").exists()
