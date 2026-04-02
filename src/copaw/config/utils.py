@@ -628,3 +628,151 @@ def get_jobs_path() -> Path:
 def get_chats_path() -> Path:
     """Return chats.json path."""
     return (WORKING_DIR / CHATS_FILE).expanduser()
+
+
+# =============================================================================
+# Tenant-aware path helpers
+# =============================================================================
+
+from .context import get_current_tenant_id, TenantContextError
+
+
+def get_tenant_working_dir(tenant_id: str | None = None) -> Path:
+    """Get tenant-specific working directory.
+
+    Args:
+        tenant_id: Tenant ID. If None, uses current tenant from context
+            or falls back to global WORKING_DIR.
+
+    Returns:
+        Path to tenant working directory.
+    """
+    if tenant_id is None:
+        tenant_id = get_current_tenant_id()
+
+    if tenant_id:
+        return WORKING_DIR / tenant_id
+
+    return WORKING_DIR
+
+
+def get_tenant_config_path(tenant_id: str | None = None) -> Path:
+    """Get tenant-specific config.json path.
+
+    Args:
+        tenant_id: Tenant ID. If None, uses current tenant from context.
+
+    Returns:
+        Path to tenant config.json.
+    """
+    return get_tenant_working_dir(tenant_id) / "config.json"
+
+
+def get_tenant_jobs_path(tenant_id: str | None = None) -> Path:
+    """Get tenant-specific jobs.json path.
+
+    Args:
+        tenant_id: Tenant ID. If None, uses current tenant from context.
+
+    Returns:
+        Path to tenant jobs.json.
+    """
+    return get_tenant_working_dir(tenant_id) / JOBS_FILE
+
+
+def get_tenant_chats_path(tenant_id: str | None = None) -> Path:
+    """Get tenant-specific chats.json path.
+
+    Args:
+        tenant_id: Tenant ID. If None, uses current tenant from context.
+
+    Returns:
+        Path to tenant chats.json.
+    """
+    return get_tenant_working_dir(tenant_id) / CHATS_FILE
+
+
+def get_tenant_memory_dir(tenant_id: str | None = None) -> Path:
+    """Get tenant-specific memory directory.
+
+    Args:
+        tenant_id: Tenant ID. If None, uses current tenant from context.
+
+    Returns:
+        Path to tenant memory directory.
+    """
+    return get_tenant_working_dir(tenant_id) / "memory"
+
+
+def get_tenant_media_dir(tenant_id: str | None = None) -> Path:
+    """Get tenant-specific media directory.
+
+    Args:
+        tenant_id: Tenant ID. If None, uses current tenant from context.
+
+    Returns:
+        Path to tenant media directory.
+    """
+    return get_tenant_working_dir(tenant_id) / "media"
+
+
+def get_tenant_secrets_dir(tenant_id: str | None = None) -> Path:
+    """Get tenant-specific secrets directory.
+
+    Args:
+        tenant_id: Tenant ID. If None, uses current tenant from context.
+
+    Returns:
+        Path to tenant secrets directory.
+    """
+    return get_tenant_working_dir(tenant_id) / ".secret"
+
+
+def get_tenant_heartbeat_path(tenant_id: str | None = None) -> Path:
+    """Get tenant-specific HEARTBEAT.md path.
+
+    Args:
+        tenant_id: Tenant ID. If None, uses current tenant from context.
+
+    Returns:
+        Path to tenant HEARTBEAT.md.
+    """
+    return get_tenant_working_dir(tenant_id) / HEARTBEAT_FILE
+
+
+def get_tenant_working_dir_strict(tenant_id: str | None = None) -> Path:
+    """Get tenant working directory, raising if tenant context unavailable.
+
+    Args:
+        tenant_id: Tenant ID. If None, requires current tenant from context.
+
+    Returns:
+        Path to tenant working directory.
+
+    Raises:
+        TenantContextError: If tenant_id is None and no tenant in context.
+    """
+    if tenant_id is None:
+        tenant_id = get_current_tenant_id()
+        if tenant_id is None:
+            raise TenantContextError(
+                "Tenant context required. "
+                "Ensure this code runs within a tenant-scoped request or context."
+            )
+
+    return WORKING_DIR / tenant_id
+
+
+def get_tenant_config_path_strict(tenant_id: str | None = None) -> Path:
+    """Get tenant config path, raising if tenant context unavailable.
+
+    Args:
+        tenant_id: Tenant ID. If None, requires current tenant from context.
+
+    Returns:
+        Path to tenant config.json.
+
+    Raises:
+        TenantContextError: If tenant_id is None and no tenant in context.
+    """
+    return get_tenant_working_dir_strict(tenant_id) / "config.json"
