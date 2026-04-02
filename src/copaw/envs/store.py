@@ -184,6 +184,7 @@ def save_envs(
     path: Optional[Path] = None,
 ) -> None:
     """Write env vars to envs.json and sync to ``os.environ``."""
+    sync_process_env = path is None
     if path is None:
         path = get_envs_json_path()
         _migrate_legacy_envs_json(path)
@@ -197,7 +198,8 @@ def save_envs(
         json.dump(envs, fh, indent=2, ensure_ascii=False)
     _chmod_best_effort(path, 0o600)
 
-    _sync_environ(old, envs)
+    if sync_process_env:
+        _sync_environ(old, envs)
 
 
 def set_env_var(

@@ -116,6 +116,12 @@ def _in_active_hours(active_hours: Any) -> bool:
     return now >= start_t or now <= end_t
 
 
+def resolve_heartbeat_path(workspace_dir: Optional[Path] = None) -> Path:
+    if workspace_dir is not None:
+        return Path(workspace_dir) / HEARTBEAT_FILE
+    return get_heartbeat_query_path()
+
+
 async def run_heartbeat_once(
     *,
     runner: Any,
@@ -140,11 +146,7 @@ async def run_heartbeat_once(
         logger.debug("heartbeat skipped: outside active hours")
         return
 
-    # Use workspace_dir if provided, otherwise fall back to global path
-    if workspace_dir:
-        path = Path(workspace_dir) / HEARTBEAT_FILE
-    else:
-        path = get_heartbeat_query_path()
+    path = resolve_heartbeat_path(workspace_dir)
 
     if not path.is_file():
         logger.debug("heartbeat skipped: no file at %s", path)

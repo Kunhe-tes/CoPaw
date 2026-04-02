@@ -4,13 +4,86 @@
 Tests valid/missing/invalid tenant ID handling, exempt endpoints,
 and context binding behavior.
 """
+import importlib.util
 import sys
+import types
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent.parent.parent / "src"))
 
 import pytest
+from fastapi import FastAPI
+from fastapi.testclient import TestClient
 from unittest.mock import Mock, AsyncMock
+
+_CONTEXT_FILE = Path(__file__).parent.parent.parent.parent / "src" / "copaw" / "config" / "context.py"
+_context_spec = importlib.util.spec_from_file_location(
+    "copaw.config.context",
+    _CONTEXT_FILE,
+)
+context_module = importlib.util.module_from_spec(_context_spec)
+sys.modules["copaw.config.context"] = context_module
+assert _context_spec is not None and _context_spec.loader is not None
+_context_spec.loader.exec_module(context_module)
+
+_MIDDLEWARE_FILE = Path(__file__).parent.parent.parent.parent / "src" / "copaw" / "app" / "middleware" / "tenant_identity.py"
+_PACKAGE_PATH = str(_MIDDLEWARE_FILE.parent)
+if "copaw.app.middleware" not in sys.modules:
+    middleware_pkg = types.ModuleType("copaw.app.middleware")
+    middleware_pkg.__path__ = [_PACKAGE_PATH]
+    sys.modules["copaw.app.middleware"] = middleware_pkg
+
+_middleware_spec = importlib.util.spec_from_file_location(
+    "copaw.app.middleware.tenant_identity",
+    _MIDDLEWARE_FILE,
+)
+tenant_identity = importlib.util.module_from_spec(_middleware_spec)
+sys.modules["copaw.app.middleware.tenant_identity"] = tenant_identity
+assert _middleware_spec is not None and _middleware_spec.loader is not None
+_middleware_spec.loader.exec_module(tenant_identity)
+
+
+
+def build_test_app():
+    app = FastAPI()
+    app.add_middleware(
+        tenant_identity.TenantIdentityMiddleware,
+        require_tenant=True,
+        default_tenant_id=None,
+    )
+
+    @app.get("/api/settings")
+    def stateful_route():
+        return {"ok": True}
+
+    @app.get("/api/version")
+    def exempt_route():
+        return {"version": "test"}
+
+    return app
+
+
+def test_missing_tenant_header_returns_400_for_stateful_route():
+    client = TestClient(build_test_app(), raise_server_exceptions=False)
+    response = client.get("/api/settings")
+    assert response.status_code == 400
+    assert response.json()["detail"] == "X-Tenant-Id header is required"
+
+
+def test_exempt_route_still_works_without_tenant_header():
+    client = TestClient(build_test_app(), raise_server_exceptions=False)
+    response = client.get("/api/version")
+    assert response.status_code == 200
+
+
+def test_invalid_tenant_id_returns_400():
+    client = TestClient(build_test_app(), raise_server_exceptions=False)
+    response = client.get(
+        "/api/settings",
+        headers={"X-Tenant-Id": "../bad"},
+    )
+    assert response.status_code == 400
+    assert response.json()["detail"] == "Invalid X-Tenant-Id format"
 
 
 class TestTenantIdentityExemptions:

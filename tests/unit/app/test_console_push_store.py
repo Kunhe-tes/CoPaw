@@ -3,6 +3,8 @@
 
 Tests that messages are isolated by tenant and do not leak across tenants.
 """
+import asyncio
+import importlib.util
 import sys
 from pathlib import Path
 
@@ -10,9 +12,35 @@ sys.path.insert(0, str(Path(__file__).parent.parent.parent.parent / "src"))
 
 import pytest
 
+SRC_ROOT = Path(__file__).parent.parent.parent.parent / "src"
+_STORE_FILE = SRC_ROOT / "copaw" / "app" / "console_push_store.py"
+
+store_spec = importlib.util.spec_from_file_location(
+    "tenant_test_console_push_store",
+    _STORE_FILE,
+)
+console_push_store = importlib.util.module_from_spec(store_spec)
+assert store_spec is not None and store_spec.loader is not None
+store_spec.loader.exec_module(console_push_store)
+
 
 class TestTenantPushStoreIsolation:
     """Tests for tenant isolation in push store."""
+
+    def test_messages_do_not_leak_across_sessions_within_same_tenant(self):
+        append = console_push_store.append
+        clear_tenant = console_push_store.clear_tenant
+        take = console_push_store.take
+
+        async def scenario():
+            await clear_tenant("tenant-a")
+            await append("session-a", "msg-a", tenant_id="tenant-a")
+            await append("session-b", "msg-b", tenant_id="tenant-a")
+            return await take("session-a", tenant_id="tenant-a")
+
+        taken = asyncio.run(scenario())
+
+        assert [m["text"] for m in taken] == ["msg-a"]
 
     @pytest.mark.skip(reason="Requires full app dependencies")
     async def test_append_creates_tenant_isolated_message(self):

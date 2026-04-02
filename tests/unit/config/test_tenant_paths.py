@@ -4,12 +4,51 @@
 Tests tenant-aware path computation and strict failure when
 tenant/workspace context is absent.
 """
+import importlib.util
 import sys
+import types
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent.parent.parent / "src"))
 
 import pytest
+
+SRC_ROOT = Path(__file__).parent.parent.parent.parent / "src"
+_CONTEXT_FILE = SRC_ROOT / "copaw" / "config" / "context.py"
+_UTILS_FILE = SRC_ROOT / "copaw" / "config" / "utils.py"
+
+config_stub = types.ModuleType("copaw.config.config")
+config_stub.Config = object
+config_stub.HeartbeatConfig = object
+config_stub.LastApiConfig = object
+config_stub.LastDispatchConfig = object
+config_stub.load_agent_config = lambda *args, **kwargs: None
+config_stub.save_agent_config = lambda *args, **kwargs: None
+sys.modules["copaw.config.config"] = config_stub
+
+
+context_spec = importlib.util.spec_from_file_location(
+    "copaw.config.context",
+    _CONTEXT_FILE,
+)
+context_module = importlib.util.module_from_spec(context_spec)
+sys.modules["copaw.config.context"] = context_module
+assert context_spec is not None and context_spec.loader is not None
+context_spec.loader.exec_module(context_module)
+
+utils_spec = importlib.util.spec_from_file_location(
+    "copaw.config.utils",
+    _UTILS_FILE,
+)
+utils_module = importlib.util.module_from_spec(utils_spec)
+sys.modules["copaw.config.utils"] = utils_module
+assert utils_spec is not None and utils_spec.loader is not None
+utils_spec.loader.exec_module(utils_module)
+
+TenantContextError = context_module.TenantContextError
+get_tenant_working_dir_strict = utils_module.get_tenant_working_dir_strict
+get_tenant_config_path_strict = utils_module.get_tenant_config_path_strict
+WORKING_DIR = utils_module.WORKING_DIR
 
 
 class TestTenantPathHelpers:
@@ -101,14 +140,17 @@ class TestTenantPathHelpers:
 class TestTenantPathStrictHelpers:
     """Tests for strict tenant path helpers."""
 
-    @pytest.mark.skip(reason="Requires full app dependencies")
-    def test_get_tenant_working_dir_strict_raises_without_context(self):
-        """get_tenant_working_dir_strict raises when no tenant context."""
-        from copaw.config.utils import get_tenant_working_dir_strict
-        from copaw.config.context import TenantContextError
-
+    def test_get_tenant_working_dir_strict_raises_without_tenant_context(self):
         with pytest.raises(TenantContextError):
             get_tenant_working_dir_strict()
+
+    def test_get_tenant_config_path_strict_uses_explicit_tenant(self):
+        path = get_tenant_config_path_strict("tenant-a")
+        assert path == WORKING_DIR / "tenant-a" / "config.json"
+
+    def test_tenant_sensitive_helper_call_does_not_fallback_to_global_path(self):
+        with pytest.raises(TenantContextError):
+            get_tenant_working_dir_strict(None)
 
     @pytest.mark.skip(reason="Requires full app dependencies")
     def test_get_tenant_working_dir_strict_with_tenant_id(self):

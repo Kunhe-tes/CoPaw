@@ -293,7 +293,7 @@ app = FastAPI(
 )
 
 # Add tenant identity middleware first (extracts tenant/user from headers)
-app.add_middleware(TenantIdentityMiddleware)
+app.add_middleware(TenantIdentityMiddleware, default_tenant_id=None)
 
 # Add tenant workspace middleware second (loads workspace from pool)
 app.add_middleware(TenantWorkspaceMiddleware)

@@ -10,7 +10,7 @@ from typing import Callable, Awaitable
 
 from fastapi import Request, HTTPException
 from starlette.middleware.base import BaseHTTPMiddleware
-from starlette.responses import Response
+from starlette.responses import Response, JSONResponse
 from starlette.types import ASGIApp
 
 from copaw.config.context import (
@@ -93,7 +93,7 @@ the tenant/user context for the duration of the request. Stateful
         self,
         app: ASGIApp,
         require_tenant: bool = True,
-        default_tenant_id: str | None = "default",
+        default_tenant_id: str | None = None,
     ):
         """Initialize tenant identity middleware.
 
@@ -142,23 +142,14 @@ the tenant/user context for the duration of the request. Stateful
             if not is_exempt:
                 if not tenant_id:
                     if self._require_tenant:
-                        if self._default_tenant_id:
-                            # Use default tenant for backward compatibility
-                            tenant_id = self._default_tenant_id
-                            logger.debug(
-                                f"Using default tenant '{tenant_id}' for {path}",
-                            )
-                        else:
-                            logger.warning(
-                                f"Missing X-Tenant-Id header for {path}",
-                            )
-                            raise HTTPException(
-                                status_code=400,
-                                detail="X-Tenant-Id header is required",
-                            )
-                    else:
-                        # Tenant not required, use default
-                        tenant_id = self._default_tenant_id
+                        logger.warning(
+                            f"Missing X-Tenant-Id header for {path}",
+                        )
+                        raise HTTPException(
+                            status_code=400,
+                            detail="X-Tenant-Id header is required",
+                        )
+                    tenant_id = self._default_tenant_id
 
                 # Validate tenant ID format (basic validation)
                 if tenant_id and not self._is_valid_tenant_id(tenant_id):
@@ -193,6 +184,11 @@ the tenant/user context for the duration of the request. Stateful
                 response.headers["X-Tenant-Id-Resolved"] = tenant_id
 
             return response
+        except HTTPException as exc:
+            return JSONResponse(
+                status_code=exc.status_code,
+                content={"detail": exc.detail},
+            )
 
         finally:
             # Reset context variables (in reverse order)

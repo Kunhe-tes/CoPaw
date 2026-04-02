@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from pathlib import Path
 from typing import Any, Dict
 
 from .models import CronJobSpec
@@ -28,6 +29,10 @@ class CronExecutor:
         target_user_id = job.dispatch.target.user_id
         target_session_id = job.dispatch.target.session_id
         dispatch_meta: Dict[str, Any] = dict(job.dispatch.meta or {})
+        workspace_dir_value = dispatch_meta.get("workspace_dir")
+        workspace_dir = None
+        if workspace_dir_value:
+            workspace_dir = Path(workspace_dir_value)
 
         # Extract tenant_id from job spec (added for tenant isolation)
         tenant_id = getattr(job, 'tenant_id', None)
@@ -49,6 +54,7 @@ class CronExecutor:
         with bind_tenant_context(
             tenant_id=tenant_id,
             user_id=target_user_id,
+            workspace_dir=workspace_dir,
         ):
             await self._execute_job(job, target_user_id, target_session_id, dispatch_meta)
 

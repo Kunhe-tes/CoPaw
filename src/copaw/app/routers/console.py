@@ -204,19 +204,17 @@ async def post_console_upload(
 @router.get("/push-messages")
 async def get_push_messages(
     request: Request,
-    session_id: str | None = Query(None, description="Optional session id"),
+    session_id: str | None = Query(None, description="Session id"),
 ):
-    """
-    Return pending push messages for current tenant. Without session_id:
-    recent messages (all sessions, last 60s), not consumed so every tab sees them.
-    """
-    from ..console_push_store import get_recent, take
+    """Return pending push messages for the current tenant session."""
+    from ..console_push_store import take
 
-    # Get tenant_id from request state (set by TenantIdentityMiddleware)
+    if not session_id:
+        raise HTTPException(
+            status_code=400,
+            detail="session_id is required",
+        )
+
     tenant_id = getattr(request.state, "tenant_id", None)
-
-    if session_id:
-        messages = await take(session_id, tenant_id=tenant_id)
-    else:
-        messages = await get_recent(tenant_id=tenant_id)
+    messages = await take(session_id, tenant_id=tenant_id)
     return {"messages": messages}

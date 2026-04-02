@@ -8,7 +8,7 @@ from contextvars import ContextVar
 from typing import Optional, TYPE_CHECKING
 from fastapi import Request
 
-from ..config.utils import load_config
+from ..config.utils import load_config, get_tenant_config_path
 from ..config.context import (
     get_current_tenant_id,
     get_current_user_id,
@@ -37,11 +37,11 @@ def _get_tenant_aware_config(tenant_id: Optional[str] = None):
     Returns:
         Configuration object.
     """
-    if tenant_id:
-        # For now, fall back to global config
-        # TODO: Implement tenant-scoped config loading once utils.py updated
+    if tenant_id is None:
+        tenant_id = get_current_tenant_id()
+    if tenant_id is None:
         return load_config()
-    return load_config()
+    return load_config(get_tenant_config_path(tenant_id))
 
 
 async def get_agent_for_request(
@@ -73,6 +73,10 @@ async def get_agent_for_request(
         # Try to get from request state (set by tenant middleware)
         tenant_id = getattr(request.state, "tenant_id", None)
 
+    # Step 1b: Prefer tenant workspace already bound by middleware when it
+    # matches the resolved target agent.
+    workspace = getattr(request.state, "workspace", None)
+
     # Step 2: Resolve user context
     user_id = get_current_user_id()
     if user_id is None:
@@ -80,21 +84,29 @@ async def get_agent_for_request(
 
     # Step 3: Determine which agent to use
     target_agent_id = agent_id
+    explicit_agent_requested = target_agent_id is not None
 
     # Check request.state.agent_id (from agent-scoped router)
     if not target_agent_id and hasattr(request.state, "agent_id"):
         target_agent_id = request.state.agent_id
+        explicit_agent_requested = target_agent_id is not None
 
     # Check X-Agent-Id header
     if not target_agent_id:
         target_agent_id = request.headers.get("X-Agent-Id")
+        explicit_agent_requested = target_agent_id is not None
 
     # Load tenant-aware config for fallback and validation
     config = None
+    if workspace is not None and not explicit_agent_requested:
+        return workspace
     if not target_agent_id:
         # Fallback to active agent from config
         config = _get_tenant_aware_config(tenant_id)
-        target_agent_id = config.agents.active_agent or "default"
+        target_agent_id = target_agent_id or config.agents.active_agent or "default"
+
+    if workspace is not None and getattr(workspace, "agent_id", None) == target_agent_id:
+        return workspace
 
     # Check if agent exists and is enabled (using tenant-aware config)
     if config is None:
@@ -129,7 +141,7 @@ async def get_agent_for_request(
     manager = request.app.state.multi_agent_manager
 
     try:
-        workspace = await manager.get_agent(target_agent_id)
+        workspace = await manager.get_agent(target_agent_id, tenant_id=tenant_id)
         if not workspace:
             raise HTTPException(
                 status_code=404,
