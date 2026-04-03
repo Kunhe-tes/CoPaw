@@ -4,12 +4,25 @@ declare const TOKEN: string;
 const AUTH_TOKEN_KEY = "copaw_auth_token";
 
 /**
+ * 从window读取运行时配置
+ * @returns 运行时配置对象
+ */
+function getRuntimeConfig(): { baseUrl?: string } {
+  if (typeof window !== 'undefined' && window.__env__?.baseUrl !== undefined) {
+    return window.__env__;
+  }
+  return {};
+}
+
+/**
  * Get the full API URL with /api prefix
+ * 优先级：运行时配置 > 构建时配置 > 相对路径
  * @param path - API path (e.g., "/models", "/skills")
  * @returns Full API URL (e.g., "http://localhost:8088/api/models" or "/api/models")
  */
 export function getApiUrl(path: string): string {
-  const base = VITE_API_BASE_URL || "";
+  const runtimeConfig = getRuntimeConfig();
+  const base = runtimeConfig.baseUrl || VITE_API_BASE_URL || "";
   const apiPrefix = "/api";
   const normalizedPath = path.startsWith("/") ? path : `/${path}`;
   return `${base}${apiPrefix}${normalizedPath}`;
