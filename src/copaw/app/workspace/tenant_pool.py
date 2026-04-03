@@ -12,6 +12,7 @@ from pathlib import Path
 from threading import Lock
 from typing import Optional
 
+from .tenant_initializer import TenantInitializer
 from .workspace import Workspace
 
 logger = logging.getLogger(__name__)
@@ -136,6 +137,12 @@ class TenantWorkspacePool:
             )
 
             try:
+                # Bootstrap tenant directory structure and agents
+                initializer = TenantInitializer(
+                    self._base_working_dir, tenant_id,
+                )
+                initializer.initialize()
+
                 workspace = Workspace(agent_id, str(workspace_dir))
 
                 # Register in pool
