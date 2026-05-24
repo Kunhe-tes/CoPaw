@@ -91,7 +91,28 @@ def _validate_shell(
             allowed=False,
             reason="missing shell command",
         )
+    shell_operator = _denied_shell_operator(command)
+    if shell_operator is not None:
+        return ToolAuthorizationDecision(
+            allowed=False,
+            reason=f"shell command denied by operator `{shell_operator}`",
+        )
     normalized = f" {command.lower()} "
+    if _uses_output_option(normalized):
+        return ToolAuthorizationDecision(
+            allowed=False,
+            reason="shell command denied by output option",
+        )
+    if _uses_external_execution_option(normalized):
+        return ToolAuthorizationDecision(
+            allowed=False,
+            reason="shell command denied by external execution option",
+        )
+    if _uses_sed_in_place(normalized):
+        return ToolAuthorizationDecision(
+            allowed=False,
+            reason="sed write or execute expressions are denied",
+        )
     for pattern in policy.shell.denied_patterns:
         if pattern in command or pattern.lower() in normalized:
             return ToolAuthorizationDecision(
@@ -112,4 +133,49 @@ def _validate_shell(
     return ToolAuthorizationDecision(
         allowed=False,
         reason="shell command is not in the readonly allowlist",
+    )
+
+
+def _denied_shell_operator(command: str) -> str | None:
+    """Return a shell operator that can sequence, pipe, or redirect work."""
+    for operator in ("&&", "||", ";", "|", "&", "`", "$(", "\n", "\r", "<"):
+        if operator in command:
+            return operator
+    return None
+
+
+def _uses_output_option(normalized_command: str) -> bool:
+    return re.search(r"(^|\s)--output(=|\s)", normalized_command) is not None
+
+
+def _uses_external_execution_option(normalized_command: str) -> bool:
+    return any(
+        re.search(pattern, normalized_command) is not None
+        for pattern in (
+            r"(^|\s)--pre(=|\s)",
+            r"(^|\s)--ext-diff(\s|$)",
+            r"(^|\s)--textconv(\s|$)",
+        )
+    )
+
+
+def _uses_sed_in_place(normalized_command: str) -> bool:
+    parts = normalized_command.strip().split()
+    return bool(
+        parts
+        and parts[0] == "sed"
+        and (
+            any(part.startswith("-i") for part in parts[1:])
+            or "--in-place" in parts[1:]
+            or re.search(
+                r"(^|[\s,;{'])\d*(,\d*)?[we]\s",
+                normalized_command,
+            )
+            is not None
+            or re.search(
+                r"(^|[\s,;{'])s(.+)[we](['\s]|$)",
+                normalized_command,
+            )
+            is not None
+        ),
     )

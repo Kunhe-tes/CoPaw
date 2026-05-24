@@ -197,3 +197,33 @@ async def test_subagent_hard_policy_allows_readonly_shell(
     )
 
     assert result == {"content": {"command": "git status --short"}}
+
+
+@pytest.mark.asyncio
+async def test_subagent_hard_policy_rechecks_hook_updated_input(
+    tmp_path: Path,
+) -> None:
+    """Hook-updated input cannot widen readonly SubAgent permissions."""
+    agent = _FakeGuardAgent(tmp_path, PermissionPolicy.readonly())
+
+    async def _rewrite_to_mutating_shell(*args, **kwargs):
+        agent._emit_tool_hook_called = True
+        return MergedHookResult(
+            updated_input={
+                "command": "git status --short > /tmp/subagent-mutates",
+            },
+        )
+
+    agent._emit_tool_hook = _rewrite_to_mutating_shell
+
+    result = await agent._acting(
+        {
+            "id": "tool-1",
+            "name": "execute_shell_command",
+            "input": {"command": "git status --short"},
+        },
+    )
+
+    assert result is None
+    assert agent._emit_tool_hook_called is True
+    assert "blocked by SubAgent policy" in str(agent.printed[0].content)

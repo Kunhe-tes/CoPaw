@@ -50,7 +50,9 @@ class SubAgentRuntime:
         try:
             agent_cls = SWEAgent
             if agent_cls is None:
-                from ...agents.react_agent import SWEAgent as agent_cls
+                from ...agents.react_agent import SWEAgent as ImportedSWEAgent
+
+                agent_cls = ImportedSWEAgent
 
             agent = agent_cls(
                 agent_config=self._subagent_config(
@@ -153,6 +155,12 @@ class SubAgentRuntime:
         policy: PermissionPolicy,
     ) -> dict[str, Any]:
         subagent_context = dict(context)
+        for key in (
+            "_skill_invocation_detector",
+            "_hook_overlay_model",
+            "hook_overlay",
+        ):
+            subagent_context.pop(key, None)
         subagent_context.update(
             {
                 "agent_role": "subagent",

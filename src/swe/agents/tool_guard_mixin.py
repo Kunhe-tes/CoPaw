@@ -886,6 +886,16 @@ class ToolGuardMixin:
             tool_call = dict(tool_call)
             tool_call["input"] = pre_hook_result.updated_input
             tool_input = pre_hook_result.updated_input
+            subagent_denial = self._subagent_policy_denial(
+                tool_name,
+                tool_input,
+            )
+            if subagent_denial is not None:
+                return await self._acting_subagent_policy_denied(
+                    tool_call,
+                    tool_name,
+                    subagent_denial,
+                )
         if pre_hook_result.decision in {
             HookDecision.BLOCK,
             HookDecision.DENY,

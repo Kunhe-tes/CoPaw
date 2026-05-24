@@ -52,7 +52,7 @@ def create_delegate_to_subagent_tool(
             spec=spec,
             parent_agent_config=parent_agent_config,
             workspace_dir=Path(workspace_dir or "."),
-            parent_policy=PermissionPolicy.readonly(),
+            parent_policy=_parent_policy_from_config(parent_agent_config),
             request_context=request_context,
         )
         return ToolResponse(
@@ -68,3 +68,23 @@ def create_delegate_to_subagent_tool(
         )
 
     return delegate_to_subagent
+
+
+def _parent_policy_from_config(parent_agent_config: Any) -> PermissionPolicy:
+    """Build parent readonly policy from enabled parent built-in tools."""
+    readonly = PermissionPolicy.readonly()
+    readonly_tools = set(readonly.tools.allow)
+    tools_config = getattr(parent_agent_config, "tools", None)
+    builtin_tools = getattr(tools_config, "builtin_tools", None)
+    if not isinstance(builtin_tools, dict):
+        return readonly
+
+    enabled = {
+        name
+        for name, config in builtin_tools.items()
+        if name in readonly_tools and getattr(config, "enabled", True)
+    }
+    return PermissionPolicy.readonly(
+        allow_tools=sorted(enabled),
+        deny_tools=sorted(readonly_tools - enabled),
+    )

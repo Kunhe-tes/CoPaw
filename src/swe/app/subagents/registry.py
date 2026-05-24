@@ -38,6 +38,8 @@ class AgentRegistry:
         self._load(providers)
 
     def _load(self, providers: list[SubAgentDefinitionProvider]) -> None:
+        builtin_names: set[str] = set()
+        user_names: set[str] = set()
         for provider in providers:
             for definition in provider.list_definitions():
                 errors = definition.validation_errors()
@@ -49,6 +51,20 @@ class AgentRegistry:
                         "duplicate SubAgent definition: "
                         f"{definition.name}@{definition.version}",
                     )
+                if definition.source == "builtin":
+                    if definition.name in user_names:
+                        raise DefinitionValidationError(
+                            "user definition cannot shadow builtin "
+                            f"SubAgent definition: {definition.name}",
+                        )
+                    builtin_names.add(definition.name)
+                elif definition.name in builtin_names:
+                    raise DefinitionValidationError(
+                        "user definition cannot shadow builtin "
+                        f"SubAgent definition: {definition.name}",
+                    )
+                else:
+                    user_names.add(definition.name)
                 self._definitions[key] = definition
 
     def list(

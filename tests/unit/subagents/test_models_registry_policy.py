@@ -100,6 +100,25 @@ def test_registry_rejects_duplicate_and_builtin_shadowing() -> None:
     assert "plan-researcher" in str(exc_info.value)
 
 
+def test_registry_rejects_user_definition_shadowing_builtin_name() -> None:
+    """A user provider cannot supersede a built-in with another version."""
+    builtin = builtin_definition_provider().list_definitions()[0]
+    user_shadow = builtin.model_copy(
+        update={"source": "user", "version": "9.0.0"},
+    )
+
+    with pytest.raises(DefinitionValidationError) as exc_info:
+        AgentRegistry(
+            [
+                builtin_definition_provider(),
+                InMemoryDefinitionProvider([user_shadow]),
+            ],
+        )
+
+    assert "shadow builtin" in str(exc_info.value)
+    assert "plan-researcher" in str(exc_info.value)
+
+
 def test_registry_supports_user_provider_filtering_and_version_lookup() -> (
     None
 ):
@@ -173,7 +192,17 @@ def test_effective_policy_uses_intersection_and_deny_precedence() -> None:
         ("git status --short", True),
         ("git show HEAD -- src/swe/app.py", True),
         ("pytest tests/unit", False),
+        ("rg --pre 'touch /tmp/subagent-mutates' SubAgent src", False),
+        ("git diff --ext-diff", False),
         ("git checkout -- file.py", False),
+        ("git status --short && touch /tmp/subagent-mutates", False),
+        ("git status --short & touch /tmp/subagent-mutates", False),
+        ("git status --short | sh", False),
+        ("git diff --output=/tmp/subagent-mutates", False),
+        ("git log --output /tmp/subagent-mutates", False),
+        ("sed -i bak s/a/b/ file.txt", False),
+        ("sed -n '1,10w /tmp/subagent-mutates' file.txt", False),
+        ("sed -n '1e touch /tmp/subagent-mutates' file.txt", False),
         ("sed -n '1,10p' a.py > out.txt", False),
         ("python -m black src", False),
         ("deploy production", False),

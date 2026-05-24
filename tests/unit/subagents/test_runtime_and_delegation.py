@@ -24,7 +24,7 @@ from swe.app.subagents import (
 from swe.agents.tools.delegate_to_subagent import (
     create_delegate_to_subagent_tool,
 )
-from swe.config.config import AgentProfileConfig
+from swe.config.config import AgentProfileConfig, ToolsConfig
 
 
 class _FakeSWEAgent:
@@ -104,7 +104,12 @@ async def test_runtime_creates_fresh_agent_with_subagent_safe_options(
         parent_agent_config=_agent_config(tmp_path),
         workspace_dir=tmp_path,
         effective_policy=PermissionPolicy.readonly(),
-        request_context={"session_id": "parent-session"},
+        request_context={
+            "session_id": "parent-session",
+            "_skill_invocation_detector": object(),
+            "_hook_overlay_model": object(),
+            "hook_overlay": {"loaded_skill_sources": [{"source_id": "x"}]},
+        },
     )
 
     assert result.status == "completed"
@@ -119,6 +124,11 @@ async def test_runtime_creates_fresh_agent_with_subagent_safe_options(
     assert (
         created.kwargs["request_context"]["subagent_run_id"] == record.run_id
     )
+    assert (
+        "_skill_invocation_detector" not in created.kwargs["request_context"]
+    )
+    assert "_hook_overlay_model" not in created.kwargs["request_context"]
+    assert "hook_overlay" not in created.kwargs["request_context"]
     delegated_message = created.messages[0]
     assert delegated_message.get_text_content().count("task-1") >= 1
     assert "parent scratchpad" not in delegated_message.get_text_content()
@@ -304,3 +314,35 @@ async def test_delegate_tool_returns_compact_agent_result_without_transcript(
     assert payload["summary"] == "compact summary"
     assert "raw transcript" not in response.content[0]["text"]
     manager.delegate.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_delegate_tool_parent_policy_respects_disabled_parent_tools(
+    tmp_path: Path,
+) -> None:
+    """SubAgent effective permissions cannot exceed parent tool config."""
+    manager = SimpleNamespace()
+    manager.delegate = AsyncMock(
+        return_value=AgentResult(
+            task_id="task-1",
+            agent_run_id="run-1",
+            agent_name="plan-researcher",
+            status="completed",
+            summary="compact summary",
+        ),
+    )
+    parent_config = _agent_config(tmp_path)
+    parent_config.tools = ToolsConfig()
+    parent_config.tools.builtin_tools["execute_shell_command"].enabled = False
+    tool = create_delegate_to_subagent_tool(
+        manager=manager,
+        parent_agent_config=parent_config,
+        workspace_dir=tmp_path,
+        request_context={"session_id": "parent-session", "agent_role": "main"},
+    )
+
+    await tool("plan-researcher", "Inspect code")
+
+    parent_policy = manager.delegate.await_args.kwargs["parent_policy"]
+    assert "execute_shell_command" not in parent_policy.tools.allow
+    assert "execute_shell_command" in parent_policy.tools.deny
