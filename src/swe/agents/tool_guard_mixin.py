@@ -741,6 +741,56 @@ class ToolGuardMixin:
         await self.memory.add(tool_res_msg)
         return None
 
+    async def _acting_subagent_policy_denied(
+        self,
+        tool_call: dict[str, Any],
+        tool_name: str,
+        reason: str,
+    ) -> dict | None:
+        """Return a tool result for hard SubAgent policy denial."""
+        denied_text = (
+            f"Tool `{tool_name}` blocked by SubAgent policy.\n"
+            f"{reason or 'SubAgent policy denied tool execution.'}"
+        )
+        tool_res_msg = Msg(
+            "system",
+            [
+                ToolResultBlock(
+                    type="tool_result",
+                    id=tool_call["id"],
+                    name=tool_name,
+                    output=[{"type": "text", "text": denied_text}],
+                ),
+            ],
+            "system",
+        )
+        await self.print(tool_res_msg, True)
+        await self.memory.add(tool_res_msg)
+        return None
+
+    def _subagent_policy_denial(
+        self,
+        tool_name: str,
+        tool_input: dict[str, Any],
+    ) -> str | None:
+        """Return denial reason if a SubAgent tool call violates hard policy."""
+        request_context = getattr(self, "_request_context", {}) or {}
+        if request_context.get("agent_role") != "subagent":
+            return None
+        policy_payload = request_context.get("subagent_policy")
+        if not isinstance(policy_payload, dict):
+            return "missing SubAgent effective policy"
+        try:
+            from swe.app.subagents import PermissionPolicy, validate_tool_call
+
+            policy = PermissionPolicy.model_validate(policy_payload)
+            decision = validate_tool_call(policy, tool_name, tool_input)
+        except Exception as exc:
+            return f"invalid SubAgent effective policy: {exc}"
+        if decision.allowed:
+            return None
+        return decision.reason
+
     async def _record_tool_hook_result(
         self,
         result: MergedHookResult,
@@ -817,6 +867,14 @@ class ToolGuardMixin:
         # Resolve mcp_server from toolkit registration since tool_call dict
         # (agentscope ToolUseBlock) does not carry mcp_server.
         mcp_server = self._resolve_mcp_server(tool_name)
+
+        subagent_denial = self._subagent_policy_denial(tool_name, tool_input)
+        if subagent_denial is not None:
+            return await self._acting_subagent_policy_denied(
+                tool_call,
+                tool_name,
+                subagent_denial,
+            )
 
         pre_hook_result = await self._emit_tool_hook(
             HookEventName.PRE_TOOL_USE,

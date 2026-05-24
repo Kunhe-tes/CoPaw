@@ -52,6 +52,7 @@ from .tools import (
     set_user_timezone,
     write_file,
     create_memory_search_tool,
+    create_delegate_to_subagent_tool,
     copy_file_to_static,
     update_task_progress,
 )
@@ -129,6 +130,8 @@ class SWEAgent(ToolGuardMixin, ReActAgent):
         namesake_strategy: NamesakeStrategy = "skip",
         workspace_dir: Path | None = None,
         task_tracker: Any | None = None,
+        enable_workspace_skills: bool = True,
+        system_prompt_override: str | None = None,
     ):
         """Initialize SWEAgent.
 
@@ -157,6 +160,8 @@ class SWEAgent(ToolGuardMixin, ReActAgent):
         self._namesake_strategy = namesake_strategy
         self._workspace_dir = workspace_dir
         self._task_tracker = task_tracker
+        self._enable_workspace_skills = enable_workspace_skills
+        self._system_prompt_override = system_prompt_override
         self._init_agent_phase_state()
 
         # Extract configuration from agent_config
@@ -265,6 +270,34 @@ class SWEAgent(ToolGuardMixin, ReActAgent):
                 f"Failed to load agent tools config: {e}, "
                 "all tools will be disabled",
             )
+        request_context = getattr(self, "_request_context", {}) or {}
+        if request_context.get("agent_role") == "subagent":
+            allowed = set()
+            policy = request_context.get("subagent_policy") or {}
+            if isinstance(policy, dict):
+                tools_policy = policy.get("tools") or {}
+                if isinstance(tools_policy, dict):
+                    allowed = set(tools_policy.get("allow") or [])
+            enabled_tools = {
+                name: name in allowed
+                for name in (
+                    enabled_tools.keys()
+                    if enabled_tools
+                    else (
+                        "execute_shell_command",
+                        "read_file",
+                        "write_file",
+                        "edit_file",
+                        "grep_search",
+                        "glob_search",
+                        "get_current_time",
+                        "set_user_timezone",
+                        "get_token_usage",
+                        "copy_file_to_static",
+                        "update_task_progress",
+                    )
+                )
+            }
 
         # Map of tool functions
         tool_functions = {
@@ -333,6 +366,20 @@ class SWEAgent(ToolGuardMixin, ReActAgent):
                     f"Failed to register task management tools: {e}",
                 )
 
+        if (
+            request_context.get("enable_subagents")
+            and request_context.get("agent_role", "main") != "subagent"
+        ):
+            toolkit.register_tool_function(
+                create_delegate_to_subagent_tool(
+                    manager=request_context.get("_delegation_manager"),
+                    parent_agent_config=self._agent_config,
+                    workspace_dir=self._workspace_dir,
+                    request_context=request_context,
+                ),
+                namesake_strategy=namesake_strategy,
+            )
+
         return toolkit
 
     def _register_skills(self, toolkit: Toolkit) -> None:
@@ -344,6 +391,10 @@ class SWEAgent(ToolGuardMixin, ReActAgent):
         Args:
             toolkit: Toolkit to register skills to
         """
+        if not getattr(self, "_enable_workspace_skills", True):
+            self._effective_skills = []
+            return
+
         workspace_dir = self._workspace_dir or WORKING_DIR
 
         ensure_skills_initialized(workspace_dir)
@@ -457,6 +508,10 @@ class SWEAgent(ToolGuardMixin, ReActAgent):
         Returns:
             Complete system prompt string
         """
+        system_prompt_override = getattr(self, "_system_prompt_override", None)
+        if system_prompt_override is not None:
+            return system_prompt_override
+
         # Get agent_id from request_context
         agent_id = (
             self._request_context.get("agent_id")
