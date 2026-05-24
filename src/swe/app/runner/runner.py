@@ -1541,6 +1541,16 @@ class AgentRunner(Runner):
         approved_tool_call: dict[str, Any] | None,
     ) -> SWEAgent:
         """创建 SWEAgent，并注入本轮请求上下文。"""
+        request_enable_subagents = getattr(
+            request,
+            "enable_subagents",
+            False,
+        )
+        if isinstance(request_enable_subagents, str):
+            request_enable_subagents = (
+                request_enable_subagents.strip().lower()
+                in {"true", "1", "yes"}
+            )
         request_context = {
             "session_id": session_id,
             "user_id": user_id,
@@ -1550,7 +1560,7 @@ class AgentRunner(Runner):
             "agent_id": self.agent_id,
             "tenant_id": self.tenant_id or "",
             "agent_role": "main",
-            "enable_subagents": True,
+            "enable_subagents": bool(request_enable_subagents),
             "transcript_path": (
                 self.session._get_save_path(session_id, user_id)
                 if hasattr(self.session, "_get_save_path")

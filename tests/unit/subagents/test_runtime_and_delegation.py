@@ -349,6 +349,56 @@ async def test_runtime_invalid_output_uses_one_repair_attempt(
 
 
 @pytest.mark.asyncio
+async def test_runtime_extracts_markdown_fenced_agent_result_json(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    """Markdown fenced JSON is extracted and validated without repair."""
+    from swe.app.subagents import runtime as runtime_module
+
+    _FakeSWEAgent.instances = []
+    _FakeSWEAgent.replies = [
+        Msg(
+            "Friday",
+            """Here is the result:
+
+```json
+{
+  "task_id": "task-1",
+  "agent_run_id": "ignored",
+  "agent_name": "plan-researcher",
+  "status": "completed",
+  "summary": "from fenced json"
+}
+```""",
+            "assistant",
+        ),
+    ]
+    monkeypatch.setattr(runtime_module, "SWEAgent", _FakeSWEAgent)
+    registry = AgentRegistry([builtin_definition_provider()])
+    definition = registry.resolve("plan-researcher")
+    store = InMemorySubAgentRunStore()
+    record = await store.create(
+        _spec(),
+        definition,
+        PermissionPolicy.readonly(),
+    )
+
+    result = await SubAgentRuntime(store=store).run(
+        run=record,
+        definition=definition,
+        spec=_spec(),
+        parent_agent_config=_agent_config(tmp_path),
+        workspace_dir=tmp_path,
+        effective_policy=PermissionPolicy.readonly(),
+    )
+
+    assert result.status == "completed"
+    assert result.summary == "from fenced json"
+    assert len(_FakeSWEAgent.instances[0].messages) == 1
+
+
+@pytest.mark.asyncio
 async def test_runtime_records_failure_as_structured_result(
     monkeypatch,
     tmp_path: Path,
@@ -382,6 +432,60 @@ async def test_runtime_records_failure_as_structured_result(
     saved = await store.get(record.run_id)
     assert saved is not None
     assert saved.status == "failed"
+    assert saved.result == result
+
+
+@pytest.mark.asyncio
+async def test_runtime_overrides_untrusted_model_metrics(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    """Runtime-owned metrics are not taken from model output."""
+    from swe.app.subagents import runtime as runtime_module
+
+    _FakeSWEAgent.instances = []
+    _FakeSWEAgent.replies = [
+        Msg(
+            "Friday",
+            json.dumps(
+                {
+                    "task_id": "task-1",
+                    "agent_run_id": "ignored",
+                    "agent_name": "plan-researcher",
+                    "status": "completed",
+                    "summary": "done",
+                    "metrics": {
+                        "turns_used": 99,
+                        "tool_calls_used": 88,
+                        "elapsed_ms": 1,
+                    },
+                },
+            ),
+            "assistant",
+        ),
+    ]
+    monkeypatch.setattr(runtime_module, "SWEAgent", _FakeSWEAgent)
+    registry = AgentRegistry([builtin_definition_provider()])
+    definition = registry.resolve("plan-researcher")
+    store = InMemorySubAgentRunStore()
+    record = await store.create(
+        _spec(),
+        definition,
+        PermissionPolicy.readonly(),
+    )
+
+    result = await SubAgentRuntime(store=store).run(
+        run=record,
+        definition=definition,
+        spec=_spec(),
+        parent_agent_config=_agent_config(tmp_path),
+        workspace_dir=tmp_path,
+        effective_policy=PermissionPolicy.readonly(),
+    )
+
+    assert result.metrics.turns_used == 1
+    assert result.metrics.tool_calls_used == 0
+    assert result.metrics.elapsed_ms >= 0
 
 
 @pytest.mark.asyncio

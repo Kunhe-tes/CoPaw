@@ -63,6 +63,19 @@ MUTATING_TOOLS = frozenset(
         "delegate_to_subagent",
     },
 )
+READONLY_ALLOWED_COMMANDS = (
+    "pwd",
+    "ls",
+    "rg",
+    "grep",
+    "sed",
+    "git status",
+    "git diff",
+    "git grep",
+    "git log",
+    "git show",
+)
+READONLY_ALLOWED_COMMAND_SET = frozenset(READONLY_ALLOWED_COMMANDS)
 
 
 class DefinitionValidationError(ValueError):
@@ -89,18 +102,7 @@ class ShellPolicy(BaseModel):
     enabled: bool = True
     strategy: Literal["deny_all", "allowlist"] = "allowlist"
     allowed_commands: list[str] = Field(
-        default_factory=lambda: [
-            "pwd",
-            "ls",
-            "rg",
-            "grep",
-            "sed",
-            "git status",
-            "git diff",
-            "git grep",
-            "git log",
-            "git show",
-        ],
+        default_factory=lambda: list(READONLY_ALLOWED_COMMANDS),
     )
     denied_patterns: list[str] = Field(
         default_factory=lambda: [
@@ -279,6 +281,30 @@ class SubAgentDefinition(BaseModel):
         if mutating:
             errors.append(
                 f"mutating tool is unsupported: {', '.join(mutating)}",
+            )
+        permission_mutating = sorted(
+            set(self.permission.tools.allow) & MUTATING_TOOLS,
+        )
+        if permission_mutating:
+            errors.append(
+                "permission mutating tool is unsupported: "
+                + ", ".join(permission_mutating),
+            )
+        permission_mcp = sorted(
+            tool
+            for tool in self.permission.tools.allow
+            if tool.startswith("mcp:")
+        )
+        if permission_mcp:
+            errors.append("permission MCP tools are unsupported")
+        unsupported_permission_commands = sorted(
+            set(self.permission.shell.allowed_commands)
+            - READONLY_ALLOWED_COMMAND_SET,
+        )
+        if unsupported_permission_commands:
+            errors.append(
+                "permission shell allowed_commands widen readonly scope: "
+                + ", ".join(unsupported_permission_commands),
             )
         return errors
 

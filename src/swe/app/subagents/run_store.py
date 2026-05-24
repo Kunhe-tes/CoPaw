@@ -39,7 +39,13 @@ class SubAgentRunStore(Protocol):
     ) -> SubAgentRunRecord:
         """Persist a terminal result."""
 
-    async def fail(self, run_id: str, message: str) -> SubAgentRunRecord:
+    async def fail(
+        self,
+        run_id: str,
+        message: str,
+        *,
+        result: AgentResult | None = None,
+    ) -> SubAgentRunRecord:
         """Persist a terminal failure."""
 
     async def cancel(self, run_id: str) -> SubAgentRunRecord:
@@ -97,7 +103,13 @@ class InMemorySubAgentRunStore:
         self.records[run_id] = record
         return record
 
-    async def fail(self, run_id: str, message: str) -> SubAgentRunRecord:
+    async def fail(
+        self,
+        run_id: str,
+        message: str,
+        *,
+        result: AgentResult | None = None,
+    ) -> SubAgentRunRecord:
         """Store terminal failure with structured error."""
         error = AgentError(
             code="runtime_error",
@@ -107,6 +119,7 @@ class InMemorySubAgentRunStore:
         record = self.records[run_id].model_copy(
             update={
                 "status": "failed",
+                "result": result,
                 "errors": [*self.records[run_id].errors, error],
                 "finished_at": _now_utc(),
             },
@@ -182,8 +195,14 @@ class LocalJsonSubAgentRunStore(InMemorySubAgentRunStore):
         self._save()
         return record
 
-    async def fail(self, run_id: str, message: str) -> SubAgentRunRecord:
-        record = await super().fail(run_id, message)
+    async def fail(
+        self,
+        run_id: str,
+        message: str,
+        *,
+        result: AgentResult | None = None,
+    ) -> SubAgentRunRecord:
+        record = await super().fail(run_id, message, result=result)
         self._save()
         return record
 

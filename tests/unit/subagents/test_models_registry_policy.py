@@ -83,6 +83,39 @@ def test_definition_validation_rejects_unsupported_mvp_capabilities() -> None:
     assert "mutating tool" in message
 
 
+def test_definition_validation_rejects_unsafe_permission_overrides() -> None:
+    """User definitions cannot widen readonly policy via permission config."""
+    with pytest.raises(DefinitionValidationError) as exc_info:
+        SubAgentDefinition.model_validate(
+            {
+                "name": "unsafe-permission",
+                "version": "1.0.0",
+                "description": "Unsafe permission worker",
+                "prompt": {"system": "Inspect code"},
+                "source": "user",
+                "owner_scope": "tenant/source/workspace",
+                "permission": {
+                    "tools": {
+                        "allow": [
+                            "read_file",
+                            "write_file",
+                            "mcp:server.tool",
+                        ],
+                    },
+                    "shell": {
+                        "allowed_commands": ["pwd", "python"],
+                    },
+                },
+            },
+        )
+
+    message = str(exc_info.value)
+    assert "permission" in message
+    assert "MCP" in message
+    assert "mutating tool" in message
+    assert "python" in message
+
+
 def test_registry_rejects_duplicate_and_builtin_shadowing() -> None:
     """A user provider cannot silently replace a built-in definition."""
     builtin = builtin_definition_provider().list_definitions()[0]
@@ -201,6 +234,8 @@ def test_effective_policy_uses_intersection_and_deny_precedence() -> None:
         ("git diff --output=/tmp/subagent-mutates", False),
         ("git log --output /tmp/subagent-mutates", False),
         ("sed -i bak s/a/b/ file.txt", False),
+        ("sed 's/a/b/w/tmp/subagent-mutates' file.txt", False),
+        ("sed 's/a/date/e' file.txt", False),
         ("sed -n '1,10w /tmp/subagent-mutates' file.txt", False),
         ("sed -n '1e touch /tmp/subagent-mutates' file.txt", False),
         ("sed -n '1,10p' a.py > out.txt", False),

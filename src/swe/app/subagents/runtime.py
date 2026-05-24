@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 import time
 from pathlib import Path
 from typing import Any
@@ -50,6 +51,13 @@ class SubAgentRuntime:
         await self._store.mark_running(run.run_id)
         try:
             budget = self._effective_budget(definition.budget, spec.budget)
+            subagent_context = self._request_context(
+                request_context or {},
+                run,
+                effective_policy,
+                budget,
+            )
+            turns_used = 0
             agent_cls = SWEAgent
             if agent_cls is None:
                 from ...agents.react_agent import SWEAgent as ImportedSWEAgent
@@ -67,12 +75,7 @@ class SubAgentRuntime:
                 enable_memory_manager=False,
                 mcp_clients=[],
                 memory_manager=None,
-                request_context=self._request_context(
-                    request_context or {},
-                    run,
-                    effective_policy,
-                    budget,
-                ),
+                request_context=subagent_context,
                 workspace_dir=workspace_dir,
                 task_tracker=None,
                 enable_workspace_skills=False,
@@ -89,6 +92,7 @@ class SubAgentRuntime:
                 "user",
             )
             deadline = started + (budget.timeout_ms / 1000)
+            turns_used += 1
             reply = await self._reply_with_remaining_timeout(
                 agent,
                 message,
@@ -99,9 +103,12 @@ class SubAgentRuntime:
                 spec=spec,
                 run_id=run.run_id,
                 definition=definition,
+                turns_used=turns_used,
+                tool_calls_used=self._tool_calls_used(subagent_context),
                 elapsed_ms=int((time.monotonic() - started) * 1000),
             )
             if result is None:
+                turns_used += 1
                 repair = await self._reply_with_remaining_timeout(
                     agent,
                     Msg(
@@ -116,6 +123,8 @@ class SubAgentRuntime:
                     spec=spec,
                     run_id=run.run_id,
                     definition=definition,
+                    turns_used=turns_used,
+                    tool_calls_used=self._tool_calls_used(subagent_context),
                     elapsed_ms=int((time.monotonic() - started) * 1000),
                 )
             if result is None:
@@ -136,7 +145,7 @@ class SubAgentRuntime:
                 "SubAgent execution exceeded its timeout budget.",
                 "failed",
             )
-            await self._store.fail(run.run_id, result.summary)
+            await self._store.fail(run.run_id, result.summary, result=result)
             return result
         except Exception as exc:
             result = self._failure_result(
@@ -146,7 +155,7 @@ class SubAgentRuntime:
                 str(exc),
                 "failed",
             )
-            await self._store.fail(run.run_id, str(exc))
+            await self._store.fail(run.run_id, str(exc), result=result)
             return result
 
     def _subagent_config(
@@ -271,13 +280,15 @@ class SubAgentRuntime:
         spec: DelegationSpec,
         run_id: str,
         definition: SubAgentDefinition,
+        turns_used: int,
+        tool_calls_used: int,
         elapsed_ms: int,
     ) -> AgentResult | None:
         text = reply.get_text_content()
         try:
-            data = json.loads(text)
+            data = self._extract_json_payload(text)
             result = AgentResult.model_validate(data)
-        except (TypeError, json.JSONDecodeError, ValidationError):
+        except (TypeError, ValueError, ValidationError):
             return None
         return result.model_copy(
             update={
@@ -285,10 +296,36 @@ class SubAgentRuntime:
                 "agent_run_id": run_id,
                 "agent_name": definition.name,
                 "metrics": result.metrics.model_copy(
-                    update={"elapsed_ms": elapsed_ms},
+                    update={
+                        "turns_used": turns_used,
+                        "tool_calls_used": tool_calls_used,
+                        "elapsed_ms": elapsed_ms,
+                    },
                 ),
             },
         )
+
+    def _extract_json_payload(self, text: str) -> Any:
+        try:
+            return json.loads(text)
+        except (TypeError, json.JSONDecodeError):
+            pass
+        for match in re.finditer(
+            r"```(?:json|JSON)?\s*(.*?)\s*```",
+            text,
+            flags=re.DOTALL,
+        ):
+            try:
+                return json.loads(match.group(1))
+            except json.JSONDecodeError:
+                continue
+        raise ValueError("No valid JSON payload found in SubAgent reply.")
+
+    def _tool_calls_used(self, request_context: dict[str, Any]) -> int:
+        try:
+            return int(request_context.get("_subagent_tool_calls_used") or 0)
+        except (TypeError, ValueError):
+            return 0
 
     def _failure_result(
         self,

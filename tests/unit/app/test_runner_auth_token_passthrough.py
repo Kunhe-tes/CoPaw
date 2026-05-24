@@ -104,11 +104,11 @@ async def test_query_handler_injects_auth_headers_into_mcp_headers_and_context(
     assert captured["request_context"]["auth_token"] == "token-123"
 
 
-def test_create_agent_for_query_enables_subagents_in_real_context(
+def test_create_agent_for_query_keeps_subagents_disabled_by_default(
     monkeypatch,
     tmp_path,
 ) -> None:
-    """Real chat runner contexts expose main-agent delegation by default."""
+    """Real chat runner contexts keep delegation disabled unless opted in."""
     runner = AgentRunner(agent_id="test-agent", workspace_dir=tmp_path)
     runner.tenant_id = "tenant-1"
     runner.session = SimpleNamespace(
@@ -140,6 +140,44 @@ def test_create_agent_for_query_enables_subagents_in_real_context(
     )
 
     assert captured["request_context"]["agent_role"] == "main"
+    assert captured["request_context"]["enable_subagents"] is False
+
+
+def test_create_agent_for_query_enables_subagents_when_request_opts_in(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    """Delegation is exposed only when the incoming request opts in."""
+    runner = AgentRunner(agent_id="test-agent", workspace_dir=tmp_path)
+    runner.tenant_id = "tenant-1"
+    runner.session = SimpleNamespace(
+        _get_save_path=lambda session_id, user_id: (
+            f"/tmp/{session_id}-{user_id}.json"
+        ),
+    )
+    captured: dict[str, Any] = {}
+
+    class FakeAgent:
+        def __init__(self, **kwargs):
+            captured["request_context"] = kwargs["request_context"]
+
+    monkeypatch.setattr("swe.app.runner.runner.SWEAgent", FakeAgent)
+
+    runner._create_agent_for_query(
+        agent_config=_fake_agent_config(),
+        env_context="",
+        mcp_clients=[],
+        request=SimpleNamespace(enable_subagents=True),
+        session_id="session-1",
+        user_id="user-1",
+        channel="console",
+        chat=SimpleNamespace(id="chat-1"),
+        turn_id="turn-1",
+        hook_overlay=HookSessionOverlay(),
+        auth_token=None,
+        approved_tool_call=None,
+    )
+
     assert captured["request_context"]["enable_subagents"] is True
 
 

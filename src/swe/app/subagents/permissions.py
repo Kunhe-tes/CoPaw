@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import re
+import shlex
 
 from .models import (
     MVP_READONLY_TOOLS,
@@ -108,7 +109,7 @@ def _validate_shell(
             allowed=False,
             reason="shell command denied by external execution option",
         )
-    if _uses_sed_in_place(normalized):
+    if _uses_sed_in_place(command):
         return ToolAuthorizationDecision(
             allowed=False,
             reason="sed write or execute expressions are denied",
@@ -159,23 +160,85 @@ def _uses_external_execution_option(normalized_command: str) -> bool:
     )
 
 
-def _uses_sed_in_place(normalized_command: str) -> bool:
-    parts = normalized_command.strip().split()
+def _uses_sed_in_place(command: str) -> bool:
+    try:
+        parts = shlex.split(command)
+    except ValueError:
+        parts = command.strip().split()
     return bool(
         parts
-        and parts[0] == "sed"
+        and parts[0].lower() == "sed"
         and (
             any(part.startswith("-i") for part in parts[1:])
-            or "--in-place" in parts[1:]
-            or re.search(
-                r"(^|[\s,;{'])\d*(,\d*)?[we]\s",
-                normalized_command,
+            or "--in-place" in {part.lower() for part in parts[1:]}
+            or any(
+                _sed_script_uses_write_or_exec(script)
+                for script in _sed_scripts(parts)
             )
-            is not None
-            or re.search(
-                r"(^|[\s,;{'])s(.+)[we](['\s]|$)",
-                normalized_command,
-            )
-            is not None
         ),
     )
+
+
+def _sed_scripts(parts: list[str]) -> list[str]:
+    """Extract inline sed scripts without expanding shell behavior."""
+    scripts: list[str] = []
+    implicit_script_consumed = False
+    index = 1
+    while index < len(parts):
+        part = parts[index]
+        lower = part.lower()
+        if lower in {"-e", "--expression"}:
+            if index + 1 < len(parts):
+                scripts.append(parts[index + 1])
+                index += 2
+                continue
+            break
+        if lower.startswith("-e") and len(part) > 2:
+            scripts.append(part[2:])
+            index += 1
+            continue
+        if lower.startswith("--expression="):
+            scripts.append(part.split("=", 1)[1])
+            index += 1
+            continue
+        if part.startswith("-"):
+            index += 1
+            continue
+        if not implicit_script_consumed:
+            scripts.append(part)
+            implicit_script_consumed = True
+        index += 1
+    return scripts
+
+
+def _sed_script_uses_write_or_exec(script: str) -> bool:
+    """Detect inline sed commands that write files or execute commands."""
+    if re.search(r"(^|[;{])\s*\d*(,\d*)?\s*[we](?:\s|$)", script) is not None:
+        return True
+    index = 0
+    while index < len(script):
+        if script[index] != "s" or index + 1 >= len(script):
+            index += 1
+            continue
+        delimiter = script[index + 1]
+        if delimiter.isalnum() or delimiter.isspace():
+            index += 1
+            continue
+        cursor = index + 2
+        for _ in range(2):
+            while cursor < len(script):
+                if script[cursor] == "\\":
+                    cursor += 2
+                    continue
+                if script[cursor] == delimiter:
+                    cursor += 1
+                    break
+                cursor += 1
+            else:
+                return False
+        while cursor < len(script) and script[cursor] not in ";}":
+            if script[cursor] in {"w", "e"}:
+                return True
+            cursor += 1
+        index = cursor + 1
+    return False
