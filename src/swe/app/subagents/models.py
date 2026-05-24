@@ -290,6 +290,9 @@ class SubAgentDefinition(BaseModel):
                 "permission mutating tool is unsupported: "
                 + ", ".join(permission_mutating),
             )
+        for tool in self.permission.tools.allow:
+            if tool not in KNOWN_BUILTIN_TOOLS and not tool.startswith("mcp:"):
+                errors.append(f"unknown built-in tool: {tool}")
         permission_mcp = sorted(
             tool
             for tool in self.permission.tools.allow

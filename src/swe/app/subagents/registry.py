@@ -5,6 +5,8 @@ from __future__ import annotations
 
 from typing import Protocol
 
+from packaging.version import InvalidVersion, Version
+
 from .models import DefinitionValidationError, SubAgentDefinition
 
 
@@ -67,6 +69,16 @@ class AgentRegistry:
                     user_names.add(definition.name)
                 self._definitions[key] = definition
 
+    @staticmethod
+    def _version_sort_key(
+        definition: SubAgentDefinition,
+    ) -> tuple[int, Version | str]:
+        """Prefer semantic versions while remaining stable for legacy strings."""
+        try:
+            return (1, Version(definition.version))
+        except InvalidVersion:
+            return (0, definition.version)
+
     def list(
         self,
         *,
@@ -81,14 +93,17 @@ class AgentRegistry:
             definitions = [
                 d for d in definitions if d.owner_scope == owner_scope
             ]
-        return sorted(definitions, key=lambda d: (d.name, d.version))
+        return sorted(
+            definitions,
+            key=lambda d: (d.name, self._version_sort_key(d)),
+        )
 
     def resolve(
         self,
         name: str,
         version: str | None = None,
     ) -> SubAgentDefinition:
-        """Resolve a definition by name, using latest lexical version by default."""
+        """Resolve a definition by name, using latest semantic version by default."""
         if version is not None:
             return self.get(name, version)
         matches = [
@@ -98,7 +113,7 @@ class AgentRegistry:
         ]
         if not matches:
             raise KeyError(name)
-        return sorted(matches, key=lambda d: d.version)[-1]
+        return max(matches, key=self._version_sort_key)
 
     def get(self, name: str, version: str) -> SubAgentDefinition:
         """Return an exact definition version."""

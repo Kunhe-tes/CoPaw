@@ -116,6 +116,28 @@ def test_definition_validation_rejects_unsafe_permission_overrides() -> None:
     assert "python" in message
 
 
+def test_definition_validation_rejects_unknown_permission_tools() -> None:
+    """Permission tool allowlists must use known built-in tool names."""
+    with pytest.raises(DefinitionValidationError) as exc_info:
+        SubAgentDefinition.model_validate(
+            {
+                "name": "unknown-permission-tool",
+                "version": "1.0.0",
+                "description": "Invalid permission worker",
+                "prompt": {"system": "Inspect code"},
+                "source": "user",
+                "owner_scope": "tenant/source/workspace",
+                "permission": {
+                    "tools": {
+                        "allow": ["read_file", "bogus_tool"],
+                    },
+                },
+            },
+        )
+
+    assert "unknown built-in tool: bogus_tool" in str(exc_info.value)
+
+
 def test_registry_rejects_duplicate_and_builtin_shadowing() -> None:
     """A user provider cannot silently replace a built-in definition."""
     builtin = builtin_definition_provider().list_definitions()[0]
@@ -182,6 +204,30 @@ def test_registry_supports_user_provider_filtering_and_version_lookup() -> (
     assert registry.list(owner_scope="tenant-a/source-b/default") == [
         user_definition,
     ]
+
+
+def test_registry_resolve_uses_latest_semantic_version_by_default() -> None:
+    """Default resolution should pick the highest semantic version."""
+    earlier = SubAgentDefinition.model_validate(
+        {
+            "name": "local-reader",
+            "version": "2.0.0",
+            "description": "Older readonly worker",
+            "prompt": {"system": "Read files and summarize evidence."},
+            "source": "user",
+            "owner_scope": "tenant-a/source-b/default",
+            "tools": {"allow": ["read_file"]},
+        },
+    )
+    later = earlier.model_copy(update={"version": "10.0.0"})
+    registry = AgentRegistry(
+        [
+            builtin_definition_provider(),
+            InMemoryDefinitionProvider([earlier, later]),
+        ],
+    )
+
+    assert registry.resolve("local-reader") == later
 
 
 def test_effective_policy_uses_intersection_and_deny_precedence() -> None:
