@@ -33,12 +33,20 @@ class _BaseAgent:
 class _FakeGuardAgent(ToolGuardMixin, _BaseAgent):
     name = "Friday"
 
-    def __init__(self, tmp_path: Path, policy: PermissionPolicy):
+    def __init__(
+        self,
+        tmp_path: Path,
+        policy: PermissionPolicy,
+        *,
+        subagent_budget: dict | None = None,
+    ):
         self._request_context = {
             "session_id": "session-1",
             "agent_role": "subagent",
             "subagent_policy": policy.model_dump(mode="json"),
         }
+        if subagent_budget is not None:
+            self._request_context["subagent_budget"] = subagent_budget
         self._agent_config = SimpleNamespace()
         self._workspace_dir = tmp_path
         self.memory = _Memory()
@@ -227,3 +235,34 @@ async def test_subagent_hard_policy_rechecks_hook_updated_input(
     assert result is None
     assert agent._emit_tool_hook_called is True
     assert "blocked by SubAgent policy" in str(agent.printed[0].content)
+
+
+@pytest.mark.asyncio
+async def test_subagent_tool_call_budget_denies_extra_calls(
+    tmp_path: Path,
+) -> None:
+    """Readonly SubAgents stop tool execution after max_tool_calls."""
+    agent = _FakeGuardAgent(
+        tmp_path,
+        PermissionPolicy.readonly(),
+        subagent_budget={"max_tool_calls": 1},
+    )
+
+    first = await agent._acting(
+        {
+            "id": "tool-1",
+            "name": "execute_shell_command",
+            "input": {"command": "git status --short"},
+        },
+    )
+    second = await agent._acting(
+        {
+            "id": "tool-2",
+            "name": "execute_shell_command",
+            "input": {"command": "git status --short"},
+        },
+    )
+
+    assert first == {"content": {"command": "git status --short"}}
+    assert second is None
+    assert "budget exceeded" in str(agent.printed[0].content)

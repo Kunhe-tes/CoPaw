@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 from pathlib import Path
 from types import SimpleNamespace
@@ -17,10 +18,12 @@ from swe.app.subagents import (
     DelegationManager,
     DelegationSpec,
     InMemorySubAgentRunStore,
+    LocalJsonSubAgentRunStore,
     PermissionPolicy,
     SubAgentRuntime,
     builtin_definition_provider,
 )
+from swe.app.subagents.models import BudgetConfig
 from swe.agents.tools.delegate_to_subagent import (
     create_delegate_to_subagent_tool,
 )
@@ -132,6 +135,168 @@ async def test_runtime_creates_fresh_agent_with_subagent_safe_options(
     delegated_message = created.messages[0]
     assert delegated_message.get_text_content().count("task-1") >= 1
     assert "parent scratchpad" not in delegated_message.get_text_content()
+
+
+@pytest.mark.asyncio
+async def test_runtime_uses_effective_policy_for_visible_tools(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    """Visible SubAgent tools are narrowed by the effective policy."""
+    from swe.app.subagents import runtime as runtime_module
+
+    _FakeSWEAgent.instances = []
+    _FakeSWEAgent.replies = [
+        Msg(
+            "Friday",
+            json.dumps(
+                {
+                    "task_id": "task-1",
+                    "agent_run_id": "ignored",
+                    "agent_name": "plan-researcher",
+                    "status": "completed",
+                    "summary": "found files",
+                },
+            ),
+            "assistant",
+        ),
+    ]
+    monkeypatch.setattr(runtime_module, "SWEAgent", _FakeSWEAgent)
+    registry = AgentRegistry([builtin_definition_provider()])
+    definition = registry.resolve("plan-researcher")
+    store = InMemorySubAgentRunStore()
+    policy = PermissionPolicy.readonly(
+        allow_tools=["read_file"],
+        deny_tools=["execute_shell_command"],
+    )
+    record = await store.create(_spec(), definition, policy)
+
+    await SubAgentRuntime(store=store).run(
+        run=record,
+        definition=definition,
+        spec=_spec(),
+        parent_agent_config=_agent_config(tmp_path),
+        workspace_dir=tmp_path,
+        effective_policy=policy,
+    )
+
+    tools = _FakeSWEAgent.instances[0].kwargs["agent_config"].tools
+    assert tools.builtin_tools["read_file"].enabled is True
+    assert tools.builtin_tools["execute_shell_command"].enabled is False
+
+
+@pytest.mark.asyncio
+async def test_runtime_applies_non_timeout_budgets_to_agent_context(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    """Turns, token cap, and tool-call budgets affect the worker run."""
+    from swe.app.subagents import runtime as runtime_module
+
+    _FakeSWEAgent.instances = []
+    _FakeSWEAgent.replies = [
+        Msg(
+            "Friday",
+            json.dumps(
+                {
+                    "task_id": "task-1",
+                    "agent_run_id": "ignored",
+                    "agent_name": "plan-researcher",
+                    "status": "completed",
+                    "summary": "found files",
+                },
+            ),
+            "assistant",
+        ),
+    ]
+    monkeypatch.setattr(runtime_module, "SWEAgent", _FakeSWEAgent)
+    registry = AgentRegistry([builtin_definition_provider()])
+    definition = registry.resolve("plan-researcher").model_copy(
+        update={
+            "budget": BudgetConfig(
+                max_turns=4,
+                max_tool_calls=7,
+                max_tokens=9000,
+                timeout_ms=1000,
+            ),
+        },
+    )
+    spec = _spec().model_copy(
+        update={
+            "budget": BudgetConfig(
+                max_turns=2,
+                max_tool_calls=3,
+                max_tokens=1000,
+                timeout_ms=1000,
+            ),
+        },
+    )
+    store = InMemorySubAgentRunStore()
+    record = await store.create(spec, definition, PermissionPolicy.readonly())
+
+    await SubAgentRuntime(store=store).run(
+        run=record,
+        definition=definition,
+        spec=spec,
+        parent_agent_config=_agent_config(tmp_path),
+        workspace_dir=tmp_path,
+        effective_policy=PermissionPolicy.readonly(),
+    )
+
+    created = _FakeSWEAgent.instances[0]
+    assert created.kwargs["agent_config"].running.max_iters == 2
+    assert created.kwargs["agent_config"].running.max_input_length == 1000
+    assert created.kwargs["request_context"]["subagent_budget"] == {
+        "max_turns": 2,
+        "max_tool_calls": 3,
+        "max_tokens": 1000,
+        "timeout_ms": 1000,
+    }
+
+
+@pytest.mark.asyncio
+async def test_runtime_repair_attempt_uses_remaining_timeout(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    """The JSON repair attempt cannot outlive the run timeout budget."""
+    from swe.app.subagents import runtime as runtime_module
+
+    class SlowRepairAgent:
+        def __init__(self, **kwargs):
+            self.kwargs = kwargs
+            self.messages: list[Msg] = []
+
+        async def reply(self, msg=None, structured_model=None):
+            self.messages.append(msg)
+            if len(self.messages) == 1:
+                return Msg("Friday", "not json", "assistant")
+            await asyncio.sleep(0.2)
+            return Msg("Friday", "{}", "assistant")
+
+    monkeypatch.setattr(runtime_module, "SWEAgent", SlowRepairAgent)
+    registry = AgentRegistry([builtin_definition_provider()])
+    definition = registry.resolve("plan-researcher").model_copy(
+        update={"budget": BudgetConfig(timeout_ms=50)},
+    )
+    store = InMemorySubAgentRunStore()
+    record = await store.create(
+        _spec(),
+        definition,
+        PermissionPolicy.readonly(),
+    )
+
+    result = await SubAgentRuntime(store=store).run(
+        run=record,
+        definition=definition,
+        spec=_spec(),
+        parent_agent_config=_agent_config(tmp_path),
+        workspace_dir=tmp_path,
+        effective_policy=PermissionPolicy.readonly(),
+    )
+
+    assert result.status == "failed"
+    assert result.errors[0].code == "timeout"
 
 
 @pytest.mark.asyncio
@@ -255,6 +420,39 @@ async def test_delegation_manager_resolves_records_and_invokes_runtime(
     assert saved.definition_name == "plan-researcher"
     assert saved.definition_source == "builtin"
     runtime.run.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_delegation_manager_defaults_to_workspace_local_run_store(
+    tmp_path: Path,
+) -> None:
+    """Default delegation records survive in workspace-local app state."""
+    registry = AgentRegistry([builtin_definition_provider()])
+    runtime = SimpleNamespace()
+    runtime.run = AsyncMock(
+        return_value=AgentResult(
+            task_id="task-1",
+            agent_run_id="runtime-run",
+            agent_name="plan-researcher",
+            status="completed",
+            summary="ok",
+        ),
+    )
+    manager = DelegationManager(registry=registry, runtime=runtime)
+
+    await manager.delegate(
+        spec=_spec(),
+        parent_agent_config=_agent_config(tmp_path),
+        workspace_dir=tmp_path,
+        parent_policy=PermissionPolicy.readonly(),
+        request_context={"agent_role": "main"},
+    )
+
+    local_store = LocalJsonSubAgentRunStore(tmp_path)
+    records = list(local_store.records.values())
+    assert len(records) == 1
+    assert records[0].definition_name == "plan-researcher"
+    assert records[0].status == "queued"
 
 
 @pytest.mark.asyncio

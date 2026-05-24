@@ -8,6 +8,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 
+from swe.agents.hook_runtime.models import HookSessionOverlay
 from swe.app.runner.runner import AgentRunner
 
 
@@ -101,6 +102,45 @@ async def test_query_handler_injects_auth_headers_into_mcp_headers_and_context(
         "cookie": "foo=bar; com.cmb.dw.rtl.sso.token=auth-123",
     }
     assert captured["request_context"]["auth_token"] == "token-123"
+
+
+def test_create_agent_for_query_enables_subagents_in_real_context(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    """Real chat runner contexts expose main-agent delegation by default."""
+    runner = AgentRunner(agent_id="test-agent", workspace_dir=tmp_path)
+    runner.tenant_id = "tenant-1"
+    runner.session = SimpleNamespace(
+        _get_save_path=lambda session_id, user_id: (
+            f"/tmp/{session_id}-{user_id}.json"
+        ),
+    )
+    captured: dict[str, Any] = {}
+
+    class FakeAgent:
+        def __init__(self, **kwargs):
+            captured["request_context"] = kwargs["request_context"]
+
+    monkeypatch.setattr("swe.app.runner.runner.SWEAgent", FakeAgent)
+
+    runner._create_agent_for_query(
+        agent_config=_fake_agent_config(),
+        env_context="",
+        mcp_clients=[],
+        request=SimpleNamespace(),
+        session_id="session-1",
+        user_id="user-1",
+        channel="console",
+        chat=SimpleNamespace(id="chat-1"),
+        turn_id="turn-1",
+        hook_overlay=HookSessionOverlay(),
+        auth_token=None,
+        approved_tool_call=None,
+    )
+
+    assert captured["request_context"]["agent_role"] == "main"
+    assert captured["request_context"]["enable_subagents"] is True
 
 
 @pytest.mark.asyncio

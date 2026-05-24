@@ -791,6 +791,29 @@ class ToolGuardMixin:
             return None
         return decision.reason
 
+    def _subagent_budget_denial(self) -> str | None:
+        """Consume one SubAgent tool-call budget slot or return denial."""
+        request_context = getattr(self, "_request_context", {}) or {}
+        if request_context.get("agent_role") != "subagent":
+            return None
+        budget = request_context.get("subagent_budget")
+        if not isinstance(budget, dict):
+            return None
+        try:
+            max_tool_calls = int(budget.get("max_tool_calls") or 0)
+            used = int(request_context.get("_subagent_tool_calls_used") or 0)
+        except (TypeError, ValueError):
+            return "invalid SubAgent tool-call budget"
+        if max_tool_calls <= 0:
+            return None
+        if used >= max_tool_calls:
+            return (
+                "SubAgent tool-call budget exceeded "
+                f"({used}/{max_tool_calls})."
+            )
+        request_context["_subagent_tool_calls_used"] = used + 1
+        return None
+
     async def _record_tool_hook_result(
         self,
         result: MergedHookResult,
@@ -874,6 +897,13 @@ class ToolGuardMixin:
                 tool_call,
                 tool_name,
                 subagent_denial,
+            )
+        subagent_budget_denial = self._subagent_budget_denial()
+        if subagent_budget_denial is not None:
+            return await self._acting_subagent_policy_denied(
+                tool_call,
+                tool_name,
+                subagent_budget_denial,
             )
 
         pre_hook_result = await self._emit_tool_hook(

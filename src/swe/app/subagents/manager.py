@@ -11,7 +11,7 @@ from .builtins import builtin_definition_provider
 from .models import AgentError, AgentResult, DelegationSpec, PermissionPolicy
 from .permissions import compose_effective_policy
 from .registry import AgentRegistry
-from .run_store import InMemorySubAgentRunStore
+from .run_store import LocalJsonSubAgentRunStore, SubAgentRunStore
 from .runtime import SubAgentRuntime
 
 
@@ -22,14 +22,14 @@ class DelegationManager:
         self,
         *,
         registry: AgentRegistry | None = None,
-        store: InMemorySubAgentRunStore | None = None,
+        store: SubAgentRunStore | None = None,
         runtime: SubAgentRuntime | Any | None = None,
     ):
         self._registry = registry or AgentRegistry(
             [builtin_definition_provider()],
         )
-        self._store = store or InMemorySubAgentRunStore()
-        self._runtime = runtime or SubAgentRuntime(store=self._store)
+        self._store = store
+        self._runtime = runtime
 
     async def delegate(
         self,
@@ -55,8 +55,10 @@ class DelegationManager:
             runtime_policy or PermissionPolicy.readonly(),
             workspace_policy or PermissionPolicy.readonly(),
         )
-        run = await self._store.create(spec, definition, effective_policy)
-        return await self._runtime.run(
+        store = self._store or LocalJsonSubAgentRunStore(workspace_dir)
+        runtime = self._runtime or SubAgentRuntime(store=store)
+        run = await store.create(spec, definition, effective_policy)
+        return await runtime.run(
             run=run,
             definition=definition,
             spec=spec,

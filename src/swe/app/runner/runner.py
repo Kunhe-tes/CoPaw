@@ -1549,6 +1549,8 @@ class AgentRunner(Runner):
             "turn_id": turn_id,
             "agent_id": self.agent_id,
             "tenant_id": self.tenant_id or "",
+            "agent_role": "main",
+            "enable_subagents": True,
             "transcript_path": (
                 self.session._get_save_path(session_id, user_id)
                 if hasattr(self.session, "_get_save_path")
