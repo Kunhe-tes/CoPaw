@@ -234,6 +234,7 @@ def test_effective_policy_uses_intersection_and_deny_precedence() -> None:
         ("git diff --output=/tmp/subagent-mutates", False),
         ("git log --output /tmp/subagent-mutates", False),
         ("sed -i bak s/a/b/ file.txt", False),
+        ("sed --in-place=.bak s/a/b/ file.txt", False),
         ("sed 's/a/b/w/tmp/subagent-mutates' file.txt", False),
         ("sed 's/a/date/e' file.txt", False),
         ("sed -n '1,10w /tmp/subagent-mutates' file.txt", False),

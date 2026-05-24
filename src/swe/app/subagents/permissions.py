@@ -171,7 +171,11 @@ def _uses_sed_in_place(command: str) -> bool:
         and parts[0].lower() == "sed"
         and (
             any(part.startswith("-i") for part in parts[1:])
-            or "--in-place" in {part.lower() for part in parts[1:]}
+            or any(
+                lower_part == "--in-place"
+                or lower_part.startswith("--in-place=")
+                for lower_part in (part.lower() for part in parts[1:])
+            )
             or _uses_sed_script_file(parts)
             or any(
                 _sed_script_uses_write_or_exec(script)
