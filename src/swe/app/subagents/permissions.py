@@ -161,6 +161,7 @@ def _uses_external_execution_option(normalized_command: str) -> bool:
 
 
 def _uses_sed_in_place(command: str) -> bool:
+    """Detect sed options that can mutate files or execute arbitrary scripts."""
     try:
         parts = shlex.split(command)
     except ValueError:
@@ -171,12 +172,26 @@ def _uses_sed_in_place(command: str) -> bool:
         and (
             any(part.startswith("-i") for part in parts[1:])
             or "--in-place" in {part.lower() for part in parts[1:]}
+            or _uses_sed_script_file(parts)
             or any(
                 _sed_script_uses_write_or_exec(script)
                 for script in _sed_scripts(parts)
             )
         ),
     )
+
+
+def _uses_sed_script_file(parts: list[str]) -> bool:
+    """Treat file-backed sed scripts as unsafe in readonly mode."""
+    for part in parts[1:]:
+        lower = part.lower()
+        if lower in {"-f", "--file"}:
+            return True
+        if lower.startswith("-f") and len(part) > 2:
+            return True
+        if lower.startswith("--file="):
+            return True
+    return False
 
 
 def _sed_scripts(parts: list[str]) -> list[str]:
