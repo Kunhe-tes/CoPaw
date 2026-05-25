@@ -527,10 +527,15 @@ async def test_delegation_manager_resolves_records_and_invokes_runtime(
 
 
 @pytest.mark.asyncio
-async def test_delegation_manager_defaults_to_workspace_local_run_store(
+async def test_delegation_manager_defaults_to_app_state_run_store(
+    monkeypatch,
     tmp_path: Path,
 ) -> None:
-    """Default delegation records survive in workspace-local app state."""
+    """Default delegation records stay out of delegated checkout roots."""
+    repo_checkout = tmp_path / "repo-checkout"
+    repo_checkout.mkdir()
+    app_state_root = tmp_path / "app-state"
+    monkeypatch.setattr("swe.config.utils.WORKING_DIR", app_state_root)
     registry = AgentRegistry([builtin_definition_provider()])
     runtime = SimpleNamespace()
     runtime.run = AsyncMock(
@@ -546,13 +551,16 @@ async def test_delegation_manager_defaults_to_workspace_local_run_store(
 
     await manager.delegate(
         spec=_spec(),
-        parent_agent_config=_agent_config(tmp_path),
-        workspace_dir=tmp_path,
+        parent_agent_config=_agent_config(repo_checkout),
+        workspace_dir=repo_checkout,
         parent_policy=PermissionPolicy.readonly(),
         request_context={"agent_role": "main"},
     )
 
-    local_store = LocalJsonSubAgentRunStore(tmp_path)
+    assert not (repo_checkout / "subagent_runs.json").exists()
+    local_store = LocalJsonSubAgentRunStore(
+        app_state_root / "default" / "workspaces" / "default",
+    )
     records = list(local_store.records.values())
     assert len(records) == 1
     assert records[0].definition_name == "plan-researcher"

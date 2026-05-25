@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any
 
 from ...config.config import AgentProfileConfig
+from ...config.utils import get_tenant_working_dir
 from .builtins import builtin_definition_provider
 from .models import AgentError, AgentResult, DelegationSpec, PermissionPolicy
 from .permissions import compose_effective_policy
@@ -55,7 +56,9 @@ class DelegationManager:
             runtime_policy or PermissionPolicy.readonly(),
             workspace_policy or PermissionPolicy.readonly(),
         )
-        store = self._store or LocalJsonSubAgentRunStore(workspace_dir)
+        store = self._store or LocalJsonSubAgentRunStore(
+            _default_run_store_dir(parent_agent_config),
+        )
         runtime = self._runtime or SubAgentRuntime(store=store)
         run = await store.create(spec, definition, effective_policy)
         return await runtime.run(
@@ -91,3 +94,9 @@ class DelegationManager:
                 AgentError(code="nested_delegation", message=message),
             ],
         )
+
+
+def _default_run_store_dir(parent_agent_config: AgentProfileConfig) -> Path:
+    """Return the app-state directory for default SubAgent run records."""
+    agent_id = parent_agent_config.id or "default"
+    return get_tenant_working_dir() / "workspaces" / agent_id
