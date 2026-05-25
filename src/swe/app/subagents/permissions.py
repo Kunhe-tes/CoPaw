@@ -33,11 +33,16 @@ def compose_effective_policy(
     for policy in policies:
         allowed_commands &= set(policy.shell.allowed_commands)
         denied_patterns.update(policy.shell.denied_patterns)
+    shell_strategy = (
+        "deny_all"
+        if any(policy.shell.strategy == "deny_all" for policy in policies)
+        else "allowlist"
+    )
     return PermissionPolicy(
         tools=PermissionTools(allow=sorted(allow), deny=sorted(deny)),
         shell=ShellPolicy(
             enabled=all(policy.shell.enabled for policy in policies),
-            strategy="allowlist",
+            strategy=shell_strategy,
             allowed_commands=sorted(allowed_commands),
             denied_patterns=sorted(denied_patterns),
         ),
@@ -91,6 +96,11 @@ def _validate_shell(
         return ToolAuthorizationDecision(
             allowed=False,
             reason="missing shell command",
+        )
+    if policy.shell.strategy == "deny_all":
+        return ToolAuthorizationDecision(
+            allowed=False,
+            reason="shell strategy deny_all",
         )
     shell_operator = _denied_shell_operator(command)
     if shell_operator is not None:
@@ -232,7 +242,7 @@ def _sed_scripts(parts: list[str]) -> list[str]:
 
 def _sed_script_uses_write_or_exec(script: str) -> bool:
     """Detect inline sed commands that write files or execute commands."""
-    if re.search(r"(^|[;{])\s*\d*(,\d*)?\s*[we](?:\s|$)", script) is not None:
+    if _sed_script_has_write_or_exec_command(script):
         return True
     index = 0
     while index < len(script):
@@ -261,3 +271,104 @@ def _sed_script_uses_write_or_exec(script: str) -> bool:
             cursor += 1
         index = cursor + 1
     return False
+
+
+def _sed_script_has_write_or_exec_command(script: str) -> bool:
+    """Detect sed w/W/e commands after optional addresses and negation."""
+    index = 0
+    while index < len(script):
+        index = _skip_sed_command_boundaries(script, index)
+        if index >= len(script):
+            break
+        command_index = _sed_command_index(script, index)
+        if command_index >= len(script):
+            break
+        if script[command_index] in {"w", "W", "e"}:
+            return True
+        index = _next_sed_command_start(script, command_index + 1)
+    return False
+
+
+def _skip_sed_command_boundaries(script: str, index: int) -> int:
+    """Skip whitespace and command separators before a sed command."""
+    while index < len(script) and (
+        script[index].isspace() or script[index] in ";{}"
+    ):
+        index += 1
+    return index
+
+
+def _sed_command_index(script: str, index: int) -> int:
+    """Return the command character index after sed addresses."""
+    index = _skip_sed_spaces(script, index)
+    index = _skip_sed_addresses(script, index)
+    index = _skip_sed_spaces(script, index)
+    if index < len(script) and script[index] == "!":
+        index = _skip_sed_spaces(script, index + 1)
+    return index
+
+
+def _skip_sed_addresses(script: str, index: int) -> int:
+    """Skip sed line, last-line, and regex address prefixes."""
+    for address_count in range(2):
+        next_index = _skip_sed_address(script, index)
+        if next_index == index:
+            break
+        index = _skip_sed_spaces(script, next_index)
+        if address_count == 0 and index < len(script) and script[index] == ",":
+            index = _skip_sed_spaces(script, index + 1)
+            continue
+        break
+    return index
+
+
+def _skip_sed_address(script: str, index: int) -> int:
+    """Skip one sed address when present."""
+    if index >= len(script):
+        return index
+    if script[index].isdigit():
+        while index < len(script) and script[index].isdigit():
+            index += 1
+        return index
+    if script[index] == "$":
+        return index + 1
+    if script[index] == "/":
+        return _skip_sed_delimited_pattern(script, index, "/")
+    if script[index] == "\\" and index + 1 < len(script):
+        return _skip_sed_delimited_pattern(
+            script,
+            index + 1,
+            script[index + 1],
+        )
+    return index
+
+
+def _skip_sed_delimited_pattern(
+    script: str,
+    index: int,
+    delimiter: str,
+) -> int:
+    """Skip a sed regex address delimited by delimiter."""
+    cursor = index + 1
+    while cursor < len(script):
+        if script[cursor] == "\\":
+            cursor += 2
+            continue
+        if script[cursor] == delimiter:
+            return cursor + 1
+        cursor += 1
+    return index
+
+
+def _skip_sed_spaces(script: str, index: int) -> int:
+    """Skip sed script whitespace."""
+    while index < len(script) and script[index].isspace():
+        index += 1
+    return index
+
+
+def _next_sed_command_start(script: str, index: int) -> int:
+    """Find the next likely sed command boundary."""
+    while index < len(script) and script[index] not in ";\n{}":
+        index += 1
+    return index

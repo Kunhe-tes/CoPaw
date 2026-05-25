@@ -21,6 +21,7 @@ from swe.app.subagents import (
     compose_effective_policy,
     validate_tool_call,
 )
+from swe.app.subagents.models import AgentError
 
 
 def test_builtin_definitions_are_valid_and_readonly() -> None:
@@ -130,6 +131,32 @@ def test_definition_validation_rejects_unknown_permission_tools() -> None:
                 "permission": {
                     "tools": {
                         "allow": ["read_file", "bogus_tool"],
+                    },
+                },
+            },
+        )
+
+    assert "unknown built-in tool: bogus_tool" in str(exc_info.value)
+
+
+@pytest.mark.parametrize("permission_field", ["deny", "ask"])
+def test_definition_validation_rejects_unknown_permission_deny_ask_tools(
+    permission_field: str,
+) -> None:
+    """Permission tool deny/ask lists must use known built-in tool names."""
+    with pytest.raises(DefinitionValidationError) as exc_info:
+        SubAgentDefinition.model_validate(
+            {
+                "name": f"unknown-permission-{permission_field}-tool",
+                "version": "1.0.0",
+                "description": "Invalid permission worker",
+                "prompt": {"system": "Inspect code"},
+                "source": "user",
+                "owner_scope": "tenant/source/workspace",
+                "permission": {
+                    "tools": {
+                        "allow": ["read_file"],
+                        permission_field: ["bogus_tool"],
                     },
                 },
             },
@@ -262,6 +289,26 @@ def test_effective_policy_uses_intersection_and_deny_precedence() -> None:
     ).allowed
 
 
+def test_effective_policy_preserves_shell_deny_all() -> None:
+    """A deny_all input policy must keep effective shell execution denied."""
+    parent = PermissionPolicy.readonly()
+    subagent = PermissionPolicy.readonly()
+    runtime = PermissionPolicy.readonly()
+    workspace = PermissionPolicy.readonly()
+    workspace.shell.strategy = "deny_all"
+
+    effective = compose_effective_policy(parent, subagent, runtime, workspace)
+
+    assert effective.shell.strategy == "deny_all"
+    decision = validate_tool_call(
+        effective,
+        "execute_shell_command",
+        {"command": "pwd"},
+    )
+    assert not decision.allowed
+    assert "deny_all" in decision.reason
+
+
 @pytest.mark.parametrize(
     ("command", "allowed"),
     [
@@ -279,12 +326,22 @@ def test_effective_policy_uses_intersection_and_deny_precedence() -> None:
         ("git status --short | sh", False),
         ("git diff --output=/tmp/subagent-mutates", False),
         ("git log --output /tmp/subagent-mutates", False),
+        ("sed '/warning/p' file.txt", True),
+        ("sed '$p' file.txt", True),
         ("sed -i bak s/a/b/ file.txt", False),
         ("sed --in-place=.bak s/a/b/ file.txt", False),
         ("sed 's/a/b/w/tmp/subagent-mutates' file.txt", False),
         ("sed 's/a/date/e' file.txt", False),
         ("sed -n '1,10w /tmp/subagent-mutates' file.txt", False),
+        ("sed -e '1w/tmp/subagent-mutates' file.txt", False),
+        ("sed '1W /tmp/subagent-mutates' file.txt", False),
+        ("sed -e '1W/tmp/subagent-mutates' file.txt", False),
+        ("sed '$w /tmp/subagent-mutates' file.txt", False),
+        ("sed '/a/w /tmp/subagent-mutates' file.txt", False),
+        ("sed '1,$w /tmp/subagent-mutates' file.txt", False),
+        ("sed '2!w /tmp/subagent-mutates' file.txt", False),
         ("sed -n '1e touch /tmp/subagent-mutates' file.txt", False),
+        ("sed '$e touch /tmp/subagent-mutates' file.txt", False),
         ("sed -f readonly-script.sed file.txt", False),
         ("sed -freadonly-script.sed file.txt", False),
         ("sed --file readonly-script.sed file.txt", False),
@@ -351,3 +408,31 @@ async def test_run_stores_record_status_result_and_errors(
     assert saved_failed is not None
     assert saved_failed.status == "failed"
     assert saved_failed.errors[0].message == "boom"
+
+    timeout = await local_store.create(spec, definition, policy)
+    await local_store.mark_running(timeout.run_id)
+    timeout_result = AgentResult(
+        task_id="task-1",
+        agent_run_id=timeout.run_id,
+        agent_name="plan-researcher",
+        status="failed",
+        summary="timed out",
+        errors=[
+            AgentError(
+                code="timeout",
+                message="SubAgent execution exceeded its timeout budget.",
+                recoverable=False,
+            ),
+        ],
+    )
+    await local_store.fail(
+        timeout.run_id,
+        timeout_result.summary,
+        result=timeout_result,
+    )
+
+    saved_timeout = await local_store.get(timeout.run_id)
+    assert saved_timeout is not None
+    assert saved_timeout.result is not None
+    assert saved_timeout.result.errors[0].code == "timeout"
+    assert saved_timeout.errors[0].code == "timeout"

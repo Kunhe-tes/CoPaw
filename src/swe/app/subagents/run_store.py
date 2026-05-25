@@ -111,16 +111,22 @@ class InMemorySubAgentRunStore:
         result: AgentResult | None = None,
     ) -> SubAgentRunRecord:
         """Store terminal failure with structured error."""
-        error = AgentError(
-            code="runtime_error",
-            message=message,
-            recoverable=False,
+        errors = (
+            list(result.errors)
+            if result and result.errors
+            else [
+                AgentError(
+                    code="runtime_error",
+                    message=message,
+                    recoverable=False,
+                ),
+            ]
         )
         record = self.records[run_id].model_copy(
             update={
                 "status": "failed",
                 "result": result,
-                "errors": [*self.records[run_id].errors, error],
+                "errors": [*self.records[run_id].errors, *errors],
                 "finished_at": _now_utc(),
             },
         )
