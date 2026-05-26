@@ -19,6 +19,7 @@
  * - manager: 是否为普通管理员
  * - authHeaders: 自定义 headers 数组
  * - parentOrigin: 父窗口来源 origin
+ * - subBranchId: 支行 ID
  *
  * 相关文件：
  * - types/iframe.ts: 类型定义
@@ -86,6 +87,7 @@ const initialState: IframeContext = {
   token: null,
   bbk: null,
   orgCode: null,
+  subBranchId: null,
   orgLvl: null,
   positionId: null,
   userChange: false,
@@ -134,6 +136,7 @@ export const useIframeStore = create<IframeStore>()(
         token: state.token,
         bbk: state.bbk,
         orgCode: state.orgCode,
+        subBranchId: state.subBranchId,
         orgLvl: state.orgLvl,
         positionId: state.positionId,
         userChange: state.userChange,

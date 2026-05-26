@@ -23,6 +23,7 @@ import {
 import { SkillCard } from "./SkillCard";
 import { SkillDetailDrawer } from "./SkillDetailDrawer";
 import { DistributeTargetModal, DistributeTargetType } from "./DistributeTargetModal";
+import { RecallModal, RecallTargetType } from "./components/RecallModal";
 import UploadSkillModal from "./components/UploadSkillModal";
 import { MCPCard } from "./MCPCard";
 import { MCPDetailDrawer } from "./MCPDetailDrawer";
@@ -70,6 +71,12 @@ export function MarketSkills({ sourceId, isManager }: MarketSkillsProps) {
   const [distributeModalOpen, setDistributeModalOpen] = useState(false);
   const [distributeType, setDistributeType] = useState<DistributeTargetType>("skill");
   const [distributeTarget, setDistributeTarget] = useState<MarketSkill | MarketMCPItem | null>(null);
+
+  // 撤回弹窗状态
+  const [recallModalOpen, setRecallModalOpen] = useState(false);
+  const [recallType, setRecallType] = useState<RecallTargetType>("skill");
+  const [recallItemId, setRecallItemId] = useState<string>("");
+  const [recallItemName, setRecallItemName] = useState<string>("");
 
   const [searchQuery, setSearchQuery] = useState("");
   const [activeResourceType, setActiveResourceType] = useState<ResourceType>("skill");
@@ -168,6 +175,22 @@ export function MarketSkills({ sourceId, isManager }: MarketSkillsProps) {
     setDistributeType("mcp");
     setDistributeTarget(mcp);
     setDistributeModalOpen(true);
+  }, []);
+
+  // 打开技能撤回弹窗
+  const openSkillRecallModal = useCallback((skill: MarketSkill) => {
+    setRecallType("skill");
+    setRecallItemId(skill.item_id);
+    setRecallItemName(skill.name);
+    setRecallModalOpen(true);
+  }, []);
+
+  // 打开 MCP 撤回弹窗
+  const openMCPRecallModal = useCallback((mcp: MarketMCPItem | MarketMCPDetail) => {
+    setRecallType("mcp");
+    setRecallItemId(mcp.item_id);
+    setRecallItemName(mcp.name);
+    setRecallModalOpen(true);
   }, []);
 
   const openMCPEditModal = useCallback(async (target: MarketMCPItem | MarketMCPDetail) => {
@@ -391,6 +414,11 @@ export function MarketSkills({ sourceId, isManager }: MarketSkillsProps) {
                     ? () => openSkillDistributeModal(selectedSkill)
                     : undefined
                 }
+                onRecall={
+                  isManager
+                    ? () => openSkillRecallModal(selectedSkill)
+                    : undefined
+                }
                 sourceId={sourceId}
                 onRefresh={refreshSkills}
                 categoryName={selectedSkillCategoryName}
@@ -513,6 +541,7 @@ export function MarketSkills({ sourceId, isManager }: MarketSkillsProps) {
               <MCPDetailDrawer
                 mcp={selectedMCP}
                 onDistribute={isManager ? () => openMCPDistributeModal(selectedMCP) : undefined}
+                onRecall={isManager ? () => openMCPRecallModal(selectedMCP) : undefined}
                 onEdit={() => void openMCPEditModal(selectedMCP)}
                 onDelete={isManager ? () => confirmDeleteMCP(selectedMCP) : undefined}
                 canEdit={isManager}
@@ -604,6 +633,32 @@ export function MarketSkills({ sourceId, isManager }: MarketSkillsProps) {
           void handleMCPEditSuccess(detail);
         }}
       />
+
+      {/* 撤回弹窗 */}
+      {isManager && (
+        <RecallModal
+          open={recallModalOpen}
+          type={recallType}
+          itemId={recallItemId}
+          itemName={recallItemName}
+          sourceId={sourceId}
+          onClose={() => {
+            setRecallModalOpen(false);
+            setRecallItemId("");
+            setRecallItemName("");
+          }}
+          onSuccess={() => {
+            setRecallModalOpen(false);
+            setRecallItemId("");
+            setRecallItemName("");
+            if (recallType === "skill") {
+              refreshSkills();
+            } else {
+              refreshMCP();
+            }
+          }}
+        />
+      )}
     </div>
   );
 }

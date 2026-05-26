@@ -20,6 +20,7 @@ import {
 import { ChevronDown, ChevronRight } from "lucide-react";
 import { marketMcpApi } from "../../api/modules/marketMcp";
 import { BBK_ID_MAP } from "../../constants/bbk";
+import { copyToClipboard } from "../../utils/clipboard";
 
 const { Dragger } = Upload;
 
@@ -138,12 +139,11 @@ export function MCPUploadModal({
   const [showJsonTemplate, setShowJsonTemplate] = useState(false);
 
   const handleCopyJsonTemplate = async () => {
-    try {
-      await navigator.clipboard.writeText(MCP_JSON_TEMPLATE);
+    const success = await copyToClipboard(MCP_JSON_TEMPLATE);
+    if (success) {
       setJsonTemplateCopied(true);
       setTimeout(() => setJsonTemplateCopied(false), 2000);
-    } catch (error) {
-      console.error("复制 JSON 模板失败:", error);
+    } else {
       message.error("复制 JSON 模板失败");
     }
   };

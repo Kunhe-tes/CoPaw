@@ -38,7 +38,6 @@ import {
 import UserDetailModal from "./components/UserDetailModal";
 import SkillDetailModal from "./components/SkillDetailModal";
 import { BBK_ID_MAP, BBK_ID_TO_NAME_MAP, getBbkDisplayName } from "../../../constants/bbk";
-import { useIframeStore, getIframeContext } from "../../../stores/iframeStore";
 import {
   formatChange,
   formatDuration,
@@ -55,19 +54,7 @@ import {
   type TrendDatum,
   type UserRow,
 } from "./types";
-import {DEFAULT_SOURCE_ID, DEFAULT_BBK_ID} from "@/constants/identity.ts";
 const { Option } = Select;
-
-const PLATFORM_NAME_MAP: Record<string, string> = {
-  CMSJY: "远程RM小助Claw版",
-  UPPCLAW: "智像小助CLAW",
-  copilotClaw: "数据赋能小助CLAW",
-  ruice: "睿策小助Claw版",
-  privatebanking: "私行小助claw",
-  SZLS: "数智零售claw",
-  rtauto: "实时数据CLAW",
-  RMASSIST: "RM小助",
-};
 
 const METRIC_ACCENT_COLORS = [
   "#2563eb",
@@ -90,9 +77,6 @@ const DONUT_COLORS = ["#18b368", "#ef4444", "#94a3b8"];
 
 const safeNumber = (value: unknown): number =>
   typeof value === "number" && !Number.isNaN(value) ? value : 0;
-
-const getPlatformDisplayName = (sourceId: string): string =>
-  PLATFORM_NAME_MAP[sourceId] || sourceId;
 
 const iconMap = {
   users: UserRound,
@@ -472,34 +456,12 @@ export function buildTrendSvgData(trendData: TrendDatum[]) {
 
 export default function BusinessOverviewPage() {
   const navigate = useNavigate();
-  const isSuperManager = useIframeStore((state) => state.isSuperManager);
-  const userSource = useIframeStore((state) => state.source);
-  const userBbk = useIframeStore((state) => state.bbk);
 
   const [timeRange, setTimeRange] = useState<TimeRange>("day");
   const [dateRange, setDateRange] = useState<[Dayjs, Dayjs]>([dayjs(), dayjs()]);
-    // 非超级管理员的平台初始值为用户所属平台，超级管理员默认为 "all"
-  const [platform, setPlatform] = useState<string>(() => {
-    // 初始化时从 sessionStorage 获取，避免闪烁
-    try {
-      const stored = sessionStorage.getItem("swe-iframe-context");
-      if (stored) {
-        const ctx = JSON.parse(stored);
-        if (ctx.state?.isSuperManager) {
-          return "all";
-        }
-        return ctx.state?.source || DEFAULT_SOURCE_ID || "all";
-      }
-    } catch {
-      // ignore
-    }
-    // 非 iframe 模式下使用默认 source
-    return DEFAULT_SOURCE_ID || "all";
-  });
   // 管理员多选分行；非管理员使用用户所属分行
   const [bbkIds, setBbkIds] = useState<string[]>([]);
 
-  const [sources, setSources] = useState<string[]>([]);
   const [overviewStats, setOverviewStats] = useState<OverviewStats | null>(
     null,
   );
@@ -545,6 +507,7 @@ export default function BusinessOverviewPage() {
   const mcpLoadingRef = useRef(false);
   const [modalOpen, setModalOpen] = useState(false);
   const [selectedUserId, setSelectedUserId] = useState<string | null>(null);
+  const [selectedUserName, setSelectedUserName] = useState<string | null>(null);
   const [skillModalOpen, setSkillModalOpen] = useState(false);
   const [selectedSkillName, setSelectedSkillName] = useState("");
   const [activeTrendIndex, setActiveTrendIndex] = useState<number | null>(null);
@@ -557,21 +520,6 @@ export default function BusinessOverviewPage() {
     () => dateRange[1].format("YYYY-MM-DD"),
     [dateRange],
   );
-  // 平台筛选参数：超级管理员选择 "all" 时传递 "all"，其他情况按实际值传递
-  // 使用 useMemo 缓存，避免每次渲染重新创建导致请求循环
-  const effectiveSourceId = useMemo(() => {
-    if (isSuperManager) {
-      return platform === "all" ? "all" : platform;
-    }
-    const sourceFromContext = getIframeContext().source || DEFAULT_SOURCE_ID;
-    return sourceFromContext ? sourceFromContext : undefined;
-  }, [isSuperManager, platform]);
-  // Select 显示用的平台值
-  const displayPlatformValue = useMemo(() => {
-    if (isSuperManager) return platform;
-    const sourceFromContext = getIframeContext().source || DEFAULT_SOURCE_ID;
-    return sourceFromContext || "all";
-  }, [isSuperManager, platform]);
   // 分行筛选参数：直接使用 UI 选择的 bbkIds，空数组表示全部分行
   const effectiveBbkIds = useMemo(() => {
     return bbkIds.length === 0 ? undefined : bbkIds;
@@ -593,27 +541,6 @@ export default function BusinessOverviewPage() {
     [],
   );
 
-  // 获取平台列表
-  const fetchSources = useCallback(async () => {
-    try {
-      // 超级管理员：加载所有平台选项
-      if (isSuperManager) {
-        const res = await tracingApi.getSources();
-        setSources(res.sources || []);
-      } else {
-        // 非超级管理员：只显示用户所属平台
-        const effectiveSource = userSource || DEFAULT_SOURCE_ID;
-        if (effectiveSource) {
-          setSources([effectiveSource]);
-        } else {
-          setSources([]);
-        }
-      }
-    } catch (error) {
-      console.error("Failed to fetch sources:", error);
-    }
-  }, [isSuperManager, userSource]);
-
   const fetchDashboard = useCallback(async () => {
     const isSingleDay = dateRange[0].isSame(dateRange[1], "day");
 
@@ -622,27 +549,23 @@ export default function BusinessOverviewPage() {
         tracingApi.getOverview(
           startDateText,
           endDateText,
-          effectiveSourceId,
           effectiveBbkIds?.join(","),
         ),
         tracingApi.getGrowthStats(
           startDateText,
           endDateText,
           timeRange,
-          effectiveSourceId,
           effectiveBbkIds?.join(","),
         ),
         isSingleDay
           ? tracingApi.getHourlyTrend(
               startDateText,
               endDateText,
-              effectiveSourceId,
               effectiveBbkIds?.join(","),
             )
           : tracingApi.getDailyTrend(
               startDateText,
               endDateText,
-              effectiveSourceId,
               effectiveBbkIds?.join(","),
             ),
       ]);
@@ -663,7 +586,6 @@ export default function BusinessOverviewPage() {
   }, [
     dateRange,
     effectiveBbkIds,
-    effectiveSourceId,
     endDateText,
     startDateText,
     timeRange,
@@ -681,7 +603,6 @@ export default function BusinessOverviewPage() {
         const result = await tracingApi.getUsers(page, 10, {
           start_date: startDateText,
           end_date: endDateText,
-          source_id: effectiveSourceId,
           bbk_ids: effectiveBbkIds?.join(","),
           sort_by: "conversations",
           filter_user_type: activeFilterType,
@@ -700,7 +621,7 @@ export default function BusinessOverviewPage() {
         setActiveLoading(false);
       }
     },
-    [effectiveBbkIds, effectiveSourceId, endDateText, startDateText, transformUserData, activeFilterType],
+    [effectiveBbkIds, endDateText, startDateText, transformUserData, activeFilterType],
   );
 
   const fetchSkills = useCallback(
@@ -716,7 +637,6 @@ export default function BusinessOverviewPage() {
         const result = await tracingApi.getSkills(1, 5, {
           start_date: startDateText,
           end_date: endDateText,
-          source_id: effectiveSourceId,
           bbk_ids: effectiveBbkIds?.join(","),
         });
         const rows = result.items || [];
@@ -728,7 +648,7 @@ export default function BusinessOverviewPage() {
         setSkillsLoading(false);
       }
     },
-    [effectiveBbkIds, effectiveSourceId, endDateText, startDateText],
+    [effectiveBbkIds, endDateText, startDateText],
   );
 
   const fetchMcpSummary = useCallback(
@@ -743,7 +663,6 @@ export default function BusinessOverviewPage() {
         const result = await tracingApi.getMCPSummary({
           start_date: startDateText,
           end_date: endDateText,
-          source_id: effectiveSourceId,
           bbk_ids: effectiveBbkIds?.join(","),
         });
         setMcpSummaryData(result);
@@ -754,7 +673,7 @@ export default function BusinessOverviewPage() {
         setMcpLoading(false);
       }
     },
-    [effectiveBbkIds, effectiveSourceId, endDateText, startDateText],
+    [effectiveBbkIds, endDateText, startDateText],
   );
 
   const fetchTaskStatusSummary = useCallback(async () => {
@@ -762,32 +681,26 @@ export default function BusinessOverviewPage() {
       const result = await tracingApi.getTaskStatusSummary({
         start_date: startDateText,
         end_date: endDateText,
-        source_id: effectiveSourceId,
         bbk_ids: effectiveBbkIds?.join(","),
       });
       setTaskStatusSummary(result);
     } catch (error) {
       console.error("Failed to fetch task status summary:", error);
     }
-  }, [effectiveBbkIds, effectiveSourceId, endDateText, startDateText]);
+  }, [effectiveBbkIds, endDateText, startDateText]);
 
   const fetchDepthSummary = useCallback(async () => {
     try {
       const result = await tracingApi.getDepthSummary({
         start_date: startDateText,
         end_date: endDateText,
-        source_id: effectiveSourceId,
         bbk_ids: effectiveBbkIds?.join(","),
       });
       setDepthSummary(result);
     } catch (error) {
       console.error("Failed to fetch depth summary:", error);
     }
-  }, [effectiveBbkIds, effectiveSourceId, endDateText, startDateText]);
-
-  useEffect(() => {
-    fetchSources();
-  }, [fetchSources]);
+  }, [effectiveBbkIds, endDateText, startDateText]);
 
   useEffect(() => {
     fetchDashboard();
@@ -985,22 +898,6 @@ export default function BusinessOverviewPage() {
               {BBK_ID_MAP.map((item) => (
                 <Option key={item.value} value={item.value}>
                   {item.label}
-                </Option>
-              ))}
-            </Select>
-            <Select
-              className={styles.scopeSelect}
-              value={displayPlatformValue}
-              onChange={(value) => {
-                setPlatform(value || "all");
-              }}
-              disabled={!isSuperManager}
-              allowClear
-            >
-              <Option value="all">全部平台</Option>
-              {sources.map((source) => (
-                <Option key={source} value={source}>
-                  {getPlatformDisplayName(source)}
                 </Option>
               ))}
             </Select>
@@ -1329,6 +1226,7 @@ export default function BusinessOverviewPage() {
                     className={styles.rankRow}
                     onClick={() => {
                       setSelectedUserId(item.userId);
+                      setSelectedUserName(item.userName);
                       setModalOpen(true);
                     }}
                   >
@@ -1469,6 +1367,9 @@ export default function BusinessOverviewPage() {
               skills.slice(0, 5).map((skill, index) => {
                 const percent = (safeNumber(skill.count) / skillsTotal) * 100;
                 const barColor = SKILL_BAR_COLORS[index] || SKILL_BAR_COLORS[0];
+                // 根据描述字数动态计算tooltip宽度
+                const descLen = skill.skill_description?.length || 0;
+                const tooltipWidth = descLen <= 30 ? 240 : descLen <= 60 ? 320 : descLen <= 100 ? 400 : 520;
                 return (
                   <button
                     key={skill.skill_name}
@@ -1479,7 +1380,24 @@ export default function BusinessOverviewPage() {
                       setSkillModalOpen(true);
                     }}
                   >
-                    <Tooltip title={skill.skill_name} placement="top">
+                    <Tooltip
+                      placement="top"
+                      overlayInnerStyle={{ width: tooltipWidth, maxWidth: tooltipWidth }}
+                      title={
+                        skill.skill_description ? (
+                          <div className={styles.skillTooltip}>
+                            <div className={styles.skillTooltipName}>
+                              {skill.skill_name}
+                            </div>
+                            <div className={styles.skillTooltipDesc}>
+                              {skill.skill_description}
+                            </div>
+                          </div>
+                        ) : (
+                          skill.skill_name
+                        )
+                      }
+                    >
                       <span className={styles.skillName}>
                         {truncateName(skill.skill_name, 20)}
                       </span>
@@ -1571,9 +1489,9 @@ export default function BusinessOverviewPage() {
       <UserDetailModal
         open={modalOpen}
         userId={selectedUserId}
+        userName={selectedUserName}
         startDate={startDateText}
         endDate={endDateText}
-        sourceId={effectiveSourceId}
         bbkIds={effectiveBbkIds?.join(",")}
         onClose={() => {
           setModalOpen(false);
@@ -1586,7 +1504,6 @@ export default function BusinessOverviewPage() {
         skillName={selectedSkillName}
         startDate={startDateText}
         endDate={endDateText}
-        sourceId={effectiveSourceId}
         onClose={() => {
           setSkillModalOpen(false);
           setSelectedSkillName("");

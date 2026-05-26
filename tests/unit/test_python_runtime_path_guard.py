@@ -8,6 +8,7 @@ import subprocess
 import sys
 from pathlib import Path
 
+import swe.constant as swe_constant
 from swe.security.python_runtime_path_guard import (
     prepare_python_runtime_path_guard_env,
 )
@@ -101,6 +102,61 @@ def test_runtime_guard_allows_trusted_swe_entrypoint_to_read_trusted_file(
     assert result.returncode == 0, result.stderr
     assert "True" in result.stdout
     assert '"last_api"' in result.stdout
+
+
+def test_runtime_guard_allows_trusted_swe_entrypoint_to_bootstrap_envs_json(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    """可信 SWE 启动器需要读取密钥目录中的 envs.json 完成初始化。"""
+    tenant_root = tmp_path / "tenant"
+    tenant_root.mkdir()
+    working_dir = tmp_path / ".swe"
+    secret_dir = tmp_path / ".swe.secret"
+    secret_dir.mkdir()
+    envs_path = secret_dir / "envs.json"
+    envs_path.write_text(
+        '{"SWE_GUARD_BOOTSTRAP_TEST": "loaded"}\n',
+        encoding="utf-8",
+    )
+    trusted_bin = tmp_path / "venv" / "bin"
+    trusted_bin.mkdir(parents=True)
+    swe_entrypoint = trusted_bin / "swe"
+    swe_entrypoint.write_text(
+        (
+            "import os\n"
+            "import swe\n"
+            "print(os.environ.get('SWE_GUARD_BOOTSTRAP_TEST'))\n"
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(swe_constant, "WORKING_DIR", working_dir)
+    monkeypatch.setattr(swe_constant, "SECRET_DIR", secret_dir)
+
+    env = os.environ.copy()
+    env["SWE_WORKING_DIR"] = str(working_dir)
+    env["SWE_SECRET_DIR"] = str(secret_dir)
+    guard_dir = prepare_python_runtime_path_guard_env(
+        env,
+        tenant_root=tenant_root,
+        base_dir=tenant_root,
+        trusted_entrypoint_roots=[trusted_bin],
+    )
+
+    with guard_dir:
+        result = subprocess.run(
+            [sys.executable, str(swe_entrypoint)],
+            cwd=tenant_root,
+            env=env,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            check=False,
+        )
+
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip() == "loaded"
+    assert "failed to load persisted envs on init" not in result.stderr
 
 
 def test_runtime_guard_denies_untrusted_python_access_to_trusted_file(

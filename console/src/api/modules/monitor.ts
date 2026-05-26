@@ -13,7 +13,6 @@ export interface FilterOptionsResponse {
   users: FilterOption[];
   bbk_ids: FilterOption[];
   channels: FilterOption[];
-  source_ids: FilterOption[];
   job_names: FilterOption[];
   job_ids: FilterOption[];
 }
@@ -112,7 +111,6 @@ export const monitorApi = {
     filters?: {
       tenant_id?: string;
       bbk_id?: string;
-      source_id?: string;
       creator_user_id?: string;
       status?: string;
       enabled?: boolean;
@@ -171,7 +169,6 @@ export const monitorApi = {
     filters?: {
       tenant_id?: string;
       bbk_id?: string;
-      source_id?: string;
       enabled?: boolean;
     },
   ): Promise<Blob> => {

@@ -123,10 +123,33 @@ CREATE TABLE IF NOT EXISTS swe_cron_executions (
 """
 
 
+# SQL for creating extracted customer names table
+CREATE_EXTRACTED_CUSTOMER_NAMES_TABLE = """
+CREATE TABLE IF NOT EXISTS swe_extracted_customer_names (
+    id              BIGINT AUTO_INCREMENT PRIMARY KEY COMMENT '主键ID',
+    trace_id        VARCHAR(64) NOT NULL COMMENT '关联的 trace ID',
+    skill_name      VARCHAR(255) NOT NULL COMMENT '技能名称',
+    user_message_names JSON NOT NULL COMMENT '用户消息中提取的姓名列表',
+    model_output_names JSON NOT NULL COMMENT '模型输出中提取的姓名列表',
+    user_id         VARCHAR(64) DEFAULT '' COMMENT '用户 ID',
+    bbk_id          VARCHAR(64) DEFAULT '' COMMENT '分行 ID',
+    created_at      DATETIME DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
+    updated_at      DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT '更新时间',
+
+    UNIQUE INDEX uk_trace_skill (trace_id, skill_name),
+    INDEX idx_skill_name (skill_name),
+    INDEX idx_user_id (user_id),
+    INDEX idx_bbk_id (bbk_id),
+    INDEX idx_created_at (created_at)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='提取客户姓名记录表';
+"""
+
+
 async def init_database_tables() -> None:
     """Initialize database tables for cron monitoring.
 
-    Creates the cron_jobs and cron_executions tables if they don't exist.
+    Creates the cron_jobs, cron_executions, and extracted_customer_names
+    tables if they don't exist.
     """
     db = get_db_connection()
 
@@ -136,6 +159,11 @@ async def init_database_tables() -> None:
 
         await db.execute(CREATE_CRON_EXECUTIONS_TABLE)
         logger.info("Created cron_executions table (or already exists)")
+
+        await db.execute(CREATE_EXTRACTED_CUSTOMER_NAMES_TABLE)
+        logger.info(
+            "Created extracted_customer_names table (or already exists)",
+        )
 
     except Exception as e:
         logger.error("Failed to initialize database tables: %s", e)

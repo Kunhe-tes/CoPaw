@@ -24,6 +24,7 @@ import {
   Send,
   Pencil,
   Trash2,
+  Undo2,
 } from "lucide-react";
 import { marketMcpApi } from "../../api/modules/marketMcp";
 import type { MarketMCPDetail, MCPTestResult } from "../../api/types";
@@ -33,6 +34,7 @@ const { Title, Paragraph, Text } = Typography;
 interface MCPDetailDrawerProps {
   mcp: MarketMCPDetail | null;
   onDistribute?: () => void;
+  onRecall?: () => void;
   onEdit?: () => void;
   onDelete?: () => void;
   canEdit?: boolean;
@@ -63,6 +65,7 @@ const footerButtonStyle = {
 export function MCPDetailDrawer({
   mcp,
   onDistribute,
+  onRecall,
   onEdit,
   onDelete,
   canEdit = false,
@@ -298,6 +301,18 @@ export function MCPDetailDrawer({
                   >
                     <Send size={12} />
                     分发
+                  </Button>
+                )}
+                {/* 撤回功能临时隐藏，后续启用时移除 false 条件 */}
+                {isManager && onRecall && false && (
+                  <Button
+                    size="small"
+                    danger
+                    onClick={onRecall}
+                    style={{ ...footerButtonStyle }}
+                  >
+                    <Undo2 size={12} />
+                    撤回
                   </Button>
                 )}
                 {canEdit && onEdit && (

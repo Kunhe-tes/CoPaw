@@ -26,39 +26,32 @@ from ..models.tracing import (
     MCPSummary,
     TaskStatusSummary,
     DepthSummary,
+    ExtractCustomerNamesRequest,
+    ExtractCustomerNamesResponse,
 )
 from ..services.tracing import TracingQueryService, TracingExportService
+from ..services.tracing.extract_service import ExtractCustomerNamesService
 from ..database import get_es_client, get_db_connection
 from ...config.constant import USER_INFO_API_URL
 
 
-def _get_source_id(
-    request: Request,
-    query_source_id: Optional[str] = None,
-) -> str:
-    """获取 source_id.
+def _get_source_id_from_header(request: Request) -> str:
+    """从请求头获取 source_id.
 
     优先级：
-    1. 查询参数 source_id
-    2. X-Source-Id 请求头
-    3. 默认值 "all"（查询所有平台）
-
-    查询参数优先级更高，因为 UI 中用户显式选择平台时使用查询参数，
-    请求头来自 iframe 上下文，仅作为回退。
+    1. X-Source-Id 请求头
+    2. 默认值 "default"
 
     Args:
         request: FastAPI 请求对象
-        query_source_id: 查询参数中的 source_id
 
     Returns:
         数据源标识字符串
     """
-    if query_source_id:
-        return query_source_id
     header_source_id = request.headers.get("X-Source-Id")
     if header_source_id:
         return header_source_id
-    return "all"
+    return "default"
 
 
 def _parse_date(
@@ -102,10 +95,6 @@ router = APIRouter(prefix="/monitor/tracing", tags=["tracing"])
 @router.get("/overview", response_model=OverviewStats)
 async def get_overview(
     request: Request,
-    source_id: Optional[str] = Query(
-        None,
-        description="数据源标识，使用 'all' 查询所有平台",
-    ),
     bbk_ids: Optional[str] = Query(
         None,
         description="分行ID筛选",
@@ -119,7 +108,6 @@ async def get_overview(
     """获取运营概览统计.
 
     Args:
-        source_id: 数据源标识（使用 'all' 或留空查询所有平台）
         bbk_ids: 分行ID筛选
         start_date: 可选的开始日期筛选
         end_date: 可选的结束日期筛选
@@ -127,8 +115,7 @@ async def get_overview(
     Returns:
         运营概览统计，包括用户数、Token 使用量、模型分布等
     """
-    # 未指定时使用 'all' 获取所有平台数据
-    actual_source_id = source_id or "all"
+    actual_source_id = _get_source_id_from_header(request)
     service = TracingQueryService.get_instance()
 
     start = _parse_date(start_date, "start_date")
@@ -148,10 +135,6 @@ async def get_overview(
 @router.get("/users", response_model=dict)
 async def get_users(
     request: Request,
-    source_id: Optional[str] = Query(
-        None,
-        description="数据源标识，使用 'all' 查询所有平台",
-    ),
     page: int = Query(1, ge=1, description="页码"),
     page_size: int = Query(20, ge=1, le=100, description="每页数量"),
     user_id: Optional[str] = Query(
@@ -176,7 +159,6 @@ async def get_users(
     """获取用户列表及其统计信息.
 
     Args:
-        source_id: 数据源标识（使用 'all' 或留空查询所有平台）
         page: 页码
         page_size: 每页数量
         user_id: 按用户 ID 筛选
@@ -188,7 +170,7 @@ async def get_users(
     Returns:
         分页的用户列表及统计信息
     """
-    actual_source_id = source_id or "all"
+    actual_source_id = _get_source_id_from_header(request)
     service = TracingQueryService.get_instance()
 
     start = _parse_date(start_date, "start_date")
@@ -217,7 +199,6 @@ async def get_users(
 async def get_user_stats(
     user_id: str,
     request: Request,
-    source_id: Optional[str] = Query(None, description="数据源标识"),
     start_date: Optional[str] = Query(
         None,
         description="开始日期 (YYYY-MM-DD)",
@@ -232,7 +213,6 @@ async def get_user_stats(
 
     Args:
         user_id: 用户标识
-        source_id: 数据源标识（可选，默认从请求头获取）
         start_date: 可选的开始日期筛选
         end_date: 可选的结束日期筛选
         bbk_ids: 分行ID筛选
@@ -240,7 +220,7 @@ async def get_user_stats(
     Returns:
         用户统计信息
     """
-    actual_source_id = _get_source_id(request, source_id)
+    actual_source_id = _get_source_id_from_header(request)
     service = TracingQueryService.get_instance()
 
     start = _parse_date(start_date, "start_date")
@@ -261,7 +241,6 @@ async def get_user_stats(
 @router.get("/traces", response_model=dict)
 async def get_traces(
     request: Request,
-    source_id: Optional[str] = Query(None, description="数据源标识"),
     page: int = Query(1, ge=1, description="页码"),
     page_size: int = Query(20, ge=1, le=100, description="每页数量"),
     user_id: Optional[str] = Query(None, description="按用户 ID 筛选"),
@@ -280,7 +259,6 @@ async def get_traces(
     """获取对话列表.
 
     Args:
-        source_id: 数据源标识（可选，默认从请求头获取）
         page: 页码
         page_size: 每页数量
         user_id: 按用户 ID 筛选
@@ -292,7 +270,7 @@ async def get_traces(
     Returns:
         分页的对话列表
     """
-    actual_source_id = _get_source_id(request, source_id)
+    actual_source_id = _get_source_id_from_header(request)
     service = TracingQueryService.get_instance()
 
     start = _parse_date(start_date, "start_date")
@@ -321,14 +299,11 @@ async def get_traces(
 async def get_trace_detail(
     trace_id: str,
     request: Request,
-    source_id: Optional[str] = Query(None, description="数据源标识"),
 ) -> TraceDetail:
     """获取对话详情（包含 Span）.
 
     Args:
-        trace_id: 对话标识
-        source_id: 数据源标识（可选）。未提供时仅按 trace_id 查询，
-            因为 trace_id 是全局唯一的
+        trace_id: 对话标识（全局唯一）
 
     Returns:
         对话详情及所有 Span
@@ -336,11 +311,9 @@ async def get_trace_detail(
     Raises:
         HTTPException: 对话未找到时抛出
     """
-    # trace_id 是全局唯一的，仅在显式提供时使用 source_id
-    actual_source_id = source_id if source_id else None
     service = TracingQueryService.get_instance()
 
-    detail = await service.get_trace_detail(trace_id, actual_source_id)
+    detail = await service.get_trace_detail(trace_id, None)
     if detail is None:
         raise HTTPException(status_code=404, detail="Trace not found")
 
@@ -354,16 +327,13 @@ async def get_trace_detail(
 async def get_trace_timeline(
     trace_id: str,
     request: Request,
-    source_id: Optional[str] = Query(None, description="数据源标识"),
 ) -> TraceDetailWithTimeline:
     """获取对话详情（带时间线）.
 
     返回分层时间线，其中技能调用是父节点，包含其工具调用作为子节点。
 
     Args:
-        trace_id: 对话标识
-        source_id: 数据源标识（可选）。未提供时仅按 trace_id 查询，
-            因为 trace_id 是全局唯一的
+        trace_id: 对话标识（全局唯一）
 
     Returns:
         对话详情及分层时间线
@@ -371,12 +341,11 @@ async def get_trace_timeline(
     Raises:
         HTTPException: 对话未找到时抛出
     """
-    actual_source_id = source_id if source_id else None
     service = TracingQueryService.get_instance()
 
     detail = await service.get_trace_detail_with_timeline(
         trace_id,
-        actual_source_id,
+        None,
     )
     if detail is None:
         raise HTTPException(status_code=404, detail="Trace not found")
@@ -390,7 +359,6 @@ async def get_trace_timeline(
 @router.get("/sessions", response_model=dict)
 async def get_sessions(
     request: Request,
-    source_id: Optional[str] = Query(None, description="数据源标识"),
     page: int = Query(1, ge=1, description="页码"),
     page_size: int = Query(20, ge=1, le=100, description="每页数量"),
     user_id: Optional[str] = Query(None, description="按用户 ID 筛选"),
@@ -408,7 +376,6 @@ async def get_sessions(
     """获取会话列表及其统计信息.
 
     Args:
-        source_id: 数据源标识（可选，默认从请求头获取）
         page: 页码
         page_size: 每页数量
         user_id: 按用户 ID 筛选
@@ -419,7 +386,7 @@ async def get_sessions(
     Returns:
         分页的会话列表及统计信息
     """
-    actual_source_id = _get_source_id(request, source_id)
+    actual_source_id = _get_source_id_from_header(request)
     service = TracingQueryService.get_instance()
 
     start = _parse_date(start_date, "start_date")
@@ -447,7 +414,6 @@ async def get_sessions(
 async def get_session_stats(
     session_id: str,
     request: Request,
-    source_id: Optional[str] = Query(None, description="数据源标识"),
     start_date: Optional[str] = Query(
         None,
         description="开始日期 (YYYY-MM-DD)",
@@ -462,14 +428,13 @@ async def get_session_stats(
 
     Args:
         session_id: 会话标识
-        source_id: 数据源标识（可选，默认从请求头获取）
         start_date: 可选的开始日期筛选
         end_date: 可选的结束日期筛选
 
     Returns:
         会话统计信息
     """
-    actual_source_id = _get_source_id(request, source_id)
+    actual_source_id = _get_source_id_from_header(request)
     service = TracingQueryService.get_instance()
 
     start = _parse_date(start_date, "start_date")
@@ -490,7 +455,6 @@ async def get_session_stats(
 @router.get("/user-messages", response_model=dict)
 async def get_user_messages(
     request: Request,
-    source_id: Optional[str] = Query(None, description="数据源标识"),
     page: int = Query(1, ge=1, description="页码"),
     page_size: int = Query(20, ge=1, le=100, description="每页数量"),
     user_id: Optional[str] = Query(None, description="按用户 ID 筛选"),
@@ -514,7 +478,6 @@ async def get_user_messages(
     用于成本分析和消息内容查询。
 
     Args:
-        source_id: 数据源标识（可选，默认从请求头获取）
         page: 页码
         page_size: 每页数量
         user_id: 按用户 ID 筛选
@@ -526,7 +489,7 @@ async def get_user_messages(
     Returns:
         分页的用户消息列表及 Token 使用量
     """
-    actual_source_id = _get_source_id(request, source_id)
+    actual_source_id = _get_source_id_from_header(request)
     service = TracingQueryService.get_instance()
 
     start = _parse_date(start_date, "start_date")
@@ -555,7 +518,6 @@ async def get_user_messages(
 @router.get("/user-messages/export")
 async def export_user_messages(
     request: Request,
-    source_id: Optional[str] = Query(None, description="数据源标识"),
     user_id: Optional[str] = Query(None, description="按用户 ID 筛选"),
     session_id: Optional[str] = Query(
         None,
@@ -580,7 +542,6 @@ async def export_user_messages(
     """导出用户消息.
 
     Args:
-        source_id: 数据源标识（可选，默认从请求头获取）
         user_id: 按用户 ID 筛选
         session_id: 按会话 ID 筛选
         start_date: 开始日期筛选
@@ -591,7 +552,7 @@ async def export_user_messages(
     Returns:
         StreamingResponse 包含导出文件
     """
-    actual_source_id = _get_source_id(request, source_id)
+    actual_source_id = _get_source_id_from_header(request)
     export_service = TracingExportService.get_instance()
 
     start = _parse_date(start_date, "start_date")
@@ -664,10 +625,6 @@ async def get_sources(
 @router.get("/channel-distribution", response_model=dict)
 async def get_channel_distribution(
     request: Request,
-    source_id: Optional[str] = Query(
-        None,
-        description="数据源标识，使用 'all' 查询所有平台",
-    ),
     start_date: Optional[str] = Query(
         None,
         description="开始日期 (YYYY-MM-DD)",
@@ -677,14 +634,13 @@ async def get_channel_distribution(
     """获取渠道分布统计.
 
     Args:
-        source_id: 数据源标识（可选，使用 'all' 获取所有平台的分布）
         start_date: 开始日期筛选
         end_date: 结束日期筛选
 
     Returns:
         渠道分布：platformUserDistribution, platformCallDistribution, totalPlatforms
     """
-    actual_source_id = source_id or "all"
+    actual_source_id = _get_source_id_from_header(request)
     service = TracingQueryService.get_instance()
 
     start = _parse_date(start_date, "start_date")
@@ -699,10 +655,6 @@ async def get_channel_distribution(
 @router.get("/growth-stats", response_model=dict)
 async def get_growth_stats(
     request: Request,
-    source_id: Optional[str] = Query(
-        None,
-        description="数据源标识，使用 'all' 查询所有平台",
-    ),
     start_date: str = Query(..., description="开始日期 (YYYY-MM-DD)"),
     end_date: str = Query(..., description="结束日期 (YYYY-MM-DD)"),
     time_range: str = Query(
@@ -714,15 +666,14 @@ async def get_growth_stats(
     """获取运营看板环比指标。
 
     口径说明：
-    - 该接口返回的是“当前统计窗口”相对“上一对比窗口”的环比结果。
-    - 平台维度通过 `source_id` 过滤；分行维度通过 `bbk_ids` 过滤，
-      两者为叠加筛选关系。
-    - `time_range` 只决定上一对比窗口的回溯长度，不改变当前窗口
+    - 该接口返回的是当前统计窗口相对上一对比窗口的环比结果。
+    - 分行维度通过 bbk_ids 过滤。
+    - time_range 只决定上一对比窗口的回溯长度，不改变当前窗口
       的起止日期输入。
     - 返回字段的业务口径由服务层统一定义，供总览卡片和使用深度卡片
       复用，避免前端自行推导环比口径。
     """
-    actual_source_id = source_id or "all"
+    actual_source_id = _get_source_id_from_header(request)
     service = TracingQueryService.get_instance()
 
     start = _parse_date(start_date, "start_date")
@@ -748,10 +699,6 @@ async def get_growth_stats(
 @router.get("/daily-trend", response_model=dict)
 async def get_daily_trend(
     request: Request,
-    source_id: Optional[str] = Query(
-        None,
-        description="数据源标识，使用 'all' 查询所有平台",
-    ),
     start_date: Optional[str] = Query(
         None,
         description="开始日期 (YYYY-MM-DD)",
@@ -760,7 +707,7 @@ async def get_daily_trend(
     bbk_ids: Optional[str] = Query(None, description="分行ID筛选"),
 ) -> dict:
     """获取日趋势数据."""
-    actual_source_id = source_id or "all"
+    actual_source_id = _get_source_id_from_header(request)
     service = TracingQueryService.get_instance()
 
     start = _parse_date(start_date, "start_date")
@@ -778,22 +725,18 @@ async def get_daily_trend(
 @router.get("/hourly-trend", response_model=dict)
 async def get_hourly_trend(
     request: Request,
-    source_id: Optional[str] = Query(
-        None,
-        description="Source ID filter, use 'all' for all platforms",
-    ),
     start_date: Optional[str] = Query(
         None,
-        description="Start date (YYYY-MM-DD)",
+        description="开始日期 (YYYY-MM-DD)",
     ),
     end_date: Optional[str] = Query(
         None,
-        description="End date (YYYY-MM-DD)",
+        description="结束日期 (YYYY-MM-DD)",
     ),
     bbk_ids: Optional[str] = Query(None, description="分行ID筛选"),
 ) -> dict:
-    """Get hourly trend data for single-day charts."""
-    actual_source_id = source_id or "all"
+    """获取小时趋势数据."""
+    actual_source_id = _get_source_id_from_header(request)
     service = TracingQueryService.get_instance()
 
     start = _parse_date(start_date, "start_date")
@@ -814,7 +757,6 @@ async def get_hourly_trend(
 @router.get("/models", response_model=dict)
 async def get_model_usage(
     request: Request,
-    source_id: Optional[str] = Query(None, description="数据源标识"),
     start_date: Optional[str] = Query(
         None,
         description="开始日期 (YYYY-MM-DD)",
@@ -824,14 +766,13 @@ async def get_model_usage(
     """获取模型使用统计.
 
     Args:
-        source_id: 数据源标识（可选，默认从请求头获取）
         start_date: 开始日期筛选
         end_date: 结束日期筛选
 
     Returns:
         模型使用统计
     """
-    actual_source_id = _get_source_id(request, source_id)
+    actual_source_id = _get_source_id_from_header(request)
     service = TracingQueryService.get_instance()
 
     start = _parse_date(start_date, "start_date")
@@ -847,7 +788,6 @@ async def get_model_usage(
 @router.get("/tools", response_model=dict)
 async def get_tool_usage(
     request: Request,
-    source_id: Optional[str] = Query(None, description="数据源标识"),
     start_date: Optional[str] = Query(
         None,
         description="开始日期 (YYYY-MM-DD)",
@@ -857,14 +797,13 @@ async def get_tool_usage(
     """获取工具使用统计.
 
     Args:
-        source_id: 数据源标识（可选，默认从请求头获取）
         start_date: 开始日期筛选
         end_date: 结束日期筛选
 
     Returns:
         工具使用统计
     """
-    actual_source_id = _get_source_id(request, source_id)
+    actual_source_id = _get_source_id_from_header(request)
     service = TracingQueryService.get_instance()
 
     start = _parse_date(start_date, "start_date")
@@ -880,10 +819,6 @@ async def get_tool_usage(
 @router.get("/skills", response_model=dict)
 async def get_skill_usage(
     request: Request,
-    source_id: Optional[str] = Query(
-        None,
-        description="数据源标识，使用 'all' 查询所有平台",
-    ),
     page: int = Query(1, ge=1, description="页码"),
     page_size: int = Query(10, ge=1, le=100, description="每页数量"),
     start_date: Optional[str] = Query(
@@ -894,7 +829,7 @@ async def get_skill_usage(
     bbk_ids: Optional[str] = Query(None, description="分行ID筛选"),
 ) -> dict:
     """获取技能调用排行榜（分页）."""
-    actual_source_id = source_id or "all"
+    actual_source_id = _get_source_id_from_header(request)
     service = TracingQueryService.get_instance()
 
     start = _parse_date(start_date, "start_date")
@@ -920,10 +855,6 @@ async def get_skill_usage(
 async def get_skill_traces(
     skill_name: str,
     request: Request,
-    source_id: Optional[str] = Query(
-        None,
-        description="数据源标识，使用 'all' 查询所有平台",
-    ),
     page: int = Query(1, ge=1, description="页码"),
     page_size: int = Query(20, ge=1, le=100, description="每页数量"),
     start_date: Optional[str] = Query(
@@ -936,7 +867,6 @@ async def get_skill_traces(
 
     Args:
         skill_name: 技能名称
-        source_id: 数据源标识（使用 'all' 或留空查询所有平台）
         page: 页码
         page_size: 每页数量
         start_date: 开始日期筛选
@@ -945,7 +875,7 @@ async def get_skill_traces(
     Returns:
         分页的对话列表
     """
-    actual_source_id = source_id or "all"
+    actual_source_id = _get_source_id_from_header(request)
     service = TracingQueryService.get_instance()
 
     start = _parse_date(start_date, "start_date")
@@ -973,10 +903,6 @@ async def get_skill_traces(
 @router.get("/mcp/summary", response_model=MCPSummary)
 async def get_mcp_summary(
     request: Request,
-    source_id: Optional[str] = Query(
-        None,
-        description="数据源标识，使用 'all' 查询所有平台",
-    ),
     start_date: Optional[str] = Query(
         None,
         description="开始日期 (YYYY-MM-DD)",
@@ -985,7 +911,7 @@ async def get_mcp_summary(
     bbk_ids: Optional[str] = Query(None, description="分行ID筛选"),
 ) -> MCPSummary:
     """获取 MCP 全局调用汇总统计."""
-    actual_source_id = source_id or "all"
+    actual_source_id = _get_source_id_from_header(request)
     service = TracingQueryService.get_instance()
 
     start = _parse_date(start_date, "start_date")
@@ -1003,10 +929,6 @@ async def get_mcp_summary(
 @router.get("/mcp", response_model=dict)
 async def get_mcp_usage(
     request: Request,
-    source_id: Optional[str] = Query(
-        None,
-        description="数据源标识，使用 'all' 查询所有平台",
-    ),
     page: int = Query(1, ge=1, description="页码"),
     page_size: int = Query(10, ge=1, le=100, description="每页数量"),
     start_date: Optional[str] = Query(
@@ -1017,7 +939,7 @@ async def get_mcp_usage(
     bbk_ids: Optional[str] = Query(None, description="分行ID筛选"),
 ) -> dict:
     """获取 MCP 服务调用排行榜（分页）."""
-    actual_source_id = source_id or "all"
+    actual_source_id = _get_source_id_from_header(request)
     service = TracingQueryService.get_instance()
 
     start = _parse_date(start_date, "start_date")
@@ -1045,10 +967,6 @@ async def get_mcp_usage(
 @router.get("/task-status/summary", response_model=TaskStatusSummary)
 async def get_task_status_summary(
     request: Request,
-    source_id: Optional[str] = Query(
-        None,
-        description="数据源标识，使用 'all' 查询所有平台",
-    ),
     start_date: Optional[str] = Query(
         None,
         description="开始日期 (YYYY-MM-DD)",
@@ -1057,7 +975,7 @@ async def get_task_status_summary(
     bbk_ids: Optional[str] = Query(None, description="分行ID筛选"),
 ) -> TaskStatusSummary:
     """获取定时任务执行汇总统计."""
-    actual_source_id = source_id or "all"
+    actual_source_id = _get_source_id_from_header(request)
     service = TracingQueryService.get_instance()
 
     start = _parse_date(start_date, "start_date")
@@ -1078,10 +996,6 @@ async def get_task_status_summary(
 @router.get("/depth/summary", response_model=DepthSummary)
 async def get_depth_summary(
     request: Request,
-    source_id: Optional[str] = Query(
-        None,
-        description="数据源标识，使用 'all' 查询所有平台",
-    ),
     start_date: Optional[str] = Query(
         None,
         description="开始日期 (YYYY-MM-DD)",
@@ -1090,7 +1004,7 @@ async def get_depth_summary(
     bbk_ids: Optional[str] = Query(None, description="分行ID筛选"),
 ) -> DepthSummary:
     """获取使用深度汇总统计."""
-    actual_source_id = source_id or "all"
+    actual_source_id = _get_source_id_from_header(request)
     service = TracingQueryService.get_instance()
 
     start = _parse_date(start_date, "start_date")
@@ -1373,3 +1287,78 @@ async def batch_update_tracing_user_info(
         spans_updated=spans_updated,
         details=details,
     )
+
+
+# ===== 提取客户姓名 =====
+
+
+@router.post(
+    "/extract-customer-names",
+    response_model=ExtractCustomerNamesResponse,
+    summary="提取客户姓名",
+    description="从指定技能的对话记录中提取客户姓名",
+)
+async def extract_customer_names(
+    body: ExtractCustomerNamesRequest,
+) -> ExtractCustomerNamesResponse:
+    """提取客户姓名.
+
+    从 swe_tracing_traces 的 user_message 和 ES 的 model_output 中提取客户姓名，
+    结果保存到 swe_extracted_customer_names 表。
+
+    Args:
+        body: 提取请求参数
+
+    Returns:
+        提取统计结果
+
+    Raises:
+        HTTPException: skill_names 为空时返回 400 错误
+    """
+    if not body.skill_names:
+        raise HTTPException(
+            status_code=400,
+            detail="skill_names is required",
+        )
+
+    service = ExtractCustomerNamesService.get_instance()
+
+    # 解析日期（BETWEEN 两边界均包含，end_date 设为当天结束时间）
+    start_date = None
+    end_date = None
+    if body.start_date:
+        try:
+            start_date = datetime.strptime(body.start_date, "%Y-%m-%d")
+        except ValueError as exc:
+            raise HTTPException(
+                status_code=400,
+                detail="Invalid start_date format",
+            ) from exc
+    if body.end_date:
+        try:
+            end_date = datetime.strptime(body.end_date, "%Y-%m-%d").replace(
+                hour=23,
+                minute=59,
+                second=59,
+            )
+        except ValueError as exc:
+            raise HTTPException(
+                status_code=400,
+                detail="Invalid end_date format",
+            ) from exc
+
+    try:
+        result = await service.extract_names(
+            skill_names=body.skill_names,
+            user_ids=body.user_ids,
+            bbk_id=body.bbk_id,
+            start_date=start_date,
+            end_date=end_date,
+        )
+        return ExtractCustomerNamesResponse(**result)
+    except Exception as e:
+        logger.error("Failed to extract customer names: %s", e)
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to extract customer names: {e}",
+        ) from e

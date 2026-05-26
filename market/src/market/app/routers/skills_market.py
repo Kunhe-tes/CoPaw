@@ -660,3 +660,99 @@ async def init_user_skills(
             _process_workspace_skills(workspace_dir, uid, dry_run, results)
 
     return results
+
+
+@router.get(
+    "/market/skills/{item_id}/distributions",
+)
+async def get_skill_distributions(
+    item_id: str,
+    request: Request,
+    x_source_id: Optional[str] = Header(default=None, alias="X-Source-Id"),
+    x_manager: Optional[str] = Header(default=None, alias="X-Manager"),
+):
+    """查询技能分发记录（管理员）."""
+    source_id = require_source_id(x_source_id)
+    _require_manager(x_manager)
+    svc = request.app.state.marketplace
+    distributions = await svc.get_distributions(source_id, item_id, "skill")
+    return distributions
+
+
+@router.post(
+    "/market/skills/recall",
+)
+async def recall_skill_by_name(
+    request: Request,
+    x_source_id: Optional[str] = Header(default=None, alias="X-Source-Id"),
+    x_manager: Optional[str] = Header(default=None, alias="X-Manager"),
+    x_user_id: Optional[str] = Header(default=None, alias="X-User-Id"),
+    x_user_name: Optional[str] = Header(default=None, alias="X-User-Name"),
+) -> dict:
+    """按技能名称撤回（管理员）."""
+    from ...marketplace.schemas import RecallRequest
+
+    source_id = require_source_id(x_source_id)
+    _require_manager(x_manager)
+    svc = request.app.state.marketplace
+
+    # 解析请求体
+    body = await request.json()
+    target_user_ids = body.get("target_user_ids")
+    skill_name = body.get("skill_name")
+    req = RecallRequest(
+        target_user_ids=target_user_ids,
+        skill_name=skill_name,
+    )
+
+    try:
+        result = await svc.recall_skill(
+            source_id,
+            None,
+            operator_id=x_user_id or "",
+            operator_name=decode_user_name(x_user_name) or "",
+            req=req,
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return result.model_dump()
+
+
+@router.post(
+    "/market/skills/{item_id}/recall",
+)
+async def recall_skill(
+    item_id: str,
+    request: Request,
+    x_source_id: Optional[str] = Header(default=None, alias="X-Source-Id"),
+    x_manager: Optional[str] = Header(default=None, alias="X-Manager"),
+    x_user_id: Optional[str] = Header(default=None, alias="X-User-Id"),
+    x_user_name: Optional[str] = Header(default=None, alias="X-User-Name"),
+) -> dict:
+    """撤回已分发的技能（管理员）."""
+    from ...marketplace.schemas import RecallRequest
+
+    source_id = require_source_id(x_source_id)
+    _require_manager(x_manager)
+    svc = request.app.state.marketplace
+
+    # 解析请求体
+    body = await request.json()
+    target_user_ids = body.get("target_user_ids")
+    force = body.get("force", False)
+    req = RecallRequest(
+        target_user_ids=target_user_ids,
+        force=force,
+    )
+
+    try:
+        result = await svc.recall_skill(
+            source_id,
+            item_id,
+            operator_id=x_user_id or "",
+            operator_name=decode_user_name(x_user_name) or "",
+            req=req,
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    return result.model_dump()

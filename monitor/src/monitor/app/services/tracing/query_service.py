@@ -1575,7 +1575,8 @@ class TracingQueryService:
         if source_id == "all":
             exclude_placeholders = ", ".join(["%s"] * len(EXCLUDED_SOURCE_IDS))
             query = f"""
-                SELECT skill_name, COUNT(*) as count,
+                SELECT skill_name, MAX(skill_description) as skill_description,
+                       COUNT(*) as count,
                        AVG(duration_ms) as avg_duration
                 FROM swe_tracing_spans
                 WHERE start_time >= %s AND start_time <= %s
@@ -1596,7 +1597,8 @@ class TracingQueryService:
             rows = await self._db.fetch_all(query, params)
         else:
             query = f"""
-                SELECT skill_name, COUNT(*) as count,
+                SELECT skill_name, MAX(skill_description) as skill_description,
+                       COUNT(*) as count,
                        AVG(duration_ms) as avg_duration
                 FROM swe_tracing_spans
                 WHERE source_id = %s AND start_time >= %s AND start_time <= %s
@@ -1612,6 +1614,7 @@ class TracingQueryService:
         return [
             SkillUsage(
                 skill_name=row["skill_name"],
+                skill_description=row["skill_description"] or "",
                 count=row["count"] or 0,
                 avg_duration_ms=int(row["avg_duration"] or 0),
             )
@@ -1880,7 +1883,8 @@ class TracingQueryService:
         # 分页查询
         offset = (page - 1) * page_size
         data_query = f"""
-            SELECT skill_name, COUNT(*) as count,
+            SELECT skill_name, MAX(skill_description) as skill_description,
+                   COUNT(*) as count,
                    AVG(duration_ms) as avg_duration
             FROM swe_tracing_spans
             WHERE {base_where}
@@ -1894,6 +1898,7 @@ class TracingQueryService:
         skills = [
             SkillUsage(
                 skill_name=row["skill_name"],
+                skill_description=row["skill_description"] or "",
                 count=row["count"] or 0,
                 avg_duration_ms=int(row["avg_duration"] or 0),
             )
@@ -2644,7 +2649,8 @@ class TracingQueryService:
         bbk_filter_sql, bbk_filter_params = build_bbk_in_filter(bbk_ids)
         if source_id == "all":
             skill_query = f"""
-                SELECT skill_name, COUNT(*) as count,
+                SELECT skill_name, MAX(skill_description) as skill_description,
+                       COUNT(*) as count,
                        AVG(duration_ms) as avg_duration
                 FROM swe_tracing_spans
                 WHERE user_id = %s AND start_time >= %s AND start_time <= %s
@@ -2659,7 +2665,8 @@ class TracingQueryService:
             )
         else:
             skill_query = f"""
-                SELECT skill_name, COUNT(*) as count,
+                SELECT skill_name, MAX(skill_description) as skill_description,
+                       COUNT(*) as count,
                        AVG(duration_ms) as avg_duration
                 FROM swe_tracing_spans
                 WHERE source_id = %s AND user_id = %s AND start_time >= %s AND start_time <= %s
@@ -2672,9 +2679,11 @@ class TracingQueryService:
                 skill_query,
                 (source_id, user_id, start_date, end_date, *bbk_filter_params),
             )
+
         return [
             SkillUsage(
                 skill_name=row["skill_name"],
+                skill_description=row["skill_description"] or "",
                 count=row["count"],
                 avg_duration_ms=int(row["avg_duration"] or 0),
             )
@@ -3186,7 +3195,8 @@ class TracingQueryService:
                 ["%s"] * len(EXCLUDED_SOURCE_IDS),
             )
             query = f"""
-                SELECT skill_name, COUNT(*) as count,
+                SELECT skill_name, MAX(skill_description) as skill_description,
+                       COUNT(*) as count,
                        AVG(duration_ms) as avg_duration
                 FROM swe_tracing_spans
                 WHERE source_id NOT IN ({exclude_placeholders})
@@ -3209,7 +3219,8 @@ class TracingQueryService:
             )
         return await self._db.fetch_all(
             f"""
-            SELECT skill_name, COUNT(*) as count,
+            SELECT skill_name, MAX(skill_description) as skill_description,
+                   COUNT(*) as count,
                    AVG(duration_ms) as avg_duration
             FROM swe_tracing_spans
             WHERE source_id = %s AND session_id = %s AND start_time >= %s AND start_time <= %s
@@ -3334,6 +3345,7 @@ class TracingQueryService:
         return [
             SkillUsage(
                 skill_name=row["skill_name"],
+                skill_description=row.get("skill_description", "") or "",
                 count=row["count"],
                 avg_duration_ms=int(row["avg_duration"] or 0),
             )

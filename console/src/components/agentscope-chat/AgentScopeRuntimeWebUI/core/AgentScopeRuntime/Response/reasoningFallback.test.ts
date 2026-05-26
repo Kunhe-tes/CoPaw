@@ -218,4 +218,45 @@ describe("getCompletedReasoningFallbackText", () => {
 
     expect(getCompletedReasoningFallbackText(data)).toBe("");
   });
+
+  it("does not return fallback when a tool card appears after reasoning", () => {
+    const data = response({
+      output: [
+        {
+          id: "reason-1",
+          object: "message",
+          role: AgentScopeRuntimeMessageRole.ASSISTANT,
+          type: AgentScopeRuntimeMessageType.REASONING,
+          status: AgentScopeRuntimeRunStatus.Completed,
+          content: [
+            {
+              object: "content",
+              type: AgentScopeRuntimeContentType.TEXT,
+              text: "正常工具调用前思考",
+              status: AgentScopeRuntimeRunStatus.Completed,
+            },
+          ],
+        },
+        {
+          id: "tool-1",
+          object: "message",
+          role: AgentScopeRuntimeMessageRole.ASSISTANT,
+          type: AgentScopeRuntimeMessageType.MCP_CALL,
+          status: AgentScopeRuntimeRunStatus.Completed,
+          content: [
+            {
+              object: "content",
+              type: AgentScopeRuntimeContentType.DATA,
+              data: {
+                name: "read_file",
+              },
+              status: AgentScopeRuntimeRunStatus.Completed,
+            },
+          ],
+        },
+      ],
+    });
+
+    expect(getCompletedReasoningFallbackText(data)).toBe("");
+  });
 });

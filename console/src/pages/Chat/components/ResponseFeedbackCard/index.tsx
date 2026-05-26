@@ -43,7 +43,7 @@ export default function ResponseFeedbackCard(props: {
   const userId = useIframeStore((state) => state.userId);
   const userName = useIframeStore((state) => state.userName);
   const bbk = useIframeStore((state) => state.bbk);
-  const orgCode = useIframeStore((state) => state.orgCode);
+  const subBranchId = useIframeStore((state) => state.subBranchId);
   const positionId = useIframeStore((state) => state.positionId);
   const eligible = isResponseFeedbackUserAllowed(userId);
   const feedbackTargetKey = useMemo(
@@ -117,14 +117,13 @@ export default function ResponseFeedbackCard(props: {
       feedback_user_name: userName || null,
       feedback_user_sap: userId || null,
       feedback_branch: bbk || null,
-      feedback_sub_branch: orgCode || null,
+      feedback_sub_branch: subBranchId || null,
       feedback_position: positionId || null,
     }),
     [
       bbk,
       content,
       feedbackId,
-      orgCode,
       positionId,
       props.chatId,
       props.responseId,
@@ -134,6 +133,7 @@ export default function ResponseFeedbackCard(props: {
       props.traceId,
       savedTraceId,
       selectedOptions,
+      subBranchId,
       userId,
       userName,
     ],

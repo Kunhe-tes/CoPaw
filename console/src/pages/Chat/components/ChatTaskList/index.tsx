@@ -129,41 +129,36 @@ export default function ChatTaskList(props: ChatTaskListProps) {
                     tabIndex={0}
                   >
                     <div className="chat-task-list-item-header">
+                      {sidebarMeta.unreadCount > 0 && (
+                        <span className="chat-task-list-item-badge">
+                          {sidebarMeta.unreadCount > 99
+                            ? "99+"
+                            : sidebarMeta.unreadCount}
+                        </span>
+                      )}
                       <span className="chat-task-list-item-title">
                         {task.name || task.id}
                       </span>
-                      {(sidebarMeta.unreadCount > 0 ||
-                        sidebarMeta.canPause ||
-                        sidebarMeta.canRun ||
-                        sidebarMeta.canResume ||
-                        sidebarMeta.canDelete) && (
+                      {(sidebarMeta.canPause ||
+                          sidebarMeta.canRun ||
+                          sidebarMeta.canResume ||
+                          sidebarMeta.canDelete) && (
                         <div className="chat-task-list-item-trailing">
-                          {sidebarMeta.unreadCount > 0 && (
-                            <span className="chat-task-list-item-badge">
-                              {sidebarMeta.unreadCount > 99
-                                ? "99+"
-                                : sidebarMeta.unreadCount}
-                            </span>
-                          )}
-                          {(sidebarMeta.canPause ||
-                            sidebarMeta.canRun ||
-                            sidebarMeta.canResume ||
-                            sidebarMeta.canDelete) && (
-                            <div className="chat-task-list-item-actions">
-                              <TaskActionMenu
-                                task={task}
-                                sidebarMeta={sidebarMeta}
-                                classNamePrefix="chat-task-list-item"
-                                onTaskPause={onTaskPause}
-                                onTaskRun={onTaskRun}
-                                onTaskResume={onTaskResume}
-                                onTaskDelete={onTaskDelete}
-                              />
-                            </div>
-                          )}
+                          <div className="chat-task-list-item-actions">
+                            <TaskActionMenu
+                              task={task}
+                              sidebarMeta={sidebarMeta}
+                              classNamePrefix="chat-task-list-item"
+                              onTaskPause={onTaskPause}
+                              onTaskRun={onTaskRun}
+                              onTaskResume={onTaskResume}
+                              onTaskDelete={onTaskDelete}
+                            />
+                          </div>
                         </div>
                       )}
                     </div>
+
                     {sidebarMeta.state !== "active" &&
                       sidebarMeta.state !== "running" && (
                         <div

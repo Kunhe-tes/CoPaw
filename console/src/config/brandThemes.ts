@@ -44,7 +44,7 @@ export interface BrandThemeConfig {
 }
 
 /**
- * 默认主题配置 (CoPaw)
+ * 默认主题配置 (SWE)
  */
 export const DEFAULT_THEME: BrandThemeConfig = {
   source: "default",

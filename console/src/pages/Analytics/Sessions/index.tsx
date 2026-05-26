@@ -35,8 +35,6 @@ import {
   TraceDetail,
 } from "../../../api/modules/tracing";
 import { getBbkDisplayName, BBK_ID_MAP } from "../../../constants/bbk";
-import { useIframeStore } from "../../../stores/iframeStore";
-import { DEFAULT_SOURCE_ID } from "../../../constants/identity";
 import styles from "./index.module.less";
 
 const { RangePicker } = DatePicker;
@@ -72,12 +70,6 @@ export default function SessionsPage() {
   );
   const [traceDetail, setTraceDetail] = useState<TraceDetail | null>(null);
   const [traceLoading, setTraceLoading] = useState(false);
-
-  // 获取用户权限和来源信息
-  const isSuperManager = useIframeStore((state) => state.isSuperManager);
-  const userSource = useIframeStore((state) => state.source);
-  // 非 iframe 模式下使用默认 source，超级管理员不传 source_id（查询全部）
-  const effectiveSourceId = isSuperManager ? undefined : (userSource || DEFAULT_SOURCE_ID);
 
   // 用于追踪筛选条件变化，避免 useEffect 重复触发
   const filtersRef = useRef({
@@ -118,7 +110,6 @@ export default function SessionsPage() {
         bbk_ids: bbkIdFilter,
         start_date: dateRange?.[0]?.format("YYYY-MM-DD"),
         end_date: dateRange?.[1]?.format("YYYY-MM-DD"),
-        source_id: effectiveSourceId,
       });
       setSessions(data.items || []);
       setTotal(data.total || 0);
@@ -143,7 +134,6 @@ export default function SessionsPage() {
         session.session_id,
         dateRange?.[0]?.format("YYYY-MM-DD"),
         dateRange?.[1]?.format("YYYY-MM-DD"),
-        effectiveSourceId,
       );
       setSessionStats(stats);
 
@@ -151,7 +141,6 @@ export default function SessionsPage() {
       setTracesLoading(true);
       const tracesData = await tracingApi.getTraces(1, 20, {
         session_id: session.session_id,
-        source_id: effectiveSourceId,
       });
       // 按时间升序排列
       const sortedTraces = (tracesData.items || []).sort((a, b) =>

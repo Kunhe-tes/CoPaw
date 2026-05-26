@@ -258,3 +258,12 @@ SWE_WARMUP_TIMEOUT_SECONDS = EnvVarLoader.get_float(
 # ============================================================
 
 USER_INFO_API_URL = EnvVarLoader.get_str("MONITOR_USER_INFO_API_URL", "")
+
+# ============================================================
+# 客户姓名提取 API 配置
+# ============================================================
+
+EXTRACT_CUSTOMER_NAMES_URL = EnvVarLoader.get_str(
+    "MONITOR_EXTRACT_CUSTOMER_NAMES_URL",
+    "",
+)

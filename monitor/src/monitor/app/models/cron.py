@@ -366,6 +366,7 @@ class ExecutionQueryParams(BaseModel):
 
     job_id: Optional[str] = Field(default=None, description="任务ID筛选")
     tenant_id: Optional[str] = Field(default=None, description="租户ID筛选")
+    source_id: Optional[str] = Field(default=None, description="来源标识筛选")
     status: Optional[str] = Field(default=None, description="执行状态筛选")
     start_time: Optional[datetime] = Field(
         default=None,

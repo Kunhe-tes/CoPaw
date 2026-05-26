@@ -61,6 +61,7 @@ class TenantInitializer:
         self.base_working_dir = Path(base_working_dir).expanduser().resolve()
         self.tenant_id = tenant_id
         self.source_id = source_id or None
+        self._template_created_from_default = False  # 标记模板是否动态创建
         self.scope_id = scope_id or None
         self.template_name = self._resolve_template_name()
         self.effective_tenant_id = (
@@ -110,6 +111,9 @@ class TenantInitializer:
             )
             try:
                 self._create_source_template_from_default(template_dir)
+                self._template_created_from_default = (
+                    True  # 标记模板已动态创建
+                )
                 logger.info(
                     f"Created template {template_name} from default, "
                     f"using for tenant {self.tenant_id}",

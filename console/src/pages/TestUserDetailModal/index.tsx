@@ -333,15 +333,8 @@ export default function TestUserDetailModalPage() {
             <div className={modalStyles.rightPanel}>
               <ReadOnlySessionChat
                 selectedSessionId={selectedSessionId}
-                userId={MOCK_USER_ID}
-                traces={[]}
-                total={0}
-                page={1}
-                pageSize={10}
-                tracesLoading={false}
-                onPageChange={() => undefined}
+                chatIdBySessionId={{}}
                 mockMessages={selectedMessages}
-                mockSource="chat"
               />
             </div>
           </div>

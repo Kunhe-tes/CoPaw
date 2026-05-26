@@ -424,18 +424,25 @@ class CronExecutor:
         if not trace_id or not has_trace_manager():
             return
 
+        trace_mgr = get_trace_manager()
+        task = asyncio.create_task(
+            trace_mgr.end_trace(trace_id, TraceStatus.COMPLETED),
+        )
+
         try:
-            trace_mgr = get_trace_manager()
-            await asyncio.shield(
-                trace_mgr.end_trace(trace_id, TraceStatus.COMPLETED),
-            )
+            await asyncio.shield(task)
         except asyncio.CancelledError:
+            # 外部取消信号到达，但 shield 已阻止其传播到 end_trace
+            # 显式等待 task 完成，确保 trace 状态正确写入
             logger.info(
-                "Trace ended as COMPLETED (shielded) for job_id=%s, "
-                "propagating CancelledError",
+                "Trace ending was cancelled after successful cron execution; "
+                "waiting for end_trace to finish: job_id=%s",
                 job_id,
             )
-            raise
+            try:
+                await task
+            except Exception as e:
+                logger.warning("Failed to end trace for success: %s", e)
         except Exception as e:
             logger.warning("Failed to end trace for success: %s", e)
 

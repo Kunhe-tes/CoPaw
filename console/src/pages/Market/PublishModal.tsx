@@ -18,6 +18,7 @@ interface PublishModalProps {
     description: string;
     skillJson: Record<string, unknown>;
     skillMd: string;
+    skillDirName?: string; // 技能目录名，用于同步整个目录
   };
 }
 
@@ -67,6 +68,8 @@ export function PublishModal({ open, sourceId, userId, onClose, onSuccess, initi
         bbk_ids: values.bbk_ids,
         skill_json: initialData?.skillJson || {},
         skill_md: values.skill_md,
+        skill_name: initialData?.skillDirName,
+        agent_id: "default",
       };
       await marketApi.publishSkill(sourceId, payload);
       form.resetFields();

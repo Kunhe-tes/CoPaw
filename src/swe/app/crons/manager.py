@@ -1767,6 +1767,7 @@ class CronManager:  # pylint: disable=too-many-public-methods
             "cron _execute_once: job_id=%s status=error error=%s",
             st.last_run_at,
             repr(error),
+            exc_info=(type(error), error, error.__traceback__),
         )
         end_time, duration_ms = self._record_failure_timing(
             st,

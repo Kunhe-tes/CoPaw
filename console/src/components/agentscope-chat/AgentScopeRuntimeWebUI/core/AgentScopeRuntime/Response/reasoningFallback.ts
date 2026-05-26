@@ -51,6 +51,31 @@ function getReasoningText(message: IAgentScopeRuntimeMessage) {
   );
 }
 
+function hasRenderableNonReasoningOutput(message: IAgentScopeRuntimeMessage) {
+  if (message.type === AgentScopeRuntimeMessageType.REASONING) {
+    return false;
+  }
+
+  if (message.type === AgentScopeRuntimeMessageType.HEARTBEAT) {
+    return false;
+  }
+
+  if (hasVisibleMessageContent(message)) {
+    return true;
+  }
+
+  return Boolean(
+    message.message ||
+      message.code ||
+      message.content?.some((content) => {
+        if (content.type === AgentScopeRuntimeContentType.DATA) {
+          return Boolean(content.data);
+        }
+        return true;
+      }),
+  );
+}
+
 function isGeneratingStatus(status: unknown) {
   return (
     status === AgentScopeRuntimeRunStatus.Created ||
@@ -91,7 +116,7 @@ export function getCompletedReasoningFallbackText(
 
   for (let index = messages.length - 1; index >= 0; index -= 1) {
     const message = messages[index];
-    if (hasVisibleMessageContent(message)) {
+    if (hasRenderableNonReasoningOutput(message)) {
       return "";
     }
 

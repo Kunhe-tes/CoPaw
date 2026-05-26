@@ -10,6 +10,7 @@ const mocks = vi.hoisted(() => ({
   getSessionList: vi.fn(),
   getRealIdForSession: vi.fn(),
   updateMessage: vi.fn(),
+  iframeSource: null as string | null,
 }));
 
 vi.mock("@/api/modules/suggestions", () => ({
@@ -43,6 +44,11 @@ vi.mock("../../Context/ChatAnywhereOptionsContext", () => ({
         },
       },
     }),
+}));
+
+vi.mock("@/stores/iframeStore", () => ({
+  useIframeStore: (selector: (value: unknown) => unknown) =>
+    selector({ source: mocks.iframeSource }),
 }));
 
 let hookApi: ReturnType<typeof useSuggestionsPolling>;
@@ -111,6 +117,7 @@ describe("useSuggestionsPolling", () => {
     mocks.getSessionList.mockReset();
     mocks.getRealIdForSession.mockReset();
     mocks.updateMessage.mockReset();
+    mocks.iframeSource = null;
     mocks.getRealIdForSession.mockReturnValue("chat-1");
     mocks.getSessionList.mockResolvedValue(undefined);
   });
@@ -179,6 +186,21 @@ describe("useSuggestionsPolling", () => {
       await hookApi.pollSuggestions();
     });
 
+    expect(mocks.fetchSuggestions).not.toHaveBeenCalled();
+    expect(mocks.updateMessage).not.toHaveBeenCalled();
+  });
+
+  it("does not call suggestions API when source is ruice", async () => {
+    const currentQARef = createCurrentQARef();
+    mocks.iframeSource = "ruice";
+
+    renderHarness(currentQARef);
+
+    await act(async () => {
+      await hookApi.pollSuggestions();
+    });
+
+    expect(mocks.getSessionList).not.toHaveBeenCalled();
     expect(mocks.fetchSuggestions).not.toHaveBeenCalled();
     expect(mocks.updateMessage).not.toHaveBeenCalled();
   });

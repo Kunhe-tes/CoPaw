@@ -485,9 +485,11 @@ class SWEAgent(ToolGuardMixin, ReActAgent):
                 return
 
             # Setup detector with effective skills
+            workspace_dir = Path(self._workspace_dir or WORKING_DIR)
             await trace_mgr.setup_skill_detector(
                 trace_id=trace_id,
                 enabled_skills=self._effective_skills,
+                workspace_dir=workspace_dir,
             )
         except Exception as e:
             logger.debug("Failed to setup skill detector: %s", e)

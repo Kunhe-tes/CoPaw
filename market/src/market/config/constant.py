@@ -175,6 +175,6 @@ SKILL_SCAN_MODE = EnvVarLoader.get_str("MARKET_SKILL_SCAN_MODE", "block")
 
 SWE_INTERNAL_URL = EnvVarLoader.get_str(
     "SWE_INTERNAL_URL",
-    "http://localhost:8000",
+    "http://localhost:8088",
 )
 SWE_INTERNAL_TOKEN = EnvVarLoader.get_str("SWE_INTERNAL_TOKEN", "")

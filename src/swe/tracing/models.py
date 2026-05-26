@@ -79,6 +79,10 @@ class Span(BaseModel):
         default=None,
         description="Skill name for skill events",
     )
+    skill_description: Optional[str] = Field(
+        default=None,
+        description="Skill description from SKILL.md",
+    )
     mcp_server: Optional[str] = Field(
         default=None,
         description="MCP server name if this tool is from MCP",

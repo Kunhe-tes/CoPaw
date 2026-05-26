@@ -15,8 +15,6 @@ import type { ColumnsType } from "antd/es/table";
 import dayjs from "dayjs";
 import { tracingApi, UserMessageItem } from "../../../api/modules/tracing";
 import { getBbkDisplayName, BBK_ID_MAP } from "../../../constants/bbk";
-import { useIframeStore } from "../../../stores/iframeStore";
-import { DEFAULT_SOURCE_ID } from "../../../constants/identity";
 import styles from "./index.module.less";
 
 const { RangePicker } = DatePicker;
@@ -36,12 +34,6 @@ export default function MessagesPage() {
     [dayjs().subtract(7, "day"), dayjs()],
   );
   const [exporting, setExporting] = useState(false);
-
-  // 获取用户权限和来源信息
-  const isSuperManager = useIframeStore((state) => state.isSuperManager);
-  const userSource = useIframeStore((state) => state.source);
-  // 非 iframe 模式下使用默认 source，超级管理员不传 sourceId（查询全部）
-  const effectiveSourceId = isSuperManager ? undefined : (userSource || DEFAULT_SOURCE_ID);
 
   // 用于追踪筛选条件变化，避免 useEffect 重复触发
   const filtersRef = useRef({
@@ -94,7 +86,6 @@ export default function MessagesPage() {
         start_date: dateRange?.[0]?.format("YYYY-MM-DD"),
         end_date: dateRange?.[1]?.format("YYYY-MM-DD"),
         query: searchQuery || undefined,
-        source_id: effectiveSourceId,
       });
       setMessages(data.items || []);
       setTotal(data.total || 0);
@@ -116,7 +107,6 @@ export default function MessagesPage() {
           start_date: dateRange?.[0]?.format("YYYY-MM-DD"),
           end_date: dateRange?.[1]?.format("YYYY-MM-DD"),
           query: searchQuery || undefined,
-          source_id: effectiveSourceId,
         },
         "xlsx",
       );

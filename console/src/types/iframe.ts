@@ -154,6 +154,8 @@ export interface IframeContext {
   bbk: string | null;
   /** 组织编码 */
   orgCode: string | null;
+  /** 支行 ID */
+  subBranchId: string | null;
   /** 组织层级 */
   orgLvl: string | null;
   /** 职位 ID */

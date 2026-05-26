@@ -11,6 +11,8 @@ import type {
   MCPDistributeResponse,
   MCPTestResult,
   UpdateMarketMCPMetadataRequest,
+  DistributionRecord,
+  RecallResponse,
 } from "../types";
 
 export const marketMcpApi = {
@@ -143,5 +145,45 @@ export const marketMcpApi = {
       body: JSON.stringify(data),
     };
     return request<MarketMCPDetail>(`/market/mcp/${itemId}/metadata`, opts);
+  },
+
+  /**
+   * 查询 MCP 分发记录（管理员）
+   */
+  getMCPDistributions: async (
+    sourceId: string,
+    itemId: string
+  ): Promise<DistributionRecord[]> => {
+    const opts = mergeHeaders({
+      "X-Source-Id": sourceId,
+      "X-Manager": "true",
+    });
+    return request<DistributionRecord[]>(
+      `/market/mcp/${itemId}/distributions`,
+      opts
+    );
+  },
+
+  /**
+   * 撤回已分发的 MCP（管理员）
+   */
+  recallMCP: async (
+    sourceId: string,
+    itemId: string,
+    targetUserIds?: string[]
+  ): Promise<RecallResponse> => {
+    const opts: RequestInit = {
+      method: "POST",
+      ...(mergeHeaders({
+        "Content-Type": "application/json",
+        "X-Source-Id": sourceId,
+        "X-Manager": "true",
+      })),
+      body: JSON.stringify({ target_user_ids: targetUserIds }),
+    };
+    return request<RecallResponse>(
+      `/market/mcp/${itemId}/recall`,
+      opts
+    );
   },
 };

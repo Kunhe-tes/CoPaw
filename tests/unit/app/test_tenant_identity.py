@@ -123,6 +123,11 @@ def test_public_text_asset_api_routes_are_exempt() -> None:
     assert tenant_identity.is_source_exempt("/api/assets/text/write") is True
 
 
+def test_public_asset_upload_api_route_is_exempt() -> None:
+    assert tenant_identity.is_tenant_exempt("/api/assets/upload") is True
+    assert tenant_identity.is_source_exempt("/api/assets/upload") is True
+
+
 def test_internal_api_routes_are_exempt() -> None:
     assert (
         tenant_identity.is_tenant_exempt("/api/internal/cron/callback") is True

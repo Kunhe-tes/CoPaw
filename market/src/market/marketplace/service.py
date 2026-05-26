@@ -1,4 +1,5 @@
 # -*- coding: utf-8 -*-
+# pylint: disable=too-many-public-methods
 """应用市场业务服务."""
 
 from __future__ import annotations
@@ -9,7 +10,7 @@ import shutil
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Callable, Optional
 from urllib.parse import unquote
 
 import httpx
@@ -18,6 +19,7 @@ from ..config.constant import SWE_INTERNAL_URL, SWE_INTERNAL_TOKEN
 from ..database.connection import DatabaseConnection
 from ..security import SkillScanError, scan_skill_directory
 from .fs import (
+    _atomic_write_json,
     _mask_env_value,
     copy_mcp_to_user,
     copy_skill_to_user,
@@ -25,9 +27,12 @@ from .fs import (
     get_skill_dir,
     get_user_skills_dir,
     load_index,
+    migrate_legacy_scope_dir_if_needed,
     mutate_user_skill_manifest,
     read_user_skill_manifest,
     load_mcp_config,
+    normalize_mcp_config_data,
+    resolve_effective_user_id,
     save_index,
     save_mcp_config,
     normalize_skill_name,
@@ -36,6 +41,7 @@ from .models import MarketItem
 from .schemas import (
     DistributeRequest,
     DistributeResponse,
+    DistributionRecord,
     MCPDistributionRequest,
     MCPDistributionResponse,
     MCPDistributionTenantResult,
@@ -48,6 +54,9 @@ from .schemas import (
     MySkillItem,
     PublishMCPRequest,
     PublishSkillRequest,
+    RecallRequest,
+    RecallResponse,
+    RecallResultItem,
     SkillUserStat,
 )
 
@@ -131,6 +140,19 @@ _QUERY_USERS_BY_BBK_SQL = """
     WHERE source_id = %s AND bbk_id IN ({placeholders})
 """
 
+_QUERY_USERS_BY_TENANT_IDS_SQL = """
+    SELECT tenant_id, tenant_name, bbk_id
+    FROM swe_tenant_init_source
+    WHERE source_id = %s AND tenant_id IN ({placeholders})
+"""
+
+_QUERY_DISTRIBUTIONS_SQL = """
+    SELECT target_user_id, target_user_name, target_bbk_id, created_at
+    FROM swe_marketplace_operation_logs
+    WHERE source_id = %s AND item_id = %s AND item_type = %s AND operation = 'distribute'
+    ORDER BY created_at DESC
+"""
+
 
 def _sort_items_by_updated_at_desc(
     items: list[MarketItem],
@@ -142,88 +164,6 @@ def _sort_items_by_updated_at_desc(
         return (1 if timestamp else 0, timestamp)
 
     return sorted(items, key=sort_key, reverse=True)
-
-
-def _normalize_transport_value(raw_transport: str) -> str | None:
-    """Normalize transport string to standard values."""
-    lowered = raw_transport.strip().lower()
-    if lowered == "streamable-http":
-        return "streamable_http"
-    if lowered in {"stdio", "sse", "streamable_http"}:
-        return lowered
-    return None
-
-
-def _extract_first_mcp_server(config_data: dict) -> dict:
-    """Extract first MCP server config from nested mcpServers structure."""
-    mcp_servers = config_data.get("mcpServers")
-    if not isinstance(mcp_servers, dict) or not mcp_servers:
-        return dict(config_data)
-
-    _, first_value = next(iter(mcp_servers.items()))
-    if isinstance(first_value, dict):
-        return dict(first_value)
-    return dict(config_data)
-
-
-def _apply_advanced_fields(normalized: dict) -> None:
-    """Apply fields from nested 'advanced' dict to normalized config."""
-    advanced = normalized.get("advanced")
-    if not isinstance(advanced, dict):
-        return
-
-    if "headers" not in normalized and isinstance(
-        advanced.get("headers"),
-        dict,
-    ):
-        normalized["headers"] = advanced.get("headers", {})
-
-    if "transport" not in normalized and isinstance(
-        advanced.get("transport"),
-        str,
-    ):
-        transport = _normalize_transport_value(advanced["transport"])
-        if transport:
-            normalized["transport"] = transport
-
-
-def _infer_transport_from_config(normalized: dict) -> None:
-    """Infer transport type from command or url if not set."""
-    if "transport" in normalized:
-        return
-
-    command = normalized.get("command")
-    if isinstance(command, str) and command.strip():
-        normalized["transport"] = "stdio"
-        return
-
-    url = normalized.get("url")
-    if isinstance(url, str) and url.strip():
-        normalized["transport"] = "streamable_http"
-
-
-def _normalize_market_mcp_config_data(config_data: dict) -> dict:
-    """兼容旧市场条目中的原始 MCP 上传结构。
-
-    历史上部分市场条目直接把上传 JSON 原样保存到了 config 中，
-    例如 {"mcpServers": {...}}。详情展示和测试连接都需要先把这类
-    旧结构归一化成 MCPClientConfig 可识别的扁平字段。
-    """
-    if not isinstance(config_data, dict):
-        return {}
-
-    normalized = _extract_first_mcp_server(config_data)
-    _apply_advanced_fields(normalized)
-
-    # Normalize top-level transport/type field
-    raw_transport = normalized.get("transport") or normalized.get("type")
-    if isinstance(raw_transport, str):
-        transport = _normalize_transport_value(raw_transport)
-        if transport:
-            normalized["transport"] = transport
-
-    _infer_transport_from_config(normalized)
-    return normalized
 
 
 def _bump_patch(version: str) -> str:
@@ -363,6 +303,63 @@ def _parse_md_frontmatter(
     return name, description
 
 
+def _extract_version_from_frontmatter(md_content: str) -> str:
+    """从 SKILL.md frontmatter 中提取 version."""
+    try:
+        end_idx = md_content.index("---", 3)
+        fm_text = md_content[3:end_idx].strip()
+    except ValueError:
+        return ""
+
+    for line in fm_text.split("\n"):
+        if ":" in line:
+            key, val = line.split(":", 1)
+            key = key.strip().lower()
+            val = val.strip()
+            if key == "version" and val:
+                return val
+    return ""
+
+
+def _build_skill_metadata_for_manifest(
+    skill_dir: Path,
+    skill_name: str,
+    source: str = "customized",
+) -> dict[str, Any]:
+    """从技能目录构建 manifest 所需的 metadata 字段.
+
+    只从 SKILL.md 读取基本信息，额外字段（creator_id, creator_name, bbk_id 等）
+    由调用方通过 extra_metadata 参数传入。
+    """
+    skill_md_path = skill_dir / "SKILL.md"
+    name = skill_name
+    description = ""
+    version_text = ""
+
+    # 从 SKILL.md 读取基本信息
+    if skill_md_path.exists():
+        try:
+            md_content = skill_md_path.read_text(encoding="utf-8")
+            name, description = _parse_md_frontmatter(md_content, skill_name)
+            version_text = _extract_version_from_frontmatter(md_content)
+        except OSError:
+            pass
+
+    now = datetime.now(timezone.utc).isoformat()
+
+    return {
+        "name": name,
+        "description": description,
+        "version_text": version_text,
+        "commit_text": "",
+        "signature": "",
+        "source": source,
+        "protected": False,
+        "requirements": {"require_bins": [], "require_envs": []},
+        "updated_at": now,
+    }
+
+
 class MarketplaceService:
     def __init__(
         self,
@@ -378,6 +375,7 @@ class MarketplaceService:
         self,
         user_id: str,
         agent_id: str = "default",
+        source_id: str | None = None,
     ) -> None:
         """通过 HTTP 回调触发 src/swe 的 Agent 重载."""
         url = f"{SWE_INTERNAL_URL}/api/internal/agents/{agent_id}/reload"
@@ -385,16 +383,20 @@ class MarketplaceService:
         if SWE_INTERNAL_TOKEN:
             headers["X-Internal-Token"] = f"Bearer {SWE_INTERNAL_TOKEN}"
 
+        params = {"tenant_id": user_id}
+        if source_id:
+            params["source_id"] = source_id
+
         try:
             async with httpx.AsyncClient(timeout=10.0) as client:
                 response = await client.post(
                     url,
-                    params={"tenant_id": user_id},
+                    params=params,
                     headers=headers,
                 )
                 if response.status_code == 200:
                     logger.info(
-                        f"Agent reload triggered for '{agent_id}' (tenant={user_id})",
+                        f"Agent reload triggered for '{agent_id}' (tenant={user_id}, source={source_id})",
                     )
                 else:
                     logger.warning(
@@ -428,19 +430,77 @@ class MarketplaceService:
         agent_id: str = "default",
         source_id: str | None = None,
         enabled: bool = True,
+        source: str = "customized",
+        extra_metadata: dict | None = None,
     ) -> bool:
-        """注册技能到 manifest（用于上传/分发时记录）。"""
+        """注册技能到 manifest（用于上传/分发时记录）。
+
+        写入完整的字段，与 src/swe 的 reconcile_workspace_manifest 保持一致：
+        - enabled: 启用状态
+        - channels: 通道配置
+        - source: 技能来源
+        - metadata: 元数据（name、description、version、creator_id 等）
+        - requirements: 报备要求
+        - config: 配置（保留已有）
+        - created_at/updated_at: 时间戳
+
+        Args:
+            extra_metadata: 额外的 metadata 字段（如 creator_id、creator_name、bbk_id）
+        """
+
+        # 获取技能目录，用于构建 metadata
+        skills_dir = get_user_skills_dir(
+            self.swe_root,
+            user_id,
+            agent_id,
+            source_id,
+        )
+        skill_dir = skills_dir / skill_name
 
         def _update(payload: dict) -> bool:
             skills_dict = payload.setdefault("skills", {})
-            entry = skills_dict.setdefault(skill_name, {})
-            # 只更新字段，不覆盖已有数据
-            entry.setdefault(
-                "created_at",
-                datetime.now(timezone.utc).isoformat(),
+            existing = skills_dict.get(skill_name) or {}
+
+            # 构建 metadata（从 SKILL.md 和 skill.json 读取）
+            metadata = _build_skill_metadata_for_manifest(
+                skill_dir,
+                skill_name,
+                source=source,
             )
-            entry["enabled"] = enabled
-            entry["updated_at"] = datetime.now(timezone.utc).isoformat()
+
+            # 合并额外的 metadata（上传时传入的 creator_id、name 等）
+            if extra_metadata:
+                for key, value in extra_metadata.items():
+                    # 允许 name 字段覆盖（用户重命名时指定的新名称）
+                    if key == "name" and value:
+                        metadata[key] = value
+                    # 不覆盖其他核心字段
+                    elif key not in ["description", "source"]:
+                        metadata[key] = value
+
+            # 保留已有的 config 和 channels
+            existing_config = existing.get("config")
+            existing_channels = existing.get("channels") or ["all"]
+
+            now = datetime.now(timezone.utc).isoformat()
+
+            entry = {
+                "enabled": enabled,
+                "channels": existing_channels,
+                "source": source,
+                "metadata": metadata,
+                "requirements": metadata["requirements"],
+                "updated_at": now,
+            }
+
+            # 保留已有的 config
+            if existing_config:
+                entry["config"] = existing_config
+
+            # 保留已有的 created_at（首次注册时写入）
+            entry["created_at"] = existing.get("created_at") or now
+
+            skills_dict[skill_name] = entry
             return True
 
         return mutate_user_skill_manifest(
@@ -495,7 +555,7 @@ class MarketplaceService:
         )
 
         if updated:
-            await self._trigger_agent_reload(user_id, agent_id)
+            await self._trigger_agent_reload(user_id, agent_id, source_id)
 
         return {"success": updated}
 
@@ -525,7 +585,7 @@ class MarketplaceService:
         )
 
         if updated:
-            await self._trigger_agent_reload(user_id, agent_id)
+            await self._trigger_agent_reload(user_id, agent_id, source_id)
 
         return {"success": updated}
 
@@ -622,7 +682,13 @@ class MarketplaceService:
         source_id: str,
         req: PublishSkillRequest,
     ) -> MarketItem:
-        """上架技能。同名技能已存在时递增 patch 版本号。"""
+        """上架技能。同名技能已存在时递增 patch 版本号。
+
+        如果请求中包含 skill_name，则从用户工作区复制整个技能目录到市场。
+        否则使用 skill_json 和 skill_md 字段创建目录。
+        """
+        import shutil
+
         items = load_index(self.marketplace_root, source_id)
         existing = next((i for i in items if i.name == req.name), None)
 
@@ -661,12 +727,54 @@ class MarketplaceService:
             item.item_id,
         )
         skill_dir.mkdir(parents=True, exist_ok=True)
-        (skill_dir / "skill.json").write_text(
-            json.dumps(req.skill_json, ensure_ascii=False, indent=2),
-            encoding="utf-8",
-        )
-        if req.skill_md:
-            (skill_dir / "SKILL.md").write_text(req.skill_md, encoding="utf-8")
+
+        # 如果提供了 skill_name，从用户工作区复制整个目录
+        if req.skill_name:
+            src_skill_dir = (
+                get_user_skills_dir(
+                    self.swe_root,
+                    req.creator_id,
+                    req.agent_id,
+                    source_id,
+                )
+                / req.skill_name
+            )
+            if src_skill_dir.exists() and src_skill_dir.is_dir():
+                # 删除旧目录，复制整个目录（保持与用户工作区一致）
+                if skill_dir.exists():
+                    shutil.rmtree(skill_dir)
+                shutil.copytree(src_skill_dir, skill_dir)
+                logger.info(
+                    "Copied entire skill directory from %s to %s",
+                    src_skill_dir,
+                    skill_dir,
+                )
+            else:
+                # 源目录不存在，回退到单文件写入
+                logger.warning(
+                    "Source skill directory %s not found, falling back to single files",
+                    src_skill_dir,
+                )
+                (skill_dir / "skill.json").write_text(
+                    json.dumps(req.skill_json, ensure_ascii=False, indent=2),
+                    encoding="utf-8",
+                )
+                if req.skill_md:
+                    (skill_dir / "SKILL.md").write_text(
+                        req.skill_md,
+                        encoding="utf-8",
+                    )
+        else:
+            # 未提供 skill_name，使用单文件写入
+            (skill_dir / "skill.json").write_text(
+                json.dumps(req.skill_json, ensure_ascii=False, indent=2),
+                encoding="utf-8",
+            )
+            if req.skill_md:
+                (skill_dir / "SKILL.md").write_text(
+                    req.skill_md,
+                    encoding="utf-8",
+                )
 
         save_index(self.marketplace_root, source_id, items)
 
@@ -885,13 +993,16 @@ class MarketplaceService:
                     )
                     continue
 
-                # 注册技能到 manifest（使用安全名称）
+                # 注册技能到 manifest（使用返回的 metadata）
+                metadata = result.get("metadata") or {}
                 self.register_skill_in_manifest(
                     user["tenant_id"],
                     safe_skill_name,
                     "default",
                     source_id,
                     enabled=True,
+                    source=f"marketplace:{item_id}",
+                    extra_metadata=metadata,
                 )
                 count += 1
             except Exception as e:
@@ -935,7 +1046,13 @@ class MarketplaceService:
         user_id: str,
         agent_id: str = "default",
     ) -> list[MySkillItem]:
-        """获取用户技能列表（我创建的 + 我接收的）。"""
+        """获取用户技能列表（我创建的 + 我接收的）。
+
+        数据来源：
+        - name、description：从 SKILL.md frontmatter 读取
+        - source、distributed_by、received_version 等：从 workspace manifest 读取
+        - 不再依赖技能目录内的 skill.json 文件
+        """
         skills_dir = get_user_skills_dir(
             self.swe_root,
             user_id,
@@ -945,7 +1062,7 @@ class MarketplaceService:
         if not skills_dir.exists():
             return []
 
-        # 读取 manifest 获取启用状态
+        # 读取 workspace manifest 获取技能状态和元数据
         manifest = read_user_skill_manifest(
             self.swe_root,
             user_id,
@@ -953,85 +1070,121 @@ class MarketplaceService:
             source_id,
         )
         manifest_skills = manifest.get("skills", {})
+        market_versions = self._get_active_market_versions(source_id)
 
+        return [
+            self._build_my_skill_item(
+                skill_dir,
+                manifest_skills,
+                market_versions,
+            )
+            for skill_dir in sorted(skills_dir.iterdir())
+            if skill_dir.is_dir()
+        ]
+
+    def _get_active_market_versions(self, source_id: str) -> dict[str, str]:
+        """读取当前来源下已发布技能的最新版本映射."""
         market_index = load_index(self.marketplace_root, source_id)
-        market_versions: dict[str, str] = {
-            i.name: i.version for i in market_index if i.status == "active"
+        return {
+            item.name: item.version
+            for item in market_index
+            if item.status == "active"
         }
 
-        result = []
-        for skill_dir in sorted(skills_dir.iterdir()):
-            if not skill_dir.is_dir():
-                continue
-            skill_json_path = skill_dir / "skill.json"
+    def _read_skill_frontmatter(
+        self,
+        skill_dir: Path,
+        skill_name: str,
+    ) -> tuple[str, str]:
+        """读取技能 frontmatter 中的展示名称和描述."""
+        skill_md_path = skill_dir / "SKILL.md"
+        if not skill_md_path.exists():
+            return skill_name, ""
+        try:
+            md_content = skill_md_path.read_text(encoding="utf-8")
+        except Exception:  # pylint: disable=broad-except
+            return skill_name, ""
+        if not md_content.startswith("---"):
+            return skill_name, ""
+        return _parse_md_frontmatter(md_content, skill_name)
 
-            # 无 skill.json 时视为「我创建的」，从 SKILL.md 尝试提取展示名
-            if not skill_json_path.exists():
-                data = {"source": "customized"}
-                display_name = skill_dir.name
-                description = ""
-                # 尝试从 SKILL.md frontmatter 提取名称
-                skill_md_path = skill_dir / "SKILL.md"
-                if skill_md_path.exists():
-                    try:
-                        md_content = skill_md_path.read_text(encoding="utf-8")
-                        if md_content.startswith("---"):
-                            display_name, description = _parse_md_frontmatter(
-                                md_content,
-                                display_name,
-                            )
-                    except Exception:
-                        pass
-            else:
-                try:
-                    data = json.loads(
-                        skill_json_path.read_text(encoding="utf-8"),
-                    )
-                except (json.JSONDecodeError, OSError):
-                    continue
-                skill_name = skill_dir.name
-                # 从 skill.json 的 name 字段获取展示名称，如果没有则用目录名
-                display_name = data.get("name") or skill_name
-                description = data.get("description", "")
+    def _resolve_skill_display_fields(
+        self,
+        skill_dir: Path,
+        skill_name: str,
+        manifest_metadata: dict[str, Any],
+    ) -> tuple[str, str]:
+        """合并 manifest 与 frontmatter，得到展示名称和描述."""
+        md_name, md_desc = self._read_skill_frontmatter(skill_dir, skill_name)
+        display_name = manifest_metadata.get("name") or md_name
+        description = manifest_metadata.get("description") or md_desc
+        return display_name, description
 
-            skill_name = skill_dir.name
-            source = data.get("source", "customized")
-            is_received = source.startswith("marketplace:")
-            received_version = data.get("received_version")
-            # 用展示名称匹配市场版本（市场技能用 name 字段）
-            market_version = market_versions.get(display_name)
-            has_update = (
-                is_received
-                and received_version is not None
-                and market_version is not None
-                and received_version != market_version
-            )
+    def _resolve_skill_timestamps(
+        self,
+        manifest_entry: dict[str, Any],
+        manifest_metadata: dict[str, Any],
+    ) -> tuple[str | None, str | None]:
+        """优先从运行时 manifest 读取时间字段，缺失时回退 metadata."""
+        created_at = manifest_entry.get("created_at") or manifest_metadata.get(
+            "created_at",
+        )
+        updated_at = manifest_entry.get("updated_at") or manifest_metadata.get(
+            "updated_at",
+        )
+        return created_at, updated_at
 
-            # 从 manifest 获取启用状态
-            manifest_entry = manifest_skills.get(skill_name, {})
-            enabled = manifest_entry.get("enabled", True)
+    def _build_my_skill_item(
+        self,
+        skill_dir: Path,
+        manifest_skills: dict[str, Any],
+        market_versions: dict[str, str],
+    ) -> MySkillItem:
+        """构建“我的技能”列表中的单个条目."""
+        skill_name = skill_dir.name
+        manifest_entry = manifest_skills.get(skill_name, {})
+        manifest_metadata = manifest_entry.get("metadata", {})
+        source = manifest_entry.get("source") or manifest_metadata.get(
+            "source",
+            "customized",
+        )
+        display_name, description = self._resolve_skill_display_fields(
+            skill_dir,
+            skill_name,
+            manifest_metadata,
+        )
+        received_version = manifest_metadata.get("received_version")
+        market_version = market_versions.get(display_name)
+        created_at, updated_at = self._resolve_skill_timestamps(
+            manifest_entry,
+            manifest_metadata,
+        )
+        is_received = source.startswith("marketplace:")
+        has_update = (
+            is_received
+            and received_version is not None
+            and market_version is not None
+            and received_version != market_version
+        )
+        category_id = manifest_metadata.get("category_id")
+        creator_name = manifest_metadata.get("creator_name")
 
-            result.append(
-                MySkillItem(
-                    skill_name=skill_name,
-                    display_name=display_name,
-                    source=source,
-                    description=description,
-                    version=data.get("version"),
-                    received_version=received_version,
-                    distributed_by=data.get("distributed_by"),
-                    is_received=is_received,
-                    has_update=has_update,
-                    enabled=enabled,
-                    category=data.get("category"),
-                    creator_name=_decode_creator_name(
-                        data.get("creator_name", ""),
-                    ),
-                    created_at=data.get("created_at"),
-                    updated_at=data.get("updated_at"),
-                ),
-            )
-        return result
+        return MySkillItem(
+            skill_name=skill_name,
+            display_name=display_name,
+            source=source,
+            description=description,
+            version=manifest_metadata.get("version_text"),
+            received_version=received_version,
+            distributed_by=manifest_metadata.get("distributed_by"),
+            is_received=is_received,
+            has_update=has_update,
+            enabled=manifest_entry.get("enabled", True),
+            category=str(category_id) if category_id else None,
+            creator_name=_decode_creator_name(creator_name or ""),
+            created_at=created_at,
+            updated_at=updated_at,
+        )
 
     async def _get_stats(
         self,
@@ -1087,6 +1240,12 @@ class MarketplaceService:
         req: DistributeRequest,
     ) -> list[dict]:
         if not self.db.is_connected:
+            # 数据库未连接时返回空信息
+            if req.target_type == "user_id" and req.target_values:
+                return [
+                    {"tenant_id": uid, "tenant_name": "", "bbk_id": ""}
+                    for uid in req.target_values
+                ]
             return []
         try:
             if req.target_type == "all":
@@ -1102,8 +1261,22 @@ class MarketplaceService:
                     (source_id, *req.target_values),
                 )
             if req.target_type == "user_id" and req.target_values:
+                # 手动输入用户 ID 时，也从数据库查询用户信息
+                placeholders = ",".join(["%s"] * len(req.target_values))
+                sql = _QUERY_USERS_BY_TENANT_IDS_SQL.format(
+                    placeholders=placeholders,
+                )
+                rows = await self.db.fetch_all(
+                    sql,
+                    (source_id, *req.target_values),
+                )
+                # 创建映射，查询不到的用户保留空信息
+                user_map = {row["tenant_id"]: row for row in rows}
                 return [
-                    {"tenant_id": uid, "tenant_name": "", "bbk_id": ""}
+                    user_map.get(
+                        uid,
+                        {"tenant_id": uid, "tenant_name": "", "bbk_id": ""},
+                    )
                     for uid in req.target_values
                 ]
         except Exception as e:
@@ -1277,7 +1450,7 @@ class MarketplaceService:
         agent_id: str = "default",
         source_id: str | None = None,
     ) -> bool:
-        """删除用户技能."""
+        """删除用户技能（同时从 manifest 移除条目）。"""
         import shutil
 
         skills_dir = get_user_skills_dir(
@@ -1293,9 +1466,154 @@ class MarketplaceService:
 
         try:
             shutil.rmtree(skill_dir)
-            return True
         except Exception:
             return False
+
+        # 从 manifest 移除技能条目
+        def _remove(payload: dict) -> bool:
+            payload.get("skills", {}).pop(skill_name, None)
+            return True
+
+        mutate_user_skill_manifest(
+            self.swe_root,
+            user_id,
+            agent_id,
+            _remove,
+            source_id,
+        )
+
+        return True
+
+    def migrate_skill_json_to_manifest(
+        self,
+        user_id: str,
+        agent_id: str = "default",
+        source_id: str | None = None,
+        delete_skill_json: bool = False,
+    ) -> dict[str, Any]:
+        """迁移技能目录内 skill.json 字段到 workspace manifest.
+
+        将以下字段从 skills/<技能名>/skill.json 合并到 workspaces/<agent_id>/skill.json:
+        - creator_id
+        - creator_name
+        - bbk_id
+        - distributed_by
+        - received_version
+        - category_id
+
+        Args:
+            user_id: 用户 ID.
+            agent_id: Agent ID，默认为 "default".
+            source_id: 来源 ID.
+            delete_skill_json: 是否删除技能目录内的 skill.json 文件.
+
+        Returns:
+            迁移结果统计：{"migrated": int, "skipped": int, "errors": list}
+        """
+        skills_dir = get_user_skills_dir(
+            self.swe_root,
+            user_id,
+            agent_id,
+            source_id,
+        )
+
+        if not skills_dir.exists():
+            return {"migrated": 0, "skipped": 0, "errors": []}
+
+        migrated = 0
+        skipped = 0
+        errors: list[str] = []
+
+        # 辅助函数：创建合并函数，避免循环变量闭包问题
+        def _make_merge_func(
+            skill_name_arg: str,
+            extra_fields_arg: dict,
+        ) -> Callable[[dict], bool]:
+            def _merge(payload: dict) -> bool:
+                skills_dict = payload.setdefault("skills", {})
+                existing = skills_dict.get(skill_name_arg) or {}
+
+                # 合并到 metadata 层
+                metadata = existing.get("metadata") or {}
+                for key, value in extra_fields_arg.items():
+                    # 不覆盖已存在的字段
+                    if key not in metadata:
+                        metadata[key] = value
+                existing["metadata"] = metadata
+
+                skills_dict[skill_name_arg] = existing
+                return True
+
+            return _merge
+
+        for skill_dir in skills_dir.iterdir():
+            if not skill_dir.is_dir():
+                continue
+
+            skill_name = skill_dir.name
+            skill_json_path = skill_dir / "skill.json"
+
+            # 没有 skill.json 则跳过
+            if not skill_json_path.exists():
+                skipped += 1
+                continue
+
+            # 读取技能目录内的 skill.json
+            try:
+                skill_data = json.loads(
+                    skill_json_path.read_text(encoding="utf-8"),
+                )
+            except (json.JSONDecodeError, OSError) as e:
+                errors.append(f"{skill_name}: 读取 skill.json 失败 - {e}")
+                continue
+
+            # 提取需要迁移的字段
+            extra_fields = {}
+            for field in [
+                "creator_id",
+                "creator_name",
+                "bbk_id",
+                "distributed_by",
+                "received_version",
+                "category_id",
+            ]:
+                if field in skill_data:
+                    extra_fields[field] = skill_data[field]
+
+            # 没有额外字段则跳过
+            if not extra_fields:
+                skipped += 1
+                continue
+
+            # 使用辅助函数创建 merge 函数
+            _merge = _make_merge_func(skill_name, dict(extra_fields))
+
+            try:
+                mutate_user_skill_manifest(
+                    self.swe_root,
+                    user_id,
+                    agent_id,
+                    _merge,
+                    source_id,
+                )
+            except Exception as e:
+                errors.append(f"{skill_name}: 写入 manifest 失败 - {e}")
+                continue
+
+            # 删除技能目录内的 skill.json（如果请求）
+            if delete_skill_json:
+                try:
+                    skill_json_path.unlink()
+                except OSError as e:
+                    errors.append(f"{skill_name}: 删除 skill.json 失败 - {e}")
+
+            migrated += 1
+
+        return {
+            "migrated": migrated,
+            "skipped": skipped,
+            "errors": errors,
+        }
 
     # ============ MCP 服务方法 ============
 
@@ -1492,7 +1810,7 @@ class MarketplaceService:
         user_stats = await self._get_mcp_user_stats(item.client_key, source_id)
 
         # 获取并脱敏敏感字段
-        config_data = _normalize_market_mcp_config_data(
+        config_data = normalize_mcp_config_data(
             mcp_config.get("config", {}),
         )
         masked_env = {
@@ -1570,16 +1888,43 @@ class MarketplaceService:
                 f"MCP item {item_id} not found in source {source_id}",
             )
 
+        # 批量查询用户信息（tenant_name, bbk_id）
+        user_info_map: dict[str, dict] = {}
+        if self.db.is_connected and req.target_tenant_ids:
+            try:
+                placeholders = ",".join(["%s"] * len(req.target_tenant_ids))
+                sql = _QUERY_USERS_BY_TENANT_IDS_SQL.format(
+                    placeholders=placeholders,
+                )
+                rows = await self.db.fetch_all(
+                    sql,
+                    (source_id, *req.target_tenant_ids),
+                )
+                for row in rows:
+                    user_info_map[row["tenant_id"]] = {
+                        "tenant_name": row.get("tenant_name", ""),
+                        "bbk_id": row.get("bbk_id", ""),
+                    }
+            except Exception as e:
+                logger.warning(
+                    "Failed to query user info for MCP distribute: %s",
+                    e,
+                )
+
         results: list[MCPDistributionTenantResult] = []
 
         for tenant_id in req.target_tenant_ids:
             try:
+                effective_user_id = resolve_effective_user_id(
+                    tenant_id,
+                    source_id,
+                )
+                user_root = migrate_legacy_scope_dir_if_needed(
+                    self.swe_root,
+                    effective_user_id,
+                )
                 user_config_path = (
-                    self.swe_root
-                    / tenant_id
-                    / "workspaces"
-                    / "default"
-                    / "agent.json"
+                    user_root / "workspaces" / "default" / "agent.json"
                 )
                 bootstrapped = not user_config_path.exists()
                 copy_mcp_to_user(
@@ -1591,6 +1936,11 @@ class MarketplaceService:
                     client_key=item.client_key,
                     distributed_by=operator_id,
                 )
+
+                # 获取用户信息（如果查询不到则为空）
+                user_info = user_info_map.get(tenant_id, {})
+                tenant_name = user_info.get("tenant_name", "")
+                bbk_id = user_info.get("bbk_id", "")
 
                 # 记录分发日志
                 if self.db.is_connected:
@@ -1606,8 +1956,8 @@ class MarketplaceService:
                                 item_id,
                                 item.name,
                                 tenant_id,
-                                "",
-                                "",
+                                tenant_name,
+                                bbk_id,
                             ),
                         )
                     except Exception as e:
@@ -1800,3 +2150,585 @@ class MarketplaceService:
                 e,
             )
         return []
+
+    # ============ 撤回服务方法 ============
+
+    async def get_distributions(
+        self,
+        source_id: str,
+        item_id: str,
+        item_type: str,
+    ) -> list[DistributionRecord]:
+        """查询分发记录.
+
+        Args:
+            source_id: 来源 ID.
+            item_id: 条目 ID.
+            item_type: 条目类型（skill 或 mcp）.
+
+        Returns:
+            分发记录列表.
+        """
+        if not self.db.is_connected:
+            return []
+        try:
+            rows = await self.db.fetch_all(
+                _QUERY_DISTRIBUTIONS_SQL,
+                (source_id, item_id, item_type),
+            )
+            return [
+                DistributionRecord(
+                    target_user_id=r["target_user_id"],
+                    target_user_name=r.get("target_user_name") or "",
+                    target_bbk_id=r.get("target_bbk_id") or "",
+                    distributed_at=(
+                        r.get("created_at").isoformat()
+                        if r.get("created_at")
+                        else None
+                    ),
+                )
+                for r in rows
+            ]
+        except Exception as e:
+            logger.warning(
+                "Failed to get distributions for %s: %s",
+                item_id,
+                e,
+            )
+        return []
+
+    def _build_recall_response(
+        self,
+        item_id: str,
+        recalled_count: int,
+        results: list[RecallResultItem],
+    ) -> RecallResponse:
+        """统一组装撤回响应."""
+        return RecallResponse(
+            recalled_count=recalled_count,
+            failed_count=len(results) - recalled_count,
+            results=results,
+            item_id=item_id,
+        )
+
+    async def _query_user_info_map(
+        self,
+        source_id: str,
+        user_ids: list[str],
+        item_type: str,
+    ) -> dict[str, dict[str, str]]:
+        """批量查询用户名称和机构信息."""
+        if not self.db.is_connected or not user_ids:
+            return {}
+        try:
+            placeholders = ",".join(["%s"] * len(user_ids))
+            sql = _QUERY_USERS_BY_TENANT_IDS_SQL.format(
+                placeholders=placeholders,
+            )
+            rows = await self.db.fetch_all(sql, (source_id, *user_ids))
+        except Exception as e:
+            logger.warning(
+                "Failed to query user info for %s recall: %s",
+                item_type,
+                e,
+            )
+            return {}
+
+        user_info_map: dict[str, dict[str, str]] = {}
+        for row in rows:
+            user_info_map[row["tenant_id"]] = {
+                "tenant_name": row.get("tenant_name", ""),
+                "bbk_id": row.get("bbk_id", ""),
+            }
+        return user_info_map
+
+    def _resolve_users_to_recall(
+        self,
+        target_user_ids: list[str] | None,
+        dist_map: dict[str, DistributionRecord],
+    ) -> list[str]:
+        """优先使用显式指定用户，否则回退到分发记录中的用户."""
+        if target_user_ids:
+            return target_user_ids
+        return list(dist_map.keys())
+
+    def _resolve_recall_target_identity(
+        self,
+        user_id: str,
+        dist_map: dict[str, DistributionRecord],
+        user_info_map: dict[str, dict[str, str]],
+    ) -> tuple[str, str]:
+        """优先使用分发记录中的用户信息，缺失时回退数据库补充."""
+        dist = dist_map.get(user_id)
+        target_user_name = (
+            dist.target_user_name if dist and dist.target_user_name else ""
+        )
+        target_bbk_id = (
+            dist.target_bbk_id if dist and dist.target_bbk_id else ""
+        )
+        if target_user_name or target_bbk_id:
+            return target_user_name, target_bbk_id
+
+        user_info = user_info_map.get(user_id, {})
+        return (
+            user_info.get("tenant_name", ""),
+            user_info.get("bbk_id", ""),
+        )
+
+    async def _log_recall_operation(
+        self,
+        source_id: str,
+        operator_id: str,
+        operator_name: str,
+        item_type: str,
+        item_id: str,
+        item_name: str,
+        user_id: str,
+        target_user_name: str,
+        target_bbk_id: str,
+    ) -> None:
+        """记录撤回操作日志，日志失败不影响主流程."""
+        if not self.db.is_connected:
+            return
+        try:
+            await self.db.execute(
+                _LOG_MARKET_OP_SQL,
+                (
+                    source_id,
+                    operator_id,
+                    operator_name,
+                    "recall",
+                    item_type,
+                    item_id,
+                    item_name,
+                    user_id,
+                    target_user_name,
+                    target_bbk_id,
+                ),
+            )
+        except Exception as e:
+            logger.warning("Failed to log recall operation: %s", e)
+
+    async def _execute_recall_for_users(
+        self,
+        source_id: str,
+        item_id: str,
+        item_name: str,
+        item_type: str,
+        operator_id: str,
+        operator_name: str,
+        user_ids: list[str],
+        dist_map: dict[str, DistributionRecord],
+        user_info_map: dict[str, dict[str, str]],
+        recall_one: Callable[[str], Any],
+        warning_message: str,
+    ) -> RecallResponse:
+        """执行按用户维度的撤回流程并汇总结果."""
+        results: list[RecallResultItem] = []
+        recalled_count = 0
+
+        for user_id in user_ids:
+            target_user_name, target_bbk_id = (
+                self._resolve_recall_target_identity(
+                    user_id,
+                    dist_map,
+                    user_info_map,
+                )
+            )
+            try:
+                failure_reason = await recall_one(user_id)
+                if failure_reason:
+                    results.append(
+                        RecallResultItem(
+                            user_id=user_id,
+                            success=False,
+                            reason=failure_reason,
+                        ),
+                    )
+                    continue
+
+                await self._log_recall_operation(
+                    source_id,
+                    operator_id,
+                    operator_name,
+                    item_type,
+                    item_id,
+                    item_name,
+                    user_id,
+                    target_user_name,
+                    target_bbk_id,
+                )
+                results.append(
+                    RecallResultItem(user_id=user_id, success=True),
+                )
+                recalled_count += 1
+            except Exception as e:
+                logger.warning(warning_message, user_id, e)
+                results.append(
+                    RecallResultItem(
+                        user_id=user_id,
+                        success=False,
+                        reason=str(e),
+                    ),
+                )
+
+        return self._build_recall_response(item_id, recalled_count, results)
+
+    def _remove_skill_manifest_entry(
+        self,
+        user_id: str,
+        skill_name: str,
+        source_id: str | None,
+        agent_id: str = "default",
+    ) -> None:
+        """从运行时 manifest 中移除技能记录."""
+
+        def _remove(payload: dict, _name: str = skill_name) -> bool:
+            payload.get("skills", {}).pop(_name, None)
+            return True
+
+        mutate_user_skill_manifest(
+            self.swe_root,
+            user_id,
+            agent_id,
+            _remove,
+            source_id,
+        )
+
+    def _skill_source_matches(
+        self,
+        user_id: str,
+        skill_name: str,
+        source_id: str | None,
+        expected_source_prefix: str,
+        agent_id: str = "default",
+    ) -> bool:
+        """检查技能来源是否属于当前市场条目."""
+        manifest = read_user_skill_manifest(
+            self.swe_root,
+            user_id,
+            agent_id,
+            source_id,
+        )
+        skill_entry = manifest.get("skills", {}).get(skill_name, {})
+        source = skill_entry.get("source", "") or skill_entry.get(
+            "metadata",
+            {},
+        ).get("source", "")
+        return source.startswith(expected_source_prefix)
+
+    async def _recall_skill_from_user(
+        self,
+        user_id: str,
+        source_id: str,
+        skill_name: str,
+        expected_source_prefix: str | None = None,
+        reload_source_id: str | None = None,
+    ) -> str | None:
+        """撤回单个用户的技能，失败时返回原因."""
+        skills_dir = get_user_skills_dir(
+            self.swe_root,
+            user_id,
+            "default",
+            source_id,
+        )
+        skill_dir = skills_dir / skill_name
+        if not skill_dir.exists():
+            return "skill_not_found"
+        if expected_source_prefix and not self._skill_source_matches(
+            user_id,
+            skill_name,
+            source_id,
+            expected_source_prefix,
+        ):
+            return "not_from_this_marketplace"
+
+        await self.disable_skill(
+            user_id,
+            skill_name,
+            "default",
+            source_id,
+        )
+        shutil.rmtree(skill_dir)
+        self._remove_skill_manifest_entry(user_id, skill_name, source_id)
+        await self._trigger_agent_reload(
+            user_id,
+            "default",
+            reload_source_id,
+        )
+        return None
+
+    def _get_user_agent_config_path(
+        self,
+        user_id: str,
+        source_id: str | None,
+        agent_id: str = "default",
+    ) -> Path:
+        """获取用户 agent 配置路径."""
+        effective_user_id = resolve_effective_user_id(user_id, source_id)
+        user_root = migrate_legacy_scope_dir_if_needed(
+            self.swe_root,
+            effective_user_id,
+        )
+        return user_root / "workspaces" / agent_id / "agent.json"
+
+    def _load_user_agent_config(
+        self,
+        user_config_path: Path,
+    ) -> dict[str, Any] | None:
+        """读取用户 agent 配置，解析失败时返回空值."""
+        try:
+            return json.loads(user_config_path.read_text(encoding="utf-8"))
+        except json.JSONDecodeError:
+            return None
+
+    async def _recall_mcp_from_user(
+        self,
+        user_id: str,
+        source_id: str,
+        client_key: str,
+        expected_source_prefix: str | None = None,
+        reload_source_id: str | None = None,
+    ) -> str | None:
+        """撤回单个用户的 MCP，失败时返回原因."""
+        user_config_path = self._get_user_agent_config_path(user_id, source_id)
+        if not user_config_path.exists():
+            return "agent_config_not_found"
+
+        user_config = self._load_user_agent_config(user_config_path)
+        if user_config is None:
+            return "invalid_agent_config"
+
+        mcp_section = user_config.get("mcp")
+        if not isinstance(mcp_section, dict):
+            return "mcp_not_found"
+        mcp_clients = mcp_section.get("clients")
+        if not isinstance(mcp_clients, dict):
+            return "mcp_not_found"
+        if client_key not in mcp_clients:
+            return "mcp_not_found"
+
+        if expected_source_prefix:
+            source = mcp_clients.get(client_key, {}).get("source", "")
+            if not source.startswith(expected_source_prefix):
+                return "not_from_this_marketplace"
+
+        mcp_clients.pop(client_key, None)
+        mcp_section["clients"] = mcp_clients
+        user_config["updated_at"] = datetime.now(timezone.utc).isoformat()
+        _atomic_write_json(user_config_path, user_config)
+        await self._trigger_agent_reload(
+            user_id,
+            "default",
+            reload_source_id,
+        )
+        return None
+
+    def _require_market_item(
+        self,
+        source_id: str,
+        item_id: str,
+        item_type: str,
+        item_label: str,
+    ) -> MarketItem:
+        """按类型读取市场条目，不存在时抛出异常."""
+        item = next(
+            (
+                market_item
+                for market_item in load_index(self.marketplace_root, source_id)
+                if market_item.item_id == item_id
+                and market_item.item_type == item_type
+            ),
+            None,
+        )
+        if item is None:
+            raise ValueError(f"{item_label} item {item_id} not found")
+        return item
+
+    async def recall_skill(
+        self,
+        source_id: str,
+        item_id: str | None,
+        operator_id: str,
+        operator_name: str,
+        req: RecallRequest,
+    ) -> RecallResponse:
+        """撤回已分发的技能.
+
+        Args:
+            source_id: 来源 ID.
+            item_id: 条目 ID（可选，按名称撤回时不需要）.
+            operator_id: 操作者 ID.
+            operator_name: 操作者名称.
+            req: 撤回请求体.
+
+        Returns:
+            撤回结果.
+        """
+        if req.skill_name:
+            if not req.target_user_ids:
+                return self._build_recall_response("", 0, [])
+
+            user_info_map = await self._query_user_info_map(
+                source_id,
+                req.target_user_ids,
+                "skill",
+            )
+            safe_skill_name = normalize_skill_name(req.skill_name)
+            return await self._execute_recall_for_users(
+                source_id=source_id,
+                item_id="",
+                item_name=req.skill_name,
+                item_type="skill",
+                operator_id=operator_id,
+                operator_name=operator_name,
+                user_ids=req.target_user_ids,
+                dist_map={},
+                user_info_map=user_info_map,
+                recall_one=lambda user_id: self._recall_skill_from_user(
+                    user_id,
+                    source_id,
+                    safe_skill_name,
+                    reload_source_id=source_id,
+                ),
+                warning_message="Failed to recall skill from user %s: %s",
+            )
+
+        if not item_id:
+            raise ValueError("item_id or skill_name is required")
+
+        item = self._require_market_item(source_id, item_id, "skill", "Skill")
+        distributions = await self.get_distributions(
+            source_id,
+            item_id,
+            "skill",
+        )
+        dist_map = {d.target_user_id: d for d in distributions}
+        users_to_recall = self._resolve_users_to_recall(
+            req.target_user_ids,
+            dist_map,
+        )
+
+        if not users_to_recall:
+            return self._build_recall_response(item_id, 0, [])
+
+        user_info_map = await self._query_user_info_map(
+            source_id,
+            users_to_recall,
+            "skill",
+        )
+        safe_skill_name = normalize_skill_name(item.name)
+        expected_source_prefix = None
+        if not req.force:
+            expected_source_prefix = f"marketplace:{item_id}"
+
+        return await self._execute_recall_for_users(
+            source_id=source_id,
+            item_id=item_id,
+            item_name=item.name,
+            item_type="skill",
+            operator_id=operator_id,
+            operator_name=operator_name,
+            user_ids=users_to_recall,
+            dist_map=dist_map,
+            user_info_map=user_info_map,
+            recall_one=lambda user_id: self._recall_skill_from_user(
+                user_id,
+                source_id,
+                safe_skill_name,
+                expected_source_prefix,
+                None,
+            ),
+            warning_message="Failed to recall skill from user %s: %s",
+        )
+
+    async def recall_mcp(
+        self,
+        source_id: str,
+        item_id: str | None,
+        operator_id: str,
+        operator_name: str,
+        req: RecallRequest,
+    ) -> RecallResponse:
+        """撤回已分发的 MCP.
+
+        Args:
+            source_id: 来源 ID.
+            item_id: 条目 ID（可选，按名称撤回时不需要）.
+            operator_id: 操作者 ID.
+            operator_name: 操作者名称.
+            req: 撤回请求体.
+
+        Returns:
+            撤回结果.
+        """
+        if req.mcp_name:
+            if not req.target_user_ids:
+                return self._build_recall_response("", 0, [])
+
+            user_info_map = await self._query_user_info_map(
+                source_id,
+                req.target_user_ids,
+                "mcp",
+            )
+            return await self._execute_recall_for_users(
+                source_id=source_id,
+                item_id="",
+                item_name=req.mcp_name,
+                item_type="mcp",
+                operator_id=operator_id,
+                operator_name=operator_name,
+                user_ids=req.target_user_ids,
+                dist_map={},
+                user_info_map=user_info_map,
+                recall_one=lambda user_id: self._recall_mcp_from_user(
+                    user_id,
+                    source_id,
+                    req.mcp_name,
+                    reload_source_id=source_id,
+                ),
+                warning_message="Failed to recall MCP from user %s: %s",
+            )
+
+        if not item_id:
+            raise ValueError("item_id or mcp_name is required")
+
+        item = self._require_market_item(source_id, item_id, "mcp", "MCP")
+        distributions = await self.get_distributions(source_id, item_id, "mcp")
+        dist_map = {d.target_user_id: d for d in distributions}
+        users_to_recall = self._resolve_users_to_recall(
+            req.target_user_ids,
+            dist_map,
+        )
+
+        if not users_to_recall:
+            return self._build_recall_response(item_id, 0, [])
+
+        user_info_map = await self._query_user_info_map(
+            source_id,
+            users_to_recall,
+            "mcp",
+        )
+        expected_source_prefix = None
+        if not req.force:
+            expected_source_prefix = f"marketplace:{item_id}"
+
+        return await self._execute_recall_for_users(
+            source_id=source_id,
+            item_id=item_id,
+            item_name=item.name,
+            item_type="mcp",
+            operator_id=operator_id,
+            operator_name=operator_name,
+            user_ids=users_to_recall,
+            dist_map=dist_map,
+            user_info_map=user_info_map,
+            recall_one=lambda user_id: self._recall_mcp_from_user(
+                user_id,
+                source_id,
+                item.client_key,
+                expected_source_prefix,
+                None,
+            ),
+            warning_message="Failed to recall MCP from user %s: %s",
+        )

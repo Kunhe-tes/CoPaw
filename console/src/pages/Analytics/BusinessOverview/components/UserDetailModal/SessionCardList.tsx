@@ -9,6 +9,7 @@ import {
   Wrench,
 } from "lucide-react";
 import { SessionListItem } from "../../../../../api/modules/tracing";
+import { copyToClipboard } from "@/utils/clipboard";
 import styles from "./index.module.less";
 
 interface SessionCardListProps {
@@ -20,7 +21,7 @@ interface SessionCardListProps {
   selectedSessionId: string | null;
   collapsed?: boolean;
   onSelect: (sessionId: string) => void;
-  onPageChange: (page: number) => void;
+  onPageChange: (page: number, pageSize: number) => void;
   onToggleCollapsed?: () => void;
 }
 
@@ -73,13 +74,17 @@ export default function SessionCardList({
     return <span>{truncated}</span>;
   };
 
-  const handleCopySessionId = (
+  const handleCopySessionId = async (
     e: React.MouseEvent,
     sessionId: string,
   ) => {
     e.stopPropagation();
-    navigator.clipboard.writeText(sessionId);
-    message.success("会话 ID 已复制");
+    const copied = await copyToClipboard(sessionId);
+    if (copied) {
+      message.success("会话 ID 已复制");
+      return;
+    }
+    message.error("会话 ID 复制失败");
   };
 
   if (collapsed) {
@@ -151,6 +156,7 @@ export default function SessionCardList({
                           <button
                             type="button"
                             className={styles.copyButton}
+                            aria-label="复制会话 ID"
                             onClick={(e) =>
                               handleCopySessionId(e, session.session_id)
                             }
@@ -203,6 +209,8 @@ export default function SessionCardList({
                 simple
                 current={page}
                 pageSize={pageSize}
+                showSizeChanger
+                pageSizeOptions={["10", "20", "50", "100"]}
                 total={total}
                 onChange={onPageChange}
               />

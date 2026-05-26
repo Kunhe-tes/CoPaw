@@ -85,7 +85,7 @@ export default createGlobalStyle`
     align-items: center;
     justify-content: space-between;
     gap: 8px;
-    margin-bottom: 6px;
+    margin-bottom: 2px;
   }
 
   &-item-title {

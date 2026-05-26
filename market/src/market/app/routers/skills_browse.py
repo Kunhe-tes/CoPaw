@@ -353,22 +353,25 @@ def _parse_frontmatter_description(skill_md_path: Path) -> str:
     return ""
 
 
-def _update_skill_json(
-    skill_json_path: Path,
+def _build_skill_metadata(
+    skill_dir: Path,
     skill_name: str,
     original_name: str,
-    user_id: str,
-    user_name: str,
-    bbk_id: str,
-    category_id: int | None,
 ) -> dict[str, Any]:
-    """Update skill.json with metadata, return parsed data.
+    """构建技能元数据（用于写入 manifest），不再写入 skill.json 文件.
 
     Args:
+        skill_dir: 技能目录
         skill_name: 安全的目录名
         original_name: 原始技能名称（用于前端展示）
+
+    Returns:
+        技能元数据字典
     """
+    skill_json_path = skill_dir / "skill.json"
     skill_data: dict[str, Any] = {}
+
+    # 读取已有的 skill.json（如果存在）
     if skill_json_path.exists():
         try:
             skill_data = json.loads(
@@ -382,35 +385,22 @@ def _update_skill_json(
 
     # 优先从 skill.json 获取 description，其次从 SKILL.md frontmatter
     if not skill_data.get("description"):
-        skill_md_path = skill_json_path.parent / "SKILL.md"
+        skill_md_path = skill_dir / "SKILL.md"
         desc_from_md = _parse_frontmatter_description(skill_md_path)
         if desc_from_md:
             skill_data["description"] = desc_from_md
         else:
             skill_data.setdefault("description", "")
 
-    skill_data["source"] = "customized"
-    skill_data["creator_id"] = user_id
-    skill_data["creator_name"] = user_name
-    skill_data["bbk_id"] = bbk_id
-    if category_id is not None:
-        skill_data["category_id"] = category_id
+    skill_data["source"] = skill_data.get("source", "customized")
 
-    # 时间字段处理：
-    # - 新上传技能：写入 created_at
-    # - 更新现有技能：保留 created_at，写入 updated_at
+    # 时间字段处理
     current_time = datetime.now(timezone.utc).isoformat()
     if not skill_data.get("created_at"):
-        # 新上传的技能，写入创建时间
         skill_data["created_at"] = current_time
     else:
-        # 更新现有技能，写入更新时间
         skill_data["updated_at"] = current_time
 
-    skill_json_path.write_text(
-        json.dumps(skill_data, ensure_ascii=False, indent=2),
-        encoding="utf-8",
-    )
     return skill_data
 
 
@@ -425,12 +415,15 @@ def _process_single_skill(
     bbk_id: str,
     overwrite: bool,
     category_id: int | None,
-) -> tuple[bool, dict[str, str] | None]:
-    """Process single skill import. Returns (imported, conflict_or_none).
+) -> tuple[bool, dict[str, str] | None, dict[str, Any] | None]:
+    """Process single skill import. Returns (imported, conflict_or_none, metadata).
 
     Args:
         skill_name: 安全的目录名
         original_name: 原始技能名称
+
+    Returns:
+        (是否导入成功, 冲突信息, 技能元数据用于写入 manifest)
     """
     if skill_name in existing_names and not overwrite:
         # 递增计数器直到找到不冲突的建议名
@@ -441,12 +434,16 @@ def _process_single_skill(
             if safe_suggested not in existing_names:
                 break
             counter += 1
-        return False, {
-            "reason": "already_exists",
-            "skill_name": skill_name,
-            "original_name": original_name,
-            "suggested_name": suggested,
-        }
+        return (
+            False,
+            {
+                "reason": "already_exists",
+                "skill_name": skill_name,
+                "original_name": original_name,
+                "suggested_name": suggested,
+            },
+            None,
+        )
 
     if not _import_skill_dir(
         skill_dir,
@@ -455,19 +452,24 @@ def _process_single_skill(
         original_name,
         overwrite,
     ):
-        return False, None
+        return False, None, None
 
-    skill_json_path = skills_dir / skill_name / "skill.json"
-    _update_skill_json(
-        skill_json_path,
+    # 构建技能元数据（不再写入 skill.json 文件）
+    imported_skill_dir = skills_dir / skill_name
+    skill_metadata = _build_skill_metadata(
+        imported_skill_dir,
         skill_name,
         original_name,
-        user_id,
-        user_name,
-        bbk_id,
-        category_id,
     )
-    return True, None
+
+    # 添加上传者信息到元数据
+    skill_metadata["creator_id"] = user_id
+    skill_metadata["creator_name"] = user_name
+    skill_metadata["bbk_id"] = bbk_id
+    if category_id is not None:
+        skill_metadata["category_id"] = category_id
+
+    return True, None, skill_metadata
 
 
 def _import_skill_from_zip(
@@ -485,6 +487,7 @@ def _import_skill_from_zip(
     """Import skill from zip data to user skills directory."""
     imported: list[str] = []
     conflicts: list[dict[str, str]] = []
+    skills_metadata: dict[str, dict[str, Any]] = {}  # skill_name -> metadata
     tmp_dir: Path | None = None
     parsed_name: str | None = None
     parsed_description: str | None = None
@@ -514,7 +517,7 @@ def _import_skill_from_zip(
             elif target_name and len(found_skills) == 1:
                 safe_skill_name = normalize_skill_name(target_name.strip())
 
-            success, conflict = _process_single_skill(
+            success, conflict, metadata = _process_single_skill(
                 skill_dir,
                 skills_dir,
                 safe_skill_name,
@@ -531,17 +534,12 @@ def _import_skill_from_zip(
                 conflicts.append(conflict)
                 continue
 
-            if success:
+            if success and metadata:
                 imported.append(safe_skill_name)
+                skills_metadata[safe_skill_name] = metadata
                 if parsed_name is None:
-                    skill_json_path = (
-                        skills_dir / safe_skill_name / "skill.json"
-                    )
-                    skill_data = json.loads(
-                        skill_json_path.read_text(encoding="utf-8"),
-                    )
-                    parsed_name = skill_data.get("name")
-                    parsed_description = skill_data.get("description")
+                    parsed_name = metadata.get("name")
+                    parsed_description = metadata.get("description")
 
     except zipfile.BadZipFile as e:
         raise HTTPException(
@@ -559,6 +557,7 @@ def _import_skill_from_zip(
         "count": len(imported),
         "name": parsed_name,
         "description": parsed_description,
+        "skills_metadata": skills_metadata,  # 返回 metadata 用于写入 manifest
     }
     if conflicts:
         result["conflicts"] = conflicts
@@ -767,17 +766,23 @@ async def upload_skill_to_workspace(
         except Exception as e:
             logger.warning("Failed to log upload operation: %s", e)
 
-    # 注册技能到 manifest
+    # 注册技能到 manifest（使用已构建的 metadata）
     if result.get("imported"):
+        skills_metadata = result.get("skills_metadata") or {}
         for skill_name in result["imported"]:
+            skill_metadata = skills_metadata.get(skill_name) or {}
             svc.register_skill_in_manifest(
                 x_user_id,
                 skill_name,
                 agent_id,
                 source_id,
                 enabled=enable,
+                source="customized",
+                extra_metadata=skill_metadata,
             )
 
+    # 移除 skills_metadata，不返回给前端
+    result.pop("skills_metadata", None)
     result["enabled"] = enable
     return result
 
@@ -1188,3 +1193,68 @@ async def log_skill_operation(
             logger.warning("Failed to log operation: %s", e)
 
     return {"success": True}
+
+
+class MigrateSkillJsonRequest(BaseModel):
+    """迁移 skill.json 字段请求."""
+
+    delete_skill_json: bool = Field(
+        default=False,
+        description="是否删除技能目录内的 skill.json 文件",
+    )
+
+
+class MigrateSkillJsonResponse(BaseModel):
+    """迁移 skill.json 字段响应."""
+
+    migrated: int = Field(description="成功迁移的技能数量")
+    skipped: int = Field(
+        description="跳过的技能数量（无 skill.json 或无额外字段）",
+    )
+    errors: list[str] = Field(default_factory=list, description="错误信息列表")
+
+
+@router.post(
+    "/market/skills/migrate-skill-json",
+    response_model=MigrateSkillJsonResponse,
+)
+async def migrate_skill_json_to_manifest(
+    request: Request,
+    body: MigrateSkillJsonRequest,
+    x_source_id: Optional[str] = Header(default=None, alias="X-Source-Id"),
+    x_user_id: Optional[str] = Header(default=None, alias="X-User-Id"),
+    agent_id: str = "default",
+):
+    """迁移技能目录内 skill.json 字段到 workspace manifest.
+
+    将以下字段从 skills/<技能名>/skill.json 合并到 workspaces/<agent_id>/skill.json:
+    - creator_id
+    - creator_name
+    - bbk_id
+    - distributed_by
+    - received_version
+    - category_id
+
+    Args:
+        delete_skill_json: 是否删除技能目录内的 skill.json 文件（默认不删除）
+    """
+    source_id = require_source_id(x_source_id)
+    if not x_user_id:
+        raise HTTPException(
+            status_code=400,
+            detail="X-User-Id header is required",
+        )
+
+    svc = request.app.state.marketplace
+    result = svc.migrate_skill_json_to_manifest(
+        x_user_id,
+        agent_id,
+        source_id,
+        delete_skill_json=body.delete_skill_json,
+    )
+
+    return MigrateSkillJsonResponse(
+        migrated=result["migrated"],
+        skipped=result["skipped"],
+        errors=result["errors"],
+    )

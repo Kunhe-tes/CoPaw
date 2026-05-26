@@ -18,6 +18,9 @@ class PublishSkillRequest(BaseModel):
     bbk_ids: list[str] = Field(default_factory=list)
     skill_json: dict = Field(default_factory=dict)
     skill_md: str = ""
+    # 可选：指定用户技能目录名，用于同步整个目录
+    skill_name: Optional[str] = None
+    agent_id: str = "default"
 
 
 class DistributeRequest(BaseModel):
@@ -252,3 +255,38 @@ class UpdateMarketMCPMetadataRequest(BaseModel):
     description: str | None = None
     guidance: str | None = None
     bbk_ids: list[str] = Field(default_factory=list)
+
+
+class DistributionRecord(BaseModel):
+    """分发记录."""
+
+    target_user_id: str
+    target_user_name: str = ""
+    target_bbk_id: str = ""
+    distributed_at: Optional[str] = None
+
+
+class RecallRequest(BaseModel):
+    """撤回请求体."""
+
+    target_user_ids: list[str] | None = None  # 不传则撤回所有
+    force: bool = False  # 强制撤回，不验证来源是否匹配
+    skill_name: str | None = None  # 按技能名称撤回（技能专用）
+    mcp_name: str | None = None  # 按 MCP 名称撤回（MCP 专用）
+
+
+class RecallResultItem(BaseModel):
+    """单个用户的撤回结果."""
+
+    user_id: str
+    success: bool
+    reason: str | None = None
+
+
+class RecallResponse(BaseModel):
+    """撤回结果响应."""
+
+    recalled_count: int
+    failed_count: int = 0
+    results: list[RecallResultItem] = Field(default_factory=list)
+    item_id: str

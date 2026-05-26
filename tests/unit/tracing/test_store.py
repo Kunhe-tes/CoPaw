@@ -484,6 +484,46 @@ class TestQueryOperations:
         assert len(traces) == 1
 
     @pytest.mark.asyncio
+    async def test_get_traces_filter_by_feedback(self, config, mock_db):
+        now = datetime.now()
+        mock_db.fetch_all.return_value = [
+            {
+                "trace_id": "trace-1",
+                "source_id": "test-source",
+                "user_id": "user-1",
+                "user_name": None,
+                "bbk_id": None,
+                "session_id": "session-1",
+                "channel": "console",
+                "start_time": now,
+                "duration_ms": 100,
+                "total_tokens": 0,
+                "total_input_tokens": 0,
+                "total_output_tokens": 0,
+                "model_name": None,
+                "status": "completed",
+                "skills_count": 0,
+                "feedback_content": "需要优化回答",
+                "feedback_updated_at": now,
+            },
+        ]
+
+        store = TraceStore(config, mock_db)
+        await store.initialize()
+
+        traces, total = await store.get_traces(
+            "test-source",
+            has_feedback=True,
+        )
+
+        count_sql = mock_db.fetch_one.call_args_list[-1][0][0]
+        query_sql = mock_db.fetch_all.call_args_list[-1][0][0]
+        assert "swe_response_feedback" in count_sql
+        assert "NULLIF(TRIM(rf.feedback_content), '') IS NOT NULL" in query_sql
+        assert traces[0].feedback_content == "需要优化回答"
+        assert len(traces) == 1
+
+    @pytest.mark.asyncio
     async def test_get_trace_detail(self, config, mock_db):
         """Test getting trace detail with spans."""
         now = datetime.now()

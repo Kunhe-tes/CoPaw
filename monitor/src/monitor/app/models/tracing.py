@@ -79,6 +79,10 @@ class Span(BaseModel):
         default=None,
         description="Skill name for skill events",
     )
+    skill_description: Optional[str] = Field(
+        default=None,
+        description="Skill description from SKILL.md",
+    )
     mcp_server: Optional[str] = Field(
         default=None,
         description="MCP server name if this tool is from MCP",
@@ -186,6 +190,10 @@ class SkillUsage(BaseModel):
     """Skill usage statistics with weighted attribution."""
 
     skill_name: str
+    skill_description: Optional[str] = Field(
+        default=None,
+        description="技能描述",
+    )
     count: int = 0
     weighted_count: float = 0.0
     avg_duration_ms: int = 0
@@ -560,3 +568,47 @@ class ModelOutputRequest(BaseModel):
 
     trace_id: str = Field(description="追踪 ID")
     model_output: str = Field(description="模型输出文本")
+
+
+class ExtractCustomerNamesRequest(BaseModel):
+    """提取客户姓名请求."""
+
+    skill_names: list[str] = Field(
+        ...,
+        description="技能名称列表",
+        min_length=1,
+    )
+    user_ids: Optional[list[str]] = Field(
+        default=None,
+        description="用户 ID 列表筛选",
+    )
+    bbk_id: Optional[str] = Field(
+        default=None,
+        description="分行 ID 筛选",
+    )
+    start_date: Optional[str] = Field(
+        default=None,
+        description="开始日期 (YYYY-MM-DD)",
+    )
+    end_date: Optional[str] = Field(
+        default=None,
+        description="结束日期 (YYYY-MM-DD)",
+    )
+
+
+class ExtractCustomerNamesResponse(BaseModel):
+    """提取客户姓名响应."""
+
+    total_traces: int = Field(default=0, description="处理的 trace 总数")
+    names_extracted: int = Field(
+        default=0,
+        description="提取的姓名总数",
+    )
+    user_message_names: int = Field(
+        default=0,
+        description="用户消息中提取的姓名数",
+    )
+    model_output_names: int = Field(
+        default=0,
+        description="模型输出中提取的姓名数",
+    )

@@ -6,6 +6,7 @@ import { getExternalToken, isExternalTokenEnabled } from "./externalToken";
 import { getUserId } from "../utils/identity";
 import { getIframeContext } from "../stores/iframeStore";
 import { DEFAULT_SOURCE_ID, DEFAULT_BBK_ID, DEFAULT_USER_NAME } from "../constants/identity";
+import { COOKIE_KEYS } from "../layouts/constants";
 // ==================== userId 统一整改结束 ====================
 
 /**
@@ -26,7 +27,7 @@ export function buildAuthHeaders(): Record<string, string> {
   if (isExternalTokenEnabled()) {
     const externalToken = getExternalToken();
     if (externalToken) {
-      headers.Authorization = `Bearer ${externalToken}`;
+      headers['X-Auth-Authorization'] = `Bearer ${externalToken}`;
     }
   } else {
     // 回退到原有 token 逻辑
@@ -97,8 +98,11 @@ export function buildAuthHeaders(): Record<string, string> {
     headers["X-Bbk-Id"] = bbkId;
   }
 
-  // 7. Username
-  const userName = iframeContext.userName || DEFAULT_USER_NAME;
+  // 7. Scope ID（tenantId和sourceId拼接而成）
+  headers["X-Scope-Id"] = `${userId}-${sourceId}`
+
+  // 8. Username
+  const userName = iframeContext.userName || DEFAULT_USER_NAME
   if (userName) {
     headers["X-User-Name"] = encodeURIComponent(userName);
   }
@@ -111,15 +115,48 @@ export function buildAuthHeaders(): Record<string, string> {
     headers["X-Position-Id"] = iframeContext.positionId;
   }
 
-  // 8. Space（来自 iframe context）
+  // 9. Space（来自 iframe context）
   if (iframeContext.space) {
     headers["space"] = iframeContext.space;
   }
 
-  // 9. Cookie（仅在用户变更时添加）
+  // 10. Cookie（优先使用 iframeContext 中 userChange=true 时的值，否则使用 document.cookie）
+  let cookieData;
+  // 定义需要替换的cookie key映射关系
+  const cookieKeyMap: Record<string, string> = {
+    'userId': COOKIE_KEYS.userId,
+    'sysId': COOKIE_KEYS.sysId,
+    'bbk': COOKIE_KEYS.bbk,
+    'orgCode': COOKIE_KEYS.orgCode,
+    'orgLvl': COOKIE_KEYS.orgLvl,
+    'token': COOKIE_KEYS.token,
+    'positionId': COOKIE_KEYS.positionId
+  };
+
   if (iframeContext.userChange) {
-    headers["x-header-cookie"] = document.cookie;
+    // 优先使用 iframeContext 中的值（从 fetchCustomerInfo 接口获取的最新cookie）
+    let cookieString = document.cookie;
+    Object.entries(iframeContext).forEach(([key, value]) => {
+      if (key in cookieKeyMap && value) {
+        const cookieKey = cookieKeyMap[key as keyof typeof cookieKeyMap];
+        const searchRegex = new RegExp(`${cookieKey}=[^;]*`, 'g');
+
+        if (cookieString.includes(cookieKey)) {
+          // 如果cookie中存在该key，替换其值
+          cookieString = cookieString.replace(searchRegex, `${cookieKey}=${encodeURIComponent(value)}`);
+        } else {
+          // 如果cookie中不存在该key，添加新的cookie
+          cookieString += `; ${cookieKey}=${encodeURIComponent(value)}`;
+        }
+      }
+    });
+    cookieData = cookieString;
+  } else {
+    // 未变更时，直接使用 document.cookie（浏览器会自动更新过期的cookie）
+    cookieData = document.cookie;
   }
+
+  headers["x-header-cookie"] = cookieData;
 
   return headers;
 }

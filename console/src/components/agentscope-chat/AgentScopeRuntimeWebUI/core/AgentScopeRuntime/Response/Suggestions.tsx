@@ -1,6 +1,8 @@
 import React, { useState } from "react";
 import { Tooltip } from "antd";
 import { useProviderContext } from "@/components/agentscope-chat";
+import { useIframeStore } from "@/stores/iframeStore";
+import { isSuggestionsDisabledForSource } from "@/utils/sourceFeatures";
 import { SparkRightArrowLine } from "@agentscope-ai/icons";
 import { AgentScopeRuntimeRunStatus } from "../types";
 import { emit } from "../../Context/useChatAnywhereEventEmitter";
@@ -20,10 +22,11 @@ export interface ISuggestionsProps {
 export default function Suggestions(props: ISuggestionsProps) {
   const { suggestions, status } = props;
   const prefixCls = useProviderContext().getPrefixCls("suggestions");
+  const source = useIframeStore((state) => state.source);
   const [tooltipVisible, setTooltipVisible] = useState<string | null>(null);
 
   // 没有建议内容时不渲染
-  if (!suggestions?.length) {
+  if (!suggestions?.length || isSuggestionsDisabledForSource(source)) {
     return null;
   }
 

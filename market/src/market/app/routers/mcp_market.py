@@ -27,8 +27,11 @@ from ...marketplace.schemas import (
     UpdateMarketMCPMetadataRequest,
     UploadMCPResponse,
 )
-from ...marketplace.fs import load_mcp_config, load_index
-from ...marketplace.service import _normalize_market_mcp_config_data
+from ...marketplace.fs import (
+    load_mcp_config,
+    load_index,
+    normalize_mcp_config_data,
+)
 from ...runtime.config_store import MCPClientConfig
 from ...runtime.context import tenant_context
 from ..deps import require_source_id
@@ -419,7 +422,7 @@ async def test_market_mcp(
     if mcp_config is None:
         raise HTTPException(status_code=404, detail="MCP config not found")
 
-    config_data = _normalize_market_mcp_config_data(
+    config_data = normalize_mcp_config_data(
         mcp_config.get("config", {}),
     )
     if not config_data.get("name"):
@@ -436,3 +439,99 @@ async def test_market_mcp(
         source_id=source_id,
     ):
         return await _test_mcp_connection(client_config)
+
+
+@router.get(
+    "/market/mcp/{item_id}/distributions",
+)
+async def get_mcp_distributions(
+    item_id: str,
+    request: Request,
+    x_source_id: Optional[str] = Header(default=None, alias="X-Source-Id"),
+    x_manager: Optional[str] = Header(default=None, alias="X-Manager"),
+):
+    """查询 MCP 分发记录（管理员）."""
+    source_id = require_source_id(x_source_id)
+    _require_manager(x_manager)
+    svc = request.app.state.marketplace
+    distributions = await svc.get_distributions(source_id, item_id, "mcp")
+    return distributions
+
+
+@router.post(
+    "/market/mcp/recall",
+)
+async def recall_mcp_by_name(
+    request: Request,
+    x_source_id: Optional[str] = Header(default=None, alias="X-Source-Id"),
+    x_manager: Optional[str] = Header(default=None, alias="X-Manager"),
+    x_user_id: Optional[str] = Header(default=None, alias="X-User-Id"),
+    x_user_name: Optional[str] = Header(default=None, alias="X-User-Name"),
+) -> dict:
+    """按 MCP 名称撤回（管理员）."""
+    from ...marketplace.schemas import RecallRequest
+
+    source_id = require_source_id(x_source_id)
+    _require_manager(x_manager)
+    svc = request.app.state.marketplace
+
+    # 解析请求体
+    body = await request.json()
+    target_user_ids = body.get("target_user_ids")
+    mcp_name = body.get("mcp_name")
+    req = RecallRequest(
+        target_user_ids=target_user_ids,
+        mcp_name=mcp_name,
+    )
+
+    try:
+        result = await svc.recall_mcp(
+            source_id,
+            None,
+            operator_id=x_user_id or "",
+            operator_name=unquote(x_user_name or ""),
+            req=req,
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return result.model_dump()
+
+
+@router.post(
+    "/market/mcp/{item_id}/recall",
+)
+async def recall_mcp(
+    item_id: str,
+    request: Request,
+    x_source_id: Optional[str] = Header(default=None, alias="X-Source-Id"),
+    x_manager: Optional[str] = Header(default=None, alias="X-Manager"),
+    x_user_id: Optional[str] = Header(default=None, alias="X-User-Id"),
+    x_user_name: Optional[str] = Header(default=None, alias="X-User-Name"),
+) -> dict:
+    """撤回已分发的 MCP（管理员）."""
+    from ...marketplace.schemas import RecallRequest
+
+    source_id = require_source_id(x_source_id)
+    _require_manager(x_manager)
+    svc = request.app.state.marketplace
+
+    # 解析请求体
+    body = await request.json()
+    target_user_ids = body.get("target_user_ids")
+    force = body.get("force", False)
+    req = RecallRequest(
+        target_user_ids=target_user_ids,
+        force=force,
+    )
+
+    try:
+        result = await svc.recall_mcp(
+            source_id,
+            item_id,
+            operator_id=x_user_id or "",
+            operator_name=unquote(x_user_name or ""),
+            req=req,
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    return result.model_dump()

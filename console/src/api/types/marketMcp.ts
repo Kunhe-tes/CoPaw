@@ -133,3 +133,37 @@ export interface UpdateMarketMCPMetadataRequest {
   /** 可见机构 */
   bbk_ids: string[];
 }
+
+/** 分发记录 */
+export interface DistributionRecord {
+  /** 目标用户 ID */
+  target_user_id: string;
+  /** 目标用户名称 */
+  target_user_name: string;
+  /** 目标用户所属机构 ID */
+  target_bbk_id: string;
+  /** 分发时间 */
+  distributed_at: string | null;
+}
+
+/** 撤回结果项 */
+export interface RecallResultItem {
+  /** 用户 ID */
+  user_id: string;
+  /** 是否成功 */
+  success: boolean;
+  /** 失败原因 */
+  reason: string | null;
+}
+
+/** 撤回响应 */
+export interface RecallResponse {
+  /** 撤回成功数量 */
+  recalled_count: number;
+  /** 撤回失败数量 */
+  failed_count: number;
+  /** 撤回结果列表 */
+  results: RecallResultItem[];
+  /** 条目 ID */
+  item_id: string;
+}

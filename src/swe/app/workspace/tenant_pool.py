@@ -123,7 +123,19 @@ class TenantWorkspacePool:
         source_id: str | None,
         scope_id: str | None,
     ) -> str:
-        """解析用于隔离 bootstrap 状态的运行时租户标识。"""
+        """Resolve the bootstrap tenant ID from runtime identity.
+
+        Args:
+            tenant_id: The tenant identifier.
+            source_id: Optional source identifier.
+            scope_id: Optional explicit runtime scope.
+
+        Returns:
+            The resolved bootstrap tenant ID.
+
+        Raises:
+            ValueError: If scope_id cannot resolve to a canonical scope.
+        """
         if scope_id is not None:
             bootstrap_tenant_id = resolve_runtime_identity(scope_id)[2]
             if bootstrap_tenant_id is None:
@@ -134,55 +146,209 @@ class TenantWorkspacePool:
 
         return resolve_runtime_identity(tenant_id, source_id)[2] or tenant_id
 
-    async def _record_bootstrap_init_source(
+    async def _check_existing_bootstrap(
+        self,
+        bootstrap_tenant_id: str,
+        tenant_id: str,
+        source_id: str | None,
+        scope_id: str | None,
+    ) -> bool:
+        """Check if tenant already has a complete bootstrap.
+
+        Args:
+            bootstrap_tenant_id: The resolved bootstrap tenant ID.
+            tenant_id: The original tenant identifier.
+            source_id: Optional source identifier.
+            scope_id: Optional explicit runtime scope.
+
+        Returns:
+            True if already bootstrapped and complete, False otherwise.
+        """
+        async with self._registry_lock:
+            entry = self._workspaces.get(bootstrap_tenant_id)
+            if entry is None:
+                return False
+
+            initializer = TenantInitializer(
+                self._base_working_dir,
+                tenant_id,
+                source_id=source_id,
+                scope_id=scope_id,
+            )
+            if initializer.has_seeded_bootstrap():
+                self._mark_access(entry)
+                return True
+
+            logger.warning(
+                "Tenant %s cached in pool but scaffold is incomplete. "
+                "Running self-heal bootstrap.",
+                bootstrap_tenant_id,
+            )
+            return False
+
+    def _log_seeding_results(
+        self,
+        tenant_id: str,
+        bootstrap_result: dict,
+    ) -> None:
+        """Log the seeding results from bootstrap.
+
+        Args:
+            tenant_id: The tenant identifier.
+            bootstrap_result: The result from ensure_seeded_bootstrap().
+        """
+        pool_seed = bootstrap_result.get("pool_seed", {})
+        workspace_seed = bootstrap_result.get("workspace_seed", {})
+
+        if pool_seed.get("seeded"):
+            logger.info(
+                f"Tenant {tenant_id} skill pool seeded from "
+                f"{pool_seed.get('source')}: "
+                f"{pool_seed.get('skills', [])}",
+            )
+        if workspace_seed.get("seeded"):
+            logger.info(
+                f"Tenant {tenant_id} workspace skills seeded: "
+                f"{workspace_seed.get('skills', [])}",
+            )
+
+    def _compute_init_source_mapping(
         self,
         tenant_id: str,
         source_id: str | None,
         scope_id: str | None,
         initializer: TenantInitializer,
-        tenant_name: str | None,
-        bbk_id: str | None,
-    ) -> None:
-        """记录 bootstrap 模板来源和逻辑租户映射。"""
+    ) -> tuple[str, str | None, str]:
+        """Compute init source mapping parameters.
+
+        Args:
+            tenant_id: The tenant identifier.
+            source_id: Optional source identifier.
+            scope_id: Optional explicit runtime scope.
+            initializer: The TenantInitializer instance.
+
+        Returns:
+            Tuple of (logical_tenant_id, resolved_source_id, init_source).
+        """
+        # init_source records the direct template source
         if tenant_id == "default" and scope_id is None:
             init_source = "default"
         else:
             init_source = initializer.template_name
 
-        (
-            logical_tenant_id,
-            resolved_source_id,
-            _scope_id,
-        ) = (
+        # Resolve logical tenant ID for DB mapping
+        logical_tenant_id, resolved_source_id, _ = (
             resolve_runtime_identity(scope_id)
             if scope_id is not None
             else resolve_runtime_identity(tenant_id, source_id)
         )
-        # DB 映射服务于运维侧按来源查询，应保存逻辑租户，
-        # 不能把运行时隔离目录使用的 opaque scope 暴露出去。
-        await self._record_init_source_mapping(
-            logical_tenant_id or tenant_id,
-            resolved_source_id or source_id,
-            init_source,
-            tenant_name=tenant_name,
-            bbk_id=bbk_id,
-        )
 
-    async def _register_bootstrapped_tenant(
+        return logical_tenant_id, resolved_source_id, init_source
+
+    async def _register_tenant_entry(
         self,
         bootstrap_tenant_id: str,
-    ) -> None:
-        """注册已完成 bootstrap 的租户，并刷新访问统计。"""
+    ) -> TenantWorkspaceEntry:
+        """Register or update tenant entry in pool.
+
+        Args:
+            bootstrap_tenant_id: The resolved bootstrap tenant ID.
+
+        Returns:
+            The tenant workspace entry.
+        """
         async with self._registry_lock:
             if bootstrap_tenant_id not in self._workspaces:
                 entry = TenantWorkspaceEntry(
                     tenant_id=bootstrap_tenant_id,
-                    workspace=None,
+                    workspace=None,  # Runtime not started
                 )
                 self._workspaces[bootstrap_tenant_id] = entry
             else:
                 entry = self._workspaces[bootstrap_tenant_id]
             self._mark_access(entry)
+            return entry
+
+    async def _perform_bootstrap(
+        self,
+        bootstrap_tenant_id: str,
+        tenant_id: str,
+        source_id: str | None,
+        scope_id: str | None,
+        tenant_name: str | None,
+        bbk_id: str | None,
+    ) -> None:
+        """Perform the actual bootstrap process.
+
+        Args:
+            bootstrap_tenant_id: The resolved bootstrap tenant ID.
+            tenant_id: The original tenant identifier.
+            source_id: Optional source identifier.
+            scope_id: Optional explicit runtime scope.
+            tenant_name: Optional tenant name for DB record.
+            bbk_id: Optional BBK identifier for DB record.
+
+        Raises:
+            RuntimeError: If bootstrap fails.
+        """
+        workspace_dir = self._get_tenant_workspace_dir(bootstrap_tenant_id)
+        logger.info(
+            "Bootstrapping tenant directory: %s at %s",
+            bootstrap_tenant_id,
+            workspace_dir,
+        )
+
+        initializer = TenantInitializer(
+            self._base_working_dir,
+            tenant_id,
+            source_id=source_id,
+            scope_id=scope_id,
+        )
+
+        try:
+            bootstrap_result = initializer.ensure_seeded_bootstrap()
+
+            # Log seeding results
+            self._log_seeding_results(tenant_id, bootstrap_result)
+
+            # Record template mapping if template was dynamically created
+            if initializer._template_created_from_default and source_id:
+                await self._record_template_init_source_mapping(
+                    template_name=initializer.template_name,
+                    source_id=source_id,
+                )
+
+            # Record init source mapping
+            logical_tenant_id, resolved_source_id, init_source = (
+                self._compute_init_source_mapping(
+                    tenant_id,
+                    source_id,
+                    scope_id,
+                    initializer,
+                )
+            )
+            await self._record_init_source_mapping(
+                logical_tenant_id or tenant_id,
+                resolved_source_id or source_id,
+                init_source,
+                tenant_name=tenant_name,
+                bbk_id=bbk_id,
+            )
+
+            # Register in pool
+            await self._register_tenant_entry(bootstrap_tenant_id)
+
+            logger.info("Tenant bootstrapped: %s", bootstrap_tenant_id)
+
+        except Exception as e:
+            logger.error(
+                "Failed to bootstrap tenant %s: %s",
+                bootstrap_tenant_id,
+                e,
+            )
+            raise RuntimeError(
+                f"Failed to bootstrap tenant {bootstrap_tenant_id}: {e}",
+            ) from e
 
     async def ensure_bootstrap(
         self,
@@ -208,6 +374,7 @@ class TenantWorkspacePool:
         Raises:
             RuntimeError: If bootstrap fails.
         """
+        # Resolve bootstrap tenant ID
         bootstrap_tenant_id = self._resolve_bootstrap_tenant_id(
             tenant_id,
             source_id,
@@ -215,93 +382,37 @@ class TenantWorkspacePool:
         )
 
         # Fast path: check if already bootstrapped
-        async with self._registry_lock:
-            entry = self._workspaces.get(bootstrap_tenant_id)
-            if entry is not None:
-                initializer = TenantInitializer(
-                    self._base_working_dir,
-                    tenant_id,
-                    source_id=source_id,
-                    scope_id=scope_id,
-                )
-                if initializer.has_seeded_bootstrap():
-                    self._mark_access(entry)
-                    return
-                logger.warning(
-                    "Tenant %s cached in pool but scaffold is incomplete. "
-                    "Running self-heal bootstrap.",
-                    bootstrap_tenant_id,
-                )
+        if await self._check_existing_bootstrap(
+            bootstrap_tenant_id,
+            tenant_id,
+            source_id,
+            scope_id,
+        ):
+            return
 
-        # Slow path: need to bootstrap or self-heal (with per-tenant lock)
+        # Slow path: bootstrap with per-tenant lock
         bootstrap_lock = await self._get_or_create_bootstrap_lock(
             bootstrap_tenant_id,
         )
         async with bootstrap_lock:
             # Double-check after acquiring lock
-            async with self._registry_lock:
-                entry = self._workspaces.get(bootstrap_tenant_id)
-            initializer = TenantInitializer(
-                self._base_working_dir,
+            if await self._check_existing_bootstrap(
+                bootstrap_tenant_id,
                 tenant_id,
-                source_id=source_id,
-                scope_id=scope_id,
-            )
-            if entry is not None and initializer.has_seeded_bootstrap():
-                self._mark_access(entry)
+                source_id,
+                scope_id,
+            ):
                 return
 
-            # Perform seeded bootstrap (outside registry lock to avoid blocking)
-            workspace_dir = self._get_tenant_workspace_dir(
+            # Perform bootstrap
+            await self._perform_bootstrap(
                 bootstrap_tenant_id,
+                tenant_id,
+                source_id,
+                scope_id,
+                tenant_name,
+                bbk_id,
             )
-            logger.info(
-                "Bootstrapping tenant directory: %s at %s",
-                bootstrap_tenant_id,
-                workspace_dir,
-            )
-
-            try:
-                # Bootstrap tenant with seeded skills (no QA agent, no runtime start)
-                bootstrap_result = initializer.ensure_seeded_bootstrap()
-
-                # Log seeding results
-                pool_seed = bootstrap_result.get("pool_seed", {})
-                workspace_seed = bootstrap_result.get("workspace_seed", {})
-                if pool_seed.get("seeded"):
-                    logger.info(
-                        f"Tenant {tenant_id} skill pool seeded from "
-                        f"{pool_seed.get('source')}: "
-                        f"{pool_seed.get('skills', [])}",
-                    )
-                if workspace_seed.get("seeded"):
-                    logger.info(
-                        f"Tenant {tenant_id} workspace skills seeded: "
-                        f"{workspace_seed.get('skills', [])}",
-                    )
-
-                await self._record_bootstrap_init_source(
-                    tenant_id,
-                    source_id,
-                    scope_id,
-                    initializer,
-                    tenant_name=tenant_name,
-                    bbk_id=bbk_id,
-                )
-
-                await self._register_bootstrapped_tenant(bootstrap_tenant_id)
-
-                logger.info("Tenant bootstrapped: %s", bootstrap_tenant_id)
-
-            except Exception as e:
-                logger.error(
-                    "Failed to bootstrap tenant %s: %s",
-                    bootstrap_tenant_id,
-                    e,
-                )
-                raise RuntimeError(
-                    f"Failed to bootstrap tenant {bootstrap_tenant_id}: {e}",
-                ) from e
 
     async def _record_init_source_mapping(
         self,
@@ -338,6 +449,45 @@ class TenantWorkspacePool:
             logger.warning(
                 f"Failed to record init source mapping for tenant "
                 f"{tenant_id}: {e}",
+            )
+
+    async def _record_template_init_source_mapping(
+        self,
+        template_name: str,
+        source_id: str,
+    ) -> None:
+        """Record template init source mapping to database.
+
+        当 default_{source_id} 模板从 default 动态创建时，
+        记录映射关系：(default_{source_id}, source_id, default)
+
+        Args:
+            template_name: 模板目录名（如 default_ruice）。
+            source_id: 来源标识。
+        """
+        try:
+            from .tenant_init_source_store import get_tenant_init_source_store
+
+            store = get_tenant_init_source_store()
+            if store is None:
+                return
+            # 模板条目：tenant_id=模板目录名, source_id=来源, init_source="default"
+            await store.get_or_create(
+                tenant_id=template_name,
+                source_id=source_id,
+                init_source="default",
+                tenant_name=None,
+                bbk_id=None,
+            )
+            logger.info(
+                f"Recorded template init_source mapping: "
+                f"template={template_name}, source={source_id}",
+            )
+        except Exception as e:
+            # Non-fatal: log warning but don't fail bootstrap
+            logger.warning(
+                f"Failed to record template init source mapping for "
+                f"template {template_name}: {e}",
             )
 
     async def get_or_create(

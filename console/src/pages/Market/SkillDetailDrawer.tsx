@@ -7,6 +7,7 @@ import {
   ShareAltOutlined,
   TagOutlined,
   UserOutlined,
+  RollbackOutlined,
 } from "@ant-design/icons";
 import { Button, Spin, Table, Tag, Typography } from "antd";
 import ReactMarkdown from "react-markdown";
@@ -23,6 +24,7 @@ interface SkillDetailDrawerProps {
   onClose: () => void;
   isManager?: boolean;
   onDistribute?: () => void;
+  onRecall?: () => void;
   sourceId?: string;
   onRefresh?: () => void;
   categoryName?: string;
@@ -191,6 +193,7 @@ export function SkillDetailDrawer({
   skill,
   isManager,
   onDistribute,
+  onRecall,
   sourceId,
   categoryName,
 }: SkillDetailDrawerProps) {
@@ -490,25 +493,43 @@ export function SkillDetailDrawer({
               </Tag>
             </div>
 
-            {isManager && onDistribute && (
-              <div style={{ marginTop: 10 }}>
-                <Button
-                  type="primary"
-                  aria-label="分发技能"
-                  icon={<ShareAltOutlined />}
-                  onClick={onDistribute}
-                  style={{
-                    width: "100%",
-                    height: 36,
-                    borderRadius: 12,
-                    background:
-                      "linear-gradient(135deg, #c4956a 0%, #b85a3a 100%)",
-                    border: "none",
-                    boxShadow: "none",
-                  }}
-                >
-                  分发技能
-                </Button>
+            {isManager && (onDistribute || onRecall) && (
+              <div style={{ marginTop: 10, display: "flex", gap: 8 }}>
+                {onDistribute && (
+                  <Button
+                    type="primary"
+                    aria-label="分发技能"
+                    icon={<ShareAltOutlined />}
+                    onClick={onDistribute}
+                    style={{
+                      flex: 1,
+                      height: 36,
+                      borderRadius: 12,
+                      background:
+                        "linear-gradient(135deg, #c4956a 0%, #b85a3a 100%)",
+                      border: "none",
+                      boxShadow: "none",
+                    }}
+                  >
+                    分发技能
+                  </Button>
+                )}
+                {/* 撤回功能临时隐藏，后续启用时移除 false 条件 */}
+                {onRecall && false && (
+                  <Button
+                    danger
+                    aria-label="撤回技能"
+                    icon={<RollbackOutlined />}
+                    onClick={onRecall}
+                    style={{
+                      flex: onDistribute ? 0 : 1,
+                      height: 36,
+                      borderRadius: 12,
+                    }}
+                  >
+                    撤回
+                  </Button>
+                )}
               </div>
             )}
           </div>

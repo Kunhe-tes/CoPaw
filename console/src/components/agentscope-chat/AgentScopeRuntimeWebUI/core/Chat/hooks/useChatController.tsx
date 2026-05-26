@@ -20,6 +20,7 @@ import {
   RUNTIME_INPUT_SET_CONTENT_EVENT,
   type FollowUpSubmitData,
 } from "./followUpSubmit";
+import { emitTaskProgressUpdate } from "@/pages/Chat/taskProgressEvents";
 import { shouldEnqueueFollowUpSubmission } from "./followUpSubmitState";
 import type { CurrentQARef } from "./currentQARef";
 import {
@@ -51,6 +52,7 @@ export default function useChatController() {
   const currentQARef = useRef<CurrentQARef["current"]>({});
   const followUpCoordinatorRef = useRef<FollowUpSubmitCoordinator | null>(null);
   const followUpSessionIdRef = useRef<string | undefined>(undefined);
+  const previousSessionIdRef = useRef<string | undefined>(undefined);
 
   // 消息处理
   const messageHandler = useChatMessageHandler({ currentQARef });
@@ -389,6 +391,15 @@ export default function useChatController() {
 
   // 监听会话切换，断开当前 SSE 连接（不通知后端取消）并重置状态
   useEffect(() => {
+    const previousSessionId = previousSessionIdRef.current;
+    previousSessionIdRef.current = currentSessionId;
+    if (
+      previousSessionId !== undefined &&
+      previousSessionId !== currentSessionId
+    ) {
+      emitTaskProgressUpdate(null);
+    }
+
     followUpSessionIdRef.current = undefined;
     currentQARef.current.abortController?.abort(
       createChatStreamAbortReason("detach"),

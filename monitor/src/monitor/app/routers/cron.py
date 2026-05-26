@@ -9,7 +9,7 @@ from datetime import datetime
 from io import BytesIO
 from urllib.parse import quote
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import StreamingResponse
 
 from ..models.cron import (
@@ -28,6 +28,14 @@ from ..services.cron.export_service import ExportService, get_export_service
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/monitor/cron", tags=["cron"])
+
+
+def _get_source_id_from_header(request: Request) -> str:
+    """从请求头获取 source_id."""
+    header_source_id = request.headers.get("X-Source-Id")
+    if header_source_id:
+        return header_source_id
+    return "default"
 
 
 @router.get("/filter-options")
@@ -50,9 +58,9 @@ async def get_filter_options(
 
 @router.get("/jobs", response_model=PaginatedResponse[CronJobModel])
 async def list_jobs(
+    request: Request,
     tenant_id: str | None = Query(default=None, description="租户ID筛选"),
     bbk_id: str | None = Query(default=None, description="分行号筛选"),
-    source_id: str | None = Query(default=None, description="来源标识筛选"),
     creator_user_id: str | None = Query(
         default=None,
         description="创建者ID筛选",
@@ -66,9 +74,9 @@ async def list_jobs(
     """List cron jobs with pagination and filters.
 
     Args:
+        request: FastAPI request object
         tenant_id: Tenant ID filter
         bbk_id: BBK ID filter (分行号)
-        source_id: Source ID filter (来源标识)
         creator_user_id: Creator user ID filter
         status: Status filter
         enabled: Enabled filter
@@ -79,10 +87,11 @@ async def list_jobs(
     Returns:
         Paginated job list
     """
+    actual_source_id = _get_source_id_from_header(request)
     params = CronJobQueryParams(
         tenant_id=tenant_id,
         bbk_id=bbk_id,
-        source_id=source_id,
+        source_id=actual_source_id,
         creator_user_id=creator_user_id,
         status=status,
         enabled=enabled,
@@ -117,6 +126,7 @@ async def get_job(
 
 @router.get("/executions", response_model=PaginatedResponse[ExecutionModel])
 async def list_executions(
+    request: Request,
     job_id: str | None = Query(default=None, description="任务ID筛选"),
     tenant_id: str | None = Query(default=None, description="租户ID筛选"),
     status: str | None = Query(default=None, description="执行状态筛选"),
@@ -135,6 +145,7 @@ async def list_executions(
     """List execution history with pagination and filters.
 
     Args:
+        request: FastAPI request object
         job_id: Job ID filter
         tenant_id: Tenant ID filter
         status: Status filter
@@ -147,9 +158,11 @@ async def list_executions(
     Returns:
         Paginated execution list
     """
+    actual_source_id = _get_source_id_from_header(request)
     params = ExecutionQueryParams(
         job_id=job_id,
         tenant_id=tenant_id,
+        source_id=actual_source_id,
         status=status,
         start_time=start_time,
         end_time=end_time,
@@ -187,10 +200,10 @@ async def get_execution(
 
 @router.get("/export")
 async def export_data(
+    request: Request,
     job_id: str | None = Query(default=None, description="任务ID筛选"),
     tenant_id: str | None = Query(default=None, description="租户ID筛选"),
     bbk_id: str | None = Query(default=None, description="分行号筛选"),
-    source_id: str | None = Query(default=None, description="来源标识筛选"),
     enabled: bool | None = Query(default=None, description="是否启用筛选"),
     status: str | None = Query(default=None, description="状态筛选"),
     start_time: datetime | None = Query(
@@ -211,10 +224,10 @@ async def export_data(
     """Export cron data to Excel.
 
     Args:
+        request: FastAPI request object
         job_id: Job ID filter (for executions)
         tenant_id: Tenant ID filter
         bbk_id: BBK ID filter (分行号)
-        source_id: Source ID filter (来源标识)
         enabled: Enabled filter (是否启用)
         status: Status filter
         start_time: Start time filter (for executions)
@@ -226,12 +239,13 @@ async def export_data(
     Returns:
         Excel file download
     """
+    actual_source_id = _get_source_id_from_header(request)
     try:
         if export_type == "jobs":
             jobs = await query_service.get_jobs_for_export(
                 tenant_id=tenant_id,
                 bbk_id=bbk_id,
-                source_id=source_id,
+                source_id=actual_source_id,
                 enabled=enabled,
                 status=status,
             )
@@ -241,6 +255,7 @@ async def export_data(
             executions = await query_service.get_executions_for_export(
                 job_id=job_id,
                 tenant_id=tenant_id,
+                source_id=actual_source_id,
                 status=status,
                 start_time=start_time,
                 end_time=end_time,

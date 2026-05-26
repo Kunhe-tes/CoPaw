@@ -8,12 +8,25 @@ import Message from "./Message";
 import Tool from "./Tool";
 import Reasoning from "./Reasoning";
 import Error from "./Error";
-import { Bubble } from "@/components/agentscope-chat";
+import { Bubble, Markdown } from "@/components/agentscope-chat";
 import Actions from "./Actions";
 import Suggestions from "./Suggestions";
 import RetryStatusMessage from "./RetryStatusMessage";
+import { getCompletedReasoningFallbackText } from "./reasoningFallback";
 // import { Avatar, Flex } from "antd";
 // import { useChatAnywhereOptions } from "../../Context/ChatAnywhereOptionsContext";
+
+type RetryMetadata = {
+  retry_status?: unknown;
+  metadata?: {
+    retry_status?: unknown;
+  };
+};
+
+function getRetryStatus(item: unknown) {
+  const metadata = (item as { metadata?: RetryMetadata }).metadata;
+  return metadata?.retry_status || metadata?.metadata?.retry_status;
+}
 
 export default function AgentScopeRuntimeResponseCard(props: {
   data: IAgentScopeRuntimeResponse;
@@ -26,6 +39,9 @@ export default function AgentScopeRuntimeResponseCard(props: {
       props.data.output,
     );
   }, [props.data.output]);
+  const reasoningFallbackText = useMemo(() => {
+    return getCompletedReasoningFallbackText(props.data, messages);
+  }, [messages, props.data]);
 
   if (
     !messages?.length &&
@@ -47,8 +63,7 @@ export default function AgentScopeRuntimeResponseCard(props: {
             // 检测重试状态消息，使用专用卡片渲染
             // SSE 流式路径: metadata.retry_status
             // 历史加载路径: metadata.metadata.retry_status（后端嵌套）
-            const meta = (item as any).metadata;
-            const retryStatus = meta?.retry_status || meta?.metadata?.retry_status;
+            const retryStatus = getRetryStatus(item);
             if (retryStatus) {
               return <RetryStatusMessage key={item.id} data={item} />;
             }
@@ -72,6 +87,7 @@ export default function AgentScopeRuntimeResponseCard(props: {
             return null;
         }
       })}
+      {reasoningFallbackText && <Markdown content={reasoningFallbackText} />}
       {props.data.error && <Error data={props.data.error} />}
       <Actions {...props} />
       {props.data.suggestions?.length > 0 && (

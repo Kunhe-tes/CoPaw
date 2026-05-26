@@ -6,6 +6,7 @@ import { AgentScopeRuntimeRunStatus } from "../types";
 
 const mocks = vi.hoisted(() => ({
   emit: vi.fn(),
+  iframeSource: null as string | null,
 }));
 
 vi.mock("@/components/agentscope-chat", () => ({
@@ -16,6 +17,11 @@ vi.mock("@/components/agentscope-chat", () => ({
 
 vi.mock("../../Context/useChatAnywhereEventEmitter", () => ({
   emit: mocks.emit,
+}));
+
+vi.mock("@/stores/iframeStore", () => ({
+  useIframeStore: (selector: (value: unknown) => unknown) =>
+    selector({ source: mocks.iframeSource }),
 }));
 
 vi.mock("antd", () => ({
@@ -45,6 +51,7 @@ function renderSuggestions(status = AgentScopeRuntimeRunStatus.Completed) {
 describe("Suggestions", () => {
   beforeEach(() => {
     mocks.emit.mockReset();
+    mocks.iframeSource = null;
   });
 
   afterEach(() => {
@@ -81,5 +88,14 @@ describe("Suggestions", () => {
     });
 
     expect(mocks.emit).not.toHaveBeenCalled();
+  });
+
+  it("does not render suggestions when source is ruice", () => {
+    mocks.iframeSource = "ruice";
+
+    renderSuggestions();
+
+    expect(container?.querySelector("button")).toBeNull();
+    expect(container?.textContent).not.toContain("猜你想问");
   });
 });

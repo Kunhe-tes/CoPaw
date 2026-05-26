@@ -521,8 +521,9 @@ def _resolve_env_paths(paths: Iterable[Path]) -> list[str]:
 
 
 def _collect_default_trusted_paths() -> list[Path]:
-    """Return SWE metadata files trusted only for SWE's own CLI entrypoints."""
+    """返回仅允许 SWE 自身 CLI 入口访问的元数据文件。"""
     from swe.constant import CHATS_FILE, CONFIG_FILE, HEARTBEAT_FILE, JOBS_FILE
+    from swe.constant import SECRET_DIR
     from swe.constant import WORKING_DIR
 
     return [
@@ -530,6 +531,8 @@ def _collect_default_trusted_paths() -> list[Path]:
         WORKING_DIR / JOBS_FILE,
         WORKING_DIR / CHATS_FILE,
         WORKING_DIR / HEARTBEAT_FILE,
+        SECRET_DIR / "envs.json",
+        WORKING_DIR / "envs.json",
     ]
 
 

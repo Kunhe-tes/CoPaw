@@ -98,6 +98,7 @@ PUBLIC_ROUTE_EXEMPT_PREFIXES = (
     "/assets/",
     "/static/",
     "/console/",
+    "/api/assets/upload",
     "/api/assets/text/",
     "/api/internal/",
 )

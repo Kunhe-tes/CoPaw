@@ -20,7 +20,8 @@ from pathlib import Path
 logger = logging.getLogger(__name__)
 
 VALID_ENVS = ("dev", "prd")
-DEFAULT_ENV = "prd"
+DEFAULT_ENV = "dev"
+_APPLIED_DEFAULTS: dict[str, str] = {}
 
 
 def _get_package_dir() -> Path:
@@ -74,6 +75,7 @@ def load_env_defaults(env: str | None = None) -> dict[str, str]:
         if key not in os.environ:
             os.environ[key] = value
             set_vars[key] = value
+            _APPLIED_DEFAULTS[key] = value
 
     if set_vars:
         logger.debug(
@@ -89,3 +91,8 @@ def load_env_defaults(env: str | None = None) -> dict[str, str]:
 def get_current_env() -> str:
     """Get the current environment name."""
     return os.environ.get("SWE_ENV", DEFAULT_ENV)
+
+
+def get_applied_env_defaults() -> dict[str, str]:
+    """返回当前进程中由默认配置注入的环境变量。"""
+    return dict(_APPLIED_DEFAULTS)

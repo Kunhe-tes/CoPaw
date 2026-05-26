@@ -1,14 +1,13 @@
-import { useEffect, useMemo, useRef, useState } from "react";
-import { Empty, Pagination, Spin, Tag } from "antd";
+import { useEffect, useRef, useState } from "react";
+import { Empty, Spin } from "antd";
 import {
   AgentScopeRuntimeWebUIComposedProvider,
   Bubble,
   IAgentScopeRuntimeWebUIMessage,
   IAgentScopeRuntimeWebUIOptions,
 } from "@/components/agentscope-chat";
-import { chatApi } from "../../../../../api/modules/chat";
-import { tracingApi, TraceDetail, TraceListItem } from "../../../../../api/modules/tracing";
-import type { ChatSpec, Message } from "../../../../../api/types";
+import { tracingApi } from "../../../../../api/modules/tracing";
+import type { Message } from "../../../../../api/types";
 import {
   convertMessages,
 } from "../../../../Chat/sessionApi";
@@ -58,109 +57,27 @@ const READONLY_CARDS = {
 
 interface ReadOnlySessionChatProps {
   selectedSessionId: string | null;
-  userId: string | null;
-  traces: TraceListItem[];
-  total: number;
-  page: number;
-  pageSize: number;
-  tracesLoading: boolean;
-  onPageChange: (page: number) => void;
+  chatIdBySessionId: Record<string, string>;
+  targetUserId?: string;
   mockMessages?: Message[];
-  mockSource?: "chat" | "tracing";
-}
-
-function findChatBySessionId(
-  chats: ChatSpec[],
-  sessionId: string,
-): ChatSpec | undefined {
-  return chats.find(
-    (chat) => chat.id === sessionId || chat.session_id === sessionId,
-  );
-}
-
-function buildTextContent(text: string) {
-  return [{ type: "text", text, status: "completed" }];
-}
-
-function detailsToMessages(details: TraceDetail[]): Message[] {
-  return [...details]
-    .sort((a, b) => {
-      return (
-        new Date(a.trace.start_time).getTime() -
-        new Date(b.trace.start_time).getTime()
-      );
-    })
-    .flatMap((detail) => {
-      const messages: Message[] = [];
-      if (detail.trace.user_message) {
-        messages.push({
-          id: `${detail.trace.trace_id}-user`,
-          role: "user",
-          object: "message",
-          type: "message",
-          content: buildTextContent(detail.trace.user_message),
-          timestamp: detail.trace.start_time,
-        });
-      }
-      if (detail.trace.model_output) {
-        messages.push({
-          id: `${detail.trace.trace_id}-assistant`,
-          role: "assistant",
-          object: "message",
-          type: "message",
-          content: buildTextContent(detail.trace.model_output),
-          timestamp: detail.trace.end_time || detail.trace.start_time,
-        });
-      }
-      if (!detail.trace.model_output && detail.trace.error) {
-        messages.push({
-          id: `${detail.trace.trace_id}-error`,
-          role: "assistant",
-          object: "message",
-          type: "error",
-          message: detail.trace.error,
-          content: [],
-          timestamp: detail.trace.end_time || detail.trace.start_time,
-        });
-      }
-      return messages;
-    });
 }
 
 export default function ReadOnlySessionChat({
   selectedSessionId,
-  userId,
-  traces,
-  total,
-  page,
-  pageSize,
-  tracesLoading,
-  onPageChange,
+  chatIdBySessionId,
+  targetUserId,
   mockMessages,
-  mockSource = "chat",
 }: ReadOnlySessionChatProps) {
   const requestSeqRef = useRef(0);
   const [chatMessages, setChatMessages] = useState<
     IAgentScopeRuntimeWebUIMessage[]
   >([]);
-  const [traceMessages, setTraceMessages] = useState<
-    IAgentScopeRuntimeWebUIMessage[]
-  >([]);
   const [chatLoading, setChatLoading] = useState(false);
-  const [traceDetailLoading, setTraceDetailLoading] = useState(false);
-  const [source, setSource] = useState<"chat" | "tracing" | null>(null);
-
-  const displayMessages = chatMessages.length > 0 ? chatMessages : traceMessages;
-  const loading =
-    chatLoading ||
-    (!chatMessages.length && (tracesLoading || traceDetailLoading));
 
   useEffect(() => {
     const seq = requestSeqRef.current + 1;
     requestSeqRef.current = seq;
     setChatMessages([]);
-    setTraceMessages([]);
-    setSource(null);
 
     if (!selectedSessionId) {
       setChatLoading(false);
@@ -169,30 +86,29 @@ export default function ReadOnlySessionChat({
 
     if (mockMessages) {
       setChatMessages(convertMessages(mockMessages));
-      setSource(mockSource);
       setChatLoading(false);
-      setTraceDetailLoading(false);
       return;
     }
 
     setChatLoading(true);
     const loadChatHistory = async () => {
       try {
-        const chats = await chatApi.listChats(userId ? { user_id: userId } : undefined);
-        const matchedChat = findChatBySessionId(chats, selectedSessionId);
-        const chatId = matchedChat?.id || selectedSessionId;
-        const history = await chatApi.getChat(chatId);
+        const chatId = chatIdBySessionId[selectedSessionId];
+        if (!chatId) {
+          return;
+        }
+
+        if (!targetUserId) {
+          return;
+        }
+
+        const history = await tracingApi.getUserChat(targetUserId, chatId);
         if (requestSeqRef.current !== seq) return;
 
         const messages = convertMessages(history.messages || []);
         setChatMessages(messages);
-        if (messages.length > 0) {
-          setSource("chat");
-        }
       } catch (error) {
-        if (requestSeqRef.current === seq) {
-          setSource("tracing");
-        }
+        console.error("Failed to load chat history:", error);
       } finally {
         if (requestSeqRef.current === seq) {
           setChatLoading(false);
@@ -201,59 +117,7 @@ export default function ReadOnlySessionChat({
     };
 
     void loadChatHistory();
-  }, [selectedSessionId, userId, mockMessages, mockSource]);
-
-  useEffect(() => {
-    if (mockMessages) {
-      return;
-    }
-
-    const seq = requestSeqRef.current;
-    setTraceMessages([]);
-
-    if (!selectedSessionId || chatMessages.length > 0 || traces.length === 0) {
-      setTraceDetailLoading(false);
-      return;
-    }
-
-    setTraceDetailLoading(true);
-    const loadTraceDetails = async () => {
-      try {
-        const details = await Promise.all(
-          [...traces]
-            .reverse()
-            .map((trace) => tracingApi.getTraceDetail(trace.trace_id)),
-        );
-        if (requestSeqRef.current !== seq) return;
-
-        const messages = convertMessages(detailsToMessages(details));
-        setTraceMessages(messages);
-        if (messages.length > 0) {
-          setSource("tracing");
-        }
-      } catch (error) {
-        console.error("Failed to load trace chat details:", error);
-      } finally {
-        if (requestSeqRef.current === seq) {
-          setTraceDetailLoading(false);
-        }
-      }
-    };
-
-    void loadTraceDetails();
-  }, [selectedSessionId, chatMessages.length, traces, mockMessages]);
-
-  const titleTag = useMemo(() => {
-    if (!selectedSessionId) return null;
-    if (source === null) {
-      return <Tag>加载中</Tag>;
-    }
-    return (
-      <Tag color={source === "chat" ? "blue" : "default"}>
-        {source === "chat" ? "聊天历史" : "追踪摘要"}
-      </Tag>
-    );
-  }, [selectedSessionId, source]);
+  }, [selectedSessionId, chatIdBySessionId, targetUserId, mockMessages]);
 
   if (!selectedSessionId) {
     return (
@@ -274,11 +138,11 @@ export default function ReadOnlySessionChat({
         <Tag color="green">只读</Tag> */}
       </div>
 
-      {loading ? (
+      {chatLoading ? (
         <div className={styles.readonlyChatLoading}>
           <Spin />
         </div>
-      ) : displayMessages.length === 0 ? (
+      ) : chatMessages.length === 0 ? (
         <div className={styles.readonlyChatEmpty}>
           <Empty description="暂无聊天内容" />
         </div>
@@ -291,7 +155,7 @@ export default function ReadOnlySessionChat({
             <Bubble.List
               pagination={false}
               order="asc"
-              items={displayMessages}
+              items={chatMessages}
               classNames={{
                 wrapper: styles.readonlyBubbleWrapper,
                 list: styles.readonlyBubbleList,
@@ -299,18 +163,6 @@ export default function ReadOnlySessionChat({
             />
           </div>
         </AgentScopeRuntimeWebUIComposedProvider>
-      )}
-
-      {source !== "chat" && total > pageSize && (
-        <div className={styles.tracesPagination}>
-          <Pagination
-            simple
-            current={page}
-            pageSize={pageSize}
-            total={total}
-            onChange={onPageChange}
-          />
-        </div>
       )}
     </div>
   );

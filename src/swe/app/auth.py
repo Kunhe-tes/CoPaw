@@ -46,6 +46,7 @@ _PUBLIC_PATHS: frozenset[str] = frozenset(
         "/api/auth/status",
         "/api/auth/register",
         "/api/version",
+        "/api/assets/upload",
         "/api/settings/language",
     },
 )

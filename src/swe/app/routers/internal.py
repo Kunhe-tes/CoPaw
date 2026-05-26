@@ -8,8 +8,10 @@ import logging
 import os
 from pathlib import Path
 from typing import Any, Dict, Optional
+from urllib.parse import unquote, urlsplit
 
-from fastapi import APIRouter, Body, Header, HTTPException, Request
+from fastapi import APIRouter, Body, File, Header, HTTPException, Request
+from fastapi import UploadFile
 from pydantic import BaseModel, Field
 
 from ...config.context import (
@@ -21,7 +23,7 @@ from ...config.utils import list_all_tenant_ids
 from ...constant import WORKING_DIR
 
 router = APIRouter(prefix="/internal", tags=["internal"])
-public_router = APIRouter(prefix="/assets/text", tags=["assets"])
+public_router = APIRouter(prefix="/assets", tags=["assets"])
 logger = logging.getLogger(__name__)
 
 # 内部服务认证 Token（可选）
@@ -33,6 +35,88 @@ _INVALID_FILE_NAME_DETAIL = "Invalid file_name"
 _ASSET_NOT_FOUND_DETAIL = "Asset file not found"
 _ASSET_INVALID_UTF8_DETAIL = "Asset file is not valid UTF-8"
 _CONTENT_INVALID_UTF8_DETAIL = "Content is not valid UTF-8"
+_INVALID_PREVIEW_TARGET_DETAIL = "Invalid preview target"
+_PREVIEW_PLACEHOLDER_HTML = """<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>文件正在生成中</title>
+  <style>
+    :root {
+      color-scheme: light;
+      font-family:
+        -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      background: #eef2f7;
+      color: #172033;
+    }
+
+    * {
+      box-sizing: border-box;
+    }
+
+    body {
+      min-height: 100vh;
+      margin: 0;
+      display: grid;
+      place-items: center;
+      padding: 32px;
+      background:
+        radial-gradient(circle at top left, #dbeafe 0, transparent 34%),
+        linear-gradient(135deg, #f8fafc 0%, #e2e8f0 100%);
+    }
+
+    main {
+      width: min(100%, 520px);
+      padding: 44px 40px;
+      border: 1px solid rgba(148, 163, 184, 0.28);
+      border-radius: 8px;
+      background: rgba(255, 255, 255, 0.92);
+      box-shadow: 0 24px 70px rgba(15, 23, 42, 0.12);
+      text-align: center;
+    }
+
+    .loader {
+      width: 52px;
+      height: 52px;
+      margin: 0 auto 24px;
+      border: 4px solid #dbeafe;
+      border-top-color: #2563eb;
+      border-radius: 999px;
+      animation: spin 1s linear infinite;
+    }
+
+    h1 {
+      margin: 0 0 12px;
+      font-size: 28px;
+      font-weight: 700;
+      line-height: 1.25;
+      letter-spacing: 0;
+    }
+
+    p {
+      margin: 0;
+      color: #475569;
+      font-size: 16px;
+      line-height: 1.8;
+    }
+
+    @keyframes spin {
+      to {
+        transform: rotate(360deg);
+      }
+    }
+  </style>
+</head>
+<body>
+  <main>
+    <div class="loader" aria-hidden="true"></div>
+    <h1>文件正在生成中</h1>
+    <p>内容准备完成后，页面会自动展示最新预览。</p>
+  </main>
+</body>
+</html>
+"""
 
 
 class InternalErrorResponse(BaseModel):
@@ -49,6 +133,7 @@ class InternalTextAssetWriteRequest(BaseModel):
     user_id: str
     source_id: str
     content: str
+    preview_url: Optional[str] = None
 
 
 class InternalTextAssetWriteResponse(BaseModel):
@@ -56,6 +141,29 @@ class InternalTextAssetWriteResponse(BaseModel):
     file_name: str
     scope_id: str
     public_url: str
+
+
+class InternalAssetUploadResponse(BaseModel):
+    """内部 asset 上传响应。"""
+
+    success: bool = Field(default=True)
+    file_name: str
+    asset_path: str
+    size: int
+
+
+class InternalTextAssetPreviewPathRequest(BaseModel):
+    user_id: str
+    source_id: str
+    file_name: Optional[str] = None
+
+
+class InternalTextAssetPreviewPathResponse(BaseModel):
+    success: bool = Field(default=True)
+    file_name: str
+    scope_id: str
+    public_url: str
+    static_path: str
 
 
 def _verify_internal_token(token: Optional[str]) -> None:
@@ -108,17 +216,114 @@ def _generate_text_asset_file_name(user_id: str) -> str:
     return f"{user_id}-{timestamp}.html"
 
 
+def _build_static_path(scope_id: str, file_name: str) -> str:
+    return f"/static/{scope_id}/{_STATIC_AGENT_ID}/{file_name}"
+
+
 def _build_public_url(scope_id: str, file_name: str) -> str:
     base_url = os.getenv("FILE_URL", _DEFAULT_FILE_URL_BASE).rstrip("/")
-    return f"{base_url}/static/{scope_id}/{_STATIC_AGENT_ID}/{file_name}"
+    return f"{base_url}{_build_static_path(scope_id, file_name)}"
 
 
 def _get_asset_file_path(file_name: str) -> Path:
     return WORKING_DIR / _ASSET_ROOT_DIRNAME / file_name
 
 
+def _build_asset_path(file_name: str) -> str:
+    return f"{_ASSET_ROOT_DIRNAME}/{file_name}"
+
+
 def _get_scope_static_dir(scope_id: str) -> Path:
     return WORKING_DIR / scope_id / "workspaces" / _STATIC_AGENT_ID / "static"
+
+
+def _validate_text_asset_identity(user_id: str, source_id: str) -> str:
+    if not is_valid_identity_value(user_id):
+        raise HTTPException(status_code=400, detail="Invalid user_id")
+    if not is_valid_identity_value(source_id):
+        raise HTTPException(status_code=400, detail="Invalid source_id")
+
+    scope_id = resolve_scope_id(user_id, source_id)
+    if scope_id is None:
+        raise HTTPException(status_code=400, detail="Failed to resolve scope")
+    return scope_id
+
+
+def _validate_preview_file_name(file_name: str) -> str:
+    safe_file_name = _validate_asset_file_name(file_name)
+    if not safe_file_name.endswith(".html"):
+        raise HTTPException(
+            status_code=400,
+            detail=_INVALID_PREVIEW_TARGET_DETAIL,
+        )
+    return safe_file_name
+
+
+def _resolve_static_target(
+    static_dir: Path,
+    file_name: str,
+) -> Path:
+    try:
+        resolved_static_dir = static_dir.resolve()
+        target = (resolved_static_dir / file_name).resolve()
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=400,
+            detail=_INVALID_PREVIEW_TARGET_DETAIL,
+        ) from exc
+
+    if target.parent != resolved_static_dir:
+        raise HTTPException(
+            status_code=400,
+            detail=_INVALID_PREVIEW_TARGET_DETAIL,
+        )
+    return target
+
+
+def _parse_preview_target(preview_url: str, expected_scope_id: str) -> str:
+    parsed = urlsplit(preview_url.strip())
+    raw_path = parsed.path if parsed.scheme or parsed.netloc else preview_url
+    path = unquote(raw_path)
+    parts = path.split("/")
+    if (
+        len(parts) != 5
+        or parts[0] != ""
+        or parts[1] != "static"
+        or parts[2] != expected_scope_id
+        or parts[3] != _STATIC_AGENT_ID
+    ):
+        raise HTTPException(
+            status_code=400,
+            detail=_INVALID_PREVIEW_TARGET_DETAIL,
+        )
+
+    file_name = parts[4]
+    if any(part in {"", ".", ".."} for part in parts[1:]):
+        raise HTTPException(
+            status_code=400,
+            detail=_INVALID_PREVIEW_TARGET_DETAIL,
+        )
+    try:
+        return _validate_preview_file_name(file_name)
+    except HTTPException as exc:
+        raise HTTPException(
+            status_code=400,
+            detail=_INVALID_PREVIEW_TARGET_DETAIL,
+        ) from exc
+
+
+def _normalize_preview_file_name(
+    file_name: Optional[str],
+    user_id: str,
+) -> str:
+    if file_name is None:
+        return _generate_text_asset_file_name(user_id)
+
+    safe_file_name = _validate_asset_file_name(file_name)
+    path = Path(file_name)
+    if path.suffix:
+        return safe_file_name
+    return f"{safe_file_name}.html"
 
 
 def _read_text_asset(file_name: str) -> InternalTextAssetReadResponse:
@@ -133,23 +338,40 @@ def _read_text_asset(file_name: str) -> InternalTextAssetReadResponse:
     )
 
 
+async def _save_uploaded_asset_file(
+    file: UploadFile,
+) -> InternalAssetUploadResponse:
+    safe_file_name = _validate_asset_file_name(file.filename or "")
+    content = await file.read()
+    asset_dir = WORKING_DIR / _ASSET_ROOT_DIRNAME
+    asset_dir.mkdir(parents=True, exist_ok=True)
+    asset_file = _get_asset_file_path(safe_file_name)
+    asset_file.write_bytes(content)
+
+    return InternalAssetUploadResponse(
+        file_name=safe_file_name,
+        asset_path=_build_asset_path(safe_file_name),
+        size=len(content),
+    )
+
+
 def _write_text_asset(
     payload: InternalTextAssetWriteRequest,
 ) -> InternalTextAssetWriteResponse:
-    if not is_valid_identity_value(payload.user_id):
-        raise HTTPException(status_code=400, detail="Invalid user_id")
-    if not is_valid_identity_value(payload.source_id):
-        raise HTTPException(status_code=400, detail="Invalid source_id")
-
-    scope_id = resolve_scope_id(payload.user_id, payload.source_id)
-    if scope_id is None:
-        raise HTTPException(status_code=400, detail="Failed to resolve scope")
-
-    file_name = _generate_text_asset_file_name(payload.user_id)
+    scope_id = _validate_text_asset_identity(
+        payload.user_id,
+        payload.source_id,
+    )
+    file_name = (
+        _parse_preview_target(payload.preview_url, scope_id)
+        if payload.preview_url is not None
+        else _generate_text_asset_file_name(payload.user_id)
+    )
     content = _validate_utf8_text(payload.content)
     static_dir = _get_scope_static_dir(scope_id)
     static_dir.mkdir(parents=True, exist_ok=True)
-    (static_dir / file_name).write_text(content, encoding="utf-8")
+    target = _resolve_static_target(static_dir, file_name)
+    target.write_text(content, encoding="utf-8")
 
     return InternalTextAssetWriteResponse(
         file_name=file_name,
@@ -158,47 +380,66 @@ def _write_text_asset(
     )
 
 
-@router.get(
-    "/assets/text/read",
-    response_model=InternalTextAssetReadResponse,
-    responses={
-        400: {"model": InternalErrorResponse},
-        401: {"model": InternalErrorResponse},
-        404: {"model": InternalErrorResponse},
-    },
-)
-async def internal_read_text_asset(
-    file_name: str,
-    x_internal_token: Optional[str] = Header(
-        default=None,
-        alias="X-Internal-Token",
-    ),
-) -> InternalTextAssetReadResponse:
-    _verify_internal_token(x_internal_token)
-    return _read_text_asset(file_name)
+def _create_preview_path(
+    payload: InternalTextAssetPreviewPathRequest,
+) -> InternalTextAssetPreviewPathResponse:
+    scope_id = _validate_text_asset_identity(
+        payload.user_id,
+        payload.source_id,
+    )
+    file_name = _validate_preview_file_name(
+        _normalize_preview_file_name(payload.file_name, payload.user_id),
+    )
+    static_dir = _get_scope_static_dir(scope_id)
+    static_dir.mkdir(parents=True, exist_ok=True)
+    target = _resolve_static_target(static_dir, file_name)
+    if target.exists():
+        target.unlink()
+    target.write_text(_PREVIEW_PLACEHOLDER_HTML, encoding="utf-8")
+
+    return InternalTextAssetPreviewPathResponse(
+        file_name=file_name,
+        scope_id=scope_id,
+        public_url=_build_public_url(scope_id, file_name),
+        static_path=_build_static_path(scope_id, file_name),
+    )
 
 
 @router.post(
-    "/assets/text/write",
-    response_model=InternalTextAssetWriteResponse,
+    "/assets/text/preview-path",
+    response_model=InternalTextAssetPreviewPathResponse,
     responses={
         400: {"model": InternalErrorResponse},
         401: {"model": InternalErrorResponse},
     },
 )
-async def internal_write_text_asset(
-    payload: InternalTextAssetWriteRequest,
+async def internal_create_text_asset_preview_path(
+    payload: InternalTextAssetPreviewPathRequest,
     x_internal_token: Optional[str] = Header(
         default=None,
         alias="X-Internal-Token",
     ),
-) -> InternalTextAssetWriteResponse:
+) -> InternalTextAssetPreviewPathResponse:
     _verify_internal_token(x_internal_token)
-    return _write_text_asset(payload)
+    return _create_preview_path(payload)
+
+
+@public_router.post(
+    "/upload",
+    response_model=InternalAssetUploadResponse,
+    responses={
+        400: {"model": InternalErrorResponse},
+    },
+)
+async def upload_asset(
+    file: UploadFile = File(...),
+) -> InternalAssetUploadResponse:
+    """公开上传 asset 文件，不校验内部服务 Token。"""
+    return await _save_uploaded_asset_file(file)
 
 
 @public_router.get(
-    "/read",
+    "/text/read",
     response_model=InternalTextAssetReadResponse,
     responses={
         400: {"model": InternalErrorResponse},
@@ -212,7 +453,7 @@ async def read_text_asset(
 
 
 @public_router.post(
-    "/write",
+    "/text/write",
     response_model=InternalTextAssetWriteResponse,
     responses={
         400: {"model": InternalErrorResponse},

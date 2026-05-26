@@ -119,7 +119,10 @@ import {
 } from "./feedbackRenderContext";
 import {
   CHAT_TASK_PROGRESS_UPDATE_EVENT,
+  isTaskProgressUpdateForActiveSession,
+  normalizeTaskProgressUpdateEventDetail,
   type ChatTaskProgressData,
+  type ChatTaskProgressUpdateDetail,
 } from "./taskProgressEvents";
 import { isChatTaskProgressEnabled } from "./taskProgressConfig";
 
@@ -521,7 +524,28 @@ export default function ChatPage() {
         setTaskProgress(null);
         return;
       }
-      const detail = (event as CustomEvent<ChatTaskProgressData | null>).detail;
+      const update = normalizeTaskProgressUpdateEventDetail(
+        (event as CustomEvent<ChatTaskProgressUpdateDetail>).detail,
+      );
+      if (
+        !isTaskProgressUpdateForActiveSession(update, [
+          chatId,
+          activeSessionId,
+          window.currentSessionId,
+          chatId ? sessionApi.getChatIdForSession(chatId) : null,
+          activeSessionId
+            ? sessionApi.getChatIdForSession(activeSessionId)
+            : null,
+          chatId ? sessionApi.getLogicalSessionId(chatId) : null,
+          activeSessionId
+            ? sessionApi.getLogicalSessionId(activeSessionId)
+            : null,
+        ])
+      ) {
+        return;
+      }
+
+      const detail = update.task_progress;
       if (!detail) {
         setTaskProgress(null);
         return;
@@ -541,7 +565,7 @@ export default function ChatPage() {
     document.addEventListener(CHAT_TASK_PROGRESS_UPDATE_EVENT, handler);
     return () =>
       document.removeEventListener(CHAT_TASK_PROGRESS_UPDATE_EVENT, handler);
-  }, [taskProgressEnabled]);
+  }, [activeSessionId, chatId, taskProgressEnabled]);
 
   useEffect(() => {
     if (!taskProgressEnabled) {

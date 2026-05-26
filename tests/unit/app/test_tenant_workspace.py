@@ -94,6 +94,16 @@ class TestTenantWorkspaceExemptions:
 
         assert middleware._is_workspace_exempt("/api/assets/text/read") is True
 
+    def test_public_asset_upload_api_route_exempt(self):
+        """公开 asset 上传接口应跳过工作区加载。"""
+        from swe.app.middleware.tenant_workspace import (
+            TenantWorkspaceMiddleware,
+        )
+
+        middleware = TenantWorkspaceMiddleware(app=MagicMock())
+
+        assert middleware._is_workspace_exempt("/api/assets/upload") is True
+
     def test_internal_api_routes_exempt(self):
         """Internal callbacks should bypass workspace loading."""
         from swe.app.middleware.tenant_workspace import (

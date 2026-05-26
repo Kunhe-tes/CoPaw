@@ -466,6 +466,7 @@ def _create_session_skill_detector(
         session_id=session_id,
         channel=channel,
         source_id=source_id,
+        workspace_dir=workspace_dir,
         skill_hook_loader=_load_skill_hooks,
     )
     detector.set_enabled_skills(enabled_skills)

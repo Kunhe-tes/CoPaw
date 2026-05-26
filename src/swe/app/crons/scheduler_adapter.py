@@ -386,6 +386,7 @@ class RealSchedulerAdapter(SchedulerAdapter):
             {
                 "tenant_id": tenant_id,
                 "source_id": source_id,
+                "scopeId": f"{tenant_id}-{source_id}",
                 "agent_id": agent_id,
                 "task_type": task_type,
                 "job_id": job_id,

@@ -10,8 +10,6 @@ import {
   UserListItem,
 } from "../../../api/modules/tracing";
 import { getBbkDisplayName, BBK_ID_MAP } from "../../../constants/bbk";
-import { useIframeStore } from "../../../stores/iframeStore";
-import { DEFAULT_SOURCE_ID } from "../../../constants/identity";
 import styles from "./index.module.less";
 
 const { RangePicker } = DatePicker;
@@ -31,12 +29,6 @@ export default function UsersPage() {
   const [drawerOpen, setDrawerOpen] = useState(false);
   const [selectedUser, setSelectedUser] = useState<UserStats | null>(null);
   const [userLoading, setUserLoading] = useState(false);
-
-  // 获取用户权限和来源信息
-  const isSuperManager = useIframeStore((state) => state.isSuperManager);
-  const userSource = useIframeStore((state) => state.source);
-  // 非 iframe 模式下使用默认 source，超级管理员不传 source_id（查询全部）
-  const effectiveSourceId = isSuperManager ? undefined : (userSource || DEFAULT_SOURCE_ID);
 
   // 用于追踪筛选条件变化，避免 useEffect 重复触发
   const filtersRef = useRef({
@@ -77,7 +69,6 @@ export default function UsersPage() {
         bbk_ids: bbkIdFilter,
         start_date: dateRange?.[0]?.format("YYYY-MM-DD"),
         end_date: dateRange?.[1]?.format("YYYY-MM-DD"),
-        source_id: effectiveSourceId,
         filter_user_type: "all", // 用户分析页面不过滤用户类型
       });
       setUsers(data.items || []);
@@ -96,7 +87,6 @@ export default function UsersPage() {
         userId,
         dateRange?.[0]?.format("YYYY-MM-DD"),
         dateRange?.[1]?.format("YYYY-MM-DD"),
-        effectiveSourceId,
       );
       setSelectedUser(data);
     } catch (error) {

@@ -51,7 +51,7 @@ def _set_app_working_dir(monkeypatch, tmp_path: Path) -> None:
     )
 
 
-def test_internal_text_asset_read_returns_404_for_missing_file(
+def test_internal_text_asset_read_route_is_not_exposed(
     monkeypatch,
     tmp_path: Path,
 ) -> None:
@@ -61,59 +61,28 @@ def test_internal_text_asset_read_returns_404_for_missing_file(
     response = client.get("/internal/assets/text/read?file_name=guide.txt")
 
     assert response.status_code == 404
-    assert response.json()["detail"] == "Asset file not found"
 
 
-def test_internal_text_asset_read_rejects_invalid_file_name(
+def test_internal_text_asset_write_route_is_not_exposed(
     monkeypatch,
     tmp_path: Path,
 ) -> None:
     _set_working_dir(monkeypatch, tmp_path)
     client = _build_client()
 
-    response = client.get("/internal/assets/text/read?file_name=../guide.txt")
+    response = client.post(
+        "/internal/assets/text/write",
+        json={
+            "user_id": "alice",
+            "source_id": "portal",
+            "content": "<p>hello</p>",
+        },
+    )
 
-    assert response.status_code == 400
-    assert response.json()["detail"] == "Invalid file_name"
-
-
-def test_internal_text_asset_read_rejects_invalid_utf8(
-    monkeypatch,
-    tmp_path: Path,
-) -> None:
-    _set_working_dir(monkeypatch, tmp_path)
-    asset_dir = tmp_path / "asset"
-    asset_dir.mkdir(parents=True, exist_ok=True)
-    (asset_dir / "broken.txt").write_bytes(b"\xff\xfe\xfd")
-    client = _build_client()
-
-    response = client.get("/internal/assets/text/read?file_name=broken.txt")
-
-    assert response.status_code == 400
-    assert response.json()["detail"] == "Asset file is not valid UTF-8"
+    assert response.status_code == 404
 
 
-def test_internal_text_asset_read_returns_utf8_content(
-    monkeypatch,
-    tmp_path: Path,
-) -> None:
-    _set_working_dir(monkeypatch, tmp_path)
-    asset_dir = tmp_path / "asset"
-    asset_dir.mkdir(parents=True, exist_ok=True)
-    (asset_dir / "guide.txt").write_text("hello\nworld", encoding="utf-8")
-    client = _build_client()
-
-    response = client.get("/internal/assets/text/read?file_name=guide.txt")
-
-    assert response.status_code == 200
-    assert response.json() == {
-        "success": True,
-        "file_name": "guide.txt",
-        "content": "hello\nworld",
-    }
-
-
-def test_internal_text_asset_write_creates_scope_static_file_and_public_url(
+def test_internal_text_asset_preview_path_creates_placeholder_file(
     monkeypatch,
     tmp_path: Path,
 ) -> None:
@@ -123,12 +92,8 @@ def test_internal_text_asset_write_creates_scope_static_file_and_public_url(
     scope_id = encode_scope_id("alice", "portal")
 
     response = client.post(
-        "/internal/assets/text/write",
-        json={
-            "user_id": "alice",
-            "source_id": "portal",
-            "content": "<p>hello</p>",
-        },
+        "/internal/assets/text/preview-path",
+        json={"user_id": "alice", "source_id": "portal"},
     )
 
     assert response.status_code == 200
@@ -140,6 +105,9 @@ def test_internal_text_asset_write_creates_scope_static_file_and_public_url(
         f"https://files.example/static/{scope_id}/default/"
         f"{payload['file_name']}"
     )
+    assert payload["static_path"] == (
+        f"/static/{scope_id}/default/{payload['file_name']}"
+    )
 
     stored_file = (
         tmp_path
@@ -149,10 +117,200 @@ def test_internal_text_asset_write_creates_scope_static_file_and_public_url(
         / "static"
         / payload["file_name"]
     )
-    assert stored_file.read_text(encoding="utf-8") == "<p>hello</p>"
+    placeholder_html = stored_file.read_text(encoding="utf-8")
+    assert placeholder_html.startswith("<!doctype html>")
+    assert "<title>文件正在生成中</title>" in placeholder_html
+    assert "<h1>文件正在生成中</h1>" in placeholder_html
+    assert "内容准备完成后，页面会自动展示最新预览。" in placeholder_html
 
 
-def test_internal_text_asset_write_rejects_invalid_utf8_payload(
+def test_internal_text_asset_preview_path_recreates_named_placeholder_file(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    _set_working_dir(monkeypatch, tmp_path)
+    monkeypatch.setenv("FILE_URL", "https://files.example")
+    client = _build_client()
+    scope_id = encode_scope_id("alice", "portal")
+    static_dir = tmp_path / scope_id / "workspaces" / "default" / "static"
+    static_dir.mkdir(parents=True, exist_ok=True)
+    existing_file = static_dir / "draft.html"
+    existing_file.write_text("<main>old</main>", encoding="utf-8")
+
+    response = client.post(
+        "/internal/assets/text/preview-path",
+        json={
+            "user_id": "alice",
+            "source_id": "portal",
+            "file_name": "draft",
+        },
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["file_name"] == "draft.html"
+    assert payload["scope_id"] == scope_id
+    assert payload["public_url"] == (
+        f"https://files.example/static/{scope_id}/default/draft.html"
+    )
+    assert payload["static_path"] == f"/static/{scope_id}/default/draft.html"
+
+    placeholder_html = existing_file.read_text(encoding="utf-8")
+    assert "<main>old</main>" not in placeholder_html
+    assert "<title>文件正在生成中</title>" in placeholder_html
+
+
+def test_main_app_preview_path_returns_immediately_viewable_placeholder(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    _set_working_dir(monkeypatch, tmp_path)
+    _set_app_working_dir(monkeypatch, tmp_path)
+    monkeypatch.setenv("FILE_URL", "http://testserver")
+
+    with TestClient(
+        app_module.app,
+        raise_server_exceptions=False,
+    ) as client:
+        response = client.post(
+            "/api/internal/assets/text/preview-path",
+            json={"user_id": "alice", "source_id": "portal"},
+        )
+        payload = response.json()
+        static_response = client.get(payload["static_path"])
+
+    assert response.status_code == 200
+    assert static_response.status_code == 200
+    assert "text/html" in static_response.headers["content-type"].lower()
+    assert static_response.text.startswith("<!doctype html>")
+    assert "文件正在生成中" in static_response.text
+    assert "内容准备完成后，页面会自动展示最新预览。" in static_response.text
+
+
+def test_public_text_asset_write_overwrites_preview_url_target(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    _set_working_dir(monkeypatch, tmp_path)
+    monkeypatch.setenv("FILE_URL", "https://files.example")
+    client = _build_client()
+    preview = client.post(
+        "/internal/assets/text/preview-path",
+        json={"user_id": "alice", "source_id": "portal"},
+    ).json()
+
+    response = client.post(
+        "/assets/text/write",
+        json={
+            "user_id": "alice",
+            "source_id": "portal",
+            "content": "<main>ready</main>",
+            "preview_url": preview["public_url"],
+        },
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["file_name"] == preview["file_name"]
+    assert payload["scope_id"] == preview["scope_id"]
+    assert payload["public_url"] == preview["public_url"]
+    stored_file = (
+        tmp_path
+        / preview["scope_id"]
+        / "workspaces"
+        / "default"
+        / "static"
+        / preview["file_name"]
+    )
+    assert stored_file.read_text(encoding="utf-8") == "<main>ready</main>"
+
+
+def test_public_text_asset_write_overwrites_preview_static_path_target(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    _set_working_dir(monkeypatch, tmp_path)
+    monkeypatch.setenv("FILE_URL", "https://files.example")
+    client = _build_client()
+    preview = client.post(
+        "/internal/assets/text/preview-path",
+        json={"user_id": "alice", "source_id": "portal"},
+    ).json()
+
+    response = client.post(
+        "/assets/text/write",
+        json={
+            "user_id": "alice",
+            "source_id": "portal",
+            "content": "<main>ready</main>",
+            "preview_url": preview["static_path"],
+        },
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["file_name"] == preview["file_name"]
+    assert payload["public_url"] == preview["public_url"]
+    assert (
+        tmp_path
+        / preview["scope_id"]
+        / "workspaces"
+        / "default"
+        / "static"
+        / preview["file_name"]
+    ).read_text(encoding="utf-8") == "<main>ready</main>"
+
+
+def test_public_text_asset_write_without_preview_target_creates_new_file(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    _set_working_dir(monkeypatch, tmp_path)
+    generated_names = iter(
+        [
+            "alice-preview.html",
+            "alice-generated.html",
+        ],
+    )
+    monkeypatch.setattr(
+        internal_module,
+        "_generate_text_asset_file_name",
+        lambda _user_id: next(generated_names),
+    )
+    client = _build_client()
+    preview = client.post(
+        "/internal/assets/text/preview-path",
+        json={"user_id": "alice", "source_id": "portal"},
+    ).json()
+
+    response = client.post(
+        "/assets/text/write",
+        json={
+            "user_id": "alice",
+            "source_id": "portal",
+            "content": "<main>separate</main>",
+        },
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["file_name"] != preview["file_name"]
+    preview_file = (
+        tmp_path
+        / preview["scope_id"]
+        / "workspaces"
+        / "default"
+        / "static"
+        / preview["file_name"]
+    )
+    generated_file = preview_file.with_name(payload["file_name"])
+    assert "文件正在生成中" in preview_file.read_text(encoding="utf-8")
+    assert (
+        generated_file.read_text(encoding="utf-8") == "<main>separate</main>"
+    )
+
+
+def test_public_text_asset_write_rejects_invalid_utf8_payload(
     monkeypatch,
     tmp_path: Path,
 ) -> None:
@@ -160,7 +318,7 @@ def test_internal_text_asset_write_rejects_invalid_utf8_payload(
     client = _build_client()
 
     response = client.post(
-        "/internal/assets/text/write",
+        "/assets/text/write",
         content=(
             b'{"user_id":"alice","source_id":"portal",' b'"content":"\\ud800"}'
         ),
@@ -169,6 +327,102 @@ def test_internal_text_asset_write_rejects_invalid_utf8_payload(
 
     assert response.status_code == 400
     assert response.json()["detail"] == "Content is not valid UTF-8"
+
+
+def test_internal_text_asset_preview_path_rejects_invalid_identity(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    _set_working_dir(monkeypatch, tmp_path)
+    client = _build_client()
+
+    response = client.post(
+        "/internal/assets/text/preview-path",
+        json={"user_id": "../alice", "source_id": "portal"},
+    )
+
+    assert response.status_code == 400
+    assert response.json()["detail"] == "Invalid user_id"
+
+
+def test_public_text_asset_write_rejects_cross_scope_preview_target(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    _set_working_dir(monkeypatch, tmp_path)
+    client = _build_client()
+    preview = client.post(
+        "/internal/assets/text/preview-path",
+        json={"user_id": "alice", "source_id": "portal"},
+    ).json()
+
+    response = client.post(
+        "/assets/text/write",
+        json={
+            "user_id": "bob",
+            "source_id": "portal",
+            "content": "<main>wrong</main>",
+            "preview_url": preview["static_path"],
+        },
+    )
+
+    assert response.status_code == 400
+    assert response.json()["detail"] == "Invalid preview target"
+    preview_html = (
+        tmp_path
+        / preview["scope_id"]
+        / "workspaces"
+        / "default"
+        / "static"
+        / preview["file_name"]
+    ).read_text(encoding="utf-8")
+    assert "文件正在生成中" in preview_html
+
+
+def test_public_text_asset_write_rejects_traversal_preview_target(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    _set_working_dir(monkeypatch, tmp_path)
+    client = _build_client()
+    scope_id = encode_scope_id("alice", "portal")
+
+    response = client.post(
+        "/assets/text/write",
+        json={
+            "user_id": "alice",
+            "source_id": "portal",
+            "content": "<main>wrong</main>",
+            "preview_url": f"/static/{scope_id}/default/../escape.html",
+        },
+    )
+
+    assert response.status_code == 400
+    assert response.json()["detail"] == "Invalid preview target"
+    assert not (tmp_path / scope_id / "workspaces").exists()
+
+
+def test_public_text_asset_write_rejects_non_html_preview_target(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    _set_working_dir(monkeypatch, tmp_path)
+    client = _build_client()
+    scope_id = encode_scope_id("alice", "portal")
+
+    response = client.post(
+        "/assets/text/write",
+        json={
+            "user_id": "alice",
+            "source_id": "portal",
+            "content": "<main>wrong</main>",
+            "preview_url": f"/static/{scope_id}/default/preview.txt",
+        },
+    )
+
+    assert response.status_code == 400
+    assert response.json()["detail"] == "Invalid preview target"
+    assert not (tmp_path / scope_id / "workspaces").exists()
 
 
 def test_public_text_asset_read_returns_utf8_content_without_internal_token(

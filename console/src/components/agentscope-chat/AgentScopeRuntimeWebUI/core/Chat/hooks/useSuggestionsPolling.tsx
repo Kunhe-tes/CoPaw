@@ -3,6 +3,8 @@ import {
   extractCopyableText,
   extractUserMessageText,
 } from "@/pages/Chat/utils";
+import { useIframeStore } from "@/stores/iframeStore";
+import { isSuggestionsDisabledForSource } from "@/utils/sourceFeatures";
 import { useCallback, useEffect, useRef } from "react";
 import { useContextSelector } from "use-context-selector";
 import { ChatAnywhereSessionsContext } from "../../Context/ChatAnywhereSessionsContext";
@@ -29,6 +31,7 @@ export default function useSuggestionsPolling(options: {
   );
 
   const sessionApi = useChatAnywhereOptions((v) => v.session?.api);
+  const source = useIframeStore((state) => state.source);
   const sessionIdRef = useRef(currentSessionId);
   const activePollResponseIdRef = useRef<string | null>(null);
 
@@ -37,6 +40,11 @@ export default function useSuggestionsPolling(options: {
   }, [currentSessionId]);
 
   const pollSuggestions = useCallback(async () => {
+    if (isSuggestionsDisabledForSource(source)) {
+      console.debug("[Suggestions] Disabled for source:", source);
+      return;
+    }
+
     const sessionId = sessionIdRef.current;
     if (!sessionId) {
       console.debug("[Suggestions] No session ID available");
@@ -135,7 +143,7 @@ export default function useSuggestionsPolling(options: {
     } catch (error) {
       console.debug("[Suggestions] Fetch failed:", error);
     }
-  }, [currentQARef, updateMessage, sessionApi]);
+  }, [currentQARef, updateMessage, sessionApi, source]);
 
   return { pollSuggestions };
 }

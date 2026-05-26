@@ -121,9 +121,13 @@ async def query_user_info(
 class TenantSourceInfo(BaseModel):
     """租户来源信息。"""
 
-    tenant_id: str = Field(..., description="租户ID（用户ID）")
+    tenant_id: str = Field(..., description="租户ID（用户ID或模板目录名）")
     tenant_name: Optional[str] = Field(default=None, description="租户名称")
     bbk_id: Optional[str] = Field(default=None, description="BBK标识")
+    init_source: Optional[str] = Field(
+        default=None,
+        description="初始化来源模板（模板条目为default，用户条目为default_{source_id}）",
+    )
 
 
 class TenantSourceInfoListResponse(BaseModel):
@@ -181,6 +185,7 @@ async def list_tenants_by_source(
             tenant_id=row["tenant_id"],
             tenant_name=row.get("tenant_name"),
             bbk_id=row.get("bbk_id"),
+            init_source=row.get("init_source"),
         )
         for row in rows
     ]

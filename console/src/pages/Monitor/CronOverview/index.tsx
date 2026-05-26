@@ -16,7 +16,7 @@ import {
 } from "antd";
 import type { ColumnsType } from "antd/es/table";
 import dayjs from "dayjs";
-import { DownloadOutlined, EyeOutlined, ReloadOutlined, CheckOutlined } from "@ant-design/icons";
+import { DownloadOutlined, EyeOutlined, ReloadOutlined } from "@ant-design/icons";
 import { PageHeader } from "@/components/PageHeader";
 import {
   monitorApi,
@@ -25,7 +25,6 @@ import {
   FilterOption,
   FilterOptionsResponse,
 } from "../../../api/modules/monitor";
-import { useIframeStore } from "../../../stores/iframeStore";
 import { BBK_ID_MAP, BBK_ID_TO_NAME_MAP } from "../../../constants/bbk";
 import styles from "./index.module.less";
 
@@ -71,31 +70,10 @@ const EXEC_STATUS_OPTIONS = [
   { value: "skipped", label: "跳过" },
 ];
 
-// 平台名称映射
-const PLATFORM_NAME_MAP: Record<string, string> = {
-  RMASSIST: "RM小助",
-  CMSJY: "远程小助",
-  UPPCLAW: "智像小助",
-  copilotClaw: "数据赋能小助",
-  ruice: "睿策小助",
-  privatebanking: "私行小助",
-  SZLS: "数智零售",
-  rtauto: "实时数据",
-};
-
 // 分行选项（来自前端常量）
 const BBK_OPTIONS = [
   { value: "", label: "全部分行" },
   ...BBK_ID_MAP,
-];
-
-// 平台选项（来自前端常量）
-const PLATFORM_OPTIONS = [
-  { value: "", label: "全部平台" },
-  ...Object.entries(PLATFORM_NAME_MAP).map(([value, label]) => ({
-    value,
-    label,
-  })),
 ];
 
 // 是否启用选项
@@ -108,9 +86,6 @@ const ENABLED_OPTIONS = [
 export default function CronOverviewPage() {
   const { t } = useTranslation();
 
-  // 从 iframeStore 获取当前用户的 source，用于默认筛选
-  const currentUserSource = useIframeStore((state) => state.source);
-
   // 首次加载标记：控制是否自动触发查询
   const initialLoadDone = useRef(false);
 
@@ -119,7 +94,6 @@ export default function CronOverviewPage() {
     users: [],
     bbk_ids: [], // 不使用，分行来自前端常量
     channels: [], // 不使用
-    source_ids: [], // 不使用，平台来自前端常量
     job_names: [],
     job_ids: [],
   });
@@ -134,11 +108,6 @@ export default function CronOverviewPage() {
   // Jobs filters (dropdown selects)
   const [jobsUserFilter, setJobsUserFilter] = useState<string>("");
   const [jobsBbkFilter, setJobsBbkFilter] = useState<string>("");
-  const [jobsSourceFilter, setJobsSourceFilter] = useState<string>(() => {
-    // 默认选中登录人当前的平台，如果获取不到则使用 RMASSIST
-    const source = useIframeStore.getState().source;
-    return source || "RMASSIST";
-  });
   const [jobsEnabledFilter, setJobsEnabledFilter] = useState<string>("true"); // 默认选中已启用
 
   // Executions state
@@ -216,16 +185,14 @@ export default function CronOverviewPage() {
     }
   };
 
-  // Fetch jobs - 可接收可选的 source 覆盖参数（用于首次加载）
-  const fetchJobs = async (overrideSource?: string) => {
+  // Fetch jobs
+  const fetchJobs = async () => {
     setJobsLoading(true);
     try {
-      const sourceId = overrideSource || jobsSourceFilter;
       const enabledValue = jobsEnabledFilter === "true" ? true : jobsEnabledFilter === "false" ? false : undefined;
       const result = await monitorApi.getJobs(jobsPage, jobsPageSize, {
         tenant_id: jobsUserFilter || undefined,
         bbk_id: jobsBbkFilter || undefined,
-        source_id: sourceId || undefined,
         enabled: enabledValue,
       });
       setJobs(result.items);
@@ -264,27 +231,19 @@ export default function CronOverviewPage() {
     fetchFilterOptions();
   }, []);
 
-  // 首次加载逻辑：根据 iframe source 状态决定何时加载
+  // 首次加载逻辑
   useEffect(() => {
     // 如果已经完成首次加载，不再重复
     if (initialLoadDone.current) {
       return;
     }
 
-    // 如果有 iframe source，使用它进行首次加载
-    if (currentUserSource) {
-      setJobsSourceFilter(currentUserSource);
-      fetchJobs(currentUserSource);
-      fetchExecutions();
-      initialLoadDone.current = true;
-    } else {
-      // 没有 iframe source 时，使用空筛选进行首次加载
-      fetchJobs();
-      fetchExecutions();
-      initialLoadDone.current = true;
-    }
+    // 使用空筛选进行首次加载
+    fetchJobs();
+    fetchExecutions();
+    initialLoadDone.current = true;
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [currentUserSource]);
+  }, []);
 
   // Jobs query effect (分页变化时触发查询，首次加载由上面的 effect 控制)
   useEffect(() => {
@@ -324,7 +283,6 @@ export default function CronOverviewPage() {
       const blob = await monitorApi.exportJobs({
         tenant_id: jobsUserFilter || undefined,
         bbk_id: jobsBbkFilter || undefined,
-        source_id: jobsSourceFilter || undefined,
         enabled: enabledValue,
       });
       const url = window.URL.createObjectURL(blob);
@@ -370,21 +328,6 @@ export default function CronOverviewPage() {
     setDetailDrawerOpen(true);
   };
 
-  // Mark job as read
-  const handleMarkAsRead = async (jobId: string) => {
-    try {
-      const result = await monitorApi.markJobAsRead(jobId);
-      if (result.marked) {
-        message.success(`已标记 ${result.count} 条记录为已读`);
-        // 刷新执行记录列表
-        fetchExecutions();
-      }
-    } catch (error) {
-      console.error("Failed to mark as read:", error);
-      message.error("标记已读失败");
-    }
-  };
-
   // 构建带"全部"选项的筛选项列表（使用 useMemo 缓存）
   const userOptions = useMemo(() => {
     return [{ value: "", label: "全部" }, ...filterOptions.users];
@@ -416,13 +359,6 @@ export default function CronOverviewPage() {
       key: "tenant_id",
       width: 140,
       ellipsis: true,
-    },
-    {
-      title: "平台",
-      dataIndex: "source_id",
-      key: "source_id",
-      width: 120,
-      render: (source: string) => source || "-",
     },
     {
       title: "分行",
@@ -566,28 +502,16 @@ export default function CronOverviewPage() {
     {
       title: "操作",
       key: "action",
-      width: 120,
+      width: 80,
       render: (_, record) => (
-        <Space size="small">
-          <Button
-            type="link"
-            size="small"
-            icon={<EyeOutlined />}
-            onClick={() => handleViewExecution(record)}
-          >
-            详情
-          </Button>
-          {record.status === "success" && !record.is_read && (
-            <Button
-              type="link"
-              size="small"
-              icon={<CheckOutlined />}
-              onClick={() => handleMarkAsRead(record.job_id)}
-            >
-              标记已读
-            </Button>
-          )}
-        </Space>
+        <Button
+          type="link"
+          size="small"
+          icon={<EyeOutlined />}
+          onClick={() => handleViewExecution(record)}
+        >
+          详情
+        </Button>
       ),
     },
   ];
@@ -631,14 +555,6 @@ export default function CronOverviewPage() {
                         onChange={(value) => setJobsBbkFilter(value || "")}
                         style={{ width: 120 }}
                         options={BBK_OPTIONS}
-                      />
-                      <Select
-                        placeholder="平台"
-                        value={jobsSourceFilter || undefined}
-                        onChange={(value) => setJobsSourceFilter(value || "")}
-                        style={{ width: 160 }}
-                        allowClear
-                        options={PLATFORM_OPTIONS}
                       />
                       <Select
                         placeholder="是否启用"

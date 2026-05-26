@@ -1,3 +1,17 @@
+export const COOKIE_KEYS = {
+  userId: "",
+  sysId: "",
+  bbk: "",
+  orgCode: "",
+  orgLvl: "",
+  token: "",
+  positionId: "",
+} as const;
+// ── LocalStorage Keys ─────────────────────────────────────────────────────
+export const STORAGE_KEYS = {
+  authToken: "copaw_auth_token"
+} as const;
+
 // ── URLs ──────────────────────────────────────────────────────────────────
 
 export const PYPI_URL = "https://pypi.org/pypi/copaw/json";

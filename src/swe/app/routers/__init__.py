@@ -19,6 +19,7 @@ from ..crons.api import router as cron_router
 from ..runner.api import router as runner_router
 from .console import router as console_router
 from .token_usage import router as token_usage_router
+from .tracing import router as tracing_router
 from .auth import router as auth_router
 from .messages import router as messages_router
 from .files import router as files_router
@@ -56,6 +57,7 @@ router.include_router(tools_router)
 router.include_router(workspace_router)
 router.include_router(envs_router)
 router.include_router(token_usage_router)
+router.include_router(tracing_router)
 router.include_router(auth_router)
 router.include_router(files_router)
 router.include_router(settings_router)

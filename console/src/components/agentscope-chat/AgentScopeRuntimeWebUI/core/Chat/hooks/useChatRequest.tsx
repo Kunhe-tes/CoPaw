@@ -335,14 +335,14 @@ export default function useChatRequest(options: UseChatRequestOptions) {
             apiOptionsRef.current.responseParser || JSON.parse;
           const chunkData = responseParser(chunk.data);
           if (isTaskCancellationFrame(chunkData)) {
-            emitTaskProgressUpdate(null);
+            emitTaskProgressUpdate(null, owner);
             onFinish(owner);
             return;
           }
 
           const streamedTaskProgress = extractTaskProgress(chunkData);
           if (streamedTaskProgress !== undefined) {
-            emitTaskProgressUpdate(streamedTaskProgress);
+            emitTaskProgressUpdate(streamedTaskProgress, owner);
           }
           const res = agentScopeRuntimeResponseBuilder.handle(chunkData);
           const isTerminalResponse =
@@ -386,7 +386,7 @@ export default function useChatRequest(options: UseChatRequestOptions) {
               res.status === AgentScopeRuntimeRunStatus.Completed ||
               res.status === AgentScopeRuntimeRunStatus.Failed
             ) {
-              emitTaskProgressUpdate(null);
+              emitTaskProgressUpdate(null, owner);
               onFinish(owner);
             } else {
               updateMessage(currentQARef.current.response);
@@ -566,7 +566,7 @@ export default function useChatRequest(options: UseChatRequestOptions) {
       updateMessage(currentQARef.current.response);
     }
 
-    emitTaskProgressUpdate(null);
+    emitTaskProgressUpdate(null, activeOwner);
   }, [currentQARef, getCurrentSessionId, getResponseHeaderTimestamp, updateMessage]);
 
   return { request, reconnect, mockRequest, cancelActiveRequest };

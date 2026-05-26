@@ -98,12 +98,20 @@ vi.mock("./components", () => ({
       <span>{row.key}</span>
       <span>{row.value}</span>
       {!row.isNew ? (
-        <button
-          onClick={() => onChange(idx, "value", "********")}
-          type="button"
-        >
-          keep-stars-{idx}
-        </button>
+        <>
+          <button
+            onClick={() => onChange(idx, "value", "********")}
+            type="button"
+          >
+            keep-stars-{idx}
+          </button>
+          <button
+            onClick={() => onChange(idx, "key", "RENAMED_KEY")}
+            type="button"
+          >
+            rename-key-{idx}
+          </button>
+        </>
       ) : null}
       {row.isNew ? (
         <>
@@ -147,7 +155,6 @@ describe("EnvironmentsPage", () => {
     await waitFor(() => {
       expect(mocks.patchEnvs).toHaveBeenCalledWith({
         values: { NEW_SECRET: "fresh-secret" },
-        preserve: ["API_TOKEN", "PLAIN_KEY"],
         delete: [],
       });
     });
@@ -163,8 +170,21 @@ describe("EnvironmentsPage", () => {
     await waitFor(() => {
       expect(mocks.patchEnvs).toHaveBeenCalledWith({
         values: { API_TOKEN: "********" },
-        preserve: ["PLAIN_KEY"],
         delete: [],
+      });
+    });
+  });
+
+  it("deletes the old key when renaming an existing variable", async () => {
+    render(<EnvironmentsPage />);
+
+    fireEvent.click(screen.getByRole("button", { name: "rename-key-1" }));
+    fireEvent.click(screen.getByRole("button", { name: "save" }));
+
+    await waitFor(() => {
+      expect(mocks.patchEnvs).toHaveBeenCalledWith({
+        values: { RENAMED_KEY: "visible-value" },
+        delete: ["PLAIN_KEY"],
       });
     });
   });

@@ -11,7 +11,6 @@ interface SkillDetailModalProps {
   skillName: string;
   startDate: string;
   endDate: string;
-  sourceId?: string;
   onClose: () => void;
 }
 
@@ -20,7 +19,6 @@ export default function SkillDetailModal({
   skillName,
   startDate,
   endDate,
-  sourceId,
   onClose,
 }: SkillDetailModalProps) {
   // 对话列表状态
@@ -61,7 +59,6 @@ export default function SkillDetailModal({
       const data = await tracingApi.getSkillTraces(skillName, pageNum, pageSize, {
         start_date: startDate,
         end_date: endDate,
-        source_id: sourceId,
       });
       setTraces(data.items || []);
       setTotal(data.total || 0);
@@ -75,7 +72,7 @@ export default function SkillDetailModal({
     } finally {
       setLoading(false);
     }
-  }, [skillName, startDate, endDate, sourceId, pageSize]);
+  }, [skillName, startDate, endDate, pageSize]);
 
   // 获取对话详情
   const fetchTraceDetail = useCallback(async (traceId: string) => {

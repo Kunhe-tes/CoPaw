@@ -81,11 +81,12 @@ export default function MySkillsPage() {
     description: string;
     skillJson: Record<string, unknown>;
     skillMd: string;
+    skillDirName?: string; // 技能目录名，用于同步整个目录
   } | null>(null);
 
   // Conflict rename modal for upload
-  // 冲突处理：显示覆盖选项（我的技能支持覆盖现有技能）
-  const { showConflictRenameModal, conflictRenameModal } = useConflictRenameModal({ showOverwriteOption: true });
+  // 冲突处理：强制使用覆盖模式（不允许重命名为新名称）
+  const { showConflictRenameModal, conflictRenameModal } = useConflictRenameModal({ forceOverwrite: true });
 
   // Debounce search
   const debounceTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
@@ -164,9 +165,9 @@ export default function MySkillsPage() {
         } else {
           message.info({ content: "未导入新技能，可能已存在", key: "upload" });
         }
-        refresh();
+        await refresh();
 
-        // 刷新上传技能的文件树缓存
+        // 刷新上传技能的文件树缓存并自动展开
         const importedNames = result.imported || [];
         if (importedNames.length > 0) {
           // 清除已上传技能的文件树缓存
@@ -178,31 +179,33 @@ export default function MySkillsPage() {
             return next;
           });
 
-          // 如果当前选中的技能是刚上传的，立即重新加载其文件树
-          if (selectedSkill && importedNames.includes(selectedSkill.skill_name)) {
-            try {
-              const files = await mySkillsApi.listSkillFiles(selectedSkill.skill_name);
-              const sortedFiles = sortFileTreeNodes(files, true);
-              setSkillFiles((prev) => ({ ...prev, [selectedSkill.skill_name]: sortedFiles }));
+          // 自动展开第一个导入的技能并加载其文件树
+          const firstImportedName = importedNames[0];
+          try {
+            const files = await mySkillsApi.listSkillFiles(firstImportedName);
+            const sortedFiles = sortFileTreeNodes(files, true);
+            setSkillFiles((prev) => ({ ...prev, [firstImportedName]: sortedFiles }));
 
-              // 重新加载当前选中的文件
-              if (selectedFile) {
-                const res = await mySkillsApi.readSkillFile(selectedSkill.skill_name, selectedFile);
-                setFileContent(res.content);
-                setFileType(res.file_type);
-              } else {
-                // 如果没有选中文件，自动选择 SKILL.md
-                const skillMdFile = sortedFiles.find((f) => f.name === "SKILL.md" && f.type === "file");
-                if (skillMdFile) {
-                  const res = await mySkillsApi.readSkillFile(selectedSkill.skill_name, "SKILL.md");
-                  setSelectedFile("SKILL.md");
-                  setFileContent(res.content);
-                  setFileType(res.file_type);
-                }
-              }
-            } catch (err) {
-              console.error("Failed to reload skill files:", err);
+            // 刷新后重新获取最新的技能列表
+            const latestCreated = await mySkillsApi.getCreatedSkills();
+            const latestReceived = await mySkillsApi.getReceivedSkills();
+            const allSkills = [...latestCreated, ...latestReceived];
+            const newSkill = allSkills.find(s => s.skill_name === firstImportedName);
+            if (newSkill) {
+              setSelectedSkill(newSkill);
+              setExpandedSkills(new Set([firstImportedName]));
             }
+
+            // 自动选择 SKILL.md
+            const skillMdFile = sortedFiles.find((f) => f.name === "SKILL.md" && f.type === "file");
+            if (skillMdFile) {
+              const res = await mySkillsApi.readSkillFile(firstImportedName, "SKILL.md");
+              setSelectedFile("SKILL.md");
+              setFileContent(res.content);
+              setFileType(res.file_type);
+            }
+          } catch (err) {
+            console.error("Failed to load skill files after upload:", err);
           }
         }
         break;
@@ -466,6 +469,7 @@ export default function MySkillsPage() {
         description: skill.description || "",
         skillJson,
         skillMd,
+        skillDirName: skill.skill_name, // 传递目录名，用于同步整个目录
       });
       setPublishModalOpen(true);
     } catch (err) {
