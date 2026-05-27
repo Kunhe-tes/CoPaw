@@ -42,6 +42,8 @@ __pycache__/
 *.egg-info/
 *.zip
 config.json
+review
+skills-lock.json
 
 # IDEs and editors
 .idea/
