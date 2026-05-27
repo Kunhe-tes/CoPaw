@@ -1624,6 +1624,21 @@ export default function ChatPage() {
       });
     };
 
+    const planModeQuickMenuItems = [
+      <PlanModeMenuItem
+        key="plan-mode"
+        enabled={planModeEnabled}
+        label={t("chat.planMode.label", "Plan")}
+        tooltip={t(
+          "chat.planMode.tooltip",
+          "Plan Mode 使用只读工具先产出计划",
+        )}
+        onChange={(enabled) => {
+          void persistPlanMode(enabled);
+        }}
+      />,
+    ];
+
     return {
       ...i18nConfig,
       theme: {
@@ -1660,6 +1675,9 @@ export default function ChatPage() {
             greeting={
               typeof greeting === "string" ? greeting : "你好，有什么可以帮您？"
             }
+            placeholder={t("chat.inputPlaceholder")}
+            beforeSubmit={handleBeforeSubmit}
+            quickMenuItems={planModeQuickMenuItems}
             onSubmit={(data) => onSubmit(data)}
           />
         ),
@@ -1671,20 +1689,7 @@ export default function ChatPage() {
         beforeUI: taskProgressEnabled ? (
           <TaskProgressFloatingCard progress={taskProgress} />
         ) : null,
-        quickMenuItems: [
-          <PlanModeMenuItem
-            key="plan-mode"
-            enabled={planModeEnabled}
-            label={t("chat.planMode.label", "Plan")}
-            tooltip={t(
-              "chat.planMode.tooltip",
-              "Plan Mode 使用只读工具先产出计划",
-            )}
-            onChange={(enabled) => {
-              void persistPlanMode(enabled);
-            }}
-          />,
-        ],
+        quickMenuItems: planModeQuickMenuItems,
         allowSpeech: false,
         attachments: {
           accept: "*/*",
