@@ -121,6 +121,131 @@ export interface ChatApprovalActionCardData {
   status?: "pending" | "approved" | "denied" | "timeout" | "superseded";
 }
 
+export type PlanClarificationKind =
+  | "single_choice"
+  | "multi_choice"
+  | "text_input";
+
+export interface PlanClarificationOption {
+  id: string;
+  label: string;
+}
+
+export interface ChatPlanClarificationCardData {
+  card_type: "plan_clarification";
+  kind: PlanClarificationKind;
+  prompt: string;
+  options?: PlanClarificationOption[];
+}
+
+export interface ChatPlanReviewCardData {
+  card_type: "plan_review";
+  plan_id: string;
+  title: string;
+  summary: string;
+  steps: string[];
+  risks: string[];
+  verification: string[];
+  open_questions: string[];
+  confidence: number;
+  status?: "pending" | "submitted";
+}
+
+export type ChatPlanInteractionCardData =
+  | ChatPlanClarificationCardData
+  | ChatPlanReviewCardData;
+
+function isStringArray(value: unknown): value is string[] {
+  return (
+    Array.isArray(value) && value.every((item) => typeof item === "string")
+  );
+}
+
+function normalizePlanInteractionCard(
+  value: unknown,
+): ChatPlanInteractionCardData | null {
+  if (!value || typeof value !== "object") return null;
+  const card = value as Record<string, unknown>;
+
+  if (card.card_type === "plan_clarification") {
+    const kind = card.kind;
+    if (
+      kind !== "single_choice" &&
+      kind !== "multi_choice" &&
+      kind !== "text_input"
+    ) {
+      return null;
+    }
+    if (typeof card.prompt !== "string" || !card.prompt.trim()) return null;
+    const options = Array.isArray(card.options)
+      ? card.options.filter(
+          (option): option is PlanClarificationOption =>
+            Boolean(option) &&
+            typeof option === "object" &&
+            typeof (option as PlanClarificationOption).id === "string" &&
+            typeof (option as PlanClarificationOption).label === "string",
+        )
+      : undefined;
+    return {
+      card_type: "plan_clarification",
+      kind,
+      prompt: card.prompt,
+      options,
+    };
+  }
+
+  if (card.card_type === "plan_review") {
+    if (
+      typeof card.plan_id !== "string" ||
+      typeof card.title !== "string" ||
+      typeof card.summary !== "string" ||
+      !isStringArray(card.steps) ||
+      !isStringArray(card.risks) ||
+      !isStringArray(card.verification) ||
+      !isStringArray(card.open_questions) ||
+      typeof card.confidence !== "number"
+    ) {
+      return null;
+    }
+
+    return {
+      card_type: "plan_review",
+      plan_id: card.plan_id,
+      title: card.title,
+      summary: card.summary,
+      steps: card.steps,
+      risks: card.risks,
+      verification: card.verification,
+      open_questions: card.open_questions,
+      confidence: card.confidence,
+      status: card.status === "submitted" ? "submitted" : undefined,
+    };
+  }
+
+  return null;
+}
+
+export function extractPlanInteractionCard(
+  value: unknown,
+): ChatPlanInteractionCardData | null {
+  if (!value || typeof value !== "object") return null;
+  const record = value as Record<string, unknown>;
+  const direct = normalizePlanInteractionCard(record.plan_interaction_card);
+  if (direct) return direct;
+
+  const nested = extractPlanInteractionCard(record.metadata);
+  if (nested) return nested;
+
+  if (Array.isArray(record.output)) {
+    for (const item of record.output) {
+      const found = extractPlanInteractionCard(item);
+      if (found) return found;
+    }
+  }
+
+  return null;
+}
+
 export interface ChatTaskRunGroupCardData {
   runId: string;
   runIndex: number;

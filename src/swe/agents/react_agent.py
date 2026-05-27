@@ -55,6 +55,8 @@ from .tools import (
     create_delegate_to_subagent_tool,
     copy_file_to_static,
     update_task_progress,
+    ask_plan_clarification,
+    create_submit_proposed_plan_tool,
 )
 from .utils import process_file_and_media_blocks_in_message
 from ..utils.fs_text import sanitize_text_for_json
@@ -69,6 +71,17 @@ if TYPE_CHECKING:
     from ..config.config import AgentProfileConfig
 
 logger = logging.getLogger(__name__)
+_PLAN_MODE_ALLOWED_TOOLS = frozenset(
+    {
+        "execute_shell_command",
+        "read_file",
+        "grep_search",
+        "glob_search",
+        "get_current_time",
+        "ask_plan_clarification",
+        "submit_proposed_plan",
+    },
+)
 
 # Valid namesake strategies for tool registration
 NamesakeStrategy = Literal["override", "skip", "raise", "rename"]
@@ -271,6 +284,7 @@ class SWEAgent(ToolGuardMixin, ReActAgent):
                 "all tools will be disabled",
             )
         request_context = getattr(self, "_request_context", {}) or {}
+        plan_mode_enabled = bool(request_context.get("plan_mode_enabled"))
         if request_context.get("agent_role") == "subagent":
             allowed = set()
             policy = request_context.get("subagent_policy") or {}
@@ -298,6 +312,11 @@ class SWEAgent(ToolGuardMixin, ReActAgent):
                     )
                 )
             }
+        elif plan_mode_enabled:
+            enabled_tools = {
+                name: enabled and name in _PLAN_MODE_ALLOWED_TOOLS
+                for name, enabled in enabled_tools.items()
+            }
 
         # Map of tool functions
         tool_functions = {
@@ -313,9 +332,22 @@ class SWEAgent(ToolGuardMixin, ReActAgent):
             "copy_file_to_static": copy_file_to_static,
             "update_task_progress": update_task_progress,
         }
+        if request_context.get("agent_role", "main") != "subagent":
+            tool_functions.update(
+                {
+                    "ask_plan_clarification": ask_plan_clarification,
+                    "submit_proposed_plan": create_submit_proposed_plan_tool(
+                        request_context=request_context,
+                        workspace_dir=self._workspace_dir,
+                    ),
+                },
+            )
 
         # Register only enabled tools
         for tool_name, tool_func in tool_functions.items():
+            if plan_mode_enabled and tool_name not in _PLAN_MODE_ALLOWED_TOOLS:
+                logger.debug("Skipped Plan Mode forbidden tool: %s", tool_name)
+                continue
             # If tool not in config, enable by default (backward compatibility)
             if not enabled_tools.get(tool_name, True):
                 logger.debug("Skipped disabled tool: %s", tool_name)
@@ -551,7 +583,14 @@ class SWEAgent(ToolGuardMixin, ReActAgent):
             get_current_source_system_config,
         )
 
-        if is_chat_task_progress_enabled(get_current_source_system_config()):
+        plan_mode_enabled = bool(
+            (getattr(self, "_request_context", {}) or {}).get(
+                "plan_mode_enabled",
+            ),
+        )
+        if not plan_mode_enabled and is_chat_task_progress_enabled(
+            get_current_source_system_config(),
+        ):
             # 这里按 source 开关注入要求，避免关闭后仍提示模型强制调用。
             sys_prompt += (
                 "\n\n[Task Progress Requirement]\n"

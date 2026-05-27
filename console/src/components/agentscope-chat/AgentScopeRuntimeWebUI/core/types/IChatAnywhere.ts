@@ -252,7 +252,9 @@ export interface IAgentScopeRuntimeWebUISenderOptions {
    * @description 提交前的钩子函数
    * @descriptionEn Hook function before submit
    */
-  beforeSubmit?: () => Promise<boolean>;
+  beforeSubmit?: (
+    data: IAgentScopeRuntimeWebUIInputData,
+  ) => Promise<ChatBeforeSubmitResult>;
   /**
    * @description 提交回调函数
    * @descriptionEn Submit callback function
@@ -509,5 +511,13 @@ export interface IAgentScopeRuntimeWebUIInputData {
    */
   biz_params?: {
     user_prompt_params?: Record<string, string>;
-  };
+  } & Record<string, unknown>;
 }
+
+export type ChatBeforeSubmitResult =
+  | boolean
+  | IAgentScopeRuntimeWebUIInputData
+  | {
+      shouldSubmit: false;
+      clearInput?: boolean;
+    };

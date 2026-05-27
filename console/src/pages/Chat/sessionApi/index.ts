@@ -14,11 +14,16 @@ import api, {
 import { cronJobApi } from "../../../api/modules/cronjob";
 import type {
   ChatApprovalActionCardData,
+  ChatPlanInteractionCardData,
   ChatRuntimeRequestCardData,
   ChatRuntimeResponseCardData,
   ChatTaskRunGroupCardData,
 } from "../messageMeta";
-import { resolveGroupTimestamp, resolveMessageTimestamp } from "../messageMeta";
+import {
+  extractPlanInteractionCard,
+  resolveGroupTimestamp,
+  resolveMessageTimestamp,
+} from "../messageMeta";
 import { toDisplayUrl } from "../utils";
 import { applyPreferredSessionSelection } from "./preferredSession";
 import { shouldNotifySessionSelected } from "./sessionRaceGuard";
@@ -52,6 +57,7 @@ const TYPE_PLUGIN_CALL_OUTPUT = "plugin_call_output";
 // const CARD_REQUEST = "AgentScopeRuntimeRequestCard";
 const CARD_RESPONSE = "AgentScopeRuntimeResponseCard";
 const CARD_APPROVAL_ACTION = "ApprovalAction";
+const CARD_PLAN_INTERACTION = "PlanInteraction";
 const CARD_TASK_RUN = "TaskRunGroupCard";
 const TASK_SESSION_KIND = "task";
 const TASK_RUN_SECTION_STEP = "step";
@@ -401,22 +407,23 @@ const buildResponseCard = (
     content: normalizeOutputMessageContent(msg.content),
   }));
 
-  const cardTraceId = normalizedMessages.reduce<string | null>(
-    (found, msg) => {
-      if (found) return found;
-      const metadata = msg.metadata;
-      if (!metadata || typeof metadata !== "object") return null;
-      const record = metadata as Record<string, unknown>;
-      const tid =
-        record.trace_id || record.traceId;
-      return typeof tid === "string" && tid.trim() ? tid : null;
-    },
-    null,
-  );
+  const cardTraceId = normalizedMessages.reduce<string | null>((found, msg) => {
+    if (found) return found;
+    const metadata = msg.metadata;
+    if (!metadata || typeof metadata !== "object") return null;
+    const record = metadata as Record<string, unknown>;
+    const tid = record.trace_id || record.traceId;
+    return typeof tid === "string" && tid.trim() ? tid : null;
+  }, null);
 
   const approvalAction =
     normalizedMessages.reduce<ChatApprovalActionCardData | null>(
       (found, message) => found ?? extractApprovalAction(message),
+      null,
+    );
+  const planInteractionCard =
+    normalizedMessages.reduce<ChatPlanInteractionCardData | null>(
+      (found, message) => found ?? extractPlanInteractionCard(message),
       null,
     );
 
@@ -445,6 +452,13 @@ const buildResponseCard = (
     cards.push({
       code: CARD_APPROVAL_ACTION,
       data: approvalAction,
+    });
+  }
+
+  if (planInteractionCard) {
+    cards.push({
+      code: CARD_PLAN_INTERACTION,
+      data: planInteractionCard,
     });
   }
 

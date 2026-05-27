@@ -70,6 +70,74 @@ class _FakeGuardAgent(ToolGuardMixin, _BaseAgent):
         self.printed.append(msg)
 
 
+class _FakePlanGuardAgent(ToolGuardMixin, _BaseAgent):
+    name = "Friday"
+
+    def __init__(self, tmp_path: Path):
+        self._request_context = {
+            "session_id": "session-1",
+            "agent_role": "main",
+            "plan_mode_enabled": True,
+        }
+        self._agent_config = SimpleNamespace()
+        self._workspace_dir = tmp_path
+        self.memory = _Memory()
+        self.printed = []
+        self._tool_guard_lock = asyncio.Lock()
+        self._emit_tool_hook_called = False
+        self._acting_with_approval_called = False
+
+    def _ensure_tool_guard(self) -> None:
+        self._tool_guard_engine = SimpleNamespace(enabled=False)
+
+    async def _emit_tool_hook(self, *args, **kwargs):
+        self._emit_tool_hook_called = True
+        return MergedHookResult()
+
+    async def _acting_with_approval(self, *args, **kwargs):
+        self._acting_with_approval_called = True
+        raise AssertionError("Plan Mode policy must not request approval")
+
+    async def print(self, msg, *args, **kwargs):
+        self.printed.append(msg)
+
+
+class _FakeNormalMainGuardAgent(ToolGuardMixin, _BaseAgent):
+    name = "Friday"
+
+    def __init__(self, tmp_path: Path):
+        self._request_context = {
+            "session_id": "session-1",
+            "agent_role": "main",
+            "plan_mode_enabled": False,
+            "accepted_plan": {
+                "plan_id": "plan-1",
+                "title": "Accepted plan",
+            },
+        }
+        self._agent_config = SimpleNamespace()
+        self._workspace_dir = tmp_path
+        self.memory = _Memory()
+        self.printed = []
+        self._tool_guard_lock = asyncio.Lock()
+        self._emit_tool_hook_called = False
+        self._acting_with_approval_called = False
+
+    def _ensure_tool_guard(self) -> None:
+        self._tool_guard_engine = SimpleNamespace(enabled=False)
+
+    async def _emit_tool_hook(self, *args, **kwargs):
+        self._emit_tool_hook_called = True
+        return MergedHookResult()
+
+    async def _acting_with_approval(self, *args, **kwargs):
+        self._acting_with_approval_called = True
+        return {"content": "approval path"}
+
+    async def print(self, msg, *args, **kwargs):
+        self.printed.append(msg)
+
+
 def _bare_agent(tmp_path: Path, *, request_context=None) -> SWEAgent:
     agent = object.__new__(SWEAgent)
     agent._request_context = dict(request_context or {})
@@ -166,6 +234,58 @@ def test_main_agent_registers_delegation_tool_only_when_enabled(
         "delegate_to_subagent" not in SWEAgent._create_toolkit(disabled).tools
     )
     assert "delegate_to_subagent" in SWEAgent._create_toolkit(enabled).tools
+    main_tools = SWEAgent._create_toolkit(disabled).tools
+    assert "ask_plan_clarification" in main_tools
+    assert "submit_proposed_plan" in main_tools
+    assert (
+        "ask_plan_clarification"
+        not in SWEAgent._create_toolkit(
+            _bare_agent(tmp_path, request_context={"agent_role": "subagent"}),
+        ).tools
+    )
+
+
+def test_plan_mode_toolkit_excludes_mutating_tools(tmp_path: Path) -> None:
+    """Plan Mode 只暴露规划所需的只读工具。"""
+    agent = _bare_agent(
+        tmp_path,
+        request_context={"agent_role": "main", "plan_mode_enabled": True},
+    )
+
+    tools = SWEAgent._create_toolkit(agent).tools
+
+    assert "read_file" in tools
+    assert "grep_search" in tools
+    assert "glob_search" in tools
+    assert "get_current_time" in tools
+    assert "execute_shell_command" in tools
+    assert "ask_plan_clarification" in tools
+    assert "submit_proposed_plan" in tools
+    for tool_name in (
+        "write_file",
+        "edit_file",
+        "copy_file_to_static",
+        "update_task_progress",
+        "set_user_timezone",
+        "get_token_usage",
+    ):
+        assert tool_name not in tools
+
+
+def test_plan_mode_toolkit_keeps_readonly_delegation_when_enabled(
+    tmp_path: Path,
+) -> None:
+    """启用 SubAgent 时，Plan Mode 仍可同步只读委派。"""
+    agent = _bare_agent(
+        tmp_path,
+        request_context={
+            "agent_role": "main",
+            "plan_mode_enabled": True,
+            "enable_subagents": True,
+        },
+    )
+
+    assert "delegate_to_subagent" in SWEAgent._create_toolkit(agent).tools
 
 
 @pytest.mark.asyncio
@@ -266,3 +386,130 @@ async def test_subagent_tool_call_budget_denies_extra_calls(
     assert first == {"content": {"command": "git status --short"}}
     assert second is None
     assert "budget exceeded" in str(agent.printed[0].content)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("tool_name", "tool_input"),
+    [
+        ("write_file", {"file_path": "x", "content": "no"}),
+        ("edit_file", {"file_path": "x", "old_str": "a", "new_str": "b"}),
+        ("copy_file_to_static", {"file_path": "x"}),
+        ("update_task_progress", {"tasks": []}),
+        ("execute_shell_command", {"command": "pytest tests/unit"}),
+        ("execute_shell_command", {"command": "git status > out.txt"}),
+        ("execute_shell_command", {"command": "kubectl apply -f deploy.yaml"}),
+        ("execute_shell_command", {"command": "alembic upgrade head"}),
+    ],
+)
+async def test_plan_mode_hard_policy_denies_before_hooks_and_approvals(
+    tmp_path: Path,
+    tool_name: str,
+    tool_input: dict,
+) -> None:
+    """Plan Mode 硬策略在 hooks 和审批前拒绝写入或验证命令。"""
+    agent = _FakePlanGuardAgent(tmp_path)
+
+    result = await agent._acting(
+        {"id": "tool-1", "name": tool_name, "input": tool_input},
+    )
+
+    assert result is None
+    assert agent._emit_tool_hook_called is False
+    assert agent._acting_with_approval_called is False
+    assert "blocked by Plan Mode policy" in str(agent.printed[0].content)
+
+
+@pytest.mark.asyncio
+async def test_plan_mode_hard_policy_allows_readonly_shell(
+    tmp_path: Path,
+) -> None:
+    """只读 shell 命令仍进入正常工具执行路径。"""
+    agent = _FakePlanGuardAgent(tmp_path)
+
+    result = await agent._acting(
+        {
+            "id": "tool-1",
+            "name": "execute_shell_command",
+            "input": {"command": "git status --short"},
+        },
+    )
+
+    assert result == {"content": {"command": "git status --short"}}
+
+
+@pytest.mark.asyncio
+async def test_plan_mode_hard_policy_rechecks_hook_updated_input(
+    tmp_path: Path,
+) -> None:
+    """Hook 改写后的输入不能绕过 Plan Mode 只读策略。"""
+    agent = _FakePlanGuardAgent(tmp_path)
+
+    async def _rewrite_to_test_command(*args, **kwargs):
+        agent._emit_tool_hook_called = True
+        return MergedHookResult(updated_input={"command": "pytest"})
+
+    agent._emit_tool_hook = _rewrite_to_test_command
+
+    result = await agent._acting(
+        {
+            "id": "tool-1",
+            "name": "execute_shell_command",
+            "input": {"command": "git status --short"},
+        },
+    )
+
+    assert result is None
+    assert agent._emit_tool_hook_called is True
+    assert "blocked by Plan Mode policy" in str(agent.printed[0].content)
+
+
+@pytest.mark.asyncio
+async def test_plan_mode_denial_leaves_workspace_file_unchanged(
+    tmp_path: Path,
+) -> None:
+    """Plan Mode 拦截写工具后不会进入任何可能改写工作区的路径。"""
+    target = tmp_path / "target.txt"
+    target.write_text("original", encoding="utf-8")
+    agent = _FakePlanGuardAgent(tmp_path)
+
+    result = await agent._acting(
+        {
+            "id": "tool-1",
+            "name": "write_file",
+            "input": {
+                "file_path": str(target),
+                "content": "mutated",
+            },
+        },
+    )
+
+    assert result is None
+    assert target.read_text(encoding="utf-8") == "original"
+
+
+@pytest.mark.asyncio
+async def test_execute_turn_restores_normal_main_agent_tool_path(
+    tmp_path: Path,
+) -> None:
+    """execute 决策后的 normal 轮次不再套用 Plan Mode 硬拒绝。"""
+    agent = _FakeNormalMainGuardAgent(tmp_path)
+
+    result = await agent._acting(
+        {
+            "id": "tool-1",
+            "name": "write_file",
+            "input": {
+                "file_path": "target.txt",
+                "content": "allowed by normal mode",
+            },
+        },
+    )
+
+    assert result == {
+        "content": {
+            "file_path": "target.txt",
+            "content": "allowed by normal mode",
+        },
+    }
+    assert agent.printed == []

@@ -133,6 +133,17 @@ _PREVIEW_MIME_PREFIXES: tuple[tuple[str, PreviewType], ...] = (
     ("audio/", "audio"),
 )
 _UPLOADED_STORED_NAME_PATTERN = re.compile(r"^[0-9a-f]{32}_(?P<name>.+)$")
+_BASE_AGENT_REQUEST_KEYS = frozenset(
+    {
+        "input",
+        "session_id",
+        "user_id",
+        "channel",
+        "reconnect",
+    },
+)
+_PLAN_INTERACTION_RESPONSE_KEY = "plan_interaction_response"
+_PLAN_MODE_META_KEY = "plan_mode_enabled"
 
 
 class GeneratedFileItem(BaseModel):
@@ -347,6 +358,7 @@ def _extract_session_and_payload(request_data: Union[AgentRequest, dict]):
 
     run_key must be ChatSpec.id (chat_id) so it matches list_chats/get_chat.
     """
+    request_meta: dict[str, Any] = {}
     if isinstance(request_data, AgentRequest):
         channel_id = getattr(request_data, "channel", None) or "console"
         sender_id = request_data.user_id or "default"
@@ -354,12 +366,16 @@ def _extract_session_and_payload(request_data: Union[AgentRequest, dict]):
         content_parts = (
             list(request_data.input[0].content) if request_data.input else []
         )
+        channel_meta = getattr(request_data, "channel_meta", None)
+        if isinstance(channel_meta, dict):
+            request_meta.update(channel_meta)
 
     else:
         channel_id = request_data.get("channel", "console")
         sender_id = request_data.get("user_id", "default")
         session_id = request_data.get("session_id", "default")
         input_data = request_data.get("input", [])
+        request_meta.update(_extract_request_meta(request_data))
 
         content_parts = []
         for content_part in input_data:
@@ -374,11 +390,131 @@ def _extract_session_and_payload(request_data: Union[AgentRequest, dict]):
         "sender_id": sender_id,
         "content_parts": content_parts,
         "meta": {
+            **request_meta,
             "session_id": session_id,
             "user_id": sender_id,
         },
     }
     return native_payload
+
+
+def _extract_request_meta(request_data: dict[str, Any]) -> dict[str, Any]:
+    """保留 Console 请求的计划元数据和未知扩展字段。"""
+    meta = request_data.get("meta")
+    request_meta = dict(meta) if isinstance(meta, dict) else {}
+    for key, value in request_data.items():
+        if key in _BASE_AGENT_REQUEST_KEYS or key == "meta":
+            continue
+        request_meta[key] = value
+    return request_meta
+
+
+def _is_exit_plan_response(meta: dict[str, Any]) -> bool:
+    """判断本次请求是否是 Plan Review Card 的只退出动作。"""
+    response = meta.get(_PLAN_INTERACTION_RESPONSE_KEY)
+    return (
+        isinstance(response, dict) and response.get("decision") == "exit_plan"
+    )
+
+
+def _plan_review_response(meta: dict[str, Any]) -> dict[str, Any] | None:
+    """提取 Plan Review Card 的审核响应。"""
+    response = meta.get(_PLAN_INTERACTION_RESPONSE_KEY)
+    if not isinstance(response, dict):
+        return None
+    decision = response.get("decision")
+    if decision not in {"revise", "execute", "exit_plan"}:
+        return None
+    return response
+
+
+def _accepted_plan_context(plan: Any) -> dict[str, Any]:
+    """构造传给执行轮次的只读计划上下文。"""
+    return {
+        "plan_id": plan.plan_id,
+        "title": plan.title,
+        "summary": plan.summary,
+        "steps": list(plan.steps),
+        "risks": list(plan.risks),
+        "verification": list(plan.verification),
+        "open_questions": list(plan.open_questions),
+        "confidence": plan.confidence,
+    }
+
+
+async def _record_plan_review_decision(
+    workspace: Any,
+    chat: Any,
+    meta: dict[str, Any],
+) -> dict[str, Any] | None:
+    """记录计划审核决策，execute 时只从后端持久化记录构造上下文。"""
+    response = _plan_review_response(meta)
+    if response is None:
+        return None
+
+    decision = response.get("decision")
+    if decision not in {"revise", "execute", "exit_plan"}:
+        raise HTTPException(status_code=400, detail="Invalid plan response")
+    plan_id = response.get("plan_id")
+    if not isinstance(plan_id, str) or not plan_id:
+        raise HTTPException(status_code=400, detail="plan_id is required")
+
+    from ..plans import JsonProposedPlanStore, PlanService
+
+    service = PlanService(JsonProposedPlanStore(Path(workspace.workspace_dir)))
+    try:
+        plan = await service.record_decision(
+            chat_id=chat.id,
+            plan_id=plan_id,
+            decision=decision,
+            feedback=response.get("feedback"),
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    if decision == "execute":
+        accepted = await service.load_accepted_plan(chat.id, plan.plan_id)
+        if accepted is None:
+            raise HTTPException(
+                status_code=404,
+                detail="accepted plan not found",
+            )
+        meta["accepted_plan"] = _accepted_plan_context(accepted)
+
+    chat.meta = {
+        **(getattr(chat, "meta", None) or {}),
+        _PLAN_MODE_META_KEY: decision == "revise",
+    }
+    meta[_PLAN_MODE_META_KEY] = decision == "revise"
+    chat_manager = getattr(workspace, "chat_manager", None)
+    if chat_manager is not None and hasattr(chat_manager, "update_chat"):
+        await chat_manager.update_chat(chat)
+
+    return meta.get("accepted_plan")
+
+
+def _build_exit_plan_stream(chat_id: str) -> StreamingResponse:
+    """返回一个不启动 Main Agent 的 SSE 响应。"""
+
+    async def event_generator() -> AsyncGenerator[str, None]:
+        yield ": keep-alive\n\n"
+        payload = {
+            "object": "plan_interaction",
+            "status": "completed",
+            "type": "exit_plan",
+            "chat_id": chat_id,
+        }
+        yield f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
+
+    return StreamingResponse(
+        _stream_with_keepalive(event_generator()),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
+    )
 
 
 def _derive_chat_name(native_payload: dict) -> str:
@@ -428,6 +564,104 @@ async def _attach_reconnect_queue(
     )
 
 
+async def _resolve_raw_console_request_data(
+    request_data: Union[AgentRequest, dict],
+    request: Request,
+) -> Union[AgentRequest, dict]:
+    """在 FastAPI 丢弃扩展字段时回读原始 JSON 请求体。"""
+    if not isinstance(request_data, AgentRequest):
+        return request_data
+
+    try:
+        raw_body = await request.json()
+        if isinstance(raw_body, dict):
+            return raw_body
+    except Exception:
+        # 原始 JSON 仅用于保留扩展元数据，失败时仍按已解析模型处理。
+        return request_data
+    return request_data
+
+
+def _inject_console_request_meta(
+    native_payload: dict[str, Any],
+    request: Request,
+) -> None:
+    """把中间件解析出的租户上下文写入 native payload 元数据。"""
+    source_id = getattr(
+        request.state,
+        "source_id",
+        None,
+    ) or request.headers.get(
+        "X-Source-Id",
+    )
+    if not source_id:
+        raise HTTPException(
+            status_code=400,
+            detail="X-Source-Id header is required",
+        )
+    native_payload["meta"]["source_id"] = source_id
+
+    request_state = getattr(request, "state", None)
+    if not request_state:
+        return
+
+    user_name = getattr(request_state, "user_name", None)
+    bbk_id = getattr(request_state, "bbk_id", None)
+    if user_name:
+        native_payload["meta"]["user_name"] = user_name
+    if bbk_id:
+        native_payload["meta"]["bbk_id"] = bbk_id
+
+
+async def _prepare_console_chat_queue(
+    *,
+    workspace: Any,
+    tracker: Any,
+    console_channel: Any,
+    native_payload: dict[str, Any],
+    session_id: str,
+    is_reconnect: bool,
+) -> tuple[Any, str, StreamingResponse | None]:
+    """根据 reconnect 或新请求准备 SSE 队列，并处理纯退出计划模式。"""
+    if is_reconnect:
+        queue, run_key = await _attach_reconnect_queue(
+            workspace,
+            tracker,
+            session_id,
+            native_payload["channel_id"],
+        )
+        return queue, run_key, None
+
+    chat = await workspace.chat_manager.get_or_create_chat(
+        session_id,
+        native_payload["sender_id"],
+        native_payload["channel_id"],
+        name=_derive_chat_name(native_payload),
+        meta=(
+            {
+                "agent_id": workspace.agent_id,
+            }
+            if getattr(workspace, "agent_id", None)
+            else None
+        ),
+    )
+    if _plan_review_response(native_payload["meta"]):
+        await _record_plan_review_decision(
+            workspace,
+            chat,
+            native_payload["meta"],
+        )
+    if _is_exit_plan_response(native_payload["meta"]):
+        return None, chat.id, _build_exit_plan_stream(chat.id)
+
+    queue, _ = await tracker.attach_or_start(
+        chat.id,
+        native_payload,
+        console_channel.stream_one,
+    )
+    return queue, chat.id, None
+
+
 @router.post(
     "/chat",
     status_code=200,
@@ -449,37 +683,18 @@ async def post_console_chat(
             status_code=503,
             detail="Channel Console not found",
         )
+
     try:
-        native_payload = _extract_session_and_payload(request_data)
+        raw_request_data = await _resolve_raw_console_request_data(
+            request_data,
+            request,
+        )
+        native_payload = _extract_session_and_payload(raw_request_data)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e)) from e
 
-    # Inject source_id from resolved request state for data isolation
-    source_id = getattr(
-        request.state,
-        "source_id",
-        None,
-    ) or request.headers.get(
-        "X-Source-Id",
-    )
-    if not source_id:
-        raise HTTPException(
-            status_code=400,
-            detail="X-Source-Id header is required",
-        )
-    native_payload["meta"]["source_id"] = source_id
+    _inject_console_request_meta(native_payload, request)
 
-    # 从 request.state 获取 user_name 和 bbk_id（由 TenantIdentityMiddleware 设置）
-    request_state = getattr(request, "state", None)
-    if request_state:
-        user_name = getattr(request_state, "user_name", None)
-        bbk_id = getattr(request_state, "bbk_id", None)
-        if user_name:
-            native_payload["meta"]["user_name"] = user_name
-        if bbk_id:
-            native_payload["meta"]["bbk_id"] = bbk_id
-
-    # Debug: log the session_id from frontend
     logger.debug(
         "Console chat: native_payload.meta.session_id=%s",
         native_payload.get("meta", {}).get("session_id"),
@@ -494,42 +709,24 @@ async def post_console_chat(
     )
     tracker = workspace.task_tracker
 
-    is_reconnect = False
-    if isinstance(request_data, dict):
-        is_reconnect = request_data.get("reconnect") is True
-
-    if is_reconnect:
-        queue, run_key = await _attach_reconnect_queue(
-            workspace,
-            tracker,
-            session_id,
-            native_payload["channel_id"],
+    queue, run_key, short_circuit = await _prepare_console_chat_queue(
+        workspace=workspace,
+        tracker=tracker,
+        console_channel=console_channel,
+        native_payload=native_payload,
+        session_id=session_id,
+        is_reconnect=(
+            isinstance(request_data, dict)
+            and request_data.get("reconnect") is True
+        ),
+    )
+    if short_circuit is not None:
+        return short_circuit
+    if queue is None:
+        raise HTTPException(
+            status_code=404,
+            detail="No running chat for this session",
         )
-        if queue is None:
-            raise HTTPException(
-                status_code=404,
-                detail="No running chat for this session",
-            )
-    else:
-        chat = await workspace.chat_manager.get_or_create_chat(
-            session_id,
-            native_payload["sender_id"],
-            native_payload["channel_id"],
-            name=_derive_chat_name(native_payload),
-            meta=(
-                {
-                    "agent_id": workspace.agent_id,
-                }
-                if getattr(workspace, "agent_id", None)
-                else None
-            ),
-        )
-        queue, _ = await tracker.attach_or_start(
-            chat.id,
-            native_payload,
-            console_channel.stream_one,
-        )
-        run_key = chat.id
 
     async def event_generator() -> AsyncGenerator[str, None]:
         # Hold iterator so finally can aclose(); guarantees stream_from_queue's

@@ -44,9 +44,14 @@ vi.mock("@/components/agentscope-chat", () => ({
 }));
 
 vi.mock("../../Context/ChatAnywhereOptionsContext", () => ({
-  useChatAnywhereOptions: (selector: (value: { sender: object }) => unknown) =>
-    selector({ sender: {} }),
+  useChatAnywhereOptions: (
+    selector: (value: { sender: Record<string, unknown> }) => unknown,
+  ) => selector({ sender: senderOptions.current }),
 }));
+
+const senderOptions = {
+  current: {} as Record<string, unknown>,
+};
 
 vi.mock("../../Context/ChatAnywhereInputContext", () => ({
   useChatAnywhereInput: (
@@ -67,6 +72,7 @@ vi.mock("./useAttachments", () => ({
 
 describe("Chat Input restore flow", () => {
   beforeEach(() => {
+    senderOptions.current = {};
     attachmentState.currentFileList = [];
     attachmentState.getFileList.mockImplementation(
       () => attachmentState.currentFileList,
@@ -108,9 +114,9 @@ describe("Chat Input restore flow", () => {
     );
 
     await waitFor(() => {
-      expect(
-        (screen.getByTestId("chat-input") as HTMLInputElement).value,
-      ).toBe("recover me");
+      expect((screen.getByTestId("chat-input") as HTMLInputElement).value).toBe(
+        "recover me",
+      );
     });
     expect(attachmentState.setFileList).toHaveBeenCalledWith(restoredFiles);
 
@@ -156,9 +162,9 @@ describe("Chat Input restore flow", () => {
     );
 
     await waitFor(() => {
-      expect(
-        (screen.getByTestId("chat-input") as HTMLInputElement).value,
-      ).toBe("normal prompt");
+      expect((screen.getByTestId("chat-input") as HTMLInputElement).value).toBe(
+        "normal prompt",
+      );
     });
 
     fireEvent.click(
@@ -221,5 +227,67 @@ describe("Chat Input restore flow", () => {
     );
 
     expect(attachmentState.handlePasteFile).toHaveBeenCalledWith(file);
+  });
+
+  it("allows beforeSubmit to inspect and transform the submitted input", async () => {
+    const onSubmit = vi.fn();
+    senderOptions.current = {
+      beforeSubmit: vi.fn(async (data) => ({
+        ...data,
+        query: "transformed",
+        biz_params: {
+          ...(data.biz_params || {}),
+          mode: "plan",
+        },
+      })),
+    };
+
+    render(<Input onCancel={vi.fn()} onSubmit={onSubmit} />);
+
+    fireEvent.change(screen.getByTestId("chat-input"), {
+      target: { value: "/plan transformed" },
+    });
+    fireEvent.click(
+      screen.getByRole("button", { name: "submit", hidden: true }),
+    );
+
+    await waitFor(() => {
+      expect(senderOptions.current.beforeSubmit).toHaveBeenCalledWith({
+        query: "/plan transformed",
+        fileList: [],
+        biz_params: undefined,
+      });
+      expect(onSubmit).toHaveBeenCalledWith({
+        query: "transformed",
+        fileList: [],
+        biz_params: { mode: "plan" },
+      });
+    });
+  });
+
+  it("allows beforeSubmit to clear input without submitting a request", async () => {
+    const onSubmit = vi.fn();
+    senderOptions.current = {
+      beforeSubmit: vi.fn(async () => ({
+        shouldSubmit: false,
+        clearInput: true,
+      })),
+    };
+
+    render(<Input onCancel={vi.fn()} onSubmit={onSubmit} />);
+
+    fireEvent.change(screen.getByTestId("chat-input"), {
+      target: { value: "/plan" },
+    });
+    fireEvent.click(
+      screen.getByRole("button", { name: "submit", hidden: true }),
+    );
+
+    await waitFor(() => {
+      expect(onSubmit).not.toHaveBeenCalled();
+      expect((screen.getByTestId("chat-input") as HTMLInputElement).value).toBe(
+        "",
+      );
+    });
   });
 });

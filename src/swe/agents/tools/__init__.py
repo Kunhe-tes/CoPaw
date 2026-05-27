@@ -22,6 +22,7 @@ from .get_token_usage import get_token_usage
 from .copy_file_to_static import copy_file_to_static
 from .update_task_progress import update_task_progress
 from .delegate_to_subagent import create_delegate_to_subagent_tool
+from .planning import ask_plan_clarification, create_submit_proposed_plan_tool
 
 __all__ = [
     "execute_python_code",
@@ -41,4 +42,6 @@ __all__ = [
     "copy_file_to_static",
     "update_task_progress",
     "create_delegate_to_subagent_tool",
+    "ask_plan_clarification",
+    "create_submit_proposed_plan_tool",
 ]

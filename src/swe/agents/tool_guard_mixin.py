@@ -64,6 +64,51 @@ _TOOLS_WITH_SPECIFIC_TIMEOUTS = {
 }
 _APPROVAL_KIND_TOOL_GUARD = "tool_guard"
 _APPROVAL_KIND_HOOK_PRE_TOOL_USE = "hook_pre_tool_use"
+_PLAN_MODE_ALLOWED_TOOLS = frozenset(
+    {
+        "execute_shell_command",
+        "read_file",
+        "grep_search",
+        "glob_search",
+        "get_current_time",
+        "ask_plan_clarification",
+        "submit_proposed_plan",
+        "delegate_to_subagent",
+    },
+)
+_PLAN_MODE_READONLY_SHELL_PREFIXES = (
+    "pwd",
+    "ls",
+    "rg",
+    "grep",
+    "sed",
+    "git status",
+    "git diff",
+    "git grep",
+    "git log",
+    "git show",
+)
+_PLAN_MODE_DENIED_SHELL_PATTERNS = (
+    ">",
+    ">>",
+    "| tee",
+    " rm ",
+    "rm ",
+    "mv ",
+    "cp ",
+    "pytest",
+    "npm test",
+    "coverage",
+    "snapshot",
+    "black",
+    "ruff --fix",
+    "migrate",
+    "migration",
+    "alembic",
+    "deploy",
+    "kubectl",
+    "helm",
+)
 
 
 class _GuardAction:
@@ -768,6 +813,66 @@ class ToolGuardMixin:
         await self.memory.add(tool_res_msg)
         return None
 
+    async def _acting_plan_mode_policy_denied(
+        self,
+        tool_call: dict[str, Any],
+        tool_name: str,
+        reason: str,
+    ) -> dict | None:
+        """Return a tool result for hard Plan Mode policy denial."""
+        denied_text = (
+            f"Tool `{tool_name}` blocked by Plan Mode policy.\n"
+            f"{reason or 'Plan Mode allows planning and readonly tools only.'}"
+        )
+        tool_res_msg = Msg(
+            "system",
+            [
+                ToolResultBlock(
+                    type="tool_result",
+                    id=tool_call["id"],
+                    name=tool_name,
+                    output=[{"type": "text", "text": denied_text}],
+                ),
+            ],
+            "system",
+        )
+        await self.print(tool_res_msg, True)
+        await self.memory.add(tool_res_msg)
+        return None
+
+    def _plan_mode_policy_denial(
+        self,
+        tool_name: str,
+        tool_input: dict[str, Any],
+    ) -> str | None:
+        """Return denial reason if Main Agent Plan Mode forbids a call."""
+        request_context = getattr(self, "_request_context", {}) or {}
+        if request_context.get(
+            "agent_role",
+            "main",
+        ) == "subagent" or not request_context.get("plan_mode_enabled"):
+            return None
+        if tool_name not in _PLAN_MODE_ALLOWED_TOOLS:
+            return "tool is unavailable while Plan Mode is active"
+        if tool_name != "execute_shell_command":
+            return None
+
+        command = str(tool_input.get("command") or "").strip()
+        normalized = " ".join(command.lower().split())
+        if not normalized:
+            return "empty shell command"
+        if any(
+            pattern in f" {normalized} "
+            for pattern in _PLAN_MODE_DENIED_SHELL_PATTERNS
+        ):
+            return "shell command is mutating, verifies, deploys, or migrates"
+        if not any(
+            normalized == prefix or normalized.startswith(f"{prefix} ")
+            for prefix in _PLAN_MODE_READONLY_SHELL_PREFIXES
+        ):
+            return "shell command is not in the Plan Mode readonly allowlist"
+        return None
+
     def _subagent_policy_denial(
         self,
         tool_name: str,
@@ -891,6 +996,17 @@ class ToolGuardMixin:
         # (agentscope ToolUseBlock) does not carry mcp_server.
         mcp_server = self._resolve_mcp_server(tool_name)
 
+        plan_mode_denial = self._plan_mode_policy_denial(
+            tool_name,
+            tool_input,
+        )
+        if plan_mode_denial is not None:
+            return await self._acting_plan_mode_policy_denied(
+                tool_call,
+                tool_name,
+                plan_mode_denial,
+            )
+
         subagent_denial = self._subagent_policy_denial(tool_name, tool_input)
         if subagent_denial is not None:
             return await self._acting_subagent_policy_denied(
@@ -916,6 +1032,16 @@ class ToolGuardMixin:
             tool_call = dict(tool_call)
             tool_call["input"] = pre_hook_result.updated_input
             tool_input = pre_hook_result.updated_input
+            plan_mode_denial = self._plan_mode_policy_denial(
+                tool_name,
+                tool_input,
+            )
+            if plan_mode_denial is not None:
+                return await self._acting_plan_mode_policy_denied(
+                    tool_call,
+                    tool_name,
+                    plan_mode_denial,
+                )
             subagent_denial = self._subagent_policy_denial(
                 tool_name,
                 tool_input,

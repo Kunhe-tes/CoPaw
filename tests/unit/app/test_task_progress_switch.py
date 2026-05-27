@@ -105,6 +105,30 @@ class TestReactAgentTaskProgressPrompt:
         assert "Task Progress Requirement" in prompt
         assert "update_task_progress" in prompt
 
+    def test_build_sys_prompt_suppresses_task_progress_in_plan_mode(
+        self,
+        monkeypatch,
+    ):
+        """Plan Mode 工具箱不含进度工具，因此提示词也不能强制调用。"""
+        monkeypatch.setattr(
+            react_agent_module,
+            "build_system_prompt_from_working_dir",
+            lambda **_: "base prompt",
+        )
+        monkeypatch.setattr(
+            react_agent_module,
+            "build_multimodal_hint",
+            lambda: "",
+        )
+        agent = self._build_agent()
+        agent._request_context = {"plan_mode_enabled": True}
+
+        with bind_source_system_config(_build_effective_config(True)):
+            prompt = SWEAgent._build_sys_prompt(agent)
+
+        assert "Task Progress Requirement" not in prompt
+        assert "update_task_progress" not in prompt
+
     def test_build_sys_prompt_appends_env_context_after_base_and_hint(
         self,
         monkeypatch,

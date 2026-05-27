@@ -19,6 +19,17 @@ import { useContextSelector } from "use-context-selector";
 
 const RUNTIME_INPUT_UPLOAD_FILE_EVENT = "pasteFile";
 
+function isSubmitCancelled(result: unknown): result is {
+  shouldSubmit: false;
+  clearInput?: boolean;
+} {
+  return (
+    Boolean(result) &&
+    typeof result === "object" &&
+    (result as { shouldSubmit?: unknown }).shouldSubmit === false
+  );
+}
+
 export interface InputProps {
   onCancel: () => void;
   onSubmit: (data: IAgentScopeRuntimeWebUIInputData) => void;
@@ -26,9 +37,8 @@ export interface InputProps {
 
 export default function Input({ onCancel, onSubmit }: InputProps) {
   const [content, setContent, getContent] = useGetState("");
-  const restoredBizParamsRef = useRef<
-    IAgentScopeRuntimeWebUIInputData["biz_params"]
-  >(undefined);
+  const restoredBizParamsRef =
+    useRef<IAgentScopeRuntimeWebUIInputData["biz_params"]>(undefined);
   const prefixCls = useProviderContext().getPrefixCls("chat-anywhere-input");
   const senderOptions = useChatAnywhereOptions((v) => v.sender);
   const inputContext = useChatAnywhereInput((v) => v);
@@ -46,7 +56,7 @@ export default function Input({ onCancel, onSubmit }: InputProps) {
     placeholder = "",
     disclaimer = "",
     maxLength,
-    beforeSubmit = () => Promise.resolve(true),
+    beforeSubmit = async () => true,
     beforeUI,
     afterUI,
     attachments,
@@ -81,7 +91,10 @@ export default function Input({ onCancel, onSubmit }: InputProps) {
 
       setContent(nextContent);
 
-      if (Object.prototype.hasOwnProperty.call(detail, "fileList") && setFileList) {
+      if (
+        Object.prototype.hasOwnProperty.call(detail, "fileList") &&
+        setFileList
+      ) {
         setFileList(detail.fileList || []);
       }
 
@@ -123,21 +136,40 @@ export default function Input({ onCancel, onSubmit }: InputProps) {
   );
 
   const handleSubmit = useCallback(async () => {
-    const next = await beforeSubmit();
-    if (!next) return;
-
     const fileList = (getFileList?.() || []).filter((i) => i.response?.url);
-    onSubmit({
+    const inputData: IAgentScopeRuntimeWebUIInputData = {
       query: getContent(),
       fileList,
       biz_params: restoredBizParamsRef.current,
-    });
+    };
+    const next = await beforeSubmit(inputData);
+    if (!next) return;
+
+    if (isSubmitCancelled(next)) {
+      if (next.clearInput) {
+        setContent("");
+        restoredBizParamsRef.current = undefined;
+        if (setFileList) {
+          setFileList([]);
+        }
+      }
+      return;
+    }
+
+    onSubmit(typeof next === "object" ? next : inputData);
     setContent("");
     restoredBizParamsRef.current = undefined;
     if (setFileList) {
       setFileList([]);
     }
-  }, [beforeSubmit, getContent, getFileList, onSubmit, setContent, setFileList]);
+  }, [
+    beforeSubmit,
+    getContent,
+    getFileList,
+    onSubmit,
+    setContent,
+    setFileList,
+  ]);
 
   const handleCancel = useCallback(() => {
     onCancel();
@@ -145,7 +177,12 @@ export default function Input({ onCancel, onSubmit }: InputProps) {
 
   return (
     <div className={prefixCls}>
-      <div className={`${prefixCls}-wrapper`} style={{ display: hasMessages || fileList.length > 0 ? "block" : "none" }}>
+      <div
+        className={`${prefixCls}-wrapper`}
+        style={{
+          display: hasMessages || fileList.length > 0 ? "block" : "none",
+        }}
+      >
         {beforeUI}
         <ChatInput
           loading={inputContext.loading}

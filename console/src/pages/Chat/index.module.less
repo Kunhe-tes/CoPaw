@@ -118,6 +118,28 @@
   }
 }
 
+.planModeToggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 28px;
+  padding: 0 8px;
+  color: rgba(0, 0, 0, 0.72);
+  font-size: 13px;
+  line-height: 1;
+  white-space: nowrap;
+}
+
+.planModeToggleLabel {
+  font-weight: 500;
+}
+
+:global(.dark-mode) {
+  .planModeToggle {
+    color: rgba(255, 255, 255, 0.78);
+  }
+}
+
 /* Prompt star icon - use theme color */
 :global {
   .chat-anywhere-prompt-icon,
