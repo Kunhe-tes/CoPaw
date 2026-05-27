@@ -9,6 +9,7 @@ import mimetypes
 import re
 import asyncio
 import uuid
+from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import AsyncGenerator, Literal, Union, Any, Optional, Dict
@@ -144,6 +145,23 @@ _BASE_AGENT_REQUEST_KEYS = frozenset(
 )
 _PLAN_INTERACTION_RESPONSE_KEY = "plan_interaction_response"
 _PLAN_MODE_META_KEY = "plan_mode_enabled"
+_ACCEPTED_PLAN_META_KEY = "accepted_plan"
+_ACCEPTED_PLAN_SOURCE_META_KEY = "accepted_plan_source"
+_ACCEPTED_PLAN_SERVER_SOURCE = "server_plan_store"
+_BACKEND_ONLY_META_KEYS = frozenset(
+    {
+        _ACCEPTED_PLAN_META_KEY,
+        _ACCEPTED_PLAN_SOURCE_META_KEY,
+    },
+)
+
+
+@dataclass(frozen=True)
+class _PlanReviewDecisionOutcome:
+    """计划审核记录结果，供路由层决定是否启动执行。"""
+
+    accepted_plan: dict[str, Any] | None = None
+    duplicate_execute: bool = False
 
 
 class GeneratedFileItem(BaseModel):
@@ -368,7 +386,7 @@ def _extract_session_and_payload(request_data: Union[AgentRequest, dict]):
         )
         channel_meta = getattr(request_data, "channel_meta", None)
         if isinstance(channel_meta, dict):
-            request_meta.update(channel_meta)
+            request_meta.update(_sanitize_client_meta(channel_meta))
 
     else:
         channel_id = request_data.get("channel", "console")
@@ -401,12 +419,27 @@ def _extract_session_and_payload(request_data: Union[AgentRequest, dict]):
 def _extract_request_meta(request_data: dict[str, Any]) -> dict[str, Any]:
     """保留 Console 请求的计划元数据和未知扩展字段。"""
     meta = request_data.get("meta")
-    request_meta = dict(meta) if isinstance(meta, dict) else {}
+    request_meta = _sanitize_client_meta(meta)
     for key, value in request_data.items():
-        if key in _BASE_AGENT_REQUEST_KEYS or key == "meta":
+        if (
+            key in _BASE_AGENT_REQUEST_KEYS
+            or key == "meta"
+            or key in _BACKEND_ONLY_META_KEYS
+        ):
             continue
         request_meta[key] = value
     return request_meta
+
+
+def _sanitize_client_meta(meta: Any) -> dict[str, Any]:
+    """剔除只能由后端写入的 meta 字段，保留普通扩展字段。"""
+    if not isinstance(meta, dict):
+        return {}
+    return {
+        key: value
+        for key, value in meta.items()
+        if key not in _BACKEND_ONLY_META_KEYS
+    }
 
 
 def _is_exit_plan_response(meta: dict[str, Any]) -> bool:
@@ -446,7 +479,7 @@ async def _record_plan_review_decision(
     workspace: Any,
     chat: Any,
     meta: dict[str, Any],
-) -> dict[str, Any] | None:
+) -> _PlanReviewDecisionOutcome | None:
     """记录计划审核决策，execute 时只从后端持久化记录构造上下文。"""
     response = _plan_review_response(meta)
     if response is None:
@@ -467,7 +500,7 @@ async def _record_plan_review_decision(
 
     service = PlanService(JsonProposedPlanStore(Path(workspace.workspace_dir)))
     try:
-        plan = await service.record_decision(
+        result = await service.record_decision(
             chat_id=chat.id,
             plan_id=plan_id,
             decision=decision,
@@ -479,13 +512,17 @@ async def _record_plan_review_decision(
         raise HTTPException(status_code=404, detail=str(exc)) from exc
 
     if decision == "execute":
-        accepted = await service.load_accepted_plan(chat.id, plan.plan_id)
+        accepted = await service.load_accepted_plan(
+            chat.id,
+            result.plan.plan_id,
+        )
         if accepted is None:
             raise HTTPException(
                 status_code=404,
                 detail="accepted plan not found",
             )
-        meta["accepted_plan"] = _accepted_plan_context(accepted)
+        meta[_ACCEPTED_PLAN_META_KEY] = _accepted_plan_context(accepted)
+        meta[_ACCEPTED_PLAN_SOURCE_META_KEY] = _ACCEPTED_PLAN_SERVER_SOURCE
 
     chat.meta = {
         **(getattr(chat, "meta", None) or {}),
@@ -496,7 +533,10 @@ async def _record_plan_review_decision(
     if chat_manager is not None and hasattr(chat_manager, "update_chat"):
         await chat_manager.update_chat(chat)
 
-    return meta.get("accepted_plan")
+    return _PlanReviewDecisionOutcome(
+        accepted_plan=meta.get(_ACCEPTED_PLAN_META_KEY),
+        duplicate_execute=decision == "execute" and result.duplicate,
+    )
 
 
 def _build_exit_plan_stream(chat_id: str) -> StreamingResponse:
@@ -508,6 +548,30 @@ def _build_exit_plan_stream(chat_id: str) -> StreamingResponse:
             "object": "response",
             "status": "completed",
             "type": "exit_plan",
+            "chat_id": chat_id,
+        }
+        yield f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
+
+    return StreamingResponse(
+        _stream_with_keepalive(event_generator()),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
+    )
+
+
+def _build_duplicate_execute_stream(chat_id: str) -> StreamingResponse:
+    """重复 execute 已无运行任务时返回完成事件，保证请求无副作用。"""
+
+    async def event_generator() -> AsyncGenerator[str, None]:
+        yield ": keep-alive\n\n"
+        payload = {
+            "object": "response",
+            "status": "completed",
+            "type": "plan_execute_duplicate",
             "chat_id": chat_id,
         }
         yield f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
@@ -652,11 +716,16 @@ async def _prepare_console_chat_queue(
         ),
     )
     if _plan_review_response(native_payload["meta"]):
-        await _record_plan_review_decision(
+        decision_outcome = await _record_plan_review_decision(
             workspace,
             chat,
             native_payload["meta"],
         )
+        if decision_outcome is not None and decision_outcome.duplicate_execute:
+            queue = await tracker.attach(chat.id)
+            if queue is not None:
+                return queue, chat.id, None
+            return None, chat.id, _build_duplicate_execute_stream(chat.id)
     if _is_exit_plan_response(native_payload["meta"]):
         return None, chat.id, _build_exit_plan_stream(chat.id)
 

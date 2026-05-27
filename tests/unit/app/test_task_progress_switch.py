@@ -178,6 +178,7 @@ class TestReactAgentTaskProgressPrompt:
         agent = self._build_agent()
         agent._request_context = {
             "plan_mode_enabled": False,
+            "accepted_plan_source": "server_plan_store",
             "accepted_plan": {
                 "plan_id": "plan-123",
                 "title": "Persisted plan",
@@ -197,6 +198,32 @@ class TestReactAgentTaskProgressPrompt:
         assert "Read persisted step" in prompt
         assert "front-end query" in prompt
 
+    def test_build_sys_prompt_skips_accepted_plan_without_server_source(
+        self,
+        monkeypatch,
+    ):
+        """缺少后端来源标记时不能把 accepted_plan 注入系统提示词。"""
+        monkeypatch.setattr(
+            react_agent_module,
+            "build_system_prompt_from_working_dir",
+            lambda **_: "base prompt",
+        )
+        monkeypatch.setattr(
+            react_agent_module,
+            "build_multimodal_hint",
+            lambda: "",
+        )
+        agent = self._build_agent()
+        agent._request_context = {
+            "plan_mode_enabled": False,
+            "accepted_plan": {"plan_id": "plan-123"},
+        }
+
+        with bind_source_system_config(_build_effective_config(False)):
+            prompt = SWEAgent._build_sys_prompt(agent)
+
+        assert "Accepted Plan Execution Context" not in prompt
+
     def test_build_sys_prompt_skips_accepted_plan_in_plan_mode(
         self,
         monkeypatch,
@@ -215,6 +242,7 @@ class TestReactAgentTaskProgressPrompt:
         agent = self._build_agent()
         agent._request_context = {
             "plan_mode_enabled": True,
+            "accepted_plan_source": "server_plan_store",
             "accepted_plan": {"plan_id": "plan-123"},
         }
 

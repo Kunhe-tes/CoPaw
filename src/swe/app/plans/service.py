@@ -3,6 +3,8 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
+
 from .models import (
     PlanReviewDecision,
     PlanReviewDecisionType,
@@ -14,6 +16,15 @@ from .store import ProposedPlanStore
 
 class PlanDecisionConflict(ValueError):
     """计划已经进入终态，不能再接受不同审核决策。"""
+
+
+@dataclass(frozen=True)
+class PlanDecisionResult:
+    """记录审核决策后的结果，区分首次写入与幂等重放。"""
+
+    plan: ProposedPlan
+    created: bool
+    duplicate: bool
 
 
 class PlanService:
@@ -47,7 +58,7 @@ class PlanService:
         plan_id: str,
         decision: PlanReviewDecisionType,
         feedback: str | None = None,
-    ) -> ProposedPlan:
+    ) -> PlanDecisionResult:
         """记录审核动作，并阻止跨 chat 使用 plan_id。"""
         plan = await self._store.get(chat_id, plan_id)
         if plan is None:
@@ -61,7 +72,11 @@ class PlanService:
                 last_decision is not None
                 and last_decision.decision == decision
             ):
-                return plan
+                return PlanDecisionResult(
+                    plan=plan,
+                    created=False,
+                    duplicate=True,
+                )
             raise PlanDecisionConflict(
                 "plan decision conflicts with finalized status",
             )
@@ -72,7 +87,12 @@ class PlanService:
             decision=decision,
             feedback=feedback,
         )
-        return await self._store.record_decision(review)
+        updated = await self._store.record_decision(review)
+        return PlanDecisionResult(
+            plan=updated,
+            created=True,
+            duplicate=False,
+        )
 
     async def load_accepted_plan(
         self,

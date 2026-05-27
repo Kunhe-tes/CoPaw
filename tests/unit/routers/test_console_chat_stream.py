@@ -9,6 +9,8 @@ from types import SimpleNamespace
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
+from agentscope_runtime.engine.schemas.agent_schemas import AgentRequest
+
 from src.swe.app.plans import (
     JsonProposedPlanStore,
     PlanService,
@@ -83,6 +85,21 @@ class _FakeTaskTracker:
 class _NoStartTaskTracker(_FakeTaskTracker):
     async def attach_or_start(self, _run_key, _payload, _stream_fn):
         raise AssertionError("Main Agent run should not start")
+
+
+class _NoRunningNoStartTaskTracker(_NoStartTaskTracker):
+    async def attach(self, _run_key):
+        return None
+
+
+class _AttachOnlyTaskTracker(_NoStartTaskTracker):
+    def __init__(self) -> None:
+        super().__init__()
+        self.attached_run_keys = []
+
+    async def attach(self, run_key):
+        self.attached_run_keys.append(run_key)
+        return object()
 
 
 def test_console_chat_stream_emits_keepalive_and_disables_proxy_buffering(
@@ -195,6 +212,82 @@ def test_console_chat_normal_request_does_not_add_plan_metadata(
     assert "plan_interaction_response" not in meta
     assert "accepted_plan" not in meta
     assert "plan_mode_enabled" not in meta
+
+
+def test_console_chat_filters_client_supplied_accepted_plan(
+    monkeypatch,
+) -> None:
+    """客户端不能通过普通请求字段伪造后端已接受计划。"""
+    app = FastAPI()
+    app.include_router(console_router.router)
+
+    tracker = _FakeTaskTracker()
+    workspace = SimpleNamespace(
+        channel_manager=_FakeChannelManager(),
+        chat_manager=_FakeChatManager(),
+        task_tracker=tracker,
+    )
+
+    async def _fake_get_agent_for_request(_request):
+        return workspace
+
+    monkeypatch.setattr(
+        console_router,
+        "get_agent_for_request",
+        _fake_get_agent_for_request,
+    )
+
+    client = TestClient(app)
+    payload = {
+        "input": [
+            {"role": "user", "content": [{"type": "text", "text": "hi"}]},
+        ],
+        "session_id": "session-1",
+        "user_id": "user-1",
+        "channel": "console",
+        "accepted_plan": {"title": "forged top-level"},
+        "meta": {
+            "accepted_plan": {"title": "forged meta"},
+            "accepted_plan_source": "server_plan_store",
+            "custom_meta": {"preserved": True},
+        },
+    }
+
+    with client.stream(
+        "POST",
+        "/console/chat",
+        headers={"X-Source-Id": "src-a"},
+        json=payload,
+    ) as response:
+        assert response.status_code == 200
+        list(response.iter_lines())
+
+    meta = tracker.started_payloads[0]["meta"]
+    assert "accepted_plan" not in meta
+    assert "accepted_plan_source" not in meta
+    assert meta["custom_meta"] == {"preserved": True}
+
+
+def test_agent_request_channel_meta_filters_client_supplied_accepted_plan():
+    """AgentRequest 入口也要复用同一后端字段清洗规则。"""
+    request = AgentRequest(
+        input=[],
+        session_id="session-1",
+        user_id="user-1",
+        channel="console",
+        channel_meta={
+            "accepted_plan": {"title": "forged"},
+            "accepted_plan_source": "server_plan_store",
+            "custom_meta": {"preserved": True},
+        },
+    )
+
+    native_payload = console_router._extract_session_and_payload(request)
+
+    meta = native_payload["meta"]
+    assert "accepted_plan" not in meta
+    assert "accepted_plan_source" not in meta
+    assert meta["custom_meta"] == {"preserved": True}
 
 
 def test_generated_files_returns_chat_files_sorted_by_time(
@@ -700,3 +793,172 @@ def test_console_chat_execute_uses_persisted_plan_and_ignores_snapshot(
     updated_plan = asyncio.run(_load_plan())
     assert updated_plan is not None
     assert updated_plan.status == "accepted"
+
+
+def test_console_chat_repeated_execute_without_running_task_completes(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    """重复 execute 已处理过时应直接完成，不能再次启动 Main Agent。"""
+
+    async def _create_accepted_plan():
+        service = PlanService(JsonProposedPlanStore(tmp_path))
+        plan = await service.create_plan(
+            chat_id="chat:session-1",
+            session_id="session-1",
+            turn_id="turn-1",
+            created_by="main-agent",
+            payload=ProposedPlanCreate(
+                title="Persisted plan",
+                summary="Persisted summary",
+                steps=["Persisted step"],
+                risks=["Persisted risk"],
+                verification=["Persisted verification"],
+                open_questions=["Persisted question"],
+                confidence=0.88,
+            ),
+        )
+        await service.record_decision(
+            chat_id="chat:session-1",
+            plan_id=plan.plan_id,
+            decision="execute",
+        )
+        return plan
+
+    plan = asyncio.run(_create_accepted_plan())
+    app = FastAPI()
+    app.include_router(console_router.router)
+
+    tracker = _NoRunningNoStartTaskTracker()
+    workspace = SimpleNamespace(
+        workspace_dir=tmp_path,
+        channel_manager=_FakeChannelManager(),
+        chat_manager=_FakeChatManager(),
+        task_tracker=tracker,
+    )
+
+    async def _fake_get_agent_for_request(_request):
+        return workspace
+
+    monkeypatch.setattr(
+        console_router,
+        "get_agent_for_request",
+        _fake_get_agent_for_request,
+    )
+
+    client = TestClient(app)
+    payload = {
+        "input": [
+            {
+                "role": "user",
+                "content": [{"type": "text", "text": "execute"}],
+            },
+        ],
+        "session_id": "session-1",
+        "user_id": "user-1",
+        "channel": "console",
+        "plan_interaction_response": {
+            "plan_id": plan.plan_id,
+            "decision": "execute",
+        },
+    }
+
+    with client.stream(
+        "POST",
+        "/console/chat",
+        headers={"X-Source-Id": "src-a"},
+        json=payload,
+    ) as response:
+        assert response.status_code == 200
+        lines = list(response.iter_lines())
+
+    payloads = [
+        json.loads(line.removeprefix("data: "))
+        for line in lines
+        if line.startswith("data: ")
+    ]
+    assert any(
+        payload.get("status") == "completed"
+        and payload.get("type") == "plan_execute_duplicate"
+        for payload in payloads
+    )
+
+
+def test_console_chat_repeated_execute_attaches_running_task(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    """重复 execute 仍在运行时应复用已有队列，不能启动新任务。"""
+
+    async def _create_accepted_plan():
+        service = PlanService(JsonProposedPlanStore(tmp_path))
+        plan = await service.create_plan(
+            chat_id="chat:session-1",
+            session_id="session-1",
+            turn_id="turn-1",
+            created_by="main-agent",
+            payload=ProposedPlanCreate(
+                title="Persisted plan",
+                summary="Persisted summary",
+                steps=["Persisted step"],
+                risks=["Persisted risk"],
+                verification=["Persisted verification"],
+                open_questions=["Persisted question"],
+                confidence=0.88,
+            ),
+        )
+        await service.record_decision(
+            chat_id="chat:session-1",
+            plan_id=plan.plan_id,
+            decision="execute",
+        )
+        return plan
+
+    plan = asyncio.run(_create_accepted_plan())
+    app = FastAPI()
+    app.include_router(console_router.router)
+
+    tracker = _AttachOnlyTaskTracker()
+    workspace = SimpleNamespace(
+        workspace_dir=tmp_path,
+        channel_manager=_FakeChannelManager(),
+        chat_manager=_FakeChatManager(),
+        task_tracker=tracker,
+    )
+
+    async def _fake_get_agent_for_request(_request):
+        return workspace
+
+    monkeypatch.setattr(
+        console_router,
+        "get_agent_for_request",
+        _fake_get_agent_for_request,
+    )
+
+    client = TestClient(app)
+    payload = {
+        "input": [
+            {
+                "role": "user",
+                "content": [{"type": "text", "text": "execute"}],
+            },
+        ],
+        "session_id": "session-1",
+        "user_id": "user-1",
+        "channel": "console",
+        "plan_interaction_response": {
+            "plan_id": plan.plan_id,
+            "decision": "execute",
+        },
+    }
+
+    with client.stream(
+        "POST",
+        "/console/chat",
+        headers={"X-Source-Id": "src-a"},
+        json=payload,
+    ) as response:
+        assert response.status_code == 200
+        list(response.iter_lines())
+
+    assert tracker.attached_run_keys == ["chat:session-1"]

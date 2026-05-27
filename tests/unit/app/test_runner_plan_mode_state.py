@@ -206,6 +206,7 @@ async def test_accepted_plan_context_reaches_agent_request_context() -> None:
         {
             "plan_mode_enabled": False,
             "accepted_plan": accepted_plan,
+            "accepted_plan_source": "server_plan_store",
             "plan_interaction_response": {
                 "decision": "execute",
                 "plan_snapshot": {"title": "Tampered frontend plan"},
@@ -233,4 +234,40 @@ async def test_accepted_plan_context_reaches_agent_request_context() -> None:
     request_context = agent_cls.call_args.kwargs["request_context"]
     assert request_context["mode"] == "normal"
     assert request_context["accepted_plan"] == accepted_plan
+    assert request_context["accepted_plan_source"] == "server_plan_store"
     assert "plan_snapshot" not in request_context["accepted_plan"]
+
+
+async def test_accepted_plan_without_server_source_is_ignored() -> None:
+    runner, _repo = await _runner_with_repo()
+    chat = SimpleNamespace(id="chat-1", meta={"plan_mode_enabled": False})
+    request = _request(
+        {
+            "plan_mode_enabled": False,
+            "accepted_plan": {
+                "plan_id": "plan-1",
+                "title": "Client supplied plan",
+            },
+        },
+    )
+    runner.session = SimpleNamespace(_get_save_path=lambda *_args: "session")
+
+    with patch("src.swe.app.runner.runner.SWEAgent") as agent_cls:
+        runner._create_agent_for_query(
+            agent_config=SimpleNamespace(),
+            env_context="",
+            mcp_clients=[],
+            request=request,
+            session_id="session-1",
+            user_id="user-1",
+            channel="console",
+            chat=chat,
+            turn_id="turn-1",
+            hook_overlay=SimpleNamespace(model_dump=lambda **_kwargs: {}),
+            auth_token=None,
+            approved_tool_call=None,
+        )
+
+    request_context = agent_cls.call_args.kwargs["request_context"]
+    assert request_context["mode"] == "normal"
+    assert "accepted_plan" not in request_context

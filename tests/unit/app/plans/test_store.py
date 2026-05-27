@@ -11,6 +11,7 @@ import pytest
 from swe.app.plans import (
     JsonProposedPlanStore,
     PlanDecisionConflict,
+    PlanDecisionResult,
     PlanReviewDecision,
     PlanService,
     ProposedPlanCreate,
@@ -157,9 +158,15 @@ async def test_service_repeats_same_terminal_decision_idempotently(
         decision="execute",
     )
 
-    assert second.status == "accepted"
-    assert len(second.decisions) == 1
-    assert second.decisions == first.decisions
+    assert isinstance(first, PlanDecisionResult)
+    assert first.created is True
+    assert first.duplicate is False
+    assert isinstance(second, PlanDecisionResult)
+    assert second.created is False
+    assert second.duplicate is True
+    assert second.plan.status == "accepted"
+    assert len(second.plan.decisions) == 1
+    assert second.plan.decisions == first.plan.decisions
 
 
 @pytest.mark.asyncio

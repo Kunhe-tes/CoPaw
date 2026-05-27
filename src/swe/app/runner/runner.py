@@ -93,6 +93,9 @@ _INTERNAL_FOLLOW_UP_METADATA_KEY = "swe_internal_follow_up"
 _PLAN_MODE_META_KEY = "plan_mode_enabled"
 _PLAN_REQUEST_MODE_KEY = "mode"
 _PLAN_INTERACTION_RESPONSE_KEY = "plan_interaction_response"
+_ACCEPTED_PLAN_META_KEY = "accepted_plan"
+_ACCEPTED_PLAN_SOURCE_META_KEY = "accepted_plan_source"
+_ACCEPTED_PLAN_SERVER_SOURCE = "server_plan_store"
 _BEFORE_STOP_FOLLOW_UP_REASON_TEMPLATE = (
     "BeforeStop completion gate blocked stopping: {reason}\n"
     "Continue working until the gate can allow completion."
@@ -1642,9 +1645,14 @@ class AgentRunner(Runner):
         plan_response = channel_meta.get(_PLAN_INTERACTION_RESPONSE_KEY)
         if isinstance(plan_response, dict):
             request_context[_PLAN_INTERACTION_RESPONSE_KEY] = plan_response
-        accepted_plan = channel_meta.get("accepted_plan")
-        if isinstance(accepted_plan, dict):
-            request_context["accepted_plan"] = accepted_plan
+        accepted_plan = channel_meta.get(_ACCEPTED_PLAN_META_KEY)
+        if channel_meta.get(
+            _ACCEPTED_PLAN_SOURCE_META_KEY,
+        ) == _ACCEPTED_PLAN_SERVER_SOURCE and isinstance(accepted_plan, dict):
+            request_context[_ACCEPTED_PLAN_META_KEY] = accepted_plan
+            request_context[_ACCEPTED_PLAN_SOURCE_META_KEY] = (
+                _ACCEPTED_PLAN_SERVER_SOURCE
+            )
         if auth_token:
             request_context["auth_token"] = auth_token
         if approved_tool_call:

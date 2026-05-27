@@ -73,6 +73,8 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 _ACCEPTED_PLAN_TEXT_LIMIT = 1200
 _ACCEPTED_PLAN_LIST_LIMIT = 20
+_ACCEPTED_PLAN_SOURCE_META_KEY = "accepted_plan_source"
+_ACCEPTED_PLAN_SERVER_SOURCE = "server_plan_store"
 _PLAN_MODE_ALLOWED_TOOLS = frozenset(
     {
         "execute_shell_command",
@@ -112,6 +114,11 @@ def _build_accepted_plan_prompt(request_context: dict[str, Any]) -> str:
     """构造执行轮次的 accepted plan 提示词。"""
     accepted_plan = request_context.get("accepted_plan")
     if not isinstance(accepted_plan, dict):
+        return ""
+    if (
+        request_context.get(_ACCEPTED_PLAN_SOURCE_META_KEY)
+        != _ACCEPTED_PLAN_SERVER_SOURCE
+    ):
         return ""
     if request_context.get("plan_mode_enabled"):
         return ""
