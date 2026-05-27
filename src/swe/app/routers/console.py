@@ -148,6 +148,11 @@ _PLAN_MODE_META_KEY = "plan_mode_enabled"
 _ACCEPTED_PLAN_META_KEY = "accepted_plan"
 _ACCEPTED_PLAN_SOURCE_META_KEY = "accepted_plan_source"
 _ACCEPTED_PLAN_SERVER_SOURCE = "server_plan_store"
+_DUPLICATE_PLAN_DECISION_EVENT_TYPES = {
+    "execute": "plan_execute_duplicate",
+    "revise": "plan_revise_duplicate",
+    "exit_plan": "plan_exit_duplicate",
+}
 _BACKEND_ONLY_META_KEYS = frozenset(
     {
         _ACCEPTED_PLAN_META_KEY,
@@ -161,7 +166,7 @@ class _PlanReviewDecisionOutcome:
     """计划审核记录结果，供路由层决定是否启动执行。"""
 
     accepted_plan: dict[str, Any] | None = None
-    duplicate_execute: bool = False
+    duplicate_decision: str | None = None
 
 
 class GeneratedFileItem(BaseModel):
@@ -511,6 +516,9 @@ async def _record_plan_review_decision(
     except ValueError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
 
+    if result.duplicate:
+        return _PlanReviewDecisionOutcome(duplicate_decision=decision)
+
     if decision == "execute":
         accepted = await service.load_accepted_plan(
             chat.id,
@@ -535,7 +543,6 @@ async def _record_plan_review_decision(
 
     return _PlanReviewDecisionOutcome(
         accepted_plan=meta.get(_ACCEPTED_PLAN_META_KEY),
-        duplicate_execute=decision == "execute" and result.duplicate,
     )
 
 
@@ -565,13 +572,21 @@ def _build_exit_plan_stream(chat_id: str) -> StreamingResponse:
 
 def _build_duplicate_execute_stream(chat_id: str) -> StreamingResponse:
     """重复 execute 已无运行任务时返回完成事件，保证请求无副作用。"""
+    return _build_duplicate_plan_decision_stream(chat_id, "execute")
+
+
+def _build_duplicate_plan_decision_stream(
+    chat_id: str,
+    decision: str,
+) -> StreamingResponse:
+    """重复终态决策返回完成事件，避免再次启动或修改运行流程。"""
 
     async def event_generator() -> AsyncGenerator[str, None]:
         yield ": keep-alive\n\n"
         payload = {
             "object": "response",
             "status": "completed",
-            "type": "plan_execute_duplicate",
+            "type": _DUPLICATE_PLAN_DECISION_EVENT_TYPES[decision],
             "chat_id": chat_id,
         }
         yield f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
@@ -721,11 +736,25 @@ async def _prepare_console_chat_queue(
             chat,
             native_payload["meta"],
         )
-        if decision_outcome is not None and decision_outcome.duplicate_execute:
+        duplicate_decision = (
+            decision_outcome.duplicate_decision
+            if decision_outcome is not None
+            else None
+        )
+        if duplicate_decision == "execute":
             queue = await tracker.attach(chat.id)
             if queue is not None:
                 return queue, chat.id, None
             return None, chat.id, _build_duplicate_execute_stream(chat.id)
+        if duplicate_decision is not None:
+            return (
+                None,
+                chat.id,
+                _build_duplicate_plan_decision_stream(
+                    chat.id,
+                    duplicate_decision,
+                ),
+            )
     if _is_exit_plan_response(native_payload["meta"]):
         return None, chat.id, _build_exit_plan_stream(chat.id)
 

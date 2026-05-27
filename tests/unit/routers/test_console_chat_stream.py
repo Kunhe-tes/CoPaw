@@ -884,6 +884,94 @@ def test_console_chat_repeated_execute_without_running_task_completes(
     )
 
 
+def test_console_chat_repeated_revise_without_running_task_completes(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    """重复 revise 已处理过时应直接完成，不能再次启动 Main Agent。"""
+
+    async def _create_revision_requested_plan():
+        service = PlanService(JsonProposedPlanStore(tmp_path))
+        plan = await service.create_plan(
+            chat_id="chat:session-1",
+            session_id="session-1",
+            turn_id="turn-1",
+            created_by="main-agent",
+            payload=ProposedPlanCreate(
+                title="Persisted plan",
+                summary="Persisted summary",
+                steps=["Persisted step"],
+                risks=["Persisted risk"],
+                verification=["Persisted verification"],
+                open_questions=["Persisted question"],
+                confidence=0.88,
+            ),
+        )
+        await service.record_decision(
+            chat_id="chat:session-1",
+            plan_id=plan.plan_id,
+            decision="revise",
+        )
+        return plan
+
+    plan = asyncio.run(_create_revision_requested_plan())
+    app = FastAPI()
+    app.include_router(console_router.router)
+
+    workspace = SimpleNamespace(
+        workspace_dir=tmp_path,
+        channel_manager=_FakeChannelManager(),
+        chat_manager=_FakeChatManager(),
+        task_tracker=_NoStartTaskTracker(),
+    )
+
+    async def _fake_get_agent_for_request(_request):
+        return workspace
+
+    monkeypatch.setattr(
+        console_router,
+        "get_agent_for_request",
+        _fake_get_agent_for_request,
+    )
+
+    client = TestClient(app)
+    payload = {
+        "input": [
+            {
+                "role": "user",
+                "content": [{"type": "text", "text": "revise"}],
+            },
+        ],
+        "session_id": "session-1",
+        "user_id": "user-1",
+        "channel": "console",
+        "plan_interaction_response": {
+            "plan_id": plan.plan_id,
+            "decision": "revise",
+        },
+    }
+
+    with client.stream(
+        "POST",
+        "/console/chat",
+        headers={"X-Source-Id": "src-a"},
+        json=payload,
+    ) as response:
+        assert response.status_code == 200
+        lines = list(response.iter_lines())
+
+    payloads = [
+        json.loads(line.removeprefix("data: "))
+        for line in lines
+        if line.startswith("data: ")
+    ]
+    assert any(
+        payload.get("status") == "completed"
+        and payload.get("type") == "plan_revise_duplicate"
+        for payload in payloads
+    )
+
+
 def test_console_chat_repeated_execute_attaches_running_task(
     tmp_path,
     monkeypatch,
