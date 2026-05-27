@@ -8,7 +8,7 @@ import {
 } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
-  PlanModeToggle,
+  PlanModeMenuItem,
   getPlanModeEnabled,
   preparePlanModeSubmit,
 } from "./planMode";
@@ -20,7 +20,7 @@ describe("Plan Mode frontend helpers", () => {
 
   it("initializes the toggle from ChatSpec meta", () => {
     render(
-      <PlanModeToggle
+      <PlanModeMenuItem
         enabled={getPlanModeEnabled({
           meta: { plan_mode_enabled: true },
         })}
@@ -38,7 +38,9 @@ describe("Plan Mode frontend helpers", () => {
   it("persists toggle changes through the provided handler", async () => {
     const onChange = vi.fn();
 
-    render(<PlanModeToggle enabled={false} label="Plan" onChange={onChange} />);
+    render(
+      <PlanModeMenuItem enabled={false} label="Plan" onChange={onChange} />,
+    );
 
     fireEvent.click(screen.getByRole("switch", { name: "Plan" }));
 

@@ -22,7 +22,7 @@ import { flushSync } from "react-dom";
 import { Button, Modal, Result, Tooltip } from "antd";
 import { useAppMessage } from "../../hooks/useAppMessage";
 import { ExclamationCircleOutlined, SettingOutlined } from "@ant-design/icons";
-import { SparkCopyLine, SparkAttachmentLine } from "@agentscope-ai/icons";
+import { SparkCopyLine } from "@agentscope-ai/icons";
 import { useTranslation } from "react-i18next";
 import { useLocation, useNavigate } from "react-router-dom";
 import sessionApi from "./sessionApi";
@@ -58,7 +58,6 @@ import { useBrandTheme } from "../../contexts/BrandThemeContext";
 import { useIframeStore } from "../../stores/iframeStore";
 // ==================== URL 导航参数结束 ====================
 import styles from "./index.module.less";
-import { IconButton } from "@agentscope-ai/design";
 // import ChatActionGroup from "./components/ChatActionGroup";
 import ChatHeaderTitle from "./components/ChatHeaderTitle";
 import ChatSessionInitializer from "./components/ChatSessionInitializer";
@@ -105,7 +104,7 @@ import TaskRunGroupCard from "./components/TaskRunGroupCard";
 import TaskProgressFloatingCard from "./components/TaskProgressFloatingCard";
 import GeneratedFilesDrawer from "./components/GeneratedFilesDrawer";
 import {
-  PlanModeToggle,
+  PlanModeMenuItem,
   buildPlanModeMeta,
   getPlanModeEnabled,
   getPlanModeForRequest,
@@ -286,10 +285,6 @@ interface CommandSuggestion {
 type InputMessage = {
   role?: string;
   content?: unknown;
-};
-
-type AttachmentTriggerProps = {
-  disabled?: boolean;
 };
 
 function renderSuggestionLabel(command: string, description: string) {
@@ -1644,17 +1639,6 @@ export default function ChatPage() {
             <ChatHeaderTitle />
             <span style={{ flex: 1 }} />
             <GeneratedFilesDrawer />
-            <PlanModeToggle
-              enabled={planModeEnabled}
-              label={t("chat.planMode.label", "Plan")}
-              tooltip={t(
-                "chat.planMode.tooltip",
-                "Plan Mode 使用只读工具先产出计划",
-              )}
-              onChange={(enabled) => {
-                void persistPlanMode(enabled);
-              }}
-            />
             <ModelSelector />
             {/* <ChatActionGroup /> */}
           </>
@@ -1687,24 +1671,22 @@ export default function ChatPage() {
         beforeUI: taskProgressEnabled ? (
           <TaskProgressFloatingCard progress={taskProgress} />
         ) : null,
+        quickMenuItems: [
+          <PlanModeMenuItem
+            key="plan-mode"
+            enabled={planModeEnabled}
+            label={t("chat.planMode.label", "Plan")}
+            tooltip={t(
+              "chat.planMode.tooltip",
+              "Plan Mode 使用只读工具先产出计划",
+            )}
+            onChange={(enabled) => {
+              void persistPlanMode(enabled);
+            }}
+          />,
+        ],
         allowSpeech: false,
         attachments: {
-          trigger: function AttachmentTrigger(props: AttachmentTriggerProps) {
-            const tooltipKey = multimodalCaps.supportsMultimodal
-              ? multimodalCaps.supportsImage && !multimodalCaps.supportsVideo
-                ? "chat.attachments.tooltipImageOnly"
-                : "chat.attachments.tooltip"
-              : "chat.attachments.tooltipNoMultimodal";
-            return (
-              <Tooltip title={t(tooltipKey, { limit: CHAT_ATTACHMENT_MAX_MB })}>
-                <IconButton
-                  disabled={props?.disabled}
-                  icon={<SparkAttachmentLine />}
-                  bordered={false}
-                />
-              </Tooltip>
-            );
-          },
           accept: "*/*",
           customRequest: handleFileUpload,
         },

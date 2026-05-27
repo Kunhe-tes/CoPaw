@@ -1,10 +1,13 @@
 import { IAgentScopeRuntimeWebUISenderAttachmentsOptions } from "@/components/agentscope-chat";
 import { Upload } from "antd";
 import type { UploadFile } from "antd";
-import { IconButton } from "@agentscope-ai/design";
 import { SparkAttachmentLine } from "@agentscope-ai/icons";
 import { Sender, Attachments } from "@/components/agentscope-chat";
 import React, { useCallback, useRef, useState } from "react";
+import { useTranslation } from "react-i18next";
+import {
+  ComposerQuickMenuItem,
+} from "@/components/agentscope-chat/ComposerQuickMenu";
 
 export default function useAttachments(
   attachments: IAgentScopeRuntimeWebUISenderAttachmentsOptions,
@@ -12,6 +15,7 @@ export default function useAttachments(
     disabled?: boolean;
   },
 ) {
+  const { t } = useTranslation();
   const [fileList, setFileList] = useState<UploadFile[]>([]);
   const fileListRef = useRef<UploadFile[]>([]);
   fileListRef.current = fileList;
@@ -123,7 +127,7 @@ export default function useAttachments(
   );
 
   if (rest?.customRequest) {
-    const uploadIconButton = (
+    const uploadQuickMenuItem = (
       <Upload
         fileList={fileList}
         showUploadList={false}
@@ -133,13 +137,10 @@ export default function useAttachments(
         {...rest}
         disabled={options?.disabled}
       >
-        {trigger ? (
-          React.createElement(trigger, { disabled: options?.disabled })
-        ) : (
-          <IconButton
-            disabled={options?.disabled}
+        {trigger ? React.createElement(trigger, { disabled: options?.disabled }) : (
+          <ComposerQuickMenuItem
             icon={<SparkAttachmentLine />}
-            bordered={false}
+            label={t("chat.quickMenu.upload", "上传文件")}
           />
         )}
       </Upload>
@@ -159,13 +160,14 @@ export default function useAttachments(
       getFileList,
       setFileList,
       handlePasteFile,
-      uploadIconButton,
+      uploadQuickMenuItem,
       uploadFileListHeader,
     };
   } else {
     return {
       enabled: false,
       handlePasteFile: undefined,
+      uploadQuickMenuItem: undefined,
     };
   }
 }

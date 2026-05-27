@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef } from "react";
+import React, { useCallback, useEffect, useMemo, useRef } from "react";
 import {
   useProviderContext,
   ChatInput,
@@ -16,6 +16,8 @@ import {
 } from "../hooks/followUpSubmit";
 import { ChatAnywhereMessagesContext } from "../../Context/ChatAnywhereMessagesContext";
 import { useContextSelector } from "use-context-selector";
+import { useTranslation } from "react-i18next";
+import ComposerQuickMenu from "@/components/agentscope-chat/ComposerQuickMenu";
 
 const RUNTIME_INPUT_UPLOAD_FILE_EVENT = "pasteFile";
 
@@ -36,6 +38,7 @@ export interface InputProps {
 }
 
 export default function Input({ onCancel, onSubmit }: InputProps) {
+  const { t } = useTranslation();
   const [content, setContent, getContent] = useGetState("");
   const restoredBizParamsRef =
     useRef<IAgentScopeRuntimeWebUIInputData["biz_params"]>(undefined);
@@ -61,6 +64,7 @@ export default function Input({ onCancel, onSubmit }: InputProps) {
     afterUI,
     attachments,
     prefix,
+    quickMenuItems,
     allowSpeech,
     suggestions,
   } = senderOptions || {};
@@ -70,9 +74,14 @@ export default function Input({ onCancel, onSubmit }: InputProps) {
     getFileList,
     setFileList,
     handlePasteFile,
-    uploadIconButton,
+    uploadQuickMenuItem,
     uploadFileListHeader,
   } = useAttachments(attachments, { disabled: !!inputContext.disabled });
+
+  const mergedQuickMenuItems = useMemo(() => {
+    const externalItems = React.Children.toArray(quickMenuItems).filter(Boolean);
+    return [uploadQuickMenuItem, ...externalItems].filter(Boolean);
+  }, [quickMenuItems, uploadQuickMenuItem]);
 
   // Clear attachments when session changes
   useEffect(() => {
@@ -191,7 +200,12 @@ export default function Input({ onCancel, onSubmit }: InputProps) {
           value={content}
           prefix={
             <>
-              {uploadIconButton}
+              <ComposerQuickMenu
+                disabled={Boolean(inputContext.disabled)}
+                triggerLabel={t("chat.quickMenu.trigger", "快捷操作")}
+              >
+                {mergedQuickMenuItems}
+              </ComposerQuickMenu>
               {prefix}
             </>
           }

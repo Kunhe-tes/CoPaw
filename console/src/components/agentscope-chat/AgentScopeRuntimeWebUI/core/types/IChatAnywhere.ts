@@ -281,6 +281,11 @@ export interface IAgentScopeRuntimeWebUISenderOptions {
    */
   prefix?: React.ReactNode | React.ReactNode[];
   /**
+   * @description 输入框快捷菜单项，显示在左下角加号弹层中
+   * @descriptionEn Quick menu items shown inside the bottom-left plus menu
+   */
+  quickMenuItems?: React.ReactNode | React.ReactNode[];
+  /**
    * @description 是否支持语音输入
    * @descriptionEn Whether to allow speech input
    */

@@ -1,6 +1,8 @@
 import React from "react";
 import { Switch, Tooltip } from "antd";
 import type { IAgentScopeRuntimeWebUIInputData } from "@/components/agentscope-chat";
+import { ApartmentOutlined } from "@ant-design/icons";
+import { ComposerQuickMenuItem } from "@/components/agentscope-chat/ComposerQuickMenu";
 import styles from "./index.module.less";
 
 export type ChatPlanMode = "plan" | "normal";
@@ -105,7 +107,7 @@ export function isPlanModeSubmitCancelled(
   );
 }
 
-export function PlanModeToggle({
+export function PlanModeMenuItem({
   enabled,
   disabled = false,
   label,
@@ -119,16 +121,19 @@ export function PlanModeToggle({
   onChange: (enabled: boolean) => void;
 }) {
   const control = (
-    <label className={styles.planModeToggle}>
-      <span className={styles.planModeToggleLabel}>{label}</span>
-      <Switch
-        size="small"
-        checked={enabled}
-        disabled={disabled}
-        aria-label={label}
-        onChange={(checked) => onChange(checked)}
-      />
-    </label>
+    <ComposerQuickMenuItem
+      icon={<ApartmentOutlined />}
+      label={<span className={styles.planModeToggleLabel}>{label}</span>}
+      extra={
+        <Switch
+          size="small"
+          checked={enabled}
+          disabled={disabled}
+          aria-label={label}
+          onChange={(checked) => onChange(checked)}
+        />
+      }
+    />
   );
 
   return tooltip ? <Tooltip title={tooltip}>{control}</Tooltip> : control;

@@ -18,6 +18,7 @@ const attachmentState = {
     attachmentState.currentFileList = next;
   }),
   handlePasteFile: vi.fn<(file: File) => void>(),
+  handleUploadMenuClick: vi.fn<() => void>(),
 };
 
 vi.mock("@/components/agentscope-chat", () => ({
@@ -25,6 +26,7 @@ vi.mock("@/components/agentscope-chat", () => ({
     value?: string;
     onChange?: (value: string) => void;
     onSubmit?: () => void;
+    prefix?: React.ReactNode;
   }) => (
     <div>
       <input
@@ -32,6 +34,7 @@ vi.mock("@/components/agentscope-chat", () => ({
         value={props.value || ""}
         onChange={(event) => props.onChange?.(event.target.value)}
       />
+      <div data-testid="chat-prefix">{props.prefix}</div>
       <button type="button" onClick={() => props.onSubmit?.()}>
         submit
       </button>
@@ -65,7 +68,11 @@ vi.mock("./useAttachments", () => ({
     getFileList: attachmentState.getFileList,
     setFileList: attachmentState.setFileList,
     handlePasteFile: attachmentState.handlePasteFile,
-    uploadIconButton: null,
+    uploadQuickMenuItem: (
+      <button type="button" onClick={() => attachmentState.handleUploadMenuClick()}>
+        上传文件
+      </button>
+    ),
     uploadFileListHeader: null,
   }),
 }));
@@ -80,6 +87,7 @@ describe("Chat Input restore flow", () => {
     attachmentState.getFileList.mockClear();
     attachmentState.setFileList.mockClear();
     attachmentState.handlePasteFile.mockClear();
+    attachmentState.handleUploadMenuClick.mockClear();
   });
 
   afterEach(() => {
@@ -289,5 +297,31 @@ describe("Chat Input restore flow", () => {
         "",
       );
     });
+  });
+
+  it("shows upload and custom quick actions inside the plus menu", async () => {
+    const onPlanModeClick = vi.fn();
+    senderOptions.current = {
+      quickMenuItems: [
+        <button key="plan" type="button" onClick={onPlanModeClick}>
+          计划模式
+        </button>,
+      ],
+    };
+
+    render(<Input onCancel={vi.fn()} onSubmit={vi.fn()} />);
+
+    fireEvent.click(screen.getByRole("button", { name: "快捷操作", hidden: true }));
+
+    fireEvent.click(
+      await screen.findByRole("button", { name: "上传文件", hidden: true }),
+    );
+    fireEvent.click(screen.getByRole("button", { name: "快捷操作", hidden: true }));
+    fireEvent.click(
+      await screen.findByRole("button", { name: "计划模式", hidden: true }),
+    );
+
+    expect(attachmentState.handleUploadMenuClick).toHaveBeenCalledTimes(1);
+    expect(onPlanModeClick).toHaveBeenCalledTimes(1);
   });
 });
