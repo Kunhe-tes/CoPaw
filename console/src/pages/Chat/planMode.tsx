@@ -68,6 +68,7 @@ export async function preparePlanModeSubmit(
   options: {
     planModeEnabled: boolean;
     persistPlanMode: (enabled: boolean) => Promise<void>;
+    setPlanModeEnabled?: (enabled: boolean) => void;
   },
 ): Promise<PlanModeSubmitResult> {
   const planCommandText = parsePlanCommand(data.query.trim());
@@ -75,14 +76,15 @@ export async function preparePlanModeSubmit(
     return withPlanMode(data, getPlanModeForRequest(options.planModeEnabled));
   }
 
-  await options.persistPlanMode(true);
-
   if (!planCommandText) {
+    options.setPlanModeEnabled?.(true);
     return {
       shouldSubmit: false,
       clearInput: true,
     };
   }
+
+  await options.persistPlanMode(true);
 
   return withPlanMode(
     {

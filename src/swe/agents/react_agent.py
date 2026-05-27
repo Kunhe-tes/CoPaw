@@ -71,6 +71,8 @@ if TYPE_CHECKING:
     from ..config.config import AgentProfileConfig
 
 logger = logging.getLogger(__name__)
+_ACCEPTED_PLAN_TEXT_LIMIT = 1200
+_ACCEPTED_PLAN_LIST_LIMIT = 20
 _PLAN_MODE_ALLOWED_TOOLS = frozenset(
     {
         "execute_shell_command",
@@ -85,6 +87,58 @@ _PLAN_MODE_ALLOWED_TOOLS = frozenset(
 
 # Valid namesake strategies for tool registration
 NamesakeStrategy = Literal["override", "skip", "raise", "rename"]
+
+
+def _stringify_accepted_plan_value(value: Any) -> str:
+    """限制计划字段长度，避免异常持久化内容撑爆系统提示词。"""
+    text = str(value).strip()
+    if len(text) <= _ACCEPTED_PLAN_TEXT_LIMIT:
+        return text
+    return text[: _ACCEPTED_PLAN_TEXT_LIMIT - 3] + "..."
+
+
+def _format_accepted_plan_items(value: Any) -> list[str]:
+    """把计划列表字段转成稳定文本，忽略非预期结构。"""
+    if not isinstance(value, list):
+        return []
+    return [
+        _stringify_accepted_plan_value(item)
+        for item in value[:_ACCEPTED_PLAN_LIST_LIMIT]
+        if str(item).strip()
+    ]
+
+
+def _build_accepted_plan_prompt(request_context: dict[str, Any]) -> str:
+    """构造执行轮次的 accepted plan 提示词。"""
+    accepted_plan = request_context.get("accepted_plan")
+    if not isinstance(accepted_plan, dict):
+        return ""
+    if request_context.get("plan_mode_enabled"):
+        return ""
+
+    lines = [
+        "[Accepted Plan Execution Context]",
+        "The backend persisted this plan after the user selected Execute.",
+        "Treat it as the source of truth for this execution turn.",
+        "Do not regenerate the plan or rely on the front-end query text.",
+        "If the plan conflicts with the current repository state, report the "
+        "conflict before changing files.",
+    ]
+    for field in ("plan_id", "title", "summary"):
+        value = accepted_plan.get(field)
+        if value is not None:
+            lines.append(f"- {field}: {_stringify_accepted_plan_value(value)}")
+
+    for field in ("steps", "risks", "verification", "open_questions"):
+        items = _format_accepted_plan_items(accepted_plan.get(field))
+        if not items:
+            continue
+        lines.append(f"- {field}:")
+        lines.extend(
+            f"  {index}. {item}" for index, item in enumerate(items, 1)
+        )
+
+    return "\n".join(lines)
 
 
 class AgentPhase(str, Enum):
@@ -575,6 +629,12 @@ class SWEAgent(ToolGuardMixin, ReActAgent):
 
         if self._env_context is not None:
             sys_prompt = sys_prompt + "\n\n" + self._env_context
+
+        accepted_plan_prompt = _build_accepted_plan_prompt(
+            getattr(self, "_request_context", {}) or {},
+        )
+        if accepted_plan_prompt:
+            sys_prompt = sys_prompt + "\n\n" + accepted_plan_prompt
 
         from ..app.source_system_config import (
             is_chat_task_progress_enabled,

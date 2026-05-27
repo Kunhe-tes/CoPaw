@@ -49,6 +49,7 @@ describe("Plan Mode frontend helpers", () => {
 
   it("turns /plan with text into a planning request", async () => {
     const persistPlanMode = vi.fn(async () => {});
+    const setPlanModeEnabled = vi.fn();
 
     const result = await preparePlanModeSubmit(
       {
@@ -58,10 +59,12 @@ describe("Plan Mode frontend helpers", () => {
       {
         planModeEnabled: false,
         persistPlanMode,
+        setPlanModeEnabled,
       },
     );
 
     expect(persistPlanMode).toHaveBeenCalledWith(true);
+    expect(setPlanModeEnabled).not.toHaveBeenCalled();
     expect(result).toMatchObject({
       query: "investigate this bug",
       biz_params: { mode: "plan" },
@@ -70,6 +73,7 @@ describe("Plan Mode frontend helpers", () => {
 
   it("turns /plan alone into a state change without a request", async () => {
     const persistPlanMode = vi.fn(async () => {});
+    const setPlanModeEnabled = vi.fn();
 
     const result = await preparePlanModeSubmit(
       {
@@ -79,10 +83,12 @@ describe("Plan Mode frontend helpers", () => {
       {
         planModeEnabled: false,
         persistPlanMode,
+        setPlanModeEnabled,
       },
     );
 
-    expect(persistPlanMode).toHaveBeenCalledWith(true);
+    expect(persistPlanMode).not.toHaveBeenCalled();
+    expect(setPlanModeEnabled).toHaveBeenCalledWith(true);
     expect(result).toEqual({
       shouldSubmit: false,
       clearInput: true,

@@ -10,6 +10,7 @@ import pytest
 
 from swe.app.plans import (
     JsonProposedPlanStore,
+    PlanDecisionConflict,
     PlanReviewDecision,
     PlanService,
     ProposedPlanCreate,
@@ -129,3 +130,65 @@ async def test_service_loads_only_accepted_plan(tmp_path: Path) -> None:
     accepted = await service.load_accepted_plan("chat-1", plan.plan_id)
     assert accepted is not None
     assert accepted.plan_id == plan.plan_id
+
+
+@pytest.mark.asyncio
+async def test_service_repeats_same_terminal_decision_idempotently(
+    tmp_path: Path,
+) -> None:
+    """重复提交相同终态决策时不应追加重复 decision。"""
+    service = PlanService(JsonProposedPlanStore(tmp_path))
+    plan = await service.create_plan(
+        chat_id="chat-1",
+        session_id="session-1",
+        turn_id="turn-1",
+        created_by="main-agent",
+        payload=_payload(),
+    )
+
+    first = await service.record_decision(
+        chat_id="chat-1",
+        plan_id=plan.plan_id,
+        decision="execute",
+    )
+    second = await service.record_decision(
+        chat_id="chat-1",
+        plan_id=plan.plan_id,
+        decision="execute",
+    )
+
+    assert second.status == "accepted"
+    assert len(second.decisions) == 1
+    assert second.decisions == first.decisions
+
+
+@pytest.mark.asyncio
+async def test_service_rejects_different_decision_after_terminal_status(
+    tmp_path: Path,
+) -> None:
+    """终态计划不能被后续不同决策覆盖。"""
+    service = PlanService(JsonProposedPlanStore(tmp_path))
+    plan = await service.create_plan(
+        chat_id="chat-1",
+        session_id="session-1",
+        turn_id="turn-1",
+        created_by="main-agent",
+        payload=_payload(),
+    )
+    await service.record_decision(
+        chat_id="chat-1",
+        plan_id=plan.plan_id,
+        decision="execute",
+    )
+
+    with pytest.raises(PlanDecisionConflict):
+        await service.record_decision(
+            chat_id="chat-1",
+            plan_id=plan.plan_id,
+            decision="revise",
+        )
+
+    accepted = await service.load_accepted_plan("chat-1", plan.plan_id)
+    assert accepted is not None
+    assert accepted.status == "accepted"
+    assert len(accepted.decisions) == 1

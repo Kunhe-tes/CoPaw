@@ -272,6 +272,54 @@ def test_plan_mode_toolkit_excludes_mutating_tools(tmp_path: Path) -> None:
         assert tool_name not in tools
 
 
+def test_plan_mode_shell_policy_allows_strict_readonly_commands(
+    tmp_path: Path,
+) -> None:
+    """Plan Mode shell 仅允许参数可证明只读的简单命令。"""
+    agent = _FakePlanGuardAgent(tmp_path)
+
+    for command in (
+        "pwd",
+        "ls src",
+        "rg accepted_plan src/swe",
+        "grep -R accepted_plan src/swe",
+        "git status --short",
+        "git diff -- src/swe/app/plans/models.py",
+        "git grep accepted_plan -- src/swe",
+        "git log --oneline -5",
+        "git show HEAD:README.md",
+    ):
+        assert (
+            agent._plan_mode_policy_denial(
+                "execute_shell_command",
+                {"command": command},
+            )
+            is None
+        ), command
+
+
+def test_plan_mode_shell_policy_rejects_mutating_shell_bypasses(
+    tmp_path: Path,
+) -> None:
+    """Plan Mode shell 默认拒绝复合语法和带写入能力的参数。"""
+    agent = _FakePlanGuardAgent(tmp_path)
+
+    for command in (
+        "sed -i '' 's/foo/bar/' some-file.py",
+        "git diff --output=/tmp/plan-mode-write.txt",
+        "rg foo > out",
+        "ls; touch x",
+        "A=1 rg foo",
+        "git show HEAD:foo > bar",
+        "git diff --ext-diff",
+    ):
+        denial = agent._plan_mode_policy_denial(
+            "execute_shell_command",
+            {"command": command},
+        )
+        assert denial is not None, command
+
+
 def test_plan_mode_toolkit_keeps_readonly_delegation_when_enabled(
     tmp_path: Path,
 ) -> None:

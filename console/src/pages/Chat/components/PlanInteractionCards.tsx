@@ -69,12 +69,19 @@ export function PlanClarificationCard({
       : data.kind === "multi_choice"
       ? multiChoice
       : [];
-  const query =
+  const trimmedText = textInput.trim();
+  const selectedLabels = optionLabels(options, selectedIds);
+  const allowsCustomText =
+    data.kind === "text_input" || data.allow_custom_response === true;
+  const queryParts =
     data.kind === "text_input"
-      ? textInput.trim()
-      : optionLabels(options, selectedIds);
+      ? [trimmedText]
+      : [selectedLabels, trimmedText].filter(Boolean);
+  const query = queryParts.join("\n");
   const disabled =
-    data.kind === "text_input" ? !query : selectedIds.length === 0;
+    data.kind === "text_input"
+      ? !query
+      : selectedIds.length === 0 && !trimmedText;
 
   const handleSubmit = () => {
     if (disabled) return;
@@ -88,7 +95,7 @@ export function PlanClarificationCard({
             card_type: "plan_clarification",
             kind: data.kind,
             selected_option_ids: selectedIds,
-            text: data.kind === "text_input" ? query : undefined,
+            text: trimmedText || undefined,
           },
         },
       },
@@ -138,6 +145,15 @@ export function PlanClarificationCard({
               <Input.TextArea
                 autoSize={{ minRows: 2, maxRows: 5 }}
                 placeholder={data.prompt}
+                value={textInput}
+                onChange={(event) => setTextInput(event.target.value)}
+              />
+            ) : null}
+            {data.kind !== "text_input" && allowsCustomText ? (
+              <Input.TextArea
+                autoSize={{ minRows: 2, maxRows: 5 }}
+                placeholder="Custom response"
+                style={{ marginTop: 12 }}
                 value={textInput}
                 onChange={(event) => setTextInput(event.target.value)}
               />

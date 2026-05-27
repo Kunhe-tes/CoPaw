@@ -114,6 +114,82 @@ describe("Plan interaction cards", () => {
     expect(screen.getByPlaceholderText("Add detail")).toBeInTheDocument();
   });
 
+  it("submits custom text for choice clarification when allowed", async () => {
+    const submit = captureSubmitEvents();
+
+    render(
+      <PlanClarificationCard
+        data={{
+          card_type: "plan_clarification",
+          kind: "single_choice",
+          prompt: "Pick scope",
+          allow_custom_response: true,
+          options: [{ id: "small", label: "Small" }],
+        }}
+      />,
+    );
+
+    fireEvent.change(screen.getByPlaceholderText("Custom response"), {
+      target: { value: "Use a narrower scope" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Submit" }));
+
+    await waitFor(() => {
+      expect(submit.handler).toHaveBeenCalledTimes(1);
+    });
+    expect(submit.handler.mock.calls[0][0].detail).toMatchObject({
+      query: "Use a narrower scope",
+      biz_params: {
+        plan_interaction_response: {
+          card_type: "plan_clarification",
+          kind: "single_choice",
+          selected_option_ids: [],
+          text: "Use a narrower scope",
+        },
+      },
+    });
+
+    submit.cleanup();
+  });
+
+  it("submits selected choices plus custom text when both are present", async () => {
+    const submit = captureSubmitEvents();
+
+    render(
+      <PlanClarificationCard
+        data={{
+          card_type: "plan_clarification",
+          kind: "multi_choice",
+          prompt: "Pick checks",
+          allow_custom_response: true,
+          options: [{ id: "lint", label: "Lint" }],
+        }}
+      />,
+    );
+
+    fireEvent.click(screen.getByLabelText("Lint"));
+    fireEvent.change(screen.getByPlaceholderText("Custom response"), {
+      target: { value: "Also run focused backend tests" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Submit" }));
+
+    await waitFor(() => {
+      expect(submit.handler).toHaveBeenCalledTimes(1);
+    });
+    expect(submit.handler.mock.calls[0][0].detail).toMatchObject({
+      query: "Lint\nAlso run focused backend tests",
+      biz_params: {
+        plan_interaction_response: {
+          kind: "multi_choice",
+          selected_option_ids: ["lint"],
+          text: "Also run focused backend tests",
+        },
+      },
+    });
+
+    submit.cleanup();
+  });
+
   it("submits review decisions with distinct Plan Review payloads", async () => {
     const submit = captureSubmitEvents();
 

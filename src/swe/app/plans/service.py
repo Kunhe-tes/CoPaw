@@ -12,6 +12,10 @@ from .models import (
 from .store import ProposedPlanStore
 
 
+class PlanDecisionConflict(ValueError):
+    """计划已经进入终态，不能再接受不同审核决策。"""
+
+
 class PlanService:
     """围绕 Proposed Plan 存储提供业务级操作。"""
 
@@ -51,6 +55,16 @@ class PlanService:
             if existing_plan is not None:
                 raise ValueError("plan does not belong to chat")
             raise ValueError("plan not found")
+        if plan.status != "proposed":
+            last_decision = plan.decisions[-1] if plan.decisions else None
+            if (
+                last_decision is not None
+                and last_decision.decision == decision
+            ):
+                return plan
+            raise PlanDecisionConflict(
+                "plan decision conflicts with finalized status",
+            )
 
         review = PlanReviewDecision(
             plan_id=plan.plan_id,

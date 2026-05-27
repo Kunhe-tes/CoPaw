@@ -1625,6 +1625,7 @@ export default function ChatPage() {
       return preparePlanModeSubmit(data, {
         planModeEnabled,
         persistPlanMode,
+        setPlanModeEnabled,
       });
     };
 

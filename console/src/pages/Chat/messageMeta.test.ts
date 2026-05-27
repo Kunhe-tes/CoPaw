@@ -64,4 +64,23 @@ describe("messageMeta", () => {
       }),
     ).toBeNull();
   });
+
+  it("preserves clarification custom response permission", () => {
+    expect(
+      extractPlanInteractionCard({
+        metadata: {
+          plan_interaction_card: {
+            card_type: "plan_clarification",
+            kind: "single_choice",
+            prompt: "Pick scope",
+            allow_custom_response: true,
+            options: [{ id: "small", label: "Small" }],
+          },
+        },
+      }),
+    ).toMatchObject({
+      card_type: "plan_clarification",
+      allow_custom_response: true,
+    });
+  });
 });

@@ -12,11 +12,12 @@ from .models import (
     ProposedPlan,
     ProposedPlanCreate,
 )
-from .service import PlanService
+from .service import PlanDecisionConflict, PlanService
 from .store import JsonProposedPlanStore, ProposedPlanStore
 
 __all__ = [
     "JsonProposedPlanStore",
+    "PlanDecisionConflict",
     "PlanClarificationCard",
     "PlanClarificationKind",
     "PlanInteractionCard",

@@ -160,6 +160,69 @@ class TestReactAgentTaskProgressPrompt:
         env_index = prompt.index("- Source ID: portal")
         assert base_index < hint_index < env_index
 
+    def test_build_sys_prompt_injects_accepted_plan_in_normal_mode(
+        self,
+        monkeypatch,
+    ):
+        """执行轮次必须从后端持久化计划注入系统提示词。"""
+        monkeypatch.setattr(
+            react_agent_module,
+            "build_system_prompt_from_working_dir",
+            lambda **_: "base prompt",
+        )
+        monkeypatch.setattr(
+            react_agent_module,
+            "build_multimodal_hint",
+            lambda: "",
+        )
+        agent = self._build_agent()
+        agent._request_context = {
+            "plan_mode_enabled": False,
+            "accepted_plan": {
+                "plan_id": "plan-123",
+                "title": "Persisted plan",
+                "summary": "Use backend facts",
+                "steps": ["Read persisted step"],
+                "risks": ["Known risk"],
+                "verification": ["Run focused tests"],
+                "open_questions": ["None"],
+            },
+        }
+
+        with bind_source_system_config(_build_effective_config(False)):
+            prompt = SWEAgent._build_sys_prompt(agent)
+
+        assert "Accepted Plan Execution Context" in prompt
+        assert "plan-123" in prompt
+        assert "Read persisted step" in prompt
+        assert "front-end query" in prompt
+
+    def test_build_sys_prompt_skips_accepted_plan_in_plan_mode(
+        self,
+        monkeypatch,
+    ):
+        """计划评审阶段不能把 accepted_plan 当作执行上下文。"""
+        monkeypatch.setattr(
+            react_agent_module,
+            "build_system_prompt_from_working_dir",
+            lambda **_: "base prompt",
+        )
+        monkeypatch.setattr(
+            react_agent_module,
+            "build_multimodal_hint",
+            lambda: "",
+        )
+        agent = self._build_agent()
+        agent._request_context = {
+            "plan_mode_enabled": True,
+            "accepted_plan": {"plan_id": "plan-123"},
+        }
+
+        with bind_source_system_config(_build_effective_config(False)):
+            prompt = SWEAgent._build_sys_prompt(agent)
+
+        assert "Accepted Plan Execution Context" not in prompt
+
 
 class TestUpdateTaskProgressSwitch:
     """验证工具与 stream 附加都受 source 开关控制。"""

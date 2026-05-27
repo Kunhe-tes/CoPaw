@@ -459,7 +459,11 @@ async def _record_plan_review_decision(
     if not isinstance(plan_id, str) or not plan_id:
         raise HTTPException(status_code=400, detail="plan_id is required")
 
-    from ..plans import JsonProposedPlanStore, PlanService
+    from ..plans import (
+        JsonProposedPlanStore,
+        PlanDecisionConflict,
+        PlanService,
+    )
 
     service = PlanService(JsonProposedPlanStore(Path(workspace.workspace_dir)))
     try:
@@ -469,6 +473,8 @@ async def _record_plan_review_decision(
             decision=decision,
             feedback=response.get("feedback"),
         )
+    except PlanDecisionConflict as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
     except ValueError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
 
@@ -499,7 +505,7 @@ def _build_exit_plan_stream(chat_id: str) -> StreamingResponse:
     async def event_generator() -> AsyncGenerator[str, None]:
         yield ": keep-alive\n\n"
         payload = {
-            "object": "plan_interaction",
+            "object": "response",
             "status": "completed",
             "type": "exit_plan",
             "chat_id": chat_id,

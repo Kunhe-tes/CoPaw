@@ -17,6 +17,7 @@ import json as _json
 import logging
 import os
 from pathlib import Path
+import shlex
 import time
 import uuid as _uuid
 from typing import Any, Literal
@@ -76,39 +77,81 @@ _PLAN_MODE_ALLOWED_TOOLS = frozenset(
         "delegate_to_subagent",
     },
 )
-_PLAN_MODE_READONLY_SHELL_PREFIXES = (
-    "pwd",
-    "ls",
-    "rg",
-    "grep",
-    "sed",
-    "git status",
-    "git diff",
-    "git grep",
-    "git log",
-    "git show",
+_PLAN_MODE_SHELL_META_CHARS = frozenset((";", "|", ">", "<", "&", "`", "$"))
+_PLAN_MODE_GIT_READONLY_SUBCOMMANDS = frozenset(
+    ("status", "diff", "grep", "log", "show"),
 )
-_PLAN_MODE_DENIED_SHELL_PATTERNS = (
-    ">",
-    ">>",
-    "| tee",
-    " rm ",
-    "rm ",
-    "mv ",
-    "cp ",
-    "pytest",
-    "npm test",
-    "coverage",
-    "snapshot",
-    "black",
-    "ruff --fix",
-    "migrate",
-    "migration",
-    "alembic",
-    "deploy",
-    "kubectl",
-    "helm",
+_PLAN_MODE_DENIED_GIT_OPTIONS = frozenset(
+    ("--output", "--ext-diff", "--textconv", "-O", "--open-files-in-pager"),
 )
+_PLAN_MODE_DENIED_READONLY_OPTIONS = frozenset(
+    ("--pre",),
+)
+
+
+def _has_plan_mode_shell_structure(command: str) -> bool:
+    """识别 shell 复合语法，Plan Mode 下不尝试证明其只读性。"""
+    return any(char in command for char in _PLAN_MODE_SHELL_META_CHARS)
+
+
+def _looks_like_env_assignment(token: str) -> bool:
+    """识别 `A=1 cmd` 这类会改变执行环境的 shell 前缀。"""
+    name, separator, _value = token.partition("=")
+    return bool(separator and name and name.replace("_", "").isalnum())
+
+
+def _has_denied_option(
+    args: list[str],
+    denied_options: frozenset[str],
+) -> bool:
+    """同时覆盖 `--flag value` 与 `--flag=value` 两类写法。"""
+    for arg in args:
+        if arg in denied_options:
+            return True
+        if any(arg.startswith(f"{option}=") for option in denied_options):
+            return True
+    return False
+
+
+def _validate_plan_mode_git(tokens: list[str]) -> str | None:
+    """校验 git 子命令和参数是否保持只读。"""
+    if len(tokens) < 2:
+        return "git command requires a readonly subcommand"
+    subcommand = tokens[1]
+    if subcommand.startswith("-"):
+        return "git global options are unavailable in Plan Mode"
+    if subcommand not in _PLAN_MODE_GIT_READONLY_SUBCOMMANDS:
+        return "git subcommand is unavailable in Plan Mode"
+    if _has_denied_option(tokens[2:], _PLAN_MODE_DENIED_GIT_OPTIONS):
+        return "git command option may write files or execute external helpers"
+    return None
+
+
+def _validate_plan_mode_readonly_shell(command: str) -> str | None:
+    """对 Plan Mode shell 命令做保守的只读白名单校验。"""
+    if not command:
+        return "empty shell command"
+    if _has_plan_mode_shell_structure(command):
+        return "shell compound syntax is unavailable in Plan Mode"
+    try:
+        tokens = shlex.split(command)
+    except ValueError:
+        return "shell command could not be parsed safely"
+    if not tokens:
+        return "empty shell command"
+    if _looks_like_env_assignment(tokens[0]):
+        return "environment assignments are unavailable in Plan Mode"
+
+    executable = tokens[0]
+    if executable in {"pwd", "ls"}:
+        return None
+    if executable in {"rg", "grep"}:
+        if _has_denied_option(tokens[1:], _PLAN_MODE_DENIED_READONLY_OPTIONS):
+            return "search command option may execute external helpers"
+        return None
+    if executable == "git":
+        return _validate_plan_mode_git(tokens)
+    return "shell command is not in the Plan Mode readonly allowlist"
 
 
 class _GuardAction:
@@ -858,20 +901,7 @@ class ToolGuardMixin:
             return None
 
         command = str(tool_input.get("command") or "").strip()
-        normalized = " ".join(command.lower().split())
-        if not normalized:
-            return "empty shell command"
-        if any(
-            pattern in f" {normalized} "
-            for pattern in _PLAN_MODE_DENIED_SHELL_PATTERNS
-        ):
-            return "shell command is mutating, verifies, deploys, or migrates"
-        if not any(
-            normalized == prefix or normalized.startswith(f"{prefix} ")
-            for prefix in _PLAN_MODE_READONLY_SHELL_PREFIXES
-        ):
-            return "shell command is not in the Plan Mode readonly allowlist"
-        return None
+        return _validate_plan_mode_readonly_shell(command)
 
     def _subagent_policy_denial(
         self,

@@ -124,6 +124,8 @@ class ProposedPlan(ProposedPlanCreate):
         decision: PlanReviewDecision,
     ) -> "ProposedPlan":
         """追加审核决策并根据决策同步计划状态。"""
+        if self.status != "proposed":
+            raise ValueError("plan decision is already finalized")
         status_by_decision: dict[PlanReviewDecisionType, PlanStatus] = {
             "revise": "revision_requested",
             "execute": "accepted",

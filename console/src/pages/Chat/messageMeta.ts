@@ -136,6 +136,7 @@ export interface ChatPlanClarificationCardData {
   kind: PlanClarificationKind;
   prompt: string;
   options?: PlanClarificationOption[];
+  allow_custom_response?: boolean;
 }
 
 export interface ChatPlanReviewCardData {
@@ -191,6 +192,7 @@ function normalizePlanInteractionCard(
       kind,
       prompt: card.prompt,
       options,
+      allow_custom_response: card.allow_custom_response === true,
     };
   }
 

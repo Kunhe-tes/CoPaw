@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 from types import SimpleNamespace
 
@@ -508,7 +509,17 @@ def test_console_chat_exit_plan_short_circuits_agent_run(
         assert response.status_code == 200
         lines = list(response.iter_lines())
 
-    assert any('"type": "exit_plan"' in line for line in lines)
+    exit_payloads = [
+        json.loads(line.removeprefix("data: "))
+        for line in lines
+        if line.startswith("data: ")
+    ]
+    assert any(
+        payload.get("object") == "response"
+        and payload.get("status") == "completed"
+        and payload.get("type") == "exit_plan"
+        for payload in exit_payloads
+    )
     chat = chat_manager.chats["session-1"]
     assert chat.meta["plan_mode_enabled"] is False
 
@@ -521,6 +532,82 @@ def test_console_chat_exit_plan_short_circuits_agent_run(
     updated_plan = asyncio.run(_load_plan())
     assert updated_plan is not None
     assert updated_plan.status == "exited"
+
+
+def test_console_chat_returns_conflict_for_terminal_plan_decision(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    """终态计划收到不同决策时，路由应返回 409 而不是覆盖状态。"""
+
+    async def _create_accepted_plan():
+        service = PlanService(JsonProposedPlanStore(tmp_path))
+        plan = await service.create_plan(
+            chat_id="chat:session-1",
+            session_id="session-1",
+            turn_id="turn-1",
+            created_by="main-agent",
+            payload=ProposedPlanCreate(
+                title="Plan title",
+                summary="Plan summary",
+                steps=["Inspect"],
+                risks=["None"],
+                verification=["Run tests"],
+                open_questions=["None"],
+                confidence=0.9,
+            ),
+        )
+        await service.record_decision(
+            chat_id="chat:session-1",
+            plan_id=plan.plan_id,
+            decision="execute",
+        )
+        return plan
+
+    plan = asyncio.run(_create_accepted_plan())
+    app = FastAPI()
+    app.include_router(console_router.router)
+
+    workspace = SimpleNamespace(
+        workspace_dir=tmp_path,
+        channel_manager=_FakeChannelManager(),
+        chat_manager=_FakeChatManager(),
+        task_tracker=_NoStartTaskTracker(),
+    )
+
+    async def _fake_get_agent_for_request(_request):
+        return workspace
+
+    monkeypatch.setattr(
+        console_router,
+        "get_agent_for_request",
+        _fake_get_agent_for_request,
+    )
+
+    client = TestClient(app)
+    payload = {
+        "input": [
+            {
+                "role": "user",
+                "content": [{"type": "text", "text": "revise"}],
+            },
+        ],
+        "session_id": "session-1",
+        "user_id": "user-1",
+        "channel": "console",
+        "plan_interaction_response": {
+            "plan_id": plan.plan_id,
+            "decision": "revise",
+        },
+    }
+
+    response = client.post(
+        "/console/chat",
+        headers={"X-Source-Id": "src-a"},
+        json=payload,
+    )
+
+    assert response.status_code == 409
 
 
 def test_console_chat_execute_uses_persisted_plan_and_ignores_snapshot(
