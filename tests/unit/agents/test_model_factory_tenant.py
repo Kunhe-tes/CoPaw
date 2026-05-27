@@ -53,6 +53,40 @@ class TestFileBlockSupportFormatter:
         assert formatter_class is not None
         assert "FileBlockSupport" in formatter_class.__name__
 
+    @pytest.mark.asyncio
+    async def test_openai_formatter_moves_hook_system_to_developer(self):
+        """历史 hook system 消息发送给 OpenAI 时应转为 developer。"""
+        from agentscope.formatter import OpenAIChatFormatter
+        from agentscope.message import Msg
+
+        formatter_class = _create_file_block_support_formatter(
+            OpenAIChatFormatter,
+        )
+        formatter = formatter_class()
+
+        messages = await formatter._format(
+            [
+                Msg(name="system", role="system", content="base prompt"),
+                Msg(name="user", role="user", content="hello"),
+                Msg(
+                    name="system",
+                    role="system",
+                    content="[Hook additional context]\nremember",
+                ),
+                Msg(name="user", role="user", content="next turn"),
+            ],
+        )
+
+        assert [message["role"] for message in messages] == [
+            "system",
+            "user",
+            "developer",
+            "user",
+        ]
+        assert messages[2]["content"][0]["text"] == (
+            "[Hook additional context]\nremember"
+        )
+
 
 class TestCreateModelAndFormatterTenantIntegration:
     """Tests for tenant-aware model creation."""

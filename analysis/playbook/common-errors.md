@@ -65,6 +65,72 @@
 - 这一阶段只解决“外层 SSE 静默断连”
 - 不包含 MCP 内部执行进度透传；如果希望前端看到“工具执行中”，需要后续把 MCP progress/event 映射进 `TaskTracker` 或 SSE 事件流
 
+## Console SSE 只返回 keep-alive 没有 data
+
+### 症状
+
+- `/api/console/chat` 返回 `200 text/event-stream`
+- 响应头包含 `X-Accel-Buffering: no`，且首帧能收到 `: keep-alive`
+- 随后连接结束或长期没有任何 `data:` 模型事件
+
+### 典型原因
+
+- Console 请求经 `_resolve_raw_console_request_data()` 回读原始 JSON 后，`content_parts` 仍是 dict
+- `BaseChannel._apply_no_text_debounce()` 如果只按对象属性读取 `type/text`，会把 `{"type":"text","text":"..."}` 误判为无文本消息
+- 误判后消息被缓存到 `_pending_content_by_session`，`ConsoleChannel.stream_one()` 直接返回，`TaskTracker` producer 不会调用模型
+
+### 第一落点
+
+- [src/swe/app/routers/console.py](/Users/shixiangyi/code/Swe/src/swe/app/routers/console.py)
+- 重点看 `_extract_session_and_payload()` 是否把前端 JSON content 传入 `native_payload["content_parts"]`
+- [src/swe/app/channels/base.py](/Users/shixiangyi/code/Swe/src/swe/app/channels/base.py)
+- 重点看 `_content_has_text()`、`_content_has_audio()` 和 `_apply_no_text_debounce()` 是否同时兼容 runtime Content 对象与 dict
+- [src/swe/app/channels/console/channel.py](/Users/shixiangyi/code/Swe/src/swe/app/channels/console/channel.py)
+- 重点看 `stream_one()` 是否在 debounce 后继续构造 `AgentRequest`
+
+### 第一阶段处理
+
+- 用 `curl --no-buffer -N` 先确认是否至少收到首个 `: keep-alive`
+- 如果只有 keep-alive，没有 `data:`，检查 `content_parts` 的实际类型
+- dict 文本块应被识别为完整用户输入，再交给 `AgentRequest` 做 runtime content 类型转换
+- 若已能收到 `response created/in_progress/failed`，说明 SSE 和 producer 已通，后续错误应转向模型 Provider、工具或 Runner 配置
+
+## Console 第二轮提问报 System message must be at the beginning
+
+### 症状
+
+- `/api/console/chat` 首轮请求正常，沿用同一个 `session_id` 第二轮提问失败
+- SSE 返回 `Unknown agent error: BadRequestError: Error code: 400`
+- 模型后端错误内容包含：
+  - `System message must be at the beginning.`
+- query error dump 栈一般落在 `agentscope/model/_openai_model.py` 调用 OpenAI-compatible `chat.completions.create`
+
+### 典型原因
+
+- 首轮结束后的 hook additionalContext 被追加进 `agent.memory`
+- 如果追加消息使用 `role=system`，第二轮历史会变成 `system/user/assistant/system/user`
+- hook 附加上下文统一使用 `developer` 角色；AgentScope `Msg` 构造器不直接支持该角色，需通过 hook message helper 构造
+- 严格 OpenAI-compatible 后端只允许第一条消息是 `system`，会拒绝非首位 system
+- 已经落盘的旧 session 即使源头修复，也可能继续携带历史尾部 system
+
+### 第一落点
+
+- [src/swe/app/runner/runner.py](/Users/shixiangyi/code/Swe/src/swe/app/runner/runner.py)
+- 重点看 `_emit_stop_hook_if_needed()` 写入 STOP hook additionalContext 时是否使用 developer hook message helper
+- [src/swe/agents/model_factory.py](/Users/shixiangyi/code/Swe/src/swe/agents/model_factory.py)
+- 重点看 OpenAI formatter 最终清洗是否把历史 hook `system` 转为 `developer`
+- [src/swe/agents/tool_guard_mixin.py](/Users/shixiangyi/code/Swe/src/swe/agents/tool_guard_mixin.py)
+- 重点看 `_record_tool_hook_result()` 是否同样使用 developer hook message helper
+- 对应测试：
+  - [tests/unit/app/test_runner_hook_runtime.py](/Users/shixiangyi/code/Swe/tests/unit/app/test_runner_hook_runtime.py)
+  - [tests/unit/agents/test_model_factory_tenant.py](/Users/shixiangyi/code/Swe/tests/unit/agents/test_model_factory_tenant.py)
+
+### 第一阶段处理
+
+- 新增 hook 附加上下文不要追加为尾部 `system` 或 `user`，应统一写为 `developer`
+- formatter 侧保留兜底：只有第 0 条消息允许继续保持 `role="system"`，历史 hook system 转为 developer，其他非首位 system 转为 user
+- 如果仍报错，检查当前 session 落盘 JSON 中 `agent.memory.content` 的 role 顺序，确认是否还有非首位 system 绕过了 formatter
+
 ## Console 切换运行中会话时 reconnect 返回 404
 
 ### 症状

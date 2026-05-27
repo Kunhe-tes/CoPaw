@@ -26,6 +26,10 @@ from agentscope.message import Msg, ToolResultBlock
 
 from ..constant import AGENT_WATCHDOG_TIMEOUT, QUERY_TIMEOUT_SECONDS
 from .hook_runtime import HookRuntime
+from .hook_runtime.messages import (
+    HOOK_ADDITIONAL_CONTEXT_PREFIX,
+    build_hook_additional_context_msg,
+)
 from .hook_runtime.models import (
     HookConfig,
     HookContext,
@@ -963,10 +967,8 @@ class ToolGuardMixin:
             lines.append(f"[{event_name.value}] {result.reason}")
         if not lines:
             return
-        msg = Msg(
-            "system",
-            "[Hook additional context]\n" + "\n".join(lines),
-            "system",
+        msg = build_hook_additional_context_msg(
+            f"{HOOK_ADDITIONAL_CONTEXT_PREFIX}\n" + "\n".join(lines),
         )
         await self.memory.add(msg)
 

@@ -553,6 +553,70 @@ async def test_query_handler_injects_prompt_additional_context(
 
 
 @pytest.mark.asyncio
+async def test_stop_hook_additional_context_is_persisted_as_developer(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    runner = AgentRunner(agent_id="test-agent", workspace_dir=tmp_path)
+    runner.session = SafeJSONSession(save_dir=str(tmp_path))
+    setattr(runner, "_chat_manager", None)
+    _patch_normal_agent_path(monkeypatch)
+    monkeypatch.setattr(
+        "swe.app.runner.runner.load_agent_config",
+        lambda *args, **kwargs: _agent_config(HookConfig(enabled=True)),
+    )
+    monkeypatch.setattr(
+        "swe.app.runner.runner._load_tenant_hook_config",
+        lambda *args, **kwargs: HookConfig(enabled=True),
+    )
+    monkeypatch.setattr(
+        "swe.app.runner.runner._resolve_active_model_label",
+        lambda *args, **kwargs: "openai/gpt-test",
+    )
+    monkeypatch.setattr(
+        "swe.app.runner.runner._emit_runner_hook",
+        AsyncMock(
+            side_effect=[
+                MergedHookResult(),
+                MergedHookResult(),
+                MergedHookResult(),
+                MergedHookResult(
+                    additional_context=[
+                        AdditionalContext(
+                            handler_id="stop",
+                            context="remember for next turn",
+                        ),
+                    ],
+                ),
+            ],
+        ),
+    )
+
+    request = SimpleNamespace(
+        session_id="session-1",
+        user_id="user-1",
+        channel="console",
+        channel_meta={},
+    )
+    msgs = [Msg(name="user", role="user", content="hello")]
+
+    outputs = [
+        item async for item in runner.query_handler(msgs, request=request)
+    ]
+    stored_state = await runner.session.get_session_state_dict(
+        session_id="session-1",
+        user_id="user-1",
+    )
+    stored_content = stored_state["agent"]["memory"]["content"]
+    roles = [entry[0]["role"] for entry in stored_content]
+
+    assert outputs[-1][0].get_text_content() == "agent reply"
+    assert "remember for next turn" in stored_content[-1][0]["content"]
+    assert roles[-1] == "developer"
+    assert all(role != "system" for role in roles[1:])
+
+
+@pytest.mark.asyncio
 async def test_query_handler_session_start_block_yields_before_cleanup(
     monkeypatch,
     tmp_path,

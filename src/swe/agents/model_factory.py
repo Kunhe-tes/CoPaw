@@ -33,6 +33,10 @@ except ImportError:  # pragma: no cover - compatibility fallback
     GeminiChatModel = None
 
 from .utils.tool_message_utils import _sanitize_tool_messages
+from .hook_runtime.messages import (
+    HOOK_ADDITIONAL_CONTEXT_PREFIX,
+    HOOK_CONTEXT_ROLE,
+)
 from ..constant import (
     DEFAULT_LLM_CHAT_MAX_CONCURRENT,
     DEFAULT_LLM_CRON_MAX_CONCURRENT,
@@ -683,15 +687,33 @@ def _create_file_block_support_formatter(
 def _strip_top_level_message_name(
     messages: list[dict],
 ) -> list[dict]:
-    """Strip top-level `name` from OpenAI chat messages.
-
-    Some strict OpenAI-compatible backends reject `messages[*].name`
-    (especially for assistant/tool roles) and may return 500/400 on
-    follow-up turns. Keep function/tool names unchanged.
-    """
-    for message in messages:
+    """清理 OpenAI-compatible 后端容易拒绝的消息字段。"""
+    for index, message in enumerate(messages):
         message.pop("name", None)
+        if index != 0 and message.get("role") == "system":
+            if _has_hook_additional_context_prefix(message):
+                message["role"] = HOOK_CONTEXT_ROLE
+            else:
+                message["role"] = "user"
     return messages
+
+
+def _has_hook_additional_context_prefix(message: dict) -> bool:
+    """判断格式化后的消息是否来自 hook 附加上下文。"""
+    content = message.get("content")
+    if isinstance(content, str):
+        return content.startswith(HOOK_ADDITIONAL_CONTEXT_PREFIX)
+    if not isinstance(content, list):
+        return False
+    for block in content:
+        if not isinstance(block, dict):
+            continue
+        text = block.get("text")
+        if isinstance(text, str) and text.startswith(
+            HOOK_ADDITIONAL_CONTEXT_PREFIX,
+        ):
+            return True
+    return False
 
 
 def _get_agent_id(

@@ -55,6 +55,10 @@ from ...agents.hook_runtime.models import (
     HookSessionState,
     MergedHookResult,
 )
+from ...agents.hook_runtime.messages import (
+    HOOK_ADDITIONAL_CONTEXT_PREFIX,
+    build_hook_additional_context_msg,
+)
 from ...agents.hook_runtime.skill_loader import (
     SkillHookLoadError,
     load_skill_hooks_for_session,
@@ -1033,7 +1037,7 @@ def _with_hook_context(
     """追加 hook 上下文，避免主流程重复拼接同一段格式。"""
     if not hook_context:
         return env_context
-    return f"{env_context}\n\n[Hook additional context]\n{hook_context}"
+    return f"{env_context}\n\n{HOOK_ADDITIONAL_CONTEXT_PREFIX}\n{hook_context}"
 
 
 def _chat_name_from_messages(msgs: list[Any]) -> str:
@@ -2089,10 +2093,8 @@ class AgentRunner(Runner):
         stop_context = _format_hook_additional_context(stop_hook_result)
         if stop_context:
             await runtime.agent.memory.add(
-                Msg(
-                    name="system",
-                    role="system",
-                    content=("[Hook additional context]\n" f"{stop_context}"),
+                build_hook_additional_context_msg(
+                    f"{HOOK_ADDITIONAL_CONTEXT_PREFIX}\n{stop_context}",
                 ),
             )
         if stop_hook_result.decision in {
