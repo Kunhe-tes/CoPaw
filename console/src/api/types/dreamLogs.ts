@@ -45,6 +45,102 @@ export interface DreamLogsResponse {
   page_size: number;
 }
 
+export interface DreamLogReportParams {
+  start_time?: string;
+  end_time?: string;
+  bbk_id?: string;
+  user_search?: string;
+  status?: string;
+  trigger?: string;
+  agent_id?: string;
+  page?: number;
+  page_size?: number;
+}
+
+export interface DreamLogReportSummary {
+  covered_users: number;
+  governed_users: number;
+  ungoverned_users: number;
+  total_executions: number;
+  success_count: number;
+  failed_count: number;
+  success_rate: number;
+  total_files_changed: number;
+  total_size_saved: number;
+  avg_duration_ms: number;
+  last_execution?: string | null;
+}
+
+export interface DreamLogReportTrendPoint {
+  date: string;
+  executions: number;
+  success_count: number;
+  failed_count: number;
+  total_size_saved: number;
+}
+
+export interface DreamLogReportStatusBucket {
+  status: string;
+  count: number;
+}
+
+export interface DreamLogReportBbkBucket {
+  bbk_id: string;
+  user_count: number;
+  governed_users: number;
+  executions: number;
+  success_rate: number;
+}
+
+export interface DreamLogReportUserRow {
+  user_id: string;
+  user_name?: string | null;
+  bbk_id?: string | null;
+  agents: string[];
+  executions: number;
+  success_rate: number;
+  failed_count: number;
+  total_files_changed: number;
+  total_size_saved: number;
+  last_execution?: string | null;
+  latest_error?: string | null;
+}
+
+export interface DreamLogReportRecord {
+  id: string;
+  timestamp: string;
+  trigger: string;
+  status: string;
+  agent_id: string;
+  files_optimized: string[];
+  total_size_saved: number;
+  total_files_changed: number;
+  duration_ms: number;
+  model_used: string;
+  input_tokens: number;
+  output_tokens: number;
+  summary: string;
+  error?: string | null;
+}
+
+export interface DreamLogReportResponse {
+  summary: DreamLogReportSummary;
+  trends: DreamLogReportTrendPoint[];
+  status_distribution: DreamLogReportStatusBucket[];
+  bbk_distribution: DreamLogReportBbkBucket[];
+  users: DreamLogReportUserRow[];
+  total: number;
+  page: number;
+  page_size: number;
+}
+
+export interface DreamLogUserRecordsResponse {
+  records: DreamLogReportRecord[];
+  total: number;
+  page: number;
+  page_size: number;
+}
+
 export interface DiffResponse {
   filename: string;
   content_before: string;

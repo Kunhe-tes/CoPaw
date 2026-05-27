@@ -275,14 +275,24 @@ export default function Sidebar({ selectedKey }: SidebarProps) {
     },
     ...(isRMassistSource
       ? [
-        {
-          key: "analytics-claw-data-overview",
-          icon: <SparkBarChartLine size={18} />,
-          path: "/analytics/claw-data-overview",
-          label: t("nav.analyticsClawDataOverview", "Claw数据看板"),
-        },
-      ]
-    : []),
+          {
+            key: "analytics-claw-data-overview",
+            icon: <SparkBarChartLine size={18} />,
+            path: "/analytics/claw-data-overview",
+            label: t("nav.analyticsClawDataOverview", "Claw数据看板"),
+          },
+        ]
+      : []),
+    ...(canManageCurrentSourceConfig
+      ? [
+          {
+            key: "analytics-continuous-governance",
+            icon: <SparkRefreshLine size={18} />,
+            path: "/analytics/continuous-governance",
+            label: t("nav.analyticsContinuousGovernance", "持续治理分析"),
+          },
+        ]
+      : []),
     {
       key: "analytics-messages",
       icon: <SparkSearchLine size={18} />,
@@ -462,8 +472,19 @@ export default function Sidebar({ selectedKey }: SidebarProps) {
                   : t("nav.analyticsClawDataOverview", "Claw数据看板"),
                 icon: <SparkBarChartLine size={16} />,
               },
-          ]
-        : []),
+            ]
+          : []),
+        ...(canManageCurrentSourceConfig
+          ? [
+              {
+                key: "analytics-continuous-governance",
+                label: collapsed
+                  ? null
+                  : t("nav.analyticsContinuousGovernance", "持续治理分析"),
+                icon: <SparkRefreshLine size={16} />,
+              },
+            ]
+          : []),
         {
           key: "analytics-messages",
           label: collapsed ? null : t("nav.analyticsMessages", "Messages"),

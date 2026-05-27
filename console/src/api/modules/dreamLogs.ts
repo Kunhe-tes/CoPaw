@@ -13,19 +13,57 @@ import type {
   OrphanFilesResponse,
   OrphanFileContentResponse,
   GovernanceStatusResponse,
+  DreamLogReportParams,
+  DreamLogReportResponse,
+  DreamLogUserRecordsResponse,
 } from "../types/dreamLogs";
+
+function buildReportQuery(params: DreamLogReportParams = {}): string {
+  const searchParams = new URLSearchParams();
+  Object.entries(params).forEach(([key, value]) => {
+    if (value !== undefined && value !== null && value !== "") {
+      searchParams.set(key, String(value));
+    }
+  });
+  const query = searchParams.toString();
+  return query ? `?${query}` : "";
+}
 
 export const dreamLogsApi = {
   /**
    * List dream optimization records
    */
-  list: async (page: number = 1, pageSize: number = 20): Promise<DreamLogsResponse> =>
+  list: async (
+    page: number = 1,
+    pageSize: number = 20,
+  ): Promise<DreamLogsResponse> =>
     request(`/dream-logs?page=${page}&page_size=${pageSize}`),
 
   /**
    * Get aggregate statistics
    */
   stats: async (): Promise<DreamLogsStats> => request("/dream-logs/stats"),
+
+  /**
+   * Get source-scoped governance report
+   */
+  report: async (
+    params: DreamLogReportParams = {},
+  ): Promise<DreamLogReportResponse> =>
+    request(`/dream-logs/report${buildReportQuery(params)}`),
+
+  /**
+   * Get readonly governance records for one source-scoped user
+   */
+  reportUserRecords: async (
+    userId: string,
+    params: DreamLogReportParams = {},
+  ): Promise<DreamLogUserRecordsResponse> =>
+    request(
+      `/dream-logs/report/users/${encodeURIComponent(
+        userId,
+      )}/records${buildReportQuery(params)}`,
+    ),
 
   /**
    * Get file diff
@@ -48,7 +86,10 @@ export const dreamLogsApi = {
   /**
    * Rollback files from a dream optimization
    */
-  rollback: async (recordId: string, files?: string[]): Promise<RollbackResponse> =>
+  rollback: async (
+    recordId: string,
+    files?: string[],
+  ): Promise<RollbackResponse> =>
     request(`/dream-logs/rollback/${recordId}`, {
       method: "POST",
       body: JSON.stringify({ files }),
@@ -88,7 +129,9 @@ export const dreamLogsApi = {
   /**
    * Get orphan file content for preview
    */
-  getOrphanFileContent: async (filepath: string): Promise<OrphanFileContentResponse> =>
+  getOrphanFileContent: async (
+    filepath: string,
+  ): Promise<OrphanFileContentResponse> =>
     request(`/dream-logs/orphan-files/${filepath}/content`),
 
   /**

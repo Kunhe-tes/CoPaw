@@ -1,0 +1,270 @@
+.page {
+  min-height: 100%;
+  padding: 20px 24px 28px;
+  background: #f5f7fb;
+}
+
+.header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+  margin-bottom: 16px;
+
+  h2 {
+    margin: 0;
+    color: #111827;
+    font-size: 22px;
+    font-weight: 700;
+    line-height: 1.3;
+  }
+
+  p {
+    margin: 6px 0 0;
+    color: #64748b;
+    font-size: 14px;
+  }
+}
+
+.filterBar {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 10px;
+  padding: 12px;
+  margin-bottom: 16px;
+  background: #ffffff;
+  border: 1px solid #e5eaf2;
+  border-radius: 8px;
+}
+
+.filterControl {
+  width: 150px;
+}
+
+.searchInput {
+  width: 220px;
+}
+
+.agentInput {
+  width: 140px;
+}
+
+.kpiGrid {
+  display: grid;
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+  gap: 12px;
+  margin-bottom: 16px;
+}
+
+.kpiCard {
+  min-height: 104px;
+  padding: 14px 14px 12px;
+  background: #ffffff;
+  border: 1px solid #e5eaf2;
+  border-top: 3px solid #2563eb;
+  border-radius: 8px;
+}
+
+.kpiHeader {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: #475569;
+  font-size: 13px;
+  line-height: 1.2;
+}
+
+.kpiIcon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 auto;
+}
+
+.kpiLabel {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.kpiValue {
+  margin-top: 16px;
+  color: #0f172a;
+  font-size: 22px;
+  font-weight: 700;
+  line-height: 1.2;
+  font-variant-numeric: tabular-nums;
+  word-break: break-word;
+}
+
+.chartGrid {
+  display: grid;
+  grid-template-columns: 1.6fr 1fr 1fr;
+  gap: 16px;
+  margin-bottom: 16px;
+}
+
+.panel,
+.tablePanel {
+  background: #ffffff;
+  border: 1px solid #e5eaf2;
+  border-radius: 8px;
+}
+
+.panel {
+  min-height: 260px;
+  padding: 16px;
+}
+
+.tablePanel {
+  padding: 16px;
+}
+
+.panelHeader {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 14px;
+  color: #111827;
+  font-size: 15px;
+  font-weight: 700;
+}
+
+.panelMeta {
+  color: #64748b;
+  font-size: 13px;
+  font-weight: 500;
+}
+
+.trendChart {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(26px, 1fr));
+  align-items: end;
+  gap: 8px;
+  height: 188px;
+  padding-top: 8px;
+}
+
+.trendItem {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  height: 100%;
+}
+
+.trendTrack {
+  display: flex;
+  align-items: flex-end;
+  width: 100%;
+  max-width: 28px;
+  flex: 1;
+  background: #edf2f7;
+  border-radius: 6px 6px 2px 2px;
+  overflow: hidden;
+}
+
+.trendBar {
+  width: 100%;
+  background: linear-gradient(180deg, #2f80ed 0%, #16a34a 100%);
+  border-radius: 6px 6px 2px 2px;
+}
+
+.trendLabel {
+  color: #64748b;
+  font-size: 12px;
+  line-height: 1;
+  white-space: nowrap;
+}
+
+.distributionList {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.distributionRow {
+  display: grid;
+  grid-template-columns: 88px minmax(0, 1fr) 42px;
+  align-items: center;
+  gap: 10px;
+}
+
+.distributionName,
+.distributionValue {
+  color: #334155;
+  font-size: 13px;
+}
+
+.distributionName {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.distributionValue {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+
+.distributionTrack {
+  height: 8px;
+  background: #edf2f7;
+  border-radius: 999px;
+  overflow: hidden;
+}
+
+.distributionBar,
+.bbkBar {
+  height: 100%;
+  border-radius: inherit;
+}
+
+.distributionBar {
+  background: #2563eb;
+}
+
+.bbkBar {
+  background: #16a34a;
+}
+
+.errorText {
+  color: #dc2626;
+}
+
+.drawerAlert {
+  margin-bottom: 14px;
+}
+
+@media (max-width: 1280px) {
+  .kpiGrid {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+
+  .chartGrid {
+    grid-template-columns: 1fr;
+  }
+}
+
+@media (max-width: 760px) {
+  .page {
+    padding: 14px;
+  }
+
+  .header {
+    flex-direction: column;
+  }
+
+  .kpiGrid {
+    grid-template-columns: 1fr;
+  }
+
+  .filterControl,
+  .searchInput,
+  .agentInput {
+    width: 100%;
+  }
+}

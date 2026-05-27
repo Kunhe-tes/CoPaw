@@ -6,13 +6,14 @@ Provides REST API endpoints for dream optimization records.
 
 import asyncio
 import json
-import shutil
 import logging
+import shutil
 import base64
 import threading
-from datetime import datetime, timezone
+from collections import defaultdict
+from datetime import datetime, time, timezone
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional
 
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel
@@ -104,6 +105,106 @@ class DreamLogsResponse(BaseModel):
 
     records: list[DreamLogRecord]
     stats: DreamLogsStats
+    total: int
+    page: int
+    page_size: int
+
+
+class DreamLogReportSummary(BaseModel):
+    """持续治理分析汇总指标。"""
+
+    covered_users: int
+    governed_users: int
+    ungoverned_users: int
+    total_executions: int
+    success_count: int
+    failed_count: int
+    success_rate: float
+    total_files_changed: int
+    total_size_saved: int
+    avg_duration_ms: int
+    last_execution: Optional[str] = None
+
+
+class DreamLogReportTrendPoint(BaseModel):
+    """持续治理趋势点。"""
+
+    date: str
+    executions: int
+    success_count: int
+    failed_count: int
+    total_size_saved: int
+
+
+class DreamLogReportStatusBucket(BaseModel):
+    """持续治理状态分布。"""
+
+    status: str
+    count: int
+
+
+class DreamLogReportBbkBucket(BaseModel):
+    """持续治理机构分布。"""
+
+    bbk_id: str
+    user_count: int
+    governed_users: int
+    executions: int
+    success_rate: float
+
+
+class DreamLogReportUserRow(BaseModel):
+    """持续治理用户明细行。"""
+
+    user_id: str
+    user_name: Optional[str] = None
+    bbk_id: Optional[str] = None
+    agents: list[str]
+    executions: int
+    success_rate: float
+    failed_count: int
+    total_files_changed: int
+    total_size_saved: int
+    last_execution: Optional[str] = None
+    latest_error: Optional[str] = None
+
+
+class DreamLogReportRecord(BaseModel):
+    """持续治理用户下钻记录。"""
+
+    id: str
+    timestamp: str
+    trigger: str
+    status: str
+    agent_id: str
+    files_optimized: list[str]
+    total_size_saved: int
+    total_files_changed: int
+    duration_ms: int
+    model_used: str
+    input_tokens: int
+    output_tokens: int
+    summary: str
+    error: Optional[str] = None
+
+
+class DreamLogReportResponse(BaseModel):
+    """持续治理分析报表响应。"""
+
+    summary: DreamLogReportSummary
+    trends: list[DreamLogReportTrendPoint]
+    status_distribution: list[DreamLogReportStatusBucket]
+    bbk_distribution: list[DreamLogReportBbkBucket]
+    users: list[DreamLogReportUserRow]
+    total: int
+    page: int
+    page_size: int
+
+
+class DreamLogUserRecordsResponse(BaseModel):
+    """持续治理用户下钻记录响应。"""
+
+    records: list[DreamLogReportRecord]
     total: int
     page: int
     page_size: int
@@ -388,9 +489,515 @@ def _format_size(size_bytes: int) -> str:
         return f"{size_bytes / (1024 * 1024):.1f}MB"
 
 
+REPORT_ALLOWED_ROLES = {"manager", "admin"}
+DEFAULT_REPORT_AGENT_ID = "default"
+MAX_REPORT_PAGE_SIZE = 100
+
+
+def _ensure_report_permission(request: Request) -> None:
+    """校验持续治理分析只允许管理角色访问。"""
+    role = request.headers.get("X-User-Role", "").strip().lower()
+    if role not in REPORT_ALLOWED_ROLES:
+        raise HTTPException(status_code=403, detail="Permission denied")
+
+
+def _get_report_source_id(request: Request) -> str:
+    """获取报表统计的当前来源标识。"""
+    request_state = getattr(request, "state", None)
+    source_id = None
+    if request_state is not None:
+        source_id = getattr(request_state, "source_id", None)
+    source_id = source_id or request.headers.get("X-Source-Id")
+    if not source_id:
+        raise HTTPException(status_code=400, detail="source_id is required")
+    return source_id
+
+
+def _get_workspace_root(request: Request) -> Path:
+    """获取所有 source-scoped 租户目录所在的根目录。"""
+    workspace = getattr(request.state, "workspace", None)
+    if workspace is None:
+        raise HTTPException(
+            status_code=503,
+            detail="Tenant workspace not available",
+        )
+    return Path(workspace.workspace_dir).parent
+
+
+def _resolve_tenant_dir(
+    workspace_root: Path,
+    tenant_id: str,
+    source_id: str,
+) -> Path:
+    """把逻辑用户和 source 映射到运行时租户目录。"""
+    from ...config.context import resolve_runtime_tenant_id
+
+    runtime_tenant_id = resolve_runtime_tenant_id(tenant_id, source_id)
+    return workspace_root / (runtime_tenant_id or tenant_id)
+
+
+def _iter_agent_workspace_dirs(
+    tenant_dir: Path,
+    agent_id: Optional[str] = None,
+) -> list[tuple[str, Path]]:
+    """列出需要纳入统计的 agent 工作区目录。"""
+    workspaces_dir = tenant_dir / "workspaces"
+    if agent_id:
+        return [(agent_id, workspaces_dir / agent_id)]
+    if not workspaces_dir.exists():
+        return [(DEFAULT_REPORT_AGENT_ID, workspaces_dir / DEFAULT_REPORT_AGENT_ID)]
+    return [
+        (path.name, path)
+        for path in sorted(workspaces_dir.iterdir())
+        if path.is_dir()
+    ]
+
+
+def _parse_report_datetime(
+    value: Optional[str],
+    *,
+    is_end: bool = False,
+) -> Optional[datetime]:
+    """解析报表筛选时间，日期输入按自然日边界处理。"""
+    if not value:
+        return None
+    try:
+        if len(value) == 10:
+            parsed_date = datetime.strptime(value, "%Y-%m-%d").date()
+            dt = datetime.combine(
+                parsed_date,
+                time.max if is_end else time.min,
+            )
+        else:
+            dt = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Invalid datetime: {value}",
+        ) from exc
+    if dt.tzinfo is None:
+        return dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(timezone.utc)
+
+
+def _record_datetime(record: dict[str, Any]) -> Optional[datetime]:
+    """解析治理记录时间，异常记录不参与时间排序和趋势。"""
+    timestamp = str(record.get("timestamp") or "")
+    if not timestamp:
+        return None
+    try:
+        dt = datetime.fromisoformat(timestamp.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if dt.tzinfo is None:
+        return dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(timezone.utc)
+
+
+def _record_matches_report_filters(
+    record: dict[str, Any],
+    *,
+    start_dt: Optional[datetime],
+    end_dt: Optional[datetime],
+    status: Optional[str],
+    trigger: Optional[str],
+) -> bool:
+    """判断治理记录是否命中报表筛选条件。"""
+    if status and record.get("status") != status:
+        return False
+    if trigger and record.get("trigger") != trigger:
+        return False
+    record_dt = _record_datetime(record)
+    if start_dt is not None and (record_dt is None or record_dt < start_dt):
+        return False
+    if end_dt is not None and (record_dt is None or record_dt > end_dt):
+        return False
+    return True
+
+
+def _normalise_report_record(
+    record: dict[str, Any],
+    *,
+    agent_id: str,
+) -> dict[str, Any]:
+    """把原始 dream log 记录收敛为报表只读记录。"""
+    return {
+        "id": str(record.get("id") or ""),
+        "timestamp": str(record.get("timestamp") or ""),
+        "trigger": str(record.get("trigger") or ""),
+        "status": str(record.get("status") or ""),
+        "agent_id": agent_id,
+        "files_optimized": list(record.get("files_optimized") or []),
+        "total_size_saved": int(record.get("total_size_saved") or 0),
+        "total_files_changed": int(record.get("total_files_changed") or 0),
+        "duration_ms": int(record.get("duration_ms") or 0),
+        "model_used": str(record.get("model_used") or ""),
+        "input_tokens": int(record.get("input_tokens") or 0),
+        "output_tokens": int(record.get("output_tokens") or 0),
+        "summary": str(record.get("summary") or ""),
+        "error": record.get("error"),
+    }
+
+
+def _records_sort_value(record: dict[str, Any]) -> tuple[str, str]:
+    """为记录倒序排序提供稳定键。"""
+    return (str(record.get("timestamp") or ""), str(record.get("id") or ""))
+
+
+def _normalise_page(page: int, page_size: int) -> tuple[int, int]:
+    """限制报表分页参数，避免一次请求扫描后返回过多行。"""
+    safe_page = max(page, 1)
+    safe_page_size = min(max(page_size, 1), MAX_REPORT_PAGE_SIZE)
+    return safe_page, safe_page_size
+
+
+async def _load_source_tenants(source_id: str) -> list[dict[str, Any]]:
+    """读取当前 source 下可管理的用户清单。"""
+    from ..workspace.tenant_init_source_store import (
+        get_tenant_init_source_store,
+    )
+
+    store = get_tenant_init_source_store()
+    if store is None:
+        raise HTTPException(status_code=503, detail="Database not available")
+    rows = await store.get_by_source(source_id)
+    return list(rows)
+
+
+def _filter_source_tenants(
+    tenants: list[dict[str, Any]],
+    *,
+    bbk_id: Optional[str],
+    user_search: Optional[str],
+) -> list[dict[str, Any]]:
+    """应用机构和用户关键字筛选。"""
+    keyword = (user_search or "").strip().lower()
+    filtered = []
+    for tenant in tenants:
+        tenant_id = str(tenant.get("tenant_id") or "")
+        tenant_name = str(tenant.get("tenant_name") or "")
+        if bbk_id and tenant.get("bbk_id") != bbk_id:
+            continue
+        if (
+            keyword
+            and keyword not in tenant_id.lower()
+            and keyword not in tenant_name.lower()
+        ):
+            continue
+        filtered.append(tenant)
+    return filtered
+
+
+def _collect_tenant_report_records(
+    workspace_root: Path,
+    tenant: dict[str, Any],
+    source_id: str,
+    *,
+    agent_id: Optional[str],
+    start_dt: Optional[datetime],
+    end_dt: Optional[datetime],
+    status: Optional[str],
+    trigger: Optional[str],
+) -> list[dict[str, Any]]:
+    """读取单个用户在筛选条件下的治理记录。"""
+    tenant_id = str(tenant.get("tenant_id") or "")
+    tenant_dir = _resolve_tenant_dir(workspace_root, tenant_id, source_id)
+    report_records: list[dict[str, Any]] = []
+    for current_agent_id, workspace_dir in _iter_agent_workspace_dirs(
+        tenant_dir,
+        agent_id,
+    ):
+        data = _load_dream_logs(workspace_dir)
+        for record in data.get("records", []):
+            if not isinstance(record, dict):
+                continue
+            if not _record_matches_report_filters(
+                record,
+                start_dt=start_dt,
+                end_dt=end_dt,
+                status=status,
+                trigger=trigger,
+            ):
+                continue
+            report_records.append(
+                _normalise_report_record(record, agent_id=current_agent_id),
+            )
+    report_records.sort(key=_records_sort_value, reverse=True)
+    return report_records
+
+
+def _build_report_summary(
+    users: list[DreamLogReportUserRow],
+    records: list[dict[str, Any]],
+) -> DreamLogReportSummary:
+    """从用户行和记录构建汇总指标。"""
+    total_executions = len(records)
+    success_count = sum(1 for record in records if record["status"] == "success")
+    failed_count = sum(1 for record in records if record["status"] == "failed")
+    total_duration_ms = sum(record["duration_ms"] for record in records)
+    return DreamLogReportSummary(
+        covered_users=len(users),
+        governed_users=sum(1 for user in users if user.executions > 0),
+        ungoverned_users=sum(1 for user in users if user.executions == 0),
+        total_executions=total_executions,
+        success_count=success_count,
+        failed_count=failed_count,
+        success_rate=round(
+            success_count * 100 / total_executions,
+            2,
+        )
+        if total_executions
+        else 0,
+        total_files_changed=sum(
+            record["total_files_changed"] for record in records
+        ),
+        total_size_saved=sum(record["total_size_saved"] for record in records),
+        avg_duration_ms=total_duration_ms // total_executions
+        if total_executions
+        else 0,
+        last_execution=max(
+            (record["timestamp"] for record in records),
+            default=None,
+        ),
+    )
+
+
+def _build_report_trends(
+    records: list[dict[str, Any]],
+) -> list[DreamLogReportTrendPoint]:
+    """按日期聚合治理趋势。"""
+    buckets: dict[str, dict[str, int]] = defaultdict(
+        lambda: {
+            "executions": 0,
+            "success_count": 0,
+            "failed_count": 0,
+            "total_size_saved": 0,
+        },
+    )
+    for record in records:
+        record_dt = _record_datetime(record)
+        if record_dt is None:
+            continue
+        bucket = buckets[record_dt.date().isoformat()]
+        bucket["executions"] += 1
+        bucket["success_count"] += 1 if record["status"] == "success" else 0
+        bucket["failed_count"] += 1 if record["status"] == "failed" else 0
+        bucket["total_size_saved"] += record["total_size_saved"]
+    return [
+        DreamLogReportTrendPoint(date=date_key, **values)
+        for date_key, values in sorted(buckets.items())
+    ]
+
+
+def _build_status_distribution(
+    records: list[dict[str, Any]],
+) -> list[DreamLogReportStatusBucket]:
+    """按治理状态聚合分布。"""
+    counts: dict[str, int] = defaultdict(int)
+    for record in records:
+        counts[record["status"] or "unknown"] += 1
+    return [
+        DreamLogReportStatusBucket(status=status, count=count)
+        for status, count in sorted(counts.items())
+    ]
+
+
+def _build_bbk_distribution(
+    users: list[DreamLogReportUserRow],
+) -> list[DreamLogReportBbkBucket]:
+    """按机构聚合用户覆盖和治理成功率。"""
+    buckets: dict[str, dict[str, int]] = defaultdict(
+        lambda: {
+            "user_count": 0,
+            "governed_users": 0,
+            "executions": 0,
+            "success_count": 0,
+        },
+    )
+    for user in users:
+        bucket = buckets[user.bbk_id or "unassigned"]
+        bucket["user_count"] += 1
+        bucket["governed_users"] += 1 if user.executions else 0
+        bucket["executions"] += user.executions
+        bucket["success_count"] += round(user.executions * user.success_rate / 100)
+
+    return [
+        DreamLogReportBbkBucket(
+            bbk_id=bbk_id,
+            user_count=values["user_count"],
+            governed_users=values["governed_users"],
+            executions=values["executions"],
+            success_rate=round(
+                values["success_count"] * 100 / values["executions"],
+                2,
+            )
+            if values["executions"]
+            else 0,
+        )
+        for bbk_id, values in sorted(buckets.items())
+    ]
+
+
+def _build_user_row(
+    tenant: dict[str, Any],
+    records: list[dict[str, Any]],
+) -> DreamLogReportUserRow:
+    """构建持续治理用户明细行。"""
+    executions = len(records)
+    success_count = sum(1 for record in records if record["status"] == "success")
+    failed_count = sum(1 for record in records if record["status"] == "failed")
+    latest_error = next(
+        (record.get("error") for record in records if record.get("error")),
+        None,
+    )
+    return DreamLogReportUserRow(
+        user_id=str(tenant.get("tenant_id") or ""),
+        user_name=tenant.get("tenant_name"),
+        bbk_id=tenant.get("bbk_id"),
+        agents=sorted({record["agent_id"] for record in records}),
+        executions=executions,
+        success_rate=round(success_count * 100 / executions, 2)
+        if executions
+        else 0,
+        failed_count=failed_count,
+        total_files_changed=sum(
+            record["total_files_changed"] for record in records
+        ),
+        total_size_saved=sum(record["total_size_saved"] for record in records),
+        last_execution=max(
+            (record["timestamp"] for record in records),
+            default=None,
+        ),
+        latest_error=latest_error,
+    )
+
+
 # ------------------------------------------------------------------
 # API endpoints
 # ------------------------------------------------------------------
+
+
+@router.get("/report", response_model=DreamLogReportResponse)
+async def get_dream_logs_report(
+    request: Request,
+    start_time: Optional[str] = None,
+    end_time: Optional[str] = None,
+    bbk_id: Optional[str] = None,
+    user_search: Optional[str] = None,
+    status: Optional[str] = None,
+    trigger: Optional[str] = None,
+    agent_id: Optional[str] = None,
+    page: int = 1,
+    page_size: int = 20,
+) -> DreamLogReportResponse:
+    """统计当前 source 下所有可管理用户的持续治理情况。"""
+    _ensure_report_permission(request)
+    source_id = _get_report_source_id(request)
+    workspace_root = _get_workspace_root(request)
+    start_dt = _parse_report_datetime(start_time)
+    end_dt = _parse_report_datetime(end_time, is_end=True)
+    safe_page, safe_page_size = _normalise_page(page, page_size)
+
+    tenants = _filter_source_tenants(
+        await _load_source_tenants(source_id),
+        bbk_id=bbk_id,
+        user_search=user_search,
+    )
+    all_records: list[dict[str, Any]] = []
+    user_rows: list[DreamLogReportUserRow] = []
+    for tenant in tenants:
+        records = _collect_tenant_report_records(
+            workspace_root,
+            tenant,
+            source_id,
+            agent_id=agent_id,
+            start_dt=start_dt,
+            end_dt=end_dt,
+            status=status,
+            trigger=trigger,
+        )
+        all_records.extend(records)
+        user_rows.append(_build_user_row(tenant, records))
+
+    user_rows.sort(
+        key=lambda user: (
+            user.executions,
+            user.last_execution or "",
+            user.user_id,
+        ),
+        reverse=True,
+    )
+    start_idx = (safe_page - 1) * safe_page_size
+    end_idx = start_idx + safe_page_size
+
+    return DreamLogReportResponse(
+        summary=_build_report_summary(user_rows, all_records),
+        trends=_build_report_trends(all_records),
+        status_distribution=_build_status_distribution(all_records),
+        bbk_distribution=_build_bbk_distribution(user_rows),
+        users=user_rows[start_idx:end_idx],
+        total=len(user_rows),
+        page=safe_page,
+        page_size=safe_page_size,
+    )
+
+
+@router.get(
+    "/report/users/{user_id}/records",
+    response_model=DreamLogUserRecordsResponse,
+)
+async def get_dream_log_report_user_records(
+    request: Request,
+    user_id: str,
+    start_time: Optional[str] = None,
+    end_time: Optional[str] = None,
+    status: Optional[str] = None,
+    trigger: Optional[str] = None,
+    agent_id: Optional[str] = None,
+    page: int = 1,
+    page_size: int = 20,
+) -> DreamLogUserRecordsResponse:
+    """查询当前 source 内单个用户的持续治理记录。"""
+    _ensure_report_permission(request)
+    source_id = _get_report_source_id(request)
+    workspace_root = _get_workspace_root(request)
+    start_dt = _parse_report_datetime(start_time)
+    end_dt = _parse_report_datetime(end_time, is_end=True)
+    safe_page, safe_page_size = _normalise_page(page, page_size)
+
+    tenants = await _load_source_tenants(source_id)
+    tenant = next(
+        (
+            row
+            for row in tenants
+            if str(row.get("tenant_id") or "") == user_id
+        ),
+        None,
+    )
+    if tenant is None:
+        raise HTTPException(status_code=404, detail="User not found")
+
+    records = _collect_tenant_report_records(
+        workspace_root,
+        tenant,
+        source_id,
+        agent_id=agent_id,
+        start_dt=start_dt,
+        end_dt=end_dt,
+        status=status,
+        trigger=trigger,
+    )
+    start_idx = (safe_page - 1) * safe_page_size
+    end_idx = start_idx + safe_page_size
+    return DreamLogUserRecordsResponse(
+        records=[
+            DreamLogReportRecord(**record)
+            for record in records[start_idx:end_idx]
+        ],
+        total=len(records),
+        page=safe_page,
+        page_size=safe_page_size,
+    )
 
 
 @router.get("", response_model=DreamLogsResponse)
