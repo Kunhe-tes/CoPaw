@@ -39,6 +39,7 @@ import dayjs from "dayjs";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { dreamLogsApi } from "../../../api/modules/dreamLogs";
+import { useIframeStore } from "../../../stores/iframeStore";
 import type {
   DreamLogRecord,
   DreamLogsStats,
@@ -48,6 +49,7 @@ import StatsCards from "./components/StatsCards";
 import FileDiffModal from "./components/FileDiffModal";
 import BackupFiles from "./components/BackupFiles";
 import OrphanFiles from "./components/OrphanFiles";
+import ArchiveGovernance from "./components/ArchiveGovernance";
 import styles from "./index.module.less";
 
 const { Text } = Typography;
@@ -58,6 +60,9 @@ const POLL_TIMEOUT = 30 * 60 * 1000;
 
 export default function ContinuousIterationPage() {
   const { t } = useTranslation();
+  const isSuperManager = useIframeStore((state) => state.isSuperManager);
+  const manager = useIframeStore((state) => state.manager);
+  const canManageArchive = isSuperManager || manager;
   const [loading, setLoading] = useState(true);
   const [records, setRecords] = useState<DreamLogRecord[]>([]);
   const [stats, setStats] = useState<DreamLogsStats | null>(null);
@@ -624,6 +629,20 @@ export default function ContinuousIterationPage() {
       ),
       children: <OrphanFiles />,
     },
+    ...(canManageArchive
+      ? [
+          {
+            key: "archive-governance",
+            label: (
+              <Space>
+                <DatabaseOutlined />
+                归档治理
+              </Space>
+            ),
+            children: <ArchiveGovernance />,
+          },
+        ]
+      : []),
   ];
 
   return (

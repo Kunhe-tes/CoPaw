@@ -24,6 +24,7 @@ import {
   ReloadOutlined,
   EyeOutlined,
   FolderOutlined,
+  InboxOutlined,
 } from "@ant-design/icons";
 import dayjs from "dayjs";
 import ReactMarkdown from "react-markdown";
@@ -73,6 +74,30 @@ export default function OrphanFilesPage() {
       }
     } catch (error) {
       message.error(t("dreamLogs.orphanFiles.deleteFailed"));
+    }
+  };
+
+  const handleArchiveFile = async (filepath: string) => {
+    try {
+      const result = await dreamLogsApi.archiveOrphanFiles([filepath]);
+      if (result.success) {
+        message.success("文件已归档");
+        fetchOrphanFiles();
+      } else {
+        message.error(result.message);
+      }
+    } catch (error) {
+      message.error("归档失败");
+    }
+  };
+
+  const handleAutoArchive = async () => {
+    try {
+      const result = await dreamLogsApi.autoArchiveOrphanFiles();
+      message.success(`自动归档 ${result.files_archived.length} 个文件`);
+      fetchOrphanFiles();
+    } catch (error) {
+      message.error("自动归档失败");
     }
   };
 
@@ -150,6 +175,16 @@ export default function OrphanFilesPage() {
             onClick={() => handlePreview(record.path)}
           />
           <Popconfirm
+            title="确认归档该文件？"
+            onConfirm={() => handleArchiveFile(record.path)}
+          >
+            <Button
+              type="text"
+              size="small"
+              icon={<InboxOutlined />}
+            />
+          </Popconfirm>
+          <Popconfirm
             title={t("dreamLogs.orphanFiles.deleteConfirm")}
             onConfirm={() => handleDeleteFile(record.path)}
           >
@@ -224,12 +259,20 @@ export default function OrphanFilesPage() {
         className={styles.recordsCard}
         title={t("dreamLogs.orphanFiles.title")}
         extra={
-          <Button
-            icon={<ReloadOutlined />}
-            onClick={fetchOrphanFiles}
-          >
-            {t("common.refresh")}
-          </Button>
+          <Space>
+            <Button
+              icon={<InboxOutlined />}
+              onClick={handleAutoArchive}
+            >
+              自动归档 3 天未修改
+            </Button>
+            <Button
+              icon={<ReloadOutlined />}
+              onClick={fetchOrphanFiles}
+            >
+              {t("common.refresh")}
+            </Button>
+          </Space>
         }
       >
         <Spin spinning={loading}>

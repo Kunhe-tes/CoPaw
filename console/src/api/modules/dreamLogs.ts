@@ -16,11 +16,23 @@ import type {
   DreamLogReportParams,
   DreamLogReportResponse,
   DreamLogUserRecordsResponse,
+  ArchiveOperationResponse,
+  ArchiveItemsResponse,
+  ArchiveRestoreRequest,
+  ArchiveRestoreResponse,
+  ArchivePurgeResponse,
+  ProtectedFilesResponse,
+  ProtectedFileRemoveRequest,
+  ProtectedFileRemoveResponse,
+  ArchiveAdminAuditsResponse,
+  ArchiveReportResponse,
 } from "../types/dreamLogs";
 
-function buildReportQuery(params: DreamLogReportParams = {}): string {
+function buildReportQuery(
+  params: DreamLogReportParams | Record<string, unknown> = {},
+): string {
   const searchParams = new URLSearchParams();
-  Object.entries(params).forEach(([key, value]) => {
+  Object.entries(params as Record<string, unknown>).forEach(([key, value]) => {
     if (value !== undefined && value !== null && value !== "") {
       searchParams.set(key, String(value));
     }
@@ -139,4 +151,77 @@ export const dreamLogsApi = {
    */
   deleteOrphanFile: async (filepath: string): Promise<DeleteBackupResponse> =>
     request(`/dream-logs/orphan-files/${filepath}`, { method: "DELETE" }),
+
+  archiveOrphanFiles: async (
+    files: string[],
+    reason = "manual",
+  ): Promise<ArchiveOperationResponse> =>
+    request("/dream-logs/orphan-files/archive", {
+      method: "POST",
+      body: JSON.stringify({ files, reason }),
+    }),
+
+  autoArchiveOrphanFiles: async (): Promise<ArchiveOperationResponse> =>
+    request("/dream-logs/orphan-files/archive-auto-run", {
+      method: "POST",
+    }),
+
+  listArchiveItems: async (params: Record<string, unknown> = {}) => {
+    const query = buildReportQuery(params);
+    return request<ArchiveItemsResponse>(`/dream-logs/archive/items${query}`);
+  },
+
+  listProtectedFiles: async (params: Record<string, unknown> = {}) => {
+    const query = buildReportQuery(params);
+    return request<ProtectedFilesResponse>(
+      `/dream-logs/archive/protected-files${query}`,
+    );
+  },
+
+  removeProtectedFile: async (
+    body: ProtectedFileRemoveRequest,
+  ): Promise<ProtectedFileRemoveResponse> =>
+    request("/dream-logs/archive/protected-files", {
+      method: "DELETE",
+      body: JSON.stringify(body),
+    }),
+
+  restoreArchiveItem: async (
+    body: ArchiveRestoreRequest,
+  ): Promise<ArchiveRestoreResponse> =>
+    request("/dream-logs/archive/restore", {
+      method: "POST",
+      body: JSON.stringify(body),
+    }),
+
+  purgeArchiveItems: async (body: {
+    archive_item_ids: string[];
+    target_user_id: string;
+    target_agent_id?: string;
+    reason?: string;
+  }): Promise<ArchivePurgeResponse> =>
+    request("/dream-logs/archive/items", {
+      method: "DELETE",
+      body: JSON.stringify(body),
+    }),
+
+  purgeExpiredArchiveItems: async (body: {
+    target_user_id?: string;
+    target_agent_id?: string;
+    reason?: string;
+  } = {}): Promise<ArchivePurgeResponse> =>
+    request("/dream-logs/archive/purge-expired", {
+      method: "POST",
+      body: JSON.stringify(body),
+    }),
+
+  listArchiveAdminAudits: async (
+    params: Record<string, unknown> = {},
+  ): Promise<ArchiveAdminAuditsResponse> =>
+    request(
+      `/dream-logs/archive/admin-audits${buildReportQuery(params)}`,
+    ),
+
+  archiveReport: async (): Promise<ArchiveReportResponse> =>
+    request("/dream-logs/archive/report"),
 };

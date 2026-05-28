@@ -2641,6 +2641,10 @@ class CronManager:  # pylint: disable=too-many-public-methods
                 tenant_id=runtime_tenant_id,
                 trigger="cron",
             )
+            if workspace_dir is not None:
+                from ..routers.dream_logs import run_dream_archive_maintenance
+
+                run_dream_archive_maintenance(workspace_dir, actor="dream_cron")
         logger.debug("Dream task executed successfully")
 
     def _resolve_runtime_context(

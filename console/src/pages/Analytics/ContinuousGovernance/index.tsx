@@ -39,6 +39,7 @@ import type {
   DreamLogReportStatusBucket,
   DreamLogReportTrendPoint,
   DreamLogReportUserRow,
+  ArchiveReportResponse,
 } from "../../../api/types/dreamLogs";
 import { BBK_ID_MAP, getBbkDisplayName } from "../../../constants/bbk";
 import styles from "./index.module.less";
@@ -57,7 +58,7 @@ interface FilterDraft {
 }
 
 interface KpiConfig {
-  key: keyof DreamLogReportResponse["summary"];
+  key: string;
   label: string;
   value: string;
   accent: string;
@@ -253,6 +254,8 @@ export default function ContinuousGovernancePage() {
     ),
   );
   const [report, setReport] = useState<DreamLogReportResponse | null>(null);
+  const [archiveReport, setArchiveReport] =
+    useState<ArchiveReportResponse | null>(null);
   const [loading, setLoading] = useState(false);
   const [drawerOpen, setDrawerOpen] = useState(false);
   const [selectedUser, setSelectedUser] =
@@ -266,8 +269,12 @@ export default function ContinuousGovernancePage() {
   const fetchReport = useCallback(async (params: DreamLogReportParams) => {
     setLoading(true);
     try {
-      const data = await dreamLogsApi.report(params);
+      const [data, archiveData] = await Promise.all([
+        dreamLogsApi.report(params),
+        dreamLogsApi.archiveReport(),
+      ]);
       setReport(data);
+      setArchiveReport(archiveData);
     } catch (error) {
       console.error("Failed to fetch continuous governance report:", error);
       message.error("持续治理分析加载失败");
@@ -378,6 +385,40 @@ export default function ContinuousGovernancePage() {
       },
     ];
   }, [report]);
+
+  const archiveKpis = useMemo<KpiConfig[]>(() => {
+    const summary = archiveReport?.summary;
+    return [
+      {
+        key: "archive_files",
+        label: "归档文件",
+        value: formatNumber(summary?.archived_files ?? 0),
+        accent: "#0d9488",
+        icon: FileText,
+      },
+      {
+        key: "protected_files",
+        label: "保护文件",
+        value: formatNumber(summary?.protected_files ?? 0),
+        accent: "#0284c7",
+        icon: UserCheck,
+      },
+      {
+        key: "pending_purge_files",
+        label: "待清理归档",
+        value: formatNumber(summary?.pending_purge_files ?? 0),
+        accent: "#ea580c",
+        icon: AlertTriangle,
+      },
+      {
+        key: "purged_size_bytes",
+        label: "归档释放空间",
+        value: formatBytes(summary?.purged_size_bytes ?? 0),
+        accent: "#059669",
+        icon: HardDriveDownload,
+      },
+    ];
+  }, [archiveReport]);
 
   const userColumns: ColumnsType<DreamLogReportUserRow> = [
     {
@@ -659,7 +700,7 @@ export default function ContinuousGovernancePage() {
       </div>
 
       <div className={styles.kpiGrid}>
-        {kpis.map((item) => (
+        {[...kpis, ...archiveKpis].map((item) => (
           <KpiCard key={item.key} item={item} />
         ))}
       </div>

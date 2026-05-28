@@ -223,3 +223,143 @@ export interface GovernanceStatusResponse {
   started_at?: string;
   trigger?: "cron" | "manual";
 }
+
+export interface ArchiveItem {
+  id: string;
+  original_path: string;
+  archive_path: string;
+  size_bytes: number;
+  mtime: string;
+  archived_at: string;
+  archived_by: string;
+  archive_reason: string;
+  target_user_id?: string | null;
+  target_agent_id?: string | null;
+  expired: boolean;
+}
+
+export interface ArchiveOperationResponse {
+  success: boolean;
+  message: string;
+  files_archived: string[];
+  items: ArchiveItem[];
+}
+
+export interface ArchiveItemsResponse {
+  items: ArchiveItem[];
+  total: number;
+  page: number;
+  page_size: number;
+}
+
+export interface ArchiveRestoreRequest {
+  archive_item_id: string;
+  target_user_id: string;
+  target_agent_id?: string;
+  protect_after_restore?: boolean;
+}
+
+export interface ArchiveRestoreResponse {
+  success: boolean;
+  message: string;
+  restored_path: string;
+  protected: boolean;
+}
+
+export interface ArchivePurgeResponse {
+  success: boolean;
+  message: string;
+  files_deleted: string[];
+  files_count: number;
+  total_size_bytes: number;
+  audit_event_id: string;
+}
+
+export interface ProtectedFileInfo {
+  target_user_id: string;
+  target_agent_id: string;
+  path: string;
+  protected_at: string;
+  protected_by: string;
+  reason: string;
+  exists: boolean;
+  size_bytes?: number | null;
+  mtime?: string | null;
+}
+
+export interface ProtectedFilesResponse {
+  items: ProtectedFileInfo[];
+  total: number;
+  page: number;
+  page_size: number;
+}
+
+export interface ProtectedFileRemoveRequest {
+  target_user_id: string;
+  target_agent_id?: string;
+  path: string;
+}
+
+export interface ProtectedFileRemoveResponse {
+  success: boolean;
+  message: string;
+  removed_path: string;
+}
+
+export interface ArchiveAdminAuditRecord {
+  event_id: string;
+  timestamp: string;
+  operation: string;
+  status: string;
+  actor_user_id: string;
+  actor_role: string;
+  source_id: string;
+  source_name?: string | null;
+  target_user_id: string;
+  target_agent_id: string;
+  scope: string;
+  files_count: number;
+  total_size_bytes: number;
+  reason: string;
+  error?: string | null;
+}
+
+export interface ArchiveAdminAuditSummary {
+  total_operations: number;
+  success_operations: number;
+  failed_operations: number;
+  partial_success_operations: number;
+  manual_operations: number;
+  auto_operations: number;
+  total_files_cleared: number;
+  total_size_cleared_bytes: number;
+  last_operation_at?: string | null;
+}
+
+export interface ArchiveAdminAuditsResponse {
+  summary: ArchiveAdminAuditSummary;
+  items: ArchiveAdminAuditRecord[];
+  total: number;
+  page: number;
+  page_size: number;
+}
+
+export interface ArchiveReportSummary {
+  archived_files: number;
+  archived_size_bytes: number;
+  pending_purge_files: number;
+  pending_purge_size_bytes: number;
+  protected_files: number;
+  protected_existing_files: number;
+  protected_missing_files: number;
+  purge_operations: number;
+  purge_success_operations: number;
+  purge_failed_operations: number;
+  purged_files: number;
+  purged_size_bytes: number;
+  last_purge_at?: string | null;
+}
+
+export interface ArchiveReportResponse {
+  summary: ArchiveReportSummary;
+}

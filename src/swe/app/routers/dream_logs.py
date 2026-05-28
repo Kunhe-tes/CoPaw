@@ -10,8 +10,9 @@ import logging
 import shutil
 import base64
 import threading
+import uuid
 from collections import defaultdict
-from datetime import datetime, time, timezone
+from datetime import datetime, time, timezone, timedelta
 from pathlib import Path
 from typing import Any, Optional
 
@@ -318,6 +319,200 @@ class OrphanFileContentResponse(BaseModel):
     error_message: Optional[str] = None
 
 
+class ArchiveFileRequest(BaseModel):
+    """归档当前工作区孤立文件的请求。"""
+
+    files: list[str]
+    reason: str = "manual"
+
+
+class ArchiveItem(BaseModel):
+    """归档区中可恢复文件的元数据。"""
+
+    id: str
+    original_path: str
+    archive_path: str
+    size_bytes: int
+    mtime: str
+    archived_at: str
+    archived_by: str
+    archive_reason: str
+    target_user_id: Optional[str] = None
+    target_agent_id: Optional[str] = None
+    expired: bool = False
+
+
+class ArchiveOperationResponse(BaseModel):
+    """归档操作响应。"""
+
+    success: bool
+    message: str
+    files_archived: list[str]
+    items: list[ArchiveItem]
+
+
+class ArchiveItemsResponse(BaseModel):
+    """管理员归档列表响应。"""
+
+    items: list[ArchiveItem]
+    total: int
+    page: int
+    page_size: int
+
+
+class ArchiveRestoreRequest(BaseModel):
+    """管理员恢复归档文件的请求。"""
+
+    archive_item_id: str
+    target_user_id: str
+    target_agent_id: str = "default"
+    protect_after_restore: bool = False
+
+
+class ArchiveRestoreResponse(BaseModel):
+    """管理员恢复归档文件的响应。"""
+
+    success: bool
+    message: str
+    restored_path: str
+    protected: bool = False
+
+
+class ArchivePurgeRequest(BaseModel):
+    """管理员清理归档文件的请求。"""
+
+    archive_item_ids: list[str]
+    target_user_id: str
+    target_agent_id: str = "default"
+    reason: str = "manual_clear"
+
+
+class ArchivePurgeExpiredRequest(BaseModel):
+    """管理员清理超过保留期归档文件的请求。"""
+
+    target_user_id: Optional[str] = None
+    target_agent_id: Optional[str] = None
+    reason: str = "expired_10_days"
+
+
+class ArchivePurgeResponse(BaseModel):
+    """管理员清理归档文件的响应。"""
+
+    success: bool
+    message: str
+    files_deleted: list[str]
+    files_count: int
+    total_size_bytes: int
+    audit_event_id: str
+
+
+class ProtectedFileInfo(BaseModel):
+    """管理员保护文件查询行。"""
+
+    target_user_id: str
+    target_agent_id: str
+    path: str
+    protected_at: str
+    protected_by: str
+    reason: str
+    exists: bool
+    size_bytes: Optional[int] = None
+    mtime: Optional[str] = None
+
+
+class ProtectedFilesResponse(BaseModel):
+    """管理员保护文件查询响应。"""
+
+    items: list[ProtectedFileInfo]
+    total: int
+    page: int
+    page_size: int
+
+
+class ProtectedFileRemoveRequest(BaseModel):
+    """管理员取消保护文件的请求。"""
+
+    target_user_id: str
+    target_agent_id: str = "default"
+    path: str
+
+
+class ProtectedFileRemoveResponse(BaseModel):
+    """管理员取消保护文件的响应。"""
+
+    success: bool
+    message: str
+    removed_path: str
+
+
+class ArchiveAdminAuditRecord(BaseModel):
+    """管理员归档清理审计记录。"""
+
+    event_id: str
+    timestamp: str
+    operation: str
+    status: str
+    actor_user_id: str
+    actor_role: str
+    source_id: str
+    source_name: Optional[str] = None
+    target_user_id: str
+    target_agent_id: str
+    scope: str
+    files_count: int
+    total_size_bytes: int
+    reason: str
+    error: Optional[str] = None
+
+
+class ArchiveAdminAuditSummary(BaseModel):
+    """管理员归档清理审计汇总。"""
+
+    total_operations: int
+    success_operations: int
+    failed_operations: int
+    partial_success_operations: int
+    manual_operations: int
+    auto_operations: int
+    total_files_cleared: int
+    total_size_cleared_bytes: int
+    last_operation_at: Optional[str] = None
+
+
+class ArchiveAdminAuditsResponse(BaseModel):
+    """管理员归档清理审计分页响应。"""
+
+    summary: ArchiveAdminAuditSummary
+    items: list[ArchiveAdminAuditRecord]
+    total: int
+    page: int
+    page_size: int
+
+
+class ArchiveReportSummary(BaseModel):
+    """当前渠道归档治理统计。"""
+
+    archived_files: int
+    archived_size_bytes: int
+    pending_purge_files: int
+    pending_purge_size_bytes: int
+    protected_files: int
+    protected_existing_files: int
+    protected_missing_files: int
+    purge_operations: int
+    purge_success_operations: int
+    purge_failed_operations: int
+    purged_files: int
+    purged_size_bytes: int
+    last_purge_at: Optional[str] = None
+
+
+class ArchiveReportResponse(BaseModel):
+    """持续治理分析页归档统计响应。"""
+
+    summary: ArchiveReportSummary
+
+
 # Keep list - files and directories that should NOT be listed as orphan
 KEEP_FILES = {
     "MEMORY.md",
@@ -340,6 +535,7 @@ KEEP_DIRS = {
     "sessions",
     "backup",
     "skills",
+    "governance",
 }
 
 
@@ -352,6 +548,256 @@ BACKUP_DIR = "backup"
 
 # Image file extensions for preview
 IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".gif", ".webp", ".svg", ".bmp"}
+ARCHIVE_DIR = "governance/archive"
+ARCHIVE_FILES_DIR = "governance/archive/files"
+ARCHIVE_INDEX_FILE = "governance/archive/index.json"
+PROTECTED_PATHS_FILE = "governance/archive/protected_paths.json"
+ARCHIVE_ADMIN_AUDIT_FILE = "governance/archive_admin_audit.jsonl"
+AUTO_ARCHIVE_DAYS = 3
+ARCHIVE_PURGE_DAYS = 10
+
+
+def _utc_now() -> datetime:
+    """返回统一的 UTC 当前时间，便于归档判断和审计记录。"""
+    return datetime.now(timezone.utc)
+
+
+def _isoformat(dt: datetime) -> str:
+    """把时间统一输出为带 Z 的 UTC ISO 字符串。"""
+    return dt.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+def _file_mtime_iso(path: Path) -> str:
+    """读取文件最后修改时间并转换成 UTC ISO 字符串。"""
+    return _isoformat(datetime.fromtimestamp(path.stat().st_mtime, timezone.utc))
+
+
+def _atomic_write_json(path: Path, data: dict[str, Any]) -> None:
+    """原子写入 JSON，避免并发或异常导致索引文件半写入。"""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path = path.with_suffix(path.suffix + ".tmp")
+    tmp_path.write_text(
+        json.dumps(data, ensure_ascii=False, indent=2, sort_keys=True),
+        encoding="utf-8",
+    )
+    tmp_path.replace(path)
+
+
+def _load_json_file(path: Path, default: dict[str, Any]) -> dict[str, Any]:
+    """读取 JSON 文件，文件缺失或损坏时返回默认结构。"""
+    if not path.exists():
+        return default
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+        return data if isinstance(data, dict) else default
+    except Exception as exc:
+        logger.warning("Failed to load json file %s: %s", path, exc)
+        return default
+
+
+def _archive_index_path(workspace_dir: Path) -> Path:
+    """返回当前工作区归档索引路径。"""
+    return workspace_dir / ARCHIVE_INDEX_FILE
+
+
+def _protected_paths_path(workspace_dir: Path) -> Path:
+    """返回当前工作区保护名单路径。"""
+    return workspace_dir / PROTECTED_PATHS_FILE
+
+
+def _load_archive_index(workspace_dir: Path) -> dict[str, Any]:
+    """读取归档索引，保证返回结构包含 items。"""
+    data = _load_json_file(_archive_index_path(workspace_dir), {"version": 1, "items": []})
+    items = data.get("items")
+    if not isinstance(items, list):
+        data["items"] = []
+    data["version"] = 1
+    return data
+
+
+def _save_archive_index(workspace_dir: Path, data: dict[str, Any]) -> None:
+    """保存归档索引。"""
+    data["version"] = 1
+    if not isinstance(data.get("items"), list):
+        data["items"] = []
+    _atomic_write_json(_archive_index_path(workspace_dir), data)
+
+
+def _load_protected_paths(workspace_dir: Path) -> dict[str, Any]:
+    """读取保护名单，保证返回结构包含 paths。"""
+    data = _load_json_file(
+        _protected_paths_path(workspace_dir),
+        {"version": 1, "paths": []},
+    )
+    paths = data.get("paths")
+    if not isinstance(paths, list):
+        data["paths"] = []
+    data["version"] = 1
+    return data
+
+
+def _save_protected_paths(workspace_dir: Path, data: dict[str, Any]) -> None:
+    """保存保护名单。"""
+    data["version"] = 1
+    if not isinstance(data.get("paths"), list):
+        data["paths"] = []
+    _atomic_write_json(_protected_paths_path(workspace_dir), data)
+
+
+def _normalise_workspace_relative_path(filepath: str) -> str:
+    """归一化工作区相对路径，并拒绝绝对路径和穿越路径。"""
+    raw_path = Path(filepath)
+    if raw_path.is_absolute():
+        raise HTTPException(status_code=403, detail="Access denied")
+    parts = [part for part in raw_path.parts if part not in ("", ".")]
+    if not parts or any(part == ".." for part in parts):
+        raise HTTPException(status_code=403, detail="Access denied")
+    if any(part.startswith(".") for part in parts):
+        raise HTTPException(status_code=403, detail="Access denied")
+    return "/".join(parts)
+
+
+def _is_root_keep_file(relative_path: str) -> bool:
+    """判断相对路径是否命中根目录保留文件。"""
+    parts = relative_path.split("/")
+    return len(parts) == 1 and parts[0] in KEEP_FILES
+
+
+def _is_keep_dir_path(relative_path: str) -> bool:
+    """判断相对路径是否位于根目录保留目录下。"""
+    first = relative_path.split("/", 1)[0]
+    return first in KEEP_DIRS
+
+
+def _protected_path_set(workspace_dir: Path) -> set[str]:
+    """返回当前工作区受保护相对路径集合。"""
+    data = _load_protected_paths(workspace_dir)
+    protected: set[str] = set()
+    for item in data.get("paths", []):
+        if isinstance(item, dict) and item.get("path"):
+            try:
+                protected.add(_normalise_workspace_relative_path(str(item["path"])))
+            except HTTPException:
+                continue
+    return protected
+
+
+def _is_protected_path(workspace_dir: Path, relative_path: str) -> bool:
+    """判断文件是否在恢复保护名单中。"""
+    return relative_path in _protected_path_set(workspace_dir)
+
+
+def _resolve_workspace_file(
+    workspace_dir: Path,
+    filepath: str,
+    *,
+    allow_protected: bool = False,
+) -> tuple[str, Path]:
+    """解析工作区文件路径，并执行治理保留路径保护。"""
+    relative_path = _normalise_workspace_relative_path(filepath)
+    if _is_root_keep_file(relative_path) or _is_keep_dir_path(relative_path):
+        raise HTTPException(status_code=403, detail="Protected path")
+    if not allow_protected and _is_protected_path(workspace_dir, relative_path):
+        raise HTTPException(status_code=409, detail="File is protected")
+    file_path = workspace_dir / Path(*relative_path.split("/"))
+    try:
+        file_path.resolve().relative_to(workspace_dir.resolve())
+    except ValueError:
+        raise HTTPException(status_code=403, detail="Access denied")
+    return relative_path, file_path
+
+
+def _archive_item_expired(item: dict[str, Any], now: Optional[datetime] = None) -> bool:
+    """判断归档项是否超过 10 天清理期限。"""
+    archived_at = str(item.get("archived_at") or "")
+    if not archived_at:
+        return False
+    try:
+        archived_dt = datetime.fromisoformat(archived_at.replace("Z", "+00:00"))
+    except ValueError:
+        return False
+    if archived_dt.tzinfo is None:
+        archived_dt = archived_dt.replace(tzinfo=timezone.utc)
+    return (now or _utc_now()) - archived_dt.astimezone(timezone.utc) >= timedelta(
+        days=ARCHIVE_PURGE_DAYS,
+    )
+
+
+def _archive_item_model(
+    item: dict[str, Any],
+    *,
+    target_user_id: Optional[str] = None,
+    target_agent_id: Optional[str] = None,
+) -> ArchiveItem:
+    """把索引记录转换成 API 响应模型。"""
+    return ArchiveItem(
+        id=str(item.get("id") or ""),
+        original_path=str(item.get("original_path") or ""),
+        archive_path=str(item.get("archive_path") or ""),
+        size_bytes=int(item.get("size_bytes") or 0),
+        mtime=str(item.get("mtime") or ""),
+        archived_at=str(item.get("archived_at") or ""),
+        archived_by=str(item.get("archived_by") or ""),
+        archive_reason=str(item.get("archive_reason") or ""),
+        target_user_id=target_user_id,
+        target_agent_id=target_agent_id,
+        expired=_archive_item_expired(item),
+    )
+
+
+def _request_actor(request: Request) -> tuple[str, str]:
+    """读取当前请求操作者和角色，用于管理员审计。"""
+    actor = (
+        getattr(request.state, "user", None)
+        or request.headers.get("X-User-Id")
+        or _get_tenant_id(request)
+        or "unknown"
+    )
+    role = request.headers.get("X-User-Role", "").strip().lower() or "user"
+    return str(actor), role
+
+
+def _target_workspace_dir(
+    workspace_root: Path,
+    target_user_id: str,
+    source_id: str,
+    target_agent_id: str,
+) -> Path:
+    """根据逻辑用户、渠道和 Agent 定位目标工作区。"""
+    return (
+        _resolve_tenant_dir(workspace_root, target_user_id, source_id)
+        / "workspaces"
+        / target_agent_id
+    )
+
+
+def _append_archive_admin_audit(
+    admin_workspace_dir: Path,
+    record: dict[str, Any],
+) -> None:
+    """把管理员归档清理审计追加写入操作者自己的工作区。"""
+    audit_path = admin_workspace_dir / ARCHIVE_ADMIN_AUDIT_FILE
+    audit_path.parent.mkdir(parents=True, exist_ok=True)
+    with open(audit_path, "a", encoding="utf-8") as fh:
+        fh.write(json.dumps(record, ensure_ascii=False, sort_keys=True))
+        fh.write("\n")
+
+
+def _read_archive_admin_audit(path: Path) -> list[dict[str, Any]]:
+    """读取单个管理员清理审计文件，跳过损坏行。"""
+    if not path.exists():
+        return []
+    records: list[dict[str, Any]] = []
+    for line in path.read_text(encoding="utf-8").splitlines():
+        if not line.strip():
+            continue
+        try:
+            record = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(record, dict):
+            records.append(record)
+    return records
 
 
 def _get_file_type(filepath: Path) -> str:
@@ -417,6 +863,25 @@ def _get_tenant_id(request: Request) -> str:
         if tenant_id:
             return tenant_id
     return request.headers.get("X-Tenant-Id", "default")
+
+
+def _get_logical_tenant_id(request: Request) -> str:
+    """获取当前请求的原始租户标识，避免把编码后的 scope 展示给管理员。"""
+    request_state = getattr(request, "state", None)
+    source_id = _get_report_source_id(request)
+    runtime_tenant_id = None
+    if request_state is not None:
+        runtime_tenant_id = getattr(request_state, "tenant_id", None)
+        scope_id = getattr(request_state, "scope_id", None)
+        if scope_id and not runtime_tenant_id:
+            runtime_tenant_id = scope_id
+    runtime_tenant_id = runtime_tenant_id or request.headers.get("X-Tenant-Id")
+    if not runtime_tenant_id:
+        return "default"
+    from ...config.context import resolve_runtime_identity
+
+    tenant_id, _, _ = resolve_runtime_identity(runtime_tenant_id, source_id)
+    return tenant_id or str(runtime_tenant_id)
 
 
 def _parse_backup_filename(filename: str) -> str:
@@ -1296,6 +1761,16 @@ async def trigger_dream_optimization(request: Request) -> TriggerResponse:
                     tenant_id=tenant_id,
                     trigger="manual",
                 )
+                maintenance_workspace_value = getattr(runner, "workspace_dir", None)
+                if maintenance_workspace_value:
+                    run_dream_archive_maintenance(
+                        Path(maintenance_workspace_value),
+                        actor=str(
+                            request.headers.get("X-User-Id")
+                            or tenant_id
+                            or "dream",
+                        ),
+                    )
             finally:
                 _clear_running()
 
@@ -1544,6 +2019,9 @@ def _scan_orphan_files(workspace_dir: Path) -> list[OrphanFileInfo]:
                     try:
                         stat = item.stat()
                         relative_path = str(item.relative_to(relative_base))
+                        relative_path = relative_path.replace("\\", "/")
+                        if relative_path in _protected_path_set(workspace_dir):
+                            continue
                         orphan_files.append(
                             OrphanFileInfo(
                                 filename=item.name,
@@ -1590,6 +2068,162 @@ async def list_orphan_files(request: Request) -> OrphanFilesResponse:
     )
 
 
+def _archive_workspace_files(
+    workspace_dir: Path,
+    filepaths: list[str],
+    *,
+    actor: str,
+    reason: str,
+) -> list[ArchiveItem]:
+    """把工作区文件移动到归档区并写入归档索引。"""
+    index = _load_archive_index(workspace_dir)
+    items = list(index.get("items") or [])
+    archived_items: list[ArchiveItem] = []
+    now = _isoformat(_utc_now())
+    for filepath in filepaths:
+        relative_path, file_path = _resolve_workspace_file(workspace_dir, filepath)
+        if not file_path.exists() or not file_path.is_file():
+            raise HTTPException(status_code=404, detail="File not found")
+
+        stat = file_path.stat()
+        item_id = uuid.uuid4().hex
+        archive_relative_path = f"{ARCHIVE_FILES_DIR}/{item_id}"
+        archive_file = workspace_dir / archive_relative_path
+        archive_file.parent.mkdir(parents=True, exist_ok=True)
+        shutil.move(str(file_path), str(archive_file))
+        item = {
+            "id": item_id,
+            "original_path": relative_path,
+            "archive_path": archive_relative_path,
+            "size_bytes": stat.st_size,
+            "mtime": _isoformat(
+                datetime.fromtimestamp(stat.st_mtime, timezone.utc),
+            ),
+            "archived_at": now,
+            "archived_by": actor,
+            "archive_reason": reason,
+        }
+        items.append(item)
+        archived_items.append(_archive_item_model(item))
+
+    index["items"] = items
+    _save_archive_index(workspace_dir, index)
+    return archived_items
+
+
+def _old_orphan_file_candidates(workspace_dir: Path) -> list[str]:
+    """找出超过自动归档阈值且未受保护的孤立文件。"""
+    cutoff = _utc_now() - timedelta(days=AUTO_ARCHIVE_DAYS)
+    candidates: list[str] = []
+    for orphan_file in _scan_orphan_files(workspace_dir):
+        file_path = workspace_dir / Path(*orphan_file.path.split("/"))
+        try:
+            mtime = datetime.fromtimestamp(
+                file_path.stat().st_mtime,
+                timezone.utc,
+            )
+        except OSError:
+            continue
+        if mtime <= cutoff:
+            candidates.append(orphan_file.path)
+    return candidates
+
+
+def _expired_archive_item_ids(workspace_dir: Path) -> set[str]:
+    """找出超过归档保留期的归档条目。"""
+    index = _load_archive_index(workspace_dir)
+    return {
+        str(item.get("id") or "")
+        for item in index.get("items", [])
+        if isinstance(item, dict)
+        and item.get("id")
+        and _archive_item_expired(item)
+    }
+
+
+def run_dream_archive_maintenance(
+    workspace_dir: Path,
+    *,
+    actor: str = "dream",
+) -> dict[str, Any]:
+    """在 dream 完成后执行当前工作区的归档维护。"""
+    archived_items = _archive_workspace_files(
+        workspace_dir,
+        _old_orphan_file_candidates(workspace_dir),
+        actor=actor,
+        reason="dream_auto_mtime_3_days",
+    )
+    expired_ids = _expired_archive_item_ids(workspace_dir)
+    deleted_paths: list[str] = []
+    deleted_size = 0
+    if expired_ids:
+        deleted_paths, deleted_size = _purge_archive_items(
+            workspace_dir,
+            expired_ids,
+        )
+    logger.info(
+        "Dream archive maintenance completed: archived=%d purged=%d",
+        len(archived_items),
+        len(deleted_paths),
+    )
+    return {
+        "files_archived": [item.original_path for item in archived_items],
+        "files_purged": deleted_paths,
+        "purged_size_bytes": deleted_size,
+    }
+
+
+@router.post(
+    "/orphan-files/archive",
+    response_model=ArchiveOperationResponse,
+)
+async def archive_orphan_files(
+    request: Request,
+    body: ArchiveFileRequest,
+) -> ArchiveOperationResponse:
+    """手动归档当前工作区的孤立文件。"""
+    workspace_dir = _get_workspace_dir(request)
+    actor, _ = _request_actor(request)
+    if not body.files:
+        raise HTTPException(status_code=400, detail="No files provided")
+    items = _archive_workspace_files(
+        workspace_dir,
+        body.files,
+        actor=actor,
+        reason=body.reason or "manual",
+    )
+    return ArchiveOperationResponse(
+        success=True,
+        message="Archived files",
+        files_archived=[item.original_path for item in items],
+        items=items,
+    )
+
+
+@router.post(
+    "/orphan-files/archive-auto-run",
+    response_model=ArchiveOperationResponse,
+)
+async def archive_old_orphan_files(request: Request) -> ArchiveOperationResponse:
+    """自动归档超过 3 天未修改的孤立文件。"""
+    workspace_dir = _get_workspace_dir(request)
+    candidates = _old_orphan_file_candidates(workspace_dir)
+
+    actor, _ = _request_actor(request)
+    items = _archive_workspace_files(
+        workspace_dir,
+        candidates,
+        actor=actor,
+        reason="auto_mtime_3_days",
+    )
+    return ArchiveOperationResponse(
+        success=True,
+        message="Auto archived files",
+        files_archived=[item.original_path for item in items],
+        items=items,
+    )
+
+
 @router.get(
     "/orphan-files/{filepath:path}/content",
     response_model=OrphanFileContentResponse,
@@ -1600,7 +2234,7 @@ async def get_orphan_file_content(
 ) -> OrphanFileContentResponse:
     """Get content of an orphan file for preview."""
     workspace_dir = _get_workspace_dir(request)
-    file_path = workspace_dir / filepath
+    _, file_path = _resolve_workspace_file(workspace_dir, filepath)
 
     if not file_path.exists():
         raise HTTPException(status_code=404, detail="File not found")
@@ -1678,7 +2312,7 @@ async def delete_orphan_file(
 ) -> DeleteBackupResponse:
     """Delete an orphan file."""
     workspace_dir = _get_workspace_dir(request)
-    file_path = workspace_dir / filepath
+    _, file_path = _resolve_workspace_file(workspace_dir, filepath)
 
     if not file_path.exists():
         raise HTTPException(status_code=404, detail="File not found")
@@ -1718,3 +2352,573 @@ async def delete_orphan_file(
             message=f"Failed to delete file: {str(e)}",
             files_deleted=[],
         )
+
+
+async def _source_archive_workspaces(
+    request: Request,
+    *,
+    agent_id: Optional[str] = None,
+) -> list[tuple[str, str, Path]]:
+    """列出当前渠道下可管理用户的 Agent 工作区。"""
+    source_id = _get_report_source_id(request)
+    workspace_root = _get_workspace_root(request)
+    try:
+        tenants = await _load_source_tenants(source_id)
+    except HTTPException as exc:
+        if exc.status_code != 503:
+            raise
+        tenants = [{"tenant_id": _get_logical_tenant_id(request)}]
+    workspaces: list[tuple[str, str, Path]] = []
+    for tenant in tenants:
+        tenant_id = str(tenant.get("tenant_id") or "")
+        if not tenant_id:
+            continue
+        tenant_dir = _resolve_tenant_dir(workspace_root, tenant_id, source_id)
+        for current_agent_id, workspace_dir in _iter_agent_workspace_dirs(
+            tenant_dir,
+            agent_id=agent_id,
+        ):
+            workspaces.append((tenant_id, current_agent_id, workspace_dir))
+    return workspaces
+
+
+async def _ensure_target_user_in_current_source(
+    request: Request,
+    target_user_id: str,
+) -> None:
+    """确认目标用户属于当前渠道可管理范围。"""
+    source_id = _get_report_source_id(request)
+    try:
+        tenants = await _load_source_tenants(source_id)
+    except HTTPException as exc:
+        if exc.status_code != 503:
+            raise
+        if target_user_id == _get_logical_tenant_id(request):
+            return
+        raise
+    allowed_user_ids = {str(tenant.get("tenant_id") or "") for tenant in tenants}
+    if target_user_id not in allowed_user_ids:
+        raise HTTPException(status_code=403, detail="Target user out of scope")
+
+
+def _find_archive_item(
+    workspace_dir: Path,
+    archive_item_id: str,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """在归档索引中查找指定归档项。"""
+    index = _load_archive_index(workspace_dir)
+    for item in index.get("items", []):
+        if str(item.get("id") or "") == archive_item_id:
+            return index, item
+    raise HTTPException(status_code=404, detail="Archive item not found")
+
+
+def _remove_archive_items_from_index(
+    workspace_dir: Path,
+    ids_to_remove: set[str],
+) -> None:
+    """从归档索引移除指定归档项。"""
+    index = _load_archive_index(workspace_dir)
+    index["items"] = [
+        item
+        for item in index.get("items", [])
+        if str(item.get("id") or "") not in ids_to_remove
+    ]
+    _save_archive_index(workspace_dir, index)
+
+
+def _add_protected_path(
+    workspace_dir: Path,
+    relative_path: str,
+    *,
+    actor: str,
+    reason: str,
+) -> None:
+    """把恢复后的文件路径加入保护名单。"""
+    data = _load_protected_paths(workspace_dir)
+    paths = list(data.get("paths") or [])
+    now = _isoformat(_utc_now())
+    normalised_path = _normalise_workspace_relative_path(relative_path)
+    next_paths = [
+        item
+        for item in paths
+        if not (
+            isinstance(item, dict)
+            and _normalise_workspace_relative_path(str(item.get("path") or ""))
+            == normalised_path
+        )
+    ]
+    next_paths.append(
+        {
+            "path": normalised_path,
+            "protected_at": now,
+            "protected_by": actor,
+            "reason": reason,
+        },
+    )
+    data["paths"] = next_paths
+    _save_protected_paths(workspace_dir, data)
+
+
+def _remove_protected_path(workspace_dir: Path, relative_path: str) -> bool:
+    """从保护名单中移除指定工作区相对路径。"""
+    data = _load_protected_paths(workspace_dir)
+    normalised_path = _normalise_workspace_relative_path(relative_path)
+    paths = list(data.get("paths") or [])
+    next_paths = [
+        item
+        for item in paths
+        if not (
+            isinstance(item, dict)
+            and _normalise_workspace_relative_path(str(item.get("path") or ""))
+            == normalised_path
+        )
+    ]
+    if len(next_paths) == len(paths):
+        return False
+    data["paths"] = next_paths
+    _save_protected_paths(workspace_dir, data)
+    return True
+
+
+@router.get("/archive/items", response_model=ArchiveItemsResponse)
+async def list_archive_items(
+    request: Request,
+    target_user_id: Optional[str] = None,
+    target_agent_id: Optional[str] = None,
+    expired: Optional[bool] = None,
+    page: int = 1,
+    page_size: int = 20,
+) -> ArchiveItemsResponse:
+    """管理员查询当前渠道下的归档文件。"""
+    _ensure_report_permission(request)
+    safe_page, safe_page_size = _normalise_page(page, page_size)
+    items: list[ArchiveItem] = []
+    for tenant_id, agent_id, workspace_dir in await _source_archive_workspaces(
+        request,
+        agent_id=target_agent_id,
+    ):
+        if target_user_id and tenant_id != target_user_id:
+            continue
+        for item in _load_archive_index(workspace_dir).get("items", []):
+            model = _archive_item_model(
+                item,
+                target_user_id=tenant_id,
+                target_agent_id=agent_id,
+            )
+            if expired is not None and model.expired != expired:
+                continue
+            items.append(model)
+    items.sort(key=lambda item: item.archived_at, reverse=True)
+    start = (safe_page - 1) * safe_page_size
+    end = start + safe_page_size
+    return ArchiveItemsResponse(
+        items=items[start:end],
+        total=len(items),
+        page=safe_page,
+        page_size=safe_page_size,
+    )
+
+
+@router.get("/archive/protected-files", response_model=ProtectedFilesResponse)
+async def list_protected_files(
+    request: Request,
+    target_user_id: Optional[str] = None,
+    target_agent_id: Optional[str] = None,
+    page: int = 1,
+    page_size: int = 20,
+) -> ProtectedFilesResponse:
+    """管理员查询当前渠道下的保护文件。"""
+    _ensure_report_permission(request)
+    safe_page, safe_page_size = _normalise_page(page, page_size)
+    rows: list[ProtectedFileInfo] = []
+    for tenant_id, agent_id, workspace_dir in await _source_archive_workspaces(
+        request,
+        agent_id=target_agent_id,
+    ):
+        if target_user_id and tenant_id != target_user_id:
+            continue
+        protected = _load_protected_paths(workspace_dir)
+        for item in protected.get("paths", []):
+            if not isinstance(item, dict) or not item.get("path"):
+                continue
+            try:
+                relative_path = _normalise_workspace_relative_path(
+                    str(item["path"]),
+                )
+            except HTTPException:
+                continue
+            file_path = workspace_dir / Path(*relative_path.split("/"))
+            exists = file_path.exists()
+            stat = file_path.stat() if exists else None
+            rows.append(
+                ProtectedFileInfo(
+                    target_user_id=tenant_id,
+                    target_agent_id=agent_id,
+                    path=relative_path,
+                    protected_at=str(item.get("protected_at") or ""),
+                    protected_by=str(item.get("protected_by") or ""),
+                    reason=str(item.get("reason") or ""),
+                    exists=exists,
+                    size_bytes=stat.st_size if stat else None,
+                    mtime=_file_mtime_iso(file_path) if stat else None,
+                ),
+            )
+    rows.sort(key=lambda item: item.protected_at, reverse=True)
+    start = (safe_page - 1) * safe_page_size
+    end = start + safe_page_size
+    return ProtectedFilesResponse(
+        items=rows[start:end],
+        total=len(rows),
+        page=safe_page,
+        page_size=safe_page_size,
+    )
+
+
+@router.delete(
+    "/archive/protected-files",
+    response_model=ProtectedFileRemoveResponse,
+)
+async def remove_protected_file(
+    request: Request,
+    body: ProtectedFileRemoveRequest,
+) -> ProtectedFileRemoveResponse:
+    """管理员取消指定路径的保护，后续扫描和归档会重新纳入该文件。"""
+    _ensure_report_permission(request)
+    await _ensure_target_user_in_current_source(request, body.target_user_id)
+    relative_path = _normalise_workspace_relative_path(body.path)
+    workspace_dir = _target_workspace_dir(
+        _get_workspace_root(request),
+        body.target_user_id,
+        _get_report_source_id(request),
+        body.target_agent_id,
+    )
+    removed = _remove_protected_path(workspace_dir, relative_path)
+    if not removed:
+        raise HTTPException(status_code=404, detail="Protected file not found")
+    return ProtectedFileRemoveResponse(
+        success=True,
+        message="Protected file removed",
+        removed_path=relative_path,
+    )
+
+
+@router.post("/archive/restore", response_model=ArchiveRestoreResponse)
+async def restore_archive_item(
+    request: Request,
+    body: ArchiveRestoreRequest,
+) -> ArchiveRestoreResponse:
+    """管理员恢复归档文件，可选择恢复后加入保护名单。"""
+    _ensure_report_permission(request)
+    await _ensure_target_user_in_current_source(request, body.target_user_id)
+    source_id = _get_report_source_id(request)
+    workspace_dir = _target_workspace_dir(
+        _get_workspace_root(request),
+        body.target_user_id,
+        source_id,
+        body.target_agent_id,
+    )
+    index, item = _find_archive_item(workspace_dir, body.archive_item_id)
+    original_path = _normalise_workspace_relative_path(
+        str(item.get("original_path") or ""),
+    )
+    archive_path = _normalise_workspace_relative_path(
+        str(item.get("archive_path") or ""),
+    )
+    archive_file = workspace_dir / Path(*archive_path.split("/"))
+    restore_path = workspace_dir / Path(*original_path.split("/"))
+    if not archive_file.exists():
+        raise HTTPException(status_code=404, detail="Archived file not found")
+    if restore_path.exists():
+        raise HTTPException(status_code=409, detail="Restore target exists")
+    restore_path.parent.mkdir(parents=True, exist_ok=True)
+    shutil.move(str(archive_file), str(restore_path))
+    index["items"] = [
+        row
+        for row in index.get("items", [])
+        if str(row.get("id") or "") != body.archive_item_id
+    ]
+    _save_archive_index(workspace_dir, index)
+
+    actor, _ = _request_actor(request)
+    if body.protect_after_restore:
+        _add_protected_path(
+            workspace_dir,
+            original_path,
+            actor=actor,
+            reason="restored_from_archive",
+        )
+    return ArchiveRestoreResponse(
+        success=True,
+        message="Restored archive item",
+        restored_path=original_path,
+        protected=body.protect_after_restore,
+    )
+
+
+def _purge_archive_items(
+    workspace_dir: Path,
+    archive_item_ids: set[str],
+) -> tuple[list[str], int]:
+    """删除归档文件并返回原路径列表和释放大小。"""
+    index = _load_archive_index(workspace_dir)
+    deleted_paths: list[str] = []
+    total_size = 0
+    found_ids: set[str] = set()
+    for item in index.get("items", []):
+        item_id = str(item.get("id") or "")
+        if item_id not in archive_item_ids:
+            continue
+        found_ids.add(item_id)
+        archive_path = _normalise_workspace_relative_path(
+            str(item.get("archive_path") or ""),
+        )
+        archive_file = workspace_dir / Path(*archive_path.split("/"))
+        if archive_file.exists():
+            archive_file.unlink()
+        deleted_paths.append(str(item.get("original_path") or ""))
+        total_size += int(item.get("size_bytes") or 0)
+    if found_ids != archive_item_ids:
+        raise HTTPException(status_code=404, detail="Archive item not found")
+    _remove_archive_items_from_index(workspace_dir, archive_item_ids)
+    return deleted_paths, total_size
+
+
+def _build_purge_audit_record(
+    request: Request,
+    *,
+    event_id: str,
+    operation: str,
+    target_user_id: str,
+    target_agent_id: str,
+    files_count: int,
+    total_size_bytes: int,
+    reason: str,
+    status: str = "success",
+    error: Optional[str] = None,
+) -> dict[str, Any]:
+    """构造管理员归档清理审计事件。"""
+    actor, role = _request_actor(request)
+    source_id = _get_report_source_id(request)
+    source_name = request.headers.get("X-Source-Name") or source_id
+    return {
+        "event_id": event_id,
+        "timestamp": _isoformat(_utc_now()),
+        "operation": operation,
+        "status": status,
+        "actor_user_id": actor,
+        "actor_role": role,
+        "source_id": source_id,
+        "source_name": source_name,
+        "target_user_id": target_user_id,
+        "target_agent_id": target_agent_id,
+        "scope": "selected",
+        "files_count": files_count,
+        "total_size_bytes": total_size_bytes,
+        "reason": reason,
+        "error": error,
+    }
+
+
+@router.delete("/archive/items", response_model=ArchivePurgeResponse)
+async def purge_archive_items(
+    request: Request,
+    body: ArchivePurgeRequest,
+) -> ArchivePurgeResponse:
+    """管理员手动清理指定归档文件并写入清理审计。"""
+    _ensure_report_permission(request)
+    if not body.archive_item_ids:
+        raise HTTPException(status_code=400, detail="No archive items provided")
+    await _ensure_target_user_in_current_source(request, body.target_user_id)
+    source_id = _get_report_source_id(request)
+    workspace_dir = _target_workspace_dir(
+        _get_workspace_root(request),
+        body.target_user_id,
+        source_id,
+        body.target_agent_id,
+    )
+    deleted_paths, total_size = _purge_archive_items(
+        workspace_dir,
+        set(body.archive_item_ids),
+    )
+    event_id = uuid.uuid4().hex
+    audit = _build_purge_audit_record(
+        request,
+        event_id=event_id,
+        operation="purge_archive",
+        target_user_id=body.target_user_id,
+        target_agent_id=body.target_agent_id,
+        files_count=len(deleted_paths),
+        total_size_bytes=total_size,
+        reason=body.reason,
+    )
+    _append_archive_admin_audit(_get_workspace_dir(request), audit)
+    return ArchivePurgeResponse(
+        success=True,
+        message="Purged archive items",
+        files_deleted=deleted_paths,
+        files_count=len(deleted_paths),
+        total_size_bytes=total_size,
+        audit_event_id=event_id,
+    )
+
+
+@router.post("/archive/purge-expired", response_model=ArchivePurgeResponse)
+async def purge_expired_archive_items(
+    request: Request,
+    body: ArchivePurgeExpiredRequest,
+) -> ArchivePurgeResponse:
+    """管理员清理当前渠道下超过 10 天的归档文件。"""
+    _ensure_report_permission(request)
+    all_deleted: list[str] = []
+    total_size = 0
+    event_id = uuid.uuid4().hex
+    for tenant_id, agent_id, workspace_dir in await _source_archive_workspaces(
+        request,
+        agent_id=body.target_agent_id,
+    ):
+        if body.target_user_id and tenant_id != body.target_user_id:
+            continue
+        expired_ids = {
+            str(item.get("id") or "")
+            for item in _load_archive_index(workspace_dir).get("items", [])
+            if _archive_item_expired(item)
+        }
+        if not expired_ids:
+            continue
+        deleted_paths, deleted_size = _purge_archive_items(workspace_dir, expired_ids)
+        all_deleted.extend(deleted_paths)
+        total_size += deleted_size
+        audit = _build_purge_audit_record(
+            request,
+            event_id=event_id,
+            operation="auto_purge_archive",
+            target_user_id=tenant_id,
+            target_agent_id=agent_id,
+            files_count=len(deleted_paths),
+            total_size_bytes=deleted_size,
+            reason=body.reason,
+        )
+        audit["scope"] = "expired_10_days"
+        _append_archive_admin_audit(_get_workspace_dir(request), audit)
+    return ArchivePurgeResponse(
+        success=True,
+        message="Purged expired archive items",
+        files_deleted=all_deleted,
+        files_count=len(all_deleted),
+        total_size_bytes=total_size,
+        audit_event_id=event_id,
+    )
+
+
+def _collect_admin_audits(
+    workspace_root: Path,
+    source_id: str,
+) -> list[ArchiveAdminAuditRecord]:
+    """扫描工作区根目录下当前渠道的管理员清理审计。"""
+    records: list[ArchiveAdminAuditRecord] = []
+    for audit_path in workspace_root.glob("*/workspaces/*/" + ARCHIVE_ADMIN_AUDIT_FILE):
+        for record in _read_archive_admin_audit(audit_path):
+            if record.get("source_id") != source_id:
+                continue
+            try:
+                records.append(ArchiveAdminAuditRecord(**record))
+            except Exception:
+                continue
+    records.sort(key=lambda item: item.timestamp, reverse=True)
+    return records
+
+
+def _build_admin_audit_summary(
+    records: list[ArchiveAdminAuditRecord],
+) -> ArchiveAdminAuditSummary:
+    """根据管理员清理审计明细构造顶部指标。"""
+    return ArchiveAdminAuditSummary(
+        total_operations=len(records),
+        success_operations=sum(1 for row in records if row.status == "success"),
+        failed_operations=sum(1 for row in records if row.status == "failed"),
+        partial_success_operations=sum(
+            1 for row in records if row.status == "partial_success"
+        ),
+        manual_operations=sum(1 for row in records if row.operation == "purge_archive"),
+        auto_operations=sum(
+            1 for row in records if row.operation == "auto_purge_archive"
+        ),
+        total_files_cleared=sum(row.files_count for row in records),
+        total_size_cleared_bytes=sum(row.total_size_bytes for row in records),
+        last_operation_at=max((row.timestamp for row in records), default=None),
+    )
+
+
+@router.get("/archive/admin-audits", response_model=ArchiveAdminAuditsResponse)
+async def list_archive_admin_audits(
+    request: Request,
+    page: int = 1,
+    page_size: int = 20,
+) -> ArchiveAdminAuditsResponse:
+    """管理员查询当前渠道下归档清理审计明细和统计。"""
+    _ensure_report_permission(request)
+    safe_page, safe_page_size = _normalise_page(page, page_size)
+    records = _collect_admin_audits(_get_workspace_root(request), _get_report_source_id(request))
+    start = (safe_page - 1) * safe_page_size
+    end = start + safe_page_size
+    return ArchiveAdminAuditsResponse(
+        summary=_build_admin_audit_summary(records),
+        items=records[start:end],
+        total=len(records),
+        page=safe_page,
+        page_size=safe_page_size,
+    )
+
+
+@router.get("/archive/report", response_model=ArchiveReportResponse)
+async def get_archive_report(request: Request) -> ArchiveReportResponse:
+    """为持续治理分析页返回当前渠道归档治理统计。"""
+    _ensure_report_permission(request)
+    archive_items: list[ArchiveItem] = []
+    protected_rows: list[ProtectedFileInfo] = []
+    for tenant_id, agent_id, workspace_dir in await _source_archive_workspaces(request):
+        for item in _load_archive_index(workspace_dir).get("items", []):
+            archive_items.append(
+                _archive_item_model(
+                    item,
+                    target_user_id=tenant_id,
+                    target_agent_id=agent_id,
+                ),
+            )
+        protected = _load_protected_paths(workspace_dir)
+        for item in protected.get("paths", []):
+            if not isinstance(item, dict) or not item.get("path"):
+                continue
+            relative_path = _normalise_workspace_relative_path(str(item["path"]))
+            file_path = workspace_dir / Path(*relative_path.split("/"))
+            protected_rows.append(
+                ProtectedFileInfo(
+                    target_user_id=tenant_id,
+                    target_agent_id=agent_id,
+                    path=relative_path,
+                    protected_at=str(item.get("protected_at") or ""),
+                    protected_by=str(item.get("protected_by") or ""),
+                    reason=str(item.get("reason") or ""),
+                    exists=file_path.exists(),
+                ),
+            )
+    audits = _collect_admin_audits(_get_workspace_root(request), _get_report_source_id(request))
+    pending_items = [item for item in archive_items if item.expired]
+    return ArchiveReportResponse(
+        summary=ArchiveReportSummary(
+            archived_files=len(archive_items),
+            archived_size_bytes=sum(item.size_bytes for item in archive_items),
+            pending_purge_files=len(pending_items),
+            pending_purge_size_bytes=sum(item.size_bytes for item in pending_items),
+            protected_files=len(protected_rows),
+            protected_existing_files=sum(1 for item in protected_rows if item.exists),
+            protected_missing_files=sum(1 for item in protected_rows if not item.exists),
+            purge_operations=len(audits),
+            purge_success_operations=sum(1 for item in audits if item.status == "success"),
+            purge_failed_operations=sum(1 for item in audits if item.status == "failed"),
+            purged_files=sum(item.files_count for item in audits),
+            purged_size_bytes=sum(item.total_size_bytes for item in audits),
+            last_purge_at=max((item.timestamp for item in audits), default=None),
+        ),
+    )
