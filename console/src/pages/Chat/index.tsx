@@ -491,6 +491,29 @@ function RuntimeLoadingBridge({
   return null;
 }
 
+function ActivePlanModeControl({
+  enabled,
+  label,
+  onDisable,
+}: {
+  enabled: boolean;
+  label: string;
+  onDisable: () => void;
+}) {
+  const { disabled } = useChatAnywhereInput((value) => ({
+    disabled: Boolean(value.disabled),
+  }));
+
+  return (
+    <ActivePlanModeButton
+      enabled={enabled}
+      disabled={disabled}
+      label={label}
+      onDisable={onDisable}
+    />
+  );
+}
+
 export default function ChatPage() {
   const { t } = useTranslation();
   const navigate = useNavigate();
@@ -958,7 +981,7 @@ export default function ChatPage() {
 
   const activePlanModeControl = useMemo(
     () => (
-      <ActivePlanModeButton
+      <ActivePlanModeControl
         enabled={planModeEnabled}
         label={t("chat.planMode.label", "计划模式")}
         onDisable={() => {
