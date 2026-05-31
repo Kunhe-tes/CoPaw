@@ -150,6 +150,7 @@ export default function useAttachments(
     const uploadFileListHeader = (
       <Sender.Header closable={false} open={fileList?.length > 0}>
         <Attachments
+          disabled={options?.disabled}
           items={fileList}
           onChange={(info) => setFileList(info.fileList)}
         />
