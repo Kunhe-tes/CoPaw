@@ -77,6 +77,9 @@ export default function Input({ onCancel, onSubmit }: InputProps) {
     uploadQuickMenuItem,
     uploadFileListHeader,
   } = useAttachments(attachments, { disabled: !!inputContext.disabled });
+  const canHandlePasteFile = inputContext.disabled
+    ? undefined
+    : handlePasteFile;
 
   const mergedQuickMenuItems = useMemo(() => {
     const externalItems = React.Children.toArray(quickMenuItems).filter(Boolean);
@@ -120,21 +123,21 @@ export default function Input({ onCancel, onSubmit }: InputProps) {
   }, [setContent, setFileList]);
 
   useEffect(() => {
-    if (!handlePasteFile) {
+    if (!canHandlePasteFile) {
       return;
     }
 
     const handler = (event: Event) => {
       const detail = (event as CustomEvent<{ file?: File }>).detail;
       if (detail?.file instanceof File) {
-        handlePasteFile(detail.file);
+        canHandlePasteFile(detail.file);
       }
     };
 
     document.addEventListener(RUNTIME_INPUT_UPLOAD_FILE_EVENT, handler);
     return () =>
       document.removeEventListener(RUNTIME_INPUT_UPLOAD_FILE_EVENT, handler);
-  }, [handlePasteFile]);
+  }, [canHandlePasteFile]);
 
   const handleContentChange = useCallback(
     (value: string) => {
@@ -215,7 +218,7 @@ export default function Input({ onCancel, onSubmit }: InputProps) {
           onSubmit={handleSubmit}
           onCancel={handleCancel}
           allowSpeech={allowSpeech}
-          onPasteFile={handlePasteFile}
+          onPasteFile={canHandlePasteFile}
           suggestions={suggestions}
         />
         {afterUI}

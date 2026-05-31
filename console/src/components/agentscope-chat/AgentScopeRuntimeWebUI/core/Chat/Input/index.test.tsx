@@ -56,10 +56,17 @@ const senderOptions = {
   current: {} as Record<string, unknown>,
 };
 
+const inputState = {
+  current: {
+    disabled: false,
+    loading: false,
+  },
+};
+
 vi.mock("../../Context/ChatAnywhereInputContext", () => ({
   useChatAnywhereInput: (
     selector: (value: { disabled: boolean; loading: boolean }) => unknown,
-  ) => selector({ disabled: false, loading: false }),
+  ) => selector(inputState.current),
 }));
 
 vi.mock("./useAttachments", () => ({
@@ -80,6 +87,10 @@ vi.mock("./useAttachments", () => ({
 describe("Chat Input restore flow", () => {
   beforeEach(() => {
     senderOptions.current = {};
+    inputState.current = {
+      disabled: false,
+      loading: false,
+    };
     attachmentState.currentFileList = [];
     attachmentState.getFileList.mockImplementation(
       () => attachmentState.currentFileList,
@@ -235,6 +246,24 @@ describe("Chat Input restore flow", () => {
     );
 
     expect(attachmentState.handlePasteFile).toHaveBeenCalledWith(file);
+  });
+
+  it("ignores files dispatched by the chat drag-and-drop bridge when disabled", () => {
+    const file = new File(["hello"], "demo.txt", { type: "text/plain" });
+    inputState.current = {
+      disabled: true,
+      loading: false,
+    };
+
+    render(<Input onCancel={vi.fn()} onSubmit={vi.fn()} />);
+
+    document.dispatchEvent(
+      new CustomEvent("pasteFile", {
+        detail: { file },
+      }),
+    );
+
+    expect(attachmentState.handlePasteFile).not.toHaveBeenCalled();
   });
 
   it("allows beforeSubmit to inspect and transform the submitted input", async () => {

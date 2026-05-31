@@ -27,6 +27,7 @@ export default function useAttachments(
 
   const handlePasteFile = useCallback(
     (file: File) => {
+      if (options?.disabled) return;
       if (!rest?.customRequest) return;
 
       const fileType = file.type || "";
@@ -123,7 +124,7 @@ export default function useAttachments(
         { defaultRequest: () => undefined },
       );
     },
-    [rest?.customRequest, rest?.accept],
+    [options?.disabled, rest?.customRequest, rest?.accept],
   );
 
   if (rest?.customRequest) {
