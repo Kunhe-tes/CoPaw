@@ -21,9 +21,9 @@ import ComposerQuickMenu, {
 
 const RUNTIME_INPUT_UPLOAD_FILE_EVENT = "pasteFile";
 const PLACEHOLDER_OPTIONS = [
-  '告诉我你要做什么，我将召唤相应专家，为你执行...',
-  '有什么要求都告诉我，我会越用越懂你...',
-  '你可以给我取个名字，甚至设定我的人设...'
+  "告诉我你要做什么，我将召唤相应专家，为你执行...",
+  "有什么要求都告诉我，我会越用越懂你...",
+  "你可以给我取个名字，甚至设定我的人设...",
 ];
 
 interface WelcomeCenterLayoutProps {
@@ -31,6 +31,7 @@ interface WelcomeCenterLayoutProps {
   placeholder?: string;
   beforeSubmit?: IAgentScopeRuntimeWebUISenderOptions["beforeSubmit"];
   quickMenuItems?: React.ReactNode | React.ReactNode[];
+  prefixItems?: React.ReactNode | React.ReactNode[];
   onSubmit: (data: IAgentScopeRuntimeWebUIInputData) => void;
 }
 
@@ -46,7 +47,14 @@ function isSubmitCancelled(result: unknown): result is {
 }
 
 export default function WelcomeCenterLayout(props: WelcomeCenterLayoutProps) {
-  const { greeting, onSubmit, beforeSubmit, placeholder, quickMenuItems } = props;
+  const {
+    greeting,
+    onSubmit,
+    beforeSubmit,
+    placeholder,
+    quickMenuItems,
+    prefixItems,
+  } = props;
   const { t } = useTranslation();
   const [inputValue, setInputValue] = useState("");
   const [fileList, setFileList] = useState<UploadFile[]>([]);
@@ -246,6 +254,7 @@ export default function WelcomeCenterLayout(props: WelcomeCenterLayoutProps) {
               >
                 {mergedQuickMenuItems}
               </ComposerQuickMenu>
+              {prefixItems}
             </div>
             <button
               className="welcome-input-send-btn"

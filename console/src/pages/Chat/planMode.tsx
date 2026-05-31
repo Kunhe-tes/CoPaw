@@ -17,7 +17,30 @@ export type PlanModeSubmitResult =
   | PlanModeSubmitCancelled;
 
 export type PlanModeSessionLike = {
+  id?: string;
+  realId?: string;
+  sessionId?: string;
+  session_id?: string;
   meta?: Record<string, unknown> | null;
+};
+
+type PersistPlanModeStateOptions<TSession extends PlanModeSessionLike> = {
+  enabled: boolean;
+  session: TSession | null;
+  ensureChatId: (
+    session: TSession | null,
+    meta: Record<string, unknown>,
+  ) => Promise<string | null>;
+  updateChat: (
+    chatId: string,
+    payload: { meta: Record<string, unknown> },
+  ) => Promise<{ meta?: Record<string, unknown> | null }>;
+  updateSession: (session: {
+    id: string;
+    meta: Record<string, unknown>;
+  }) => Promise<unknown>;
+  setPlanModeEnabled: (enabled: boolean) => void;
+  onPersistError?: (error: unknown) => void;
 };
 
 export function getPlanModeEnabled(
@@ -38,6 +61,26 @@ export function buildPlanModeMeta(
 
 export function getPlanModeForRequest(enabled: boolean): ChatPlanMode {
   return enabled ? "plan" : "normal";
+}
+
+export function resolveActivePlanModeSession<
+  TSession extends PlanModeSessionLike,
+>(sessions: TSession[], ids: Array<string | null | undefined>): TSession | null {
+  const idSet = new Set(
+    ids.filter((value): value is string => Boolean(value)),
+  );
+
+  if (idSet.size === 0) {
+    return null;
+  }
+
+  return (
+    sessions.find((session) =>
+      [session.id, session.realId, session.sessionId, session.session_id].some(
+        (value) => Boolean(value && idSet.has(value)),
+      ),
+    ) || null
+  );
 }
 
 function withPlanMode(
@@ -107,6 +150,42 @@ export function isPlanModeSubmitCancelled(
   );
 }
 
+export async function persistPlanModeState<
+  TSession extends PlanModeSessionLike,
+>({
+  enabled,
+  session,
+  ensureChatId,
+  updateChat,
+  updateSession,
+  setPlanModeEnabled,
+  onPersistError,
+}: PersistPlanModeStateOptions<TSession>): Promise<void> {
+  const nextMeta = buildPlanModeMeta(session?.meta, enabled);
+
+  setPlanModeEnabled(enabled);
+
+  try {
+    const targetChatId = await ensureChatId(session, nextMeta);
+    if (!targetChatId) {
+      throw new Error("Missing chat id for Plan Mode state");
+    }
+
+    const updated = await updateChat(targetChatId, {
+      meta: nextMeta,
+    });
+
+    await updateSession({
+      id: session?.id || targetChatId,
+      meta: updated.meta || nextMeta,
+    });
+  } catch (error) {
+    setPlanModeEnabled(getPlanModeEnabled(session));
+    onPersistError?.(error);
+    throw error;
+  }
+}
+
 export function PlanModeMenuItem({
   enabled,
   disabled = false,
@@ -137,4 +216,33 @@ export function PlanModeMenuItem({
   );
 
   return tooltip ? <Tooltip title={tooltip}>{control}</Tooltip> : control;
+}
+
+export function ActivePlanModeButton({
+  enabled,
+  disabled = false,
+  label,
+  onDisable,
+}: {
+  enabled: boolean;
+  disabled?: boolean;
+  label: string;
+  onDisable: () => void;
+}) {
+  if (!enabled) {
+    return null;
+  }
+
+  return (
+    <button
+      type="button"
+      className={styles.planModeActiveButton}
+      aria-label={label}
+      disabled={disabled}
+      onClick={onDisable}
+    >
+      <ApartmentOutlined />
+      <span>{label}</span>
+    </button>
+  );
 }

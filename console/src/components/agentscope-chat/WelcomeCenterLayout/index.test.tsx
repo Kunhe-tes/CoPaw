@@ -130,6 +130,28 @@ describe("WelcomeCenterLayout", () => {
     expect(screen.getByRole("button", { name: "Plan Mode" })).toBeInTheDocument();
   });
 
+  it("renders prefix action items beside the quick menu in the welcome composer", () => {
+    const { container } = render(
+      <WelcomeCenterLayout
+        greeting="你好"
+        onSubmit={vi.fn()}
+        prefixItems={
+          <button type="button">
+            计划模式
+          </button>
+        }
+      />,
+    );
+
+    const actionButtons = Array.from(
+      container.querySelectorAll(".welcome-input-actions button"),
+    ).map((button) => button.textContent?.trim());
+
+    expect(actionButtons).toContain("menu");
+    expect(actionButtons).toContain("计划模式");
+    expect(screen.getByRole("button", { name: "计划模式" })).toBeInTheDocument();
+  });
+
   it("uses beforeSubmit to transform welcome submissions", async () => {
     const onSubmit = vi.fn();
     const beforeSubmit = vi.fn(async (data) => ({

@@ -324,4 +324,24 @@ describe("Chat Input restore flow", () => {
     expect(attachmentState.handleUploadMenuClick).toHaveBeenCalledTimes(1);
     expect(onPlanModeClick).toHaveBeenCalledTimes(1);
   });
+
+  it("renders sender.prefix controls in the bottom action row and dispatches clicks", () => {
+    const onDisable = vi.fn();
+    senderOptions.current = {
+      prefix: (
+        <button type="button" onClick={onDisable}>
+          计划模式
+        </button>
+      ),
+    };
+
+    render(<Input onCancel={vi.fn()} onSubmit={vi.fn()} />);
+
+    fireEvent.click(
+      screen.getByRole("button", { name: "计划模式", hidden: true }),
+    );
+
+    expect(screen.getByTestId("chat-prefix")).toHaveTextContent("计划模式");
+    expect(onDisable).toHaveBeenCalledTimes(1);
+  });
 });

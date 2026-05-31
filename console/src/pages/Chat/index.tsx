@@ -11,6 +11,7 @@ import AgentScopeRuntimeRequestCard from "@/components/agentscope-chat/AgentScop
 import AgentScopeRuntimeResponseCard from "@/components/agentscope-chat/AgentScopeRuntimeWebUI/core/AgentScopeRuntime/Response/Card";
 // ==================== 组件引入方式变更结束 ====================
 import {
+  Children,
   useCallback,
   useEffect,
   useMemo,
@@ -104,11 +105,13 @@ import TaskRunGroupCard from "./components/TaskRunGroupCard";
 import TaskProgressFloatingCard from "./components/TaskProgressFloatingCard";
 import GeneratedFilesDrawer from "./components/GeneratedFilesDrawer";
 import {
+  ActivePlanModeButton,
   PlanModeMenuItem,
-  buildPlanModeMeta,
   getPlanModeEnabled,
   getPlanModeForRequest,
+  persistPlanModeState,
   preparePlanModeSubmit,
+  resolveActivePlanModeSession,
   type PlanModeSessionLike,
 } from "./planMode";
 import type {
@@ -872,27 +875,11 @@ export default function ChatPage() {
         feedbackSessionId !== lastFeedbackSessionIdRef.current),
   );
   const activePlanModeSession = useMemo<PlanModeSession | null>(() => {
-    const ids = new Set(
-      [activeSessionId, chatId, window.currentSessionId].filter(
-        (value): value is string => Boolean(value),
-      ),
-    );
-
-    if (ids.size === 0) {
-      return null;
-    }
-
-    return (
-      (sessions.find((session) => {
-        const candidate = session as PlanModeSession;
-        return [
-          candidate.id,
-          candidate.realId,
-          candidate.sessionId,
-          candidate.session_id,
-        ].some((value) => Boolean(value && ids.has(value)));
-      }) as PlanModeSession | undefined) || null
-    );
+    return resolveActivePlanModeSession(sessions, [
+      activeSessionId,
+      chatId,
+      window.currentSessionId,
+    ]) as PlanModeSession | null;
   }, [activeSessionId, chatId, sessions]);
   const activePlanModeMetadataEnabled = getPlanModeEnabled(
     activePlanModeSession,
@@ -949,33 +936,37 @@ export default function ChatPage() {
 
   const persistPlanMode = useCallback(
     async (enabled: boolean) => {
-      const session = activePlanModeSessionRef.current;
-      const nextMeta = buildPlanModeMeta(session?.meta, enabled);
-
-      setPlanModeEnabled(enabled);
-
-      try {
-        const targetChatId = await ensurePlanModeChatId(session, nextMeta);
-        if (!targetChatId) {
-          throw new Error("Missing chat id for Plan Mode state");
-        }
-
-        const updated = await chatApi.updateChat(targetChatId, {
-          meta: nextMeta,
-        });
-        await sessionApi.updateSession({
-          id: session?.id || targetChatId,
-          meta: updated.meta || nextMeta,
-        } as Parameters<typeof sessionApi.updateSession>[0] & {
-          meta: Record<string, unknown>;
-        });
-      } catch (error) {
-        setPlanModeEnabled(getPlanModeEnabled(session));
-        message.error(t("chat.planMode.persistFailed", "Plan Mode 保存失败"));
-        throw error;
-      }
+      await persistPlanModeState({
+        enabled,
+        session: activePlanModeSessionRef.current,
+        ensureChatId: ensurePlanModeChatId,
+        updateChat: chatApi.updateChat,
+        updateSession: async (session) =>
+          sessionApi.updateSession(
+            session as Parameters<typeof sessionApi.updateSession>[0] & {
+              meta: Record<string, unknown>;
+            },
+          ),
+        setPlanModeEnabled,
+        onPersistError: () => {
+          message.error(t("chat.planMode.persistFailed", "Plan Mode 保存失败"));
+        },
+      });
     },
     [ensurePlanModeChatId, message, t],
+  );
+
+  const activePlanModeControl = useMemo(
+    () => (
+      <ActivePlanModeButton
+        enabled={planModeEnabled}
+        label={t("chat.planMode.label", "计划模式")}
+        onDisable={() => {
+          void persistPlanMode(false);
+        }}
+      />
+    ),
+    [persistPlanMode, planModeEnabled, t],
   );
 
   useEffect(() => {
@@ -1605,13 +1596,17 @@ export default function ChatPage() {
       {
         command: "/plan",
         value: "plan",
-        description: t("chat.commands.plan.description", "进入 Plan Mode"),
+        description: t("chat.commands.plan.description", "进入计划模式"),
       },
     ];
 
     const senderConfig = i18nConfig.sender as
       | IAgentScopeRuntimeWebUISenderOptions
       | undefined;
+    const senderPrefixNodes = [
+      ...Children.toArray(activePlanModeControl),
+      ...Children.toArray(senderConfig?.prefix),
+    ].filter(Boolean);
 
     const handleBeforeSubmit: NonNullable<
       IAgentScopeRuntimeWebUISenderOptions["beforeSubmit"]
@@ -1628,10 +1623,10 @@ export default function ChatPage() {
       <PlanModeMenuItem
         key="plan-mode"
         enabled={planModeEnabled}
-        label={t("chat.planMode.label", "Plan")}
+        label={t("chat.planMode.label", "计划模式")}
         tooltip={t(
           "chat.planMode.tooltip",
-          "Plan Mode 使用只读工具先产出计划",
+          "计划模式使用只读工具先产出计划",
         )}
         onChange={(enabled) => {
           void persistPlanMode(enabled);
@@ -1678,6 +1673,7 @@ export default function ChatPage() {
             placeholder={t("chat.inputPlaceholder")}
             beforeSubmit={handleBeforeSubmit}
             quickMenuItems={planModeQuickMenuItems}
+            prefixItems={activePlanModeControl}
             onSubmit={(data) => onSubmit(data)}
           />
         ),
@@ -1690,6 +1686,8 @@ export default function ChatPage() {
           <TaskProgressFloatingCard progress={taskProgress} />
         ) : null,
         quickMenuItems: planModeQuickMenuItems,
+        prefix:
+          senderPrefixNodes.length > 0 ? <>{senderPrefixNodes}</> : undefined,
         allowSpeech: false,
         attachments: {
           accept: "*/*",

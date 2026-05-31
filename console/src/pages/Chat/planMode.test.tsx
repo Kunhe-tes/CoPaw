@@ -8,9 +8,12 @@ import {
 } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
+  ActivePlanModeButton,
   PlanModeMenuItem,
   getPlanModeEnabled,
+  persistPlanModeState,
   preparePlanModeSubmit,
+  resolveActivePlanModeSession,
 } from "./planMode";
 
 describe("Plan Mode frontend helpers", () => {
@@ -24,12 +27,12 @@ describe("Plan Mode frontend helpers", () => {
         enabled={getPlanModeEnabled({
           meta: { plan_mode_enabled: true },
         })}
-        label="Plan"
+        label="计划模式"
         onChange={vi.fn()}
       />,
     );
 
-    expect(screen.getByRole("switch", { name: "Plan" })).toHaveAttribute(
+    expect(screen.getByRole("switch", { name: "计划模式" })).toHaveAttribute(
       "aria-checked",
       "true",
     );
@@ -39,13 +42,46 @@ describe("Plan Mode frontend helpers", () => {
     const onChange = vi.fn();
 
     render(
-      <PlanModeMenuItem enabled={false} label="Plan" onChange={onChange} />,
+      <PlanModeMenuItem
+        enabled={false}
+        label="计划模式"
+        onChange={onChange}
+      />,
     );
 
-    fireEvent.click(screen.getByRole("switch", { name: "Plan" }));
+    fireEvent.click(screen.getByRole("switch", { name: "计划模式" }));
 
     await waitFor(() => {
       expect(onChange).toHaveBeenCalledWith(true);
+    });
+  });
+
+  it("renders the active Plan Mode button only when enabled and dispatches disable clicks", async () => {
+    const onDisable = vi.fn();
+    const { rerender } = render(
+      <ActivePlanModeButton
+        enabled={false}
+        label="计划模式"
+        onDisable={onDisable}
+      />,
+    );
+
+    expect(
+      screen.queryByRole("button", { name: "计划模式" }),
+    ).not.toBeInTheDocument();
+
+    rerender(
+      <ActivePlanModeButton
+        enabled
+        label="计划模式"
+        onDisable={onDisable}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "计划模式" }));
+
+    await waitFor(() => {
+      expect(onDisable).toHaveBeenCalledTimes(1);
     });
   });
 
@@ -145,5 +181,102 @@ describe("Plan Mode frontend helpers", () => {
         },
       },
     });
+  });
+
+  it("resolves the active Plan Mode session across id aliases without leaking between chats", () => {
+    const sessions = [
+      {
+        id: "chat-enabled",
+        realId: "real-enabled",
+        sessionId: "logical-enabled",
+        meta: { plan_mode_enabled: true },
+      },
+      {
+        id: "chat-disabled",
+        session_id: "logical-disabled",
+        meta: { plan_mode_enabled: false },
+      },
+    ];
+
+    expect(
+      resolveActivePlanModeSession(sessions, ["real-enabled"])?.meta
+        ?.plan_mode_enabled,
+    ).toBe(true);
+    expect(
+      resolveActivePlanModeSession(sessions, ["logical-enabled"])?.meta
+        ?.plan_mode_enabled,
+    ).toBe(true);
+    expect(
+      resolveActivePlanModeSession(sessions, ["logical-disabled"])?.meta
+        ?.plan_mode_enabled,
+    ).toBe(false);
+  });
+
+  it("persists Plan Mode changes through chat metadata updates", async () => {
+    const session = {
+      id: "chat-1",
+      meta: { plan_mode_enabled: true, title: "demo" },
+    };
+    const ensureChatId = vi.fn(async () => "chat-1");
+    const updateChat = vi.fn(async () => ({
+      meta: { plan_mode_enabled: false, title: "demo" },
+    }));
+    const updateSession = vi.fn(async () => undefined);
+    const setPlanModeEnabled = vi.fn();
+
+    await persistPlanModeState({
+      enabled: false,
+      session,
+      ensureChatId,
+      updateChat,
+      updateSession,
+      setPlanModeEnabled,
+    });
+
+    expect(setPlanModeEnabled).toHaveBeenNthCalledWith(1, false);
+    expect(ensureChatId).toHaveBeenCalledWith(session, {
+      plan_mode_enabled: false,
+      title: "demo",
+    });
+    expect(updateChat).toHaveBeenCalledWith("chat-1", {
+      meta: {
+        plan_mode_enabled: false,
+        title: "demo",
+      },
+    });
+    expect(updateSession).toHaveBeenCalledWith({
+      id: "chat-1",
+      meta: {
+        plan_mode_enabled: false,
+        title: "demo",
+      },
+    });
+  });
+
+  it("rolls back local Plan Mode state when persistence fails", async () => {
+    const session = {
+      id: "chat-1",
+      meta: { plan_mode_enabled: true },
+    };
+    const setPlanModeEnabled = vi.fn();
+    const onPersistError = vi.fn();
+
+    await expect(
+      persistPlanModeState({
+        enabled: false,
+        session,
+        ensureChatId: vi.fn(async () => "chat-1"),
+        updateChat: vi.fn(async () => {
+          throw new Error("persist failed");
+        }),
+        updateSession: vi.fn(async () => undefined),
+        setPlanModeEnabled,
+        onPersistError,
+      }),
+    ).rejects.toThrow("persist failed");
+
+    expect(setPlanModeEnabled).toHaveBeenNthCalledWith(1, false);
+    expect(setPlanModeEnabled).toHaveBeenNthCalledWith(2, true);
+    expect(onPersistError).toHaveBeenCalledTimes(1);
   });
 });
