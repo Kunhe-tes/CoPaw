@@ -1,8 +1,18 @@
 import React from "react";
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import {
+  cleanup,
+  fireEvent,
+  render,
+  screen,
+  waitFor,
+} from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import WelcomeCenterLayout from "./index";
 import { chatApi } from "@/api/modules/chat";
+
+const mockedInputState = {
+  disabled: false,
+};
 
 vi.mock("@agentscope-ai/icons", () => ({
   SparkAttachmentLine: () => <span data-testid="attachment-icon" />,
@@ -17,13 +27,23 @@ vi.mock("@/components/agentscope-chat/ComposerQuickMenu", () => {
 
   function ComposerQuickMenu(props: {
     children?: React.ReactNode;
+    disabled?: boolean;
     triggerLabel: string;
   }) {
     const [open, setOpen] = React.useState(false);
 
     return (
       <div>
-        <button type="button" aria-label={props.triggerLabel} onClick={() => setOpen((prev: boolean) => !prev)}>
+        <button
+          type="button"
+          aria-label={props.triggerLabel}
+          disabled={props.disabled}
+          onClick={() => {
+            if (!props.disabled) {
+              setOpen((prev: boolean) => !prev);
+            }
+          }}
+        >
           menu
         </button>
         {open ? <div>{props.children}</div> : null}
@@ -50,6 +70,9 @@ vi.mock("@/components/agentscope-chat", () => ({
       ))}
     </div>
   ),
+  useChatAnywhereInput: (
+    selector: (value: { disabled: boolean }) => unknown,
+  ) => selector({ disabled: mockedInputState.disabled }),
 }));
 
 vi.mock("react-i18next", () => ({
@@ -66,7 +89,13 @@ vi.mock("@/api/modules/chat", () => ({
 }));
 
 vi.mock("../FeaturedCases", () => ({
-  default: () => <div data-testid="featured-cases" />,
+  default: (props: { onFillInput?: (value: string) => void }) => (
+    <div data-testid="featured-cases">
+      <button type="button" onClick={() => props.onFillInput?.("案例提示")}>
+        填充案例
+      </button>
+    </div>
+  ),
 }));
 
 vi.mock("../CaseDetailDrawer", () => ({
@@ -84,6 +113,7 @@ const mockedUploadFile = vi.mocked(chatApi.uploadFile);
 describe("WelcomeCenterLayout", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    mockedInputState.disabled = false;
     mockedUploadFile.mockResolvedValue({
       url: "demo.txt",
       file_name: "demo.txt",
@@ -111,6 +141,34 @@ describe("WelcomeCenterLayout", () => {
     });
   });
 
+  it(
+    "locks welcome composer interactions when the global input is disabled",
+    async () => {
+      const onSubmit = vi.fn();
+      const file = new File(["hello"], "demo.txt", { type: "text/plain" });
+      mockedInputState.disabled = true;
+
+      render(<WelcomeCenterLayout greeting="你好" onSubmit={onSubmit} />);
+
+      expect(screen.getByRole("textbox")).toBeDisabled();
+      expect(
+        screen.getByRole("button", { name: "chat.quickMenu.trigger" }),
+      ).toBeDisabled();
+      expect(screen.getByRole("button", { name: "发送" })).toBeDisabled();
+
+      document.dispatchEvent(
+        new CustomEvent("pasteFile", {
+          detail: { file },
+        }),
+      );
+      fireEvent.click(screen.getByRole("button", { name: "填充案例" }));
+
+      expect(mockedUploadFile).not.toHaveBeenCalled();
+      expect(screen.getByRole("textbox")).toHaveValue("");
+      expect(onSubmit).not.toHaveBeenCalled();
+    },
+  );
+
   it("shows upload and custom quick actions in the same menu", async () => {
     render(
       <WelcomeCenterLayout
@@ -124,10 +182,14 @@ describe("WelcomeCenterLayout", () => {
       />,
     );
 
-    fireEvent.click(screen.getByRole("button", { name: "chat.quickMenu.trigger" }));
+    fireEvent.click(
+      screen.getByRole("button", { name: "chat.quickMenu.trigger" }),
+    );
 
     expect(screen.getByText("chat.quickMenu.upload")).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Plan Mode" })).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "Plan Mode" }),
+    ).toBeInTheDocument();
   });
 
   it("renders prefix action items beside the quick menu in the welcome composer", () => {

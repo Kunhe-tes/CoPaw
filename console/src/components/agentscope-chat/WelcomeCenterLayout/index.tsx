@@ -6,6 +6,7 @@ import {
   Attachments,
   type IAgentScopeRuntimeWebUIInputData,
   type IAgentScopeRuntimeWebUISenderOptions,
+  useChatAnywhereInput,
 } from "@/components/agentscope-chat";
 import { chatApi } from "@/api/modules/chat";
 import Style from "./style";
@@ -56,6 +57,9 @@ export default function WelcomeCenterLayout(props: WelcomeCenterLayoutProps) {
     prefixItems,
   } = props;
   const { t } = useTranslation();
+  const { disabled: inputDisabled } = useChatAnywhereInput((value) => ({
+    disabled: Boolean(value.disabled),
+  }));
   const [inputValue, setInputValue] = useState("");
   const [fileList, setFileList] = useState<UploadFile[]>([]);
   const [drawerVisible, setDrawerVisible] = useState(false);
@@ -75,6 +79,8 @@ export default function WelcomeCenterLayout(props: WelcomeCenterLayoutProps) {
   }, []);
 
   const handleSend = useCallback(async () => {
+    if (inputDisabled) return;
+
     const trimmed = inputValue.trim();
     if (!trimmed) return;
 
@@ -98,7 +104,14 @@ export default function WelcomeCenterLayout(props: WelcomeCenterLayoutProps) {
 
     onSubmit(typeof next === "object" ? next : inputData);
     clearComposer();
-  }, [beforeSubmit, clearComposer, fileList, inputValue, onSubmit]);
+  }, [
+    beforeSubmit,
+    clearComposer,
+    fileList,
+    inputDisabled,
+    inputValue,
+    onSubmit,
+  ]);
 
   const handleKeyDown = useCallback(
     (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
@@ -111,8 +124,9 @@ export default function WelcomeCenterLayout(props: WelcomeCenterLayoutProps) {
   );
 
   const handleFillInput = useCallback((text: string) => {
+    if (inputDisabled) return;
     setInputValue(text);
-  }, []);
+  }, [inputDisabled]);
 
   const handleViewCase = useCallback(async (id: number) => {
     setLoadingCase(true);
@@ -136,6 +150,10 @@ export default function WelcomeCenterLayout(props: WelcomeCenterLayoutProps) {
   }, []);
 
   const handleBeforeUpload = useCallback((file: File) => {
+    if (inputDisabled) {
+      return Upload.LIST_IGNORE;
+    }
+
     const uid = `welcome-${Date.now()}-${Math.random().toString(36).slice(2)}`;
     const uploadFile: UploadFile = {
       uid,
@@ -187,7 +205,7 @@ export default function WelcomeCenterLayout(props: WelcomeCenterLayoutProps) {
       });
 
     return false;
-  }, [t]);
+  }, [inputDisabled, t]);
 
   const mergedQuickMenuItems = useMemo(() => {
     const externalItems = React.Children.toArray(quickMenuItems).filter(Boolean);
@@ -233,6 +251,7 @@ export default function WelcomeCenterLayout(props: WelcomeCenterLayoutProps) {
             <div style={{ marginBottom: -8, marginTop: -8, marginLeft: -20 }}>
               <Attachments
                 items={fileList}
+                disabled={inputDisabled}
                 onChange={(info) => setFileList(info.fileList)}
               />
             </div>
@@ -240,6 +259,7 @@ export default function WelcomeCenterLayout(props: WelcomeCenterLayoutProps) {
 
           <Input.TextArea
             className="welcome-input-placeholder"
+            disabled={inputDisabled}
             value={inputValue}
             onChange={(e) => setInputValue(e.target.value)}
             onKeyDown={handleKeyDown}
@@ -250,6 +270,7 @@ export default function WelcomeCenterLayout(props: WelcomeCenterLayoutProps) {
           <div className="welcome-input-actions">
             <div className="welcome-input-actions-left">
               <ComposerQuickMenu
+                disabled={inputDisabled}
                 triggerLabel={t("chat.quickMenu.trigger", "快捷操作")}
               >
                 {mergedQuickMenuItems}
@@ -259,7 +280,7 @@ export default function WelcomeCenterLayout(props: WelcomeCenterLayoutProps) {
             <button
               className="welcome-input-send-btn"
               onClick={handleSend}
-              disabled={!inputValue.trim()}
+              disabled={inputDisabled || !inputValue.trim()}
               type="button"
             >
               <img src={sendIcon} alt="发送" width={28} height={28} />
@@ -281,6 +302,7 @@ export default function WelcomeCenterLayout(props: WelcomeCenterLayoutProps) {
         caseData={selectedCase}
         loading={loadingCase}
         onMakeSimilar={(value) => {
+          if (inputDisabled) return;
           setInputValue(value);
           handleCloseDrawer();
         }}
