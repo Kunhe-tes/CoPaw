@@ -117,8 +117,18 @@ vi.mock("@/components/agentscope-chat/ComposerQuickMenu", () => {
     );
   }
 
-  function ComposerQuickMenuItem(props: { label: React.ReactNode }) {
-    return <button type="button">{props.label}</button>;
+  function ComposerQuickMenuItem(props: {
+    icon?: React.ReactNode;
+    label: React.ReactNode;
+    extra?: React.ReactNode;
+  }) {
+    return (
+      <div>
+        {props.icon}
+        <span>{props.label}</span>
+        {props.extra}
+      </div>
+    );
   }
 
   return {
@@ -377,11 +387,9 @@ describe("ChatPage plan mode wiring", () => {
   });
 
   it("disables active Plan Mode buttons when the composer is disabled", async () => {
-    const { container } = render(<ChatPage />);
+    render(<ChatPage />);
 
-    const buttons = Array.from(
-      container.querySelectorAll('button[aria-label="计划模式"]'),
-    );
+    const buttons = screen.getAllByRole("button", { name: "计划模式" });
 
     expect(buttons).toHaveLength(2);
     buttons.forEach((button) => {
@@ -392,5 +400,11 @@ describe("ChatPage plan mode wiring", () => {
     await Promise.resolve();
 
     expect(mocks.updateChat).not.toHaveBeenCalled();
+  });
+
+  it("disables the quick menu Plan Mode switch when the composer is disabled", () => {
+    render(<ChatPage />);
+
+    expect(screen.getByRole("switch", { name: "计划模式" })).toBeDisabled();
   });
 });

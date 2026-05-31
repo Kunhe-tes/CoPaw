@@ -538,6 +538,9 @@ export default function ChatPage() {
   const dragCounterRef = useRef(0);
   const runtimeLoadingBridgeRef = useRef<RuntimeLoadingBridgeApi | null>(null);
   const { message } = useAppMessage();
+  const { disabled: composerDisabled } = useChatAnywhereInput((value) => ({
+    disabled: Boolean(value.disabled),
+  }));
   const {
     sessions,
     setSessionLoading,
@@ -1646,6 +1649,7 @@ export default function ChatPage() {
       <PlanModeMenuItem
         key="plan-mode"
         enabled={planModeEnabled}
+        disabled={composerDisabled}
         label={t("chat.planMode.label", "计划模式")}
         tooltip={t(
           "chat.planMode.tooltip",
@@ -1818,6 +1822,7 @@ export default function ChatPage() {
     isComposingRef,
     isDark,
     multimodalCaps,
+    composerDisabled,
     persistPlanMode,
     planModeEnabled,
     resolveLogicalRequestSessionId,

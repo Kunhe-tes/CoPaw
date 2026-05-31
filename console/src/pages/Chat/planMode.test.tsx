@@ -56,6 +56,26 @@ describe("Plan Mode frontend helpers", () => {
     });
   });
 
+  it("does not dispatch toggle changes when the menu item is disabled", async () => {
+    const onChange = vi.fn();
+
+    render(
+      <PlanModeMenuItem
+        enabled={false}
+        disabled
+        label="计划模式"
+        onChange={onChange}
+      />,
+    );
+
+    expect(screen.getByRole("switch", { name: "计划模式" })).toBeDisabled();
+    fireEvent.click(screen.getByRole("switch", { name: "计划模式" }));
+
+    await waitFor(() => {
+      expect(onChange).not.toHaveBeenCalled();
+    });
+  });
+
   it("renders the active Plan Mode button only when enabled and dispatches disable clicks", async () => {
     const onDisable = vi.fn();
     const { rerender } = render(

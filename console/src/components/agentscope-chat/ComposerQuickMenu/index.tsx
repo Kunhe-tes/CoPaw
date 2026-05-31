@@ -15,19 +15,27 @@ export interface ComposerQuickMenuItemProps {
   extra?: React.ReactNode;
   onClick?: () => void;
   className?: string;
+  disabled?: boolean;
 }
 
 export function ComposerQuickMenuItem(props: ComposerQuickMenuItemProps) {
-  const { className, extra, icon, label, onClick } = props;
+  const { className, disabled = false, extra, icon, label, onClick } = props;
+  const clickable = Boolean(onClick) && !disabled;
 
   return (
     <div
-      className={classNames(styles.item, onClick && styles.itemClickable, className)}
-      onClick={onClick}
+      className={classNames(
+        styles.item,
+        clickable && styles.itemClickable,
+        disabled && styles.itemDisabled,
+        className,
+      )}
+      aria-disabled={onClick ? disabled : undefined}
+      onClick={clickable ? onClick : undefined}
       role={onClick ? "button" : undefined}
-      tabIndex={onClick ? 0 : undefined}
+      tabIndex={clickable ? 0 : undefined}
       onKeyDown={
-        onClick
+        clickable
           ? (event) => {
               if (event.key === "Enter" || event.key === " ") {
                 event.preventDefault();
@@ -52,6 +60,12 @@ export default function ComposerQuickMenu(props: ComposerQuickMenuProps) {
     () => React.Children.toArray(children).filter(Boolean),
     [children],
   );
+
+  useEffect(() => {
+    if (disabled) {
+      setOpen(false);
+    }
+  }, [disabled]);
 
   useEffect(() => {
     if (!open) {
@@ -93,7 +107,7 @@ export default function ComposerQuickMenu(props: ComposerQuickMenuProps) {
       >
         <PlusOutlined />
       </button>
-      {open ? (
+      {open && !disabled ? (
         <div className={styles.panel} onClick={() => setOpen(false)}>
           {items.map((item, index) => (
             <div

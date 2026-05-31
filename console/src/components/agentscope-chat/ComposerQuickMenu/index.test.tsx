@@ -46,4 +46,25 @@ describe("ComposerQuickMenu", () => {
       expect(screen.queryByText("计划模式")).not.toBeInTheDocument();
     });
   });
+
+  it("closes an already open menu when the trigger becomes disabled", async () => {
+    const { rerender } = render(
+      <ComposerQuickMenu triggerLabel="快捷操作">
+        <ComposerQuickMenuItem label="计划模式" />
+      </ComposerQuickMenu>,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "快捷操作" }));
+    expect(await screen.findByText("计划模式")).toBeInTheDocument();
+
+    rerender(
+      <ComposerQuickMenu triggerLabel="快捷操作" disabled>
+        <ComposerQuickMenuItem label="计划模式" />
+      </ComposerQuickMenu>,
+    );
+
+    await waitFor(() => {
+      expect(screen.queryByText("计划模式")).not.toBeInTheDocument();
+    });
+  });
 });
