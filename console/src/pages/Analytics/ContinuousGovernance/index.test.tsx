@@ -1,16 +1,21 @@
 import {
+  cleanup,
   fireEvent,
   render,
   screen,
   waitFor,
   within,
 } from "@testing-library/react";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import ContinuousGovernancePage from "./index";
 
 const mocks = vi.hoisted(() => ({
   dreamLogsApi: {
+    archiveReport: vi.fn(),
+    listArchiveAdminAudits: vi.fn(),
+    listArchiveItems: vi.fn(),
+    listProtectedFiles: vi.fn(),
     report: vi.fn(),
     reportUserRecords: vi.fn(),
   },
@@ -21,6 +26,10 @@ vi.mock("../../../api/modules/dreamLogs", () => ({
 }));
 
 describe("ContinuousGovernancePage", () => {
+  afterEach(() => {
+    cleanup();
+  });
+
   beforeEach(() => {
     vi.clearAllMocks();
     mocks.dreamLogsApi.report.mockResolvedValue({
@@ -108,26 +117,122 @@ describe("ContinuousGovernancePage", () => {
       page: 1,
       page_size: 10,
     });
+    mocks.dreamLogsApi.archiveReport.mockResolvedValue({
+      summary: {
+        archived_files: 3,
+        archived_size_bytes: 4096,
+        pending_purge_files: 1,
+        pending_purge_size_bytes: 1024,
+        protected_files: 2,
+        protected_existing_files: 1,
+        protected_missing_files: 1,
+        purge_operations: 4,
+        purge_success_operations: 3,
+        purge_failed_operations: 1,
+        purged_files: 8,
+        purged_size_bytes: 8192,
+        last_purge_at: "2026-05-26T09:00:00Z",
+      },
+    });
+    mocks.dreamLogsApi.listArchiveItems.mockResolvedValue({
+      items: [
+        {
+          id: "archive-1",
+          original_path: "memory/old.md",
+          archive_path: "governance/archive/files/archive-1",
+          size_bytes: 2048,
+          mtime: "2026-05-20T09:00:00Z",
+          archived_at: "2026-05-25T09:00:00Z",
+          archived_by: "admin",
+          archive_reason: "manual",
+          target_user_id: "alice",
+          target_agent_id: "default",
+          expired: true,
+        },
+      ],
+      total: 1,
+      page: 1,
+      page_size: 100,
+    });
+    mocks.dreamLogsApi.listProtectedFiles.mockResolvedValue({
+      items: [
+        {
+          target_user_id: "bob",
+          target_agent_id: "default",
+          path: "memory/protected.md",
+          protected_at: "2026-05-24T09:00:00Z",
+          protected_by: "admin",
+          reason: "restored_from_archive",
+          exists: false,
+          size_bytes: null,
+          mtime: null,
+        },
+      ],
+      total: 1,
+      page: 1,
+      page_size: 100,
+    });
+    mocks.dreamLogsApi.listArchiveAdminAudits.mockResolvedValue({
+      summary: {
+        total_operations: 1,
+        success_operations: 1,
+        failed_operations: 0,
+        partial_success_operations: 0,
+        manual_operations: 1,
+        auto_operations: 0,
+        total_files_cleared: 2,
+        total_size_cleared_bytes: 4096,
+        last_operation_at: "2026-05-26T09:00:00Z",
+      },
+      items: [
+        {
+          event_id: "audit-1",
+          timestamp: "2026-05-26T09:00:00Z",
+          operation: "purge_archive",
+          status: "success",
+          actor_user_id: "admin",
+          actor_role: "admin",
+          source_id: "source-a",
+          source_name: "source-a",
+          target_user_id: "alice",
+          target_agent_id: "default",
+          scope: "selected",
+          files_count: 2,
+          total_size_bytes: 4096,
+          reason: "manual_clear",
+          error: null,
+        },
+      ],
+      total: 1,
+      page: 1,
+      page_size: 100,
+    });
   });
 
-  it("shows report KPIs and user rows", async () => {
+  it("shows governance report KPIs and user rows in the default tab", async () => {
     render(<ContinuousGovernancePage />);
 
-    expect(await screen.findByText("持续治理分析")).toBeInTheDocument();
+    expect(
+      await screen.findByRole("heading", { name: "持续治理分析" }),
+    ).toBeInTheDocument();
     expect(
       screen.getByTestId("governance-kpi-covered_users"),
     ).toHaveTextContent("10");
     expect(screen.getByTestId("governance-kpi-success_rate")).toHaveTextContent(
       "83.33%",
     );
-    expect(await screen.findByText("Alice")).toBeInTheDocument();
-    expect(screen.getByText("model timeout")).toBeInTheDocument();
+    expect((await screen.findAllByText("Alice")).length).toBeGreaterThan(0);
+    expect(screen.getAllByText("model timeout").length).toBeGreaterThan(0);
+    expect(mocks.dreamLogsApi.archiveReport).not.toHaveBeenCalled();
+    expect(
+      screen.queryByTestId("governance-kpi-archive_files"),
+    ).not.toBeInTheDocument();
   });
 
   it("loads readonly user governance records in a drawer", async () => {
     render(<ContinuousGovernancePage />);
 
-    await screen.findByText("Alice");
+    await screen.findAllByText("Alice");
     fireEvent.click(screen.getAllByRole("button", { name: "查看 alice" })[0]);
 
     await waitFor(() => {
@@ -140,5 +245,66 @@ describe("ContinuousGovernancePage", () => {
     const drawer = await screen.findByRole("dialog");
     expect(within(drawer).getByText("record-1")).toBeInTheDocument();
     expect(within(drawer).getByText("model timeout")).toBeInTheDocument();
+  });
+
+  it("loads archive readonly metrics and lists after switching tabs", async () => {
+    render(<ContinuousGovernancePage />);
+
+    await screen.findAllByText("Alice");
+    fireEvent.click(screen.getByRole("tab", { name: "文件清理与归档" }));
+
+    await waitFor(() => {
+      expect(mocks.dreamLogsApi.archiveReport).toHaveBeenCalledTimes(1);
+      expect(mocks.dreamLogsApi.listArchiveItems).toHaveBeenCalledWith({
+        page_size: 100,
+      });
+      expect(mocks.dreamLogsApi.listProtectedFiles).toHaveBeenCalledWith({
+        page_size: 100,
+      });
+      expect(mocks.dreamLogsApi.listArchiveAdminAudits).toHaveBeenCalledWith({
+        page_size: 100,
+      });
+    });
+
+    expect(screen.getByTestId("governance-kpi-archive_files")).toHaveTextContent(
+      "3",
+    );
+    expect(screen.getAllByText("memory/old.md").length).toBeGreaterThan(0);
+    expect(screen.getAllByText("memory/protected.md").length).toBeGreaterThan(
+      0,
+    );
+    expect(screen.getAllByText("audit-1").length).toBeGreaterThan(0);
+  });
+
+  it("keeps governance report visible when archive data fails", async () => {
+    mocks.dreamLogsApi.archiveReport.mockRejectedValueOnce(
+      new Error("archive failed"),
+    );
+
+    render(<ContinuousGovernancePage />);
+
+    expect((await screen.findAllByText("Alice")).length).toBeGreaterThan(0);
+    expect(screen.getByTestId("governance-kpi-covered_users")).toHaveTextContent(
+      "10",
+    );
+
+    fireEvent.click(screen.getByRole("tab", { name: "文件清理与归档" }));
+
+    await waitFor(() => {
+      expect(mocks.dreamLogsApi.archiveReport).toHaveBeenCalledTimes(1);
+    });
+    expect(screen.queryByText("memory/old.md")).not.toBeInTheDocument();
+  });
+
+  it("keeps archive tab available when governance report fails", async () => {
+    mocks.dreamLogsApi.report.mockRejectedValueOnce(new Error("report failed"));
+
+    render(<ContinuousGovernancePage />);
+    fireEvent.click(screen.getByRole("tab", { name: "文件清理与归档" }));
+
+    expect(
+      await screen.findByTestId("governance-kpi-archive_files"),
+    ).toHaveTextContent("3");
+    expect(screen.getAllByText("memory/old.md").length).toBeGreaterThan(0);
   });
 });

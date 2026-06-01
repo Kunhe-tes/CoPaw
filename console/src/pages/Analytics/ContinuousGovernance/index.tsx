@@ -9,6 +9,7 @@ import {
   Select,
   Space,
   Table,
+  Tabs,
   Tag,
   Tooltip,
   message,
@@ -18,6 +19,7 @@ import type { Dayjs } from "dayjs";
 import dayjs from "dayjs";
 import {
   AlertTriangle,
+  Archive,
   BarChart3,
   Clock3,
   Database,
@@ -25,6 +27,7 @@ import {
   HardDriveDownload,
   RefreshCw,
   Search,
+  ShieldCheck,
   Timer,
   UserCheck,
   Users,
@@ -32,6 +35,9 @@ import {
 } from "lucide-react";
 import { dreamLogsApi } from "../../../api/modules/dreamLogs";
 import type {
+  ArchiveAdminAuditRecord,
+  ArchiveItem,
+  ArchiveReportResponse,
   DreamLogReportBbkBucket,
   DreamLogReportParams,
   DreamLogReportRecord,
@@ -39,7 +45,7 @@ import type {
   DreamLogReportStatusBucket,
   DreamLogReportTrendPoint,
   DreamLogReportUserRow,
-  ArchiveReportResponse,
+  ProtectedFileInfo,
 } from "../../../api/types/dreamLogs";
 import { BBK_ID_MAP, getBbkDisplayName } from "../../../constants/bbk";
 import styles from "./index.module.less";
@@ -47,6 +53,7 @@ import styles from "./index.module.less";
 const { RangePicker } = DatePicker;
 
 type DateRange = [Dayjs, Dayjs] | null;
+type ActiveTab = "governance" | "files";
 
 interface FilterDraft {
   dateRange: DateRange;
@@ -82,6 +89,17 @@ const STATUS_TEXT: Record<string, string> = {
 const TRIGGER_TEXT: Record<string, string> = {
   manual: "手动",
   cron: "定时",
+};
+
+const AUDIT_OPERATION_TEXT: Record<string, string> = {
+  purge_archive: "手动清理",
+  auto_purge_archive: "自动清理",
+};
+
+const AUDIT_STATUS_COLORS: Record<string, string> = {
+  success: "green",
+  failed: "red",
+  partial_success: "gold",
 };
 
 function formatNumber(value: number): string {
@@ -241,6 +259,7 @@ function BbkChart({ data }: { data: DreamLogReportBbkBucket[] }) {
 }
 
 export default function ContinuousGovernancePage() {
+  const [activeTab, setActiveTab] = useState<ActiveTab>("governance");
   const [draft, setDraft] = useState<FilterDraft>({
     dateRange: [dayjs().subtract(30, "day"), dayjs()],
   });
@@ -256,7 +275,15 @@ export default function ContinuousGovernancePage() {
   const [report, setReport] = useState<DreamLogReportResponse | null>(null);
   const [archiveReport, setArchiveReport] =
     useState<ArchiveReportResponse | null>(null);
+  const [archiveItems, setArchiveItems] = useState<ArchiveItem[]>([]);
+  const [archiveTotal, setArchiveTotal] = useState(0);
+  const [protectedFiles, setProtectedFiles] = useState<ProtectedFileInfo[]>([]);
+  const [protectedTotal, setProtectedTotal] = useState(0);
+  const [adminAudits, setAdminAudits] = useState<ArchiveAdminAuditRecord[]>([]);
+  const [auditTotal, setAuditTotal] = useState(0);
+  const [archiveLoaded, setArchiveLoaded] = useState(false);
   const [loading, setLoading] = useState(false);
+  const [archiveLoading, setArchiveLoading] = useState(false);
   const [drawerOpen, setDrawerOpen] = useState(false);
   const [selectedUser, setSelectedUser] =
     useState<DreamLogReportUserRow | null>(null);
@@ -269,23 +296,59 @@ export default function ContinuousGovernancePage() {
   const fetchReport = useCallback(async (params: DreamLogReportParams) => {
     setLoading(true);
     try {
-      const [data, archiveData] = await Promise.all([
-        dreamLogsApi.report(params),
-        dreamLogsApi.archiveReport(),
-      ]);
+      const data = await dreamLogsApi.report(params);
       setReport(data);
-      setArchiveReport(archiveData);
     } catch (error) {
       console.error("Failed to fetch continuous governance report:", error);
       message.error("持续治理分析加载失败");
+      setReport(null);
     } finally {
       setLoading(false);
+    }
+  }, []);
+
+  const fetchArchiveData = useCallback(async () => {
+    setArchiveLoading(true);
+    try {
+      const [reportData, itemsData, protectedData, auditsData] =
+        await Promise.all([
+          dreamLogsApi.archiveReport(),
+          dreamLogsApi.listArchiveItems({ page_size: 100 }),
+          dreamLogsApi.listProtectedFiles({ page_size: 100 }),
+          dreamLogsApi.listArchiveAdminAudits({ page_size: 100 }),
+        ]);
+      setArchiveReport(reportData);
+      setArchiveItems(itemsData.items || []);
+      setArchiveTotal(itemsData.total || 0);
+      setProtectedFiles(protectedData.items || []);
+      setProtectedTotal(protectedData.total || 0);
+      setAdminAudits(auditsData.items || []);
+      setAuditTotal(auditsData.total || 0);
+      setArchiveLoaded(true);
+    } catch (error) {
+      console.error("Failed to fetch file governance report:", error);
+      message.error("文件清理与归档加载失败");
+      setArchiveReport(null);
+      setArchiveItems([]);
+      setArchiveTotal(0);
+      setProtectedFiles([]);
+      setProtectedTotal(0);
+      setAdminAudits([]);
+      setAuditTotal(0);
+    } finally {
+      setArchiveLoading(false);
     }
   }, []);
 
   useEffect(() => {
     void fetchReport(query);
   }, [fetchReport, query]);
+
+  useEffect(() => {
+    if (activeTab === "files" && !archiveLoaded) {
+      void fetchArchiveData();
+    }
+  }, [activeTab, archiveLoaded, fetchArchiveData]);
 
   const loadUserRecords = useCallback(
     async (user: DreamLogReportUserRow, page: number, pageSize: number) => {
@@ -394,14 +457,14 @@ export default function ContinuousGovernancePage() {
         label: "归档文件",
         value: formatNumber(summary?.archived_files ?? 0),
         accent: "#0d9488",
-        icon: FileText,
+        icon: Archive,
       },
       {
         key: "protected_files",
         label: "保护文件",
         value: formatNumber(summary?.protected_files ?? 0),
         accent: "#0284c7",
-        icon: UserCheck,
+        icon: ShieldCheck,
       },
       {
         key: "pending_purge_files",
@@ -594,6 +657,181 @@ export default function ContinuousGovernancePage() {
     },
   ];
 
+  const archiveColumns: ColumnsType<ArchiveItem> = [
+    {
+      title: "目标用户",
+      dataIndex: "target_user_id",
+      key: "target_user_id",
+      width: 120,
+      render: (value) => value || "-",
+    },
+    {
+      title: "Agent",
+      dataIndex: "target_agent_id",
+      key: "target_agent_id",
+      width: 100,
+      render: (value) => value || "-",
+    },
+    {
+      title: "原路径",
+      dataIndex: "original_path",
+      key: "original_path",
+      width: 260,
+      render: (value) => <span className={styles.pathText}>{value}</span>,
+    },
+    {
+      title: "大小",
+      dataIndex: "size_bytes",
+      key: "size_bytes",
+      width: 110,
+      render: (value: number) => formatBytes(value),
+    },
+    {
+      title: "归档时间",
+      dataIndex: "archived_at",
+      key: "archived_at",
+      width: 160,
+      render: (value) => formatDateTime(value),
+    },
+    {
+      title: "归档人",
+      dataIndex: "archived_by",
+      key: "archived_by",
+      width: 120,
+      render: (value) => value || "-",
+    },
+    {
+      title: "状态",
+      dataIndex: "expired",
+      key: "expired",
+      width: 100,
+      render: (expired: boolean) =>
+        expired ? <Tag color="orange">待清理</Tag> : <Tag color="green">可恢复</Tag>,
+    },
+  ];
+
+  const protectedColumns: ColumnsType<ProtectedFileInfo> = [
+    {
+      title: "目标用户",
+      dataIndex: "target_user_id",
+      key: "target_user_id",
+      width: 120,
+    },
+    {
+      title: "Agent",
+      dataIndex: "target_agent_id",
+      key: "target_agent_id",
+      width: 100,
+    },
+    {
+      title: "路径",
+      dataIndex: "path",
+      key: "path",
+      width: 280,
+      render: (value) => <span className={styles.pathText}>{value}</span>,
+    },
+    {
+      title: "保护时间",
+      dataIndex: "protected_at",
+      key: "protected_at",
+      width: 160,
+      render: (value) => formatDateTime(value),
+    },
+    {
+      title: "保护人",
+      dataIndex: "protected_by",
+      key: "protected_by",
+      width: 120,
+      render: (value) => value || "-",
+    },
+    {
+      title: "原因",
+      dataIndex: "reason",
+      key: "reason",
+      width: 160,
+      render: (value) => value || "-",
+    },
+    {
+      title: "存在状态",
+      dataIndex: "exists",
+      key: "exists",
+      width: 110,
+      render: (exists: boolean) =>
+        exists ? <Tag color="green">存在</Tag> : <Tag color="orange">缺失</Tag>,
+    },
+    {
+      title: "大小",
+      dataIndex: "size_bytes",
+      key: "size_bytes",
+      width: 110,
+      render: (value?: number | null) => (value ? formatBytes(value) : "-"),
+    },
+  ];
+
+  const auditColumns: ColumnsType<ArchiveAdminAuditRecord> = [
+    {
+      title: "事件 ID",
+      dataIndex: "event_id",
+      key: "event_id",
+      width: 160,
+      render: (value) => <span className={styles.pathText}>{value}</span>,
+    },
+    {
+      title: "操作时间",
+      dataIndex: "timestamp",
+      key: "timestamp",
+      width: 160,
+      render: (value) => formatDateTime(value),
+    },
+    {
+      title: "管理员",
+      dataIndex: "actor_user_id",
+      key: "actor_user_id",
+      width: 120,
+    },
+    {
+      title: "目标用户",
+      dataIndex: "target_user_id",
+      key: "target_user_id",
+      width: 120,
+    },
+    {
+      title: "Agent",
+      dataIndex: "target_agent_id",
+      key: "target_agent_id",
+      width: 100,
+    },
+    {
+      title: "类型",
+      dataIndex: "operation",
+      key: "operation",
+      width: 120,
+      render: (value: string) => AUDIT_OPERATION_TEXT[value] || value,
+    },
+    {
+      title: "文件数",
+      dataIndex: "files_count",
+      key: "files_count",
+      width: 90,
+    },
+    {
+      title: "释放空间",
+      dataIndex: "total_size_bytes",
+      key: "total_size_bytes",
+      width: 110,
+      render: (value: number) => formatBytes(value),
+    },
+    {
+      title: "状态",
+      dataIndex: "status",
+      key: "status",
+      width: 100,
+      render: (value: string) => (
+        <Tag color={AUDIT_STATUS_COLORS[value] || "default"}>{value}</Tag>
+      ),
+    },
+  ];
+
   const applyFilters = () => {
     setQuery(buildParams(draft, 1, report?.page_size || 20));
   };
@@ -606,20 +844,21 @@ export default function ContinuousGovernancePage() {
     setQuery(buildParams(nextDraft, 1, 20));
   };
 
-  return (
-    <div className={styles.page}>
-      <div className={styles.header}>
+  const refreshActiveTab = () => {
+    if (activeTab === "files") {
+      void fetchArchiveData();
+      return;
+    }
+    void fetchReport(query);
+  };
+
+  const renderGovernanceTab = () => (
+    <>
+      <div className={styles.sectionHeader}>
         <div>
-          <h2>持续治理分析</h2>
+          <h3>持续治理分析</h3>
           <p>当前来源内所有可管理用户的持续治理覆盖、成功率和异常情况</p>
         </div>
-        <Button
-          icon={<RefreshCw size={16} />}
-          onClick={() => void fetchReport(query)}
-          loading={loading}
-        >
-          刷新
-        </Button>
       </div>
 
       <div className={styles.filterBar}>
@@ -700,7 +939,7 @@ export default function ContinuousGovernancePage() {
       </div>
 
       <div className={styles.kpiGrid}>
-        {[...kpis, ...archiveKpis].map((item) => (
+        {kpis.map((item) => (
           <KpiCard key={item.key} item={item} />
         ))}
       </div>
@@ -750,6 +989,117 @@ export default function ContinuousGovernancePage() {
           }}
         />
       </section>
+    </>
+  );
+
+  const renderFileGovernanceTab = () => (
+    <>
+      <div className={styles.sectionHeader}>
+        <div>
+          <h3>文件清理与归档</h3>
+          <p>当前来源内可管理用户的归档、保护文件和清理审计情况</p>
+        </div>
+      </div>
+
+      <Alert
+        className={styles.readonlyHint}
+        type="info"
+        showIcon
+        message="只读分析"
+        description="这里仅展示文件清理与归档状态，不提供清理、恢复、归档或取消保护操作。需要处理文件时请进入持续治理工作台。"
+      />
+
+      <div className={styles.kpiGrid}>
+        {archiveKpis.map((item) => (
+          <KpiCard key={item.key} item={item} />
+        ))}
+      </div>
+
+      <section className={styles.tablePanel}>
+        <div className={styles.panelHeader}>
+          <span>归档文件</span>
+          <span className={styles.panelMeta}>共 {archiveTotal} 个</span>
+        </div>
+        <Table
+          rowKey="id"
+          size="middle"
+          loading={archiveLoading}
+          columns={archiveColumns}
+          dataSource={archiveItems}
+          scroll={{ x: 970 }}
+          pagination={false}
+        />
+      </section>
+
+      <section className={styles.tablePanel}>
+        <div className={styles.panelHeader}>
+          <span>保护文件</span>
+          <span className={styles.panelMeta}>共 {protectedTotal} 个</span>
+        </div>
+        <Table
+          rowKey={(record) =>
+            `${record.target_user_id}:${record.target_agent_id}:${record.path}`
+          }
+          size="middle"
+          loading={archiveLoading}
+          columns={protectedColumns}
+          dataSource={protectedFiles}
+          scroll={{ x: 1160 }}
+          pagination={false}
+        />
+      </section>
+
+      <section className={styles.tablePanel}>
+        <div className={styles.panelHeader}>
+          <span>清理审计</span>
+          <span className={styles.panelMeta}>共 {auditTotal} 条记录</span>
+        </div>
+        <Table
+          rowKey="event_id"
+          size="middle"
+          loading={archiveLoading}
+          columns={auditColumns}
+          dataSource={adminAudits}
+          scroll={{ x: 1140 }}
+          pagination={false}
+        />
+      </section>
+    </>
+  );
+
+  return (
+    <div className={styles.page}>
+      <div className={styles.header}>
+        <div>
+          <h2>质量工程看板</h2>
+          <p>面向当前来源的持续治理质量与文件清理归档分析</p>
+        </div>
+        <Button
+          icon={<RefreshCw size={16} />}
+          onClick={refreshActiveTab}
+          loading={activeTab === "files" ? archiveLoading : loading}
+        >
+          刷新
+        </Button>
+      </div>
+
+      <Tabs
+        className={styles.tabs}
+        activeKey={activeTab}
+        onChange={(key) => setActiveTab(key as ActiveTab)}
+        items={[
+          {
+            key: "governance",
+            label: "持续治理分析",
+            children: renderGovernanceTab(),
+          },
+          {
+            key: "files",
+            label: "文件清理与归档",
+            children: renderFileGovernanceTab(),
+          },
+        ]}
+      />
 
       <Drawer
         title={
