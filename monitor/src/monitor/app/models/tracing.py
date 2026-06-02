@@ -253,6 +253,8 @@ class OverviewStats(BaseModel):
     online_users: int = 0
     online_user_ids: list[str] = Field(default_factory=list)
     total_users: int = 0
+    it_users: int = 0  # IT人员数量（80/IT开头的用户ID）
+    business_users: int = 0  # 业务人员数量（其他用户）
     model_distribution: list[ModelUsage] = Field(default_factory=list)
     total_tokens: int = 0
     input_tokens: int = 0
@@ -306,6 +308,16 @@ class TaskStatusSummary(BaseModel):
     success: int = 0  # 成功次数
     failed: int = 0  # 失败次数
     cancelled: int = 0  # 已取消/跳过次数
+    read_count: int = 0  # 已读次数
+    new_cron_tasks: int = 0  # 新增定时任务数（本时间段内创建的）
+
+
+class ErrorSummary(BaseModel):
+    """报错分析汇总统计."""
+
+    total_errors: int = 0  # 报错总数
+    model_errors: int = 0  # 模型报错（llm_input）
+    tool_errors: int = 0  # 工具报错（tool_call_end）
 
 
 class DepthSummary(BaseModel):

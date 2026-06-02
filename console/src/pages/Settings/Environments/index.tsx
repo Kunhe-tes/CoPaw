@@ -303,7 +303,7 @@ function EnvironmentsPage() {
     <div className={styles.environmentsPage}>
       {/* ---- Page header ---- */}
       <PageHeader
-        parent={t("environments.parent")}
+        parent={t("nav.systemSettings")}
         current={t("environments.environments")}
       />
 

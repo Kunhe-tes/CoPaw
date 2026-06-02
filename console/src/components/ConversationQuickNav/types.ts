@@ -1,4 +1,5 @@
 import type { IAgentScopeRuntimeWebUIMessage } from "@/components/agentscope-chat";
+import type { RefObject } from "react";
 
 /**
  * 问题信息结构
@@ -16,6 +17,10 @@ export interface QuestionInfo {
 export interface ConversationQuickNavProps {
   /** 最小问题数量才显示（默认 1） */
   minQuestions?: number;
+  /** 外部传入的消息列表；不传时读取会话页上下文 */
+  messages?: IAgentScopeRuntimeWebUIMessage[];
+  /** 限定查询和滚动的根节点，避免弹窗与主会话互相影响 */
+  scrollRootRef?: RefObject<HTMLElement | null>;
 }
 
 /**

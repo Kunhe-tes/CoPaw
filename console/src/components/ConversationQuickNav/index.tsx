@@ -8,10 +8,19 @@ import Style from "./style";
 
 export default function ConversationQuickNav({
   minQuestions = 1,
+  messages,
+  scrollRootRef,
 }: ConversationQuickNavProps) {
-  const { questions, shouldShow } = useQuestionMessages(minQuestions);
-  const { scrollToMessage } = useScrollToMessage();
-  const { currentQuestionId, setCurrent } = useCurrentQuestion(questions);
+  const { questions, shouldShow } = useQuestionMessages(
+    minQuestions,
+    messages,
+    scrollRootRef,
+  );
+  const { scrollToMessage } = useScrollToMessage(scrollRootRef);
+  const { currentQuestionId, setCurrent } = useCurrentQuestion(
+    questions,
+    scrollRootRef,
+  );
   const [isContainerHovered, setIsContainerHovered] = useState(false);
 
   if (!shouldShow) {

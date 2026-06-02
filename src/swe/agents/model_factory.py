@@ -746,6 +746,16 @@ def _get_model_slot(
 ):
     """Get active model slot from provider manager."""
     from ..tenant_models.models import ModelSlot
+    from ..app.crons.model_slot_context import (
+        get_current_model_slot_override,
+    )
+
+    override = get_current_model_slot_override()
+    if override and override.provider_id and override.model:
+        return ModelSlot(
+            provider_id=override.provider_id,
+            model=override.model,
+        )
 
     active_model = manager.get_active_model()
     if (

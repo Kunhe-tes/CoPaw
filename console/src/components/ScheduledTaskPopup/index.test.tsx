@@ -15,6 +15,29 @@ vi.mock("@/hooks/useAppMessage", () => ({
   useAppMessage: () => ({ message: mocks.message }),
 }));
 
+vi.mock("@/api/modules/provider", () => ({
+  providerApi: {
+    listProviders: vi.fn().mockResolvedValue([
+      {
+        id: "openai",
+        name: "OpenAI",
+        require_api_key: true,
+        api_key: "sk-test",
+        base_url: "https://api.openai.com",
+        is_custom: false,
+        models: [{ id: "gpt-5.4", name: "GPT-5.4" }],
+        extra_models: [],
+      },
+    ]),
+    getActiveModels: vi.fn().mockResolvedValue({
+      active_llm: {
+        provider_id: "openai",
+        model: "gpt-5.4",
+      },
+    }),
+  },
+}));
+
 describe("ScheduledTaskPopup", () => {
   const defaultProps = {
     open: true,
@@ -52,6 +75,15 @@ describe("ScheduledTaskPopup", () => {
       const confirmBtns = screen.getAllByText("确认");
       expect(cancelBtns.length).toBeGreaterThan(0);
       expect(confirmBtns.length).toBeGreaterThan(0);
+    });
+
+    it("defaults execution model selector to tenant default", async () => {
+      render(<ScheduledTaskPopup {...defaultProps} />);
+
+      const modelSelect = await screen.findByRole("combobox", {
+        name: "执行模型",
+      });
+      expect(modelSelect).toHaveValue("__DEFAULT__");
     });
   });
 
@@ -278,6 +310,7 @@ describe("ScheduledTaskPopup", () => {
         const [cronExpr, config] = onConfirm.mock.calls[0];
         expect(cronExpr).toMatch(/^\d{2} \d{2} \* \* \*$/);
         expect(config.frequency).toBe("daily");
+        expect(onConfirm.mock.calls[0][2]).toBeUndefined();
       });
     });
 
@@ -314,6 +347,27 @@ describe("ScheduledTaskPopup", () => {
         expect(config.frequency).toBe("monthly");
         expect(config.dates).toContain(1);
         expect(config.dates).toContain(15);
+      });
+    });
+
+    it("passes explicit model_slot when user selects a configured model", async () => {
+      const onConfirm = vi.fn().mockResolvedValue(undefined);
+      render(<ScheduledTaskPopup {...defaultProps} onConfirm={onConfirm} />);
+
+      const modelSelect = await screen.findByRole("combobox", {
+        name: "执行模型",
+      });
+      fireEvent.change(modelSelect, {
+        target: { value: "openai::gpt-5.4" },
+      });
+      fireEvent.click(screen.getAllByText("确认")[0]);
+
+      await waitFor(() => {
+        expect(onConfirm).toHaveBeenCalled();
+        expect(onConfirm.mock.calls[0][2]).toEqual({
+          provider_id: "openai",
+          model: "gpt-5.4",
+        });
       });
     });
   });

@@ -485,6 +485,14 @@ current_recent_max_bytes: ContextVar[int | None] = ContextVar(
     "current_recent_max_bytes",
     default=None,
 )
+current_file_read_max_bytes: ContextVar[int | None] = ContextVar(
+    "current_file_read_max_bytes",
+    default=None,
+)
+current_tool_result_retention_days: ContextVar[int | None] = ContextVar(
+    "current_tool_result_retention_days",
+    default=None,
+)
 
 
 def get_current_recent_max_bytes() -> int | None:
@@ -503,6 +511,26 @@ def set_current_recent_max_bytes(max_bytes: int | None) -> None:
         max_bytes: Byte limit for recent tool output truncation.
     """
     current_recent_max_bytes.set(max_bytes)
+
+
+def get_current_file_read_max_bytes() -> int | None:
+    """读取当前 source 生效后的文件读取即时截断阈值。"""
+    return current_file_read_max_bytes.get()
+
+
+def set_current_file_read_max_bytes(max_bytes: int | None) -> None:
+    """设置当前 source 生效后的文件读取即时截断阈值。"""
+    current_file_read_max_bytes.set(max_bytes)
+
+
+def get_current_tool_result_retention_days() -> int | None:
+    """读取当前请求解析后的工具结果保留天数。"""
+    return current_tool_result_retention_days.get()
+
+
+def set_current_tool_result_retention_days(days: int | None) -> None:
+    """设置当前请求解析后的工具结果保留天数。"""
+    current_tool_result_retention_days.set(days)
 
 
 # Context variable to store request-level passthrough headers for MCP

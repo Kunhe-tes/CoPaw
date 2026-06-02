@@ -231,7 +231,7 @@ function SecurityPage() {
   return (
     <div className={styles.securityPage}>
       <PageHeader
-        parent={t("security.parent")}
+        parent={t("nav.systemSettings")}
         current={t("security.security")}
       />
 

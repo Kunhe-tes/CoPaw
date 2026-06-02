@@ -52,7 +52,12 @@ class TenantWorkspacePool:
     MultiAgentManager.get_agent() on demand.
     """
 
-    def __init__(self, base_working_dir: Path):
+    def __init__(
+        self,
+        base_working_dir: Path,
+        *,
+        source_system_config_service: object | None = None,
+    ):
         """Initialize the tenant workspace pool.
 
         Args:
@@ -61,6 +66,7 @@ class TenantWorkspacePool:
         """
         self._base_working_dir = Path(base_working_dir).expanduser().resolve()
         self._base_working_dir.mkdir(parents=True, exist_ok=True)
+        self._source_system_config_service = source_system_config_service
 
         # Tenant workspace registry: tenant_id -> TenantWorkspaceEntry
         self._workspaces: dict[str, TenantWorkspaceEntry] = {}
@@ -74,6 +80,13 @@ class TenantWorkspacePool:
         logger.info(
             f"TenantWorkspacePool initialized at {self._base_working_dir}",
         )
+
+    def set_source_system_config_service(
+        self,
+        source_system_config_service: object | None,
+    ) -> None:
+        """Update the source config service for future workspaces."""
+        self._source_system_config_service = source_system_config_service
 
     def _get_tenant_workspace_dir(self, tenant_id: str) -> Path:
         """Get the workspace directory for a tenant.
@@ -556,6 +569,7 @@ class TenantWorkspacePool:
                     / agent_id,
                 ),
                 tenant_id=tenant_id,
+                source_system_config_service=self._source_system_config_service,
             )
 
             if entry is None:

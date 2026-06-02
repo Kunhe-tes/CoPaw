@@ -15,9 +15,12 @@ import { isHistorySessionActive } from "./historySessions";
 import sendIcon from "../../../../assets/icons/new_chat.svg";
 import operateIcon from "../../../../assets/icons/operate.svg";
 import guideImage from "@/assets/others/note.png";
+import { OPS_MODE_KEY } from "@/layouts/Header";
 // import { useChatAnywhereSessionsState } from '@/components/agentscope-chat';
 import { ChatAnywhereSessionsContext } from "@/components/agentscope-chat";
+import { useChatAnywhereMessages } from "@/components/agentscope-chat/AgentScopeRuntimeWebUI/core/Context/ChatAnywhereMessagesContext";
 import { useAgentStore } from "@/stores/agentStore";
+import { useIframeStore } from "@/stores/iframeStore";
 import sessionApi from "../../sessionApi";
 import { getSessionAgentId } from "../../sessionApi/sessionAgent";
 import { resolveRequestedSessionId } from "../../sessionApi/resolvedSessionMapping";
@@ -115,15 +118,93 @@ export default function ChatSidebar(props: ChatSidebarProps) {
     ChatAnywhereSessionsContext,
     (value) => value.setSessions,
   );
+  const setCurrentSessionId = useContextSelector(
+    ChatAnywhereSessionsContext,
+    (value) => value.setCurrentSessionId,
+  );
   const isSessionsListLoading = useContextSelector(
     ChatAnywhereSessionsContext,
     (value) => value.isSessionsListLoading,
   );
+  const setSessionsListLoading = useContextSelector(
+    ChatAnywhereSessionsContext,
+    (value) => value.setSessionsListLoading,
+  );
+  const { removeAllMessages } = useChatAnywhereMessages();
   const { selectedAgent, setSelectedAgent } = useAgentStore();
+  const userId = useIframeStore((state) => state.userId);
+  const source = useIframeStore((state) => state.source);
+  const identityKey = `${userId ?? ""}|${source ?? ""}`;
+  const previousIdentityKeyRef = useRef(identityKey);
+  const previousOpsModeRef = useRef(
+    sessionStorage.getItem(OPS_MODE_KEY) === "true",
+  );
 
   const currentChatId = location.pathname.match(/^\/chat\/(.+)$/)?.[1] || null;
   const currentChatIdRef = useRef<string | null>(currentChatId);
+  const pathnameRef = useRef(location.pathname);
   currentChatIdRef.current = currentChatId;
+  pathnameRef.current = location.pathname;
+
+  useEffect(() => {
+    if (previousIdentityKeyRef.current === identityKey) {
+      return;
+    }
+
+    const opsModeEnabled = sessionStorage.getItem(OPS_MODE_KEY) === "true";
+    const isOpsModeIdentityChange =
+      opsModeEnabled || previousOpsModeRef.current;
+    previousIdentityKeyRef.current = identityKey;
+    previousOpsModeRef.current = opsModeEnabled;
+    if (!isOpsModeIdentityChange) {
+      return;
+    }
+
+    let cancelled = false;
+    sessionApi.resetForIdentityChange();
+    setSessionsListLoading(true);
+    setSessionLoading(false);
+    setCurrentSessionId(undefined);
+    setSessions([]);
+    removeAllMessages();
+
+    if (pathnameRef.current.startsWith("/chat/")) {
+      navigate("/chat", { replace: true });
+    }
+
+    void sessionApi
+      .getSessionList()
+      .then((sessionList) => {
+        if (cancelled) {
+          return;
+        }
+        setSessions(sessionList);
+        setCurrentSessionId(sessionList[0]?.id);
+      })
+      .catch(() => {
+        if (!cancelled) {
+          setSessions([]);
+          setCurrentSessionId(undefined);
+        }
+      })
+      .finally(() => {
+        if (!cancelled) {
+          setSessionsListLoading(false);
+        }
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [
+    identityKey,
+    navigate,
+    removeAllMessages,
+    setCurrentSessionId,
+    setSessionLoading,
+    setSessions,
+    setSessionsListLoading,
+  ]);
 
   // 刷新共享 sessions 状态
   const refreshSessions = useCallback(async () => {

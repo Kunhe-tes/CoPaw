@@ -15,6 +15,8 @@ from typing import List, Tuple
 
 from ...config.context import (
     get_current_effective_tenant_id,
+    get_current_source_id,
+    get_current_tenant_id,
     get_current_user_id,
 )
 
@@ -36,13 +38,18 @@ INTERCEPT_RULES: List[InterceptRule] = [
     # swe cron create 需要注入 tenant-id 和 target-user
     InterceptRule(
         command_prefix="swe cron create",
-        inject_params=["--tenant-id", "--target-user", "--creator-user"],
+        inject_params=[
+            "--tenant-id",
+            "--source-id",
+            "--target-user",
+            "--creator-user",
+        ],
         inject_position="at_end",
     ),
     # swe cron 其他子命令只需注入 tenant-id
     InterceptRule(
         command_prefix="swe cron",
-        inject_params=["--tenant-id"],
+        inject_params=["--tenant-id", "--source-id"],
         inject_position="at_end",
     ),
 ]
@@ -85,7 +92,8 @@ def intercept_command(command: str) -> Tuple[str, bool]:
     Returns:
         Tuple of (modified_command, was_intercepted)
     """
-    tenant_id = get_current_effective_tenant_id()
+    tenant_id = get_current_tenant_id()
+    source_id = get_current_source_id()
     user_id = get_current_user_id()
 
     # 如果没有用户上下文，不修改命令
@@ -123,6 +131,8 @@ def intercept_command(command: str) -> Tuple[str, bool]:
             # 根据参数类型获取值
             if param == "--tenant-id" and tenant_id:
                 inject_parts.append(f"{param} {tenant_id}")
+            elif param == "--source-id" and source_id:
+                inject_parts.append(f"{param} {source_id}")
             elif param == "--target-user" and user_id:
                 inject_parts.append(f"{param} {user_id}")
             elif param == "--creator-user" and user_id:
@@ -148,6 +158,8 @@ def intercept_command(command: str) -> Tuple[str, bool]:
                     continue
                 if param == "--tenant-id" and tenant_id:
                     inject_tokens.extend([param, tenant_id])
+                elif param == "--source-id" and source_id:
+                    inject_tokens.extend([param, source_id])
                 elif param == "--target-user" and user_id:
                     inject_tokens.extend([param, user_id])
                 elif param == "--creator-user" and user_id:

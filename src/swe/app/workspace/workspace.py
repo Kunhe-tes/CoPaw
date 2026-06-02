@@ -86,6 +86,7 @@ class Workspace:
         agent_id: str,
         workspace_dir: str,
         tenant_id: Optional[str] = None,
+        source_system_config_service: object | None = None,
     ):
         """Initialize agent instance.
 
@@ -97,6 +98,7 @@ class Workspace:
         self.agent_id = agent_id
         self.workspace_dir = Path(workspace_dir).expanduser()
         self.tenant_id = tenant_id
+        self._source_system_config_service = source_system_config_service
         self.workspace_dir.mkdir(parents=True, exist_ok=True)
 
         # Service manager (unified component management)
@@ -220,6 +222,7 @@ class Workspace:
                 init_args=lambda ws: {
                     "working_dir": str(ws.workspace_dir),
                     "agent_id": ws.agent_id,
+                    "tenant_id": ws.tenant_id,
                 },
                 post_init=lambda ws, mm: setattr(
                     ws._service_manager.services["runner"],
@@ -291,6 +294,9 @@ class Workspace:
                     "agent_id": ws.agent_id,
                     "tenant_id": ws.tenant_id,
                     "scheduler_adapter": _build_scheduler_adapter(),
+                    "source_system_config_service": (
+                        ws._source_system_config_service
+                    ),
                 },
                 start_method="start",
                 stop_method="stop",

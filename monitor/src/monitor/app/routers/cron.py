@@ -20,6 +20,8 @@ from ..models.cron import (
     PaginatedResponse,
     ExecutionDetailResponse,
     MarkReadResponse,
+    SubscriptionDetailItem,
+    SubscriptionOverviewItem,
     UnreadCountResponse,
 )
 from ..services.cron import QueryService, get_query_service
@@ -65,6 +67,7 @@ async def list_jobs(
         default=None,
         description="创建者ID筛选",
     ),
+    job_origin: str | None = Query(default=None, description="任务来源筛选"),
     status: str | None = Query(default=None, description="状态筛选"),
     enabled: bool | None = Query(default=None, description="是否启用筛选"),
     page: int = Query(default=1, ge=1, description="页码"),
@@ -93,12 +96,69 @@ async def list_jobs(
         bbk_id=bbk_id,
         source_id=actual_source_id,
         creator_user_id=creator_user_id,
+        job_origin=job_origin,
         status=status,
         enabled=enabled,
         page=page,
         page_size=page_size,
     )
     return await service.list_jobs(params)
+
+
+@router.get(
+    "/subscription-overview",
+    response_model=PaginatedResponse[SubscriptionOverviewItem],
+)
+async def get_subscription_overview(
+    keyword: str | None = Query(default=None, description="订阅任务名称搜索"),
+    tenant_id: str | None = Query(default=None, description="租户ID筛选"),
+    bbk_id: str | None = Query(default=None, description="所属机构筛选"),
+    source_id: str | None = Query(default=None, description="来源筛选"),
+    start_time: datetime | None = Query(default=None, description="开始时间"),
+    end_time: datetime | None = Query(default=None, description="结束时间"),
+    page: int = Query(default=1, ge=1, description="页码"),
+    page_size: int = Query(default=10, ge=1, le=100, description="每页数量"),
+    service: QueryService = Depends(get_query_service),
+) -> PaginatedResponse[SubscriptionOverviewItem]:
+    """查询订阅任务概览聚合数据。"""
+    return await service.get_subscription_overview(
+        keyword=keyword,
+        tenant_id=tenant_id,
+        bbk_id=bbk_id,
+        source_id=source_id,
+        start_time=start_time,
+        end_time=end_time,
+        page=page,
+        page_size=page_size,
+    )
+
+
+@router.get(
+    "/subscription-overview/{subscription_key}/jobs",
+    response_model=PaginatedResponse[SubscriptionDetailItem],
+)
+async def get_subscription_details(
+    subscription_key: str,
+    tenant_id: str | None = Query(default=None, description="租户ID筛选"),
+    bbk_id: str | None = Query(default=None, description="所属机构筛选"),
+    source_id: str | None = Query(default=None, description="来源筛选"),
+    start_time: datetime | None = Query(default=None, description="开始时间"),
+    end_time: datetime | None = Query(default=None, description="结束时间"),
+    page: int = Query(default=1, ge=1, description="页码"),
+    page_size: int = Query(default=10, ge=1, le=100, description="每页数量"),
+    service: QueryService = Depends(get_query_service),
+) -> PaginatedResponse[SubscriptionDetailItem]:
+    """查询订阅任务详情弹窗数据。"""
+    return await service.get_subscription_details(
+        subscription_key=subscription_key,
+        tenant_id=tenant_id,
+        bbk_id=bbk_id,
+        source_id=source_id,
+        start_time=start_time,
+        end_time=end_time,
+        page=page,
+        page_size=page_size,
+    )
 
 
 @router.get("/jobs/{job_id}", response_model=CronJobModel)

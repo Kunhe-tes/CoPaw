@@ -1,3 +1,5 @@
+import type { ReactNode } from "react";
+
 export interface UserRow {
   userId: string;
   userName?: string;
@@ -27,7 +29,7 @@ export interface BreakdownItem {
 export interface OverviewMetricCard {
   key: string;
   title: string;
-  valueText: string;
+  valueText: ReactNode;
   changeText: string;
   changeDirection: "up" | "down" | "flat";
   accentColor: string;

@@ -1,3 +1,4 @@
+import type { RefObject } from "react";
 import { useState, useEffect, useCallback, useRef } from "react";
 
 interface Question {
@@ -10,7 +11,34 @@ interface Question {
  * 追踪当前滚动位置对应的问题
  * 通过检查所有问题元素位置，找到最接近视口顶部的问题
  */
-export function useCurrentQuestion(questions: Question[]) {
+function findMessageElement(
+  messageId: string,
+  scrollRootRef?: RefObject<HTMLElement | null>,
+): HTMLElement | null {
+  const root = scrollRootRef?.current;
+  if (!root) {
+    return document.getElementById(messageId);
+  }
+  return (
+    Array.from(root.querySelectorAll<HTMLElement>("[id]")).find(
+      (element) => element.id === messageId,
+    ) ?? null
+  );
+}
+
+function findScrollContainer(
+  scrollRootRef?: RefObject<HTMLElement | null>,
+): Element | null {
+  return (
+    scrollRootRef?.current?.querySelector('[class*="bubble-list-scroll"]') ??
+    document.querySelector('[class*="bubble-list-scroll"]')
+  );
+}
+
+export function useCurrentQuestion(
+  questions: Question[],
+  scrollRootRef?: RefObject<HTMLElement | null>,
+) {
   // 初始状态：如果有问题则默认第一个，否则null
   const [currentQuestionId, setCurrentQuestionId] = useState<string | null>(
     questions[0]?.id || null
@@ -50,7 +78,7 @@ export function useCurrentQuestion(questions: Question[]) {
 
     // 按顺序检查所有问题（从上到下）
     for (const question of currentQuestions) {
-      const element = document.getElementById(question.id);
+      const element = findMessageElement(question.id, scrollRootRef);
       if (!element) continue;
 
       const rect = element.getBoundingClientRect();
@@ -76,7 +104,7 @@ export function useCurrentQuestion(questions: Question[]) {
       // 找最接近viewportTop的上方的元素
       let maxBottom = -Infinity;
       for (const question of currentQuestions) {
-        const element = document.getElementById(question.id);
+        const element = findMessageElement(question.id, scrollRootRef);
         if (!element) continue;
 
         const rect = element.getBoundingClientRect();
@@ -102,7 +130,7 @@ export function useCurrentQuestion(questions: Question[]) {
         return prev;
       });
     }
-  }, []);
+  }, [scrollRootRef]);
 
   // 当 questions 变化时，立即检查当前问题
   useEffect(() => {
@@ -118,7 +146,7 @@ export function useCurrentQuestion(questions: Question[]) {
     if (questions.length === 0) return;
 
     // 找到滚动容器
-    const scrollContainer = document.querySelector('[class*="bubble-list-scroll"]');
+    const scrollContainer = findScrollContainer(scrollRootRef);
     if (!scrollContainer) return;
 
     // 使用RAF包装的滚动处理
@@ -165,7 +193,7 @@ export function useCurrentQuestion(questions: Question[]) {
         clearTimeout(manualSelectTimeoutRef.current);
       }
     };
-  }, [questions.length, checkCurrentQuestion]);
+  }, [questions.length, checkCurrentQuestion, scrollRootRef]);
 
   // 手动设置当前问题的方法（点击时使用）
   const setCurrent = useCallback((id: string) => {

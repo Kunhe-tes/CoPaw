@@ -133,19 +133,29 @@ class ReMeLightMemoryManager(BaseMemoryManager):
     - Vector and full-text search via memory_search()
     """
 
-    def __init__(self, working_dir: str, agent_id: str):
+    def __init__(
+        self,
+        working_dir: str,
+        agent_id: str,
+        tenant_id: str | None = None,
+    ):
         """Initialize with ReMeLight.
 
         Args:
             working_dir: Working directory for memory storage.
             agent_id: Agent ID for config loading.
+            tenant_id: Optional tenant identifier for scoped config access.
 
         Embedding priority: config > env var (EMBEDDING_API_KEY /
         EMBEDDING_BASE_URL / EMBEDDING_MODEL_NAME).
         Backend: MEMORY_STORE_BACKEND env var (auto/local/chroma,
         default auto).
         """
-        super().__init__(working_dir=working_dir, agent_id=agent_id)
+        super().__init__(
+            working_dir=working_dir,
+            agent_id=agent_id,
+            tenant_id=tenant_id,
+        )
         self._reme_version_ok: bool = self._check_reme_version()
         self._reme = None
 
@@ -192,7 +202,7 @@ See: https://docs.trychroma.com/docs/overview/troubleshooting#sqlite
 
         fts_enabled = EnvVarLoader.get_bool("FTS_ENABLED", True)
 
-        agent_config = load_agent_config(self.agent_id)
+        agent_config = self._load_agent_config()
         rebuild_on_start = (
             agent_config.running.memory_summary.rebuild_memory_index_on_start
         )
@@ -255,6 +265,15 @@ See: https://docs.trychroma.com/docs/overview/troubleshooting#sqlite
                 " to align.",
             )
 
+    def _load_agent_config(self, tenant_id: str | None = None):
+        resolved_tenant_id = (
+            tenant_id if tenant_id is not None else self.tenant_id
+        )
+        return load_agent_config(
+            self.agent_id,
+            tenant_id=resolved_tenant_id,
+        )
+
     def _prepare_model_formatter(self) -> None:
         """Lazily initialize chat_model and formatter if not already set."""
         self._warn_if_version_mismatch()
@@ -271,7 +290,7 @@ See: https://docs.trychroma.com/docs/overview/troubleshooting#sqlite
         """Return embedding config with priority:
         config > env var > default."""
         self._warn_if_version_mismatch()
-        cfg = load_agent_config(self.agent_id).running.embedding_config
+        cfg = self._load_agent_config().running.embedding_config
         return {
             "backend": cfg.backend,
             "api_key": cfg.api_key
@@ -351,7 +370,7 @@ See: https://docs.trychroma.com/docs/overview/troubleshooting#sqlite
         """
         self._prepare_model_formatter()
 
-        agent_config = load_agent_config(self.agent_id)
+        agent_config = self._load_agent_config()
         cc = agent_config.running.context_compact
 
         result = await self._reme.compact_memory(
@@ -404,7 +423,7 @@ See: https://docs.trychroma.com/docs/overview/troubleshooting#sqlite
         """Generate a comprehensive summary of the given messages."""
         self._prepare_model_formatter()
 
-        agent_config = load_agent_config(self.agent_id)
+        agent_config = self._load_agent_config()
         cc = agent_config.running.context_compact
 
         set_current_workspace_dir(Path(self.working_dir))
@@ -454,7 +473,7 @@ See: https://docs.trychroma.com/docs/overview/troubleshooting#sqlite
         self._warn_if_version_mismatch()
         if self._reme is None:
             return None
-        agent_config = load_agent_config(self.agent_id)
+        agent_config = self._load_agent_config()
         return self._reme.get_in_memory_memory(
             as_token_counter=get_swe_token_counter(agent_config),
         )

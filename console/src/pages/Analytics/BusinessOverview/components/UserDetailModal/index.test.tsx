@@ -153,6 +153,8 @@ describe("UserDetailModal", () => {
       expect(tracingApiMock.getUserChats).toHaveBeenCalledWith("user-001");
     });
 
-    expect(sessionCardListMock).toHaveBeenCalled();
+    await waitFor(() => {
+      expect(sessionCardListMock).toHaveBeenCalled();
+    });
   });
 });

@@ -114,6 +114,8 @@ import {
   resolveActivePlanModeSession,
   type PlanModeSessionLike,
 } from "./planMode";
+import { AutoPreviewHtmlProvider } from "@/components/agentscope-chat/AutoPreviewHtmlContext";
+import { HtmlPreviewTrackingProvider } from "@/components/agentscope-chat/HtmlPreviewTrackingContext";
 import type {
   ChatApprovalActionCardData,
   ChatPlanInteractionCardData,
@@ -502,9 +504,10 @@ function ActivePlanModeControl({
   displayLabel?: string;
   onDisable: () => void;
 }) {
-  const { disabled } = useChatAnywhereInput((value) => ({
+  const inputState = useChatAnywhereInput((value) => ({
     disabled: Boolean(value.disabled),
   }));
+  const disabled = Boolean(inputState.disabled);
 
   return (
     <ActivePlanModeButton
@@ -537,13 +540,15 @@ export default function ChatPage() {
   );
   const { selectedAgent } = useAgentStore();
   const [refreshKey, setRefreshKey] = useState(0);
+  const [autoPreviewTriggerKey, setAutoPreviewTriggerKey] = useState(0);
   const [isDragging, setIsDragging] = useState(false);
   const dragCounterRef = useRef(0);
   const runtimeLoadingBridgeRef = useRef<RuntimeLoadingBridgeApi | null>(null);
   const { message } = useAppMessage();
-  const { disabled: composerDisabled } = useChatAnywhereInput((value) => ({
+  const composerInputState = useChatAnywhereInput((value) => ({
     disabled: Boolean(value.disabled),
   }));
+  const composerDisabled = Boolean(composerInputState.disabled);
   const {
     sessions,
     setSessionLoading,
@@ -792,14 +797,10 @@ export default function ChatPage() {
     const chatId = task?.task?.chat_id;
 
     if (chatId) {
-      console.info("[Chat] Navigating from taskId to chatId:", {
-        taskId: taskIdRef.current,
-        chatId,
-      });
+      setAutoPreviewTriggerKey((prev) => prev + 1);
       navigate(`/chat/${chatId}`, { replace: true });
       taskIdRef.current = null;
     } else {
-      console.warn("[Chat] taskId not found or no chat_id:", taskIdRef.current);
       taskIdRef.current = null;
     }
   }, [jobs, navigate]);
@@ -1139,12 +1140,16 @@ export default function ChatPage() {
     (task: CronJobSpecOutput) => {
       const taskOpenTarget = getTaskOpenTarget(task);
       if (!taskOpenTarget) return;
+      const shouldAutoPreviewOnOpen = taskOpenTarget !== chatIdRef.current;
 
       // Force loading to render immediately before navigate triggers re-render
       flushSync(() => {
         setSessionLoading(true);
       });
 
+      if (shouldAutoPreviewOnOpen) {
+        setAutoPreviewTriggerKey((prev) => prev + 1);
+      }
       navigate(`/chat/${taskOpenTarget}`, { replace: true });
     },
     [navigate, setSessionLoading],
@@ -1598,6 +1603,14 @@ export default function ChatPage() {
     ],
   );
 
+  const htmlPreviewTrackingContextValue = useMemo(
+    () => ({
+      cronTaskId: feedbackTask?.cronTaskId || null,
+      cronTaskName: feedbackTask?.cronTaskName || null,
+    }),
+    [feedbackTask],
+  );
+
   const options = useMemo(() => {
     const i18nConfig = getDefaultConfig(
       t,
@@ -1859,43 +1872,50 @@ export default function ChatPage() {
   return (
     <AgentScopeRuntimeWebUIComposedProvider options={options} cards={cards}>
       <ChatFeedbackRenderProvider value={feedbackRenderContextValue}>
-        <div
-          style={{
-            height: "100%",
-            width: "100%",
-            display: "flex",
-            flexDirection: "row",
-          }}
-        >
-          {/* ==================== 首页改版 (Kun He) ==================== */}
-          {/* 聊天专用侧栏：支持折叠为64px工具条 */}
-          <ChatSidebar
-            tasks={tasks}
-            selectedTaskId={currentTask?.id}
-            onCreateSession={handleCreateSessionFromSidebar}
-            onTaskClick={handleTaskOpen}
-            onTaskPause={handleTaskPause}
-            onTaskRun={handleTaskRun}
-            onTaskResume={handleTaskResume}
-            onTaskDelete={handleTaskDelete}
-          />
-          {/* ==================== 首页改版结束 ==================== */}
-          <div
-            className={styles.chatMessagesArea}
-            style={{ flex: 1, minWidth: 0, position: "relative" }}
-            onDragEnter={handleDragEnter}
-            onDragLeave={handleDragLeave}
-            onDragOver={handleDragOver}
-            onDrop={handleDrop}
+        <HtmlPreviewTrackingProvider value={htmlPreviewTrackingContextValue}>
+          <AutoPreviewHtmlProvider
+            triggerKey={autoPreviewTriggerKey}
+            onConsumed={() => setAutoPreviewTriggerKey(0)}
           >
-            <AgentScopeRuntimeWebUILayout ref={chatRef} key={refreshKey} />
-            <DragUploadOverlay
-              visible={isDragging}
-              onClose={handleDragOverlayClose}
-            />
-            <ConversationQuickNav />
-          </div>
-        </div>
+            <div
+              style={{
+                height: "100%",
+                width: "100%",
+                display: "flex",
+                flexDirection: "row",
+              }}
+            >
+              {/* ==================== 首页改版 (Kun He) ==================== */}
+              {/* 聊天专用侧栏：支持折叠为64px工具条 */}
+              <ChatSidebar
+                tasks={tasks}
+                selectedTaskId={currentTask?.id}
+                onCreateSession={handleCreateSessionFromSidebar}
+                onTaskClick={handleTaskOpen}
+                onTaskPause={handleTaskPause}
+                onTaskRun={handleTaskRun}
+                onTaskResume={handleTaskResume}
+                onTaskDelete={handleTaskDelete}
+              />
+              {/* ==================== 首页改版结束 ==================== */}
+              <div
+                className={styles.chatMessagesArea}
+                style={{ flex: 1, minWidth: 0, position: "relative" }}
+                onDragEnter={handleDragEnter}
+                onDragLeave={handleDragLeave}
+                onDragOver={handleDragOver}
+                onDrop={handleDrop}
+              >
+                <AgentScopeRuntimeWebUILayout ref={chatRef} key={refreshKey} />
+                <DragUploadOverlay
+                  visible={isDragging}
+                  onClose={handleDragOverlayClose}
+                />
+                <ConversationQuickNav />
+              </div>
+            </div>
+          </AutoPreviewHtmlProvider>
+        </HtmlPreviewTrackingProvider>
       </ChatFeedbackRenderProvider>
 
       <Modal

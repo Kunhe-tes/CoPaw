@@ -10,6 +10,7 @@ from typing import Any, Optional
 from ...database import get_db_connection, DatabaseConnection
 from ....utils.bbk import get_bbk_name_by_id
 from ...models.tracing import (
+    ErrorSummary,
     EventType,
     ModelUsage,
     MCPToolUsage,
@@ -86,12 +87,18 @@ def build_bbk_in_filter(bbk_ids: Optional[str]) -> tuple[str, list[str]]:
     Returns:
         (filter_sql, params) - 如 " AND bbk_id IN (%s, %s, %s)", ["100", "200", "201"]
         无值时返回 ("", [])
+
+    Note:
+        选择总行(100)时，需同时包含虚拟标识 V00，确保数据完整统计
     """
     if not bbk_ids:
         return "", []
     ids = [id.strip() for id in bbk_ids.split(",") if id.strip()]
     if not ids:
         return "", []
+    # 总行 100 需同时查询 V00（虚拟标识）
+    if "100" in ids and "V00" not in ids:
+        ids.append("V00")
     placeholders = ", ".join(["%s"] * len(ids))
     return f" AND bbk_id IN ({placeholders})", ids
 
@@ -152,12 +159,18 @@ def build_cron_bbk_in_filter(bbk_ids: Optional[str]) -> tuple[str, list[str]]:
     Returns:
         (filter_sql, params) - 如 " AND j.bbk_id IN (%s, %s, %s)", ["100", "200", "201"]
         无值时返回 ("", [])
+
+    Note:
+        选择总行(100)时，需同时包含虚拟标识 V00，确保数据完整统计
     """
     if not bbk_ids:
         return "", []
     ids = [id.strip() for id in bbk_ids.split(",") if id.strip()]
     if not ids:
         return "", []
+    # 总行 100 需同时查询 V00（虚拟标识）
+    if "100" in ids and "V00" not in ids:
+        ids.append("V00")
     placeholders = ", ".join(["%s"] * len(ids))
     return f" AND j.bbk_id IN ({placeholders})", ids
 
@@ -196,7 +209,7 @@ class TracingQueryService:
 
         # 并行获取当前周期各项统计数据
         (
-            total_users,
+            (total_users, it_users, business_users),
             (online_users, online_user_ids),
             token_row,
             model_distribution,
@@ -214,6 +227,8 @@ class TracingQueryService:
 
         return self._build_overview_stats(
             total_users=total_users,
+            it_users=it_users,
+            business_users=business_users,
             online_users=online_users,
             online_user_ids=online_user_ids,
             model_distribution=model_distribution,
@@ -264,6 +279,8 @@ class TracingQueryService:
     def _build_overview_stats(
         self,
         total_users: int,
+        it_users: int,
+        business_users: int,
         online_users: int,
         online_user_ids: list[str],
         token_row: Optional[dict],
@@ -280,6 +297,8 @@ class TracingQueryService:
             online_users=online_users,
             online_user_ids=online_user_ids,
             total_users=total_users,
+            it_users=it_users,
+            business_users=business_users,
             model_distribution=model_distribution,
             total_tokens=token_row["total_tokens"] or 0 if token_row else 0,
             input_tokens=token_row["input_tokens"] or 0 if token_row else 0,
@@ -363,46 +382,51 @@ class TracingQueryService:
             """
             span_params = (source_id, start_date, end_date, *bbk_params)
 
-        # 各项分行统计查询
+        # 各项分行统计查询（V00 并入总行 100）
         users_query = f"""
-            SELECT bbk_id, COUNT(DISTINCT user_id) AS value
+            SELECT CASE WHEN bbk_id = 'V00' THEN '100' ELSE bbk_id END AS bbk_id,
+                   COUNT(DISTINCT user_id) AS value
             FROM swe_tracing_traces
             WHERE {trace_where}
-            GROUP BY bbk_id
+            GROUP BY CASE WHEN bbk_id = 'V00' THEN '100' ELSE bbk_id END
             ORDER BY value DESC
             LIMIT 5
         """
         conversations_query = f"""
-            SELECT bbk_id, COUNT(*) AS value
+            SELECT CASE WHEN bbk_id = 'V00' THEN '100' ELSE bbk_id END AS bbk_id,
+                   COUNT(*) AS value
             FROM swe_tracing_traces
             WHERE {trace_where}
-            GROUP BY bbk_id
+            GROUP BY CASE WHEN bbk_id = 'V00' THEN '100' ELSE bbk_id END
             ORDER BY value DESC
             LIMIT 5
         """
         sessions_query = f"""
-            SELECT bbk_id, COUNT(DISTINCT session_id) AS value
+            SELECT CASE WHEN bbk_id = 'V00' THEN '100' ELSE bbk_id END AS bbk_id,
+                   COUNT(DISTINCT session_id) AS value
             FROM swe_tracing_traces
             WHERE {trace_where}
-            GROUP BY bbk_id
+            GROUP BY CASE WHEN bbk_id = 'V00' THEN '100' ELSE bbk_id END
             ORDER BY value DESC
             LIMIT 5
         """
         tokens_query = f"""
-            SELECT bbk_id, COALESCE(SUM(total_tokens), 0) AS value
+            SELECT CASE WHEN bbk_id = 'V00' THEN '100' ELSE bbk_id END AS bbk_id,
+                   COALESCE(SUM(total_tokens), 0) AS value
             FROM swe_tracing_traces
             WHERE {trace_where}
-            GROUP BY bbk_id
+            GROUP BY CASE WHEN bbk_id = 'V00' THEN '100' ELSE bbk_id END
             ORDER BY value DESC
             LIMIT 5
         """
         skills_query = f"""
-            SELECT bbk_id, COUNT(*) AS value
+            SELECT CASE WHEN bbk_id = 'V00' THEN '100' ELSE bbk_id END AS bbk_id,
+                   COUNT(*) AS value
             FROM swe_tracing_spans
             WHERE {span_where}
               AND event_type = 'skill_invocation'
               AND skill_name IS NOT NULL
-            GROUP BY bbk_id
+            GROUP BY CASE WHEN bbk_id = 'V00' THEN '100' ELSE bbk_id END
             ORDER BY value DESC
             LIMIT 5
         """
@@ -416,7 +440,8 @@ class TracingQueryService:
         )
         if source_id == "all":
             cron_query = f"""
-                SELECT j.bbk_id, COUNT(*) AS value
+                SELECT CASE WHEN j.bbk_id = 'V00' THEN '100' ELSE j.bbk_id END AS bbk_id,
+                       COUNT(*) AS value
                 FROM swe_cron_executions e
                 INNER JOIN swe_cron_jobs j ON e.job_id = j.id
                 WHERE e.actual_time >= %s AND e.actual_time < %s
@@ -426,7 +451,7 @@ class TracingQueryService:
                   AND j.tenant_id != 'default'
                   AND j.bbk_id IS NOT NULL AND j.bbk_id != ''
                   {cron_bbk_filter_sql}
-                GROUP BY j.bbk_id
+                GROUP BY CASE WHEN j.bbk_id = 'V00' THEN '100' ELSE j.bbk_id END
                 ORDER BY value DESC
                 LIMIT 5
             """
@@ -438,7 +463,8 @@ class TracingQueryService:
             )
         else:
             cron_query = f"""
-                SELECT j.bbk_id, COUNT(*) AS value
+                SELECT CASE WHEN j.bbk_id = 'V00' THEN '100' ELSE j.bbk_id END AS bbk_id,
+                       COUNT(*) AS value
                 FROM swe_cron_executions e
                 INNER JOIN swe_cron_jobs j ON e.job_id = j.id
                 WHERE e.actual_time >= %s AND e.actual_time < %s
@@ -448,7 +474,7 @@ class TracingQueryService:
                   AND j.bbk_id IS NOT NULL AND j.bbk_id != ''
                   AND j.source_id = %s
                   {cron_bbk_filter_sql}
-                GROUP BY j.bbk_id
+                GROUP BY CASE WHEN j.bbk_id = 'V00' THEN '100' ELSE j.bbk_id END
                 ORDER BY value DESC
                 LIMIT 5
             """
@@ -1342,13 +1368,16 @@ class TracingQueryService:
         start_date: datetime,
         end_date: datetime,
         bbk_ids: Optional[str] = None,
-    ) -> int:
-        """获取用户总数."""
+    ) -> tuple[int, int, int]:
+        """获取用户总数、IT人员数和业务人员数."""
         bbk_filter_sql, bbk_filter_params = build_bbk_in_filter(bbk_ids)
         if source_id == "all":
             exclude_placeholders = ", ".join(["%s"] * len(EXCLUDED_SOURCE_IDS))
             query = f"""
-                SELECT COUNT(DISTINCT user_id) as total_users
+                SELECT
+                    COUNT(DISTINCT user_id) as total_users,
+                    COUNT(DISTINCT CASE WHEN user_id LIKE '80%%' OR user_id LIKE 'IT%%' THEN user_id END) as it_users,
+                    COUNT(DISTINCT CASE WHEN user_id NOT LIKE '80%%' AND user_id NOT LIKE 'IT%%' THEN user_id END) as business_users
                 FROM swe_tracing_traces
                 WHERE start_time >= %s AND start_time <= %s
                   AND source_id NOT IN ({exclude_placeholders})
@@ -1363,14 +1392,30 @@ class TracingQueryService:
             row = await self._db.fetch_one(query, params)
         else:
             query = f"""
-                SELECT COUNT(DISTINCT user_id) as total_users
+                SELECT
+                    COUNT(DISTINCT user_id) as total_users,
+                    COUNT(DISTINCT CASE WHEN user_id LIKE '80%%' OR user_id LIKE 'IT%%' THEN user_id END) as it_users,
+                    COUNT(DISTINCT CASE WHEN user_id NOT LIKE '80%%' AND user_id NOT LIKE 'IT%%' THEN user_id END) as business_users
                 FROM swe_tracing_traces
                 WHERE source_id = %s AND start_time >= %s AND start_time <= %s
                   AND user_id != 'default'{bbk_filter_sql}
             """
-            params = (source_id, start_date, end_date, *bbk_filter_params)
+            params = (
+                source_id,
+                start_date,
+                end_date,
+                *bbk_filter_params,
+            )
             row = await self._db.fetch_one(query, params)
-        return row["total_users"] if row else 0
+
+        if row is None:
+            return (0, 0, 0)
+
+        total_users = row.get("total_users") or 0
+        it_users = row.get("it_users") or 0
+        business_users = row.get("business_users") or 0
+
+        return (total_users, it_users, business_users)
 
     async def _get_online_users(
         self,
@@ -1983,7 +2028,7 @@ class TracingQueryService:
 
         if source_id == "all":
             query = f"""
-                SELECT e.status, COUNT(*) AS count
+                SELECT e.status, e.is_read, COUNT(*) AS count
                 FROM swe_cron_executions e
                 INNER JOIN swe_cron_jobs j ON e.job_id = j.id
                 WHERE e.actual_time >= %s AND e.actual_time < %s
@@ -1992,7 +2037,7 @@ class TracingQueryService:
                   AND j.source_id NOT IN ({exclude_placeholders})
                   AND j.tenant_id != 'default'
                   {bbk_filter_sql}
-                GROUP BY e.status
+                GROUP BY e.status, e.is_read
             """
             params = (
                 start_date,
@@ -2002,7 +2047,7 @@ class TracingQueryService:
             )
         else:
             query = f"""
-                SELECT e.status, COUNT(*) AS count
+                SELECT e.status, e.is_read, COUNT(*) AS count
                 FROM swe_cron_executions e
                 INNER JOIN swe_cron_jobs j ON e.job_id = j.id
                 WHERE e.actual_time >= %s AND e.actual_time < %s
@@ -2011,26 +2056,149 @@ class TracingQueryService:
                   AND j.tenant_id != 'default'
                   AND j.source_id = %s
                   {bbk_filter_sql}
-                GROUP BY e.status
+                GROUP BY e.status, e.is_read
             """
             params = (start_date, end_date, source_id, *bbk_filter_params)
 
         rows = await self._db.fetch_all(query, params)
-        status_map = {row["status"]: row["count"] for row in rows}
 
-        success = status_map.get("success", 0)
-        failed = status_map.get("error", 0) + status_map.get("timeout", 0)
-        cancelled = status_map.get("cancelled", 0) + status_map.get(
-            "skipped",
-            0,
-        )
+        # 按状态汇总
+        success = 0
+        failed = 0
+        cancelled = 0
+        read_count = 0
+
+        for row in rows:
+            status = row["status"]
+            is_read = row["is_read"]
+            count = row["count"]
+
+            if status == "success":
+                success += count
+            elif status in ("error", "timeout"):
+                failed += count
+            elif status in ("cancelled", "skipped"):
+                cancelled += count
+
+            if is_read:
+                read_count += count
+
         total_tasks = success + failed + cancelled
+
+        # 查询本时间段内新增的定时任务数（按 created_at 过滤）
+        if source_id == "all":
+            new_cron_query = f"""
+                SELECT COUNT(*) AS count
+                FROM swe_cron_jobs
+                WHERE created_at >= %s AND created_at < %s
+                  AND status != 'deleted'
+                  AND deleted_at IS NULL
+                  AND source_id NOT IN ({exclude_placeholders})
+                  AND tenant_id != 'default'
+                  {bbk_filter_sql}
+            """
+            new_cron_params = (
+                start_date,
+                end_date,
+                *EXCLUDED_SOURCE_IDS,
+                *bbk_filter_params,
+            )
+        else:
+            new_cron_query = """
+                SELECT COUNT(*) AS count
+                FROM swe_cron_jobs
+                WHERE created_at >= %s AND created_at < %s
+                  AND status != 'deleted'
+                  AND deleted_at IS NULL
+                  AND tenant_id != 'default'
+                  AND source_id = %s
+            """
+            new_cron_params = (start_date, end_date, source_id)
+
+        new_cron_result = await self._db.fetch_one(
+            new_cron_query,
+            new_cron_params,
+        )
+        new_cron_tasks = new_cron_result["count"] if new_cron_result else 0
 
         return TaskStatusSummary(
             total_tasks=total_tasks,
             success=success,
             failed=failed,
             cancelled=cancelled,
+            read_count=read_count,
+            new_cron_tasks=new_cron_tasks,
+        )
+
+    async def get_error_summary(
+        self,
+        source_id: str,
+        start_date: Optional[datetime] = None,
+        end_date: Optional[datetime] = None,
+        bbk_ids: Optional[str] = None,
+    ) -> ErrorSummary:
+        """获取报错分析汇总统计.
+
+        统计 swe_tracing_spans 中 error 不为空的记录，
+        仅统计 llm_input（模型报错）和 tool_call_end（工具报错）。
+        """
+        if start_date is None:
+            start_date = datetime.now() - timedelta(days=30)
+        if end_date is None:
+            end_date = datetime.now() + timedelta(days=1)
+
+        bbk_filter_sql, bbk_filter_params = build_bbk_in_filter(bbk_ids)
+        exclude_placeholders = ", ".join(["%s"] * len(EXCLUDED_SOURCE_IDS))
+
+        if source_id == "all":
+            query = f"""
+                SELECT event_type, COUNT(*) AS count
+                FROM swe_tracing_spans
+                WHERE start_time >= %s AND start_time < %s
+                  AND error IS NOT NULL
+                  AND error != ''
+                  AND source_id NOT IN ({exclude_placeholders})
+                  AND event_type IN ('llm_input', 'tool_call_end')
+                  {bbk_filter_sql}
+                GROUP BY event_type
+            """
+            params = (
+                start_date,
+                end_date,
+                *EXCLUDED_SOURCE_IDS,
+                *bbk_filter_params,
+            )
+        else:
+            query = f"""
+                SELECT event_type, COUNT(*) AS count
+                FROM swe_tracing_spans
+                WHERE start_time >= %s AND start_time < %s
+                  AND error IS NOT NULL
+                  AND error != ''
+                  AND source_id = %s
+                  AND event_type IN ('llm_input', 'tool_call_end')
+                  {bbk_filter_sql}
+                GROUP BY event_type
+            """
+            params = (start_date, end_date, source_id, *bbk_filter_params)
+
+        rows = await self._db.fetch_all(query, params)
+
+        model_errors = 0
+        tool_errors = 0
+
+        for row in rows:
+            if row["event_type"] == "llm_input":
+                model_errors = row["count"]
+            elif row["event_type"] == "tool_call_end":
+                tool_errors = row["count"]
+
+        total_errors = model_errors + tool_errors
+
+        return ErrorSummary(
+            total_errors=total_errors,
+            model_errors=model_errors,
+            tool_errors=tool_errors,
         )
 
     async def get_depth_summary(

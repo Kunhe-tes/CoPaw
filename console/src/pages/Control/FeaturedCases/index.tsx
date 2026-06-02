@@ -1,6 +1,7 @@
 import { useState, useEffect } from "react";
 import { Button, Card, Table, Modal, Input, Select } from "antd";
 import { Form } from "@agentscope-ai/design";
+import { useTranslation } from "react-i18next";
 import { PageHeader } from "@/components/PageHeader";
 import { useFeaturedCases } from "./components/hooks";
 import { createCaseColumns } from "./components/columns";
@@ -9,6 +10,7 @@ import type { FeaturedCase } from "@/api/types/featuredCases";
 import styles from "./index.module.less";
 
 function FeaturedCasesPage() {
+  const { t } = useTranslation();
   const { cases, loading, total, loadCases, createCase, updateCase, deleteCase } =
     useFeaturedCases();
 
@@ -111,7 +113,7 @@ function FeaturedCasesPage() {
   return (
     <div className={styles.featuredCasesPage}>
       <PageHeader
-        items={[{ title: "控制" }, { title: "精选案例管理" }]}
+        items={[{ title: t("nav.systemSettings") }, { title: t("nav.featuredCasesManagement", "精选案例管理") }]}
         extra={
           <Button type="primary" onClick={handleCreate}>
             + 新建案例

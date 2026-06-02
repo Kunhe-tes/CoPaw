@@ -78,6 +78,28 @@
   line-height: 1.6;
 }
 
+.toolOutputSection {
+  display: grid;
+  gap: 12px;
+  padding: 18px 0;
+  border-top: 1px solid rgba(5, 5, 5, 0.06);
+}
+
+.toolOutputSection:first-of-type {
+  border-top: none;
+}
+
+.toolOutputSectionHeader {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.toolOutputSectionHeader :global(.ant-tag) {
+  margin-inline-end: 0;
+}
+
 .numberGrid {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
@@ -126,7 +148,12 @@
     color: rgba(255, 255, 255, 0.88);
   }
 
+  .toolOutputSection,
   .switchRow {
     border-bottom-color: rgba(255, 255, 255, 0.08);
+  }
+
+  .toolOutputSection {
+    border-top-color: rgba(255, 255, 255, 0.08);
   }
 }

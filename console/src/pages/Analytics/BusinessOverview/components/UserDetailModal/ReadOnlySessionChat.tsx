@@ -17,6 +17,7 @@ import type {
   ChatRuntimeRequestCardData,
   ChatRuntimeResponseCardData,
 } from "../../../../Chat/messageMeta";
+import ConversationQuickNav from "../../../../../components/ConversationQuickNav";
 import styles from "./index.module.less";
 
 const READONLY_OPTIONS: IAgentScopeRuntimeWebUIOptions = {
@@ -69,6 +70,7 @@ export default function ReadOnlySessionChat({
   mockMessages,
 }: ReadOnlySessionChatProps) {
   const requestSeqRef = useRef(0);
+  const chatContentRef = useRef<HTMLDivElement | null>(null);
   const [chatMessages, setChatMessages] = useState<
     IAgentScopeRuntimeWebUIMessage[]
   >([]);
@@ -151,7 +153,7 @@ export default function ReadOnlySessionChat({
           options={READONLY_OPTIONS}
           cards={READONLY_CARDS}
         >
-          <div className={styles.readonlyChatBubbleList}>
+          <div ref={chatContentRef} className={styles.readonlyChatBubbleList}>
             <Bubble.List
               pagination={false}
               order="asc"
@@ -160,6 +162,10 @@ export default function ReadOnlySessionChat({
                 wrapper: styles.readonlyBubbleWrapper,
                 list: styles.readonlyBubbleList,
               }}
+            />
+            <ConversationQuickNav
+              messages={chatMessages}
+              scrollRootRef={chatContentRef}
             />
           </div>
         </AgentScopeRuntimeWebUIComposedProvider>

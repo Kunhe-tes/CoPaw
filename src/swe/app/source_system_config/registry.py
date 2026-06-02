@@ -67,6 +67,20 @@ TOOL_RESULT_COMPACT_RETENTION_DAYS_SETTING = SourceSystemConfigSetting(
     le=10,
 )
 
+FILE_READ_TRUNCATION_ENABLED_SETTING = SourceSystemConfigSetting(
+    key="file_read_truncation.enabled",
+    path=("file_read_truncation", "enabled"),
+    default_value=True,
+    value_type="bool",
+)
+FILE_READ_TRUNCATION_MAX_BYTES_SETTING = SourceSystemConfigSetting(
+    key="file_read_truncation.max_bytes",
+    path=("file_read_truncation", "max_bytes"),
+    default_value=50000,
+    value_type="int",
+    ge=1000,
+)
+
 CURRENT_SOURCE_SYSTEM_CONFIG_SWITCHES: tuple[SourceSystemConfigSwitch, ...] = (
     CHAT_TASK_PROGRESS_ENABLED_SWITCH,
 )
@@ -80,11 +94,24 @@ CURRENT_SOURCE_SYSTEM_CONFIG_SETTINGS: tuple[
     TOOL_RESULT_COMPACT_OLD_MAX_BYTES_SETTING,
     TOOL_RESULT_COMPACT_RECENT_MAX_BYTES_SETTING,
     TOOL_RESULT_COMPACT_RETENTION_DAYS_SETTING,
+    FILE_READ_TRUNCATION_ENABLED_SETTING,
+    FILE_READ_TRUNCATION_MAX_BYTES_SETTING,
 )
 
 _MISSING = object()
 _TRUE_STRINGS = frozenset({"true", "1", "yes", "on"})
 _FALSE_STRINGS = frozenset({"false", "0", "no", "off"})
+_IMMEDIATE_TRUNCATION_ENABLED_SETTINGS = (
+    FILE_READ_TRUNCATION_ENABLED_SETTING,
+)
+_DEPRECATED_SYSTEM_SECTION_KEYS = frozenset(
+    {
+        "external_tool_output_truncation",
+    },
+)
+_PRESERVED_DEFAULT_SETTING_PATHS = frozenset(
+    setting.path for setting in _IMMEDIATE_TRUNCATION_ENABLED_SETTINGS
+)
 
 
 def build_default_source_system_config_payload() -> dict[str, Any]:
@@ -118,7 +145,10 @@ def prune_registered_default_overrides(
         if value is _MISSING:
             continue
         if value == setting.default_value:
+            if setting.path in _PRESERVED_DEFAULT_SETTING_PATHS:
+                continue
             _delete_nested_path(pruned, setting.path)
+    _drop_immediate_truncation_sections_without_enabled(pruned)
     return pruned
 
 
@@ -147,6 +177,7 @@ def normalize_registered_setting_values(
 ) -> dict[str, Any]:
     """规范化已注册配置项的值，避免脏值进入持久化配置。"""
     normalized = deepcopy(raw_config)
+    _drop_deprecated_system_sections(normalized)
     for setting in CURRENT_SOURCE_SYSTEM_CONFIG_SETTINGS:
         value = _get_nested_value(normalized, setting.path)
         if value is _MISSING:
@@ -311,6 +342,23 @@ def _coerce_registered_int_value(
     return value
 
 
+def _drop_immediate_truncation_sections_without_enabled(
+    payload: dict[str, Any],
+) -> None:
+    """即时截断缺少 enabled 时视为未配置，避免空对象误判为显式接管。"""
+    for setting in _IMMEDIATE_TRUNCATION_ENABLED_SETTINGS:
+        section_key = setting.path[0]
+        section = payload.get(section_key)
+        if isinstance(section, dict) and "enabled" not in section:
+            payload.pop(section_key, None)
+
+
+def _drop_deprecated_system_sections(payload: dict[str, Any]) -> None:
+    """移除已经下线的系统配置段，避免死配置在读写链路中回流。"""
+    for key in _DEPRECATED_SYSTEM_SECTION_KEYS:
+        payload.pop(key, None)
+
+
 def _validate_explicit_tool_result_compact_ranges(
     raw_config: dict[str, Any],
     payload: dict[str, Any],
@@ -343,6 +391,8 @@ __all__ = [
     "CHAT_TASK_PROGRESS_ENABLED_SWITCH",
     "CURRENT_SOURCE_SYSTEM_CONFIG_SETTINGS",
     "CURRENT_SOURCE_SYSTEM_CONFIG_SWITCHES",
+    "FILE_READ_TRUNCATION_ENABLED_SETTING",
+    "FILE_READ_TRUNCATION_MAX_BYTES_SETTING",
     "SourceSystemConfigSwitch",
     "SourceSystemConfigSetting",
     "TOOL_RESULT_COMPACT_ENABLED_SETTING",

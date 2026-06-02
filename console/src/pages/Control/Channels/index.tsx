@@ -111,7 +111,7 @@ function ChannelsPage() {
   return (
     <div className={styles.channelsPage}>
       <PageHeader
-        items={[{ title: t("nav.control") }, { title: t("channels.title") }]}
+        items={[{ title: t("nav.runCenter") }, { title: t("channels.title") }]}
         center={
           <div className={styles.filterTabs}>
             {FILTER_TABS.map(({ key, label }) => (

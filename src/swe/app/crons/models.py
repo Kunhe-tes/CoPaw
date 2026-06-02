@@ -13,6 +13,7 @@ from pydantic import (
 )
 
 from ..channels.schema import DEFAULT_CHANNEL
+from ...providers.models import ModelSlotConfig
 
 # ---------------------------------------------------------------------------
 # APScheduler v3 uses ISO 8601 weekday numbering (0=Mon … 6=Sun) for
@@ -164,6 +165,7 @@ class CronJobSpec(BaseModel):
     task_type: TaskType = "agent"
     text: Optional[str] = None
     request: Optional[CronJobRequest] = None
+    model_slot: Optional[ModelSlotConfig] = None
     dispatch: DispatchSpec
 
     runtime: JobRuntimeSpec = Field(default_factory=JobRuntimeSpec)
@@ -174,6 +176,7 @@ class CronJobSpec(BaseModel):
         if self.task_type == "text":
             if not (self.text and self.text.strip()):
                 raise ValueError("task_type is text but text is empty")
+            self.model_slot = None
         elif self.task_type == "agent":
             if self.request is None:
                 raise ValueError("task_type is agent but request is missing")

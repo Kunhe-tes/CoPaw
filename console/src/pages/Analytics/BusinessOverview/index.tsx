@@ -6,6 +6,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { UIEvent } from "react";
 import { useNavigate } from "react-router-dom";
 import {
+  ArrowUp,
   ArrowUpRight,
   CalendarDays,
   CheckSquare,
@@ -22,14 +23,21 @@ import {
   Users,
   Zap,
 } from "lucide-react";
-import { DatePicker, Select, Tooltip, message } from "antd";
+import { DatePicker, Select, Switch, Tooltip, message } from "antd";
+import ReactECharts from "echarts-for-react";
 import type { Dayjs } from "dayjs";
 import dayjs from "dayjs";
 import styles from "./index.module.less";
+import { htmlPreviewEventsApi } from "../../../api/modules/htmlPreviewEvents";
+import type {
+  HtmlPreviewCustomerClickItem,
+  HtmlPreviewClickSummaryItem,
+  HtmlPreviewListSummaryItem,
+} from "../../../api/types/htmlPreviewEvents";
 import {
   tracingApi,
   type BranchMetricItem,
-  type MCPSummary,
+  type ErrorSummary,
   type OverviewStats,
   type SkillUsage,
   type TaskStatusSummary,
@@ -64,17 +72,7 @@ const METRIC_ACCENT_COLORS = [
   "#7c3aed",
 ];
 
-// 技能使用TOP5的颜色数组
-const SKILL_BAR_COLORS = [
-  "#2563eb", // 蓝色
-  "#22c55e", // 绿色
-  "#f97316", // 橙色
-  "#7c3aed", // 紫色
-  "#06b6d4", // 青色
-];
-
 const DONUT_COLORS = ["#18b368", "#ef4444", "#94a3b8"];
-
 const safeNumber = (value: unknown): number =>
   typeof value === "number" && !Number.isNaN(value) ? value : 0;
 
@@ -117,13 +115,26 @@ function buildMetricCards(
     skillGrowth: number | null;
     cronGrowth: number | null;
   },
-  skills: SkillUsage[],
 ): OverviewMetricCard[] {
   return [
     {
       key: "users",
       title: "活跃用户数",
-      valueText: formatNumber(overviewStats?.total_users ?? 0),
+      valueText: (
+        <span className={styles.userValueWrap}>
+          <span className={styles.userTotal}>{formatNumber(overviewStats?.total_users ?? 0)}</span>
+          <span className={styles.userAnnotation}>
+            <span className={styles.annotationRow}>
+              <span className={styles.annotationDot} style={{ background: "#6366f1" }} />
+              IT人员 {formatNumber(overviewStats?.it_users ?? 0)}
+            </span>
+            <span className={styles.annotationRow}>
+              <span className={styles.annotationDot} style={{ background: "#22c55e" }} />
+              业务人员 {formatNumber(overviewStats?.business_users ?? 0)}
+            </span>
+          </span>
+        </span>
+      ),
       changeText: formatChange(growthStats.userGrowth),
       changeDirection: toChangeDirection(growthStats.userGrowth),
       accentColor: METRIC_ACCENT_COLORS[0],
@@ -141,7 +152,14 @@ function buildMetricCards(
     {
       key: "cron_tasks",
       title: "定时任务数",
-      valueText: formatNumber(taskStatusSummary?.total_tasks ?? 0),
+      valueText: (
+        <>
+          {formatNumber(taskStatusSummary?.total_tasks ?? 0)}
+          <span className={styles.newCronHint}>
+            <ArrowUp size={10} className={styles.newCronIcon} />新增：{formatNumber(taskStatusSummary?.new_cron_tasks ?? 0)}个
+          </span>
+        </>
+      ),
       changeText: formatChange(growthStats.cronGrowth),
       changeDirection: toChangeDirection(growthStats.cronGrowth),
       accentColor: METRIC_ACCENT_COLORS[2],
@@ -234,22 +252,19 @@ function buildExecutionSummary(
   ];
 }
 
-function buildMcpSummary(summary: MCPSummary | null): SummaryLegendItem[] {
-  const totalCalls = safeNumber(summary?.total_calls);
-  const errorCount = safeNumber(summary?.error_count);
-
+function buildErrorSummary(summary: ErrorSummary | null): SummaryLegendItem[] {
   return [
     {
-      key: "mcp-success",
-      label: "成功运行",
-      value: Math.max(totalCalls - errorCount, 0),
-      color: DONUT_COLORS[0],
+      key: "model-error",
+      label: "模型报错",
+      value: safeNumber(summary?.model_errors),
+      color: "#f59e0b",
     },
     {
-      key: "mcp-error",
-      label: "报错",
-      value: errorCount,
-      color: DONUT_COLORS[1],
+      key: "tool-error",
+      label: "工具报错",
+      value: safeNumber(summary?.tool_errors),
+      color: "#ef4444",
     },
   ];
 }
@@ -271,6 +286,175 @@ function buildDonutSegments(items: SummaryLegendItem[]) {
     offset += fraction * 283;
     return segment;
   });
+}
+
+/** 漏斗图组件：使用 echarts 展示任务执行转化率 */
+function TaskFunnel({ taskStatusSummary }: { taskStatusSummary: TaskStatusSummary | null }) {
+  const totalTasks = safeNumber(taskStatusSummary?.total_tasks);
+  const successCount = safeNumber(taskStatusSummary?.success);
+  const readCount = safeNumber(taskStatusSummary?.read_count);
+
+  if (totalTasks === 0) {
+    return (
+      <div className={styles.emptyBreakdown}>
+        <Database className={styles.emptyBreakdownIcon} />
+        <span className={styles.emptyBreakdownText}>暂无任务数据</span>
+      </div>
+    );
+  }
+
+  const successRate = ((successCount / totalTasks) * 100).toFixed(1);
+  const readRate = successCount > 0 ? ((readCount / successCount) * 100).toFixed(1) : "0.0";
+
+  // 值为 0 时保证有最小值显示
+  const minBar = Math.max(totalTasks * 0.12, 1);
+  const ensureVisible = (v: number) => (v <= minBar ? minBar : v);
+
+  const funnelColors = ["#4f46e5", "#16a34a", "#0891b2"];
+
+  const chartData = [
+    { name: "总任务数", value: ensureVisible(totalTasks), rawValue: totalTasks },
+    { name: "执行成功数", value: ensureVisible(successCount), rawValue: successCount },
+    { name: "已读数", value: ensureVisible(readCount), rawValue: readCount },
+  ];
+
+  const option = {
+    tooltip: {
+      trigger: "item",
+      formatter: (params: { name: string; data: { rawValue: number } }) =>
+        `${params.name}: ${formatNumber(params.data.rawValue)}`,
+    },
+    legend: {
+      data: chartData.map((item) => item.name),
+      top: 0,
+      itemWidth: 10,
+      itemHeight: 10,
+      itemGap: 16,
+      textStyle: {
+        color: "#475569",
+        fontSize: 12,
+        fontWeight: 500,
+      },
+    },
+    grid: {
+      left: "5%",
+      right: "35%",
+      top: "10%",
+      bottom: "15%",
+    },
+    xAxis: { show: false, type: "value" },
+    yAxis: { show: false, type: "category" },
+    series: [
+      {
+        type: "funnel",
+        left: "5%",
+        right: "40%",
+        top: "15%",
+        bottom: "10%",
+        min: 0,
+        max: totalTasks,
+        minSize: "35%",
+        maxSize: "100%",
+        sort: "descending",
+        gap: 2,
+        label: {
+          show: true,
+          position: "inside",
+          formatter: (params: { name: string; data: { rawValue: number } }) =>
+            `${params.name}  ${formatNumber(params.data.rawValue)}`,
+          color: "#fff",
+          fontSize: 12,
+          fontWeight: 600,
+        },
+        itemStyle: {
+          borderWidth: 0,
+        },
+        data: chartData.map((item, index) => ({
+          name: item.name,
+          value: item.value,
+          rawValue: item.rawValue,
+          itemStyle: { color: funnelColors[index] },
+        })),
+      },
+    ],
+    // 右侧转化率标注
+    graphic: [
+      // 第一层到第二层的转化率
+      {
+        type: "group",
+        left: "68%",
+        top: "28%",
+        children: [
+          {
+            type: "circle",
+            shape: { cx: 3, cy: 0, r: 3 },
+            style: { fill: "#94a3b8" },
+          },
+          {
+            type: "line",
+            shape: { x1: 3, y1: 0, x2: 3, y2: 30 },
+            style: { stroke: "#94a3b8", lineWidth: 1, lineDash: [3, 2] },
+          },
+          {
+            type: "circle",
+            shape: { cx: 3, cy: 30, r: 3 },
+            style: { fill: "#94a3b8" },
+          },
+          {
+            type: "text",
+            style: {
+              text: `→ ${successRate}%`,
+              x: 12,
+              y: 15,
+              fill: "#64748b",
+              fontSize: 11,
+              fontWeight: 500,
+            },
+          },
+        ],
+      },
+      // 第二层到第三层的转化率
+      {
+        type: "group",
+        left: "68%",
+        top: "56%",
+        children: [
+          {
+            type: "circle",
+            shape: { cx: 3, cy: 0, r: 3 },
+            style: { fill: "#94a3b8" },
+          },
+          {
+            type: "line",
+            shape: { x1: 3, y1: 0, x2: 3, y2: 30 },
+            style: { stroke: "#94a3b8", lineWidth: 1, lineDash: [3, 2] },
+          },
+          {
+            type: "circle",
+            shape: { cx: 3, cy: 30, r: 3 },
+            style: { fill: "#94a3b8" },
+          },
+          {
+            type: "text",
+            style: {
+              text: `→ ${readRate}%`,
+              x: 12,
+              y: 15,
+              fill: "#64748b",
+              fontSize: 11,
+              fontWeight: 500,
+            },
+          },
+        ],
+      },
+    ],
+  };
+
+  return (
+    <div className={styles.funnelWrap}>
+      <ReactECharts option={option} style={{ height: 160 }} />
+    </div>
+  );
 }
 
 function getLabelInterval(dataLength: number): number {
@@ -494,17 +678,33 @@ export default function BusinessOverviewPage() {
   const [activeHasMore, setActiveHasMore] = useState(true);
   const [activeLoading, setActiveLoading] = useState(false);
   const activeLoadingRef = useRef(false);
-  // 用户过滤类型：filtered(已过滤内部用户) / all(全部用户)
-  const [activeFilterType, setActiveFilterType] = useState<"filtered" | "all">("filtered");
+  // 用户过滤类型：filtered(过滤IT人员) / all(全部用户)
+  const [activeFilterType, setActiveFilterType] = useState<"filtered" | "all">("all");
   const [skills, setSkills] = useState<SkillUsage[]>([]);
+  const [skillsPage, setSkillsPage] = useState(1);
+  const [skillsHasMore, setSkillsHasMore] = useState(true);
   const [skillsLoading, setSkillsLoading] = useState(false);
   const skillsLoadingRef = useRef(false);
-  const [mcpSummaryData, setMcpSummaryData] = useState<MCPSummary | null>(null);
+  const [errorSummaryData, setErrorSummaryData] = useState<ErrorSummary | null>(null);
   const [taskStatusSummary, setTaskStatusSummary] =
     useState<TaskStatusSummary | null>(null);
   const [depthSummary, setDepthSummary] = useState<DepthSummary | null>(null);
-  const [mcpLoading, setMcpLoading] = useState(false);
-  const mcpLoadingRef = useRef(false);
+  const [htmlPreviewClicks, setHtmlPreviewClicks] = useState<
+    HtmlPreviewClickSummaryItem[]
+  >([]);
+  const [htmlPreviewLists, setHtmlPreviewLists] = useState<
+    HtmlPreviewListSummaryItem[]
+  >([]);
+  const [htmlPreviewCustomerClicks, setHtmlPreviewCustomerClicks] = useState<
+    HtmlPreviewCustomerClickItem[]
+  >([]);
+  const [selectedHtmlPreviewListKey, setSelectedHtmlPreviewListKey] =
+    useState<string>("all");
+  const [includeUnclickedCustomers, setIncludeUnclickedCustomers] =
+    useState(false);
+  const [htmlPreviewLoading, setHtmlPreviewLoading] = useState(false);
+  const [errorLoading, setErrorLoading] = useState(false);
+  const errorLoadingRef = useRef(false);
   const [modalOpen, setModalOpen] = useState(false);
   const [selectedUserId, setSelectedUserId] = useState<string | null>(null);
   const [selectedUserName, setSelectedUserName] = useState<string | null>(null);
@@ -625,7 +825,7 @@ export default function BusinessOverviewPage() {
   );
 
   const fetchSkills = useCallback(
-    async () => {
+    async (page: number = 1, append: boolean = false) => {
       if (skillsLoadingRef.current) {
         return;
       }
@@ -633,14 +833,22 @@ export default function BusinessOverviewPage() {
       setSkillsLoading(true);
 
       try {
-        // 只请求TOP5数据
-        const result = await tracingApi.getSkills(1, 5, {
+        const pageSize = 10;
+        const result = await tracingApi.getSkills(page, pageSize, {
           start_date: startDateText,
           end_date: endDateText,
           bbk_ids: effectiveBbkIds?.join(","),
         });
         const rows = result.items || [];
-        setSkills(rows);
+
+        if (append) {
+          setSkills(prev => [...prev, ...rows]);
+        } else {
+          setSkills(rows);
+        }
+
+        // 如果返回的数据少于 pageSize，说明没有更多数据了
+        setSkillsHasMore(rows.length >= pageSize);
       } catch (error) {
         console.error("Failed to fetch skills:", error);
       } finally {
@@ -651,26 +859,26 @@ export default function BusinessOverviewPage() {
     [effectiveBbkIds, endDateText, startDateText],
   );
 
-  const fetchMcpSummary = useCallback(
+  const fetchErrorSummary = useCallback(
     async () => {
-      if (mcpLoadingRef.current) {
+      if (errorLoadingRef.current) {
         return;
       }
-      mcpLoadingRef.current = true;
-      setMcpLoading(true);
+      errorLoadingRef.current = true;
+      setErrorLoading(true);
 
       try {
-        const result = await tracingApi.getMCPSummary({
+        const result = await tracingApi.getErrorSummary({
           start_date: startDateText,
           end_date: endDateText,
           bbk_ids: effectiveBbkIds?.join(","),
         });
-        setMcpSummaryData(result);
+        setErrorSummaryData(result);
       } catch (error) {
-        console.error("Failed to fetch MCP summary:", error);
+        console.error("Failed to fetch error summary:", error);
       } finally {
-        mcpLoadingRef.current = false;
-        setMcpLoading(false);
+        errorLoadingRef.current = false;
+        setErrorLoading(false);
       }
     },
     [effectiveBbkIds, endDateText, startDateText],
@@ -702,20 +910,99 @@ export default function BusinessOverviewPage() {
     }
   }, [effectiveBbkIds, endDateText, startDateText]);
 
+  const fetchHtmlPreviewClicks = useCallback(async () => {
+    setHtmlPreviewLoading(true);
+    try {
+      const params = {
+        startTime: dateRange[0].startOf("day").toISOString(),
+        endTime: dateRange[1].endOf("day").toISOString(),
+        bbkIds: effectiveBbkIds?.join(","),
+        limit: 100,
+      };
+      const selectedListKey =
+        selectedHtmlPreviewListKey === "all"
+          ? null
+          : selectedHtmlPreviewListKey;
+      const detailParams = {
+        ...params,
+        listKey: selectedListKey,
+      };
+      const [summaryResult, listResult, customerResult] = await Promise.allSettled([
+        htmlPreviewEventsApi.getSummary(detailParams),
+        htmlPreviewEventsApi.getLists(params),
+        htmlPreviewEventsApi.getCustomerClicks({
+          ...detailParams,
+          includeUnclicked: includeUnclickedCustomers,
+          limit: 500,
+        }),
+      ]);
+      if (summaryResult.status === "fulfilled") {
+        setHtmlPreviewClicks(summaryResult.value.items || []);
+      } else {
+        console.error(
+          "Failed to fetch HTML preview click summary:",
+          summaryResult.reason,
+        );
+        setHtmlPreviewClicks([]);
+      }
+      if (listResult.status === "fulfilled") {
+        setHtmlPreviewLists(listResult.value.items || []);
+      } else {
+        console.error(
+          "Failed to fetch HTML preview list summary:",
+          listResult.reason,
+        );
+        setHtmlPreviewLists([]);
+      }
+      if (customerResult.status === "fulfilled") {
+        setHtmlPreviewCustomerClicks(customerResult.value.items || []);
+      } else {
+        console.error(
+          "Failed to fetch HTML preview customer clicks:",
+          customerResult.reason,
+        );
+        setHtmlPreviewCustomerClicks([]);
+      }
+    } catch (error) {
+      console.error("Failed to fetch HTML preview click statistics:", error);
+      setHtmlPreviewClicks([]);
+      setHtmlPreviewLists([]);
+      setHtmlPreviewCustomerClicks([]);
+    } finally {
+      setHtmlPreviewLoading(false);
+    }
+  }, [
+    dateRange,
+    effectiveBbkIds,
+    includeUnclickedCustomers,
+    selectedHtmlPreviewListKey,
+  ]);
+
   useEffect(() => {
     fetchDashboard();
     fetchSkills();
-    fetchMcpSummary();
+    fetchErrorSummary();
     fetchTaskStatusSummary();
     fetchDepthSummary();
+    fetchHtmlPreviewClicks();
     // 活跃用户请求由独立的 useEffect 处理
   }, [
     fetchDashboard,
     fetchDepthSummary,
-    fetchMcpSummary,
+    fetchErrorSummary,
+    fetchHtmlPreviewClicks,
     fetchSkills,
     fetchTaskStatusSummary,
   ]);
+
+  useEffect(() => {
+    if (
+      selectedHtmlPreviewListKey !== "all" &&
+      !htmlPreviewLists.some((item) => item.list_key === selectedHtmlPreviewListKey)
+    ) {
+      setSelectedHtmlPreviewListKey("all");
+    }
+  }, [htmlPreviewLists, selectedHtmlPreviewListKey]);
 
   // 活跃用户请求独立处理，避免 activeFilterType 变化触发其他请求
   useEffect(() => {
@@ -786,12 +1073,28 @@ export default function BusinessOverviewPage() {
     [activeHasMore, activePage, fetchActiveUsers],
   );
 
+  const handleSkillsScroll = useCallback(
+    (event: UIEvent<HTMLDivElement>) => {
+      const target = event.currentTarget;
+      if (
+        target.scrollHeight - target.scrollTop <= target.clientHeight + 40 &&
+        skillsHasMore &&
+        !skillsLoadingRef.current
+      ) {
+        const nextPage = skillsPage + 1;
+        setSkillsPage(nextPage);
+        fetchSkills(nextPage, true);
+      }
+    },
+    [skillsHasMore, skillsPage, fetchSkills],
+  );
+
   const disabledDate = (current: Dayjs | null): boolean =>
     !!current && current.isAfter(dayjs().startOf("day"), "day");
 
   const metricCards = useMemo(
-    () => buildMetricCards(overviewStats, taskStatusSummary, growthStats, skills),
-    [growthStats, overviewStats, skills, taskStatusSummary],
+    () => buildMetricCards(overviewStats, taskStatusSummary, growthStats),
+    [growthStats, overviewStats, taskStatusSummary],
   );
   const depthCards = useMemo(
     () => buildDepthCards(depthSummary, growthStats),
@@ -801,10 +1104,107 @@ export default function BusinessOverviewPage() {
     () => buildExecutionSummary(taskStatusSummary),
     [taskStatusSummary],
   );
-  const mcpSummaryItems = useMemo(
-    () => buildMcpSummary(mcpSummaryData),
-    [mcpSummaryData],
+  const errorSummaryItems = useMemo(
+    () => buildErrorSummary(errorSummaryData),
+    [errorSummaryData],
   );
+  const selectedHtmlPreviewList = useMemo(
+    () =>
+      htmlPreviewLists.find(
+        (item) => item.list_key === selectedHtmlPreviewListKey,
+      ) || null,
+    [htmlPreviewLists, selectedHtmlPreviewListKey],
+  );
+  const displayedHtmlPreviewLists = useMemo(
+    () =>
+      selectedHtmlPreviewListKey === "all"
+        ? htmlPreviewLists
+        : htmlPreviewLists.filter(
+            (item) => item.list_key === selectedHtmlPreviewListKey,
+          ),
+    [htmlPreviewLists, selectedHtmlPreviewListKey],
+  );
+  const htmlPreviewListCount = displayedHtmlPreviewLists.length;
+  const htmlPreviewInsightClicks = useMemo(
+    () =>
+      displayedHtmlPreviewLists.reduce(
+        (sum, item) => sum + safeNumber(item.insight_count),
+        0,
+      ),
+    [displayedHtmlPreviewLists],
+  );
+  const htmlPreviewPhoneClicks = useMemo(
+    () =>
+      displayedHtmlPreviewLists.reduce(
+        (sum, item) => sum + safeNumber(item.phone_count),
+        0,
+      ),
+    [displayedHtmlPreviewLists],
+  );
+  const htmlPreviewPlanClicks = useMemo(
+    () =>
+      displayedHtmlPreviewLists.reduce(
+        (sum, item) => sum + safeNumber(item.plan_count),
+        0,
+      ),
+    [displayedHtmlPreviewLists],
+  );
+  const htmlPreviewTotalClicks = useMemo(
+    () =>
+      displayedHtmlPreviewLists.reduce(
+        (sum, item) => sum + safeNumber(item.total_click_count),
+        0,
+      ),
+    [displayedHtmlPreviewLists],
+  );
+  const htmlPreviewMaxActionClicks = Math.max(
+    htmlPreviewInsightClicks,
+    htmlPreviewPhoneClicks,
+    htmlPreviewPlanClicks,
+    1,
+  );
+  const htmlPreviewActionTotal =
+    htmlPreviewInsightClicks + htmlPreviewPhoneClicks + htmlPreviewPlanClicks;
+  const htmlPreviewInsightPercent =
+    htmlPreviewActionTotal > 0
+      ? Math.round((htmlPreviewInsightClicks / htmlPreviewActionTotal) * 100)
+      : 0;
+  const htmlPreviewPhonePercent =
+    htmlPreviewActionTotal > 0
+      ? Math.round((htmlPreviewPhoneClicks / htmlPreviewActionTotal) * 100)
+      : 0;
+  const htmlPreviewPlanPercent =
+    htmlPreviewActionTotal > 0
+      ? Math.round((htmlPreviewPlanClicks / htmlPreviewActionTotal) * 100)
+      : 0;
+  const htmlPreviewCustomerTotal = useMemo(
+    () =>
+      displayedHtmlPreviewLists.reduce(
+        (sum, item) => sum + safeNumber(item.customer_count),
+        0,
+      ),
+    [displayedHtmlPreviewLists],
+  );
+  const htmlPreviewClickedCustomerCount = useMemo(
+    () =>
+      displayedHtmlPreviewLists.reduce(
+        (sum, item) => sum + safeNumber(item.clicked_customer_count),
+        0,
+      ),
+    [displayedHtmlPreviewLists],
+  );
+  const htmlPreviewLatestClick = useMemo(() => {
+    const sortedClickTimes = htmlPreviewClicks
+      .map((item) => item.last_clicked_at)
+      .filter(Boolean)
+      .sort();
+    const latest = sortedClickTimes[sortedClickTimes.length - 1];
+    return latest ? dayjs(latest).format("YYYY-MM-DD HH:mm") : "-";
+  }, [htmlPreviewClicks]);
+  const hasHtmlPreviewAnalysisData =
+    htmlPreviewClicks.length > 0 ||
+    htmlPreviewLists.length > 0 ||
+    htmlPreviewCustomerClicks.length > 0;
   const trendSvg = useMemo(() => buildTrendSvgData(trendData), [trendData]);
   const activeTrendZone =
     activeTrendIndex === null ? null : trendSvg.hoverZones[activeTrendIndex] ?? null;
@@ -814,11 +1214,6 @@ export default function BusinessOverviewPage() {
         top: `${Math.min(78, Math.max(10, (activeTrendZone.pointY / trendSvg.height) * 100))}%`,
       }
     : undefined;
-  const skillsTotal = Math.max(
-    skills.reduce((sum, item) => sum + safeNumber(item.count), 0),
-    1,
-  );
-
   return (
     <div className={styles.businessOverviewPage}>
       <header className={styles.pageHeader}>
@@ -908,9 +1303,10 @@ export default function BusinessOverviewPage() {
                 fetchDashboard();
                 fetchActiveUsers(1, false);
                 fetchSkills();
-                fetchMcpSummary();
+                fetchErrorSummary();
                 fetchTaskStatusSummary();
                 fetchDepthSummary();
+                fetchHtmlPreviewClicks();
               }}
             >
               <RotateCw size={16} />
@@ -1160,19 +1556,6 @@ export default function BusinessOverviewPage() {
             <h3 className={styles.panelTitle}>活跃用户排行榜</h3>
             <div className={styles.filterTab}>
               <span
-                className={activeFilterType === "filtered" ? styles.filterTabActive : styles.filterTabItem}
-                onClick={() => {
-                  if (activeFilterType !== "filtered") {
-                    setActiveFilterType("filtered");
-                    setActiveUsers([]);
-                    setActivePage(1);
-                    setActiveHasMore(true);
-                  }
-                }}
-              >
-                已过滤
-              </span>
-              <span
                 className={activeFilterType === "all" ? styles.filterTabActive : styles.filterTabItem}
                 onClick={() => {
                   if (activeFilterType !== "all") {
@@ -1185,6 +1568,19 @@ export default function BusinessOverviewPage() {
               >
                 全部
               </span>
+              <span
+                className={activeFilterType === "filtered" ? styles.filterTabActive : styles.filterTabItem}
+                onClick={() => {
+                  if (activeFilterType !== "filtered") {
+                    setActiveFilterType("filtered");
+                    setActiveUsers([]);
+                    setActivePage(1);
+                    setActiveHasMore(true);
+                  }
+                }}
+              >
+                过滤IT人员
+              </span>
             </div>
           </div>
           <div className={styles.rankHeader}>
@@ -1194,7 +1590,7 @@ export default function BusinessOverviewPage() {
           </div>
           <div className={styles.rankList} onScroll={handleActiveScroll}>
             {activeUsers.length === 0 ? (
-              <div className={styles.emptyState}>暂无数据</div>
+              <div className={styles.emptyState}>暂无用户数据</div>
             ) : (
               activeUsers.map((item, index) => {
                 const rank = index + 1;
@@ -1257,32 +1653,30 @@ export default function BusinessOverviewPage() {
             {depthCards.map((card) => (
               <div key={card.key} className={styles.depthCard}>
                 <div className={styles.depthIconWrap}>
-                  {card.key === "avg-rounds" && <MessageCircleMore size={19} />}
-                  {card.key === "multi-round" && <Users size={19} />}
-                  {card.key === "avg-duration" && <Clock3 size={19} />}
-                  {card.key === "avg-sessions" && <ArrowUpRight size={19} />}
+                  {card.key === "avg-rounds" && <MessageCircleMore size={15} />}
+                  {card.key === "multi-round" && <Users size={15} />}
+                  {card.key === "avg-duration" && <Clock3 size={15} />}
+                  {card.key === "avg-sessions" && <ArrowUpRight size={15} />}
                 </div>
-                <div className={styles.depthBody}>
-                  <Tooltip title={card.title} placement="top">
-                    <div className={styles.depthTitle}>{card.title}</div>
-                  </Tooltip>
-                  <div className={styles.depthValue}>{card.valueText}</div>
-                  <div
-                    className={
-                      card.changeDirection === "up"
-                        ? styles.metricChangeUp
-                        : card.changeDirection === "down"
-                        ? styles.metricChangeDown
-                        : styles.metricChangeFlat
-                    }
-                  >
-                    环比
-                    {card.changeDirection === "up" && <TrendingUp size={12} />}
-                    {card.changeDirection === "down" && (
-                      <TrendingDown size={12} />
-                    )}
-                    {card.changeText}
-                  </div>
+                <div className={styles.depthValue}>{card.valueText}</div>
+                <Tooltip title={card.title} placement="top">
+                  <div className={styles.depthTitle}>{card.title}</div>
+                </Tooltip>
+                <div
+                  className={
+                    card.changeDirection === "up"
+                      ? styles.metricChangeUp
+                      : card.changeDirection === "down"
+                      ? styles.metricChangeDown
+                      : styles.metricChangeFlat
+                  }
+                >
+                  环比
+                  {card.changeDirection === "up" && <TrendingUp size={12} />}
+                  {card.changeDirection === "down" && (
+                    <TrendingDown size={12} />
+                  )}
+                  {card.changeText}
                 </div>
               </div>
             ))}
@@ -1307,79 +1701,86 @@ export default function BusinessOverviewPage() {
             </button>
           </div>
           <div className={styles.donutLayout}>
-            <div className={styles.donutWrap}>
-              <svg viewBox="0 0 120 120" className={styles.donutSvg}>
-                <circle cx="60" cy="60" r="45" className={styles.donutTrack} />
-                {buildDonutSegments(executionSummary).map((item) => (
-                  <circle
-                    key={item.key}
-                    cx="60"
-                    cy="60"
-                    r="45"
-                    className={styles.donutSegment}
-                    style={{
-                      stroke: item.color,
-                      strokeDasharray: item.dasharray,
-                      strokeDashoffset: item.dashoffset,
-                    }}
-                  />
-                ))}
-              </svg>
-              <div className={styles.donutCenter}>
-                <strong>
-                  {formatNumber(taskStatusSummary?.total_tasks ?? 0)}
-                </strong>
-                <span>总任务数</span>
+            <div className={styles.donutColumn}>
+              <div className={styles.donutWrap}>
+                <svg viewBox="0 0 120 120" className={styles.donutSvg}>
+                  <circle cx="60" cy="60" r="45" className={styles.donutTrack} />
+                  {buildDonutSegments(executionSummary).map((item) => (
+                    <circle
+                      key={item.key}
+                      cx="60"
+                      cy="60"
+                      r="45"
+                      className={styles.donutSegment}
+                      style={{
+                        stroke: item.color,
+                        strokeDasharray: item.dasharray,
+                        strokeDashoffset: item.dashoffset,
+                      }}
+                    />
+                  ))}
+                </svg>
+                <div className={styles.donutCenter}>
+                  <strong>
+                    {formatNumber(taskStatusSummary?.total_tasks ?? 0)}
+                  </strong>
+                  <span>总任务数</span>
+                </div>
+              </div>
+              <div className={styles.donutLegend}>
+                {executionSummary.map((item) => {
+                  const total = Math.max(
+                    executionSummary.reduce((sum, row) => sum + row.value, 0),
+                    1,
+                  );
+
+                  return (
+                    <div key={item.key} className={styles.donutLegendItem}>
+                      <span className={styles.donutLegendDot} style={{ background: item.color }} />
+                      <span>{item.label}</span>
+                      <span className={styles.donutLegendValue}>
+                        {formatNumber(item.value)}&nbsp;({formatPercent((item.value / total) * 100)})
+                      </span>
+                    </div>
+                  );
+                })}
               </div>
             </div>
-            <div className={styles.legendList}>
-              {executionSummary.map((item) => {
-                const total = Math.max(
-                  executionSummary.reduce((sum, row) => sum + row.value, 0),
-                  1,
-                );
-
-                return (
-                  <div key={item.key} className={styles.legendRow}>
-                    <span className={styles.legendLabel}>
-                      <i style={{ background: item.color }} />
-                      {item.label}
-                    </span>
-                    <span className={styles.legendValue}>
-                      {formatNumber(item.value)} (
-                      {formatPercent((item.value / total) * 100)})
-                    </span>
-                  </div>
-                );
-              })}
-            </div>
+            <TaskFunnel taskStatusSummary={taskStatusSummary} />
           </div>
         </article>
 
         <article className={styles.panelMedium}>
           <div className={styles.panelHeader}>
-            <h3 className={styles.panelTitle}>技能使用TOP5</h3>
+            <h3 className={styles.panelTitle}>技能使用排行榜</h3>
           </div>
-          <div className={styles.skillList}>
+          <div className={styles.rankList} onScroll={handleSkillsScroll}>
             {skills.length === 0 ? (
-              <div className={styles.emptyState}>暂无数据</div>
+              <div className={styles.emptyState}>暂无技能数据</div>
             ) : (
-              skills.slice(0, 5).map((skill, index) => {
-                const percent = (safeNumber(skill.count) / skillsTotal) * 100;
-                const barColor = SKILL_BAR_COLORS[index] || SKILL_BAR_COLORS[0];
-                // 根据描述字数动态计算tooltip宽度
+              skills.map((skill, index) => {
+                const rank = index + 1;
+                const rankClass =
+                  rank === 1
+                    ? styles.rankBadgeGold
+                    : rank === 2
+                    ? styles.rankBadgeSilver
+                    : rank === 3
+                    ? styles.rankBadgeBronze
+                    : styles.rankBadge;
                 const descLen = skill.skill_description?.length || 0;
                 const tooltipWidth = descLen <= 30 ? 240 : descLen <= 60 ? 320 : descLen <= 100 ? 400 : 520;
                 return (
                   <button
-                    key={skill.skill_name}
+                    key={`${skill.skill_name}-${rank}`}
                     type="button"
-                    className={styles.skillRow}
+                    className={styles.rankRow}
                     onClick={() => {
                       setSelectedSkillName(skill.skill_name);
                       setSkillModalOpen(true);
                     }}
                   >
+                    <span className={rankClass}>{rank}</span>
                     <Tooltip
                       placement="top"
                       overlayInnerStyle={{ width: tooltipWidth, maxWidth: tooltipWidth }}
@@ -1398,18 +1799,12 @@ export default function BusinessOverviewPage() {
                         )
                       }
                     >
-                      <span className={styles.skillName}>
+                      <span className={styles.rankUser}>
                         {truncateName(skill.skill_name, 20)}
                       </span>
                     </Tooltip>
-                    <div className={styles.skillTrack}>
-                      <div
-                        className={styles.skillBar}
-                        style={{ width: `${Math.max(percent, 10)}%`, background: barColor }}
-                      />
-                    </div>
-                    <span className={styles.skillStat}>
-                      {formatNumber(skill.count)} ({formatPercent(percent)})
+                    <span className={styles.rankCalls}>
+                      {formatNumber(skill.count)}
                     </span>
                   </button>
                 );
@@ -1423,20 +1818,13 @@ export default function BusinessOverviewPage() {
 
         <article className={styles.panelLarge}>
           <div className={styles.panelHeader}>
-            <h3 className={styles.panelTitle}>MCP调用概览</h3>
-            {/* TODO: 后续补充点击查看功能 */}
-            {false && (
-              <button type="button" className={styles.detailLink}>
-                查看详情
-                <ChevronRight size={14} />
-              </button>
-            )}
+            <h3 className={styles.panelTitle}>报错分析</h3>
           </div>
-          <div className={styles.donutLayout}>
-            <div className={styles.donutWrap}>
-              <svg viewBox="0 0 120 120" className={styles.donutSvg}>
+          <div className={styles.donutLayoutCompact}>
+            <div className={styles.donutCompact}>
+              <svg viewBox="0 0 120 120" className={styles.donutCompactSvg}>
                 <circle cx="60" cy="60" r="45" className={styles.donutTrack} />
-                {buildDonutSegments(mcpSummaryItems).map((item) => (
+                {buildDonutSegments(errorSummaryItems).map((item) => (
                   <circle
                     key={item.key}
                     cx="60"
@@ -1453,36 +1841,282 @@ export default function BusinessOverviewPage() {
               </svg>
               <div className={styles.donutCenter}>
                 <strong>
-                  {formatNumber(safeNumber(mcpSummaryData?.total_calls))}
+                  {formatNumber(safeNumber(errorSummaryData?.total_errors))}
                 </strong>
-                <span>总调用数</span>
+                <span>报错总数</span>
               </div>
             </div>
-            <div className={styles.legendList}>
-              {mcpSummaryItems.map((item) => {
-                const total = Math.max(
-                  mcpSummaryItems.reduce((sum, row) => sum + row.value, 0),
-                  1,
-                );
+            <div className={styles.legendHorizontal}>
+              <div className={styles.legendGroup}>
+                {errorSummaryItems.map((item) => {
+                  const total = Math.max(
+                    errorSummaryItems.reduce((sum, row) => sum + row.value, 0),
+                    1,
+                  );
 
-                return (
-                  <div key={item.key} className={styles.legendRow}>
-                    <span className={styles.legendLabel}>
-                      <i style={{ background: item.color }} />
-                      {item.label}
-                    </span>
-                    <span className={styles.legendValue}>
-                      {formatNumber(item.value)} (
-                      {formatPercent((item.value / total) * 100)})
-                    </span>
-                  </div>
-                );
-              })}
-              {mcpLoading && (
+                  return (
+                    <div key={item.key} className={styles.legendRow}>
+                      <span className={styles.legendLabel}>
+                        <i style={{ background: item.color }} />
+                        {item.label}
+                      </span>
+                      <span className={styles.legendValue}>
+                        {formatNumber(item.value)} (
+                        {formatPercent((item.value / total) * 100)})
+                      </span>
+                    </div>
+                  );
+                })}
+              </div>
+              {errorLoading && (
                 <div className={styles.listFootnote}>加载中...</div>
               )}
             </div>
           </div>
+        </article>
+      </section>
+
+      <section
+        className={styles.htmlPreviewSection}
+        data-testid="html-preview-click-section"
+      >
+        <article className={styles.panelLarge}>
+          <div className={styles.panelHeader}>
+            <h3 className={styles.panelTitle}>客户经营点击分析</h3>
+            <span className={styles.panelMeta}>
+              最近点击：{htmlPreviewLatestClick}
+            </span>
+          </div>
+          <div className={styles.htmlPreviewFilters}>
+            <Select
+              className={styles.htmlPreviewListSelect}
+              value={selectedHtmlPreviewListKey}
+              onChange={setSelectedHtmlPreviewListKey}
+              placeholder="全部名单"
+              showSearch
+              optionFilterProp="label"
+            >
+              <Option value="all" label="全部名单">
+                全部名单
+              </Option>
+              {htmlPreviewLists.map((item) => (
+                <Option
+                  key={item.list_key}
+                  value={item.list_key}
+                  label={item.list_name}
+                >
+                  {item.list_name}
+                </Option>
+              ))}
+            </Select>
+            <label className={styles.htmlPreviewSwitch}>
+              <Switch
+                size="small"
+                checked={includeUnclickedCustomers}
+                onChange={setIncludeUnclickedCustomers}
+              />
+              <span>显示未点击客户</span>
+            </label>
+          </div>
+          {!hasHtmlPreviewAnalysisData ? (
+            <div className={styles.emptyChartState}>
+              <Database className={styles.emptyBreakdownIcon} />
+              <span>
+                {htmlPreviewLoading ? "加载中..." : "暂无客户经营点击数据"}
+              </span>
+            </div>
+          ) : (
+            <div className={styles.htmlPreviewDashboard}>
+              <div className={styles.htmlPreviewStats}>
+                <div className={styles.htmlPreviewStatCard}>
+                  <span>名单数</span>
+                  <strong>{formatNumber(htmlPreviewListCount)}</strong>
+                </div>
+                <div className={styles.htmlPreviewStatCard}>
+                  <span>名单总客户数</span>
+                  <strong>{formatNumber(htmlPreviewCustomerTotal)}</strong>
+                </div>
+                <div className={styles.htmlPreviewStatCard}>
+                  <span>被点击客户数</span>
+                  <strong>{formatNumber(htmlPreviewClickedCustomerCount)}</strong>
+                </div>
+                <div className={styles.htmlPreviewStatCard}>
+                  <span>点击总数</span>
+                  <strong>{formatNumber(htmlPreviewTotalClicks)}</strong>
+                </div>
+              </div>
+              <div className={styles.htmlPreviewDistribution}>
+                <div className={styles.htmlPreviewTopTitle}>点击分布</div>
+                <div className={styles.htmlPreviewDistributionRows}>
+                  <div className={styles.htmlPreviewDistributionRow}>
+                    <div className={styles.htmlPreviewDistributionMeta}>
+                      <span>洞察</span>
+                      <strong>
+                        {formatNumber(htmlPreviewInsightClicks)}
+                        <em>{htmlPreviewInsightPercent}%</em>
+                      </strong>
+                    </div>
+                    <div className={styles.htmlPreviewDistributionTrack}>
+                      <i
+                        className={styles.htmlPreviewInsightBar}
+                        style={{
+                          width: `${Math.max(
+                            6,
+                            (htmlPreviewInsightClicks /
+                              htmlPreviewMaxActionClicks) *
+                              100,
+                          )}%`,
+                        }}
+                      />
+                    </div>
+                  </div>
+                  <div className={styles.htmlPreviewDistributionRow}>
+                    <div className={styles.htmlPreviewDistributionMeta}>
+                      <span>电访</span>
+                      <strong>
+                        {formatNumber(htmlPreviewPhoneClicks)}
+                        <em>{htmlPreviewPhonePercent}%</em>
+                      </strong>
+                    </div>
+                    <div className={styles.htmlPreviewDistributionTrack}>
+                      <i
+                        className={styles.htmlPreviewPhoneBar}
+                        style={{
+                          width: `${Math.max(
+                            6,
+                            (htmlPreviewPhoneClicks /
+                              htmlPreviewMaxActionClicks) *
+                              100,
+                          )}%`,
+                        }}
+                      />
+                    </div>
+                  </div>
+                  <div className={styles.htmlPreviewDistributionRow}>
+                    <div className={styles.htmlPreviewDistributionMeta}>
+                      <span>方案</span>
+                      <strong>
+                        {formatNumber(htmlPreviewPlanClicks)}
+                        <em>{htmlPreviewPlanPercent}%</em>
+                      </strong>
+                    </div>
+                    <div className={styles.htmlPreviewDistributionTrack}>
+                      <i
+                        className={styles.htmlPreviewPlanBar}
+                        style={{
+                          width: `${Math.max(
+                            6,
+                            (htmlPreviewPlanClicks /
+                              htmlPreviewMaxActionClicks) *
+                              100,
+                          )}%`,
+                        }}
+                      />
+                    </div>
+                  </div>
+                </div>
+              </div>
+              <div className={styles.htmlPreviewTopList}>
+                <div className={styles.htmlPreviewTopTitle}>名单点击概览</div>
+                {displayedHtmlPreviewLists.slice(0, 5).map((item) => (
+                  <div
+                    key={item.list_key}
+                    className={styles.htmlPreviewListRow}
+                  >
+                    <Tooltip
+                      title={item.file_name || item.file_url || item.list_name}
+                      placement="top"
+                    >
+                      <span className={styles.htmlPreviewTopName}>
+                        {item.list_name}
+                      </span>
+                    </Tooltip>
+                    <div className={styles.htmlPreviewListMetrics}>
+                      <span>
+                        <em>名单客户</em>
+                        <strong>{formatNumber(item.customer_count)}</strong>
+                      </span>
+                      <span>
+                        <em>点击客户</em>
+                        <strong>
+                          {formatNumber(item.clicked_customer_count)}
+                        </strong>
+                      </span>
+                      <span>
+                        <em>洞察</em>
+                        <strong>{formatNumber(item.insight_count)}</strong>
+                      </span>
+                      <span>
+                        <em>电访</em>
+                        <strong>{formatNumber(item.phone_count)}</strong>
+                      </span>
+                      <span>
+                        <em>方案</em>
+                        <strong>{formatNumber(item.plan_count)}</strong>
+                      </span>
+                    </div>
+                  </div>
+                ))}
+                {displayedHtmlPreviewLists.length === 0 && (
+                  <div className={styles.htmlPreviewEmptyLine}>
+                    暂无名单点击概览数据
+                  </div>
+                )}
+              </div>
+              <div className={styles.htmlPreviewEventList}>
+                <div className={styles.htmlPreviewTopTitle}>客户点击明细</div>
+                {selectedHtmlPreviewList && (
+                  <div className={styles.htmlPreviewSelectedList}>
+                    当前名单：{selectedHtmlPreviewList.list_name}
+                  </div>
+                )}
+                {htmlPreviewCustomerClicks.length === 0 ? (
+                  <div className={styles.htmlPreviewEmptyLine}>
+                    暂无客户点击明细
+                  </div>
+                ) : (
+                  <div className={styles.htmlPreviewCustomerTable}>
+                    <div className={styles.htmlPreviewCustomerHeader}>
+                      <span>客户</span>
+                      <span>洞察</span>
+                      <span>电访</span>
+                      <span>方案</span>
+                      <span>总点击</span>
+                      <span>最近</span>
+                    </div>
+                    {htmlPreviewCustomerClicks.map((item) => (
+                      <div
+                        key={`${item.customer_id || item.customer_name}-${
+                          item.last_clicked_at || ""
+                        }`}
+                        className={styles.htmlPreviewCustomerRow}
+                      >
+                        <div className={styles.htmlPreviewCustomerCell}>
+                          <span className={styles.htmlPreviewCustomerName}>
+                            {item.customer_name || "未知客户"}
+                          </span>
+                          {item.customer_id && (
+                            <span className={styles.htmlPreviewCustomerId}>
+                              {item.customer_id}
+                            </span>
+                          )}
+                        </div>
+                        <strong>{formatNumber(item.insight_count)}</strong>
+                        <strong>{formatNumber(item.phone_count)}</strong>
+                        <strong>{formatNumber(item.plan_count)}</strong>
+                        <strong>{formatNumber(item.total_click_count)}</strong>
+                        <span className={styles.htmlPreviewEventTime}>
+                          {item.last_clicked_at
+                            ? dayjs(item.last_clicked_at).format("MM-DD HH:mm")
+                            : "-"}
+                        </span>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+            </div>
+          )}
         </article>
       </section>
 

@@ -40,15 +40,18 @@ class BaseMemoryManager(ABC):
         self,
         working_dir: str,
         agent_id: str,
+        tenant_id: str | None = None,
     ):
         """Initialize common memory manager attributes.
 
         Args:
             working_dir: Working directory path for memory storage.
             agent_id: Unique agent identifier.
+            tenant_id: Optional tenant identifier for scoped config access.
         """
         self.working_dir: str = working_dir
         self.agent_id: str = agent_id
+        self.tenant_id: str | None = tenant_id
         self.chat_model: Optional[ChatModelBase] = None
         self.formatter: Optional[FormatterBase] = None
 

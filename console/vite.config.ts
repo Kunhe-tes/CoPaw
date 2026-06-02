@@ -31,6 +31,10 @@ export default defineConfig(({ mode }) => {
         "@": path.resolve(__dirname, "./src"),
       },
     },
+    build: {
+      target: "chrome80",
+      cssTarget: "chrome80",
+    },
     server: {
       host: "0.0.0.0",
       port: 5173,

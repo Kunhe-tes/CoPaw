@@ -348,6 +348,21 @@ class SkillInvocationDetector:
         if len(self._recent_tools) > 10:
             self._recent_tools.pop(0)
 
+        # Step 0: Check if Agent is reading a skill's SKILL.md (highest priority)
+        # 当Agent主动读取某技能的SKILL.md文件时，直接激活该技能
+        skill_from_md_read = self._detect_skill_from_skill_md_read(
+            tool_name,
+            tool_input,
+        )
+        if skill_from_md_read:
+            await self._ensure_skill_active(
+                skill_from_md_read,
+                1.0,
+                tool_name,
+            )
+            self._context_manager.record_tool_call(tool_name, mcp_server)
+            return skill_from_md_read, {skill_from_md_read: 1.0}
+
         # Step 1: Check for explicit declaration
         declared_skills = self._registry.get_skills_for_tool(tool_name)
 
@@ -639,6 +654,45 @@ class SkillInvocationDetector:
             return 0.5
 
         return matches / total_features
+
+    def _detect_skill_from_skill_md_read(
+        self,
+        tool_name: str,
+        tool_input: dict[str, Any],
+    ) -> Optional[str]:
+        """检测Agent是否在读取某个技能的SKILL.md文件.
+
+        当Agent调用read_file工具读取某个启用技能的SKILL.md时，
+        这表明Agent正在主动了解该技能的使用方法，应将该技能激活。
+
+        Args:
+            tool_name: 工具名称
+            tool_input: 工具输入参数
+
+        Returns:
+            技能名称，如果未检测到则返回None
+        """
+        if tool_name != "read_file":
+            return None
+
+        file_path = tool_input.get("file_path", "")
+        if not file_path:
+            return None
+
+        path = Path(file_path)
+        if path.name != "SKILL.md":
+            return None
+
+        skill_name = path.parent.name
+        if skill_name in self._enabled_skills:
+            logger.info(
+                "Detected skill '%s' from SKILL.md read: %s",
+                skill_name,
+                file_path,
+            )
+            return skill_name
+
+        return None
 
     def _update_skill_state(self, skill: str) -> None:
         """Update skill state after a tool call.

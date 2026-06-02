@@ -198,7 +198,7 @@ function normalizePlanClarificationFields(
   if (!Array.isArray(value) || value.length === 0) return null;
 
   const normalized = value
-    .map((field) => {
+    .map((field): PlanClarificationField | null => {
       if (!field || typeof field !== "object") return null;
       const record = field as Record<string, unknown>;
       const type = record.type;

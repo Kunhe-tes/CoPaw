@@ -29,11 +29,11 @@
 
 // ─── Sidebar ─────────────────────────────────────────────────────────────────
 .sider {
-  // background: #fff !important;
   background: #ffffff !important;
+  border-right: 0;
   overflow: auto;
   height: calc(100vh - 64px);
-  padding: 0 16px;
+  padding: 8px;
   display: flex;
   flex-direction: column;
 
@@ -67,12 +67,12 @@
     margin-bottom: 12px;
   }
 
-  // Menu takes remaining space
+  // 菜单区域需要独立滚动，避免底部折叠按钮被长列表挤出。
   .sideMenu {
     flex: 1;
     overflow-y: auto;
+    padding: 0;
 
-    // Hide scrollbar for menu too
     &::-webkit-scrollbar {
       display: none;
     }
@@ -99,8 +99,8 @@
 
     .collapseToggleContainer {
       justify-content: center;
-      width: calc(100% + 16px);
-      margin: 0 -8px;
+      width: 100%;
+      margin: 0;
       padding: 8px 0;
     }
 
@@ -131,57 +131,143 @@
 
   :global {
     .swe-menu {
-      // background: #fff !important;
       background: #ffffff !important;
       border-inline-end: 0 !important;
+      color: var(--colorText, #1a1716);
     }
 
-    /* Group title (一级菜单分组) */
     .swe-menu-submenu-title {
-      font-family: "PingFang SC", sans-serif !important;
-      font-size: 12px !important;
-      font-weight: 500 !important;
-      line-height: 32px !important;
+      height: 36px !important;
+      margin: 6px 0 4px !important;
+      padding: 0 8px 0 8px !important;
+      border-radius: 8px !important;
+      font-size: 14px !important;
+      font-weight: 400 !important;
+      line-height: 36px !important;
       letter-spacing: normal !important;
-      color: rgba(26, 23, 22, 0.25) !important;
-      padding-left: 8px !important;
+      color: var(--colorText, #1a1716) !important;
+      cursor: pointer !important;
+      transition:
+        background-color 0.16s ease,
+        color 0.16s ease;
 
-      /* No hover effect for group titles */
       &:hover {
-        background: transparent !important;
-        color: rgba(26, 23, 22, 0.25) !important;
+        background: rgba(26, 23, 22, 0.04) !important;
+        color: var(--colorText, #1a1716) !important;
+      }
+
+      .swe-menu-item-icon {
+        color: var(--colorTextSecondary, rgba(26, 23, 22, 0.45)) !important;
+      }
+
+      .swe-menu-title-content {
+        margin-inline-start: 8px !important;
       }
     }
 
-    /* Hide submenu arrow */
     .swe-menu-submenu-arrow {
-      display: none !important;
+      display: inline-flex !important;
+      align-items: center;
+      justify-content: center;
+      inset-inline-end: 8px !important;
+      width: 14px;
+      color: var(--colorTextSecondary, rgba(26, 23, 22, 0.45)) !important;
     }
 
-    /* Always expand submenus */
-    .swe-menu-submenu {
-      > .swe-menu {
-        display: block !important;
+    .swe-menu-item {
+      position: relative;
+      height: 36px !important;
+      margin: 3px 0 !important;
+      padding: 0 10px 0 30px !important;
+      border-radius: 8px !important;
+      color: var(--colorText, #1a1716) !important;
+      font-size: 14px !important;
+      line-height: 36px !important;
+      letter-spacing: normal !important;
+      transition:
+        background-color 0.16s ease,
+        color 0.16s ease;
+
+      &::before {
+        position: absolute;
+        top: 8px;
+        bottom: 8px;
+        left: 17px;
+        width: 2px;
+        border-radius: 999px;
+        background: transparent;
+        content: "";
+      }
+
+      &:hover {
+        background: rgba(55, 105, 252, 0.06) !important;
+        color: var(--colorText, #1a1716) !important;
+      }
+
+      .swe-menu-item-icon {
+        display: inline-flex !important;
+        color: var(--colorTextSecondary, rgba(26, 23, 22, 0.45)) !important;
+      }
+
+      .swe-menu-title-content {
+        margin-inline-start: 8px !important;
       }
     }
 
-    /* Menu item padding - align all items */
-    .swe-menu-item {
-      padding-left: 8px !important;
+    .swe-menu-root > .swe-menu-item {
+      height: 36px !important;
+      margin: 2px 0 8px !important;
+      padding: 0 8px !important;
+      color: var(--colorText, #1a1716) !important;
+      font-weight: 400 !important;
+      line-height: 36px !important;
+
+      &::before {
+        display: none;
+      }
+
+      .swe-menu-item-icon {
+        display: inline-flex !important;
+        color: var(--colorTextSecondary, rgba(26, 23, 22, 0.45)) !important;
+      }
+
+      .swe-menu-title-content {
+        margin-inline-start: 8px !important;
+      }
     }
 
-    /* Remove submenu indent - align with parent */
+    .swe-menu-root > .swe-menu-item-selected {
+      background: rgba(55, 105, 252, 0.1) !important;
+      color: #3769fc !important;
+
+      .swe-menu-item-icon {
+        color: #3769fc !important;
+      }
+    }
+
     .swe-menu-submenu .swe-menu-item {
-      padding-left: 8px !important;
+      padding-left: 33px !important;
+
+      // 二级菜单只保留文字层级，避免图标和一级菜单抢视觉焦点。
+      .swe-menu-item-icon {
+        display: none !important;
+      }
+
+      .swe-menu-title-content {
+        margin-inline-start: 0 !important;
+      }
     }
 
-    /* Selected item */
     .swe-menu-item-selected {
-      background: rgba(55, 105, 252, 0.08) !important;
-      color: inherit !important;
+      background: rgba(55, 105, 252, 0.1) !important;
+      color: #3769fc !important;
       display: flex !important;
       align-items: center !important;
-      justify-content: center !important;
+      justify-content: flex-start !important;
+
+      &::before {
+        background: transparent;
+      }
 
       .swe-menu-title-content {
         display: flex !important;
@@ -189,9 +275,24 @@
       }
     }
 
-    /* Selected submenu item - keep text color unchanged */
     .swe-menu-submenu .swe-menu-item-selected {
-      color: inherit !important;
+      color: #3769fc !important;
+      font-weight: 500 !important;
+
+      .swe-menu-item-icon {
+        color: #3769fc !important;
+      }
+    }
+
+    .swe-menu-submenu-selected > .swe-menu-submenu-title {
+      background: rgba(55, 105, 252, 0.08) !important;
+      color: var(--colorText, #1a1716) !important;
+      box-shadow: none;
+
+      .swe-menu-item-icon,
+      .swe-menu-submenu-arrow {
+        color: #3769fc !important;
+      }
     }
   }
 }
@@ -209,36 +310,75 @@
     .swe-menu {
       background: #1a1a1a !important;
       border-inline-end: 0 !important;
+      color: rgba(255, 255, 255, 0.82);
     }
 
-    /* Group title (sub-menu label) */
     .swe-menu-submenu-title {
-      color: rgba(255, 255, 255, 0.45) !important;
+      color: rgba(255, 255, 255, 0.88) !important;
 
-      /* No hover effect for group titles in dark mode */
       &:hover {
         background: transparent !important;
-        color: rgba(255, 255, 255, 0.45) !important;
+        color: rgba(255, 255, 255, 0.88) !important;
       }
     }
 
-    /* Regular menu item */
+    .swe-menu-submenu-arrow {
+      color: rgba(255, 255, 255, 0.62) !important;
+    }
+
     .swe-menu-item {
       color: rgba(255, 255, 255, 0.75) !important;
     }
 
-    /* Hover state - only for menu items, not group titles */
     .swe-menu-item:hover {
       background: rgba(255, 255, 255, 0.1) !important;
       color: rgba(255, 255, 255, 0.95) !important;
     }
 
-    /* Selected item */
     .swe-menu-item-selected {
       background: rgba(55, 105, 252, 0.15) !important;
       color: #3769fc !important;
     }
+
+    .swe-menu-submenu-selected > .swe-menu-submenu-title {
+      background: rgba(255, 255, 255, 0.08) !important;
+      color: rgba(255, 255, 255, 0.95) !important;
+      box-shadow: none;
+
+      .swe-menu-item-icon,
+      .swe-menu-submenu-arrow {
+        color: #66a7ff !important;
+      }
+    }
+
+    .swe-menu-root > .swe-menu-item {
+      color: rgba(255, 255, 255, 0.88) !important;
+
+      .swe-menu-item-icon {
+        color: rgba(255, 255, 255, 0.62) !important;
+      }
+    }
+
+    .swe-menu-root > .swe-menu-item-selected {
+      color: #66a7ff !important;
+
+      .swe-menu-item-icon {
+        color: #66a7ff !important;
+      }
+    }
   }
+}
+
+.submenuArrowIcon {
+  color: currentcolor;
+  transition:
+    color 0.16s ease,
+    transform 0.16s ease;
+  transform: rotate(-90deg);
+}
+
+.submenuArrowIconOpen {
+  transform: rotate(0deg);
 }
 
 .logoWrapper {
@@ -292,7 +432,7 @@
 
 // ─── Auth actions (account + logout) ──────────────────────────────────────────
 .authActions {
-  padding: 12px 16px;
+  padding: 10px 8px;
   border-top: 1px solid #f0f0f0;
 }
 
@@ -321,9 +461,9 @@
 .collapseToggleContainer {
   flex-shrink: 0;
   z-index: 10;
-  width: calc(100% + 32px);
-  margin: 0 -16px;
-  padding: 8px 16px;
+  width: 100%;
+  margin: 0;
+  padding: 8px 0;
   display: flex;
   align-items: center;
   justify-content: flex-end;

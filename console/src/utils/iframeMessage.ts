@@ -501,7 +501,7 @@ function syncOriginYEnvFromCurrentContext(): Promise<void> {
       values: {
         token,
         bbkOrgId: store.bbk ?? "",
-        brnOrgId: getTargetCookie("brnOrgId") ?? "",
+        brnOrgId: store.orgCode ?? "",
         sapId: store.userId ?? "",
         rtlPstId: store.positionId ?? "",
         sourceId: "RMASSIST",

@@ -441,3 +441,60 @@ class TestRetryConfigPropagation:
         assert retry_config.max_retries == 5
         assert retry_config.backoff_base == 2.0
         assert retry_config.backoff_cap == 120.0
+
+
+class TestScopedModelSlotOverride:
+    def test_scoped_override_takes_priority_over_tenant_default(self):
+        from swe.agents.model_factory import create_model_and_formatter
+        from swe.app.crons.model_slot_context import (
+            bind_model_slot_override,
+        )
+        from swe.providers.models import ModelSlotConfig
+
+        with (
+            patch(
+                "swe.agents.model_factory.ProviderManager",
+            ) as mock_pm_class,
+            patch(
+                "swe.agents.model_factory._create_formatter_instance",
+            ),
+            patch(
+                "swe.agents.model_factory.TokenRecordingModelWrapper",
+                side_effect=lambda _provider_id, model: model,
+            ),
+            patch(
+                "swe.agents.model_factory.RetryChatModel",
+                side_effect=lambda model, **_kwargs: model,
+            ),
+        ):
+            mock_manager = MagicMock()
+            mock_manager.get_active_model.return_value = ModelSlotConfig(
+                provider_id="openai",
+                model="gpt-4o",
+            )
+            mock_pm_class.get_instance.return_value = mock_manager
+            mock_pm_class.ensure_tenant_provider_storage = MagicMock()
+
+            default_provider = MagicMock()
+            default_provider.get_chat_model_instance.return_value = MagicMock()
+            override_provider = MagicMock()
+            override_provider.get_chat_model_instance.return_value = (
+                MagicMock()
+            )
+            mock_manager.get_provider.side_effect = lambda provider_id: {
+                "openai": default_provider,
+                "anthropic": override_provider,
+            }[provider_id]
+
+            with bind_model_slot_override(
+                ModelSlotConfig(
+                    provider_id="anthropic",
+                    model="claude-3-7-sonnet",
+                ),
+            ):
+                create_model_and_formatter()
+
+        mock_manager.get_provider.assert_called_once_with("anthropic")
+        override_provider.get_chat_model_instance.assert_called_once_with(
+            "claude-3-7-sonnet",
+        )

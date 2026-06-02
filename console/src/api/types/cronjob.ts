@@ -1,3 +1,5 @@
+import type { ModelSlotConfig } from "./provider";
+
 export interface CronJobSchedule {
   type: "cron";
   cron: string;
@@ -58,6 +60,7 @@ export interface CronJobSpecInput {
   schedule: CronJobSchedule;
   task_type?: "text" | "agent";
   text?: string;
+  model_slot?: ModelSlotConfig | null;
   request?: CronJobRequest;
   dispatch: CronJobDispatch;
   runtime?: CronJobRuntime;
@@ -84,6 +87,7 @@ export interface CronBroadcastTenantResult {
   offset_minutes: number;
   notification_timezone: string;
   error: string;
+  warning: string;
 }
 
 export interface CronBroadcastResponse {

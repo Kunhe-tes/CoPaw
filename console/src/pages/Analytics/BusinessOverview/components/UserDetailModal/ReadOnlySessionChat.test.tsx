@@ -23,6 +23,12 @@ vi.mock("../../../../Chat/components/RuntimeResponseCard", () => ({
   default: () => <div data-testid="runtime-response-card" />,
 }));
 
+vi.mock("../../../../../components/ConversationQuickNav", () => ({
+  default: ({ messages }: { messages?: unknown[] }) => (
+    <div data-testid="conversation-quick-nav">{messages?.length ?? 0}</div>
+  ),
+}));
+
 vi.mock("@/components/agentscope-chat", () => ({
   AgentScopeRuntimeWebUIComposedProvider: ({
     children,
@@ -60,6 +66,7 @@ describe("ReadOnlySessionChat", () => {
         "chat-uuid-1",
       );
     });
+    await screen.findByTestId("conversation-quick-nav");
   });
 
   it("does not call chat detail when mapping is missing", async () => {

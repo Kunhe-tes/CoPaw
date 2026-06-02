@@ -469,7 +469,7 @@ function SkillsPage() {
   return (
     <div className={styles.skillsPage}>
       <PageHeader
-        items={[{ title: t("nav.agent") }, { title: t("skills.title") }]}
+        items={[{ title: t("nav.creationCenter") }, { title: t("skills.title") }]}
         extra={
           <div className={styles.headerRight}>
             <input

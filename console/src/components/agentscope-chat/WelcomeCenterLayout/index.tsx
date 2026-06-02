@@ -57,9 +57,10 @@ export default function WelcomeCenterLayout(props: WelcomeCenterLayoutProps) {
     prefixItems,
   } = props;
   const { t } = useTranslation();
-  const { disabled: inputDisabled } = useChatAnywhereInput((value) => ({
+  const inputState = useChatAnywhereInput((value) => ({
     disabled: Boolean(value.disabled),
   }));
+  const inputDisabled = Boolean(inputState.disabled);
   const [inputValue, setInputValue] = useState("");
   const [fileList, setFileList] = useState<UploadFile[]>([]);
   const [drawerVisible, setDrawerVisible] = useState(false);

@@ -25,14 +25,11 @@ export const ONE_HOUR_MS = 60 * 60 * 1000;
 // ── Navigation ────────────────────────────────────────────────────────────
 
 export const DEFAULT_OPEN_KEYS = [
-  "chat-group",
-  "control-group",
-  "agent-group",
-  "settings-group",
-  "analytics-group",
-  "instance-group",
-  "harness-group",
-  "market-group",
+  "creation-center",
+  "run-center",
+  "system-settings",
+  "insight-center",
+  "quality-engineering",
 ];
 
 export const KEY_TO_PATH: Record<string, string> = {
@@ -133,7 +130,7 @@ export const compareVersions = (a: string, b: string): number => {
   const normalise = (v: string) =>
     v
       .replace(/\.post(\d+)/i, ".$1")
-      .split(/[.\-]/)
+      .split(/[.-]/)
       .map((seg) => (isNaN(Number(seg)) ? 0 : Number(seg)));
   const aN = normalise(a);
   const bN = normalise(b);

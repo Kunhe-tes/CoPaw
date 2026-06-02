@@ -411,6 +411,7 @@ ask CoPaw and send the reply". **Requires `copaw app` to be running.**
 | `copaw cron get <job_id>`    | Show a job's spec                             |
 | `copaw cron state <job_id>`  | Show runtime state (next run, last run, etc.) |
 | `copaw cron create ...`      | Create a job                                  |
+| `copaw cron update <job_id>` | Replace a job in place                        |
 | `copaw cron delete <job_id>` | Delete a job                                  |
 | `copaw cron pause <job_id>`  | Pause a job                                   |
 | `copaw cron resume <job_id>` | Resume a paused job                           |
@@ -453,6 +454,10 @@ copaw cron create \
 Required: `--type`, `--name`, `--cron`, `--channel`, `--target-user`,
 `--target-session`, `--text`.
 
+Optional model selection for agent jobs: pass `--model-provider <provider>`
+and `--model <model>` together. This writes `model_slot` into the job spec.
+Text jobs ignore these flags.
+
 **Option 2 — JSON file (complex or batch)**
 
 ```bash
@@ -468,7 +473,24 @@ JSON structure matches the output of `copaw cron get <job_id>`.
 | `--timezone`                 | user timezone | Timezone for the cron schedule (defaults to `user_timezone` from config) |
 | `--enabled` / `--no-enabled` | enabled       | Create enabled or disabled                                               |
 | `--mode`                     | `final`       | `stream` (incremental) or `final` (complete response)                    |
+| `--model-provider` + `--model` | unset       | Set `model_slot` for agent jobs; both flags must be provided together    |
 | `--base-url`                 | auto          | Override the API base URL                                                |
+
+### Updating jobs
+
+`copaw cron update <job_id>` accepts the same inline fields as `create`.
+
+- If you omit `--model-provider` and `--model`, the existing `model_slot` is preserved.
+- If you provide both flags for an agent job, the existing `model_slot` is replaced.
+- If the effective task type is `text`, `model_slot` is removed.
+
+```bash
+copaw cron update job-123 \
+  --type agent \
+  --text "Regenerate the daily summary" \
+  --model-provider openai \
+  --model gpt-5.4
+```
 
 ### Cron expression cheat sheet
 
@@ -612,7 +634,7 @@ See [Config & Working Directory](./config) and [Multi-Agent](./multi-agent) for 
 | `copaw env`      | `list` · `set` · `delete`                                                            |        No        |
 | `copaw channels` | `list` · `send` · `install` · `add` · `remove` · `config`                            |     **Yes**      |
 | `copaw agents`   | `list` · `chat`                                                                      |     **Yes**      |
-| `copaw cron`     | `list` · `get` · `state` · `create` · `delete` · `pause` · `resume` · `run`          |     **Yes**      |
+| `copaw cron`     | `list` · `get` · `state` · `create` · `update` · `delete` · `pause` · `resume` · `run` |     **Yes**      |
 | `copaw chats`    | `list` · `get` · `create` · `update` · `delete`                                      |     **Yes**      |
 | `copaw skills`   | `list` · `config`                                                                    |        No        |
 | `copaw clean`    | —                                                                                    |        No        |

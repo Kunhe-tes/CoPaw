@@ -111,6 +111,46 @@ function matchExt(suffix: string, ext: string[]): boolean {
 
 export type FileType = "previewable" | "unsupported";
 
+const AUTO_PREVIEW_MARKERS = ["[auto-preview]", "存款到期完整客户名单"];
+const HTML_PREVIEW_EXTS = ["html", "htm"];
+
+function safeDecodeValue(value: string): string {
+  try {
+    return decodeURIComponent(value);
+  } catch {
+    return value;
+  }
+}
+
+function extractUrlFileName(url: string): string {
+  try {
+    const urlObj = new URL(url, window.location.origin);
+    return urlObj.pathname.split("/").pop() || "";
+  } catch {
+    return url.split(/[?#]/)[0].split("/").pop() || "";
+  }
+}
+
+function includesAutoPreviewMarker(value: string): boolean {
+  const decodedValue = safeDecodeValue(value);
+  return AUTO_PREVIEW_MARKERS.some((marker) => decodedValue.includes(marker));
+}
+
+function hasHtmlExtension(fileName: string): boolean {
+  const ext = getExtension(safeDecodeValue(fileName));
+  return matchExt(ext, HTML_PREVIEW_EXTS);
+}
+
+export function isAutoPreviewHtmlLink(url: string, fileName?: string): boolean {
+  const extractedFileName = extractUrlFileName(url);
+  const candidates = [url, extractedFileName, fileName || ""];
+
+  return (
+    hasHtmlExtension(fileName || extractedFileName) &&
+    candidates.some((candidate) => includesAutoPreviewMarker(candidate))
+  );
+}
+
 export function getFileType(fileName: string): FileType {
   const ext = getExtension(fileName);
   if (matchExt(ext, BROWSER_PREVIEWABLE_EXTS)) return "previewable";

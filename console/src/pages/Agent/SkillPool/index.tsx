@@ -679,7 +679,7 @@ function SkillPoolPage() {
   return (
     <div className={styles.skillsPage}>
       <PageHeader
-        items={[{ title: t("nav.settings") }, { title: t("nav.skillPool") }]}
+        items={[{ title: t("nav.systemSettings") }, { title: t("nav.skillPool") }]}
         extra={
           <div className={styles.headerRight}>
             <input

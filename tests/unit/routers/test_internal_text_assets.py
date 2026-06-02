@@ -564,6 +564,92 @@ def test_main_app_static_html_returns_text_html_content_type(
     assert "text/html" in response.headers["content-type"].lower()
 
 
+def test_main_app_runtime_static_html_uses_gzip_when_requested(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    _set_app_working_dir(monkeypatch, tmp_path)
+    body = "<!doctype html><p>runtime static gzip</p>\n" * 200
+    static_file = (
+        tmp_path
+        / "gzipscope"
+        / "workspaces"
+        / "default"
+        / "static"
+        / "report.html"
+    )
+    static_file.parent.mkdir(parents=True, exist_ok=True)
+    static_file.write_bytes(body.encode("utf-8"))
+
+    with TestClient(
+        app_module.app,
+        raise_server_exceptions=False,
+    ) as client:
+        response = client.get(
+            "/static/gzipscope/default/report.html",
+            headers={"Accept-Encoding": "gzip"},
+        )
+
+    assert response.status_code == 200
+    assert response.headers["content-encoding"] == "gzip"
+    assert response.text == body
+
+
+def test_main_app_runtime_static_non_html_skips_gzip(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    _set_app_working_dir(monkeypatch, tmp_path)
+    body = "runtime static text stays plain\n" * 200
+    static_file = (
+        tmp_path
+        / "gzipscope"
+        / "workspaces"
+        / "default"
+        / "static"
+        / "report.txt"
+    )
+    static_file.parent.mkdir(parents=True, exist_ok=True)
+    static_file.write_bytes(body.encode("utf-8"))
+
+    with TestClient(
+        app_module.app,
+        raise_server_exceptions=False,
+    ) as client:
+        response = client.get(
+            "/static/gzipscope/default/report.txt",
+            headers={"Accept-Encoding": "gzip"},
+        )
+
+    assert response.status_code == 200
+    assert "content-encoding" not in response.headers
+    assert response.text == body
+
+
+def test_main_app_console_static_file_skips_runtime_gzip(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    asset_dir = tmp_path / "console-assets"
+    asset_dir.mkdir(parents=True, exist_ok=True)
+    body = "console static stays plain\n" * 200
+    (asset_dir / "app.txt").write_bytes(body.encode("utf-8"))
+    monkeypatch.setattr(app_module, "_assets_dir", asset_dir, raising=False)
+
+    with TestClient(
+        app_module.app,
+        raise_server_exceptions=False,
+    ) as client:
+        response = client.get(
+            "/static/app.txt",
+            headers={"Accept-Encoding": "gzip"},
+        )
+
+    assert response.status_code == 200
+    assert "content-encoding" not in response.headers
+    assert response.text == body
+
+
 def test_main_app_public_text_asset_read_skips_auth_when_enabled(
     monkeypatch,
     tmp_path: Path,

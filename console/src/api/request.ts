@@ -46,10 +46,10 @@ function buildHeaders(
   extra?: HeadersInit,
   body?: BodyInit | null,
 ): Headers {
-  // Normalize extra to a Headers instance for consistent handling
+  // 统一转为 Headers，保证后续读取和写入行为一致。
   const headers = extra instanceof Headers ? extra : new Headers(extra);
 
-  // Only add Content-Type for methods that typically have a body
+  // 仅对通常携带请求体的方法补默认 Content-Type。
   if (method && ["POST", "PUT", "PATCH"].includes(method.toUpperCase())) {
     // FormData 需要浏览器自动生成 multipart boundary，不能强行写死 Content-Type。
     if (!headers.has("Content-Type") && !(body instanceof FormData)) {
@@ -66,6 +66,42 @@ function buildHeaders(
   return headers;
 }
 
+async function parseResponse<T>(response: Response): Promise<T> {
+  if (response.status === 204) {
+    return undefined as T;
+  }
+
+  const contentType = response.headers.get("content-type") || "";
+  if (!contentType.includes("application/json")) {
+    return (await response.text()) as unknown as T;
+  }
+
+  return (await response.json()) as T;
+}
+
+async function throwRequestError(response: Response): Promise<never> {
+  const text = await response.text().catch(() => "");
+  const contentType = response.headers.get("content-type") || "";
+  const errorMessage = getErrorMessageFromBody(text, contentType);
+
+  // 保留原始响应体，方便 parseErrorDetail() 提取结构化字段。
+  const finalMessage = errorMessage
+    ? `${errorMessage} - ${text}`
+    : `Request failed: ${response.status} ${response.statusText}`;
+
+  throw new Error(finalMessage);
+}
+
+function throwLocalAuthError(): never {
+  clearAuthToken();
+  throw new Error("认证已失效，请刷新页面或重新进入系统后再试");
+}
+
+function throwExternalAuthError(): never {
+  clearExternalToken();
+  throw new Error("登录状态已失效，请刷新页面或重新进入后再试");
+}
+
 export async function request<T = unknown>(
   path: string,
   options: RequestInit = {},
@@ -80,15 +116,25 @@ export async function request<T = unknown>(
   });
 
   if (!response.ok) {
-    // Handle 401: try refresh external token and retry, or redirect to login
+    // 401 时优先尝试刷新外部 token 并重试，最终失败也只抛错，不跳转页面。
     if (response.status === 401) {
-      // If external token is enabled, try to refresh and retry
       if (isExternalTokenEnabled()) {
+        let canRetry = false;
         try {
-          const newToken = await ensureValidToken(true); // Force refresh
-          // Retry with new token
-          const newHeaders = buildHeaders(method, options.headers);
-          newHeaders.set("Authorization", `Bearer ${newToken}`);
+          await ensureValidToken(true);
+          canRetry = true;
+        } catch {
+          // 刷新失败说明缓存 token 不可信，清理后向调用方暴露认证失败。
+          clearExternalToken();
+        }
+
+        if (canRetry) {
+          // 重试仍走统一 header 构建，避免外部 token 与普通 token 逻辑分叉。
+          const newHeaders = buildHeaders(
+            method,
+            options.headers,
+            options.body,
+          );
 
           const retryResponse = await fetch(url, {
             ...options,
@@ -96,57 +142,26 @@ export async function request<T = unknown>(
           });
 
           if (retryResponse.ok) {
-            // Handle successful retry response
-            if (retryResponse.status === 204) {
-              return undefined as T;
-            }
-            const retryContentType =
-              retryResponse.headers.get("content-type") || "";
-            if (!retryContentType.includes("application/json")) {
-              return (await retryResponse.text()) as unknown as T;
-            }
-            return (await retryResponse.json()) as T;
+            return parseResponse<T>(retryResponse);
           }
 
-          // Retry also failed with 401, clear external token
+          // 外部 token 由宿主系统负责登录态，重试仍 401 时只抛错，不跳转内部登录页。
           if (retryResponse.status === 401) {
-            clearExternalToken();
+            throwExternalAuthError();
           }
-        } catch {
-          // Refresh failed, clear external token
-          clearExternalToken();
+
+          await throwRequestError(retryResponse);
         }
+
+        throwExternalAuthError();
       }
 
-      // Fallback to original logic: clear auth token and redirect to login
-      clearAuthToken();
-      if (window.location.pathname !== "/login") {
-        window.location.href = "/login";
-      }
-      throw new Error("Not authenticated");
+      // 项目作为宿主系统内嵌页面使用，认证失效只抛错，不跳转内部登录页。
+      throwLocalAuthError();
     }
 
-    // Handle other errors
-    const text = await response.text().catch(() => "");
-    const contentType = response.headers.get("content-type") || "";
-    const errorMessage = getErrorMessageFromBody(text, contentType);
-
-    // Preserve raw body for parseErrorDetail() to extract structured fields
-    const finalMessage = errorMessage
-      ? `${errorMessage} - ${text}`
-      : `Request failed: ${response.status} ${response.statusText}`;
-
-    throw new Error(finalMessage);
+    await throwRequestError(response);
   }
 
-  if (response.status === 204) {
-    return undefined as T;
-  }
-
-  const contentType = response.headers.get("content-type") || "";
-  if (!contentType.includes("application/json")) {
-    return (await response.text()) as unknown as T;
-  }
-
-  return (await response.json()) as T;
+  return parseResponse<T>(response);
 }

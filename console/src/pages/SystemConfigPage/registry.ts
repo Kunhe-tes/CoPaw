@@ -1,4 +1,5 @@
 import type { SourceSystemConfig } from "@/api/types/sourceSystemConfig";
+import { clonePlainConfig } from "@/utils/clonePlainConfig";
 
 export interface CurrentSourceConfigSwitchDefinition {
   key: string;
@@ -14,6 +15,19 @@ export interface ToolResultCompactConfig {
   old_max_bytes: number;
   recent_max_bytes: number;
   retention_days: number;
+}
+
+export interface ImmediateTruncationConfig {
+  enabled: boolean;
+  max_bytes: number;
+}
+
+export type ImmediateTruncationConfigKey =
+  | "file_read_truncation";
+
+export interface ImmediateTruncationState {
+  explicit: boolean;
+  config: ImmediateTruncationConfig;
 }
 
 export interface CurrentSourceConfigNumberDefinition {
@@ -43,6 +57,13 @@ export const TOOL_RESULT_COMPACT_DEFAULTS: ToolResultCompactConfig = {
   recent_max_bytes: 50000,
   retention_days: 5,
 };
+
+export const FILE_READ_TRUNCATION_DEFAULTS: ImmediateTruncationConfig = {
+  enabled: true,
+  max_bytes: 50000,
+};
+
+export const IMMEDIATE_TRUNCATION_MIN_BYTES = 1000;
 
 export const TOOL_RESULT_COMPACT_NUMBER_FIELDS: CurrentSourceConfigNumberDefinition[] =
   [
@@ -74,6 +95,10 @@ export const TOOL_RESULT_COMPACT_NUMBER_FIELDS: CurrentSourceConfigNumberDefinit
     },
   ];
 
+function isPlainObject(value: unknown): value is Record<string, unknown> {
+  return Boolean(value) && typeof value === "object" && !Array.isArray(value);
+}
+
 export function readRegisteredSwitchValue(
   config: SourceSystemConfig,
   definition: CurrentSourceConfigSwitchDefinition,
@@ -93,7 +118,7 @@ export function writeRegisteredSwitchValue(
   definition: CurrentSourceConfigSwitchDefinition,
   value: boolean,
 ): SourceSystemConfig {
-  const nextConfig = structuredClone(config);
+  const nextConfig = clonePlainConfig(config);
   let current: Record<string, unknown> = nextConfig;
   definition.path.forEach((segment, index) => {
     const isLeaf = index === definition.path.length - 1;
@@ -118,10 +143,10 @@ export function readToolResultCompactConfig(
   config: SourceSystemConfig,
 ): ToolResultCompactConfig {
   const rawValue = config.tool_result_compact;
-  if (!rawValue || typeof rawValue !== "object" || Array.isArray(rawValue)) {
+  if (!isPlainObject(rawValue)) {
     return { ...TOOL_RESULT_COMPACT_DEFAULTS };
   }
-  const rawConfig = rawValue as Record<string, unknown>;
+  const rawConfig = rawValue;
   return {
     enabled:
       typeof rawConfig.enabled === "boolean"
@@ -153,12 +178,92 @@ export function writeToolResultCompactValue<
   key: K,
   value: ToolResultCompactConfig[K],
 ): SourceSystemConfig {
-  const nextConfig = structuredClone(config);
+  const nextConfig = clonePlainConfig(config);
   const rawValue = nextConfig.tool_result_compact;
-  if (!rawValue || typeof rawValue !== "object" || Array.isArray(rawValue)) {
+  if (!isPlainObject(rawValue)) {
     nextConfig.tool_result_compact = {};
   }
   (nextConfig.tool_result_compact as Record<string, unknown>)[key] = value;
+  return nextConfig;
+}
+
+export function readImmediateTruncationConfig(
+  config: SourceSystemConfig,
+  key: ImmediateTruncationConfigKey,
+): ImmediateTruncationState {
+  const defaults = FILE_READ_TRUNCATION_DEFAULTS;
+  const rawValue = config[key];
+  if (!isPlainObject(rawValue)) {
+    return {
+      explicit: false,
+      config: { ...defaults },
+    };
+  }
+  return {
+    explicit: true,
+    config: {
+      enabled:
+        typeof rawValue.enabled === "boolean"
+          ? rawValue.enabled
+          : defaults.enabled,
+      max_bytes:
+        typeof rawValue.max_bytes === "number"
+          ? rawValue.max_bytes
+          : defaults.max_bytes,
+    },
+  };
+}
+
+export function writeImmediateTruncationValue<
+  K extends keyof ImmediateTruncationConfig,
+>(
+  config: SourceSystemConfig,
+  configKey: ImmediateTruncationConfigKey,
+  key: K,
+  value: ImmediateTruncationConfig[K],
+): SourceSystemConfig {
+  const defaults = FILE_READ_TRUNCATION_DEFAULTS;
+  const nextConfig = structuredClone(config);
+  const rawValue = nextConfig[configKey];
+  if (!isPlainObject(rawValue)) {
+    nextConfig[configKey] = {};
+  }
+  const section = nextConfig[configKey] as Record<string, unknown>;
+  section[key] = value;
+  if (
+    key === "enabled" &&
+    value === true &&
+    typeof section.max_bytes !== "number"
+  ) {
+    section.max_bytes = defaults.max_bytes;
+  }
+  return nextConfig;
+}
+
+export function enableImmediateTruncationConfig(
+  config: SourceSystemConfig,
+  configKey: ImmediateTruncationConfigKey,
+): SourceSystemConfig {
+  const defaults = FILE_READ_TRUNCATION_DEFAULTS;
+  const nextConfig = writeImmediateTruncationValue(
+    config,
+    configKey,
+    "enabled",
+    true,
+  );
+  const rawValue = nextConfig[configKey];
+  if (isPlainObject(rawValue) && typeof rawValue.max_bytes !== "number") {
+    rawValue.max_bytes = defaults.max_bytes;
+  }
+  return nextConfig;
+}
+
+export function clearImmediateTruncationConfig(
+  config: SourceSystemConfig,
+  configKey: ImmediateTruncationConfigKey,
+): SourceSystemConfig {
+  const nextConfig = structuredClone(config);
+  delete nextConfig[configKey];
   return nextConfig;
 }
 
@@ -178,4 +283,30 @@ export function validateToolResultCompactConfig(
     return "近期结果预览字节数不能小于旧结果预览字节数";
   }
   return null;
+}
+
+export function validateImmediateTruncationConfig(
+  state: ImmediateTruncationState,
+  title: string,
+): string | null {
+  if (!state.explicit) {
+    return null;
+  }
+  const value = state.config.max_bytes;
+  if (!Number.isInteger(value) || value < IMMEDIATE_TRUNCATION_MIN_BYTES) {
+    return `${title}不能小于 ${IMMEDIATE_TRUNCATION_MIN_BYTES}`;
+  }
+  return null;
+}
+
+export function validateToolOutputConfigs(
+  config: SourceSystemConfig,
+): string | null {
+  return (
+    validateToolResultCompactConfig(readToolResultCompactConfig(config)) ||
+    validateImmediateTruncationConfig(
+      readImmediateTruncationConfig(config, "file_read_truncation"),
+      "文件读取输出片段字节数",
+    )
+  );
 }

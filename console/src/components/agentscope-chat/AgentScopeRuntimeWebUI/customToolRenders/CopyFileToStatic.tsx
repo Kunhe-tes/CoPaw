@@ -6,6 +6,7 @@ import {
   SparkFalseLine,
 } from "@agentscope-ai/icons";
 import DownloadFileCard from "../../DownloadFileCard";
+import { isAutoPreviewHtmlLink } from "../../FilePreviewModal/fileUtils";
 import { IAgentScopeRuntimeMessage, AgentScopeRuntimeRunStatus } from "../core/AgentScopeRuntime/types";
 
 interface CopyFileToStaticData {
@@ -142,6 +143,10 @@ function CopyFileToStatic(props: CopyFileToStaticProps) {
       <DownloadFileCard
         url={parsedOutput.url!}
         fileName={parsedOutput.fileName}
+        enableClickTracking={isAutoPreviewHtmlLink(
+          parsedOutput.url!,
+          parsedOutput.fileName,
+        )}
       />
     );
   }, [loading, parsedOutput, prefixCls]);

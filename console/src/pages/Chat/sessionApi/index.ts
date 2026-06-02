@@ -893,6 +893,15 @@ export class SessionApi implements IAgentScopeRuntimeWebUISessionAPI {
     Promise<IAgentScopeRuntimeWebUISession>
   > = new Map();
 
+  resetForIdentityChange(): void {
+    this.sessionList = [];
+    this.sessionListRequest = null;
+    this.sessionRequests.clear();
+    this.intendedSessionId = null;
+    this.preferredChatId = null;
+    this.lastSelectedSessionId = null;
+  }
+
   /**
    * Called when a temporary timestamp session id is resolved to a real backend
    * UUID. Consumers (e.g. Chat/index.tsx) can register here to update the URL.

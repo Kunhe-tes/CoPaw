@@ -594,8 +594,14 @@ def _hook_block_message(result: MergedHookResult) -> Msg:
 
 def _resolve_active_model_label(tenant_id: str | None) -> str | None:
     try:
+        from ..crons.model_slot_context import (
+            get_current_model_slot_override,
+        )
         from ...providers.provider_manager import ProviderManager
 
+        override = get_current_model_slot_override()
+        if override and override.provider_id and override.model:
+            return f"{override.provider_id}/{override.model}"
         manager = ProviderManager.get_instance(tenant_id)
         active = manager.get_active_model()
         if active and active.provider_id and active.model:

@@ -91,6 +91,8 @@ def test_build_broadcast_job_uses_target_tenant_and_current_source() -> None:
         cron="0 8 * * *",
         timezone_name="Asia/Shanghai",
         offset_minutes=60,
+        model_slot=source_job.model_slot,
+        model_slot_fallback_reason="",
     )
 
     assert target_job.tenant_id == "tenant-b"
@@ -130,6 +132,7 @@ async def test_scheduler_payload_uses_logical_tenant_and_source() -> None:
         "agent_id": "default",
         "task_type": "job",
         "job_id": "job-1",
+        "scopeId": "tenant-a-source-a",
         "fromId": "tenant-a",
     }
 
@@ -150,9 +153,11 @@ async def test_callback_resolves_runtime_scope_from_tenant_and_source(
                 job_id: str,
                 *,
                 is_manual: bool = True,
+                source_id: str | None = None,
             ) -> None:
                 observed["run_job"] = job_id
                 observed["is_manual"] = is_manual
+                observed["source_id"] = source_id
 
         return FakeCronManager()
 
@@ -189,6 +194,7 @@ async def test_callback_resolves_runtime_scope_from_tenant_and_source(
         "lookup": (encode_scope_id("tenant-a", "source-a"), "default"),
         "run_job": "job-1",
         "is_manual": False,
+        "source_id": "source-a",
     }
 
 

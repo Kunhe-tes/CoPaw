@@ -17,6 +17,7 @@ from pydantic import BaseModel, Field
 logger = logging.getLogger(__name__)
 
 from ..models.tracing import (
+    ErrorSummary,
     OverviewStats,
     TraceDetail,
     TraceDetailWithTimeline,
@@ -982,6 +983,35 @@ async def get_task_status_summary(
     end = _parse_date(end_date, "end_date", add_day=True)
 
     summary = await service.get_task_status_summary(
+        actual_source_id,
+        start,
+        end,
+        bbk_ids,
+    )
+    return summary
+
+
+# ===== 报错分析统计 =====
+
+
+@router.get("/error/summary", response_model=ErrorSummary)
+async def get_error_summary(
+    request: Request,
+    start_date: Optional[str] = Query(
+        None,
+        description="开始日期 (YYYY-MM-DD)",
+    ),
+    end_date: Optional[str] = Query(None, description="结束日期 (YYYY-MM-DD)"),
+    bbk_ids: Optional[str] = Query(None, description="分行ID筛选"),
+) -> ErrorSummary:
+    """获取报错分析汇总统计."""
+    actual_source_id = _get_source_id_from_header(request)
+    service = TracingQueryService.get_instance()
+
+    start = _parse_date(start_date, "start_date")
+    end = _parse_date(end_date, "end_date", add_day=True)
+
+    summary = await service.get_error_summary(
         actual_source_id,
         start,
         end,

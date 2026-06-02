@@ -705,6 +705,33 @@ async def test_query_handler_session_start_block_yields_before_cleanup(
             await asyncio.gather(next_item, return_exceptions=True)
 
 
+def test_resolve_active_model_label_prefers_scoped_override(monkeypatch):
+    from swe.app.crons import model_slot_context
+    from swe.providers.models import ModelSlotConfig
+    from swe.app.runner.runner import _resolve_active_model_label
+
+    monkeypatch.setattr(
+        model_slot_context,
+        "get_current_model_slot_override",
+        lambda: ModelSlotConfig(
+            provider_id="openai",
+            model="gpt-5.4",
+        ),
+    )
+    provider_manager = SimpleNamespace(
+        get_active_model=lambda: ModelSlotConfig(
+            provider_id="anthropic",
+            model="claude-3-7-sonnet",
+        ),
+    )
+    monkeypatch.setattr(
+        "swe.providers.provider_manager.ProviderManager.get_instance",
+        lambda _tenant_id: provider_manager,
+    )
+
+    assert _resolve_active_model_label("tenant-a") == "openai/gpt-5.4"
+
+
 @pytest.mark.asyncio
 async def test_query_handler_before_stop_allow_emits_stop_and_completes(
     monkeypatch,

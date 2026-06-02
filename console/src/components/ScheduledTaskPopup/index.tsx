@@ -1,4 +1,4 @@
-import { useState, useCallback, useMemo } from "react";
+import { useState, useCallback, useEffect, useMemo } from "react";
 import { Modal, Tooltip } from "antd";
 import { useAppMessage } from "../../hooks/useAppMessage";
 import {
@@ -12,12 +12,22 @@ import {
   generateCronExpression,
   hasDateBoundaryWarning,
 } from "../../utils/cron";
+import type { ModelSlotConfig } from "@/api/types";
+import {
+  DEFAULT_EXECUTION_MODEL_KEY,
+  parseExecutionModelKey,
+  useExecutionModelOptions,
+} from "@/hooks/useExecutionModelOptions";
 import styles from "./index.module.less";
 
 export interface ScheduledTaskPopupProps {
   open: boolean;
   onClose: () => void;
-  onConfirm: (cronExpression: string, config: ScheduleConfig) => Promise<void>;
+  onConfirm: (
+    cronExpression: string,
+    config: ScheduleConfig,
+    modelSlot?: ModelSlotConfig,
+  ) => Promise<void>;
   onSuccess?: () => void;
   caseValue?: string;
 }
@@ -44,9 +54,23 @@ export default function ScheduledTaskPopup({
   const [weekdays, setWeekdays] = useState<number[]>(DEFAULT_WEEKDAYS);
   const [dates, setDates] = useState<number[]>(DEFAULT_DATES);
   const [loading, setLoading] = useState(false);
+  const [executionModelKey, setExecutionModelKey] = useState(
+    DEFAULT_EXECUTION_MODEL_KEY,
+  );
   // 临时输入值，允许用户自由编辑
   const [hourInput, setHourInput] = useState<string>(formatTimeValue(DEFAULT_TIME.hour));
   const [minuteInput, setMinuteInput] = useState<string>(formatTimeValue(DEFAULT_TIME.minute));
+  const {
+    loading: executionModelLoading,
+    options: executionModelOptions,
+    tenantDefaultLabel,
+  } = useExecutionModelOptions(open);
+
+  useEffect(() => {
+    if (open) {
+      setExecutionModelKey(DEFAULT_EXECUTION_MODEL_KEY);
+    }
+  }, [open]);
 
   const handleFrequencyChange = useCallback((newFrequency: FrequencyType) => {
     setFrequency(newFrequency);
@@ -140,7 +164,11 @@ export default function ScheduledTaskPopup({
     setLoading(true);
     try {
       const cronExpression = generateCronExpression(scheduleConfig);
-      await onConfirm(cronExpression, scheduleConfig);
+      await onConfirm(
+        cronExpression,
+        scheduleConfig,
+        parseExecutionModelKey(executionModelKey),
+      );
       message.success("定时任务创建成功");
       onClose();
       onSuccess?.();
@@ -149,7 +177,15 @@ export default function ScheduledTaskPopup({
     } finally {
       setLoading(false);
     }
-  }, [isConfirmDisabled, scheduleConfig, onConfirm, message, onClose, onSuccess]);
+  }, [
+    executionModelKey,
+    isConfirmDisabled,
+    scheduleConfig,
+    onConfirm,
+    message,
+    onClose,
+    onSuccess,
+  ]);
 
   const handleClose = useCallback(() => {
     onClose();
@@ -274,6 +310,28 @@ export default function ScheduledTaskPopup({
             />
             <span className={styles.timeUnit}>分</span>
           </div>
+        </div>
+
+        <div className={styles.section}>
+          <label className={styles.label} htmlFor="execution-model-select">
+            执行模型
+          </label>
+          <select
+            id="execution-model-select"
+            className={styles.modelSelect}
+            value={executionModelKey}
+            onChange={(event) => setExecutionModelKey(event.target.value)}
+            disabled={executionModelLoading}
+          >
+            <option value={DEFAULT_EXECUTION_MODEL_KEY}>
+              {tenantDefaultLabel}
+            </option>
+            {executionModelOptions.map((option) => (
+              <option key={option.key} value={option.key}>
+                {option.label}
+              </option>
+            ))}
+          </select>
         </div>
 
         {previewText && (

@@ -274,12 +274,15 @@ export function PlanClarificationCard({
                           value: option.id,
                           label: option.label,
                         }))}
-                        onChange={(value) =>
+                        onChange={(value) => {
+                          const selectedValues = Array.isArray(value)
+                            ? value
+                            : [];
                           setFormValues((current) => ({
                             ...current,
-                            [field.id]: value.map(String),
-                          }))
-                        }
+                            [field.id]: selectedValues.map(String),
+                          }));
+                        }}
                       />
                     ) : null}
                     {field.type === "text" ? (

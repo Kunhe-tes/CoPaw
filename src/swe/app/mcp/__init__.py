@@ -9,7 +9,6 @@ that solve the CPU leak issue caused by cross-task context manager exits.
 """
 
 import asyncio
-import logging
 import uuid
 from typing import Any
 
@@ -18,7 +17,10 @@ from agentscope.mcp._mcp_function import MCPToolFunction
 from agentscope.tool import ToolResponse
 from mcp import ClientSession as _CS
 from ...config.context import get_current_effective_tenant_id
-from ...constant import MCP_MAX_TOTAL_TIMEOUT, MCP_PER_NOTIFICATION_TIMEOUT
+from ...constant import (
+    MCP_MAX_TOTAL_TIMEOUT,
+    MCP_PER_NOTIFICATION_TIMEOUT,
+)
 
 from .manager import MCPClientManager
 from .stateful_client import (
@@ -27,9 +29,6 @@ from .stateful_client import (
     _call_with_timeout_refresh,
 )
 from .watcher import MCPConfigWatcher
-
-logger = logging.getLogger(__name__)
-
 
 # ---------------------------------------------------------------------------
 # Helpers extracted from _patched_mcp_call to keep the main function flat.
@@ -92,7 +91,11 @@ def _launch_call_tool(
     return asyncio.ensure_future(_run())
 
 
-async def _drain_progress(progress_queue, tool_name, result_box):
+async def _drain_progress(
+    progress_queue,
+    tool_name,
+    result_box,
+):
     """Yield intermediate ``ToolResponse`` chunks from *progress_queue*.
 
     The final ``CallToolResult`` is appended to *result_box* (a one-element

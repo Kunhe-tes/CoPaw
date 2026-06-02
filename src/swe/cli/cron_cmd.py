@@ -10,6 +10,7 @@ import click
 
 from .http import client, print_json
 from ..app.channels.schema import DEFAULT_CHANNEL
+from ..config.context import get_current_source_id, get_current_tenant_id
 from ..config.utils import load_config
 
 
@@ -166,13 +167,15 @@ def _build_headers(
     user_id: Optional[str] = None,
     source_id: Optional[str] = None,
 ) -> dict[str, str]:
-    headers = {"X-Agent-Id": agent_id}
-    if tenant_id:
-        headers["X-Tenant-Id"] = tenant_id
+    resolved_source_id = source_id or get_current_source_id()
+    headers = {
+        "X-Agent-Id": agent_id,
+        "X-Tenant-Id": tenant_id or get_current_tenant_id() or "default",
+    }
     if user_id:
         headers["X-User-Id"] = user_id
-    if source_id:
-        headers["X-Source-Id"] = source_id
+    if resolved_source_id:
+        headers["X-Source-Id"] = resolved_source_id
     return headers
 
 
@@ -188,6 +191,8 @@ def _build_spec_from_cli(
     timezone: str,
     enabled: bool,
     mode: str,
+    model_provider: Optional[str],
+    model: Optional[str],
     tenant_id: Optional[str] = None,
     job_id: str = "",
 ) -> dict:
@@ -208,6 +213,7 @@ def _build_spec_from_cli(
         "timeout_seconds": 7200,
         "misfire_grace_seconds": 300,
     }
+    model_slot = _resolve_model_slot(model_provider, model)
     if task_type == "text":
         if not (text and text.strip()):
             raise click.UsageError(
@@ -231,7 +237,7 @@ def _build_spec_from_cli(
                 "--text is required when task type is 'agent' "
                 "(the question/prompt sent to the agent)",
             )
-        return {
+        payload = {
             "id": job_id,
             "name": name,
             "enabled": enabled,
@@ -253,7 +259,32 @@ def _build_spec_from_cli(
             "runtime": runtime,
             "meta": meta,
         }
+        if model_slot is not None:
+            payload["model_slot"] = model_slot
+        return payload
     raise click.UsageError(f"Unsupported task type: {task_type}")
+
+
+def _resolve_model_slot(
+    model_provider: Optional[str],
+    model: Optional[str],
+) -> Optional[dict[str, str]]:
+    if (model_provider is None) != (model is None):
+        raise click.UsageError(
+            "--model-provider and --model must be provided together",
+        )
+    if model_provider is None or model is None:
+        return None
+    normalized_provider = model_provider.strip()
+    normalized_model = model.strip()
+    if not normalized_provider or not normalized_model:
+        raise click.UsageError(
+            "--model-provider and --model must be non-empty",
+        )
+    return {
+        "provider_id": normalized_provider,
+        "model": normalized_model,
+    }
 
 
 def _build_payload_from_args(
@@ -270,6 +301,8 @@ def _build_payload_from_args(
     timezone: str,
     enabled: bool,
     mode: str,
+    model_provider: Optional[str],
+    model: Optional[str],
     tenant_id: Optional[str],
     job_id: str = "",
 ) -> dict:
@@ -306,6 +339,8 @@ def _build_payload_from_args(
         timezone=timezone,
         enabled=enabled,
         mode=mode,
+        model_provider=model_provider,
+        model=model,
         tenant_id=tenant_id,
         job_id=job_id,
     )
@@ -455,6 +490,7 @@ def _apply_task_payload(
     if effective_task_type == "text":
         payload["text"] = effective_text
         payload.pop("request", None)
+        payload.pop("model_slot", None)
         return payload
 
     existing_request = payload.get("request")
@@ -495,6 +531,8 @@ def _merge_update_payload(
     timezone: Optional[str],
     enabled: Optional[bool],
     mode: Optional[str],
+    model_provider: Optional[str],
+    model: Optional[str],
     tenant_id: Optional[str],
 ) -> dict:
     payload = copy.deepcopy(existing_spec)
@@ -543,12 +581,16 @@ def _merge_update_payload(
         text,
         effective_task_type,
     )
-    return _apply_task_payload(
+    payload = _apply_task_payload(
         payload,
         effective_task_type,
         effective_text,
         target,
     )
+    model_slot = _resolve_model_slot(model_provider, model)
+    if model_slot is not None and effective_task_type == "agent":
+        payload["model_slot"] = model_slot
+    return payload
 
 
 @cron_group.command("create")
@@ -649,6 +691,16 @@ def _merge_update_payload(
     ),
 )
 @click.option(
+    "--model-provider",
+    default=None,
+    help="Model provider ID to store in model_slot for agent jobs.",
+)
+@click.option(
+    "--model",
+    default=None,
+    help="Model name to store in model_slot for agent jobs.",
+)
+@click.option(
     "--base-url",
     default=None,
     help="Override the API base URL. Defaults to global --host/--port.",
@@ -683,6 +735,8 @@ def create_job(
     timezone: Optional[str],
     enabled: bool,
     mode: str,
+    model_provider: Optional[str],
+    model: Optional[str],
     base_url: Optional[str],
     agent_id: str,
     tenant_id: Optional[str],
@@ -710,6 +764,8 @@ def create_job(
         timezone=timezone,
         enabled=enabled,
         mode=mode,
+        model_provider=model_provider,
+        model=model,
         tenant_id=tenant_id,
     )
     with client(base_url) as c:
@@ -740,6 +796,8 @@ def _update_job_impl(
     timezone: Optional[str],
     enabled: Optional[bool],
     mode: Optional[str],
+    model_provider: Optional[str],
+    model: Optional[str],
     base_url: Optional[str],
     agent_id: str,
     tenant_id: Optional[str],
@@ -761,6 +819,8 @@ def _update_job_impl(
                 timezone=timezone or "",
                 enabled=enabled if enabled is not None else True,
                 mode=mode or "final",
+                model_provider=model_provider,
+                model=model,
                 tenant_id=tenant_id,
                 job_id=job_id,
             )
@@ -786,6 +846,8 @@ def _update_job_impl(
                 timezone=timezone,
                 enabled=enabled,
                 mode=mode,
+                model_provider=model_provider,
+                model=model,
                 tenant_id=tenant_id,
             )
         effective_user_id = _infer_effective_user_id(payload, creator_user)
@@ -875,6 +937,16 @@ def _update_job_impl(
     help="Override delivery mode only when this option is provided.",
 )
 @click.option(
+    "--model-provider",
+    default=None,
+    help="Model provider ID to store in model_slot for agent jobs.",
+)
+@click.option(
+    "--model",
+    default=None,
+    help="Model name to store in model_slot for agent jobs.",
+)
+@click.option(
     "--base-url",
     default=None,
     help="Override the API base URL. Defaults to global --host/--port.",
@@ -910,6 +982,8 @@ def update_job(
     timezone: Optional[str],
     enabled: Optional[bool],
     mode: Optional[str],
+    model_provider: Optional[str],
+    model: Optional[str],
     base_url: Optional[str],
     agent_id: str,
     tenant_id: Optional[str],
@@ -931,6 +1005,8 @@ def update_job(
         timezone,
         enabled,
         mode,
+        model_provider,
+        model,
         base_url,
         agent_id,
         tenant_id,

@@ -57,7 +57,7 @@ class MonitorSyncClient:
         Args:
             base_url: Monitor API base URL. If None, uses get_monitor_api_url().
         """
-        self._base_url = base_url or get_monitor_api_url()
+        self._base_url = get_monitor_api_url() if base_url is None else base_url
         self._client: Optional[httpx.AsyncClient] = None
         self._enabled = bool(self._base_url)
 
@@ -258,11 +258,19 @@ class MonitorSyncClient:
         """
         meta = spec_dict.get("meta", {})
         pause_reason = meta.get("pause_reason") or ""
+        subscription_key = meta.get("subscription_key") or ""
+        job_origin = (
+            meta.get("job_origin")
+            or ("subscription" if subscription_key else "")
+            or "manual"
+        )
         meta_json = json.dumps(meta, ensure_ascii=False) if meta else ""
         return {
             "creator_user_id": meta.get("creator_user_id") or "",
             "task_chat_id": meta.get("task_chat_id") or "",
             "task_session_id": meta.get("task_session_id") or "",
+            "job_origin": job_origin,
+            "subscription_key": subscription_key,
             "meta": meta_json,
             "status": "paused" if pause_reason else "active",
             "pause_reason": pause_reason,
@@ -423,6 +431,9 @@ class MonitorSyncClient:
         instance_id: str = "",
         executor_leader: str = "",
         scheduled_time: Optional[datetime] = None,
+        notification_due_at: Optional[datetime] = None,
+        notification_timezone: str = "",
+        meta: Optional[Dict[str, Any]] = None,
     ) -> None:
         """Record an execution to Monitor.
 
@@ -443,6 +454,7 @@ class MonitorSyncClient:
             instance_id: Instance ID
             executor_leader: Executor leader ID
             scheduled_time: Scheduled execution time
+            meta: 执行模型等扩展元数据
         """
         if not self._enabled:
             return
@@ -462,6 +474,9 @@ class MonitorSyncClient:
             instance_id=instance_id,
             executor_leader=executor_leader,
             scheduled_time=scheduled_time,
+            notification_due_at=notification_due_at,
+            notification_timezone=notification_timezone,
+            meta=meta,
         )
 
         # Fire and forget
@@ -483,6 +498,9 @@ class MonitorSyncClient:
         instance_id: str,
         executor_leader: str,
         scheduled_time: Optional[datetime],
+        notification_due_at: Optional[datetime] = None,
+        notification_timezone: str = "",
+        meta: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         """Build execution sync data dict.
 
@@ -501,15 +519,21 @@ class MonitorSyncClient:
             instance_id: Instance ID
             executor_leader: Executor leader ID
             scheduled_time: Scheduled execution time
+            meta: 执行模型等扩展元数据
 
         Returns:
             Dict with execution sync fields
         """
         # 手动执行且成功的任务默认标记为已读
+        needs_notification = self._execution_needs_notification(job, status)
         is_read = is_manual and status == "success"
         read_at = None
         if is_read and end_time:
             read_at = self._format_optional_time(end_time)
+
+        notification_due_time = None
+        if needs_notification:
+            notification_due_time = notification_due_at or end_time or actual_time
 
         return {
             "job_id": job.id,
@@ -528,10 +552,27 @@ class MonitorSyncClient:
             "session_id": session_id,
             "input_snapshot": self._format_optional_json(input_snapshot),
             "output_preview": self._truncate_preview(output_preview),
-            "meta": "",
+            "meta": self._format_optional_json(meta),
+            "notification_status": (
+                "pending" if needs_notification else "not_required"
+            ),
+            "notification_due_at": self._format_optional_time(
+                notification_due_time,
+            ),
+            "notification_timezone": (
+                notification_timezone if needs_notification else ""
+            ),
             "is_read": is_read,
             "read_at": read_at,
         }
+
+    def _execution_needs_notification(
+        self,
+        job: CronJobSpec,
+        status: str,
+    ) -> bool:
+        """只有 agent 成功任务需要进入完成通知队列。"""
+        return status == "success" and getattr(job, "task_type", "") == "agent"
 
     def _format_actual_time(self, time: datetime) -> str:
         """Format actual_time datetime to ISO string in Beijing timezone.
@@ -570,6 +611,83 @@ class MonitorSyncClient:
             logger.warning(
                 "Failed to record execution to monitor: job_id=%s status=%d",
                 exec_data.get("job_id"),
+                response.status_code,
+            )
+
+    async def claim_due_notifications(
+        self,
+        *,
+        lock_owner: str,
+        now_utc: datetime,
+        limit: int,
+        stale_lock_seconds: int = 600,
+    ) -> list[Dict[str, Any]]:
+        """Claim cron execution records that are ready for notification."""
+        if not self._enabled:
+            return []
+        client = await self._get_client()
+        response = await client.post(
+            "/monitor/sync/notifications/claim",
+            json={
+                "lock_owner": lock_owner,
+                "now_utc": self._format_optional_time(now_utc),
+                "limit": limit,
+                "stale_lock_seconds": stale_lock_seconds,
+            },
+        )
+        if 200 <= response.status_code < 300:
+            data = response.json()
+            return data if isinstance(data, list) else []
+        logger.warning(
+            "Failed to claim cron notifications: status=%d response=%s",
+            response.status_code,
+            response.text,
+        )
+        return []
+
+    async def mark_notification_sent(
+        self,
+        *,
+        execution_id: int,
+        sent_at: datetime,
+    ) -> None:
+        """Mark a claimed cron execution notification as sent."""
+        if not self._enabled:
+            return
+        client = await self._get_client()
+        response = await client.post(
+            f"/monitor/sync/notifications/{execution_id}/sent",
+            json={"sent_at": self._format_optional_time(sent_at)},
+        )
+        if not 200 <= response.status_code < 300:
+            logger.warning(
+                "Failed to mark cron notification sent: id=%s status=%d",
+                execution_id,
+                response.status_code,
+            )
+
+    async def mark_notification_failed(
+        self,
+        *,
+        execution_id: int,
+        error: str,
+        max_attempts: int,
+    ) -> None:
+        """Mark a claimed cron execution notification attempt as failed."""
+        if not self._enabled:
+            return
+        client = await self._get_client()
+        response = await client.post(
+            f"/monitor/sync/notifications/{execution_id}/failed",
+            json={
+                "error": error,
+                "max_attempts": max_attempts,
+            },
+        )
+        if not 200 <= response.status_code < 300:
+            logger.warning(
+                "Failed to mark cron notification failed: id=%s status=%d",
+                execution_id,
                 response.status_code,
             )
 

@@ -1,4 +1,5 @@
 import dayjs from "dayjs";
+import type { ModelSlotConfig } from "../api/types";
 
 export type FrequencyType = "daily" | "weekly" | "monthly";
 
@@ -206,10 +207,30 @@ export interface CreateScheduledTaskOptions {
   sessionId?: string;
   caseValue: string;
   channel?: string;
+  modelSlot?: ModelSlotConfig;
+  subscriptionKey?: string;
 }
 
 export function buildCronJobSpec(options: CreateScheduledTaskOptions): import("../api/types/cronjob").CronJobSpecInput {
-  const { cronExpression, name, userId, sessionId, caseValue, channel } = options;
+  const {
+    cronExpression,
+    name,
+    userId,
+    sessionId,
+    caseValue,
+    channel,
+    modelSlot,
+    subscriptionKey,
+  } = options;
+
+  const meta: Record<string, unknown> = {
+    creator_user_id: userId,
+  };
+
+  if (subscriptionKey) {
+    meta.job_origin = "subscription";
+    meta.subscription_key = subscriptionKey;
+  }
 
   return {
     id: `${name}-${Date.now()}`,
@@ -242,8 +263,7 @@ export function buildCronJobSpec(options: CreateScheduledTaskOptions): import(".
       },
       mode: "final",
     },
-    meta: {
-      creator_user_id: userId,
-    },
+    meta,
+    model_slot: modelSlot,
   };
 }

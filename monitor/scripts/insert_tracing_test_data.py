@@ -7,6 +7,7 @@
     cd monitor
     .venv/Scripts/python scripts/insert_tracing_test_data.py
 """
+
 import asyncio
 import json
 import random
@@ -41,15 +42,22 @@ def load_db_config_from_env_file() -> dict[str, Any]:
 from monitor.app.database.config import MonitorDatabaseConfig
 from monitor.app.database.connection import DatabaseConnection
 
-
 # 测试数据配置
-BBK_IDS = ["100", "200", "201", "202", "203"]  # 总行、北京、上海、深圳、广州
+BBK_IDS = [
+    "100",
+    "200",
+    "201",
+    "202",
+    "203",
+    "V00",
+]  # 总行、北京、上海、深圳、广州、V00（将并入总行）
 BBK_NAMES = {
     "100": "总行",
     "200": "北京分行",
     "201": "上海分行",
     "202": "深圳分行",
     "203": "广州分行",
+    "V00": "V00",
 }
 
 SOURCE_IDS = ["SZLS", "CMSJY", "UPPCLAW", "copilotClaw", "ruice"]
@@ -140,8 +148,12 @@ def generate_trace(
 
     # 随机决定是否使用技能
     use_skills = random.random() > 0.3
-    skills_used = random.sample(SKILLS, random.randint(1, 3)) if use_skills else []
-    tools_used = random.sample(TOOLS, random.randint(0, 4)) if use_skills else []
+    skills_used = (
+        random.sample(SKILLS, random.randint(1, 3)) if use_skills else []
+    )
+    tools_used = (
+        random.sample(TOOLS, random.randint(0, 4)) if use_skills else []
+    )
 
     # 模型使用
     model_name = random.choice(MODELS)
@@ -231,14 +243,14 @@ def generate_span(
         span_data["output_tokens"] = trace["total_output_tokens"]
         span_data["duration_ms"] = random.randint(100, 5000)
         span_data["end_time"] = span_start + timedelta(
-            milliseconds=span_data["duration_ms"]
+            milliseconds=span_data["duration_ms"],
         )
 
     elif event_type == "skill_invocation":
         span_data["skill_name"] = random.choice(SKILLS)
         span_data["duration_ms"] = random.randint(200, 3000)
         span_data["end_time"] = span_start + timedelta(
-            milliseconds=span_data["duration_ms"]
+            milliseconds=span_data["duration_ms"],
         )
 
     elif event_type in ["tool_call_start", "tool_call_end"]:
@@ -248,7 +260,7 @@ def generate_span(
             span_data["mcp_server"] = random.choice(MCP_SERVERS)
         span_data["duration_ms"] = random.randint(50, 1000)
         span_data["end_time"] = span_start + timedelta(
-            milliseconds=span_data["duration_ms"]
+            milliseconds=span_data["duration_ms"],
         )
         span_data["name"] = f"{span_data['tool_name']} execution"
 
@@ -333,8 +345,16 @@ async def insert_test_data(
                 trace["total_input_tokens"],
                 trace["total_output_tokens"],
                 trace["total_tokens"],
-                json.dumps(trace["tools_used"]) if trace["tools_used"] else None,
-                json.dumps(trace["skills_used"]) if trace["skills_used"] else None,
+                (
+                    json.dumps(trace["tools_used"])
+                    if trace["tools_used"]
+                    else None
+                ),
+                (
+                    json.dumps(trace["skills_used"])
+                    if trace["skills_used"]
+                    else None
+                ),
                 trace["status"],
                 trace["error"],
                 trace["user_message"],
@@ -394,7 +414,11 @@ async def insert_test_data(
             # 如果有技能调用，生成技能 spans
             for skill_name in trace.get("skills_used", []):
                 skill_offset = random.randint(100, trace["duration_ms"] // 3)
-                skill_span = generate_span(trace, "skill_invocation", skill_offset)
+                skill_span = generate_span(
+                    trace,
+                    "skill_invocation",
+                    skill_offset,
+                )
                 skill_span["skill_name"] = skill_name
 
                 span_params = (
@@ -425,7 +449,11 @@ async def insert_test_data(
             # 如果有工具调用，生成工具 spans
             for tool_name in trace.get("tools_used", []):
                 tool_offset = random.randint(200, trace["duration_ms"] // 2)
-                tool_span = generate_span(trace, "tool_call_start", tool_offset)
+                tool_span = generate_span(
+                    trace,
+                    "tool_call_start",
+                    tool_offset,
+                )
                 tool_span["tool_name"] = tool_name
 
                 span_params = (
@@ -492,7 +520,7 @@ async def main():
         traces_per_hour=50,
     )
 
-    print(f"\n插入完成:")
+    print("\n插入完成:")
     print(f"  - Trace 记录: {trace_count} 条")
     print(f"  - Span 记录: {span_count} 条")
 

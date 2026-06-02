@@ -7,7 +7,7 @@ from SWE to Monitor database.
 
 import logging
 import os
-from datetime import datetime, timezone
+from datetime import datetime
 from typing import Optional, Tuple
 from zoneinfo import ZoneInfo
 
@@ -29,6 +29,41 @@ _BEIJING_TZ = ZoneInfo("Asia/Shanghai")
 # 用户信息 API URL（与 SWE 服务共用同一个配置）
 USER_INFO_API_URL = os.environ.get("MONITOR_USER_INFO_API_URL", "")
 
+# 数据库字段长度限制（基于 swe_cron_executions 表结构）
+# VARCHAR 字段需要截断以避免写入失败
+# input_snapshot 已改为 TEXT 类型（最大 65535 字节）
+# utf8mb4 编码每字符最多 4 字节，保守上限 16000 字符
+INPUT_SNAPSHOT_MAX_LENGTH = 16000
+ERROR_MESSAGE_MAX_LENGTH = 2048
+OUTPUT_PREVIEW_MAX_LENGTH = 512
+META_MAX_LENGTH = 2048
+
+
+def _truncate_string(text: Optional[str], max_length: int) -> str:
+    """截断字符串到指定最大长度。
+
+    确保写入数据库不会因超长而报错。
+
+    Args:
+        text: 原始字符串（可能为 None）
+        max_length: 最大长度限制
+
+    Returns:
+        截断后的字符串（不超过 max_length）
+    """
+    if text is None:
+        return ""
+    if len(text) <= max_length:
+        return text
+    # 截断并保留截断标记，便于识别数据被裁剪
+    truncated = text[: max_length - 3] + "..."
+    logger.warning(
+        "String truncated from %d to %d chars for database field limit",
+        len(text),
+        max_length,
+    )
+    return truncated
+
 
 def _get_beijing_now() -> datetime:
     """获取当前东八区时间（无 tzinfo），用于数据库存储。
@@ -37,6 +72,15 @@ def _get_beijing_now() -> datetime:
         当前北京时间（无时区信息）
     """
     return datetime.now(_BEIJING_TZ).replace(tzinfo=None)
+
+
+def _to_beijing_naive(value: Optional[datetime]) -> Optional[datetime]:
+    """将有时区时间统一转为北京时区的无时区值。"""
+    if value is None:
+        return None
+    if value.tzinfo is None:
+        return value
+    return value.astimezone(_BEIJING_TZ).replace(tzinfo=None)
 
 
 def _extract_bbk_id_from_path_name(path_name: Optional[str]) -> Optional[str]:
@@ -151,7 +195,7 @@ async def _enrich_sync_request(
 
         # 1. 解码 tenant_id（如果是加密格式）
         if request.tenant_id and is_encoded_scope_id(request.tenant_id):
-            decoded_tenant_id, decoded_source_id = try_decode_tenant_id(
+            decoded_tenant_id, _ = try_decode_tenant_id(
                 request.tenant_id,
             )
             if decoded_tenant_id != request.tenant_id:
@@ -246,6 +290,8 @@ class SyncService:
                     creator_user_id = %s,
                     task_chat_id = %s,
                     task_session_id = %s,
+                    job_origin = %s,
+                    subscription_key = %s,
                     meta = %s,
                     status = %s,
                     pause_reason = %s,
@@ -274,6 +320,8 @@ class SyncService:
                     request.creator_user_id,
                     request.task_chat_id,
                     request.task_session_id,
+                    request.job_origin,
+                    request.subscription_key,
                     request.meta,
                     request.status,
                     request.pause_reason,
@@ -296,10 +344,12 @@ class SyncService:
                     cron_expr, timezone, channel, target_user_id, target_session_id,
                     timeout_seconds, max_concurrency, misfire_grace_seconds,
                     text_content, request_input,
-                    creator_user_id, task_chat_id, task_session_id, meta,
+                    creator_user_id, task_chat_id, task_session_id,
+                    job_origin, subscription_key,
+                    meta,
                     status, pause_reason, created_at, updated_at
                 ) VALUES (
-                    %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s
+                    %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s
                 )
                 """,
                 (
@@ -324,6 +374,8 @@ class SyncService:
                     request.creator_user_id,
                     request.task_chat_id,
                     request.task_session_id,
+                    request.job_origin,
+                    request.subscription_key,
                     request.meta,
                     request.status,
                     request.pause_reason,
@@ -400,6 +452,21 @@ class SyncService:
 
         now = _get_beijing_now()
 
+        # 截断超长字段，确保写入数据库不会报错
+        input_snapshot = _truncate_string(
+            request.input_snapshot,
+            INPUT_SNAPSHOT_MAX_LENGTH,
+        )
+        error_message = _truncate_string(
+            request.error_message,
+            ERROR_MESSAGE_MAX_LENGTH,
+        )
+        output_preview = _truncate_string(
+            request.output_preview,
+            OUTPUT_PREVIEW_MAX_LENGTH,
+        )
+        meta = _truncate_string(request.meta, META_MAX_LENGTH)
+
         await db.execute(
             """
             INSERT INTO swe_cron_executions (
@@ -409,10 +476,11 @@ class SyncService:
                 instance_id, executor_leader, is_manual,
                 trace_id, session_id,
                 input_snapshot, output_preview, meta,
+                notification_status, notification_due_at, notification_timezone,
                 is_read, read_at,
                 created_at
             ) VALUES (
-                %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s
+                %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s
             )
             """,
             (
@@ -424,15 +492,18 @@ class SyncService:
                 request.end_time,
                 request.duration_ms,
                 request.status,
-                request.error_message,
+                error_message,
                 request.instance_id,
                 request.executor_leader,
                 request.is_manual,
                 request.trace_id,
                 request.session_id,
-                request.input_snapshot,
-                request.output_preview,
-                request.meta,
+                input_snapshot,
+                output_preview,
+                meta,
+                request.notification_status,
+                _to_beijing_naive(request.notification_due_at),
+                request.notification_timezone,
                 request.is_read,
                 request.read_at,
                 now,

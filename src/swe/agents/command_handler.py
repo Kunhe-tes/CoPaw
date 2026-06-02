@@ -86,7 +86,13 @@ class CommandHandler(ConversationCommandHandlerMixin):
         Returns:
             AgentProfileConfig: The current agent configuration
         """
-        return load_agent_config(self.memory_manager.agent_id)
+        if self.memory_manager is None:
+            raise RuntimeError("CommandHandler requires memory_manager")
+        tenant_id = getattr(self.memory_manager, "tenant_id", None)
+        return load_agent_config(
+            self.memory_manager.agent_id,
+            tenant_id=tenant_id,
+        )
 
     def is_command(self, query: str | None) -> bool:
         """Check if the query is a system command (alias for mixin)."""

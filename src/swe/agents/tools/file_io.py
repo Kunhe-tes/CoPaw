@@ -19,7 +19,10 @@ from .utils import (
     read_file_safe,
     DEFAULT_MAX_BYTES,
 )
-from ...config.context import get_current_recent_max_bytes
+from ...config.context import (
+    get_current_file_read_max_bytes,
+    get_current_recent_max_bytes,
+)
 from ...constant import TRUNCATION_NOTICE_MARKER
 from ...security.tenant_path_boundary import (
     resolve_tenant_path,
@@ -418,7 +421,11 @@ async def read_file(  # pylint: disable=too-many-return-statements
         selected_content = "\n".join(all_lines[s - 1 : e])
 
         # Apply smart truncation (consistent with shell output format)
-        max_bytes = get_current_recent_max_bytes() or DEFAULT_MAX_BYTES
+        file_read_max_bytes = get_current_file_read_max_bytes()
+        if file_read_max_bytes is not None:
+            max_bytes = file_read_max_bytes
+        else:
+            max_bytes = get_current_recent_max_bytes() or DEFAULT_MAX_BYTES
         text = truncate_text_output(
             selected_content,
             start_line=s,

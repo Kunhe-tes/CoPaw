@@ -27,6 +27,7 @@ from .auth import AuthMiddleware
 from .middleware.tenant_identity import TenantIdentityMiddleware
 from .middleware.tenant_workspace import TenantWorkspaceMiddleware
 from .middleware.header_passthrough import HeaderPassthroughMiddleware
+from .middleware.runtime_static_gzip import RuntimeStaticGZipMiddleware
 from .source_system_config.middleware import SourceSystemConfigMiddleware
 from .routers import router as api_router, create_agent_scoped_router
 from .routers.agent_scoped import AgentContextMiddleware
@@ -41,6 +42,7 @@ from ..tracing import init_trace_manager, close_trace_manager
 from ..database import get_database_config
 from .service_heartbeat import start_service_heartbeat, stop_service_heartbeat
 from .crons.monitor_sync_client import get_monitor_sync_client
+from .crons.notification_worker import CronNotificationWorker
 
 # Apply log level on load so reload child process gets same level as CLI.
 logger = setup_logger(os.environ.get(LOG_LEVEL_ENV, "info"))
@@ -357,6 +359,12 @@ async def lifespan(
         app.state.source_system_config_service = SourceSystemConfigService(
             SourceSystemConfigStore(db_connection),
         )
+        multi_agent_manager.set_source_system_config_service(
+            app.state.source_system_config_service,
+        )
+        tenant_workspace_pool.set_source_system_config_service(
+            app.state.source_system_config_service,
+        )
         logger.info("SourceSystemConfig module initialized")
     except Exception as e:
         logger.warning("Failed to initialize source system config: %s", e)
@@ -367,12 +375,17 @@ async def lifespan(
             from .greeting.router import init_greeting_module
             from .featured_case.router import init_featured_case_module
             from .feedback.router import init_feedback_module
+            from .html_preview_clicks.router import (
+                init_html_preview_click_module,
+            )
 
             init_greeting_module(db_connection)
             init_featured_case_module(db_connection)
             init_feedback_module(db_connection)
+            init_html_preview_click_module(db_connection)
             logger.info(
-                "Greeting, FeaturedCase and Feedback modules initialized",
+                "Greeting, FeaturedCase, Feedback and HTML preview click "
+                "modules initialized",
             )
 
             from .workspace.tenant_init_source_store import (
@@ -401,10 +414,26 @@ async def lifespan(
     get_monitor_sync_client().schedule_swe_cron_warmup(
         start_delay_seconds=5.0,
     )
+    cron_notification_worker = CronNotificationWorker(
+        multi_agent_manager=multi_agent_manager,
+    )
+    app.state.cron_notification_worker = cron_notification_worker
+    cron_notification_worker.start()
 
     try:
         yield
     finally:
+        cron_notification_worker = getattr(
+            app.state,
+            "cron_notification_worker",
+            None,
+        )
+        if cron_notification_worker is not None:
+            try:
+                await cron_notification_worker.stop()
+            except Exception as e:
+                logger.warning("Error stopping cron notification worker: %s", e)
+
         # Close tracing manager
         try:
             await close_trace_manager()
@@ -450,6 +479,8 @@ app = FastAPI(
     redoc_url="/redoc" if DOCS_ENABLED else None,
     openapi_url="/openapi.json" if DOCS_ENABLED else None,
 )
+
+app.add_middleware(RuntimeStaticGZipMiddleware)
 
 # Apply CORS middleware if CORS_ORIGINS is set
 # Note: add_middleware inserts at the beginning of the stack, so the LAST

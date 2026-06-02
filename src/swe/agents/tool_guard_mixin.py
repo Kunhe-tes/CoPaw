@@ -601,29 +601,126 @@ class ToolGuardMixin:
         tool_output: dict | str | None,
         error: str | None = None,
     ) -> None:
-        """Emit tool call end trace event."""
+        """Emit tool call end trace event.
+
+        处理MCP工具返回的isError字段，确保错误信息正确记录到tracing。
+        """
         if not span_id or not has_trace_manager():
             return
         try:
             trace_ctx = get_current_trace()
-            if trace_ctx:
-                trace_mgr = get_trace_manager()
-                output_str: str | None = None
-                if error is None:
-                    if tool_output and isinstance(tool_output, dict):
-                        output_str = tool_output.get("content") or str(
-                            tool_output,
-                        )
-                    elif tool_output:
-                        output_str = str(tool_output)
-                await trace_mgr.emit_tool_call_end(
-                    trace_id=trace_ctx.trace_id,
-                    span_id=span_id,
-                    tool_output=output_str,
-                    error=error,
-                )
+            if not trace_ctx:
+                return
+
+            trace_mgr = get_trace_manager()
+            output_str, mcp_error = self._resolve_tool_output_and_error(
+                tool_output,
+                error,
+            )
+
+            await trace_mgr.emit_tool_call_end(
+                trace_id=trace_ctx.trace_id,
+                span_id=span_id,
+                tool_output=output_str,
+                error=mcp_error,
+            )
         except Exception as e:
             logger.debug("Failed to emit tool end event: %s", e)
+
+    def _resolve_tool_output_and_error(
+        self,
+        tool_output: dict | str | None,
+        error: str | None,
+    ) -> tuple[str | None, str | None]:
+        """解析工具输出，处理MCP isError字段.
+
+        Args:
+            tool_output: 工具返回结果
+            error: 已有的错误信息
+
+        Returns:
+            (output_str, resolved_error) 元组
+        """
+        if error is not None:
+            return None, error
+
+        if tool_output is None:
+            return None, None
+
+        # 处理MCP CallToolResult类型
+        try:
+            from mcp.types import CallToolResult
+
+            if isinstance(tool_output, CallToolResult):
+                if tool_output.isError:
+                    return None, self._extract_mcp_error_content(tool_output)
+                return self._extract_mcp_success_content(tool_output), None
+        except ImportError:
+            pass
+
+        # 处理dict形式
+        if isinstance(tool_output, dict):
+            if tool_output.get("isError"):
+                return None, self._extract_dict_error_content(tool_output)
+            return tool_output.get("content") or str(tool_output), None
+
+        return str(tool_output), None
+
+    def _extract_mcp_error_content(self, result) -> str:
+        """从MCP CallToolResult中提取错误信息.
+
+        Args:
+            result: CallToolResult对象，isError=True
+
+        Returns:
+            错误信息字符串
+        """
+        content = getattr(result, "content", [])
+        error_parts = []
+        for block in content:
+            text = getattr(block, "text", None)
+            if text:
+                error_parts.append(text)
+        return "\n".join(error_parts) if error_parts else "MCP tool error"
+
+    def _extract_mcp_success_content(self, result) -> str:
+        """从MCP CallToolResult中提取成功返回内容.
+
+        Args:
+            result: CallToolResult对象，isError=False
+
+        Returns:
+            内容字符串
+        """
+        content = getattr(result, "content", [])
+        content_parts = []
+        for block in content:
+            text = getattr(block, "text", None)
+            if text:
+                content_parts.append(text)
+        return "\n".join(content_parts) if content_parts else ""
+
+    def _extract_dict_error_content(self, result: dict) -> str:
+        """从dict形式的结果中提取错误信息.
+
+        Args:
+            result: 包含isError=True的dict
+
+        Returns:
+            错误信息字符串
+        """
+        content = result.get("content", [])
+        if isinstance(content, list):
+            error_parts = []
+            for block in content:
+                if isinstance(block, dict):
+                    text = block.get("text", "")
+                else:
+                    text = str(block)
+                if text:
+                    error_parts.append(text)
+            return "\n".join(error_parts) if error_parts else "Tool error"
+        return str(content) if content else "Tool error"
 
     def _load_tenant_hook_config(self) -> HookConfig:
         try:

@@ -28,6 +28,7 @@ import { mySkillsApi } from "./modules/mySkills";
 import { myMcpApi } from "./modules/myMcp";
 import { marketMcpApi } from "./modules/marketMcp";
 import { feedbackApi } from "./modules/feedback";
+import { htmlPreviewEventsApi } from "./modules/htmlPreviewEvents";
 
 export const api = {
   // Root
@@ -100,6 +101,9 @@ export const api = {
 
   // Feedback
   ...feedbackApi,
+
+  // HTML Preview Events
+  ...htmlPreviewEventsApi,
 };
 
 export default api;

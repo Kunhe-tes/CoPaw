@@ -185,7 +185,7 @@ function ModelsPage() {
         <>
           {/* ---- LLM Section (top) ---- */}
           <PageHeader
-            parent={t("nav.settings")}
+            parent={t("nav.systemSettings")}
             current={t("models.llmTitle")}
           />
           {/* ---- Scrollable Content ---- */}

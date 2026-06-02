@@ -24,6 +24,23 @@ logger = logging.getLogger(__name__)
 _MAX_JOBDESC_CHARS = 200
 _MAX_GLUEREMARK_CHARS = 60
 _MAX_CRON_CHARS = 20
+_SCHEDULER_DOW_NUMBERS = {
+    "mon": "1",
+    "tue": "2",
+    "wed": "3",
+    "thu": "4",
+    "fri": "5",
+    "sat": "6",
+    "sun": "7",
+    "0": "7",
+    "1": "1",
+    "2": "2",
+    "3": "3",
+    "4": "4",
+    "5": "5",
+    "6": "6",
+    "7": "7",
+}
 
 
 def _truncate(value: str, max_chars: int) -> str:
@@ -31,6 +48,35 @@ def _truncate(value: str, max_chars: int) -> str:
     if len(value) <= max_chars:
         return value
     return value[: max_chars - 1] + "…"
+
+
+def _normalize_scheduler_dow_value(value: str) -> str:
+    """把内部星期值转换为调度平台可识别的数字。"""
+    return _SCHEDULER_DOW_NUMBERS.get(value.lower(), value)
+
+
+def _normalize_scheduler_dow_token(token: str) -> str:
+    """转换星期字段中的单个值、范围或步长表达式。"""
+    if "/" in token:
+        base, step = token.rsplit("/", 1)
+        return f"{_normalize_scheduler_dow_token(base)}/{step}"
+    if "-" in token:
+        start, end = token.split("-", 1)
+        return (
+            f"{_normalize_scheduler_dow_value(start)}-"
+            f"{_normalize_scheduler_dow_value(end)}"
+        )
+    return _normalize_scheduler_dow_value(token)
+
+
+def _normalize_scheduler_dow(field: str) -> str:
+    """转换完整星期字段，保留逗号组合结构。"""
+    if field == "*":
+        return field
+    return ",".join(
+        _normalize_scheduler_dow_token(token.strip())
+        for token in field.split(",")
+    )
 
 
 class SchedulerAdapter(ABC):
@@ -365,7 +411,12 @@ class RealSchedulerAdapter(SchedulerAdapter):
         parts = cron.strip().split()
         if len(parts) != 5:
             return cron
-        normalized = f"0 {' '.join(parts[:4])} ?"
+        minute, hour, day_of_month, month, day_of_week = parts
+        scheduler_day_of_week = _normalize_scheduler_dow(day_of_week)
+        if scheduler_day_of_week == "*":
+            normalized = f"0 {minute} {hour} {day_of_month} {month} ?"
+        else:
+            normalized = f"0 {minute} {hour} ? {month} {scheduler_day_of_week}"
         logger.debug("Normalized cron: %s -> %s", cron, normalized)
         return normalized
 

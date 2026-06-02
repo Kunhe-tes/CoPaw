@@ -69,6 +69,14 @@ CREATE TABLE IF NOT EXISTS `swe_cron_executions` (
     `input_snapshot` VARCHAR(2048) DEFAULT '' COMMENT '执行时的输入快照',
     `output_preview` VARCHAR(512) DEFAULT '' COMMENT '输出预览 (前100字符)',
     `meta` VARCHAR(2048) DEFAULT '' COMMENT '执行元数据',
+    `notification_status` VARCHAR(16) DEFAULT 'not_required' COMMENT '通知状态',
+    `notification_due_at` DATETIME DEFAULT NULL COMMENT '计划通知时间',
+    `notification_timezone` VARCHAR(64) DEFAULT '' COMMENT '通知计算时区',
+    `notification_sent_at` DATETIME DEFAULT NULL COMMENT '通知发送时间',
+    `notification_attempts` INT DEFAULT 0 COMMENT '通知尝试次数',
+    `notification_error` VARCHAR(2048) DEFAULT '' COMMENT '通知错误',
+    `notification_lock_owner` VARCHAR(128) DEFAULT '' COMMENT '通知锁持有者',
+    `notification_locked_at` DATETIME DEFAULT NULL COMMENT '通知锁时间',
     `created_at` DATETIME DEFAULT CURRENT_TIMESTAMP COMMENT '记录创建时间',
     INDEX `idx_job_id` (`job_id`),
     INDEX `idx_tenant_id` (`tenant_id`),
@@ -76,6 +84,8 @@ CREATE TABLE IF NOT EXISTS `swe_cron_executions` (
     INDEX `idx_scheduled_time` (`scheduled_time`),
     INDEX `idx_actual_time` (`actual_time`),
     INDEX `idx_trace_id` (`trace_id`),
+    INDEX `idx_notification_scan` (`notification_status`, `notification_due_at`),
+    INDEX `idx_notification_lock` (`notification_lock_owner`, `notification_locked_at`),
     INDEX `idx_tenant_actual` (`tenant_id`, `actual_time`),
     INDEX `idx_created_at` (`created_at`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='定时任务执行历史表';

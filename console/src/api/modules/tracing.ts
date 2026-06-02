@@ -8,6 +8,8 @@ export interface OverviewStats {
   online_users: number;
   online_user_ids: string[];
   total_users: number;
+  it_users: number;  // IT人员数量（80/IT开头的用户ID）
+  business_users: number;  // 业务人员数量（其他用户）
   model_distribution: ModelUsage[];
   total_tokens: number;
   input_tokens: number;
@@ -51,6 +53,8 @@ export interface TaskStatusSummary {
   success: number;
   failed: number;
   cancelled: number;
+  read_count: number;
+  new_cron_tasks: number;
 }
 
 export interface DepthSummary {
@@ -103,6 +107,12 @@ export interface MCPSummary {
   total_calls: number;
   error_count: number;
   server_count: number;
+}
+
+export interface ErrorSummary {
+  total_errors: number;
+  model_errors: number;
+  tool_errors: number;
 }
 
 export interface DailyStats {
@@ -796,5 +806,23 @@ export const tracingApi = {
     }
     const query = params.toString() ? `?${params.toString()}` : "";
     return request(`/monitor/tracing/depth/summary${query}`);
+  },
+
+  // 报错分析汇总统计
+  getErrorSummary: async (
+    filters?: {
+      start_date?: string;
+      end_date?: string;
+      bbk_ids?: string;
+    },
+  ): Promise<ErrorSummary> => {
+    const params = new URLSearchParams();
+    if (filters) {
+      Object.entries(filters).forEach(([key, value]) => {
+        if (value) params.append(key, value);
+      });
+    }
+    const query = params.toString() ? `?${params.toString()}` : "";
+    return request(`/monitor/tracing/error/summary${query}`);
   },
 };

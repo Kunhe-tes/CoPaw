@@ -96,7 +96,7 @@ function VoiceTranscriptionPage() {
     <div className={styles.voiceTranscriptionPage}>
       <PageHeader
         items={[
-          { title: t("nav.settings") },
+          { title: t("nav.systemSettings") },
           { title: t("voiceTranscription.title") },
         ]}
       />

@@ -2,6 +2,7 @@ import { useProviderContext } from "@/components/agentscope-chat";
 import DownloadFileCard from "../../../DownloadFileCard";
 import {
   extractDecodedFileNameFromUrl,
+  isAutoPreviewHtmlLink,
   safeDecodeFileName,
 } from "../../../FilePreviewModal/fileUtils";
 
@@ -20,6 +21,7 @@ function isFileLink(href?: string): boolean {
   const pathname = urlObj.pathname;
   // 匹配 /files/preview/ 路径
   if (pathname.includes("/files/preview/")) return true;
+  if (isAutoPreviewHtmlLink(href)) return true;
 
   // 匹配常见文件扩展名，html/htm 默认按普通页面链接处理
   const fileExts = [
@@ -48,7 +50,14 @@ export default function Link(props) {
 
   const href = props.href;
   if (isFileLink(href)) {
-    return <DownloadFileCard url={href} fileName={extractFileName(href)} />;
+    const fileName = extractFileName(href);
+    return (
+      <DownloadFileCard
+        url={href}
+        fileName={fileName}
+        enableClickTracking={isAutoPreviewHtmlLink(href, fileName)}
+      />
+    );
   }
 
   return <a {...props} />;
@@ -57,7 +66,8 @@ export default function Link(props) {
 function Sup(props) {
   const { getPrefixCls } = useProviderContext();
   const prefixCls = getPrefixCls("markdown-footnote");
-  const { href, ...rest } = props;
+  const rest = { ...props };
+  delete rest.href;
 
   return (
     <a
@@ -65,13 +75,16 @@ function Sup(props) {
       className={prefixCls}
       onClick={() => {
         try {
-          const [x, y, id] = props.id.split("-");
+          const idParts = props.id.split("-");
+          const id = idParts[idParts.length - 1];
           const url = document
             .querySelector(`#footnote-${id}`)
             .querySelector("a")
             .getAttribute("href");
           window.open(url, "_blank");
-        } catch (error) {}
+        } catch {
+          return;
+        }
       }}
     />
   );

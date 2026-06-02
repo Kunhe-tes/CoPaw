@@ -301,7 +301,7 @@ function MCPPage() {
   return (
     <div className={styles.mcpPage}>
       <PageHeader
-        items={[{ title: t("nav.agent") }, { title: t("mcp.title") }]}
+        items={[{ title: t("nav.creationCenter") }, { title: t("mcp.title") }]}
         extra={
           <div className={styles.headerActions}>
             {selectedClientKeys.length > 0 ? (

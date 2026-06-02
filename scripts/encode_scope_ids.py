@@ -6,25 +6,18 @@ from __future__ import annotations
 
 import argparse
 import sys
-from dataclasses import dataclass
 from pathlib import Path
 
 # 允许直接通过 ``python scripts/...`` 运行时导入项目源码。
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
 # pylint: disable=wrong-import-position
-from swe.config.context import encode_scope_id
+from swe.config.scope_conversion import (
+    EncodedScope,
+    encode_canonical_scope_id as _encode_canonical_scope_id,
+)
 
 # pylint: enable=wrong-import-position
-
-
-@dataclass(frozen=True)
-class EncodedScope:
-    """记录一次 scope 编码结果。"""
-
-    tenant_id: str
-    source_id: str
-    scope_id: str
 
 
 def parse_identity_ids(raw_value: str, field_name: str) -> tuple[str, ...]:
@@ -44,11 +37,7 @@ def encode_canonical_scope_id(
     source_id: str,
 ) -> EncodedScope:
     """把逻辑 tenant/source 编码为 canonical scope ID。"""
-    return EncodedScope(
-        tenant_id=tenant_id,
-        source_id=source_id,
-        scope_id=encode_scope_id(tenant_id, source_id),
-    )
+    return _encode_canonical_scope_id(tenant_id, source_id)
 
 
 def _format_encoded_scope(encoded: EncodedScope) -> str:

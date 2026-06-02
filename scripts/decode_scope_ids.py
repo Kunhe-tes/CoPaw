@@ -6,25 +6,18 @@ from __future__ import annotations
 
 import argparse
 import sys
-from dataclasses import dataclass
 from pathlib import Path
 
 # 允许直接通过 ``python scripts/...`` 运行时导入项目源码。
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
 # pylint: disable=wrong-import-position
-from swe.config.context import decode_scope_id
+from swe.config.scope_conversion import (
+    DecodedScope,
+    decode_canonical_scope_id as _decode_canonical_scope_id,
+)
 
 # pylint: enable=wrong-import-position
-
-
-@dataclass(frozen=True)
-class DecodedScope:
-    """记录一次 scope 反解结果。"""
-
-    scope_id: str
-    tenant_id: str
-    source_id: str
 
 
 def parse_scope_ids(raw_value: str) -> tuple[str, ...]:
@@ -37,14 +30,7 @@ def parse_scope_ids(raw_value: str) -> tuple[str, ...]:
 
 def decode_canonical_scope_id(scope_id: str) -> DecodedScope:
     """仅反解 canonical scope ID，不接受 legacy 前缀格式。"""
-    if scope_id.startswith("scope.v1."):
-        raise ValueError("Legacy scope IDs are not supported")
-    tenant_id, source_id = decode_scope_id(scope_id)
-    return DecodedScope(
-        scope_id=scope_id,
-        tenant_id=tenant_id,
-        source_id=source_id,
-    )
+    return _decode_canonical_scope_id(scope_id)
 
 
 def _format_decoded_scope(decoded: DecodedScope) -> str:

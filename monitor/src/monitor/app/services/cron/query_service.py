@@ -17,6 +17,8 @@ from ...models.cron import (
     ExecutionModel,
     ExecutionQueryParams,
     PaginatedResponse,
+    SubscriptionDetailItem,
+    SubscriptionOverviewItem,
 )
 
 # 东八区时区（北京时间）
@@ -36,6 +38,9 @@ EXECUTION_TIME_FIELDS = [
     "scheduled_time",
     "actual_time",
     "end_time",
+    "notification_due_at",
+    "notification_sent_at",
+    "notification_locked_at",
     "created_at",
 ]
 
@@ -95,6 +100,10 @@ class QueryService:
         if params.creator_user_id:
             conditions.append("creator_user_id = %s")
             sql_params.append(params.creator_user_id)
+
+        if params.job_origin:
+            conditions.append("job_origin = %s")
+            sql_params.append(params.job_origin)
 
         if params.status:
             conditions.append("status = %s")
@@ -589,6 +598,267 @@ class QueryService:
             "job_names": job_names,
             "job_ids": job_ids,
         }
+
+    async def get_subscription_overview(
+        self,
+        *,
+        keyword: Optional[str] = None,
+        tenant_id: Optional[str] = None,
+        bbk_id: Optional[str] = None,
+        source_id: Optional[str] = None,
+        start_time: Optional[datetime] = None,
+        end_time: Optional[datetime] = None,
+        page: int = 1,
+        page_size: int = 10,
+    ) -> PaginatedResponse[SubscriptionOverviewItem]:
+        """按订阅任务分组统计当天概览数据。"""
+        db = get_db_connection()
+        start_time, end_time = self._resolve_today_range(start_time, end_time)
+        conditions, sql_params = self._build_subscription_conditions(
+            keyword=keyword,
+            tenant_id=tenant_id,
+            bbk_id=bbk_id,
+            source_id=source_id,
+        )
+        where_clause = " AND ".join(conditions)
+        group_key = "COALESCE(NULLIF(j.subscription_key, ''), CONCAT('job:', j.id))"
+
+        count_sql = f"""
+            SELECT COUNT(*) as count
+            FROM (
+                SELECT {group_key} AS subscription_group
+                FROM swe_cron_jobs j
+                WHERE {where_clause}
+                GROUP BY subscription_group
+            ) grouped
+        """
+        count_result = await db.fetch_one(count_sql, tuple(sql_params))
+        total = count_result.get("count", 0) if count_result else 0
+
+        offset = (page - 1) * page_size
+        latest_execution_sql = """
+            SELECT e.*
+            FROM swe_cron_executions e
+            INNER JOIN (
+                SELECT job_id, MAX(actual_time) AS latest_actual_time
+                FROM swe_cron_executions
+                WHERE actual_time >= %s AND actual_time <= %s
+                GROUP BY job_id
+            ) latest
+                ON latest.job_id = e.job_id
+                AND latest.latest_actual_time = e.actual_time
+        """
+        query_sql = f"""
+            SELECT
+                {group_key} AS subscription_key,
+                MAX(j.name) AS task_name,
+                COUNT(*) AS total_task_count,
+                COUNT(DISTINCT NULLIF(j.creator_user_id, '')) AS subscriber_count,
+                SUM(CASE WHEN le.status = 'running' THEN 1 ELSE 0 END)
+                    AS running_task_count,
+                SUM(
+                    CASE
+                        WHEN le.job_id IS NULL
+                            AND j.enabled = 1
+                            AND j.status = 'active'
+                        THEN 1 ELSE 0
+                    END
+                ) AS pending_task_count,
+                SUM(CASE WHEN le.status = 'success' THEN 1 ELSE 0 END)
+                    AS executed_task_count,
+                SUM(
+                    CASE
+                        WHEN le.status IN ('error', 'timeout', 'cancelled')
+                        THEN 1 ELSE 0
+                    END
+                ) AS failed_task_count,
+                COALESCE(
+                    AVG(CASE WHEN le.status = 'success' THEN le.duration_ms END),
+                    0
+                ) AS avg_duration_ms,
+                SUM(CASE WHEN le.status = 'success' THEN 1 ELSE 0 END)
+                    AS success_count,
+                SUM(
+                    CASE
+                        WHEN le.status IN ('success', 'error', 'timeout', 'cancelled')
+                        THEN 1 ELSE 0
+                    END
+                ) AS completed_count
+            FROM swe_cron_jobs j
+            LEFT JOIN ({latest_execution_sql}) le ON le.job_id = j.id
+            WHERE {where_clause}
+            GROUP BY subscription_key
+            ORDER BY total_task_count DESC, task_name ASC
+            LIMIT %s OFFSET %s
+        """
+        rows = await db.fetch_all(
+            query_sql,
+            (start_time, end_time, *sql_params, page_size, offset),
+        )
+
+        items = []
+        for row in rows:
+            completed_count = int(row.get("completed_count") or 0)
+            success_count = int(row.get("success_count") or 0)
+            success_rate = (
+                success_count / completed_count if completed_count else 0.0
+            )
+            items.append(
+                SubscriptionOverviewItem(
+                    subscription_key=row.get("subscription_key") or "",
+                    task_name=row.get("task_name") or "",
+                    subscriber_count=int(row.get("subscriber_count") or 0),
+                    total_task_count=int(row.get("total_task_count") or 0),
+                    running_task_count=int(row.get("running_task_count") or 0),
+                    pending_task_count=int(row.get("pending_task_count") or 0),
+                    executed_task_count=int(row.get("executed_task_count") or 0),
+                    failed_task_count=int(row.get("failed_task_count") or 0),
+                    avg_duration_ms=float(row.get("avg_duration_ms") or 0),
+                    success_rate=success_rate,
+                ),
+            )
+
+        return PaginatedResponse(
+            items=items,
+            total=total,
+            page=page,
+            page_size=page_size,
+        )
+
+    async def get_subscription_details(
+        self,
+        subscription_key: str,
+        *,
+        tenant_id: Optional[str] = None,
+        bbk_id: Optional[str] = None,
+        source_id: Optional[str] = None,
+        start_time: Optional[datetime] = None,
+        end_time: Optional[datetime] = None,
+        page: int = 1,
+        page_size: int = 10,
+    ) -> PaginatedResponse[SubscriptionDetailItem]:
+        """查询订阅任务详情弹窗数据。"""
+        db = get_db_connection()
+        start_time, end_time = self._resolve_today_range(start_time, end_time)
+        conditions, sql_params = self._build_subscription_conditions(
+            tenant_id=tenant_id,
+            bbk_id=bbk_id,
+            source_id=source_id,
+        )
+        conditions.append("j.subscription_key = %s")
+        sql_params.append(subscription_key)
+        where_clause = " AND ".join(conditions)
+
+        count_sql = f"""
+            SELECT COUNT(*) as count
+            FROM swe_cron_jobs j
+            WHERE {where_clause}
+        """
+        count_result = await db.fetch_one(count_sql, tuple(sql_params))
+        total = count_result.get("count", 0) if count_result else 0
+
+        offset = (page - 1) * page_size
+        latest_execution_sql = """
+            SELECT e.*
+            FROM swe_cron_executions e
+            INNER JOIN (
+                SELECT job_id, MAX(actual_time) AS latest_actual_time
+                FROM swe_cron_executions
+                WHERE actual_time >= %s AND actual_time <= %s
+                GROUP BY job_id
+            ) latest
+                ON latest.job_id = e.job_id
+                AND latest.latest_actual_time = e.actual_time
+        """
+        query_sql = f"""
+            SELECT
+                j.id AS job_id,
+                j.creator_user_id AS subscriber_id,
+                j.tenant_name AS subscriber_name,
+                j.bbk_id,
+                j.enabled,
+                CASE WHEN le.job_id IS NULL THEN 'pending' ELSE 'executed' END
+                    AS execution_status,
+                le.actual_time AS execution_time
+            FROM swe_cron_jobs j
+            LEFT JOIN ({latest_execution_sql}) le ON le.job_id = j.id
+            WHERE {where_clause}
+            ORDER BY j.created_at DESC
+            LIMIT %s OFFSET %s
+        """
+        rows = await db.fetch_all(
+            query_sql,
+            (start_time, end_time, *sql_params, page_size, offset),
+        )
+        items = [
+            SubscriptionDetailItem(
+                job_id=row.get("job_id") or "",
+                subscriber_id=row.get("subscriber_id") or "",
+                subscriber_name=row.get("subscriber_name") or "",
+                bbk_id=row.get("bbk_id") or "",
+                enabled=bool(row.get("enabled")),
+                execution_status=row.get("execution_status") or "pending",
+                execution_time=convert_utc_to_beijing(row.get("execution_time")),
+            )
+            for row in rows
+        ]
+
+        return PaginatedResponse(
+            items=items,
+            total=total,
+            page=page,
+            page_size=page_size,
+        )
+
+    def _resolve_today_range(
+        self,
+        start_time: Optional[datetime],
+        end_time: Optional[datetime],
+    ) -> Tuple[datetime, datetime]:
+        """未传时间范围时默认使用北京时间当天。"""
+        if start_time and end_time:
+            return start_time, end_time
+        today_start = datetime.now(BEIJING_TZ).replace(
+            hour=0,
+            minute=0,
+            second=0,
+            microsecond=0,
+        )
+        today_end = today_start.replace(
+            hour=23,
+            minute=59,
+            second=59,
+            microsecond=999999,
+        )
+        return today_start - timedelta(hours=8), today_end - timedelta(hours=8)
+
+    def _build_subscription_conditions(
+        self,
+        *,
+        keyword: Optional[str] = None,
+        tenant_id: Optional[str] = None,
+        bbk_id: Optional[str] = None,
+        source_id: Optional[str] = None,
+    ) -> Tuple[List[str], List]:
+        """构建订阅任务查询条件。"""
+        conditions = ["j.deleted_at IS NULL", "j.job_origin = 'subscription'"]
+        sql_params: List = []
+        if keyword:
+            conditions.append(
+                "j.name LIKE %s",
+            )
+            keyword_like = f"%{keyword}%"
+            sql_params.append(keyword_like)
+        if tenant_id:
+            conditions.append("j.tenant_id = %s")
+            sql_params.append(tenant_id)
+        if bbk_id:
+            conditions.append("j.bbk_id = %s")
+            sql_params.append(bbk_id)
+        if source_id:
+            conditions.append("j.source_id = %s")
+            sql_params.append(source_id)
+        return conditions, sql_params
 
     async def mark_job_as_read(self, job_id: str) -> int:
         """标记任务及其历史执行记录为已读。

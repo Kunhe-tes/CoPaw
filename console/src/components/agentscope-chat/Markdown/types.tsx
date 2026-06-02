@@ -1,4 +1,4 @@
-import { XMarkdownProps } from "@ant-design/x-markdown";
+import type { XMarkdownProps } from "@ant-design/x-markdown";
 
 export interface MarkdownProps {
   /**

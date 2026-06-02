@@ -6,6 +6,8 @@ import { CopyOutlined, MoreOutlined } from "@ant-design/icons";
 import { TFunction } from "i18next";
 import { parseCron } from "./parseCron";
 import { copyToClipboard } from "../../../../utils/clipboard";
+import type { ExecutionModelOption } from "@/hooks/useExecutionModelOptions";
+import { formatExecutionModelLabel } from "@/hooks/useExecutionModelOptions";
 import styles from "../index.module.less";
 
 type CronJob = CronJobSpecOutput;
@@ -18,6 +20,8 @@ interface ColumnHandlers {
   onDelete: (jobId: string) => void;
   onCopySuccess: () => void;
   onCopyError: () => void;
+  executionModelOptions: ExecutionModelOption[];
+  tenantDefaultModelLabel: string;
   t: TFunction;
 }
 
@@ -172,6 +176,21 @@ export const createColumns = (
       dataIndex: "task_type",
       key: "task_type",
       width: 140,
+    },
+    {
+      title: "ExecutionModel",
+      key: "model_slot",
+      width: 240,
+      render: (_: unknown, record: CronJob) => {
+        if (record.task_type !== "agent") {
+          return "-";
+        }
+        return formatExecutionModelLabel(
+          record.model_slot,
+          handlers.executionModelOptions,
+          handlers.tenantDefaultModelLabel,
+        );
+      },
     },
     {
       title: handlers.t("cronJobs.text"),

@@ -121,7 +121,7 @@ export default function AgentsPage() {
   return (
     <div className={styles.agentsPage}>
       <PageHeader
-        parent={t("agent.parent")}
+        parent={t("nav.systemSettings")}
         current={t("agent.agents")}
         extra={
           <div className={styles.headerRight}>

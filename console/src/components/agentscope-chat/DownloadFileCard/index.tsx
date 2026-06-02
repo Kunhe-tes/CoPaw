@@ -1,16 +1,20 @@
-import React, { useMemo, useState } from "react";
+import React, { useEffect, useMemo, useRef, useState } from "react";
 import { SparkDownloadLine } from "@agentscope-ai/icons";
 import FilePreviewModal from "../FilePreviewModal";
 import {
   extractDecodedFileNameFromUrl,
   getFileIcon,
   getFileType,
+  isAutoPreviewHtmlLink,
   safeDecodeFileName,
 } from "../FilePreviewModal/fileUtils";
+import { useAutoPreviewHtml } from "../AutoPreviewHtmlContext";
 
 export interface DownloadFileCardProps {
   url: string;
   fileName?: string;
+  autoPreview?: boolean;
+  enableClickTracking?: boolean;
   className?: string;
   style?: React.CSSProperties;
 }
@@ -79,8 +83,18 @@ const downloadBtnStyle: React.CSSProperties = {
 };
 
 function DownloadFileCard(props: DownloadFileCardProps) {
-  const { url, fileName: propFileName, className, style } = props;
+  const {
+    url,
+    fileName: propFileName,
+    autoPreview,
+    enableClickTracking = false,
+    className,
+    style,
+  } = props;
   const [previewOpen, setPreviewOpen] = useState(false);
+  const autoPreviewOpenedRef = useRef(false);
+  const { enabled: pageAutoPreviewEnabled, register: registerAutoPreview } =
+    useAutoPreviewHtml();
 
   // Extract filename from URL if not provided
   const fileName = useMemo(() => {
@@ -97,6 +111,45 @@ function DownloadFileCard(props: DownloadFileCardProps) {
   }, [fileName]);
 
   const fileType = useMemo(() => getFileType(fileName), [fileName]);
+  const shouldAutoPreview = useMemo(
+    () =>
+      autoPreview ??
+      (pageAutoPreviewEnabled && isAutoPreviewHtmlLink(url, fileName)),
+    [autoPreview, pageAutoPreviewEnabled, url, fileName],
+  );
+  const isAutoPreviewHtml = useMemo(
+    () => isAutoPreviewHtmlLink(url, fileName),
+    [fileName, url],
+  );
+  const shouldEnableClickTracking = enableClickTracking || isAutoPreviewHtml;
+
+  useEffect(() => {
+    if (
+      !shouldAutoPreview ||
+      autoPreviewOpenedRef.current ||
+      fileType !== "previewable"
+    ) {
+      return;
+    }
+
+    if (autoPreview === undefined && pageAutoPreviewEnabled) {
+      return registerAutoPreview({
+        open: () => {
+          autoPreviewOpenedRef.current = true;
+          setPreviewOpen(true);
+        },
+      });
+    }
+
+    autoPreviewOpenedRef.current = true;
+    setPreviewOpen(true);
+  }, [
+    autoPreview,
+    fileType,
+    pageAutoPreviewEnabled,
+    registerAutoPreview,
+    shouldAutoPreview,
+  ]);
 
   const handlePreview = () => {
     setPreviewOpen(true);
@@ -167,6 +220,7 @@ function DownloadFileCard(props: DownloadFileCardProps) {
         onClose={() => setPreviewOpen(false)}
         fileUrl={url}
         fileName={fileName}
+        enableClickTracking={shouldEnableClickTracking}
       />
     </>
   );

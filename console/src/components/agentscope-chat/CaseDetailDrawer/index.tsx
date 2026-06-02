@@ -1,11 +1,12 @@
 import { useState } from "react";
 import { Drawer, Spin } from "antd";
 import Style from "./style";
-import type { FeaturedCase, CaseDetail, CaseStep } from "@/api/types/featuredCases";
+import type { FeaturedCase, CaseStep } from "@/api/types/featuredCases";
+import type { ModelSlotConfig } from "@/api/types";
 import ScheduledTaskPopup from "@/components/ScheduledTaskPopup";
 import { cronJobApi } from "@/api/modules/cronjob";
 import { getUserId, getChannel } from "@/utils/identity";
-import { buildCronJobSpec, generateCronExpression, type ScheduleConfig } from "@/utils/cron";
+import { buildCronJobSpec, type ScheduleConfig } from "@/utils/cron";
 
 export interface CaseDetailDrawerProps {
   visible: boolean;
@@ -116,8 +117,10 @@ export default function CaseDetailDrawer({
 
   const handleConfirmScheduledTask = async (
     cronExpression: string,
-    config: ScheduleConfig
+    config: ScheduleConfig,
+    modelSlot?: ModelSlotConfig,
   ) => {
+    void config;
     if (!caseData) return;
 
     const userId = getUserId();
@@ -130,6 +133,8 @@ export default function CaseDetailDrawer({
       sessionId: undefined,
       caseValue: caseData.value,
       channel,
+      modelSlot,
+      subscriptionKey: `featured_case:${caseData.id}`,
     });
 
     await cronJobApi.createCronJob(spec);

@@ -32,6 +32,7 @@ from .zhaohu import zhaohu_router
 from ..greeting import greeting_router
 from ..featured_case import featured_case_router
 from ..feedback import router as feedback_router
+from ..html_preview_clicks import router as html_preview_click_router
 from .dream_logs import router as dream_logs_router
 from .user_info import router as user_info_router
 from .internal import public_router as public_text_asset_router
@@ -69,6 +70,7 @@ router.include_router(zhaohu_router)
 router.include_router(greeting_router)
 router.include_router(featured_case_router)
 router.include_router(feedback_router)
+router.include_router(html_preview_click_router)
 router.include_router(dream_logs_router)
 router.include_router(user_info_router)
 router.include_router(internal_router)

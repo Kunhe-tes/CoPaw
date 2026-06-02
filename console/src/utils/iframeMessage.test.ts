@@ -69,7 +69,6 @@ describe("fetchAndSetUserName", () => {
       "vorglvl",
       "positionID",
       "token",
-      "brnOrgId",
     ].forEach((name) => {
       document.cookie = `${name}=; expires=Thu, 01 Jan 1970 00:00:00 GMT; path=/`;
     });
@@ -311,7 +310,7 @@ describe("fetchAndSetUserName", () => {
     window.history.pushState({}, "", "/?origin=Y");
     document.cookie = "userid=80000002; path=/";
     document.cookie = "token=fresh-token; path=/";
-    document.cookie = "brnOrgId=BRN001; path=/";
+    document.cookie = "brnOrgId=COOKIE_BRN_SHOULD_NOT_BE_USED; path=/";
     mockedFetchCustomerInfo.mockResolvedValueOnce({
       returnCode: "SUC0000",
       body: {
@@ -336,7 +335,7 @@ describe("fetchAndSetUserName", () => {
       values: expect.objectContaining({
         token: "response-token",
         bbkOrgId: "bbk-001",
-        brnOrgId: "BRN001",
+        brnOrgId: "org",
         sapId: "80000003",
         rtlPstId: "position-001",
         sourceId: "RMASSIST",
@@ -351,7 +350,6 @@ describe("fetchAndSetUserName", () => {
     window.history.pushState({}, "", "/?origin=Y");
     document.cookie = "userid=80000002; path=/";
     document.cookie = "token=fresh-token; path=/";
-    document.cookie = "brnOrgId=BRN001; path=/";
     mockedFetchCustomerInfo.mockResolvedValue({
       returnCode: "SUC0000",
       body: {

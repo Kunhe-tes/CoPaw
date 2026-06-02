@@ -1028,3 +1028,109 @@ class TestInferencerUserMessageMethods:
         # Description keywords should have lower confidence than trigger keywords
         assert confidence >= 0.4
         assert confidence <= 0.85
+
+
+class TestSkillMdReadDetection:
+    """Test skill detection from SKILL.md file reads."""
+
+    @pytest.mark.asyncio
+    async def test_detect_skill_from_skill_md_read(self):
+        """Test that reading a SKILL.md file activates the corresponding skill."""
+        detector = SkillInvocationDetector()
+        detector.set_enabled_skills(["xlsx", "pdf", "docx"])
+
+        # 模拟读取xlsx技能的SKILL.md
+        skill = detector._detect_skill_from_skill_md_read(
+            "read_file",
+            {"file_path": "/workspace/skills/xlsx/SKILL.md"},
+        )
+
+        assert skill == "xlsx"
+
+    @pytest.mark.asyncio
+    async def test_detect_skill_from_skill_md_read_not_enabled(self):
+        """Test that reading SKILL.md for non-enabled skill returns None."""
+        detector = SkillInvocationDetector()
+        detector.set_enabled_skills(["xlsx", "pdf"])
+
+        # 尝试读取未启用的技能
+        skill = detector._detect_skill_from_skill_md_read(
+            "read_file",
+            {"file_path": "/workspace/skills/docx/SKILL.md"},
+        )
+
+        assert skill is None
+
+    @pytest.mark.asyncio
+    async def test_detect_skill_from_skill_md_read_not_skill_md(self):
+        """Test that reading non-SKILL.md files returns None."""
+        detector = SkillInvocationDetector()
+        detector.set_enabled_skills(["xlsx"])
+
+        skill = detector._detect_skill_from_skill_md_read(
+            "read_file",
+            {"file_path": "/workspace/skills/xlsx/README.md"},
+        )
+
+        assert skill is None
+
+    @pytest.mark.asyncio
+    async def test_detect_skill_from_skill_md_read_wrong_tool(self):
+        """Test that non-read_file tools return None."""
+        detector = SkillInvocationDetector()
+        detector.set_enabled_skills(["xlsx"])
+
+        skill = detector._detect_skill_from_skill_md_read(
+            "write_file",
+            {"file_path": "/workspace/skills/xlsx/SKILL.md"},
+        )
+
+        assert skill is None
+
+    @pytest.mark.asyncio
+    async def test_detect_skill_from_skill_md_read_empty_path(self):
+        """Test that empty file_path returns None."""
+        detector = SkillInvocationDetector()
+        detector.set_enabled_skills(["xlsx"])
+
+        skill = detector._detect_skill_from_skill_md_read(
+            "read_file",
+            {"file_path": ""},
+        )
+
+        assert skill is None
+
+    @pytest.mark.asyncio
+    async def test_skill_md_read_activates_skill(self):
+        """Test full flow: reading SKILL.md activates the skill."""
+        detector = SkillInvocationDetector()
+        detector.set_enabled_skills(["xlsx", "pdf"])
+
+        # 调用on_tool_call读取SKILL.md
+        skill, weights = await detector.on_tool_call(
+            "read_file",
+            {"file_path": "/workspace/skills/xlsx/SKILL.md"},
+        )
+
+        assert skill == "xlsx"
+        assert weights == {"xlsx": 1.0}
+
+    @pytest.mark.asyncio
+    async def test_skill_md_read_priority_over_other_detection(self):
+        """Test that SKILL.md read has highest priority."""
+        # 设置一个技能声明使用了read_file工具
+        registry = get_skill_tool_registry()
+        registry.register_skill_tools("pdf", ["read_file"])
+
+        detector = SkillInvocationDetector(registry=registry)
+        detector.set_enabled_skills(["xlsx", "pdf"])
+
+        # pdf声明了read_file，但读取的是xlsx的SKILL.md
+        skill, weights = await detector.on_tool_call(
+            "read_file",
+            {"file_path": "/workspace/skills/xlsx/SKILL.md"},
+        )
+
+        # 应该识别为xlsx，而不是pdf
+        assert skill == "xlsx"
+        assert weights == {"xlsx": 1.0}

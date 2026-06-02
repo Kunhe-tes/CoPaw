@@ -1,0 +1,163 @@
+# -*- coding: utf-8 -*-
+"""定时任务完成通知后台扫描器。"""
+
+from __future__ import annotations
+
+import asyncio
+import logging
+import os
+import socket
+from datetime import datetime, timezone
+from typing import Any, Optional
+from uuid import uuid4
+from zoneinfo import ZoneInfo
+
+from ...config.context import resolve_runtime_tenant_id
+from ...config.utils import load_config
+from .monitor_sync_client import MonitorSyncClient, get_monitor_sync_client
+
+logger = logging.getLogger(__name__)
+
+SCAN_INTERVAL_ENV = "SWE_CRON_NOTIFICATION_SCAN_SECONDS"
+BATCH_SIZE_ENV = "SWE_CRON_NOTIFICATION_BATCH_SIZE"
+MAX_ATTEMPTS_ENV = "SWE_CRON_NOTIFICATION_MAX_ATTEMPTS"
+
+
+class CronNotificationWorker:
+    """从 Monitor 领取完成记录并发送定时任务完成通知。"""
+
+    def __init__(
+        self,
+        *,
+        multi_agent_manager: Any,
+        monitor_client: Optional[MonitorSyncClient] = None,
+        interval_seconds: Optional[int] = None,
+        batch_size: Optional[int] = None,
+        max_attempts: Optional[int] = None,
+        app_timezone: Optional[str] = None,
+    ) -> None:
+        self._multi_agent_manager = multi_agent_manager
+        self._monitor_client = monitor_client or get_monitor_sync_client()
+        self._interval_seconds = interval_seconds or _get_int_env(
+            SCAN_INTERVAL_ENV,
+            default=300,
+            minimum=300,
+            maximum=600,
+        )
+        self._batch_size = batch_size or _get_int_env(
+            BATCH_SIZE_ENV,
+            default=20,
+            minimum=1,
+            maximum=100,
+        )
+        self._max_attempts = max_attempts or _get_int_env(
+            MAX_ATTEMPTS_ENV,
+            default=3,
+            minimum=1,
+            maximum=10,
+        )
+        self._app_timezone = app_timezone or _load_app_timezone()
+        self._lock_owner = f"{socket.gethostname()}:{os.getpid()}:{uuid4()}"
+        self._task: Optional[asyncio.Task] = None
+        self._stopped = asyncio.Event()
+
+    def start(self) -> None:
+        """启动后台扫描任务。"""
+        if self._task is not None and not self._task.done():
+            return
+        self._stopped.clear()
+        self._task = asyncio.create_task(self._run_loop())
+
+    async def stop(self) -> None:
+        """停止后台扫描任务。"""
+        self._stopped.set()
+        if self._task is None:
+            return
+        self._task.cancel()
+        try:
+            await self._task
+        except asyncio.CancelledError:
+            pass
+
+    async def scan_once(self) -> None:
+        """执行一次通知扫描。"""
+        now_utc = self._now_utc()
+        rows = await self._monitor_client.claim_due_notifications(
+            lock_owner=self._lock_owner,
+            now_utc=now_utc,
+            limit=self._batch_size,
+        )
+        for row in rows:
+            await self._send_one(row)
+
+    async def _run_loop(self) -> None:
+        while not self._stopped.is_set():
+            try:
+                await self.scan_once()
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.warning("Cron notification scan failed", exc_info=True)
+            try:
+                await asyncio.wait_for(
+                    self._stopped.wait(),
+                    timeout=self._interval_seconds,
+                )
+            except asyncio.TimeoutError:
+                continue
+
+    async def _send_one(self, row: dict[str, Any]) -> None:
+        execution_id = int(row.get("id"))
+        try:
+            tenant_id = str(row.get("tenant_id") or "")
+            source_id = str(row.get("source_id") or "")
+            job_id = str(row.get("job_id") or "")
+            runtime_tenant_id = resolve_runtime_tenant_id(
+                tenant_id or None,
+                source_id or None,
+            )
+            workspace = await self._multi_agent_manager.get_agent(
+                "default",
+                tenant_id=runtime_tenant_id,
+            )
+            if workspace.cron_manager is None:
+                raise RuntimeError(f"cron manager unavailable: {tenant_id}")
+            await workspace.cron_manager.send_task_success_notification(job_id)
+            await self._monitor_client.mark_notification_sent(
+                execution_id=execution_id,
+                sent_at=self._now_utc(),
+            )
+        except Exception as exc:  # pylint: disable=broad-except
+            await self._monitor_client.mark_notification_failed(
+                execution_id=execution_id,
+                error=repr(exc),
+                max_attempts=self._max_attempts,
+            )
+
+    def _now_utc(self) -> datetime:
+        try:
+            app_tz = ZoneInfo(self._app_timezone or "UTC")
+        except Exception:
+            app_tz = timezone.utc
+        return datetime.now(app_tz).astimezone(timezone.utc)
+
+
+def _get_int_env(
+    name: str,
+    *,
+    default: int,
+    minimum: int,
+    maximum: int,
+) -> int:
+    try:
+        value = int(os.environ.get(name, "") or default)
+    except ValueError:
+        value = default
+    return max(minimum, min(maximum, value))
+
+
+def _load_app_timezone() -> str:
+    try:
+        return load_config().user_timezone or "UTC"
+    except Exception:
+        return "UTC"

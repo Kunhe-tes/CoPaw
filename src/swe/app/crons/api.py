@@ -5,13 +5,26 @@ import uuid
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, Field
 
-from ...config.context import resolve_runtime_tenant_id, resolve_scope_id
+from ...config.context import (
+    resolve_runtime_tenant_id,
+    resolve_scope_id,
+    resolve_scope_preferred_tenant_id,
+)
 from ...config.utils import list_logical_tenant_ids
+from ...providers.provider_manager import ProviderManager
 from .broadcast import compute_broadcast_offsets, shift_cron_expression
 from .manager import CronManager
 from .models import CronJobListItem, CronJobSpec, CronJobView
 
 router = APIRouter(prefix="/cron", tags=["cron"])
+
+BROADCAST_MODEL_SLOT_WARNING = (
+    "model_slot not copied: provider/model unavailable in target tenant"
+)
+BROADCAST_ORIGINAL_MODEL_SLOT_META_KEY = "broadcast_original_model_slot"
+BROADCAST_MODEL_SLOT_FALLBACK_REASON_META_KEY = (
+    "broadcast_model_slot_fallback_reason"
+)
 
 
 class BroadcastTenantListResponse(BaseModel):
@@ -31,6 +44,7 @@ class CronBroadcastTenantResult(BaseModel):
     offset_minutes: int = 0
     notification_timezone: str = ""
     error: str = ""
+    warning: str = ""
 
 
 class CronBroadcastResponse(BaseModel):
@@ -98,6 +112,63 @@ def _inject_creator_user(
     return spec.model_copy(update={"meta": meta})
 
 
+def _validate_cron_job_model_slot(
+    request: Request,
+    spec: CronJobSpec,
+) -> None:
+    if spec.task_type != "agent" or spec.model_slot is None:
+        return
+    tenant_id = resolve_scope_preferred_tenant_id(
+        getattr(request.state, "tenant_id", None),
+        getattr(request.state, "source_id", None),
+        getattr(request.state, "scope_id", None),
+    )
+    manager_tenant_id = tenant_id or "default"
+    manager = _get_provider_manager(manager_tenant_id)
+    provider = manager.get_provider(spec.model_slot.provider_id)
+    if provider is None:
+        raise HTTPException(
+            status_code=404,
+            detail=(f"Provider '{spec.model_slot.provider_id}' not found."),
+        )
+    if not provider.has_model(spec.model_slot.model):
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"Model '{spec.model_slot.model}' not found in provider "
+                f"'{spec.model_slot.provider_id}'."
+            ),
+        )
+
+
+def _get_provider_manager(manager_tenant_id: str):
+    ProviderManager.ensure_tenant_provider_storage(manager_tenant_id)
+    return ProviderManager.get_instance(manager_tenant_id)
+
+
+def _resolve_broadcast_model_slot(
+    runtime_tenant_id: str,
+    source_job: CronJobSpec,
+):
+    if source_job.model_slot is None:
+        return None, "", ""
+    manager = _get_provider_manager(runtime_tenant_id)
+    provider = manager.get_provider(source_job.model_slot.provider_id)
+    if provider is None:
+        return (
+            None,
+            BROADCAST_MODEL_SLOT_WARNING,
+            "provider_not_found",
+        )
+    if not provider.has_model(source_job.model_slot.model):
+        return (
+            None,
+            BROADCAST_MODEL_SLOT_WARNING,
+            "model_not_found",
+        )
+    return source_job.model_slot, "", ""
+
+
 async def _ensure_task_binding_for_read(
     spec: CronJobSpec,
     request: Request,
@@ -156,6 +227,8 @@ def _build_broadcast_job(
     cron: str,
     timezone_name: str,
     offset_minutes: int,
+    model_slot,
+    model_slot_fallback_reason: str,
 ) -> CronJobSpec:
     meta = dict(source_job.meta or {})
     for key in (
@@ -169,6 +242,8 @@ def _build_broadcast_job(
         "auto_paused_at",
         "unread_count_at_pause",
         "external_job_id",
+        BROADCAST_ORIGINAL_MODEL_SLOT_META_KEY,
+        BROADCAST_MODEL_SLOT_FALLBACK_REASON_META_KEY,
     ):
         meta.pop(key, None)
     meta.update(
@@ -181,6 +256,13 @@ def _build_broadcast_job(
             "broadcast_notification_policy": "original_schedule",
         },
     )
+    if source_job.model_slot is not None and model_slot is None:
+        meta[BROADCAST_ORIGINAL_MODEL_SLOT_META_KEY] = (
+            source_job.model_slot.model_dump(mode="json")
+        )
+        meta[BROADCAST_MODEL_SLOT_FALLBACK_REASON_META_KEY] = (
+            model_slot_fallback_reason
+        )
 
     request_spec = source_job.request
     if request_spec is not None:
@@ -218,6 +300,7 @@ def _build_broadcast_job(
                 },
             ),
             "request": request_spec,
+            "model_slot": model_slot,
             "dispatch": dispatch,
             "meta": meta,
         },
@@ -293,9 +376,16 @@ async def broadcast_job(
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     offsets = compute_broadcast_offsets(len(normalized_tenants))
-    multi_agent_manager = getattr(request.app.state, "multi_agent_manager", None)
+    multi_agent_manager = getattr(
+        request.app.state,
+        "multi_agent_manager",
+        None,
+    )
     if multi_agent_manager is None:
-        raise HTTPException(status_code=500, detail="multi_agent_manager missing")
+        raise HTTPException(
+            status_code=500,
+            detail="multi_agent_manager missing",
+        )
     tenant_workspace_pool = getattr(
         request.app.state,
         "tenant_workspace_pool",
@@ -341,6 +431,12 @@ async def broadcast_job(
             if workspace.cron_manager is None:
                 raise RuntimeError("CronManager not initialized")
             target_job_id = str(uuid.uuid4())
+            model_slot, warning, model_slot_fallback_reason = (
+                _resolve_broadcast_model_slot(
+                    runtime_tenant_id or "default",
+                    source_job,
+                )
+            )
             target_job = _build_broadcast_job(
                 source_job,
                 job_id=target_job_id,
@@ -349,6 +445,8 @@ async def broadcast_job(
                 cron=shifted.cron,
                 timezone_name=shifted.timezone,
                 offset_minutes=offset,
+                model_slot=model_slot,
+                model_slot_fallback_reason=model_slot_fallback_reason,
             )
             await workspace.cron_manager.create_or_replace_job(target_job)
             saved = await workspace.cron_manager.get_job(target_job_id)
@@ -361,6 +459,7 @@ async def broadcast_job(
                     timezone=(saved or target_job).schedule.timezone,
                     offset_minutes=offset,
                     notification_timezone=timezone_name,
+                    warning=warning,
                 ),
             )
         except Exception as exc:  # pylint: disable=broad-except
@@ -407,6 +506,7 @@ async def create_job(
     created = spec.model_copy(update={"id": job_id})
     created = _inject_request_tenant(created, request)
     created = _inject_creator_user(created, request)
+    _validate_cron_job_model_slot(request, created)
     await mgr.create_or_replace_job(created)
     saved = await mgr.get_job(job_id)
     return saved or created
@@ -424,6 +524,7 @@ async def replace_job(
     existing = await mgr.get_job(job_id)
     spec = _inject_request_tenant(spec, request)
     spec = _inject_creator_user(spec, request, existing=existing)
+    _validate_cron_job_model_slot(request, spec)
     await mgr.create_or_replace_job(spec)
     saved = await mgr.get_job(job_id)
     return saved or spec

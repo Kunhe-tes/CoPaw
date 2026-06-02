@@ -401,6 +401,7 @@ copaw agents chat \
 | `copaw cron get <job_id>`    | 查看任务配置                   |
 | `copaw cron state <job_id>`  | 查看运行状态（下次运行时间等） |
 | `copaw cron create ...`      | 创建任务                       |
+| `copaw cron update <job_id>` | 原地替换任务                   |
 | `copaw cron delete <job_id>` | 删除任务                       |
 | `copaw cron pause <job_id>`  | 暂停任务                       |
 | `copaw cron resume <job_id>` | 恢复暂停的任务                 |
@@ -443,6 +444,10 @@ copaw cron create \
 必填：`--type`、`--name`、`--cron`、`--channel`、`--target-user`、
 `--target-session`、`--text`。
 
+agent 任务可选传 `--model-provider <provider>` 和 `--model <model>`。
+两个参数必须同时出现，CLI 会把它们写入任务的 `model_slot`。`text`
+任务会忽略这两个参数。
+
 **方式二——JSON 文件（适合复杂或批量）**
 
 ```bash
@@ -458,7 +463,24 @@ JSON 结构见 `copaw cron get <job_id>` 的返回。
 | `--timezone`                 | 用户时区 | Cron 调度时区（默认使用 config 中的 `user_timezone`） |
 | `--enabled` / `--no-enabled` | 启用     | 创建时启用或禁用                                      |
 | `--mode`                     | `final`  | `stream`（逐步发送）或 `final`（完成后一次性发送）    |
+| `--model-provider` + `--model` | 未设置 | 为 agent 任务设置 `model_slot`；两个参数必须一起传    |
 | `--base-url`                 | 自动     | 覆盖 API 地址                                         |
+
+### 更新任务
+
+`copaw cron update <job_id>` 支持和 `create` 相同的内联参数。
+
+- 不传 `--model-provider` / `--model` 时，保留现有 `model_slot`。
+- 对 agent 任务同时传入两个参数时，用新的 `model_slot` 覆盖旧值。
+- 当有效任务类型为 `text` 时，会移除 `model_slot`。
+
+```bash
+copaw cron update job-123 \
+  --type agent \
+  --text "重新生成今日日报" \
+  --model-provider openai \
+  --model gpt-5.4
+```
 
 ### Cron 表达式速查
 
@@ -599,7 +621,7 @@ copaw --host 0.0.0.0 --port 9090 cron list
 | `copaw env`      | `list` · `set` · `delete`                                                            |        否         |
 | `copaw channels` | `list` · `send` · `install` · `add` · `remove` · `config`                            |      **是**       |
 | `copaw agents`   | `list` · `chat`                                                                      |      **是**       |
-| `copaw cron`     | `list` · `get` · `state` · `create` · `delete` · `pause` · `resume` · `run`          |      **是**       |
+| `copaw cron`     | `list` · `get` · `state` · `create` · `update` · `delete` · `pause` · `resume` · `run` |      **是**       |
 | `copaw chats`    | `list` · `get` · `create` · `update` · `delete`                                      |      **是**       |
 | `copaw skills`   | `list` · `config`                                                                    |        否         |
 | `copaw clean`    | —                                                                                    |        否         |

@@ -13,6 +13,8 @@ import { useTranslation } from "react-i18next";
 import type { FormInstance } from "antd";
 import type { CronJobSpecOutput } from "../../../../api/types";
 import { TIMEZONE_OPTIONS, DEFAULT_FORM_VALUES } from "./constants";
+import type { ExecutionModelOption } from "@/hooks/useExecutionModelOptions";
+import { DEFAULT_EXECUTION_MODEL_KEY } from "@/hooks/useExecutionModelOptions";
 import styles from "../index.module.less";
 
 type CronJob = CronJobSpecOutput;
@@ -22,6 +24,9 @@ interface JobDrawerProps {
   editingJob: CronJob | null;
   form: FormInstance<CronJob>;
   saving: boolean;
+  executionModelOptions: ExecutionModelOption[];
+  executionModelLoading: boolean;
+  tenantDefaultModelLabel: string;
   onClose: () => void;
   onSubmit: (values: CronJob) => void;
 }
@@ -31,6 +36,9 @@ export function JobDrawer({
   editingJob,
   form,
   saving,
+  executionModelOptions,
+  executionModelLoading,
+  tenantDefaultModelLabel,
   onClose,
   onSubmit,
 }: JobDrawerProps) {
@@ -242,7 +250,16 @@ export function JobDrawer({
           ]}
           tooltip={t("cronJobs.taskTypeTooltip")}
         >
-          <Select>
+          <Select
+            onChange={(value) => {
+              if (value === "text") {
+                form.setFieldValue(
+                  "execution_model_key",
+                  DEFAULT_EXECUTION_MODEL_KEY,
+                );
+              }
+            }}
+          >
             <Select.Option value="text">text</Select.Option>
             <Select.Option value="agent">agent</Select.Option>
           </Select>
@@ -259,6 +276,32 @@ export function JobDrawer({
 
             return (
               <>
+                {taskType === "agent" && (
+                  <Form.Item
+                    name="execution_model_key"
+                    label="执行模型"
+                    extra={
+                      <span className={styles.formExtraText}>
+                        未指定时跟随当前租户默认模型
+                      </span>
+                    }
+                  >
+                    <Select loading={executionModelLoading}>
+                      <Select.Option value={DEFAULT_EXECUTION_MODEL_KEY}>
+                        {tenantDefaultModelLabel}
+                      </Select.Option>
+                      {executionModelOptions.map((option) => (
+                        <Select.Option
+                          key={option.key}
+                          value={option.key}
+                        >
+                          {option.label}
+                        </Select.Option>
+                      ))}
+                    </Select>
+                  </Form.Item>
+                )}
+
                 <Form.Item
                   name="text"
                   label={t("cronJobs.text")}

@@ -8,6 +8,10 @@ from .warmup_service import (
     WarmupStatus,
     get_swe_cron_warmup_service,
 )
+from .notification_service import (
+    CronNotificationService,
+    get_cron_notification_service,
+)
 
 __all__ = [
     "SyncService",
@@ -17,4 +21,6 @@ __all__ = [
     "SweCronWarmupService",
     "WarmupStatus",
     "get_swe_cron_warmup_service",
+    "CronNotificationService",
+    "get_cron_notification_service",
 ]

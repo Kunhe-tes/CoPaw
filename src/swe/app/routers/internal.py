@@ -19,6 +19,10 @@ from ...config.context import (
     resolve_runtime_tenant_id,
     resolve_scope_id,
 )
+from ...config.scope_conversion import (
+    decode_canonical_scope_id,
+    encode_canonical_scope_id,
+)
 from ...config.utils import list_all_tenant_ids
 from ...constant import WORKING_DIR
 
@@ -166,11 +170,114 @@ class InternalTextAssetPreviewPathResponse(BaseModel):
     static_path: str
 
 
+class InternalScopeEncodeItem(BaseModel):
+    tenant_id: str
+    source_id: str
+    scope_id: str
+
+
+class InternalScopeEncodeResponse(BaseModel):
+    success: bool = Field(default=True)
+    item: Optional[InternalScopeEncodeItem] = None
+    items: Optional[list[InternalScopeEncodeItem]] = None
+
+
+class InternalScopeDecodeItem(BaseModel):
+    scope_id: str
+    tenant_id: str
+    source_id: str
+
+
+class InternalScopeDecodeResponse(BaseModel):
+    success: bool = Field(default=True)
+    item: Optional[InternalScopeDecodeItem] = None
+    items: Optional[list[InternalScopeDecodeItem]] = None
+
+
 def _verify_internal_token(token: Optional[str]) -> None:
     """验证内部服务 Token（如果配置了的话）."""
     if _INTERNAL_TOKEN:
         if not token or token != f"Bearer {_INTERNAL_TOKEN}":
             raise HTTPException(status_code=401, detail="Unauthorized")
+
+
+def _http_400(detail: str) -> HTTPException:
+    return HTTPException(status_code=400, detail=detail)
+
+
+def _require_internal_token(
+    authorization: Optional[str],
+    x_internal_token: Optional[str],
+) -> None:
+    _verify_internal_token(authorization or x_internal_token)
+
+
+def _encode_scope_items_from_body(
+    body: Dict[str, Any],
+) -> tuple[tuple[Any, ...], bool]:
+    tenant_id = body.get("tenant_id")
+    source_id = body.get("source_id")
+    items = body.get("items")
+    has_single_fields = tenant_id is not None or source_id is not None
+    has_batch_items = items is not None
+
+    if has_single_fields == has_batch_items:
+        raise _http_400("Expected either tenant_id/source_id or items")
+
+    try:
+        if has_batch_items:
+            if not isinstance(items, list) or not items:
+                raise _http_400("items must not be empty")
+            encoded_items = []
+            for item in items:
+                if not isinstance(item, dict):
+                    raise _http_400("Each item must be an object")
+                encoded_items.append(
+                    encode_canonical_scope_id(
+                        str(item.get("tenant_id", "")),
+                        str(item.get("source_id", "")),
+                    ),
+                )
+            return tuple(encoded_items), False
+
+        if tenant_id is None or source_id is None:
+            raise _http_400(
+                "tenant_id and source_id must be provided together",
+            )
+        return (
+            (encode_canonical_scope_id(str(tenant_id), str(source_id)),),
+            True,
+        )
+    except ValueError as exc:
+        raise _http_400(str(exc)) from exc
+
+
+def _decode_scope_items_from_body(
+    body: Dict[str, Any],
+) -> tuple[tuple[Any, ...], bool]:
+    scope_id = body.get("scope_id")
+    scope_ids = body.get("scope_ids")
+    has_single_scope = scope_id is not None
+    has_batch_scopes = scope_ids is not None
+
+    if has_single_scope == has_batch_scopes:
+        raise _http_400("Expected either scope_id or scope_ids")
+
+    try:
+        if has_batch_scopes:
+            if not isinstance(scope_ids, list) or not scope_ids:
+                raise _http_400("scope_ids must not be empty")
+            return (
+                tuple(
+                    decode_canonical_scope_id(str(raw_scope_id))
+                    for raw_scope_id in scope_ids
+                ),
+                False,
+            )
+
+        return ((decode_canonical_scope_id(str(scope_id)),), True)
+    except ValueError as exc:
+        raise _http_400(str(exc)) from exc
 
 
 def _validate_asset_file_name(file_name: str) -> str:
@@ -422,6 +529,58 @@ async def internal_create_text_asset_preview_path(
 ) -> InternalTextAssetPreviewPathResponse:
     _verify_internal_token(x_internal_token)
     return _create_preview_path(payload)
+
+
+@router.post(
+    "/scope/encode",
+    response_model=InternalScopeEncodeResponse,
+    response_model_exclude_none=True,
+    responses={
+        400: {"model": InternalErrorResponse},
+        401: {"model": InternalErrorResponse},
+    },
+)
+async def internal_scope_encode(
+    body: Dict[str, Any] = Body(...),
+) -> InternalScopeEncodeResponse:
+    encoded_items, is_single = _encode_scope_items_from_body(body)
+    response_items = [
+        InternalScopeEncodeItem(
+            tenant_id=item.tenant_id,
+            source_id=item.source_id,
+            scope_id=item.scope_id,
+        )
+        for item in encoded_items
+    ]
+    if is_single:
+        return InternalScopeEncodeResponse(item=response_items[0])
+    return InternalScopeEncodeResponse(items=response_items)
+
+
+@router.post(
+    "/scope/decode",
+    response_model=InternalScopeDecodeResponse,
+    response_model_exclude_none=True,
+    responses={
+        400: {"model": InternalErrorResponse},
+        401: {"model": InternalErrorResponse},
+    },
+)
+async def internal_scope_decode(
+    body: Dict[str, Any] = Body(...),
+) -> InternalScopeDecodeResponse:
+    decoded_items, is_single = _decode_scope_items_from_body(body)
+    response_items = [
+        InternalScopeDecodeItem(
+            scope_id=item.scope_id,
+            tenant_id=item.tenant_id,
+            source_id=item.source_id,
+        )
+        for item in decoded_items
+    ]
+    if is_single:
+        return InternalScopeDecodeResponse(item=response_items[0])
+    return InternalScopeDecodeResponse(items=response_items)
 
 
 @public_router.post(
@@ -748,7 +907,11 @@ async def internal_cron_callback(
                     detail="job_id required for task_type=job",
                 )
             # 调度回调触发的执行是自动执行，不是手动执行
-            await mgr.run_job(job_id, is_manual=False)
+            await mgr.run_job(
+                job_id,
+                is_manual=False,
+                source_id=source_id,
+            )
 
         logger.info(
             "Callback dispatched: type=%s tenant=%s agent=%s job=%s",

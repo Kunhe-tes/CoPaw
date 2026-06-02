@@ -1,8 +1,47 @@
-import React from "react";
-import { Space, Card, Typography, Divider, Alert, Tag } from "antd";
+import React, { useMemo, useState } from "react";
+import { Space, Card, Typography, Divider, Alert, Tag, Button } from "antd";
 import DownloadFileCard from "@/components/agentscope-chat/DownloadFileCard";
 
 const { Title, Paragraph } = Typography;
+
+const AUTO_PREVIEW_FILE_NAME = "存款到期完整客户名单-1779875663603.html";
+
+function buildHtmlPreviewUrl(description: string): string {
+  const html = `<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <title>到期完整客户名单</title>
+    <style>
+      body { margin: 0; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; background: #f6f8fb; color: #1f2937; }
+      .page { padding: 28px; }
+      h1 { margin: 0 0 8px; font-size: 24px; }
+      p { margin: 0 0 20px; color: #64748b; }
+      table { width: 100%; border-collapse: collapse; background: #fff; border: 1px solid #e5e7eb; }
+      th, td { padding: 12px 14px; border-bottom: 1px solid #e5e7eb; text-align: left; }
+      th { background: #eef6ff; color: #0f172a; }
+      .tag { display: inline-block; padding: 3px 8px; border-radius: 4px; background: #e8f5e9; color: #16794c; font-size: 12px; }
+    </style>
+  </head>
+  <body>
+    <main class="page">
+      <h1>完整客户清单</h1>
+      <p>${description}</p>
+      <table>
+        <thead>
+          <tr><th>客户</th><th>到期时间</th><th>建议动作</th><th>状态</th></tr>
+        </thead>
+        <tbody>
+          <tr><td>张三</td><td>2026-05-28</td><td>生成专项经营方案</td><td><span class="tag">已生成</span></td></tr>
+          <tr><td>王二</td><td>2026-05-29</td><td>安排客户回访</td><td><span class="tag">待跟进</span></td></tr>
+          <tr><td>李四</td><td>2026-05-29</td><td>预约面谈</td><td><span class="tag">待确认</span></td></tr>
+        </tbody>
+      </table>
+    </main>
+  </body>
+</html>`;
+  return `data:text/html;charset=utf-8,${encodeURIComponent(html)}`;
+}
 
 // 测试用的各种文件类型 URL
 const testFiles = [
@@ -42,6 +81,16 @@ const testFiles = [
 ];
 
 function TestDownloadCardPage() {
+  const [autoPreviewKey, setAutoPreviewKey] = useState(0);
+  const autoPreviewUrl = useMemo(
+    () => buildHtmlPreviewUrl("这是用于验证自动弹窗的本地 HTML 预览内容。"),
+    [],
+  );
+  const normalPreviewUrl = useMemo(
+    () => buildHtmlPreviewUrl("这是普通 HTML 对照内容，应只在点击卡片后弹窗。"),
+    [],
+  );
+
   return (
     <div style={{ padding: 24, maxWidth: 1200, margin: "0 auto" }}>
       <Title level={2}>文件下载卡片测试页面</Title>
@@ -76,6 +125,39 @@ function TestDownloadCardPage() {
       />
 
       <Divider>文件预览测试</Divider>
+
+      <Card
+        title="自动预览 HTML 测试"
+        size="small"
+        style={{ marginBottom: 24 }}
+        extra={
+          <Button
+            size="small"
+            onClick={() => setAutoPreviewKey((prev) => prev + 1)}
+          >
+            重新触发自动预览
+          </Button>
+        }
+      >
+        <Paragraph>
+          下面这张卡片的文件名包含 <code>存款到期完整客户名单</code>，
+          页面加载后应自动弹出 HTML 预览。关闭弹窗后可点击右上角按钮重新触发。
+        </Paragraph>
+        <Space wrap align="start">
+          <DownloadFileCard
+            key={autoPreviewKey}
+            url={autoPreviewUrl}
+            fileName={AUTO_PREVIEW_FILE_NAME}
+            autoPreview
+          />
+          <Tag color="purple">自动弹窗</Tag>
+          <DownloadFileCard
+            url={normalPreviewUrl}
+            fileName="普通HTML页面.html"
+          />
+          <Tag color="default">对照：不自动弹窗</Tag>
+        </Space>
+      </Card>
 
       <Space direction="vertical" size="large" style={{ width: "100%" }}>
         {Object.entries(

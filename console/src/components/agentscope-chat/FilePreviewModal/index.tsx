@@ -1,32 +1,46 @@
-import React, { useCallback, useEffect, useMemo, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Modal, message, Tooltip, Spin } from "antd";
 import { FullscreenOutlined } from "@ant-design/icons";
 import {
   SparkFalseLine,
   SparkDownloadLine,
-  SparkCopyLine,
-  SparkTrueLine,
+  // SparkCopyLine,
+  // SparkTrueLine,
 } from "@agentscope-ai/icons";
 import { IconButton } from "@agentscope-ai/design";
 import { getFileIcon, getFileType, getContentType } from "./fileUtils";
+import Markdown from "../Markdown";
+import { htmlPreviewEventsApi } from "@/api/modules/htmlPreviewEvents";
+import { useHtmlPreviewTracking } from "../HtmlPreviewTrackingContext";
+import { attachHtmlPreviewClickTracker } from "./htmlPreviewClickTracking";
 
 export interface FilePreviewModalProps {
   open: boolean;
   onClose: () => void;
   fileUrl: string;
   fileName: string;
+  enableClickTracking?: boolean;
 }
 
 function FilePreviewModal(props: FilePreviewModalProps) {
-  const { open, onClose, fileUrl, fileName } = props;
+  const { open, onClose, fileUrl, fileName, enableClickTracking = false } =
+    props;
   const [copied, setCopied] = useState(false);
-  const [fullscreen, setFullscreen] = useState(false);
+  const [fullscreen, setFullscreen] = useState(true);
   const [blobUrl, setBlobUrl] = useState<string | null>(null);
+  const [markdownContent, setMarkdownContent] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
-
+  const iframeRef = useRef<HTMLIFrameElement | null>(null);
+  const cleanupClickTrackingRef = useRef<(() => void) | null>(null);
+  const trackingContext = useHtmlPreviewTracking();
   const fileType = useMemo(() => getFileType(fileName), [fileName]);
+  const isMarkdownFile = useMemo(() => /\.mdx?$/i.test(fileName), [fileName]);
   const { icon, color } = useMemo(() => getFileIcon(fileName, 48), [fileName]);
+  const isHtmlPreview = useMemo(
+    () => fileType === "previewable" && getContentType(fileName) === "text/html",
+    [fileName, fileType],
+  );
 
   // fetch 文件数据并创建 Blob URL
   useEffect(() => {
@@ -34,13 +48,18 @@ function FilePreviewModal(props: FilePreviewModalProps) {
       setLoading(true);
       setError(null);
       setBlobUrl(null);
+      setMarkdownContent(null);
 
       fetch(fileUrl)
-        .then((res) => {
+        .then(async (res) => {
           if (!res.ok) throw new Error("加载失败");
-          return res.blob();
-        })
-        .then((blob) => {
+
+          if (isMarkdownFile) {
+            setMarkdownContent(await res.text());
+            return;
+          }
+
+          const blob = await res.blob();
           const contentType = getContentType(fileName);
           const newBlob = new Blob([blob], { type: contentType });
           const url = URL.createObjectURL(newBlob);
@@ -53,7 +72,7 @@ function FilePreviewModal(props: FilePreviewModalProps) {
           setLoading(false);
         });
     }
-  }, [open, fileType, fileUrl, fileName]);
+  }, [open, fileType, fileUrl, fileName, isMarkdownFile]);
 
   // 清理 Blob URL
   useEffect(() => {
@@ -63,6 +82,20 @@ function FilePreviewModal(props: FilePreviewModalProps) {
       }
     };
   }, [blobUrl]);
+
+  useEffect(() => {
+    if (!open) {
+      cleanupClickTrackingRef.current?.();
+      cleanupClickTrackingRef.current = null;
+    }
+  }, [open]);
+
+  useEffect(() => {
+    return () => {
+      cleanupClickTrackingRef.current?.();
+      cleanupClickTrackingRef.current = null;
+    };
+  }, []);
 
   const handleCopy = useCallback(async () => {
     try {
@@ -89,6 +122,38 @@ function FilePreviewModal(props: FilePreviewModalProps) {
     setFullscreen((prev) => !prev);
   }, []);
 
+  const handleIframeLoad = useCallback(() => {
+    cleanupClickTrackingRef.current?.();
+    cleanupClickTrackingRef.current = null;
+
+    const iframe = iframeRef.current;
+    if (!iframe || !isHtmlPreview || !enableClickTracking) {
+      return;
+    }
+
+    try {
+      cleanupClickTrackingRef.current = attachHtmlPreviewClickTracker({
+        iframe,
+        metadata: {
+          cronTaskId: trackingContext.cronTaskId,
+          cronTaskName: trackingContext.cronTaskName,
+          fileUrl,
+          fileName,
+        },
+        reporter: htmlPreviewEventsApi.recordClick,
+        listSnapshotReporter: htmlPreviewEventsApi.recordListSnapshot,
+      });
+    } catch (error) {
+      console.warn("Failed to attach HTML preview click tracker:", error);
+    }
+  }, [
+    enableClickTracking,
+    fileName,
+    fileUrl,
+    isHtmlPreview,
+    trackingContext,
+  ]);
+
   const previewHeight = fullscreen ? "85vh" : "500px";
 
   const renderPreviewContent = useMemo(() => {
@@ -108,13 +173,22 @@ function FilePreviewModal(props: FilePreviewModalProps) {
           </div>
         );
       }
+      if (isMarkdownFile && markdownContent !== null) {
+        return (
+          <div style={{ width: "100%", height: previewHeight, overflow: "auto", padding: "16px", boxSizing: "border-box", textAlign: "left" }}>
+            <Markdown content={markdownContent} />
+          </div>
+        );
+      }
       if (blobUrl) {
         return (
           <div style={{ width: "100%", height: previewHeight }}>
             <iframe
+              ref={iframeRef}
               src={blobUrl}
               style={{ width: "100%", height: "100%", border: "none" }}
               title="File Preview"
+              onLoad={handleIframeLoad}
             />
           </div>
         );
@@ -141,18 +215,31 @@ function FilePreviewModal(props: FilePreviewModalProps) {
         </IconButton>
       </div>
     );
-  }, [fileType, blobUrl, loading, error, fileName, icon, color, handleDownload, previewHeight]);
+  }, [
+    fileType,
+    loading,
+    error,
+    isMarkdownFile,
+    markdownContent,
+    previewHeight,
+    blobUrl,
+    fileName,
+    icon,
+    color,
+    handleDownload,
+    handleIframeLoad,
+  ]);
 
   const headerActions = useMemo(() => {
     const actions = [
-      <Tooltip key="copy" title="复制链接">
-        <IconButton
-          size="small"
-          icon={copied ? <SparkTrueLine style={{ color: "#52c41a" }} /> : <SparkCopyLine />}
-          onClick={handleCopy}
-          bordered={false}
-        />
-      </Tooltip>,
+      // <Tooltip key="copy" title="复制链接">
+      //   <IconButton
+      //     size="small"
+      //     icon={copied ? <SparkTrueLine style={{ color: "#52c41a" }} /> : <SparkCopyLine />}
+      //     onClick={handleCopy}
+      //     bordered={false}
+      //   />
+      // </Tooltip>,
       <Tooltip key="download" title="下载文件">
         <IconButton
           size="small"

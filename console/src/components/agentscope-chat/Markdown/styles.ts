@@ -6,10 +6,9 @@ export default createGlobalStyle`
   max-width: 100%;
 
   blockquote {
-    padding-inline: 0.6em 0;
-    padding-block: 0;
+    padding: 0 0 0 0.6em;
     margin: 1em 0;
-    border-inline-start: 4px solid ${(p) => p.theme.colorBorder};
+    border-left: 4px solid ${(p) => p.theme.colorBorder};
     opacity: 0.85;
   }
 
@@ -25,7 +24,7 @@ export default createGlobalStyle`
     color: ${(p) => p.theme.colorText};
     border-radius: ${(p) => p.theme.borderRadiusSM}px;
     padding: 2px 6px;
-    margin-inline: 3px;
+    margin: 0 3px;
     border: 1px solid ${(p) => p.theme.colorBorderSecondary};
   }
 
@@ -109,6 +108,8 @@ export default createGlobalStyle`
 
   p {
     margin-bottom: 0.5714285714285714em;
+    overflow-wrap: anywhere;
+    word-break: break-word;
   }
 
   h1 {
@@ -147,7 +148,8 @@ export default createGlobalStyle`
     display: block;
     width: max-content;
     max-width: 100%;
-    overflow: auto;
+    overflow-x: auto;
+    overflow-y: hidden;
   }
 
   table th {

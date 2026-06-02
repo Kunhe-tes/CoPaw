@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 """Tests for SWE Monitor sync client."""
 
+import json
 import pytest
 from datetime import datetime, timezone
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -33,11 +34,11 @@ class TestMonitorSyncClient:
         assert client._base_url == "http://test:8080/api"
         assert client._enabled is True
 
-    def test_client_uses_default_url_when_empty_string(self):
-        """Test client falls back to default URL when base_url is empty."""
+    def test_client_disables_sync_when_empty_string(self):
+        """Test explicit empty base_url disables Monitor sync."""
         client = MonitorSyncClient("")
-        assert client._base_url == "http://localhost:9090/api"
-        assert client._enabled is True
+        assert client._base_url == ""
+        assert client._enabled is False
 
     def test_get_monitor_sync_client_singleton(self):
         """Test singleton pattern for sync client."""
@@ -186,3 +187,139 @@ class TestExecutionRecordFormat:
 
         # 北京时间应为次日早上7点: 2026-05-20 07:00:00+08:00
         assert result == "2026-05-20T07:00:00+08:00"
+
+    def test_execution_notification_due_at_uses_beijing_time(self):
+        """Test notification_due_at uses the same Beijing time format."""
+        client = MonitorSyncClient("http://test:8080/api")
+        job = MagicMock()
+        job.id = "job-001"
+        job.name = "Test Job"
+        job.tenant_id = "tenant-001"
+        job.task_type = "agent"
+        job.meta = {}
+
+        due_at = datetime(2026, 5, 19, 10, 0, 0, tzinfo=timezone.utc)
+        result = client._build_execution_sync_data(
+            job=job,
+            status="success",
+            actual_time=due_at,
+            end_time=due_at,
+            duration_ms=100,
+            error_message="",
+            is_manual=False,
+            trace_id="",
+            session_id="",
+            input_snapshot=None,
+            output_preview="",
+            instance_id="",
+            executor_leader="",
+            scheduled_time=None,
+            notification_due_at=due_at,
+            notification_timezone="Asia/Shanghai",
+        )
+
+        assert result["notification_due_at"] == "2026-05-19T18:00:00+08:00"
+
+    def test_pending_notification_without_due_at_uses_end_time(self):
+        """Test pending notifications always carry a concrete due time."""
+        client = MonitorSyncClient("http://test:8080/api")
+        job = MagicMock()
+        job.id = "job-001"
+        job.name = "Test Job"
+        job.tenant_id = "tenant-001"
+        job.task_type = "agent"
+        job.meta = {}
+
+        actual_time = datetime(2026, 5, 19, 10, 0, 0, tzinfo=timezone.utc)
+        end_time = datetime(2026, 5, 19, 10, 5, 0, tzinfo=timezone.utc)
+        result = client._build_execution_sync_data(
+            job=job,
+            status="success",
+            actual_time=actual_time,
+            end_time=end_time,
+            duration_ms=300000,
+            error_message="",
+            is_manual=False,
+            trace_id="",
+            session_id="",
+            input_snapshot=None,
+            output_preview="",
+            instance_id="",
+            executor_leader="",
+            scheduled_time=None,
+        )
+
+        assert result["notification_status"] == "pending"
+        assert result["notification_due_at"] == "2026-05-19T18:05:00+08:00"
+
+    def test_build_execution_sync_data_includes_model_meta(self):
+        from swe.app.crons.models import (
+            CronJobRequest,
+            CronJobSpec,
+            DispatchSpec,
+            DispatchTarget,
+            JobRuntimeSpec,
+            ScheduleSpec,
+        )
+
+        client = MonitorSyncClient("http://test:8080/api")
+        job = CronJobSpec(
+            id="job-1",
+            name="agent job",
+            tenant_id="tenant-a",
+            schedule=ScheduleSpec(cron="* * * * *"),
+            task_type="agent",
+            request=CronJobRequest(input={"text": "ping"}),
+            dispatch=DispatchSpec(
+                target=DispatchTarget(
+                    user_id="user-a",
+                    session_id="session-a",
+                ),
+            ),
+            runtime=JobRuntimeSpec(),
+        )
+        actual_time = datetime(2026, 5, 28, 1, 2, 3, tzinfo=timezone.utc)
+        end_time = datetime(2026, 5, 28, 1, 2, 5, tzinfo=timezone.utc)
+
+        payload = client._build_execution_sync_data(
+            job=job,
+            status="success",
+            actual_time=actual_time,
+            end_time=end_time,
+            duration_ms=2000,
+            error_message="",
+            is_manual=False,
+            trace_id="trace-1",
+            session_id="session-a",
+            output_preview="done",
+            input_snapshot={"input": "ping"},
+            instance_id="instance-a",
+            executor_leader="leader-a",
+            scheduled_time=actual_time,
+            meta={
+                "original_model_slot": {
+                    "provider_id": "openai",
+                    "model": "gpt-5.4",
+                },
+                "effective_model_slot": {
+                    "provider_id": "anthropic",
+                    "model": "claude-3-7-sonnet",
+                },
+                "fallback_reason": "provider_not_found",
+            },
+        )
+
+        assert json.loads(payload["meta"]) == {
+            "original_model_slot": {
+                "provider_id": "openai",
+                "model": "gpt-5.4",
+            },
+            "effective_model_slot": {
+                "provider_id": "anthropic",
+                "model": "claude-3-7-sonnet",
+            },
+            "fallback_reason": "provider_not_found",
+        }
+        assert json.loads(payload["input_snapshot"]) == {
+            "input": "ping",
+        }

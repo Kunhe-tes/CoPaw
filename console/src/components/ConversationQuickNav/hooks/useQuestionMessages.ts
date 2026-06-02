@@ -1,7 +1,8 @@
 import { useContextSelector } from "use-context-selector";
 import { ChatAnywhereMessagesContext } from "@/components/agentscope-chat/AgentScopeRuntimeWebUI/core/Context/ChatAnywhereMessagesContext";
 import { ChatAnywhereSessionsContext } from "@/components/agentscope-chat/AgentScopeRuntimeWebUI/core/Context/ChatAnywhereSessionsContext";
-import { IAgentScopeRuntimeWebUIMessage } from "@/components/agentscope-chat";
+import type { IAgentScopeRuntimeWebUIMessage } from "@/components/agentscope-chat";
+import type { RefObject } from "react";
 import { useMemo, useState, useEffect } from "react";
 import { extractQuestionText } from "../types";
 
@@ -17,11 +18,40 @@ interface QuestionInfo {
  * @param minQuestions 最小问题数量才显示（默认 1）
  * @returns QuestionInfo 数组和显示状态
  */
-export function useQuestionMessages(minQuestions = 1) {
+function findMessageElement(
+  messageId: string,
+  scrollRootRef?: RefObject<HTMLElement | null>,
+): HTMLElement | null {
+  const root = scrollRootRef?.current;
+  if (!root) {
+    return document.getElementById(messageId);
+  }
+  return (
+    Array.from(root.querySelectorAll<HTMLElement>("[id]")).find(
+      (element) => element.id === messageId,
+    ) ?? null
+  );
+}
+
+function findMessageContainer(
+  scrollRootRef?: RefObject<HTMLElement | null>,
+): Element | null {
+  return (
+    scrollRootRef?.current?.querySelector('[class*="bubble-list-scroll"]') ??
+    document.querySelector('[class*="bubble-list-scroll"]')
+  );
+}
+
+export function useQuestionMessages(
+  minQuestions = 1,
+  messageOverride?: IAgentScopeRuntimeWebUIMessage[],
+  scrollRootRef?: RefObject<HTMLElement | null>,
+) {
   const messages = useContextSelector(
     ChatAnywhereMessagesContext,
     (v) => v.messages,
   );
+  const sourceMessages = messageOverride ?? messages ?? [];
 
   const isSessionLoading = useContextSelector(
     ChatAnywhereSessionsContext,
@@ -33,10 +63,10 @@ export function useQuestionMessages(minQuestions = 1) {
 
   // 从messages中提取所有用户消息
   const allUserMessages = useMemo(() => {
-    return messages.filter(
+    return sourceMessages.filter(
       (msg: IAgentScopeRuntimeWebUIMessage) => msg.role === "user",
     );
-  }, [messages]);
+  }, [sourceMessages]);
 
   // 监听DOM变化，检查哪些消息已加载
   useEffect(() => {
@@ -49,7 +79,7 @@ export function useQuestionMessages(minQuestions = 1) {
         if (!text) continue;
 
         // 检查消息是否已加载到DOM
-        const messageElement = document.getElementById(msg.id);
+        const messageElement = findMessageElement(msg.id, scrollRootRef);
         if (messageElement) {
           loadedIndex++;
           questions.push({
@@ -71,7 +101,7 @@ export function useQuestionMessages(minQuestions = 1) {
       checkLoadedMessages();
     });
 
-    const messageContainer = document.querySelector('[class*="bubble-list-scroll"]');
+    const messageContainer = findMessageContainer(scrollRootRef);
     if (messageContainer) {
       observer.observe(messageContainer, {
         childList: true,
@@ -82,7 +112,7 @@ export function useQuestionMessages(minQuestions = 1) {
     return () => {
       observer.disconnect();
     };
-  }, [allUserMessages]);
+  }, [allUserMessages, scrollRootRef]);
 
   const shouldShow = useMemo(() => {
     if (isSessionLoading) return false;

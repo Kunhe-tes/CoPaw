@@ -1,3 +1,4 @@
+import "./utils/browserCompat";
 import { createRoot } from "react-dom/client";
 import App from "./App.tsx";
 import "./i18n";
@@ -9,10 +10,7 @@ import {
   handleUrlOriginParam,
   fetchAndSetUserName,
 } from "./utils/iframeMessage";
-import {
-  isExternalTokenEnabled,
-  ensureValidToken,
-} from "./api/externalToken";
+import { isExternalTokenEnabled, ensureValidToken } from "./api/externalToken";
 
 /**
  * 初始化流程：

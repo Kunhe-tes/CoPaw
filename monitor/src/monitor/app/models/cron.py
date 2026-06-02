@@ -98,6 +98,8 @@ class CronJobModel(BaseModel):
     creator_user_id: str = Field(default="", description="创建者用户ID")
     task_chat_id: str = Field(default="", description="关联聊天ID")
     task_session_id: str = Field(default="", description="关联会话ID")
+    job_origin: str = Field(default="manual", description="任务来源")
+    subscription_key: str = Field(default="", description="订阅任务稳定分组ID")
     meta: str = Field(default="", description="扩展元数据 (JSON字符串)")
 
     # 状态追踪
@@ -198,6 +200,15 @@ class ExecutionModel(BaseModel):
     meta: str = Field(default="", description="执行元数据 (JSON字符串)")
 
     # 已读状态
+    notification_status: str = Field(default="not_required", description="通知状态")
+    notification_due_at: Optional[datetime] = Field(default=None, description="计划通知时间")
+    notification_timezone: str = Field(default="", description="通知计算时区")
+    notification_sent_at: Optional[datetime] = Field(default=None, description="通知发送时间")
+    notification_attempts: int = Field(default=0, description="通知尝试次数")
+    notification_error: str = Field(default="", description="通知错误")
+    notification_lock_owner: str = Field(default="", description="通知锁持有者")
+    notification_locked_at: Optional[datetime] = Field(default=None, description="通知锁时间")
+
     is_read: bool = Field(default=False, description="是否已读")
     read_at: Optional[datetime] = Field(
         default=None,
@@ -283,6 +294,8 @@ class CronJobSyncRequest(BaseModel):
     creator_user_id: str = Field(default="", description="创建者用户ID")
     task_chat_id: str = Field(default="", description="关联聊天ID")
     task_session_id: str = Field(default="", description="关联会话ID")
+    job_origin: str = Field(default="manual", description="任务来源")
+    subscription_key: str = Field(default="", description="订阅任务稳定分组ID")
     meta: str = Field(default="", description="扩展元数据 (JSON字符串)")
 
     # 状态
@@ -333,6 +346,10 @@ class ExecutionSyncRequest(BaseModel):
     meta: str = Field(default="", description="执行元数据 (JSON字符串)")
 
     # 已读状态（手动执行且成功的任务默认已读）
+    notification_status: str = Field(default="not_required", description="通知状态")
+    notification_due_at: Optional[datetime] = Field(default=None, description="计划通知时间")
+    notification_timezone: str = Field(default="", description="通知计算时区")
+
     is_read: bool = Field(default=False, description="是否已读")
     read_at: Optional[datetime] = Field(
         default=None,
@@ -355,6 +372,7 @@ class CronJobQueryParams(BaseModel):
         default=None,
         description="创建者ID筛选",
     )
+    job_origin: Optional[str] = Field(default=None, description="任务来源筛选")
     status: Optional[str] = Field(default=None, description="状态筛选")
     enabled: Optional[bool] = Field(default=None, description="是否启用筛选")
     page: int = Field(default=1, ge=1, description="页码")
@@ -463,6 +481,33 @@ class UnreadCountResponse(BaseModel):
     total_unread: int = Field(default=0, description="总未读数量")
 
 
+class SubscriptionOverviewItem(BaseModel):
+    """订阅任务概览聚合项。"""
+
+    subscription_key: str = Field(..., description="订阅任务稳定分组ID")
+    task_name: str = Field(..., description="任务名称")
+    subscriber_count: int = Field(default=0, description="订阅人数")
+    total_task_count: int = Field(default=0, description="总任务数")
+    running_task_count: int = Field(default=0, description="执行中任务数")
+    pending_task_count: int = Field(default=0, description="待执行任务数")
+    executed_task_count: int = Field(default=0, description="已执行任务数")
+    failed_task_count: int = Field(default=0, description="执行失败任务数")
+    avg_duration_ms: float = Field(default=0.0, description="平均耗时")
+    success_rate: float = Field(default=0.0, description="执行成功率")
+
+
+class SubscriptionDetailItem(BaseModel):
+    """订阅任务详情弹窗条目。"""
+
+    job_id: str = Field(..., description="任务ID")
+    subscriber_id: str = Field(default="", description="订阅人ID")
+    subscriber_name: str = Field(default="", description="订阅人名称")
+    bbk_id: str = Field(default="", description="所属机构")
+    enabled: bool = Field(default=True, description="启用状态")
+    execution_status: str = Field(default="pending", description="执行状态")
+    execution_time: Optional[datetime] = Field(default=None, description="执行时间")
+
+
 # ============================================================
 # Helper functions for converting from SWE models
 # ============================================================
@@ -502,6 +547,12 @@ def convert_spec_to_sync_request(
     creator_user_id = meta.get("creator_user_id", "")
     task_chat_id = meta.get("task_chat_id", "")
     task_session_id = meta.get("task_session_id", "")
+    subscription_key = meta.get("subscription_key", "")
+    job_origin = (
+        meta.get("job_origin")
+        or ("subscription" if subscription_key else "")
+        or "manual"
+    )
     pause_reason = meta.get("pause_reason", "")
 
     # Determine status
@@ -539,6 +590,8 @@ def convert_spec_to_sync_request(
         creator_user_id=creator_user_id,
         task_chat_id=task_chat_id,
         task_session_id=task_session_id,
+        job_origin=job_origin,
+        subscription_key=subscription_key,
         meta=json.dumps(meta, ensure_ascii=False) if meta else "",
         status=status,
         pause_reason=pause_reason,

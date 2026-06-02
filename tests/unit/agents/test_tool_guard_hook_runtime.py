@@ -619,3 +619,293 @@ async def test_skill_activation_loads_hooks_for_later_tool_event(
     assert calls == [
         ("skill:xlsx:post-hook", HookEventName.POST_TOOL_USE),
     ]
+
+
+class TestMcpErrorTracing:
+    """测试MCP工具错误信息的tracing记录."""
+
+    def test_extract_mcp_error_content(self, tmp_path):
+        """测试从CallToolResult提取错误信息."""
+        from mcp.types import CallToolResult, TextContent
+
+        agent = _FakeAgent(tmp_path)
+
+        # 模拟MCP错误返回
+        result = CallToolResult(
+            content=[
+                TextContent(type="text", text="Error: Connection timeout"),
+                TextContent(type="text", text="Please check server status"),
+            ],
+            isError=True,
+        )
+
+        error_msg = agent._extract_mcp_error_content(result)
+        assert "Connection timeout" in error_msg
+        assert "check server status" in error_msg
+
+    def test_extract_mcp_error_content_empty(self, tmp_path):
+        """测试空content时的错误提取."""
+        from mcp.types import CallToolResult
+
+        agent = _FakeAgent(tmp_path)
+
+        result = CallToolResult(content=[], isError=True)
+        error_msg = agent._extract_mcp_error_content(result)
+        assert error_msg == "MCP tool error"
+
+    def test_extract_mcp_success_content(self, tmp_path):
+        """测试从CallToolResult提取成功内容."""
+        from mcp.types import CallToolResult, TextContent
+
+        agent = _FakeAgent(tmp_path)
+
+        result = CallToolResult(
+            content=[
+                TextContent(type="text", text="Operation completed"),
+                TextContent(type="text", text="Result: OK"),
+            ],
+            isError=False,
+        )
+
+        content = agent._extract_mcp_success_content(result)
+        assert "Operation completed" in content
+        assert "Result: OK" in content
+
+    def test_extract_dict_error_content(self, tmp_path):
+        """测试从dict结果提取错误信息."""
+        agent = _FakeAgent(tmp_path)
+
+        result = {
+            "isError": True,
+            "content": [
+                {"type": "text", "text": "Database connection failed"},
+                {"type": "text", "text": "Retry count: 3"},
+            ],
+        }
+
+        error_msg = agent._extract_dict_error_content(result)
+        assert "Database connection failed" in error_msg
+        assert "Retry count: 3" in error_msg
+
+    def test_extract_dict_error_content_string_content(self, tmp_path):
+        """测试content为字符串时的错误提取."""
+        agent = _FakeAgent(tmp_path)
+
+        result = {
+            "isError": True,
+            "content": "Simple error message",
+        }
+
+        error_msg = agent._extract_dict_error_content(result)
+        assert error_msg == "Simple error message"
+
+    @pytest.mark.asyncio
+    async def test_emit_tool_trace_end_with_mcp_error(
+        self,
+        tmp_path,
+        monkeypatch,
+    ):
+        """测试MCP错误时正确记录error到tracing."""
+        from mcp.types import CallToolResult, TextContent
+
+        agent = _FakeAgent(tmp_path)
+
+        # 模拟tracing环境
+        emitted_events = []
+
+        class FakeTraceContext:
+            trace_id = "trace-123"
+
+        class FakeTraceManager:
+            async def emit_tool_call_end(
+                self,
+                trace_id,
+                span_id,
+                tool_output,
+                error,
+            ):
+                emitted_events.append(
+                    {
+                        "trace_id": trace_id,
+                        "span_id": span_id,
+                        "tool_output": tool_output,
+                        "error": error,
+                    },
+                )
+
+        def _fake_has_trace_manager():
+            return True
+
+        def _fake_get_current_trace():
+            return FakeTraceContext()
+
+        def _fake_get_trace_manager():
+            return FakeTraceManager()
+
+        monkeypatch.setattr(
+            "swe.agents.tool_guard_mixin.has_trace_manager",
+            _fake_has_trace_manager,
+        )
+        monkeypatch.setattr(
+            "swe.agents.tool_guard_mixin.get_current_trace",
+            _fake_get_current_trace,
+        )
+        monkeypatch.setattr(
+            "swe.agents.tool_guard_mixin.get_trace_manager",
+            _fake_get_trace_manager,
+        )
+
+        # 模拟MCP错误返回
+        mcp_result = CallToolResult(
+            content=[
+                TextContent(type="text", text="MCP server error: timeout"),
+            ],
+            isError=True,
+        )
+
+        await agent._emit_tool_trace_end("span-456", mcp_result)
+
+        # 验证error被正确记录
+        assert len(emitted_events) == 1
+        event = emitted_events[0]
+        assert event["span_id"] == "span-456"
+        assert event["error"] == "MCP server error: timeout"
+        assert event["tool_output"] is None
+
+    @pytest.mark.asyncio
+    async def test_emit_tool_trace_end_with_mcp_success(
+        self,
+        tmp_path,
+        monkeypatch,
+    ):
+        """测试MCP成功时正确记录output到tracing."""
+        from mcp.types import CallToolResult, TextContent
+
+        agent = _FakeAgent(tmp_path)
+
+        emitted_events = []
+
+        class FakeTraceContext:
+            trace_id = "trace-123"
+
+        class FakeTraceManager:
+            async def emit_tool_call_end(
+                self,
+                trace_id,
+                span_id,
+                tool_output,
+                error,
+            ):
+                emitted_events.append(
+                    {
+                        "trace_id": trace_id,
+                        "span_id": span_id,
+                        "tool_output": tool_output,
+                        "error": error,
+                    },
+                )
+
+        def _fake_has_trace_manager():
+            return True
+
+        def _fake_get_current_trace():
+            return FakeTraceContext()
+
+        def _fake_get_trace_manager():
+            return FakeTraceManager()
+
+        monkeypatch.setattr(
+            "swe.agents.tool_guard_mixin.has_trace_manager",
+            _fake_has_trace_manager,
+        )
+        monkeypatch.setattr(
+            "swe.agents.tool_guard_mixin.get_current_trace",
+            _fake_get_current_trace,
+        )
+        monkeypatch.setattr(
+            "swe.agents.tool_guard_mixin.get_trace_manager",
+            _fake_get_trace_manager,
+        )
+
+        # 模拟MCP成功返回
+        mcp_result = CallToolResult(
+            content=[
+                TextContent(type="text", text="File read successfully"),
+            ],
+            isError=False,
+        )
+
+        await agent._emit_tool_trace_end("span-789", mcp_result)
+
+        # 验证output被正确记录，error为None
+        assert len(emitted_events) == 1
+        event = emitted_events[0]
+        assert event["span_id"] == "span-789"
+        assert event["error"] is None
+        assert "File read successfully" in event["tool_output"]
+
+    @pytest.mark.asyncio
+    async def test_emit_tool_trace_end_with_dict_error(
+        self,
+        tmp_path,
+        monkeypatch,
+    ):
+        """测试dict形式的错误返回."""
+        agent = _FakeAgent(tmp_path)
+
+        emitted_events = []
+
+        class FakeTraceContext:
+            trace_id = "trace-123"
+
+        class FakeTraceManager:
+            async def emit_tool_call_end(
+                self,
+                trace_id,
+                span_id,
+                tool_output,
+                error,
+            ):
+                emitted_events.append(
+                    {
+                        "trace_id": trace_id,
+                        "span_id": span_id,
+                        "tool_output": tool_output,
+                        "error": error,
+                    },
+                )
+
+        def _fake_has_trace_manager():
+            return True
+
+        def _fake_get_current_trace():
+            return FakeTraceContext()
+
+        def _fake_get_trace_manager():
+            return FakeTraceManager()
+
+        monkeypatch.setattr(
+            "swe.agents.tool_guard_mixin.has_trace_manager",
+            _fake_has_trace_manager,
+        )
+        monkeypatch.setattr(
+            "swe.agents.tool_guard_mixin.get_current_trace",
+            _fake_get_current_trace,
+        )
+        monkeypatch.setattr(
+            "swe.agents.tool_guard_mixin.get_trace_manager",
+            _fake_get_trace_manager,
+        )
+
+        # 模拟dict形式错误返回
+        dict_result = {
+            "isError": True,
+            "content": "Tool execution failed",
+        }
+
+        await agent._emit_tool_trace_end("span-dict", dict_result)
+
+        # 验证error被正确记录
+        assert len(emitted_events) == 1
+        event = emitted_events[0]
+        assert event["error"] == "Tool execution failed"

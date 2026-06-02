@@ -41,7 +41,7 @@ export default function ToolsPage() {
   return (
     <div className={styles.toolsPage}>
       <PageHeader
-        items={[{ title: t("nav.agent") }, { title: t("tools.title") }]}
+        items={[{ title: t("nav.creationCenter") }, { title: t("tools.title") }]}
         extra={
           <div className={styles.headerAction}>
             <Switch

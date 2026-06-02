@@ -85,7 +85,10 @@ class MemoryCompactionHook:
         """
         try:
             # Get hot-reloaded agent config
-            agent_config = load_agent_config(self.memory_manager.agent_id)
+            agent_config = load_agent_config(
+                self.memory_manager.agent_id,
+                tenant_id=getattr(self.memory_manager, "tenant_id", None),
+            )
             running_config = agent_config.running
             token_counter = get_swe_token_counter(agent_config)
 

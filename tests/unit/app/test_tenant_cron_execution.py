@@ -154,6 +154,14 @@ def _build_agent_job(workspace_dir: str, timeout_seconds: int = 1) -> object:
     )
 
 
+class _Provider:
+    def __init__(self, models: list[str]):
+        self._models = set(models)
+
+    def has_model(self, model_id: str) -> bool:
+        return model_id in self._models
+
+
 def test_job_runtime_defaults_allow_longer_cron_runs() -> None:
     runtime = JobRuntimeSpec()
 
@@ -222,6 +230,57 @@ def test_execute_binds_source_scope_during_job_and_resets_afterward(
     assert observed["meta_source"] == "source-a"
     assert observed["meta_scope"] == observed["effective_tenant_id"]
     assert _get_current_source_id() is None
+
+
+def test_prepare_execution_context_resolves_scope_and_workspace_dir() -> None:
+    executor = CronExecutor(
+        runner=_Runner(),
+        channel_manager=_ChannelManager(),
+    )
+    job = _build_text_job("/tmp/tenant-a/workspaces/alpha")
+
+    context = executor._prepare_execution_context(job)
+
+    assert context.target_user_id == "user-a"
+    assert context.target_session_id == "session-a"
+    assert context.workspace_dir == Path("/tmp/tenant-a/workspaces/alpha")
+    assert context.tenant_id == "tenant-a"
+    assert context.source_id == "source-a"
+    assert context.scope_id == context_module.encode_scope_id(
+        "tenant-a",
+        "source-a",
+    )
+    assert context.dispatch_meta == {
+        "workspace_dir": "/tmp/tenant-a/workspaces/alpha",
+        "tenant_id": "tenant-a",
+        "source_id": "source-a",
+        "scope_id": context_module.encode_scope_id("tenant-a", "source-a"),
+    }
+
+
+def test_build_execution_result_truncates_output_preview() -> None:
+    executor = CronExecutor(
+        runner=_Runner(),
+        channel_manager=_ChannelManager(),
+    )
+
+    result = executor._build_execution_result(
+        {
+            "trace_id": "trace-1",
+            "output_preview": "x" * 120,
+            "input_snapshot": {"text": "hello"},
+            "executor_leader": "leader-1",
+        },
+        execution_meta={"fallback_reason": "provider_not_found"},
+    )
+
+    assert result == executor_module.ExecutionResult(
+        trace_id="trace-1",
+        output_preview="x" * 100,
+        input_snapshot={"text": "hello"},
+        executor_leader="leader-1",
+        execution_meta={"fallback_reason": "provider_not_found"},
+    )
 
 
 def test_build_agent_request_includes_runtime_scope():
@@ -537,3 +596,477 @@ def test_execute_exposes_tenant_process_limit_policy_inside_cron_context(
         "enabled": True,
         "cpu": 3,
     }
+
+
+def test_execute_binds_explicit_model_slot_and_resets_afterward(monkeypatch):
+    from swe.providers.models import ModelSlotConfig
+    from swe.app.crons.model_slot_context import (
+        get_current_model_slot_override,
+    )
+
+    observed = {}
+    executor = CronExecutor(
+        runner=_Runner(),
+        channel_manager=_ChannelManager(),
+    )
+    job = _build_agent_job("/tmp/tenant-a/workspaces/alpha").model_copy(
+        update={
+            "model_slot": ModelSlotConfig(
+                provider_id="openai",
+                model="gpt-5.4",
+            ),
+        },
+    )
+
+    async def fake_execute_job(
+        _self,
+        _job,
+        _target_user_id,
+        _target_session_id,
+        _dispatch_meta,
+    ):
+        current = get_current_model_slot_override()
+        observed["provider_id"] = (
+            current.provider_id if current is not None else None
+        )
+        observed["model"] = current.model if current is not None else None
+        return {}
+
+    monkeypatch.setattr(CronExecutor, "_execute_job", fake_execute_job)
+    monkeypatch.setattr(
+        executor_module,
+        "ProviderManager",
+        types.SimpleNamespace(
+            ensure_tenant_provider_storage=lambda _tenant_id: None,
+            get_instance=lambda _tenant_id: types.SimpleNamespace(
+                get_provider=lambda provider_id: (
+                    _Provider(["gpt-5.4"]) if provider_id == "openai" else None
+                ),
+                get_active_model=lambda: ModelSlotConfig(
+                    provider_id="anthropic",
+                    model="claude-3-7-sonnet",
+                ),
+            ),
+        ),
+    )
+
+    result = asyncio.run(executor.execute(job))
+
+    assert observed == {
+        "provider_id": "openai",
+        "model": "gpt-5.4",
+    }
+    assert result.execution_meta == {
+        "original_model_slot": {
+            "provider_id": "openai",
+            "model": "gpt-5.4",
+        },
+        "effective_model_slot": {
+            "provider_id": "openai",
+            "model": "gpt-5.4",
+        },
+        "fallback_reason": "",
+    }
+    assert get_current_model_slot_override() is None
+
+
+def test_execute_falls_back_to_tenant_default_when_model_slot_is_missing(
+    monkeypatch,
+):
+    from swe.providers.models import ModelSlotConfig
+    from swe.app.crons.model_slot_context import (
+        get_current_model_slot_override,
+    )
+
+    observed = {}
+    executor = CronExecutor(
+        runner=_Runner(),
+        channel_manager=_ChannelManager(),
+    )
+    job = _build_agent_job("/tmp/tenant-a/workspaces/alpha").model_copy(
+        update={
+            "model_slot": ModelSlotConfig(
+                provider_id="openai",
+                model="gpt-5.4",
+            ),
+        },
+    )
+
+    async def fake_execute_job(
+        _self,
+        _job,
+        _target_user_id,
+        _target_session_id,
+        _dispatch_meta,
+    ):
+        current = get_current_model_slot_override()
+        observed["override"] = None if current is None else current.model
+        return {}
+
+    monkeypatch.setattr(CronExecutor, "_execute_job", fake_execute_job)
+    monkeypatch.setattr(
+        executor_module,
+        "ProviderManager",
+        types.SimpleNamespace(
+            ensure_tenant_provider_storage=lambda _tenant_id: None,
+            get_instance=lambda _tenant_id: types.SimpleNamespace(
+                get_provider=lambda _provider_id: None,
+                get_active_model=lambda: ModelSlotConfig(
+                    provider_id="anthropic",
+                    model="claude-3-7-sonnet",
+                ),
+            ),
+        ),
+    )
+
+    result = asyncio.run(executor.execute(job))
+
+    assert observed["override"] is None
+    assert result.execution_meta == {
+        "original_model_slot": {
+            "provider_id": "openai",
+            "model": "gpt-5.4",
+        },
+        "effective_model_slot": {
+            "provider_id": "anthropic",
+            "model": "claude-3-7-sonnet",
+        },
+        "fallback_reason": "provider_not_found",
+    }
+    assert get_current_model_slot_override() is None
+
+
+def test_execute_falls_back_to_tenant_default_when_model_is_missing(
+    monkeypatch,
+):
+    from swe.providers.models import ModelSlotConfig
+    from swe.app.crons.model_slot_context import (
+        get_current_model_slot_override,
+    )
+
+    observed = {}
+    executor = CronExecutor(
+        runner=_Runner(),
+        channel_manager=_ChannelManager(),
+    )
+    job = _build_agent_job("/tmp/tenant-a/workspaces/alpha").model_copy(
+        update={
+            "model_slot": ModelSlotConfig(
+                provider_id="openai",
+                model="gpt-5.4",
+            ),
+        },
+    )
+
+    async def fake_execute_job(
+        _self,
+        _job,
+        _target_user_id,
+        _target_session_id,
+        _dispatch_meta,
+    ):
+        current = get_current_model_slot_override()
+        observed["override"] = None if current is None else current.model
+        return {}
+
+    monkeypatch.setattr(CronExecutor, "_execute_job", fake_execute_job)
+    monkeypatch.setattr(
+        executor_module,
+        "ProviderManager",
+        types.SimpleNamespace(
+            ensure_tenant_provider_storage=lambda _tenant_id: None,
+            get_instance=lambda _tenant_id: types.SimpleNamespace(
+                get_provider=lambda provider_id: (
+                    _Provider(["gpt-4.1"]) if provider_id == "openai" else None
+                ),
+                get_active_model=lambda: ModelSlotConfig(
+                    provider_id="anthropic",
+                    model="claude-3-7-sonnet",
+                ),
+            ),
+        ),
+    )
+
+    result = asyncio.run(executor.execute(job))
+
+    assert observed["override"] is None
+    assert result.execution_meta == {
+        "original_model_slot": {
+            "provider_id": "openai",
+            "model": "gpt-5.4",
+        },
+        "effective_model_slot": {
+            "provider_id": "anthropic",
+            "model": "claude-3-7-sonnet",
+        },
+        "fallback_reason": "model_not_found",
+    }
+    assert get_current_model_slot_override() is None
+
+
+def test_execute_uses_broadcast_fallback_meta_when_model_slot_cleared(
+    monkeypatch,
+):
+    from swe.providers.models import ModelSlotConfig
+    from swe.app.crons.model_slot_context import (
+        get_current_model_slot_override,
+    )
+
+    observed = {}
+    executor = CronExecutor(
+        runner=_Runner(),
+        channel_manager=_ChannelManager(),
+    )
+    job = _build_agent_job("/tmp/tenant-a/workspaces/alpha").model_copy(
+        update={
+            "model_slot": None,
+            "meta": {
+                "broadcast_original_model_slot": {
+                    "provider_id": "openai",
+                    "model": "gpt-5.4",
+                },
+                "broadcast_model_slot_fallback_reason": ("provider_not_found"),
+            },
+        },
+    )
+
+    async def fake_execute_job(
+        _self,
+        _job,
+        _target_user_id,
+        _target_session_id,
+        _dispatch_meta,
+    ):
+        current = get_current_model_slot_override()
+        observed["override"] = None if current is None else current.model
+        return {}
+
+    monkeypatch.setattr(CronExecutor, "_execute_job", fake_execute_job)
+    monkeypatch.setattr(
+        executor_module,
+        "ProviderManager",
+        types.SimpleNamespace(
+            ensure_tenant_provider_storage=lambda _tenant_id: None,
+            get_instance=lambda _tenant_id: types.SimpleNamespace(
+                get_provider=lambda _provider_id: None,
+                get_active_model=lambda: ModelSlotConfig(
+                    provider_id="anthropic",
+                    model="claude-3-7-sonnet",
+                ),
+            ),
+        ),
+    )
+
+    result = asyncio.run(executor.execute(job))
+
+    assert observed["override"] is None
+    assert result.execution_meta == {
+        "original_model_slot": {
+            "provider_id": "openai",
+            "model": "gpt-5.4",
+        },
+        "effective_model_slot": {
+            "provider_id": "anthropic",
+            "model": "claude-3-7-sonnet",
+        },
+        "fallback_reason": "provider_not_found",
+    }
+    assert get_current_model_slot_override() is None
+
+
+def test_execute_uses_broadcast_model_not_found_meta_when_model_slot_cleared(
+    monkeypatch,
+):
+    from swe.providers.models import ModelSlotConfig
+    from swe.app.crons.model_slot_context import (
+        get_current_model_slot_override,
+    )
+
+    observed = {}
+    executor = CronExecutor(
+        runner=_Runner(),
+        channel_manager=_ChannelManager(),
+    )
+    job = _build_agent_job("/tmp/tenant-a/workspaces/alpha").model_copy(
+        update={
+            "model_slot": None,
+            "meta": {
+                "broadcast_original_model_slot": {
+                    "provider_id": "openai",
+                    "model": "gpt-5.4",
+                },
+                "broadcast_model_slot_fallback_reason": "model_not_found",
+            },
+        },
+    )
+
+    async def fake_execute_job(
+        _self,
+        _job,
+        _target_user_id,
+        _target_session_id,
+        _dispatch_meta,
+    ):
+        current = get_current_model_slot_override()
+        observed["override"] = None if current is None else current.model
+        return {}
+
+    monkeypatch.setattr(CronExecutor, "_execute_job", fake_execute_job)
+    monkeypatch.setattr(
+        executor_module,
+        "ProviderManager",
+        types.SimpleNamespace(
+            ensure_tenant_provider_storage=lambda _tenant_id: None,
+            get_instance=lambda _tenant_id: types.SimpleNamespace(
+                get_provider=lambda _provider_id: None,
+                get_active_model=lambda: ModelSlotConfig(
+                    provider_id="anthropic",
+                    model="claude-3-7-sonnet",
+                ),
+            ),
+        ),
+    )
+
+    result = asyncio.run(executor.execute(job))
+
+    assert observed["override"] is None
+    assert result.execution_meta == {
+        "original_model_slot": {
+            "provider_id": "openai",
+            "model": "gpt-5.4",
+        },
+        "effective_model_slot": {
+            "provider_id": "anthropic",
+            "model": "claude-3-7-sonnet",
+        },
+        "fallback_reason": "model_not_found",
+    }
+    assert get_current_model_slot_override() is None
+
+
+def test_execute_does_not_leak_model_slot_override_between_concurrent_runs(
+    monkeypatch,
+):
+    from swe.providers.models import ModelSlotConfig
+    from swe.app.crons.model_slot_context import (
+        get_current_model_slot_override,
+    )
+
+    observed = {}
+    release = asyncio.Event()
+    entered = asyncio.Event()
+    executor = CronExecutor(
+        runner=_Runner(),
+        channel_manager=_ChannelManager(),
+    )
+    override_job = _build_agent_job(
+        "/tmp/tenant-a/workspaces/alpha",
+    ).model_copy(
+        update={
+            "id": "job-override",
+            "model_slot": ModelSlotConfig(
+                provider_id="openai",
+                model="gpt-5.4",
+            ),
+        },
+    )
+    default_job = _build_agent_job(
+        "/tmp/tenant-a/workspaces/beta",
+    ).model_copy(update={"id": "job-default"})
+
+    async def fake_execute_job(
+        _self,
+        job,
+        _target_user_id,
+        _target_session_id,
+        _dispatch_meta,
+    ):
+        current = get_current_model_slot_override()
+        observed[job.id] = None if current is None else current.model
+        entered.set()
+        await release.wait()
+        return {}
+
+    monkeypatch.setattr(CronExecutor, "_execute_job", fake_execute_job)
+    monkeypatch.setattr(
+        executor_module,
+        "ProviderManager",
+        types.SimpleNamespace(
+            ensure_tenant_provider_storage=lambda _tenant_id: None,
+            get_instance=lambda _tenant_id: types.SimpleNamespace(
+                get_provider=lambda provider_id: (
+                    _Provider(["gpt-5.4"]) if provider_id == "openai" else None
+                ),
+                get_active_model=lambda: ModelSlotConfig(
+                    provider_id="anthropic",
+                    model="claude-3-7-sonnet",
+                ),
+            ),
+        ),
+    )
+
+    async def run_both():
+        first = asyncio.create_task(executor.execute(override_job))
+        await entered.wait()
+        second = asyncio.create_task(executor.execute(default_job))
+        await asyncio.sleep(0)
+        release.set()
+        return await asyncio.gather(first, second)
+
+    asyncio.run(run_both())
+
+    assert observed == {
+        "job-override": "gpt-5.4",
+        "job-default": None,
+    }
+
+
+def test_execute_does_not_mutate_tenant_active_model(monkeypatch):
+    from swe.providers.models import ModelSlotConfig
+
+    executor = CronExecutor(
+        runner=_Runner(),
+        channel_manager=_ChannelManager(),
+    )
+    job = _build_agent_job("/tmp/tenant-a/workspaces/alpha").model_copy(
+        update={
+            "model_slot": ModelSlotConfig(
+                provider_id="openai",
+                model="gpt-5.4",
+            ),
+        },
+    )
+    manager = types.SimpleNamespace(
+        get_provider=lambda provider_id: (
+            _Provider(["gpt-5.4"]) if provider_id == "openai" else None
+        ),
+        get_active_model=lambda: ModelSlotConfig(
+            provider_id="anthropic",
+            model="claude-3-7-sonnet",
+        ),
+    )
+
+    async def fake_execute_job(
+        _self,
+        _job,
+        _target_user_id,
+        _target_session_id,
+        _dispatch_meta,
+    ):
+        return {}
+
+    monkeypatch.setattr(CronExecutor, "_execute_job", fake_execute_job)
+    monkeypatch.setattr(
+        executor_module,
+        "ProviderManager",
+        types.SimpleNamespace(
+            ensure_tenant_provider_storage=lambda _tenant_id: None,
+            get_instance=lambda _tenant_id: manager,
+        ),
+    )
+
+    before = manager.get_active_model()
+    asyncio.run(executor.execute(job))
+    after = manager.get_active_model()
+
+    assert after == before

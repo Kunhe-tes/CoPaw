@@ -16,6 +16,7 @@ import { citationsExtension } from "./core/plugins/citations";
 import { CursorComponent, cursorExtension } from "./core/plugins/cursor";
 import markedFootnote from "marked-footnote";
 import Link from "./core/components/Link";
+import CompatibleMarkdownFallback from "./compatibleMarkdown";
 
 // 缓存不变的 dompurify 配置
 const EMPTY_DOMPURIFY_CONFIG = {
@@ -107,26 +108,49 @@ export default memo(function (props: MarkdownProps) {
   );
 
   const resolvedContent = content || "";
-  const fallback = (
+  const fallback = raw ? (
     <Raw
       content={resolvedContent}
       baseFontSize={baseFontSize}
       baseLineHeight={baseLineHeight}
+    />
+  ) : (
+    <CompatibleMarkdownFallback
+      content={resolvedContent}
+      allowHtml={allowHtml}
+      baseFontSize={baseFontSize}
+      baseLineHeight={baseLineHeight}
+      className={props.className}
     />
   );
 
   const fallbackRender = useCallback(
     (...args: unknown[]) => {
       console.error(args);
-      return (
+      return raw ? (
         <Raw
           content={resolvedContent}
           baseFontSize={baseFontSize}
           baseLineHeight={baseLineHeight}
         />
+      ) : (
+        <CompatibleMarkdownFallback
+          content={resolvedContent}
+          allowHtml={allowHtml}
+          baseFontSize={baseFontSize}
+          baseLineHeight={baseLineHeight}
+          className={props.className}
+        />
       );
     },
-    [resolvedContent, baseFontSize, baseLineHeight],
+    [
+      raw,
+      resolvedContent,
+      allowHtml,
+      baseFontSize,
+      baseLineHeight,
+      props.className,
+    ],
   );
 
   const markdownStyle = useMemo(

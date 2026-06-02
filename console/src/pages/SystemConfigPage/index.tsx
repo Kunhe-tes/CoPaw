@@ -26,12 +26,17 @@ import { DEFAULT_SOURCE_ID } from "@/constants/identity";
 import {
   CURRENT_SOURCE_SYSTEM_CONFIG_SWITCHES,
   TOOL_RESULT_COMPACT_NUMBER_FIELDS,
+  clearImmediateTruncationConfig,
+  enableImmediateTruncationConfig,
   readRegisteredSwitchValue,
+  readImmediateTruncationConfig,
   readToolResultCompactConfig,
-  validateToolResultCompactConfig,
+  validateToolOutputConfigs,
   writeRegisteredSwitchValue,
+  writeImmediateTruncationValue,
   writeToolResultCompactValue,
 } from "./registry";
+import type { ImmediateTruncationConfigKey } from "./registry";
 import styles from "./index.module.less";
 
 function formatUpdatedAt(value?: string | null): string {
@@ -141,9 +146,9 @@ export default function SystemConfigPage() {
     return (
       <div className={styles.systemConfigPage}>
         <PageHeader
-          parent={t("nav.settings")}
+          parent={t("nav.systemSettings")}
           current={t("nav.currentSourceConfig", {
-            defaultValue: "当前 Source 配置",
+            defaultValue: "当前系统配置",
           })}
         />
         <div className={styles.centerState}>
@@ -151,7 +156,7 @@ export default function SystemConfigPage() {
             status="403"
             title="403"
             subTitle={t("sourceSystemConfigPage.forbidden", {
-              defaultValue: "仅管理员可访问当前 Source 系统配置页面。",
+              defaultValue: "仅管理员可访问当前系统配置页面。",
             })}
           />
         </div>
@@ -198,13 +203,61 @@ export default function SystemConfigPage() {
     );
   };
 
+  const handleEnableImmediateTruncation = (
+    configKey: ImmediateTruncationConfigKey,
+  ) => {
+    if (formDisabled) {
+      return;
+    }
+    setValidationError(null);
+    setDraftConfig((previous) =>
+      enableImmediateTruncationConfig(previous, configKey),
+    );
+  };
+
+  const handleImmediateTruncationEnabledChange = (
+    configKey: ImmediateTruncationConfigKey,
+    checked: boolean,
+  ) => {
+    if (formDisabled) {
+      return;
+    }
+    setValidationError(null);
+    setDraftConfig((previous) =>
+      writeImmediateTruncationValue(previous, configKey, "enabled", checked),
+    );
+  };
+
+  const handleImmediateTruncationMaxBytesChange = (
+    configKey: ImmediateTruncationConfigKey,
+    value: number | null,
+  ) => {
+    if (formDisabled || typeof value !== "number") {
+      return;
+    }
+    setValidationError(null);
+    setDraftConfig((previous) =>
+      writeImmediateTruncationValue(previous, configKey, "max_bytes", value),
+    );
+  };
+
+  const handleRestoreImmediateTruncationInheritance = (
+    configKey: ImmediateTruncationConfigKey,
+  ) => {
+    if (formDisabled) {
+      return;
+    }
+    setValidationError(null);
+    setDraftConfig((previous) =>
+      clearImmediateTruncationConfig(previous, configKey),
+    );
+  };
+
   const handleSave = async () => {
     if (formDisabled) {
       return;
     }
-    const validationError = validateToolResultCompactConfig(
-      readToolResultCompactConfig(draftConfig),
-    );
+    const validationError = validateToolOutputConfigs(draftConfig);
     if (validationError) {
       setValidationError(validationError);
       message.error(validationError);
@@ -232,7 +285,7 @@ export default function SystemConfigPage() {
       }
       message.success(
         t("sourceSystemConfigPage.saveSuccess", {
-          defaultValue: "当前 Source 配置已保存",
+          defaultValue: "当前系统配置已保存",
         }),
       );
     } catch (requestError) {
@@ -253,6 +306,10 @@ export default function SystemConfigPage() {
   };
 
   const toolResultCompactConfig = readToolResultCompactConfig(draftConfig);
+  const fileReadTruncationState = readImmediateTruncationConfig(
+    draftConfig,
+    "file_read_truncation",
+  );
 
   const handleDelete = async () => {
     if (formDisabled) {
@@ -282,7 +339,7 @@ export default function SystemConfigPage() {
       }
       message.success(
         t("sourceSystemConfigPage.deleteSuccess", {
-          defaultValue: "当前 Source 配置已恢复默认态",
+          defaultValue: "当前系统配置已恢复默认态",
         }),
       );
     } catch (requestError) {
@@ -305,7 +362,7 @@ export default function SystemConfigPage() {
   return (
     <div className={styles.systemConfigPage}>
       <PageHeader
-        parent={t("nav.settings")}
+        parent={t("nav.systemSettings")}
         current={t("nav.currentSourceConfig", {
           defaultValue: "系统特性配置",
         })}
@@ -332,7 +389,7 @@ export default function SystemConfigPage() {
             type="error"
             showIcon
             message={t("sourceSystemConfigPage.requestFailed", {
-              defaultValue: "当前 Source 配置请求失败",
+              defaultValue: "当前系统配置请求失败",
             })}
             description={requestError}
           />
@@ -343,7 +400,7 @@ export default function SystemConfigPage() {
             type="error"
             showIcon
             message={t("sourceSystemConfigPage.validationFailed", {
-              defaultValue: "当前 Source 配置校验失败",
+              defaultValue: "当前系统配置校验失败",
             })}
             description={validationError}
           />
@@ -360,7 +417,7 @@ export default function SystemConfigPage() {
                 <div>
                   <span className={styles.metaLabel}>
                     {t("sourceSystemConfigPage.sourceLabel", {
-                      defaultValue: "当前 Source",
+                      defaultValue: "当前系统",
                     })}
                   </span>
                   <span className={styles.metaValue}>{activeSourceId}</span>
@@ -433,54 +490,199 @@ export default function SystemConfigPage() {
             <Card
               className={styles.switchCard}
               title={t("sourceSystemConfigPage.toolResultCompactTitle", {
-                defaultValue: "工具结果压缩配置",
+                defaultValue: "工具输出控制",
               })}
             >
               <div className={styles.toolResultIntro}>
                 {t("sourceSystemConfigPage.toolResultCompactIntro", {
                   defaultValue:
-                    "未保存 source 覆盖时继承 Agent 配置；保存后当前 source 下请求使用这些阈值。",
+                    "当前系统下工具历史压缩和文件读取即时截断的解析配置。",
                 })}
               </div>
-              <div className={styles.switchRow}>
-                <div className={styles.switchCopy}>
-                  <span className={styles.switchTitle}>
-                    {t("sourceSystemConfigPage.toolResultEnabled", {
-                      defaultValue: "启用工具结果压缩",
-                    })}
-                  </span>
-                  <span className={styles.switchDescription}>
-                    {t("sourceSystemConfigPage.toolResultEnabledDescription", {
-                      defaultValue:
-                        "关闭后当前 source 的历史工具结果不再压缩为 toolresult 文件。",
-                    })}
-                  </span>
-                </div>
-                <Switch
-                  checked={toolResultCompactConfig.enabled}
-                  disabled={formDisabled}
-                  onChange={handleToolResultEnabledChange}
-                />
-              </div>
-              <div className={styles.numberGrid}>
-                {TOOL_RESULT_COMPACT_NUMBER_FIELDS.map((definition) => (
-                  <label key={definition.key} className={styles.numberField}>
-                    <span className={styles.numberLabel}>
-                      {definition.title}
+              <section className={styles.toolOutputSection}>
+                <div className={styles.toolOutputSectionHeader}>
+                  <div className={styles.switchCopy}>
+                    <span className={styles.switchTitle}>
+                      {t("sourceSystemConfigPage.historyToolResultTitle", {
+                        defaultValue: "历史工具结果压缩",
+                      })}
                     </span>
-                    <InputNumber
-                      min={definition.min}
-                      max={definition.max}
-                      step={definition.step}
-                      value={toolResultCompactConfig[definition.key]}
+                    <span className={styles.switchDescription}>
+                      {t(
+                        "sourceSystemConfigPage.historyToolResultDescription",
+                        {
+                          defaultValue:
+                            "未保存系统覆盖时继承 Agent 配置；保存后当前系统下请求使用这些历史压缩阈值。",
+                        },
+                      )}
+                    </span>
+                  </div>
+                </div>
+                <div className={styles.switchRow}>
+                  <div className={styles.switchCopy}>
+                    <span className={styles.switchTitle}>
+                      {t("sourceSystemConfigPage.toolResultEnabled", {
+                        defaultValue: "启用工具结果压缩",
+                      })}
+                    </span>
+                    <span className={styles.switchDescription}>
+                      {t(
+                        "sourceSystemConfigPage.toolResultEnabledDescription",
+                        {
+                          defaultValue:
+                            "关闭后当前系统的历史工具结果不再压缩为 toolresult 文件。",
+                        },
+                      )}
+                    </span>
+                  </div>
+                  <Switch
+                    checked={toolResultCompactConfig.enabled}
+                    disabled={formDisabled}
+                    onChange={handleToolResultEnabledChange}
+                  />
+                </div>
+                <div className={styles.numberGrid}>
+                  {TOOL_RESULT_COMPACT_NUMBER_FIELDS.map((definition) => (
+                    <label key={definition.key} className={styles.numberField}>
+                      <span className={styles.numberLabel}>
+                        {definition.title}
+                      </span>
+                      <InputNumber
+                        min={definition.min}
+                        max={definition.max}
+                        step={definition.step}
+                        value={toolResultCompactConfig[definition.key]}
+                        disabled={formDisabled}
+                        onChange={(value) =>
+                          handleToolResultNumberChange(definition.key, value)
+                        }
+                      />
+                    </label>
+                  ))}
+                </div>
+              </section>
+
+              <section className={styles.toolOutputSection}>
+                <div className={styles.toolOutputSectionHeader}>
+                  <div className={styles.switchCopy}>
+                    <span className={styles.switchTitle}>
+                      {t("sourceSystemConfigPage.fileReadTruncationTitle", {
+                        defaultValue: "文件读取截断",
+                      })}
+                    </span>
+                    <span className={styles.switchDescription}>
+                      {t(
+                        "sourceSystemConfigPage.fileReadTruncationDescription",
+                        {
+                          defaultValue:
+                            "缺少独立配置时继续使用历史工具结果的近期阈值；显式配置后由本段接管。",
+                        },
+                      )}
+                    </span>
+                  </div>
+                  <Tag
+                    color={fileReadTruncationState.explicit ? "green" : "blue"}
+                  >
+                    {fileReadTruncationState.explicit
+                      ? fileReadTruncationState.config.enabled
+                        ? t(
+                            "sourceSystemConfigPage.fileReadIndependentEnabledState",
+                            {
+                              defaultValue: "独立配置已启用",
+                            },
+                          )
+                        : t(
+                            "sourceSystemConfigPage.fileReadIndependentDisabledState",
+                            {
+                              defaultValue: "独立配置已关闭",
+                            },
+                          )
+                      : t("sourceSystemConfigPage.fileReadInheritedState", {
+                          defaultValue: "继承旧工具结果近期阈值",
+                        })}
+                  </Tag>
+                </div>
+                {fileReadTruncationState.explicit ? (
+                  <>
+                    <div className={styles.switchRow}>
+                      <div className={styles.switchCopy}>
+                        <span className={styles.switchTitle}>
+                          {t("sourceSystemConfigPage.fileReadEnabledTitle", {
+                            defaultValue: "启用文件读取截断",
+                          })}
+                        </span>
+                        <span className={styles.switchDescription}>
+                          {t(
+                            "sourceSystemConfigPage.fileReadEnabledDescription",
+                            {
+                              defaultValue:
+                                "关闭后当前系统的文件读取即时输出不再由 SWE 截断。",
+                            },
+                          )}
+                        </span>
+                      </div>
+                      <Switch
+                        checked={fileReadTruncationState.config.enabled}
+                        disabled={formDisabled}
+                        onChange={(checked) =>
+                          handleImmediateTruncationEnabledChange(
+                            "file_read_truncation",
+                            checked,
+                          )
+                        }
+                      />
+                    </div>
+                    <div className={styles.numberGrid}>
+                      <label className={styles.numberField}>
+                        <span className={styles.numberLabel}>
+                          {t("sourceSystemConfigPage.fileReadMaxBytesLabel", {
+                            defaultValue: "输出片段字节数",
+                          })}
+                        </span>
+                        <InputNumber
+                          min={1000}
+                          step={1000}
+                          value={fileReadTruncationState.config.max_bytes}
+                          disabled={
+                            formDisabled ||
+                            !fileReadTruncationState.config.enabled
+                          }
+                          onChange={(value) =>
+                            handleImmediateTruncationMaxBytesChange(
+                              "file_read_truncation",
+                              value,
+                            )
+                          }
+                        />
+                      </label>
+                    </div>
+                    <Button
                       disabled={formDisabled}
-                      onChange={(value) =>
-                        handleToolResultNumberChange(definition.key, value)
+                      onClick={() =>
+                        handleRestoreImmediateTruncationInheritance(
+                          "file_read_truncation",
+                        )
                       }
-                    />
-                  </label>
-                ))}
-              </div>
+                    >
+                      {t("sourceSystemConfigPage.restoreInheritance", {
+                        defaultValue: "恢复继承",
+                      })}
+                    </Button>
+                  </>
+                ) : (
+                  <Button
+                    disabled={formDisabled}
+                    onClick={() =>
+                      handleEnableImmediateTruncation("file_read_truncation")
+                    }
+                  >
+                    {t("sourceSystemConfigPage.enableFileReadTruncation", {
+                      defaultValue: "启用独立配置",
+                    })}
+                  </Button>
+                )}
+              </section>
+
             </Card>
 
             <div className={styles.actionRow}>
