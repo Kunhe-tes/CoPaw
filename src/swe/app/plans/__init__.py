@@ -3,6 +3,8 @@
 
 from .models import (
     PlanClarificationCard,
+    PlanClarificationField,
+    PlanClarificationFieldType,
     PlanClarificationKind,
     PlanInteractionCard,
     PlanReviewCard,
@@ -20,6 +22,8 @@ __all__ = [
     "PlanDecisionConflict",
     "PlanDecisionResult",
     "PlanClarificationCard",
+    "PlanClarificationField",
+    "PlanClarificationFieldType",
     "PlanClarificationKind",
     "PlanInteractionCard",
     "PlanReviewCard",

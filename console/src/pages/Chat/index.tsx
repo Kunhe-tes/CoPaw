@@ -494,10 +494,12 @@ function RuntimeLoadingBridge({
 function ActivePlanModeControl({
   enabled,
   label,
+  displayLabel,
   onDisable,
 }: {
   enabled: boolean;
   label: string;
+  displayLabel?: string;
   onDisable: () => void;
 }) {
   const { disabled } = useChatAnywhereInput((value) => ({
@@ -509,6 +511,7 @@ function ActivePlanModeControl({
       enabled={enabled}
       disabled={disabled}
       label={label}
+      displayLabel={displayLabel}
       onDisable={onDisable}
     />
   );
@@ -987,6 +990,7 @@ export default function ChatPage() {
       <ActivePlanModeControl
         enabled={planModeEnabled}
         label={t("chat.planMode.label", "计划模式")}
+        displayLabel={t("chat.planMode.shortLabel", "计划")}
         onDisable={() => {
           void persistPlanMode(false);
         }}

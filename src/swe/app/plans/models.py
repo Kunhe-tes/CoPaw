@@ -7,11 +7,28 @@ from datetime import datetime, timezone
 from typing import Any, Literal
 from uuid import uuid4
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    field_validator,
+    model_validator,
+)
 
 PlanStatus = Literal["proposed", "revision_requested", "accepted", "exited"]
 PlanReviewDecisionType = Literal["revise", "execute", "exit_plan"]
-PlanClarificationKind = Literal["single_choice", "multi_choice", "text_input"]
+PlanClarificationKind = Literal[
+    "single_choice",
+    "multi_choice",
+    "text_input",
+    "form",
+]
+PlanClarificationFieldType = Literal[
+    "select",
+    "multiselect",
+    "text",
+    "textarea",
+]
 
 
 def _now_utc() -> datetime:
@@ -36,6 +53,28 @@ class PlanOption(_StrictPlanModel):
     id: str
     label: str
     description: str | None = None
+
+
+class PlanClarificationField(_StrictPlanModel):
+    """结构化计划澄清表单中的单个字段。"""
+
+    id: str
+    label: str
+    type: PlanClarificationFieldType
+    options: list[PlanOption] = Field(default_factory=list)
+    placeholder: str | None = None
+    required: bool = False
+    description: str | None = None
+
+    @model_validator(mode="after")
+    def _validate_field_shape(self) -> "PlanClarificationField":
+        """限制字段类型和候选项的组合，避免前端收到矛盾配置。"""
+        needs_options = self.type in {"select", "multiselect"}
+        if needs_options and not self.options:
+            raise ValueError("select-like fields require options")
+        if not needs_options and self.options:
+            raise ValueError("text-like fields do not accept options")
+        return self
 
 
 class ProposedPlanCreate(_StrictPlanModel):
@@ -153,7 +192,25 @@ class PlanClarificationCard(PlanInteractionCard):
     prompt: str
     kind: PlanClarificationKind
     options: list[PlanOption] = Field(default_factory=list)
+    form_id: str | None = None
+    fields: list[PlanClarificationField] = Field(default_factory=list)
     allow_custom_response: bool = False
+
+    @model_validator(mode="after")
+    def _validate_clarification_shape(self) -> "PlanClarificationCard":
+        """根据卡片种类约束字段，保证前后端使用统一契约。"""
+        if self.kind == "form":
+            if not self.fields:
+                raise ValueError("form clarification requires fields")
+            if self.options:
+                raise ValueError("form clarification does not use options")
+            return self
+
+        if self.fields:
+            raise ValueError("non-form clarification does not use fields")
+        if self.kind in {"single_choice", "multi_choice"} and not self.options:
+            raise ValueError("choice clarification requires options")
+        return self
 
 
 class PlanReviewCard(PlanInteractionCard):

@@ -320,6 +320,31 @@ def test_plan_mode_shell_policy_rejects_mutating_shell_bypasses(
         assert denial is not None, command
 
 
+@pytest.mark.asyncio
+async def test_plan_mode_hard_policy_allows_memory_and_clarification_tools(
+    tmp_path: Path,
+) -> None:
+    """Plan Mode 可使用记忆检索和计划澄清工具补足规划上下文。"""
+    agent = _FakePlanGuardAgent(tmp_path)
+
+    for tool_name, tool_input in (
+        ("memory_search", {"query": "prior decision"}),
+        (
+            "ask_plan_clarification",
+            {"prompt": "Choose scope", "kind": "choice"},
+        ),
+    ):
+        result = await agent._acting(
+            {
+                "id": f"tool-{tool_name}",
+                "name": tool_name,
+                "input": tool_input,
+            },
+        )
+
+        assert result == {"content": tool_input}
+
+
 def test_plan_mode_toolkit_keeps_readonly_delegation_when_enabled(
     tmp_path: Path,
 ) -> None:

@@ -83,4 +83,48 @@ describe("messageMeta", () => {
       allow_custom_response: true,
     });
   });
+
+  it("extracts structured clarification forms", () => {
+    const card = extractPlanInteractionCard({
+      metadata: {
+        plan_interaction_card: {
+          card_type: "plan_clarification",
+          kind: "form",
+          form_id: "customer_plan_clarification",
+          prompt: "Collect planning context",
+          allow_custom_response: true,
+          fields: [
+            {
+              id: "industry",
+              label: "所在行业",
+              type: "select",
+              required: true,
+              options: [{ id: "retail", label: "零售/电商" }],
+            },
+            {
+              id: "current_challenges",
+              label: "当前主要挑战",
+              type: "textarea",
+              placeholder: "请补充",
+            },
+          ],
+        },
+      },
+    });
+
+    expect(card).toMatchObject({
+      card_type: "plan_clarification",
+      kind: "form",
+      form_id: "customer_plan_clarification",
+      allow_custom_response: true,
+    });
+    expect(card?.card_type).toBe("plan_clarification");
+    if (card?.card_type !== "plan_clarification") return;
+    expect(card.fields).toHaveLength(2);
+    expect(card.fields?.[0]).toMatchObject({
+      id: "industry",
+      type: "select",
+      required: true,
+    });
+  });
 });

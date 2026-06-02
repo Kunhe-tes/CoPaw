@@ -1,7 +1,7 @@
 import React from "react";
 import { Switch, Tooltip } from "antd";
 import type { IAgentScopeRuntimeWebUIInputData } from "@/components/agentscope-chat";
-import { ApartmentOutlined } from "@ant-design/icons";
+import { CloseCircleFilled, OrderedListOutlined } from "@ant-design/icons";
 import { ComposerQuickMenuItem } from "@/components/agentscope-chat/ComposerQuickMenu";
 import styles from "./index.module.less";
 
@@ -201,7 +201,7 @@ export function PlanModeMenuItem({
 }) {
   const control = (
     <ComposerQuickMenuItem
-      icon={<ApartmentOutlined />}
+      icon={<OrderedListOutlined />}
       label={<span className={styles.planModeToggleLabel}>{label}</span>}
       extra={
         <Switch
@@ -222,11 +222,13 @@ export function ActivePlanModeButton({
   enabled,
   disabled = false,
   label,
+  displayLabel,
   onDisable,
 }: {
   enabled: boolean;
   disabled?: boolean;
   label: string;
+  displayLabel?: string;
   onDisable: () => void;
 }) {
   if (!enabled) {
@@ -241,8 +243,9 @@ export function ActivePlanModeButton({
       disabled={disabled}
       onClick={onDisable}
     >
-      <ApartmentOutlined />
-      <span>{label}</span>
+      <OrderedListOutlined className={styles.planModeActiveIcon} />
+      <CloseCircleFilled className={styles.planModeCloseIcon} />
+      <span>{displayLabel || label}</span>
     </button>
   );
 }

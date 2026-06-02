@@ -19,19 +19,149 @@ from ...app.plans import (
 from ...constant import WORKING_DIR
 
 _PLAN_CARD_METADATA_KEY = "plan_interaction_card"
+_LEGACY_CLARIFICATION_KINDS = frozenset(
+    {"single_choice", "multi_choice", "text_input"},
+)
+_FORM_FIELD_TYPE_ALIASES = {
+    "select": "select",
+    "multiselect": "multiselect",
+    "multi_select": "multiselect",
+    "multi_choice": "multiselect",
+    "text": "text",
+    "text_input": "text",
+    "textarea": "textarea",
+}
+
+
+def _normalize_choice_option(option: Any) -> dict[str, Any]:
+    """把候选项统一归一成 id/label 结构，便于前端稳定渲染。"""
+    if isinstance(option, str):
+        return {"id": option, "label": option}
+    if not isinstance(option, dict):
+        raise ValueError("clarification option must be a string or object")
+
+    option_id = option.get("id") or option.get("value") or option.get("name")
+    label = option.get("label") or option.get("name") or option_id
+    if not isinstance(option_id, str) or not option_id.strip():
+        raise ValueError("clarification option id is required")
+    if not isinstance(label, str) or not label.strip():
+        raise ValueError("clarification option label is required")
+
+    normalized = {"id": option_id, "label": label}
+    description = option.get("description")
+    if isinstance(description, str) and description.strip():
+        normalized["description"] = description
+    return normalized
+
+
+def _looks_like_form_field(option: Any) -> bool:
+    """根据常见字段约定判断 options 是否实际承载表单字段定义。"""
+    return (
+        isinstance(option, dict)
+        and isinstance(option.get("label"), str)
+        and isinstance(option.get("type"), str)
+        and isinstance(option.get("id") or option.get("name"), str)
+    )
+
+
+def _normalize_form_field(field: dict[str, Any]) -> dict[str, Any]:
+    """兼容 name/id、字符串候选项和输入类型别名。"""
+    field_id = field.get("id") or field.get("name")
+    if not isinstance(field_id, str) or not field_id.strip():
+        raise ValueError("clarification field id is required")
+
+    label = field.get("label")
+    if not isinstance(label, str) or not label.strip():
+        raise ValueError("clarification field label is required")
+
+    raw_type = field.get("type")
+    if not isinstance(raw_type, str) or not raw_type.strip():
+        raise ValueError("clarification field type is required")
+    normalized_type = _FORM_FIELD_TYPE_ALIASES.get(raw_type.strip().lower())
+    if normalized_type is None:
+        raise ValueError(f"unsupported clarification field type: {raw_type}")
+
+    normalized: dict[str, Any] = {
+        "id": field_id,
+        "label": label,
+        "type": normalized_type,
+        "required": bool(field.get("required", False)),
+    }
+    placeholder = field.get("placeholder")
+    if isinstance(placeholder, str) and placeholder.strip():
+        normalized["placeholder"] = placeholder
+    description = field.get("description")
+    if isinstance(description, str) and description.strip():
+        normalized["description"] = description
+
+    if normalized_type in {"select", "multiselect"}:
+        raw_options = field.get("options")
+        if not isinstance(raw_options, list) or not raw_options:
+            raise ValueError(
+                f"clarification field {field_id} requires options",
+            )
+        normalized["options"] = [
+            _normalize_choice_option(option) for option in raw_options
+        ]
+    return normalized
+
+
+def _normalize_clarification_payload(
+    *,
+    kind: str,
+    options: list[dict[str, Any]] | None,
+    fields: list[dict[str, Any]] | None,
+) -> dict[str, Any]:
+    """把旧式 choice/text 和新式表单 payload 收敛为统一卡片模型。"""
+    if fields is not None:
+        return {
+            "kind": "form",
+            "form_id": None if kind == "form" else kind,
+            "options": [],
+            "fields": [_normalize_form_field(field) for field in fields],
+        }
+
+    raw_options = options or []
+    if kind not in _LEGACY_CLARIFICATION_KINDS and raw_options:
+        if all(_looks_like_form_field(option) for option in raw_options):
+            return {
+                "kind": "form",
+                "form_id": kind,
+                "options": [],
+                "fields": [
+                    _normalize_form_field(option) for option in raw_options
+                ],
+            }
+
+    return {
+        "kind": kind,
+        "form_id": None,
+        "options": [
+            _normalize_choice_option(option) for option in raw_options
+        ],
+        "fields": [],
+    }
 
 
 async def ask_plan_clarification(
     prompt: str,
     kind: str,
     options: list[dict[str, Any]] | None = None,
+    fields: list[dict[str, Any]] | None = None,
     allow_custom_response: bool = False,
 ) -> ToolResponse:
     """生成计划澄清卡片，让前端用结构化控件收集下一轮回复。"""
+    payload = _normalize_clarification_payload(
+        kind=kind,
+        options=options,
+        fields=fields,
+    )
     card = PlanClarificationCard(
         prompt=prompt,
-        kind=kind,
-        options=options or [],
+        kind=payload["kind"],
+        options=payload["options"],
+        form_id=payload["form_id"],
+        fields=payload["fields"],
         allow_custom_response=allow_custom_response,
     )
     return ToolResponse(

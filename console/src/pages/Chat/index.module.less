@@ -141,32 +141,59 @@
 }
 
 .planModeActiveButton {
+  position: relative;
   display: inline-flex;
   align-items: center;
-  gap: 6px;
-  min-height: 28px;
+  justify-content: center;
+  gap: 8px;
+  min-height: 34px;
   padding: 0 10px;
-  border: 1px solid rgba(55, 105, 252, 0.16);
+  border: 0;
   border-radius: 999px;
-  background: rgba(55, 105, 252, 0.08);
-  color: #3769fc;
-  font-size: 13px;
+  background: transparent;
+  color: #8a8d93;
+  font-size: 15px;
+  font-weight: 500;
   line-height: 1;
   white-space: nowrap;
   cursor: pointer;
   transition:
     background-color 0.2s ease,
-    border-color 0.2s ease,
     color 0.2s ease,
     opacity 0.2s ease;
 
+  &::before {
+    position: absolute;
+    left: -12px;
+    top: 50%;
+    width: 1px;
+    height: 24px;
+    background: rgba(0, 0, 0, 0.08);
+    content: "";
+    opacity: 0;
+    transform: translateY(-50%);
+    transition: opacity 0.2s ease;
+  }
+
   &:hover:not(:disabled) {
-    background: rgba(55, 105, 252, 0.12);
-    border-color: rgba(55, 105, 252, 0.28);
+    background: #eeeeee;
+    color: #85898f;
+
+    &::before {
+      opacity: 1;
+    }
+
+    .planModeActiveIcon {
+      display: none;
+    }
+
+    .planModeCloseIcon {
+      display: inline-flex;
+    }
   }
 
   &:focus-visible {
-    outline: 2px solid rgba(55, 105, 252, 0.28);
+    outline: 2px solid rgba(138, 141, 147, 0.28);
     outline-offset: 2px;
   }
 
@@ -176,20 +203,40 @@
   }
 }
 
+.planModeActiveIcon,
+.planModeCloseIcon {
+  width: 18px;
+  height: 18px;
+  flex: 0 0 18px;
+  font-size: 18px;
+}
+
+.planModeCloseIcon {
+  display: none;
+  color: #84888f;
+}
+
 :global(.dark-mode) {
   .planModeActiveButton {
-    border-color: rgba(94, 133, 255, 0.28);
-    background: rgba(94, 133, 255, 0.16);
-    color: rgba(212, 224, 255, 0.96);
+    background: transparent;
+    color: rgba(255, 255, 255, 0.64);
+
+    &::before {
+      background: rgba(255, 255, 255, 0.12);
+    }
 
     &:hover:not(:disabled) {
-      background: rgba(94, 133, 255, 0.22);
-      border-color: rgba(130, 162, 255, 0.38);
+      background: rgba(255, 255, 255, 0.1);
+      color: rgba(255, 255, 255, 0.72);
     }
 
     &:focus-visible {
-      outline-color: rgba(130, 162, 255, 0.42);
+      outline-color: rgba(255, 255, 255, 0.24);
     }
+  }
+
+  .planModeCloseIcon {
+    color: rgba(255, 255, 255, 0.58);
   }
 }
 

@@ -82,6 +82,7 @@ _PLAN_MODE_ALLOWED_TOOLS = frozenset(
         "grep_search",
         "glob_search",
         "get_current_time",
+        "memory_search",
         "ask_plan_clarification",
         "submit_proposed_plan",
     },

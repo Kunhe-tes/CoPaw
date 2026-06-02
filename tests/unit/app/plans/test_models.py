@@ -85,6 +85,37 @@ def test_plan_clarification_card_supports_allowed_kinds() -> None:
     assert card.kind == "single_choice"
 
 
+def test_plan_clarification_card_supports_form_fields() -> None:
+    card = PlanClarificationCard(
+        prompt="Collect planning context",
+        kind="form",
+        form_id="customer_plan_clarification",
+        fields=[
+            {
+                "id": "industry",
+                "label": "所在行业",
+                "type": "select",
+                "options": [
+                    {"id": "retail", "label": "零售/电商"},
+                    {"id": "saas", "label": "SaaS/软件服务"},
+                ],
+                "required": True,
+            },
+            {
+                "id": "current_challenges",
+                "label": "当前主要挑战",
+                "type": "textarea",
+                "placeholder": "请补充",
+            },
+        ],
+    )
+
+    assert card.kind == "form"
+    assert card.form_id == "customer_plan_clarification"
+    assert card.fields[0].type == "select"
+    assert card.fields[1].placeholder == "请补充"
+
+
 def test_plan_review_decision_rejects_unknown_decision() -> None:
     with pytest.raises(ValidationError):
         PlanReviewDecision(

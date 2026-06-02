@@ -124,11 +124,28 @@ export interface ChatApprovalActionCardData {
 export type PlanClarificationKind =
   | "single_choice"
   | "multi_choice"
-  | "text_input";
+  | "text_input"
+  | "form";
 
 export interface PlanClarificationOption {
   id: string;
   label: string;
+}
+
+export type PlanClarificationFieldType =
+  | "select"
+  | "multiselect"
+  | "text"
+  | "textarea";
+
+export interface PlanClarificationField {
+  id: string;
+  label: string;
+  type: PlanClarificationFieldType;
+  options?: PlanClarificationOption[];
+  placeholder?: string;
+  required?: boolean;
+  description?: string;
 }
 
 export interface ChatPlanClarificationCardData {
@@ -136,6 +153,8 @@ export interface ChatPlanClarificationCardData {
   kind: PlanClarificationKind;
   prompt: string;
   options?: PlanClarificationOption[];
+  form_id?: string;
+  fields?: PlanClarificationField[];
   allow_custom_response?: boolean;
 }
 
@@ -162,6 +181,69 @@ function isStringArray(value: unknown): value is string[] {
   );
 }
 
+function isPlanClarificationOption(
+  value: unknown,
+): value is PlanClarificationOption {
+  return (
+    Boolean(value) &&
+    typeof value === "object" &&
+    typeof (value as PlanClarificationOption).id === "string" &&
+    typeof (value as PlanClarificationOption).label === "string"
+  );
+}
+
+function normalizePlanClarificationFields(
+  value: unknown,
+): PlanClarificationField[] | null {
+  if (!Array.isArray(value) || value.length === 0) return null;
+
+  const normalized = value
+    .map((field) => {
+      if (!field || typeof field !== "object") return null;
+      const record = field as Record<string, unknown>;
+      const type = record.type;
+      if (
+        typeof record.id !== "string" ||
+        typeof record.label !== "string" ||
+        (type !== "select" &&
+          type !== "multiselect" &&
+          type !== "text" &&
+          type !== "textarea")
+      ) {
+        return null;
+      }
+
+      const options = Array.isArray(record.options)
+        ? record.options.filter(isPlanClarificationOption)
+        : undefined;
+      if (
+        (type === "select" || type === "multiselect") &&
+        (!options || options.length === 0)
+      ) {
+        return null;
+      }
+
+      return {
+        id: record.id,
+        label: record.label,
+        type,
+        options,
+        placeholder:
+          typeof record.placeholder === "string"
+            ? record.placeholder
+            : undefined,
+        required: record.required === true,
+        description:
+          typeof record.description === "string"
+            ? record.description
+            : undefined,
+      };
+    })
+    .filter((field): field is PlanClarificationField => Boolean(field));
+
+  return normalized.length === value.length ? normalized : null;
+}
+
 function normalizePlanInteractionCard(
   value: unknown,
 ): ChatPlanInteractionCardData | null {
@@ -173,25 +255,24 @@ function normalizePlanInteractionCard(
     if (
       kind !== "single_choice" &&
       kind !== "multi_choice" &&
-      kind !== "text_input"
+      kind !== "text_input" &&
+      kind !== "form"
     ) {
       return null;
     }
     if (typeof card.prompt !== "string" || !card.prompt.trim()) return null;
     const options = Array.isArray(card.options)
-      ? card.options.filter(
-          (option): option is PlanClarificationOption =>
-            Boolean(option) &&
-            typeof option === "object" &&
-            typeof (option as PlanClarificationOption).id === "string" &&
-            typeof (option as PlanClarificationOption).label === "string",
-        )
+      ? card.options.filter(isPlanClarificationOption)
       : undefined;
+    const fields = normalizePlanClarificationFields(card.fields);
+    if (kind === "form" && !fields) return null;
     return {
       card_type: "plan_clarification",
       kind,
       prompt: card.prompt,
       options,
+      form_id: typeof card.form_id === "string" ? card.form_id : undefined,
+      fields: kind === "form" ? fields || undefined : undefined,
       allow_custom_response: card.allow_custom_response === true,
     };
   }

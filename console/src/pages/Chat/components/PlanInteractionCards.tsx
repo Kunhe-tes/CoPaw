@@ -1,10 +1,20 @@
 import { useEffect, useMemo, useState } from "react";
-import { Button, Checkbox, Flex, Input, Radio, Space, Typography } from "antd";
+import {
+  Button,
+  Checkbox,
+  Flex,
+  Input,
+  Radio,
+  Select,
+  Space,
+  Typography,
+} from "antd";
 import { ClipboardCheck, FileQuestion } from "lucide-react";
 import { OperateCard } from "@/components/agentscope-chat";
 import { emit } from "@/components/agentscope-chat/AgentScopeRuntimeWebUI/core/Context/useChatAnywhereEventEmitter";
 import type {
   ChatPlanClarificationCardData,
+  PlanClarificationField,
   ChatPlanReviewCardData,
   PlanClarificationOption,
 } from "../messageMeta";
@@ -52,6 +62,41 @@ function optionLabels(
     .join(", ");
 }
 
+function hasFormValue(value: string | string[] | undefined): boolean {
+  if (Array.isArray(value)) {
+    return value.length > 0;
+  }
+  return Boolean(value && value.trim());
+}
+
+function formatFormFieldValue(
+  field: PlanClarificationField,
+  value: string | string[] | undefined,
+): string {
+  if (!hasFormValue(value)) return "";
+  const optionLabelById = new Map(
+    (field.options || []).map((item) => [item.id, item.label]),
+  );
+  if (Array.isArray(value)) {
+    return value
+      .map((item) => optionLabelById.get(item) || item)
+      .filter(Boolean)
+      .join(", ");
+  }
+  return optionLabelById.get(value) || value;
+}
+
+function collectFormValues(
+  fields: PlanClarificationField[],
+  values: Record<string, string | string[]>,
+): Record<string, string | string[]> {
+  return Object.fromEntries(
+    fields
+      .map((field) => [field.id, values[field.id]] as const)
+      .filter(([, value]) => hasFormValue(value)),
+  );
+}
+
 export function PlanClarificationCard({
   data,
 }: {
@@ -60,7 +105,11 @@ export function PlanClarificationCard({
   const [singleChoice, setSingleChoice] = useState<string>("");
   const [multiChoice, setMultiChoice] = useState<string[]>([]);
   const [textInput, setTextInput] = useState("");
+  const [formValues, setFormValues] = useState<Record<string, string | string[]>>(
+    {},
+  );
   const options = data.options || [];
+  const fields = data.fields || [];
   const selectedIds =
     data.kind === "single_choice"
       ? singleChoice
@@ -71,32 +120,56 @@ export function PlanClarificationCard({
       : [];
   const trimmedText = textInput.trim();
   const selectedLabels = optionLabels(options, selectedIds);
+  const requiredFormFieldsSatisfied = fields.every(
+    (field) => !field.required || hasFormValue(formValues[field.id]),
+  );
+  const formQueryLines = fields
+    .map((field) => {
+      const formattedValue = formatFormFieldValue(field, formValues[field.id]);
+      if (!formattedValue) return "";
+      return `${field.label}: ${formattedValue}`;
+    })
+    .filter(Boolean);
   const allowsCustomText =
     data.kind === "text_input" || data.allow_custom_response === true;
   const queryParts =
     data.kind === "text_input"
       ? [trimmedText]
+      : data.kind === "form"
+      ? [...formQueryLines, trimmedText].filter(Boolean)
       : [selectedLabels, trimmedText].filter(Boolean);
   const query = queryParts.join("\n");
   const disabled =
     data.kind === "text_input"
       ? !query
+      : data.kind === "form"
+      ? !requiredFormFieldsSatisfied || !query
       : selectedIds.length === 0 && !trimmedText;
 
   const handleSubmit = () => {
     if (disabled) return;
+    const payload =
+      data.kind === "form"
+        ? {
+            card_type: "plan_clarification" as const,
+            kind: "form" as const,
+            form_id: data.form_id,
+            field_values: collectFormValues(fields, formValues),
+            text: trimmedText || undefined,
+          }
+        : {
+            card_type: "plan_clarification" as const,
+            kind: data.kind,
+            selected_option_ids: selectedIds,
+            text: trimmedText || undefined,
+          };
     emit({
       type: "handleSubmit",
       data: {
         query,
         fileList: [],
         biz_params: {
-          plan_interaction_response: {
-            card_type: "plan_clarification",
-            kind: data.kind,
-            selected_option_ids: selectedIds,
-            text: trimmedText || undefined,
-          },
+          plan_interaction_response: payload,
         },
       },
     });
@@ -148,6 +221,107 @@ export function PlanClarificationCard({
                 value={textInput}
                 onChange={(event) => setTextInput(event.target.value)}
               />
+            ) : null}
+            {data.kind === "form" ? (
+              <Space direction="vertical" size={12} style={{ width: "100%" }}>
+                {fields.map((field) => (
+                  <div key={field.id}>
+                    <Typography.Text strong>
+                      {field.label}
+                      {field.required ? " *" : ""}
+                    </Typography.Text>
+                    {field.description ? (
+                      <div style={{ marginTop: 4 }}>
+                        <Typography.Text type="secondary">
+                          {field.description}
+                        </Typography.Text>
+                      </div>
+                    ) : null}
+                    {field.type === "select" ? (
+                      <Select
+                        aria-label={field.label}
+                        style={{ width: "100%", marginTop: 8 }}
+                        placeholder={field.placeholder || field.label}
+                        value={
+                          typeof formValues[field.id] === "string"
+                            ? formValues[field.id]
+                            : undefined
+                        }
+                        options={(field.options || []).map((option) => ({
+                          value: option.id,
+                          label: option.label,
+                        }))}
+                        onChange={(value) =>
+                          setFormValues((current) => ({
+                            ...current,
+                            [field.id]: String(value),
+                          }))
+                        }
+                      />
+                    ) : null}
+                    {field.type === "multiselect" ? (
+                      <Select
+                        mode="multiple"
+                        aria-label={field.label}
+                        style={{ width: "100%", marginTop: 8 }}
+                        placeholder={field.placeholder || field.label}
+                        value={
+                          Array.isArray(formValues[field.id])
+                            ? formValues[field.id]
+                            : []
+                        }
+                        options={(field.options || []).map((option) => ({
+                          value: option.id,
+                          label: option.label,
+                        }))}
+                        onChange={(value) =>
+                          setFormValues((current) => ({
+                            ...current,
+                            [field.id]: value.map(String),
+                          }))
+                        }
+                      />
+                    ) : null}
+                    {field.type === "text" ? (
+                      <Input
+                        aria-label={field.label}
+                        style={{ marginTop: 8 }}
+                        placeholder={field.placeholder || field.label}
+                        value={
+                          typeof formValues[field.id] === "string"
+                            ? formValues[field.id]
+                            : ""
+                        }
+                        onChange={(event) =>
+                          setFormValues((current) => ({
+                            ...current,
+                            [field.id]: event.target.value,
+                          }))
+                        }
+                      />
+                    ) : null}
+                    {field.type === "textarea" ? (
+                      <Input.TextArea
+                        aria-label={field.label}
+                        autoSize={{ minRows: 2, maxRows: 5 }}
+                        style={{ marginTop: 8 }}
+                        placeholder={field.placeholder || field.label}
+                        value={
+                          typeof formValues[field.id] === "string"
+                            ? formValues[field.id]
+                            : ""
+                        }
+                        onChange={(event) =>
+                          setFormValues((current) => ({
+                            ...current,
+                            [field.id]: event.target.value,
+                          }))
+                        }
+                      />
+                    ) : null}
+                  </div>
+                ))}
+              </Space>
             ) : null}
             {data.kind !== "text_input" && allowsCustomText ? (
               <Input.TextArea

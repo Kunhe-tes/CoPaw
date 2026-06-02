@@ -190,6 +190,68 @@ describe("Plan interaction cards", () => {
     submit.cleanup();
   });
 
+  it("renders structured clarification forms and submits field values", async () => {
+    const submit = captureSubmitEvents();
+
+    render(
+      <PlanClarificationCard
+        data={{
+          card_type: "plan_clarification",
+          kind: "form",
+          form_id: "customer_plan_clarification",
+          prompt: "Collect planning context",
+          allow_custom_response: true,
+          fields: [
+            {
+              id: "industry",
+              label: "所在行业",
+              type: "select",
+              required: true,
+              options: [{ id: "retail", label: "零售/电商" }],
+            },
+            {
+              id: "current_challenges",
+              label: "当前主要挑战",
+              type: "textarea",
+              placeholder: "请补充",
+            },
+          ],
+        }}
+      />,
+    );
+
+    fireEvent.mouseDown(screen.getByRole("combobox"));
+    fireEvent.click(screen.getByText("零售/电商"));
+    fireEvent.change(screen.getByPlaceholderText("请补充"), {
+      target: { value: "复购率低" },
+    });
+    fireEvent.change(screen.getByPlaceholderText("Custom response"), {
+      target: { value: "希望年度内看到改善" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Submit" }));
+
+    await waitFor(() => {
+      expect(submit.handler).toHaveBeenCalledTimes(1);
+    });
+    expect(submit.handler.mock.calls[0][0].detail).toMatchObject({
+      query: "所在行业: 零售/电商\n当前主要挑战: 复购率低\n希望年度内看到改善",
+      biz_params: {
+        plan_interaction_response: {
+          card_type: "plan_clarification",
+          kind: "form",
+          form_id: "customer_plan_clarification",
+          field_values: {
+            industry: "retail",
+            current_challenges: "复购率低",
+          },
+          text: "希望年度内看到改善",
+        },
+      },
+    });
+
+    submit.cleanup();
+  });
+
   it("submits review decisions with distinct Plan Review payloads", async () => {
     const submit = captureSubmitEvents();
 
