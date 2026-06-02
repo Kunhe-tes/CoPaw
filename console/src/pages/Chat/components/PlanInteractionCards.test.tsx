@@ -252,6 +252,57 @@ describe("Plan interaction cards", () => {
     submit.cleanup();
   });
 
+  it("submits structured multiselect form values as selected option ids", async () => {
+    const submit = captureSubmitEvents();
+
+    render(
+      <PlanClarificationCard
+        data={{
+          card_type: "plan_clarification",
+          kind: "form",
+          form_id: "plan_checks",
+          prompt: "Choose verification checks",
+          fields: [
+            {
+              id: "checks",
+              label: "验证项",
+              type: "multiselect",
+              required: true,
+              options: [
+                { id: "frontend", label: "前端测试" },
+                { id: "backend", label: "后端测试" },
+              ],
+            },
+          ],
+        }}
+      />,
+    );
+
+    fireEvent.mouseDown(screen.getByRole("combobox"));
+    fireEvent.click(screen.getByText("前端测试"));
+    fireEvent.click(screen.getByText("后端测试"));
+    fireEvent.click(screen.getByRole("button", { name: "Submit" }));
+
+    await waitFor(() => {
+      expect(submit.handler).toHaveBeenCalledTimes(1);
+    });
+    expect(submit.handler.mock.calls[0][0].detail).toMatchObject({
+      query: "验证项: 前端测试, 后端测试",
+      biz_params: {
+        plan_interaction_response: {
+          card_type: "plan_clarification",
+          kind: "form",
+          form_id: "plan_checks",
+          field_values: {
+            checks: ["frontend", "backend"],
+          },
+        },
+      },
+    });
+
+    submit.cleanup();
+  });
+
   it("submits review decisions with distinct Plan Review payloads", async () => {
     const submit = captureSubmitEvents();
 

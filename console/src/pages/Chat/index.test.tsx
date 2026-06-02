@@ -1,5 +1,11 @@
 import React from "react";
-import { cleanup, fireEvent, render, screen } from "@testing-library/react";
+import {
+  cleanup,
+  fireEvent,
+  render,
+  screen,
+  waitFor,
+} from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import ChatPage from "./index";
 
@@ -11,8 +17,11 @@ const mocks = vi.hoisted(() => {
 
   return {
     capturedOptions: null as Record<string, any> | null,
+    listCronJobs: vi.fn(async () => []),
     currentSessionId: "chat-1",
     inputDisabled: true,
+    navigationSessionId: null as string | null,
+    navigationTaskId: null as string | null,
     navigate: vi.fn(),
     sessions: [
       {
@@ -195,8 +204,8 @@ vi.mock("../../stores/iframeStore", () => {
     selector ? selector({ userId: "test-user" }) : { userId: "test-user" };
 
   useIframeStore.getState = () => ({
-    sessionId: null,
-    taskId: null,
+    sessionId: mocks.navigationSessionId,
+    taskId: mocks.navigationTaskId,
     clearNavigationParams: mocks.clearNavigationParams,
   });
 
@@ -215,11 +224,12 @@ vi.mock("../../api/modules/chat", () => ({
 
 vi.mock("../../api/modules/cronjob", () => ({
   cronJobApi: {
-    listCronJobs: vi.fn(async () => []),
+    listCronJobs: mocks.listCronJobs,
     pauseCronJob: vi.fn(async () => undefined),
     resumeCronJob: vi.fn(async () => undefined),
     runCronJob: vi.fn(async () => undefined),
     deleteCronJob: vi.fn(async () => undefined),
+    markTaskRead: vi.fn(async () => undefined),
   },
 }));
 
@@ -277,9 +287,72 @@ vi.mock("./sessionApi", () => ({
   },
 }));
 
-vi.mock("./components/ChatSidebar", () => ({
-  __esModule: true,
-  default: () => null,
+vi.mock("./components/ChatSidebar", () => {
+  function ChatSidebar(props: {
+    tasks: Array<{ id: string; name?: string }>;
+    selectedTaskId?: string;
+    onTaskClick?: (task: { id: string; name?: string }) => void;
+  }) {
+    return (
+      <div
+        data-testid="chat-sidebar"
+        data-selected-task-id={props.selectedTaskId || ""}
+      >
+        {props.tasks.map((task) => (
+          <button
+            key={task.id}
+            type="button"
+            onClick={() => props.onTaskClick?.(task)}
+          >
+            {`Open ${task.name || task.id}`}
+          </button>
+        ))}
+      </div>
+    );
+  }
+
+  return {
+    __esModule: true,
+    default: ChatSidebar,
+  };
+});
+
+vi.mock("@/components/agentscope-chat/AutoPreviewHtmlContext", () => ({
+  AutoPreviewHtmlProvider: ({
+    children,
+    triggerKey,
+  }: {
+    children: React.ReactNode;
+    triggerKey: number;
+    onConsumed: () => void;
+  }) => (
+    <div data-testid="auto-preview-provider" data-trigger-key={triggerKey}>
+      {children}
+    </div>
+  ),
+  useAutoPreviewHtml: () => ({
+    enabled: false,
+    register: () => () => undefined,
+  }),
+}));
+
+vi.mock("@/components/agentscope-chat/HtmlPreviewTrackingContext", () => ({
+  HtmlPreviewTrackingProvider: ({
+    children,
+    value,
+  }: {
+    children: React.ReactNode;
+    value: { cronTaskId?: string | null; cronTaskName?: string | null };
+  }) => (
+    <div
+      data-testid="html-preview-tracking-provider"
+      data-cron-task-id={value.cronTaskId || ""}
+      data-cron-task-name={value.cronTaskName || ""}
+    >
+      {children}
+    </div>
+  ),
+  useHtmlPreviewTracking: () => ({}),
 }));
 
 vi.mock("./components/ChatHeaderTitle", () => ({
@@ -371,7 +444,11 @@ describe("ChatPage plan mode wiring", () => {
   beforeEach(() => {
     mocks.capturedOptions = null;
     mocks.inputDisabled = true;
+    mocks.navigationSessionId = null;
+    mocks.navigationTaskId = null;
     mocks.navigate.mockReset();
+    mocks.listCronJobs.mockReset();
+    mocks.listCronJobs.mockResolvedValue([]);
     mocks.setLoading.mockReset();
     mocks.getLoading.mockReset();
     mocks.getLoading.mockReturnValue(false);
@@ -406,5 +483,107 @@ describe("ChatPage plan mode wiring", () => {
     render(<ChatPage />);
 
     expect(screen.getByRole("switch", { name: "计划模式" })).toBeDisabled();
+  });
+
+  it("triggers HTML auto preview when taskId navigation resolves to a chat", async () => {
+    mocks.navigationTaskId = "task-from-url";
+    mocks.listCronJobs.mockResolvedValue([
+      {
+        id: "task-from-url",
+        name: "URL Task",
+        enabled: true,
+        schedule: { type: "cron", cron: "* * * * *" },
+        dispatch: {
+          type: "channel",
+          target: { user_id: "test-user", session_id: "chat-2" },
+        },
+        task: {
+          visible_in_my_tasks: true,
+          chat_id: "chat-2",
+          has_scheduled_result: true,
+          latest_scheduled_preview: "",
+          unread_execution_count: 0,
+          is_running: false,
+        },
+      },
+    ]);
+
+    render(<ChatPage />);
+
+    await screen.findByRole("button", { name: "Open URL Task" });
+
+    expect(mocks.clearNavigationParams).toHaveBeenCalled();
+    await waitFor(() => {
+      expect(mocks.navigate).toHaveBeenCalledWith("/chat/chat-2", {
+        replace: true,
+      });
+    });
+    expect(screen.getByTestId("auto-preview-provider")).toHaveAttribute(
+      "data-trigger-key",
+      "1",
+    );
+  });
+
+  it("wires task tracking context and triggers auto preview from sidebar task open", async () => {
+    mocks.listCronJobs.mockResolvedValue([
+      {
+        id: "task-current",
+        name: "Current Task",
+        enabled: true,
+        schedule: { type: "cron", cron: "* * * * *" },
+        dispatch: {
+          type: "channel",
+          target: { user_id: "test-user", session_id: "chat-1" },
+        },
+        task: {
+          visible_in_my_tasks: true,
+          chat_id: "chat-1",
+          has_scheduled_result: true,
+          latest_scheduled_preview: "",
+          unread_execution_count: 0,
+          is_running: false,
+        },
+      },
+      {
+        id: "task-other",
+        name: "Other Task",
+        enabled: true,
+        schedule: { type: "cron", cron: "* * * * *" },
+        dispatch: {
+          type: "channel",
+          target: { user_id: "test-user", session_id: "chat-2" },
+        },
+        task: {
+          visible_in_my_tasks: true,
+          chat_id: "chat-2",
+          has_scheduled_result: true,
+          latest_scheduled_preview: "",
+          unread_execution_count: 0,
+          is_running: false,
+        },
+      },
+    ]);
+
+    render(<ChatPage />);
+
+    await waitFor(() => {
+      expect(
+        screen.getByTestId("html-preview-tracking-provider"),
+      ).toHaveAttribute("data-cron-task-id", "task-current");
+    });
+    expect(
+      screen.getByTestId("html-preview-tracking-provider"),
+    ).toHaveAttribute("data-cron-task-name", "Current Task");
+
+    fireEvent.click(screen.getByRole("button", { name: "Open Other Task" }));
+
+    expect(mocks.setSessionLoading).toHaveBeenCalledWith(true);
+    expect(mocks.navigate).toHaveBeenCalledWith("/chat/chat-2", {
+      replace: true,
+    });
+    expect(screen.getByTestId("auto-preview-provider")).toHaveAttribute(
+      "data-trigger-key",
+      "1",
+    );
   });
 });
