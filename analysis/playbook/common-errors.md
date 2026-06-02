@@ -131,6 +131,40 @@
 - formatter 侧保留兜底：只有第 0 条消息允许继续保持 `role="system"`，历史 hook system 转为 developer，其他非首位 system 转为 user
 - 如果仍报错，检查当前 session 落盘 JSON 中 `agent.memory.content` 的 role 顺序，确认是否还有非首位 system 绕过了 formatter
 
+## 会话恢复时报 Msg.from_dict 断言失败
+
+### 症状
+
+- 发起已有 `session_id` 的会话时，Runner 在加载 session state 阶段直接报错
+- 常见堆栈包含：
+  - `SafeJSONSession.load_session_state()`
+  - `ReMeInMemoryMemory.load_state_dict()`
+  - `Msg.from_dict(...)`
+  - `assert role in ["user", "assistant", "system"]`
+- 落盘的 session JSON 里可以看到 hook additionalContext 消息使用 `role="developer"`
+
+### 典型原因
+
+- hook additionalContext 为了兼容 OpenAI-compatible 后端，会在 memory / session 中保留 `developer` 语义
+- AgentScope `Msg` 运行态允许先构造 `system` 再改写为 `developer`，但 `Msg.from_dict()` 反序列化时仍只接受 `user/assistant/system`
+- 会话恢复如果直接把落盘 JSON 交给底层 memory `load_state_dict()`，就会在反序列化阶段触发断言
+
+### 第一落点
+
+- [src/swe/app/runner/session.py](/Users/shixiangyi/code/Swe/src/swe/app/runner/session.py)
+- 重点看 `load_session_state()` 是否在调用底层 `load_state_dict()` 前做消息 role 兼容迁移，并在内存态恢复原始 role
+- [src/swe/agents/hook_runtime/messages.py](/Users/shixiangyi/code/Swe/src/swe/agents/hook_runtime/messages.py)
+- 重点看 hook 附加上下文是否仍通过 helper 生成 `developer` 消息
+- 对应回归测试：
+  - [tests/unit/app/test_session.py](/Users/shixiangyi/code/Swe/tests/unit/app/test_session.py)
+  - [tests/unit/app/test_runner_hook_runtime.py](/Users/shixiangyi/code/Swe/tests/unit/app/test_runner_hook_runtime.py)
+
+### 第一阶段处理
+
+- 不要把落盘里的 `developer` role 直接改成普通 `user`，否则会丢失 hook 语义
+- 在 session 加载边界先把不被 AgentScope 接受的 role 临时降级成 `system`，待 `Msg` 实例化成功后再恢复原始 role
+- 如果用户已经产生坏 session 文件，修复代码后重新发起同一 `session_id` 即可触发兼容恢复，不需要先手工删历史
+
 ## Console 切换运行中会话时 reconnect 返回 404
 
 ### 症状

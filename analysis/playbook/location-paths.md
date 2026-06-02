@@ -32,6 +32,16 @@
 - Formatter 回归测试：[tests/unit/agents/test_model_factory_tenant.py](/Users/shixiangyi/code/Swe/tests/unit/agents/test_model_factory_tenant.py)
 - Tool hook 回归测试：[tests/unit/agents/test_tool_guard_hook_runtime.py](/Users/shixiangyi/code/Swe/tests/unit/agents/test_tool_guard_hook_runtime.py)
 
+## 会话恢复 / developer role 反序列化断言
+
+- 会话加载边界：[src/swe/app/runner/session.py](/Users/shixiangyi/code/Swe/src/swe/app/runner/session.py)
+- 重点看 `load_session_state()` 调底层 `load_state_dict()` 前后是否做 role 兼容迁移
+- Hook 消息构造：[src/swe/agents/hook_runtime/messages.py](/Users/shixiangyi/code/Swe/src/swe/agents/hook_runtime/messages.py)
+- 重点看 `build_hook_additional_context_msg()` 是否仍保留 developer 语义
+- Runner 入口：[src/swe/app/runner/runner.py](/Users/shixiangyi/code/Swe/src/swe/app/runner/runner.py)
+- 重点看 `get_state_loaded()` 是否把 session 恢复异常直接暴露到 query 主链路
+- 会话加载回归测试：[tests/unit/app/test_session.py](/Users/shixiangyi/code/Swe/tests/unit/app/test_session.py)
+
 ## 长 Tool 执行 / 用户中断 / running 状态
 
 - 前端 chat 请求入口：[console/src/pages/Chat/index.tsx](/Users/shixiangyi/code/Swe/console/src/pages/Chat/index.tsx)
