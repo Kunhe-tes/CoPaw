@@ -1,15 +1,13 @@
 .planClarificationCard {
   width: min(calc(100% - 32px), 818px);
   margin: 0 auto 8px;
-  border: 1px solid rgba(36, 58, 96, 0.12);
-  border-radius: 8px;
-  background: linear-gradient(
-      180deg,
-      rgba(255, 255, 255, 0.96),
-      rgba(247, 250, 255, 0.96)
-    ),
-    radial-gradient(circle at 0 0, rgba(47, 107, 255, 0.12), transparent 42%);
-  box-shadow: 0 10px 28px rgba(31, 45, 72, 0.1);
+  border: 1px solid rgba(36, 58, 96, 0.08);
+  border-radius: 16px;
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.96), rgba(247, 250, 255, 0.92)),
+    radial-gradient(circle at 0 0, rgba(47, 107, 255, 0.1), transparent 44%);
+  box-shadow: 0 14px 34px rgba(31, 45, 72, 0.08);
+  overflow: hidden;
 }
 
 @media (max-width: 768px) {
@@ -22,8 +20,8 @@
 .planClarificationBody {
   display: flex;
   flex-direction: column;
-  gap: 8px;
-  padding: 8px 10px 10px;
+  gap: 10px;
+  padding: 10px 12px 12px;
 }
 
 .choicePrompt {
@@ -31,80 +29,83 @@
 }
 
 .choiceCustomResponse {
-  margin-top: 2px;
+  margin-top: 4px;
+}
+
+.choiceOptionsViewport {
+  position: relative;
+  max-height: 88px;
+  overflow-y: auto;
+  padding-right: 16px;
+  scrollbar-gutter: stable;
+  scrollbar-width: auto;
+  scrollbar-color: rgba(47, 107, 255, 0.78) rgba(36, 58, 96, 0.12);
+}
+
+.choiceScrollHint {
+  position: absolute;
+  top: 8px;
+  right: 2px;
+  bottom: 8px;
+  display: flex;
+  align-items: flex-start;
+  justify-content: center;
+  width: 10px;
+  pointer-events: none;
+}
+
+.choiceScrollTrack {
+  position: relative;
+  width: 8px;
+  height: 100%;
+  border-radius: 999px;
+  background: linear-gradient(
+    180deg,
+    rgba(36, 58, 96, 0.14),
+    rgba(36, 58, 96, 0.2)
+  );
+  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.72);
+}
+
+.choiceScrollThumb {
+  position: absolute;
+  top: 0;
+  left: 1px;
+  width: 6px;
+  height: 28px;
+  border-radius: 999px;
+  background: linear-gradient(180deg, #6c96ff, #2f6bff);
+  box-shadow:
+    0 4px 10px rgba(47, 107, 255, 0.24),
+    inset 0 1px 0 rgba(255, 255, 255, 0.55);
+}
+
+.choiceOptionList {
+  width: 100%;
 }
 
 .cardActions {
-  margin-top: 2px;
+  margin-top: 4px;
 }
 
 .formStepper {
   display: flex;
   flex-direction: column;
-  gap: 10px;
-}
-
-.stepRail {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  min-height: 24px;
-}
-
-.stepDot,
-.stepDotActive,
-.stepDotComplete {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  width: 22px;
-  height: 22px;
-  padding: 0;
-  border: 1px solid rgba(35, 48, 76, 0.16);
-  border-radius: 999px;
-  background: #ffffff;
-  color: rgba(35, 48, 76, 0.58);
-  font-size: 11px;
-  font-weight: 700;
-  line-height: 1;
-  cursor: pointer;
-  transition:
-    border-color 0.18s ease,
-    background-color 0.18s ease,
-    color 0.18s ease,
-    transform 0.18s ease;
-}
-
-.stepDot:hover,
-.stepDotActive:hover,
-.stepDotComplete:hover {
-  transform: translateY(-1px);
-}
-
-.stepDotActive {
-  border-color: rgba(47, 107, 255, 0.48);
-  background: #2f6bff;
-  color: #ffffff;
-}
-
-.stepDotComplete {
-  border-color: rgba(15, 159, 110, 0.28);
-  background: rgba(15, 159, 110, 0.1);
-  color: #0f9f6e;
+  gap: 12px;
 }
 
 .formStage {
   display: flex;
   flex-direction: column;
   gap: 8px;
-  min-height: 108px;
-  padding: 10px;
-  border: 1px solid rgba(36, 58, 96, 0.12);
-  border-radius: 8px;
-  background: rgba(255, 255, 255, 0.78);
+  min-height: 0;
+  padding: 10px 10px 12px;
+  border-radius: 14px;
+  background: rgba(255, 255, 255, 0.5);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.7);
 }
 
-.formStageHeader {
+.formStageMeta {
   display: flex;
   align-items: center;
   gap: 8px;
@@ -113,22 +114,47 @@
 
 .formStageCount {
   flex: 0 0 auto;
-  padding: 2px 7px;
+  padding: 2px 8px;
   border-radius: 999px;
-  background: rgba(47, 107, 255, 0.1);
+  background: rgba(47, 107, 255, 0.08);
   color: #2f6bff;
-  font-size: 11px;
+  font-size: 10px;
   font-weight: 700;
   line-height: 18px;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.formStageRequired {
+  color: rgba(35, 48, 76, 0.42);
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
 }
 
 .formStageTitle {
   min-width: 0;
   color: rgba(21, 31, 52, 0.92);
+  font-size: 14px;
+  line-height: 1.35;
+  letter-spacing: -0.01em;
+}
+
+.formStageTitle :global(.ant-typography-expand),
+.formStageDescription :global(.ant-typography-expand) {
+  display: none;
 }
 
 .formStageDescription {
   color: rgba(35, 48, 76, 0.58);
+  display: -webkit-box;
+  overflow: hidden;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 1;
+  line-clamp: 1;
+  font-size: 12px;
+  line-height: 1.45;
 }
 
 .fieldControl {
@@ -139,13 +165,85 @@
 .fieldControl:global(.ant-input),
 .fieldControl:global(.ant-input-affix-wrapper),
 .fieldControl:global(.ant-input-textarea textarea) {
-  border-radius: 8px;
+  border-radius: 12px;
+}
+
+.formStageViewport {
+  min-height: 0;
+}
+
+.formStageViewportCompact {
+  overflow: visible;
+}
+
+.formStageViewportExpanded {
+  max-height: 192px;
+  overflow-y: auto;
+  padding-right: 4px;
+  scrollbar-gutter: stable;
+  scrollbar-width: auto;
+  scrollbar-color: rgba(47, 107, 255, 0.78) rgba(36, 58, 96, 0.12);
+}
+
+.choiceOptionsViewport::-webkit-scrollbar,
+.formStageViewportExpanded::-webkit-scrollbar {
+  width: 12px;
+}
+
+.choiceOptionsViewport::-webkit-scrollbar-track,
+.formStageViewportExpanded::-webkit-scrollbar-track {
+  background: rgba(36, 58, 96, 0.1);
+  border-radius: 999px;
+}
+
+.choiceOptionsViewport::-webkit-scrollbar-thumb,
+.formStageViewportExpanded::-webkit-scrollbar-thumb {
+  background: rgba(47, 107, 255, 0.78);
+  border: 2px solid rgba(255, 255, 255, 0.9);
+  border-radius: 999px;
+}
+
+.choiceOptionsViewport::-webkit-scrollbar-thumb:hover,
+.formStageViewportExpanded::-webkit-scrollbar-thumb:hover {
+  background: rgba(47, 107, 255, 0.92);
+}
+
+.formStageViewport :global(.ant-input),
+.formStageViewport :global(.ant-input-affix-wrapper),
+.formStageViewport :global(.ant-select-selector),
+.formStageViewport :global(.ant-input-textarea textarea) {
+  box-shadow: none;
+}
+
+.formStageViewportExpanded :global(.ant-input-textarea textarea) {
+  min-height: 92px;
+  max-height: 192px;
+  overflow-y: auto !important;
+  resize: none;
+}
+
+.formStageViewportCompact :global(.ant-input-textarea textarea) {
+  min-height: 92px;
+  max-height: 192px;
+  overflow-y: auto !important;
+  resize: none;
+}
+
+.formStageViewport :global(.ant-select-selector) {
+  min-height: 40px;
+}
+
+.formStageViewport :global(.ant-input-textarea) {
+  min-height: 92px;
 }
 
 .answerStrip {
   display: flex;
-  flex-wrap: wrap;
-  gap: 6px;
+  flex-wrap: nowrap;
+  gap: 8px;
+  overflow-x: auto;
+  padding-bottom: 2px;
+  scrollbar-width: thin;
 }
 
 .answerPill {
@@ -153,12 +251,22 @@
   align-items: center;
   max-width: 100%;
   gap: 6px;
-  padding: 4px 8px;
-  border: 1px solid rgba(36, 58, 96, 0.1);
+  padding: 5px 10px;
+  border: 1px solid rgba(36, 58, 96, 0.08);
   border-radius: 999px;
-  background: rgba(255, 255, 255, 0.74);
+  background: rgba(255, 255, 255, 0.72);
   color: rgba(35, 48, 76, 0.72);
   cursor: pointer;
+  transition:
+    transform 0.18s ease,
+    background-color 0.18s ease,
+    border-color 0.18s ease;
+}
+
+.answerPill:hover {
+  transform: translateY(-1px);
+  background: rgba(255, 255, 255, 0.92);
+  border-color: rgba(47, 107, 255, 0.16);
 }
 
 .answerPill span,
@@ -169,13 +277,15 @@
 }
 
 .answerPill span {
-  max-width: 112px;
-  font-size: 11px;
-  font-weight: 600;
+  max-width: 96px;
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
 }
 
 .answerPill strong {
-  max-width: 180px;
+  max-width: 200px;
   color: rgba(21, 31, 52, 0.9);
   font-size: 12px;
   font-weight: 700;
@@ -183,6 +293,7 @@
 
 .formNav {
   gap: 8px;
+  padding-top: 2px;
 }
 
 :global(.dark-mode) {
@@ -193,16 +304,13 @@
         rgba(29, 33, 44, 0.96),
         rgba(22, 26, 35, 0.96)
       ),
-      radial-gradient(circle at 0 0, rgba(74, 126, 255, 0.2), transparent 46%);
-    box-shadow: 0 -10px 30px rgba(0, 0, 0, 0.28);
-  }
-
-  .formStage {
-    border-color: rgba(255, 255, 255, 0.1);
+      radial-gradient(circle at 0 0, rgba(74, 126, 255, 0.18), transparent 46%);
+    box-shadow: 0 16px 34px rgba(0, 0, 0, 0.24);
   }
 
   .formStage {
     background: rgba(255, 255, 255, 0.04);
+    box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.04);
   }
 
   .choicePrompt {
@@ -217,28 +325,64 @@
     color: rgba(255, 255, 255, 0.58);
   }
 
-  .stepDot,
-  .stepDotActive,
-  .stepDotComplete,
-  .answerPill {
-    border-color: rgba(255, 255, 255, 0.12);
-    background: rgba(255, 255, 255, 0.06);
+  .formStageRequired {
+    color: rgba(255, 255, 255, 0.42);
   }
 
-  .stepDot {
-    color: rgba(255, 255, 255, 0.62);
-  }
-
-  .stepDotActive {
-    background: #4a7eff;
-    color: #ffffff;
+  .formStageCount {
+    background: rgba(74, 126, 255, 0.16);
+    color: rgba(255, 255, 255, 0.88);
   }
 
   .answerPill {
-    color: rgba(255, 255, 255, 0.72);
+    border-color: rgba(255, 255, 255, 0.1);
+    background: rgba(255, 255, 255, 0.05);
+    color: rgba(255, 255, 255, 0.74);
+  }
+
+  .answerPill:hover {
+    background: rgba(255, 255, 255, 0.09);
+    border-color: rgba(122, 160, 255, 0.22);
   }
 
   .answerPill strong {
     color: rgba(255, 255, 255, 0.9);
+  }
+
+  .choiceOptionsViewport,
+  .formStageViewportExpanded {
+    scrollbar-color: rgba(122, 160, 255, 0.92) rgba(255, 255, 255, 0.14);
+  }
+
+  .choiceScrollTrack {
+    background: linear-gradient(
+      180deg,
+      rgba(255, 255, 255, 0.12),
+      rgba(255, 255, 255, 0.2)
+    );
+    box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.08);
+  }
+
+  .choiceScrollThumb {
+    background: linear-gradient(180deg, #a5bcff, #6f96ff);
+    box-shadow:
+      0 4px 10px rgba(84, 130, 255, 0.26),
+      inset 0 1px 0 rgba(255, 255, 255, 0.34);
+  }
+
+  .choiceOptionsViewport::-webkit-scrollbar-track,
+  .formStageViewportExpanded::-webkit-scrollbar-track {
+    background: rgba(255, 255, 255, 0.12);
+  }
+
+  .choiceOptionsViewport::-webkit-scrollbar-thumb,
+  .formStageViewportExpanded::-webkit-scrollbar-thumb {
+    background: rgba(122, 160, 255, 0.88);
+    border-color: rgba(22, 26, 35, 0.88);
+  }
+
+  .choiceOptionsViewport::-webkit-scrollbar-thumb:hover,
+  .formStageViewportExpanded::-webkit-scrollbar-thumb:hover {
+    background: rgba(148, 179, 255, 0.98);
   }
 }

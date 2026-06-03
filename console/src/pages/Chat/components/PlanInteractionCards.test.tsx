@@ -9,6 +9,7 @@ import {
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { createContext } from "use-context-selector";
 import { PlanClarificationCard, PlanReviewCard } from "./PlanInteractionCards";
+import styles from "./PlanInteractionCards.module.less";
 
 vi.mock("@/components/agentscope-chat", () => ({
   ChatAnywhereSessionsContext: createContext({
@@ -120,7 +121,7 @@ describe("Plan interaction cards", () => {
   });
 
   it("renders multiple-choice and text clarification inputs", () => {
-    const { rerender } = render(
+    const { container, rerender } = render(
       <PlanClarificationCard
         data={{
           card_type: "plan_clarification",
@@ -136,6 +137,9 @@ describe("Plan interaction cards", () => {
 
     expect(screen.getByLabelText("Lint")).toBeInTheDocument();
     expect(screen.getByLabelText("Test")).toBeInTheDocument();
+    expect(
+      container.querySelector(`.${styles.choiceOptionsViewport}`),
+    ).toBeInTheDocument();
 
     rerender(
       <PlanClarificationCard
@@ -148,6 +152,28 @@ describe("Plan interaction cards", () => {
     );
 
     expect(screen.getByPlaceholderText("Add detail")).toBeInTheDocument();
+  });
+
+  it("shows a persistent scroll hint when choice options exceed three rows", () => {
+    const { container } = render(
+      <PlanClarificationCard
+        data={{
+          card_type: "plan_clarification",
+          kind: "multi_choice",
+          prompt: "Pick checks",
+          options: [
+            { id: "lint", label: "Lint" },
+            { id: "test", label: "Test" },
+            { id: "build", label: "Build" },
+            { id: "deploy", label: "Deploy" },
+          ],
+        }}
+      />,
+    );
+
+    expect(
+      container.querySelector(`.${styles.choiceScrollHint}`),
+    ).toBeInTheDocument();
   });
 
   it("submits custom text for choice clarification when allowed", async () => {
@@ -293,6 +319,46 @@ describe("Plan interaction cards", () => {
     });
 
     submit.cleanup();
+  });
+
+  it("renders compact form progress without numeric step buttons", () => {
+    const { container } = render(
+      <PlanClarificationCard
+        data={{
+          card_type: "plan_clarification",
+          kind: "form",
+          form_id: "customer_plan_clarification",
+          prompt: "Collect planning context",
+          allow_custom_response: true,
+          fields: [
+            {
+              id: "industry",
+              label: "所在行业",
+              type: "select",
+              required: true,
+              options: [{ id: "retail", label: "零售/电商" }],
+            },
+            {
+              id: "current_challenges",
+              label: "当前主要挑战",
+              type: "textarea",
+              placeholder: "请补充",
+            },
+          ],
+        }}
+      />,
+    );
+
+    expect(screen.getByText("1/3")).toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: "Question 1" }),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: "Question 2" }),
+    ).not.toBeInTheDocument();
+    expect(
+      container.querySelector(`.${styles.formStageViewportCompact}`),
+    ).toBeInTheDocument();
   });
 
   it("submits structured multiselect form values as selected option ids", async () => {

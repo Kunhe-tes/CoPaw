@@ -12,7 +12,6 @@ import {
 import {
   ArrowLeft,
   ArrowRight,
-  CheckCircle2,
   ClipboardCheck,
 } from "lucide-react";
 import {
@@ -278,6 +277,15 @@ function PlanClarificationFormSteps({
   const canGoBack = boundedStep > 0;
   const canGoNext = boundedStep < totalSteps - 1 && currentFieldComplete;
   const isFinalStep = totalSteps === 0 || boundedStep === totalSteps - 1;
+  const hasCompletedAnswers = fields.some((field) =>
+    hasFormValue(formValues[field.id]),
+  );
+  const stageViewportClassName = [
+    styles.formStageViewport,
+    activeField?.type === "textarea" || isCustomResponseStep
+      ? styles.formStageViewportExpanded
+      : styles.formStageViewportCompact,
+  ].join(" ");
 
   useEffect(() => {
     setActiveStep((current) => getBoundedFormStep(current, totalSteps));
@@ -295,49 +303,18 @@ function PlanClarificationFormSteps({
 
   return (
     <div className={styles.formStepper}>
-      {totalSteps > 1 ? (
-        <div className={styles.stepRail} aria-label="Clarification progress">
-          {Array.from({ length: totalSteps }).map((_, index) => {
-            const field = fields[index];
-            const isComplete =
-              field && hasFormValue(formValues[field.id])
-                ? true
-                : index === fields.length && textInput.trim().length > 0;
-            return (
-              <button
-                key={field?.id || "custom-response"}
-                type="button"
-                className={
-                  index === boundedStep
-                    ? styles.stepDotActive
-                    : isComplete
-                    ? styles.stepDotComplete
-                    : styles.stepDot
-                }
-                aria-label={`Question ${index + 1}`}
-                onClick={() => {
-                  if (index <= boundedStep || isComplete) {
-                    setActiveStep(index);
-                  }
-                }}
-              >
-                {isComplete ? <CheckCircle2 size={14} /> : index + 1}
-              </button>
-            );
-          })}
-        </div>
-      ) : null}
-
       <div className={styles.formStage}>
-        <div className={styles.formStageHeader}>
+        <div className={styles.formStageMeta}>
           <span className={styles.formStageCount}>
             {totalSteps > 0 ? `${boundedStep + 1}/${totalSteps}` : "0/0"}
           </span>
-          <Typography.Text className={styles.formStageTitle} strong>
-            {activeField?.label || "Additional context"}
-            {activeField?.required ? " *" : ""}
-          </Typography.Text>
+          {activeField?.required ? (
+            <span className={styles.formStageRequired}>Required</span>
+          ) : null}
         </div>
+        <Typography.Text className={styles.formStageTitle} strong>
+          {activeField?.label || "Additional context"}
+        </Typography.Text>
 
         {activeField?.description ? (
           <Typography.Text className={styles.formStageDescription}>
@@ -345,47 +322,49 @@ function PlanClarificationFormSteps({
           </Typography.Text>
         ) : null}
 
-        {activeField ? (
-          <PlanClarificationFieldInput
-            field={activeField}
-            value={formValues[activeField.id]}
-            onChange={(value) => onFieldChange(activeField.id, value)}
-          />
+        {hasCompletedAnswers ? (
+          <div className={styles.answerStrip}>
+            {fields.map((field, index) => {
+              const formattedValue = formatFormFieldValue(
+                field,
+                formValues[field.id],
+              );
+              if (!formattedValue) return null;
+              return (
+                <button
+                  key={field.id}
+                  type="button"
+                  className={styles.answerPill}
+                  onClick={() => setActiveStep(index)}
+                >
+                  <span>{field.label}</span>
+                  <strong>{formattedValue}</strong>
+                </button>
+              );
+            })}
+          </div>
         ) : null}
 
-        {isCustomResponseStep ? (
-          <Input.TextArea
-            autoSize={{ minRows: 3, maxRows: 6 }}
-            className={styles.fieldControl}
-            placeholder="Custom response"
-            value={textInput}
-            onChange={(event) => onTextInputChange(event.target.value)}
-          />
-        ) : null}
-      </div>
+        <div className={stageViewportClassName}>
+          {activeField ? (
+            <PlanClarificationFieldInput
+              field={activeField}
+              value={formValues[activeField.id]}
+              onChange={(value) => onFieldChange(activeField.id, value)}
+            />
+          ) : null}
 
-      {fields.some((field) => hasFormValue(formValues[field.id])) ? (
-        <div className={styles.answerStrip}>
-          {fields.map((field, index) => {
-            const formattedValue = formatFormFieldValue(
-              field,
-              formValues[field.id],
-            );
-            if (!formattedValue) return null;
-            return (
-              <button
-                key={field.id}
-                type="button"
-                className={styles.answerPill}
-                onClick={() => setActiveStep(index)}
-              >
-                <span>{field.label}</span>
-                <strong>{formattedValue}</strong>
-              </button>
-            );
-          })}
+          {isCustomResponseStep ? (
+            <Input.TextArea
+              autoSize={{ minRows: 3, maxRows: 6 }}
+              className={styles.fieldControl}
+              placeholder="Custom response"
+              value={textInput}
+              onChange={(event) => onTextInputChange(event.target.value)}
+            />
+          ) : null}
         </div>
-      ) : null}
+      </div>
 
       <Flex justify="space-between" align="center" className={styles.formNav}>
         <Button
@@ -522,6 +501,7 @@ export function PlanClarificationCard({
   };
 
   if (submitted) return null;
+  const choiceOptionsNeedScrollHint = options.length > 3;
 
   return (
     <div className={styles.planClarificationCard}>
@@ -532,32 +512,50 @@ export function PlanClarificationCard({
           </Typography.Text>
         ) : null}
         {data.kind === "single_choice" ? (
-          <Radio.Group
-            value={singleChoice}
-            onChange={(event) => setSingleChoice(event.target.value)}
-          >
-            <Space direction="vertical">
-              {options.map((option) => (
-                <Radio key={option.id} value={option.id}>
-                  {option.label}
-                </Radio>
-              ))}
-            </Space>
-          </Radio.Group>
+          <div className={styles.choiceOptionsViewport}>
+            {choiceOptionsNeedScrollHint ? (
+              <span aria-hidden="true" className={styles.choiceScrollHint}>
+                <span className={styles.choiceScrollTrack}>
+                  <span className={styles.choiceScrollThumb} />
+                </span>
+              </span>
+            ) : null}
+            <Radio.Group
+              value={singleChoice}
+              onChange={(event) => setSingleChoice(event.target.value)}
+            >
+              <Space direction="vertical" className={styles.choiceOptionList}>
+                {options.map((option) => (
+                  <Radio key={option.id} value={option.id}>
+                    {option.label}
+                  </Radio>
+                ))}
+              </Space>
+            </Radio.Group>
+          </div>
         ) : null}
         {data.kind === "multi_choice" ? (
-          <Checkbox.Group
-            value={multiChoice}
-            onChange={(values) => setMultiChoice(values.map(String))}
-          >
-            <Space direction="vertical">
-              {options.map((option) => (
-                <Checkbox key={option.id} value={option.id}>
-                  {option.label}
-                </Checkbox>
-              ))}
-            </Space>
-          </Checkbox.Group>
+          <div className={styles.choiceOptionsViewport}>
+            {choiceOptionsNeedScrollHint ? (
+              <span aria-hidden="true" className={styles.choiceScrollHint}>
+                <span className={styles.choiceScrollTrack}>
+                  <span className={styles.choiceScrollThumb} />
+                </span>
+              </span>
+            ) : null}
+            <Checkbox.Group
+              value={multiChoice}
+              onChange={(values) => setMultiChoice(values.map(String))}
+            >
+              <Space direction="vertical" className={styles.choiceOptionList}>
+                {options.map((option) => (
+                  <Checkbox key={option.id} value={option.id}>
+                    {option.label}
+                  </Checkbox>
+                ))}
+              </Space>
+            </Checkbox.Group>
+          </div>
         ) : null}
         {data.kind === "text_input" ? (
           <Input.TextArea
