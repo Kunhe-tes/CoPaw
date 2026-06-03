@@ -3,6 +3,13 @@
   display: inline-flex;
 }
 
+.portal {
+  position: fixed;
+  inset: 0;
+  z-index: 1100;
+  pointer-events: none;
+}
+
 .trigger {
   display: inline-flex;
   align-items: center;
@@ -35,15 +42,13 @@
 
 .panel {
   position: absolute;
-  left: 0;
-  bottom: calc(100% + 12px);
-  z-index: 20;
   min-width: 176px;
   padding: 10px;
   background: #fff;
   border: 1px solid rgba(0, 0, 0, 0.08);
   border-radius: 20px;
   box-shadow: 0 18px 40px rgba(15, 23, 42, 0.14);
+  pointer-events: auto;
 }
 
 .itemWrap + .itemWrap {

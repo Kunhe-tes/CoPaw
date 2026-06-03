@@ -1,6 +1,14 @@
 import { PlusOutlined } from "@ant-design/icons";
 import classNames from "classnames";
-import React, { useEffect, useMemo, useRef, useState } from "react";
+import React, {
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
+import { createPortal } from "react-dom";
 import styles from "./index.module.less";
 
 export interface ComposerQuickMenuProps {
@@ -56,10 +64,49 @@ export default function ComposerQuickMenu(props: ComposerQuickMenuProps) {
   const { children, disabled = false, triggerLabel } = props;
   const [open, setOpen] = useState(false);
   const rootRef = useRef<HTMLDivElement>(null);
+  const triggerRef = useRef<HTMLButtonElement>(null);
+  const panelRef = useRef<HTMLDivElement>(null);
+  const [panelStyle, setPanelStyle] = useState<React.CSSProperties | null>(
+    null,
+  );
   const items = useMemo(
     () => React.Children.toArray(children).filter(Boolean),
     [children],
   );
+
+  const updatePanelPosition = useCallback(() => {
+    if (!triggerRef.current || !panelRef.current) {
+      return;
+    }
+
+    const gap = 12;
+    const viewportPadding = 16;
+    const triggerRect = triggerRef.current.getBoundingClientRect();
+    const panelRect = panelRef.current.getBoundingClientRect();
+    const maxLeft = Math.max(
+      viewportPadding,
+      window.innerWidth - panelRect.width - viewportPadding,
+    );
+    const left = Math.min(
+      Math.max(triggerRect.left, viewportPadding),
+      maxLeft,
+    );
+    const openAbove =
+      triggerRect.top >= panelRect.height + gap + viewportPadding;
+    const maxTop = Math.max(
+      viewportPadding,
+      window.innerHeight - panelRect.height - viewportPadding,
+    );
+    const top = openAbove
+      ? triggerRect.top - panelRect.height - gap
+      : Math.min(triggerRect.bottom + gap, maxTop);
+
+    setPanelStyle({
+      left,
+      top,
+      visibility: "visible",
+    });
+  }, []);
 
   useEffect(() => {
     if (disabled) {
@@ -74,9 +121,9 @@ export default function ComposerQuickMenu(props: ComposerQuickMenuProps) {
 
     const handlePointerDown = (event: MouseEvent) => {
       if (
-        rootRef.current &&
         event.target instanceof Node &&
-        !rootRef.current.contains(event.target)
+        !rootRef.current?.contains(event.target) &&
+        !panelRef.current?.contains(event.target)
       ) {
         setOpen(false);
       }
@@ -88,13 +135,59 @@ export default function ComposerQuickMenu(props: ComposerQuickMenuProps) {
     };
   }, [open]);
 
+  useLayoutEffect(() => {
+    if (!open) {
+      setPanelStyle(null);
+      return;
+    }
+
+    updatePanelPosition();
+
+    const handleReposition = () => {
+      updatePanelPosition();
+    };
+
+    window.addEventListener("resize", handleReposition);
+    window.addEventListener("scroll", handleReposition, true);
+
+    return () => {
+      window.removeEventListener("resize", handleReposition);
+      window.removeEventListener("scroll", handleReposition, true);
+    };
+  }, [open, updatePanelPosition]);
+
   if (items.length === 0) {
     return null;
   }
 
+  const panel =
+    open && !disabled
+      ? createPortal(
+          <div className={styles.portal}>
+            <div
+              ref={panelRef}
+              className={styles.panel}
+              style={panelStyle || { visibility: "hidden" }}
+              onClick={() => setOpen(false)}
+            >
+              {items.map((item, index) => (
+                <div
+                  key={(React.isValidElement(item) && item.key) || index}
+                  className={styles.itemWrap}
+                >
+                  {item}
+                </div>
+              ))}
+            </div>
+          </div>,
+          document.body,
+        )
+      : null;
+
   return (
     <div className={styles.root} ref={rootRef}>
       <button
+        ref={triggerRef}
         aria-label={triggerLabel}
         className={styles.trigger}
         disabled={disabled}
@@ -107,18 +200,7 @@ export default function ComposerQuickMenu(props: ComposerQuickMenuProps) {
       >
         <PlusOutlined />
       </button>
-      {open && !disabled ? (
-        <div className={styles.panel} onClick={() => setOpen(false)}>
-          {items.map((item, index) => (
-            <div
-              key={(React.isValidElement(item) && item.key) || index}
-              className={styles.itemWrap}
-            >
-              {item}
-            </div>
-          ))}
-        </div>
-      ) : null}
+      {panel}
     </div>
   );
 }

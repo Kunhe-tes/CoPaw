@@ -67,4 +67,20 @@ describe("ComposerQuickMenu", () => {
       expect(screen.queryByText("计划模式")).not.toBeInTheDocument();
     });
   });
+
+  it("renders the menu in a portal so overlays do not clip it", async () => {
+    const { container } = render(
+      <div style={{ overflow: "hidden" }}>
+        <ComposerQuickMenu triggerLabel="快捷操作">
+          <ComposerQuickMenuItem label="上传文件" />
+        </ComposerQuickMenu>
+      </div>,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "快捷操作" }));
+
+    const menuItem = await screen.findByText("上传文件");
+    expect(container).not.toContainElement(menuItem);
+    expect(document.body).toContainElement(menuItem);
+  });
 });
