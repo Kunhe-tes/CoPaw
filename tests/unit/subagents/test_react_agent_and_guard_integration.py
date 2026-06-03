@@ -8,6 +8,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from agentscope.tool import ToolResponse
 
 from swe.agents import react_agent as react_agent_module
 from swe.agents.hook_runtime.models import MergedHookResult
@@ -28,6 +29,44 @@ class _Memory:
 class _BaseAgent:
     async def _acting(self, tool_call):
         return {"content": tool_call["input"]}
+
+
+class _PlanningToolkit:
+    async def call_tool_function(self, tool_call):
+        async def _chunks():
+            yield ToolResponse(
+                content=[
+                    {
+                        "type": "text",
+                        "text": "Planning clarification requested.",
+                    },
+                ],
+                metadata={
+                    "plan_interaction_card": {
+                        "card_type": "plan_clarification",
+                        "kind": "form",
+                        "prompt": tool_call["input"]["prompt"],
+                        "form_id": "customer_operation_plan",
+                        "fields": [
+                            {
+                                "id": "industry",
+                                "label": "行业/业务类型",
+                                "type": "select",
+                                "options": [
+                                    {
+                                        "id": "SaaS/软件服务",
+                                        "label": "SaaS/软件服务",
+                                    },
+                                ],
+                                "required": True,
+                            },
+                        ],
+                        "allow_custom_response": True,
+                    },
+                },
+            )
+
+        return _chunks()
 
 
 class _FakeGuardAgent(ToolGuardMixin, _BaseAgent):
@@ -100,6 +139,12 @@ class _FakePlanGuardAgent(ToolGuardMixin, _BaseAgent):
 
     async def print(self, msg, *args, **kwargs):
         self.printed.append(msg)
+
+
+class _FakePlanInteractionAgent(_FakePlanGuardAgent):
+    def __init__(self, tmp_path: Path):
+        super().__init__(tmp_path)
+        self.toolkit = _PlanningToolkit()
 
 
 class _FakeNormalMainGuardAgent(ToolGuardMixin, _BaseAgent):
@@ -343,6 +388,55 @@ async def test_plan_mode_hard_policy_allows_memory_and_clarification_tools(
         )
 
         assert result == {"content": tool_input}
+
+
+@pytest.mark.asyncio
+async def test_plan_interaction_tool_metadata_is_printed_and_persisted(
+    tmp_path: Path,
+) -> None:
+    """计划交互卡片依赖消息 metadata，不能只保留工具文本输出。"""
+    agent = _FakePlanInteractionAgent(tmp_path)
+
+    result = await agent._acting(
+        {
+            "id": "tool-plan-1",
+            "name": "ask_plan_clarification",
+            "input": {
+                "prompt": "制定客户经营计划需要明确几个方向，请告诉我：",
+                "kind": "customer_operation_plan",
+            },
+        },
+    )
+
+    assert result is None
+    assert agent.printed
+    assert agent.printed[-1].metadata["plan_interaction_card"] == {
+        "card_type": "plan_clarification",
+        "kind": "form",
+        "prompt": "制定客户经营计划需要明确几个方向，请告诉我：",
+        "form_id": "customer_operation_plan",
+        "fields": [
+            {
+                "id": "industry",
+                "label": "行业/业务类型",
+                "type": "select",
+                "options": [
+                    {
+                        "id": "SaaS/软件服务",
+                        "label": "SaaS/软件服务",
+                    },
+                ],
+                "required": True,
+            },
+        ],
+        "allow_custom_response": True,
+    }
+    assert (
+        agent.memory.content[-1][0].metadata["plan_interaction_card"][
+            "form_id"
+        ]
+        == "customer_operation_plan"
+    )
 
 
 def test_plan_mode_toolkit_keeps_readonly_delegation_when_enabled(

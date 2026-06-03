@@ -9,8 +9,18 @@ import {
   Space,
   Typography,
 } from "antd";
-import { ClipboardCheck, FileQuestion } from "lucide-react";
-import { OperateCard } from "@/components/agentscope-chat";
+import {
+  ArrowLeft,
+  ArrowRight,
+  CheckCircle2,
+  ClipboardCheck,
+} from "lucide-react";
+import {
+  ChatAnywhereSessionsContext,
+  type IAgentScopeRuntimeWebUIMessage,
+  OperateCard,
+} from "@/components/agentscope-chat";
+import { ChatAnywhereMessagesContext } from "@/components/agentscope-chat/AgentScopeRuntimeWebUI/core/Context/ChatAnywhereMessagesContext";
 import { emit } from "@/components/agentscope-chat/AgentScopeRuntimeWebUI/core/Context/useChatAnywhereEventEmitter";
 import type {
   ChatPlanClarificationCardData,
@@ -18,12 +28,16 @@ import type {
   ChatPlanReviewCardData,
   PlanClarificationOption,
 } from "../messageMeta";
+import styles from "./PlanInteractionCards.module.less";
+import { useContextSelector } from "use-context-selector";
 
+const PLAN_CLARIFICATION_STORAGE_KEY = "copaw_submitted_plan_clarifications";
 const PLAN_REVIEW_STORAGE_KEY = "copaw_submitted_plan_reviews";
+const PLAN_INTERACTION_CARD_CODE = "PlanInteraction";
 
-function loadSubmittedPlanIds(): Set<string> {
+function loadSubmittedInteractionKeys(storageKey: string): Set<string> {
   try {
-    const raw = sessionStorage.getItem(PLAN_REVIEW_STORAGE_KEY);
+    const raw = sessionStorage.getItem(storageKey);
     if (!raw) return new Set();
     const parsed = JSON.parse(raw);
     if (!Array.isArray(parsed)) return new Set();
@@ -35,18 +49,26 @@ function loadSubmittedPlanIds(): Set<string> {
   }
 }
 
-function storeSubmittedPlanId(planId: string): void {
-  if (!planId) return;
-  const submittedIds = loadSubmittedPlanIds();
-  submittedIds.add(planId);
+function storeSubmittedInteractionKey(storageKey: string, key: string): void {
+  if (!key) return;
+  const submittedIds = loadSubmittedInteractionKeys(storageKey);
+  submittedIds.add(key);
   try {
     sessionStorage.setItem(
-      PLAN_REVIEW_STORAGE_KEY,
+      storageKey,
       JSON.stringify(Array.from(submittedIds)),
     );
   } catch {
     return;
   }
+}
+
+function loadSubmittedPlanIds(): Set<string> {
+  return loadSubmittedInteractionKeys(PLAN_REVIEW_STORAGE_KEY);
+}
+
+function storeSubmittedPlanId(planId: string): void {
+  storeSubmittedInteractionKey(PLAN_REVIEW_STORAGE_KEY, planId);
 }
 
 function optionLabels(
@@ -97,16 +119,330 @@ function collectFormValues(
   );
 }
 
+function isPlanClarificationCardData(
+  data: unknown,
+): data is ChatPlanClarificationCardData {
+  return (
+    Boolean(data) &&
+    typeof data === "object" &&
+    (data as { card_type?: unknown }).card_type === "plan_clarification"
+  );
+}
+
+function findLatestPlanClarificationCard(
+  messages: IAgentScopeRuntimeWebUIMessage[],
+): ChatPlanClarificationCardData | null {
+  for (
+    let messageIndex = messages.length - 1;
+    messageIndex >= 0;
+    messageIndex -= 1
+  ) {
+    const cards = messages[messageIndex]?.cards || [];
+    for (let cardIndex = cards.length - 1; cardIndex >= 0; cardIndex -= 1) {
+      const card = cards[cardIndex];
+      if (
+        card.code === PLAN_INTERACTION_CARD_CODE &&
+        isPlanClarificationCardData(card.data)
+      ) {
+        return card.data;
+      }
+    }
+  }
+  return null;
+}
+
+function createPlanClarificationSubmissionKey(
+  data: ChatPlanClarificationCardData,
+  sessionId: string | undefined,
+): string {
+  return JSON.stringify({
+    session_id: sessionId || "unknown",
+    kind: data.kind,
+    prompt: data.prompt,
+    form_id: data.form_id,
+    options: data.options || [],
+    fields: data.fields || [],
+    allow_custom_response: data.allow_custom_response === true,
+  });
+}
+
+function getInitialFormStep(fields: PlanClarificationField[]): number {
+  return fields.length > 0 ? 0 : 0;
+}
+
+function getBoundedFormStep(step: number, totalSteps: number): number {
+  if (totalSteps <= 0) return 0;
+  return Math.min(Math.max(step, 0), totalSteps - 1);
+}
+
+function PlanClarificationFieldInput({
+  field,
+  value,
+  onChange,
+}: {
+  field: PlanClarificationField;
+  value: string | string[] | undefined;
+  onChange: (value: string | string[]) => void;
+}) {
+  if (field.type === "select") {
+    return (
+      <Select
+        aria-label={field.label}
+        className={styles.fieldControl}
+        placeholder={field.placeholder || field.label}
+        value={typeof value === "string" ? value : undefined}
+        options={(field.options || []).map((option) => ({
+          value: option.id,
+          label: option.label,
+        }))}
+        onChange={(nextValue) => onChange(String(nextValue))}
+      />
+    );
+  }
+
+  if (field.type === "multiselect") {
+    return (
+      <Select
+        mode="multiple"
+        aria-label={field.label}
+        className={styles.fieldControl}
+        placeholder={field.placeholder || field.label}
+        value={Array.isArray(value) ? value : []}
+        options={(field.options || []).map((option) => ({
+          value: option.id,
+          label: option.label,
+        }))}
+        onChange={(nextValue) => {
+          const selectedValues = Array.isArray(nextValue) ? nextValue : [];
+          onChange(selectedValues.map(String));
+        }}
+      />
+    );
+  }
+
+  if (field.type === "textarea") {
+    return (
+      <Input.TextArea
+        aria-label={field.label}
+        autoSize={{ minRows: 3, maxRows: 6 }}
+        className={styles.fieldControl}
+        placeholder={field.placeholder || field.label}
+        value={typeof value === "string" ? value : ""}
+        onChange={(event) => onChange(event.target.value)}
+      />
+    );
+  }
+
+  return (
+    <Input
+      aria-label={field.label}
+      className={styles.fieldControl}
+      placeholder={field.placeholder || field.label}
+      value={typeof value === "string" ? value : ""}
+      onChange={(event) => onChange(event.target.value)}
+    />
+  );
+}
+
+function PlanClarificationFormSteps({
+  fields,
+  formValues,
+  textInput,
+  allowCustomResponse,
+  disabled,
+  onFieldChange,
+  onTextInputChange,
+  onSubmit,
+}: {
+  fields: PlanClarificationField[];
+  formValues: Record<string, string | string[]>;
+  textInput: string;
+  allowCustomResponse: boolean;
+  disabled: boolean;
+  onFieldChange: (fieldId: string, value: string | string[]) => void;
+  onTextInputChange: (value: string) => void;
+  onSubmit: () => void;
+}) {
+  const hasCustomResponseStep = allowCustomResponse;
+  const totalSteps = fields.length + (hasCustomResponseStep ? 1 : 0);
+  const [activeStep, setActiveStep] = useState(() =>
+    getInitialFormStep(fields),
+  );
+  const boundedStep = getBoundedFormStep(activeStep, totalSteps);
+  const activeField =
+    boundedStep < fields.length ? fields[boundedStep] : undefined;
+  const isCustomResponseStep = !activeField && hasCustomResponseStep;
+  const currentFieldComplete = activeField
+    ? !activeField.required || hasFormValue(formValues[activeField.id])
+    : true;
+  const canGoBack = boundedStep > 0;
+  const canGoNext = boundedStep < totalSteps - 1 && currentFieldComplete;
+  const isFinalStep = totalSteps === 0 || boundedStep === totalSteps - 1;
+
+  useEffect(() => {
+    setActiveStep((current) => getBoundedFormStep(current, totalSteps));
+  }, [totalSteps]);
+
+  const goBack = () => {
+    if (!canGoBack) return;
+    setActiveStep((current) => getBoundedFormStep(current - 1, totalSteps));
+  };
+
+  const goNext = () => {
+    if (!canGoNext) return;
+    setActiveStep((current) => getBoundedFormStep(current + 1, totalSteps));
+  };
+
+  return (
+    <div className={styles.formStepper}>
+      {totalSteps > 1 ? (
+        <div className={styles.stepRail} aria-label="Clarification progress">
+          {Array.from({ length: totalSteps }).map((_, index) => {
+            const field = fields[index];
+            const isComplete =
+              field && hasFormValue(formValues[field.id])
+                ? true
+                : index === fields.length && textInput.trim().length > 0;
+            return (
+              <button
+                key={field?.id || "custom-response"}
+                type="button"
+                className={
+                  index === boundedStep
+                    ? styles.stepDotActive
+                    : isComplete
+                    ? styles.stepDotComplete
+                    : styles.stepDot
+                }
+                aria-label={`Question ${index + 1}`}
+                onClick={() => {
+                  if (index <= boundedStep || isComplete) {
+                    setActiveStep(index);
+                  }
+                }}
+              >
+                {isComplete ? <CheckCircle2 size={14} /> : index + 1}
+              </button>
+            );
+          })}
+        </div>
+      ) : null}
+
+      <div className={styles.formStage}>
+        <div className={styles.formStageHeader}>
+          <span className={styles.formStageCount}>
+            {totalSteps > 0 ? `${boundedStep + 1}/${totalSteps}` : "0/0"}
+          </span>
+          <Typography.Text className={styles.formStageTitle} strong>
+            {activeField?.label || "Additional context"}
+            {activeField?.required ? " *" : ""}
+          </Typography.Text>
+        </div>
+
+        {activeField?.description ? (
+          <Typography.Text className={styles.formStageDescription}>
+            {activeField.description}
+          </Typography.Text>
+        ) : null}
+
+        {activeField ? (
+          <PlanClarificationFieldInput
+            field={activeField}
+            value={formValues[activeField.id]}
+            onChange={(value) => onFieldChange(activeField.id, value)}
+          />
+        ) : null}
+
+        {isCustomResponseStep ? (
+          <Input.TextArea
+            autoSize={{ minRows: 3, maxRows: 6 }}
+            className={styles.fieldControl}
+            placeholder="Custom response"
+            value={textInput}
+            onChange={(event) => onTextInputChange(event.target.value)}
+          />
+        ) : null}
+      </div>
+
+      {fields.some((field) => hasFormValue(formValues[field.id])) ? (
+        <div className={styles.answerStrip}>
+          {fields.map((field, index) => {
+            const formattedValue = formatFormFieldValue(
+              field,
+              formValues[field.id],
+            );
+            if (!formattedValue) return null;
+            return (
+              <button
+                key={field.id}
+                type="button"
+                className={styles.answerPill}
+                onClick={() => setActiveStep(index)}
+              >
+                <span>{field.label}</span>
+                <strong>{formattedValue}</strong>
+              </button>
+            );
+          })}
+        </div>
+      ) : null}
+
+      <Flex justify="space-between" align="center" className={styles.formNav}>
+        <Button
+          icon={<ArrowLeft size={14} />}
+          disabled={!canGoBack}
+          onClick={goBack}
+        >
+          Back
+        </Button>
+        {isFinalStep ? (
+          <Button type="primary" disabled={disabled} onClick={onSubmit}>
+            Submit
+          </Button>
+        ) : (
+          <Button
+            type="primary"
+            icon={<ArrowRight size={14} />}
+            iconPosition="end"
+            disabled={!canGoNext}
+            onClick={goNext}
+          >
+            Next
+          </Button>
+        )}
+      </Flex>
+    </div>
+  );
+}
+
 export function PlanClarificationCard({
   data,
 }: {
   data: ChatPlanClarificationCardData;
 }) {
+  const currentSessionId = useContextSelector(
+    ChatAnywhereSessionsContext,
+    (value) => value.currentSessionId,
+  );
   const [singleChoice, setSingleChoice] = useState<string>("");
   const [multiChoice, setMultiChoice] = useState<string[]>([]);
   const [textInput, setTextInput] = useState("");
-  const [formValues, setFormValues] = useState<Record<string, string | string[]>>(
-    {},
+  const [formValues, setFormValues] = useState<
+    Record<string, string | string[]>
+  >({});
+  const submissionKey = useMemo(
+    () =>
+      createPlanClarificationSubmissionKey(
+        data,
+        currentSessionId ||
+          (window as Window & { currentSessionId?: string }).currentSessionId,
+      ),
+    [currentSessionId, data],
+  );
+  const [submitted, setSubmitted] = useState(() =>
+    loadSubmittedInteractionKeys(PLAN_CLARIFICATION_STORAGE_KEY).has(
+      submissionKey,
+    ),
   );
   const options = data.options || [];
   const fields = data.fields || [];
@@ -146,8 +482,16 @@ export function PlanClarificationCard({
       ? !requiredFormFieldsSatisfied || !query
       : selectedIds.length === 0 && !trimmedText;
 
+  useEffect(() => {
+    setSubmitted(
+      loadSubmittedInteractionKeys(PLAN_CLARIFICATION_STORAGE_KEY).has(
+        submissionKey,
+      ),
+    );
+  }, [submissionKey]);
+
   const handleSubmit = () => {
-    if (disabled) return;
+    if (disabled || submitted) return;
     const payload =
       data.kind === "form"
         ? {
@@ -163,6 +507,8 @@ export function PlanClarificationCard({
             selected_option_ids: selectedIds,
             text: trimmedText || undefined,
           };
+    storeSubmittedInteractionKey(PLAN_CLARIFICATION_STORAGE_KEY, submissionKey);
+    setSubmitted(true);
     emit({
       type: "handleSubmit",
       data: {
@@ -175,176 +521,99 @@ export function PlanClarificationCard({
     });
   };
 
+  if (submitted) return null;
+
   return (
-    <OperateCard
-      header={{
-        icon: <FileQuestion size={16} />,
-        title: "Plan clarification",
-        description: data.prompt,
-      }}
-      body={{
-        defaultOpen: true,
-        children: (
-          <OperateCard.LineBody>
-            {data.kind === "single_choice" ? (
-              <Radio.Group
-                value={singleChoice}
-                onChange={(event) => setSingleChoice(event.target.value)}
-              >
-                <Space direction="vertical">
-                  {options.map((option) => (
-                    <Radio key={option.id} value={option.id}>
-                      {option.label}
-                    </Radio>
-                  ))}
-                </Space>
-              </Radio.Group>
-            ) : null}
-            {data.kind === "multi_choice" ? (
-              <Checkbox.Group
-                value={multiChoice}
-                onChange={(values) => setMultiChoice(values.map(String))}
-              >
-                <Space direction="vertical">
-                  {options.map((option) => (
-                    <Checkbox key={option.id} value={option.id}>
-                      {option.label}
-                    </Checkbox>
-                  ))}
-                </Space>
-              </Checkbox.Group>
-            ) : null}
-            {data.kind === "text_input" ? (
-              <Input.TextArea
-                autoSize={{ minRows: 2, maxRows: 5 }}
-                placeholder={data.prompt}
-                value={textInput}
-                onChange={(event) => setTextInput(event.target.value)}
-              />
-            ) : null}
-            {data.kind === "form" ? (
-              <Space direction="vertical" size={12} style={{ width: "100%" }}>
-                {fields.map((field) => (
-                  <div key={field.id}>
-                    <Typography.Text strong>
-                      {field.label}
-                      {field.required ? " *" : ""}
-                    </Typography.Text>
-                    {field.description ? (
-                      <div style={{ marginTop: 4 }}>
-                        <Typography.Text type="secondary">
-                          {field.description}
-                        </Typography.Text>
-                      </div>
-                    ) : null}
-                    {field.type === "select" ? (
-                      <Select
-                        aria-label={field.label}
-                        style={{ width: "100%", marginTop: 8 }}
-                        placeholder={field.placeholder || field.label}
-                        value={
-                          typeof formValues[field.id] === "string"
-                            ? formValues[field.id]
-                            : undefined
-                        }
-                        options={(field.options || []).map((option) => ({
-                          value: option.id,
-                          label: option.label,
-                        }))}
-                        onChange={(value) =>
-                          setFormValues((current) => ({
-                            ...current,
-                            [field.id]: String(value),
-                          }))
-                        }
-                      />
-                    ) : null}
-                    {field.type === "multiselect" ? (
-                      <Select
-                        mode="multiple"
-                        aria-label={field.label}
-                        style={{ width: "100%", marginTop: 8 }}
-                        placeholder={field.placeholder || field.label}
-                        value={
-                          Array.isArray(formValues[field.id])
-                            ? formValues[field.id]
-                            : []
-                        }
-                        options={(field.options || []).map((option) => ({
-                          value: option.id,
-                          label: option.label,
-                        }))}
-                        onChange={(value) => {
-                          const selectedValues = Array.isArray(value)
-                            ? value
-                            : [];
-                          setFormValues((current) => ({
-                            ...current,
-                            [field.id]: selectedValues.map(String),
-                          }));
-                        }}
-                      />
-                    ) : null}
-                    {field.type === "text" ? (
-                      <Input
-                        aria-label={field.label}
-                        style={{ marginTop: 8 }}
-                        placeholder={field.placeholder || field.label}
-                        value={
-                          typeof formValues[field.id] === "string"
-                            ? formValues[field.id]
-                            : ""
-                        }
-                        onChange={(event) =>
-                          setFormValues((current) => ({
-                            ...current,
-                            [field.id]: event.target.value,
-                          }))
-                        }
-                      />
-                    ) : null}
-                    {field.type === "textarea" ? (
-                      <Input.TextArea
-                        aria-label={field.label}
-                        autoSize={{ minRows: 2, maxRows: 5 }}
-                        style={{ marginTop: 8 }}
-                        placeholder={field.placeholder || field.label}
-                        value={
-                          typeof formValues[field.id] === "string"
-                            ? formValues[field.id]
-                            : ""
-                        }
-                        onChange={(event) =>
-                          setFormValues((current) => ({
-                            ...current,
-                            [field.id]: event.target.value,
-                          }))
-                        }
-                      />
-                    ) : null}
-                  </div>
-                ))}
-              </Space>
-            ) : null}
-            {data.kind !== "text_input" && allowsCustomText ? (
-              <Input.TextArea
-                autoSize={{ minRows: 2, maxRows: 5 }}
-                placeholder="Custom response"
-                style={{ marginTop: 12 }}
-                value={textInput}
-                onChange={(event) => setTextInput(event.target.value)}
-              />
-            ) : null}
-            <Flex justify="flex-end" style={{ marginTop: 12 }}>
-              <Button type="primary" disabled={disabled} onClick={handleSubmit}>
-                Submit
-              </Button>
-            </Flex>
-          </OperateCard.LineBody>
-        ),
-      }}
-    />
+    <div className={styles.planClarificationCard}>
+      <div className={styles.planClarificationBody}>
+        {data.kind !== "form" ? (
+          <Typography.Text strong className={styles.choicePrompt}>
+            {data.prompt}
+          </Typography.Text>
+        ) : null}
+        {data.kind === "single_choice" ? (
+          <Radio.Group
+            value={singleChoice}
+            onChange={(event) => setSingleChoice(event.target.value)}
+          >
+            <Space direction="vertical">
+              {options.map((option) => (
+                <Radio key={option.id} value={option.id}>
+                  {option.label}
+                </Radio>
+              ))}
+            </Space>
+          </Radio.Group>
+        ) : null}
+        {data.kind === "multi_choice" ? (
+          <Checkbox.Group
+            value={multiChoice}
+            onChange={(values) => setMultiChoice(values.map(String))}
+          >
+            <Space direction="vertical">
+              {options.map((option) => (
+                <Checkbox key={option.id} value={option.id}>
+                  {option.label}
+                </Checkbox>
+              ))}
+            </Space>
+          </Checkbox.Group>
+        ) : null}
+        {data.kind === "text_input" ? (
+          <Input.TextArea
+            autoSize={{ minRows: 2, maxRows: 5 }}
+            placeholder={data.prompt}
+            value={textInput}
+            onChange={(event) => setTextInput(event.target.value)}
+          />
+        ) : null}
+        {data.kind === "form" ? (
+          <PlanClarificationFormSteps
+            fields={fields}
+            formValues={formValues}
+            textInput={textInput}
+            allowCustomResponse={allowsCustomText}
+            disabled={disabled}
+            onFieldChange={(fieldId, value) =>
+              setFormValues((current) => ({
+                ...current,
+                [fieldId]: value,
+              }))
+            }
+            onTextInputChange={setTextInput}
+            onSubmit={handleSubmit}
+          />
+        ) : null}
+        {data.kind !== "text_input" &&
+        data.kind !== "form" &&
+        allowsCustomText ? (
+          <Input.TextArea
+            autoSize={{ minRows: 2, maxRows: 5 }}
+            placeholder="Custom response"
+            className={styles.choiceCustomResponse}
+            value={textInput}
+            onChange={(event) => setTextInput(event.target.value)}
+          />
+        ) : null}
+        {data.kind !== "form" ? (
+          <Flex justify="flex-end" className={styles.cardActions}>
+            <Button type="primary" disabled={disabled} onClick={handleSubmit}>
+              Submit
+            </Button>
+          </Flex>
+        ) : null}
+      </div>
+    </div>
   );
+}
+
+export function ActivePlanClarificationCard() {
+  const data = useContextSelector(ChatAnywhereMessagesContext, (value) =>
+    findLatestPlanClarificationCard(value.messages || []),
+  );
+
+  if (!data) return null;
+  return <PlanClarificationCard data={data} />;
 }
 
 function PlanList({ title, items }: { title: string; items: string[] }) {

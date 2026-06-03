@@ -104,13 +104,22 @@ class ProposedPlanCreate(_StrictPlanModel):
         "steps",
         "risks",
         "verification",
-        "open_questions",
         mode="after",
     )
     @classmethod
     def _non_empty_text_list(cls, value: list[str]) -> list[str]:
         if not value:
             raise ValueError("must not be empty")
+        if any(not item.strip() for item in value):
+            raise ValueError("items must not be empty")
+        return value
+
+    @field_validator("open_questions", mode="after")
+    @classmethod
+    def _open_questions_items_must_be_non_empty(
+        cls,
+        value: list[str],
+    ) -> list[str]:
         if any(not item.strip() for item in value):
             raise ValueError("items must not be empty")
         return value

@@ -1100,7 +1100,11 @@ export class SessionApi implements IAgentScopeRuntimeWebUISessionAPI {
         (session) => (session as ExtendedSession).sessionId === sessionId,
       ) as ExtendedSession[];
       if (matches.length === 1) {
-        return matches[0].realId || matches[0].id;
+        const matchedSession = matches[0];
+        if (matchedSession.realId) {
+          return matchedSession.realId;
+        }
+        return isLocalTimestamp(matchedSession.id) ? null : matchedSession.id;
       }
 
       return null;

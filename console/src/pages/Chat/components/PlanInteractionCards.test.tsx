@@ -7,9 +7,13 @@ import {
   waitFor,
 } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { createContext } from "use-context-selector";
 import { PlanClarificationCard, PlanReviewCard } from "./PlanInteractionCards";
 
 vi.mock("@/components/agentscope-chat", () => ({
+  ChatAnywhereSessionsContext: createContext({
+    currentSessionId: "chat-1",
+  }),
   OperateCard: Object.assign(
     ({
       header,
@@ -44,6 +48,8 @@ describe("Plan interaction cards", () => {
   afterEach(() => {
     cleanup();
     sessionStorage.clear();
+    (window as Window & { currentSessionId?: string }).currentSessionId =
+      undefined;
   });
 
   it("renders and submits a single-choice clarification", async () => {
@@ -63,6 +69,7 @@ describe("Plan interaction cards", () => {
       />,
     );
 
+    expect(screen.queryByText("Plan clarification")).not.toBeInTheDocument();
     fireEvent.click(screen.getByLabelText("Small"));
     fireEvent.click(screen.getByRole("button", { name: "Submit" }));
 
@@ -78,6 +85,35 @@ describe("Plan interaction cards", () => {
           selected_option_ids: ["small"],
         },
       },
+    });
+    expect(screen.queryByLabelText("Small")).not.toBeInTheDocument();
+
+    submit.cleanup();
+  });
+
+  it("does not render an already submitted clarification in the same session", async () => {
+    const submit = captureSubmitEvents();
+    const data = {
+      card_type: "plan_clarification" as const,
+      kind: "single_choice" as const,
+      prompt: "Pick scope",
+      options: [{ id: "small", label: "Small" }],
+    };
+
+    const { unmount } = render(<PlanClarificationCard data={data} />);
+
+    fireEvent.click(screen.getByLabelText("Small"));
+    fireEvent.click(screen.getByRole("button", { name: "Submit" }));
+
+    await waitFor(() => {
+      expect(submit.handler).toHaveBeenCalledTimes(1);
+    });
+
+    unmount();
+    render(<PlanClarificationCard data={data} />);
+
+    await waitFor(() => {
+      expect(screen.queryByLabelText("Small")).not.toBeInTheDocument();
     });
 
     submit.cleanup();
@@ -220,11 +256,18 @@ describe("Plan interaction cards", () => {
       />,
     );
 
+    expect(screen.queryByPlaceholderText("请补充")).not.toBeInTheDocument();
     fireEvent.mouseDown(screen.getByRole("combobox"));
     fireEvent.click(screen.getByText("零售/电商"));
+    fireEvent.click(screen.getByRole("button", { name: "Next" }));
+    expect(screen.getByPlaceholderText("请补充")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Back" }));
+    expect(screen.getByRole("combobox")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Next" }));
     fireEvent.change(screen.getByPlaceholderText("请补充"), {
       target: { value: "复购率低" },
     });
+    fireEvent.click(screen.getByRole("button", { name: "Next" }));
     fireEvent.change(screen.getByPlaceholderText("Custom response"), {
       target: { value: "希望年度内看到改善" },
     });

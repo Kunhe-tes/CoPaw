@@ -98,7 +98,7 @@ import RuntimeResponseCard from "./components/RuntimeResponseCard";
 import { isResponseFeedbackUserAllowed } from "./components/ResponseFeedbackCard/whitelist";
 import ApprovalActionCard from "./components/ApprovalActionCard";
 import {
-  PlanClarificationCard,
+  ActivePlanClarificationCard,
   PlanReviewCard,
 } from "./components/PlanInteractionCards";
 import TaskRunGroupCard from "./components/TaskRunGroupCard";
@@ -175,9 +175,7 @@ const chatCardRenderers = {
     <ApprovalActionCard {...props} />
   ),
   PlanInteraction: (props: { data: ChatPlanInteractionCardData }) =>
-    props.data.card_type === "plan_clarification" ? (
-      <PlanClarificationCard data={props.data} />
-    ) : (
+    props.data.card_type === "plan_clarification" ? null : (
       <PlanReviewCard data={props.data} />
     ),
   TaskRunGroupCard: (props: { data: ChatTaskRunGroupCardData }) => {
@@ -939,7 +937,7 @@ export default function ChatPage() {
         sessionApi.getChatIdForSession(candidateSessionId) ||
         session?.realId ||
         (session?.id && !/^\d+$/.test(session.id) ? session.id : null) ||
-        (chatId ? sessionApi.getChatIdForSession(chatId) || chatId : null);
+        (chatId ? sessionApi.getChatIdForSession(chatId) : null);
 
       if (existingChatId) {
         return existingChatId;
@@ -1668,10 +1666,7 @@ export default function ChatPage() {
         enabled={planModeEnabled}
         disabled={composerDisabled}
         label={t("chat.planMode.label", "计划模式")}
-        tooltip={t(
-          "chat.planMode.tooltip",
-          "计划模式使用只读工具先产出计划",
-        )}
+        tooltip={t("chat.planMode.tooltip", "计划模式使用只读工具先产出计划")}
         onChange={(enabled) => {
           void persistPlanMode(enabled);
         }}
@@ -1726,9 +1721,14 @@ export default function ChatPage() {
       sender: {
         ...senderConfig,
         beforeSubmit: handleBeforeSubmit,
-        beforeUI: taskProgressEnabled ? (
-          <TaskProgressFloatingCard progress={taskProgress} />
-        ) : null,
+        beforeUI: (
+          <>
+            {taskProgressEnabled ? (
+              <TaskProgressFloatingCard progress={taskProgress} />
+            ) : null}
+            <ActivePlanClarificationCard />
+          </>
+        ),
         quickMenuItems: planModeQuickMenuItems,
         prefix:
           senderPrefixNodes.length > 0 ? <>{senderPrefixNodes}</> : undefined,

@@ -115,6 +115,37 @@ describe("SessionApi identity mapping", () => {
     expect(list[0]?.name).toBe("new chat");
   });
 
+  it("does not expose an unresolved pending local session as a backend chat id", async () => {
+    const sessionApi = new SessionApi();
+
+    await sessionApi.createSession({
+      name: "new chat",
+      messages: [],
+    });
+
+    const logicalSessionId = sessionApi.getPendingSessionId();
+
+    expect(logicalSessionId).toBeTruthy();
+    expect(sessionApi.getChatIdForSession(logicalSessionId!)).toBeNull();
+  });
+
+  it("removes an unresolved pending local session without deleting a backend chat", async () => {
+    const sessionApi = new SessionApi();
+
+    await sessionApi.createSession({
+      name: "new chat",
+      messages: [],
+    });
+
+    const logicalSessionId = sessionApi.getPendingSessionId();
+    expect(logicalSessionId).toBeTruthy();
+
+    const list = await sessionApi.removeSession({ id: logicalSessionId! });
+
+    expect(apiMocks.deleteChat).not.toHaveBeenCalled();
+    expect(list.some((session) => session.id === logicalSessionId)).toBe(false);
+  });
+
   it("keeps multiple pending local sessions when backend persistence has not caught up yet", async () => {
     const sessionApi = new SessionApi();
 

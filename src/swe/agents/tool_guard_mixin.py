@@ -67,6 +67,12 @@ _TOOLS_WITH_SPECIFIC_TIMEOUTS = {
     "grep_search",
     "glob_search",
 }
+_PLAN_INTERACTION_TOOL_NAMES = frozenset(
+    {
+        "ask_plan_clarification",
+        "submit_proposed_plan",
+    },
+)
 _APPROVAL_KIND_TOOL_GUARD = "tool_guard"
 _APPROVAL_KIND_HOOK_PRE_TOOL_USE = "hook_pre_tool_use"
 _PLAN_MODE_ALLOWED_TOOLS = frozenset(
@@ -231,6 +237,37 @@ class ToolGuardMixin:
             return True
         return tool_name in _TOOLS_WITH_SPECIFIC_TIMEOUTS
 
+    async def _run_plan_interaction_tool_call(
+        self,
+        tool_call: dict[str, Any],
+        tool_name: str,
+    ) -> dict | None:
+        """执行计划交互工具并保留卡片 metadata。"""
+        tool_res_msg = Msg(
+            "system",
+            [
+                ToolResultBlock(
+                    type="tool_result",
+                    id=tool_call["id"],
+                    name=tool_name,
+                    output=[],
+                ),
+            ],
+            "system",
+        )
+        try:
+            tool_res = await self.toolkit.call_tool_function(tool_call)
+            async for chunk in tool_res:
+                tool_res_msg.content[0]["output"] = chunk.content
+                if chunk.metadata:
+                    tool_res_msg.metadata.update(chunk.metadata)
+                await self.print(tool_res_msg, chunk.is_last)
+                if chunk.is_interrupted:
+                    raise asyncio.CancelledError()
+            return None
+        finally:
+            await self.memory.add(tool_res_msg)
+
     async def _run_tool_call_with_hard_timeout(
         self,
         tool_call: dict[str, Any],
@@ -250,6 +287,17 @@ class ToolGuardMixin:
 
             started_at = time.monotonic()
             try:
+                if tool_name in _PLAN_INTERACTION_TOOL_NAMES and hasattr(
+                    self,
+                    "toolkit",
+                ):
+                    return await asyncio.wait_for(
+                        self._run_plan_interaction_tool_call(
+                            tool_call,
+                            tool_name,
+                        ),
+                        timeout=LOCAL_TOOL_EXECUTION_HARD_TIMEOUT,
+                    )
                 return await asyncio.wait_for(
                     super()._acting(tool_call),  # type: ignore[misc]
                     timeout=LOCAL_TOOL_EXECUTION_HARD_TIMEOUT,

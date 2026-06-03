@@ -1,0 +1,244 @@
+.planClarificationCard {
+  width: min(calc(100% - 32px), 818px);
+  margin: 0 auto 8px;
+  border: 1px solid rgba(36, 58, 96, 0.12);
+  border-radius: 8px;
+  background: linear-gradient(
+      180deg,
+      rgba(255, 255, 255, 0.96),
+      rgba(247, 250, 255, 0.96)
+    ),
+    radial-gradient(circle at 0 0, rgba(47, 107, 255, 0.12), transparent 42%);
+  box-shadow: 0 10px 28px rgba(31, 45, 72, 0.1);
+}
+
+@media (max-width: 768px) {
+  .planClarificationCard {
+    width: calc(100% - 16px);
+    margin-bottom: 6px;
+  }
+}
+
+.planClarificationBody {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 8px 10px 10px;
+}
+
+.choicePrompt {
+  color: rgba(21, 31, 52, 0.92);
+}
+
+.choiceCustomResponse {
+  margin-top: 2px;
+}
+
+.cardActions {
+  margin-top: 2px;
+}
+
+.formStepper {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.stepRail {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 24px;
+}
+
+.stepDot,
+.stepDotActive,
+.stepDotComplete {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  padding: 0;
+  border: 1px solid rgba(35, 48, 76, 0.16);
+  border-radius: 999px;
+  background: #ffffff;
+  color: rgba(35, 48, 76, 0.58);
+  font-size: 11px;
+  font-weight: 700;
+  line-height: 1;
+  cursor: pointer;
+  transition:
+    border-color 0.18s ease,
+    background-color 0.18s ease,
+    color 0.18s ease,
+    transform 0.18s ease;
+}
+
+.stepDot:hover,
+.stepDotActive:hover,
+.stepDotComplete:hover {
+  transform: translateY(-1px);
+}
+
+.stepDotActive {
+  border-color: rgba(47, 107, 255, 0.48);
+  background: #2f6bff;
+  color: #ffffff;
+}
+
+.stepDotComplete {
+  border-color: rgba(15, 159, 110, 0.28);
+  background: rgba(15, 159, 110, 0.1);
+  color: #0f9f6e;
+}
+
+.formStage {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-height: 108px;
+  padding: 10px;
+  border: 1px solid rgba(36, 58, 96, 0.12);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.78);
+}
+
+.formStageHeader {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.formStageCount {
+  flex: 0 0 auto;
+  padding: 2px 7px;
+  border-radius: 999px;
+  background: rgba(47, 107, 255, 0.1);
+  color: #2f6bff;
+  font-size: 11px;
+  font-weight: 700;
+  line-height: 18px;
+}
+
+.formStageTitle {
+  min-width: 0;
+  color: rgba(21, 31, 52, 0.92);
+}
+
+.formStageDescription {
+  color: rgba(35, 48, 76, 0.58);
+}
+
+.fieldControl {
+  width: 100%;
+}
+
+.fieldControl :global(.ant-select-selector),
+.fieldControl:global(.ant-input),
+.fieldControl:global(.ant-input-affix-wrapper),
+.fieldControl:global(.ant-input-textarea textarea) {
+  border-radius: 8px;
+}
+
+.answerStrip {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.answerPill {
+  display: inline-flex;
+  align-items: center;
+  max-width: 100%;
+  gap: 6px;
+  padding: 4px 8px;
+  border: 1px solid rgba(36, 58, 96, 0.1);
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.74);
+  color: rgba(35, 48, 76, 0.72);
+  cursor: pointer;
+}
+
+.answerPill span,
+.answerPill strong {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.answerPill span {
+  max-width: 112px;
+  font-size: 11px;
+  font-weight: 600;
+}
+
+.answerPill strong {
+  max-width: 180px;
+  color: rgba(21, 31, 52, 0.9);
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.formNav {
+  gap: 8px;
+}
+
+:global(.dark-mode) {
+  .planClarificationCard {
+    border-color: rgba(255, 255, 255, 0.12);
+    background: linear-gradient(
+        180deg,
+        rgba(29, 33, 44, 0.96),
+        rgba(22, 26, 35, 0.96)
+      ),
+      radial-gradient(circle at 0 0, rgba(74, 126, 255, 0.2), transparent 46%);
+    box-shadow: 0 -10px 30px rgba(0, 0, 0, 0.28);
+  }
+
+  .formStage {
+    border-color: rgba(255, 255, 255, 0.1);
+  }
+
+  .formStage {
+    background: rgba(255, 255, 255, 0.04);
+  }
+
+  .choicePrompt {
+    color: rgba(255, 255, 255, 0.9);
+  }
+
+  .formStageTitle {
+    color: rgba(255, 255, 255, 0.9);
+  }
+
+  .formStageDescription {
+    color: rgba(255, 255, 255, 0.58);
+  }
+
+  .stepDot,
+  .stepDotActive,
+  .stepDotComplete,
+  .answerPill {
+    border-color: rgba(255, 255, 255, 0.12);
+    background: rgba(255, 255, 255, 0.06);
+  }
+
+  .stepDot {
+    color: rgba(255, 255, 255, 0.62);
+  }
+
+  .stepDotActive {
+    background: #4a7eff;
+    color: #ffffff;
+  }
+
+  .answerPill {
+    color: rgba(255, 255, 255, 0.72);
+  }
+
+  .answerPill strong {
+    color: rgba(255, 255, 255, 0.9);
+  }
+}

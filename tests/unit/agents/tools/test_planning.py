@@ -140,3 +140,45 @@ async def test_submit_proposed_plan_persists_before_review_card(
     )
     assert stored is not None
     assert stored.summary == "Narrow the failing scope and patch it."
+
+
+@pytest.mark.asyncio
+async def test_submit_proposed_plan_allows_empty_open_questions(
+    tmp_path: Path,
+) -> None:
+    tool = create_submit_proposed_plan_tool(
+        request_context={
+            "chat_id": "chat-2",
+            "session_id": "session-2",
+            "turn_id": "turn-2",
+            "user_id": "user-2",
+        },
+        workspace_dir=tmp_path,
+    )
+
+    response = await tool(
+        title="B2B 企业服务客户经营计划（6个月）",
+        summary="将客户经营计划整理为可执行的半年路线图。",
+        steps=["保存计划文档", "生成分享版本"],
+        risks=[
+            "客户成功团队人手不足",
+            "竞对低价抢客",
+            "涨价说服成本高",
+            "跨团队协同成本高",
+        ],
+        verification=[
+            "确认 plan 文件已保存",
+            "确认文件内容完整",
+        ],
+        open_questions=[],
+        confidence=0.9,
+    )
+
+    card = response.metadata["plan_interaction_card"]
+    assert card["card_type"] == "plan_review"
+    stored = await JsonProposedPlanStore(tmp_path).get(
+        "chat-2",
+        card["plan_id"],
+    )
+    assert stored is not None
+    assert stored.open_questions == []

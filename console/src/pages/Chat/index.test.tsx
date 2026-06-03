@@ -17,9 +17,17 @@ const mocks = vi.hoisted(() => {
 
   return {
     capturedOptions: null as Record<string, any> | null,
+    createChat: vi.fn(async () => ({
+      id: "chat-real-created",
+      meta: { plan_mode_enabled: true },
+    })),
     listCronJobs: vi.fn(async () => []),
     currentSessionId: "chat-1",
     inputDisabled: true,
+    pathname: "/chat/chat-1",
+    getChatIdForSession: vi.fn((sessionId: string) => sessionId),
+    getLogicalSessionId: vi.fn((sessionId: string) => sessionId),
+    getRealIdForSession: vi.fn((sessionId: string) => sessionId),
     navigationSessionId: null as string | null,
     navigationTaskId: null as string | null,
     navigate: vi.fn(),
@@ -37,9 +45,11 @@ const mocks = vi.hoisted(() => {
     getLoading,
     setSessionLoading,
     setSessions,
-    updateChat: vi.fn(async (_chatId: string, payload: Record<string, any>) => ({
-      meta: payload.meta,
-    })),
+    updateChat: vi.fn(
+      async (_chatId: string, payload: Record<string, any>) => ({
+        meta: payload.meta,
+      }),
+    ),
     updateSession: vi.fn(async () => undefined),
     clearNavigationParams: vi.fn(),
   };
@@ -88,14 +98,12 @@ vi.mock("@/components/agentscope-chat", () => {
       currentSessionId: mocks.currentSessionId,
     }),
     useChatAnywhereInput: (
-      selector: (
-        value: {
-          disabled: boolean;
-          loading: boolean;
-          setLoading: typeof mocks.setLoading;
-          getLoading: typeof mocks.getLoading;
-        },
-      ) => unknown,
+      selector: (value: {
+        disabled: boolean;
+        loading: boolean;
+        setLoading: typeof mocks.setLoading;
+        getLoading: typeof mocks.getLoading;
+      }) => unknown,
     ) =>
       selector({
         disabled: mocks.inputDisabled,
@@ -159,7 +167,7 @@ vi.mock("@agentscope-ai/icons", () => ({
 }));
 
 vi.mock("react-router-dom", () => ({
-  useLocation: () => ({ pathname: "/chat/chat-1" }),
+  useLocation: () => ({ pathname: mocks.pathname }),
   useNavigate: () => mocks.navigate,
 }));
 
@@ -209,12 +217,15 @@ vi.mock("../../stores/iframeStore", () => {
     clearNavigationParams: mocks.clearNavigationParams,
   });
 
-  return { useIframeStore };
+  return {
+    getIframeContext: () => ({ userId: "test-user" }),
+    useIframeStore,
+  };
 });
 
 vi.mock("../../api/modules/chat", () => ({
   chatApi: {
-    createChat: vi.fn(),
+    createChat: mocks.createChat,
     filePreviewUrl: vi.fn((filename: string) => `/preview/${filename}`),
     stopChat: vi.fn(async () => undefined),
     updateChat: mocks.updateChat,
@@ -278,9 +289,12 @@ vi.mock("./sessionApi", () => ({
     onSessionIdResolved: null,
     onSessionRemoved: null,
     onSessionSelected: null,
-    getChatIdForSession: (sessionId: string) => sessionId,
-    getLogicalSessionId: (sessionId: string) => sessionId,
-    getRealIdForSession: (sessionId: string) => sessionId,
+    getChatIdForSession: (sessionId: string) =>
+      mocks.getChatIdForSession(sessionId),
+    getLogicalSessionId: (sessionId: string) =>
+      mocks.getLogicalSessionId(sessionId),
+    getRealIdForSession: (sessionId: string) =>
+      mocks.getRealIdForSession(sessionId),
     getSessionList: vi.fn(async () => []),
     setLastUserMessage: vi.fn(),
     updateSession: mocks.updateSession,
@@ -406,6 +420,7 @@ vi.mock("./components/ApprovalActionCard", () => ({
 }));
 
 vi.mock("./components/PlanInteractionCards", () => ({
+  ActivePlanClarificationCard: () => null,
   PlanClarificationCard: () => null,
   PlanReviewCard: () => null,
 }));
@@ -415,10 +430,13 @@ vi.mock("./components/TaskRunGroupCard", () => ({
   default: () => null,
 }));
 
-vi.mock("@/components/agentscope-chat/AgentScopeRuntimeWebUI/customToolRenders/CopyFileToStatic", () => ({
-  __esModule: true,
-  default: () => null,
-}));
+vi.mock(
+  "@/components/agentscope-chat/AgentScopeRuntimeWebUI/customToolRenders/CopyFileToStatic",
+  () => ({
+    __esModule: true,
+    default: () => null,
+  }),
+);
 
 vi.mock("./components/ResponseFeedbackCard/whitelist", () => ({
   isResponseFeedbackUserAllowed: () => false,
@@ -444,9 +462,31 @@ describe("ChatPage plan mode wiring", () => {
   beforeEach(() => {
     mocks.capturedOptions = null;
     mocks.inputDisabled = true;
+    mocks.pathname = "/chat/chat-1";
+    mocks.currentSessionId = "chat-1";
+    mocks.getChatIdForSession.mockImplementation(
+      (sessionId: string) => sessionId,
+    );
+    mocks.getLogicalSessionId.mockImplementation(
+      (sessionId: string) => sessionId,
+    );
+    mocks.getRealIdForSession.mockImplementation(
+      (sessionId: string) => sessionId,
+    );
+    mocks.sessions = [
+      {
+        id: "chat-1",
+        realId: "chat-1",
+        sessionId: "chat-1",
+        name: "会话 1",
+        messages: [],
+        meta: { plan_mode_enabled: true },
+      },
+    ];
     mocks.navigationSessionId = null;
     mocks.navigationTaskId = null;
     mocks.navigate.mockReset();
+    mocks.createChat.mockClear();
     mocks.listCronJobs.mockReset();
     mocks.listCronJobs.mockResolvedValue([]);
     mocks.setLoading.mockReset();
@@ -483,6 +523,44 @@ describe("ChatPage plan mode wiring", () => {
     render(<ChatPage />);
 
     expect(screen.getByRole("switch", { name: "计划模式" })).toBeDisabled();
+  });
+
+  it("creates a backend chat before persisting Plan Mode for a pending local session", async () => {
+    mocks.inputDisabled = false;
+    mocks.pathname = "/chat/1780458341751000";
+    mocks.currentSessionId = "1780458341751000";
+    mocks.getChatIdForSession.mockImplementation(() => null);
+    mocks.getRealIdForSession.mockImplementation(() => null);
+    mocks.sessions = [
+      {
+        id: "1780458341751000",
+        sessionId: "1780458341751000",
+        name: "新会话",
+        messages: [],
+        meta: {},
+      },
+    ];
+    mocks.updateChat.mockResolvedValueOnce({
+      meta: { plan_mode_enabled: true },
+    });
+
+    render(<ChatPage />);
+
+    fireEvent.click(screen.getByRole("switch", { name: "计划模式" }));
+
+    await waitFor(() => {
+      expect(mocks.createChat).toHaveBeenCalledTimes(1);
+    });
+
+    expect(mocks.createChat).toHaveBeenCalledWith(
+      expect.objectContaining({
+        session_id: "1780458341751000",
+        name: "新会话",
+      }),
+    );
+    expect(mocks.updateChat).toHaveBeenCalledWith("chat-real-created", {
+      meta: { plan_mode_enabled: true },
+    });
   });
 
   it("triggers HTML auto preview when taskId navigation resolves to a chat", async () => {
