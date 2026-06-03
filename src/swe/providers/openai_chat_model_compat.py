@@ -6,7 +6,7 @@ from __future__ import annotations
 import json
 from datetime import datetime
 from types import SimpleNamespace
-from typing import Any, AsyncGenerator, Type
+from typing import Any, AsyncGenerator, Literal, Type
 
 from agentscope.model import OpenAIChatModel
 from agentscope.model._model_response import ChatResponse
@@ -324,9 +324,67 @@ def _extract_tagged_tool_call_blocks(
     return content, think_tool_calls, text_tool_calls
 
 
+def _has_developer_role(messages: list[dict]) -> bool:
+    """判断消息列表是否包含 OpenAI-compatible 后端可能不支持的 role。"""
+    return any(
+        isinstance(message, dict) and message.get("role") == "developer"
+        for message in messages
+    )
+
+
+def _downgrade_developer_role_messages(
+    messages: list[dict],
+) -> list[dict]:
+    """把 developer 消息降级为 user，避免修改调用方持有的历史对象。"""
+    return [
+        (
+            {**message, "role": "user"}
+            if isinstance(message, dict) and message.get("role") == "developer"
+            else message
+        )
+        for message in messages
+    ]
+
+
+def _is_unexpected_message_role_error(exc: Exception) -> bool:
+    """识别 OpenAI-compatible 后端拒绝 developer role 的错误。"""
+    return "unexpected message role" in str(exc).lower()
+
+
 class OpenAIChatModelCompat(OpenAIChatModel):
     """OpenAIChatModel with robust parsing for malformed tool-call chunks
     and transparent ``extra_content`` (Gemini thought_signature) relay."""
+
+    async def __call__(
+        self,
+        messages: list[dict],
+        tools: list[dict] | None = None,
+        tool_choice: Literal["auto", "none", "required"] | str | None = None,
+        structured_model: Type[BaseModel] | None = None,
+        **kwargs: Any,
+    ) -> ChatResponse | AsyncGenerator[ChatResponse, None]:
+        """调用模型，并兼容不支持 developer role 的 OpenAI-like 后端。"""
+        try:
+            return await super().__call__(
+                messages,
+                tools=tools,
+                tool_choice=tool_choice,
+                structured_model=structured_model,
+                **kwargs,
+            )
+        except Exception as exc:
+            if not (
+                _has_developer_role(messages)
+                and _is_unexpected_message_role_error(exc)
+            ):
+                raise
+            return await super().__call__(
+                _downgrade_developer_role_messages(messages),
+                tools=tools,
+                tool_choice=tool_choice,
+                structured_model=structured_model,
+                **kwargs,
+            )
 
     # pylint: disable=too-many-branches
     async def _parse_openai_stream_response(

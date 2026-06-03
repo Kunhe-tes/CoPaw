@@ -103,6 +103,8 @@
 - SSE 返回 `Unknown agent error: BadRequestError: Error code: 400`
 - 模型后端错误内容包含：
   - `System message must be at the beginning.`
+  - `Unexpected message role.`
+  - `{'code': 20015, 'message': 'Unexpected message role.'}`
 - query error dump 栈一般落在 `agentscope/model/_openai_model.py` 调用 OpenAI-compatible `chat.completions.create`
 
 ### 典型原因
@@ -111,6 +113,7 @@
 - 如果追加消息使用 `role=system`，第二轮历史会变成 `system/user/assistant/system/user`
 - hook 附加上下文统一使用 `developer` 角色；AgentScope `Msg` 构造器不直接支持该角色，需通过 hook message helper 构造
 - 严格 OpenAI-compatible 后端只允许第一条消息是 `system`，会拒绝非首位 system
+- 部分 OpenAI-compatible 后端（例如 DashScope 兼容模式）不接受 OpenAI 新增的 `developer` role
 - 已经落盘的旧 session 即使源头修复，也可能继续携带历史尾部 system
 
 ### 第一落点
@@ -119,16 +122,20 @@
 - 重点看 `_emit_stop_hook_if_needed()` 写入 STOP hook additionalContext 时是否使用 developer hook message helper
 - [src/swe/agents/model_factory.py](/Users/shixiangyi/code/Swe/src/swe/agents/model_factory.py)
 - 重点看 OpenAI formatter 最终清洗是否把历史 hook `system` 转为 `developer`
+- [src/swe/providers/openai_chat_model_compat.py](/Users/shixiangyi/code/Swe/src/swe/providers/openai_chat_model_compat.py)
+- 重点看 OpenAI-compatible 后端拒绝 `developer` role 时是否降级重试为 `user`
 - [src/swe/agents/tool_guard_mixin.py](/Users/shixiangyi/code/Swe/src/swe/agents/tool_guard_mixin.py)
 - 重点看 `_record_tool_hook_result()` 是否同样使用 developer hook message helper
 - 对应测试：
   - [tests/unit/app/test_runner_hook_runtime.py](/Users/shixiangyi/code/Swe/tests/unit/app/test_runner_hook_runtime.py)
   - [tests/unit/agents/test_model_factory_tenant.py](/Users/shixiangyi/code/Swe/tests/unit/agents/test_model_factory_tenant.py)
+  - [tests/unit/providers/test_openai_stream_toolcall_compat.py](/Users/shixiangyi/code/Swe/tests/unit/providers/test_openai_stream_toolcall_compat.py)
 
 ### 第一阶段处理
 
 - 新增 hook 附加上下文不要追加为尾部 `system` 或 `user`，应统一写为 `developer`
 - formatter 侧保留兜底：只有第 0 条消息允许继续保持 `role="system"`，历史 hook system 转为 developer，其他非首位 system 转为 user
+- provider 兼容层保留二级兜底：只有后端明确报 `Unexpected message role` 且请求中存在 `developer` 时，才把 `developer` 降级成 `user` 重试
 - 如果仍报错，检查当前 session 落盘 JSON 中 `agent.memory.content` 的 role 顺序，确认是否还有非首位 system 绕过了 formatter
 
 ## 会话恢复时报 Msg.from_dict 断言失败
@@ -164,6 +171,40 @@
 - 不要把落盘里的 `developer` role 直接改成普通 `user`，否则会丢失 hook 语义
 - 在 session 加载边界先把不被 AgentScope 接受的 role 临时降级成 `system`，待 `Msg` 实例化成功后再恢复原始 role
 - 如果用户已经产生坏 session 文件，修复代码后重新发起同一 `session_id` 即可触发兼容恢复，不需要先手工删历史
+
+## 聊天详情接口读取 developer 历史时报 500
+
+### 症状
+
+- 请求 `GET /api/chats/{chat_id}` 或 `GET /api/tracing/chats/{chat_id}` 返回 `500`
+- 常见堆栈包含：
+  - `src/swe/app/runner/api.py:_messages_from_memory_state()`
+  - `memory.load_state_dict(...)`
+  - `assert role in ["user", "assistant", "system"]`
+- 如果先绕过 `load_state_dict()`，下一层还可能继续报：
+  - `Input should be 'assistant', 'system', 'user' or 'tool'`
+
+### 典型原因
+
+- 落盘 session 的 hook additionalContext 消息会保留 `role="developer"`
+- 聊天详情接口直接读取原始 `memory_state` 时，如果没有复用 session 加载边界的 role 兼容逻辑，会先在 AgentScope 反序列化阶段失败
+- 即使 AgentScope 内存已恢复成功，详情接口组装 `ChatMessage` 时仍要经过 runtime `Message` schema；该 schema 也不接受 `developer`
+
+### 第一落点
+
+- [src/swe/app/runner/api.py](/Users/shixiangyi/code/Swe/src/swe/app/runner/api.py)
+- 重点看 `_messages_from_memory_state()` 是否在 `load_state_dict()` 前调用 session 的 role 兼容逻辑
+- [src/swe/app/runner/utils.py](/Users/shixiangyi/code/Swe/src/swe/app/runner/utils.py)
+- 重点看 `agentscope_msg_to_message()` 是否对 runtime 不支持的角色做展示层降级
+- 对应回归测试：
+  - [tests/unit/app/test_chat_api_message_timestamp.py](/Users/shixiangyi/code/Swe/tests/unit/app/test_chat_api_message_timestamp.py)
+  - [tests/unit/routers/test_tracing_chats_api.py](/Users/shixiangyi/code/Swe/tests/unit/routers/test_tracing_chats_api.py)
+
+### 第一阶段处理
+
+- 详情接口读取 memory 时，先复用 `session.py` 的 role 兼容逻辑，把 `developer` 临时降级到 AgentScope 可接受的角色，再在内存态恢复
+- 进入 API 响应层后，把 runtime schema 不支持的 `developer` 降级为 `system`
+- 为避免丢语义，把原始角色放入返回消息的 `metadata.original_role`
 
 ## Console 切换运行中会话时 reconnect 返回 404
 

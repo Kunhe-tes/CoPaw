@@ -138,6 +138,53 @@ async def test_stream_parser_skips_tool_call_without_function(
     assert tool_blocks[-1]["input"] == {"x": 1}
 
 
+async def test_call_retries_developer_role_as_user_when_backend_rejects(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _clear_proxy_env(monkeypatch)
+    model = CompatHarnessOpenAIChatModel(
+        "dummy",
+        api_key="sk-test",
+        stream=True,
+    )
+    calls: list[list[dict[str, Any]]] = []
+
+    class FakeCompletions:
+        async def create(self, **kwargs: Any) -> FakeAsyncStream:
+            calls.append(kwargs["messages"])
+            if len(calls) == 1:
+                raise RuntimeError("Unexpected message role.")
+            return FakeAsyncStream([])
+
+    model.client = SimpleNamespace(
+        chat=SimpleNamespace(completions=FakeCompletions()),
+    )
+    messages = [
+        {"role": "system", "content": "base"},
+        {"role": "developer", "content": "hook context"},
+        {"role": "user", "content": "next"},
+    ]
+
+    await model(messages)
+
+    assert len(calls) == 2
+    assert [message["role"] for message in calls[0]] == [
+        "system",
+        "developer",
+        "user",
+    ]
+    assert [message["role"] for message in calls[1]] == [
+        "system",
+        "user",
+        "user",
+    ]
+    assert [message["role"] for message in messages] == [
+        "system",
+        "developer",
+        "user",
+    ]
+
+
 def test_sanitize_tool_call_normalizes_non_string_arguments() -> None:
     none_arguments_tool_call = SimpleNamespace(
         index=0,

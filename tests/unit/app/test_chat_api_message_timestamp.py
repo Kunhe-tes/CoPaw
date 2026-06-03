@@ -7,6 +7,9 @@ from agentscope.message import Msg
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
+from swe.agents.hook_runtime.messages import (
+    build_hook_additional_context_msg,
+)
 from src.swe.app.runner.api import (
     get_chat_manager,
     get_session,
@@ -101,3 +104,60 @@ def test_get_chat_exposes_message_timestamp(
     assert response.status_code == 200
     payload = response.json()
     assert payload["messages"][0]["timestamp"] == "2026-04-17T08:00:00Z"
+
+
+def test_get_chat_accepts_developer_role_history() -> None:
+    """聊天历史中的 developer role 应能以兼容形式返回。"""
+
+    class _DeveloperRoleSession:
+        async def get_session_state_dict(
+            self,
+            _session_id: str,
+            _user_id: str,
+        ) -> dict:
+            developer_msg = build_hook_additional_context_msg(
+                "[Hook additional context]\nremember for next turn",
+            )
+            return {
+                "agent": {
+                    "memory": {
+                        "content": [
+                            [
+                                developer_msg.to_dict(),
+                                [],
+                            ],
+                        ],
+                    },
+                },
+            }
+
+    workspace = SimpleNamespace(
+        chat_manager=_FakeChatManager(),
+        runner=SimpleNamespace(session=_DeveloperRoleSession()),
+        task_tracker=_FakeTaskTracker(),
+    )
+
+    app = FastAPI()
+    app.include_router(router)
+
+    async def _get_workspace():
+        return workspace
+
+    async def _get_chat_manager_override():
+        return workspace.chat_manager
+
+    async def _get_session_override():
+        return workspace.runner.session
+
+    app.dependency_overrides[get_workspace] = _get_workspace
+    app.dependency_overrides[get_chat_manager] = _get_chat_manager_override
+    app.dependency_overrides[get_session] = _get_session_override
+
+    client = TestClient(app)
+
+    response = client.get("/chats/chat-1")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["messages"][0]["role"] == "system"
+    assert payload["messages"][0]["metadata"]["original_role"] == "developer"
