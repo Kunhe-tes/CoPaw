@@ -112,6 +112,14 @@ _Avoid_: file compaction, historical tool result compaction
 The user-facing grouping for source-scoped controls over historical tool-result compaction and file-read output truncation.
 _Avoid_: tool result compression configuration
 
+**Context Window**:
+The bounded model input budget available to a Main Agent turn. A **Context Window** is measured as the configured capacity used to decide whether the next turn can fit its prompt, memory, conversation history, and current user input.
+_Avoid_: token bill, monthly quota, historical usage
+
+**Persisted Context Occupancy**:
+An estimate of how much of the **Context Window** is occupied by the persisted state and fixed runtime context that would actually enter the next Main Agent model input after any completed compaction. It includes system prompt, completed compressed summary, effective history messages, and compacted tool results; it excludes unsent composer text, already-compacted raw history, and tokens already billed by previous model calls.
+_Avoid_: token usage, usage statistics, cost usage
+
 ## Flagged Ambiguities
 
 **"Create SubAgent"**:
@@ -224,6 +232,12 @@ Resolved as exposing absence for **File Read Truncation** as inheriting the hist
 
 **"Tool Output Controls Scope"**:
 Resolved as limited to the Source System Configuration page and runtime resolution for this change. The Agent configuration page keeps the existing historical tool-result compaction controls for now.
+
+**"Current Session Context Usage"**:
+Resolved as **Persisted Context Occupancy**, meaning the estimated persisted session context divided by the configured **Context Window**. It excludes the current unsent composer text and does not mean cumulative token usage across completed calls.
+
+**"Context Window Capacity"**:
+Resolved as the Main Agent running configuration `max_input_length`, not provider-reported model metadata. The indicator follows Swe's runtime budget because compaction and fit checks are governed by that configuration.
 
 ## Example Dialogue
 
