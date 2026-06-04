@@ -58,6 +58,44 @@
   margin-bottom: 16px;
 }
 
+.healthPanel {
+  padding: 14px 16px;
+  margin-bottom: 16px;
+  background: #fff7ed;
+  border: 1px solid #fed7aa;
+  border-radius: 8px;
+}
+
+.healthList {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.healthRow {
+  display: grid;
+  grid-template-columns: auto minmax(180px, 1fr) minmax(220px, 2fr) 140px;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+  color: #7c2d12;
+  font-size: 13px;
+}
+
+.healthEntity,
+.healthReason,
+.healthTime {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.healthTime {
+  color: #9a3412;
+  text-align: right;
+}
+
 .filterBar {
   display: flex;
   align-items: center;
@@ -308,5 +346,13 @@
   .searchInput,
   .agentInput {
     width: 100%;
+  }
+
+  .healthRow {
+    grid-template-columns: 1fr;
+  }
+
+  .healthTime {
+    text-align: left;
   }
 }

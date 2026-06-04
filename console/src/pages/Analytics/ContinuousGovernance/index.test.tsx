@@ -93,6 +93,7 @@ describe("ContinuousGovernancePage", () => {
       total: 1,
       page: 1,
       page_size: 20,
+      health: [],
     });
     mocks.dreamLogsApi.reportUserRecords.mockResolvedValue({
       records: [
@@ -133,6 +134,7 @@ describe("ContinuousGovernancePage", () => {
         purged_size_bytes: 8192,
         last_purge_at: "2026-05-26T09:00:00Z",
       },
+      health: [],
     });
     mocks.dreamLogsApi.listArchiveItems.mockResolvedValue({
       items: [
@@ -274,6 +276,100 @@ describe("ContinuousGovernancePage", () => {
       0,
     );
     expect(screen.getAllByText("audit-1").length).toBeGreaterThan(0);
+  });
+
+  it("shows reconcile health separately from core metrics", async () => {
+    mocks.dreamLogsApi.report.mockResolvedValueOnce({
+      summary: {
+        covered_users: 1,
+        governed_users: 1,
+        ungoverned_users: 0,
+        total_executions: 1,
+        success_count: 1,
+        failed_count: 0,
+        success_rate: 100,
+        total_files_changed: 1,
+        total_size_saved: 10,
+        avg_duration_ms: 100,
+        last_execution: "2026-05-25T09:00:00Z",
+      },
+      trends: [],
+      status_distribution: [],
+      bbk_distribution: [],
+      users: [],
+      total: 0,
+      page: 1,
+      page_size: 20,
+      health: [
+        {
+          source_id: "source-a",
+          target_user_id: "alice",
+          target_agent_id: "default",
+          entity_type: "governance_record",
+          entity_id: "record-2",
+          status: "reconcile_needed",
+          reason: "db write failed",
+          error: "timeout",
+          payload: {},
+          updated_at: "2026-05-25T10:00:00Z",
+        },
+      ],
+    });
+
+    render(<ContinuousGovernancePage />);
+
+    expect(
+      await screen.findByTestId("governance-health-panel"),
+    ).toHaveTextContent("governance_record / record-2");
+    expect(screen.getByTestId("governance-kpi-total_executions")).toHaveTextContent(
+      "1",
+    );
+  });
+
+  it("passes only user-dimension filters to file governance requests", async () => {
+    render(<ContinuousGovernancePage />);
+
+    await screen.findAllByText("Alice");
+    fireEvent.change(screen.getByPlaceholderText("搜索用户 ID / 姓名"), {
+      target: { value: "Alice" },
+    });
+    fireEvent.change(screen.getByPlaceholderText("Agent"), {
+      target: { value: "default" },
+    });
+    fireEvent.click(screen.getByTestId("governance-query-button"));
+
+    await waitFor(() => {
+      expect(mocks.dreamLogsApi.report).toHaveBeenLastCalledWith(
+        expect.objectContaining({
+          user_search: "Alice",
+          agent_id: "default",
+        }),
+      );
+    });
+
+    fireEvent.click(screen.getByRole("tab", { name: "文件清理与归档" }));
+
+    await waitFor(() => {
+      expect(mocks.dreamLogsApi.archiveReport).toHaveBeenCalledWith({
+        user_search: "Alice",
+        target_agent_id: "default",
+      });
+    });
+    expect(mocks.dreamLogsApi.listArchiveItems).toHaveBeenCalledWith({
+      user_search: "Alice",
+      target_agent_id: "default",
+      page_size: 100,
+    });
+    expect(mocks.dreamLogsApi.listProtectedFiles).toHaveBeenCalledWith({
+      user_search: "Alice",
+      target_agent_id: "default",
+      page_size: 100,
+    });
+    expect(mocks.dreamLogsApi.listArchiveAdminAudits).toHaveBeenCalledWith({
+      user_search: "Alice",
+      target_agent_id: "default",
+      page_size: 100,
+    });
   });
 
   it("keeps governance report visible when archive data fails", async () => {

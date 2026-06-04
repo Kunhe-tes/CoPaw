@@ -46,6 +46,7 @@ import type {
   DreamLogReportTrendPoint,
   DreamLogReportUserRow,
   ProtectedFileInfo,
+  ReconcileHealthInfo,
 } from "../../../api/types/dreamLogs";
 import { BBK_ID_MAP, getBbkDisplayName } from "../../../constants/bbk";
 import styles from "./index.module.less";
@@ -149,6 +150,16 @@ function buildParams(
   };
 }
 
+function buildFileGovernanceParams(
+  params: DreamLogReportParams,
+): Record<string, unknown> {
+  const next: Record<string, unknown> = {};
+  if (params.bbk_id) next.bbk_id = params.bbk_id;
+  if (params.user_search) next.user_search = params.user_search;
+  if (params.agent_id) next.target_agent_id = params.agent_id;
+  return next;
+}
+
 function KpiCard({ item }: { item: KpiConfig }) {
   const Icon = item.icon;
   return (
@@ -165,6 +176,46 @@ function KpiCard({ item }: { item: KpiConfig }) {
       </div>
       <div className={styles.kpiValue}>{item.value}</div>
     </div>
+  );
+}
+
+function HealthPanel({
+  title,
+  items,
+  testId,
+}: {
+  title: string;
+  items: ReconcileHealthInfo[];
+  testId: string;
+}) {
+  if (!items.length) return null;
+  return (
+    <section className={styles.healthPanel} data-testid={testId}>
+      <div className={styles.panelHeader}>
+        <span>{title}</span>
+        <Tag color="orange">{items.length}</Tag>
+      </div>
+      <div className={styles.healthList}>
+        {items.map((item) => (
+          <div
+            key={`${item.entity_type}:${item.entity_id}`}
+            className={styles.healthRow}
+            data-testid={`health-row-${item.entity_type}-${item.entity_id}`}
+          >
+            <Tag color={item.status === "failed" ? "red" : "orange"}>
+              {item.status}
+            </Tag>
+            <span className={styles.healthEntity}>
+              {item.entity_type} / {item.entity_id}
+            </span>
+            <span className={styles.healthReason}>{item.reason}</span>
+            <span className={styles.healthTime}>
+              {formatDateTime(item.updated_at)}
+            </span>
+          </div>
+        ))}
+      </div>
+    </section>
   );
 }
 
@@ -310,12 +361,16 @@ export default function ContinuousGovernancePage() {
   const fetchArchiveData = useCallback(async () => {
     setArchiveLoading(true);
     try {
+      const fileParams = buildFileGovernanceParams(query);
       const [reportData, itemsData, protectedData, auditsData] =
         await Promise.all([
-          dreamLogsApi.archiveReport(),
-          dreamLogsApi.listArchiveItems({ page_size: 100 }),
-          dreamLogsApi.listProtectedFiles({ page_size: 100 }),
-          dreamLogsApi.listArchiveAdminAudits({ page_size: 100 }),
+          dreamLogsApi.archiveReport(fileParams),
+          dreamLogsApi.listArchiveItems({ ...fileParams, page_size: 100 }),
+          dreamLogsApi.listProtectedFiles({ ...fileParams, page_size: 100 }),
+          dreamLogsApi.listArchiveAdminAudits({
+            ...fileParams,
+            page_size: 100,
+          }),
         ]);
       setArchiveReport(reportData);
       setArchiveItems(itemsData.items || []);
@@ -338,11 +393,15 @@ export default function ContinuousGovernancePage() {
     } finally {
       setArchiveLoading(false);
     }
-  }, []);
+  }, [query]);
 
   useEffect(() => {
     void fetchReport(query);
   }, [fetchReport, query]);
+
+  useEffect(() => {
+    setArchiveLoaded(false);
+  }, [query]);
 
   useEffect(() => {
     if (activeTab === "files" && !archiveLoaded) {
@@ -931,12 +990,23 @@ export default function ContinuousGovernancePage() {
           allowClear
         />
         <Space>
-          <Button type="primary" onClick={applyFilters} loading={loading}>
+          <Button
+            type="primary"
+            onClick={applyFilters}
+            loading={loading}
+            data-testid="governance-query-button"
+          >
             查询
           </Button>
           <Button onClick={resetFilters}>重置</Button>
         </Space>
       </div>
+
+      <HealthPanel
+        title="待对账状态"
+        items={report?.health || []}
+        testId="governance-health-panel"
+      />
 
       <div className={styles.kpiGrid}>
         {kpis.map((item) => (
@@ -1007,6 +1077,12 @@ export default function ContinuousGovernancePage() {
         showIcon
         message="只读分析"
         description="这里仅展示文件清理与归档状态，不提供清理、恢复、归档或取消保护操作。需要处理文件时请进入持续治理工作台。"
+      />
+
+      <HealthPanel
+        title="文件治理待对账状态"
+        items={archiveReport?.health || []}
+        testId="archive-health-panel"
       />
 
       <div className={styles.kpiGrid}>

@@ -222,6 +222,8 @@ export const dreamLogsApi = {
       `/dream-logs/archive/admin-audits${buildReportQuery(params)}`,
     ),
 
-  archiveReport: async (): Promise<ArchiveReportResponse> =>
-    request("/dream-logs/archive/report"),
+  archiveReport: async (
+    params: Record<string, unknown> = {},
+  ): Promise<ArchiveReportResponse> =>
+    request(`/dream-logs/archive/report${buildReportQuery(params)}`),
 };

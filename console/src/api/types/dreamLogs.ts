@@ -123,12 +123,26 @@ export interface DreamLogReportRecord {
   error?: string | null;
 }
 
+export interface ReconcileHealthInfo {
+  source_id: string;
+  target_user_id: string;
+  target_agent_id: string;
+  entity_type: string;
+  entity_id: string;
+  status: string;
+  reason: string;
+  error?: string | null;
+  payload?: Record<string, unknown>;
+  updated_at?: string | null;
+}
+
 export interface DreamLogReportResponse {
   summary: DreamLogReportSummary;
   trends: DreamLogReportTrendPoint[];
   status_distribution: DreamLogReportStatusBucket[];
   bbk_distribution: DreamLogReportBbkBucket[];
   users: DreamLogReportUserRow[];
+  health: ReconcileHealthInfo[];
   total: number;
   page: number;
   page_size: number;
@@ -362,4 +376,5 @@ export interface ArchiveReportSummary {
 
 export interface ArchiveReportResponse {
   summary: ArchiveReportSummary;
+  health: ReconcileHealthInfo[];
 }
