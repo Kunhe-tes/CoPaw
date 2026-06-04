@@ -22,6 +22,7 @@ from ..tenant_context import bind_tenant_context
 from ..console_push_store import append as push_store_append
 from ...config.context import (
     canonicalize_scope_id,
+    is_valid_identity_value,
     resolve_runtime_identity,
     resolve_scope_id,
 )
@@ -34,6 +35,7 @@ from ..source_system_config.runtime import (
     resolve_cron_unread_auto_pause_config,
     set_current_source_system_config,
 )
+from ..continuous_governance.models import GOVERNANCE_ID_MAX_LENGTH
 from .auth_state import prefetch_auth_token
 from .cron_utils import compute_next_run_at, compute_next_run_times
 from .executor import CronExecutor
@@ -369,6 +371,7 @@ class CronManager:  # pylint: disable=too-many-public-methods
         tenant_id: Optional[str] = None,
         scheduler_adapter: Optional[SchedulerAdapter] = None,
         source_system_config_service: Any = None,
+        continuous_governance_service: Any = None,
     ):
         self._repo = repo
         self._runner = runner
@@ -378,6 +381,7 @@ class CronManager:  # pylint: disable=too-many-public-methods
         self._tenant_id = tenant_id
         self._timezone = timezone
         self._source_system_config_service = source_system_config_service
+        self._continuous_governance_service = continuous_governance_service
 
         self._executor = CronExecutor(
             runner=runner,
@@ -2637,15 +2641,112 @@ class CronManager:  # pylint: disable=too-many-public-methods
                 source_system_config,
             ),
         ):
+            before_record_ids = self._load_dream_record_ids(workspace_dir)
             await self._runner.memory_manager.dream_memory(
                 tenant_id=runtime_tenant_id,
                 trigger="cron",
             )
+            governance_agent_id = self._continuous_governance_target_agent_id()
+            await self._dual_write_dream_records(
+                workspace_dir=workspace_dir,
+                source_id=source_id,
+                tenant_id=tenant_id,
+                agent_id=governance_agent_id,
+                before_record_ids=before_record_ids,
+            )
             if workspace_dir is not None:
-                from ..routers.dream_logs import run_dream_archive_maintenance
+                from ..routers.dream_logs import (
+                    dual_write_dream_archive_maintenance_result,
+                    run_dream_archive_maintenance,
+                )
 
-                run_dream_archive_maintenance(workspace_dir, actor="dream_cron")
+                maintenance = run_dream_archive_maintenance(
+                    workspace_dir,
+                    actor="dream_cron",
+                )
+                if (
+                    maintenance is not None
+                    and self._continuous_governance_service is not None
+                    and source_id
+                    and tenant_id
+                    and governance_agent_id
+                ):
+                    await dual_write_dream_archive_maintenance_result(
+                        service=self._continuous_governance_service,
+                        source_id=source_id,
+                        target_user_id=tenant_id,
+                        target_agent_id=governance_agent_id,
+                        maintenance=maintenance,
+                        actor="dream_cron",
+                        source_name=source_id,
+                    )
         logger.debug("Dream task executed successfully")
+
+    def _load_dream_record_ids(self, workspace_dir: Path | None) -> set[str]:
+        """读取 dream 执行前已有记录 id。"""
+        if workspace_dir is None:
+            return set()
+        data = self._load_dream_logs(workspace_dir)
+        return {
+            str(record.get("id") or "")
+            for record in data.get("records", [])
+            if isinstance(record, dict) and record.get("id")
+        }
+
+    def _continuous_governance_target_agent_id(self) -> str | None:
+        """返回可安全写入持续治理读模型的 agent 标识。"""
+        agent_id = self._agent_id or "default"
+        if (
+            len(agent_id) > GOVERNANCE_ID_MAX_LENGTH
+            or not is_valid_identity_value(agent_id)
+        ):
+            logger.warning(
+                "Skip continuous governance dual-write for invalid agent id",
+            )
+            return None
+        return agent_id
+
+    async def _dual_write_dream_records(
+        self,
+        *,
+        workspace_dir: Path | None,
+        source_id: str | None,
+        tenant_id: str | None,
+        agent_id: str | None,
+        before_record_ids: set[str],
+    ) -> None:
+        """cron dream 完成后把新增治理记录写入数据库读模型。"""
+        service = self._continuous_governance_service
+        if workspace_dir is None or not source_id or not tenant_id or not agent_id:
+            return
+        if service is None:
+            return
+        data = self._load_dream_logs(workspace_dir)
+        for record in data.get("records", []):
+            if not isinstance(record, dict):
+                continue
+            record_id = str(record.get("id") or "")
+            if not record_id or record_id in before_record_ids:
+                continue
+            await service.upsert_workspace_governance_record_with_health(
+                source_id=source_id,
+                target_user_id=tenant_id,
+                target_user_name=None,
+                bbk_id=None,
+                target_agent_id=agent_id,
+                record=record,
+            )
+
+    def _load_dream_logs(self, workspace_dir: Path) -> dict[str, Any]:
+        """读取 workspace dream_logs.json。"""
+        path = workspace_dir / "dream_logs.json"
+        if not path.exists():
+            return {"records": []}
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return {"records": []}
+        return data if isinstance(data, dict) else {"records": []}
 
     def _resolve_runtime_context(
         self,

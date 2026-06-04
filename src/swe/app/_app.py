@@ -468,6 +468,24 @@ async def lifespan(
     except Exception as e:
         logger.warning("Failed to initialize source system config: %s", e)
 
+    # --- 初始化持续治理管理侧数据库读模型 ---
+    try:
+        from .continuous_governance.service import ContinuousGovernanceService
+        from .continuous_governance.store import ContinuousGovernanceStore
+
+        app.state.continuous_governance_service = ContinuousGovernanceService(
+            ContinuousGovernanceStore(db_connection),
+        )
+        multi_agent_manager.set_continuous_governance_service(
+            app.state.continuous_governance_service,
+        )
+        tenant_workspace_pool.set_continuous_governance_service(
+            app.state.continuous_governance_service,
+        )
+        logger.info("ContinuousGovernance module initialized")
+    except Exception as e:
+        logger.warning("Failed to initialize continuous governance: %s", e)
+
     # --- Initialize greeting and featured_case modules ---
     if db_connection is not None:
         try:

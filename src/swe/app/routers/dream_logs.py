@@ -5,6 +5,7 @@ Provides REST API endpoints for dream optimization records.
 """
 
 import asyncio
+import hashlib
 import json
 import logging
 import shutil
@@ -12,15 +13,37 @@ import base64
 import threading
 import uuid
 from collections import defaultdict
+from dataclasses import dataclass, field
 from datetime import datetime, time, timezone, timedelta
 from pathlib import Path
 from typing import Any, Optional
 
 from fastapi import APIRouter, HTTPException, Request
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
+
+from ..continuous_governance.models import GOVERNANCE_ID_MAX_LENGTH
 
 router = APIRouter(prefix="/dream-logs", tags=["dream-logs"])
 logger = logging.getLogger(__name__)
+TARGET_AGENT_ID_MAX_LENGTH = GOVERNANCE_ID_MAX_LENGTH
+
+
+def _health_batch_entity_id(prefix: str, values: list[str]) -> str:
+    """为批量待对账项生成长度稳定的实体标识。"""
+    digest = hashlib.sha256(
+        "\n".join(sorted(str(value) for value in values)).encode("utf-8"),
+    ).hexdigest()[:24]
+    return f"{prefix}:{digest}"
+
+
+@dataclass
+class DreamArchiveMaintenanceResult:
+    """dream 后置文件治理维护产生的结构化变更。"""
+
+    archived_items: list[Any] = field(default_factory=list)
+    purged_archive_item_ids: list[str] = field(default_factory=list)
+    purged_paths: list[str] = field(default_factory=list)
+    purged_size_bytes: int = 0
 
 # 治理任务运行状态（模块级共享，兼容线程+协程）
 _current_run_lock = threading.Lock()
@@ -189,6 +212,21 @@ class DreamLogReportRecord(BaseModel):
     error: Optional[str] = None
 
 
+class ReconcileHealthInfo(BaseModel):
+    """持续治理待补偿或待对账健康状态。"""
+
+    source_id: str
+    target_user_id: str
+    target_agent_id: str
+    entity_type: str
+    entity_id: str
+    status: str
+    reason: str
+    error: Optional[str] = None
+    payload: dict[str, Any] = Field(default_factory=dict)
+    updated_at: Optional[datetime] = None
+
+
 class DreamLogReportResponse(BaseModel):
     """持续治理分析报表响应。"""
 
@@ -200,6 +238,7 @@ class DreamLogReportResponse(BaseModel):
     total: int
     page: int
     page_size: int
+    health: list[ReconcileHealthInfo] = Field(default_factory=list)
 
 
 class DreamLogUserRecordsResponse(BaseModel):
@@ -511,6 +550,7 @@ class ArchiveReportResponse(BaseModel):
     """持续治理分析页归档统计响应。"""
 
     summary: ArchiveReportSummary
+    health: list[ReconcileHealthInfo] = Field(default_factory=list)
 
 
 # Keep list - files and directories that should NOT be listed as orphan
@@ -745,6 +785,34 @@ def _archive_item_model(
     )
 
 
+def _validate_target_agent_id(target_agent_id: str) -> str:
+    """校验可作为 workspace 路径片段的 agent 标识。"""
+    from ...config.context import is_valid_identity_value
+
+    if (
+        len(target_agent_id) > TARGET_AGENT_ID_MAX_LENGTH
+        or not is_valid_identity_value(target_agent_id)
+    ):
+        raise HTTPException(status_code=400, detail="Invalid target agent id")
+    return target_agent_id
+
+
+def _optional_target_agent_id(target_agent_id: str | None) -> str | None:
+    """校验可选的 agent 过滤条件。"""
+    if target_agent_id is None:
+        return None
+    return _validate_target_agent_id(target_agent_id)
+
+
+def _is_valid_target_agent_id(target_agent_id: str) -> bool:
+    """判断历史 workspace 目录名是否可作为治理读模型 agent 标识。"""
+    try:
+        _validate_target_agent_id(target_agent_id)
+    except HTTPException:
+        return False
+    return True
+
+
 def _request_actor(request: Request) -> tuple[str, str]:
     """读取当前请求操作者和角色，用于管理员审计。"""
     actor = (
@@ -764,11 +832,17 @@ def _target_workspace_dir(
     target_agent_id: str,
 ) -> Path:
     """根据逻辑用户、渠道和 Agent 定位目标工作区。"""
-    return (
+    safe_agent_id = _validate_target_agent_id(target_agent_id)
+    workspaces_dir = (
         _resolve_tenant_dir(workspace_root, target_user_id, source_id)
         / "workspaces"
-        / target_agent_id
-    )
+    ).resolve()
+    workspace_dir = (workspaces_dir / safe_agent_id).resolve()
+    try:
+        workspace_dir.relative_to(workspaces_dir)
+    except ValueError:
+        raise HTTPException(status_code=403, detail="Access denied")
+    return workspace_dir
 
 
 def _append_archive_admin_audit(
@@ -827,7 +901,7 @@ def _get_file_type(filepath: Path) -> str:
 
 def _get_agent_id(request: Request) -> str:
     """Get agent_id from request header or default."""
-    return request.headers.get("X-Agent-Id", "default")
+    return _validate_target_agent_id(request.headers.get("X-Agent-Id", "default"))
 
 
 def _get_workspace_dir(request: Request) -> Path:
@@ -1008,13 +1082,19 @@ def _iter_agent_workspace_dirs(
     """列出需要纳入统计的 agent 工作区目录。"""
     workspaces_dir = tenant_dir / "workspaces"
     if agent_id:
-        return [(agent_id, workspaces_dir / agent_id)]
+        safe_agent_id = _validate_target_agent_id(agent_id)
+        workspace_dir = (workspaces_dir.resolve() / safe_agent_id).resolve()
+        try:
+            workspace_dir.relative_to(workspaces_dir.resolve())
+        except ValueError:
+            raise HTTPException(status_code=403, detail="Access denied")
+        return [(safe_agent_id, workspace_dir)]
     if not workspaces_dir.exists():
         return [(DEFAULT_REPORT_AGENT_ID, workspaces_dir / DEFAULT_REPORT_AGENT_ID)]
     return [
         (path.name, path)
         for path in sorted(workspaces_dir.iterdir())
-        if path.is_dir()
+        if path.is_dir() and _is_valid_target_agent_id(path.name)
     ]
 
 
@@ -1127,6 +1207,260 @@ async def _load_source_tenants(source_id: str) -> list[dict[str, Any]]:
         raise HTTPException(status_code=503, detail="Database not available")
     rows = await store.get_by_source(source_id)
     return list(rows)
+
+
+def _get_continuous_governance_service(request: Request) -> Any:
+    """读取持续治理数据库读模型服务。"""
+    service = getattr(
+        request.app.state,
+        "continuous_governance_service",
+        None,
+    )
+    if service is None:
+        raise HTTPException(
+            status_code=503,
+            detail="Continuous governance database service not available",
+        )
+    store = getattr(service, "store", None)
+    if store is not None and not getattr(store, "is_available", True):
+        raise HTTPException(
+            status_code=503,
+            detail="Continuous governance database service not available",
+        )
+    return service
+
+
+def _get_optional_continuous_governance_service(request: Request) -> Any | None:
+    """当前 workspace 操作尽力获取数据库读模型服务。"""
+    service = getattr(
+        request.app.state,
+        "continuous_governance_service",
+        None,
+    )
+    if service is None:
+        return None
+    store = getattr(service, "store", None)
+    if store is not None and not getattr(store, "is_available", True):
+        return None
+    return service
+
+
+def _get_optional_source_id(request: Request) -> str | None:
+    """读取可用于双写的 source_id，缺失时不影响当前 workspace 操作。"""
+    request_state = getattr(request, "state", None)
+    source_id = None
+    if request_state is not None:
+        source_id = getattr(request_state, "source_id", None)
+    source_id = source_id or request.headers.get("X-Source-Id")
+    return str(source_id) if source_id else None
+
+
+async def _record_dual_write_health(
+    request: Request,
+    *,
+    source_id: str,
+    target_user_id: str,
+    target_agent_id: str,
+    entity_type: str,
+    entity_id: str,
+    error: Exception,
+    payload: dict[str, Any],
+) -> None:
+    """双写失败时尽力登记待对账状态。"""
+    service = _get_optional_continuous_governance_service(request)
+    if service is None:
+        return
+    await _record_service_reconcile_health(
+        service,
+        source_id=source_id,
+        target_user_id=target_user_id,
+        target_agent_id=target_agent_id,
+        entity_type=entity_type,
+        entity_id=entity_id,
+        error=error,
+        payload=payload,
+    )
+
+
+async def _record_service_reconcile_health(
+    service: Any,
+    *,
+    source_id: str,
+    target_user_id: str,
+    target_agent_id: str,
+    entity_type: str,
+    entity_id: str,
+    error: Exception,
+    payload: dict[str, Any],
+) -> None:
+    """在无 Request 的定时任务边界登记待对账状态。"""
+    try:
+        await service.record_reconcile_health(
+            source_id=source_id,
+            target_user_id=target_user_id,
+            target_agent_id=target_agent_id,
+            entity_type=entity_type,
+            entity_id=entity_id,
+            reason="workspace write succeeded but db write failed",
+            error=str(error),
+            payload=payload,
+        )
+    except Exception as exc:
+        logger.warning("Failed to record continuous governance health: %s", exc)
+
+
+async def dual_write_dream_archive_maintenance_result(
+    *,
+    service: Any,
+    source_id: str,
+    target_user_id: str,
+    target_agent_id: str,
+    maintenance: DreamArchiveMaintenanceResult,
+    actor: str,
+    source_name: str | None = None,
+) -> None:
+    """把 dream 后置文件治理维护结果写入数据库读模型。"""
+    if maintenance.archived_items:
+        payload_items = [
+            item.model_dump()
+            for item in maintenance.archived_items
+            if hasattr(item, "model_dump")
+        ]
+        try:
+            await service.upsert_archive_items(
+                source_id=source_id,
+                target_user_id=target_user_id,
+                target_agent_id=target_agent_id,
+                items=payload_items,
+            )
+        except Exception as exc:
+            await _record_service_reconcile_health(
+                service,
+                source_id=source_id,
+                target_user_id=target_user_id,
+                target_agent_id=target_agent_id,
+                entity_type="archive_items",
+                entity_id=_health_batch_entity_id(
+                    "archive_items",
+                    [str(item.get("id") or "") for item in payload_items],
+                ),
+                error=exc,
+                payload={"items": payload_items},
+            )
+    if maintenance.purged_archive_item_ids:
+        audit = _build_purge_audit_payload(
+            event_id=uuid.uuid4().hex,
+            operation="purge_expired_archive",
+            actor_user_id=actor,
+            actor_role="system",
+            source_id=source_id,
+            source_name=source_name or source_id,
+            target_user_id=target_user_id,
+            target_agent_id=target_agent_id,
+            scope="dream_auto_expired_10_days",
+            files_count=len(maintenance.purged_paths),
+            total_size_bytes=maintenance.purged_size_bytes,
+            reason="dream_auto_expired_10_days",
+        )
+        try:
+            await service.delete_archive_items(
+                source_id=source_id,
+                target_user_id=target_user_id,
+                target_agent_id=target_agent_id,
+                archive_item_ids=maintenance.purged_archive_item_ids,
+            )
+            await service.upsert_cleanup_audit(audit)
+        except Exception as exc:
+            await _record_service_reconcile_health(
+                service,
+                source_id=source_id,
+                target_user_id=target_user_id,
+                target_agent_id=target_agent_id,
+                entity_type="cleanup_audit",
+                entity_id=audit["event_id"],
+                error=exc,
+                payload={
+                    "audit": audit,
+                    "archive_item_ids": maintenance.purged_archive_item_ids,
+                },
+            )
+
+
+async def _dual_write_archive_items(
+    request: Request,
+    *,
+    source_id: str,
+    target_user_id: str,
+    target_agent_id: str,
+    items: list[ArchiveItem],
+) -> None:
+    """归档操作成功后写入文件治理状态读模型。"""
+    if not items:
+        return
+    service = _get_optional_continuous_governance_service(request)
+    if service is None:
+        return
+    payload_items = [item.model_dump() for item in items]
+    try:
+        await service.upsert_archive_items(
+            source_id=source_id,
+            target_user_id=target_user_id,
+            target_agent_id=target_agent_id,
+            items=payload_items,
+        )
+    except Exception as exc:
+        await _record_dual_write_health(
+            request,
+            source_id=source_id,
+            target_user_id=target_user_id,
+            target_agent_id=target_agent_id,
+            entity_type="archive_items",
+            entity_id=_health_batch_entity_id(
+                "archive_items",
+                [item.id for item in items],
+            ),
+            error=exc,
+            payload={"items": payload_items},
+        )
+
+
+async def _dual_write_workspace_governance_records(
+    request: Request,
+    *,
+    workspace_dir: Path,
+    target_user_id: str,
+    target_agent_id: str,
+    before_record_ids: set[str],
+) -> None:
+    """dream 完成后把新增 workspace 记录写入数据库读模型。"""
+    source_id = _get_optional_source_id(request)
+    service = _get_optional_continuous_governance_service(request)
+    if not source_id or service is None:
+        return
+    tenants = await _load_source_tenants(source_id)
+    tenant = next(
+        (
+            row
+            for row in tenants
+            if str(row.get("tenant_id") or "") == target_user_id
+        ),
+        {},
+    )
+    data = _load_dream_logs(workspace_dir)
+    for record in data.get("records", []):
+        if not isinstance(record, dict):
+            continue
+        record_id = str(record.get("id") or "")
+        if not record_id or record_id in before_record_ids:
+            continue
+        await service.upsert_workspace_governance_record_with_health(
+            source_id=source_id,
+            target_user_id=target_user_id,
+            target_user_name=tenant.get("tenant_name"),
+            bbk_id=tenant.get("bbk_id"),
+            target_agent_id=target_agent_id,
+            record=record,
+        )
 
 
 def _filter_source_tenants(
@@ -1358,52 +1692,45 @@ async def get_dream_logs_report(
     """统计当前 source 下所有可管理用户的持续治理情况。"""
     _ensure_report_permission(request)
     source_id = _get_report_source_id(request)
-    workspace_root = _get_workspace_root(request)
     start_dt = _parse_report_datetime(start_time)
     end_dt = _parse_report_datetime(end_time, is_end=True)
-    safe_page, safe_page_size = _normalise_page(page, page_size)
-
-    tenants = _filter_source_tenants(
-        await _load_source_tenants(source_id),
+    safe_agent_id = _optional_target_agent_id(agent_id)
+    service = _get_continuous_governance_service(request)
+    report = await service.build_governance_report(
+        source_id=source_id,
+        tenants=await _load_source_tenants(source_id),
+        start_time=start_dt,
+        end_time=end_dt,
         bbk_id=bbk_id,
         user_search=user_search,
+        status=status,
+        trigger=trigger,
+        agent_id=safe_agent_id,
+        page=page,
+        page_size=page_size,
     )
-    all_records: list[dict[str, Any]] = []
-    user_rows: list[DreamLogReportUserRow] = []
-    for tenant in tenants:
-        records = _collect_tenant_report_records(
-            workspace_root,
-            tenant,
-            source_id,
-            agent_id=agent_id,
-            start_dt=start_dt,
-            end_dt=end_dt,
-            status=status,
-            trigger=trigger,
-        )
-        all_records.extend(records)
-        user_rows.append(_build_user_row(tenant, records))
-
-    user_rows.sort(
-        key=lambda user: (
-            user.executions,
-            user.last_execution or "",
-            user.user_id,
-        ),
-        reverse=True,
-    )
-    start_idx = (safe_page - 1) * safe_page_size
-    end_idx = start_idx + safe_page_size
-
     return DreamLogReportResponse(
-        summary=_build_report_summary(user_rows, all_records),
-        trends=_build_report_trends(all_records),
-        status_distribution=_build_status_distribution(all_records),
-        bbk_distribution=_build_bbk_distribution(user_rows),
-        users=user_rows[start_idx:end_idx],
-        total=len(user_rows),
-        page=safe_page,
-        page_size=safe_page_size,
+        summary=DreamLogReportSummary(**report.summary.model_dump()),
+        trends=[
+            DreamLogReportTrendPoint(**item.model_dump())
+            for item in report.trends
+        ],
+        status_distribution=[
+            DreamLogReportStatusBucket(**item.model_dump())
+            for item in report.status_distribution
+        ],
+        bbk_distribution=[
+            DreamLogReportBbkBucket(**item.model_dump())
+            for item in report.bbk_distribution
+        ],
+        users=[DreamLogReportUserRow(**item.model_dump()) for item in report.users],
+        total=report.total,
+        page=report.page,
+        page_size=report.page_size,
+        health=[
+            ReconcileHealthInfo(**item.model_dump())
+            for item in report.health
+        ],
     )
 
 
@@ -1425,43 +1752,33 @@ async def get_dream_log_report_user_records(
     """查询当前 source 内单个用户的持续治理记录。"""
     _ensure_report_permission(request)
     source_id = _get_report_source_id(request)
-    workspace_root = _get_workspace_root(request)
     start_dt = _parse_report_datetime(start_time)
     end_dt = _parse_report_datetime(end_time, is_end=True)
-    safe_page, safe_page_size = _normalise_page(page, page_size)
-
+    safe_agent_id = _optional_target_agent_id(agent_id)
+    service = _get_continuous_governance_service(request)
     tenants = await _load_source_tenants(source_id)
-    tenant = next(
-        (
-            row
-            for row in tenants
-            if str(row.get("tenant_id") or "") == user_id
-        ),
-        None,
-    )
-    if tenant is None:
-        raise HTTPException(status_code=404, detail="User not found")
-
-    records = _collect_tenant_report_records(
-        workspace_root,
-        tenant,
-        source_id,
-        agent_id=agent_id,
-        start_dt=start_dt,
-        end_dt=end_dt,
+    result = await service.list_user_records(
+        source_id=source_id,
+        tenants=tenants,
+        user_id=user_id,
+        start_time=start_dt,
+        end_time=end_dt,
         status=status,
         trigger=trigger,
+        agent_id=safe_agent_id,
+        page=page,
+        page_size=page_size,
     )
-    start_idx = (safe_page - 1) * safe_page_size
-    end_idx = start_idx + safe_page_size
+    if result is None:
+        raise HTTPException(status_code=404, detail="User not found")
     return DreamLogUserRecordsResponse(
         records=[
-            DreamLogReportRecord(**record)
-            for record in records[start_idx:end_idx]
+            DreamLogReportRecord(**record.model_dump())
+            for record in result.records
         ],
-        total=len(records),
-        page=safe_page,
-        page_size=safe_page_size,
+        total=result.total,
+        page=result.page,
+        page_size=result.page_size,
     )
 
 
@@ -1699,6 +2016,37 @@ async def rollback_dream_optimization(
         records[record_idx]["rollback_timestamp"] = datetime.now().isoformat()
         records[record_idx]["rollback_files"] = rolled_back_files
         _save_dream_logs(workspace_dir, data)
+        source_id = _get_optional_source_id(request)
+        service = _get_optional_continuous_governance_service(request)
+        if source_id and service is not None:
+            target_user_id = _get_logical_tenant_id(request)
+            target_agent_id = _get_agent_id(request)
+            try:
+                await service.mark_governance_record_rollback(
+                    source_id=source_id,
+                    target_user_id=target_user_id,
+                    target_agent_id=target_agent_id,
+                    record_id=record_id,
+                    rollback_timestamp=records[record_idx]["rollback_timestamp"],
+                    rollback_files=rolled_back_files,
+                )
+            except Exception as exc:
+                await _record_dual_write_health(
+                    request,
+                    source_id=source_id,
+                    target_user_id=target_user_id,
+                    target_agent_id=target_agent_id,
+                    entity_type="governance_record",
+                    entity_id=record_id,
+                    error=exc,
+                    payload={
+                        "record_id": record_id,
+                        "rollback_timestamp": records[record_idx][
+                            "rollback_timestamp"
+                        ],
+                        "rollback_files": rolled_back_files,
+                    },
+                )
 
     return RollbackResponse(
         success=bool(rolled_back_files),
@@ -1720,7 +2068,9 @@ async def trigger_dream_optimization(request: Request) -> TriggerResponse:
     tenant_id = _get_tenant_id(request)
 
     # Get agent_id from request or use default
-    agent_id = request.headers.get("X-Agent-Id", "default")
+    agent_id = _validate_target_agent_id(
+        request.headers.get("X-Agent-Id", "default"),
+    )
 
     try:
         # Get MultiAgentManager from app state
@@ -1757,13 +2107,30 @@ async def trigger_dream_optimization(request: Request) -> TriggerResponse:
         async def _wrapped_dream():
             _set_running("manual")
             try:
+                maintenance_workspace_value = getattr(runner, "workspace_dir", None)
+                workspace_dir = (
+                    Path(maintenance_workspace_value)
+                    if maintenance_workspace_value
+                    else _get_workspace_dir(request)
+                )
+                before_record_ids = {
+                    str(record.get("id") or "")
+                    for record in _load_dream_logs(workspace_dir).get("records", [])
+                    if isinstance(record, dict) and record.get("id")
+                }
                 await runner.memory_manager.dream_memory(
                     tenant_id=tenant_id,
                     trigger="manual",
                 )
-                maintenance_workspace_value = getattr(runner, "workspace_dir", None)
+                await _dual_write_workspace_governance_records(
+                    request,
+                    workspace_dir=workspace_dir,
+                    target_user_id=_get_logical_tenant_id(request),
+                    target_agent_id=agent_id,
+                    before_record_ids=before_record_ids,
+                )
                 if maintenance_workspace_value:
-                    run_dream_archive_maintenance(
+                    maintenance = run_dream_archive_maintenance(
                         Path(maintenance_workspace_value),
                         actor=str(
                             request.headers.get("X-User-Id")
@@ -1771,6 +2138,27 @@ async def trigger_dream_optimization(request: Request) -> TriggerResponse:
                             or "dream",
                         ),
                     )
+                    source_id = _get_optional_source_id(request)
+                    service = _get_optional_continuous_governance_service(
+                        request,
+                    )
+                    if source_id and service is not None:
+                        await dual_write_dream_archive_maintenance_result(
+                            service=service,
+                            source_id=source_id,
+                            target_user_id=_get_logical_tenant_id(request),
+                            target_agent_id=agent_id,
+                            maintenance=maintenance,
+                            actor=str(
+                                request.headers.get("X-User-Id")
+                                or tenant_id
+                                or "dream",
+                            ),
+                            source_name=(
+                                request.headers.get("X-Source-Name")
+                                or source_id
+                            ),
+                        )
             finally:
                 _clear_running()
 
@@ -2145,7 +2533,7 @@ def run_dream_archive_maintenance(
     workspace_dir: Path,
     *,
     actor: str = "dream",
-) -> dict[str, Any]:
+) -> DreamArchiveMaintenanceResult:
     """在 dream 完成后执行当前工作区的归档维护。"""
     archived_items = _archive_workspace_files(
         workspace_dir,
@@ -2154,6 +2542,7 @@ def run_dream_archive_maintenance(
         reason="dream_auto_mtime_3_days",
     )
     expired_ids = _expired_archive_item_ids(workspace_dir)
+    purged_archive_item_ids: list[str] = []
     deleted_paths: list[str] = []
     deleted_size = 0
     if expired_ids:
@@ -2161,16 +2550,18 @@ def run_dream_archive_maintenance(
             workspace_dir,
             expired_ids,
         )
+        purged_archive_item_ids = sorted(expired_ids)
     logger.info(
         "Dream archive maintenance completed: archived=%d purged=%d",
         len(archived_items),
         len(deleted_paths),
     )
-    return {
-        "files_archived": [item.original_path for item in archived_items],
-        "files_purged": deleted_paths,
-        "purged_size_bytes": deleted_size,
-    }
+    return DreamArchiveMaintenanceResult(
+        archived_items=archived_items,
+        purged_archive_item_ids=purged_archive_item_ids,
+        purged_paths=deleted_paths,
+        purged_size_bytes=deleted_size,
+    )
 
 
 @router.post(
@@ -2192,6 +2583,15 @@ async def archive_orphan_files(
         actor=actor,
         reason=body.reason or "manual",
     )
+    source_id = _get_optional_source_id(request)
+    if source_id:
+        await _dual_write_archive_items(
+            request,
+            source_id=source_id,
+            target_user_id=_get_logical_tenant_id(request),
+            target_agent_id=_get_agent_id(request),
+            items=items,
+        )
     return ArchiveOperationResponse(
         success=True,
         message="Archived files",
@@ -2216,6 +2616,15 @@ async def archive_old_orphan_files(request: Request) -> ArchiveOperationResponse
         actor=actor,
         reason="auto_mtime_3_days",
     )
+    source_id = _get_optional_source_id(request)
+    if source_id:
+        await _dual_write_archive_items(
+            request,
+            source_id=source_id,
+            target_user_id=_get_logical_tenant_id(request),
+            target_agent_id=_get_agent_id(request),
+            items=items,
+        )
     return ArchiveOperationResponse(
         success=True,
         message="Auto archived files",
@@ -2401,6 +2810,59 @@ async def _ensure_target_user_in_current_source(
         raise HTTPException(status_code=403, detail="Target user out of scope")
 
 
+async def _file_report_target_user_ids(
+    request: Request,
+    *,
+    source_id: str,
+    target_user_id: Optional[str],
+    bbk_id: Optional[str],
+    user_search: Optional[str],
+) -> list[str]:
+    """按用户维度收窄文件治理报表，不接收记录维度过滤。"""
+    tenants = _filter_source_tenants(
+        await _load_source_tenants(source_id),
+        bbk_id=bbk_id,
+        user_search=user_search,
+    )
+    allowed_user_ids = {str(row.get("tenant_id") or "") for row in tenants}
+    if target_user_id:
+        await _ensure_target_user_in_current_source(request, target_user_id)
+        return [target_user_id] if target_user_id in allowed_user_ids else []
+    return sorted(allowed_user_ids)
+
+
+def _archive_db_row_to_response(row: Any) -> ArchiveItem:
+    """把数据库归档状态行转换为管理侧响应模型。"""
+    return ArchiveItem(
+        id=row.archive_item_id,
+        original_path=row.original_path,
+        archive_path=row.archive_path,
+        size_bytes=row.size_bytes,
+        mtime=row.mtime,
+        archived_at=row.archived_at,
+        archived_by=row.archived_by,
+        archive_reason=row.archive_reason,
+        target_user_id=row.target_user_id,
+        target_agent_id=row.target_agent_id,
+        expired=_archive_item_expired({"archived_at": row.archived_at}),
+    )
+
+
+def _protected_db_row_to_response(row: Any) -> ProtectedFileInfo:
+    """把数据库保护文件状态行转换为管理侧响应模型。"""
+    return ProtectedFileInfo(
+        target_user_id=row.target_user_id,
+        target_agent_id=row.target_agent_id,
+        path=row.path,
+        protected_at=row.protected_at,
+        protected_by=row.protected_by,
+        reason=row.reason,
+        exists=row.exists,
+        size_bytes=row.size_bytes,
+        mtime=row.mtime,
+    )
+
+
 def _find_archive_item(
     workspace_dir: Path,
     archive_item_id: str,
@@ -2433,7 +2895,7 @@ def _add_protected_path(
     *,
     actor: str,
     reason: str,
-) -> None:
+) -> dict[str, Any]:
     """把恢复后的文件路径加入保护名单。"""
     data = _load_protected_paths(workspace_dir)
     paths = list(data.get("paths") or [])
@@ -2448,16 +2910,16 @@ def _add_protected_path(
             == normalised_path
         )
     ]
-    next_paths.append(
-        {
-            "path": normalised_path,
-            "protected_at": now,
-            "protected_by": actor,
-            "reason": reason,
-        },
-    )
+    protected_item = {
+        "path": normalised_path,
+        "protected_at": now,
+        "protected_by": actor,
+        "reason": reason,
+    }
+    next_paths.append(protected_item)
     data["paths"] = next_paths
     _save_protected_paths(workspace_dir, data)
+    return protected_item
 
 
 def _remove_protected_path(workspace_dir: Path, relative_path: str) -> bool:
@@ -2486,6 +2948,8 @@ async def list_archive_items(
     request: Request,
     target_user_id: Optional[str] = None,
     target_agent_id: Optional[str] = None,
+    bbk_id: Optional[str] = None,
+    user_search: Optional[str] = None,
     expired: Optional[bool] = None,
     page: int = 1,
     page_size: int = 20,
@@ -2493,22 +2957,24 @@ async def list_archive_items(
     """管理员查询当前渠道下的归档文件。"""
     _ensure_report_permission(request)
     safe_page, safe_page_size = _normalise_page(page, page_size)
-    items: list[ArchiveItem] = []
-    for tenant_id, agent_id, workspace_dir in await _source_archive_workspaces(
+    source_id = _get_report_source_id(request)
+    service = _get_continuous_governance_service(request)
+    safe_agent_id = _optional_target_agent_id(target_agent_id)
+    target_user_ids = await _file_report_target_user_ids(
         request,
-        agent_id=target_agent_id,
-    ):
-        if target_user_id and tenant_id != target_user_id:
-            continue
-        for item in _load_archive_index(workspace_dir).get("items", []):
-            model = _archive_item_model(
-                item,
-                target_user_id=tenant_id,
-                target_agent_id=agent_id,
-            )
-            if expired is not None and model.expired != expired:
-                continue
-            items.append(model)
+        source_id=source_id,
+        target_user_id=target_user_id,
+        bbk_id=bbk_id,
+        user_search=user_search,
+    )
+    rows = await service.store.list_archive_items(
+        source_id,
+        target_user_ids=target_user_ids,
+        target_agent_id=safe_agent_id,
+    )
+    items = [_archive_db_row_to_response(row) for row in rows]
+    if expired is not None:
+        items = [item for item in items if item.expired == expired]
     items.sort(key=lambda item: item.archived_at, reverse=True)
     start = (safe_page - 1) * safe_page_size
     end = start + safe_page_size
@@ -2525,45 +2991,30 @@ async def list_protected_files(
     request: Request,
     target_user_id: Optional[str] = None,
     target_agent_id: Optional[str] = None,
+    bbk_id: Optional[str] = None,
+    user_search: Optional[str] = None,
     page: int = 1,
     page_size: int = 20,
 ) -> ProtectedFilesResponse:
     """管理员查询当前渠道下的保护文件。"""
     _ensure_report_permission(request)
     safe_page, safe_page_size = _normalise_page(page, page_size)
-    rows: list[ProtectedFileInfo] = []
-    for tenant_id, agent_id, workspace_dir in await _source_archive_workspaces(
+    source_id = _get_report_source_id(request)
+    service = _get_continuous_governance_service(request)
+    safe_agent_id = _optional_target_agent_id(target_agent_id)
+    target_user_ids = await _file_report_target_user_ids(
         request,
-        agent_id=target_agent_id,
-    ):
-        if target_user_id and tenant_id != target_user_id:
-            continue
-        protected = _load_protected_paths(workspace_dir)
-        for item in protected.get("paths", []):
-            if not isinstance(item, dict) or not item.get("path"):
-                continue
-            try:
-                relative_path = _normalise_workspace_relative_path(
-                    str(item["path"]),
-                )
-            except HTTPException:
-                continue
-            file_path = workspace_dir / Path(*relative_path.split("/"))
-            exists = file_path.exists()
-            stat = file_path.stat() if exists else None
-            rows.append(
-                ProtectedFileInfo(
-                    target_user_id=tenant_id,
-                    target_agent_id=agent_id,
-                    path=relative_path,
-                    protected_at=str(item.get("protected_at") or ""),
-                    protected_by=str(item.get("protected_by") or ""),
-                    reason=str(item.get("reason") or ""),
-                    exists=exists,
-                    size_bytes=stat.st_size if stat else None,
-                    mtime=_file_mtime_iso(file_path) if stat else None,
-                ),
-            )
+        source_id=source_id,
+        target_user_id=target_user_id,
+        bbk_id=bbk_id,
+        user_search=user_search,
+    )
+    protected_rows = await service.store.list_protected_files(
+        source_id,
+        target_user_ids=target_user_ids,
+        target_agent_id=safe_agent_id,
+    )
+    rows = [_protected_db_row_to_response(row) for row in protected_rows]
     rows.sort(key=lambda item: item.protected_at, reverse=True)
     start = (safe_page - 1) * safe_page_size
     end = start + safe_page_size
@@ -2596,6 +3047,27 @@ async def remove_protected_file(
     removed = _remove_protected_path(workspace_dir, relative_path)
     if not removed:
         raise HTTPException(status_code=404, detail="Protected file not found")
+    source_id = _get_report_source_id(request)
+    service = _get_optional_continuous_governance_service(request)
+    if service is not None:
+        try:
+            await service.delete_protected_file(
+                source_id=source_id,
+                target_user_id=body.target_user_id,
+                target_agent_id=body.target_agent_id,
+                path=relative_path,
+            )
+        except Exception as exc:
+            await _record_dual_write_health(
+                request,
+                source_id=source_id,
+                target_user_id=body.target_user_id,
+                target_agent_id=body.target_agent_id,
+                entity_type="protected_file",
+                entity_id=relative_path,
+                error=exc,
+                payload={"path": relative_path, "operation": "remove"},
+            )
     return ProtectedFileRemoveResponse(
         success=True,
         message="Protected file removed",
@@ -2641,13 +3113,66 @@ async def restore_archive_item(
     _save_archive_index(workspace_dir, index)
 
     actor, _ = _request_actor(request)
+    protected_item: dict[str, Any] | None = None
     if body.protect_after_restore:
-        _add_protected_path(
+        protected_item = _add_protected_path(
             workspace_dir,
             original_path,
             actor=actor,
             reason="restored_from_archive",
         )
+    protected_payload: dict[str, Any] = {}
+    if body.protect_after_restore:
+        stat = restore_path.stat() if restore_path.exists() else None
+        protected_payload = {
+            "protected_at": str(
+                (protected_item or {}).get("protected_at") or "",
+            ),
+            "protected_by": str(
+                (protected_item or {}).get("protected_by") or actor,
+            ),
+            "exists": restore_path.exists(),
+            "size_bytes": stat.st_size if stat else None,
+            "mtime": _file_mtime_iso(restore_path) if stat else None,
+        }
+    service = _get_optional_continuous_governance_service(request)
+    if service is not None:
+        try:
+            await service.delete_archive_items(
+                source_id=source_id,
+                target_user_id=body.target_user_id,
+                target_agent_id=body.target_agent_id,
+                archive_item_ids=[body.archive_item_id],
+            )
+            if body.protect_after_restore:
+                await service.upsert_protected_file(
+                    source_id=source_id,
+                    target_user_id=body.target_user_id,
+                    target_agent_id=body.target_agent_id,
+                    path=original_path,
+                    protected_at=protected_payload["protected_at"],
+                    protected_by=protected_payload["protected_by"],
+                    reason="restored_from_archive",
+                    exists=protected_payload["exists"],
+                    size_bytes=protected_payload["size_bytes"],
+                    mtime=protected_payload["mtime"],
+                )
+        except Exception as exc:
+            await _record_dual_write_health(
+                request,
+                source_id=source_id,
+                target_user_id=body.target_user_id,
+                target_agent_id=body.target_agent_id,
+                entity_type="archive_restore",
+                entity_id=body.archive_item_id,
+                error=exc,
+                payload={
+                    "archive_item_id": body.archive_item_id,
+                    "original_path": original_path,
+                    "protect_after_restore": body.protect_after_restore,
+                    **protected_payload,
+                },
+            )
     return ArchiveRestoreResponse(
         success=True,
         message="Restored archive item",
@@ -2701,18 +3226,54 @@ def _build_purge_audit_record(
     actor, role = _request_actor(request)
     source_id = _get_report_source_id(request)
     source_name = request.headers.get("X-Source-Name") or source_id
+    return _build_purge_audit_payload(
+        event_id=event_id,
+        operation=operation,
+        actor_user_id=actor,
+        actor_role=role,
+        source_id=source_id,
+        source_name=source_name,
+        target_user_id=target_user_id,
+        target_agent_id=target_agent_id,
+        scope="selected",
+        files_count=files_count,
+        total_size_bytes=total_size_bytes,
+        reason=reason,
+        status=status,
+        error=error,
+    )
+
+
+def _build_purge_audit_payload(
+    *,
+    event_id: str,
+    operation: str,
+    actor_user_id: str,
+    actor_role: str,
+    source_id: str,
+    source_name: str,
+    target_user_id: str,
+    target_agent_id: str,
+    scope: str,
+    files_count: int,
+    total_size_bytes: int,
+    reason: str,
+    status: str = "success",
+    error: Optional[str] = None,
+) -> dict[str, Any]:
+    """构造可跨请求和定时任务复用的清理审计 payload。"""
     return {
         "event_id": event_id,
         "timestamp": _isoformat(_utc_now()),
         "operation": operation,
         "status": status,
-        "actor_user_id": actor,
-        "actor_role": role,
+        "actor_user_id": actor_user_id,
+        "actor_role": actor_role,
         "source_id": source_id,
         "source_name": source_name,
         "target_user_id": target_user_id,
         "target_agent_id": target_agent_id,
-        "scope": "selected",
+        "scope": scope,
         "files_count": files_count,
         "total_size_bytes": total_size_bytes,
         "reason": reason,
@@ -2753,6 +3314,27 @@ async def purge_archive_items(
         reason=body.reason,
     )
     _append_archive_admin_audit(_get_workspace_dir(request), audit)
+    service = _get_optional_continuous_governance_service(request)
+    if service is not None:
+        try:
+            await service.delete_archive_items(
+                source_id=source_id,
+                target_user_id=body.target_user_id,
+                target_agent_id=body.target_agent_id,
+                archive_item_ids=body.archive_item_ids,
+            )
+            await service.upsert_cleanup_audit(audit)
+        except Exception as exc:
+            await _record_dual_write_health(
+                request,
+                source_id=source_id,
+                target_user_id=body.target_user_id,
+                target_agent_id=body.target_agent_id,
+                entity_type="cleanup_audit",
+                entity_id=event_id,
+                error=exc,
+                payload={"audit": audit, "archive_item_ids": body.archive_item_ids},
+            )
     return ArchivePurgeResponse(
         success=True,
         message="Purged archive items",
@@ -2770,9 +3352,10 @@ async def purge_expired_archive_items(
 ) -> ArchivePurgeResponse:
     """管理员清理当前渠道下超过 10 天的归档文件。"""
     _ensure_report_permission(request)
+    source_id = _get_report_source_id(request)
     all_deleted: list[str] = []
     total_size = 0
-    event_id = uuid.uuid4().hex
+    last_event_id = uuid.uuid4().hex
     for tenant_id, agent_id, workspace_dir in await _source_archive_workspaces(
         request,
         agent_id=body.target_agent_id,
@@ -2789,6 +3372,8 @@ async def purge_expired_archive_items(
         deleted_paths, deleted_size = _purge_archive_items(workspace_dir, expired_ids)
         all_deleted.extend(deleted_paths)
         total_size += deleted_size
+        event_id = uuid.uuid4().hex
+        last_event_id = event_id
         audit = _build_purge_audit_record(
             request,
             event_id=event_id,
@@ -2801,13 +3386,34 @@ async def purge_expired_archive_items(
         )
         audit["scope"] = "expired_10_days"
         _append_archive_admin_audit(_get_workspace_dir(request), audit)
+        service = _get_optional_continuous_governance_service(request)
+        if service is not None:
+            try:
+                await service.delete_archive_items(
+                    source_id=source_id,
+                    target_user_id=tenant_id,
+                    target_agent_id=agent_id,
+                    archive_item_ids=list(expired_ids),
+                )
+                await service.upsert_cleanup_audit(audit)
+            except Exception as exc:
+                await _record_dual_write_health(
+                    request,
+                    source_id=source_id,
+                    target_user_id=tenant_id,
+                    target_agent_id=agent_id,
+                    entity_type="cleanup_audit",
+                    entity_id=event_id,
+                    error=exc,
+                    payload={"audit": audit, "archive_item_ids": list(expired_ids)},
+                )
     return ArchivePurgeResponse(
         success=True,
         message="Purged expired archive items",
         files_deleted=all_deleted,
         files_count=len(all_deleted),
         total_size_bytes=total_size,
-        audit_event_id=event_id,
+        audit_event_id=last_event_id,
     )
 
 
@@ -2850,16 +3456,58 @@ def _build_admin_audit_summary(
     )
 
 
+def _cleanup_audit_to_response(record: Any) -> ArchiveAdminAuditRecord:
+    """把数据库清理审计记录转换为既有响应行。"""
+    return ArchiveAdminAuditRecord(
+        event_id=record.event_id,
+        timestamp=record.timestamp,
+        operation=record.operation,
+        status=record.status,
+        actor_user_id=record.actor_user_id,
+        actor_role=record.actor_role,
+        source_id=record.source_id,
+        source_name=record.source_name,
+        target_user_id=record.target_user_id,
+        target_agent_id=record.target_agent_id,
+        scope=record.scope,
+        files_count=record.files_count,
+        total_size_bytes=record.total_size_bytes,
+        reason=record.reason,
+        error=record.error,
+    )
+
+
 @router.get("/archive/admin-audits", response_model=ArchiveAdminAuditsResponse)
 async def list_archive_admin_audits(
     request: Request,
+    target_user_id: Optional[str] = None,
+    target_agent_id: Optional[str] = None,
+    bbk_id: Optional[str] = None,
+    user_search: Optional[str] = None,
     page: int = 1,
     page_size: int = 20,
 ) -> ArchiveAdminAuditsResponse:
     """管理员查询当前渠道下归档清理审计明细和统计。"""
     _ensure_report_permission(request)
     safe_page, safe_page_size = _normalise_page(page, page_size)
-    records = _collect_admin_audits(_get_workspace_root(request), _get_report_source_id(request))
+    source_id = _get_report_source_id(request)
+    service = _get_continuous_governance_service(request)
+    safe_agent_id = _optional_target_agent_id(target_agent_id)
+    target_user_ids = await _file_report_target_user_ids(
+        request,
+        source_id=source_id,
+        target_user_id=target_user_id,
+        bbk_id=bbk_id,
+        user_search=user_search,
+    )
+    records = [
+        _cleanup_audit_to_response(record)
+        for record in await service.store.list_cleanup_audits(
+            source_id,
+            target_user_ids=target_user_ids,
+            target_agent_id=safe_agent_id,
+        )
+    ]
     start = (safe_page - 1) * safe_page_size
     end = start + safe_page_size
     return ArchiveAdminAuditsResponse(
@@ -2872,53 +3520,40 @@ async def list_archive_admin_audits(
 
 
 @router.get("/archive/report", response_model=ArchiveReportResponse)
-async def get_archive_report(request: Request) -> ArchiveReportResponse:
+async def get_archive_report(
+    request: Request,
+    target_user_id: Optional[str] = None,
+    target_agent_id: Optional[str] = None,
+    bbk_id: Optional[str] = None,
+    user_search: Optional[str] = None,
+) -> ArchiveReportResponse:
     """为持续治理分析页返回当前渠道归档治理统计。"""
     _ensure_report_permission(request)
-    archive_items: list[ArchiveItem] = []
-    protected_rows: list[ProtectedFileInfo] = []
-    for tenant_id, agent_id, workspace_dir in await _source_archive_workspaces(request):
-        for item in _load_archive_index(workspace_dir).get("items", []):
-            archive_items.append(
-                _archive_item_model(
-                    item,
-                    target_user_id=tenant_id,
-                    target_agent_id=agent_id,
-                ),
-            )
-        protected = _load_protected_paths(workspace_dir)
-        for item in protected.get("paths", []):
-            if not isinstance(item, dict) or not item.get("path"):
-                continue
-            relative_path = _normalise_workspace_relative_path(str(item["path"]))
-            file_path = workspace_dir / Path(*relative_path.split("/"))
-            protected_rows.append(
-                ProtectedFileInfo(
-                    target_user_id=tenant_id,
-                    target_agent_id=agent_id,
-                    path=relative_path,
-                    protected_at=str(item.get("protected_at") or ""),
-                    protected_by=str(item.get("protected_by") or ""),
-                    reason=str(item.get("reason") or ""),
-                    exists=file_path.exists(),
-                ),
-            )
-    audits = _collect_admin_audits(_get_workspace_root(request), _get_report_source_id(request))
-    pending_items = [item for item in archive_items if item.expired]
+    source_id = _get_report_source_id(request)
+    safe_agent_id = _optional_target_agent_id(target_agent_id)
+    if target_user_id:
+        await _ensure_target_user_in_current_source(request, target_user_id)
+    tenants = _filter_source_tenants(
+        await _load_source_tenants(source_id),
+        bbk_id=bbk_id,
+        user_search=user_search,
+    )
+    if target_user_id:
+        tenant_ids = {str(row.get("tenant_id") or "") for row in tenants}
+        if target_user_id not in tenant_ids:
+            tenants = []
+            target_user_id = None
+    service = _get_continuous_governance_service(request)
+    report = await service.build_archive_report(
+        source_id=source_id,
+        tenants=tenants,
+        target_user_id=target_user_id,
+        target_agent_id=safe_agent_id,
+    )
     return ArchiveReportResponse(
-        summary=ArchiveReportSummary(
-            archived_files=len(archive_items),
-            archived_size_bytes=sum(item.size_bytes for item in archive_items),
-            pending_purge_files=len(pending_items),
-            pending_purge_size_bytes=sum(item.size_bytes for item in pending_items),
-            protected_files=len(protected_rows),
-            protected_existing_files=sum(1 for item in protected_rows if item.exists),
-            protected_missing_files=sum(1 for item in protected_rows if not item.exists),
-            purge_operations=len(audits),
-            purge_success_operations=sum(1 for item in audits if item.status == "success"),
-            purge_failed_operations=sum(1 for item in audits if item.status == "failed"),
-            purged_files=sum(item.files_count for item in audits),
-            purged_size_bytes=sum(item.total_size_bytes for item in audits),
-            last_purge_at=max((item.timestamp for item in audits), default=None),
-        ),
+        summary=ArchiveReportSummary(**report.summary.model_dump()),
+        health=[
+            ReconcileHealthInfo(**item.model_dump())
+            for item in report.health
+        ],
     )
