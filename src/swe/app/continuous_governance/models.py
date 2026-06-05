@@ -127,6 +127,8 @@ class GovernanceReportTrendPoint(BaseModel):
 
     date: str
     executions: int
+    manual_count: int = 0
+    cron_count: int = 0
     success_count: int
     failed_count: int
     total_size_saved: int

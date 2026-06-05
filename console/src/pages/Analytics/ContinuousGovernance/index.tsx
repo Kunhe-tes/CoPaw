@@ -3,15 +3,17 @@ import {
   Alert,
   Button,
   DatePicker,
+  Descriptions,
   Drawer,
   Empty,
   Input,
+  Modal,
   Select,
+  Segmented,
   Space,
   Table,
   Tabs,
   Tag,
-  Tooltip,
   message,
 } from "antd";
 import type { ColumnsType } from "antd/es/table";
@@ -25,7 +27,6 @@ import {
   Database,
   FileText,
   HardDriveDownload,
-  RefreshCw,
   Search,
   ShieldCheck,
   Timer,
@@ -52,9 +53,20 @@ import { BBK_ID_MAP, getBbkDisplayName } from "../../../constants/bbk";
 import styles from "./index.module.less";
 
 const { RangePicker } = DatePicker;
+const DEFAULT_AGENT_ID = "default";
 
 type DateRange = [Dayjs, Dayjs] | null;
 type ActiveTab = "governance" | "files";
+type DateShortcutKey = "today" | "last7" | "lastMonth";
+
+const DATE_SHORTCUT_OPTIONS: Array<{
+  label: string;
+  value: DateShortcutKey;
+}> = [
+  { label: "今天", value: "today" },
+  { label: "近七天", value: "last7" },
+  { label: "近一个月", value: "lastMonth" },
+];
 
 interface FilterDraft {
   dateRange: DateRange;
@@ -150,6 +162,36 @@ function buildParams(
   };
 }
 
+function buildDefaultDraft(): FilterDraft {
+  return {
+    dateRange: [dayjs().subtract(30, "day"), dayjs()],
+    agent_id: DEFAULT_AGENT_ID,
+  };
+}
+
+function buildDateShortcutRange(shortcut: DateShortcutKey): [Dayjs, Dayjs] {
+  const today = dayjs();
+  if (shortcut === "today") {
+    return [today, today];
+  }
+  if (shortcut === "last7") {
+    return [today.subtract(6, "day"), today];
+  }
+  return [today.subtract(30, "day"), today];
+}
+
+function getActiveDateShortcut(
+  dateRange: DateRange,
+): DateShortcutKey | undefined {
+  if (!dateRange) return undefined;
+  return DATE_SHORTCUT_OPTIONS.find(({ value }) => {
+    const [start, end] = buildDateShortcutRange(value);
+    return (
+      dateRange[0].isSame(start, "day") && dateRange[1].isSame(end, "day")
+    );
+  })?.value;
+}
+
 function buildFileGovernanceParams(
   params: DreamLogReportParams,
 ): Record<string, unknown> {
@@ -219,35 +261,222 @@ function HealthPanel({
   );
 }
 
+const TREND_CHART_WIDTH = 360;
+const TREND_CHART_HEIGHT = 170;
+const TREND_CHART_MARGIN = {
+  top: 18,
+  right: 14,
+  bottom: 30,
+  left: 42,
+};
+
+function getChartTicks(maxValue: number): number[] {
+  const upper = Math.max(maxValue, 1);
+  return [0, Math.ceil(upper / 2), upper].filter(
+    (value, index, values) => values.indexOf(value) === index,
+  );
+}
+
+function getChartX(index: number, count: number): number {
+  const plotWidth =
+    TREND_CHART_WIDTH - TREND_CHART_MARGIN.left - TREND_CHART_MARGIN.right;
+  if (count === 1) {
+    return TREND_CHART_MARGIN.left + plotWidth / 2;
+  }
+  return TREND_CHART_MARGIN.left + (plotWidth * index) / (count - 1);
+}
+
+function getChartY(value: number, maxValue: number): number {
+  const plotHeight =
+    TREND_CHART_HEIGHT - TREND_CHART_MARGIN.top - TREND_CHART_MARGIN.bottom;
+  return (
+    TREND_CHART_MARGIN.top + plotHeight * (1 - value / Math.max(maxValue, 1))
+  );
+}
+
 function TrendChart({ data }: { data: DreamLogReportTrendPoint[] }) {
-  const maxValue = Math.max(...data.map((item) => item.executions), 1);
   if (!data.length) {
     return (
       <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="暂无趋势数据" />
     );
   }
+
+  const maxValue = Math.max(...data.map((item) => item.executions), 1);
+  const ticks = getChartTicks(maxValue);
+  const axisBottom = TREND_CHART_HEIGHT - TREND_CHART_MARGIN.bottom;
+  const barSlotWidth =
+    data.length === 1
+      ? TREND_CHART_WIDTH - TREND_CHART_MARGIN.left - TREND_CHART_MARGIN.right
+      : (TREND_CHART_WIDTH -
+          TREND_CHART_MARGIN.left -
+          TREND_CHART_MARGIN.right) /
+        data.length;
+  const barWidth = Math.min(34, Math.max(18, barSlotWidth * 0.46));
+
   return (
-    <div className={styles.trendChart}>
-      {data.map((item) => (
-        <Tooltip
-          key={item.date}
-          title={`执行 ${item.executions} 次，成功 ${item.success_count} 次`}
-        >
-          <div className={styles.trendItem}>
-            <div className={styles.trendTrack}>
-              <div
-                className={styles.trendBar}
-                style={{
-                  height: `${Math.max((item.executions / maxValue) * 100, 8)}%`,
-                }}
+    <div className={styles.trendWrap}>
+      <svg
+        className={styles.trendSvg}
+        viewBox={`0 0 ${TREND_CHART_WIDTH} ${TREND_CHART_HEIGHT}`}
+        aria-hidden="true"
+      >
+        {ticks.map((tick) => {
+          const y = getChartY(tick, maxValue);
+          return (
+            <g key={tick}>
+              <line
+                className={styles.chartGridLine}
+                x1={TREND_CHART_MARGIN.left}
+                y1={y}
+                x2={TREND_CHART_WIDTH - TREND_CHART_MARGIN.right}
+                y2={y}
               />
-            </div>
-            <span className={styles.trendLabel}>
-              {dayjs(item.date).format("MM-DD")}
-            </span>
-          </div>
-        </Tooltip>
-      ))}
+              <text className={styles.chartYAxisLabel} x={34} y={y + 4}>
+                {formatNumber(tick)}
+              </text>
+            </g>
+          );
+        })}
+        <line
+          className={styles.chartAxisLine}
+          x1={TREND_CHART_MARGIN.left}
+          y1={axisBottom}
+          x2={TREND_CHART_WIDTH - TREND_CHART_MARGIN.right}
+          y2={axisBottom}
+        />
+        <line
+          className={styles.chartAxisLine}
+          x1={TREND_CHART_MARGIN.left}
+          y1={TREND_CHART_MARGIN.top}
+          x2={TREND_CHART_MARGIN.left}
+          y2={axisBottom}
+        />
+        {data.map((item, index) => {
+          const cronCount = item.cron_count ?? 0;
+          const manualCount =
+            item.manual_count ?? Math.max(item.executions - cronCount, 0);
+          const x = getChartX(index, data.length);
+          const totalY = getChartY(item.executions, maxValue);
+          const manualY = getChartY(manualCount, maxValue);
+          const autoHeight = Math.max(manualY - totalY, 0);
+          const manualHeight = Math.max(axisBottom - manualY, 0);
+          return (
+            <g key={item.date}>
+              <title>{`共 ${item.executions} 次，手动 ${manualCount} 次，自动 ${cronCount} 次`}</title>
+              {manualCount > 0 && (
+                <rect
+                  className={styles.trendBarManual}
+                  x={x - barWidth / 2}
+                  y={manualY}
+                  width={barWidth}
+                  height={manualHeight}
+                  rx="4"
+                />
+              )}
+              {cronCount > 0 && (
+                <rect
+                  className={styles.trendBarAuto}
+                  x={x - barWidth / 2}
+                  y={totalY}
+                  width={barWidth}
+                  height={autoHeight}
+                  rx="4"
+                />
+              )}
+              <text className={styles.chartXAxisLabel} x={x} y={158}>
+                {dayjs(item.date).format("MM-DD")}
+              </text>
+            </g>
+          );
+        })}
+      </svg>
+      <div className={styles.trendLegend}>
+        <span>
+          <i className={styles.trendLegendManual} />
+          手动
+        </span>
+        <span>
+          <i className={styles.trendLegendAuto} />
+          自动
+        </span>
+      </div>
+    </div>
+  );
+}
+
+function SavingsLineChart({ data }: { data: DreamLogReportTrendPoint[] }) {
+  if (!data.length) {
+    return (
+      <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="暂无节省空间数据" />
+    );
+  }
+
+  const maxValue = Math.max(...data.map((item) => item.total_size_saved), 1);
+  const ticks = getChartTicks(maxValue);
+  const axisBottom = TREND_CHART_HEIGHT - TREND_CHART_MARGIN.bottom;
+  const points = data.map((item, index) => ({
+    x: getChartX(index, data.length),
+    y: getChartY(item.total_size_saved, maxValue),
+    item,
+  }));
+  const pointPath = points.map((point) => `${point.x},${point.y}`).join(" ");
+
+  return (
+    <div className={styles.savingsChart}>
+      <svg
+        className={styles.savingsLineSvg}
+        viewBox={`0 0 ${TREND_CHART_WIDTH} ${TREND_CHART_HEIGHT}`}
+        aria-hidden="true"
+      >
+        {ticks.map((tick) => {
+          const y = getChartY(tick, maxValue);
+          return (
+            <g key={tick}>
+              <line
+                className={styles.chartGridLine}
+                x1={TREND_CHART_MARGIN.left}
+                y1={y}
+                x2={TREND_CHART_WIDTH - TREND_CHART_MARGIN.right}
+                y2={y}
+              />
+              <text className={styles.chartYAxisLabel} x={34} y={y + 4}>
+                {formatBytes(tick)}
+              </text>
+            </g>
+          );
+        })}
+        <line
+          className={styles.chartAxisLine}
+          x1={TREND_CHART_MARGIN.left}
+          y1={axisBottom}
+          x2={TREND_CHART_WIDTH - TREND_CHART_MARGIN.right}
+          y2={axisBottom}
+        />
+        <line
+          className={styles.chartAxisLine}
+          x1={TREND_CHART_MARGIN.left}
+          y1={TREND_CHART_MARGIN.top}
+          x2={TREND_CHART_MARGIN.left}
+          y2={axisBottom}
+        />
+        <polyline className={styles.savingsLine} points={pointPath} />
+        {points.map((point) => (
+          <g key={point.item.date}>
+            <title>{`${dayjs(point.item.date).format("MM-DD")} 节省 ${formatBytes(
+              point.item.total_size_saved,
+            )}`}</title>
+            <circle
+              className={styles.savingsPoint}
+              cx={point.x}
+              cy={point.y}
+              r="3"
+            />
+            <text className={styles.chartXAxisLabel} x={point.x} y={158}>
+              {dayjs(point.item.date).format("MM-DD")}
+            </text>
+          </g>
+        ))}
+      </svg>
     </div>
   );
 }
@@ -290,7 +519,9 @@ function BbkChart({ data }: { data: DreamLogReportBbkBucket[] }) {
     );
   }
   return (
-    <div className={styles.distributionList}>
+    <div
+      className={`${styles.distributionList} ${styles.distributionListScrollable}`}
+    >
       {data.map((item) => (
         <div key={item.bbk_id} className={styles.distributionRow}>
           <span className={styles.distributionName}>
@@ -311,17 +542,9 @@ function BbkChart({ data }: { data: DreamLogReportBbkBucket[] }) {
 
 export default function ContinuousGovernancePage() {
   const [activeTab, setActiveTab] = useState<ActiveTab>("governance");
-  const [draft, setDraft] = useState<FilterDraft>({
-    dateRange: [dayjs().subtract(30, "day"), dayjs()],
-  });
+  const [draft, setDraft] = useState<FilterDraft>(() => buildDefaultDraft());
   const [query, setQuery] = useState<DreamLogReportParams>(() =>
-    buildParams(
-      {
-        dateRange: [dayjs().subtract(30, "day"), dayjs()],
-      },
-      1,
-      20,
-    ),
+    buildParams(buildDefaultDraft(), 1, 20),
   );
   const [report, setReport] = useState<DreamLogReportResponse | null>(null);
   const [archiveReport, setArchiveReport] =
@@ -343,6 +566,8 @@ export default function ContinuousGovernancePage() {
   const [recordsTotal, setRecordsTotal] = useState(0);
   const [recordsPage, setRecordsPage] = useState(1);
   const [recordsPageSize, setRecordsPageSize] = useState(10);
+  const [detailRecord, setDetailRecord] =
+    useState<DreamLogReportRecord | null>(null);
 
   const fetchReport = useCallback(async (params: DreamLogReportParams) => {
     setLoading(true);
@@ -527,7 +752,7 @@ export default function ContinuousGovernancePage() {
       },
       {
         key: "pending_purge_files",
-        label: "待清理归档",
+        label: "待清理文件",
         value: formatNumber(summary?.pending_purge_files ?? 0),
         accent: "#ea580c",
         icon: AlertTriangle,
@@ -563,13 +788,6 @@ export default function ContinuousGovernancePage() {
       key: "bbk_id",
       width: 150,
       render: (value) => getBbkDisplayName(value),
-    },
-    {
-      title: "Agent",
-      dataIndex: "agents",
-      key: "agents",
-      width: 150,
-      render: (agents: string[]) => (agents.length ? agents.join(", ") : "-"),
     },
     {
       title: "执行次数",
@@ -609,21 +827,6 @@ export default function ContinuousGovernancePage() {
       key: "last_execution",
       width: 160,
       render: (value) => formatDateTime(value),
-    },
-    {
-      title: "最新异常",
-      dataIndex: "latest_error",
-      key: "latest_error",
-      width: 180,
-      ellipsis: true,
-      render: (value) =>
-        value ? (
-          <Tooltip title={value}>
-            <span className={styles.errorText}>{value}</span>
-          </Tooltip>
-        ) : (
-          "-"
-        ),
     },
     {
       title: "操作",
@@ -681,12 +884,6 @@ export default function ContinuousGovernancePage() {
       render: (value: string) => TRIGGER_TEXT[value] || value || "-",
     },
     {
-      title: "Agent",
-      dataIndex: "agent_id",
-      key: "agent_id",
-      width: 110,
-    },
-    {
       title: "文件数",
       dataIndex: "total_files_changed",
       key: "total_files_changed",
@@ -707,12 +904,20 @@ export default function ContinuousGovernancePage() {
       render: (value: number) => formatDuration(value),
     },
     {
-      title: "异常",
-      dataIndex: "error",
-      key: "error",
-      width: 180,
-      render: (value) =>
-        value ? <span className={styles.errorText}>{value}</span> : "-",
+      title: "操作",
+      key: "actions",
+      fixed: "right",
+      width: 100,
+      render: (_, record) => (
+        <Button
+          type="link"
+          size="small"
+          aria-label={`查看 ${record.id} 详情`}
+          onClick={() => setDetailRecord(record)}
+        >
+          查看详情
+        </Button>
+      ),
     },
   ];
 
@@ -725,17 +930,10 @@ export default function ContinuousGovernancePage() {
       render: (value) => value || "-",
     },
     {
-      title: "Agent",
-      dataIndex: "target_agent_id",
-      key: "target_agent_id",
-      width: 100,
-      render: (value) => value || "-",
-    },
-    {
-      title: "原路径",
+      title: "路径",
       dataIndex: "original_path",
       key: "original_path",
-      width: 260,
+      width: 300,
       render: (value) => <span className={styles.pathText}>{value}</span>,
     },
     {
@@ -746,14 +944,14 @@ export default function ContinuousGovernancePage() {
       render: (value: number) => formatBytes(value),
     },
     {
-      title: "归档时间",
+      title: "时间",
       dataIndex: "archived_at",
       key: "archived_at",
       width: 160,
       render: (value) => formatDateTime(value),
     },
     {
-      title: "归档人",
+      title: "操作人",
       dataIndex: "archived_by",
       key: "archived_by",
       width: 120,
@@ -777,46 +975,11 @@ export default function ContinuousGovernancePage() {
       width: 120,
     },
     {
-      title: "Agent",
-      dataIndex: "target_agent_id",
-      key: "target_agent_id",
-      width: 100,
-    },
-    {
       title: "路径",
       dataIndex: "path",
       key: "path",
-      width: 280,
+      width: 300,
       render: (value) => <span className={styles.pathText}>{value}</span>,
-    },
-    {
-      title: "保护时间",
-      dataIndex: "protected_at",
-      key: "protected_at",
-      width: 160,
-      render: (value) => formatDateTime(value),
-    },
-    {
-      title: "保护人",
-      dataIndex: "protected_by",
-      key: "protected_by",
-      width: 120,
-      render: (value) => value || "-",
-    },
-    {
-      title: "原因",
-      dataIndex: "reason",
-      key: "reason",
-      width: 160,
-      render: (value) => value || "-",
-    },
-    {
-      title: "存在状态",
-      dataIndex: "exists",
-      key: "exists",
-      width: 110,
-      render: (exists: boolean) =>
-        exists ? <Tag color="green">存在</Tag> : <Tag color="orange">缺失</Tag>,
     },
     {
       title: "大小",
@@ -824,6 +987,35 @@ export default function ContinuousGovernancePage() {
       key: "size_bytes",
       width: 110,
       render: (value?: number | null) => (value ? formatBytes(value) : "-"),
+    },
+    {
+      title: "时间",
+      dataIndex: "protected_at",
+      key: "protected_at",
+      width: 160,
+      render: (value) => formatDateTime(value),
+    },
+    {
+      title: "操作人",
+      dataIndex: "protected_by",
+      key: "protected_by",
+      width: 120,
+      render: (value) => value || "-",
+    },
+    {
+      title: "状态",
+      dataIndex: "exists",
+      key: "exists",
+      width: 110,
+      render: (exists: boolean) =>
+        exists ? <Tag color="green">存在</Tag> : <Tag color="orange">缺失</Tag>,
+    },
+    {
+      title: "原因",
+      dataIndex: "reason",
+      key: "reason",
+      width: 160,
+      render: (value) => value || "-",
     },
   ];
 
@@ -853,12 +1045,6 @@ export default function ContinuousGovernancePage() {
       dataIndex: "target_user_id",
       key: "target_user_id",
       width: 120,
-    },
-    {
-      title: "Agent",
-      dataIndex: "target_agent_id",
-      key: "target_agent_id",
-      width: 100,
     },
     {
       title: "类型",
@@ -895,20 +1081,19 @@ export default function ContinuousGovernancePage() {
     setQuery(buildParams(draft, 1, report?.page_size || 20));
   };
 
-  const resetFilters = () => {
-    const nextDraft: FilterDraft = {
-      dateRange: [dayjs().subtract(30, "day"), dayjs()],
+  const applyDateShortcut = (shortcut: DateShortcutKey) => {
+    const nextDraft = {
+      ...draft,
+      dateRange: buildDateShortcutRange(shortcut),
     };
     setDraft(nextDraft);
-    setQuery(buildParams(nextDraft, 1, 20));
+    setQuery(buildParams(nextDraft, 1, report?.page_size || 20));
   };
 
-  const refreshActiveTab = () => {
-    if (activeTab === "files") {
-      void fetchArchiveData();
-      return;
-    }
-    void fetchReport(query);
+  const resetFilters = () => {
+    const nextDraft = buildDefaultDraft();
+    setDraft(nextDraft);
+    setQuery(buildParams(nextDraft, 1, 20));
   };
 
   const renderGovernanceTab = () => (
@@ -930,6 +1115,12 @@ export default function ContinuousGovernancePage() {
             }));
           }}
           allowClear
+        />
+        <Segmented
+          className={styles.dateShortcuts}
+          value={getActiveDateShortcut(draft.dateRange)}
+          options={DATE_SHORTCUT_OPTIONS}
+          onChange={(value) => applyDateShortcut(value as DateShortcutKey)}
         />
         <Select
           className={styles.filterControl}
@@ -979,17 +1170,10 @@ export default function ContinuousGovernancePage() {
           ]}
           allowClear
         />
-        <Input
-          className={styles.agentInput}
-          placeholder="Agent"
-          value={draft.agent_id}
-          onChange={(event) =>
-            setDraft((prev) => ({ ...prev, agent_id: event.target.value }))
-          }
-          onPressEnter={applyFilters}
-          allowClear
-        />
-        <Space>
+        <Space
+          className={styles.filterActions}
+          data-testid="governance-filter-actions"
+        >
           <Button
             type="primary"
             onClick={applyFilters}
@@ -998,7 +1182,12 @@ export default function ContinuousGovernancePage() {
           >
             查询
           </Button>
-          <Button onClick={resetFilters}>重置</Button>
+          <Button
+            onClick={resetFilters}
+            data-testid="governance-reset-button"
+          >
+            重置
+          </Button>
         </Space>
       </div>
 
@@ -1020,6 +1209,12 @@ export default function ContinuousGovernancePage() {
             <span>治理趋势</span>
           </div>
           <TrendChart data={report?.trends || []} />
+        </section>
+        <section className={styles.panel}>
+          <div className={styles.panelHeader}>
+            <span>节省空间趋势</span>
+          </div>
+          <SavingsLineChart data={report?.trends || []} />
         </section>
         <section className={styles.panel}>
           <div className={styles.panelHeader}>
@@ -1046,7 +1241,7 @@ export default function ContinuousGovernancePage() {
           loading={loading}
           columns={userColumns}
           dataSource={report?.users || []}
-          scroll={{ x: 1450 }}
+          scroll={{ x: 1120 }}
           pagination={{
             current: report?.page || query.page || 1,
             pageSize: report?.page_size || query.page_size || 20,
@@ -1067,17 +1262,11 @@ export default function ContinuousGovernancePage() {
       <div className={styles.sectionHeader}>
         <div>
           <h3>文件清理与归档</h3>
-          <p>当前来源内可管理用户的归档、保护文件和清理审计情况</p>
+          <p>
+            当前来源内可管理用户的归档、保护文件和清理审计情况。这里仅展示文件清理与归档状态，不提供清理、恢复、归档或取消保护操作。需要处理文件时请进入持续治理工作台。
+          </p>
         </div>
       </div>
-
-      <Alert
-        className={styles.readonlyHint}
-        type="info"
-        showIcon
-        message="只读分析"
-        description="这里仅展示文件清理与归档状态，不提供清理、恢复、归档或取消保护操作。需要处理文件时请进入持续治理工作台。"
-      />
 
       <HealthPanel
         title="文件治理待对账状态"
@@ -1102,7 +1291,7 @@ export default function ContinuousGovernancePage() {
           loading={archiveLoading}
           columns={archiveColumns}
           dataSource={archiveItems}
-          scroll={{ x: 970 }}
+          scroll={{ x: 870 }}
           pagination={false}
         />
       </section>
@@ -1120,7 +1309,7 @@ export default function ContinuousGovernancePage() {
           loading={archiveLoading}
           columns={protectedColumns}
           dataSource={protectedFiles}
-          scroll={{ x: 1160 }}
+          scroll={{ x: 980 }}
           pagination={false}
         />
       </section>
@@ -1136,7 +1325,7 @@ export default function ContinuousGovernancePage() {
           loading={archiveLoading}
           columns={auditColumns}
           dataSource={adminAudits}
-          scroll={{ x: 1140 }}
+          scroll={{ x: 1040 }}
           pagination={false}
         />
       </section>
@@ -1145,20 +1334,6 @@ export default function ContinuousGovernancePage() {
 
   return (
     <div className={styles.page}>
-      <div className={styles.header}>
-        <div>
-          <h2>质量工程看板</h2>
-          <p>面向当前来源的持续治理质量与文件清理归档分析</p>
-        </div>
-        <Button
-          icon={<RefreshCw size={16} />}
-          onClick={refreshActiveTab}
-          loading={activeTab === "files" ? archiveLoading : loading}
-        >
-          刷新
-        </Button>
-      </div>
-
       <Tabs
         className={styles.tabs}
         activeKey={activeTab}
@@ -1185,25 +1360,19 @@ export default function ContinuousGovernancePage() {
         }
         width={860}
         open={drawerOpen}
-        onClose={() => setDrawerOpen(false)}
+        onClose={() => {
+          setDrawerOpen(false);
+          setDetailRecord(null);
+        }}
         destroyOnClose
       >
-        {selectedUser && (
-          <Alert
-            className={styles.drawerAlert}
-            type="info"
-            showIcon
-            message="只读下钻"
-            description="这里展示该用户近期持续治理记录和摘要，不提供批量触发或跨用户回滚操作。"
-          />
-        )}
         <Table
           rowKey="id"
           size="small"
           loading={recordLoading}
           columns={recordColumns}
           dataSource={records}
-          scroll={{ x: 980 }}
+          scroll={{ x: 900 }}
           pagination={{
             current: recordsPage,
             pageSize: recordsPageSize,
@@ -1218,6 +1387,75 @@ export default function ContinuousGovernancePage() {
           }}
         />
       </Drawer>
+      <Modal
+        title="治理记录详情"
+        open={Boolean(detailRecord)}
+        footer={null}
+        onCancel={() => setDetailRecord(null)}
+        width={720}
+        destroyOnClose
+      >
+        {detailRecord && (
+          <Descriptions size="small" bordered column={2}>
+            <Descriptions.Item label="任务 ID" span={2}>
+              {detailRecord.id}
+            </Descriptions.Item>
+            <Descriptions.Item label="时间">
+              {formatDateTime(detailRecord.timestamp)}
+            </Descriptions.Item>
+            <Descriptions.Item label="状态">
+              <Tag color={STATUS_COLORS[detailRecord.status] || "default"}>
+                {STATUS_TEXT[detailRecord.status] || detailRecord.status}
+              </Tag>
+            </Descriptions.Item>
+            <Descriptions.Item label="触发方式">
+              {TRIGGER_TEXT[detailRecord.trigger] ||
+                detailRecord.trigger ||
+                "-"}
+            </Descriptions.Item>
+            <Descriptions.Item label="耗时">
+              {formatDuration(detailRecord.duration_ms)}
+            </Descriptions.Item>
+            <Descriptions.Item label="文件数">
+              {formatNumber(detailRecord.total_files_changed)}
+            </Descriptions.Item>
+            <Descriptions.Item label="节省空间">
+              {formatBytes(detailRecord.total_size_saved)}
+            </Descriptions.Item>
+            <Descriptions.Item label="模型">
+              {detailRecord.model_used || "-"}
+            </Descriptions.Item>
+            <Descriptions.Item label="Token">
+              {formatNumber(
+                detailRecord.input_tokens + detailRecord.output_tokens,
+              )}
+            </Descriptions.Item>
+            <Descriptions.Item label="摘要" span={2}>
+              {detailRecord.summary || "-"}
+            </Descriptions.Item>
+            <Descriptions.Item label="异常" span={2}>
+              {detailRecord.error ? (
+                <span className={styles.errorText}>{detailRecord.error}</span>
+              ) : (
+                "-"
+              )}
+            </Descriptions.Item>
+            <Descriptions.Item label="文件列表" span={2}>
+              {detailRecord.files_optimized.length ? (
+                <Space direction="vertical" size={0}>
+                  {detailRecord.files_optimized.map((file) => (
+                    <span key={file} className={styles.pathText}>
+                      {file}
+                    </span>
+                  ))}
+                </Space>
+              ) : (
+                "-"
+              )}
+            </Descriptions.Item>
+          </Descriptions>
+        )}
+      </Modal>
     </div>
   );
 }

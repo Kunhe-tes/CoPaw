@@ -334,7 +334,7 @@ def test_report_requires_manager_or_admin(tmp_path, monkeypatch) -> None:
     assert response.status_code == 403
 
 
-def test_report_aggregates_current_source_and_keeps_no_log_users(
+def test_report_aggregates_current_source_and_counts_no_log_users(
     tmp_path,
     monkeypatch,
 ) -> None:
@@ -445,10 +445,8 @@ def test_report_aggregates_current_source_and_keeps_no_log_users(
     assert payload["summary"]["success_count"] == 1
     assert payload["summary"]["failed_count"] == 1
     assert payload["summary"]["total_size_saved"] == 200
-    assert {item["user_id"] for item in payload["users"]} == {
-        "alice",
-        "bob",
-    }
+    assert payload["total"] == 1
+    assert {item["user_id"] for item in payload["users"]} == {"alice"}
     assert "charlie" not in {item["user_id"] for item in payload["users"]}
 
 

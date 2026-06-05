@@ -155,6 +155,8 @@ class DreamLogReportTrendPoint(BaseModel):
 
     date: str
     executions: int
+    manual_count: int = 0
+    cron_count: int = 0
     success_count: int
     failed_count: int
     total_size_saved: int
@@ -1568,6 +1570,8 @@ def _build_report_trends(
     buckets: dict[str, dict[str, int]] = defaultdict(
         lambda: {
             "executions": 0,
+            "manual_count": 0,
+            "cron_count": 0,
             "success_count": 0,
             "failed_count": 0,
             "total_size_saved": 0,
@@ -1579,6 +1583,10 @@ def _build_report_trends(
             continue
         bucket = buckets[record_dt.date().isoformat()]
         bucket["executions"] += 1
+        if record.get("trigger") == "cron":
+            bucket["cron_count"] += 1
+        else:
+            bucket["manual_count"] += 1
         bucket["success_count"] += 1 if record["status"] == "success" else 0
         bucket["failed_count"] += 1 if record["status"] == "failed" else 0
         bucket["total_size_saved"] += record["total_size_saved"]

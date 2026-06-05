@@ -93,6 +93,7 @@ class ContinuousGovernanceService:
             ),
             reverse=True,
         )
+        visible_user_rows = [row for row in user_rows if row.executions > 0]
         start_idx = (safe_page - 1) * safe_page_size
         end_idx = start_idx + safe_page_size
         return GovernanceReportData(
@@ -100,8 +101,8 @@ class ContinuousGovernanceService:
             trends=_build_trends(records),
             status_distribution=_build_status_distribution(records),
             bbk_distribution=_build_bbk_distribution(user_rows),
-            users=user_rows[start_idx:end_idx],
-            total=len(user_rows),
+            users=visible_user_rows[start_idx:end_idx],
+            total=len(visible_user_rows),
             page=safe_page,
             page_size=safe_page_size,
             health=health,
@@ -782,6 +783,8 @@ def _build_trends(
     buckets: dict[str, dict[str, int]] = defaultdict(
         lambda: {
             "executions": 0,
+            "manual_count": 0,
+            "cron_count": 0,
             "success_count": 0,
             "failed_count": 0,
             "total_size_saved": 0,
@@ -793,6 +796,10 @@ def _build_trends(
             continue
         bucket = buckets[record_dt.date().isoformat()]
         bucket["executions"] += 1
+        if record.trigger == "cron":
+            bucket["cron_count"] += 1
+        else:
+            bucket["manual_count"] += 1
         bucket["success_count"] += 1 if record.status == "success" else 0
         bucket["failed_count"] += 1 if record.status == "failed" else 0
         bucket["total_size_saved"] += record.total_size_saved
@@ -828,9 +835,11 @@ def _build_bbk_distribution(
         },
     )
     for user in users:
-        bucket = buckets[user.bbk_id or "unassigned"]
+        if user.executions <= 0:
+            continue
+        bucket = buckets[user.bbk_id or "other"]
         bucket["user_count"] += 1
-        bucket["governed_users"] += 1 if user.executions else 0
+        bucket["governed_users"] += 1
         bucket["executions"] += user.executions
         bucket["success_count"] += round(user.executions * user.success_rate / 100)
     return [
@@ -846,7 +855,11 @@ def _build_bbk_distribution(
             if values["executions"]
             else 0,
         )
-        for bbk_id, values in sorted(buckets.items())
+        for bbk_id, values in sorted(
+            buckets.items(),
+            key=lambda item: (item[1]["executions"], item[0]),
+            reverse=True,
+        )
     ]
 
 

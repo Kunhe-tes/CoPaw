@@ -26,7 +26,6 @@ import {
   DownOutlined,
   FileOutlined,
   HistoryOutlined,
-  ReloadOutlined,
   EyeOutlined,
   RightOutlined,
   RollbackOutlined,
@@ -96,7 +95,11 @@ const groupBackupFilesByTask = (files: BackupFileInfo[]): BackupTaskGroup[] => {
   });
 };
 
-export default function BackupFilesPage() {
+interface BackupFilesPageProps {
+  refreshKey?: number;
+}
+
+export default function BackupFilesPage({ refreshKey = 0 }: BackupFilesPageProps) {
   const { t } = useTranslation();
   const [loading, setLoading] = useState(true);
   const [backups, setBackups] = useState<BackupListResponse | null>(null);
@@ -107,7 +110,7 @@ export default function BackupFilesPage() {
 
   useEffect(() => {
     fetchBackups();
-  }, []);
+  }, [refreshKey]);
 
   const fetchBackups = async () => {
     setLoading(true);
@@ -438,9 +441,6 @@ export default function BackupFilesPage() {
               disabled={!backups || backups.total_files === 0}
             >
               {t("dreamLogs.backup.deleteAll")}
-            </Button>
-            <Button icon={<ReloadOutlined />} onClick={fetchBackups}>
-              {t("common.refresh")}
             </Button>
           </Space>
         }

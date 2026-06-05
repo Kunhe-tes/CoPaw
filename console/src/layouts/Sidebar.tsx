@@ -289,7 +289,7 @@ export default function Sidebar({ selectedKey }: SidebarProps) {
             key: "analytics-continuous-governance",
             icon: <SparkRefreshLine size={18} />,
             path: "/analytics/continuous-governance",
-            label: t("nav.analyticsContinuousGovernance", "持续治理分析"),
+            label: t("nav.analyticsContinuousGovernance", "质量工程看板"),
           },
         ]
       : []),
@@ -480,7 +480,7 @@ export default function Sidebar({ selectedKey }: SidebarProps) {
                 key: "analytics-continuous-governance",
                 label: collapsed
                   ? null
-                  : t("nav.analyticsContinuousGovernance", "持续治理分析"),
+                  : t("nav.analyticsContinuousGovernance", "质量工程看板"),
                 icon: <SparkRefreshLine size={16} />,
               },
             ]

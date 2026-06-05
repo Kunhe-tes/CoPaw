@@ -19,9 +19,7 @@ import {
 } from "antd";
 import type { ColumnsType } from "antd/es/table";
 import {
-  DeleteOutlined,
   FileOutlined,
-  ReloadOutlined,
   EyeOutlined,
   FolderOutlined,
   InboxOutlined,
@@ -39,7 +37,11 @@ import styles from "../index.module.less";
 
 const { Text } = Typography;
 
-export default function OrphanFilesPage() {
+interface OrphanFilesPageProps {
+  refreshKey?: number;
+}
+
+export default function OrphanFilesPage({ refreshKey = 0 }: OrphanFilesPageProps) {
   const { t } = useTranslation();
   const [loading, setLoading] = useState(true);
   const [orphanFiles, setOrphanFiles] = useState<OrphanFilesResponse | null>(null);
@@ -49,7 +51,7 @@ export default function OrphanFilesPage() {
 
   useEffect(() => {
     fetchOrphanFiles();
-  }, []);
+  }, [refreshKey]);
 
   const fetchOrphanFiles = async () => {
     setLoading(true);
@@ -60,20 +62,6 @@ export default function OrphanFilesPage() {
       console.error("Failed to fetch orphan files:", error);
     } finally {
       setLoading(false);
-    }
-  };
-
-  const handleDeleteFile = async (filepath: string) => {
-    try {
-      const result = await dreamLogsApi.deleteOrphanFile(filepath);
-      if (result.success) {
-        message.success(t("dreamLogs.orphanFiles.deleteSuccess"));
-        fetchOrphanFiles();
-      } else {
-        message.error(result.message);
-      }
-    } catch (error) {
-      message.error(t("dreamLogs.orphanFiles.deleteFailed"));
     }
   };
 
@@ -171,6 +159,7 @@ export default function OrphanFilesPage() {
           <Button
             type="text"
             size="small"
+            aria-label={`查看 ${record.path}`}
             icon={<EyeOutlined />}
             onClick={() => handlePreview(record.path)}
           />
@@ -181,18 +170,8 @@ export default function OrphanFilesPage() {
             <Button
               type="text"
               size="small"
+              aria-label={`归档 ${record.path}`}
               icon={<InboxOutlined />}
-            />
-          </Popconfirm>
-          <Popconfirm
-            title={t("dreamLogs.orphanFiles.deleteConfirm")}
-            onConfirm={() => handleDeleteFile(record.path)}
-          >
-            <Button
-              type="text"
-              size="small"
-              danger
-              icon={<DeleteOutlined />}
             />
           </Popconfirm>
         </Space>
@@ -265,12 +244,6 @@ export default function OrphanFilesPage() {
               onClick={handleAutoArchive}
             >
               自动归档 3 天未修改
-            </Button>
-            <Button
-              icon={<ReloadOutlined />}
-              onClick={fetchOrphanFiles}
-            >
-              {t("common.refresh")}
             </Button>
           </Space>
         }

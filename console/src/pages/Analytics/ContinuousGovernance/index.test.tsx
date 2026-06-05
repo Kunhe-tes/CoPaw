@@ -7,6 +7,7 @@ import {
   within,
 } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import dayjs from "dayjs";
 
 import ContinuousGovernancePage from "./index";
 
@@ -50,6 +51,8 @@ describe("ContinuousGovernancePage", () => {
         {
           date: "2026-05-24",
           executions: 8,
+          manual_count: 5,
+          cron_count: 3,
           success_count: 7,
           failed_count: 1,
           total_size_saved: 1024,
@@ -57,6 +60,8 @@ describe("ContinuousGovernancePage", () => {
         {
           date: "2026-05-25",
           executions: 10,
+          manual_count: 4,
+          cron_count: 6,
           success_count: 8,
           failed_count: 2,
           total_size_saved: 1024,
@@ -73,6 +78,13 @@ describe("ContinuousGovernancePage", () => {
           governed_users: 5,
           executions: 12,
           success_rate: 90,
+        },
+        {
+          bbk_id: "unassigned",
+          user_count: 1,
+          governed_users: 1,
+          executions: 1,
+          success_rate: 100,
         },
       ],
       users: [
@@ -224,11 +236,62 @@ describe("ContinuousGovernancePage", () => {
       "83.33%",
     );
     expect((await screen.findAllByText("Alice")).length).toBeGreaterThan(0);
-    expect(screen.getAllByText("model timeout").length).toBeGreaterThan(0);
+    expect(mocks.dreamLogsApi.report).toHaveBeenLastCalledWith(
+      expect.objectContaining({ agent_id: "default" }),
+    );
+    expect(
+      screen.queryByRole("columnheader", { name: "Agent" }),
+    ).not.toBeInTheDocument();
+    expect(screen.queryByText("最新异常")).not.toBeInTheDocument();
+    expect(screen.queryByText("model timeout")).not.toBeInTheDocument();
+    expect(screen.queryByPlaceholderText("Agent")).not.toBeInTheDocument();
+    expect(screen.getByText("其他")).toBeInTheDocument();
+    expect(screen.getByText("手动")).toBeInTheDocument();
+    expect(screen.getByText("自动")).toBeInTheDocument();
+    expect(screen.getByText("节省空间趋势")).toBeInTheDocument();
     expect(mocks.dreamLogsApi.archiveReport).not.toHaveBeenCalled();
     expect(
       screen.queryByTestId("governance-kpi-archive_files"),
     ).not.toBeInTheDocument();
+  }, 10000);
+
+  it("keeps refresh with query actions and removes the top dashboard title", async () => {
+    render(<ContinuousGovernancePage />);
+
+    await screen.findByTestId("governance-kpi-covered_users");
+
+    expect(
+      screen.queryByRole("heading", { name: "质量工程看板" }),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByText("面向当前来源的持续治理质量与文件清理归档分析"),
+    ).not.toBeInTheDocument();
+
+    const actions = screen.getByTestId("governance-filter-actions");
+    expect(
+      within(actions).getByTestId("governance-query-button"),
+    ).toBeInTheDocument();
+    expect(within(actions).getByTestId("governance-reset-button"))
+      .toBeInTheDocument();
+    expect(within(actions).getAllByRole("button")).toHaveLength(2);
+  });
+
+  it("applies date shortcut filters immediately", async () => {
+    render(<ContinuousGovernancePage />);
+
+    await screen.findByTestId("governance-kpi-covered_users");
+    fireEvent.click(screen.getByText("今天"));
+
+    const today = dayjs().format("YYYY-MM-DD");
+    await waitFor(() => {
+      expect(mocks.dreamLogsApi.report).toHaveBeenLastCalledWith(
+        expect.objectContaining({
+          start_time: today,
+          end_time: today,
+          agent_id: "default",
+        }),
+      );
+    });
   });
 
   it("loads readonly user governance records in a drawer", async () => {
@@ -246,8 +309,21 @@ describe("ContinuousGovernancePage", () => {
 
     const drawer = await screen.findByRole("dialog");
     expect(within(drawer).getByText("record-1")).toBeInTheDocument();
-    expect(within(drawer).getByText("model timeout")).toBeInTheDocument();
-  });
+    expect(within(drawer).queryByText("只读下钻")).not.toBeInTheDocument();
+    expect(
+      within(drawer).queryByRole("columnheader", { name: "异常" }),
+    ).not.toBeInTheDocument();
+    expect(within(drawer).queryByText("model timeout")).not.toBeInTheDocument();
+
+    fireEvent.click(
+      within(drawer).getByRole("button", { name: "查看 record-1 详情" }),
+    );
+
+    expect(screen.getByText("治理记录详情")).toBeInTheDocument();
+    expect(screen.getByText("model timeout")).toBeInTheDocument();
+    expect(screen.getByText("gpt-test")).toBeInTheDocument();
+    expect(screen.getByText("MEMORY.md")).toBeInTheDocument();
+  }, 10000);
 
   it("loads archive readonly metrics and lists after switching tabs", async () => {
     render(<ContinuousGovernancePage />);
@@ -255,15 +331,25 @@ describe("ContinuousGovernancePage", () => {
     await screen.findAllByText("Alice");
     fireEvent.click(screen.getByRole("tab", { name: "文件清理与归档" }));
 
+    expect(screen.queryByText("只读分析")).not.toBeInTheDocument();
+    expect(
+      screen.getByText(
+        "当前来源内可管理用户的归档、保护文件和清理审计情况。这里仅展示文件清理与归档状态，不提供清理、恢复、归档或取消保护操作。需要处理文件时请进入持续治理工作台。",
+      ),
+    ).toBeInTheDocument();
+
     await waitFor(() => {
       expect(mocks.dreamLogsApi.archiveReport).toHaveBeenCalledTimes(1);
       expect(mocks.dreamLogsApi.listArchiveItems).toHaveBeenCalledWith({
+        target_agent_id: "default",
         page_size: 100,
       });
       expect(mocks.dreamLogsApi.listProtectedFiles).toHaveBeenCalledWith({
+        target_agent_id: "default",
         page_size: 100,
       });
       expect(mocks.dreamLogsApi.listArchiveAdminAudits).toHaveBeenCalledWith({
+        target_agent_id: "default",
         page_size: 100,
       });
     });
@@ -276,7 +362,28 @@ describe("ContinuousGovernancePage", () => {
       0,
     );
     expect(screen.getAllByText("audit-1").length).toBeGreaterThan(0);
-  });
+    expect(
+      screen.queryByRole("columnheader", { name: "Agent" }),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("columnheader", { name: "原路径" }),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("columnheader", { name: "归档时间" }),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("columnheader", { name: "归档人" }),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("columnheader", { name: "保护时间" }),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("columnheader", { name: "保护人" }),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("columnheader", { name: "存在状态" }),
+    ).not.toBeInTheDocument();
+  }, 20000);
 
   it("shows reconcile health separately from core metrics", async () => {
     mocks.dreamLogsApi.report.mockResolvedValueOnce({
@@ -332,9 +439,6 @@ describe("ContinuousGovernancePage", () => {
     await screen.findAllByText("Alice");
     fireEvent.change(screen.getByPlaceholderText("搜索用户 ID / 姓名"), {
       target: { value: "Alice" },
-    });
-    fireEvent.change(screen.getByPlaceholderText("Agent"), {
-      target: { value: "default" },
     });
     fireEvent.click(screen.getByTestId("governance-query-button"));
 

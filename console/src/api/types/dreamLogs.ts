@@ -74,6 +74,8 @@ export interface DreamLogReportSummary {
 export interface DreamLogReportTrendPoint {
   date: string;
   executions: number;
+  manual_count?: number;
+  cron_count?: number;
   success_count: number;
   failed_count: number;
   total_size_saved: number;

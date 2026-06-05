@@ -151,7 +151,12 @@ class _FailingArchiveStore(_FakeStore):
         raise RuntimeError("archive db timeout")
 
 
-def _record(record_id: str, user_id: str, status: str) -> GovernanceRecord:
+def _record(
+    record_id: str,
+    user_id: str,
+    status: str,
+    trigger: str = "manual",
+) -> GovernanceRecord:
     """构造治理记录。"""
     return GovernanceRecord(
         source_id="source-a",
@@ -161,7 +166,7 @@ def _record(record_id: str, user_id: str, status: str) -> GovernanceRecord:
         target_agent_id="default",
         record_id=record_id,
         timestamp=f"2026-05-2{len(record_id)}T09:00:00Z",
-        trigger="manual",
+        trigger=trigger,
         status=status,
         files_optimized=["MEMORY.md"],
         total_size_saved=100 if status == "success" else 0,
@@ -182,7 +187,7 @@ async def test_report_counts_failed_and_rollback_as_governed() -> None:
     store.records = [
         _record("r1", "alice", "success"),
         _record("r2", "bob", "failed"),
-        _record("r3", "carol", "rollback"),
+        _record("r3", "carol", "rollback", trigger="cron"),
     ]
     service = ContinuousGovernanceService(store)
 
@@ -191,7 +196,7 @@ async def test_report_counts_failed_and_rollback_as_governed() -> None:
         tenants=[
             {"tenant_id": "alice", "tenant_name": "Alice", "bbk_id": "bbk-1"},
             {"tenant_id": "bob", "tenant_name": "Bob", "bbk_id": "bbk-1"},
-            {"tenant_id": "carol", "tenant_name": "Carol", "bbk_id": "bbk-1"},
+            {"tenant_id": "carol", "tenant_name": "Carol", "bbk_id": None},
             {"tenant_id": "dave", "tenant_name": "Dave", "bbk_id": "bbk-2"},
         ],
         page=1,
@@ -205,6 +210,17 @@ async def test_report_counts_failed_and_rollback_as_governed() -> None:
     assert report.summary.success_count == 1
     assert report.summary.failed_count == 1
     assert report.summary.success_rate == 33.33
+    assert report.total == 3
+    assert {row.user_id for row in report.users} == {"alice", "bob", "carol"}
+    assert all(row.executions > 0 for row in report.users)
+    assert [
+        (bucket.bbk_id, bucket.user_count, bucket.executions)
+        for bucket in report.bbk_distribution
+    ] == [("bbk-1", 2, 2), ("other", 1, 1)]
+    assert [
+        (point.executions, point.manual_count, point.cron_count)
+        for point in report.trends
+    ] == [(3, 2, 1)]
 
 
 @pytest.mark.asyncio

@@ -12,6 +12,7 @@ import {
   Table,
   Tabs,
   Tag,
+  Tooltip,
   Typography,
   message,
 } from "antd";
@@ -19,7 +20,6 @@ import type { ColumnsType } from "antd/es/table";
 import {
   DeleteOutlined,
   InboxOutlined,
-  ReloadOutlined,
   RollbackOutlined,
   SafetyOutlined,
 } from "@ant-design/icons";
@@ -41,7 +41,13 @@ function formatSize(bytes: number): string {
   return `${(bytes / (1024 * 1024)).toFixed(2)}MB`;
 }
 
-export default function ArchiveGovernance() {
+interface ArchiveGovernanceProps {
+  refreshKey?: number;
+}
+
+export default function ArchiveGovernance({
+  refreshKey = 0,
+}: ArchiveGovernanceProps) {
   const [loading, setLoading] = useState(false);
   const [report, setReport] = useState<ArchiveReportResponse | null>(null);
   const [archiveItems, setArchiveItems] = useState<ArchiveItem[]>([]);
@@ -71,7 +77,7 @@ export default function ArchiveGovernance() {
 
   useEffect(() => {
     fetchData();
-  }, []);
+  }, [refreshKey]);
 
   const handleRestore = async (record: ArchiveItem, protect: boolean) => {
     if (!record.target_user_id || !record.target_agent_id) return;
@@ -167,33 +173,40 @@ export default function ArchiveGovernance() {
     {
       title: "操作",
       key: "actions",
-      width: 220,
+      width: 124,
       fixed: "right",
       render: (_, record) => (
-        <Space>
-          <Button
-            type="link"
-            size="small"
-            icon={<RollbackOutlined />}
-            onClick={() => handleRestore(record, false)}
-          >
-            恢复
-          </Button>
-          <Button
-            type="link"
-            size="small"
-            icon={<SafetyOutlined />}
-            onClick={() => handleRestore(record, true)}
-          >
-            恢复并保护
-          </Button>
+        <Space size={4} className={styles.tableActionGroup}>
+          <Tooltip title="恢复">
+            <Button
+              type="text"
+              size="small"
+              aria-label="恢复"
+              icon={<RollbackOutlined />}
+              onClick={() => handleRestore(record, false)}
+            />
+          </Tooltip>
+          <Tooltip title="恢复并保护">
+            <Button
+              type="text"
+              size="small"
+              aria-label="恢复并保护"
+              icon={<SafetyOutlined />}
+              onClick={() => handleRestore(record, true)}
+            />
+          </Tooltip>
           <Popconfirm
             title="确认清理该归档文件？"
             onConfirm={() => handlePurge(record)}
           >
-            <Button type="link" size="small" danger icon={<DeleteOutlined />}>
-              清理
-            </Button>
+            <Button
+              type="text"
+              size="small"
+              danger
+              aria-label="清理"
+              title="清理"
+              icon={<DeleteOutlined />}
+            />
           </Popconfirm>
         </Space>
       ),
@@ -232,16 +245,21 @@ export default function ArchiveGovernance() {
     {
       title: "操作",
       key: "actions",
-      width: 110,
+      width: 72,
       fixed: "right",
       render: (_, record) => (
         <Popconfirm
           title="确认取消该文件保护？"
           onConfirm={() => handleRemoveProtection(record)}
         >
-          <Button type="link" size="small" danger>
-            取消保护
-          </Button>
+          <Button
+            type="text"
+            size="small"
+            danger
+            aria-label="取消保护"
+            title="取消保护"
+            icon={<DeleteOutlined />}
+          />
         </Popconfirm>
       ),
     },
@@ -295,12 +313,12 @@ export default function ArchiveGovernance() {
 
       {summary && (
         <Row gutter={16} className={styles.statsRow}>
-          <Col span={6}>
+          <Col flex="1 1 180px">
             <Card className={styles.subStatsCard}>
               <Statistic title="归档文件" value={summary.archived_files} />
             </Card>
           </Col>
-          <Col span={6}>
+          <Col flex="1 1 180px">
             <Card className={styles.subStatsCard}>
               <Statistic
                 title="归档占用"
@@ -308,12 +326,20 @@ export default function ArchiveGovernance() {
               />
             </Card>
           </Col>
-          <Col span={6}>
+          <Col flex="1 1 180px">
+            <Card className={styles.subStatsCard}>
+              <Statistic
+                title="待清理文件"
+                value={summary.pending_purge_files}
+              />
+            </Card>
+          </Col>
+          <Col flex="1 1 180px">
             <Card className={styles.subStatsCard}>
               <Statistic title="保护文件" value={summary.protected_files} />
             </Card>
           </Col>
-          <Col span={6}>
+          <Col flex="1 1 180px">
             <Card className={styles.subStatsCard}>
               <Statistic
                 title="已释放空间"
@@ -338,17 +364,17 @@ export default function ArchiveGovernance() {
               title="确认清理超过 10 天的归档文件？"
               onConfirm={handlePurgeExpired}
             >
-              <Button danger icon={<DeleteOutlined />}>
-                清理超过 10 天
-              </Button>
-            </Popconfirm>
-            <Button icon={<ReloadOutlined />} onClick={fetchData}>
-              刷新
+            <Button danger icon={<DeleteOutlined />}>
+              清理超过 10 天
             </Button>
+          </Popconfirm>
           </Space>
         }
       >
         <Tabs
+          onChange={() => {
+            void fetchData();
+          }}
           items={[
             {
               key: "archives",
