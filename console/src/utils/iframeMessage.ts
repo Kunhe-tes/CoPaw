@@ -168,10 +168,10 @@ function initializeUser(userId: string): void {
  * 处理 USER_DATA 消息
  * 父窗口发送的用户数据消息处理逻辑
  */
-function handleUserDataMessage(
+async function handleUserDataMessage(
   message: IframeUserDataMessage,
   origin: string,
-): void {
+): Promise<void> {
   const store = useIframeStore.getState();
   const authHeaders = buildAuthHeaders(message);
   const nextUserId = message.data.sapId ?? null;
@@ -190,8 +190,11 @@ function handleUserDataMessage(
     bbk: message.data.bbkId ?? null,
   });
 
+  // 等待 userName 获取完成后再标记初始化完成
+  // 确保 X-User-Name header 在后续请求中可用
+  await fetchAndSetUserName();
+
   store.markInitialized();
-  void fetchAndSetUserName();
   // sendMessageToParent({ type: "READY_RESPONSE", initialized: true });
   // 只在W发起
   // const headers = buildCookieHeaders();
@@ -240,7 +243,8 @@ function handleMessage(event: MessageEvent): void {
 
   switch (message.type) {
     case "USER_DATA":
-      handleUserDataMessage(message, event.origin);
+      // 异步处理，等待 userName 获取完成后再标记 initialized
+      void handleUserDataMessage(message, event.origin);
       break;
     case "HEARTBEAT":
       handleHeartbeatMessage(message.timestamp);

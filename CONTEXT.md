@@ -140,6 +140,38 @@ _Avoid_: generic exception, plain-text tool failure, error string
 A persisted `tool_result` failure payload encoded in the MCP-style shape with `isError=true` and failure content blocks. A **Structured Tool Failure Result** is the canonical terminal output for failed tool invocations across local tools, MCP tools, and runtime-generated failures.
 _Avoid_: plain-text failure output, ad-hoc error JSON, inferred tool failure
 
+**Hook Telemetry Event**:
+A structured observability record for one Hook Runtime boundary, used to analyze hook behavior without changing the hook's runtime decision semantics. A **Hook Telemetry Event** includes the boundary-level outcome and the handler-level details that explain it, and is emitted in a log-collection-friendly shape rather than persisted as a Trace Span.
+_Avoid_: debug log, audit record, raw hook payload, trace span
+
+**Hook Telemetry Log Message**:
+A single-line structured application log message with a stable hook telemetry prefix and a JSON payload. **Hook Telemetry Log Message** is a normal operational signal, not an exceptional alert, and does not imply changing the global log formatter.
+_Avoid_: global JSON logging, unstructured hook log, trace span, warning log
+
+**Hook Telemetry Emission Boundary**:
+The rule that a **Hook Telemetry Log Message** is emitted only when at least one hook handler actually runs for a Hook Runtime boundary.
+_Avoid_: unmatched hook boundary log, resolver miss telemetry
+
+**Hook Telemetry Correlation**:
+The relationship between a **Hook Telemetry Log Message** and the request or trace that caused it. **Hook Telemetry Correlation** should include a trace identifier when one is available, but a missing trace identifier does not make the telemetry event invalid.
+_Avoid_: mandatory trace span linkage, uncorrelated hook log
+
+**Hook Telemetry Schema**:
+The versioned JSON shape inside a **Hook Telemetry Log Message**. The schema records correlation fields, boundary-level outcome fields, and handler-level details while excluding raw hook payloads by default.
+_Avoid_: ad-hoc log fields, raw payload schema, trace span schema
+
+**Hook Boundary Outcome**:
+The merged result of one Hook Runtime boundary after all matching handlers have been resolved and combined.
+_Avoid_: handler result, raw hook output, final log line
+
+**Hook Handler Detail**:
+The observable result of one hook handler within a **Hook Telemetry Event**, kept so slow, failed, blocking, or input-mutating handlers can be diagnosed. **Hook Handler Detail** stores structured metadata and redacted, bounded previews rather than full handler input or output.
+_Avoid_: hook boundary outcome, raw handler payload
+
+**Hook Payload Preview**:
+A redacted and size-bounded representation of hook-adjacent text or structured data used for diagnosis without retaining the original payload.
+_Avoid_: raw prompt, raw tool input, raw tool output, full updated input
+
 **Session Skill Freshness**:
 The cross-turn behavior that determines when a chat session starts using updated skill content. In this context, **Session Skill Freshness** means skill changes take effect on the next turn, not during an in-flight turn.
 _Avoid_: skill hot reload, mid-turn skill reload, live skill patch
@@ -238,6 +270,9 @@ Resolved as two different concepts. The always-on rule applies only to the manag
 
 **"Plan SubAgent"**:
 Resolved as outside the next Plan Mode design. The existing SubAgent runtime and delegation rules remain, but Plan Mode does not require an automatic built-in planning SubAgent.
+
+**"Hook Instrumentation Log"**:
+Resolved as a **Hook Telemetry Log Message** emitted for log collection and analysis, not a Trace Span persisted in tracing storage and not a global logging format change.
 
 **"Plan Mode Delegation"**:
 Resolved as allowed but optional. Plan Mode may expose `delegate_to_subagent`, but it does not auto-call `plan-researcher` or any other built-in SubAgent.

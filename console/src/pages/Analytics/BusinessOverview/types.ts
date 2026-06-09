@@ -8,7 +8,14 @@ export interface UserRow {
   calls: number;
   tokens: number;
   lastActive: string;
+  // 三种口径统计字段
+  manualCalls: number;
+  cronExecutions: number;
+  cronReads: number;
 }
+
+// 活跃用户排行榜口径类型
+export type UserMetricType = "manual" | "cron_exec" | "cron_read";
 
 export interface UserDetailModalProps {
   open: boolean;

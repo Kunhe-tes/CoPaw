@@ -32,6 +32,7 @@ from ...marketplace.schemas import (
     UploadSkillResponse,
 )
 from ...marketplace.service import MarketItem, load_index, save_index
+from ...marketplace.version_service import SkillVersionService
 from ..deps import decode_user_name, require_source_id
 from .skills_browse import (
     _decode_zip_filename,
@@ -134,30 +135,32 @@ def _parse_frontmatter(
 def _copy_skill_to_market(
     skill_dir: Path,
     market_skill_dir: Path,
-    skill_json: dict,
+    skill_json: dict,  # noqa: ARG001 - 保留参数签名兼容，但不再写入
     skill_md: str,
 ) -> None:
-    """复制技能文件到市场目录."""
+    """复制技能文件到市场目录.
+
+    覆盖时先清空目标目录，确保旧文件不会残留。
+    不再写入 skill.json，元数据从 SKILL.md frontmatter 读取。
+    """
     market_skill_dir.mkdir(parents=True, exist_ok=True)
 
-    # 复制 skill.json
-    (market_skill_dir / "skill.json").write_text(
-        json.dumps(skill_json, ensure_ascii=False, indent=2),
-        encoding="utf-8",
-    )
+    # 清空目标目录中的旧文件（覆盖场景）
+    for existing in market_skill_dir.iterdir():
+        if existing.is_dir():
+            shutil.rmtree(existing)
+        else:
+            existing.unlink()
 
     # 复制 SKILL.md
     if skill_md:
         (market_skill_dir / "SKILL.md").write_text(skill_md, encoding="utf-8")
 
-    # 复制其他文件（处理已存在的目录）
+    # 复制其他文件（排除 skill.json）
     for f in skill_dir.iterdir():
         if f.name not in ("skill.json", "SKILL.md"):
             target = market_skill_dir / f.name
             if f.is_dir():
-                # 目标目录已存在时先删除，再复制
-                if target.exists():
-                    shutil.rmtree(target)
                 shutil.copytree(f, target)
             else:
                 shutil.copy2(f, target)
@@ -233,8 +236,12 @@ def _process_single_skill(
     user_id: str,
     user_name: str,
     category_id: Optional[int],
+    overwrite: bool = False,
 ) -> tuple[Optional[str], Optional[dict], Optional[str]]:
     """处理单个技能的上架逻辑.
+
+    Args:
+        overwrite: 是否覆盖同名技能，默认 False（返回冲突）
 
     Returns:
         (imported_name, conflict_info, parsed_name_for_first)
@@ -251,17 +258,16 @@ def _process_single_skill(
     existing = next((i for i in items if i.name == name), None)
 
     if existing:
-        # active 状态的同名技能返回冲突，建议改名
-        if existing.status == "active":
+        # 不允许覆盖时，返回冲突提示
+        if not overwrite and existing.status == "active":
             return (
                 None,
                 {"skill_name": name, "suggested_name": f"{name}_1"},
                 name,
             )
 
-        # inactive 状态的同名技能，复用条目并重新激活（与 publish_skill API 一致）
+        # 允许覆盖时，更新现有条目
         now = datetime.now(timezone.utc).isoformat()
-        # 重新发布已下架技能时，更新 created_at 为当前时间
         existing.created_at = now
         existing.status = "active"
         existing.description = description
@@ -291,6 +297,21 @@ def _process_single_skill(
     _copy_skill_to_market(skill_dir, market_skill_dir, skill_json, skill_md)
 
     save_index(svc.marketplace_root, source_id, items)
+
+    # 创建版本快照
+    version_svc = SkillVersionService(svc.marketplace_root)
+    try:
+        version_svc.create_version_snapshot(
+            source_id=source_id,
+            item_id=item.item_id,
+            skill_dir=market_skill_dir,
+            description=f"上传版本 {item.version}",
+            creator=user_name,
+            current_market_version=item.version,
+        )
+    except Exception as e:
+        logger.warning("Failed to create version snapshot: %s", e)
+
     return name, None, name
 
 
@@ -303,12 +324,17 @@ async def publish_skill_upload(
     request: Request,
     file: UploadFile = File(..., description="Skill zip file to publish"),
     category_id: Optional[int] = None,
+    overwrite: bool = False,
     x_source_id: Optional[str] = Header(default=None, alias="X-Source-Id"),
     x_manager: Optional[str] = Header(default=None, alias="X-Manager"),
     x_user_id: Optional[str] = Header(default=None, alias="X-User-Id"),
     x_user_name: Optional[str] = Header(default=None, alias="X-User-Name"),
 ):
-    """上传 zip 文件上架技能到市场（管理员）."""
+    """上传 zip 文件上架技能到市场（管理员）.
+
+    Args:
+        overwrite: 是否覆盖同名技能，默认 False（返回冲突提示）
+    """
     source_id = require_source_id(x_source_id)
     _require_manager(x_manager)
     if not x_user_id:
@@ -350,6 +376,7 @@ async def publish_skill_upload(
                 x_user_id,
                 user_name,
                 category_id,
+                overwrite,  # 传递 overwrite 参数
             )
 
             if conflict:
@@ -449,6 +476,32 @@ async def unpublish_skill(
     _require_manager(x_manager)
     svc = request.app.state.marketplace
     ok = await svc.unpublish_skill(
+        source_id,
+        item_id,
+        operator_id=x_user_id or "",
+        operator_name=decode_user_name(x_user_name) or "",
+    )
+    if not ok:
+        raise HTTPException(status_code=404, detail="Skill not found")
+
+
+@router.delete(
+    "/market/skills/{item_id}/delete",
+    status_code=status.HTTP_204_NO_CONTENT,
+)
+async def delete_skill_permanently(
+    item_id: str,
+    request: Request,
+    x_source_id: Optional[str] = Header(default=None, alias="X-Source-Id"),
+    x_manager: Optional[str] = Header(default=None, alias="X-Manager"),
+    x_user_id: Optional[str] = Header(default=None, alias="X-User-Id"),
+    x_user_name: Optional[str] = Header(default=None, alias="X-User-Name"),
+):
+    """彻底删除技能及其版本历史（管理员）。"""
+    source_id = require_source_id(x_source_id)
+    _require_manager(x_manager)
+    svc = request.app.state.marketplace
+    ok = await svc.delete_market_skill(
         source_id,
         item_id,
         operator_id=x_user_id or "",

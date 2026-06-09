@@ -2,6 +2,9 @@
 from __future__ import annotations
 
 import uuid
+from dataclasses import dataclass
+from typing import Any
+
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, Field
 
@@ -23,6 +26,9 @@ BROADCAST_MODEL_SLOT_WARNING = (
 )
 BROADCAST_CRON_FALLBACK_WARNING = (
     "cron offset not applied: unsupported cron, using original schedule"
+)
+BROADCAST_ALREADY_EXISTS_WARNING = (
+    "broadcast skipped: target tenant already has child job"
 )
 BROADCAST_ORIGINAL_MODEL_SLOT_META_KEY = "broadcast_original_model_slot"
 BROADCAST_MODEL_SLOT_FALLBACK_REASON_META_KEY = (
@@ -54,6 +60,29 @@ class CronBroadcastResponse(BaseModel):
     results: list[CronBroadcastTenantResult] = Field(default_factory=list)
 
 
+@dataclass(frozen=True)
+class _BroadcastContext:
+    """保存一次广播请求内所有目标租户共享的执行上下文。"""
+
+    source_job: CronJobSpec
+    offsets: list[int]
+    multi_agent_manager: Any
+    tenant_workspace_pool: Any | None
+    agent_id: str
+    source_id: str | None
+    timezone_name: str
+
+
+@dataclass(frozen=True)
+class _BroadcastSchedule:
+    """保存目标租户最终使用的 cron 表达式和偏移信息。"""
+
+    cron: str
+    timezone: str
+    offset_minutes: int
+    warning: str
+
+
 async def get_cron_manager(
     request: Request,
 ) -> CronManager:
@@ -70,7 +99,7 @@ async def get_cron_manager(
 
 
 def _inject_request_tenant(spec: CronJobSpec, request: Request) -> CronJobSpec:
-    """Force cron job tenant_id, bbk_id, source_id, tenant_name to follow request context."""
+    """确保定时任务租户字段跟随当前请求上下文。"""
     tenant_id = getattr(request.state, "tenant_id", None)
     bbk_id = getattr(request.state, "bbk_id", None)
     source_id = getattr(request.state, "source_id", None)
@@ -314,6 +343,225 @@ def _build_broadcast_job(
     )
 
 
+async def _find_existing_broadcast_child_job(
+    mgr: CronManager,
+    source_job_id: str,
+) -> CronJobSpec | None:
+    for job in await mgr.list_jobs():
+        if (job.meta or {}).get("broadcast_source_job_id") == source_job_id:
+            return job
+    return None
+
+
+def _normalize_broadcast_target_tenants(
+    target_tenant_ids: list[str],
+) -> list[str]:
+    normalized_tenants: list[str] = []
+    seen: set[str] = set()
+    try:
+        for tenant_id in target_tenant_ids:
+            normalized = _validate_target_tenant_id(tenant_id)
+            if normalized in seen:
+                continue
+            seen.add(normalized)
+            normalized_tenants.append(normalized)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return normalized_tenants
+
+
+def _get_broadcast_multi_agent_manager(request: Request):
+    multi_agent_manager = getattr(
+        request.app.state,
+        "multi_agent_manager",
+        None,
+    )
+    if multi_agent_manager is None:
+        raise HTTPException(
+            status_code=500,
+            detail="multi_agent_manager missing",
+        )
+    return multi_agent_manager
+
+
+def _build_broadcast_context(
+    request: Request,
+    source_job: CronJobSpec,
+    normalized_tenants: list[str],
+) -> _BroadcastContext:
+    return _BroadcastContext(
+        source_job=source_job,
+        offsets=compute_broadcast_offsets(len(normalized_tenants)),
+        multi_agent_manager=_get_broadcast_multi_agent_manager(request),
+        tenant_workspace_pool=getattr(
+            request.app.state,
+            "tenant_workspace_pool",
+            None,
+        ),
+        agent_id=_request_agent_id(request),
+        source_id=_request_source_id(request),
+        timezone_name=source_job.schedule.timezone or "UTC",
+    )
+
+
+def _resolve_broadcast_schedule(
+    source_job: CronJobSpec,
+    timezone_name: str,
+    offset: int,
+) -> _BroadcastSchedule:
+    shifted = shift_cron_expression(
+        source_job.schedule.cron,
+        timezone_name,
+        offset_minutes=offset,
+    )
+    if shifted.error:
+        return _BroadcastSchedule(
+            cron=source_job.schedule.cron,
+            timezone=timezone_name,
+            offset_minutes=0,
+            warning=BROADCAST_CRON_FALLBACK_WARNING,
+        )
+    return _BroadcastSchedule(
+        cron=shifted.cron,
+        timezone=shifted.timezone,
+        offset_minutes=offset,
+        warning="",
+    )
+
+
+async def _get_broadcast_target_cron_manager(
+    context: _BroadcastContext,
+    tenant_id: str,
+) -> tuple[CronManager, str | None]:
+    if context.tenant_workspace_pool is not None:
+        await context.tenant_workspace_pool.ensure_bootstrap(
+            tenant_id,
+            source_id=context.source_id,
+        )
+    runtime_tenant_id = resolve_runtime_tenant_id(
+        tenant_id,
+        context.source_id,
+    )
+    workspace = await context.multi_agent_manager.get_agent(
+        context.agent_id,
+        tenant_id=runtime_tenant_id,
+    )
+    if workspace.cron_manager is None:
+        raise RuntimeError("CronManager not initialized")
+    return workspace.cron_manager, runtime_tenant_id
+
+
+def _build_existing_broadcast_result(
+    tenant_id: str,
+    existing_child_job: CronJobSpec,
+    notification_timezone: str,
+) -> CronBroadcastTenantResult:
+    existing_meta = existing_child_job.meta or {}
+    return CronBroadcastTenantResult(
+        tenant_id=tenant_id,
+        success=True,
+        job_id=existing_child_job.id,
+        cron=existing_child_job.schedule.cron,
+        timezone=existing_child_job.schedule.timezone,
+        offset_minutes=int(
+            existing_meta.get(
+                "broadcast_offset_minutes",
+                0,
+            )
+            or 0,
+        ),
+        notification_timezone=notification_timezone,
+        warning=BROADCAST_ALREADY_EXISTS_WARNING,
+    )
+
+
+async def _create_broadcast_child_job(
+    context: _BroadcastContext,
+    tenant_id: str,
+    target_cron_manager: CronManager,
+    runtime_tenant_id: str | None,
+    schedule: _BroadcastSchedule,
+) -> CronBroadcastTenantResult:
+    target_job_id = str(uuid.uuid4())
+    model_slot, warning, model_slot_fallback_reason = (
+        _resolve_broadcast_model_slot(
+            runtime_tenant_id or "default",
+            context.source_job,
+        )
+    )
+    target_job = _build_broadcast_job(
+        context.source_job,
+        job_id=target_job_id,
+        target_tenant_id=tenant_id,
+        source_id=context.source_id,
+        cron=schedule.cron,
+        timezone_name=schedule.timezone,
+        offset_minutes=schedule.offset_minutes,
+        model_slot=model_slot,
+        model_slot_fallback_reason=model_slot_fallback_reason,
+    )
+    await target_cron_manager.create_or_replace_job(target_job)
+    saved = await target_cron_manager.get_job(target_job_id)
+    result_job = saved or target_job
+    return CronBroadcastTenantResult(
+        tenant_id=tenant_id,
+        success=True,
+        job_id=target_job_id,
+        cron=result_job.schedule.cron,
+        timezone=result_job.schedule.timezone,
+        offset_minutes=schedule.offset_minutes,
+        notification_timezone=context.timezone_name,
+        warning=_join_broadcast_warnings(
+            warning,
+            schedule.warning,
+        ),
+    )
+
+
+async def _broadcast_to_tenant(
+    context: _BroadcastContext,
+    tenant_id: str,
+    offset: int,
+) -> CronBroadcastTenantResult:
+    schedule = _resolve_broadcast_schedule(
+        context.source_job,
+        context.timezone_name,
+        offset,
+    )
+    try:
+        target_cron_manager, runtime_tenant_id = (
+            await _get_broadcast_target_cron_manager(context, tenant_id)
+        )
+        existing_child_job = await _find_existing_broadcast_child_job(
+            target_cron_manager,
+            context.source_job.id,
+        )
+        if existing_child_job is not None:
+            return _build_existing_broadcast_result(
+                tenant_id,
+                existing_child_job,
+                context.timezone_name,
+            )
+        return await _create_broadcast_child_job(
+            context,
+            tenant_id,
+            target_cron_manager,
+            runtime_tenant_id,
+            schedule,
+        )
+    except Exception as exc:  # pylint: disable=broad-except
+        return CronBroadcastTenantResult(
+            tenant_id=tenant_id,
+            success=False,
+            cron=schedule.cron,
+            timezone=schedule.timezone,
+            offset_minutes=schedule.offset_minutes,
+            notification_timezone=context.timezone_name,
+            error=repr(exc),
+            warning=schedule.warning,
+        )
+
+
 @router.get("/jobs", response_model=list[CronJobListItem])
 async def list_jobs(
     request: Request,
@@ -373,116 +621,18 @@ async def broadcast_job(
             detail="No target tenant IDs provided",
         )
 
-    normalized_tenants = []
-    try:
-        for tenant_id in body.target_tenant_ids:
-            normalized = _validate_target_tenant_id(tenant_id)
-            if normalized not in normalized_tenants:
-                normalized_tenants.append(normalized)
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-
-    offsets = compute_broadcast_offsets(len(normalized_tenants))
-    multi_agent_manager = getattr(
-        request.app.state,
-        "multi_agent_manager",
-        None,
+    normalized_tenants = _normalize_broadcast_target_tenants(
+        body.target_tenant_ids,
     )
-    if multi_agent_manager is None:
-        raise HTTPException(
-            status_code=500,
-            detail="multi_agent_manager missing",
-        )
-    tenant_workspace_pool = getattr(
-        request.app.state,
-        "tenant_workspace_pool",
-        None,
+    context = _build_broadcast_context(
+        request,
+        source_job,
+        normalized_tenants,
     )
-
-    results: list[CronBroadcastTenantResult] = []
-    agent_id = _request_agent_id(request)
-    source_id = _request_source_id(request)
-    timezone_name = source_job.schedule.timezone or "UTC"
-    for tenant_id, offset in zip(normalized_tenants, offsets):
-        shifted = shift_cron_expression(
-            source_job.schedule.cron,
-            timezone_name,
-            offset_minutes=offset,
-        )
-        cron_warning = ""
-        applied_offset = offset
-        if shifted.error:
-            cron_warning = BROADCAST_CRON_FALLBACK_WARNING
-            applied_offset = 0
-            cron = source_job.schedule.cron
-            shifted_timezone = timezone_name
-        else:
-            cron = shifted.cron
-            shifted_timezone = shifted.timezone
-        try:
-            if tenant_workspace_pool is not None:
-                await tenant_workspace_pool.ensure_bootstrap(
-                    tenant_id,
-                    source_id=source_id,
-                )
-            runtime_tenant_id = resolve_runtime_tenant_id(
-                tenant_id,
-                source_id,
-            )
-            workspace = await multi_agent_manager.get_agent(
-                agent_id,
-                tenant_id=runtime_tenant_id,
-            )
-            if workspace.cron_manager is None:
-                raise RuntimeError("CronManager not initialized")
-            target_job_id = str(uuid.uuid4())
-            model_slot, warning, model_slot_fallback_reason = (
-                _resolve_broadcast_model_slot(
-                    runtime_tenant_id or "default",
-                    source_job,
-                )
-            )
-            target_job = _build_broadcast_job(
-                source_job,
-                job_id=target_job_id,
-                target_tenant_id=tenant_id,
-                source_id=source_id,
-                cron=cron,
-                timezone_name=shifted_timezone,
-                offset_minutes=applied_offset,
-                model_slot=model_slot,
-                model_slot_fallback_reason=model_slot_fallback_reason,
-            )
-            await workspace.cron_manager.create_or_replace_job(target_job)
-            saved = await workspace.cron_manager.get_job(target_job_id)
-            results.append(
-                CronBroadcastTenantResult(
-                    tenant_id=tenant_id,
-                    success=True,
-                    job_id=target_job_id,
-                    cron=(saved or target_job).schedule.cron,
-                    timezone=(saved or target_job).schedule.timezone,
-                    offset_minutes=applied_offset,
-                    notification_timezone=timezone_name,
-                    warning=_join_broadcast_warnings(
-                        warning,
-                        cron_warning,
-                    ),
-                ),
-            )
-        except Exception as exc:  # pylint: disable=broad-except
-            results.append(
-                CronBroadcastTenantResult(
-                    tenant_id=tenant_id,
-                    success=False,
-                    cron=cron,
-                    timezone=shifted_timezone,
-                    offset_minutes=applied_offset,
-                    notification_timezone=timezone_name,
-                    error=repr(exc),
-                    warning=cron_warning,
-                ),
-            )
+    results = [
+        await _broadcast_to_tenant(context, tenant_id, offset)
+        for tenant_id, offset in zip(normalized_tenants, context.offsets)
+    ]
     return CronBroadcastResponse(results=results)
 
 

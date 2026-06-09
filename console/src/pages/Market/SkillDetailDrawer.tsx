@@ -3,17 +3,18 @@ import { useEffect, useMemo, useState } from "react";
 import {
   BarChartOutlined,
   CalendarOutlined,
+  HistoryOutlined,
   ProfileOutlined,
-  ShareAltOutlined,
   TagOutlined,
   UserOutlined,
-  RollbackOutlined,
 } from "@ant-design/icons";
-import { Button, Spin, Table, Tag, Typography } from "antd";
+import { Button, Popconfirm, Spin, Table, Tag, Typography } from "antd";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
+import { Send, Undo2, Trash2, Archive } from "lucide-react";
 import { marketApi, MarketSkillDetail } from "../../api/modules/market";
 import type { FileContentResponse } from "../../api/modules/mySkills";
+import { VersionHistoryModal } from "./Skills/VersionHistoryModal";
 import styles from "./SkillDetailDrawer.module.less";
 
 const { Paragraph, Text, Title } = Typography;
@@ -25,12 +26,24 @@ interface SkillDetailDrawerProps {
   isManager?: boolean;
   onDistribute?: () => void;
   onRecall?: () => void;
+  onUnpublish?: () => void;
+  onDelete?: () => void;
   sourceId?: string;
   onRefresh?: () => void;
   categoryName?: string;
 }
 
 const FRONTMATTER_PATTERN = /^---\r?\n[\s\S]*?\r?\n---[ \t]*(?:\r?\n|$)/;
+
+const FOOTER_BUTTON_STYLE = {
+  height: 28,
+  padding: "0 12px",
+  borderRadius: 8,
+  fontSize: 12,
+  display: "inline-flex",
+  alignItems: "center",
+  gap: 4,
+} as const;
 
 const BASE_META_TAG_STYLE = {
   margin: 0,
@@ -188,18 +201,25 @@ function renderPreviewContent(
   );
 }
 
-export function SkillDetailDrawer({
-  open,
-  skill,
-  isManager,
-  onDistribute,
-  onRecall,
-  sourceId,
-  categoryName,
-}: SkillDetailDrawerProps) {
+export function SkillDetailDrawer(
+  props: SkillDetailDrawerProps,
+) {
+  const {
+    open,
+    skill,
+    isManager,
+    onDistribute,
+    onRecall,
+    onUnpublish,
+    onDelete,
+    sourceId,
+    categoryName,
+    onRefresh,
+  } = props;
   const [fileDetail, setFileDetail] = useState<FileContentResponse | null>(null);
   const [fileLoading, setFileLoading] = useState(false);
   const [previewError, setPreviewError] = useState<string | null>(null);
+  const [versionHistoryOpen, setVersionHistoryOpen] = useState(false);
   const displayTitle = skill?.chinese_name?.trim() || skill?.name || "";
   const displayDescription = skill?.description || "暂无描述";
   const normalizedCategoryName = categoryName?.trim();
@@ -258,15 +278,16 @@ export function SkillDetailDrawer({
   }
 
   return (
-    <div style={{ height: "100%", overflow: "auto", padding: 12 }}>
-      <div
-        style={{
-          display: "flex",
-          gap: 12,
-          flexWrap: "wrap",
-          alignItems: "flex-start",
-        }}
-      >
+    <>
+      <div style={{ height: "100%", overflow: "auto", padding: 12 }}>
+        <div
+          style={{
+            display: "flex",
+            gap: 12,
+            flexWrap: "wrap",
+            alignItems: "flex-start",
+          }}
+        >
         <div
           style={{
             flex: "1 1 720px",
@@ -493,43 +514,99 @@ export function SkillDetailDrawer({
               </Tag>
             </div>
 
-            {isManager && (onDistribute || onRecall) && (
-              <div style={{ marginTop: 10, display: "flex", gap: 8 }}>
+            {isManager && (onDistribute || onRecall || onUnpublish || onDelete) && (
+              <div style={{ marginTop: 10, display: "flex", gap: 8, flexWrap: "wrap" }}>
+                <Button
+                  onClick={() => setVersionHistoryOpen(true)}
+                  style={{
+                    ...FOOTER_BUTTON_STYLE,
+                    color: "#5e5d59",
+                    border: "1px solid #d9d9d9",
+                    backgroundColor: "#fff",
+                  }}
+                >
+                  <HistoryOutlined style={{ fontSize: 12 }} />
+                  版本历史
+                </Button>
                 {onDistribute && (
                   <Button
                     type="primary"
-                    aria-label="分发技能"
-                    icon={<ShareAltOutlined />}
                     onClick={onDistribute}
-                    style={{
-                      flex: 1,
-                      height: 36,
-                      borderRadius: 12,
-                      background:
-                        "linear-gradient(135deg, #c4956a 0%, #b85a3a 100%)",
-                      border: "none",
-                      boxShadow: "none",
-                    }}
+                    style={{ ...FOOTER_BUTTON_STYLE }}
                   >
-                    分发技能
+                    <Send size={12} />
+                    分发
                   </Button>
                 )}
-                {/* 撤回功能临时隐藏，后续启用时移除 false 条件 */}
-                {onRecall && false && (
+                {onRecall && (
                   <Button
-                    danger
-                    aria-label="撤回技能"
-                    icon={<RollbackOutlined />}
                     onClick={onRecall}
                     style={{
-                      flex: onDistribute ? 0 : 1,
-                      height: 36,
-                      borderRadius: 12,
+                      ...FOOTER_BUTTON_STYLE,
+                      color: "#5e5d59",
+                      border: "1px solid #d9d9d9",
+                      backgroundColor: "#fff",
                     }}
                   >
+                    <Undo2 size={12} />
                     撤回
                   </Button>
                 )}
+                {onUnpublish && (
+                  <Popconfirm
+                    title="确认下架此技能？"
+                    description="下架后用户将无法查看此技能，但数据仍保留"
+                    onConfirm={onUnpublish}
+                    okText="下架"
+                    cancelText="取消"
+                  >
+                    <Button
+                      style={{
+                        ...FOOTER_BUTTON_STYLE,
+                        color: "#5e5d59",
+                        border: "1px solid #d9d9d9",
+                        backgroundColor: "#fff",
+                      }}
+                    >
+                      <Archive size={12} />
+                      下架
+                    </Button>
+                  </Popconfirm>
+                )}
+                {onDelete && (
+                  <Popconfirm
+                    title="彻底删除此技能？"
+                    description="删除后技能文件和版本历史将全部清除，无法恢复"
+                    onConfirm={onDelete}
+                    okText="删除"
+                    okButtonProps={{ danger: true }}
+                    cancelText="取消"
+                  >
+                    <Button
+                      danger
+                      style={{ ...FOOTER_BUTTON_STYLE }}
+                    >
+                      <Trash2 size={12} />
+                      删除
+                    </Button>
+                  </Popconfirm>
+                )}
+              </div>
+            )}
+            {!isManager && (
+              <div style={{ marginTop: 10, display: "flex", gap: 8 }}>
+                <Button
+                  onClick={() => setVersionHistoryOpen(true)}
+                  style={{
+                    ...FOOTER_BUTTON_STYLE,
+                    color: "#5e5d59",
+                    border: "1px solid #d9d9d9",
+                    backgroundColor: "#fff",
+                  }}
+                >
+                  <HistoryOutlined style={{ fontSize: 12 }} />
+                  版本历史
+                </Button>
               </div>
             )}
           </div>
@@ -603,6 +680,18 @@ export function SkillDetailDrawer({
           </div>
         </div>
       </div>
-    </div>
+      </div>
+
+      <VersionHistoryModal
+        open={versionHistoryOpen}
+        itemId={skill.item_id}
+        skillName={displayTitle}
+        currentVersion={skill.version}
+        sourceId={sourceId || ""}
+        isManager={isManager}
+        onClose={() => setVersionHistoryOpen(false)}
+        onVersionSwitched={onRefresh}
+      />
+    </>
   );
 }

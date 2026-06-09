@@ -1,6 +1,6 @@
-import { Card, Tag, Typography, Button, Space, Popconfirm } from "antd";
+import { Card, Tag, Typography, Button, Space, Popconfirm, Dropdown } from "antd";
 import { MarketSkill } from "../../api/modules/market";
-import { Users, PhoneCall, Calendar, GitBranch, CheckCircle, Sparkles, Tag as TagIcon, Eye, Trash2, Send } from "lucide-react";
+import { Users, PhoneCall, Calendar, GitBranch, CheckCircle, Sparkles, Tag as TagIcon, Eye, Trash2, Send, MoreVertical, Archive } from "lucide-react";
 
 const { Text } = Typography;
 
@@ -9,13 +9,14 @@ interface SkillCardProps {
   onClick: () => void;
   onDistribute?: () => void;
   onUnpublish?: () => void;
+  onDelete?: () => void;
   isManager: boolean;
   isInstalled?: boolean;
   isFeatured?: boolean;
   categoryName?: string;
 }
 
-export function SkillCard({ skill, onClick, onDistribute, onUnpublish, isManager, isInstalled, isFeatured, categoryName }: SkillCardProps) {
+export function SkillCard({ skill, onClick, onDistribute, onUnpublish, onDelete, isManager, isInstalled, isFeatured, categoryName }: SkillCardProps) {
   const formatMetricValue = (value: number | null): string => {
     if (value === null) return "0";
     if (value >= 100000000) return `${(value / 100000000).toFixed(1)}亿`;
@@ -254,17 +255,51 @@ export function SkillCard({ skill, onClick, onDistribute, onUnpublish, isManager
               分发
             </Button>
           )}
-          {isManager && onUnpublish && (
-            <Popconfirm
-              title="删除技能"
-              description={`确定删除技能「${skill.name}」？删除后用户将无法查看。`}
-              onConfirm={onUnpublish}
-              okText="确定"
-              cancelText="取消"
+          {isManager && (onUnpublish || onDelete) && (
+            <Dropdown
+              menu={{
+                items: [
+                  {
+                    key: "unpublish",
+                    label: (
+                      <Popconfirm
+                        title="确认下架此技能？"
+                        description="下架后用户将无法查看此技能，但数据仍保留"
+                        onConfirm={onUnpublish}
+                        okText="下架"
+                        cancelText="取消"
+                      >
+                        <span style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                          <Archive size={14} />
+                          下架
+                        </span>
+                      </Popconfirm>
+                    ),
+                  },
+                  {
+                    key: "delete",
+                    label: (
+                      <Popconfirm
+                        title="彻底删除此技能？"
+                        description="删除后技能文件和版本历史将全部清除，无法恢复"
+                        onConfirm={onDelete}
+                        okText="删除"
+                        okButtonProps={{ danger: true }}
+                        cancelText="取消"
+                      >
+                        <span style={{ display: "flex", alignItems: "center", gap: 8, color: "#ff4d4f" }}>
+                          <Trash2 size={14} />
+                          彻底删除
+                        </span>
+                      </Popconfirm>
+                    ),
+                  },
+                ],
+              }}
+              trigger={['click']}
             >
               <Button
                 size="small"
-                danger
                 style={{
                   height: 28,
                   padding: "0 12px",
@@ -275,10 +310,10 @@ export function SkillCard({ skill, onClick, onDistribute, onUnpublish, isManager
                   gap: 4,
                 }}
               >
-                <Trash2 size={12} />
-                删除
+                <MoreVertical size={12} />
+                管理
               </Button>
-            </Popconfirm>
+            </Dropdown>
           )}
         </div>
       </div>

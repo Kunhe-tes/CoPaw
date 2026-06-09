@@ -65,6 +65,7 @@
     "monitorCronOverview": "定时任务概览",
     "monitor": "监控",
     "analyticsBusinessOverview": "运营看板",
+    "analyticsCronJobOverview": "定时任务概览",
     "instance": "实例管理",
     "instanceOverview": "概览",
     "instanceInstances": "实例列表",
@@ -1724,5 +1725,30 @@
       "previewTitle": "文件预览",
       "previewFailed": "获取文件内容失败"
     }
+  },
+  "tenantSelector": {
+    "targetMode": "分发目标",
+    "byOrganization": "按机构",
+    "byUser": "按用户",
+    "selectOrganization": "选择机构",
+    "selectOrganizationPlaceholder": "选择机构",
+    "organizationSelectionHint": "已选择 {{count}} 个机构，涉及 {{userCount}} 个用户",
+    "userCount": "{{count}} 人",
+    "selectUsers": "选择用户",
+    "selectAll": "全选",
+    "clearAll": "清空",
+    "manualInput": "手动输入用户",
+    "manualInputHint": "输入额外的用户ID，多个用户用空格或逗号分隔",
+    "manualInputPlaceholder": "例如：user001 user002 user003",
+    "selectedCount": "已选 {{count}} 个：",
+    "extraInput": "输入额外租户ID",
+    "extraInputHint": "输入不在列表中的租户ID，多个ID用空格或逗号分隔",
+    "extraInputPlaceholder": "例如：external_user001 external_user002",
+    "filterPlaceholder": "搜索租户名称或ID",
+    "filterHint": "找到 {{count}} 个（共 {{total}} 个）",
+    "noMatchHint": "未找到匹配的租户",
+    "noSourceId": "无法加载租户列表",
+    "noSourceIdDescription": "未获取到有效的来源标识，请刷新页面重试",
+    "loadError": "加载租户列表失败"
   }
 }

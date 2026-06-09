@@ -14,7 +14,8 @@ import { useTranslation } from "react-i18next";
 import type { FormInstance } from "antd";
 import { useCallback, useRef, useState } from "react";
 import { getChannelLabel, type ChannelKey } from "./constants";
-import { TenantTargetPicker } from "../../../../components/TenantTargetPicker";
+import { getUserId } from "../../../../utils/identity";
+import { TenantSelector } from "../../../../components/TenantSelector";
 import styles from "../index.module.less";
 import { useTheme } from "../../../../contexts/ThemeContext";
 import { api } from "../../../../api";
@@ -157,12 +158,11 @@ export function ChannelDrawer({
 
   // 通道配置分发状态
   const [distributeOpen, setDistributeOpen] = useState(false);
-  const [distributeLoading, setDistributeLoading] = useState(false);
   const [distributeSubmitting, setDistributeSubmitting] = useState(false);
-  const [distributeTenantIds, setDistributeTenantIds] = useState<string[]>([]);
   const [selectedDistributeTenantIds, setSelectedDistributeTenantIds] =
     useState<string[]>([]);
   const [distributeOverwrite, setDistributeOverwrite] = useState(false);
+  const currentTenantId = getUserId();
 
   const stopWeixinPoll = useCallback(() => {
     if (weixinPollRef.current) {
@@ -271,20 +271,9 @@ export function ChannelDrawer({
 
   // ── 通道配置分发 ──────────────────────────────────────────────────────────
 
-  const handleOpenDistribute = async () => {
+  const handleOpenDistribute = () => {
     setDistributeOpen(true);
     setSelectedDistributeTenantIds([]);
-    setDistributeLoading(true);
-    try {
-      const result = await api.listChannelDistributionTenants();
-      setDistributeTenantIds(result.tenant_ids || []);
-    } catch (error) {
-      message.error(
-        error instanceof Error ? error.message : "加载租户列表失败",
-      );
-    } finally {
-      setDistributeLoading(false);
-    }
   };
 
   const handleDistribute = async () => {
@@ -300,11 +289,14 @@ export function ChannelDrawer({
       const succeeded = items.filter((r) => r.success);
       const failed = items.filter((r) => !r.success);
       if (succeeded.length > 0) {
-        message.success(t("channels.distributeSuccess", { count: succeeded.length }));
+        message.success(
+          t("channels.distributeSuccess", { count: succeeded.length }),
+        );
       }
       if (failed.length > 0) {
         const lines = failed.map(
-          (r) => `• ${r.tenant_id}: ${r.error || t("channels.distributeFailed")}`,
+          (r) =>
+            `• ${r.tenant_id}: ${r.error || t("channels.distributeFailed")}`,
         );
         Modal.confirm({
           title: t("channels.distributePartialFailure"),
@@ -320,9 +312,7 @@ export function ChannelDrawer({
       setDistributeOpen(false);
     } catch (error) {
       message.error(
-        error instanceof Error
-          ? error.message
-          : t("channels.distributeFailed"),
+        error instanceof Error ? error.message : t("channels.distributeFailed"),
       );
     } finally {
       setDistributeSubmitting(false);
@@ -1193,15 +1183,11 @@ export function ChannelDrawer({
             />
             <span>{t("channels.distributeOverwrite")}</span>
           </div>
-          {distributeLoading ? (
-            <div>{t("common.loading")}</div>
-          ) : (
-            <TenantTargetPicker
-              tenantIds={distributeTenantIds}
-              selectedTenantIds={selectedDistributeTenantIds}
-              onChange={setSelectedDistributeTenantIds}
-            />
-          )}
+          <TenantSelector
+            selectedTenantIds={selectedDistributeTenantIds}
+            onChange={setSelectedDistributeTenantIds}
+            excludeTenantId={currentTenantId}
+          />
         </div>
       </Modal>
     </Drawer>

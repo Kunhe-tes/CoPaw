@@ -307,6 +307,13 @@
 
 .analysisGrid {
   display: grid;
+  grid-template-columns: 2.2fr 2.1fr;
+  gap: 16px;
+  margin-bottom: 16px;
+}
+
+.analysisGridWithDepth {
+  display: grid;
   grid-template-columns: 2.2fr 2.1fr 1.72fr;
   gap: 16px;
   margin-bottom: 16px;
@@ -554,15 +561,15 @@
 
 .rankHeader {
   display: grid;
-  grid-template-columns: 36px minmax(0, 1fr) 62px;
-  gap: 10px;
+  grid-template-columns: 36px minmax(0, 1fr) 56px 56px 56px;
+  gap: 8px;
   padding: 2px 0 10px;
   color: #64748b;
   font-size: 14px;
   font-weight: 600;
 }
 
-.rankHeader span:last-child {
+.rankHeader span:not(:first-child):not(:nth-child(2)) {
   text-align: right;
 }
 
@@ -575,8 +582,8 @@
 
 .rankRow {
   display: grid;
-  grid-template-columns: 36px minmax(0, 1fr) 62px;
-  gap: 10px;
+  grid-template-columns: 36px minmax(0, 1fr) 56px 56px 56px;
+  gap: 8px;
   align-items: center;
   padding: 10px 0;
   border: 0;

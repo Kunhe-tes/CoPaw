@@ -14,6 +14,7 @@ declare global {
       systemCode?: string;
       systemSecret?: string;
       responseFeedbackUserWhitelist?: string[];
+      enableOriginYTaskTabs?: boolean | string | number;
     };
   }
 }

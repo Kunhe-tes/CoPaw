@@ -7,6 +7,7 @@
 | 区域 | 关键文件 | 说明 |
 |------|----------|------|
 | Tracing | `src/swe/tracing/config.py`, `src/swe/tracing/manager.py`, `src/swe/tracing/models.py`, `src/swe/tracing/model_wrapper.py`, `src/swe/tracing/sanitizer.py`, `src/swe/tracing/store.py` | 追踪配置、模型包装、脱敏和落盘 |
+| Hook Telemetry | `src/swe/agents/hook_runtime/runtime.py` | Hook handler 实际执行时输出 `HOOK_TELEMETRY ` 前缀的单行 JSON 日志，用于日志采集侧分析；不写入 tracing span |
 | Token Usage | `src/swe/token_usage/manager.py`, `src/swe/token_usage/model_wrapper.py` | Token 统计与包装器 |
 | App 侧心跳 | `src/swe/app/service_heartbeat.py`, `src/swe/app/crons/heartbeat.py` | 服务状态和实例心跳 |
 

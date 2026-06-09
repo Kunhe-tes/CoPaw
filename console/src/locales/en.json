@@ -61,6 +61,7 @@
     "analyticsMessages": "User Messages",
     "analyticsTraces": "Conversation Analytics",
     "analyticsBusinessOverview": "Business Overview",
+    "analyticsCronJobOverview": "Cron Job Overview",
     "monitorCronOverview": "Cron Overview",
     "monitor": "Monitor",
     "instance": "Instance",
@@ -1711,5 +1712,30 @@
       "previewTitle": "File Preview",
       "previewFailed": "Failed to get file content"
     }
+  },
+  "tenantSelector": {
+    "targetMode": "Target Mode",
+    "byOrganization": "By Organization",
+    "byUser": "By User",
+    "selectOrganization": "Select Organization",
+    "selectOrganizationPlaceholder": "Select organization",
+    "organizationSelectionHint": "Selected {{count}} organizations, involving {{userCount}} users",
+    "userCount": "{{count}} users",
+    "selectUsers": "Select Users",
+    "selectAll": "Select All",
+    "clearAll": "Clear All",
+    "manualInput": "Manual Input",
+    "manualInputHint": "Enter additional user IDs, separated by space or comma",
+    "manualInputPlaceholder": "e.g. user001 user002 user003",
+    "selectedCount": "Selected {{count}}:",
+    "extraInput": "Enter Extra Tenant IDs",
+    "extraInputHint": "Enter tenant IDs not in the list, separated by space or comma",
+    "extraInputPlaceholder": "e.g. external_user001 external_user002",
+    "filterPlaceholder": "Search tenant name or ID",
+    "filterHint": "Found {{count}} of {{total}}",
+    "noMatchHint": "No matching tenants found",
+    "noSourceId": "Cannot Load Tenant List",
+    "noSourceIdDescription": "No valid source ID found, please refresh the page",
+    "loadError": "Failed to load tenant list"
   }
 }

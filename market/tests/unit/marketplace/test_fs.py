@@ -815,3 +815,159 @@ def test_copy_skill_to_user_no_existing_skill(tmp_path):
         "distributed_by": "admin1",
         "received_version": "1.0.0",
     }
+
+
+# ========== MCP 配置归一化测试 ==========
+
+
+def test_normalize_mcp_config_data_deep_copy():
+    """深拷贝确保嵌套字典不会共享引用."""
+    from market.marketplace.fs import normalize_mcp_config_data
+
+    original = {
+        "command": "npx",
+        "args": ["-y", "@anthropic/mcp"],
+        "env": {"API_KEY": "secret-key"},
+        "headers": {"Authorization": "Bearer token"},
+    }
+
+    normalized = normalize_mcp_config_data(original)
+
+    # 修改原始配置的嵌套字典
+    original["env"]["API_KEY"] = "modified-key"
+    original["headers"]["Authorization"] = "modified-token"
+
+    # 归一化后的配置不应受影响（深拷贝）
+    assert normalized["env"]["API_KEY"] == "secret-key"
+    assert normalized["headers"]["Authorization"] == "Bearer token"
+
+
+def test_normalize_mcp_config_data_preserves_all_fields():
+    """归一化应保留所有配置字段."""
+    from market.marketplace.fs import normalize_mcp_config_data
+
+    config = {
+        "command": "python",
+        "args": ["server.py"],
+        "env": {"KEY1": "value1", "KEY2": "value2"},
+        "headers": {"X-Custom": "custom-value"},
+        "cwd": "/app",
+        "lazy_load": True,
+    }
+
+    normalized = normalize_mcp_config_data(config)
+
+    assert normalized["command"] == "python"
+    assert normalized["args"] == ["server.py"]
+    assert normalized["env"] == {"KEY1": "value1", "KEY2": "value2"}
+    assert normalized["headers"] == {"X-Custom": "custom-value"}
+    assert normalized["cwd"] == "/app"
+    assert normalized["lazy_load"] is True
+    assert normalized["transport"] == "stdio"  # 推断
+
+
+def test_normalize_mcp_config_data_extracts_from_mcp_servers():
+    """从 mcpServers 嵌套结构中提取第一个 server 配置."""
+    from market.marketplace.fs import normalize_mcp_config_data
+
+    config = {
+        "mcpServers": {
+            "weather": {
+                "command": "npx",
+                "args": ["-y", "@anthropic/weather"],
+                "env": {"WEATHER_KEY": "key1"},
+            },
+            "calendar": {
+                "command": "npx",
+                "args": ["-y", "@anthropic/calendar"],
+            },
+        },
+    }
+
+    normalized = normalize_mcp_config_data(config)
+
+    # 应提取第一个 server（weather）
+    assert normalized["command"] == "npx"
+    assert normalized["args"] == ["-y", "@anthropic/weather"]
+    assert normalized["env"] == {"WEATHER_KEY": "key1"}
+    assert "calendar" not in normalized
+
+
+def test_normalize_mcp_config_data_advanced_headers_promotion():
+    """advanced.headers 应提升到顶层（仅当顶层不存在时）."""
+    from market.marketplace.fs import normalize_mcp_config_data
+
+    # 场景1：没有顶层 headers，从 advanced 提升
+    config1 = {
+        "command": "python",
+        "advanced": {
+            "headers": {"X-Advanced": "advanced-value"},
+        },
+    }
+    normalized1 = normalize_mcp_config_data(config1)
+    assert normalized1["headers"] == {"X-Advanced": "advanced-value"}
+
+    # 场景2：有顶层 headers，不覆盖
+    config2 = {
+        "command": "python",
+        "headers": {"X-Top": "top-value"},
+        "advanced": {
+            "headers": {"X-Advanced": "should-not-override"},
+        },
+    }
+    normalized2 = normalize_mcp_config_data(config2)
+    assert normalized2["headers"] == {"X-Top": "top-value"}
+
+
+def test_normalize_mcp_config_data_deep_copy_advanced_headers():
+    """从 advanced 提取 headers 时应深拷贝，避免引用共享."""
+    from market.marketplace.fs import normalize_mcp_config_data
+
+    config = {
+        "command": "python",
+        "advanced": {
+            "headers": {"Auth": "bearer-token"},
+        },
+    }
+
+    normalized = normalize_mcp_config_data(config)
+
+    # 修改原始配置的 advanced.headers
+    config["advanced"]["headers"]["Auth"] = "modified-token"
+
+    # 归一化后的 headers 不应受影响（深拷贝）
+    assert normalized["headers"]["Auth"] == "bearer-token"
+
+
+def test_normalize_mcp_config_data_transport_normalization():
+    """transport 字段应正确归一化."""
+    from market.marketplace.fs import normalize_mcp_config_data
+
+    # type -> transport
+    config1 = {"type": "stdio", "command": "python"}
+    normalized1 = normalize_mcp_config_data(config1)
+    assert normalized1["transport"] == "stdio"
+
+    # streamable-http -> streamable_http
+    config2 = {"transport": "streamable-http", "url": "http://localhost"}
+    normalized2 = normalize_mcp_config_data(config2)
+    assert normalized2["transport"] == "streamable_http"
+
+    # 从 command 推断 stdio
+    config3 = {"command": "python"}
+    normalized3 = normalize_mcp_config_data(config3)
+    assert normalized3["transport"] == "stdio"
+
+    # 从 url 推断 streamable_http
+    config4 = {"url": "http://localhost/mcp"}
+    normalized4 = normalize_mcp_config_data(config4)
+    assert normalized4["transport"] == "streamable_http"
+
+
+def test_normalize_mcp_config_data_empty_input():
+    """空输入应返回空字典."""
+    from market.marketplace.fs import normalize_mcp_config_data
+
+    assert normalize_mcp_config_data(None) == {}
+    assert normalize_mcp_config_data("not a dict") == {}
+    assert normalize_mcp_config_data({}) == {}

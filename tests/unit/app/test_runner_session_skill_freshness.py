@@ -1,7 +1,10 @@
 # -*- coding: utf-8 -*-
 from __future__ import annotations
 
+import ast
+import inspect
 import json
+import textwrap
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
@@ -59,8 +62,10 @@ class _FakeAgent:
     def __init__(self, **kwargs):
         self.memory = _FakeMemory()
         self._request_context = kwargs.get("request_context", {})
+        self._sys_prompt = "base sys prompt"
         self.rebuild_sys_prompt_calls = 0
         self.turn_msgs = []
+        self.sys_prompt_at_call = ""
         _FakeAgent.last_instance = self
 
     async def register_mcp_clients(self):
@@ -72,13 +77,19 @@ class _FakeAgent:
     def get_effective_skills(self) -> list[str]:
         return list(type(self).effective_skills)
 
+    @property
+    def sys_prompt(self) -> str:
+        return self._sys_prompt
+
     def rebuild_sys_prompt(self):
         self.rebuild_sys_prompt_calls += 1
+        self._sys_prompt = "rebuilt sys prompt"
 
     async def setup_skill_detector(self, trace_id: str) -> None:
         del trace_id
 
     async def __call__(self, turn_msgs):
+        self.sys_prompt_at_call = self.sys_prompt
         self.turn_msgs = list(turn_msgs)
         for msg in turn_msgs:
             self.memory.content.append((msg, []))
@@ -182,6 +193,62 @@ def _request() -> SimpleNamespace:
         user_id="user-1",
         channel="console",
         channel_meta={},
+    )
+
+
+def _model_sys_prompt() -> str:
+    assert _FakeAgent.last_instance is not None
+    return _FakeAgent.last_instance.sys_prompt_at_call
+
+
+def _turn_notice_messages() -> list[Msg]:
+    assert _FakeAgent.last_instance is not None
+    return [
+        msg
+        for msg in _FakeAgent.last_instance.turn_msgs
+        if msg.role == "system"
+        and "[Skill freshness notice]" in msg.get_text_content()
+    ]
+
+
+def _turn_notice_text() -> str:
+    notice_messages = _turn_notice_messages()
+    assert len(notice_messages) == 1
+    return notice_messages[0].get_text_content()
+
+
+def _streamed_notice_messages(outputs) -> list[Msg]:
+    return [
+        msg
+        for msg, _last in outputs
+        if msg.role == "system"
+        and "[Skill freshness notice]" in msg.get_text_content()
+    ]
+
+
+def _cyclomatic_complexity(func) -> int:
+    source = textwrap.dedent(inspect.getsource(func))
+    tree = ast.parse(source)
+    decision_nodes = (
+        ast.If,
+        ast.For,
+        ast.AsyncFor,
+        ast.While,
+        ast.Try,
+        ast.ExceptHandler,
+        ast.BoolOp,
+        ast.IfExp,
+        ast.comprehension,
+    )
+    return 1 + sum(isinstance(node, decision_nodes) for node in ast.walk(tree))
+
+
+def test_refresh_session_skill_freshness_complexity_stays_bounded() -> None:
+    assert (
+        _cyclomatic_complexity(
+            AgentRunner._refresh_session_skill_freshness,
+        )
+        <= 10
     )
 
 
@@ -355,6 +422,61 @@ async def test_blocked_turn_persists_confirmed_skill_snapshot(
 
 
 @pytest.mark.asyncio
+async def test_freshness_notice_is_sent_as_visible_system_turn_message(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    runner = _patch_runner(monkeypatch, tmp_path)
+    _FakeAgent.effective_skills = ["xlsx"]
+    _write_skill_manifest(tmp_path, skills=["xlsx"])
+    skill_dir = _write_skill_dir(tmp_path, "xlsx")
+    await runner.session.save_session_skill_snapshot(
+        session_id="session-1",
+        user_id="user-1",
+        snapshot={
+            "xlsx": {
+                "skill_name": "xlsx",
+                "resolved_skill_dir": str(skill_dir),
+                "freshness_token": 10.0,
+            },
+        },
+    )
+    monkeypatch.setattr(
+        "swe.app.runner.runner.get_skill_freshness_token",
+        lambda _path: 11.0,
+    )
+
+    outputs = [
+        item
+        async for item in runner.query_handler(
+            [Msg(name="user", role="user", content="continue")],
+            request=_request(),
+        )
+    ]
+
+    assert outputs[-1][0].get_text_content() == "agent reply"
+    assert _FakeAgent.last_instance is not None
+    notice_messages = [
+        msg
+        for msg in _FakeAgent.last_instance.turn_msgs
+        if msg.role == "system"
+    ]
+    assert len(notice_messages) == 1
+    notice_text = notice_messages[0].get_text_content()
+    assert "[Skill freshness notice]" in notice_text
+    assert "detected skill-directory change" in notice_text
+    streamed_notice_messages = [
+        msg
+        for msg, _last in outputs
+        if msg.role == "system"
+        and "[Skill freshness notice]" in msg.get_text_content()
+    ]
+    assert len(streamed_notice_messages) == 1
+    assert streamed_notice_messages[0].get_text_content() == notice_text
+    assert "[Skill freshness notice]" not in _model_sys_prompt()
+
+
+@pytest.mark.asyncio
 async def test_declared_skill_resume_emits_freshness_notice_before_persisting_snapshot(
     monkeypatch,
     tmp_path: Path,
@@ -388,17 +510,7 @@ async def test_declared_skill_resume_emits_freshness_notice_before_persisting_sn
     ]
 
     assert outputs[-1][0].get_text_content() == "agent reply"
-    assert _FakeAgent.last_instance is not None
-    notice_messages = [
-        msg
-        for msg in _FakeAgent.last_instance.turn_msgs
-        if msg.role == "system"
-    ]
-    assert len(notice_messages) == 1
-    assert (
-        "detected skill-directory change"
-        in notice_messages[0].get_text_content()
-    )
+    assert "detected skill-directory change" in _turn_notice_text()
 
     state = await runner.session.get_session_state_dict(
         "session-1",
@@ -453,23 +565,11 @@ async def test_turn_start_aggregates_token_change_and_withdrawal_notice(
     ]
 
     assert outputs[-1][0].get_text_content() == "agent reply"
-    assert _FakeAgent.last_instance is not None
-    notice = _FakeAgent.last_instance.turn_msgs[0]
-    assert notice.role == "system"
-    assert "xlsx" in notice.get_text_content()
-    assert "detected skill-directory change" in notice.get_text_content()
-    assert "pdf" in notice.get_text_content()
-    assert "no longer effective" in notice.get_text_content()
-    assert (
-        len(
-            [
-                msg
-                for msg in _FakeAgent.last_instance.turn_msgs
-                if msg.role == "system"
-            ],
-        )
-        == 1
-    )
+    notice_text = _turn_notice_text()
+    assert "xlsx" in notice_text
+    assert "detected skill-directory change" in notice_text
+    assert "pdf" in notice_text
+    assert "no longer effective" in notice_text
     state = await runner.session.get_session_state_dict(
         "session-1",
         user_id="user-1",
@@ -519,9 +619,7 @@ async def test_turn_start_notice_reports_directory_switch_paths(
     ]
 
     assert outputs[-1][0].get_text_content() == "agent reply"
-    assert _FakeAgent.last_instance is not None
-    notice_text = _FakeAgent.last_instance.turn_msgs[0].get_text_content()
-    assert f"{old_dir} -> {new_dir}" in notice_text
+    assert f"{old_dir} -> {new_dir}" in _turn_notice_text()
 
 
 @pytest.mark.asyncio
@@ -558,12 +656,7 @@ async def test_missing_skill_snapshot_entry_is_removed_without_notice(
     ]
 
     assert outputs[-1][0].get_text_content() == "agent reply"
-    assert _FakeAgent.last_instance is not None
-    assert [
-        msg
-        for msg in _FakeAgent.last_instance.turn_msgs
-        if msg.role == "system"
-    ] == []
+    assert _turn_notice_messages() == []
     state = await runner.session.get_session_state_dict(
         "session-1",
         user_id="user-1",
@@ -606,9 +699,7 @@ async def test_missing_stored_skill_dir_still_reports_directory_switch(
     ]
 
     assert outputs[-1][0].get_text_content() == "agent reply"
-    assert _FakeAgent.last_instance is not None
-    notice_text = _FakeAgent.last_instance.turn_msgs[0].get_text_content()
-    assert f"{old_dir} -> {new_dir}" in notice_text
+    assert f"{old_dir} -> {new_dir}" in _turn_notice_text()
     state = await runner.session.get_session_state_dict(
         "session-1",
         user_id="user-1",
@@ -820,8 +911,7 @@ async def test_applied_snapshot_prevents_repeat_notice_on_later_turn(
     ]
 
     assert first_outputs[-1][0].get_text_content() == "agent reply"
-    assert _FakeAgent.last_instance is not None
-    assert _FakeAgent.last_instance.turn_msgs[0].role == "system"
+    assert len(_streamed_notice_messages(first_outputs)) == 1
 
     second_outputs = [
         item
@@ -832,12 +922,7 @@ async def test_applied_snapshot_prevents_repeat_notice_on_later_turn(
     ]
 
     assert second_outputs[-1][0].get_text_content() == "agent reply"
-    assert _FakeAgent.last_instance is not None
-    assert [
-        msg
-        for msg in _FakeAgent.last_instance.turn_msgs
-        if msg.role == "system"
-    ] == []
+    assert _streamed_notice_messages(second_outputs) == []
 
 
 @pytest.mark.asyncio
@@ -874,8 +959,7 @@ async def test_freshness_notice_is_not_persisted_in_session_memory(
     ]
 
     assert outputs[-1][0].get_text_content() == "agent reply"
-    assert _FakeAgent.last_instance is not None
-    assert _FakeAgent.last_instance.turn_msgs[0].role == "system"
+    assert len(_streamed_notice_messages(outputs)) == 1
 
     state = await runner.session.get_session_state_dict(
         "session-1",
@@ -986,17 +1070,7 @@ async def test_retryable_plan_failure_defers_snapshot_persistence_until_success(
             },
         },
     ]
-    assert _FakeAgent.last_instance is not None
-    notice_messages = [
-        msg
-        for msg in _FakeAgent.last_instance.turn_msgs
-        if msg.role == "system"
-    ]
-    assert len(notice_messages) == 1
-    assert (
-        "detected skill-directory change"
-        in notice_messages[0].get_text_content()
-    )
+    assert "detected skill-directory change" in _turn_notice_text()
 
     state = await runner.session.get_session_state_dict(
         "session-1",
@@ -1108,17 +1182,7 @@ async def test_retryable_completion_failure_defers_snapshot_persistence_until_su
             },
         },
     ]
-    assert _FakeAgent.last_instance is not None
-    notice_messages = [
-        msg
-        for msg in _FakeAgent.last_instance.turn_msgs
-        if msg.role == "system"
-    ]
-    assert len(notice_messages) == 1
-    assert (
-        "detected skill-directory change"
-        in notice_messages[0].get_text_content()
-    )
+    assert "detected skill-directory change" in _turn_notice_text()
 
     state = await runner.session.get_session_state_dict(
         "session-1",

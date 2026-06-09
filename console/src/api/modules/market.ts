@@ -211,6 +211,20 @@ export const marketApi = {
     return request<void>(`/market/skills/${itemId}`, opts);
   },
 
+  deleteSkill: async (
+    sourceId: string,
+    itemId: string,
+  ): Promise<void> => {
+    const opts: RequestInit = {
+      method: "DELETE",
+      ...(mergeHeaders({
+        "X-Source-Id": sourceId,
+        "X-Manager": "true",
+      })),
+    };
+    return request<void>(`/market/skills/${itemId}/delete`, opts);
+  },
+
   distributeSkill: async (
     sourceId: string,
     itemId: string,
@@ -278,6 +292,7 @@ export const marketApi = {
     file: File,
     options?: {
       category_id?: number;
+      overwrite?: boolean;
     }
   ): Promise<{
     imported: string[];
