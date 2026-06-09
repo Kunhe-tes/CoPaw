@@ -132,6 +132,8 @@ export interface PublishSingleMCPRequest {
   category_id?: number;
   /** 关联 BBK ID 列表 */
   bbk_ids?: string[];
+  /** 同名 MCP 已存在时是否覆盖 */
+  overwrite?: boolean;
 }
 
 /** 单个发布结果 */

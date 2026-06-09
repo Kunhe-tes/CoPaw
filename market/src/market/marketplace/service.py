@@ -63,6 +63,27 @@ from .version_service import SkillVersionService
 
 logger = logging.getLogger(__name__)
 
+
+class MCPNameConflictError(Exception):
+    """MCP 同名冲突异常，用于发布时检测到同名 MCP 已存在。"""
+
+    def __init__(
+        self,
+        existing_item_id: str,
+        existing_name: str,
+        existing_creator_id: str = "",
+        existing_creator_name: str = "",
+    ) -> None:
+        self.existing_item_id = existing_item_id
+        self.existing_name = existing_name
+        self.existing_creator_id = existing_creator_id
+        self.existing_creator_name = existing_creator_name
+        super().__init__(
+            f"MCP with name '{existing_name}' already exists "
+            f"(created by {existing_creator_name or existing_creator_id})",
+        )
+
+
 _BINARY_PREVIEW_SUFFIXES = {
     ".png",
     ".jpg",
@@ -1710,29 +1731,63 @@ class MarketplaceService:
     ) -> MarketItem:
         """发布 MCP 到市场。覆盖已存在条目。
 
+        冲突识别仅基于 (name, creator_id)，不再使用 client_key：
+        - 同 name + 同 creator_id：视为同一用户更新自己的发布，静默覆盖。
+        - 同 name + 不同 creator_id：视为撞名冲突。overwrite=False 抛
+          MCPNameConflictError；overwrite=True 复用原 item_id 替换为新发布者。
+        - name 不存在：新建条目。
+
+        client_key 仍写入条目本身，但不参与匹配。
+
         Args:
             source_id: 来源 ID。
             req: 发布请求体。
 
         Returns:
             创建或更新的 MarketItem。
+
+        Raises:
+            MCPNameConflictError: 同名但不同 creator 且 overwrite=False。
         """
         items = load_index(self.marketplace_root, source_id)
 
-        # 按 client_key 查找已存在的 MCP 条目
+        # 自己发的同名条目（同 creator）→ 直接覆盖
         existing = next(
             (
                 i
                 for i in items
-                if i.item_type == "mcp" and i.client_key == req.client_key
+                if i.item_type == "mcp"
+                and i.name == req.name
+                and i.creator_id == req.creator_id
             ),
             None,
         )
 
+        # 别人发的同名条目（不同 creator）→ 冲突
+        same_name_other = next(
+            (
+                i
+                for i in items
+                if i.item_type == "mcp"
+                and i.name == req.name
+                and i.creator_id != req.creator_id
+            ),
+            None,
+        )
+
+        if same_name_other is not None and not req.overwrite:
+            raise MCPNameConflictError(
+                existing_item_id=same_name_other.item_id,
+                existing_name=same_name_other.name,
+                existing_creator_id=same_name_other.creator_id,
+                existing_creator_name=same_name_other.creator_name,
+            )
+
         now = datetime.now(timezone.utc).isoformat()
         if existing is not None:
-            # 覆盖：复用 item_id
+            # 同一用户更新自己的发布：复用 item_id
             existing.version = _bump_patch(existing.version)
+            existing.client_key = req.client_key
             existing.name = req.name
             existing.chinese_name = req.chinese_name
             existing.description = req.description
@@ -1747,6 +1802,23 @@ class MarketplaceService:
             existing.status = "active"
             existing.updated_at = now
             item = existing
+        elif same_name_other is not None and req.overwrite:
+            # 覆盖其他用户的同名条目：复用 item_id，新发布者接管
+            same_name_other.version = _bump_patch(same_name_other.version)
+            same_name_other.client_key = req.client_key
+            same_name_other.name = req.name
+            same_name_other.chinese_name = req.chinese_name
+            same_name_other.description = req.description
+            same_name_other.guidance = req.guidance
+            same_name_other.creator_id = req.creator_id
+            same_name_other.creator_name = req.creator_name
+            same_name_other.category_id = req.category_id
+            same_name_other.bbk_ids = req.bbk_ids
+            if same_name_other.status == "inactive":
+                same_name_other.created_at = now
+            same_name_other.status = "active"
+            same_name_other.updated_at = now
+            item = same_name_other
         else:
             # 创建新条目
             item = MarketItem(
@@ -1940,6 +2012,37 @@ class MarketplaceService:
             user_stats=user_stats,
         )
 
+    @staticmethod
+    def _find_user_mcp_name_conflict(
+        user_config_path: Path,
+        mcp_name: str,
+    ) -> str | None:
+        """检查用户本地是否已有同名且 creator_id 非空的 MCP。
+
+        Args:
+            user_config_path: 用户 agent.json 路径。
+            mcp_name: 待分发的 MCP 名称。
+
+        Returns:
+            冲突条目的 client_key；无冲突返回 None。
+        """
+        if not user_config_path.exists():
+            return None
+        try:
+            raw = json.loads(
+                user_config_path.read_text(encoding="utf-8"),
+            )
+        except (json.JSONDecodeError, OSError):
+            return None
+
+        clients = raw.get("mcp", {}).get("clients", {})
+        for key, cfg in clients.items():
+            if not isinstance(cfg, dict):
+                continue
+            if cfg.get("name") == mcp_name and cfg.get("creator_id"):
+                return key
+        return None
+
     async def distribute_mcp(
         self,
         source_id: str,
@@ -2016,6 +2119,28 @@ class MarketplaceService:
                     user_root / "workspaces" / "default" / "agent.json"
                 )
                 bootstrapped = not user_config_path.exists()
+
+                # 同名冲突检测：若用户本地已有同 name 且 creator_id 非空的 MCP
+                # （即"是用户自己创建/管理的 MCP"），拒绝分发，避免覆盖。
+                # creator_id 为空表示是早期未携带来源信息的市场分发，可被覆盖。
+                conflict_client_key = self._find_user_mcp_name_conflict(
+                    user_config_path,
+                    item.name,
+                )
+                if conflict_client_key is not None:
+                    results.append(
+                        MCPDistributionTenantResult(
+                            tenant_id=tenant_id,
+                            success=False,
+                            error=(
+                                f"用户已有同名 MCP "
+                                f'"{item.name}"（client_key={conflict_client_key}），'
+                                f"不能分发以避免覆盖"
+                            ),
+                        ),
+                    )
+                    continue
+
                 copy_mcp_to_user(
                     marketplace_root=self.marketplace_root,
                     source_id=source_id,
@@ -2024,6 +2149,9 @@ class MarketplaceService:
                     user_id=tenant_id,
                     client_key=item.client_key,
                     distributed_by=operator_id,
+                    creator_id=item.creator_id,
+                    creator_name=item.creator_name,
+                    mcp_name=item.name,
                 )
 
                 # 获取用户信息（如果查询不到则为空）
