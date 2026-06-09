@@ -2,7 +2,8 @@ import React, { useState, useMemo } from "react";
 import { Button, Card, Input, Switch } from "@agentscope-ai/design";
 import { CopyOutlined, UndoOutlined, SaveOutlined } from "@ant-design/icons";
 import type { MarkdownFile } from "../../../../api/types";
-import { XMarkdown } from "@ant-design/x-markdown";
+import ReactMarkdown from "react-markdown";
+import remarkGfm from "remark-gfm";
 import { useTranslation } from "react-i18next";
 import { useAppMessage } from "../../../../hooks/useAppMessage";
 import { stripFrontmatter } from "../../../../utils/markdown";
@@ -104,10 +105,11 @@ export const FileEditor: React.FC<FileEditorProps> = ({
                 )}
               </div>
               {showMarkdown && isMarkdownFile ? (
-                <XMarkdown
-                  content={markdownContent}
-                  className={styles.markdownViewer}
-                />
+                <div className={styles.markdownViewer}>
+                  <ReactMarkdown remarkPlugins={[remarkGfm]}>
+                    {markdownContent}
+                  </ReactMarkdown>
+                </div>
               ) : (
                 <Input.TextArea
                   value={fileContent}

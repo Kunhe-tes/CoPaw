@@ -237,13 +237,34 @@
 
 .markdownViewer {
   flex: 1;
-  display: flex;
-  flex-direction: column;
   height: calc(100% - 20px);
   overflow: auto;
   border: 1px solid #e8e8e8;
   padding: 16px;
   border-radius: 8px;
+
+  table {
+    border-collapse: collapse;
+    display: block;
+    width: max-content;
+    max-width: 100%;
+    overflow-x: auto;
+    overflow-y: hidden;
+    margin: 1em 0;
+  }
+
+  th {
+    background: #f7f8fa;
+    font-weight: 600;
+    text-align: left;
+  }
+
+  th,
+  td {
+    border: 1px solid #e5e7eb;
+    padding: 8px 12px;
+    white-space: pre;
+  }
 }
 
 .textarea {

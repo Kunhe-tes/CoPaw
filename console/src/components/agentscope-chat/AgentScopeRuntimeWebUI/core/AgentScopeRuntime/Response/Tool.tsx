@@ -1,9 +1,5 @@
 import React from "react";
-import {
-  AgentScopeRuntimeRunStatus,
-  IAgentScopeRuntimeMessage,
-  IDataContent,
-} from "../types";
+import { IAgentScopeRuntimeMessage, IDataContent } from "../types";
 import { ToolCall } from "@/components/agentscope-chat";
 import { useChatAnywhereOptions } from "../../Context/ChatAnywhereOptionsContext";
 import Approval from "./Approval";
@@ -13,6 +9,7 @@ import {
   resolveServerLabel,
   resolveToolName,
 } from "./ToolTitle";
+import { isToolMessageLoading, resolveToolMessageStatus } from "./ToolStatus";
 
 const HIDDEN_TOOL_NAMES = new Set(["update_task_progress"]);
 
@@ -34,10 +31,18 @@ const Tool = React.memo(function ({
     output: Record<string, any>;
     summary?: string;
     output_summary?: string;
+    tool_status?: "running" | "success" | "failed";
+    tool_error?: string | null;
   }>[];
-  const loading = data.status === AgentScopeRuntimeRunStatus.InProgress;
   const inputData = (content[0]?.data || {}) as Record<string, any>;
   const outputData = (content[1]?.data || {}) as Record<string, any>;
+  const msgStatus = resolveToolMessageStatus({
+    messageStatus: data.status,
+    hasOutputContent: content.length > 1,
+    inputData,
+    outputData,
+  });
+  const loading = isToolMessageLoading(msgStatus);
   const toolName = resolveToolName(inputData) || resolveToolName(outputData);
   if (HIDDEN_TOOL_NAMES.has(toolName)) return null;
 
@@ -57,15 +62,17 @@ const Tool = React.memo(function ({
   });
 
   let node;
+  const renderedData =
+    msgStatus === data.status ? data : { ...data, status: msgStatus };
 
   if (customToolRenderConfig[toolName]) {
     const C = customToolRenderConfig[toolName];
-    node = <C data={data} />;
+    node = <C data={renderedData} />;
   } else {
     node = (
       <ToolCall
         loading={loading}
-        msgStatus={data.status}
+        msgStatus={msgStatus}
         defaultOpen={false}
         title={title}
         input={input}

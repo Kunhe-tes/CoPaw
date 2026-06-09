@@ -83,6 +83,7 @@ class HookContext(BaseModel):
     effort: EffortConfig | None = None
     agent_type: str | None = None
     source_id: str | None = None
+    trace_id: str | None = None
     workspace_dir: str | None = None
     chat_id: str | None = None
     turn_id: str | None = None

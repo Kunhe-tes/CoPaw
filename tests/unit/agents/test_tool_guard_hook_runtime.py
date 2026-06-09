@@ -113,6 +113,30 @@ def test_tool_hooks_enabled_accepts_loaded_skill_sources(tmp_path) -> None:
     assert agent._tool_hooks_enabled(HookConfig())
 
 
+def test_build_tool_hook_context_includes_correlation_fields(tmp_path) -> None:
+    agent = _FakeAgent(tmp_path)
+    agent._request_context.update(
+        {
+            "source_id": "source-a",
+            "trace_id": "trace-1",
+            "chat_id": "chat-1",
+            "turn_id": "turn-1",
+        },
+    )
+
+    context = agent._build_tool_hook_context(
+        HookEventName.PRE_TOOL_USE,
+        tool_name="read_file",
+        tool_input={"path": "README.md"},
+        tool_use_id="tool-1",
+    )
+
+    assert context.source_id == "source-a"
+    assert context.trace_id == "trace-1"
+    assert context.chat_id == "chat-1"
+    assert context.turn_id == "turn-1"
+
+
 @pytest.mark.asyncio
 async def test_pre_tool_hook_updated_input_replaces_tool_call(
     tmp_path,

@@ -282,6 +282,28 @@ async def test_apply_channel_changes_materializes_default_console_when_missing(
     assert watcher._last_channels.console.bot_prefix == ""
 
 
+def test_resolve_channel_change_action_marks_deleted_channel_for_removal(
+    tmp_path,
+):
+    workspace_dir = tmp_path / "tenant-a" / "workspaces" / "default"
+    workspace_dir.mkdir(parents=True)
+    (workspace_dir / "agent.json").write_text("{}", encoding="utf-8")
+
+    watcher = AgentConfigWatcher(
+        agent_id="default",
+        workspace_dir=workspace_dir,
+        channel_manager=AsyncMock(),
+        tenant_id="tenant-a",
+    )
+
+    action = watcher._resolve_channel_change_action(
+        None,
+        {"enabled": True, "bot_prefix": "[OLD]"},
+    )
+
+    assert action == "remove"
+
+
 async def test_reload_one_channel_adds_enabled_custom_channel(
     tmp_path,
 ):

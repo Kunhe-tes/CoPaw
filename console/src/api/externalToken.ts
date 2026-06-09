@@ -28,6 +28,7 @@ interface WindowEnv {
   SYSTEM_SECRET?: string;
   TOKEN_API_URL?: string;
   responseFeedbackUserWhitelist?: string[];
+  enableOriginYTaskTabs?: boolean | string | number;
 }
 
 declare global {

@@ -607,6 +607,97 @@ def _create_file_block_support_formatter(
             return _strip_top_level_message_name(messages)
 
         @staticmethod
+        def _extract_text_from_tool_result_dict(
+            output: dict,
+        ) -> str | None:
+            content = output.get("content")
+            if not isinstance(content, list):
+                return None
+
+            textual_output = [
+                block["text"]
+                for block in content
+                if (
+                    isinstance(block, dict)
+                    and block.get("type") == "text"
+                    and isinstance(block.get("text"), str)
+                )
+            ]
+            if not textual_output:
+                return None
+            return "\n".join(textual_output)
+
+        @staticmethod
+        def _convert_non_file_tool_result_block(
+            block: dict,
+        ) -> tuple[str, Sequence[Tuple[str, dict]]]:
+            return base_formatter_class.convert_tool_result_to_string(
+                [block],
+            )
+
+        @staticmethod
+        def _convert_file_block_tool_result(
+            block: dict,
+        ) -> tuple[str, tuple[str, dict]]:
+            file_path = block.get("path", "") or block.get("url", "")
+            file_name = block.get("name", file_path)
+            text = (
+                f"The returned file '{file_name}' "
+                f"can be found at: {file_path}"
+            )
+            return text, (file_path, block)
+
+        @staticmethod
+        def _join_tool_result_text(
+            textual_output: list[str],
+        ) -> str:
+            if not textual_output:
+                return ""
+            if len(textual_output) == 1:
+                return textual_output[0]
+            return "\n".join(f"- {item}" for item in textual_output)
+
+        @staticmethod
+        def _convert_tool_result_with_file_blocks(
+            output: List[dict],
+            error: ValueError,
+        ) -> tuple[str, Sequence[Tuple[str, dict]]]:
+            textual_output: list[str] = []
+            multimodal_data: list[Tuple[str, dict]] = []
+
+            for block in output:
+                if not isinstance(block, dict) or "type" not in block:
+                    raise ValueError(
+                        f"Invalid block: {block}, "
+                        "expected a dict with 'type' key",
+                    ) from error
+
+                if block["type"] == "file":
+                    text, file_data = (
+                        FileBlockSupportFormatter._convert_file_block_tool_result(
+                            block,
+                        )
+                    )
+                    textual_output.append(text)
+                    multimodal_data.append(file_data)
+                    continue
+
+                text, data = (
+                    FileBlockSupportFormatter._convert_non_file_tool_result_block(
+                        block,
+                    )
+                )
+                textual_output.append(text)
+                multimodal_data.extend(data)
+
+            return (
+                FileBlockSupportFormatter._join_tool_result_text(
+                    textual_output,
+                ),
+                multimodal_data,
+            )
+
+        @staticmethod
         def convert_tool_result_to_string(
             output: Union[str, List[dict], dict],
         ) -> tuple[str, Sequence[Tuple[str, dict]]]:
@@ -624,72 +715,24 @@ def _create_file_block_support_formatter(
                 return output, []
 
             if isinstance(output, dict):
-                content = output.get("content")
-                if isinstance(content, list):
-                    textual_output = []
-                    for block in content:
-                        if (
-                            isinstance(block, dict)
-                            and block.get("type") == "text"
-                            and isinstance(block.get("text"), str)
-                        ):
-                            textual_output.append(block["text"])
-                    if textual_output:
-                        return "\n".join(textual_output), []
+                text = FileBlockSupportFormatter._extract_text_from_tool_result_dict(
+                    output,
+                )
+                if text is not None:
+                    return text, []
                 return json.dumps(output, ensure_ascii=False), []
 
-            # Try parent class method first
             try:
                 return base_formatter_class.convert_tool_result_to_string(
                     output,
                 )
-            except ValueError as e:
-                if "Unsupported block type: file" not in str(e):
+            except ValueError as error:
+                if "Unsupported block type: file" not in str(error):
                     raise
-
-                # Handle output containing file blocks
-                textual_output = []
-                multimodal_data = []
-
-                for block in output:
-                    if not isinstance(block, dict) or "type" not in block:
-                        raise ValueError(
-                            f"Invalid block: {block}, "
-                            "expected a dict with 'type' key",
-                        ) from e
-
-                    if block["type"] == "file":
-                        file_path = block.get("path", "") or block.get(
-                            "url",
-                            "",
-                        )
-                        file_name = block.get("name", file_path)
-
-                        textual_output.append(
-                            f"The returned file '{file_name}' "
-                            f"can be found at: {file_path}",
-                        )
-                        multimodal_data.append((file_path, block))
-                    else:
-                        # Delegate other block types to parent class
-                        (
-                            text,
-                            data,
-                        ) = base_formatter_class.convert_tool_result_to_string(
-                            [block],
-                        )
-                        textual_output.append(text)
-                        multimodal_data.extend(data)
-
-                if len(textual_output) == 0:
-                    return "", multimodal_data
-                elif len(textual_output) == 1:
-                    return textual_output[0], multimodal_data
-                else:
-                    return (
-                        "\n".join("- " + _ for _ in textual_output),
-                        multimodal_data,
-                    )
+                return FileBlockSupportFormatter._convert_tool_result_with_file_blocks(
+                    output,
+                    error,
+                )
 
     FileBlockSupportFormatter.__name__ = (
         f"FileBlockSupport{base_formatter_class.__name__}"

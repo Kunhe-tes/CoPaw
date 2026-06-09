@@ -12,6 +12,7 @@
 
 from __future__ import annotations
 
+import copy
 import json
 import logging
 import os
@@ -46,36 +47,49 @@ def _normalize_transport_value(raw_transport: str) -> str | None:
 
 
 def _extract_first_mcp_server(config_data: dict) -> dict:
-    """从嵌套的 mcpServers 结构中提取第一个 MCP server 配置."""
+    """从嵌套的 mcpServers 结构中提取第一个 MCP server 配置.
+
+    使用深拷贝确保嵌套字典（headers、env 等）不会共享引用，
+    避免重复分发时配置污染问题。
+    """
     mcp_servers = config_data.get("mcpServers")
     if not isinstance(mcp_servers, dict) or not mcp_servers:
-        return dict(config_data)
+        # 深拷贝确保嵌套字典独立
+        return copy.deepcopy(config_data)
 
     _, first_value = next(iter(mcp_servers.items()))
     if isinstance(first_value, dict):
-        return dict(first_value)
-    return dict(config_data)
+        # 深拷贝第一个 server 配置
+        return copy.deepcopy(first_value)
+    return copy.deepcopy(config_data)
 
 
 def _apply_advanced_fields(normalized: dict) -> None:
-    """将嵌套的 'advanced' 字段提升到顶层配置."""
+    """将嵌套的 'advanced' 字段提升到顶层配置.
+
+    处理逻辑：
+    - headers: 仅当顶层不存在时，从 advanced.headers 提升（避免覆盖用户配置）
+    - transport: 仅当顶层不存在时，从 advanced.transport 提升
+    - 其他 advanced 内的字段忽略（已通过深拷贝保留在 normalized 中）
+    """
     advanced = normalized.get("advanced")
     if not isinstance(advanced, dict):
         return
 
-    if "headers" not in normalized and isinstance(
-        advanced.get("headers"),
-        dict,
-    ):
-        normalized["headers"] = advanced.get("headers", {})
+    # headers 提升：顶层 headers 优先，避免覆盖用户显式配置
+    if "headers" not in normalized:
+        advanced_headers = advanced.get("headers")
+        if isinstance(advanced_headers, dict):
+            # 深拷贝避免引用共享
+            normalized["headers"] = copy.deepcopy(advanced_headers)
 
-    if "transport" not in normalized and isinstance(
-        advanced.get("transport"),
-        str,
-    ):
-        transport = _normalize_transport_value(advanced["transport"])
-        if transport:
-            normalized["transport"] = transport
+    # transport 提升：顶层 transport 优先
+    if "transport" not in normalized:
+        advanced_transport = advanced.get("transport")
+        if isinstance(advanced_transport, str):
+            transport = _normalize_transport_value(advanced_transport)
+            if transport:
+                normalized["transport"] = transport
 
 
 def _infer_transport_from_config(normalized: dict) -> None:
@@ -101,14 +115,18 @@ def normalize_mcp_config_data(config_data: dict) -> dict:
     成 MCPClientConfig 可识别的扁平字段。
 
     主要处理：
-    - 将 mcpServers 嵌套结构提取到顶层
-    - 将 advanced.headers 提升到顶层 headers
+    - 将 mcpServers 嵌套结构提取到顶层（使用深拷贝避免引用共享）
+    - 将 advanced.headers 提升到顶层 headers（深拷贝）
     - 将 advanced.transport 提升到顶层 transport
     - 统一 transport 字段的命名（type -> transport, streamable-http -> streamable_http）
+
+    重要：返回的字典是深拷贝结果，嵌套字典（headers、env 等）与原配置无引用关系，
+    确保重复分发时各租户配置独立，不会相互污染。
     """
     if not isinstance(config_data, dict):
         return {}
 
+    # 深拷贝提取配置，避免嵌套字典引用共享
     normalized = _extract_first_mcp_server(config_data)
     _apply_advanced_fields(normalized)
 

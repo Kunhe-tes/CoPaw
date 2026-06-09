@@ -633,3 +633,75 @@ def test_broadcast_clears_stale_fallback_meta_when_source_model_slot_missing():
         "broadcast_model_slot_fallback_reason"
         not in target_supported.created[0].meta
     )
+
+
+def test_broadcast_skips_tenant_that_already_has_source_child_job():
+    source_job = CronJobSpec.model_validate(
+        {
+            **_job_spec("job-source"),
+            "schedule": ScheduleSpec(
+                cron="0 9 * * *",
+            ).model_dump(mode="json"),
+            "tenant_id": "tenant-a",
+            "source_id": "source-a",
+            "scope_id": encode_scope_id("tenant-a", "source-a"),
+        },
+    )
+    existing_child_job = CronJobSpec.model_validate(
+        {
+            **_job_spec("job-existing-child"),
+            "schedule": ScheduleSpec(
+                cron="0 9 * * *",
+            ).model_dump(mode="json"),
+            "tenant_id": "tenant-b",
+            "source_id": "source-a",
+            "scope_id": encode_scope_id("tenant-b", "source-a"),
+            "meta": {
+                "broadcast_source_job_id": "job-source",
+                "broadcast_offset_minutes": 0,
+            },
+        },
+    )
+    source_manager = _Manager({"job-source": source_job})
+    target_manager = _Manager({"job-existing-child": existing_child_job})
+    multi_agent_manager = _MultiAgentManager(
+        {
+            encode_scope_id("tenant-b", "source-a"): _Workspace(
+                target_manager,
+            ),
+        },
+    )
+    client = _build_client(
+        source_manager,
+        multi_agent_manager=multi_agent_manager,
+        tenant_workspace_pool=_TenantWorkspacePool(),
+    )
+    _install_provider_manager(
+        {},
+        providers_by_tenant={
+            encode_scope_id("tenant-b", "source-a"): {},
+        },
+    )
+
+    response = client.post(
+        "/cron/jobs/job-source/broadcast",
+        json={"target_tenant_ids": ["tenant-b"]},
+    )
+
+    assert response.status_code == 200
+    assert target_manager.created == []
+    assert response.json()["results"] == [
+        {
+            "tenant_id": "tenant-b",
+            "success": True,
+            "job_id": "job-existing-child",
+            "cron": "0 9 * * *",
+            "timezone": "UTC",
+            "offset_minutes": 0,
+            "notification_timezone": "UTC",
+            "error": "",
+            "warning": (
+                "broadcast skipped: target tenant already has child job"
+            ),
+        },
+    ]

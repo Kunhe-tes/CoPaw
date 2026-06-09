@@ -13,10 +13,9 @@ import {
   DEFAULT_FORM_VALUES,
 } from "./components";
 import { PageHeader } from "@/components/PageHeader";
-import { TenantTargetPicker } from "@/components/TenantTargetPicker";
+import { TenantSelector } from "@/components/TenantSelector";
 import { useAppMessage } from "../../../hooks/useAppMessage";
-import { useIframeStore } from "../../../stores/iframeStore";
-import { DEFAULT_SOURCE_ID } from "../../../constants/identity";
+import { getUserId } from "../../../utils/identity";
 import {
   buildExecutionModelKey,
   useExecutionModelOptions,
@@ -45,7 +44,6 @@ function CronJobsPage() {
   const [drawerOpen, setDrawerOpen] = useState(false);
   const [editingJob, setEditingJob] = useState<CronJob | null>(null);
   const [broadcastingJob, setBroadcastingJob] = useState<CronJob | null>(null);
-  const [broadcastTenantIds, setBroadcastTenantIds] = useState<string[]>([]);
   const [selectedBroadcastTenantIds, setSelectedBroadcastTenantIds] = useState<
     string[]
   >([]);
@@ -56,7 +54,7 @@ function CronJobsPage() {
   const [saving, setSaving] = useState(false);
   const [form] = Form.useForm<CronJob>();
   const userTimezoneRef = useRef("UTC");
-  const sourceId = useIframeStore((state) => state.source) || DEFAULT_SOURCE_ID;
+  const currentTenantId = getUserId();
   const {
     loading: executionModelLoading,
     options: executionModelOptions,
@@ -122,18 +120,10 @@ function CronJobsPage() {
     });
   };
 
-  const handleBroadcast = async (job: CronJob) => {
+  const handleBroadcast = (job: CronJob) => {
     setBroadcastingJob(job);
     setSelectedBroadcastTenantIds([]);
     setBroadcastResults([]);
-    try {
-      const res = await api.listCronBroadcastTenants();
-      setBroadcastTenantIds(res.tenant_ids || []);
-    } catch (error) {
-      console.error("Failed to load broadcast tenants", error);
-      message.error("Failed to load tenants");
-      setBroadcastTenantIds([]);
-    }
   };
 
   const handleBroadcastCancel = () => {
@@ -263,12 +253,11 @@ function CronJobsPage() {
               {broadcastingJob.schedule?.timezone || "UTC"}；优先在原执行时间前
               4 小时内均匀错峰，无法安全错峰的 cron 会按原表达式分发。
             </div>
-            <TenantTargetPicker
-              tenantIds={broadcastTenantIds}
+            <TenantSelector
               selectedTenantIds={selectedBroadcastTenantIds}
               onChange={setSelectedBroadcastTenantIds}
               hint="选择需要接收该定时任务的租户"
-              sourceId={sourceId}
+              excludeTenantId={currentTenantId}
             />
             {broadcastResults.length > 0 && (
               <div style={{ display: "grid", gap: 6 }}>

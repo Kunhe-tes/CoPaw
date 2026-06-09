@@ -66,6 +66,7 @@ import ConversationQuickNav from "@/components/ConversationQuickNav";
 // ==================== 首页改版 (Kun He) ====================
 import WelcomeCenterLayout from "@/components/agentscope-chat/WelcomeCenterLayout";
 import ChatSidebar from "./components/ChatSidebar";
+import ChatTaskTabs from "./components/ChatTaskTabs";
 // ==================== 首页改版结束 ====================
 // ==================== 自定义工具渲染器 (customToolRenderConfig) ====================
 import CopyFileToStatic from "@/components/agentscope-chat/AgentScopeRuntimeWebUI/customToolRenders/CopyFileToStatic";
@@ -85,6 +86,7 @@ import {
   getTaskOpenTarget,
   shouldMarkTaskReadOnOpen,
 } from "./taskJobs";
+import { shouldEnableOriginYTaskTabs } from "./origin";
 import { shouldRefreshCurrentTaskMessages } from "./taskMessageRefresh";
 import { matchesResolvedChatId } from "./sessionApi/resolvedSessionMapping";
 
@@ -777,6 +779,21 @@ export default function ChatPage() {
     () => deriveChatTaskState(jobs, chatId),
     [jobs, chatId],
   );
+  const enableTaskTabs = useMemo(() => {
+    return shouldEnableOriginYTaskTabs(location.search);
+  }, [location.search]);
+  const [taskTabsOpen, setTaskTabsOpen] = useState(false);
+  const handleTaskTabsToggle = useCallback(() => {
+    setTaskTabsOpen((prev) => !prev);
+  }, []);
+  const handleTaskTabsClose = useCallback(() => {
+    setTaskTabsOpen(false);
+  }, []);
+  useEffect(() => {
+    if (!enableTaskTabs) {
+      setTaskTabsOpen(false);
+    }
+  }, [enableTaskTabs]);
   const feedbackTask = useMemo(
     () =>
       currentTask
@@ -1502,8 +1519,20 @@ export default function ChatPage() {
           <>
             <ChatSessionInitializer />
             <RuntimeLoadingBridge bridgeRef={runtimeLoadingBridgeRef} />
-            <ChatHeaderTitle />
-            <span style={{ flex: 1 }} />
+            {(!enableTaskTabs || !taskTabsOpen) && <ChatHeaderTitle />}
+            {enableTaskTabs && (
+              <ChatTaskTabs
+                visible={taskTabsOpen}
+                tasks={tasks}
+                selectedTaskId={currentTask?.id}
+                onTaskClick={handleTaskOpen}
+                onTaskPause={handleTaskPause}
+                onTaskRun={handleTaskRun}
+                onTaskResume={handleTaskResume}
+                onTaskDelete={handleTaskDelete}
+              />
+            )}
+            <span style={{ flex: 1, minWidth: 8 }} />
             <GeneratedFilesDrawer />
             <ModelSelector />
             {/* <ChatActionGroup /> */}
@@ -1661,6 +1690,15 @@ export default function ChatPage() {
     multimodalCaps,
     resolveLogicalRequestSessionId,
     resolveRequestChatId,
+    enableTaskTabs,
+    taskTabsOpen,
+    tasks,
+    currentTask?.id,
+    handleTaskOpen,
+    handleTaskPause,
+    handleTaskRun,
+    handleTaskResume,
+    handleTaskDelete,
     taskProgress,
     t,
   ]);
@@ -1668,6 +1706,7 @@ export default function ChatPage() {
   // ==================== 首页改版 (Kun He) ====================
   // 新建聊天：通过 chatRef 调用后端 createSession API
   const handleCreateSessionFromSidebar = useCallback(async () => {
+    setTaskTabsOpen(false);
     const newId = await chatRef.current?.createSession?.();
     if (newId) {
       navigate(`/chat/${newId}`, { replace: true });
@@ -1707,7 +1746,11 @@ export default function ChatPage() {
               <ChatSidebar
                 tasks={tasks}
                 selectedTaskId={currentTask?.id}
+                enableTaskTabs={enableTaskTabs}
+                taskTabsOpen={taskTabsOpen}
                 onCreateSession={handleCreateSessionFromSidebar}
+                onTaskTabsToggle={handleTaskTabsToggle}
+                onTaskTabsClose={handleTaskTabsClose}
                 onTaskClick={handleTaskOpen}
                 onTaskPause={handleTaskPause}
                 onTaskRun={handleTaskRun}

@@ -704,6 +704,8 @@ class ToolGuardMixin:
             user_id=str(request_context.get("user_id") or ""),
             agent_id=str(request_context.get("agent_id") or ""),
             channel=str(request_context.get("channel") or ""),
+            source_id=request_context.get("source_id"),
+            trace_id=request_context.get("trace_id"),
             workspace_dir=str(workspace_dir),
             chat_id=request_context.get("chat_id"),
             turn_id=request_context.get("turn_id"),

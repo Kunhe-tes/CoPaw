@@ -78,6 +78,43 @@ class TestFileBlockSupportFormatter:
         assert text == "permission denied"
         assert multimodal == []
 
+    def test_formatter_supports_file_blocks(self):
+        """File blocks are converted into readable text and metadata."""
+        from agentscope.formatter import OpenAIChatFormatter
+
+        formatter_class = _create_file_block_support_formatter(
+            OpenAIChatFormatter,
+        )
+
+        text, multimodal = formatter_class.convert_tool_result_to_string(
+            [
+                {
+                    "type": "text",
+                    "text": "artifact generated",
+                },
+                {
+                    "type": "file",
+                    "path": "/tmp/report.txt",
+                    "name": "report.txt",
+                },
+            ],
+        )
+
+        assert text == (
+            "- artifact generated\n"
+            "- The returned file 'report.txt' can be found at: /tmp/report.txt"
+        )
+        assert multimodal == [
+            (
+                "/tmp/report.txt",
+                {
+                    "type": "file",
+                    "path": "/tmp/report.txt",
+                    "name": "report.txt",
+                },
+            ),
+        ]
+
 
 class TestCreateModelAndFormatterTenantIntegration:
     """Tests for tenant-aware model creation."""
