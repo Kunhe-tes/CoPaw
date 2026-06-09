@@ -5,13 +5,14 @@ import pytest
 from unittest.mock import MagicMock, AsyncMock
 from pathlib import Path
 
-from market.marketplace.service import MarketplaceService
+from market.marketplace.service import MarketplaceService, MCPNameConflictError
 from market.marketplace.schemas import (
     MCPDistributionRequest,
     PublishMCPRequest,
     DistributeRequest,
 )
 from market.marketplace.models import MarketItem
+from market.runtime.context import encode_scope_id
 
 
 @pytest.fixture
@@ -40,6 +41,12 @@ def service(mock_db, mock_paths):
     """创建 MarketplaceService 实例."""
     marketplace_root, swe_root = mock_paths
     return MarketplaceService(mock_db, marketplace_root, swe_root)
+
+
+def _user_agent_path(swe_root: Path, tenant_id: str, source_id: str) -> Path:
+    """计算运行时实际写入的 agent.json 路径（含 scope 编码）。"""
+    effective = encode_scope_id(tenant_id, source_id)
+    return swe_root / effective / "workspaces" / "default" / "agent.json"
 
 
 class TestPublishMCP:
@@ -71,23 +78,23 @@ class TestPublishMCP:
         assert item.status == "active"
 
     async def test_publish_mcp_overwrite(self, service):
-        """覆盖已存在的 MCP（复用 item_id）。"""
+        """同 creator 重复发布同名 MCP，复用 item_id 覆盖（自己更新自己）。"""
         source_id = "test-source"
 
         # 首次发布
         req1 = PublishMCPRequest(
             client_key="weather",
-            name="Old Name",
+            name="Weather Tool",
             creator_id="admin",
             config={"command": "npx"},
         )
         item1 = await service.publish_mcp(source_id, req1)
         item_id = item1.item_id
 
-        # 再次发布（覆盖）
+        # 同 creator 再次发布同名（仅更新描述与配置）→ 覆盖
         req2 = PublishMCPRequest(
             client_key="weather",
-            name="New Name",
+            name="Weather Tool",
             description="Updated",
             creator_id="admin",
             config={"command": "npx", "args": ["updated"]},
@@ -95,8 +102,35 @@ class TestPublishMCP:
         item2 = await service.publish_mcp(source_id, req2)
 
         assert item2.item_id == item_id  # 复用 item_id
-        assert item2.name == "New Name"
         assert item2.description == "Updated"
+
+    async def test_publish_mcp_rename_creates_new(self, service):
+        """同 creator 改了 name 重新发布 → 视为新条目（name 是公共标识）。
+
+        新模型下冲突识别仅基于 (name, creator_id)；改名后旧 item 不会被自动
+        关联，会作为"孤儿条目"留在市场，需要用户/管理员手动下架。
+        """
+        source_id = "test-source"
+
+        req1 = PublishMCPRequest(
+            client_key="weather",
+            name="Old Name",
+            creator_id="admin",
+            config={"command": "npx"},
+        )
+        item1 = await service.publish_mcp(source_id, req1)
+
+        req2 = PublishMCPRequest(
+            client_key="weather",  # 即使 client_key 一样
+            name="New Name",  # name 变了
+            creator_id="admin",
+            config={"command": "npx"},
+        )
+        item2 = await service.publish_mcp(source_id, req2)
+
+        # 新建条目，不复用 item_id
+        assert item2.item_id != item1.item_id
+        assert item2.name == "New Name"
 
     async def test_publish_mcp_with_bbk_ids(self, service):
         """发布带 bbk_ids 限制的 MCP."""
@@ -113,6 +147,141 @@ class TestPublishMCP:
         item = await service.publish_mcp(source_id, req)
 
         assert item.bbk_ids == ["100", "200"]
+
+
+class TestPublishMCPNameConflict:
+    """MCP 同名冲突测试。冲突识别仅基于 (name, creator_id)。"""
+
+    async def test_name_conflict_raises_error(self, service):
+        """不同 creator 的同名 MCP，overwrite=False 抛出 MCPNameConflictError。"""
+        source_id = "test-source"
+
+        # 用户 A 发布 MCP
+        req_a = PublishMCPRequest(
+            client_key="user-a-weather",
+            name="Weather Tool",
+            creator_id="user-a",
+            creator_name="用户A",
+            config={"command": "npx", "args": ["weather-a"]},
+        )
+        await service.publish_mcp(source_id, req_a)
+
+        # 用户 B 发布同名 MCP，不覆盖
+        req_b = PublishMCPRequest(
+            client_key="user-b-weather",
+            name="Weather Tool",
+            creator_id="user-b",
+            creator_name="用户B",
+            config={"command": "npx", "args": ["weather-b"]},
+        )
+
+        with pytest.raises(MCPNameConflictError) as exc_info:
+            await service.publish_mcp(source_id, req_b)
+
+        assert exc_info.value.existing_name == "Weather Tool"
+        assert exc_info.value.existing_creator_id == "user-a"
+        assert exc_info.value.existing_creator_name == "用户A"
+
+    async def test_name_conflict_overwrite(self, service):
+        """不同 creator 的同名 MCP，overwrite=True 覆盖已有条目。"""
+        source_id = "test-source"
+
+        # 用户 A 发布 MCP
+        req_a = PublishMCPRequest(
+            client_key="user-a-weather",
+            name="Weather Tool",
+            creator_id="user-a",
+            creator_name="用户A",
+            config={"command": "npx", "args": ["weather-a"]},
+        )
+        item_a = await service.publish_mcp(source_id, req_a)
+
+        # 用户 B 发布同名 MCP，选择覆盖
+        req_b = PublishMCPRequest(
+            client_key="user-b-weather",
+            name="Weather Tool",
+            creator_id="user-b",
+            creator_name="用户B",
+            config={"command": "npx", "args": ["weather-b"]},
+            overwrite=True,
+        )
+        item_b = await service.publish_mcp(source_id, req_b)
+
+        # 复用原来的 item_id
+        assert item_b.item_id == item_a.item_id
+        # client_key 更新为新发布者的
+        assert item_b.client_key == "user-b-weather"
+        assert item_b.name == "Weather Tool"
+        assert item_b.creator_id == "user-b"
+        # 版本号递增
+        assert item_b.version == "1.0.1"
+
+    async def test_same_creator_same_name_no_conflict(self, service):
+        """同一 creator 重复发布同名 MCP 不触发冲突（自己更新自己）。"""
+        source_id = "test-source"
+
+        req = PublishMCPRequest(
+            client_key="weather",
+            name="Weather Tool",
+            creator_id="admin",
+            config={"command": "npx"},
+        )
+        item1 = await service.publish_mcp(source_id, req)
+        item2 = await service.publish_mcp(source_id, req)
+
+        # 不抛出异常，复用 item_id
+        assert item2.item_id == item1.item_id
+        assert item2.version == "1.0.1"
+
+    async def test_same_creator_client_key_changed_no_conflict(self, service):
+        """同一 creator 用不同 client_key 发同名 MCP 也不冲突（自己更新自己）。
+
+        体现冲突识别只看 (name, creator_id)，client_key 不参与匹配。
+        """
+        source_id = "test-source"
+
+        req1 = PublishMCPRequest(
+            client_key="weather-v1",
+            name="Weather Tool",
+            creator_id="admin",
+            config={"command": "npx"},
+        )
+        req2 = PublishMCPRequest(
+            client_key="weather-v2",  # client_key 改了
+            name="Weather Tool",
+            creator_id="admin",  # 但 creator 没变
+            config={"command": "npx"},
+        )
+        item1 = await service.publish_mcp(source_id, req1)
+        item2 = await service.publish_mcp(source_id, req2)
+
+        # 复用 item_id，client_key 更新到新值
+        assert item2.item_id == item1.item_id
+        assert item2.client_key == "weather-v2"
+        assert item2.version == "1.0.1"
+
+    async def test_different_name_no_conflict(self, service):
+        """不同名称的 MCP 不触发冲突。"""
+        source_id = "test-source"
+
+        req1 = PublishMCPRequest(
+            client_key="weather",
+            name="Weather Tool",
+            creator_id="admin",
+            config={"command": "npx"},
+        )
+        req2 = PublishMCPRequest(
+            client_key="calendar",
+            name="Calendar Tool",
+            creator_id="admin",
+            config={"command": "npx"},
+        )
+
+        item1 = await service.publish_mcp(source_id, req1)
+        item2 = await service.publish_mcp(source_id, req2)
+
+        # 两个不同的 item_id
+        assert item1.item_id != item2.item_id
 
 
 class TestListMCPItems:
@@ -410,10 +579,142 @@ class TestDistributeMCP:
         assert result.results[0].success is True
 
         # 验证用户配置文件已创建
-        user_config_path = (
-            swe_root / "alice" / "workspaces" / "default" / "agent.json"
-        )
+        user_config_path = _user_agent_path(swe_root, "alice", source_id)
         assert user_config_path.exists()
+
+    async def test_distribute_skipped_when_user_has_same_name_mcp(
+        self,
+        service,
+        mock_paths,
+    ):
+        """用户本地已有同名且 creator_id 非空的 MCP 时，分发应被跳过。"""
+        import json
+
+        source_id = "test-source"
+        _, swe_root = mock_paths
+
+        # 1. 市场发布 MCP（创建者 admin）
+        publish_req = PublishMCPRequest(
+            client_key="weather",
+            name="Weather",
+            creator_id="admin",
+            creator_name="管理员",
+            config={"command": "npx", "args": ["weather"]},
+        )
+        item = await service.publish_mcp(source_id, publish_req)
+
+        # 2. 在 alice 的 agent.json 里手动塞一个同名 MCP（带 creator_id）
+        #    模拟"用户自己已经有同名 MCP"
+        user_config_path = _user_agent_path(swe_root, "alice", source_id)
+        user_config_path.parent.mkdir(parents=True, exist_ok=True)
+        user_config_path.write_text(
+            json.dumps(
+                {
+                    "mcp": {
+                        "clients": {
+                            "my-weather": {
+                                "name": "Weather",
+                                "command": "node",
+                                "args": ["my-weather.js"],
+                                "creator_id": "alice",
+                                "creator_name": "Alice",
+                            },
+                        },
+                    },
+                },
+            ),
+            encoding="utf-8",
+        )
+
+        # 3. 分发 → 期望被拒，不覆盖用户已有配置
+        dist_req = MCPDistributionRequest(
+            target_tenant_ids=["alice"],
+            overwrite=True,
+        )
+        result = await service.distribute_mcp(
+            source_id,
+            item.item_id,
+            "admin",
+            "管理员",
+            dist_req,
+        )
+
+        assert len(result.results) == 1
+        assert result.results[0].tenant_id == "alice"
+        assert result.results[0].success is False
+        assert "同名" in (result.results[0].error or "")
+        assert "my-weather" in (result.results[0].error or "")
+
+        # 用户原有配置未被覆盖
+        raw = json.loads(user_config_path.read_text(encoding="utf-8"))
+        clients = raw["mcp"]["clients"]
+        assert "my-weather" in clients
+        assert clients["my-weather"]["creator_id"] == "alice"
+        # 没有写入新的 client_key
+        assert "weather" not in clients
+
+    async def test_distribute_allowed_when_existing_mcp_has_no_creator_id(
+        self,
+        service,
+        mock_paths,
+    ):
+        """用户本地同名 MCP 但 creator_id 为空（老的市场分发数据）时，
+        允许覆盖分发，保持向前兼容。"""
+        import json
+
+        source_id = "test-source"
+        _, swe_root = mock_paths
+
+        publish_req = PublishMCPRequest(
+            client_key="weather",
+            name="Weather",
+            creator_id="admin",
+            creator_name="管理员",
+            config={"command": "npx", "args": ["weather"]},
+        )
+        item = await service.publish_mcp(source_id, publish_req)
+
+        # 用户已有同名 MCP，但没有 creator_id（早期市场分发的数据）
+        user_config_path = _user_agent_path(swe_root, "alice", source_id)
+        user_config_path.parent.mkdir(parents=True, exist_ok=True)
+        user_config_path.write_text(
+            json.dumps(
+                {
+                    "mcp": {
+                        "clients": {
+                            "weather": {
+                                "name": "Weather",
+                                "command": "old-cmd",
+                                "source": "marketplace:legacy",
+                            },
+                        },
+                    },
+                },
+            ),
+            encoding="utf-8",
+        )
+
+        dist_req = MCPDistributionRequest(
+            target_tenant_ids=["alice"],
+            overwrite=True,
+        )
+        result = await service.distribute_mcp(
+            source_id,
+            item.item_id,
+            "admin",
+            "管理员",
+            dist_req,
+        )
+
+        # 允许分发
+        assert result.results[0].success is True
+
+        # 用户配置已被覆盖，且新写入带上了 creator_id
+        raw = json.loads(user_config_path.read_text(encoding="utf-8"))
+        new_cfg = raw["mcp"]["clients"]["weather"]
+        assert new_cfg["creator_id"] == "admin"
+        assert new_cfg["creator_name"] == "管理员"
+        assert new_cfg["source"] == f"marketplace:{item.item_id}"
 
 
 class TestMCPStats:

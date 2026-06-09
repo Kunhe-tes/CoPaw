@@ -596,6 +596,9 @@ def copy_mcp_to_user(
     client_key: str,
     distributed_by: str,
     agent_id: str = DEFAULT_AGENT_ID,
+    creator_id: str = "",
+    creator_name: str = "",
+    mcp_name: str = "",
 ) -> None:
     """将市场 MCP 复制到用户本地配置。
 
@@ -608,6 +611,9 @@ def copy_mcp_to_user(
         client_key: MCP 客户端标识。
         distributed_by: 分发者标识。
         agent_id: Agent ID，默认为 "default"。
+        creator_id: 市场条目的创建者 ID（写入用户配置以便后续同名检测）。
+        creator_name: 市场条目的创建者名称。
+        mcp_name: 市场条目的 name，写入用户配置作为稳定标识。
     """
     mcp_config = load_mcp_config(marketplace_root, source_id, item_id)
     if mcp_config is None:
@@ -642,6 +648,14 @@ def copy_mcp_to_user(
     config_data["market_client_key"] = client_key
     config_data["distributed_by"] = distributed_by
     config_data["updated_at"] = datetime.now(timezone.utc).isoformat()
+    # 写入市场来源信息：creator_id 用于后续同名分发检测，
+    # name 作为稳定身份字段（与市场条目 name 一致）
+    if creator_id:
+        config_data["creator_id"] = creator_id
+    if creator_name:
+        config_data["creator_name"] = creator_name
+    if mcp_name and not config_data.get("name"):
+        config_data["name"] = mcp_name
 
     user_config["mcp"]["clients"][client_key] = config_data
 

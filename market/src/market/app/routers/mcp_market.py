@@ -27,6 +27,7 @@ from ...marketplace.schemas import (
     UpdateMarketMCPMetadataRequest,
     UploadMCPResponse,
 )
+from ...marketplace.service import MCPNameConflictError
 from ...marketplace.fs import (
     load_mcp_config,
     load_index,
@@ -199,7 +200,19 @@ async def publish_mcp(
     source_id = require_source_id(x_source_id)
     _require_manager(x_manager)
     svc = request.app.state.marketplace
-    item = await svc.publish_mcp(source_id, req)
+    try:
+        item = await svc.publish_mcp(source_id, req)
+    except MCPNameConflictError as exc:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "message": str(exc),
+                "existing_item_id": exc.existing_item_id,
+                "existing_name": exc.existing_name,
+                "existing_creator_id": exc.existing_creator_id,
+                "existing_creator_name": exc.existing_creator_name,
+            },
+        ) from exc
     return MarketMCPItem(
         item_id=item.item_id,
         client_key=item.client_key,
@@ -277,6 +290,11 @@ async def upload_mcp(
     try:
         await svc.publish_mcp(source_id, req)
         return UploadMCPResponse(success=True)
+    except MCPNameConflictError as exc:
+        return UploadMCPResponse(
+            success=False,
+            error=str(exc),
+        )
     except Exception as e:
         return UploadMCPResponse(success=False, error=str(e))
 

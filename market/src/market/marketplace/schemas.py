@@ -239,6 +239,7 @@ class PublishMCPRequest(BaseModel):
     category_id: Optional[int] = None
     bbk_ids: list[str] = Field(default_factory=list)
     config: dict
+    overwrite: bool = False
 
 
 class UploadMCPResponse(BaseModel):

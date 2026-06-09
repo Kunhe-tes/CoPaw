@@ -24,6 +24,7 @@ from ...runtime.mcp_masking import mask_env_value, restore_original_values
 from ...runtime.stateful_client import HttpStatefulClient, StdIOStatefulClient
 
 from ...marketplace.schemas import PublishMCPRequest as MarketPublishMCPRequest
+from ...marketplace.service import MCPNameConflictError
 from ..my_mcp_helpers import (
     load_agent_config_for_request,
     mark_request_state,
@@ -224,6 +225,10 @@ class PublishMCPRequest(BaseModel):
         default_factory=list,
         description="关联 BBK ID 列表",
     )
+    overwrite: bool = Field(
+        default=False,
+        description="同名 MCP 已存在时是否覆盖",
+    )
 
 
 class PublishSingleMCPRequest(BaseModel):
@@ -233,6 +238,10 @@ class PublishSingleMCPRequest(BaseModel):
     bbk_ids: List[str] = Field(
         default_factory=list,
         description="关联 BBK ID 列表",
+    )
+    overwrite: bool = Field(
+        default=False,
+        description="同名 MCP 已存在时是否覆盖",
     )
 
 
@@ -404,6 +413,9 @@ async def create_my_mcp(
         created_at=now,
         updated_at=now,
     )
+    # 标记为当前用户创建的 MCP，供市场分发时做同名冲突检测
+    new_client.creator_id = context.user_id
+    new_client.creator_name = context.user_name or context.user_id
 
     agent_config.mcp.clients[body.client_key] = new_client
     save_agent_config_for_request(context, agent_config, request)
@@ -547,6 +559,7 @@ async def _publish_client_to_market(
     publish_context: MarketPublishContext,
     client_key: str,
     client: MCPClientConfig,
+    overwrite: bool = False,
 ) -> PublishMCPResult:
     """复用单个 MCP 的市场发布逻辑。"""
     item = await marketplace.publish_mcp(
@@ -560,6 +573,7 @@ async def _publish_client_to_market(
             category_id=publish_context.category_id,
             bbk_ids=publish_context.bbk_ids,
             config=client.model_dump(mode="json"),
+            overwrite=overwrite,
         ),
     )
     return PublishMCPResult(
@@ -600,12 +614,25 @@ async def publish_single_my_mcp_to_market(
         category_id=body.category_id,
         bbk_ids=body.bbk_ids,
     )
-    result = await _publish_client_to_market(
-        marketplace,
-        publish_context,
-        client_key=client_key,
-        client=client,
-    )
+    try:
+        result = await _publish_client_to_market(
+            marketplace,
+            publish_context,
+            client_key=client_key,
+            client=client,
+            overwrite=body.overwrite,
+        )
+    except MCPNameConflictError as exc:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "message": str(exc),
+                "existing_item_id": exc.existing_item_id,
+                "existing_name": exc.existing_name,
+                "existing_creator_id": exc.existing_creator_id,
+                "existing_creator_name": exc.existing_creator_name,
+            },
+        ) from exc
     return PublishSingleMCPResponse(
         client_key=result.client_key,
         item_id=result.item_id or "",
@@ -659,8 +686,17 @@ async def publish_my_mcp_to_market(
                 publish_context,
                 client_key=client_key,
                 client=client,
+                overwrite=body.overwrite,
             )
             results.append(result)
+        except MCPNameConflictError as exc:
+            results.append(
+                PublishMCPResult(
+                    client_key=client_key,
+                    success=False,
+                    error=str(exc),
+                ),
+            )
         except Exception as exc:  # pylint: disable=broad-except
             results.append(
                 PublishMCPResult(
