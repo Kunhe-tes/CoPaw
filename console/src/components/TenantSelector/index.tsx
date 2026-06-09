@@ -58,6 +58,7 @@ function haveSameTenantIds(left: string[], right: string[]): boolean {
 export function TenantSelector({
   selectedTenantIds,
   onChange,
+  onSelectionInfoChange,
   hint,
   excludeTenantId,
   onLoadError,
@@ -164,6 +165,17 @@ export function TenantSelector({
     return Array.from(new Set([...selectedInListTenantIds, ...extraTenantIds]));
   }, [targetMode, filteredTenantIds, selectedInListTenantIds, extraTenantIds]);
 
+  const selectedTenantInfos = useMemo(() => {
+    return mergedTenantIds.map(
+      (tenantId) =>
+        tenantLookup.get(tenantId) ?? {
+          tenant_id: tenantId,
+          tenant_name: null,
+          bbk_id: null,
+        },
+    );
+  }, [mergedTenantIds, tenantLookup]);
+
   // 按机构分组的用户列表（用于展示具体用户）
   const groupedTenants = useMemo(() => {
     if (targetMode !== "bbk_id" || selectedBbkIds.length === 0) return [];
@@ -232,6 +244,10 @@ export function TenantSelector({
       onChange(mergedTenantIds);
     }
   }, [targetMode, filteredTenantIds, mergedTenantIds, onChange]);
+
+  useEffect(() => {
+    onSelectionInfoChange?.(selectedTenantInfos);
+  }, [onSelectionInfoChange, selectedTenantInfos]);
 
   // 切换模式时清空选择
   const handleModeChange = useCallback((mode: "bbk_id" | "user_id") => {
