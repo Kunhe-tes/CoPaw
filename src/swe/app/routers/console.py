@@ -351,6 +351,11 @@ def _extract_session_and_payload(request_data: Union[AgentRequest, dict]):
         channel_id = getattr(request_data, "channel", None) or "console"
         sender_id = request_data.user_id or "default"
         session_id = request_data.session_id or "default"
+        system_prompt_injections = getattr(
+            request_data,
+            "system_prompt_injections",
+            None,
+        )
         content_parts = (
             list(request_data.input[0].content) if request_data.input else []
         )
@@ -359,6 +364,9 @@ def _extract_session_and_payload(request_data: Union[AgentRequest, dict]):
         channel_id = request_data.get("channel", "console")
         sender_id = request_data.get("user_id", "default")
         session_id = request_data.get("session_id", "default")
+        system_prompt_injections = request_data.get(
+            "system_prompt_injections",
+        )
         input_data = request_data.get("input", [])
 
         content_parts = []
@@ -378,6 +386,10 @@ def _extract_session_and_payload(request_data: Union[AgentRequest, dict]):
             "user_id": sender_id,
         },
     }
+    if system_prompt_injections is not None:
+        native_payload["meta"][
+            "system_prompt_injections"
+        ] = system_prompt_injections
     return native_payload
 
 

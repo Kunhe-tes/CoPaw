@@ -27,6 +27,7 @@ from swe.app.source_system_config.models import (
 from swe.app.source_system_config.runtime import (
     bind_source_system_config,
     get_current_source_system_config,
+    get_system_prompt_injections,
     resolve_cron_unread_auto_pause_config,
     resolve_file_read_truncation_config,
     resolve_tool_result_compact_config,
@@ -46,6 +47,7 @@ DEFAULT_EXPECTED_SOURCE_CONFIG = {
         "chat_task_progress_enabled": True,
         "database_access_guard_enabled": True,
     },
+    "system_prompt_injections": [],
     "tool_result_compact": {
         "enabled": True,
         "recent_n": 2,
@@ -187,6 +189,45 @@ class TestSourceSystemConfigModels:
                 "threshold": 12,
             },
         }
+
+    def test_system_prompt_injections_are_normalized(self):
+        config = SourceSystemConfig.model_validate(
+            {
+                "system_prompt_injections": [
+                    "  keep first  ",
+                    "",
+                    "  ",
+                    "keep first",
+                    "line one\nline two",
+                ],
+            },
+        )
+
+        assert config.as_dict() == {
+            "system_prompt_injections": [
+                "keep first",
+                "line one\nline two",
+            ],
+        }
+
+    def test_system_prompt_injections_must_be_a_list(self):
+        with pytest.raises(ValueError, match="system_prompt_injections"):
+            SourceSystemConfig.model_validate(
+                {"system_prompt_injections": "not-a-list"},
+            )
+
+    def test_get_system_prompt_injections_reads_effective_defaults(self):
+        assert get_system_prompt_injections(None) == []
+        assert get_system_prompt_injections(
+            SourceSystemConfig.model_validate(
+                {
+                    "system_prompt_injections": [
+                        "source prompt",
+                        " source prompt ",
+                    ],
+                },
+            ),
+        ) == ["source prompt"]
 
     @pytest.mark.parametrize(
         ("payload", "match"),

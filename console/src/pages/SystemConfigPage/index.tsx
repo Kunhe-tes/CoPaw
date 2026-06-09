@@ -3,6 +3,7 @@ import {
   Alert,
   Button,
   Card,
+  Input,
   InputNumber,
   Result,
   Space,
@@ -28,13 +29,17 @@ import {
   TOOL_RESULT_COMPACT_NUMBER_FIELDS,
   clearImmediateTruncationConfig,
   enableImmediateTruncationConfig,
+  formatSystemPromptInjectionText,
+  parseSystemPromptInjectionText,
   readCronUnreadAutoPauseConfig,
   readRegisteredSwitchValue,
   readImmediateTruncationConfig,
+  readSystemPromptInjections,
   readToolResultCompactConfig,
   validateSourceSystemConfig,
   writeCronUnreadAutoPauseValue,
   writeRegisteredSwitchValue,
+  writeSystemPromptInjections,
   writeImmediateTruncationValue,
   writeToolResultCompactValue,
 } from "./registry";
@@ -214,6 +219,19 @@ export default function SystemConfigPage() {
     );
   };
 
+  const handleSystemPromptInjectionsChange = (value: string) => {
+    if (formDisabled) {
+      return;
+    }
+    setValidationError(null);
+    setDraftConfig((previous) =>
+      writeSystemPromptInjections(
+        previous,
+        parseSystemPromptInjectionText(value),
+      ),
+    );
+  };
+
   const handleToolResultNumberChange = (
     key: (typeof TOOL_RESULT_COMPACT_NUMBER_FIELDS)[number]["key"],
     value: number | null,
@@ -331,6 +349,9 @@ export default function SystemConfigPage() {
 
   const cronUnreadAutoPauseConfig =
     readCronUnreadAutoPauseConfig(draftConfig);
+  const systemPromptInjectionText = formatSystemPromptInjectionText(
+    readSystemPromptInjections(draftConfig),
+  );
   const toolResultCompactConfig = readToolResultCompactConfig(draftConfig);
   const fileReadTruncationState = readImmediateTruncationConfig(
     draftConfig,
@@ -511,6 +532,48 @@ export default function SystemConfigPage() {
                   </div>
                 ))}
               </div>
+            </Card>
+
+            <Card
+              className={styles.switchCard}
+              title={t("sourceSystemConfigPage.systemPromptInjectionsTitle", {
+                defaultValue: "系统提示词注入",
+              })}
+            >
+              <div className={styles.toolResultIntro}>
+                {t("sourceSystemConfigPage.systemPromptInjectionsIntro", {
+                  defaultValue:
+                    "配置当前系统运行时固定追加到对话的系统提示词。多段提示词使用空行分隔，保存时会自动去除空段和重复段。",
+                })}
+              </div>
+              <label className={styles.promptField}>
+                <span className={styles.numberLabel}>
+                  {t("sourceSystemConfigPage.systemPromptInjectionsLabel", {
+                    defaultValue: "系统提示词注入",
+                  })}
+                </span>
+                <Input.TextArea
+                  aria-label={t(
+                    "sourceSystemConfigPage.systemPromptInjectionsLabel",
+                    {
+                      defaultValue: "系统提示词注入",
+                    },
+                  )}
+                  autoSize={{ minRows: 5, maxRows: 12 }}
+                  className={styles.systemPromptTextArea}
+                  disabled={formDisabled}
+                  placeholder={t(
+                    "sourceSystemConfigPage.systemPromptInjectionsPlaceholder",
+                    {
+                      defaultValue: "每段提示词之间留一个空行",
+                    },
+                  )}
+                  value={systemPromptInjectionText}
+                  onChange={(event) =>
+                    handleSystemPromptInjectionsChange(event.target.value)
+                  }
+                />
+              </label>
             </Card>
 
             <Card
