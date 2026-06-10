@@ -356,6 +356,7 @@ def _extract_session_and_payload(request_data: Union[AgentRequest, dict]):
             "system_prompt_injections",
             None,
         )
+        file_url_network = getattr(request_data, "file_url_network", None)
         content_parts = (
             list(request_data.input[0].content) if request_data.input else []
         )
@@ -367,6 +368,7 @@ def _extract_session_and_payload(request_data: Union[AgentRequest, dict]):
         system_prompt_injections = request_data.get(
             "system_prompt_injections",
         )
+        file_url_network = request_data.get("file_url_network")
         input_data = request_data.get("input", [])
 
         content_parts = []
@@ -390,6 +392,8 @@ def _extract_session_and_payload(request_data: Union[AgentRequest, dict]):
         native_payload["meta"][
             "system_prompt_injections"
         ] = system_prompt_injections
+    if file_url_network is not None:
+        native_payload["meta"]["file_url_network"] = file_url_network
     return native_payload
 
 

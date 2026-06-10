@@ -1263,6 +1263,17 @@ def _request_system_prompt_injections(request: AgentRequest) -> list[str]:
     return _normalize_system_prompt_injections(value)
 
 
+def _request_file_url_network(request: AgentRequest) -> str:
+    """从请求属性和 channel_meta 中读取静态文件访问网络。"""
+    from ...config.context import normalize_file_url_network
+
+    channel_meta = getattr(request, "channel_meta", None) or {}
+    value = getattr(request, "file_url_network", None)
+    if value is None and isinstance(channel_meta, dict):
+        value = channel_meta.get("file_url_network")
+    return normalize_file_url_network(value)
+
+
 def _normalize_system_prompt_injections(value: Any) -> list[str]:
     from ..source_system_config.registry import (
         normalize_system_prompt_injections,
@@ -3433,8 +3444,15 @@ class AgentRunner(Runner):
         )
 
         from ..agent_context import set_current_agent_id
+        from ...config.context import (
+            reset_current_file_url_network,
+            set_current_file_url_network,
+        )
 
         set_current_agent_id(self.agent_id)
+        file_url_network_token = set_current_file_url_network(
+            _request_file_url_network(request),
+        )
 
         trace_id = await self._start_query_trace(request, msgs)
         outcome = _QueryTurnOutcome()
@@ -3524,6 +3542,7 @@ class AgentRunner(Runner):
                     ):
                         yield msg, last
         finally:
+            reset_current_file_url_network(file_url_network_token)
             cleanup_runtime = attempt_state.runtime
             cleanup_state_loaded = attempt_state.session_state_loaded
             if cleanup_runtime is None and retry_state.prev_agent is not None:
