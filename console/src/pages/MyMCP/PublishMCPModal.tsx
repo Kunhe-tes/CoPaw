@@ -29,90 +29,75 @@ interface HttpError extends Error {
     | { detail?: ConflictDetail | string };
 }
 
+interface ParsedConflict {
+  isConflict: boolean;
+  message: string;
+  existingCreatorName?: string;
+  existingCreatorId?: string;
+}
+
 interface PublishMCPModalProps {
   open: boolean;
   clientKey: string;
   clientName: string;
+  userId?: string;
   onClose: () => void;
   onSuccess: () => void;
+}
+
+/**
+ * 从 HTTP 409 响应中提取冲突详情。
+ *
+ * FastAPI 把 `HTTPException(detail=...)` 序列化为 `{detail: ...}`，
+ * 所以优先从 `data.detail` 取结构化字段；同时兼容上游已扁平化的情况。
+ */
+function extractConflictDetail(err: unknown): ConflictDetail | null {
+  const httpErr = err as HttpError;
+  if (httpErr?.status !== 409 || !httpErr?.data) {
+    return null;
+  }
+
+  const raw = httpErr.data as { detail?: ConflictDetail | string } & ConflictDetail;
+  const detailField = raw.detail;
+  if (detailField && typeof detailField === "object") {
+    return detailField;
+  }
+  // 兼容已扁平化的响应体
+  if (raw.existing_name) {
+    return raw;
+  }
+  return null;
+}
+
+/**
+ * 将冲突详情转换为用户可见文案。
+ */
+function buildConflictMessage(
+  conflict: ConflictDetail,
+  isOwnMcp: boolean,
+  creatorLabel?: string,
+): string {
+  const existingName = conflict.existing_name;
+  const fallbackMsg = conflict.message;
+
+  if (existingName) {
+    return isOwnMcp
+      ? `"${existingName}"（您已发布）`
+      : `"${existingName}"（${creatorLabel || "他人"} 发布）`;
+  }
+  return fallbackMsg || "同名 MCP 已存在";
 }
 
 export function PublishMCPModal({
   open,
   clientKey,
   clientName,
+  userId,
   onClose,
   onSuccess,
 }: PublishMCPModalProps) {
   const [form] = Form.useForm();
   const [loading, setLoading] = useState(false);
-
-  /**
-   * 从 HttpError 中提取同名冲突信息。
-   *
-   * FastAPI 把 `HTTPException(detail=...)` 序列化为 `{detail: ...}`，
-   * 所以优先从 `data.detail` 取结构化字段；同时兼容上游已扁平化的情况。
-   *
-   * 注意：用户可见文案统一在前端拼接（中文），后端 message 仅作为兜底，
-   * 避免把后端的英文 exception 字符串直接展示给用户。
-   */
-  const parseConflictError = (err: unknown) => {
-    const httpErr = err as HttpError;
-
-    // HTTP 409 表示同名冲突
-    if (httpErr?.status === 409 && httpErr?.data) {
-      // 先尝试 data.detail（FastAPI 原生格式），再回退到 data 自身
-      const raw = httpErr.data as {
-        detail?: ConflictDetail | string;
-      } & ConflictDetail;
-      const detailField = raw.detail;
-      const conflict: ConflictDetail =
-        detailField && typeof detailField === "object"
-          ? detailField
-          : raw;
-
-      const existingName = conflict.existing_name;
-      // 拼装显示名：优先 "name/id"，缺一项就只显示另一项。
-      // 例如：张三/zhangsan001、只有名字则显示 张三、只有 id 则显示 zhangsan001
-      const creatorName = conflict.existing_creator_name?.trim();
-      const creatorId = conflict.existing_creator_id?.trim();
-      const existingCreator =
-        creatorName && creatorId
-          ? `${creatorName}/${creatorId}`
-          : creatorName || creatorId || undefined;
-
-      // 优先用结构化字段拼中文文案；都拿不到再退回后端/纯字符串 detail
-      const fallbackMsg =
-        conflict.message ||
-        (typeof detailField === "string" ? detailField : undefined);
-      const message = existingName
-        ? `同名 MCP "${existingName}" 已存在`
-        : fallbackMsg || "同名 MCP 已存在";
-
-      return {
-        isConflict: true,
-        message,
-        existingCreatorName: existingCreator,
-      };
-    }
-
-    // 兜底：检查错误消息
-    const errMsg =
-      (err instanceof Error ? err.message : String(err)) || "同步失败";
-    if (errMsg.includes("already exists") || errMsg.includes("同名")) {
-      return {
-        isConflict: true,
-        message: "同名 MCP 已存在",
-        existingCreatorName: undefined,
-      };
-    }
-
-    return {
-      isConflict: false,
-      message: errMsg,
-      existingCreatorName: undefined,
-    };
-  };
 
   const doPublish = async (overwrite: boolean) => {
     if (!clientKey) {
@@ -131,41 +116,73 @@ export function PublishMCPModal({
       message.success("同步成功");
       onSuccess();
     } catch (err) {
-      const { isConflict, message: conflictMsg, existingCreatorName } =
-        parseConflictError(err);
+      // 尝试提取 409 冲突详情
+      const conflict = extractConflictDetail(err);
 
-      if (isConflict) {
-        setLoading(false);
-        // 弹窗确认是否覆盖
-        Modal.confirm({
-          title: "同名 MCP 已存在",
-          icon: <ExclamationCircleOutlined />,
-          content: (
-            <div>
-              <p>{conflictMsg}</p>
-              {existingCreatorName && (
-                <p>
-                  原始创建者：
-                  <Text strong>{existingCreatorName}</Text>
-                </p>
-              )}
-              <p>是否覆盖已有的同名 MCP？覆盖后原配置将被替换。</p>
-            </div>
-          ),
-          okText: "覆盖",
-          okType: "primary",
-          cancelText: "取消",
-          onOk: () => {
-            void doPublish(true);
-          },
-        });
-      } else {
+      // 兜底：检查错误消息是否包含冲突关键词
+      if (!conflict) {
+        const errMsg =
+          (err instanceof Error ? err.message : String(err)) || "同步失败";
+        if (errMsg.includes("already exists") || errMsg.includes("同名")) {
+          handleConflict({ existing_name: undefined } as ConflictDetail, errMsg);
+          return;
+        }
         console.error("同步失败:", err);
-        message.error(conflictMsg);
+        message.error(errMsg);
+        return;
       }
+
+      // 有结构化冲突信息，走冲突弹窗
+      handleConflict(conflict);
     } finally {
       setLoading(false);
     }
+  };
+
+  /**
+   * 显示同名冲突确认弹窗。
+   */
+  const handleConflict = (
+    conflict: ConflictDetail,
+    fallbackMsg?: string,
+  ) => {
+    setLoading(false);
+
+    const isOwnMcp =
+      userId && conflict.existing_creator_id
+        ? conflict.existing_creator_id === userId
+        : false;
+
+    // 拼装创建者显示名：优先 "name/id"，缺一项就只显示另一项。
+    const creatorName = conflict.existing_creator_name?.trim();
+    const creatorId = conflict.existing_creator_id?.trim();
+    const existingCreator =
+      creatorName && creatorId
+        ? `${creatorName}/${creatorId}`
+        : creatorName || creatorId || undefined;
+
+    const conflictMsg = buildConflictMessage(conflict, isOwnMcp, existingCreator) || fallbackMsg || "同名 MCP 已存在";
+
+    Modal.confirm({
+      title: "同名 MCP 已存在",
+      icon: <ExclamationCircleOutlined />,
+      content: (
+        <div>
+          <p>{conflictMsg}</p>
+          <p>
+            {isOwnMcp
+              ? "更新？"
+              : "覆盖？"}
+          </p>
+        </div>
+      ),
+      okText: isOwnMcp ? "更新" : "覆盖",
+      okType: "primary",
+      cancelText: "取消",
+      onOk: () => {
+        void doPublish(true);
+      },
+    });
   };
 
   const handleSubmit = async () => {

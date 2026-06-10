@@ -385,6 +385,7 @@ export default function MyMCPPage() {
         open={publishModalOpen}
         clientKey={publishClientKey}
         clientName={selectedMCP?.name || ""}
+        userId={userId}
         onClose={() => {
           setPublishModalOpen(false);
           setPublishClientKey("");
