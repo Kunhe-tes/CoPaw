@@ -24,8 +24,6 @@ from agentscope_runtime.engine.schemas.agent_schemas import (
 )
 from agentscope_runtime.engine.schemas.exception import AgentException
 from dotenv import load_dotenv
-from mcp.client.sse import sse_client
-from mcp.client.streamable_http import streamable_http_client
 
 from ..mcp.http_headers import resolve_mcp_http_headers
 from ..mcp.stateful_client import HttpStatefulClient, StdIOStatefulClient
@@ -655,9 +653,7 @@ async def _build_and_connect_mcp_clients(
                 passthrough_headers,
             )
             if client is not None:
-                await client.connect(
-                    timeout=_MCP_CONNECT_TIMEOUT_SECONDS,
-                )
+                await client.connect()
                 clients.append(client)
                 logger.info(f"MCP client '{key}' created and connected")
         except asyncio.CancelledError:
@@ -747,34 +743,10 @@ async def _create_mcp_client_with_headers(
         name=client_config.name,
         transport=client_config.transport,
         url=client_config.url,
-        headers=None,  # Headers are in http_client
+        headers=merged_headers or None,
+        timeout=_MCP_HTTP_TIMEOUT_SECONDS,
+        sse_read_timeout=_MCP_HTTP_SSE_READ_TIMEOUT_SECONDS,
     )
-
-    # Create appropriate transport context
-    if client_config.transport == "sse":
-        client_context = sse_client(
-            url=client_config.url,
-            headers=merged_headers,
-            timeout=_MCP_HTTP_TIMEOUT_SECONDS,
-            sse_read_timeout=_MCP_HTTP_SSE_READ_TIMEOUT_SECONDS,
-        )
-        http_client = None
-    else:  # streamable_http
-        http_client = httpx.AsyncClient(
-            headers=merged_headers,
-            timeout=httpx.Timeout(
-                connect=_MCP_HTTP_TIMEOUT_SECONDS,
-                read=_MCP_HTTP_SSE_READ_TIMEOUT_SECONDS,
-                write=_MCP_HTTP_TIMEOUT_SECONDS,
-                pool=_MCP_HTTP_TIMEOUT_SECONDS,
-            ),
-        )
-        client_context = streamable_http_client(
-            url=client_config.url,
-            http_client=http_client,
-        )
-
-    client.client = client_context
 
     setattr(
         client,
@@ -783,7 +755,6 @@ async def _create_mcp_client_with_headers(
             **rebuild_info,
             "headers": merged_headers,
             "_temp_client": True,
-            "_http_client": http_client,
         },
     )
     setattr(client, "_swe_temp_client", True)
@@ -800,11 +771,6 @@ async def _cleanup_mcp_clients(clients: list[Any]) -> None:
     for client in clients:
         try:
             await client.close()
-            # For HTTP clients, also close the httpx client
-            rebuild_info = getattr(client, "_swe_rebuild_info", {})
-            http_client = rebuild_info.get("_http_client")
-            if http_client is not None:
-                await http_client.aclose()
         except Exception as e:
             logger.warning(f"Error closing MCP client: {e}")
 
@@ -938,7 +904,7 @@ def _build_skill_freshness_notice_msg(text: str) -> Msg:
     return Msg(
         name="system",
         role="system",
-        content=text,
+        content=[TextBlock(type="text", text=text)],
         metadata={
             _SKILL_FRESHNESS_NOTICE_METADATA_KEY: True,
         },
@@ -994,7 +960,8 @@ def _refresh_switched_session_skill_snapshot_entry(
     return (
         f"{skill_name}: detected skill-directory switch "
         f"{stored_dir} -> {current_dir}. Treat current skill "
-        "content as superseding earlier assumptions."
+        "content as superseding earlier assumptions. You MUST "
+        f"re-read {current_dir / 'SKILL.md'} before relying on this skill."
     )
 
 
@@ -1037,7 +1004,8 @@ def _refresh_changed_session_skill_snapshot_entry(
     return (
         f"{skill_name}: detected skill-directory change at "
         f"{current_dir}. Treat current skill content as "
-        "superseding earlier assumptions."
+        "superseding earlier assumptions. You MUST "
+        f"re-read {current_dir / 'SKILL.md'} before relying on this skill."
     )
 
 
@@ -3324,7 +3292,6 @@ class AgentRunner(Runner):
                 skill_freshness_refresh.notice_text,
             )
             plan.turn_msgs.insert(0, notice_msg)
-            yield notice_msg, False
 
         async for msg, last in self._stream_completion_lifecycle(
             request=attempt_input.request,

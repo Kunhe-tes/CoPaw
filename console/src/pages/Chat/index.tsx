@@ -1534,7 +1534,7 @@ export default function ChatPage() {
             )}
             <span style={{ flex: 1, minWidth: 8 }} />
             <GeneratedFilesDrawer />
-            <ModelSelector />
+            {(!enableTaskTabs || !taskTabsOpen) && <ModelSelector />}
             {/* <ChatActionGroup /> */}
           </>
         ),

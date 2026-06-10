@@ -2,6 +2,36 @@
 
 本文档只收录仓库中已经出现过、且有明确入口可追的高频报错。
 
+## MCP 注册时报 App not Subscribe This MCP Server
+
+### 症状
+
+- MCP 客户端连接日志正常，但 Agent 注册工具时失败
+- 堆栈停在 `register_mcp_clients()` 调用 `client.list_tools()` 的阶段
+- 服务端返回 `App not Subscribe This MCP Server`
+- 同一份 MCP 配置在回滚应用版本后恢复正常
+
+### 典型原因
+
+- Runner 构建 MCP 客户端时正确合并了静态 Header、透传 Header 和 cookie
+- 但实际 `connect()` 使用了另一套 transport context，导致构建阶段的鉴权 Header 没有进入真实请求
+- 基础 MCP initialize 可能允许无鉴权完成，直到 `tools/list` 才执行应用订阅校验，因此容易误判为服务端订阅或配置问题
+
+### 第一落点
+
+- [src/swe/app/runner/runner.py](../../src/swe/app/runner/runner.py)
+- 重点看 `_create_mcp_client_with_headers()` 是否把 `merged_headers` 直接传给负责 transport 生命周期的 `HttpStatefulClient`
+- [src/swe/app/mcp/stateful_client.py](../../src/swe/app/mcp/stateful_client.py)
+- 重点看 `HttpStatefulClient._run_lifecycle()` 实际创建 HTTP / SSE transport 时使用的 `self.headers`
+- [tests/unit/app/test_runner_mcp_http_timeouts.py](../../tests/unit/app/test_runner_mcp_http_timeouts.py)
+- 回归测试必须真实调用 `connect()`，不能只断言构建阶段生成了带 Header 的临时 context
+
+### 第一阶段处理
+
+- transport 生命周期只由一层负责，避免 Runner 和 `HttpStatefulClient` 同时创建 context
+- Runner 将合并后的 Header 和超时参数直接传给 `HttpStatefulClient`
+- 用 Streamable HTTP 和 SSE 两种 transport 的 `connect()` 测试确认真实请求参数包含订阅身份 Header
+
 ## Console 复制工具输入时触发 Clipboard 权限策略报错
 
 ### 症状
