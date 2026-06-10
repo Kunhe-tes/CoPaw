@@ -16,6 +16,7 @@ from ...config.context import (
 )
 from ...config.utils import list_logical_tenant_ids
 from ...providers.provider_manager import ProviderManager
+from ..identity_resolver import resolve_user_identity
 from .broadcast import compute_broadcast_offsets, shift_cron_expression
 from .manager import CronManager
 from .models import CronJobListItem, CronJobSpec, CronJobView
@@ -82,6 +83,21 @@ class _BroadcastSchedule:
     timezone: str
     offset_minutes: int
     warning: str
+
+
+async def _resolve_broadcast_target_identity(
+    tenant_id: str,
+    source_id: str | None,
+) -> tuple[str | None, str | None]:
+    """解析广播目标租户的身份信息。"""
+    resolved = await resolve_user_identity(
+        tenant_id=tenant_id,
+        source_id=source_id,
+        user_name=None,
+        bbk_id=None,
+        allow_remote_lookup=False,
+    )
+    return resolved.user_name, resolved.bbk_id
 
 
 async def get_cron_manager(
@@ -261,6 +277,8 @@ def _build_broadcast_job(
     *,
     job_id: str,
     target_tenant_id: str,
+    target_tenant_name: str | None,
+    target_bbk_id: str | None,
     source_id: str | None,
     cron: str,
     timezone_name: str,
@@ -327,9 +345,9 @@ def _build_broadcast_job(
             "id": job_id,
             "enabled": True,
             "tenant_id": target_tenant_id,
-            "bbk_id": None,
+            "bbk_id": target_bbk_id,
             "source_id": source_id,
-            "tenant_name": None,
+            "tenant_name": target_tenant_name,
             "scope_id": resolve_scope_id(target_tenant_id, source_id),
             "schedule": source_job.schedule.model_copy(
                 update={
@@ -491,10 +509,18 @@ async def _create_broadcast_child_job(
             context.source_job,
         )
     )
+    target_tenant_name, target_bbk_id = (
+        await _resolve_broadcast_target_identity(
+            tenant_id,
+            context.source_id,
+        )
+    )
     target_job = _build_broadcast_job(
         context.source_job,
         job_id=target_job_id,
         target_tenant_id=tenant_id,
+        target_tenant_name=target_tenant_name,
+        target_bbk_id=target_bbk_id,
         source_id=context.source_id,
         cron=schedule.cron,
         timezone_name=schedule.timezone,

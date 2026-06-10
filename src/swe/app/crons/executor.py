@@ -16,6 +16,7 @@ from .model_slot_context import bind_model_slot_override
 from .models import CronJobSpec
 from ..tenant_context import bind_tenant_context
 from ..console_push_store import append as push_store_append
+from ..identity_resolver import resolve_user_identity
 from ...config.llm_workload import LLM_WORKLOAD_CRON, bind_llm_workload
 from ...config.context import (
     canonicalize_scope_id,
@@ -549,14 +550,21 @@ class CronExecutor:
                 return None
 
             source_id = job.source_id or "default"
+            resolved_identity = await resolve_user_identity(
+                tenant_id=getattr(job, "tenant_id", None),
+                source_id=job.source_id,
+                user_name=job.tenant_name,
+                bbk_id=job.bbk_id,
+                allow_remote_lookup=False,
+            )
             trace_id = await trace_mgr.start_trace(
                 user_id=target_user_id or "cron",
                 session_id=target_session_id or f"cron:{job.id}",
                 channel=job.dispatch.channel,
                 source_id=source_id,
                 user_message=None,
-                user_name=job.tenant_name,
-                bbk_id=job.bbk_id,
+                user_name=resolved_identity.user_name,
+                bbk_id=resolved_identity.bbk_id,
                 session_name=job.name,
             )
             # 写入 model_output 到 ES
@@ -642,14 +650,21 @@ class CronExecutor:
                 return None
 
             source_id = job.source_id or "default"
+            resolved_identity = await resolve_user_identity(
+                tenant_id=getattr(job, "tenant_id", None),
+                source_id=job.source_id,
+                user_name=job.tenant_name,
+                bbk_id=job.bbk_id,
+                allow_remote_lookup=False,
+            )
             trace_id = await trace_mgr.start_trace(
                 user_id=target_user_id or "cron",
                 session_id=target_session_id or f"cron:{job.id}",
                 channel=job.dispatch.channel,
                 source_id=source_id,
                 user_message=None,  # agent 任务的用户消息由 runner 处理
-                user_name=job.tenant_name,
-                bbk_id=job.bbk_id,
+                user_name=resolved_identity.user_name,
+                bbk_id=resolved_identity.bbk_id,
                 session_name=job.name,
             )
             logger.info(

@@ -42,6 +42,7 @@ from .session import (
 from .stream_boundary import normalize_reasoning_boundary_stream
 from .task_progress import attach_task_progress
 from .utils import build_env_context
+from ..identity_resolver import resolve_user_identity
 from ..channels.schema import DEFAULT_CHANNEL
 from ...agents.react_agent import SWEAgent
 from ...agents.skill_invocation_detector import SkillInvocationDetector
@@ -1666,14 +1667,21 @@ class AgentRunner(Runner):
                 return None
             # 检查是否已有外部传入的 trace_id
             existing_trace_id = getattr(request, "trace_id", None)
+            resolved_identity = await resolve_user_identity(
+                tenant_id=getattr(request, "user_id", None),
+                source_id=_request_source_id(request),
+                user_name=_request_user_name(request),
+                bbk_id=_request_bbk_id(request),
+                allow_remote_lookup=False,
+            )
             trace_id = await trace_mgr.start_trace(
                 user_id=getattr(request, "user_id", "") or "",
                 session_id=getattr(request, "session_id", "") or "",
                 channel=getattr(request, "channel", DEFAULT_CHANNEL),
                 source_id=_request_source_id(request),
                 user_message=_get_last_user_text(msgs),
-                user_name=_request_user_name(request),
-                bbk_id=_request_bbk_id(request),
+                user_name=resolved_identity.user_name,
+                bbk_id=resolved_identity.bbk_id,
                 session_name=_session_name_from_messages(msgs),
                 trace_id=existing_trace_id,  # 使用传入的 trace_id 或 None
                 attach_existing=existing_trace_id
