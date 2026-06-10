@@ -307,6 +307,7 @@ class SkillInvocationDetector:
         user_id: str,
         session_id: str,
         channel: str,
+        source_id: str = "",
     ) -> None:
         """Set tracing context for emitting events.
 
@@ -322,6 +323,7 @@ class SkillInvocationDetector:
         self._user_id = user_id
         self._session_id = session_id
         self._channel = channel
+        self._source_id = source_id
 
     async def on_tool_call(
         self,

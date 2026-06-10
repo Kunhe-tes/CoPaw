@@ -986,6 +986,13 @@ class CronExecutor:
     ) -> Dict[str, Any]:
         """Build agent request dict from job spec."""
         req: Dict[str, Any] = job.request.model_dump(mode="json")
+        removed_trace_id = req.pop("trace_id", None)
+        if removed_trace_id:
+            logger.warning(
+                "cron agent request removed stale trace_id=%s for job_id=%s",
+                str(removed_trace_id)[:20],
+                job.id,
+            )
         req["user_id"] = req.get("user_id") or target_user_id or "cron"
         req["session_id"] = (
             req.get("session_id") or target_session_id or f"cron:{job.id}"
