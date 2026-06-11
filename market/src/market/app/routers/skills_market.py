@@ -31,7 +31,12 @@ from ...marketplace.schemas import (
     PublishSkillRequest,
     UploadSkillResponse,
 )
-from ...marketplace.service import MarketItem, load_index, save_index
+from ...marketplace.service import (
+    MarketItem,
+    SkillNameConflictError,
+    load_index,
+    save_index,
+)
 from ...marketplace.version_service import SkillVersionService
 from ..deps import decode_user_name, require_source_id
 from .skills_browse import (
@@ -443,7 +448,20 @@ async def publish_skill(
     source_id = require_source_id(x_source_id)
     _require_manager(x_manager)
     svc = request.app.state.marketplace
-    item = await svc.publish_skill(source_id, req)
+    try:
+        item = await svc.publish_skill(source_id, req)
+    except SkillNameConflictError as exc:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "message": str(exc),
+                "existing_item_id": exc.existing_item_id,
+                "existing_name": exc.existing_name,
+                "existing_creator_id": exc.existing_creator_id,
+                "existing_creator_name": exc.existing_creator_name,
+                "existing_version": exc.existing_version,
+            },
+        ) from exc
     return MarketSkillResponse(
         item_id=item.item_id,
         name=item.name,

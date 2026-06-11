@@ -53,6 +53,7 @@ export interface PublishSkillRequest {
   // 可选：指定用户技能目录名，用于同步整个目录
   skill_name?: string;
   agent_id?: string;
+  overwrite?: boolean;
 }
 
 export interface DistributeRequest {

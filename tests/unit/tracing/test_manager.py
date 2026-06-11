@@ -241,6 +241,103 @@ class TestTraceManager:
         await manager.close()
 
     @pytest.mark.asyncio
+    async def test_attach_existing_trace_with_matching_identity(
+        self,
+        enabled_config,
+        mock_db,
+    ):
+        """Matching attach_existing request should reuse the trace."""
+        manager = TraceManager(enabled_config, mock_db)
+        await manager.initialize()
+
+        trace_id = await manager.start_trace(
+            user_id="user-1",
+            session_id="session-1",
+            channel="console",
+            source_id="source-1",
+        )
+
+        attached_trace_id = await manager.start_trace(
+            user_id="user-1",
+            session_id="session-1",
+            channel="console",
+            source_id="source-1",
+            trace_id=trace_id,
+            attach_existing=True,
+        )
+
+        assert attached_trace_id == trace_id
+        assert get_current_trace() is not None
+        assert get_current_trace().trace_id == trace_id
+        assert get_current_trace().attached is True
+
+        await manager.close()
+
+    @pytest.mark.asyncio
+    async def test_attach_existing_trace_with_mismatched_identity_uses_new_id(
+        self,
+        enabled_config,
+        mock_db,
+    ):
+        """Mismatched attach_existing request must not reuse the old trace."""
+        manager = TraceManager(enabled_config, mock_db)
+        await manager.initialize()
+
+        trace_id = await manager.start_trace(
+            user_id="user-1",
+            session_id="session-1",
+            channel="console",
+            source_id="source-1",
+        )
+
+        new_trace_id = await manager.start_trace(
+            user_id="user-1",
+            session_id="session-2",
+            channel="console",
+            source_id="source-1",
+            trace_id=trace_id,
+            attach_existing=True,
+        )
+
+        assert new_trace_id != trace_id
+        assert get_current_trace() is not None
+        assert get_current_trace().trace_id == new_trace_id
+        assert get_current_trace().session_id == "session-2"
+        assert get_current_trace().attached is False
+        assert trace_id in manager._active_traces
+        assert new_trace_id in manager._active_traces
+
+        await manager.close()
+
+    @pytest.mark.asyncio
+    async def test_attach_existing_trace_not_found_keeps_requested_id(
+        self,
+        enabled_config,
+        mock_db,
+    ):
+        """Missing attach target should still reuse caller-provided trace_id."""
+        manager = TraceManager(enabled_config, mock_db)
+        await manager.initialize()
+
+        requested_trace_id = "external-trace-id"
+        new_trace_id = await manager.start_trace(
+            user_id="user-1",
+            session_id="session-1",
+            channel="console",
+            source_id="source-1",
+            trace_id=requested_trace_id,
+            attach_existing=True,
+        )
+
+        assert new_trace_id == requested_trace_id
+        assert get_current_trace() is not None
+        assert get_current_trace().trace_id == requested_trace_id
+        assert get_current_trace().attached is False
+        assert requested_trace_id in manager._active_traces
+
+        await manager.close()
+
+    @pytest.mark.asyncio
     async def test_end_trace(self, enabled_config, mock_db):
         """Test end_trace updates trace status."""
         mock_db.fetch_one.return_value = {

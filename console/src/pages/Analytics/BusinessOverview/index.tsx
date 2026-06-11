@@ -1162,6 +1162,17 @@ export default function BusinessOverviewPage() {
                 </Tooltip>
               )}
               allowClear
+              showSearch
+              filterOption={(input, option) => {
+                const searchValue = input.toLowerCase();
+                const optionValue = String(option?.value ?? "");
+                const optionLabel = BBK_ID_TO_NAME_MAP[optionValue] || "";
+                // 支持按分行号或分行名搜索
+                return (
+                  optionValue.toLowerCase().includes(searchValue) ||
+                  optionLabel.toLowerCase().includes(searchValue)
+                );
+              }}
             >
               {BBK_ID_MAP.map((item) => (
                 <Option key={item.value} value={item.value}>
@@ -1639,6 +1650,11 @@ export default function BusinessOverviewPage() {
           <div className={styles.panelHeader}>
             <h3 className={styles.panelTitle}>技能使用排行榜</h3>
           </div>
+          <div className={styles.skillRankHeader}>
+            <span>排名</span>
+            <span>技能</span>
+            <span>调用次数</span>
+          </div>
           <div className={styles.rankList} onScroll={handleSkillsScroll}>
             {skillsLoading && skills.length === 0 ? (
               <div className={styles.listFootnote}>加载中...</div>
@@ -1661,7 +1677,7 @@ export default function BusinessOverviewPage() {
                   <button
                     key={`${skill.skill_name}-${rank}`}
                     type="button"
-                    className={styles.rankRow}
+                    className={styles.skillRankRow}
                     onClick={() => {
                       setSelectedSkillName(skill.skill_name);
                       setSkillModalOpen(true);
@@ -1690,7 +1706,7 @@ export default function BusinessOverviewPage() {
                         {truncateName(skill.skill_name, 20)}
                       </span>
                     </Tooltip>
-                    <span className={styles.rankCalls}>
+                    <span className={styles.skillRankCalls}>
                       {formatNumber(skill.count)}
                     </span>
                   </button>

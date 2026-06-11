@@ -467,6 +467,7 @@ export function MCPDetailPanel({
           </Tag>
           <Tag>{mcp.transport}</Tag>
           {isDistributed && <Tag color="purple">市场分发</Tag>}
+          {mcp.has_update && <Tag color="orange">有更新</Tag>}
         </div>
 
         <div style={{ display: "grid", gap: 16 }}>
@@ -491,6 +492,16 @@ export function MCPDetailPanel({
             </p>
             <div style={{ display: "grid", gap: 10 }}>
               <InfoRow label="名称" value={mcp.name} />
+              {mcp.version && (
+                <InfoRow
+                  label="版本"
+                  value={
+                    isDistributed && mcp.creator_name
+                      ? `v${mcp.version}（由 ${mcp.creator_name} 创建）`
+                      : `v${mcp.version}`
+                  }
+                />
+              )}
               <InfoRow
                 label="创建时间"
                 value={formatDateTime(mcp.created_at)}
@@ -499,7 +510,6 @@ export function MCPDetailPanel({
                 label="更新时间"
                 value={formatDateTime(mcp.updated_at)}
               />
-              {isDistributed && <InfoRow label="来源" value={mcp.source} />}
               {isDistributed && (
                 <InfoRow label="分发者" value={mcp.distributed_by || "-"} />
               )}

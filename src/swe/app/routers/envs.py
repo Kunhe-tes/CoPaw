@@ -17,8 +17,13 @@ from ...envs.runtime import (
     mask_env_value,
     validate_env_mapping,
 )
-from ...config.context import is_valid_identity_value, resolve_scope_id
-from ...config.utils import get_tenant_secrets_dir
+from ...config.context import (
+    is_valid_identity_value,
+    resolve_storage_tenant_id,
+)
+from ...config.utils import (
+    get_tenant_storage_secrets_dir,
+)
 
 router = APIRouter(prefix="/envs", tags=["envs"])
 
@@ -38,10 +43,15 @@ RESERVED_SCOPE_FIELD_ERROR = (
 
 def _get_tenant_envs_path(request: Request) -> Path:
     """Get tenant-specific envs.json path."""
-    tenant_id = getattr(request.state, "scope_id", None)
-    if tenant_id is None:
-        tenant_id = getattr(request.state, "tenant_id", None)
-    secrets_dir = get_tenant_secrets_dir(tenant_id)
+    tenant_id = getattr(request.state, "tenant_id", None)
+    source_id = getattr(request.state, "source_id", None)
+    scope_id = getattr(request.state, "scope_id", None)
+    storage_tenant_id = resolve_storage_tenant_id(
+        tenant_id,
+        source_id,
+        scope_id=scope_id,
+    )
+    secrets_dir = get_tenant_storage_secrets_dir(storage_tenant_id)
     return secrets_dir / "envs.json"
 
 
@@ -178,18 +188,24 @@ async def write_target_envs(
     actor = _require_manager(request)
     _validate_identity_or_400("target_tenant_id", body.target_tenant_id)
     _validate_identity_or_400("target_source_id", body.target_source_id)
-    scope_id = resolve_scope_id(body.target_tenant_id, body.target_source_id)
-    if scope_id is None:
-        raise HTTPException(400, detail="Target scope is required")
+    storage_tenant_id = resolve_storage_tenant_id(
+        body.target_tenant_id,
+        body.target_source_id,
+    )
+    if storage_tenant_id is None:
+        raise HTTPException(400, detail="Target storage tenant is required")
     cleaned = _validate_envs_or_400(body.values)
-    save_envs(cleaned, get_tenant_secrets_dir(scope_id) / "envs.json")
+    save_envs(
+        cleaned,
+        get_tenant_storage_secrets_dir(storage_tenant_id) / "envs.json",
+    )
     audit = TargetEnvAudit(
         actor=actor,
         target_tenant_id=body.target_tenant_id,
         target_source_id=body.target_source_id,
         keys=sorted(cleaned),
     )
-    _append_target_env_audit(scope_id, audit)
+    _append_target_env_audit(storage_tenant_id, audit)
     return TargetEnvWriteResponse(envs=_masked_env_list(cleaned), audit=audit)
 
 
@@ -252,9 +268,14 @@ def _validate_identity_or_400(field_name: str, value: str) -> None:
         )
 
 
-def _append_target_env_audit(scope_id: str, audit: TargetEnvAudit) -> None:
+def _append_target_env_audit(
+    storage_tenant_id: str,
+    audit: TargetEnvAudit,
+) -> None:
     """追加不含原始 env 值的 target 写入审计记录。"""
-    audit_path = get_tenant_secrets_dir(scope_id) / "envs.audit.jsonl"
+    audit_path = (
+        get_tenant_storage_secrets_dir(storage_tenant_id) / "envs.audit.jsonl"
+    )
     audit_path.parent.mkdir(parents=True, exist_ok=True)
     try:
         os.chmod(audit_path.parent, 0o700)

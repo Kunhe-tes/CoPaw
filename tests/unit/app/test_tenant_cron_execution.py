@@ -304,6 +304,27 @@ def test_build_agent_request_includes_runtime_scope():
     )
 
 
+def test_build_agent_request_removes_stale_trace_id():
+    executor = CronExecutor(
+        runner=_Runner(),
+        channel_manager=_ChannelManager(),
+    )
+    job = _build_agent_job("/tmp/tenant-a/workspaces/beta").model_copy(
+        update={
+            "request": CronJobRequest.model_validate(
+                {
+                    "input": [{"content": [{"text": "ping"}]}],
+                    "trace_id": "stale-trace-id",
+                },
+            ),
+        },
+    )
+
+    req = executor._build_agent_request(job, "user-a", "session-a")
+
+    assert "trace_id" not in req
+
+
 def test_apply_auth_token_uses_runtime_scope(monkeypatch):
     """Cron auth 读取必须使用 scope_id，不能回退到逻辑 tenant。"""
     observed = {}
