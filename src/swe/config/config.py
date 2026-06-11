@@ -193,6 +193,7 @@ class ZhaohuConfig(BaseChannelConfig):
             "",
         ),
     )
+    session_end_push_enabled: bool = False
 
 
 class ConsoleConfig(BaseChannelConfig):

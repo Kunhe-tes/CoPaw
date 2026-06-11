@@ -645,6 +645,7 @@
       "console_enabled_mandatory": "Console 渠道由系统管理并始终保持开启。"
     },
     "distributeToTenants": "分发到租户",
+    "sessionEndPushEnabled": "会话结束推送",
     "distributeTitle": "分发通道配置到租户",
     "distributeHint": "将当前通道配置分发到目标租户的 default agent。",
     "distributeOverwrite": "覆盖已有配置",

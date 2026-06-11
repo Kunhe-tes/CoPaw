@@ -49,6 +49,30 @@ class _PendingRunner:
         await asyncio.sleep(30)
 
 
+class _EmptyStreamRunner:
+    """模拟返回空流的 Runner（没有任何事件，包括 Completed 或 Failed）。"""
+
+    async def stream_query(self, _req):
+        # 不 yield 任何事件，直接返回
+        return
+        yield  # pylint: disable=unreachable # 使方法成为 generator
+
+
+class _FailedRunner:
+    """模拟模型调用失败的 Runner，返回 Failed 事件而不抛出异常。"""
+
+    async def stream_query(self, _req):
+        # 模拟 runner 在模型失败时的行为：yield Failed 事件，不抛出异常
+        yield SimpleNamespace(
+            object="message",
+            status=RunStatus.Failed,
+            error=SimpleNamespace(
+                code="model_error",
+                message="Model not available",
+            ),
+        )
+
+
 class _ChannelManager:
     def __init__(self) -> None:
         self.events: list[object] = []
@@ -327,6 +351,167 @@ def test_failed_execution_still_syncs_model_meta(monkeypatch):
         },
         "fallback_reason": "provider_not_found",
     }
+
+
+def test_failed_event_marks_execution_as_error(monkeypatch):
+    """当 runner yield Failed 事件时，应正确标记为错误而不是成功。
+
+    这是针对模型调用失败场景的关键测试：
+    - runner 不抛出异常，而是 yield Failed 事件
+    - executor 应检测 Failed 事件并正确处理为失败
+    - 不应将 CancelledError 视为成功
+    """
+    warning_messages: list[str] = []
+
+    def fake_executor_warning(message, *args, **_kwargs) -> None:
+        try:
+            text = str(message) % args if args else str(message)
+        except TypeError:
+            text = str(message)
+        warning_messages.append(text)
+
+    monkeypatch.setattr(
+        "swe.app.crons.executor.logger.warning",
+        fake_executor_warning,
+    )
+
+    async def _run():
+        job = _build_agent_job()
+        channel_manager = _ChannelManager()
+        monitor = _MonitorSyncClient()
+        manager = CronManager(
+            repo=_Repo(job),
+            runner=_FailedRunner(),
+            channel_manager=channel_manager,
+        )
+        manager._monitor_sync_client = (
+            monitor  # pylint: disable=protected-access
+        )
+
+        try:
+            await manager._execute_once(  # pylint: disable=protected-access
+                job,
+                is_manual=False,
+            )
+        except RuntimeError:
+            # executor 应在检测到 Failed 事件后抛出 RuntimeError
+            pass
+
+        return manager, channel_manager, monitor
+
+    manager, channel_manager, monitor = asyncio.run(_run())
+
+    state = manager.get_state("job-cancel-after-output")
+    # 验证：应该记录为 error 或 cancelled，不是 success
+    assert state.last_status in ("error", "cancelled")
+    # 验证：Monitor 同步应记录为 error
+    assert monitor.records[-1]["status"] == "error"
+    # 验证：应该看到 failed 事件的日志
+    assert any("failed" in message.lower() for message in warning_messages)
+
+
+def test_empty_stream_marks_execution_as_error():
+    """当 runner 返回空流（没有任何 Completed 或 Failed 事件）时，
+    应正确标记为错误而不是成功。
+
+    这是针对模型不可用等场景的测试：
+    - runner 可能返回空流而不是 yield Failed 事件
+    - executor 应检测没有 Completed 事件并正确处理为失败
+    """
+
+    async def _run():
+        job = _build_agent_job()
+        channel_manager = _ChannelManager()
+        monitor = _MonitorSyncClient()
+        manager = CronManager(
+            repo=_Repo(job),
+            runner=_EmptyStreamRunner(),
+            channel_manager=channel_manager,
+        )
+        manager._monitor_sync_client = (
+            monitor  # pylint: disable=protected-access
+        )
+
+        try:
+            await manager._execute_once(  # pylint: disable=protected-access
+                job,
+                is_manual=False,
+            )
+        except RuntimeError:
+            # executor 应在检测到没有 Completed 事件后抛出 RuntimeError
+            pass
+
+        return manager, channel_manager, monitor
+
+    manager, channel_manager, monitor = asyncio.run(_run())
+
+    state = manager.get_state("job-cancel-after-output")
+    # 验证：应该记录为 error，不是 success
+    assert state.last_status == "error"
+    # 验证：Monitor 同步应记录为 error
+    assert monitor.records[-1]["status"] == "error"
+    # 验证：没有发送任何事件
+    assert len(channel_manager.events) == 0
+
+
+def test_failed_execution_preserves_trace_id(monkeypatch):
+    """验证执行失败时 trace_id 仍能正确传递到 Monitor。
+
+    这是确保 trace_id 在失败场景下也能被保存的关键测试：
+    - executor 在失败时应将 trace_id 附加到异常
+    - manager 应从异常获取 trace_id
+    - trace_id 应被同步到 Monitor
+    """
+    fake_trace_id = "test-trace-id-for-failure"
+
+    async def fake_start_trace(**_kwargs):
+        return fake_trace_id
+
+    async def fake_end_trace(*_args, **_kwargs):
+        return None
+
+    # Mock trace_manager 使 trace_id 被创建
+    monkeypatch.setattr(
+        "swe.app.crons.executor.has_trace_manager",
+        lambda: True,
+    )
+    monkeypatch.setattr(
+        "swe.app.crons.executor.get_trace_manager",
+        lambda: SimpleNamespace(
+            enabled=True,
+            start_trace=fake_start_trace,
+            end_trace=fake_end_trace,
+        ),
+    )
+
+    async def _run():
+        job = _build_agent_job()
+        channel_manager = _ChannelManager()
+        monitor = _MonitorSyncClient()
+        manager = CronManager(
+            repo=_Repo(job),
+            runner=_EmptyStreamRunner(),
+            channel_manager=channel_manager,
+        )
+        manager._monitor_sync_client = (
+            monitor  # pylint: disable=protected-access
+        )
+
+        try:
+            await manager._execute_once(  # pylint: disable=protected-access
+                job,
+                is_manual=False,
+            )
+        except RuntimeError:
+            pass
+
+        return monitor
+
+    monitor = asyncio.run(_run())
+
+    # 验证：trace_id 应被正确传递到 Monitor
+    assert monitor.records[-1]["status"] == "error"
+    assert monitor.records[-1]["trace_id"] == fake_trace_id
 
 
 def test_manual_broadcast_execution_does_not_delay_notification():

@@ -542,6 +542,7 @@ class ConsoleChannel(BaseChannel):
                 self._print_error(err_msg)
 
             to_handle = request.user_id or ""
+            await self._try_session_end_push(request, to_handle)
             if self._on_reply_sent:
                 self._on_reply_sent(
                     self.channel,

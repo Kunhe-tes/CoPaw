@@ -129,6 +129,7 @@ export interface ZhaohuConfig extends BaseChannelConfig {
   robot_open_id: string;
   client_id: string;
   client_secret: string;
+  session_end_push_enabled?: boolean;
 }
 
 export interface ChannelConfig {

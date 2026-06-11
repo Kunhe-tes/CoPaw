@@ -3,7 +3,6 @@ import {
   CheckCircle2,
   ChevronRight,
   Clock3,
-  Info,
   PlaySquare,
   ShieldCheck,
   TrendingDown,
@@ -49,6 +48,11 @@ const failureReasonOptions = [
 type FailureReason = (typeof failureReasonOptions)[number];
 
 const formatNumber = (value: number) => value.toLocaleString("en-US");
+const formatPercent = (value: number) => `${value.toFixed(2)}%`;
+const quickTooltipProps = {
+  mouseEnterDelay: 0,
+  mouseLeaveDelay: 0,
+} as const;
 const truncateAxisLabel = (value: string, maxLength = 6) =>
   value.length > maxLength ? `${value.slice(0, maxLength)}...` : value;
 
@@ -265,21 +269,23 @@ function CurvedDonutChart({
         })}
       </defs>
       {singleValueItem ? (
-        <circle
-          cx="74"
-          cy="74"
-          r="47.5"
-          fill="none"
-          stroke={`url(#${gradientPrefix}-${singleValueItemIndex})`}
-          strokeWidth="17"
-        >
-          <title>
-            {singleValueItem.name}: {formatNumber(singleValueItem.value)}
-            {singleValueItem.percent !== undefined
+        <Tooltip
+          {...quickTooltipProps}
+          title={`${singleValueItem.name}: ${formatNumber(singleValueItem.value)}${
+            singleValueItem.percent !== undefined
               ? ` (${singleValueItem.percent.toFixed(2)}%)`
-              : ""}
-          </title>
-        </circle>
+              : ""
+          }`}
+        >
+          <circle
+            cx="74"
+            cy="74"
+            r="47.5"
+            fill="none"
+            stroke={`url(#${gradientPrefix}-${singleValueItemIndex})`}
+            strokeWidth="17"
+          />
+        </Tooltip>
       ) : (
         items.map((item, index) => {
           const angle = total ? (item.value / total) * Math.PI * 2 : 0;
@@ -288,30 +294,32 @@ function CurvedDonutChart({
           currentAngle = endAngle;
 
           return (
-            <path
+            <Tooltip
               key={item.name}
-              d={donutSegmentPath(startAngle, endAngle)}
-              fill={`url(#${gradientPrefix}-${index})`}
+              {...quickTooltipProps}
+              title={`${item.name}: ${formatNumber(item.value)}${
+                item.percent !== undefined ? ` (${item.percent.toFixed(2)}%)` : ""
+              }`}
             >
-              <title>
-                {item.name}: {formatNumber(item.value)}
-                {item.percent !== undefined ? ` (${item.percent.toFixed(2)}%)` : ""}
-              </title>
-            </path>
+              <path
+                d={donutSegmentPath(startAngle, endAngle)}
+                fill={`url(#${gradientPrefix}-${index})`}
+              />
+            </Tooltip>
           );
         })
       )}
       {!total ? (
-        <circle
-          cx="74"
-          cy="74"
-          r="47.5"
-          fill="none"
-          stroke="#e2e8f0"
-          strokeWidth="17"
-        >
-          <title>{centerLabel}: 0</title>
-        </circle>
+        <Tooltip {...quickTooltipProps} title={`${centerLabel}: 0`}>
+          <circle
+            cx="74"
+            cy="74"
+            r="47.5"
+            fill="none"
+            stroke="#e2e8f0"
+            strokeWidth="17"
+          />
+        </Tooltip>
       ) : null}
       <text
         x="74"
@@ -401,7 +409,7 @@ function FailureReasonChart({
     <div className={styles.failureChart}>
       {items.map((item) => (
         <div key={item.name} className={styles.failureRow}>
-          <Tooltip title={item.name} placement="topLeft">
+          <Tooltip {...quickTooltipProps} title={item.name} placement="topLeft">
             <span className={styles.failureLabel}>
               {truncateAxisLabel(item.name)}
             </span>
@@ -522,14 +530,24 @@ function BranchStackCell<T extends { name: string } & Record<string, string | nu
   rows,
   keys,
   colors,
+  labels,
+  primaryKey,
 }: {
   name: string;
   rows: T[];
   keys: string[];
   colors: string[];
+  labels: Record<string, string>;
+  primaryKey: string;
 }) {
   const row = rows.find((item) => item.name === name);
   const normalized = row ? normalizeStack(row, keys) : {};
+  const total = row
+    ? keys.reduce((sum, key) => sum + Number(row[key] ?? 0), 0)
+    : 0;
+  const primaryPercent = total
+    ? (Number(row?.[primaryKey] ?? 0) / total) * 100
+    : 0;
   const gradientPrefix = `branch-stack-${name.replace(
     /[^a-zA-Z0-9_-]/g,
     "-",
@@ -561,25 +579,34 @@ function BranchStackCell<T extends { name: string } & Record<string, string | nu
         </defs>
         {keys.map((key, index) => {
           const value = normalized[key] ?? 0;
+          if (value <= 0) {
+            return null;
+          }
+
           const start = currentStart;
-          const end = index === keys.length - 1 ? 100 : currentStart + value;
+          const end = Math.min(100, currentStart + value);
           currentStart = end;
 
           return (
-            <path
+            <Tooltip
               key={key}
-              d={curvedStackSegmentPath(
-                start,
-                end,
-                index === 0,
-                index === keys.length - 1,
-              )}
-              fill={`url(#${gradientPrefix}-${index})`}
-            />
+              {...quickTooltipProps}
+              title={`${labels[key] ?? key}: ${formatNumber(Number(row?.[key] ?? 0))}`}
+            >
+              <path
+                d={curvedStackSegmentPath(
+                  start,
+                  end,
+                  index === 0,
+                  index === keys.length - 1,
+                )}
+                fill={`url(#${gradientPrefix}-${index})`}
+              />
+            </Tooltip>
           );
         })}
       </svg>
-      <strong>100%</strong>
+      <strong>{formatPercent(primaryPercent)}</strong>
     </div>
   );
 }
@@ -644,6 +671,12 @@ function BranchSharedOverview({
                   rows={branchExecution}
                   keys={["success", "failed", "skipped"]}
                   colors={["#16a34a", "#ef4444", "#94a3b8"]}
+                  labels={{
+                    success: "执行成功次数",
+                    failed: "执行失败次数",
+                    skipped: "任务取消次数",
+                  }}
+                  primaryKey="success"
                 />
               </div>
               <div className={styles.branchCell}>
@@ -652,6 +685,11 @@ function BranchSharedOverview({
                   rows={branchRead}
                   keys={["read", "unread"]}
                   colors={["#2563eb", "#f97316"]}
+                  labels={{
+                    read: "\u5df2\u8bfb\u6570\u91cf",
+                    unread: "\u672a\u8bfb\u6570\u91cf",
+                  }}
+                  primaryKey="read"
                 />
               </div>
             </div>
@@ -773,7 +811,11 @@ function FailedTaskModal({
                     ? `${task.duration_ms}ms`
                     : `${(task.duration_ms / 1000).toFixed(2)}s`}
                 </span>
-                <Tooltip title={task.error_message} placement="topLeft">
+                <Tooltip
+                  {...quickTooltipProps}
+                  title={task.error_message}
+                  placement="topLeft"
+                >
                   <span className={styles.errorMessageCell}>
                     {task.error_message || "-"}
                   </span>
@@ -948,7 +990,6 @@ export default function CronJobOverviewPage() {
           <div className={styles.toolbarLeft}>
             <div className={styles.titleWrap}>
               <h1>定时任务概览</h1>
-              <Info size={18} />
             </div>
           </div>
           <div className={styles.toolbarRight}>

@@ -534,6 +534,7 @@
     "groupPolicyTooltip": "Кто может взаимодействовать с ботом в групповых чатах. Open: все; Allowlist: только авторизованные пользователи",
     "requireMention": "Требовать @упоминание",
     "requireMentionTooltip": "Бот отвечает в групповых чатах только при явном @упоминании",
+    "sessionEndPushEnabled": "Push по завершении сессии",
     "policyOpen": "Open",
     "policyAllowlist": "Allowlist",
     "allowFrom": "Пользователи allowlist",
