@@ -605,6 +605,22 @@ def save_mcp_config(
     _atomic_write_json(path, config)
 
 
+def _normalize_mcp_client_key(name: str) -> str:
+    """将 MCP 名称归一化为安全的 client_key，与前端 buildClientKey 对齐。
+
+    市场名称唯一，因此 name 派生的 key 天然不会在市场 MCP 之间冲突。
+    """
+    import re as _re
+
+    if not name or not name.strip():
+        return "mcp"
+    # 小写 + 空格/特殊字符替换为连字符
+    normalized = _re.sub(r"[^a-z0-9_-]+", "-", name.strip().lower())
+    normalized = _re.sub(r"-+", "-", normalized).strip("-_")
+    return normalized or "mcp"
+
+
+# pylint: disable=too-many-statements
 def copy_mcp_to_user(
     marketplace_root: Path,
     source_id: str,
@@ -613,12 +629,20 @@ def copy_mcp_to_user(
     user_id: str,
     client_key: str,
     distributed_by: str,
+    version: str = "",
     agent_id: str = DEFAULT_AGENT_ID,
     creator_id: str = "",
     creator_name: str = "",
     mcp_name: str = "",
-) -> None:
+) -> str:
     """将市场 MCP 复制到用户本地配置。
+
+    写入逻辑基于 MCP 名称（市场内唯一）而非 client_key（不可靠）：
+    1) 同名替换：已有同名市场 MCP 时先移除旧条目再写入，保证不重复累积。
+    2) dict key：优先使用市场原始 client_key；若被不同名称的条目占用，
+       则用名称派生的 key，因市场 name 唯一，天然无碰撞。
+    3) 用户自建 MCP：同名由上游 _find_user_mcp_name_conflict 拦截，
+       不同名但 client_key 碰撞时用名称派生 key 保护。
 
     Args:
         marketplace_root: 市场根目录。
@@ -626,12 +650,16 @@ def copy_mcp_to_user(
         item_id: 条目 ID。
         swe_root: SWE 用户根目录。
         user_id: 用户 ID。
-        client_key: MCP 客户端标识。
+        client_key: MCP 客户端标识（市场来源，非全局唯一）。
         distributed_by: 分发者标识。
+        version: 市场条目版本号，写入 received_version。
         agent_id: Agent ID，默认为 "default"。
         creator_id: 市场条目的创建者 ID（写入用户配置以便后续同名检测）。
         creator_name: 市场条目的创建者名称。
         mcp_name: 市场条目的 name，写入用户配置作为稳定标识。
+
+    Returns:
+        实际写入用户配置的 client_key。
     """
     mcp_config = load_mcp_config(marketplace_root, source_id, item_id)
     if mcp_config is None:
@@ -666,15 +694,71 @@ def copy_mcp_to_user(
     config_data["market_client_key"] = client_key
     config_data["distributed_by"] = distributed_by
     config_data["updated_at"] = datetime.now(timezone.utc).isoformat()
+
+    # ---- 基于名称的替换与 key 决策 ----
+    # 市场名称唯一，因此用名称作为身份标识，而非不可靠的 client_key。
+    current_source = f"marketplace:{item_id}"
+    replaced_created_at: str | None = None
+
+    # 1) 同名替换：移除已有的同名市场分发条目
+    if mcp_name:
+        for existing_key, existing_cfg in list(
+            user_config["mcp"]["clients"].items(),
+        ):
+            if not isinstance(existing_cfg, dict):
+                continue
+            if existing_cfg.get("name") != mcp_name:
+                continue
+            existing_source = existing_cfg.get("source", "")
+            if (
+                isinstance(existing_source, str)
+                and existing_source.startswith("marketplace:")
+                and existing_source != current_source
+            ):
+                # 同名市场 MCP → 移除旧条目，保留 created_at
+                if existing_cfg.get("created_at"):
+                    replaced_created_at = existing_cfg["created_at"]
+                del user_config["mcp"]["clients"][existing_key]
+            elif existing_source == current_source:
+                # 同一条目重新分发 → 移除旧条目（会在下方重新写入），保留 created_at
+                if existing_cfg.get("created_at"):
+                    replaced_created_at = existing_cfg["created_at"]
+                del user_config["mcp"]["clients"][existing_key]
+
+    # 2) 确定 dict key：优先使用市场原始 client_key
+    effective_client_key = client_key
+    existing_at_key = user_config["mcp"]["clients"].get(effective_client_key)
+    if existing_at_key and isinstance(existing_at_key, dict):
+        # client_key 被占用（不同名称的 MCP），用名称派生的 key
+        name_key = _normalize_mcp_client_key(mcp_name)
+        effective_client_key = name_key
+        # 名称派生 key 也被占用则追加序号
+        _suffix = 1
+        _base = effective_client_key
+        while effective_client_key in user_config["mcp"]["clients"]:
+            effective_client_key = f"{_base}-{_suffix}"
+            _suffix += 1
+
+    # 保留原有 created_at（重复分发时不覆盖首次创建时间）
+    config_data["created_at"] = (
+        replaced_created_at
+        if replaced_created_at
+        else datetime.now(timezone.utc).isoformat()
+    )
+    # 记录市场版本号（供后续判断是否有更新）
+    if version:
+        config_data["received_version"] = version
+        config_data["version"] = version
     # 写入市场来源信息：creator_id 用于后续同名分发检测，
     # name 作为稳定身份字段（与市场条目 name 一致）
-    if creator_id:
+    if creator_id is not None:
         config_data["creator_id"] = creator_id
-    if creator_name:
+    if creator_name is not None:
         config_data["creator_name"] = creator_name
     if mcp_name and not config_data.get("name"):
         config_data["name"] = mcp_name
 
-    user_config["mcp"]["clients"][client_key] = config_data
+    user_config["mcp"]["clients"][effective_client_key] = config_data
 
     _atomic_write_json(user_config_path, user_config)
+    return effective_client_key

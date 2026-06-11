@@ -396,11 +396,18 @@ export default function MySkillsPage() {
         : draftContent;
 
       await mySkillsApi.saveSkillFile(selectedSkill.skill_name, selectedFile, contentToSave);
-      setFileContent(contentToSave);
       setIsEditing(false);
       message.success("保存成功，可新开会话试一试效果。");
 
-      // 刷新单个技能数据（更新 updated_at 显示）
+      // 重新读取文件内容（后端可能更新了 frontmatter 中的 version 等字段）
+      try {
+        const res = await mySkillsApi.readSkillFile(selectedSkill.skill_name, selectedFile);
+        setFileContent(res.content);
+      } catch {
+        setFileContent(contentToSave);
+      }
+
+      // 刷新单个技能数据（更新 version、updated_at 显示）
       const updatedSkill = await refreshSkill(selectedSkill.skill_name);
       if (updatedSkill) {
         setSelectedSkill(updatedSkill);
@@ -888,7 +895,6 @@ export default function MySkillsPage() {
           setPublishInitialData(null);
         }}
         onSuccess={() => {
-          message.success("上架成功");
           refresh();
         }}
         initialData={publishInitialData}
