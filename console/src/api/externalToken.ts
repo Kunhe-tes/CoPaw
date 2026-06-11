@@ -2,11 +2,11 @@
 // Handles token fetch, refresh, and storage for external authentication
 
 // Token storage keys (isolated by domain via localStorage)
-const EXTERNAL_TOKEN_KEY = "copaw_external_token";
-const EXTERNAL_TOKEN_EXPIRES_KEY = "copaw_external_token_expires";
+const EXTERNAL_TOKEN_KEY = "claw_external_token";
+const EXTERNAL_TOKEN_EXPIRES_KEY = "claw_external_token_expires";
 
 // Refresh margin: refresh token 60 seconds before expiry
-const REFRESH_MARGIN_SECONDS = 60;
+const REFRESH_MARGIN_SECONDS = 600;
 
 // Prevent concurrent refresh
 let isRefreshing = false;
@@ -19,30 +19,20 @@ let refreshPromise: Promise<string> | null = null;
 interface TokenConfig {
   systemCode: string;
   systemSecret: string;
-  tokenApiUrl: string;
 }
 
 interface WindowEnv {
   baseUrl?: string;
   SYSTEM_CODE?: string;
   SYSTEM_SECRET?: string;
-  TOKEN_API_URL?: string;
   responseFeedbackUserWhitelist?: string[];
   enableOriginYTaskTabs?: boolean | string | number;
 }
 
-declare global {
-  interface Window {
-    __env__?: WindowEnv;
-  }
-}
-
 function getTokenConfig(): TokenConfig {
-  const env = window.__env__ || {};
   return {
-    systemCode: env.SYSTEM_CODE || "",
-    systemSecret: env.SYSTEM_SECRET || "",
-    tokenApiUrl: env.TOKEN_API_URL || "",
+    systemCode: window.__env__.systemCode || "",
+    systemSecret: window.__env__.systemSect || "",
   };
 }
 
@@ -51,28 +41,25 @@ function getTokenConfig(): TokenConfig {
  */
 export function isExternalTokenEnabled(): boolean {
   const config = getTokenConfig();
-  return !!config.systemCode && !!config.systemSecret && !!config.tokenApiUrl;
+  return !!config.systemCode && !!config.systemSecret;
 }
 
 /**
  * Fetch new token from external API
- * POST {tokenApiUrl} with {"systemcode": xxx, "systemsecret": xxx}
+ * POST {tokenApiUrl} with {"systemcode": xxx, "systemSect": xxx}
  * Response: {"accesstoken": xxx, "expirestime": xxx}
  */
 export async function fetchNewToken(): Promise<{ token: string; expiresIn: number }> {
   const config = getTokenConfig();
-  if (!config.tokenApiUrl) {
-    throw new Error("TOKEN_API_URL not configured");
-  }
-
-  const response = await fetch(config.tokenApiUrl, {
+  const response = await fetch("/gateway-admin/api/auth/system/token", {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
     },
     body: JSON.stringify({
-      systemcode: config.systemCode,
-      systemsecret: config.systemSecret,
+      systemCode: config.systemCode,
+      systemSecret: config.systemSecret,
+      grantType: "issue"
     }),
   });
 
@@ -81,13 +68,14 @@ export async function fetchNewToken(): Promise<{ token: string; expiresIn: numbe
   }
 
   const data = await response.json();
-  const token = data.accesstoken || data.accessToken || data.access_token;
-  const expiresIn = data.expirestime || data.expiresTime || data.expires_in || 0;
+
+  const token = data?.data.accessToken;
+  const expiresIn = data?.data.expiresIn;
 
   if (!token) {
     throw new Error("Token not found in response");
   }
-
+  console.log('token', token, expiresIn)
   return { token, expiresIn };
 }
 
@@ -98,17 +86,16 @@ export async function fetchNewToken(): Promise<{ token: string; expiresIn: numbe
  */
 export async function refreshToken(oldToken: string): Promise<{ token: string; expiresIn: number }> {
   const config = getTokenConfig();
-  if (!config.tokenApiUrl) {
-    throw new Error("TOKEN_API_URL not configured");
-  }
-
-  const response = await fetch(config.tokenApiUrl, {
+  const response = await fetch("/gateway-admin/api/auth/system/token", {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
     },
     body: JSON.stringify({
-      token: oldToken,
+      oldToken: oldToken,
+      systemCode: config.systemCode,
+      systemSecret: config.systemSecret,
+      grantType: "renew"
     }),
   });
 
@@ -121,8 +108,8 @@ export async function refreshToken(oldToken: string): Promise<{ token: string; e
   }
 
   const data = await response.json();
-  const token = data.accesstoken || data.accessToken || data.access_token;
-  const expiresIn = data.expirestime || data.expiresTime || data.expires_in || 0;
+  const token = data?.data.accessToken;
+  const expiresIn = data?.data.expiresIn;
 
   if (!token) {
     throw new Error("Token not found in response");

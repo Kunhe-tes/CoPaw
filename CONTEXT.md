@@ -181,7 +181,7 @@ The content identity of one skill across its full directory tree, including `SKI
 _Avoid_: SKILL.md version, single-file skill update, prompt-only skill change
 
 **Skill Directory Freshness Token**:
-A lightweight change marker for one skill directory, derived from the latest recursive `mtime` across the tracked skill tree rather than strict content hashing. In this context, next-turn skill freshness checks compare the stored **Skill Directory Freshness Token** to the current one and accept heuristic rather than exact change detection.
+A lightweight change marker for one skill directory, derived from a stable digest of each tracked file's relative path, `mtime_ns`, and size rather than strict content hashing. In this context, next-turn skill freshness checks compare the stored **Skill Directory Freshness Token** to the current one and accept heuristic rather than exact change detection.
 _Avoid_: strict content revision, canonical content identity, cryptographic signature
 
 **Session Associated Skill Set**:
@@ -193,12 +193,12 @@ A session-state record that stores the session's **Session Associated Skill Set*
 _Avoid_: trace-derived skill history, transient detector state, prompt-only cache
 
 **Skill Freshness Refresh**:
-The next-turn refresh step that re-reads current skill content and rebuilds prompt state when a stored **Session Skill Snapshot** no longer matches the latest **Skill Directory Freshness Token**.
+The next-turn refresh step that rebuilds prompt state and requires the model to re-read the current `SKILL.md` when a stored **Session Skill Snapshot** no longer matches the latest **Skill Directory Freshness Token**.
 _Avoid_: mid-turn reload, background hot patch, user-visible skill reset
 
 **Skill Freshness Notice**:
-An internal model-facing notice added on the next turn after a **Skill Freshness Refresh**. A **Skill Freshness Notice** uses cautious wording such as detecting a skill-directory change, tells the model that current skill content supersedes assumptions formed from earlier turns, and can explicitly name a directory switch when that occurred.
-_Avoid_: user toast, public warning, silent refresh only
+An internal model-facing notice added on the next turn after a **Skill Freshness Refresh**. A **Skill Freshness Notice** uses cautious wording such as detecting a skill-directory change, tells the model that current skill content supersedes assumptions formed from earlier turns, and requires the model to re-read the current `SKILL.md` before relying on that skill. It references the skill path instead of inlining the skill body, can explicitly name a directory switch, and is not exposed to the Console stream or persisted into chat history.
+_Avoid_: user-visible message, persistent banner, historical chat message, silent refresh only
 
 **Confirmed Skill Association**:
 The point at which a skill becomes part of the session's durable dependency set because the runtime actually activated it, rather than merely suspecting it. Only a **Confirmed Skill Association** can add a skill to the **Session Associated Skill Set**.
@@ -235,6 +235,34 @@ _Avoid_: silent disable drift, missing-skill ignore case, stale effective skill
 **Aggregated Skill Freshness Notice**:
 One per-turn **Skill Freshness Notice** that combines all effective associated-skill changes detected for that turn. It lists affected skills item-by-item instead of emitting separate notices per skill.
 _Avoid_: per-skill notice spam, repeated freshness banners, fragmented model notice
+
+**System Runtime Diagnostic**:
+A periodic, Runtime Instance-scoped assessment of the Swe backend service's load, responsiveness, process resources, and storage capacity. It is broader than a liveness probe and does not execute an Agent Heartbeat.
+_Avoid_: self-check, health endpoint, Agent Heartbeat
+
+**Request Execution Load**:
+The current load and responsiveness of the backend request-serving runtime within one Runtime Instance, distinct from tenant or business-runtime usage.
+_Avoid_: Flask worker usage, ordinary HTTP throughput, request latency, tenant usage statistics, Agent Run count, LLM load
+
+**Runtime Instance**:
+One running Swe service container in a multi-instance deployment, independently from the business-facing instances used for user allocation.
+_Avoid_: business instance, tenant, Supervisor process
+
+**Diagnostic Run**:
+One System Runtime Diagnostic collection performed by a Runtime Instance.
+_Avoid_: latest-only snapshot, request-time probe, liveness response
+
+**Diagnostic Flow Record**:
+One append-only record containing the metrics collected by one Runtime Instance during one Diagnostic Run. It supports latest-state queries and historical trend analysis.
+_Avoid_: EAV diagnostic item, JSON payload, LONGTEXT payload, diagnostic run ID
+
+**Runtime Diagnostic Log**:
+A machine-readable event emitted by Swe to report Runtime Instance lifecycle or a Diagnostic Flow Record for asynchronous downstream persistence.
+_Avoid_: direct diagnostic database write, free-form diagnostic message, Kafka implementation in Swe
+
+**Diagnostic Lease**:
+A renewable period during which a Runtime Instance is considered present. Graceful deregistration ends it immediately; expiry makes an abnormally terminated Runtime Instance ineffective.
+_Avoid_: permanent active flag, shutdown-only invalidation
 
 ## Flagged Ambiguities
 
@@ -368,7 +396,7 @@ Resolved as **Skill Directory Revision**, not `SKILL.md`-only monitoring. Any tr
 Resolved as comparing **Skill Directory Freshness Token** values for this feature, not recomputing strict **Skill Directory Revision** values on every turn.
 
 **"Skill Freshness Token Scope"**:
-Resolved as the latest recursive `mtime` across the tracked skill directory tree, not just the root directory and `SKILL.md`.
+Resolved as a stable digest of each tracked file's relative path, `mtime_ns`, and size across the skill directory tree, not just the root directory and `SKILL.md`.
 
 **"Associated Skills To Monitor"**:
 Resolved as the session's **Session Associated Skill Set** only. Skills that the session never associated with are outside the monitoring scope.
@@ -377,7 +405,7 @@ Resolved as the session's **Session Associated Skill Set** only. Skills that the
 Resolved as persisting a **Session Skill Snapshot** in session state, not reconstructing it from tracing or other runtime records.
 
 **"Skill Update Handling"**:
-Resolved as **Skill Freshness Refresh** plus a model-only **Skill Freshness Notice**. The first version does not require a user-visible update message.
+Resolved as **Skill Freshness Refresh** plus a model-only **Skill Freshness Notice**. The notice is visible to the model for one turn, but is not exposed to the Console stream or persisted into chat history.
 
 **"When A Skill Becomes Associated"**:
 Resolved as **Confirmed Skill Association** only. Low-confidence inference without actual activation must not expand the **Session Associated Skill Set**.
@@ -411,6 +439,15 @@ Resolved as exposing absence for **File Read Truncation** as inheriting the hist
 
 **"Tool Output Controls Scope"**:
 Resolved as limited to the Source System Configuration page and runtime resolution for this change. The Agent configuration page keeps the existing historical tool-result compaction controls for now.
+
+**"System Self-Check"**:
+Resolved as **System Runtime Diagnostic**. The existing lightweight health endpoint remains a liveness probe, while the scheduled `HEARTBEAT.md` run remains an Agent Heartbeat.
+
+**"Flask Worker Usage"**:
+Resolved as **Request Execution Load**. Swe does not run Flask or a multi-worker web-server pool; the diagnostic reports the load and responsiveness of the single-worker Uvicorn/FastAPI backend instead of tenant-level workload statistics or Supervisor process state.
+
+**"Diagnostic Instance"**:
+Resolved as a **Runtime Instance**, meaning one running Swe service container. It is distinct from the business-facing instance records used for user allocation.
 
 ## Example Dialogue
 

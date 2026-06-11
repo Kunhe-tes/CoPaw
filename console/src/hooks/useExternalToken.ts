@@ -71,5 +71,5 @@ export function useExternalToken(): { isInitialized: boolean } {
  */
 export function useIsExternalTokenEnabled(): boolean {
   const config = getTokenConfig();
-  return !!config.systemCode && !!config.systemSecret && !!config.tokenApiUrl;
+  return !!config.systemCode && !!config.systemSecret;
 }
