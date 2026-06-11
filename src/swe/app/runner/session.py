@@ -7,10 +7,12 @@ This module wraps agentscope's SessionBase so that session_id and user_id
 are sanitized before being used as filenames.
 """
 
-import os
-import re
+import asyncio
 import json
 import logging
+import os
+import re
+import threading
 
 from typing import Union, Sequence
 
@@ -19,6 +21,11 @@ from agentscope.session import SessionBase
 
 logger = logging.getLogger(__name__)
 SESSION_SKILL_SNAPSHOT_STATE_KEY = "session_skill_snapshot"
+_SESSION_WRITE_LOCKS: dict[
+    tuple[asyncio.AbstractEventLoop, str],
+    asyncio.Lock,
+] = {}
+_SESSION_WRITE_LOCKS_GUARD = threading.Lock()
 
 
 # Characters forbidden in Windows filenames
@@ -36,11 +43,28 @@ def sanitize_filename(name: str) -> str:
     return _UNSAFE_FILENAME_RE.sub("--", name)
 
 
+def _get_session_write_lock(file_path: str) -> asyncio.Lock:
+    loop = asyncio.get_running_loop()
+    normalized_path = os.path.normcase(os.path.abspath(file_path))
+    lock_key = (loop, normalized_path)
+    with _SESSION_WRITE_LOCKS_GUARD:
+        lock = _SESSION_WRITE_LOCKS.get(lock_key)
+        if lock is None:
+            lock = asyncio.Lock()
+            _SESSION_WRITE_LOCKS[lock_key] = lock
+        return lock
+
+
+def _write_json_text(file_path: str, content: str) -> None:
+    with open(file_path, "w", encoding="utf-8") as file:
+        file.write(content)
+
+
 class SafeJSONSession(SessionBase):
     """SessionBase subclass with filename sanitization and async file I/O.
 
-    Overrides all file-reading/writing methods to use :mod:`aiofiles` so
-    that disk I/O does not block the event loop.
+    Uses :mod:`aiofiles` for reads and worker threads for writes so that
+    disk I/O does not block the event loop.
     """
 
     def __init__(
@@ -78,39 +102,39 @@ class SafeJSONSession(SessionBase):
     ) -> None:
         """Save state modules to a JSON file using async I/O."""
         session_save_path = self._get_save_path(session_id, user_id=user_id)
-        existing_state = {}
-        if os.path.exists(session_save_path):
-            async with aiofiles.open(
-                session_save_path,
-                "r",
-                encoding="utf-8",
-                errors="surrogatepass",
-            ) as f:
-                content = await f.read()
-                if content.strip():
-                    try:
-                        loaded_state = json.loads(content)
-                    except json.JSONDecodeError:
-                        logger.warning(
-                            "Failed to parse existing session state at %s; "
-                            "overwriting with current state.",
-                            session_save_path,
-                        )
-                    else:
-                        if isinstance(loaded_state, dict):
-                            existing_state = loaded_state
+        async with _get_session_write_lock(session_save_path):
+            existing_state = {}
+            if os.path.exists(session_save_path):
+                async with aiofiles.open(
+                    session_save_path,
+                    "r",
+                    encoding="utf-8",
+                    errors="surrogatepass",
+                ) as f:
+                    content = await f.read()
+                    if content.strip():
+                        try:
+                            loaded_state = json.loads(content)
+                        except json.JSONDecodeError:
+                            logger.warning(
+                                "Failed to parse existing session state at %s; "
+                                "overwriting with current state.",
+                                session_save_path,
+                            )
+                        else:
+                            if isinstance(loaded_state, dict):
+                                existing_state = loaded_state
 
-        state_dicts = {
-            name: state_module.state_dict()
-            for name, state_module in state_modules_mapping.items()
-        }
-        state_dicts = {**existing_state, **state_dicts}
-        with open(
-            session_save_path,
-            "w",
-            encoding="utf-8",
-        ) as f:
-            f.write(json.dumps(state_dicts, ensure_ascii=False))
+            state_dicts = {
+                name: state_module.state_dict()
+                for name, state_module in state_modules_mapping.items()
+            }
+            state_dicts = {**existing_state, **state_dicts}
+            await asyncio.to_thread(
+                _write_json_text,
+                session_save_path,
+                json.dumps(state_dicts, ensure_ascii=False),
+            )
 
         logger.info(
             "Saved session state to %s successfully.",
@@ -165,42 +189,41 @@ class SafeJSONSession(SessionBase):
         create_if_not_exist: bool = True,
     ) -> None:
         session_save_path = self._get_save_path(session_id, user_id=user_id)
+        async with _get_session_write_lock(session_save_path):
+            if os.path.exists(session_save_path):
+                async with aiofiles.open(
+                    session_save_path,
+                    "r",
+                    encoding="utf-8",
+                    errors="surrogatepass",
+                ) as f:
+                    content = await f.read()
+                    states = json.loads(content)
 
-        if os.path.exists(session_save_path):
-            async with aiofiles.open(
+            else:
+                if not create_if_not_exist:
+                    raise ValueError(
+                        f"Session file {session_save_path} does not exist.",
+                    )
+                states = {}
+
+            path = key.split(".") if isinstance(key, str) else list(key)
+            if not path:
+                raise ValueError("key path is empty")
+
+            cur = states
+            for k in path[:-1]:
+                if k not in cur or not isinstance(cur[k], dict):
+                    cur[k] = {}
+                cur = cur[k]
+
+            cur[path[-1]] = value
+
+            await asyncio.to_thread(
+                _write_json_text,
                 session_save_path,
-                "r",
-                encoding="utf-8",
-                errors="surrogatepass",
-            ) as f:
-                content = await f.read()
-                states = json.loads(content)
-
-        else:
-            if not create_if_not_exist:
-                raise ValueError(
-                    f"Session file {session_save_path} does not exist.",
-                )
-            states = {}
-
-        path = key.split(".") if isinstance(key, str) else list(key)
-        if not path:
-            raise ValueError("key path is empty")
-
-        cur = states
-        for k in path[:-1]:
-            if k not in cur or not isinstance(cur[k], dict):
-                cur[k] = {}
-            cur = cur[k]
-
-        cur[path[-1]] = value
-
-        with open(
-            session_save_path,
-            "w",
-            encoding="utf-8",
-        ) as f:
-            f.write(json.dumps(states, ensure_ascii=False))
+                json.dumps(states, ensure_ascii=False),
+            )
 
         logger.info(
             "Updated session state key '%s' in %s successfully.",
@@ -293,16 +316,11 @@ class SafeJSONSession(SessionBase):
         user_id: str = "",
     ) -> None:
         """Persist the top-level session skill snapshot."""
-        state = await self.get_session_state_dict(
+        await self.update_session_state(
             session_id=session_id,
+            key=SESSION_SKILL_SNAPSHOT_STATE_KEY,
+            value=snapshot,
             user_id=user_id,
-            allow_not_exist=True,
-        )
-        state[SESSION_SKILL_SNAPSHOT_STATE_KEY] = snapshot
-        await self.save_merged_state(
-            session_id=session_id,
-            user_id=user_id,
-            state=state,
         )
 
     async def save_merged_state(
@@ -324,12 +342,12 @@ class SafeJSONSession(SessionBase):
         if state is None:
             state = {}
         session_save_path = self._get_save_path(session_id, user_id=user_id)
-        async with aiofiles.open(
-            session_save_path,
-            "w",
-            encoding="utf-8",
-        ) as f:
-            await f.write(json.dumps(state, ensure_ascii=False))
+        async with _get_session_write_lock(session_save_path):
+            await asyncio.to_thread(
+                _write_json_text,
+                session_save_path,
+                json.dumps(state, ensure_ascii=False),
+            )
         logger.info(
             "Saved merged session state to %s (keys=%d)",
             session_save_path,
