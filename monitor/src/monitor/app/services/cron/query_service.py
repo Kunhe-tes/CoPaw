@@ -1709,6 +1709,7 @@ class QueryService:
         start_date: Optional[str] = None,
         end_date: Optional[str] = None,
         bbk_ids: Optional[str] = None,
+        source_id: Optional[str] = None,
     ) -> CronOverviewStatsResponse:
         """获取定时任务概览统计。
 
@@ -1716,6 +1717,7 @@ class QueryService:
             start_date: 开始日期 (YYYY-MM-DD格式字符串)
             end_date: 结束日期 (YYYY-MM-DD格式字符串)
             bbk_ids: 分行号筛选（逗号分隔）
+            source_id: 来源标识
 
         Returns:
             概览统计数据
@@ -1730,6 +1732,11 @@ class QueryService:
         # 构建 bbk 过滤条件
         bbk_filter_sql, bbk_filter_params = self._build_bbk_filter(bbk_ids)
 
+        # 构建 source 过滤条件
+        source_filter_sql, source_filter_params = self._build_source_filter(
+            source_id,
+        )
+
         # 1. 定时任务总数（不包含已删除）
         task_count_sql = f"""
             SELECT COUNT(*) AS count
@@ -1737,11 +1744,14 @@ class QueryService:
             WHERE deleted_at IS NULL
               AND status != 'deleted'
               {bbk_filter_sql.replace('j.bbk_id', 'bbk_id')}
+              {source_filter_sql.replace('j.source_id', 'source_id')}
         """
-        task_count_row = await db.fetch_one(
-            task_count_sql,
-            tuple(bbk_filter_params) if bbk_filter_params else None,
+        task_count_params = (
+            tuple(bbk_filter_params + source_filter_params)
+            if (bbk_filter_params or source_filter_params)
+            else None
         )
+        task_count_row = await db.fetch_one(task_count_sql, task_count_params)
         total_tasks = int(
             task_count_row.get("count", 0) if task_count_row else 0,
         )
@@ -1755,10 +1765,16 @@ class QueryService:
             WHERE deleted_at IS NULL
               AND status != 'deleted'
               {bbk_filter_sql.replace('j.bbk_id', 'bbk_id')}
+              {source_filter_sql.replace('j.source_id', 'source_id')}
         """
+        branch_tenant_params = (
+            tuple(bbk_filter_params + source_filter_params)
+            if (bbk_filter_params or source_filter_params)
+            else None
+        )
         branch_tenant_row = await db.fetch_one(
             branch_tenant_sql,
-            tuple(bbk_filter_params) if bbk_filter_params else None,
+            branch_tenant_params,
         )
         branch_count = int(
             (
@@ -1787,15 +1803,12 @@ class QueryService:
               AND j.deleted_at IS NULL
               AND j.status != 'deleted'
               {bbk_filter_sql}
+              {source_filter_sql}
         """
-        exec_row = await db.fetch_one(
-            exec_sql,
-            (
-                (start_time, end_time, *bbk_filter_params)
-                if bbk_filter_params
-                else (start_time, end_time)
-            ),
+        exec_params = (
+            [start_time, end_time] + bbk_filter_params + source_filter_params
         )
+        exec_row = await db.fetch_one(exec_sql, tuple(exec_params))
         total_executions = int(
             exec_row.get("total_executions", 0) if exec_row else 0,
         )
@@ -1814,15 +1827,12 @@ class QueryService:
               AND j.deleted_at IS NULL
               AND j.status != 'deleted'
               {bbk_filter_sql}
+              {source_filter_sql}
         """
-        read_row = await db.fetch_one(
-            read_tasks_sql,
-            (
-                (start_time, end_time, *bbk_filter_params)
-                if bbk_filter_params
-                else (start_time, end_time)
-            ),
+        read_params = (
+            [start_time, end_time] + bbk_filter_params + source_filter_params
         )
+        read_row = await db.fetch_one(read_tasks_sql, tuple(read_params))
         read_tasks = int(read_row.get("read_tasks", 0) if read_row else 0)
 
         # 计算比率
@@ -1860,6 +1870,7 @@ class QueryService:
         start_date: Optional[str] = None,
         end_date: Optional[str] = None,
         bbk_ids: Optional[str] = None,
+        source_id: Optional[str] = None,
     ) -> CronBranchBehaviorResponse:
         """获取分行层行为分析。
 
@@ -1867,6 +1878,7 @@ class QueryService:
             start_date: 开始日期 (YYYY-MM-DD格式字符串)
             end_date: 结束日期 (YYYY-MM-DD格式字符串)
             bbk_ids: 分行号筛选（逗号分隔）
+            source_id: 来源标识
 
         Returns:
             分行行为分析数据
@@ -1881,6 +1893,11 @@ class QueryService:
         # 构建 bbk 过滤条件
         bbk_filter_sql, bbk_filter_params = self._build_bbk_filter(bbk_ids)
 
+        # 构建 source 过滤条件
+        source_filter_sql, source_filter_params = self._build_source_filter(
+            source_id,
+        )
+
         # 获取时间范围内的分行列表（从执行表获取，确保只统计有执行记录的分行）
         branch_list_sql = f"""
             SELECT DISTINCT j.bbk_id
@@ -1892,15 +1909,12 @@ class QueryService:
               AND j.bbk_id IS NOT NULL
               AND j.bbk_id != ''
               {bbk_filter_sql}
+              {source_filter_sql}
         """
-        branch_rows = await db.fetch_all(
-            branch_list_sql,
-            (
-                (start_time, end_time, *bbk_filter_params)
-                if bbk_filter_params
-                else (start_time, end_time)
-            ),
+        branch_params = (
+            [start_time, end_time] + bbk_filter_params + source_filter_params
         )
+        branch_rows = await db.fetch_all(branch_list_sql, tuple(branch_params))
         branch_ids = [
             row.get("bbk_id") for row in branch_rows if row.get("bbk_id")
         ]
@@ -1910,20 +1924,27 @@ class QueryService:
             bbk_name = get_bbk_name_by_id(bbk_id) or bbk_id
 
             # 1. 该分行任务总数（不包含已删除）
-            task_count_sql = """
+            source_where = " AND source_id = %s" if source_id else ""
+            task_count_sql = f"""
                 SELECT COUNT(*) AS count
                 FROM swe_cron_jobs
                 WHERE deleted_at IS NULL
                   AND status != 'deleted'
                   AND bbk_id = %s
+                  {source_where}
             """
-            task_count_row = await db.fetch_one(task_count_sql, (bbk_id,))
+            task_count_params = (bbk_id, source_id) if source_id else (bbk_id,)
+            task_count_row = await db.fetch_one(
+                task_count_sql,
+                task_count_params,
+            )
             total_tasks = int(
                 task_count_row.get("count", 0) if task_count_row else 0,
             )
 
             # 2. 已读任务数（按job_id去重）
-            read_tasks_sql = """
+            source_join_where = " AND j.source_id = %s" if source_id else ""
+            read_tasks_sql = f"""
                 SELECT COUNT(DISTINCT e.job_id) AS read_tasks
                 FROM swe_cron_executions e
                 LEFT JOIN swe_cron_jobs j ON e.job_id = j.id
@@ -1932,15 +1953,17 @@ class QueryService:
                   AND j.deleted_at IS NULL
                   AND j.status != 'deleted'
                   AND j.bbk_id = %s
+                  {source_join_where}
             """
-            read_row = await db.fetch_one(
-                read_tasks_sql,
-                (start_time, end_time, bbk_id),
-            )
+            read_params = [start_time, end_time, bbk_id]
+            if source_id:
+                read_params.append(source_id)
+            read_row = await db.fetch_one(read_tasks_sql, tuple(read_params))
             read_tasks = int(read_row.get("read_tasks", 0) if read_row else 0)
 
             # 3. 点击数统计（从 swe_html_preview_click_events）
-            click_sql = """
+            source_click_where = " AND source_id = %s" if source_id else ""
+            click_sql = f"""
                 SELECT
                     button_type,
                     COUNT(DISTINCT cron_task_id) AS click_tasks
@@ -1948,12 +1971,13 @@ class QueryService:
                 WHERE clicked_at >= %s AND clicked_at <= %s
                   AND bbk_id = %s
                   AND cron_task_id IS NOT NULL
+                  {source_click_where}
                 GROUP BY button_type
             """
-            click_rows = await db.fetch_all(
-                click_sql,
-                (start_time, end_time, bbk_id),
-            )
+            click_params = [start_time, end_time, bbk_id]
+            if source_id:
+                click_params.append(source_id)
+            click_rows = await db.fetch_all(click_sql, tuple(click_params))
 
             plan_click_tasks = 0
             insight_click_tasks = 0
@@ -2015,6 +2039,7 @@ class QueryService:
         start_date: Optional[str] = None,
         end_date: Optional[str] = None,
         bbk_ids: Optional[str] = None,
+        source_id: Optional[str] = None,
     ) -> CronBranchErrorResponse:
         """获取分行层异常执行数据。
 
@@ -2022,6 +2047,7 @@ class QueryService:
             start_date: 开始日期 (YYYY-MM-DD格式字符串)
             end_date: 结束日期 (YYYY-MM-DD格式字符串)
             bbk_ids: 分行号筛选（逗号分隔）
+            source_id: 来源标识
 
         Returns:
             分行异常执行数据
@@ -2036,6 +2062,11 @@ class QueryService:
         # 构建 bbk 过滤条件
         bbk_filter_sql, bbk_filter_params = self._build_bbk_filter(bbk_ids)
 
+        # 构建 source 过滤条件
+        source_filter_sql, source_filter_params = self._build_source_filter(
+            source_id,
+        )
+
         # 1. 受影响的分行数量和客户经理数量
         affected_sql = f"""
             SELECT
@@ -2048,15 +2079,12 @@ class QueryService:
               AND j.deleted_at IS NULL
               AND j.status != 'deleted'
               {bbk_filter_sql}
+              {source_filter_sql}
         """
-        affected_row = await db.fetch_one(
-            affected_sql,
-            (
-                (start_time, end_time, *bbk_filter_params)
-                if bbk_filter_params
-                else (start_time, end_time)
-            ),
+        affected_params = (
+            [start_time, end_time] + bbk_filter_params + source_filter_params
         )
+        affected_row = await db.fetch_one(affected_sql, tuple(affected_params))
         affected_branch_count = int(
             (
                 affected_row.get("affected_branch_count", 0)
@@ -2079,6 +2107,8 @@ class QueryService:
             end_time,
             bbk_filter_sql,
             bbk_filter_params,
+            source_filter_sql,
+            source_filter_params,
         )
 
         # 3. 分行异常排行（按报错次数由高到低）
@@ -2094,16 +2124,16 @@ class QueryService:
               AND j.deleted_at IS NULL
               AND j.status != 'deleted'
               {bbk_filter_sql}
+              {source_filter_sql}
             GROUP BY j.bbk_id
             ORDER BY branch_error_count DESC
         """
+        branch_rank_params = (
+            [start_time, end_time] + bbk_filter_params + source_filter_params
+        )
         branch_rank_rows = await db.fetch_all(
             branch_rank_sql,
-            (
-                (start_time, end_time, *bbk_filter_params)
-                if bbk_filter_params
-                else (start_time, end_time)
-            ),
+            tuple(branch_rank_params),
         )
 
         branch_error_rank = []
@@ -2148,8 +2178,13 @@ class QueryService:
         end_time: datetime,
         bbk_filter_sql: str,
         bbk_filter_params: List,
+        source_filter_sql: str = "",
+        source_filter_params: List = None,
     ) -> List[CronErrorReasonItem]:
         """获取报错原因分布。"""
+        if source_filter_params is None:
+            source_filter_params = []
+
         rows = await db.fetch_all(
             f"""
             SELECT
@@ -2172,14 +2207,15 @@ class QueryService:
               AND j.deleted_at IS NULL
               AND j.status != 'deleted'
               {bbk_filter_sql}
+              {source_filter_sql}
             GROUP BY 1
             ORDER BY count DESC, reason ASC
             LIMIT 10
             """,
-            (
-                (start_time, end_time, *bbk_filter_params)
-                if bbk_filter_params
-                else (start_time, end_time)
+            tuple(
+                [start_time, end_time]
+                + bbk_filter_params
+                + source_filter_params,
             ),
         )
 
@@ -2295,6 +2331,15 @@ class QueryService:
             ids.append("V00")
         placeholders = ", ".join(["%s"] * len(ids))
         return f" AND j.bbk_id IN ({placeholders})", ids
+
+    def _build_source_filter(
+        self,
+        source_id: Optional[str],
+    ) -> Tuple[str, List]:
+        """构建 source 过滤条件。"""
+        if not source_id:
+            return "", []
+        return " AND j.source_id = %s", [source_id]
 
 
 # Global query service instance

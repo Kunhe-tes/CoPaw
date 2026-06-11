@@ -456,10 +456,12 @@ async def get_overview_stats(
     Returns:
         概览统计数据
     """
+    actual_source_id = _get_source_id_from_header(request)
     return await service.get_overview_stats(
         start_date=start_date,
         end_date=end_date,
         bbk_ids=bbk_ids,
+        source_id=actual_source_id,
     )
 
 
@@ -493,10 +495,12 @@ async def get_branch_behavior(
     Returns:
         分行行为分析数据
     """
+    actual_source_id = _get_source_id_from_header(request)
     return await service.get_branch_behavior(
         start_date=start_date,
         end_date=end_date,
         bbk_ids=bbk_ids,
+        source_id=actual_source_id,
     )
 
 
@@ -530,8 +534,10 @@ async def get_branch_error(
     Returns:
         分行异常执行数据
     """
+    actual_source_id = _get_source_id_from_header(request)
     return await service.get_branch_error(
         start_date=start_date,
         end_date=end_date,
         bbk_ids=bbk_ids,
+        source_id=actual_source_id,
     )
