@@ -591,8 +591,8 @@ function buildTrendAxisTicks(axisMax: number): TrendAxisTick[] {
 export function buildTrendSvgData(trendData: TrendDatum[]) {
   const width = 428;
   const height = 244;
-  const chartLeft = 6;
-  const chartRight = 6;
+  const chartLeft = 20;
+  const chartRight = 20;
   const chartTop = 10;
   const chartBottom = 24;
   const chartWidth = width - chartLeft - chartRight;
@@ -1298,6 +1298,8 @@ export default function BusinessOverviewPage() {
               <svg
                 viewBox={`0 0 ${trendSvg.width} ${trendSvg.height}`}
                 className={styles.trendSvg}
+                preserveAspectRatio="none"
+                preserveAspectRatio="none"
               >
                 <defs>
                   <linearGradient
