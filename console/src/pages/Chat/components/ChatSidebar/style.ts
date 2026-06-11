@@ -18,12 +18,12 @@ export default createGlobalStyle`
 /* ─── Collapse toggle button ─── */
 .chat-sidebar-collapse-toggle {
   position: absolute;
-  right: -13px;
+  right: -11px;
   top: 50%;
   transform: translateY(-50%);
   z-index: 50;
-  width: 26px;
-  height: 26px;
+  width: 22px;
+  height: 22px;
   border-radius: 50%;
   border: 1px solid rgba(0, 0, 0, 0.08);
   background: #FFFFFF;
@@ -62,8 +62,7 @@ export default createGlobalStyle`
 
 .chat-sidebar-content {
   flex: 1;
-  overflow-y: auto;
-  padding-top: 12px;
+  // overflow-y: auto;
 
   &::-webkit-scrollbar {
     width: 4px;
@@ -87,7 +86,7 @@ export default createGlobalStyle`
 }
 
 .chat-sidebar-content-record-list {
-  height: calc(100vh - 143px);
+  height: calc(100vh - 139px);
   overflow: auto;
   scrollbar-width: thin;
   scrollbar-color: rgba(0, 0, 0, 0.12) transparent;
@@ -116,8 +115,8 @@ export default createGlobalStyle`
   }
 
   &-toggle {
-    width: 16px;
-    height: 16px;
+    width: 10px;
+    height: 10px;
     display: flex;
     align-items: center;
     justify-content: center;
@@ -161,7 +160,9 @@ export default createGlobalStyle`
 
 /* New topic button */
 .chat-sidebar-new-topic {
-  padding: 12px 20px;
+  padding: 24px 20px;
+  display: flex;
+  justify-content: center;
 }
 
 .chat-sidebar-new-topic-btn {
