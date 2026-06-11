@@ -242,6 +242,20 @@ export function JobDrawer({
           />
         </Form.Item>
 
+        <Form.Item label="Notification delay">
+          <div className={styles.inlineFieldGroup}>
+            <Form.Item name="notificationDelayValue" noStyle>
+              <InputNumber min={0} style={{ flex: 1 }} placeholder="0" />
+            </Form.Item>
+            <Form.Item name="notificationDelayUnit" noStyle>
+              <Select style={{ width: 140 }}>
+                <Select.Option value="minutes">minutes</Select.Option>
+                <Select.Option value="hours">hours</Select.Option>
+              </Select>
+            </Form.Item>
+          </div>
+        </Form.Item>
+
         <Form.Item
           name="task_type"
           label={t("cronJobs.taskType")}

@@ -233,7 +233,7 @@ function CronJobsPage() {
           dataSource={jobs}
           loading={loading}
           rowKey="id"
-          scroll={{ x: 2840 }}
+          scroll={{ x: 3010 }}
           pagination={{
             pageSize: 10,
           }}

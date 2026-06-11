@@ -8,6 +8,7 @@ import { parseCron } from "./parseCron";
 import { copyToClipboard } from "../../../../utils/clipboard";
 import type { ExecutionModelOption } from "@/hooks/useExecutionModelOptions";
 import { formatExecutionModelLabel } from "@/hooks/useExecutionModelOptions";
+import { formatNotificationDelay } from "@/utils/cron";
 import styles from "../index.module.less";
 
 type CronJob = CronJobSpecOutput;
@@ -170,6 +171,13 @@ export const createColumns = (
       dataIndex: ["schedule", "timezone"],
       key: "timezone",
       width: 170,
+    },
+    {
+      title: "NotificationDelay",
+      key: "notification_delay",
+      width: 170,
+      render: (_: unknown, record: CronJob) =>
+        formatNotificationDelay(record.meta?.notification_delay_minutes),
     },
     {
       title: "TaskType",
