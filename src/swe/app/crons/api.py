@@ -485,11 +485,15 @@ def _resolve_broadcast_schedule(
 async def _get_broadcast_target_cron_manager(
     context: _BroadcastContext,
     tenant_id: str,
+    tenant_name: str | None = None,
+    bbk_id: str | None = None,
 ) -> tuple[CronManager, str | None]:
     if context.tenant_workspace_pool is not None:
         await context.tenant_workspace_pool.ensure_bootstrap(
             tenant_id,
             source_id=context.source_id,
+            tenant_name=tenant_name,
+            bbk_id=bbk_id,
         )
     runtime_tenant_id = resolve_runtime_tenant_id(
         tenant_id,
@@ -534,6 +538,8 @@ async def _create_broadcast_child_job(
     target_cron_manager: CronManager,
     runtime_tenant_id: str | None,
     schedule: _BroadcastSchedule,
+    target_tenant_name: str | None,
+    target_bbk_id: str | None,
 ) -> CronBroadcastTenantResult:
     target_job_id = str(uuid.uuid4())
     model_slot, warning, model_slot_fallback_reason = (
@@ -542,18 +548,6 @@ async def _create_broadcast_child_job(
             context.source_job,
         )
     )
-    target_identity = context.target_identity_by_tenant.get(tenant_id, {})
-    target_tenant_name = _optional_text(target_identity.get("tenant_name"))
-    target_bbk_id = _optional_text(target_identity.get("bbk_id"))
-    if not target_tenant_name or not target_bbk_id:
-        fallback_name, fallback_bbk_id = (
-            await _resolve_broadcast_target_identity(
-                tenant_id,
-                context.source_id,
-            )
-        )
-        target_tenant_name = target_tenant_name or fallback_name
-        target_bbk_id = target_bbk_id or fallback_bbk_id
     target_job = _build_broadcast_job(
         context.source_job,
         job_id=target_job_id,
@@ -566,8 +560,8 @@ async def _create_broadcast_child_job(
         offset_minutes=schedule.offset_minutes,
         model_slot=model_slot,
         model_slot_fallback_reason=model_slot_fallback_reason,
-        tenant_name=target_identity.get("tenant_name"),
-        bbk_id=target_identity.get("bbk_id"),
+        tenant_name=target_tenant_name,
+        bbk_id=target_bbk_id,
     )
     await target_cron_manager.create_or_replace_job(target_job)
     saved = await target_cron_manager.get_job(target_job_id)
@@ -597,9 +591,26 @@ async def _broadcast_to_tenant(
         context.timezone_name,
         offset,
     )
+    target_identity = context.target_identity_by_tenant.get(tenant_id, {})
+    target_tenant_name = _optional_text(target_identity.get("tenant_name"))
+    target_bbk_id = _optional_text(target_identity.get("bbk_id"))
+    if not target_tenant_name or not target_bbk_id:
+        fallback_name, fallback_bbk_id = (
+            await _resolve_broadcast_target_identity(
+                tenant_id,
+                context.source_id,
+            )
+        )
+        target_tenant_name = target_tenant_name or fallback_name
+        target_bbk_id = target_bbk_id or fallback_bbk_id
     try:
         target_cron_manager, runtime_tenant_id = (
-            await _get_broadcast_target_cron_manager(context, tenant_id)
+            await _get_broadcast_target_cron_manager(
+                context,
+                tenant_id,
+                tenant_name=target_tenant_name,
+                bbk_id=target_bbk_id,
+            )
         )
         existing_child_job = await _find_existing_broadcast_child_job(
             target_cron_manager,
@@ -617,6 +628,8 @@ async def _broadcast_to_tenant(
             target_cron_manager,
             runtime_tenant_id,
             schedule,
+            target_tenant_name,
+            target_bbk_id,
         )
     except Exception as exc:  # pylint: disable=broad-except
         return CronBroadcastTenantResult(
