@@ -998,13 +998,6 @@ export function ChannelDrawer({
             >
               <Input.Password />
             </Form.Item>
-            <Form.Item
-              name="session_end_push_enabled"
-              label={t("channels.sessionEndPushEnabled")}
-              valuePropName="checked"
-            >
-              <Switch />
-            </Form.Item>
           </>
         );
 
@@ -1163,6 +1156,13 @@ export function ChannelDrawer({
               >
                 <Switch />
               </Form.Item>
+              <Form.Item
+              name="session_end_push_enabled"
+              label={t("channels.sessionEndPushEnabled")}
+              valuePropName="checked"
+            >
+              <Switch />
+            </Form.Item>
             </>
           )}
 
