@@ -207,6 +207,49 @@ export default createGlobalStyle`
     color: ${DESIGN_TOKENS.colorTextMuted};
   }
 
+  &-paused-group {
+    margin-top: 6px;
+    padding-top: 6px;
+    border-top: 1px solid rgba(17, 20, 45, 0.06);
+  }
+
+  &-paused-toggle {
+    width: 100%;
+    height: 36px;
+    padding: 0 10px;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    border: 0;
+    border-radius: 6px;
+    background: transparent;
+    color: ${DESIGN_TOKENS.colorTextSecondary};
+    font-size: 13px;
+    line-height: 20px;
+    cursor: pointer;
+    transition: background-color 0.15s ease;
+
+    &:hover {
+      background: rgba(55, 105, 252, 0.04);
+    }
+
+    &:focus-visible {
+      outline: 2px solid rgba(55, 105, 252, 0.32);
+      outline-offset: 1px;
+    }
+  }
+
+  &-paused-items {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    margin-top: 4px;
+
+    &[hidden] {
+      display: none;
+    }
+  }
+
   &-empty {
     padding: 16px 0;
     text-align: center;
@@ -226,5 +269,20 @@ export default createGlobalStyle`
 
 .dark-mode .chat-task-list-item--selected::before {
   background-color: #5B8AFF;
+}
+
+.dark-mode .chat-task-list-paused-group {
+  border-top-color: rgba(255, 255, 255, 0.08);
+}
+
+.dark-mode .chat-task-list-paused-toggle:hover {
+  background: rgba(255, 255, 255, 0.06);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .chat-task-list-toggle,
+  .chat-task-list-paused-toggle {
+    transition: none;
+  }
 }
 `;

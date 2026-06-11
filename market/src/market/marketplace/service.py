@@ -363,16 +363,102 @@ def _extract_version_from_frontmatter(md_content: str) -> str:
             key = key.strip().lower()
             val = val.strip()
             if key == "version" and val:
-                # 移除引号（双引号或单引号）
-                if val.startswith('"') and val.endswith('"'):
-                    val = val[1:-1]
-                elif val.startswith("'") and val.endswith("'"):
-                    val = val[1:-1]
-                # 移除 v 前缀（如 v1.0.0）
-                if val.lower().startswith("v"):
-                    val = val[1:]
                 return val
     return ""
+
+
+def _upsert_skill_item(
+    items: list[MarketItem],
+    existing: MarketItem | None,
+    req: PublishSkillRequest,
+) -> MarketItem:
+    """更新已有技能条目或创建新条目，返回更新/创建后的 item。"""
+    now = datetime.now(timezone.utc).isoformat()
+    if existing is not None:
+        version = _bump_patch(existing.version)
+        existing.version = version
+        existing.description = req.description
+        existing.creator_id = req.creator_id
+        existing.creator_name = req.creator_name
+        existing.category_id = req.category_id
+        existing.bbk_ids = req.bbk_ids
+        # 重新发布已下架技能时，更新 created_at 为当前时间
+        if existing.status == "inactive":
+            existing.created_at = now
+        existing.status = "active"
+        existing.updated_at = now
+        return existing
+
+    item = MarketItem(
+        item_id=str(uuid.uuid4()),
+        item_type="skill",
+        name=req.name,
+        description=req.description,
+        version="1.0.0",
+        creator_id=req.creator_id,
+        creator_name=req.creator_name,
+        category_id=req.category_id,
+        bbk_ids=req.bbk_ids,
+        status="active",
+        created_at=now,
+        updated_at=now,
+    )
+    items.append(item)
+    return item
+
+
+def _copy_skill_files(
+    req: PublishSkillRequest,
+    skill_dir: Path,
+    swe_root: Path,
+    source_id: str,
+) -> None:
+    """将技能文件复制到市场目录。"""
+    if req.skill_name:
+        src_skill_dir = (
+            get_user_skills_dir(
+                swe_root,
+                req.creator_id,
+                req.agent_id,
+                source_id,
+            )
+            / req.skill_name
+        )
+        if src_skill_dir.exists() and src_skill_dir.is_dir():
+            # 删除旧目录，复制整个目录（保持与用户工作区一致）
+            if skill_dir.exists():
+                shutil.rmtree(skill_dir)
+            shutil.copytree(src_skill_dir, skill_dir)
+            # 删除复制过来的 skill.json（不再需要）
+            skill_json_path = skill_dir / "skill.json"
+            if skill_json_path.exists():
+                try:
+                    skill_json_path.unlink()
+                except OSError:
+                    pass
+            logger.info(
+                "Copied entire skill directory from %s to %s",
+                src_skill_dir,
+                skill_dir,
+            )
+        else:
+            # 源目录不存在，只写入 SKILL.md
+            logger.warning(
+                "Source skill directory %s not found, falling back to SKILL.md only",
+                src_skill_dir,
+            )
+            if req.skill_md:
+                (skill_dir / "SKILL.md").write_text(
+                    req.skill_md,
+                    encoding="utf-8",
+                )
+    else:
+        # 未提供 skill_name，只写入 SKILL.md
+        if req.skill_md:
+            (skill_dir / "SKILL.md").write_text(
+                req.skill_md,
+                encoding="utf-8",
+            )
 
 
 def _build_skill_metadata_for_manifest(
@@ -738,7 +824,7 @@ class MarketplaceService:
             )
         return results
 
-    async def publish_skill(  # pylint: disable=too-many-statements
+    async def publish_skill(
         self,
         source_id: str,
         req: PublishSkillRequest,
@@ -748,8 +834,6 @@ class MarketplaceService:
         如果请求中包含 skill_name，则从用户工作区复制整个技能目录到市场。
         否则使用 skill_json 和 skill_md 字段创建目录。
         """
-        import shutil
-
         items = load_index(self.marketplace_root, source_id)
         existing = next((i for i in items if i.name == req.name), None)
 
@@ -763,48 +847,7 @@ class MarketplaceService:
                 existing_version=existing.version,
             )
 
-        now = datetime.now(timezone.utc).isoformat()
-
-        # 提取 SKILL.md 中的版本号（如果有）
-        skill_md_version = ""
-        if req.skill_md:
-            skill_md_version = _extract_version_from_frontmatter(req.skill_md)
-
-        if existing is not None:
-            # 版本策略：SKILL.md 有版本则使用，否则自动递增
-            version = (
-                skill_md_version
-                if skill_md_version
-                else _bump_patch(existing.version)
-            )
-            existing.version = version
-            existing.description = req.description
-            existing.creator_id = req.creator_id
-            existing.creator_name = req.creator_name
-            existing.category_id = req.category_id
-            existing.bbk_ids = req.bbk_ids
-            # 重新发布已下架技能时，更新 created_at 为当前时间
-            if existing.status == "inactive":
-                existing.created_at = now
-            existing.status = "active"
-            existing.updated_at = now
-            item = existing
-        else:
-            item = MarketItem(
-                item_id=str(uuid.uuid4()),
-                item_type="skill",
-                name=req.name,
-                description=req.description,
-                version=skill_md_version or "1.0.0",
-                creator_id=req.creator_id,
-                creator_name=req.creator_name,
-                category_id=req.category_id,
-                bbk_ids=req.bbk_ids,
-                status="active",
-                created_at=now,
-                updated_at=now,
-            )
-            items.append(item)
+        item = _upsert_skill_item(items, existing, req)
 
         skill_dir = get_skill_dir(
             self.marketplace_root,
@@ -813,54 +856,21 @@ class MarketplaceService:
         )
         skill_dir.mkdir(parents=True, exist_ok=True)
 
-        # 如果提供了 skill_name，从用户工作区复制整个目录
-        if req.skill_name:
-            src_skill_dir = (
-                get_user_skills_dir(
-                    self.swe_root,
-                    req.creator_id,
-                    req.agent_id,
-                    source_id,
-                )
-                / req.skill_name
-            )
-            if src_skill_dir.exists() and src_skill_dir.is_dir():
-                # 删除旧目录，复制整个目录（保持与用户工作区一致）
-                if skill_dir.exists():
-                    shutil.rmtree(skill_dir)
-                shutil.copytree(src_skill_dir, skill_dir)
-                # 删除复制过来的 skill.json（不再需要）
-                skill_json_path = skill_dir / "skill.json"
-                if skill_json_path.exists():
-                    try:
-                        skill_json_path.unlink()
-                    except OSError:
-                        pass
-                logger.info(
-                    "Copied entire skill directory from %s to %s",
-                    src_skill_dir,
-                    skill_dir,
-                )
-            else:
-                # 源目录不存在，只写入 SKILL.md
-                logger.warning(
-                    "Source skill directory %s not found, falling back to SKILL.md only",
-                    src_skill_dir,
-                )
-                if req.skill_md:
-                    (skill_dir / "SKILL.md").write_text(
-                        req.skill_md,
-                        encoding="utf-8",
-                    )
-        else:
-            # 未提供 skill_name，只写入 SKILL.md
-            if req.skill_md:
-                (skill_dir / "SKILL.md").write_text(
-                    req.skill_md,
-                    encoding="utf-8",
-                )
+        _copy_skill_files(req, skill_dir, self.swe_root, source_id)
 
         save_index(self.marketplace_root, source_id, items)
+
+        # 尝试从 SKILL.md 提取版本号更新到市场条目
+        skill_md_path = skill_dir / "SKILL.md"
+        if skill_md_path.exists():
+            try:
+                md_content = skill_md_path.read_text(encoding="utf-8")
+                md_version = _extract_version_from_frontmatter(md_content)
+                if md_version:
+                    item.version = md_version
+                    save_index(self.marketplace_root, source_id, items)
+            except OSError:
+                pass
 
         # 创建版本快照
         version_svc = SkillVersionService(self.marketplace_root)
@@ -869,9 +879,8 @@ class MarketplaceService:
                 source_id=source_id,
                 item_id=item.item_id,
                 skill_dir=skill_dir,
-                description="",  # 去掉重复的版本号信息，用户可通过标题查看版本
-                creator=req.creator_id,
-                creator_name=req.creator_name,
+                description=f"上架版本 {item.version}",
+                creator=req.creator_name,
                 current_market_version=item.version,
             )
         except Exception as e:

@@ -1,4 +1,4 @@
-import React, { useEffect, useRef, useCallback } from "react";
+import React, { useEffect, useRef, useCallback, useId, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import type { CronJobSpecOutput } from "@/api/types";
 import type { IAgentScopeRuntimeWebUISession } from "@/components/agentscope-chat";
@@ -9,6 +9,7 @@ import {
   getTaskNextRunText,
   getTaskNextRunTooltipTimes,
   getTaskSidebarMeta,
+  partitionTasksByPauseState,
   TASK_COMPLETED_STATUS_TEXT,
 } from "../../../taskJobs";
 import { formatListTime } from "../../../listTimeFormat";
@@ -26,6 +27,7 @@ export interface ExpandablePanelProps {
   type: "tasks" | "history";
   onClose: () => void;
   tasks: CronJobSpecOutput[];
+  selectedTaskId?: string;
   sessions: IAgentScopeRuntimeWebUISession[];
   onTaskClick: (task: CronJobSpecOutput) => void;
   onTaskPause?: (task: CronJobSpecOutput) => void;
@@ -45,6 +47,7 @@ export default function ExpandablePanel({
   type,
   onClose,
   tasks,
+  selectedTaskId,
   sessions,
   onTaskClick,
   onTaskPause,
@@ -103,6 +106,7 @@ export default function ExpandablePanel({
         {type === "tasks" ? (
           <TasksContent
             tasks={tasks}
+            selectedTaskId={selectedTaskId}
             onTaskClick={onTaskClick}
             onTaskPause={onTaskPause}
             onTaskRun={onTaskRun}
@@ -127,6 +131,7 @@ export default function ExpandablePanel({
 
 function TasksContent({
   tasks,
+  selectedTaskId,
   onTaskClick,
   onTaskPause,
   onTaskRun,
@@ -134,12 +139,124 @@ function TasksContent({
   onTaskDelete,
 }: {
   tasks: CronJobSpecOutput[];
+  selectedTaskId?: string;
   onTaskClick: (task: CronJobSpecOutput) => void;
   onTaskPause?: (task: CronJobSpecOutput) => void;
   onTaskRun?: (task: CronJobSpecOutput) => void;
   onTaskResume?: (task: CronJobSpecOutput) => void;
   onTaskDelete?: (task: CronJobSpecOutput) => void;
 }) {
+  const [pausedCollapsed, setPausedCollapsed] = useState(true);
+  const pausedRegionId = useId();
+  const { runnableTasks, pausedTasks } = partitionTasksByPauseState(tasks);
+  const selectedTaskIsPaused = pausedTasks.some(
+    (task) => task.id === selectedTaskId,
+  );
+
+  useEffect(() => {
+    if (selectedTaskIsPaused) {
+      setPausedCollapsed(false);
+    }
+  }, [selectedTaskId, selectedTaskIsPaused]);
+
+  const renderTask = (task: CronJobSpecOutput) => {
+    const sidebarMeta = getTaskSidebarMeta(task);
+    const nextRunText = getTaskNextRunText(task);
+    const nextRunTooltipTimes = getTaskNextRunTooltipTimes(task);
+
+    return (
+      <div
+        key={task.id}
+        className={`expandable-panel-task-card${
+          task.id === selectedTaskId
+            ? " expandable-panel-task-card--selected"
+            : ""
+        }${
+          sidebarMeta.state !== "active" && sidebarMeta.state !== "running"
+            ? " expandable-panel-task-card--paused"
+            : ""
+        }${
+          sidebarMeta.state === "auto-paused"
+            ? " expandable-panel-task-card--auto-paused"
+            : ""
+        }${
+          sidebarMeta.state === "running"
+            ? " expandable-panel-task-card--running"
+            : ""
+        }`}
+        onClick={() => onTaskClick(task)}
+        role="button"
+        tabIndex={0}
+      >
+        <div className="expandable-panel-task-title-row">
+          <span className="expandable-panel-task-title">
+            {task.name || task.id}
+          </span>
+          {(sidebarMeta.unreadCount > 0 ||
+            sidebarMeta.canPause ||
+            sidebarMeta.canRun ||
+            sidebarMeta.canResume ||
+            sidebarMeta.canDelete) && (
+            <div className="expandable-panel-task-trailing">
+              {sidebarMeta.unreadCount > 0 && (
+                <span className="expandable-panel-task-badge">
+                  {sidebarMeta.unreadCount > 99
+                    ? "99+"
+                    : sidebarMeta.unreadCount}
+                </span>
+              )}
+              {(sidebarMeta.canPause ||
+                sidebarMeta.canRun ||
+                sidebarMeta.canResume ||
+                sidebarMeta.canDelete) && (
+                <div className="expandable-panel-task-actions">
+                  <TaskActionMenu
+                    task={task}
+                    sidebarMeta={sidebarMeta}
+                    classNamePrefix="expandable-panel-task"
+                    onTaskPause={onTaskPause}
+                    onTaskRun={onTaskRun}
+                    onTaskResume={onTaskResume}
+                    onTaskDelete={onTaskDelete}
+                  />
+                </div>
+              )}
+            </div>
+          )}
+        </div>
+        {sidebarMeta.state !== "active" && sidebarMeta.state !== "running" && (
+          <div
+            className={`expandable-panel-task-status ${
+              sidebarMeta.state === "auto-paused"
+                ? "expandable-panel-task-status--auto"
+                : "expandable-panel-task-status--manual"
+            }`}
+          >
+            {sidebarMeta.state === "auto-paused"
+              ? `已自动暂停 · 连续 ${sidebarMeta.unreadCount} 次未读`
+              : "已手动暂停"}
+          </div>
+        )}
+        {(task.task?.latest_scheduled_preview ||
+          task.task?.last_scheduled_run_at) && (
+          <div className="expandable-panel-task-subtitle">
+            {task.task?.last_scheduled_run_at && (
+              <span className="expandable-panel-task-time">
+                {formatListTime(task.task.last_scheduled_run_at)}
+              </span>
+            )}
+            {TASK_COMPLETED_STATUS_TEXT}
+          </div>
+        )}
+        {nextRunText && (
+          <TaskNextRunTooltip runTimes={nextRunTooltipTimes}>
+            <div className="expandable-panel-task-next-run">{nextRunText}</div>
+          </TaskNextRunTooltip>
+        )}
+      </div>
+    );
+  };
+
   return (
     <>
       <div className="expandable-panel-header">
@@ -152,99 +269,47 @@ function TasksContent({
         {tasks.length === 0 ? (
           <div className="expandable-panel-empty">暂无任务</div>
         ) : (
-          tasks.map((task) => {
-            const sidebarMeta = getTaskSidebarMeta(task);
-            const nextRunText = getTaskNextRunText(task);
-            const nextRunTooltipTimes = getTaskNextRunTooltipTimes(task);
-
-            return (
-              <div
-                key={task.id}
-                className={`expandable-panel-task-card${
-                  sidebarMeta.state !== "active" &&
-                  sidebarMeta.state !== "running"
-                    ? " expandable-panel-task-card--paused"
-                    : ""
-                }${
-                  sidebarMeta.state === "auto-paused"
-                    ? " expandable-panel-task-card--auto-paused"
-                    : ""
-                }`}
-                onClick={() => onTaskClick(task)}
-                role="button"
-                tabIndex={0}
-              >
-                <div className="expandable-panel-task-title-row">
-                  <span className="expandable-panel-task-title">
-                    {task.name || task.id}
+          <>
+            {runnableTasks.map(renderTask)}
+            {pausedTasks.length > 0 && (
+              <div className="expandable-panel-paused-group">
+                <button
+                  type="button"
+                  className="expandable-panel-paused-toggle"
+                  aria-expanded={!pausedCollapsed}
+                  aria-controls={pausedRegionId}
+                  onClick={() => setPausedCollapsed((prev) => !prev)}
+                >
+                  <span
+                    className={`expandable-panel-paused-chevron${
+                      pausedCollapsed
+                        ? " expandable-panel-paused-chevron--collapsed"
+                        : ""
+                    }`}
+                    aria-hidden="true"
+                  >
+                    <svg width="10" height="6" viewBox="0 0 10 6" fill="none">
+                      <path
+                        d="M1 1L5 5L9 1"
+                        stroke="currentColor"
+                        strokeWidth="1.5"
+                        strokeLinecap="round"
+                        strokeLinejoin="round"
+                      />
+                    </svg>
                   </span>
-                  {(sidebarMeta.unreadCount > 0 ||
-                    sidebarMeta.canPause ||
-                    sidebarMeta.canRun ||
-                    sidebarMeta.canResume ||
-                    sidebarMeta.canDelete) && (
-                    <div className="expandable-panel-task-trailing">
-                      {sidebarMeta.unreadCount > 0 && (
-                        <span className="expandable-panel-task-badge">
-                          {sidebarMeta.unreadCount > 99
-                            ? "99+"
-                            : sidebarMeta.unreadCount}
-                        </span>
-                      )}
-                      {(sidebarMeta.canPause ||
-                        sidebarMeta.canRun ||
-                        sidebarMeta.canResume ||
-                        sidebarMeta.canDelete) && (
-                        <div className="expandable-panel-task-actions">
-                          <TaskActionMenu
-                            task={task}
-                            sidebarMeta={sidebarMeta}
-                            classNamePrefix="expandable-panel-task"
-                            onTaskPause={onTaskPause}
-                            onTaskRun={onTaskRun}
-                            onTaskResume={onTaskResume}
-                            onTaskDelete={onTaskDelete}
-                          />
-                        </div>
-                      )}
-                    </div>
-                  )}
+                  <span>已暂停任务 {pausedTasks.length}</span>
+                </button>
+                <div
+                  id={pausedRegionId}
+                  className="expandable-panel-paused-items"
+                  hidden={pausedCollapsed}
+                >
+                  {pausedTasks.map(renderTask)}
                 </div>
-                {sidebarMeta.state !== "active" &&
-                  sidebarMeta.state !== "running" && (
-                    <div
-                      className={`expandable-panel-task-status ${
-                        sidebarMeta.state === "auto-paused"
-                          ? "expandable-panel-task-status--auto"
-                          : "expandable-panel-task-status--manual"
-                      }`}
-                    >
-                      {sidebarMeta.state === "auto-paused"
-                        ? `已自动暂停 · 连续 ${sidebarMeta.unreadCount} 次未读`
-                        : "已手动暂停"}
-                    </div>
-                  )}
-                {(task.task?.latest_scheduled_preview ||
-                  task.task?.last_scheduled_run_at) && (
-                  <div className="expandable-panel-task-subtitle">
-                    {task.task?.last_scheduled_run_at && (
-                      <span className="expandable-panel-task-time">
-                        {formatListTime(task.task.last_scheduled_run_at)}
-                      </span>
-                    )}
-                    {TASK_COMPLETED_STATUS_TEXT}
-                  </div>
-                )}
-                {nextRunText && (
-                  <TaskNextRunTooltip runTimes={nextRunTooltipTimes}>
-                    <div className="expandable-panel-task-next-run">
-                      {nextRunText}
-                    </div>
-                  </TaskNextRunTooltip>
-                )}
               </div>
-            );
-          })
+            )}
+          </>
         )}
       </div>
     </>

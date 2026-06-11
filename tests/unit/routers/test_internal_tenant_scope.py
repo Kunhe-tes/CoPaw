@@ -433,6 +433,73 @@ def test_internal_batch_initialize_requires_identity_resolution(
     pool.ensure_bootstrap.assert_not_awaited()
 
 
+def test_internal_batch_initialize_marks_existing_tenant_as_skipped(
+    monkeypatch,
+) -> None:
+    pool = SimpleNamespace(ensure_bootstrap=AsyncMock())
+    client = _build_client(SimpleNamespace())
+    client.app.state.tenant_workspace_pool = pool
+
+    async def fake_resolve_user_identity(**kwargs):
+        tenant_id = kwargs["tenant_id"]
+        return ResolvedIdentity(
+            user_name=f"name-{tenant_id}",
+            bbk_id=f"bbk-{tenant_id}",
+        )
+
+    async def fake_existing_check(_pool, tenant_id, source_id):
+        return tenant_id == "111"
+
+    monkeypatch.setattr(
+        internal_router,
+        "resolve_user_identity",
+        fake_resolve_user_identity,
+    )
+    monkeypatch.setattr(
+        internal_router,
+        "_is_tenant_already_bootstrapped",
+        fake_existing_check,
+    )
+
+    response = client.post(
+        "/internal/tenants/batch-initialize",
+        json={
+            "tenant_ids": "111,222",
+            "source_id": "RMASSIST",
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "success": True,
+        "total": 2,
+        "success_count": 2,
+        "fail_count": 0,
+        "results": [
+            {
+                "tenant_id": "111",
+                "tenant_name": "name-111",
+                "bbk_id": "bbk-111",
+                "status": "success",
+                "message": "skipped",
+            },
+            {
+                "tenant_id": "222",
+                "tenant_name": "name-222",
+                "bbk_id": "bbk-222",
+                "status": "success",
+                "message": "initialized",
+            },
+        ],
+    }
+    pool.ensure_bootstrap.assert_awaited_once_with(
+        "222",
+        source_id="RMASSIST",
+        tenant_name="name-222",
+        bbk_id="bbk-222",
+    )
+
+
 def test_internal_batch_initialize_rejects_empty_tenant_ids() -> None:
     client = _build_client(SimpleNamespace())
 

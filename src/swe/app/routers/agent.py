@@ -1008,6 +1008,7 @@ async def list_agent_config_distribution_tenants(
         tenant_ids=await list_logical_tenant_ids(
             _request_source_id(request),
             source_filter=True,
+            include_templates=True,
         ),
     )
 

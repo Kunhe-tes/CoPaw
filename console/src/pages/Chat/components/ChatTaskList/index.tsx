@@ -1,4 +1,4 @@
-import React, { useState, useCallback } from "react";
+import React, { useState, useCallback, useEffect, useId } from "react";
 import type { CronJobSpecOutput } from "@/api/types";
 import Style from "./style";
 import { DESIGN_TOKENS } from "@/config/designTokens";
@@ -7,6 +7,7 @@ import {
   getTaskNextRunText,
   getTaskNextRunTooltipTimes,
   getTaskSidebarMeta,
+  partitionTasksByPauseState,
   TASK_COMPLETED_STATUS_TEXT,
 } from "../../taskJobs";
 import { formatListTime } from "../../listTimeFormat";
@@ -56,6 +57,18 @@ export default function ChatTaskList(props: ChatTaskListProps) {
     onTaskDelete,
   } = props;
   const [collapsed, setCollapsed] = useState(false);
+  const [pausedCollapsed, setPausedCollapsed] = useState(true);
+  const pausedRegionId = useId();
+  const { runnableTasks, pausedTasks } = partitionTasksByPauseState(tasks);
+  const selectedTaskIsPaused = pausedTasks.some(
+    (task) => task.id === selectedTaskId,
+  );
+
+  useEffect(() => {
+    if (selectedTaskIsPaused) {
+      setPausedCollapsed(false);
+    }
+  }, [selectedTaskId, selectedTaskIsPaused]);
 
   const handleToggle = useCallback(() => {
     setCollapsed((prev) => !prev);
@@ -67,6 +80,93 @@ export default function ChatTaskList(props: ChatTaskListProps) {
     },
     [onTaskClick],
   );
+
+  const renderTask = (task: CronJobSpecOutput) => {
+    const sidebarMeta = getTaskSidebarMeta(task);
+    const nextRunText = getTaskNextRunText(task);
+    const nextRunTooltipTimes = getTaskNextRunTooltipTimes(task);
+
+    return (
+      <div
+        key={task.id}
+        className={`chat-task-list-item${
+          task.id === selectedTaskId ? " chat-task-list-item--selected" : ""
+        }${
+          sidebarMeta.state !== "active" && sidebarMeta.state !== "running"
+            ? " chat-task-list-item--paused"
+            : ""
+        }${
+          sidebarMeta.state === "running" ? " chat-task-list-item--running" : ""
+        }${
+          sidebarMeta.state === "auto-paused"
+            ? " chat-task-list-item--auto-paused"
+            : ""
+        }`}
+        onClick={() => handleTaskClick(task)}
+        role="button"
+        tabIndex={0}
+      >
+        <div className="chat-task-list-item-header">
+          {sidebarMeta.unreadCount > 0 && (
+            <span className="chat-task-list-item-badge">
+              {sidebarMeta.unreadCount > 99 ? "99+" : sidebarMeta.unreadCount}
+            </span>
+          )}
+          <span className="chat-task-list-item-title">
+            {task.name || task.id}
+          </span>
+          {(sidebarMeta.canPause ||
+            sidebarMeta.canRun ||
+            sidebarMeta.canResume ||
+            sidebarMeta.canDelete) && (
+            <div className="chat-task-list-item-trailing">
+              <div className="chat-task-list-item-actions">
+                <TaskActionMenu
+                  task={task}
+                  sidebarMeta={sidebarMeta}
+                  classNamePrefix="chat-task-list-item"
+                  onTaskPause={onTaskPause}
+                  onTaskRun={onTaskRun}
+                  onTaskResume={onTaskResume}
+                  onTaskDelete={onTaskDelete}
+                />
+              </div>
+            </div>
+          )}
+        </div>
+
+        {sidebarMeta.state !== "active" && sidebarMeta.state !== "running" && (
+          <div
+            className={`chat-task-list-item-status ${
+              sidebarMeta.state === "auto-paused"
+                ? "chat-task-list-item-status--auto"
+                : "chat-task-list-item-status--manual"
+            }`}
+          >
+            {sidebarMeta.state === "auto-paused"
+              ? `已自动暂停 · 连续 ${sidebarMeta.unreadCount} 次未读`
+              : "已手动暂停"}
+          </div>
+        )}
+        {(task.task?.latest_scheduled_preview ||
+          task.task?.last_scheduled_run_at) && (
+          <div className="chat-task-list-item-subtitle">
+            {task.task?.last_scheduled_run_at && (
+              <span className="chat-task-list-item-time">
+                {formatListTime(task.task.last_scheduled_run_at)}
+              </span>
+            )}
+            {TASK_COMPLETED_STATUS_TEXT}
+          </div>
+        )}
+        {nextRunText && (
+          <TaskNextRunTooltip runTimes={nextRunTooltipTimes}>
+            <div className="chat-task-list-item-next-run">{nextRunText}</div>
+          </TaskNextRunTooltip>
+        )}
+      </div>
+    );
+  };
 
   return (
     <>
@@ -89,102 +189,30 @@ export default function ChatTaskList(props: ChatTaskListProps) {
             {tasks.length === 0 ? (
               <div className="chat-task-list-empty">暂无任务</div>
             ) : (
-              tasks.map((task) => {
-                const sidebarMeta = getTaskSidebarMeta(task);
-                const nextRunText = getTaskNextRunText(task);
-                const nextRunTooltipTimes = getTaskNextRunTooltipTimes(task);
-
-                return (
-                  <div
-                    key={task.id}
-                    className={`chat-task-list-item${
-                      task.id === selectedTaskId
-                        ? " chat-task-list-item--selected"
-                        : ""
-                    }${
-                      sidebarMeta.state !== "active" &&
-                      sidebarMeta.state !== "running"
-                        ? " chat-task-list-item--paused"
-                        : ""
-                    }${
-                      sidebarMeta.state === "running"
-                        ? " chat-task-list-item--running"
-                        : ""
-                    }${
-                      sidebarMeta.state === "auto-paused"
-                        ? " chat-task-list-item--auto-paused"
-                        : ""
-                    }`}
-                    onClick={() => handleTaskClick(task)}
-                    role="button"
-                    tabIndex={0}
-                  >
-                    <div className="chat-task-list-item-header">
-                      {sidebarMeta.unreadCount > 0 && (
-                        <span className="chat-task-list-item-badge">
-                          {sidebarMeta.unreadCount > 99
-                            ? "99+"
-                            : sidebarMeta.unreadCount}
-                        </span>
-                      )}
-                      <span className="chat-task-list-item-title">
-                        {task.name || task.id}
-                      </span>
-                      {(sidebarMeta.canPause ||
-                        sidebarMeta.canRun ||
-                        sidebarMeta.canResume ||
-                        sidebarMeta.canDelete) && (
-                        <div className="chat-task-list-item-trailing">
-                          <div className="chat-task-list-item-actions">
-                            <TaskActionMenu
-                              task={task}
-                              sidebarMeta={sidebarMeta}
-                              classNamePrefix="chat-task-list-item"
-                              onTaskPause={onTaskPause}
-                              onTaskRun={onTaskRun}
-                              onTaskResume={onTaskResume}
-                              onTaskDelete={onTaskDelete}
-                            />
-                          </div>
-                        </div>
-                      )}
+              <>
+                {runnableTasks.map(renderTask)}
+                {pausedTasks.length > 0 && (
+                  <div className="chat-task-list-paused-group">
+                    <button
+                      type="button"
+                      className="chat-task-list-paused-toggle"
+                      aria-expanded={!pausedCollapsed}
+                      aria-controls={pausedRegionId}
+                      onClick={() => setPausedCollapsed((prev) => !prev)}
+                    >
+                      <ToggleIcon collapsed={pausedCollapsed} />
+                      <span>已暂停任务 {pausedTasks.length}</span>
+                    </button>
+                    <div
+                      id={pausedRegionId}
+                      className="chat-task-list-paused-items"
+                      hidden={pausedCollapsed}
+                    >
+                      {pausedTasks.map(renderTask)}
                     </div>
-
-                    {sidebarMeta.state !== "active" &&
-                      sidebarMeta.state !== "running" && (
-                        <div
-                          className={`chat-task-list-item-status ${
-                            sidebarMeta.state === "auto-paused"
-                              ? "chat-task-list-item-status--auto"
-                              : "chat-task-list-item-status--manual"
-                          }`}
-                        >
-                          {sidebarMeta.state === "auto-paused"
-                            ? `已自动暂停 · 连续 ${sidebarMeta.unreadCount} 次未读`
-                            : "已手动暂停"}
-                        </div>
-                      )}
-                    {(task.task?.latest_scheduled_preview ||
-                      task.task?.last_scheduled_run_at) && (
-                      <div className="chat-task-list-item-subtitle">
-                        {task.task?.last_scheduled_run_at && (
-                          <span className="chat-task-list-item-time">
-                            {formatListTime(task.task.last_scheduled_run_at)}
-                          </span>
-                        )}
-                        {TASK_COMPLETED_STATUS_TEXT}
-                      </div>
-                    )}
-                    {nextRunText && (
-                      <TaskNextRunTooltip runTimes={nextRunTooltipTimes}>
-                        <div className="chat-task-list-item-next-run">
-                          {nextRunText}
-                        </div>
-                      </TaskNextRunTooltip>
-                    )}
                   </div>
-                );
-              })
+                )}
+              </>
             )}
           </div>
         )}
