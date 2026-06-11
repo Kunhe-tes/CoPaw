@@ -684,6 +684,7 @@ async def list_channel_distribution_tenants(
     tenant_ids = await list_logical_tenant_ids(
         _request_source_id(request),
         source_filter=True,
+        include_templates=True,
     )
     return {"tenant_ids": tenant_ids}
 
