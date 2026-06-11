@@ -594,7 +594,7 @@ export function buildTrendSvgData(trendData: TrendDatum[]) {
   const chartLeft = 20;
   const chartRight = 20;
   const chartTop = 10;
-  const chartBottom = 24;
+  const chartBottom = 32;
   const chartWidth = width - chartLeft - chartRight;
   const chartHeight = height - chartTop - chartBottom;
   const rawMaxCalls = Math.max(
