@@ -22,6 +22,12 @@ export interface MyMCPListItem {
   created_at: string;
   /** 更新时间 */
   updated_at: string;
+  /** MCP 版本号 */
+  version: string;
+  /** 市场分发时接收的版本号 */
+  received_version: string;
+  /** 市场是否有新版本 */
+  has_update: boolean;
 }
 
 /** MCP 详情 */
@@ -42,6 +48,10 @@ export interface MyMCPDetail extends MyMCPListItem {
   lazy_load: boolean;
   /** 分发来源 */
   distributed_by: string;
+  /** 创建者 ID */
+  creator_id: string;
+  /** 创建者名称 */
+  creator_name: string;
 }
 
 /** MCP 创建请求 */

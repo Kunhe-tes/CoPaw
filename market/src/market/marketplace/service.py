@@ -73,13 +73,37 @@ class MCPNameConflictError(Exception):
         existing_name: str,
         existing_creator_id: str = "",
         existing_creator_name: str = "",
+        existing_version: str = "",
     ) -> None:
         self.existing_item_id = existing_item_id
         self.existing_name = existing_name
         self.existing_creator_id = existing_creator_id
         self.existing_creator_name = existing_creator_name
+        self.existing_version = existing_version
         super().__init__(
             f"MCP with name '{existing_name}' already exists "
+            f"(created by {existing_creator_name or existing_creator_id})",
+        )
+
+
+class SkillNameConflictError(Exception):
+    """技能同名冲突异常，用于发布时检测到同名技能已存在。"""
+
+    def __init__(
+        self,
+        existing_item_id: str,
+        existing_name: str,
+        existing_creator_id: str = "",
+        existing_creator_name: str = "",
+        existing_version: str = "",
+    ) -> None:
+        self.existing_item_id = existing_item_id
+        self.existing_name = existing_name
+        self.existing_creator_id = existing_creator_id
+        self.existing_creator_name = existing_creator_name
+        self.existing_version = existing_version
+        super().__init__(
+            f"Skill with name '{existing_name}' already exists "
             f"(created by {existing_creator_name or existing_creator_id})",
         )
 
@@ -372,7 +396,7 @@ def _build_skill_metadata_for_manifest(
     return {
         "name": name,
         "description": description,
-        "version_text": version_text,
+        "version_text": version_text or "1.0.0",
         "commit_text": "",
         "signature": "",
         "source": source,
@@ -499,6 +523,13 @@ class MarketplaceService:
                     # 不覆盖其他核心字段
                     elif key not in ["description", "source"]:
                         metadata[key] = value
+            # 分发技能：version_text 使用市场版本号而非 SKILL.md 的默认值
+            if (
+                source.startswith("marketplace:")
+                and extra_metadata
+                and extra_metadata.get("received_version")
+            ):
+                metadata["version_text"] = extra_metadata["received_version"]
 
             # 保留已有的 config 和 channels
             existing_config = existing.get("config")
@@ -704,7 +735,7 @@ class MarketplaceService:
         source_id: str,
         req: PublishSkillRequest,
     ) -> MarketItem:
-        """上架技能。同名技能已存在时递增 patch 版本号。
+        """上架技能。同名技能已存在且 overwrite=False 时抛冲突异常。
 
         如果请求中包含 skill_name，则从用户工作区复制整个技能目录到市场。
         否则使用 skill_json 和 skill_md 字段创建目录。
@@ -713,6 +744,16 @@ class MarketplaceService:
 
         items = load_index(self.marketplace_root, source_id)
         existing = next((i for i in items if i.name == req.name), None)
+
+        # 同名技能已存在且未选择覆盖 → 提示用户
+        if existing is not None and not req.overwrite:
+            raise SkillNameConflictError(
+                existing_item_id=existing.item_id,
+                existing_name=existing.name,
+                existing_creator_id=existing.creator_id,
+                existing_creator_name=existing.creator_name,
+                existing_version=existing.version,
+            )
 
         now = datetime.now(timezone.utc).isoformat()
         if existing is not None:
@@ -801,6 +842,18 @@ class MarketplaceService:
                 )
 
         save_index(self.marketplace_root, source_id, items)
+
+        # 尝试从 SKILL.md 提取版本号更新到市场条目
+        skill_md_path = skill_dir / "SKILL.md"
+        if skill_md_path.exists():
+            try:
+                md_content = skill_md_path.read_text(encoding="utf-8")
+                md_version = _extract_version_from_frontmatter(md_content)
+                if md_version:
+                    item.version = md_version
+                    save_index(self.marketplace_root, source_id, items)
+            except OSError:
+                pass
 
         # 创建版本快照
         version_svc = SkillVersionService(self.marketplace_root)
@@ -1281,7 +1334,7 @@ class MarketplaceService:
             display_name=display_name,
             source=source,
             description=description,
-            version=version or None,
+            version=version or "1.0.0",
             received_version=received_version,
             distributed_by=manifest_metadata.get("distributed_by"),
             is_received=is_received,
@@ -1388,6 +1441,12 @@ class MarketplaceService:
                 ]
         except Exception as e:
             logger.warning("Failed to resolve target users: %s", e)
+            # user_id 模式下即使数据库查询失败，仍然可以按 ID 分发
+            if req.target_type == "user_id" and req.target_values:
+                return [
+                    {"tenant_id": uid, "tenant_name": "", "bbk_id": ""}
+                    for uid in req.target_values
+                ]
         return []
 
     def list_skill_files(
@@ -1465,6 +1524,86 @@ class MarketplaceService:
         )
         return _read_preview_file(skill_dir, file_path)
 
+    def _bump_skill_version_in_frontmatter(
+        self,
+        skill_dir: Path,
+    ) -> str:
+        """Bump SKILL.md frontmatter 中的 version 字段，返回新版本号."""
+        skill_md_path = skill_dir / "SKILL.md"
+        if not skill_md_path.exists():
+            return "1.0.1"
+
+        try:
+            md_content = skill_md_path.read_text(encoding="utf-8")
+        except OSError:
+            return "1.0.1"
+
+        current_version = (
+            _extract_version_from_frontmatter(md_content) or "1.0.0"
+        )
+        new_version = _bump_patch(current_version)
+
+        # 替换 frontmatter 中的 version 行
+        try:
+            end_idx = md_content.index("---", 3)
+        except ValueError:
+            return new_version
+
+        fm_text = md_content[3:end_idx]
+        lines = fm_text.split("\n")
+        replaced = False
+        for i, line in enumerate(lines):
+            if ":" in line:
+                key, _ = line.split(":", 1)
+                if key.strip().lower() == "version":
+                    lines[i] = f"version: {new_version}"
+                    replaced = True
+                    break
+
+        if not replaced:
+            # frontmatter 中没有 version 行，追加
+            lines.append(f"version: {new_version}")
+
+        new_fm = "\n".join(lines)
+        new_content = f"---\n{new_fm}\n---{md_content[end_idx + 3 :]}"
+
+        try:
+            skill_md_path.write_text(new_content, encoding="utf-8")
+        except OSError as e:
+            logger.warning("Failed to bump version in SKILL.md: %s", e)
+
+        return new_version
+
+    def _bump_skill_version_in_manifest(
+        self,
+        user_id: str,
+        skill_name: str,
+        new_version: str,
+        agent_id: str = "default",
+        source_id: str | None = None,
+    ) -> None:
+        """更新 manifest 中技能的 version_text 和 updated_at."""
+        now = datetime.now(timezone.utc).isoformat()
+
+        def _update(payload: dict) -> bool:
+            entry = payload.get("skills", {}).get(skill_name)
+            if entry is None:
+                return False
+            metadata = entry.get("metadata", {})
+            metadata["version_text"] = new_version
+            metadata["updated_at"] = now
+            entry["metadata"] = metadata
+            entry["updated_at"] = now
+            return True
+
+        mutate_user_skill_manifest(
+            self.swe_root,
+            user_id,
+            agent_id,
+            _update,
+            source_id,
+        )
+
     def save_skill_file(
         self,
         user_id: str,
@@ -1475,7 +1614,11 @@ class MarketplaceService:
         agent_id: str = "default",
         source_id: str | None = None,
     ) -> bool:
-        """保存技能文件内容，自动创建 skill.json（如不存在）."""
+        """保存技能文件内容，自动创建 skill.json（如不存在）.
+
+        保存时同步 bump SKILL.md frontmatter 中的 version 字段和 manifest
+        的 version_text，确保版本号与编辑操作同步。
+        """
         skills_dir = get_user_skills_dir(
             self.swe_root,
             user_id,
@@ -1496,17 +1639,22 @@ class MarketplaceService:
         try:
             target.write_text(content, encoding="utf-8")
 
-            # 处理 skill.json：自动创建或更新
-            skill_json_path = skill_dir / "skill.json"
             current_time = datetime.now(timezone.utc).isoformat()
 
+            # bump SKILL.md frontmatter 中的 version 字段
+            new_version = self._bump_skill_version_in_frontmatter(skill_dir)
+
+            # 处理 skill.json：自动创建或更新
+            skill_json_path = skill_dir / "skill.json"
+
             if skill_json_path.exists():
-                # 更新现有 skill.json 的 updated_at
+                # 更新现有 skill.json 的 updated_at 和 version
                 try:
                     skill_data = json.loads(
                         skill_json_path.read_text(encoding="utf-8"),
                     )
                     skill_data["updated_at"] = current_time
+                    skill_data["version"] = new_version
                     skill_json_path.write_text(
                         json.dumps(skill_data, ensure_ascii=False, indent=2),
                         encoding="utf-8",
@@ -1521,7 +1669,7 @@ class MarketplaceService:
                 base_skill_data = {
                     "name": skill_name,
                     "description": "",
-                    "version": "1.0.0",
+                    "version": new_version,
                     "creator_id": user_id,
                     "creator_name": user_name or "",
                     "created_at": current_time,
@@ -1545,6 +1693,15 @@ class MarketplaceService:
                         "Failed to auto-create skill.json: %s",
                         e,
                     )
+
+            # 同步 bump manifest 中的 version_text
+            self._bump_skill_version_in_manifest(
+                user_id,
+                skill_name,
+                new_version,
+                agent_id,
+                source_id,
+            )
 
             return True
         except Exception:
@@ -1730,11 +1887,19 @@ class MarketplaceService:
         req: PublishMCPRequest,
         now: str,
     ) -> None:
-        """将发布请求的字段写入已存在的市场条目并 bump 版本号。
+        """将发布请求的字段写入已存在的市场条目并更新版本号。
 
         用于同名复用 item_id 的两种场景：同 creator 自更新 / overwrite 接管。
+
+        版本号策略（按"创建人 + 版本号"方案）：
+        版本号始终递增，创建人标识当前版本的发布者。
+        - 有明确版本号（同步到市场）：直接使用发布者本地版本号。
+        - 无明确版本号（手动上传）：bump 市场当前版本号。
         """
-        target.version = _bump_patch(target.version)
+        if req.version:
+            target.version = req.version
+        else:
+            target.version = _bump_patch(target.version)
         target.client_key = req.client_key
         target.name = req.name
         target.chinese_name = req.chinese_name
@@ -1809,6 +1974,7 @@ class MarketplaceService:
                 existing_name=existing.name,
                 existing_creator_id=existing.creator_id,
                 existing_creator_name=existing.creator_name,
+                existing_version=existing.version,
             )
 
         if same_name_other is not None and not req.overwrite:
@@ -1817,6 +1983,7 @@ class MarketplaceService:
                 existing_name=same_name_other.name,
                 existing_creator_id=same_name_other.creator_id,
                 existing_creator_name=same_name_other.creator_name,
+                existing_version=same_name_other.version,
             )
 
         now = datetime.now(timezone.utc).isoformat()
@@ -1829,7 +1996,8 @@ class MarketplaceService:
             self._apply_publish_update(same_name_other, req, now)
             item = same_name_other
         else:
-            # 创建新条目
+            # 创建新条目，版本号使用发布者本地版本
+            initial_version = req.version or "1.0.0"
             item = MarketItem(
                 item_id=str(uuid.uuid4()),
                 item_type="mcp",
@@ -1838,6 +2006,7 @@ class MarketplaceService:
                 chinese_name=req.chinese_name,
                 description=req.description,
                 guidance=req.guidance,
+                version=initial_version,
                 creator_id=req.creator_id,
                 creator_name=req.creator_name,
                 category_id=req.category_id,
@@ -2155,7 +2324,7 @@ class MarketplaceService:
                     )
                     continue
 
-                copy_mcp_to_user(
+                effective_client_key = copy_mcp_to_user(
                     marketplace_root=self.marketplace_root,
                     source_id=source_id,
                     item_id=item_id,
@@ -2163,6 +2332,7 @@ class MarketplaceService:
                     user_id=tenant_id,
                     client_key=item.client_key,
                     distributed_by=operator_id,
+                    version=item.version,
                     creator_id=item.creator_id,
                     creator_name=item.creator_name,
                     mcp_name=item.name,
@@ -2201,7 +2371,7 @@ class MarketplaceService:
                         tenant_id=tenant_id,
                         success=True,
                         bootstrapped=bootstrapped,
-                        default_agent_updated=[item.client_key],
+                        default_agent_updated=[effective_client_key],
                     ),
                 )
             except Exception as e:
@@ -2717,11 +2887,26 @@ class MarketplaceService:
         self,
         user_id: str,
         source_id: str,
-        client_key: str,
+        mcp_name: str,
         expected_source_prefix: str | None = None,
         reload_source_id: str | None = None,
     ) -> str | None:
-        """撤回单个用户的 MCP，失败时返回原因."""
+        """撤回单个用户的 MCP，失败时返回原因.
+
+        使用 mcp_name（市场内唯一）作为身份标识，遍历用户配置中
+        所有 MCP 条目按 name 字段匹配，与 _find_user_mcp_name_conflict
+        及 copy_mcp_to_user 的逻辑保持一致。
+
+        Args:
+            user_id: 用户 ID。
+            source_id: 来源 ID。
+            mcp_name: 待撤回的 MCP 名称（市场内唯一）。
+            expected_source_prefix: 可选，验证 source 前缀。
+            reload_source_id: 可选，触发重载的 source_id。
+
+        Returns:
+            失败原因字符串；成功返回 None。
+        """
         user_config_path = self._get_user_agent_config_path(user_id, source_id)
         if not user_config_path.exists():
             return "agent_config_not_found"
@@ -2736,15 +2921,25 @@ class MarketplaceService:
         mcp_clients = mcp_section.get("clients")
         if not isinstance(mcp_clients, dict):
             return "mcp_not_found"
-        if client_key not in mcp_clients:
+
+        # 按 name 字段遍历查找（mcp_name 在市场内唯一）
+        target_key: str | None = None
+        for key, cfg in mcp_clients.items():
+            if not isinstance(cfg, dict):
+                continue
+            if cfg.get("name") == mcp_name:
+                target_key = key
+                break
+
+        if target_key is None:
             return "mcp_not_found"
 
         if expected_source_prefix:
-            source = mcp_clients.get(client_key, {}).get("source", "")
+            source = mcp_clients.get(target_key, {}).get("source", "")
             if not source.startswith(expected_source_prefix):
                 return "not_from_this_marketplace"
 
-        mcp_clients.pop(client_key, None)
+        mcp_clients.pop(target_key, None)
         mcp_section["clients"] = mcp_clients
         user_config["updated_at"] = datetime.now(timezone.utc).isoformat()
         _atomic_write_json(user_config_path, user_config)
@@ -2894,6 +3089,7 @@ class MarketplaceService:
             撤回结果.
         """
         if req.mcp_name:
+            mcp_name = req.mcp_name  # narrowed from str | None
             if not req.target_user_ids:
                 return self._build_recall_response("", 0, [])
 
@@ -2905,7 +3101,7 @@ class MarketplaceService:
             return await self._execute_recall_for_users(
                 source_id=source_id,
                 item_id="",
-                item_name=req.mcp_name,
+                item_name=mcp_name,
                 item_type="mcp",
                 operator_id=operator_id,
                 operator_name=operator_name,
@@ -2915,7 +3111,7 @@ class MarketplaceService:
                 recall_one=lambda user_id: self._recall_mcp_from_user(
                     user_id,
                     source_id,
-                    req.mcp_name,
+                    mcp_name=mcp_name,
                     reload_source_id=source_id,
                 ),
                 warning_message="Failed to recall MCP from user %s: %s",
@@ -2957,9 +3153,9 @@ class MarketplaceService:
             recall_one=lambda user_id: self._recall_mcp_from_user(
                 user_id,
                 source_id,
-                item.client_key,
-                expected_source_prefix,
-                None,
+                mcp_name=item.name,
+                expected_source_prefix=expected_source_prefix,
+                reload_source_id=None,
             ),
             warning_message="Failed to recall MCP from user %s: %s",
         )

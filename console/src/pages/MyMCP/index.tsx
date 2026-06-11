@@ -315,6 +315,11 @@ export default function MyMCPPage() {
                         分发
                       </Tag>
                     )}
+                    {item.has_update && (
+                      <Tag color="orange" style={{ margin: 0, fontSize: 10 }}>
+                        更新
+                      </Tag>
+                    )}
                   </button>
                 );
               })}

@@ -211,6 +211,7 @@ async def publish_mcp(
                 "existing_name": exc.existing_name,
                 "existing_creator_id": exc.existing_creator_id,
                 "existing_creator_name": exc.existing_creator_name,
+                "existing_version": exc.existing_version,
             },
         ) from exc
     return MarketMCPItem(
@@ -273,6 +274,8 @@ async def upload_mcp(
     final_name = form.name or inferred_name
 
     # 构建发布请求
+    # 从上传的 config 中提取 version（如有），确保手动上传也能携带版本号
+    uploaded_version = config.get("version", "")
     req = PublishMCPRequest(
         client_key=client_key,
         name=final_name,
@@ -284,6 +287,8 @@ async def upload_mcp(
         category_id=None,
         bbk_ids=json.loads(form.bbk_ids) if form.bbk_ids else [],
         config=config,
+        version=uploaded_version,
+        overwrite=True,  # 管理员手动上传即意图覆盖同名条目
     )
 
     svc = request.app.state.marketplace

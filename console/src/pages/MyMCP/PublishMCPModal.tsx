@@ -16,6 +16,7 @@ interface ConflictDetail {
   existing_name?: string;
   existing_creator_id?: string;
   existing_creator_name?: string;
+  existing_version?: string;
 }
 
 interface HttpError extends Error {
@@ -78,14 +79,16 @@ function buildConflictMessage(
   creatorLabel?: string,
 ): string {
   const existingName = conflict.existing_name;
+  const existingVersion = conflict.existing_version;
   const fallbackMsg = conflict.message;
 
   if (existingName) {
+    const versionSuffix = existingVersion ? `（当前市场版本 v${existingVersion}）` : "";
     return isOwnMcp
-      ? `"${existingName}"（您已发布）`
-      : `"${existingName}"（${creatorLabel || "他人"} 发布）`;
+      ? `您之前已发布过「${existingName}」${versionSuffix}`
+      : `「${existingName}」已由 ${creatorLabel || "其他用户"} 发布${versionSuffix}`;
   }
-  return fallbackMsg || "同名 MCP 已存在";
+  return fallbackMsg || "市场中已存在同名 MCP";
 }
 
 export function PublishMCPModal({
@@ -161,23 +164,23 @@ export function PublishMCPModal({
         ? `${creatorName}/${creatorId}`
         : creatorName || creatorId || undefined;
 
-    const conflictMsg = buildConflictMessage(conflict, isOwnMcp, existingCreator) || fallbackMsg || "同名 MCP 已存在";
+    const conflictMsg = buildConflictMessage(conflict, isOwnMcp, existingCreator) || fallbackMsg || "市场中已存在同名 MCP";
 
     Modal.confirm({
-      title: "同名 MCP 已存在",
+      title: isOwnMcp ? "确认更新" : "确认覆盖",
       icon: <ExclamationCircleOutlined />,
       content: (
         <div>
           <p>{conflictMsg}</p>
           <p>
             {isOwnMcp
-              ? "更新？"
-              : "覆盖？"}
+              ? "是否使用当前版本替换市场中的已有内容？"
+              : "是否用当前版本替换已有的同名 MCP？此操作不可撤销。"}
           </p>
         </div>
       ),
-      okText: isOwnMcp ? "更新" : "覆盖",
-      okType: "primary",
+      okText: isOwnMcp ? "确认更新" : "确认覆盖",
+      okType: isOwnMcp ? "primary" : "danger",
       cancelText: "取消",
       onOk: () => {
         void doPublish(true);
