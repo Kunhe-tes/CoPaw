@@ -18,6 +18,7 @@ from ...config.context import (
     is_valid_identity_value,
     resolve_runtime_tenant_id,
     resolve_scope_id,
+    resolve_storage_tenant_id,
 )
 from ...config.scope_conversion import (
     decode_canonical_scope_id,
@@ -121,6 +122,16 @@ _PREVIEW_PLACEHOLDER_HTML = """<!doctype html>
 </body>
 </html>
 """
+
+
+def _list_runtime_tenant_ids() -> list[str]:
+    """返回参与运行态维护的租户列表，显式排除模板目录。"""
+    tenant_ids = list_all_tenant_ids()
+    return [
+        tenant_id
+        for tenant_id in tenant_ids
+        if tenant_id == "default" or not tenant_id.startswith("default_")
+    ]
 
 
 class InternalErrorResponse(BaseModel):
@@ -685,9 +696,9 @@ async def _get_cron_manager(manager, tenant_id: str, agent_id: str):
 
 def _get_configured_agent_ids(tenant_id: str) -> list[str]:
     """读取指定租户配置中的所有 Agent ID。"""
-    from ...config.utils import get_tenant_config_path, load_config
+    from ...config.utils import get_tenant_storage_config_path, load_config
 
-    config = load_config(get_tenant_config_path(tenant_id))
+    config = load_config(get_tenant_storage_config_path(tenant_id))
     return sorted(config.agents.profiles.keys())
 
 
@@ -699,7 +710,7 @@ async def register_missing_cron_jobs(request: Request):
         logger.warning("MultiAgentManager not initialized")
         raise HTTPException(status_code=503, detail="Manager not available")
 
-    tenant_ids = list_all_tenant_ids()
+    tenant_ids = _list_runtime_tenant_ids()
     summary: dict[str, Any] = {
         "tenant_count": len(tenant_ids),
         "agent_count": 0,
@@ -775,7 +786,7 @@ async def refresh_external_cron_jobs(request: Request):
         logger.warning("MultiAgentManager not initialized")
         raise HTTPException(status_code=503, detail="Manager not available")
 
-    tenant_ids = list_all_tenant_ids()
+    tenant_ids = _list_runtime_tenant_ids()
     summary: dict[str, Any] = {
         "tenant_count": len(tenant_ids),
         "agent_count": 0,
@@ -890,7 +901,9 @@ async def internal_cron_callback(
         logger.warning("MultiAgentManager not initialized")
         raise HTTPException(status_code=503, detail="Manager not available")
 
-    runtime_tenant_id = resolve_runtime_tenant_id(tenant_id, source_id)
+    runtime_tenant_id = (
+        resolve_runtime_tenant_id(tenant_id, source_id) or tenant_id
+    )
     mgr = await _get_cron_manager(manager, runtime_tenant_id, agent_id)
     if mgr is None:
         raise HTTPException(status_code=404, detail="CronManager not found")

@@ -124,6 +124,27 @@ def test_internal_scope_encode_single_item() -> None:
     }
 
 
+def test_internal_runtime_tenant_ids_exclude_template_dirs(
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(
+        internal_router,
+        "list_all_tenant_ids",
+        lambda: [
+            "default",
+            "default_ruice",
+            encode_scope_id("tenant-a", "source-a"),
+            "tenant-b",
+        ],
+    )
+
+    assert internal_router._list_runtime_tenant_ids() == [
+        "default",
+        encode_scope_id("tenant-a", "source-a"),
+        "tenant-b",
+    ]
+
+
 def test_internal_scope_encode_skips_internal_token_auth(
     monkeypatch,
 ) -> None:

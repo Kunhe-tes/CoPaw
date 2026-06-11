@@ -644,16 +644,16 @@ def _prepare_target_tenant(
     request: Request,
     tenant_id: str,
 ):
-    from ...config.context import resolve_runtime_tenant_id
-    from ...config.utils import get_tenant_working_dir_strict
+    from ...config.context import resolve_storage_tenant_id
+    from ...config.utils import get_tenant_storage_working_dir
     from ..workspace.tenant_initializer import TenantInitializer
 
     validated_tenant_id = _validate_target_tenant_id(tenant_id)
-    effective_tid = resolve_runtime_tenant_id(
+    effective_tid = resolve_storage_tenant_id(
         validated_tenant_id,
         _request_source_id(request),
     )
-    tenant_working_dir = get_tenant_working_dir_strict(effective_tid)
+    tenant_working_dir = get_tenant_storage_working_dir(effective_tid)
     initializer = TenantInitializer(
         tenant_working_dir.parent,
         validated_tenant_id,

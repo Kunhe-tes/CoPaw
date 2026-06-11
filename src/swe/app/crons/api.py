@@ -12,6 +12,7 @@ from ...config.context import (
     resolve_runtime_tenant_id,
     resolve_scope_id,
     resolve_scope_preferred_tenant_id,
+    resolve_storage_tenant_id,
 )
 from ...config.utils import list_logical_tenant_ids
 from ...providers.provider_manager import ProviderManager
@@ -182,8 +183,9 @@ def _validate_cron_job_model_slot(
 
 
 def _get_provider_manager(manager_tenant_id: str):
-    ProviderManager.ensure_tenant_provider_storage(manager_tenant_id)
-    return ProviderManager.get_instance(manager_tenant_id)
+    storage_tenant_id = resolve_storage_tenant_id(manager_tenant_id, None)
+    ProviderManager.ensure_tenant_provider_storage(storage_tenant_id)
+    return ProviderManager.get_instance(storage_tenant_id)
 
 
 def _resolve_broadcast_model_slot(

@@ -47,6 +47,7 @@ class TenantInitSourceStore:
         init_source: str,
         tenant_name: Optional[str] = None,
         bbk_id: Optional[str] = None,
+        tenant_type: str = "tenant",
     ) -> str:
         """Get existing or create a new mapping record.
 
@@ -83,18 +84,26 @@ class TenantInitSourceStore:
 
             insert_query = (
                 "INSERT INTO swe_tenant_init_source "
-                "(tenant_id, source_id, tenant_name, bbk_id, init_source) "
-                "VALUES (%s, %s, %s, %s, %s)"
+                "(tenant_id, source_id, tenant_name, bbk_id, init_source, tenant_type) "
+                "VALUES (%s, %s, %s, %s, %s, %s)"
             )
             try:
                 await self.db.execute(
                     insert_query,
-                    (tenant_id, source_id, tenant_name, bbk_id, init_source),
+                    (
+                        tenant_id,
+                        source_id,
+                        tenant_name,
+                        bbk_id,
+                        init_source,
+                        tenant_type,
+                    ),
                 )
                 logger.info(
                     f"Created init_source mapping: tenant={tenant_id}, "
                     f"source={source_id}, tenant_name={tenant_name}, "
-                    f"bbk_id={bbk_id}, init_source={init_source}",
+                    f"bbk_id={bbk_id}, init_source={init_source}, "
+                    f"tenant_type={tenant_type}",
                 )
             except Exception as e:
                 logger.warning(
@@ -163,7 +172,12 @@ class TenantInitSourceStore:
             )
             return False
 
-    async def get_by_source(self, source_id: str) -> list[dict]:
+    async def get_by_source(
+        self,
+        source_id: str,
+        *,
+        include_templates: bool = False,
+    ) -> list[dict]:
         """Query all tenants initialized from a given source.
 
         Args:
@@ -175,10 +189,13 @@ class TenantInitSourceStore:
         if not self._use_db:
             return []
         query = (
-            "SELECT tenant_id, source_id, tenant_name, bbk_id, init_source, created_at "
-            "FROM swe_tenant_init_source WHERE source_id = %s "
-            "ORDER BY created_at"
+            "SELECT tenant_id, source_id, tenant_name, bbk_id, init_source, "
+            "tenant_type, created_at FROM swe_tenant_init_source "
+            "WHERE source_id = %s "
         )
+        if not include_templates:
+            query += "AND (tenant_type IS NULL OR tenant_type != 'template') "
+        query += "ORDER BY created_at"
         try:
             rows = await self.db.fetch_all(query, (source_id,))
             return list(rows)
@@ -192,6 +209,8 @@ class TenantInitSourceStore:
         self,
         page: int = 1,
         page_size: int = 20,
+        *,
+        include_templates: bool = False,
     ) -> tuple[list[dict], int]:
         """Get all mapping records with pagination.
 
@@ -209,15 +228,23 @@ class TenantInitSourceStore:
             count_query = (
                 "SELECT COUNT(*) as total FROM swe_tenant_init_source"
             )
+            if not include_templates:
+                count_query += (
+                    " WHERE (tenant_type IS NULL OR tenant_type != 'template')"
+                )
             count_row = await self.db.fetch_one(count_query)
             total = count_row["total"] if count_row else 0
 
             offset = (page - 1) * page_size
             query = (
-                "SELECT tenant_id, source_id, tenant_name, bbk_id, init_source, created_at "
-                "FROM swe_tenant_init_source "
-                "ORDER BY created_at DESC LIMIT %s OFFSET %s"
+                "SELECT tenant_id, source_id, tenant_name, bbk_id, init_source, "
+                "tenant_type, created_at FROM swe_tenant_init_source "
             )
+            if not include_templates:
+                query += (
+                    "WHERE (tenant_type IS NULL OR tenant_type != 'template') "
+                )
+            query += "ORDER BY created_at DESC LIMIT %s OFFSET %s"
             rows = await self.db.fetch_all(query, (page_size, offset))
             return list(rows), total
         except Exception as e:
@@ -227,6 +254,8 @@ class TenantInitSourceStore:
     async def get_by_tenant_prefix(
         self,
         prefixes: list[str],
+        *,
+        include_templates: bool = False,
     ) -> list[dict]:
         """Query tenants whose tenant_id starts with given prefixes.
 
@@ -242,9 +271,11 @@ class TenantInitSourceStore:
         # 构建 OR 条件
         conditions = " OR ".join([f"tenant_id LIKE '{p}%'" for p in prefixes])
         query = (
-            "SELECT tenant_id, source_id, tenant_name, bbk_id, init_source "
+            "SELECT tenant_id, source_id, tenant_name, bbk_id, init_source, tenant_type "
             "FROM swe_tenant_init_source WHERE " + conditions
         )
+        if not include_templates:
+            query += " AND (tenant_type IS NULL OR tenant_type != 'template')"
         try:
             rows = await self.db.fetch_all(query)
             return list(rows)
@@ -297,7 +328,12 @@ class TenantInitSourceStore:
             )
             return False
 
-    async def get_bbk_by_source(self, source_id: str) -> list[dict]:
+    async def get_bbk_by_source(
+        self,
+        source_id: str,
+        *,
+        include_templates: bool = False,
+    ) -> list[dict]:
         """Query distinct bbk_ids for a given source.
 
         Args:
@@ -311,8 +347,10 @@ class TenantInitSourceStore:
         query = (
             "SELECT DISTINCT bbk_id FROM swe_tenant_init_source "
             "WHERE source_id = %s AND bbk_id IS NOT NULL AND bbk_id != '' "
-            "ORDER BY bbk_id"
         )
+        if not include_templates:
+            query += "AND (tenant_type IS NULL OR tenant_type != 'template') "
+        query += "ORDER BY bbk_id"
         try:
             rows = await self.db.fetch_all(query, (source_id,))
             return list(rows)

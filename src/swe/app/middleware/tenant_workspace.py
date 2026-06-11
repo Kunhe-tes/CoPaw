@@ -21,6 +21,7 @@ from starlette.types import ASGIApp
 
 from swe.config.context import (
     canonicalize_scope_id,
+    resolve_storage_tenant_id,
     set_current_workspace_dir,
     reset_current_workspace_dir,
 )
@@ -32,19 +33,17 @@ logger = logging.getLogger(__name__)
 
 
 def _get_effective_request_tenant_id(request: Request) -> str | None:
-    """Return the runtime scope used for workspace isolation."""
-    scope_id = getattr(request.state, "scope_id", None)
-    if isinstance(scope_id, str) and scope_id:
-        return canonicalize_scope_id(scope_id)
-
-    effective_tenant_id = getattr(request.state, "effective_tenant_id", None)
-    if isinstance(effective_tenant_id, str) and effective_tenant_id:
-        return effective_tenant_id
-
+    """Return the storage tenant used for workspace and config isolation."""
     tenant_id = getattr(request.state, "tenant_id", None)
-    if isinstance(tenant_id, str) and tenant_id:
-        return tenant_id
-    return None
+    source_id = getattr(request.state, "source_id", None)
+    scope_id = getattr(request.state, "scope_id", None)
+    if not isinstance(tenant_id, str) or not tenant_id:
+        return None
+    return resolve_storage_tenant_id(
+        tenant_id,
+        source_id if isinstance(source_id, str) else None,
+        scope_id=scope_id if isinstance(scope_id, str) else None,
+    )
 
 
 class TenantWorkspaceContext:
