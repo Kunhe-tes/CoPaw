@@ -604,6 +604,39 @@ class TestTenantInitSourceModuleInit:
         init_tenant_init_source_module(db=None)
 
 
+class TestGetTenantSourceInfo:
+    """Tests for tenant identity lookup by tenant-source pair."""
+
+    @pytest.mark.asyncio
+    async def test_returns_none_without_db(self):
+        """get_tenant_source_info returns None when DB is unavailable."""
+        store = TenantInitSourceStore(db=None)
+
+        result = await store.get_tenant_source_info("tenant-1", "RMASSIST")
+
+        assert result is None
+
+    @pytest.mark.asyncio
+    async def test_returns_identity_when_record_exists(self):
+        """get_tenant_source_info returns tenant_name and bbk_id."""
+        mock_db = MagicMock()
+        mock_db.is_connected = True
+        mock_db.fetch_one = AsyncMock(
+            return_value={
+                "tenant_name": "张三",
+                "bbk_id": "3301",
+            },
+        )
+        store = TenantInitSourceStore(db=mock_db)
+
+        result = await store.get_tenant_source_info("tenant-1", "RMASSIST")
+
+        assert result == {
+            "tenant_name": "张三",
+            "bbk_id": "3301",
+        }
+
+
 # ==================== is_tenant_source tests ====================
 
 

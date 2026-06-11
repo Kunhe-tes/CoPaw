@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""API routers 包级懒加载入口。"""
+"""Lazy-loading entry point for API routers."""
 
 from __future__ import annotations
 
@@ -74,7 +74,7 @@ _ROUTER_CACHE: APIRouter | None = None
 
 
 def _build_router() -> APIRouter:
-    """按需构造聚合 API router。"""
+    """Build the aggregated API router on demand."""
     router = APIRouter()
     for module_path, attr_name in _ROUTER_MODULES:
         module = import_module(module_path, __name__)
@@ -90,7 +90,7 @@ def create_agent_scoped_router() -> APIRouter:
 
 
 def __getattr__(name: str):
-    """按需导出聚合 router 或具体子模块。"""
+    """Lazily export the aggregate router or a router submodule."""
     global _ROUTER_CACHE  # pylint: disable=global-statement
 
     if name == "router":

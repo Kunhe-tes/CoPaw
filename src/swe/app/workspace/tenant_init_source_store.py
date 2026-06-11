@@ -205,6 +205,39 @@ class TenantInitSourceStore:
             )
             return []
 
+    async def get_tenant_source_info(
+        self,
+        tenant_id: str,
+        source_id: str,
+    ) -> dict | None:
+        """Query tenant identity fields for a tenant-source pair.
+
+        Args:
+            tenant_id: The tenant identifier.
+            source_id: The source identifier.
+
+        Returns:
+            Dict containing tenant_name and bbk_id, or None if no record exists.
+        """
+        if not self._use_db:
+            return None
+        query = (
+            "SELECT tenant_name, bbk_id FROM swe_tenant_init_source "
+            "WHERE tenant_id = %s AND source_id = %s "
+            "LIMIT 1"
+        )
+        try:
+            row = await self.db.fetch_one(query, (tenant_id, source_id))
+            return dict(row) if row else None
+        except Exception as e:
+            logger.warning(
+                "Failed to query tenant source info for tenant=%s source=%s: %s",
+                tenant_id,
+                source_id,
+                e,
+            )
+            return None
+
     async def get_all(
         self,
         page: int = 1,
