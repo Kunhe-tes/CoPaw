@@ -591,10 +591,10 @@ function buildTrendAxisTicks(axisMax: number): TrendAxisTick[] {
 export function buildTrendSvgData(trendData: TrendDatum[]) {
   const width = 428;
   const height = 244;
-  const chartLeft = 34;
-  const chartRight = 34;
-  const chartTop = 18;
-  const chartBottom = 34;
+  const chartLeft = 6;
+  const chartRight = 6;
+  const chartTop = 10;
+  const chartBottom = 24;
   const chartWidth = width - chartLeft - chartRight;
   const chartHeight = height - chartTop - chartBottom;
   const rawMaxCalls = Math.max(
@@ -1352,7 +1352,7 @@ export default function BusinessOverviewPage() {
                       }
                     />
                     {bar.showLabel && (
-                      <text x={bar.x + bar.width / 2} y={233} className={styles.axisLabel}>
+                      <text x={bar.x + bar.width / 2} y={trendSvg.height - trendSvg.chartBottom + 6} className={styles.axisLabel}>
                         {bar.label}
                       </text>
                     )}
