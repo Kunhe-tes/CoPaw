@@ -61,6 +61,7 @@ class SkillVersionService:
         skill_dir: Path,
         description: str = "",
         creator: str = "",
+        creator_name: str = "",
         current_market_version: Optional[str] = None,
         created_at: Optional[str] = None,
     ) -> SkillVersion:
@@ -72,12 +73,18 @@ class SkillVersionService:
         3. 如果无版本历史且有 current_market_version，使用它
         4. 如果无版本历史且无 current_market_version，默认 1.0.0
 
+        版本描述生成策略：
+        1. 如果传入 description，使用传入值
+        2. 如果是初始版本（无历史），描述为 "首次上传"
+        3. 如果有历史版本，计算 diff 统计生成描述（如 "变更 3 个文件，新增 12 行"）
+
         Args:
             source_id: 来源 ID
             item_id: 条目 ID
             skill_dir: 当前技能文件目录
-            description: 版本描述
-            creator: 创建者名称
+            description: 版本描述（可选，不传则自动生成）
+            creator: 创建者 ID
+            creator_name: 创建者名称
             current_market_version: 市场索引中的当前版本号（可选）
             created_at: 创建时间 ISO8601 格式（可选，用于历史技能初始化）
 
@@ -88,8 +95,12 @@ class SkillVersionService:
         manifest = self._load_versions_manifest(source_id, item_id)
         existing_ids = {v.version_id for v in manifest.versions}
 
-        # 获取版本历史中的最新版本号（用于递增）
+        # 判断是否是初始版本
+        is_initial = len(manifest.versions) == 0
+
+        # 获取版本历史中的最新版本（用于递增和 diff 计算）
         last_version_from_history = ""
+        last_version_dir: Optional[Path] = None
         if manifest.versions:
             # 按创建时间排序，获取最新版本
             sorted_versions = sorted(
@@ -98,6 +109,11 @@ class SkillVersionService:
                 reverse=True,
             )
             last_version_from_history = sorted_versions[0].version_id
+            last_version_dir = self._get_version_dir(
+                source_id,
+                item_id,
+                last_version_from_history,
+            )
 
         # 提取版本号
         version_id = self._extract_version_from_skill(
@@ -106,13 +122,35 @@ class SkillVersionService:
             last_version_from_history=last_version_from_history,
         )
 
-        # 确保版本号唯一
+        # 确保版本号唯一，处理冲突情况
         if version_id in existing_ids:
-            # 版本号冲突，递增版本
-            version_id = self._bump_version(version_id)
-            # 再次检查唯一性
-            while version_id in existing_ids:
-                version_id = self._bump_version(version_id)
+            # 版本号已存在，检查签名是否相同
+            existing_version_info = next(
+                (v for v in manifest.versions if v.version_id == version_id),
+                None,
+            )
+            # 计算新内容的签名
+            new_signature = self._calculate_signature(skill_dir)
+            if (
+                existing_version_info
+                and existing_version_info.signature == new_signature
+            ):
+                # 同版本同内容 → 跳过，不创建新快照
+                logger.info(
+                    "Version %s already exists with same content, skipping snapshot creation",
+                    version_id,
+                )
+                # 更新 is_current 标记
+                for v in manifest.versions:
+                    v.is_current = v.version_id == version_id
+                self._save_versions_manifest(source_id, item_id, manifest)
+                return existing_version_info
+            else:
+                # 同版本不同内容 → 报错，要求用户指定新版本
+                raise ValueError(
+                    f"Version {version_id} already exists with different content. "
+                    f"Please specify a new version in SKILL.md or allow auto-bump.",
+                )
 
         # 计算签名
         signature = self._calculate_signature(skill_dir)
@@ -121,13 +159,33 @@ class SkillVersionService:
         version_dir = self._get_version_dir(source_id, item_id, version_id)
         self._copy_skill_to_version(skill_dir, version_dir)
 
+        # 自动生成版本描述（如果未传入）
+        if not description:
+            if is_initial:
+                description = "首次上传"
+            elif last_version_dir and last_version_dir.exists():
+                # 计算与上一个版本的 diff 统计
+                stats = self._compute_quick_diff_stats(
+                    last_version_dir,
+                    skill_dir,
+                )
+                if stats["changed_files"] == 0:
+                    description = "无变更"
+                else:
+                    parts = [f"变更 {stats['changed_files']} 个文件"]
+                    if stats["added_lines"] > 0:
+                        parts.append(f"新增 {stats['added_lines']} 行")
+                    if stats["deleted_lines"] > 0:
+                        parts.append(f"删除 {stats['deleted_lines']} 行")
+                    description = "，".join(parts)
+
         # 创建版本信息
         now = created_at or datetime.now(timezone.utc).isoformat()
-        is_initial = len(manifest.versions) == 0
         new_version = SkillVersion(
             version_id=version_id,
             created_at=now,
             created_by=creator,
+            created_by_name=creator_name,
             description=description,
             signature=signature,
             is_current=True,
@@ -611,14 +669,16 @@ class SkillVersionService:
         """从 SKILL.md 提取版本号.
 
         版本号生成策略（按优先级）：
-        1. SKILL.md 有 version 字段 → 直接使用
-        2. 版本历史存在 → 接着最后版本递增
-        3. current_market_version 存在 → 使用它
+        1. SKILL.md 有 version 字段 → 直接使用（用户明确指定）
+        2. current_market_version 存在 → 使用它（保持市场版本一致）
+        3. 版本历史存在 → 接着最后版本递增
         4. 新技能 → 默认 1.0.0
+
+        注意：调用方应确保 current_market_version 已正确设置（考虑 SKILL.md 版本）
 
         Args:
             skill_dir: 技能目录
-            current_market_version: 市场索引中的当前版本号
+            current_market_version: 市场索引中的当前版本号（已考虑 SKILL.md）
             last_version_from_history: 版本历史中的最新版本号
 
         Returns:
@@ -633,13 +693,13 @@ class SkillVersionService:
             if version:
                 return version
 
-        # 2. 版本历史存在，接着最后版本递增
-        if last_version_from_history:
-            return self._bump_version(last_version_from_history)
-
-        # 3. 使用市场索引中的当前版本号
+        # 2. 使用市场索引中的当前版本号（与标题版本对齐）
         if current_market_version:
             return current_market_version
+
+        # 3. 版本历史存在，接着最后版本递增
+        if last_version_from_history:
+            return self._bump_version(last_version_from_history)
 
         # 4. 新技能，默认使用 1.0.0
         return "1.0.0"
@@ -674,6 +734,13 @@ class SkillVersionService:
         md_content: str,
     ) -> str:
         """从 SKILL.md frontmatter 中提取 version."""
+        return self._extract_version_from_frontmatter_static(md_content)
+
+    @staticmethod
+    def _extract_version_from_frontmatter_static(
+        md_content: str,
+    ) -> str:
+        """从 SKILL.md frontmatter 中提取 version（静态方法，供外部调用）."""
         if not md_content.startswith("---"):
             return ""
         try:
@@ -688,11 +755,14 @@ class SkillVersionService:
                 key = key.strip().lower()
                 val = val.strip()
                 if key == "version" and val:
-                    # 移除引号
+                    # 移除引号（双引号或单引号）
                     if val.startswith('"') and val.endswith('"'):
                         val = val[1:-1]
                     elif val.startswith("'") and val.endswith("'"):
                         val = val[1:-1]
+                    # 移除 v 前缀（如 v1.0.0）
+                    if val.lower().startswith("v"):
+                        val = val[1:]
                     return val
         return ""
 
@@ -876,6 +946,63 @@ class SkillVersionService:
                 deleted += 1
 
         return diff_text, added, deleted
+
+    def _compute_quick_diff_stats(
+        self,
+        base_dir: Path,
+        target_dir: Path,
+    ) -> dict[str, int]:
+        """快速计算两个目录的 diff 统计（用于版本描述生成）.
+
+        Returns:
+            {"changed_files": int, "added_lines": int, "deleted_lines": int}
+        """
+        base_files = self._collect_skill_files(base_dir)
+        target_files = self._collect_skill_files(target_dir)
+
+        added_files = target_files - base_files
+        deleted_files = base_files - target_files
+        common_files = base_files & target_files
+
+        changed_files = 0
+        total_added = 0
+        total_deleted = 0
+
+        # 新增文件
+        for f in added_files:
+            target_path = target_dir / f
+            if target_path.is_file():
+                lines = self._read_file_lines(target_path)
+                total_added += len(lines)
+                changed_files += 1
+
+        # 删除文件
+        for f in deleted_files:
+            base_path = base_dir / f
+            if base_path.is_file():
+                lines = self._read_file_lines(base_path)
+                total_deleted += len(lines)
+                changed_files += 1
+
+        # 修改文件
+        for f in common_files:
+            base_path = base_dir / f
+            target_path = target_dir / f
+            if base_path.is_file() and target_path.is_file():
+                _, added, deleted = self._compute_file_diff(
+                    base_path,
+                    target_path,
+                )
+                if added > 0 or deleted > 0:
+                    total_added += added
+                    total_deleted += deleted
+                    changed_files += 1
+
+        return {
+            "changed_files": changed_files,
+            "added_lines": total_added,
+            "deleted_lines": total_deleted,
+        }
 
     def _generate_diff_for_new_file(
         self,

@@ -234,7 +234,14 @@ export function VersionHistoryModal(props: VersionHistoryModalProps) {
                       </Text>
                       <Text type="secondary" style={{ fontSize: 12 }}>
                         <UserOutlined style={{ marginRight: 4 }} />
-                        {version.created_by || "-"}
+                        {(() => {
+                          const name = version.created_by_name?.trim();
+                          const id = version.created_by?.trim();
+                          if (name && id) return `${name}/${id}`;
+                          if (name) return name;
+                          if (id) return id;
+                          return "-";
+                        })()}
                       </Text>
                     </div>
                     <div style={{ display: "flex", gap: 6 }}>

@@ -289,8 +289,6 @@ function TaskFunnel({ taskStatusSummary }: { taskStatusSummary: TaskStatusSummar
   const totalTasks = safeNumber(taskStatusSummary?.total_tasks);
   const successCount = safeNumber(taskStatusSummary?.success);
   const readCount = safeNumber(taskStatusSummary?.read_count);
-  const clickCount = safeNumber(taskStatusSummary?.click_count);
-  const clickByButtonType = taskStatusSummary?.click_by_button_type || {};
 
   if (totalTasks === 0) {
     return (
@@ -303,43 +301,24 @@ function TaskFunnel({ taskStatusSummary }: { taskStatusSummary: TaskStatusSummar
 
   const successRate = ((successCount / totalTasks) * 100).toFixed(1);
   const readRate = successCount > 0 ? ((readCount / successCount) * 100).toFixed(1) : "0.0";
-  const clickRate = readCount > 0 ? ((clickCount / readCount) * 100).toFixed(1) : "0.0";
 
   // 值为 0 时保证有最小值显示
   const minBar = Math.max(totalTasks * 0.12, 1);
   const ensureVisible = (v: number) => (v <= minBar ? minBar : v);
 
-  const funnelColors = ["#4f46e5", "#16a34a", "#0891b2", "#f59e0b"];
+  const funnelColors = ["#4f46e5", "#16a34a", "#0891b2"];
 
   const chartData = [
     { name: "总任务数", value: ensureVisible(totalTasks), rawValue: totalTasks },
     { name: "执行成功数", value: ensureVisible(successCount), rawValue: successCount },
     { name: "已读数", value: ensureVisible(readCount), rawValue: readCount },
-    { name: "点击数", value: ensureVisible(clickCount), rawValue: clickCount, clickByButtonType },
   ];
-
-  // 生成点击数的详细 tooltip（表格展示）
-  const generateClickTooltip = (clickByType: Record<string, number>) => {
-    const entries = Object.entries(clickByType);
-    if (entries.length === 0) {
-      return `<div style="font-weight:600;">点击数: 0</div>`;
-    }
-    const rows = entries.map(
-      ([type, count]) =>
-        `<tr><td style="padding:2px 8px;text-align:left;color:#475569;">${type}</td><td style="padding:2px 8px;text-align:right;font-weight:600;">${formatNumber(count)}</td></tr>`,
-    );
-    return `<div style="font-weight:600;margin-bottom:6px;">点击数: ${formatNumber(clickCount)}</div><table style="border-collapse:collapse;font-size:12px;"><tbody>${rows.join("")}</tbody></table>`;
-  };
 
   const option = {
     tooltip: {
       trigger: "item",
-      formatter: (params: { name: string; data: { rawValue: number; clickByButtonType?: Record<string, number> } }) => {
-        if (params.name === "点击数" && params.data.clickByButtonType) {
-          return generateClickTooltip(params.data.clickByButtonType);
-        }
-        return `${params.name}: ${formatNumber(params.data.rawValue)}`;
-      },
+      formatter: (params: { name: string; data: { rawValue: number } }) =>
+        `${params.name}: ${formatNumber(params.data.rawValue)}`,
       extraCssText: "max-width: 200px; white-space: normal;",
     },
     legend: {
@@ -392,7 +371,6 @@ function TaskFunnel({ taskStatusSummary }: { taskStatusSummary: TaskStatusSummar
           name: item.name,
           value: item.value,
           rawValue: item.rawValue,
-          clickByButtonType: item.clickByButtonType,
           itemStyle: { color: funnelColors[index] },
         })),
       },
@@ -458,40 +436,6 @@ function TaskFunnel({ taskStatusSummary }: { taskStatusSummary: TaskStatusSummar
             type: "text",
             style: {
               text: `→ ${readRate}%`,
-              x: 12,
-              y: 10,
-              fill: "#64748b",
-              fontSize: 10,
-              fontWeight: 500,
-            },
-          },
-        ],
-      },
-      // 第三层到第四层的转化率
-      {
-        type: "group",
-        left: "68%",
-        top: "58%",
-        children: [
-          {
-            type: "circle",
-            shape: { cx: 3, cy: 0, r: 3 },
-            style: { fill: "#94a3b8" },
-          },
-          {
-            type: "line",
-            shape: { x1: 3, y1: 0, x2: 3, y2: 20 },
-            style: { stroke: "#94a3b8", lineWidth: 1, lineDash: [3, 2] },
-          },
-          {
-            type: "circle",
-            shape: { cx: 3, cy: 20, r: 3 },
-            style: { fill: "#94a3b8" },
-          },
-          {
-            type: "text",
-            style: {
-              text: `→ ${clickRate}%`,
               x: 12,
               y: 10,
               fill: "#64748b",
@@ -781,9 +725,10 @@ export default function BusinessOverviewPage() {
         lastActive: item.last_active
           ? dayjs(String(item.last_active)).format("YYYY-MM-DD HH:mm")
           : "-",
-        // 三种口径统计字段
+        // 四种口径统计字段
         manualCalls: safeNumber(item.manual_calls),
         cronExecutions: safeNumber(item.cron_executions),
+        cronSuccess: safeNumber(item.cron_success),
         cronReads: safeNumber(item.cron_reads),
       })),
     [],
@@ -1470,9 +1415,10 @@ export default function BusinessOverviewPage() {
           <div className={styles.rankHeader}>
             <span>排名</span>
             <span>用户</span>
-            <span>主动使用</span>
-            <span>定时执行</span>
+            <span>任务执行</span>
+            <span>任务成功</span>
             <span>结果查看</span>
+            <span>主动调用</span>
           </div>
           <div className={styles.rankList} onScroll={handleActiveScroll}>
             {activeLoading && activeUsers.length === 0 ? (
@@ -1521,13 +1467,16 @@ export default function BusinessOverviewPage() {
                       </span>
                     </Tooltip>
                     <span className={styles.rankCalls}>
-                      {formatNumber(item.manualCalls)}
-                    </span>
-                    <span className={styles.rankCalls}>
                       {formatNumber(item.cronExecutions)}
                     </span>
                     <span className={styles.rankCalls}>
+                      {formatNumber(item.cronSuccess)}
+                    </span>
+                    <span className={styles.rankCalls}>
                       {formatNumber(item.cronReads)}
+                    </span>
+                    <span className={styles.rankCalls}>
+                      {formatNumber(item.manualCalls)}
                     </span>
                   </button>
                 );

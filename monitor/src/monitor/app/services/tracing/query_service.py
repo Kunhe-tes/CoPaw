@@ -1099,14 +1099,15 @@ class TracingQueryService:
             filter_user_type: 'filtered' 过滤80/IT开头用户，'all' 仅过滤default用户
             metric_type: 口径类型（仅影响默认排序，不影响返回字段）
         """
-        # 排序映射表
+        # 排序映射表（按四列依次降序：任务执行数、任务成功数、结果查看数、主动调用数）
         order_by_map = {
-            "manual": "manual_calls DESC, user_id ASC",
-            "cron_exec": "cron_executions DESC, user_id ASC",
-            "cron_read": "cron_reads DESC, user_id ASC",
-            "manual_calls": "manual_calls DESC, user_id ASC",
-            "cron_executions": "cron_executions DESC, user_id ASC",
-            "cron_reads": "cron_reads DESC, user_id ASC",
+            "manual": "cron_executions DESC, cron_success DESC, cron_reads DESC, manual_calls DESC, user_id ASC",
+            "cron_exec": "cron_executions DESC, cron_success DESC, cron_reads DESC, manual_calls DESC, user_id ASC",
+            "cron_read": "cron_executions DESC, cron_success DESC, cron_reads DESC, manual_calls DESC, user_id ASC",
+            "manual_calls": "cron_executions DESC, cron_success DESC, cron_reads DESC, manual_calls DESC, user_id ASC",
+            "cron_executions": "cron_executions DESC, cron_success DESC, cron_reads DESC, manual_calls DESC, user_id ASC",
+            "cron_success": "cron_executions DESC, cron_success DESC, cron_reads DESC, manual_calls DESC, user_id ASC",
+            "cron_reads": "cron_executions DESC, cron_success DESC, cron_reads DESC, manual_calls DESC, user_id ASC",
             "last_active": "last_active DESC, user_id ASC",
         }
 
@@ -1114,8 +1115,8 @@ class TracingQueryService:
         if sort_by and sort_by in order_by_map:
             order_by = order_by_map[sort_by]
         else:
-            metric_key = metric_type or "manual"
-            order_by = order_by_map.get(metric_key, order_by_map["manual"])
+            # 默认按四列依次降序排序
+            order_by = order_by_map["manual"]
 
         # 构建 WHERE 条件和参数
         where_sql, params = self._build_traces_where_clause(
@@ -1185,9 +1186,9 @@ class TracingQueryService:
         params.append("default")
         if filter_user_type == "filtered":
             where_clauses.append(
-                "(t.user_id NOT LIKE %s AND t.user_id NOT LIKE %s)",
+                "(t.user_id NOT LIKE %s AND t.user_id NOT LIKE %s AND t.user_id != %s)",
             )
-            params.extend(["80%%", "IT%%"])
+            params.extend(["80%%", "IT%%", "agent_default"])
 
         if user_id:
             where_clauses.append("t.user_id LIKE %s")
@@ -1259,6 +1260,7 @@ class TracingQueryService:
                        MAX(t.start_time) as last_active,
                        COUNT(CASE WHEN t.session_id NOT LIKE 'cron-task:%%' THEN 1 END) as manual_calls,
                        COALESCE(MAX(ce.cron_executions), 0) as cron_executions,
+                       COALESCE(MAX(ce.cron_success), 0) as cron_success,
                        (SELECT COUNT(*) FROM swe_tracing_spans s
                         WHERE s.trace_id IN (SELECT trace_id FROM swe_tracing_traces WHERE user_id = t.user_id)
                         AND s.event_type = 'skill_invocation') as total_skills,
@@ -1269,6 +1271,7 @@ class TracingQueryService:
                 LEFT JOIN (
                     SELECT j.tenant_id as user_id,
                            COUNT(*) as cron_executions,
+                           SUM(CASE WHEN e.status = 'success' THEN 1 ELSE 0 END) as cron_success,
                            SUM(CASE WHEN e.is_read = TRUE THEN 1 ELSE 0 END) as cron_reads
                     FROM swe_cron_executions e
                     INNER JOIN swe_cron_jobs j ON e.job_id = j.id
@@ -1290,6 +1293,7 @@ class TracingQueryService:
                        MAX(t.start_time) as last_active,
                        COUNT(CASE WHEN t.session_id NOT LIKE 'cron-task:%%' THEN 1 END) as manual_calls,
                        COALESCE(MAX(ce.cron_executions), 0) as cron_executions,
+                       COALESCE(MAX(ce.cron_success), 0) as cron_success,
                        (SELECT COUNT(*) FROM swe_tracing_spans s
                         WHERE s.source_id = %s
                         AND s.trace_id IN (SELECT trace_id FROM swe_tracing_traces WHERE user_id = t.user_id AND source_id = %s)
@@ -1301,6 +1305,7 @@ class TracingQueryService:
                 LEFT JOIN (
                     SELECT j.tenant_id as user_id,
                            COUNT(*) as cron_executions,
+                           SUM(CASE WHEN e.status = 'success' THEN 1 ELSE 0 END) as cron_success,
                            SUM(CASE WHEN e.is_read = TRUE THEN 1 ELSE 0 END) as cron_reads
                     FROM swe_cron_executions e
                     INNER JOIN swe_cron_jobs j ON e.job_id = j.id
@@ -1334,6 +1339,7 @@ class TracingQueryService:
             last_active=row["last_active"],
             manual_calls=row["manual_calls"] or 0,
             cron_executions=row["cron_executions"] or 0,
+            cron_success=row["cron_success"] or 0,
             cron_reads=row["cron_reads"] or 0,
         )
 
@@ -1607,8 +1613,8 @@ class TracingQueryService:
             query = f"""
                 SELECT
                     COUNT(DISTINCT user_id) as total_users,
-                    COUNT(DISTINCT CASE WHEN user_id LIKE '80%%' OR user_id LIKE 'IT%%' THEN user_id END) as it_users,
-                    COUNT(DISTINCT CASE WHEN user_id NOT LIKE '80%%' AND user_id NOT LIKE 'IT%%' THEN user_id END) as business_users
+                    COUNT(DISTINCT CASE WHEN user_id LIKE '80%%' OR user_id LIKE 'IT%%' OR user_id = 'agent_default' THEN user_id END) as it_users,
+                    COUNT(DISTINCT CASE WHEN user_id NOT LIKE '80%%' AND user_id NOT LIKE 'IT%%' AND user_id != 'agent_default' THEN user_id END) as business_users
                 FROM swe_tracing_traces
                 WHERE start_time >= %s AND start_time <= %s
                   AND source_id NOT IN ({exclude_placeholders})
@@ -1625,8 +1631,8 @@ class TracingQueryService:
             query = f"""
                 SELECT
                     COUNT(DISTINCT user_id) as total_users,
-                    COUNT(DISTINCT CASE WHEN user_id LIKE '80%%' OR user_id LIKE 'IT%%' THEN user_id END) as it_users,
-                    COUNT(DISTINCT CASE WHEN user_id NOT LIKE '80%%' AND user_id NOT LIKE 'IT%%' THEN user_id END) as business_users
+                    COUNT(DISTINCT CASE WHEN user_id LIKE '80%%' OR user_id LIKE 'IT%%' OR user_id = 'agent_default' THEN user_id END) as it_users,
+                    COUNT(DISTINCT CASE WHEN user_id NOT LIKE '80%%' AND user_id NOT LIKE 'IT%%' AND user_id != 'agent_default' THEN user_id END) as business_users
                 FROM swe_tracing_traces
                 WHERE source_id = %s AND start_time >= %s AND start_time <= %s
                   AND user_id != 'default'{bbk_filter_sql}
@@ -2333,7 +2339,7 @@ class TracingQueryService:
                 *bbk_filter_params,
             )
         else:
-            new_cron_query = """
+            new_cron_query = f"""
                 SELECT COUNT(*) AS count
                 FROM swe_cron_jobs
                 WHERE created_at >= %s AND created_at < %s
@@ -2341,59 +2347,20 @@ class TracingQueryService:
                   AND deleted_at IS NULL
                   AND tenant_id != 'default'
                   AND source_id = %s
+                  {bbk_filter_sql}
             """
-            new_cron_params = (start_date, end_date, source_id)
+            new_cron_params = (
+                start_date,
+                end_date,
+                source_id,
+                *bbk_filter_params,
+            )
 
         new_cron_result = await self._db.fetch_one(
             new_cron_query,
             new_cron_params,
         )
         new_cron_tasks = new_cron_result["count"] if new_cron_result else 0
-
-        # 查询点击数统计（从 swe_html_preview_click_events）
-        if source_id == "all":
-            click_query = f"""
-                SELECT
-                    COUNT(DISTINCT cron_task_id) AS click_count,
-                    button_type,
-                    MAX(button_name) AS button_name
-                FROM swe_html_preview_click_events
-                WHERE clicked_at >= %s AND clicked_at < %s
-                  AND source_id NOT IN ({exclude_placeholders})
-                  {bbk_filter_sql}
-                  AND cron_task_id IS NOT NULL
-                GROUP BY button_type
-            """
-            click_params = (
-                start_date,
-                end_date,
-                *EXCLUDED_SOURCE_IDS,
-                *bbk_filter_params,
-            )
-        else:
-            click_query = """
-                SELECT
-                    COUNT(DISTINCT cron_task_id) AS click_count,
-                    button_type,
-                    MAX(button_name) AS button_name
-                FROM swe_html_preview_click_events
-                WHERE clicked_at >= %s AND clicked_at < %s
-                  AND source_id = %s
-                  AND cron_task_id IS NOT NULL
-                GROUP BY button_type
-            """
-            click_params = (start_date, end_date, source_id)
-
-        click_rows = await self._db.fetch_all(click_query, click_params)
-
-        # 汇总点击数
-        click_count = 0
-        click_by_button_type: dict[str, int] = {}
-        for row in click_rows:
-            btn_name = row["button_name"] or row["button_type"] or "unknown"
-            btn_count = row["click_count"] or 0
-            click_by_button_type[btn_name] = btn_count
-            click_count += btn_count
 
         return TaskStatusSummary(
             total_tasks=total_tasks,
@@ -2402,8 +2369,6 @@ class TracingQueryService:
             cancelled=cancelled,
             read_count=read_count,
             new_cron_tasks=new_cron_tasks,
-            click_count=click_count,
-            click_by_button_type=click_by_button_type,
         )
 
     async def get_error_summary(

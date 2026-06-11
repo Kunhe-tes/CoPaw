@@ -363,6 +363,14 @@ def _extract_version_from_frontmatter(md_content: str) -> str:
             key = key.strip().lower()
             val = val.strip()
             if key == "version" and val:
+                # 移除引号（双引号或单引号）
+                if val.startswith('"') and val.endswith('"'):
+                    val = val[1:-1]
+                elif val.startswith("'") and val.endswith("'"):
+                    val = val[1:-1]
+                # 移除 v 前缀（如 v1.0.0）
+                if val.lower().startswith("v"):
+                    val = val[1:]
                 return val
     return ""
 
@@ -756,8 +764,19 @@ class MarketplaceService:
             )
 
         now = datetime.now(timezone.utc).isoformat()
+
+        # 提取 SKILL.md 中的版本号（如果有）
+        skill_md_version = ""
+        if req.skill_md:
+            skill_md_version = _extract_version_from_frontmatter(req.skill_md)
+
         if existing is not None:
-            version = _bump_patch(existing.version)
+            # 版本策略：SKILL.md 有版本则使用，否则自动递增
+            version = (
+                skill_md_version
+                if skill_md_version
+                else _bump_patch(existing.version)
+            )
             existing.version = version
             existing.description = req.description
             existing.creator_id = req.creator_id
@@ -776,7 +795,7 @@ class MarketplaceService:
                 item_type="skill",
                 name=req.name,
                 description=req.description,
-                version="1.0.0",
+                version=skill_md_version or "1.0.0",
                 creator_id=req.creator_id,
                 creator_name=req.creator_name,
                 category_id=req.category_id,
@@ -843,18 +862,6 @@ class MarketplaceService:
 
         save_index(self.marketplace_root, source_id, items)
 
-        # 尝试从 SKILL.md 提取版本号更新到市场条目
-        skill_md_path = skill_dir / "SKILL.md"
-        if skill_md_path.exists():
-            try:
-                md_content = skill_md_path.read_text(encoding="utf-8")
-                md_version = _extract_version_from_frontmatter(md_content)
-                if md_version:
-                    item.version = md_version
-                    save_index(self.marketplace_root, source_id, items)
-            except OSError:
-                pass
-
         # 创建版本快照
         version_svc = SkillVersionService(self.marketplace_root)
         try:
@@ -862,8 +869,9 @@ class MarketplaceService:
                 source_id=source_id,
                 item_id=item.item_id,
                 skill_dir=skill_dir,
-                description=f"上架版本 {item.version}",
-                creator=req.creator_name,
+                description="",  # 去掉重复的版本号信息，用户可通过标题查看版本
+                creator=req.creator_id,
+                creator_name=req.creator_name,
                 current_market_version=item.version,
             )
         except Exception as e:
