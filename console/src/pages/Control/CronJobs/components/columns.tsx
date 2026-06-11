@@ -17,6 +17,7 @@ interface ColumnHandlers {
   onToggleEnabled: (job: CronJob) => void;
   onExecuteNow: (job: CronJob) => void;
   onBroadcast: (job: CronJob) => void;
+  onManageChildren: (job: CronJob) => void;
   onEdit: (job: CronJob) => void;
   onDelete: (jobId: string) => void;
   onCopySuccess: () => void;
@@ -342,6 +343,11 @@ export const createColumns = (
             key: "broadcast",
             label: "广播到租户",
             onClick: () => handlers.onBroadcast(record),
+          },
+          {
+            key: "broadcast_children",
+            label: "查看分发用户",
+            onClick: () => handlers.onManageChildren(record),
           },
           {
             key: "edit",

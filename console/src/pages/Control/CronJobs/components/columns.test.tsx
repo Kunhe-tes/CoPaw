@@ -43,6 +43,7 @@ describe("CronJobs columns", () => {
       onToggleEnabled: vi.fn(),
       onExecuteNow: vi.fn(),
       onBroadcast: vi.fn(),
+      onManageChildren: vi.fn(),
       onEdit: vi.fn(),
       onDelete: vi.fn(),
       onCopySuccess: vi.fn(),

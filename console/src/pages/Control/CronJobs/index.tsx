@@ -12,6 +12,7 @@ import {
   JobDrawer,
   useCronJobs,
   DEFAULT_FORM_VALUES,
+  BroadcastChildrenModal,
 } from "./components";
 import { PageHeader } from "@/components/PageHeader";
 import { TenantSelector } from "@/components/TenantSelector";
@@ -54,6 +55,8 @@ function CronJobsPage() {
   const [broadcastResults, setBroadcastResults] = useState<
     CronBroadcastTenantResult[]
   >([]);
+  const [childrenManagementJob, setChildrenManagementJob] =
+    useState<CronJob | null>(null);
   const [broadcasting, setBroadcasting] = useState(false);
   const [saving, setSaving] = useState(false);
   const [form] = Form.useForm<CronJob>();
@@ -129,6 +132,10 @@ function CronJobsPage() {
     setSelectedBroadcastTenantIds([]);
     setSelectedBroadcastTargets([]);
     setBroadcastResults([]);
+  };
+
+  const handleManageChildren = (job: CronJob) => {
+    setChildrenManagementJob(job);
   };
 
   const handleBroadcastCancel = () => {
@@ -207,6 +214,7 @@ function CronJobsPage() {
     onToggleEnabled: handleToggleEnabled,
     onExecuteNow: handleExecuteNow,
     onBroadcast: handleBroadcast,
+    onManageChildren: handleManageChildren,
     onEdit: handleEdit,
     onDelete: handleDelete,
     onCopySuccess: () => message.success(t("common.copied")),
@@ -250,6 +258,12 @@ function CronJobsPage() {
         tenantDefaultModelLabel={tenantDefaultLabel}
         onClose={handleDrawerClose}
         onSubmit={handleSubmit}
+      />
+
+      <BroadcastChildrenModal
+        open={Boolean(childrenManagementJob)}
+        job={childrenManagementJob}
+        onClose={() => setChildrenManagementJob(null)}
       />
 
       <Modal

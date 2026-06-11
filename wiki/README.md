@@ -7,6 +7,7 @@
 | 文档 | 适合回答的问题 |
 | --- | --- |
 | [Cron 定时任务](cron/README.md) | 定时任务创建、调度回调、执行上下文、广播、Monitor 同步、完成通知和通知延迟 |
+| [应用市场技能拥有用户反查](market-skill-owner-lookup/README.md) | 应用市场按技能目录名反查哪些用户当前拥有同名技能，以及版本/启用状态 |
 | [系统提示词注入](system-prompt-injections/README.md) | source 级和请求级 system prompt injection 如何配置、合并、进入 Agent system prompt |
 | [静态文件访问网络](network-aware-file-urls/README.md) | `copy_file_to_static` 如何按办公网/业务网生成可访问 URL |
 | [Hook](hook/README.md) | hook 运行机制和示例 |
@@ -21,5 +22,6 @@
 - `feat(system-config): add system prompt injections`
 - `feat(static): support network-aware file URLs`
 - 当前未提交的 cron 通知延迟：`meta.notification_delay_minutes`
+- 当前未提交的分发拥有者管理：cron 分发子任务反查/批量操作、应用市场技能按名称反查拥有用户
 
 这些内容已经分别补入上表对应 wiki。
