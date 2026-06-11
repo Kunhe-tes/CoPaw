@@ -91,6 +91,12 @@ export interface CronBroadcastTenantResult {
   warning: string;
 }
 
+export interface CronBroadcastTarget {
+  tenant_id: string;
+  tenant_name?: string | null;
+  bbk_id?: string | null;
+}
+
 export interface CronBroadcastResponse {
   results: CronBroadcastTenantResult[];
 }
