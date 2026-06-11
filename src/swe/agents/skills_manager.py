@@ -906,7 +906,7 @@ def _build_skill_metadata(
     return {
         "name": skill_name,
         "description": str(post.get("description", "") or ""),
-        "version_text": _extract_version(post),
+        "version_text": _extract_version(post) or "1.0.0",
         "commit_text": "",
         "signature": _build_signature(skill_dir) if compute_signature else "",
         "source": source,
@@ -1281,6 +1281,7 @@ def reconcile_workspace_manifest(workspace_dir: Path) -> dict[str, Any]:
                 "source": source,
                 "metadata": metadata,
                 "requirements": metadata["requirements"],
+                "created_at": existing.get("created_at") or _timestamp(),
                 "updated_at": _timestamp(),
             }
             if "config" in existing:

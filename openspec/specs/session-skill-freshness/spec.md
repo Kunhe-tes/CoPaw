@@ -62,16 +62,19 @@ When the system detects one or more effective associated skill changes for a tur
 - **WHEN** a skill changes only because its freshness token differs for the same resolved skill directory
 - **THEN** the notice SHALL describe that skill as having a detected skill-directory change
 - **AND** the notice SHALL instruct the model to treat current skill content as superseding earlier assumptions
+- **AND** the notice SHALL require the model to re-read the current `SKILL.md` before relying on that skill
+- **AND** the notice SHALL NOT inline the `SKILL.md` body
 
 #### Scenario: Notice names directory switch paths
 - **WHEN** a skill change is caused by a directory switch
 - **THEN** the notice SHALL identify the affected skill by name
 - **AND** the notice SHALL include the old resolved skill directory and the new resolved skill directory in `old -> new` form
+- **AND** the notice SHALL require the model to re-read `SKILL.md` from the new resolved skill directory
 
 #### Scenario: Notice is model-only and one-turn scoped
 - **WHEN** the system emits a skill freshness notice for a turn
 - **THEN** the notice SHALL be visible to the model for that turn only
-- **AND** the system SHALL NOT expose that notice as a user-visible chat message
+- **AND** the system SHALL NOT expose that notice in the current live Console stream
 - **AND** the system SHALL NOT persist that notice into long-lived session memory as a recurring prompt banner
 
 ### Requirement: Applied snapshot SHALL be updated immediately after refresh handling
@@ -93,4 +96,3 @@ After the system detects associated skill changes for a turn and applies the res
 - **WHEN** a turn has already applied a freshness change and persisted the resulting snapshot state
 - **AND** the next turn sees the same snapshot values and effective skill resolution
 - **THEN** the system SHALL NOT emit another freshness notice for that same prior change
-

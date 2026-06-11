@@ -87,24 +87,14 @@ async def test_runner_http_client_keeps_tenant_secret_literal(
     )
     captured: dict[str, Any] = {}
 
-    class _FakeAsyncClient:
-        def __init__(self, **kwargs):
-            captured["http_client_kwargs"] = kwargs
-
     class _FakeHttpStatefulClient:
         def __init__(self, **kwargs):
             captured["stateful_client_kwargs"] = kwargs
 
-    monkeypatch.setattr(runner_module.httpx, "AsyncClient", _FakeAsyncClient)
     monkeypatch.setattr(
         runner_module,
         "HttpStatefulClient",
         _FakeHttpStatefulClient,
-    )
-    monkeypatch.setattr(
-        runner_module,
-        "streamable_http_client",
-        lambda **kwargs: "streamable-http-context",
     )
 
     with tenant_context(tenant_id="tenant-a", source_id="source-a"):
@@ -120,7 +110,7 @@ async def test_runner_http_client_keeps_tenant_secret_literal(
             ),
         )
 
-    assert captured["http_client_kwargs"]["headers"] == {
+    assert captured["stateful_client_kwargs"]["headers"] == {
         "Authorization": "Bearer abc${HOME}xyz",
         "X-Home": "dir=/home/demo",
     }

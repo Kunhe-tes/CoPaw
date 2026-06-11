@@ -16,8 +16,13 @@ from .model_slot_context import bind_model_slot_override
 from .models import CronJobSpec
 from ..tenant_context import bind_tenant_context
 from ..console_push_store import append as push_store_append
+from ..identity_resolver import resolve_user_identity
 from ...config.llm_workload import LLM_WORKLOAD_CRON, bind_llm_workload
-from ...config.context import canonicalize_scope_id, resolve_scope_id
+from ...config.context import (
+    canonicalize_scope_id,
+    resolve_scope_id,
+    resolve_storage_tenant_id,
+)
 from ...providers.models import ModelSlotConfig
 from ...providers.provider_manager import ProviderManager
 from ...tracing import has_trace_manager, get_trace_manager
@@ -90,6 +95,8 @@ class AgentStreamState:
     completed_message_sent: bool = False
     stream_returned: bool = False
     output_parts: list[str] = field(default_factory=list)
+    failed_message_seen: bool = False  # 是否看到 Failed 事件
+    error_message: str = ""  # 错误信息
 
     @property
     def output_len(self) -> int:
@@ -302,7 +309,15 @@ class CronExecutor:
             return None
 
         runtime_tenant_id = scope_id or getattr(job, "tenant_id", None)
-        manager_tenant_id = runtime_tenant_id or "default"
+        manager_tenant_id = (
+            resolve_storage_tenant_id(
+                getattr(job, "tenant_id", None),
+                getattr(job, "source_id", None),
+                scope_id=runtime_tenant_id if runtime_tenant_id else None,
+            )
+            or runtime_tenant_id
+            or "default"
+        )
         ProviderManager.ensure_tenant_provider_storage(manager_tenant_id)
         manager = ProviderManager.get_instance(manager_tenant_id)
         active_model = manager.get_active_model()
@@ -537,14 +552,21 @@ class CronExecutor:
                 return None
 
             source_id = job.source_id or "default"
+            resolved_identity = await resolve_user_identity(
+                tenant_id=getattr(job, "tenant_id", None),
+                source_id=job.source_id,
+                user_name=job.tenant_name,
+                bbk_id=job.bbk_id,
+                allow_remote_lookup=False,
+            )
             trace_id = await trace_mgr.start_trace(
                 user_id=target_user_id or "cron",
                 session_id=target_session_id or f"cron:{job.id}",
                 channel=job.dispatch.channel,
                 source_id=source_id,
                 user_message=None,
-                user_name=job.tenant_name,
-                bbk_id=job.bbk_id,
+                user_name=resolved_identity.user_name,
+                bbk_id=resolved_identity.bbk_id,
                 session_name=job.name,
             )
             # 写入 model_output 到 ES
@@ -630,14 +652,21 @@ class CronExecutor:
                 return None
 
             source_id = job.source_id or "default"
+            resolved_identity = await resolve_user_identity(
+                tenant_id=getattr(job, "tenant_id", None),
+                source_id=job.source_id,
+                user_name=job.tenant_name,
+                bbk_id=job.bbk_id,
+                allow_remote_lookup=False,
+            )
             trace_id = await trace_mgr.start_trace(
                 user_id=target_user_id or "cron",
                 session_id=target_session_id or f"cron:{job.id}",
                 channel=job.dispatch.channel,
                 source_id=source_id,
                 user_message=None,  # agent 任务的用户消息由 runner 处理
-                user_name=job.tenant_name,
-                bbk_id=job.bbk_id,
+                user_name=resolved_identity.user_name,
+                bbk_id=resolved_identity.bbk_id,
                 session_name=job.name,
             )
             logger.info(
@@ -781,17 +810,117 @@ class CronExecutor:
             "executor_leader": "",
         }
 
-    async def _execute_agent_job(
+    def _log_agent_stream_failed(
+        self,
+        job: CronJobSpec,
+        stream_state: AgentStreamState,
+    ) -> None:
+        """记录 Agent stream 返回后检测到 Failed 事件的日志。"""
+        logger.warning(
+            "cron agent stream returned with failed: job_id=%s "
+            "event_count=%s error=%s",
+            job.id,
+            stream_state.event_count,
+            stream_state.error_message,
+        )
+
+    def _log_agent_timeout(self, job: CronJobSpec) -> None:
+        """记录 Agent 执行超时日志。"""
+        logger.warning(
+            "cron execute: job_id=%s timed out after %ss",
+            job.id,
+            job.runtime.timeout_seconds,
+        )
+
+    def _log_agent_cancelled_after_failed(
+        self,
+        job: CronJobSpec,
+        stream_state: AgentStreamState,
+    ) -> None:
+        """记录取消后检测到 Failed 的日志。"""
+        logger.warning(
+            "cron agent cancelled after failed: job_id=%s "
+            "phase=%s event_count=%s failed_seen=%s error=%s",
+            job.id,
+            self._agent_stream_phase(stream_state),
+            stream_state.event_count,
+            stream_state.failed_message_seen,
+            stream_state.error_message,
+        )
+
+    def _log_agent_cancelled_after_completed(
+        self,
+        job: CronJobSpec,
+        stream_state: AgentStreamState,
+        cancelling_count: int,
+        uncancelled: int,
+    ) -> None:
+        """记录取消后已完成输出的日志。"""
+        logger.info(
+            "cron agent cancellation after completed output; "
+            "treating as success: job_id=%s phase=%s "
+            "event_count=%s completed_seen=%s completed_sent=%s "
+            "stream_returned=%s output_len=%s cancelling_count=%s "
+            "uncancelled=%s",
+            job.id,
+            self._agent_stream_phase(stream_state),
+            stream_state.event_count,
+            stream_state.completed_message_seen,
+            stream_state.completed_message_sent,
+            stream_state.stream_returned,
+            stream_state.output_len,
+            cancelling_count,
+            uncancelled,
+        )
+
+    def _log_agent_cancelled_before_completed(
+        self,
+        job: CronJobSpec,
+        stream_state: AgentStreamState,
+    ) -> None:
+        """记录取消前未完成输出的日志。"""
+        logger.info(
+            "cron agent cancelled before completion: job_id=%s "
+            "phase=%s event_count=%s completed_seen=%s "
+            "completed_sent=%s stream_returned=%s cancelling_count=%s",
+            job.id,
+            self._agent_stream_phase(stream_state),
+            stream_state.event_count,
+            stream_state.completed_message_seen,
+            stream_state.completed_message_sent,
+            stream_state.stream_returned,
+            self._current_task_cancelling_count(),
+        )
+
+    def _log_agent_generic_error(
+        self,
+        job: CronJobSpec,
+        error: Exception,
+    ) -> None:
+        """记录 Agent 执行通用异常日志。"""
+        logger.warning(
+            "cron execute: job_id=%s error: %s",
+            job.id,
+            repr(error),
+        )
+
+    async def _prepare_agent_execution(
         self,
         job: CronJobSpec,
         target_user_id: str,
         target_session_id: str,
         dispatch_meta: Dict[str, Any],
-    ) -> Dict[str, Any]:
-        """Execute agent-type job: run agent query and send events.
+    ) -> tuple[str, Optional[str], Dict[str, Any], AgentStreamState]:
+        """准备 Agent 执行的上下文和请求。
+
+        Args:
+            job: 任务定义
+            target_user_id: 目标用户 ID
+            target_session_id: 目标会话 ID
+            dispatch_meta: dispatch 元数据
 
         Returns:
-            Dict with trace_id, output_preview, input_snapshot, executor_leader
+            (runtime_tenant_id, trace_id, req, stream_state)
         """
         runtime_tenant_id = (
             dispatch_meta.get("scope_id")
@@ -808,7 +937,6 @@ class CronExecutor:
         req = self._build_agent_request(job, target_user_id, target_session_id)
         self._apply_auth_token(job, dispatch_meta, req)
 
-        # 在 executor 中创建 trace，确保 trace_id 可用
         trace_id = await self._create_trace_for_agent_job(
             job,
             target_user_id,
@@ -817,57 +945,322 @@ class CronExecutor:
         if trace_id:
             req["trace_id"] = trace_id
 
-        # 用于标记 trace 是否已被结束（防止重复结束）
+        return runtime_tenant_id, trace_id, req, AgentStreamState()
+
+    async def _run_agent_stream_with_timeout(
+        self,
+        job: CronJobSpec,
+        target_user_id: str,
+        target_session_id: str,
+        dispatch_meta: Dict[str, Any],
+        req: Dict[str, Any],
+        stream_state: AgentStreamState,
+        trace_id: Optional[str],
+    ) -> None:
+        """带超时控制的 Agent stream 执行。
+
+        Args:
+            job: 任务定义
+            target_user_id: 目标用户 ID
+            target_session_id: 目标会话 ID
+            dispatch_meta: dispatch 元数据
+            req: agent 请求
+            stream_state: 流状态
+            trace_id: trace ID
+        """
+        logger.info(
+            "cron agent stream start: job_id=%s channel=%s "
+            "session_id=%s trace_id=%s timeout=%ss",
+            job.id,
+            job.dispatch.channel,
+            target_session_id[:40] if target_session_id else "",
+            trace_id[:20] if trace_id else "(empty)",
+            job.runtime.timeout_seconds,
+        )
+        timeout_ctx = (
+            asyncio.timeout(job.runtime.timeout_seconds)
+            if hasattr(asyncio, "timeout")
+            else None
+        )
+        if timeout_ctx:
+            async with timeout_ctx:
+                await self._run_agent_stream(
+                    job,
+                    target_user_id,
+                    target_session_id,
+                    dispatch_meta,
+                    req,
+                    stream_state,
+                )
+        else:
+            await asyncio.wait_for(
+                self._run_agent_stream(
+                    job,
+                    target_user_id,
+                    target_session_id,
+                    dispatch_meta,
+                    req,
+                    stream_state,
+                ),
+                timeout=job.runtime.timeout_seconds,
+            )
+
+    async def _push_output_to_console(
+        self,
+        job: CronJobSpec,
+        stream_state: AgentStreamState,
+        runtime_tenant_id: str,
+    ) -> None:
+        """推送 Agent 输出到 console。
+
+        Args:
+            job: 任务定义
+            stream_state: 流状态
+            runtime_tenant_id: 租户 ID
+        """
+        task_chat_id: Optional[str] = (job.meta or {}).get("task_chat_id")
+        if (
+            job.dispatch.channel != CONSOLE_CHANNEL
+            and stream_state.output_parts
+            and task_chat_id
+        ):
+            await self._push_to_console(
+                task_chat_id,
+                "\n".join(stream_state.output_parts),
+                runtime_tenant_id,
+            )
+
+    async def _handle_agent_failed_after_stream(
+        self,
+        job: CronJobSpec,
+        stream_state: AgentStreamState,
+        trace_id: Optional[str],
+    ) -> None:
+        """处理 stream 返回后检测到 Failed 事件。
+
+        Args:
+            job: 任务定义
+            stream_state: 流状态
+            trace_id: trace ID
+
+        Raises:
+            RuntimeError: 总是抛出
+        """
+        self._log_agent_stream_failed(job, stream_state)
+        await self._end_trace_on_exception(
+            trace_id,
+            TraceStatus.ERROR,
+            stream_state.error_message,
+        )
+        exc = RuntimeError(
+            f"Agent execution failed: {stream_state.error_message}",
+        )
+        setattr(exc, "cron_trace_id", trace_id)
+        raise exc
+
+    async def _handle_agent_no_completion(
+        self,
+        job: CronJobSpec,
+        stream_state: AgentStreamState,
+        trace_id: Optional[str],
+    ) -> None:
+        """处理 stream 返回但没有 Completed 事件的情况。
+
+        当模型不可用或其他原因导致 agent 未正常完成时，
+        stream 可能返回空流或只有中间事件但没有 Completed 事件。
+        这种情况应视为执行失败。
+
+        Args:
+            job: 任务定义
+            stream_state: 流状态
+            trace_id: trace ID
+
+        Raises:
+            RuntimeError: 总是抛出
+        """
+        error_msg = (
+            f"Agent execution did not complete: "
+            f"event_count={stream_state.event_count} "
+            f"output_len={stream_state.output_len}"
+        )
+        logger.warning(
+            "cron agent stream returned without completion: job_id=%s "
+            "event_count=%s output_len=%s failed_seen=%s",
+            job.id,
+            stream_state.event_count,
+            stream_state.output_len,
+            stream_state.failed_message_seen,
+        )
+        await self._end_trace_on_exception(
+            trace_id,
+            TraceStatus.ERROR,
+            error_msg,
+        )
+        exc = RuntimeError(error_msg)
+        setattr(exc, "cron_trace_id", trace_id)
+        raise exc
+
+    async def _handle_agent_timeout_error(
+        self,
+        job: CronJobSpec,
+        trace_id: Optional[str],
+        runtime_tenant_id: str,
+    ) -> None:
+        """处理 Agent 执行超时异常。
+
+        Args:
+            job: 任务定义
+            trace_id: trace ID
+            runtime_tenant_id: 租户 ID
+
+        Raises:
+            asyncio.TimeoutError: 总是抛出
+        """
+        self._log_agent_timeout(job)
+        await self._notify_timeout(job, runtime_tenant_id)
+        await self._end_trace_on_exception(
+            trace_id,
+            TraceStatus.ERROR,
+            "Timeout",
+        )
+        # 附加 trace_id 到异常，以便 manager 获取
+        exc = asyncio.TimeoutError()
+        setattr(exc, "cron_trace_id", trace_id)
+        raise exc
+
+    async def _handle_agent_cancelled_error(
+        self,
+        job: CronJobSpec,
+        stream_state: AgentStreamState,
+        trace_id: Optional[str],
+        req: Dict[str, Any],
+    ) -> Optional[Dict[str, Any]]:
+        """处理 Agent 执行取消异常。
+
+        Args:
+            job: 任务定义
+            stream_state: 流状态
+            trace_id: trace ID
+            req: agent 请求
+
+        Returns:
+            如果取消时已完成，返回成功结果；否则返回 None
+
+        Raises:
+            asyncio.CancelledError: 如果取消前未完成
+        """
+        if stream_state.failed_message_seen:
+            self._log_agent_cancelled_after_failed(job, stream_state)
+            await self._end_trace_on_exception(
+                trace_id,
+                TraceStatus.ERROR,
+                stream_state.error_message,
+            )
+            exc = asyncio.CancelledError()
+            setattr(exc, "cron_trace_id", trace_id)
+            raise exc
+
+        if self._has_agent_completed_output(stream_state):
+            cancelling_count = self._current_task_cancelling_count()
+            uncancelled = self._uncancel_current_task()
+            self._log_agent_cancelled_after_completed(
+                job,
+                stream_state,
+                cancelling_count,
+                uncancelled,
+            )
+            await self._end_trace_on_success(trace_id, job.id)
+            return self._build_agent_execution_result(
+                trace_id,
+                stream_state.output_parts,
+                req,
+            )
+
+        self._log_agent_cancelled_before_completed(job, stream_state)
+        await self._end_trace_on_exception(trace_id, TraceStatus.CANCELLED)
+        exc = asyncio.CancelledError()
+        setattr(exc, "cron_trace_id", trace_id)
+        raise exc
+
+    async def _handle_agent_generic_exception(
+        self,
+        job: CronJobSpec,
+        trace_id: Optional[str],
+        error: Exception,
+    ) -> None:
+        """处理 Agent 执行通用异常。
+
+        Args:
+            job: 任务定义
+            trace_id: trace ID
+            error: 异常对象
+
+        Raises:
+            Exception: 总是抛出原异常
+        """
+        self._log_agent_generic_error(job, error)
+        await self._end_trace_on_exception(
+            trace_id,
+            TraceStatus.ERROR,
+            str(error),
+        )
+
+    async def _execute_agent_job(
+        self,
+        job: CronJobSpec,
+        target_user_id: str,
+        target_session_id: str,
+        dispatch_meta: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        """Execute agent-type job: run agent query and send events.
+
+        Returns:
+            Dict with trace_id, output_preview, input_snapshot, executor_leader
+        """
+        runtime_tenant_id, trace_id, req, stream_state = (
+            await self._prepare_agent_execution(
+                job,
+                target_user_id,
+                target_session_id,
+                dispatch_meta,
+            )
+        )
+
         trace_ended = False
-        stream_state = AgentStreamState()
         result: Optional[Dict[str, Any]] = None
         try:
-            logger.info(
-                "cron agent stream start: job_id=%s channel=%s "
-                "session_id=%s trace_id=%s timeout=%ss",
-                job.id,
-                job.dispatch.channel,
-                target_session_id[:40] if target_session_id else "",
-                trace_id[:20] if trace_id else "(empty)",
-                job.runtime.timeout_seconds,
+            await self._run_agent_stream_with_timeout(
+                job,
+                target_user_id,
+                target_session_id,
+                dispatch_meta,
+                req,
+                stream_state,
+                trace_id,
             )
-            # Wrap the entire agent execution in a timeout
-            # asyncio.timeout 是 Python 3.11+ 的特性，低版本使用 wait_for
-            if hasattr(asyncio, "timeout"):
-                async with asyncio.timeout(job.runtime.timeout_seconds):
-                    await self._run_agent_stream(
-                        job,
-                        target_user_id,
-                        target_session_id,
-                        dispatch_meta,
-                        req,
-                        stream_state,
-                    )
-            else:
-                await asyncio.wait_for(
-                    self._run_agent_stream(
-                        job,
-                        target_user_id,
-                        target_session_id,
-                        dispatch_meta,
-                        req,
-                        stream_state,
-                    ),
-                    timeout=job.runtime.timeout_seconds,
+            await self._push_output_to_console(
+                job,
+                stream_state,
+                runtime_tenant_id,
+            )
+
+            if stream_state.failed_message_seen:
+                trace_ended = True
+                await self._handle_agent_failed_after_stream(
+                    job,
+                    stream_state,
+                    trace_id,
                 )
-            # 推送结果到 console
-            task_chat_id: Optional[str] = (job.meta or {}).get("task_chat_id")
-            if (
-                job.dispatch.channel != CONSOLE_CHANNEL
-                and stream_state.output_parts
-                and task_chat_id
-            ):
-                await self._push_to_console(
-                    task_chat_id,
-                    "\n".join(stream_state.output_parts),
-                    runtime_tenant_id,
+
+            # 检查是否有 Completed 事件，没有则视为执行失败
+            if not stream_state.completed_message_seen:
+                trace_ended = True
+                await self._handle_agent_no_completion(
+                    job,
+                    stream_state,
+                    trace_id,
                 )
-            # 正常完成，构建执行结果
+
             result = self._build_agent_execution_result(
                 trace_id,
                 stream_state.output_parts,
@@ -875,80 +1268,33 @@ class CronExecutor:
             )
         except asyncio.TimeoutError:
             trace_ended = True
-            logger.warning(
-                "cron execute: job_id=%s timed out after %ss",
-                job.id,
-                job.runtime.timeout_seconds,
-            )
-            await self._notify_timeout(job, runtime_tenant_id)
-            await self._end_trace_on_exception(
+            await self._handle_agent_timeout_error(
+                job,
                 trace_id,
-                TraceStatus.ERROR,
-                "Timeout",
+                runtime_tenant_id,
             )
             raise
         except asyncio.CancelledError:
-            if self._has_agent_completed_output(stream_state):
-                trace_ended = True
-                cancelling_count = self._current_task_cancelling_count()
-                uncancelled = self._uncancel_current_task()
-                logger.info(
-                    "cron agent cancellation after completed output; "
-                    "treating as success: job_id=%s phase=%s "
-                    "event_count=%s completed_seen=%s completed_sent=%s "
-                    "stream_returned=%s output_len=%s cancelling_count=%s "
-                    "uncancelled=%s",
-                    job.id,
-                    self._agent_stream_phase(stream_state),
-                    stream_state.event_count,
-                    stream_state.completed_message_seen,
-                    stream_state.completed_message_sent,
-                    stream_state.stream_returned,
-                    stream_state.output_len,
-                    cancelling_count,
-                    uncancelled,
-                )
-                await self._end_trace_on_success(trace_id, job.id)
-                return self._build_agent_execution_result(
-                    trace_id,
-                    stream_state.output_parts,
-                    req,
-                )
             trace_ended = True
-            logger.info(
-                "cron agent cancelled before completion: job_id=%s "
-                "phase=%s event_count=%s completed_seen=%s "
-                "completed_sent=%s stream_returned=%s cancelling_count=%s",
-                job.id,
-                self._agent_stream_phase(stream_state),
-                stream_state.event_count,
-                stream_state.completed_message_seen,
-                stream_state.completed_message_sent,
-                stream_state.stream_returned,
-                self._current_task_cancelling_count(),
+            cancelled_result = await self._handle_agent_cancelled_error(
+                job,
+                stream_state,
+                trace_id,
+                req,
             )
-            await self._end_trace_on_exception(trace_id, TraceStatus.CANCELLED)
+            if cancelled_result is not None:
+                return cancelled_result
             raise
         except Exception as e:  # pylint: disable=broad-except
             trace_ended = True
-            logger.warning(
-                "cron execute: job_id=%s error: %s",
-                job.id,
-                repr(e),
-            )
-            await self._end_trace_on_exception(
-                trace_id,
-                TraceStatus.ERROR,
-                str(e),
-            )
+            await self._handle_agent_generic_exception(job, trace_id, e)
+            # 附加 trace_id 到异常，以便 manager 获取
+            setattr(e, "cron_trace_id", trace_id)
             raise
         finally:
-            # 结束 trace（仅在未被结束时）
-            # 使用 shield 保护 end_trace 操作，确保 trace 状态正确写入
             if trace_id and not trace_ended:
                 await self._end_trace_on_success(trace_id, job.id)
 
-        # 正常完成时返回结果（异常分支已 raise）
         return result
 
     def _build_agent_request(
@@ -959,6 +1305,13 @@ class CronExecutor:
     ) -> Dict[str, Any]:
         """Build agent request dict from job spec."""
         req: Dict[str, Any] = job.request.model_dump(mode="json")
+        removed_trace_id = req.pop("trace_id", None)
+        if removed_trace_id:
+            logger.warning(
+                "cron agent request removed stale trace_id=%s for job_id=%s",
+                str(removed_trace_id)[:20],
+                job.id,
+            )
         req["user_id"] = req.get("user_id") or target_user_id or "cron"
         req["session_id"] = (
             req.get("session_id") or target_session_id or f"cron:{job.id}"
@@ -1033,6 +1386,7 @@ class CronExecutor:
         async for event in self._runner.stream_query(req):
             stream_state.event_count += 1
             is_completed_message = self._is_completed_message_event(event)
+            is_failed_message = self._is_failed_message_event(event)
             text = self._extract_text_from_event(event)
             if text:
                 stream_state.output_parts.append(text)
@@ -1044,6 +1398,18 @@ class CronExecutor:
                     job.id,
                     stream_state.event_count,
                     len(text),
+                )
+            if is_failed_message:
+                stream_state.failed_message_seen = True
+                stream_state.error_message = self._extract_error_from_event(
+                    event,
+                )
+                logger.warning(
+                    "cron agent failed message received: job_id=%s "
+                    "event_count=%s error=%s",
+                    job.id,
+                    stream_state.event_count,
+                    stream_state.error_message,
                 )
             await self._channel_manager.send_event(
                 channel=job.dispatch.channel,
@@ -1064,11 +1430,12 @@ class CronExecutor:
         stream_state.stream_returned = True
         logger.info(
             "cron agent stream returned: job_id=%s event_count=%s "
-            "completed_seen=%s completed_sent=%s output_len=%s",
+            "completed_seen=%s completed_sent=%s failed_seen=%s output_len=%s",
             job.id,
             stream_state.event_count,
             stream_state.completed_message_seen,
             stream_state.completed_message_sent,
+            stream_state.failed_message_seen,
             stream_state.output_len,
         )
 
@@ -1163,13 +1530,71 @@ class CronExecutor:
         )
 
     @staticmethod
-    def _has_agent_completed_output(stream_state: AgentStreamState) -> bool:
+    def _is_failed_message_event(event: Any) -> bool:
+        """检测是否为 Failed 状态事件。
+
+        当模型调用失败时，runner 会 yield Failed 事件而不是抛出异常。
+        我们需要检测这个事件以正确处理失败情况。
+
+        Args:
+            event: Runner event
+
+        Returns:
+            True if event is a failed message event
+        """
+        from agentscope_runtime.engine.schemas.agent_schemas import RunStatus
+
         return (
-            stream_state.completed_message_seen or stream_state.stream_returned
+            getattr(event, "object", None) == "message"
+            and getattr(event, "status", None) == RunStatus.Failed
         )
 
     @staticmethod
+    def _extract_error_from_event(event: Any) -> str:
+        """从 Failed 事件中提取错误信息。
+
+        Args:
+            event: Runner event with status Failed
+
+        Returns:
+            Error message string
+        """
+        error = getattr(event, "error", None)
+        if error is None:
+            return ""
+        message = getattr(error, "message", None) or ""
+        code = getattr(error, "code", None) or ""
+        return (
+            f"{code}: {message}" if code and message else message or code or ""
+        )
+
+    @staticmethod
+    def _has_agent_completed_output(stream_state: AgentStreamState) -> bool:
+        """判断 Agent 是否真正完成输出。
+
+        只有在以下情况才视为成功：
+        - 没有看到 Failed 事件
+        - 看到了 Completed 事件
+
+        如果 stream 只是正常返回但没有 Completed 事件（如模型调用失败），
+        不应该视为成功。
+
+        Args:
+            stream_state: Agent 执行状态
+
+        Returns:
+            True if agent truly completed with output
+        """
+        # 如果看到了 Failed 事件，绝对不是成功
+        if stream_state.failed_message_seen:
+            return False
+        # 必须看到 Completed 事件才视为成功
+        return stream_state.completed_message_seen
+
+    @staticmethod
     def _agent_stream_phase(stream_state: AgentStreamState) -> str:
+        if stream_state.failed_message_seen:
+            return "failed"
         if stream_state.stream_returned:
             return "stream_returned"
         if stream_state.completed_message_seen:

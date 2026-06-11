@@ -11,6 +11,9 @@ from unittest.mock import AsyncMock
 
 import pytest
 from agentscope.message import Msg
+from agentscope_runtime.adapters.agentscope.stream import (
+    adapt_agentscope_message_stream,
+)
 
 from swe.agents.hook_runtime.models import (
     HookConfig,
@@ -422,7 +425,7 @@ async def test_blocked_turn_persists_confirmed_skill_snapshot(
 
 
 @pytest.mark.asyncio
-async def test_freshness_notice_is_sent_as_visible_system_turn_message(
+async def test_freshness_notice_is_model_only_system_turn_message(
     monkeypatch,
     tmp_path: Path,
 ) -> None:
@@ -471,9 +474,103 @@ async def test_freshness_notice_is_sent_as_visible_system_turn_message(
         if msg.role == "system"
         and "[Skill freshness notice]" in msg.get_text_content()
     ]
-    assert len(streamed_notice_messages) == 1
-    assert streamed_notice_messages[0].get_text_content() == notice_text
+    assert streamed_notice_messages == []
     assert "[Skill freshness notice]" not in _model_sys_prompt()
+
+
+@pytest.mark.asyncio
+async def test_freshness_notice_requires_reloading_current_skill_md(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    runner = _patch_runner(monkeypatch, tmp_path)
+    _FakeAgent.effective_skills = ["xlsx"]
+    _write_skill_manifest(tmp_path, skills=["xlsx"])
+    skill_dir = _write_skill_dir(tmp_path, "xlsx")
+    updated_instruction = "CURRENT_SKILL_MD_DIRECTIVE_20260609"
+    (skill_dir / "SKILL.md").write_text(
+        (
+            "---\n"
+            "name: xlsx\n"
+            "description: updated xlsx\n"
+            "---\n"
+            f"{updated_instruction}\n"
+        ),
+        encoding="utf-8",
+    )
+    await runner.session.save_session_skill_snapshot(
+        session_id="session-1",
+        user_id="user-1",
+        snapshot={
+            "xlsx": {
+                "skill_name": "xlsx",
+                "resolved_skill_dir": str(skill_dir),
+                "freshness_token": 10.0,
+            },
+        },
+    )
+    monkeypatch.setattr(
+        "swe.app.runner.runner.get_skill_freshness_token",
+        lambda _path: 11.0,
+    )
+
+    outputs = [
+        item
+        async for item in runner.query_handler(
+            [Msg(name="user", role="user", content="continue")],
+            request=_request(),
+        )
+    ]
+
+    assert outputs[-1][0].get_text_content() == "agent reply"
+    notice_text = _turn_notice_text()
+    assert "You MUST re-read" in notice_text
+    assert str(skill_dir / "SKILL.md") in notice_text
+    assert updated_instruction not in notice_text
+
+
+@pytest.mark.asyncio
+async def test_freshness_notice_is_hidden_from_agentscope_runtime_stream_adapter(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    runner = _patch_runner(monkeypatch, tmp_path)
+    _FakeAgent.effective_skills = ["xlsx"]
+    _write_skill_manifest(tmp_path, skills=["xlsx"])
+    skill_dir = _write_skill_dir(tmp_path, "xlsx")
+    await runner.session.save_session_skill_snapshot(
+        session_id="session-1",
+        user_id="user-1",
+        snapshot={
+            "xlsx": {
+                "skill_name": "xlsx",
+                "resolved_skill_dir": str(skill_dir),
+                "freshness_token": 10.0,
+            },
+        },
+    )
+    monkeypatch.setattr(
+        "swe.app.runner.runner.get_skill_freshness_token",
+        lambda _path: 11.0,
+    )
+
+    async def source_stream():
+        async for item in runner.query_handler(
+            [Msg(name="user", role="user", content="continue")],
+            request=_request(),
+        ):
+            yield item
+
+    events = [
+        event
+        async for event in adapt_agentscope_message_stream(source_stream())
+    ]
+    serialized_events = [event.model_dump_json() for event in events]
+
+    assert not any(
+        "[Skill freshness notice]" in event for event in serialized_events
+    )
+    assert any("agent reply" in event for event in serialized_events)
 
 
 @pytest.mark.asyncio
@@ -619,7 +716,10 @@ async def test_turn_start_notice_reports_directory_switch_paths(
     ]
 
     assert outputs[-1][0].get_text_content() == "agent reply"
-    assert f"{old_dir} -> {new_dir}" in _turn_notice_text()
+    notice_text = _turn_notice_text()
+    assert f"{old_dir} -> {new_dir}" in notice_text
+    assert "You MUST re-read" in notice_text
+    assert str(new_dir / "SKILL.md") in notice_text
 
 
 @pytest.mark.asyncio
@@ -911,7 +1011,7 @@ async def test_applied_snapshot_prevents_repeat_notice_on_later_turn(
     ]
 
     assert first_outputs[-1][0].get_text_content() == "agent reply"
-    assert len(_streamed_notice_messages(first_outputs)) == 1
+    assert _streamed_notice_messages(first_outputs) == []
 
     second_outputs = [
         item
@@ -959,7 +1059,7 @@ async def test_freshness_notice_is_not_persisted_in_session_memory(
     ]
 
     assert outputs[-1][0].get_text_content() == "agent reply"
-    assert len(_streamed_notice_messages(outputs)) == 1
+    assert _streamed_notice_messages(outputs) == []
 
     state = await runner.session.get_session_state_dict(
         "session-1",
@@ -1195,3 +1295,91 @@ async def test_retryable_completion_failure_defers_snapshot_persistence_until_su
             "freshness_token": 11.0,
         },
     }
+
+
+@pytest.mark.asyncio
+async def test_retryable_completion_failure_keeps_notice_model_only(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    runner = _patch_runner(monkeypatch, tmp_path)
+    _FakeAgent.effective_skills = ["xlsx"]
+    _write_skill_manifest(tmp_path, skills=["xlsx"])
+    skill_dir = _write_skill_dir(tmp_path, "xlsx")
+    await runner.session.save_session_skill_snapshot(
+        session_id="session-1",
+        user_id="user-1",
+        snapshot={
+            "xlsx": {
+                "skill_name": "xlsx",
+                "resolved_skill_dir": str(skill_dir),
+                "freshness_token": 10.0,
+            },
+        },
+    )
+    monkeypatch.setattr(
+        "swe.app.runner.runner.get_skill_freshness_token",
+        lambda _path: 11.0,
+    )
+    monkeypatch.setattr(
+        "swe.app.runner.runner.load_agent_config",
+        lambda *args, **kwargs: SimpleNamespace(
+            id="test-agent",
+            hooks=SimpleNamespace(enabled=False, events={}),
+            mcp=None,
+            running=SimpleNamespace(
+                suggestions=SimpleNamespace(
+                    enabled=False,
+                    mode=SuggestionMode.DISABLED,
+                ),
+                query_retry=SimpleNamespace(
+                    enabled=True,
+                    max_retries=1,
+                    backoff_base=0.0,
+                    backoff_cap=0.0,
+                ),
+            ),
+        ),
+    )
+
+    plan_notice_counts: list[int] = []
+    original_stream_completion_lifecycle = runner._stream_completion_lifecycle
+
+    async def flaky_stream_completion_lifecycle(*args, **kwargs):
+        plan_notice_counts.append(
+            len(
+                [
+                    msg
+                    for msg in kwargs["plan"].turn_msgs
+                    if msg.role == "system"
+                    and "[Skill freshness notice]" in msg.get_text_content()
+                ],
+            ),
+        )
+        if len(plan_notice_counts) == 1:
+            raise RuntimeError("request timed out")
+        async for item in original_stream_completion_lifecycle(
+            request=kwargs["request"],
+            runtime=kwargs["runtime"],
+            plan=kwargs["plan"],
+            outcome=kwargs["outcome"],
+        ):
+            yield item
+
+    monkeypatch.setattr(
+        runner,
+        "_stream_completion_lifecycle",
+        flaky_stream_completion_lifecycle,
+    )
+
+    outputs = [
+        item
+        async for item in runner.query_handler(
+            [Msg(name="user", role="user", content="continue")],
+            request=_request(),
+        )
+    ]
+
+    assert outputs[-1][0].get_text_content() == "agent reply"
+    assert plan_notice_counts == [1, 1]
+    assert _streamed_notice_messages(outputs) == []

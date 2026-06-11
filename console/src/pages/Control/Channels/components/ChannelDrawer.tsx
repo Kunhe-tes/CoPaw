@@ -282,7 +282,7 @@ export function ChannelDrawer({
     try {
       const result = await api.distributeChannelConfig(activeKey, {
         target_tenant_ids: selectedDistributeTenantIds,
-        fields: ["robot_open_id", "client_id", "client_secret"],
+        fields: ["enabled", "bot_prefix", "filter_tool_messages", "filter_thinking", "robot_open_id", "client_id", "client_secret", "session_end_push_enabled"],
         overwrite: distributeOverwrite,
       });
       const items = result.results || [];
@@ -987,6 +987,13 @@ export function ChannelDrawer({
               rules={[{ required: true }]}
             >
               <Input.Password />
+            </Form.Item>
+            <Form.Item
+              name="session_end_push_enabled"
+              label={t("channels.sessionEndPushEnabled")}
+              valuePropName="checked"
+            >
+              <Switch />
             </Form.Item>
           </>
         );

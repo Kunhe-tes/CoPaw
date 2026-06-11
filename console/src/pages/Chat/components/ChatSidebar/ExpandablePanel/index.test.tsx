@@ -1,5 +1,11 @@
 import React from "react";
-import { fireEvent, render, screen } from "@testing-library/react";
+import {
+  fireEvent,
+  render,
+  screen,
+  waitFor,
+  within,
+} from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import ExpandablePanel from ".";
 
@@ -20,6 +26,36 @@ vi.mock("@/components/agentscope-chat", () => ({
 }));
 
 describe("ExpandablePanel history", () => {
+  it("loads another page when the first page does not fill the panel", async () => {
+    const clientHeight = vi
+      .spyOn(HTMLElement.prototype, "clientHeight", "get")
+      .mockReturnValue(500);
+    const scrollHeight = vi
+      .spyOn(HTMLElement.prototype, "scrollHeight", "get")
+      .mockReturnValue(240);
+    const onLoadMoreSessions = vi.fn();
+
+    render(
+      <ExpandablePanel
+        visible
+        type="history"
+        onClose={vi.fn()}
+        tasks={[]}
+        sessions={[{ id: "chat-2", name: "chat two", messages: [] }]}
+        hasMoreSessions
+        onLoadMoreSessions={onLoadMoreSessions}
+        onTaskClick={vi.fn()}
+        toolbarRef={{ current: document.createElement("div") }}
+      />,
+    );
+
+    await waitFor(() => {
+      expect(onLoadMoreSessions).toHaveBeenCalledTimes(1);
+    });
+    clientHeight.mockRestore();
+    scrollHeight.mockRestore();
+  });
+
   beforeEach(() => {
     mocks.navigate.mockReset();
     mocks.setSessionLoading.mockReset();
@@ -110,6 +146,272 @@ describe("ExpandablePanel history", () => {
       replace: true,
     });
     expect(onClose).toHaveBeenCalled();
+  });
+
+  it("renders history sessions in the provided page order", () => {
+    const { container } = render(
+      <ExpandablePanel
+        visible
+        type="history"
+        onClose={vi.fn()}
+        tasks={[]}
+        sessions={[
+          { id: "chat-3", name: "newest chat", messages: [] },
+          { id: "chat-2", name: "older chat", messages: [] },
+        ]}
+        onTaskClick={vi.fn()}
+        toolbarRef={{ current: document.createElement("div") }}
+      />,
+    );
+
+    const rows = within(container).getAllByRole("button");
+    expect(rows.map((row) => row.textContent)).toEqual([
+      expect.stringContaining("newest chat"),
+      expect.stringContaining("older chat"),
+    ]);
+  });
+
+  it("renders only the loaded page for a large history result", () => {
+    const sessions = Array.from({ length: 50 }, (_, index) => ({
+      id: `chat-${index}`,
+      name: `chat ${index}`,
+      messages: [],
+    }));
+    const { container } = render(
+      <ExpandablePanel
+        visible
+        type="history"
+        onClose={vi.fn()}
+        tasks={[]}
+        sessions={sessions}
+        hasMoreSessions
+        onLoadMoreSessions={vi.fn()}
+        onTaskClick={vi.fn()}
+        toolbarRef={{ current: document.createElement("div") }}
+      />,
+    );
+
+    expect(
+      container.querySelectorAll(".expandable-panel-history-item"),
+    ).toHaveLength(50);
+    expect(
+      within(container).queryByRole("button", { name: "加载更多历史记录" }),
+    ).not.toBeInTheDocument();
+  });
+
+  it("loads another history page when the collapsed panel scrolls near the bottom", () => {
+    const onLoadMoreSessions = vi.fn();
+    const { container } = render(
+      <ExpandablePanel
+        visible
+        type="history"
+        onClose={vi.fn()}
+        tasks={[]}
+        sessions={[{ id: "chat-2", name: "chat two", messages: [] }]}
+        hasMoreSessions
+        onLoadMoreSessions={onLoadMoreSessions}
+        onTaskClick={vi.fn()}
+        toolbarRef={{ current: document.createElement("div") }}
+      />,
+    );
+
+    const scrollContainer = container.querySelector(
+      ".expandable-panel-content",
+    ) as HTMLDivElement;
+    Object.defineProperties(scrollContainer, {
+      clientHeight: { configurable: true, value: 200 },
+      scrollHeight: { configurable: true, value: 500 },
+      scrollTop: { configurable: true, value: 230, writable: true },
+    });
+    fireEvent.scroll(scrollContainer);
+
+    expect(onLoadMoreSessions).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not load another page before the collapsed panel nears the bottom", () => {
+    const onLoadMoreSessions = vi.fn();
+    const { container } = render(
+      <ExpandablePanel
+        visible
+        type="history"
+        onClose={vi.fn()}
+        tasks={[]}
+        sessions={[{ id: "chat-2", name: "chat two", messages: [] }]}
+        hasMoreSessions
+        onLoadMoreSessions={onLoadMoreSessions}
+        onTaskClick={vi.fn()}
+        toolbarRef={{ current: document.createElement("div") }}
+      />,
+    );
+
+    const scrollContainer = container.querySelector(
+      ".expandable-panel-content",
+    ) as HTMLDivElement;
+    Object.defineProperties(scrollContainer, {
+      clientHeight: { configurable: true, value: 200 },
+      scrollHeight: { configurable: true, value: 500 },
+      scrollTop: { configurable: true, value: 100, writable: true },
+    });
+    fireEvent.scroll(scrollContainer);
+
+    expect(onLoadMoreSessions).not.toHaveBeenCalled();
+  });
+
+  it("locks repeated bottom scroll events until loading state changes", () => {
+    const onLoadMoreSessions = vi.fn();
+    const { container } = render(
+      <ExpandablePanel
+        visible
+        type="history"
+        onClose={vi.fn()}
+        tasks={[]}
+        sessions={[{ id: "chat-2", name: "chat two", messages: [] }]}
+        hasMoreSessions
+        onLoadMoreSessions={onLoadMoreSessions}
+        onTaskClick={vi.fn()}
+        toolbarRef={{ current: document.createElement("div") }}
+      />,
+    );
+
+    const scrollContainer = container.querySelector(
+      ".expandable-panel-content",
+    ) as HTMLDivElement;
+    Object.defineProperties(scrollContainer, {
+      clientHeight: { configurable: true, value: 200 },
+      scrollHeight: { configurable: true, value: 500 },
+      scrollTop: { configurable: true, value: 300, writable: true },
+    });
+    fireEvent.scroll(scrollContainer);
+    fireEvent.scroll(scrollContainer);
+
+    expect(onLoadMoreSessions).toHaveBeenCalledTimes(1);
+  });
+
+  it("unlocks bottom loading after the previous page completes", () => {
+    const onLoadMoreSessions = vi.fn();
+    const props = {
+      visible: true,
+      type: "history" as const,
+      onClose: vi.fn(),
+      tasks: [],
+      sessions: [{ id: "chat-2", name: "chat two", messages: [] }],
+      hasMoreSessions: true,
+      onLoadMoreSessions,
+      onTaskClick: vi.fn(),
+      toolbarRef: { current: document.createElement("div") },
+    };
+    const { container, rerender } = render(<ExpandablePanel {...props} />);
+    const scrollContainer = container.querySelector(
+      ".expandable-panel-content",
+    ) as HTMLDivElement;
+    Object.defineProperties(scrollContainer, {
+      clientHeight: { configurable: true, value: 200 },
+      scrollHeight: { configurable: true, value: 500 },
+      scrollTop: { configurable: true, value: 300, writable: true },
+    });
+
+    fireEvent.scroll(scrollContainer);
+    rerender(<ExpandablePanel {...props} isLoadingMoreSessions />);
+    rerender(<ExpandablePanel {...props} isLoadingMoreSessions={false} />);
+    fireEvent.scroll(scrollContainer);
+
+    expect(onLoadMoreSessions).toHaveBeenCalledTimes(2);
+  });
+
+  it("disables repeated history loading while a page is in flight", () => {
+    const onLoadMoreSessions = vi.fn();
+    const { container } = render(
+      <ExpandablePanel
+        visible
+        type="history"
+        onClose={vi.fn()}
+        tasks={[]}
+        sessions={[{ id: "chat-2", name: "chat two", messages: [] }]}
+        hasMoreSessions
+        isLoadingMoreSessions
+        onLoadMoreSessions={onLoadMoreSessions}
+        onTaskClick={vi.fn()}
+        toolbarRef={{ current: document.createElement("div") }}
+      />,
+    );
+
+    const scrollContainer = container.querySelector(
+      ".expandable-panel-content",
+    ) as HTMLDivElement;
+    Object.defineProperties(scrollContainer, {
+      clientHeight: { configurable: true, value: 200 },
+      scrollHeight: { configurable: true, value: 500 },
+      scrollTop: { configurable: true, value: 300, writable: true },
+    });
+    expect(
+      within(container).getByRole("status", {
+        name: "正在加载历史记录",
+      }),
+    ).toBeInTheDocument();
+    fireEvent.scroll(scrollContainer);
+    expect(onLoadMoreSessions).not.toHaveBeenCalled();
+  });
+
+  it("offers retry without hiding loaded history after a page failure", () => {
+    const onLoadMoreSessions = vi.fn();
+    const { container } = render(
+      <ExpandablePanel
+        visible
+        type="history"
+        onClose={vi.fn()}
+        tasks={[]}
+        sessions={[{ id: "chat-2", name: "chat two", messages: [] }]}
+        hasMoreSessions
+        loadMoreSessionsFailed
+        onLoadMoreSessions={onLoadMoreSessions}
+        onTaskClick={vi.fn()}
+        toolbarRef={{ current: document.createElement("div") }}
+      />,
+    );
+
+    expect(within(container).getByText("chat two")).toBeInTheDocument();
+    const scrollContainer = container.querySelector(
+      ".expandable-panel-content",
+    ) as HTMLDivElement;
+    Object.defineProperties(scrollContainer, {
+      clientHeight: { configurable: true, value: 200 },
+      scrollHeight: { configurable: true, value: 500 },
+      scrollTop: { configurable: true, value: 300, writable: true },
+    });
+    fireEvent.scroll(scrollContainer);
+    expect(onLoadMoreSessions).not.toHaveBeenCalled();
+    fireEvent.click(
+      within(container).getByRole("button", { name: "重试加载历史记录" }),
+    );
+    expect(onLoadMoreSessions).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not load after the final history page", () => {
+    const onLoadMoreSessions = vi.fn();
+    const { container } = render(
+      <ExpandablePanel
+        visible
+        type="history"
+        onClose={vi.fn()}
+        tasks={[]}
+        sessions={[{ id: "chat-2", name: "chat two", messages: [] }]}
+        onLoadMoreSessions={onLoadMoreSessions}
+        onTaskClick={vi.fn()}
+        toolbarRef={{ current: document.createElement("div") }}
+      />,
+    );
+
+    const scrollContainer = container.querySelector(
+      ".expandable-panel-content",
+    ) as HTMLDivElement;
+    Object.defineProperties(scrollContainer, {
+      clientHeight: { configurable: true, value: 200 },
+      scrollHeight: { configurable: true, value: 500 },
+      scrollTop: { configurable: true, value: 300, writable: true },
+    });
+    fireEvent.scroll(scrollContainer);
+
+    expect(onLoadMoreSessions).not.toHaveBeenCalled();
   });
 });
 

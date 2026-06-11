@@ -11,6 +11,7 @@ This test module covers:
 # pylint: disable=protected-access,redefined-outer-name
 
 import pytest
+from unittest.mock import AsyncMock
 
 from swe.agents.skill_tool_registry import (
     SkillToolRegistry,
@@ -1134,3 +1135,35 @@ class TestSkillMdReadDetection:
         # 应该识别为xlsx，而不是pdf
         assert skill == "xlsx"
         assert weights == {"xlsx": 1.0}
+
+    @pytest.mark.asyncio
+    async def test_set_tracing_context_updates_source_id_for_emitted_skill(
+        self,
+    ):
+        """Test tracing context update reuses source_id in skill spans."""
+        trace_manager = AsyncMock()
+        trace_manager.emit_skill_invocation = AsyncMock(
+            return_value="span-1",
+        )
+        detector = SkillInvocationDetector(trace_manager=trace_manager)
+        detector.set_enabled_skills(["xlsx"])
+        detector.set_tracing_context(
+            trace_manager,
+            "trace-1",
+            "user-1",
+            "session-1",
+            "console",
+            "source-1",
+        )
+
+        await detector.start_skill(
+            "xlsx",
+            trigger_tool="user_message",
+            trigger_reason="declared",
+        )
+
+        trace_manager.emit_skill_invocation.assert_awaited_once()
+        assert (
+            trace_manager.emit_skill_invocation.await_args.kwargs["source_id"]
+            == "source-1"
+        )

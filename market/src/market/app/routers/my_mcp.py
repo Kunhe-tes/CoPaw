@@ -24,6 +24,8 @@ from ...runtime.mcp_masking import mask_env_value, restore_original_values
 from ...runtime.stateful_client import HttpStatefulClient, StdIOStatefulClient
 
 from ...marketplace.schemas import PublishMCPRequest as MarketPublishMCPRequest
+from ...marketplace.service import MCPNameConflictError
+from ...marketplace.fs import load_index
 from ..my_mcp_helpers import (
     load_agent_config_for_request,
     mark_request_state,
@@ -96,6 +98,18 @@ def _is_distributed_from_market(client: MCPClientConfig) -> bool:
     return client.source.startswith("marketplace:")
 
 
+def _bump_patch(version: str) -> str:
+    """Increment patch version: '1.0.0' -> '1.0.1'."""
+    parts = version.split(".")
+    if len(parts) == 3:
+        try:
+            parts[2] = str(int(parts[2]) + 1)
+            return ".".join(parts)
+        except ValueError:
+            pass
+    return version + ".1"
+
+
 def _mcp_client_not_found_detail(client_key: str) -> str:
     """构造 MCP 不存在的统一错误文案。"""
     return MCP_CLIENT_NOT_FOUND_TEMPLATE.format(client_key=client_key)
@@ -119,6 +133,12 @@ class MyMCPListItem(BaseModel):
     )
     created_at: str = Field(default="", description="创建时间")
     updated_at: str = Field(default="", description="更新时间")
+    version: str = Field(default="", description="MCP 版本号")
+    received_version: str = Field(
+        default="",
+        description="市场分发时接收的版本号",
+    )
+    has_update: bool = Field(default=False, description="市场是否有新版本")
 
 
 class MyMCPDetail(MyMCPListItem):
@@ -138,6 +158,8 @@ class MyMCPDetail(MyMCPListItem):
     cwd: str = Field(default="", description="工作目录")
     lazy_load: bool = Field(default=False, description=LAZY_LOAD_DESCRIPTION)
     distributed_by: str = Field(default="", description="分发来源")
+    creator_id: str = Field(default="", description="创建者 ID")
+    creator_name: str = Field(default="", description="创建者名称")
 
 
 class MyMCPCreateRequest(BaseModel):
@@ -224,6 +246,10 @@ class PublishMCPRequest(BaseModel):
         default_factory=list,
         description="关联 BBK ID 列表",
     )
+    overwrite: bool = Field(
+        default=False,
+        description="同名 MCP 已存在时是否覆盖",
+    )
 
 
 class PublishSingleMCPRequest(BaseModel):
@@ -233,6 +259,10 @@ class PublishSingleMCPRequest(BaseModel):
     bbk_ids: List[str] = Field(
         default_factory=list,
         description="关联 BBK ID 列表",
+    )
+    overwrite: bool = Field(
+        default=False,
+        description="同名 MCP 已存在时是否覆盖",
     )
 
 
@@ -299,6 +329,8 @@ def _mask_sensitive_values(client: MCPClientConfig) -> MyMCPDetail:
         market_client_key=client.market_client_key,
         created_at=client.created_at,
         updated_at=client.updated_at,
+        version=client.version,
+        received_version=client.received_version,
         url=client.url,
         headers=masked_headers,
         command=client.command,
@@ -307,6 +339,8 @@ def _mask_sensitive_values(client: MCPClientConfig) -> MyMCPDetail:
         cwd=client.cwd,
         lazy_load=client.lazy_load,
         distributed_by=client.distributed_by,
+        creator_id=getattr(client, "creator_id", ""),
+        creator_name=getattr(client, "creator_name", ""),
     )
 
 
@@ -319,8 +353,37 @@ async def list_my_mcp(request: Request) -> List[MyMCPListItem]:
     if agent_config.mcp is None or not agent_config.mcp.clients:
         return []
 
+    # 获取市场 MCP 最新版本映射，用于判断 has_update
+    marketplace = getattr(request.app.state, "marketplace", None)
+    market_versions: dict[str, str] = {}
+    market_creators: dict[str, tuple[str, str]] = (
+        {}
+    )  # name -> (creator_id, creator_name)
+    if marketplace and context.source_id:
+        try:
+            items = load_index(marketplace.marketplace_root, context.source_id)
+            for item in items:
+                if item.item_type == "mcp" and item.status == "active":
+                    market_versions[item.name] = item.version
+                    market_creators[item.name] = (
+                        item.creator_id,
+                        item.creator_name,
+                    )
+        except Exception:  # pylint: disable=broad-except
+            pass
+
     result: list[MyMCPListItem] = []
     for client_key, client in agent_config.mcp.clients.items():
+        is_distributed = client.source.startswith("marketplace:")
+        received_version = client.received_version
+        market_version = market_versions.get(client.name)
+        has_update = (
+            is_distributed
+            and received_version is not None
+            and received_version != ""
+            and market_version is not None
+            and received_version != market_version
+        )
         result.append(
             MyMCPListItem(
                 client_key=client_key,
@@ -332,6 +395,9 @@ async def list_my_mcp(request: Request) -> List[MyMCPListItem]:
                 market_client_key=client.market_client_key,
                 created_at=client.created_at,
                 updated_at=client.updated_at,
+                version=client.version,
+                received_version=received_version,
+                has_update=has_update,
             ),
         )
 
@@ -366,6 +432,31 @@ async def get_my_mcp_detail(
 
     detail = _mask_sensitive_values(client)
     detail.client_key = client_key
+
+    # 分发的 MCP：如果本地无创建者信息，从市场索引补充
+    # pylint: disable=too-many-nested-blocks
+    if _is_distributed_from_market(client) and not detail.creator_name:
+        marketplace = getattr(request.app.state, "marketplace", None)
+        if marketplace and context.source_id:
+            try:
+                items = load_index(
+                    marketplace.marketplace_root,
+                    context.source_id,
+                )
+                for item in items:
+                    if (
+                        item.item_type == "mcp"
+                        and item.name == client.name
+                        and item.status == "active"
+                    ):
+                        if item.creator_name:
+                            detail.creator_name = item.creator_name
+                        if item.creator_id:
+                            detail.creator_id = item.creator_id
+                        break
+            except Exception:  # pylint: disable=broad-except
+                pass
+
     return detail
 
 
@@ -401,9 +492,13 @@ async def create_my_mcp(
         cwd=body.cwd,
         lazy_load=body.lazy_load,
         source="",
+        version="1.0.0",
         created_at=now,
         updated_at=now,
     )
+    # 标记为当前用户创建的 MCP，供市场分发时做同名冲突检测
+    new_client.creator_id = context.user_id
+    new_client.creator_name = context.user_name or context.user_id
 
     agent_config.mcp.clients[body.client_key] = new_client
     save_agent_config_for_request(context, agent_config, request)
@@ -462,6 +557,8 @@ async def update_my_mcp(
 
     merged_data.update(update_data)
     merged_data["updated_at"] = datetime.now(timezone.utc).isoformat()
+    # 编辑内容时 bump patch 版本号
+    merged_data["version"] = _bump_patch(merged_data.get("version") or "1.0.0")
 
     updated_client = MCPClientConfig.model_validate(merged_data)
     agent_config.mcp.clients[client_key] = updated_client
@@ -547,6 +644,7 @@ async def _publish_client_to_market(
     publish_context: MarketPublishContext,
     client_key: str,
     client: MCPClientConfig,
+    overwrite: bool = False,
 ) -> PublishMCPResult:
     """复用单个 MCP 的市场发布逻辑。"""
     item = await marketplace.publish_mcp(
@@ -560,6 +658,8 @@ async def _publish_client_to_market(
             category_id=publish_context.category_id,
             bbk_ids=publish_context.bbk_ids,
             config=client.model_dump(mode="json"),
+            overwrite=overwrite,
+            version=client.version,
         ),
     )
     return PublishMCPResult(
@@ -600,12 +700,26 @@ async def publish_single_my_mcp_to_market(
         category_id=body.category_id,
         bbk_ids=body.bbk_ids,
     )
-    result = await _publish_client_to_market(
-        marketplace,
-        publish_context,
-        client_key=client_key,
-        client=client,
-    )
+    try:
+        result = await _publish_client_to_market(
+            marketplace,
+            publish_context,
+            client_key=client_key,
+            client=client,
+            overwrite=body.overwrite,
+        )
+    except MCPNameConflictError as exc:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "message": str(exc),
+                "existing_item_id": exc.existing_item_id,
+                "existing_name": exc.existing_name,
+                "existing_creator_id": exc.existing_creator_id,
+                "existing_creator_name": exc.existing_creator_name,
+                "existing_version": exc.existing_version,
+            },
+        ) from exc
     return PublishSingleMCPResponse(
         client_key=result.client_key,
         item_id=result.item_id or "",
@@ -659,8 +773,17 @@ async def publish_my_mcp_to_market(
                 publish_context,
                 client_key=client_key,
                 client=client,
+                overwrite=body.overwrite,
             )
             results.append(result)
+        except MCPNameConflictError as exc:
+            results.append(
+                PublishMCPResult(
+                    client_key=client_key,
+                    success=False,
+                    error=str(exc),
+                ),
+            )
         except Exception as exc:  # pylint: disable=broad-except
             results.append(
                 PublishMCPResult(

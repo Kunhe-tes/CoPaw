@@ -247,6 +247,55 @@ def resolve_runtime_tenant_id(
     return tenant_id
 
 
+def resolve_storage_tenant_id(
+    tenant_id: str | None,
+    source_id: str | None,
+    *,
+    scope_id: str | None = None,
+) -> str | None:
+    """解析配置、目录与模板资产使用的存储租户标识。
+
+    这里显式区分 runtime 与 storage 两种语义：
+
+    - default + source：固定落到 ``default_{source}`` 模板目录
+    - 非 default + source：保持当前 runtime scope 目录策略
+    - 历史/显式 scope：继续 canonicalize 兼容
+
+    Args:
+        tenant_id: 逻辑 tenant 或已编码 scope。
+        source_id: 来源标识。
+        scope_id: 可选显式 runtime scope。
+
+    Returns:
+        用于目录和配置访问的存储租户标识。
+    """
+    if tenant_id is None:
+        return None
+
+    if tenant_id == "default":
+        if not source_id:
+            return "default"
+        return f"default_{source_id}"
+
+    resolved_scope_id = scope_id
+    if resolved_scope_id is not None:
+        return canonicalize_scope_id(resolved_scope_id)
+
+    legacy_prefix = f"{_LEGACY_SCOPE_ID_PREFIX}."
+    if tenant_id.startswith(legacy_prefix):
+        return canonicalize_scope_id(tenant_id)
+
+    decoded_identity = _decode_runtime_scope_identity(
+        tenant_id,
+        source_id,
+    )
+    if decoded_identity is not None:
+        return decoded_identity[2]
+
+    runtime_tenant_id = resolve_runtime_tenant_id(tenant_id, source_id)
+    return runtime_tenant_id or tenant_id
+
+
 def resolve_scope_preferred_tenant_id(
     tenant_id: str | None,
     source_id: str | None = None,

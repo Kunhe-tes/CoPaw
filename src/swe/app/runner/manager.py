@@ -8,7 +8,7 @@ import logging
 from datetime import datetime, timezone
 from typing import Any, Optional
 
-from .models import ChatSpec
+from .models import ChatPage, ChatSpec
 from .repo import BaseChatRepository
 from ..channels.schema import DEFAULT_CHANNEL
 
@@ -98,6 +98,49 @@ class ChatManager:
             return await self._repo.filter_chats(
                 user_id=user_id,
                 channel=channel,
+            )
+
+    async def list_chats_page(
+        self,
+        *,
+        page: int,
+        page_size: int,
+        user_id: Optional[str] = None,
+        channel: Optional[str] = None,
+    ) -> ChatPage:
+        """List one filtered chat page in stable newest-first order."""
+        async with self._lock:
+            logger.debug(
+                "list_chats_page: repo path=%s, filters: user_id=%s, "
+                "channel=%s, page=%s, page_size=%s",
+                self._repo.path,
+                user_id,
+                channel,
+                page,
+                page_size,
+            )
+            return await self._repo.paginate_chats(
+                user_id=user_id,
+                channel=channel,
+                page=page,
+                page_size=page_size,
+            )
+
+    async def list_chats_cursor(
+        self,
+        *,
+        page_size: int,
+        cursor: str | None = None,
+        user_id: Optional[str] = None,
+        channel: Optional[str] = None,
+    ) -> ChatPage:
+        """List a stable creation-ordered page using an opaque cursor."""
+        async with self._lock:
+            return await self._repo.paginate_chats_cursor(
+                user_id=user_id,
+                channel=channel,
+                page_size=page_size,
+                cursor=cursor,
             )
 
     async def get_chat(self, chat_id: str) -> Optional[ChatSpec]:

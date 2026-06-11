@@ -7,9 +7,8 @@ from abc import ABC, abstractmethod
 from typing import TYPE_CHECKING, Dict, List, Type, Any
 from pydantic import BaseModel, Field
 
-from agentscope.model import ChatModelBase
-
 if TYPE_CHECKING:
+    from agentscope.model import ChatModelBase
     from .multimodal_prober import ProbeResult
 
 
