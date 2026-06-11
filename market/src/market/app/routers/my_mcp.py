@@ -72,14 +72,15 @@ async def _log_my_mcp_operation(
         await db.execute(
             """
             INSERT INTO swe_user_item_operation_logs
-                (source_id, user_id, user_name, operation,
+                (source_id, user_id, user_name, bbk_id, operation,
                  item_type, item_name)
-            VALUES (%s, %s, %s, %s, %s, %s)
+            VALUES (%s, %s, %s, %s, %s, %s, %s)
             """,
             (
                 context.source_id,
                 context.user_id,
                 context.user_name,
+                context.bbk_id,
                 operation,
                 "mcp",
                 item_name,
