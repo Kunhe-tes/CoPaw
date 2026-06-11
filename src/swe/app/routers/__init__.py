@@ -37,6 +37,7 @@ from .dream_logs import router as dream_logs_router
 from .user_info import router as user_info_router
 from .internal import public_router as public_text_asset_router
 from .internal import router as internal_router
+from .system_check import router as system_check_router
 from ..source_system_config import router as source_system_config_router
 
 router = APIRouter()
@@ -75,6 +76,7 @@ router.include_router(dream_logs_router)
 router.include_router(user_info_router)
 router.include_router(internal_router)
 router.include_router(public_text_asset_router)
+router.include_router(system_check_router)
 router.include_router(source_system_config_router)
 
 
