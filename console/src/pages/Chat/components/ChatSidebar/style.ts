@@ -358,7 +358,6 @@ export default createGlobalStyle`
   margin: 0 24px;
 }
 
-/* Virtual scrolling history list container */
 .chat-sidebar-history-list {
   flex: 1;
   min-height: 100px;

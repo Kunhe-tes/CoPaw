@@ -16,8 +16,6 @@ export interface HistorySessionRowProps {
     backendId: string | null,
     sessionName: string,
   ) => void;
-  /** Custom style for virtual scrolling positioning */
-  style?: React.CSSProperties;
 }
 
 function resolveBackendChatId(
@@ -58,7 +56,6 @@ function HistorySessionRowInner(props: HistorySessionRowProps) {
       showEdit={false}
       showTimeline={false}
       showChannel={false}
-      style={props.style}
     />
   );
 }
@@ -74,8 +71,7 @@ function areEqual(
     prevProps.session.id === nextProps.session.id &&
     prevProps.session.realId === nextProps.session.realId &&
     prevProps.session.name === nextProps.session.name &&
-    prevProps.session.createdAt === nextProps.session.createdAt &&
-    prevProps.style === nextProps.style
+    prevProps.session.createdAt === nextProps.session.createdAt
   );
 }
 
