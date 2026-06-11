@@ -6,7 +6,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from datetime import datetime, timezone
-from typing import Dict, List, Literal, Optional
+from typing import Any, Dict, List, Literal, Optional
 from urllib.parse import unquote
 
 from fastapi import (
@@ -97,6 +97,41 @@ async def _log_my_mcp_operation(
 def _is_distributed_from_market(client: MCPClientConfig) -> bool:
     """判断 MCP 是否来自市场分发。"""
     return client.source.startswith("marketplace:")
+
+
+def _fill_creator_from_market(
+    client: MCPClientConfig,
+    detail: MyMCPDetail,
+    request: Request,
+    context: Any,
+) -> None:
+    """分发的 MCP：如果本地无创建者信息，从市场索引补充。"""
+    if not _is_distributed_from_market(client) or detail.creator_name:
+        return
+
+    marketplace = getattr(request.app.state, "marketplace", None)
+    if not marketplace or not context.source_id:
+        return
+
+    try:
+        items = load_index(
+            marketplace.marketplace_root,
+            context.source_id,
+        )
+    except Exception:  # pylint: disable=broad-except
+        return
+
+    for item in items:
+        if (
+            item.item_type == "mcp"
+            and item.name == client.name
+            and item.status == "active"
+        ):
+            if item.creator_name:
+                detail.creator_name = item.creator_name
+            if item.creator_id:
+                detail.creator_id = item.creator_id
+            break
 
 
 def _bump_patch(version: str) -> str:
@@ -435,28 +470,7 @@ async def get_my_mcp_detail(
     detail.client_key = client_key
 
     # 分发的 MCP：如果本地无创建者信息，从市场索引补充
-    # pylint: disable=too-many-nested-blocks
-    if _is_distributed_from_market(client) and not detail.creator_name:
-        marketplace = getattr(request.app.state, "marketplace", None)
-        if marketplace and context.source_id:
-            try:
-                items = load_index(
-                    marketplace.marketplace_root,
-                    context.source_id,
-                )
-                for item in items:
-                    if (
-                        item.item_type == "mcp"
-                        and item.name == client.name
-                        and item.status == "active"
-                    ):
-                        if item.creator_name:
-                            detail.creator_name = item.creator_name
-                        if item.creator_id:
-                            detail.creator_id = item.creator_id
-                        break
-            except Exception:  # pylint: disable=broad-except
-                pass
+    _fill_creator_from_market(client, detail, request, context)
 
     return detail
 
