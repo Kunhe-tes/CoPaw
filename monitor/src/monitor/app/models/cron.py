@@ -200,14 +200,29 @@ class ExecutionModel(BaseModel):
     meta: str = Field(default="", description="执行元数据 (JSON字符串)")
 
     # 已读状态
-    notification_status: str = Field(default="not_required", description="通知状态")
-    notification_due_at: Optional[datetime] = Field(default=None, description="计划通知时间")
+    notification_status: str = Field(
+        default="not_required",
+        description="通知状态",
+    )
+    notification_due_at: Optional[datetime] = Field(
+        default=None,
+        description="计划通知时间",
+    )
     notification_timezone: str = Field(default="", description="通知计算时区")
-    notification_sent_at: Optional[datetime] = Field(default=None, description="通知发送时间")
+    notification_sent_at: Optional[datetime] = Field(
+        default=None,
+        description="通知发送时间",
+    )
     notification_attempts: int = Field(default=0, description="通知尝试次数")
     notification_error: str = Field(default="", description="通知错误")
-    notification_lock_owner: str = Field(default="", description="通知锁持有者")
-    notification_locked_at: Optional[datetime] = Field(default=None, description="通知锁时间")
+    notification_lock_owner: str = Field(
+        default="",
+        description="通知锁持有者",
+    )
+    notification_locked_at: Optional[datetime] = Field(
+        default=None,
+        description="通知锁时间",
+    )
 
     is_read: bool = Field(default=False, description="是否已读")
     read_at: Optional[datetime] = Field(
@@ -346,8 +361,14 @@ class ExecutionSyncRequest(BaseModel):
     meta: str = Field(default="", description="执行元数据 (JSON字符串)")
 
     # 已读状态（手动执行且成功的任务默认已读）
-    notification_status: str = Field(default="not_required", description="通知状态")
-    notification_due_at: Optional[datetime] = Field(default=None, description="计划通知时间")
+    notification_status: str = Field(
+        default="not_required",
+        description="通知状态",
+    )
+    notification_due_at: Optional[datetime] = Field(
+        default=None,
+        description="计划通知时间",
+    )
     notification_timezone: str = Field(default="", description="通知计算时区")
 
     is_read: bool = Field(default=False, description="是否已读")
@@ -486,8 +507,14 @@ class CronOverviewMetricItem(BaseModel):
 
     key: str = Field(..., description="Metric key")
     value: float = Field(default=0, description="Metric value")
-    compare: str = Field(default="", description="Comparison text (e.g., '+12.5%')")
-    trend: Optional[str] = Field(default=None, description="Trend: 'up' or 'down'")
+    compare: str = Field(
+        default="",
+        description="Comparison text (e.g., '+12.5%')",
+    )
+    trend: Optional[str] = Field(
+        default=None,
+        description="Trend: 'up' or 'down'",
+    )
 
 
 class CronOverviewDistributionItem(BaseModel):
@@ -513,24 +540,36 @@ class CronOverviewBranchReadItem(BaseModel):
 
     name: str = Field(..., description="Branch ID")
     read: int = Field(default=0, description="Read success execution count")
-    unread: int = Field(default=0, description="Unread success execution count")
+    unread: int = Field(
+        default=0,
+        description="Unread success execution count",
+    )
 
 
 class CronOverviewResponse(BaseModel):
     """Aggregated response for the cron overview page."""
 
-    start_time: Optional[datetime] = Field(default=None, description="Range start")
+    start_time: Optional[datetime] = Field(
+        default=None,
+        description="Range start",
+    )
     end_time: Optional[datetime] = Field(default=None, description="Range end")
     metrics: List[CronOverviewMetricItem] = Field(default_factory=list)
-    task_status: List[CronOverviewDistributionItem] = Field(default_factory=list)
+    task_status: List[CronOverviewDistributionItem] = Field(
+        default_factory=list,
+    )
     execution_result: List[CronOverviewDistributionItem] = Field(
         default_factory=list,
     )
-    read_status: List[CronOverviewDistributionItem] = Field(default_factory=list)
+    read_status: List[CronOverviewDistributionItem] = Field(
+        default_factory=list,
+    )
     failure_reasons: List[CronOverviewDistributionItem] = Field(
         default_factory=list,
     )
-    branch_tasks: List[CronOverviewDistributionItem] = Field(default_factory=list)
+    branch_tasks: List[CronOverviewDistributionItem] = Field(
+        default_factory=list,
+    )
     branch_execution: List[CronOverviewBranchExecutionItem] = Field(
         default_factory=list,
     )
@@ -561,7 +600,113 @@ class SubscriptionDetailItem(BaseModel):
     bbk_id: str = Field(default="", description="所属机构")
     enabled: bool = Field(default=True, description="启用状态")
     execution_status: str = Field(default="pending", description="执行状态")
-    execution_time: Optional[datetime] = Field(default=None, description="执行时间")
+    execution_time: Optional[datetime] = Field(
+        default=None,
+        description="执行时间",
+    )
+
+
+# ============================================================
+# 新定时任务概览页面响应模型
+# ============================================================
+
+
+class CronOverviewStatsResponse(BaseModel):
+    """定时任务概览统计响应。"""
+
+    start_date: str = Field(..., description="开始日期")
+    end_date: str = Field(..., description="结束日期")
+    total_tasks: int = Field(
+        default=0,
+        description="定时任务总数（不包含已删除）",
+    )
+    total_executions: int = Field(default=0, description="总执行次数")
+    branch_count: int = Field(default=0, description="分行数量")
+    tenant_count: int = Field(default=0, description="租户数量")
+    success_rate: float = Field(default=0.0, description="执行成功率")
+    success_count: int = Field(default=0, description="执行成功数")
+    read_tasks: int = Field(
+        default=0,
+        description="已读任务数（按job_id去重）",
+    )
+    read_rate: float = Field(default=0.0, description="已读率")
+    error_count: int = Field(default=0, description="报错数量")
+    error_rate: float = Field(default=0.0, description="报错率")
+
+
+class CronBranchBehaviorItem(BaseModel):
+    """分行层行为分析单项。"""
+
+    bbk_id: str = Field(..., description="分行ID")
+    bbk_name: str = Field(..., description="分行名称")
+    total_tasks: int = Field(default=0, description="该分行定时任务总数")
+    read_tasks: int = Field(
+        default=0,
+        description="已读任务数（按job_id去重）",
+    )
+    read_rate: float = Field(default=0.0, description="已读率")
+    plan_click_tasks: int = Field(
+        default=0,
+        description="方案点击数（按job_id去重）",
+    )
+    plan_click_rate: float = Field(default=0.0, description="方案点击率")
+    insight_click_tasks: int = Field(default=0, description="洞察点击数")
+    insight_click_rate: float = Field(default=0.0, description="洞察点击率")
+    phone_click_tasks: int = Field(default=0, description="电访点击数")
+    phone_click_rate: float = Field(default=0.0, description="电访点击率")
+
+
+class CronBranchBehaviorResponse(BaseModel):
+    """分行层行为分析响应。"""
+
+    start_date: str = Field(..., description="开始日期")
+    end_date: str = Field(..., description="结束日期")
+    items: List[CronBranchBehaviorItem] = Field(
+        default_factory=list,
+        description="分行行为分析列表",
+    )
+
+
+class CronErrorReasonItem(BaseModel):
+    """报错原因单项。"""
+
+    reason: str = Field(..., description="报错原因")
+    count: int = Field(default=0, description="数量")
+    percent: float = Field(default=0.0, description="比例")
+
+
+class CronBranchErrorRankItem(BaseModel):
+    """分行异常排行单项。"""
+
+    bbk_id: str = Field(..., description="分行ID")
+    bbk_name: str = Field(..., description="分行名称")
+    total_executions: int = Field(default=0, description="该分行总执行次数")
+    error_count: int = Field(default=0, description="报错次数")
+    error_rate: float = Field(default=0.0, description="报错率")
+    affected_managers: int = Field(default=0, description="受影响客户经理数量")
+
+
+class CronBranchErrorResponse(BaseModel):
+    """分行层异常执行数据响应。"""
+
+    start_date: str = Field(..., description="开始日期")
+    end_date: str = Field(..., description="结束日期")
+    affected_branch_count: int = Field(
+        default=0,
+        description="受影响的分行数量",
+    )
+    affected_manager_count: int = Field(
+        default=0,
+        description="受影响的客户经理数量",
+    )
+    error_reasons: List[CronErrorReasonItem] = Field(
+        default_factory=list,
+        description="报错原因分布",
+    )
+    branch_error_rank: List[CronBranchErrorRankItem] = Field(
+        default_factory=list,
+        description="分行异常排行",
+    )
 
 
 # ============================================================
