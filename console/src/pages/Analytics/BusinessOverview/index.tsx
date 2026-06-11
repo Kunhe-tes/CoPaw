@@ -591,10 +591,10 @@ function buildTrendAxisTicks(axisMax: number): TrendAxisTick[] {
 export function buildTrendSvgData(trendData: TrendDatum[]) {
   const width = 428;
   const height = 244;
-  const chartLeft = 34;
-  const chartRight = 34;
-  const chartTop = 18;
-  const chartBottom = 34;
+  const chartLeft = 20;
+  const chartRight = 20;
+  const chartTop = 10;
+  const chartBottom = 32;
   const chartWidth = width - chartLeft - chartRight;
   const chartHeight = height - chartTop - chartBottom;
   const rawMaxCalls = Math.max(
@@ -1309,6 +1309,7 @@ export default function BusinessOverviewPage() {
               <svg
                 viewBox={`0 0 ${trendSvg.width} ${trendSvg.height}`}
                 className={styles.trendSvg}
+                preserveAspectRatio="none"
               >
                 <defs>
                   <linearGradient
@@ -1323,8 +1324,8 @@ export default function BusinessOverviewPage() {
                   </linearGradient>
                 </defs>
 
-                {[0, 1, 2, 3, 4].map((row) => {
-                  const y = trendSvg.chartTop + (trendSvg.chartHeight / 4) * row;
+                {[0, 1, 2, 3, 4, 5].map((row) => {
+                  const y = trendSvg.chartTop + (trendSvg.chartHeight / 5) * row;
                   return (
                     <line
                       key={`grid-${row}`}
@@ -1363,7 +1364,7 @@ export default function BusinessOverviewPage() {
                       }
                     />
                     {bar.showLabel && (
-                      <text x={bar.x + bar.width / 2} y={233} className={styles.axisLabel}>
+                      <text x={bar.x + bar.width / 2} y={trendSvg.height - trendSvg.chartBottom + 22} className={styles.axisLabel}>
                         {bar.label}
                       </text>
                     )}
