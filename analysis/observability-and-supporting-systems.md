@@ -31,7 +31,7 @@
 |-----------|------|
 | `src/swe/envs/store.py` | 环境变量持久化 |
 | `src/swe/tunnel/cloudflare.py`, `src/swe/tunnel/binary_manager.py` | Cloudflare 隧道支持 |
-| `src/swe/utils/fs_text.py`, `src/swe/utils/logging.py`, `src/swe/utils/system_info.py`, `src/swe/utils/telemetry.py` | 文件、日志、系统信息与遥测 |
+| `src/swe/utils/fs_text.py`, `src/swe/utils/logging.py`, `src/swe/utils/system_info.py` | 文件、日志与系统信息 |
 | `src/swe/tokenizer/` | Tokenizer 词表和配置资产 |
 
 ## 运维与发布资源
