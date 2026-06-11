@@ -578,6 +578,49 @@ def test_broadcast_uses_original_cron_when_offset_shift_is_unsupported():
     )
 
 
+def test_broadcast_child_inherits_notification_delay_minutes():
+    source_job = CronJobSpec.model_validate(
+        {
+            **_job_spec("job-source"),
+            "schedule": ScheduleSpec(
+                cron="0 9 * * *",
+            ).model_dump(mode="json"),
+            "tenant_id": "tenant-a",
+            "source_id": "source-a",
+            "scope_id": encode_scope_id("tenant-a", "source-a"),
+            "meta": {"notification_delay_minutes": 120},
+        },
+    )
+    source_manager = _Manager({"job-source": source_job})
+    target_manager = _Manager()
+    multi_agent_manager = _MultiAgentManager(
+        {
+            encode_scope_id("tenant-b", "source-a"): _Workspace(
+                target_manager,
+            ),
+        },
+    )
+    client = _build_client(
+        source_manager,
+        multi_agent_manager=multi_agent_manager,
+        tenant_workspace_pool=_TenantWorkspacePool(),
+    )
+    _install_provider_manager(
+        {},
+        providers_by_tenant={encode_scope_id("tenant-b", "source-a"): {}},
+    )
+
+    response = client.post(
+        "/cron/jobs/job-source/broadcast",
+        json={"target_tenant_ids": ["tenant-b"]},
+    )
+
+    assert response.status_code == 200
+    assert (
+        target_manager.created[0].meta["notification_delay_minutes"] == 120
+    )
+
+
 def test_broadcast_clears_stale_fallback_meta_when_source_model_slot_missing():
     source_job = CronJobSpec.model_validate(
         {
