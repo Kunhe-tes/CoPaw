@@ -48,7 +48,6 @@ vi.mock("antd", () => ({
   Modal: { confirm: vi.fn() },
 }));
 
-vi.mock("../ChatTaskEntry", () => ({ default: () => null }));
 vi.mock("../ChatTaskList", () => ({ default: () => null }));
 vi.mock("./CollapsedToolbar", () => ({ default: () => null }));
 vi.mock("./ExpandablePanel", () => ({ default: () => null }));

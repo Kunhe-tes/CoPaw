@@ -5,7 +5,6 @@ import { Image, Modal } from "antd";
 import { useContextSelector } from "use-context-selector";
 import useChatAnywhereEventEmitter from "@/components/agentscope-chat/AgentScopeRuntimeWebUI/core/Context/useChatAnywhereEventEmitter";
 import Style from "./style";
-import ChatTaskEntry from "../ChatTaskEntry";
 import ChatTaskList from "../ChatTaskList";
 import type { CronJobSpecOutput } from "@/api/types";
 import { DESIGN_TOKENS } from "@/config/designTokens";
@@ -77,11 +76,7 @@ function ToggleIcon({ collapsed }: { collapsed: boolean }) {
 export interface ChatSidebarProps {
   tasks: CronJobSpecOutput[];
   selectedTaskId?: string;
-  enableTaskTabs?: boolean;
-  taskTabsOpen?: boolean;
   onCreateSession?: () => void;
-  onTaskTabsToggle?: () => void;
-  onTaskTabsClose?: () => void;
   onTaskClick?: (task: CronJobSpecOutput) => void;
   onTaskPause?: (task: CronJobSpecOutput) => void;
   onTaskRun?: (task: CronJobSpecOutput) => void;
@@ -93,11 +88,7 @@ export default function ChatSidebar(props: ChatSidebarProps) {
   const {
     tasks,
     selectedTaskId,
-    enableTaskTabs = false,
-    taskTabsOpen = false,
     onCreateSession,
-    onTaskTabsToggle,
-    onTaskTabsClose,
     onTaskClick,
     onTaskPause,
     onTaskRun,
@@ -250,15 +241,9 @@ export default function ChatSidebar(props: ChatSidebarProps) {
   }, [onCreateSession]);
 
   const handleToggleCollapse = useCallback(() => {
-    setCollapsed((prev) => {
-      const nextCollapsed = !prev;
-      if (nextCollapsed && enableTaskTabs) {
-        onTaskTabsClose?.();
-      }
-      return nextCollapsed;
-    });
+    setCollapsed((prev) => !prev);
     setActivePanel(null);
-  }, [enableTaskTabs, onTaskTabsClose]);
+  }, []);
 
   const handleNewChat = useCallback(() => {
     setActivePanel(null);
@@ -406,23 +391,15 @@ export default function ChatSidebar(props: ChatSidebarProps) {
               className="chat-sidebar-content-record-list"
               ref={historyScrollContainerRef}
             >
-              {enableTaskTabs ? (
-                <ChatTaskEntry
-                  tasks={tasks}
-                  open={taskTabsOpen}
-                  onToggle={() => onTaskTabsToggle?.()}
-                />
-              ) : (
-                <ChatTaskList
-                  tasks={tasks}
-                  selectedTaskId={selectedTaskId}
-                  onTaskClick={onTaskClick}
-                  onTaskPause={onTaskPause}
-                  onTaskRun={onTaskRun}
-                  onTaskResume={onTaskResume}
-                  onTaskDelete={onTaskDelete}
-                />
-              )}
+              <ChatTaskList
+                tasks={tasks}
+                selectedTaskId={selectedTaskId}
+                onTaskClick={handleTaskOpen}
+                onTaskPause={onTaskPause}
+                onTaskRun={onTaskRun}
+                onTaskResume={onTaskResume}
+                onTaskDelete={onTaskDelete}
+              />
               <div className="chat-sidebar-history">
                 <div
                   className="chat-sidebar-history-header"
