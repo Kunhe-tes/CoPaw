@@ -308,3 +308,108 @@ async def test_skill_snapshot_save_preserves_concurrent_state_update(
     assert state["session_skill_snapshot"] == {
         "xlsx": {"freshness_token": 1},
     }
+
+
+@pytest.mark.asyncio
+async def test_get_session_state_dict_avoids_truncated_json_during_write(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    session_path = tmp_path / "shared.json"
+    session_path.write_text('{"version": "old"}', encoding="utf-8")
+    write_truncated = threading.Event()
+    allow_write = threading.Event()
+
+    def truncating_write(path: str, content: str) -> None:
+        with open(path, "w", encoding="utf-8") as file:
+            file.write("")
+            file.flush()
+            write_truncated.set()
+            assert allow_write.wait(timeout=2)
+            file.write(content)
+            file.flush()
+
+    monkeypatch.setattr(
+        session_module,
+        "_write_json_text",
+        truncating_write,
+        raising=False,
+    )
+    session = SafeJSONSession(save_dir=str(tmp_path))
+
+    save_task = asyncio.create_task(
+        session.save_merged_state("shared", state={"version": "new"}),
+    )
+    assert await asyncio.to_thread(write_truncated.wait, 1)
+
+    read_task = asyncio.create_task(
+        session.get_session_state_dict("shared"),
+    )
+    await asyncio.sleep(0.05)
+    allow_write.set()
+
+    await save_task
+    state = await read_task
+
+    assert state in ({"version": "old"}, {"version": "new"})
+
+
+@pytest.mark.asyncio
+async def test_load_session_state_avoids_truncated_json_during_write(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    class StateModule:
+        def __init__(self) -> None:
+            self.loaded_state: dict | None = None
+
+        def load_state_dict(self, state: dict) -> None:
+            self.loaded_state = state
+
+    session_path = tmp_path / "shared.json"
+    session_path.write_text(
+        '{"agent": {"version": "old"}}',
+        encoding="utf-8",
+    )
+    write_truncated = threading.Event()
+    allow_write = threading.Event()
+
+    def truncating_write(path: str, content: str) -> None:
+        with open(path, "w", encoding="utf-8") as file:
+            file.write("")
+            file.flush()
+            write_truncated.set()
+            assert allow_write.wait(timeout=2)
+            file.write(content)
+            file.flush()
+
+    monkeypatch.setattr(
+        session_module,
+        "_write_json_text",
+        truncating_write,
+        raising=False,
+    )
+    session = SafeJSONSession(save_dir=str(tmp_path))
+    state_module = StateModule()
+
+    save_task = asyncio.create_task(
+        session.save_merged_state(
+            "shared",
+            state={"agent": {"version": "new"}},
+        ),
+    )
+    assert await asyncio.to_thread(write_truncated.wait, 1)
+
+    load_task = asyncio.create_task(
+        session.load_session_state("shared", agent=state_module),
+    )
+    await asyncio.sleep(0.05)
+    allow_write.set()
+
+    await save_task
+    await load_task
+
+    assert state_module.loaded_state in (
+        {"version": "old"},
+        {"version": "new"},
+    )
