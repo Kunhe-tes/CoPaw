@@ -19,6 +19,7 @@ import {
 } from "../historySessions";
 import TaskActionMenu from "../../TaskActionMenu";
 import TaskNextRunTooltip from "../../TaskNextRunTooltip";
+import { HistoryInfiniteScrollTrigger } from "../HistoryInfiniteScrollTrigger";
 
 export interface ExpandablePanelProps {
   visible: boolean;
@@ -32,6 +33,11 @@ export interface ExpandablePanelProps {
   onTaskResume?: (task: CronJobSpecOutput) => void;
   onTaskDelete?: (task: CronJobSpecOutput) => void;
   toolbarRef: React.RefObject<HTMLElement | null>;
+  hasMoreSessions?: boolean;
+  sessionTotal?: number;
+  isLoadingMoreSessions?: boolean;
+  loadMoreSessionsFailed?: boolean;
+  onLoadMoreSessions?: () => void;
 }
 
 export default function ExpandablePanel({
@@ -46,6 +52,11 @@ export default function ExpandablePanel({
   onTaskResume,
   onTaskDelete,
   toolbarRef,
+  hasMoreSessions = false,
+  sessionTotal,
+  isLoadingMoreSessions = false,
+  loadMoreSessionsFailed = false,
+  onLoadMoreSessions,
 }: ExpandablePanelProps) {
   const panelRef = useRef<HTMLDivElement>(null);
 
@@ -99,7 +110,15 @@ export default function ExpandablePanel({
             onTaskDelete={onTaskDelete}
           />
         ) : (
-          <HistoryContent sessions={sessions} onClose={onClose} />
+          <HistoryContent
+            sessions={sessions}
+            onClose={onClose}
+            hasMoreSessions={hasMoreSessions}
+            sessionTotal={sessionTotal ?? sessions.length}
+            isLoadingMoreSessions={isLoadingMoreSessions}
+            loadMoreSessionsFailed={loadMoreSessionsFailed}
+            onLoadMoreSessions={onLoadMoreSessions}
+          />
         )}
       </div>
     </>
@@ -235,11 +254,22 @@ function TasksContent({
 function HistoryContent({
   sessions,
   onClose,
+  hasMoreSessions,
+  sessionTotal,
+  isLoadingMoreSessions,
+  loadMoreSessionsFailed,
+  onLoadMoreSessions,
 }: {
   sessions: IAgentScopeRuntimeWebUISession[];
   onClose: () => void;
+  hasMoreSessions: boolean;
+  sessionTotal: number;
+  isLoadingMoreSessions: boolean;
+  loadMoreSessionsFailed: boolean;
+  onLoadMoreSessions?: () => void;
 }) {
   const navigate = useNavigate();
+  const scrollContainerRef = useRef<HTMLDivElement>(null);
   const { currentSessionId, setSessionLoading } =
     useChatAnywhereSessionsState();
 
@@ -267,30 +297,36 @@ function HistoryContent({
       <div className="expandable-panel-header">
         <HistoryIconSmall />
         <span className="expandable-panel-header-title">
-          历史记录({sessions.length})
+          历史记录({sessionTotal})
         </span>
       </div>
-      <div className="expandable-panel-content">
-        {sessions.length === 0 ? (
+      <div className="expandable-panel-content" ref={scrollContainerRef}>
+        {sessions.length === 0 && (
           <div className="expandable-panel-empty">暂无历史记录</div>
-        ) : (
-          sessions.map((session) => (
-            <div
-              key={session.id}
-              className="expandable-panel-history-item"
-              onClick={() => handleSessionClick(session)}
-              role="button"
-              tabIndex={0}
-            >
-              <div className="expandable-panel-history-title">
-                {session.name || "新会话"}
-              </div>
-              <div className="expandable-panel-history-time">
-                {formatListTime((session as any).createdAt)}
-              </div>
-            </div>
-          ))
         )}
+        {sessions.map((session) => (
+          <div
+            key={session.id}
+            className="expandable-panel-history-item"
+            onClick={() => handleSessionClick(session)}
+            role="button"
+            tabIndex={0}
+          >
+            <div className="expandable-panel-history-title">
+              {session.name || "新会话"}
+            </div>
+            <div className="expandable-panel-history-time">
+              {formatListTime((session as HistorySession).createdAt)}
+            </div>
+          </div>
+        ))}
+        <HistoryInfiniteScrollTrigger
+          scrollContainerRef={scrollContainerRef}
+          hasMore={hasMoreSessions}
+          loading={isLoadingMoreSessions}
+          failed={loadMoreSessionsFailed}
+          onLoadMore={() => onLoadMoreSessions?.()}
+        />
       </div>
     </>
   );

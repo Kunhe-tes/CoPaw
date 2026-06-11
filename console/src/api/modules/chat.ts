@@ -2,6 +2,7 @@ import { request } from "../request";
 import { getApiUrl, getApiToken } from "../config";
 import { buildAuthHeaders } from "../authHeaders";
 import type {
+  ChatPage,
   ChatSpec,
   ChatHistory,
   ChatDeleteResponse,
@@ -85,6 +86,27 @@ export const chatApi = {
     return request<ChatSpec[]>(`/chats${query ? `?${query}` : ""}`);
   },
 
+  listChatsPage: (params: {
+    page_size: number;
+    page?: number;
+    cursor?: string | null;
+    user_id?: string;
+    channel?: string;
+  }) => {
+    const searchParams = new URLSearchParams({
+      page_size: String(params.page_size),
+    });
+    if (params.page !== undefined) {
+      searchParams.append("page", String(params.page));
+    }
+    if (params.cursor !== undefined) {
+      searchParams.append("cursor", params.cursor || "");
+    }
+    if (params.user_id) searchParams.append("user_id", params.user_id);
+    if (params.channel) searchParams.append("channel", params.channel);
+    return request<ChatPage>(`/chats?${searchParams.toString()}`);
+  },
+
   createChat: (chat: Partial<ChatSpec>) =>
     request<ChatSpec>("/chats", {
       method: "POST",
@@ -119,7 +141,9 @@ export const chatApi = {
     source: "all" | "generated" | "uploaded" = "all",
   ) =>
     request<GeneratedFilesResponse>(
-      `/console/generated-files?sort=${encodeURIComponent(sort)}&source=${encodeURIComponent(source)}`,
+      `/console/generated-files?sort=${encodeURIComponent(
+        sort,
+      )}&source=${encodeURIComponent(source)}`,
     ),
 
   stopChat: (chatId: string) =>

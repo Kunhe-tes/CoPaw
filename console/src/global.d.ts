@@ -14,7 +14,6 @@ declare global {
       systemCode?: string;
       systemSect?: string;
       responseFeedbackUserWhitelist?: string[];
-      enableOriginYTaskTabs?: boolean | string | number;
     };
     __postMsgSwe__?: string;
   }
