@@ -12,8 +12,9 @@
 2. 再看 [Cron 存储、调度与入口](cron-scheduler.md)，确认任务从 Console / CLI 创建后如何落盘、同步平台、再被回调触发。
 3. 然后看 [Cron 执行上下文](cron-execution-context.md)，理解 scheduled run 如何恢复 tenant、source、model、cookie 和 runner 上下文。
 4. 如果问题和任务列表、未读、完成提醒或 Monitor 数据有关，看 [Cron Monitor 与通知](cron-monitor-notification.md)。
-5. 如果问题涉及多租户广播、heartbeat、dream 或多实例部署，看 [Cron 广播与系统任务](cron-broadcast-system.md)。
-6. 最后用 [Cron 排查与提交脉络](cron-troubleshooting-history.md) 定位常见问题和相关提交。
+5. 如果问题涉及可配置完成通知延迟、广播通知延迟叠加、CLI / Console 延迟配置，看 [Cron 通知延迟](cron-notification-delay.md)。
+6. 如果问题涉及多租户广播、heartbeat、dream 或多实例部署，看 [Cron 广播与系统任务](cron-broadcast-system.md)。
+7. 最后用 [Cron 排查与提交脉络](cron-troubleshooting-history.md) 定位常见问题和相关提交。
 
 ## 文档目录
 
@@ -23,6 +24,7 @@
 | [Cron 存储、调度与入口](cron-scheduler.md) | jobs.json 如何保存、外部平台如何同步、Console / CLI / 回调分别怎么进入 |
 | [Cron 执行上下文](cron-execution-context.md) | 单次执行流程、成功/取消判定、source 隔离、model_slot、cron_auth.json 和 cookie 来源 |
 | [Cron Monitor 与通知](cron-monitor-notification.md) | 任务卡片、未读计数、自动暂停、Monitor 同步、完成通知领取和推送 |
+| [Cron 通知延迟](cron-notification-delay.md) | `meta.notification_delay_minutes`、自动/手动执行差异、广播 offset 叠加、CLI 和 Console 配置 |
 | [Cron 广播与系统任务](cron-broadcast-system.md) | 广播任务如何派生子任务、heartbeat / dream 怎么跑、多实例 coordination 当前边界 |
 | [Cron 排查与提交脉络](cron-troubleshooting-history.md) | pending approval、source 串租户、Monitor 取消态、通知缺失、星期转换等问题怎么查 |
 
@@ -71,4 +73,5 @@
 - 当前 wiki 以 `v1.0.0` 的 `f0ed1c9e` 为事实来源。
 - 当前基线已包含 `51febe0a fix(cron): persist broadcast target identity`，广播目标的 `tenant_name`、`bbk_id` 会随 `targets` 请求体写入子任务。
 - 当前基线已包含 `f0ed1c9e fix(cron): handle chained swe cron commands`，Agent shell 拦截器可以处理 `echo ready && swe cron list` 这类链式命令。
+- 当前本地修改补充了 `meta.notification_delay_minutes`，自动成功执行的完成通知可以按任务配置延迟，广播子任务会在原有错峰通知 offset 上继续叠加这个延迟。
 - 这里记录的是当前代码真实行为，不把尚未装配的 coordination 原语描述成已经生效的运行路径。
