@@ -4,6 +4,7 @@ import {
   getTaskNextRunTooltipText,
   getTaskNextRunTooltipTimes,
   getTaskSidebarMeta,
+  partitionTasksByPauseState,
 } from "./taskJobs";
 
 function taskJob(
@@ -97,6 +98,71 @@ describe("getTaskSidebarMeta", () => {
     expect(meta.canRun).toBe(false);
     expect(meta.canResume).toBe(false);
     expect(meta.canDelete).toBe(false);
+  });
+});
+
+describe("partitionTasksByPauseState", () => {
+  it("keeps runnable and paused task order stable", () => {
+    const active = taskJob({ id: "active" });
+    const manualPaused = taskJob({
+      id: "manual-paused",
+      task: {
+        visible_in_my_tasks: true,
+        has_scheduled_result: false,
+        latest_scheduled_preview: "",
+        unread_execution_count: 0,
+        is_running: false,
+        is_paused: true,
+        pause_reason: "manual",
+      },
+    });
+    const running = taskJob({
+      id: "running",
+      task: {
+        visible_in_my_tasks: true,
+        has_scheduled_result: false,
+        latest_scheduled_preview: "",
+        unread_execution_count: 0,
+        is_running: true,
+        is_paused: false,
+        pause_reason: null,
+      },
+    });
+    const autoPaused = taskJob({
+      id: "auto-paused",
+      task: {
+        visible_in_my_tasks: true,
+        has_scheduled_result: false,
+        latest_scheduled_preview: "",
+        unread_execution_count: 3,
+        is_running: false,
+        is_paused: true,
+        pause_reason: "auto_unread_threshold",
+      },
+    });
+
+    const groups = partitionTasksByPauseState([
+      active,
+      manualPaused,
+      running,
+      autoPaused,
+    ]);
+
+    expect(groups.runnableTasks.map((task) => task.id)).toEqual([
+      "active",
+      "running",
+    ]);
+    expect(groups.pausedTasks.map((task) => task.id)).toEqual([
+      "manual-paused",
+      "auto-paused",
+    ]);
+  });
+
+  it("returns empty groups for an empty collection", () => {
+    expect(partitionTasksByPauseState([])).toEqual({
+      runnableTasks: [],
+      pausedTasks: [],
+    });
   });
 });
 
