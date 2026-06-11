@@ -71,6 +71,8 @@ def _manager(**overrides) -> RuntimeDiagnosticManager:
         "wall_time": lambda: 1000.0,
         "process": _Process(),
         "disk_usage": _disk_usage,
+        "pod_open_fd_count": lambda: 6,
+        "pod_disk_io_bytes": lambda: (100, 200),
         "log_sink": messages.append,
     }
     options.update(overrides)
@@ -128,6 +130,11 @@ def test_diagnostic_payload_contains_confirmed_metrics() -> None:
         "process_thread_count": 3,
         "process_open_fd_count": 4,
         "process_uptime_seconds": 100,
+        "pod_open_fd_count": 6,
+        "pod_disk_read_bytes_per_second": None,
+        "pod_disk_read_bytes_per_second_peak": None,
+        "pod_disk_write_bytes_per_second": None,
+        "pod_disk_write_bytes_per_second_peak": None,
         "storage_total_bytes": 1000,
         "storage_used_bytes": 600,
         "storage_free_bytes": 400,
@@ -171,24 +178,105 @@ def test_failed_process_fields_do_not_suppress_other_process_fields() -> None:
     assert payload["process_uptime_seconds"] == 100
 
 
+def test_pod_disk_io_reports_latest_and_peak_rates() -> None:
+    manager = _manager()
+    manager.record_sample(
+        lag_ms=1.0,
+        cpu_percent=1.0,
+        pod_disk_io_bytes=(100, 200),
+        sampled_at=10.0,
+    )
+    manager.record_sample(
+        lag_ms=1.0,
+        cpu_percent=1.0,
+        pod_disk_io_bytes=(300, 500),
+        sampled_at=11.0,
+    )
+    manager.record_sample(
+        lag_ms=1.0,
+        cpu_percent=1.0,
+        pod_disk_io_bytes=(500, 900),
+        sampled_at=13.0,
+    )
+
+    payload = manager.build_diagnostic_payload()
+
+    assert payload["pod_disk_read_bytes_per_second"] == 100.0
+    assert payload["pod_disk_read_bytes_per_second_peak"] == 200.0
+    assert payload["pod_disk_write_bytes_per_second"] == 200.0
+    assert payload["pod_disk_write_bytes_per_second_peak"] == 300.0
+
+
+def test_failed_pod_metrics_emit_null_without_suppressing_other_fields() -> (
+    None
+):
+    manager = _manager(
+        pod_open_fd_count=lambda: (_ for _ in ()).throw(
+            PermissionError("fd unavailable"),
+        ),
+    )
+    manager.record_sample(
+        lag_ms=1.0,
+        cpu_percent=1.0,
+        pod_disk_io_bytes=(100, 200),
+        sampled_at=10.0,
+    )
+    manager.record_sample(
+        lag_ms=1.0,
+        cpu_percent=1.0,
+        pod_disk_io_bytes=None,
+        sampled_at=11.0,
+    )
+
+    payload = manager.build_diagnostic_payload()
+
+    assert payload["pod_open_fd_count"] is None
+    assert payload["pod_disk_read_bytes_per_second"] is None
+    assert payload["pod_disk_read_bytes_per_second_peak"] is None
+    assert payload["pod_disk_write_bytes_per_second"] is None
+    assert payload["pod_disk_write_bytes_per_second_peak"] is None
+    assert payload["process_rss_bytes"] == 100
+
+
 def test_window_rotation_preserves_active_sse_and_clears_samples() -> None:
     manager = _manager()
     manager.record_sse_opened()
     manager.record_sse_opened()
     manager.record_sse_closed()
-    manager.record_sample(lag_ms=100.0, cpu_percent=50.0)
+    manager.record_sample(
+        lag_ms=100.0,
+        cpu_percent=50.0,
+        pod_disk_io_bytes=(100, 200),
+        sampled_at=10.0,
+    )
+    manager.record_sample(
+        lag_ms=100.0,
+        cpu_percent=50.0,
+        pod_disk_io_bytes=(200, 400),
+        sampled_at=11.0,
+    )
 
     manager.rotate_window()
+    manager.record_sample(
+        lag_ms=100.0,
+        cpu_percent=50.0,
+        pod_disk_io_bytes=(500, 1000),
+        sampled_at=13.0,
+    )
     payload = manager.build_diagnostic_payload()
 
     assert payload["sse_active_connections"] == 1
     assert payload["sse_peak_connections"] == 1
-    assert payload["event_loop_lag_avg_ms"] is None
-    assert payload["event_loop_lag_p95_ms"] is None
-    assert payload["event_loop_lag_max_ms"] is None
+    assert payload["event_loop_lag_avg_ms"] == 100.0
+    assert payload["event_loop_lag_p95_ms"] == 100.0
+    assert payload["event_loop_lag_max_ms"] == 100.0
     assert payload["event_loop_blocked_count"] == 0
-    assert payload["process_cpu_avg_percent"] is None
-    assert payload["process_cpu_max_percent"] is None
+    assert payload["process_cpu_avg_percent"] == 50.0
+    assert payload["process_cpu_max_percent"] == 50.0
+    assert payload["pod_disk_read_bytes_per_second"] == 150.0
+    assert payload["pod_disk_read_bytes_per_second_peak"] == 150.0
+    assert payload["pod_disk_write_bytes_per_second"] == 300.0
+    assert payload["pod_disk_write_bytes_per_second_peak"] == 300.0
 
 
 @pytest.mark.asyncio

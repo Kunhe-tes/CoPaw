@@ -28,7 +28,7 @@ Hook 机制的埋点以运行时日志为入口，不写入 `swe_tracing_spans`�
 - `diagnostic_flow`：首次延迟 120 秒并增加 0-10 秒抖动，之后每 30 分钟输出一次。
 - `instance_deregistered`：应用优雅关闭时注销实例。
 
-`diagnostic_flow` 只覆盖 SSE 当前值与峰值、事件循环延迟、当前 Swe/Uvicorn Python 进程资源，以及 `/opt/deployments/app` 所在文件系统的使用情况。单项采集失败时对应字段为 `null`，其他字段继续输出。
+`diagnostic_flow` 只覆盖 SSE 当前值与峰值、事件循环延迟、当前 Swe/Uvicorn Python 进程资源、当前容器的文件打开句柄数与 cgroup 磁盘读写速率，以及 `/opt/deployments/app` 所在文件系统的使用情况。Pod 级采集不读取 Kubernetes 节点级 `file-nr` 或磁盘 IO；无需 root 权限，读取不完整时对应字段为 `null`，其他字段继续输出。
 
 日志采集下游应以注册和诊断事件续租实例状态，租约为 75 分钟；注销事件立即将实例置为无效。诊断流水保留 30 天。Swe 本身不直接写诊断数据库，也不负责 Kafka 消费。
 
