@@ -86,6 +86,7 @@ class RuntimeDiagnosticManager:
         self._process_cpu_samples: list[float] = []
         self._previous_pod_disk_io_bytes: tuple[int, int] | None = None
         self._previous_pod_disk_io_at: float | None = None
+        self._pod_disk_io_collection_failed = False
         self._pod_disk_io_valid = True
         self._pod_disk_read_bytes_per_second: float | None = None
         self._pod_disk_read_bytes_per_second_peak: float | None = None
@@ -198,12 +199,14 @@ class RuntimeDiagnosticManager:
             logger.exception(
                 "Failed to collect runtime diagnostic process CPU",
             )
-        try:
-            pod_disk_io_bytes = self._pod_disk_io_bytes()
-        except Exception:  # pylint: disable=broad-except
-            logger.exception(
-                "Failed to collect runtime diagnostic Pod disk I/O",
-            )
+        if not self._pod_disk_io_collection_failed:
+            try:
+                pod_disk_io_bytes = self._pod_disk_io_bytes()
+            except Exception:  # pylint: disable=broad-except
+                self._pod_disk_io_collection_failed = True
+                logger.exception(
+                    "Failed to collect runtime diagnostic Pod disk I/O",
+                )
         self.record_sample(
             lag_ms=lag_ms,
             cpu_percent=cpu_percent,

@@ -3,10 +3,11 @@
 
 from __future__ import annotations
 
-import json
 import asyncio
+import json
 
 import pytest
+from swe.app import runtime_diagnostic
 from swe.app.runtime_diagnostic import RuntimeDiagnosticManager
 
 
@@ -302,6 +303,45 @@ async def test_sample_once_records_event_loop_lag_and_process_cpu() -> None:
     assert payload["event_loop_lag_avg_ms"] == 1250.0
     assert payload["event_loop_blocked_count"] == 1
     assert payload["process_cpu_avg_percent"] == 25.0
+
+
+@pytest.mark.asyncio
+async def test_sample_once_latches_pod_disk_io_collection_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls = 0
+    exception_logs: list[str] = []
+
+    def unavailable_pod_disk_io_bytes() -> tuple[int, int]:
+        nonlocal calls
+        calls += 1
+        raise OSError("cgroup io counters unavailable")
+
+    monkeypatch.setattr(
+        runtime_diagnostic.logger,
+        "exception",
+        lambda message, *args: exception_logs.append(
+            message % args if args else message,
+        ),
+    )
+    manager = _manager(
+        monotonic_time=lambda: 11.0,
+        pod_disk_io_bytes=unavailable_pod_disk_io_bytes,
+    )
+
+    await manager.sample_once(planned_wakeup=10.0)
+    await manager.sample_once(planned_wakeup=11.0)
+
+    payload = manager.build_diagnostic_payload()
+
+    assert calls == 1
+    assert exception_logs == [
+        "Failed to collect runtime diagnostic Pod disk I/O",
+    ]
+    assert payload["pod_disk_read_bytes_per_second"] is None
+    assert payload["pod_disk_read_bytes_per_second_peak"] is None
+    assert payload["pod_disk_write_bytes_per_second"] is None
+    assert payload["pod_disk_write_bytes_per_second_peak"] is None
 
 
 @pytest.mark.asyncio
