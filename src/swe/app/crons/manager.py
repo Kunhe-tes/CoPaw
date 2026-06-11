@@ -1438,12 +1438,6 @@ class CronManager:  # pylint: disable=too-many-public-methods
         if not text or not getattr(self._runner, "session", None):
             return
 
-        existing_state = await self._runner.session.get_session_state_dict(
-            session_id,
-            user_id,
-            allow_not_exist=True,
-        )
-        task_messages = list(existing_state.get(TASK_MESSAGES_STATE_KEY, []))
         timestamp = (
             datetime.now(timezone.utc)
             .isoformat()
@@ -1452,29 +1446,52 @@ class CronManager:  # pylint: disable=too-many-public-methods
                 "Z",
             )
         )
-        task_messages.append(
-            {
-                "id": f"cron-text-{uuid4()}",
-                "type": "message",
-                "role": "assistant",
-                "content": [
-                    {
-                        "type": "text",
-                        "text": text,
-                    },
-                ],
-                "metadata": {
-                    "cron_task": True,
+        task_message = {
+            "id": f"cron-text-{uuid4()}",
+            "type": "message",
+            "role": "assistant",
+            "content": [
+                {
+                    "type": "text",
+                    "text": text,
                 },
-                "timestamp": timestamp,
+            ],
+            "metadata": {
+                "cron_task": True,
             },
+            "timestamp": timestamp,
+        }
+
+        def _merge(existing_state: dict[str, object]) -> dict[str, object]:
+            merged_state = dict(existing_state)
+            raw_task_messages = merged_state.get(TASK_MESSAGES_STATE_KEY, [])
+            task_messages = (
+                list(raw_task_messages)
+                if isinstance(raw_task_messages, list)
+                else []
+            )
+            task_messages.append(task_message)
+            merged_state[TASK_MESSAGES_STATE_KEY] = task_messages
+            return merged_state
+
+        if hasattr(self._runner.session, "mutate_session_state"):
+            await self._runner.session.mutate_session_state(
+                session_id=session_id,
+                mutator=_merge,
+                user_id=user_id,
+                create_if_not_exist=True,
+            )
+            return
+
+        existing_state = await self._runner.session.get_session_state_dict(
+            session_id,
+            user_id,
+            allow_not_exist=True,
         )
-        merged_state = dict(existing_state)
-        merged_state[TASK_MESSAGES_STATE_KEY] = task_messages
         await self._runner.session.save_merged_state(
             session_id=session_id,
             user_id=user_id,
-            state=merged_state,
+            state=_merge(existing_state),
         )
 
     async def _load_task_preview_text(
@@ -1788,9 +1805,13 @@ class CronManager:  # pylint: disable=too-many-public-methods
                 )
             except (TypeError, ValueError):
                 offset = 0
-            if not is_manual and (job.meta or {}).get(
-                "broadcast_notification_policy",
-            ) == "original_schedule":
+            if (
+                not is_manual
+                and (job.meta or {}).get(
+                    "broadcast_notification_policy",
+                )
+                == "original_schedule"
+            ):
                 notification_due_at = actual_time + timedelta(minutes=offset)
                 notification_timezone = (job.meta or {}).get(
                     "broadcast_original_timezone",

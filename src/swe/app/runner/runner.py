@@ -3564,35 +3564,52 @@ class AgentRunner(Runner):
         hook_overlay: HookSessionOverlay | None = None,
     ) -> None:
         """保存 cron 任务状态，保留旧历史并追加本轮新增消息。"""
-        existing_state = await self.session.get_session_state_dict(
-            session_id=session_id,
-            user_id=user_id,
-            allow_not_exist=True,
-        )
         current_agent_state = agent.state_dict()
-        (
-            merged_state,
-            existing_content,
-            current_content,
-            stripped_count,
-        ) = _build_cron_merged_state(
-            existing_state,
-            current_agent_state,
-            hook_overlay,
-        )
-        await self.session.save_merged_state(
-            session_id,
-            user_id=user_id,
-            state=merged_state,
-        )
+        merge_stats: dict[str, Any] = {}
+
+        def _merge(existing_state: dict[str, Any]) -> dict[str, Any]:
+            (
+                merged_state,
+                existing_content,
+                current_content,
+                stripped_count,
+            ) = _build_cron_merged_state(
+                existing_state,
+                current_agent_state,
+                hook_overlay,
+            )
+            merge_stats["existing_content"] = existing_content
+            merge_stats["current_content"] = current_content
+            merge_stats["stripped_count"] = stripped_count
+            return merged_state
+
+        if hasattr(self.session, "mutate_session_state"):
+            await self.session.mutate_session_state(
+                session_id=session_id,
+                mutator=_merge,
+                user_id=user_id,
+                create_if_not_exist=True,
+            )
+        else:
+            existing_state = await self.session.get_session_state_dict(
+                session_id=session_id,
+                user_id=user_id,
+                allow_not_exist=True,
+            )
+            await self.session.save_merged_state(
+                session_id,
+                user_id=user_id,
+                state=_merge(existing_state),
+            )
+
         logger.info(
             "Cron task: saved merged session state "
             "(session_id=%s, existing_memory_content=%s, new_content=%s, "
             "stripped_internal_follow_ups=%s)",
             session_id,
-            len(existing_content),
-            len(current_content),
-            stripped_count,
+            len(merge_stats.get("existing_content", [])),
+            len(merge_stats.get("current_content", [])),
+            merge_stats.get("stripped_count", 0),
         )
 
     async def _save_legacy_session_state(
@@ -3641,39 +3658,55 @@ class AgentRunner(Runner):
             )
             return
 
-        existing_state = await self.session.get_session_state_dict(
-            session_id=session_id,
-            user_id=user_id,
-            allow_not_exist=True,
-        )
-        state_modules: dict[str, Any] = (
-            dict(existing_state) if isinstance(existing_state, dict) else {}
-        )
-        if (
-            isinstance(existing_state, dict)
-            and SESSION_SKILL_SNAPSHOT_STATE_KEY in existing_state
-        ):
-            state_modules[SESSION_SKILL_SNAPSHOT_STATE_KEY] = (
-                _normalize_session_skill_snapshot(
-                    existing_state.get(SESSION_SKILL_SNAPSHOT_STATE_KEY),
-                )
+        current_agent_state = agent.state_dict()
+        stripped_count = 0
+
+        def _merge(existing_state: dict[str, Any]) -> dict[str, Any]:
+            nonlocal stripped_count
+            state_modules: dict[str, Any] = (
+                dict(existing_state)
+                if isinstance(existing_state, dict)
+                else {}
             )
-        state_modules["agent"] = agent.state_dict()
-        if hook_overlay is not None:
-            state_modules["hook_overlay"] = hook_overlay.model_dump(
-                mode="json",
-                by_alias=True,
+            if SESSION_SKILL_SNAPSHOT_STATE_KEY in state_modules:
+                state_modules[SESSION_SKILL_SNAPSHOT_STATE_KEY] = (
+                    _normalize_session_skill_snapshot(
+                        state_modules.get(
+                            SESSION_SKILL_SNAPSHOT_STATE_KEY,
+                        ),
+                    )
+                )
+            state_modules["agent"] = current_agent_state
+            if hook_overlay is not None:
+                state_modules["hook_overlay"] = hook_overlay.model_dump(
+                    mode="json",
+                    by_alias=True,
+                )
+            else:
+                state_modules.pop("hook_overlay", None)
+            stripped_count = _strip_internal_follow_up_messages_from_state(
+                state_modules["agent"],
+            )
+            return state_modules
+
+        if hasattr(self.session, "mutate_session_state"):
+            await self.session.mutate_session_state(
+                session_id=session_id,
+                mutator=_merge,
+                user_id=user_id,
+                create_if_not_exist=True,
             )
         else:
-            state_modules.pop("hook_overlay", None)
-        stripped_count = _strip_internal_follow_up_messages_from_state(
-            state_modules["agent"],
-        )
-        await self.session.save_merged_state(
-            session_id=session_id,
-            user_id=user_id,
-            state=state_modules,
-        )
+            existing_state = await self.session.get_session_state_dict(
+                session_id=session_id,
+                user_id=user_id,
+                allow_not_exist=True,
+            )
+            await self.session.save_merged_state(
+                session_id=session_id,
+                user_id=user_id,
+                state=_merge(existing_state),
+            )
         logger.info(
             "Saved session state with stripped_internal_follow_ups=%s "
             "(session_id=%s)",

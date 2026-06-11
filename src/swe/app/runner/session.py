@@ -14,7 +14,7 @@ import os
 import re
 import threading
 
-from typing import Union, Sequence
+from typing import Any, Callable, Sequence, Union
 
 import aiofiles
 from agentscope.session import SessionBase
@@ -188,29 +188,11 @@ class SafeJSONSession(SessionBase):
         user_id: str = "",
         create_if_not_exist: bool = True,
     ) -> None:
-        session_save_path = self._get_save_path(session_id, user_id=user_id)
-        async with _get_session_write_lock(session_save_path):
-            if os.path.exists(session_save_path):
-                async with aiofiles.open(
-                    session_save_path,
-                    "r",
-                    encoding="utf-8",
-                    errors="surrogatepass",
-                ) as f:
-                    content = await f.read()
-                    states = json.loads(content)
+        path = key.split(".") if isinstance(key, str) else list(key)
+        if not path:
+            raise ValueError("key path is empty")
 
-            else:
-                if not create_if_not_exist:
-                    raise ValueError(
-                        f"Session file {session_save_path} does not exist.",
-                    )
-                states = {}
-
-            path = key.split(".") if isinstance(key, str) else list(key)
-            if not path:
-                raise ValueError("key path is empty")
-
+        def _mutate(states: dict[str, Any]) -> dict[str, Any]:
             cur = states
             for k in path[:-1]:
                 if k not in cur or not isinstance(cur[k], dict):
@@ -218,17 +200,19 @@ class SafeJSONSession(SessionBase):
                 cur = cur[k]
 
             cur[path[-1]] = value
+            return states
 
-            await asyncio.to_thread(
-                _write_json_text,
-                session_save_path,
-                json.dumps(states, ensure_ascii=False),
-            )
+        await self.mutate_session_state(
+            session_id=session_id,
+            mutator=_mutate,
+            user_id=user_id,
+            create_if_not_exist=create_if_not_exist,
+        )
 
         logger.info(
             "Updated session state key '%s' in %s successfully.",
             key,
-            session_save_path,
+            self._get_save_path(session_id, user_id=user_id),
         )
 
     async def get_session_state_dict(
@@ -353,3 +337,53 @@ class SafeJSONSession(SessionBase):
             session_save_path,
             len(state),
         )
+
+    async def mutate_session_state(
+        self,
+        session_id: str,
+        mutator: Callable[[dict[str, Any]], dict[str, Any] | None],
+        user_id: str = "",
+        create_if_not_exist: bool = True,
+    ) -> dict[str, Any]:
+        """Atomically read, merge and write session state under one lock."""
+        session_save_path = self._get_save_path(session_id, user_id=user_id)
+        async with _get_session_write_lock(session_save_path):
+            if os.path.exists(session_save_path):
+                async with aiofiles.open(
+                    session_save_path,
+                    "r",
+                    encoding="utf-8",
+                    errors="surrogatepass",
+                ) as file:
+                    content = await file.read()
+                    states = json.loads(content) if content.strip() else {}
+            else:
+                if not create_if_not_exist:
+                    raise ValueError(
+                        f"Session file {session_save_path} does not exist.",
+                    )
+                states = {}
+
+            if not isinstance(states, dict):
+                raise ValueError(
+                    f"Session file {session_save_path} does not contain "
+                    "a JSON object.",
+                )
+
+            updated_state = mutator(states)
+            if updated_state is None:
+                updated_state = states
+            if not isinstance(updated_state, dict):
+                raise ValueError("mutator must return a dict or None")
+
+            await asyncio.to_thread(
+                _write_json_text,
+                session_save_path,
+                json.dumps(updated_state, ensure_ascii=False),
+            )
+
+        logger.info(
+            "Mutated session state in %s successfully.",
+            session_save_path,
+        )
+        return updated_state
