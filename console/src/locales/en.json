@@ -667,6 +667,7 @@
       "console_enabled_mandatory": "Console channel is system-managed and always enabled."
     },
     "distributeToTenants": "Distribute to Tenants",
+    "sessionEndPushEnabled": "Session End Push",
     "distributeTitle": "Distribute Channel Config to Tenants",
     "distributeHint": "Distribute the current channel config to target tenants' default agent.",
     "distributeOverwrite": "Overwrite existing values",

@@ -3,6 +3,8 @@
 It provides a unified interface to manage providers, such as listing available
 providers, adding/removing custom providers, and fetching provider details."""
 
+from __future__ import annotations
+
 import asyncio
 import json
 import logging
@@ -10,6 +12,7 @@ import os
 import shutil
 import threading
 import time
+from typing import TYPE_CHECKING, Dict, List
 
 try:
     import fcntl
@@ -21,11 +24,8 @@ try:
 except ImportError:  # pragma: no cover (Unix)
     msvcrt = None
 from pathlib import Path
-from typing import Dict, List
 
 from pydantic import BaseModel
-
-from agentscope.model import ChatModelBase
 
 from swe.providers.provider import (
     ModelInfo,
@@ -33,12 +33,10 @@ from swe.providers.provider import (
     ProviderInfo,
 )
 from swe.providers.models import ModelSlotConfig
-from swe.providers.openai_provider import OpenAIProvider
-from swe.providers.anthropic_provider import AnthropicProvider
-
-# from swe.providers.gemini_provider import GeminiProvider
-from swe.providers.ollama_provider import OllamaProvider
 from swe.constant import SECRET_DIR
+
+if TYPE_CHECKING:
+    from agentscope.model import ChatModelBase
 
 logger = logging.getLogger(__name__)
 
@@ -245,30 +243,21 @@ class ProviderManager:
     def _resolve_effective_provider_tenant_id(
         tenant_id: str | None,
     ) -> str:
-        """解析 provider 存储使用的运行时租户标识。"""
+        """解析 provider 存储使用的 storage 租户标识。"""
         from ..config.context import (
-            canonicalize_scope_id,
             get_current_scope_id,
             get_current_source_id,
-            resolve_runtime_identity,
+            get_current_tenant_id,
+            resolve_storage_tenant_id,
         )
 
-        requested_tenant_id = tenant_id or "default"
-        current_scope_id = get_current_scope_id()
-        source_id = get_current_source_id()
-        if current_scope_id is not None:
-            _, current_source_id, _ = resolve_runtime_identity(
-                current_scope_id,
-            )
-            source_id = source_id or current_source_id
-            if tenant_id is None or requested_tenant_id == current_scope_id:
-                return canonicalize_scope_id(current_scope_id)
-
-        _, _, scope_id = resolve_runtime_identity(
+        requested_tenant_id = tenant_id or get_current_tenant_id() or "default"
+        resolved_tenant_id = resolve_storage_tenant_id(
             requested_tenant_id,
-            source_id,
+            get_current_source_id(),
+            scope_id=get_current_scope_id(),
         )
-        return scope_id or requested_tenant_id
+        return resolved_tenant_id or requested_tenant_id
 
     @staticmethod
     def ensure_tenant_provider_storage(tenant_id: str | None) -> None:
@@ -280,8 +269,8 @@ class ProviderManager:
         an empty directory structure is created.
 
         当显式传入 tenant_id 且当前上下文带有 source/scope 时，会写入
-        目标租户在当前 source 下的运行时 scope；未传入 tenant_id 时
-        继续沿用当前请求 scope。
+        目标租户在当前 source 下的 storage 目录；未传入 tenant_id 时
+        继续沿用当前请求对应的 storage 语义。
 
         Args:
             tenant_id: The tenant ID to ensure storage for. If None, uses "default".
@@ -417,8 +406,8 @@ class ProviderManager:
         each tenant has its own isolated ProviderManager instance.
 
         当显式传入 tenant_id 且当前上下文带有 source/scope 时，单例 key
-        会解析为目标租户在当前 source 下的运行时 scope；未传入
-        tenant_id 时继续沿用当前请求 scope。
+        会解析为目标租户在当前 source 下的 storage 目录；未传入
+        tenant_id 时继续沿用当前请求对应的 storage 语义。
 
         Args:
             tenant_id: The tenant ID. If None, uses "default" tenant.
@@ -950,6 +939,10 @@ class ProviderManager:
 
     def _provider_from_data(self, data: Dict) -> Provider:
         """Deserialize provider data to a concrete provider type."""
+        from swe.providers.anthropic_provider import AnthropicProvider
+        from swe.providers.ollama_provider import OllamaProvider
+        from swe.providers.openai_provider import OpenAIProvider
+
         provider_id = str(data.get("id", ""))
         chat_model = str(data.get("chat_model", ""))
 
@@ -1104,6 +1097,8 @@ class ProviderManager:
 
     def _migrate_custom_providers(self, custom_providers: dict) -> None:
         """Migrate custom providers from legacy format."""
+        from swe.providers.openai_provider import OpenAIProvider
+
         for provider_id, data in custom_providers.items():
             custom_provider = OpenAIProvider(
                 id=provider_id,

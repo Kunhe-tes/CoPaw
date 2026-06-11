@@ -44,6 +44,20 @@ from swe.config.utils import save_config  # noqa: E402
 # pylint: enable=wrong-import-position
 
 
+def _stub_seed_steps(monkeypatch):
+    """让测试聚焦目录与配置语义，避免运行时技能依赖干扰。"""
+    monkeypatch.setattr(
+        TenantInitializer,
+        "seed_skill_pool_from_default",
+        lambda self: {"seeded": False, "skipped": True},
+    )
+    monkeypatch.setattr(
+        TenantInitializer,
+        "seed_default_workspace_skills_from_default",
+        lambda self: {"seeded": False, "skipped": True},
+    )
+
+
 # ==================== TenantInitializer source_id tests ====================
 
 
@@ -88,8 +102,6 @@ class TestTenantInitializerSourceId:
             '{"agents": {}}',
             encoding="utf-8",
         )
-        scope_id = encode_scope_id("default", "ruice")
-
         initializer = TenantInitializer(
             tmp_path,
             "default",
@@ -97,8 +109,8 @@ class TestTenantInitializerSourceId:
         )
         # Template is created from default
         assert initializer.template_name == "default_ruice"
-        assert initializer.effective_tenant_id == scope_id
-        assert initializer.tenant_dir == tmp_path / scope_id
+        assert initializer.effective_tenant_id == "default_ruice"
+        assert initializer.tenant_dir == tmp_path / "default_ruice"
 
     def test_non_default_user_with_source_uses_scope_directory(
         self,
@@ -229,6 +241,7 @@ class TestTenantInitializerSourceId:
                 "token_usage": True,
             },
         )
+        _stub_seed_steps(monkeypatch)
         # Setup default_ruice template
         ruice_dir = tmp_path / "default_ruice"
         ruice_workspace = ruice_dir / "workspaces" / "default"
@@ -319,6 +332,7 @@ class TestTenantInitializerSourceId:
                 "token_usage": True,
             },
         )
+        _stub_seed_steps(monkeypatch)
         # Setup default template (as source template base)
         default_dir = tmp_path / "default"
         default_workspace = default_dir / "workspaces" / "default"
@@ -363,11 +377,11 @@ class TestTenantInitializerSourceId:
                 encoding="utf-8",
             )
 
-        # Initialize default tenant with source_id and seed runtime scope dir
+        # Initialize default tenant with source_id and seed template dir
         new_init = TenantInitializer(tmp_path, "default", source_id="ruice")
         new_init.ensure_seeded_bootstrap()
 
-        tenant_dir = tmp_path / encode_scope_id("default", "ruice")
+        tenant_dir = tmp_path / "default_ruice"
         config_data = json.loads(
             (tenant_dir / "config.json").read_text(encoding="utf-8"),
         )
@@ -402,6 +416,7 @@ class TestTenantInitializerSourceId:
                 "token_usage": True,
             },
         )
+        _stub_seed_steps(monkeypatch)
         ruice_dir = tmp_path / "default_ruice"
         ruice_workspace = ruice_dir / "workspaces" / "default"
         ruice_workspace.mkdir(parents=True)
@@ -693,7 +708,7 @@ class TestResolveEffectiveTenantId:
         assert resolve_effective_tenant_id("default", None) == "default"
 
     def test_default_with_source_returns_source_tenant(self):
-        """default + source_id 应返回统一编码后的 scope_id。"""
+        """default + source_id 的 runtime 兼容别名仍返回 scope_id。"""
         from swe.config.context import (
             encode_scope_id,
             resolve_effective_tenant_id,
@@ -701,6 +716,14 @@ class TestResolveEffectiveTenantId:
 
         assert resolve_effective_tenant_id("default", "ruice") == (
             encode_scope_id("default", "ruice")
+        )
+
+    def test_default_with_source_storage_resolves_to_template_dir(self):
+        """default + source_id 的 storage 语义应返回模板目录。"""
+        from swe.config.context import resolve_storage_tenant_id
+
+        assert resolve_storage_tenant_id("default", "ruice") == (
+            "default_ruice"
         )
 
     def test_non_default_with_source_returns_original(self):

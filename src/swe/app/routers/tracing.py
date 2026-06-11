@@ -8,7 +8,10 @@ import logging
 from fastapi import APIRouter, HTTPException, Query, Request
 
 from ...config.context import resolve_scope_preferred_tenant_id
-from ...config.utils import get_tenant_config_path, load_config
+from ...config.utils import (
+    get_tenant_storage_config_path,
+    load_config,
+)
 from ..runner.api import (
     TASK_RUNS_STATE_KEY,
     _annotate_approval_action_statuses,
@@ -40,7 +43,7 @@ def _request_agent_id(request: Request, tenant_id: str | None) -> str:
         return agent_id
 
     config = (
-        load_config(get_tenant_config_path(tenant_id))
+        load_config(get_tenant_storage_config_path(tenant_id))
         if tenant_id
         else load_config()
     )

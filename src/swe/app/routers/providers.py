@@ -23,12 +23,13 @@ from pydantic import BaseModel, Field
 from ...config.context import (
     get_current_effective_tenant_id,
     resolve_scope_preferred_tenant_id,
+    resolve_storage_tenant_id,
 )
 from ...config.utils import (
-    get_tenant_working_dir_strict,
+    get_tenant_storage_providers_dir,
+    get_tenant_storage_working_dir,
     list_logical_tenant_ids,
 )
-from ...constant import SECRET_DIR
 from ...providers.models import ModelSlotConfig
 from ...providers.provider import ProviderInfo, ModelInfo
 from ...providers.provider_manager import ActiveModelsInfo, ProviderManager
@@ -152,7 +153,7 @@ def _request_tenant_id(request: Request) -> str | None:
 
 
 def _request_tenant_working_dir(request: Request):
-    return get_tenant_working_dir_strict(_get_effective_tenant_id(request))
+    return get_tenant_storage_working_dir(_get_effective_tenant_id(request))
 
 
 def _request_source_id(request: Request) -> str | None:
@@ -160,11 +161,11 @@ def _request_source_id(request: Request) -> str | None:
 
 
 def _get_effective_tenant_id(request: Request) -> str | None:
-    """从请求上下文获取有效租户 ID。"""
-    return resolve_scope_preferred_tenant_id(
+    """从请求上下文获取 storage 语义的有效租户 ID。"""
+    return resolve_storage_tenant_id(
         _request_tenant_id(request),
         _request_source_id(request),
-        getattr(request.state, "scope_id", None),
+        scope_id=getattr(request.state, "scope_id", None),
     )
 
 
@@ -198,8 +199,8 @@ def _distribute_providers_to_tenant(
     if not was_bootstrapped:
         initializer.ensure_seeded_bootstrap()
 
-    target_providers_dir = (
-        SECRET_DIR / initializer.effective_tenant_id / "providers"
+    target_providers_dir = get_tenant_storage_providers_dir(
+        initializer.effective_tenant_id,
     )
 
     # Remove existing target directory if exists
@@ -278,8 +279,12 @@ async def _distribute_active_model_to_tenant(
     if not was_bootstrapped:
         initializer.ensure_seeded_bootstrap()
 
-    ProviderManager.ensure_tenant_provider_storage(target_tenant_id)
-    target_manager = ProviderManager.get_instance(target_tenant_id)
+    ProviderManager.ensure_tenant_provider_storage(
+        initializer.effective_tenant_id,
+    )
+    target_manager = ProviderManager.get_instance(
+        initializer.effective_tenant_id,
+    )
     target_manager.overwrite_provider_payload(provider_payload)
     await target_manager.activate_model(
         source_active_model.provider_id,
@@ -876,7 +881,9 @@ async def distribute_providers(
         )
 
     # 获取源 providers 目录
-    source_providers_dir = SECRET_DIR / effective_tenant_id / "providers"
+    source_providers_dir = get_tenant_storage_providers_dir(
+        effective_tenant_id,
+    )
     if not source_providers_dir.exists():
         raise HTTPException(
             status_code=400,

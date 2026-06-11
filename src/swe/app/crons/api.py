@@ -12,6 +12,7 @@ from ...config.context import (
     resolve_runtime_tenant_id,
     resolve_scope_id,
     resolve_scope_preferred_tenant_id,
+    resolve_storage_tenant_id,
 )
 from ...config.utils import list_logical_tenant_ids
 from ...providers.provider_manager import ProviderManager
@@ -40,8 +41,15 @@ class BroadcastTenantListResponse(BaseModel):
     tenant_ids: list[str] = Field(default_factory=list)
 
 
+class CronBroadcastTarget(BaseModel):
+    tenant_id: str
+    tenant_name: str | None = None
+    bbk_id: str | None = None
+
+
 class CronBroadcastRequest(BaseModel):
     target_tenant_ids: list[str] = Field(default_factory=list)
+    targets: list[CronBroadcastTarget] = Field(default_factory=list)
 
 
 class CronBroadcastTenantResult(BaseModel):
@@ -71,6 +79,7 @@ class _BroadcastContext:
     agent_id: str
     source_id: str | None
     timezone_name: str
+    target_identity_by_tenant: dict[str, dict[str, str | None]]
 
 
 @dataclass(frozen=True)
@@ -174,8 +183,9 @@ def _validate_cron_job_model_slot(
 
 
 def _get_provider_manager(manager_tenant_id: str):
-    ProviderManager.ensure_tenant_provider_storage(manager_tenant_id)
-    return ProviderManager.get_instance(manager_tenant_id)
+    storage_tenant_id = resolve_storage_tenant_id(manager_tenant_id, None)
+    ProviderManager.ensure_tenant_provider_storage(storage_tenant_id)
+    return ProviderManager.get_instance(storage_tenant_id)
 
 
 def _resolve_broadcast_model_slot(
@@ -254,6 +264,13 @@ def _validate_target_tenant_id(tenant_id: str) -> str:
     return value
 
 
+def _optional_text(value: Any) -> str | None:
+    if value is None:
+        return None
+    text = str(value).strip()
+    return text or None
+
+
 def _build_broadcast_job(
     source_job: CronJobSpec,
     *,
@@ -265,6 +282,8 @@ def _build_broadcast_job(
     offset_minutes: int,
     model_slot,
     model_slot_fallback_reason: str,
+    tenant_name: str | None = None,
+    bbk_id: str | None = None,
 ) -> CronJobSpec:
     meta = dict(source_job.meta or {})
     for key in (
@@ -325,9 +344,9 @@ def _build_broadcast_job(
             "id": job_id,
             "enabled": True,
             "tenant_id": target_tenant_id,
-            "bbk_id": None,
+            "bbk_id": bbk_id,
             "source_id": source_id,
-            "tenant_name": None,
+            "tenant_name": tenant_name,
             "scope_id": resolve_scope_id(target_tenant_id, source_id),
             "schedule": source_job.schedule.model_copy(
                 update={
@@ -353,21 +372,34 @@ async def _find_existing_broadcast_child_job(
     return None
 
 
-def _normalize_broadcast_target_tenants(
-    target_tenant_ids: list[str],
-) -> list[str]:
+def _normalize_broadcast_targets(
+    body: CronBroadcastRequest,
+) -> tuple[list[str], dict[str, dict[str, str | None]]]:
+    if body.targets:
+        raw_targets = body.targets
+    else:
+        raw_targets = [
+            CronBroadcastTarget(tenant_id=tenant_id)
+            for tenant_id in body.target_tenant_ids
+        ]
+
     normalized_tenants: list[str] = []
+    identity_by_tenant: dict[str, dict[str, str | None]] = {}
     seen: set[str] = set()
     try:
-        for tenant_id in target_tenant_ids:
-            normalized = _validate_target_tenant_id(tenant_id)
-            if normalized in seen:
+        for target in raw_targets:
+            tenant_id = _validate_target_tenant_id(target.tenant_id)
+            if tenant_id in seen:
                 continue
-            seen.add(normalized)
-            normalized_tenants.append(normalized)
+            seen.add(tenant_id)
+            normalized_tenants.append(tenant_id)
+            identity_by_tenant[tenant_id] = {
+                "tenant_name": _optional_text(target.tenant_name),
+                "bbk_id": _optional_text(target.bbk_id),
+            }
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
-    return normalized_tenants
+    return normalized_tenants, identity_by_tenant
 
 
 def _get_broadcast_multi_agent_manager(request: Request):
@@ -388,7 +420,9 @@ def _build_broadcast_context(
     request: Request,
     source_job: CronJobSpec,
     normalized_tenants: list[str],
+    target_identity_by_tenant: dict[str, dict[str, str | None]],
 ) -> _BroadcastContext:
+    source_id = _request_source_id(request)
     return _BroadcastContext(
         source_job=source_job,
         offsets=compute_broadcast_offsets(len(normalized_tenants)),
@@ -399,8 +433,9 @@ def _build_broadcast_context(
             None,
         ),
         agent_id=_request_agent_id(request),
-        source_id=_request_source_id(request),
+        source_id=source_id,
         timezone_name=source_job.schedule.timezone or "UTC",
+        target_identity_by_tenant=target_identity_by_tenant,
     )
 
 
@@ -489,6 +524,7 @@ async def _create_broadcast_child_job(
             context.source_job,
         )
     )
+    target_identity = context.target_identity_by_tenant.get(tenant_id, {})
     target_job = _build_broadcast_job(
         context.source_job,
         job_id=target_job_id,
@@ -499,6 +535,8 @@ async def _create_broadcast_child_job(
         offset_minutes=schedule.offset_minutes,
         model_slot=model_slot,
         model_slot_fallback_reason=model_slot_fallback_reason,
+        tenant_name=target_identity.get("tenant_name"),
+        bbk_id=target_identity.get("bbk_id"),
     )
     await target_cron_manager.create_or_replace_job(target_job)
     saved = await target_cron_manager.get_job(target_job_id)
@@ -615,19 +653,20 @@ async def broadcast_job(
     source_job = await mgr.get_job(job_id)
     if not source_job:
         raise HTTPException(status_code=404, detail="job not found")
-    if not body.target_tenant_ids:
+    if not body.target_tenant_ids and not body.targets:
         raise HTTPException(
             status_code=400,
             detail="No target tenant IDs provided",
         )
 
-    normalized_tenants = _normalize_broadcast_target_tenants(
-        body.target_tenant_ids,
+    normalized_tenants, target_identity_by_tenant = _normalize_broadcast_targets(
+        body,
     )
     context = _build_broadcast_context(
         request,
         source_job,
         normalized_tenants,
+        target_identity_by_tenant,
     )
     results = [
         await _broadcast_to_tenant(context, tenant_id, offset)

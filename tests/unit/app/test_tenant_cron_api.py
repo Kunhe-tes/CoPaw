@@ -635,6 +635,62 @@ def test_broadcast_clears_stale_fallback_meta_when_source_model_slot_missing():
     )
 
 
+def test_broadcast_job_persists_target_identity_from_request():
+    source_job = CronJobSpec.model_validate(
+        {
+            **_job_spec("job-source"),
+            "schedule": ScheduleSpec(
+                cron="0 9 * * *",
+            ).model_dump(mode="json"),
+            "tenant_id": "tenant-a",
+            "tenant_name": "Alice",
+            "bbk_id": "1001",
+            "source_id": "source-a",
+            "scope_id": encode_scope_id("tenant-a", "source-a"),
+        },
+    )
+    source_manager = _Manager({"job-source": source_job})
+    target_manager = _Manager()
+    multi_agent_manager = _MultiAgentManager(
+        {
+            encode_scope_id("tenant-b", "source-a"): _Workspace(
+                target_manager,
+            ),
+        },
+    )
+
+    client = _build_client(
+        source_manager,
+        multi_agent_manager=multi_agent_manager,
+        tenant_workspace_pool=_TenantWorkspacePool(),
+    )
+    _install_provider_manager(
+        {},
+        providers_by_tenant={
+            encode_scope_id("tenant-b", "source-a"): {},
+        },
+    )
+
+    response = client.post(
+        "/cron/jobs/job-source/broadcast",
+        json={
+            "target_tenant_ids": ["tenant-b"],
+            "targets": [
+                {
+                    "tenant_id": "tenant-b",
+                    "tenant_name": "Bob",
+                    "bbk_id": "2002",
+                },
+            ],
+        },
+    )
+
+    assert response.status_code == 200
+    assert target_manager.created[0].tenant_id == "tenant-b"
+    assert target_manager.created[0].tenant_name == "Bob"
+    assert target_manager.created[0].bbk_id == "2002"
+
+
 def test_broadcast_skips_tenant_that_already_has_source_child_job():
     source_job = CronJobSpec.model_validate(
         {

@@ -15,7 +15,10 @@ from pathlib import Path
 import time
 from typing import Optional
 
-from ...config.context import resolve_runtime_identity
+from ...config.context import (
+    resolve_runtime_identity,
+    resolve_storage_tenant_id,
+)
 from .tenant_initializer import TenantInitializer
 from .workspace import Workspace
 
@@ -149,15 +152,14 @@ class TenantWorkspacePool:
         Raises:
             ValueError: If scope_id cannot resolve to a canonical scope.
         """
-        if scope_id is not None:
-            bootstrap_tenant_id = resolve_runtime_identity(scope_id)[2]
-            if bootstrap_tenant_id is None:
-                raise ValueError(
-                    "scope_id must resolve to a canonical runtime scope",
-                )
-            return bootstrap_tenant_id
-
-        return resolve_runtime_identity(tenant_id, source_id)[2] or tenant_id
+        resolved_tenant_id = resolve_storage_tenant_id(
+            tenant_id,
+            source_id,
+            scope_id=scope_id,
+        )
+        if resolved_tenant_id is None:
+            raise ValueError("tenant_id must resolve to a storage tenant id")
+        return resolved_tenant_id
 
     async def _check_existing_bootstrap(
         self,
@@ -255,6 +257,8 @@ class TenantWorkspacePool:
             if scope_id is not None
             else resolve_runtime_identity(tenant_id, source_id)
         )
+        if logical_tenant_id is None:
+            logical_tenant_id = tenant_id
 
         return logical_tenant_id, resolved_source_id, init_source
 
@@ -476,6 +480,7 @@ class TenantWorkspacePool:
                 init_source=init_source,
                 tenant_name=tenant_name,
                 bbk_id=bbk_id,
+                tenant_type="tenant",
             )
         except Exception as e:
             # Non-fatal: log warning but don't fail bootstrap
@@ -511,6 +516,7 @@ class TenantWorkspacePool:
                 init_source="default",
                 tenant_name=None,
                 bbk_id=None,
+                tenant_type="template",
             )
             logger.info(
                 f"Recorded template init_source mapping: "
