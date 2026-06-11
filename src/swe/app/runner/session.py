@@ -15,7 +15,7 @@ import re
 import threading
 import tempfile
 
-from typing import Any, Callable, Sequence, Union
+from typing import Any, Callable, Protocol, Sequence, Union
 
 import aiofiles
 from agentscope.session import SessionBase
@@ -415,3 +415,60 @@ class SafeJSONSession(SessionBase):
             session_save_path,
         )
         return updated_state
+
+
+class RunnerSessionProtocol(Protocol):
+    def _get_save_path(self, session_id: str, user_id: str) -> str:
+        pass
+
+    async def load_session_state(
+        self,
+        session_id: str,
+        user_id: str = "",
+        allow_not_exist: bool = True,
+        **state_modules_mapping,
+    ) -> None:
+        pass
+
+    async def save_session_state(
+        self,
+        session_id: str,
+        user_id: str = "",
+        **state_modules_mapping,
+    ) -> None:
+        pass
+
+    async def update_session_state(
+        self,
+        session_id: str,
+        key: Union[str, Sequence[str]],
+        value,
+        user_id: str = "",
+        create_if_not_exist: bool = True,
+    ) -> None:
+        pass
+
+    async def get_session_state_dict(
+        self,
+        session_id: str,
+        user_id: str = "",
+        allow_not_exist: bool = True,
+    ) -> dict:
+        pass
+
+    async def save_merged_state(
+        self,
+        session_id: str,
+        user_id: str = "",
+        state: dict | None = None,
+    ) -> None:
+        pass
+
+    async def mutate_session_state(
+        self,
+        session_id: str,
+        mutator: Callable[[dict[str, Any]], dict[str, Any] | None],
+        user_id: str = "",
+        create_if_not_exist: bool = True,
+    ) -> dict[str, Any]:
+        pass

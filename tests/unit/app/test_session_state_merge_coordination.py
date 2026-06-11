@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import copy
+import json
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
@@ -12,6 +13,7 @@ from agentscope.message import Msg
 
 from swe.app.crons.manager import CronManager
 from swe.app.runner.runner import AgentRunner
+from swe.security.tool_guard.models import TOOL_GUARD_DENIED_MARK
 
 
 class _FakeAgent:
@@ -102,6 +104,56 @@ class _AtomicSessionDouble:
             return copy.deepcopy(self.state)
 
 
+class _MutationTrackingFileSession:
+    def __init__(self, path: Path) -> None:
+        self.path = path
+        self.mutate_calls = 0
+
+    def _get_save_path(self, session_id: str, user_id: str = "") -> str:
+        del session_id, user_id
+        return str(self.path)
+
+    async def mutate_session_state(
+        self,
+        session_id: str,
+        mutator,
+        user_id: str = "",
+        create_if_not_exist: bool = True,
+    ) -> dict:
+        del session_id, user_id, create_if_not_exist
+        self.mutate_calls += 1
+        state = json.loads(self.path.read_text(encoding="utf-8"))
+        updated = mutator(copy.deepcopy(state))
+        if updated is None:
+            updated = state
+        self.path.write_text(
+            json.dumps(updated, ensure_ascii=False),
+            encoding="utf-8",
+        )
+        return updated
+
+
+class _MutateOnlySession:
+    def __init__(self) -> None:
+        self.state: dict = {}
+        self.mutate_calls = 0
+
+    async def mutate_session_state(
+        self,
+        session_id: str,
+        mutator,
+        user_id: str = "",
+        create_if_not_exist: bool = True,
+    ) -> dict:
+        del session_id, user_id, create_if_not_exist
+        self.mutate_calls += 1
+        updated = mutator(copy.deepcopy(self.state))
+        if updated is None:
+            updated = self.state
+        self.state = copy.deepcopy(updated)
+        return copy.deepcopy(self.state)
+
+
 def _make_runner(monkeypatch, tmp_path: Path, session) -> AgentRunner:
     runner = AgentRunner(agent_id="test-agent", workspace_dir=tmp_path)
     runner.session = session
@@ -190,6 +242,113 @@ async def test_cron_text_append_preserves_concurrent_agent_update(
     await asyncio.gather(append_task, update_task)
 
     assert session.state["agent"]["memory"]["content"]
+    assert session.state["task_messages"][0]["content"][0]["text"] == (
+        "cron preview"
+    )
+
+
+@pytest.mark.asyncio
+async def test_denied_cleanup_uses_atomic_session_mutation_when_available(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    session_path = tmp_path / "session-1.json"
+    session_path.write_text(
+        json.dumps(
+            {
+                "agent": {
+                    "memory": {
+                        "content": [
+                            [
+                                {
+                                    "role": "assistant",
+                                    "content": "tool call",
+                                },
+                                [TOOL_GUARD_DENIED_MARK],
+                            ],
+                            [
+                                {
+                                    "role": "assistant",
+                                    "content": "llm denial explanation",
+                                },
+                                [],
+                            ],
+                        ],
+                    },
+                },
+                "task_messages": [{"id": "keep-me"}],
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    session = _MutationTrackingFileSession(session_path)
+    runner = _make_runner(monkeypatch, tmp_path, session)
+
+    await runner._cleanup_denied_session_memory(
+        session_id="session-1",
+        user_id="user-1",
+        denial_response=Msg(
+            name="Friday",
+            role="assistant",
+            content="❌ Tool denied",
+        ),
+    )
+
+    state = json.loads(session_path.read_text(encoding="utf-8"))
+
+    assert session.mutate_calls == 1
+    assert state["task_messages"] == [{"id": "keep-me"}]
+    content = state["agent"]["memory"]["content"]
+    assert content[0] == [
+        {"role": "assistant", "content": "tool call"},
+        [],
+    ]
+    assert content[1][1] == []
+    assert content[1][0]["name"] == "Friday"
+    assert content[1][0]["role"] == "assistant"
+    assert content[1][0]["content"] == "❌ Tool denied"
+
+
+@pytest.mark.asyncio
+async def test_regular_session_save_requires_only_atomic_mutation(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    session = _MutateOnlySession()
+    runner = _make_runner(monkeypatch, tmp_path, session)
+
+    await runner._save_regular_session_state(
+        _FakeAgent(),
+        session_id="session-1",
+        user_id="user-1",
+        hook_overlay=None,
+    )
+
+    assert session.mutate_calls == 1
+    assert session.state["agent"]["memory"]["content"]
+
+
+@pytest.mark.asyncio
+async def test_cron_text_append_requires_only_atomic_mutation(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    session = _MutateOnlySession()
+    runner = _make_runner(monkeypatch, tmp_path, session)
+    manager = CronManager(
+        repo=object(),
+        runner=runner,
+        channel_manager=object(),
+    )
+
+    await manager._append_text_task_message(
+        "session-1",
+        "user-1",
+        "cron preview",
+    )
+
+    assert session.mutate_calls == 1
     assert session.state["task_messages"][0]["content"][0]["text"] == (
         "cron preview"
     )

@@ -29,6 +29,7 @@ async def test_query_handler_injects_auth_headers_into_mcp_headers_and_context(
     runner = AgentRunner(agent_id="test-agent")
     runner.session = SimpleNamespace(
         load_session_state=AsyncMock(),
+        mutate_session_state=AsyncMock(return_value={}),
         save_session_state=AsyncMock(),
     )
     setattr(runner, "_chat_manager", None)
@@ -108,6 +109,7 @@ async def test_query_handler_keeps_existing_passthrough_headers(monkeypatch):
     runner = AgentRunner(agent_id="test-agent")
     runner.session = SimpleNamespace(
         load_session_state=AsyncMock(),
+        mutate_session_state=AsyncMock(return_value={}),
         save_session_state=AsyncMock(),
     )
     setattr(runner, "_chat_manager", None)

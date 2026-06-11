@@ -36,6 +36,7 @@ from .command_dispatch import (
 from .query_error_dump import write_query_error_dump
 from .retry_classifier import is_query_retryable
 from .session import (
+    RunnerSessionProtocol,
     SafeJSONSession,
     SESSION_SKILL_SNAPSHOT_STATE_KEY,
 )
@@ -389,7 +390,7 @@ def _hook_config_enabled(
 
 
 async def _load_session_hook_overlay(
-    session: Any,
+    session: RunnerSessionProtocol | None,
     *,
     session_id: str,
     user_id: str,
@@ -855,6 +856,14 @@ def _normalize_session_skill_snapshot(
         if isinstance(skill_name, str) and isinstance(entry, dict):
             normalized[skill_name] = dict(entry)
     return normalized
+
+
+def _coerce_session_storage_id(session_id: str | None | Any) -> str:
+    return "" if session_id is None else str(session_id)
+
+
+def _coerce_session_storage_user_id(user_id: str | None) -> str:
+    return user_id or ""
 
 
 def _build_session_skill_snapshot_entry(
@@ -1437,6 +1446,7 @@ class AgentRunner(Runner):
         self._workspace: Any = None  # Workspace instance for control commands
         self.memory_manager: BaseMemoryManager | None = None
         self._task_tracker = task_tracker  # Task tracker for background tasks
+        self.session: RunnerSessionProtocol | None = None
 
     def set_chat_manager(self, chat_manager):
         """Set chat manager for auto-registration.
@@ -3534,6 +3544,8 @@ class AgentRunner(Runner):
         user_id: str | None,
     ) -> bool:
         # 对于 cron 任务，跳过会话历史加载（不读取旧历史）
+        storage_session_id = _coerce_session_storage_id(session_id)
+        storage_user_id = _coerce_session_storage_user_id(user_id)
         if skip_history:
             logger.info(
                 "Cron task: skipping session state load (session_id=%s)",
@@ -3543,8 +3555,8 @@ class AgentRunner(Runner):
         else:
             try:
                 await self.session.load_session_state(
-                    session_id=session_id,
-                    user_id=user_id,
+                    session_id=storage_session_id,
+                    user_id=storage_user_id,
                     agent=agent,
                 )
             except KeyError as e:
@@ -3564,6 +3576,8 @@ class AgentRunner(Runner):
         hook_overlay: HookSessionOverlay | None = None,
     ) -> None:
         """保存 cron 任务状态，保留旧历史并追加本轮新增消息。"""
+        storage_session_id = _coerce_session_storage_id(session_id)
+        storage_user_id = _coerce_session_storage_user_id(user_id)
         current_agent_state = agent.state_dict()
         merge_stats: dict[str, Any] = {}
 
@@ -3583,24 +3597,12 @@ class AgentRunner(Runner):
             merge_stats["stripped_count"] = stripped_count
             return merged_state
 
-        if hasattr(self.session, "mutate_session_state"):
-            await self.session.mutate_session_state(
-                session_id=session_id,
-                mutator=_merge,
-                user_id=user_id,
-                create_if_not_exist=True,
-            )
-        else:
-            existing_state = await self.session.get_session_state_dict(
-                session_id=session_id,
-                user_id=user_id,
-                allow_not_exist=True,
-            )
-            await self.session.save_merged_state(
-                session_id,
-                user_id=user_id,
-                state=_merge(existing_state),
-            )
+        await self.session.mutate_session_state(
+            session_id=storage_session_id,
+            mutator=_merge,
+            user_id=storage_user_id,
+            create_if_not_exist=True,
+        )
 
         logger.info(
             "Cron task: saved merged session state "
@@ -3619,23 +3621,22 @@ class AgentRunner(Runner):
         user_id: str | None,
         hook_overlay: HookSessionOverlay | None = None,
     ) -> None:
-        """兼容不支持 save_merged_state 的旧 session 实现。"""
+        """兼容不支持 state_dict 的 agent 落盘路径。"""
+        storage_session_id = _coerce_session_storage_id(session_id)
+        storage_user_id = _coerce_session_storage_user_id(user_id)
         await self.session.save_session_state(
-            session_id=session_id,
-            user_id=user_id,
+            session_id=storage_session_id,
+            user_id=storage_user_id,
             agent=agent,
         )
-        if hook_overlay is None or not hasattr(
-            self.session,
-            "update_session_state",
-        ):
+        if hook_overlay is None:
             return
 
         await self.session.update_session_state(
-            session_id,
+            storage_session_id,
             "hook_overlay",
             hook_overlay.model_dump(mode="json", by_alias=True),
-            user_id=user_id,
+            user_id=storage_user_id,
         )
 
     async def _save_regular_session_state(
@@ -3646,10 +3647,9 @@ class AgentRunner(Runner):
         hook_overlay: HookSessionOverlay | None = None,
     ) -> None:
         """保存普通请求状态，并在落盘前剔除内部续跑提示。"""
-        if not hasattr(agent, "state_dict") or not hasattr(
-            self.session,
-            "save_merged_state",
-        ):
+        storage_session_id = _coerce_session_storage_id(session_id)
+        storage_user_id = _coerce_session_storage_user_id(user_id)
+        if not hasattr(agent, "state_dict"):
             await self._save_legacy_session_state(
                 agent,
                 session_id,
@@ -3689,24 +3689,12 @@ class AgentRunner(Runner):
             )
             return state_modules
 
-        if hasattr(self.session, "mutate_session_state"):
-            await self.session.mutate_session_state(
-                session_id=session_id,
-                mutator=_merge,
-                user_id=user_id,
-                create_if_not_exist=True,
-            )
-        else:
-            existing_state = await self.session.get_session_state_dict(
-                session_id=session_id,
-                user_id=user_id,
-                allow_not_exist=True,
-            )
-            await self.session.save_merged_state(
-                session_id=session_id,
-                user_id=user_id,
-                state=_merge(existing_state),
-            )
+        await self.session.mutate_session_state(
+            session_id=storage_session_id,
+            mutator=_merge,
+            user_id=storage_user_id,
+            create_if_not_exist=True,
+        )
         logger.info(
             "Saved session state with stripped_internal_follow_ups=%s "
             "(session_id=%s)",
@@ -3759,28 +3747,16 @@ class AgentRunner(Runner):
         if not hasattr(self, "session") or self.session is None:
             return
 
+        storage_session_id = _coerce_session_storage_id(session_id)
+        storage_user_id = _coerce_session_storage_user_id(user_id)
         path = self.session._get_save_path(  # pylint: disable=protected-access
-            session_id,
-            user_id,
+            storage_session_id,
+            storage_user_id,
         )
         if not Path(path).exists():
             return
 
         try:
-            with open(
-                path,
-                "r",
-                encoding="utf-8",
-                errors="surrogatepass",
-            ) as f:
-                states = json.load(f)
-
-            agent_state = states.get("agent", {})
-            memory_state = agent_state.get("memory", {})
-            content = memory_state.get("content", [])
-
-            if not content:
-                return
 
             def _is_marked(entry):
                 return (
@@ -3791,57 +3767,74 @@ class AgentRunner(Runner):
                 )
 
             last_marked_idx = -1
-            for i, entry in enumerate(content):
-                if _is_marked(entry):
-                    last_marked_idx = i
-
             modified = False
 
-            if last_marked_idx >= 0 and last_marked_idx + 1 < len(content):
-                next_entry = content[last_marked_idx + 1]
-                if (
-                    isinstance(next_entry, list)
-                    and len(next_entry) >= 1
-                    and isinstance(next_entry[0], dict)
-                    and next_entry[0].get("role") == "assistant"
-                ):
-                    del content[last_marked_idx + 1]
+            def _cleanup_state(states: dict[str, Any]) -> dict[str, Any]:
+                nonlocal modified, last_marked_idx
+                agent_state = states.get("agent", {})
+                if not isinstance(agent_state, dict):
+                    return states
+
+                memory_state = agent_state.get("memory", {})
+                if not isinstance(memory_state, dict):
+                    return states
+
+                content = memory_state.get("content", [])
+                if not isinstance(content, list) or not content:
+                    return states
+
+                for i, entry in enumerate(content):
+                    if _is_marked(entry):
+                        last_marked_idx = i
+
+                if last_marked_idx >= 0 and last_marked_idx + 1 < len(content):
+                    next_entry = content[last_marked_idx + 1]
+                    if (
+                        isinstance(next_entry, list)
+                        and len(next_entry) >= 1
+                        and isinstance(next_entry[0], dict)
+                        and next_entry[0].get("role") == "assistant"
+                    ):
+                        del content[last_marked_idx + 1]
+                        modified = True
+
+                for entry in content:
+                    if _is_marked(entry):
+                        entry[1].remove(TOOL_GUARD_DENIED_MARK)
+                        modified = True
+
+                if denial_response is not None:
+                    ts = getattr(denial_response, "timestamp", None)
+                    msg_dict = {
+                        "id": getattr(denial_response, "id", ""),
+                        "name": getattr(denial_response, "name", "Friday"),
+                        "role": getattr(denial_response, "role", "assistant"),
+                        "content": denial_response.content,
+                        "metadata": getattr(
+                            denial_response,
+                            "metadata",
+                            None,
+                        ),
+                        "timestamp": str(ts) if ts is not None else "",
+                    }
+                    content.append([msg_dict, []])
                     modified = True
 
-            for entry in content:
-                if _is_marked(entry):
-                    entry[1].remove(TOOL_GUARD_DENIED_MARK)
-                    modified = True
+                return states
 
-            if denial_response is not None:
-                ts = getattr(denial_response, "timestamp", None)
-                msg_dict = {
-                    "id": getattr(denial_response, "id", ""),
-                    "name": getattr(denial_response, "name", "Friday"),
-                    "role": getattr(denial_response, "role", "assistant"),
-                    "content": denial_response.content,
-                    "metadata": getattr(
-                        denial_response,
-                        "metadata",
-                        None,
-                    ),
-                    "timestamp": str(ts) if ts is not None else "",
-                }
-                content.append([msg_dict, []])
-                modified = True
+            await self.session.mutate_session_state(
+                session_id=storage_session_id,
+                mutator=_cleanup_state,
+                user_id=storage_user_id,
+                create_if_not_exist=False,
+            )
 
-            if modified:
-                with open(
-                    path,
-                    "w",
-                    encoding="utf-8",
-                    errors="surrogatepass",
-                ) as f:
-                    json.dump(states, f, ensure_ascii=False)
-                logger.info(
-                    "Tool guard: cleaned up denied session memory in %s",
-                    path,
-                )
+            if not modified:
+                return
+            logger.info(
+                "Tool guard: cleaned up denied session memory in %s",
+                path,
+            )
         except Exception:  # pylint: disable=broad-except
             logger.warning(
                 "Failed to clean up denied messages from session %s",

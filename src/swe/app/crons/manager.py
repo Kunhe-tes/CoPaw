@@ -1474,24 +1474,11 @@ class CronManager:  # pylint: disable=too-many-public-methods
             merged_state[TASK_MESSAGES_STATE_KEY] = task_messages
             return merged_state
 
-        if hasattr(self._runner.session, "mutate_session_state"):
-            await self._runner.session.mutate_session_state(
-                session_id=session_id,
-                mutator=_merge,
-                user_id=user_id,
-                create_if_not_exist=True,
-            )
-            return
-
-        existing_state = await self._runner.session.get_session_state_dict(
-            session_id,
-            user_id,
-            allow_not_exist=True,
-        )
-        await self._runner.session.save_merged_state(
+        await self._runner.session.mutate_session_state(
             session_id=session_id,
+            mutator=_merge,
             user_id=user_id,
-            state=_merge(existing_state),
+            create_if_not_exist=True,
         )
 
     async def _load_task_preview_text(
