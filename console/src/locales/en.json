@@ -61,6 +61,7 @@
     "analyticsMessages": "User Messages",
     "analyticsTraces": "Conversation Analytics",
     "analyticsBusinessOverview": "Business Overview",
+    "analyticsClawDataOverview": "Claw Data Overview",
     "analyticsCronJobOverview": "Cron Job Overview",
     "monitorCronOverview": "Cron Overview",
     "monitor": "Monitor",

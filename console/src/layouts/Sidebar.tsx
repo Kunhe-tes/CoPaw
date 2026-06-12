@@ -272,6 +272,12 @@ export default function Sidebar({ selectedKey }: SidebarProps) {
       label: t("nav.analyticsBusinessOverview", "运营看板"),
     },
     {
+      key: "analytics-claw-data-overview",
+      icon: <SparkBarChartLine size={18} />,
+      path: "/analytics/claw-data-overview",
+      label: t("nav.analyticsClawDataOverview", "Claw数据看板"),
+    },
+    {
       key: "analytics-messages",
       icon: <SparkSearchLine size={18} />,
       path: "/analytics/messages",
@@ -289,13 +295,12 @@ export default function Sidebar({ selectedKey }: SidebarProps) {
     //   path: "/analytics/sessions",
     //   label: t("nav.analyticsSessions", "Sessions"),
     // },
-    {
-      key: "analytics-traces",
-      icon: <SparkFileTxtLine size={18} />,
-      path: "/analytics/traces",
-      label: t("nav.analyticsTraces", "Traces"),
-    },
-    // 质量工程
+    //     {
+    //       key: "analytics-traces",
+    //       icon: <SparkFileTxtLine size={18} />,
+    //       path: "/analytics/traces",
+    //       label: t("nav.analyticsTraces", "Traces"),
+    //     },
     {
       key: "continuous-iteration",
       icon: <SparkRefreshLine size={18} />,
@@ -443,25 +448,32 @@ export default function Sidebar({ selectedKey }: SidebarProps) {
           icon: <SparkBarChartLine size={16} />,
         },
         {
+          key: "analytics-claw-data-overview",
+          label: collapsed
+            ? null
+            : t("nav.analyticsClawDataOverview", "Claw数据看板"),
+          icon: <SparkBarChartLine size={16} />,
+        },
+        {
           key: "analytics-messages",
           label: collapsed ? null : t("nav.analyticsMessages", "Messages"),
           icon: <SparkSearchLine size={16} />,
         },
         // {
-        //   key: "analytics-users",
-        //   label: collapsed ? null : t("nav.analyticsUsers", "Users"),
-        //   icon: <SparkUserGroupLine size={16} />,
+        //   key: "analytics-users",
+        //   label: collapsed ? null : t("nav.analyticsUsers", "Users"),
+        //   icon: <SparkUserGroupLine size={16} />,
         // },
         // {
-        //   key: "analytics-sessions",
-        //   label: collapsed ? null : t("nav.analyticsSessions", "Sessions"),
-        //   icon: <SparkMessageLine size={16} />,
+        //   key: "analytics-sessions",
+        //   label: collapsed ? null : t("nav.analyticsSessions", "Sessions"),
+        //   icon: <SparkMessageLine size={16} />,
         // },
-        {
-          key: "analytics-traces",
-          label: collapsed ? null : t("nav.analyticsTraces", "Traces"),
-          icon: <SparkFileTxtLine size={16} />,
-        },
+        //         {
+        //           key: "analytics-traces",
+        //           label: collapsed ? null : t("nav.analyticsTraces", "Traces"),
+        //           icon: <SparkFileTxtLine size={16} />,
+        //         },
       ],
     },
     // 7. 质量工程
