@@ -665,7 +665,13 @@ class MarketplaceService:
         agent_id: str = "default",
         source_id: str | None = None,
     ) -> dict[str, Any]:
-        """启用技能（含安全扫描 + 回调重载）."""
+        """启用技能（含安全扫描 + 回调重载）.
+
+        安全扫描策略：
+        - 如果技能已在 manifest 中注册（之前已启用过），重新启用时跳过安全扫描，
+          因为内容已受信任。禁用再启用是用户的常规操作，不应被扫描阻断。
+        - 如果技能未在 manifest 中注册（首次启用），则执行安全扫描。
+        """
         skills_dir = get_user_skills_dir(
             self.swe_root,
             user_id,
@@ -676,15 +682,30 @@ class MarketplaceService:
         if not skill_dir.exists():
             return {"success": False, "reason": "not_found"}
 
-        # 安全扫描
-        try:
-            self._scan_skill_or_raise(user_id, skill_name, agent_id, source_id)
-        except SkillScanError as e:
-            return {
-                "success": False,
-                "reason": "security_scan_failed",
-                "detail": str(e),
-            }
+        # 检查技能是否已在 manifest 中注册（之前已启用过）
+        manifest = read_user_skill_manifest(
+            self.swe_root,
+            user_id,
+            agent_id,
+            source_id,
+        )
+        already_registered = skill_name in manifest.get("skills", {})
+
+        # 仅对首次启用的技能执行安全扫描（已注册的技能重新启用时跳过）
+        if not already_registered:
+            try:
+                self._scan_skill_or_raise(
+                    user_id,
+                    skill_name,
+                    agent_id,
+                    source_id,
+                )
+            except SkillScanError as e:
+                return {
+                    "success": False,
+                    "reason": "security_scan_failed",
+                    "detail": str(e),
+                }
 
         # 更新 manifest
         def _update(payload: dict) -> bool:
@@ -1633,8 +1654,9 @@ class MarketplaceService:
     ) -> bool:
         """保存技能文件内容，自动创建 skill.json（如不存在）.
 
-        保存时同步 bump SKILL.md frontmatter 中的 version 字段和 manifest
-        的 version_text，确保版本号与编辑操作同步。
+        如果新内容与现有内容一致，则跳过写入和版本更新。
+        只有内容发生变化时，才 bump SKILL.md frontmatter 中的 version 字段
+        和 manifest 的 version_text，确保版本号与实际编辑同步。
         """
         skills_dir = get_user_skills_dir(
             self.swe_root,
@@ -1652,6 +1674,16 @@ class MarketplaceService:
 
         if not target.exists() or not target.is_file():
             return False
+
+        # 读取现有内容，判断是否有变化
+        try:
+            existing_content = target.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError):
+            existing_content = None
+
+        if existing_content == content:
+            # 内容未变化，无需写入文件或更新版本
+            return True
 
         try:
             target.write_text(content, encoding="utf-8")
