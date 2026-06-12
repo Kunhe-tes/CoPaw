@@ -2324,12 +2324,12 @@ class TracingQueryService:
         if source_id == "all":
             new_cron_query = f"""
                 SELECT COUNT(*) AS count
-                FROM swe_cron_jobs
-                WHERE created_at >= %s AND created_at < %s
-                  AND status != 'deleted'
-                  AND deleted_at IS NULL
-                  AND source_id NOT IN ({exclude_placeholders})
-                  AND tenant_id != 'default'
+                FROM swe_cron_jobs j
+                WHERE j.created_at >= %s AND j.created_at < %s
+                  AND j.status != 'deleted'
+                  AND j.deleted_at IS NULL
+                  AND j.source_id NOT IN ({exclude_placeholders})
+                  AND j.tenant_id != 'default'
                   {bbk_filter_sql}
             """
             new_cron_params = (
@@ -2341,12 +2341,12 @@ class TracingQueryService:
         else:
             new_cron_query = f"""
                 SELECT COUNT(*) AS count
-                FROM swe_cron_jobs
-                WHERE created_at >= %s AND created_at < %s
-                  AND status != 'deleted'
-                  AND deleted_at IS NULL
-                  AND tenant_id != 'default'
-                  AND source_id = %s
+                FROM swe_cron_jobs j
+                WHERE j.created_at >= %s AND j.created_at < %s
+                  AND j.status != 'deleted'
+                  AND j.deleted_at IS NULL
+                  AND j.tenant_id != 'default'
+                  AND j.source_id = %s
                   {bbk_filter_sql}
             """
             new_cron_params = (
