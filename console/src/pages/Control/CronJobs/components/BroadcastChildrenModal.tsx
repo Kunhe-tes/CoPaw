@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import type { Key } from "react";
-import { Alert, Space, Tag } from "antd";
+import { Alert, Space, Tag, Typography } from "antd";
 import type { ColumnsType } from "antd/es/table";
 import { Button, Modal, Table } from "@agentscope-ai/design";
 import api from "../../../../api";
@@ -11,6 +11,12 @@ import type {
 } from "../../../../api/types";
 
 type CronJob = CronJobSpecOutput;
+const { Text } = Typography;
+
+const MODAL_WIDTH = 1280;
+const MODAL_MAX_WIDTH = "calc(100vw - 48px)";
+const TABLE_SCROLL_X = 1120;
+const TABLE_SCROLL_Y = "calc(100vh - 380px)";
 
 interface BroadcastChildrenModalProps {
   open: boolean;
@@ -33,6 +39,34 @@ function resultLine(item: CronBroadcastChildOperationResult): string {
   return `${base}: ${item.message || "failed"}`;
 }
 
+function buildDuplicateTenantNameSummaries(
+  children: CronBroadcastChildItem[],
+): string[] {
+  const counts = new Map<string, number>();
+  children.forEach((item) => {
+    const name = item.tenant_name?.trim();
+    if (!name) return;
+    counts.set(name, (counts.get(name) || 0) + 1);
+  });
+  return Array.from(counts.entries())
+    .filter(([, count]) => count > 1)
+    .map(([name, count]) => `${name} (${count} 个 UID)`);
+}
+
+function renderTenantCell(record: CronBroadcastChildItem) {
+  if (!record.tenant_name) {
+    return <Text>{record.tenant_id}</Text>;
+  }
+  return (
+    <Space direction="vertical" size={0}>
+      <Text strong>{record.tenant_name}</Text>
+      <Text type="secondary" code>
+        {record.tenant_id}
+      </Text>
+    </Space>
+  );
+}
+
 export function BroadcastChildrenModal({
   open,
   job,
@@ -50,6 +84,10 @@ export function BroadcastChildrenModal({
     const selected = new Set(selectedRowKeys.map(String));
     return children.filter((item) => selected.has(rowKey(item)));
   }, [children, selectedRowKeys]);
+  const duplicateTenantNameSummaries = useMemo(
+    () => buildDuplicateTenantNameSummaries(children),
+    [children],
+  );
   const hasFailedResults = operationResults.some((result) => !result.success);
 
   const loadChildren = async () => {
@@ -108,10 +146,7 @@ export function BroadcastChildrenModal({
       title: "用户",
       key: "tenant",
       width: 220,
-      render: (_: unknown, record) =>
-        record.tenant_name
-          ? `${record.tenant_name} (${record.tenant_id})`
-          : record.tenant_id,
+      render: (_: unknown, record) => renderTenantCell(record),
     },
     {
       title: "机构",
@@ -171,14 +206,18 @@ export function BroadcastChildrenModal({
       title={job ? `分发用户 / 子任务：${job.name}` : "分发用户 / 子任务"}
       onCancel={submitting ? undefined : onClose}
       footer={null}
-      width={960}
+      style={{ maxWidth: MODAL_MAX_WIDTH }}
+      width={MODAL_WIDTH}
     >
-      <div style={{ display: "grid", gap: 12 }}>
-        <Alert
-          type="info"
-          showIcon
-          message="这里展示该源定时任务已经分发出去的子定时任务。没有分发过时列表为空。"
-        />
+      <div style={{ display: "grid", gap: 12, minWidth: 0 }}>
+        {duplicateTenantNameSummaries.length > 0 && (
+          <Alert
+            type="warning"
+            showIcon
+            message="存在同名用户，请以 UID 区分"
+            description={duplicateTenantNameSummaries.join("、")}
+          />
+        )}
 
         <Space>
           <Button onClick={loadChildren} loading={loading}>
@@ -234,7 +273,7 @@ export function BroadcastChildrenModal({
           }}
           pagination={{ pageSize: 8 }}
           locale={{ emptyText: "当前任务尚未分发给任何用户" }}
-          scroll={{ x: 1170 }}
+          scroll={{ x: TABLE_SCROLL_X, y: TABLE_SCROLL_Y }}
         />
       </div>
     </Modal>
