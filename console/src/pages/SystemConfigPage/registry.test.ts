@@ -2,10 +2,13 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 
 import {
   CURRENT_SOURCE_SYSTEM_CONFIG_SWITCHES,
+  normalizeSystemPromptInjections,
   readCronUnreadAutoPauseConfig,
+  readSystemPromptInjections,
   validateSourceSystemConfig,
   writeCronUnreadAutoPauseValue,
   writeRegisteredSwitchValue,
+  writeSystemPromptInjections,
   writeToolResultCompactValue,
 } from "./registry";
 
@@ -102,5 +105,50 @@ describe("SystemConfigPage registry compatibility", () => {
         },
       }),
     ).toContain("1");
+  });
+
+  it("normalizes system prompt injections", () => {
+    expect(
+      normalizeSystemPromptInjections([" keep ", "", "keep", "next\nline"]),
+    ).toEqual(["keep", "next\nline"]);
+  });
+
+  it("reads default system prompt injections", () => {
+    expect(readSystemPromptInjections({})).toEqual([]);
+  });
+
+  it("writes system prompt injections without mutating source", () => {
+    vi.stubGlobal("structuredClone", undefined);
+    const source = {
+      provider_policy: { default_model: "qwen-max" },
+      system_prompt_injections: ["old"],
+    };
+
+    const next = writeSystemPromptInjections(source, [
+      " keep ",
+      "",
+      "keep",
+      "next",
+    ]);
+
+    expect(next).toEqual({
+      provider_policy: { default_model: "qwen-max" },
+      system_prompt_injections: ["keep", "next"],
+    });
+    expect(source.system_prompt_injections).toEqual(["old"]);
+  });
+
+  it("clears system prompt injections when no prompts remain", () => {
+    const next = writeSystemPromptInjections(
+      {
+        provider_policy: { default_model: "qwen-max" },
+        system_prompt_injections: ["old"],
+      },
+      [" ", ""],
+    );
+
+    expect(next).toEqual({
+      provider_policy: { default_model: "qwen-max" },
+    });
   });
 });
