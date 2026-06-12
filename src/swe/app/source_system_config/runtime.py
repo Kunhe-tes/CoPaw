@@ -15,6 +15,7 @@ from .registry import (
     FILE_READ_TRUNCATION_ENABLED_SETTING,
     FILE_READ_TRUNCATION_MAX_BYTES_SETTING,
     SourceSystemConfigSetting,
+    get_system_prompt_injections as _get_system_prompt_injections,
     merge_source_system_config_with_defaults,
     normalize_registered_setting_values,
 )
@@ -158,6 +159,16 @@ def resolve_cron_unread_auto_pause_config(
             ),
         ),
     )
+
+
+def get_system_prompt_injections(source_config: Any | None = None) -> list[str]:
+    """读取当前 source 的系统提示词注入配置。"""
+    config = (
+        get_current_source_system_config()
+        if source_config is None
+        else source_config
+    )
+    return _get_system_prompt_injections(config)
 
 
 def _get_source_config_id(source_config: Any | None) -> str:

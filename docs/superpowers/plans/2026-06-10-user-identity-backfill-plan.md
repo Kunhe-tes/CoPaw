@@ -236,4 +236,3 @@ Expected: 无输出，返回码 0
 tests/unit/app/test_external_cron_scope_refresh.py
 当前环境收集失败：ModuleNotFoundError: croniter
 ```
-

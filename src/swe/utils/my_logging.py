@@ -57,6 +57,10 @@ class ColorFormatter(logging.Formatter):
     }
     RESET = "\033[0m"
 
+    @staticmethod
+    def _escape_line_breaks(text: str) -> str:
+        return text.replace("\r", r"\r").replace("\n", r"\n")
+
     def format(self, record):
         # Disable colors if output is not a terminal (e.g. piped/redirected)
         use_color = hasattr(sys.stderr, "isatty") and sys.stderr.isatty()
@@ -75,7 +79,7 @@ class ColorFormatter(logging.Formatter):
             pass
 
         prefix = f"{level} {full_path}:{record.lineno}"
-        original_msg = super().format(record)
+        original_msg = self._escape_line_breaks(super().format(record))
 
         return f"{prefix} | {original_msg}"
 

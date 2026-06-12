@@ -280,6 +280,30 @@ def test_ensure_storage_uses_requested_tenant_with_current_source(
     assert not (isolated_secret_dir / current_scope_id / "providers").exists()
 
 
+def test_get_instance_preserves_explicit_scoped_target_tenant(
+    isolated_secret_dir,
+) -> None:
+    target_scope_id = encode_scope_id("tenant-b", "source-b")
+
+    with tenant_context(tenant_id="tenant-a", source_id="source-a"):
+        manager = ProviderManager.get_instance(target_scope_id)
+
+    assert manager.tenant_id == target_scope_id
+
+
+def test_ensure_storage_preserves_explicit_scoped_target_tenant(
+    isolated_secret_dir,
+) -> None:
+    target_scope_id = encode_scope_id("tenant-b", "source-b")
+    current_scope_id = encode_scope_id("tenant-a", "source-a")
+
+    with tenant_context(tenant_id="tenant-a", source_id="source-a"):
+        ProviderManager.ensure_tenant_provider_storage(target_scope_id)
+
+    assert (isolated_secret_dir / target_scope_id / "providers").exists()
+    assert not (isolated_secret_dir / current_scope_id / "providers").exists()
+
+
 def test_provider_storage_keeps_legacy_scope_directory_untouched(
     isolated_secret_dir,
 ) -> None:

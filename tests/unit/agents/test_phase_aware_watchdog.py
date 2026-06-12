@@ -4,7 +4,6 @@ from __future__ import annotations
 import asyncio
 from contextlib import suppress
 from pathlib import Path
-import time
 
 from agentscope.memory import InMemoryMemory
 from agentscope.message import Msg, ToolResultBlock
@@ -274,7 +273,7 @@ async def test_file_write_diagnostics_include_size_and_timing_not_content(
 
 
 @pytest.mark.asyncio
-async def test_file_write_runs_blocking_io_off_event_loop(
+async def test_write_file_runs_blocking_io_off_event_loop(
     tmp_path: Path,
     monkeypatch,
 ):
@@ -284,8 +283,12 @@ async def test_file_write_runs_blocking_io_off_event_loop(
     done = False
     ticks = 0
 
-    def blocking_write(**_kwargs):
-        time.sleep(0.05)
+    async def slow_write(**kwargs):
+        await asyncio.sleep(0.05)
+        Path(kwargs["file_path"]).write_text(
+            kwargs["content"],
+            encoding=kwargs["encoding"],
+        )
 
     async def heartbeat():
         nonlocal ticks
@@ -297,7 +300,7 @@ async def test_file_write_runs_blocking_io_off_event_loop(
     monkeypatch.setattr(
         file_io,
         "_write_content_with_diagnostics",
-        blocking_write,
+        slow_write,
     )
 
     with monkeypatch.context() as m:
@@ -309,4 +312,53 @@ async def test_file_write_runs_blocking_io_off_event_loop(
             done = True
             await heartbeat_task
 
+    assert (workspace_dir / "note.txt").read_text(
+        encoding="utf-8-sig",
+    ) == "content"
+    assert ticks > 0
+
+
+@pytest.mark.asyncio
+async def test_append_file_runs_blocking_io_off_event_loop(
+    tmp_path: Path,
+    monkeypatch,
+):
+    tenant_dir = tmp_path / "tenant_a"
+    workspace_dir = tenant_dir / "workspaces" / "agent_a"
+    workspace_dir.mkdir(parents=True)
+    target = workspace_dir / "note.txt"
+    target.write_text("base", encoding="utf-8-sig")
+    done = False
+    ticks = 0
+
+    async def slow_write(**kwargs):
+        await asyncio.sleep(0.05)
+        Path(kwargs["file_path"]).write_text(
+            kwargs["content"],
+            encoding=kwargs["encoding"],
+        )
+
+    async def heartbeat():
+        nonlocal ticks
+        while not done:
+            await asyncio.sleep(0.005)
+            if not done:
+                ticks += 1
+
+    monkeypatch.setattr(
+        file_io,
+        "_write_content_with_diagnostics",
+        slow_write,
+    )
+
+    with monkeypatch.context() as m:
+        m.setattr("swe.security.tenant_path_boundary.WORKING_DIR", tmp_path)
+        with tenant_context(tenant_id="tenant_a", workspace_dir=workspace_dir):
+            heartbeat_task = asyncio.create_task(heartbeat())
+            await asyncio.sleep(0)
+            await file_io.append_file("note.txt", " content")
+            done = True
+            await heartbeat_task
+
+    assert target.read_text(encoding="utf-8-sig") == "base content"
     assert ticks > 0

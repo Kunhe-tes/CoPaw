@@ -1,7 +1,6 @@
 import React, { useState, useCallback, useEffect, useId } from "react";
 import type { CronJobSpecOutput } from "@/api/types";
 import Style from "./style";
-import { DESIGN_TOKENS } from "@/config/designTokens";
 import { TasksIconSmall } from "../ChatSidebar/CollapsedToolbar/icons";
 import {
   getTaskNextRunText,
@@ -27,23 +26,12 @@ function ToggleIcon({ collapsed }: { collapsed: boolean }) {
     >
       <path
         d="M1 1L5 5L9 1"
-        stroke={DESIGN_TOKENS.colorTextMuted}
+        stroke="currentColor"
         strokeWidth="1.5"
         strokeLinecap="round"
         strokeLinejoin="round"
       />
     </svg>
-  );
-}
-
-function PausedTasksIcon() {
-  return (
-    <span className="chat-task-list-paused-icon" aria-hidden="true">
-      <svg width="12" height="12" viewBox="0 0 12 12" fill="none">
-        <rect x="2.5" y="2" width="2" height="8" rx="1" fill="currentColor" />
-        <rect x="7.5" y="2" width="2" height="8" rx="1" fill="currentColor" />
-      </svg>
-    </span>
   );
 }
 
@@ -211,7 +199,7 @@ export default function ChatTaskList(props: ChatTaskListProps) {
                       aria-controls={pausedRegionId}
                       onClick={() => setPausedCollapsed((prev) => !prev)}
                     >
-                      <PausedTasksIcon />
+                      <ToggleIcon collapsed={pausedCollapsed} />
                       <span className="chat-task-list-paused-label">
                         已暂停任务
                       </span>
@@ -221,7 +209,6 @@ export default function ChatTaskList(props: ChatTaskListProps) {
                       >
                         {pausedTasks.length}
                       </span>
-                      <ToggleIcon collapsed={pausedCollapsed} />
                     </button>
                     <div
                       id={pausedRegionId}

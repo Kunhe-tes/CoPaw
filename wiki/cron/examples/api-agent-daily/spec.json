@@ -1,0 +1,46 @@
+{
+  "id": "ignored-on-create",
+  "name": "每日经营摘要",
+  "enabled": true,
+  "schedule": {
+    "type": "cron",
+    "cron": "30 9 * * mon-fri",
+    "timezone": "Asia/Shanghai"
+  },
+  "task_type": "agent",
+  "request": {
+    "input": [
+      {
+        "role": "user",
+        "type": "message",
+        "content": [
+          {
+            "type": "text",
+            "text": "请汇总昨天的关键经营指标，列出异常项、可能原因和今天需要跟进的动作。"
+          }
+        ]
+      }
+    ],
+    "session_id": "session-cron-demo",
+    "user_id": "cron"
+  },
+  "dispatch": {
+    "type": "channel",
+    "channel": "zhaohu",
+    "target": {
+      "user_id": "user-001",
+      "session_id": "session-cron-demo"
+    },
+    "mode": "final",
+    "meta": {}
+  },
+  "runtime": {
+    "max_concurrency": 1,
+    "timeout_seconds": 7200,
+    "misfire_grace_seconds": 300
+  },
+  "meta": {
+    "creator_user_id": "user-001",
+    "example": "wiki/cron/examples/api-agent-daily"
+  }
+}

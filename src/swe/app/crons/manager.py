@@ -46,6 +46,7 @@ AUTO_PAUSE_REASON = "auto_unread_threshold"
 MANUAL_PAUSE_REASON = "manual"
 TASK_MESSAGES_STATE_KEY = "task_messages"
 _SYSTEM_JOB_IDS_FILE = "system_jobs.json"
+MAX_NOTIFICATION_DELAY_MINUTES = 7 * 24 * 60
 
 # 心跳 every 字段解析正则（如 "30m"、"6h"）
 _EVERY_PATTERN = re.compile(
@@ -55,6 +56,17 @@ _EVERY_PATTERN = re.compile(
 
 logger = logging.getLogger(__name__)
 _T = TypeVar("_T")
+
+
+def _notification_delay_minutes(job: CronJobSpec) -> int:
+    meta = job.meta or {}
+    try:
+        delay_minutes = int(meta.get("notification_delay_minutes", 0) or 0)
+    except (TypeError, ValueError):
+        return 0
+    if delay_minutes < 0:
+        return 0
+    return min(delay_minutes, MAX_NOTIFICATION_DELAY_MINUTES)
 
 
 @dataclass
@@ -1438,12 +1450,6 @@ class CronManager:  # pylint: disable=too-many-public-methods
         if not text or not getattr(self._runner, "session", None):
             return
 
-        existing_state = await self._runner.session.get_session_state_dict(
-            session_id,
-            user_id,
-            allow_not_exist=True,
-        )
-        task_messages = list(existing_state.get(TASK_MESSAGES_STATE_KEY, []))
         timestamp = (
             datetime.now(timezone.utc)
             .isoformat()
@@ -1452,29 +1458,39 @@ class CronManager:  # pylint: disable=too-many-public-methods
                 "Z",
             )
         )
-        task_messages.append(
-            {
-                "id": f"cron-text-{uuid4()}",
-                "type": "message",
-                "role": "assistant",
-                "content": [
-                    {
-                        "type": "text",
-                        "text": text,
-                    },
-                ],
-                "metadata": {
-                    "cron_task": True,
+        task_message = {
+            "id": f"cron-text-{uuid4()}",
+            "type": "message",
+            "role": "assistant",
+            "content": [
+                {
+                    "type": "text",
+                    "text": text,
                 },
-                "timestamp": timestamp,
+            ],
+            "metadata": {
+                "cron_task": True,
             },
-        )
-        merged_state = dict(existing_state)
-        merged_state[TASK_MESSAGES_STATE_KEY] = task_messages
-        await self._runner.session.save_merged_state(
+            "timestamp": timestamp,
+        }
+
+        def _merge(existing_state: dict[str, object]) -> dict[str, object]:
+            merged_state = dict(existing_state)
+            raw_task_messages = merged_state.get(TASK_MESSAGES_STATE_KEY, [])
+            task_messages = (
+                list(raw_task_messages)
+                if isinstance(raw_task_messages, list)
+                else []
+            )
+            task_messages.append(task_message)
+            merged_state[TASK_MESSAGES_STATE_KEY] = task_messages
+            return merged_state
+
+        await self._runner.session.mutate_session_state(
             session_id=session_id,
+            mutator=_merge,
             user_id=user_id,
-            state=merged_state,
+            create_if_not_exist=True,
         )
 
     async def _load_task_preview_text(
@@ -1781,24 +1797,28 @@ class CronManager:  # pylint: disable=too-many-public-methods
         notification_timezone = (
             job.schedule.timezone or self._timezone or "UTC"
         )
-        if exec_status == "success":
+        if exec_status == "success" and not is_manual:
+            delay_minutes = _notification_delay_minutes(job)
             try:
                 offset = int(
                     (job.meta or {}).get("broadcast_offset_minutes", 0) or 0,
                 )
             except (TypeError, ValueError):
                 offset = 0
-            if (
-                not is_manual
-                and (job.meta or {}).get(
-                    "broadcast_notification_policy",
+            if (job.meta or {}).get(
+                "broadcast_notification_policy",
+            ) == "original_schedule":
+                total_delay = max(offset, 0) + delay_minutes
+                notification_due_at = actual_time + timedelta(
+                    minutes=total_delay,
                 )
-                == "original_schedule"
-            ):
-                notification_due_at = actual_time + timedelta(minutes=offset)
                 notification_timezone = (job.meta or {}).get(
                     "broadcast_original_timezone",
                 ) or notification_timezone
+            elif delay_minutes > 0:
+                notification_due_at = (
+                    end_time or actual_time
+                ) + timedelta(minutes=delay_minutes)
 
         await self._monitor_sync_client.record_execution(
             job=job,

@@ -245,4 +245,3 @@ Expected: all application unit tests pass.
 Run GitNexus staged or all-change detection and verify only runtime diagnostic,
 FastAPI lifecycle, middleware, dependency, tests, and operational docs are
 affected.
-

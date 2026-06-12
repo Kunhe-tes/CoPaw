@@ -11,6 +11,7 @@ import threading
 import time
 from typing import Optional
 
+import aiofiles
 from agentscope.message import TextBlock
 from agentscope.tool import ToolResponse
 
@@ -191,7 +192,7 @@ def _remove_temp_file(temp_path: str) -> None:
         os.unlink(temp_path)
 
 
-def _write_content_with_diagnostics(
+async def _write_content_with_diagnostics(
     *,
     operation: str,
     file_path: str,
@@ -205,11 +206,11 @@ def _write_content_with_diagnostics(
     write_seconds = 0.0
     close_seconds = 0.0
     started_at = time.perf_counter()
-    with open(file_path, mode, encoding=encoding) as file:
+    async with aiofiles.open(file_path, mode, encoding=encoding) as file:
         open_seconds = time.perf_counter() - started_at
 
         started_at = time.perf_counter()
-        file.write(content)
+        await file.write(content)
         write_seconds = time.perf_counter() - started_at
 
         started_at = time.perf_counter()
@@ -244,8 +245,7 @@ async def _write_file_atomically_unlocked(
 ) -> None:
     temp_path = _make_temp_file_path(file_path)
     write_task = asyncio.create_task(
-        asyncio.to_thread(
-            _write_content_with_diagnostics,
+        _write_content_with_diagnostics(
             operation=operation,
             file_path=temp_path,
             content=content,

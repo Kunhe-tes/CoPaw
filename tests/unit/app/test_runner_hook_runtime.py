@@ -499,6 +499,7 @@ async def test_query_handler_user_prompt_hook_blocks_before_command_dispatch(
     runner = AgentRunner(agent_id="test-agent", workspace_dir=tmp_path)
     runner.session = SimpleNamespace(
         get_session_state_dict=AsyncMock(return_value={}),
+        mutate_session_state=AsyncMock(return_value={}),
     )
     setattr(runner, "_chat_manager", None)
     tenant_hooks = HookConfig(
@@ -562,6 +563,7 @@ async def test_query_handler_no_config_does_not_emit_hook(
     runner = AgentRunner(agent_id="test-agent", workspace_dir=tmp_path)
     runner.session = SimpleNamespace(
         get_session_state_dict=AsyncMock(return_value={}),
+        mutate_session_state=AsyncMock(return_value={}),
     )
     setattr(runner, "_chat_manager", None)
 
