@@ -36,6 +36,17 @@ function ToggleIcon({ collapsed }: { collapsed: boolean }) {
   );
 }
 
+function PausedTasksIcon() {
+  return (
+    <span className="chat-task-list-paused-icon" aria-hidden="true">
+      <svg width="12" height="12" viewBox="0 0 12 12" fill="none">
+        <rect x="2.5" y="2" width="2" height="8" rx="1" fill="currentColor" />
+        <rect x="7.5" y="2" width="2" height="8" rx="1" fill="currentColor" />
+      </svg>
+    </span>
+  );
+}
+
 export interface ChatTaskListProps {
   tasks: CronJobSpecOutput[];
   selectedTaskId?: string;
@@ -190,18 +201,27 @@ export default function ChatTaskList(props: ChatTaskListProps) {
               <div className="chat-task-list-empty">暂无任务</div>
             ) : (
               <>
-                {runnableTasks.map(renderTask)}
                 {pausedTasks.length > 0 && (
                   <div className="chat-task-list-paused-group">
                     <button
                       type="button"
                       className="chat-task-list-paused-toggle"
+                      aria-label={`已暂停任务 ${pausedTasks.length}`}
                       aria-expanded={!pausedCollapsed}
                       aria-controls={pausedRegionId}
                       onClick={() => setPausedCollapsed((prev) => !prev)}
                     >
+                      <PausedTasksIcon />
+                      <span className="chat-task-list-paused-label">
+                        已暂停任务
+                      </span>
+                      <span
+                        className="chat-task-list-paused-count"
+                        aria-hidden="true"
+                      >
+                        {pausedTasks.length}
+                      </span>
                       <ToggleIcon collapsed={pausedCollapsed} />
-                      <span>已暂停任务 {pausedTasks.length}</span>
                     </button>
                     <div
                       id={pausedRegionId}
@@ -212,6 +232,7 @@ export default function ChatTaskList(props: ChatTaskListProps) {
                     </div>
                   </div>
                 )}
+                {runnableTasks.map(renderTask)}
               </>
             )}
           </div>

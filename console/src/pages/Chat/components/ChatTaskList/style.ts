@@ -208,35 +208,80 @@ export default createGlobalStyle`
   }
 
   &-paused-group {
-    margin-top: 6px;
-    padding-top: 6px;
-    border-top: 1px solid rgba(17, 20, 45, 0.06);
+    margin: 2px 0 6px;
   }
 
   &-paused-toggle {
     width: 100%;
-    height: 36px;
-    padding: 0 10px;
+    min-height: 40px;
+    padding: 0 10px 0 8px;
     display: flex;
     align-items: center;
-    gap: 8px;
-    border: 0;
-    border-radius: 6px;
-    background: transparent;
+    gap: 9px;
+    border: 1px solid rgba(55, 105, 252, 0.10);
+    border-radius: 9px;
+    background: rgba(55, 105, 252, 0.035);
     color: ${DESIGN_TOKENS.colorTextSecondary};
     font-size: 13px;
     line-height: 20px;
     cursor: pointer;
-    transition: background-color 0.15s ease;
+    box-shadow: 0 1px 2px rgba(17, 20, 45, 0.025);
+    transition:
+      background-color 0.18s ease,
+      border-color 0.18s ease,
+      box-shadow 0.18s ease;
 
     &:hover {
-      background: rgba(55, 105, 252, 0.04);
+      background: rgba(55, 105, 252, 0.065);
+      border-color: rgba(55, 105, 252, 0.18);
+      box-shadow: 0 3px 10px rgba(55, 105, 252, 0.07);
     }
 
     &:focus-visible {
       outline: 2px solid rgba(55, 105, 252, 0.32);
       outline-offset: 1px;
     }
+
+    .chat-task-list-toggle {
+      flex: 0 0 auto;
+      margin-left: auto;
+    }
+  }
+
+  &-paused-icon {
+    width: 24px;
+    height: 24px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    flex: 0 0 auto;
+    border-radius: 7px;
+    background: rgba(55, 105, 252, 0.10);
+    color: ${DESIGN_TOKENS.colorPrimary};
+  }
+
+  &-paused-label {
+    min-width: 0;
+    color: ${DESIGN_TOKENS.colorTextPrimary};
+    font-weight: 500;
+    letter-spacing: 0.01em;
+  }
+
+  &-paused-count {
+    min-width: 22px;
+    height: 20px;
+    padding: 0 6px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    flex: 0 0 auto;
+    border: 1px solid rgba(55, 105, 252, 0.10);
+    border-radius: 10px;
+    background: rgba(255, 255, 255, 0.76);
+    color: ${DESIGN_TOKENS.colorTextSecondary};
+    font-size: 11px;
+    font-weight: 600;
+    line-height: 18px;
   }
 
   &-paused-items {
@@ -272,11 +317,27 @@ export default createGlobalStyle`
 }
 
 .dark-mode .chat-task-list-paused-group {
-  border-top-color: rgba(255, 255, 255, 0.08);
+  border-top-color: transparent;
+}
+
+.dark-mode .chat-task-list-paused-toggle {
+  background: rgba(91, 138, 255, 0.08);
+  border-color: rgba(91, 138, 255, 0.14);
 }
 
 .dark-mode .chat-task-list-paused-toggle:hover {
+  background: rgba(91, 138, 255, 0.13);
+  border-color: rgba(91, 138, 255, 0.24);
+}
+
+.dark-mode .chat-task-list-paused-icon {
+  background: rgba(91, 138, 255, 0.16);
+  color: #8EADFF;
+}
+
+.dark-mode .chat-task-list-paused-count {
   background: rgba(255, 255, 255, 0.06);
+  border-color: rgba(255, 255, 255, 0.08);
 }
 
 @media (prefers-reduced-motion: reduce) {
