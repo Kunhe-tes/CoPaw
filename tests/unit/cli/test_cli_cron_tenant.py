@@ -184,6 +184,78 @@ def test_cron_create_agent_sets_model_slot() -> None:
     }
 
 
+def test_cron_create_defaults_notification_delay_minutes() -> None:
+    runner = CliRunner()
+
+    with patch("swe.cli.cron_cmd.client") as mock_client:
+        mock_http = MagicMock()
+        mock_http.__enter__.return_value = mock_http
+        mock_http.post.return_value = _Response()
+        mock_client.return_value = mock_http
+
+        result = runner.invoke(
+            cron_group,
+            [
+                "create",
+                "--type",
+                "agent",
+                "--name",
+                "tenant cron",
+                "--cron",
+                "* * * * *",
+                "--channel",
+                "console",
+                "--target-user",
+                "user-a",
+                "--target-session",
+                "session-a",
+                "--text",
+                "ping",
+            ],
+        )
+
+    assert result.exit_code == 0
+    _, kwargs = mock_http.post.call_args
+    assert kwargs["json"]["meta"]["notification_delay_minutes"] == 0
+
+
+def test_cron_create_sets_notification_delay_minutes() -> None:
+    runner = CliRunner()
+
+    with patch("swe.cli.cron_cmd.client") as mock_client:
+        mock_http = MagicMock()
+        mock_http.__enter__.return_value = mock_http
+        mock_http.post.return_value = _Response()
+        mock_client.return_value = mock_http
+
+        result = runner.invoke(
+            cron_group,
+            [
+                "create",
+                "--type",
+                "agent",
+                "--name",
+                "tenant cron",
+                "--cron",
+                "* * * * *",
+                "--channel",
+                "console",
+                "--target-user",
+                "user-a",
+                "--target-session",
+                "session-a",
+                "--text",
+                "ping",
+                "--notification-delay-minutes",
+                "120",
+            ],
+        )
+
+    assert result.exit_code == 0
+    _, kwargs = mock_http.post.call_args
+    assert kwargs["json"]["meta"]["notification_delay_minutes"] == 120
+
+
 def test_cron_create_text_ignores_model_slot() -> None:
     runner = CliRunner()
 

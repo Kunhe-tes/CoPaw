@@ -25,7 +25,7 @@ from agentscope_runtime.engine.schemas.agent_schemas import (
 from agentscope_runtime.engine.schemas.exception import AgentException
 from dotenv import load_dotenv
 
-from ..mcp.http_headers import resolve_mcp_http_headers
+from ..mcp.http_headers import build_mcp_http_headers
 from ..mcp.stateful_client import HttpStatefulClient, StdIOStatefulClient
 from ..mcp.stdio_launcher import build_tenant_aware_stdio_launch_config
 from .command_dispatch import (
@@ -36,6 +36,7 @@ from .command_dispatch import (
 from .query_error_dump import write_query_error_dump
 from .retry_classifier import is_query_retryable
 from .session import (
+    RunnerSessionProtocol,
     SafeJSONSession,
     SESSION_SKILL_SNAPSHOT_STATE_KEY,
 )
@@ -390,7 +391,7 @@ def _hook_config_enabled(
 
 
 async def _load_session_hook_overlay(
-    session: Any,
+    session: RunnerSessionProtocol | None,
     *,
     session_id: str,
     user_id: str,
@@ -625,12 +626,14 @@ def _resolve_active_model_label(tenant_id: str | None) -> str | None:
 async def _build_and_connect_mcp_clients(
     mcp_config: MCPConfig | None,
     passthrough_headers: dict[str, str] | None = None,
+    session_id: str | None = None,
 ) -> list[Any]:
     """Build and connect MCP clients from config for single request use.
 
     Args:
         mcp_config: MCP configuration from agent_config.mcp
         passthrough_headers: Headers to merge for HTTP transport clients
+        session_id: Request-scoped session identifier for reserved headers
 
     Returns:
         List of connected MCP client instances (all created for this request)
@@ -652,6 +655,7 @@ async def _build_and_connect_mcp_clients(
             client = await _create_mcp_client_with_headers(
                 client_config,
                 passthrough_headers,
+                session_id=session_id,
             )
             if client is not None:
                 await client.connect()
@@ -679,6 +683,7 @@ async def _build_and_connect_mcp_clients(
 async def _create_mcp_client_with_headers(
     client_config: MCPClientConfig,
     passthrough_headers: dict[str, str] | None = None,
+    session_id: str | None = None,
 ) -> Any:
     """Create a single MCP client with optional header passthrough.
 
@@ -688,6 +693,7 @@ async def _create_mcp_client_with_headers(
     Args:
         client_config: Single MCP client configuration
         passthrough_headers: Headers to merge for HTTP transport
+        session_id: Request-scoped session identifier for reserved headers
 
     Returns:
         MCP client instance (not yet connected)
@@ -697,6 +703,10 @@ async def _create_mcp_client_with_headers(
         "transport": client_config.transport,
         "url": client_config.url,
         "headers": client_config.headers or None,
+        "passthrough_headers": dict(passthrough_headers or {}) or None,
+        "session_id": session_id,
+        "timeout": _MCP_HTTP_TIMEOUT_SECONDS,
+        "sse_read_timeout": _MCP_HTTP_SSE_READ_TIMEOUT_SECONDS,
         "command": client_config.command,
         "args": list(client_config.args),
         "env": dict(client_config.env),
@@ -731,20 +741,17 @@ async def _create_mcp_client_with_headers(
         return client
 
     # HTTP transport (streamable_http or sse)
-    headers = client_config.headers
-    if headers:
-        headers = resolve_mcp_http_headers(headers)
-
-    # Merge passthrough headers for HTTP transport
-    merged_headers = dict(headers or {})
-    if passthrough_headers:
-        merged_headers.update(passthrough_headers)
+    merged_headers = build_mcp_http_headers(
+        client_config.headers,
+        passthrough_headers=passthrough_headers,
+        session_id=session_id,
+    )
 
     client = HttpStatefulClient(
         name=client_config.name,
         transport=client_config.transport,
         url=client_config.url,
-        headers=merged_headers or None,
+        headers=merged_headers,
         timeout=_MCP_HTTP_TIMEOUT_SECONDS,
         sse_read_timeout=_MCP_HTTP_SSE_READ_TIMEOUT_SECONDS,
     )
@@ -754,7 +761,6 @@ async def _create_mcp_client_with_headers(
         "_swe_rebuild_info",
         {
             **rebuild_info,
-            "headers": merged_headers,
             "_temp_client": True,
         },
     )
@@ -856,6 +862,14 @@ def _normalize_session_skill_snapshot(
         if isinstance(skill_name, str) and isinstance(entry, dict):
             normalized[skill_name] = dict(entry)
     return normalized
+
+
+def _coerce_session_storage_id(session_id: str | None | Any) -> str:
+    return "" if session_id is None else str(session_id)
+
+
+def _coerce_session_storage_user_id(user_id: str | None) -> str:
+    return user_id or ""
 
 
 def _build_session_skill_snapshot_entry(
@@ -1224,6 +1238,62 @@ def _with_hook_context(
     return f"{env_context}\n\n[Hook additional context]\n{hook_context}"
 
 
+def _request_system_prompt_injections(request: AgentRequest) -> list[str]:
+    channel_meta = getattr(request, "channel_meta", None) or {}
+    value = getattr(request, "system_prompt_injections", None)
+    if value is None and isinstance(channel_meta, dict):
+        value = channel_meta.get("system_prompt_injections")
+    return _normalize_system_prompt_injections(value)
+
+
+def _request_file_url_network(request: AgentRequest) -> str:
+    """从请求属性和 channel_meta 中读取静态文件访问网络。"""
+    from ...config.context import normalize_file_url_network
+
+    channel_meta = getattr(request, "channel_meta", None) or {}
+    value = getattr(request, "file_url_network", None)
+    if value is None and isinstance(channel_meta, dict):
+        value = channel_meta.get("file_url_network")
+    return normalize_file_url_network(value)
+
+
+def _normalize_system_prompt_injections(value: Any) -> list[str]:
+    from ..source_system_config.registry import (
+        normalize_system_prompt_injections,
+    )
+
+    try:
+        return normalize_system_prompt_injections(value)
+    except ValueError:
+        logger.warning(
+            "Ignored invalid system_prompt_injections payload",
+            exc_info=True,
+        )
+        return []
+
+
+def _merge_system_prompt_injections(*sources: Any) -> list[str]:
+    merged: list[str] = []
+    seen: set[str] = set()
+    for source in sources:
+        for item in _normalize_system_prompt_injections(source):
+            if item in seen:
+                continue
+            seen.add(item)
+            merged.append(item)
+    return merged
+
+
+def _with_system_prompt_injections(
+    env_context: str,
+    injections: list[str],
+) -> str:
+    if not injections:
+        return env_context
+    body = "\n\n".join(injections)
+    return f"{env_context}\n\n[System prompt injections]\n{body}"
+
+
 def _chat_name_from_messages(msgs: list[Any]) -> str:
     """从首条消息派生会话名，保持原有文本和媒体消息规则。"""
     if not msgs:
@@ -1438,6 +1508,7 @@ class AgentRunner(Runner):
         self._workspace: Any = None  # Workspace instance for control commands
         self.memory_manager: BaseMemoryManager | None = None
         self._task_tracker = task_tracker  # Task tracker for background tasks
+        self.session: RunnerSessionProtocol | None = None
 
     def set_chat_manager(self, chat_manager):
         """Set chat manager for auto-registration.
@@ -2292,6 +2363,17 @@ class AgentRunner(Runner):
             env_context,
             preflight.hook_additional_context,
         )
+        from ..source_system_config.runtime import (
+            get_system_prompt_injections,
+        )
+
+        env_context = _with_system_prompt_injections(
+            env_context,
+            _merge_system_prompt_injections(
+                get_system_prompt_injections(),
+                _request_system_prompt_injections(request),
+            ),
+        )
 
         agent_config = (
             preflight.agent_config
@@ -2323,6 +2405,7 @@ class AgentRunner(Runner):
             mcp_clients = await _build_and_connect_mcp_clients(
                 agent_config.mcp,
                 passthrough_headers=passthrough_headers or None,
+                session_id=session_id,
             )
 
             turn_id = f"turn-{uuid4().hex}"
@@ -3417,8 +3500,15 @@ class AgentRunner(Runner):
         )
 
         from ..agent_context import set_current_agent_id
+        from ...config.context import (
+            reset_current_file_url_network,
+            set_current_file_url_network,
+        )
 
         set_current_agent_id(self.agent_id)
+        file_url_network_token = set_current_file_url_network(
+            _request_file_url_network(request),
+        )
 
         trace_id = await self._start_query_trace(request, msgs)
         outcome = _QueryTurnOutcome()
@@ -3508,6 +3598,7 @@ class AgentRunner(Runner):
                     ):
                         yield msg, last
         finally:
+            reset_current_file_url_network(file_url_network_token)
             cleanup_runtime = attempt_state.runtime
             cleanup_state_loaded = attempt_state.session_state_loaded
             if cleanup_runtime is None and retry_state.prev_agent is not None:
@@ -3607,6 +3698,8 @@ class AgentRunner(Runner):
         user_id: str | None,
     ) -> bool:
         # 对于 cron 任务，跳过会话历史加载（不读取旧历史）
+        storage_session_id = _coerce_session_storage_id(session_id)
+        storage_user_id = _coerce_session_storage_user_id(user_id)
         if skip_history:
             logger.info(
                 "Cron task: skipping session state load (session_id=%s)",
@@ -3616,8 +3709,8 @@ class AgentRunner(Runner):
         else:
             try:
                 await self.session.load_session_state(
-                    session_id=session_id,
-                    user_id=user_id,
+                    session_id=storage_session_id,
+                    user_id=storage_user_id,
                     agent=agent,
                 )
             except KeyError as e:
@@ -3637,35 +3730,42 @@ class AgentRunner(Runner):
         hook_overlay: HookSessionOverlay | None = None,
     ) -> None:
         """保存 cron 任务状态，保留旧历史并追加本轮新增消息。"""
-        existing_state = await self.session.get_session_state_dict(
-            session_id=session_id,
-            user_id=user_id,
-            allow_not_exist=True,
-        )
+        storage_session_id = _coerce_session_storage_id(session_id)
+        storage_user_id = _coerce_session_storage_user_id(user_id)
         current_agent_state = agent.state_dict()
-        (
-            merged_state,
-            existing_content,
-            current_content,
-            stripped_count,
-        ) = _build_cron_merged_state(
-            existing_state,
-            current_agent_state,
-            hook_overlay,
+        merge_stats: dict[str, Any] = {}
+
+        def _merge(existing_state: dict[str, Any]) -> dict[str, Any]:
+            (
+                merged_state,
+                existing_content,
+                current_content,
+                stripped_count,
+            ) = _build_cron_merged_state(
+                existing_state,
+                current_agent_state,
+                hook_overlay,
+            )
+            merge_stats["existing_content"] = existing_content
+            merge_stats["current_content"] = current_content
+            merge_stats["stripped_count"] = stripped_count
+            return merged_state
+
+        await self.session.mutate_session_state(
+            session_id=storage_session_id,
+            mutator=_merge,
+            user_id=storage_user_id,
+            create_if_not_exist=True,
         )
-        await self.session.save_merged_state(
-            session_id,
-            user_id=user_id,
-            state=merged_state,
-        )
+
         logger.info(
             "Cron task: saved merged session state "
             "(session_id=%s, existing_memory_content=%s, new_content=%s, "
             "stripped_internal_follow_ups=%s)",
             session_id,
-            len(existing_content),
-            len(current_content),
-            stripped_count,
+            len(merge_stats.get("existing_content", [])),
+            len(merge_stats.get("current_content", [])),
+            merge_stats.get("stripped_count", 0),
         )
 
     async def _save_legacy_session_state(
@@ -3675,23 +3775,22 @@ class AgentRunner(Runner):
         user_id: str | None,
         hook_overlay: HookSessionOverlay | None = None,
     ) -> None:
-        """兼容不支持 save_merged_state 的旧 session 实现。"""
+        """兼容不支持 state_dict 的 agent 落盘路径。"""
+        storage_session_id = _coerce_session_storage_id(session_id)
+        storage_user_id = _coerce_session_storage_user_id(user_id)
         await self.session.save_session_state(
-            session_id=session_id,
-            user_id=user_id,
+            session_id=storage_session_id,
+            user_id=storage_user_id,
             agent=agent,
         )
-        if hook_overlay is None or not hasattr(
-            self.session,
-            "update_session_state",
-        ):
+        if hook_overlay is None:
             return
 
         await self.session.update_session_state(
-            session_id,
+            storage_session_id,
             "hook_overlay",
             hook_overlay.model_dump(mode="json", by_alias=True),
-            user_id=user_id,
+            user_id=storage_user_id,
         )
 
     async def _save_regular_session_state(
@@ -3702,10 +3801,9 @@ class AgentRunner(Runner):
         hook_overlay: HookSessionOverlay | None = None,
     ) -> None:
         """保存普通请求状态，并在落盘前剔除内部续跑提示。"""
-        if not hasattr(agent, "state_dict") or not hasattr(
-            self.session,
-            "save_merged_state",
-        ):
+        storage_session_id = _coerce_session_storage_id(session_id)
+        storage_user_id = _coerce_session_storage_user_id(user_id)
+        if not hasattr(agent, "state_dict"):
             await self._save_legacy_session_state(
                 agent,
                 session_id,
@@ -3714,38 +3812,42 @@ class AgentRunner(Runner):
             )
             return
 
-        existing_state = await self.session.get_session_state_dict(
-            session_id=session_id,
-            user_id=user_id,
-            allow_not_exist=True,
-        )
-        state_modules: dict[str, Any] = (
-            dict(existing_state) if isinstance(existing_state, dict) else {}
-        )
-        if (
-            isinstance(existing_state, dict)
-            and SESSION_SKILL_SNAPSHOT_STATE_KEY in existing_state
-        ):
-            state_modules[SESSION_SKILL_SNAPSHOT_STATE_KEY] = (
-                _normalize_session_skill_snapshot(
-                    existing_state.get(SESSION_SKILL_SNAPSHOT_STATE_KEY),
+        current_agent_state = agent.state_dict()
+        stripped_count = 0
+
+        def _merge(existing_state: dict[str, Any]) -> dict[str, Any]:
+            nonlocal stripped_count
+            state_modules: dict[str, Any] = (
+                dict(existing_state)
+                if isinstance(existing_state, dict)
+                else {}
+            )
+            if SESSION_SKILL_SNAPSHOT_STATE_KEY in state_modules:
+                state_modules[SESSION_SKILL_SNAPSHOT_STATE_KEY] = (
+                    _normalize_session_skill_snapshot(
+                        state_modules.get(
+                            SESSION_SKILL_SNAPSHOT_STATE_KEY,
+                        ),
+                    )
                 )
+            state_modules["agent"] = current_agent_state
+            if hook_overlay is not None:
+                state_modules["hook_overlay"] = hook_overlay.model_dump(
+                    mode="json",
+                    by_alias=True,
+                )
+            else:
+                state_modules.pop("hook_overlay", None)
+            stripped_count = _strip_internal_follow_up_messages_from_state(
+                state_modules["agent"],
             )
-        state_modules["agent"] = agent.state_dict()
-        if hook_overlay is not None:
-            state_modules["hook_overlay"] = hook_overlay.model_dump(
-                mode="json",
-                by_alias=True,
-            )
-        else:
-            state_modules.pop("hook_overlay", None)
-        stripped_count = _strip_internal_follow_up_messages_from_state(
-            state_modules["agent"],
-        )
-        await self.session.save_merged_state(
-            session_id=session_id,
-            user_id=user_id,
-            state=state_modules,
+            return state_modules
+
+        await self.session.mutate_session_state(
+            session_id=storage_session_id,
+            mutator=_merge,
+            user_id=storage_user_id,
+            create_if_not_exist=True,
         )
         logger.info(
             "Saved session state with stripped_internal_follow_ups=%s "
@@ -3799,28 +3901,16 @@ class AgentRunner(Runner):
         if not hasattr(self, "session") or self.session is None:
             return
 
+        storage_session_id = _coerce_session_storage_id(session_id)
+        storage_user_id = _coerce_session_storage_user_id(user_id)
         path = self.session._get_save_path(  # pylint: disable=protected-access
-            session_id,
-            user_id,
+            storage_session_id,
+            storage_user_id,
         )
         if not Path(path).exists():
             return
 
         try:
-            with open(
-                path,
-                "r",
-                encoding="utf-8",
-                errors="surrogatepass",
-            ) as f:
-                states = json.load(f)
-
-            agent_state = states.get("agent", {})
-            memory_state = agent_state.get("memory", {})
-            content = memory_state.get("content", [])
-
-            if not content:
-                return
 
             def _is_marked(entry):
                 return (
@@ -3831,57 +3921,74 @@ class AgentRunner(Runner):
                 )
 
             last_marked_idx = -1
-            for i, entry in enumerate(content):
-                if _is_marked(entry):
-                    last_marked_idx = i
-
             modified = False
 
-            if last_marked_idx >= 0 and last_marked_idx + 1 < len(content):
-                next_entry = content[last_marked_idx + 1]
-                if (
-                    isinstance(next_entry, list)
-                    and len(next_entry) >= 1
-                    and isinstance(next_entry[0], dict)
-                    and next_entry[0].get("role") == "assistant"
-                ):
-                    del content[last_marked_idx + 1]
+            def _cleanup_state(states: dict[str, Any]) -> dict[str, Any]:
+                nonlocal modified, last_marked_idx
+                agent_state = states.get("agent", {})
+                if not isinstance(agent_state, dict):
+                    return states
+
+                memory_state = agent_state.get("memory", {})
+                if not isinstance(memory_state, dict):
+                    return states
+
+                content = memory_state.get("content", [])
+                if not isinstance(content, list) or not content:
+                    return states
+
+                for i, entry in enumerate(content):
+                    if _is_marked(entry):
+                        last_marked_idx = i
+
+                if last_marked_idx >= 0 and last_marked_idx + 1 < len(content):
+                    next_entry = content[last_marked_idx + 1]
+                    if (
+                        isinstance(next_entry, list)
+                        and len(next_entry) >= 1
+                        and isinstance(next_entry[0], dict)
+                        and next_entry[0].get("role") == "assistant"
+                    ):
+                        del content[last_marked_idx + 1]
+                        modified = True
+
+                for entry in content:
+                    if _is_marked(entry):
+                        entry[1].remove(TOOL_GUARD_DENIED_MARK)
+                        modified = True
+
+                if denial_response is not None:
+                    ts = getattr(denial_response, "timestamp", None)
+                    msg_dict = {
+                        "id": getattr(denial_response, "id", ""),
+                        "name": getattr(denial_response, "name", "Friday"),
+                        "role": getattr(denial_response, "role", "assistant"),
+                        "content": denial_response.content,
+                        "metadata": getattr(
+                            denial_response,
+                            "metadata",
+                            None,
+                        ),
+                        "timestamp": str(ts) if ts is not None else "",
+                    }
+                    content.append([msg_dict, []])
                     modified = True
 
-            for entry in content:
-                if _is_marked(entry):
-                    entry[1].remove(TOOL_GUARD_DENIED_MARK)
-                    modified = True
+                return states
 
-            if denial_response is not None:
-                ts = getattr(denial_response, "timestamp", None)
-                msg_dict = {
-                    "id": getattr(denial_response, "id", ""),
-                    "name": getattr(denial_response, "name", "Friday"),
-                    "role": getattr(denial_response, "role", "assistant"),
-                    "content": denial_response.content,
-                    "metadata": getattr(
-                        denial_response,
-                        "metadata",
-                        None,
-                    ),
-                    "timestamp": str(ts) if ts is not None else "",
-                }
-                content.append([msg_dict, []])
-                modified = True
+            await self.session.mutate_session_state(
+                session_id=storage_session_id,
+                mutator=_cleanup_state,
+                user_id=storage_user_id,
+                create_if_not_exist=False,
+            )
 
-            if modified:
-                with open(
-                    path,
-                    "w",
-                    encoding="utf-8",
-                    errors="surrogatepass",
-                ) as f:
-                    json.dump(states, f, ensure_ascii=False)
-                logger.info(
-                    "Tool guard: cleaned up denied session memory in %s",
-                    path,
-                )
+            if not modified:
+                return
+            logger.info(
+                "Tool guard: cleaned up denied session memory in %s",
+                path,
+            )
         except Exception:  # pylint: disable=broad-except
             logger.warning(
                 "Failed to clean up denied messages from session %s",

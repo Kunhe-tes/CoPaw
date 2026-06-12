@@ -12,8 +12,10 @@ from ..tool_failure import ToolExecutionError
 from ...app.agent_context import get_current_agent_id
 from ...config.context import (
     get_current_effective_tenant_id,
+    get_current_file_url_network,
     get_current_user_id,
     get_current_workspace_dir,
+    resolve_file_url_base,
 )
 
 
@@ -21,7 +23,13 @@ def _raise_tool_error(error_type: str, msg: str) -> None:
     raise ToolExecutionError(error_type=error_type, detail=msg)
 
 
-def _tool_ok(path: str, message: str) -> ToolResponse:
+def _tool_ok(
+    path: str,
+    message: str,
+    *,
+    url: str,
+    network: str,
+) -> ToolResponse:
     """Return success response."""
     return ToolResponse(
         content=[
@@ -31,6 +39,8 @@ def _tool_ok(path: str, message: str) -> ToolResponse:
                     {
                         "ok": True,
                         "path": path,
+                        "url": url,
+                        "network": network,
                         "message": message,
                     },
                     ensure_ascii=False,
@@ -117,7 +127,7 @@ async def copy_file_to_static(file_path: str) -> ToolResponse:
     )
     file_name = os.path.basename(dest_path)
     agent_id = get_current_agent_id()
-    access = os.getenv("FILE_URL", "http://localhost:8088").rstrip("/")
+    access, network = resolve_file_url_base(get_current_file_url_network())
     url = (
         access
         + "/static/"
@@ -131,4 +141,6 @@ async def copy_file_to_static(file_path: str) -> ToolResponse:
     return _tool_ok(
         f"![{file_name}]({url})",
         "已返回markdown格式的访问链接",
+        url=url,
+        network=network,
     )

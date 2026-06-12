@@ -85,6 +85,8 @@ export const CRON_UNREAD_AUTO_PAUSE_MIN_THRESHOLD = 1;
 
 export const IMMEDIATE_TRUNCATION_MIN_BYTES = 1000;
 
+export const SYSTEM_PROMPT_INJECTION_SEPARATOR = /\n\s*\n/g;
+
 export const TOOL_RESULT_COMPACT_NUMBER_FIELDS: CurrentSourceConfigNumberDefinition[] =
   [
     {
@@ -239,6 +241,55 @@ export function writeCronUnreadAutoPauseValue<
     nextConfig.cron_unread_auto_pause = {};
   }
   (nextConfig.cron_unread_auto_pause as Record<string, unknown>)[key] = value;
+  return nextConfig;
+}
+
+export function normalizeSystemPromptInjections(value: unknown): string[] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+  const seen = new Set<string>();
+  const prompts: string[] = [];
+  for (const item of value) {
+    const prompt = String(item).trim();
+    if (!prompt || seen.has(prompt)) {
+      continue;
+    }
+    seen.add(prompt);
+    prompts.push(prompt);
+  }
+  return prompts;
+}
+
+export function readSystemPromptInjections(
+  config: SourceSystemConfig,
+): string[] {
+  return normalizeSystemPromptInjections(config.system_prompt_injections);
+}
+
+export function parseSystemPromptInjectionText(value: string): string[] {
+  return normalizeSystemPromptInjections(
+    value.split(SYSTEM_PROMPT_INJECTION_SEPARATOR),
+  );
+}
+
+export function formatSystemPromptInjectionText(
+  prompts: readonly string[],
+): string {
+  return normalizeSystemPromptInjections([...prompts]).join("\n\n");
+}
+
+export function writeSystemPromptInjections(
+  config: SourceSystemConfig,
+  value: unknown,
+): SourceSystemConfig {
+  const nextConfig = clonePlainConfig(config);
+  const prompts = normalizeSystemPromptInjections(value);
+  if (prompts.length === 0) {
+    delete nextConfig.system_prompt_injections;
+    return nextConfig;
+  }
+  nextConfig.system_prompt_injections = prompts;
   return nextConfig;
 }
 

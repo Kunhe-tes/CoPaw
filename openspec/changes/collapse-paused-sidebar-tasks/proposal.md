@@ -6,11 +6,11 @@ Paused scheduled tasks currently occupy the same visual level as tasks that can 
 
 - Split the sidebar task collection into runnable tasks and paused tasks using the existing task state metadata.
 - Keep runnable and currently running tasks directly visible in their existing order.
-- Move manually and automatically paused tasks into a dedicated "已暂停任务(N)" disclosure group at the bottom of the task list, collapsed by default.
+- Move manually and automatically paused tasks into a dedicated "已暂停任务(N)" disclosure immediately below the task-section header and above runnable tasks, collapsed by default.
 - Allow users to expand the paused group to inspect paused tasks and use the existing open, resume, and delete actions.
 - Preserve the total count in "我的任务(N)" while showing the paused count separately on the disclosure row.
 - Keep the collapsed paused-task disclosure intentionally minimal: it shows only the paused-task label and count, without unread badges or aggregate unread text.
-- Automatically expand the paused-task group when the task currently being viewed belongs to that group, so the selected task remains visible in the sidebar.
+- Automatically expand the paused-task group when the task currently being viewed belongs to that group, while still allowing the user to collapse it manually afterward.
 - Apply the same grouping behavior to both the expanded chat sidebar and the collapsed-sidebar task popover.
 - Add accessible disclosure semantics, keyboard operation, visible focus styling, and reduced-motion behavior.
 - Keep cronjob APIs, pause/resume semantics, unread tracking, task navigation, and task ordering unchanged.

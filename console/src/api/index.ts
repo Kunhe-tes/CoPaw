@@ -29,6 +29,7 @@ import { myMcpApi } from "./modules/myMcp";
 import { marketMcpApi } from "./modules/marketMcp";
 import { feedbackApi } from "./modules/feedback";
 import { htmlPreviewEventsApi } from "./modules/htmlPreviewEvents";
+import { systemCheckApi } from "./modules/systemCheck";
 
 export const api = {
   // Root
@@ -104,6 +105,9 @@ export const api = {
 
   // HTML Preview Events
   ...htmlPreviewEventsApi,
+
+  // System Check
+  ...systemCheckApi,
 };
 
 export default api;

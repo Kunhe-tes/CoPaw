@@ -490,8 +490,13 @@ describe("ExpandablePanel tasks", () => {
     );
 
     const toggle = screen.getByRole("button", { name: "已暂停任务 1" });
+    const activeTask = screen.getByText("active active");
     expect(toggle).toHaveAttribute("aria-expanded", "false");
-    expect(screen.getByText("active active")).toBeVisible();
+    expect(activeTask).toBeVisible();
+    expect(
+      toggle.compareDocumentPosition(activeTask) &
+        Node.DOCUMENT_POSITION_FOLLOWING,
+    ).not.toBe(0);
     expect(screen.getByText("paused paused")).not.toBeVisible();
     expect(toggle).not.toHaveTextContent("3");
   });

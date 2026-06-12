@@ -76,7 +76,24 @@
     "marketGroup": "应用市场",
     "market": "应用市场",
     "mySkills": "我的技能",
-    "myMcp": "我的 MCP"
+    "myMcp": "我的 MCP",
+    "systemCheck": "系统自检"
+  },
+  "systemCheck": {
+    "forbidden": "仅管理员可访问系统自检页面。",
+    "authExpiry": {
+      "title": "鉴权过期查询",
+      "tenantIds": "租户 ID",
+      "sourceRequired": "请输入 Source ID。",
+      "tenantRequired": "请输入至少一个租户 ID。",
+      "columns": {
+        "tenantId": "租户 ID",
+        "status": "状态",
+        "expiry": "过期时间",
+        "expired": "已过期",
+        "message": "消息"
+      }
+    }
   },
   "cases": {
     "title": "案例管理",

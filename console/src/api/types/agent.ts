@@ -3,6 +3,8 @@ export interface AgentRequest {
   session_id?: string | null;
   user_id?: string | null;
   channel?: string | null;
+  system_prompt_injections?: string[];
+  file_url_network?: "office" | "business";
   [key: string]: unknown;
 }
 

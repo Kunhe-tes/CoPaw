@@ -44,6 +44,7 @@ import {
   PencilLine,
   Settings,
   ShieldCheck,
+  SearchCheck,
   Store,
   Wrench,
   Puzzle,
@@ -81,6 +82,7 @@ export default function Sidebar({ selectedKey }: SidebarProps) {
   const [collapsed, setCollapsed] = useState(false);
   const [openKeys, setOpenKeys] = useState<string[]>([...DEFAULT_OPEN_KEYS]);
   const canManageCurrentSourceConfig = isSuperManager || manager;
+  const canUseSystemCheck = isSuperManager || manager;
 
   // ── Effects ──────────────────────────────────────────────────────────────
 
@@ -250,6 +252,18 @@ export default function Sidebar({ selectedKey }: SidebarProps) {
           },
         ]
       : []),
+    ...(canUseSystemCheck
+      ? [
+          {
+            key: "system-check",
+            icon: <SearchCheck size={18} />,
+            path: "/system-check",
+            label: t("nav.systemCheck", {
+              defaultValue: "系统自检",
+            }),
+          },
+        ]
+      : []),
     // 洞察中心
     {
       key: "analytics-business-overview",
@@ -397,6 +411,19 @@ export default function Sidebar({ selectedKey }: SidebarProps) {
                       defaultValue: "系统特性配置",
                     }),
                 icon: <SparkModifyLine size={16} />,
+              },
+            ]
+          : []),
+        ...(canUseSystemCheck
+          ? [
+              {
+                key: "system-check",
+                label: collapsed
+                  ? null
+                  : t("nav.systemCheck", {
+                      defaultValue: "系统自检",
+                    }),
+                icon: <SearchCheck size={16} />,
               },
             ]
           : []),
