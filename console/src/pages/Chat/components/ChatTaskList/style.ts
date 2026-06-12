@@ -214,8 +214,8 @@ export default createGlobalStyle`
 
   &-paused-toggle {
     width: 100%;
-    min-height: 28px;
-    padding: 0 4px;
+    min-height: 22px;
+    padding: 4px 8px 0;
     display: flex;
     align-items: center;
     gap: 6px;
@@ -264,6 +264,7 @@ export default createGlobalStyle`
     font-weight: 400;
     line-height: 18px;
     font-variant-numeric: tabular-nums;
+    margin-left: -4px;
   }
 
   &-paused-items {
