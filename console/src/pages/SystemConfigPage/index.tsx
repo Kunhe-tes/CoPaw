@@ -547,11 +547,6 @@ export default function SystemConfigPage() {
                 })}
               </div>
               <label className={styles.promptField}>
-                <span className={styles.numberLabel}>
-                  {t("sourceSystemConfigPage.systemPromptInjectionsLabel", {
-                    defaultValue: "系统提示词注入",
-                  })}
-                </span>
                 <Input.TextArea
                   aria-label={t(
                     "sourceSystemConfigPage.systemPromptInjectionsLabel",

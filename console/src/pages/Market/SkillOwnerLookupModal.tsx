@@ -1,6 +1,5 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import {
-  Alert,
   Button,
   Modal,
   Space,
@@ -16,7 +15,6 @@ import {
 } from "../../api/modules/userInfo";
 import {
   buildSkillOwnerRows,
-  resolveMarketSkillName,
   type SkillOwnerRow,
 } from "./skillOwnerLookup";
 import type { MySkill } from "../../api/modules/mySkills";
@@ -66,11 +64,6 @@ export function SkillOwnerLookupModal({
   const [tenantCount, setTenantCount] = useState(0);
   const [failedCount, setFailedCount] = useState(0);
   const [rows, setRows] = useState<SkillOwnerRow[]>([]);
-
-  const stableSkillName = useMemo(
-    () => (skill ? resolveMarketSkillName(skill) : ""),
-    [skill],
-  );
 
   const loadOwners = useCallback(async () => {
     if (!open || !skill || !sourceId) {
@@ -122,16 +115,6 @@ export function SkillOwnerLookupModal({
       ]}
     >
       <Space direction="vertical" size={12} style={{ width: "100%" }}>
-        <Alert
-          type="info"
-          showIcon
-          message="按技能目录名实时反查当前用户工作区，不读取历史分发记录。"
-          description={
-            stableSkillName
-              ? `匹配目录名：${stableSkillName}`
-              : "当前市场技能缺少可匹配的目录名。"
-          }
-        />
         <div style={{ display: "flex", gap: 16, flexWrap: "wrap" }}>
           <Text type="secondary">扫描用户：{tenantCount}</Text>
           <Text type="secondary">拥有用户：{rows.length}</Text>
@@ -181,12 +164,6 @@ export function SkillOwnerLookupModal({
               title: "用户版本",
               dataIndex: "installed_version",
               key: "installed_version",
-              render: (value) => value || "-",
-            },
-            {
-              title: "接收版本",
-              dataIndex: "received_version",
-              key: "received_version",
               render: (value) => value || "-",
             },
             {
