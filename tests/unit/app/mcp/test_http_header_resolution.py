@@ -230,6 +230,11 @@ async def test_rebuild_mcp_client_reresolves_scope_headers_on_reconnect(
         "x-swe-source-id": "source-a",
         "x-swe-session-id": "session-1",
     }
+    assert captured[0]["timeout"] == runner_module._MCP_HTTP_TIMEOUT_SECONDS
+    assert (
+        captured[0]["sse_read_timeout"]
+        == runner_module._MCP_HTTP_SSE_READ_TIMEOUT_SECONDS
+    )
     assert captured[1]["headers"] == {
         "Authorization": "Bearer rotated-token",
         "X-Home": "dir=/home/demo",
@@ -238,3 +243,8 @@ async def test_rebuild_mcp_client_reresolves_scope_headers_on_reconnect(
         "x-swe-source-id": "source-a",
         "x-swe-session-id": "session-1",
     }
+    assert captured[1]["timeout"] == runner_module._MCP_HTTP_TIMEOUT_SECONDS
+    assert (
+        captured[1]["sse_read_timeout"]
+        == runner_module._MCP_HTTP_SSE_READ_TIMEOUT_SECONDS
+    )

@@ -705,6 +705,8 @@ async def _create_mcp_client_with_headers(
         "headers": client_config.headers or None,
         "passthrough_headers": dict(passthrough_headers or {}) or None,
         "session_id": session_id,
+        "timeout": _MCP_HTTP_TIMEOUT_SECONDS,
+        "sse_read_timeout": _MCP_HTTP_SSE_READ_TIMEOUT_SECONDS,
         "command": client_config.command,
         "args": list(client_config.args),
         "env": dict(client_config.env),

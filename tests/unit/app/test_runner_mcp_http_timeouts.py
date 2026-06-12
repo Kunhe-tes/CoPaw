@@ -179,6 +179,14 @@ async def test_create_streamable_http_mcp_client_uses_explicit_httpx_timeouts(
         "Authorization": "Bearer test-token",
     }
     assert getattr(client, "_swe_rebuild_info")["session_id"] == "session-1"
+    assert (
+        getattr(client, "_swe_rebuild_info")["timeout"]
+        == runner_module._MCP_HTTP_TIMEOUT_SECONDS
+    )
+    assert (
+        getattr(client, "_swe_rebuild_info")["sse_read_timeout"]
+        == runner_module._MCP_HTTP_SSE_READ_TIMEOUT_SECONDS
+    )
 
 
 @pytest.mark.asyncio

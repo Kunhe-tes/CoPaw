@@ -858,13 +858,38 @@ class SWEAgent(ToolGuardMixin, ReActAgent):
                 ),
                 session_id=rebuild_info.get("session_id"),
             )
+            timeout = rebuild_info.get(
+                "timeout",
+                getattr(client, "timeout", None),
+            )
+            sse_read_timeout = rebuild_info.get(
+                "sse_read_timeout",
+                getattr(client, "sse_read_timeout", None),
+            )
+            http_client_kwargs = {
+                "timeout": timeout,
+                "sse_read_timeout": sse_read_timeout,
+            }
             rebuilt_client = HttpStatefulClient(
                 name=name,
                 transport=transport,
                 url=rebuild_info.get("url"),
                 headers=headers,
+                **{
+                    key: value
+                    for key, value in http_client_kwargs.items()
+                    if value is not None
+                },
             )
-            setattr(rebuilt_client, "_swe_rebuild_info", rebuild_info)
+            setattr(
+                rebuilt_client,
+                "_swe_rebuild_info",
+                {
+                    **rebuild_info,
+                    "timeout": timeout,
+                    "sse_read_timeout": sse_read_timeout,
+                },
+            )
             return rebuilt_client
         except Exception:  # pylint: disable=broad-except
             return None
