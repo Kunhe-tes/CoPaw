@@ -354,12 +354,12 @@ export default function ScheduledTaskPopup({
 
         <div className={styles.section}>
           <label className={styles.label} htmlFor="notification-delay-value">
-            Notification delay
+            通知延迟
           </label>
           <div className={styles.delayPicker}>
             <input
               id="notification-delay-value"
-              aria-label="Notification delay value"
+              aria-label="通知延迟数值"
               className={styles.delayInput}
               type="number"
               min={0}
@@ -369,7 +369,7 @@ export default function ScheduledTaskPopup({
               }
             />
             <select
-              aria-label="Notification delay unit"
+              aria-label="通知延迟单位"
               className={styles.delayUnitSelect}
               value={notificationDelayUnit}
               onChange={(event) =>
@@ -378,8 +378,8 @@ export default function ScheduledTaskPopup({
                 )
               }
             >
-              <option value="minutes">minutes</option>
-              <option value="hours">hours</option>
+              <option value="minutes">分钟</option>
+              <option value="hours">小时</option>
             </select>
           </div>
         </div>

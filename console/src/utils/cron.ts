@@ -37,13 +37,13 @@ export function getNotificationDelayFormValue(
 export function formatNotificationDelay(value: unknown): string {
   const minutes = normalizeNotificationDelayMinutes(value);
   if (minutes === 0) {
-    return "Immediate";
+    return "立即通知";
   }
   if (minutes % 60 === 0) {
     const hours = minutes / 60;
-    return `${hours} ${hours === 1 ? "hour" : "hours"}`;
+    return `${hours} 小时`;
   }
-  return `${minutes} ${minutes === 1 ? "minute" : "minutes"}`;
+  return `${minutes} 分钟`;
 }
 
 export interface ScheduleConfig {

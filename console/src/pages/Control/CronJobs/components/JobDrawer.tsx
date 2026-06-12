@@ -242,15 +242,15 @@ export function JobDrawer({
           />
         </Form.Item>
 
-        <Form.Item label="Notification delay">
+        <Form.Item label="通知延迟">
           <div className={styles.inlineFieldGroup}>
             <Form.Item name="notificationDelayValue" noStyle>
               <InputNumber min={0} style={{ flex: 1 }} placeholder="0" />
             </Form.Item>
             <Form.Item name="notificationDelayUnit" noStyle>
               <Select style={{ width: 140 }}>
-                <Select.Option value="minutes">minutes</Select.Option>
-                <Select.Option value="hours">hours</Select.Option>
+                <Select.Option value="minutes">分钟</Select.Option>
+                <Select.Option value="hours">小时</Select.Option>
               </Select>
             </Form.Item>
           </div>

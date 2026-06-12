@@ -59,6 +59,6 @@ describe("CronJobs columns", () => {
       },
     });
 
-    expect(column?.render?.(undefined, job, 0)).toBe("2 hours");
+    expect(column?.render?.(undefined, job, 0)).toBe("2 小时");
   });
 });

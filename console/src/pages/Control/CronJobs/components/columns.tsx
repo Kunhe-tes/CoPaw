@@ -174,7 +174,7 @@ export const createColumns = (
       width: 170,
     },
     {
-      title: "NotificationDelay",
+      title: "通知延迟",
       key: "notification_delay",
       width: 170,
       render: (_: unknown, record: CronJob) =>

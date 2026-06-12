@@ -375,10 +375,10 @@ describe("ScheduledTaskPopup", () => {
       const onConfirm = vi.fn().mockResolvedValue(undefined);
       render(<ScheduledTaskPopup {...defaultProps} onConfirm={onConfirm} />);
 
-      fireEvent.change(screen.getByLabelText("Notification delay value"), {
+      fireEvent.change(screen.getByLabelText("通知延迟数值"), {
         target: { value: "2" },
       });
-      fireEvent.change(screen.getByLabelText("Notification delay unit"), {
+      fireEvent.change(screen.getByLabelText("通知延迟单位"), {
         target: { value: "hours" },
       });
       fireEvent.click(screen.getByRole("button", { name: "确认" }));

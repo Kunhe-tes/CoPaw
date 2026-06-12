@@ -372,8 +372,8 @@ describe("notification delay helpers", () => {
   });
 
   it("formats notification delay for display", () => {
-    expect(formatNotificationDelay(0)).toBe("Immediate");
-    expect(formatNotificationDelay(45)).toBe("45 minutes");
-    expect(formatNotificationDelay(120)).toBe("2 hours");
+    expect(formatNotificationDelay(0)).toBe("立即通知");
+    expect(formatNotificationDelay(45)).toBe("45 分钟");
+    expect(formatNotificationDelay(120)).toBe("2 小时");
   });
 });
