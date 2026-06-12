@@ -186,17 +186,6 @@ export function TenantSelector({
     );
   }, [mergedTenantIds, tenantLookup]);
 
-  const selectedTenantInfos = useMemo(() => {
-    return mergedTenantIds.map(
-      (tenantId) =>
-        tenantLookup.get(tenantId) ?? {
-          tenant_id: tenantId,
-          tenant_name: null,
-          bbk_id: null,
-        },
-    );
-  }, [mergedTenantIds, tenantLookup]);
-
   // 按机构分组的用户列表（用于展示具体用户）
   const groupedTenants = useMemo(() => {
     if (targetMode !== "bbk_id" || selectedBbkIds.length === 0) return [];

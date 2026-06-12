@@ -473,7 +473,7 @@ describe("TenantSelector", () => {
       });
     });
 
-    it("entering IDs in list does NOT select cards", async () => {
+    it("entering IDs in list selects matching cards", async () => {
       const onChange = vi.fn();
       render(<TenantSelector {...defaultProps} onChange={onChange} />);
 
@@ -490,11 +490,10 @@ describe("TenantSelector", () => {
       const textarea = screen.getByPlaceholderText(/例如：external/);
       fireEvent.change(textarea, { target: { value: "user001" } });
 
-      // 等待一下，卡片不应该被选中
+      // 列表中存在的 ID 会同步为卡片选中态
       await waitFor(() => {
         const card = getCardByText("用户一 (user001)");
-        // 卡片选中状态不变
-        expect(card?.className).not.toMatch(/Selected/);
+        expect(card?.className).toMatch(/Selected/);
       });
     });
 
