@@ -1,6 +1,8 @@
 # -*- coding: utf-8 -*-
 from __future__ import annotations
 
+import asyncio
+import os
 import uuid
 from dataclasses import dataclass
 from typing import Any
@@ -35,6 +37,8 @@ BROADCAST_MODEL_SLOT_FALLBACK_REASON_META_KEY = (
 )
 CHILD_RUN_SKIPPED_PAUSED_MESSAGE = "paused, not executed"
 CHILD_NOT_FROM_SOURCE_MESSAGE = "child job does not belong to source job"
+CRON_BROADCAST_CONCURRENCY_ENV = "CRON_BROADCAST_CONCURRENCY"
+DEFAULT_CRON_BROADCAST_CONCURRENCY = 4
 
 PRESERVED_CHILD_META_KEYS = (
     "task_chat_id",
@@ -47,6 +51,21 @@ PRESERVED_CHILD_META_KEYS = (
     "auto_paused_at",
     "unread_count_at_pause",
 )
+
+
+def _positive_int_or_default(value: str | None, default: int) -> int:
+    try:
+        parsed = int(str(value or "").strip())
+    except ValueError:
+        return default
+    return parsed if parsed > 0 else default
+
+
+def _get_cron_broadcast_concurrency() -> int:
+    return _positive_int_or_default(
+        os.getenv(CRON_BROADCAST_CONCURRENCY_ENV),
+        DEFAULT_CRON_BROADCAST_CONCURRENCY,
+    )
 
 
 class BroadcastTenantListResponse(BaseModel):
@@ -781,6 +800,29 @@ async def _broadcast_to_tenant(
         )
 
 
+async def _broadcast_to_tenants(
+    context: _BroadcastContext,
+    tenant_ids: list[str],
+) -> list[CronBroadcastTenantResult]:
+    semaphore = asyncio.Semaphore(_get_cron_broadcast_concurrency())
+
+    async def _run(
+        tenant_id: str,
+        offset: int,
+    ) -> CronBroadcastTenantResult:
+        async with semaphore:
+            return await _broadcast_to_tenant(context, tenant_id, offset)
+
+    return list(
+        await asyncio.gather(
+            *[
+                _run(tenant_id, offset)
+                for tenant_id, offset in zip(tenant_ids, context.offsets)
+            ],
+        ),
+    )
+
+
 def _is_broadcast_child_of(job: CronJobSpec | None, source_job_id: str) -> bool:
     if job is None:
         return False
@@ -832,6 +874,50 @@ async def _build_child_management_context(
         tenant_ids,
         {},
     )
+
+
+async def _list_broadcast_children_for_tenant(
+    context: _BroadcastContext,
+    tenant_id: str,
+) -> list[CronBroadcastChildItem]:
+    try:
+        target_cron_manager, _ = await _get_target_cron_manager(
+            context,
+            tenant_id,
+            bootstrap=False,
+        )
+        items: list[CronBroadcastChildItem] = []
+        for job in await target_cron_manager.list_jobs():
+            if _is_broadcast_child_of(job, context.source_job.id):
+                items.append(
+                    _build_broadcast_child_item(
+                        tenant_id=tenant_id,
+                        job=job,
+                        state=target_cron_manager.get_state(job.id),
+                    ),
+                )
+        return items
+    except Exception:
+        return []
+
+
+async def _list_broadcast_children_for_tenants(
+    context: _BroadcastContext,
+    tenant_ids: list[str],
+) -> list[CronBroadcastChildItem]:
+    semaphore = asyncio.Semaphore(_get_cron_broadcast_concurrency())
+
+    async def _run(tenant_id: str) -> list[CronBroadcastChildItem]:
+        async with semaphore:
+            return await _list_broadcast_children_for_tenant(
+                context,
+                tenant_id,
+            )
+
+    batches = await asyncio.gather(
+        *[_run(tenant_id) for tenant_id in tenant_ids],
+    )
+    return [item for batch in batches for item in batch]
 
 
 async def _list_source_tenant_ids(request: Request) -> list[str]:
@@ -947,10 +1033,7 @@ async def broadcast_job(
         normalized_tenants,
         target_identity_by_tenant,
     )
-    results = [
-        await _broadcast_to_tenant(context, tenant_id, offset)
-        for tenant_id, offset in zip(normalized_tenants, context.offsets)
-    ]
+    results = await _broadcast_to_tenants(context, normalized_tenants)
     return CronBroadcastResponse(results=results)
 
 
@@ -970,25 +1053,7 @@ async def list_broadcast_children(
         source_job,
         tenant_ids,
     )
-    items: list[CronBroadcastChildItem] = []
-    for tenant_id in tenant_ids:
-        try:
-            target_cron_manager, _ = await _get_target_cron_manager(
-                context,
-                tenant_id,
-                bootstrap=False,
-            )
-            for job in await target_cron_manager.list_jobs():
-                if _is_broadcast_child_of(job, source_job.id):
-                    items.append(
-                        _build_broadcast_child_item(
-                            tenant_id=tenant_id,
-                            job=job,
-                            state=target_cron_manager.get_state(job.id),
-                        ),
-                    )
-        except Exception:
-            continue
+    items = await _list_broadcast_children_for_tenants(context, tenant_ids)
     return CronBroadcastChildrenResponse(items=items)
 
 

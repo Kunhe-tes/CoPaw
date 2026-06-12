@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 """Tenant injection regression tests for cron APIs."""
 
+import asyncio
 import importlib.util
 import sys
 import types
@@ -402,6 +403,98 @@ def test_create_text_job_clears_model_slot():
     assert manager.created[0].task_type == "text"
     assert manager.created[0].model_slot is None
     assert response.json().get("model_slot") is None
+
+
+def test_cron_broadcast_concurrency_uses_env_with_default(monkeypatch):
+    monkeypatch.delenv(
+        api_module.CRON_BROADCAST_CONCURRENCY_ENV,
+        raising=False,
+    )
+    assert api_module._get_cron_broadcast_concurrency() == 4
+
+    monkeypatch.setenv(api_module.CRON_BROADCAST_CONCURRENCY_ENV, "2")
+    assert api_module._get_cron_broadcast_concurrency() == 2
+
+    monkeypatch.setenv(api_module.CRON_BROADCAST_CONCURRENCY_ENV, "0")
+    assert api_module._get_cron_broadcast_concurrency() == 4
+
+
+def test_broadcast_to_tenants_limits_concurrency(monkeypatch):
+    monkeypatch.setenv(api_module.CRON_BROADCAST_CONCURRENCY_ENV, "2")
+    active = 0
+    max_active = 0
+
+    async def _fake_broadcast_to_tenant(_context, tenant_id, offset):
+        nonlocal active, max_active
+        active += 1
+        max_active = max(max_active, active)
+        await asyncio.sleep(0)
+        active -= 1
+        return api_module.CronBroadcastTenantResult(
+            tenant_id=tenant_id,
+            success=True,
+            offset_minutes=offset,
+        )
+
+    monkeypatch.setattr(
+        api_module,
+        "_broadcast_to_tenant",
+        _fake_broadcast_to_tenant,
+    )
+    context = types.SimpleNamespace(offsets=[0, 1, 2, 3, 4])
+
+    results = asyncio.run(
+        api_module._broadcast_to_tenants(
+            context,
+            ["tenant-a", "tenant-b", "tenant-c", "tenant-d", "tenant-e"],
+        ),
+    )
+
+    assert max_active == 2
+    assert [item.tenant_id for item in results] == [
+        "tenant-a",
+        "tenant-b",
+        "tenant-c",
+        "tenant-d",
+        "tenant-e",
+    ]
+    assert [item.offset_minutes for item in results] == [0, 1, 2, 3, 4]
+
+
+def test_list_broadcast_children_for_tenants_limits_concurrency(monkeypatch):
+    monkeypatch.setenv(api_module.CRON_BROADCAST_CONCURRENCY_ENV, "2")
+    active = 0
+    max_active = 0
+
+    async def _fake_list_children(_context, tenant_id):
+        nonlocal active, max_active
+        active += 1
+        max_active = max(max_active, active)
+        await asyncio.sleep(0)
+        active -= 1
+        return [tenant_id]
+
+    monkeypatch.setattr(
+        api_module,
+        "_list_broadcast_children_for_tenant",
+        _fake_list_children,
+    )
+
+    results = asyncio.run(
+        api_module._list_broadcast_children_for_tenants(
+            types.SimpleNamespace(),
+            ["tenant-a", "tenant-b", "tenant-c", "tenant-d", "tenant-e"],
+        ),
+    )
+
+    assert max_active == 2
+    assert results == [
+        "tenant-a",
+        "tenant-b",
+        "tenant-c",
+        "tenant-d",
+        "tenant-e",
+    ]
 
 
 def test_broadcast_clears_model_slot_and_returns_warning_for_unsupported_tenant():
