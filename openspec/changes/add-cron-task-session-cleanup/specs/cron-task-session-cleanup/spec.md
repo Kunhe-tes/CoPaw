@@ -16,13 +16,19 @@ The system SHALL define source-scoped `cron_task_session_cleanup` configuration 
 - **THEN** the system SHALL reject the source system config update
 
 ### Requirement: Cleanup runs as an external scheduler system job
-The system SHALL register scheduled task session cleanup with the external scheduler platform as a system job for the current source. The cleanup system job MUST NOT be persisted as a business cron job, MUST NOT appear in user task lists, MUST NOT create its own task session, and MUST NOT participate in unread result, notification, or task result semantics.
+The system SHALL register scheduled task session cleanup with the external scheduler platform as one system job per source. The cleanup callback MUST treat `source_id` as the cleanup boundary and MUST NOT treat callback `tenant_id` as a single-user cleanup boundary. The cleanup system job MUST NOT be persisted as a business cron job, MUST NOT appear in user task lists, MUST NOT create its own task session, and MUST NOT participate in unread result, notification, or task result semantics.
 
 #### Scenario: Cleanup config is enabled
 - **WHEN** CronManager initializes for a source whose effective cleanup config is enabled
 - **THEN** the system SHALL register or update an external scheduler system job with the configured daily cron
-- **AND** the callback SHALL use a cleanup-specific `task_type`
+- **AND** the callback SHALL use `task_type="cleanup"`
 - **AND** the external system job id SHALL be stored in the system jobs id store
+
+#### Scenario: Cleanup config is modified by another user of the same source
+- **WHEN** a cleanup system job is already registered for a source
+- **AND** another user bound to the same source saves `cron_task_session_cleanup`
+- **THEN** the system SHALL update or resume the existing source cleanup system job
+- **AND** it SHALL NOT register a second cleanup system job for that source
 
 #### Scenario: Cleanup config is enabled from the current source config page
 - **WHEN** a manager saves the current source config with `cron_task_session_cleanup.enabled=true`
@@ -35,12 +41,14 @@ The system SHALL register scheduled task session cleanup with the external sched
 - **AND** it SHALL NOT create or update a business cron job in `jobs.json`
 
 #### Scenario: Cleanup callback dispatches
-- **WHEN** the internal scheduler callback receives the cleanup `task_type`
-- **THEN** it SHALL dispatch to the CronManager cleanup runner for the resolved runtime tenant and agent
+- **WHEN** the internal scheduler callback receives `task_type="cleanup"`
+- **THEN** it SHALL list all logical tenant ids bound to callback `source_id`
+- **AND** it SHALL resolve each logical tenant and `source_id` to that tenant's runtime scope
+- **AND** it SHALL dispatch to each resolved CronManager cleanup runner for the callback agent
 - **AND** it SHALL NOT require a business `job_id`
 
 ### Requirement: Cleanup prunes only filesystem task session history
-The cleanup runner SHALL prune filesystem task session history older than the configured retention window. It MUST NOT delete business cron jobs, task chats, chat/session bindings, cron execution records, monitor data, tracing data, token usage data, or other audit records.
+The cleanup runner SHALL prune filesystem task session history older than the configured retention window for every source-bound tenant scope selected by the cleanup callback. It MUST NOT delete business cron jobs, task chats, chat/session bindings, cron execution records, monitor data, tracing data, token usage data, or other audit records.
 
 #### Scenario: Expired task run history is pruned
 - **WHEN** a task session contains `task_runs` whose `ended_at` values are older than the retention cutoff
@@ -91,6 +99,7 @@ After pruning a task session, the system SHALL update only derived scheduled-tas
 - **WHEN** a task was paused before cleanup because of unread auto-pause
 - **THEN** cleanup SHALL NOT re-enable the task
 - **AND** the task MAY show zero unread executions while remaining paused
+- **AND** task list surfaces SHALL show the paused task as cleaned instead of displaying `0` unread executions
 
 ### Requirement: Cleanup coordinates with task session writes
 The cleanup runner and cron task session save path SHALL coordinate writes by task session id. Cleanup MUST NOT skip all history for a task solely because a run is currently active; it MAY skip a specific session when it cannot obtain the session write lock within the configured short timeout.

@@ -45,11 +45,13 @@ from .monitor_sync_client import get_monitor_sync_client, MonitorSyncClient
 HEARTBEAT_JOB_ID = "_heartbeat"
 DREAM_JOB_ID = "_dream"
 TASK_SESSION_CLEANUP_JOB_ID = "_cron_task_session_cleanup"
-TASK_SESSION_CLEANUP_TASK_TYPE = "cron_task_session_cleanup"
+TASK_SESSION_CLEANUP_TASK_TYPE = "cleanup"
 AUTO_PAUSE_REASON = "auto_unread_threshold"
 MANUAL_PAUSE_REASON = "manual"
 TASK_MESSAGES_STATE_KEY = "task_messages"
 _SYSTEM_JOB_IDS_FILE = "system_jobs.json"
+_SOURCE_SYSTEM_JOB_IDS_DIR = ".system_jobs"
+_SOURCE_SYSTEM_JOB_IDS_SOURCE_DIR = "sources"
 MAX_NOTIFICATION_DELAY_MINUTES = 7 * 24 * 60
 
 # 心跳 every 字段解析正则（如 "30m"、"6h"）
@@ -2670,13 +2672,69 @@ class CronManager:  # pylint: disable=too-many-public-methods
     def _system_job_ids_path(self) -> Path:
         return self._repo._path.parent / _SYSTEM_JOB_IDS_FILE
 
+    @staticmethod
+    def _encode_source_system_job_key(source_id: str) -> str:
+        encoded = base64.urlsafe_b64encode(source_id.encode("utf-8")).decode(
+            "ascii",
+        )
+        return encoded.rstrip("=")
+
+    def _system_job_ids_root(self) -> Path:
+        repo_dir = self._repo._path.parent
+        if not self._tenant_id:
+            return repo_dir
+
+        runtime_dir_names = {self._tenant_id}
+        try:
+            runtime_dir_names.add(canonicalize_scope_id(self._tenant_id))
+        except ValueError:
+            pass
+        if repo_dir.name in runtime_dir_names:
+            return repo_dir.parent
+        return repo_dir
+
+    def _source_system_job_ids_path(self, source_id: str) -> Path:
+        source_key = self._encode_source_system_job_key(source_id)
+        return (
+            self._system_job_ids_root()
+            / _SOURCE_SYSTEM_JOB_IDS_DIR
+            / _SOURCE_SYSTEM_JOB_IDS_SOURCE_DIR
+            / source_key
+            / _SYSTEM_JOB_IDS_FILE
+        )
+
+    @staticmethod
+    def _read_system_job_ids_file(path: Path) -> dict[str, str]:
+        try:
+            if not path.exists():
+                return {}
+            data = json.loads(path.read_text(encoding="utf-8"))
+            if not isinstance(data, dict):
+                return {}
+            return {
+                str(key): str(value)
+                for key, value in data.items()
+                if value is not None
+            }
+        except Exception:
+            logger.debug("Failed to load system_job_ids from %s", path)
+            return {}
+
+    @staticmethod
+    def _write_system_job_ids_file(
+        path: Path,
+        system_job_ids: dict[str, str],
+    ) -> None:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(
+            json.dumps(system_job_ids, ensure_ascii=False),
+            encoding="utf-8",
+        )
+
     def _load_system_job_ids(self) -> None:
         path = self._system_job_ids_path()
         try:
-            if path.exists():
-                self._system_job_ids = json.loads(
-                    path.read_text(encoding="utf-8"),
-                )
+            self._system_job_ids = self._read_system_job_ids_file(path)
         except Exception:
             logger.debug("Failed to load system_job_ids, resetting")
             self._system_job_ids = {}
@@ -2684,12 +2742,49 @@ class CronManager:  # pylint: disable=too-many-public-methods
     def _save_system_job_ids(self) -> None:
         path = self._system_job_ids_path()
         try:
-            path.write_text(
-                json.dumps(self._system_job_ids, ensure_ascii=False),
-                encoding="utf-8",
-            )
+            self._write_system_job_ids_file(path, self._system_job_ids)
         except Exception:
             logger.warning("Failed to save system_job_ids", exc_info=True)
+
+    def _get_task_session_cleanup_external_id(self, source_id: str) -> str:
+        job_id = TASK_SESSION_CLEANUP_JOB_ID
+        if not source_id:
+            return self._system_job_ids.get(job_id, "")
+
+        path = self._source_system_job_ids_path(source_id)
+        source_job_ids = self._read_system_job_ids_file(path)
+        ext_id = source_job_ids.get(job_id, "")
+        if ext_id:
+            return ext_id
+
+        legacy_ext_id = self._system_job_ids.get(job_id, "")
+        if legacy_ext_id:
+            source_job_ids[job_id] = legacy_ext_id
+            try:
+                self._write_system_job_ids_file(path, source_job_ids)
+            except Exception:
+                logger.warning(
+                    "Failed to migrate cleanup system job id to source scope",
+                    exc_info=True,
+                )
+            return legacy_ext_id
+        return ""
+
+    def _save_task_session_cleanup_external_id(
+        self,
+        source_id: str,
+        ext_id: str,
+    ) -> None:
+        job_id = TASK_SESSION_CLEANUP_JOB_ID
+        if not source_id:
+            self._system_job_ids[job_id] = ext_id
+            self._save_system_job_ids()
+            return
+
+        path = self._source_system_job_ids_path(source_id)
+        source_job_ids = self._read_system_job_ids_file(path)
+        source_job_ids[job_id] = ext_id
+        self._write_system_job_ids_file(path, source_job_ids)
 
     async def _restore_external_job_ids(self) -> None:
         """恢复 external_job_id，缺失的补注册到外部调度平台。"""
@@ -2993,7 +3088,8 @@ class CronManager:  # pylint: disable=too-many-public-methods
 
         config = await self._resolve_task_session_cleanup_config()
         job_id = TASK_SESSION_CLEANUP_JOB_ID
-        ext_id = self._system_job_ids.get(job_id, "")
+        tenant_id, source_id = self._get_external_scheduler_business_identity()
+        ext_id = self._get_task_session_cleanup_external_id(source_id)
 
         if not config.enabled:
             if ext_id:
@@ -3009,7 +3105,6 @@ class CronManager:  # pylint: disable=too-many-public-methods
         callback_url = self._build_callback_url(
             TASK_SESSION_CLEANUP_TASK_TYPE,
         )
-        tenant_id, source_id = self._get_external_scheduler_business_identity()
         try:
             if ext_id:
                 await self._scheduler_adapter.update_job(
@@ -3036,8 +3131,10 @@ class CronManager:  # pylint: disable=too-many-public-methods
                     callback_url=callback_url,
                 )
                 if ext_id:
-                    self._system_job_ids[job_id] = ext_id
-                    self._save_system_job_ids()
+                    self._save_task_session_cleanup_external_id(
+                        source_id,
+                        ext_id,
+                    )
         except Exception:
             logger.warning(
                 "Failed to register task session cleanup to external scheduler",

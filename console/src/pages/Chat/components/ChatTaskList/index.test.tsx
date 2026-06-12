@@ -202,6 +202,16 @@ describe("ChatTaskList actions", () => {
     expect(screen.getByText("暂停任务 selected")).toBeVisible();
   });
 
+  it("shows cleaned text for auto-paused tasks with cleared unread count", async () => {
+    const task = pausedTask("cleaned", 0, "auto_unread_threshold");
+    render(<ChatTaskList tasks={[task]} selectedTaskId={task.id} />);
+
+    await waitFor(() => {
+      expect(screen.getByText("已自动暂停 · 已清理")).toBeVisible();
+    });
+    expect(screen.queryByText("已自动暂停 · 连续 0 次未读")).toBeNull();
+  });
+
   it("keeps the group collapsed when an unselected task becomes paused", () => {
     const active = taskJob({ id: "changing", name: "状态变化任务" });
     const { rerender } = render(<ChatTaskList tasks={[active]} />);

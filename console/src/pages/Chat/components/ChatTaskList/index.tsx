@@ -5,6 +5,7 @@ import { TasksIconSmall } from "../ChatSidebar/CollapsedToolbar/icons";
 import {
   getTaskNextRunText,
   getTaskNextRunTooltipTimes,
+  getTaskPauseStatusText,
   getTaskSidebarMeta,
   partitionTasksByPauseState,
   TASK_COMPLETED_STATUS_TEXT,
@@ -82,6 +83,7 @@ export default function ChatTaskList(props: ChatTaskListProps) {
 
   const renderTask = (task: CronJobSpecOutput) => {
     const sidebarMeta = getTaskSidebarMeta(task);
+    const pauseStatusText = getTaskPauseStatusText(sidebarMeta);
     const nextRunText = getTaskNextRunText(task);
     const nextRunTooltipTimes = getTaskNextRunTooltipTimes(task);
 
@@ -134,7 +136,7 @@ export default function ChatTaskList(props: ChatTaskListProps) {
           )}
         </div>
 
-        {sidebarMeta.state !== "active" && sidebarMeta.state !== "running" && (
+        {pauseStatusText && (
           <div
             className={`chat-task-list-item-status ${
               sidebarMeta.state === "auto-paused"
@@ -142,9 +144,7 @@ export default function ChatTaskList(props: ChatTaskListProps) {
                 : "chat-task-list-item-status--manual"
             }`}
           >
-            {sidebarMeta.state === "auto-paused"
-              ? `已自动暂停 · 连续 ${sidebarMeta.unreadCount} 次未读`
-              : "已手动暂停"}
+            {pauseStatusText}
           </div>
         )}
         {(task.task?.latest_scheduled_preview ||

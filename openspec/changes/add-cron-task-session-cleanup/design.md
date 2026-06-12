@@ -12,6 +12,8 @@ Task session saves currently read existing state, append the current run memory 
 
 - Add a source-scoped scheduled task session cleanup policy that is disabled by default.
 - Run cleanup once per day through the external scheduler platform.
+- Keep at most one cleanup scheduler job per source when different users edit the same source config.
+- Apply each cleanup callback to all users bound to the callback source.
 - Delete only expired filesystem task session history.
 - Preserve business tasks, chat/session bindings, monitor records, tracing records, and execution audit data.
 - Keep cleanup safe around currently running tasks by serializing per-session writes.
@@ -46,7 +48,11 @@ Alternatives considered:
 
 ### Register cleanup as an external system job
 
-Cleanup registration extends the heartbeat/dream system-job pattern. The job id is stored in `system_jobs.json`, callback dispatch uses a new `task_type`, enabled config registers or updates the external system job, and disabled config pauses the external job instead of writing anything to business `jobs.json`.
+Cleanup registration extends the heartbeat/dream system-job pattern. The job id is stored in source-scoped system job id storage, callback dispatch uses `task_type="cleanup"`, enabled config registers or updates the external system job, and disabled config pauses the external job instead of writing anything to business `jobs.json`.
+
+The callback payload still carries `tenant_id` because the scheduler platform and existing callback contract include it, but cleanup does not use that field as the deletion boundary. For cleanup, `source_id` is the boundary: the internal callback lists all logical tenants bound to that source, resolves each tenant/source pair to its runtime scope, and invokes that tenant's CronManager cleanup runner.
+
+Heartbeat and dream continue to use the current manager's `system_jobs.json`. Cleanup uses source-level external job id storage so a second user saving the same source config can update the existing scheduler job instead of creating another one.
 
 Alternatives considered:
 

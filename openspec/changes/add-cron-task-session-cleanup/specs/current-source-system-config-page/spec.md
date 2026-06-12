@@ -5,7 +5,7 @@ The current source system config page SHALL expose controls for `cron_task_sessi
 
 #### Scenario: Page loads cleanup defaults
 - **WHEN** a manager opens the current source system config page for a source with no explicit cleanup config
-- **THEN** the page SHALL show scheduled task session cleanup enabled
+- **THEN** the page SHALL show scheduled task session cleanup disabled
 - **AND** it SHALL show retention days as `30`
 - **AND** it SHALL show daily run time as `01:00`
 
