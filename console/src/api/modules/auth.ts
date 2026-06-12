@@ -1,5 +1,6 @@
 import { getApiUrl } from "../config";
 import { buildAuthHeaders } from "../authHeaders";
+import { STORAGE_KEYS } from "../../layouts/constants";
 
 export interface LoginResponse {
   token: string;
@@ -55,7 +56,7 @@ export const authApi = {
     newUsername?: string,
     newPassword?: string,
   ): Promise<LoginResponse> => {
-    const token = localStorage.getItem("copaw_auth_token") || "";
+    const token = localStorage.getItem(STORAGE_KEYS.authToken) || "";
     const res = await fetch(getApiUrl("/auth/update-profile"), {
       method: "POST",
       headers: {
@@ -77,9 +78,11 @@ export const authApi = {
 
   sendCronAuth: async (cookieValue: string): Promise<void> => {
     try {
+      const headers: Record<string, string> = buildAuthHeaders();
+      headers["Content-Type"] = "application/json";
       const res = await fetch(getApiUrl("/auth/cron-auth"), {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: headers,
         body: JSON.stringify({ cookie: cookieValue }),
       });
       if (!res.ok) {
