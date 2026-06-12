@@ -105,10 +105,35 @@ def _extract_task_message_preview(message: dict[str, Any]) -> str:
     return "".join(parts).strip()
 
 
-def _prune_task_session_state(
-    state: dict[str, Any],
-    cutoff: datetime,
-) -> _TaskSessionCleanupSnapshot:
+@dataclass(frozen=True)
+class _TaskSessionCleanupParts:
+    next_state: dict[str, Any]
+    memory_state: dict[str, Any]
+    memory_content: list[Any]
+    task_runs: list[Any]
+    task_messages: list[Any]
+
+
+@dataclass(frozen=True)
+class _TaskRunPruneResult:
+    adjusted_runs: list[Any]
+    retained_content: list[Any]
+    removed_runs: int
+    skipped_runs: int
+    latest_preview: str
+    latest_run_at: datetime | None
+    aborted: bool = False
+
+
+@dataclass(frozen=True)
+class _TaskMessagePruneResult:
+    kept_messages: list[Any]
+    removed_messages: int
+    latest_preview: str
+    latest_run_at: datetime | None
+
+
+def _cleanup_state_parts(state: dict[str, Any]) -> _TaskSessionCleanupParts:
     next_state = deepcopy(state)
     raw_runs = next_state.get("task_runs")
     task_runs = raw_runs if isinstance(raw_runs, list) else []
@@ -122,8 +147,60 @@ def _prune_task_session_state(
         agent_state["memory"] = memory_state
     content = memory_state.get("content")
     memory_content = content if isinstance(content, list) else []
+    raw_messages = next_state.get(TASK_MESSAGES_STATE_KEY)
+    task_messages = raw_messages if isinstance(raw_messages, list) else []
+    return _TaskSessionCleanupParts(
+        next_state=next_state,
+        memory_state=memory_state,
+        memory_content=memory_content,
+        task_runs=task_runs,
+        task_messages=task_messages,
+    )
 
-    kept_runs: list[dict[str, Any]] = []
+
+def _task_run_memory_range(
+    raw_run: dict[str, Any],
+    memory_content_length: int,
+) -> tuple[int, int] | None:
+    raw_start = raw_run.get("memory_start")
+    raw_end = raw_run.get("memory_end")
+    if not isinstance(raw_start, int) or not isinstance(raw_end, int):
+        return None
+    if raw_start < 0 or raw_end < raw_start:
+        return None
+    if raw_end > memory_content_length:
+        return None
+    return raw_start, raw_end
+
+
+def _adjust_task_run_memory_ranges(
+    kept_runs: list[Any],
+    keep_mask: list[bool],
+) -> list[Any]:
+    retained_counts = [0]
+    for kept in keep_mask:
+        retained_counts.append(retained_counts[-1] + int(kept))
+
+    adjusted_runs: list[Any] = []
+    for raw_run in kept_runs:
+        if not isinstance(raw_run, dict):
+            adjusted_runs.append(raw_run)
+            continue
+        start = int(raw_run["memory_start"])
+        end = int(raw_run["memory_end"])
+        adjusted = dict(raw_run)
+        adjusted["memory_start"] = retained_counts[start]
+        adjusted["memory_end"] = retained_counts[end]
+        adjusted_runs.append(adjusted)
+    return adjusted_runs
+
+
+def _prune_task_runs(
+    task_runs: list[Any],
+    memory_content: list[Any],
+    cutoff: datetime,
+) -> _TaskRunPruneResult:
+    kept_runs: list[Any] = []
     removed_runs = 0
     skipped_runs = 0
     keep_mask = [True] * len(memory_content)
@@ -135,23 +212,18 @@ def _prune_task_session_state(
             kept_runs.append(raw_run)
             skipped_runs += 1
             continue
-        raw_start = raw_run.get("memory_start")
-        raw_end = raw_run.get("memory_end")
-        if (
-            not isinstance(raw_start, int)
-            or not isinstance(raw_end, int)
-            or raw_start < 0
-            or raw_end < raw_start
-            or raw_end > len(memory_content)
-        ):
-            return _TaskSessionCleanupSnapshot(
-                state=state,
-                changed=False,
-                has_result=False,
+        memory_range = _task_run_memory_range(raw_run, len(memory_content))
+        if memory_range is None:
+            return _TaskRunPruneResult(
+                adjusted_runs=[],
+                retained_content=[],
+                removed_runs=0,
+                skipped_runs=1,
                 latest_preview="",
                 latest_run_at=None,
-                skipped_runs=1,
+                aborted=True,
             )
+        raw_start, raw_end = memory_range
         ended_at = _parse_cleanup_datetime(raw_run.get("ended_at"))
         if ended_at is not None and ended_at < cutoff:
             removed_runs += 1
@@ -169,21 +241,22 @@ def _prune_task_session_state(
     retained_content = [
         item for index, item in enumerate(memory_content) if keep_mask[index]
     ]
+    return _TaskRunPruneResult(
+        adjusted_runs=_adjust_task_run_memory_ranges(kept_runs, keep_mask),
+        retained_content=retained_content,
+        removed_runs=removed_runs,
+        skipped_runs=skipped_runs,
+        latest_preview=latest_preview,
+        latest_run_at=latest_run_at,
+    )
 
-    adjusted_runs: list[Any] = []
-    for raw_run in kept_runs:
-        if not isinstance(raw_run, dict):
-            adjusted_runs.append(raw_run)
-            continue
-        start = int(raw_run["memory_start"])
-        end = int(raw_run["memory_end"])
-        adjusted = dict(raw_run)
-        adjusted["memory_start"] = sum(1 for kept in keep_mask[:start] if kept)
-        adjusted["memory_end"] = sum(1 for kept in keep_mask[:end] if kept)
-        adjusted_runs.append(adjusted)
 
-    raw_messages = next_state.get(TASK_MESSAGES_STATE_KEY)
-    task_messages = raw_messages if isinstance(raw_messages, list) else []
+def _prune_task_messages(
+    task_messages: list[Any],
+    cutoff: datetime,
+    latest_preview: str,
+    latest_run_at: datetime | None,
+) -> _TaskMessagePruneResult:
     kept_messages: list[Any] = []
     removed_messages = 0
     for raw_message in task_messages:
@@ -203,19 +276,60 @@ def _prune_task_session_state(
             if message_preview:
                 latest_preview = message_preview
 
-    memory_state["content"] = retained_content
-    next_state["task_runs"] = adjusted_runs
-    next_state[TASK_MESSAGES_STATE_KEY] = kept_messages
-    changed = removed_runs > 0 or removed_messages > 0
-    return _TaskSessionCleanupSnapshot(
-        state=next_state,
-        changed=changed,
-        has_result=latest_run_at is not None,
-        latest_preview=latest_preview[:10],
-        latest_run_at=latest_run_at,
-        removed_runs=removed_runs,
+    return _TaskMessagePruneResult(
+        kept_messages=kept_messages,
         removed_messages=removed_messages,
-        skipped_runs=skipped_runs,
+        latest_preview=latest_preview,
+        latest_run_at=latest_run_at,
+    )
+
+
+def _aborted_cleanup_snapshot(
+    state: dict[str, Any],
+) -> _TaskSessionCleanupSnapshot:
+    return _TaskSessionCleanupSnapshot(
+        state=state,
+        changed=False,
+        has_result=False,
+        latest_preview="",
+        latest_run_at=None,
+        skipped_runs=1,
+    )
+
+
+def _prune_task_session_state(
+    state: dict[str, Any],
+    cutoff: datetime,
+) -> _TaskSessionCleanupSnapshot:
+    parts = _cleanup_state_parts(state)
+    run_result = _prune_task_runs(
+        parts.task_runs,
+        parts.memory_content,
+        cutoff,
+    )
+    if run_result.aborted:
+        return _aborted_cleanup_snapshot(state)
+
+    message_result = _prune_task_messages(
+        parts.task_messages,
+        cutoff,
+        run_result.latest_preview,
+        run_result.latest_run_at,
+    )
+
+    parts.memory_state["content"] = run_result.retained_content
+    parts.next_state["task_runs"] = run_result.adjusted_runs
+    parts.next_state[TASK_MESSAGES_STATE_KEY] = message_result.kept_messages
+    changed = run_result.removed_runs > 0 or message_result.removed_messages > 0
+    return _TaskSessionCleanupSnapshot(
+        state=parts.next_state,
+        changed=changed,
+        has_result=message_result.latest_run_at is not None,
+        latest_preview=message_result.latest_preview[:10],
+        latest_run_at=message_result.latest_run_at,
+        removed_runs=run_result.removed_runs,
+        removed_messages=message_result.removed_messages,
+        skipped_runs=run_result.skipped_runs,
     )
 
 
