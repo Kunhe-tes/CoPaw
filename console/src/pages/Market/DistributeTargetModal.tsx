@@ -107,7 +107,7 @@ export function DistributeTargetModal({
             return `• ${r.tenant_id}${suffix}`;
           });
           const failureLines = failed.map(
-            (r) => `• ${r.tenant_id}: ${r.error || "分发失败"}`,
+            (r) => `• 用户${r.tenant_id}${r.error ? r.error.replace(/^用户已有/, "已有") : "分发失败"}`,
           );
           Modal.confirm({
             title: succeeded.length > 0 ? "部分租户分发失败" : "分发失败",

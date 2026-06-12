@@ -1134,7 +1134,9 @@ class TracingQueryService:
 
         # 构建 cron 子查询
         cron_subquery_sql, cron_params = self._build_cron_subquery(
-            source_id, start_date, end_date
+            source_id,
+            start_date,
+            end_date,
         )
 
         # 构建主查询
@@ -1171,7 +1173,7 @@ class TracingQueryService:
         if source_id == "all":
             exclude_placeholders = ", ".join(["%s"] * len(EXCLUDED_SOURCE_IDS))
             where_clauses.append(
-                f"t.source_id NOT IN ({exclude_placeholders})"
+                f"t.source_id NOT IN ({exclude_placeholders})",
             )
             params.extend(EXCLUDED_SOURCE_IDS)
         else:
@@ -1183,7 +1185,7 @@ class TracingQueryService:
         params.append("default")
         if filter_user_type == "filtered":
             where_clauses.append(
-                "(t.user_id NOT LIKE %s AND t.user_id NOT LIKE %s)"
+                "(t.user_id NOT LIKE %s AND t.user_id NOT LIKE %s)",
             )
             params.extend(["80%%", "IT%%"])
 
@@ -1194,7 +1196,7 @@ class TracingQueryService:
         if bbk_ids:
             bbk_filter_sql, bbk_params = build_bbk_in_filter(bbk_ids)
             where_clauses.append(
-                f"t.bbk_id IN ({', '.join(['%s'] * len(bbk_params))})"
+                f"t.bbk_id IN ({', '.join(['%s'] * len(bbk_params))})",
             )
             params.extend(bbk_params)
 
@@ -1260,12 +1262,8 @@ class TracingQueryService:
                        (SELECT COUNT(*) FROM swe_tracing_spans s
                         WHERE s.trace_id IN (SELECT trace_id FROM swe_tracing_traces WHERE user_id = t.user_id)
                         AND s.event_type = 'skill_invocation') as total_skills,
-                       (SELECT user_name FROM swe_tracing_traces t2
-                        WHERE t2.user_id = t.user_id AND t2.user_name IS NOT NULL
-                        ORDER BY t2.start_time DESC LIMIT 1) as user_name,
-                       (SELECT bbk_id FROM swe_tracing_traces t3
-                        WHERE t3.user_id = t.user_id AND t3.bbk_id IS NOT NULL
-                        ORDER BY t3.start_time DESC LIMIT 1) as bbk_id,
+                       MAX(t.user_name) as user_name,
+                       MAX(t.bbk_id) as bbk_id,
                        COALESCE(MAX(ce.cron_reads), 0) as cron_reads
                 FROM swe_tracing_traces t
                 LEFT JOIN (
@@ -1296,12 +1294,8 @@ class TracingQueryService:
                         WHERE s.source_id = %s
                         AND s.trace_id IN (SELECT trace_id FROM swe_tracing_traces WHERE user_id = t.user_id AND source_id = %s)
                         AND s.event_type = 'skill_invocation') as total_skills,
-                       (SELECT user_name FROM swe_tracing_traces t2
-                        WHERE t2.user_id = t.user_id AND t2.source_id = %s AND t2.user_name IS NOT NULL
-                        ORDER BY t2.start_time DESC LIMIT 1) as user_name,
-                       (SELECT bbk_id FROM swe_tracing_traces t3
-                        WHERE t3.user_id = t.user_id AND t3.source_id = %s AND t3.bbk_id IS NOT NULL
-                        ORDER BY t3.start_time DESC LIMIT 1) as bbk_id,
+                       MAX(t.user_name) as user_name,
+                       MAX(t.bbk_id) as bbk_id,
                        COALESCE(MAX(ce.cron_reads), 0) as cron_reads
                 FROM swe_tracing_traces t
                 LEFT JOIN (
@@ -1319,7 +1313,7 @@ class TracingQueryService:
                 LIMIT %s OFFSET %s
             """
             final_params = (
-                [source_id, source_id, source_id, source_id]
+                [source_id, source_id]
                 + cron_params
                 + params
                 + [page_size, offset]
@@ -2128,7 +2122,6 @@ class TracingQueryService:
             exclude_placeholders = ", ".join(["%s"] * len(EXCLUDED_SOURCE_IDS))
             base_where = f"""
                 start_time >= %s AND start_time <= %s
-                AND event_type = 'skill_invocation'
                 AND skill_name IS NOT NULL
                 AND source_id NOT IN ({exclude_placeholders})
                 AND user_id != 'default'{bbk_filter_sql}
@@ -2142,7 +2135,6 @@ class TracingQueryService:
         else:
             base_where = f"""
                 source_id = %s AND start_time >= %s AND start_time <= %s
-                AND event_type = 'skill_invocation'
                 AND skill_name IS NOT NULL
                 AND user_id != 'default'{bbk_filter_sql}
             """

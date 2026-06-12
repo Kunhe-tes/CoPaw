@@ -12,5 +12,4 @@ window.__env__ = {
   systemCode: '',
   systemSect: '',
   responseFeedbackUserWhitelist: ["*"], // 回答反馈卡片白名单，"*"表示全员开放
-  enableOriginYTaskTabs: true, // 是否开启原始任务标签页
 };

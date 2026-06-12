@@ -329,7 +329,7 @@
 .panelLarge,
 .panelMedium {
   min-height: 290px;
-  padding: 18px 20px;
+  padding: 18px 16px;
 }
 
 .panelHeader {
@@ -430,22 +430,29 @@
   display: grid;
   grid-template-columns: 28px minmax(0, 1fr) 28px;
   align-items: stretch;
-  gap: 12px;
+  gap: 0px;
 }
 
-.axisLeft,
+.axisLeft {
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between;
+  padding: 10px 0 32px;
+  color: #94a3b8;
+  font-size: 12px;
+  line-height: 1;
+  text-align: right;
+}
+
 .axisRight {
   display: flex;
   flex-direction: column;
   justify-content: space-between;
-  padding: 14px 0 20px;
+  padding: 10px 0 32px;
   color: #94a3b8;
   font-size: 12px;
   line-height: 1;
-}
-
-.axisRight {
-  text-align: right;
+  text-align: left;
 }
 
 .trendPlotArea {
@@ -466,7 +473,7 @@
 
 .axisLabel {
   fill: #64748b;
-  font-size: 12px;
+  font-size: 10px;
   text-anchor: middle;
 }
 
@@ -573,6 +580,20 @@
   text-align: right;
 }
 
+.skillRankHeader {
+  display: grid;
+  grid-template-columns: 36px minmax(0, 1fr) 80px;
+  gap: 8px;
+  padding: 2px 0 10px;
+  color: #64748b;
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.skillRankHeader span:last-child {
+  text-align: right;
+}
+
 .rankList {
   display: flex;
   flex-direction: column;
@@ -645,6 +666,31 @@
 }
 
 .rankCalls {
+  color: #111827;
+  font-size: 14px;
+  font-weight: 700;
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+
+.skillRankRow {
+  display: grid;
+  grid-template-columns: 36px minmax(0, 1fr) 80px;
+  gap: 8px;
+  align-items: center;
+  padding: 10px 0;
+  border: 0;
+  border-bottom: 1px solid #eef2f7;
+  background: transparent;
+  cursor: pointer;
+  text-align: left;
+}
+
+.skillRankRow:last-child {
+  border-bottom: 0;
+}
+
+.skillRankCalls {
   color: #111827;
   font-size: 14px;
   font-weight: 700;

@@ -10,6 +10,11 @@ export interface TaskSidebarMeta {
   canDelete: boolean;
 }
 
+export interface TaskGroups {
+  runnableTasks: CronJobSpecOutput[];
+  pausedTasks: CronJobSpecOutput[];
+}
+
 const AUTO_PAUSE_REASON = "auto_unread_threshold";
 export const TASK_COMPLETED_STATUS_TEXT = "已完成";
 
@@ -67,6 +72,23 @@ export function getTaskSidebarMeta(job: CronJobSpecOutput): TaskSidebarMeta {
     canResume: false,
     canDelete: true,
   };
+}
+
+export function partitionTasksByPauseState(
+  jobs: CronJobSpecOutput[],
+): TaskGroups {
+  return jobs.reduce<TaskGroups>(
+    (groups, job) => {
+      const state = getTaskSidebarMeta(job).state;
+      if (state === "auto-paused" || state === "manual-paused") {
+        groups.pausedTasks.push(job);
+      } else {
+        groups.runnableTasks.push(job);
+      }
+      return groups;
+    },
+    { runnableTasks: [], pausedTasks: [] },
+  );
 }
 
 export function shouldMarkTaskReadOnOpen(job: CronJobSpecOutput): boolean {

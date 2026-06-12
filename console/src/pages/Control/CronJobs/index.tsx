@@ -1,6 +1,7 @@
 import { useState, useEffect, useRef } from "react";
 import { Button, Card, Form, Modal, Table } from "@agentscope-ai/design";
 import type {
+  CronBroadcastTarget,
   CronBroadcastTenantResult,
   CronJobSpecOutput,
 } from "../../../api/types";
@@ -46,6 +47,9 @@ function CronJobsPage() {
   const [broadcastingJob, setBroadcastingJob] = useState<CronJob | null>(null);
   const [selectedBroadcastTenantIds, setSelectedBroadcastTenantIds] = useState<
     string[]
+  >([]);
+  const [selectedBroadcastTargets, setSelectedBroadcastTargets] = useState<
+    CronBroadcastTarget[]
   >([]);
   const [broadcastResults, setBroadcastResults] = useState<
     CronBroadcastTenantResult[]
@@ -123,23 +127,36 @@ function CronJobsPage() {
   const handleBroadcast = (job: CronJob) => {
     setBroadcastingJob(job);
     setSelectedBroadcastTenantIds([]);
+    setSelectedBroadcastTargets([]);
     setBroadcastResults([]);
   };
 
   const handleBroadcastCancel = () => {
     setBroadcastingJob(null);
     setSelectedBroadcastTenantIds([]);
+    setSelectedBroadcastTargets([]);
     setBroadcastResults([]);
   };
 
   const handleBroadcastConfirm = async () => {
     if (!broadcastingJob) return;
     const targetTenantIds = Array.from(new Set(selectedBroadcastTenantIds));
+    const targetByTenantId = new Map(
+      selectedBroadcastTargets.map((target) => [target.tenant_id, target]),
+    );
+    const targets = targetTenantIds.map((tenantId) => {
+      const target = targetByTenantId.get(tenantId);
+      return {
+        tenant_id: tenantId,
+        tenant_name: target?.tenant_name ?? null,
+        bbk_id: target?.bbk_id ?? null,
+      };
+    });
     setBroadcasting(true);
     try {
       const res = await api.broadcastCronJob(
         broadcastingJob.id,
-        targetTenantIds,
+        targets,
       );
       const resultMessage = getBroadcastResultMessage(res.results);
       if (resultMessage.tone === "warning") {
@@ -256,6 +273,7 @@ function CronJobsPage() {
             <TenantSelector
               selectedTenantIds={selectedBroadcastTenantIds}
               onChange={setSelectedBroadcastTenantIds}
+              onSelectionInfoChange={setSelectedBroadcastTargets}
               hint="选择需要接收该定时任务的租户"
               excludeTenantId={currentTenantId}
             />

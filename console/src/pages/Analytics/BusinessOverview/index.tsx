@@ -591,10 +591,10 @@ function buildTrendAxisTicks(axisMax: number): TrendAxisTick[] {
 export function buildTrendSvgData(trendData: TrendDatum[]) {
   const width = 428;
   const height = 244;
-  const chartLeft = 34;
-  const chartRight = 34;
-  const chartTop = 18;
-  const chartBottom = 34;
+  const chartLeft = 20;
+  const chartRight = 20;
+  const chartTop = 10;
+  const chartBottom = 32;
   const chartWidth = width - chartLeft - chartRight;
   const chartHeight = height - chartTop - chartBottom;
   const rawMaxCalls = Math.max(
@@ -1162,6 +1162,17 @@ export default function BusinessOverviewPage() {
                 </Tooltip>
               )}
               allowClear
+              showSearch
+              filterOption={(input, option) => {
+                const searchValue = input.toLowerCase();
+                const optionValue = String(option?.value ?? "");
+                const optionLabel = BBK_ID_TO_NAME_MAP[optionValue] || "";
+                // 支持按分行号或分行名搜索
+                return (
+                  optionValue.toLowerCase().includes(searchValue) ||
+                  optionLabel.toLowerCase().includes(searchValue)
+                );
+              }}
             >
               {BBK_ID_MAP.map((item) => (
                 <Option key={item.value} value={item.value}>
@@ -1298,6 +1309,7 @@ export default function BusinessOverviewPage() {
               <svg
                 viewBox={`0 0 ${trendSvg.width} ${trendSvg.height}`}
                 className={styles.trendSvg}
+                preserveAspectRatio="none"
               >
                 <defs>
                   <linearGradient
@@ -1312,8 +1324,8 @@ export default function BusinessOverviewPage() {
                   </linearGradient>
                 </defs>
 
-                {[0, 1, 2, 3, 4].map((row) => {
-                  const y = trendSvg.chartTop + (trendSvg.chartHeight / 4) * row;
+                {[0, 1, 2, 3, 4, 5].map((row) => {
+                  const y = trendSvg.chartTop + (trendSvg.chartHeight / 5) * row;
                   return (
                     <line
                       key={`grid-${row}`}
@@ -1352,7 +1364,7 @@ export default function BusinessOverviewPage() {
                       }
                     />
                     {bar.showLabel && (
-                      <text x={bar.x + bar.width / 2} y={233} className={styles.axisLabel}>
+                      <text x={bar.x + bar.width / 2} y={trendSvg.height - trendSvg.chartBottom + 22} className={styles.axisLabel}>
                         {bar.label}
                       </text>
                     )}
@@ -1639,6 +1651,11 @@ export default function BusinessOverviewPage() {
           <div className={styles.panelHeader}>
             <h3 className={styles.panelTitle}>技能使用排行榜</h3>
           </div>
+          <div className={styles.skillRankHeader}>
+            <span>排名</span>
+            <span>技能</span>
+            <span>调用次数</span>
+          </div>
           <div className={styles.rankList} onScroll={handleSkillsScroll}>
             {skillsLoading && skills.length === 0 ? (
               <div className={styles.listFootnote}>加载中...</div>
@@ -1661,7 +1678,7 @@ export default function BusinessOverviewPage() {
                   <button
                     key={`${skill.skill_name}-${rank}`}
                     type="button"
-                    className={styles.rankRow}
+                    className={styles.skillRankRow}
                     onClick={() => {
                       setSelectedSkillName(skill.skill_name);
                       setSkillModalOpen(true);
@@ -1690,7 +1707,7 @@ export default function BusinessOverviewPage() {
                         {truncateName(skill.skill_name, 20)}
                       </span>
                     </Tooltip>
-                    <span className={styles.rankCalls}>
+                    <span className={styles.skillRankCalls}>
                       {formatNumber(skill.count)}
                     </span>
                   </button>

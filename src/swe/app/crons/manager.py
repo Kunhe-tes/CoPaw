@@ -2060,6 +2060,10 @@ class CronManager:  # pylint: disable=too-many-public-methods
                     "cron_execution_meta",
                     execution_meta,
                 )
+                # 从异常获取 trace_id（executor 在失败时附加到异常上）
+                exc_trace_id = getattr(exc, "cron_trace_id", None)
+                if exc_trace_id and not trace_id:
+                    trace_id = exc_trace_id
                 # 检查任务是否实际执行成功
                 # CancelledError 可能是在 finally 块中（trace 结束时）抛出的
                 # 如果任务已执行成功，应该记录为 success 而非 cancelled
@@ -2088,6 +2092,10 @@ class CronManager:  # pylint: disable=too-many-public-methods
                     "cron_execution_meta",
                     execution_meta,
                 )
+                # 从异常获取 trace_id（executor 在失败时附加到异常上）
+                exc_trace_id = getattr(e, "cron_trace_id", None)
+                if exc_trace_id and not trace_id:
+                    trace_id = exc_trace_id
                 exec_status, error_message, end_time, duration_ms = (
                     self._handle_execution_error(st, actual_time, e)
                 )

@@ -58,6 +58,7 @@ function haveSameTenantIds(left: string[], right: string[]): boolean {
 export function TenantSelector({
   selectedTenantIds,
   onChange,
+  onSelectionInfoChange,
   hint,
   excludeTenantId,
   onLoadError,
@@ -155,14 +156,35 @@ export function TenantSelector({
     return parsedExtraTenantIds.filter((id) => !availableTenantIds.includes(id));
   }, [parsedExtraTenantIds, availableTenantIds]);
 
+  // 额外ID中，已在列表中的部分（需要自动选中卡片）
+  const inListExtraTenantIds = useMemo(() => {
+    return parsedExtraTenantIds.filter((id) => availableTenantIds.includes(id));
+  }, [parsedExtraTenantIds, availableTenantIds]);
+
+  // 实际的卡片选中列表（手动选中 + 额外输入中已存在于列表的自动选中）
+  const effectiveInListTenantIds = useMemo(() => {
+    return Array.from(new Set([...selectedInListTenantIds, ...inListExtraTenantIds]));
+  }, [selectedInListTenantIds, inListExtraTenantIds]);
+
   // 最终合并的用户 ID 列表
   const mergedTenantIds = useMemo(() => {
     if (targetMode === "bbk_id") {
       return filteredTenantIds;
     }
-    // 用户模式：卡片选中的 + 额外输入的
-    return Array.from(new Set([...selectedInListTenantIds, ...extraTenantIds]));
-  }, [targetMode, filteredTenantIds, selectedInListTenantIds, extraTenantIds]);
+    // 用户模式：卡片选中的 + 额外输入的（额外输入中已在列表的通过 effectiveInListTenantIds 合并）
+    return Array.from(new Set([...effectiveInListTenantIds, ...extraTenantIds]));
+  }, [targetMode, filteredTenantIds, effectiveInListTenantIds, extraTenantIds]);
+
+  const selectedTenantInfos = useMemo(() => {
+    return mergedTenantIds.map(
+      (tenantId) =>
+        tenantLookup.get(tenantId) ?? {
+          tenant_id: tenantId,
+          tenant_name: null,
+          bbk_id: null,
+        },
+    );
+  }, [mergedTenantIds, tenantLookup]);
 
   // 按机构分组的用户列表（用于展示具体用户）
   const groupedTenants = useMemo(() => {
@@ -233,6 +255,10 @@ export function TenantSelector({
     }
   }, [targetMode, filteredTenantIds, mergedTenantIds, onChange]);
 
+  useEffect(() => {
+    onSelectionInfoChange?.(selectedTenantInfos);
+  }, [onSelectionInfoChange, selectedTenantInfos]);
+
   // 切换模式时清空选择
   const handleModeChange = useCallback((mode: "bbk_id" | "user_id") => {
     setTargetMode(mode);
@@ -263,9 +289,12 @@ export function TenantSelector({
   );
 
   // 移除已选租户（使用函数式更新）
+  // 同时清除手动选中和额外输入中的该ID
   const handleRemoveSelected = useCallback(
     (tenantId: string) => {
+      // 从手动选中列表移除
       setSelectedInListTenantIds((prev) => prev.filter((id) => id !== tenantId));
+      // 从额外输入文本中移除
       setExtraTenantIdsText((prev) => {
         const ids = parseManualTenantIds(prev).filter((id) => id !== tenantId);
         return ids.join("\n");
@@ -415,7 +444,7 @@ export function TenantSelector({
                     })}
                   </span>
                   <div className={styles.tagList}>
-                    {[...selectedInListTenantIds, ...extraTenantIds].map((tenantId) => {
+                    {[...effectiveInListTenantIds, ...extraTenantIds].map((tenantId) => {
                       const isInList = availableTenantIds.includes(tenantId);
                       const displayName = isInList
                         ? renderTenantName(tenantId)
@@ -442,7 +471,7 @@ export function TenantSelector({
               {/* 用户卡片网格 */}
               <div className={styles.userGrid}>
                 {displayedTenantIds.map((tenantId) => {
-                  const selected = selectedInListTenantIds.includes(tenantId);
+                  const selected = effectiveInListTenantIds.includes(tenantId);
                   return (
                     <button
                       key={tenantId}

@@ -3,9 +3,6 @@
 
 from __future__ import annotations
 
-from .provider import ModelInfo, Provider, ProviderInfo
-from .provider_manager import ProviderManager, ActiveModelsInfo
-
 __all__ = [
     "ActiveModelsInfo",
     "ModelInfo",
@@ -16,7 +13,10 @@ __all__ = [
 
 
 def __getattr__(name: str):
-    if name in {"ProviderManager", "ActiveModelsInfo"}:
+    if name in {
+        "ProviderManager",
+        "ActiveModelsInfo",
+    }:
         from .provider_manager import (
             ActiveModelsInfo as _ActiveModelsInfo,
             ProviderManager as _ProviderManager,
@@ -25,6 +25,19 @@ def __getattr__(name: str):
         exports = {
             "ProviderManager": _ProviderManager,
             "ActiveModelsInfo": _ActiveModelsInfo,
+        }
+        return exports[name]
+    if name in {"ModelInfo", "Provider", "ProviderInfo"}:
+        from .provider import (
+            ModelInfo as _ModelInfo,
+            Provider as _Provider,
+            ProviderInfo as _ProviderInfo,
+        )
+
+        exports = {
+            "ModelInfo": _ModelInfo,
+            "Provider": _Provider,
+            "ProviderInfo": _ProviderInfo,
         }
         return exports[name]
     raise AttributeError(name)

@@ -43,6 +43,7 @@ from .session import (
 from .stream_boundary import normalize_reasoning_boundary_stream
 from .task_progress import attach_task_progress
 from .utils import build_env_context
+from ..identity_resolver import resolve_user_identity
 from ..channels.schema import DEFAULT_CHANNEL
 from ...agents.react_agent import SWEAgent
 from ...agents.skill_invocation_detector import SkillInvocationDetector
@@ -1676,14 +1677,21 @@ class AgentRunner(Runner):
                 return None
             # 检查是否已有外部传入的 trace_id
             existing_trace_id = getattr(request, "trace_id", None)
+            resolved_identity = await resolve_user_identity(
+                tenant_id=getattr(request, "user_id", None),
+                source_id=_request_source_id(request),
+                user_name=_request_user_name(request),
+                bbk_id=_request_bbk_id(request),
+                allow_remote_lookup=False,
+            )
             trace_id = await trace_mgr.start_trace(
                 user_id=getattr(request, "user_id", "") or "",
                 session_id=getattr(request, "session_id", "") or "",
                 channel=getattr(request, "channel", DEFAULT_CHANNEL),
                 source_id=_request_source_id(request),
                 user_message=_get_last_user_text(msgs),
-                user_name=_request_user_name(request),
-                bbk_id=_request_bbk_id(request),
+                user_name=resolved_identity.user_name,
+                bbk_id=resolved_identity.bbk_id,
                 session_name=_session_name_from_messages(msgs),
                 trace_id=existing_trace_id,  # 使用传入的 trace_id 或 None
                 attach_existing=existing_trace_id
@@ -2089,6 +2097,64 @@ class AgentRunner(Runner):
             runtime.agent._request_context = {}
         runtime.agent._request_context["_skill_invocation_detector"] = (
             runtime.session_skill_detector
+        )
+
+        trace_id = getattr(request, "trace_id", None)
+        if trace_id and has_trace_manager():
+            try:
+                trace_mgr = get_trace_manager()
+                runtime.session_skill_detector.set_tracing_context(
+                    trace_mgr,
+                    trace_id,
+                    runtime.user_id,
+                    runtime.session_id,
+                    runtime.channel,
+                    source_id_for_hooks,
+                )
+                from ...tracing import get_current_trace
+
+                trace_ctx = get_current_trace()
+                if trace_ctx and trace_ctx.trace_id == trace_id:
+                    trace_ctx.set_skill_detector(
+                        runtime.session_skill_detector,
+                        (
+                            runtime.agent.get_effective_skills()
+                            if hasattr(runtime.agent, "get_effective_skills")
+                            else []
+                        ),
+                    )
+            except Exception:
+                logger.warning(
+                    "Failed to attach tracing context to session skill detector",
+                    exc_info=True,
+                )
+
+    def _rebind_trace_skill_detector_if_needed(
+        self,
+        *,
+        runtime: _QueryRuntime,
+        trace_id: str | None,
+    ) -> None:
+        """确保 trace context 与会话级 detector 收敛到同一实例。"""
+        if trace_id is None or runtime.session_skill_detector is None:
+            return
+
+        from ...tracing import get_current_trace
+
+        trace_ctx = get_current_trace()
+        if trace_ctx is None or trace_ctx.trace_id != trace_id:
+            return
+        if trace_ctx.skill_detector is runtime.session_skill_detector:
+            return
+
+        enabled_skills = (
+            runtime.agent.get_effective_skills()
+            if hasattr(runtime.agent, "get_effective_skills")
+            else []
+        )
+        trace_ctx.set_skill_detector(
+            runtime.session_skill_detector,
+            enabled_skills,
         )
 
     async def _refresh_session_skill_freshness(
@@ -2627,12 +2693,15 @@ class AgentRunner(Runner):
         from ...tracing import get_current_trace
 
         ctx = get_current_trace()
-        if ctx and ctx.attached:
+        if ctx and ctx.attached and ctx.trace_id == trace_id:
             logger.debug(
                 "Skip ending attached trace (owned by external): trace_id=%s",
                 trace_id[:20] if trace_id else "(empty)",
             )
-            # 清除 context，让外部创建者可以正确结束
+            from ...tracing import set_current_trace
+
+            # 清除 context，让后续请求不会继承外部 trace。
+            set_current_trace(None)
             return
 
         try:
@@ -3270,7 +3339,11 @@ class AgentRunner(Runner):
             attempt_state.should_return = True
             return
 
-        if attempt_input.trace_id:
+        self._rebind_trace_skill_detector_if_needed(
+            runtime=runtime,
+            trace_id=attempt_input.trace_id,
+        )
+        if attempt_input.trace_id and runtime.session_skill_detector is None:
             await runtime.agent.setup_skill_detector(attempt_input.trace_id)
 
         logger.debug(f"Agent Query msgs {attempt_input.msgs}")

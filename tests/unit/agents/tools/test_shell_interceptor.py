@@ -36,6 +36,21 @@ def test_intercept_swe_cron_create_injects_source_and_user_fields():
     assert "--creator-user user-a" in command
 
 
+def test_intercept_swe_cron_list_does_not_inject_create_only_user_fields():
+    with tenant_context(
+        tenant_id="tenant-a",
+        user_id="user-a",
+        source_id="source-a",
+    ):
+        command, intercepted = intercept_command("swe cron list")
+
+    assert intercepted is True
+    assert "--tenant-id tenant-a" in command
+    assert "--source-id source-a" in command
+    assert "--target-user" not in command
+    assert "--creator-user" not in command
+
+
 def test_intercept_swe_cron_keeps_explicit_source_id():
     with tenant_context(
         tenant_id="tenant-a",
@@ -49,3 +64,32 @@ def test_intercept_swe_cron_keeps_explicit_source_id():
     assert intercepted is True
     assert command.count("--source-id") == 1
     assert "--source-id explicit-source" in command
+
+
+def test_intercept_swe_cron_after_shell_and_operator():
+    with tenant_context(
+        tenant_id="tenant-a",
+        user_id="user-a",
+        source_id="source-a",
+    ):
+        command, intercepted = intercept_command("echo ready && swe cron list")
+
+    assert intercepted is True
+    assert command == (
+        "echo ready && swe cron list "
+        "--tenant-id tenant-a --source-id source-a"
+    )
+
+
+def test_intercept_swe_cron_before_shell_and_operator():
+    with tenant_context(
+        tenant_id="tenant-a",
+        user_id="user-a",
+        source_id="source-a",
+    ):
+        command, intercepted = intercept_command("swe cron list && echo done")
+
+    assert intercepted is True
+    assert command == (
+        "swe cron list --tenant-id tenant-a --source-id source-a && echo done"
+    )

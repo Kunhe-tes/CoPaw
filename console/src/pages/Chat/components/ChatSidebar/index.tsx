@@ -3,10 +3,8 @@ import { flushSync } from "react-dom";
 import { useNavigate, useLocation } from "react-router-dom";
 import { Image, Modal } from "antd";
 import { useContextSelector } from "use-context-selector";
-import { useVirtualizer } from "@tanstack/react-virtual";
 import useChatAnywhereEventEmitter from "@/components/agentscope-chat/AgentScopeRuntimeWebUI/core/Context/useChatAnywhereEventEmitter";
 import Style from "./style";
-import ChatTaskEntry from "../ChatTaskEntry";
 import ChatTaskList from "../ChatTaskList";
 import type { CronJobSpecOutput } from "@/api/types";
 import { DESIGN_TOKENS } from "@/config/designTokens";
@@ -24,6 +22,8 @@ import { getSessionAgentId } from "../../sessionApi/sessionAgent";
 import { resolveRequestedSessionId } from "../../sessionApi/resolvedSessionMapping";
 import { HistorySessionRow } from "./HistorySessionRow";
 import { HistorySkeleton } from "./HistorySkeleton";
+import { HistoryInfiniteScrollTrigger } from "./HistoryInfiniteScrollTrigger";
+import { mergeConcurrentSessions } from "./mergeConcurrentSessions";
 
 /** Extended session type with additional backend fields */
 interface ExtendedHistorySession extends HistorySession {
@@ -76,11 +76,7 @@ function ToggleIcon({ collapsed }: { collapsed: boolean }) {
 export interface ChatSidebarProps {
   tasks: CronJobSpecOutput[];
   selectedTaskId?: string;
-  enableTaskTabs?: boolean;
-  taskTabsOpen?: boolean;
   onCreateSession?: () => void;
-  onTaskTabsToggle?: () => void;
-  onTaskTabsClose?: () => void;
   onTaskClick?: (task: CronJobSpecOutput) => void;
   onTaskPause?: (task: CronJobSpecOutput) => void;
   onTaskRun?: (task: CronJobSpecOutput) => void;
@@ -92,11 +88,7 @@ export default function ChatSidebar(props: ChatSidebarProps) {
   const {
     tasks,
     selectedTaskId,
-    enableTaskTabs = false,
-    taskTabsOpen = false,
     onCreateSession,
-    onTaskTabsToggle,
-    onTaskTabsClose,
     onTaskClick,
     onTaskPause,
     onTaskRun,
@@ -106,9 +98,12 @@ export default function ChatSidebar(props: ChatSidebarProps) {
   const navigate = useNavigate();
   const location = useLocation();
   const [historyCollapsed, setHistoryCollapsed] = useState(false);
+  const [isLoadingMoreHistory, setIsLoadingMoreHistory] = useState(false);
+  const [loadMoreHistoryFailed, setLoadMoreHistoryFailed] = useState(false);
   const [collapsed, setCollapsed] = useState(false);
   const [activePanel, setActivePanel] = useState<PanelType>(null);
   const toolbarRef = useRef<HTMLDivElement>(null);
+  const historyScrollContainerRef = useRef<HTMLDivElement>(null);
   // Guide image preview state
   const [guidePreviewVisible, setGuidePreviewVisible] = useState(false);
   // const { sessions: sharedSessions, setSessionLoading, setSessions } = useChatAnywhereSessionsState();
@@ -124,6 +119,10 @@ export default function ChatSidebar(props: ChatSidebarProps) {
     ChatAnywhereSessionsContext,
     (value) => value.setSessions,
   );
+  const getSessions = useContextSelector(
+    ChatAnywhereSessionsContext,
+    (value) => value.getSessions,
+  );
   const isSessionsListLoading = useContextSelector(
     ChatAnywhereSessionsContext,
     (value) => value.isSessionsListLoading,
@@ -138,11 +137,26 @@ export default function ChatSidebar(props: ChatSidebarProps) {
   const refreshSessions = useCallback(async () => {
     try {
       const sessionList = await sessionApi.getSessionList();
-      setSessions(sessionList);
+      setSessions(mergeConcurrentSessions(sessionList, getSessions(), false));
+      setLoadMoreHistoryFailed(false);
     } catch {
       // ignore
     }
-  }, [setSessions]);
+  }, [getSessions, setSessions]);
+
+  const loadMoreSessions = useCallback(async () => {
+    if (isLoadingMoreHistory || !sessionApi.hasMoreSessions()) return;
+    setIsLoadingMoreHistory(true);
+    setLoadMoreHistoryFailed(false);
+    try {
+      const sessionList = await sessionApi.loadMoreSessions();
+      setSessions(mergeConcurrentSessions(sessionList, getSessions(), true));
+    } catch {
+      setLoadMoreHistoryFailed(true);
+    } finally {
+      setIsLoadingMoreHistory(false);
+    }
+  }, [getSessions, isLoadingMoreHistory, setSessions]);
 
   // 监听 visibilitychange 刷新 sessions
   useEffect(() => {
@@ -184,15 +198,7 @@ export default function ChatSidebar(props: ChatSidebarProps) {
   }, [sharedSessions]);
   const sessionsRef = useRef(sessions);
   sessionsRef.current = sessions;
-
-  // Virtual scrolling setup for history list
-  const historyListRef = useRef<HTMLDivElement>(null);
-  const rowVirtualizer = useVirtualizer({
-    count: sessions.length,
-    getScrollElement: () => historyListRef.current,
-    estimateSize: () => 52,
-    overscan: 5,
-  });
+  const historyTotal = Math.max(sessionApi.getSessionTotal(), sessions.length);
 
   const handleToggleHistory = useCallback(() => {
     setHistoryCollapsed((prev) => !prev);
@@ -235,15 +241,9 @@ export default function ChatSidebar(props: ChatSidebarProps) {
   }, [onCreateSession]);
 
   const handleToggleCollapse = useCallback(() => {
-    setCollapsed((prev) => {
-      const nextCollapsed = !prev;
-      if (nextCollapsed && enableTaskTabs) {
-        onTaskTabsClose?.();
-      }
-      return nextCollapsed;
-    });
+    setCollapsed((prev) => !prev);
     setActivePanel(null);
-  }, [enableTaskTabs, onTaskTabsClose]);
+  }, []);
 
   const handleNewChat = useCallback(() => {
     setActivePanel(null);
@@ -328,6 +328,7 @@ export default function ChatSidebar(props: ChatSidebarProps) {
             type="tasks"
             onClose={handleClosePanel}
             tasks={tasks}
+            selectedTaskId={selectedTaskId}
             sessions={sessions}
             onTaskClick={handleTaskOpen}
             onTaskPause={onTaskPause}
@@ -344,6 +345,11 @@ export default function ChatSidebar(props: ChatSidebarProps) {
             sessions={sessions}
             onTaskClick={handleTaskOpen}
             toolbarRef={toolbarRef}
+            hasMoreSessions={sessionApi.hasMoreSessions()}
+            sessionTotal={historyTotal}
+            isLoadingMoreSessions={isLoadingMoreHistory}
+            loadMoreSessionsFailed={loadMoreHistoryFailed}
+            onLoadMoreSessions={() => void loadMoreSessions()}
           />
           <button
             className="chat-sidebar-collapse-toggle"
@@ -382,24 +388,19 @@ export default function ChatSidebar(props: ChatSidebarProps) {
                 新建会话
               </button>
             </div>
-            <div className="chat-sidebar-content-record-list">
-              {enableTaskTabs ? (
-                <ChatTaskEntry
-                  tasks={tasks}
-                  open={taskTabsOpen}
-                  onToggle={() => onTaskTabsToggle?.()}
-                />
-              ) : (
-                <ChatTaskList
-                  tasks={tasks}
-                  selectedTaskId={selectedTaskId}
-                  onTaskClick={onTaskClick}
-                  onTaskPause={onTaskPause}
-                  onTaskRun={onTaskRun}
-                  onTaskResume={onTaskResume}
-                  onTaskDelete={onTaskDelete}
-                />
-              )}
+            <div
+              className="chat-sidebar-content-record-list"
+              ref={historyScrollContainerRef}
+            >
+              <ChatTaskList
+                tasks={tasks}
+                selectedTaskId={selectedTaskId}
+                onTaskClick={handleTaskOpen}
+                onTaskPause={onTaskPause}
+                onTaskRun={onTaskRun}
+                onTaskResume={onTaskResume}
+                onTaskDelete={onTaskDelete}
+              />
               <div className="chat-sidebar-history">
                 <div
                   className="chat-sidebar-history-header"
@@ -409,31 +410,21 @@ export default function ChatSidebar(props: ChatSidebarProps) {
                 >
                   <div className="chat-sidebar-history-title">
                     <HistoryIcon />
-                    历史记录({sessions.length})
+                    历史记录({historyTotal})
                   </div>
                   <ToggleIcon collapsed={historyCollapsed} />
                 </div>
                 {!historyCollapsed &&
                   (isSessionsListLoading ? (
                     <HistorySkeleton count={8} />
-                  ) : sessions.length === 0 ? (
-                    <div className="chat-sidebar-history-empty">
-                      暂无历史记录
-                    </div>
                   ) : (
-                    <div
-                      ref={historyListRef}
-                      className="chat-sidebar-history-list"
-                    >
-                      <div
-                        style={{
-                          height: `${rowVirtualizer.getTotalSize()}px`,
-                          width: "100%",
-                          position: "relative",
-                        }}
-                      >
-                        {rowVirtualizer.getVirtualItems().map((virtualItem) => {
-                          const session = sessions[virtualItem.index];
+                    <div className="chat-sidebar-history-list">
+                      {sessions.length === 0 ? (
+                        <div className="chat-sidebar-history-empty">
+                          暂无历史记录
+                        </div>
+                      ) : (
+                        sessions.map((session) => {
                           const ext = session as ExtendedHistorySession;
                           return (
                             <HistorySessionRow
@@ -446,18 +437,17 @@ export default function ChatSidebar(props: ChatSidebarProps) {
                               )}
                               onSessionClick={handleSessionClick}
                               onSessionDelete={handleDeleteSession}
-                              style={{
-                                position: "absolute",
-                                top: 0,
-                                left: 0,
-                                width: "100%",
-                                height: `${virtualItem.size}px`,
-                                transform: `translateY(${virtualItem.start}px)`,
-                              }}
                             />
                           );
-                        })}
-                      </div>
+                        })
+                      )}
+                      <HistoryInfiniteScrollTrigger
+                        scrollContainerRef={historyScrollContainerRef}
+                        hasMore={sessionApi.hasMoreSessions()}
+                        loading={isLoadingMoreHistory}
+                        failed={loadMoreHistoryFailed}
+                        onLoadMore={() => void loadMoreSessions()}
+                      />
                     </div>
                   ))}
               </div>
@@ -466,11 +456,11 @@ export default function ChatSidebar(props: ChatSidebarProps) {
 
           <div className="chat-sidebar-footer">
             {/* 暂时隐藏，后续需要时再开放
-            <div className="chat-sidebar-footer-item">
-              <img src={skillMarketIcon} alt="发送" width="24" height="24" />
-              skill市场
-            </div>
-            <div className="chat-sidebar-footer-divider" /> */}
+            <div className="chat-sidebar-footer-item">
+              <img src={skillMarketIcon} alt="发送" width="24" height="24" />
+              skill市场
+            </div>
+            <div className="chat-sidebar-footer-divider" /> */}
             <div
               className="chat-sidebar-footer-item"
               onClick={handleOpenGuide}

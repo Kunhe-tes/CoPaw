@@ -141,12 +141,24 @@ class _MultiAgentManager:
 
 
 class _TenantWorkspacePool:
+    def __init__(self):
+        self.calls = []
+
     async def ensure_bootstrap(
         self,
-        _tenant_id: str,
+        tenant_id: str,
         source_id: str | None = None,
+        tenant_name: str | None = None,
+        bbk_id: str | None = None,
     ):
-        del source_id
+        self.calls.append(
+            {
+                "tenant_id": tenant_id,
+                "source_id": source_id,
+                "tenant_name": tenant_name,
+                "bbk_id": bbk_id,
+            },
+        )
         return None
 
 
@@ -633,6 +645,71 @@ def test_broadcast_clears_stale_fallback_meta_when_source_model_slot_missing():
         "broadcast_model_slot_fallback_reason"
         not in target_supported.created[0].meta
     )
+
+
+def test_broadcast_job_persists_target_identity_from_request():
+    source_job = CronJobSpec.model_validate(
+        {
+            **_job_spec("job-source"),
+            "schedule": ScheduleSpec(
+                cron="0 9 * * *",
+            ).model_dump(mode="json"),
+            "tenant_id": "tenant-a",
+            "tenant_name": "Alice",
+            "bbk_id": "1001",
+            "source_id": "source-a",
+            "scope_id": encode_scope_id("tenant-a", "source-a"),
+        },
+    )
+    source_manager = _Manager({"job-source": source_job})
+    target_manager = _Manager()
+    multi_agent_manager = _MultiAgentManager(
+        {
+            encode_scope_id("tenant-b", "source-a"): _Workspace(
+                target_manager,
+            ),
+        },
+    )
+
+    tenant_workspace_pool = _TenantWorkspacePool()
+    client = _build_client(
+        source_manager,
+        multi_agent_manager=multi_agent_manager,
+        tenant_workspace_pool=tenant_workspace_pool,
+    )
+    _install_provider_manager(
+        {},
+        providers_by_tenant={
+            encode_scope_id("tenant-b", "source-a"): {},
+        },
+    )
+
+    response = client.post(
+        "/cron/jobs/job-source/broadcast",
+        json={
+            "target_tenant_ids": ["tenant-b"],
+            "targets": [
+                {
+                    "tenant_id": "tenant-b",
+                    "tenant_name": "Bob",
+                    "bbk_id": "2002",
+                },
+            ],
+        },
+    )
+
+    assert response.status_code == 200
+    assert target_manager.created[0].tenant_id == "tenant-b"
+    assert target_manager.created[0].tenant_name == "Bob"
+    assert target_manager.created[0].bbk_id == "2002"
+    assert tenant_workspace_pool.calls == [
+        {
+            "tenant_id": "tenant-b",
+            "source_id": "source-a",
+            "tenant_name": "Bob",
+            "bbk_id": "2002",
+        },
+    ]
 
 
 def test_broadcast_skips_tenant_that_already_has_source_child_job():
