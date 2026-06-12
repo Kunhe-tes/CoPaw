@@ -255,6 +255,7 @@ async def list_broadcast_tenants(
         tenant_ids=await list_logical_tenant_ids(
             getattr(request.state, "source_id", None),
             source_filter=True,
+            include_templates=True,
         ),
     )
 

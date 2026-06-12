@@ -750,14 +750,15 @@ async def upload_skill_to_workspace(
             await svc.db.execute(
                 """
                 INSERT INTO swe_user_item_operation_logs
-                    (source_id, user_id, user_name, operation,
+                    (source_id, user_id, user_name, bbk_id, operation,
                      item_type, item_name)
-                VALUES (%s, %s, %s, %s, %s, %s)
+                VALUES (%s, %s, %s, %s, %s, %s, %s)
                 """,
                 (
                     source_id,
                     x_user_id,
                     user_name,
+                    bbk_id,
                     "upload",
                     "skill",
                     ",".join(imported_skills),
@@ -858,6 +859,7 @@ async def save_skill_file(
     x_source_id: Optional[str] = Header(default=None, alias="X-Source-Id"),
     x_user_id: Optional[str] = Header(default=None, alias="X-User-Id"),
     x_user_name: Optional[str] = Header(default=None, alias="X-User-Name"),
+    x_bbk_id: Optional[str] = Header(default=None, alias="X-Bbk-Id"),
     agent_id: str = "default",
 ):
     """保存技能文件内容（仅我创建的技能支持）."""
@@ -892,19 +894,21 @@ async def save_skill_file(
         raise HTTPException(status_code=500, detail="Failed to save file")
 
     # Log edit operation
+    bbk_id = x_bbk_id
     if svc.db.is_connected:
         try:
             await svc.db.execute(
                 """
                 INSERT INTO swe_user_item_operation_logs
-                    (source_id, user_id, user_name, operation,
+                    (source_id, user_id, user_name, bbk_id, operation,
                      item_type, item_name)
-                VALUES (%s, %s, %s, %s, %s, %s)
+                VALUES (%s, %s, %s, %s, %s, %s, %s)
                 """,
                 (
                     source_id,
                     x_user_id,
                     decode_user_name(x_user_name),
+                    bbk_id,
                     "edit",
                     "skill",
                     skill_name,
@@ -926,6 +930,7 @@ async def delete_my_skill(
     x_source_id: Optional[str] = Header(default=None, alias="X-Source-Id"),
     x_user_id: Optional[str] = Header(default=None, alias="X-User-Id"),
     x_user_name: Optional[str] = Header(default=None, alias="X-User-Name"),
+    x_bbk_id: Optional[str] = Header(default=None, alias="X-Bbk-Id"),
     agent_id: str = "default",
 ):
     """删除技能."""
@@ -945,19 +950,21 @@ async def delete_my_skill(
         )
 
     # Log delete operation
+    bbk_id = x_bbk_id
     if svc.db.is_connected:
         try:
             await svc.db.execute(
                 """
                 INSERT INTO swe_user_item_operation_logs
-                    (source_id, user_id, user_name, operation,
+                    (source_id, user_id, user_name, bbk_id, operation,
                      item_type, item_name)
-                VALUES (%s, %s, %s, %s, %s, %s)
+                VALUES (%s, %s, %s, %s, %s, %s, %s)
                 """,
                 (
                     source_id,
                     x_user_id,
                     decode_user_name(x_user_name),
+                    bbk_id,
                     "delete",
                     "skill",
                     skill_name,
@@ -1170,20 +1177,22 @@ async def log_skill_operation(
 
     svc = request.app.state.marketplace
     user_name = decode_user_name(body.user_name) or x_user_id
+    bbk_id = body.bbk_id
 
     if svc.db.is_connected:
         try:
             await svc.db.execute(
                 """
                 INSERT INTO swe_user_item_operation_logs
-                    (source_id, user_id, user_name, operation,
+                    (source_id, user_id, user_name, bbk_id, operation,
                      item_type, item_name)
-                VALUES (%s, %s, %s, %s, %s, %s)
+                VALUES (%s, %s, %s, %s, %s, %s, %s)
                 """,
                 (
                     source_id,
                     x_user_id,
                     user_name,
+                    bbk_id,
                     body.operation,
                     body.item_type,
                     body.item_name,
