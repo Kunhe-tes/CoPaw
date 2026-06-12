@@ -31,12 +31,14 @@ import {
   enableImmediateTruncationConfig,
   formatSystemPromptInjectionText,
   parseSystemPromptInjectionText,
+  readCronTaskSessionCleanupConfig,
   readCronUnreadAutoPauseConfig,
   readRegisteredSwitchValue,
   readImmediateTruncationConfig,
   readSystemPromptInjections,
   readToolResultCompactConfig,
   validateSourceSystemConfig,
+  writeCronTaskSessionCleanupValue,
   writeCronUnreadAutoPauseValue,
   writeRegisteredSwitchValue,
   writeSystemPromptInjections,
@@ -219,6 +221,38 @@ export default function SystemConfigPage() {
     );
   };
 
+  const handleCronTaskSessionCleanupEnabledChange = (checked: boolean) => {
+    if (formDisabled) {
+      return;
+    }
+    setValidationError(null);
+    setDraftConfig((previous) =>
+      writeCronTaskSessionCleanupValue(previous, "enabled", checked),
+    );
+  };
+
+  const handleCronTaskSessionCleanupRetentionChange = (
+    value: number | null,
+  ) => {
+    if (formDisabled || typeof value !== "number") {
+      return;
+    }
+    setValidationError(null);
+    setDraftConfig((previous) =>
+      writeCronTaskSessionCleanupValue(previous, "retention_days", value),
+    );
+  };
+
+  const handleCronTaskSessionCleanupRunTimeChange = (value: string) => {
+    if (formDisabled) {
+      return;
+    }
+    setValidationError(null);
+    setDraftConfig((previous) =>
+      writeCronTaskSessionCleanupValue(previous, "run_time", value),
+    );
+  };
+
   const handleSystemPromptInjectionsChange = (value: string) => {
     if (formDisabled) {
       return;
@@ -349,6 +383,8 @@ export default function SystemConfigPage() {
 
   const cronUnreadAutoPauseConfig =
     readCronUnreadAutoPauseConfig(draftConfig);
+  const cronTaskSessionCleanupConfig =
+    readCronTaskSessionCleanupConfig(draftConfig);
   const systemPromptInjectionText = formatSystemPromptInjectionText(
     readSystemPromptInjections(draftConfig),
   );
@@ -818,6 +854,92 @@ export default function SystemConfigPage() {
                 )}
               </section>
 
+            </Card>
+
+            <Card
+              className={styles.switchCard}
+              title={t("sourceSystemConfigPage.cronTaskSessionCleanupTitle", {
+                defaultValue: "定时任务会话历史清理",
+              })}
+            >
+              <div className={styles.switchList}>
+                <div className={styles.switchRow}>
+                  <div className={styles.switchCopy}>
+                    <span className={styles.switchTitle}>
+                      {t(
+                        "sourceSystemConfigPage.cronTaskSessionCleanupEnabled",
+                        {
+                          defaultValue: "启用历史清理",
+                        },
+                      )}
+                    </span>
+                    <span className={styles.switchDescription}>
+                      {t(
+                        "sourceSystemConfigPage.cronTaskSessionCleanupDescription",
+                        {
+                          defaultValue:
+                            "每天按配置时间清理超过保留天数的定时任务会话历史。",
+                        },
+                      )}
+                    </span>
+                  </div>
+                  <Switch
+                    checked={cronTaskSessionCleanupConfig.enabled}
+                    disabled={formDisabled}
+                    onChange={handleCronTaskSessionCleanupEnabledChange}
+                  />
+                </div>
+                <div className={styles.numberGrid}>
+                  <label className={styles.numberField}>
+                    <span className={styles.numberLabel}>
+                      {t(
+                        "sourceSystemConfigPage.cronTaskSessionCleanupRetention",
+                        {
+                          defaultValue: "历史保留天数",
+                        },
+                      )}
+                    </span>
+                    <InputNumber
+                      min={1}
+                      step={1}
+                      value={cronTaskSessionCleanupConfig.retention_days}
+                      disabled={
+                        formDisabled ||
+                        !cronTaskSessionCleanupConfig.enabled
+                      }
+                      onChange={handleCronTaskSessionCleanupRetentionChange}
+                    />
+                  </label>
+                  <label className={styles.numberField}>
+                    <span className={styles.numberLabel}>
+                      {t(
+                        "sourceSystemConfigPage.cronTaskSessionCleanupRunTime",
+                        {
+                          defaultValue: "每日运行时间",
+                        },
+                      )}
+                    </span>
+                    <Input
+                      aria-label={t(
+                        "sourceSystemConfigPage.cronTaskSessionCleanupRunTime",
+                        {
+                          defaultValue: "每日运行时间",
+                        },
+                      )}
+                      value={cronTaskSessionCleanupConfig.run_time}
+                      disabled={
+                        formDisabled ||
+                        !cronTaskSessionCleanupConfig.enabled
+                      }
+                      onChange={(event) =>
+                        handleCronTaskSessionCleanupRunTimeChange(
+                          event.target.value,
+                        )
+                      }
+                    />
+                  </label>
+                </div>
+              </div>
             </Card>
 
             <div className={styles.actionRow}>

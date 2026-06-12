@@ -8,7 +8,8 @@ import logging
 import os
 import random
 import re
-from contextlib import contextmanager
+from contextlib import asynccontextmanager, contextmanager
+from copy import deepcopy
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from uuid import uuid4
@@ -29,6 +30,7 @@ from ..source_system_config.runtime import (
     bind_source_system_config,
     get_current_source_system_config,
     reset_current_source_system_config,
+    resolve_cron_task_session_cleanup_config,
     resolve_cron_unread_auto_pause_config,
     set_current_source_system_config,
 )
@@ -42,6 +44,8 @@ from .monitor_sync_client import get_monitor_sync_client, MonitorSyncClient
 
 HEARTBEAT_JOB_ID = "_heartbeat"
 DREAM_JOB_ID = "_dream"
+TASK_SESSION_CLEANUP_JOB_ID = "_cron_task_session_cleanup"
+TASK_SESSION_CLEANUP_TASK_TYPE = "cron_task_session_cleanup"
 AUTO_PAUSE_REASON = "auto_unread_threshold"
 MANUAL_PAUSE_REASON = "manual"
 TASK_MESSAGES_STATE_KEY = "task_messages"
@@ -69,9 +73,167 @@ def _notification_delay_minutes(job: CronJobSpec) -> int:
     return min(delay_minutes, MAX_NOTIFICATION_DELAY_MINUTES)
 
 
+def _parse_cleanup_datetime(value: Any) -> datetime | None:
+    if isinstance(value, datetime):
+        parsed = value
+    elif isinstance(value, str) and value.strip():
+        try:
+            parsed = datetime.fromisoformat(
+                value.strip().replace("Z", "+00:00"),
+            )
+        except ValueError:
+            return None
+    else:
+        return None
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+def _extract_task_message_preview(message: dict[str, Any]) -> str:
+    content = message.get("content")
+    if isinstance(content, str):
+        return content.strip()
+    if not isinstance(content, list):
+        return ""
+    parts: list[str] = []
+    for item in content:
+        if not isinstance(item, dict):
+            continue
+        if item.get("type") == "text" and item.get("text"):
+            parts.append(str(item["text"]))
+    return "".join(parts).strip()
+
+
+def _prune_task_session_state(
+    state: dict[str, Any],
+    cutoff: datetime,
+) -> _TaskSessionCleanupSnapshot:
+    next_state = deepcopy(state)
+    raw_runs = next_state.get("task_runs")
+    task_runs = raw_runs if isinstance(raw_runs, list) else []
+    agent_state = next_state.get("agent")
+    if not isinstance(agent_state, dict):
+        agent_state = {}
+        next_state["agent"] = agent_state
+    memory_state = agent_state.get("memory")
+    if not isinstance(memory_state, dict):
+        memory_state = {}
+        agent_state["memory"] = memory_state
+    content = memory_state.get("content")
+    memory_content = content if isinstance(content, list) else []
+
+    kept_runs: list[dict[str, Any]] = []
+    removed_runs = 0
+    skipped_runs = 0
+    keep_mask = [True] * len(memory_content)
+    latest_preview = ""
+    latest_run_at: datetime | None = None
+
+    for raw_run in task_runs:
+        if not isinstance(raw_run, dict):
+            kept_runs.append(raw_run)
+            skipped_runs += 1
+            continue
+        raw_start = raw_run.get("memory_start")
+        raw_end = raw_run.get("memory_end")
+        if (
+            not isinstance(raw_start, int)
+            or not isinstance(raw_end, int)
+            or raw_start < 0
+            or raw_end < raw_start
+            or raw_end > len(memory_content)
+        ):
+            return _TaskSessionCleanupSnapshot(
+                state=state,
+                changed=False,
+                has_result=False,
+                latest_preview="",
+                latest_run_at=None,
+                skipped_runs=1,
+            )
+        ended_at = _parse_cleanup_datetime(raw_run.get("ended_at"))
+        if ended_at is not None and ended_at < cutoff:
+            removed_runs += 1
+            for index in range(raw_start, raw_end):
+                keep_mask[index] = False
+            continue
+        kept_runs.append(raw_run)
+        if ended_at is None:
+            skipped_runs += 1
+            continue
+        if latest_run_at is None or ended_at >= latest_run_at:
+            latest_run_at = ended_at
+            latest_preview = str(raw_run.get("preview_text") or "")
+
+    retained_content = [
+        item for index, item in enumerate(memory_content) if keep_mask[index]
+    ]
+
+    adjusted_runs: list[Any] = []
+    for raw_run in kept_runs:
+        if not isinstance(raw_run, dict):
+            adjusted_runs.append(raw_run)
+            continue
+        start = int(raw_run["memory_start"])
+        end = int(raw_run["memory_end"])
+        adjusted = dict(raw_run)
+        adjusted["memory_start"] = sum(1 for kept in keep_mask[:start] if kept)
+        adjusted["memory_end"] = sum(1 for kept in keep_mask[:end] if kept)
+        adjusted_runs.append(adjusted)
+
+    raw_messages = next_state.get(TASK_MESSAGES_STATE_KEY)
+    task_messages = raw_messages if isinstance(raw_messages, list) else []
+    kept_messages: list[Any] = []
+    removed_messages = 0
+    for raw_message in task_messages:
+        if not isinstance(raw_message, dict):
+            kept_messages.append(raw_message)
+            continue
+        timestamp = _parse_cleanup_datetime(raw_message.get("timestamp"))
+        if timestamp is not None and timestamp < cutoff:
+            removed_messages += 1
+            continue
+        kept_messages.append(raw_message)
+        if timestamp is not None and (
+            latest_run_at is None or timestamp >= latest_run_at
+        ):
+            latest_run_at = timestamp
+            message_preview = _extract_task_message_preview(raw_message)
+            if message_preview:
+                latest_preview = message_preview
+
+    memory_state["content"] = retained_content
+    next_state["task_runs"] = adjusted_runs
+    next_state[TASK_MESSAGES_STATE_KEY] = kept_messages
+    changed = removed_runs > 0 or removed_messages > 0
+    return _TaskSessionCleanupSnapshot(
+        state=next_state,
+        changed=changed,
+        has_result=latest_run_at is not None,
+        latest_preview=latest_preview[:10],
+        latest_run_at=latest_run_at,
+        removed_runs=removed_runs,
+        removed_messages=removed_messages,
+        skipped_runs=skipped_runs,
+    )
+
+
 @dataclass
 class _Runtime:
     sem: asyncio.Semaphore
+
+
+@dataclass(frozen=True)
+class _TaskSessionCleanupSnapshot:
+    state: dict[str, Any]
+    changed: bool
+    has_result: bool
+    latest_preview: str
+    latest_run_at: datetime | None
+    removed_runs: int = 0
+    removed_messages: int = 0
+    skipped_runs: int = 0
 
 
 class CronManager:  # pylint: disable=too-many-public-methods
@@ -600,6 +762,23 @@ class CronManager:  # pylint: disable=too-many-public-methods
             yield
         finally:
             reset_current_source_system_config(token)
+
+    async def _resolve_task_session_cleanup_config(self):
+        tenant_id, source_id = self._get_external_scheduler_business_identity()
+        del tenant_id
+        if self._source_system_config_service is None or not source_id:
+            return resolve_cron_task_session_cleanup_config(None)
+        try:
+            source_config = await self._source_system_config_service.resolve_config(
+                source_id,
+            )
+        except Exception:
+            logger.warning(
+                "Failed to resolve task session cleanup source config",
+                exc_info=True,
+            )
+            return resolve_cron_task_session_cleanup_config(None)
+        return resolve_cron_task_session_cleanup_config(source_config)
 
     async def _sync_job_to_external_scheduler(
         self,
@@ -1441,6 +1620,26 @@ class CronManager:  # pylint: disable=too-many-public-methods
                 if updated_job and self._monitor_sync_client is not None:
                     await self._monitor_sync_client.sync_job(updated_job)
 
+    @asynccontextmanager
+    async def _task_session_write_lock(
+        self,
+        session: Any,
+        session_id: str,
+        user_id: str,
+        *,
+        timeout_seconds: float = 5.0,
+    ):
+        lock_factory = getattr(session, "session_write_lock", None)
+        if not callable(lock_factory):
+            yield
+            return
+        async with lock_factory(
+            session_id,
+            user_id,
+            timeout_seconds=timeout_seconds,
+        ):
+            yield
+
     async def _append_text_task_message(
         self,
         session_id: str,
@@ -1700,6 +1899,133 @@ class CronManager:  # pylint: disable=too-many-public-methods
             )
             if raise_on_error:
                 raise
+
+    async def run_task_session_cleanup(
+        self,
+        *,
+        now: datetime | None = None,
+    ) -> dict[str, Any]:
+        """清理当前 manager 范围内的定时任务会话历史文件。"""
+        config = await self._resolve_task_session_cleanup_config()
+        result: dict[str, Any] = {
+            "enabled": config.enabled,
+            "retention_days": config.retention_days,
+            "sessions_seen": 0,
+            "sessions_cleaned": 0,
+            "sessions_skipped_locked": 0,
+            "runs_removed": 0,
+            "messages_removed": 0,
+        }
+        if not config.enabled:
+            return result
+        session = getattr(self._runner, "session", None)
+        if session is None:
+            return result
+
+        cutoff_base = now or datetime.now(timezone.utc)
+        if cutoff_base.tzinfo is None:
+            cutoff_base = cutoff_base.replace(tzinfo=timezone.utc)
+        cutoff = cutoff_base.astimezone(timezone.utc) - timedelta(
+            days=config.retention_days,
+        )
+
+        for job in await self._repo.list_jobs():
+            meta = job.meta or {}
+            task_session_id = meta.get("task_session_id")
+            creator_user_id = meta.get("creator_user_id")
+            if not task_session_id or not creator_user_id:
+                continue
+            result["sessions_seen"] += 1
+            mutate_session_state = getattr(
+                session,
+                "mutate_session_state",
+                None,
+            )
+            snapshot: _TaskSessionCleanupSnapshot | None = None
+            try:
+                if callable(mutate_session_state):
+
+                    def _mutate_state(
+                        state: dict[str, Any],
+                    ) -> dict[str, Any]:
+                        nonlocal snapshot
+                        snapshot = _prune_task_session_state(state, cutoff)
+                        if snapshot.changed:
+                            return snapshot.state
+                        return state
+
+                    await mutate_session_state(
+                        session_id=str(task_session_id),
+                        user_id=str(creator_user_id),
+                        mutator=_mutate_state,
+                        create_if_not_exist=True,
+                        timeout_seconds=5.0,
+                    )
+                else:
+                    async with self._task_session_write_lock(
+                        session,
+                        str(task_session_id),
+                        str(creator_user_id),
+                    ):
+                        state = await session.get_session_state_dict(
+                            str(task_session_id),
+                            str(creator_user_id),
+                            allow_not_exist=True,
+                        )
+                        snapshot = _prune_task_session_state(state, cutoff)
+                        if snapshot.changed:
+                            await session.save_merged_state(
+                                session_id=str(task_session_id),
+                                user_id=str(creator_user_id),
+                                state=snapshot.state,
+                            )
+            except TimeoutError:
+                result["sessions_skipped_locked"] += 1
+                logger.info(
+                    "Task session cleanup skipped locked session: %s",
+                    task_session_id,
+                )
+                continue
+
+            if snapshot is None or not snapshot.changed:
+                continue
+            result["sessions_cleaned"] += 1
+            result["runs_removed"] += snapshot.removed_runs
+            result["messages_removed"] += snapshot.removed_messages
+            async with self._lock:
+                await self._mutate_jobs_file_locked(
+                    lambda jobs_file, job_id=job.id, snap=snapshot: (
+                        self._apply_task_session_cleanup_meta(
+                            jobs_file,
+                            job_id,
+                            snap,
+                        )
+                    ),
+                )
+        logger.info("Task session cleanup result: %s", result)
+        return result
+
+    def _apply_task_session_cleanup_meta(
+        self,
+        jobs_file: JobsFile,
+        job_id: str,
+        snapshot: _TaskSessionCleanupSnapshot,
+    ) -> tuple[bool, None]:
+        for index, job in enumerate(jobs_file.jobs):
+            if job.id != job_id:
+                continue
+            meta = dict(job.meta or {})
+            meta["task_has_scheduled_result"] = snapshot.has_result
+            meta["task_last_scheduled_preview"] = (
+                snapshot.latest_preview if snapshot.has_result else ""
+            )
+            meta["task_last_scheduled_run_at"] = (
+                snapshot.latest_run_at if snapshot.has_result else None
+            )
+            meta["task_unread_execution_count"] = 0
+            jobs_file.jobs[index] = job.model_copy(update={"meta": meta})
+            return True, None
+        return False, None
 
     async def send_task_success_notification(self, job_id: str) -> None:
         """发送指定定时任务的完成通知，供通知 worker 调用。"""
@@ -2424,6 +2750,7 @@ class CronManager:  # pylint: disable=too-many-public-methods
         """注册 heartbeat 和 dream 到外部调度平台。"""
         await self.register_heartbeat()
         await self.register_dream()
+        await self.register_task_session_cleanup()
 
     async def register_heartbeat(self) -> None:
         """将心跳任务注册到外部调度平台（或禁用时取消注册）。"""
@@ -2542,6 +2869,64 @@ class CronManager:  # pylint: disable=too-many-public-methods
         except Exception:
             logger.warning(
                 "Failed to register dream to external scheduler",
+                exc_info=True,
+            )
+
+    async def register_task_session_cleanup(self) -> None:
+        """将任务会话清理注册为外部调度平台的系统任务。"""
+        if isinstance(self._scheduler_adapter, NoopSchedulerAdapter):
+            return
+
+        config = await self._resolve_task_session_cleanup_config()
+        job_id = TASK_SESSION_CLEANUP_JOB_ID
+        ext_id = self._system_job_ids.get(job_id, "")
+
+        if not config.enabled:
+            if ext_id:
+                try:
+                    await self._scheduler_adapter.pause_job(ext_id)
+                except Exception:
+                    logger.warning(
+                        "Failed to pause task session cleanup on external scheduler",
+                        exc_info=True,
+                    )
+            return
+
+        callback_url = self._build_callback_url(
+            TASK_SESSION_CLEANUP_TASK_TYPE,
+        )
+        tenant_id, source_id = self._get_external_scheduler_business_identity()
+        try:
+            if ext_id:
+                await self._scheduler_adapter.update_job(
+                    external_id=ext_id,
+                    tenant_id=tenant_id,
+                    source_id=source_id,
+                    agent_id=self._agent_id or "",
+                    task_type=TASK_SESSION_CLEANUP_TASK_TYPE,
+                    job_id=job_id,
+                    job_name=TASK_SESSION_CLEANUP_TASK_TYPE,
+                    cron=config.cron,
+                    callback_url=callback_url,
+                )
+                await self._scheduler_adapter.resume_job(ext_id)
+            else:
+                ext_id = await self._scheduler_adapter.register_job(
+                    tenant_id=tenant_id,
+                    source_id=source_id,
+                    agent_id=self._agent_id or "",
+                    task_type=TASK_SESSION_CLEANUP_TASK_TYPE,
+                    job_id=job_id,
+                    job_name=TASK_SESSION_CLEANUP_TASK_TYPE,
+                    cron=config.cron,
+                    callback_url=callback_url,
+                )
+                if ext_id:
+                    self._system_job_ids[job_id] = ext_id
+                    self._save_system_job_ids()
+        except Exception:
+            logger.warning(
+                "Failed to register task session cleanup to external scheduler",
                 exc_info=True,
             )
 

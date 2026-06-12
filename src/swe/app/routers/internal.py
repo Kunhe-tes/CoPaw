@@ -1110,6 +1110,8 @@ async def internal_cron_callback(
             await mgr.run_heartbeat()
         elif task_type == "dream":
             await mgr.run_dream()
+        elif task_type == "cron_task_session_cleanup":
+            await mgr.run_task_session_cleanup()
         else:
             if not job_id:
                 raise HTTPException(

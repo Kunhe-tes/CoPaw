@@ -4,6 +4,7 @@
 import asyncio
 import json
 from datetime import datetime
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -28,6 +29,7 @@ from swe.app.source_system_config.runtime import (
     bind_source_system_config,
     get_current_source_system_config,
     get_system_prompt_injections,
+    resolve_cron_task_session_cleanup_config,
     resolve_cron_unread_auto_pause_config,
     resolve_file_read_truncation_config,
     resolve_tool_result_compact_config,
@@ -62,6 +64,11 @@ DEFAULT_EXPECTED_SOURCE_CONFIG = {
     "cron_unread_auto_pause": {
         "enabled": True,
         "threshold": 10,
+    },
+    "cron_task_session_cleanup": {
+        "enabled": False,
+        "retention_days": 30,
+        "cron": "0 1 * * *",
     },
 }
 
@@ -190,6 +197,26 @@ class TestSourceSystemConfigModels:
             },
         }
 
+    def test_cron_task_session_cleanup_config_is_accepted(self):
+        """任务会话清理配置应允许按 source 覆盖默认保留策略。"""
+        config = SourceSystemConfig.model_validate(
+            {
+                "cron_task_session_cleanup": {
+                    "enabled": False,
+                    "retention_days": 45,
+                    "cron": "30 2 * * *",
+                },
+            },
+        )
+
+        assert config.as_dict() == {
+            "cron_task_session_cleanup": {
+                "enabled": False,
+                "retention_days": 45,
+                "cron": "30 2 * * *",
+            },
+        }
+
     def test_system_prompt_injections_are_normalized(self):
         config = SourceSystemConfig.model_validate(
             {
@@ -246,6 +273,29 @@ class TestSourceSystemConfigModels:
         with pytest.raises(ValueError, match=match):
             SourceSystemConfig.model_validate(
                 {"cron_unread_auto_pause": payload},
+            )
+
+    @pytest.mark.parametrize(
+        ("payload", "match"),
+        [
+            ({"retention_days": 0}, "retention_days"),
+            ({"retention_days": "30"}, "retention_days"),
+            ({"enabled": "disabled"}, "enabled"),
+            ({"cron": "*/5 * * * *"}, "cron"),
+            ({"cron": "0 1 * * 1"}, "cron"),
+            ({"cron": "0 24 * * *"}, "cron"),
+            ({"cron": "60 1 * * *"}, "cron"),
+        ],
+    )
+    def test_invalid_cron_task_session_cleanup_config_is_rejected(
+        self,
+        payload,
+        match,
+    ):
+        """清理配置只能保存可靠的每日运行策略。"""
+        with pytest.raises(ValueError, match=match):
+            SourceSystemConfig.model_validate(
+                {"cron_task_session_cleanup": payload},
             )
 
     @pytest.mark.parametrize(
@@ -1398,6 +1448,43 @@ class TestSourceSystemConfigRuntime:
         assert result.enabled is False
         assert result.threshold == 12
 
+    def test_cron_task_session_cleanup_runtime_uses_defaults(self):
+        result = resolve_cron_task_session_cleanup_config(None)
+
+        assert result.enabled is False
+        assert result.retention_days == 30
+        assert result.cron == "0 1 * * *"
+
+    def test_cron_task_session_cleanup_runtime_uses_source_config(self):
+        effective = EffectiveSourceSystemConfig(
+            source_id="portal",
+            config=SourceSystemConfig.model_validate(
+                {
+                    "cron_task_session_cleanup": {
+                        "enabled": False,
+                        "retention_days": 45,
+                        "cron": "30 2 * * *",
+                    },
+                },
+            ).merged_with_defaults(),
+            raw_config=SourceSystemConfig.model_validate(
+                {
+                    "cron_task_session_cleanup": {
+                        "enabled": False,
+                        "retention_days": 45,
+                        "cron": "30 2 * * *",
+                    },
+                },
+            ),
+            version=3,
+        )
+
+        result = resolve_cron_task_session_cleanup_config(effective)
+
+        assert result.enabled is False
+        assert result.retention_days == 45
+        assert result.cron == "30 2 * * *"
+
 
 class TestSourceSystemConfigMiddleware:
     """验证 HTTP 请求级配置绑定。"""
@@ -1482,14 +1569,19 @@ class TestSourceSystemConfigMiddleware:
 class TestSourceSystemConfigApi:
     """验证 source 系统配置 API。"""
 
-    def _build_client(self, store) -> TestClient:
+    def _build_client(self, store, workspace=None) -> TestClient:
         """创建带真实路由和中间件的测试客户端。"""
-        return self._build_client_with_server_exception_mode(store, True)
+        return self._build_client_with_server_exception_mode(
+            store,
+            True,
+            workspace=workspace,
+        )
 
     def _build_client_with_server_exception_mode(
         self,
         store,
         raise_server_exceptions: bool,
+        workspace=None,
     ) -> TestClient:
         """创建可选择是否透传服务端异常的测试客户端。"""
         app = FastAPI()
@@ -1500,6 +1592,13 @@ class TestSourceSystemConfigApi:
         )
         app.state.source_system_config_service = service
         app.include_router(source_config_router, prefix="/api")
+        if workspace is not None:
+
+            @app.middleware("http")
+            async def attach_workspace(request, call_next):
+                request.state.workspace = workspace
+                return await call_next(request)
+
         app.add_middleware(SourceSystemConfigMiddleware)
         app.add_middleware(TenantIdentityMiddleware, default_tenant_id=None)
         return TestClient(
@@ -1591,6 +1690,39 @@ class TestSourceSystemConfigApi:
             },
         }
         assert list(store.records) == ["portal"]
+
+    def test_manager_update_refreshes_cleanup_system_job(self):
+        """打开清理配置后，应立即刷新当前工作区的外部系统任务。"""
+        store = _FakeManagementStore()
+        cron_manager = SimpleNamespace(
+            register_task_session_cleanup=AsyncMock(),
+        )
+        client = self._build_client(
+            store,
+            workspace=SimpleNamespace(cron_manager=cron_manager),
+        )
+
+        response = client.put(
+            "/api/source-system-config/current",
+            headers={
+                "X-Tenant-Id": "tenant-a",
+                "X-Source-Id": "portal",
+                "X-User-Id": "alice",
+                "X-User-Role": "manager",
+            },
+            json={
+                "config": {
+                    "cron_task_session_cleanup": {
+                        "enabled": True,
+                        "retention_days": 30,
+                        "cron": "0 1 * * *",
+                    },
+                },
+            },
+        )
+
+        assert response.status_code == 200
+        cron_manager.register_task_session_cleanup.assert_awaited_once_with()
 
     def test_current_source_update_rejects_body_source_override(self):
         """current-source 接口不允许请求体携带 source_id 覆盖目标 source。"""

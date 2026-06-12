@@ -22,6 +22,10 @@ from swe.app.crons.models import (
 )
 from swe.app.crons.scheduler_adapter import RealSchedulerAdapter
 from swe.app.routers import internal as internal_router
+from swe.app.source_system_config.models import (
+    EffectiveSourceSystemConfig,
+    SourceSystemConfig,
+)
 from swe.config.context import encode_scope_id
 
 
@@ -77,6 +81,19 @@ def _sample_job(*, external_id: str | None = None) -> CronJobSpec:
         runtime=JobRuntimeSpec(timeout_seconds=30),
         meta=meta,
     )
+
+
+class _StaticSourceSystemConfigService:
+    def __init__(self, raw_config: dict[str, Any] | None = None) -> None:
+        self.raw_config = SourceSystemConfig.model_validate(raw_config or {})
+
+    async def resolve_config(self, source_id: str) -> EffectiveSourceSystemConfig:
+        return EffectiveSourceSystemConfig(
+            source_id=source_id,
+            config=self.raw_config.merged_with_defaults(),
+            raw_config=self.raw_config,
+            version=1,
+        )
 
 
 def test_build_broadcast_job_uses_target_tenant_and_current_source() -> None:
@@ -162,6 +179,129 @@ async def test_scheduler_payload_keeps_full_normalized_cron() -> None:
 
 
 @pytest.mark.asyncio
+async def test_cleanup_system_job_does_not_register_by_default(
+    tmp_path,
+) -> None:
+    """默认未开启清理配置时，不应向外部调度平台创建系统任务。"""
+    adapter = CapturingSchedulerAdapter()
+
+    class FakeRepo:
+        _path = tmp_path / "jobs.json"
+
+        async def list_jobs(self):
+            return []
+
+    manager = CronManager(
+        repo=FakeRepo(),
+        runner=SimpleNamespace(workspace_dir=None, _workspace=None),
+        channel_manager=object(),
+        agent_id="default",
+        tenant_id=encode_scope_id("tenant-a", "source-a"),
+        scheduler_adapter=adapter,
+        source_system_config_service=_StaticSourceSystemConfigService({}),
+    )
+
+    await manager.register_task_session_cleanup()
+
+    assert adapter.requests == []
+    assert await manager.list_jobs() == []
+
+
+@pytest.mark.asyncio
+async def test_cleanup_system_job_registers_with_source_configured_daily_cron(
+    tmp_path,
+) -> None:
+    """任务会话清理应作为系统任务注册到外部调度平台。"""
+    adapter = CapturingSchedulerAdapter()
+
+    class FakeRepo:
+        _path = tmp_path / "jobs.json"
+
+        async def list_jobs(self):
+            return []
+
+    manager = CronManager(
+        repo=FakeRepo(),
+        runner=SimpleNamespace(workspace_dir=None, _workspace=None),
+        channel_manager=object(),
+        agent_id="default",
+        tenant_id=encode_scope_id("tenant-a", "source-a"),
+        scheduler_adapter=adapter,
+        source_system_config_service=_StaticSourceSystemConfigService(
+            {
+                "cron_task_session_cleanup": {
+                    "enabled": True,
+                    "retention_days": 45,
+                    "cron": "30 2 * * *",
+                },
+            },
+        ),
+    )
+
+    await manager.register_task_session_cleanup()
+
+    add_path, add_payload = adapter.requests[0]
+    assert add_path == "/job-admin/v2/add-job"
+    assert add_payload["jobCron"] == "0 30 2 * * ?"
+    assert "cron_task_session_cleanup" in add_payload["jobDesc"]
+    job_param = _decode_job_param(add_payload["jobParam"])
+    assert job_param["tenant_id"] == "tenant-a"
+    assert job_param["source_id"] == "source-a"
+    assert job_param["task_type"] == "cron_task_session_cleanup"
+    assert job_param["job_id"] == "_cron_task_session_cleanup"
+    assert await manager.list_jobs() == []
+
+
+@pytest.mark.asyncio
+async def test_cleanup_system_job_pauses_when_source_config_disabled(
+    tmp_path,
+) -> None:
+    """关闭清理配置时只暂停系统任务，不写入业务任务。"""
+    adapter = CapturingSchedulerAdapter()
+
+    class FakeRepo:
+        _path = tmp_path / "jobs.json"
+
+        async def list_jobs(self):
+            return []
+
+    manager = CronManager(
+        repo=FakeRepo(),
+        runner=SimpleNamespace(workspace_dir=None, _workspace=None),
+        channel_manager=object(),
+        agent_id="default",
+        tenant_id=encode_scope_id("tenant-a", "source-a"),
+        scheduler_adapter=adapter,
+        source_system_config_service=_StaticSourceSystemConfigService(
+            {
+                "cron_task_session_cleanup": {
+                    "enabled": False,
+                    "retention_days": 30,
+                    "cron": "0 1 * * *",
+                },
+            },
+        ),
+    )
+    manager._system_job_ids["_cron_task_session_cleanup"] = "1001"
+
+    await manager.register_task_session_cleanup()
+
+    assert adapter.requests == [
+        (
+            "/job-admin/v2/update-job-run-states",
+            {
+                "id": 1001,
+                "runFlag": 0,
+                "clientNo": "client",
+                "clientKey": "key",
+                "clientRemark": "remark",
+            },
+        ),
+    ]
+    assert await manager.list_jobs() == []
+
+
+@pytest.mark.asyncio
 async def test_scheduler_payload_converts_weekdays_without_mutating_input() -> (
     None
 ):
@@ -243,6 +383,59 @@ async def test_callback_resolves_runtime_scope_from_tenant_and_source(
         "run_job": "job-1",
         "is_manual": False,
         "source_id": "source-a",
+    }
+
+
+@pytest.mark.asyncio
+async def test_callback_dispatches_cleanup_without_business_job_id(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """清理系统任务回调不应要求业务 job_id。"""
+    observed: dict[str, Any] = {}
+
+    async def fake_get_cron_manager(manager, tenant_id: str, agent_id: str):
+        observed["lookup"] = (tenant_id, agent_id)
+
+        class FakeCronManager:
+            async def run_task_session_cleanup(self) -> None:
+                observed["cleanup"] = True
+
+        return FakeCronManager()
+
+    monkeypatch.setattr(
+        internal_router,
+        "_get_cron_manager",
+        fake_get_cron_manager,
+    )
+
+    params = {
+        "tenant_id": "tenant-a",
+        "source_id": "source-a",
+        "agent_id": "default",
+        "task_type": "cron_task_session_cleanup",
+    }
+    request = SimpleNamespace(
+        app=SimpleNamespace(
+            state=SimpleNamespace(multi_agent_manager=object()),
+        ),
+    )
+
+    response = await internal_router.internal_cron_callback(
+        request=request,
+        body={
+            "jobParam": base64.urlsafe_b64encode(
+                json.dumps(params).encode(),
+            ).decode(),
+        },
+    )
+
+    assert response == {
+        "status": "ok",
+        "task_type": "cron_task_session_cleanup",
+    }
+    assert observed == {
+        "lookup": (encode_scope_id("tenant-a", "source-a"), "default"),
+        "cleanup": True,
     }
 
 

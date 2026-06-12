@@ -3,9 +3,12 @@
 
 from typing import NoReturn
 
+import logging
 from fastapi import APIRouter, HTTPException, Request
 
 from swe.config.context import is_valid_identity_value
+
+from ..agent_context import get_agent_for_request
 
 from .models import (
     CurrentSourceSystemConfigResponse,
@@ -19,6 +22,8 @@ from .service import (
     SourceSystemConfigService,
 )
 from .store import SourceSystemConfigStoreUnavailable
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(
     prefix="/source-system-config",
@@ -85,6 +90,32 @@ def _raise_invalid_storage_data(exc: Exception) -> NoReturn:
     ) from exc
 
 
+async def _refresh_cleanup_system_job(request: Request) -> None:
+    """配置变更后刷新当前 Agent 的清理系统任务。"""
+    workspace = getattr(request.state, "workspace", None)
+    cron_manager = getattr(workspace, "cron_manager", None)
+    if cron_manager is None:
+        if getattr(request.app.state, "multi_agent_manager", None) is None:
+            return
+        try:
+            workspace = await get_agent_for_request(request)
+            cron_manager = getattr(workspace, "cron_manager", None)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "刷新定时任务会话清理系统任务失败: %s",
+                exc,
+            )
+            return
+
+    refresh = getattr(cron_manager, "register_task_session_cleanup", None)
+    if refresh is None:
+        return
+    try:
+        await refresh()
+    except Exception:  # noqa: BLE001
+        logger.exception("刷新定时任务会话清理系统任务失败")
+
+
 @router.get("/effective", response_model=EffectiveSourceSystemConfig)
 async def get_effective_source_system_config(
     request: Request,
@@ -126,11 +157,13 @@ async def upsert_current_source_system_config(
     source_id = _get_request_source_id(request)
     service = _get_service(request)
     try:
-        return await service.upsert_current_source_config(
+        response = await service.upsert_current_source_config(
             source_id,
             payload.config,
             updated_by=updated_by,
         )
+        await _refresh_cleanup_system_job(request)
+        return response
     except SourceSystemConfigStoreUnavailable as exc:
         _raise_storage_unavailable(exc)
     except ValueError as exc:
@@ -151,6 +184,7 @@ async def delete_current_source_system_config(
         _raise_storage_unavailable(exc)
     if not deleted:
         raise HTTPException(status_code=404, detail="Source config not found")
+    await _refresh_cleanup_system_job(request)
     return {"deleted": True}
 
 

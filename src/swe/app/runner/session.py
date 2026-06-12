@@ -15,7 +15,8 @@ import re
 import threading
 import tempfile
 
-from typing import Any, Callable, Protocol, Sequence, Union
+from contextlib import asynccontextmanager
+from typing import Any, AsyncIterator, Callable, Protocol, Sequence, Union
 
 import aiofiles
 from agentscope.session import SessionBase
@@ -114,6 +115,25 @@ class SafeJSONSession(SessionBase):
         else:
             file_path = f"{safe_sid}.json"
         return os.path.join(self.save_dir, file_path)
+
+    @asynccontextmanager
+    async def session_write_lock(
+        self,
+        session_id: str,
+        user_id: str = "",
+        timeout_seconds: float | None = None,
+    ) -> AsyncIterator[None]:
+        """按会话文件串行化读改写，避免清理和运行结束互相覆盖。"""
+        session_save_path = self._get_save_path(session_id, user_id=user_id)
+        lock = _get_session_write_lock(session_save_path)
+        if timeout_seconds is None:
+            await lock.acquire()
+        else:
+            await asyncio.wait_for(lock.acquire(), timeout=timeout_seconds)
+        try:
+            yield
+        finally:
+            lock.release()
 
     async def _read_session_state_file(
         self,
@@ -372,10 +392,16 @@ class SafeJSONSession(SessionBase):
         mutator: Callable[[dict[str, Any]], dict[str, Any] | None],
         user_id: str = "",
         create_if_not_exist: bool = True,
+        timeout_seconds: float | None = None,
     ) -> dict[str, Any]:
         """Atomically read, merge and write session state under one lock."""
         session_save_path = self._get_save_path(session_id, user_id=user_id)
-        async with _get_session_write_lock(session_save_path):
+        lock = _get_session_write_lock(session_save_path)
+        if timeout_seconds is None:
+            await lock.acquire()
+        else:
+            await asyncio.wait_for(lock.acquire(), timeout=timeout_seconds)
+        try:
             if os.path.exists(session_save_path):
                 async with aiofiles.open(
                     session_save_path,
@@ -409,6 +435,8 @@ class SafeJSONSession(SessionBase):
                 session_save_path,
                 json.dumps(updated_state, ensure_ascii=False),
             )
+        finally:
+            lock.release()
 
         logger.info(
             "Mutated session state in %s successfully.",

@@ -27,6 +27,13 @@ export interface CronUnreadAutoPauseConfig {
   threshold: number;
 }
 
+export interface CronTaskSessionCleanupConfig {
+  enabled: boolean;
+  retention_days: number;
+  cron: string;
+  run_time: string;
+}
+
 export type ImmediateTruncationConfigKey =
   | "file_read_truncation";
 
@@ -81,7 +88,17 @@ export const CRON_UNREAD_AUTO_PAUSE_DEFAULTS: CronUnreadAutoPauseConfig = {
   threshold: 10,
 };
 
+export const CRON_TASK_SESSION_CLEANUP_DEFAULTS: CronTaskSessionCleanupConfig =
+  {
+    enabled: false,
+    retention_days: 30,
+    cron: "0 1 * * *",
+    run_time: "01:00",
+  };
+
 export const CRON_UNREAD_AUTO_PAUSE_MIN_THRESHOLD = 1;
+
+export const CRON_TASK_SESSION_CLEANUP_MIN_RETENTION_DAYS = 1;
 
 export const IMMEDIATE_TRUNCATION_MIN_BYTES = 1000;
 
@@ -241,6 +258,108 @@ export function writeCronUnreadAutoPauseValue<
     nextConfig.cron_unread_auto_pause = {};
   }
   (nextConfig.cron_unread_auto_pause as Record<string, unknown>)[key] = value;
+  return nextConfig;
+}
+
+export function dailyRunTimeToCron(value: string): string | null {
+  const match = /^(\d{1,2}):(\d{2})$/.exec(value.trim());
+  if (!match) {
+    return null;
+  }
+  const hour = Number(match[1]);
+  const minute = Number(match[2]);
+  if (
+    !Number.isInteger(hour) ||
+    !Number.isInteger(minute) ||
+    hour < 0 ||
+    hour > 23 ||
+    minute < 0 ||
+    minute > 59
+  ) {
+    return null;
+  }
+  return `${minute} ${hour} * * *`;
+}
+
+export function cronToDailyRunTime(value: unknown): string | null {
+  if (typeof value !== "string") {
+    return null;
+  }
+  const parts = value.trim().split(/\s+/);
+  if (parts.length !== 5) {
+    return null;
+  }
+  const [minute, hour, dayOfMonth, month, dayOfWeek] = parts;
+  if (dayOfMonth !== "*" || month !== "*" || dayOfWeek !== "*") {
+    return null;
+  }
+  if (!/^\d+$/.test(minute) || !/^\d+$/.test(hour)) {
+    return null;
+  }
+  const minuteValue = Number(minute);
+  const hourValue = Number(hour);
+  if (
+    minuteValue < 0 ||
+    minuteValue > 59 ||
+    hourValue < 0 ||
+    hourValue > 23
+  ) {
+    return null;
+  }
+  return `${String(hourValue).padStart(2, "0")}:${String(
+    minuteValue,
+  ).padStart(2, "0")}`;
+}
+
+export function readCronTaskSessionCleanupConfig(
+  config: SourceSystemConfig,
+): CronTaskSessionCleanupConfig {
+  const rawValue = config.cron_task_session_cleanup;
+  if (!isPlainObject(rawValue)) {
+    return { ...CRON_TASK_SESSION_CLEANUP_DEFAULTS };
+  }
+  const cron =
+    typeof rawValue.cron === "string"
+      ? rawValue.cron
+      : CRON_TASK_SESSION_CLEANUP_DEFAULTS.cron;
+  return {
+    enabled:
+      typeof rawValue.enabled === "boolean"
+        ? rawValue.enabled
+        : CRON_TASK_SESSION_CLEANUP_DEFAULTS.enabled,
+    retention_days:
+      typeof rawValue.retention_days === "number"
+        ? rawValue.retention_days
+        : CRON_TASK_SESSION_CLEANUP_DEFAULTS.retention_days,
+    cron,
+    run_time:
+      cronToDailyRunTime(cron) ??
+      CRON_TASK_SESSION_CLEANUP_DEFAULTS.run_time,
+  };
+}
+
+export function writeCronTaskSessionCleanupValue(
+  config: SourceSystemConfig,
+  key: "enabled" | "retention_days" | "cron" | "run_time",
+  value: boolean | number | string,
+): SourceSystemConfig {
+  const nextConfig = clonePlainConfig(config);
+  const rawValue = nextConfig.cron_task_session_cleanup;
+  if (!isPlainObject(rawValue)) {
+    nextConfig.cron_task_session_cleanup = {};
+  }
+  const section = nextConfig.cron_task_session_cleanup as Record<
+    string,
+    unknown
+  >;
+  if (key === "run_time") {
+    const cron = dailyRunTimeToCron(String(value));
+    if (cron !== null) {
+      section.cron = cron;
+    }
+    return nextConfig;
+  }
+  section[key] = value;
   return nextConfig;
 }
 
@@ -417,10 +536,28 @@ export function validateCronUnreadAutoPauseConfig(
   return null;
 }
 
+export function validateCronTaskSessionCleanupConfig(
+  config: CronTaskSessionCleanupConfig,
+): string | null {
+  if (
+    !Number.isInteger(config.retention_days) ||
+    config.retention_days < CRON_TASK_SESSION_CLEANUP_MIN_RETENTION_DAYS
+  ) {
+    return `浠诲姟浼氳瘽鍘嗗彶淇濈暀澶╂暟涓嶈兘灏忎簬 ${CRON_TASK_SESSION_CLEANUP_MIN_RETENTION_DAYS}`;
+  }
+  if (cronToDailyRunTime(config.cron) === null) {
+    return "cron_task_session_cleanup.cron must be daily cron";
+  }
+  return null;
+}
+
 export function validateSourceSystemConfig(
   config: SourceSystemConfig,
 ): string | null {
   return (
+    validateCronTaskSessionCleanupConfig(
+      readCronTaskSessionCleanupConfig(config),
+    ) ||
     validateCronUnreadAutoPauseConfig(readCronUnreadAutoPauseConfig(config)) ||
     validateToolOutputConfigs(config)
   );

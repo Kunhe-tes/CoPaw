@@ -24,6 +24,10 @@
 补充说明：
 - Cron 执行链路会先绑定 tenant context，再进入 runner / tool 层，因此 tenant root `security.process_limits` 会沿同一上下文传播到 shell 与 MCP `stdio` 子进程启动点
 - 进程 CPU 时间/内存上限属于 launch-time 保护，和 Cron 自身的任务超时/调度超时是两套边界：前者限制单个子进程资源，后者限制整个任务 wall-clock 生命周期
+- 定时任务会话历史清理属于外部调度平台上的系统任务，配置来自 `source_system_config.cron_task_session_cleanup`，系统任务 ID 存在 `system_jobs.json`，不会写入业务 `jobs.json`，也不会出现在“我的任务”。
+- 该清理默认关闭；管理员在当前 Source 系统特性配置页开启后，会刷新当前 Agent 的外部调度平台系统任务注册。
+- 该清理只处理文件系统中的任务 session JSON 历史：按 `task_runs[].ended_at` 删除超过保留天数的历史 run、对应 `agent.memory.content` 片段和可判断时间的 `task_messages`；不清理 `swe_cron_executions`、Monitor、Tracing 或其它审计数据。
+- 清理和定时任务结束写回共用 task session 写锁；如果拿不到锁，本轮跳过该 session，避免运行中的任务每天同一时间执行时永久无法清理，也避免并发写覆盖。
 
 ## 基础支撑模块
 

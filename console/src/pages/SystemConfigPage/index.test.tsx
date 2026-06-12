@@ -192,6 +192,68 @@ describe("SystemConfigPage", () => {
     });
   });
 
+  it("saves cron task session cleanup settings", async () => {
+    mocks.sourceSystemConfigApi.getCurrent.mockResolvedValueOnce({
+      source_id: "portal",
+      config: {
+        provider_policy: { default_model: "qwen-max" },
+        cron_task_session_cleanup: {
+          enabled: true,
+          retention_days: 30,
+          cron: "0 1 * * *",
+          unknown_retained: "yes",
+        },
+      },
+      version: 1,
+      is_default: false,
+      updated_by: "alice",
+      updated_at: "2026-05-20 22:00:00",
+    });
+    mocks.sourceSystemConfigApi.updateCurrent.mockResolvedValue({
+      source_id: "portal",
+      config: {
+        provider_policy: { default_model: "qwen-max" },
+        cron_task_session_cleanup: {
+          enabled: true,
+          retention_days: 45,
+          cron: "30 2 * * *",
+          unknown_retained: "yes",
+        },
+      },
+      version: 2,
+      is_default: false,
+      updated_by: "alice",
+      updated_at: "2026-05-21 10:00:00",
+    });
+
+    render(<SystemConfigPage />);
+
+    expect(await screen.findByText("定时任务会话历史清理")).toBeTruthy();
+    expect(screen.getByLabelText("每日运行时间")).toHaveValue("01:00");
+
+    fireEvent.change(screen.getByDisplayValue("30"), {
+      target: { value: "45" },
+    });
+    fireEvent.change(screen.getByLabelText("每日运行时间"), {
+      target: { value: "02:30" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "common.save" }));
+
+    await waitFor(() => {
+      expect(mocks.sourceSystemConfigApi.updateCurrent).toHaveBeenCalledWith({
+        config: {
+          provider_policy: { default_model: "qwen-max" },
+          cron_task_session_cleanup: {
+            enabled: true,
+            retention_days: 45,
+            cron: "30 2 * * *",
+            unknown_retained: "yes",
+          },
+        },
+      });
+    });
+  });
+
   it("saves tool result compact values while preserving unknown raw keys", async () => {
     mocks.sourceSystemConfigApi.getCurrent.mockResolvedValueOnce({
       source_id: "portal",
