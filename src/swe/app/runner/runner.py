@@ -25,7 +25,7 @@ from agentscope_runtime.engine.schemas.agent_schemas import (
 from agentscope_runtime.engine.schemas.exception import AgentException
 from dotenv import load_dotenv
 
-from ..mcp.http_headers import resolve_mcp_http_headers
+from ..mcp.http_headers import build_mcp_http_headers
 from ..mcp.stateful_client import HttpStatefulClient, StdIOStatefulClient
 from ..mcp.stdio_launcher import build_tenant_aware_stdio_launch_config
 from .command_dispatch import (
@@ -626,12 +626,14 @@ def _resolve_active_model_label(tenant_id: str | None) -> str | None:
 async def _build_and_connect_mcp_clients(
     mcp_config: MCPConfig | None,
     passthrough_headers: dict[str, str] | None = None,
+    session_id: str | None = None,
 ) -> list[Any]:
     """Build and connect MCP clients from config for single request use.
 
     Args:
         mcp_config: MCP configuration from agent_config.mcp
         passthrough_headers: Headers to merge for HTTP transport clients
+        session_id: Request-scoped session identifier for reserved headers
 
     Returns:
         List of connected MCP client instances (all created for this request)
@@ -653,6 +655,7 @@ async def _build_and_connect_mcp_clients(
             client = await _create_mcp_client_with_headers(
                 client_config,
                 passthrough_headers,
+                session_id=session_id,
             )
             if client is not None:
                 await client.connect()
@@ -680,6 +683,7 @@ async def _build_and_connect_mcp_clients(
 async def _create_mcp_client_with_headers(
     client_config: MCPClientConfig,
     passthrough_headers: dict[str, str] | None = None,
+    session_id: str | None = None,
 ) -> Any:
     """Create a single MCP client with optional header passthrough.
 
@@ -689,6 +693,7 @@ async def _create_mcp_client_with_headers(
     Args:
         client_config: Single MCP client configuration
         passthrough_headers: Headers to merge for HTTP transport
+        session_id: Request-scoped session identifier for reserved headers
 
     Returns:
         MCP client instance (not yet connected)
@@ -698,6 +703,10 @@ async def _create_mcp_client_with_headers(
         "transport": client_config.transport,
         "url": client_config.url,
         "headers": client_config.headers or None,
+        "passthrough_headers": dict(passthrough_headers or {}) or None,
+        "session_id": session_id,
+        "timeout": _MCP_HTTP_TIMEOUT_SECONDS,
+        "sse_read_timeout": _MCP_HTTP_SSE_READ_TIMEOUT_SECONDS,
         "command": client_config.command,
         "args": list(client_config.args),
         "env": dict(client_config.env),
@@ -732,20 +741,17 @@ async def _create_mcp_client_with_headers(
         return client
 
     # HTTP transport (streamable_http or sse)
-    headers = client_config.headers
-    if headers:
-        headers = resolve_mcp_http_headers(headers)
-
-    # Merge passthrough headers for HTTP transport
-    merged_headers = dict(headers or {})
-    if passthrough_headers:
-        merged_headers.update(passthrough_headers)
+    merged_headers = build_mcp_http_headers(
+        client_config.headers,
+        passthrough_headers=passthrough_headers,
+        session_id=session_id,
+    )
 
     client = HttpStatefulClient(
         name=client_config.name,
         transport=client_config.transport,
         url=client_config.url,
-        headers=merged_headers or None,
+        headers=merged_headers,
         timeout=_MCP_HTTP_TIMEOUT_SECONDS,
         sse_read_timeout=_MCP_HTTP_SSE_READ_TIMEOUT_SECONDS,
     )
@@ -755,7 +761,6 @@ async def _create_mcp_client_with_headers(
         "_swe_rebuild_info",
         {
             **rebuild_info,
-            "headers": merged_headers,
             "_temp_client": True,
         },
     )
@@ -2400,6 +2405,7 @@ class AgentRunner(Runner):
             mcp_clients = await _build_and_connect_mcp_clients(
                 agent_config.mcp,
                 passthrough_headers=passthrough_headers or None,
+                session_id=session_id,
             )
 
             turn_id = f"turn-{uuid4().hex}"
