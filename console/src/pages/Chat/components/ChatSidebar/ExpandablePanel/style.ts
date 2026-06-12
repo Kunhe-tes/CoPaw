@@ -117,34 +117,36 @@ export default createGlobalStyle`
 }
 
 .expandable-panel-paused-group {
-  margin: 0 0 10px;
+  margin: 0 0 6px;
 }
 
 .expandable-panel-paused-toggle {
   width: 100%;
-  min-height: 42px;
-  padding: 0 11px 0 9px;
+  min-height: 30px;
+  padding: 0 4px;
   display: flex;
   align-items: center;
-  gap: 9px;
-  border: 1px solid rgba(55, 105, 252, 0.11);
-  border-radius: 10px;
-  background: rgba(55, 105, 252, 0.04);
-  color: ${DESIGN_TOKENS.colorTextSecondary};
-  font-size: 13px;
-  line-height: 20px;
+  gap: 6px;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  color: ${DESIGN_TOKENS.colorTextMuted};
+  font-size: 12px;
+  line-height: 18px;
   text-align: left;
   cursor: pointer;
-  box-shadow: 0 1px 2px rgba(17, 20, 45, 0.03);
-  transition:
-    background-color 0.18s ease,
-    border-color 0.18s ease,
-    box-shadow 0.18s ease;
+  transition: color 0.15s ease;
+
+  &::after {
+    content: "";
+    height: 1px;
+    flex: 1 1 auto;
+    margin-left: 4px;
+    background: rgba(17, 20, 45, 0.06);
+  }
 
   &:hover {
-    background: rgba(55, 105, 252, 0.07);
-    border-color: rgba(55, 105, 252, 0.20);
-    box-shadow: 0 4px 14px rgba(55, 105, 252, 0.08);
+    color: ${DESIGN_TOKENS.colorTextSecondary};
   }
 
   &:focus-visible {
@@ -153,40 +155,19 @@ export default createGlobalStyle`
   }
 }
 
-.expandable-panel-paused-icon {
-  width: 26px;
-  height: 26px;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  flex: 0 0 auto;
-  border-radius: 8px;
-  background: rgba(55, 105, 252, 0.11);
-  color: ${DESIGN_TOKENS.colorPrimary};
-}
-
 .expandable-panel-paused-label {
   min-width: 0;
-  color: ${DESIGN_TOKENS.colorTextPrimary};
-  font-weight: 500;
-  letter-spacing: 0.01em;
+  color: inherit;
+  font-weight: 400;
 }
 
 .expandable-panel-paused-count {
-  min-width: 22px;
-  height: 20px;
-  padding: 0 6px;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
   flex: 0 0 auto;
-  border: 1px solid rgba(55, 105, 252, 0.11);
-  border-radius: 10px;
-  background: rgba(255, 255, 255, 0.78);
-  color: ${DESIGN_TOKENS.colorTextSecondary};
-  font-size: 11px;
-  font-weight: 600;
+  color: inherit;
+  font-size: 12px;
+  font-weight: 400;
   line-height: 18px;
+  font-variant-numeric: tabular-nums;
 }
 
 .expandable-panel-paused-chevron {
@@ -195,7 +176,6 @@ export default createGlobalStyle`
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  margin-left: auto;
   color: ${DESIGN_TOKENS.colorTextMuted};
   transition: transform 0.2s ease;
 
@@ -347,28 +327,16 @@ export default createGlobalStyle`
   color: ${DESIGN_TOKENS.colorTextMuted};
 }
 
-.dark-mode .expandable-panel-paused-group {
-  border-top-color: transparent;
-}
-
 .dark-mode .expandable-panel-paused-toggle {
-  background: rgba(91, 138, 255, 0.08);
-  border-color: rgba(91, 138, 255, 0.14);
+  color: rgba(255, 255, 255, 0.46);
 }
 
 .dark-mode .expandable-panel-paused-toggle:hover {
-  background: rgba(91, 138, 255, 0.13);
-  border-color: rgba(91, 138, 255, 0.24);
+  color: rgba(255, 255, 255, 0.70);
 }
 
-.dark-mode .expandable-panel-paused-icon {
-  background: rgba(91, 138, 255, 0.16);
-  color: #8EADFF;
-}
-
-.dark-mode .expandable-panel-paused-count {
-  background: rgba(255, 255, 255, 0.06);
-  border-color: rgba(255, 255, 255, 0.08);
+.dark-mode .expandable-panel-paused-toggle::after {
+  background: rgba(255, 255, 255, 0.08);
 }
 
 @media (prefers-reduced-motion: reduce) {

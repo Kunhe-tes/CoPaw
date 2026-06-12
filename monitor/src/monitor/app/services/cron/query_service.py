@@ -1149,7 +1149,7 @@ class QueryService:
             SELECT COALESCE(NULLIF(j.bbk_id, ''), 'unknown') AS name,
                    COUNT(*) AS value
             FROM swe_cron_jobs j
-            WHERE {job_where} 
+            WHERE {job_where}
                 AND j.status IN ('active', 'paused')
             GROUP BY j.bbk_id
             ORDER BY value DESC, name ASC

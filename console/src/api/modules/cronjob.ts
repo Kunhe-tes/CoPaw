@@ -1,5 +1,8 @@
 import { request } from "../request";
 import type {
+  CronBroadcastChildRef,
+  CronBroadcastChildrenBatchResponse,
+  CronBroadcastChildrenResponse,
   CronBroadcastResponse,
   CronBroadcastTarget,
   CronJobSpecInput,
@@ -73,6 +76,35 @@ export const cronJobApi = {
           target_tenant_ids: targets.map((target) => target.tenant_id),
           targets,
         }),
+      },
+    ),
+
+  listCronBroadcastChildren: (jobId: string) =>
+    request<CronBroadcastChildrenResponse>(
+      `/cron/jobs/${encodeURIComponent(jobId)}/broadcast/children`,
+    ),
+
+  deleteCronBroadcastChildren: (
+    jobId: string,
+    items: CronBroadcastChildRef[],
+  ) =>
+    request<CronBroadcastChildrenBatchResponse>(
+      `/cron/jobs/${encodeURIComponent(jobId)}/broadcast/children/delete`,
+      {
+        method: "POST",
+        body: JSON.stringify({ items }),
+      },
+    ),
+
+  runCronBroadcastChildren: (
+    jobId: string,
+    items: CronBroadcastChildRef[],
+  ) =>
+    request<CronBroadcastChildrenBatchResponse>(
+      `/cron/jobs/${encodeURIComponent(jobId)}/broadcast/children/run`,
+      {
+        method: "POST",
+        body: JSON.stringify({ items }),
       },
     ),
 };

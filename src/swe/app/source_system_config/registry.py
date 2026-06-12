@@ -100,6 +100,8 @@ CRON_UNREAD_AUTO_PAUSE_THRESHOLD_SETTING = SourceSystemConfigSetting(
     value_type="int",
     ge=1,
 )
+SYSTEM_PROMPT_INJECTIONS_PATH = ("system_prompt_injections",)
+SYSTEM_PROMPT_INJECTIONS_DEFAULT: list[str] = []
 
 CURRENT_SOURCE_SYSTEM_CONFIG_SWITCHES: tuple[SourceSystemConfigSwitch, ...] = (
     CHAT_TASK_PROGRESS_ENABLED_SWITCH,
@@ -146,6 +148,9 @@ def build_default_source_system_config_payload() -> dict[str, Any]:
             payload,
             _build_nested_payload(setting.path, setting.default_value),
         )
+    payload[SYSTEM_PROMPT_INJECTIONS_PATH[0]] = deepcopy(
+        SYSTEM_PROMPT_INJECTIONS_DEFAULT,
+    )
     return payload
 
 
@@ -172,6 +177,13 @@ def prune_registered_default_overrides(
             if setting.path in _PRESERVED_DEFAULT_SETTING_PATHS:
                 continue
             _delete_nested_path(pruned, setting.path)
+    prompt_injections = pruned.get(SYSTEM_PROMPT_INJECTIONS_PATH[0], _MISSING)
+    if prompt_injections is not _MISSING:
+        normalized = normalize_system_prompt_injections(prompt_injections)
+        if normalized == SYSTEM_PROMPT_INJECTIONS_DEFAULT:
+            pruned.pop(SYSTEM_PROMPT_INJECTIONS_PATH[0], None)
+        else:
+            pruned[SYSTEM_PROMPT_INJECTIONS_PATH[0]] = normalized
     _drop_immediate_truncation_sections_without_enabled(pruned)
     return pruned
 
@@ -212,6 +224,33 @@ def is_database_access_guard_enabled(config: Any | None) -> bool:
     )
 
 
+def normalize_system_prompt_injections(value: Any) -> list[str]:
+    """规范化 source 级系统提示词注入列表。"""
+    if value is None:
+        return []
+    if not isinstance(value, list):
+        raise ValueError("system_prompt_injections must be a list")
+
+    normalized: list[str] = []
+    seen: set[str] = set()
+    for item in value:
+        text = str(item).strip()
+        if not text or text in seen:
+            continue
+        seen.add(text)
+        normalized.append(text)
+    return normalized
+
+
+def get_system_prompt_injections(config: Any | None) -> list[str]:
+    """读取合成后的 source 系统提示词注入配置。"""
+    raw_config = _normalize_config_payload(config)
+    merged = merge_source_system_config_with_defaults(raw_config)
+    return normalize_system_prompt_injections(
+        merged.get(SYSTEM_PROMPT_INJECTIONS_PATH[0], []),
+    )
+
+
 def normalize_registered_setting_values(
     raw_config: dict[str, Any],
     *,
@@ -220,6 +259,14 @@ def normalize_registered_setting_values(
     """规范化已注册配置项的值，避免脏值进入持久化配置。"""
     normalized = deepcopy(raw_config)
     _drop_deprecated_system_sections(normalized)
+    prompt_injections = normalized.get(
+        SYSTEM_PROMPT_INJECTIONS_PATH[0],
+        _MISSING,
+    )
+    if prompt_injections is not _MISSING:
+        normalized[SYSTEM_PROMPT_INJECTIONS_PATH[0]] = (
+            normalize_system_prompt_injections(prompt_injections)
+        )
     for setting in CURRENT_SOURCE_SYSTEM_CONFIG_SETTINGS:
         value = _get_nested_value(normalized, setting.path)
         if value is _MISSING:
@@ -440,16 +487,20 @@ __all__ = [
     "FILE_READ_TRUNCATION_MAX_BYTES_SETTING",
     "SourceSystemConfigSwitch",
     "SourceSystemConfigSetting",
+    "SYSTEM_PROMPT_INJECTIONS_DEFAULT",
+    "SYSTEM_PROMPT_INJECTIONS_PATH",
     "TOOL_RESULT_COMPACT_ENABLED_SETTING",
     "TOOL_RESULT_COMPACT_OLD_MAX_BYTES_SETTING",
     "TOOL_RESULT_COMPACT_RECENT_MAX_BYTES_SETTING",
     "TOOL_RESULT_COMPACT_RECENT_N_SETTING",
     "TOOL_RESULT_COMPACT_RETENTION_DAYS_SETTING",
     "build_default_source_system_config_payload",
+    "get_system_prompt_injections",
     "is_chat_task_progress_enabled",
     "is_database_access_guard_enabled",
     "merge_source_system_config_with_defaults",
     "normalize_registered_setting_values",
     "normalize_registered_switch_values",
+    "normalize_system_prompt_injections",
     "prune_registered_default_overrides",
 ]

@@ -500,6 +500,96 @@ def test_internal_batch_initialize_marks_existing_tenant_as_skipped(
     )
 
 
+def test_internal_batch_initialize_marks_existing_tenant_as_skipped_from_fs(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    from swe.app.workspace.tenant_initializer import TenantInitializer
+
+    monkeypatch.setattr(
+        TenantInitializer,
+        "_has_skill_pool_state",
+        lambda self: True,
+    )
+
+    existing_init = TenantInitializer(tmp_path, "111", source_id="RMASSIST")
+    tenant_dir = existing_init.tenant_dir
+    default_workspace = tenant_dir / "workspaces" / "default"
+    default_workspace.mkdir(parents=True, exist_ok=True)
+    (tenant_dir / "config.json").write_text("{}", encoding="utf-8")
+    (default_workspace / "agent.json").write_text("{}", encoding="utf-8")
+    (default_workspace / "chats.json").write_text("{}", encoding="utf-8")
+    (default_workspace / "jobs.json").write_text("{}", encoding="utf-8")
+    (default_workspace / "token_usage.json").write_text(
+        "{}",
+        encoding="utf-8",
+    )
+    (default_workspace / "sessions").mkdir(exist_ok=True)
+    (default_workspace / "memory").mkdir(exist_ok=True)
+    for file_name in (
+        "AGENTS.md",
+        "HEARTBEAT.md",
+        "MEMORY.md",
+        "PROFILE.md",
+        "SOUL.md",
+    ):
+        (default_workspace / file_name).write_text("", encoding="utf-8")
+    skill_pool_dir = tenant_dir / "skill_pool"
+    skill_pool_dir.mkdir(parents=True, exist_ok=True)
+    (skill_pool_dir / "skill.json").write_text(
+        json.dumps({"skills": {"default-skill": {"name": "default-skill"}}}),
+        encoding="utf-8",
+    )
+
+    assert existing_init.has_seeded_bootstrap() is True
+
+    pool = SimpleNamespace(
+        ensure_bootstrap=AsyncMock(),
+        _base_working_dir=tmp_path,
+    )
+    client = _build_client(SimpleNamespace())
+    client.app.state.tenant_workspace_pool = pool
+
+    async def fake_resolve_user_identity(**kwargs):
+        tenant_id = kwargs["tenant_id"]
+        return ResolvedIdentity(
+            user_name=f"name-{tenant_id}",
+            bbk_id=f"bbk-{tenant_id}",
+        )
+
+    monkeypatch.setattr(
+        internal_router,
+        "resolve_user_identity",
+        fake_resolve_user_identity,
+    )
+
+    response = client.post(
+        "/internal/tenants/batch-initialize",
+        json={
+            "tenant_ids": "111",
+            "source_id": "RMASSIST",
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "success": True,
+        "total": 1,
+        "success_count": 1,
+        "fail_count": 0,
+        "results": [
+            {
+                "tenant_id": "111",
+                "tenant_name": "name-111",
+                "bbk_id": "bbk-111",
+                "status": "success",
+                "message": "skipped",
+            },
+        ],
+    }
+    pool.ensure_bootstrap.assert_not_awaited()
+
+
 def test_internal_batch_initialize_rejects_empty_tenant_ids() -> None:
     client = _build_client(SimpleNamespace())
 

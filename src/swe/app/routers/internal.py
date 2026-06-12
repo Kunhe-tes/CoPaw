@@ -27,6 +27,7 @@ from ...config.scope_conversion import (
 )
 from ...config.utils import list_all_tenant_ids
 from ...constant import WORKING_DIR
+from ..workspace.tenant_initializer import TenantInitializer
 
 router = APIRouter(prefix="/internal", tags=["internal"])
 public_router = APIRouter(prefix="/assets", tags=["assets"])
@@ -274,36 +275,18 @@ async def _is_tenant_already_bootstrapped(
     tenant_id: str,
     source_id: str,
 ) -> bool:
-    """判断租户是否已经完成 bootstrap。"""
-    resolve_bootstrap_tenant_id = getattr(
-        pool,
-        "_resolve_bootstrap_tenant_id",
-        None,
-    )
-    check_existing_bootstrap = getattr(
-        pool,
-        "_check_existing_bootstrap",
-        None,
-    )
-    if not callable(resolve_bootstrap_tenant_id) or not callable(
-        check_existing_bootstrap,
-    ):
+    """判断租户目录是否已经完成 bootstrap。"""
+    base_working_dir = getattr(pool, "_base_working_dir", None)
+    if base_working_dir is None:
         return False
 
     try:
-        bootstrap_tenant_id = resolve_bootstrap_tenant_id(
+        initializer = TenantInitializer(
+            base_working_dir,
             tenant_id,
-            source_id,
-            None,
+            source_id=source_id,
         )
-        return bool(
-            await check_existing_bootstrap(
-                bootstrap_tenant_id,
-                tenant_id,
-                source_id,
-                None,
-            ),
-        )
+        return initializer.has_seeded_bootstrap()
     except Exception:
         return False
 

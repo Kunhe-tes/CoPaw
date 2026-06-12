@@ -12,6 +12,8 @@ from typing import Any
 import pytest
 
 from swe.app.routers import providers as providers_router
+from swe.config.context import encode_scope_id, tenant_context
+from swe.providers.provider_manager import ProviderManager
 from swe.providers.models import ModelSlotConfig
 
 
@@ -428,6 +430,33 @@ def test_distribute_active_model_uses_request_scope_for_source_dir(
         provider_id="openai",
         model="gpt-5.4",
     )
+
+
+def test_provider_manager_keeps_explicit_target_scope_under_request_scope(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    secret_dir = tmp_path / "secret"
+    monkeypatch.setattr(
+        "swe.providers.provider_manager.SECRET_DIR",
+        secret_dir,
+    )
+    ProviderManager.reset_instance_cache()
+
+    target_scope_id = encode_scope_id("tenant-target", "source-b")
+    source_scope_id = encode_scope_id("tenant-source", "source-a")
+
+    with tenant_context(
+        tenant_id="tenant-source",
+        source_id="source-a",
+        scope_id=source_scope_id,
+    ):
+        ProviderManager.ensure_tenant_provider_storage(target_scope_id)
+        manager = ProviderManager.get_instance(target_scope_id)
+
+    assert manager.tenant_id == target_scope_id
+    assert (secret_dir / target_scope_id / "providers").exists()
+    assert not (secret_dir / source_scope_id / "providers").exists()
 
 
 def test_distribute_active_model_overwrites_builtin_provider_and_switches_active_slot(
