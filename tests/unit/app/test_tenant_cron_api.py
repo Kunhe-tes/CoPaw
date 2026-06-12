@@ -10,6 +10,8 @@ from pathlib import Path
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from swe.config.context import encode_scope_id
+from swe.config.context import tenant_context
+from swe.providers.provider_manager import ProviderManager
 
 SRC_ROOT = Path(__file__).parent.parent.parent.parent / "src"
 sys.path.insert(0, str(SRC_ROOT))
@@ -143,8 +145,13 @@ class _ProviderManager:
 
 
 class _Workspace:
-    def __init__(self, cron_manager: _Manager):
+    def __init__(
+        self,
+        cron_manager: _Manager,
+        workspace_dir: str = "/tmp/workspaces/default",
+    ):
         self.cron_manager = cron_manager
+        self.workspace_dir = workspace_dir
 
 
 class _MultiAgentManager:
@@ -735,9 +742,7 @@ def test_broadcast_child_inherits_notification_delay_minutes():
     )
 
     assert response.status_code == 200
-    assert (
-        target_manager.created[0].meta["notification_delay_minutes"] == 120
-    )
+    assert target_manager.created[0].meta["notification_delay_minutes"] == 120
 
 
 def test_broadcast_clears_stale_fallback_meta_when_source_model_slot_missing():
@@ -862,6 +867,33 @@ def test_broadcast_job_persists_target_identity_from_request():
     ]
 
 
+def test_cron_provider_manager_respects_explicit_target_scope(
+    monkeypatch,
+    tmp_path: Path,
+):
+    api_module.ProviderManager = ProviderManager
+    secret_dir = tmp_path / "secret"
+    monkeypatch.setattr(
+        "swe.providers.provider_manager.SECRET_DIR",
+        secret_dir,
+    )
+    ProviderManager.reset_instance_cache()
+
+    source_scope_id = encode_scope_id("tenant-a", "source-a")
+    target_scope_id = encode_scope_id("tenant-b", "source-b")
+
+    with tenant_context(
+        tenant_id="tenant-a",
+        source_id="source-a",
+        scope_id=source_scope_id,
+    ):
+        manager = api_module._get_provider_manager(target_scope_id)
+
+    assert manager.tenant_id == target_scope_id
+    assert (secret_dir / target_scope_id / "providers").exists()
+    assert not (secret_dir / source_scope_id / "providers").exists()
+
+
 def test_broadcast_updates_existing_child_job_definition():
     source_job = CronJobSpec.model_validate(
         {
@@ -978,7 +1010,9 @@ def test_broadcast_updates_existing_child_job_definition():
     ]
 
 
-def test_list_broadcast_children_returns_empty_for_undistributed_job(monkeypatch):
+def test_list_broadcast_children_returns_empty_for_undistributed_job(
+    monkeypatch,
+):
     async def _list_tenants(_source_id, source_filter=True):
         del source_filter
         return ["tenant-b"]
