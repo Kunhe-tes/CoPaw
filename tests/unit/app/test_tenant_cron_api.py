@@ -128,8 +128,13 @@ class _ProviderManager:
 
 
 class _Workspace:
-    def __init__(self, cron_manager: _Manager):
+    def __init__(
+        self,
+        cron_manager: _Manager,
+        workspace_dir: str = "/tmp/workspaces/default",
+    ):
         self.cron_manager = cron_manager
+        self.workspace_dir = workspace_dir
 
 
 class _MultiAgentManager:
@@ -710,6 +715,64 @@ def test_broadcast_job_persists_target_identity_from_request():
             "bbk_id": "2002",
         },
     ]
+
+
+def test_broadcast_job_rewrites_workspace_dir_to_target_workspace():
+    source_job = CronJobSpec.model_validate(
+        {
+            **_job_spec("job-source"),
+            "schedule": ScheduleSpec(
+                cron="0 9 * * *",
+            ).model_dump(mode="json"),
+            "tenant_id": "tenant-a",
+            "source_id": "source-a",
+            "scope_id": encode_scope_id("tenant-a", "source-a"),
+            "dispatch": DispatchSpec(
+                channel="console",
+                target=DispatchTarget(
+                    user_id="user-a",
+                    session_id="session-a",
+                ),
+                meta={
+                    "workspace_dir": "/tmp/tenant-a/workspaces/default",
+                },
+            ).model_dump(mode="json"),
+        },
+    )
+    source_manager = _Manager({"job-source": source_job})
+    target_manager = _Manager()
+    target_workspace_dir = "/tmp/tenant-b-scope/workspaces/default"
+    multi_agent_manager = _MultiAgentManager(
+        {
+            encode_scope_id("tenant-b", "source-a"): _Workspace(
+                target_manager,
+                workspace_dir=target_workspace_dir,
+            ),
+        },
+    )
+
+    client = _build_client(
+        source_manager,
+        multi_agent_manager=multi_agent_manager,
+        tenant_workspace_pool=_TenantWorkspacePool(),
+    )
+    _install_provider_manager(
+        {},
+        providers_by_tenant={
+            encode_scope_id("tenant-b", "source-a"): {},
+        },
+    )
+
+    response = client.post(
+        "/cron/jobs/job-source/broadcast",
+        json={"target_tenant_ids": ["tenant-b"]},
+    )
+
+    assert response.status_code == 200
+    assert (
+        target_manager.created[0].dispatch.meta["workspace_dir"]
+        == target_workspace_dir
+    )
 
 
 def test_broadcast_skips_tenant_that_already_has_source_child_job():
