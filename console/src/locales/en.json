@@ -70,7 +70,24 @@
     "instanceAllocations": "Allocations",
     "instanceOperationLogs": "Operation Logs",
     "harness": "Harness",
-    "continuousIteration": "Continuous Iteration"
+    "continuousIteration": "Continuous Iteration",
+    "systemCheck": "System Check"
+  },
+  "systemCheck": {
+    "forbidden": "Only managers can access system checks.",
+    "authExpiry": {
+      "title": "Auth Expiry Check",
+      "tenantIds": "Tenant ID",
+      "sourceRequired": "Enter Source ID.",
+      "tenantRequired": "Enter at least one tenant ID.",
+      "columns": {
+        "tenantId": "Tenant ID",
+        "status": "Status",
+        "expiry": "Expiry Time",
+        "expired": "Expired",
+        "message": "Message"
+      }
+    }
   },
   "cases": {
     "title": "Cases Management",

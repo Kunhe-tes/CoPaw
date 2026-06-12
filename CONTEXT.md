@@ -140,6 +140,10 @@ _Avoid_: generic exception, plain-text tool failure, error string
 A persisted `tool_result` failure payload encoded in the MCP-style shape with `isError=true` and failure content blocks. A **Structured Tool Failure Result** is the canonical terminal output for failed tool invocations across local tools, MCP tools, and runtime-generated failures.
 _Avoid_: plain-text failure output, ad-hoc error JSON, inferred tool failure
 
+**MCP Availability Failure**:
+A failure that prevents an enabled MCP client from becoming usable by an Agent, including failure to connect or discover its available capabilities. An **MCP Availability Failure** is distinct from an individual MCP tool invocation returning a **Structured Tool Failure Result**.
+_Avoid_: MCP tool failure, optional MCP skip, successful connection log
+
 **Hook Telemetry Event**:
 A structured observability record for one Hook Runtime boundary, used to analyze hook behavior without changing the hook's runtime decision semantics. A **Hook Telemetry Event** includes the boundary-level outcome and the handler-level details that explain it, and is emitted in a log-collection-friendly shape rather than persisted as a Trace Span.
 _Avoid_: debug log, audit record, raw hook payload, trace span
