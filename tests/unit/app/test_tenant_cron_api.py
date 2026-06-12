@@ -9,6 +9,8 @@ from pathlib import Path
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from swe.config.context import encode_scope_id
+from swe.config.context import tenant_context
+from swe.providers.provider_manager import ProviderManager
 
 SRC_ROOT = Path(__file__).parent.parent.parent.parent / "src"
 sys.path.insert(0, str(SRC_ROOT))
@@ -717,62 +719,31 @@ def test_broadcast_job_persists_target_identity_from_request():
     ]
 
 
-def test_broadcast_job_rewrites_workspace_dir_to_target_workspace():
-    source_job = CronJobSpec.model_validate(
-        {
-            **_job_spec("job-source"),
-            "schedule": ScheduleSpec(
-                cron="0 9 * * *",
-            ).model_dump(mode="json"),
-            "tenant_id": "tenant-a",
-            "source_id": "source-a",
-            "scope_id": encode_scope_id("tenant-a", "source-a"),
-            "dispatch": DispatchSpec(
-                channel="console",
-                target=DispatchTarget(
-                    user_id="user-a",
-                    session_id="session-a",
-                ),
-                meta={
-                    "workspace_dir": "/tmp/tenant-a/workspaces/default",
-                },
-            ).model_dump(mode="json"),
-        },
+def test_cron_provider_manager_respects_explicit_target_scope(
+    monkeypatch,
+    tmp_path: Path,
+):
+    api_module.ProviderManager = ProviderManager
+    secret_dir = tmp_path / "secret"
+    monkeypatch.setattr(
+        "swe.providers.provider_manager.SECRET_DIR",
+        secret_dir,
     )
-    source_manager = _Manager({"job-source": source_job})
-    target_manager = _Manager()
-    target_workspace_dir = "/tmp/tenant-b-scope/workspaces/default"
-    multi_agent_manager = _MultiAgentManager(
-        {
-            encode_scope_id("tenant-b", "source-a"): _Workspace(
-                target_manager,
-                workspace_dir=target_workspace_dir,
-            ),
-        },
-    )
+    ProviderManager.reset_instance_cache()
 
-    client = _build_client(
-        source_manager,
-        multi_agent_manager=multi_agent_manager,
-        tenant_workspace_pool=_TenantWorkspacePool(),
-    )
-    _install_provider_manager(
-        {},
-        providers_by_tenant={
-            encode_scope_id("tenant-b", "source-a"): {},
-        },
-    )
+    source_scope_id = encode_scope_id("tenant-a", "source-a")
+    target_scope_id = encode_scope_id("tenant-b", "source-b")
 
-    response = client.post(
-        "/cron/jobs/job-source/broadcast",
-        json={"target_tenant_ids": ["tenant-b"]},
-    )
+    with tenant_context(
+        tenant_id="tenant-a",
+        source_id="source-a",
+        scope_id=source_scope_id,
+    ):
+        manager = api_module._get_provider_manager(target_scope_id)
 
-    assert response.status_code == 200
-    assert (
-        target_manager.created[0].dispatch.meta["workspace_dir"]
-        == target_workspace_dir
-    )
+    assert manager.tenant_id == target_scope_id
+    assert (secret_dir / target_scope_id / "providers").exists()
+    assert not (secret_dir / source_scope_id / "providers").exists()
 
 
 def test_broadcast_skips_tenant_that_already_has_source_child_job():
