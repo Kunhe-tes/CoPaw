@@ -269,6 +269,45 @@ def _parse_batch_tenant_ids(raw_tenant_ids: str) -> list[str]:
     return tenant_ids
 
 
+async def _is_tenant_already_bootstrapped(
+    pool: Any,
+    tenant_id: str,
+    source_id: str,
+) -> bool:
+    """判断租户是否已经完成 bootstrap。"""
+    resolve_bootstrap_tenant_id = getattr(
+        pool,
+        "_resolve_bootstrap_tenant_id",
+        None,
+    )
+    check_existing_bootstrap = getattr(
+        pool,
+        "_check_existing_bootstrap",
+        None,
+    )
+    if not callable(resolve_bootstrap_tenant_id) or not callable(
+        check_existing_bootstrap,
+    ):
+        return False
+
+    try:
+        bootstrap_tenant_id = resolve_bootstrap_tenant_id(
+            tenant_id,
+            source_id,
+            None,
+        )
+        return bool(
+            await check_existing_bootstrap(
+                bootstrap_tenant_id,
+                tenant_id,
+                source_id,
+                None,
+            ),
+        )
+    except Exception:
+        return False
+
+
 def _require_internal_token(
     authorization: Optional[str],
     x_internal_token: Optional[str],
@@ -708,6 +747,23 @@ async def internal_batch_initialize_tenants(
             )
             if payload.fail_fast:
                 break
+            continue
+
+        if await _is_tenant_already_bootstrapped(
+            pool,
+            tenant_id,
+            payload.source_id,
+        ):
+            success_count += 1
+            results.append(
+                InternalBatchInitializeTenantResult(
+                    tenant_id=tenant_id,
+                    tenant_name=resolved_identity.user_name,
+                    bbk_id=resolved_identity.bbk_id,
+                    status="success",
+                    message="skipped",
+                ),
+            )
             continue
 
         try:

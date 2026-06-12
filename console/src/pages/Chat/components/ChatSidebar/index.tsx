@@ -328,6 +328,7 @@ export default function ChatSidebar(props: ChatSidebarProps) {
             type="tasks"
             onClose={handleClosePanel}
             tasks={tasks}
+            selectedTaskId={selectedTaskId}
             sessions={sessions}
             onTaskClick={handleTaskOpen}
             onTaskPause={onTaskPause}

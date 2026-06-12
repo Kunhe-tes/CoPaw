@@ -26,6 +26,7 @@ class MyMCPRequestContext:
     effective_tenant_id: str
     agent_id: str
     user_name: str = ""
+    bbk_id: str = ""
 
     def __post_init__(self) -> None:
         if not self.user_name:
@@ -43,6 +44,7 @@ def resolve_my_mcp_request_context(request: Request) -> MyMCPRequestContext:
     tenant_id = request.headers.get("X-Tenant-Id", "").strip() or user_id
     source_id = request.headers.get("X-Source-Id", "").strip()
     agent_id = request.headers.get("X-Agent-Id", "").strip()
+    bbk_id = request.headers.get("X-Bbk-Id", "").strip()
 
     if not user_id:
         raise HTTPException(
@@ -78,6 +80,7 @@ def resolve_my_mcp_request_context(request: Request) -> MyMCPRequestContext:
         source_id=source_id,
         effective_tenant_id=effective_tenant_id,
         agent_id=resolved_agent_id,
+        bbk_id=bbk_id,
     )
 
 

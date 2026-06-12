@@ -329,7 +329,7 @@
 .panelLarge,
 .panelMedium {
   min-height: 290px;
-  padding: 18px 20px;
+  padding: 18px 16px;
 }
 
 .panelHeader {
@@ -430,22 +430,29 @@
   display: grid;
   grid-template-columns: 28px minmax(0, 1fr) 28px;
   align-items: stretch;
-  gap: 12px;
+  gap: 0px;
 }
 
-.axisLeft,
+.axisLeft {
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between;
+  padding: 10px 0 32px;
+  color: #94a3b8;
+  font-size: 12px;
+  line-height: 1;
+  text-align: right;
+}
+
 .axisRight {
   display: flex;
   flex-direction: column;
   justify-content: space-between;
-  padding: 14px 0 20px;
+  padding: 10px 0 32px;
   color: #94a3b8;
   font-size: 12px;
   line-height: 1;
-}
-
-.axisRight {
-  text-align: right;
+  text-align: left;
 }
 
 .trendPlotArea {
@@ -466,7 +473,7 @@
 
 .axisLabel {
   fill: #64748b;
-  font-size: 12px;
+  font-size: 10px;
   text-anchor: middle;
 }
 
