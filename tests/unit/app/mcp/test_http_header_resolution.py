@@ -113,24 +113,61 @@ async def test_runner_http_client_keeps_tenant_secret_literal(
     assert captured["stateful_client_kwargs"]["headers"] == {
         "Authorization": "Bearer abc${HOME}xyz",
         "X-Home": "dir=/home/demo",
+        "x-swe-tenant-id": "tenant-a",
+        "x-swe-source-id": "source-a",
     }
 
 
-def test_rebuild_mcp_client_keeps_tenant_secret_literal(
+@pytest.mark.asyncio
+async def test_runner_http_client_injects_runtime_scope_headers_and_dedupes_reserved_keys(
     monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
+) -> None:
+    from swe.app.runner import runner as runner_module
+
+    captured: dict[str, Any] = {}
+
+    class _FakeHttpStatefulClient:
+        def __init__(self, **kwargs):
+            captured["stateful_client_kwargs"] = kwargs
+
+    monkeypatch.setattr(
+        runner_module,
+        "HttpStatefulClient",
+        _FakeHttpStatefulClient,
+    )
+
+    with tenant_context(tenant_id="tenant-a", source_id="source-a"):
+        await runner_module._create_mcp_client_with_headers(
+            MCPClientConfig(
+                name="demo",
+                transport="streamable_http",
+                url="https://mcp.example.test/stream",
+                headers={
+                    "X-Swe-Tenant-Id": "config-tenant",
+                    "X-Swe-Source-Id": "config-source",
+                    "X-Static": "static",
+                },
+            ),
+            passthrough_headers={
+                "x-swe-source-id": "passthrough-source",
+                "Authorization": "Bearer test-token",
+            },
+        )
+
+    assert captured["stateful_client_kwargs"]["headers"] == {
+        "X-Static": "static",
+        "Authorization": "Bearer test-token",
+        "x-swe-tenant-id": "tenant-a",
+        "x-swe-source-id": "source-a",
+    }
+
+
+def test_rebuild_mcp_client_reuses_materialized_headers_without_reresolving(
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     from swe.agents.react_agent import SWEAgent
 
-    monkeypatch.setattr("swe.config.utils.WORKING_DIR", tmp_path)
-    monkeypatch.setattr("swe.constant.WORKING_DIR", tmp_path)
     monkeypatch.setenv("HOME", "/home/demo")
-    _write_scope_env(
-        tmp_path,
-        "tenant-a",
-        "source-a",
-        {"MCP_TOKEN": "abc${HOME}xyz"},
-    )
     captured: dict[str, Any] = {}
 
     class _FakeHttpStatefulClient:
@@ -143,8 +180,9 @@ def test_rebuild_mcp_client_keeps_tenant_secret_literal(
             "transport": "streamable_http",
             "url": "https://mcp.example.test/stream",
             "headers": {
-                "Authorization": "Bearer ${ENV:MCP_TOKEN}",
                 "X-Home": "dir=${HOME}",
+                "x-swe-tenant-id": "tenant-a",
+                "x-swe-source-id": "source-a",
             },
         },
     )
@@ -153,10 +191,10 @@ def test_rebuild_mcp_client_keeps_tenant_secret_literal(
         "swe.agents.react_agent.HttpStatefulClient",
         _FakeHttpStatefulClient,
     ):
-        with tenant_context(tenant_id="tenant-a", source_id="source-a"):
-            SWEAgent._rebuild_mcp_client(original_client)
+        SWEAgent._rebuild_mcp_client(original_client)
 
     assert captured["headers"] == {
-        "Authorization": "Bearer abc${HOME}xyz",
-        "X-Home": "dir=/home/demo",
+        "X-Home": "dir=${HOME}",
+        "x-swe-tenant-id": "tenant-a",
+        "x-swe-source-id": "source-a",
     }

@@ -36,8 +36,13 @@ async def test_query_handler_injects_auth_headers_into_mcp_headers_and_context(
 
     captured: dict[str, Any] = {}
 
-    async def fake_build_clients(_mcp, passthrough_headers=None):
+    async def fake_build_clients(
+        _mcp,
+        passthrough_headers=None,
+        session_id=None,
+    ):
         captured["passthrough_headers"] = passthrough_headers
+        captured["session_id"] = session_id
         return []
 
     class FakeAgent:
@@ -101,6 +106,7 @@ async def test_query_handler_injects_auth_headers_into_mcp_headers_and_context(
     assert captured["passthrough_headers"] == {
         "cookie": "foo=bar; com.cmb.dw.rtl.sso.token=auth-123",
     }
+    assert captured["session_id"] == "session-1"
     assert captured["request_context"]["auth_token"] == "token-123"
 
 
@@ -116,8 +122,13 @@ async def test_query_handler_keeps_existing_passthrough_headers(monkeypatch):
 
     captured: dict[str, Any] = {}
 
-    async def fake_build_clients(_mcp, passthrough_headers=None):
+    async def fake_build_clients(
+        _mcp,
+        passthrough_headers=None,
+        session_id=None,
+    ):
         captured["passthrough_headers"] = passthrough_headers
+        captured["session_id"] = session_id
         return []
 
     class FakeAgent:
@@ -189,4 +200,5 @@ async def test_query_handler_keeps_existing_passthrough_headers(monkeypatch):
         "authorization": "Bearer existing",
         "cookie": "foo=bar; com.cmb.dw.rtl.sso.token=auth-123",
     }
+    assert captured["session_id"] == "session-1"
     assert captured["request_context"]["auth_token"] == "token-123"

@@ -24,7 +24,6 @@ from anyio import ClosedResourceError
 from pydantic import BaseModel
 
 from ..app.mcp.stdio_launcher import build_tenant_aware_stdio_launch_config
-from ..app.mcp.http_headers import resolve_mcp_http_headers
 from .command_handler import CommandHandler
 from ..app.mcp import HttpStatefulClient, StdIOStatefulClient
 from .hooks import BootstrapHook, MemoryCompactionHook
@@ -852,7 +851,7 @@ class SWEAgent(ToolGuardMixin, ReActAgent):
                 return rebuilt_client
 
             raw_headers = rebuild_info.get("headers") or {}
-            headers = resolve_mcp_http_headers(raw_headers)
+            headers = dict(raw_headers) or None
             rebuilt_client = HttpStatefulClient(
                 name=name,
                 transport=transport,
