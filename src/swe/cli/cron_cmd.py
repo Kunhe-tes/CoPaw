@@ -13,6 +13,8 @@ from ..app.channels.schema import DEFAULT_CHANNEL
 from ..config.context import get_current_source_id, get_current_tenant_id
 from ..config.utils import load_config
 
+MAX_NOTIFICATION_DELAY_MINUTES = 7 * 24 * 60
+
 
 def _base_url(ctx: click.Context, base_url: Optional[str]) -> str:
     """Resolve base_url with priority:
@@ -195,6 +197,7 @@ def _build_spec_from_cli(
     model: Optional[str],
     tenant_id: Optional[str] = None,
     job_id: str = "",
+    notification_delay_minutes: int = 0,
 ) -> dict:
     """Build CronJobSpec JSON payload from CLI args."""
     schedule = {"type": "cron", "cron": cron, "timezone": timezone}
@@ -205,7 +208,7 @@ def _build_spec_from_cli(
         "mode": mode,
         "meta": {},
     }
-    meta = {}
+    meta = {"notification_delay_minutes": notification_delay_minutes}
     if creator_user:
         meta["creator_user_id"] = creator_user
     runtime = {
@@ -305,6 +308,7 @@ def _build_payload_from_args(
     model: Optional[str],
     tenant_id: Optional[str],
     job_id: str = "",
+    notification_delay_minutes: int = 0,
 ) -> dict:
     if file_ is not None:
         payload = json.loads(file_.read_text(encoding="utf-8"))
@@ -343,6 +347,7 @@ def _build_payload_from_args(
         model=model,
         tenant_id=tenant_id,
         job_id=job_id,
+        notification_delay_minutes=notification_delay_minutes,
     )
 
 
@@ -701,6 +706,16 @@ def _merge_update_payload(
     help="Model name to store in model_slot for agent jobs.",
 )
 @click.option(
+    "--notification-delay-minutes",
+    type=click.IntRange(0, MAX_NOTIFICATION_DELAY_MINUTES),
+    default=0,
+    show_default=True,
+    help=(
+        "Delay successful automatic-run completion notifications by this "
+        "many minutes."
+    ),
+)
+@click.option(
     "--base-url",
     default=None,
     help="Override the API base URL. Defaults to global --host/--port.",
@@ -737,6 +752,7 @@ def create_job(
     mode: str,
     model_provider: Optional[str],
     model: Optional[str],
+    notification_delay_minutes: int,
     base_url: Optional[str],
     agent_id: str,
     tenant_id: Optional[str],
@@ -767,6 +783,7 @@ def create_job(
         model_provider=model_provider,
         model=model,
         tenant_id=tenant_id,
+        notification_delay_minutes=notification_delay_minutes,
     )
     with client(base_url) as c:
         effective_user_id = _infer_effective_user_id(payload, creator_user)

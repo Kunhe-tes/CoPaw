@@ -41,9 +41,9 @@ POST /api/cron/jobs/{job_id}/broadcast
 3. 用 `shift_cron_expression()` 尝试把 cron 向前平移 offset。
 4. 如果 cron 无法安全平移，保留原 cron，并返回 fallback warning。
 5. 为每个目标租户找对应 runtime workspace 和 `CronManager`。
-6. 如果目标租户已有同一个 `broadcast_source_job_id` 的子任务，跳过重复创建并返回 warning。
+6. 如果目标租户已有同一个 `broadcast_source_job_id` 的子任务，刷新已有子任务的任务定义配置，不重复创建。
 7. 尝试复制源任务的 `model_slot`；目标租户缺 provider/model 时回退默认模型，并写 fallback meta。
-8. 创建子任务，子任务 `meta.broadcast_source_job_id` 指向源任务。
+8. 创建或刷新子任务，子任务 `meta.broadcast_source_job_id` 指向源任务。
 9. 如果请求体带 `targets`，把目标租户的 `tenant_name`、`bbk_id` 写入子任务顶层字段；`tenant_id`、`request.user_id`、`dispatch.target.user_id` 都切到目标租户。
 
 广播相关 meta：
@@ -59,6 +59,8 @@ POST /api/cron/jobs/{job_id}/broadcast
 | `broadcast_model_slot_fallback_reason` | 模型回退原因 |
 
 当前 `v1.0.0` 基线已包含 `0732cdea fix(cron): reduce broadcast API complexity`、`f24ad72a fix(cron): skip duplicate broadcast child jobs` 和 `51febe0a fix(cron): persist broadcast target identity`。如果排查广播子任务展示身份丢失，优先看 `CronBroadcastTarget`、`_normalize_broadcast_targets()` 和 `_build_broadcast_job()`。
+
+当前本地修改改变了重复分发语义：重新分发到已有子任务时，后端会覆盖执行内容、执行类型、cron、时区、runtime、model slot、通知延迟和广播 meta 等用户无关配置，同时保留子任务 ID、目标用户身份、任务卡片绑定和暂停/启停状态。分发后的子任务可以在定时任务菜单中用“查看分发用户”反查、批量删除或批量重跑，详细见 [Cron 分发子任务管理](cron-distribution-management.md)。
 
 ## Heartbeat 与 Dream
 

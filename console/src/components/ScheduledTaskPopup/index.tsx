@@ -11,6 +11,8 @@ import {
   formatNextRunPreview,
   generateCronExpression,
   hasDateBoundaryWarning,
+  toNotificationDelayMinutes,
+  type NotificationDelayUnit,
 } from "../../utils/cron";
 import type { ModelSlotConfig } from "@/api/types";
 import {
@@ -27,6 +29,7 @@ export interface ScheduledTaskPopupProps {
     cronExpression: string,
     config: ScheduleConfig,
     modelSlot?: ModelSlotConfig,
+    notificationDelayMinutes?: number,
   ) => Promise<void>;
   onSuccess?: () => void;
   caseValue?: string;
@@ -57,6 +60,9 @@ export default function ScheduledTaskPopup({
   const [executionModelKey, setExecutionModelKey] = useState(
     DEFAULT_EXECUTION_MODEL_KEY,
   );
+  const [notificationDelayValue, setNotificationDelayValue] = useState("0");
+  const [notificationDelayUnit, setNotificationDelayUnit] =
+    useState<NotificationDelayUnit>("minutes");
   // 临时输入值，允许用户自由编辑
   const [hourInput, setHourInput] = useState<string>(formatTimeValue(DEFAULT_TIME.hour));
   const [minuteInput, setMinuteInput] = useState<string>(formatTimeValue(DEFAULT_TIME.minute));
@@ -69,6 +75,8 @@ export default function ScheduledTaskPopup({
   useEffect(() => {
     if (open) {
       setExecutionModelKey(DEFAULT_EXECUTION_MODEL_KEY);
+      setNotificationDelayValue("0");
+      setNotificationDelayUnit("minutes");
     }
   }, [open]);
 
@@ -109,6 +117,10 @@ export default function ScheduledTaskPopup({
     setTime((prev) => ({ ...prev, minute }));
     setMinuteInput(formatTimeValue(minute));
   }, [minuteInput]);
+
+  const handleNotificationDelayInputChange = useCallback((value: string) => {
+    setNotificationDelayValue(value.replace(/[^\d]/g, ""));
+  }, []);
 
   const toggleWeekday = useCallback((day: number) => {
     setWeekdays((prev) => {
@@ -168,6 +180,10 @@ export default function ScheduledTaskPopup({
         cronExpression,
         scheduleConfig,
         parseExecutionModelKey(executionModelKey),
+        toNotificationDelayMinutes(
+          Number.parseInt(notificationDelayValue || "0", 10),
+          notificationDelayUnit,
+        ),
       );
       message.success("定时任务创建成功");
       onClose();
@@ -183,6 +199,8 @@ export default function ScheduledTaskPopup({
     scheduleConfig,
     onConfirm,
     message,
+    notificationDelayUnit,
+    notificationDelayValue,
     onClose,
     onSuccess,
   ]);
@@ -332,6 +350,38 @@ export default function ScheduledTaskPopup({
               </option>
             ))}
           </select>
+        </div>
+
+        <div className={styles.section}>
+          <label className={styles.label} htmlFor="notification-delay-value">
+            Notification delay
+          </label>
+          <div className={styles.delayPicker}>
+            <input
+              id="notification-delay-value"
+              aria-label="Notification delay value"
+              className={styles.delayInput}
+              type="number"
+              min={0}
+              value={notificationDelayValue}
+              onChange={(event) =>
+                handleNotificationDelayInputChange(event.target.value)
+              }
+            />
+            <select
+              aria-label="Notification delay unit"
+              className={styles.delayUnitSelect}
+              value={notificationDelayUnit}
+              onChange={(event) =>
+                setNotificationDelayUnit(
+                  event.target.value as NotificationDelayUnit,
+                )
+              }
+            >
+              <option value="minutes">minutes</option>
+              <option value="hours">hours</option>
+            </select>
+          </div>
         </div>
 
         {previewText && (

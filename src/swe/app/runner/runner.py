@@ -1224,6 +1224,62 @@ def _with_hook_context(
     return f"{env_context}\n\n[Hook additional context]\n{hook_context}"
 
 
+def _request_system_prompt_injections(request: AgentRequest) -> list[str]:
+    channel_meta = getattr(request, "channel_meta", None) or {}
+    value = getattr(request, "system_prompt_injections", None)
+    if value is None and isinstance(channel_meta, dict):
+        value = channel_meta.get("system_prompt_injections")
+    return _normalize_system_prompt_injections(value)
+
+
+def _request_file_url_network(request: AgentRequest) -> str:
+    """从请求属性和 channel_meta 中读取静态文件访问网络。"""
+    from ...config.context import normalize_file_url_network
+
+    channel_meta = getattr(request, "channel_meta", None) or {}
+    value = getattr(request, "file_url_network", None)
+    if value is None and isinstance(channel_meta, dict):
+        value = channel_meta.get("file_url_network")
+    return normalize_file_url_network(value)
+
+
+def _normalize_system_prompt_injections(value: Any) -> list[str]:
+    from ..source_system_config.registry import (
+        normalize_system_prompt_injections,
+    )
+
+    try:
+        return normalize_system_prompt_injections(value)
+    except ValueError:
+        logger.warning(
+            "Ignored invalid system_prompt_injections payload",
+            exc_info=True,
+        )
+        return []
+
+
+def _merge_system_prompt_injections(*sources: Any) -> list[str]:
+    merged: list[str] = []
+    seen: set[str] = set()
+    for source in sources:
+        for item in _normalize_system_prompt_injections(source):
+            if item in seen:
+                continue
+            seen.add(item)
+            merged.append(item)
+    return merged
+
+
+def _with_system_prompt_injections(
+    env_context: str,
+    injections: list[str],
+) -> str:
+    if not injections:
+        return env_context
+    body = "\n\n".join(injections)
+    return f"{env_context}\n\n[System prompt injections]\n{body}"
+
+
 def _chat_name_from_messages(msgs: list[Any]) -> str:
     """从首条消息派生会话名，保持原有文本和媒体消息规则。"""
     if not msgs:
@@ -2291,6 +2347,17 @@ class AgentRunner(Runner):
         env_context = _with_hook_context(
             env_context,
             preflight.hook_additional_context,
+        )
+        from ..source_system_config.runtime import (
+            get_system_prompt_injections,
+        )
+
+        env_context = _with_system_prompt_injections(
+            env_context,
+            _merge_system_prompt_injections(
+                get_system_prompt_injections(),
+                _request_system_prompt_injections(request),
+            ),
         )
 
         agent_config = (
@@ -3417,8 +3484,15 @@ class AgentRunner(Runner):
         )
 
         from ..agent_context import set_current_agent_id
+        from ...config.context import (
+            reset_current_file_url_network,
+            set_current_file_url_network,
+        )
 
         set_current_agent_id(self.agent_id)
+        file_url_network_token = set_current_file_url_network(
+            _request_file_url_network(request),
+        )
 
         trace_id = await self._start_query_trace(request, msgs)
         outcome = _QueryTurnOutcome()
@@ -3508,6 +3582,7 @@ class AgentRunner(Runner):
                     ):
                         yield msg, last
         finally:
+            reset_current_file_url_network(file_url_network_token)
             cleanup_runtime = attempt_state.runtime
             cleanup_state_loaded = attempt_state.session_state_loaded
             if cleanup_runtime is None and retry_state.prev_agent is not None:

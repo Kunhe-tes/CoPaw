@@ -1,4 +1,6 @@
-export type SourceSystemConfig = Record<string, unknown>;
+export interface SourceSystemConfig extends Record<string, unknown> {
+  system_prompt_injections?: string[];
+}
 
 export interface EffectiveSourceSystemConfig {
   source_id: string;
