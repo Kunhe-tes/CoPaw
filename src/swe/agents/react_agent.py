@@ -23,6 +23,7 @@ from agentscope.tool import Toolkit
 from anyio import ClosedResourceError
 from pydantic import BaseModel
 
+from ..app.mcp.http_headers import build_mcp_http_headers
 from ..app.mcp.stdio_launcher import build_tenant_aware_stdio_launch_config
 from .command_handler import CommandHandler
 from ..app.mcp import HttpStatefulClient, StdIOStatefulClient
@@ -850,8 +851,13 @@ class SWEAgent(ToolGuardMixin, ReActAgent):
                 )
                 return rebuilt_client
 
-            raw_headers = rebuild_info.get("headers") or {}
-            headers = dict(raw_headers) or None
+            headers = build_mcp_http_headers(
+                rebuild_info.get("headers"),
+                passthrough_headers=rebuild_info.get(
+                    "passthrough_headers",
+                ),
+                session_id=rebuild_info.get("session_id"),
+            )
             rebuilt_client = HttpStatefulClient(
                 name=name,
                 transport=transport,

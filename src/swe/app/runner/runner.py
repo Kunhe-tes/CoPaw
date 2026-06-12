@@ -703,6 +703,8 @@ async def _create_mcp_client_with_headers(
         "transport": client_config.transport,
         "url": client_config.url,
         "headers": client_config.headers or None,
+        "passthrough_headers": dict(passthrough_headers or {}) or None,
+        "session_id": session_id,
         "command": client_config.command,
         "args": list(client_config.args),
         "env": dict(client_config.env),
@@ -757,7 +759,6 @@ async def _create_mcp_client_with_headers(
         "_swe_rebuild_info",
         {
             **rebuild_info,
-            "headers": merged_headers,
             "_temp_client": True,
         },
     )

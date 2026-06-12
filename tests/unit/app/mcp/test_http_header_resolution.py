@@ -4,7 +4,6 @@
 from __future__ import annotations
 
 from pathlib import Path
-from types import SimpleNamespace
 from typing import Any
 from unittest.mock import patch
 
@@ -66,6 +65,8 @@ def test_manager_build_client_keeps_tenant_secret_literal(
     assert captured["headers"] == {
         "Authorization": "Bearer abc${HOME}xyz",
         "X-Home": "dir=/home/demo",
+        "x-swe-tenant-id": "tenant-a",
+        "x-swe-source-id": "source-a",
     }
 
 
@@ -162,39 +163,78 @@ async def test_runner_http_client_injects_runtime_scope_headers_and_dedupes_rese
     }
 
 
-def test_rebuild_mcp_client_reuses_materialized_headers_without_reresolving(
+@pytest.mark.asyncio
+async def test_rebuild_mcp_client_reresolves_scope_headers_on_reconnect(
     monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
 ) -> None:
+    from swe.app.runner import runner as runner_module
     from swe.agents.react_agent import SWEAgent
 
     monkeypatch.setenv("HOME", "/home/demo")
-    captured: dict[str, Any] = {}
+    monkeypatch.setattr("swe.config.utils.WORKING_DIR", tmp_path)
+    monkeypatch.setattr("swe.constant.WORKING_DIR", tmp_path)
+    _write_scope_env(
+        tmp_path,
+        "tenant-a",
+        "source-a",
+        {"MCP_TOKEN": "initial-token"},
+    )
+    captured: list[dict[str, Any]] = []
 
     class _FakeHttpStatefulClient:
         def __init__(self, **kwargs):
-            captured.update(kwargs)
+            captured.append(kwargs)
 
-    original_client = SimpleNamespace(
-        _swe_rebuild_info={
-            "name": "demo",
-            "transport": "streamable_http",
-            "url": "https://mcp.example.test/stream",
-            "headers": {
-                "X-Home": "dir=${HOME}",
-                "x-swe-tenant-id": "tenant-a",
-                "x-swe-source-id": "source-a",
-            },
-        },
-    )
-
-    with patch(
-        "swe.agents.react_agent.HttpStatefulClient",
-        _FakeHttpStatefulClient,
+    with (
+        patch(
+            "swe.app.runner.runner.HttpStatefulClient",
+            _FakeHttpStatefulClient,
+        ),
+        patch(
+            "swe.agents.react_agent.HttpStatefulClient",
+            _FakeHttpStatefulClient,
+        ),
     ):
-        SWEAgent._rebuild_mcp_client(original_client)
+        with tenant_context(tenant_id="tenant-a", source_id="source-a"):
+            original_client = (
+                await runner_module._create_mcp_client_with_headers(
+                    MCPClientConfig(
+                        name="demo",
+                        transport="streamable_http",
+                        url="https://mcp.example.test/stream",
+                        headers={
+                            "Authorization": "Bearer ${ENV:MCP_TOKEN}",
+                            "X-Home": "dir=${HOME}",
+                        },
+                    ),
+                    passthrough_headers={"Authorization-Extra": "extra"},
+                    session_id="session-1",
+                )
+            )
 
-    assert captured["headers"] == {
-        "X-Home": "dir=${HOME}",
+            _write_scope_env(
+                tmp_path,
+                "tenant-a",
+                "source-a",
+                {"MCP_TOKEN": "rotated-token"},
+            )
+            rebuilt = SWEAgent._rebuild_mcp_client(original_client)
+
+    assert rebuilt is not None
+    assert captured[0]["headers"] == {
+        "Authorization": "Bearer initial-token",
+        "X-Home": "dir=/home/demo",
+        "Authorization-Extra": "extra",
         "x-swe-tenant-id": "tenant-a",
         "x-swe-source-id": "source-a",
+        "x-swe-session-id": "session-1",
+    }
+    assert captured[1]["headers"] == {
+        "Authorization": "Bearer rotated-token",
+        "X-Home": "dir=/home/demo",
+        "Authorization-Extra": "extra",
+        "x-swe-tenant-id": "tenant-a",
+        "x-swe-source-id": "source-a",
+        "x-swe-session-id": "session-1",
     }

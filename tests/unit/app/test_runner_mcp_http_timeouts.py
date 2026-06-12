@@ -174,11 +174,11 @@ async def test_create_streamable_http_mcp_client_uses_explicit_httpx_timeouts(
     }
     assert getattr(client, "_swe_rebuild_info")["headers"] == {
         "X-Static": "static",
-        "Authorization": "Bearer test-token",
-        "x-swe-tenant-id": "tenant-a",
-        "x-swe-source-id": "source-a",
-        "x-swe-session-id": "session-1",
     }
+    assert getattr(client, "_swe_rebuild_info")["passthrough_headers"] == {
+        "Authorization": "Bearer test-token",
+    }
+    assert getattr(client, "_swe_rebuild_info")["session_id"] == "session-1"
 
 
 @pytest.mark.asyncio
