@@ -55,9 +55,6 @@ export interface TaskStatusSummary {
   cancelled: number;
   read_count: number;
   new_cron_tasks: number;
-  // 点击数统计
-  click_count: number;
-  click_by_button_type: Record<string, number>;
 }
 
 export interface DepthSummary {
@@ -172,9 +169,10 @@ export interface UserListItem {
   total_conversations: number;
   total_tokens: number;
   last_active: string | null;
-  // 三种口径统计字段
+  // 四种口径统计字段
   manual_calls: number;
   cron_executions: number;
+  cron_success: number;
   cron_reads: number;
 }
 
