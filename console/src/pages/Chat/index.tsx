@@ -86,6 +86,7 @@ import {
   shouldMarkTaskReadOnOpen,
 } from "./taskJobs";
 import { shouldRefreshCurrentTaskMessages } from "./taskMessageRefresh";
+import { resolveCurrentFileUrlNetwork } from "./fileUrlNetwork";
 import { matchesResolvedChatId } from "./sessionApi/resolvedSessionMapping";
 
 import RuntimeRequestCard from "./components/RuntimeRequestCard";
@@ -1280,6 +1281,7 @@ export default function ChatPage() {
         // ==================== userId 统一整改结束 ====================
         stream: true,
         ...biz_params,
+        file_url_network: resolveCurrentFileUrlNetwork(),
       };
 
       const backendChatId = resolveRequestChatId(

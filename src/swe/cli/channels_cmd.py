@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Optional
 
 import click
+from pydantic import BaseModel
 
 from ..config import (
     get_config_path,
@@ -17,10 +18,14 @@ from ..config import (
 from ..config.config import (
     Config,
     ConsoleConfig,
+    CONSOLE_CHANNEL_REASON,
     ZhaohuConfig,
     load_agent_config,
+    normalize_channel_config_set,
+    normalize_single_channel_config,
     save_agent_config,
 )
+from ..config.channel_invariants import include_mandatory_channels
 from .utils import prompt_confirm, prompt_select
 from .http import client, print_json, resolve_base_url
 from ..config import get_available_channels
@@ -148,7 +153,7 @@ class CustomChannel(BaseChannel):
 
 def _get_channel_names() -> dict[str, str]:
     """Return channel key -> display name (built-in + plugins)."""
-    available = get_available_channels()
+    available = include_mandatory_channels(get_available_channels())
     registry = get_channel_registry()
     out = {k: v for k, v in _ALL_CHANNEL_NAMES.items() if k in available}
     for key in available:
@@ -247,16 +252,7 @@ def configure_zhaohu(current_config: ZhaohuConfig) -> ZhaohuConfig:
 def configure_console(current_config: ConsoleConfig) -> ConsoleConfig:
     """Configure Console channel interactively."""
     click.echo("\n=== Configure Console Channel ===")
-
-    enabled = prompt_confirm(
-        "Enable Console channel?",
-        default=current_config.enabled,
-    )
-
-    if not enabled:
-        current_config.enabled = False
-        return current_config
-
+    click.echo(f"Console channel is system-managed: {CONSOLE_CHANNEL_REASON}")
     current_config.enabled = True
 
     bot_prefix = click.prompt(
@@ -300,7 +296,7 @@ def _plugin_configure(
 
 def get_channel_configurators() -> dict:
     """Return channel configurators (built-in + plugin get_configurator)."""
-    available = get_available_channels()
+    available = include_mandatory_channels(get_available_channels())
     registry = get_channel_registry()
     out = {
         k: v for k, v in _ALL_CHANNEL_CONFIGURATORS.items() if k in available
@@ -373,9 +369,17 @@ def _get_channel_config(config: Config, key: str):
     """Get channel config for key (from attr or extra)."""
     ch = getattr(config.channels, key, None)
     if ch is not None:
-        return ch
+        return normalize_single_channel_config(
+            key,
+            ch,
+            materialize_missing=(key == "console"),
+        )
     extra = getattr(config.channels, "__pydantic_extra__", None) or {}
-    return extra.get(key)
+    return normalize_single_channel_config(
+        key,
+        extra.get(key),
+        materialize_missing=(key == "console"),
+    )
 
 
 def configure_channels_interactive(config: Config) -> None:
@@ -430,12 +434,9 @@ def configure_channels_interactive(config: Config) -> None:
         if _channel_enabled(_get_channel_config(config, key))
     ]
 
-    if enabled_channels:
-        click.echo(
-            f"\n✓ Enabled channels: {', '.join(enabled_channels)}",
-        )
-    else:
-        click.echo("\n⚠ Warning: No channels enabled!")
+    click.echo(
+        f"\n✓ Enabled channels: {', '.join(enabled_channels)}",
+    )
 
 
 # ── CLI commands ───────────────────────────────────────────────────
@@ -449,8 +450,8 @@ def channels_group() -> None:
 
 def _channel_config_fields(ch):
     """Yield (field_name, value) for a channel config (model or dict)."""
-    if hasattr(ch, "model_fields"):
-        for fn in ch.model_fields:
+    if isinstance(ch, BaseModel):
+        for fn in ch.__class__.model_fields:
             if fn == "enabled":
                 continue
             yield (fn, getattr(ch, fn))
@@ -487,11 +488,11 @@ def list_cmd(agent_id: str) -> None:
     """Show current channel configuration."""
     try:
         agent_config = load_agent_config(agent_id)
+        agent_config.channels = normalize_channel_config_set(
+            agent_config.channels,
+            materialize_missing_console=True,
+        )
         click.echo(f"Channels for agent: {agent_id}\n")
-
-        if not agent_config.channels:
-            click.echo("No channels configured for this agent.")
-            return
 
         extra = (
             getattr(agent_config.channels, "__pydantic_extra__", None) or {}
@@ -510,6 +511,10 @@ def list_cmd(agent_id: str) -> None:
             click.echo(f"\n{'─' * 40}")
             click.echo(f"  {name}  [{status}]")
             click.echo(f"{'─' * 40}")
+            if key == "console":
+                click.echo(
+                    "  note                : system-managed, always enabled",
+                )
 
             for field_name, value in _channel_config_fields(ch):
                 display = (
@@ -658,7 +663,11 @@ def add_cmd(
     current = _get_channel_config(existing, key)
 
     if current is None:
-        default = {"enabled": False, "bot_prefix": ""}
+        default = (
+            {"enabled": True, "bot_prefix": ""}
+            if key == "console"
+            else {"enabled": False, "bot_prefix": ""}
+        )
         setattr(existing.channels, key, default)
         if configure:
             configurators = get_channel_configurators()
@@ -734,11 +743,13 @@ def configure_cmd(agent_id: str) -> None:
 
         # Create a temporary Config object for the interactive configurator
         temp_config = Config()
-        temp_config.channels = (
-            agent_config.channels
-            if agent_config.channels
-            else temp_config.channels
+        normalized_channels = normalize_channel_config_set(
+            agent_config.channels,
+            materialize_missing_console=True,
         )
+        if normalized_channels is None:
+            raise RuntimeError("Channel config normalization returned None")
+        temp_config.channels = normalized_channels
 
         configure_channels_interactive(temp_config)
 

@@ -3,6 +3,49 @@ import type { ModelSlotConfig } from "../api/types";
 
 export type FrequencyType = "daily" | "weekly" | "monthly";
 
+export type NotificationDelayUnit = "minutes" | "hours";
+
+export const MAX_NOTIFICATION_DELAY_MINUTES = 7 * 24 * 60;
+
+export function normalizeNotificationDelayMinutes(value: unknown): number {
+  const numericValue =
+    typeof value === "number" ? value : Number.parseInt(String(value ?? ""), 10);
+  if (!Number.isFinite(numericValue) || numericValue < 0) {
+    return 0;
+  }
+  return Math.min(Math.floor(numericValue), MAX_NOTIFICATION_DELAY_MINUTES);
+}
+
+export function toNotificationDelayMinutes(
+  value: number | null | undefined,
+  unit: NotificationDelayUnit,
+): number {
+  const multiplier = unit === "hours" ? 60 : 1;
+  return normalizeNotificationDelayMinutes((value ?? 0) * multiplier);
+}
+
+export function getNotificationDelayFormValue(
+  value: unknown,
+): { value: number; unit: NotificationDelayUnit } {
+  const minutes = normalizeNotificationDelayMinutes(value);
+  if (minutes > 0 && minutes % 60 === 0) {
+    return { value: minutes / 60, unit: "hours" };
+  }
+  return { value: minutes, unit: "minutes" };
+}
+
+export function formatNotificationDelay(value: unknown): string {
+  const minutes = normalizeNotificationDelayMinutes(value);
+  if (minutes === 0) {
+    return "立即通知";
+  }
+  if (minutes % 60 === 0) {
+    const hours = minutes / 60;
+    return `${hours} 小时`;
+  }
+  return `${minutes} 分钟`;
+}
+
 export interface ScheduleConfig {
   frequency: FrequencyType;
   hour: number;
@@ -123,7 +166,7 @@ export function calculateNextRun(config: ScheduleConfig): dayjs.Dayjs {
 
       for (const wd of sortedWeekdays) {
         const targetDay = wd === 7 ? 0 : wd;
-        let candidate = targetTime.day(targetDay);
+        const candidate = targetTime.day(targetDay);
         if (candidate.isAfter(now)) {
           return candidate;
         }
@@ -209,6 +252,7 @@ export interface CreateScheduledTaskOptions {
   channel?: string;
   modelSlot?: ModelSlotConfig;
   subscriptionKey?: string;
+  notificationDelayMinutes?: number;
 }
 
 export function buildCronJobSpec(options: CreateScheduledTaskOptions): import("../api/types/cronjob").CronJobSpecInput {
@@ -221,10 +265,13 @@ export function buildCronJobSpec(options: CreateScheduledTaskOptions): import(".
     channel,
     modelSlot,
     subscriptionKey,
+    notificationDelayMinutes,
   } = options;
 
   const meta: Record<string, unknown> = {
     creator_user_id: userId,
+    notification_delay_minutes:
+      normalizeNotificationDelayMinutes(notificationDelayMinutes),
   };
 
   if (subscriptionKey) {

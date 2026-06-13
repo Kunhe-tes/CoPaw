@@ -6,8 +6,10 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 import logging
 from pathlib import Path
+from types import SimpleNamespace
 
 from typing import (
     Any,
@@ -23,6 +25,8 @@ from .command_registry import CommandRegistry
 from .registry import get_channel_registry
 from .unified_queue_manager import UnifiedQueueManager
 from ...config import get_available_channels
+from ...config.channel_invariants import include_mandatory_channels
+from ...config.config import BaseChannelConfig
 from ...constant import CHANNEL_CONSUME_TIMEOUT
 
 if TYPE_CHECKING:
@@ -35,6 +39,15 @@ OnLastDispatch = Optional[Callable[[str, str, str], None]]
 
 # Default max size per channel queue
 _CHANNEL_QUEUE_MAXSIZE = 1000
+
+
+def _get_required_available_channels(
+    registry: dict[str, type[BaseChannel]] | None = None,
+) -> tuple[str, ...]:
+    """Return env-filtered channel keys plus required built-ins."""
+    available = set(include_mandatory_channels(get_available_channels()))
+    registry = registry or get_channel_registry()
+    return tuple(key for key in registry if key in available)
 
 
 async def _process_batch(ch: BaseChannel, batch: List[Any]) -> None:
@@ -97,12 +110,11 @@ class ChannelManager:
         process endpoint.
         on_last_dispatch: called when a user send+reply was sent.
         """
-        available = get_available_channels()
         registry = get_channel_registry()
         channels: list[BaseChannel] = [
             ch_cls.from_env(process, on_reply_sent=on_last_dispatch)
             for key, ch_cls in registry.items()
-            if key in available
+            if key in _get_required_available_channels(registry)
         ]
         return cls(channels)
 
@@ -123,18 +135,26 @@ class ChannelManager:
             on_last_dispatch: Callback for dispatch events
             workspace_dir: Agent workspace directory for channel state files
         """
-        available = get_available_channels()
         ch = config.channels
         show_tool_details = getattr(config, "show_tool_details", True)
         extra = getattr(ch, "__pydantic_extra__", None) or {}
+        from ...config.config import normalize_single_channel_config
 
         channels: list[BaseChannel] = []
-        for key, ch_cls in get_channel_registry().items():
+        registry = get_channel_registry()
+        available = set(_get_required_available_channels(registry))
+        for key, ch_cls in registry.items():
             if key not in available:
                 continue
             ch_cfg = getattr(ch, key, None)
             if ch_cfg is None and key in extra:
                 ch_cfg = extra[key]
+
+            ch_cfg = normalize_single_channel_config(
+                key,
+                ch_cfg,
+                materialize_missing=(key == "console"),
+            )
             if ch_cfg is None:
                 continue
             if isinstance(ch_cfg, dict):
@@ -186,8 +206,6 @@ class ChannelManager:
             }
 
             # Only pass kwargs that the channel's from_config accepts
-            import inspect
-
             sig = inspect.signature(ch_cls.from_config)
             if any(
                 p.kind == inspect.Parameter.VAR_KEYWORD
@@ -220,6 +238,71 @@ class ChannelManager:
             self.enqueue(channel_id, payload)
 
         return cb
+
+    def instantiate_channel(
+        self,
+        channel_name: str,
+        config: Any,
+        *,
+        workspace_dir: Path | None = None,
+    ) -> BaseChannel:
+        """Create one channel instance from config using current runtime."""
+        registry = get_channel_registry()
+        ch_cls = registry.get(channel_name)
+        if ch_cls is None:
+            raise KeyError(f"channel not registered: {channel_name}")
+
+        template = next(
+            (ch for ch in self.channels if hasattr(ch, "_process")),
+            None,
+        )
+        if template is None:
+            raise RuntimeError(
+                f"cannot instantiate channel without runtime template: "
+                f"{channel_name}",
+            )
+
+        ch_cfg = config
+        if isinstance(ch_cfg, dict):
+            defaults = BaseChannelConfig().model_dump()
+            defaults.update(ch_cfg)
+            ch_cfg = SimpleNamespace(**defaults)
+
+        from_config_kwargs = {
+            "process": getattr(template, "_process"),
+            "config": ch_cfg,
+            "on_reply_sent": getattr(template, "_on_reply_sent", None),
+            "show_tool_details": getattr(
+                template,
+                "_show_tool_details",
+                True,
+            ),
+            "filter_tool_messages": getattr(
+                ch_cfg,
+                "filter_tool_messages",
+                False,
+            ),
+            "filter_thinking": getattr(
+                ch_cfg,
+                "filter_thinking",
+                False,
+            ),
+            "workspace_dir": workspace_dir,
+        }
+
+        sig = inspect.signature(ch_cls.from_config)
+        if any(
+            p.kind == inspect.Parameter.VAR_KEYWORD
+            for p in sig.parameters.values()
+        ):
+            filtered_kwargs = from_config_kwargs
+        else:
+            filtered_kwargs = {
+                key: value
+                for key, value in from_config_kwargs.items()
+                if key in sig.parameters
+            }
+        return ch_cls.from_config(**filtered_kwargs)
 
     def _extract_session_id(
         self,
@@ -318,6 +401,13 @@ class ChannelManager:
             query: Extracted query text for logging
         """
         try:
+            if await self.get_channel(channel_id) is None:
+                logger.debug(
+                    "Dropping enqueue for removed channel=%s session=%s",
+                    channel_id,
+                    session_id[:30],
+                )
+                return
             await asyncio.wait_for(
                 self._queue_manager.enqueue(
                     channel_id,
@@ -386,14 +476,6 @@ class ChannelManager:
             f"priority={priority_level}",
         )
 
-        # Get channel instance
-        ch = await self.get_channel(channel_id)
-        if not ch:
-            logger.error(
-                f"Consumer: channel not found: channel_id={channel_id}",
-            )
-            return
-
         while True:
             try:
                 # Get first payload
@@ -411,6 +493,17 @@ class ChannelManager:
                         batch.append(next_payload)
                     except asyncio.QueueEmpty:
                         break
+
+                ch = await self.get_channel(channel_id)
+                if not ch:
+                    logger.info(
+                        "Consumer exiting for removed channel=%s session=%s "
+                        "priority=%s",
+                        channel_id,
+                        session_id[:30],
+                        priority_level,
+                    )
+                    return
 
                 # Process batch (with merge logic)
                 try:
@@ -603,6 +696,11 @@ class ChannelManager:
         #    (e.g. DingTalk) can register its handler
         if getattr(new_channel, "uses_manager_queue", True):
             new_channel.set_enqueue(self._make_enqueue_cb(new_channel_name))
+        if self._workspace is not None:
+            new_channel.set_workspace(
+                self._workspace,
+                self._command_registry,
+            )
 
         # 2) Start new channel outside lock (may be slow, e.g. DingTalk)
         logger.info(f"Pre-starting new channel: {new_channel_name}")
@@ -632,6 +730,7 @@ class ChannelManager:
                 self.channels.append(new_channel)
             else:
                 logger.info(f"Stopping old channel: {old_channel.channel}")
+                old_channel.set_enqueue(None)
                 try:
                     await old_channel.stop()
                 except asyncio.CancelledError:
@@ -640,6 +739,33 @@ class ChannelManager:
                     logger.exception(
                         f"Failed to stop old channel: {old_channel.channel}",
                     )
+
+    async def remove_channel(self, channel_name: str) -> bool:
+        """Remove one channel by name and stop it."""
+        async with self._lock:
+            removed_channel = None
+            for i, ch in enumerate(self.channels):
+                if ch.channel == channel_name:
+                    removed_channel = self.channels.pop(i)
+                    break
+
+        if removed_channel is None:
+            return False
+
+        removed_channel.set_enqueue(None)
+        if self._queue_manager is not None:
+            await self._queue_manager.cancel_channel(channel_name)
+
+        logger.info(f"Stopping removed channel: {channel_name}")
+        try:
+            await removed_channel.stop()
+        except asyncio.CancelledError:
+            pass
+        except Exception:
+            logger.exception(
+                f"Failed to stop removed channel: {channel_name}",
+            )
+        return True
 
     async def send_event(
         self,

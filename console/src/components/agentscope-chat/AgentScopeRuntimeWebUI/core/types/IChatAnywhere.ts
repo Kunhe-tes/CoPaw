@@ -330,6 +330,7 @@ export interface IAgentScopeRuntimeWebUISessionAPI {
    */
   updateSession?: (
     session: Partial<IAgentScopeRuntimeWebUISession>,
+    options?: IAgentScopeRuntimeWebUISessionUpdateOptions,
   ) => Promise<IAgentScopeRuntimeWebUISession[]>;
   /**
    * @description 创建会话
@@ -345,6 +346,10 @@ export interface IAgentScopeRuntimeWebUISessionAPI {
   removeSession?: (
     session: Partial<IAgentScopeRuntimeWebUISession>,
   ) => Promise<IAgentScopeRuntimeWebUISession[]>;
+}
+
+export interface IAgentScopeRuntimeWebUISessionUpdateOptions {
+  refreshList?: boolean;
 }
 
 /**

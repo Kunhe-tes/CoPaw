@@ -17,6 +17,8 @@ export const DEFAULT_FORM_VALUES = {
   },
   cronType: "daily",
   cronTime: dayjs().hour(9).minute(0),
+  notificationDelayValue: 0,
+  notificationDelayUnit: "minutes" as const,
   task_type: "agent" as const,
   execution_model_key: DEFAULT_EXECUTION_MODEL_KEY,
   dispatch: {
@@ -35,5 +37,8 @@ export const DEFAULT_FORM_VALUES = {
     max_concurrency: 1,
     timeout_seconds: 7200,
     misfire_grace_seconds: 300,
+  },
+  meta: {
+    notification_delay_minutes: 0,
   },
 };

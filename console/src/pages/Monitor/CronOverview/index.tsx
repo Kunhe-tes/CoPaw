@@ -1,761 +1,1084 @@
-import { useState, useEffect, useRef, useMemo } from "react";
-import { useTranslation } from "react-i18next";
 import {
-  Tabs,
-  Card,
-  Table,
-  Select,
-  DatePicker,
-  Button,
-  Space,
-  Tag,
-  Drawer,
-  Descriptions,
-  message,
-  Spin,
-} from "antd";
-import type { ColumnsType } from "antd/es/table";
+  CalendarDays,
+  CheckCircle2,
+  ChevronRight,
+  Clock3,
+  Info,
+  PlaySquare,
+  ShieldCheck,
+  TrendingDown,
+  TrendingUp,
+  UserRound,
+  Workflow,
+  type LucideIcon,
+} from "lucide-react";
+import { useEffect, useState } from "react";
+import { DatePicker, Input, Modal, Pagination, Select, Spin, Tooltip } from "antd";
+import { WarningOutlined } from "@ant-design/icons";
+import type { Dayjs } from "dayjs";
 import dayjs from "dayjs";
-import { DownloadOutlined, EyeOutlined, ReloadOutlined } from "@ant-design/icons";
-import { PageHeader } from "@/components/PageHeader";
-import {
-  monitorApi,
-  CronJobItem,
-  ExecutionItem,
-  FilterOption,
-  FilterOptionsResponse,
-} from "../../../api/modules/monitor";
-import { BBK_ID_MAP, BBK_ID_TO_NAME_MAP } from "../../../constants/bbk";
+import { monitorApi, CronOverviewResponse, ExecutionItem } from "../../../api/modules/monitor";
 import styles from "./index.module.less";
 
-const { RangePicker } = DatePicker;
+type TimeRange = "day" | "week" | "month" | "custom";
 
-
-const EXEC_STATUS_COLORS: Record<string, string> = {
-  success: "green",
-  error: "red",
-  cancelled: "orange",
-  timeout: "orange",
-  skipped: "default",
-  running: "blue",
+type MetricCard = {
+  key: string;
+  title: string;
+  value: string;
+  compare: string;
+  trend: "up" | "down" | null;
+  accent: string;
+  icon: LucideIcon;
 };
 
-
-const EXEC_STATUS_LABELS: Record<string, string> = {
-  success: "成功",
-  error: "失败",
-  cancelled: "取消",
-  timeout: "超时",
-  skipped: "跳过",
-  running: "运行中",
+type DistributionItem = {
+  name: string;
+  value: number;
+  percent?: number;
+  color?: string;
 };
 
-// 时间范围选项
-const TIME_RANGE_OPTIONS = [
-  { value: "today", label: "今日" },
-  { value: "week", label: "本周" },
-  { value: "month", label: "本月" },
-  { value: "last7days", label: "近7天" },
-  { value: "last30days", label: "近30天" },
-  { value: "custom", label: "自定义" },
-];
+const failureReasonOptions = [
+  "渠道不存在",
+  "token过期",
+  "密文长度错误",
+  "智能体请求校验失败",
+  "其他",
+] as const;
 
+type FailureReason = (typeof failureReasonOptions)[number];
 
-const EXEC_STATUS_OPTIONS = [
-  { value: "", label: "全部状态" },
-  { value: "success", label: "成功" },
-  { value: "error", label: "失败" },
-  { value: "timeout", label: "超时" },
-  { value: "cancelled", label: "取消" },
-  { value: "skipped", label: "跳过" },
-];
+const formatNumber = (value: number) => value.toLocaleString("en-US");
+const truncateAxisLabel = (value: string, maxLength = 6) =>
+  value.length > maxLength ? `${value.slice(0, maxLength)}...` : value;
 
-// 分行选项（来自前端常量）
-const BBK_OPTIONS = [
-  { value: "", label: "全部分行" },
-  ...BBK_ID_MAP,
-];
+const classifyFailureReason = (errorMessage: string): FailureReason => {
+  const message = errorMessage || "";
+  const normalizedMessage = message.toLowerCase();
 
-// 是否启用选项
-const ENABLED_OPTIONS = [
-  { value: "", label: "全部" },
-  { value: "true", label: "已启用" },
-  { value: "false", label: "已禁用" },
-];
+  if (message.includes("channel not found")) {
+    return "渠道不存在";
+  }
+  if (message.includes("cron auth user_info is expired")) {
+    return "token过期";
+  }
+  if (message.includes("Illegal Argument")) {
+    return "密文长度错误";
+  }
+  if (normalizedMessage.includes("validation error for agentrequest")) {
+    return "智能体请求校验失败";
+  }
+  return "其他";
+};
 
-export default function CronOverviewPage() {
-  const { t } = useTranslation();
+const hashString = (value: string) => {
+  let hash = 0;
+  for (let index = 0; index < value.length; index += 1) {
+    hash = (hash * 31 + value.charCodeAt(index)) >>> 0;
+  }
+  return hash.toString(36);
+};
 
-  // 首次加载标记：控制是否自动触发查询
-  const initialLoadDone = useRef(false);
+const metricDefinitions = [
+  {
+    key: "total",
+    title: "定时任务数",
+    accent: "#2563eb",
+    icon: Workflow,
+  },
+  {
+    key: "subscribed",
+    title: "订阅任务数",
+    accent: "#7c3aed",
+    icon: CalendarDays,
+  },
+  {
+    key: "created",
+    title: "自主创建任务数",
+    accent: "#0891b2",
+    icon: UserRound,
+  },
+  {
+    key: "runs",
+    title: "执行次数",
+    accent: "#f97316",
+    icon: PlaySquare,
+  },
+  {
+    key: "success_rate",
+    title: "执行成功率",
+    accent: "#16a34a",
+    icon: ShieldCheck,
+  },
+  {
+    key: "avg_cost",
+    title: "平均耗时",
+    accent: "#2563eb",
+    icon: Clock3,
+  },
+] as const;
 
-  // Filter options (loaded from API - 仅用户从数据库查询)
-  const [filterOptions, setFilterOptions] = useState<FilterOptionsResponse>({
-    users: [],
-    bbk_ids: [], // 不使用，分行来自前端常量
-    channels: [], // 不使用
-    job_names: [],
-    job_ids: [],
-  });
-  const [filterOptionsLoading, setFilterOptionsLoading] = useState(false);
-
-  // Jobs state
-  const [jobsLoading, setJobsLoading] = useState(false);
-  const [jobs, setJobs] = useState<CronJobItem[]>([]);
-  const [jobsTotal, setJobsTotal] = useState(0);
-  const [jobsPage, setJobsPage] = useState(1);
-  const [jobsPageSize, setJobsPageSize] = useState(10);
-  // Jobs filters (dropdown selects)
-  const [jobsUserFilter, setJobsUserFilter] = useState<string>("");
-  const [jobsBbkFilter, setJobsBbkFilter] = useState<string>("");
-  const [jobsEnabledFilter, setJobsEnabledFilter] = useState<string>("true"); // 默认选中已启用
-
-  // Executions state
-  const [execsLoading, setExecsLoading] = useState(false);
-  const [executions, setExecutions] = useState<ExecutionItem[]>([]);
-  const [execsTotal, setExecsTotal] = useState(0);
-  const [execsPage, setExecsPage] = useState(1);
-  const [execsPageSize, setExecsPageSize] = useState(10);
-  // Executions filters (dropdown selects)
-  const [execsJobFilter, setExecsJobFilter] = useState<string>("");
-  const [execsUserFilter, setExecsUserFilter] = useState<string>("");
-  const [execsStatusFilter, setExecsStatusFilter] = useState<string>("");
-  const [execsTimeRangeType, setExecsTimeRangeType] = useState<string>("today");
-  const [execsCustomTimeRange, setExecsCustomTimeRange] = useState<[dayjs.Dayjs | null, dayjs.Dayjs | null]>([dayjs().subtract(7, "day"), dayjs()]);
-
-  // Execution detail drawer
-  const [detailDrawerOpen, setDetailDrawerOpen] = useState(false);
-  const [selectedExecution, setSelectedExecution] = useState<ExecutionItem | null>(null);
-
-  // 获取时间范围
-  const getTimeRange = (
-    rangeType: string,
-    customRange?: [dayjs.Dayjs | null, dayjs.Dayjs | null],
-  ): { start_time?: string; end_time?: string } => {
-    const today = dayjs().startOf("day");
-    switch (rangeType) {
-      case "today":
-        return {
-          start_time: today.format("YYYY-MM-DDTHH:mm:ss"),
-          end_time: today.endOf("day").format("YYYY-MM-DDTHH:mm:ss"),
-        };
-      case "week":
-        return {
-          start_time: today.subtract(6, "day").format("YYYY-MM-DDTHH:mm:ss"),
-          end_time: today.endOf("day").format("YYYY-MM-DDTHH:mm:ss"),
-        };
-      case "month":
-        return {
-          start_time: today.subtract(29, "day").format("YYYY-MM-DDTHH:mm:ss"),
-          end_time: today.endOf("day").format("YYYY-MM-DDTHH:mm:ss"),
-        };
-      case "last7days":
-        return {
-          start_time: today.subtract(6, "day").format("YYYY-MM-DDTHH:mm:ss"),
-          end_time: today.endOf("day").format("YYYY-MM-DDTHH:mm:ss"),
-        };
-      case "last30days":
-        return {
-          start_time: today.subtract(29, "day").format("YYYY-MM-DDTHH:mm:ss"),
-          end_time: today.endOf("day").format("YYYY-MM-DDTHH:mm:ss"),
-        };
-      case "custom":
-        if (customRange && customRange[0] && customRange[1]) {
-          return {
-            start_time: customRange[0].format("YYYY-MM-DDTHH:mm:ss"),
-            end_time: customRange[1].endOf("day").format("YYYY-MM-DDTHH:mm:ss"),
-          };
-        }
-        return {};
-      default:
-        return {};
+const formatMetricValue = (key: string, value: number | undefined) => {
+  if (value === undefined || value === null) {
+    return "-";
+  }
+  if (key === "success_rate") {
+    return `${value.toFixed(2)}%`;
+  }
+  if (key === "avg_cost") {
+    if (value < 60000) {
+      return `${Math.round(value / 1000)}s`;
     }
-  };
+    return `${(value / 60000).toFixed(2)}min`;
+  }
+  return formatNumber(value);
+};
 
-  // Fetch filter options
-  const fetchFilterOptions = async () => {
-    setFilterOptionsLoading(true);
-    try {
-      const options = await monitorApi.getFilterOptions();
-      setFilterOptions(options);
-    } catch (error) {
-      console.error("Failed to fetch filter options:", error);
-    } finally {
-      setFilterOptionsLoading(false);
-    }
-  };
+function SectionTitle({ children }: { children: React.ReactNode }) {
+  return (
+    <div className={styles.sectionTitle}>
+      <span />
+      <h2>{children}</h2>
+    </div>
+  );
+}
 
-  // Fetch jobs
-  const fetchJobs = async () => {
-    setJobsLoading(true);
-    try {
-      const enabledValue = jobsEnabledFilter === "true" ? true : jobsEnabledFilter === "false" ? false : undefined;
-      const result = await monitorApi.getJobs(jobsPage, jobsPageSize, {
-        tenant_id: jobsUserFilter || undefined,
-        bbk_id: jobsBbkFilter || undefined,
-        enabled: enabledValue,
-      });
-      setJobs(result.items);
-      setJobsTotal(result.total);
-    } catch (error) {
-      console.error("Failed to fetch jobs:", error);
-      message.error("获取任务列表失败");
-    } finally {
-      setJobsLoading(false);
-    }
-  };
+function MetricCard({ metric }: { metric: MetricCard }) {
+  const Icon = metric.icon;
+  const isCostMetric = metric.key === "avg_cost";
+  const isPositiveTrend = isCostMetric
+    ? metric.trend === "down"
+    : metric.trend === "up";
+  const trendClassName = metric.trend
+    ? isPositiveTrend
+      ? styles.goodTrend
+      : styles.hotTrend
+    : "";
+  const compareLabel = metric.key === "total" ? "数量" : "环比";
+  const showCompareLabel = metric.compare !== "-";
 
-  // Fetch executions
-  const fetchExecutions = async () => {
-    setExecsLoading(true);
-    try {
-      const timeRange = getTimeRange(execsTimeRangeType, execsCustomTimeRange);
-      const result = await monitorApi.getExecutions(execsPage, execsPageSize, {
-        job_id: execsJobFilter || undefined,
-        tenant_id: execsUserFilter || undefined,
-        status: execsStatusFilter || undefined,
-        ...timeRange,
-      });
-      setExecutions(result.items);
-      setExecsTotal(result.total);
-    } catch (error) {
-      console.error("Failed to fetch executions:", error);
-      message.error("获取执行历史失败");
-    } finally {
-      setExecsLoading(false);
-    }
-  };
-
-  // Load filter options on mount
-  useEffect(() => {
-    fetchFilterOptions();
-  }, []);
-
-  // 首次加载逻辑
-  useEffect(() => {
-    // 如果已经完成首次加载，不再重复
-    if (initialLoadDone.current) {
-      return;
-    }
-
-    // 使用空筛选进行首次加载
-    fetchJobs();
-    fetchExecutions();
-    initialLoadDone.current = true;
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
-
-  // Jobs query effect (分页变化时触发查询，首次加载由上面的 effect 控制)
-  useEffect(() => {
-    if (!initialLoadDone.current) {
-      return;
-    }
-    fetchJobs();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [jobsPage, jobsPageSize]);
-
-  // Executions query effect (分页变化时触发查询)
-  useEffect(() => {
-    if (!initialLoadDone.current) {
-      return;
-    }
-    fetchExecutions();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [execsPage, execsPageSize]);
-
-  // Handler for jobs search button
-  const handleJobsSearch = () => {
-    setJobsPage(1);
-    fetchJobs();
-  };
-
-  // Handler for executions search button
-  const handleExecsSearch = () => {
-    setExecsPage(1);
-    fetchExecutions();
-  };
-
-  // Export jobs
-  const handleExportJobs = async () => {
-    try {
-      message.loading("正在导出...");
-      const enabledValue = jobsEnabledFilter === "true" ? true : jobsEnabledFilter === "false" ? false : undefined;
-      const blob = await monitorApi.exportJobs({
-        tenant_id: jobsUserFilter || undefined,
-        bbk_id: jobsBbkFilter || undefined,
-        enabled: enabledValue,
-      });
-      const url = window.URL.createObjectURL(blob);
-      const a = document.createElement("a");
-      a.href = url;
-      a.download = `cron_jobs_${dayjs().format("YYYY-MM-DD_HHmmss")}.xlsx`;
-      a.click();
-      window.URL.revokeObjectURL(url);
-      message.success("导出成功");
-    } catch (error) {
-      console.error("Export failed:", error);
-      message.error("导出失败");
-    }
-  };
-
-  // Export executions
-  const handleExportExecutions = async () => {
-    try {
-      message.loading("正在导出...");
-      const timeRange = getTimeRange(execsTimeRangeType, execsCustomTimeRange);
-      const blob = await monitorApi.exportExecutions({
-        job_id: execsJobFilter || undefined,
-        tenant_id: execsUserFilter || undefined,
-        status: execsStatusFilter || undefined,
-        ...timeRange,
-      });
-      const url = window.URL.createObjectURL(blob);
-      const a = document.createElement("a");
-      a.href = url;
-      a.download = `cron_executions_${dayjs().format("YYYY-MM-DD_HHmmss")}.xlsx`;
-      a.click();
-      window.URL.revokeObjectURL(url);
-      message.success("导出成功");
-    } catch (error) {
-      console.error("Export failed:", error);
-      message.error("导出失败");
-    }
-  };
-
-  // View execution detail
-  const handleViewExecution = (exec: ExecutionItem) => {
-    setSelectedExecution(exec);
-    setDetailDrawerOpen(true);
-  };
-
-  // 构建带"全部"选项的筛选项列表（使用 useMemo 缓存）
-  const userOptions = useMemo(() => {
-    return [{ value: "", label: "全部" }, ...filterOptions.users];
-  }, [filterOptions.users]);
-
-  const jobIdOptions = useMemo(() => {
-    return [{ value: "", label: "全部" }, ...filterOptions.job_ids];
-  }, [filterOptions.job_ids]);
-
-  // Jobs table columns
-  const jobsColumns: ColumnsType<CronJobItem> = [
-    {
-      title: "任务名称",
-      dataIndex: "name",
-      key: "name",
-      width: 160,
-      ellipsis: true,
-    },
-    {
-      title: "用户姓名",
-      dataIndex: "tenant_name",
-      key: "tenant_name",
-      width: 120,
-      render: (name: string) => name || "-",
-    },
-    {
-      title: "用户ID",
-      dataIndex: "tenant_id",
-      key: "tenant_id",
-      width: 140,
-      ellipsis: true,
-    },
-    {
-      title: "分行",
-      dataIndex: "bbk_id",
-      key: "bbk_id",
-      width: 100,
-      render: (bbk: string) => BBK_ID_TO_NAME_MAP[bbk] || bbk || "-",
-    },
-    {
-      title: "是否启用",
-      dataIndex: "enabled",
-      key: "enabled",
-      width: 90,
-      render: (enabled: boolean) => (
-        <Tag color={enabled ? "green" : "orange"}>
-          {enabled ? "已启用" : "已禁用"}
-        </Tag>
-      ),
-    },
-    {
-      title: "今日执行状态",
-      dataIndex: "today_status",
-      key: "today_status",
-      width: 100,
-      render: (status: string | null) => {
-        if (!status) {
-          return <Tag color="default">未执行</Tag>;
-        }
-        return (
-          <Tag color={EXEC_STATUS_COLORS[status] || "default"}>
-            {EXEC_STATUS_LABELS[status] || status}
-          </Tag>
-        );
-      },
-    },
-    {
-      title: "执行次数",
-      dataIndex: "execution_count",
-      key: "execution_count",
-      width: 90,
-      render: (count: number) => count || 0,
-    },
-    {
-      title: "创建时间",
-      dataIndex: "created_at",
-      key: "created_at",
-      width: 160,
-      render: (time: string | null) =>
-        time ? dayjs(time).format("YYYY-MM-DD HH:mm") : "-",
-    },
-  ];
-
-  // Executions table columns
-  const execsColumns: ColumnsType<ExecutionItem> = [
-    {
-      title: "任务名称",
-      dataIndex: "job_name",
-      key: "job_name",
-      width: 160,
-      ellipsis: true,
-    },
-    {
-      title: "用户姓名",
-      dataIndex: "tenant_name",
-      key: "tenant_name",
-      width: 120,
-      render: (name: string) => name || "-",
-    },
-    {
-      title: "用户ID",
-      dataIndex: "tenant_id",
-      key: "tenant_id",
-      width: 140,
-      ellipsis: true,
-    },
-    {
-      title: "状态",
-      dataIndex: "status",
-      key: "status",
-      width: 80,
-      render: (status: string, record: ExecutionItem) => {
-        const color = EXEC_STATUS_COLORS[status] || "default";
-        // 未读的成功任务添加高亮背景
-        if (status === "success" && !record.is_read) {
-          return (
-            <Tag color={color} style={{ fontWeight: "bold" }}>
-              {EXEC_STATUS_LABELS[status] || status}
-            </Tag>
-          );
-        }
-        return (
-          <Tag color={color}>
-            {EXEC_STATUS_LABELS[status] || status}
-          </Tag>
-        );
-      },
-    },
-    {
-      title: "已读",
-      dataIndex: "is_read",
-      key: "is_read",
-      width: 70,
-      render: (isRead: boolean, record: ExecutionItem) => {
-        // 只有成功的任务才显示已读状态
-        if (record.status !== "success") {
-          return "-";
-        }
-        return isRead ? (
-          <Tag color="green">已读</Tag>
-        ) : (
-          <Tag color="orange">未读</Tag>
-        );
-      },
-    },
-    {
-      title: "执行时间",
-      dataIndex: "actual_time",
-      key: "actual_time",
-      width: 160,
-      render: (time: string) => dayjs(time).format("YYYY-MM-DD HH:mm"),
-    },
-    {
-      title: "耗时",
-      dataIndex: "duration_ms",
-      key: "duration_ms",
-      width: 80,
-      render: (ms: number) => {
-        if (!ms) return "-";
-        if (ms < 1000) return `${ms}ms`;
-        if (ms < 60000) return `${(ms / 1000).toFixed(1)}s`;
-        return `${(ms / 60000).toFixed(1)}m`;
-      },
-    },
-    {
-      title: "执行方式",
-      dataIndex: "is_manual",
-      key: "is_manual",
-      width: 80,
-      render: (manual: boolean) => manual ? "手动" : "自动",
-    },
-    {
-      title: "操作",
-      key: "action",
-      width: 80,
-      render: (_, record) => (
-        <Button
-          type="link"
-          size="small"
-          icon={<EyeOutlined />}
-          onClick={() => handleViewExecution(record)}
+  return (
+    <article
+      className={styles.metricCard}
+      style={{ borderTopColor: metric.accent }}
+    >
+      <div className={styles.metricHeader}>
+        <i
+          style={{
+            color: "#ffffff",
+            backgroundColor: metric.accent,
+          }}
         >
-          详情
-        </Button>
-      ),
-    },
-  ];
+          <Icon size={22} />
+        </i>
+        <div className={styles.metricText}>
+          <span className={styles.metricTitle}>{metric.title}</span>
+          <strong>{metric.value}</strong>
+          {metric.compare ? (
+            <div className={`${styles.metricCompare} ${trendClassName}`}>
+              {showCompareLabel ? <span>{compareLabel}</span> : null}
+              {metric.trend === "up" ? <TrendingUp size={14} /> : null}
+              {metric.trend === "down" ? <TrendingDown size={14} /> : null}
+              <em>{metric.compare}</em>
+            </div>
+          ) : null}
+        </div>
+      </div>
+    </article>
+  );
+}
+
+const polarPoint = (cx: number, cy: number, radius: number, angle: number) => ({
+  x: cx + radius * Math.cos(angle),
+  y: cy + radius * Math.sin(angle),
+});
+
+function seamCurve(
+  cx: number,
+  cy: number,
+  outerRadius: number,
+  innerRadius: number,
+  angle: number,
+  fromOuter: boolean,
+) {
+  const outer = polarPoint(cx, cy, outerRadius, angle);
+  const inner = polarPoint(cx, cy, innerRadius, angle);
+  const control = polarPoint(cx, cy, (outerRadius + innerRadius) / 2, angle + 0.22);
+  const end = fromOuter ? inner : outer;
+
+  return `Q ${control.x.toFixed(3)} ${control.y.toFixed(3)} ${end.x.toFixed(3)} ${end.y.toFixed(3)}`;
+}
+
+function donutSegmentPath(
+  startAngle: number,
+  endAngle: number,
+  cx = 74,
+  cy = 74,
+  outerRadius = 56,
+  innerRadius = 39,
+) {
+  const outerStart = polarPoint(cx, cy, outerRadius, startAngle);
+  const outerEnd = polarPoint(cx, cy, outerRadius, endAngle);
+  const innerStart = polarPoint(cx, cy, innerRadius, startAngle);
+  const largeArcFlag = endAngle - startAngle > Math.PI ? 1 : 0;
+
+  return [
+    `M ${outerStart.x.toFixed(3)} ${outerStart.y.toFixed(3)}`,
+    `A ${outerRadius} ${outerRadius} 0 ${largeArcFlag} 1 ${outerEnd.x.toFixed(3)} ${outerEnd.y.toFixed(3)}`,
+    seamCurve(cx, cy, outerRadius, innerRadius, endAngle, true),
+    `A ${innerRadius} ${innerRadius} 0 ${largeArcFlag} 0 ${innerStart.x.toFixed(3)} ${innerStart.y.toFixed(3)}`,
+    seamCurve(cx, cy, outerRadius, innerRadius, startAngle, false),
+    "Z",
+  ].join(" ");
+}
+
+function CurvedDonutChart({
+  items,
+  centerValue,
+  centerLabel,
+}: {
+  items: DistributionItem[];
+  centerValue: string;
+  centerLabel: string;
+}) {
+  const total = items.reduce((sum, item) => sum + item.value, 0);
+  const nonZeroItems = items.filter((item) => item.value > 0);
+  const singleValueItem = nonZeroItems.length === 1 ? nonZeroItems[0] : null;
+  const singleValueItemIndex = singleValueItem
+    ? items.findIndex((item) => item.name === singleValueItem.name)
+    : -1;
+  const gradientPrefix = `donut-${hashString(
+    `${centerLabel}-${items.map((item) => item.name).join("-")}`,
+  )}`;
+  let currentAngle = -Math.PI / 2;
+
+  return (
+    <svg
+      className={styles.curvedDonut}
+      viewBox="0 0 148 148"
+      role="img"
+      aria-label={`${centerLabel} ${centerValue}`}
+    >
+      <defs>
+        {items.map((item, index) => {
+          const color = item.color || "#94a3b8";
+          return (
+            <radialGradient
+              key={item.name}
+              id={`${gradientPrefix}-${index}`}
+              cx="50%"
+              cy="50%"
+              r="62%"
+            >
+              <stop offset="58%" stopColor={color} stopOpacity="0.72" />
+              <stop offset="100%" stopColor={color} />
+            </radialGradient>
+          );
+        })}
+      </defs>
+      {singleValueItem ? (
+        <circle
+          cx="74"
+          cy="74"
+          r="47.5"
+          fill="none"
+          stroke={`url(#${gradientPrefix}-${singleValueItemIndex})`}
+          strokeWidth="17"
+        >
+          <title>
+            {singleValueItem.name}: {formatNumber(singleValueItem.value)}
+            {singleValueItem.percent !== undefined
+              ? ` (${singleValueItem.percent.toFixed(2)}%)`
+              : ""}
+          </title>
+        </circle>
+      ) : (
+        items.map((item, index) => {
+          const angle = total ? (item.value / total) * Math.PI * 2 : 0;
+          const startAngle = currentAngle;
+          const endAngle = currentAngle + angle;
+          currentAngle = endAngle;
+
+          return (
+            <path
+              key={item.name}
+              d={donutSegmentPath(startAngle, endAngle)}
+              fill={`url(#${gradientPrefix}-${index})`}
+            >
+              <title>
+                {item.name}: {formatNumber(item.value)}
+                {item.percent !== undefined ? ` (${item.percent.toFixed(2)}%)` : ""}
+              </title>
+            </path>
+          );
+        })
+      )}
+      {!total ? (
+        <circle
+          cx="74"
+          cy="74"
+          r="47.5"
+          fill="none"
+          stroke="#e2e8f0"
+          strokeWidth="17"
+        >
+          <title>{centerLabel}: 0</title>
+        </circle>
+      ) : null}
+      <text
+        x="74"
+        y="68"
+        textAnchor="middle"
+        className={styles.curvedDonutValue}
+      >
+        {centerValue}
+      </text>
+      <text
+        x="74"
+        y="86"
+        textAnchor="middle"
+        className={styles.curvedDonutLabel}
+      >
+        {centerLabel}
+      </text>
+    </svg>
+  );
+}
+
+function Panel({
+  title,
+  children,
+  action,
+}: {
+  title: string;
+  children: React.ReactNode;
+  action?: React.ReactNode;
+}) {
+  return (
+    <article className={styles.panel}>
+      <div className={styles.panelHeader}>
+        <h3>{title}</h3>
+        {action}
+      </div>
+      {children}
+    </article>
+  );
+}
+
+function DonutPanel({
+  title,
+  items,
+  centerValue,
+  centerLabel,
+}: {
+  title: string;
+  items: DistributionItem[];
+  centerValue: string;
+  centerLabel: string;
+}) {
+  return (
+    <Panel title={title}>
+      <div className={styles.donutLayout}>
+        <CurvedDonutChart
+          items={items}
+          centerValue={centerValue}
+          centerLabel={centerLabel}
+        />
+        <div className={styles.legendList}>
+          {items.map((item) => (
+            <div key={item.name} className={styles.legendRow}>
+              <span>
+                <i style={{ backgroundColor: item.color }} />
+                {item.name}
+              </span>
+              <strong>
+                {formatNumber(item.value)} ({item.percent.toFixed(2)}%)
+              </strong>
+            </div>
+          ))}
+        </div>
+      </div>
+    </Panel>
+  );
+}
+
+function FailureReasonChart({
+  items,
+}: {
+  items: DistributionItem[];
+}) {
+  const maxValue = Math.max(...items.map((item) => item.value), 1);
+
+  return (
+    <div className={styles.failureChart}>
+      {items.map((item) => (
+        <div key={item.name} className={styles.failureRow}>
+          <Tooltip title={item.name} placement="topLeft">
+            <span className={styles.failureLabel}>
+              {truncateAxisLabel(item.name)}
+            </span>
+          </Tooltip>
+          <div className={styles.failureBarTrack}>
+            <span
+              className={styles.failureBar}
+              style={{
+                width: `${Math.max(5, (item.value / maxValue) * 100)}%`,
+              }}
+            />
+          </div>
+          <strong className={styles.failureValue}>
+            {item.value}
+            {item.percent !== undefined ? ` (${item.percent.toFixed(2)}%)` : ""}
+          </strong>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function normalizeStack<T extends Record<string, string | number>>(
+  row: T,
+  keys: string[],
+) {
+  const total = keys.reduce((sum, key) => sum + Number(row[key]), 0);
+
+  return keys.reduce<Record<string, number>>((result, key, index) => {
+    if (!total) {
+      result[key] = 0;
+      return result;
+    }
+
+    if (index === keys.length - 1) {
+      const previousTotal = keys
+        .slice(0, -1)
+        .reduce((sum, prevKey) => sum + result[prevKey], 0);
+      result[key] = Number((100 - previousTotal).toFixed(2));
+      return result;
+    }
+
+    result[key] = Number(((Number(row[key]) / total) * 100).toFixed(2));
+    return result;
+  }, {});
+}
+
+function curvedStackSegmentPath(
+  start: number,
+  end: number,
+  isFirst: boolean,
+  isLast: boolean,
+) {
+  const height = 12;
+  const curveOffset = 2.4;
+  const rightBoundary = isLast
+    ? `L ${end.toFixed(3)} ${height}`
+    : `Q ${(end + curveOffset).toFixed(3)} ${(height / 2).toFixed(3)} ${end.toFixed(3)} ${height}`;
+  const leftBoundary = isFirst
+    ? `L ${start.toFixed(3)} 0`
+    : `Q ${(start + curveOffset).toFixed(3)} ${(height / 2).toFixed(3)} ${start.toFixed(3)} 0`;
+
+  return [
+    `M ${start.toFixed(3)} 0`,
+    `L ${end.toFixed(3)} 0`,
+    rightBoundary,
+    `L ${start.toFixed(3)} ${height}`,
+    leftBoundary,
+    "Z",
+  ].join(" ");
+}
+
+function BranchLegend({
+  items,
+}: {
+  items: Array<{ label: string; color: string }>;
+}) {
+  return (
+    <div className={styles.branchLegend}>
+      {items.map((item) => (
+        <span key={item.label}>
+          <i style={{ backgroundColor: item.color }} />
+          {item.label}
+        </span>
+      ))}
+    </div>
+  );
+}
+
+function BranchTaskCell({
+  name,
+  rows,
+  maxValue,
+}: {
+  name: string;
+  rows: DistributionItem[];
+  maxValue: number;
+}) {
+  const task = rows.find((item) => item.name === name);
+  const value = task?.value ?? 0;
+
+  return (
+    <div className={styles.branchBarRow}>
+      <span className={styles.branchName}>{name}</span>
+      <div className={styles.branchBarTrack}>
+        <span
+          className={styles.branchSingleBar}
+          style={{ width: `${Math.max(5, (value / maxValue) * 100)}%` }}
+        />
+      </div>
+      <strong>{formatNumber(value)}</strong>
+    </div>
+  );
+}
+
+function BranchStackCell<T extends { name: string } & Record<string, string | number>>({
+  name,
+  rows,
+  keys,
+  colors,
+}: {
+  name: string;
+  rows: T[];
+  keys: string[];
+  colors: string[];
+}) {
+  const row = rows.find((item) => item.name === name);
+  const normalized = row ? normalizeStack(row, keys) : {};
+  const gradientPrefix = `branch-stack-${name.replace(
+    /[^a-zA-Z0-9_-]/g,
+    "-",
+  )}-${keys.join("-")}`;
+  let currentStart = 0;
+
+  return (
+    <div className={styles.branchBarRow}>
+      <span className={styles.branchName}>{name}</span>
+      <svg
+        className={styles.branchStackTrack}
+        viewBox="0 0 100 12"
+        preserveAspectRatio="none"
+      >
+        <defs>
+          {colors.map((color, index) => (
+            <linearGradient
+              key={color}
+              id={`${gradientPrefix}-${index}`}
+              x1="0"
+              y1="0"
+              x2="1"
+              y2="0"
+            >
+              <stop offset="0%" stopColor={color} />
+              <stop offset="100%" stopColor={color} stopOpacity="0.72" />
+            </linearGradient>
+          ))}
+        </defs>
+        {keys.map((key, index) => {
+          const value = normalized[key] ?? 0;
+          const start = currentStart;
+          const end = index === keys.length - 1 ? 100 : currentStart + value;
+          currentStart = end;
+
+          return (
+            <path
+              key={key}
+              d={curvedStackSegmentPath(
+                start,
+                end,
+                index === 0,
+                index === keys.length - 1,
+              )}
+              fill={`url(#${gradientPrefix}-${index})`}
+            />
+          );
+        })}
+      </svg>
+      <strong>100%</strong>
+    </div>
+  );
+}
+
+function BranchSharedOverview({
+  branchTasks,
+  branchExecution,
+  branchRead,
+}: {
+  branchTasks: DistributionItem[];
+  branchExecution: Array<{
+    name: string;
+    success: number;
+    failed: number;
+    skipped: number;
+  }>;
+  branchRead: Array<{
+    name: string;
+    read: number;
+    unread: number;
+  }>;
+}) {
+  const branchNames = branchTasks.map((item) => item.name);
+  const maxTaskValue = Math.max(...branchTasks.map((item) => item.value), 1);
+
+  return (
+    <section className={styles.branchSharedSection}>
+      <div className={styles.branchSharedScroller}>
+        <div className={styles.branchSharedGrid}>
+          <article className={styles.branchHeaderCard}>
+            <h3>分行定时任务数量</h3>
+            <div className={styles.branchLegendSpacer} />
+          </article>
+          <article className={styles.branchHeaderCard}>
+            <h3>分行执行结果分布</h3>
+            <BranchLegend
+              items={[
+                { label: "成功", color: "#16a34a" },
+                { label: "失败", color: "#ef4444" },
+                { label: "已取消/跳过", color: "#94a3b8" },
+              ]}
+            />
+          </article>
+          <article className={styles.branchHeaderCard}>
+            <h3>分行阅读状态分布</h3>
+            <BranchLegend
+              items={[
+                { label: "已读", color: "#2563eb" },
+                { label: "未读", color: "#f97316" },
+              ]}
+            />
+          </article>
+
+          {branchNames.map((name) => (
+            <div key={name} className={styles.branchSharedRow}>
+              <div className={styles.branchCell}>
+                <BranchTaskCell name={name} rows={branchTasks} maxValue={maxTaskValue} />
+              </div>
+              <div className={styles.branchCell}>
+                <BranchStackCell
+                  name={name}
+                  rows={branchExecution}
+                  keys={["success", "failed", "skipped"]}
+                  colors={["#16a34a", "#ef4444", "#94a3b8"]}
+                />
+              </div>
+              <div className={styles.branchCell}>
+                <BranchStackCell
+                  name={name}
+                  rows={branchRead}
+                  keys={["read", "unread"]}
+                  colors={["#2563eb", "#f97316"]}
+                />
+              </div>
+            </div>
+          ))}
+        </div>
+      </div>
+    </section>
+  );
+}
+
+function FailedTaskModal({
+  open,
+  onClose,
+  tasks,
+  loading,
+}: {
+  open: boolean;
+  onClose: () => void;
+  tasks: ExecutionItem[];
+  loading: boolean;
+}) {
+  const [keyword, setKeyword] = useState("");
+  const [failureReason, setFailureReason] = useState<FailureReason | undefined>();
+  const [currentPage, setCurrentPage] = useState(1);
+  const pageSize = 5;
+  const normalizedKeyword = keyword.trim().toLowerCase();
+  const filteredTasks = tasks.filter((task) => {
+    const matchesKeyword = normalizedKeyword
+      ? (task.tenant_id || "").toLowerCase().includes(normalizedKeyword)
+      : true;
+    const matchesFailureReason = failureReason
+      ? classifyFailureReason(task.error_message) === failureReason
+      : true;
+
+    return matchesKeyword && matchesFailureReason;
+  });
+  const totalCount = filteredTasks.length;
+  const paginatedTasks = filteredTasks.slice(
+    (currentPage - 1) * pageSize,
+    currentPage * pageSize,
+  );
+  const handlePageChange = (page: number) => {
+    setCurrentPage(page);
+  };
+  const handleFilterChange = () => {
+    setCurrentPage(1);
+  };
+  const handleClose = () => {
+    setKeyword("");
+    setFailureReason(undefined);
+    setCurrentPage(1);
+    onClose();
+  };
+
+  return (
+    <Modal
+      open={open}
+      className={styles.failedTaskModal}
+      title={
+        <div
+          className={styles.failedTaskModalTitle}
+        >
+          <span className={styles.failedTaskWarningIcon}>
+            <WarningOutlined />
+          </span>
+          <span>执行失败任务清单</span>
+        </div>
+      }
+      width={1080}
+      footer={null}
+      onCancel={handleClose}
+      destroyOnHidden
+    >
+      <div className={styles.failedTaskToolbar}>
+        <Input.Search
+          value={keyword}
+          onChange={(event) => setKeyword(event.target.value)}
+          onSearch={(val) => { setKeyword(val); handleFilterChange(); }}
+          allowClear
+          placeholder="输入用户ID筛选"
+          className={styles.failedTaskSearch}
+        />
+        <Select
+          allowClear
+          value={failureReason}
+          onChange={(value) => {
+            setFailureReason(value);
+            handleFilterChange();
+          }}
+          placeholder="失败原因"
+          className={styles.failedReasonSelect}
+          options={failureReasonOptions.map((reason) => ({
+            label: reason,
+            value: reason,
+          }))}
+        />
+      </div>
+      <Spin spinning={loading} tip="加载失败任务...">
+        <div className={styles.failedTaskTable}>
+          <div className={styles.failedTaskTableHeader}>
+            <span>任务名称</span>
+            <span>用户姓名</span>
+            <span>用户id</span>
+            <span>执行时间</span>
+            <span>耗时</span>
+            <span>报错信息</span>
+          </div>
+          <div className={styles.failedTaskTableBody}>
+            {paginatedTasks.map((task) => (
+              <div key={task.id} className={styles.failedTaskTableRow}>
+                <span className={styles.failedTaskName}>{task.job_name}</span>
+                <span>{task.tenant_name}</span>
+                <span>{task.tenant_id}</span>
+                <span>{task.actual_time ? dayjs(task.actual_time).format("YYYY-MM-DD HH:mm:ss") : "-"}</span>
+                <span>
+                  {task.duration_ms === undefined || task.duration_ms === null
+                    ? "-"
+                    : task.duration_ms < 1000
+                    ? `${task.duration_ms}ms`
+                    : `${(task.duration_ms / 1000).toFixed(2)}s`}
+                </span>
+                <Tooltip title={task.error_message} placement="topLeft">
+                  <span className={styles.errorMessageCell}>
+                    {task.error_message || "-"}
+                  </span>
+                </Tooltip>
+              </div>
+            ))}
+          </div>
+        </div>
+        <div className={styles.failedTaskPagination}>
+          <Pagination
+            current={currentPage}
+            pageSize={pageSize}
+            total={totalCount}
+            onChange={handlePageChange}
+            showSizeChanger={false}
+            showTotal={(total) => `共 ${total} 条`}
+          />
+        </div>
+      </Spin>
+    </Modal>
+  );
+}
+
+export default function CronJobOverviewPage() {
+  const [timeRange, setTimeRange] = useState<TimeRange>("week");
+  const [dateRange, setDateRange] = useState<[Dayjs, Dayjs]>([
+    dayjs().subtract(6, "day"),
+    dayjs(),
+  ]);
+  const [overview, setOverview] = useState<CronOverviewResponse | null>(null);
+  const [overviewLoading, setOverviewLoading] = useState(false);
+  const [failedTaskModalOpen, setFailedTaskModalOpen] = useState(false);
+  const [failedTasks, setFailedTasks] = useState<ExecutionItem[]>([]);
+  const [failedTasksLoading, setFailedTasksLoading] = useState(false);
+
+  const getDateRangeParams = (range: [Dayjs, Dayjs]) => ({
+    start_time: range[0].startOf("day").format("YYYY-MM-DDTHH:mm:ss"),
+    end_time: range[1].endOf("day").format("YYYY-MM-DDTHH:mm:ss"),
+  });
+
+  const fetchOverview = async () => {
+    setOverviewLoading(true);
+    try {
+      const params = getDateRangeParams(dateRange);
+      const response = await monitorApi.getCronOverview(params);
+      setOverview(response);
+    } catch (error) {
+      console.error("Failed to fetch cron overview:", error);
+    } finally {
+      setOverviewLoading(false);
+    }
+  };
+
+  const fetchFailedTasks = async () => {
+    setFailedTasksLoading(true);
+    try {
+      const params = {
+        ...getDateRangeParams(dateRange),
+        status: "error",
+      };
+      const pageSize = 100;
+      let page = 1;
+      let total = 0;
+      const allTasks: ExecutionItem[] = [];
+
+      do {
+        const response = await monitorApi.getExecutions(page, pageSize, params);
+        if (response.items.length === 0) {
+          break;
+        }
+        allTasks.push(...response.items);
+        total = response.total;
+        page += 1;
+      } while (allTasks.length < total);
+
+      setFailedTasks(allTasks);
+    } catch (error) {
+      console.error("Failed to fetch failed tasks:", error);
+    } finally {
+      setFailedTasksLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    fetchOverview();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [timeRange, dateRange]);
+
+  useEffect(() => {
+    if (failedTaskModalOpen) {
+      fetchFailedTasks();
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [failedTaskModalOpen, dateRange]);
+
+  const handleModeChange = (nextRange: TimeRange) => {
+    setTimeRange(nextRange);
+    const today = dayjs();
+
+    if (nextRange === "day") {
+      setDateRange([today, today]);
+    } else if (nextRange === "week") {
+      setDateRange([today.subtract(6, "day"), today]);
+    } else if (nextRange === "month") {
+      setDateRange([today.subtract(29, "day"), today]);
+    }
+  };
+
+  const handleDateRangeChange = (
+    dates: null | [Dayjs | null, Dayjs | null],
+  ) => {
+    if (!dates?.[0] || !dates?.[1]) {
+      return;
+    }
+
+    const [start, end] = dates;
+    const today = dayjs();
+
+    if (start.isSame(today, "day") && end.isSame(today, "day")) {
+      setTimeRange("day");
+    } else if (
+      start.isSame(today.subtract(6, "day"), "day") &&
+      end.isSame(today, "day")
+    ) {
+      setTimeRange("week");
+    } else if (
+      start.isSame(today.subtract(29, "day"), "day") &&
+      end.isSame(today, "day")
+    ) {
+      setTimeRange("month");
+    } else {
+      setTimeRange("custom");
+    }
+
+    setDateRange([start, end]);
+  };
+
+  const disabledDate = (current: Dayjs | null): boolean =>
+    !!current && current.isAfter(dayjs().startOf("day"), "day");
+
+  const getOverviewMetricValue = (key: string) =>
+    overview?.metrics.find((item) => item.key === key)?.value;
+
+  const getOverviewMetricCompare = (key: string) =>
+    overview?.metrics.find((item) => item.key === key)?.compare ?? "";
+
+  const getOverviewMetricTrend = (key: string) =>
+    overview?.metrics.find((item) => item.key === key)?.trend ?? "up";
+
+  const metricCards = metricDefinitions.map((definition) => ({
+    key: definition.key,
+    title: definition.title,
+    value: formatMetricValue(definition.key, getOverviewMetricValue(definition.key)),
+    compare: getOverviewMetricCompare(definition.key),
+    trend: getOverviewMetricTrend(definition.key),
+    accent: definition.accent,
+    icon: definition.icon,
+  }));
+
+  const taskStatus = overview?.task_status ?? [];
+  const executionResult = overview?.execution_result ?? [];
+  const readStatus = overview?.read_status ?? [];
+  const failureReasons = overview?.failure_reasons ?? [];
+  const branchTasks = overview?.branch_tasks ?? [];
+  const branchExecution = overview?.branch_execution ?? [];
+  const branchRead = overview?.branch_read ?? [];
 
   return (
     <div className={styles.cronOverviewPage}>
-      <PageHeader
-        items={[
-          { title: t("nav.monitor") || "监控" },
-          { title: "定时任务概览" },
-        ]}
-      />
+      <header className={styles.pageHeader}>
+        <div className={styles.toolbar}>
+          <div className={styles.toolbarLeft}>
+            <div className={styles.titleWrap}>
+              <h1>定时任务概览</h1>
+              <Info size={18} />
+            </div>
+          </div>
+          <div className={styles.toolbarRight}>
+            <div className={styles.segmentedControl}>
+              <button
+                type="button"
+                className={
+                  timeRange === "day"
+                    ? styles.segmentActive
+                    : styles.segmentButton
+                }
+                onClick={() => handleModeChange("day")}
+              >
+                今天
+              </button>
+              <button
+                type="button"
+                className={
+                  timeRange === "week"
+                    ? styles.segmentActive
+                    : styles.segmentButton
+                }
+                onClick={() => handleModeChange("week")}
+              >
+                近7天
+              </button>
+              <button
+                type="button"
+                className={
+                  timeRange === "month"
+                    ? styles.segmentActive
+                    : styles.segmentButton
+                }
+                onClick={() => handleModeChange("month")}
+              >
+                近30天
+              </button>
+            </div>
 
-      <Card className={styles.tableCard}>
-        <Tabs
-          defaultActiveKey="jobs"
-          items={[
-            {
-              key: "jobs",
-              label: "任务列表",
-              children: (
-                <>
-                  <div className={styles.filterBar}>
-                    <Space size="middle" wrap>
-                      <Select
-                        placeholder="用户"
-                        value={jobsUserFilter}
-                        onChange={(value) => setJobsUserFilter(value || "")}
-                        style={{ width: 180 }}
-                        showSearch
-                        filterOption={(input, option) =>
-                          (option?.label ?? "").toLowerCase().includes(input.toLowerCase())
-                        }
-                        options={userOptions}
-                        loading={filterOptionsLoading}
-                        virtual={false}
-                      />
-                      <Select
-                        placeholder="分行"
-                        value={jobsBbkFilter}
-                        onChange={(value) => setJobsBbkFilter(value || "")}
-                        style={{ width: 120 }}
-                        options={BBK_OPTIONS}
-                      />
-                      <Select
-                        placeholder="是否启用"
-                        value={jobsEnabledFilter || undefined}
-                        onChange={(value) => setJobsEnabledFilter(value || "")}
-                        style={{ width: 120 }}
-                        allowClear
-                        options={ENABLED_OPTIONS}
-                      />
-                      <Button
-                        type="primary"
-                        icon={<ReloadOutlined />}
-                        onClick={handleJobsSearch}
-                      >
-                        查询
-                      </Button>
-                      <Button
-                        icon={<DownloadOutlined />}
-                        onClick={handleExportJobs}
-                      >
-                        导出
-                      </Button>
-                    </Space>
-                  </div>
+            <div className={styles.dateRangePanel}>
+              <DatePicker.RangePicker
+                className={styles.rangePicker}
+                value={dateRange}
+                onChange={handleDateRangeChange}
+                format="YYYY-MM-DD"
+                suffixIcon={<CalendarDays size={16} />}
+                disabledDate={disabledDate}
+                allowClear={false}
+              />
+            </div>
+          </div>
+        </div>
+      </header>
 
-                  <Table
-                    columns={jobsColumns}
-                    dataSource={jobs}
-                    rowKey="id"
-                    loading={jobsLoading}
-                    pagination={{
-                      current: jobsPage,
-                      pageSize: jobsPageSize,
-                      total: jobsTotal,
-                      showSizeChanger: true,
-                      showTotal: (total) => `共 ${total} 条`,
-                      onChange: (page, pageSize) => {
-                        setJobsPage(page);
-                        setJobsPageSize(pageSize);
-                      },
-                    }}
-                    scroll={{ x: 1100 }}
-                  />
-                </>
-              ),
-            },
-            {
-              key: "executions",
-              label: "执行记录",
-              children: (
-                <>
-                  <div className={styles.filterBar}>
-                    <Space size="middle" wrap>
-                      <Select
-                        placeholder="任务"
-                        value={execsJobFilter}
-                        onChange={(value) => setExecsJobFilter(value || "")}
-                        style={{ width: 200 }}
-                        showSearch
-                        filterOption={(input, option) =>
-                          (option?.label ?? "").toLowerCase().includes(input.toLowerCase())
-                        }
-                        options={jobIdOptions}
-                        loading={filterOptionsLoading}
-                        virtual={false}
-                      />
-                      <Select
-                        placeholder="用户"
-                        value={execsUserFilter}
-                        onChange={(value) => setExecsUserFilter(value || "")}
-                        style={{ width: 180 }}
-                        showSearch
-                        filterOption={(input, option) =>
-                          (option?.label ?? "").toLowerCase().includes(input.toLowerCase())
-                        }
-                        options={userOptions}
-                        loading={filterOptionsLoading}
-                        virtual={false}
-                      />
-                      <Select
-                        placeholder="状态"
-                        value={execsStatusFilter}
-                        onChange={(value) => setExecsStatusFilter(value || "")}
-                        style={{ width: 120 }}
-                        options={EXEC_STATUS_OPTIONS}
-                      />
-                      <Select
-                        placeholder="时间范围"
-                        value={execsTimeRangeType}
-                        onChange={(value) => {
-                          setExecsTimeRangeType(value);
-                          if (value !== "custom") {
-                            setExecsCustomTimeRange([null, null]);
-                          }
-                        }}
-                        style={{ width: 120 }}
-                        options={TIME_RANGE_OPTIONS}
-                      />
-                      {execsTimeRangeType === "custom" && (
-                        <RangePicker
-                          value={execsCustomTimeRange as [dayjs.Dayjs, dayjs.Dayjs]}
-                          onChange={(dates) =>
-                            setExecsCustomTimeRange(dates as [dayjs.Dayjs | null, dayjs.Dayjs | null])
-                          }
-                          allowClear
-                        />
-                      )}
-                      <Button
-                        type="primary"
-                        icon={<ReloadOutlined />}
-                        onClick={handleExecsSearch}
-                      >
-                        查询
-                      </Button>
-                      <Button
-                        icon={<DownloadOutlined />}
-                        onClick={handleExportExecutions}
-                      >
-                        导出
-                      </Button>
-                    </Space>
-                  </div>
+      <SectionTitle>任务总体概览</SectionTitle>
+      <Spin spinning={overviewLoading} tip="加载中...">
+        <section className={styles.metricGrid}>
+          {metricCards.map((metric) => (
+            <MetricCard key={metric.key} metric={metric} />
+          ))}
+        </section>
+      </Spin>
 
-                  <Table
-                    columns={execsColumns}
-                    dataSource={executions}
-                    rowKey="id"
-                    loading={execsLoading}
-                    pagination={{
-                      current: execsPage,
-                      pageSize: execsPageSize,
-                      total: execsTotal,
-                      showSizeChanger: true,
-                      showTotal: (total) => `共 ${total} 条`,
-                      onChange: (page, pageSize) => {
-                        setExecsPage(page);
-                        setExecsPageSize(pageSize);
-                      },
-                    }}
-                    scroll={{ x: 1020 }}
-                  />
-                </>
-              ),
-            },
-          ]}
+      <SectionTitle>任务状态与触达情况</SectionTitle>
+      <Spin spinning={overviewLoading} tip="加载中...">
+        <section className={styles.statusGrid}>
+          <DonutPanel
+            title="任务状态分布"
+            items={taskStatus}
+            centerValue={formatNumber(branchTasks.reduce((sum, item) => sum + item.value, 0))}
+            centerLabel="总任务数"
+          />
+          <DonutPanel
+            title="执行结果分布"
+            items={executionResult}
+            centerValue={formatNumber(executionResult.reduce((sum, item) => sum + item.value, 0))}
+            centerLabel="总执行次数"
+          />
+          <Panel
+            title="任务失败原因分布"
+            action={
+              <button
+                type="button"
+                className={styles.linkButton}
+                onClick={() => setFailedTaskModalOpen(true)}
+              >
+                查看详情
+                <ChevronRight size={14} />
+              </button>
+            }
+          >
+            <FailureReasonChart items={failureReasons} />
+          </Panel>
+          <DonutPanel
+            title="任务阅读状态分布"
+            items={readStatus}
+            centerValue={formatNumber(readStatus.reduce((sum, item) => sum + item.value, 0))}
+            centerLabel="成功执行次数"
+          />
+        </section>
+      </Spin>
+
+      <SectionTitle>分行任务执行与触达概况</SectionTitle>
+      <Spin spinning={overviewLoading} tip="加载中...">
+        <BranchSharedOverview
+          branchTasks={branchTasks}
+          branchExecution={branchExecution}
+          branchRead={branchRead}
         />
-      </Card>
+      </Spin>
 
-      <Drawer
-        title="执行详情"
-        placement="right"
-        width={500}
-        open={detailDrawerOpen}
-        onClose={() => setDetailDrawerOpen(false)}
-      >
-        {selectedExecution && (
-          <Descriptions column={1} bordered size="small">
-            <Descriptions.Item label="任务名称">
-              {selectedExecution.job_name || "-"}
-            </Descriptions.Item>
-            <Descriptions.Item label="用户姓名">
-              {selectedExecution.tenant_name || "-"}
-            </Descriptions.Item>
-            <Descriptions.Item label="用户ID">
-              {selectedExecution.tenant_id || "-"}
-            </Descriptions.Item>
-            <Descriptions.Item label="执行状态">
-              <Tag color={EXEC_STATUS_COLORS[selectedExecution.status]}>
-                {EXEC_STATUS_LABELS[selectedExecution.status]}
-              </Tag>
-            </Descriptions.Item>
-            <Descriptions.Item label="执行时间">
-              {dayjs(selectedExecution.actual_time).format("YYYY-MM-DD HH:mm:ss")}
-            </Descriptions.Item>
-            <Descriptions.Item label="耗时">
-              {selectedExecution.duration_ms
-                ? `${(selectedExecution.duration_ms / 1000).toFixed(1)}秒`
-                : "-"}
-            </Descriptions.Item>
-            <Descriptions.Item label="执行方式">
-              {selectedExecution.is_manual ? "手动触发" : "自动执行"}
-            </Descriptions.Item>
-            <Descriptions.Item label="Trace ID">
-              {selectedExecution.trace_id || "-"}
-            </Descriptions.Item>
-            <Descriptions.Item label="Session ID">
-              {selectedExecution.session_id || "-"}
-            </Descriptions.Item>
-            <Descriptions.Item label="输出预览">
-              {selectedExecution.output_preview || "-"}
-            </Descriptions.Item>
-            {selectedExecution.error_message && (
-              <Descriptions.Item label="错误信息">
-                <pre style={{ whiteSpace: "pre-wrap", color: "#ff4d4f" }}>
-                  {selectedExecution.error_message}
-                </pre>
-              </Descriptions.Item>
-            )}
-          </Descriptions>
-        )}
-      </Drawer>
+      <FailedTaskModal
+        open={failedTaskModalOpen}
+        onClose={() => setFailedTaskModalOpen(false)}
+        tasks={failedTasks}
+        loading={failedTasksLoading}
+      />
     </div>
   );
 }

@@ -27,6 +27,8 @@ from swe.app.source_system_config.models import (
 from swe.app.source_system_config.runtime import (
     bind_source_system_config,
     get_current_source_system_config,
+    get_system_prompt_injections,
+    resolve_cron_unread_auto_pause_config,
     resolve_file_read_truncation_config,
     resolve_tool_result_compact_config,
 )
@@ -43,7 +45,9 @@ from swe.app.source_system_config.store import (
 DEFAULT_EXPECTED_SOURCE_CONFIG = {
     "feature_switches": {
         "chat_task_progress_enabled": True,
+        "database_access_guard_enabled": True,
     },
+    "system_prompt_injections": [],
     "tool_result_compact": {
         "enabled": True,
         "recent_n": 2,
@@ -54,6 +58,10 @@ DEFAULT_EXPECTED_SOURCE_CONFIG = {
     "file_read_truncation": {
         "enabled": True,
         "max_bytes": 50000,
+    },
+    "cron_unread_auto_pause": {
+        "enabled": True,
+        "threshold": 10,
     },
 }
 
@@ -101,6 +109,7 @@ class TestSourceSystemConfigModels:
             **DEFAULT_EXPECTED_SOURCE_CONFIG,
             "feature_switches": {
                 "chat_task_progress_enabled": False,
+                "database_access_guard_enabled": True,
             },
             "provider_policy": {"default_model": "qwen-max"},
         }
@@ -162,6 +171,82 @@ class TestSourceSystemConfigModels:
                 "max_bytes": 12000,
             },
         }
+
+    def test_cron_unread_auto_pause_config_is_accepted(self):
+        """定时任务未读自动暂停配置应允许按 source 覆盖。"""
+        config = SourceSystemConfig.model_validate(
+            {
+                "cron_unread_auto_pause": {
+                    "enabled": False,
+                    "threshold": 12,
+                },
+            },
+        )
+
+        assert config.as_dict() == {
+            "cron_unread_auto_pause": {
+                "enabled": False,
+                "threshold": 12,
+            },
+        }
+
+    def test_system_prompt_injections_are_normalized(self):
+        config = SourceSystemConfig.model_validate(
+            {
+                "system_prompt_injections": [
+                    "  keep first  ",
+                    "",
+                    "  ",
+                    "keep first",
+                    "line one\nline two",
+                ],
+            },
+        )
+
+        assert config.as_dict() == {
+            "system_prompt_injections": [
+                "keep first",
+                "line one\nline two",
+            ],
+        }
+
+    def test_system_prompt_injections_must_be_a_list(self):
+        with pytest.raises(ValueError, match="system_prompt_injections"):
+            SourceSystemConfig.model_validate(
+                {"system_prompt_injections": "not-a-list"},
+            )
+
+    def test_get_system_prompt_injections_reads_effective_defaults(self):
+        assert get_system_prompt_injections(None) == []
+        assert get_system_prompt_injections(
+            SourceSystemConfig.model_validate(
+                {
+                    "system_prompt_injections": [
+                        "source prompt",
+                        " source prompt ",
+                    ],
+                },
+            ),
+        ) == ["source prompt"]
+
+    @pytest.mark.parametrize(
+        ("payload", "match"),
+        [
+            ({"threshold": 0}, "threshold"),
+            ({"threshold": "many"}, "threshold"),
+            ({"enabled": "disabled"}, "enabled"),
+        ],
+    )
+    def test_invalid_cron_unread_auto_pause_config_is_rejected(
+        self,
+        payload,
+        match,
+    ):
+        """未读暂停配置只接受可识别布尔值和大于等于 1 的整数阈值。"""
+        with pytest.raises(ValueError, match=match):
+            SourceSystemConfig.model_validate(
+                {"cron_unread_auto_pause": payload},
+            )
 
     @pytest.mark.parametrize(
         ("payload", "match"),
@@ -1283,6 +1368,35 @@ class TestSourceSystemConfigRuntime:
         assert result.enabled is True
         assert result.max_bytes == 24000
         assert result.explicit is False
+
+
+    def test_cron_unread_auto_pause_runtime_uses_source_config(self):
+        """运行时应读取当前 source 的未读自动暂停开关和条数。"""
+        effective = EffectiveSourceSystemConfig(
+            source_id="portal",
+            config=SourceSystemConfig.model_validate(
+                {
+                    "cron_unread_auto_pause": {
+                        "enabled": False,
+                        "threshold": 12,
+                    },
+                },
+            ).merged_with_defaults(),
+            raw_config=SourceSystemConfig.model_validate(
+                {
+                    "cron_unread_auto_pause": {
+                        "enabled": False,
+                        "threshold": 12,
+                    },
+                },
+            ),
+            version=3,
+        )
+
+        result = resolve_cron_unread_auto_pause_config(effective)
+
+        assert result.enabled is False
+        assert result.threshold == 12
 
 
 class TestSourceSystemConfigMiddleware:

@@ -516,106 +516,6 @@ async def get_transcription_provider_type() -> dict:
     }
 
 
-@router.put(
-    "/transcription-provider-type",
-    summary="Set transcription provider type",
-    description=(
-        "Set the transcription provider type. "
-        '"disabled": no transcription; '
-        '"whisper_api": remote Whisper endpoint; '
-        '"local_whisper": locally installed openai-whisper.'
-    ),
-)
-async def put_transcription_provider_type(
-    body: dict = Body(
-        ...,
-        description=(
-            "Provider type, e.g. "
-            '{"transcription_provider_type": "whisper_api"}'
-        ),
-    ),
-) -> dict:
-    """Set the transcription provider type."""
-    raw = body.get("transcription_provider_type")
-    provider_type = (str(raw) if raw is not None else "").strip().lower()
-    valid = {"disabled", "whisper_api", "local_whisper"}
-    if provider_type not in valid:
-        raise HTTPException(
-            status_code=400,
-            detail=(
-                f"Invalid transcription_provider_type '{provider_type}'. "
-                f"Must be one of: {', '.join(sorted(valid))}"
-            ),
-        )
-    config = load_config()
-    config.agents.transcription_provider_type = provider_type
-    save_config(config)
-    return {"transcription_provider_type": provider_type}
-
-
-@router.get(
-    "/local-whisper-status",
-    summary="Check local whisper availability",
-    description=(
-        "Check whether the local whisper provider can be used. "
-        "Returns availability of ffmpeg and openai-whisper."
-    ),
-)
-async def get_local_whisper_status() -> dict:
-    """Check local whisper dependencies."""
-    from ...agents.utils.audio_transcription import (
-        check_local_whisper_available,
-    )
-
-    return check_local_whisper_available()
-
-
-@router.get(
-    "/transcription-providers",
-    summary="List transcription providers",
-    description=(
-        "List providers capable of audio transcription (Whisper API). "
-        "Returns available providers and the configured selection."
-    ),
-)
-async def get_transcription_providers() -> dict:
-    """List transcription-capable providers and configured selection."""
-    from ...agents.utils.audio_transcription import (
-        get_configured_transcription_provider_id,
-        list_transcription_providers,
-    )
-
-    return {
-        "providers": list_transcription_providers(),
-        "configured_provider_id": (get_configured_transcription_provider_id()),
-    }
-
-
-@router.put(
-    "/transcription-provider",
-    summary="Set transcription provider",
-    description=(
-        "Set the provider to use for audio transcription. "
-        'Use empty string "" to unset.'
-    ),
-)
-async def put_transcription_provider(
-    body: dict = Body(
-        ...,
-        description=(
-            'Provider ID, e.g. {"provider_id": "openai"} '
-            'or {"provider_id": ""} to unset'
-        ),
-    ),
-) -> dict:
-    """Set the transcription provider."""
-    provider_id = (body.get("provider_id") or "").strip()
-    config = load_config()
-    config.agents.transcription_provider_id = provider_id
-    save_config(config)
-    return {"provider_id": provider_id}
-
-
 @router.get(
     "/running-config",
     response_model=AgentsRunningConfig,
@@ -1008,6 +908,7 @@ async def list_agent_config_distribution_tenants(
         tenant_ids=await list_logical_tenant_ids(
             _request_source_id(request),
             source_filter=True,
+            include_templates=True,
         ),
     )
 

@@ -3,6 +3,7 @@ import {
   Alert,
   Button,
   Card,
+  Input,
   InputNumber,
   Result,
   Space,
@@ -28,11 +29,17 @@ import {
   TOOL_RESULT_COMPACT_NUMBER_FIELDS,
   clearImmediateTruncationConfig,
   enableImmediateTruncationConfig,
+  formatSystemPromptInjectionText,
+  parseSystemPromptInjectionText,
+  readCronUnreadAutoPauseConfig,
   readRegisteredSwitchValue,
   readImmediateTruncationConfig,
+  readSystemPromptInjections,
   readToolResultCompactConfig,
-  validateToolOutputConfigs,
+  validateSourceSystemConfig,
+  writeCronUnreadAutoPauseValue,
   writeRegisteredSwitchValue,
+  writeSystemPromptInjections,
   writeImmediateTruncationValue,
   writeToolResultCompactValue,
 } from "./registry";
@@ -190,6 +197,41 @@ export default function SystemConfigPage() {
     );
   };
 
+  const handleCronUnreadAutoPauseEnabledChange = (checked: boolean) => {
+    if (formDisabled) {
+      return;
+    }
+    setValidationError(null);
+    setDraftConfig((previous) =>
+      writeCronUnreadAutoPauseValue(previous, "enabled", checked),
+    );
+  };
+
+  const handleCronUnreadAutoPauseThresholdChange = (
+    value: number | null,
+  ) => {
+    if (formDisabled || typeof value !== "number") {
+      return;
+    }
+    setValidationError(null);
+    setDraftConfig((previous) =>
+      writeCronUnreadAutoPauseValue(previous, "threshold", value),
+    );
+  };
+
+  const handleSystemPromptInjectionsChange = (value: string) => {
+    if (formDisabled) {
+      return;
+    }
+    setValidationError(null);
+    setDraftConfig((previous) =>
+      writeSystemPromptInjections(
+        previous,
+        parseSystemPromptInjectionText(value),
+      ),
+    );
+  };
+
   const handleToolResultNumberChange = (
     key: (typeof TOOL_RESULT_COMPACT_NUMBER_FIELDS)[number]["key"],
     value: number | null,
@@ -257,7 +299,7 @@ export default function SystemConfigPage() {
     if (formDisabled) {
       return;
     }
-    const validationError = validateToolOutputConfigs(draftConfig);
+    const validationError = validateSourceSystemConfig(draftConfig);
     if (validationError) {
       setValidationError(validationError);
       message.error(validationError);
@@ -305,6 +347,11 @@ export default function SystemConfigPage() {
     }
   };
 
+  const cronUnreadAutoPauseConfig =
+    readCronUnreadAutoPauseConfig(draftConfig);
+  const systemPromptInjectionText = formatSystemPromptInjectionText(
+    readSystemPromptInjections(draftConfig),
+  );
   const toolResultCompactConfig = readToolResultCompactConfig(draftConfig);
   const fileReadTruncationState = readImmediateTruncationConfig(
     draftConfig,
@@ -484,6 +531,94 @@ export default function SystemConfigPage() {
                     />
                   </div>
                 ))}
+              </div>
+            </Card>
+
+            <Card
+              className={styles.switchCard}
+              title={t("sourceSystemConfigPage.systemPromptInjectionsTitle", {
+                defaultValue: "系统提示词注入",
+              })}
+            >
+              <div className={styles.toolResultIntro}>
+                {t("sourceSystemConfigPage.systemPromptInjectionsIntro", {
+                  defaultValue:
+                    "配置当前系统运行时固定追加到对话的系统提示词。多段提示词使用空行分隔，保存时会自动去除空段和重复段。",
+                })}
+              </div>
+              <label className={styles.promptField}>
+                <Input.TextArea
+                  aria-label={t(
+                    "sourceSystemConfigPage.systemPromptInjectionsLabel",
+                    {
+                      defaultValue: "系统提示词注入",
+                    },
+                  )}
+                  autoSize={{ minRows: 5, maxRows: 12 }}
+                  className={styles.systemPromptTextArea}
+                  disabled={formDisabled}
+                  placeholder={t(
+                    "sourceSystemConfigPage.systemPromptInjectionsPlaceholder",
+                    {
+                      defaultValue: "每段提示词之间留一个空行",
+                    },
+                  )}
+                  value={systemPromptInjectionText}
+                  onChange={(event) =>
+                    handleSystemPromptInjectionsChange(event.target.value)
+                  }
+                />
+              </label>
+            </Card>
+
+            <Card
+              className={styles.switchCard}
+              title={t("sourceSystemConfigPage.cronUnreadAutoPauseTitle", {
+                defaultValue: "定时任务未读自动暂停",
+              })}
+            >
+              <div className={styles.switchList}>
+                <div className={styles.switchRow}>
+                  <div className={styles.switchCopy}>
+                    <span className={styles.switchTitle}>
+                      {t("sourceSystemConfigPage.cronUnreadAutoPauseEnabled", {
+                        defaultValue: "启用未读自动暂停",
+                      })}
+                    </span>
+                    <span className={styles.switchDescription}>
+                      {t(
+                        "sourceSystemConfigPage.cronUnreadAutoPauseDescription",
+                        {
+                          defaultValue:
+                            "开启后，当前渠道的定时任务连续产生未读结果达到阈值时会自动暂停。",
+                        },
+                      )}
+                    </span>
+                  </div>
+                  <Switch
+                    checked={cronUnreadAutoPauseConfig.enabled}
+                    disabled={formDisabled}
+                    onChange={handleCronUnreadAutoPauseEnabledChange}
+                  />
+                </div>
+                <div className={styles.numberGrid}>
+                  <label className={styles.numberField}>
+                    <span className={styles.numberLabel}>
+                      {t("sourceSystemConfigPage.cronUnreadPauseThreshold", {
+                        defaultValue: "未读暂停条数",
+                      })}
+                    </span>
+                    <InputNumber
+                      min={1}
+                      step={1}
+                      value={cronUnreadAutoPauseConfig.threshold}
+                      disabled={
+                        formDisabled || !cronUnreadAutoPauseConfig.enabled
+                      }
+                      onChange={handleCronUnreadAutoPauseThresholdChange}
+                    />
+                  </label>
+                </div>
               </div>
             </Card>
 

@@ -62,6 +62,7 @@ TENANT_EXEMPT_ROUTES = frozenset(
         # Console SPA routes (static files)
         "/console",
         "/console/",
+        "/api/zhaohu/callback",
     ],
 )
 
@@ -91,6 +92,7 @@ SOURCE_EXEMPT_ROUTES = frozenset(
         "/swe-dark.png",
         "/console",
         "/console/",
+        "/api/zhaohu/callback",
     ],
 )
 

@@ -31,6 +31,25 @@ export function useMarket(sourceId: string) {
     }
   }, [sourceId, selectedCategory]);
 
+  // 刷新当前选中技能的详情
+  const refreshSelectedSkill = useCallback(async () => {
+    if (!selectedSkill) return;
+    try {
+      const detail = await marketApi.getSkillDetail(sourceId, selectedSkill.item_id);
+      if (detail) {
+        setSelectedSkill(detail);
+      }
+    } catch (err) {
+      console.error("Failed to refresh skill detail:", err);
+    }
+  }, [sourceId, selectedSkill]);
+
+  // 刷新技能列表和详情
+  const refreshSkillsAndDetail = useCallback(async () => {
+    await refreshSkills();
+    await refreshSelectedSkill();
+  }, [refreshSkills, refreshSelectedSkill]);
+
   const openSkillDetail = useCallback(
     async (itemId: string) => {
       try {
@@ -59,6 +78,8 @@ export function useMarket(sourceId: string) {
     setPublishModalOpen,
     refreshCategories,
     refreshSkills,
+    refreshSelectedSkill,
+    refreshSkillsAndDetail,
     openSkillDetail,
   };
 }

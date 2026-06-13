@@ -53,21 +53,6 @@ Recommended baseline:
 Review your config and skills regularly; limit tool scope to what you need.
 """
 
-TELEMETRY_INFO = """
-Help improve SWE by sharing anonymous usage data!
-
-We collect only:
-• SWE version (e.g., 0.0.7)
-• Install method (pip, Docker, or desktop app)
-• OS and version (e.g., macOS 14.0, Ubuntu 22.04)
-• Python version (e.g., 3.11)
-• CPU architecture (e.g., x86_64, arm64)
-• GPU availability (detected, not detailed specs)
-
-No personal data collected! No files, no credentials, no identifiable information.
-This helps us understand SWE's usage environment and prioritize improvements.
-"""
-
 
 def _echo_security_warning_box() -> None:
     """Print SECURITY_WARNING in a rich panel with blue border."""
@@ -76,18 +61,6 @@ def _echo_security_warning_box() -> None:
         Panel(
             SECURITY_WARNING.strip(),
             title="[bold]🐾 Security warning — please read[/bold]",
-            border_style="blue",
-        ),
-    )
-
-
-def _echo_telemetry_info_box() -> None:
-    """Print TELEMETRY_INFO in a rich panel with blue border."""
-    console = Console()
-    console.print(
-        Panel(
-            TELEMETRY_INFO.strip(),
-            title="[bold]📊 Help improve SWE[/bold]",
             border_style="blue",
         ),
     )
@@ -188,29 +161,6 @@ def init_cmd(
             )
             raise click.Abort()
     working_dir.mkdir(parents=True, exist_ok=True)
-
-    # --- Telemetry collection (optional, anonymous) ---
-    from ..utils.telemetry import (
-        collect_and_upload_telemetry,
-        has_telemetry_been_collected,
-        is_telemetry_opted_out,
-        mark_telemetry_collected,
-    )
-
-    if not is_telemetry_opted_out(
-        WORKING_DIR,
-    ) and not has_telemetry_been_collected(WORKING_DIR):
-        if use_defaults:
-            success = collect_and_upload_telemetry(WORKING_DIR)
-
-        else:
-            _echo_telemetry_info_box()
-            if prompt_confirm("Share usage data?", default=True):
-                success = collect_and_upload_telemetry(WORKING_DIR)
-                if success:
-                    click.echo("✓ Thank you!")
-            else:
-                mark_telemetry_collected(WORKING_DIR, opted_out=True)
 
     # --- Copy init config files (config.json template only) ---
     # default tenant: use md_files templates (config.json only, no providers.json)

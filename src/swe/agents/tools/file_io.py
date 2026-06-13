@@ -11,9 +11,11 @@ import threading
 import time
 from typing import Optional
 
+import aiofiles
 from agentscope.message import TextBlock
 from agentscope.tool import ToolResponse
 
+from ..tool_failure import ToolExecutionError
 from .utils import (
     truncate_text_output,
     read_file_safe,
@@ -43,6 +45,10 @@ try:
     )
 except (TypeError, ValueError):
     FILE_WRITE_SLOW_WARNING_SECONDS = 1.0
+
+
+def _raise_file_error(error_type: str, detail: str) -> None:
+    raise ToolExecutionError(error_type=error_type, detail=detail)
 
 
 def _resolve_file_path(file_path: str) -> str:
@@ -186,7 +192,7 @@ def _remove_temp_file(temp_path: str) -> None:
         os.unlink(temp_path)
 
 
-def _write_content_with_diagnostics(
+async def _write_content_with_diagnostics(
     *,
     operation: str,
     file_path: str,
@@ -200,11 +206,11 @@ def _write_content_with_diagnostics(
     write_seconds = 0.0
     close_seconds = 0.0
     started_at = time.perf_counter()
-    with open(file_path, mode, encoding=encoding) as file:
+    async with aiofiles.open(file_path, mode, encoding=encoding) as file:
         open_seconds = time.perf_counter() - started_at
 
         started_at = time.perf_counter()
-        file.write(content)
+        await file.write(content)
         write_seconds = time.perf_counter() - started_at
 
         started_at = time.perf_counter()
@@ -239,8 +245,7 @@ async def _write_file_atomically_unlocked(
 ) -> None:
     temp_path = _make_temp_file_path(file_path)
     write_task = asyncio.create_task(
-        asyncio.to_thread(
-            _write_content_with_diagnostics,
+        _write_content_with_diagnostics(
             operation=operation,
             file_path=temp_path,
             content=content,
@@ -336,56 +341,39 @@ async def read_file(  # pylint: disable=too-many-return-statements
         try:
             start_line = int(start_line)
         except (ValueError, TypeError):
-            return ToolResponse(
-                content=[
-                    TextBlock(
-                        type="text",
-                        text=f"Error: start_line must be an integer, got {start_line!r}.",
-                    ),
-                ],
+            _raise_file_error(
+                "invalid_arguments",
+                f"Error: start_line must be an integer, got {start_line!r}.",
             )
 
     if end_line is not None:
         try:
             end_line = int(end_line)
         except (ValueError, TypeError):
-            return ToolResponse(
-                content=[
-                    TextBlock(
-                        type="text",
-                        text=f"Error: end_line must be an integer, got {end_line!r}.",
-                    ),
-                ],
+            _raise_file_error(
+                "invalid_arguments",
+                f"Error: end_line must be an integer, got {end_line!r}.",
             )
 
     # Validate path against tenant boundary
     try:
         file_path = _resolve_file_path(file_path)
     except TenantPathBoundaryError:
-        return ToolResponse(
-            content=[
-                TextBlock(**make_permission_denied_response("Read file")),
-            ],
+        _raise_file_error(
+            "permission_denied",
+            make_permission_denied_response("Read file")["text"],
         )
 
     if not os.path.exists(file_path):
-        return ToolResponse(
-            content=[
-                TextBlock(
-                    type="text",
-                    text=f"Error: The file {file_path} does not exist.",
-                ),
-            ],
+        _raise_file_error(
+            "not_found",
+            f"Error: The file {file_path} does not exist.",
         )
 
     if not os.path.isfile(file_path):
-        return ToolResponse(
-            content=[
-                TextBlock(
-                    type="text",
-                    text=f"Error: The path {file_path} is not a file.",
-                ),
-            ],
+        _raise_file_error(
+            "invalid_arguments",
+            f"Error: The path {file_path} is not a file.",
         )
 
     try:
@@ -398,23 +386,15 @@ async def read_file(  # pylint: disable=too-many-return-statements
         e = min(total, end_line if end_line is not None else total)
 
         if s > total:
-            return ToolResponse(
-                content=[
-                    TextBlock(
-                        type="text",
-                        text=f"Error: start_line {s} exceeds file length ({total} lines).",
-                    ),
-                ],
+            _raise_file_error(
+                "invalid_arguments",
+                f"Error: start_line {s} exceeds file length ({total} lines).",
             )
 
         if s > e:
-            return ToolResponse(
-                content=[
-                    TextBlock(
-                        type="text",
-                        text=f"Error: start_line ({s}) > end_line ({e}).",
-                    ),
-                ],
+            _raise_file_error(
+                "invalid_arguments",
+                f"Error: start_line ({s}) > end_line ({e}).",
             )
 
         # Extract selected lines
@@ -456,13 +436,11 @@ async def read_file(  # pylint: disable=too-many-return-statements
         )
 
     except Exception as e:
-        return ToolResponse(
-            content=[
-                TextBlock(
-                    type="text",
-                    text=f"Error: Read file failed due to \n{e}",
-                ),
-            ],
+        if isinstance(e, ToolExecutionError):
+            raise
+        _raise_file_error(
+            "unexpected_tool_error",
+            f"Error: Read file failed due to \n{e}",
         )
 
 
@@ -481,13 +459,9 @@ async def write_file(
     """
 
     if not file_path:
-        return ToolResponse(
-            content=[
-                TextBlock(
-                    type="text",
-                    text="Error: No `file_path` provided.",
-                ),
-            ],
+        _raise_file_error(
+            "invalid_arguments",
+            "Error: No `file_path` provided.",
         )
 
     # Validate path against tenant boundary
@@ -495,10 +469,9 @@ async def write_file(
     try:
         file_path = _resolve_writable_file_path(file_path)
     except TenantPathBoundaryError:
-        return ToolResponse(
-            content=[
-                TextBlock(**make_permission_denied_response("Write file")),
-            ],
+        _raise_file_error(
+            "permission_denied",
+            make_permission_denied_response("Write file")["text"],
         )
     resolve_seconds = time.perf_counter() - resolve_started_at
 
@@ -521,13 +494,11 @@ async def write_file(
             ],
         )
     except Exception as e:
-        return ToolResponse(
-            content=[
-                TextBlock(
-                    type="text",
-                    text=f"Error: Write file failed due to \n{e}",
-                ),
-            ],
+        if isinstance(e, ToolExecutionError):
+            raise
+        _raise_file_error(
+            "unexpected_tool_error",
+            f"Error: Write file failed due to \n{e}",
         )
 
 
@@ -550,77 +521,51 @@ async def edit_file(
     """
 
     if not file_path:
-        return ToolResponse(
-            content=[
-                TextBlock(
-                    type="text",
-                    text="Error: No `file_path` provided.",
-                ),
-            ],
+        _raise_file_error(
+            "invalid_arguments",
+            "Error: No `file_path` provided.",
         )
 
     # Validate path against tenant boundary
     try:
         resolved_path = _resolve_file_path(file_path)
     except TenantPathBoundaryError:
-        return ToolResponse(
-            content=[
-                TextBlock(**make_permission_denied_response("Edit file")),
-            ],
+        _raise_file_error(
+            "permission_denied",
+            make_permission_denied_response("Edit file")["text"],
         )
 
     if not os.path.exists(resolved_path):
-        return ToolResponse(
-            content=[
-                TextBlock(
-                    type="text",
-                    text=f"Error: The file {resolved_path} does not exist.",
-                ),
-            ],
+        _raise_file_error(
+            "not_found",
+            f"Error: The file {resolved_path} does not exist.",
         )
 
     if not os.path.isfile(resolved_path):
-        return ToolResponse(
-            content=[
-                TextBlock(
-                    type="text",
-                    text=f"Error: The path {resolved_path} is not a file.",
-                ),
-            ],
+        _raise_file_error(
+            "invalid_arguments",
+            f"Error: The path {resolved_path} is not a file.",
         )
 
     try:
         content = read_file_safe(resolved_path)
     except Exception as e:
-        return ToolResponse(
-            content=[
-                TextBlock(
-                    type="text",
-                    text=f"Error: Read file failed due to \n{e}",
-                ),
-            ],
+        _raise_file_error(
+            "unexpected_tool_error",
+            f"Error: Read file failed due to \n{e}",
         )
 
     if old_text not in content:
-        return ToolResponse(
-            content=[
-                TextBlock(
-                    type="text",
-                    text=f"Error: The text to replace was not found in {file_path}.",
-                ),
-            ],
+        _raise_file_error(
+            "not_found",
+            f"Error: The text to replace was not found in {file_path}.",
         )
 
     new_content = content.replace(old_text, new_text)
-    write_response = await write_file(
+    await write_file(
         file_path=resolved_path,
         content=new_content,
     )
-
-    if write_response.content and len(write_response.content) > 0:
-        write_text = write_response.content[0].get("text", "")
-        if write_text.startswith("Error:"):
-            return write_response
 
     return ToolResponse(
         content=[
@@ -648,13 +593,9 @@ async def append_file(
     """
 
     if not file_path:
-        return ToolResponse(
-            content=[
-                TextBlock(
-                    type="text",
-                    text="Error: No `file_path` provided.",
-                ),
-            ],
+        _raise_file_error(
+            "invalid_arguments",
+            "Error: No `file_path` provided.",
         )
 
     # Validate path against tenant boundary
@@ -662,10 +603,9 @@ async def append_file(
     try:
         file_path = _resolve_writable_file_path(file_path)
     except TenantPathBoundaryError:
-        return ToolResponse(
-            content=[
-                TextBlock(**make_permission_denied_response("Append file")),
-            ],
+        _raise_file_error(
+            "permission_denied",
+            make_permission_denied_response("Append file")["text"],
         )
     resolve_seconds = time.perf_counter() - resolve_started_at
 
@@ -687,11 +627,9 @@ async def append_file(
             ],
         )
     except Exception as e:
-        return ToolResponse(
-            content=[
-                TextBlock(
-                    type="text",
-                    text=f"Error: Append file failed due to \n{e}",
-                ),
-            ],
+        if isinstance(e, ToolExecutionError):
+            raise
+        _raise_file_error(
+            "unexpected_tool_error",
+            f"Error: Append file failed due to \n{e}",
         )

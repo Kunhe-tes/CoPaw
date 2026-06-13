@@ -66,6 +66,11 @@ class MCPClientConfig(BaseModel):
     lazy_load: bool = Field(default=False, description="是否懒加载")
     created_at: str = Field(default="", description="创建时间")
     updated_at: str = Field(default="", description="更新时间")
+    version: str = Field(default="1.0.0", description="MCP 版本号")
+    received_version: str = Field(
+        default="",
+        description="市场分发时接收的版本号",
+    )
 
     @model_validator(mode="before")
     @classmethod

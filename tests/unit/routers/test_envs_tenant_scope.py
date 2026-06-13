@@ -27,8 +27,9 @@ async def bind_tenant_id(request: Request, call_next):
     request.state.tenant_id = request.headers.get("X-Tenant-Id")
     request.state.source_id = request.headers.get("X-Source-Id")
     if request.state.tenant_id and request.state.source_id:
-        request.state.scope_id = (
-            f"{request.state.tenant_id}.{request.state.source_id}"
+        request.state.scope_id = encode_scope_id(
+            request.state.tenant_id,
+            request.state.source_id,
         )
     return await call_next(request)
 
@@ -42,12 +43,12 @@ _SOURCE_HEADERS = {"X-Source-Id": "source-a"}
 def _use_tmp_env_paths(tmp_path: Path):
     """Redirect tenant secrets directories to a temp directory."""
 
-    def mock_get_tenant_secrets_dir(tenant_id=None):
+    def mock_get_tenant_storage_secrets_dir(tenant_id=None):
         return tmp_path / (tenant_id or "default") / ".secret"
 
     with patch(
-        "swe.app.routers.envs.get_tenant_secrets_dir",
-        mock_get_tenant_secrets_dir,
+        "swe.app.routers.envs.get_tenant_storage_secrets_dir",
+        mock_get_tenant_storage_secrets_dir,
     ):
         yield tmp_path
 
@@ -102,7 +103,10 @@ def test_tenant_env_api_is_file_scoped_not_process_scoped(
     )
 
     envs_path = (
-        _use_tmp_env_paths / "tenant-a.source-a" / ".secret" / "envs.json"
+        _use_tmp_env_paths
+        / encode_scope_id("tenant-a", "source-a")
+        / ".secret"
+        / "envs.json"
     )
 
     assert response.status_code == 200
@@ -173,7 +177,10 @@ def test_patch_envs_merges_values_and_preserves_unmentioned_keys(
     )
 
     envs_path = (
-        _use_tmp_env_paths / "tenant-a.source-a" / ".secret" / "envs.json"
+        _use_tmp_env_paths
+        / encode_scope_id("tenant-a", "source-a")
+        / ".secret"
+        / "envs.json"
     )
     assert response.status_code == 200
     assert load_envs(envs_path) == {
@@ -214,7 +221,10 @@ def test_patch_envs_deletes_keys_and_ignores_preserve_compat_field(
     )
 
     envs_path = (
-        _use_tmp_env_paths / "tenant-a.source-a" / ".secret" / "envs.json"
+        _use_tmp_env_paths
+        / encode_scope_id("tenant-a", "source-a")
+        / ".secret"
+        / "envs.json"
     )
     assert response.status_code == 200
     assert load_envs(envs_path) == {
@@ -264,7 +274,10 @@ def test_current_scope_env_api_rejects_reserved_scope_fields(
 ):
     """普通 env API 遇到保留 scope 字段时必须显式失败。"""
     current_path = (
-        _use_tmp_env_paths / "tenant-a.source-a" / ".secret" / "envs.json"
+        _use_tmp_env_paths
+        / encode_scope_id("tenant-a", "source-a")
+        / ".secret"
+        / "envs.json"
     )
     save_envs({"EXISTING_TOKEN": "keep-me"}, current_path)
 
@@ -300,10 +313,16 @@ def test_same_logical_tenant_different_sources_use_separate_api_env_files(
     assert response_a.status_code == 200
     assert response_b.status_code == 200
     assert load_envs(
-        _use_tmp_env_paths / "tenant-a.source-a" / ".secret" / "envs.json",
+        _use_tmp_env_paths
+        / encode_scope_id("tenant-a", "source-a")
+        / ".secret"
+        / "envs.json",
     ) == {"API_TOKEN": "source-a"}
     assert load_envs(
-        _use_tmp_env_paths / "tenant-a.source-b" / ".secret" / "envs.json",
+        _use_tmp_env_paths
+        / encode_scope_id("tenant-a", "source-b")
+        / ".secret"
+        / "envs.json",
     ) == {"API_TOKEN": "source-b"}
 
 
@@ -375,7 +394,8 @@ def test_same_tenant_different_sources_use_scope_specific_env_file(
     request = types.SimpleNamespace(
         state=types.SimpleNamespace(
             tenant_id="tenant-a",
-            scope_id="scope.v1.tenant-a.source-b",
+            source_id="source-b",
+            scope_id=encode_scope_id("tenant-a", "source-b"),
         ),
     )
 
@@ -383,7 +403,28 @@ def test_same_tenant_different_sources_use_scope_specific_env_file(
 
     assert envs_path == (
         _use_tmp_env_paths
-        / "scope.v1.tenant-a.source-b"
+        / encode_scope_id("tenant-a", "source-b")
         / ".secret"
         / "envs.json"
+    )
+
+
+def test_default_tenant_with_source_uses_template_env_file(
+    _use_tmp_env_paths: Path,
+):
+    """default + source 的当前 env 请求应落到 default_{source} 模板目录。"""
+    from swe.app.routers import envs as envs_router
+
+    request = types.SimpleNamespace(
+        state=types.SimpleNamespace(
+            tenant_id="default",
+            source_id="source-b",
+            scope_id=encode_scope_id("default", "source-b"),
+        ),
+    )
+
+    envs_path = envs_router._get_tenant_envs_path(request)
+
+    assert envs_path == (
+        _use_tmp_env_paths / "default_source-b" / ".secret" / "envs.json"
     )

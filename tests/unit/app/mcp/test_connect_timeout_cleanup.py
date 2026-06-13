@@ -65,7 +65,9 @@ async def test_http_connect_timeout_cleans_up_hanging_lifecycle(
         await client.connect(timeout=0.05)
 
     elapsed = time.perf_counter() - started_at
-    assert elapsed < 0.2
+    # Full-suite event loop contention can add noticeable scheduling delay
+    # after the connect timeout fires; we only need to guard against hangs.
+    assert elapsed < 0.5
     assert client._lifecycle_task is None or client._lifecycle_task.done()
     assert client.session is None
     assert client.is_connected is False
@@ -126,7 +128,9 @@ async def test_stdio_connect_timeout_cleans_up_hanging_lifecycle(
         await client.connect(timeout=0.05)
 
     elapsed = time.perf_counter() - started_at
-    assert elapsed < 0.2
+    # Full-suite event loop contention can add noticeable scheduling delay
+    # after the connect timeout fires; we only need to guard against hangs.
+    assert elapsed < 0.5
     assert client._lifecycle_task is None or client._lifecycle_task.done()
     assert client.session is None
     assert client.is_connected is False

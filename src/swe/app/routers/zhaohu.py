@@ -31,6 +31,7 @@ class ZhaohuCallbackRequest(BaseModel):
     """Zhaohu message callback request body."""
 
     msg_id: str = Field(default="", alias="msgId")
+    source_id: str = Field(default="", alias="sourceId")
     from_id: str = Field(default="", alias="fromId")
     to_id: str = Field(default="", alias="toId")
     group_id: Optional[int] = Field(default=None, alias="groupId")
@@ -178,6 +179,28 @@ async def zhaohu_callback(
     if sap_id:
         request.state.tenant_id = sap_id
         request.state.user_id = sap_id
+
+    # 从 binding 表查询 source_id
+    source_id = None
+    if sap_id and body.to_id:
+        from ..channels.zhaohu.binding_store import get_zhaohu_binding_store
+
+        binding_store = get_zhaohu_binding_store()
+        if binding_store:
+            source_id = await binding_store.get_source_id_by_robot(
+                sap_id,
+                body.to_id,
+            )
+    logger.info("request zhaohu callback: source_id=%s", source_id)
+
+    if source_id:
+        body.source_id = source_id
+        request.state.source_id = source_id
+    if sap_id and source_id:
+        from ...config.context import encode_scope_id
+
+        request.state.scope_id = encode_scope_id(sap_id, source_id)
+        request.state.effective_tenant_id = request.state.scope_id
 
     logger.info("zhaohu callback received: %s", user_info)
     zhaohu_ch = await _get_zhaohu_channel(request)

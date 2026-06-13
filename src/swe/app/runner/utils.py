@@ -27,6 +27,7 @@ from ...agents.utils.tool_summary import (
 )
 from ...config import load_config  # pylint: disable=no-name-in-module
 from .models import ChatMessage
+from .tool_status import apply_running_tool_status, apply_terminal_tool_status
 
 logger = logging.getLogger(__name__)
 _MISSING_SOURCE_ID_PLACEHOLDER = "(not provided)"
@@ -456,6 +457,7 @@ def agentscope_msg_to_message(
                     arguments=arguments,
                     server_label=block.get("server_label"),
                 )
+                apply_running_tool_status(call_data)
 
                 data_content = DataContent(
                     delta=False,
@@ -500,6 +502,10 @@ def agentscope_msg_to_message(
                 output_data["output_summary"] = generate_tool_output_summary(
                     tool_name=tool_name,
                     output=output,
+                )
+                apply_terminal_tool_status(
+                    output_data,
+                    raw_output=block.get("output"),
                 )
 
                 data_content = DataContent(

@@ -28,6 +28,7 @@ from .middleware.tenant_identity import TenantIdentityMiddleware
 from .middleware.tenant_workspace import TenantWorkspaceMiddleware
 from .middleware.header_passthrough import HeaderPassthroughMiddleware
 from .middleware.runtime_static_gzip import RuntimeStaticGZipMiddleware
+from .middleware.sse_diagnostic import SSEDiagnosticMiddleware
 from .source_system_config.middleware import SourceSystemConfigMiddleware
 from .routers import router as api_router, create_agent_scoped_router
 from .routers.agent_scoped import AgentContextMiddleware
@@ -43,6 +44,7 @@ from ..database import get_database_config
 from .service_heartbeat import start_service_heartbeat, stop_service_heartbeat
 from .crons.monitor_sync_client import get_monitor_sync_client
 from .crons.notification_worker import CronNotificationWorker
+from .runtime_diagnostic import RuntimeDiagnosticManager
 
 # Apply log level on load so reload child process gets same level as CLI.
 logger = setup_logger(os.environ.get(LOG_LEVEL_ENV, "info"))
@@ -173,6 +175,8 @@ agent_app = AgentApp(
     stream_task_queue="stream_query",
     stream_task_timeout=300,
 )
+
+runtime_diagnostic_manager = RuntimeDiagnosticManager()
 
 
 async def _reset_scope_sensitive_runtime_state(app: FastAPI) -> None:
@@ -428,8 +432,18 @@ async def lifespan(
     cron_notification_worker.start()
 
     try:
+        await runtime_diagnostic_manager.start()
+    except Exception as e:
+        logger.warning("Failed to start runtime diagnostic manager: %s", e)
+
+    try:
         yield
     finally:
+        try:
+            await runtime_diagnostic_manager.stop()
+        except Exception as e:
+            logger.warning("Error stopping runtime diagnostic manager: %s", e)
+
         cron_notification_worker = getattr(
             app.state,
             "cron_notification_worker",
@@ -489,6 +503,7 @@ app = FastAPI(
     redoc_url="/redoc" if DOCS_ENABLED else None,
     openapi_url="/openapi.json" if DOCS_ENABLED else None,
 )
+app.state.runtime_diagnostic_manager = runtime_diagnostic_manager
 
 app.add_middleware(RuntimeStaticGZipMiddleware)
 
@@ -527,6 +542,12 @@ app.add_middleware(TenantIdentityMiddleware, default_tenant_id=None)
 # Add header passthrough middleware for MCP server requests
 # Extracts x-header-* headers and stores in context for MCP clients
 app.add_middleware(HeaderPassthroughMiddleware)
+
+# Track SSE responses as the outermost middleware.
+app.add_middleware(
+    SSEDiagnosticMiddleware,
+    manager=runtime_diagnostic_manager,
+)
 
 
 # Console static dir: env, or swe package data (console), or cwd.

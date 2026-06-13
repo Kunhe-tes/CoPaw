@@ -20,8 +20,18 @@ export interface Message {
 }
 
 export interface ChatHistory {
+  chat?: ChatSpec | null;
   messages: Message[];
   status?: ChatStatus; // Conversation status: idle, running, or stopping
+}
+
+export interface ChatPage {
+  items: ChatSpec[];
+  total: number;
+  page: number;
+  page_size: number;
+  has_more: boolean;
+  next_cursor?: string | null;
 }
 
 export interface ChatDeleteResponse {

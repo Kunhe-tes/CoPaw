@@ -22,6 +22,11 @@ export interface ImmediateTruncationConfig {
   max_bytes: number;
 }
 
+export interface CronUnreadAutoPauseConfig {
+  enabled: boolean;
+  threshold: number;
+}
+
 export type ImmediateTruncationConfigKey =
   | "file_read_truncation";
 
@@ -48,6 +53,14 @@ export const CURRENT_SOURCE_SYSTEM_CONFIG_SWITCHES: CurrentSourceConfigSwitchDef
       description:
         "关闭后不再注入 task progress 提示词，也不会写入或展示步骤进度。",
     },
+    {
+      key: "feature_switches.database_access_guard_enabled",
+      path: ["feature_switches", "database_access_guard_enabled"],
+      defaultValue: true,
+      title: "数据库访问拦截",
+      description:
+        "关闭后模型可通过 Python/命令行直连数据库，不再拦截。",
+    },
   ];
 
 export const TOOL_RESULT_COMPACT_DEFAULTS: ToolResultCompactConfig = {
@@ -63,7 +76,16 @@ export const FILE_READ_TRUNCATION_DEFAULTS: ImmediateTruncationConfig = {
   max_bytes: 50000,
 };
 
+export const CRON_UNREAD_AUTO_PAUSE_DEFAULTS: CronUnreadAutoPauseConfig = {
+  enabled: true,
+  threshold: 10,
+};
+
+export const CRON_UNREAD_AUTO_PAUSE_MIN_THRESHOLD = 1;
+
 export const IMMEDIATE_TRUNCATION_MIN_BYTES = 1000;
+
+export const SYSTEM_PROMPT_INJECTION_SEPARATOR = /\n\s*\n/g;
 
 export const TOOL_RESULT_COMPACT_NUMBER_FIELDS: CurrentSourceConfigNumberDefinition[] =
   [
@@ -187,6 +209,90 @@ export function writeToolResultCompactValue<
   return nextConfig;
 }
 
+export function readCronUnreadAutoPauseConfig(
+  config: SourceSystemConfig,
+): CronUnreadAutoPauseConfig {
+  const rawValue = config.cron_unread_auto_pause;
+  if (!isPlainObject(rawValue)) {
+    return { ...CRON_UNREAD_AUTO_PAUSE_DEFAULTS };
+  }
+  return {
+    enabled:
+      typeof rawValue.enabled === "boolean"
+        ? rawValue.enabled
+        : CRON_UNREAD_AUTO_PAUSE_DEFAULTS.enabled,
+    threshold:
+      typeof rawValue.threshold === "number"
+        ? rawValue.threshold
+        : CRON_UNREAD_AUTO_PAUSE_DEFAULTS.threshold,
+  };
+}
+
+export function writeCronUnreadAutoPauseValue<
+  K extends keyof CronUnreadAutoPauseConfig,
+>(
+  config: SourceSystemConfig,
+  key: K,
+  value: CronUnreadAutoPauseConfig[K],
+): SourceSystemConfig {
+  const nextConfig = clonePlainConfig(config);
+  const rawValue = nextConfig.cron_unread_auto_pause;
+  if (!isPlainObject(rawValue)) {
+    nextConfig.cron_unread_auto_pause = {};
+  }
+  (nextConfig.cron_unread_auto_pause as Record<string, unknown>)[key] = value;
+  return nextConfig;
+}
+
+export function normalizeSystemPromptInjections(value: unknown): string[] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+  const seen = new Set<string>();
+  const prompts: string[] = [];
+  for (const item of value) {
+    const prompt = String(item).trim();
+    if (!prompt || seen.has(prompt)) {
+      continue;
+    }
+    seen.add(prompt);
+    prompts.push(prompt);
+  }
+  return prompts;
+}
+
+export function readSystemPromptInjections(
+  config: SourceSystemConfig,
+): string[] {
+  return normalizeSystemPromptInjections(config.system_prompt_injections);
+}
+
+export function parseSystemPromptInjectionText(value: string): string[] {
+  return normalizeSystemPromptInjections(
+    value.split(SYSTEM_PROMPT_INJECTION_SEPARATOR),
+  );
+}
+
+export function formatSystemPromptInjectionText(
+  prompts: readonly string[],
+): string {
+  return normalizeSystemPromptInjections([...prompts]).join("\n\n");
+}
+
+export function writeSystemPromptInjections(
+  config: SourceSystemConfig,
+  value: unknown,
+): SourceSystemConfig {
+  const nextConfig = clonePlainConfig(config);
+  const prompts = normalizeSystemPromptInjections(value);
+  if (prompts.length === 0) {
+    delete nextConfig.system_prompt_injections;
+    return nextConfig;
+  }
+  nextConfig.system_prompt_injections = prompts;
+  return nextConfig;
+}
+
 export function readImmediateTruncationConfig(
   config: SourceSystemConfig,
   key: ImmediateTruncationConfigKey,
@@ -297,6 +403,27 @@ export function validateImmediateTruncationConfig(
     return `${title}不能小于 ${IMMEDIATE_TRUNCATION_MIN_BYTES}`;
   }
   return null;
+}
+
+export function validateCronUnreadAutoPauseConfig(
+  config: CronUnreadAutoPauseConfig,
+): string | null {
+  if (
+    !Number.isInteger(config.threshold) ||
+    config.threshold < CRON_UNREAD_AUTO_PAUSE_MIN_THRESHOLD
+  ) {
+    return `未读暂停条数不能小于 ${CRON_UNREAD_AUTO_PAUSE_MIN_THRESHOLD}`;
+  }
+  return null;
+}
+
+export function validateSourceSystemConfig(
+  config: SourceSystemConfig,
+): string | null {
+  return (
+    validateCronUnreadAutoPauseConfig(readCronUnreadAutoPauseConfig(config)) ||
+    validateToolOutputConfigs(config)
+  );
 }
 
 export function validateToolOutputConfigs(

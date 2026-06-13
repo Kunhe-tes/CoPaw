@@ -14,5 +14,6 @@ CREATE TABLE IF NOT EXISTS swe_zhaohu_channel_binding (
     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
 
     UNIQUE KEY uk_tenant_source (tenant_id, source_id),
+    INDEX idx_tenant_robot (tenant_id, robot_id),
     INDEX idx_open_id (open_id)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='招乎渠道绑定表';

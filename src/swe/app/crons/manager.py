@@ -27,11 +27,13 @@ from ...config.context import (
 from ...config.llm_workload import LLM_WORKLOAD_CRON, bind_llm_workload
 from ..source_system_config.runtime import (
     bind_source_system_config,
+    get_current_source_system_config,
     reset_current_source_system_config,
+    resolve_cron_unread_auto_pause_config,
     set_current_source_system_config,
 )
 from .auth_state import prefetch_auth_token
-from .cron_utils import compute_next_run_at
+from .cron_utils import compute_next_run_at, compute_next_run_times
 from .executor import CronExecutor
 from .models import CronJobSpec, CronJobState, CronTaskView, JobsFile
 from .repo.base import BaseJobRepository
@@ -40,11 +42,11 @@ from .monitor_sync_client import get_monitor_sync_client, MonitorSyncClient
 
 HEARTBEAT_JOB_ID = "_heartbeat"
 DREAM_JOB_ID = "_dream"
-AUTO_PAUSE_UNREAD_THRESHOLD = 3
 AUTO_PAUSE_REASON = "auto_unread_threshold"
 MANUAL_PAUSE_REASON = "manual"
 TASK_MESSAGES_STATE_KEY = "task_messages"
 _SYSTEM_JOB_IDS_FILE = "system_jobs.json"
+MAX_NOTIFICATION_DELAY_MINUTES = 7 * 24 * 60
 
 # 心跳 every 字段解析正则（如 "30m"、"6h"）
 _EVERY_PATTERN = re.compile(
@@ -54,6 +56,17 @@ _EVERY_PATTERN = re.compile(
 
 logger = logging.getLogger(__name__)
 _T = TypeVar("_T")
+
+
+def _notification_delay_minutes(job: CronJobSpec) -> int:
+    meta = job.meta or {}
+    try:
+        delay_minutes = int(meta.get("notification_delay_minutes", 0) or 0)
+    except (TypeError, ValueError):
+        return 0
+    if delay_minutes < 0:
+        return 0
+    return min(delay_minutes, MAX_NOTIFICATION_DELAY_MINUTES)
 
 
 @dataclass
@@ -1437,12 +1450,6 @@ class CronManager:  # pylint: disable=too-many-public-methods
         if not text or not getattr(self._runner, "session", None):
             return
 
-        existing_state = await self._runner.session.get_session_state_dict(
-            session_id,
-            user_id,
-            allow_not_exist=True,
-        )
-        task_messages = list(existing_state.get(TASK_MESSAGES_STATE_KEY, []))
         timestamp = (
             datetime.now(timezone.utc)
             .isoformat()
@@ -1451,29 +1458,39 @@ class CronManager:  # pylint: disable=too-many-public-methods
                 "Z",
             )
         )
-        task_messages.append(
-            {
-                "id": f"cron-text-{uuid4()}",
-                "type": "message",
-                "role": "assistant",
-                "content": [
-                    {
-                        "type": "text",
-                        "text": text,
-                    },
-                ],
-                "metadata": {
-                    "cron_task": True,
+        task_message = {
+            "id": f"cron-text-{uuid4()}",
+            "type": "message",
+            "role": "assistant",
+            "content": [
+                {
+                    "type": "text",
+                    "text": text,
                 },
-                "timestamp": timestamp,
+            ],
+            "metadata": {
+                "cron_task": True,
             },
-        )
-        merged_state = dict(existing_state)
-        merged_state[TASK_MESSAGES_STATE_KEY] = task_messages
-        await self._runner.session.save_merged_state(
+            "timestamp": timestamp,
+        }
+
+        def _merge(existing_state: dict[str, object]) -> dict[str, object]:
+            merged_state = dict(existing_state)
+            raw_task_messages = merged_state.get(TASK_MESSAGES_STATE_KEY, [])
+            task_messages = (
+                list(raw_task_messages)
+                if isinstance(raw_task_messages, list)
+                else []
+            )
+            task_messages.append(task_message)
+            merged_state[TASK_MESSAGES_STATE_KEY] = task_messages
+            return merged_state
+
+        await self._runner.session.mutate_session_state(
             session_id=session_id,
+            mutator=_merge,
             user_id=user_id,
-            state=merged_state,
+            create_if_not_exist=True,
         )
 
     async def _load_task_preview_text(
@@ -1514,7 +1531,14 @@ class CronManager:  # pylint: disable=too-many-public-methods
             meta["task_last_scheduled_run_at"] = datetime.now(timezone.utc)
             updated = job.model_copy(update={"meta": meta})
             auto_paused = False
-            if unread_count >= AUTO_PAUSE_UNREAD_THRESHOLD and job.enabled:
+            auto_pause_config = resolve_cron_unread_auto_pause_config(
+                get_current_source_system_config(),
+            )
+            if (
+                auto_pause_config.enabled
+                and unread_count >= auto_pause_config.threshold
+                and job.enabled
+            ):
                 auto_paused = True
                 meta["pause_reason"] = AUTO_PAUSE_REASON
                 meta["auto_paused_at"] = meta["task_last_scheduled_run_at"]
@@ -1773,7 +1797,8 @@ class CronManager:  # pylint: disable=too-many-public-methods
         notification_timezone = (
             job.schedule.timezone or self._timezone or "UTC"
         )
-        if exec_status == "success":
+        if exec_status == "success" and not is_manual:
+            delay_minutes = _notification_delay_minutes(job)
             try:
                 offset = int(
                     (job.meta or {}).get("broadcast_offset_minutes", 0) or 0,
@@ -1783,10 +1808,17 @@ class CronManager:  # pylint: disable=too-many-public-methods
             if (job.meta or {}).get(
                 "broadcast_notification_policy",
             ) == "original_schedule":
-                notification_due_at = actual_time + timedelta(minutes=offset)
+                total_delay = max(offset, 0) + delay_minutes
+                notification_due_at = actual_time + timedelta(
+                    minutes=total_delay,
+                )
                 notification_timezone = (job.meta or {}).get(
                     "broadcast_original_timezone",
                 ) or notification_timezone
+            elif delay_minutes > 0:
+                notification_due_at = (
+                    end_time or actual_time
+                ) + timedelta(minutes=delay_minutes)
 
         await self._monitor_sync_client.record_execution(
             job=job,
@@ -2044,6 +2076,10 @@ class CronManager:  # pylint: disable=too-many-public-methods
                     "cron_execution_meta",
                     execution_meta,
                 )
+                # 从异常获取 trace_id（executor 在失败时附加到异常上）
+                exc_trace_id = getattr(exc, "cron_trace_id", None)
+                if exc_trace_id and not trace_id:
+                    trace_id = exc_trace_id
                 # 检查任务是否实际执行成功
                 # CancelledError 可能是在 finally 块中（trace 结束时）抛出的
                 # 如果任务已执行成功，应该记录为 success 而非 cancelled
@@ -2072,6 +2108,10 @@ class CronManager:  # pylint: disable=too-many-public-methods
                     "cron_execution_meta",
                     execution_meta,
                 )
+                # 从异常获取 trace_id（executor 在失败时附加到异常上）
+                exc_trace_id = getattr(e, "cron_trace_id", None)
+                if exc_trace_id and not trace_id:
+                    trace_id = exc_trace_id
                 exec_status, error_message, end_time, duration_ms = (
                     self._handle_execution_error(st, actual_time, e)
                 )
@@ -2521,12 +2561,14 @@ class CronManager:  # pylint: disable=too-many-public-methods
         if not job.schedule or not job.schedule.cron:
             return
         try:
-            next_run = compute_next_run_at(
+            next_runs = compute_next_run_times(
                 job.schedule.cron,
                 job.schedule.timezone or self._timezone or "UTC",
+                count=3,
             )
             st = self._states.get(job.id, CronJobState())
-            st.next_run_at = next_run
+            st.next_run_times = next_runs
+            st.next_run_at = next_runs[0] if next_runs else None
             self._states[job.id] = st
         except Exception:
             logger.debug(

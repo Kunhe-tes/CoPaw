@@ -52,8 +52,12 @@ describe("SystemConfigPage", () => {
     return screen.getAllByRole("switch")[0];
   }
 
+  function getCronUnreadAutoPauseSwitch() {
+    return screen.getAllByRole("switch")[2];
+  }
+
   function getToolResultCompactSwitch() {
-    return screen.getAllByRole("switch")[1];
+    return screen.getAllByRole("switch")[3];
   }
 
   afterEach(() => {
@@ -61,7 +65,13 @@ describe("SystemConfigPage", () => {
   });
 
   beforeEach(() => {
-    vi.clearAllMocks();
+    loadEffectiveConfig.mockReset();
+    loadEffectiveConfig.mockResolvedValue(undefined);
+    mocks.sourceSystemConfigApi.getCurrent.mockReset();
+    mocks.sourceSystemConfigApi.updateCurrent.mockReset();
+    mocks.sourceSystemConfigApi.deleteCurrent.mockReset();
+    mocks.messageApi.success.mockReset();
+    mocks.messageApi.error.mockReset();
     useIframeStore.getState().clearContext();
     useIframeStore.getState().setContext({
       source: "portal",
@@ -145,6 +155,43 @@ describe("SystemConfigPage", () => {
     expect(mocks.messageApi.success).toHaveBeenCalled();
   });
 
+  it("saves cron unread auto pause settings", async () => {
+    mocks.sourceSystemConfigApi.updateCurrent.mockResolvedValue({
+      source_id: "portal",
+      config: {
+        cron_unread_auto_pause: {
+          enabled: false,
+          threshold: 12,
+        },
+      },
+      version: 1,
+      is_default: false,
+      updated_by: "alice",
+      updated_at: "2026-05-20 22:00:00",
+    });
+
+    render(<SystemConfigPage />);
+
+    expect(await screen.findByText("定时任务未读自动暂停")).toBeTruthy();
+
+    fireEvent.change(screen.getByDisplayValue("10"), {
+      target: { value: "12" },
+    });
+    fireEvent.click(getCronUnreadAutoPauseSwitch());
+    fireEvent.click(screen.getByRole("button", { name: "common.save" }));
+
+    await waitFor(() => {
+      expect(mocks.sourceSystemConfigApi.updateCurrent).toHaveBeenCalledWith({
+        config: {
+          cron_unread_auto_pause: {
+            enabled: false,
+            threshold: 12,
+          },
+        },
+      });
+    });
+  });
+
   it("saves tool result compact values while preserving unknown raw keys", async () => {
     mocks.sourceSystemConfigApi.getCurrent.mockResolvedValueOnce({
       source_id: "portal",
@@ -199,6 +246,49 @@ describe("SystemConfigPage", () => {
       });
     });
     expect(loadEffectiveConfig).toHaveBeenCalledWith("portal");
+  });
+
+  it("saves system prompt injections", async () => {
+    mocks.sourceSystemConfigApi.getCurrent.mockResolvedValueOnce({
+      source_id: "portal",
+      config: {
+        system_prompt_injections: ["source prompt"],
+      },
+      version: 1,
+      is_default: false,
+      updated_by: "alice",
+      updated_at: "2026-05-21 10:00:00",
+    });
+    mocks.sourceSystemConfigApi.updateCurrent.mockResolvedValue({
+      source_id: "portal",
+      config: {
+        system_prompt_injections: ["source prompt", "runtime rule"],
+      },
+      version: 2,
+      is_default: false,
+      updated_by: "alice",
+      updated_at: "2026-05-21 11:00:00",
+    });
+
+    render(<SystemConfigPage />);
+
+    const input = await screen.findByLabelText("系统提示词注入");
+    expect(input).toHaveValue("source prompt");
+
+    fireEvent.change(input, {
+      target: {
+        value: "source prompt\n\nruntime rule\n\nsource prompt",
+      },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "common.save" }));
+
+    await waitFor(() => {
+      expect(mocks.sourceSystemConfigApi.updateCurrent).toHaveBeenCalledWith({
+        config: {
+          system_prompt_injections: ["source prompt", "runtime rule"],
+        },
+      });
+    });
   });
 
   it("saves explicit immediate truncation configs", async () => {

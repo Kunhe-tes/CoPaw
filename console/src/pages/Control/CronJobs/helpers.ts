@@ -8,6 +8,11 @@ import {
   buildExecutionModelKey,
   parseExecutionModelKey,
 } from "@/hooks/useExecutionModelOptions";
+import {
+  getNotificationDelayFormValue,
+  toNotificationDelayMinutes,
+  type NotificationDelayUnit,
+} from "@/utils/cron";
 import type { CronParts } from "./components/parseCron";
 import { parseCron, serializeCron } from "./components/parseCron";
 
@@ -17,12 +22,17 @@ export type CronJobFormValues = CronJobSpecOutput & {
   cronDaysOfWeek?: string[];
   cronCustom?: string;
   execution_model_key?: string;
+  notificationDelayValue?: number;
+  notificationDelayUnit?: NotificationDelayUnit;
 };
 
 export function buildCronJobFormValues(
   job: CronJobSpecOutput,
 ): CronJobFormValues {
   const cronParts = parseCron(job.schedule?.cron || "0 9 * * *");
+  const notificationDelay = getNotificationDelayFormValue(
+    job.meta?.notification_delay_minutes,
+  );
   const formValues: CronJobFormValues = {
     ...job,
     request: {
@@ -33,6 +43,8 @@ export function buildCronJobFormValues(
     },
     cronType: cronParts.type,
     execution_model_key: buildExecutionModelKey(job.model_slot),
+    notificationDelayValue: notificationDelay.value,
+    notificationDelayUnit: notificationDelay.unit,
   };
 
   if (cronParts.type === "daily" || cronParts.type === "weekly") {
@@ -69,12 +81,25 @@ export function buildCronJobSubmitPayload(
   }
 
   const cronExpression = serializeCron(cronParts);
-  const { execution_model_key: executionModelKey, ...rawValues } = values;
+  const {
+    execution_model_key: executionModelKey,
+    notificationDelayValue,
+    notificationDelayUnit,
+    ...rawValues
+  } = values;
+  const notificationDelayMinutes = toNotificationDelayMinutes(
+    notificationDelayValue,
+    notificationDelayUnit || "minutes",
+  );
   let processedValues: Record<string, any> = {
     ...rawValues,
     schedule: {
       ...values.schedule,
       cron: cronExpression,
+    },
+    meta: {
+      ...(values.meta || {}),
+      notification_delay_minutes: notificationDelayMinutes,
     },
     model_slot:
       values.task_type === "agent"

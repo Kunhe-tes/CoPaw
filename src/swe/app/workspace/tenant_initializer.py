@@ -55,8 +55,7 @@ class TenantInitializer:
             scope_id: Optional explicit runtime scope. When provided, it takes
                 precedence over tenant/source recomputation.
         """
-        from ...config.context import resolve_runtime_tenant_id
-        from ...config.utils import migrate_legacy_scope_dir_if_needed
+        from ...config.context import resolve_storage_tenant_id
 
         self.base_working_dir = Path(base_working_dir).expanduser().resolve()
         self.tenant_id = tenant_id
@@ -65,18 +64,14 @@ class TenantInitializer:
         self.scope_id = scope_id or None
         self.template_name = self._resolve_template_name()
         self.effective_tenant_id = (
-            resolve_runtime_tenant_id(self.scope_id, None)
-            if self.scope_id is not None
-            else resolve_runtime_tenant_id(
+            resolve_storage_tenant_id(
                 tenant_id,
                 self.source_id,
+                scope_id=self.scope_id,
             )
             or tenant_id
         )
-        self.tenant_dir = migrate_legacy_scope_dir_if_needed(
-            self.base_working_dir,
-            self.effective_tenant_id,
-        )
+        self.tenant_dir = self.base_working_dir / self.effective_tenant_id
 
     def _resolve_template_name(self) -> str:
         """Determine which default_xxx template directory to use.
@@ -285,10 +280,10 @@ class TenantInitializer:
         self.initialize_minimal()
         result["minimal"] = True
 
-        # Step 1.5: Seed tenant root config from default template
-        # For default tenant: only seed if config doesn't exist
-        # For non-default tenant: skip (config already copied from md_files)
-        if is_default_tenant:
+        # Step 1.5: Seed tenant root config from template when missing。
+        # 历史逻辑假设非 default 租户的 config 会在其他链路提前复制，
+        # 但 source 模板场景下首次初始化需要在这里统一补齐。
+        if is_default_tenant or not config_existed:
             result["config_seed"] = self.seed_tenant_config_from_default(
                 overwrite=not config_existed,
             )
@@ -666,6 +661,7 @@ class TenantInitializer:
             (default_workspace / dirname).mkdir(parents=True, exist_ok=True)
 
         tenant_config_path = self.tenant_dir / "config.json"
+        tenant_config = load_config(tenant_config_path)
         target_agent_config_path = default_workspace / "agent.json"
         template_workspace = (
             self.base_working_dir
@@ -682,6 +678,9 @@ class TenantInitializer:
                 source_agent_config_path.read_text(encoding="utf-8"),
             )
             agent_payload["workspace_dir"] = str(default_workspace)
+            agent_payload["channels"] = tenant_config.channels.model_dump(
+                exclude_none=True,
+            )
             agent_config_model = AgentProfileConfig(**agent_payload)
             target_agent_config_path.write_text(
                 json.dumps(
@@ -692,7 +691,6 @@ class TenantInitializer:
                 encoding="utf-8",
             )
         elif not target_agent_config_path.exists():
-            tenant_config = load_config(tenant_config_path)
             save_agent_config(
                 "default",
                 AgentProfileConfig(

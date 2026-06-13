@@ -42,9 +42,9 @@ async def test_write_file_cancellation_does_not_modify_target(
     release_write = threading.Event()
     write_finished = threading.Event()
 
-    def delayed_write(**kwargs):
+    async def delayed_write(**kwargs):
         write_started.set()
-        release_write.wait(1.0)
+        assert await asyncio.to_thread(release_write.wait, 1.0)
         Path(kwargs["file_path"]).write_text(
             kwargs["content"],
             encoding=kwargs["encoding"],
@@ -86,15 +86,13 @@ async def test_append_file_cancellation_does_not_modify_target(
     release_write = threading.Event()
     write_finished = threading.Event()
 
-    def delayed_write(**kwargs):
+    async def delayed_write(**kwargs):
         write_started.set()
-        release_write.wait(1.0)
-        with open(  # pylint: disable=unspecified-encoding
-            kwargs["file_path"],
-            kwargs["mode"],
+        assert await asyncio.to_thread(release_write.wait, 1.0)
+        Path(kwargs["file_path"]).write_text(
+            kwargs["content"],
             encoding=kwargs["encoding"],
-        ) as file:
-            file.write(kwargs["content"])
+        )
         write_finished.set()
 
     monkeypatch.setattr(

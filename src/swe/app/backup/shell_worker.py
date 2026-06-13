@@ -16,7 +16,12 @@ from pathlib import Path
 from zoneinfo import ZoneInfo
 
 from swe.constant import SECRET_DIR, WORKING_DIR
-from swe.config.utils import get_tenant_working_dir, list_all_tenant_ids
+from swe.config.utils import (
+    get_tenant_storage_providers_dir,
+    get_tenant_storage_secrets_dir,
+    get_tenant_working_dir,
+    list_all_tenant_ids,
+)
 
 from .config import BackupEnvironmentConfig, ShellScriptConfig
 from .models import BackupTask, BackupTaskStatus
@@ -666,13 +671,11 @@ class ShellBackupWorker:
         """回滚时使用 Python zipfile 解压。"""
         import zipfile
 
-        from swe.config.utils import get_tenant_secrets_dir
-
         def _do_extract():
             target_dir.mkdir(parents=True, exist_ok=True)
-            secrets_dir = get_tenant_secrets_dir(tenant_id)
+            secrets_dir = get_tenant_storage_secrets_dir(tenant_id)
             secrets_dir.mkdir(parents=True, exist_ok=True)
-            provider_dir = SECRET_DIR / tenant_id / "providers"
+            provider_dir = get_tenant_storage_providers_dir(tenant_id)
             provider_dir.mkdir(parents=True, exist_ok=True)
 
             with zipfile.ZipFile(zip_path, "r") as zf:

@@ -101,3 +101,5 @@ def test_get_chat_exposes_message_timestamp(
     assert response.status_code == 200
     payload = response.json()
     assert payload["messages"][0]["timestamp"] == "2026-04-17T08:00:00Z"
+    assert payload["chat"]["id"] == "chat-1"
+    assert payload["chat"]["session_id"] == "default:user-1"

@@ -458,7 +458,7 @@ export default function TaskRunGroupCard(props: {
           chatId={props.chatId}
           messages={finalMessages}
           sessionId={props.sessionId}
-          showFeedback={!autoPreviewMessages}
+          showFeedback
           task={props.task}
           feedbackLookup={props.feedbackLookup}
           loadingFeedback={props.loadingFeedback}

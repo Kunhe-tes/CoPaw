@@ -6,16 +6,110 @@ export default createGlobalStyle`
 .conversation-quick-nav {
   position: absolute;
   right: 8px;
-  top: 50%;
-  transform: translateY(-50%);
-  width: 12px;
+  top: 24px;
+  bottom: 24px;
+  width: 36px;
   z-index: 100;
   display: flex;
   flex-direction: column;
   align-items: flex-end;
-  gap: 15px;
   opacity: 0;
   animation: quick-nav-fade-in 300ms ease-out forwards;
+  pointer-events: none;
+}
+
+.conversation-quick-nav::before,
+.conversation-quick-nav::after {
+  content: '';
+  position: absolute;
+  right: 0;
+  width: 36px;
+  height: 14px;
+  z-index: 1;
+  pointer-events: none;
+}
+
+.conversation-quick-nav::before {
+  top: 0;
+  background: linear-gradient(to bottom, rgba(255, 255, 255, 0.9), transparent);
+}
+
+.conversation-quick-nav::after {
+  bottom: 0;
+  background: linear-gradient(to top, rgba(255, 255, 255, 0.9), transparent);
+}
+
+.conversation-quick-nav__scroll {
+  width: 36px;
+  height: 100%;
+  overflow-y: auto;
+  overflow-x: hidden;
+  padding: 14px 0;
+  box-sizing: border-box;
+  pointer-events: none;
+  scrollbar-width: none;
+  scrollbar-color: transparent transparent;
+  -ms-overflow-style: none;
+  overscroll-behavior: contain;
+}
+
+.conversation-quick-nav__items {
+  width: 100%;
+  min-height: 100%;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  justify-content: center;
+  gap: 15px;
+}
+
+.conversation-quick-nav__scroll::-webkit-scrollbar {
+  width: 0 !important;
+  height: 0 !important;
+  background: transparent !important;
+}
+
+.conversation-quick-nav__scroll::-webkit-scrollbar-thumb,
+.conversation-quick-nav__scroll::-webkit-scrollbar-track {
+  background: transparent !important;
+}
+
+.quick-nav-overflow-hint {
+  position: absolute;
+  right: 22px;
+  z-index: 3;
+  height: 24px;
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  padding: 0 7px;
+  border: 1px solid rgba(0, 0, 0, 0.08);
+  border-radius: 6px;
+  background: rgba(255, 255, 255, 0.96);
+  color: rgba(0, 0, 0, 0.65);
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.1);
+  font-size: 11px;
+  line-height: 1;
+  white-space: nowrap;
+  cursor: pointer;
+  pointer-events: auto;
+  transition: color 150ms ease, border-color 150ms ease, box-shadow 150ms ease;
+}
+
+.quick-nav-overflow-hint:hover,
+.quick-nav-overflow-hint:focus-visible {
+  color: ${DESIGN_TOKENS.colorPrimary};
+  border-color: ${DESIGN_TOKENS.colorPrimary};
+  box-shadow: 0 2px 10px rgba(55, 105, 252, 0.2);
+  outline: none;
+}
+
+.quick-nav-overflow-hint--top {
+  top: 4px;
+}
+
+.quick-nav-overflow-hint--bottom {
+  bottom: 4px;
 }
 
 /* 当整个导航组件被hover时，所有横线都有宽度变化 */
@@ -43,6 +137,7 @@ export default createGlobalStyle`
   transition: all 150ms ease;
   border-radius: 2px;
   outline: none;
+  pointer-events: auto;
 }
 
 /* Invisible touch target for accessibility */
@@ -78,9 +173,7 @@ export default createGlobalStyle`
 
 /* ─── Tooltip ─── */
 .quick-nav-tooltip {
-  position: absolute;
-  right: 32px;
-  top: 50%;
+  position: fixed;
   transform: translateY(-50%);
   background: linear-gradient(135deg, rgba(55, 105, 252, 0.95), rgba(55, 105, 252, 0.85));
   color: #FFFFFF;
@@ -97,6 +190,7 @@ export default createGlobalStyle`
   transition: all 200ms ease;
   pointer-events: none;
   box-shadow: 0 2px 8px rgba(55, 105, 252, 0.3);
+  z-index: 101;
 }
 
 .quick-nav-tooltip--visible {
@@ -165,6 +259,26 @@ export default createGlobalStyle`
 [data-theme='dark'] .quick-nav-tooltip {
   background: linear-gradient(135deg, rgba(55, 105, 252, 0.9), rgba(55, 105, 252, 0.75));
   box-shadow: 0 2px 8px rgba(55, 105, 252, 0.2);
+}
+
+[data-theme='dark'] .quick-nav-overflow-hint {
+  border-color: rgba(255, 255, 255, 0.16);
+  background: rgba(32, 32, 32, 0.96);
+  color: rgba(255, 255, 255, 0.72);
+}
+
+[data-theme='dark'] .quick-nav-overflow-hint:hover,
+[data-theme='dark'] .quick-nav-overflow-hint:focus-visible {
+  color: ${DESIGN_TOKENS.colorPrimary};
+  border-color: ${DESIGN_TOKENS.colorPrimary};
+}
+
+[data-theme='dark'] .conversation-quick-nav::before {
+  background: linear-gradient(to bottom, rgba(20, 20, 20, 0.9), transparent);
+}
+
+[data-theme='dark'] .conversation-quick-nav::after {
+  background: linear-gradient(to top, rgba(20, 20, 20, 0.9), transparent);
 }
 
 [data-theme='dark'] .quick-nav-tooltip::before {

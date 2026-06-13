@@ -14,7 +14,6 @@ from typing import TYPE_CHECKING, Any, AsyncGenerator, Callable, Collection
 from uuid import uuid4
 
 import httpx
-from agentscope.mcp import HttpStatefulClient, StdIOStatefulClient
 from agentscope.message import Msg, TextBlock
 from agentscope.pipeline import stream_printing_messages
 from agentscope_runtime.engine.runner import Runner
@@ -25,10 +24,9 @@ from agentscope_runtime.engine.schemas.agent_schemas import (
 )
 from agentscope_runtime.engine.schemas.exception import AgentException
 from dotenv import load_dotenv
-from mcp.client.sse import sse_client
-from mcp.client.streamable_http import streamable_http_client
 
-from ..mcp.http_headers import resolve_mcp_http_headers
+from ..mcp.http_headers import build_mcp_http_headers
+from ..mcp.stateful_client import HttpStatefulClient, StdIOStatefulClient
 from ..mcp.stdio_launcher import build_tenant_aware_stdio_launch_config
 from .command_dispatch import (
     _get_last_user_text,
@@ -37,14 +35,22 @@ from .command_dispatch import (
 )
 from .query_error_dump import write_query_error_dump
 from .retry_classifier import is_query_retryable
-from .session import SafeJSONSession
+from .session import (
+    RunnerSessionProtocol,
+    SafeJSONSession,
+    SESSION_SKILL_SNAPSHOT_STATE_KEY,
+)
 from .stream_boundary import normalize_reasoning_boundary_stream
 from .task_progress import attach_task_progress
 from .utils import build_env_context
+from ..identity_resolver import resolve_user_identity
 from ..channels.schema import DEFAULT_CHANNEL
 from ...agents.react_agent import SWEAgent
 from ...agents.skill_invocation_detector import SkillInvocationDetector
-from ...agents.skills_manager import get_workspace_skills_dir
+from ...agents.skills_manager import (
+    get_skill_freshness_token,
+    get_workspace_skills_dir,
+)
 from ...agents.hook_runtime import HookRuntime
 from ...agents.hook_runtime.models import (
     HookConfig,
@@ -90,12 +96,20 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 TASK_RUNS_STATE_KEY = "task_runs"
 _INTERNAL_FOLLOW_UP_METADATA_KEY = "swe_internal_follow_up"
+_SKILL_FRESHNESS_NOTICE_METADATA_KEY = "swe_skill_freshness_notice"
+_SESSION_TITLE_GENERATED_META_KEY = "session_title_generated"
+_TASK_SESSION_KIND = "task"
 _BEFORE_STOP_FOLLOW_UP_REASON_TEMPLATE = (
     "BeforeStop completion gate blocked stopping: {reason}\n"
     "Continue working until the gate can allow completion."
 )
 _BEFORE_STOP_INCOMPLETE_MESSAGE_TEMPLATE = (
     "任务未完成：BeforeStop 完成门禁已达到自动续跑上限。最新阻断原因：{reason}"
+)
+_SKILL_FRESHNESS_NOTICE_HEADER = (
+    "[Skill freshness notice]\n"
+    "The following previously associated skills changed for this turn. "
+    "Treat current skill content as superseding earlier assumptions:\n"
 )
 
 _APPROVE_EXACT = frozenset(
@@ -106,6 +120,7 @@ _APPROVE_EXACT = frozenset(
     },
 )
 _MCP_HTTP_TIMEOUT_SECONDS = 240.0
+_MCP_CONNECT_TIMEOUT_SECONDS = _MCP_HTTP_TIMEOUT_SECONDS
 _MCP_HTTP_SSE_READ_TIMEOUT_SECONDS = 60.0 * 5
 
 _DENY_EXACT = frozenset(
@@ -146,6 +161,7 @@ class _QueryRuntime:
     user_id: str
     channel: str
     skip_history: bool
+    pending_confirmed_skill_snapshots: dict[str, dict[str, Any]]
 
 
 @dataclass
@@ -375,7 +391,7 @@ def _hook_config_enabled(
 
 
 async def _load_session_hook_overlay(
-    session: Any,
+    session: RunnerSessionProtocol | None,
     *,
     session_id: str,
     user_id: str,
@@ -434,6 +450,7 @@ def _create_session_skill_detector(
     get_hook_state: Callable[[], HookSessionState],
     set_hook_state: Callable[[HookSessionState], None],
     approved_http_urls: Collection[str] | None = None,
+    confirmed_skill_callback: Callable[[str], Any] | None = None,
 ) -> SkillInvocationDetector:
     workspace = Path(workspace_dir)
     approvals = (
@@ -468,6 +485,7 @@ def _create_session_skill_detector(
         source_id=source_id,
         workspace_dir=workspace_dir,
         skill_hook_loader=_load_skill_hooks,
+        confirmed_skill_callback=confirmed_skill_callback,
     )
     detector.set_enabled_skills(enabled_skills)
     return detector
@@ -522,6 +540,7 @@ def _build_runner_hook_context(
         channel=channel,
         source_id=getattr(request, "source_id", None)
         or channel_meta.get("source_id"),
+        trace_id=getattr(request, "trace_id", None),
         workspace_dir=str(workspace_dir),
         chat_id=channel_meta.get("chat_id"),
         turn_id=channel_meta.get("turn_id"),
@@ -607,12 +626,14 @@ def _resolve_active_model_label(tenant_id: str | None) -> str | None:
 async def _build_and_connect_mcp_clients(
     mcp_config: MCPConfig | None,
     passthrough_headers: dict[str, str] | None = None,
+    session_id: str | None = None,
 ) -> list[Any]:
     """Build and connect MCP clients from config for single request use.
 
     Args:
         mcp_config: MCP configuration from agent_config.mcp
         passthrough_headers: Headers to merge for HTTP transport clients
+        session_id: Request-scoped session identifier for reserved headers
 
     Returns:
         List of connected MCP client instances (all created for this request)
@@ -634,6 +655,7 @@ async def _build_and_connect_mcp_clients(
             client = await _create_mcp_client_with_headers(
                 client_config,
                 passthrough_headers,
+                session_id=session_id,
             )
             if client is not None:
                 await client.connect()
@@ -661,6 +683,7 @@ async def _build_and_connect_mcp_clients(
 async def _create_mcp_client_with_headers(
     client_config: MCPClientConfig,
     passthrough_headers: dict[str, str] | None = None,
+    session_id: str | None = None,
 ) -> Any:
     """Create a single MCP client with optional header passthrough.
 
@@ -670,6 +693,7 @@ async def _create_mcp_client_with_headers(
     Args:
         client_config: Single MCP client configuration
         passthrough_headers: Headers to merge for HTTP transport
+        session_id: Request-scoped session identifier for reserved headers
 
     Returns:
         MCP client instance (not yet connected)
@@ -679,6 +703,10 @@ async def _create_mcp_client_with_headers(
         "transport": client_config.transport,
         "url": client_config.url,
         "headers": client_config.headers or None,
+        "passthrough_headers": dict(passthrough_headers or {}) or None,
+        "session_id": session_id,
+        "timeout": _MCP_HTTP_TIMEOUT_SECONDS,
+        "sse_read_timeout": _MCP_HTTP_SSE_READ_TIMEOUT_SECONDS,
         "command": client_config.command,
         "args": list(client_config.args),
         "env": dict(client_config.env),
@@ -713,56 +741,27 @@ async def _create_mcp_client_with_headers(
         return client
 
     # HTTP transport (streamable_http or sse)
-    headers = client_config.headers
-    if headers:
-        headers = resolve_mcp_http_headers(headers)
-
-    # Merge passthrough headers for HTTP transport
-    merged_headers = dict(headers or {})
-    if passthrough_headers:
-        merged_headers.update(passthrough_headers)
+    merged_headers = build_mcp_http_headers(
+        client_config.headers,
+        passthrough_headers=passthrough_headers,
+        session_id=session_id,
+    )
 
     client = HttpStatefulClient(
         name=client_config.name,
         transport=client_config.transport,
         url=client_config.url,
-        headers=None,  # Headers are in http_client
+        headers=merged_headers,
+        timeout=_MCP_HTTP_TIMEOUT_SECONDS,
+        sse_read_timeout=_MCP_HTTP_SSE_READ_TIMEOUT_SECONDS,
     )
-
-    # Create appropriate transport context
-    if client_config.transport == "sse":
-        client_context = sse_client(
-            url=client_config.url,
-            headers=merged_headers,
-            timeout=_MCP_HTTP_TIMEOUT_SECONDS,
-            sse_read_timeout=_MCP_HTTP_SSE_READ_TIMEOUT_SECONDS,
-        )
-        http_client = None
-    else:  # streamable_http
-        http_client = httpx.AsyncClient(
-            headers=merged_headers,
-            timeout=httpx.Timeout(
-                connect=_MCP_HTTP_TIMEOUT_SECONDS,
-                read=_MCP_HTTP_SSE_READ_TIMEOUT_SECONDS,
-                write=_MCP_HTTP_TIMEOUT_SECONDS,
-                pool=_MCP_HTTP_TIMEOUT_SECONDS,
-            ),
-        )
-        client_context = streamable_http_client(
-            url=client_config.url,
-            http_client=http_client,
-        )
-
-    client.client = client_context
 
     setattr(
         client,
         "_swe_rebuild_info",
         {
             **rebuild_info,
-            "headers": merged_headers,
             "_temp_client": True,
-            "_http_client": http_client,
         },
     )
     setattr(client, "_swe_temp_client", True)
@@ -779,11 +778,6 @@ async def _cleanup_mcp_clients(clients: list[Any]) -> None:
     for client in clients:
         try:
             await client.close()
-            # For HTTP clients, also close the httpx client
-            rebuild_info = getattr(client, "_swe_rebuild_info", {})
-            http_client = rebuild_info.get("_http_client")
-            if http_client is not None:
-                await http_client.aclose()
         except Exception as e:
             logger.warning(f"Error closing MCP client: {e}")
 
@@ -857,6 +851,241 @@ def _build_before_stop_incomplete_msg(reason: str) -> Msg:
     )
 
 
+def _normalize_session_skill_snapshot(
+    snapshot: dict[str, Any] | None,
+) -> dict[str, dict[str, Any]]:
+    if not isinstance(snapshot, dict):
+        return {}
+
+    normalized: dict[str, dict[str, Any]] = {}
+    for skill_name, entry in snapshot.items():
+        if isinstance(skill_name, str) and isinstance(entry, dict):
+            normalized[skill_name] = dict(entry)
+    return normalized
+
+
+def _coerce_session_storage_id(session_id: str | None | Any) -> str:
+    return "" if session_id is None else str(session_id)
+
+
+def _coerce_session_storage_user_id(user_id: str | None) -> str:
+    return user_id or ""
+
+
+def _build_session_skill_snapshot_entry(
+    *,
+    skill_name: str,
+    resolved_skill_dir: Path,
+    freshness_token: Any,
+) -> dict[str, Any]:
+    return {
+        "skill_name": skill_name,
+        "resolved_skill_dir": str(resolved_skill_dir),
+        "freshness_token": freshness_token,
+    }
+
+
+def _upsert_session_skill_snapshot_entry(
+    snapshot: dict[str, dict[str, Any]],
+    *,
+    skill_name: str,
+    resolved_skill_dir: Path,
+    freshness_token: Any,
+) -> None:
+    snapshot[skill_name] = _build_session_skill_snapshot_entry(
+        skill_name=skill_name,
+        resolved_skill_dir=resolved_skill_dir,
+        freshness_token=freshness_token,
+    )
+
+
+def _remove_session_skill_snapshot_entry(
+    snapshot: dict[str, dict[str, Any]],
+    *,
+    skill_name: str,
+) -> None:
+    snapshot.pop(skill_name, None)
+
+
+def _skill_freshness_notice_text(
+    changes: list[str],
+) -> str:
+    return _SKILL_FRESHNESS_NOTICE_HEADER + "\n".join(
+        f"- {item}" for item in changes
+    )
+
+
+def _build_skill_freshness_notice_msg(text: str) -> Msg:
+    return Msg(
+        name="system",
+        role="system",
+        content=[TextBlock(type="text", text=text)],
+        metadata={
+            _SKILL_FRESHNESS_NOTICE_METADATA_KEY: True,
+        },
+    )
+
+
+@dataclass(frozen=True)
+class _SkillFreshnessRefreshResult:
+    notice_text: str | None = None
+    stored_snapshot: dict[str, dict[str, Any]] | None = None
+    refreshed_snapshot: dict[str, dict[str, Any]] | None = None
+
+
+def _supports_session_skill_freshness_refresh(
+    *,
+    session: Any,
+    runtime: "_QueryRuntime",
+) -> bool:
+    if runtime.skip_history or session is None or not runtime.session_id:
+        return False
+    if not hasattr(runtime.agent, "get_effective_skills"):
+        return False
+    return all(
+        hasattr(session, attr)
+        for attr in (
+            "get_session_skill_snapshot",
+            "save_session_skill_snapshot",
+        )
+    )
+
+
+def _refresh_switched_session_skill_snapshot_entry(
+    next_snapshot: dict[str, dict[str, Any]],
+    *,
+    skill_name: str,
+    stored_dir: Path,
+    current_dir: Path | None,
+) -> str | None:
+    if (
+        current_dir is None
+        or not current_dir.exists()
+        or current_dir == stored_dir
+    ):
+        return None
+
+    current_token = get_skill_freshness_token(current_dir)
+    _upsert_session_skill_snapshot_entry(
+        next_snapshot,
+        skill_name=skill_name,
+        resolved_skill_dir=current_dir,
+        freshness_token=current_token,
+    )
+    return (
+        f"{skill_name}: detected skill-directory switch "
+        f"{stored_dir} -> {current_dir}. Treat current skill "
+        "content as superseding earlier assumptions. You MUST "
+        f"re-read {current_dir / 'SKILL.md'} before relying on this skill."
+    )
+
+
+def _refresh_withdrawn_session_skill_snapshot_entry(
+    next_snapshot: dict[str, dict[str, Any]],
+    *,
+    skill_name: str,
+    current_dir: Path | None,
+) -> str | None:
+    if current_dir is not None and current_dir.exists():
+        return None
+
+    _remove_session_skill_snapshot_entry(
+        next_snapshot,
+        skill_name=skill_name,
+    )
+    return (
+        f"{skill_name}: no longer effective for this turn. "
+        "Stop relying on earlier assumptions from this skill."
+    )
+
+
+def _refresh_changed_session_skill_snapshot_entry(
+    next_snapshot: dict[str, dict[str, Any]],
+    *,
+    skill_name: str,
+    entry: dict[str, Any],
+    current_dir: Path,
+) -> str | None:
+    current_token = get_skill_freshness_token(current_dir)
+    if current_token == entry.get("freshness_token"):
+        return None
+
+    _upsert_session_skill_snapshot_entry(
+        next_snapshot,
+        skill_name=skill_name,
+        resolved_skill_dir=current_dir,
+        freshness_token=current_token,
+    )
+    return (
+        f"{skill_name}: detected skill-directory change at "
+        f"{current_dir}. Treat current skill content as "
+        "superseding earlier assumptions. You MUST "
+        f"re-read {current_dir / 'SKILL.md'} before relying on this skill."
+    )
+
+
+def _refresh_session_skill_snapshot_entry(
+    next_snapshot: dict[str, dict[str, Any]],
+    *,
+    skill_name: str,
+    entry: dict[str, Any],
+    effective_skill_dirs: dict[str, Path],
+) -> str | None:
+    stored_dir = Path(str(entry.get("resolved_skill_dir", "")))
+    current_dir = effective_skill_dirs.get(skill_name)
+
+    switch_notice = _refresh_switched_session_skill_snapshot_entry(
+        next_snapshot,
+        skill_name=skill_name,
+        stored_dir=stored_dir,
+        current_dir=current_dir,
+    )
+    if switch_notice is not None:
+        return switch_notice
+
+    if not stored_dir.exists():
+        _remove_session_skill_snapshot_entry(
+            next_snapshot,
+            skill_name=skill_name,
+        )
+        return None
+
+    withdrawal_notice = _refresh_withdrawn_session_skill_snapshot_entry(
+        next_snapshot,
+        skill_name=skill_name,
+        current_dir=current_dir,
+    )
+    if withdrawal_notice is not None:
+        return withdrawal_notice
+
+    assert current_dir is not None
+    return _refresh_changed_session_skill_snapshot_entry(
+        next_snapshot,
+        skill_name=skill_name,
+        entry=entry,
+        current_dir=current_dir,
+    )
+
+
+def _refresh_session_skill_snapshot_entries(
+    next_snapshot: dict[str, dict[str, Any]],
+    *,
+    stored_snapshot: dict[str, dict[str, Any]],
+    effective_skill_dirs: dict[str, Path],
+) -> list[str]:
+    changes: list[str] = []
+    for skill_name, entry in stored_snapshot.items():
+        notice = _refresh_session_skill_snapshot_entry(
+            next_snapshot,
+            skill_name=skill_name,
+            entry=entry,
+            effective_skill_dirs=effective_skill_dirs,
+        )
+        if notice is not None:
+            changes.append(notice)
+    return changes
+
+
 def _resolve_max_before_stop_turns(agent_config: Any) -> int:
     """解析 BeforeStop 自动续跑上限，未配置时使用保守默认值。"""
     running_config = getattr(agent_config, "running", None)
@@ -909,7 +1138,7 @@ def _resolve_max_automatic_follow_up_turns(
 def _strip_internal_follow_up_messages_from_state(
     agent_state: dict[str, Any],
 ) -> int:
-    """Remove hidden continuation prompts before persisting session state."""
+    """Remove ephemeral system prompts before persisting session state."""
     memory_state = agent_state.get("memory")
     if not isinstance(memory_state, dict):
         return 0
@@ -927,8 +1156,9 @@ def _strip_internal_follow_up_messages_from_state(
             if isinstance(msg_payload, dict)
             else None
         )
-        if isinstance(metadata, dict) and metadata.get(
-            _INTERNAL_FOLLOW_UP_METADATA_KEY,
+        if isinstance(metadata, dict) and (
+            metadata.get(_INTERNAL_FOLLOW_UP_METADATA_KEY)
+            or metadata.get(_SKILL_FRESHNESS_NOTICE_METADATA_KEY)
         ):
             removed += 1
             continue
@@ -1008,6 +1238,62 @@ def _with_hook_context(
     return f"{env_context}\n\n[Hook additional context]\n{hook_context}"
 
 
+def _request_system_prompt_injections(request: AgentRequest) -> list[str]:
+    channel_meta = getattr(request, "channel_meta", None) or {}
+    value = getattr(request, "system_prompt_injections", None)
+    if value is None and isinstance(channel_meta, dict):
+        value = channel_meta.get("system_prompt_injections")
+    return _normalize_system_prompt_injections(value)
+
+
+def _request_file_url_network(request: AgentRequest) -> str:
+    """从请求属性和 channel_meta 中读取静态文件访问网络。"""
+    from ...config.context import normalize_file_url_network
+
+    channel_meta = getattr(request, "channel_meta", None) or {}
+    value = getattr(request, "file_url_network", None)
+    if value is None and isinstance(channel_meta, dict):
+        value = channel_meta.get("file_url_network")
+    return normalize_file_url_network(value)
+
+
+def _normalize_system_prompt_injections(value: Any) -> list[str]:
+    from ..source_system_config.registry import (
+        normalize_system_prompt_injections,
+    )
+
+    try:
+        return normalize_system_prompt_injections(value)
+    except ValueError:
+        logger.warning(
+            "Ignored invalid system_prompt_injections payload",
+            exc_info=True,
+        )
+        return []
+
+
+def _merge_system_prompt_injections(*sources: Any) -> list[str]:
+    merged: list[str] = []
+    seen: set[str] = set()
+    for source in sources:
+        for item in _normalize_system_prompt_injections(source):
+            if item in seen:
+                continue
+            seen.add(item)
+            merged.append(item)
+    return merged
+
+
+def _with_system_prompt_injections(
+    env_context: str,
+    injections: list[str],
+) -> str:
+    if not injections:
+        return env_context
+    body = "\n\n".join(injections)
+    return f"{env_context}\n\n[System prompt injections]\n{body}"
+
+
 def _chat_name_from_messages(msgs: list[Any]) -> str:
     """从首条消息派生会话名，保持原有文本和媒体消息规则。"""
     if not msgs:
@@ -1017,6 +1303,42 @@ def _chat_name_from_messages(msgs: list[Any]) -> str:
     if content:
         return content[:10]
     return "Media Message"
+
+
+def _should_generate_session_title(
+    chat: Any,
+    *,
+    fallback_name: str,
+) -> bool:
+    """判断当前 chat 是否仍可由自动标题覆盖。
+
+    只允许覆盖尚未生成过标题且仍保持默认/历史自动名称的会话，避免后续
+    轮次或人工改名被后台任务再次覆盖。
+    """
+    if chat is None:
+        return False
+
+    meta = getattr(chat, "meta", None) or {}
+    if meta.get("session_kind") == _TASK_SESSION_KIND:
+        return False
+
+    if meta.get(_SESSION_TITLE_GENERATED_META_KEY):
+        return False
+
+    current_name = (getattr(chat, "name", "") or "").strip()
+    auto_names = {"New Chat", "新会话", fallback_name}
+    return current_name in auto_names
+
+
+def _clear_session_title_meta(request: AgentRequest) -> None:
+    """清理通道标题元数据，避免跳过生成后仍向前端推送标题更新。"""
+    channel_meta = getattr(request, "channel_meta", None)
+    if not isinstance(channel_meta, dict):
+        return
+    if "session_title" not in channel_meta:
+        return
+    channel_meta.pop("session_title", None)
+    request.channel_meta = channel_meta
 
 
 def _request_source_id(request: AgentRequest) -> str:
@@ -1186,6 +1508,7 @@ class AgentRunner(Runner):
         self._workspace: Any = None  # Workspace instance for control commands
         self.memory_manager: BaseMemoryManager | None = None
         self._task_tracker = task_tracker  # Task tracker for background tasks
+        self.session: RunnerSessionProtocol | None = None
 
     def set_chat_manager(self, chat_manager):
         """Set chat manager for auto-registration.
@@ -1415,14 +1738,21 @@ class AgentRunner(Runner):
                 return None
             # 检查是否已有外部传入的 trace_id
             existing_trace_id = getattr(request, "trace_id", None)
+            resolved_identity = await resolve_user_identity(
+                tenant_id=getattr(request, "user_id", None),
+                source_id=_request_source_id(request),
+                user_name=_request_user_name(request),
+                bbk_id=_request_bbk_id(request),
+                allow_remote_lookup=False,
+            )
             trace_id = await trace_mgr.start_trace(
                 user_id=getattr(request, "user_id", "") or "",
                 session_id=getattr(request, "session_id", "") or "",
                 channel=getattr(request, "channel", DEFAULT_CHANNEL),
                 source_id=_request_source_id(request),
                 user_message=_get_last_user_text(msgs),
-                user_name=_request_user_name(request),
-                bbk_id=_request_bbk_id(request),
+                user_name=resolved_identity.user_name,
+                bbk_id=resolved_identity.bbk_id,
                 session_name=_session_name_from_messages(msgs),
                 trace_id=existing_trace_id,  # 使用传入的 trace_id 或 None
                 attach_existing=existing_trace_id
@@ -1431,10 +1761,160 @@ class AgentRunner(Runner):
             if trace_id:
                 # 通道层负责把事件发给前端，这里写回 request 让 SSE 能透传 trace_id。
                 setattr(request, "trace_id", trace_id)
+
             return trace_id
         except Exception as e:
             logger.warning("Failed to start trace: %s", e)
             return None
+
+    async def _generate_session_title_before_stream(
+        self,
+        *,
+        request: AgentRequest,
+        chat: Any,
+        msgs: list[Any],
+        trace_id: str | None,
+    ) -> None:
+        """在 Agent 主回答前生成标题，确保前端先收到标题刷新事件。"""
+        if not trace_id:
+            return
+
+        chat_meta = getattr(chat, "meta", None) or {}
+        if chat_meta.get("session_kind") == _TASK_SESSION_KIND:
+            _clear_session_title_meta(request)
+            return
+
+        channel_meta = getattr(request, "channel_meta", None) or {}
+        existing_title = channel_meta.get("session_title")
+        if existing_title:
+            await self._persist_session_title(
+                request=request,
+                title=str(existing_title),
+                trace_id=trace_id,
+                chat_id=getattr(chat, "id", None),
+            )
+            return
+
+        user_question = _get_last_user_text(msgs)
+        if not user_question or not user_question.strip():
+            return
+
+        fallback_name = _chat_name_from_messages(msgs)
+        if not _should_generate_session_title(
+            chat,
+            fallback_name=fallback_name,
+        ):
+            return
+
+        await self._generate_and_update_title(
+            request=request,
+            user_question=user_question,
+            trace_id=trace_id,
+            chat_id=getattr(chat, "id", None),
+        )
+
+    async def _persist_session_title(
+        self,
+        *,
+        request: AgentRequest,
+        title: str,
+        trace_id: str,
+        chat_id: str | None = None,
+    ) -> None:
+        """把已确定的标题写回 chat、trace 和 SSE 元数据。"""
+        channel_meta = getattr(request, "channel_meta", None) or {}
+        resolved_chat_id = chat_id or channel_meta.get("chat_id")
+        if resolved_chat_id:
+            channel_meta["chat_id"] = resolved_chat_id
+
+        persisted = False
+        if not resolved_chat_id:
+            logger.warning("跳过会话标题刷新：缺少 chat_id")
+        elif self._chat_manager is None:
+            logger.warning(
+                "跳过会话标题刷新：ChatManager 不可用 chat_id=%s",
+                resolved_chat_id,
+            )
+        else:
+            try:
+                persisted = await self._chat_manager.update_chat_name(
+                    resolved_chat_id,
+                    title,
+                    meta={
+                        _SESSION_TITLE_GENERATED_META_KEY: True,
+                    },
+                )
+            except Exception:
+                logger.warning(
+                    "更新 chats.json 标题失败 chat_id=%s",
+                    resolved_chat_id,
+                    exc_info=True,
+                )
+            if not persisted:
+                logger.warning(
+                    "更新 chats.json 标题未命中 chat_id=%s",
+                    resolved_chat_id,
+                )
+
+        if not persisted:
+            channel_meta.pop("session_title", None)
+            request.channel_meta = channel_meta
+            return
+
+        if has_trace_manager():
+            try:
+                trace_mgr = get_trace_manager()
+                await trace_mgr.update_session_name(trace_id, title)
+            except Exception:
+                logger.warning(
+                    "更新 tracing 会话标题失败 trace_id=%s",
+                    trace_id,
+                    exc_info=True,
+                )
+
+        channel_meta["session_title"] = title
+        request.channel_meta = channel_meta
+
+    async def _generate_and_update_title(
+        self,
+        request: AgentRequest,
+        user_question: str | None,
+        trace_id: str,
+        chat_id: str | None = None,
+    ) -> None:
+        """生成会话标题并更新存储。
+
+        调用外部标题 API，成功后更新 chats.json、MySQL 和 channel_meta；
+        失败只记日志，不修改任何数据。
+        """
+        if not user_question or not user_question.strip():
+            return
+
+        try:
+            from ..title_generator import generate_title
+
+            title = await generate_title(user_question)
+            if not title:
+                return
+
+            await self._persist_session_title(
+                request=request,
+                title=title,
+                trace_id=trace_id,
+                chat_id=chat_id,
+            )
+
+            logger.info(
+                "会话标题已更新: trace_id=%s title=%s",
+                trace_id,
+                title,
+            )
+        except Exception:
+            logger.warning(
+                "异步标题生成失败 trace_id=%s",
+                trace_id,
+                exc_info=True,
+            )
 
     @staticmethod
     def _attach_trace_id_to_event(event: Any, trace_id: str | None) -> Any:
@@ -1571,6 +2051,8 @@ class AgentRunner(Runner):
             "turn_id": turn_id,
             "agent_id": self.agent_id,
             "tenant_id": self.tenant_id or "",
+            "source_id": _request_source_id(request),
+            "trace_id": getattr(request, "trace_id", None),
             "transcript_path": (
                 self.session._get_save_path(session_id, user_id)
                 if hasattr(self.session, "_get_save_path")
@@ -1627,6 +2109,34 @@ class AgentRunner(Runner):
             )
             runtime.agent._request_context["hook_overlay"] = dumped
 
+        async def _queue_confirmed_skill_snapshot_update(
+            skill_name: str,
+        ) -> None:
+            if (
+                self.session is None
+                or not runtime.session_id
+                or not hasattr(self.session, "get_session_skill_snapshot")
+                or not hasattr(self.session, "save_session_skill_snapshot")
+            ):
+                return
+
+            skill_dir = (
+                get_workspace_skills_dir(
+                    Path(self.workspace_dir or WORKING_DIR),
+                )
+                / skill_name
+            )
+            if not skill_dir.exists():
+                return
+
+            runtime.pending_confirmed_skill_snapshots[skill_name] = (
+                _build_session_skill_snapshot_entry(
+                    skill_name=skill_name,
+                    resolved_skill_dir=skill_dir,
+                    freshness_token=get_skill_freshness_token(skill_dir),
+                )
+            )
+
         source_id_for_hooks = _request_source_id(request)
         runtime.session_skill_detector = _create_session_skill_detector(
             workspace_dir=Path(self.workspace_dir or WORKING_DIR),
@@ -1642,12 +2152,148 @@ class AgentRunner(Runner):
             ),
             get_hook_state=_get_session_hook_state,
             set_hook_state=_set_session_hook_state,
+            confirmed_skill_callback=(_queue_confirmed_skill_snapshot_update),
         )
         if not hasattr(runtime.agent, "_request_context"):
             runtime.agent._request_context = {}
         runtime.agent._request_context["_skill_invocation_detector"] = (
             runtime.session_skill_detector
         )
+
+        trace_id = getattr(request, "trace_id", None)
+        if trace_id and has_trace_manager():
+            try:
+                trace_mgr = get_trace_manager()
+                runtime.session_skill_detector.set_tracing_context(
+                    trace_mgr,
+                    trace_id,
+                    runtime.user_id,
+                    runtime.session_id,
+                    runtime.channel,
+                    source_id_for_hooks,
+                )
+                from ...tracing import get_current_trace
+
+                trace_ctx = get_current_trace()
+                if trace_ctx and trace_ctx.trace_id == trace_id:
+                    trace_ctx.set_skill_detector(
+                        runtime.session_skill_detector,
+                        (
+                            runtime.agent.get_effective_skills()
+                            if hasattr(runtime.agent, "get_effective_skills")
+                            else []
+                        ),
+                    )
+            except Exception:
+                logger.warning(
+                    "Failed to attach tracing context to session skill detector",
+                    exc_info=True,
+                )
+
+    def _rebind_trace_skill_detector_if_needed(
+        self,
+        *,
+        runtime: _QueryRuntime,
+        trace_id: str | None,
+    ) -> None:
+        """确保 trace context 与会话级 detector 收敛到同一实例。"""
+        if trace_id is None or runtime.session_skill_detector is None:
+            return
+
+        from ...tracing import get_current_trace
+
+        trace_ctx = get_current_trace()
+        if trace_ctx is None or trace_ctx.trace_id != trace_id:
+            return
+        if trace_ctx.skill_detector is runtime.session_skill_detector:
+            return
+
+        enabled_skills = (
+            runtime.agent.get_effective_skills()
+            if hasattr(runtime.agent, "get_effective_skills")
+            else []
+        )
+        trace_ctx.set_skill_detector(
+            runtime.session_skill_detector,
+            enabled_skills,
+        )
+
+    async def _refresh_session_skill_freshness(
+        self,
+        *,
+        runtime: _QueryRuntime,
+    ) -> _SkillFreshnessRefreshResult:
+        if not _supports_session_skill_freshness_refresh(
+            session=self.session,
+            runtime=runtime,
+        ):
+            return _SkillFreshnessRefreshResult()
+
+        stored_snapshot = _normalize_session_skill_snapshot(
+            await self.session.get_session_skill_snapshot(
+                session_id=runtime.session_id,
+                user_id=runtime.user_id,
+                allow_not_exist=True,
+            ),
+        )
+        if not stored_snapshot:
+            return _SkillFreshnessRefreshResult(
+                stored_snapshot={},
+                refreshed_snapshot={},
+            )
+
+        workspace_skills_dir = get_workspace_skills_dir(
+            Path(self.workspace_dir or WORKING_DIR),
+        )
+        effective_skill_dirs = {
+            skill_name: workspace_skills_dir / skill_name
+            for skill_name in runtime.agent.get_effective_skills()
+        }
+
+        next_snapshot = _normalize_session_skill_snapshot(stored_snapshot)
+        changes = _refresh_session_skill_snapshot_entries(
+            next_snapshot,
+            stored_snapshot=stored_snapshot,
+            effective_skill_dirs=effective_skill_dirs,
+        )
+
+        notice_text = (
+            _skill_freshness_notice_text(changes) if changes else None
+        )
+        return _SkillFreshnessRefreshResult(
+            notice_text=notice_text,
+            stored_snapshot=stored_snapshot,
+            refreshed_snapshot=next_snapshot,
+        )
+
+    async def _build_skill_snapshot_to_persist(
+        self,
+        *,
+        runtime: _QueryRuntime,
+        refresh_result: _SkillFreshnessRefreshResult,
+    ) -> dict[str, dict[str, Any]] | None:
+        if (
+            runtime.skip_history
+            or self.session is None
+            or not runtime.session_id
+            or refresh_result.stored_snapshot is None
+            or refresh_result.refreshed_snapshot is None
+        ):
+            return None
+
+        next_snapshot = _normalize_session_skill_snapshot(
+            refresh_result.refreshed_snapshot,
+        )
+        if runtime.pending_confirmed_skill_snapshots:
+            next_snapshot.update(
+                _normalize_session_skill_snapshot(
+                    runtime.pending_confirmed_skill_snapshots,
+                ),
+            )
+
+        if next_snapshot != refresh_result.stored_snapshot:
+            return next_snapshot
+        return None
 
     async def _start_declared_session_skill(
         self,
@@ -1717,6 +2363,17 @@ class AgentRunner(Runner):
             env_context,
             preflight.hook_additional_context,
         )
+        from ..source_system_config.runtime import (
+            get_system_prompt_injections,
+        )
+
+        env_context = _with_system_prompt_injections(
+            env_context,
+            _merge_system_prompt_injections(
+                get_system_prompt_injections(),
+                _request_system_prompt_injections(request),
+            ),
+        )
 
         agent_config = (
             preflight.agent_config
@@ -1748,6 +2405,7 @@ class AgentRunner(Runner):
             mcp_clients = await _build_and_connect_mcp_clients(
                 agent_config.mcp,
                 passthrough_headers=passthrough_headers or None,
+                session_id=session_id,
             )
 
             turn_id = f"turn-{uuid4().hex}"
@@ -1758,6 +2416,12 @@ class AgentRunner(Runner):
                 name=_chat_name_from_messages(msgs),
                 request=request,
                 turn_id=turn_id,
+            )
+            await self._generate_session_title_before_stream(
+                request=request,
+                chat=chat,
+                msgs=msgs,
+                trace_id=getattr(request, "trace_id", None),
             )
             env_context, block_response = await self._emit_session_start_hook(
                 request=request,
@@ -1813,6 +2477,7 @@ class AgentRunner(Runner):
                 user_id=user_id,
                 channel=channel,
                 skip_history=skip_history,
+                pending_confirmed_skill_snapshots={},
             )
             self._attach_session_skill_detector(
                 runtime=runtime,
@@ -2101,12 +2766,15 @@ class AgentRunner(Runner):
         from ...tracing import get_current_trace
 
         ctx = get_current_trace()
-        if ctx and ctx.attached:
+        if ctx and ctx.attached and ctx.trace_id == trace_id:
             logger.debug(
                 "Skip ending attached trace (owned by external): trace_id=%s",
                 trace_id[:20] if trace_id else "(empty)",
             )
-            # 清除 context，让外部创建者可以正确结束
+            from ...tracing import set_current_trace
+
+            # 清除 context，让后续请求不会继承外部 trace。
+            set_current_trace(None)
             return
 
         try:
@@ -2670,6 +3338,7 @@ class AgentRunner(Runner):
         plan: _TurnPlan,
         outcome: _QueryTurnOutcome,
         trace_id: str | None,
+        skill_snapshot_to_persist: dict[str, dict[str, Any]] | None = None,
     ) -> None:
         """执行 agent 输出后的持久化、suggestion 与 trace 收尾。"""
         await self._generate_backend_suggestions_if_needed(
@@ -2685,6 +3354,12 @@ class AgentRunner(Runner):
             trace_id,
             TraceStatus.COMPLETED,
         )
+        if skill_snapshot_to_persist is not None:
+            await self.session.save_session_skill_snapshot(
+                session_id=runtime.session_id,
+                user_id=runtime.user_id,
+                snapshot=skill_snapshot_to_persist,
+            )
 
     async def _finish_blocked_query_attempt(
         self,
@@ -2692,18 +3367,24 @@ class AgentRunner(Runner):
         runtime: _QueryRuntime,
         outcome: _QueryTurnOutcome,
         trace_id: str | None,
+        skill_snapshot_to_persist: dict[str, dict[str, Any]] | None = None,
     ) -> None:
         """BeforeStop 耗尽预算时仍需写入最终输出并结束 trace。"""
-        if not outcome.completion_marked_incomplete:
-            return
-        await self._index_model_output_if_needed(
-            trace_id=trace_id,
-            agent=runtime.agent,
-        )
-        await self._end_trace_if_needed(
-            trace_id,
-            TraceStatus.COMPLETED,
-        )
+        if outcome.completion_marked_incomplete:
+            await self._index_model_output_if_needed(
+                trace_id=trace_id,
+                agent=runtime.agent,
+            )
+            await self._end_trace_if_needed(
+                trace_id,
+                TraceStatus.COMPLETED,
+            )
+        if skill_snapshot_to_persist is not None:
+            await self.session.save_session_skill_snapshot(
+                session_id=runtime.session_id,
+                user_id=runtime.user_id,
+                snapshot=skill_snapshot_to_persist,
+            )
 
     async def _stream_single_query_attempt(
         self,
@@ -2731,7 +3412,11 @@ class AgentRunner(Runner):
             attempt_state.should_return = True
             return
 
-        if attempt_input.trace_id:
+        self._rebind_trace_skill_detector_if_needed(
+            runtime=runtime,
+            trace_id=attempt_input.trace_id,
+        )
+        if attempt_input.trace_id and runtime.session_skill_detector is None:
             await runtime.agent.setup_skill_detector(attempt_input.trace_id)
 
         logger.debug(f"Agent Query msgs {attempt_input.msgs}")
@@ -2745,6 +3430,10 @@ class AgentRunner(Runner):
         retry_state.agent = runtime.agent
         retry_state.session_state_loaded = attempt_state.session_state_loaded
 
+        skill_freshness_refresh = await self._refresh_session_skill_freshness(
+            runtime=runtime,
+        )
+
         # 会话状态可能保存了旧提示词，执行前强制刷新文件态上下文。
         runtime.agent.rebuild_sys_prompt()
 
@@ -2754,6 +3443,11 @@ class AgentRunner(Runner):
             msgs=attempt_input.msgs,
             query=attempt_input.query,
         )
+        if skill_freshness_refresh.notice_text:
+            notice_msg = _build_skill_freshness_notice_msg(
+                skill_freshness_refresh.notice_text,
+            )
+            plan.turn_msgs.insert(0, notice_msg)
 
         async for msg, last in self._stream_completion_lifecycle(
             request=attempt_input.request,
@@ -2763,11 +3457,19 @@ class AgentRunner(Runner):
         ):
             yield msg, last
 
+        skill_snapshot_to_persist = (
+            await self._build_skill_snapshot_to_persist(
+                runtime=runtime,
+                refresh_result=skill_freshness_refresh,
+            )
+        )
+
         if outcome.completion_blocked:
             await self._finish_blocked_query_attempt(
                 runtime=runtime,
                 outcome=outcome,
                 trace_id=attempt_input.trace_id,
+                skill_snapshot_to_persist=skill_snapshot_to_persist,
             )
             attempt_state.should_return = True
             return
@@ -2777,6 +3479,7 @@ class AgentRunner(Runner):
             plan=plan,
             outcome=outcome,
             trace_id=attempt_input.trace_id,
+            skill_snapshot_to_persist=skill_snapshot_to_persist,
         )
         retry_state.task_completed = outcome.task_completed
         attempt_state.succeeded = True
@@ -2797,8 +3500,15 @@ class AgentRunner(Runner):
         )
 
         from ..agent_context import set_current_agent_id
+        from ...config.context import (
+            reset_current_file_url_network,
+            set_current_file_url_network,
+        )
 
         set_current_agent_id(self.agent_id)
+        file_url_network_token = set_current_file_url_network(
+            _request_file_url_network(request),
+        )
 
         trace_id = await self._start_query_trace(request, msgs)
         outcome = _QueryTurnOutcome()
@@ -2888,6 +3598,7 @@ class AgentRunner(Runner):
                     ):
                         yield msg, last
         finally:
+            reset_current_file_url_network(file_url_network_token)
             cleanup_runtime = attempt_state.runtime
             cleanup_state_loaded = attempt_state.session_state_loaded
             if cleanup_runtime is None and retry_state.prev_agent is not None:
@@ -2987,6 +3698,8 @@ class AgentRunner(Runner):
         user_id: str | None,
     ) -> bool:
         # 对于 cron 任务，跳过会话历史加载（不读取旧历史）
+        storage_session_id = _coerce_session_storage_id(session_id)
+        storage_user_id = _coerce_session_storage_user_id(user_id)
         if skip_history:
             logger.info(
                 "Cron task: skipping session state load (session_id=%s)",
@@ -2996,8 +3709,8 @@ class AgentRunner(Runner):
         else:
             try:
                 await self.session.load_session_state(
-                    session_id=session_id,
-                    user_id=user_id,
+                    session_id=storage_session_id,
+                    user_id=storage_user_id,
                     agent=agent,
                 )
             except KeyError as e:
@@ -3017,35 +3730,42 @@ class AgentRunner(Runner):
         hook_overlay: HookSessionOverlay | None = None,
     ) -> None:
         """保存 cron 任务状态，保留旧历史并追加本轮新增消息。"""
-        existing_state = await self.session.get_session_state_dict(
-            session_id=session_id,
-            user_id=user_id,
-            allow_not_exist=True,
-        )
+        storage_session_id = _coerce_session_storage_id(session_id)
+        storage_user_id = _coerce_session_storage_user_id(user_id)
         current_agent_state = agent.state_dict()
-        (
-            merged_state,
-            existing_content,
-            current_content,
-            stripped_count,
-        ) = _build_cron_merged_state(
-            existing_state,
-            current_agent_state,
-            hook_overlay,
+        merge_stats: dict[str, Any] = {}
+
+        def _merge(existing_state: dict[str, Any]) -> dict[str, Any]:
+            (
+                merged_state,
+                existing_content,
+                current_content,
+                stripped_count,
+            ) = _build_cron_merged_state(
+                existing_state,
+                current_agent_state,
+                hook_overlay,
+            )
+            merge_stats["existing_content"] = existing_content
+            merge_stats["current_content"] = current_content
+            merge_stats["stripped_count"] = stripped_count
+            return merged_state
+
+        await self.session.mutate_session_state(
+            session_id=storage_session_id,
+            mutator=_merge,
+            user_id=storage_user_id,
+            create_if_not_exist=True,
         )
-        await self.session.save_merged_state(
-            session_id,
-            user_id=user_id,
-            state=merged_state,
-        )
+
         logger.info(
             "Cron task: saved merged session state "
             "(session_id=%s, existing_memory_content=%s, new_content=%s, "
             "stripped_internal_follow_ups=%s)",
             session_id,
-            len(existing_content),
-            len(current_content),
-            stripped_count,
+            len(merge_stats.get("existing_content", [])),
+            len(merge_stats.get("current_content", [])),
+            merge_stats.get("stripped_count", 0),
         )
 
     async def _save_legacy_session_state(
@@ -3055,23 +3775,22 @@ class AgentRunner(Runner):
         user_id: str | None,
         hook_overlay: HookSessionOverlay | None = None,
     ) -> None:
-        """兼容不支持 save_merged_state 的旧 session 实现。"""
+        """兼容不支持 state_dict 的 agent 落盘路径。"""
+        storage_session_id = _coerce_session_storage_id(session_id)
+        storage_user_id = _coerce_session_storage_user_id(user_id)
         await self.session.save_session_state(
-            session_id=session_id,
-            user_id=user_id,
+            session_id=storage_session_id,
+            user_id=storage_user_id,
             agent=agent,
         )
-        if hook_overlay is None or not hasattr(
-            self.session,
-            "update_session_state",
-        ):
+        if hook_overlay is None:
             return
 
         await self.session.update_session_state(
-            session_id,
+            storage_session_id,
             "hook_overlay",
             hook_overlay.model_dump(mode="json", by_alias=True),
-            user_id=user_id,
+            user_id=storage_user_id,
         )
 
     async def _save_regular_session_state(
@@ -3082,10 +3801,9 @@ class AgentRunner(Runner):
         hook_overlay: HookSessionOverlay | None = None,
     ) -> None:
         """保存普通请求状态，并在落盘前剔除内部续跑提示。"""
-        if not hasattr(agent, "state_dict") or not hasattr(
-            self.session,
-            "save_merged_state",
-        ):
+        storage_session_id = _coerce_session_storage_id(session_id)
+        storage_user_id = _coerce_session_storage_user_id(user_id)
+        if not hasattr(agent, "state_dict"):
             await self._save_legacy_session_state(
                 agent,
                 session_id,
@@ -3094,21 +3812,42 @@ class AgentRunner(Runner):
             )
             return
 
-        state_modules = {
-            "agent": agent.state_dict(),
-        }
-        if hook_overlay is not None:
-            state_modules["hook_overlay"] = hook_overlay.model_dump(
-                mode="json",
-                by_alias=True,
+        current_agent_state = agent.state_dict()
+        stripped_count = 0
+
+        def _merge(existing_state: dict[str, Any]) -> dict[str, Any]:
+            nonlocal stripped_count
+            state_modules: dict[str, Any] = (
+                dict(existing_state)
+                if isinstance(existing_state, dict)
+                else {}
             )
-        stripped_count = _strip_internal_follow_up_messages_from_state(
-            state_modules["agent"],
-        )
-        await self.session.save_merged_state(
-            session_id=session_id,
-            user_id=user_id,
-            state=state_modules,
+            if SESSION_SKILL_SNAPSHOT_STATE_KEY in state_modules:
+                state_modules[SESSION_SKILL_SNAPSHOT_STATE_KEY] = (
+                    _normalize_session_skill_snapshot(
+                        state_modules.get(
+                            SESSION_SKILL_SNAPSHOT_STATE_KEY,
+                        ),
+                    )
+                )
+            state_modules["agent"] = current_agent_state
+            if hook_overlay is not None:
+                state_modules["hook_overlay"] = hook_overlay.model_dump(
+                    mode="json",
+                    by_alias=True,
+                )
+            else:
+                state_modules.pop("hook_overlay", None)
+            stripped_count = _strip_internal_follow_up_messages_from_state(
+                state_modules["agent"],
+            )
+            return state_modules
+
+        await self.session.mutate_session_state(
+            session_id=storage_session_id,
+            mutator=_merge,
+            user_id=storage_user_id,
+            create_if_not_exist=True,
         )
         logger.info(
             "Saved session state with stripped_internal_follow_ups=%s "
@@ -3162,28 +3901,16 @@ class AgentRunner(Runner):
         if not hasattr(self, "session") or self.session is None:
             return
 
+        storage_session_id = _coerce_session_storage_id(session_id)
+        storage_user_id = _coerce_session_storage_user_id(user_id)
         path = self.session._get_save_path(  # pylint: disable=protected-access
-            session_id,
-            user_id,
+            storage_session_id,
+            storage_user_id,
         )
         if not Path(path).exists():
             return
 
         try:
-            with open(
-                path,
-                "r",
-                encoding="utf-8",
-                errors="surrogatepass",
-            ) as f:
-                states = json.load(f)
-
-            agent_state = states.get("agent", {})
-            memory_state = agent_state.get("memory", {})
-            content = memory_state.get("content", [])
-
-            if not content:
-                return
 
             def _is_marked(entry):
                 return (
@@ -3194,57 +3921,74 @@ class AgentRunner(Runner):
                 )
 
             last_marked_idx = -1
-            for i, entry in enumerate(content):
-                if _is_marked(entry):
-                    last_marked_idx = i
-
             modified = False
 
-            if last_marked_idx >= 0 and last_marked_idx + 1 < len(content):
-                next_entry = content[last_marked_idx + 1]
-                if (
-                    isinstance(next_entry, list)
-                    and len(next_entry) >= 1
-                    and isinstance(next_entry[0], dict)
-                    and next_entry[0].get("role") == "assistant"
-                ):
-                    del content[last_marked_idx + 1]
+            def _cleanup_state(states: dict[str, Any]) -> dict[str, Any]:
+                nonlocal modified, last_marked_idx
+                agent_state = states.get("agent", {})
+                if not isinstance(agent_state, dict):
+                    return states
+
+                memory_state = agent_state.get("memory", {})
+                if not isinstance(memory_state, dict):
+                    return states
+
+                content = memory_state.get("content", [])
+                if not isinstance(content, list) or not content:
+                    return states
+
+                for i, entry in enumerate(content):
+                    if _is_marked(entry):
+                        last_marked_idx = i
+
+                if last_marked_idx >= 0 and last_marked_idx + 1 < len(content):
+                    next_entry = content[last_marked_idx + 1]
+                    if (
+                        isinstance(next_entry, list)
+                        and len(next_entry) >= 1
+                        and isinstance(next_entry[0], dict)
+                        and next_entry[0].get("role") == "assistant"
+                    ):
+                        del content[last_marked_idx + 1]
+                        modified = True
+
+                for entry in content:
+                    if _is_marked(entry):
+                        entry[1].remove(TOOL_GUARD_DENIED_MARK)
+                        modified = True
+
+                if denial_response is not None:
+                    ts = getattr(denial_response, "timestamp", None)
+                    msg_dict = {
+                        "id": getattr(denial_response, "id", ""),
+                        "name": getattr(denial_response, "name", "Friday"),
+                        "role": getattr(denial_response, "role", "assistant"),
+                        "content": denial_response.content,
+                        "metadata": getattr(
+                            denial_response,
+                            "metadata",
+                            None,
+                        ),
+                        "timestamp": str(ts) if ts is not None else "",
+                    }
+                    content.append([msg_dict, []])
                     modified = True
 
-            for entry in content:
-                if _is_marked(entry):
-                    entry[1].remove(TOOL_GUARD_DENIED_MARK)
-                    modified = True
+                return states
 
-            if denial_response is not None:
-                ts = getattr(denial_response, "timestamp", None)
-                msg_dict = {
-                    "id": getattr(denial_response, "id", ""),
-                    "name": getattr(denial_response, "name", "Friday"),
-                    "role": getattr(denial_response, "role", "assistant"),
-                    "content": denial_response.content,
-                    "metadata": getattr(
-                        denial_response,
-                        "metadata",
-                        None,
-                    ),
-                    "timestamp": str(ts) if ts is not None else "",
-                }
-                content.append([msg_dict, []])
-                modified = True
+            await self.session.mutate_session_state(
+                session_id=storage_session_id,
+                mutator=_cleanup_state,
+                user_id=storage_user_id,
+                create_if_not_exist=False,
+            )
 
-            if modified:
-                with open(
-                    path,
-                    "w",
-                    encoding="utf-8",
-                    errors="surrogatepass",
-                ) as f:
-                    json.dump(states, f, ensure_ascii=False)
-                logger.info(
-                    "Tool guard: cleaned up denied session memory in %s",
-                    path,
-                )
+            if not modified:
+                return
+            logger.info(
+                "Tool guard: cleaned up denied session memory in %s",
+                path,
+            )
         except Exception:  # pylint: disable=broad-except
             logger.warning(
                 "Failed to clean up denied messages from session %s",

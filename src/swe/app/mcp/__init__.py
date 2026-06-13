@@ -16,6 +16,7 @@ from agentscope.mcp._client_base import MCPClientBase
 from agentscope.mcp._mcp_function import MCPToolFunction
 from agentscope.tool import ToolResponse
 from mcp import ClientSession as _CS
+from ...agents.tool_failure import build_structured_failure_output
 from ...config.context import get_current_effective_tenant_id
 from ...constant import (
     MCP_MAX_TOTAL_TIMEOUT,
@@ -170,8 +171,14 @@ async def _call_with_progress(
         as_content = MCPClientBase._convert_mcp_content_to_as_blocks(
             res.content,
         )
+        content: Any = as_content
+        if getattr(res, "isError", False):
+            content = build_structured_failure_output(
+                error_type="mcp_tool_error",
+                content=as_content,
+            )
         yield ToolResponse(
-            content=as_content,
+            content=content,
             metadata=res.meta,
             stream=True,
             is_last=True,

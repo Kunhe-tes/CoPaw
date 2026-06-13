@@ -32,7 +32,13 @@ vi.mock("../RuntimeRequestCard", () => ({
 }));
 
 vi.mock("../RuntimeResponseCard", () => ({
-  default: ({ data }: { data: MockResponseData }) => {
+  default: ({
+    data,
+    showFeedback,
+  }: {
+    data: MockResponseData;
+    showFeedback?: boolean;
+  }) => {
     const firstContent = data.output?.[0]?.content?.[0];
     const output = data.output || [];
     return (
@@ -41,6 +47,7 @@ vi.mock("../RuntimeResponseCard", () => ({
         data-output-count={output.length}
         data-output-ids={output.map((item) => item.id).join(",")}
         data-output-types={output.map((item) => item.type).join(",")}
+        data-show-feedback={String(showFeedback)}
         data-testid={`response-${data.id}`}
       >
         {data.id}
@@ -231,6 +238,10 @@ describe("TaskRunGroupCard", () => {
     );
 
     expect(screen.getByTestId("response-preview-response")).toBeInTheDocument();
+    expect(screen.getByTestId("response-preview-response")).toHaveAttribute(
+      "data-show-feedback",
+      "true",
+    );
     expect(screen.queryByTestId("response-final-response")).toBeNull();
     expect(screen.queryByTestId("response-step-response")).toBeNull();
     expect(screen.queryByTestId("task-run-steps")).toBeNull();
@@ -243,6 +254,10 @@ describe("TaskRunGroupCard", () => {
     expect(getStepResponseIds()).toEqual([
       "response-step-response",
     ]);
+    expect(screen.getByTestId("response-step-response")).toHaveAttribute(
+      "data-show-feedback",
+      "false",
+    );
     expect(screen.getByTestId("response-step-response")).toHaveAttribute(
       "data-output-ids",
       "step-response-message,preview-response-message,final-response-message",

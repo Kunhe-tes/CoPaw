@@ -24,21 +24,39 @@ logger = logging.getLogger(__name__)
 _MAX_JOBDESC_CHARS = 200
 _MAX_GLUEREMARK_CHARS = 60
 _SCHEDULER_DOW_NUMBERS = {
-    "mon": "1",
-    "tue": "2",
-    "wed": "3",
-    "thu": "4",
-    "fri": "5",
-    "sat": "6",
-    "sun": "7",
-    "0": "7",
-    "1": "1",
-    "2": "2",
-    "3": "3",
-    "4": "4",
-    "5": "5",
-    "6": "6",
-    "7": "7",
+    "sun": "1",
+    "mon": "2",
+    "tue": "3",
+    "wed": "4",
+    "thu": "5",
+    "fri": "6",
+    "sat": "7",
+    "0": "1",
+    "1": "2",
+    "2": "3",
+    "3": "4",
+    "4": "5",
+    "5": "6",
+    "6": "7",
+    "7": "1",
+}
+_CRONTAB_DOW_ORDER = ("mon", "tue", "wed", "thu", "fri", "sat", "sun")
+_CRONTAB_DOW_NAMES = {
+    "mon": "mon",
+    "tue": "tue",
+    "wed": "wed",
+    "thu": "thu",
+    "fri": "fri",
+    "sat": "sat",
+    "sun": "sun",
+    "0": "sun",
+    "1": "mon",
+    "2": "tue",
+    "3": "wed",
+    "4": "thu",
+    "5": "fri",
+    "6": "sat",
+    "7": "sun",
 }
 
 
@@ -61,11 +79,37 @@ def _normalize_scheduler_dow_token(token: str) -> str:
         return f"{_normalize_scheduler_dow_token(base)}/{step}"
     if "-" in token:
         start, end = token.split("-", 1)
+        scheduler_range = _normalize_scheduler_dow_range(start, end)
+        if scheduler_range is not None:
+            return scheduler_range
         return (
             f"{_normalize_scheduler_dow_value(start)}-"
             f"{_normalize_scheduler_dow_value(end)}"
         )
     return _normalize_scheduler_dow_value(token)
+
+
+def _normalize_scheduler_dow_range(start: str, end: str) -> str | None:
+    """将内部星期范围转换为外部平台范围，跨周日时展开成列表。"""
+    start_name = _CRONTAB_DOW_NAMES.get(start.lower())
+    end_name = _CRONTAB_DOW_NAMES.get(end.lower())
+    if start_name is None or end_name is None:
+        return None
+
+    start_index = _CRONTAB_DOW_ORDER.index(start_name)
+    end_index = _CRONTAB_DOW_ORDER.index(end_name)
+    if start_index > end_index:
+        return None
+
+    scheduler_values = [
+        _SCHEDULER_DOW_NUMBERS[name]
+        for name in _CRONTAB_DOW_ORDER[start_index : end_index + 1]
+    ]
+    first = int(scheduler_values[0])
+    last = int(scheduler_values[-1])
+    if first <= last:
+        return f"{first}-{last}"
+    return ",".join(scheduler_values)
 
 
 def _normalize_scheduler_dow(field: str) -> str:

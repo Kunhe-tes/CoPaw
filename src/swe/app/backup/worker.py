@@ -13,10 +13,12 @@ from datetime import datetime
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
-from swe.constant import SECRET_DIR, WORKING_DIR
+from swe.constant import WORKING_DIR
 from swe.config.utils import (
     get_tenant_working_dir,
-    get_tenant_secrets_dir,
+    get_tenant_storage_providers_dir,
+    get_tenant_storage_secrets_dir,
+    get_tenant_storage_working_dir,
     list_all_tenant_ids,
 )
 
@@ -461,7 +463,7 @@ class BackupWorker:
                 )
 
                 # 2. Compress tenant secrets (WORKING_DIR / tenant_id / ".secret")
-                secrets_dir = get_tenant_secrets_dir(tenant_id)
+                secrets_dir = get_tenant_storage_secrets_dir(tenant_id)
                 if secrets_dir.exists():
                     _compress_directory(
                         zf,
@@ -472,7 +474,7 @@ class BackupWorker:
                     )
 
                 # 3. Compress provider configs (SECRET_DIR / tenant_id / providers)
-                provider_dir = SECRET_DIR / tenant_id / "providers"
+                provider_dir = get_tenant_storage_providers_dir(tenant_id)
                 if provider_dir.exists():
                     _compress_directory(
                         zf,
@@ -563,7 +565,7 @@ class BackupWorker:
                 compresslevel=1,
             ) as zf:
                 _compress_directory(zf, tenant_dir, tenant_dir)
-                secrets_dir = get_tenant_secrets_dir(tenant_id)
+                secrets_dir = get_tenant_storage_secrets_dir(tenant_id)
                 if secrets_dir.exists():
                     _compress_directory(
                         zf,
@@ -571,7 +573,7 @@ class BackupWorker:
                         secrets_dir,
                         prefix=".secret/",
                     )
-                provider_dir = SECRET_DIR / tenant_id / "providers"
+                provider_dir = get_tenant_storage_providers_dir(tenant_id)
                 if provider_dir.exists():
                     _compress_directory(
                         zf,
@@ -603,10 +605,10 @@ class BackupWorker:
 
         def _do_extract():
             target_dir.mkdir(parents=True, exist_ok=True)
-            secrets_dir = get_tenant_secrets_dir(tenant_id)
+            secrets_dir = get_tenant_storage_secrets_dir(tenant_id)
             secrets_dir.mkdir(parents=True, exist_ok=True)
 
-            provider_dir = SECRET_DIR / tenant_id / "providers"
+            provider_dir = get_tenant_storage_providers_dir(tenant_id)
             provider_dir.mkdir(parents=True, exist_ok=True)
 
             with zipfile.ZipFile(zip_path, "r") as zf:

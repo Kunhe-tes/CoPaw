@@ -1,6 +1,11 @@
 import { describe, expect, it } from "vitest";
 import type { CronJobSpecOutput } from "../../api/types";
-import { getTaskSidebarMeta } from "./taskJobs";
+import {
+  getTaskNextRunTooltipText,
+  getTaskNextRunTooltipTimes,
+  getTaskSidebarMeta,
+  partitionTasksByPauseState,
+} from "./taskJobs";
 
 function taskJob(
   overrides: Partial<CronJobSpecOutput> = {},
@@ -93,5 +98,105 @@ describe("getTaskSidebarMeta", () => {
     expect(meta.canRun).toBe(false);
     expect(meta.canResume).toBe(false);
     expect(meta.canDelete).toBe(false);
+  });
+});
+
+describe("partitionTasksByPauseState", () => {
+  it("keeps runnable and paused task order stable", () => {
+    const active = taskJob({ id: "active" });
+    const manualPaused = taskJob({
+      id: "manual-paused",
+      task: {
+        visible_in_my_tasks: true,
+        has_scheduled_result: false,
+        latest_scheduled_preview: "",
+        unread_execution_count: 0,
+        is_running: false,
+        is_paused: true,
+        pause_reason: "manual",
+      },
+    });
+    const running = taskJob({
+      id: "running",
+      task: {
+        visible_in_my_tasks: true,
+        has_scheduled_result: false,
+        latest_scheduled_preview: "",
+        unread_execution_count: 0,
+        is_running: true,
+        is_paused: false,
+        pause_reason: null,
+      },
+    });
+    const autoPaused = taskJob({
+      id: "auto-paused",
+      task: {
+        visible_in_my_tasks: true,
+        has_scheduled_result: false,
+        latest_scheduled_preview: "",
+        unread_execution_count: 3,
+        is_running: false,
+        is_paused: true,
+        pause_reason: "auto_unread_threshold",
+      },
+    });
+
+    const groups = partitionTasksByPauseState([
+      active,
+      manualPaused,
+      running,
+      autoPaused,
+    ]);
+
+    expect(groups.runnableTasks.map((task) => task.id)).toEqual([
+      "active",
+      "running",
+    ]);
+    expect(groups.pausedTasks.map((task) => task.id)).toEqual([
+      "manual-paused",
+      "auto-paused",
+    ]);
+  });
+
+  it("returns empty groups for an empty collection", () => {
+    expect(partitionTasksByPauseState([])).toEqual({
+      runnableTasks: [],
+      pausedTasks: [],
+    });
+  });
+});
+
+describe("getTaskNextRunTooltipText", () => {
+  it("shows the next three run times from state", () => {
+    const job = taskJob({
+      state: {
+        next_run_at: "2026-06-04T01:00:00Z",
+        next_run_times: [
+          "2026-06-04T01:00:00Z",
+          "2026-06-05T01:00:00Z",
+          "2026-06-06T01:00:00Z",
+          "2026-06-07T01:00:00Z",
+        ],
+      },
+    });
+    const tooltip = getTaskNextRunTooltipText(job);
+
+    expect(tooltip?.split("\n")).toHaveLength(4);
+    expect(tooltip).toContain("之后三次运行时间");
+    expect(tooltip).not.toContain("06-07");
+    expect(getTaskNextRunTooltipTimes(job)).toHaveLength(3);
+  });
+
+  it("falls back to next_run_at when next_run_times is absent", () => {
+    const tooltip = getTaskNextRunTooltipText(
+      taskJob({
+        state: {
+          next_run_at: "2026-06-04T01:00:00Z",
+        },
+      }),
+    );
+
+    expect(tooltip).toContain("之后三次运行时间");
+    expect(tooltip).toContain("06-04");
   });
 });

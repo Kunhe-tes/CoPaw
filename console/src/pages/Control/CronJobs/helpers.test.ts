@@ -63,6 +63,19 @@ describe("CronJobs helpers", () => {
     expect(result.cronDaysOfWeek).toEqual(["mon", "wed"]);
   });
 
+  it("hydrates notification delay as hours when stored minutes divide by 60", () => {
+    const result = buildCronJobFormValues(
+      buildCronJob({
+        meta: {
+          notification_delay_minutes: 120,
+        },
+      }),
+    );
+
+    expect(result.notificationDelayValue).toBe(2);
+    expect(result.notificationDelayUnit).toBe("hours");
+  });
+
   it("builds submit payload with explicit model_slot for agent jobs", () => {
     const result = buildCronJobSubmitPayload({
       ...buildCronJob(),
@@ -70,6 +83,8 @@ describe("CronJobs helpers", () => {
       cronTime: dayjs().hour(8).minute(30),
       cronDaysOfWeek: ["mon", "fri"],
       execution_model_key: "openai::gpt-5.4",
+      notificationDelayValue: 2,
+      notificationDelayUnit: "hours",
       request: {
         input: JSON.stringify([{ role: "user", content: [] }]),
       },
@@ -80,6 +95,7 @@ describe("CronJobs helpers", () => {
       provider_id: "openai",
       model: "gpt-5.4",
     });
+    expect(result.meta?.notification_delay_minutes).toBe(120);
     expect(result.request?.input).toEqual([{ role: "user", content: [] }]);
   });
 

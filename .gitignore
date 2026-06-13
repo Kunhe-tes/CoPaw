@@ -89,6 +89,7 @@ CLAUDE.md
 .claude
 .codex
 *.tmp
+skills-lock.json
 
 # Build cache
 .cache/  # Includes conda_unpack_wheels/ for Windows packaging workaround

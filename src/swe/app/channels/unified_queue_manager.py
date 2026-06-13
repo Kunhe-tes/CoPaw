@@ -326,6 +326,35 @@ class UnifiedQueueManager:
 
         return cleared_count
 
+    async def cancel_channel(self, channel_id: str) -> int:
+        """Cancel and remove all queues owned by a channel."""
+        async with self._lock:
+            matched = [
+                (key, state)
+                for key, state in self._queues.items()
+                if key[0] == channel_id
+            ]
+            for key, _ in matched:
+                self._queues.pop(key, None)
+
+        if not matched:
+            return 0
+
+        for _, state in matched:
+            state.consumer_task.cancel()
+
+        await asyncio.gather(
+            *(state.consumer_task for _, state in matched),
+            return_exceptions=True,
+        )
+
+        logger.info(
+            "Cancelled %d queue(s) for channel=%s",
+            len(matched),
+            channel_id,
+        )
+        return len(matched)
+
     async def stop_all(self) -> None:
         """Stop all consumers and cleanup task gracefully.
 

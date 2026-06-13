@@ -1,7 +1,10 @@
 import { useCallback } from "react";
 import ReactDOM from "react-dom";
 import { useChatAnywhereSessions } from "../../Context/ChatAnywhereSessionsContext";
-import { IAgentScopeRuntimeWebUIMessage } from "@/components/agentscope-chat";
+import {
+  IAgentScopeRuntimeWebUIMessage,
+  IAgentScopeRuntimeWebUISessionUpdateOptions,
+} from "@/components/agentscope-chat";
 
 /**
  * 处理会话创建和更新的 Hook
@@ -55,6 +58,7 @@ export default function useChatSessionHandler() {
       sessionId: string | undefined,
       messages: IAgentScopeRuntimeWebUIMessage[],
       generating?: boolean,
+      options?: IAgentScopeRuntimeWebUISessionUpdateOptions,
     ) => {
       if (!sessionId) {
         return;
@@ -64,7 +68,7 @@ export default function useChatSessionHandler() {
         id: sessionId,
         messages,
         ...(typeof generating === "boolean" ? { generating } : {}),
-      });
+      }, options);
     },
     [updateSession],
   );

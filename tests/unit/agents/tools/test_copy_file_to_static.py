@@ -15,10 +15,14 @@ from swe.agents.tools.copy_file_to_static import copy_file_to_static
 from swe.app.agent_context import set_current_agent_id
 from swe.config.context import (
     encode_scope_id,
+    get_current_file_url_network,
+    reset_current_file_url_network,
     reset_current_scope_id,
     reset_current_source_id,
     reset_current_user_id,
     reset_current_workspace_dir,
+    resolve_file_url_base,
+    set_current_file_url_network,
     set_current_scope_id,
     set_current_source_id,
     set_current_user_id,
@@ -83,3 +87,89 @@ async def test_copy_file_to_static_returns_scope_static_url(
 
     assert response.status_code == 200
     assert response.text == "<p>ok</p>"
+
+
+def test_resolve_file_url_base_defaults_to_office(monkeypatch) -> None:
+    monkeypatch.delenv("FILE_URL_OFFICE", raising=False)
+    monkeypatch.delenv("FILE_URL_BUSINESS", raising=False)
+    monkeypatch.setenv("FILE_URL", "https://legacy.example/")
+
+    base_url, network = resolve_file_url_base(None)
+
+    assert base_url == "https://legacy.example"
+    assert network == "office"
+
+
+def test_resolve_file_url_base_uses_business_when_configured(
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv("FILE_URL_OFFICE", "https://office.example/")
+    monkeypatch.setenv("FILE_URL_BUSINESS", "https://business.example/")
+
+    base_url, network = resolve_file_url_base("business")
+
+    assert base_url == "https://business.example"
+    assert network == "business"
+
+
+def test_resolve_file_url_base_falls_back_to_office_for_invalid_network(
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv("FILE_URL_OFFICE", "https://office.example/")
+    monkeypatch.setenv("FILE_URL_BUSINESS", "https://business.example/")
+
+    base_url, network = resolve_file_url_base("invalid")
+
+    assert base_url == "https://office.example"
+    assert network == "office"
+
+
+def test_resolve_file_url_base_falls_back_to_office_when_business_missing(
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv("FILE_URL_OFFICE", "https://office.example/")
+    monkeypatch.delenv("FILE_URL_BUSINESS", raising=False)
+
+    base_url, network = resolve_file_url_base("business")
+
+    assert base_url == "https://office.example"
+    assert network == "office"
+
+
+@pytest.mark.asyncio
+async def test_copy_file_to_static_returns_business_url_from_context(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    source_file = tmp_path / "report.html"
+    source_file.write_text("<p>business</p>", encoding="utf-8")
+    scope_id = encode_scope_id("alice", "portal")
+    workspace_dir = tmp_path / scope_id / "workspaces" / "agent-a"
+    monkeypatch.setenv("FILE_URL_OFFICE", "https://office.example/")
+    monkeypatch.setenv("FILE_URL_BUSINESS", "https://business.example/")
+    set_current_agent_id("agent-a")
+
+    user_token = set_current_user_id("alice")
+    source_token = set_current_source_id("portal")
+    scope_token = set_current_scope_id(scope_id)
+    workspace_token = set_current_workspace_dir(workspace_dir)
+    network_token = set_current_file_url_network("business")
+    try:
+        response = await copy_file_to_static(str(source_file))
+    finally:
+        reset_current_file_url_network(network_token)
+        reset_current_workspace_dir(workspace_token)
+        reset_current_scope_id(scope_token)
+        reset_current_source_id(source_token)
+        reset_current_user_id(user_token)
+        set_current_agent_id("default")
+
+    payload = _tool_payload(response)
+
+    assert payload["ok"] is True
+    assert payload["url"].startswith(
+        f"https://business.example/static/{scope_id}/agent-a/",
+    )
+    assert payload["network"] == "business"
+    assert payload["path"] == f"![report.html]({payload['url']})"
+    assert get_current_file_url_network() == "office"

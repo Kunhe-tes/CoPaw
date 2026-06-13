@@ -1,7 +1,10 @@
 # Source-Scoped Runtime Isolation
 
+## Purpose
+Define source-scoped runtime isolation so tenant-scoped state, runtime helpers,
+and background execution paths consistently isolate local state by resolved
+`scope_id` rather than logical tenant identity alone.
 ## Requirements
-
 ### Requirement: Scoped runtime identity SHALL combine source and logical tenant
 The system SHALL derive a runtime `scope_id` from `source_id` and logical
 `tenant_id` for every tenant-scoped execution path. The runtime `scope_id`
@@ -77,8 +80,9 @@ flows that access tenant-scoped state.
   tenant-only fallback or from opaque local state
 
 ### Requirement: Tenant-scoped helpers SHALL resolve local state by scope
-Any helper that resolves tenant-scoped local paths or configuration SHALL use
-runtime scope identity rather than logical tenant identity.
+The system SHALL make any helper that resolves tenant-scoped local paths,
+configuration, or runtime environment values use runtime scope identity rather
+than logical tenant identity.
 
 #### Scenario: Router resolves settings or envs path
 - **WHEN** a router resolves tenant-scoped settings, envs, providers, config,
@@ -91,6 +95,13 @@ runtime scope identity rather than logical tenant identity.
 - **THEN** provider storage SHALL be isolated by `scope_id`
 - **AND** source scoping SHALL apply uniformly to every tenant, not only to the
   logical `default` tenant
+
+#### Scenario: Runtime resolves persisted tenant env values
+- **WHEN** shell execution, command hook execution, MCP stdio launch, or another
+  subprocess runtime reads tenant-scoped env values
+- **THEN** the lookup SHALL use the current runtime `scope_id`
+- **AND** the lookup SHALL NOT use logical `tenant_id` as the local-state
+  isolation key for scoped requests
 
 ### Requirement: Temporary session and chat stores SHALL isolate by scope-aware keys
 Temporary stores for scoped runtime data SHALL use keys that include runtime
@@ -163,3 +174,4 @@ scope-aware traffic after cutover.
 - **WHEN** a stale tenant-only runtime cache entry exists for a logical tenant
 - **THEN** scoped traffic for the same logical tenant but a different source
   SHALL NOT reuse that entry
+

@@ -55,6 +55,9 @@ export interface TaskStatusSummary {
   cancelled: number;
   read_count: number;
   new_cron_tasks: number;
+  // 点击数统计
+  click_count: number;
+  click_by_button_type: Record<string, number>;
 }
 
 export interface DepthSummary {
@@ -169,6 +172,10 @@ export interface UserListItem {
   total_conversations: number;
   total_tokens: number;
   last_active: string | null;
+  // 三种口径统计字段
+  manual_calls: number;
+  cron_executions: number;
+  cron_reads: number;
 }
 
 export interface TraceListItem {
@@ -401,6 +408,7 @@ export const tracingApi = {
       sort_by?: string;
       filter_user_type?: string;
       bbk_ids?: string;
+      metric_type?: string;
     },
   ): Promise<{
     items: UserListItem[];
@@ -415,6 +423,9 @@ export const tracingApi = {
       Object.entries(filters).forEach(([key, value]) => {
         // filter_user_type 需要传递 "all" 或 "filtered"
         if (key === "filter_user_type") {
+          if (value) params.append(key, value);
+        } else if (key === "metric_type") {
+          // metric_type 需要传递口径类型
           if (value) params.append(key, value);
         } else if (value && value !== "all") {
           params.append(key, value);

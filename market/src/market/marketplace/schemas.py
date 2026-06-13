@@ -21,6 +21,7 @@ class PublishSkillRequest(BaseModel):
     # 可选：指定用户技能目录名，用于同步整个目录
     skill_name: Optional[str] = None
     agent_id: str = "default"
+    overwrite: bool = False
 
 
 class DistributeRequest(BaseModel):
@@ -239,6 +240,8 @@ class PublishMCPRequest(BaseModel):
     category_id: Optional[int] = None
     bbk_ids: list[str] = Field(default_factory=list)
     config: dict
+    overwrite: bool = False
+    version: str = ""  # 发布者本地版本号，首次发布时作为市场条目初始版本
 
 
 class UploadMCPResponse(BaseModel):

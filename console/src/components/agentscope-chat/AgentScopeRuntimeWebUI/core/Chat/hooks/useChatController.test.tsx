@@ -212,6 +212,7 @@ describe("useChatController", () => {
       "chat-a",
       [{ id: "message-1" }],
       false,
+      { refreshList: false },
     );
   });
 
@@ -283,6 +284,7 @@ describe("useChatController", () => {
       "chat-b",
       [{ id: "message-1" }],
       false,
+      { refreshList: false },
     );
   });
 });

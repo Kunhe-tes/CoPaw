@@ -11,6 +11,7 @@ export {
   Radio,
   Select,
   Switch,
+  Table,
   Tooltip,
   message,
 } from "antd";

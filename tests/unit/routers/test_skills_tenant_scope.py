@@ -340,9 +340,11 @@ def test_list_broadcast_tenants_returns_discovered_tenant_ids(
         _source_id=None,
         *,
         source_filter=False,
+        include_templates=False,
     ):
+        assert include_templates is True
         del source_filter
-        return ["default", "tenant-a", "tenant-b"]
+        return ["default_ruice", "tenant-a", "tenant-b"]
 
     monkeypatch.setattr(
         skills_router,
@@ -352,7 +354,7 @@ def test_list_broadcast_tenants_returns_discovered_tenant_ids(
 
     result = asyncio.run(skills_router.list_broadcast_tenants(_request()))
 
-    assert result.tenant_ids == ["default", "tenant-a", "tenant-b"]
+    assert result.tenant_ids == ["default_ruice", "tenant-a", "tenant-b"]
 
 
 def test_list_broadcast_tenants_uses_source_scoped_logical_ids(
@@ -364,10 +366,12 @@ def test_list_broadcast_tenants_uses_source_scoped_logical_ids(
         source_id: str | None = None,
         *,
         source_filter: bool = False,
+        include_templates: bool = False,
     ) -> list[str]:
+        assert include_templates is True
         del source_filter
         observed.append(source_id)
-        return ["default", "tenant-a"]
+        return ["default_ruice", "tenant-a"]
 
     monkeypatch.setattr(
         skills_router,
@@ -380,7 +384,7 @@ def test_list_broadcast_tenants_uses_source_scoped_logical_ids(
     )
 
     assert observed == ["ruice"]
-    assert result.tenant_ids == ["default", "tenant-a"]
+    assert result.tenant_ids == ["default_ruice", "tenant-a"]
 
 
 def test_list_workspace_skill_sources_uses_effective_tenant_id(

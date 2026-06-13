@@ -11,6 +11,7 @@ from agentscope.memory import InMemoryMemory
 from .session import SafeJSONSession
 from .manager import ChatManager
 from .models import (
+    ChatPage,
     ChatSpec,
     ChatHistory,
     ChatMessage,
@@ -356,22 +357,84 @@ async def get_session(
     return workspace.runner.session
 
 
-@router.get("", response_model=list[ChatSpec])
+@router.get("", response_model=list[ChatSpec] | ChatPage)
 async def list_chats(
     user_id: Optional[str] = Query(None, description="Filter by user ID"),
     channel: Optional[str] = Query(None, description="Filter by channel"),
+    page: Optional[int] = Query(None, ge=1, description="Page number"),
+    page_size: Optional[int] = Query(
+        None,
+        ge=1,
+        le=100,
+        description="Chats per page (maximum 100)",
+    ),
+    cursor: Optional[str] = Query(
+        None,
+        description="Opaque cursor for stable chat pagination",
+    ),
     mgr: ChatManager = Depends(get_chat_manager),
     workspace=Depends(get_workspace),
 ):
-    """List all chats with optional filters.
+    """List chats with optional filters and opt-in pagination.
+
+    Omitting both pagination parameters preserves the legacy array response.
+    Providing both returns a ``ChatPage`` ordered by latest update first.
 
     Args:
         user_id: Optional user ID to filter chats
         channel: Optional channel name to filter chats
+        page: Optional page number, paired with page_size
+        page_size: Optional page size, paired with page
         mgr: Chat manager dependency
     """
-    chats = await mgr.list_chats(user_id=user_id, channel=channel)
+    cursor_mode = cursor is not None
+    if cursor_mode and page is not None:
+        raise HTTPException(
+            status_code=422,
+            detail="page cannot be combined with cursor pagination",
+        )
+    if cursor_mode and page_size is None:
+        raise HTTPException(
+            status_code=422,
+            detail="page_size is required with cursor pagination",
+        )
+    if not cursor_mode and (page is None) != (page_size is None):
+        raise HTTPException(
+            status_code=422,
+            detail="page and page_size must be provided together",
+        )
+
     tracker = workspace.task_tracker
+    if cursor_mode and page_size is not None:
+        try:
+            chat_page = await mgr.list_chats_cursor(
+                user_id=user_id,
+                channel=channel,
+                page_size=page_size,
+                cursor=cursor or None,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        items = []
+        for spec in chat_page.items:
+            status = await tracker.get_status(spec.id)
+            items.append(spec.model_copy(update={"status": status}))
+        return chat_page.model_copy(update={"items": items})
+
+    if page is not None and page_size is not None:
+        chat_page = await mgr.list_chats_page(
+            user_id=user_id,
+            channel=channel,
+            page=page,
+            page_size=page_size,
+        )
+        items = []
+        for spec in chat_page.items:
+            status = await tracker.get_status(spec.id)
+            items.append(spec.model_copy(update={"status": status}))
+        return chat_page.model_copy(update={"items": items})
+
+    chats = await mgr.list_chats(user_id=user_id, channel=channel)
     result = []
     for spec in chats:
         status = await tracker.get_status(spec.id)
@@ -460,7 +523,11 @@ async def get_chat(
     status = await workspace.task_tracker.get_status(chat_id)
     task_messages = _task_session_messages_from_state(state)
     if not state:
-        return ChatHistory(messages=task_messages, status=status)
+        return ChatHistory(
+            chat=chat_spec,
+            messages=task_messages,
+            status=status,
+        )
     memory_state = state.get("agent", {}).get("memory", {})
     messages: list[ChatMessage] = []
     if memory_state:
@@ -478,7 +545,7 @@ async def get_chat(
     messages.extend(task_messages)
     messages.sort(key=_message_sort_key)
     messages = await _annotate_approval_action_statuses(messages)
-    return ChatHistory(messages=messages, status=status)
+    return ChatHistory(chat=chat_spec, messages=messages, status=status)
 
 
 @router.put("/{chat_id}", response_model=ChatSpec)

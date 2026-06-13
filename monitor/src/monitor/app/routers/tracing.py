@@ -153,13 +153,17 @@ async def get_users(
     end_date: Optional[str] = Query(None, description="结束日期 (YYYY-MM-DD)"),
     sort_by: Optional[str] = Query(
         None,
-        description="排序字段: conversations, last_active",
+        description="排序字段: manual_calls, cron_executions, cron_reads, last_active",
     ),
     filter_user_type: Optional[str] = Query(
         "filtered",
         description="用户过滤类型: filtered(过滤80/IT开头用户), all(仅过滤default用户)",
     ),
     bbk_ids: Optional[str] = Query(None, description="按分行号筛选"),
+    metric_type: Optional[str] = Query(
+        "manual",
+        description="口径类型: manual(主动使用), cron_exec(定时执行), cron_read(结果查看)",
+    ),
 ) -> dict:
     """获取用户列表及其统计信息.
 
@@ -169,8 +173,9 @@ async def get_users(
         user_id: 按用户 ID 筛选
         start_date: 开始日期筛选
         end_date: 结束日期筛选
-        sort_by: 排序字段（conversations, last_active）
-        filter_user_type: 用户过滤类型（filtered/all）
+        sort_by: 排序字段
+        filter_user_type: 用户过滤类型
+        metric_type: 口径类型（manual/cron_exec/cron_read）
 
     Returns:
         分页的用户列表及统计信息
@@ -191,12 +196,14 @@ async def get_users(
         sort_by,
         filter_user_type,
         bbk_ids,
+        metric_type,
     )
     return {
         "items": [u.model_dump() for u in users],
         "total": total,
         "page": page,
         "page_size": page_size,
+        "metric_type": metric_type,
     }
 
 

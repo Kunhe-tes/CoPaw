@@ -1,3 +1,4 @@
+export { BroadcastChildrenModal } from "./BroadcastChildrenModal";
 export { createColumns } from "./columns";
 export { JobDrawer } from "./JobDrawer";
 export { useCronJobs } from "../useCronJobs";

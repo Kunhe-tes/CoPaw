@@ -13,6 +13,7 @@ export interface FilterOptionsResponse {
   users: FilterOption[];
   bbk_ids: FilterOption[];
   channels: FilterOption[];
+  source_ids: FilterOption[];
   job_names: FilterOption[];
   job_ids: FilterOption[];
 }
@@ -39,6 +40,8 @@ export interface CronJobItem {
   creator_user_id: string;
   task_chat_id: string;
   task_session_id: string;
+  job_origin: string;
+  subscription_key: string;
   meta: string;
   status: string;
   pause_reason: string;
@@ -97,11 +100,92 @@ export interface UnreadCountResponse {
   total_unread: number;
 }
 
+export interface CronOverviewMetricItem {
+  key: string;
+  value: number;
+  compare: string;
+  trend: "up" | "down" | null;
+}
+
+export interface CronOverviewDistributionItem {
+  name: string;
+  value: number;
+  percent: number;
+}
+
+export interface CronOverviewBranchExecutionItem {
+  name: string;
+  success: number;
+  failed: number;
+  skipped: number;
+}
+
+export interface CronOverviewBranchReadItem {
+  name: string;
+  read: number;
+  unread: number;
+}
+
+export interface CronOverviewResponse {
+  start_time: string | null;
+  end_time: string | null;
+  metrics: CronOverviewMetricItem[];
+  task_status: CronOverviewDistributionItem[];
+  execution_result: CronOverviewDistributionItem[];
+  read_status: CronOverviewDistributionItem[];
+  failure_reasons: CronOverviewDistributionItem[];
+  branch_tasks: CronOverviewDistributionItem[];
+  branch_execution: CronOverviewBranchExecutionItem[];
+  branch_read: CronOverviewBranchReadItem[];
+}
+
+export interface SubscriptionOverviewItem {
+  subscription_key: string;
+  task_name: string;
+  subscriber_count: number;
+  total_task_count: number;
+  running_task_count: number;
+  pending_task_count: number;
+  executed_task_count: number;
+  failed_task_count: number;
+  avg_duration_ms: number;
+  success_rate: number;
+}
+
+export interface SubscriptionDetailItem {
+  job_id: string;
+  subscriber_id: string;
+  subscriber_name: string;
+  bbk_id: string;
+  enabled: boolean;
+  execution_status: string;
+  execution_time: string | null;
+}
+
 // API functions
 export const monitorApi = {
   // Get filter options for dropdown selects
   getFilterOptions: async (): Promise<FilterOptionsResponse> => {
     return request(`/monitor/cron/filter-options`);
+  },
+
+  // Get page-shaped aggregate data for the cron overview
+  getCronOverview: async (filters?: {
+    tenant_id?: string;
+    bbk_id?: string;
+    start_time?: string;
+    end_time?: string;
+  }): Promise<CronOverviewResponse> => {
+    const params = new URLSearchParams();
+    if (filters) {
+      Object.entries(filters).forEach(([key, value]) => {
+        if (value !== undefined && value !== null && value !== "") {
+          params.append(key, value);
+        }
+      });
+    }
+    const query = params.toString();
+    return request(`/monitor/cron/overview${query ? `?${query}` : ""}`);
   },
 
   // Get cron jobs list
@@ -112,6 +196,7 @@ export const monitorApi = {
       tenant_id?: string;
       bbk_id?: string;
       creator_user_id?: string;
+      job_origin?: string;
       status?: string;
       enabled?: boolean;
     },
@@ -162,6 +247,62 @@ export const monitorApi = {
   // Get single execution
   getExecution: async (executionId: number): Promise<ExecutionItem> => {
     return request(`/monitor/cron/executions/${executionId}`);
+  },
+
+  // Get subscription-level overview rows
+  getSubscriptionOverview: async (
+    page = 1,
+    pageSize = 20,
+    filters?: {
+      keyword?: string;
+      tenant_id?: string;
+      bbk_id?: string;
+      source_id?: string;
+      start_time?: string;
+      end_time?: string;
+    },
+  ): Promise<PaginatedResponse<SubscriptionOverviewItem>> => {
+    const params = new URLSearchParams();
+    params.append("page", page.toString());
+    params.append("page_size", pageSize.toString());
+    if (filters) {
+      Object.entries(filters).forEach(([key, value]) => {
+        if (value !== undefined && value !== null && value !== "") {
+          params.append(key, value);
+        }
+      });
+    }
+    return request(`/monitor/cron/subscription-overview?${params.toString()}`);
+  },
+
+  // Get subscription detail rows for a drawer/table
+  getSubscriptionDetails: async (
+    subscriptionKey: string,
+    page = 1,
+    pageSize = 20,
+    filters?: {
+      tenant_id?: string;
+      bbk_id?: string;
+      source_id?: string;
+      start_time?: string;
+      end_time?: string;
+    },
+  ): Promise<PaginatedResponse<SubscriptionDetailItem>> => {
+    const params = new URLSearchParams();
+    params.append("page", page.toString());
+    params.append("page_size", pageSize.toString());
+    if (filters) {
+      Object.entries(filters).forEach(([key, value]) => {
+        if (value !== undefined && value !== null && value !== "") {
+          params.append(key, value);
+        }
+      });
+    }
+    return request(
+      `/monitor/cron/subscription-overview/${encodeURIComponent(
+        subscriptionKey,
+      )}/jobs?${params.toString()}`,
+    );
   },
 
   // Export jobs to Excel

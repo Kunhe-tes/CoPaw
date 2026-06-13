@@ -1000,17 +1000,17 @@ class HtmlPreviewClickStore:
             CASE
                 WHEN button_type IN ('insight', 'phone', 'plan', 'other')
                     THEN button_type
-                WHEN LOWER(COALESCE(button_id, '')) LIKE '%plan%'
-                    OR COALESCE(button_name, '') LIKE '%查看方案%'
-                    OR COALESCE(button_text, '') LIKE '%查看方案%'
+                WHEN LOWER(COALESCE(button_id, '')) LIKE '%%plan%%'
+                    OR COALESCE(button_name, '') LIKE '%%查看方案%%'
+                    OR COALESCE(button_text, '') LIKE '%%查看方案%%'
                     THEN 'plan'
-                WHEN LOWER(COALESCE(button_id, '')) LIKE '%phone%'
-                    OR COALESCE(button_name, '') LIKE '%电访%'
-                    OR COALESCE(button_text, '') LIKE '%电访%'
+                WHEN LOWER(COALESCE(button_id, '')) LIKE '%%phone%%'
+                    OR COALESCE(button_name, '') LIKE '%%电访%%'
+                    OR COALESCE(button_text, '') LIKE '%%电访%%'
                     THEN 'phone'
-                WHEN LOWER(COALESCE(button_id, '')) LIKE '%insight%'
-                    OR COALESCE(button_name, '') LIKE '%洞察%'
-                    OR COALESCE(button_text, '') LIKE '%洞察%'
+                WHEN LOWER(COALESCE(button_id, '')) LIKE '%%insight%%'
+                    OR COALESCE(button_name, '') LIKE '%%洞察%%'
+                    OR COALESCE(button_text, '') LIKE '%%洞察%%'
                     THEN 'insight'
                 ELSE 'other'
             END

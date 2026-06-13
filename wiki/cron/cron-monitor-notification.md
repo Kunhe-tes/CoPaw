@@ -1,0 +1,97 @@
+# Cron Monitor 与通知
+
+本文说明 cron 如何生成任务卡片、维护未读状态、把 job / execution 同步给 Monitor，以及如何通过后台 worker 推送任务完成通知。
+
+返回 [Cron 定时任务模块索引](README.md)。
+
+## 任务卡片、未读与自动暂停
+
+当任务带 `creator_user_id` 且 workspace 有 `chat_manager` 时，`CronManager._ensure_task_binding()` 会为任务创建或复用一个 task chat。
+
+成功执行后，`CronManager._record_task_execution_success()` 会：
+
+- 对 text 任务，把固定文本写入 task session 的 `task_messages`。
+- 对 agent 任务，从 session memory 中提取最近助手输出作为预览。
+- 更新 `task_has_scheduled_result`。
+- 更新 `task_last_scheduled_preview`。
+- `task_unread_execution_count += 1`。
+- 更新 `task_last_scheduled_run_at`。
+
+自动暂停由 source system config 决定，入口是：
+
+```text
+resolve_cron_unread_auto_pause_config(get_current_source_system_config())
+```
+
+如果配置启用，并且未读次数达到阈值：
+
+- job 的 `enabled` 会被改为 `False`。
+- `pause_reason = "auto_unread_threshold"`。
+- `auto_paused_at` 和 `unread_count_at_pause` 写入 meta。
+- 如果有外部调度平台 ID，会暂停外部任务。
+- 更新后的 job 会同步到 Monitor。
+
+手动恢复任务时，`resume_job()` 会同步 Monitor job，并把历史未读执行记录标为已读。
+
+## 完成通知
+
+完成通知分两阶段。
+
+第一阶段，执行结束时写 Monitor：
+
+- `MonitorSyncClient.record_execution()` 同步 execution。
+- 只有 `agent` 且 status 为 `success` 的任务需要通知。
+- 手动执行成功默认 `is_read = true`。
+- 自动执行成功默认产生 `notification_status = "pending"`。
+- 广播任务如果 `broadcast_notification_policy == "original_schedule"`，会按原始任务时间计算通知 due time；手动运行不会套这个延迟。
+
+第二阶段，SWE 后台 worker 领取并推送：
+
+- 应用启动时 `_app.py` 创建 `CronNotificationWorker` 并启动。
+- worker 调 `MonitorSyncClient.claim_due_notifications()`。
+- Monitor 侧 `CronNotificationService` 用 `FOR UPDATE SKIP LOCKED` 原子领取 due execution。
+- worker 解析 `tenant_id/source_id`，用 `resolve_runtime_tenant_id()` 找到 workspace。
+- 调 `CronManager.send_task_success_notification(job_id)`。
+- 最终通过 `zhaohu` channel 推送“定时任务已完成”消息。
+
+通知 worker 相关环境变量：
+
+| 环境变量 | 默认值 | 说明 |
+| --- | --- | --- |
+| `SWE_CRON_NOTIFICATION_SCAN_SECONDS` | 300 | 扫描间隔，代码限制在 300 到 600 秒 |
+| `SWE_CRON_NOTIFICATION_BATCH_SIZE` | 20 | 每次领取数量，限制在 1 到 100 |
+| `SWE_CRON_NOTIFICATION_MAX_ATTEMPTS` | 3 | 通知失败最大重试次数 |
+| `SWE_CRON_NOTIFICATION_SOURCE_IDS` | 空 | 当前 SWE 实例允许领取通知的 source 列表 |
+
+多实例部署时，如果不同 SWE 实例负责不同 source，必须配置 `SWE_CRON_NOTIFICATION_SOURCE_IDS`。Monitor 领取 SQL 会只领取这些 source 的记录，同时允许 `source_id` 为空的 legacy 记录被任意实例竞争。
+
+## Monitor 同步与查询
+
+SWE 侧 `MonitorSyncClient` 默认 base URL 是：
+
+```text
+http://localhost:9090/api
+```
+
+可通过 `SWE_MONITOR_API_URL` 覆盖。
+
+SWE 会调用 Monitor：
+
+| SWE 调用 | Monitor 接口 | 作用 |
+| --- | --- | --- |
+| `sync_job()` | `POST /monitor/sync/job` | upsert 定时任务定义 |
+| `delete_job()` | `DELETE /monitor/sync/job/{job_id}` | 标记删除 |
+| `record_execution()` | `POST /monitor/sync/execution` | 写执行记录 |
+| `claim_due_notifications()` | `POST /monitor/sync/notifications/claim` | 领取待通知记录 |
+| `mark_notification_sent()` | `POST /monitor/sync/notifications/{id}/sent` | 标记通知成功 |
+| `mark_notification_failed()` | `POST /monitor/sync/notifications/{id}/failed` | 标记通知失败或重试 |
+| `mark_job_as_read()` | `POST /monitor/cron/jobs/{job_id}/mark-read` | 标记任务执行记录已读 |
+
+Monitor 数据表主要是：
+
+- `swe_cron_jobs`
+- `swe_cron_executions`
+
+Monitor 写入时间统一处理为北京时间 naive datetime，SWE 侧也会把 UTC 时间转换为 Asia/Shanghai 后再同步，避免表格里出现时区不一致。
+
+Monitor 查询入口在 `monitor/src/monitor/app/routers/cron.py`，提供任务列表、执行历史、概览、订阅概览、导出、已读和未读数查询。

@@ -4,12 +4,14 @@ import { getApiUrl } from "../config";
 import type {
   FileContentResponse,
   FileTreeNode,
+  MySkill,
 } from "./mySkills";
 import type { DistributionRecord, RecallResultItem, RecallResponse } from "../types";
 
 export interface MarketSkill {
   item_id: string;
   name: string;
+  skill_name?: string;
   chinese_name?: string;
   description: string;
   version: string;
@@ -51,6 +53,7 @@ export interface PublishSkillRequest {
   // 可选：指定用户技能目录名，用于同步整个目录
   skill_name?: string;
   agent_id?: string;
+  overwrite?: boolean;
 }
 
 export interface DistributeRequest {
@@ -211,6 +214,20 @@ export const marketApi = {
     return request<void>(`/market/skills/${itemId}`, opts);
   },
 
+  deleteSkill: async (
+    sourceId: string,
+    itemId: string,
+  ): Promise<void> => {
+    const opts: RequestInit = {
+      method: "DELETE",
+      ...(mergeHeaders({
+        "X-Source-Id": sourceId,
+        "X-Manager": "true",
+      })),
+    };
+    return request<void>(`/market/skills/${itemId}/delete`, opts);
+  },
+
   distributeSkill: async (
     sourceId: string,
     itemId: string,
@@ -278,6 +295,7 @@ export const marketApi = {
     file: File,
     options?: {
       category_id?: number;
+      overwrite?: boolean;
     }
   ): Promise<{
     imported: string[];
@@ -343,5 +361,27 @@ export const marketApi = {
       `/market/skills/${itemId}/recall`,
       opts
     );
+  },
+
+  listUserMarketSkills: async (
+    sourceId: string,
+    userId: string,
+  ): Promise<MySkill[]> => {
+    const headers = {
+      "X-Source-Id": sourceId,
+      "X-User-Id": userId,
+      "X-Tenant-Id": userId,
+    };
+    const [mine, received] = await Promise.all([
+      request<MySkill[]>("/market/skills/mine", mergeHeaders(headers)),
+      request<MySkill[]>("/market/skills/received", mergeHeaders(headers)),
+    ]);
+    const byName = new Map<string, MySkill>();
+    for (const skill of [...(mine || []), ...(received || [])]) {
+      if (!byName.has(skill.skill_name)) {
+        byName.set(skill.skill_name, skill);
+      }
+    }
+    return Array.from(byName.values());
   },
 };

@@ -8,11 +8,44 @@ import logging
 from datetime import datetime, timezone
 from typing import Any, Optional
 
-from .models import ChatSpec
+from .models import ChatPage, ChatSpec
 from .repo import BaseChatRepository
 from ..channels.schema import DEFAULT_CHANNEL
 
 logger = logging.getLogger(__name__)
+
+_SESSION_TITLE_GENERATED_META_KEY = "session_title_generated"
+
+
+def _is_older_datetime(left: datetime, right: datetime) -> bool:
+    if left.tzinfo is None and right.tzinfo is not None:
+        left = left.replace(tzinfo=timezone.utc)
+    if right.tzinfo is None and left.tzinfo is not None:
+        right = right.replace(tzinfo=timezone.utc)
+    return left < right
+
+
+def _should_keep_generated_title(
+    *,
+    existing: ChatSpec,
+    incoming: ChatSpec,
+) -> bool:
+    existing_meta = existing.meta or {}
+    incoming_meta = incoming.meta or {}
+    if not existing_meta.get(_SESSION_TITLE_GENERATED_META_KEY):
+        return False
+    if incoming_meta.get(_SESSION_TITLE_GENERATED_META_KEY):
+        return False
+    return _is_older_datetime(incoming.updated_at, existing.updated_at)
+
+
+def _keep_generated_title(existing: ChatSpec, incoming: ChatSpec) -> None:
+    incoming.name = existing.name
+    incoming.meta = {
+        **(existing.meta or {}),
+        **(incoming.meta or {}),
+        _SESSION_TITLE_GENERATED_META_KEY: True,
+    }
 
 
 class ChatManager:
@@ -65,6 +98,49 @@ class ChatManager:
             return await self._repo.filter_chats(
                 user_id=user_id,
                 channel=channel,
+            )
+
+    async def list_chats_page(
+        self,
+        *,
+        page: int,
+        page_size: int,
+        user_id: Optional[str] = None,
+        channel: Optional[str] = None,
+    ) -> ChatPage:
+        """List one filtered chat page in stable newest-first order."""
+        async with self._lock:
+            logger.debug(
+                "list_chats_page: repo path=%s, filters: user_id=%s, "
+                "channel=%s, page=%s, page_size=%s",
+                self._repo.path,
+                user_id,
+                channel,
+                page,
+                page_size,
+            )
+            return await self._repo.paginate_chats(
+                user_id=user_id,
+                channel=channel,
+                page=page,
+                page_size=page_size,
+            )
+
+    async def list_chats_cursor(
+        self,
+        *,
+        page_size: int,
+        cursor: str | None = None,
+        user_id: Optional[str] = None,
+        channel: Optional[str] = None,
+    ) -> ChatPage:
+        """List a stable creation-ordered page using an opaque cursor."""
+        async with self._lock:
+            return await self._repo.paginate_chats_cursor(
+                user_id=user_id,
+                channel=channel,
+                page_size=page_size,
+                cursor=cursor,
             )
 
     async def get_chat(self, chat_id: str) -> Optional[ChatSpec]:
@@ -171,9 +247,50 @@ class ChatManager:
             Updated chat spec
         """
         async with self._lock:
+            existing = await self._repo.get_chat(spec.id)
+            if existing is not None and _should_keep_generated_title(
+                existing=existing,
+                incoming=spec,
+            ):
+                _keep_generated_title(existing, spec)
             spec.updated_at = datetime.now(timezone.utc)
             await self._repo.upsert_chat(spec)
             return spec
+
+    async def update_chat_name(
+        self,
+        chat_id: str,
+        name: str,
+        *,
+        meta: Optional[dict[str, Any]] = None,
+    ) -> bool:
+        """更新会话名称。
+
+        Args:
+            chat_id: Chat 标识
+            name: 新名称
+            meta: 需要同步合并写入的元数据
+
+        Returns:
+            更新成功返回 True，chat 不存在返回 False
+        """
+        async with self._lock:
+            spec = await self._repo.get_chat(chat_id)
+            if spec is None:
+                logger.warning(
+                    "update_chat_name: chat not found chat_id=%s",
+                    chat_id,
+                )
+                return False
+            spec.name = name
+            if meta:
+                spec.meta = {
+                    **(spec.meta or {}),
+                    **meta,
+                }
+            spec.updated_at = datetime.now(timezone.utc)
+            await self._repo.upsert_chat(spec)
+            return True
 
     async def delete_chats(self, chat_ids: list[str]) -> bool:
         """Delete a chat spec.

@@ -4,9 +4,13 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
+import base64
+import binascii
+from datetime import datetime, timezone
+import json
 from typing import Optional
 
-from ..models import ChatSpec, ChatsFile
+from ..models import ChatPage, ChatSpec, ChatsFile
 from ...channels.schema import DEFAULT_CHANNEL
 
 
@@ -144,3 +148,105 @@ class BaseChatRepository(ABC):
             results = [c for c in results if c.channel == channel]
 
         return results
+
+    async def paginate_chats(
+        self,
+        *,
+        page: int,
+        page_size: int,
+        user_id: Optional[str] = None,
+        channel: Optional[str] = None,
+    ) -> ChatPage:
+        """Return one filtered chat page in stable newest-first order."""
+        chats = await self.filter_chats(user_id=user_id, channel=channel)
+
+        def _sort_key(chat: ChatSpec) -> tuple[float, str]:
+            updated_at = chat.updated_at
+            if updated_at.tzinfo is None:
+                updated_at = updated_at.replace(tzinfo=timezone.utc)
+            return updated_at.timestamp(), chat.id
+
+        ordered = sorted(chats, key=_sort_key, reverse=True)
+        total = len(ordered)
+        offset = (page - 1) * page_size
+        items = ordered[offset : offset + page_size]
+        return ChatPage(
+            items=items,
+            total=total,
+            page=page,
+            page_size=page_size,
+            has_more=offset + len(items) < total,
+        )
+
+    @staticmethod
+    def _cursor_sort_key(chat: ChatSpec) -> tuple[datetime, str]:
+        created_at = chat.created_at
+        if created_at.tzinfo is None:
+            created_at = created_at.replace(tzinfo=timezone.utc)
+        return created_at, chat.id
+
+    @staticmethod
+    def _encode_cursor(key: tuple[datetime, str]) -> str:
+        created_at, chat_id = key
+        payload = json.dumps(
+            [created_at.astimezone(timezone.utc).isoformat(), chat_id],
+            separators=(",", ":"),
+        ).encode("utf-8")
+        return base64.urlsafe_b64encode(payload).decode("ascii")
+
+    @staticmethod
+    def _decode_cursor(cursor: str) -> tuple[datetime, str]:
+        try:
+            created_at_raw, chat_id = json.loads(
+                base64.urlsafe_b64decode(cursor.encode("ascii")),
+            )
+            created_at = datetime.fromisoformat(created_at_raw)
+            if created_at.tzinfo is None:
+                created_at = created_at.replace(tzinfo=timezone.utc)
+            if not isinstance(chat_id, str) or not chat_id:
+                raise ValueError
+            return created_at, chat_id
+        except (
+            ValueError,
+            TypeError,
+            UnicodeDecodeError,
+            binascii.Error,
+            json.JSONDecodeError,
+        ) as exc:
+            raise ValueError("Invalid chat pagination cursor") from exc
+
+    async def paginate_chats_cursor(
+        self,
+        *,
+        page_size: int,
+        cursor: str | None = None,
+        user_id: Optional[str] = None,
+        channel: Optional[str] = None,
+    ) -> ChatPage:
+        """Return a stable page ordered by immutable creation identity."""
+        chats = await self.filter_chats(user_id=user_id, channel=channel)
+        ordered = sorted(chats, key=self._cursor_sort_key, reverse=True)
+        if cursor:
+            boundary = self._decode_cursor(cursor)
+            ordered = [
+                chat
+                for chat in ordered
+                if self._cursor_sort_key(chat) < boundary
+            ]
+
+        total = len(chats)
+        items = ordered[:page_size]
+        has_more = len(ordered) > len(items)
+        next_cursor = (
+            self._encode_cursor(self._cursor_sort_key(items[-1]))
+            if has_more and items
+            else None
+        )
+        return ChatPage(
+            items=items,
+            total=total,
+            page=1,
+            page_size=page_size,
+            has_more=has_more,
+            next_cursor=next_cursor,
+        )

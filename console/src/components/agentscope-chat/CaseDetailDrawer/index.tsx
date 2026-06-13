@@ -119,6 +119,7 @@ export default function CaseDetailDrawer({
     cronExpression: string,
     config: ScheduleConfig,
     modelSlot?: ModelSlotConfig,
+    notificationDelayMinutes?: number,
   ) => {
     void config;
     if (!caseData) return;
@@ -134,6 +135,7 @@ export default function CaseDetailDrawer({
       caseValue: caseData.value,
       channel,
       modelSlot,
+      notificationDelayMinutes,
       subscriptionKey: `featured_case:${caseData.id}`,
     });
 

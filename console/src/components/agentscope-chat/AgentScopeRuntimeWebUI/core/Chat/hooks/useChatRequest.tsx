@@ -8,6 +8,7 @@ import {
 } from "../../AgentScopeRuntime/types";
 import { IAgentScopeRuntimeWebUIMessage } from "@/components/agentscope-chat";
 import { IAgentScopeRuntimeWebUIInputData } from "../../types";
+import { SESSION_TITLE_PATCH_EVENT } from "../../Context/ChatAnywhereSessionsContext";
 import { withResponseHeaderMeta } from "./headerMeta";
 import type { CurrentQARef } from "./currentQARef";
 import {
@@ -22,6 +23,7 @@ import {
   createChatStreamAbortReason,
   isAbortLikeError,
 } from "./abortReasons";
+import { emit } from "../../Context/useChatAnywhereEventEmitter";
 
 interface UseChatRequestOptions {
   currentQARef: CurrentQARef;
@@ -63,6 +65,37 @@ function getUserVisibleErrorMessage(error: unknown) {
     : typeof error === "string"
       ? error
       : JSON.stringify(error);
+}
+
+function getSessionTitlePatch(data: unknown) {
+  if (!data || typeof data !== "object") {
+    return undefined;
+  }
+
+  const frame = data as {
+    object?: unknown;
+    session_id?: unknown;
+    session_title?: unknown;
+  };
+
+  if (
+    frame.object !== "session_title_updated" ||
+    typeof frame.session_id !== "string" ||
+    typeof frame.session_title !== "string"
+  ) {
+    return undefined;
+  }
+
+  const sessionId = frame.session_id.trim();
+  const sessionTitle = frame.session_title.trim();
+  if (!sessionId || !sessionTitle) {
+    return undefined;
+  }
+
+  return {
+    session_id: sessionId,
+    session_title: sessionTitle,
+  };
 }
 
 /**
@@ -322,6 +355,27 @@ export default function useChatRequest(options: UseChatRequestOptions) {
         for await (const chunk of Stream({
           readableStream: response.body,
         })) {
+          if (!chunk.data) {
+            continue;
+          }
+
+          const responseParser =
+            apiOptionsRef.current.responseParser || JSON.parse;
+          const chunkData = responseParser(chunk.data);
+
+          // 标题生成帧不依赖当前请求归属，切会话后也要同步本地标题。
+          const sessionTitlePatch = getSessionTitlePatch(chunkData);
+          if (sessionTitlePatch) {
+            emit({
+              type: SESSION_TITLE_PATCH_EVENT,
+              data: sessionTitlePatch,
+            });
+            if (!isOwnerActive()) {
+              return;
+            }
+            continue;
+          }
+
           if (!isOwnerActive()) {
             return;
           }
@@ -331,9 +385,6 @@ export default function useChatRequest(options: UseChatRequestOptions) {
             break;
           }
 
-          const responseParser =
-            apiOptionsRef.current.responseParser || JSON.parse;
-          const chunkData = responseParser(chunk.data);
           if (isTaskCancellationFrame(chunkData)) {
             emitTaskProgressUpdate(null, owner);
             onFinish(owner);

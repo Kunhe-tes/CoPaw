@@ -24,13 +24,14 @@ import { SkillCard } from "./SkillCard";
 import { SkillDetailDrawer } from "./SkillDetailDrawer";
 import { DistributeTargetModal, DistributeTargetType } from "./DistributeTargetModal";
 import { RecallModal, RecallTargetType } from "./components/RecallModal";
+import { SkillOwnerLookupModal } from "./SkillOwnerLookupModal";
 import UploadSkillModal from "./components/UploadSkillModal";
 import { MCPCard } from "./MCPCard";
 import { MCPDetailDrawer } from "./MCPDetailDrawer";
 import { MCPUploadModal } from "./MCPUploadModal";
 import { MCPEditModal } from "./MCPEditModal";
 import { useMarket } from "./useMarket";
-import { marketApi, MarketSkill } from "../../api/modules/market";
+import { marketApi, MarketSkill, MarketSkillDetail } from "../../api/modules/market";
 import { marketMcpApi } from "../../api/modules/marketMcp";
 import type { MarketMCPItem, MarketMCPDetail } from "../../api/types";
 
@@ -55,6 +56,7 @@ export function MarketSkills({ sourceId, isManager }: MarketSkillsProps) {
     setDetailDrawerOpen,
     refreshCategories,
     refreshSkills,
+    refreshSkillsAndDetail,
     openSkillDetail,
   } = useMarket(sourceId);
 
@@ -77,6 +79,7 @@ export function MarketSkills({ sourceId, isManager }: MarketSkillsProps) {
   const [recallType, setRecallType] = useState<RecallTargetType>("skill");
   const [recallItemId, setRecallItemId] = useState<string>("");
   const [recallItemName, setRecallItemName] = useState<string>("");
+  const [ownerLookupSkill, setOwnerLookupSkill] = useState<MarketSkill | MarketSkillDetail | null>(null);
 
   const [searchQuery, setSearchQuery] = useState("");
   const [activeResourceType, setActiveResourceType] = useState<ResourceType>("skill");
@@ -87,11 +90,30 @@ export function MarketSkills({ sourceId, isManager }: MarketSkillsProps) {
     refreshSkills();
   }, [refreshCategories, refreshSkills]);
 
-  // Handle unpublish skill
-  const handleUnpublish = async (skill: MarketSkill) => {
+  // Handle unpublish skill (下架)
+  const handleUnpublishSkill = async (skill: MarketSkill | MarketSkillDetail | null) => {
+    if (!skill || !sourceId) return;
     try {
       await marketApi.unpublishSkill(sourceId, skill.item_id);
+      message.success("下架成功");
+      if (selectedSkill?.item_id === skill.item_id) {
+        setDetailDrawerOpen(false);
+      }
+      refreshSkills();
+    } catch (err) {
+      message.error("下架失败");
+    }
+  };
+
+  // Handle delete skill permanently (彻底删除)
+  const handleDeleteSkill = async (skill: MarketSkill | MarketSkillDetail | null) => {
+    if (!skill || !sourceId) return;
+    try {
+      await marketApi.deleteSkill(sourceId, skill.item_id);
       message.success("删除成功");
+      if (selectedSkill?.item_id === skill.item_id) {
+        setDetailDrawerOpen(false);
+      }
       refreshSkills();
     } catch (err) {
       message.error("删除失败");
@@ -183,6 +205,10 @@ export function MarketSkills({ sourceId, isManager }: MarketSkillsProps) {
     setRecallItemId(skill.item_id);
     setRecallItemName(skill.name);
     setRecallModalOpen(true);
+  }, []);
+
+  const openSkillOwnerLookup = useCallback((skill: MarketSkill | MarketSkillDetail) => {
+    setOwnerLookupSkill(skill);
   }, []);
 
   // 打开 MCP 撤回弹窗
@@ -414,13 +440,28 @@ export function MarketSkills({ sourceId, isManager }: MarketSkillsProps) {
                     ? () => openSkillDistributeModal(selectedSkill)
                     : undefined
                 }
+                onLookupOwners={
+                  isManager
+                    ? () => openSkillOwnerLookup(selectedSkill)
+                    : undefined
+                }
                 onRecall={
                   isManager
                     ? () => openSkillRecallModal(selectedSkill)
                     : undefined
                 }
+                onUnpublish={
+                  isManager
+                    ? () => handleUnpublishSkill(selectedSkill)
+                    : undefined
+                }
+                onDelete={
+                  isManager
+                    ? () => handleDeleteSkill(selectedSkill)
+                    : undefined
+                }
                 sourceId={sourceId}
-                onRefresh={refreshSkills}
+                onRefresh={refreshSkillsAndDetail}
                 categoryName={selectedSkillCategoryName}
               />
             </div>
@@ -524,7 +565,9 @@ export function MarketSkills({ sourceId, isManager }: MarketSkillsProps) {
                           categoryName={catName}
                           onClick={() => openSkillDetail(skill.item_id)}
                           onDistribute={isManager ? () => openSkillDistributeModal(skill) : undefined}
-                          onUnpublish={isManager ? () => handleUnpublish(skill) : undefined}
+                          onLookupOwners={isManager ? () => openSkillOwnerLookup(skill) : undefined}
+                          onUnpublish={isManager ? () => handleUnpublishSkill(skill) : undefined}
+                          onDelete={isManager ? () => handleDeleteSkill(skill) : undefined}
                           isManager={isManager}
                         />
                       );
@@ -589,7 +632,7 @@ export function MarketSkills({ sourceId, isManager }: MarketSkillsProps) {
         open={uploadModalOpen}
         sourceId={sourceId}
         onClose={() => setUploadModalOpen(false)}
-        onSuccess={refreshSkills}
+        onSuccess={refreshSkillsAndDetail}
       />
 
       {/* 统一分发弹窗 */}
@@ -657,6 +700,15 @@ export function MarketSkills({ sourceId, isManager }: MarketSkillsProps) {
               refreshMCP();
             }
           }}
+        />
+      )}
+
+      {isManager && (
+        <SkillOwnerLookupModal
+          open={Boolean(ownerLookupSkill)}
+          skill={ownerLookupSkill}
+          sourceId={sourceId}
+          onClose={() => setOwnerLookupSkill(null)}
         />
       )}
     </div>

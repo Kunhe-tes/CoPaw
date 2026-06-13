@@ -44,6 +44,7 @@ import {
   PencilLine,
   Settings,
   ShieldCheck,
+  SearchCheck,
   Store,
   Wrench,
   Puzzle,
@@ -81,6 +82,7 @@ export default function Sidebar({ selectedKey }: SidebarProps) {
   const [collapsed, setCollapsed] = useState(false);
   const [openKeys, setOpenKeys] = useState<string[]>([...DEFAULT_OPEN_KEYS]);
   const canManageCurrentSourceConfig = isSuperManager || manager;
+  const canUseSystemCheck = isSuperManager || manager;
 
   // ── Effects ──────────────────────────────────────────────────────────────
 
@@ -250,12 +252,30 @@ export default function Sidebar({ selectedKey }: SidebarProps) {
           },
         ]
       : []),
+    ...(canUseSystemCheck
+      ? [
+          {
+            key: "system-check",
+            icon: <SearchCheck size={18} />,
+            path: "/system-check",
+            label: t("nav.systemCheck", {
+              defaultValue: "系统自检",
+            }),
+          },
+        ]
+      : []),
     // 洞察中心
     {
       key: "analytics-business-overview",
       icon: <SparkBarChartLine size={18} />,
       path: "/analytics/business-overview",
       label: t("nav.analyticsBusinessOverview", "运营看板"),
+    },
+    {
+      key: "analytics-claw-data-overview",
+      icon: <SparkBarChartLine size={18} />,
+      path: "/analytics/claw-data-overview",
+      label: t("nav.analyticsClawDataOverview", "Claw数据看板"),
     },
     {
       key: "analytics-messages",
@@ -275,13 +295,12 @@ export default function Sidebar({ selectedKey }: SidebarProps) {
     //   path: "/analytics/sessions",
     //   label: t("nav.analyticsSessions", "Sessions"),
     // },
-    {
-      key: "analytics-traces",
-      icon: <SparkFileTxtLine size={18} />,
-      path: "/analytics/traces",
-      label: t("nav.analyticsTraces", "Traces"),
-    },
-    // 质量工程
+    //     {
+    //       key: "analytics-traces",
+    //       icon: <SparkFileTxtLine size={18} />,
+    //       path: "/analytics/traces",
+    //       label: t("nav.analyticsTraces", "Traces"),
+    //     },
     {
       key: "continuous-iteration",
       icon: <SparkRefreshLine size={18} />,
@@ -400,6 +419,19 @@ export default function Sidebar({ selectedKey }: SidebarProps) {
               },
             ]
           : []),
+        ...(canUseSystemCheck
+          ? [
+              {
+                key: "system-check",
+                label: collapsed
+                  ? null
+                  : t("nav.systemCheck", {
+                      defaultValue: "系统自检",
+                    }),
+                icon: <SearchCheck size={16} />,
+              },
+            ]
+          : []),
       ],
     },
     // 6. 洞察中心
@@ -416,25 +448,32 @@ export default function Sidebar({ selectedKey }: SidebarProps) {
           icon: <SparkBarChartLine size={16} />,
         },
         {
+          key: "analytics-claw-data-overview",
+          label: collapsed
+            ? null
+            : t("nav.analyticsClawDataOverview", "Claw数据看板"),
+          icon: <SparkBarChartLine size={16} />,
+        },
+        {
           key: "analytics-messages",
           label: collapsed ? null : t("nav.analyticsMessages", "Messages"),
           icon: <SparkSearchLine size={16} />,
         },
         // {
-        //   key: "analytics-users",
-        //   label: collapsed ? null : t("nav.analyticsUsers", "Users"),
-        //   icon: <SparkUserGroupLine size={16} />,
+        //   key: "analytics-users",
+        //   label: collapsed ? null : t("nav.analyticsUsers", "Users"),
+        //   icon: <SparkUserGroupLine size={16} />,
         // },
         // {
-        //   key: "analytics-sessions",
-        //   label: collapsed ? null : t("nav.analyticsSessions", "Sessions"),
-        //   icon: <SparkMessageLine size={16} />,
+        //   key: "analytics-sessions",
+        //   label: collapsed ? null : t("nav.analyticsSessions", "Sessions"),
+        //   icon: <SparkMessageLine size={16} />,
         // },
-        {
-          key: "analytics-traces",
-          label: collapsed ? null : t("nav.analyticsTraces", "Traces"),
-          icon: <SparkFileTxtLine size={16} />,
-        },
+        //         {
+        //           key: "analytics-traces",
+        //           label: collapsed ? null : t("nav.analyticsTraces", "Traces"),
+        //           icon: <SparkFileTxtLine size={16} />,
+        //         },
       ],
     },
     // 7. 质量工程

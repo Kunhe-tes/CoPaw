@@ -199,6 +199,7 @@ class JobsFile(BaseModel):
 
 class CronJobState(BaseModel):
     next_run_at: Optional[datetime] = None
+    next_run_times: list[datetime] = Field(default_factory=list)
     last_run_at: Optional[datetime] = None
     last_prefetch_at: Optional[datetime] = None
     last_status: Optional[

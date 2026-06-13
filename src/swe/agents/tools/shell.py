@@ -18,6 +18,7 @@ from typing import Optional
 from agentscope.message import TextBlock
 from agentscope.tool import ToolResponse
 
+from ..tool_failure import ToolExecutionError
 from ...envs.runtime import build_runtime_env
 from ...security.tenant_path_boundary import (
     is_path_within_tenant_with_base,
@@ -711,6 +712,21 @@ def _tool_text_response(text: str) -> ToolResponse:
     )
 
 
+def _raise_shell_error(error_type: str, detail: str) -> None:
+    raise ToolExecutionError(error_type=error_type, detail=detail)
+
+
+def _classify_shell_failure(
+    returncode: int,
+    stderr_str: str,
+) -> str:
+    if returncode == -1 or "TimeoutError:" in stderr_str:
+        return "tool_timeout"
+    if "outside the allowed workspace" in stderr_str:
+        return "permission_denied"
+    return "shell_command_failed"
+
+
 def _prepare_subprocess_env() -> dict[str, str]:
     """Prepare subprocess environment with tenant env and active Python PATH."""
     env = build_runtime_env()
@@ -889,12 +905,17 @@ async def execute_shell_command(
     try:
         working_dir = _resolve_cwd(cwd)
     except TenantPathBoundaryError as e:
-        return _tool_text_response(f"Error: {e}")
+        _raise_shell_error("permission_denied", f"Error: {e}")
 
     # Validate explicit path tokens in the command, using working_dir as base for relative paths
     path_error = _validate_shell_paths(cmd, base_dir=working_dir)
     if path_error:
-        return _tool_text_response(path_error)
+        error_type = (
+            "permission_denied"
+            if "outside the allowed workspace" in path_error
+            else "invalid_arguments"
+        )
+        _raise_shell_error(error_type, path_error)
 
     env = _prepare_subprocess_env()
     python_runtime_guard = prepare_python_runtime_path_guard_env(
@@ -921,11 +942,19 @@ async def execute_shell_command(
             stdout_str,
             stderr_str,
         )
+        if returncode != 0:
+            _raise_shell_error(
+                _classify_shell_failure(returncode, stderr_str),
+                response_text,
+            )
 
         return _tool_text_response(response_text)
 
     except Exception as e:
-        return _tool_text_response(
+        if isinstance(e, ToolExecutionError):
+            raise
+        _raise_shell_error(
+            "unexpected_tool_error",
             f"Error: Shell command execution failed due to \n{e}",
         )
 

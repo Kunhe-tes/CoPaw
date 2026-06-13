@@ -636,26 +636,42 @@ export function MCPFormModal({
                   连接成功，共 {testResult.tools?.length ?? 0} 个工具：
                 </p>
                 {testResult.tools && testResult.tools.length > 0 && (
-                  <ul
+                  <div
                     style={{
-                      marginTop: 4,
-                      marginBottom: 0,
-                      marginLeft: 18,
-                      padding: 0,
-                      listStyle: "disc",
+                      marginTop: 8,
+                      maxHeight: 200,
+                      overflow: "auto",
+                      display: "grid",
+                      gap: 6,
                     }}
                   >
-                    {testResult.tools.slice(0, 10).map((tool) => (
-                      <li key={tool.name} style={{ margin: "2px 0" }}>
-                        {tool.name}
-                      </li>
+                    {testResult.tools.map((tool) => (
+                      <div
+                        key={tool.name}
+                        style={{
+                          padding: "6px 8px",
+                          borderRadius: 6,
+                          backgroundColor: "#f5f5f5",
+                        }}
+                      >
+                        <div style={{ fontWeight: 500, color: "#434a57" }}>
+                          {tool.name}
+                        </div>
+                        {tool.description ? (
+                          <div
+                            style={{
+                              marginTop: 2,
+                              color: "#8b94a3",
+                              fontSize: 11,
+                              lineHeight: 1.4,
+                            }}
+                          >
+                            {tool.description}
+                          </div>
+                        ) : null}
+                      </div>
                     ))}
-                    {testResult.tools.length > 10 && (
-                      <li style={{ color: "#8b94a3" }}>
-                        ... 等 {testResult.tools.length - 10} 个
-                      </li>
-                    )}
-                  </ul>
+                  </div>
                 )}
               </div>
             ) : (

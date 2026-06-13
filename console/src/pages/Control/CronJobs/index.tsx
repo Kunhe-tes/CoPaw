@@ -1,6 +1,7 @@
 import { useState, useEffect, useRef } from "react";
 import { Button, Card, Form, Modal, Table } from "@agentscope-ai/design";
 import type {
+  CronBroadcastTarget,
   CronBroadcastTenantResult,
   CronJobSpecOutput,
 } from "../../../api/types";
@@ -11,12 +12,12 @@ import {
   JobDrawer,
   useCronJobs,
   DEFAULT_FORM_VALUES,
+  BroadcastChildrenModal,
 } from "./components";
 import { PageHeader } from "@/components/PageHeader";
-import { TenantTargetPicker } from "@/components/TenantTargetPicker";
+import { TenantSelector } from "@/components/TenantSelector";
 import { useAppMessage } from "../../../hooks/useAppMessage";
-import { useIframeStore } from "../../../stores/iframeStore";
-import { DEFAULT_SOURCE_ID } from "../../../constants/identity";
+import { getUserId } from "../../../utils/identity";
 import {
   buildExecutionModelKey,
   useExecutionModelOptions,
@@ -45,18 +46,22 @@ function CronJobsPage() {
   const [drawerOpen, setDrawerOpen] = useState(false);
   const [editingJob, setEditingJob] = useState<CronJob | null>(null);
   const [broadcastingJob, setBroadcastingJob] = useState<CronJob | null>(null);
-  const [broadcastTenantIds, setBroadcastTenantIds] = useState<string[]>([]);
   const [selectedBroadcastTenantIds, setSelectedBroadcastTenantIds] = useState<
     string[]
+  >([]);
+  const [selectedBroadcastTargets, setSelectedBroadcastTargets] = useState<
+    CronBroadcastTarget[]
   >([]);
   const [broadcastResults, setBroadcastResults] = useState<
     CronBroadcastTenantResult[]
   >([]);
+  const [childrenManagementJob, setChildrenManagementJob] =
+    useState<CronJob | null>(null);
   const [broadcasting, setBroadcasting] = useState(false);
   const [saving, setSaving] = useState(false);
   const [form] = Form.useForm<CronJob>();
   const userTimezoneRef = useRef("UTC");
-  const sourceId = useIframeStore((state) => state.source) || DEFAULT_SOURCE_ID;
+  const currentTenantId = getUserId();
   const {
     loading: executionModelLoading,
     options: executionModelOptions,
@@ -122,34 +127,43 @@ function CronJobsPage() {
     });
   };
 
-  const handleBroadcast = async (job: CronJob) => {
+  const handleBroadcast = (job: CronJob) => {
     setBroadcastingJob(job);
     setSelectedBroadcastTenantIds([]);
+    setSelectedBroadcastTargets([]);
     setBroadcastResults([]);
-    try {
-      const res = await api.listCronBroadcastTenants();
-      setBroadcastTenantIds(res.tenant_ids || []);
-    } catch (error) {
-      console.error("Failed to load broadcast tenants", error);
-      message.error("Failed to load tenants");
-      setBroadcastTenantIds([]);
-    }
+  };
+
+  const handleManageChildren = (job: CronJob) => {
+    setChildrenManagementJob(job);
   };
 
   const handleBroadcastCancel = () => {
     setBroadcastingJob(null);
     setSelectedBroadcastTenantIds([]);
+    setSelectedBroadcastTargets([]);
     setBroadcastResults([]);
   };
 
   const handleBroadcastConfirm = async () => {
     if (!broadcastingJob) return;
     const targetTenantIds = Array.from(new Set(selectedBroadcastTenantIds));
+    const targetByTenantId = new Map(
+      selectedBroadcastTargets.map((target) => [target.tenant_id, target]),
+    );
+    const targets = targetTenantIds.map((tenantId) => {
+      const target = targetByTenantId.get(tenantId);
+      return {
+        tenant_id: tenantId,
+        tenant_name: target?.tenant_name ?? null,
+        bbk_id: target?.bbk_id ?? null,
+      };
+    });
     setBroadcasting(true);
     try {
       const res = await api.broadcastCronJob(
         broadcastingJob.id,
-        targetTenantIds,
+        targets,
       );
       const resultMessage = getBroadcastResultMessage(res.results);
       if (resultMessage.tone === "warning") {
@@ -200,6 +214,7 @@ function CronJobsPage() {
     onToggleEnabled: handleToggleEnabled,
     onExecuteNow: handleExecuteNow,
     onBroadcast: handleBroadcast,
+    onManageChildren: handleManageChildren,
     onEdit: handleEdit,
     onDelete: handleDelete,
     onCopySuccess: () => message.success(t("common.copied")),
@@ -226,7 +241,7 @@ function CronJobsPage() {
           dataSource={jobs}
           loading={loading}
           rowKey="id"
-          scroll={{ x: 2840 }}
+          scroll={{ x: 3010 }}
           pagination={{
             pageSize: 10,
           }}
@@ -243,6 +258,12 @@ function CronJobsPage() {
         tenantDefaultModelLabel={tenantDefaultLabel}
         onClose={handleDrawerClose}
         onSubmit={handleSubmit}
+      />
+
+      <BroadcastChildrenModal
+        open={Boolean(childrenManagementJob)}
+        job={childrenManagementJob}
+        onClose={() => setChildrenManagementJob(null)}
       />
 
       <Modal
@@ -263,12 +284,12 @@ function CronJobsPage() {
               {broadcastingJob.schedule?.timezone || "UTC"}；优先在原执行时间前
               4 小时内均匀错峰，无法安全错峰的 cron 会按原表达式分发。
             </div>
-            <TenantTargetPicker
-              tenantIds={broadcastTenantIds}
+            <TenantSelector
               selectedTenantIds={selectedBroadcastTenantIds}
               onChange={setSelectedBroadcastTenantIds}
+              onSelectionInfoChange={setSelectedBroadcastTargets}
               hint="选择需要接收该定时任务的租户"
-              sourceId={sourceId}
+              excludeTenantId={currentTenantId}
             />
             {broadcastResults.length > 0 && (
               <div style={{ display: "grid", gap: 6 }}>

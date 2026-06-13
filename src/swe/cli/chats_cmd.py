@@ -24,6 +24,10 @@ def chats_group() -> None:
       swe chats get <chat_id>           # View details
       swe chats create --session-id s1 --user-id u1
       swe chats delete <chat_id>        # Delete a chat
+
+    The CLI list command keeps the legacy unpaginated behavior. HTTP clients
+    can request a bounded page with GET /chats?page=1&page_size=50; paginated
+    responses include items, total, page, page_size, and has_more.
     """
 
 

@@ -179,7 +179,10 @@ async def list_tenants_by_source(
             detail="Database not available",
         )
 
-    rows = await store.get_by_source(source_id)
+    rows = await store.get_by_source(
+        source_id,
+        include_templates=True,
+    )
     items = [
         TenantSourceInfo(
             tenant_id=row["tenant_id"],

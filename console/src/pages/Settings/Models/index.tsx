@@ -12,7 +12,8 @@ import { PageHeader } from "@/components/PageHeader";
 import { useTranslation } from "react-i18next";
 import { useAppMessage } from "@/hooks/useAppMessage";
 import { useIframeStore } from "@/stores/iframeStore";
-import { TenantTargetPicker } from "@/components/TenantTargetPicker";
+import { getUserId } from "@/utils/identity";
+import { TenantSelector } from "@/components/TenantSelector";
 import api from "@/api";
 import type { ProviderInfo } from "../../../api/types/provider";
 import styles from "./index.module.less";
@@ -32,11 +33,10 @@ function ModelsPage() {
 
   // 供应商全量分发状态
   const [providersDistOpen, setProvidersDistOpen] = useState(false);
-  const [providersDistLoading, setProvidersDistLoading] = useState(false);
   const [providersDistSubmitting, setProvidersDistSubmitting] = useState(false);
-  const [providersDistTenantIds, setProvidersDistTenantIds] = useState<string[]>([]);
   const [selectedProvidersDistTenantIds, setSelectedProvidersDistTenantIds] =
     useState<string[]>([]);
+  const currentTenantId = getUserId();
 
   const refreshProvidersSilently = useCallback(() => {
     void fetchAll(false);
@@ -72,20 +72,9 @@ function ModelsPage() {
 
   // ===== 供应商全量分发 =====
 
-  const openProvidersDistModal = async () => {
+  const openProvidersDistModal = () => {
     setProvidersDistOpen(true);
     setSelectedProvidersDistTenantIds([]);
-    setProvidersDistLoading(true);
-    try {
-      const result = await api.listActiveModelDistributionTenants();
-      setProvidersDistTenantIds(result.tenant_ids || []);
-    } catch (error) {
-      const errMsg =
-        error instanceof Error ? error.message : t("models.distributeFailed");
-      message.error(errMsg);
-    } finally {
-      setProvidersDistLoading(false);
-    }
   };
 
   const closeProvidersDistModal = () => {
@@ -137,7 +126,10 @@ function ModelsPage() {
 
       if (failed.length > 0) {
         const failureLines = failed.map(
-          (item) => `• ${item.tenant_id}: ${item.error || t("models.distributeFailed")}`,
+          (item) =>
+            `• ${item.tenant_id}: ${
+              item.error || t("models.distributeFailed")
+            }`,
         );
         Modal.confirm({
           title: t("models.distributePartialFailureTitle"),
@@ -294,15 +286,11 @@ function ModelsPage() {
                 >
                   {t("models.distributeProvidersWarning")}
                 </div>
-                {providersDistLoading ? (
-                  <div>{t("models.loading")}</div>
-                ) : (
-                  <TenantTargetPicker
-                    tenantIds={providersDistTenantIds}
-                    selectedTenantIds={selectedProvidersDistTenantIds}
-                    onChange={setSelectedProvidersDistTenantIds}
-                  />
-                )}
+                <TenantSelector
+                  selectedTenantIds={selectedProvidersDistTenantIds}
+                  onChange={setSelectedProvidersDistTenantIds}
+                  excludeTenantId={currentTenantId}
+                />
               </div>
             </Modal>
           </div>

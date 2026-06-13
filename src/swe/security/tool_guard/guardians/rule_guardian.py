@@ -300,12 +300,27 @@ class RuleBasedToolGuardian(BaseToolGuardian):
         self._rules_dir = rules_dir
         self._extra_rules = list(extra_rules) if extra_rules else []
         self._rules: list[GuardRule] = []
+        self._db_rules: list[GuardRule] = []
         self._load_all_rules()
 
     def _load_all_rules(self) -> None:
         """(Re)load built-in + config custom rules, filtering disabled."""
         builtin = load_rules_from_directory(self._rules_dir)
+        rules_dir = self._rules_dir or _DEFAULT_RULES_DIR
+
+        # DB 规则单独加载，由 source 级开关控制是否生效
+        db_yaml = rules_dir / "dangerous_database_commands.yaml"
+        if db_yaml.is_file():
+            self._db_rules = load_rules_from_yaml(db_yaml)
+        else:
+            self._db_rules = []
+        db_rule_ids = {rule.id for rule in self._db_rules}
+        if db_rule_ids:
+            builtin = [r for r in builtin if r.id not in db_rule_ids]
+
         custom, disabled = _load_config_rules()
+        # 从 disabled 中过滤 DB 规则
+        self._db_rules = [r for r in self._db_rules if r.id not in disabled]
         merged = builtin + self._extra_rules + custom
         self._rules = [r for r in merged if r.id not in disabled]
 
@@ -337,6 +352,29 @@ class RuleBasedToolGuardian(BaseToolGuardian):
         applicable_rules = [
             r for r in self._rules if r.applies_to_tool(tool_name)
         ]
+
+        # DB 规则：由 source 级开关控制是否生效
+        if self._db_rules:
+            try:
+                from swe.app.source_system_config.runtime import (
+                    get_current_source_system_config,
+                )
+                from swe.app.source_system_config.registry import (
+                    is_database_access_guard_enabled,
+                )
+
+                config = get_current_source_system_config()
+                if is_database_access_guard_enabled(config):
+                    applicable_rules += [
+                        r
+                        for r in self._db_rules
+                        if r.applies_to_tool(tool_name)
+                    ]
+            except Exception:
+                # 开关读取失败时默认启用（安全优先）
+                applicable_rules += [
+                    r for r in self._db_rules if r.applies_to_tool(tool_name)
+                ]
 
         if not applicable_rules:
             return findings

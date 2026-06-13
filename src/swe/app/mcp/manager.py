@@ -11,7 +11,7 @@ import asyncio
 import logging
 from typing import Any, Dict, List, TYPE_CHECKING
 
-from .http_headers import resolve_mcp_http_headers
+from .http_headers import build_mcp_http_headers
 from .stdio_launcher import build_tenant_aware_stdio_launch_config
 from .stateful_client import HttpStatefulClient, StdIOStatefulClient
 
@@ -268,15 +268,11 @@ class MCPClientManager:
             )
             return client
 
-        headers = client_config.headers
-        if headers:
-            headers = resolve_mcp_http_headers(headers)
-
         client = HttpStatefulClient(
             name=client_config.name,
             transport=client_config.transport,
             url=client_config.url,
-            headers=headers or None,
+            headers=build_mcp_http_headers(client_config.headers),
         )
         setattr(client, "_qwenpaw_rebuild_info", rebuild_info)
         return client

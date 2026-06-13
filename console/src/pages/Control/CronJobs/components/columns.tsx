@@ -8,6 +8,7 @@ import { parseCron } from "./parseCron";
 import { copyToClipboard } from "../../../../utils/clipboard";
 import type { ExecutionModelOption } from "@/hooks/useExecutionModelOptions";
 import { formatExecutionModelLabel } from "@/hooks/useExecutionModelOptions";
+import { formatNotificationDelay } from "@/utils/cron";
 import styles from "../index.module.less";
 
 type CronJob = CronJobSpecOutput;
@@ -16,6 +17,7 @@ interface ColumnHandlers {
   onToggleEnabled: (job: CronJob) => void;
   onExecuteNow: (job: CronJob) => void;
   onBroadcast: (job: CronJob) => void;
+  onManageChildren: (job: CronJob) => void;
   onEdit: (job: CronJob) => void;
   onDelete: (jobId: string) => void;
   onCopySuccess: () => void;
@@ -170,6 +172,13 @@ export const createColumns = (
       dataIndex: ["schedule", "timezone"],
       key: "timezone",
       width: 170,
+    },
+    {
+      title: "通知延迟",
+      key: "notification_delay",
+      width: 170,
+      render: (_: unknown, record: CronJob) =>
+        formatNotificationDelay(record.meta?.notification_delay_minutes),
     },
     {
       title: "TaskType",
@@ -334,6 +343,11 @@ export const createColumns = (
             key: "broadcast",
             label: "广播到租户",
             onClick: () => handlers.onBroadcast(record),
+          },
+          {
+            key: "broadcast_children",
+            label: "查看分发用户",
+            onClick: () => handlers.onManageChildren(record),
           },
           {
             key: "edit",

@@ -1349,6 +1349,7 @@ class ZhaohuChannel(BaseChannel):
         # Extract callback fields
         (
             msg_id,
+            source_id,
             from_id,
             to_id,
             group_id,
@@ -1374,6 +1375,7 @@ class ZhaohuChannel(BaseChannel):
         # Build meta
         meta = self._build_callback_meta(
             yst_id,
+            source_id,
             from_id,
             to_id,
             group_id,
@@ -1383,6 +1385,7 @@ class ZhaohuChannel(BaseChannel):
             user_name,
         )
         source_id = str(meta.get("source_id") or self.channel)
+        logger.info("source id final sourceId=%s", source_id)
 
         with bind_tenant_context(
             tenant_id=sap_id,
@@ -1417,6 +1420,7 @@ class ZhaohuChannel(BaseChannel):
         """
         return (
             getattr(callback_body, "msg_id", "") or "",
+            getattr(callback_body, "source_id", "") or "",
             getattr(callback_body, "from_id", "") or "",
             getattr(callback_body, "to_id", "") or "",
             getattr(callback_body, "group_id", None),
@@ -1429,6 +1433,7 @@ class ZhaohuChannel(BaseChannel):
     def _build_callback_meta(
         self,
         yst_id: str,
+        source_id: str,
         from_id: str,
         to_id: str,
         group_id: Optional[int],
@@ -1440,6 +1445,7 @@ class ZhaohuChannel(BaseChannel):
         """Build metadata dict for callback message."""
         meta: Dict[str, Any] = {
             "send_addr": yst_id,
+            "source_id": source_id,
             "open_id": from_id,
             "to_id": to_id,
             "group_id": group_id,
@@ -1447,7 +1453,6 @@ class ZhaohuChannel(BaseChannel):
             "msg_type": msg_type,
             "timestamp": timestamp,
             "is_group": group_id is not None,
-            "source_id": self.channel,
         }
         if user_name:
             meta["user_name"] = user_name

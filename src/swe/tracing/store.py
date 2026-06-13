@@ -199,6 +199,24 @@ class TraceStore:
         )
         await self.db.execute(query, params)
 
+    async def update_session_name(
+        self, trace_id: str, session_name: str,
+    ) -> None:
+        """更新 trace 的 session_name。
+
+        Args:
+            trace_id: Trace 标识
+            session_name: 新的会话名称
+        """
+        if self.db is None:
+            return
+
+        query = (
+            "UPDATE swe_tracing_traces SET session_name = %s "
+            "WHERE trace_id = %s"
+        )
+        await self.db.execute(query, (session_name, trace_id))
+
     async def get_trace(
         self,
         trace_id: str,

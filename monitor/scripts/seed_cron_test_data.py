@@ -3,7 +3,7 @@
 
 为"任务执行概览"漏斗图提供测试数据.
 关键约束:
-    - cron_jobs.source_id 必须为 "default"（匹配 x-source-id: default 请求头）
+    - cron_jobs.source_id 可通过命令行参数指定（默认 UPPCLAW）
     - cron_jobs.tenant_id 不能为 "default"（否则被查询过滤掉）
     - cron_jobs.status 不能为 "deleted"
     - cron_jobs.deleted_at IS NULL
@@ -12,22 +12,29 @@
 运行方式:
     cd D:/workspace/CoPaw
     .venv/Scripts/python.exe monitor/scripts/seed_cron_test_data.py
+    .venv/Scripts/python.exe monitor/scripts/seed_cron_test_data.py --source-id default
 """
 
 import asyncio
+import argparse
 import random
 import sys
 import uuid
 from datetime import datetime, timedelta
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
+# 添加 swe src 目录到 Python 路径
+swe_src_path = Path(__file__).parent.parent.parent / "src"
+sys.path.insert(0, str(swe_src_path))
 
 from swe.envs import load_envs_into_environ
 
 load_envs_into_environ()
 
 from swe.database import get_database_config, DatabaseConnection
+
+# 默认 source_id
+DEFAULT_SOURCE_ID = "UPPCLAW"
 
 BBK_IDS = ["100", "200", "201", "202", "203", "204", "205", "206", "V00"]
 CRON_JOB_NAMES = [
@@ -156,7 +163,9 @@ async def create_executions(db, job_ids, start_date, end_date):
     return exec_count
 
 
-async def create_jobs_and_generate_executions(db, start_date, end_date):
+async def create_jobs_and_generate_executions(
+    db, start_date, end_date, source_id
+):
     """创建测试任务并生成执行记录."""
     # 每个分行创建多个测试任务
     job_ids = []
@@ -184,7 +193,7 @@ async def create_jobs_and_generate_executions(db, start_date, end_date):
                     f"tenant-{bbk_id}",
                     f"租户{bbk_id}",
                     bbk_id,
-                    "default",
+                    source_id,
                     True,
                     task_type,
                     "0 9 * * *",
@@ -294,7 +303,7 @@ async def create_jobs_and_generate_executions(db, start_date, end_date):
     return insert_count
 
 
-async def verify_results(db, start_date, end_date):
+async def verify_results(db, start_date, end_date, source_id):
     """验证插入结果."""
     print("\n=== 执行状态分布 ===")
     rows = await db.fetch_all("""
@@ -332,10 +341,10 @@ async def verify_results(db, start_date, end_date):
         WHERE e.actual_time >= %s AND e.actual_time <= %s
           AND j.status != 'deleted'
           AND j.deleted_at IS NULL
-          AND j.source_id = 'default'
+          AND j.source_id = %s
           AND j.tenant_id != 'default'
     """,
-        (start_date, end_date),
+        (start_date, end_date, source_id),
     )
     print(
         f"  总任务: {result['total_tasks']}, "
@@ -346,8 +355,18 @@ async def verify_results(db, start_date, end_date):
 
 async def main():
     """生成近30天定时任务执行测试数据."""
+    parser = argparse.ArgumentParser(description="生成定时任务测试数据")
+    parser.add_argument(
+        "--source-id",
+        default=DEFAULT_SOURCE_ID,
+        help=f"数据来源标识（默认: {DEFAULT_SOURCE_ID})",
+    )
+    args = parser.parse_args()
+    source_id = args.source_id
+
     db_config = get_database_config()
     print(f"数据库: {db_config.host}:{db_config.port}/{db_config.database}")
+    print(f"source_id: {source_id}")
 
     db = DatabaseConnection(db_config)
     await db.connect()
@@ -383,6 +402,7 @@ async def main():
             db,
             start_date,
             end_date,
+            source_id,
         )
 
         print(f"\n共插入 {insert_count} 条执行记录")
@@ -390,7 +410,7 @@ async def main():
             f"时间范围: {start_date.strftime('%Y-%m-%d')} ~ {end_date.strftime('%Y-%m-%d')}",
         )
 
-        await verify_results(db, start_date, end_date)
+        await verify_results(db, start_date, end_date, source_id)
 
     except Exception as e:
         print(f"插入失败: {e}")

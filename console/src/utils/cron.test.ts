@@ -9,8 +9,11 @@ import {
   weekdayNumberToLabel,
   calculateNextRun,
   formatNextRunPreview,
+  formatNotificationDelay,
+  getNotificationDelayFormValue,
   hasDateBoundaryWarning,
   buildCronJobSpec,
+  toNotificationDelayMinutes,
   WEEKDAY_MAP,
   type ScheduleConfig,
 } from "./cron";
@@ -259,6 +262,7 @@ describe("buildCronJobSpec", () => {
     expect(result.dispatch.target.user_id).toBe("user-123");
     expect(result.dispatch.target.session_id).toBe("session-456");
     expect(result.dispatch.mode).toBe("final");
+    expect(result.meta?.notification_delay_minutes).toBe(0);
   });
 
   it("builds agent type cron job without sessionId", () => {
@@ -311,6 +315,18 @@ describe("buildCronJobSpec", () => {
     });
   });
 
+  it("stores explicit notification delay minutes", () => {
+    const result = buildCronJobSpec({
+      cronExpression: "0 9 * * *",
+      name: "delayed task",
+      userId: "alice",
+      caseValue: "daily reminder",
+      notificationDelayMinutes: 120,
+    });
+
+    expect(result.meta?.notification_delay_minutes).toBe(120);
+  });
+
   it("generates unique id based on name and timestamp", () => {
     const result1 = buildCronJobSpec({
       cronExpression: "0 9 * * *",
@@ -329,5 +345,35 @@ describe("buildCronJobSpec", () => {
     expect(result1.id).toContain("任务A");
     expect(result2.id).toContain("任务B");
     expect(result1.id).not.toBe(result2.id);
+  });
+});
+
+describe("notification delay helpers", () => {
+  it("converts minutes and hours to stored minutes", () => {
+    expect(toNotificationDelayMinutes(45, "minutes")).toBe(45);
+    expect(toNotificationDelayMinutes(2, "hours")).toBe(120);
+  });
+
+  it("normalizes invalid delay values to zero", () => {
+    expect(toNotificationDelayMinutes(-1, "minutes")).toBe(0);
+    expect(toNotificationDelayMinutes(Number.NaN, "hours")).toBe(0);
+    expect(toNotificationDelayMinutes(null, "minutes")).toBe(0);
+  });
+
+  it("hydrates form values from stored minutes", () => {
+    expect(getNotificationDelayFormValue(120)).toEqual({
+      value: 2,
+      unit: "hours",
+    });
+    expect(getNotificationDelayFormValue(45)).toEqual({
+      value: 45,
+      unit: "minutes",
+    });
+  });
+
+  it("formats notification delay for display", () => {
+    expect(formatNotificationDelay(0)).toBe("立即通知");
+    expect(formatNotificationDelay(45)).toBe("45 分钟");
+    expect(formatNotificationDelay(120)).toBe("2 小时");
   });
 });

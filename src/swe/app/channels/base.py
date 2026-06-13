@@ -1004,6 +1004,63 @@ class BaseChannel(ABC):
 
         Override for post-processing (e.g. Feishu DONE reaction).
         """
+        await self._try_session_end_push(request, to_handle)
+
+    def _should_session_end_push(self) -> bool:
+        """Check if zhaohu session-end push is enabled via config."""
+        if self.channel == "zhaohu":
+            return False
+        if self._workspace is None:
+            return False
+        zhaohu_cfg = getattr(
+            self._workspace._config.channels,
+            "zhaohu",
+            None,
+        )
+        if zhaohu_cfg is None:
+            return False
+        return bool(getattr(zhaohu_cfg, "session_end_push_enabled", False))
+
+    async def _try_session_end_push(
+        self,
+        request: "AgentRequest",
+        to_handle: str,
+    ) -> None:
+        """If session-end push is enabled, send notification via zhaohu."""
+        if not self._should_session_end_push():
+            return
+        try:
+            cm = self._workspace.channel_manager
+            if cm is None:
+                return
+            zhaohu_ch = await cm.get_channel("zhaohu")
+            if zhaohu_ch is None:
+                return
+            query = self._extract_user_query(request)
+            if len(query) > 30:
+                prefix = query[:30]
+                text = f"{prefix}...任务已完成请及时查看"
+            else:
+                text = (
+                    f"{query}任务已完成请及时查看"
+                    if query
+                    else "任务已完成请及时查看"
+                )
+            await zhaohu_ch.send(to_handle, text)
+            logger.info("session-end push sent via zhaohu to %s", to_handle)
+        except Exception:
+            logger.exception("session-end push failed for %s", to_handle)
+
+    def _extract_user_query(self, request: "AgentRequest") -> str:
+        """Extract user's query text from request."""
+        user_input = getattr(request, "input", None) or []
+        for item in user_input:
+            for part in getattr(item, "content", []) or []:
+                if getattr(part, "type", None) == ContentType.TEXT:
+                    text = getattr(part, "text", None)
+                    if text:
+                        return text.strip()
+        return ""
 
     async def _on_consume_error(
         self,

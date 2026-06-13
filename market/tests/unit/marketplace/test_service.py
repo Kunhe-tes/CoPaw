@@ -430,7 +430,11 @@ async def test_recall_skill_by_name_removes_skill_dir_and_manifest(tmp_path):
 
 @pytest.mark.asyncio
 async def test_recall_mcp_by_name_removes_client_from_agent_config(tmp_path):
-    """按名称撤回 MCP 时，应从 agent 配置中移除目标 client."""
+    """按名称撤回 MCP 时，应从 agent 配置中移除目标 client.
+
+    撤回使用 mcp_name（name 字段）匹配，不依赖 dict key。
+    即使用户配置中的 dict key 与 name 不同，也能正确找到并移除。
+    """
     from market.marketplace.fs import resolve_effective_user_id
     from market.marketplace.schemas import RecallRequest
 
@@ -441,7 +445,6 @@ async def test_recall_mcp_by_name_removes_client_from_agent_config(tmp_path):
 
     user_id = "user-1"
     source_id = "source-1"
-    client_key = "mcp_client"
     effective_user_id = resolve_effective_user_id(user_id, source_id)
     agent_config_path = (
         tmp_path
@@ -457,8 +460,14 @@ async def test_recall_mcp_by_name_removes_client_from_agent_config(tmp_path):
             {
                 "mcp": {
                     "clients": {
-                        client_key: {"source": "marketplace:item-1"},
-                        "other_client": {"source": "marketplace:item-2"},
+                        "my-mcp-tool": {
+                            "name": "My MCP Tool",
+                            "source": "marketplace:item-1",
+                        },
+                        "other-client": {
+                            "name": "Other Client",
+                            "source": "marketplace:item-2",
+                        },
                     },
                 },
             },
@@ -467,17 +476,18 @@ async def test_recall_mcp_by_name_removes_client_from_agent_config(tmp_path):
         encoding="utf-8",
     )
 
+    # 按 mcp_name 撤回，dict key "my-mcp-tool" 与 name "My MCP Tool" 不同
     result = await svc.recall_mcp(
         source_id,
         None,
         "admin-1",
         "Admin",
-        RecallRequest(mcp_name=client_key, target_user_ids=[user_id]),
+        RecallRequest(mcp_name="My MCP Tool", target_user_ids=[user_id]),
     )
 
     config_data = json.loads(agent_config_path.read_text(encoding="utf-8"))
     assert result.recalled_count == 1
     assert result.failed_count == 0
     assert result.results[0].success is True
-    assert client_key not in config_data["mcp"]["clients"]
-    assert "other_client" in config_data["mcp"]["clients"]
+    assert "my-mcp-tool" not in config_data["mcp"]["clients"]
+    assert "other-client" in config_data["mcp"]["clients"]

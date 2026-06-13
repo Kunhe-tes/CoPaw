@@ -1,0 +1,171 @@
+.tenantSelector {
+  display: grid;
+  gap: 12px;
+}
+
+.sectionLabel {
+  font-weight: 500;
+}
+
+.hint {
+  margin-top: 8px;
+  color: #666;
+  font-size: 12px;
+}
+
+.loadingSpin {
+  margin-left: 16px;
+}
+
+/* 机构模式 */
+.modeSection {
+  display: grid;
+  gap: 8px;
+}
+
+.orgSection {
+  display: grid;
+  gap: 8px;
+}
+
+.orgSelect {
+  width: 100%;
+}
+
+/* 用户模式 */
+.userHeader {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 8px;
+}
+
+.actionButtons {
+  display: flex;
+  gap: 8px;
+}
+
+.filterSection {
+  display: grid;
+  gap: 4px;
+}
+
+/* 用户卡片网格 */
+.userGrid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+  gap: 8px;
+  max-height: 240px;
+  overflow-y: auto;
+}
+
+.userCard {
+  cursor: pointer;
+  border-radius: 8px;
+  border: 1px solid #d9d9d9;
+  background: #fff;
+  padding: 12px 14px;
+  text-align: left;
+  position: relative;
+  font-size: 12px;
+
+  &:hover {
+    border-color: #1677ff;
+  }
+}
+
+.userCardSelected {
+  border-color: #1677ff;
+  background: #eff6ff;
+}
+
+.checkIcon {
+  position: absolute;
+  right: 10px;
+  top: 8px;
+  color: #1677ff;
+}
+
+/* 已选标签 */
+.selectedTags {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.selectedCount {
+  font-size: 12px;
+  color: #666;
+}
+
+.tagList {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.selectedTag {
+  margin: 0;
+  padding: 2px 8px;
+  font-size: 12px;
+  border-radius: 4px;
+  cursor: default;
+}
+
+/* 无匹配提示 */
+.noMatchHint {
+  color: #999;
+  font-size: 12px;
+  padding: 16px;
+  text-align: center;
+}
+
+/* 额外ID输入 */
+.extraInputSection {
+  display: grid;
+  gap: 4px;
+}
+
+.manualInput {
+  width: 100%;
+  padding: 8px;
+  border-radius: 6px;
+  border: 1px solid #d9d9d9;
+  font-size: 12px;
+  resize: none;
+
+  &:focus {
+    border-color: #1677ff;
+    outline: none;
+  }
+}
+
+/* 机构折叠面板 */
+.collapseLabel {
+  font-size: 13px;
+}
+
+.collapseIcon {
+  margin-right: 6px;
+  color: #1677ff;
+}
+
+.collapseCount {
+  margin-left: 8px;
+  color: #999;
+}
+
+.userDetailGrid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(130px, 1fr));
+  gap: 4px;
+}
+
+.userDetailItem {
+  font-size: 12px;
+  color: #333;
+  padding: 2px 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}

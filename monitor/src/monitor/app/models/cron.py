@@ -481,6 +481,62 @@ class UnreadCountResponse(BaseModel):
     total_unread: int = Field(default=0, description="总未读数量")
 
 
+class CronOverviewMetricItem(BaseModel):
+    """Single metric item for the cron overview page."""
+
+    key: str = Field(..., description="Metric key")
+    value: float = Field(default=0, description="Metric value")
+    compare: str = Field(default="", description="Comparison text (e.g., '+12.5%')")
+    trend: Optional[str] = Field(default=None, description="Trend: 'up' or 'down'")
+
+
+class CronOverviewDistributionItem(BaseModel):
+    """Single distribution item for charts."""
+
+    name: str = Field(..., description="Item name")
+    value: int = Field(default=0, description="Item count")
+    percent: float = Field(default=0.0, description="Item percentage")
+    color: Optional[str] = Field(default=None, description="Item color")
+
+
+class CronOverviewBranchExecutionItem(BaseModel):
+    """Execution distribution for one branch."""
+
+    name: str = Field(..., description="Branch ID")
+    success: int = Field(default=0, description="Success count")
+    failed: int = Field(default=0, description="Failure count")
+    skipped: int = Field(default=0, description="Skipped count")
+
+
+class CronOverviewBranchReadItem(BaseModel):
+    """Read distribution for one branch."""
+
+    name: str = Field(..., description="Branch ID")
+    read: int = Field(default=0, description="Read success execution count")
+    unread: int = Field(default=0, description="Unread success execution count")
+
+
+class CronOverviewResponse(BaseModel):
+    """Aggregated response for the cron overview page."""
+
+    start_time: Optional[datetime] = Field(default=None, description="Range start")
+    end_time: Optional[datetime] = Field(default=None, description="Range end")
+    metrics: List[CronOverviewMetricItem] = Field(default_factory=list)
+    task_status: List[CronOverviewDistributionItem] = Field(default_factory=list)
+    execution_result: List[CronOverviewDistributionItem] = Field(
+        default_factory=list,
+    )
+    read_status: List[CronOverviewDistributionItem] = Field(default_factory=list)
+    failure_reasons: List[CronOverviewDistributionItem] = Field(
+        default_factory=list,
+    )
+    branch_tasks: List[CronOverviewDistributionItem] = Field(default_factory=list)
+    branch_execution: List[CronOverviewBranchExecutionItem] = Field(
+        default_factory=list,
+    )
+    branch_read: List[CronOverviewBranchReadItem] = Field(default_factory=list)
+
+
 class SubscriptionOverviewItem(BaseModel):
     """订阅任务概览聚合项。"""
 

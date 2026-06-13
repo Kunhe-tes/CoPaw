@@ -86,9 +86,15 @@ utils_module = importlib.reload(utils_module)
 
 TenantContextError = context_module.TenantContextError
 encode_scope_id = context_module.encode_scope_id
+resolve_storage_tenant_id = context_module.resolve_storage_tenant_id
 tenant_context = context_module.tenant_context
 get_tenant_working_dir_strict = utils_module.get_tenant_working_dir_strict
 get_tenant_config_path_strict = utils_module.get_tenant_config_path_strict
+get_tenant_storage_config_path = utils_module.get_tenant_storage_config_path
+get_tenant_storage_providers_dir = (
+    utils_module.get_tenant_storage_providers_dir
+)
+get_tenant_storage_working_dir = utils_module.get_tenant_storage_working_dir
 list_logical_tenant_ids = utils_module.list_logical_tenant_ids
 WORKING_DIR = utils_module.WORKING_DIR
 
@@ -210,6 +216,31 @@ class TestTenantPathStrictHelpers:
             path = get_tenant_working_dir_strict(tenant_id)
 
         assert path == WORKING_DIR / encode_scope_id(tenant_id, "ruice")
+
+
+class TestStorageTenantPathHelpers:
+    """Tests for storage-aware tenant path helpers."""
+
+    def test_resolve_storage_tenant_for_default_source_uses_template_dir(
+        self,
+    ):
+        assert resolve_storage_tenant_id("default", "ruice") == "default_ruice"
+
+    def test_storage_working_dir_keeps_template_dir_raw(self):
+        path = get_tenant_storage_working_dir("default_ruice")
+        assert path == WORKING_DIR / "default_ruice"
+
+    def test_storage_config_path_for_default_source_uses_template_dir(self):
+        with tenant_context(tenant_id="default", source_id="ruice"):
+            path = get_tenant_storage_config_path("default")
+
+        assert path == WORKING_DIR / "default_ruice" / "config.json"
+
+    def test_storage_providers_dir_for_default_source_uses_template_dir(self):
+        with tenant_context(tenant_id="default", source_id="ruice"):
+            path = get_tenant_storage_providers_dir("default")
+
+        assert path == utils_module.SECRET_DIR / "default_ruice" / "providers"
 
 
 class TestLegacyScopeDirectoryLookup:
@@ -374,7 +405,47 @@ class TestLogicalTenantListing:
 
         result = await list_logical_tenant_ids("ruice", source_filter=True)
         assert result == ["tenant-a", "tenant-b"]
-        fake_store.get_by_source.assert_called_once_with("ruice")
+        fake_store.get_by_source.assert_called_once_with(
+            "ruice",
+            include_templates=False,
+        )
+
+    async def test_source_filter_can_include_template_tenants(
+        self,
+        monkeypatch,
+    ):
+        """source_filter=True 可按需返回 template 租户。"""
+        fake_store = AsyncMock()
+        fake_store.get_by_source.return_value = [
+            {
+                "tenant_id": "default_ruice",
+                "source_id": "ruice",
+                "tenant_type": "template",
+            },
+            {"tenant_id": "tenant-a", "source_id": "ruice"},
+        ]
+
+        monkeypatch.setitem(
+            sys.modules,
+            "swe.app.workspace.tenant_init_source_store",
+            tenant_init_source_store_stub,
+        )
+        monkeypatch.setattr(
+            tenant_init_source_store_stub,
+            "get_tenant_init_source_store",
+            lambda: fake_store,
+        )
+
+        result = await list_logical_tenant_ids(
+            "ruice",
+            source_filter=True,
+            include_templates=True,
+        )
+        assert result == ["default_ruice", "tenant-a"]
+        fake_store.get_by_source.assert_called_once_with(
+            "ruice",
+            include_templates=True,
+        )
 
     async def test_source_filter_returns_empty_when_store_unavailable(
         self,

@@ -110,6 +110,31 @@ class ZhaohuChannelBindingStore:
             )
             return None
 
+    async def get_source_id_by_robot(
+        self,
+        tenant_id: str,
+        robot_id: str,
+    ) -> Optional[str]:
+        """按 (tenant_id, robot_id) 查询 source_id"""
+        db = self._use_db()
+        if db is None:
+            return None
+
+        sql = f"""
+            SELECT source_id FROM {_BINDING_TABLE}
+            WHERE tenant_id = %s AND robot_id = %s
+        """
+        try:
+            row = await db.fetch_one(sql, (tenant_id, robot_id))
+            return row["source_id"] if row else None
+        except Exception:
+            logger.exception(
+                "get_source_id_by_robot 失败: tenant_id=%s, robot_id=%s",
+                tenant_id,
+                robot_id,
+            )
+            return None
+
     async def get_binding_by_open_id(
         self,
         open_id: str,

@@ -87,6 +87,8 @@ def test_build_broadcast_job_uses_target_tenant_and_current_source() -> None:
         source_job,
         job_id="job-broadcast",
         target_tenant_id="tenant-b",
+        target_tenant_name="目标租户",
+        target_bbk_id="3301",
         source_id="source-a",
         cron="0 8 * * *",
         timezone_name="Asia/Shanghai",
@@ -98,6 +100,8 @@ def test_build_broadcast_job_uses_target_tenant_and_current_source() -> None:
     assert target_job.tenant_id == "tenant-b"
     assert target_job.source_id == "source-a"
     assert target_job.scope_id == encode_scope_id("tenant-b", "source-a")
+    assert target_job.tenant_name == "目标租户"
+    assert target_job.bbk_id == "3301"
     assert target_job.dispatch.target.user_id == "tenant-b"
     assert target_job.request is not None
     assert target_job.request.user_id == "tenant-b"
@@ -155,6 +159,30 @@ async def test_scheduler_payload_keeps_full_normalized_cron() -> None:
 
     _, payload = adapter.requests[0]
     assert payload["jobCron"] == "0 0 9,10,11,12,13 * * ?"
+
+
+@pytest.mark.asyncio
+async def test_scheduler_payload_converts_weekdays_without_mutating_input() -> (
+    None
+):
+    """仅外部 payload 转换星期编号，内部 cron 值保持标准 crontab 语义。"""
+    adapter = CapturingSchedulerAdapter()
+    cron = "0 9 * * 1-5"
+
+    await adapter.register_job(
+        tenant_id="tenant-a",
+        source_id="source-a",
+        agent_id="default",
+        task_type="job",
+        job_id="job-1",
+        job_name="weekday-window",
+        cron=cron,
+        callback_url="http://swe.local/api/internal/cron/callback",
+    )
+
+    _, payload = adapter.requests[0]
+    assert cron == "0 9 * * 1-5"
+    assert payload["jobCron"] == "0 0 9 ? * 2-6"
 
 
 @pytest.mark.asyncio

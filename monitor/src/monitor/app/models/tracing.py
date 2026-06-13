@@ -314,6 +314,12 @@ class TaskStatusSummary(BaseModel):
     cancelled: int = 0  # 已取消/跳过次数
     read_count: int = 0  # 已读次数
     new_cron_tasks: int = 0  # 新增定时任务数（本时间段内创建的）
+    # 点击数统计
+    click_count: int = 0  # 点击数（按 cron_task_id 去重）
+    click_by_button_type: dict[str, int] = Field(
+        default_factory=dict,
+        description="按 button_type 分类的点击数",
+    )
 
 
 class ErrorSummary(BaseModel):
@@ -547,6 +553,10 @@ class UserListItem(BaseModel):
     total_tokens: int = 0
     total_skills: int = 0
     last_active: Optional[datetime] = None
+    # 三个口径统计字段
+    manual_calls: int = Field(default=0, description="主动使用次数")
+    cron_executions: int = Field(default=0, description="定时任务执行数")
+    cron_reads: int = Field(default=0, description="定时任务结果查看数")
 
 
 class TraceListItem(BaseModel):
@@ -689,7 +699,8 @@ class SessionRoundTrace(BaseModel):
     input_tokens: int = Field(default=0, description="输入 Token")
     output_tokens: int = Field(default=0, description="输出 Token")
     tools_used: list[str] = Field(
-        default_factory=list, description="使用的工具"
+        default_factory=list,
+        description="使用的工具",
     )
     error: Optional[str] = Field(default=None, description="错误信息")
     is_error_round: bool = Field(default=False, description="是否是报错轮次")
@@ -703,11 +714,13 @@ class SessionTracesResponse(BaseModel):
     user_id: str = Field(description="用户 ID")
     user_name: Optional[str] = Field(default=None, description="用户名称")
     traces: list[SessionRoundTrace] = Field(
-        default_factory=list, description="所有轮次"
+        default_factory=list,
+        description="所有轮次",
     )
     total_rounds: int = Field(default=0, description="总轮次")
     error_round_index: Optional[int] = Field(
-        default=None, description="报错轮次索引（从0开始）"
+        default=None,
+        description="报错轮次索引（从0开始）",
     )
 
 
@@ -722,7 +735,8 @@ class InputTokensMismatchItem(BaseModel):
     )
     user_id: Optional[str] = Field(default=None, description="用户ID")
     start_time: Optional[datetime] = Field(
-        default=None, description="对话开始时间"
+        default=None,
+        description="对话开始时间",
     )
 
 

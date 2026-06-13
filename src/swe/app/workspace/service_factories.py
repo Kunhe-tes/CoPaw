@@ -60,15 +60,19 @@ async def create_channel_service(ws: "Workspace", service):
         ws._service_manager.services["channel_manager"] = service
         return service
 
-    if not ws._config.channels:
-        return None
-
-    from ...config.config import Config
+    from ...config.config import Config, normalize_channel_config_set
     from ...config.utils import update_last_dispatch
     from ..channels.manager import ChannelManager
     from ..channels.utils import make_process_from_runner
 
-    temp_config = Config(channels=ws._config.channels)
+    normalized_channels = normalize_channel_config_set(
+        ws._config.channels,
+        materialize_missing_console=True,
+    )
+    if not normalized_channels:
+        return None
+
+    temp_config = Config(channels=normalized_channels)
     runner = ws._service_manager.services["runner"]
 
     def on_last_dispatch(channel, user_id, session_id):

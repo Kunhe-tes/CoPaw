@@ -27,6 +27,7 @@ from ...marketplace.schemas import (
     UpdateMarketMCPMetadataRequest,
     UploadMCPResponse,
 )
+from ...marketplace.service import MCPNameConflictError
 from ...marketplace.fs import (
     load_mcp_config,
     load_index,
@@ -199,7 +200,20 @@ async def publish_mcp(
     source_id = require_source_id(x_source_id)
     _require_manager(x_manager)
     svc = request.app.state.marketplace
-    item = await svc.publish_mcp(source_id, req)
+    try:
+        item = await svc.publish_mcp(source_id, req)
+    except MCPNameConflictError as exc:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "message": str(exc),
+                "existing_item_id": exc.existing_item_id,
+                "existing_name": exc.existing_name,
+                "existing_creator_id": exc.existing_creator_id,
+                "existing_creator_name": exc.existing_creator_name,
+                "existing_version": exc.existing_version,
+            },
+        ) from exc
     return MarketMCPItem(
         item_id=item.item_id,
         client_key=item.client_key,
@@ -260,6 +274,8 @@ async def upload_mcp(
     final_name = form.name or inferred_name
 
     # 构建发布请求
+    # 从上传的 config 中提取 version（如有），确保手动上传也能携带版本号
+    uploaded_version = config.get("version", "")
     req = PublishMCPRequest(
         client_key=client_key,
         name=final_name,
@@ -271,12 +287,19 @@ async def upload_mcp(
         category_id=None,
         bbk_ids=json.loads(form.bbk_ids) if form.bbk_ids else [],
         config=config,
+        version=uploaded_version,
+        overwrite=True,  # 管理员手动上传即意图覆盖同名条目
     )
 
     svc = request.app.state.marketplace
     try:
         await svc.publish_mcp(source_id, req)
         return UploadMCPResponse(success=True)
+    except MCPNameConflictError as exc:
+        return UploadMCPResponse(
+            success=False,
+            error=str(exc),
+        )
     except Exception as e:
         return UploadMCPResponse(success=False, error=str(e))
 

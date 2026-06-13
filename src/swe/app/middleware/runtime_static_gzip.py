@@ -6,6 +6,7 @@ from starlette.types import ASGIApp, Receive, Scope, Send
 
 _RUNTIME_STATIC_PREFIX = "/static/"
 _HTML_SUFFIXES = (".html", ".htm")
+_DEFAULT_COMPRESS_LEVEL = 3
 
 
 def is_runtime_static_html_path(path: str) -> bool:
@@ -43,7 +44,7 @@ class RuntimeStaticGZipMiddleware:
         self,
         app: ASGIApp,
         minimum_size: int = 500,
-        compresslevel: int = 6,
+        compresslevel: int = _DEFAULT_COMPRESS_LEVEL,
     ) -> None:
         self.app = app
         self.gzip_app = GZipMiddleware(

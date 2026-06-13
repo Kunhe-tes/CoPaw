@@ -10,9 +10,13 @@ from typing import Any, Generator
 from swe.config.config import ToolResultCompactConfig
 
 from .registry import (
+    CRON_UNREAD_AUTO_PAUSE_ENABLED_SETTING,
+    CRON_UNREAD_AUTO_PAUSE_THRESHOLD_SETTING,
     FILE_READ_TRUNCATION_ENABLED_SETTING,
     FILE_READ_TRUNCATION_MAX_BYTES_SETTING,
     SourceSystemConfigSetting,
+    get_system_prompt_injections as _get_system_prompt_injections,
+    merge_source_system_config_with_defaults,
     normalize_registered_setting_values,
 )
 from .models import EffectiveSourceSystemConfig
@@ -30,6 +34,14 @@ class ImmediateTruncationConfig:
     enabled: bool
     max_bytes: int
     explicit: bool
+
+
+@dataclass(frozen=True)
+class CronUnreadAutoPauseConfig:
+    """定时任务未读自动暂停的运行时配置。"""
+
+    enabled: bool
+    threshold: int
 
 
 @contextmanager
@@ -119,6 +131,46 @@ def resolve_file_read_truncation_config(
     )
 
 
+def resolve_cron_unread_auto_pause_config(
+    source_config: Any | None = None,
+) -> CronUnreadAutoPauseConfig:
+    """解析当前 source 的定时任务未读自动暂停配置。"""
+    raw_config = _extract_config_payload(source_config)
+    merged = merge_source_system_config_with_defaults(raw_config)
+    raw_section = merged.get("cron_unread_auto_pause")
+    section = raw_section if isinstance(raw_section, dict) else {}
+    normalized = normalize_registered_setting_values(
+        {"cron_unread_auto_pause": section},
+    )
+    normalized_section = normalized.get("cron_unread_auto_pause")
+    if not isinstance(normalized_section, dict):
+        normalized_section = {}
+    return CronUnreadAutoPauseConfig(
+        enabled=bool(
+            normalized_section.get(
+                "enabled",
+                CRON_UNREAD_AUTO_PAUSE_ENABLED_SETTING.default_value,
+            ),
+        ),
+        threshold=int(
+            normalized_section.get(
+                "threshold",
+                CRON_UNREAD_AUTO_PAUSE_THRESHOLD_SETTING.default_value,
+            ),
+        ),
+    )
+
+
+def get_system_prompt_injections(source_config: Any | None = None) -> list[str]:
+    """读取当前 source 的系统提示词注入配置。"""
+    config = (
+        get_current_source_system_config()
+        if source_config is None
+        else source_config
+    )
+    return _get_system_prompt_injections(config)
+
+
 def _get_source_config_id(source_config: Any | None) -> str:
     """尽量提取 source 标识，日志缺少上下文时回退为 unknown。"""
     config = (
@@ -201,6 +253,26 @@ def _extract_raw_config_payload(source_config: Any | None) -> dict[str, Any]:
         return config.as_dict()
     if hasattr(config, "config") and not isinstance(config, dict):
         return _extract_raw_config_payload(getattr(config, "config"))
+    if isinstance(config, dict):
+        return dict(config)
+    return {}
+
+
+def _extract_config_payload(source_config: Any | None) -> dict[str, Any]:
+    """读取可包含默认值的 effective 配置，缺省时返回空对象。"""
+    config = (
+        get_current_source_system_config()
+        if source_config is None
+        else source_config
+    )
+    if config is None:
+        return {}
+    if isinstance(config, EffectiveSourceSystemConfig):
+        return config.config.as_dict()
+    if hasattr(config, "config") and not isinstance(config, dict):
+        return _extract_config_payload(getattr(config, "config"))
+    if hasattr(config, "as_dict"):
+        return config.as_dict()
     if isinstance(config, dict):
         return dict(config)
     return {}

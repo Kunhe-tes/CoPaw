@@ -1,4 +1,9 @@
-## ADDED Requirements
+# scheduled-task-popup Specification
+
+## Purpose
+Define the scheduled task popup behavior for creating cron jobs from case details, including execution schedule selection and optional execution model selection.
+
+## Requirements
 
 ### Requirement: Popup modal display
 When the user clicks "订阅为定时任务" in the CaseDetailDrawer, the system SHALL display a modal popup titled "定时设置" with frequency selection tabs (每天/每周/每月), time picker, and confirm/cancel buttons.
@@ -140,12 +145,36 @@ When the user confirms the popup, the system SHALL generate a valid cron express
 - **WHEN** user confirms monthly frequency with dates 1, 15 and time 10:00
 - **THEN** cron expression `0 0 10 1,15 * *` is generated
 
+### Requirement: Execution model selection
+The scheduled task popup SHALL allow users to choose between the tenant default model and an explicit configured provider/model when creating an agent scheduled task from case details.
+
+#### Scenario: Popup defaults to tenant default model
+- **WHEN** the ScheduledTaskPopup opens
+- **THEN** the execution model selector SHALL default to tenant default model
+- **AND** confirming the popup in that state SHALL create a cron job without `model_slot`
+
+#### Scenario: Popup submits explicit model slot
+- **WHEN** the user selects a configured provider/model in the ScheduledTaskPopup and confirms
+- **THEN** the created cron job payload SHALL include top-level `model_slot` with the selected `provider_id` and `model`
+
+#### Scenario: Popup only lists configured tenant models
+- **WHEN** the ScheduledTaskPopup loads execution model options
+- **THEN** it SHALL list only provider/model choices from the current tenant's configured providers and their `models + extra_models`
+
 ### Requirement: Scheduled task creation
-When the user confirms the popup with valid settings, the system SHALL create a scheduled task via the cronjob API using the case data from the parent component.
+When the user confirms the popup with valid settings, the system SHALL create a scheduled task via the cronjob API using the case data from the parent component and the selected execution model behavior.
 
 #### Scenario: Create scheduled task from case
 - **WHEN** user confirms popup with caseData present and valid settings
 - **THEN** a CronJobSpecInput is created with schedule.cron from generated expression, dispatch targeting the current user/session, and the case input data
+
+#### Scenario: Create scheduled task with default model
+- **WHEN** user confirms popup while the execution model selector is set to tenant default model
+- **THEN** the CronJobSpecInput SHALL NOT include `model_slot`
+
+#### Scenario: Create scheduled task with explicit model
+- **WHEN** user confirms popup after selecting a configured provider/model
+- **THEN** the CronJobSpecInput SHALL include top-level `model_slot` with the selected provider and model
 
 #### Scenario: API success feedback
 - **WHEN** the cronjob creation API call succeeds

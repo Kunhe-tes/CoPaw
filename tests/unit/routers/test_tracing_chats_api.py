@@ -8,6 +8,7 @@ from types import SimpleNamespace
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
+from swe.app.identity_resolver import ResolvedIdentity
 from swe.app.routers.tracing import router
 from swe.app.runner.models import ChatSpec
 from swe.config.context import resolve_scope_id
@@ -158,6 +159,40 @@ def test_get_user_chats_reads_target_user_workspace() -> None:
             "source_id": "CMSJY",
             "tenant_name": None,
             "bbk_id": "100",
+            "scope_id": None,
+        },
+    ]
+
+
+def test_get_user_chats_resolves_identity_before_bootstrap(
+    monkeypatch,
+) -> None:
+    client, _, _, pool = _client()
+
+    async def fake_resolve_user_identity(**kwargs):
+        assert kwargs["tenant_id"] == "target-user"
+        assert kwargs["source_id"] == "CMSJY"
+        assert kwargs["allow_remote_lookup"] is True
+        return ResolvedIdentity(user_name="目标用户", bbk_id="2002")
+
+    monkeypatch.setattr(
+        "swe.app.routers.tracing.resolve_user_identity",
+        fake_resolve_user_identity,
+    )
+
+    response = client.get(
+        "/tracing/chats",
+        params={"user_id": "target-user"},
+        headers={"X-Source-Id": "CMSJY"},
+    )
+
+    assert response.status_code == 200
+    assert pool.calls == [
+        {
+            "tenant_id": "target-user",
+            "source_id": "CMSJY",
+            "tenant_name": "目标用户",
+            "bbk_id": "2002",
             "scope_id": None,
         },
     ]

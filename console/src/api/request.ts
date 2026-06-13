@@ -89,7 +89,22 @@ async function throwRequestError(response: Response): Promise<never> {
     ? `${errorMessage} - ${text}`
     : `Request failed: ${response.status} ${response.statusText}`;
 
-  throw new Error(finalMessage);
+  const error = new Error(finalMessage);
+  // 将 HTTP 状态码和解析后的响应体挂载到 Error 上，
+  // 方便调用方根据 status / data 做差异化处理（如 409 同名冲突）。
+  (error as Error & { status?: number; data?: unknown }).status =
+    response.status;
+
+  if (contentType.includes("application/json") && text) {
+    try {
+      (error as Error & { status?: number; data?: unknown }).data =
+        JSON.parse(text);
+    } catch {
+      // 忽略 JSON 解析失败
+    }
+  }
+
+  throw error;
 }
 
 function throwLocalAuthError(): never {

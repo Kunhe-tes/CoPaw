@@ -28,7 +28,6 @@ import {
   isActiveChatRequestOwner,
   type ChatRequestOwner,
 } from "./requestOwnership";
-import { createChatStreamAbortReason } from "./abortReasons";
 // import mockdata from '../../mock/mock.json'
 
 /**
@@ -86,6 +85,7 @@ export default function useChatController() {
         owner?.sessionId ?? currentQARef.current.activeRequestOwner?.sessionId,
         messageHandler.getMessages(),
         false,
+        { refreshList: false },
       );
 
       if (
@@ -389,7 +389,7 @@ export default function useChatController() {
     [createRequestOwner, messageHandler, reconnect, setLoading],
   );
 
-  // 监听会话切换，断开当前 SSE 连接（不通知后端取消）并重置状态
+  // 监听会话切换：解除当前 UI 归属，保留旧流读取标题等元信息帧。
   useEffect(() => {
     const previousSessionId = previousSessionIdRef.current;
     previousSessionIdRef.current = currentSessionId;
@@ -401,9 +401,6 @@ export default function useChatController() {
     }
 
     followUpSessionIdRef.current = undefined;
-    currentQARef.current.abortController?.abort(
-      createChatStreamAbortReason("detach"),
-    );
     currentQARef.current = {
       request: undefined,
       response: undefined,

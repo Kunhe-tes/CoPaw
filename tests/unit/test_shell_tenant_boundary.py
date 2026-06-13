@@ -24,6 +24,7 @@ from swe.config.context import encode_scope_id, tenant_context
 from swe.config.config import Config
 from swe.config.utils import save_config
 from swe.envs.store import save_envs
+from swe.agents.tool_failure import ToolExecutionError
 from swe.agents.tools.shell import (
     execute_shell_command,
     _extract_path_tokens,
@@ -119,6 +120,16 @@ def _write_scope_env(
 ) -> None:
     scope_id = encode_scope_id(tenant_id, source_id)
     save_envs(envs, base_dir / scope_id / ".secret" / "envs.json")
+
+
+def _assert_tool_error(
+    exc_info: pytest.ExceptionInfo[ToolExecutionError],
+    *,
+    error_type: str,
+    detail_contains: str,
+) -> None:
+    assert exc_info.value.error_type == error_type
+    assert detail_contains in exc_info.value.detail
 
 
 # =============================================================================
@@ -702,9 +713,14 @@ class TestExecuteShellCommand:
         other_dir = mock_working_dir / "other_tenant"
 
         with tenant_context(tenant_id="test_tenant"):
-            result = await execute_shell_command("ls", cwd=other_dir)
+            with pytest.raises(ToolExecutionError) as exc_info:
+                await execute_shell_command("ls", cwd=other_dir)
 
-            assert "outside the tenant workspace" in result.content[0]["text"]
+        _assert_tool_error(
+            exc_info,
+            error_type="permission_denied",
+            detail_contains="outside the tenant workspace",
+        )
 
     @pytest.mark.asyncio
     async def test_rejects_cross_tenant_path_in_command(
@@ -716,9 +732,14 @@ class TestExecuteShellCommand:
 
         with tenant_context(tenant_id="test_tenant"):
             other_path = mock_working_dir / "other_tenant/secret.txt"
-            result = await execute_shell_command(f"cat {other_path}")
+            with pytest.raises(ToolExecutionError) as exc_info:
+                await execute_shell_command(f"cat {other_path}")
 
-            assert "outside the allowed workspace" in result.content[0]["text"]
+        _assert_tool_error(
+            exc_info,
+            error_type="permission_denied",
+            detail_contains="outside the allowed workspace",
+        )
 
     @pytest.mark.asyncio
     async def test_allows_valid_relative_paths(self, mock_working_dir: Path):
@@ -741,11 +762,16 @@ class TestExecuteShellCommand:
         from swe.agents.tools.shell import execute_shell_command
 
         with tenant_context(tenant_id="test_tenant"):
-            result = await execute_shell_command(
-                "cat ../other_tenant/secret.txt",
-            )
+            with pytest.raises(ToolExecutionError) as exc_info:
+                await execute_shell_command(
+                    "cat ../other_tenant/secret.txt",
+                )
 
-            assert "outside the allowed workspace" in result.content[0]["text"]
+        _assert_tool_error(
+            exc_info,
+            error_type="permission_denied",
+            detail_contains="outside the allowed workspace",
+        )
 
     @pytest.mark.asyncio
     async def test_rejects_code_exec_in_command(self, mock_working_dir: Path):
@@ -753,9 +779,14 @@ class TestExecuteShellCommand:
         from swe.agents.tools.shell import execute_shell_command
 
         with tenant_context(tenant_id="test_tenant"):
-            result = await execute_shell_command('bash -c "echo hello"')
+            with pytest.raises(ToolExecutionError) as exc_info:
+                await execute_shell_command('bash -c "echo hello"')
 
-            assert "code execution flags" in result.content[0]["text"]
+        _assert_tool_error(
+            exc_info,
+            error_type="invalid_arguments",
+            detail_contains="code execution flags",
+        )
 
     @pytest.mark.asyncio
     async def test_python_runtime_guard_rejects_dynamic_open_outside_tenant(
@@ -772,11 +803,16 @@ class TestExecuteShellCommand:
         )
 
         with tenant_context(tenant_id="test_tenant"):
-            result = await execute_shell_command(
-                f"python -c {shlex.quote(code)}",
-            )
+            with pytest.raises(ToolExecutionError) as exc_info:
+                await execute_shell_command(
+                    f"python -c {shlex.quote(code)}",
+                )
 
-        assert "outside the allowed workspace" in result.content[0]["text"]
+        _assert_tool_error(
+            exc_info,
+            error_type="permission_denied",
+            detail_contains="outside the allowed workspace",
+        )
 
     @pytest.mark.asyncio
     async def test_python_runtime_guard_allows_dynamic_open_inside_tenant(
@@ -815,11 +851,16 @@ class TestExecuteShellCommand:
         )
 
         with tenant_context(tenant_id="test_tenant"):
-            result = await execute_shell_command(
-                f"python -c {shlex.quote(code)}",
-            )
+            with pytest.raises(ToolExecutionError) as exc_info:
+                await execute_shell_command(
+                    f"python -c {shlex.quote(code)}",
+                )
 
-        assert "outside the allowed workspace" in result.content[0]["text"]
+        _assert_tool_error(
+            exc_info,
+            error_type="permission_denied",
+            detail_contains="outside the allowed workspace",
+        )
 
     @pytest.mark.asyncio
     async def test_disabled_process_limit_policy_does_not_inject_preexec(
@@ -972,12 +1013,17 @@ class TestExecuteShellCommand:
         )
 
         with tenant_context(tenant_id="test_tenant"):
-            result = await execute_shell_command(
-                'python -c "while True: pass"',
-                timeout=10,
-            )
+            with pytest.raises(ToolExecutionError) as exc_info:
+                await execute_shell_command(
+                    'python -c "while True: pass"',
+                    timeout=10,
+                )
 
-        assert "TimeoutError" in result.content[0]["text"]
+        _assert_tool_error(
+            exc_info,
+            error_type="tool_timeout",
+            detail_contains="TimeoutError",
+        )
 
     @pytest.mark.asyncio
     @pytest.mark.skipif(
@@ -1013,9 +1059,14 @@ class TestExecuteShellCommand:
             side_effect=_fake_create_subprocess_shell,
         ):
             with tenant_context(tenant_id="test_tenant"):
-                result = await execute_shell_command("echo hello", timeout=10)
+                with pytest.raises(ToolExecutionError) as exc_info:
+                    await execute_shell_command("echo hello", timeout=10)
 
-        assert "MemoryError" in result.content[0]["text"]
+        _assert_tool_error(
+            exc_info,
+            error_type="shell_command_failed",
+            detail_contains="MemoryError",
+        )
 
     @pytest.mark.asyncio
     async def test_shell_unsupported_platform_returns_diagnostic(
@@ -1076,6 +1127,11 @@ class TestExecuteShellCommand:
             side_effect=AssertionError("runtime env should not be built"),
         ):
             with tenant_context(tenant_id="test_tenant", source_id="source-a"):
-                result = await execute_shell_command("cat /etc/passwd")
+                with pytest.raises(ToolExecutionError) as exc_info:
+                    await execute_shell_command("cat /etc/passwd")
 
-        assert "outside the allowed workspace" in result.content[0]["text"]
+        _assert_tool_error(
+            exc_info,
+            error_type="permission_denied",
+            detail_contains="outside the allowed workspace",
+        )

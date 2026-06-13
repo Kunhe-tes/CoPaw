@@ -60,11 +60,26 @@ class ChatMessage(Message):
 class ChatHistory(BaseModel):
     """Complete chat view with spec and state."""
 
+    chat: ChatSpec | None = Field(
+        default=None,
+        description="Chat metadata for direct detail loading",
+    )
     messages: list[ChatMessage] = Field(default_factory=list)
     status: str = Field(
         default="idle",
         description="Conversation status: idle, running, or stopping",
     )
+
+
+class ChatPage(BaseModel):
+    """Paginated chat list response."""
+
+    items: list[ChatSpec] = Field(default_factory=list)
+    total: int = Field(ge=0)
+    page: int = Field(ge=1)
+    page_size: int = Field(ge=1)
+    has_more: bool
+    next_cursor: str | None = None
 
 
 class ChatsFile(BaseModel):

@@ -1,9 +1,8 @@
 # -*- coding: utf-8 -*-
-"""Shell command interceptor for tenant isolation.
+"""Shell 命令拦截器。
 
-This module provides command interception mechanism that automatically
-injects tenant isolation parameters (--tenant-id, --target-user, etc.)
-from ContextVar into specific commands like 'cron' and 'swe'.
+该模块负责在 Agent 执行特定 shell 命令前，按当前租户、来源和用户
+上下文自动补充隔离参数，避免 cron 等命令落到错误的运行时范围。
 """
 
 from __future__ import annotations
@@ -14,7 +13,6 @@ from dataclasses import dataclass
 from typing import List, Tuple
 
 from ...config.context import (
-    get_current_effective_tenant_id,
     get_current_source_id,
     get_current_tenant_id,
     get_current_user_id,
@@ -25,17 +23,15 @@ logger = logging.getLogger(__name__)
 
 @dataclass
 class InterceptRule:
-    """Rule for intercepting and modifying shell commands."""
+    """描述一个 shell 命令拦截规则。"""
 
-    command_prefix: str  # 匹配的命令前缀，如 "cron" 或 "swe cron"
-    inject_params: List[str]  # 需注入的参数名，如 ["--tenant-id"]
-    # 注入位置："after_subcommand" 或 "at_end"
+    command_prefix: str
+    inject_params: List[str]
     inject_position: str = "after_subcommand"
 
 
-# 拦截规则定义 - 按优先级排序（更具体的规则在前）
+# 更具体的规则放在前面，避免被通用前缀提前匹配。
 INTERCEPT_RULES: List[InterceptRule] = [
-    # swe cron create 需要注入 tenant-id 和 target-user
     InterceptRule(
         command_prefix="swe cron create",
         inject_params=[
@@ -46,7 +42,6 @@ INTERCEPT_RULES: List[InterceptRule] = [
         ],
         inject_position="at_end",
     ),
-    # swe cron 其他子命令只需注入 tenant-id
     InterceptRule(
         command_prefix="swe cron",
         inject_params=["--tenant-id", "--source-id"],
@@ -56,30 +51,19 @@ INTERCEPT_RULES: List[InterceptRule] = [
 
 
 def _has_param(tokens: List[str], param_name: str) -> bool:
-    """Check if command already has the parameter.
+    """检查命令中是否已经显式传入指定参数。"""
 
-    Handles both formats:
-    - --tenant-id value (param at index i, value at i+1)
-    - --tenant-id=value (param with embedded value)
-
-    Args:
-        tokens: List of command tokens
-        param_name: Parameter name to check (e.g., "--tenant-id")
-
-    Returns:
-        True if parameter already exists in command
-    """
     for token in tokens:
-        # Check --param=value format
         if token.startswith(f"{param_name}="):
             return True
-        # Check --param format (standalone parameter)
         if token == param_name:
             return True
     return False
 
 
 def _is_swe_cron_group_help(tokens: List[str]) -> bool:
+    """cron 组级帮助命令不注入租户参数，避免破坏 help 输出。"""
+
     return (
         len(tokens) == 3
         and tokens[0] == "swe"
@@ -88,106 +72,166 @@ def _is_swe_cron_group_help(tokens: List[str]) -> bool:
     )
 
 
-def intercept_command(command: str) -> Tuple[str, bool]:
-    """Intercept and modify command with tenant isolation params.
+def _split_by_shell_and(command: str) -> List[str]:
+    """按未被引号包裹的 && 拆分命令，并保留分隔符用于原样拼回。"""
 
-    Automatically injects --tenant-id and --target-user/--user-id from
-    ContextVar for commands matching INTERCEPT_RULES. Skips injection
-    if the parameter already exists in the original command.
+    parts: List[str] = []
+    start = 0
+    quote: str | None = None
+    escaped = False
+    index = 0
+    while index < len(command):
+        char = command[index]
+        if escaped:
+            escaped = False
+            index += 1
+            continue
+        if char == "\\" and quote != "'":
+            escaped = True
+            index += 1
+            continue
+        if quote is not None:
+            if char == quote:
+                quote = None
+            index += 1
+            continue
+        if char in {"'", '"'}:
+            quote = char
+            index += 1
+            continue
+        if (
+            char == "&"
+            and index + 1 < len(command)
+            and command[index + 1] == "&"
+        ):
+            parts.append(command[start:index])
+            parts.append("&&")
+            index += 2
+            start = index
+            continue
+        index += 1
+    parts.append(command[start:])
+    return parts
 
-    Args:
-        command: Original shell command string
 
-    Returns:
-        Tuple of (modified_command, was_intercepted)
-    """
-    tenant_id = get_current_tenant_id()
-    source_id = get_current_source_id()
-    user_id = get_current_user_id()
+def _build_inject_parts(
+    tokens: List[str],
+    rule: InterceptRule,
+    *,
+    tenant_id: str | None,
+    source_id: str | None,
+    user_id: str | None,
+) -> List[str]:
+    """根据当前上下文构造需要追加的参数片段。"""
 
-    # 如果没有用户上下文，不修改命令
-    if tenant_id is None and user_id is None:
+    inject_parts: List[str] = []
+    for param in rule.inject_params:
+        if _has_param(tokens, param):
+            logger.debug(
+                "Shell interceptor: skipping %s, already exists in command",
+                param,
+            )
+            continue
+        if param == "--tenant-id" and tenant_id:
+            inject_parts.append(f"{param} {tenant_id}")
+        elif param == "--source-id" and source_id:
+            inject_parts.append(f"{param} {source_id}")
+        elif param == "--target-user" and user_id:
+            inject_parts.append(f"{param} {user_id}")
+        elif param == "--creator-user" and user_id:
+            inject_parts.append(f"{param} {user_id}")
+        elif param == "--user-id" and user_id:
+            inject_parts.append(f"{param} {user_id}")
+    return inject_parts
+
+
+def _intercept_command_segment(
+    command: str,
+    *,
+    tenant_id: str | None,
+    source_id: str | None,
+    user_id: str | None,
+) -> Tuple[str, bool]:
+    """只处理单个 shell 命令段，避免把参数加到链式命令的错误位置。"""
+
+    leading = command[: len(command) - len(command.lstrip())]
+    trailing = command[len(command.rstrip()) :]
+    command_body = command.strip()
+    if not command_body:
         return command, False
 
-    # 解析命令
     try:
-        tokens = shlex.split(command)
+        tokens = shlex.split(command_body)
     except ValueError:
-        # shlex 解析失败时返回原命令
         return command, False
 
-    if not tokens:
-        return command, False
-    if _is_swe_cron_group_help(tokens):
+    if not tokens or _is_swe_cron_group_help(tokens):
         return command, False
 
-    # 匹配拦截规则（按优先级顺序）
     for rule in INTERCEPT_RULES:
         prefix_tokens = rule.command_prefix.split()
         if tokens[: len(prefix_tokens)] != prefix_tokens:
             continue
 
-        # 构建注入参数（跳过已存在的参数）
-        inject_parts = []
-        for param in rule.inject_params:
-            # 检查参数是否已存在，避免重复添加
-            if _has_param(tokens, param):
-                logger.debug(
-                    "Shell interceptor: skipping %s, "
-                    "already exists in command",
-                    param,
-                )
-                continue
-
-            # 根据参数类型获取值
-            if param == "--tenant-id" and tenant_id:
-                inject_parts.append(f"{param} {tenant_id}")
-            elif param == "--source-id" and source_id:
-                inject_parts.append(f"{param} {source_id}")
-            elif param == "--target-user" and user_id:
-                inject_parts.append(f"{param} {user_id}")
-            elif param == "--creator-user" and user_id:
-                inject_parts.append(f"{param} {user_id}")
-            elif param == "--user-id" and user_id:
-                inject_parts.append(f"{param} {user_id}")
-
-        # 如果没有需要注入的参数，返回原命令
+        inject_parts = _build_inject_parts(
+            tokens,
+            rule,
+            tenant_id=tenant_id,
+            source_id=source_id,
+            user_id=user_id,
+        )
         if not inject_parts:
             return command, False
 
-        # 根据位置注入
         if rule.inject_position == "at_end":
-            # 直接追加到命令末尾，保留原始格式
-            modified_command = command.rstrip() + " " + " ".join(inject_parts)
-        else:  # after_subcommand
-            # 在子命令后插入（需要重新组装）
+            modified_body = command_body + " " + " ".join(inject_parts)
+        else:
             insert_pos = len(prefix_tokens)
-            # 注入参数值作为单独的 tokens
-            inject_tokens = []
-            for param in rule.inject_params:
-                if _has_param(tokens, param):
-                    continue
-                if param == "--tenant-id" and tenant_id:
-                    inject_tokens.extend([param, tenant_id])
-                elif param == "--source-id" and source_id:
-                    inject_tokens.extend([param, source_id])
-                elif param == "--target-user" and user_id:
-                    inject_tokens.extend([param, user_id])
-                elif param == "--creator-user" and user_id:
-                    inject_tokens.extend([param, user_id])
-                elif param == "--user-id" and user_id:
-                    inject_tokens.extend([param, user_id])
-            if inject_tokens:
-                tokens = (
-                    tokens[:insert_pos] + inject_tokens + tokens[insert_pos:]
-                )
-            modified_command = shlex.join(tokens)
-
-        logger.info(
-            "Shell command intercepted: %s -> %s",
-            command,
-            modified_command,
-        )
-        return modified_command, True
+            inject_tokens = shlex.split(" ".join(inject_parts))
+            tokens = tokens[:insert_pos] + inject_tokens + tokens[insert_pos:]
+            modified_body = shlex.join(tokens)
+        return leading + modified_body + trailing, True
 
     return command, False
+
+
+def intercept_command(command: str) -> Tuple[str, bool]:
+    """按当前请求上下文为匹配的 shell 命令注入隔离参数。
+
+    支持单条命令和 ``xxx && swe cron ...`` 形式的链式命令；只修改真正
+    命中的命令段，不把参数追加到整条 shell 命令末尾。
+    """
+
+    tenant_id = get_current_tenant_id()
+    source_id = get_current_source_id()
+    user_id = get_current_user_id()
+
+    if tenant_id is None and user_id is None:
+        return command, False
+
+    parts = _split_by_shell_and(command)
+    modified_parts: List[str] = []
+    was_intercepted = False
+    for part in parts:
+        if part == "&&":
+            modified_parts.append(part)
+            continue
+        modified_part, part_intercepted = _intercept_command_segment(
+            part,
+            tenant_id=tenant_id,
+            source_id=source_id,
+            user_id=user_id,
+        )
+        modified_parts.append(modified_part)
+        was_intercepted = was_intercepted or part_intercepted
+
+    if not was_intercepted:
+        return command, False
+
+    modified_command = "".join(modified_parts)
+    logger.info(
+        "Shell command intercepted: %s -> %s",
+        command,
+        modified_command,
+    )
+    return modified_command, True

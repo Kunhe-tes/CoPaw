@@ -153,6 +153,11 @@ const SkillDetailPanel = memo(function SkillDetailPanel({
                 </Text>
               </Tooltip>
             )}
+            {skill.version && (
+              <Text type="secondary" style={{ fontSize: 12 }}>
+                版本: v{skill.version}
+              </Text>
+            )}
           </div>
         </div>
         <div style={{ display: "flex", gap: 8, flexShrink: 0 }}>

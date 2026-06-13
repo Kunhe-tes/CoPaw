@@ -1,6 +1,10 @@
 import { useAgentsData, FileListPanel, FileEditor } from "./components";
 import styles from "./index.module.less";
-import { UploadOutlined, DownloadOutlined, SendOutlined } from "@ant-design/icons";
+import {
+  UploadOutlined,
+  DownloadOutlined,
+  SendOutlined,
+} from "@ant-design/icons";
 import { Button, Modal, Tooltip } from "@agentscope-ai/design";
 import { workspaceApi } from "../../../api/modules/workspace";
 import { useEffect, useRef, useState } from "react";
@@ -9,7 +13,7 @@ import { PageHeader } from "@/components/PageHeader";
 import { useAppMessage } from "../../../hooks/useAppMessage";
 import { getUserId, DEFAULT_USER_ID } from "../../../utils/identity";
 import { useIframeStore } from "../../../stores/iframeStore";
-import { TenantTargetPicker } from "../../../components/TenantTargetPicker";
+import { TenantSelector } from "../../../components/TenantSelector";
 
 const BROADCASTABLE_FILES = [
   "AGENTS.md",
@@ -51,9 +55,7 @@ export default function WorkspacePage() {
   // --- File broadcast state ---
   const [selectedFileNames, setSelectedFileNames] = useState<string[]>([]);
   const [broadcastOpen, setBroadcastOpen] = useState(false);
-  const [broadcastLoading, setBroadcastLoading] = useState(false);
   const [broadcastSubmitting, setBroadcastSubmitting] = useState(false);
-  const [broadcastTenantIds, setBroadcastTenantIds] = useState<string[]>([]);
   const [selectedTenantIds, setSelectedTenantIds] = useState<string[]>([]);
 
   const sanitizedSelectedTenantIds = selectedTenantIds.filter(
@@ -68,25 +70,10 @@ export default function WorkspacePage() {
     );
   };
 
-  const openBroadcastModal = async () => {
+  const openBroadcastModal = () => {
     if (!selectedFileNames.length) return;
     setBroadcastOpen(true);
     setSelectedTenantIds([]);
-    setBroadcastLoading(true);
-    try {
-      const result = await workspaceApi.listBroadcastTenants();
-      setBroadcastTenantIds(
-        (result.tenant_ids || []).filter(
-          (id) => id !== currentTenantId,
-        ),
-      );
-    } catch (error) {
-      const errMsg =
-        error instanceof Error ? error.message : t("workspace.broadcastFailed");
-      message.error(errMsg);
-    } finally {
-      setBroadcastLoading(false);
-    }
   };
 
   const closeBroadcastModal = () => {
@@ -141,7 +128,9 @@ export default function WorkspacePage() {
       if (failed.length > 0) {
         const failureLines = failed.map(
           (item) =>
-            `• ${item.tenant_id}: ${item.error || t("workspace.broadcastFailed")}`,
+            `• ${item.tenant_id}: ${
+              item.error || t("workspace.broadcastFailed")
+            }`,
         );
         if (succeeded.length === 0) {
           message.error(t("workspace.broadcastFailed"));
@@ -253,7 +242,10 @@ export default function WorkspacePage() {
   return (
     <div className={styles.workspacePage}>
       <PageHeader
-        items={[{ title: t("nav.creationCenter") }, { title: t("workspace.title") }]}
+        items={[
+          { title: t("nav.creationCenter") },
+          { title: t("workspace.title") },
+        ]}
         afterBreadcrumb={
           <p className={styles.workspacePath}>
             {t("workspace.workspacePath")}{" "}
@@ -302,7 +294,9 @@ export default function WorkspacePage() {
               )}
               <Button
                 size="small"
-                disabled={(!isDefaultUser && !manager) || !selectedFileNames.length}
+                disabled={
+                  (!isDefaultUser && !manager) || !selectedFileNames.length
+                }
                 icon={<SendOutlined />}
                 onClick={openBroadcastModal}
               >
@@ -364,19 +358,13 @@ export default function WorkspacePage() {
             <div>{t("workspace.broadcastDefaultAgentWarning")}</div>
             <div>{t("workspace.broadcastOverwriteWarning")}</div>
           </div>
-          {broadcastLoading ? (
-            <div>{t("common.loading")}</div>
-          ) : (
-            <TenantTargetPicker
-              tenantIds={broadcastTenantIds}
-              selectedTenantIds={selectedTenantIds}
-              onChange={(ids) =>
-                setSelectedTenantIds(
-                  ids.filter((id) => id !== currentTenantId),
-                )
-              }
-            />
-          )}
+          <TenantSelector
+            selectedTenantIds={selectedTenantIds}
+            onChange={(ids) =>
+              setSelectedTenantIds(ids.filter((id) => id !== currentTenantId))
+            }
+            excludeTenantId={currentTenantId}
+          />
         </div>
       </Modal>
     </div>
