@@ -166,7 +166,7 @@ export function calculateNextRun(config: ScheduleConfig): dayjs.Dayjs {
 
       for (const wd of sortedWeekdays) {
         const targetDay = wd === 7 ? 0 : wd;
-        let candidate = targetTime.day(targetDay);
+        const candidate = targetTime.day(targetDay);
         if (candidate.isAfter(now)) {
           return candidate;
         }
