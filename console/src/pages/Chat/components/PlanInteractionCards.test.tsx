@@ -8,7 +8,13 @@ import {
 } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { createContext } from "use-context-selector";
-import { PlanClarificationCard, PlanReviewCard } from "./PlanInteractionCards";
+import { ChatAnywhereMessagesContext } from "@/components/agentscope-chat/AgentScopeRuntimeWebUI/core/Context/ChatAnywhereMessagesContext";
+import { ChatAnywhereSessionsContext } from "@/components/agentscope-chat";
+import {
+  ActivePlanClarificationCard,
+  PlanClarificationCard,
+  PlanReviewCard,
+} from "./PlanInteractionCards";
 import styles from "./PlanInteractionCards.module.less";
 
 vi.mock("@/components/agentscope-chat", () => ({
@@ -43,6 +49,39 @@ function captureSubmitEvents() {
     handler,
     cleanup: () => document.removeEventListener("handleSubmit", handler),
   };
+}
+
+function createSessionContextValue(sessionId = "chat-1") {
+  return {
+    sessions: [],
+    setSessions: vi.fn(),
+    getSessions: () => [],
+    currentSessionId: sessionId,
+    setCurrentSessionId: vi.fn(),
+    getCurrentSessionId: () => sessionId,
+    isSessionLoading: false,
+    setSessionLoading: vi.fn(),
+    isSessionsListLoading: false,
+    setSessionsListLoading: vi.fn(),
+  };
+}
+
+function renderActiveClarification(messages: any[]) {
+  return render(
+    <ChatAnywhereSessionsContext.Provider
+      value={createSessionContextValue()}
+    >
+      <ChatAnywhereMessagesContext.Provider
+        value={{
+          messages,
+          setMessages: vi.fn(),
+          getMessages: () => messages,
+        }}
+      >
+        <ActivePlanClarificationCard />
+      </ChatAnywhereMessagesContext.Provider>
+    </ChatAnywhereSessionsContext.Provider>,
+  );
 }
 
 describe("Plan interaction cards", () => {
@@ -229,6 +268,27 @@ describe("Plan interaction cards", () => {
     expect(submit.handler.mock.calls[0][0].detail).toMatchObject({
       query: "Line one",
     });
+    submit.cleanup();
+  });
+
+  it("ignores Enter while IME composition is active in text clarifications", () => {
+    const submit = captureSubmitEvents();
+    render(
+      <PlanClarificationCard
+        data={{
+          card_type: "plan_clarification",
+          kind: "text_input",
+          prompt: "Add detail",
+        }}
+      />,
+    );
+    const input = screen.getByPlaceholderText("Add detail");
+
+    fireEvent.change(input, { target: { value: "正在输入" } });
+    fireEvent.keyDown(input, { key: "Enter", isComposing: true });
+
+    expect(submit.handler).not.toHaveBeenCalled();
+    expect(input).toHaveValue("正在输入");
     submit.cleanup();
   });
 
@@ -479,6 +539,136 @@ describe("Plan interaction cards", () => {
     render(<PlanClarificationCard data={data} />);
     expect(screen.queryByText("Pick scope")).not.toBeInTheDocument();
     submit.cleanup();
+  });
+
+  it("resets stale clarification state when a newer card instance replaces it", () => {
+    const firstMessages = [
+      {
+        id: "message-1",
+        role: "assistant" as const,
+        cards: [
+          {
+            id: "clarification-1",
+            code: "PlanInteraction",
+            data: {
+              card_type: "plan_clarification" as const,
+              kind: "single_choice" as const,
+              prompt: "Pick scope",
+              options: [{ id: "small", label: "Small" }],
+            },
+          },
+        ],
+      },
+    ];
+    const { rerender } = renderActiveClarification(firstMessages);
+
+    fireEvent.click(screen.getByRole("button", { name: /Small/ }));
+    expect(screen.getByRole("button", { name: "提交" })).toBeEnabled();
+
+    const secondMessages = [
+      ...firstMessages,
+      {
+        id: "message-2",
+        role: "assistant" as const,
+        cards: [
+          {
+            id: "clarification-2",
+            code: "PlanInteraction",
+            data: {
+              card_type: "plan_clarification" as const,
+              kind: "single_choice" as const,
+              prompt: "Pick size",
+              options: [{ id: "large", label: "Large" }],
+            },
+          },
+        ],
+      },
+    ];
+
+    rerender(
+      <ChatAnywhereSessionsContext.Provider
+        value={createSessionContextValue()}
+      >
+        <ChatAnywhereMessagesContext.Provider
+          value={{
+            messages: secondMessages,
+            setMessages: vi.fn(),
+            getMessages: () => secondMessages,
+          }}
+        >
+          <ActivePlanClarificationCard />
+        </ChatAnywhereMessagesContext.Provider>
+      </ChatAnywhereSessionsContext.Provider>,
+    );
+
+    expect(screen.getByRole("button", { name: /Large/ })).toHaveAttribute(
+      "aria-pressed",
+      "false",
+    );
+    expect(screen.getByRole("button", { name: "提交" })).toBeDisabled();
+  });
+
+  it("shows a repeated clarification again when it is a new card instance", () => {
+    const firstMessages = [
+      {
+        id: "message-1",
+        role: "assistant" as const,
+        cards: [
+          {
+            id: "clarification-1",
+            code: "PlanInteraction",
+            data: {
+              card_type: "plan_clarification" as const,
+              kind: "single_choice" as const,
+              prompt: "Pick scope",
+              options: [{ id: "small", label: "Small" }],
+            },
+          },
+        ],
+      },
+    ];
+    const { rerender } = renderActiveClarification(firstMessages);
+
+    fireEvent.click(screen.getByRole("button", { name: "退出" }));
+    expect(screen.queryByText("Pick scope")).not.toBeInTheDocument();
+
+    const secondMessages = [
+      ...firstMessages,
+      {
+        id: "message-2",
+        role: "assistant" as const,
+        cards: [
+          {
+            id: "clarification-2",
+            code: "PlanInteraction",
+            data: {
+              card_type: "plan_clarification" as const,
+              kind: "single_choice" as const,
+              prompt: "Pick scope",
+              options: [{ id: "small", label: "Small" }],
+            },
+          },
+        ],
+      },
+    ];
+
+    rerender(
+      <ChatAnywhereSessionsContext.Provider
+        value={createSessionContextValue()}
+      >
+        <ChatAnywhereMessagesContext.Provider
+          value={{
+            messages: secondMessages,
+            setMessages: vi.fn(),
+            getMessages: () => secondMessages,
+          }}
+        >
+          <ActivePlanClarificationCard />
+        </ChatAnywhereMessagesContext.Provider>
+      </ChatAnywhereSessionsContext.Provider>,
+    );
+
+    expect(screen.getByText("Pick scope")).toBeInTheDocument();
   });
 
   it("submits review decisions with distinct Plan Review payloads", async () => {

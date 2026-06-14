@@ -126,20 +126,24 @@ function isPlanClarificationCardData(
 
 function findLatestPlanClarificationCard(
   messages: IAgentScopeRuntimeWebUIMessage[],
-): ChatPlanClarificationCardData | null {
+): { data: ChatPlanClarificationCardData; instanceKey: string } | null {
   for (
     let messageIndex = messages.length - 1;
     messageIndex >= 0;
     messageIndex -= 1
   ) {
-    const cards = messages[messageIndex]?.cards || [];
+    const message = messages[messageIndex];
+    const cards = message?.cards || [];
     for (let cardIndex = cards.length - 1; cardIndex >= 0; cardIndex -= 1) {
       const card = cards[cardIndex];
       if (
         card.code === PLAN_INTERACTION_CARD_CODE &&
         isPlanClarificationCardData(card.data)
       ) {
-        return card.data;
+        return {
+          data: card.data,
+          instanceKey: `${message.id}:${card.id || card.code}:${cardIndex}`,
+        };
       }
     }
   }
@@ -158,6 +162,16 @@ function createPlanClarificationSubmissionKey(
     options: data.options || [],
     fields: data.fields || [],
     allow_custom_response: data.allow_custom_response === true,
+  });
+}
+
+function createPlanClarificationDismissalKey(
+  sessionId: string | undefined,
+  cardInstanceKey: string,
+): string {
+  return JSON.stringify({
+    session_id: sessionId || "unknown",
+    instance_key: cardInstanceKey,
   });
 }
 
@@ -276,8 +290,10 @@ function ChoiceRows({
 
 export function PlanClarificationCard({
   data,
+  cardInstanceKey,
 }: {
   data: ChatPlanClarificationCardData;
+  cardInstanceKey?: string;
 }) {
   const currentSessionId = useContextSelector(
     ChatAnywhereSessionsContext,
@@ -292,14 +308,20 @@ export function PlanClarificationCard({
   const [formValues, setFormValues] = useState<
     Record<string, string | string[]>
   >({});
+  const resolvedSessionId =
+    currentSessionId ||
+    (window as Window & { currentSessionId?: string }).currentSessionId;
   const submissionKey = useMemo(
+    () => createPlanClarificationSubmissionKey(data, resolvedSessionId),
+    [data, resolvedSessionId],
+  );
+  const dismissalKey = useMemo(
     () =>
-      createPlanClarificationSubmissionKey(
-        data,
-        currentSessionId ||
-          (window as Window & { currentSessionId?: string }).currentSessionId,
+      createPlanClarificationDismissalKey(
+        resolvedSessionId,
+        cardInstanceKey || submissionKey,
       ),
-    [currentSessionId, data],
+    [cardInstanceKey, resolvedSessionId, submissionKey],
   );
   const [submitted, setSubmitted] = useState(() =>
     loadSubmittedInteractionKeys(PLAN_CLARIFICATION_STORAGE_KEY).has(
@@ -308,7 +330,7 @@ export function PlanClarificationCard({
   );
   const [dismissed, setDismissed] = useState(() =>
     loadSubmittedInteractionKeys(PLAN_CLARIFICATION_DISMISSAL_STORAGE_KEY).has(
-      submissionKey,
+      dismissalKey,
     ),
   );
   const options = data.options || [];
@@ -385,11 +407,16 @@ export function PlanClarificationCard({
     setDismissed(
       loadSubmittedInteractionKeys(
         PLAN_CLARIFICATION_DISMISSAL_STORAGE_KEY,
-      ).has(submissionKey),
+      ).has(dismissalKey),
     );
+    setSingleChoice("");
+    setMultiChoice([]);
+    setTextInput("");
+    setCustomActive(false);
+    setFormValues({});
     setFocusedIndex(0);
     setActiveStep(0);
-  }, [submissionKey]);
+  }, [dismissalKey, submissionKey]);
 
   useEffect(() => {
     setFocusedIndex(0);
@@ -398,7 +425,7 @@ export function PlanClarificationCard({
   const handleDismiss = () => {
     storeSubmittedInteractionKey(
       PLAN_CLARIFICATION_DISMISSAL_STORAGE_KEY,
-      submissionKey,
+      dismissalKey,
     );
     setDismissed(true);
   };
@@ -520,6 +547,9 @@ export function PlanClarificationCard({
     }
     if (isTextTarget(event.target)) {
       if (event.key === "Enter" && !event.shiftKey) {
+        if (event.nativeEvent.isComposing) {
+          return;
+        }
         event.preventDefault();
         goForward();
       }
@@ -729,12 +759,17 @@ export function PlanClarificationCard({
 }
 
 export function ActivePlanClarificationCard() {
-  const data = useContextSelector(ChatAnywhereMessagesContext, (value) =>
+  const clarification = useContextSelector(ChatAnywhereMessagesContext, (value) =>
     findLatestPlanClarificationCard(value.messages || []),
   );
 
-  if (!data) return null;
-  return <PlanClarificationCard data={data} />;
+  if (!clarification) return null;
+  return (
+    <PlanClarificationCard
+      data={clarification.data}
+      cardInstanceKey={clarification.instanceKey}
+    />
+  );
 }
 
 function PlanList({ title, items }: { title: string; items: string[] }) {
