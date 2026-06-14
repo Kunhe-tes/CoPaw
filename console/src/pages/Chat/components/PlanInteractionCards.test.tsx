@@ -53,7 +53,30 @@ describe("Plan interaction cards", () => {
       undefined;
   });
 
-  it("renders and submits a single-choice clarification", async () => {
+  it("marks an active clarification and persists dismissal in the session", () => {
+    const data = {
+      card_type: "plan_clarification" as const,
+      kind: "single_choice" as const,
+      prompt: "Pick scope",
+      options: [{ id: "small", label: "Small" }],
+    };
+    const { container, rerender } = render(
+      <PlanClarificationCard data={data} />,
+    );
+
+    expect(
+      container.querySelector('[data-plan-clarification-active="true"]'),
+    ).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "退出" }));
+    expect(
+      container.querySelector('[data-plan-clarification-active="true"]'),
+    ).not.toBeInTheDocument();
+
+    rerender(<PlanClarificationCard data={data} />);
+    expect(screen.queryByText("Pick scope")).not.toBeInTheDocument();
+  });
+
+  it("uses focus-only initial state and submits the focused single choice with Enter", async () => {
     const submit = captureSubmitEvents();
 
     render(
@@ -70,58 +93,31 @@ describe("Plan interaction cards", () => {
       />,
     );
 
-    expect(screen.queryByText("Plan clarification")).not.toBeInTheDocument();
-    fireEvent.click(screen.getByLabelText("Small"));
-    fireEvent.click(screen.getByRole("button", { name: "Submit" }));
+    const small = screen.getByRole("button", { name: /Small/ });
+    expect(small).toHaveAttribute("aria-current", "true");
+    expect(small).toHaveAttribute("aria-pressed", "false");
+    fireEvent.keyDown(screen.getByRole("region", { name: "Pick scope" }), {
+      key: "Enter",
+    });
 
     await waitFor(() => {
-      expect(submit.handler).toHaveBeenCalled();
+      expect(submit.handler).toHaveBeenCalledTimes(1);
     });
     expect(submit.handler.mock.calls[0][0].detail).toMatchObject({
       query: "Small",
       biz_params: {
         plan_interaction_response: {
-          card_type: "plan_clarification",
-          kind: "single_choice",
           selected_option_ids: ["small"],
         },
       },
     });
-    expect(screen.queryByLabelText("Small")).not.toBeInTheDocument();
 
     submit.cleanup();
   });
 
-  it("does not render an already submitted clarification in the same session", async () => {
+  it("separates multi-choice focus from selection and submits selected rows", async () => {
     const submit = captureSubmitEvents();
-    const data = {
-      card_type: "plan_clarification" as const,
-      kind: "single_choice" as const,
-      prompt: "Pick scope",
-      options: [{ id: "small", label: "Small" }],
-    };
-
-    const { unmount } = render(<PlanClarificationCard data={data} />);
-
-    fireEvent.click(screen.getByLabelText("Small"));
-    fireEvent.click(screen.getByRole("button", { name: "Submit" }));
-
-    await waitFor(() => {
-      expect(submit.handler).toHaveBeenCalledTimes(1);
-    });
-
-    unmount();
-    render(<PlanClarificationCard data={data} />);
-
-    await waitFor(() => {
-      expect(screen.queryByLabelText("Small")).not.toBeInTheDocument();
-    });
-
-    submit.cleanup();
-  });
-
-  it("renders multiple-choice and text clarification inputs", () => {
-    const { container, rerender } = render(
+    render(
       <PlanClarificationCard
         data={{
           card_type: "plan_clarification",
@@ -134,14 +130,86 @@ describe("Plan interaction cards", () => {
         }}
       />,
     );
+    const card = screen.getByRole("region", { name: "Pick checks" });
 
-    expect(screen.getByLabelText("Lint")).toBeInTheDocument();
-    expect(screen.getByLabelText("Test")).toBeInTheDocument();
+    fireEvent.keyDown(card, { key: " " });
+    fireEvent.keyDown(card, { key: "ArrowDown" });
+    fireEvent.keyDown(card, { key: " " });
+    expect(screen.getByRole("button", { name: /Lint/ })).toHaveAttribute(
+      "aria-pressed",
+      "true",
+    );
+    expect(screen.getByRole("button", { name: /Test/ })).toHaveAttribute(
+      "aria-pressed",
+      "true",
+    );
+    fireEvent.keyDown(card, { key: "Enter" });
+
+    await waitFor(() => expect(submit.handler).toHaveBeenCalledTimes(1));
+    expect(submit.handler.mock.calls[0][0].detail).toMatchObject({
+      query: "Lint, Test",
+      biz_params: {
+        plan_interaction_response: {
+          selected_option_ids: ["lint", "test"],
+        },
+      },
+    });
+    submit.cleanup();
+  });
+
+  it("makes a multi-choice custom response exclusive with predefined choices", async () => {
+    const submit = captureSubmitEvents();
+    render(
+      <PlanClarificationCard
+        data={{
+          card_type: "plan_clarification",
+          kind: "multi_choice",
+          prompt: "Pick checks",
+          allow_custom_response: true,
+          options: [
+            { id: "lint", label: "Lint" },
+            { id: "test", label: "Test" },
+          ],
+        }}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: /Lint/ }));
+    fireEvent.click(screen.getByRole("button", { name: /自定义回复/ }));
     expect(
-      container.querySelector(`.${styles.choiceOptionsViewport}`),
-    ).toBeInTheDocument();
+      screen.queryByRole("button", { name: /Lint/ }),
+    ).not.toBeInTheDocument();
+    fireEvent.keyDown(screen.getByPlaceholderText("请输入自定义回复"), {
+      key: "Escape",
+    });
+    expect(screen.getByRole("button", { name: /Lint/ })).toHaveAttribute(
+      "aria-pressed",
+      "false",
+    );
+    fireEvent.click(screen.getByRole("button", { name: /自定义回复/ }));
+    fireEvent.change(screen.getByPlaceholderText("请输入自定义回复"), {
+      target: { value: "Run security checks" },
+    });
+    fireEvent.keyDown(screen.getByPlaceholderText("请输入自定义回复"), {
+      key: "Enter",
+    });
 
-    rerender(
+    await waitFor(() => expect(submit.handler).toHaveBeenCalledTimes(1));
+    expect(submit.handler.mock.calls[0][0].detail).toMatchObject({
+      query: "Run security checks",
+      biz_params: {
+        plan_interaction_response: {
+          selected_option_ids: [],
+          text: "Run security checks",
+        },
+      },
+    });
+    submit.cleanup();
+  });
+
+  it("uses Enter to submit text and preserves Shift+Enter for new lines", async () => {
+    const submit = captureSubmitEvents();
+    render(
       <PlanClarificationCard
         data={{
           card_type: "plan_clarification",
@@ -150,111 +218,89 @@ describe("Plan interaction cards", () => {
         }}
       />,
     );
+    const input = screen.getByPlaceholderText("Add detail");
 
-    expect(screen.getByPlaceholderText("Add detail")).toBeInTheDocument();
+    fireEvent.change(input, { target: { value: "Line one" } });
+    fireEvent.keyDown(input, { key: "Enter", shiftKey: true });
+    expect(submit.handler).not.toHaveBeenCalled();
+    fireEvent.keyDown(input, { key: "Enter" });
+
+    await waitFor(() => expect(submit.handler).toHaveBeenCalledTimes(1));
+    expect(submit.handler.mock.calls[0][0].detail).toMatchObject({
+      query: "Line one",
+    });
+    submit.cleanup();
   });
 
-  it("shows a persistent scroll hint when choice options exceed three rows", () => {
-    const { container } = render(
+  it("uses Enter to advance form pages and Escape to return", () => {
+    render(
       <PlanClarificationCard
         data={{
           card_type: "plan_clarification",
-          kind: "multi_choice",
-          prompt: "Pick checks",
-          options: [
-            { id: "lint", label: "Lint" },
-            { id: "test", label: "Test" },
-            { id: "build", label: "Build" },
-            { id: "deploy", label: "Deploy" },
+          kind: "form",
+          form_id: "plan-context",
+          prompt: "Collect context",
+          fields: [
+            {
+              id: "scope",
+              label: "Scope",
+              type: "select",
+              required: true,
+              options: [{ id: "small", label: "Small" }],
+            },
+            {
+              id: "detail",
+              label: "Detail",
+              type: "textarea",
+            },
           ],
         }}
       />,
     );
 
+    fireEvent.click(screen.getByRole("button", { name: /Small/ }));
+    fireEvent.keyDown(screen.getByRole("region", { name: "Collect context" }), {
+      key: "Enter",
+    });
+    expect(screen.getByPlaceholderText("Detail")).toBeInTheDocument();
+
+    fireEvent.keyDown(screen.getByPlaceholderText("Detail"), {
+      key: "Escape",
+    });
+    expect(screen.getByRole("button", { name: /Small/ })).toBeInTheDocument();
+  });
+
+  it("keeps a form text field visible when Space is pressed on the card", () => {
+    render(
+      <PlanClarificationCard
+        data={{
+          card_type: "plan_clarification",
+          kind: "form",
+          form_id: "plan-detail",
+          prompt: "Collect detail",
+          fields: [
+            {
+              id: "detail",
+              label: "Detail",
+              type: "text",
+            },
+          ],
+        }}
+      />,
+    );
+
+    fireEvent.keyDown(screen.getByRole("region", { name: "Collect detail" }), {
+      key: " ",
+    });
+
+    expect(screen.getByPlaceholderText("Detail")).toBeInTheDocument();
     expect(
-      container.querySelector(`.${styles.choiceScrollHint}`),
-    ).toBeInTheDocument();
+      screen.queryByPlaceholderText("请输入自定义回复"),
+    ).not.toBeInTheDocument();
   });
 
-  it("submits custom text for choice clarification when allowed", async () => {
+  it("submits paged form values and optional supplemental context", async () => {
     const submit = captureSubmitEvents();
-
-    render(
-      <PlanClarificationCard
-        data={{
-          card_type: "plan_clarification",
-          kind: "single_choice",
-          prompt: "Pick scope",
-          allow_custom_response: true,
-          options: [{ id: "small", label: "Small" }],
-        }}
-      />,
-    );
-
-    fireEvent.change(screen.getByPlaceholderText("Custom response"), {
-      target: { value: "Use a narrower scope" },
-    });
-    fireEvent.click(screen.getByRole("button", { name: "Submit" }));
-
-    await waitFor(() => {
-      expect(submit.handler).toHaveBeenCalledTimes(1);
-    });
-    expect(submit.handler.mock.calls[0][0].detail).toMatchObject({
-      query: "Use a narrower scope",
-      biz_params: {
-        plan_interaction_response: {
-          card_type: "plan_clarification",
-          kind: "single_choice",
-          selected_option_ids: [],
-          text: "Use a narrower scope",
-        },
-      },
-    });
-
-    submit.cleanup();
-  });
-
-  it("submits selected choices plus custom text when both are present", async () => {
-    const submit = captureSubmitEvents();
-
-    render(
-      <PlanClarificationCard
-        data={{
-          card_type: "plan_clarification",
-          kind: "multi_choice",
-          prompt: "Pick checks",
-          allow_custom_response: true,
-          options: [{ id: "lint", label: "Lint" }],
-        }}
-      />,
-    );
-
-    fireEvent.click(screen.getByLabelText("Lint"));
-    fireEvent.change(screen.getByPlaceholderText("Custom response"), {
-      target: { value: "Also run focused backend tests" },
-    });
-    fireEvent.click(screen.getByRole("button", { name: "Submit" }));
-
-    await waitFor(() => {
-      expect(submit.handler).toHaveBeenCalledTimes(1);
-    });
-    expect(submit.handler.mock.calls[0][0].detail).toMatchObject({
-      query: "Lint\nAlso run focused backend tests",
-      biz_params: {
-        plan_interaction_response: {
-          kind: "multi_choice",
-          selected_option_ids: ["lint"],
-          text: "Also run focused backend tests",
-        },
-      },
-    });
-
-    submit.cleanup();
-  });
-
-  it("renders structured clarification forms and submits field values", async () => {
-    const submit = captureSubmitEvents();
-
     render(
       <PlanClarificationCard
         data={{
@@ -272,7 +318,7 @@ describe("Plan interaction cards", () => {
               options: [{ id: "retail", label: "零售/电商" }],
             },
             {
-              id: "current_challenges",
+              id: "challenges",
               label: "当前主要挑战",
               type: "textarea",
               placeholder: "请补充",
@@ -282,88 +328,40 @@ describe("Plan interaction cards", () => {
       />,
     );
 
-    expect(screen.queryByPlaceholderText("请补充")).not.toBeInTheDocument();
-    fireEvent.mouseDown(screen.getByRole("combobox"));
-    fireEvent.click(screen.getByText("零售/电商"));
-    fireEvent.click(screen.getByRole("button", { name: "Next" }));
-    expect(screen.getByPlaceholderText("请补充")).toBeInTheDocument();
-    fireEvent.click(screen.getByRole("button", { name: "Back" }));
-    expect(screen.getByRole("combobox")).toBeInTheDocument();
-    fireEvent.click(screen.getByRole("button", { name: "Next" }));
+    expect(screen.getByText("1 of 3")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: /零售\/电商/ }));
+    fireEvent.click(screen.getByRole("button", { name: "继续" }));
     fireEvent.change(screen.getByPlaceholderText("请补充"), {
       target: { value: "复购率低" },
     });
-    fireEvent.click(screen.getByRole("button", { name: "Next" }));
-    fireEvent.change(screen.getByPlaceholderText("Custom response"), {
+    fireEvent.keyDown(screen.getByPlaceholderText("请补充"), { key: "Enter" });
+    fireEvent.change(screen.getByPlaceholderText("请输入自定义回复"), {
       target: { value: "希望年度内看到改善" },
     });
-    fireEvent.click(screen.getByRole("button", { name: "Submit" }));
-
-    await waitFor(() => {
-      expect(submit.handler).toHaveBeenCalledTimes(1);
+    fireEvent.keyDown(screen.getByPlaceholderText("请输入自定义回复"), {
+      key: "Enter",
     });
+
+    await waitFor(() => expect(submit.handler).toHaveBeenCalledTimes(1));
     expect(submit.handler.mock.calls[0][0].detail).toMatchObject({
       query: "所在行业: 零售/电商\n当前主要挑战: 复购率低\n希望年度内看到改善",
       biz_params: {
         plan_interaction_response: {
-          card_type: "plan_clarification",
           kind: "form",
           form_id: "customer_plan_clarification",
           field_values: {
             industry: "retail",
-            current_challenges: "复购率低",
+            challenges: "复购率低",
           },
           text: "希望年度内看到改善",
         },
       },
     });
-
     submit.cleanup();
-  });
-
-  it("renders compact form progress without numeric step buttons", () => {
-    const { container } = render(
-      <PlanClarificationCard
-        data={{
-          card_type: "plan_clarification",
-          kind: "form",
-          form_id: "customer_plan_clarification",
-          prompt: "Collect planning context",
-          allow_custom_response: true,
-          fields: [
-            {
-              id: "industry",
-              label: "所在行业",
-              type: "select",
-              required: true,
-              options: [{ id: "retail", label: "零售/电商" }],
-            },
-            {
-              id: "current_challenges",
-              label: "当前主要挑战",
-              type: "textarea",
-              placeholder: "请补充",
-            },
-          ],
-        }}
-      />,
-    );
-
-    expect(screen.getByText("1/3")).toBeInTheDocument();
-    expect(
-      screen.queryByRole("button", { name: "Question 1" }),
-    ).not.toBeInTheDocument();
-    expect(
-      screen.queryByRole("button", { name: "Question 2" }),
-    ).not.toBeInTheDocument();
-    expect(
-      container.querySelector(`.${styles.formStageViewportCompact}`),
-    ).toBeInTheDocument();
   });
 
   it("submits structured multiselect form values as selected option ids", async () => {
     const submit = captureSubmitEvents();
-
     render(
       <PlanClarificationCard
         data={{
@@ -387,28 +385,99 @@ describe("Plan interaction cards", () => {
       />,
     );
 
-    fireEvent.mouseDown(screen.getByRole("combobox"));
-    fireEvent.click(screen.getByText("前端测试"));
-    fireEvent.click(screen.getByText("后端测试"));
-    fireEvent.click(screen.getByRole("button", { name: "Submit" }));
+    fireEvent.click(screen.getByRole("button", { name: /前端测试/ }));
+    fireEvent.click(screen.getByRole("button", { name: /后端测试/ }));
+    fireEvent.click(screen.getByRole("button", { name: "提交" }));
 
-    await waitFor(() => {
-      expect(submit.handler).toHaveBeenCalledTimes(1);
-    });
+    await waitFor(() => expect(submit.handler).toHaveBeenCalledTimes(1));
     expect(submit.handler.mock.calls[0][0].detail).toMatchObject({
       query: "验证项: 前端测试, 后端测试",
       biz_params: {
         plan_interaction_response: {
-          card_type: "plan_clarification",
-          kind: "form",
-          form_id: "plan_checks",
           field_values: {
             checks: ["frontend", "backend"],
           },
         },
       },
     });
+    submit.cleanup();
+  });
 
+  it("preserves supplemental context when revisiting form fields", () => {
+    render(
+      <PlanClarificationCard
+        data={{
+          card_type: "plan_clarification",
+          kind: "form",
+          form_id: "scope-context",
+          prompt: "Collect context",
+          allow_custom_response: true,
+          fields: [
+            {
+              id: "scope",
+              label: "Scope",
+              type: "select",
+              required: true,
+              options: [{ id: "small", label: "Small" }],
+            },
+          ],
+        }}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: /Small/ }));
+    fireEvent.click(screen.getByRole("button", { name: "继续" }));
+    fireEvent.change(screen.getByPlaceholderText("请输入自定义回复"), {
+      target: { value: "Keep this context" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "上一项" }));
+    fireEvent.click(screen.getByRole("button", { name: /Small/ }));
+    fireEvent.click(screen.getByRole("button", { name: "继续" }));
+
+    expect(screen.getByPlaceholderText("请输入自定义回复")).toHaveValue(
+      "Keep this context",
+    );
+  });
+
+  it("keeps long option sets inside the card viewport", () => {
+    const { container } = render(
+      <PlanClarificationCard
+        data={{
+          card_type: "plan_clarification",
+          kind: "multi_choice",
+          prompt: "Pick checks",
+          options: Array.from({ length: 6 }, (_, index) => ({
+            id: String(index),
+            label: `Option ${index + 1}`,
+          })),
+        }}
+      />,
+    );
+
+    expect(
+      container.querySelector(`.${styles.choiceOptionsViewport}`),
+    ).toBeInTheDocument();
+    expect(screen.getAllByRole("button", { name: /Option/ })).toHaveLength(6);
+  });
+
+  it("does not render an already submitted clarification in the same session", async () => {
+    const submit = captureSubmitEvents();
+    const data = {
+      card_type: "plan_clarification" as const,
+      kind: "single_choice" as const,
+      prompt: "Pick scope",
+      options: [{ id: "small", label: "Small" }],
+    };
+    const { unmount } = render(<PlanClarificationCard data={data} />);
+
+    fireEvent.keyDown(screen.getByRole("region", { name: "Pick scope" }), {
+      key: "Enter",
+    });
+    await waitFor(() => expect(submit.handler).toHaveBeenCalledTimes(1));
+
+    unmount();
+    render(<PlanClarificationCard data={data} />);
+    expect(screen.queryByText("Pick scope")).not.toBeInTheDocument();
     submit.cleanup();
   });
 
@@ -455,7 +524,7 @@ describe("Plan interaction cards", () => {
     submit.cleanup();
   });
 
-  it("executes or exits review cards in normal mode and disables duplicates", async () => {
+  it("executes review cards in normal mode and disables duplicates", async () => {
     const submit = captureSubmitEvents();
 
     render(

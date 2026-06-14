@@ -44,6 +44,10 @@ _Avoid_: generic form, survey
 The user's structured answer to a Plan Interaction Card, submitted as the next normal chat turn with metadata that identifies the card and selected or entered value.
 _Avoid_: hidden plan API update, out-of-band form submission
 
+**Planning Clarification Dismissal**:
+The user's decision to close the current Planning Clarification Card without submitting a Plan Interaction Response. It leaves Plan Mode active and restores normal chat input for the user.
+_Avoid_: exit Plan Mode, reject plan, submit empty response
+
 **Plan Interaction Tool**:
 A built-in Main Agent tool that emits Plan Interaction Cards through validated structured metadata.
 _Avoid_: markdown JSON card, frontend text parser
@@ -160,6 +164,12 @@ Resolved to support only `single_choice`, `multi_choice`, `text_input`, and `pla
 
 **"Plan Card Submission"**:
 Resolved as a normal next chat turn carrying **Plan Interaction Response** metadata, not a separate plan-state API call.
+
+**"Dismiss Planning Clarification"**:
+Resolved as a **Planning Clarification Dismissal** that closes only the current clarification, restores normal chat input, keeps Plan Mode active, and submits no message.
+
+**"Custom Multi-choice Clarification Response"**:
+Resolved as an alternative to all predefined choices. Choosing a custom response clears previously selected predefined choices, and choosing any predefined choice clears the custom response.
 
 **"Plan Card Emission"**:
 Resolved as a **Plan Interaction Tool** call. The frontend must not infer planning cards from free-form assistant text JSON.
