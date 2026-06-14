@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from typing import Any
 
@@ -65,8 +66,8 @@ def _looks_like_form_field(option: Any) -> bool:
 
 
 def _normalize_form_field(field: dict[str, Any]) -> dict[str, Any]:
-    """兼容 name/id、字符串候选项和输入类型别名。"""
-    field_id = field.get("id") or field.get("name")
+    """兼容 key/name/id、字符串候选项和输入类型别名。"""
+    field_id = field.get("id") or field.get("name") or field.get("key")
     if not isinstance(field_id, str) or not field_id.strip():
         raise ValueError("clarification field id is required")
 
@@ -75,8 +76,10 @@ def _normalize_form_field(field: dict[str, Any]) -> dict[str, Any]:
         raise ValueError("clarification field label is required")
 
     raw_type = field.get("type")
+    if raw_type is None:
+        raw_type = "select" if field.get("options") else "text"
     if not isinstance(raw_type, str) or not raw_type.strip():
-        raise ValueError("clarification field type is required")
+        raise ValueError("clarification field type must be a string")
     normalized_type = _FORM_FIELD_TYPE_ALIASES.get(raw_type.strip().lower())
     if normalized_type is None:
         raise ValueError(f"unsupported clarification field type: {raw_type}")
@@ -106,6 +109,22 @@ def _normalize_form_field(field: dict[str, Any]) -> dict[str, Any]:
     return normalized
 
 
+def _normalize_form_fields(fields: Any) -> list[dict[str, Any]]:
+    """兼容模型把表单字段数组序列化为 JSON 字符串的情况。"""
+    if isinstance(fields, str):
+        try:
+            fields = json.loads(fields)
+        except json.JSONDecodeError as error:
+            raise ValueError(
+                "clarification fields must be a valid JSON array",
+            ) from error
+    if not isinstance(fields, list) or any(
+        not isinstance(field, dict) for field in fields
+    ):
+        raise ValueError("clarification fields must be an array of objects")
+    return [_normalize_form_field(field) for field in fields]
+
+
 def _normalize_clarification_payload(
     *,
     kind: str,
@@ -118,7 +137,7 @@ def _normalize_clarification_payload(
             "kind": "form",
             "form_id": None if kind == "form" else kind,
             "options": [],
-            "fields": [_normalize_form_field(field) for field in fields],
+            "fields": _normalize_form_fields(fields),
         }
 
     raw_options = options or []

@@ -105,6 +105,39 @@ async def test_ask_plan_clarification_normalizes_form_payload() -> None:
 
 
 @pytest.mark.asyncio
+async def test_ask_plan_clarification_accepts_string_fields() -> None:
+    response = await ask_plan_clarification(
+        prompt="Collect customer planning context",
+        kind="form",
+        fields=(
+            '[{"key":"industry","label":"行业/业务类型"},'
+            '{"key":"customer_type","label":"客户类型","options":'
+            '[{"label":"企业客户 (B2B)","value":"B2B"}]}]'
+        ),
+        allow_custom_response=True,
+    )
+
+    card = response.metadata["plan_interaction_card"]
+    assert card["kind"] == "form"
+    assert card["fields"] == [
+        {
+            "id": "industry",
+            "label": "行业/业务类型",
+            "type": "text",
+            "options": [],
+            "required": False,
+        },
+        {
+            "id": "customer_type",
+            "label": "客户类型",
+            "type": "select",
+            "options": [{"id": "B2B", "label": "企业客户 (B2B)"}],
+            "required": False,
+        },
+    ]
+
+
+@pytest.mark.asyncio
 async def test_submit_proposed_plan_persists_before_review_card(
     tmp_path: Path,
 ) -> None:
