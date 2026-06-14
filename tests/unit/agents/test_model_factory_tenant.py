@@ -15,6 +15,9 @@ from swe.agents.model_factory import (
     _get_formatter_for_chat_model,
     _create_file_block_support_formatter,
 )
+from swe.agents.hook_runtime.messages import (
+    build_hook_additional_context_msg,
+)
 from swe.agents.react_agent import _build_accepted_plan_tool_exchange
 
 
@@ -55,8 +58,8 @@ class TestFileBlockSupportFormatter:
         assert "FileBlockSupport" in formatter_class.__name__
 
     @pytest.mark.asyncio
-    async def test_openai_formatter_demotes_later_hook_system_role(self):
-        """OpenAI 兼容后端应降级中段 hook system 消息。"""
+    async def test_openai_formatter_demotes_later_generic_system_role(self):
+        """OpenAI 兼容后端应降级普通中段 system 消息。"""
         from agentscope.formatter import OpenAIChatFormatter
         from agentscope.message import Msg
 
@@ -72,7 +75,7 @@ class TestFileBlockSupportFormatter:
                 Msg(
                     name="system",
                     role="system",
-                    content="[Hook additional context]\nremember",
+                    content="intermediate system context",
                 ),
                 Msg(name="user", role="user", content="next turn"),
             ],
@@ -85,14 +88,14 @@ class TestFileBlockSupportFormatter:
             "user",
         ]
         assert messages[2]["content"][0]["text"] == (
-            "[Hook additional context]\nremember"
+            "intermediate system context"
         )
 
     @pytest.mark.asyncio
-    async def test_anthropic_formatter_demotes_later_hook_system_role(
+    async def test_anthropic_formatter_demotes_later_generic_system_role(
         self,
     ):
-        """Anthropic 后端应降级中段 hook system 消息。"""
+        """Anthropic 后端应降级普通中段 system 消息。"""
         from agentscope.formatter import AnthropicChatFormatter
         from agentscope.message import Msg
 
@@ -108,7 +111,7 @@ class TestFileBlockSupportFormatter:
                 Msg(
                     name="system",
                     role="system",
-                    content="[Hook additional context]\nremember",
+                    content="intermediate system context",
                 ),
                 Msg(name="user", role="user", content="next turn"),
             ],
@@ -118,6 +121,72 @@ class TestFileBlockSupportFormatter:
             "system",
             "user",
             "user",
+            "user",
+        ]
+        assert messages[2]["content"][0]["text"] == (
+            "intermediate system context"
+        )
+
+    @pytest.mark.asyncio
+    async def test_openai_formatter_preserves_later_hook_system_role(self):
+        """OpenAI 兼容后端应保留持久化 hook system 消息。"""
+        from agentscope.formatter import OpenAIChatFormatter
+        from agentscope.message import Msg
+
+        formatter_class = _create_file_block_support_formatter(
+            OpenAIChatFormatter,
+        )
+        formatter = formatter_class()
+
+        messages = await formatter._format(
+            [
+                Msg(name="system", role="system", content="base prompt"),
+                Msg(name="user", role="user", content="hello"),
+                build_hook_additional_context_msg(
+                    "[Hook additional context]\nremember",
+                ),
+                Msg(name="user", role="user", content="next turn"),
+            ],
+        )
+
+        assert [message["role"] for message in messages] == [
+            "system",
+            "user",
+            "system",
+            "user",
+        ]
+        assert messages[2]["content"][0]["text"] == (
+            "[Hook additional context]\nremember"
+        )
+
+    @pytest.mark.asyncio
+    async def test_anthropic_formatter_preserves_later_hook_system_role(
+        self,
+    ):
+        """Anthropic 后端应保留持久化 hook system 消息。"""
+        from agentscope.formatter import AnthropicChatFormatter
+        from agentscope.message import Msg
+
+        formatter_class = _create_file_block_support_formatter(
+            AnthropicChatFormatter,
+        )
+        formatter = formatter_class()
+
+        messages = await formatter._format(
+            [
+                Msg(name="system", role="system", content="base prompt"),
+                Msg(name="user", role="user", content="hello"),
+                build_hook_additional_context_msg(
+                    "[Hook additional context]\nremember",
+                ),
+                Msg(name="user", role="user", content="next turn"),
+            ],
+        )
+
+        assert [message["role"] for message in messages] == [
+            "system",
+            "user",
+            "system",
             "user",
         ]
         assert messages[2]["content"][0]["text"] == (

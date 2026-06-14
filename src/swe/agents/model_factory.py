@@ -32,6 +32,7 @@ except ImportError:  # pragma: no cover - compatibility fallback
     GeminiChatFormatter = None
     GeminiChatModel = None
 
+from .hook_runtime.messages import HOOK_ADDITIONAL_CONTEXT_PREFIX
 from .utils.tool_message_utils import _sanitize_tool_messages
 from ..constant import (
     DEFAULT_LLM_CHAT_MAX_CONCURRENT,
@@ -301,7 +302,16 @@ def _format_anthropic_messages(  # pylint: disable=too-many-branches
                     },
                 )
 
-        if msg.role == "system" and index != 0:
+        if (
+            msg.role == "system"
+            and index != 0
+            and not _is_persisted_hook_follow_up_message(
+                {
+                    "role": msg.role,
+                    "content": content_blocks,
+                },
+            )
+        ):
             role = "user"
         else:
             role = msg.role
@@ -686,9 +696,32 @@ def _strip_top_level_message_name(
     """清理 OpenAI-compatible 后端容易拒绝的消息字段。"""
     for index, message in enumerate(messages):
         message.pop("name", None)
-        if index != 0 and message.get("role") == "system":
+        if (
+            index != 0
+            and message.get("role") == "system"
+            and not _is_persisted_hook_follow_up_message(message)
+        ):
             message["role"] = "user"
     return messages
+
+
+def _is_persisted_hook_follow_up_message(message: dict) -> bool:
+    """判断消息是否为需要跨 turn 保留 system 语义的 hook 上下文。"""
+    content = message.get("content")
+    if isinstance(content, str):
+        return content.startswith(HOOK_ADDITIONAL_CONTEXT_PREFIX)
+    if not isinstance(content, list):
+        return False
+
+    for block in content:
+        if (
+            isinstance(block, dict)
+            and block.get("type") == "text"
+            and isinstance(block.get("text"), str)
+            and block["text"].startswith(HOOK_ADDITIONAL_CONTEXT_PREFIX)
+        ):
+            return True
+    return False
 
 
 def _get_agent_id(
