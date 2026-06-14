@@ -33,9 +33,6 @@ except ImportError:  # pragma: no cover - compatibility fallback
     GeminiChatModel = None
 
 from .utils.tool_message_utils import _sanitize_tool_messages
-from .hook_runtime.messages import (
-    HOOK_ADDITIONAL_CONTEXT_PREFIX,
-)
 from ..constant import (
     DEFAULT_LLM_CHAT_MAX_CONCURRENT,
     DEFAULT_LLM_CRON_MAX_CONCURRENT,
@@ -304,13 +301,7 @@ def _format_anthropic_messages(  # pylint: disable=too-many-branches
                     },
                 )
 
-        if (
-            msg.role == "system"
-            and index != 0
-            and not _has_hook_additional_context_prefix(
-                {"content": content_blocks},
-            )
-        ):
+        if msg.role == "system" and index != 0:
             role = "user"
         else:
             role = msg.role
@@ -696,27 +687,8 @@ def _strip_top_level_message_name(
     for index, message in enumerate(messages):
         message.pop("name", None)
         if index != 0 and message.get("role") == "system":
-            if not _has_hook_additional_context_prefix(message):
-                message["role"] = "user"
+            message["role"] = "user"
     return messages
-
-
-def _has_hook_additional_context_prefix(message: dict) -> bool:
-    """判断格式化后的消息是否来自 hook 附加上下文。"""
-    content = message.get("content")
-    if isinstance(content, str):
-        return content.startswith(HOOK_ADDITIONAL_CONTEXT_PREFIX)
-    if not isinstance(content, list):
-        return False
-    for block in content:
-        if not isinstance(block, dict):
-            continue
-        text = block.get("text")
-        if isinstance(text, str) and text.startswith(
-            HOOK_ADDITIONAL_CONTEXT_PREFIX,
-        ):
-            return True
-    return False
 
 
 def _get_agent_id(

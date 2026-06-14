@@ -55,8 +55,8 @@ class TestFileBlockSupportFormatter:
         assert "FileBlockSupport" in formatter_class.__name__
 
     @pytest.mark.asyncio
-    async def test_openai_formatter_preserves_hook_system_role(self):
-        """hook system 消息在非首位时仍应保留 system 角色。"""
+    async def test_openai_formatter_demotes_later_hook_system_role(self):
+        """OpenAI 兼容后端应降级中段 hook system 消息。"""
         from agentscope.formatter import OpenAIChatFormatter
         from agentscope.message import Msg
 
@@ -81,7 +81,43 @@ class TestFileBlockSupportFormatter:
         assert [message["role"] for message in messages] == [
             "system",
             "user",
+            "user",
+            "user",
+        ]
+        assert messages[2]["content"][0]["text"] == (
+            "[Hook additional context]\nremember"
+        )
+
+    @pytest.mark.asyncio
+    async def test_anthropic_formatter_demotes_later_hook_system_role(
+        self,
+    ):
+        """Anthropic 后端应降级中段 hook system 消息。"""
+        from agentscope.formatter import AnthropicChatFormatter
+        from agentscope.message import Msg
+
+        formatter_class = _create_file_block_support_formatter(
+            AnthropicChatFormatter,
+        )
+        formatter = formatter_class()
+
+        messages = await formatter._format(
+            [
+                Msg(name="system", role="system", content="base prompt"),
+                Msg(name="user", role="user", content="hello"),
+                Msg(
+                    name="system",
+                    role="system",
+                    content="[Hook additional context]\nremember",
+                ),
+                Msg(name="user", role="user", content="next turn"),
+            ],
+        )
+
+        assert [message["role"] for message in messages] == [
             "system",
+            "user",
+            "user",
             "user",
         ]
         assert messages[2]["content"][0]["text"] == (
