@@ -25,7 +25,7 @@ A user-visible planning state where the Main Agent itself runs under reduced pla
 _Avoid_: dry run, planning prompt
 
 **Proposed Plan**:
-A planning artifact presented by the Main Agent for user review before continuing work. A Proposed Plan contains a plan id, title, summary, steps, risks, verification items, open questions, and confidence.
+A planning artifact presented by the Main Agent for user review before continuing work. A Proposed Plan contains a plan id, title, summary, steps, risks, and verification items.
 _Avoid_: permission request, execution unlock
 
 **Plan Review Decision**:
@@ -178,7 +178,7 @@ Resolved as a **Plan Interaction Tool** call. The frontend must not infer planni
 Resolved as two built-in tools: `ask_plan_clarification` for clarification cards and `submit_proposed_plan` for final plan review cards.
 
 **"Proposed Plan Fields"**:
-Resolved as `plan_id`, `title`, `summary`, `steps[]`, `risks[]`, `verification[]`, `open_questions[]`, and `confidence` for the first version.
+Resolved as `plan_id`, `title`, `summary`, `steps[]`, `risks[]`, and `verification[]`. `open_questions[]` and `confidence` are not part of the Proposed Plan protocol or user review card because they do not drive the Plan Review Decision.
 
 **"Scheduled Job Default Model"**:
 Resolved as execution-time model resolution: if a **Scheduled Job** has no **Execution Model Slot**, each run uses the current **Tenant Default Model** rather than the default model that existed when the job was created.
