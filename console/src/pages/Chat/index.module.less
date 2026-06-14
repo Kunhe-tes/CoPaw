@@ -38,6 +38,13 @@
       display: flex;
       align-items: center;
     }
+
+    [class*="-chat-anywhere-input-wrapper"]:has(
+        [data-plan-clarification-active="true"]
+      )
+      > [class*="-sender"] {
+      display: none;
+    }
   }
 
   /* Custom scrollbar — thin, rounded, always visible */

@@ -1,388 +1,370 @@
 .planClarificationCard {
-  width: min(calc(100% - 32px), 818px);
-  margin: 0 auto 8px;
-  border: 1px solid rgba(36, 58, 96, 0.08);
-  border-radius: 16px;
-  background:
-    linear-gradient(180deg, rgba(255, 255, 255, 0.96), rgba(247, 250, 255, 0.92)),
-    radial-gradient(circle at 0 0, rgba(47, 107, 255, 0.1), transparent 44%);
-  box-shadow: 0 14px 34px rgba(31, 45, 72, 0.08);
+  --clarification-card-bg: #f3f4eb;
+  --clarification-border: rgba(225, 222, 214, 0.9);
+  --clarification-active-bg: #e6e7de;
+  --clarification-text: #56584f;
+  --clarification-muted: #a3a49a;
+  --clarification-soft: #c0bfb6;
+  --clarification-accent: #4f6f63;
+  --clarification-accent-hover: #45675b;
+  --clarification-accent-text: #edf2ed;
+  --clarification-kbd-bg: #e9e7de;
+
+  width: min(100%, 818px);
+  margin: 0 auto;
+  padding: 13px 8px 8px;
   overflow: hidden;
-}
-
-@media (max-width: 768px) {
-  .planClarificationCard {
-    width: calc(100% - 16px);
-    margin-bottom: 6px;
-  }
-}
-
-.planClarificationBody {
-  display: flex;
-  flex-direction: column;
-  gap: 10px;
-  padding: 10px 12px 12px;
-}
-
-.choicePrompt {
-  color: rgba(21, 31, 52, 0.92);
-}
-
-.choiceCustomResponse {
-  margin-top: 4px;
-}
-
-.choiceOptionsViewport {
-  position: relative;
-  max-height: 88px;
-  overflow-y: auto;
-  padding-right: 16px;
-  scrollbar-gutter: stable;
-  scrollbar-width: auto;
-  scrollbar-color: rgba(47, 107, 255, 0.78) rgba(36, 58, 96, 0.12);
-}
-
-.choiceScrollHint {
-  position: absolute;
-  top: 8px;
-  right: 2px;
-  bottom: 8px;
-  display: flex;
-  align-items: flex-start;
-  justify-content: center;
-  width: 10px;
-  pointer-events: none;
-}
-
-.choiceScrollTrack {
-  position: relative;
-  width: 8px;
-  height: 100%;
-  border-radius: 999px;
-  background: linear-gradient(
-    180deg,
-    rgba(36, 58, 96, 0.14),
-    rgba(36, 58, 96, 0.2)
-  );
-  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.72);
-}
-
-.choiceScrollThumb {
-  position: absolute;
-  top: 0;
-  left: 1px;
-  width: 6px;
-  height: 28px;
-  border-radius: 999px;
-  background: linear-gradient(180deg, #6c96ff, #2f6bff);
+  border: 1px solid var(--clarification-border);
+  border-radius: 17px;
+  outline: none;
+  background: var(--clarification-card-bg);
   box-shadow:
-    0 4px 10px rgba(47, 107, 255, 0.24),
-    inset 0 1px 0 rgba(255, 255, 255, 0.55);
+    0 1px 2px rgba(78, 75, 65, 0.06),
+    0 2px 10px rgba(78, 75, 65, 0.05),
+    inset 0 1px 0 rgba(255, 255, 255, 0.46);
+  color: var(--clarification-text);
+  animation: clarification-enter 160ms ease-out both;
 }
 
-.choiceOptionList {
-  width: 100%;
+.planClarificationCard:focus-visible {
+  box-shadow:
+    0 0 0 2px rgba(79, 111, 99, 0.16),
+    0 2px 10px rgba(78, 75, 65, 0.06);
 }
 
-.cardActions {
-  margin-top: 4px;
-}
-
-.formStepper {
+.cardHeader {
   display: flex;
-  flex-direction: column;
-  gap: 12px;
+  min-height: 26px;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 0 6px 7px;
 }
 
-.formStage {
+.cardHeading {
   display: flex;
-  flex-direction: column;
-  gap: 8px;
-  min-height: 0;
-  padding: 10px 10px 12px;
-  border-radius: 14px;
-  background: rgba(255, 255, 255, 0.5);
-  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.7);
-}
-
-.formStageMeta {
-  display: flex;
+  min-width: 0;
   align-items: center;
   gap: 8px;
-  min-width: 0;
 }
 
-.formStageCount {
-  flex: 0 0 auto;
-  padding: 2px 8px;
-  border-radius: 999px;
-  background: rgba(47, 107, 255, 0.08);
-  color: #2f6bff;
-  font-size: 10px;
-  font-weight: 700;
-  line-height: 18px;
-  letter-spacing: 0.04em;
-  text-transform: uppercase;
-}
-
-.formStageRequired {
-  color: rgba(35, 48, 76, 0.42);
-  font-size: 10px;
-  font-weight: 700;
-  letter-spacing: 0.04em;
-  text-transform: uppercase;
-}
-
-.formStageTitle {
-  min-width: 0;
-  color: rgba(21, 31, 52, 0.92);
+.cardHeading strong {
+  overflow: hidden;
+  color: var(--clarification-text);
   font-size: 14px;
-  line-height: 1.35;
+  font-weight: 700;
   letter-spacing: -0.01em;
-}
-
-.formStageTitle :global(.ant-typography-expand),
-.formStageDescription :global(.ant-typography-expand) {
-  display: none;
-}
-
-.formStageDescription {
-  color: rgba(35, 48, 76, 0.58);
-  display: -webkit-box;
-  overflow: hidden;
-  -webkit-box-orient: vertical;
-  -webkit-line-clamp: 1;
-  line-clamp: 1;
-  font-size: 12px;
-  line-height: 1.45;
-}
-
-.fieldControl {
-  width: 100%;
-}
-
-.fieldControl :global(.ant-select-selector),
-.fieldControl:global(.ant-input),
-.fieldControl:global(.ant-input-affix-wrapper),
-.fieldControl:global(.ant-input-textarea textarea) {
-  border-radius: 12px;
-}
-
-.formStageViewport {
-  min-height: 0;
-}
-
-.formStageViewportCompact {
-  overflow: visible;
-}
-
-.formStageViewportExpanded {
-  max-height: 192px;
-  overflow-y: auto;
-  padding-right: 4px;
-  scrollbar-gutter: stable;
-  scrollbar-width: auto;
-  scrollbar-color: rgba(47, 107, 255, 0.78) rgba(36, 58, 96, 0.12);
-}
-
-.choiceOptionsViewport::-webkit-scrollbar,
-.formStageViewportExpanded::-webkit-scrollbar {
-  width: 12px;
-}
-
-.choiceOptionsViewport::-webkit-scrollbar-track,
-.formStageViewportExpanded::-webkit-scrollbar-track {
-  background: rgba(36, 58, 96, 0.1);
-  border-radius: 999px;
-}
-
-.choiceOptionsViewport::-webkit-scrollbar-thumb,
-.formStageViewportExpanded::-webkit-scrollbar-thumb {
-  background: rgba(47, 107, 255, 0.78);
-  border: 2px solid rgba(255, 255, 255, 0.9);
-  border-radius: 999px;
-}
-
-.choiceOptionsViewport::-webkit-scrollbar-thumb:hover,
-.formStageViewportExpanded::-webkit-scrollbar-thumb:hover {
-  background: rgba(47, 107, 255, 0.92);
-}
-
-.formStageViewport :global(.ant-input),
-.formStageViewport :global(.ant-input-affix-wrapper),
-.formStageViewport :global(.ant-select-selector),
-.formStageViewport :global(.ant-input-textarea textarea) {
-  box-shadow: none;
-}
-
-.formStageViewportExpanded :global(.ant-input-textarea textarea) {
-  min-height: 92px;
-  max-height: 192px;
-  overflow-y: auto !important;
-  resize: none;
-}
-
-.formStageViewportCompact :global(.ant-input-textarea textarea) {
-  min-height: 92px;
-  max-height: 192px;
-  overflow-y: auto !important;
-  resize: none;
-}
-
-.formStageViewport :global(.ant-select-selector) {
-  min-height: 40px;
-}
-
-.formStageViewport :global(.ant-input-textarea) {
-  min-height: 92px;
-}
-
-.answerStrip {
-  display: flex;
-  flex-wrap: nowrap;
-  gap: 8px;
-  overflow-x: auto;
-  padding-bottom: 2px;
-  scrollbar-width: thin;
-}
-
-.answerPill {
-  display: inline-flex;
-  align-items: center;
-  max-width: 100%;
-  gap: 6px;
-  padding: 5px 10px;
-  border: 1px solid rgba(36, 58, 96, 0.08);
-  border-radius: 999px;
-  background: rgba(255, 255, 255, 0.72);
-  color: rgba(35, 48, 76, 0.72);
-  cursor: pointer;
-  transition:
-    transform 0.18s ease,
-    background-color 0.18s ease,
-    border-color 0.18s ease;
-}
-
-.answerPill:hover {
-  transform: translateY(-1px);
-  background: rgba(255, 255, 255, 0.92);
-  border-color: rgba(47, 107, 255, 0.16);
-}
-
-.answerPill span,
-.answerPill strong {
-  overflow: hidden;
+  line-height: 20px;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
-.answerPill span {
-  max-width: 96px;
+.cardHeading span {
+  flex: 0 0 auto;
+  border-radius: 999px;
+  background: rgba(79, 111, 99, 0.1);
+  color: var(--clarification-accent);
   font-size: 10px;
   font-weight: 700;
-  letter-spacing: 0.02em;
-  text-transform: uppercase;
+  line-height: 18px;
+  padding: 0 7px;
 }
 
-.answerPill strong {
-  max-width: 200px;
-  color: rgba(21, 31, 52, 0.9);
+.cardPager {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 8px;
+  color: var(--clarification-soft);
   font-size: 12px;
+  font-weight: 700;
+  line-height: 20px;
+  user-select: none;
+}
+
+.cardPager button {
+  display: inline-grid;
+  width: 20px;
+  height: 20px;
+  padding: 0;
+  border: 0;
+  border-radius: 6px;
+  place-items: center;
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+}
+
+.cardPager button:hover:not(:disabled) {
+  background: var(--clarification-active-bg);
+  color: var(--clarification-text);
+}
+
+.cardPager button:disabled {
+  cursor: default;
+  opacity: 0.36;
+}
+
+.fieldDescription {
+  margin: -2px 6px 7px;
+  overflow: hidden;
+  color: var(--clarification-muted);
+  font-size: 12px;
+  line-height: 17px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.cardStage {
+  min-height: 36px;
+}
+
+.choiceOptionsViewport {
+  display: flex;
+  max-height: 144px;
+  flex-direction: column;
+  gap: 2px;
+  overflow-y: auto;
+  padding-right: 2px;
+  scrollbar-color: rgba(86, 88, 79, 0.28) transparent;
+  scrollbar-width: thin;
+}
+
+.choiceOptionsViewport::-webkit-scrollbar {
+  width: 5px;
+}
+
+.choiceOptionsViewport::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.choiceOptionsViewport::-webkit-scrollbar-thumb {
+  border-radius: 999px;
+  background: rgba(86, 88, 79, 0.28);
+}
+
+.optionRow {
+  position: relative;
+  display: flex;
+  width: 100%;
+  min-height: 34px;
+  flex: 0 0 34px;
+  align-items: center;
+  gap: 8px;
+  padding: 0 11px 0 9px;
+  border: 0;
+  border-radius: 8px;
+  outline: none;
+  background: transparent;
+  color: var(--clarification-muted);
+  cursor: pointer;
+  font: inherit;
+  text-align: left;
+  transition:
+    background-color 120ms ease,
+    color 120ms ease;
+}
+
+.optionRow:hover,
+.optionRowFocused {
+  background: var(--clarification-active-bg);
+  color: var(--clarification-text);
+}
+
+.optionRowSelected {
+  color: var(--clarification-text);
+}
+
+.optionRowSelected .optionLabel {
   font-weight: 700;
 }
 
-.formNav {
+.optionNumber {
+  width: 19px;
+  flex: 0 0 19px;
+  opacity: 0.7;
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.optionLabel {
+  min-width: 0;
+  flex: 1;
+  overflow: hidden;
+  font-size: 13px;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+  line-height: 20px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.optionFocusIcon {
+  flex: 0 0 auto;
+  color: var(--clarification-soft);
+}
+
+.textField,
+.textArea {
+  width: 100%;
+  border: 1px solid rgba(86, 88, 79, 0.15);
+  border-radius: 10px;
+  outline: none;
+  background: rgba(255, 255, 255, 0.36);
+  color: var(--clarification-text);
+  font: inherit;
+  font-size: 13px;
+  line-height: 20px;
+  transition:
+    border-color 120ms ease,
+    box-shadow 120ms ease;
+}
+
+.textField {
+  height: 38px;
+  padding: 0 11px;
+}
+
+.textArea {
+  min-height: 88px;
+  max-height: 160px;
+  padding: 9px 11px;
+  resize: none;
+}
+
+.textField::placeholder,
+.textArea::placeholder {
+  color: var(--clarification-muted);
+}
+
+.textField:focus,
+.textArea:focus {
+  border-color: rgba(79, 111, 99, 0.38);
+  box-shadow: 0 0 0 2px rgba(79, 111, 99, 0.08);
+}
+
+.cardActions {
+  display: flex;
+  min-height: 30px;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 14px;
+  padding: 7px 0 0;
+}
+
+.dismissButton,
+.continueButton {
+  display: inline-flex;
+  height: 28px;
+  align-items: center;
+  justify-content: center;
+  border: 0;
+  font: inherit;
+  font-size: 13px;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.dismissButton {
+  gap: 6px;
+  padding: 0;
+  background: transparent;
+  color: #8e8e84;
+}
+
+.dismissButton kbd {
+  min-width: 30px;
+  height: 18px;
+  padding: 0 6px;
+  border-radius: 6px;
+  background: var(--clarification-kbd-bg);
+  box-shadow: inset 0 -1px 0 rgba(120, 116, 104, 0.12);
+  color: #77766f;
+  font-family: inherit;
+  font-size: 11px;
+  font-weight: 800;
+  line-height: 18px;
+}
+
+.continueButton {
+  min-width: 92px;
   gap: 8px;
-  padding-top: 2px;
+  padding: 0 13px;
+  border-radius: 999px;
+  background: var(--clarification-accent);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.14),
+    0 1px 2px rgba(54, 70, 62, 0.18);
+  color: var(--clarification-accent-text);
+}
+
+.continueButton:hover:not(:disabled) {
+  background: var(--clarification-accent-hover);
+}
+
+.continueButton:disabled {
+  cursor: not-allowed;
+  opacity: 0.42;
+}
+
+@keyframes clarification-enter {
+  from {
+    opacity: 0;
+    transform: translateY(3px) scale(0.997);
+  }
+
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}
+
+@media (max-width: 768px) {
+  .planClarificationCard {
+    padding: 11px 7px 7px;
+    border-radius: 14px;
+  }
+
+  .cardHeader {
+    gap: 8px;
+  }
+
+  .cardHeading strong {
+    font-size: 13px;
+  }
 }
 
 :global(.dark-mode) {
   .planClarificationCard {
-    border-color: rgba(255, 255, 255, 0.12);
-    background: linear-gradient(
-        180deg,
-        rgba(29, 33, 44, 0.96),
-        rgba(22, 26, 35, 0.96)
-      ),
-      radial-gradient(circle at 0 0, rgba(74, 126, 255, 0.18), transparent 46%);
-    box-shadow: 0 16px 34px rgba(0, 0, 0, 0.24);
-  }
+    --clarification-card-bg: #282a25;
+    --clarification-border: rgba(231, 232, 220, 0.1);
+    --clarification-active-bg: #373a34;
+    --clarification-text: #d9dbd0;
+    --clarification-muted: #94978e;
+    --clarification-soft: #72766d;
+    --clarification-accent: #668578;
+    --clarification-accent-hover: #739487;
+    --clarification-accent-text: #f0f4ef;
+    --clarification-kbd-bg: #353730;
 
-  .formStage {
-    background: rgba(255, 255, 255, 0.04);
-    box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.04);
-  }
-
-  .choicePrompt {
-    color: rgba(255, 255, 255, 0.9);
-  }
-
-  .formStageTitle {
-    color: rgba(255, 255, 255, 0.9);
-  }
-
-  .formStageDescription {
-    color: rgba(255, 255, 255, 0.58);
-  }
-
-  .formStageRequired {
-    color: rgba(255, 255, 255, 0.42);
-  }
-
-  .formStageCount {
-    background: rgba(74, 126, 255, 0.16);
-    color: rgba(255, 255, 255, 0.88);
-  }
-
-  .answerPill {
-    border-color: rgba(255, 255, 255, 0.1);
-    background: rgba(255, 255, 255, 0.05);
-    color: rgba(255, 255, 255, 0.74);
-  }
-
-  .answerPill:hover {
-    background: rgba(255, 255, 255, 0.09);
-    border-color: rgba(122, 160, 255, 0.22);
-  }
-
-  .answerPill strong {
-    color: rgba(255, 255, 255, 0.9);
-  }
-
-  .choiceOptionsViewport,
-  .formStageViewportExpanded {
-    scrollbar-color: rgba(122, 160, 255, 0.92) rgba(255, 255, 255, 0.14);
-  }
-
-  .choiceScrollTrack {
-    background: linear-gradient(
-      180deg,
-      rgba(255, 255, 255, 0.12),
-      rgba(255, 255, 255, 0.2)
-    );
-    box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.08);
-  }
-
-  .choiceScrollThumb {
-    background: linear-gradient(180deg, #a5bcff, #6f96ff);
     box-shadow:
-      0 4px 10px rgba(84, 130, 255, 0.26),
-      inset 0 1px 0 rgba(255, 255, 255, 0.34);
+      0 1px 2px rgba(0, 0, 0, 0.16),
+      0 6px 20px rgba(0, 0, 0, 0.14),
+      inset 0 1px 0 rgba(255, 255, 255, 0.03);
   }
 
-  .choiceOptionsViewport::-webkit-scrollbar-track,
-  .formStageViewportExpanded::-webkit-scrollbar-track {
-    background: rgba(255, 255, 255, 0.12);
+  .textField,
+  .textArea {
+    border-color: rgba(231, 232, 220, 0.1);
+    background: rgba(255, 255, 255, 0.025);
   }
 
-  .choiceOptionsViewport::-webkit-scrollbar-thumb,
-  .formStageViewportExpanded::-webkit-scrollbar-thumb {
-    background: rgba(122, 160, 255, 0.88);
-    border-color: rgba(22, 26, 35, 0.88);
+  .dismissButton {
+    color: #a2a49b;
   }
 
-  .choiceOptionsViewport::-webkit-scrollbar-thumb:hover,
-  .formStageViewportExpanded::-webkit-scrollbar-thumb:hover {
-    background: rgba(148, 179, 255, 0.98);
+  .dismissButton kbd {
+    box-shadow: inset 0 -1px 0 rgba(0, 0, 0, 0.18);
+    color: #b3b5ab;
   }
 }

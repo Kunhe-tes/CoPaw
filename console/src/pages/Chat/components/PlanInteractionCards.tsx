@@ -1,18 +1,12 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
+import { Button, Flex, Input, Space, Typography } from "antd";
 import {
-  Button,
-  Checkbox,
-  Flex,
-  Input,
-  Radio,
-  Select,
-  Space,
-  Typography,
-} from "antd";
-import {
-  ArrowLeft,
-  ArrowRight,
+  Check,
+  ChevronLeft,
+  ChevronRight,
+  ChevronsUpDown,
   ClipboardCheck,
+  CornerDownLeft,
 } from "lucide-react";
 import {
   ChatAnywhereSessionsContext,
@@ -31,6 +25,8 @@ import styles from "./PlanInteractionCards.module.less";
 import { useContextSelector } from "use-context-selector";
 
 const PLAN_CLARIFICATION_STORAGE_KEY = "copaw_submitted_plan_clarifications";
+const PLAN_CLARIFICATION_DISMISSAL_STORAGE_KEY =
+  "copaw_dismissed_plan_clarifications";
 const PLAN_REVIEW_STORAGE_KEY = "copaw_submitted_plan_reviews";
 const PLAN_INTERACTION_CARD_CODE = "PlanInteraction";
 
@@ -165,231 +161,115 @@ function createPlanClarificationSubmissionKey(
   });
 }
 
-function getInitialFormStep(fields: PlanClarificationField[]): number {
-  return fields.length > 0 ? 0 : 0;
+function boundedIndex(index: number, count: number): number {
+  if (count <= 0) return 0;
+  return Math.min(Math.max(index, 0), count - 1);
 }
 
-function getBoundedFormStep(step: number, totalSteps: number): number {
-  if (totalSteps <= 0) return 0;
-  return Math.min(Math.max(step, 0), totalSteps - 1);
-}
-
-function PlanClarificationFieldInput({
-  field,
-  value,
-  onChange,
-}: {
-  field: PlanClarificationField;
-  value: string | string[] | undefined;
-  onChange: (value: string | string[]) => void;
-}) {
-  if (field.type === "select") {
-    return (
-      <Select
-        aria-label={field.label}
-        className={styles.fieldControl}
-        placeholder={field.placeholder || field.label}
-        value={typeof value === "string" ? value : undefined}
-        options={(field.options || []).map((option) => ({
-          value: option.id,
-          label: option.label,
-        }))}
-        onChange={(nextValue) => onChange(String(nextValue))}
-      />
-    );
-  }
-
-  if (field.type === "multiselect") {
-    return (
-      <Select
-        mode="multiple"
-        aria-label={field.label}
-        className={styles.fieldControl}
-        placeholder={field.placeholder || field.label}
-        value={Array.isArray(value) ? value : []}
-        options={(field.options || []).map((option) => ({
-          value: option.id,
-          label: option.label,
-        }))}
-        onChange={(nextValue) => {
-          const selectedValues = Array.isArray(nextValue) ? nextValue : [];
-          onChange(selectedValues.map(String));
-        }}
-      />
-    );
-  }
-
-  if (field.type === "textarea") {
-    return (
-      <Input.TextArea
-        aria-label={field.label}
-        autoSize={{ minRows: 3, maxRows: 6 }}
-        className={styles.fieldControl}
-        placeholder={field.placeholder || field.label}
-        value={typeof value === "string" ? value : ""}
-        onChange={(event) => onChange(event.target.value)}
-      />
-    );
-  }
-
+function isTextTarget(target: EventTarget | null): boolean {
   return (
-    <Input
-      aria-label={field.label}
-      className={styles.fieldControl}
-      placeholder={field.placeholder || field.label}
-      value={typeof value === "string" ? value : ""}
-      onChange={(event) => onChange(event.target.value)}
-    />
+    target instanceof HTMLInputElement || target instanceof HTMLTextAreaElement
   );
 }
 
-function PlanClarificationFormSteps({
-  fields,
-  formValues,
-  textInput,
-  allowCustomResponse,
-  disabled,
-  onFieldChange,
-  onTextInputChange,
-  onSubmit,
+function ChoiceRows({
+  options,
+  selectedIds,
+  focusedIndex,
+  allowCustomResponse = false,
+  customActive = false,
+  onFocusIndexChange,
+  onSelect,
+  onCustomSelect,
 }: {
-  fields: PlanClarificationField[];
-  formValues: Record<string, string | string[]>;
-  textInput: string;
-  allowCustomResponse: boolean;
-  disabled: boolean;
-  onFieldChange: (fieldId: string, value: string | string[]) => void;
-  onTextInputChange: (value: string) => void;
-  onSubmit: () => void;
+  options: PlanClarificationOption[];
+  selectedIds: string[];
+  focusedIndex: number;
+  allowCustomResponse?: boolean;
+  customActive?: boolean;
+  onFocusIndexChange: (index: number) => void;
+  onSelect: (optionId: string) => void;
+  onCustomSelect?: () => void;
 }) {
-  const hasCustomResponseStep = allowCustomResponse;
-  const totalSteps = fields.length + (hasCustomResponseStep ? 1 : 0);
-  const [activeStep, setActiveStep] = useState(() =>
-    getInitialFormStep(fields),
-  );
-  const boundedStep = getBoundedFormStep(activeStep, totalSteps);
-  const activeField =
-    boundedStep < fields.length ? fields[boundedStep] : undefined;
-  const isCustomResponseStep = !activeField && hasCustomResponseStep;
-  const currentFieldComplete = activeField
-    ? !activeField.required || hasFormValue(formValues[activeField.id])
-    : true;
-  const canGoBack = boundedStep > 0;
-  const canGoNext = boundedStep < totalSteps - 1 && currentFieldComplete;
-  const isFinalStep = totalSteps === 0 || boundedStep === totalSteps - 1;
-  const hasCompletedAnswers = fields.some((field) =>
-    hasFormValue(formValues[field.id]),
-  );
-  const stageViewportClassName = [
-    styles.formStageViewport,
-    activeField?.type === "textarea" || isCustomResponseStep
-      ? styles.formStageViewportExpanded
-      : styles.formStageViewportCompact,
-  ].join(" ");
+  const rowRefs = useRef<Array<HTMLButtonElement | null>>([]);
+  const allRowsCount = options.length + (allowCustomResponse ? 1 : 0);
 
   useEffect(() => {
-    setActiveStep((current) => getBoundedFormStep(current, totalSteps));
-  }, [totalSteps]);
-
-  const goBack = () => {
-    if (!canGoBack) return;
-    setActiveStep((current) => getBoundedFormStep(current - 1, totalSteps));
-  };
-
-  const goNext = () => {
-    if (!canGoNext) return;
-    setActiveStep((current) => getBoundedFormStep(current + 1, totalSteps));
-  };
+    const focusedRow = rowRefs.current[focusedIndex];
+    if (typeof focusedRow?.scrollIntoView === "function") {
+      focusedRow.scrollIntoView({ block: "nearest" });
+    }
+  }, [focusedIndex]);
 
   return (
-    <div className={styles.formStepper}>
-      <div className={styles.formStage}>
-        <div className={styles.formStageMeta}>
-          <span className={styles.formStageCount}>
-            {totalSteps > 0 ? `${boundedStep + 1}/${totalSteps}` : "0/0"}
-          </span>
-          {activeField?.required ? (
-            <span className={styles.formStageRequired}>Required</span>
-          ) : null}
-        </div>
-        <Typography.Text className={styles.formStageTitle} strong>
-          {activeField?.label || "Additional context"}
-        </Typography.Text>
-
-        {activeField?.description ? (
-          <Typography.Text className={styles.formStageDescription}>
-            {activeField.description}
-          </Typography.Text>
-        ) : null}
-
-        {hasCompletedAnswers ? (
-          <div className={styles.answerStrip}>
-            {fields.map((field, index) => {
-              const formattedValue = formatFormFieldValue(
-                field,
-                formValues[field.id],
-              );
-              if (!formattedValue) return null;
-              return (
-                <button
-                  key={field.id}
-                  type="button"
-                  className={styles.answerPill}
-                  onClick={() => setActiveStep(index)}
-                >
-                  <span>{field.label}</span>
-                  <strong>{formattedValue}</strong>
-                </button>
-              );
-            })}
-          </div>
-        ) : null}
-
-        <div className={stageViewportClassName}>
-          {activeField ? (
-            <PlanClarificationFieldInput
-              field={activeField}
-              value={formValues[activeField.id]}
-              onChange={(value) => onFieldChange(activeField.id, value)}
-            />
-          ) : null}
-
-          {isCustomResponseStep ? (
-            <Input.TextArea
-              autoSize={{ minRows: 3, maxRows: 6 }}
-              className={styles.fieldControl}
-              placeholder="Custom response"
-              value={textInput}
-              onChange={(event) => onTextInputChange(event.target.value)}
-            />
-          ) : null}
-        </div>
-      </div>
-
-      <Flex justify="space-between" align="center" className={styles.formNav}>
-        <Button
-          icon={<ArrowLeft size={14} />}
-          disabled={!canGoBack}
-          onClick={goBack}
-        >
-          Back
-        </Button>
-        {isFinalStep ? (
-          <Button type="primary" disabled={disabled} onClick={onSubmit}>
-            Submit
-          </Button>
-        ) : (
-          <Button
-            type="primary"
-            icon={<ArrowRight size={14} />}
-            iconPosition="end"
-            disabled={!canGoNext}
-            onClick={goNext}
+    <div className={styles.choiceOptionsViewport}>
+      {options.map((option, index) => {
+        const selected = selectedIds.includes(option.id);
+        const focused = focusedIndex === index;
+        return (
+          <button
+            ref={(node) => {
+              rowRefs.current[index] = node;
+            }}
+            key={option.id}
+            type="button"
+            className={[
+              styles.optionRow,
+              focused ? styles.optionRowFocused : "",
+              selected ? styles.optionRowSelected : "",
+            ]
+              .filter(Boolean)
+              .join(" ")}
+            aria-current={focused ? "true" : undefined}
+            aria-pressed={selected}
+            onMouseEnter={() => onFocusIndexChange(index)}
+            onFocus={() => onFocusIndexChange(index)}
+            onClick={() => onSelect(option.id)}
           >
-            Next
-          </Button>
-        )}
-      </Flex>
+            <span className={styles.optionNumber}>{index + 1}.</span>
+            <span className={styles.optionLabel}>{option.label}</span>
+            {selected ? <Check aria-hidden="true" size={15} /> : null}
+            {focused ? (
+              <ChevronsUpDown
+                aria-hidden="true"
+                className={styles.optionFocusIcon}
+                size={14}
+              />
+            ) : null}
+          </button>
+        );
+      })}
+      {allowCustomResponse ? (
+        <button
+          ref={(node) => {
+            rowRefs.current[allRowsCount - 1] = node;
+          }}
+          type="button"
+          className={[
+            styles.optionRow,
+            focusedIndex === allRowsCount - 1 ? styles.optionRowFocused : "",
+            customActive ? styles.optionRowSelected : "",
+          ]
+            .filter(Boolean)
+            .join(" ")}
+          aria-current={focusedIndex === allRowsCount - 1 ? "true" : undefined}
+          aria-pressed={customActive}
+          onMouseEnter={() => onFocusIndexChange(allRowsCount - 1)}
+          onFocus={() => onFocusIndexChange(allRowsCount - 1)}
+          onClick={onCustomSelect}
+        >
+          <span className={styles.optionNumber}>{allRowsCount}.</span>
+          <span className={styles.optionLabel}>自定义回复</span>
+          {customActive ? <Check aria-hidden="true" size={15} /> : null}
+          {focusedIndex === allRowsCount - 1 ? (
+            <ChevronsUpDown
+              aria-hidden="true"
+              className={styles.optionFocusIcon}
+              size={14}
+            />
+          ) : null}
+        </button>
+      ) : null}
     </div>
   );
 }
@@ -406,6 +286,9 @@ export function PlanClarificationCard({
   const [singleChoice, setSingleChoice] = useState<string>("");
   const [multiChoice, setMultiChoice] = useState<string[]>([]);
   const [textInput, setTextInput] = useState("");
+  const [customActive, setCustomActive] = useState(false);
+  const [focusedIndex, setFocusedIndex] = useState(0);
+  const [activeStep, setActiveStep] = useState(0);
   const [formValues, setFormValues] = useState<
     Record<string, string | string[]>
   >({});
@@ -423,8 +306,43 @@ export function PlanClarificationCard({
       submissionKey,
     ),
   );
+  const [dismissed, setDismissed] = useState(() =>
+    loadSubmittedInteractionKeys(PLAN_CLARIFICATION_DISMISSAL_STORAGE_KEY).has(
+      submissionKey,
+    ),
+  );
   const options = data.options || [];
   const fields = data.fields || [];
+  const allowsCustomText =
+    data.kind === "text_input" || data.allow_custom_response === true;
+  const totalSteps =
+    data.kind === "form"
+      ? fields.length + (data.allow_custom_response ? 1 : 0)
+      : 1;
+  const boundedStep = boundedIndex(activeStep, totalSteps);
+  const activeField =
+    data.kind === "form" && boundedStep < fields.length
+      ? fields[boundedStep]
+      : undefined;
+  const isSupplementStep =
+    data.kind === "form" && !activeField && data.allow_custom_response === true;
+  const activeOptions =
+    activeField?.type === "select" || activeField?.type === "multiselect"
+      ? activeField.options || []
+      : options;
+  const activeSelectedIds = activeField
+    ? Array.isArray(formValues[activeField.id])
+      ? (formValues[activeField.id] as string[])
+      : typeof formValues[activeField.id] === "string"
+      ? [formValues[activeField.id] as string]
+      : []
+    : data.kind === "single_choice"
+    ? singleChoice
+      ? [singleChoice]
+      : []
+    : data.kind === "multi_choice"
+    ? multiChoice
+    : [];
   const selectedIds =
     data.kind === "single_choice"
       ? singleChoice
@@ -434,7 +352,7 @@ export function PlanClarificationCard({
       ? multiChoice
       : [];
   const trimmedText = textInput.trim();
-  const selectedLabels = optionLabels(options, selectedIds);
+  const effectiveChoiceText = customActive ? trimmedText : "";
   const requiredFormFieldsSatisfied = fields.every(
     (field) => !field.required || hasFormValue(formValues[field.id]),
   );
@@ -445,21 +363,18 @@ export function PlanClarificationCard({
       return `${field.label}: ${formattedValue}`;
     })
     .filter(Boolean);
-  const allowsCustomText =
-    data.kind === "text_input" || data.allow_custom_response === true;
-  const queryParts =
-    data.kind === "text_input"
-      ? [trimmedText]
-      : data.kind === "form"
-      ? [...formQueryLines, trimmedText].filter(Boolean)
-      : [selectedLabels, trimmedText].filter(Boolean);
-  const query = queryParts.join("\n");
   const disabled =
     data.kind === "text_input"
-      ? !query
+      ? !trimmedText
       : data.kind === "form"
-      ? !requiredFormFieldsSatisfied || !query
-      : selectedIds.length === 0 && !trimmedText;
+      ? !requiredFormFieldsSatisfied ||
+        [...formQueryLines, trimmedText].filter(Boolean).length === 0
+      : selectedIds.length === 0 && !effectiveChoiceText;
+  const currentFieldComplete = activeField
+    ? !activeField.required || hasFormValue(formValues[activeField.id])
+    : true;
+  const isFinalStep = boundedStep >= totalSteps - 1;
+  const canGoNext = !isFinalStep && currentFieldComplete;
 
   useEffect(() => {
     setSubmitted(
@@ -467,10 +382,47 @@ export function PlanClarificationCard({
         submissionKey,
       ),
     );
+    setDismissed(
+      loadSubmittedInteractionKeys(
+        PLAN_CLARIFICATION_DISMISSAL_STORAGE_KEY,
+      ).has(submissionKey),
+    );
+    setFocusedIndex(0);
+    setActiveStep(0);
   }, [submissionKey]);
 
-  const handleSubmit = () => {
-    if (disabled || submitted) return;
+  useEffect(() => {
+    setFocusedIndex(0);
+  }, [boundedStep]);
+
+  const handleDismiss = () => {
+    storeSubmittedInteractionKey(
+      PLAN_CLARIFICATION_DISMISSAL_STORAGE_KEY,
+      submissionKey,
+    );
+    setDismissed(true);
+  };
+
+  const handleSubmit = (selectedOverride?: string[]) => {
+    const effectiveSelectedIds = selectedOverride || selectedIds;
+    const effectiveSelectedLabels = optionLabels(options, effectiveSelectedIds);
+    const effectiveText =
+      data.kind === "form" || data.kind === "text_input"
+        ? trimmedText
+        : effectiveChoiceText;
+    const effectiveQuery =
+      data.kind === "text_input"
+        ? effectiveText
+        : data.kind === "form"
+        ? [...formQueryLines, effectiveText].filter(Boolean).join("\n")
+        : [effectiveSelectedLabels, effectiveText].filter(Boolean).join("\n");
+    const effectiveDisabled =
+      data.kind === "text_input"
+        ? !effectiveQuery
+        : data.kind === "form"
+        ? !requiredFormFieldsSatisfied || !effectiveQuery
+        : effectiveSelectedIds.length === 0 && !effectiveText;
+    if (effectiveDisabled || submitted) return;
     const payload =
       data.kind === "form"
         ? {
@@ -478,20 +430,20 @@ export function PlanClarificationCard({
             kind: "form" as const,
             form_id: data.form_id,
             field_values: collectFormValues(fields, formValues),
-            text: trimmedText || undefined,
+            text: effectiveText || undefined,
           }
         : {
             card_type: "plan_clarification" as const,
             kind: data.kind,
-            selected_option_ids: selectedIds,
-            text: trimmedText || undefined,
+            selected_option_ids: effectiveSelectedIds,
+            text: effectiveText || undefined,
           };
     storeSubmittedInteractionKey(PLAN_CLARIFICATION_STORAGE_KEY, submissionKey);
     setSubmitted(true);
     emit({
       type: "handleSubmit",
       data: {
-        query,
+        query: effectiveQuery,
         fileList: [],
         biz_params: {
           plan_interaction_response: payload,
@@ -500,108 +452,279 @@ export function PlanClarificationCard({
     });
   };
 
-  if (submitted) return null;
-  const choiceOptionsNeedScrollHint = options.length > 3;
+  const goBack = () => {
+    if (customActive && data.kind !== "form") {
+      setCustomActive(false);
+      return;
+    }
+    if (boundedStep > 0) {
+      setActiveStep((current) => boundedIndex(current - 1, totalSteps));
+      return;
+    }
+    handleDismiss();
+  };
+
+  const goForward = () => {
+    if (!isFinalStep) {
+      if (canGoNext) {
+        setActiveStep((current) => boundedIndex(current + 1, totalSteps));
+      }
+      return;
+    }
+    handleSubmit();
+  };
+
+  const selectActiveOption = (optionId: string) => {
+    setCustomActive(false);
+    if (!activeField) {
+      setTextInput("");
+    }
+    if (activeField) {
+      setFormValues((current) => {
+        const currentValue = current[activeField.id];
+        if (activeField.type === "multiselect") {
+          const currentIds = Array.isArray(currentValue) ? currentValue : [];
+          return {
+            ...current,
+            [activeField.id]: currentIds.includes(optionId)
+              ? currentIds.filter((id) => id !== optionId)
+              : [...currentIds, optionId],
+          };
+        }
+        return { ...current, [activeField.id]: optionId };
+      });
+      return;
+    }
+    if (data.kind === "multi_choice") {
+      setMultiChoice((current) =>
+        current.includes(optionId)
+          ? current.filter((id) => id !== optionId)
+          : [...current, optionId],
+      );
+      return;
+    }
+    setSingleChoice(optionId);
+  };
+
+  const activateCustomResponse = () => {
+    setSingleChoice("");
+    setMultiChoice([]);
+    setCustomActive(true);
+  };
+
+  const handleCardKeyDown = (event: React.KeyboardEvent<HTMLElement>) => {
+    if (event.key === "Escape") {
+      event.preventDefault();
+      goBack();
+      return;
+    }
+    if (isTextTarget(event.target)) {
+      if (event.key === "Enter" && !event.shiftKey) {
+        event.preventDefault();
+        goForward();
+      }
+      return;
+    }
+    const rowCount =
+      activeOptions.length + (data.kind !== "form" && allowsCustomText ? 1 : 0);
+    if (event.key === "ArrowUp" || event.key === "ArrowDown") {
+      event.preventDefault();
+      setFocusedIndex((current) =>
+        boundedIndex(current + (event.key === "ArrowUp" ? -1 : 1), rowCount),
+      );
+      return;
+    }
+    if (event.key === "ArrowLeft") {
+      event.preventDefault();
+      if (boundedStep > 0) {
+        setActiveStep((current) => boundedIndex(current - 1, totalSteps));
+      }
+      return;
+    }
+    if (event.key === "ArrowRight") {
+      event.preventDefault();
+      goForward();
+      return;
+    }
+    if (/^[1-9]$/.test(event.key)) {
+      const index = Number(event.key) - 1;
+      if (index < rowCount) {
+        event.preventDefault();
+        setFocusedIndex(index);
+        if (index === activeOptions.length) activateCustomResponse();
+        else selectActiveOption(activeOptions[index].id);
+      }
+      return;
+    }
+    if (event.key === " ") {
+      event.preventDefault();
+      const hasCustomRow = data.kind !== "form" && allowsCustomText;
+      if (hasCustomRow && focusedIndex === activeOptions.length) {
+        activateCustomResponse();
+      } else if (activeOptions[focusedIndex]) {
+        selectActiveOption(activeOptions[focusedIndex].id);
+      }
+      return;
+    }
+    if (event.key === "Enter") {
+      event.preventDefault();
+      if (
+        data.kind === "single_choice" &&
+        !singleChoice &&
+        activeOptions[focusedIndex]
+      ) {
+        const focusedOptionId = activeOptions[focusedIndex].id;
+        setSingleChoice(focusedOptionId);
+        handleSubmit([focusedOptionId]);
+        return;
+      }
+      goForward();
+    }
+  };
+
+  if (submitted || dismissed) return null;
+
+  const pageTitle =
+    data.kind === "form" ? activeField?.label || "补充说明" : data.prompt;
+  const showChoiceRows =
+    !customActive &&
+    (data.kind === "single_choice" ||
+      data.kind === "multi_choice" ||
+      activeField?.type === "select" ||
+      activeField?.type === "multiselect");
+  const showCustomInput =
+    data.kind === "text_input" || customActive || isSupplementStep;
 
   return (
-    <div className={styles.planClarificationCard}>
-      <div className={styles.planClarificationBody}>
-        {data.kind !== "form" ? (
-          <Typography.Text strong className={styles.choicePrompt}>
-            {data.prompt}
-          </Typography.Text>
-        ) : null}
-        {data.kind === "single_choice" ? (
-          <div className={styles.choiceOptionsViewport}>
-            {choiceOptionsNeedScrollHint ? (
-              <span aria-hidden="true" className={styles.choiceScrollHint}>
-                <span className={styles.choiceScrollTrack}>
-                  <span className={styles.choiceScrollThumb} />
-                </span>
-              </span>
-            ) : null}
-            <Radio.Group
-              value={singleChoice}
-              onChange={(event) => setSingleChoice(event.target.value)}
-            >
-              <Space direction="vertical" className={styles.choiceOptionList}>
-                {options.map((option) => (
-                  <Radio key={option.id} value={option.id}>
-                    {option.label}
-                  </Radio>
-                ))}
-              </Space>
-            </Radio.Group>
-          </div>
-        ) : null}
-        {data.kind === "multi_choice" ? (
-          <div className={styles.choiceOptionsViewport}>
-            {choiceOptionsNeedScrollHint ? (
-              <span aria-hidden="true" className={styles.choiceScrollHint}>
-                <span className={styles.choiceScrollTrack}>
-                  <span className={styles.choiceScrollThumb} />
-                </span>
-              </span>
-            ) : null}
-            <Checkbox.Group
-              value={multiChoice}
-              onChange={(values) => setMultiChoice(values.map(String))}
-            >
-              <Space direction="vertical" className={styles.choiceOptionList}>
-                {options.map((option) => (
-                  <Checkbox key={option.id} value={option.id}>
-                    {option.label}
-                  </Checkbox>
-                ))}
-              </Space>
-            </Checkbox.Group>
-          </div>
-        ) : null}
-        {data.kind === "text_input" ? (
-          <Input.TextArea
-            autoSize={{ minRows: 2, maxRows: 5 }}
-            placeholder={data.prompt}
-            value={textInput}
-            onChange={(event) => setTextInput(event.target.value)}
+    <section
+      className={styles.planClarificationCard}
+      data-plan-clarification-active="true"
+      role="region"
+      aria-label={data.prompt}
+      tabIndex={0}
+      onKeyDown={handleCardKeyDown}
+    >
+      <header className={styles.cardHeader}>
+        <div className={styles.cardHeading}>
+          <strong>{pageTitle}</strong>
+          {activeField?.required ? <span>必填</span> : null}
+        </div>
+        <div className={styles.cardPager}>
+          <button
+            type="button"
+            aria-label="上一项"
+            disabled={boundedStep === 0}
+            onClick={() =>
+              setActiveStep((current) => boundedIndex(current - 1, totalSteps))
+            }
+          >
+            <ChevronLeft aria-hidden="true" size={15} />
+          </button>
+          <span>
+            {boundedStep + 1} of {totalSteps}
+          </span>
+          <button
+            type="button"
+            aria-label="下一项"
+            disabled={!canGoNext}
+            onClick={goForward}
+          >
+            <ChevronRight aria-hidden="true" size={15} />
+          </button>
+        </div>
+      </header>
+
+      {activeField?.description ? (
+        <p className={styles.fieldDescription}>{activeField.description}</p>
+      ) : null}
+
+      <div className={styles.cardStage}>
+        {showChoiceRows ? (
+          <ChoiceRows
+            options={activeOptions}
+            selectedIds={activeSelectedIds}
+            focusedIndex={focusedIndex}
+            allowCustomResponse={data.kind !== "form" && allowsCustomText}
+            customActive={customActive}
+            onFocusIndexChange={setFocusedIndex}
+            onSelect={selectActiveOption}
+            onCustomSelect={activateCustomResponse}
           />
         ) : null}
-        {data.kind === "form" ? (
-          <PlanClarificationFormSteps
-            fields={fields}
-            formValues={formValues}
-            textInput={textInput}
-            allowCustomResponse={allowsCustomText}
-            disabled={disabled}
-            onFieldChange={(fieldId, value) =>
+        {activeField?.type === "text" ? (
+          <input
+            autoFocus
+            className={styles.textField}
+            aria-label={activeField.label}
+            placeholder={activeField.placeholder || activeField.label}
+            value={
+              typeof formValues[activeField.id] === "string"
+                ? (formValues[activeField.id] as string)
+                : ""
+            }
+            onChange={(event) =>
               setFormValues((current) => ({
                 ...current,
-                [fieldId]: value,
+                [activeField.id]: event.target.value,
               }))
             }
-            onTextInputChange={setTextInput}
-            onSubmit={handleSubmit}
           />
         ) : null}
-        {data.kind !== "text_input" &&
-        data.kind !== "form" &&
-        allowsCustomText ? (
-          <Input.TextArea
-            autoSize={{ minRows: 2, maxRows: 5 }}
-            placeholder="Custom response"
-            className={styles.choiceCustomResponse}
+        {activeField?.type === "textarea" ? (
+          <textarea
+            autoFocus
+            className={styles.textArea}
+            aria-label={activeField.label}
+            placeholder={activeField.placeholder || activeField.label}
+            value={
+              typeof formValues[activeField.id] === "string"
+                ? (formValues[activeField.id] as string)
+                : ""
+            }
+            onChange={(event) =>
+              setFormValues((current) => ({
+                ...current,
+                [activeField.id]: event.target.value,
+              }))
+            }
+          />
+        ) : null}
+        {showCustomInput ? (
+          <textarea
+            autoFocus
+            className={styles.textArea}
+            aria-label={pageTitle}
+            placeholder={
+              data.kind === "text_input" ? data.prompt : "请输入自定义回复"
+            }
             value={textInput}
             onChange={(event) => setTextInput(event.target.value)}
           />
         ) : null}
-        {data.kind !== "form" ? (
-          <Flex justify="flex-end" className={styles.cardActions}>
-            <Button type="primary" disabled={disabled} onClick={handleSubmit}>
-              Submit
-            </Button>
-          </Flex>
-        ) : null}
       </div>
-    </div>
+
+      <footer className={styles.cardActions}>
+        <button
+          type="button"
+          className={styles.dismissButton}
+          aria-label="退出"
+          onClick={handleDismiss}
+        >
+          <span>退出</span>
+          <kbd>ESC</kbd>
+        </button>
+        <button
+          type="button"
+          className={styles.continueButton}
+          aria-label={isFinalStep ? "提交" : "继续"}
+          disabled={isFinalStep ? disabled : !canGoNext}
+          onClick={goForward}
+        >
+          <span>{isFinalStep ? "提交" : "继续"}</span>
+          <CornerDownLeft aria-hidden="true" size={14} />
+        </button>
+      </footer>
+    </section>
   );
 }
 
