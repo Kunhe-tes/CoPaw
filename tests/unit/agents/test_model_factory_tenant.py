@@ -160,10 +160,10 @@ class TestFileBlockSupportFormatter:
         )
 
     @pytest.mark.asyncio
-    async def test_anthropic_formatter_preserves_later_hook_system_role(
+    async def test_anthropic_formatter_merges_later_hook_system_role(
         self,
     ):
-        """Anthropic 后端应保留持久化 hook system 消息。"""
+        """Anthropic 后端应把持久化 hook system 合并到首条 system。"""
         from agentscope.formatter import AnthropicChatFormatter
         from agentscope.message import Msg
 
@@ -186,12 +186,12 @@ class TestFileBlockSupportFormatter:
         assert [message["role"] for message in messages] == [
             "system",
             "user",
-            "system",
             "user",
         ]
-        assert messages[2]["content"][0]["text"] == (
+        assert messages[0]["content"][-1]["text"] == (
             "[Hook additional context]\nremember"
         )
+        assert all(message["role"] != "system" for message in messages[1:])
 
     @pytest.mark.asyncio
     async def test_openai_formatter_preserves_internal_accepted_plan_exchange(

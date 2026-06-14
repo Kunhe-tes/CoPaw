@@ -243,6 +243,25 @@ def _format_anthropic_output_items(output: list) -> list:
     ]
 
 
+def _append_to_initial_anthropic_system(
+    messages: list[dict],
+    content_blocks: list[dict],
+) -> None:
+    """把后续 system 上下文合并到 Anthropic 唯一允许的首条 system 消息。"""
+    if not content_blocks:
+        return
+    if messages and messages[0].get("role") == "system":
+        messages[0].setdefault("content", []).extend(content_blocks)
+        return
+    messages.insert(
+        0,
+        {
+            "role": "system",
+            "content": [*content_blocks],
+        },
+    )
+
+
 # TODO: remove after agentscope anthropic formatter updated
 def _format_anthropic_messages(  # pylint: disable=too-many-branches
     msgs: list,
@@ -302,16 +321,18 @@ def _format_anthropic_messages(  # pylint: disable=too-many-branches
                     },
                 )
 
-        if (
-            msg.role == "system"
-            and index != 0
-            and not _is_persisted_hook_follow_up_message(
+        if msg.role == "system" and index != 0:
+            if _is_persisted_hook_follow_up_message(
                 {
                     "role": msg.role,
                     "content": content_blocks,
                 },
-            )
-        ):
+            ):
+                _append_to_initial_anthropic_system(
+                    messages,
+                    content_blocks,
+                )
+                continue
             role = "user"
         else:
             role = msg.role
