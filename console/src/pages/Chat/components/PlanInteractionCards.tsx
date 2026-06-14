@@ -16,10 +16,15 @@ import {
 import { ChatAnywhereMessagesContext } from "@/components/agentscope-chat/AgentScopeRuntimeWebUI/core/Context/ChatAnywhereMessagesContext";
 import { emit } from "@/components/agentscope-chat/AgentScopeRuntimeWebUI/core/Context/useChatAnywhereEventEmitter";
 import type {
+  ChatRuntimeResponseCardData,
   ChatPlanClarificationCardData,
   PlanClarificationField,
   ChatPlanReviewCardData,
   PlanClarificationOption,
+} from "../messageMeta";
+import {
+  resolveFeedbackResponseId,
+  resolveFeedbackTraceId,
 } from "../messageMeta";
 import styles from "./PlanInteractionCards.module.less";
 import { useContextSelector } from "use-context-selector";
@@ -29,6 +34,7 @@ const PLAN_CLARIFICATION_DISMISSAL_STORAGE_KEY =
   "copaw_dismissed_plan_clarifications";
 const PLAN_REVIEW_STORAGE_KEY = "copaw_submitted_plan_reviews";
 const PLAN_INTERACTION_CARD_CODE = "PlanInteraction";
+const RUNTIME_RESPONSE_CARD_CODE = "AgentScopeRuntimeResponseCard";
 
 function loadSubmittedInteractionKeys(storageKey: string): Set<string> {
   try {
@@ -124,9 +130,70 @@ function isPlanClarificationCardData(
   );
 }
 
+function isRuntimeResponseCardData(
+  data: unknown,
+): data is ChatRuntimeResponseCardData {
+  return (
+    Boolean(data) &&
+    typeof data === "object" &&
+    Array.isArray((data as { output?: unknown }).output)
+  );
+}
+
+function createPlanClarificationFingerprint(
+  data: ChatPlanClarificationCardData,
+): string {
+  return JSON.stringify({
+    kind: data.kind,
+    prompt: data.prompt,
+    form_id: data.form_id,
+    options: data.options || [],
+    fields: data.fields || [],
+    allow_custom_response: data.allow_custom_response === true,
+  });
+}
+
+function resolveClarificationSourceKey(
+  cards: IAgentScopeRuntimeWebUIMessage["cards"],
+  data: ChatPlanClarificationCardData,
+): string | null {
+  const responseCard = (cards || []).find(
+    (card) =>
+      card.code === RUNTIME_RESPONSE_CARD_CODE &&
+      isRuntimeResponseCardData(card.data),
+  );
+  if (!responseCard || !isRuntimeResponseCardData(responseCard.data)) {
+    return null;
+  }
+
+  const responseId = resolveFeedbackResponseId(responseCard.data);
+  if (responseId) {
+    return JSON.stringify({
+      source: "response",
+      response_id: responseId,
+      clarification: createPlanClarificationFingerprint(data),
+    });
+  }
+
+  const traceId = resolveFeedbackTraceId(responseCard.data);
+  if (traceId) {
+    return JSON.stringify({
+      source: "trace",
+      trace_id: traceId,
+      clarification: createPlanClarificationFingerprint(data),
+    });
+  }
+
+  return null;
+}
+
 function findLatestPlanClarificationCard(
   messages: IAgentScopeRuntimeWebUIMessage[],
-): { data: ChatPlanClarificationCardData; instanceKey: string } | null {
+): {
+  data: ChatPlanClarificationCardData;
+  instanceKey: string;
+  sourceKey: string | null;
+} | null {
   for (
     let messageIndex = messages.length - 1;
     messageIndex >= 0;
@@ -143,6 +210,7 @@ function findLatestPlanClarificationCard(
         return {
           data: card.data,
           instanceKey: `${message.id}:${card.id || card.code}:${cardIndex}`,
+          sourceKey: resolveClarificationSourceKey(cards, card.data),
         };
       }
     }
@@ -156,22 +224,23 @@ function createPlanClarificationSubmissionKey(
 ): string {
   return JSON.stringify({
     session_id: sessionId || "unknown",
-    kind: data.kind,
-    prompt: data.prompt,
-    form_id: data.form_id,
-    options: data.options || [],
-    fields: data.fields || [],
-    allow_custom_response: data.allow_custom_response === true,
+    clarification: createPlanClarificationFingerprint(data),
   });
 }
 
 function createPlanClarificationDismissalKey(
   sessionId: string | undefined,
-  cardInstanceKey: string,
+  stableSourceKey: string | null,
+  fallbackKey: string,
 ): string {
   return JSON.stringify({
     session_id: sessionId || "unknown",
-    instance_key: cardInstanceKey,
+    clarification:
+      stableSourceKey ||
+      JSON.stringify({
+        source: "content",
+        fingerprint: fallbackKey,
+      }),
   });
 }
 
@@ -291,9 +360,11 @@ function ChoiceRows({
 export function PlanClarificationCard({
   data,
   cardInstanceKey,
+  cardSourceKey,
 }: {
   data: ChatPlanClarificationCardData;
   cardInstanceKey?: string;
+  cardSourceKey?: string | null;
 }) {
   const currentSessionId = useContextSelector(
     ChatAnywhereSessionsContext,
@@ -319,10 +390,12 @@ export function PlanClarificationCard({
     () =>
       createPlanClarificationDismissalKey(
         resolvedSessionId,
-        cardInstanceKey || submissionKey,
+        cardSourceKey || null,
+        createPlanClarificationFingerprint(data),
       ),
-    [cardInstanceKey, resolvedSessionId, submissionKey],
+    [cardSourceKey, data, resolvedSessionId],
   );
+  const interactionResetKey = cardInstanceKey || dismissalKey;
   const [submitted, setSubmitted] = useState(() =>
     loadSubmittedInteractionKeys(PLAN_CLARIFICATION_STORAGE_KEY).has(
       submissionKey,
@@ -416,7 +489,7 @@ export function PlanClarificationCard({
     setFormValues({});
     setFocusedIndex(0);
     setActiveStep(0);
-  }, [dismissalKey, submissionKey]);
+  }, [dismissalKey, interactionResetKey, submissionKey]);
 
   useEffect(() => {
     setFocusedIndex(0);
@@ -768,6 +841,7 @@ export function ActivePlanClarificationCard() {
     <PlanClarificationCard
       data={clarification.data}
       cardInstanceKey={clarification.instanceKey}
+      cardSourceKey={clarification.sourceKey}
     />
   );
 }

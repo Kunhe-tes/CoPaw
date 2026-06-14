@@ -608,6 +608,98 @@ describe("Plan interaction cards", () => {
     expect(screen.getByRole("button", { name: "提交" })).toBeDisabled();
   });
 
+  it("keeps a dismissed clarification hidden after reload when runtime ids change", () => {
+    const firstMessages = [
+      {
+        id: "msg_runtime_1",
+        role: "assistant" as const,
+        cards: [
+          {
+            code: "AgentScopeRuntimeResponseCard",
+            data: {
+              id: "response_runtime_1",
+              output: [
+                {
+                  role: "assistant" as const,
+                  id: "msg_runtime_1",
+                  metadata: {
+                    original_id: "assistant-stable-1",
+                    trace_id: "trace-stable-1",
+                  },
+                },
+              ],
+            },
+          },
+          {
+            code: "PlanInteraction",
+            data: {
+              card_type: "plan_clarification" as const,
+              kind: "single_choice" as const,
+              prompt: "Pick scope",
+              options: [{ id: "small", label: "Small" }],
+            },
+          },
+        ],
+      },
+    ];
+    const { rerender } = renderActiveClarification(firstMessages);
+
+    fireEvent.click(screen.getByRole("button", { name: "退出" }));
+    expect(screen.queryByText("Pick scope")).not.toBeInTheDocument();
+
+    const reloadedMessages = [
+      {
+        id: "msg_runtime_2",
+        role: "assistant" as const,
+        cards: [
+          {
+            code: "AgentScopeRuntimeResponseCard",
+            data: {
+              id: "response_runtime_2",
+              output: [
+                {
+                  role: "assistant" as const,
+                  id: "msg_runtime_2",
+                  metadata: {
+                    original_id: "assistant-stable-1",
+                    trace_id: "trace-stable-1",
+                  },
+                },
+              ],
+            },
+          },
+          {
+            code: "PlanInteraction",
+            data: {
+              card_type: "plan_clarification" as const,
+              kind: "single_choice" as const,
+              prompt: "Pick scope",
+              options: [{ id: "small", label: "Small" }],
+            },
+          },
+        ],
+      },
+    ];
+
+    rerender(
+      <ChatAnywhereSessionsContext.Provider
+        value={createSessionContextValue()}
+      >
+        <ChatAnywhereMessagesContext.Provider
+          value={{
+            messages: reloadedMessages,
+            setMessages: vi.fn(),
+            getMessages: () => reloadedMessages,
+          }}
+        >
+          <ActivePlanClarificationCard />
+        </ChatAnywhereMessagesContext.Provider>
+      </ChatAnywhereSessionsContext.Provider>,
+    );
+
+    expect(screen.queryByText("Pick scope")).not.toBeInTheDocument();
+  });
+
   it("shows a repeated clarification again when it is a new card instance", () => {
     const firstMessages = [
       {
@@ -615,7 +707,22 @@ describe("Plan interaction cards", () => {
         role: "assistant" as const,
         cards: [
           {
-            id: "clarification-1",
+            code: "AgentScopeRuntimeResponseCard",
+            data: {
+              id: "response_runtime_1",
+              output: [
+                {
+                  role: "assistant" as const,
+                  id: "msg_runtime_1",
+                  metadata: {
+                    original_id: "assistant-stable-1",
+                    trace_id: "trace-stable-1",
+                  },
+                },
+              ],
+            },
+          },
+          {
             code: "PlanInteraction",
             data: {
               card_type: "plan_clarification" as const,
@@ -639,7 +746,22 @@ describe("Plan interaction cards", () => {
         role: "assistant" as const,
         cards: [
           {
-            id: "clarification-2",
+            code: "AgentScopeRuntimeResponseCard",
+            data: {
+              id: "response_runtime_2",
+              output: [
+                {
+                  role: "assistant" as const,
+                  id: "msg_runtime_2",
+                  metadata: {
+                    original_id: "assistant-stable-2",
+                    trace_id: "trace-stable-2",
+                  },
+                },
+              ],
+            },
+          },
+          {
             code: "PlanInteraction",
             data: {
               card_type: "plan_clarification" as const,
