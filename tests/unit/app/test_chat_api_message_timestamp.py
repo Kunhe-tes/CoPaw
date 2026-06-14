@@ -106,8 +106,8 @@ def test_get_chat_exposes_message_timestamp(
     assert payload["messages"][0]["timestamp"] == "2026-04-17T08:00:00Z"
 
 
-def test_get_chat_accepts_developer_role_history() -> None:
-    """聊天历史中的 developer role 应能以兼容形式返回。"""
+def test_get_chat_migrates_developer_role_history_to_system() -> None:
+    """聊天历史中的旧 developer role 应以 system 返回。"""
 
     class _DeveloperRoleSession:
         async def get_session_state_dict(
@@ -115,15 +115,21 @@ def test_get_chat_accepts_developer_role_history() -> None:
             _session_id: str,
             _user_id: str,
         ) -> dict:
-            developer_msg = build_hook_additional_context_msg(
-                "[Hook additional context]\nremember for next turn",
-            )
             return {
                 "agent": {
                     "memory": {
                         "content": [
                             [
-                                developer_msg.to_dict(),
+                                {
+                                    "id": "msg-1",
+                                    "name": "system",
+                                    "role": "developer",
+                                    "content": (
+                                        "[Hook additional context]\n"
+                                        "remember for next turn"
+                                    ),
+                                    "metadata": {},
+                                },
                                 [],
                             ],
                         ],
@@ -160,4 +166,4 @@ def test_get_chat_accepts_developer_role_history() -> None:
     assert response.status_code == 200
     payload = response.json()
     assert payload["messages"][0]["role"] == "system"
-    assert payload["messages"][0]["metadata"]["original_role"] == "developer"
+    assert "original_role" not in payload["messages"][0]["metadata"]

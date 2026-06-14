@@ -447,7 +447,7 @@ async def test_post_tool_hook_additional_context_is_added_to_memory(
     )
 
     assert "remember me" in agent.memory.content[-1][0].content
-    assert agent.memory.content[-1][0].role == "developer"
+    assert agent.memory.content[-1][0].role == "system"
 
 
 @pytest.mark.asyncio
@@ -478,7 +478,7 @@ async def test_tool_failure_hook_block_reason_is_added_to_memory(
         )
 
     assert "failure context" in agent.memory.content[-1][0].content
-    assert agent.memory.content[-1][0].role == "developer"
+    assert agent.memory.content[-1][0].role == "system"
 
 
 @pytest.mark.asyncio

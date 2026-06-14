@@ -23,7 +23,6 @@ logger = logging.getLogger(__name__)
 # Characters forbidden in Windows filenames
 _UNSAFE_FILENAME_RE = re.compile(r'[\\/:*?"<>|]')
 _ALLOWED_MESSAGE_ROLES = {"user", "assistant", "system"}
-_ORIGINAL_ROLE_METADATA_KEY = "_swe_original_role"
 
 
 def sanitize_filename(name: str) -> str:
@@ -38,7 +37,7 @@ def sanitize_filename(name: str) -> str:
 
 
 def _normalize_state_for_load(value):
-    """在反序列化前降级不被 AgentScope 接受的消息角色。"""
+    """在反序列化前把旧角色单向迁移到 AgentScope 可接受角色。"""
     if isinstance(value, list):
         return [_normalize_state_for_load(item) for item in value]
 
@@ -55,34 +54,8 @@ def _normalize_state_for_load(value):
         and "name" in normalized
         and "content" in normalized
     ):
-        metadata = normalized.get("metadata")
-        if isinstance(metadata, dict):
-            metadata = dict(metadata)
-        else:
-            metadata = {}
-        # 先按 AgentScope 允许的 system 恢复，再在内存态还原原始角色。
-        metadata.setdefault(_ORIGINAL_ROLE_METADATA_KEY, role)
-        normalized["metadata"] = metadata
         normalized["role"] = "system"
     return normalized
-
-
-def _restore_message_roles_after_load(state_module) -> None:
-    """把加载时临时降级的消息角色恢复为原始值。"""
-    content = getattr(state_module, "content", None)
-    if not isinstance(content, list):
-        return
-
-    for item in content:
-        if not isinstance(item, (tuple, list)) or not item:
-            continue
-        msg = item[0]
-        metadata = getattr(msg, "metadata", None)
-        if not isinstance(metadata, dict):
-            continue
-        original_role = metadata.pop(_ORIGINAL_ROLE_METADATA_KEY, None)
-        if isinstance(original_role, str):
-            msg.role = original_role
 
 
 class SafeJSONSession(SessionBase):
@@ -191,7 +164,6 @@ class SafeJSONSession(SessionBase):
                         states[name],
                     )
                     state_module.load_state_dict(normalized_state)
-                    _restore_message_roles_after_load(state_module)
             logger.info(
                 "Load session state from %s successfully.",
                 session_save_path,

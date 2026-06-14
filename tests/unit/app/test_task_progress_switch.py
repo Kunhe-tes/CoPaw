@@ -1,11 +1,15 @@
 # -*- coding: utf-8 -*-
 """task progress source 开关的聚焦回归测试。"""
 
+from contextlib import nullcontext
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
+from agentscope.memory import InMemoryMemory
+from agentscope.message import Msg
+from agentscope.model._model_response import ChatResponse
 
 from swe.agents import react_agent as react_agent_module
 from swe.agents.react_agent import SWEAgent
@@ -164,7 +168,7 @@ class TestReactAgentTaskProgressPrompt:
         self,
         monkeypatch,
     ):
-        """执行轮次必须从后端持久化计划注入系统提示词。"""
+        """执行轮次不应再把 accepted plan 拼进系统提示词。"""
         monkeypatch.setattr(
             react_agent_module,
             "build_system_prompt_from_working_dir",
@@ -193,10 +197,7 @@ class TestReactAgentTaskProgressPrompt:
         with bind_source_system_config(_build_effective_config(False)):
             prompt = SWEAgent._build_sys_prompt(agent)
 
-        assert "Accepted Plan Execution Context" in prompt
-        assert "plan-123" in prompt
-        assert "Read persisted step" in prompt
-        assert "front-end query" in prompt
+        assert prompt == "base prompt"
 
     def test_build_sys_prompt_skips_accepted_plan_without_server_source(
         self,
@@ -302,6 +303,145 @@ class TestUpdateTaskProgressSwitch:
             )
             is event
         )
+
+
+class _CaptureFormatter:
+    """捕获 `_reasoning` 输入消息，避免依赖具体 Provider 格式化细节。"""
+
+    def __init__(self) -> None:
+        self.last_msgs = []
+
+    async def format(self, msgs):
+        self.last_msgs = list(msgs)
+        return [{"role": "system", "content": "formatted"}]
+
+
+@pytest.mark.asyncio
+async def test_reasoning_injects_accepted_plan_as_internal_tool_exchange():
+    """accepted plan 应以内联 tool exchange 注入当前推理轮次。"""
+    agent = object.__new__(SWEAgent)
+    agent.__dict__["_module_dict"] = {}
+    agent.name = "Friday"
+    agent._sys_prompt = "base prompt"
+    agent._instance_pre_reasoning_hooks = {}
+    agent._instance_post_reasoning_hooks = {}
+    SWEAgent._class_pre_reasoning_hooks = {}
+    SWEAgent._class_post_reasoning_hooks = {}
+    agent.plan_notebook = None
+    agent.print_hint_msg = False
+    agent.compression_config = None
+    agent.tts_model = None
+    agent.model = AsyncMock(
+        return_value=ChatResponse(
+            id="resp-1",
+            content=[{"type": "text", "text": "done"}],
+        ),
+    )
+    agent.model.stream = False
+    agent.formatter = _CaptureFormatter()
+    agent.toolkit = SimpleNamespace(
+        get_json_schemas=lambda: [],
+        get_agent_skill_prompt=lambda: "",
+    )
+    agent.memory = InMemoryMemory()
+    agent._request_context = {
+        "turn_id": "turn-1",
+        "plan_mode_enabled": False,
+        "accepted_plan_source": "server_plan_store",
+        "accepted_plan": {
+            "plan_id": "plan-123",
+            "title": "Persisted plan",
+            "steps": ["Read persisted step"],
+        },
+    }
+    agent._in_summarizing = False
+    agent.agent_phase = lambda *_args, **_kwargs: nullcontext()
+    agent._proactive_strip_media_blocks = lambda: 0
+    agent._strip_media_blocks_from_memory = lambda: 0
+    agent._is_bad_request_or_media_error = lambda _exc: False
+    agent.print = AsyncMock()
+
+    await agent.memory.add(Msg("user", "execute now", "user"))
+
+    msg = await SWEAgent._reasoning(agent)
+
+    assert msg.role == "assistant"
+    prompt_msgs = agent.formatter.last_msgs
+    assert [item.role for item in prompt_msgs[:4]] == [
+        "system",
+        "user",
+        "assistant",
+        "system",
+    ]
+    assert prompt_msgs[0].content == "base prompt"
+    assert prompt_msgs[2].content[0]["type"] == "tool_use"
+    assert prompt_msgs[3].content[0]["type"] == "tool_result"
+    assert prompt_msgs[2].content[0]["id"] == prompt_msgs[3].content[0]["id"]
+    assert prompt_msgs[2].content[0]["name"] == "accepted_plan_context"
+    assert "Accepted Plan Execution Context" in (
+        prompt_msgs[3].content[0]["output"][0]["text"]
+    )
+    assert "plan-123" in prompt_msgs[3].content[0]["output"][0]["text"]
+    assert "front-end query" in prompt_msgs[3].content[0]["output"][0]["text"]
+    assert not any(
+        isinstance(item.content, str)
+        and "Accepted Plan Execution Context" in item.content
+        for item in prompt_msgs
+    )
+    assert [item[0].role for item in agent.memory.content] == [
+        "user",
+        "assistant",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_reasoning_skips_untrusted_accepted_plan_context():
+    """缺少后端来源标记时，accepted plan 不得进入 tool exchange。"""
+    agent = object.__new__(SWEAgent)
+    agent.__dict__["_module_dict"] = {}
+    agent.name = "Friday"
+    agent._sys_prompt = "base prompt"
+    agent._instance_pre_reasoning_hooks = {}
+    agent._instance_post_reasoning_hooks = {}
+    SWEAgent._class_pre_reasoning_hooks = {}
+    SWEAgent._class_post_reasoning_hooks = {}
+    agent.plan_notebook = None
+    agent.print_hint_msg = False
+    agent.compression_config = None
+    agent.tts_model = None
+    agent.model = AsyncMock(
+        return_value=ChatResponse(
+            id="resp-1",
+            content=[{"type": "text", "text": "done"}],
+        ),
+    )
+    agent.model.stream = False
+    agent.formatter = _CaptureFormatter()
+    agent.toolkit = SimpleNamespace(
+        get_json_schemas=lambda: [],
+        get_agent_skill_prompt=lambda: "",
+    )
+    agent.memory = InMemoryMemory()
+    agent._request_context = {
+        "turn_id": "turn-2",
+        "plan_mode_enabled": False,
+        "accepted_plan": {"plan_id": "client-plan"},
+    }
+    agent._in_summarizing = False
+    agent.agent_phase = lambda *_args, **_kwargs: nullcontext()
+    agent._proactive_strip_media_blocks = lambda: 0
+    agent._strip_media_blocks_from_memory = lambda: 0
+    agent._is_bad_request_or_media_error = lambda _exc: False
+    agent.print = AsyncMock()
+
+    await agent.memory.add(Msg("user", "execute now", "user"))
+
+    await SWEAgent._reasoning(agent)
+
+    assert [item.role for item in agent.formatter.last_msgs] == [
+        "system",
+        "user",
+    ]
 
 
 def test_is_chat_task_progress_enabled_reads_false_string_as_disabled():

@@ -21,15 +21,15 @@
 ## Console 第二轮提问 / OpenAI system role 顺序
 
 - 后端 query 生命周期：[src/swe/app/runner/runner.py](/Users/shixiangyi/code/Swe/src/swe/app/runner/runner.py)
-- 重点看 `_emit_stop_hook_if_needed()` 是否把 STOP hook additionalContext 追加成 developer hook 消息
+- 重点看 `_emit_stop_hook_if_needed()` 是否把 STOP hook additionalContext 追加成 hook 前缀 `system` 消息
 - Tool hook 结果记录：[src/swe/agents/tool_guard_mixin.py](/Users/shixiangyi/code/Swe/src/swe/agents/tool_guard_mixin.py)
-- 重点看 `_record_tool_hook_result()` 是否把 tool hook additionalContext 追加成 developer hook 消息
+- 重点看 `_record_tool_hook_result()` 是否把 tool hook additionalContext 追加成 hook 前缀 `system` 消息
 - Hook 消息构造：[src/swe/agents/hook_runtime/messages.py](/Users/shixiangyi/code/Swe/src/swe/agents/hook_runtime/messages.py)
-- 重点看 AgentScope `Msg` 的 developer role 兼容封装
+- 重点看 `build_hook_additional_context_msg()` 是否只生成标准 `system` 消息
 - OpenAI-compatible formatter：[src/swe/agents/model_factory.py](/Users/shixiangyi/code/Swe/src/swe/agents/model_factory.py)
-- 重点看 `_strip_top_level_message_name()` 是否清理 `messages[*].name` 并把历史 hook system 转为 developer
+- 重点看 `_strip_top_level_message_name()` 是否保留 hook 前缀 `system`，并把其他非首位 system 降级成 `user`
 - OpenAI-compatible 请求兼容层：[src/swe/providers/openai_chat_model_compat.py](/Users/shixiangyi/code/Swe/src/swe/providers/openai_chat_model_compat.py)
-- 重点看后端拒绝 `developer` role 时是否只在 `Unexpected message role` 错误下重试降级
+- 重点看是否还残留 `developer -> user` 的自动重试
 - Runner 回归测试：[tests/unit/app/test_runner_hook_runtime.py](/Users/shixiangyi/code/Swe/tests/unit/app/test_runner_hook_runtime.py)
 - Formatter 回归测试：[tests/unit/agents/test_model_factory_tenant.py](/Users/shixiangyi/code/Swe/tests/unit/agents/test_model_factory_tenant.py)
 - Provider 兼容回归测试：[tests/unit/providers/test_openai_stream_toolcall_compat.py](/Users/shixiangyi/code/Swe/tests/unit/providers/test_openai_stream_toolcall_compat.py)
@@ -38,12 +38,27 @@
 ## 会话恢复 / developer role 反序列化断言
 
 - 会话加载边界：[src/swe/app/runner/session.py](/Users/shixiangyi/code/Swe/src/swe/app/runner/session.py)
-- 重点看 `load_session_state()` 调底层 `load_state_dict()` 前后是否做 role 兼容迁移
+- 重点看 `load_session_state()` 调底层 `load_state_dict()` 前是否把 legacy `developer` 单向迁移成 `system`
 - Hook 消息构造：[src/swe/agents/hook_runtime/messages.py](/Users/shixiangyi/code/Swe/src/swe/agents/hook_runtime/messages.py)
-- 重点看 `build_hook_additional_context_msg()` 是否仍保留 developer 语义
+- 重点看 `build_hook_additional_context_msg()` 是否仍只生成 `system`
 - Runner 入口：[src/swe/app/runner/runner.py](/Users/shixiangyi/code/Swe/src/swe/app/runner/runner.py)
 - 重点看 `get_state_loaded()` 是否把 session 恢复异常直接暴露到 query 主链路
 - 会话加载回归测试：[tests/unit/app/test_session.py](/Users/shixiangyi/code/Swe/tests/unit/app/test_session.py)
+
+## accepted plan 内部 tool exchange
+
+- accepted plan 注入 helper：[src/swe/agents/react_agent.py](/Users/shixiangyi/code/Swe/src/swe/agents/react_agent.py)
+- 重点看 `_build_accepted_plan_tool_exchange()` 是否只接受 `accepted_plan_source=server_plan_store` 且避开 Plan Mode
+- Agent 推理入口：[src/swe/agents/react_agent.py](/Users/shixiangyi/code/Swe/src/swe/agents/react_agent.py)
+- 重点看 `_reasoning()` 是否仅把内部 exchange 注入当前轮次，不进入 Toolkit、ToolGuard、hook 或前端工具卡片
+- OpenAI / Anthropic formatter：[src/swe/agents/model_factory.py](/Users/shixiangyi/code/Swe/src/swe/agents/model_factory.py)
+- 重点看 tool call / tool result 是否保持同一个 id，且最终请求里不出现 `developer`
+- Plan Mode 请求上下文装配：[src/swe/app/runner/runner.py](/Users/shixiangyi/code/Swe/src/swe/app/runner/runner.py)
+- 重点看 `_create_agent_for_query()` 是否只把服务端 accepted plan 放进 `request_context`
+- 回归测试：
+  - [tests/unit/app/test_task_progress_switch.py](/Users/shixiangyi/code/Swe/tests/unit/app/test_task_progress_switch.py)
+  - [tests/unit/app/test_runner_plan_mode_state.py](/Users/shixiangyi/code/Swe/tests/unit/app/test_runner_plan_mode_state.py)
+  - [tests/unit/agents/test_model_factory_tenant.py](/Users/shixiangyi/code/Swe/tests/unit/agents/test_model_factory_tenant.py)
 
 ## 长 Tool 执行 / 用户中断 / running 状态
 

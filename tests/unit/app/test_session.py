@@ -16,15 +16,12 @@ from swe.app.runner.session import SafeJSONSession
 
 
 @pytest.mark.asyncio
-async def test_load_session_state_accepts_hook_developer_role(
+async def test_load_session_state_migrates_hook_developer_role_to_system(
     tmp_path,
 ) -> None:
-    """带 developer role 的 hook 上下文应能从会话文件恢复。"""
+    """旧 developer hook 上下文加载后应单向迁移为 system。"""
     session = SafeJSONSession(save_dir=str(tmp_path))
     memory = ReMeInMemoryMemory(token_counter=MagicMock())
-    msg = build_hook_additional_context_msg(
-        "[Hook additional context]\nremember for next turn",
-    )
     session_path = session._get_save_path("session-1", "user-1")
 
     with open(session_path, "w", encoding="utf-8") as file:
@@ -33,7 +30,16 @@ async def test_load_session_state_accepts_hook_developer_role(
                 "memory": {
                     "content": [
                         [
-                            msg.to_dict(),
+                            {
+                                "id": "msg-1",
+                                "name": "system",
+                                "role": "developer",
+                                "content": (
+                                    "[Hook additional context]\n"
+                                    "remember for next turn"
+                                ),
+                                "metadata": {},
+                            },
                             [],
                         ],
                     ],
@@ -50,5 +56,5 @@ async def test_load_session_state_accepts_hook_developer_role(
     )
 
     assert len(memory.content) == 1
-    assert memory.content[0][0].role == "developer"
+    assert memory.content[0][0].role == "system"
     assert "remember for next turn" in memory.content[0][0].content

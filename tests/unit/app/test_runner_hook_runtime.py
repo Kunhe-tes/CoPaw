@@ -553,7 +553,7 @@ async def test_query_handler_injects_prompt_additional_context(
 
 
 @pytest.mark.asyncio
-async def test_stop_hook_additional_context_is_persisted_as_developer(
+async def test_stop_hook_additional_context_is_persisted_as_system(
     monkeypatch,
     tmp_path,
 ) -> None:
@@ -612,8 +612,7 @@ async def test_stop_hook_additional_context_is_persisted_as_developer(
 
     assert outputs[-1][0].get_text_content() == "agent reply"
     assert "remember for next turn" in stored_content[-1][0]["content"]
-    assert roles[-1] == "developer"
-    assert all(role != "system" for role in roles[1:])
+    assert roles[-1] == "system"
 
 
 @pytest.mark.asyncio

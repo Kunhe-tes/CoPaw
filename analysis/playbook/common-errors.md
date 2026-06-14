@@ -2,6 +2,34 @@
 
 本文档只收录仓库中已经出现过、且有明确入口可追的高频报错。
 
+## ask_plan_clarification 报 str object has no attribute get
+
+### 症状
+
+- 模型调用 `ask_plan_clarification` 的表单模式时工具执行失败
+- 工具入参中的 `fields` 是 JSON 字符串，而不是原生数组
+- 常见报错为：`Error: 'str' object has no attribute 'get'`
+
+### 典型原因
+
+- 模型把表单字段数组再次序列化成 JSON 字符串
+- 计划澄清工具直接遍历字符串，导致单个字符进入字段归一化逻辑
+- 部分模型还会使用 `key` 代替 `id`，并省略可从 `options` 推断的字段类型
+
+### 第一落点
+
+- [src/swe/agents/tools/planning.py](../../src/swe/agents/tools/planning.py)
+- 重点看 `_normalize_form_fields()` 是否在字段归一化前解析 JSON 字符串并验证对象数组结构
+- 重点看 `_normalize_form_field()` 是否兼容 `key`，以及缺失 `type` 时是否按候选项推断类型
+- 对应回归测试：
+  - [tests/unit/agents/tools/test_planning.py](../../tests/unit/agents/tools/test_planning.py)
+
+### 第一阶段处理
+
+- 先记录工具实际入参，确认 `fields` 是原生数组还是 JSON 字符串
+- JSON 字符串只允许解析为对象数组，非法 JSON 或非对象元素应返回明确参数错误
+- 无候选项的缺省字段归一为 `text`，有候选项的缺省字段归一为 `select`
+
 ## Console 复制工具输入时触发 Clipboard 权限策略报错
 
 ### 症状
@@ -111,21 +139,23 @@
 
 - 首轮结束后的 hook additionalContext 被追加进 `agent.memory`
 - 如果追加消息使用 `role=system`，第二轮历史会变成 `system/user/assistant/system/user`
-- hook 附加上下文统一使用 `developer` 角色；AgentScope `Msg` 构造器不直接支持该角色，需通过 hook message helper 构造
 - 严格 OpenAI-compatible 后端只允许第一条消息是 `system`，会拒绝非首位 system
-- 部分 OpenAI-compatible 后端（例如 DashScope 兼容模式）不接受 OpenAI 新增的 `developer` role
-- 已经落盘的旧 session 即使源头修复，也可能继续携带历史尾部 system
+- hook 附加上下文现在会保留 `system` 角色；formatter 只允许 hook 前缀消息继续保持非首位 `system`
+- accepted plan 执行上下文现在通过内部 `assistant` tool-call 与 `tool` result 成对注入，而不是拼进主 system prompt
+- 已经落盘的旧 session 即使源头修复，也可能继续携带 legacy `developer` 历史；加载时需要先迁移成 `system`
 
 ### 第一落点
 
 - [src/swe/app/runner/runner.py](/Users/shixiangyi/code/Swe/src/swe/app/runner/runner.py)
-- 重点看 `_emit_stop_hook_if_needed()` 写入 STOP hook additionalContext 时是否使用 developer hook message helper
+- 重点看 `_emit_stop_hook_if_needed()` 写入 STOP hook additionalContext 时是否继续保留 `role="system"`
 - [src/swe/agents/model_factory.py](/Users/shixiangyi/code/Swe/src/swe/agents/model_factory.py)
-- 重点看 OpenAI formatter 最终清洗是否把历史 hook `system` 转为 `developer`
+- 重点看 OpenAI / Anthropic formatter 是否保留 hook 前缀 `system`，并保持 accepted plan tool exchange 配对
 - [src/swe/providers/openai_chat_model_compat.py](/Users/shixiangyi/code/Swe/src/swe/providers/openai_chat_model_compat.py)
-- 重点看 OpenAI-compatible 后端拒绝 `developer` role 时是否降级重试为 `user`
+- 重点看 Provider 层是否还保留 `developer -> user` 降级重试
 - [src/swe/agents/tool_guard_mixin.py](/Users/shixiangyi/code/Swe/src/swe/agents/tool_guard_mixin.py)
-- 重点看 `_record_tool_hook_result()` 是否同样使用 developer hook message helper
+- 重点看 `_record_tool_hook_result()` 是否同样写入 `role="system"` 的 hook additionalContext
+- [src/swe/agents/react_agent.py](/Users/shixiangyi/code/Swe/src/swe/agents/react_agent.py)
+- 重点看 `_build_accepted_plan_tool_exchange()` 和 `_reasoning()` 是否把 accepted plan 作为内部 tool exchange 注入当前轮次
 - 对应测试：
   - [tests/unit/app/test_runner_hook_runtime.py](/Users/shixiangyi/code/Swe/tests/unit/app/test_runner_hook_runtime.py)
   - [tests/unit/agents/test_model_factory_tenant.py](/Users/shixiangyi/code/Swe/tests/unit/agents/test_model_factory_tenant.py)
@@ -133,9 +163,10 @@
 
 ### 第一阶段处理
 
-- 新增 hook 附加上下文不要追加为尾部 `system` 或 `user`，应统一写为 `developer`
-- formatter 侧保留兜底：只有第 0 条消息允许继续保持 `role="system"`，历史 hook system 转为 developer，其他非首位 system 转为 user
-- provider 兼容层保留二级兜底：只有后端明确报 `Unexpected message role` 且请求中存在 `developer` 时，才把 `developer` 降级成 `user` 重试
+- 新增 hook 附加上下文统一写成带 hook 前缀的 `system` 消息，不再改写为 `developer` 或 `user`
+- formatter 侧保留兜底：只有 hook 前缀消息允许继续保持非首位 `system`，其他非首位 system 仍降级为 `user`
+- provider 兼容层不再做 `developer -> user` 自动重试；如果后端拒绝请求，应直接暴露失败
+- accepted plan 相关问题先确认 `assistant tool_use` 与后续 `tool_result` 是否成对、`tool_call_id` / `tool_use_id` 是否一致
 - 如果仍报错，检查当前 session 落盘 JSON 中 `agent.memory.content` 的 role 顺序，确认是否还有非首位 system 绕过了 formatter
 
 ## 会话恢复时报 Msg.from_dict 断言失败
@@ -152,27 +183,27 @@
 
 ### 典型原因
 
-- hook additionalContext 为了兼容 OpenAI-compatible 后端，会在 memory / session 中保留 `developer` 语义
-- AgentScope `Msg` 运行态允许先构造 `system` 再改写为 `developer`，但 `Msg.from_dict()` 反序列化时仍只接受 `user/assistant/system`
+- 旧版本保存的 hook additionalContext 可能仍带 `role="developer"`
+- `Msg.from_dict()` 反序列化仍只接受 `user/assistant/system`
 - 会话恢复如果直接把落盘 JSON 交给底层 memory `load_state_dict()`，就会在反序列化阶段触发断言
 
 ### 第一落点
 
 - [src/swe/app/runner/session.py](/Users/shixiangyi/code/Swe/src/swe/app/runner/session.py)
-- 重点看 `load_session_state()` 是否在调用底层 `load_state_dict()` 前做消息 role 兼容迁移，并在内存态恢复原始 role
+- 重点看 `load_session_state()` 是否在调用底层 `load_state_dict()` 前把 legacy `developer` 单向迁移成 `system`
 - [src/swe/agents/hook_runtime/messages.py](/Users/shixiangyi/code/Swe/src/swe/agents/hook_runtime/messages.py)
-- 重点看 hook 附加上下文是否仍通过 helper 生成 `developer` 消息
+- 重点看 hook 附加上下文是否仍通过 helper 生成标准 `system` 消息
 - 对应回归测试：
   - [tests/unit/app/test_session.py](/Users/shixiangyi/code/Swe/tests/unit/app/test_session.py)
   - [tests/unit/app/test_runner_hook_runtime.py](/Users/shixiangyi/code/Swe/tests/unit/app/test_runner_hook_runtime.py)
 
 ### 第一阶段处理
 
-- 不要把落盘里的 `developer` role 直接改成普通 `user`，否则会丢失 hook 语义
-- 在 session 加载边界先把不被 AgentScope 接受的 role 临时降级成 `system`，待 `Msg` 实例化成功后再恢复原始 role
+- 不要把落盘里的 legacy `developer` 直接改成普通 `user`
+- 在 session 加载边界先把 `developer` 迁移成 `system`，后续保存继续保持 `system`
 - 如果用户已经产生坏 session 文件，修复代码后重新发起同一 `session_id` 即可触发兼容恢复，不需要先手工删历史
 
-## 聊天详情接口读取 developer 历史时报 500
+## 聊天详情接口读取 legacy developer 历史时报 500
 
 ### 症状
 
@@ -186,25 +217,58 @@
 
 ### 典型原因
 
-- 落盘 session 的 hook additionalContext 消息会保留 `role="developer"`
+- 落盘 session 的旧 hook additionalContext 消息仍可能保留 `role="developer"`
 - 聊天详情接口直接读取原始 `memory_state` 时，如果没有复用 session 加载边界的 role 兼容逻辑，会先在 AgentScope 反序列化阶段失败
-- 即使 AgentScope 内存已恢复成功，详情接口组装 `ChatMessage` 时仍要经过 runtime `Message` schema；该 schema 也不接受 `developer`
+- 即使 AgentScope 内存已恢复成功，详情接口组装 `ChatMessage` 时也必须只暴露标准角色
 
 ### 第一落点
 
 - [src/swe/app/runner/api.py](/Users/shixiangyi/code/Swe/src/swe/app/runner/api.py)
 - 重点看 `_messages_from_memory_state()` 是否在 `load_state_dict()` 前调用 session 的 role 兼容逻辑
 - [src/swe/app/runner/utils.py](/Users/shixiangyi/code/Swe/src/swe/app/runner/utils.py)
-- 重点看 `agentscope_msg_to_message()` 是否对 runtime 不支持的角色做展示层降级
+- 重点看 `agentscope_msg_to_message()` 是否最终只暴露 `system/user/assistant/tool`
 - 对应回归测试：
   - [tests/unit/app/test_chat_api_message_timestamp.py](/Users/shixiangyi/code/Swe/tests/unit/app/test_chat_api_message_timestamp.py)
   - [tests/unit/routers/test_tracing_chats_api.py](/Users/shixiangyi/code/Swe/tests/unit/routers/test_tracing_chats_api.py)
 
 ### 第一阶段处理
 
-- 详情接口读取 memory 时，先复用 `session.py` 的 role 兼容逻辑，把 `developer` 临时降级到 AgentScope 可接受的角色，再在内存态恢复
-- 进入 API 响应层后，把 runtime schema 不支持的 `developer` 降级为 `system`
-- 为避免丢语义，把原始角色放入返回消息的 `metadata.original_role`
+- 详情接口读取 memory 时，先复用 `session.py` 的 role 兼容逻辑，把 legacy `developer` 迁移为 `system`
+- 进入 API 响应层后，只返回标准角色，不再恢复或暴露 `developer`
+
+## accepted plan 注入后模型拒绝 tool 消息配对
+
+### 症状
+
+- 执行 accepted plan 时模型请求直接失败
+- 常见错误包含：
+  - `tool_call_id` 缺失
+  - `tool_use_id` 不匹配
+  - `tool message must follow a tool call`
+- 同一轮 prompt 里看不到成对的 `assistant tool_use` 和 `tool_result`
+
+### 典型原因
+
+- accepted plan 被重新拼回了主 system prompt
+- 内部 tool exchange 只有 `tool_result`，没有前置 `assistant` tool call
+- tool call id / tool result id 不一致
+- accepted plan 在 Plan Mode 或非服务端来源场景下被误注入
+
+### 第一落点
+
+- [src/swe/agents/react_agent.py](/Users/shixiangyi/code/Swe/src/swe/agents/react_agent.py)
+- 重点看 `_build_accepted_plan_tool_exchange()` 是否校验 `accepted_plan_source`、`plan_mode_enabled` 并生成稳定 call id
+- [src/swe/agents/model_factory.py](/Users/shixiangyi/code/Swe/src/swe/agents/model_factory.py)
+- 重点看 OpenAI / Anthropic formatter 是否保留该内部 exchange 的顺序和关联 id
+- 对应回归测试：
+  - [tests/unit/app/test_task_progress_switch.py](/Users/shixiangyi/code/Swe/tests/unit/app/test_task_progress_switch.py)
+  - [tests/unit/agents/test_model_factory_tenant.py](/Users/shixiangyi/code/Swe/tests/unit/agents/test_model_factory_tenant.py)
+
+### 第一阶段处理
+
+- accepted plan 只能通过内部 `assistant` tool-call + `tool` result 注入
+- `tool_call_id` / `tool_use_id` 必须复用同一个 call id
+- Plan Mode 或缺少 `accepted_plan_source=server_plan_store` 时直接跳过注入
 
 ## Console 切换运行中会话时 reconnect 返回 404
 

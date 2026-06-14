@@ -12,7 +12,6 @@ from agentscope.memory import InMemoryMemory
 from .session import (
     SafeJSONSession,
     _normalize_state_for_load,
-    _restore_message_roles_after_load,
 )
 from .manager import ChatManager
 from .models import (
@@ -147,7 +146,6 @@ async def _messages_from_memory_state(
     memory = InMemoryMemory()
     normalized_state = _normalize_state_for_load(memory_state)
     memory.load_state_dict(normalized_state, strict=False)
-    _restore_message_roles_after_load(memory)
     memories = await memory.get_memory(prepend_summary=False)
     return agentscope_msg_to_message(memories)
 

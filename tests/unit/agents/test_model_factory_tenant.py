@@ -15,6 +15,7 @@ from swe.agents.model_factory import (
     _get_formatter_for_chat_model,
     _create_file_block_support_formatter,
 )
+from swe.agents.react_agent import _build_accepted_plan_tool_exchange
 
 
 class TestFormatterMapping:
@@ -54,8 +55,8 @@ class TestFileBlockSupportFormatter:
         assert "FileBlockSupport" in formatter_class.__name__
 
     @pytest.mark.asyncio
-    async def test_openai_formatter_moves_hook_system_to_developer(self):
-        """历史 hook system 消息发送给 OpenAI 时应转为 developer。"""
+    async def test_openai_formatter_preserves_hook_system_role(self):
+        """hook system 消息在非首位时仍应保留 system 角色。"""
         from agentscope.formatter import OpenAIChatFormatter
         from agentscope.message import Msg
 
@@ -80,12 +81,98 @@ class TestFileBlockSupportFormatter:
         assert [message["role"] for message in messages] == [
             "system",
             "user",
-            "developer",
+            "system",
             "user",
         ]
         assert messages[2]["content"][0]["text"] == (
             "[Hook additional context]\nremember"
         )
+
+    @pytest.mark.asyncio
+    async def test_openai_formatter_preserves_internal_accepted_plan_exchange(
+        self,
+    ):
+        """accepted plan 内部 tool exchange 应保持 OpenAI 协议配对。"""
+        from agentscope.formatter import OpenAIChatFormatter
+        from agentscope.message import Msg
+
+        formatter_class = _create_file_block_support_formatter(
+            OpenAIChatFormatter,
+        )
+        formatter = formatter_class()
+        accepted_plan_msgs = _build_accepted_plan_tool_exchange(
+            {
+                "turn_id": "turn-1",
+                "plan_mode_enabled": False,
+                "accepted_plan_source": "server_plan_store",
+                "accepted_plan": {"plan_id": "plan-123"},
+            },
+        )
+
+        messages = await formatter._format(
+            [
+                Msg(name="system", role="system", content="base prompt"),
+                *accepted_plan_msgs,
+                Msg(name="user", role="user", content="next turn"),
+            ],
+        )
+
+        assert [message["role"] for message in messages] == [
+            "system",
+            "assistant",
+            "tool",
+            "user",
+        ]
+        tool_call = messages[1]["tool_calls"][0]
+        assert tool_call["function"]["name"] == "accepted_plan_context"
+        assert messages[2]["tool_call_id"] == tool_call["id"]
+        assert "Accepted Plan Execution Context" in messages[2]["content"]
+        assert "developer" not in {message["role"] for message in messages}
+
+    @pytest.mark.asyncio
+    async def test_anthropic_formatter_preserves_internal_accepted_plan_exchange(
+        self,
+    ):
+        """accepted plan 内部 tool exchange 应保持 Anthropic 协议配对。"""
+        from agentscope.formatter import AnthropicChatFormatter
+        from agentscope.message import Msg
+
+        formatter_class = _create_file_block_support_formatter(
+            AnthropicChatFormatter,
+        )
+        formatter = formatter_class()
+        accepted_plan_msgs = _build_accepted_plan_tool_exchange(
+            {
+                "turn_id": "turn-1",
+                "plan_mode_enabled": False,
+                "accepted_plan_source": "server_plan_store",
+                "accepted_plan": {"plan_id": "plan-123"},
+            },
+        )
+
+        messages = await formatter._format(
+            [
+                Msg(name="system", role="system", content="base prompt"),
+                *accepted_plan_msgs,
+                Msg(name="user", role="user", content="next turn"),
+            ],
+        )
+
+        assert [message["role"] for message in messages] == [
+            "system",
+            "assistant",
+            "user",
+            "user",
+        ]
+        assert messages[1]["content"][0]["name"] == "accepted_plan_context"
+        assert (
+            messages[2]["content"][0]["tool_use_id"]
+            == messages[1]["content"][0]["id"]
+        )
+        assert "Accepted Plan Execution Context" in (
+            messages[2]["content"][0]["content"][0]["text"]
+        )
+        assert "developer" not in {message["role"] for message in messages}
 
 
 class TestCreateModelAndFormatterTenantIntegration:

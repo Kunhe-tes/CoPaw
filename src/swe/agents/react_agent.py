@@ -14,10 +14,12 @@ import os
 from pathlib import Path
 import time
 from typing import Any, List, Literal, Optional, Type, TYPE_CHECKING
+from uuid import uuid4
 
 from agentscope.agent import ReActAgent
+from agentscope.agent._react_agent import _MemoryMark
 from agentscope.memory import InMemoryMemory
-from agentscope.message import Msg
+from agentscope.message import Msg, ToolResultBlock, ToolUseBlock
 from agentscope.mcp._mcp_function import MCPToolFunction
 from agentscope.tool import Toolkit
 from anyio import ClosedResourceError
@@ -75,6 +77,8 @@ _ACCEPTED_PLAN_TEXT_LIMIT = 1200
 _ACCEPTED_PLAN_LIST_LIMIT = 20
 _ACCEPTED_PLAN_SOURCE_META_KEY = "accepted_plan_source"
 _ACCEPTED_PLAN_SERVER_SOURCE = "server_plan_store"
+_INTERNAL_ACCEPTED_PLAN_TOOL_NAME = "accepted_plan_context"
+_INTERNAL_ACCEPTED_PLAN_TOOL_ID_KEY = "_accepted_plan_tool_call_id"
 _PLAN_MODE_ALLOWED_TOOLS = frozenset(
     {
         "execute_shell_command",
@@ -111,18 +115,27 @@ def _format_accepted_plan_items(value: Any) -> list[str]:
     ]
 
 
-def _build_accepted_plan_prompt(request_context: dict[str, Any]) -> str:
-    """构造执行轮次的 accepted plan 提示词。"""
+def _get_server_accepted_plan(
+    request_context: dict[str, Any],
+) -> dict[str, Any] | None:
+    """仅接受来自后端计划存储的 accepted plan。"""
     accepted_plan = request_context.get("accepted_plan")
     if not isinstance(accepted_plan, dict):
-        return ""
+        return None
     if (
         request_context.get(_ACCEPTED_PLAN_SOURCE_META_KEY)
         != _ACCEPTED_PLAN_SERVER_SOURCE
     ):
-        return ""
+        return None
     if request_context.get("plan_mode_enabled"):
-        return ""
+        return None
+    return accepted_plan
+
+
+def _build_accepted_plan_tool_result_text(
+    accepted_plan: dict[str, Any],
+) -> str:
+    """构造 accepted plan 的内部 tool result 文本。"""
 
     lines = [
         "[Accepted Plan Execution Context]",
@@ -147,6 +160,65 @@ def _build_accepted_plan_prompt(request_context: dict[str, Any]) -> str:
         )
 
     return "\n".join(lines)
+
+
+def _get_internal_accepted_plan_tool_call_id(
+    request_context: dict[str, Any],
+) -> str:
+    """为当前执行轮次返回稳定的内部 tool call id。"""
+    existing = request_context.get(_INTERNAL_ACCEPTED_PLAN_TOOL_ID_KEY)
+    if isinstance(existing, str) and existing:
+        return existing
+
+    turn_id = str(request_context.get("turn_id") or "").strip()
+    suffix = "".join(
+        ch if ch.isalnum() or ch in {"-", "_"} else "-" for ch in turn_id
+    ).strip("-_")
+    if not suffix:
+        suffix = uuid4().hex
+
+    call_id = f"accepted-plan-{suffix}"
+    request_context[_INTERNAL_ACCEPTED_PLAN_TOOL_ID_KEY] = call_id
+    return call_id
+
+
+def _build_accepted_plan_tool_exchange(
+    request_context: dict[str, Any],
+) -> list[Msg]:
+    """构造当前执行轮次使用的内部 accepted plan tool exchange。"""
+    accepted_plan = _get_server_accepted_plan(request_context)
+    if accepted_plan is None:
+        return []
+
+    call_id = _get_internal_accepted_plan_tool_call_id(request_context)
+    tool_name = _INTERNAL_ACCEPTED_PLAN_TOOL_NAME
+    result_text = _build_accepted_plan_tool_result_text(accepted_plan)
+    return [
+        Msg(
+            "assistant",
+            [
+                ToolUseBlock(
+                    type="tool_use",
+                    id=call_id,
+                    name=tool_name,
+                    input={},
+                ),
+            ],
+            "assistant",
+        ),
+        Msg(
+            "system",
+            [
+                ToolResultBlock(
+                    type="tool_result",
+                    id=call_id,
+                    name=tool_name,
+                    output=[{"type": "text", "text": result_text}],
+                ),
+            ],
+            "system",
+        ),
+    ]
 
 
 class AgentPhase(str, Enum):
@@ -637,12 +709,6 @@ class SWEAgent(ToolGuardMixin, ReActAgent):
 
         if self._env_context is not None:
             sys_prompt = sys_prompt + "\n\n" + self._env_context
-
-        accepted_plan_prompt = _build_accepted_plan_prompt(
-            getattr(self, "_request_context", {}) or {},
-        )
-        if accepted_plan_prompt:
-            sys_prompt = sys_prompt + "\n\n" + accepted_plan_prompt
 
         from ..app.source_system_config import (
             is_chat_task_progress_enabled,
@@ -1209,6 +1275,25 @@ class SWEAgent(ToolGuardMixin, ReActAgent):
         """
         return self._strip_media_blocks_from_memory()
 
+    async def _run_reasoning_with_internal_context(
+        self,
+        tool_choice: Literal["auto", "none", "required"] | None = None,
+    ) -> Msg:
+        """把 accepted plan 内部上下文只注入当前推理轮次。"""
+        request_context = getattr(self, "_request_context", {}) or {}
+        internal_msgs = _build_accepted_plan_tool_exchange(request_context)
+        if not internal_msgs:
+            return await super()._reasoning(tool_choice=tool_choice)
+
+        # 复用 AgentScope 的 HINT 标记，把内部上下文仅注入当前推理轮次，
+        # 避免进入会话持久化、工具执行和前端工具卡片路径。
+        for internal_msg in internal_msgs:
+            await self.memory.add(internal_msg, marks=_MemoryMark.HINT)
+        try:
+            return await super()._reasoning(tool_choice=tool_choice)
+        finally:
+            await self.memory.delete_by_mark(mark=_MemoryMark.HINT)
+
     async def _reasoning(
         self,
         tool_choice: Literal["auto", "none", "required"] | None = None,
@@ -1238,7 +1323,9 @@ class SWEAgent(ToolGuardMixin, ReActAgent):
 
             # --- Passive fallback layer (existing logic) ---
             try:
-                return await super()._reasoning(tool_choice=tool_choice)
+                return await self._run_reasoning_with_internal_context(
+                    tool_choice=tool_choice,
+                )
             except Exception as e:
                 if not self._is_bad_request_or_media_error(e):
                     raise
@@ -1262,7 +1349,9 @@ class SWEAgent(ToolGuardMixin, ReActAgent):
                     e,
                     n_stripped,
                 )
-                return await super()._reasoning(tool_choice=tool_choice)
+                return await self._run_reasoning_with_internal_context(
+                    tool_choice=tool_choice,
+                )
 
     async def _summarizing(self) -> Msg:
         """Override summarizing with proactive media filtering,

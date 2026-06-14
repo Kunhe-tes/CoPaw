@@ -35,7 +35,6 @@ except ImportError:  # pragma: no cover - compatibility fallback
 from .utils.tool_message_utils import _sanitize_tool_messages
 from .hook_runtime.messages import (
     HOOK_ADDITIONAL_CONTEXT_PREFIX,
-    HOOK_CONTEXT_ROLE,
 )
 from ..constant import (
     DEFAULT_LLM_CHAT_MAX_CONCURRENT,
@@ -305,7 +304,13 @@ def _format_anthropic_messages(  # pylint: disable=too-many-branches
                     },
                 )
 
-        if msg.role == "system" and index != 0:
+        if (
+            msg.role == "system"
+            and index != 0
+            and not _has_hook_additional_context_prefix(
+                {"content": content_blocks},
+            )
+        ):
             role = "user"
         else:
             role = msg.role
@@ -691,9 +696,7 @@ def _strip_top_level_message_name(
     for index, message in enumerate(messages):
         message.pop("name", None)
         if index != 0 and message.get("role") == "system":
-            if _has_hook_additional_context_prefix(message):
-                message["role"] = HOOK_CONTEXT_ROLE
-            else:
+            if not _has_hook_additional_context_prefix(message):
                 message["role"] = "user"
     return messages
 
