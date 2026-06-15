@@ -557,6 +557,31 @@ describe("ExpandablePanel tasks", () => {
     ).toBeInTheDocument();
   });
 
+  it("shows cleaned text for auto-paused tasks with cleared unread count", async () => {
+    const task = taskJob("cleaned", {
+      paused: true,
+      unreadCount: 0,
+      pauseReason: "auto_unread_threshold",
+    });
+    render(
+      <ExpandablePanel
+        visible
+        type="tasks"
+        onClose={vi.fn()}
+        tasks={[task]}
+        selectedTaskId={task.id}
+        sessions={[]}
+        onTaskClick={vi.fn()}
+        toolbarRef={{ current: document.createElement("div") }}
+      />,
+    );
+
+    await waitFor(() => {
+      expect(screen.getByText("已自动暂停 · 已清理")).toBeVisible();
+    });
+    expect(screen.queryByText("已自动暂停 · 连续 0 次未读")).toBeNull();
+  });
+
   it("keeps an unselected task collapsed when it becomes paused", () => {
     const props = {
       visible: true,

@@ -6,6 +6,7 @@ import {
   Input,
   InputNumber,
   Result,
+  Select,
   Space,
   Spin,
   Switch,
@@ -26,17 +27,20 @@ import { DEFAULT_SOURCE_ID } from "@/constants/identity";
 
 import {
   CURRENT_SOURCE_SYSTEM_CONFIG_SWITCHES,
+  CRON_TASK_SESSION_CLEANUP_RUN_TIME_OPTIONS,
   TOOL_RESULT_COMPACT_NUMBER_FIELDS,
   clearImmediateTruncationConfig,
   enableImmediateTruncationConfig,
   formatSystemPromptInjectionText,
   parseSystemPromptInjectionText,
+  readCronTaskSessionCleanupConfig,
   readCronUnreadAutoPauseConfig,
   readRegisteredSwitchValue,
   readImmediateTruncationConfig,
   readSystemPromptInjections,
   readToolResultCompactConfig,
   validateSourceSystemConfig,
+  writeCronTaskSessionCleanupValue,
   writeCronUnreadAutoPauseValue,
   writeRegisteredSwitchValue,
   writeSystemPromptInjections,
@@ -207,7 +211,27 @@ export default function SystemConfigPage() {
     );
   };
 
-  const handleCronUnreadAutoPauseThresholdChange = (
+  const handleCronUnreadAutoPauseThresholdChange = (value: number | null) => {
+    if (formDisabled || typeof value !== "number") {
+      return;
+    }
+    setValidationError(null);
+    setDraftConfig((previous) =>
+      writeCronUnreadAutoPauseValue(previous, "threshold", value),
+    );
+  };
+
+  const handleCronTaskSessionCleanupEnabledChange = (checked: boolean) => {
+    if (formDisabled) {
+      return;
+    }
+    setValidationError(null);
+    setDraftConfig((previous) =>
+      writeCronTaskSessionCleanupValue(previous, "enabled", checked),
+    );
+  };
+
+  const handleCronTaskSessionCleanupRetentionChange = (
     value: number | null,
   ) => {
     if (formDisabled || typeof value !== "number") {
@@ -215,7 +239,17 @@ export default function SystemConfigPage() {
     }
     setValidationError(null);
     setDraftConfig((previous) =>
-      writeCronUnreadAutoPauseValue(previous, "threshold", value),
+      writeCronTaskSessionCleanupValue(previous, "retention_days", value),
+    );
+  };
+
+  const handleCronTaskSessionCleanupRunTimeChange = (value: string) => {
+    if (formDisabled) {
+      return;
+    }
+    setValidationError(null);
+    setDraftConfig((previous) =>
+      writeCronTaskSessionCleanupValue(previous, "run_time", value),
     );
   };
 
@@ -347,8 +381,9 @@ export default function SystemConfigPage() {
     }
   };
 
-  const cronUnreadAutoPauseConfig =
-    readCronUnreadAutoPauseConfig(draftConfig);
+  const cronUnreadAutoPauseConfig = readCronUnreadAutoPauseConfig(draftConfig);
+  const cronTaskSessionCleanupConfig =
+    readCronTaskSessionCleanupConfig(draftConfig);
   const systemPromptInjectionText = formatSystemPromptInjectionText(
     readSystemPromptInjections(draftConfig),
   );
@@ -573,52 +608,132 @@ export default function SystemConfigPage() {
 
             <Card
               className={styles.switchCard}
-              title={t("sourceSystemConfigPage.cronUnreadAutoPauseTitle", {
-                defaultValue: "定时任务未读自动暂停",
+              title={t("sourceSystemConfigPage.cronTaskSettingsTitle", {
+                defaultValue: "定时任务设置",
               })}
             >
               <div className={styles.switchList}>
-                <div className={styles.switchRow}>
-                  <div className={styles.switchCopy}>
-                    <span className={styles.switchTitle}>
-                      {t("sourceSystemConfigPage.cronUnreadAutoPauseEnabled", {
-                        defaultValue: "启用未读自动暂停",
-                      })}
-                    </span>
-                    <span className={styles.switchDescription}>
-                      {t(
-                        "sourceSystemConfigPage.cronUnreadAutoPauseDescription",
-                        {
-                          defaultValue:
-                            "开启后，当前渠道的定时任务连续产生未读结果达到阈值时会自动暂停。",
-                        },
-                      )}
-                    </span>
-                  </div>
-                  <Switch
-                    checked={cronUnreadAutoPauseConfig.enabled}
-                    disabled={formDisabled}
-                    onChange={handleCronUnreadAutoPauseEnabledChange}
-                  />
-                </div>
-                <div className={styles.numberGrid}>
-                  <label className={styles.numberField}>
-                    <span className={styles.numberLabel}>
-                      {t("sourceSystemConfigPage.cronUnreadPauseThreshold", {
-                        defaultValue: "未读暂停条数",
-                      })}
-                    </span>
-                    <InputNumber
-                      min={1}
-                      step={1}
-                      value={cronUnreadAutoPauseConfig.threshold}
-                      disabled={
-                        formDisabled || !cronUnreadAutoPauseConfig.enabled
-                      }
-                      onChange={handleCronUnreadAutoPauseThresholdChange}
+                <section className={styles.scheduledTaskSection}>
+                  <div className={styles.switchRow}>
+                    <div className={styles.switchCopy}>
+                      <span className={styles.switchTitle}>
+                        {t("sourceSystemConfigPage.cronUnreadAutoPauseTitle", {
+                          defaultValue: "定时任务未读自动暂停",
+                        })}
+                      </span>
+                      <span className={styles.switchDescription}>
+                        {t(
+                          "sourceSystemConfigPage.cronUnreadAutoPauseDescription",
+                          {
+                            defaultValue:
+                              "开启后，当前渠道的定时任务连续产生未读结果达到阈值时会自动暂停。",
+                          },
+                        )}
+                      </span>
+                    </div>
+                    <Switch
+                      checked={cronUnreadAutoPauseConfig.enabled}
+                      disabled={formDisabled}
+                      onChange={handleCronUnreadAutoPauseEnabledChange}
                     />
-                  </label>
-                </div>
+                  </div>
+                  <div className={styles.numberGrid}>
+                    <label className={styles.numberField}>
+                      <span className={styles.numberLabel}>
+                        {t("sourceSystemConfigPage.cronUnreadPauseThreshold", {
+                          defaultValue: "未读暂停条数",
+                        })}
+                      </span>
+                      <InputNumber
+                        min={1}
+                        step={1}
+                        value={cronUnreadAutoPauseConfig.threshold}
+                        disabled={
+                          formDisabled || !cronUnreadAutoPauseConfig.enabled
+                        }
+                        onChange={handleCronUnreadAutoPauseThresholdChange}
+                      />
+                    </label>
+                  </div>
+                </section>
+                <section className={styles.scheduledTaskSection}>
+                  <div className={styles.switchRow}>
+                    <div className={styles.switchCopy}>
+                      <span className={styles.switchTitle}>
+                        {t(
+                          "sourceSystemConfigPage.cronTaskSessionCleanupTitle",
+                          {
+                            defaultValue: "定时任务会话历史清理",
+                          },
+                        )}
+                      </span>
+                      <span className={styles.switchDescription}>
+                        {t(
+                          "sourceSystemConfigPage.cronTaskSessionCleanupDescription",
+                          {
+                            defaultValue:
+                              "每天按配置时间清理超过保留天数的定时任务会话历史。",
+                          },
+                        )}
+                      </span>
+                    </div>
+                    <Switch
+                      checked={cronTaskSessionCleanupConfig.enabled}
+                      disabled={formDisabled}
+                      onChange={handleCronTaskSessionCleanupEnabledChange}
+                    />
+                  </div>
+                  <div className={styles.numberGrid}>
+                    <label className={styles.numberField}>
+                      <span className={styles.numberLabel}>
+                        {t(
+                          "sourceSystemConfigPage.cronTaskSessionCleanupRetention",
+                          {
+                            defaultValue: "历史保留天数",
+                          },
+                        )}
+                      </span>
+                      <InputNumber
+                        min={1}
+                        step={1}
+                        value={cronTaskSessionCleanupConfig.retention_days}
+                        disabled={
+                          formDisabled || !cronTaskSessionCleanupConfig.enabled
+                        }
+                        onChange={handleCronTaskSessionCleanupRetentionChange}
+                      />
+                    </label>
+                    <label className={styles.numberField}>
+                      <span className={styles.numberLabel}>
+                        {t(
+                          "sourceSystemConfigPage.cronTaskSessionCleanupRunTime",
+                          {
+                            defaultValue: "每日运行时间",
+                          },
+                        )}
+                      </span>
+                      <Select
+                        aria-label={t(
+                          "sourceSystemConfigPage.cronTaskSessionCleanupRunTime",
+                          {
+                            defaultValue: "每日运行时间",
+                          },
+                        )}
+                        value={cronTaskSessionCleanupConfig.run_time}
+                        disabled={
+                          formDisabled || !cronTaskSessionCleanupConfig.enabled
+                        }
+                        options={CRON_TASK_SESSION_CLEANUP_RUN_TIME_OPTIONS.map(
+                          (runTime) => ({
+                            label: runTime,
+                            value: runTime,
+                          }),
+                        )}
+                        onChange={handleCronTaskSessionCleanupRunTimeChange}
+                      />
+                    </label>
+                  </div>
+                </section>
               </div>
             </Card>
 
@@ -817,7 +932,6 @@ export default function SystemConfigPage() {
                   </Button>
                 )}
               </section>
-
             </Card>
 
             <div className={styles.actionRow}>

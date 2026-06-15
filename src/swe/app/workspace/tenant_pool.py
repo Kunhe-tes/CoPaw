@@ -91,6 +91,13 @@ class TenantWorkspacePool:
         """Update the source config service for future workspaces."""
         self._source_system_config_service = source_system_config_service
 
+    @property
+    def init_source_store(self):
+        """返回 tenant/source 初始化来源存储。"""
+        from .tenant_init_source_store import get_tenant_init_source_store
+
+        return get_tenant_init_source_store()
+
     def _get_tenant_workspace_dir(self, tenant_id: str) -> Path:
         """Get the workspace directory for a tenant.
 

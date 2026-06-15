@@ -179,6 +179,15 @@ agent_app = AgentApp(
 runtime_diagnostic_manager = RuntimeDiagnosticManager()
 
 
+def _build_internal_cron_callback_url() -> str:
+    """构造外部调度平台回调到 SWE 的内部 cron callback 地址。"""
+    base = (
+        os.environ.get("SWE_SERVER_DOMAIN", "").strip()
+        or "http://localhost:8000"
+    )
+    return f"{base}/api/internal/cron/callback"
+
+
 async def _reset_scope_sensitive_runtime_state(app: FastAPI) -> None:
     """在开始提供 source-scoped 流量前清空长期运行态缓存。"""
     existing_manager = getattr(app.state, "multi_agent_manager", None)
@@ -359,15 +368,48 @@ async def lifespan(
     try:
         from .source_system_config.service import SourceSystemConfigService
         from .source_system_config.store import SourceSystemConfigStore
+        from .source_system_config.task_binding_store import (
+            SourceSystemTaskBindingStore,
+        )
+        from .source_system_config.task_scheduler import (
+            SourceSystemTaskScheduler,
+        )
+        from .workspace.workspace import _build_scheduler_adapter
 
-        app.state.source_system_config_service = SourceSystemConfigService(
+        source_config_service = SourceSystemConfigService(
             SourceSystemConfigStore(db_connection),
         )
+        app.state.source_system_config_service = source_config_service
+        app.state.source_system_task_scheduler = None
+
+        scheduler_adapter = _build_scheduler_adapter()
+        has_task_binding_db = db_connection is not None and bool(
+            getattr(db_connection, "is_connected", False),
+        )
+        if has_task_binding_db:
+            app.state.source_system_task_scheduler = (
+                SourceSystemTaskScheduler(
+                    binding_store=SourceSystemTaskBindingStore(
+                        db_connection,
+                    ),
+                    scheduler_adapter=scheduler_adapter,
+                    callback_url=_build_internal_cron_callback_url(),
+                    tenant_scope_store_factory=(
+                        lambda: tenant_workspace_pool.init_source_store
+                    ),
+                    multi_agent_manager=multi_agent_manager,
+                    agent_id="default",
+                )
+            )
+        else:
+            logger.warning(
+                "Source system task scheduler skipped: database is not connected",
+            )
         multi_agent_manager.set_source_system_config_service(
-            app.state.source_system_config_service,
+            source_config_service,
         )
         tenant_workspace_pool.set_source_system_config_service(
-            app.state.source_system_config_service,
+            source_config_service,
         )
         logger.info("SourceSystemConfig module initialized")
     except Exception as e:
