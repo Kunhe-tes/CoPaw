@@ -857,6 +857,7 @@ class SWEAgent(ToolGuardMixin, ReActAgent):
                     "passthrough_headers",
                 ),
                 session_id=rebuild_info.get("session_id"),
+                trace_id=rebuild_info.get("trace_id"),
             )
             timeout = rebuild_info.get(
                 "timeout",

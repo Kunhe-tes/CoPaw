@@ -627,6 +627,7 @@ async def _build_and_connect_mcp_clients(
     mcp_config: MCPConfig | None,
     passthrough_headers: dict[str, str] | None = None,
     session_id: str | None = None,
+    trace_id: str | None = None,
 ) -> list[Any]:
     """Build and connect MCP clients from config for single request use.
 
@@ -634,6 +635,7 @@ async def _build_and_connect_mcp_clients(
         mcp_config: MCP configuration from agent_config.mcp
         passthrough_headers: Headers to merge for HTTP transport clients
         session_id: Request-scoped session identifier for reserved headers
+        trace_id: Request-scoped trace identifier for reserved headers
 
     Returns:
         List of connected MCP client instances (all created for this request)
@@ -656,6 +658,7 @@ async def _build_and_connect_mcp_clients(
                 client_config,
                 passthrough_headers,
                 session_id=session_id,
+                trace_id=trace_id,
             )
             if client is not None:
                 await client.connect()
@@ -684,6 +687,7 @@ async def _create_mcp_client_with_headers(
     client_config: MCPClientConfig,
     passthrough_headers: dict[str, str] | None = None,
     session_id: str | None = None,
+    trace_id: str | None = None,
 ) -> Any:
     """Create a single MCP client with optional header passthrough.
 
@@ -694,6 +698,7 @@ async def _create_mcp_client_with_headers(
         client_config: Single MCP client configuration
         passthrough_headers: Headers to merge for HTTP transport
         session_id: Request-scoped session identifier for reserved headers
+        trace_id: Request-scoped trace identifier for reserved headers
 
     Returns:
         MCP client instance (not yet connected)
@@ -705,6 +710,7 @@ async def _create_mcp_client_with_headers(
         "headers": client_config.headers or None,
         "passthrough_headers": dict(passthrough_headers or {}) or None,
         "session_id": session_id,
+        "trace_id": trace_id,
         "timeout": _MCP_HTTP_TIMEOUT_SECONDS,
         "sse_read_timeout": _MCP_HTTP_SSE_READ_TIMEOUT_SECONDS,
         "command": client_config.command,
@@ -745,6 +751,7 @@ async def _create_mcp_client_with_headers(
         client_config.headers,
         passthrough_headers=passthrough_headers,
         session_id=session_id,
+        trace_id=trace_id,
     )
 
     client = HttpStatefulClient(
@@ -2406,6 +2413,7 @@ class AgentRunner(Runner):
                 agent_config.mcp,
                 passthrough_headers=passthrough_headers or None,
                 session_id=session_id,
+                trace_id=getattr(request, "trace_id", None),
             )
 
             turn_id = f"turn-{uuid4().hex}"
@@ -3920,60 +3928,96 @@ class AgentRunner(Runner):
                     and TOOL_GUARD_DENIED_MARK in entry[1]
                 )
 
-            last_marked_idx = -1
             modified = False
 
-            def _cleanup_state(states: dict[str, Any]) -> dict[str, Any]:
-                nonlocal modified, last_marked_idx
+            def _get_memory_content(
+                states: dict[str, Any],
+            ) -> list[Any] | None:
                 agent_state = states.get("agent", {})
                 if not isinstance(agent_state, dict):
-                    return states
+                    return None
 
                 memory_state = agent_state.get("memory", {})
                 if not isinstance(memory_state, dict):
-                    return states
+                    return None
 
                 content = memory_state.get("content", [])
                 if not isinstance(content, list) or not content:
-                    return states
+                    return None
+                return content
 
+            def _find_last_marked_index(content: list[Any]) -> int:
+                last_marked_idx = -1
                 for i, entry in enumerate(content):
                     if _is_marked(entry):
                         last_marked_idx = i
+                return last_marked_idx
 
-                if last_marked_idx >= 0 and last_marked_idx + 1 < len(content):
-                    next_entry = content[last_marked_idx + 1]
-                    if (
-                        isinstance(next_entry, list)
-                        and len(next_entry) >= 1
-                        and isinstance(next_entry[0], dict)
-                        and next_entry[0].get("role") == "assistant"
-                    ):
-                        del content[last_marked_idx + 1]
-                        modified = True
+            def _remove_denial_explanation(
+                content: list[Any],
+                last_marked_idx: int,
+            ) -> bool:
+                if last_marked_idx < 0 or last_marked_idx + 1 >= len(content):
+                    return False
 
+                next_entry = content[last_marked_idx + 1]
+                if not (
+                    isinstance(next_entry, list)
+                    and len(next_entry) >= 1
+                    and isinstance(next_entry[0], dict)
+                    and next_entry[0].get("role") == "assistant"
+                ):
+                    return False
+
+                del content[last_marked_idx + 1]
+                return True
+
+            def _strip_denied_marks(content: list[Any]) -> bool:
+                stripped = False
                 for entry in content:
                     if _is_marked(entry):
                         entry[1].remove(TOOL_GUARD_DENIED_MARK)
-                        modified = True
+                        stripped = True
+                return stripped
 
-                if denial_response is not None:
-                    ts = getattr(denial_response, "timestamp", None)
-                    msg_dict = {
-                        "id": getattr(denial_response, "id", ""),
-                        "name": getattr(denial_response, "name", "Friday"),
-                        "role": getattr(denial_response, "role", "assistant"),
-                        "content": denial_response.content,
-                        "metadata": getattr(
-                            denial_response,
-                            "metadata",
-                            None,
-                        ),
-                        "timestamp": str(ts) if ts is not None else "",
-                    }
-                    content.append([msg_dict, []])
-                    modified = True
+            def _append_denial_response(content: list[Any]) -> bool:
+                if denial_response is None:
+                    return False
 
+                ts = getattr(denial_response, "timestamp", None)
+                msg_dict = {
+                    "id": getattr(denial_response, "id", ""),
+                    "name": getattr(denial_response, "name", "Friday"),
+                    "role": getattr(denial_response, "role", "assistant"),
+                    "content": denial_response.content,
+                    "metadata": getattr(
+                        denial_response,
+                        "metadata",
+                        None,
+                    ),
+                    "timestamp": str(ts) if ts is not None else "",
+                }
+                content.append([msg_dict, []])
+                return True
+
+            def _cleanup_state(
+                states: dict[str, Any],
+            ) -> dict[str, Any] | None:
+                nonlocal modified
+                content = _get_memory_content(states)
+                if content is None:
+                    return None
+
+                last_marked_idx = _find_last_marked_index(content)
+                removed_explanation = _remove_denial_explanation(
+                    content,
+                    last_marked_idx,
+                )
+                stripped_marks = _strip_denied_marks(content)
+                appended_response = _append_denial_response(content)
+                modified = (
+                    removed_explanation or stripped_marks or appended_response
+                )
                 return states
 
             await self.session.mutate_session_state(
