@@ -78,8 +78,10 @@ export interface MarketMCPDetail extends MarketMCPItem {
 
 /** MCP 上传请求 */
 export interface MCPUploadRequest {
-  /** 上传的 MCP 配置文件 */
-  file: File;
+  /** 上传的 MCP 配置文件（与 raw_json 二选一） */
+  file?: File;
+  /** 直接粘贴的 JSON 配置字符串（与 file 二选一） */
+  raw_json?: string;
   /** 显示名称 */
   name: string;
   /** 中文名称 */

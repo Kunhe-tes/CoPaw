@@ -61,12 +61,15 @@ class UploadMCPFormData:
         description: Optional[str] = Form(default=""),
         guidance: Optional[str] = Form(default=""),
         bbk_ids: Optional[str] = Form(default=None),
+        raw_json: Optional[str] = Form(default=None),
     ) -> None:
         self.name = name
         self.chinese_name = chinese_name
         self.description = description
         self.guidance = guidance
         self.bbk_ids = bbk_ids
+        # 与 file 二选一：用户在前端选择"粘贴 JSON"模式时，原始 JSON 字符串走这里
+        self.raw_json = raw_json
 
 
 def _normalize_client_key(value: str) -> str:
@@ -252,33 +255,56 @@ async def publish_mcp(
 )
 async def upload_mcp(
     request: Request,
-    file: UploadFile = File(...),
+    file: Optional[UploadFile] = File(default=None),
     form: UploadMCPFormData = Depends(),
     x_source_id: Optional[str] = Header(default=None, alias="X-Source-Id"),
     x_manager: Optional[str] = Header(default=None, alias="X-Manager"),
     x_user_id: Optional[str] = Header(default=None, alias="X-User-Id"),
     x_user_name: Optional[str] = Header(default=None, alias="X-User-Name"),
 ):
-    """上传 MCP 连接器文件到市场（管理员）。"""
+    """上传 MCP 连接器到市场（管理员）。
+
+    支持两种入口（二选一）：
+    - file: 上传 .json 文件（multipart 文件字段）
+    - form.raw_json: 直接粘贴的 JSON 字符串（form 字段）
+    """
     source_id = require_source_id(x_source_id)
     _require_manager(x_manager)
 
-    # 校验文件格式
-    if not file.filename or not file.filename.endswith(".json"):
+    # 二选一校验：file 与 raw_json 必须有且仅有一个有效值
+    has_file = file is not None and file.filename
+    has_raw_json = bool(form.raw_json and form.raw_json.strip())
+    if not has_file and not has_raw_json:
         return UploadMCPResponse(
             success=False,
-            error="Only .json files are accepted",
+            error="Either file or raw_json is required",
         )
 
-    try:
-        content = await file.read()
-        file_data = json.loads(content.decode("utf-8"))
-    except (json.JSONDecodeError, UnicodeDecodeError) as e:
-        return UploadMCPResponse(success=False, error=f"Invalid JSON: {e}")
+    if has_file:
+        # 文件路径：保留原有 .json 扩展名校验
+        assert file is not None  # 给类型检查器看的，has_file 已经保证
+        if not file.filename.endswith(".json"):
+            return UploadMCPResponse(
+                success=False,
+                error="Only .json files are accepted",
+            )
+        try:
+            content = await file.read()
+            file_data = json.loads(content.decode("utf-8"))
+        except (json.JSONDecodeError, UnicodeDecodeError) as e:
+            return UploadMCPResponse(success=False, error=f"Invalid JSON: {e}")
+        source_filename = file.filename
+    else:
+        # 粘贴 JSON 路径：直接解析字符串，filename 用占位以便复用下游 inferred_name 推断
+        try:
+            file_data = json.loads(form.raw_json or "")
+        except json.JSONDecodeError as e:
+            return UploadMCPResponse(success=False, error=f"Invalid JSON: {e}")
+        source_filename = "pasted.json"
 
     try:
         client_key, inferred_name, config = _extract_upload_payload(
-            file.filename,
+            source_filename,
             file_data,
         )
     except ValueError as e:

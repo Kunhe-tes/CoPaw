@@ -49,12 +49,21 @@ export const marketMcpApi = {
 
   /**
    * 上传 MCP 到市场（管理员）
+   *
+   * 支持两种上传方式（二选一）：
+   * - 传 file：上传 .json 文件
+   * - 传 raw_json：直接传 JSON 字符串（前端粘贴方式）
    */
   uploadMCP: async (
     data: MCPUploadRequest
   ): Promise<MarketMCPItem> => {
     const formData = new FormData();
-    formData.append("file", data.file);
+    if (data.file) {
+      formData.append("file", data.file);
+    }
+    if (data.raw_json) {
+      formData.append("raw_json", data.raw_json);
+    }
     formData.append("name", data.name);
     if (data.chinese_name) {
       formData.append("chinese_name", data.chinese_name);
