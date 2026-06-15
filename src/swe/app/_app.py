@@ -27,6 +27,7 @@ from .auth import AuthMiddleware
 from .middleware.tenant_identity import TenantIdentityMiddleware
 from .middleware.tenant_workspace import TenantWorkspaceMiddleware
 from .middleware.header_passthrough import HeaderPassthroughMiddleware
+from .middleware.liveness_probe import LivenessProbeMiddleware
 from .middleware.runtime_static_gzip import RuntimeStaticGZipMiddleware
 from .middleware.sse_diagnostic import SSEDiagnosticMiddleware
 from .source_system_config.middleware import SourceSystemConfigMiddleware
@@ -590,6 +591,11 @@ app.add_middleware(
     SSEDiagnosticMiddleware,
     manager=runtime_diagnostic_manager,
 )
+
+# Keep the Kubernetes liveness probe outside business middleware. This proves
+# the process can answer HTTP without touching auth, tenant, source, DB, or
+# Agent runtime paths.
+app.add_middleware(LivenessProbeMiddleware)
 
 
 # Console static dir: env, or swe package data (console), or cwd.
