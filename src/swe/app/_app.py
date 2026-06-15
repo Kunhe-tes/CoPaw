@@ -1,11 +1,14 @@
 # -*- coding: utf-8 -*-
 # pylint: disable=redefined-outer-name,unused-argument
+import asyncio
 import mimetypes
 import os
 import time
 from contextlib import asynccontextmanager
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
+import anyio
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
@@ -189,6 +192,56 @@ def _build_internal_cron_callback_url() -> str:
     return f"{base}/api/internal/cron/callback"
 
 
+def _get_positive_int_env(name: str, default: int) -> int:
+    raw_value = os.environ.get(name)
+    if raw_value is None:
+        return default
+
+    try:
+        value = int(raw_value)
+    except (TypeError, ValueError):
+        logger.warning(
+            "Invalid %s=%r; using default %s",
+            name,
+            raw_value,
+            default,
+        )
+        return default
+
+    if value <= 0:
+        logger.warning(
+            "Invalid %s=%r; using default %s",
+            name,
+            raw_value,
+            default,
+        )
+        return default
+
+    return value
+
+
+def _configure_async_thread_pools() -> None:
+    anyio_thread_tokens = _get_positive_int_env("ANYIO_THREAD_TOKENS", 64)
+    asyncio_executor_workers = _get_positive_int_env(
+        "ASYNCIO_EXECUTOR_WORKERS",
+        64,
+    )
+
+    anyio_limiter = anyio.to_thread.current_default_thread_limiter()
+    anyio_limiter.total_tokens = anyio_thread_tokens
+
+    loop = asyncio.get_running_loop()
+    loop.set_default_executor(
+        ThreadPoolExecutor(max_workers=asyncio_executor_workers),
+    )
+    logger.info(
+        "Configured async thread pools: anyio_thread_tokens=%s, "
+        "asyncio_executor_workers=%s",
+        anyio_thread_tokens,
+        asyncio_executor_workers,
+    )
+
+
 async def _reset_scope_sensitive_runtime_state(app: FastAPI) -> None:
     """在开始提供 source-scoped 流量前清空长期运行态缓存。"""
     existing_manager = getattr(app.state, "multi_agent_manager", None)
@@ -215,6 +268,7 @@ async def lifespan(
     app: FastAPI,
 ):  # pylint: disable=too-many-statements,too-many-branches
     startup_start_time = time.time()
+    _configure_async_thread_pools()
     if FILE_LOG_ENABLED:
         add_swe_file_handler(WORKING_DIR / "swe.log")
     else:
@@ -388,19 +442,17 @@ async def lifespan(
             getattr(db_connection, "is_connected", False),
         )
         if has_task_binding_db:
-            app.state.source_system_task_scheduler = (
-                SourceSystemTaskScheduler(
-                    binding_store=SourceSystemTaskBindingStore(
-                        db_connection,
-                    ),
-                    scheduler_adapter=scheduler_adapter,
-                    callback_url=_build_internal_cron_callback_url(),
-                    tenant_scope_store_factory=(
-                        lambda: tenant_workspace_pool.init_source_store
-                    ),
-                    multi_agent_manager=multi_agent_manager,
-                    agent_id="default",
-                )
+            app.state.source_system_task_scheduler = SourceSystemTaskScheduler(
+                binding_store=SourceSystemTaskBindingStore(
+                    db_connection,
+                ),
+                scheduler_adapter=scheduler_adapter,
+                callback_url=_build_internal_cron_callback_url(),
+                tenant_scope_store_factory=(
+                    lambda: tenant_workspace_pool.init_source_store
+                ),
+                multi_agent_manager=multi_agent_manager,
+                agent_id="default",
             )
         else:
             logger.warning(
