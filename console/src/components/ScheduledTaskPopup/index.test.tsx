@@ -370,6 +370,24 @@ describe("ScheduledTaskPopup", () => {
         });
       });
     });
+
+    it("passes notification delay hours as minutes", async () => {
+      const onConfirm = vi.fn().mockResolvedValue(undefined);
+      render(<ScheduledTaskPopup {...defaultProps} onConfirm={onConfirm} />);
+
+      fireEvent.change(screen.getByLabelText("通知延迟数值"), {
+        target: { value: "2" },
+      });
+      fireEvent.change(screen.getByLabelText("通知延迟单位"), {
+        target: { value: "hours" },
+      });
+      fireEvent.click(screen.getByRole("button", { name: "确认" }));
+
+      await waitFor(() => {
+        expect(onConfirm).toHaveBeenCalled();
+        expect(onConfirm.mock.calls[0][3]).toBe(120);
+      });
+    });
   });
 
   describe("Confirm button enable/disable logic", () => {

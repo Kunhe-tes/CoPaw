@@ -405,7 +405,47 @@ class TestLogicalTenantListing:
 
         result = await list_logical_tenant_ids("ruice", source_filter=True)
         assert result == ["tenant-a", "tenant-b"]
-        fake_store.get_by_source.assert_called_once_with("ruice")
+        fake_store.get_by_source.assert_called_once_with(
+            "ruice",
+            include_templates=False,
+        )
+
+    async def test_source_filter_can_include_template_tenants(
+        self,
+        monkeypatch,
+    ):
+        """source_filter=True 可按需返回 template 租户。"""
+        fake_store = AsyncMock()
+        fake_store.get_by_source.return_value = [
+            {
+                "tenant_id": "default_ruice",
+                "source_id": "ruice",
+                "tenant_type": "template",
+            },
+            {"tenant_id": "tenant-a", "source_id": "ruice"},
+        ]
+
+        monkeypatch.setitem(
+            sys.modules,
+            "swe.app.workspace.tenant_init_source_store",
+            tenant_init_source_store_stub,
+        )
+        monkeypatch.setattr(
+            tenant_init_source_store_stub,
+            "get_tenant_init_source_store",
+            lambda: fake_store,
+        )
+
+        result = await list_logical_tenant_ids(
+            "ruice",
+            source_filter=True,
+            include_templates=True,
+        )
+        assert result == ["default_ruice", "tenant-a"]
+        fake_store.get_by_source.assert_called_once_with(
+            "ruice",
+            include_templates=True,
+        )
 
     async def test_source_filter_returns_empty_when_store_unavailable(
         self,

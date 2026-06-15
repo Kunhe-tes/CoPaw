@@ -7,18 +7,26 @@ This module wraps agentscope's SessionBase so that session_id and user_id
 are sanitized before being used as filenames.
 """
 
-import os
-import re
+import asyncio
 import json
 import logging
+import os
+import re
+import threading
+import tempfile
 
-from typing import Union, Sequence
+from typing import Any, Callable, Protocol, Sequence, Union
 
 import aiofiles
 from agentscope.session import SessionBase
 
 logger = logging.getLogger(__name__)
 SESSION_SKILL_SNAPSHOT_STATE_KEY = "session_skill_snapshot"
+_SESSION_WRITE_LOCKS: dict[
+    tuple[asyncio.AbstractEventLoop, str],
+    asyncio.Lock,
+] = {}
+_SESSION_WRITE_LOCKS_GUARD = threading.Lock()
 
 
 # Characters forbidden in Windows filenames
@@ -36,11 +44,48 @@ def sanitize_filename(name: str) -> str:
     return _UNSAFE_FILENAME_RE.sub("--", name)
 
 
+def _get_session_write_lock(file_path: str) -> asyncio.Lock:
+    loop = asyncio.get_running_loop()
+    normalized_path = os.path.normcase(os.path.abspath(file_path))
+    lock_key = (loop, normalized_path)
+    with _SESSION_WRITE_LOCKS_GUARD:
+        lock = _SESSION_WRITE_LOCKS.get(lock_key)
+        if lock is None:
+            lock = asyncio.Lock()
+            _SESSION_WRITE_LOCKS[lock_key] = lock
+        return lock
+
+
+def _write_json_text(file_path: str, content: str) -> None:
+    temp_path: str | None = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            "w",
+            encoding="utf-8",
+            dir=os.path.dirname(file_path) or ".",
+            prefix=f".{os.path.basename(file_path)}.",
+            suffix=".tmp",
+            delete=False,
+        ) as file:
+            temp_path = file.name
+            file.write(content)
+            file.flush()
+            os.fsync(file.fileno())
+        os.replace(temp_path, file_path)
+    except Exception:
+        if temp_path is not None:
+            try:
+                os.unlink(temp_path)
+            except OSError:
+                pass
+        raise
+
+
 class SafeJSONSession(SessionBase):
     """SessionBase subclass with filename sanitization and async file I/O.
 
-    Overrides all file-reading/writing methods to use :mod:`aiofiles` so
-    that disk I/O does not block the event loop.
+    Uses :mod:`aiofiles` for reads and worker threads for writes so that
+    disk I/O does not block the event loop.
     """
 
     def __init__(
@@ -70,6 +115,69 @@ class SafeJSONSession(SessionBase):
             file_path = f"{safe_sid}.json"
         return os.path.join(self.save_dir, file_path)
 
+    async def _read_session_state_file(
+        self,
+        session_save_path: str,
+        *,
+        allow_not_exist: bool,
+    ) -> tuple[bool, dict[str, Any]]:
+        async with _get_session_write_lock(session_save_path):
+            if not os.path.exists(session_save_path):
+                if allow_not_exist:
+                    return False, {}
+                raise ValueError(
+                    "Failed to load session state for file "
+                    f"{session_save_path} because it does not exist.",
+                )
+
+            async with aiofiles.open(
+                session_save_path,
+                "r",
+                encoding="utf-8",
+                errors="surrogatepass",
+            ) as file:
+                content = await file.read()
+
+        states = json.loads(content)
+        if not isinstance(states, dict):
+            raise ValueError(
+                f"Session file {session_save_path} does not contain "
+                "a JSON object.",
+            )
+        return True, states
+
+    async def _read_existing_state_for_merge(
+        self,
+        session_save_path: str,
+    ) -> dict[str, Any]:
+        if not os.path.exists(session_save_path):
+            return {}
+
+        async with aiofiles.open(
+            session_save_path,
+            "r",
+            encoding="utf-8",
+            errors="surrogatepass",
+        ) as f:
+            content = await f.read()
+
+        if not content.strip():
+            return {}
+
+        try:
+            loaded_state = json.loads(content)
+        except json.JSONDecodeError:
+            logger.warning(
+                "Failed to parse existing session state at %s; "
+                "overwriting with current state.",
+                session_save_path,
+            )
+            return {}
+
+        if not isinstance(loaded_state, dict):
+            return {}
+        return loaded_state
+
     async def save_session_state(
         self,
         session_id: str,
@@ -78,39 +186,20 @@ class SafeJSONSession(SessionBase):
     ) -> None:
         """Save state modules to a JSON file using async I/O."""
         session_save_path = self._get_save_path(session_id, user_id=user_id)
-        existing_state = {}
-        if os.path.exists(session_save_path):
-            async with aiofiles.open(
+        async with _get_session_write_lock(session_save_path):
+            existing_state = await self._read_existing_state_for_merge(
                 session_save_path,
-                "r",
-                encoding="utf-8",
-                errors="surrogatepass",
-            ) as f:
-                content = await f.read()
-                if content.strip():
-                    try:
-                        loaded_state = json.loads(content)
-                    except json.JSONDecodeError:
-                        logger.warning(
-                            "Failed to parse existing session state at %s; "
-                            "overwriting with current state.",
-                            session_save_path,
-                        )
-                    else:
-                        if isinstance(loaded_state, dict):
-                            existing_state = loaded_state
-
-        state_dicts = {
-            name: state_module.state_dict()
-            for name, state_module in state_modules_mapping.items()
-        }
-        state_dicts = {**existing_state, **state_dicts}
-        with open(
-            session_save_path,
-            "w",
-            encoding="utf-8",
-        ) as f:
-            f.write(json.dumps(state_dicts, ensure_ascii=False))
+            )
+            state_dicts = {
+                name: state_module.state_dict()
+                for name, state_module in state_modules_mapping.items()
+            }
+            state_dicts = {**existing_state, **state_dicts}
+            await asyncio.to_thread(
+                _write_json_text,
+                session_save_path,
+                json.dumps(state_dicts, ensure_ascii=False),
+            )
 
         logger.info(
             "Saved session state to %s successfully.",
@@ -126,16 +215,11 @@ class SafeJSONSession(SessionBase):
     ) -> None:
         """Load state modules from a JSON file using async I/O."""
         session_save_path = self._get_save_path(session_id, user_id=user_id)
-        if os.path.exists(session_save_path):
-            async with aiofiles.open(
-                session_save_path,
-                "r",
-                encoding="utf-8",
-                errors="surrogatepass",
-            ) as f:
-                content = await f.read()
-                states = json.loads(content)
-
+        exists, states = await self._read_session_state_file(
+            session_save_path,
+            allow_not_exist=allow_not_exist,
+        )
+        if exists:
             for name, state_module in state_modules_mapping.items():
                 if name in states:
                     state_module.load_state_dict(states[name])
@@ -143,17 +227,10 @@ class SafeJSONSession(SessionBase):
                 "Load session state from %s successfully.",
                 session_save_path,
             )
-
-        elif allow_not_exist:
+        else:
             logger.info(
                 "Session file %s does not exist. Skip loading session state.",
                 session_save_path,
-            )
-
-        else:
-            raise ValueError(
-                f"Failed to load session state for file {session_save_path} "
-                "because it does not exist.",
             )
 
     async def update_session_state(
@@ -164,48 +241,31 @@ class SafeJSONSession(SessionBase):
         user_id: str = "",
         create_if_not_exist: bool = True,
     ) -> None:
-        session_save_path = self._get_save_path(session_id, user_id=user_id)
-
-        if os.path.exists(session_save_path):
-            async with aiofiles.open(
-                session_save_path,
-                "r",
-                encoding="utf-8",
-                errors="surrogatepass",
-            ) as f:
-                content = await f.read()
-                states = json.loads(content)
-
-        else:
-            if not create_if_not_exist:
-                raise ValueError(
-                    f"Session file {session_save_path} does not exist.",
-                )
-            states = {}
-
         path = key.split(".") if isinstance(key, str) else list(key)
         if not path:
             raise ValueError("key path is empty")
 
-        cur = states
-        for k in path[:-1]:
-            if k not in cur or not isinstance(cur[k], dict):
-                cur[k] = {}
-            cur = cur[k]
+        def _mutate(states: dict[str, Any]) -> dict[str, Any]:
+            cur = states
+            for k in path[:-1]:
+                if k not in cur or not isinstance(cur[k], dict):
+                    cur[k] = {}
+                cur = cur[k]
 
-        cur[path[-1]] = value
+            cur[path[-1]] = value
+            return states
 
-        with open(
-            session_save_path,
-            "w",
-            encoding="utf-8",
-        ) as f:
-            f.write(json.dumps(states, ensure_ascii=False))
+        await self.mutate_session_state(
+            session_id=session_id,
+            mutator=_mutate,
+            user_id=user_id,
+            create_if_not_exist=create_if_not_exist,
+        )
 
         logger.info(
             "Updated session state key '%s' in %s successfully.",
             key,
-            session_save_path,
+            self._get_save_path(session_id, user_id=user_id),
         )
 
     async def get_session_state_dict(
@@ -232,33 +292,21 @@ class SafeJSONSession(SessionBase):
                 `allow_not_exist=True`.
         """
         session_save_path = self._get_save_path(session_id, user_id=user_id)
-        if os.path.exists(session_save_path):
-            async with aiofiles.open(
-                session_save_path,
-                "r",
-                encoding="utf-8",
-                errors="surrogatepass",
-            ) as file:
-                content = await file.read()
-                states = json.loads(content)
-
+        exists, states = await self._read_session_state_file(
+            session_save_path,
+            allow_not_exist=allow_not_exist,
+        )
+        if exists:
             logger.info(
                 "Get session state dict from %s successfully.",
                 session_save_path,
             )
             return states
-
-        if allow_not_exist:
-            logger.info(
-                "Session file %s does not exist. Return empty state dict.",
-                session_save_path,
-            )
-            return {}
-
-        raise ValueError(
-            f"Failed to get session state for file {session_save_path} "
-            "because it does not exist.",
+        logger.info(
+            "Session file %s does not exist. Return empty state dict.",
+            session_save_path,
         )
+        return {}
 
     async def get_session_skill_snapshot(
         self,
@@ -293,16 +341,11 @@ class SafeJSONSession(SessionBase):
         user_id: str = "",
     ) -> None:
         """Persist the top-level session skill snapshot."""
-        state = await self.get_session_state_dict(
+        await self.update_session_state(
             session_id=session_id,
+            key=SESSION_SKILL_SNAPSHOT_STATE_KEY,
+            value=snapshot,
             user_id=user_id,
-            allow_not_exist=True,
-        )
-        state[SESSION_SKILL_SNAPSHOT_STATE_KEY] = snapshot
-        await self.save_merged_state(
-            session_id=session_id,
-            user_id=user_id,
-            state=state,
         )
 
     async def save_merged_state(
@@ -324,14 +367,128 @@ class SafeJSONSession(SessionBase):
         if state is None:
             state = {}
         session_save_path = self._get_save_path(session_id, user_id=user_id)
-        async with aiofiles.open(
-            session_save_path,
-            "w",
-            encoding="utf-8",
-        ) as f:
-            await f.write(json.dumps(state, ensure_ascii=False))
+        async with _get_session_write_lock(session_save_path):
+            await asyncio.to_thread(
+                _write_json_text,
+                session_save_path,
+                json.dumps(state, ensure_ascii=False),
+            )
         logger.info(
             "Saved merged session state to %s (keys=%d)",
             session_save_path,
             len(state),
         )
+
+    async def mutate_session_state(
+        self,
+        session_id: str,
+        mutator: Callable[[dict[str, Any]], dict[str, Any] | None],
+        user_id: str = "",
+        create_if_not_exist: bool = True,
+    ) -> dict[str, Any]:
+        """Atomically read, merge and write session state under one lock."""
+        session_save_path = self._get_save_path(session_id, user_id=user_id)
+        async with _get_session_write_lock(session_save_path):
+            if os.path.exists(session_save_path):
+                async with aiofiles.open(
+                    session_save_path,
+                    "r",
+                    encoding="utf-8",
+                    errors="surrogatepass",
+                ) as file:
+                    content = await file.read()
+                    states = json.loads(content) if content.strip() else {}
+            else:
+                if not create_if_not_exist:
+                    raise ValueError(
+                        f"Session file {session_save_path} does not exist.",
+                    )
+                states = {}
+
+            if not isinstance(states, dict):
+                raise ValueError(
+                    f"Session file {session_save_path} does not contain "
+                    "a JSON object.",
+                )
+
+            updated_state = mutator(states)
+            if updated_state is None:
+                updated_state = states
+            if not isinstance(updated_state, dict):
+                raise ValueError("mutator must return a dict or None")
+
+            await asyncio.to_thread(
+                _write_json_text,
+                session_save_path,
+                json.dumps(updated_state, ensure_ascii=False),
+            )
+
+        logger.info(
+            "Mutated session state in %s successfully.",
+            session_save_path,
+        )
+        return updated_state
+
+
+class RunnerSessionProtocol(Protocol):
+    def _get_save_path(self, session_id: str, user_id: str) -> str:
+        # Protocol stub: concrete session implementations provide behavior.
+        pass
+
+    async def load_session_state(
+        self,
+        session_id: str,
+        user_id: str = "",
+        allow_not_exist: bool = True,
+        **state_modules_mapping,
+    ) -> None:
+        # Protocol stub: concrete session implementations provide behavior.
+        pass
+
+    async def save_session_state(
+        self,
+        session_id: str,
+        user_id: str = "",
+        **state_modules_mapping,
+    ) -> None:
+        # Protocol stub: concrete session implementations provide behavior.
+        pass
+
+    async def update_session_state(
+        self,
+        session_id: str,
+        key: Union[str, Sequence[str]],
+        value,
+        user_id: str = "",
+        create_if_not_exist: bool = True,
+    ) -> None:
+        # Protocol stub: concrete session implementations provide behavior.
+        pass
+
+    async def get_session_state_dict(
+        self,
+        session_id: str,
+        user_id: str = "",
+        allow_not_exist: bool = True,
+    ) -> dict:
+        # Protocol stub: concrete session implementations provide behavior.
+        pass
+
+    async def save_merged_state(
+        self,
+        session_id: str,
+        user_id: str = "",
+        state: dict | None = None,
+    ) -> None:
+        # Protocol stub: concrete session implementations provide behavior.
+        pass
+
+    async def mutate_session_state(
+        self,
+        session_id: str,
+        mutator: Callable[[dict[str, Any]], dict[str, Any] | None],
+        user_id: str = "",
+        create_if_not_exist: bool = True,
+    ) -> dict[str, Any]:
+        # Protocol stub: concrete session implementations provide behavior.
+        pass

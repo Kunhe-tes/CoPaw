@@ -47,6 +47,27 @@ function taskJob(
   };
 }
 
+function pausedTask(
+  id: string,
+  unreadCount = 0,
+  pauseReason: "manual" | "auto_unread_threshold" = "manual",
+): CronJobSpecOutput {
+  return taskJob({
+    id,
+    name: `暂停任务 ${id}`,
+    enabled: false,
+    task: {
+      visible_in_my_tasks: true,
+      has_scheduled_result: false,
+      latest_scheduled_preview: "",
+      unread_execution_count: unreadCount,
+      is_running: false,
+      is_paused: true,
+      pause_reason: pauseReason,
+    },
+  });
+}
+
 describe("ChatTaskList actions", () => {
   afterEach(() => {
     cleanup();
@@ -112,6 +133,7 @@ describe("ChatTaskList actions", () => {
     render(
       <ChatTaskList
         tasks={[task]}
+        selectedTaskId={task.id}
         onTaskResume={onTaskResume}
         onTaskDelete={vi.fn()}
       />,
@@ -133,6 +155,70 @@ describe("ChatTaskList actions", () => {
     expect(onTaskResume).toHaveBeenCalledWith(task);
   });
 
+  it("collapses paused tasks by default without unread aggregation", () => {
+    render(
+      <ChatTaskList
+        tasks={[
+          taskJob({ id: "active", name: "正常任务" }),
+          pausedTask("p1", 3),
+        ]}
+      />,
+    );
+
+    const toggle = screen.getByRole("button", { name: "已暂停任务 1" });
+    const activeTask = screen.getByText("正常任务");
+    expect(toggle).toHaveAttribute("aria-expanded", "false");
+    expect(activeTask).toBeVisible();
+    expect(
+      toggle.compareDocumentPosition(activeTask) &
+        Node.DOCUMENT_POSITION_FOLLOWING,
+    ).not.toBe(0);
+    expect(screen.queryByText("暂停任务 p1")).not.toBeVisible();
+    expect(toggle).not.toHaveTextContent("3");
+  });
+
+  it("expands and collapses paused tasks from the disclosure", () => {
+    render(<ChatTaskList tasks={[pausedTask("p1")]} />);
+
+    const toggle = screen.getByRole("button", { name: "已暂停任务 1" });
+    fireEvent.click(toggle);
+    expect(toggle).toHaveAttribute("aria-expanded", "true");
+    expect(screen.getByText("暂停任务 p1")).toBeVisible();
+
+    fireEvent.click(toggle);
+    expect(toggle).toHaveAttribute("aria-expanded", "false");
+    expect(screen.getByText("暂停任务 p1")).not.toBeVisible();
+  });
+
+  it("automatically expands when the selected task is paused", async () => {
+    const task = pausedTask("selected");
+    render(<ChatTaskList tasks={[task]} selectedTaskId={task.id} />);
+
+    await waitFor(() => {
+      expect(
+        screen.getByRole("button", { name: "已暂停任务 1" }),
+      ).toHaveAttribute("aria-expanded", "true");
+    });
+    expect(screen.getByText("暂停任务 selected")).toBeVisible();
+  });
+
+  it("keeps the group collapsed when an unselected task becomes paused", () => {
+    const active = taskJob({ id: "changing", name: "状态变化任务" });
+    const { rerender } = render(<ChatTaskList tasks={[active]} />);
+
+    rerender(<ChatTaskList tasks={[pausedTask("changing")]} />);
+
+    expect(
+      screen.getByRole("button", { name: "已暂停任务 1" }),
+    ).toHaveAttribute("aria-expanded", "false");
+    expect(screen.getByText("暂停任务 changing")).not.toBeVisible();
+  });
+
+  it("does not render a paused disclosure without paused tasks", () => {
+    render(<ChatTaskList tasks={[taskJob()]} />);
+    expect(screen.queryByText(/已暂停任务/)).toBeNull();
+  });
+
   it("shows completed status instead of scheduled result preview", () => {
     const task = taskJob({
       task: {
@@ -143,7 +229,7 @@ describe("ChatTaskList actions", () => {
         is_running: false,
         is_paused: false,
         pause_reason: null,
-        last_scheduled_run_at: "2026-05-21T08:00:00Z" as any,
+        last_scheduled_run_at: "2026-05-21T08:00:00Z",
       },
     });
 

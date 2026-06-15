@@ -28,6 +28,7 @@ from swe.config.context import (
 from swe.app.middleware.tenant_identity import (
     PUBLIC_ROUTE_EXEMPT_PREFIXES,
 )
+from swe.app.identity_resolver import resolve_user_identity
 
 logger = logging.getLogger(__name__)
 
@@ -218,6 +219,26 @@ class TenantWorkspaceMiddleware(BaseHTTPMiddleware):
             # Get user_name and bbk_id from request state for database record
             user_name = getattr(request.state, "user_name", None)
             bbk_id = getattr(request.state, "bbk_id", None)
+            resolved_identity = await resolve_user_identity(
+                tenant_id=getattr(request.state, "tenant_id", None)
+                or tenant_id,
+                source_id=source_id,
+                user_name=user_name,
+                bbk_id=bbk_id,
+                headers={
+                    key: value
+                    for key, value in {
+                        "Content-Type": "application/json",
+                        "Authorization": request.headers.get(
+                            "Authorization",
+                        ),
+                    }.items()
+                    if value
+                },
+                allow_remote_lookup=True,
+            )
+            user_name = resolved_identity.user_name
+            bbk_id = resolved_identity.bbk_id
 
             # Ensure tenant is bootstrapped (minimal - directories only)
             bootstrap_started_at = time.perf_counter()

@@ -35,7 +35,7 @@ __all__ = [
 
 
 def __getattr__(name: str):
-    """按需导出 tracing 组件，避免配置模型触发重运行时依赖。"""
+    """Lazily export tracing members to avoid heavy runtime imports."""
     if name == "TracingConfig":
         from .config import TracingConfig as _TracingConfig
 

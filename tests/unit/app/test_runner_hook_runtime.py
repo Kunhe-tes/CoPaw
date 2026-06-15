@@ -25,14 +25,23 @@ from swe.app.runner.runner import (
     AgentRunner,
     _build_and_connect_mcp_clients,
     _create_session_skill_detector,
+    _QueryAttemptInput,
+    _QueryAttemptState,
     _hook_config_enabled,
     _QueryPreflight,
     _QueryRuntime,
+    _RetryState,
+    _RuntimeStartResult,
     _TurnPlan,
     _QueryTurnOutcome,
 )
 from swe.app.runner.session import SafeJSONSession
 from swe.config.config import SuggestionMode
+from swe.tracing.manager import (
+    TraceContext,
+    get_current_trace,
+    set_current_trace,
+)
 
 
 def _agent_config(hooks: HookConfig | None = None):
@@ -291,6 +300,198 @@ async def test_create_session_skill_detector_loads_http_skill_hooks_without_appr
 
 
 @pytest.mark.asyncio
+async def test_attach_session_skill_detector_reuses_trace_detector_and_tracing(
+    tmp_path,
+) -> None:
+    runner = AgentRunner(agent_id="test-agent", workspace_dir=tmp_path)
+    fake_agent = SimpleNamespace(
+        _request_context={},
+        get_effective_skills=lambda: ["xlsx"],
+    )
+    runtime = _QueryRuntime(
+        agent=fake_agent,
+        agent_config=_agent_config(),
+        tenant_hooks=HookConfig(),
+        hook_overlay=HookSessionOverlay(),
+        chat=None,
+        session_skill_detector=None,
+        mcp_clients=[],
+        session_id="session-1",
+        user_id="user-1",
+        channel="console",
+        skip_history=False,
+        pending_confirmed_skill_snapshots={},
+    )
+    request = SimpleNamespace(trace_id="trace-1", source_id="source-1")
+    trace_ctx = TraceContext(
+        trace_id="trace-1",
+        user_id="user-1",
+        session_id="session-1",
+        channel="console",
+        source_id="source-1",
+    )
+    trace_manager = AsyncMock()
+    trace_manager.emit_skill_invocation = AsyncMock(
+        return_value="skill-span-1",
+    )
+    set_current_trace(trace_ctx)
+
+    with (
+        patch("swe.app.runner.runner.has_trace_manager", return_value=True),
+        patch(
+            "swe.app.runner.runner.get_trace_manager",
+            return_value=trace_manager,
+        ),
+    ):
+        runner._attach_session_skill_detector(runtime=runtime, request=request)
+        detector = runtime.session_skill_detector
+        assert (
+            detector
+            is fake_agent._request_context["_skill_invocation_detector"]
+        )
+        assert get_current_trace().skill_detector is detector
+
+        await detector.start_skill(
+            "xlsx",
+            trigger_tool="user_message",
+            trigger_reason="declared",
+        )
+
+    trace_manager.emit_skill_invocation.assert_awaited_once()
+    set_current_trace(None)
+
+
+@pytest.mark.asyncio
+async def test_stream_single_query_attempt_skips_duplicate_detector_setup(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    runner = AgentRunner(agent_id="test-agent", workspace_dir=tmp_path)
+    fake_agent = SimpleNamespace(
+        setup_skill_detector=AsyncMock(),
+        rebuild_sys_prompt=lambda: None,
+    )
+    runtime = _QueryRuntime(
+        agent=fake_agent,
+        agent_config=_agent_config(),
+        tenant_hooks=HookConfig(),
+        hook_overlay=HookSessionOverlay(),
+        chat=None,
+        session_skill_detector=object(),
+        mcp_clients=[],
+        session_id="session-1",
+        user_id="user-1",
+        channel="console",
+        skip_history=False,
+        pending_confirmed_skill_snapshots={},
+    )
+    monkeypatch.setattr(
+        runner,
+        "_prepare_query_runtime",
+        AsyncMock(return_value=_RuntimeStartResult(runtime=runtime)),
+    )
+    sentinel = RuntimeError("stop after detector guard")
+    monkeypatch.setattr(
+        runner,
+        "get_state_loaded",
+        AsyncMock(side_effect=sentinel),
+    )
+
+    attempt_input = _QueryAttemptInput(
+        request=SimpleNamespace(),
+        msgs=[],
+        query=None,
+        preflight=_QueryPreflight(),
+        trace_id="trace-1",
+    )
+    attempt_state = _QueryAttemptState()
+    retry_state = _RetryState()
+
+    with pytest.raises(RuntimeError, match="stop after detector guard"):
+        async for _ in runner._stream_single_query_attempt(
+            attempt_input=attempt_input,
+            outcome=_QueryTurnOutcome(),
+            retry_state=retry_state,
+            attempt_state=attempt_state,
+        ):
+            pass
+
+    fake_agent.setup_skill_detector.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_stream_single_query_attempt_rebinds_trace_detector_from_runtime(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    runner = AgentRunner(agent_id="test-agent", workspace_dir=tmp_path)
+    detector = object()
+    fake_agent = SimpleNamespace(
+        setup_skill_detector=AsyncMock(),
+        rebuild_sys_prompt=lambda: None,
+        get_effective_skills=lambda: ["xlsx"],
+        _request_context={"_skill_invocation_detector": detector},
+    )
+    runtime = _QueryRuntime(
+        agent=fake_agent,
+        agent_config=_agent_config(),
+        tenant_hooks=HookConfig(),
+        hook_overlay=HookSessionOverlay(),
+        chat=None,
+        session_skill_detector=detector,
+        mcp_clients=[],
+        session_id="session-1",
+        user_id="user-1",
+        channel="console",
+        skip_history=False,
+        pending_confirmed_skill_snapshots={},
+    )
+    monkeypatch.setattr(
+        runner,
+        "_prepare_query_runtime",
+        AsyncMock(return_value=_RuntimeStartResult(runtime=runtime)),
+    )
+    trace_ctx = TraceContext(
+        trace_id="trace-1",
+        user_id="user-1",
+        session_id="session-1",
+        channel="console",
+        source_id="source-1",
+    )
+    set_current_trace(trace_ctx)
+    sentinel = RuntimeError("stop after trace rebind")
+    monkeypatch.setattr(
+        runner,
+        "get_state_loaded",
+        AsyncMock(side_effect=sentinel),
+    )
+
+    attempt_input = _QueryAttemptInput(
+        request=SimpleNamespace(source_id="source-1"),
+        msgs=[],
+        query=None,
+        preflight=_QueryPreflight(),
+        trace_id="trace-1",
+    )
+    attempt_state = _QueryAttemptState()
+    retry_state = _RetryState()
+
+    with pytest.raises(RuntimeError, match="stop after trace rebind"):
+        async for _ in runner._stream_single_query_attempt(
+            attempt_input=attempt_input,
+            outcome=_QueryTurnOutcome(),
+            retry_state=retry_state,
+            attempt_state=attempt_state,
+        ):
+            pass
+
+    assert get_current_trace().skill_detector is detector
+    assert get_current_trace().enabled_skills == ["xlsx"]
+    fake_agent.setup_skill_detector.assert_not_awaited()
+    set_current_trace(None)
+
+
+@pytest.mark.asyncio
 async def test_query_handler_user_prompt_hook_blocks_before_command_dispatch(
     monkeypatch,
     tmp_path,
@@ -298,6 +499,7 @@ async def test_query_handler_user_prompt_hook_blocks_before_command_dispatch(
     runner = AgentRunner(agent_id="test-agent", workspace_dir=tmp_path)
     runner.session = SimpleNamespace(
         get_session_state_dict=AsyncMock(return_value={}),
+        mutate_session_state=AsyncMock(return_value={}),
     )
     setattr(runner, "_chat_manager", None)
     tenant_hooks = HookConfig(
@@ -361,6 +563,7 @@ async def test_query_handler_no_config_does_not_emit_hook(
     runner = AgentRunner(agent_id="test-agent", workspace_dir=tmp_path)
     runner.session = SimpleNamespace(
         get_session_state_dict=AsyncMock(return_value={}),
+        mutate_session_state=AsyncMock(return_value={}),
     )
     setattr(runner, "_chat_manager", None)
 

@@ -12,6 +12,8 @@ from typing import Any
 import pytest
 
 from swe.app.routers import providers as providers_router
+from swe.config.context import encode_scope_id, tenant_context
+from swe.providers.provider_manager import ProviderManager
 from swe.providers.models import ModelSlotConfig
 
 
@@ -139,9 +141,11 @@ def test_list_active_model_distribution_tenants_returns_discovered_ids(
         _source_id=None,
         *,
         source_filter=False,
+        include_templates=False,
     ):
+        assert include_templates is True
         del source_filter
-        return ["default", "tenant-a", "tenant-b"]
+        return ["default_ruice", "tenant-a", "tenant-b"]
 
     monkeypatch.setattr(
         providers_router,
@@ -153,7 +157,7 @@ def test_list_active_model_distribution_tenants_returns_discovered_ids(
         providers_router.list_active_model_distribution_tenants(_request()),
     )
 
-    assert result.tenant_ids == ["default", "tenant-a", "tenant-b"]
+    assert result.tenant_ids == ["default_ruice", "tenant-a", "tenant-b"]
 
 
 def test_list_active_model_distribution_tenants_maps_source_default(
@@ -165,10 +169,12 @@ def test_list_active_model_distribution_tenants_maps_source_default(
         source_id: str | None = None,
         *,
         source_filter: bool = False,
+        include_templates: bool = False,
     ) -> list[str]:
+        assert include_templates is True
         del source_filter
         observed.append(source_id)
-        return ["default", "tenant-a"]
+        return ["default_ruice", "tenant-a"]
 
     monkeypatch.setattr(
         providers_router,
@@ -183,7 +189,7 @@ def test_list_active_model_distribution_tenants_maps_source_default(
     )
 
     assert observed == ["ruice"]
-    assert result.tenant_ids == ["default", "tenant-a"]
+    assert result.tenant_ids == ["default_ruice", "tenant-a"]
 
 
 def test_distribute_active_model_to_bootstrapped_tenant(
@@ -209,7 +215,7 @@ def test_distribute_active_model_to_bootstrapped_tenant(
 
     monkeypatch.setattr(
         providers_router,
-        "get_tenant_working_dir_strict",
+        "get_tenant_storage_working_dir",
         _working_dir_factory(tmp_path),
     )
     monkeypatch.setattr(
@@ -233,6 +239,7 @@ def test_distribute_active_model_to_bootstrapped_tenant(
             assert base_working_dir == tmp_path
             self.tenant_id = tenant_id
             self.source_id = source_id
+            self.effective_tenant_id = tenant_id
 
         def has_seeded_bootstrap(self) -> bool:
             return True
@@ -289,7 +296,7 @@ def test_distribute_active_model_bootstraps_missing_tenant(
 
     monkeypatch.setattr(
         providers_router,
-        "get_tenant_working_dir_strict",
+        "get_tenant_storage_working_dir",
         _working_dir_factory(tmp_path),
     )
     monkeypatch.setattr(
@@ -312,6 +319,12 @@ def test_distribute_active_model_bootstraps_missing_tenant(
         ):
             self.tenant_id = tenant_id
             self.source_id = source_id
+            self.effective_tenant_id = (
+                providers_router.resolve_storage_tenant_id(
+                    tenant_id,
+                    source_id,
+                )
+            )
 
         def has_seeded_bootstrap(self) -> bool:
             return False
@@ -357,7 +370,7 @@ def test_distribute_active_model_uses_request_scope_for_source_dir(
     canonical_scope_id = "dGVuYW50LXNvdXJjZQ.cnVpY2U"
     observed: dict[str, str | None] = {}
 
-    def fake_get_tenant_working_dir_strict(
+    def fake_get_tenant_storage_working_dir(
         tenant_id: str | None,
     ) -> Path:
         observed["tenant_id"] = tenant_id
@@ -365,8 +378,8 @@ def test_distribute_active_model_uses_request_scope_for_source_dir(
 
     monkeypatch.setattr(
         providers_router,
-        "get_tenant_working_dir_strict",
-        fake_get_tenant_working_dir_strict,
+        "get_tenant_storage_working_dir",
+        fake_get_tenant_storage_working_dir,
     )
     monkeypatch.setattr(
         providers_router.ProviderManager,
@@ -419,6 +432,33 @@ def test_distribute_active_model_uses_request_scope_for_source_dir(
     )
 
 
+def test_provider_manager_keeps_explicit_target_scope_under_request_scope(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    secret_dir = tmp_path / "secret"
+    monkeypatch.setattr(
+        "swe.providers.provider_manager.SECRET_DIR",
+        secret_dir,
+    )
+    ProviderManager.reset_instance_cache()
+
+    target_scope_id = encode_scope_id("tenant-target", "source-b")
+    source_scope_id = encode_scope_id("tenant-source", "source-a")
+
+    with tenant_context(
+        tenant_id="tenant-source",
+        source_id="source-a",
+        scope_id=source_scope_id,
+    ):
+        ProviderManager.ensure_tenant_provider_storage(target_scope_id)
+        manager = ProviderManager.get_instance(target_scope_id)
+
+    assert manager.tenant_id == target_scope_id
+    assert (secret_dir / target_scope_id / "providers").exists()
+    assert not (secret_dir / source_scope_id / "providers").exists()
+
+
 def test_distribute_active_model_overwrites_builtin_provider_and_switches_active_slot(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -451,7 +491,7 @@ def test_distribute_active_model_overwrites_builtin_provider_and_switches_active
 
     monkeypatch.setattr(
         providers_router,
-        "get_tenant_working_dir_strict",
+        "get_tenant_storage_working_dir",
         _working_dir_factory(tmp_path),
     )
     monkeypatch.setattr(
@@ -468,6 +508,10 @@ def test_distribute_active_model_overwrites_builtin_provider_and_switches_active
         providers_router,
         "TenantInitializer",
         lambda base_working_dir, tenant_id, source_id=None: SimpleNamespace(
+            effective_tenant_id=providers_router.resolve_storage_tenant_id(
+                tenant_id,
+                source_id,
+            ),
             has_seeded_bootstrap=lambda: True,
             ensure_seeded_bootstrap=lambda: {"minimal": True},
         ),
@@ -522,7 +566,7 @@ def test_distribute_active_model_overwrites_custom_provider_and_switches_active_
 
     monkeypatch.setattr(
         providers_router,
-        "get_tenant_working_dir_strict",
+        "get_tenant_storage_working_dir",
         _working_dir_factory(tmp_path),
     )
     monkeypatch.setattr(
@@ -539,6 +583,10 @@ def test_distribute_active_model_overwrites_custom_provider_and_switches_active_
         providers_router,
         "TenantInitializer",
         lambda base_working_dir, tenant_id, source_id=None: SimpleNamespace(
+            effective_tenant_id=providers_router.resolve_storage_tenant_id(
+                tenant_id,
+                source_id,
+            ),
             has_seeded_bootstrap=lambda: True,
             ensure_seeded_bootstrap=lambda: {"minimal": True},
         ),
@@ -587,7 +635,7 @@ def test_distribute_active_model_reports_partial_success(
 
     monkeypatch.setattr(
         providers_router,
-        "get_tenant_working_dir_strict",
+        "get_tenant_storage_working_dir",
         _working_dir_factory(tmp_path),
     )
     monkeypatch.setattr(
@@ -604,6 +652,10 @@ def test_distribute_active_model_reports_partial_success(
         providers_router,
         "TenantInitializer",
         lambda base_working_dir, tenant_id, source_id=None: SimpleNamespace(
+            effective_tenant_id=providers_router.resolve_storage_tenant_id(
+                tenant_id,
+                source_id,
+            ),
             has_seeded_bootstrap=lambda: True,
             ensure_seeded_bootstrap=lambda: {"minimal": True},
         ),

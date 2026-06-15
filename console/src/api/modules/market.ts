@@ -4,12 +4,14 @@ import { getApiUrl } from "../config";
 import type {
   FileContentResponse,
   FileTreeNode,
+  MySkill,
 } from "./mySkills";
 import type { DistributionRecord, RecallResultItem, RecallResponse } from "../types";
 
 export interface MarketSkill {
   item_id: string;
   name: string;
+  skill_name?: string;
   chinese_name?: string;
   description: string;
   version: string;
@@ -51,6 +53,7 @@ export interface PublishSkillRequest {
   // 可选：指定用户技能目录名，用于同步整个目录
   skill_name?: string;
   agent_id?: string;
+  overwrite?: boolean;
 }
 
 export interface DistributeRequest {
@@ -125,6 +128,18 @@ export const marketApi = {
   listCategories: async (sourceId: string): Promise<Category[]> => {
     const opts = mergeHeaders({ "X-Source-Id": sourceId });
     return request<Category[]>("/market/categories", opts);
+  },
+
+  createCategory: async (sourceId: string, name: string): Promise<Category> => {
+    const opts: RequestInit = {
+      method: "POST",
+      ...(mergeHeaders({
+        "Content-Type": "application/json",
+        "X-Source-Id": sourceId,
+      })),
+      body: JSON.stringify({ name }),
+    };
+    return request<Category>("/market/categories", opts);
   },
 
   listMarketSkills: async (
@@ -358,5 +373,27 @@ export const marketApi = {
       `/market/skills/${itemId}/recall`,
       opts
     );
+  },
+
+  listUserMarketSkills: async (
+    sourceId: string,
+    userId: string,
+  ): Promise<MySkill[]> => {
+    const headers = {
+      "X-Source-Id": sourceId,
+      "X-User-Id": userId,
+      "X-Tenant-Id": userId,
+    };
+    const [mine, received] = await Promise.all([
+      request<MySkill[]>("/market/skills/mine", mergeHeaders(headers)),
+      request<MySkill[]>("/market/skills/received", mergeHeaders(headers)),
+    ]);
+    const byName = new Map<string, MySkill>();
+    for (const skill of [...(mine || []), ...(received || [])]) {
+      if (!byName.has(skill.skill_name)) {
+        byName.set(skill.skill_name, skill);
+      }
+    }
+    return Array.from(byName.values());
   },
 };

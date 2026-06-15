@@ -1,0 +1,47 @@
+.systemCheckPage {
+  min-height: calc(100vh - 128px);
+  padding: 0 0 24px;
+}
+
+.pageBody {
+  display: grid;
+  gap: 16px;
+  padding: 0 20px;
+}
+
+.checkCard {
+  border-radius: 8px;
+}
+
+.formGrid {
+  display: grid;
+  grid-template-columns: minmax(180px, 280px) minmax(320px, 1fr);
+  gap: 16px;
+}
+
+.tenantInput :global(.ant-input) {
+  min-height: 112px;
+  resize: vertical;
+}
+
+.actionRow {
+  display: flex;
+  justify-content: flex-end;
+}
+
+.resultTable :global(.ant-table-cell) {
+  vertical-align: top;
+}
+
+.centerState {
+  display: flex;
+  min-height: 360px;
+  align-items: center;
+  justify-content: center;
+}
+
+@media (max-width: 760px) {
+  .formGrid {
+    grid-template-columns: 1fr;
+  }
+}

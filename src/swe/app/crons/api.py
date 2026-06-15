@@ -1,6 +1,8 @@
 # -*- coding: utf-8 -*-
 from __future__ import annotations
 
+import asyncio
+import os
 import uuid
 from dataclasses import dataclass
 from typing import Any
@@ -16,6 +18,7 @@ from ...config.context import (
 )
 from ...config.utils import list_logical_tenant_ids
 from ...providers.provider_manager import ProviderManager
+from ..identity_resolver import resolve_user_identity
 from .broadcast import compute_broadcast_offsets, shift_cron_expression
 from .manager import CronManager
 from .models import CronJobListItem, CronJobSpec, CronJobView
@@ -28,13 +31,41 @@ BROADCAST_MODEL_SLOT_WARNING = (
 BROADCAST_CRON_FALLBACK_WARNING = (
     "cron offset not applied: unsupported cron, using original schedule"
 )
-BROADCAST_ALREADY_EXISTS_WARNING = (
-    "broadcast skipped: target tenant already has child job"
-)
 BROADCAST_ORIGINAL_MODEL_SLOT_META_KEY = "broadcast_original_model_slot"
 BROADCAST_MODEL_SLOT_FALLBACK_REASON_META_KEY = (
     "broadcast_model_slot_fallback_reason"
 )
+CHILD_RUN_SKIPPED_PAUSED_MESSAGE = "paused, not executed"
+CHILD_NOT_FROM_SOURCE_MESSAGE = "child job does not belong to source job"
+CRON_BROADCAST_CONCURRENCY_ENV = "CRON_BROADCAST_CONCURRENCY"
+DEFAULT_CRON_BROADCAST_CONCURRENCY = 4
+
+PRESERVED_CHILD_META_KEYS = (
+    "task_chat_id",
+    "task_session_id",
+    "task_has_scheduled_result",
+    "task_last_scheduled_preview",
+    "task_unread_execution_count",
+    "task_last_scheduled_run_at",
+    "pause_reason",
+    "auto_paused_at",
+    "unread_count_at_pause",
+)
+
+
+def _positive_int_or_default(value: str | None, default: int) -> int:
+    try:
+        parsed = int(str(value or "").strip())
+    except ValueError:
+        return default
+    return parsed if parsed > 0 else default
+
+
+def _get_cron_broadcast_concurrency() -> int:
+    return _positive_int_or_default(
+        os.getenv(CRON_BROADCAST_CONCURRENCY_ENV),
+        DEFAULT_CRON_BROADCAST_CONCURRENCY,
+    )
 
 
 class BroadcastTenantListResponse(BaseModel):
@@ -68,6 +99,48 @@ class CronBroadcastResponse(BaseModel):
     results: list[CronBroadcastTenantResult] = Field(default_factory=list)
 
 
+class CronBroadcastChildItem(BaseModel):
+    tenant_id: str
+    tenant_name: str | None = None
+    bbk_id: str | None = None
+    job_id: str
+    job_name: str = ""
+    enabled: bool = False
+    cron: str = ""
+    timezone: str = ""
+    offset_minutes: int = 0
+    last_status: str | None = None
+    last_run_at: str | None = None
+    last_error: str | None = None
+
+
+class CronBroadcastChildrenResponse(BaseModel):
+    items: list[CronBroadcastChildItem] = Field(default_factory=list)
+
+
+class CronBroadcastChildRef(BaseModel):
+    tenant_id: str
+    job_id: str
+
+
+class CronBroadcastChildrenBatchRequest(BaseModel):
+    items: list[CronBroadcastChildRef] = Field(default_factory=list)
+
+
+class CronBroadcastChildOperationResult(BaseModel):
+    tenant_id: str
+    job_id: str
+    success: bool
+    status: str
+    message: str = ""
+
+
+class CronBroadcastChildrenBatchResponse(BaseModel):
+    results: list[CronBroadcastChildOperationResult] = Field(
+        default_factory=list,
+    )
+
+
 @dataclass(frozen=True)
 class _BroadcastContext:
     """保存一次广播请求内所有目标租户共享的执行上下文。"""
@@ -90,6 +163,21 @@ class _BroadcastSchedule:
     timezone: str
     offset_minutes: int
     warning: str
+
+
+async def _resolve_broadcast_target_identity(
+    tenant_id: str,
+    source_id: str | None,
+) -> tuple[str | None, str | None]:
+    """解析广播目标租户的身份信息。"""
+    resolved = await resolve_user_identity(
+        tenant_id=tenant_id,
+        source_id=source_id,
+        user_name=None,
+        bbk_id=None,
+        allow_remote_lookup=False,
+    )
+    return resolved.user_name, resolved.bbk_id
 
 
 async def get_cron_manager(
@@ -276,6 +364,8 @@ def _build_broadcast_job(
     *,
     job_id: str,
     target_tenant_id: str,
+    target_tenant_name: str | None,
+    target_bbk_id: str | None,
     source_id: str | None,
     cron: str,
     timezone_name: str,
@@ -287,15 +377,7 @@ def _build_broadcast_job(
 ) -> CronJobSpec:
     meta = dict(source_job.meta or {})
     for key in (
-        "task_chat_id",
-        "task_session_id",
-        "task_has_scheduled_result",
-        "task_last_scheduled_preview",
-        "task_unread_execution_count",
-        "task_last_scheduled_run_at",
-        "pause_reason",
-        "auto_paused_at",
-        "unread_count_at_pause",
+        *PRESERVED_CHILD_META_KEYS,
         "external_job_id",
         BROADCAST_ORIGINAL_MODEL_SLOT_META_KEY,
         BROADCAST_MODEL_SLOT_FALLBACK_REASON_META_KEY,
@@ -344,9 +426,9 @@ def _build_broadcast_job(
             "id": job_id,
             "enabled": True,
             "tenant_id": target_tenant_id,
-            "bbk_id": bbk_id,
+            "bbk_id": target_bbk_id,
             "source_id": source_id,
-            "tenant_name": tenant_name,
+            "tenant_name": target_tenant_name,
             "scope_id": resolve_scope_id(target_tenant_id, source_id),
             "schedule": source_job.schedule.model_copy(
                 update={
@@ -467,11 +549,32 @@ def _resolve_broadcast_schedule(
 async def _get_broadcast_target_cron_manager(
     context: _BroadcastContext,
     tenant_id: str,
+    tenant_name: str | None = None,
+    bbk_id: str | None = None,
 ) -> tuple[CronManager, str | None]:
-    if context.tenant_workspace_pool is not None:
+    return await _get_target_cron_manager(
+        context,
+        tenant_id,
+        bootstrap=True,
+        tenant_name=tenant_name,
+        bbk_id=bbk_id,
+    )
+
+
+async def _get_target_cron_manager(
+    context: _BroadcastContext,
+    tenant_id: str,
+    *,
+    bootstrap: bool,
+    tenant_name: str | None = None,
+    bbk_id: str | None = None,
+) -> tuple[CronManager, str | None]:
+    if bootstrap and context.tenant_workspace_pool is not None:
         await context.tenant_workspace_pool.ensure_bootstrap(
             tenant_id,
             source_id=context.source_id,
+            tenant_name=tenant_name,
+            bbk_id=bbk_id,
         )
     runtime_tenant_id = resolve_runtime_tenant_id(
         tenant_id,
@@ -486,27 +589,48 @@ async def _get_broadcast_target_cron_manager(
     return workspace.cron_manager, runtime_tenant_id
 
 
-def _build_existing_broadcast_result(
-    tenant_id: str,
+def _merge_existing_child_with_source(
     existing_child_job: CronJobSpec,
-    notification_timezone: str,
-) -> CronBroadcastTenantResult:
-    existing_meta = existing_child_job.meta or {}
-    return CronBroadcastTenantResult(
-        tenant_id=tenant_id,
-        success=True,
-        job_id=existing_child_job.id,
-        cron=existing_child_job.schedule.cron,
-        timezone=existing_child_job.schedule.timezone,
-        offset_minutes=int(
-            existing_meta.get(
-                "broadcast_offset_minutes",
-                0,
-            )
-            or 0,
-        ),
-        notification_timezone=notification_timezone,
-        warning=BROADCAST_ALREADY_EXISTS_WARNING,
+    source_child_job: CronJobSpec,
+) -> CronJobSpec:
+    preserved_meta = {
+        key: (existing_child_job.meta or {}).get(key)
+        for key in PRESERVED_CHILD_META_KEYS
+        if key in (existing_child_job.meta or {})
+    }
+    merged_meta = {
+        **(source_child_job.meta or {}),
+        **preserved_meta,
+    }
+
+    request_spec = source_child_job.request
+    if request_spec is not None and existing_child_job.request is not None:
+        request_spec = request_spec.model_copy(
+            update={
+                "user_id": existing_child_job.request.user_id,
+                "session_id": existing_child_job.request.session_id,
+            },
+        )
+
+    dispatch = source_child_job.dispatch.model_copy(
+        update={
+            "target": existing_child_job.dispatch.target,
+        },
+    )
+
+    return source_child_job.model_copy(
+        update={
+            "id": existing_child_job.id,
+            "enabled": existing_child_job.enabled,
+            "tenant_id": existing_child_job.tenant_id,
+            "tenant_name": existing_child_job.tenant_name,
+            "bbk_id": existing_child_job.bbk_id,
+            "source_id": existing_child_job.source_id,
+            "scope_id": existing_child_job.scope_id,
+            "request": request_spec,
+            "dispatch": dispatch,
+            "meta": merged_meta,
+        },
     )
 
 
@@ -516,6 +640,8 @@ async def _create_broadcast_child_job(
     target_cron_manager: CronManager,
     runtime_tenant_id: str | None,
     schedule: _BroadcastSchedule,
+    target_tenant_name: str | None,
+    target_bbk_id: str | None,
 ) -> CronBroadcastTenantResult:
     target_job_id = str(uuid.uuid4())
     model_slot, warning, model_slot_fallback_reason = (
@@ -524,19 +650,20 @@ async def _create_broadcast_child_job(
             context.source_job,
         )
     )
-    target_identity = context.target_identity_by_tenant.get(tenant_id, {})
     target_job = _build_broadcast_job(
         context.source_job,
         job_id=target_job_id,
         target_tenant_id=tenant_id,
+        target_tenant_name=target_tenant_name,
+        target_bbk_id=target_bbk_id,
         source_id=context.source_id,
         cron=schedule.cron,
         timezone_name=schedule.timezone,
         offset_minutes=schedule.offset_minutes,
         model_slot=model_slot,
         model_slot_fallback_reason=model_slot_fallback_reason,
-        tenant_name=target_identity.get("tenant_name"),
-        bbk_id=target_identity.get("bbk_id"),
+        tenant_name=target_tenant_name,
+        bbk_id=target_bbk_id,
     )
     await target_cron_manager.create_or_replace_job(target_job)
     saved = await target_cron_manager.get_job(target_job_id)
@@ -545,6 +672,57 @@ async def _create_broadcast_child_job(
         tenant_id=tenant_id,
         success=True,
         job_id=target_job_id,
+        cron=result_job.schedule.cron,
+        timezone=result_job.schedule.timezone,
+        offset_minutes=schedule.offset_minutes,
+        notification_timezone=context.timezone_name,
+        warning=_join_broadcast_warnings(
+            warning,
+            schedule.warning,
+        ),
+    )
+
+
+async def _refresh_existing_broadcast_child_job(
+    context: _BroadcastContext,
+    tenant_id: str,
+    target_cron_manager: CronManager,
+    runtime_tenant_id: str | None,
+    schedule: _BroadcastSchedule,
+    existing_child_job: CronJobSpec,
+) -> CronBroadcastTenantResult:
+    model_slot, warning, model_slot_fallback_reason = (
+        _resolve_broadcast_model_slot(
+            runtime_tenant_id or "default",
+            context.source_job,
+        )
+    )
+    source_child_job = _build_broadcast_job(
+        context.source_job,
+        job_id=existing_child_job.id,
+        target_tenant_id=existing_child_job.tenant_id or tenant_id,
+        target_tenant_name=existing_child_job.tenant_name,
+        target_bbk_id=existing_child_job.bbk_id,
+        source_id=existing_child_job.source_id or context.source_id,
+        cron=schedule.cron,
+        timezone_name=schedule.timezone,
+        offset_minutes=schedule.offset_minutes,
+        model_slot=model_slot,
+        model_slot_fallback_reason=model_slot_fallback_reason,
+        tenant_name=existing_child_job.tenant_name,
+        bbk_id=existing_child_job.bbk_id,
+    )
+    refreshed_job = _merge_existing_child_with_source(
+        existing_child_job,
+        source_child_job,
+    )
+    await target_cron_manager.create_or_replace_job(refreshed_job)
+    saved = await target_cron_manager.get_job(existing_child_job.id)
+    result_job = saved or refreshed_job
+    return CronBroadcastTenantResult(
+        tenant_id=tenant_id,
+        success=True,
+        job_id=result_job.id,
         cron=result_job.schedule.cron,
         timezone=result_job.schedule.timezone,
         offset_minutes=schedule.offset_minutes,
@@ -566,19 +744,39 @@ async def _broadcast_to_tenant(
         context.timezone_name,
         offset,
     )
+    target_identity = context.target_identity_by_tenant.get(tenant_id, {})
+    target_tenant_name = _optional_text(target_identity.get("tenant_name"))
+    target_bbk_id = _optional_text(target_identity.get("bbk_id"))
+    if not target_tenant_name or not target_bbk_id:
+        fallback_name, fallback_bbk_id = (
+            await _resolve_broadcast_target_identity(
+                tenant_id,
+                context.source_id,
+            )
+        )
+        target_tenant_name = target_tenant_name or fallback_name
+        target_bbk_id = target_bbk_id or fallback_bbk_id
     try:
         target_cron_manager, runtime_tenant_id = (
-            await _get_broadcast_target_cron_manager(context, tenant_id)
+            await _get_broadcast_target_cron_manager(
+                context,
+                tenant_id,
+                tenant_name=target_tenant_name,
+                bbk_id=target_bbk_id,
+            )
         )
         existing_child_job = await _find_existing_broadcast_child_job(
             target_cron_manager,
             context.source_job.id,
         )
         if existing_child_job is not None:
-            return _build_existing_broadcast_result(
+            return await _refresh_existing_broadcast_child_job(
+                context,
                 tenant_id,
+                target_cron_manager,
+                runtime_tenant_id,
+                schedule,
                 existing_child_job,
-                context.timezone_name,
             )
         return await _create_broadcast_child_job(
             context,
@@ -586,6 +784,8 @@ async def _broadcast_to_tenant(
             target_cron_manager,
             runtime_tenant_id,
             schedule,
+            target_tenant_name,
+            target_bbk_id,
         )
     except Exception as exc:  # pylint: disable=broad-except
         return CronBroadcastTenantResult(
@@ -598,6 +798,170 @@ async def _broadcast_to_tenant(
             error=repr(exc),
             warning=schedule.warning,
         )
+
+
+async def _broadcast_to_tenants(
+    context: _BroadcastContext,
+    tenant_ids: list[str],
+) -> list[CronBroadcastTenantResult]:
+    semaphore = asyncio.Semaphore(_get_cron_broadcast_concurrency())
+
+    async def _run(
+        tenant_id: str,
+        offset: int,
+    ) -> CronBroadcastTenantResult:
+        async with semaphore:
+            return await _broadcast_to_tenant(context, tenant_id, offset)
+
+    return list(
+        await asyncio.gather(
+            *[
+                _run(tenant_id, offset)
+                for tenant_id, offset in zip(tenant_ids, context.offsets)
+            ],
+        ),
+    )
+
+
+def _is_broadcast_child_of(job: CronJobSpec | None, source_job_id: str) -> bool:
+    if job is None:
+        return False
+    return (job.meta or {}).get("broadcast_source_job_id") == source_job_id
+
+
+def _build_broadcast_child_item(
+    *,
+    tenant_id: str,
+    job: CronJobSpec,
+    state: Any,
+) -> CronBroadcastChildItem:
+    state_payload = _serialize_state(state) or {}
+    meta = job.meta or {}
+    return CronBroadcastChildItem(
+        tenant_id=tenant_id,
+        tenant_name=job.tenant_name,
+        bbk_id=job.bbk_id,
+        job_id=job.id,
+        job_name=job.name,
+        enabled=job.enabled,
+        cron=job.schedule.cron,
+        timezone=job.schedule.timezone,
+        offset_minutes=int(meta.get("broadcast_offset_minutes", 0) or 0),
+        last_status=state_payload.get("last_status"),
+        last_run_at=state_payload.get("last_run_at"),
+        last_error=state_payload.get("last_error"),
+    )
+
+
+async def _get_source_job_or_404(
+    mgr: CronManager,
+    job_id: str,
+) -> CronJobSpec:
+    source_job = await mgr.get_job(job_id)
+    if not source_job:
+        raise HTTPException(status_code=404, detail="job not found")
+    return source_job
+
+
+async def _build_child_management_context(
+    request: Request,
+    source_job: CronJobSpec,
+    tenant_ids: list[str],
+) -> _BroadcastContext:
+    return _build_broadcast_context(
+        request,
+        source_job,
+        tenant_ids,
+        {},
+    )
+
+
+async def _list_broadcast_children_for_tenant(
+    context: _BroadcastContext,
+    tenant_id: str,
+) -> list[CronBroadcastChildItem]:
+    try:
+        target_cron_manager, _ = await _get_target_cron_manager(
+            context,
+            tenant_id,
+            bootstrap=False,
+        )
+        items: list[CronBroadcastChildItem] = []
+        for job in await target_cron_manager.list_jobs():
+            if _is_broadcast_child_of(job, context.source_job.id):
+                items.append(
+                    _build_broadcast_child_item(
+                        tenant_id=tenant_id,
+                        job=job,
+                        state=target_cron_manager.get_state(job.id),
+                    ),
+                )
+        return items
+    except Exception:
+        return []
+
+
+async def _list_broadcast_children_for_tenants(
+    context: _BroadcastContext,
+    tenant_ids: list[str],
+) -> list[CronBroadcastChildItem]:
+    semaphore = asyncio.Semaphore(_get_cron_broadcast_concurrency())
+
+    async def _run(tenant_id: str) -> list[CronBroadcastChildItem]:
+        async with semaphore:
+            return await _list_broadcast_children_for_tenant(
+                context,
+                tenant_id,
+            )
+
+    batches = await asyncio.gather(
+        *[_run(tenant_id) for tenant_id in tenant_ids],
+    )
+    return [item for batch in batches for item in batch]
+
+
+async def _list_source_tenant_ids(request: Request) -> list[str]:
+    return await list_logical_tenant_ids(
+        _request_source_id(request),
+        source_filter=True,
+    )
+
+
+def _failure_result(
+    item: CronBroadcastChildRef,
+    message: str,
+) -> CronBroadcastChildOperationResult:
+    return CronBroadcastChildOperationResult(
+        tenant_id=item.tenant_id,
+        job_id=item.job_id,
+        success=False,
+        status="failed",
+        message=message,
+    )
+
+
+async def _get_batch_child_job(
+    context: _BroadcastContext,
+    item: CronBroadcastChildRef,
+) -> tuple[CronManager, CronJobSpec] | CronBroadcastChildOperationResult:
+    try:
+        tenant_id = _validate_target_tenant_id(item.tenant_id)
+        job_id = str(item.job_id or "").strip()
+        if not job_id:
+            return _failure_result(item, "job_id is required")
+        target_cron_manager, _ = await _get_target_cron_manager(
+            context,
+            tenant_id,
+            bootstrap=False,
+        )
+        child_job = await target_cron_manager.get_job(job_id)
+        if child_job is None:
+            return _failure_result(item, "child job not found")
+        if not _is_broadcast_child_of(child_job, context.source_job.id):
+            return _failure_result(item, CHILD_NOT_FROM_SOURCE_MESSAGE)
+        return target_cron_manager, child_job
+    except Exception as exc:  # pylint: disable=broad-except
+        return _failure_result(item, str(exc))
 
 
 @router.get("/jobs", response_model=list[CronJobListItem])
@@ -635,6 +999,7 @@ async def list_broadcast_tenants(
         tenant_ids=await list_logical_tenant_ids(
             _request_source_id(request),
             source_filter=True,
+            include_templates=True,
         ),
     )
 
@@ -668,11 +1033,113 @@ async def broadcast_job(
         normalized_tenants,
         target_identity_by_tenant,
     )
-    results = [
-        await _broadcast_to_tenant(context, tenant_id, offset)
-        for tenant_id, offset in zip(normalized_tenants, context.offsets)
-    ]
+    results = await _broadcast_to_tenants(context, normalized_tenants)
     return CronBroadcastResponse(results=results)
+
+
+@router.get(
+    "/jobs/{job_id}/broadcast/children",
+    response_model=CronBroadcastChildrenResponse,
+)
+async def list_broadcast_children(
+    request: Request,
+    job_id: str,
+    mgr: CronManager = Depends(get_cron_manager),
+) -> CronBroadcastChildrenResponse:
+    source_job = await _get_source_job_or_404(mgr, job_id)
+    tenant_ids = await _list_source_tenant_ids(request)
+    context = await _build_child_management_context(
+        request,
+        source_job,
+        tenant_ids,
+    )
+    items = await _list_broadcast_children_for_tenants(context, tenant_ids)
+    return CronBroadcastChildrenResponse(items=items)
+
+
+@router.post(
+    "/jobs/{job_id}/broadcast/children/delete",
+    response_model=CronBroadcastChildrenBatchResponse,
+)
+async def delete_broadcast_children(
+    request: Request,
+    job_id: str,
+    body: CronBroadcastChildrenBatchRequest,
+    mgr: CronManager = Depends(get_cron_manager),
+) -> CronBroadcastChildrenBatchResponse:
+    source_job = await _get_source_job_or_404(mgr, job_id)
+    context = await _build_child_management_context(
+        request,
+        source_job,
+        [item.tenant_id for item in body.items],
+    )
+    results: list[CronBroadcastChildOperationResult] = []
+    for item in body.items:
+        resolved = await _get_batch_child_job(context, item)
+        if isinstance(resolved, CronBroadcastChildOperationResult):
+            results.append(resolved)
+            continue
+        target_cron_manager, child_job = resolved
+        deleted = await target_cron_manager.delete_job(child_job.id)
+        results.append(
+            CronBroadcastChildOperationResult(
+                tenant_id=item.tenant_id,
+                job_id=child_job.id,
+                success=bool(deleted),
+                status="deleted" if deleted else "failed",
+                message="" if deleted else "delete failed",
+            ),
+        )
+    return CronBroadcastChildrenBatchResponse(results=results)
+
+
+@router.post(
+    "/jobs/{job_id}/broadcast/children/run",
+    response_model=CronBroadcastChildrenBatchResponse,
+)
+async def run_broadcast_children(
+    request: Request,
+    job_id: str,
+    body: CronBroadcastChildrenBatchRequest,
+    mgr: CronManager = Depends(get_cron_manager),
+) -> CronBroadcastChildrenBatchResponse:
+    source_job = await _get_source_job_or_404(mgr, job_id)
+    context = await _build_child_management_context(
+        request,
+        source_job,
+        [item.tenant_id for item in body.items],
+    )
+    results: list[CronBroadcastChildOperationResult] = []
+    for item in body.items:
+        resolved = await _get_batch_child_job(context, item)
+        if isinstance(resolved, CronBroadcastChildOperationResult):
+            results.append(resolved)
+            continue
+        target_cron_manager, child_job = resolved
+        if not child_job.enabled or (child_job.meta or {}).get("pause_reason"):
+            results.append(
+                CronBroadcastChildOperationResult(
+                    tenant_id=item.tenant_id,
+                    job_id=child_job.id,
+                    success=True,
+                    status="skipped",
+                    message=CHILD_RUN_SKIPPED_PAUSED_MESSAGE,
+                ),
+            )
+            continue
+        try:
+            await target_cron_manager.run_job(child_job.id)
+            results.append(
+                CronBroadcastChildOperationResult(
+                    tenant_id=item.tenant_id,
+                    job_id=child_job.id,
+                    success=True,
+                    status="started",
+                ),
+            )
+        except Exception as exc:  # pylint: disable=broad-except
+            results.append(_failure_result(item, str(exc)))
+    return CronBroadcastChildrenBatchResponse(results=results)
 
 
 @router.get("/jobs/{job_id}", response_model=CronJobView)

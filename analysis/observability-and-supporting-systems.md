@@ -8,6 +8,7 @@
 |------|----------|------|
 | Tracing | `src/swe/tracing/config.py`, `src/swe/tracing/manager.py`, `src/swe/tracing/models.py`, `src/swe/tracing/model_wrapper.py`, `src/swe/tracing/sanitizer.py`, `src/swe/tracing/store.py` | 追踪配置、模型包装、脱敏和落盘 |
 | Hook Telemetry | `src/swe/agents/hook_runtime/runtime.py` | Hook handler 实际执行时输出 `HOOK_TELEMETRY ` 前缀的单行 JSON 日志，用于日志采集侧分析；不写入 tracing span |
+| Runtime Diagnostic | `src/swe/app/runtime_diagnostic.py`, `src/swe/app/pod_resources.py`, `src/swe/app/middleware/sse_diagnostic.py`, `src/swe/app/_app.py` | 按 Pod 输出 `RUNTIME_DIAGNOSTIC ` 结构化日志，无特权采集 SSE 并发、事件循环延迟、当前 Python 进程资源、当前容器文件句柄与 cgroup 磁盘 IO，以及 `/opt/deployments/app` 文件系统使用情况 |
 | Token Usage | `src/swe/token_usage/manager.py`, `src/swe/token_usage/model_wrapper.py` | Token 统计与包装器 |
 | App 侧心跳 | `src/swe/app/service_heartbeat.py`, `src/swe/app/crons/heartbeat.py` | 服务状态和实例心跳 |
 
@@ -30,7 +31,7 @@
 |-----------|------|
 | `src/swe/envs/store.py` | 环境变量持久化 |
 | `src/swe/tunnel/cloudflare.py`, `src/swe/tunnel/binary_manager.py` | Cloudflare 隧道支持 |
-| `src/swe/utils/fs_text.py`, `src/swe/utils/logging.py`, `src/swe/utils/system_info.py`, `src/swe/utils/telemetry.py` | 文件、日志、系统信息与遥测 |
+| `src/swe/utils/fs_text.py`, `src/swe/utils/logging.py`, `src/swe/utils/system_info.py` | 文件、日志与系统信息 |
 | `src/swe/tokenizer/` | Tokenizer 词表和配置资产 |
 
 ## 运维与发布资源

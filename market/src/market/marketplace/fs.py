@@ -605,6 +605,120 @@ def save_mcp_config(
     _atomic_write_json(path, config)
 
 
+def _normalize_mcp_client_key(name: str) -> str:
+    """将 MCP 名称归一化为安全的 client_key，与前端 buildClientKey 对齐。
+
+    市场名称唯一，因此 name 派生的 key 天然不会在市场 MCP 之间冲突。
+    """
+    import re as _re
+
+    if not name or not name.strip():
+        return "mcp"
+    # 小写 + 空格/特殊字符替换为连字符
+    normalized = _re.sub(r"[^a-z0-9_-]+", "-", name.strip().lower())
+    normalized = _re.sub(r"-+", "-", normalized).strip("-_")
+    return normalized or "mcp"
+
+
+def _load_user_agent_config(user_config_path: Path) -> dict:
+    """加载用户 agent 配置，确保 mcp.clients 结构存在。"""
+    user_config: dict = {}
+    if user_config_path.exists():
+        try:
+            user_config = json.loads(
+                user_config_path.read_text(encoding="utf-8"),
+            )
+        except (json.JSONDecodeError, OSError):
+            pass
+    if "mcp" not in user_config:
+        user_config["mcp"] = {"clients": {}}
+    if "clients" not in user_config["mcp"]:
+        user_config["mcp"]["clients"] = {}
+    return user_config
+
+
+def _remove_existing_same_name_mcp(
+    clients: dict,
+    mcp_name: str,
+    current_source: str,
+) -> str | None:
+    """移除已有的同名市场 MCP 条目，返回被保留的 created_at（如有）。"""
+    if not mcp_name:
+        return None
+    replaced_created_at: str | None = None
+    for existing_key, existing_cfg in list(clients.items()):
+        if not isinstance(existing_cfg, dict):
+            continue
+        if existing_cfg.get("name") != mcp_name:
+            continue
+        existing_source = existing_cfg.get("source", "")
+        if (
+            isinstance(existing_source, str)
+            and existing_source.startswith("marketplace:")
+            and existing_source != current_source
+        ):
+            if existing_cfg.get("created_at"):
+                replaced_created_at = existing_cfg["created_at"]
+            del clients[existing_key]
+        elif existing_source == current_source:
+            if existing_cfg.get("created_at"):
+                replaced_created_at = existing_cfg["created_at"]
+            del clients[existing_key]
+    return replaced_created_at
+
+
+def _resolve_effective_client_key(
+    clients: dict,
+    client_key: str,
+    mcp_name: str,
+) -> str:
+    """确定最终写入的 dict key，处理 client_key 碰撞。"""
+    effective_client_key = client_key
+    existing_at_key = clients.get(effective_client_key)
+    if existing_at_key and isinstance(existing_at_key, dict):
+        name_key = _normalize_mcp_client_key(mcp_name)
+        effective_client_key = name_key
+        _suffix = 1
+        _base = effective_client_key
+        while effective_client_key in clients:
+            effective_client_key = f"{_base}-{_suffix}"
+            _suffix += 1
+    return effective_client_key
+
+
+def _enrich_config_data(
+    config_data: dict,
+    *,
+    item_id: str,
+    client_key: str,
+    distributed_by: str,
+    replaced_created_at: str | None,
+    version: str,
+    creator_id: str,
+    creator_name: str,
+    mcp_name: str,
+) -> None:
+    """向 config_data 写入市场来源、版本号、创建者等元信息。"""
+    config_data["source"] = f"marketplace:{item_id}"
+    config_data["market_client_key"] = client_key
+    config_data["distributed_by"] = distributed_by
+    config_data["updated_at"] = datetime.now(timezone.utc).isoformat()
+    config_data["created_at"] = (
+        replaced_created_at
+        if replaced_created_at
+        else datetime.now(timezone.utc).isoformat()
+    )
+    if version:
+        config_data["received_version"] = version
+        config_data["version"] = version
+    if creator_id is not None:
+        config_data["creator_id"] = creator_id
+    if creator_name is not None:
+        config_data["creator_name"] = creator_name
+    if mcp_name and not config_data.get("name"):
+        config_data["name"] = mcp_name
+
+
 def copy_mcp_to_user(
     marketplace_root: Path,
     source_id: str,
@@ -613,9 +727,20 @@ def copy_mcp_to_user(
     user_id: str,
     client_key: str,
     distributed_by: str,
+    version: str = "",
     agent_id: str = DEFAULT_AGENT_ID,
-) -> None:
+    creator_id: str = "",
+    creator_name: str = "",
+    mcp_name: str = "",
+) -> str:
     """将市场 MCP 复制到用户本地配置。
+
+    写入逻辑基于 MCP 名称（市场内唯一）而非 client_key（不可靠）：
+    1) 同名替换：已有同名市场 MCP 时先移除旧条目再写入，保证不重复累积。
+    2) dict key：优先使用市场原始 client_key；若被不同名称的条目占用，
+       则用名称派生的 key，因市场 name 唯一，天然无碰撞。
+    3) 用户自建 MCP：同名由上游 _find_user_mcp_name_conflict 拦截，
+       不同名但 client_key 碰撞时用名称派生 key 保护。
 
     Args:
         marketplace_root: 市场根目录。
@@ -623,9 +748,16 @@ def copy_mcp_to_user(
         item_id: 条目 ID。
         swe_root: SWE 用户根目录。
         user_id: 用户 ID。
-        client_key: MCP 客户端标识。
+        client_key: MCP 客户端标识（市场来源，非全局唯一）。
         distributed_by: 分发者标识。
+        version: 市场条目版本号，写入 received_version。
         agent_id: Agent ID，默认为 "default"。
+        creator_id: 市场条目的创建者 ID（写入用户配置以便后续同名检测）。
+        creator_name: 市场条目的创建者名称。
+        mcp_name: 市场条目的 name，写入用户配置作为稳定标识。
+
+    Returns:
+        实际写入用户配置的 client_key。
     """
     mcp_config = load_mcp_config(marketplace_root, source_id, item_id)
     if mcp_config is None:
@@ -637,30 +769,41 @@ def copy_mcp_to_user(
     user_config_path = user_root / "workspaces" / agent_id / "agent.json"
     user_config_path.parent.mkdir(parents=True, exist_ok=True)
 
-    user_config: dict = {}
-    if user_config_path.exists():
-        try:
-            user_config = json.loads(
-                user_config_path.read_text(encoding="utf-8"),
-            )
-        except (json.JSONDecodeError, OSError):
-            pass
-
-    # 确保结构存在
-    if "mcp" not in user_config:
-        user_config["mcp"] = {"clients": {}}
-    if "clients" not in user_config["mcp"]:
-        user_config["mcp"]["clients"] = {}
+    user_config = _load_user_agent_config(user_config_path)
 
     # 合并 MCP 配置
     config_data = mcp_config.get("config", {})
     # 归一化配置数据，将 advanced.headers 等字段提升到顶层
     config_data = normalize_mcp_config_data(config_data)
-    config_data["source"] = f"marketplace:{item_id}"
-    config_data["market_client_key"] = client_key
-    config_data["distributed_by"] = distributed_by
-    config_data["updated_at"] = datetime.now(timezone.utc).isoformat()
 
-    user_config["mcp"]["clients"][client_key] = config_data
+    # ---- 基于名称的替换与 key 决策 ----
+    current_source = f"marketplace:{item_id}"
+    clients = user_config["mcp"]["clients"]
+    replaced_created_at = _remove_existing_same_name_mcp(
+        clients,
+        mcp_name,
+        current_source,
+    )
+
+    effective_client_key = _resolve_effective_client_key(
+        clients,
+        client_key,
+        mcp_name,
+    )
+
+    _enrich_config_data(
+        config_data,
+        item_id=item_id,
+        client_key=client_key,
+        distributed_by=distributed_by,
+        replaced_created_at=replaced_created_at,
+        version=version,
+        creator_id=creator_id,
+        creator_name=creator_name,
+        mcp_name=mcp_name,
+    )
+
+    clients[effective_client_key] = config_data
 
     _atomic_write_json(user_config_path, user_config)
+    return effective_client_key

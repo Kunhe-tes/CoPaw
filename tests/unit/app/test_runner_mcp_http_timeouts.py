@@ -96,21 +96,24 @@ async def test_http_mcp_connect_uses_merged_headers(
         _FakeSession,
     )
 
-    client = await runner_module._create_mcp_client_with_headers(
-        MCPClientConfig(
-            name="demo",
-            transport=transport,
-            url=f"https://mcp.example.test/{transport}",
-            headers={"X-Static": "static"},
-        ),
-        passthrough_headers={"Authorization": "Bearer test-token"},
-    )
+    with tenant_context(tenant_id="tenant-a", source_id="source-a"):
+        client = await runner_module._create_mcp_client_with_headers(
+            MCPClientConfig(
+                name="demo",
+                transport=transport,
+                url=f"https://mcp.example.test/{transport}",
+                headers={"X-Static": "static"},
+            ),
+            passthrough_headers={"Authorization": "Bearer test-token"},
+        )
 
     await client.connect()
     try:
         expected_headers = {
             "X-Static": "static",
             "Authorization": "Bearer test-token",
+            "x-swe-tenant-id": "tenant-a",
+            "x-swe-source-id": "source-a",
         }
         if transport == "streamable_http":
             assert captured["http_client_kwargs"]["headers"] == (
@@ -143,15 +146,17 @@ async def test_create_streamable_http_mcp_client_uses_explicit_httpx_timeouts(
         _FakeHttpStatefulClient,
     )
 
-    await runner_module._create_mcp_client_with_headers(
-        MCPClientConfig(
-            name="demo",
-            transport="streamable_http",
-            url="https://mcp.example.test/stream",
-            headers={"X-Static": "static"},
-        ),
-        passthrough_headers={"Authorization": "Bearer test-token"},
-    )
+    with tenant_context(tenant_id="tenant-a", source_id="source-a"):
+        client = await runner_module._create_mcp_client_with_headers(
+            MCPClientConfig(
+                name="demo",
+                transport="streamable_http",
+                url="https://mcp.example.test/stream",
+                headers={"X-Static": "static"},
+            ),
+            passthrough_headers={"Authorization": "Bearer test-token"},
+            session_id="session-1",
+        )
 
     assert captured["stateful_client_kwargs"] == {
         "name": "demo",
@@ -160,9 +165,70 @@ async def test_create_streamable_http_mcp_client_uses_explicit_httpx_timeouts(
         "headers": {
             "X-Static": "static",
             "Authorization": "Bearer test-token",
+            "x-swe-tenant-id": "tenant-a",
+            "x-swe-source-id": "source-a",
+            "x-swe-session-id": "session-1",
         },
         "timeout": runner_module._MCP_HTTP_TIMEOUT_SECONDS,
         "sse_read_timeout": runner_module._MCP_HTTP_SSE_READ_TIMEOUT_SECONDS,
+    }
+    assert getattr(client, "_swe_rebuild_info")["headers"] == {
+        "X-Static": "static",
+    }
+    assert getattr(client, "_swe_rebuild_info")["passthrough_headers"] == {
+        "Authorization": "Bearer test-token",
+    }
+    assert getattr(client, "_swe_rebuild_info")["session_id"] == "session-1"
+    assert (
+        getattr(client, "_swe_rebuild_info")["timeout"]
+        == runner_module._MCP_HTTP_TIMEOUT_SECONDS
+    )
+    assert (
+        getattr(client, "_swe_rebuild_info")["sse_read_timeout"]
+        == runner_module._MCP_HTTP_SSE_READ_TIMEOUT_SECONDS
+    )
+
+
+@pytest.mark.asyncio
+async def test_create_streamable_http_mcp_client_injects_trace_id_header(
+    monkeypatch,
+) -> None:
+    from swe.app.runner import runner as runner_module
+
+    captured: dict[str, Any] = {}
+
+    class _FakeHttpStatefulClient:
+        def __init__(self, **kwargs):
+            captured["stateful_client_kwargs"] = kwargs
+
+    monkeypatch.setattr(
+        runner_module,
+        "HttpStatefulClient",
+        _FakeHttpStatefulClient,
+    )
+
+    with tenant_context(tenant_id="tenant-a", source_id="source-a"):
+        await runner_module._create_mcp_client_with_headers(
+            MCPClientConfig(
+                name="demo",
+                transport="streamable_http",
+                url="https://mcp.example.test/stream",
+                headers={
+                    "X-Swe-Trace-Id": "config-trace",
+                    "X-Static": "static",
+                },
+            ),
+            passthrough_headers={"x-swe-trace-id": "passthrough-trace"},
+            session_id="session-1",
+            trace_id="trace-1",
+        )
+
+    assert captured["stateful_client_kwargs"]["headers"] == {
+        "X-Static": "static",
+        "x-swe-tenant-id": "tenant-a",
+        "x-swe-source-id": "source-a",
+        "x-swe-session-id": "session-1",
+        "x-swe-trace-id": "trace-1",
     }
 
 
@@ -250,6 +316,8 @@ async def test_http_mcp_headers_resolve_explicit_tenant_env_references(
     assert captured["stateful_client_kwargs"]["headers"] == {
         "Authorization": "Bearer tenant-secret",
         "X-Literal": "${MCP_TOKEN}",
+        "x-swe-tenant-id": "tenant-a",
+        "x-swe-source-id": "source-a",
     }
     assert "MCP_TOKEN" not in os.environ
 
@@ -298,4 +366,6 @@ async def test_http_mcp_env_reference_resolution_is_source_scoped(
 
     assert captured["stateful_client_kwargs"]["headers"] == {
         "Authorization": "Bearer source-b",
+        "x-swe-tenant-id": "tenant-a",
+        "x-swe-source-id": "source-b",
     }

@@ -1000,6 +1000,7 @@ async def list_logical_tenant_ids(
     source_id: str | None = None,
     *,
     source_filter: bool = False,
+    include_templates: bool = False,
 ) -> list[str]:
     """Return tenant IDs, optionally filtered by source_id.
 
@@ -1009,6 +1010,8 @@ async def list_logical_tenant_ids(
             - Database unavailable: return empty list
             - source_id empty: return empty list
             - Otherwise: return tenants from swe_tenant_init_source table
+        include_templates: Whether template tenants should be included when
+            querying source-filtered tenant lists.
 
     Returns:
         List of tenant IDs.
@@ -1021,7 +1024,10 @@ async def list_logical_tenant_ids(
         store = get_tenant_init_source_store()
         if store is None or not source_id:
             return []
-        rows = await store.get_by_source(source_id)
+        rows = await store.get_by_source(
+            source_id,
+            include_templates=include_templates,
+        )
         return sorted(
             tid
             for tid in {row["tenant_id"] for row in rows}
