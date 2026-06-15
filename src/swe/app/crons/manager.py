@@ -44,14 +44,11 @@ from .monitor_sync_client import get_monitor_sync_client, MonitorSyncClient
 
 HEARTBEAT_JOB_ID = "_heartbeat"
 DREAM_JOB_ID = "_dream"
-TASK_SESSION_CLEANUP_JOB_ID = "_cron_task_session_cleanup"
 TASK_SESSION_CLEANUP_TASK_TYPE = "cleanup"
 AUTO_PAUSE_REASON = "auto_unread_threshold"
 MANUAL_PAUSE_REASON = "manual"
 TASK_MESSAGES_STATE_KEY = "task_messages"
 _SYSTEM_JOB_IDS_FILE = "system_jobs.json"
-_SOURCE_SYSTEM_JOB_IDS_DIR = ".system_jobs"
-_SOURCE_SYSTEM_JOB_IDS_SOURCE_DIR = "sources"
 MAX_NOTIFICATION_DELAY_MINUTES = 7 * 24 * 60
 
 # 心跳 every 字段解析正则（如 "30m"、"6h"）
@@ -2673,37 +2670,6 @@ class CronManager:  # pylint: disable=too-many-public-methods
         return self._repo._path.parent / _SYSTEM_JOB_IDS_FILE
 
     @staticmethod
-    def _encode_source_system_job_key(source_id: str) -> str:
-        encoded = base64.urlsafe_b64encode(source_id.encode("utf-8")).decode(
-            "ascii",
-        )
-        return encoded.rstrip("=")
-
-    def _system_job_ids_root(self) -> Path:
-        repo_dir = self._repo._path.parent
-        if not self._tenant_id:
-            return repo_dir
-
-        runtime_dir_names = {self._tenant_id}
-        try:
-            runtime_dir_names.add(canonicalize_scope_id(self._tenant_id))
-        except ValueError:
-            pass
-        if repo_dir.name in runtime_dir_names:
-            return repo_dir.parent
-        return repo_dir
-
-    def _source_system_job_ids_path(self, source_id: str) -> Path:
-        source_key = self._encode_source_system_job_key(source_id)
-        return (
-            self._system_job_ids_root()
-            / _SOURCE_SYSTEM_JOB_IDS_DIR
-            / _SOURCE_SYSTEM_JOB_IDS_SOURCE_DIR
-            / source_key
-            / _SYSTEM_JOB_IDS_FILE
-        )
-
-    @staticmethod
     def _read_system_job_ids_file(path: Path) -> dict[str, str]:
         try:
             if not path.exists():
@@ -2745,46 +2711,6 @@ class CronManager:  # pylint: disable=too-many-public-methods
             self._write_system_job_ids_file(path, self._system_job_ids)
         except Exception:
             logger.warning("Failed to save system_job_ids", exc_info=True)
-
-    def _get_task_session_cleanup_external_id(self, source_id: str) -> str:
-        job_id = TASK_SESSION_CLEANUP_JOB_ID
-        if not source_id:
-            return self._system_job_ids.get(job_id, "")
-
-        path = self._source_system_job_ids_path(source_id)
-        source_job_ids = self._read_system_job_ids_file(path)
-        ext_id = source_job_ids.get(job_id, "")
-        if ext_id:
-            return ext_id
-
-        legacy_ext_id = self._system_job_ids.get(job_id, "")
-        if legacy_ext_id:
-            source_job_ids[job_id] = legacy_ext_id
-            try:
-                self._write_system_job_ids_file(path, source_job_ids)
-            except Exception:
-                logger.warning(
-                    "Failed to migrate cleanup system job id to source scope",
-                    exc_info=True,
-                )
-            return legacy_ext_id
-        return ""
-
-    def _save_task_session_cleanup_external_id(
-        self,
-        source_id: str,
-        ext_id: str,
-    ) -> None:
-        job_id = TASK_SESSION_CLEANUP_JOB_ID
-        if not source_id:
-            self._system_job_ids[job_id] = ext_id
-            self._save_system_job_ids()
-            return
-
-        path = self._source_system_job_ids_path(source_id)
-        source_job_ids = self._read_system_job_ids_file(path)
-        source_job_ids[job_id] = ext_id
-        self._write_system_job_ids_file(path, source_job_ids)
 
     async def _restore_external_job_ids(self) -> None:
         """恢复 external_job_id，缺失的补注册到外部调度平台。"""
@@ -2956,10 +2882,9 @@ class CronManager:  # pylint: disable=too-many-public-methods
         return "0/30 * * * *"
 
     async def _register_system_jobs(self) -> None:
-        """注册 heartbeat 和 dream 到外部调度平台。"""
+        """注册 tenant 级 heartbeat 和 dream 到外部调度平台。"""
         await self.register_heartbeat()
         await self.register_dream()
-        await self.register_task_session_cleanup()
 
     async def register_heartbeat(self) -> None:
         """将心跳任务注册到外部调度平台（或禁用时取消注册）。"""
@@ -3078,66 +3003,6 @@ class CronManager:  # pylint: disable=too-many-public-methods
         except Exception:
             logger.warning(
                 "Failed to register dream to external scheduler",
-                exc_info=True,
-            )
-
-    async def register_task_session_cleanup(self) -> None:
-        """将任务会话清理注册为外部调度平台的系统任务。"""
-        if isinstance(self._scheduler_adapter, NoopSchedulerAdapter):
-            return
-
-        config = await self._resolve_task_session_cleanup_config()
-        job_id = TASK_SESSION_CLEANUP_JOB_ID
-        tenant_id, source_id = self._get_external_scheduler_business_identity()
-        ext_id = self._get_task_session_cleanup_external_id(source_id)
-
-        if not config.enabled:
-            if ext_id:
-                try:
-                    await self._scheduler_adapter.pause_job(ext_id)
-                except Exception:
-                    logger.warning(
-                        "Failed to pause task session cleanup on external scheduler",
-                        exc_info=True,
-                    )
-            return
-
-        callback_url = self._build_callback_url(
-            TASK_SESSION_CLEANUP_TASK_TYPE,
-        )
-        try:
-            if ext_id:
-                await self._scheduler_adapter.update_job(
-                    external_id=ext_id,
-                    tenant_id=tenant_id,
-                    source_id=source_id,
-                    agent_id=self._agent_id or "",
-                    task_type=TASK_SESSION_CLEANUP_TASK_TYPE,
-                    job_id=job_id,
-                    job_name=TASK_SESSION_CLEANUP_TASK_TYPE,
-                    cron=config.cron,
-                    callback_url=callback_url,
-                )
-                await self._scheduler_adapter.resume_job(ext_id)
-            else:
-                ext_id = await self._scheduler_adapter.register_job(
-                    tenant_id=tenant_id,
-                    source_id=source_id,
-                    agent_id=self._agent_id or "",
-                    task_type=TASK_SESSION_CLEANUP_TASK_TYPE,
-                    job_id=job_id,
-                    job_name=TASK_SESSION_CLEANUP_TASK_TYPE,
-                    cron=config.cron,
-                    callback_url=callback_url,
-                )
-                if ext_id:
-                    self._save_task_session_cleanup_external_id(
-                        source_id,
-                        ext_id,
-                    )
-        except Exception:
-            logger.warning(
-                "Failed to register task session cleanup to external scheduler",
                 exc_info=True,
             )
 

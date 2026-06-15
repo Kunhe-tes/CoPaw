@@ -216,39 +216,10 @@ async def test_scheduler_payload_keeps_full_normalized_cron() -> None:
 
 
 @pytest.mark.asyncio
-async def test_cleanup_system_job_does_not_register_by_default(
+async def test_cron_manager_system_jobs_do_not_register_cleanup(
     tmp_path,
 ) -> None:
-    """默认未开启清理配置时，不应向外部调度平台创建系统任务。"""
-    adapter = CapturingSchedulerAdapter()
-
-    class FakeRepo:
-        _path = tmp_path / "jobs.json"
-
-        async def list_jobs(self):
-            return []
-
-    manager = CronManager(
-        repo=FakeRepo(),
-        runner=SimpleNamespace(workspace_dir=None, _workspace=None),
-        channel_manager=object(),
-        agent_id="default",
-        tenant_id=encode_scope_id("tenant-a", "source-a"),
-        scheduler_adapter=adapter,
-        source_system_config_service=_StaticSourceSystemConfigService({}),
-    )
-
-    await manager.register_task_session_cleanup()
-
-    assert adapter.requests == []
-    assert await manager.list_jobs() == []
-
-
-@pytest.mark.asyncio
-async def test_cleanup_system_job_registers_with_source_configured_daily_cron(
-    tmp_path,
-) -> None:
-    """任务会话清理应作为系统任务注册到外部调度平台。"""
+    """tenant CronManager 初始化系统任务时不再注册 source 级清理任务。"""
     adapter = CapturingSchedulerAdapter()
 
     class FakeRepo:
@@ -268,138 +239,17 @@ async def test_cleanup_system_job_registers_with_source_configured_daily_cron(
             {
                 "cron_task_session_cleanup": {
                     "enabled": True,
-                    "retention_days": 45,
+                    "retention_days": 30,
                     "cron": "30 2 * * *",
                 },
             },
         ),
     )
 
-    await manager.register_task_session_cleanup()
+    await manager._register_system_jobs()
 
-    add_path, add_payload = adapter.requests[0]
-    assert add_path == "/job-admin/v2/add-job"
-    assert add_payload["jobCron"] == "0 30 2 * * ?"
-    assert "cleanup" in add_payload["jobDesc"]
-    job_param = _decode_job_param(add_payload["jobParam"])
-    assert job_param["tenant_id"] == "tenant-a"
-    assert job_param["source_id"] == "source-a"
-    assert job_param["task_type"] == "cleanup"
-    assert job_param["job_id"] == "_cron_task_session_cleanup"
-    assert await manager.list_jobs() == []
-
-
-@pytest.mark.asyncio
-async def test_cleanup_system_job_reuses_source_external_binding_across_users(
-    tmp_path,
-) -> None:
-    """同一 source 换用户刷新配置时只能更新同一个外部清理任务。"""
-    adapter = CapturingSchedulerAdapter()
-    cleanup_config = _StaticSourceSystemConfigService(
-        {
-            "cron_task_session_cleanup": {
-                "enabled": True,
-                "retention_days": 45,
-                "cron": "30 2 * * *",
-            },
-        },
-    )
-
-    class FakeRepo:
-        def __init__(self, scope_id: str) -> None:
-            self._path = tmp_path / scope_id / "jobs.json"
-            self._path.parent.mkdir(parents=True, exist_ok=True)
-
-        async def list_jobs(self):
-            return []
-
-    first_manager = CronManager(
-        repo=FakeRepo(encode_scope_id("tenant-a", "source-a")),
-        runner=SimpleNamespace(workspace_dir=None, _workspace=None),
-        channel_manager=object(),
-        agent_id="default",
-        tenant_id=encode_scope_id("tenant-a", "source-a"),
-        scheduler_adapter=adapter,
-        source_system_config_service=cleanup_config,
-    )
-    second_manager = CronManager(
-        repo=FakeRepo(encode_scope_id("tenant-b", "source-a")),
-        runner=SimpleNamespace(workspace_dir=None, _workspace=None),
-        channel_manager=object(),
-        agent_id="default",
-        tenant_id=encode_scope_id("tenant-b", "source-a"),
-        scheduler_adapter=adapter,
-        source_system_config_service=cleanup_config,
-    )
-
-    await first_manager.register_task_session_cleanup()
-    await second_manager.register_task_session_cleanup()
-
-    request_paths = [path for path, _ in adapter.requests]
-    assert request_paths.count("/job-admin/v2/add-job") == 1
-    assert request_paths.count("/job-admin/v2/update-job") == 1
-    update_payload = next(
-        payload
-        for path, payload in adapter.requests
-        if path == "/job-admin/v2/update-job"
-    )
-    assert update_payload["id"] == 1001
-    job_param = _decode_job_param(update_payload["jobParam"])
-    assert job_param["source_id"] == "source-a"
-    assert job_param["task_type"] == "cleanup"
-    source_job_ids_path = first_manager._source_system_job_ids_path("source-a")
-    assert json.loads(
-        source_job_ids_path.read_text(encoding="utf-8"),
-    ) == {"_cron_task_session_cleanup": "1001"}
-
-
-@pytest.mark.asyncio
-async def test_cleanup_system_job_pauses_when_source_config_disabled(
-    tmp_path,
-) -> None:
-    """关闭清理配置时只暂停系统任务，不写入业务任务。"""
-    adapter = CapturingSchedulerAdapter()
-
-    class FakeRepo:
-        _path = tmp_path / "jobs.json"
-
-        async def list_jobs(self):
-            return []
-
-    manager = CronManager(
-        repo=FakeRepo(),
-        runner=SimpleNamespace(workspace_dir=None, _workspace=None),
-        channel_manager=object(),
-        agent_id="default",
-        tenant_id=encode_scope_id("tenant-a", "source-a"),
-        scheduler_adapter=adapter,
-        source_system_config_service=_StaticSourceSystemConfigService(
-            {
-                "cron_task_session_cleanup": {
-                    "enabled": False,
-                    "retention_days": 30,
-                    "cron": "0 1 * * *",
-                },
-            },
-        ),
-    )
-    manager._system_job_ids["_cron_task_session_cleanup"] = "1001"
-
-    await manager.register_task_session_cleanup()
-
-    assert adapter.requests == [
-        (
-            "/job-admin/v2/update-job-run-states",
-            {
-                "id": 1001,
-                "runFlag": 0,
-                "clientNo": "client",
-                "clientKey": "key",
-                "clientRemark": "remark",
-            },
-        ),
-    ]
-    assert await manager.list_jobs() == []
+    paths = [path for path, _ in adapter.requests]
+    assert "/job-admin/v2/add-job" not in paths
 
 
 @pytest.mark.asyncio
