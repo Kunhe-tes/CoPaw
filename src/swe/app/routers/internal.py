@@ -14,6 +14,7 @@ from fastapi import APIRouter, Body, File, Header, HTTPException, Request
 from fastapi import UploadFile
 from pydantic import BaseModel, Field
 
+from ..identity_resolver import resolve_user_identity
 from ...config.context import (
     is_valid_identity_value,
     resolve_runtime_tenant_id,
@@ -26,6 +27,7 @@ from ...config.scope_conversion import (
 )
 from ...config.utils import list_all_tenant_ids
 from ...constant import WORKING_DIR
+from ..workspace.tenant_initializer import TenantInitializer
 
 router = APIRouter(prefix="/internal", tags=["internal"])
 public_router = APIRouter(prefix="/assets", tags=["assets"])
@@ -205,6 +207,39 @@ class InternalScopeDecodeResponse(BaseModel):
     items: Optional[list[InternalScopeDecodeItem]] = None
 
 
+class InternalBatchInitializeTenantsRequest(BaseModel):
+    """批量初始化租户请求。"""
+
+    tenant_ids: str = Field(..., description="逗号分隔的租户 ID 字符串")
+    source_id: str = Field(..., min_length=1, description="来源标识")
+    fail_fast: bool = Field(
+        default=False,
+        description="单个租户失败时是否立即终止后续处理",
+    )
+
+
+class InternalBatchInitializeTenantResult(BaseModel):
+    """单个租户初始化结果。"""
+
+    tenant_id: str
+    tenant_name: Optional[str] = None
+    bbk_id: Optional[str] = None
+    status: str
+    message: str
+
+
+class InternalBatchInitializeTenantsResponse(BaseModel):
+    """批量初始化租户响应。"""
+
+    success: bool
+    total: int
+    success_count: int
+    fail_count: int
+    results: list[InternalBatchInitializeTenantResult] = Field(
+        default_factory=list,
+    )
+
+
 def _verify_internal_token(token: Optional[str]) -> None:
     """验证内部服务 Token（如果配置了的话）."""
     if _INTERNAL_TOKEN:
@@ -214,6 +249,46 @@ def _verify_internal_token(token: Optional[str]) -> None:
 
 def _http_400(detail: str) -> HTTPException:
     return HTTPException(status_code=400, detail=detail)
+
+
+def _parse_batch_tenant_ids(raw_tenant_ids: str) -> list[str]:
+    """解析批量租户字符串并去重。"""
+    tenant_ids: list[str] = []
+    seen: set[str] = set()
+    for raw_tenant_id in raw_tenant_ids.split(","):
+        tenant_id = raw_tenant_id.strip()
+        if not tenant_id:
+            continue
+        if not is_valid_identity_value(tenant_id):
+            raise _http_400(f"Invalid tenant_id: {tenant_id}")
+        if tenant_id in seen:
+            continue
+        seen.add(tenant_id)
+        tenant_ids.append(tenant_id)
+    if not tenant_ids:
+        raise _http_400("tenant_ids must not be empty")
+    return tenant_ids
+
+
+async def _is_tenant_already_bootstrapped(
+    pool: Any,
+    tenant_id: str,
+    source_id: str,
+) -> bool:
+    """判断租户目录是否已经完成 bootstrap。"""
+    base_working_dir = getattr(pool, "_base_working_dir", None)
+    if base_working_dir is None:
+        return False
+
+    try:
+        initializer = TenantInitializer(
+            base_working_dir,
+            tenant_id,
+            source_id=source_id,
+        )
+        return initializer.has_seeded_bootstrap()
+    except Exception:
+        return False
 
 
 def _require_internal_token(
@@ -592,6 +667,128 @@ async def internal_scope_decode(
     if is_single:
         return InternalScopeDecodeResponse(item=response_items[0])
     return InternalScopeDecodeResponse(items=response_items)
+
+
+@router.post(
+    "/tenants/batch-initialize",
+    response_model=InternalBatchInitializeTenantsResponse,
+    responses={
+        400: {"model": InternalErrorResponse},
+        503: {"model": InternalErrorResponse},
+    },
+)
+async def internal_batch_initialize_tenants(
+    payload: InternalBatchInitializeTenantsRequest,
+    request: Request,
+) -> InternalBatchInitializeTenantsResponse:
+    """公开批量补齐身份并初始化租户，不校验内部服务 Token。"""
+
+    if not is_valid_identity_value(payload.source_id):
+        raise _http_400("Invalid source_id")
+
+    tenant_ids = _parse_batch_tenant_ids(payload.tenant_ids)
+
+    pool = getattr(request.app.state, "tenant_workspace_pool", None)
+    if pool is None:
+        raise HTTPException(
+            status_code=503,
+            detail="Tenant pool not available",
+        )
+
+    auth_header = request.headers.get("Authorization")
+    headers = {
+        key: value
+        for key, value in {
+            "Content-Type": "application/json",
+            "Authorization": auth_header,
+        }.items()
+        if value
+    }
+    results: list[InternalBatchInitializeTenantResult] = []
+    success_count = 0
+    fail_count = 0
+
+    for tenant_id in tenant_ids:
+        resolved_identity = await resolve_user_identity(
+            tenant_id=tenant_id,
+            source_id=payload.source_id,
+            user_name=None,
+            bbk_id=None,
+            headers=headers,
+            allow_remote_lookup=True,
+        )
+        if not resolved_identity.user_name or not resolved_identity.bbk_id:
+            fail_count += 1
+            results.append(
+                InternalBatchInitializeTenantResult(
+                    tenant_id=tenant_id,
+                    tenant_name=resolved_identity.user_name,
+                    bbk_id=resolved_identity.bbk_id,
+                    status="failed",
+                    message="user identity not resolved",
+                ),
+            )
+            if payload.fail_fast:
+                break
+            continue
+
+        if await _is_tenant_already_bootstrapped(
+            pool,
+            tenant_id,
+            payload.source_id,
+        ):
+            success_count += 1
+            results.append(
+                InternalBatchInitializeTenantResult(
+                    tenant_id=tenant_id,
+                    tenant_name=resolved_identity.user_name,
+                    bbk_id=resolved_identity.bbk_id,
+                    status="success",
+                    message="skipped",
+                ),
+            )
+            continue
+
+        try:
+            await pool.ensure_bootstrap(
+                tenant_id,
+                source_id=payload.source_id,
+                tenant_name=resolved_identity.user_name,
+                bbk_id=resolved_identity.bbk_id,
+            )
+        except Exception as exc:
+            fail_count += 1
+            results.append(
+                InternalBatchInitializeTenantResult(
+                    tenant_id=tenant_id,
+                    tenant_name=resolved_identity.user_name,
+                    bbk_id=resolved_identity.bbk_id,
+                    status="failed",
+                    message=str(exc),
+                ),
+            )
+            if payload.fail_fast:
+                break
+            continue
+
+        success_count += 1
+        results.append(
+            InternalBatchInitializeTenantResult(
+                tenant_id=tenant_id,
+                tenant_name=resolved_identity.user_name,
+                bbk_id=resolved_identity.bbk_id,
+                status="success",
+                message="initialized",
+            ),
+        )
+
+    return InternalBatchInitializeTenantsResponse(
+        success=fail_count == 0 and success_count == len(tenant_ids),
+        total=len(tenant_ids),
+        success_count=success_count,
+        fail_count=fail_count,
+        results=results,
+    )
 
 
 @public_router.post(

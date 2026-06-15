@@ -40,7 +40,7 @@ from ..utils.my_logging import setup_logger, SuppressPathAccessLogFilter
 @click.option(
     "--hide-access-paths",
     multiple=True,
-    default=("/console/push-messages",),
+    default=("/console/push-messages", "/api/health/health"),
     show_default=True,
     help="Path substrings to hide from uvicorn access log (repeatable).",
 )

@@ -10,7 +10,7 @@ import uuid
 from contextvars import ContextVar
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Literal, Optional
 
 from .config import TracingConfig
 from ..database import DatabaseConnection
@@ -289,11 +289,12 @@ class TraceManager:
         if not self.enabled:
             return trace_id or str(uuid.uuid4())
 
+        requested_trace_id = trace_id
         trace_id = trace_id or str(uuid.uuid4())
 
         # 如果是 attach_existing 模式，检查 trace 是否已存在
         if attach_existing:
-            attached = await self._handle_attach_existing(
+            attach_result = await self._handle_attach_existing(
                 trace_id,
                 user_id,
                 session_id,
@@ -303,8 +304,10 @@ class TraceManager:
                 bbk_id,
                 session_name,
             )
-            if attached:
+            if attach_result == "attached":
                 return trace_id
+            if attach_result == "identity_mismatch" and requested_trace_id:
+                trace_id = str(uuid.uuid4())
 
         # Sanitize inputs
         user_message, model_output = self._sanitize_inputs(
@@ -353,6 +356,23 @@ class TraceManager:
 
         return trace_id
 
+    @staticmethod
+    def _can_attach_to_trace(
+        existing_trace: Trace,
+        *,
+        user_id: str,
+        session_id: str,
+        channel: str,
+        source_id: str,
+    ) -> bool:
+        """判断请求身份是否允许复用已有 trace。"""
+        return (
+            (existing_trace.user_id or "") == user_id
+            and (existing_trace.session_id or "") == session_id
+            and (existing_trace.channel or "") == channel
+            and (existing_trace.source_id or "") == source_id
+        )
+
     async def _handle_attach_existing(
         self,
         trace_id: str,
@@ -363,7 +383,7 @@ class TraceManager:
         user_name: Optional[str],
         bbk_id: Optional[str],
         session_name: Optional[str],
-    ) -> bool:
+    ) -> Literal["attached", "not_found", "identity_mismatch"]:
         """处理 attach_existing 模式，检查并复用已存在的 trace。
 
         Args:
@@ -377,13 +397,39 @@ class TraceManager:
             session_name: Session name
 
         Returns:
-            True 如果成功 attach，False 如果不存在需要创建新 trace
+            attached: 成功 attach 到已有 trace
+            not_found: 未找到已有 trace，应沿用传入 trace_id 创建
+            identity_mismatch: 找到了 trace，但身份不匹配，必须改用新 trace_id
         """
         existing_trace = self._active_traces.get(
             trace_id,
         ) or await self.store.get_trace(trace_id)
         if not existing_trace:
-            return False
+            return "not_found"
+
+        if not self._can_attach_to_trace(
+            existing_trace,
+            user_id=user_id,
+            session_id=session_id,
+            channel=channel,
+            source_id=source_id,
+        ):
+            logger.warning(
+                "Reject attach_existing for trace_id=%s due to identity "
+                "mismatch: incoming(user_id=%s, session_id=%s, channel=%s, "
+                "source_id=%s) existing(user_id=%s, session_id=%s, "
+                "channel=%s, source_id=%s)",
+                trace_id,
+                user_id,
+                session_id,
+                channel,
+                source_id,
+                existing_trace.user_id or "",
+                existing_trace.session_id or "",
+                existing_trace.channel or "",
+                existing_trace.source_id or "",
+            )
+            return "identity_mismatch"
 
         # 仅设置 context，不创建数据库记录
         ctx = TraceContext(
@@ -399,7 +445,7 @@ class TraceManager:
         )
         ctx.trace = existing_trace
         set_current_trace(ctx)
-        return True
+        return "attached"
 
     def _sanitize_inputs(
         self,

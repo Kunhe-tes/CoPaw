@@ -16,6 +16,7 @@ from .registry import (
 )
 from .runtime import (
     ImmediateTruncationConfig,
+    get_system_prompt_injections,
     resolve_file_read_truncation_config,
     resolve_tool_result_compact_config,
 )
@@ -32,6 +33,7 @@ __all__ = [
     "SourceSystemConfigStore",
     "SourceSystemConfigUpsert",
     "ImmediateTruncationConfig",
+    "get_system_prompt_injections",
     "is_chat_task_progress_enabled",
     "is_database_access_guard_enabled",
     "resolve_file_read_truncation_config",

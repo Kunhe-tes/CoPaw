@@ -12,6 +12,7 @@ from ...config.utils import (
     get_tenant_storage_config_path,
     load_config,
 )
+from ..identity_resolver import resolve_user_identity
 from ..runner.api import (
     TASK_RUNS_STATE_KEY,
     _annotate_approval_action_statuses,
@@ -63,11 +64,27 @@ async def _get_target_workspace(
 
     pool = getattr(request.app.state, "tenant_workspace_pool", None)
     if pool is not None:
+        # 该入口也可能触发租户首次初始化，先补齐身份字段再写映射表。
+        resolved_identity = await resolve_user_identity(
+            tenant_id=target_user_id,
+            source_id=source_id,
+            user_name=None,
+            bbk_id=request.headers.get("X-Bbk-Id"),
+            headers={
+                key: value
+                for key, value in {
+                    "Content-Type": "application/json",
+                    "Authorization": request.headers.get("Authorization"),
+                }.items()
+                if value
+            },
+            allow_remote_lookup=True,
+        )
         await pool.ensure_bootstrap(
             target_user_id,
             source_id=source_id,
-            tenant_name=None,
-            bbk_id=request.headers.get("X-Bbk-Id"),
+            tenant_name=resolved_identity.user_name,
+            bbk_id=resolved_identity.bbk_id,
         )
 
     manager = getattr(request.app.state, "multi_agent_manager", None)

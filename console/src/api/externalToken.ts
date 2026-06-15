@@ -26,7 +26,6 @@ interface WindowEnv {
   SYSTEM_CODE?: string;
   SYSTEM_SECRET?: string;
   responseFeedbackUserWhitelist?: string[];
-  enableOriginYTaskTabs?: boolean | string | number;
 }
 
 function getTokenConfig(): TokenConfig {

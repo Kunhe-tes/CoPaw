@@ -23,8 +23,8 @@ from agentscope.tool import Toolkit
 from anyio import ClosedResourceError
 from pydantic import BaseModel
 
+from ..app.mcp.http_headers import build_mcp_http_headers
 from ..app.mcp.stdio_launcher import build_tenant_aware_stdio_launch_config
-from ..app.mcp.http_headers import resolve_mcp_http_headers
 from .command_handler import CommandHandler
 from ..app.mcp import HttpStatefulClient, StdIOStatefulClient
 from .hooks import BootstrapHook, MemoryCompactionHook
@@ -851,15 +851,45 @@ class SWEAgent(ToolGuardMixin, ReActAgent):
                 )
                 return rebuilt_client
 
-            raw_headers = rebuild_info.get("headers") or {}
-            headers = resolve_mcp_http_headers(raw_headers)
+            headers = build_mcp_http_headers(
+                rebuild_info.get("headers"),
+                passthrough_headers=rebuild_info.get(
+                    "passthrough_headers",
+                ),
+                session_id=rebuild_info.get("session_id"),
+            )
+            timeout = rebuild_info.get(
+                "timeout",
+                getattr(client, "timeout", None),
+            )
+            sse_read_timeout = rebuild_info.get(
+                "sse_read_timeout",
+                getattr(client, "sse_read_timeout", None),
+            )
+            http_client_kwargs = {
+                "timeout": timeout,
+                "sse_read_timeout": sse_read_timeout,
+            }
             rebuilt_client = HttpStatefulClient(
                 name=name,
                 transport=transport,
                 url=rebuild_info.get("url"),
                 headers=headers,
+                **{
+                    key: value
+                    for key, value in http_client_kwargs.items()
+                    if value is not None
+                },
             )
-            setattr(rebuilt_client, "_swe_rebuild_info", rebuild_info)
+            setattr(
+                rebuilt_client,
+                "_swe_rebuild_info",
+                {
+                    **rebuild_info,
+                    "timeout": timeout,
+                    "sse_read_timeout": sse_read_timeout,
+                },
+            )
             return rebuilt_client
         except Exception:  # pylint: disable=broad-except
             return None
