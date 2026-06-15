@@ -6,6 +6,7 @@ import {
   UserStats,
   SessionStats,
   SessionListItem,
+  SessionResourceFilter,
 } from "../../../../../api/modules/tracing";
 import type { ChatSpec } from "../../../../../api/types";
 import { UserDetailModalProps } from "../../types";
@@ -43,6 +44,8 @@ export default function UserDetailModal({
   const [sessionsLoading, setSessionsLoading] = useState(false);
   const [sessionsCollapsed, setSessionsCollapsed] = useState(false);
   const [hasErrorFilter, setHasErrorFilter] = useState(false);
+  const [resourceFilter, setResourceFilter] =
+    useState<SessionResourceFilter | null>(null);
   const [hasAutoSelectedSession, setHasAutoSelectedSession] = useState(false);
   const [chatSpecs, setChatSpecs] = useState<ChatSpec[]>([]);
 
@@ -83,7 +86,15 @@ export default function UserDetailModal({
       const data = await tracingApi.getSessions(page, pageSize, {
         user_id: userId,
         bbk_ids: bbkIds,
+        start_date: startDate,
+        end_date: endDate,
         has_error: hasErrorFilter ? true : undefined,
+        resource_type: resourceFilter?.type,
+        resource_name: resourceFilter?.name,
+        mcp_server:
+          resourceFilter?.type === "mcp_tool"
+            ? resourceFilter.mcp_server
+            : undefined,
       });
       setSessions(data.items || []);
       setSessionsTotal(data.total || 0);
@@ -93,7 +104,14 @@ export default function UserDetailModal({
     } finally {
       setSessionsLoading(false);
     }
-  }, [userId, bbkIds, hasErrorFilter]);
+  }, [
+    userId,
+    bbkIds,
+    startDate,
+    endDate,
+    hasErrorFilter,
+    resourceFilter,
+  ]);
 
   // 获取聊天映射
   const fetchUserChats = useCallback(async () => {
@@ -127,11 +145,11 @@ export default function UserDetailModal({
   useEffect(() => {
     if (open && userId) {
       fetchUserStats();
-      fetchSessions(1, DEFAULT_SESSIONS_PAGE_SIZE);
       fetchUserChats();
       setSessionsPage(1);
       setHasAutoSelectedSession(false);
       setSelectedSessionId(null);
+      setSessionStats(null);
     }
   }, [
     open,
@@ -140,15 +158,16 @@ export default function UserDetailModal({
     fetchUserChats,
   ]);
 
-  // 筛选状态变化时重新加载会话列表
+  // 打开弹窗或筛选条件变化时重新加载会话列表
   useEffect(() => {
     if (open && userId) {
       fetchSessions(1, DEFAULT_SESSIONS_PAGE_SIZE);
       setSessionsPage(1);
       setHasAutoSelectedSession(false);
       setSelectedSessionId(null);
+      setSessionStats(null);
     }
-  }, [hasErrorFilter]);
+  }, [open, userId, fetchSessions]);
 
   // 首次打开详情弹窗时自动选中第一条会话，便于直接查看聊天内容
   useEffect(() => {
@@ -187,6 +206,7 @@ export default function UserDetailModal({
     setHasAutoSelectedSession(false);
     setSelectedSessionId(null);
     setHasErrorFilter(false);
+    setResourceFilter(null);
     onClose();
   };
 
@@ -215,8 +235,26 @@ export default function UserDetailModal({
     setHasErrorFilter((prev) => !prev);
   }, []);
 
+  const handleResourceFilterChange = useCallback(
+    (nextFilter: SessionResourceFilter) => {
+      setResourceFilter((currentFilter) => {
+        const isSameFilter =
+          currentFilter?.type === nextFilter.type &&
+          currentFilter.name === nextFilter.name &&
+          (currentFilter.type !== "mcp_tool" ||
+            nextFilter.type !== "mcp_tool" ||
+            currentFilter.mcp_server === nextFilter.mcp_server);
+        return isSameFilter ? null : nextFilter;
+      });
+    },
+    [],
+  );
+
   // 判断当前显示的是用户级还是会话级统计
-  const showSessionStats = selectedSessionId !== null && sessionStats !== null;
+  const showSessionStats =
+    resourceFilter === null &&
+    selectedSessionId !== null &&
+    sessionStats !== null;
 
   return (
     <Modal
@@ -252,6 +290,8 @@ export default function UserDetailModal({
               userStats={userStats}
               sessionStats={showSessionStats ? sessionStats : null}
               collapsed={statsCollapsed}
+              activeResourceFilter={resourceFilter}
+              onResourceFilterChange={handleResourceFilterChange}
               onToggleCollapsed={() => setStatsCollapsed((value) => !value)}
             />
           </div>

@@ -7,7 +7,7 @@
 
 import logging
 from datetime import datetime, timedelta
-from typing import List, Optional
+from typing import List, Literal, Optional
 
 import httpx
 from fastapi import APIRouter, Query, HTTPException, Request, Body
@@ -89,6 +89,44 @@ def _parse_date(
             status_code=400,
             detail=f"Invalid {field_name} format",
         ) from exc
+
+
+def _validate_session_resource_filter(
+    resource_type: Optional[Literal["model", "skill", "mcp_tool"]],
+    resource_name: Optional[str],
+    mcp_server: Optional[str],
+) -> tuple[Optional[str], Optional[str], Optional[str]]:
+    """Validate and normalize optional session resource filtering."""
+    normalized_name = resource_name.strip() if resource_name else None
+    normalized_server = mcp_server.strip() if mcp_server else None
+
+    if resource_type is None:
+        if normalized_name or normalized_server:
+            raise HTTPException(
+                status_code=400,
+                detail="resource_type is required when resource filter fields are provided",
+            )
+        return None, None, None
+
+    if not normalized_name:
+        raise HTTPException(
+            status_code=400,
+            detail="resource_name is required",
+        )
+
+    if resource_type == "mcp_tool":
+        if not normalized_server:
+            raise HTTPException(
+                status_code=400,
+                detail="mcp_server is required for mcp_tool filters",
+            )
+    elif normalized_server:
+        raise HTTPException(
+            status_code=400,
+            detail="mcp_server is only valid for mcp_tool filters",
+        )
+
+    return resource_type, normalized_name, normalized_server
 
 
 router = APIRouter(prefix="/monitor/tracing", tags=["tracing"])
@@ -415,6 +453,18 @@ async def get_sessions(
     end_date: Optional[str] = Query(None, description="结束日期 (YYYY-MM-DD)"),
     bbk_ids: Optional[str] = Query(None, description="按分行号筛选"),
     has_error: Optional[bool] = Query(None, description="是否筛选报错会话"),
+    resource_type: Optional[Literal["model", "skill", "mcp_tool"]] = Query(
+        None,
+        description="资源筛选类型",
+    ),
+    resource_name: Optional[str] = Query(
+        None,
+        description="模型名、技能名或 MCP 工具名",
+    ),
+    mcp_server: Optional[str] = Query(
+        None,
+        description="MCP 服务名，仅 mcp_tool 类型使用",
+    ),
 ) -> dict:
     """获取会话列表及其统计信息.
 
@@ -426,6 +476,9 @@ async def get_sessions(
         start_date: 开始日期筛选
         end_date: 结束日期筛选
         has_error: 是否筛选报错会话（True=只返回报错会话，None=返回全部）
+        resource_type: 资源筛选类型
+        resource_name: 资源名称
+        mcp_server: MCP 服务名
 
     Returns:
         分页的会话列表及统计信息
@@ -435,6 +488,13 @@ async def get_sessions(
 
     start = _parse_date(start_date, "start_date")
     end = _parse_date(end_date, "end_date", add_day=True)
+    resource_type, resource_name, mcp_server = (
+        _validate_session_resource_filter(
+            resource_type,
+            resource_name,
+            mcp_server,
+        )
+    )
 
     sessions, total = await service.get_sessions(
         source_id=actual_source_id,
@@ -446,6 +506,9 @@ async def get_sessions(
         end_date=end,
         bbk_ids=bbk_ids,
         has_error=has_error,
+        resource_type=resource_type,
+        resource_name=resource_name,
+        mcp_server=mcp_server,
     )
     return {
         "items": [s.model_dump() for s in sessions],
