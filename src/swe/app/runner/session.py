@@ -16,7 +16,7 @@ import threading
 import tempfile
 
 from contextlib import asynccontextmanager
-from typing import Any, AsyncIterator, Callable, Protocol, Sequence, Union
+from typing import Any, AsyncIterator, Callable, Sequence, Union
 
 import aiofiles
 from agentscope.session import SessionBase
@@ -166,6 +166,39 @@ class SafeJSONSession(SessionBase):
             )
         return True, states
 
+    async def _read_existing_state_for_save(
+        self,
+        session_save_path: str,
+    ) -> dict[str, Any]:
+        """保存前读取已有状态，旧文件异常时沿用覆盖写入策略。"""
+        if not os.path.exists(session_save_path):
+            return {}
+
+        async with aiofiles.open(
+            session_save_path,
+            "r",
+            encoding="utf-8",
+            errors="surrogatepass",
+        ) as file:
+            content = await file.read()
+
+        if not content.strip():
+            return {}
+
+        try:
+            loaded_state = json.loads(content)
+        except json.JSONDecodeError:
+            logger.warning(
+                "Failed to parse existing session state at %s; "
+                "overwriting with current state.",
+                session_save_path,
+            )
+            return {}
+
+        if isinstance(loaded_state, dict):
+            return loaded_state
+        return {}
+
     async def save_session_state(
         self,
         session_id: str,
@@ -175,28 +208,9 @@ class SafeJSONSession(SessionBase):
         """Save state modules to a JSON file using async I/O."""
         session_save_path = self._get_save_path(session_id, user_id=user_id)
         async with _get_session_write_lock(session_save_path):
-            existing_state = {}
-            if os.path.exists(session_save_path):
-                async with aiofiles.open(
-                    session_save_path,
-                    "r",
-                    encoding="utf-8",
-                    errors="surrogatepass",
-                ) as f:
-                    content = await f.read()
-                    if content.strip():
-                        try:
-                            loaded_state = json.loads(content)
-                        except json.JSONDecodeError:
-                            logger.warning(
-                                "Failed to parse existing session state at %s; "
-                                "overwriting with current state.",
-                                session_save_path,
-                            )
-                        else:
-                            if isinstance(loaded_state, dict):
-                                existing_state = loaded_state
-
+            existing_state = await self._read_existing_state_for_save(
+                session_save_path,
+            )
             state_dicts = {
                 name: state_module.state_dict()
                 for name, state_module in state_modules_mapping.items()
@@ -443,60 +457,3 @@ class SafeJSONSession(SessionBase):
             session_save_path,
         )
         return updated_state
-
-
-class RunnerSessionProtocol(Protocol):
-    def _get_save_path(self, session_id: str, user_id: str) -> str:
-        pass
-
-    async def load_session_state(
-        self,
-        session_id: str,
-        user_id: str = "",
-        allow_not_exist: bool = True,
-        **state_modules_mapping,
-    ) -> None:
-        pass
-
-    async def save_session_state(
-        self,
-        session_id: str,
-        user_id: str = "",
-        **state_modules_mapping,
-    ) -> None:
-        pass
-
-    async def update_session_state(
-        self,
-        session_id: str,
-        key: Union[str, Sequence[str]],
-        value,
-        user_id: str = "",
-        create_if_not_exist: bool = True,
-    ) -> None:
-        pass
-
-    async def get_session_state_dict(
-        self,
-        session_id: str,
-        user_id: str = "",
-        allow_not_exist: bool = True,
-    ) -> dict:
-        pass
-
-    async def save_merged_state(
-        self,
-        session_id: str,
-        user_id: str = "",
-        state: dict | None = None,
-    ) -> None:
-        pass
-
-    async def mutate_session_state(
-        self,
-        session_id: str,
-        mutator: Callable[[dict[str, Any]], dict[str, Any] | None],
-        user_id: str = "",
-        create_if_not_exist: bool = True,
-    ) -> dict[str, Any]:
-        pass
