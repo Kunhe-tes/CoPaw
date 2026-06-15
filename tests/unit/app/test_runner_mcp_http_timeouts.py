@@ -229,6 +229,7 @@ async def test_create_streamable_http_mcp_client_injects_trace_id_header(
         "x-swe-source-id": "source-a",
         "x-swe-session-id": "session-1",
         "x-swe-trace-id": "trace-1",
+        "traceid": "trace-1",
     }
 
 
