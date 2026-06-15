@@ -245,6 +245,7 @@ class ProviderManager:
     ) -> str:
         """解析 provider 存储使用的 storage 租户标识。"""
         from ..config.context import (
+            canonicalize_scope_id,
             get_current_scope_id,
             get_current_source_id,
             get_current_tenant_id,
@@ -252,6 +253,19 @@ class ProviderManager:
         )
 
         requested_tenant_id = tenant_id or get_current_tenant_id() or "default"
+        if tenant_id is not None:
+            try:
+                return canonicalize_scope_id(requested_tenant_id)
+            except ValueError:
+                # 显式传入的是逻辑 tenant/default 模板名时，仍需结合当前
+                # source 做 storage 解析；但不能继续套用当前请求 scope，
+                # 否则会把目标租户错误重定向回源租户目录。
+                resolved_tenant_id = resolve_storage_tenant_id(
+                    requested_tenant_id,
+                    get_current_source_id(),
+                )
+                return resolved_tenant_id or requested_tenant_id
+
         resolved_tenant_id = resolve_storage_tenant_id(
             requested_tenant_id,
             get_current_source_id(),

@@ -253,11 +253,6 @@ class ServiceHeartbeatManager:
             response = await self._client.post(cfg.url, json=payload)
 
             if 200 <= response.status_code < 300:
-                logger.info(
-                    "心跳发送成功: enabled=%s, status=%d",
-                    enabled,
-                    response.status_code,
-                )
                 return True
             logger.warning(
                 "心跳发送失败: status=%d, body=%s",

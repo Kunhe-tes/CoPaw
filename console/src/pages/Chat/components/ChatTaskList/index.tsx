@@ -1,7 +1,6 @@
 import React, { useState, useCallback, useEffect, useId } from "react";
 import type { CronJobSpecOutput } from "@/api/types";
 import Style from "./style";
-import { DESIGN_TOKENS } from "@/config/designTokens";
 import { TasksIconSmall } from "../ChatSidebar/CollapsedToolbar/icons";
 import {
   getTaskNextRunText,
@@ -27,7 +26,7 @@ function ToggleIcon({ collapsed }: { collapsed: boolean }) {
     >
       <path
         d="M1 1L5 5L9 1"
-        stroke={DESIGN_TOKENS.colorTextMuted}
+        stroke="currentColor"
         strokeWidth="1.5"
         strokeLinecap="round"
         strokeLinejoin="round"
@@ -190,18 +189,26 @@ export default function ChatTaskList(props: ChatTaskListProps) {
               <div className="chat-task-list-empty">暂无任务</div>
             ) : (
               <>
-                {runnableTasks.map(renderTask)}
                 {pausedTasks.length > 0 && (
                   <div className="chat-task-list-paused-group">
                     <button
                       type="button"
                       className="chat-task-list-paused-toggle"
+                      aria-label={`已暂停任务 ${pausedTasks.length}`}
                       aria-expanded={!pausedCollapsed}
                       aria-controls={pausedRegionId}
                       onClick={() => setPausedCollapsed((prev) => !prev)}
                     >
                       <ToggleIcon collapsed={pausedCollapsed} />
-                      <span>已暂停任务 {pausedTasks.length}</span>
+                      <span className="chat-task-list-paused-label">
+                        已暂停任务
+                      </span>
+                      <span
+                        className="chat-task-list-paused-count"
+                        aria-hidden="true"
+                      >
+                        {pausedTasks.length}
+                      </span>
                     </button>
                     <div
                       id={pausedRegionId}
@@ -212,6 +219,7 @@ export default function ChatTaskList(props: ChatTaskListProps) {
                     </div>
                   </div>
                 )}
+                {runnableTasks.map(renderTask)}
               </>
             )}
           </div>

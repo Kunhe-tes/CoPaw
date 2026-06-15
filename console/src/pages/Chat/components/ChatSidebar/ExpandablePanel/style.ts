@@ -117,36 +117,57 @@ export default createGlobalStyle`
 }
 
 .expandable-panel-paused-group {
-  margin-top: 10px;
-  padding-top: 8px;
-  border-top: 1px solid rgba(17, 20, 45, 0.06);
+  margin: 0 0 6px;
 }
 
 .expandable-panel-paused-toggle {
   width: 100%;
-  height: 36px;
-  padding: 0 10px;
+  min-height: 30px;
+  padding: 0 4px;
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: 6px;
   border: 0;
-  border-radius: 6px;
+  border-radius: 4px;
   background: transparent;
-  color: ${DESIGN_TOKENS.colorTextSecondary};
-  font-size: 13px;
-  line-height: 20px;
+  color: ${DESIGN_TOKENS.colorTextMuted};
+  font-size: 12px;
+  line-height: 18px;
   text-align: left;
   cursor: pointer;
-  transition: background-color 0.15s ease;
+  transition: color 0.15s ease;
+
+  &::after {
+    content: "";
+    height: 1px;
+    flex: 1 1 auto;
+    margin-left: 4px;
+    background: rgba(17, 20, 45, 0.06);
+  }
 
   &:hover {
-    background: rgba(55, 105, 252, 0.04);
+    color: ${DESIGN_TOKENS.colorTextSecondary};
   }
 
   &:focus-visible {
     outline: 2px solid rgba(55, 105, 252, 0.32);
     outline-offset: 1px;
   }
+}
+
+.expandable-panel-paused-label {
+  min-width: 0;
+  color: inherit;
+  font-weight: 400;
+}
+
+.expandable-panel-paused-count {
+  flex: 0 0 auto;
+  color: inherit;
+  font-size: 12px;
+  font-weight: 400;
+  line-height: 18px;
+  font-variant-numeric: tabular-nums;
 }
 
 .expandable-panel-paused-chevron {
@@ -306,12 +327,16 @@ export default createGlobalStyle`
   color: ${DESIGN_TOKENS.colorTextMuted};
 }
 
-.dark-mode .expandable-panel-paused-group {
-  border-top-color: rgba(255, 255, 255, 0.08);
+.dark-mode .expandable-panel-paused-toggle {
+  color: rgba(255, 255, 255, 0.46);
 }
 
 .dark-mode .expandable-panel-paused-toggle:hover {
-  background: rgba(255, 255, 255, 0.06);
+  color: rgba(255, 255, 255, 0.70);
+}
+
+.dark-mode .expandable-panel-paused-toggle::after {
+  background: rgba(255, 255, 255, 0.08);
 }
 
 @media (prefers-reduced-motion: reduce) {

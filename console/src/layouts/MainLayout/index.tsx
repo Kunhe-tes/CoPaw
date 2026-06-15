@@ -27,6 +27,7 @@ import GreetingPage from "../../pages/Control/Greeting";
 import HeartbeatPage from "../../pages/Control/Heartbeat";
 import AgentConfigPage from "../../pages/Agent/Config";
 import SystemConfigPage from "../../pages/SystemConfigPage";
+import SystemCheckPage from "../../pages/SystemCheck";
 import SkillsPage from "../../pages/Agent/Skills";
 import SkillPoolPage from "../../pages/Agent/SkillPool";
 import ToolsPage from "../../pages/Agent/Tools";
@@ -70,6 +71,7 @@ const pathToKey: Record<string, string> = {
   "/environments": "environments",
   "/agent-config": "agent-config",
   "/system-config-page": "system-config-page",
+  "/system-check": "system-check",
   "/security": "security",
   "/token-usage": "token-usage",
   "/voice-transcription": "voice-transcription",
@@ -78,6 +80,7 @@ const pathToKey: Record<string, string> = {
   "/analytics/messages": "analytics-messages",
   "/analytics/traces": "analytics-traces",
   "/analytics/business-overview": "analytics-business-overview",
+  "/analytics/claw-data-overview": "analytics-claw-data-overview",
   "/analytics/cron-job-overview": "analytics-cron-job-overview",
   "/instance/overview": "instance-overview",
   "/instance/instances": "instance-instances",
@@ -150,6 +153,7 @@ export default function MainLayout() {
               <Route path="/environments" element={<EnvironmentsPage />} />
               <Route path="/agent-config" element={<AgentConfigPage />} />
               <Route path="/system-config-page" element={<SystemConfigPage />} />
+              <Route path="/system-check" element={<SystemCheckPage />} />
               <Route path="/security" element={<SecurityPage />} />
               <Route path="/token-usage" element={<TokenUsagePage />} />
               <Route

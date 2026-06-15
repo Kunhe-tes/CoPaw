@@ -25,6 +25,7 @@ interface SkillDetailDrawerProps {
   onClose: () => void;
   isManager?: boolean;
   onDistribute?: () => void;
+  onLookupOwners?: () => void;
   onRecall?: () => void;
   onUnpublish?: () => void;
   onDelete?: () => void;
@@ -209,6 +210,7 @@ export function SkillDetailDrawer(
     skill,
     isManager,
     onDistribute,
+    onLookupOwners,
     onRecall,
     onUnpublish,
     onDelete,
@@ -514,7 +516,7 @@ export function SkillDetailDrawer(
               </Tag>
             </div>
 
-            {isManager && (onDistribute || onRecall || onUnpublish || onDelete) && (
+            {isManager && (onDistribute || onLookupOwners || onRecall || onUnpublish || onDelete) && (
               <div style={{ marginTop: 10, display: "flex", gap: 8, flexWrap: "wrap" }}>
                 <Button
                   onClick={() => setVersionHistoryOpen(true)}
@@ -536,6 +538,20 @@ export function SkillDetailDrawer(
                   >
                     <Send size={12} />
                     分发
+                  </Button>
+                )}
+                {onLookupOwners && (
+                  <Button
+                    onClick={onLookupOwners}
+                    style={{
+                      ...FOOTER_BUTTON_STYLE,
+                      color: "#5e5d59",
+                      border: "1px solid #d9d9d9",
+                      backgroundColor: "#fff",
+                    }}
+                  >
+                    <UserOutlined style={{ fontSize: 12 }} />
+                    查看拥有用户
                   </Button>
                 )}
                 {onRecall && (

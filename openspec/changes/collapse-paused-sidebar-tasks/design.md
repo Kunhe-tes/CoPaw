@@ -9,6 +9,7 @@ The Console uses React, Ant Design, `antd-style`, existing design tokens, and lo
 ## Goals / Non-Goals
 
 **Goals:**
+
 - Make active and running tasks the primary, immediately visible task list.
 - Put all manually and automatically paused tasks in a collapsed secondary group by default.
 - Preserve task order within both groups and preserve all existing task metadata and actions.
@@ -16,6 +17,7 @@ The Console uses React, Ant Design, `antd-style`, existing design tokens, and lo
 - Keep the visual treatment consistent with the existing neutral blue/gray Console design.
 
 **Non-Goals:**
+
 - Changing cronjob APIs or the definition of paused states.
 - Automatically resuming, deleting, or otherwise mutating paused tasks.
 - Persisting disclosure state across reloads or between the two sidebar modes.
@@ -40,28 +42,28 @@ The Console uses React, Ant Design, `antd-style`, existing design tokens, and lo
 
 **Alternative considered:** Change the header count to runnable tasks only. Rejected because it makes collapsed paused tasks appear to have disappeared.
 
-### 3. Use a bottom disclosure row, collapsed by default
+### 3. Use a quiet top disclosure heading, collapsed by default
 
-**Decision:** Render the paused disclosure after runnable cards only when at least one paused task exists. Each task surface owns local disclosure state initialized as collapsed, except when the currently selected task is paused; in that case the group initializes or transitions to expanded so the selected task remains visible.
+**Decision:** Render the paused disclosure immediately below the task-section header and before runnable cards when at least one paused task exists. Each task surface owns local disclosure state initialized as collapsed, except when the currently selected task is paused; in that case the group initializes or transitions to expanded so the selected task remains visible. After automatic expansion, users may manually collapse the group again.
 
 Collapsed state:
 
 ```text
 我的任务(4)                         v
+  >  已暂停任务  2  ───────────────
+
   早报
   下次运行：06-12 09:00
 
   ark
   下次运行：06-13 09:00
-
-  >  已暂停任务 2
 ```
 
 Expanded state:
 
 ```text
-  v  已暂停任务 2
-     仅在需要时查看或恢复
+我的任务(4)                         v
+  v  已暂停任务  2  ───────────────
   ┌ 每日业绩简报                  ... ┐
   │ 已自动暂停 · 连续 3 次未读        │
   │ 06-06 09:01  已完成               │
@@ -69,21 +71,26 @@ Expanded state:
   ┌ ark                           ... ┐
   │ 已手动暂停                        │
   └───────────────────────────────────┘
+
+  早报
+  下次运行：06-12 09:00
 ```
 
-**Rationale:** A bottom group follows the user's scan path: actionable tasks first, archived-like state second. Default collapse reduces clutter without removing access.
+**Rationale:** Placing the compact paused-task entry directly below the section header makes the hidden task state discoverable without interrupting the scan of runnable cards. Default collapse and low-emphasis heading treatment keep runnable work visually dominant while giving the secondary group a predictable location.
 
 **Alternative considered:** Add a top-level "只看运行中" filter. Rejected because a filter requires more state, makes paused tasks less discoverable, and is heavier than the requested disclosure behavior.
 
-### 4. Neutral group styling with restrained paused styling
+### 4. Low-emphasis SaaS disclosure styling
 
-**Decision:** The collapsed disclosure is a 36px neutral row with muted text, a paused-task count, and a chevron. It deliberately does not display an unread badge, unread dot, or aggregate unread text. Hover uses the existing subtle blue surface; focus uses the existing visible blue focus ring. Expanded paused cards retain their individual unread badges and status text with a very light warm tint, but the group wrapper has no large orange panel or border.
+**Decision:** The collapsed disclosure is a compact 28-30px secondary section heading with a leading chevron, muted label, plain count, and a low-contrast trailing divider. It has no pause-action icon, filled surface, border, count pill, or shadow, so it reads as expandable navigation rather than a task action. It deliberately does not display an unread badge, unread dot, or aggregate unread text. Hover changes text contrast only; focus uses the existing visible blue focus ring. Expanded paused cards retain their individual unread badges and status text with a very light warm tint.
 
 Suggested visual tokens:
-- Disclosure text: existing secondary text token; count uses muted text.
-- Disclosure content: "已暂停任务 M" only; unread information remains on individual task cards after expansion.
-- Disclosure hover: `rgba(55, 105, 252, 0.04)`.
-- Paused group separator: optional 1px neutral border with 8px top margin.
+
+- Disclosure label: existing muted text token at regular weight; count is plain text rather than a badge or pill.
+- Disclosure content: leading chevron, "已暂停任务", paused count, and a subtle trailing divider; unread information remains on individual task cards after expansion.
+- Disclosure surface: transparent, without border or shadow.
+- Disclosure hover: text contrast increases slightly without adding a filled button surface or layout movement.
+- Paused group spacing: a small bottom gap before runnable tasks.
 - Auto-paused status: existing `#A15C07`; manual pause: muted text token.
 - Chevron transition: 160-200ms ease; disabled under `prefers-reduced-motion: reduce`.
 
@@ -109,9 +116,9 @@ Suggested visual tokens:
 
 ### 7. Handle live task state changes predictably
 
-**Decision:** Recompute groups on every task update. If the last paused task resumes, remove the disclosure row. If an unselected task becomes paused while the group is collapsed, place it into the hidden group and update the count without auto-expanding. If `selectedTaskId` identifies a paused task, automatically expand the paused group and keep it expanded while that task remains selected. This rule applies to both `ChatTaskList` and the collapsed-sidebar `ExpandablePanel`, which must receive the selected task ID from `ChatSidebar`.
+**Decision:** Recompute groups on every task update and render the paused disclosure immediately below the task-section header, before runnable task cards. If the last paused task resumes, remove the disclosure row. If an unselected task becomes paused while the group is collapsed, place it into the hidden group and update the count without auto-expanding. If `selectedTaskId` newly identifies a paused task, automatically expand the paused group; users may manually collapse it afterward. This rule applies to both `ChatTaskList` and the collapsed-sidebar `ExpandablePanel`, which must receive the selected task ID from `ChatSidebar`.
 
-**Rationale:** Ordinary polling updates should not create layout jumps, but hiding the task currently being viewed removes essential location feedback. Selection-triggered expansion is therefore the only automatic expansion case.
+**Rationale:** Ordinary polling updates should not create layout jumps. Selection-triggered expansion reveals the task when it becomes current, while a later manual collapse remains under user control and is not overridden by unchanged polling data.
 
 **Alternative considered:** Auto-expand whenever any task enters paused state. Rejected because background updates could repeatedly disrupt the list; automatic expansion is limited to the selected paused task.
 

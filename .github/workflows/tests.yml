@@ -6,6 +6,8 @@ on:
     paths:
       - 'src/**'
       - 'tests/**'
+      - 'scripts/run_critical_path_tests.py'
+      - 'docs/superpowers/specs/**'
       - 'pyproject.toml'
       - 'setup.py'
       - '.github/workflows/tests.yml'
@@ -14,6 +16,8 @@ on:
     paths:
       - 'src/**'
       - 'tests/**'
+      - 'scripts/run_critical_path_tests.py'
+      - 'docs/superpowers/specs/**'
       - 'pyproject.toml'
       - 'setup.py'
       - '.github/workflows/tests.yml'
@@ -28,12 +32,40 @@ jobs:
       - name: Approval granted
         run: echo "Approved by maintainer"
 
-  unit-tests:
-    name: Unit Tests - py${{ matrix.python-version }} - ${{ matrix.os }}
+  critical-path-tests:
+    name: Critical Path Tests - py3.12 - ubuntu-latest
     needs: approval-gate
     if: |
       always() &&
       needs.approval-gate.result == 'success'
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: 'pip'
+
+      - name: Install dependencies
+        shell: bash
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev,full]"
+
+      - name: Run critical runtime path tests
+        shell: bash
+        run: |
+          python scripts/run_critical_path_tests.py
+
+  unit-tests:
+    name: Unit Tests - py${{ matrix.python-version }} - ${{ matrix.os }}
+    needs: critical-path-tests
+    if: |
+      always() &&
+      needs.critical-path-tests.result == 'success'
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -94,10 +126,10 @@ jobs:
 
   integrated-tests:
     name: Integrated Tests - py${{ matrix.python-version }} - ${{ matrix.os }}
-    needs: approval-gate
+    needs: critical-path-tests
     if: |
       always() &&
-      needs.approval-gate.result == 'success'
+      needs.critical-path-tests.result == 'success'
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -169,10 +201,10 @@ jobs:
 
   coverage-report:
     name: Coverage Report
-    needs: approval-gate
+    needs: critical-path-tests
     if: |
       always() &&
-      needs.approval-gate.result == 'success'
+      needs.critical-path-tests.result == 'success'
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -233,7 +265,7 @@ jobs:
 
   test-summary:
     name: Test Summary
-    needs: [approval-gate, unit-tests, integrated-tests, coverage-report]
+    needs: [approval-gate, critical-path-tests, unit-tests, integrated-tests, coverage-report]
     if: always()
     runs-on: ubuntu-latest
     steps:
@@ -241,11 +273,17 @@ jobs:
         shell: bash
         run: |
           echo "Approval gate: ${{ needs.approval-gate.result }}"
+          echo "Critical path tests: ${{ needs.critical-path-tests.result }}"
           echo "Unit tests: ${{ needs.unit-tests.result }}"
           echo "Integrated tests: ${{ needs.integrated-tests.result }}"
 
           if [ "${{ needs.approval-gate.result }}" != "success" ]; then
             echo "❌ Approval not granted"
+            exit 1
+          fi
+
+          if [ "${{ needs.critical-path-tests.result }}" = "failure" ]; then
+            echo "❌ Critical path tests failed"
             exit 1
           fi
 

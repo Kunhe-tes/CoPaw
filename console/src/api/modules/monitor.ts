@@ -58,6 +58,7 @@ export interface ExecutionItem {
   job_name: string;
   tenant_id: string;
   tenant_name: string;
+  bbk_id?: string;
   scheduled_time: string | null;
   actual_time: string;
   end_time: string | null;
@@ -139,6 +140,121 @@ export interface CronOverviewResponse {
   branch_read: CronOverviewBranchReadItem[];
 }
 
+export interface CronJobOverviewSummaryMetric {
+  key: string;
+  value: string;
+  footerValue?: string;
+}
+
+export interface CronJobOverviewBranchBehaviorRow {
+  rank: number | "...";
+  branchName: string;
+  readTasks: string;
+  readRate: string;
+  directTasks: string;
+  directClickRate: string;
+  browseTasks: string;
+  browseClickRate: string;
+  phoneTasks: string;
+  phoneClickRate: string;
+}
+
+export interface CronJobOverviewFailureReason {
+  name: string;
+  count: number;
+  percent: number;
+  color: string;
+}
+
+export interface CronJobOverviewAnomalySummary {
+  affectedBranches: string;
+  affectedBranchesUnit: string;
+  affectedManagers: string;
+  affectedManagersUnit: string;
+}
+
+export interface CronJobOverviewAnomalyRankRow {
+  rank: number;
+  branchName: string;
+  alertExecutions: string;
+  alertRate: string;
+  affectedManagers: string;
+  latestAlertTime: string;
+}
+
+export interface CronJobOverviewPageData {
+  summaryMetrics: CronJobOverviewSummaryMetric[];
+  branchBehaviorRows: CronJobOverviewBranchBehaviorRow[];
+  failureReasons: CronJobOverviewFailureReason[];
+  anomalySummary: CronJobOverviewAnomalySummary;
+  anomalyRankRows: CronJobOverviewAnomalyRankRow[];
+}
+
+export interface CronJobOverviewDateFilters {
+  start_date?: string;
+  end_date?: string;
+  bbk_ids?: string;
+}
+
+export interface CronOverviewStatsResponse {
+  start_date: string;
+  end_date: string;
+  total_tasks: number;
+  total_executions: number;
+  branch_count: number;
+  tenant_count: number;
+  success_rate: number;
+  success_count: number;
+  read_tasks: number;
+  read_rate: number;
+  error_count: number;
+  error_rate: number;
+}
+
+export interface CronBranchBehaviorItem {
+  bbk_id: string;
+  bbk_name: string;
+  total_tasks: number;
+  read_tasks: number;
+  read_rate: number;
+  plan_click_tasks: number;
+  plan_click_rate: number;
+  insight_click_tasks: number;
+  insight_click_rate: number;
+  phone_click_tasks: number;
+  phone_click_rate: number;
+}
+
+export interface CronBranchBehaviorResponse {
+  start_date: string;
+  end_date: string;
+  items: CronBranchBehaviorItem[];
+}
+
+export interface CronErrorReasonItem {
+  reason: string;
+  count: number;
+  percent: number;
+}
+
+export interface CronBranchErrorRankItem {
+  bbk_id: string;
+  bbk_name: string;
+  total_executions: number;
+  error_count: number;
+  error_rate: number;
+  affected_managers: number;
+}
+
+export interface CronBranchErrorResponse {
+  start_date: string;
+  end_date: string;
+  affected_branch_count: number;
+  affected_manager_count: number;
+  error_reasons: CronErrorReasonItem[];
+  branch_error_rank: CronBranchErrorRankItem[];
+}
+
 export interface SubscriptionOverviewItem {
   subscription_key: string;
   task_name: string;
@@ -160,6 +276,106 @@ export interface SubscriptionDetailItem {
   enabled: boolean;
   execution_status: string;
   execution_time: string | null;
+}
+
+const CRON_FAILURE_REASON_COLORS = ["#1d6ff2", "#38a8f5", "#7a8cf0", "#ff821c", "#67cdb9"];
+
+function appendDefinedParams(
+  params: URLSearchParams,
+  filters?: object,
+) {
+  if (!filters) {
+    return;
+  }
+  Object.entries(filters).forEach(([key, value]) => {
+    if (typeof value === "string" && value !== "") {
+      params.append(key, value);
+    }
+  });
+}
+
+function buildQuery(filters?: object) {
+  const params = new URLSearchParams();
+  appendDefinedParams(params, filters);
+  const query = params.toString();
+  return query ? `?${query}` : "";
+}
+
+function formatInteger(value: number | null | undefined) {
+  return Math.round(Number(value || 0)).toLocaleString("en-US");
+}
+
+function formatPercentValue(value: number | null | undefined) {
+  return Number(value || 0).toFixed(2);
+}
+
+function formatPercentText(value: number | null | undefined) {
+  return `${formatPercentValue(value)}%`;
+}
+
+function mapCronJobOverviewPageData(
+  stats: CronOverviewStatsResponse,
+  behavior: CronBranchBehaviorResponse,
+  branchError: CronBranchErrorResponse,
+): CronJobOverviewPageData {
+  return {
+    summaryMetrics: [
+      { key: "branches", value: formatInteger(stats.branch_count) },
+      { key: "managers", value: formatInteger(stats.tenant_count) },
+      {
+        key: "tasks",
+        value: formatInteger(stats.total_tasks),
+        footerValue: `${formatInteger(stats.total_executions)} 次`,
+      },
+      {
+        key: "success",
+        value: formatPercentValue(stats.success_rate),
+        footerValue: formatInteger(stats.success_count),
+      },
+      {
+        key: "read",
+        value: formatPercentValue(stats.read_rate),
+        footerValue: formatInteger(stats.read_tasks),
+      },
+      {
+        key: "alert",
+        value: formatPercentValue(stats.error_rate),
+        footerValue: formatInteger(stats.error_count),
+      },
+    ],
+    branchBehaviorRows: behavior.items.map((item, index) => ({
+      rank: index + 1,
+      branchName: item.bbk_name || item.bbk_id || "-",
+      readTasks: formatInteger(item.read_tasks),
+      readRate: formatPercentText(item.read_rate),
+      directTasks: formatInteger(item.plan_click_tasks),
+      directClickRate: formatPercentText(item.plan_click_rate),
+      browseTasks: formatInteger(item.insight_click_tasks),
+      browseClickRate: formatPercentText(item.insight_click_rate),
+      phoneTasks: formatInteger(item.phone_click_tasks),
+      phoneClickRate: formatPercentText(item.phone_click_rate),
+    })),
+    failureReasons: branchError.error_reasons.map((item, index) => ({
+      name: item.reason || "其他",
+      count: Number(item.count || 0),
+      percent: Number(item.percent || 0),
+      color: CRON_FAILURE_REASON_COLORS[index % CRON_FAILURE_REASON_COLORS.length],
+    })),
+    anomalySummary: {
+      affectedBranches: formatInteger(branchError.affected_branch_count),
+      affectedBranchesUnit: "家",
+      affectedManagers: formatInteger(branchError.affected_manager_count),
+      affectedManagersUnit: "人",
+    },
+    anomalyRankRows: branchError.branch_error_rank.map((item, index) => ({
+      rank: index + 1,
+      branchName: item.bbk_name || item.bbk_id || "-",
+      alertExecutions: formatInteger(item.error_count),
+      alertRate: formatPercentText(item.error_rate),
+      affectedManagers: formatInteger(item.affected_managers),
+      latestAlertTime: "",
+    })),
+  };
 }
 
 // API functions
@@ -186,6 +402,35 @@ export const monitorApi = {
     }
     const query = params.toString();
     return request(`/monitor/cron/overview${query ? `?${query}` : ""}`);
+  },
+
+  getCronOverviewStats: async (
+    filters?: CronJobOverviewDateFilters,
+  ): Promise<CronOverviewStatsResponse> => {
+    return request(`/monitor/cron/overview-stats${buildQuery(filters)}`);
+  },
+
+  getCronBranchBehavior: async (
+    filters?: CronJobOverviewDateFilters,
+  ): Promise<CronBranchBehaviorResponse> => {
+    return request(`/monitor/cron/branch-behavior${buildQuery(filters)}`);
+  },
+
+  getCronBranchError: async (
+    filters?: CronJobOverviewDateFilters,
+  ): Promise<CronBranchErrorResponse> => {
+    return request(`/monitor/cron/branch-error${buildQuery(filters)}`);
+  },
+
+  getCronJobOverviewPageData: async (
+    filters?: CronJobOverviewDateFilters,
+  ): Promise<CronJobOverviewPageData> => {
+    const [stats, behavior, branchError] = await Promise.all([
+      monitorApi.getCronOverviewStats(filters),
+      monitorApi.getCronBranchBehavior(filters),
+      monitorApi.getCronBranchError(filters),
+    ]);
+    return mapCronJobOverviewPageData(stats, behavior, branchError);
   },
 
   // Get cron jobs list
@@ -226,6 +471,7 @@ export const monitorApi = {
     filters?: {
       job_id?: string;
       tenant_id?: string;
+      bbk_id?: string;
       status?: string;
       start_time?: string;
       end_time?: string;

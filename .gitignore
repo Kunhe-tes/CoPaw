@@ -118,3 +118,12 @@ src/.hypothesis/
 /venv_swe/
 /venv_monitor/
 /.codegraph/
+openspec/changes/cron-job-overview-api-mapping/design.md
+openspec/changes/cron-job-overview-api-mapping/proposal.md
+openspec/changes/cron-job-overview-api-mapping/tasks.md
+openspec/changes/cron-job-overview-api-mapping/specs/cron-job-overview-api-mapping/spec.md
+sample.png
+CRON_JOB_OVERVIEW_FRONTEND_BACKUP.md
+openspec/changes/cron-job-overview-failed-detail-modal/proposal.md
+openspec/changes/cron-job-overview-failed-detail-modal/tasks.md
+openspec/changes/cron-job-overview-failed-detail-modal/specs/cron-job-overview-failed-detail-modal/spec.md

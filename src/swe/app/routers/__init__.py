@@ -42,6 +42,7 @@ _ROUTER_MODULES = (
     (".user_info", "router"),
     (".internal", "router"),
     (".internal", "public_router"),
+    (".system_check", "router"),
     ("..source_system_config", "router"),
 )
 
@@ -62,6 +63,7 @@ _MODULE_EXPORTS = {
     "settings",
     "skills",
     "skills_stream",
+    "system_check",
     "token_usage",
     "tools",
     "tracing",

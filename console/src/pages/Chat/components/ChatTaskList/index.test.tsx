@@ -166,8 +166,13 @@ describe("ChatTaskList actions", () => {
     );
 
     const toggle = screen.getByRole("button", { name: "已暂停任务 1" });
+    const activeTask = screen.getByText("正常任务");
     expect(toggle).toHaveAttribute("aria-expanded", "false");
-    expect(screen.getByText("正常任务")).toBeVisible();
+    expect(activeTask).toBeVisible();
+    expect(
+      toggle.compareDocumentPosition(activeTask) &
+        Node.DOCUMENT_POSITION_FOLLOWING,
+    ).not.toBe(0);
     expect(screen.queryByText("暂停任务 p1")).not.toBeVisible();
     expect(toggle).not.toHaveTextContent("3");
   });

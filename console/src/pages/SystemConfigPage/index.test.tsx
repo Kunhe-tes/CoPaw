@@ -248,6 +248,49 @@ describe("SystemConfigPage", () => {
     expect(loadEffectiveConfig).toHaveBeenCalledWith("portal");
   });
 
+  it("saves system prompt injections", async () => {
+    mocks.sourceSystemConfigApi.getCurrent.mockResolvedValueOnce({
+      source_id: "portal",
+      config: {
+        system_prompt_injections: ["source prompt"],
+      },
+      version: 1,
+      is_default: false,
+      updated_by: "alice",
+      updated_at: "2026-05-21 10:00:00",
+    });
+    mocks.sourceSystemConfigApi.updateCurrent.mockResolvedValue({
+      source_id: "portal",
+      config: {
+        system_prompt_injections: ["source prompt", "runtime rule"],
+      },
+      version: 2,
+      is_default: false,
+      updated_by: "alice",
+      updated_at: "2026-05-21 11:00:00",
+    });
+
+    render(<SystemConfigPage />);
+
+    const input = await screen.findByLabelText("系统提示词注入");
+    expect(input).toHaveValue("source prompt");
+
+    fireEvent.change(input, {
+      target: {
+        value: "source prompt\n\nruntime rule\n\nsource prompt",
+      },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "common.save" }));
+
+    await waitFor(() => {
+      expect(mocks.sourceSystemConfigApi.updateCurrent).toHaveBeenCalledWith({
+        config: {
+          system_prompt_injections: ["source prompt", "runtime rule"],
+        },
+      });
+    });
+  });
+
   it("saves explicit immediate truncation configs", async () => {
     mocks.sourceSystemConfigApi.updateCurrent.mockResolvedValue({
       source_id: "portal",
