@@ -621,6 +621,7 @@ export function MarketSkills({ sourceId, isManager }: MarketSkillsProps) {
         sourceId={sourceId}
         onClose={() => setUploadModalOpen(false)}
         onSuccess={refreshSkillsAndDetail}
+        onCategoryAdded={refreshCategories}
       />
 
       {/* 统一分发弹窗 */}

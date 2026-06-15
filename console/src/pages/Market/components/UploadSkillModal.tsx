@@ -1,6 +1,6 @@
 import { useState, useEffect } from "react";
-import { Modal, Upload, Select, message, Spin, Button } from "antd";
-import { InboxOutlined, ExclamationCircleOutlined } from "@ant-design/icons";
+import { Modal, Upload, Select, Input, message, Spin, Button } from "antd";
+import { InboxOutlined, ExclamationCircleOutlined, PlusOutlined } from "@ant-design/icons";
 import type { UploadProps } from "antd";
 import { marketApi, type Category } from "../../../api/modules/market";
 
@@ -8,6 +8,7 @@ interface UploadSkillModalProps {
   open: boolean;
   onClose: () => void;
   onSuccess: () => void;
+  onCategoryAdded?: () => void;
   sourceId: string;
 }
 
@@ -17,6 +18,7 @@ export default function UploadSkillModal({
   open,
   onClose,
   onSuccess,
+  onCategoryAdded,
   sourceId,
 }: UploadSkillModalProps) {
   const [categories, setCategories] = useState<Category[]>([]);
@@ -26,6 +28,9 @@ export default function UploadSkillModal({
   const [loadingCategories, setLoadingCategories] = useState(false);
   const [showConfirm, setShowConfirm] = useState(false);
   const [conflictNames, setConflictNames] = useState<string[]>([]);
+  const [addCategoryModalOpen, setAddCategoryModalOpen] = useState(false);
+  const [newCategoryName, setNewCategoryName] = useState("");
+  const [addingCategory, setAddingCategory] = useState(false);
 
   const loadCategories = async () => {
     setLoadingCategories(true);
@@ -52,6 +57,29 @@ export default function UploadSkillModal({
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open]);
+
+  const handleAddCategory = async () => {
+    const trimmed = newCategoryName.trim();
+    if (!trimmed) {
+      message.error("请输入分类名称");
+      return;
+    }
+    setAddingCategory(true);
+    try {
+      const newCat = await marketApi.createCategory(sourceId, trimmed);
+      message.success(`分类 "${newCat.name}" 创建成功`);
+      setAddCategoryModalOpen(false);
+      setNewCategoryName("");
+      await loadCategories();
+      setSelectedCategory(newCat.id);
+      onCategoryAdded?.();
+    } catch (err) {
+      const errorMsg = err instanceof Error ? err.message : "创建失败";
+      message.error(errorMsg);
+    } finally {
+      setAddingCategory(false);
+    }
+  };
 
   const handleUpload = async (overwrite: boolean = false) => {
     if (!file) {
@@ -196,15 +224,46 @@ export default function UploadSkillModal({
             {loadingCategories ? (
               <Spin size="small" />
             ) : (
-              <Select
-                style={{ width: "100%" }}
-                value={selectedCategory}
-                onChange={setSelectedCategory}
-                placeholder="选择分类"
-                options={categories.map((c) => ({ label: c.name, value: c.id }))}
-              />
+              <div style={{ display: "flex", gap: 8 }}>
+                <Select
+                  style={{ flex: 1 }}
+                  value={selectedCategory}
+                  onChange={setSelectedCategory}
+                  placeholder="选择分类"
+                  options={categories.map((c) => ({ label: c.name, value: c.id }))}
+                />
+                <Button
+                  icon={<PlusOutlined />}
+                  onClick={() => setAddCategoryModalOpen(true)}
+                  title="新增分类"
+                />
+              </div>
             )}
           </div>
+
+          {/* 新增分类弹窗 */}
+          <Modal
+            title="新增分类"
+            open={addCategoryModalOpen}
+            onOk={handleAddCategory}
+            onCancel={() => {
+              setAddCategoryModalOpen(false);
+              setNewCategoryName("");
+            }}
+            confirmLoading={addingCategory}
+            okText="创建"
+            cancelText="取消"
+            destroyOnClose
+          >
+            <Input
+              placeholder="请输入分类名称"
+              value={newCategoryName}
+              onChange={(e) => setNewCategoryName(e.target.value)}
+              onPressEnter={handleAddCategory}
+              maxLength={128}
+              autoFocus
+            />
+          </Modal>
 
           <p style={{ color: "#8c8c8c", fontSize: 12 }}>
             提示：技能名称和描述将从 zip 包中的 SKILL.md frontmatter 自动解析

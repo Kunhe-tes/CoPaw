@@ -128,6 +128,18 @@ export const marketApi = {
     return request<Category[]>("/market/categories", opts);
   },
 
+  createCategory: async (sourceId: string, name: string): Promise<Category> => {
+    const opts: RequestInit = {
+      method: "POST",
+      ...(mergeHeaders({
+        "Content-Type": "application/json",
+        "X-Source-Id": sourceId,
+      })),
+      body: JSON.stringify({ name }),
+    };
+    return request<Category>("/market/categories", opts);
+  },
+
   listMarketSkills: async (
     sourceId: string,
     categoryId?: number
