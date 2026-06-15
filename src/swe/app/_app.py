@@ -396,6 +396,11 @@ async def lifespan(
                         ),
                         scheduler_adapter=scheduler_adapter,
                         callback_url=_build_internal_cron_callback_url(),
+                        tenant_scope_store_factory=(
+                            lambda: tenant_workspace_pool.init_source_store
+                        ),
+                        multi_agent_manager=multi_agent_manager,
+                        agent_id="default",
                     )
                 )
             else:

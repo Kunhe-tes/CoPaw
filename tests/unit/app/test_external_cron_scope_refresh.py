@@ -338,61 +338,29 @@ async def test_callback_resolves_runtime_scope_from_tenant_and_source(
 
 
 @pytest.mark.asyncio
-async def test_callback_dispatches_cleanup_without_business_job_id(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """清理系统任务回调应按 source 展开所有用户且不要求业务 job_id。"""
-    lookups: list[tuple[str, str]] = []
-    cleanups: list[str] = []
+async def test_callback_runs_source_cleanup_without_using_tenant_scope() -> None:
+    """清理回调只按 source_id 定位清理范围。"""
+    observed: dict[str, Any] = {}
 
-    async def fake_list_logical_tenant_ids(
-        source_id: str | None,
-        *,
-        source_filter: bool = False,
-    ) -> list[str]:
-        assert source_id == "source-a"
-        assert source_filter is True
-        return ["tenant-a", "tenant-b"]
-
-    async def fake_get_cron_manager(manager, tenant_id: str, agent_id: str):
-        del manager
-        lookups.append((tenant_id, agent_id))
-
-        class FakeCronManager:
-            async def run_task_session_cleanup(self) -> dict[str, Any]:
-                cleanups.append(tenant_id)
-                return {
-                    "enabled": True,
-                    "retention_days": 30,
-                    "sessions_seen": 1,
-                    "sessions_cleaned": 1,
-                    "sessions_skipped_locked": 0,
-                    "runs_removed": 2,
-                    "messages_removed": 3,
-                }
-
-        return FakeCronManager()
-
-    monkeypatch.setattr(
-        internal_router,
-        "list_logical_tenant_ids",
-        fake_list_logical_tenant_ids,
-    )
-    monkeypatch.setattr(
-        internal_router,
-        "_get_cron_manager",
-        fake_get_cron_manager,
-    )
+    class FakeSourceScheduler:
+        async def run_task_session_cleanup(self, *, source_id: str):
+            observed["source_id"] = source_id
+            return {"enabled": True, "source_id": source_id}
 
     params = {
         "tenant_id": "tenant-a",
         "source_id": "source-a",
-        "agent_id": "default",
+        "agent_id": "",
         "task_type": "cleanup",
+        "job_id": "_source_task_session_cleanup",
+        "scopeId": "tenant-a-source-a",
+        "fromId": "tenant-a",
     }
     request = SimpleNamespace(
         app=SimpleNamespace(
-            state=SimpleNamespace(multi_agent_manager=object()),
+            state=SimpleNamespace(
+                source_system_task_scheduler=FakeSourceScheduler(),
+            ),
         ),
     )
 
@@ -409,14 +377,7 @@ async def test_callback_dispatches_cleanup_without_business_job_id(
         "status": "ok",
         "task_type": "cleanup",
     }
-    assert lookups == [
-        (encode_scope_id("tenant-a", "source-a"), "default"),
-        (encode_scope_id("tenant-b", "source-a"), "default"),
-    ]
-    assert cleanups == [
-        encode_scope_id("tenant-a", "source-a"),
-        encode_scope_id("tenant-b", "source-a"),
-    ]
+    assert observed == {"source_id": "source-a"}
 
 
 @pytest.mark.asyncio

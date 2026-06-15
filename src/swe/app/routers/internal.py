@@ -25,7 +25,7 @@ from ...config.scope_conversion import (
     decode_canonical_scope_id,
     encode_canonical_scope_id,
 )
-from ...config.utils import list_all_tenant_ids, list_logical_tenant_ids
+from ...config.utils import list_all_tenant_ids
 from ...constant import WORKING_DIR
 from ..workspace.tenant_initializer import TenantInitializer
 
@@ -891,123 +891,6 @@ async def _get_cron_manager(manager, tenant_id: str, agent_id: str):
     return ws.cron_manager
 
 
-def _merge_cleanup_result(
-    summary: dict[str, Any],
-    tenant_id: str,
-    result: dict[str, Any] | None,
-) -> None:
-    summary["tenants_processed"] += 1
-    if not isinstance(result, dict):
-        summary["results"].append({"tenant_id": tenant_id})
-        return
-    summary["results"].append({"tenant_id": tenant_id, **result})
-    for key in (
-        "sessions_seen",
-        "sessions_cleaned",
-        "sessions_skipped_locked",
-        "runs_removed",
-        "messages_removed",
-    ):
-        summary[key] += int(result.get(key, 0) or 0)
-
-
-async def _run_single_scope_cleanup(
-    manager,
-    *,
-    tenant_id: str,
-    source_id: str | None,
-    agent_id: str,
-) -> dict[str, Any]:
-    runtime_tenant_id = (
-        resolve_runtime_tenant_id(tenant_id, source_id) or tenant_id
-    )
-    mgr = await _get_cron_manager(manager, runtime_tenant_id, agent_id)
-    if mgr is None:
-        raise HTTPException(status_code=404, detail="CronManager not found")
-    result = await mgr.run_task_session_cleanup()
-    return {
-        "source_id": source_id or "",
-        "tenant_count": 1,
-        "tenants_processed": 1,
-        "tenants_skipped": 0,
-        "tenants_failed": 0,
-        "results": [{"tenant_id": tenant_id, **(result or {})}],
-    }
-
-
-async def _run_source_task_session_cleanup(
-    manager,
-    *,
-    tenant_id: str,
-    source_id: str | None,
-    agent_id: str,
-) -> dict[str, Any]:
-    if not source_id:
-        return await _run_single_scope_cleanup(
-            manager,
-            tenant_id=tenant_id,
-            source_id=source_id,
-            agent_id=agent_id,
-        )
-
-    tenant_ids = await list_logical_tenant_ids(
-        source_id,
-        source_filter=True,
-    )
-    summary: dict[str, Any] = {
-        "source_id": source_id,
-        "tenant_count": len(tenant_ids),
-        "tenants_processed": 0,
-        "tenants_skipped": 0,
-        "tenants_failed": 0,
-        "sessions_seen": 0,
-        "sessions_cleaned": 0,
-        "sessions_skipped_locked": 0,
-        "runs_removed": 0,
-        "messages_removed": 0,
-        "results": [],
-    }
-    for target_tenant_id in tenant_ids:
-        runtime_tenant_id = (
-            resolve_runtime_tenant_id(target_tenant_id, source_id)
-            or target_tenant_id
-        )
-        mgr = await _get_cron_manager(
-            manager,
-            runtime_tenant_id,
-            agent_id,
-        )
-        if mgr is None:
-            summary["tenants_skipped"] += 1
-            summary["results"].append(
-                {
-                    "tenant_id": target_tenant_id,
-                    "skipped": True,
-                    "reason": "cron_manager_not_found",
-                },
-            )
-            continue
-        try:
-            result = await mgr.run_task_session_cleanup()
-        except Exception as exc:  # pylint: disable=broad-except
-            summary["tenants_failed"] += 1
-            summary["results"].append(
-                {
-                    "tenant_id": target_tenant_id,
-                    "error": repr(exc),
-                },
-            )
-            logger.warning(
-                "Source task session cleanup failed: source=%s tenant=%s",
-                source_id,
-                target_tenant_id,
-                exc_info=True,
-            )
-            continue
-        _merge_cleanup_result(summary, target_tenant_id, result)
-    return summary
-
-
 def _get_configured_agent_ids(tenant_id: str) -> list[str]:
     """读取指定租户配置中的所有 Agent ID。"""
     from ...config.utils import get_tenant_storage_config_path, load_config
@@ -1210,24 +1093,38 @@ async def internal_cron_callback(
             detail=f"Missing required param in callback body: {e}",
         )
 
-    manager = getattr(request.app.state, "multi_agent_manager", None)
-    if manager is None:
-        logger.warning("MultiAgentManager not initialized")
-        raise HTTPException(status_code=503, detail="Manager not available")
-
     try:
         if task_type == "cleanup":
-            cleanup_result = await _run_source_task_session_cleanup(
-                manager,
-                tenant_id=tenant_id,
+            if not source_id:
+                raise HTTPException(
+                    status_code=400,
+                    detail="source_id required for task_type=cleanup",
+                )
+            source_scheduler = getattr(
+                request.app.state,
+                "source_system_task_scheduler",
+                None,
+            )
+            if source_scheduler is None:
+                raise HTTPException(
+                    status_code=503,
+                    detail="Source system task scheduler not available",
+                )
+            cleanup_result = await source_scheduler.run_task_session_cleanup(
                 source_id=source_id,
-                agent_id=agent_id,
             )
             logger.info(
                 "Source task session cleanup result: %s",
                 cleanup_result,
             )
         else:
+            manager = getattr(request.app.state, "multi_agent_manager", None)
+            if manager is None:
+                logger.warning("MultiAgentManager not initialized")
+                raise HTTPException(
+                    status_code=503,
+                    detail="Manager not available",
+                )
             runtime_tenant_id = (
                 resolve_runtime_tenant_id(tenant_id, source_id) or tenant_id
             )

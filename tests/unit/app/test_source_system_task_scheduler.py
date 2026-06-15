@@ -4,11 +4,13 @@
 from __future__ import annotations
 
 from datetime import datetime
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
 from swe.app.crons.manager import TASK_SESSION_CLEANUP_TASK_TYPE
+from swe.config.context import encode_scope_id
 
 from swe.app.source_system_config.store import (
     SourceSystemConfigStoreUnavailable,
@@ -522,3 +524,67 @@ async def test_refresh_task_session_cleanup_raises_when_register_returns_empty_i
     ]
     assert store.upsert_calls == 0
     assert await store.get_binding("source-a", SOURCE_TASK_SESSION_CLEANUP_NAME) is None
+
+
+@pytest.mark.asyncio
+async def test_source_cleanup_runs_all_scope_managers_for_source() -> None:
+    """source 清理会覆盖该 source 下所有 runtime scope。"""
+    cleaned: list[str] = []
+
+    class FakeTenantScopeStore:
+        async def get_by_source(
+            self,
+            source_id: str,
+            *,
+            include_templates: bool = False,
+        ) -> list[dict[str, str]]:
+            assert source_id == "source-a"
+            assert include_templates is False
+            return [
+                {"tenant_id": "tenant-a", "source_id": "source-a"},
+                {"tenant_id": "tenant-b", "source_id": "source-a"},
+            ]
+
+    class FakeCronManager:
+        def __init__(self, name: str) -> None:
+            self.name = name
+
+        async def run_task_session_cleanup(self) -> dict[str, int | bool]:
+            cleaned.append(self.name)
+            return {
+                "enabled": True,
+                "sessions_seen": 1,
+                "sessions_cleaned": 1,
+                "sessions_skipped_locked": 0,
+                "runs_removed": 2,
+                "messages_removed": 3,
+            }
+
+    class FakeManager:
+        async def get_agent(self, agent_id: str, tenant_id: str | None = None):
+            return SimpleNamespace(
+                cron_manager=FakeCronManager(f"{tenant_id}:{agent_id}"),
+            )
+
+    scheduler = SourceSystemTaskScheduler(
+        binding_store=InMemoryBindingStore(),
+        scheduler_adapter=RecordingSchedulerAdapter(),
+        callback_url="http://swe.local/api/internal/cron/callback",
+        tenant_scope_store_factory=lambda: FakeTenantScopeStore(),
+        multi_agent_manager=FakeManager(),
+        agent_id="default",
+    )
+
+    result = await scheduler.run_task_session_cleanup(source_id="source-a")
+
+    assert cleaned == [
+        f"{encode_scope_id('tenant-a', 'source-a')}:default",
+        f"{encode_scope_id('tenant-b', 'source-a')}:default",
+    ]
+    assert result["source_id"] == "source-a"
+    assert result["scopes_seen"] == 2
+    assert result["scopes_failed"] == 0
+    assert result["sessions_seen"] == 2
+    assert result["sessions_cleaned"] == 2
+    assert result["runs_removed"] == 4
+    assert result["messages_removed"] == 6
