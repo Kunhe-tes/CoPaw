@@ -377,6 +377,7 @@ export function PlanClarificationCard({
   const [formValues, setFormValues] = useState<
     Record<string, string | string[]>
   >({});
+  const cardRef = useRef<HTMLElement | null>(null);
   const resolvedSessionId =
     currentSessionId ||
     (window as Window & { currentSessionId?: string }).currentSessionId;
@@ -468,6 +469,16 @@ export function PlanClarificationCard({
     : true;
   const isFinalStep = boundedStep >= totalSteps - 1;
   const canGoNext = !isFinalStep && currentFieldComplete;
+  const pageTitle =
+    data.kind === "form" ? activeField?.label || "补充说明" : data.prompt;
+  const showChoiceRows =
+    !customActive &&
+    (data.kind === "single_choice" ||
+      data.kind === "multi_choice" ||
+      activeField?.type === "select" ||
+      activeField?.type === "multiselect");
+  const showCustomInput =
+    data.kind === "text_input" || customActive || isSupplementStep;
 
   useEffect(() => {
     setSubmitted(
@@ -488,6 +499,11 @@ export function PlanClarificationCard({
     setFocusedIndex(0);
     setActiveStep(0);
   }, [dismissalKey, interactionResetKey, submissionKey]);
+
+  useEffect(() => {
+    if (submitted || dismissed || !showChoiceRows) return;
+    cardRef.current?.focus({ preventScroll: true });
+  }, [boundedStep, dismissed, interactionResetKey, showChoiceRows, submitted]);
 
   useEffect(() => {
     setFocusedIndex(0);
@@ -685,19 +701,9 @@ export function PlanClarificationCard({
 
   if (submitted || dismissed) return null;
 
-  const pageTitle =
-    data.kind === "form" ? activeField?.label || "补充说明" : data.prompt;
-  const showChoiceRows =
-    !customActive &&
-    (data.kind === "single_choice" ||
-      data.kind === "multi_choice" ||
-      activeField?.type === "select" ||
-      activeField?.type === "multiselect");
-  const showCustomInput =
-    data.kind === "text_input" || customActive || isSupplementStep;
-
   return (
     <section
+      ref={cardRef}
       className={styles.planClarificationCard}
       data-plan-clarification-active="true"
       role="region"
@@ -804,26 +810,29 @@ export function PlanClarificationCard({
         ) : null}
       </div>
 
-      <footer className={styles.cardActions}>
-        <button
-          type="button"
-          className={styles.dismissButton}
-          aria-label="退出"
-          onClick={handleDismiss}
-        >
-          <span>退出</span>
-          <kbd>ESC</kbd>
-        </button>
-        <button
-          type="button"
-          className={styles.continueButton}
-          aria-label={isFinalStep ? "提交" : "继续"}
-          disabled={isFinalStep ? disabled : !canGoNext}
-          onClick={goForward}
-        >
-          <span>{isFinalStep ? "提交" : "继续"}</span>
-          <CornerDownLeft aria-hidden="true" size={14} />
-        </button>
+      <footer className={styles.cardFooter}>
+        <p className={styles.keyboardHint}>方向键切换选项，Space 选择</p>
+        <div className={styles.cardActions}>
+          <button
+            type="button"
+            className={styles.dismissButton}
+            aria-label="退出"
+            onClick={handleDismiss}
+          >
+            <span>退出</span>
+            <kbd>ESC</kbd>
+          </button>
+          <button
+            type="button"
+            className={styles.continueButton}
+            aria-label={isFinalStep ? "提交" : "继续"}
+            disabled={isFinalStep ? disabled : !canGoNext}
+            onClick={goForward}
+          >
+            <span>{isFinalStep ? "提交" : "继续"}</span>
+            <CornerDownLeft aria-hidden="true" size={14} />
+          </button>
+        </div>
       </footer>
     </section>
   );

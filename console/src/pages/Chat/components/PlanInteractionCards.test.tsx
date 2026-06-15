@@ -9,6 +9,7 @@ import {
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { createContext } from "use-context-selector";
 import { ChatAnywhereMessagesContext } from "@/components/agentscope-chat/AgentScopeRuntimeWebUI/core/Context/ChatAnywhereMessagesContext";
+import type { IAgentScopeRuntimeWebUIMessage } from "@/components/agentscope-chat/AgentScopeRuntimeWebUI/core/types/IMessages";
 import { ChatAnywhereSessionsContext } from "@/components/agentscope-chat";
 import {
   ActivePlanClarificationCard,
@@ -66,7 +67,9 @@ function createSessionContextValue(sessionId = "chat-1") {
   };
 }
 
-function renderActiveClarification(messages: any[]) {
+function renderActiveClarification(
+  messages: IAgentScopeRuntimeWebUIMessage<unknown>[],
+) {
   return render(
     <ChatAnywhereSessionsContext.Provider
       value={createSessionContextValue()}
@@ -152,6 +155,42 @@ describe("Plan interaction cards", () => {
     });
 
     submit.cleanup();
+  });
+
+  it("focuses a choice clarification card on render for immediate keyboard use", () => {
+    render(
+      <PlanClarificationCard
+        data={{
+          card_type: "plan_clarification",
+          kind: "single_choice",
+          prompt: "Pick scope",
+          options: [
+            { id: "small", label: "Small" },
+            { id: "large", label: "Large" },
+          ],
+        }}
+      />,
+    );
+
+    expect(screen.getByRole("region", { name: "Pick scope" })).toHaveFocus();
+  });
+
+  it("shows keyboard operation guidance in the card footer", () => {
+    render(
+      <PlanClarificationCard
+        data={{
+          card_type: "plan_clarification",
+          kind: "multi_choice",
+          prompt: "Pick checks",
+          options: [
+            { id: "lint", label: "Lint" },
+            { id: "test", label: "Test" },
+          ],
+        }}
+      />,
+    );
+
+    expect(screen.getByText("方向键切换选项，Space 选择")).toBeInTheDocument();
   });
 
   it("separates multi-choice focus from selection and submits selected rows", async () => {
