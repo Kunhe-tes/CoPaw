@@ -13,7 +13,7 @@ from swe.agents.hook_runtime.skill_loader import load_skill_hooks_for_session
 REPO_ROOT = Path(__file__).resolve().parents[4]
 SCRIPT_PATH = (
     REPO_ROOT
-    / "docs/hook/mcp-failure-fallback-demo/scripts/mcp_failure_fallback.py"
+    / "wiki/hook/mcp-failure-fallback-demo/scripts/mcp_failure_fallback.py"
 )
 
 
@@ -99,7 +99,7 @@ def test_non_dict_payload_exits_with_code_one_and_stderr() -> None:
 
 def test_demo_skill_hook_config_loads_from_repo_files() -> None:
     """验证 demo skill 的 hooks 配置可从仓库文件加载并完成命名空间归一。"""
-    skill_root = REPO_ROOT / "docs/hook/mcp-failure-fallback-demo"
+    skill_root = REPO_ROOT / "wiki/hook/mcp-failure-fallback-demo"
 
     result = load_skill_hooks_for_session(
         skill_name="mcp-failure-fallback-demo",
