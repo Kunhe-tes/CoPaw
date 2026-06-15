@@ -813,9 +813,17 @@ export default function BusinessOverviewPage() {
         const mappedUsers = transformUserData(
           result.items as unknown as Record<string, unknown>[],
         );
-        setActiveUsers((previous) =>
-          append ? [...previous, ...mappedUsers] : mappedUsers,
-        );
+        setActiveUsers((previous) => {
+          if (!append) {
+            return mappedUsers;
+          }
+          // 按 userId 去重，避免分页数据漂移导致的重复
+          const existingIds = new Set(previous.map((u) => u.userId));
+          const dedupedUsers = mappedUsers.filter(
+            (u) => !existingIds.has(u.userId),
+          );
+          return [...previous, ...dedupedUsers];
+        });
         setActiveHasMore(mappedUsers.length === 10);
       } catch (error) {
         console.error("Failed to fetch active users:", error);
@@ -845,7 +853,14 @@ export default function BusinessOverviewPage() {
         const rows = result.items || [];
 
         if (append) {
-          setSkills(prev => [...prev, ...rows]);
+          setSkills((prev) => {
+            // 按 skill_name 去重，避免分页数据漂移导致的重复
+            const existingNames = new Set(prev.map((s) => s.skill_name));
+            const dedupedSkills = rows.filter(
+              (s) => !existingNames.has(s.skill_name),
+            );
+            return [...prev, ...dedupedSkills];
+          });
         } else {
           setSkills(rows);
         }
