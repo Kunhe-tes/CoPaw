@@ -267,7 +267,12 @@ function TasksContent({
       </div>
       <div className="expandable-panel-content">
         {tasks.length === 0 ? (
-          <div className="expandable-panel-empty">暂无任务</div>
+          <div className="expandable-panel-task-empty">
+            <div className="expandable-panel-task-empty-title">暂无任务</div>
+            <div className="expandable-panel-task-empty-description">
+              创建任务，让 AI 帮你自动推进
+            </div>
+          </div>
         ) : (
           <>
             {pausedTasks.length > 0 && (

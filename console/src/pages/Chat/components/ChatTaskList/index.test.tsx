@@ -73,6 +73,17 @@ describe("ChatTaskList actions", () => {
     cleanup();
   });
 
+  it("shows a non-interactive fallback when there are no tasks", () => {
+    render(<ChatTaskList tasks={[]} />);
+
+    expect(screen.getByText("暂无任务")).toBeInTheDocument();
+    expect(
+      screen.getByText("创建任务，让 AI 帮你自动推进"),
+    ).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "去创建" })).toBeNull();
+    expect(screen.queryByRole("link", { name: "去创建" })).toBeNull();
+  });
+
   it("opens stop, execute and delete actions from the overflow menu", async () => {
     const onTaskClick = vi.fn();
     const onTaskPause = vi.fn();
