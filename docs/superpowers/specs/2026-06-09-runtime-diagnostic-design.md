@@ -25,6 +25,8 @@ The diagnostic answers:
 - SSE current and peak concurrent connections.
 - Event-loop lag sampled every second.
 - Current Swe/Uvicorn Python process resource usage.
+- Current container/PID-namespace open file descriptor count.
+- Current container cgroup disk read/write throughput.
 - Filesystem usage for `/opt/deployments/app`.
 - INFO-level, single-line, machine-readable diagnostic logs.
 - One Runtime Instance status table and one append-only diagnostic flow table.
@@ -39,13 +41,16 @@ The diagnostic answers:
 - Ordinary HTTP request throughput, latency, status codes, or error rates.
 - Tenant, Workspace, Agent Run, Provider, LLM, MCP, or Cron statistics.
 - MySQL and Redis health checks.
-- Container cgroup limits or resources used by other processes.
+- Container cgroup limits.
+- Kubernetes node-level file-handle or disk-I/O statistics.
 - Recursive directory-size scans.
 - A derived overall health status or unified load percentage.
 
 ## 3. Existing Runtime Constraints
 
 - Swe runs FastAPI through Uvicorn with `workers=1`.
+- Each Kubernetes Pod contains only the Swe container, so current-container
+  PID namespace and cgroup metrics represent the current Pod.
 - The existing `/api/health/health` endpoint is a lightweight liveness probe
   and remains unchanged.
 - Uvicorn does not currently expose a configured concurrency limit, so a
@@ -212,7 +217,45 @@ Metrics:
 - `storage_free_bytes`
 - `storage_used_percent`
 
-### 6.5 Partial Failure
+### 6.5 Pod File Descriptors
+
+Read only the current container PID namespace. Enumerate numeric process
+directories under `/proc` and sum each `/proc/<pid>/fd` directory entry count.
+Do not read node-level `/proc/sys/fs/file-nr`.
+
+Metric:
+
+- `pod_open_fd_count`
+
+The collector runs without root privileges. If any process FD directory cannot
+be read, including a permission failure or a process disappearing during the
+scan, emit `null` rather than an incomplete count.
+
+### 6.6 Pod Disk I/O
+
+Read the current process cgroup membership from `/proc/self/cgroup`, then read
+the matching current-container cgroup disk-I/O counters:
+
+- cgroup v2: `/sys/fs/cgroup/<path>/io.stat`
+- cgroup v1: the matching blkio cgroup service-bytes file
+
+Do not use `psutil.disk_io_counters()` because it may expose Kubernetes
+node-level counters. Aggregate all block devices and sample cumulative read
+and write bytes once per second. Derive the latest one-second rate and the
+current diagnostic-window peak.
+
+Metrics:
+
+- `pod_disk_read_bytes_per_second`
+- `pod_disk_read_bytes_per_second_peak`
+- `pod_disk_write_bytes_per_second`
+- `pod_disk_write_bytes_per_second_peak`
+
+The collector does not require or attempt privilege escalation. If cgroup
+membership or counters cannot be read, or any sample in the current window is
+invalid, emit `null` for all four Pod disk-I/O fields.
+
+### 6.7 Partial Failure
 
 Each metric group is collected independently. If one metric cannot be
 collected:
@@ -250,7 +293,7 @@ timestamps from it rather than from log-ingestion time.
 ### 7.3 Diagnostic Flow
 
 ```json
-{"schema":"runtime_diagnostic.v1","event_type":"diagnostic_flow","hostname":"swe-pod-abc","event_at_ms":1780993800000,"sse_active_connections":3,"sse_peak_connections":12,"event_loop_lag_avg_ms":1.25,"event_loop_lag_p95_ms":3.8,"event_loop_lag_max_ms":1200.4,"event_loop_blocked_count":1,"process_cpu_avg_percent":18.5,"process_cpu_max_percent":82.1,"process_rss_bytes":536870912,"process_vms_bytes":1073741824,"process_thread_count":16,"process_open_fd_count":80,"process_uptime_seconds":7200,"storage_total_bytes":107374182400,"storage_used_bytes":53687091200,"storage_free_bytes":53687091200,"storage_used_percent":50.0}
+{"schema":"runtime_diagnostic.v1","event_type":"diagnostic_flow","hostname":"swe-pod-abc","event_at_ms":1780993800000,"sse_active_connections":3,"sse_peak_connections":12,"event_loop_lag_avg_ms":1.25,"event_loop_lag_p95_ms":3.8,"event_loop_lag_max_ms":1200.4,"event_loop_blocked_count":1,"process_cpu_avg_percent":18.5,"process_cpu_max_percent":82.1,"process_rss_bytes":536870912,"process_vms_bytes":1073741824,"process_thread_count":16,"process_open_fd_count":80,"process_uptime_seconds":7200,"pod_open_fd_count":100,"pod_disk_read_bytes_per_second":2048.0,"pod_disk_read_bytes_per_second_peak":8192.0,"pod_disk_write_bytes_per_second":4096.0,"pod_disk_write_bytes_per_second_peak":16384.0,"storage_total_bytes":107374182400,"storage_used_bytes":53687091200,"storage_free_bytes":53687091200,"storage_used_percent":50.0}
 ```
 
 Every metric field in `diagnostic_flow` is nullable.
@@ -302,6 +345,12 @@ CREATE TABLE swe_runtime_diagnostic_flow (
     process_thread_count INT NULL,
     process_open_fd_count INT NULL,
     process_uptime_seconds BIGINT NULL,
+
+    pod_open_fd_count INT NULL,
+    pod_disk_read_bytes_per_second DOUBLE NULL,
+    pod_disk_read_bytes_per_second_peak DOUBLE NULL,
+    pod_disk_write_bytes_per_second DOUBLE NULL,
+    pod_disk_write_bytes_per_second_peak DOUBLE NULL,
 
     storage_total_bytes BIGINT NULL,
     storage_used_bytes BIGINT NULL,

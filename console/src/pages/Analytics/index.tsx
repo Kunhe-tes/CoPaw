@@ -5,6 +5,7 @@ import MessagesPage from "./Messages";
 import TracesPage from "./Traces";
 import BusinessOverviewPage from "./BusinessOverview";
 import CronJobOverviewPage from "./CronJobOverview";
+import ClawDataOverviewPage from "./ClawDataOverview";
 
 export default function AnalyticsPage() {
   return (
@@ -15,6 +16,7 @@ export default function AnalyticsPage() {
       <Route path="messages" element={<MessagesPage />} />
       <Route path="traces" element={<TracesPage />} />
       <Route path="business-overview" element={<BusinessOverviewPage />} />
+      <Route path="claw-data-overview" element={<ClawDataOverviewPage />} />
       <Route path="cron-job-overview" element={<CronJobOverviewPage />} />
     </Routes>
   );

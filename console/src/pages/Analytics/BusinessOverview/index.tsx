@@ -533,12 +533,12 @@ function buildTrendAxisTicks(axisMax: number): TrendAxisTick[] {
 }
 
 export function buildTrendSvgData(trendData: TrendDatum[]) {
-  const width = 428;
+  const width = 580;
   const height = 244;
-  const chartLeft = 34;
-  const chartRight = 34;
-  const chartTop = 18;
-  const chartBottom = 34;
+  const chartLeft = 18;
+  const chartRight = 18;
+  const chartTop = 10;
+  const chartBottom = 36;
   const chartWidth = width - chartLeft - chartRight;
   const chartHeight = height - chartTop - chartBottom;
   const rawMaxCalls = Math.max(
@@ -712,6 +712,15 @@ export default function BusinessOverviewPage() {
   const effectiveBbkIds = useMemo(() => {
     return bbkIds.length === 0 ? undefined : bbkIds;
   }, [bbkIds]);
+  const cronJobOverviewPath = useMemo(() => {
+    const params = new URLSearchParams();
+    params.set("start_date", startDateText);
+    params.set("end_date", endDateText);
+    if (effectiveBbkIds?.length) {
+      params.set("bbk_ids", effectiveBbkIds.join(","));
+    }
+    return `/analytics/cron-job-overview?${params.toString()}`;
+  }, [effectiveBbkIds, endDateText, startDateText]);
 
   const transformUserData = useCallback(
     (items: Record<string, unknown>[]): UserRow[] =>
@@ -1254,6 +1263,7 @@ export default function BusinessOverviewPage() {
               <svg
                 viewBox={`0 0 ${trendSvg.width} ${trendSvg.height}`}
                 className={styles.trendSvg}
+                preserveAspectRatio="xMidYMid meet"
               >
                 <defs>
                   <linearGradient
@@ -1268,8 +1278,8 @@ export default function BusinessOverviewPage() {
                   </linearGradient>
                 </defs>
 
-                {[0, 1, 2, 3, 4].map((row) => {
-                  const y = trendSvg.chartTop + (trendSvg.chartHeight / 4) * row;
+                {[0, 1, 2, 3, 4, 5].map((row) => {
+                  const y = trendSvg.chartTop + (trendSvg.chartHeight / 5) * row;
                   return (
                     <line
                       key={`grid-${row}`}
@@ -1308,7 +1318,7 @@ export default function BusinessOverviewPage() {
                       }
                     />
                     {bar.showLabel && (
-                      <text x={bar.x + bar.width / 2} y={233} className={styles.axisLabel}>
+                      <text x={bar.x + bar.width / 2} y={trendSvg.height - trendSvg.chartBottom + 22} className={styles.axisLabel}>
                         {bar.label}
                       </text>
                     )}
@@ -1539,7 +1549,7 @@ export default function BusinessOverviewPage() {
             <button
               type="button"
               className={styles.detailLink}
-              onClick={() => navigate("/analytics/cron-job-overview")}
+              onClick={() => navigate(cronJobOverviewPath)}
             >
               查看详情
               <ChevronRight size={14} />

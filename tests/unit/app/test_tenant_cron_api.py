@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 """Tenant injection regression tests for cron APIs."""
 
+import asyncio
 import importlib.util
 import sys
 import types
@@ -9,6 +10,8 @@ from pathlib import Path
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from swe.config.context import encode_scope_id
+from swe.config.context import tenant_context
+from swe.providers.provider_manager import ProviderManager
 
 SRC_ROOT = Path(__file__).parent.parent.parent.parent / "src"
 sys.path.insert(0, str(SRC_ROOT))
@@ -96,6 +99,8 @@ class _Manager:
     def __init__(self, jobs_by_id: dict[str, object] | None = None):
         self.created = []
         self.jobs_by_id = dict(jobs_by_id or {})
+        self.deleted = []
+        self.ran = []
 
     async def create_or_replace_job(self, spec):
         self.created.append(spec)
@@ -106,6 +111,18 @@ class _Manager:
 
     async def get_job(self, job_id):
         return self.jobs_by_id.get(job_id)
+
+    async def delete_job(self, job_id):
+        if job_id not in self.jobs_by_id:
+            return False
+        self.deleted.append(job_id)
+        self.jobs_by_id.pop(job_id, None)
+        return True
+
+    async def run_job(self, job_id):
+        if job_id not in self.jobs_by_id:
+            raise KeyError(job_id)
+        self.ran.append(job_id)
 
     def get_state(self, job_id):
         return types.SimpleNamespace(model_dump=lambda mode=None: {})
@@ -128,8 +145,13 @@ class _ProviderManager:
 
 
 class _Workspace:
-    def __init__(self, cron_manager: _Manager):
+    def __init__(
+        self,
+        cron_manager: _Manager,
+        workspace_dir: str = "/tmp/workspaces/default",
+    ):
         self.cron_manager = cron_manager
+        self.workspace_dir = workspace_dir
 
 
 class _MultiAgentManager:
@@ -390,6 +412,98 @@ def test_create_text_job_clears_model_slot():
     assert response.json().get("model_slot") is None
 
 
+def test_cron_broadcast_concurrency_uses_env_with_default(monkeypatch):
+    monkeypatch.delenv(
+        api_module.CRON_BROADCAST_CONCURRENCY_ENV,
+        raising=False,
+    )
+    assert api_module._get_cron_broadcast_concurrency() == 4
+
+    monkeypatch.setenv(api_module.CRON_BROADCAST_CONCURRENCY_ENV, "2")
+    assert api_module._get_cron_broadcast_concurrency() == 2
+
+    monkeypatch.setenv(api_module.CRON_BROADCAST_CONCURRENCY_ENV, "0")
+    assert api_module._get_cron_broadcast_concurrency() == 4
+
+
+def test_broadcast_to_tenants_limits_concurrency(monkeypatch):
+    monkeypatch.setenv(api_module.CRON_BROADCAST_CONCURRENCY_ENV, "2")
+    active = 0
+    max_active = 0
+
+    async def _fake_broadcast_to_tenant(_context, tenant_id, offset):
+        nonlocal active, max_active
+        active += 1
+        max_active = max(max_active, active)
+        await asyncio.sleep(0)
+        active -= 1
+        return api_module.CronBroadcastTenantResult(
+            tenant_id=tenant_id,
+            success=True,
+            offset_minutes=offset,
+        )
+
+    monkeypatch.setattr(
+        api_module,
+        "_broadcast_to_tenant",
+        _fake_broadcast_to_tenant,
+    )
+    context = types.SimpleNamespace(offsets=[0, 1, 2, 3, 4])
+
+    results = asyncio.run(
+        api_module._broadcast_to_tenants(
+            context,
+            ["tenant-a", "tenant-b", "tenant-c", "tenant-d", "tenant-e"],
+        ),
+    )
+
+    assert max_active == 2
+    assert [item.tenant_id for item in results] == [
+        "tenant-a",
+        "tenant-b",
+        "tenant-c",
+        "tenant-d",
+        "tenant-e",
+    ]
+    assert [item.offset_minutes for item in results] == [0, 1, 2, 3, 4]
+
+
+def test_list_broadcast_children_for_tenants_limits_concurrency(monkeypatch):
+    monkeypatch.setenv(api_module.CRON_BROADCAST_CONCURRENCY_ENV, "2")
+    active = 0
+    max_active = 0
+
+    async def _fake_list_children(_context, tenant_id):
+        nonlocal active, max_active
+        active += 1
+        max_active = max(max_active, active)
+        await asyncio.sleep(0)
+        active -= 1
+        return [tenant_id]
+
+    monkeypatch.setattr(
+        api_module,
+        "_list_broadcast_children_for_tenant",
+        _fake_list_children,
+    )
+
+    results = asyncio.run(
+        api_module._list_broadcast_children_for_tenants(
+            types.SimpleNamespace(),
+            ["tenant-a", "tenant-b", "tenant-c", "tenant-d", "tenant-e"],
+        ),
+    )
+
+    assert max_active == 2
+    assert results == [
+        "tenant-a",
+        "tenant-b",
+        "tenant-c",
+        "tenant-d",
+        "tenant-e",
+    ]
+
+
 def test_broadcast_clears_model_slot_and_returns_warning_for_unsupported_tenant():
     source_job = CronJobSpec.model_validate(
         {
@@ -590,6 +704,47 @@ def test_broadcast_uses_original_cron_when_offset_shift_is_unsupported():
     )
 
 
+def test_broadcast_child_inherits_notification_delay_minutes():
+    source_job = CronJobSpec.model_validate(
+        {
+            **_job_spec("job-source"),
+            "schedule": ScheduleSpec(
+                cron="0 9 * * *",
+            ).model_dump(mode="json"),
+            "tenant_id": "tenant-a",
+            "source_id": "source-a",
+            "scope_id": encode_scope_id("tenant-a", "source-a"),
+            "meta": {"notification_delay_minutes": 120},
+        },
+    )
+    source_manager = _Manager({"job-source": source_job})
+    target_manager = _Manager()
+    multi_agent_manager = _MultiAgentManager(
+        {
+            encode_scope_id("tenant-b", "source-a"): _Workspace(
+                target_manager,
+            ),
+        },
+    )
+    client = _build_client(
+        source_manager,
+        multi_agent_manager=multi_agent_manager,
+        tenant_workspace_pool=_TenantWorkspacePool(),
+    )
+    _install_provider_manager(
+        {},
+        providers_by_tenant={encode_scope_id("tenant-b", "source-a"): {}},
+    )
+
+    response = client.post(
+        "/cron/jobs/job-source/broadcast",
+        json={"target_tenant_ids": ["tenant-b"]},
+    )
+
+    assert response.status_code == 200
+    assert target_manager.created[0].meta["notification_delay_minutes"] == 120
+
+
 def test_broadcast_clears_stale_fallback_meta_when_source_model_slot_missing():
     source_job = CronJobSpec.model_validate(
         {
@@ -712,16 +867,50 @@ def test_broadcast_job_persists_target_identity_from_request():
     ]
 
 
-def test_broadcast_skips_tenant_that_already_has_source_child_job():
+def test_cron_provider_manager_respects_explicit_target_scope(
+    monkeypatch,
+    tmp_path: Path,
+):
+    api_module.ProviderManager = ProviderManager
+    secret_dir = tmp_path / "secret"
+    monkeypatch.setattr(
+        "swe.providers.provider_manager.SECRET_DIR",
+        secret_dir,
+    )
+    ProviderManager.reset_instance_cache()
+
+    source_scope_id = encode_scope_id("tenant-a", "source-a")
+    target_scope_id = encode_scope_id("tenant-b", "source-b")
+
+    with tenant_context(
+        tenant_id="tenant-a",
+        source_id="source-a",
+        scope_id=source_scope_id,
+    ):
+        manager = api_module._get_provider_manager(target_scope_id)
+
+    assert manager.tenant_id == target_scope_id
+    assert (secret_dir / target_scope_id / "providers").exists()
+    assert not (secret_dir / source_scope_id / "providers").exists()
+
+
+def test_broadcast_updates_existing_child_job_definition():
     source_job = CronJobSpec.model_validate(
         {
             **_job_spec("job-source"),
             "schedule": ScheduleSpec(
-                cron="0 9 * * *",
+                cron="30 10 * * *",
             ).model_dump(mode="json"),
             "tenant_id": "tenant-a",
             "source_id": "source-a",
             "scope_id": encode_scope_id("tenant-a", "source-a"),
+            "request": CronJobRequest(
+                input=[{"content": [{"type": "text", "text": "new task"}]}],
+            ).model_dump(mode="json"),
+            "runtime": JobRuntimeSpec(
+                timeout_seconds=456,
+            ).model_dump(mode="json"),
+            "meta": {"notification_delay_minutes": 60},
         },
     )
     existing_child_job = CronJobSpec.model_validate(
@@ -730,12 +919,31 @@ def test_broadcast_skips_tenant_that_already_has_source_child_job():
             "schedule": ScheduleSpec(
                 cron="0 9 * * *",
             ).model_dump(mode="json"),
+            "enabled": False,
             "tenant_id": "tenant-b",
+            "tenant_name": "Bob",
+            "bbk_id": "2002",
             "source_id": "source-a",
             "scope_id": encode_scope_id("tenant-b", "source-a"),
+            "request": CronJobRequest(
+                input=[{"content": [{"type": "text", "text": "old task"}]}],
+                user_id="tenant-b",
+                session_id="cron-task:job-existing-child",
+            ).model_dump(mode="json"),
+            "dispatch": DispatchSpec(
+                channel="console",
+                target=DispatchTarget(
+                    user_id="tenant-b",
+                    session_id="cron-task:job-existing-child",
+                ),
+                meta={"target-owned": True},
+            ).model_dump(mode="json"),
             "meta": {
                 "broadcast_source_job_id": "job-source",
                 "broadcast_offset_minutes": 0,
+                "task_chat_id": "chat-child",
+                "task_session_id": "session-child",
+                "pause_reason": "manual",
             },
         },
     )
@@ -766,19 +974,314 @@ def test_broadcast_skips_tenant_that_already_has_source_child_job():
     )
 
     assert response.status_code == 200
-    assert target_manager.created == []
+    assert len(target_manager.created) == 1
+    updated = target_manager.created[0]
+    assert updated.id == "job-existing-child"
+    assert updated.enabled is False
+    assert updated.tenant_id == "tenant-b"
+    assert updated.tenant_name == "Bob"
+    assert updated.bbk_id == "2002"
+    assert updated.dispatch.target.user_id == "tenant-b"
+    assert updated.dispatch.target.session_id == "cron-task:job-existing-child"
+    assert updated.request is not None
+    assert updated.request.user_id == "tenant-b"
+    assert updated.request.session_id == "cron-task:job-existing-child"
+    assert updated.request.input == [
+        {"content": [{"type": "text", "text": "new task"}]},
+    ]
+    assert updated.schedule.cron == "30 10 * * *"
+    assert updated.runtime.timeout_seconds == 456
+    assert updated.meta["notification_delay_minutes"] == 60
+    assert updated.meta["task_chat_id"] == "chat-child"
+    assert updated.meta["task_session_id"] == "session-child"
+    assert updated.meta["pause_reason"] == "manual"
     assert response.json()["results"] == [
         {
             "tenant_id": "tenant-b",
             "success": True,
             "job_id": "job-existing-child",
-            "cron": "0 9 * * *",
+            "cron": "30 10 * * *",
             "timezone": "UTC",
             "offset_minutes": 0,
             "notification_timezone": "UTC",
             "error": "",
-            "warning": (
-                "broadcast skipped: target tenant already has child job"
-            ),
+            "warning": "",
+        },
+    ]
+
+
+def test_list_broadcast_children_returns_empty_for_undistributed_job(
+    monkeypatch,
+):
+    async def _list_tenants(_source_id, source_filter=True):
+        del source_filter
+        return ["tenant-b"]
+
+    monkeypatch.setattr(api_module, "list_logical_tenant_ids", _list_tenants)
+    source_job = CronJobSpec.model_validate(
+        {
+            **_job_spec("job-source"),
+            "tenant_id": "tenant-a",
+            "source_id": "source-a",
+            "scope_id": encode_scope_id("tenant-a", "source-a"),
+        },
+    )
+    source_manager = _Manager({"job-source": source_job})
+    target_manager = _Manager()
+    client = _build_client(
+        source_manager,
+        multi_agent_manager=_MultiAgentManager(
+            {
+                encode_scope_id("tenant-b", "source-a"): _Workspace(
+                    target_manager,
+                ),
+            },
+        ),
+        tenant_workspace_pool=_TenantWorkspacePool(),
+    )
+
+    response = client.get("/cron/jobs/job-source/broadcast/children")
+
+    assert response.status_code == 200
+    assert response.json() == {"items": []}
+
+
+def test_list_broadcast_children_returns_matching_target_jobs(monkeypatch):
+    async def _list_tenants(_source_id, source_filter=True):
+        del source_filter
+        return ["tenant-b", "tenant-c"]
+
+    monkeypatch.setattr(api_module, "list_logical_tenant_ids", _list_tenants)
+    source_job = CronJobSpec.model_validate(
+        {
+            **_job_spec("job-source"),
+            "tenant_id": "tenant-a",
+            "source_id": "source-a",
+            "scope_id": encode_scope_id("tenant-a", "source-a"),
+        },
+    )
+    matching_child = CronJobSpec.model_validate(
+        {
+            **_job_spec("child-b"),
+            "enabled": True,
+            "tenant_id": "tenant-b",
+            "tenant_name": "Bob",
+            "bbk_id": "2002",
+            "source_id": "source-a",
+            "scope_id": encode_scope_id("tenant-b", "source-a"),
+            "meta": {
+                "broadcast_source_job_id": "job-source",
+                "broadcast_offset_minutes": 5,
+            },
+        },
+    )
+    other_child = CronJobSpec.model_validate(
+        {
+            **_job_spec("child-c"),
+            "tenant_id": "tenant-c",
+            "source_id": "source-a",
+            "scope_id": encode_scope_id("tenant-c", "source-a"),
+            "meta": {"broadcast_source_job_id": "other-source"},
+        },
+    )
+    source_manager = _Manager({"job-source": source_job})
+    target_b = _Manager({"child-b": matching_child})
+    target_c = _Manager({"child-c": other_child})
+    client = _build_client(
+        source_manager,
+        multi_agent_manager=_MultiAgentManager(
+            {
+                encode_scope_id("tenant-b", "source-a"): _Workspace(
+                    target_b,
+                ),
+                encode_scope_id("tenant-c", "source-a"): _Workspace(
+                    target_c,
+                ),
+            },
+        ),
+        tenant_workspace_pool=_TenantWorkspacePool(),
+    )
+
+    response = client.get("/cron/jobs/job-source/broadcast/children")
+
+    assert response.status_code == 200
+    assert response.json()["items"] == [
+        {
+            "tenant_id": "tenant-b",
+            "tenant_name": "Bob",
+            "bbk_id": "2002",
+            "job_id": "child-b",
+            "job_name": "tenant cron",
+            "enabled": True,
+            "cron": "* * * * *",
+            "timezone": "UTC",
+            "offset_minutes": 5,
+            "last_status": None,
+            "last_run_at": None,
+            "last_error": None,
+        },
+    ]
+
+
+def test_batch_delete_broadcast_children_validates_source(monkeypatch):
+    async def _list_tenants(_source_id, source_filter=True):
+        del source_filter
+        return ["tenant-b"]
+
+    monkeypatch.setattr(api_module, "list_logical_tenant_ids", _list_tenants)
+    source_job = CronJobSpec.model_validate(
+        {
+            **_job_spec("job-source"),
+            "tenant_id": "tenant-a",
+            "source_id": "source-a",
+            "scope_id": encode_scope_id("tenant-a", "source-a"),
+        },
+    )
+    matching_child = CronJobSpec.model_validate(
+        {
+            **_job_spec("child-b"),
+            "tenant_id": "tenant-b",
+            "source_id": "source-a",
+            "scope_id": encode_scope_id("tenant-b", "source-a"),
+            "meta": {"broadcast_source_job_id": "job-source"},
+        },
+    )
+    unrelated_child = CronJobSpec.model_validate(
+        {
+            **_job_spec("unrelated-child"),
+            "tenant_id": "tenant-b",
+            "source_id": "source-a",
+            "scope_id": encode_scope_id("tenant-b", "source-a"),
+            "meta": {"broadcast_source_job_id": "other-source"},
+        },
+    )
+    source_manager = _Manager({"job-source": source_job})
+    target_manager = _Manager(
+        {
+            "child-b": matching_child,
+            "unrelated-child": unrelated_child,
+        },
+    )
+    client = _build_client(
+        source_manager,
+        multi_agent_manager=_MultiAgentManager(
+            {
+                encode_scope_id("tenant-b", "source-a"): _Workspace(
+                    target_manager,
+                ),
+            },
+        ),
+        tenant_workspace_pool=_TenantWorkspacePool(),
+    )
+
+    response = client.post(
+        "/cron/jobs/job-source/broadcast/children/delete",
+        json={
+            "items": [
+                {"tenant_id": "tenant-b", "job_id": "child-b"},
+                {"tenant_id": "tenant-b", "job_id": "unrelated-child"},
+            ],
+        },
+    )
+
+    assert response.status_code == 200
+    assert target_manager.deleted == ["child-b"]
+    assert response.json()["results"] == [
+        {
+            "tenant_id": "tenant-b",
+            "job_id": "child-b",
+            "success": True,
+            "status": "deleted",
+            "message": "",
+        },
+        {
+            "tenant_id": "tenant-b",
+            "job_id": "unrelated-child",
+            "success": False,
+            "status": "failed",
+            "message": "child job does not belong to source job",
+        },
+    ]
+
+
+def test_batch_run_broadcast_children_skips_disabled_jobs(monkeypatch):
+    async def _list_tenants(_source_id, source_filter=True):
+        del source_filter
+        return ["tenant-b"]
+
+    monkeypatch.setattr(api_module, "list_logical_tenant_ids", _list_tenants)
+    source_job = CronJobSpec.model_validate(
+        {
+            **_job_spec("job-source"),
+            "tenant_id": "tenant-a",
+            "source_id": "source-a",
+            "scope_id": encode_scope_id("tenant-a", "source-a"),
+        },
+    )
+    enabled_child = CronJobSpec.model_validate(
+        {
+            **_job_spec("child-enabled"),
+            "enabled": True,
+            "tenant_id": "tenant-b",
+            "source_id": "source-a",
+            "scope_id": encode_scope_id("tenant-b", "source-a"),
+            "meta": {"broadcast_source_job_id": "job-source"},
+        },
+    )
+    disabled_child = CronJobSpec.model_validate(
+        {
+            **_job_spec("child-disabled"),
+            "enabled": False,
+            "tenant_id": "tenant-b",
+            "source_id": "source-a",
+            "scope_id": encode_scope_id("tenant-b", "source-a"),
+            "meta": {"broadcast_source_job_id": "job-source"},
+        },
+    )
+    source_manager = _Manager({"job-source": source_job})
+    target_manager = _Manager(
+        {
+            "child-enabled": enabled_child,
+            "child-disabled": disabled_child,
+        },
+    )
+    client = _build_client(
+        source_manager,
+        multi_agent_manager=_MultiAgentManager(
+            {
+                encode_scope_id("tenant-b", "source-a"): _Workspace(
+                    target_manager,
+                ),
+            },
+        ),
+        tenant_workspace_pool=_TenantWorkspacePool(),
+    )
+
+    response = client.post(
+        "/cron/jobs/job-source/broadcast/children/run",
+        json={
+            "items": [
+                {"tenant_id": "tenant-b", "job_id": "child-enabled"},
+                {"tenant_id": "tenant-b", "job_id": "child-disabled"},
+            ],
+        },
+    )
+
+    assert response.status_code == 200
+    assert target_manager.ran == ["child-enabled"]
+    assert response.json()["results"] == [
+        {
+            "tenant_id": "tenant-b",
+            "job_id": "child-enabled",
+            "success": True,
+            "status": "started",
+            "message": "",
+        },
+        {
+            "tenant_id": "tenant-b",
+            "job_id": "child-disabled",
+            "success": True,
+            "status": "skipped",
+            "message": "paused, not executed",
         },
     ]

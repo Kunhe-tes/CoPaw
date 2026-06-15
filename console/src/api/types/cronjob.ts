@@ -101,6 +101,42 @@ export interface CronBroadcastResponse {
   results: CronBroadcastTenantResult[];
 }
 
+export interface CronBroadcastChildItem {
+  tenant_id: string;
+  tenant_name?: string | null;
+  bbk_id?: string | null;
+  job_id: string;
+  job_name: string;
+  enabled: boolean;
+  cron: string;
+  timezone: string;
+  offset_minutes: number;
+  last_status?: string | null;
+  last_run_at?: string | null;
+  last_error?: string | null;
+}
+
+export interface CronBroadcastChildrenResponse {
+  items: CronBroadcastChildItem[];
+}
+
+export interface CronBroadcastChildRef {
+  tenant_id: string;
+  job_id: string;
+}
+
+export interface CronBroadcastChildOperationResult {
+  tenant_id: string;
+  job_id: string;
+  success: boolean;
+  status: "deleted" | "started" | "skipped" | "failed" | string;
+  message: string;
+}
+
+export interface CronBroadcastChildrenBatchResponse {
+  results: CronBroadcastChildOperationResult[];
+}
+
 export type CronJobSpecInputLegacy = Record<string, unknown>;
 export type CronJobSpecOutputLegacy = Record<string, unknown>;
 export type CronJobViewLegacy = Record<string, unknown>;

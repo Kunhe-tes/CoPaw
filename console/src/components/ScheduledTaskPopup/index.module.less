@@ -154,6 +154,42 @@
   }
 }
 
+.delayPicker {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 120px;
+  gap: 8px;
+}
+
+.delayInput,
+.delayUnitSelect {
+  height: 32px;
+  border: 1px solid #d9d9d9;
+  border-radius: 4px;
+  background: white;
+  color: #333;
+  font-size: 12px;
+  padding: 0 10px;
+  transition: all 0.2s;
+
+  &:hover {
+    border-color: #1677ff;
+  }
+
+  &:focus {
+    outline: none;
+    border-color: #1677ff;
+    box-shadow: 0 0 0 2px rgba(22, 119, 255, 0.1);
+  }
+}
+
+.delayInput {
+  width: 100%;
+}
+
+.delayUnitSelect {
+  width: 100%;
+}
+
 .weekdayGrid {
   display: flex;
   gap: 4px;
