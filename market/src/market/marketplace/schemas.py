@@ -47,6 +47,7 @@ class MarketSkillResponse(BaseModel):
     updated_at: Optional[str]
     call_count: int = 0
     user_count: int = 0
+    version_unchanged: bool = False
 
 
 class SkillUserStat(BaseModel):
@@ -195,6 +196,7 @@ class MarketMCPItem(BaseModel):
     bbk_ids: list[str] = Field(default_factory=list)
     created_at: Optional[str] = None
     updated_at: Optional[str] = None
+    version_unchanged: bool = False
     call_count: int = 0
     user_count: int = 0
 
@@ -255,6 +257,7 @@ class UploadMCPResponse(BaseModel):
 
     success: bool
     error: Optional[str] = None
+    version_unchanged: bool = False
 
 
 class UpdateMarketMCPMetadataRequest(BaseModel):

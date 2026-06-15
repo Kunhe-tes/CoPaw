@@ -112,11 +112,15 @@ export function PublishMCPModal({
       const values = await form.validateFields();
       setLoading(true);
 
-      await myMcpApi.publishSingleToMarket(clientKey, {
+      const result = await myMcpApi.publishSingleToMarket(clientKey, {
         bbk_ids: values.bbk_ids,
         overwrite,
       });
-      message.success("同步成功");
+      if (result.version_unchanged) {
+        message.warning("内容与市场最新版本一致，市场版本未增加");
+      } else {
+        message.success("同步成功");
+      }
       onSuccess();
     } catch (err) {
       // 尝试提取 409 冲突详情

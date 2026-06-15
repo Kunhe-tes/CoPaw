@@ -14,6 +14,7 @@ import type {
   DistributionRecord,
   RecallResponse,
 } from "../types";
+import type { UploadMCPResponse } from "../types/marketMcp";
 
 export const marketMcpApi = {
   /**
@@ -84,7 +85,7 @@ export const marketMcpApi = {
       })),
       body: formData,
     };
-    return request<MarketMCPItem>("/market/mcp/upload", opts);
+    return request<UploadMCPResponse>("/market/mcp/upload", opts);
   },
 
   /**

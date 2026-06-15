@@ -845,12 +845,15 @@ class MarketplaceService:
         req: PublishSkillRequest,
         operator_id: str = "",
         operator_name: str = "",
-    ) -> MarketItem:
+    ) -> tuple[MarketItem, bool]:
         """上架技能。同名 → 续接到现有 MarketItem（R4）.
 
         Args:
             operator_id / operator_name: 真正点按钮的人（admin 的 X-User-Id），用于
                 version 快照里的 created_by；未传时退化为 req.creator_*（向后兼容）。
+
+        Returns:
+            (MarketItem, version_unchanged): 商品条目与版本是否未变化的标志。
 
         如果请求中包含 skill_name，则从用户工作区复制整个技能目录到市场。
         否则使用 skill_json 和 skill_md 字段创建目录。
@@ -891,6 +894,7 @@ class MarketplaceService:
                 pass
 
         version_svc = SkillVersionService(self.marketplace_root)
+        version_unchanged = False
         try:
             snapshot = version_svc.create_version_snapshot(
                 source_id=source_id,
@@ -910,6 +914,8 @@ class MarketplaceService:
             # 当走到"内容变 → bump"且 _bump_patch 与 _bump_version 因边界不同
             # 而结果不一致时，以快照的 version_id 为准。
             if snapshot.version_id and snapshot.version_id != item.version:
+                # 版本被回滚 = R7 no-op（内容未变）
+                version_unchanged = True
                 item.version = snapshot.version_id
             save_index(self.marketplace_root, source_id, items)
         except ValueError as e:
@@ -951,7 +957,7 @@ class MarketplaceService:
             except Exception as e:
                 logger.warning("Failed to log publish operation: %s", e)
 
-        return item
+        return item, version_unchanged
 
     async def unpublish_skill(
         self,
@@ -1988,7 +1994,7 @@ class MarketplaceService:
         self,
         source_id: str,
         req: PublishMCPRequest,
-    ) -> MarketItem:
+    ) -> tuple[MarketItem, bool]:
         """发布 MCP 到市场（R4：按 name 续接，不再因同名拒绝）.
 
         Args:
@@ -1996,7 +2002,7 @@ class MarketplaceService:
             req: 发布请求体（含 source_user_* / operator_* 字段，兼容旧调用方）。
 
         Returns:
-            创建或更新的 MarketItem。
+            (MarketItem, version_unchanged): 商品条目与版本是否未变化的标志。
         """
         items = load_index(self.marketplace_root, source_id)
 
@@ -2083,6 +2089,7 @@ class MarketplaceService:
         manifest = version_svc._load_manifest(source_id, item.item_id)
         new_sig = version_svc._calculate_signature(mcp_dir)
         existing_ids = {v.version_id for v in manifest.versions}
+        version_unchanged = False
 
         if manifest.versions:
             sorted_versions = sorted(
@@ -2093,6 +2100,7 @@ class MarketplaceService:
             last_version = sorted_versions[0]
             if last_version.signature == new_sig:
                 # 内容未变 → 复用历史最新版的 version_id（让 R7 no-op 接管）
+                version_unchanged = True
                 item.version = last_version.version_id
             elif item.version in existing_ids:
                 # 内容变了但 item.version 已在历史中 → 在历史最新版上 _bump_patch
@@ -2117,6 +2125,8 @@ class MarketplaceService:
                 source_user_version=source_user_version,
             )
             if snapshot.version_id and snapshot.version_id != item.version:
+                # 快照回滚版本号 = R7 no-op
+                version_unchanged = True
                 item.version = snapshot.version_id
         except ValueError as e:
             logger.warning(
@@ -2157,7 +2167,7 @@ class MarketplaceService:
             except Exception as e:
                 logger.warning("Failed to log MCP publish operation: %s", e)
 
-        return item
+        return item, version_unchanged
 
     async def list_mcp_items(
         self,

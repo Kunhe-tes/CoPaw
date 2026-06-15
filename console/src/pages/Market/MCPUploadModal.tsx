@@ -274,7 +274,7 @@ export function MCPUploadModal({
           ? { file: parsedUpload.file as File }
           : { raw_json: parsedUpload.rawJson as string };
 
-      await marketMcpApi.uploadMCP({
+      const result = await marketMcpApi.uploadMCP({
         name: values.name,
         chinese_name: values.chinese_name,
         description: values.description,
@@ -283,7 +283,11 @@ export function MCPUploadModal({
         ...payload,
       });
 
-      message.success("上传成功");
+      if (result.version_unchanged) {
+        message.warning("内容与市场最新版本一致，市场版本未增加");
+      } else {
+        message.success("上传成功");
+      }
       form.resetFields();
       setParsedUpload(null);
       setFileName("");

@@ -468,7 +468,7 @@ async def publish_skill(
         except Exception:  # pylint: disable=broad-except
             operator_name = x_user_name
     try:
-        item = await svc.publish_skill(
+        item, version_unchanged = await svc.publish_skill(
             source_id,
             req,
             operator_id=x_user_id or "",
@@ -509,6 +509,7 @@ async def publish_skill(
         status=item.status,
         created_at=item.created_at,
         updated_at=item.updated_at,
+        version_unchanged=version_unchanged,
     )
 
 

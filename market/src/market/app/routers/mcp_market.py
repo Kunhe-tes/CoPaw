@@ -207,7 +207,7 @@ async def publish_mcp(
     _require_manager(x_manager)
     svc = request.app.state.marketplace
     try:
-        item = await svc.publish_mcp(source_id, req)
+        item, version_unchanged = await svc.publish_mcp(source_id, req)
     except MCPNameConflictError as exc:
         raise HTTPException(
             status_code=409,
@@ -246,6 +246,7 @@ async def publish_mcp(
         updated_at=item.updated_at,
         call_count=0,
         user_count=0,
+        version_unchanged=version_unchanged,
     )
 
 
@@ -338,8 +339,11 @@ async def upload_mcp(
 
     svc = request.app.state.marketplace
     try:
-        await svc.publish_mcp(source_id, req)
-        return UploadMCPResponse(success=True)
+        _, version_unchanged = await svc.publish_mcp(source_id, req)
+        return UploadMCPResponse(
+            success=True,
+            version_unchanged=version_unchanged,
+        )
     except MCPNameConflictError as exc:
         return UploadMCPResponse(
             success=False,

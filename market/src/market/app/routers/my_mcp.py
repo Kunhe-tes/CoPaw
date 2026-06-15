@@ -328,6 +328,10 @@ class PublishMCPResult(BaseModel):
     item_id: Optional[str] = Field(None, description="市场 item ID")
     success: bool = Field(..., description="是否成功")
     error: Optional[str] = Field(None, description="错误信息")
+    version_unchanged: bool = Field(
+        False,
+        description="内容未变化，市场版本未增加",
+    )
 
 
 class PublishMCPResponse(BaseModel):
@@ -345,6 +349,10 @@ class PublishSingleMCPResponse(BaseModel):
     client_key: str = Field(..., description=MCP_CLIENT_KEY_DESCRIPTION)
     item_id: str = Field(..., description="市场 item ID")
     success: bool = Field(..., description="是否成功")
+    version_unchanged: bool = Field(
+        False,
+        description="内容未变化，市场版本未增加",
+    )
 
 
 class MarketPublishContext(BaseModel):
@@ -706,7 +714,7 @@ async def _publish_client_to_market(
     overwrite: bool = False,
 ) -> PublishMCPResult:
     """复用单个 MCP 的市场发布逻辑（透传 source_user_* / operator_*）."""
-    item = await marketplace.publish_mcp(
+    item, version_unchanged = await marketplace.publish_mcp(
         publish_context.source_id,
         MarketPublishMCPRequest(
             client_key=client_key,
@@ -731,6 +739,7 @@ async def _publish_client_to_market(
         client_key=client_key,
         success=True,
         item_id=item.item_id,
+        version_unchanged=version_unchanged,
     )
 
 
@@ -799,6 +808,7 @@ async def publish_single_my_mcp_to_market(
         client_key=result.client_key,
         item_id=result.item_id or "",
         success=result.success,
+        version_unchanged=result.version_unchanged,
     )
 
 

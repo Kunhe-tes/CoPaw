@@ -56,6 +56,8 @@ export interface MarketMCPItem {
   call_count: number;
   /** 使用人数 */
   user_count: number;
+  /** 内容未变化，市场版本未增加 */
+  version_unchanged?: boolean;
 }
 
 /** MCP 用户使用统计 */
@@ -92,6 +94,16 @@ export interface MCPUploadRequest {
   guidance?: string;
   /** 关联 BBK ID 列表 */
   bbk_ids?: string[];
+}
+
+/** MCP 上传响应 */
+export interface UploadMCPResponse {
+  /** 是否成功 */
+  success: boolean;
+  /** 错误信息 */
+  error?: string;
+  /** 内容未变化，市场版本未增加 */
+  version_unchanged?: boolean;
 }
 
 /** MCP 分发请求 */
