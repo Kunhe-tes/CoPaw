@@ -12,6 +12,7 @@ from fastapi import FastAPI, Request
 from fastapi.testclient import TestClient
 
 from swe.config.config import ToolResultCompactConfig
+from swe.config.context import encode_scope_id
 from swe.app.middleware.tenant_identity import TenantIdentityMiddleware
 from swe.app.source_system_config import router as source_config_router
 from swe.app.source_system_config.middleware import (
@@ -1569,12 +1570,18 @@ class TestSourceSystemConfigMiddleware:
 class TestSourceSystemConfigApi:
     """验证 source 系统配置 API。"""
 
-    def _build_client(self, store, workspace=None) -> TestClient:
+    def _build_client(
+        self,
+        store,
+        workspace=None,
+        source_scheduler=None,
+    ) -> TestClient:
         """创建带真实路由和中间件的测试客户端。"""
         return self._build_client_with_server_exception_mode(
             store,
             True,
             workspace=workspace,
+            source_scheduler=source_scheduler,
         )
 
     def _build_client_with_server_exception_mode(
@@ -1582,6 +1589,7 @@ class TestSourceSystemConfigApi:
         store,
         raise_server_exceptions: bool,
         workspace=None,
+        source_scheduler=None,
     ) -> TestClient:
         """创建可选择是否透传服务端异常的测试客户端。"""
         app = FastAPI()
@@ -1591,6 +1599,7 @@ class TestSourceSystemConfigApi:
             time_fn=lambda: 100,
         )
         app.state.source_system_config_service = service
+        app.state.source_system_task_scheduler = source_scheduler
         app.include_router(source_config_router, prefix="/api")
         if workspace is not None:
 
@@ -1691,15 +1700,15 @@ class TestSourceSystemConfigApi:
         }
         assert list(store.records) == ["portal"]
 
-    def test_manager_update_refreshes_cleanup_system_job(self):
-        """打开清理配置后，应立即刷新当前工作区的外部系统任务。"""
+    def test_manager_update_refreshes_cleanup_source_task(self):
+        """保存清理配置后，应按最后修改者身份刷新 source 级系统任务。"""
         store = _FakeManagementStore()
-        cron_manager = SimpleNamespace(
-            register_task_session_cleanup=AsyncMock(),
+        source_scheduler = SimpleNamespace(
+            refresh_task_session_cleanup=AsyncMock(),
         )
         client = self._build_client(
             store,
-            workspace=SimpleNamespace(cron_manager=cron_manager),
+            source_scheduler=source_scheduler,
         )
 
         response = client.put(
@@ -1722,7 +1731,16 @@ class TestSourceSystemConfigApi:
         )
 
         assert response.status_code == 200
-        cron_manager.register_task_session_cleanup.assert_awaited_once_with()
+        refresh = source_scheduler.refresh_task_session_cleanup
+        refresh.assert_awaited_once()
+        kwargs = refresh.await_args.kwargs
+        identity = kwargs["identity"]
+        assert kwargs["source_id"] == "portal"
+        assert kwargs["config"].source_id == "portal"
+        assert identity.tenant_id == "tenant-a"
+        assert identity.scope_id == encode_scope_id("tenant-a", "portal")
+        assert identity.from_id == "tenant-a"
+        assert identity.updated_by == "alice"
 
     def test_current_source_update_rejects_body_source_override(self):
         """current-source 接口不允许请求体携带 source_id 覆盖目标 source。"""

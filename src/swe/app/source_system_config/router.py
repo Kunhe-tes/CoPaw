@@ -6,9 +6,7 @@ from typing import NoReturn
 import logging
 from fastapi import APIRouter, HTTPException, Request
 
-from swe.config.context import is_valid_identity_value
-
-from ..agent_context import get_agent_for_request
+from swe.config.context import encode_scope_id, is_valid_identity_value
 
 from .models import (
     CurrentSourceSystemConfigResponse,
@@ -90,30 +88,56 @@ def _raise_invalid_storage_data(exc: Exception) -> NoReturn:
     ) from exc
 
 
-async def _refresh_cleanup_system_job(request: Request) -> None:
-    """配置变更后刷新当前 Agent 的清理系统任务。"""
-    workspace = getattr(request.state, "workspace", None)
-    cron_manager = getattr(workspace, "cron_manager", None)
-    if cron_manager is None:
-        if getattr(request.app.state, "multi_agent_manager", None) is None:
-            return
-        try:
-            workspace = await get_agent_for_request(request)
-            cron_manager = getattr(workspace, "cron_manager", None)
-        except Exception as exc:  # noqa: BLE001
-            logger.warning(
-                "刷新定时任务会话清理系统任务失败: %s",
-                exc,
-            )
-            return
+def _get_scheduler_identity(request: Request, updated_by: str | None):
+    """按最后修改配置的请求身份构造外部调度回调参数。"""
+    from .task_scheduler import SourceSchedulerIdentity
 
-    refresh = getattr(cron_manager, "register_task_session_cleanup", None)
-    if refresh is None:
+    source_id = _get_request_source_id(request)
+    tenant_id = str(
+        getattr(request.state, "tenant_id", None)
+        or request.headers.get("X-Tenant-Id")
+        or updated_by
+        or "",
+    )
+    scope_id = str(getattr(request.state, "scope_id", None) or "")
+    if not scope_id and tenant_id:
+        scope_id = encode_scope_id(tenant_id, source_id)
+    return SourceSchedulerIdentity(
+        tenant_id=tenant_id,
+        scope_id=scope_id,
+        from_id=tenant_id,
+        updated_by=updated_by,
+    )
+
+
+async def _refresh_cleanup_source_task(
+    request: Request,
+    *,
+    source_id: str,
+    updated_by: str | None,
+) -> None:
+    """配置变更后刷新当前 source 的清理系统任务。"""
+    scheduler = getattr(
+        request.app.state,
+        "source_system_task_scheduler",
+        None,
+    )
+    if scheduler is None:
+        logger.warning("Source system task scheduler is not initialized")
         return
+
     try:
-        await refresh()
+        config = await _get_service(request).resolve_config(
+            source_id,
+            force_refresh=True,
+        )
+        await scheduler.refresh_task_session_cleanup(
+            source_id=source_id,
+            config=config,
+            identity=_get_scheduler_identity(request, updated_by),
+        )
     except Exception:  # noqa: BLE001
-        logger.exception("刷新定时任务会话清理系统任务失败")
+        logger.exception("刷新 source 定时任务会话清理系统任务失败")
 
 
 @router.get("/effective", response_model=EffectiveSourceSystemConfig)
@@ -162,7 +186,11 @@ async def upsert_current_source_system_config(
             payload.config,
             updated_by=updated_by,
         )
-        await _refresh_cleanup_system_job(request)
+        await _refresh_cleanup_source_task(
+            request,
+            source_id=source_id,
+            updated_by=updated_by,
+        )
         return response
     except SourceSystemConfigStoreUnavailable as exc:
         _raise_storage_unavailable(exc)
@@ -175,7 +203,7 @@ async def delete_current_source_system_config(
     request: Request,
 ) -> dict[str, bool]:
     """删除当前请求 source_id 的原始配置。"""
-    _require_manager(request)
+    updated_by = _require_manager(request)
     source_id = _get_request_source_id(request)
     service = _get_service(request)
     try:
@@ -184,7 +212,11 @@ async def delete_current_source_system_config(
         _raise_storage_unavailable(exc)
     if not deleted:
         raise HTTPException(status_code=404, detail="Source config not found")
-    await _refresh_cleanup_system_job(request)
+    await _refresh_cleanup_source_task(
+        request,
+        source_id=source_id,
+        updated_by=updated_by,
+    )
     return {"deleted": True}
 
 
