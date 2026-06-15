@@ -366,7 +366,6 @@ async def lifespan(
 
     # --- 初始化 source 系统配置模块 ---
     try:
-        from .crons.scheduler_adapter import NoopSchedulerAdapter
         from .source_system_config.service import SourceSystemConfigService
         from .source_system_config.store import SourceSystemConfigStore
         from .source_system_config.task_binding_store import (
@@ -387,26 +386,25 @@ async def lifespan(
         has_task_binding_db = db_connection is not None and bool(
             getattr(db_connection, "is_connected", False),
         )
-        if not isinstance(scheduler_adapter, NoopSchedulerAdapter):
-            if has_task_binding_db:
-                app.state.source_system_task_scheduler = (
-                    SourceSystemTaskScheduler(
-                        binding_store=SourceSystemTaskBindingStore(
-                            db_connection,
-                        ),
-                        scheduler_adapter=scheduler_adapter,
-                        callback_url=_build_internal_cron_callback_url(),
-                        tenant_scope_store_factory=(
-                            lambda: tenant_workspace_pool.init_source_store
-                        ),
-                        multi_agent_manager=multi_agent_manager,
-                        agent_id="default",
-                    )
+        if has_task_binding_db:
+            app.state.source_system_task_scheduler = (
+                SourceSystemTaskScheduler(
+                    binding_store=SourceSystemTaskBindingStore(
+                        db_connection,
+                    ),
+                    scheduler_adapter=scheduler_adapter,
+                    callback_url=_build_internal_cron_callback_url(),
+                    tenant_scope_store_factory=(
+                        lambda: tenant_workspace_pool.init_source_store
+                    ),
+                    multi_agent_manager=multi_agent_manager,
+                    agent_id="default",
                 )
-            else:
-                logger.warning(
-                    "Source system task scheduler skipped: database is not connected",
-                )
+            )
+        else:
+            logger.warning(
+                "Source system task scheduler skipped: database is not connected",
+            )
         multi_agent_manager.set_source_system_config_service(
             source_config_service,
         )

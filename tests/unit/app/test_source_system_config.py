@@ -12,7 +12,6 @@ from fastapi import FastAPI, Request
 from fastapi.testclient import TestClient
 
 from swe.config.config import ToolResultCompactConfig
-from swe.config.context import encode_scope_id
 from swe.app.middleware.tenant_identity import TenantIdentityMiddleware
 from swe.app.source_system_config import router as source_config_router
 from swe.app.source_system_config.middleware import (
@@ -1743,7 +1742,6 @@ class TestSourceSystemConfigApi:
         assert kwargs["source_id"] == "portal"
         assert kwargs["config"].source_id == "portal"
         assert identity.tenant_id == "tenant-a"
-        assert identity.scope_id == encode_scope_id("tenant-a", "portal")
         assert identity.from_id == "tenant-a"
         assert identity.updated_by == "alice"
 
@@ -1784,10 +1782,6 @@ class TestSourceSystemConfigApi:
         assert kwargs["source_id"] == "target-source"
         assert kwargs["config"].source_id == "target-source"
         assert identity.tenant_id == "tenant-a"
-        assert identity.scope_id == encode_scope_id(
-            "tenant-a",
-            "target-source",
-        )
         assert identity.from_id == "tenant-a"
         assert identity.updated_by == "alice"
 
@@ -1894,10 +1888,6 @@ class TestSourceSystemConfigApi:
         assert kwargs["config"].source_id == "target-source"
         assert kwargs["config"].is_default is True
         assert identity.tenant_id == "tenant-a"
-        assert identity.scope_id == encode_scope_id(
-            "tenant-a",
-            "target-source",
-        )
         assert identity.from_id == "tenant-a"
         assert identity.updated_by == "bob"
 

@@ -5,7 +5,6 @@ CREATE TABLE IF NOT EXISTS swe_source_system_task_binding (
     cron VARCHAR(64) NOT NULL,
     enabled TINYINT(1) NOT NULL DEFAULT 1,
     scheduler_tenant_id VARCHAR(64) DEFAULT NULL,
-    scheduler_scope_id VARCHAR(128) DEFAULT NULL,
     scheduler_from_id VARCHAR(128) DEFAULT NULL,
     updated_by VARCHAR(128) DEFAULT NULL,
     updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP

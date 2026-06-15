@@ -46,7 +46,6 @@ swe_source_system_task_binding
 - cron
 - enabled
 - scheduler_tenant_id
-- scheduler_scope_id
 - scheduler_from_id
 - updated_by
 - updated_at
@@ -58,8 +57,13 @@ swe_source_system_task_binding
 (source_id, task_type)
 ```
 
-`scheduler_tenant_id`、`scheduler_scope_id`、`scheduler_from_id` 只记录最近
+`scheduler_tenant_id`、`scheduler_from_id` 只记录最近
 一次修改配置时用于注册调度平台的身份字段，不参与任务唯一性。
+`scopeId` 不持久化；注册外部调度任务时按普通任务规则由
+`tenant_id-source_id` 生成。
+如果环境已经创建过旧表结构，执行
+`scripts/sql/migrate_source_system_task_binding_drop_scope.sql`
+删除不再使用的 `scheduler_scope_id` 列。
 
 ## 注册流程
 
@@ -84,7 +88,7 @@ swe_source_system_task_binding
 {
   "tenant_id": "last-updater-tenant",
   "source_id": "source-a",
-  "scopeId": "last-updater-scope",
+  "scopeId": "last-updater-tenant-source-a",
   "fromId": "last-updater-tenant",
   "agent_id": "",
   "task_type": "task_session_cleanup"

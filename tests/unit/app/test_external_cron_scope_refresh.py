@@ -162,7 +162,7 @@ async def test_scheduler_payload_uses_logical_tenant_and_source() -> None:
 async def test_source_cleanup_scheduler_payload_uses_source_only_job_name() -> (
     None
 ):
-    """source 级 cleanup payload 应使用 source 维度 jobDesc 和显式 scope。"""
+    """source 级 cleanup payload 应使用 source 维度 jobDesc 和默认 scopeId。"""
     adapter = CapturingSchedulerAdapter()
 
     ext_id = await adapter.register_job(
@@ -174,7 +174,6 @@ async def test_source_cleanup_scheduler_payload_uses_source_only_job_name() -> (
         job_name="task_session_cleanup",
         cron="30 2 * * *",
         callback_url="http://swe.local/api/internal/cron/callback",
-        scope_id="scope-source-a",
         from_id="alice",
         source_level=True,
     )
@@ -190,7 +189,7 @@ async def test_source_cleanup_scheduler_payload_uses_source_only_job_name() -> (
         "agent_id": "",
         "task_type": "cleanup",
         "job_id": "_source_task_session_cleanup",
-        "scopeId": "scope-source-a",
+        "scopeId": "tenant-a-source-a",
         "fromId": "alice",
     }
 

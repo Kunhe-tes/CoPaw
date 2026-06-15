@@ -22,7 +22,6 @@ class SourceSystemTaskBinding:
     cron: str
     enabled: bool
     scheduler_tenant_id: str | None = None
-    scheduler_scope_id: str | None = None
     scheduler_from_id: str | None = None
     updated_by: str | None = None
     updated_at: datetime | None = None
@@ -85,7 +84,6 @@ class SourceSystemTaskBindingStore:
                 cron,
                 enabled,
                 scheduler_tenant_id,
-                scheduler_scope_id,
                 scheduler_from_id,
                 updated_by,
                 updated_at
@@ -111,7 +109,6 @@ class SourceSystemTaskBindingStore:
         cron: str,
         enabled: bool,
         scheduler_tenant_id: str | None = None,
-        scheduler_scope_id: str | None = None,
         scheduler_from_id: str | None = None,
         updated_by: str | None = None,
     ) -> SourceSystemTaskBinding:
@@ -124,7 +121,6 @@ class SourceSystemTaskBindingStore:
             cron=cron,
             enabled=enabled,
             scheduler_tenant_id=scheduler_tenant_id,
-            scheduler_scope_id=scheduler_scope_id,
             scheduler_from_id=scheduler_from_id,
             updated_by=updated_by,
         )
@@ -136,17 +132,15 @@ class SourceSystemTaskBindingStore:
                 cron,
                 enabled,
                 scheduler_tenant_id,
-                scheduler_scope_id,
                 scheduler_from_id,
                 updated_by
             )
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
             ON DUPLICATE KEY UPDATE
                 external_job_id = VALUES(external_job_id),
                 cron = VALUES(cron),
                 enabled = VALUES(enabled),
                 scheduler_tenant_id = VALUES(scheduler_tenant_id),
-                scheduler_scope_id = VALUES(scheduler_scope_id),
                 scheduler_from_id = VALUES(scheduler_from_id),
                 updated_by = VALUES(updated_by),
                 updated_at = CURRENT_TIMESTAMP
@@ -162,7 +156,6 @@ class SourceSystemTaskBindingStore:
                 binding.cron,
                 int(binding.enabled),
                 binding.scheduler_tenant_id,
-                binding.scheduler_scope_id,
                 binding.scheduler_from_id,
                 binding.updated_by,
             ),
@@ -187,7 +180,6 @@ class SourceSystemTaskBindingStore:
             cron=row["cron"],
             enabled=bool(row["enabled"]),
             scheduler_tenant_id=row.get("scheduler_tenant_id"),
-            scheduler_scope_id=row.get("scheduler_scope_id"),
             scheduler_from_id=row.get("scheduler_from_id"),
             updated_by=row.get("updated_by"),
             updated_at=row.get("updated_at"),

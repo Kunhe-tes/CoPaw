@@ -6,7 +6,7 @@ from typing import NoReturn
 import logging
 from fastapi import APIRouter, HTTPException, Request
 
-from swe.config.context import encode_scope_id, is_valid_identity_value
+from swe.config.context import is_valid_identity_value
 
 from .models import (
     CurrentSourceSystemConfigResponse,
@@ -91,7 +91,6 @@ def _raise_invalid_storage_data(exc: Exception) -> NoReturn:
 def _get_scheduler_identity(
     request: Request,
     *,
-    source_id: str,
     updated_by: str | None,
 ):
     """按最后修改配置的请求身份构造外部调度回调参数。"""
@@ -103,12 +102,8 @@ def _get_scheduler_identity(
         or updated_by
         or "",
     )
-    scope_id = str(getattr(request.state, "scope_id", None) or "")
-    if not scope_id and tenant_id:
-        scope_id = encode_scope_id(tenant_id, source_id)
     return SourceSchedulerIdentity(
         tenant_id=tenant_id,
-        scope_id=scope_id,
         from_id=tenant_id,
         updated_by=updated_by,
     )
@@ -140,7 +135,6 @@ async def _refresh_cleanup_source_task(
             config=config,
             identity=_get_scheduler_identity(
                 request,
-                source_id=source_id,
                 updated_by=updated_by,
             ),
         )

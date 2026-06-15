@@ -31,7 +31,6 @@ class SourceSchedulerIdentity:
     """记录最后一次修改 source 系统任务配置的调度身份。"""
 
     tenant_id: str
-    scope_id: str
     from_id: str
     updated_by: str | None = None
 
@@ -63,7 +62,6 @@ class SourceTaskBindingStoreLike(Protocol):
         cron: str,
         enabled: bool,
         scheduler_tenant_id: str | None = None,
-        scheduler_scope_id: str | None = None,
         scheduler_from_id: str | None = None,
         updated_by: str | None = None,
     ) -> SourceSystemTaskBinding:
@@ -144,7 +142,6 @@ class SourceSystemTaskScheduler:
                 cron=cleanup_config.cron,
                 enabled=False,
                 scheduler_tenant_id=identity.tenant_id,
-                scheduler_scope_id=identity.scope_id,
                 scheduler_from_id=identity.from_id,
                 updated_by=identity.updated_by,
             )
@@ -163,7 +160,6 @@ class SourceSystemTaskScheduler:
             "cron": cleanup_config.cron,
             "callback_url": self._callback_url,
             "source_level": True,
-            "scope_id": identity.scope_id,
             "from_id": identity.from_id,
         }
 
@@ -188,7 +184,6 @@ class SourceSystemTaskScheduler:
             cron=cleanup_config.cron,
             enabled=True,
             scheduler_tenant_id=identity.tenant_id,
-            scheduler_scope_id=identity.scope_id,
             scheduler_from_id=identity.from_id,
             updated_by=identity.updated_by,
         )

@@ -54,7 +54,6 @@ async def test_upsert_binding_can_be_read_back(store, mock_db):
         "cron": "0 1 * * *",
         "enabled": 1,
         "scheduler_tenant_id": "tenant-a",
-        "scheduler_scope_id": "scope-a",
         "scheduler_from_id": "system",
         "updated_by": "alice",
         "updated_at": updated_at,
@@ -67,7 +66,6 @@ async def test_upsert_binding_can_be_read_back(store, mock_db):
         cron="0 1 * * *",
         enabled=True,
         scheduler_tenant_id="tenant-a",
-        scheduler_scope_id="scope-a",
         scheduler_from_id="system",
         updated_by="alice",
     )
@@ -83,7 +81,6 @@ async def test_upsert_binding_can_be_read_back(store, mock_db):
         cron="0 1 * * *",
         enabled=True,
         scheduler_tenant_id="tenant-a",
-        scheduler_scope_id="scope-a",
         scheduler_from_id="system",
         updated_by="alice",
         updated_at=updated_at,
@@ -100,7 +97,6 @@ async def test_upsert_binding_can_be_read_back(store, mock_db):
         "0 1 * * *",
         1,
         "tenant-a",
-        "scope-a",
         "system",
         "alice",
     )
@@ -127,7 +123,6 @@ async def test_upsert_binding_raises_when_db_unavailable():
             cron="0 1 * * *",
             enabled=True,
             scheduler_tenant_id="tenant-a",
-            scheduler_scope_id="scope-a",
             scheduler_from_id="system",
             updated_by="alice",
         )
@@ -158,7 +153,6 @@ async def test_upsert_binding_wraps_execute_errors(store, mock_db):
             cron="0 1 * * *",
             enabled=True,
             scheduler_tenant_id="tenant-a",
-            scheduler_scope_id="scope-a",
             scheduler_from_id="system",
             updated_by="alice",
         )
@@ -199,7 +193,6 @@ class InMemoryBindingStore:
         cron: str,
         enabled: bool,
         scheduler_tenant_id: str | None = None,
-        scheduler_scope_id: str | None = None,
         scheduler_from_id: str | None = None,
         updated_by: str | None = None,
     ) -> SourceSystemTaskBinding:
@@ -211,7 +204,6 @@ class InMemoryBindingStore:
             cron=cron,
             enabled=enabled,
             scheduler_tenant_id=scheduler_tenant_id,
-            scheduler_scope_id=scheduler_scope_id,
             scheduler_from_id=scheduler_from_id,
             updated_by=updated_by,
         )
@@ -243,13 +235,11 @@ class RecordingSchedulerAdapter:
 def _identity(
     *,
     tenant_id: str = "tenant-a",
-    scope_id: str = "tenant-a-source-a",
     from_id: str = "alice",
     updated_by: str | None = "alice",
 ) -> SourceSchedulerIdentity:
     return SourceSchedulerIdentity(
         tenant_id=tenant_id,
-        scope_id=scope_id,
         from_id=from_id,
         updated_by=updated_by,
     )
@@ -293,7 +283,6 @@ async def test_refresh_task_session_cleanup_registers_source_level_job():
                 "cron": "30 2 * * *",
                 "callback_url": "http://swe.local/api/internal/cron/callback",
                 "source_level": True,
-                "scope_id": "tenant-a-source-a",
                 "from_id": "alice",
             },
         ),
@@ -307,7 +296,6 @@ async def test_refresh_task_session_cleanup_registers_source_level_job():
     assert binding.enabled is True
     assert binding.cron == "30 2 * * *"
     assert binding.scheduler_tenant_id == "tenant-a"
-    assert binding.scheduler_scope_id == "tenant-a-source-a"
     assert binding.scheduler_from_id == "alice"
     assert binding.updated_by == "alice"
 
@@ -323,7 +311,6 @@ async def test_refresh_task_session_cleanup_updates_and_resumes_existing_job():
         cron="30 2 * * *",
         enabled=True,
         scheduler_tenant_id="tenant-a",
-        scheduler_scope_id="old-scope",
         scheduler_from_id="old-user",
         updated_by="old-user",
     )
@@ -345,7 +332,6 @@ async def test_refresh_task_session_cleanup_updates_and_resumes_existing_job():
         },
         identity=_identity(
             tenant_id="tenant-b",
-            scope_id="scope-b",
             from_id="bob",
             updated_by="bob",
         ),
@@ -367,7 +353,6 @@ async def test_refresh_task_session_cleanup_updates_and_resumes_existing_job():
                 "cron": "15 4 * * *",
                 "callback_url": "http://swe.local/api/internal/cron/callback",
                 "source_level": True,
-                "scope_id": "scope-b",
                 "from_id": "bob",
             },
         ),
@@ -382,7 +367,6 @@ async def test_refresh_task_session_cleanup_updates_and_resumes_existing_job():
     assert binding.enabled is True
     assert binding.cron == "15 4 * * *"
     assert binding.scheduler_tenant_id == "tenant-b"
-    assert binding.scheduler_scope_id == "scope-b"
     assert binding.scheduler_from_id == "bob"
     assert binding.updated_by == "bob"
 
@@ -398,7 +382,6 @@ async def test_refresh_task_session_cleanup_pauses_existing_job_when_disabled():
         cron="30 2 * * *",
         enabled=True,
         scheduler_tenant_id="tenant-a",
-        scheduler_scope_id="scope-a",
         scheduler_from_id="alice",
         updated_by="alice",
     )
@@ -419,7 +402,6 @@ async def test_refresh_task_session_cleanup_pauses_existing_job_when_disabled():
             },
         },
         identity=_identity(
-            scope_id="scope-disabled",
             from_id="charlie",
             updated_by="charlie",
         ),
@@ -439,7 +421,6 @@ async def test_refresh_task_session_cleanup_pauses_existing_job_when_disabled():
     assert binding.enabled is False
     assert binding.cron == "0 1 * * *"
     assert binding.scheduler_tenant_id == "tenant-a"
-    assert binding.scheduler_scope_id == "scope-disabled"
     assert binding.scheduler_from_id == "charlie"
     assert binding.updated_by == "charlie"
 
@@ -517,7 +498,6 @@ async def test_refresh_task_session_cleanup_raises_when_register_returns_empty_i
                 "cron": "30 2 * * *",
                 "callback_url": "http://swe.local/api/internal/cron/callback",
                 "source_level": True,
-                "scope_id": "tenant-a-source-a",
                 "from_id": "alice",
             },
         ),
