@@ -27,7 +27,10 @@ from ...marketplace.schemas import (
     UpdateMarketMCPMetadataRequest,
     UploadMCPResponse,
 )
-from ...marketplace.service import MCPNameConflictError
+from ...marketplace.service import (
+    MCPNameConflictError,
+    MCPVersionConflictError,
+)
 from ...marketplace.fs import (
     load_mcp_config,
     load_index,
@@ -214,6 +217,16 @@ async def publish_mcp(
                 "existing_version": exc.existing_version,
             },
         ) from exc
+    except MCPVersionConflictError as exc:
+        # F3 修复：MCP 版本快照撞车不再静默吞掉
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "MCP_VERSION_CONFLICT",
+                "message": str(exc),
+                "hint": "本次同步内容与已有版本撞车，请稍后重试或联系管理员",
+            },
+        ) from exc
     return MarketMCPItem(
         item_id=item.item_id,
         client_key=item.client_key,
@@ -289,6 +302,12 @@ async def upload_mcp(
         config=config,
         version=uploaded_version,
         overwrite=True,  # 管理员手动上传即意图覆盖同名条目
+        # admin zip 上传：source_user 留空，version=v0.0.0（spec R6）
+        source_user_id="",
+        source_user_name="",
+        source_user_version="v0.0.0",
+        operator_id=x_user_id or "",
+        operator_name=unquote(x_user_name or ""),
     )
 
     svc = request.app.state.marketplace
@@ -299,6 +318,11 @@ async def upload_mcp(
         return UploadMCPResponse(
             success=False,
             error=str(exc),
+        )
+    except MCPVersionConflictError as exc:
+        return UploadMCPResponse(
+            success=False,
+            error=f"版本冲突：{exc}",
         )
     except Exception as e:
         return UploadMCPResponse(success=False, error=str(e))

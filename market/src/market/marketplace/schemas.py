@@ -242,6 +242,12 @@ class PublishMCPRequest(BaseModel):
     config: dict
     overwrite: bool = False
     version: str = ""  # 发布者本地版本号，首次发布时作为市场条目初始版本
+    # T9 R5/R6 新增：分别记录"内容来源用户"与"操作者"
+    source_user_id: str = ""
+    source_user_name: str = ""
+    source_user_version: str = ""
+    operator_id: str = ""
+    operator_name: str = ""
 
 
 class UploadMCPResponse(BaseModel):
