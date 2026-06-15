@@ -28,16 +28,18 @@ POST /api/cron/jobs/{job_id}/broadcast
       "bbk_id": "2002"
     }
   ],
-  "target_tenant_ids": ["tenant-a", "tenant-b"]
+  "target_tenant_ids": ["tenant-a", "tenant-b"],
+  "enable_offset": true,
+  "offset_window_hours": 4
 }
 ```
 
-`targets` 是当前推荐格式，用于把目标租户展示身份一起传给 SWE；`target_tenant_ids` 仍保留兼容旧调用方。如果两者都传，后端以 `targets` 为准。
+`targets` 是当前推荐格式，用于把目标租户展示身份一起传给 SWE；`target_tenant_ids` 仍保留兼容旧调用方。如果两者都传，后端以 `targets` 为准。`enable_offset` 控制是否启用广播错峰，默认开启；`offset_window_hours` 控制错峰窗口小时数，默认 4，取值范围 1-24。
 
 广播会做这些事：
 
 1. 校验目标租户 ID，去重。
-2. 根据目标数量用 `compute_broadcast_offsets()` 在 4 小时窗口内均匀计算错峰分钟数。
+2. 根据目标数量用 `compute_broadcast_offsets()` 在请求指定小时窗口内均匀计算错峰分钟数；关闭 `enable_offset` 时所有目标 offset 都是 0。
 3. 用 `shift_cron_expression()` 尝试把 cron 向前平移 offset。
 4. 如果 cron 无法安全平移，保留原 cron，并返回 fallback warning。
 5. 为每个目标租户找对应 runtime workspace 和 `CronManager`。
