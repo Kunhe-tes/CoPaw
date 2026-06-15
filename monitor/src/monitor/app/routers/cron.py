@@ -16,6 +16,9 @@ from ..models.cron import (
     CronJobModel,
     CronJobQueryParams,
     CronOverviewResponse,
+    CronOverviewStatsResponse,
+    CronBranchBehaviorResponse,
+    CronBranchErrorResponse,
     ExecutionModel,
     ExecutionQueryParams,
     PaginatedResponse,
@@ -216,6 +219,7 @@ async def list_executions(
     request: Request,
     job_id: str | None = Query(default=None, description="任务ID筛选"),
     tenant_id: str | None = Query(default=None, description="租户ID筛选"),
+    bbk_id: str | None = Query(default=None, description="分行号筛选"),
     status: str | None = Query(default=None, description="执行状态筛选"),
     start_time: datetime | None = Query(
         default=None,
@@ -235,6 +239,7 @@ async def list_executions(
         request: FastAPI request object
         job_id: Job ID filter
         tenant_id: Tenant ID filter
+        bbk_id: BBK ID filter
         status: Status filter
         start_time: Start time filter
         end_time: End time filter
@@ -246,9 +251,22 @@ async def list_executions(
         Paginated execution list
     """
     actual_source_id = _get_source_id_from_header(request)
+    logger.warning(
+        "[cron executions debug] request received: source_id=%s job_id=%s tenant_id=%s bbk_id=%s status=%s start_time=%s end_time=%s page=%s page_size=%s",
+        actual_source_id,
+        job_id,
+        tenant_id,
+        bbk_id,
+        status,
+        start_time,
+        end_time,
+        page,
+        page_size,
+    )
     params = ExecutionQueryParams(
         job_id=job_id,
         tenant_id=tenant_id,
+        bbk_id=bbk_id,
         source_id=actual_source_id,
         status=status,
         start_time=start_time,
@@ -419,5 +437,122 @@ async def get_unread_count(
     actual_source_id = _get_source_id_from_header(request)
     return await service.get_unread_count(
         tenant_id,
+        source_id=actual_source_id,
+    )
+
+
+@router.get("/overview-stats", response_model=CronOverviewStatsResponse)
+async def get_overview_stats(
+    request: Request,
+    start_date: str | None = Query(
+        default=None,
+        description="开始日期 (YYYY-MM-DD)",
+    ),
+    end_date: str | None = Query(
+        default=None,
+        description="结束日期 (YYYY-MM-DD)",
+    ),
+    bbk_ids: str | None = Query(
+        default=None,
+        description="分行号筛选（逗号分隔）",
+    ),
+    service: QueryService = Depends(get_query_service),
+) -> CronOverviewStatsResponse:
+    """获取定时任务概览统计。
+
+    返回时间范围内的定时任务总数、执行次数、成功率、已读率等统计数据。
+
+    Args:
+        start_date: 开始日期筛选 (YYYY-MM-DD格式)
+        end_date: 结束日期筛选 (YYYY-MM-DD格式)
+        bbk_ids: 分行号筛选（多个用逗号分隔，不传代表查所有分行）
+        service: Query service
+
+    Returns:
+        概览统计数据
+    """
+    actual_source_id = _get_source_id_from_header(request)
+    return await service.get_overview_stats(
+        start_date=start_date,
+        end_date=end_date,
+        bbk_ids=bbk_ids,
+        source_id=actual_source_id,
+    )
+
+
+@router.get("/branch-behavior", response_model=CronBranchBehaviorResponse)
+async def get_branch_behavior(
+    request: Request,
+    start_date: str | None = Query(
+        default=None,
+        description="开始日期 (YYYY-MM-DD)",
+    ),
+    end_date: str | None = Query(
+        default=None,
+        description="结束日期 (YYYY-MM-DD)",
+    ),
+    bbk_ids: str | None = Query(
+        default=None,
+        description="分行号筛选（逗号分隔）",
+    ),
+    service: QueryService = Depends(get_query_service),
+) -> CronBranchBehaviorResponse:
+    """获取分行层行为分析。
+
+    返回各分行的已读任务数、已读率、方案点击数、洞察点击数等行为数据。
+
+    Args:
+        start_date: 开始日期筛选 (YYYY-MM-DD格式)
+        end_date: 结束日期筛选 (YYYY-MM-DD格式)
+        bbk_ids: 分行号筛选（多个用逗号分隔）
+        service: Query service
+
+    Returns:
+        分行行为分析数据
+    """
+    actual_source_id = _get_source_id_from_header(request)
+    return await service.get_branch_behavior(
+        start_date=start_date,
+        end_date=end_date,
+        bbk_ids=bbk_ids,
+        source_id=actual_source_id,
+    )
+
+
+@router.get("/branch-error", response_model=CronBranchErrorResponse)
+async def get_branch_error(
+    request: Request,
+    start_date: str | None = Query(
+        default=None,
+        description="开始日期 (YYYY-MM-DD)",
+    ),
+    end_date: str | None = Query(
+        default=None,
+        description="结束日期 (YYYY-MM-DD)",
+    ),
+    bbk_ids: str | None = Query(
+        default=None,
+        description="分行号筛选（逗号分隔）",
+    ),
+    service: QueryService = Depends(get_query_service),
+) -> CronBranchErrorResponse:
+    """获取分行层异常执行数据。
+
+    返回受影响分行数量、报错原因分布、分行异常排行等数据。
+
+    Args:
+        start_date: 开始日期筛选 (YYYY-MM-DD格式)
+        end_date: 结束日期筛选 (YYYY-MM-DD格式)
+        bbk_ids: 分行号筛选（多个用逗号分隔）
+        service: Query service
+
+    Returns:
+        分行异常执行数据
+    """
+    actual_source_id = _get_source_id_from_header(request)
+    return await service.get_branch_error(
+        start_date=start_date,
+        end_date=end_date,
+        bbk_ids=bbk_ids,
         source_id=actual_source_id,
     )

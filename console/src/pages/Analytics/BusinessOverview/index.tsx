@@ -768,6 +768,15 @@ export default function BusinessOverviewPage() {
   const effectiveBbkIds = useMemo(() => {
     return bbkIds.length === 0 ? undefined : bbkIds;
   }, [bbkIds]);
+  const cronJobOverviewPath = useMemo(() => {
+    const params = new URLSearchParams();
+    params.set("start_date", startDateText);
+    params.set("end_date", endDateText);
+    if (effectiveBbkIds?.length) {
+      params.set("bbk_ids", effectiveBbkIds.join(","));
+    }
+    return `/analytics/cron-job-overview?${params.toString()}`;
+  }, [effectiveBbkIds, endDateText, startDateText]);
 
   const transformUserData = useCallback(
     (items: Record<string, unknown>[]): UserRow[] =>
@@ -1591,7 +1600,7 @@ export default function BusinessOverviewPage() {
             <button
               type="button"
               className={styles.detailLink}
-              onClick={() => navigate("/analytics/cron-job-overview")}
+              onClick={() => navigate(cronJobOverviewPath)}
             >
               查看详情
               <ChevronRight size={14} />
