@@ -151,8 +151,10 @@ async def test_runner_http_client_injects_runtime_scope_headers_and_dedupes_rese
             ),
             passthrough_headers={
                 "x-swe-source-id": "passthrough-source",
+                "X-Swe-Trace-Id": "passthrough-trace",
                 "Authorization": "Bearer test-token",
             },
+            trace_id="trace-1",
         )
 
     assert captured["stateful_client_kwargs"]["headers"] == {
@@ -160,6 +162,7 @@ async def test_runner_http_client_injects_runtime_scope_headers_and_dedupes_rese
         "Authorization": "Bearer test-token",
         "x-swe-tenant-id": "tenant-a",
         "x-swe-source-id": "source-a",
+        "x-swe-trace-id": "trace-1",
     }
 
 
@@ -210,6 +213,7 @@ async def test_rebuild_mcp_client_reresolves_scope_headers_on_reconnect(
                     ),
                     passthrough_headers={"Authorization-Extra": "extra"},
                     session_id="session-1",
+                    trace_id="trace-1",
                 )
             )
 
@@ -229,6 +233,7 @@ async def test_rebuild_mcp_client_reresolves_scope_headers_on_reconnect(
         "x-swe-tenant-id": "tenant-a",
         "x-swe-source-id": "source-a",
         "x-swe-session-id": "session-1",
+        "x-swe-trace-id": "trace-1",
     }
     assert captured[0]["timeout"] == runner_module._MCP_HTTP_TIMEOUT_SECONDS
     assert (
@@ -242,6 +247,7 @@ async def test_rebuild_mcp_client_reresolves_scope_headers_on_reconnect(
         "x-swe-tenant-id": "tenant-a",
         "x-swe-source-id": "source-a",
         "x-swe-session-id": "session-1",
+        "x-swe-trace-id": "trace-1",
     }
     assert captured[1]["timeout"] == runner_module._MCP_HTTP_TIMEOUT_SECONDS
     assert (

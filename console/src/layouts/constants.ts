@@ -98,7 +98,7 @@ export const KEY_TO_LABEL: Record<string, string> = {
   "analytics-traces": "nav.analyticsTraces",
   "analytics-business-overview": "nav.analyticsBusinessOverview",
   "analytics-claw-data-overview": "nav.analyticsClawDataOverview",
-  "analytics-cron-job-overview": "nav.analyticsCronJobOverview",
+  "analytics-cron-job-overview": "nav.analyticsCronJobOverview", //定时任务概览
   "instance-overview": "nav.instanceOverview",
   "instance-instances": "nav.instanceInstances",
   "instance-allocations": "nav.instanceAllocations",

@@ -709,6 +709,7 @@ async def _build_and_connect_mcp_clients(
     mcp_config: MCPConfig | None,
     passthrough_headers: dict[str, str] | None = None,
     session_id: str | None = None,
+    trace_id: str | None = None,
 ) -> list[Any]:
     """Build and connect MCP clients from config for single request use.
 
@@ -716,6 +717,7 @@ async def _build_and_connect_mcp_clients(
         mcp_config: MCP configuration from agent_config.mcp
         passthrough_headers: Headers to merge for HTTP transport clients
         session_id: Request-scoped session identifier for reserved headers
+        trace_id: Request-scoped trace identifier for reserved headers
 
     Returns:
         List of connected MCP client instances (all created for this request)
@@ -738,6 +740,7 @@ async def _build_and_connect_mcp_clients(
                 client_config,
                 passthrough_headers,
                 session_id=session_id,
+                trace_id=trace_id,
             )
             if client is not None:
                 await client.connect()
@@ -766,6 +769,7 @@ async def _create_mcp_client_with_headers(
     client_config: MCPClientConfig,
     passthrough_headers: dict[str, str] | None = None,
     session_id: str | None = None,
+    trace_id: str | None = None,
 ) -> Any:
     """Create a single MCP client with optional header passthrough.
 
@@ -776,6 +780,7 @@ async def _create_mcp_client_with_headers(
         client_config: Single MCP client configuration
         passthrough_headers: Headers to merge for HTTP transport
         session_id: Request-scoped session identifier for reserved headers
+        trace_id: Request-scoped trace identifier for reserved headers
 
     Returns:
         MCP client instance (not yet connected)
@@ -787,6 +792,7 @@ async def _create_mcp_client_with_headers(
         "headers": client_config.headers or None,
         "passthrough_headers": dict(passthrough_headers or {}) or None,
         "session_id": session_id,
+        "trace_id": trace_id,
         "timeout": _MCP_HTTP_TIMEOUT_SECONDS,
         "sse_read_timeout": _MCP_HTTP_SSE_READ_TIMEOUT_SECONDS,
         "command": client_config.command,
@@ -827,6 +833,7 @@ async def _create_mcp_client_with_headers(
         client_config.headers,
         passthrough_headers=passthrough_headers,
         session_id=session_id,
+        trace_id=trace_id,
     )
 
     client = HttpStatefulClient(
@@ -2488,6 +2495,7 @@ class AgentRunner(Runner):
                 agent_config.mcp,
                 passthrough_headers=passthrough_headers or None,
                 session_id=session_id,
+                trace_id=getattr(request, "trace_id", None),
             )
 
             turn_id = f"turn-{uuid4().hex}"
