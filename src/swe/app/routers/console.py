@@ -475,8 +475,6 @@ def _accepted_plan_context(plan: Any) -> dict[str, Any]:
         "steps": list(plan.steps),
         "risks": list(plan.risks),
         "verification": list(plan.verification),
-        "open_questions": list(plan.open_questions),
-        "confidence": plan.confidence,
     }
 
 

@@ -21,8 +21,6 @@ def _plan_payload() -> dict:
         "steps": ["Inspect logs", "Add regression test"],
         "risks": ["May need frontend follow-up"],
         "verification": ["Run targeted pytest"],
-        "open_questions": ["Which tenant reproduces it?"],
-        "confidence": 0.74,
     }
 
 
@@ -59,13 +57,22 @@ def test_proposed_plan_generates_backend_plan_id() -> None:
         "steps",
         "risks",
         "verification",
-        "open_questions",
-        "confidence",
     ],
 )
 def test_proposed_plan_requires_review_fields(missing_field: str) -> None:
     payload = _plan_payload()
     payload.pop(missing_field)
+
+    with pytest.raises(ValidationError):
+        ProposedPlanCreate.model_validate(payload)
+
+
+@pytest.mark.parametrize("removed_field", ["open_questions", "confidence"])
+def test_proposed_plan_rejects_removed_review_fields(
+    removed_field: str,
+) -> None:
+    payload = _plan_payload()
+    payload[removed_field] = [] if removed_field == "open_questions" else 0.8
 
     with pytest.raises(ValidationError):
         ProposedPlanCreate.model_validate(payload)

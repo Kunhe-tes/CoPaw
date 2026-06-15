@@ -190,7 +190,6 @@ class TestReactAgentTaskProgressPrompt:
                 "steps": ["Read persisted step"],
                 "risks": ["Known risk"],
                 "verification": ["Run focused tests"],
-                "open_questions": ["None"],
             },
         }
 

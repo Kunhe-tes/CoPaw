@@ -534,10 +534,11 @@ describe("ChatPage plan mode wiring", () => {
     mocks.sessions = [
       {
         id: "1780458341751000",
+        realId: "",
         sessionId: "1780458341751000",
         name: "新会话",
         messages: [],
-        meta: {},
+        meta: { plan_mode_enabled: false },
       },
     ];
     mocks.updateChat.mockResolvedValueOnce({

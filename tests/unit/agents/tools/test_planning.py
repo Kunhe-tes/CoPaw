@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import inspect
 from pathlib import Path
 
 import pytest
@@ -157,14 +158,14 @@ async def test_submit_proposed_plan_persists_before_review_card(
         steps=["Reproduce", "Patch", "Verify"],
         risks=["Hidden regression"],
         verification=["Run pytest"],
-        open_questions=["Need frontend coverage?"],
-        confidence=0.82,
     )
 
     card = response.metadata["plan_interaction_card"]
     assert card["card_type"] == "plan_review"
     assert card["plan_id"].startswith("plan-")
     assert card["title"] == "Fix failing test"
+    assert "open_questions" not in card
+    assert "confidence" not in card
     assert "Proposed plan" in _text(response)
 
     stored = await JsonProposedPlanStore(tmp_path).get(
@@ -176,7 +177,7 @@ async def test_submit_proposed_plan_persists_before_review_card(
 
 
 @pytest.mark.asyncio
-async def test_submit_proposed_plan_allows_empty_open_questions(
+async def test_submit_proposed_plan_omits_removed_fields_from_signature(
     tmp_path: Path,
 ) -> None:
     tool = create_submit_proposed_plan_tool(
@@ -189,29 +190,7 @@ async def test_submit_proposed_plan_allows_empty_open_questions(
         workspace_dir=tmp_path,
     )
 
-    response = await tool(
-        title="B2B 企业服务客户经营计划（6个月）",
-        summary="将客户经营计划整理为可执行的半年路线图。",
-        steps=["保存计划文档", "生成分享版本"],
-        risks=[
-            "客户成功团队人手不足",
-            "竞对低价抢客",
-            "涨价说服成本高",
-            "跨团队协同成本高",
-        ],
-        verification=[
-            "确认 plan 文件已保存",
-            "确认文件内容完整",
-        ],
-        open_questions=[],
-        confidence=0.9,
-    )
+    parameters = inspect.signature(tool).parameters
 
-    card = response.metadata["plan_interaction_card"]
-    assert card["card_type"] == "plan_review"
-    stored = await JsonProposedPlanStore(tmp_path).get(
-        "chat-2",
-        card["plan_id"],
-    )
-    assert stored is not None
-    assert stored.open_questions == []
+    assert "open_questions" not in parameters
+    assert "confidence" not in parameters

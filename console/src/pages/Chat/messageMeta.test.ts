@@ -41,8 +41,6 @@ describe("messageMeta", () => {
               steps: ["Read"],
               risks: [],
               verification: ["Test"],
-              open_questions: [],
-              confidence: 0.8,
             },
           },
         },
@@ -59,6 +57,24 @@ describe("messageMeta", () => {
             card_type: "plan_review",
             plan_id: "frontend-snapshot",
             title: "Invalid",
+          },
+        },
+      }),
+    ).toBeNull();
+
+    expect(
+      extractPlanInteractionCard({
+        metadata: {
+          plan_interaction_card: {
+            card_type: "plan_review",
+            plan_id: "old-plan",
+            title: "Old",
+            summary: "Old shape",
+            steps: ["Read"],
+            risks: [],
+            verification: ["Test"],
+            open_questions: [],
+            confidence: 0.8,
           },
         },
       }),

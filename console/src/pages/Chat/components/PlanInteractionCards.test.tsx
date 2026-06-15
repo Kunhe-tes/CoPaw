@@ -29,7 +29,7 @@ vi.mock("@/components/agentscope-chat", () => ({
       header: { title: string };
       body: { children: React.ReactNode };
     }) => (
-      <section>
+      <section data-testid="generic-operate-card">
         <h3>{header.title}</h3>
         {body.children}
       </section>
@@ -806,11 +806,19 @@ describe("Plan interaction cards", () => {
           steps: ["Read code", "Patch code"],
           risks: ["Regression"],
           verification: ["Focused tests"],
-          open_questions: [],
-          confidence: 0.82,
         }}
       />,
     );
+    expect(screen.queryByTestId("generic-operate-card")).not.toBeInTheDocument();
+    expect(screen.getByRole("region", { name: "Fix bug" })).toHaveAttribute(
+      "data-plan-review-card",
+      "true",
+    );
+    expect(screen.getByText("Steps")).toBeInTheDocument();
+    expect(screen.getByText("Risks")).toBeInTheDocument();
+    expect(screen.getByText("Verification")).toBeInTheDocument();
+    expect(screen.queryByText("Open questions")).not.toBeInTheDocument();
+    expect(screen.queryByText(/Confidence:/)).not.toBeInTheDocument();
 
     fireEvent.change(screen.getByPlaceholderText("Feedback"), {
       target: { value: "Narrow the scope" },
@@ -849,8 +857,6 @@ describe("Plan interaction cards", () => {
           steps: [],
           risks: [],
           verification: [],
-          open_questions: [],
-          confidence: 0.95,
         }}
       />,
     );

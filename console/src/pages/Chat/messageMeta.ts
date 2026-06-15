@@ -166,8 +166,6 @@ export interface ChatPlanReviewCardData {
   steps: string[];
   risks: string[];
   verification: string[];
-  open_questions: string[];
-  confidence: number;
   status?: "pending" | "submitted";
 }
 
@@ -285,8 +283,8 @@ function normalizePlanInteractionCard(
       !isStringArray(card.steps) ||
       !isStringArray(card.risks) ||
       !isStringArray(card.verification) ||
-      !isStringArray(card.open_questions) ||
-      typeof card.confidence !== "number"
+      "open_questions" in card ||
+      "confidence" in card
     ) {
       return null;
     }
@@ -299,8 +297,6 @@ function normalizePlanInteractionCard(
       steps: card.steps,
       risks: card.risks,
       verification: card.verification,
-      open_questions: card.open_questions,
-      confidence: card.confidence,
       status: card.status === "submitted" ? "submitted" : undefined,
     };
   }

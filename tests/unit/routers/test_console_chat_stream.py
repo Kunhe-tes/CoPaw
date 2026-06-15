@@ -470,8 +470,6 @@ def test_console_chat_preserves_plan_metadata(tmp_path, monkeypatch) -> None:
                 steps=["Inspect"],
                 risks=["None"],
                 verification=["Run tests"],
-                open_questions=["None"],
-                confidence=0.9,
             ),
         )
 
@@ -549,8 +547,6 @@ def test_console_chat_exit_plan_short_circuits_agent_run(
                 steps=["Inspect"],
                 risks=["None"],
                 verification=["Run tests"],
-                open_questions=["None"],
-                confidence=0.9,
             ),
         )
 
@@ -646,8 +642,6 @@ def test_console_chat_returns_conflict_for_terminal_plan_decision(
                 steps=["Inspect"],
                 risks=["None"],
                 verification=["Run tests"],
-                open_questions=["None"],
-                confidence=0.9,
             ),
         )
         await service.record_decision(
@@ -720,8 +714,6 @@ def test_console_chat_execute_uses_persisted_plan_and_ignores_snapshot(
                 steps=["Persisted step"],
                 risks=["Persisted risk"],
                 verification=["Persisted verification"],
-                open_questions=["Persisted question"],
-                confidence=0.88,
             ),
         )
 
@@ -782,6 +774,8 @@ def test_console_chat_execute_uses_persisted_plan_and_ignores_snapshot(
     assert meta["accepted_plan"]["plan_id"] == plan.plan_id
     assert meta["accepted_plan"]["title"] == "Persisted plan"
     assert meta["accepted_plan"]["steps"] == ["Persisted step"]
+    assert "open_questions" not in meta["accepted_plan"]
+    assert "confidence" not in meta["accepted_plan"]
     assert "Tampered frontend plan" not in str(meta["accepted_plan"])
 
     async def _load_plan():
@@ -814,8 +808,6 @@ def test_console_chat_repeated_execute_without_running_task_completes(
                 steps=["Persisted step"],
                 risks=["Persisted risk"],
                 verification=["Persisted verification"],
-                open_questions=["Persisted question"],
-                confidence=0.88,
             ),
         )
         await service.record_decision(
@@ -903,8 +895,6 @@ def test_console_chat_repeated_revise_without_running_task_completes(
                 steps=["Persisted step"],
                 risks=["Persisted risk"],
                 verification=["Persisted verification"],
-                open_questions=["Persisted question"],
-                confidence=0.88,
             ),
         )
         await service.record_decision(
@@ -991,8 +981,6 @@ def test_console_chat_repeated_execute_attaches_running_task(
                 steps=["Persisted step"],
                 risks=["Persisted risk"],
                 verification=["Persisted verification"],
-                open_questions=["Persisted question"],
-                confidence=0.88,
             ),
         )
         await service.record_decision(

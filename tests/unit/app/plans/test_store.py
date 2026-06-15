@@ -25,8 +25,6 @@ def _payload(title: str = "Plan title") -> ProposedPlanCreate:
         steps=["Read code", "Write tests"],
         risks=["Unknown edge case"],
         verification=["Run pytest"],
-        open_questions=["Need product copy?"],
-        confidence=0.8,
     )
 
 

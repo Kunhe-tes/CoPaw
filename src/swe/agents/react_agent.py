@@ -150,7 +150,7 @@ def _build_accepted_plan_tool_result_text(
         if value is not None:
             lines.append(f"- {field}: {_stringify_accepted_plan_value(value)}")
 
-    for field in ("steps", "risks", "verification", "open_questions"):
+    for field in ("steps", "risks", "verification"):
         items = _format_accepted_plan_items(accepted_plan.get(field))
         if not items:
             continue

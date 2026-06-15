@@ -212,18 +212,14 @@ def create_submit_proposed_plan_tool(
         steps: list[str],
         risks: list[str],
         verification: list[str],
-        open_questions: list[str],
-        confidence: float,
     ) -> ToolResponse:
-        """持久化 Proposed Plan，并返回计划审核卡片元数据。"""
+        """在没有未决问题时持久化 Proposed Plan，并返回审核卡片元数据。"""
         payload = ProposedPlanCreate(
             title=title,
             summary=summary,
             steps=steps,
             risks=risks,
             verification=verification,
-            open_questions=open_questions,
-            confidence=confidence,
         )
         service = PlanService(
             JsonProposedPlanStore(Path(workspace_dir or WORKING_DIR)),

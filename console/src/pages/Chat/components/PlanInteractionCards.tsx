@@ -1,5 +1,4 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { Button, Flex, Input, Space, Typography } from "antd";
 import {
   Check,
   ChevronLeft,
@@ -11,7 +10,6 @@ import {
 import {
   ChatAnywhereSessionsContext,
   type IAgentScopeRuntimeWebUIMessage,
-  OperateCard,
 } from "@/components/agentscope-chat";
 import { ChatAnywhereMessagesContext } from "@/components/agentscope-chat/AgentScopeRuntimeWebUI/core/Context/ChatAnywhereMessagesContext";
 import { emit } from "@/components/agentscope-chat/AgentScopeRuntimeWebUI/core/Context/useChatAnywhereEventEmitter";
@@ -849,14 +847,14 @@ export function ActivePlanClarificationCard() {
 function PlanList({ title, items }: { title: string; items: string[] }) {
   if (items.length === 0) return null;
   return (
-    <div>
-      <Typography.Text strong>{title}</Typography.Text>
-      <ul style={{ margin: "6px 0 0", paddingInlineStart: 20 }}>
+    <section className={styles.reviewSection}>
+      <h4>{title}</h4>
+      <ul>
         {items.map((item, index) => (
           <li key={`${title}-${index}`}>{item}</li>
         ))}
       </ul>
-    </div>
+    </section>
   );
 }
 
@@ -905,56 +903,63 @@ export function PlanReviewCard({ data }: { data: ChatPlanReviewCardData }) {
   };
 
   return (
-    <OperateCard
-      header={{
-        icon: <ClipboardCheck size={16} />,
-        title: data.title,
-        description: data.summary,
-      }}
-      body={{
-        defaultOpen: true,
-        children: (
-          <OperateCard.LineBody>
-            <Space direction="vertical" size={12} style={{ width: "100%" }}>
-              <PlanList title="Steps" items={data.steps} />
-              <PlanList title="Risks" items={data.risks} />
-              <PlanList title="Verification" items={data.verification} />
-              <PlanList title="Open questions" items={data.open_questions} />
-              <Typography.Text type="secondary">
-                Confidence: {Math.round(data.confidence * 100)}%
-              </Typography.Text>
-              <Input.TextArea
-                autoSize={{ minRows: 2, maxRows: 4 }}
-                placeholder="Feedback"
-                value={feedback}
-                disabled={submitted}
-                onChange={(event) => setFeedback(event.target.value)}
-              />
-              <Flex wrap gap={8}>
-                <Button
-                  disabled={submitted}
-                  onClick={() => handleDecision("revise")}
-                >
-                  Continue modifying
-                </Button>
-                <Button
-                  type="primary"
-                  disabled={submitted}
-                  onClick={() => handleDecision("execute")}
-                >
-                  Execute
-                </Button>
-                <Button
-                  disabled={submitted}
-                  onClick={() => handleDecision("exit_plan")}
-                >
-                  Exit Plan Mode
-                </Button>
-              </Flex>
-            </Space>
-          </OperateCard.LineBody>
-        ),
-      }}
-    />
+    <section
+      className={styles.planReviewCard}
+      data-plan-review-card="true"
+      role="region"
+      aria-label={data.title}
+    >
+      <header className={styles.reviewHeader}>
+        <div className={styles.reviewHeading}>
+          <span className={styles.reviewIcon}>
+            <ClipboardCheck aria-hidden="true" size={16} />
+          </span>
+          <div>
+            <strong>{data.title}</strong>
+            <p>{data.summary}</p>
+          </div>
+        </div>
+      </header>
+
+      <div className={styles.reviewContent}>
+        <PlanList title="Steps" items={data.steps} />
+        <PlanList title="Risks" items={data.risks} />
+        <PlanList title="Verification" items={data.verification} />
+        <textarea
+          className={styles.reviewFeedback}
+          placeholder="Feedback"
+          value={feedback}
+          disabled={submitted}
+          onChange={(event) => setFeedback(event.target.value)}
+        />
+      </div>
+
+      <footer className={styles.reviewActions}>
+        <button
+          type="button"
+          className={styles.reviewSecondaryButton}
+          disabled={submitted}
+          onClick={() => handleDecision("revise")}
+        >
+          Continue modifying
+        </button>
+        <button
+          type="button"
+          className={styles.reviewPrimaryButton}
+          disabled={submitted}
+          onClick={() => handleDecision("execute")}
+        >
+          Execute
+        </button>
+        <button
+          type="button"
+          className={styles.reviewSecondaryButton}
+          disabled={submitted}
+          onClick={() => handleDecision("exit_plan")}
+        >
+          Exit Plan Mode
+        </button>
+      </footer>
+    </section>
   );
 }

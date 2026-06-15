@@ -85,8 +85,6 @@ class ProposedPlanCreate(_StrictPlanModel):
     steps: list[str]
     risks: list[str]
     verification: list[str]
-    open_questions: list[str]
-    confidence: float = Field(ge=0, le=1)
     metadata: dict[str, Any] = Field(default_factory=dict)
 
     @field_validator(
@@ -110,16 +108,6 @@ class ProposedPlanCreate(_StrictPlanModel):
     def _non_empty_text_list(cls, value: list[str]) -> list[str]:
         if not value:
             raise ValueError("must not be empty")
-        if any(not item.strip() for item in value):
-            raise ValueError("items must not be empty")
-        return value
-
-    @field_validator("open_questions", mode="after")
-    @classmethod
-    def _open_questions_items_must_be_non_empty(
-        cls,
-        value: list[str],
-    ) -> list[str]:
         if any(not item.strip() for item in value):
             raise ValueError("items must not be empty")
         return value
@@ -232,8 +220,6 @@ class PlanReviewCard(PlanInteractionCard):
     steps: list[str]
     risks: list[str]
     verification: list[str]
-    open_questions: list[str]
-    confidence: float = Field(ge=0, le=1)
     submitted_decision: PlanReviewDecisionType | None = None
 
     @classmethod
@@ -246,6 +232,4 @@ class PlanReviewCard(PlanInteractionCard):
             steps=plan.steps,
             risks=plan.risks,
             verification=plan.verification,
-            open_questions=plan.open_questions,
-            confidence=plan.confidence,
         )
