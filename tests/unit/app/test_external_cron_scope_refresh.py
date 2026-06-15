@@ -159,6 +159,43 @@ async def test_scheduler_payload_uses_logical_tenant_and_source() -> None:
 
 
 @pytest.mark.asyncio
+async def test_source_cleanup_scheduler_payload_uses_source_only_job_name() -> (
+    None
+):
+    """source 级 cleanup payload 应使用 source 维度 jobDesc 和显式 scope。"""
+    adapter = CapturingSchedulerAdapter()
+
+    ext_id = await adapter.register_job(
+        tenant_id="tenant-a",
+        source_id="source-a",
+        agent_id="",
+        task_type="cleanup",
+        job_id="_source_task_session_cleanup",
+        job_name="task_session_cleanup",
+        cron="30 2 * * *",
+        callback_url="http://swe.local/api/internal/cron/callback",
+        scope_id="scope-source-a",
+        from_id="alice",
+        source_level=True,
+    )
+
+    assert ext_id == "1001"
+    add_path, payload = adapter.requests[0]
+    assert add_path == "/job-admin/v2/add-job"
+    assert payload["jobDesc"] == "[SWE] source-a/task_session_cleanup"
+    job_param = _decode_job_param(payload["jobParam"])
+    assert job_param == {
+        "tenant_id": "tenant-a",
+        "source_id": "source-a",
+        "agent_id": "",
+        "task_type": "cleanup",
+        "job_id": "_source_task_session_cleanup",
+        "scopeId": "scope-source-a",
+        "fromId": "alice",
+    }
+
+
+@pytest.mark.asyncio
 async def test_scheduler_payload_keeps_full_normalized_cron() -> None:
     """行外注册时不能截断转换后的 cron 表达式。"""
     adapter = CapturingSchedulerAdapter()
