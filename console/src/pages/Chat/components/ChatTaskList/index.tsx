@@ -186,7 +186,12 @@ export default function ChatTaskList(props: ChatTaskListProps) {
         {!collapsed && (
           <div className="chat-task-list-items">
             {tasks.length === 0 ? (
-              <div className="chat-task-list-empty">暂无任务</div>
+              <div className="chat-task-list-empty">
+                <div className="chat-task-list-empty-title">暂无任务</div>
+                <div className="chat-task-list-empty-description">
+                  创建任务，让 AI 帮你自动推进
+                </div>
+              </div>
             ) : (
               <>
                 {pausedTasks.length > 0 && (

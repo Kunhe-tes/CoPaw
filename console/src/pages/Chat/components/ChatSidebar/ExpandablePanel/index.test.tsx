@@ -469,6 +469,27 @@ describe("ExpandablePanel tasks", () => {
     mocks.setSessionLoading.mockReset();
   });
 
+  it("shows a non-interactive fallback when there are no tasks", () => {
+    render(
+      <ExpandablePanel
+        visible
+        type="tasks"
+        onClose={vi.fn()}
+        tasks={[]}
+        sessions={[]}
+        onTaskClick={vi.fn()}
+        toolbarRef={{ current: document.createElement("div") }}
+      />,
+    );
+
+    expect(screen.getByText("暂无任务")).toBeInTheDocument();
+    expect(
+      screen.getByText("创建任务，让 AI 帮你自动推进"),
+    ).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "去创建" })).toBeNull();
+    expect(screen.queryByRole("link", { name: "去创建" })).toBeNull();
+  });
+
   it("collapses paused tasks without showing aggregate unread state", () => {
     render(
       <ExpandablePanel
