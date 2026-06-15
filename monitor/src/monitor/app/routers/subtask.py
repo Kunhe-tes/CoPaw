@@ -1,0 +1,105 @@
+# -*- coding: utf-8 -*-
+"""Subtask API router for frontend.
+
+Provides endpoints for:
+- Creating subtask records
+- Syncing subtask status from external API
+- Syncing execution async_status from subtask statuses
+"""
+
+import logging
+
+from fastapi import APIRouter, Depends, HTTPException
+
+from ..models.subtask import (
+    SubtaskCreateRequest,
+    SubtaskCreateResponse,
+    SubtaskSyncStatusResponse,
+    ExecutionAsyncStatusResponse,
+)
+from ..services.subtask import get_query_service, get_sync_service
+from ..services.subtask.query_service import QueryService
+from ..services.subtask.sync_service import SyncService
+
+logger = logging.getLogger(__name__)
+
+router = APIRouter(prefix="/monitor/subtasks", tags=["subtask"])
+
+
+@router.post("", response_model=SubtaskCreateResponse)
+async def create_subtask(
+    request: SubtaskCreateRequest,
+    query_service: QueryService = Depends(get_query_service),
+) -> SubtaskCreateResponse:
+    """Create a subtask record.
+
+    Creates a new subtask record with trace_id and task_id.
+    The record is initialized with status=NULL, created_at=now(),
+    updated_at=NULL.
+
+    Args:
+        request: Create request with trace_id and task_id
+        query_service: Query service
+
+    Returns:
+        SubtaskCreateResponse with creation result
+    """
+    try:
+        return await query_service.create_subtask(
+            trace_id=request.trace_id,
+            task_id=request.task_id,
+        )
+    except Exception as e:
+        logger.error("Failed to create subtask: %s", e)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/sync-status", response_model=SubtaskSyncStatusResponse)
+async def sync_subtask_status(
+    sync_service: SyncService = Depends(get_sync_service),
+) -> SubtaskSyncStatusResponse:
+    """Sync subtask statuses from external API.
+
+    Scans subtasks with NULL/empty status, calls external API
+    to get status, and updates database.
+
+    Args:
+        sync_service: Sync service
+
+    Returns:
+        SubtaskSyncStatusResponse with sync results
+    """
+    try:
+        return await sync_service.sync_subtask_status()
+    except Exception as e:
+        logger.error("Failed to sync subtask status: %s", e)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post(
+    "/executions/sync-async-status",
+    response_model=ExecutionAsyncStatusResponse,
+)
+async def sync_execution_async_status(
+    sync_service: SyncService = Depends(get_sync_service),
+) -> ExecutionAsyncStatusResponse:
+    """Sync execution async_status from subtask statuses.
+
+    Scans executions with NULL/empty async_status, checks
+    subtask statuses, and updates async_status.
+
+    Rules:
+    - No subtasks or all SUC -> async_status = 'success'
+    - Any FAIL or PART_SUC -> async_status = 'error'
+
+    Args:
+        sync_service: Sync service
+
+    Returns:
+        ExecutionAsyncStatusResponse with sync results
+    """
+    try:
+        return await sync_service.sync_execution_async_status()
+    except Exception as e:
+        logger.error("Failed to sync execution async_status: %s", e)
+        raise HTTPException(status_code=500, detail=str(e))

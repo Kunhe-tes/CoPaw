@@ -267,3 +267,12 @@ EXTRACT_CUSTOMER_NAMES_URL = EnvVarLoader.get_str(
     "MONITOR_EXTRACT_CUSTOMER_NAMES_URL",
     "",
 )
+
+# ============================================================
+# 异步任务状态查询 API 配置
+# ============================================================
+
+ASYNC_TASK_QUERY_URL = EnvVarLoader.get_str("MONITOR_ASYNC_TASK_QUERY_URL", "")
+ASYNC_TASK_APP_KEY = EnvVarLoader.get_str("MONITOR_ASYNC_TASK_APP_KEY", "")
+ASYNC_TASK_ENV_TAG = EnvVarLoader.get_str("MONITOR_ASYNC_TASK_ENV_TAG", "")
+ASYNC_TASK_API_KEY = EnvVarLoader.get_str("MONITOR_ASYNC_TASK_API_KEY", "")
