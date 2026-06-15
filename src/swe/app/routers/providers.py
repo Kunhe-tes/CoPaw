@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import logging
 import shutil
+import time
 from pathlib import Path as PathlibPath
 from typing import List, Literal, Optional
 from copy import deepcopy
@@ -39,6 +40,8 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/models", tags=["models"])
 
+_PROVIDER_API_SLOW_LOG_MS = 500
+
 ChatModelName = Literal[
     "OpenAIChatModel",
     "KimiChatModel",
@@ -68,18 +71,59 @@ def get_provider_manager(request: Request) -> ProviderManager:
     Raises:
         HTTPException: If tenant ID is not available in request context.
     """
+    started_at = time.perf_counter()
+    resolve_started_at = started_at
     tenant_id = _get_effective_tenant_id(request)
+    resolve_ms = int((time.perf_counter() - resolve_started_at) * 1000)
 
     if tenant_id is None:
         # For exempt routes or backward compatibility, use default tenant
         tenant_id = "default"
         logger.debug("No tenant ID in request, using default tenant")
 
+    provider_tenant_id = ProviderManager._resolve_effective_provider_tenant_id(
+        tenant_id,
+    )
+    cache_hit_before = provider_tenant_id in ProviderManager._instances
+    root_path = ProviderManager._get_tenant_root_path(provider_tenant_id)
+
     # Ensure tenant provider storage exists before accessing ProviderManager
+    ensure_started_at = time.perf_counter()
     ProviderManager.ensure_tenant_provider_storage(tenant_id)
+    ensure_ms = int((time.perf_counter() - ensure_started_at) * 1000)
 
     # Return tenant-specific provider manager
-    return ProviderManager.get_instance(tenant_id)
+    get_instance_started_at = time.perf_counter()
+    manager = ProviderManager.get_instance(tenant_id)
+    get_instance_ms = int(
+        (time.perf_counter() - get_instance_started_at) * 1000,
+    )
+    total_ms = int((time.perf_counter() - started_at) * 1000)
+
+    if total_ms >= _PROVIDER_API_SLOW_LOG_MS:
+        logger.info(
+            "provider_manager_dependency_slow path=%s total_ms=%d "
+            "resolve_ms=%d ensure_ms=%d get_instance_ms=%d "
+            "route_tenant_id=%s provider_tenant_id=%s manager_tenant_id=%s "
+            "source_id=%s scope_id=%s cache_hit_before=%s "
+            "cache_hit_after=%s root_path=%s root_exists=%s",
+            request.url.path,
+            total_ms,
+            resolve_ms,
+            ensure_ms,
+            get_instance_ms,
+            tenant_id,
+            provider_tenant_id,
+            manager.tenant_id,
+            _request_source_id(request),
+            getattr(request.state, "scope_id", None),
+            cache_hit_before,
+            manager.tenant_id in ProviderManager._instances,
+            root_path,
+            root_path.exists(),
+        )
+
+    return manager
 
 
 class ProviderConfigRequest(BaseModel):
@@ -315,7 +359,20 @@ async def _distribute_active_model_to_tenant(
 async def list_all_providers(
     manager: ProviderManager = Depends(get_provider_manager),
 ) -> List[ProviderInfo]:
-    return await manager.list_provider_info()
+    started_at = time.perf_counter()
+    providers = await manager.list_provider_info()
+    duration_ms = int((time.perf_counter() - started_at) * 1000)
+    if duration_ms >= _PROVIDER_API_SLOW_LOG_MS:
+        logger.info(
+            "provider_list_info_slow tenant_id=%s duration_ms=%d "
+            "provider_count=%d custom_count=%d root_path=%s",
+            manager.tenant_id,
+            duration_ms,
+            len(providers),
+            len(manager.custom_providers),
+            manager.root_path,
+        )
+    return providers
 
 
 @router.put(
@@ -713,6 +770,7 @@ async def get_active_models(
     - agent: DEPRECATED - treated as 'global' for backward compatibility
     """
     # Short-term compatibility: normalize legacy 'agent' scope to 'global'
+    started_at = time.perf_counter()
     if scope == "agent":
         logger.warning(
             "Received deprecated scope='agent' for get_active_models. "
@@ -722,6 +780,16 @@ async def get_active_models(
     # For 'effective' and 'global', return the tenant-level active model
     # Agent-level model fallback is removed as models are now tenant-scoped
     global_model = manager.get_active_model()
+    duration_ms = int((time.perf_counter() - started_at) * 1000)
+    if duration_ms >= _PROVIDER_API_SLOW_LOG_MS:
+        logger.info(
+            "provider_active_model_read_slow tenant_id=%s duration_ms=%d "
+            "scope=%s root_path=%s",
+            manager.tenant_id,
+            duration_ms,
+            scope,
+            manager.root_path,
+        )
     logger.info("Returning tenant-level active model: %s", global_model)
     return ActiveModelsInfo(active_llm=global_model)
 

@@ -7,6 +7,7 @@ import sys
 import types
 from pathlib import Path
 
+import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from swe.config.context import encode_scope_id
@@ -594,6 +595,160 @@ def test_broadcast_clears_model_slot_and_returns_warning_for_unsupported_tenant(
             ),
         },
     ]
+
+
+def test_broadcast_uses_configured_offset_window_hours():
+    source_job = CronJobSpec.model_validate(
+        {
+            **_job_spec("job-source"),
+            "schedule": ScheduleSpec(
+                cron="0 9 * * *",
+            ).model_dump(mode="json"),
+            "tenant_id": "tenant-a",
+            "source_id": "source-a",
+            "scope_id": encode_scope_id("tenant-a", "source-a"),
+        },
+    )
+    source_manager = _Manager({"job-source": source_job})
+    target_first = _Manager()
+    target_second = _Manager()
+    target_third = _Manager()
+    multi_agent_manager = _MultiAgentManager(
+        {
+            encode_scope_id("tenant-b", "source-a"): _Workspace(
+                target_first,
+            ),
+            encode_scope_id("tenant-c", "source-a"): _Workspace(
+                target_second,
+            ),
+            encode_scope_id("tenant-d", "source-a"): _Workspace(
+                target_third,
+            ),
+        },
+    )
+    client = _build_client(
+        source_manager,
+        multi_agent_manager=multi_agent_manager,
+        tenant_workspace_pool=_TenantWorkspacePool(),
+    )
+    _install_provider_manager(
+        {},
+        providers_by_tenant={
+            encode_scope_id("tenant-b", "source-a"): {},
+            encode_scope_id("tenant-c", "source-a"): {},
+            encode_scope_id("tenant-d", "source-a"): {},
+        },
+    )
+
+    response = client.post(
+        "/cron/jobs/job-source/broadcast",
+        json={
+            "target_tenant_ids": ["tenant-b", "tenant-c", "tenant-d"],
+            "offset_window_hours": 1,
+        },
+    )
+
+    assert response.status_code == 200
+    assert [item["offset_minutes"] for item in response.json()["results"]] == [
+        0,
+        30,
+        60,
+    ]
+    assert target_first.created[0].schedule.cron == "0 9 * * *"
+    assert target_second.created[0].schedule.cron == "30 8 * * *"
+    assert target_third.created[0].schedule.cron == "0 8 * * *"
+
+
+def test_broadcast_can_disable_offset_shift():
+    source_job = CronJobSpec.model_validate(
+        {
+            **_job_spec("job-source"),
+            "schedule": ScheduleSpec(
+                cron="*/15 * * * *",
+            ).model_dump(mode="json"),
+            "tenant_id": "tenant-a",
+            "source_id": "source-a",
+            "scope_id": encode_scope_id("tenant-a", "source-a"),
+        },
+    )
+    source_manager = _Manager({"job-source": source_job})
+    target_first = _Manager()
+    target_second = _Manager()
+    multi_agent_manager = _MultiAgentManager(
+        {
+            encode_scope_id("tenant-b", "source-a"): _Workspace(
+                target_first,
+            ),
+            encode_scope_id("tenant-c", "source-a"): _Workspace(
+                target_second,
+            ),
+        },
+    )
+    client = _build_client(
+        source_manager,
+        multi_agent_manager=multi_agent_manager,
+        tenant_workspace_pool=_TenantWorkspacePool(),
+    )
+    _install_provider_manager(
+        {},
+        providers_by_tenant={
+            encode_scope_id("tenant-b", "source-a"): {},
+            encode_scope_id("tenant-c", "source-a"): {},
+        },
+    )
+
+    response = client.post(
+        "/cron/jobs/job-source/broadcast",
+        json={
+            "target_tenant_ids": ["tenant-b", "tenant-c"],
+            "enable_offset": False,
+            "offset_window_hours": 24,
+        },
+    )
+
+    assert response.status_code == 200
+    assert [item["offset_minutes"] for item in response.json()["results"]] == [
+        0,
+        0,
+    ]
+    assert [item["warning"] for item in response.json()["results"]] == [
+        "",
+        "",
+    ]
+    assert target_first.created[0].schedule.cron == "*/15 * * * *"
+    assert target_second.created[0].schedule.cron == "*/15 * * * *"
+    assert target_first.created[0].meta["broadcast_offset_minutes"] == 0
+    assert target_second.created[0].meta["broadcast_offset_minutes"] == 0
+
+
+@pytest.mark.parametrize("offset_window_hours", [0, 25])
+def test_broadcast_rejects_invalid_offset_window_hours(offset_window_hours):
+    source_manager = _Manager(
+        {
+            "job-source": CronJobSpec.model_validate(
+                {
+                    **_job_spec("job-source"),
+                    "tenant_id": "tenant-a",
+                    "source_id": "source-a",
+                    "scope_id": encode_scope_id("tenant-a", "source-a"),
+                },
+            ),
+        },
+    )
+    client = _build_client(
+        source_manager,
+        multi_agent_manager=_MultiAgentManager({}),
+    )
+
+    response = client.post(
+        "/cron/jobs/job-source/broadcast",
+        json={
+            "target_tenant_ids": ["tenant-b"],
+            "offset_window_hours": offset_window_hours,
+        },
+    )
+
+    assert response.status_code == 422
 
 
 def test_broadcast_persists_model_not_found_reason_for_unsupported_model():
