@@ -80,16 +80,16 @@ function displayVersion(versionId: string): string {
 /**
  * 把 source_user_* 拼成单行描述，避免与头部 created_by + version_id 重复。
  *
- * 规则（仅展示"用户版本"）：
+ * 规则（仅展示"用户同步版本"）：
  * - 无 source_user_version 或 = "v0.0.0"（admin zip 路径） → 不显示
  * - source_user_version == 市场 version_id → 不显示（信息重复）
- * - 否则 → "用户版本 vX.Y.Z"
+ * - 否则 → "用户同步版本 vX.Y.Z"
  */
 function describeSource(version: MCPVersion): string | null {
   const userVersion = version.source_user_version?.trim();
   if (!userVersion || userVersion === "v0.0.0") return null;
   if (userVersion === version.version_id) return null;
-  return `用户版本 ${displayVersion(userVersion)}`;
+  return `用户同步版本 ${displayVersion(userVersion)}`;
 }
 
 export function MCPVersionHistoryModal(props: MCPVersionHistoryModalProps) {
