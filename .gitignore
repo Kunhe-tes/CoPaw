@@ -118,3 +118,7 @@ src/.hypothesis/
 /venv_swe/
 /venv_monitor/
 /.codegraph/
+
+# personal debug scripts (not meant to be tracked)
+/diff_dir.py
+/diff_dir_*/
