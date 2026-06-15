@@ -1,5 +1,6 @@
 import {
   AlertTriangle,
+  ArrowLeft,
   Banknote,
   CalendarDays,
   CheckCircle2,
@@ -14,7 +15,7 @@ import { DatePicker, Input, Modal, Pagination, Select, Spin, Tooltip } from "ant
 import { WarningOutlined } from "@ant-design/icons";
 import dayjs, { type Dayjs } from "dayjs";
 import { useEffect, useState, type CSSProperties } from "react";
-import { useSearchParams } from "react-router-dom";
+import { useNavigate, useSearchParams } from "react-router-dom";
 import {
   monitorApi,
   type ExecutionItem,
@@ -551,6 +552,7 @@ function FailedTaskModal({
 }
 
 export default function CronJobOverviewPage() {
+  const navigate = useNavigate();
   const [searchParams, setSearchParams] = useSearchParams();
   const initialDateRange = getInitialDateRange(searchParams);
   const [overviewData, setOverviewData] = useState<CronJobOverviewPageData>(emptyOverviewData);
@@ -775,6 +777,13 @@ export default function CronJobOverviewPage() {
       {loading ? <div className={styles.loadingBar}>加载中...</div> : null}
       <header className={styles.header}>
         <div className={styles.titleRow}>
+          <button
+            type="button"
+            className={styles.backButton}
+            onClick={() => navigate("/analytics/business-overview")}
+          >
+            <ArrowLeft size={20} />
+          </button>
           <h1>定时任务概览</h1>
         </div>
         <div className={styles.toolbar}>

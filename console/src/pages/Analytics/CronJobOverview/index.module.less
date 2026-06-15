@@ -32,7 +32,32 @@
 .titleRow {
   display: flex;
   align-items: center;
+  gap: 8px;
   min-height: 34px;
+}
+
+.backButton {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 34px;
+  height: 34px;
+  padding: 0;
+  color: #2478ff;
+  background: #edf2ff;
+  border: none;
+  border-radius: 8px;
+  cursor: pointer;
+  transition: background 0.2s, color 0.2s;
+
+  &:hover {
+    background: #d6e4ff;
+    color: #1a5cd8;
+  }
+
+  &:active {
+    background: #c2d4ff;
+  }
 }
 
 .header h1 {
