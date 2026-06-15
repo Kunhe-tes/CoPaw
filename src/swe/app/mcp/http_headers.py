@@ -15,6 +15,7 @@ _RESERVED_SWE_HEADER_KEYS = frozenset(
         "x-swe-source-id",
         "x-swe-session-id",
         "x-swe-trace-id",
+        "traceid",
     },
 )
 
@@ -60,5 +61,6 @@ def build_mcp_http_headers(
         merged_headers["x-swe-session-id"] = session_id
     if trace_id:
         merged_headers["x-swe-trace-id"] = trace_id
+        merged_headers["traceid"] = trace_id
 
     return merged_headers or None
