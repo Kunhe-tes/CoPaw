@@ -179,6 +179,7 @@ class InMemoryBindingStore:
 
     def __init__(self) -> None:
         self._bindings: dict[tuple[str, str], SourceSystemTaskBinding] = {}
+        self.upsert_calls = 0
 
     async def get_binding(
         self,
@@ -200,6 +201,7 @@ class InMemoryBindingStore:
         scheduler_from_id: str | None = None,
         updated_by: str | None = None,
     ) -> SourceSystemTaskBinding:
+        self.upsert_calls += 1
         binding = SourceSystemTaskBinding(
             source_id=source_id,
             task_type=task_type,
@@ -274,7 +276,8 @@ async def test_refresh_task_session_cleanup_registers_source_level_job():
         identity=_identity(),
     )
 
-    assert result["action"] == "registered"
+    assert result.action == "registered"
+    assert result.binding is not None
     assert adapter.calls == [
         (
             "register_job",
@@ -346,7 +349,8 @@ async def test_refresh_task_session_cleanup_updates_and_resumes_existing_job():
         ),
     )
 
-    assert result["action"] == "updated"
+    assert result.action == "updated"
+    assert result.binding is not None
     assert adapter.calls == [
         (
             "update_job",
@@ -419,7 +423,8 @@ async def test_refresh_task_session_cleanup_pauses_existing_job_when_disabled():
         ),
     )
 
-    assert result["action"] == "paused"
+    assert result.action == "paused"
+    assert result.binding is not None
     assert adapter.calls == [
         ("pause_job", {"external_id": "ext-1001"}),
     ]
@@ -435,3 +440,85 @@ async def test_refresh_task_session_cleanup_pauses_existing_job_when_disabled():
     assert binding.scheduler_scope_id == "scope-disabled"
     assert binding.scheduler_from_id == "charlie"
     assert binding.updated_by == "charlie"
+
+
+@pytest.mark.asyncio
+async def test_refresh_task_session_cleanup_skips_empty_disabled_binding():
+    """禁用且没有现有绑定时，不应写入空绑定或调用外部调度。"""
+    store = InMemoryBindingStore()
+    adapter = RecordingSchedulerAdapter()
+    scheduler = SourceSystemTaskScheduler(
+        binding_store=store,
+        scheduler_adapter=adapter,
+        callback_url="http://swe.local/api/internal/cron/callback",
+    )
+
+    result = await scheduler.refresh_task_session_cleanup(
+        source_id="source-a",
+        config={
+            "cron_task_session_cleanup": {
+                "enabled": False,
+                "retention_days": 30,
+                "cron": "0 1 * * *",
+            },
+        },
+        identity=_identity(),
+    )
+
+    assert result.action == "disabled"
+    assert result.binding is None
+    assert adapter.calls == []
+    assert store.upsert_calls == 0
+    assert await store.get_binding("source-a", SOURCE_TASK_SESSION_CLEANUP_NAME) is None
+
+
+@pytest.mark.asyncio
+async def test_refresh_task_session_cleanup_raises_when_register_returns_empty_id():
+    """外部调度没有返回 job id 时，不应写入启用绑定。"""
+    store = InMemoryBindingStore()
+    adapter = RecordingSchedulerAdapter(external_id="")
+    scheduler = SourceSystemTaskScheduler(
+        binding_store=store,
+        scheduler_adapter=adapter,
+        callback_url="http://swe.local/api/internal/cron/callback",
+    )
+
+    with pytest.raises(
+        RuntimeError,
+        match=(
+            "external scheduler did not return job id "
+            "for source cleanup task: source-a"
+        ),
+    ):
+        await scheduler.refresh_task_session_cleanup(
+            source_id="source-a",
+            config={
+                "cron_task_session_cleanup": {
+                    "enabled": True,
+                    "retention_days": 30,
+                    "cron": "30 2 * * *",
+                },
+            },
+            identity=_identity(),
+        )
+
+    assert adapter.calls == [
+        (
+            "register_job",
+            {
+                "tenant_id": "tenant-a",
+                "source_id": "source-a",
+                "agent_id": "",
+                "task_type": TASK_SESSION_CLEANUP_TASK_TYPE,
+                "job_id": SOURCE_TASK_SESSION_CLEANUP_JOB_ID,
+                "job_name": SOURCE_TASK_SESSION_CLEANUP_NAME,
+                "cron": "30 2 * * *",
+                "callback_url": "http://swe.local/api/internal/cron/callback",
+                "source_level": True,
+                "scope_id": "tenant-a-source-a",
+                "from_id": "alice",
+            },
+        ),
+    ]
+    assert store.upsert_calls == 0
+    assert await store.get_binding("source-a", SOURCE_TASK_SESSION_CLEANUP_NAME) is None
