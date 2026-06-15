@@ -244,6 +244,10 @@ _Avoid_: per-skill notice spam, repeated freshness banners, fragmented model not
 A periodic, Runtime Instance-scoped assessment of the Swe backend service's load, responsiveness, process resources, and storage capacity. It is broader than a liveness probe and does not execute an Agent Heartbeat.
 _Avoid_: self-check, health endpoint, Agent Heartbeat
 
+**Liveness Probe**:
+A Runtime Instance signal that only proves the backend request-serving process can answer immediately. A **Liveness Probe** is not a dependency check and must not describe tenant, workspace, source configuration, database, Agent runtime, or scheduled work availability.
+_Avoid_: readiness check, system self-check, health diagnostic
+
 **Request Execution Load**:
 The current load and responsiveness of the backend request-serving runtime within one Runtime Instance, distinct from tenant or business-runtime usage.
 _Avoid_: Flask worker usage, ordinary HTTP throughput, request latency, tenant usage statistics, Agent Run count, LLM load
@@ -446,6 +450,9 @@ Resolved as limited to the Source System Configuration page and runtime resoluti
 
 **"System Self-Check"**:
 Resolved as **System Runtime Diagnostic**. The existing lightweight health endpoint remains a liveness probe, while the scheduled `HEARTBEAT.md` run remains an Agent Heartbeat.
+
+**"Health Endpoint"**:
+Resolved as **Liveness Probe** when referring to `/api/health/health`. It is not a readiness check and does not report dependency availability.
 
 **"Flask Worker Usage"**:
 Resolved as **Request Execution Load**. Swe does not run Flask or a multi-worker web-server pool; the diagnostic reports the load and responsiveness of the single-worker Uvicorn/FastAPI backend instead of tenant-level workload statistics or Supervisor process state.
