@@ -35,11 +35,7 @@ from .command_dispatch import (
 )
 from .query_error_dump import write_query_error_dump
 from .retry_classifier import is_query_retryable
-from .session import (
-    RunnerSessionProtocol,
-    SafeJSONSession,
-    SESSION_SKILL_SNAPSHOT_STATE_KEY,
-)
+from .session import SafeJSONSession, SESSION_SKILL_SNAPSHOT_STATE_KEY
 from .stream_boundary import normalize_reasoning_boundary_stream
 from .task_progress import attach_task_progress
 from .utils import build_env_context
@@ -224,6 +220,92 @@ def _extract_memory_entry_payload(entry: Any) -> dict[str, Any] | None:
     return None
 
 
+def _is_tool_guard_denied_entry(entry: Any) -> bool:
+    return (
+        isinstance(entry, list)
+        and len(entry) >= 2
+        and isinstance(entry[1], list)
+        and TOOL_GUARD_DENIED_MARK in entry[1]
+    )
+
+
+def _get_agent_memory_content(states: dict[str, Any]) -> list[Any] | None:
+    agent_state = states.get("agent", {})
+    if not isinstance(agent_state, dict):
+        return None
+
+    memory_state = agent_state.get("memory", {})
+    if not isinstance(memory_state, dict):
+        return None
+
+    content = memory_state.get("content", [])
+    if not isinstance(content, list) or not content:
+        return None
+    return content
+
+
+def _last_tool_guard_denied_index(content: list[Any]) -> int | None:
+    for index in range(len(content) - 1, -1, -1):
+        if _is_tool_guard_denied_entry(content[index]):
+            return index
+    return None
+
+
+def _is_assistant_memory_entry(entry: Any) -> bool:
+    return (
+        isinstance(entry, list)
+        and len(entry) >= 1
+        and isinstance(entry[0], dict)
+        and entry[0].get("role") == "assistant"
+    )
+
+
+def _remove_following_denial_explanation(
+    content: list[Any],
+    denied_entry_index: int | None,
+) -> bool:
+    if denied_entry_index is None:
+        return False
+
+    explanation_index = denied_entry_index + 1
+    if explanation_index >= len(content):
+        return False
+
+    if not _is_assistant_memory_entry(content[explanation_index]):
+        return False
+
+    del content[explanation_index]
+    return True
+
+
+def _strip_tool_guard_denied_marks(content: list[Any]) -> int:
+    stripped_count = 0
+    for entry in content:
+        if _is_tool_guard_denied_entry(entry):
+            entry[1].remove(TOOL_GUARD_DENIED_MARK)
+            stripped_count += 1
+    return stripped_count
+
+
+def _build_denial_response_memory_entry(
+    denial_response: Msg,
+) -> list[Any]:
+    ts = getattr(denial_response, "timestamp", None)
+    msg_dict = {
+        "id": getattr(denial_response, "id", ""),
+        "name": getattr(denial_response, "name", "Friday"),
+        "role": getattr(denial_response, "role", "assistant"),
+        "content": denial_response.content,
+        "metadata": getattr(
+            denial_response,
+            "metadata",
+            None,
+        ),
+        "timestamp": str(ts) if ts is not None else "",
+    }
+    return [msg_dict, []]
+
+
 def _extract_text_from_message_content(content: Any) -> str:
     """从消息内容中提取可展示文本。"""
     if isinstance(content, str):
@@ -391,7 +473,7 @@ def _hook_config_enabled(
 
 
 async def _load_session_hook_overlay(
-    session: RunnerSessionProtocol | None,
+    session: Any | None,
     *,
     session_id: str,
     user_id: str,
@@ -1515,7 +1597,7 @@ class AgentRunner(Runner):
         self._workspace: Any = None  # Workspace instance for control commands
         self.memory_manager: BaseMemoryManager | None = None
         self._task_tracker = task_tracker  # Task tracker for background tasks
-        self.session: RunnerSessionProtocol | None = None
+        self.session: Any | None = None
 
     def set_chat_manager(self, chat_manager):
         """Set chat manager for auto-registration.
@@ -3919,106 +4001,33 @@ class AgentRunner(Runner):
             return
 
         try:
-
-            def _is_marked(entry):
-                return (
-                    isinstance(entry, list)
-                    and len(entry) >= 2
-                    and isinstance(entry[1], list)
-                    and TOOL_GUARD_DENIED_MARK in entry[1]
-                )
-
             modified = False
-
-            def _get_memory_content(
-                states: dict[str, Any],
-            ) -> list[Any] | None:
-                agent_state = states.get("agent", {})
-                if not isinstance(agent_state, dict):
-                    return None
-
-                memory_state = agent_state.get("memory", {})
-                if not isinstance(memory_state, dict):
-                    return None
-
-                content = memory_state.get("content", [])
-                if not isinstance(content, list) or not content:
-                    return None
-                return content
-
-            def _find_last_marked_index(content: list[Any]) -> int:
-                last_marked_idx = -1
-                for i, entry in enumerate(content):
-                    if _is_marked(entry):
-                        last_marked_idx = i
-                return last_marked_idx
-
-            def _remove_denial_explanation(
-                content: list[Any],
-                last_marked_idx: int,
-            ) -> bool:
-                if last_marked_idx < 0 or last_marked_idx + 1 >= len(content):
-                    return False
-
-                next_entry = content[last_marked_idx + 1]
-                if not (
-                    isinstance(next_entry, list)
-                    and len(next_entry) >= 1
-                    and isinstance(next_entry[0], dict)
-                    and next_entry[0].get("role") == "assistant"
-                ):
-                    return False
-
-                del content[last_marked_idx + 1]
-                return True
-
-            def _strip_denied_marks(content: list[Any]) -> bool:
-                stripped = False
-                for entry in content:
-                    if _is_marked(entry):
-                        entry[1].remove(TOOL_GUARD_DENIED_MARK)
-                        stripped = True
-                return stripped
-
-            def _append_denial_response(content: list[Any]) -> bool:
-                if denial_response is None:
-                    return False
-
-                ts = getattr(denial_response, "timestamp", None)
-                msg_dict = {
-                    "id": getattr(denial_response, "id", ""),
-                    "name": getattr(denial_response, "name", "Friday"),
-                    "role": getattr(denial_response, "role", "assistant"),
-                    "content": denial_response.content,
-                    "metadata": getattr(
-                        denial_response,
-                        "metadata",
-                        None,
-                    ),
-                    "timestamp": str(ts) if ts is not None else "",
-                }
-                content.append([msg_dict, []])
-                return True
 
             def _cleanup_state(
                 states: dict[str, Any],
             ) -> dict[str, Any] | None:
                 nonlocal modified
-                content = _get_memory_content(states)
+                content = _get_agent_memory_content(states)
                 if content is None:
                     return None
 
-                last_marked_idx = _find_last_marked_index(content)
-                removed_explanation = _remove_denial_explanation(
+                last_marked_idx = _last_tool_guard_denied_index(content)
+                if _remove_following_denial_explanation(
                     content,
                     last_marked_idx,
-                )
-                stripped_marks = _strip_denied_marks(content)
-                appended_response = _append_denial_response(content)
-                modified = (
-                    removed_explanation or stripped_marks or appended_response
-                )
-                return states
+                ):
+                    modified = True
+
+                if _strip_tool_guard_denied_marks(content):
+                    modified = True
+
+                if denial_response is not None:
+                    content.append(
+                        _build_denial_response_memory_entry(denial_response),
+                    )
+                    modified = True
+
+                return states if modified else None
 
             await self.session.mutate_session_state(
                 session_id=storage_session_id,

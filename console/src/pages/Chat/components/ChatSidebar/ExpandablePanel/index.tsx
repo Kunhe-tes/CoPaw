@@ -8,6 +8,7 @@ import Style from "./style";
 import {
   getTaskNextRunText,
   getTaskNextRunTooltipTimes,
+  getTaskPauseStatusText,
   getTaskSidebarMeta,
   partitionTasksByPauseState,
   TASK_COMPLETED_STATUS_TEXT,
@@ -161,6 +162,7 @@ function TasksContent({
 
   const renderTask = (task: CronJobSpecOutput) => {
     const sidebarMeta = getTaskSidebarMeta(task);
+    const pauseStatusText = getTaskPauseStatusText(sidebarMeta);
     const nextRunText = getTaskNextRunText(task);
     const nextRunTooltipTimes = getTaskNextRunTooltipTimes(task);
 
@@ -224,7 +226,7 @@ function TasksContent({
             </div>
           )}
         </div>
-        {sidebarMeta.state !== "active" && sidebarMeta.state !== "running" && (
+        {pauseStatusText && (
           <div
             className={`expandable-panel-task-status ${
               sidebarMeta.state === "auto-paused"
@@ -232,9 +234,7 @@ function TasksContent({
                 : "expandable-panel-task-status--manual"
             }`}
           >
-            {sidebarMeta.state === "auto-paused"
-              ? `已自动暂停 · 连续 ${sidebarMeta.unreadCount} 次未读`
-              : "已手动暂停"}
+            {pauseStatusText}
           </div>
         )}
         {(task.task?.latest_scheduled_preview ||

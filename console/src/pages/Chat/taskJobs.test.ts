@@ -3,6 +3,7 @@ import type { CronJobSpecOutput } from "../../api/types";
 import {
   getTaskNextRunTooltipText,
   getTaskNextRunTooltipTimes,
+  getTaskPauseStatusText,
   getTaskSidebarMeta,
   partitionTasksByPauseState,
 } from "./taskJobs";
@@ -163,6 +164,46 @@ describe("partitionTasksByPauseState", () => {
       runnableTasks: [],
       pausedTasks: [],
     });
+  });
+});
+
+describe("getTaskPauseStatusText", () => {
+  it("shows cleaned text when unread auto-pause count is cleared", () => {
+    const meta = getTaskSidebarMeta(
+      taskJob({
+        enabled: false,
+        task: {
+          visible_in_my_tasks: true,
+          has_scheduled_result: false,
+          latest_scheduled_preview: "",
+          unread_execution_count: 0,
+          is_running: false,
+          is_paused: true,
+          pause_reason: "auto_unread_threshold",
+        },
+      }),
+    );
+
+    expect(getTaskPauseStatusText(meta)).toBe("已自动暂停 · 已清理");
+  });
+
+  it("shows unread count while unread auto-pause history remains", () => {
+    const meta = getTaskSidebarMeta(
+      taskJob({
+        enabled: false,
+        task: {
+          visible_in_my_tasks: true,
+          has_scheduled_result: false,
+          latest_scheduled_preview: "",
+          unread_execution_count: 3,
+          is_running: false,
+          is_paused: true,
+          pause_reason: "auto_unread_threshold",
+        },
+      }),
+    );
+
+    expect(getTaskPauseStatusText(meta)).toBe("已自动暂停 · 连续 3 次未读");
   });
 });
 

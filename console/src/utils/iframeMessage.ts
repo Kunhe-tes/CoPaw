@@ -17,7 +17,7 @@ import {
   ensureValidToken,
   isExternalTokenEnabled,
 } from "../api/externalToken";
-import { getTargetCookie } from "./cookie-utils";
+import { getWPlusCookie } from "./cookie-utils";
 import { authApi } from "../api/modules/auth";
 import { envApi } from "../api/modules/env";
 import { buildAuthHeaders as buildCookieHeaders } from "../api/authHeaders";
@@ -348,13 +348,13 @@ export async function handleUrlOriginParam(): Promise<void> {
   const sessionIdParam = urlParams.get("sessionId");
   const taskIdParam = urlParams.get("taskId");
   // 从 cookie 读取用户信息
-  const userId = getTargetCookie("userid");
-  const sysId = getTargetCookie("sysid");
-  const vbbk = getTargetCookie("vbbk");
-  const vorgcode = getTargetCookie("vorgcode");
-  const subBranchId = getTargetCookie("subBranchId");
-  const vorglvl = getTargetCookie("vorglvl");
-  const positionId = getTargetCookie("positionID");
+  const userId = getWPlusCookie("userid");
+  const sysId = getWPlusCookie("sysid");
+  const vbbk = getWPlusCookie("vbbk");
+  const vorgcode = getWPlusCookie("vorgcode");
+  const subBranchId = getWPlusCookie("subBranchId");
+  const vorglvl = getWPlusCookie("vorglvl");
+  const positionId = getWPlusCookie("positionID");
 
   if (!userId) {
     return;
@@ -436,12 +436,12 @@ async function initFromUrlParams(userId: string): Promise<void> {
  */
 async function fetchAndApplyCustomerInfoFromCookie(userId: string): Promise<void> {
   try {
-    const sysId = getTargetCookie("sysid") ?? "";
-    const vbbk = getTargetCookie("vbbk") ?? "";
-    const vorgcode = getTargetCookie("vorgcode") ?? "";
-    const subBranchId = getTargetCookie("subBranchId") ?? "";
-    const vorglvl = getTargetCookie("vorglvl") ?? "";
-    const positionId = getTargetCookie("positionID") ?? "";
+    const sysId = getWPlusCookie("sysid") ?? "";
+    const vbbk = getWPlusCookie("vbbk") ?? "";
+    const vorgcode = getWPlusCookie("vorgcode") ?? "";
+    const subBranchId = getWPlusCookie("subBranchId") ?? "";
+    const vorglvl = getWPlusCookie("vorglvl") ?? "";
+    const positionId = getWPlusCookie("positionID") ?? "";
 
     const targetUserData = {
       inputParams: {
@@ -475,7 +475,7 @@ async function fetchAndApplyCustomerInfoFromCookie(userId: string): Promise<void
       } else {
         // 接口未返回新cookie，刷新document.cookie的值到store
         store.setContext({
-          token: getTargetCookie("token"),
+          token: getWPlusCookie("token"),
           userChange: false,
         });
       }
@@ -499,7 +499,7 @@ function syncOriginYEnvFromCurrentContext(): Promise<void> {
     const store = useIframeStore.getState();
     const headers = buildCookieHeaders();
     const cookieValue = headers["x-header-cookie"] || document.cookie;
-    const token = store.token || getTargetCookie("token") || "";
+    const token = store.token || getWPlusCookie("token") || "";
 
     await envApi.patchEnvs({
       values: {
