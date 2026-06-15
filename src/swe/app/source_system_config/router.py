@@ -88,11 +88,15 @@ def _raise_invalid_storage_data(exc: Exception) -> NoReturn:
     ) from exc
 
 
-def _get_scheduler_identity(request: Request, updated_by: str | None):
+def _get_scheduler_identity(
+    request: Request,
+    *,
+    source_id: str,
+    updated_by: str | None,
+):
     """按最后修改配置的请求身份构造外部调度回调参数。"""
     from .task_scheduler import SourceSchedulerIdentity
 
-    source_id = _get_request_source_id(request)
     tenant_id = str(
         getattr(request.state, "tenant_id", None)
         or request.headers.get("X-Tenant-Id")
@@ -134,7 +138,11 @@ async def _refresh_cleanup_source_task(
         await scheduler.refresh_task_session_cleanup(
             source_id=source_id,
             config=config,
-            identity=_get_scheduler_identity(request, updated_by),
+            identity=_get_scheduler_identity(
+                request,
+                source_id=source_id,
+                updated_by=updated_by,
+            ),
         )
     except Exception:  # noqa: BLE001
         logger.exception("刷新 source 定时任务会话清理系统任务失败")
@@ -280,6 +288,11 @@ async def upsert_source_system_config(
     except ValueError as exc:
         _raise_invalid_storage_data(exc)
     service.invalidate(source_id)
+    await _refresh_cleanup_source_task(
+        request,
+        source_id=source_id,
+        updated_by=updated_by,
+    )
     return record
 
 
@@ -289,7 +302,7 @@ async def delete_source_system_config(
     request: Request,
 ) -> dict[str, bool]:
     """删除指定 source 的系统配置。"""
-    _require_manager(request)
+    updated_by = _require_manager(request)
     _validate_source_id(source_id)
     service = _get_service(request)
     try:
@@ -299,4 +312,9 @@ async def delete_source_system_config(
     service.invalidate(source_id)
     if not deleted:
         raise HTTPException(status_code=404, detail="Source config not found")
+    await _refresh_cleanup_source_task(
+        request,
+        source_id=source_id,
+        updated_by=updated_by,
+    )
     return {"deleted": True}
