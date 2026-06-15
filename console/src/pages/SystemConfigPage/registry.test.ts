@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import {
+  CRON_TASK_SESSION_CLEANUP_RUN_TIME_OPTIONS,
   CURRENT_SOURCE_SYSTEM_CONFIG_SWITCHES,
   normalizeSystemPromptInjections,
   readCronTaskSessionCleanupConfig,
@@ -84,6 +85,12 @@ describe("SystemConfigPage registry compatibility", () => {
     });
   });
 
+  it("offers selectable cron task session cleanup run times", () => {
+    expect(CRON_TASK_SESSION_CLEANUP_RUN_TIME_OPTIONS).toContain("01:00");
+    expect(CRON_TASK_SESSION_CLEANUP_RUN_TIME_OPTIONS).toContain("02:30");
+    expect(CRON_TASK_SESSION_CLEANUP_RUN_TIME_OPTIONS).toHaveLength(48);
+  });
+
   it("writes cron task session cleanup settings without mutating source", () => {
     vi.stubGlobal("structuredClone", undefined);
     const source = {
@@ -94,11 +101,7 @@ describe("SystemConfigPage registry compatibility", () => {
       },
     };
 
-    const next = writeCronTaskSessionCleanupValue(
-      source,
-      "run_time",
-      "02:30",
-    );
+    const next = writeCronTaskSessionCleanupValue(source, "run_time", "02:30");
 
     expect(next).toEqual({
       provider_policy: { default_model: "qwen-max" },

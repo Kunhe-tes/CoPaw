@@ -34,8 +34,7 @@ export interface CronTaskSessionCleanupConfig {
   run_time: string;
 }
 
-export type ImmediateTruncationConfigKey =
-  | "file_read_truncation";
+export type ImmediateTruncationConfigKey = "file_read_truncation";
 
 export interface ImmediateTruncationState {
   explicit: boolean;
@@ -65,8 +64,7 @@ export const CURRENT_SOURCE_SYSTEM_CONFIG_SWITCHES: CurrentSourceConfigSwitchDef
       path: ["feature_switches", "database_access_guard_enabled"],
       defaultValue: true,
       title: "数据库访问拦截",
-      description:
-        "关闭后模型可通过 Python/命令行直连数据库，不再拦截。",
+      description: "关闭后模型可通过 Python/命令行直连数据库，不再拦截。",
     },
   ];
 
@@ -95,6 +93,19 @@ export const CRON_TASK_SESSION_CLEANUP_DEFAULTS: CronTaskSessionCleanupConfig =
     cron: "0 1 * * *",
     run_time: "01:00",
   };
+
+export const CRON_TASK_SESSION_CLEANUP_RUN_TIME_OPTIONS = Array.from(
+  { length: 48 },
+  (_, index) => {
+    const totalMinutes = index * 30;
+    const hour = Math.floor(totalMinutes / 60);
+    const minute = totalMinutes % 60;
+    return `${String(hour).padStart(2, "0")}:${String(minute).padStart(
+      2,
+      "0",
+    )}`;
+  },
+);
 
 export const CRON_UNREAD_AUTO_PAUSE_MIN_THRESHOLD = 1;
 
@@ -298,17 +309,13 @@ export function cronToDailyRunTime(value: unknown): string | null {
   }
   const minuteValue = Number(minute);
   const hourValue = Number(hour);
-  if (
-    minuteValue < 0 ||
-    minuteValue > 59 ||
-    hourValue < 0 ||
-    hourValue > 23
-  ) {
+  if (minuteValue < 0 || minuteValue > 59 || hourValue < 0 || hourValue > 23) {
     return null;
   }
-  return `${String(hourValue).padStart(2, "0")}:${String(
-    minuteValue,
-  ).padStart(2, "0")}`;
+  return `${String(hourValue).padStart(2, "0")}:${String(minuteValue).padStart(
+    2,
+    "0",
+  )}`;
 }
 
 export function readCronTaskSessionCleanupConfig(
@@ -333,8 +340,7 @@ export function readCronTaskSessionCleanupConfig(
         : CRON_TASK_SESSION_CLEANUP_DEFAULTS.retention_days,
     cron,
     run_time:
-      cronToDailyRunTime(cron) ??
-      CRON_TASK_SESSION_CLEANUP_DEFAULTS.run_time,
+      cronToDailyRunTime(cron) ?? CRON_TASK_SESSION_CLEANUP_DEFAULTS.run_time,
   };
 }
 

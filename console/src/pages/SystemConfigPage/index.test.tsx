@@ -57,7 +57,7 @@ describe("SystemConfigPage", () => {
   }
 
   function getToolResultCompactSwitch() {
-    return screen.getAllByRole("switch")[3];
+    return screen.getAllByRole("switch")[4];
   }
 
   afterEach(() => {
@@ -104,9 +104,7 @@ describe("SystemConfigPage", () => {
     render(<SystemConfigPage />);
 
     expect(await screen.findByText("403")).toBeTruthy();
-    expect(
-      screen.getByText("仅管理员可访问当前系统配置页面。"),
-    ).toBeTruthy();
+    expect(screen.getByText("仅管理员可访问当前系统配置页面。")).toBeTruthy();
     expect(mocks.sourceSystemConfigApi.getCurrent).not.toHaveBeenCalled();
   });
 
@@ -228,15 +226,21 @@ describe("SystemConfigPage", () => {
 
     render(<SystemConfigPage />);
 
-    expect(await screen.findByText("定时任务会话历史清理")).toBeTruthy();
-    expect(screen.getByLabelText("每日运行时间")).toHaveValue("01:00");
+    const scheduledTaskCardTitle = await screen.findByText("定时任务设置");
+    const scheduledTaskCard = scheduledTaskCardTitle.closest(".ant-card");
+    expect(screen.getByText("定时任务未读自动暂停").closest(".ant-card")).toBe(
+      scheduledTaskCard,
+    );
+    expect(screen.getByText("定时任务会话历史清理").closest(".ant-card")).toBe(
+      scheduledTaskCard,
+    );
+    expect(screen.getByText("01:00")).toBeTruthy();
 
     fireEvent.change(screen.getByDisplayValue("30"), {
       target: { value: "45" },
     });
-    fireEvent.change(screen.getByLabelText("每日运行时间"), {
-      target: { value: "02:30" },
-    });
+    fireEvent.mouseDown(screen.getByRole("combobox", { name: "每日运行时间" }));
+    fireEvent.click(await screen.findByText("02:30"));
     fireEvent.click(screen.getByRole("button", { name: "common.save" }));
 
     await waitFor(() => {
