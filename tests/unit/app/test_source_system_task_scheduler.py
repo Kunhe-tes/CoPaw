@@ -37,17 +37,6 @@ def store(mock_db):
 async def test_upsert_binding_can_be_read_back(store, mock_db):
     """写入绑定后应可读回完整的 source 级任务绑定。"""
     updated_at = datetime(2026, 6, 15, 10, 30, 0)
-    binding = SourceSystemTaskBinding(
-        source_id="source-a",
-        task_type="task_session_cleanup",
-        external_job_id="job-123",
-        cron="0 1 * * *",
-        enabled=True,
-        scheduler_tenant_id="tenant-a",
-        scheduler_scope_id="scope-a",
-        scheduler_from_id="system",
-        updated_by="alice",
-    )
     mock_db.fetch_one.return_value = {
         "source_id": "source-a",
         "task_type": "task_session_cleanup",
@@ -61,16 +50,77 @@ async def test_upsert_binding_can_be_read_back(store, mock_db):
         "updated_at": updated_at,
     }
 
-    result = await store.upsert_binding(binding)
+    result = await store.upsert_binding(
+        source_id="source-a",
+        task_type="task_session_cleanup",
+        external_job_id="job-123",
+        cron="0 1 * * *",
+        enabled=True,
+        scheduler_tenant_id="tenant-a",
+        scheduler_scope_id="scope-a",
+        scheduler_from_id="system",
+        updated_by="alice",
+    )
     read_back = await store.get_binding(
         source_id="source-a",
         task_type="task_session_cleanup",
     )
 
-    assert result == binding.replace(updated_at=updated_at)
-    assert read_back == binding.replace(updated_at=updated_at)
+    expected = SourceSystemTaskBinding(
+        source_id="source-a",
+        task_type="task_session_cleanup",
+        external_job_id="job-123",
+        cron="0 1 * * *",
+        enabled=True,
+        scheduler_tenant_id="tenant-a",
+        scheduler_scope_id="scope-a",
+        scheduler_from_id="system",
+        updated_by="alice",
+        updated_at=updated_at,
+    )
+
+    assert result == expected
+    assert read_back == expected
     assert mock_db.execute.await_count == 1
     assert mock_db.fetch_one.await_count == 2
+    assert mock_db.execute.await_args.args[1] == (
+        "source-a",
+        "task_session_cleanup",
+        "job-123",
+        "0 1 * * *",
+        1,
+        "tenant-a",
+        "scope-a",
+        "system",
+        "alice",
+    )
+    assert mock_db.fetch_one.await_args_list[0].args[1] == (
+        "source-a",
+        "task_session_cleanup",
+    )
+    assert mock_db.fetch_one.await_args_list[1].args[1] == (
+        "source-a",
+        "task_session_cleanup",
+    )
+
+
+@pytest.mark.asyncio
+async def test_upsert_binding_raises_when_db_unavailable():
+    """DB 不可用时写入绑定应抛出统一的存储不可用异常。"""
+    store = SourceSystemTaskBindingStore(db=None)
+
+    with pytest.raises(SourceSystemConfigStoreUnavailable):
+        await store.upsert_binding(
+            source_id="source-a",
+            task_type="task_session_cleanup",
+            external_job_id="job-123",
+            cron="0 1 * * *",
+            enabled=True,
+            scheduler_tenant_id="tenant-a",
+            scheduler_scope_id="scope-a",
+            scheduler_from_id="system",
+            updated_by="alice",
+        )
 
 
 @pytest.mark.asyncio
@@ -79,4 +129,38 @@ async def test_get_binding_raises_when_db_unavailable():
     store = SourceSystemTaskBindingStore(db=None)
 
     with pytest.raises(SourceSystemConfigStoreUnavailable):
+        await store.get_binding("source-a", "task_session_cleanup")
+
+
+@pytest.mark.asyncio
+async def test_upsert_binding_wraps_execute_errors(store, mock_db):
+    """底层 execute 异常应被包装为统一的存储不可用异常。"""
+    mock_db.execute.side_effect = RuntimeError("db down")
+
+    with pytest.raises(
+        SourceSystemConfigStoreUnavailable,
+        match="upsert binding failed: db down",
+    ):
+        await store.upsert_binding(
+            source_id="source-a",
+            task_type="task_session_cleanup",
+            external_job_id="job-123",
+            cron="0 1 * * *",
+            enabled=True,
+            scheduler_tenant_id="tenant-a",
+            scheduler_scope_id="scope-a",
+            scheduler_from_id="system",
+            updated_by="alice",
+        )
+
+
+@pytest.mark.asyncio
+async def test_get_binding_wraps_fetch_errors(store, mock_db):
+    """底层 fetch_one 异常应被包装为统一的存储不可用异常。"""
+    mock_db.fetch_one.side_effect = RuntimeError("db down")
+
+    with pytest.raises(
+        SourceSystemConfigStoreUnavailable,
+        match="fetch binding failed: db down",
+    ):
         await store.get_binding("source-a", "task_session_cleanup")

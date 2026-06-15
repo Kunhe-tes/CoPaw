@@ -104,10 +104,30 @@ class SourceSystemTaskBindingStore:
 
     async def upsert_binding(
         self,
-        binding: SourceSystemTaskBinding,
+        *,
+        source_id: str,
+        task_type: str,
+        external_job_id: str,
+        cron: str,
+        enabled: bool,
+        scheduler_tenant_id: str | None = None,
+        scheduler_scope_id: str | None = None,
+        scheduler_from_id: str | None = None,
+        updated_by: str | None = None,
     ) -> SourceSystemTaskBinding:
         """创建或更新 source 系统任务绑定。"""
         db = self._require_db()
+        binding = SourceSystemTaskBinding(
+            source_id=source_id,
+            task_type=task_type,
+            external_job_id=external_job_id,
+            cron=cron,
+            enabled=enabled,
+            scheduler_tenant_id=scheduler_tenant_id,
+            scheduler_scope_id=scheduler_scope_id,
+            scheduler_from_id=scheduler_from_id,
+            updated_by=updated_by,
+        )
         query = """
             INSERT INTO swe_source_system_task_binding (
                 source_id,
