@@ -212,6 +212,11 @@ export interface SessionListItem {
   last_active: string | null;
 }
 
+export type SessionResourceFilter =
+  | { type: "model"; name: string }
+  | { type: "skill"; name: string }
+  | { type: "mcp_tool"; name: string; mcp_server: string };
+
 export interface SessionStats {
   session_id: string;
   user_id: string;
@@ -552,6 +557,9 @@ export const tracingApi = {
       end_date?: string;
       bbk_ids?: string;
       has_error?: boolean;
+      resource_type?: SessionResourceFilter["type"];
+      resource_name?: string;
+      mcp_server?: string;
     },
   ): Promise<{
     items: SessionListItem[];
