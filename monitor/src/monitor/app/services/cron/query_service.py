@@ -1635,49 +1635,41 @@ class QueryService:
         job_id: str,
         source_id: Optional[str] = None,
     ) -> int:
-        """标记任务及其历史执行记录为已读。
+        """标记任务的最新一次未读执行为已读。
 
-        将指定任务的所有成功执行的未读记录标记为已读，
-        同时更新该任务之前所有未读的成功执行记录。
+        只将指定任务的最后一次成功执行的未读记录标记为已读。
 
         Args:
             job_id: 任务ID
             source_id: Source ID filter
 
         Returns:
-            更新的记录数量
+            更新的记录数量（0 或 1）
         """
         db = get_db_connection()
-        # 数据库存储的是 naive datetime（东八区时间），去掉时区信息
         now = datetime.now(BEIJING_TZ).replace(tzinfo=None)
 
-        # 更新该任务所有成功的未读执行记录
         update_sql = """
             UPDATE swe_cron_executions e
-            SET is_read = TRUE, read_at = %s
-            WHERE e.job_id = %s
-            AND e.status = 'success'
-            AND e.is_read = FALSE
+            JOIN (
+                SELECT id FROM swe_cron_executions
+                WHERE job_id = %s
+                AND status = 'success'
+                AND is_read = FALSE
+                ORDER BY actual_time DESC
+                LIMIT 1
+            ) AS latest ON e.id = latest.id
+            SET e.is_read = TRUE, e.read_at = %s
         """
-        source_filter = source_id or ""
         logger.info(f"[mark_executions_read] 开始标记已读, job_id={job_id}")
         logger.debug(f"[mark_executions_read] SQL: {update_sql}")
 
-        result = await db.execute(update_sql, (now, job_id))
-        logger.info(f"[mark_executions_read] UPDATE执行完成, job_id={job_id}")
-        # 获取更新的记录数量
-        count_sql = """
-            SELECT COUNT(*) as count
-            FROM swe_cron_executions e
-            WHERE e.job_id = %s
-            AND e.status = 'success'
-            AND e.is_read = TRUE
-        """
-        result = await db.fetch_one(
-            count_sql,
-            (job_id, source_filter, source_filter),
+        result = await db.execute(update_sql, (job_id, now))
+        rowcount = getattr(result, "rowcount", 0) if result else 0
+        logger.info(
+            f"[mark_executions_read] UPDATE执行完成, job_id={job_id}, updated={rowcount}",
         )
-        return result.get("count", 0) if result else 0
+        return rowcount
 
     async def get_unread_count(
         self,
@@ -1767,7 +1759,10 @@ class QueryService:
               {source_filter_sql.replace('j.source_id', 'source_id')}
         """
         params = bbk_filter_params + source_filter_params
-        row = await db.fetch_one(task_count_sql, tuple(params) if params else None)
+        row = await db.fetch_one(
+            task_count_sql,
+            tuple(params) if params else None,
+        )
         return self._row_int(row, "count")
 
     async def _fetch_overview_branch_tenant_counts(
@@ -1793,7 +1788,10 @@ class QueryService:
             branch_tenant_sql,
             tuple(params) if params else None,
         )
-        return self._row_int(row, "branch_count"), self._row_int(row, "tenant_count")
+        return self._row_int(row, "branch_count"), self._row_int(
+            row,
+            "tenant_count",
+        )
 
     async def _fetch_overview_execution_counts(
         self,
@@ -1824,7 +1822,9 @@ class QueryService:
               {bbk_filter_sql}
               {source_filter_sql}
         """
-        params = [start_time, end_time] + bbk_filter_params + source_filter_params
+        params = (
+            [start_time, end_time] + bbk_filter_params + source_filter_params
+        )
         row = await db.fetch_one(exec_sql, tuple(params))
         return {
             "total_executions": self._row_int(row, "total_executions"),
@@ -1854,7 +1854,9 @@ class QueryService:
               {bbk_filter_sql}
               {source_filter_sql}
         """
-        params = [start_time, end_time] + bbk_filter_params + source_filter_params
+        params = (
+            [start_time, end_time] + bbk_filter_params + source_filter_params
+        )
         row = await db.fetch_one(read_tasks_sql, tuple(params))
         return self._row_int(row, "read_tasks")
 
@@ -1898,12 +1900,14 @@ class QueryService:
             source_filter_sql,
             source_filter_params,
         )
-        branch_count, tenant_count = await self._fetch_overview_branch_tenant_counts(
-            db,
-            bbk_filter_sql,
-            bbk_filter_params,
-            source_filter_sql,
-            source_filter_params,
+        branch_count, tenant_count = (
+            await self._fetch_overview_branch_tenant_counts(
+                db,
+                bbk_filter_sql,
+                bbk_filter_params,
+                source_filter_sql,
+                source_filter_params,
+            )
         )
         execution_counts = await self._fetch_overview_execution_counts(
             db,
@@ -1969,7 +1973,9 @@ class QueryService:
               {bbk_filter_sql}
               {source_filter_sql}
         """
-        params = [start_time, end_time] + bbk_filter_params + source_filter_params
+        params = (
+            [start_time, end_time] + bbk_filter_params + source_filter_params
+        )
         rows = await db.fetch_all(branch_list_sql, tuple(params))
         return [row.get("bbk_id") for row in rows if row.get("bbk_id")]
 
