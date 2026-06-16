@@ -11,7 +11,10 @@ import time
 from typing import Dict, Set, Optional
 
 from .workspace import Workspace
-from ..config.utils import load_config, get_tenant_config_path
+from ..config.utils import (
+    get_tenant_storage_config_path,
+    load_config,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -54,9 +57,9 @@ class MultiAgentManager:
 
     @staticmethod
     def _load_agent_config_for_tenant(tenant_id: Optional[str] = None):
-        """Load agent config from tenant path when tenant context is provided."""
+        """按存储语义加载租户配置，避免请求目录再次回退到 runtime scope。"""
         if tenant_id:
-            return load_config(get_tenant_config_path(tenant_id))
+            return load_config(get_tenant_storage_config_path(tenant_id))
         return load_config()
 
     async def get_agent(
