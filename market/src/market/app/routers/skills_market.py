@@ -72,11 +72,11 @@ def _require_manager(x_manager: Optional[str]) -> None:
 def _parse_skill_metadata(
     skill_dir: Path,
     skill_name: str,
-) -> tuple[dict, str, str, str]:
+) -> tuple[dict, str, str, str, str]:
     """解析技能元数据.
 
     Returns:
-        (skill_json, skill_md, name, description)
+        (skill_json, skill_md, name, description, version)
     """
     skill_json_path = skill_dir / "skill.json"
     skill_md_path = skill_dir / "SKILL.md"
@@ -85,6 +85,7 @@ def _parse_skill_metadata(
     skill_md = ""
     name_from_skill = skill_name
     description_from_skill = ""
+    version_from_skill = ""
 
     # 读取 skill.json
     if skill_json_path.exists():
@@ -94,47 +95,74 @@ def _parse_skill_metadata(
             )
             name_from_skill = skill_json.get("name", skill_name)
             description_from_skill = skill_json.get("description", "")
+            version_from_skill = skill_json.get("version", "")
         except json.JSONDecodeError:
             pass
 
     # 读取 SKILL.md 并解析 frontmatter
     if skill_md_path.exists():
         skill_md = skill_md_path.read_text(encoding="utf-8")
-        name_from_skill, description_from_skill = _parse_frontmatter(
-            skill_md,
-            name_from_skill,
-            description_from_skill,
+        name_from_skill, description_from_skill, version_from_md = (
+            _parse_frontmatter(
+                skill_md,
+                name_from_skill,
+                description_from_skill,
+            )
         )
+        # SKILL.md 中的 version 优先级更高（与版本历史对齐）
+        if version_from_md:
+            version_from_skill = version_from_md
 
-    return skill_json, skill_md, name_from_skill, description_from_skill
+    return (
+        skill_json,
+        skill_md,
+        name_from_skill,
+        description_from_skill,
+        version_from_skill,
+    )
 
 
 def _parse_frontmatter(
     skill_md: str,
     default_name: str,
     default_desc: str,
-) -> tuple[str, str]:
-    """从 SKILL.md 解析 frontmatter."""
+) -> tuple[str, str, str]:
+    """从 SKILL.md 解析 frontmatter.
+
+    Returns:
+        (name, description, version)
+    """
     if not skill_md.startswith("---"):
-        return default_name, default_desc
+        return default_name, default_desc, ""
 
     try:
         end_idx = skill_md.index("---", 3)
         fm_text = skill_md[3:end_idx].strip()
         name = default_name
         desc = default_desc
+        version = ""
         for line in fm_text.split("\n"):
             if ":" in line:
                 key, val = line.split(":", 1)
                 key = key.strip().lower()
                 val = val.strip()
+                # 去除引号（双引号或单引号）
+                if val.startswith('"') and val.endswith('"'):
+                    val = val[1:-1]
+                elif val.startswith("'") and val.endswith("'"):
+                    val = val[1:-1]
                 if key == "name":
                     name = val
                 elif key == "description":
                     desc = val
-        return name, desc
+                elif key == "version":
+                    # 移除 v 前缀（如 v1.0.0）
+                    if val.lower().startswith("v"):
+                        val = val[1:]
+                    version = val
+        return name, desc, version
     except ValueError:
-        return default_name, default_desc
+        return default_name, default_desc, ""
 
 
 def _copy_skill_to_market(
@@ -211,6 +239,7 @@ async def _log_publish_operation(
 def _create_market_item(
     name: str,
     description: str,
+    version: str,
     user_id: str,
     user_name: str,
     category_id: Optional[int],
@@ -222,7 +251,7 @@ def _create_market_item(
         item_type="skill",
         name=name,
         description=description,
-        version="1.0.0",
+        version=version or "1.0.0",
         creator_id=user_id,
         creator_name=user_name,
         category_id=category_id,
@@ -253,7 +282,7 @@ def _process_single_skill(
     """
     from ...marketplace.service import _bump_patch
 
-    skill_json, skill_md, name, description = _parse_skill_metadata(
+    skill_json, skill_md, name, description, version = _parse_skill_metadata(
         skill_dir,
         skill_name,
     )
@@ -272,21 +301,25 @@ def _process_single_skill(
             )
 
         # 允许覆盖时，更新现有条目
+        # 版本策略：SKILL.md 有版本则使用，否则自动递增
         now = datetime.now(timezone.utc).isoformat()
         existing.created_at = now
         existing.status = "active"
         existing.description = description
-        existing.version = _bump_patch(existing.version)
+        existing.version = (
+            version if version else _bump_patch(existing.version)
+        )
         existing.creator_id = user_id
         existing.creator_name = user_name
         existing.category_id = category_id
         existing.updated_at = now
         item = existing
     else:
-        # 创建新市场条目
+        # 创建新市场条目，使用从 SKILL.md 提取的版本号
         item = _create_market_item(
             name,
             description,
+            version,  # 传入从 SKILL.md 提取的版本号
             user_id,
             user_name,
             category_id,
@@ -310,8 +343,9 @@ def _process_single_skill(
             source_id=source_id,
             item_id=item.item_id,
             skill_dir=market_skill_dir,
-            description=f"上传版本 {item.version}",
-            creator=user_name,
+            description="",  # 去掉重复的版本号信息
+            creator=user_id,
+            creator_name=user_name,
             current_market_version=item.version,
         )
     except Exception as e:
@@ -393,7 +427,7 @@ async def publish_skill_upload(
 
                 # 记录首次解析的名称和描述
                 if parsed_name is None and first_name:
-                    skill_json, skill_md, _, desc = _parse_skill_metadata(
+                    skill_json, skill_md, _, desc, _ = _parse_skill_metadata(
                         skill_dir,
                         skill_name,
                     )
