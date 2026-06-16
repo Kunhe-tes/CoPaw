@@ -125,6 +125,7 @@ CREATE TABLE IF NOT EXISTS swe_cron_executions (
 
     -- 执行状态
     status          VARCHAR(16) NOT NULL COMMENT '状态: success/error/cancelled/timeout/skipped',
+    async_status    VARCHAR(16) DEFAULT NULL COMMENT '异步任务执行状态: success/error',
     error_message   VARCHAR(2048) DEFAULT '' COMMENT '错误信息',
 
     -- 执行上下文
@@ -159,6 +160,7 @@ CREATE TABLE IF NOT EXISTS swe_cron_executions (
     INDEX idx_job_id (job_id),
     INDEX idx_tenant_id (tenant_id),
     INDEX idx_status (status),
+    INDEX idx_async_status (async_status),
     INDEX idx_scheduled_time (scheduled_time),
     INDEX idx_actual_time (actual_time),
     INDEX idx_trace_id (trace_id),
