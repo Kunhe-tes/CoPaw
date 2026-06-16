@@ -12,7 +12,7 @@ import os
 import shutil
 import threading
 import time
-from typing import TYPE_CHECKING, Dict, List
+from typing import TYPE_CHECKING, Callable, Dict, List
 
 try:
     import fcntl
@@ -993,7 +993,16 @@ class ProviderManager:
 
     def save_active_model(self, active_model: ModelSlotConfig):
         """Save the active provider/model configuration to disk."""
-        active_path = self.root_path / "active_model.json"
+        self._save_active_model_to_root(self.root_path, active_model)
+        self._update_mtime(self.root_path / "active_model.json")
+
+    @staticmethod
+    def _save_active_model_to_root(
+        root_path: Path,
+        active_model: ModelSlotConfig,
+    ) -> None:
+        """Save the active provider/model configuration under a provider root."""
+        active_path = root_path / "active_model.json"
         with open(active_path, "w", encoding="utf-8") as f:
             json.dump(
                 active_model.model_dump(),
@@ -1005,15 +1014,15 @@ class ProviderManager:
             os.chmod(active_path, 0o600)
         except OSError:
             pass
-        self._update_mtime(active_path)
 
-    def load_active_model(self) -> ModelSlotConfig | None:
-        """Load the active provider/model configuration from disk.
-
-        If active_model.json doesn't exist but legacy tenant_models.json does,
-        recovers the active slot from the legacy config and migrates it.
-        """
-        active_path = self.root_path / "active_model.json"
+    @classmethod
+    def _load_active_model_from_root(
+        cls,
+        tenant_id: str,
+        root_path: Path,
+        save_active_model: Callable[[ModelSlotConfig], None] | None = None,
+    ) -> ModelSlotConfig | None:
+        active_path = root_path / "active_model.json"
 
         # Try to load from new location first
         if active_path.exists():
@@ -1024,21 +1033,36 @@ class ProviderManager:
             except Exception:
                 return None
 
-        # Recovery: migrate from legacy tenant_models.json if it exists
-        legacy_config = self._recover_from_legacy_tenant_models()
+        legacy_config = cls._recover_active_model_from_legacy_tenant_models(
+            tenant_id,
+        )
         if legacy_config:
             logger.info(
                 "Recovered active model from legacy tenant_models.json "
                 "for tenant %s: %s/%s",
-                self.tenant_id,
+                tenant_id,
                 legacy_config.provider_id,
                 legacy_config.model,
             )
-            # Save to new location for future reads
-            self.save_active_model(legacy_config)
+            if save_active_model is not None:
+                save_active_model(legacy_config)
+            else:
+                cls._save_active_model_to_root(root_path, legacy_config)
             return legacy_config
 
         return None
+
+    def load_active_model(self) -> ModelSlotConfig | None:
+        """Load the active provider/model configuration from disk.
+
+        If active_model.json doesn't exist but legacy tenant_models.json does,
+        recovers the active slot from the legacy config and migrates it.
+        """
+        return self._load_active_model_from_root(
+            self.tenant_id,
+            self.root_path,
+            save_active_model=self.save_active_model,
+        )
 
     def _recover_from_legacy_tenant_models(self) -> ModelSlotConfig | None:
         """Recover active model from legacy tenant_models.json.
@@ -1049,14 +1073,23 @@ class ProviderManager:
         Returns:
             ModelSlotConfig if recovery succeeded, None otherwise.
         """
+        return self._recover_active_model_from_legacy_tenant_models(
+            self.tenant_id,
+        )
+
+    @staticmethod
+    def _recover_active_model_from_legacy_tenant_models(
+        tenant_id: str,
+    ) -> ModelSlotConfig | None:
+        """Recover active model from legacy tenant_models.json for tenant_id."""
         try:
             from swe.tenant_models.manager import TenantModelManager
 
             # Check if legacy config exists for this tenant
-            legacy_path = TenantModelManager.get_config_path(self.tenant_id)
+            legacy_path = TenantModelManager.get_config_path(tenant_id)
             if not legacy_path.exists():
                 # Try default tenant as fallback
-                if self.tenant_id != "default":
+                if tenant_id != "default":
                     legacy_path = TenantModelManager.get_config_path("default")
                     if not legacy_path.exists():
                         return None
@@ -1064,7 +1097,7 @@ class ProviderManager:
                     return None
 
             # Load and extract active slot from legacy config
-            legacy_config = TenantModelManager.load(self.tenant_id)
+            legacy_config = TenantModelManager.load(tenant_id)
             if not legacy_config:
                 return None
 
@@ -1078,7 +1111,7 @@ class ProviderManager:
             logger.debug(
                 "Failed to recover from legacy tenant_models.json "
                 "for tenant %s: %s",
-                self.tenant_id,
+                tenant_id,
                 e,
             )
         return None

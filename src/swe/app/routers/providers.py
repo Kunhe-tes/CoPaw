@@ -755,8 +755,7 @@ async def remove_model_endpoint(
     summary="Get effective active LLM",
 )
 async def get_active_models(
-    _request: Request,  # Kept for API signature compatibility
-    manager: ProviderManager = Depends(get_provider_manager),
+    request: Request,
     scope: ActiveModelReadScope = Query(default="effective"),
     _agent_id: Optional[str] = Query(default=None),  # Deprecated
 ) -> ActiveModelsInfo:
@@ -779,16 +778,25 @@ async def get_active_models(
 
     # For 'effective' and 'global', return the tenant-level active model
     # Agent-level model fallback is removed as models are now tenant-scoped
-    global_model = manager.get_active_model()
+    tenant_id = _get_effective_tenant_id(request) or "default"
+    ProviderManager.ensure_tenant_provider_storage(tenant_id)
+    provider_tenant_id = ProviderManager._resolve_effective_provider_tenant_id(
+        tenant_id,
+    )
+    root_path = ProviderManager._get_tenant_root_path(provider_tenant_id)
+    global_model = ProviderManager._load_active_model_from_root(
+        provider_tenant_id,
+        root_path,
+    )
     duration_ms = int((time.perf_counter() - started_at) * 1000)
     if duration_ms >= _PROVIDER_API_SLOW_LOG_MS:
         logger.info(
             "provider_active_model_read_slow tenant_id=%s duration_ms=%d "
             "scope=%s root_path=%s",
-            manager.tenant_id,
+            provider_tenant_id,
             duration_ms,
             scope,
-            manager.root_path,
+            root_path,
         )
     logger.info("Returning tenant-level active model: %s", global_model)
     return ActiveModelsInfo(active_llm=global_model)
