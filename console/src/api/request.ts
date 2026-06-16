@@ -84,10 +84,13 @@ async function throwRequestError(response: Response): Promise<never> {
   const contentType = response.headers.get("content-type") || "";
   const errorMessage = getErrorMessageFromBody(text, contentType);
 
-  // 保留原始响应体，方便 parseErrorDetail() 提取结构化字段。
-  const finalMessage = errorMessage
-    ? `${errorMessage} - ${text}`
-    : `Request failed: ${response.status} ${response.statusText}`;
+  // JSON 响应已提取到 detail/message/error 时不再拼接原始 JSON
+  const isJson = contentType.includes("application/json");
+  const finalMessage = isJson && errorMessage
+    ? errorMessage
+    : errorMessage
+      ? `${errorMessage} - ${text}`
+      : `Request failed: ${response.status} ${response.statusText}`;
 
   const error = new Error(finalMessage);
   // 将 HTTP 状态码和解析后的响应体挂载到 Error 上，

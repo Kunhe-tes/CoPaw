@@ -304,6 +304,27 @@ def test_build_agent_request_includes_runtime_scope():
     )
 
 
+def test_build_agent_request_skips_scope_for_default_source_template():
+    executor = CronExecutor(
+        runner=_Runner(),
+        channel_manager=_ChannelManager(),
+    )
+    job = _build_agent_job(
+        "/tmp/default_source-a/workspaces/default",
+    ).model_copy(
+        update={
+            "tenant_id": "default",
+            "source_id": "source-a",
+            "scope_id": None,
+        },
+    )
+
+    req = executor._build_agent_request(job, "default", "session-a")
+
+    assert req["source_id"] == "source-a"
+    assert "scope_id" not in req
+
+
 def test_build_agent_request_removes_stale_trace_id():
     executor = CronExecutor(
         runner=_Runner(),
@@ -496,14 +517,15 @@ def test_execute_allows_agent_job_when_user_info_missing(monkeypatch):
     )
     monkeypatch.setattr(executor._runner, "stream_query", fake_stream_query)
 
-    asyncio.run(
-        executor._execute_job(
-            job,
-            "user-a",
-            "session-a",
-            {"workspace_dir": "/tmp/tenant-a/workspaces/beta"},
-        ),
-    )
+    with pytest.raises(RuntimeError, match="did not complete"):
+        asyncio.run(
+            executor._execute_job(
+                job,
+                "user-a",
+                "session-a",
+                {"workspace_dir": "/tmp/tenant-a/workspaces/beta"},
+            ),
+        )
 
     assert observed["req"]["user_id"] == "user-a"
     assert observed["req"]["session_id"] == "session-a"
@@ -544,14 +566,15 @@ def test_execute_injects_auth_token_and_cookie_into_agent_request(monkeypatch):
     )
     monkeypatch.setattr(executor._runner, "stream_query", fake_stream_query)
 
-    asyncio.run(
-        executor._execute_job(
-            job,
-            "user-a",
-            "session-a",
-            {"workspace_dir": "/tmp/tenant-a/workspaces/beta"},
-        ),
-    )
+    with pytest.raises(RuntimeError, match="did not complete"):
+        asyncio.run(
+            executor._execute_job(
+                job,
+                "user-a",
+                "session-a",
+                {"workspace_dir": "/tmp/tenant-a/workspaces/beta"},
+            ),
+        )
 
     assert observed["req"]["auth_token"] == "auth-123"
     assert observed["req"]["cookie"] == (

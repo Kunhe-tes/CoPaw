@@ -5,6 +5,7 @@ Provides methods to query job definitions and execution history
 for the frontend overview page.
 """
 
+import json
 import logging
 from datetime import datetime, timedelta
 from typing import List, Optional, Tuple, Any, Dict
@@ -18,11 +19,17 @@ from ...models.cron import (
     CronOverviewMetricItem,
     CronOverviewResponse,
     CronOverviewStatsResponse,
-    CronBranchBehaviorResponse,
-    CronBranchBehaviorItem,
+    CronBranchRankingResponse,
+    CronBranchRankingItem,
     CronBranchErrorResponse,
     CronBranchErrorRankItem,
     CronErrorReasonItem,
+    BranchSkillItem,
+    BranchSkillResponse,
+    BranchSkillManagerItem,
+    BranchSkillManagerResponse,
+    BranchSkillManagerCustomerItem,
+    BranchSkillManagerCustomerResponse,
     CronJobModel,
     CronJobQueryParams,
     ExecutionModel,
@@ -1635,49 +1642,41 @@ class QueryService:
         job_id: str,
         source_id: Optional[str] = None,
     ) -> int:
-        """标记任务及其历史执行记录为已读。
+        """标记任务的最新一次未读执行为已读。
 
-        将指定任务的所有成功执行的未读记录标记为已读，
-        同时更新该任务之前所有未读的成功执行记录。
+        只将指定任务的最后一次成功执行的未读记录标记为已读。
 
         Args:
             job_id: 任务ID
             source_id: Source ID filter
 
         Returns:
-            更新的记录数量
+            更新的记录数量（0 或 1）
         """
         db = get_db_connection()
-        # 数据库存储的是 naive datetime（东八区时间），去掉时区信息
         now = datetime.now(BEIJING_TZ).replace(tzinfo=None)
 
-        # 更新该任务所有成功的未读执行记录
         update_sql = """
             UPDATE swe_cron_executions e
-            SET is_read = TRUE, read_at = %s
-            WHERE e.job_id = %s
-            AND e.status = 'success'
-            AND e.is_read = FALSE
+            JOIN (
+                SELECT id FROM swe_cron_executions
+                WHERE job_id = %s
+                AND status = 'success'
+                AND is_read = FALSE
+                ORDER BY actual_time DESC
+                LIMIT 1
+            ) AS latest ON e.id = latest.id
+            SET e.is_read = TRUE, e.read_at = %s
         """
-        source_filter = source_id or ""
         logger.info(f"[mark_executions_read] 开始标记已读, job_id={job_id}")
         logger.debug(f"[mark_executions_read] SQL: {update_sql}")
 
-        result = await db.execute(update_sql, (now, job_id))
-        logger.info(f"[mark_executions_read] UPDATE执行完成, job_id={job_id}")
-        # 获取更新的记录数量
-        count_sql = """
-            SELECT COUNT(*) as count
-            FROM swe_cron_executions e
-            WHERE e.job_id = %s
-            AND e.status = 'success'
-            AND e.is_read = TRUE
-        """
-        result = await db.fetch_one(
-            count_sql,
-            (job_id, source_filter, source_filter),
+        result = await db.execute(update_sql, (job_id, now))
+        rowcount = getattr(result, "rowcount", 0) if result else 0
+        logger.info(
+            f"[mark_executions_read] UPDATE执行完成, job_id={job_id}, updated={rowcount}",
         )
-        return result.get("count", 0) if result else 0
+        return rowcount
 
     async def get_unread_count(
         self,
@@ -1767,7 +1766,10 @@ class QueryService:
               {source_filter_sql.replace('j.source_id', 'source_id')}
         """
         params = bbk_filter_params + source_filter_params
-        row = await db.fetch_one(task_count_sql, tuple(params) if params else None)
+        row = await db.fetch_one(
+            task_count_sql,
+            tuple(params) if params else None,
+        )
         return self._row_int(row, "count")
 
     async def _fetch_overview_branch_tenant_counts(
@@ -1793,7 +1795,10 @@ class QueryService:
             branch_tenant_sql,
             tuple(params) if params else None,
         )
-        return self._row_int(row, "branch_count"), self._row_int(row, "tenant_count")
+        return self._row_int(row, "branch_count"), self._row_int(
+            row,
+            "tenant_count",
+        )
 
     async def _fetch_overview_execution_counts(
         self,
@@ -1824,7 +1829,9 @@ class QueryService:
               {bbk_filter_sql}
               {source_filter_sql}
         """
-        params = [start_time, end_time] + bbk_filter_params + source_filter_params
+        params = (
+            [start_time, end_time] + bbk_filter_params + source_filter_params
+        )
         row = await db.fetch_one(exec_sql, tuple(params))
         return {
             "total_executions": self._row_int(row, "total_executions"),
@@ -1854,7 +1861,9 @@ class QueryService:
               {bbk_filter_sql}
               {source_filter_sql}
         """
-        params = [start_time, end_time] + bbk_filter_params + source_filter_params
+        params = (
+            [start_time, end_time] + bbk_filter_params + source_filter_params
+        )
         row = await db.fetch_one(read_tasks_sql, tuple(params))
         return self._row_int(row, "read_tasks")
 
@@ -1898,12 +1907,14 @@ class QueryService:
             source_filter_sql,
             source_filter_params,
         )
-        branch_count, tenant_count = await self._fetch_overview_branch_tenant_counts(
-            db,
-            bbk_filter_sql,
-            bbk_filter_params,
-            source_filter_sql,
-            source_filter_params,
+        branch_count, tenant_count = (
+            await self._fetch_overview_branch_tenant_counts(
+                db,
+                bbk_filter_sql,
+                bbk_filter_params,
+                source_filter_sql,
+                source_filter_params,
+            )
         )
         execution_counts = await self._fetch_overview_execution_counts(
             db,
@@ -1969,7 +1980,9 @@ class QueryService:
               {bbk_filter_sql}
               {source_filter_sql}
         """
-        params = [start_time, end_time] + bbk_filter_params + source_filter_params
+        params = (
+            [start_time, end_time] + bbk_filter_params + source_filter_params
+        )
         rows = await db.fetch_all(branch_list_sql, tuple(params))
         return [row.get("bbk_id") for row in rows if row.get("bbk_id")]
 
@@ -1992,109 +2005,155 @@ class QueryService:
         row = await db.fetch_one(task_count_sql, params)
         return self._row_int(row, "count")
 
-    async def _fetch_branch_executed_job_count(
+    async def _fetch_branch_job_ids(
+        self,
+        db: Any,
+        bbk_id: str,
+        source_id: Optional[str],
+    ) -> list[str]:
+        """获取指定分行的所有 job_id。"""
+        source_where = " AND source_id = %s" if source_id else ""
+        job_ids_sql = f"""
+            SELECT id
+            FROM swe_cron_jobs
+            WHERE deleted_at IS NULL
+              AND status != 'deleted'
+              AND bbk_id = %s
+              {source_where}
+        """
+        params = (bbk_id, source_id) if source_id else (bbk_id,)
+        rows = await db.fetch_all(job_ids_sql, params)
+        return [row["id"] for row in rows]
+
+    async def _fetch_branch_execution_stats(
         self,
         db: Any,
         start_time: datetime,
         end_time: datetime,
+        job_ids: list[str],
+    ) -> dict:
+        """直接从 swe_cron_executions 统计执行指标，不 JOIN swe_cron_jobs。"""
+        if not job_ids:
+            return {
+                "total_executions": 0,
+                "success_count": 0,
+                "read_tasks": 0,
+                "error_count": 0,
+            }
+        placeholders = ", ".join(["%s"] * len(job_ids))
+        stats_sql = f"""
+            SELECT
+                COUNT(*) AS total_executions,
+                SUM(CASE WHEN status = 'success' THEN 1 ELSE 0 END) AS success_count,
+                SUM(CASE WHEN is_read = 1 THEN 1 ELSE 0 END) AS read_tasks,
+                SUM(CASE WHEN status = 'error' THEN 1 ELSE 0 END) AS error_count
+            FROM swe_cron_executions
+            WHERE actual_time >= %s AND actual_time <= %s
+              AND job_id IN ({placeholders})
+        """
+        params = [start_time, end_time] + job_ids
+        row = await db.fetch_one(stats_sql, tuple(params))
+        return {
+            "total_executions": self._row_int(row, "total_executions"),
+            "success_count": self._row_int(row, "success_count"),
+            "read_tasks": self._row_int(row, "read_tasks"),
+            "error_count": self._row_int(row, "error_count"),
+        }
+
+    async def _fetch_branch_manager_count(
+        self,
+        db: Any,
         bbk_id: str,
         source_id: Optional[str],
     ) -> int:
-        source_where = " AND j.source_id = %s" if source_id else ""
-        job_count_sql = f"""
-            SELECT COUNT(DISTINCT e.job_id) AS executed_job_count
-            FROM swe_cron_executions e
-            LEFT JOIN swe_cron_jobs j ON e.job_id = j.id
-            WHERE e.actual_time >= %s AND e.actual_time <= %s
-              AND j.deleted_at IS NULL
-              AND j.status != 'deleted'
-              AND j.bbk_id = %s
+        source_where = " AND source_id = %s" if source_id else ""
+        manager_sql = f"""
+            SELECT COUNT(DISTINCT tenant_id) AS manager_count
+            FROM swe_cron_jobs
+            WHERE deleted_at IS NULL
+              AND status != 'deleted'
+              AND bbk_id = %s
               {source_where}
         """
-        params = [start_time, end_time, bbk_id]
-        if source_id:
-            params.append(source_id)
-        row = await db.fetch_one(job_count_sql, tuple(params))
-        return self._row_int(row, "executed_job_count")
+        params = (bbk_id, source_id) if source_id else (bbk_id,)
+        row = await db.fetch_one(manager_sql, params)
+        return self._row_int(row, "manager_count")
 
-    async def _fetch_branch_read_tasks(
+    async def _fetch_branch_click_counts(
         self,
         db: Any,
         start_time: datetime,
         end_time: datetime,
-        bbk_id: str,
         source_id: Optional[str],
-    ) -> int:
-        source_where = " AND j.source_id = %s" if source_id else ""
-        read_tasks_sql = f"""
-            SELECT COUNT(DISTINCT e.job_id) AS read_tasks
-            FROM swe_cron_executions e
-            LEFT JOIN swe_cron_jobs j ON e.job_id = j.id
-            WHERE e.actual_time >= %s AND e.actual_time <= %s
-              AND e.is_read = 1
-              AND j.deleted_at IS NULL
-              AND j.status != 'deleted'
-              AND j.bbk_id = %s
-              {source_where}
-        """
-        params = [start_time, end_time, bbk_id]
-        if source_id:
-            params.append(source_id)
-        row = await db.fetch_one(read_tasks_sql, tuple(params))
-        return self._row_int(row, "read_tasks")
+    ) -> dict:
+        """查询各分行点击统计（查看方案/去洞察/去电访）。
 
-    async def _fetch_branch_click_tasks(
-        self,
-        db: Any,
-        start_time: datetime,
-        end_time: datetime,
-        bbk_id: str,
-        source_id: Optional[str],
-    ) -> Dict[str, int]:
+        从 swe_html_preview_click_events 按 bbk_id + button_type 聚合，
+        同时返回去重任务数 (COUNT(DISTINCT cron_task_id)) 和点击数 (COUNT(*))。
+        """
         source_where = " AND source_id = %s" if source_id else ""
         click_sql = f"""
             SELECT
+                bbk_id,
                 button_type,
-                COUNT(DISTINCT cron_task_id) AS click_tasks
+                COUNT(DISTINCT cron_task_id) AS task_count,
+                COUNT(*) AS total_clicks
             FROM swe_html_preview_click_events
             WHERE clicked_at >= %s AND clicked_at <= %s
-              AND bbk_id = %s
               AND cron_task_id IS NOT NULL
+              AND bbk_id IS NOT NULL
+              AND bbk_id != ''
               {source_where}
-            GROUP BY button_type
+            GROUP BY bbk_id, button_type
         """
-        params = [start_time, end_time, bbk_id]
+        params: list = [start_time, end_time]
         if source_id:
             params.append(source_id)
         rows = await db.fetch_all(click_sql, tuple(params))
-        return {
-            row.get("button_type", ""): self._row_int(row, "click_tasks")
-            for row in rows
-        }
 
-    def _build_branch_behavior_item(
+        result: dict[str, dict[str, dict[str, int]]] = {}
+        for row in rows:
+            bbk = row["bbk_id"]
+            btn = row["button_type"] or "other"
+            if bbk not in result:
+                result[bbk] = {}
+            result[bbk][btn] = {
+                "task_count": row["task_count"] or 0,
+                "total_clicks": row["total_clicks"] or 0,
+            }
+        return result
+
+    def _build_branch_ranking_item(
         self,
         bbk_id: str,
+        manager_count: int,
         total_tasks: int,
-        executed_job_count: int,
+        success_count: int,
+        total_executions: int,
         read_tasks: int,
-        click_tasks: Dict[str, int],
-    ) -> CronBranchBehaviorItem:
-        plan_click_tasks = click_tasks.get("plan", 0)
-        insight_click_tasks = click_tasks.get("insight", 0)
-        phone_click_tasks = click_tasks.get("phone", 0)
-        return CronBranchBehaviorItem(
+        plan_count: int = 0,
+        insight_count: int = 0,
+        phone_count: int = 0,
+        plan_clicks: int = 0,
+        insight_clicks: int = 0,
+        phone_clicks: int = 0,
+        error_count: int = 0,
+    ) -> CronBranchRankingItem:
+        return CronBranchRankingItem(
             bbk_id=bbk_id,
             bbk_name=get_bbk_name_by_id(bbk_id) or bbk_id,
+            manager_count=manager_count,
             total_tasks=total_tasks,
+            success_count=success_count,
+            success_rate=self._percent(success_count, total_executions),
             read_tasks=read_tasks,
-            read_rate=self._percent(read_tasks, executed_job_count),
-            plan_click_tasks=plan_click_tasks,
-            plan_click_rate=self._percent(plan_click_tasks, read_tasks),
-            insight_click_tasks=insight_click_tasks,
-            insight_click_rate=self._percent(insight_click_tasks, read_tasks),
-            phone_click_tasks=phone_click_tasks,
-            phone_click_rate=self._percent(phone_click_tasks, read_tasks),
+            plan_count=plan_count,
+            insight_count=insight_count,
+            phone_count=phone_count,
+            plan_clicks=plan_clicks,
+            insight_clicks=insight_clicks,
+            phone_clicks=phone_clicks,
+            error_count=error_count,
         )
 
     async def get_branch_behavior(
@@ -2103,8 +2162,8 @@ class QueryService:
         end_date: Optional[str] = None,
         bbk_ids: Optional[str] = None,
         source_id: Optional[str] = None,
-    ) -> CronBranchBehaviorResponse:
-        """获取分行层行为分析。
+    ) -> CronBranchRankingResponse:
+        """获取分行综合排行。
 
         Args:
             start_date: 开始日期 (YYYY-MM-DD格式字符串)
@@ -2113,7 +2172,7 @@ class QueryService:
             source_id: 来源标识
 
         Returns:
-            分行行为分析数据
+            分行综合排行数据
         """
         db = get_db_connection()
 
@@ -2140,6 +2199,14 @@ class QueryService:
             source_filter_params,
         )
 
+        # 一次查询获取所有分行的点击统计
+        click_counts = await self._fetch_branch_click_counts(
+            db,
+            start_time,
+            end_time,
+            source_id,
+        )
+
         items = []
         for bbk_id in branch_ids:
             total_tasks = await self._fetch_branch_total_tasks(
@@ -2147,40 +2214,47 @@ class QueryService:
                 bbk_id,
                 source_id,
             )
-            executed_job_count = await self._fetch_branch_executed_job_count(
+            manager_count = await self._fetch_branch_manager_count(
                 db,
-                start_time,
-                end_time,
                 bbk_id,
                 source_id,
             )
-            read_tasks = await self._fetch_branch_read_tasks(
+            job_ids = await self._fetch_branch_job_ids(
                 db,
-                start_time,
-                end_time,
                 bbk_id,
                 source_id,
             )
-            click_tasks = await self._fetch_branch_click_tasks(
+            stats = await self._fetch_branch_execution_stats(
                 db,
                 start_time,
                 end_time,
-                bbk_id,
-                source_id,
+                job_ids,
             )
+            branch_clicks = click_counts.get(bbk_id, {})
+            plan_clicks_data = branch_clicks.get("plan", {})
+            insight_clicks_data = branch_clicks.get("insight", {})
+            phone_clicks_data = branch_clicks.get("phone", {})
             items.append(
-                self._build_branch_behavior_item(
+                self._build_branch_ranking_item(
                     bbk_id,
+                    manager_count,
                     total_tasks,
-                    executed_job_count,
-                    read_tasks,
-                    click_tasks,
+                    stats["success_count"],
+                    stats["total_executions"],
+                    stats["read_tasks"],
+                    plan_count=plan_clicks_data.get("task_count", 0),
+                    insight_count=insight_clicks_data.get("task_count", 0),
+                    phone_count=phone_clicks_data.get("task_count", 0),
+                    plan_clicks=plan_clicks_data.get("total_clicks", 0),
+                    insight_clicks=insight_clicks_data.get("total_clicks", 0),
+                    phone_clicks=phone_clicks_data.get("total_clicks", 0),
+                    error_count=stats["error_count"],
                 ),
             )
 
-        items.sort(key=lambda item: item.read_tasks, reverse=True)
+        items.sort(key=lambda item: item.success_count, reverse=True)
 
-        return CronBranchBehaviorResponse(
+        return CronBranchRankingResponse(
             start_date=start_str,
             end_date=end_str,
             items=items,
@@ -2473,6 +2547,278 @@ class QueryService:
             microsecond=0,
         )
         return start_time, end_time
+
+    @staticmethod
+    def _init_skill_dicts(
+        skill_jobs: dict,
+        skill_total: dict,
+        skill_success: dict,
+        skill_read: dict,
+        skill_error: dict,
+        sk: str,
+    ) -> None:
+        skill_jobs[sk] = set()
+        skill_total[sk] = 0
+        skill_success[sk] = 0
+        skill_read[sk] = 0
+        skill_error[sk] = 0
+
+    async def get_branch_skills(
+        self,
+        bbk_id: str,
+        start_date: Optional[str] = None,
+        end_date: Optional[str] = None,
+        source_id: Optional[str] = None,
+    ) -> BranchSkillResponse:
+        """获取分行技能维度数据。
+
+        从 swe_cron_executions + swe_tracing_traces 链路，
+        提取 skills_used JSON 数组并聚合统计每项技能的执行情况。
+        """
+        db = get_db_connection()
+
+        start_time, end_time = self._parse_date_range(start_date, end_date)
+        start_str = start_date or start_time.strftime("%Y-%m-%d")
+        end_str = end_date or end_time.strftime("%Y-%m-%d")
+
+        source_where = " AND j.source_id = %s" if source_id else ""
+
+        sql = f"""
+            SELECT
+                e.job_id,
+                e.status,
+                e.is_read,
+                t.skills_used
+            FROM swe_cron_executions e
+            JOIN swe_cron_jobs j ON e.job_id = j.id
+            JOIN swe_tracing_traces t ON e.trace_id COLLATE utf8mb4_unicode_ci = t.trace_id
+            WHERE j.bbk_id = %s
+              AND e.actual_time >= %s AND e.actual_time <= %s
+              AND t.session_id LIKE 'cron-task%%'
+              AND t.skills_used IS NOT NULL
+              {source_where}
+        """
+        params: list = [bbk_id, start_time, end_time]
+        if source_id:
+            params.append(source_id)
+        rows = await db.fetch_all(sql, tuple(params))
+
+        seen_jobs: set[str] = set()
+        skill_jobs: dict[str, set[str]] = {}
+        skill_total: dict[str, int] = {}
+        skill_success: dict[str, int] = {}
+        skill_read: dict[str, int] = {}
+        skill_error: dict[str, int] = {}
+
+        for row in rows:
+            skills = row["skills_used"]
+            if isinstance(skills, str):
+                try:
+                    skills = json.loads(skills)
+                except (TypeError, ValueError):
+                    continue
+            if not isinstance(skills, list):
+                continue
+            job_id = row["job_id"]
+            status = (row["status"] or "").lower()
+            is_read = bool(row["is_read"])
+            for sk in skills:
+                sk = str(sk).strip() if sk else ""
+                if not sk:
+                    continue
+                if sk not in skill_jobs:
+                    self._init_skill_dicts(
+                        skill_jobs,
+                        skill_total,
+                        skill_success,
+                        skill_read,
+                        skill_error,
+                        sk,
+                    )
+                skill_total[sk] += 1
+                skill_jobs[sk].add(job_id)
+                if status == "success":
+                    skill_success[sk] += 1
+                if is_read:
+                    skill_read[sk] += 1
+                if status in ("error", "timeout", "cancelled"):
+                    skill_error[sk] += 1
+
+        items: list[BranchSkillItem] = []
+        for skill_name, jobs in skill_jobs.items():
+            task_count = len(jobs)
+            success = skill_success.get(skill_name, 0)
+            exec_total = skill_total.get(skill_name, 0)
+            items.append(
+                BranchSkillItem(
+                    skill_name=skill_name,
+                    cron_task_count=task_count,
+                    success_count=success,
+                    success_rate=self._percent(success, exec_total),
+                    read_count=skill_read.get(skill_name, 0),
+                    error_count=skill_error.get(skill_name, 0),
+                ),
+            )
+
+        items.sort(key=lambda item: item.cron_task_count, reverse=True)
+
+        return BranchSkillResponse(
+            start_date=start_str,
+            end_date=end_str,
+            bbk_id=bbk_id,
+            bbk_name=get_bbk_name_by_id(bbk_id) or bbk_id,
+            items=items,
+        )
+
+    async def get_branch_skill_managers(
+        self,
+        bbk_id: str,
+        skill_name: str,
+        start_date: Optional[str] = None,
+        end_date: Optional[str] = None,
+        source_id: Optional[str] = None,
+    ) -> BranchSkillManagerResponse:
+        """获取分行+技能的客户经理维度数据。
+
+        从 swe_html_preview_click_events 出发，通过 cron_executions
+        联结 traces，筛选 skills_used 包含指定技能的行，按客户经理聚合。
+        """
+        db = get_db_connection()
+
+        start_time, end_time = self._parse_date_range(start_date, end_date)
+        start_str = start_date or start_time.strftime("%Y-%m-%d")
+        end_str = end_date or end_time.strftime("%Y-%m-%d")
+
+        source_where = " AND c.source_id = %s" if source_id else ""
+
+        sql = f"""
+            SELECT
+                c.user_id,
+                c.user_id AS user_name,
+                COUNT(DISTINCT CASE WHEN e.is_read = 1 THEN e.id END) AS read_count,
+                COUNT(DISTINCT CASE WHEN c.button_type = 'plan' THEN c.id END) AS plan_count,
+                COUNT(DISTINCT CASE WHEN c.button_type = 'insight' THEN c.id END) AS insight_count,
+                COUNT(DISTINCT CASE WHEN c.button_type = 'phone' THEN c.id END) AS phone_count,
+                MAX(c.clicked_at) AS last_click_time
+            FROM swe_html_preview_click_events c
+            JOIN swe_cron_executions e ON c.cron_task_id = e.job_id
+            JOIN swe_tracing_traces t ON e.trace_id COLLATE utf8mb4_unicode_ci = t.trace_id
+            WHERE c.bbk_id = %s
+              AND t.skills_used IS NOT NULL
+              AND JSON_CONTAINS(t.skills_used, JSON_QUOTE(%s))
+              AND c.clicked_at >= %s AND c.clicked_at <= %s
+              AND t.session_id LIKE 'cron-task%%'
+              {source_where}
+            GROUP BY c.user_id
+            ORDER BY read_count DESC
+        """
+        params: list = [bbk_id, skill_name, start_time, end_time]
+        if source_id:
+            params.append(source_id)
+        rows = await db.fetch_all(sql, tuple(params))
+
+        items: list[BranchSkillManagerItem] = []
+        for row in rows:
+            last_click = row["last_click_time"]
+            items.append(
+                BranchSkillManagerItem(
+                    user_id=row["user_id"] or "",
+                    user_name=row["user_name"] or "",
+                    read_count=row["read_count"] or 0,
+                    plan_count=row["plan_count"] or 0,
+                    insight_count=row["insight_count"] or 0,
+                    phone_count=row["phone_count"] or 0,
+                    last_click_time=(
+                        last_click.strftime("%Y-%m-%d %H:%M:%S")
+                        if last_click
+                        else None
+                    ),
+                ),
+            )
+
+        return BranchSkillManagerResponse(
+            start_date=start_str,
+            end_date=end_str,
+            bbk_id=bbk_id,
+            skill_name=skill_name,
+            items=items,
+        )
+
+    async def get_branch_skill_manager_customers(
+        self,
+        bbk_id: str,
+        skill_name: str,
+        user_id: str,
+        start_date: Optional[str] = None,
+        end_date: Optional[str] = None,
+        source_id: Optional[str] = None,
+    ) -> BranchSkillManagerCustomerResponse:
+        """获取分行+技能+客户经理的客户维度数据。
+
+        从 swe_html_preview_click_events 出发，通过 cron_executions
+        联结 traces，筛选 skills_used 包含指定技能以及指定客户经理的行，
+        按客户聚合点击行为。
+        """
+        db = get_db_connection()
+
+        start_time, end_time = self._parse_date_range(start_date, end_date)
+        start_str = start_date or start_time.strftime("%Y-%m-%d")
+        end_str = end_date or end_time.strftime("%Y-%m-%d")
+
+        source_where = " AND c.source_id = %s" if source_id else ""
+
+        sql = f"""
+            SELECT
+                c.customer_id,
+                c.customer_name,
+                MAX(CASE WHEN c.button_type = 'plan' THEN 1 ELSE 0 END) AS clicked_plan,
+                MAX(CASE WHEN c.button_type = 'insight' THEN 1 ELSE 0 END) AS clicked_insight,
+                MAX(CASE WHEN c.button_type = 'phone' THEN 1 ELSE 0 END) AS clicked_phone,
+                MAX(c.clicked_at) AS click_time
+            FROM swe_html_preview_click_events c
+            JOIN swe_cron_executions e ON c.cron_task_id = e.job_id
+            JOIN swe_tracing_traces t ON e.trace_id COLLATE utf8mb4_unicode_ci = t.trace_id
+            WHERE c.bbk_id = %s
+              AND c.user_id = %s
+              AND t.skills_used IS NOT NULL
+              AND JSON_CONTAINS(t.skills_used, JSON_QUOTE(%s))
+              AND c.clicked_at >= %s AND c.clicked_at <= %s
+              AND t.session_id LIKE 'cron-task%%'
+              {source_where}
+            GROUP BY c.customer_id, c.customer_name
+            ORDER BY click_time DESC
+        """
+        params: list = [bbk_id, user_id, skill_name, start_time, end_time]
+        if source_id:
+            params.append(source_id)
+        rows = await db.fetch_all(sql, tuple(params))
+
+        items: list[BranchSkillManagerCustomerItem] = []
+        for row in rows:
+            click_time = row["click_time"]
+            items.append(
+                BranchSkillManagerCustomerItem(
+                    customer_id=row["customer_id"] or "",
+                    customer_name=row["customer_name"] or "",
+                    clicked_plan=bool(row["clicked_plan"]),
+                    clicked_insight=bool(row["clicked_insight"]),
+                    clicked_phone=bool(row["clicked_phone"]),
+                    click_time=(
+                        click_time.strftime("%Y-%m-%d %H:%M:%S")
+                        if click_time
+                        else None
+                    ),
+                ),
+            )
+
+        return BranchSkillManagerCustomerResponse(
+            start_date=start_str,
+            end_date=end_str,
+            bbk_id=bbk_id,
+            skill_name=skill_name,
+            user_id=user_id,
+            items=items,
+        )
 
     def _build_bbk_filter(
         self,

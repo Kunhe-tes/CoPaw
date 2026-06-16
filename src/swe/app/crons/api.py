@@ -388,6 +388,9 @@ def _build_broadcast_job(
     tenant_name: str | None = None,
     bbk_id: str | None = None,
 ) -> CronJobSpec:
+    resolved_scope_id = None
+    if not (target_tenant_id == "default" and source_id is not None):
+        resolved_scope_id = resolve_scope_id(target_tenant_id, source_id)
     meta = dict(source_job.meta or {})
     for key in (
         *PRESERVED_CHILD_META_KEYS,
@@ -442,7 +445,7 @@ def _build_broadcast_job(
             "bbk_id": target_bbk_id,
             "source_id": source_id,
             "tenant_name": target_tenant_name,
-            "scope_id": resolve_scope_id(target_tenant_id, source_id),
+            "scope_id": resolved_scope_id,
             "schedule": source_job.schedule.model_copy(
                 update={
                     "cron": cron,

@@ -301,6 +301,10 @@ def resolve_runtime_tenant_id(
     """
     if tenant_id is None:
         return None
+    if tenant_id == "default":
+        if not source_id:
+            return "default"
+        return f"default_{source_id}"
     if tenant_id.startswith("default_"):
         return tenant_id
     legacy_prefix = f"{_LEGACY_SCOPE_ID_PREFIX}."
