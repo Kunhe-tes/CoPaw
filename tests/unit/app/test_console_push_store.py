@@ -82,6 +82,46 @@ class TestTenantPushStoreIsolation:
 
         assert [m["text"] for m in taken] == ["msg-a"]
 
+    def test_default_user_source_template_key_is_cleared_by_tenant_clear(self):
+        """default 用户 source 模板键应能被 clear_tenant("default") 清理。"""
+        append = console_push_store.append
+        clear_tenant = console_push_store.clear_tenant
+        _get_tenant_store = console_push_store._get_tenant_store
+
+        async def scenario():
+            with tenant_context(tenant_id="default", source_id="CMSJY"):
+                await append("session-a", "msg-a", tenant_id="default")
+                before = list(_get_tenant_store("default"))
+                await clear_tenant("default")
+                after = list(_get_tenant_store("default"))
+            return before, after
+
+        before, after = asyncio.run(scenario())
+
+        assert [m["text"] for m in before] == ["msg-a"]
+        assert [m["text"] for m in after] == []
+
+    def test_default_user_source_template_key_is_cleared_by_default_clear(
+        self,
+    ):
+        """default 用户 source 模板键应能被 clear_tenant() 默认清理。"""
+        append = console_push_store.append
+        clear_tenant = console_push_store.clear_tenant
+        _get_tenant_store = console_push_store._get_tenant_store
+
+        async def scenario():
+            with tenant_context(tenant_id="default", source_id="CMSJY"):
+                await append("session-a", "msg-a", tenant_id="default")
+                before = list(_get_tenant_store("default"))
+                await clear_tenant()
+                after = list(_get_tenant_store("default"))
+            return before, after
+
+        before, after = asyncio.run(scenario())
+
+        assert [m["text"] for m in before] == ["msg-a"]
+        assert [m["text"] for m in after] == []
+
     @pytest.mark.skip(reason="Requires full app dependencies")
     async def test_append_creates_tenant_isolated_message(self):
         """Appended messages include tenant_id for isolation."""

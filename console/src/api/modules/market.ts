@@ -24,6 +24,7 @@ export interface MarketSkill {
   updated_at: string | null;
   call_count: number;
   user_count: number;
+  version_unchanged?: boolean;
 }
 
 export interface MarketSkillDetail extends MarketSkill {

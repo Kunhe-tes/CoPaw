@@ -318,8 +318,14 @@ export default function MySkillsPage() {
       }
       message.success(`${action === "enable" ? "启用" : "禁用"}成功`);
       refresh();
-    } catch (err) {
-      message.error(`${action === "enable" ? "启用" : "禁用"}失败`);
+    } catch (err: unknown) {
+      const errObj = err as Error & { status?: number; data?: { detail?: { reason?: string; detail?: string } } };
+      const detail = errObj?.data?.detail;
+      if (detail?.reason === "security_scan_failed") {
+        message.error(`启用失败：安全扫描未通过，${detail.detail || "请检查技能内容"}`);
+      } else {
+        message.error(`${action === "enable" ? "启用" : "禁用"}失败`);
+      }
     } finally {
       setTogglingSkill(null);
     }
@@ -387,10 +393,18 @@ export default function MySkillsPage() {
 
   const handleSaveContent = useCallback(async () => {
     if (!selectedSkill || !selectedFile || !isEditing) return;
+
+    // 检查内容是否发生了变化
+    const frontmatter = splitMarkdownFrontmatter(selectedFile, fileContent);
+    if (draftContent === frontmatter.editableContent) {
+      message.info("内容未变化，无需保存");
+      setIsEditing(false);
+      return;
+    }
+
     setIsSaving(true);
     try {
       // 对于 Markdown 文件，合并 frontmatter
-      const frontmatter = splitMarkdownFrontmatter(selectedFile, fileContent);
       const contentToSave = frontmatter.hasFrontmatter
         ? mergeMarkdownFrontmatter(frontmatter.protectedPrefix, draftContent)
         : draftContent;

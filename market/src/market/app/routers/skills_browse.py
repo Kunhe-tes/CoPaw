@@ -332,38 +332,54 @@ def _get_existing_skill_names(skills_dir: Path) -> set[str]:
 
 
 def _parse_frontmatter_description(skill_md_path: Path) -> str:
-    """从 SKILL.md frontmatter 中提取 description."""
+    """从 SKILL.md frontmatter 中提取 description（委托共享工具）."""
+    from ...utils.skill_md import extract_metadata
+
     if not skill_md_path.exists():
         return ""
     try:
         content = skill_md_path.read_text(encoding="utf-8")
-        if not content.startswith("---"):
-            return ""
-        end_idx = content.index("---", 3)
-        fm_text = content[3:end_idx].strip()
-        for line in fm_text.split("\n"):
-            if ":" in line:
-                key, val = line.split(":", 1)
-                key = key.strip().lower()
-                val = val.strip()
-                if key == "description":
-                    return val
-    except (ValueError, OSError):
-        pass
-    return ""
+    except OSError:
+        return ""
+    return extract_metadata(content).get("description", "")
+
+
+def _parse_frontmatter_version(skill_md_path: Path) -> str:
+    """从 SKILL.md frontmatter 中提取 version（委托共享工具）."""
+    from ...utils.skill_md import extract_version
+
+    if not skill_md_path.exists():
+        return ""
+    try:
+        return extract_version(skill_md_path.read_text(encoding="utf-8"))
+    except OSError:
+        return ""
+
+
+def _bump_patch_version(version: str) -> str:
+    """递增版本号的 patch 部分（委托共享工具）."""
+    from ...utils.version import bump_patch
+
+    return bump_patch(version)
 
 
 def _build_skill_metadata(
     skill_dir: Path,
     skill_name: str,
     original_name: str,
+    existing_version: str = "",
 ) -> dict[str, Any]:
-    """构建技能元数据（用于写入 manifest），不再写入 skill.json 文件.
+    """构建技能元数据（用于写入 manifest），包含版本处理.
+
+    版本策略（与市场一致）：
+    1. SKILL.md 有版本 → 使用该版本（用户声明）
+    2. SKILL.md 无版本 → 新技能用 1.0.0，覆盖时 bump
 
     Args:
         skill_dir: 技能目录
         skill_name: 安全的目录名
         original_name: 原始技能名称（用于前端展示）
+        existing_version: 已存在技能的版本号（用于 bump）
 
     Returns:
         技能元数据字典
@@ -383,9 +399,21 @@ def _build_skill_metadata(
     # name 字段优先使用用户指定的名称（original_name），其次保留已有名称
     skill_data["name"] = original_name or skill_data.get("name") or skill_name
 
+    # 版本处理（与市场一致）
+    skill_md_path = skill_dir / "SKILL.md"
+    version_from_md = _parse_frontmatter_version(skill_md_path)
+    if version_from_md:
+        # SKILL.md 有版本 → 使用用户声明的版本
+        skill_data["version"] = version_from_md
+    elif existing_version:
+        # SKILL.md 无版本，已有技能 → bump 版本
+        skill_data["version"] = _bump_patch_version(existing_version)
+    else:
+        # SKILL.md 无版本，新技能 → 默认 1.0.0
+        skill_data.setdefault("version", "1.0.0")
+
     # 优先从 skill.json 获取 description，其次从 SKILL.md frontmatter
     if not skill_data.get("description"):
-        skill_md_path = skill_dir / "SKILL.md"
         desc_from_md = _parse_frontmatter_description(skill_md_path)
         if desc_from_md:
             skill_data["description"] = desc_from_md
@@ -425,6 +453,19 @@ def _process_single_skill(
     Returns:
         (是否导入成功, 冲突信息, 技能元数据用于写入 manifest)
     """
+    # 获取已存在技能的版本（用于覆盖时 bump）
+    existing_version = ""
+    if skill_name in existing_names:
+        existing_skill_json = skills_dir / skill_name / "skill.json"
+        if existing_skill_json.exists():
+            try:
+                existing_data = json.loads(
+                    existing_skill_json.read_text(encoding="utf-8"),
+                )
+                existing_version = existing_data.get("version", "")
+            except (json.JSONDecodeError, OSError):
+                pass
+
     if skill_name in existing_names and not overwrite:
         # 递增计数器直到找到不冲突的建议名
         counter = 1
@@ -454,12 +495,13 @@ def _process_single_skill(
     ):
         return False, None, None
 
-    # 构建技能元数据（不再写入 skill.json 文件）
+    # 构建技能元数据（包含版本处理）
     imported_skill_dir = skills_dir / skill_name
     skill_metadata = _build_skill_metadata(
         imported_skill_dir,
         skill_name,
         original_name,
+        existing_version=existing_version,
     )
 
     # 添加上传者信息到元数据

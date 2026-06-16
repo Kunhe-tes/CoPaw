@@ -179,6 +179,10 @@ class ExecutionModel(BaseModel):
         ...,
         description="状态: success/error/cancelled/timeout/skipped",
     )
+    async_status: Optional[str] = Field(
+        default=None,
+        description="异步任务执行状态: success/error",
+    )
     error_message: str = Field(default="", description="错误信息")
 
     # 执行上下文

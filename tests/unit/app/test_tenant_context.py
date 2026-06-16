@@ -487,6 +487,21 @@ class TestRuntimeIdentityResolution:
 
         assert resolved == "dGVuYW50LWE.c291cmNlLWE"
 
+    def test_request_effective_tenant_resolution_uses_default_template(
+        self,
+    ):
+        """default 用户在请求语义下应直接落到 default_{source}。"""
+        from swe.config.context import resolve_request_effective_tenant_id
+
+        assert (
+            resolve_request_effective_tenant_id(
+                "default",
+                "CMSJY",
+                "dGVuYW50LWE.c291cmNlLWE",
+            )
+            == "default_CMSJY"
+        )
+
     def test_scope_like_raw_tenant_still_combines_with_source(self):
         """形似 scope 的 raw tenant 也必须继续参与 source 隔离。"""
         tenant_id = "dGVzdA.c291cmNl"

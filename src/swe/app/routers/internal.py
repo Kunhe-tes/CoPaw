@@ -1093,36 +1093,63 @@ async def internal_cron_callback(
             detail=f"Missing required param in callback body: {e}",
         )
 
-    manager = getattr(request.app.state, "multi_agent_manager", None)
-    if manager is None:
-        logger.warning("MultiAgentManager not initialized")
-        raise HTTPException(status_code=503, detail="Manager not available")
-
-    runtime_tenant_id = (
-        resolve_runtime_tenant_id(tenant_id, source_id) or tenant_id
-    )
-    mgr = await _get_cron_manager(manager, runtime_tenant_id, agent_id)
-    if mgr is None:
-        raise HTTPException(status_code=404, detail="CronManager not found")
-
     try:
-        if task_type == "heartbeat":
-            await mgr.run_heartbeat()
-        elif task_type == "dream":
-            await mgr.run_dream()
-        else:
-            if not job_id:
+        if task_type == "cleanup":
+            if not source_id:
                 raise HTTPException(
                     status_code=400,
-                    detail="job_id required for task_type=job",
+                    detail="source_id required for task_type=cleanup",
                 )
-            # 调度回调触发的执行是自动执行，不是手动执行
-            await mgr.run_job(
-                job_id,
-                is_manual=False,
+            source_scheduler = getattr(
+                request.app.state,
+                "source_system_task_scheduler",
+                None,
+            )
+            if source_scheduler is None:
+                raise HTTPException(
+                    status_code=503,
+                    detail="Source system task scheduler not available",
+                )
+            cleanup_result = await source_scheduler.run_task_session_cleanup(
                 source_id=source_id,
             )
-
+            logger.info(
+                "Source task session cleanup result: %s",
+                cleanup_result,
+            )
+        else:
+            manager = getattr(request.app.state, "multi_agent_manager", None)
+            if manager is None:
+                logger.warning("MultiAgentManager not initialized")
+                raise HTTPException(
+                    status_code=503,
+                    detail="Manager not available",
+                )
+            runtime_tenant_id = (
+                resolve_runtime_tenant_id(tenant_id, source_id) or tenant_id
+            )
+            mgr = await _get_cron_manager(manager, runtime_tenant_id, agent_id)
+            if mgr is None:
+                raise HTTPException(
+                    status_code=404,
+                    detail="CronManager not found",
+                )
+            if task_type == "heartbeat":
+                await mgr.run_heartbeat()
+            elif task_type == "dream":
+                await mgr.run_dream()
+            else:
+                if not job_id:
+                    raise HTTPException(
+                        status_code=400,
+                        detail="job_id required for task_type=job",
+                    )
+                # 调度回调触发的是自动执行，不应走手动执行分支。
+                await mgr.run_job(
+                    job_id,
+                    is_manual=False,
+                    source_id=source_id,
+                )
         logger.info(
             "Callback dispatched: type=%s tenant=%s agent=%s job=%s",
             task_type,

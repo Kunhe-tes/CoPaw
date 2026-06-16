@@ -97,6 +97,11 @@ export interface CronBroadcastTarget {
   bbk_id?: string | null;
 }
 
+export interface CronBroadcastOptions {
+  enable_offset?: boolean;
+  offset_window_hours?: number;
+}
+
 export interface CronBroadcastResponse {
   results: CronBroadcastTenantResult[];
 }

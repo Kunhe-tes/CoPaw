@@ -92,6 +92,10 @@ _Avoid_: model params, cron model
 The behavior where a **Scheduled Run** uses the current **Tenant Default Model** when its configured **Execution Model Slot** cannot be used. The fallback is silent in the user interface but must remain visible in operational records.
 _Avoid_: hard failure, invisible fallback
 
+**Tenant Provider Configuration**:
+The tenant-scoped set of LLM provider definitions and model choices available for model selection. One **Tenant Provider Configuration** contains many provider entries and identifies at most one **Tenant Default Model**.
+_Avoid_: model cache, global provider list, system model config
+
 **Tenant Default Model**:
 The active LLM selection for a tenant, used by agent work when no narrower **Execution Model Slot** is specified.
 _Avoid_: global model, system default model
@@ -243,6 +247,10 @@ _Avoid_: per-skill notice spam, repeated freshness banners, fragmented model not
 **System Runtime Diagnostic**:
 A periodic, Runtime Instance-scoped assessment of the Swe backend service's load, responsiveness, process resources, and storage capacity. It is broader than a liveness probe and does not execute an Agent Heartbeat.
 _Avoid_: self-check, health endpoint, Agent Heartbeat
+
+**Liveness Probe**:
+A Runtime Instance signal that only proves the backend request-serving process can answer immediately. A **Liveness Probe** is not a dependency check and must not describe tenant, workspace, source configuration, database, Agent runtime, or scheduled work availability.
+_Avoid_: readiness check, system self-check, health diagnostic
 
 **Request Execution Load**:
 The current load and responsiveness of the backend request-serving runtime within one Runtime Instance, distinct from tenant or business-runtime usage.
@@ -446,6 +454,9 @@ Resolved as limited to the Source System Configuration page and runtime resoluti
 
 **"System Self-Check"**:
 Resolved as **System Runtime Diagnostic**. The existing lightweight health endpoint remains a liveness probe, while the scheduled `HEARTBEAT.md` run remains an Agent Heartbeat.
+
+**"Health Endpoint"**:
+Resolved as **Liveness Probe** when referring to `/api/health/health`. It is not a readiness check and does not report dependency availability.
 
 **"Flask Worker Usage"**:
 Resolved as **Request Execution Load**. Swe does not run Flask or a multi-worker web-server pool; the diagnostic reports the load and responsiveness of the single-worker Uvicorn/FastAPI backend instead of tenant-level workload statistics or Supervisor process state.

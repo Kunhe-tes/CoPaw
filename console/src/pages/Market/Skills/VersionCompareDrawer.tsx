@@ -1,4 +1,4 @@
-import { useState, useEffect, useMemo, useRef } from "react";
+import { useState, useEffect, useMemo, useRef, useCallback } from "react";
 import {
   Drawer,
   Tree,
@@ -258,7 +258,18 @@ function buildFileTree(files: FileNode[]): TreeDataNode[] {
 }
 
 /**
- * 计算行级差异
+ * 差异块（连续改动聚合）
+ */
+interface DiffBlock {
+  type: "change";  // 统一标记为变更块
+  startOriginal: number;  // 原文件起始行（-1表示新增块）
+  endOriginal: number;    // 原文件结束行
+  startModified: number;  // 新文件起始行（-1表示删除块）
+  endModified: number;    // 新文件结束行
+}
+
+/**
+ * 计算行级差异，并聚合为差异块
  */
 function computeLineDiff(
   originalContent: string,
@@ -266,15 +277,18 @@ function computeLineDiff(
 ): {
   originalLines: DiffLine[];
   modifiedLines: DiffLine[];
-  diffIndices: { original: number; modified: number }[];
+  diffBlocks: DiffBlock[];
 } {
   const diffResult = Diff.diffLines(originalContent, modifiedContent);
   const originalLines: DiffLine[] = [];
   const modifiedLines: DiffLine[] = [];
-  const diffIndices: { original: number; modified: number }[] = [];
+  const diffBlocks: DiffBlock[] = [];
 
   let originalLineNum = 0;
   let modifiedLineNum = 0;
+
+  // 当前差异块追踪
+  let currentBlock: DiffBlock | null = null;
 
   diffResult.forEach((part) => {
     const lines = part.value.split("\n");
@@ -283,6 +297,8 @@ function computeLineDiff(
     }
 
     if (part.added) {
+      // 新增行：记录差异块起始
+      const startModified = modifiedLineNum + 1;
       lines.forEach((line) => {
         modifiedLineNum++;
         modifiedLines.push({
@@ -290,9 +306,23 @@ function computeLineDiff(
           content: line,
           modifiedLineNumber: modifiedLineNum,
         });
-        diffIndices.push({ original: -1, modified: modifiedLineNum });
       });
+      // 创建或更新差异块
+      if (!currentBlock) {
+        currentBlock = {
+          type: "change",
+          startOriginal: -1,
+          endOriginal: -1,
+          startModified,
+          endModified: modifiedLineNum,
+        };
+      } else {
+        // 延伸当前差异块
+        currentBlock.endModified = modifiedLineNum;
+      }
     } else if (part.removed) {
+      // 删除行：记录差异块起始
+      const startOriginal = originalLineNum + 1;
       lines.forEach((line) => {
         originalLineNum++;
         originalLines.push({
@@ -300,9 +330,26 @@ function computeLineDiff(
           content: line,
           originalLineNumber: originalLineNum,
         });
-        diffIndices.push({ original: originalLineNum, modified: -1 });
       });
+      // 创建或更新差异块
+      if (!currentBlock) {
+        currentBlock = {
+          type: "change",
+          startOriginal,
+          endOriginal: originalLineNum,
+          startModified: -1,
+          endModified: -1,
+        };
+      } else {
+        // 延伸当前差异块（删除行在原文件侧）
+        currentBlock.endOriginal = originalLineNum;
+      }
     } else {
+      // 未修改行：如果有未结束的差异块，保存它
+      if (currentBlock) {
+        diffBlocks.push(currentBlock);
+        currentBlock = null;
+      }
       lines.forEach((line) => {
         originalLineNum++;
         modifiedLineNum++;
@@ -322,162 +369,301 @@ function computeLineDiff(
     }
   });
 
-  return { originalLines, modifiedLines, diffIndices };
+  // 保存最后一个差异块
+  if (currentBlock) {
+    diffBlocks.push(currentBlock);
+  }
+
+  return { originalLines, modifiedLines, diffBlocks };
 }
 
 /**
- * 代码面板组件
+ * 行号列组件（IDEA 风格：行号在外侧）
  */
-function CodePanel({
-  title,
+function LineNumbers({
   lines,
-  scrollToLine,
   side,
+  maxWidth,
 }: {
-  title: string;
   lines: DiffLine[];
-  scrollToLine?: number;
   side: "left" | "right";
+  maxWidth: number;
 }) {
-  const containerRef = useRef<HTMLDivElement>(null);
-
-  useEffect(() => {
-    if (scrollToLine && containerRef.current) {
-      const selector = side === "left" ? `[data-original="${scrollToLine}"]` : `[data-modified="${scrollToLine}"]`;
-      const lineElement = containerRef.current.querySelector(selector);
-      if (lineElement) {
-        lineElement.scrollIntoView({ behavior: "smooth", block: "center" });
-      }
-    }
-  }, [scrollToLine, side]);
-
-  const maxLineNum = Math.max(
-    ...lines.map((l) => l.originalLineNumber || l.modifiedLineNumber || 0),
-    1,
+  return (
+    <div
+      style={{
+        padding: "0 8px",
+        backgroundColor: "#f6f8fa",
+        minWidth: maxWidth,
+        textAlign: "right",
+        fontFamily: "'SF Mono', Consolas, monospace",
+        fontSize: 12,
+        lineHeight: "20px",
+        color: "#6e7781",
+        userSelect: "none",
+        flexShrink: 0,
+      }}
+    >
+      {lines.map((line, idx) => {
+        const lineNum = side === "left"
+          ? line.originalLineNumber
+          : line.modifiedLineNumber;
+        const bgColor =
+          line.type === "removed"
+            ? "#ffeef0"
+            : line.type === "added"
+              ? "#e6ffed"
+              : "transparent";
+        return (
+          <div
+            key={idx}
+            style={{
+              height: "20px",
+              lineHeight: "20px",
+              backgroundColor: bgColor,
+            }}
+          >
+            {lineNum || ""}
+          </div>
+        );
+      })}
+    </div>
   );
-  const lineNumberWidth = maxLineNum > 999 ? 50 : 40;
+}
+
+/**
+ * 中间沟组件（IDEA 风格：显示变更类型指示器）
+ */
+function DiffGutter({
+  originalLines,
+  modifiedLines,
+}: {
+  originalLines: DiffLine[];
+  modifiedLines: DiffLine[];
+}) {
+  // 按行配对，生成每行的变更状态
+  const gutterLines: { type: "added" | "removed" | "modified" | "normal" }[] = [];
+  let origIdx = 0;
+  let modIdx = 0;
+
+  while (origIdx < originalLines.length || modIdx < modifiedLines.length) {
+    const orig = originalLines[origIdx];
+    const mod = modifiedLines[modIdx];
+
+    if (orig && orig.type === "removed") {
+      gutterLines.push({ type: "removed" });
+      origIdx++;
+    } else if (mod && mod.type === "added") {
+      gutterLines.push({ type: "added" });
+      modIdx++;
+    } else if (orig && mod && orig.type === "normal" && mod.type === "normal") {
+      gutterLines.push({ type: "normal" });
+      origIdx++;
+      modIdx++;
+    } else {
+      break;
+    }
+  }
 
   return (
     <div
       style={{
-        flex: 1,
-        display: "flex",
-        flexDirection: "column",
-        minWidth: 0,
-        border: "1px solid #e1e4e8",
-        backgroundColor: "#fff",
+        width: 32,
+        flexShrink: 0,
+        backgroundColor: "#f0f0f0",
+        borderLeft: "1px solid #e1e4e8",
+        borderRight: "1px solid #e1e4e8",
       }}
     >
-      {/* 标题栏 */}
-      <div
-        style={{
-          padding: "6px 12px",
-          borderBottom: "1px solid #e1e4e8",
-          backgroundColor: "#f6f8fa",
-          display: "flex",
-          alignItems: "center",
-          justifyContent: "space-between",
-        }}
-      >
-        <Text strong style={{ fontSize: 12, color: "#24292f" }}>{title}</Text>
-        <Text type="secondary" style={{ fontSize: 11 }}>
-          {lines.length} 行
-        </Text>
-      </div>
+      {gutterLines.map((line, idx) => {
+        const bgColor =
+          line.type === "added"
+            ? "#acf2bd"
+            : line.type === "removed"
+              ? "#fdb8c0"
+              : line.type === "modified"
+                ? "#fdb8c0"
+                : "transparent";
+        const symbol =
+          line.type === "added"
+            ? "+"
+            : line.type === "removed"
+              ? "-"
+              : " ";
+        return (
+          <div
+            key={idx}
+            style={{
+              height: "20px",
+              lineHeight: "20px",
+              backgroundColor: bgColor,
+              textAlign: "center",
+              fontFamily: "'SF Mono', Consolas, monospace",
+              fontSize: 11,
+              color: line.type === "normal" ? "transparent" : "#cb2431",
+              userSelect: "none",
+            }}
+          >
+            {symbol}
+          </div>
+        );
+      })}
+    </div>
+  );
+}
 
-      {/* 代码区域 */}
-      <div
-        ref={containerRef}
-        style={{
-          flex: 1,
-          overflow: "auto",
-          backgroundColor: "#fff",
-        }}
-      >
-        {lines.length === 0 ? (
+/**
+ * 代码内容列
+ */
+function CodeContent({
+  lines,
+  side,
+}: {
+  lines: DiffLine[];
+  side: "left" | "right";
+}) {
+  return (
+    <div style={{ flex: 1, minWidth: 0 }}>
+      {lines.map((line, idx) => {
+        const lineNum = side === "left"
+          ? line.originalLineNumber
+          : line.modifiedLineNumber;
+        const bgColor =
+          line.type === "removed"
+            ? "#ffeef0"
+            : line.type === "added"
+              ? "#e6ffed"
+              : "transparent";
+        return (
+          <div
+            key={idx}
+            data-line={lineNum}
+            data-original={line.originalLineNumber}
+            data-modified={line.modifiedLineNumber}
+            style={{
+              height: "20px",
+              lineHeight: "20px",
+              padding: "0 12px",
+              backgroundColor: bgColor,
+              fontFamily: "'SF Mono', Consolas, monospace",
+              fontSize: 13,
+              whiteSpace: "pre",
+              overflow: "hidden",
+              textOverflow: "ellipsis",
+              color: "#24292f",
+            }}
+          >
+            {line.content || " "}
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+/**
+ * Diff 视图容器（IDEA 风格 side-by-side）
+ * 布局：代码内容 | 行号 [沟] 行号 | 代码内容
+ * 纯滚动区域，标题栏由外部提供
+ */
+function DiffView({
+  originalLines,
+  modifiedLines,
+  scrollToOriginal,
+  onScroll,
+  scrollSyncRef,
+}: {
+  originalLines: DiffLine[];
+  modifiedLines: DiffLine[];
+  scrollToOriginal?: number;
+  onScroll?: (scrollTop: number) => void;
+  scrollSyncRef?: React.MutableRefObject<number>;
+}) {
+  const containerRef = useRef<HTMLDivElement>(null);
+  const isScrollingRef = useRef(false);
+
+  const maxLineNum = Math.max(
+    ...originalLines.map((l) => l.originalLineNumber || 0),
+    ...modifiedLines.map((l) => l.modifiedLineNumber || 0),
+    1,
+  );
+  const lineNumberWidth = maxLineNum > 999 ? 50 : 40;
+
+  // 滚动到指定行
+  useEffect(() => {
+    if (scrollToOriginal && containerRef.current) {
+      const selector = `[data-original="${scrollToOriginal}"]`;
+      const el = containerRef.current.querySelector(selector);
+      if (el) {
+        el.scrollIntoView({ behavior: "smooth", block: "center" });
+      }
+    }
+  }, [scrollToOriginal]);
+
+  // 同步滚动监听
+  useEffect(() => {
+    const container = containerRef.current;
+    if (!container || !onScroll) return;
+
+    const handleScroll = () => {
+      if (isScrollingRef.current) return;
+      isScrollingRef.current = true;
+      onScroll(container.scrollTop);
+      requestAnimationFrame(() => {
+        isScrollingRef.current = false;
+      });
+    };
+
+    container.addEventListener("scroll", handleScroll);
+    return () => container.removeEventListener("scroll", handleScroll);
+  }, [onScroll]);
+
+  // 接收外部滚动同步
+  useEffect(() => {
+    const container = containerRef.current;
+    if (!container || !scrollSyncRef) return;
+
+    const checkScrollSync = () => {
+      if (isScrollingRef.current) return;
+      const targetScroll = scrollSyncRef.current;
+      if (Math.abs(container.scrollTop - targetScroll) > 2) {
+        container.scrollTop = targetScroll;
+      }
+    };
+
+    const intervalId = setInterval(checkScrollSync, 50);
+    return () => clearInterval(intervalId);
+  }, [scrollSyncRef]);
+
+  return (
+    <div
+      ref={containerRef}
+      style={{
+        flex: 1,
+        overflow: "auto",
+        backgroundColor: "#fff",
+        minHeight: 0,
+      }}
+    >
+        {originalLines.length === 0 && modifiedLines.length === 0 ? (
           <div style={{ padding: 40, textAlign: "center", color: "#6e7781" }}>
             <Text type="secondary">空文件</Text>
           </div>
         ) : (
           <div style={{ display: "flex" }}>
-            {/* 行号列 */}
-            <div
-              style={{
-                padding: "0 8px",
-                backgroundColor: "#f6f8fa",
-                borderRight: "1px solid #e1e4e8",
-                minWidth: lineNumberWidth,
-                textAlign: "right",
-                fontFamily: "'SF Mono', Consolas, monospace",
-                fontSize: 12,
-                lineHeight: "20px",
-                color: "#6e7781",
-                userSelect: "none",
-              }}
-            >
-              {lines.map((line, idx) => {
-                const lineNum = side === "left"
-                  ? line.originalLineNumber
-                  : line.modifiedLineNumber;
-                const bgColor =
-                  line.type === "removed"
-                    ? "#ffeef0"
-                    : line.type === "added"
-                      ? "#e6ffed"
-                      : "transparent";
-                return (
-                  <div
-                    key={idx}
-                    data-original={line.originalLineNumber}
-                    data-modified={line.modifiedLineNumber}
-                    style={{
-                      height: "20px",
-                      lineHeight: "20px",
-                      backgroundColor: bgColor,
-                    }}
-                  >
-                    {lineNum || ""}
-                  </div>
-                );
-              })}
-            </div>
-
-            {/* 代码内容 */}
-            <div style={{ flex: 1, minWidth: 0 }}>
-              {lines.map((line, idx) => {
-                const bgColor =
-                  line.type === "removed"
-                    ? "#ffeef0"
-                    : line.type === "added"
-                      ? "#e6ffed"
-                      : "transparent";
-                return (
-                  <div
-                    key={idx}
-                    data-original={line.originalLineNumber}
-                    data-modified={line.modifiedLineNumber}
-                    style={{
-                      height: "20px",
-                      lineHeight: "20px",
-                      padding: "0 12px",
-                      backgroundColor: bgColor,
-                      fontFamily: "'SF Mono', Consolas, monospace",
-                      fontSize: 13,
-                      whiteSpace: "pre",
-                      overflow: "hidden",
-                      textOverflow: "ellipsis",
-                      color: "#24292f",
-                    }}
-                  >
-                    {line.content || " "}
-                  </div>
-                );
-              })}
-            </div>
+            {/* 左侧代码内容 */}
+            <CodeContent lines={originalLines} side="left" />
+            {/* 左侧行号（靠近中间） */}
+            <LineNumbers lines={originalLines} side="left" maxWidth={lineNumberWidth} />
+            {/* 中间沟 */}
+            <DiffGutter originalLines={originalLines} modifiedLines={modifiedLines} />
+            {/* 右侧行号（靠近中间） */}
+            <LineNumbers lines={modifiedLines} side="right" maxWidth={lineNumberWidth} />
+            {/* 右侧代码内容 */}
+            <CodeContent lines={modifiedLines} side="right" />
           </div>
         )}
       </div>
-    </div>
   );
 }
 
@@ -490,6 +676,13 @@ export function VersionCompareDrawer(props: VersionCompareDrawerProps) {
   const [expandedKeys, setExpandedKeys] = useState<string[]>([]);
   const [currentDiffIndex, setCurrentDiffIndex] = useState(0);
   const [fullscreen, setFullscreen] = useState(false);
+
+  // 同步滚动状态
+  const scrollSyncRef = useRef<number>(0);
+
+  const handleScrollSync = useCallback((scrollTop: number) => {
+    scrollSyncRef.current = scrollTop;
+  }, []);
 
   useEffect(() => {
     if (!open || !sourceId || !itemId) return;
@@ -552,13 +745,13 @@ export function VersionCompareDrawer(props: VersionCompareDrawerProps) {
     return computeLineDiff(selectedFile.originalContent, selectedFile.modifiedContent);
   }, [selectedFile]);
 
-  // 差异导航
+  // 差异导航（按差异块为单位）
   const handleNavigateDiff = (direction: "next" | "prev") => {
-    if (!diffData || diffData.diffIndices.length === 0) return;
+    if (!diffData || diffData.diffBlocks.length === 0) return;
     const newIndex =
       direction === "next"
-        ? (currentDiffIndex + 1) % diffData.diffIndices.length
-        : (currentDiffIndex - 1 + diffData.diffIndices.length) % diffData.diffIndices.length;
+        ? (currentDiffIndex + 1) % diffData.diffBlocks.length
+        : (currentDiffIndex - 1 + diffData.diffBlocks.length) % diffData.diffBlocks.length;
     setCurrentDiffIndex(newIndex);
   };
 
@@ -602,10 +795,9 @@ export function VersionCompareDrawer(props: VersionCompareDrawerProps) {
       : <RightOutlined style={{ fontSize: 10, color: "#6e7781" }} />
   );
 
-  // 当前滚动行号
-  const currentDiff = diffData?.diffIndices[currentDiffIndex];
-  const scrollToOriginal = currentDiff?.original > 0 ? currentDiff.original : undefined;
-  const scrollToModified = currentDiff?.modified > 0 ? currentDiff.modified : undefined;
+  // 当前差异块的滚动行号（跳转到差异块起始行）
+  const currentBlock = diffData?.diffBlocks[currentDiffIndex];
+  const scrollToOriginal = currentBlock?.startOriginal > 0 ? currentBlock.startOriginal : undefined;
 
   return (
     <Drawer
@@ -634,9 +826,9 @@ export function VersionCompareDrawer(props: VersionCompareDrawerProps) {
             版本比对
           </Text>
           <div style={{ marginTop: 4, display: "flex", alignItems: "center", gap: 8 }}>
-            <Tag color="blue" style={{ borderRadius: 6 }}>{baseVersion}</Tag>
+            <Tag color="blue" style={{ borderRadius: 6 }}>{/^v/i.test(baseVersion) ? baseVersion : `v${baseVersion}`}</Tag>
             <Text type="secondary" style={{ fontSize: 12 }}>→</Text>
-            <Tag color="green" style={{ borderRadius: 6 }}>{targetVersion}</Tag>
+            <Tag color="green" style={{ borderRadius: 6 }}>{/^v/i.test(targetVersion) ? targetVersion : `v${targetVersion}`}</Tag>
           </div>
         </div>
         <Space size={8}>
@@ -869,14 +1061,14 @@ export function VersionCompareDrawer(props: VersionCompareDrawerProps) {
                     </div>
 
                     {/* 差异导航 */}
-                    {diffData && diffData.diffIndices.length > 0 && (
+                    {diffData && diffData.diffBlocks.length > 0 && (
                       <Space size={8}>
                         <Button
                           size="small"
                           onClick={() => handleNavigateDiff("prev")}
                           icon={<ArrowUpOutlined />}
                         >
-                          {currentDiffIndex + 1}/{diffData.diffIndices.length}
+                          {currentDiffIndex + 1}/{diffData.diffBlocks.length}
                         </Button>
                         <Button
                           size="small"
@@ -887,30 +1079,14 @@ export function VersionCompareDrawer(props: VersionCompareDrawerProps) {
                     )}
                   </div>
 
-                  {/* 双栏 Diff */}
-                  <div
-                    style={{
-                      flex: 1,
-                      display: "flex",
-                      gap: 1,
-                      backgroundColor: "#e1e4e8",
-                      overflow: "hidden",
-                      minHeight: 0,
-                    }}
-                  >
-                    <CodePanel
-                      title={baseVersion}
-                      lines={diffData?.originalLines || []}
-                      scrollToLine={scrollToOriginal}
-                      side="left"
-                    />
-                    <CodePanel
-                      title={targetVersion}
-                      lines={diffData?.modifiedLines || []}
-                      scrollToLine={scrollToModified}
-                      side="right"
-                    />
-                  </div>
+                  {/* IDEA 风格 side-by-side Diff */}
+                  <DiffView
+                    originalLines={diffData?.originalLines || []}
+                    modifiedLines={diffData?.modifiedLines || []}
+                    scrollToOriginal={scrollToOriginal}
+                    onScroll={handleScrollSync}
+                    scrollSyncRef={scrollSyncRef}
+                  />
                 </>
               ) : (
                 <div

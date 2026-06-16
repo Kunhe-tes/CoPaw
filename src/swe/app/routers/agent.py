@@ -17,9 +17,9 @@ from ...config import (
     AgentsRunningConfig,
 )
 from ...config.config import load_agent_config, save_agent_config
-from ...config.context import resolve_effective_tenant_id
+from ...config.context import resolve_request_effective_tenant_id
 from ...config.utils import (
-    get_tenant_working_dir_strict,
+    get_tenant_request_working_dir,
     list_logical_tenant_ids,
 )
 from ...agents.memory.agent_md_manager import AgentMdManager
@@ -729,12 +729,16 @@ def _request_effective_tenant_id(request: Request) -> str | None:
     tenant_id = _request_tenant_id(request)
     if tenant_id is None:
         return None
-    return resolve_effective_tenant_id(tenant_id, _request_source_id(request))
+    return resolve_request_effective_tenant_id(
+        tenant_id,
+        _request_source_id(request),
+        getattr(request.state, "scope_id", None),
+    )
 
 
 def _request_tenant_working_dir(request: Request) -> Path:
     """获取当前请求的租户工作目录。"""
-    return get_tenant_working_dir_strict(_request_effective_tenant_id(request))
+    return get_tenant_request_working_dir(_request_tenant_id(request))
 
 
 def _get_multi_agent_manager(request: Request) -> Any:

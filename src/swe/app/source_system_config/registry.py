@@ -15,7 +15,7 @@ class SourceSystemConfigSetting:
     key: str
     path: tuple[str, ...]
     default_value: Any
-    value_type: Literal["bool", "int"]
+    value_type: Literal["bool", "int", "str"]
     ge: int | None = None
     le: int | None = None
 
@@ -100,6 +100,27 @@ CRON_UNREAD_AUTO_PAUSE_THRESHOLD_SETTING = SourceSystemConfigSetting(
     value_type="int",
     ge=1,
 )
+CRON_TASK_SESSION_CLEANUP_ENABLED_SETTING = SourceSystemConfigSetting(
+    key="cron_task_session_cleanup.enabled",
+    path=("cron_task_session_cleanup", "enabled"),
+    default_value=False,
+    value_type="bool",
+)
+CRON_TASK_SESSION_CLEANUP_RETENTION_DAYS_SETTING = (
+    SourceSystemConfigSetting(
+        key="cron_task_session_cleanup.retention_days",
+        path=("cron_task_session_cleanup", "retention_days"),
+        default_value=30,
+        value_type="int",
+        ge=1,
+    )
+)
+CRON_TASK_SESSION_CLEANUP_CRON_SETTING = SourceSystemConfigSetting(
+    key="cron_task_session_cleanup.cron",
+    path=("cron_task_session_cleanup", "cron"),
+    default_value="0 1 * * *",
+    value_type="str",
+)
 SYSTEM_PROMPT_INJECTIONS_PATH = ("system_prompt_injections",)
 SYSTEM_PROMPT_INJECTIONS_DEFAULT: list[str] = []
 
@@ -122,6 +143,9 @@ CURRENT_SOURCE_SYSTEM_CONFIG_SETTINGS: tuple[
     FILE_READ_TRUNCATION_MAX_BYTES_SETTING,
     CRON_UNREAD_AUTO_PAUSE_ENABLED_SETTING,
     CRON_UNREAD_AUTO_PAUSE_THRESHOLD_SETTING,
+    CRON_TASK_SESSION_CLEANUP_ENABLED_SETTING,
+    CRON_TASK_SESSION_CLEANUP_RETENTION_DAYS_SETTING,
+    CRON_TASK_SESSION_CLEANUP_CRON_SETTING,
 )
 
 _MISSING = object()
@@ -283,6 +307,12 @@ def normalize_registered_setting_values(
         if setting.value_type == "int":
             coerced = _coerce_registered_int_value(setting, value)
             _set_nested_value(normalized, setting.path, coerced)
+            continue
+        if setting.value_type == "str":
+            coerced = _coerce_registered_string_value(setting, value)
+            if setting is CRON_TASK_SESSION_CLEANUP_CRON_SETTING:
+                coerced = _normalize_daily_cron_value(setting, coerced)
+            _set_nested_value(normalized, setting.path, coerced)
     if validate_cross_ranges:
         _validate_explicit_tool_result_compact_ranges(raw_config, normalized)
     return normalized
@@ -431,6 +461,44 @@ def _coerce_registered_int_value(
     return value
 
 
+def _coerce_registered_string_value(
+    setting: SourceSystemConfigSetting,
+    value: Any,
+) -> str:
+    """将注册字符串配置收敛为去除首尾空白的字符串。"""
+    if not isinstance(value, str):
+        raise ValueError(f"{setting.key} must be a string, got {value!r}")
+    return value.strip()
+
+
+def _normalize_daily_cron_value(
+    setting: SourceSystemConfigSetting,
+    value: str,
+) -> str:
+    """仅允许每天一次的五段 cron，避免清理频率被误配。"""
+    parts = [part for part in value.split() if part]
+    if len(parts) != 5:
+        raise ValueError(
+            f"{setting.key} must be a daily 5-field cron expression",
+        )
+    minute, hour, day_of_month, month, day_of_week = parts
+    if day_of_month != "*" or month != "*" or day_of_week != "*":
+        raise ValueError(
+            f"{setting.key} must run daily in '<minute> <hour> * * *' form",
+        )
+    if not minute.isdigit() or not hour.isdigit():
+        raise ValueError(
+            f"{setting.key} must use numeric minute and hour fields",
+        )
+    minute_int = int(minute)
+    hour_int = int(hour)
+    if not 0 <= minute_int <= 59 or not 0 <= hour_int <= 23:
+        raise ValueError(
+            f"{setting.key} minute/hour are out of range",
+        )
+    return f"{minute_int} {hour_int} * * *"
+
+
 def _drop_immediate_truncation_sections_without_enabled(
     payload: dict[str, Any],
 ) -> None:
@@ -478,6 +546,9 @@ def _validate_explicit_tool_result_compact_ranges(
 
 __all__ = [
     "CHAT_TASK_PROGRESS_ENABLED_SWITCH",
+    "CRON_TASK_SESSION_CLEANUP_CRON_SETTING",
+    "CRON_TASK_SESSION_CLEANUP_ENABLED_SETTING",
+    "CRON_TASK_SESSION_CLEANUP_RETENTION_DAYS_SETTING",
     "CRON_UNREAD_AUTO_PAUSE_ENABLED_SETTING",
     "CRON_UNREAD_AUTO_PAUSE_THRESHOLD_SETTING",
     "CURRENT_SOURCE_SYSTEM_CONFIG_SETTINGS",

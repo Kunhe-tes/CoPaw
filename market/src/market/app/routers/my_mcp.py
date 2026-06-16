@@ -24,7 +24,10 @@ from ...runtime.mcp_masking import mask_env_value, restore_original_values
 from ...runtime.stateful_client import HttpStatefulClient, StdIOStatefulClient
 
 from ...marketplace.schemas import PublishMCPRequest as MarketPublishMCPRequest
-from ...marketplace.service import MCPNameConflictError
+from ...marketplace.service import (
+    MCPNameConflictError,
+    MCPVersionConflictError,
+)
 from ...marketplace.fs import load_index
 from ..my_mcp_helpers import (
     load_agent_config_for_request,
@@ -135,15 +138,10 @@ def _fill_creator_from_market(
 
 
 def _bump_patch(version: str) -> str:
-    """Increment patch version: '1.0.0' -> '1.0.1'."""
-    parts = version.split(".")
-    if len(parts) == 3:
-        try:
-            parts[2] = str(int(parts[2]) + 1)
-            return ".".join(parts)
-        except ValueError:
-            pass
-    return version + ".1"
+    """Increment patch version: '1.0.0' -> '1.0.1'（委托共享工具）."""
+    from ...utils.version import bump_patch
+
+    return bump_patch(version)
 
 
 def _mcp_client_not_found_detail(client_key: str) -> str:
@@ -196,6 +194,23 @@ class MyMCPDetail(MyMCPListItem):
     distributed_by: str = Field(default="", description="分发来源")
     creator_id: str = Field(default="", description="创建者 ID")
     creator_name: str = Field(default="", description="创建者名称")
+    # T7 R2: update_my_mcp 响应专用字段
+    version_changed: bool = Field(
+        default=False,
+        description="此次请求是否实际产生了版本号变更",
+    )
+    previous_version: str = Field(
+        default="",
+        description="变更前的版本号（仅 update_my_mcp 响应填充）",
+    )
+    bump_reason: Literal["explicit", "auto", "unchanged", ""] = Field(
+        default="",
+        description=(
+            "版本号变更原因："
+            "explicit=请求体显式指定 / auto=内容变化触发 patch+1 / "
+            "unchanged=内容未变保持原版本 / 空串=非 update 场景"
+        ),
+    )
 
 
 class MyMCPCreateRequest(BaseModel):
@@ -245,6 +260,10 @@ class MyMCPUpdateRequest(BaseModel):
     env: Optional[Dict[str, str]] = Field(None, description="环境变量")
     cwd: Optional[str] = Field(None, description="工作目录")
     lazy_load: Optional[bool] = Field(None, description=LAZY_LOAD_DESCRIPTION)
+    version: Optional[str] = Field(
+        None,
+        description="显式指定版本号（R2：传入则使用，不传则按内容变化决定是否 patch+1）",
+    )
 
 
 class MyMCPDraftTestRequest(BaseModel):
@@ -309,6 +328,10 @@ class PublishMCPResult(BaseModel):
     item_id: Optional[str] = Field(None, description="市场 item ID")
     success: bool = Field(..., description="是否成功")
     error: Optional[str] = Field(None, description="错误信息")
+    version_unchanged: bool = Field(
+        False,
+        description="内容未变化，市场版本未增加",
+    )
 
 
 class PublishMCPResponse(BaseModel):
@@ -326,6 +349,10 @@ class PublishSingleMCPResponse(BaseModel):
     client_key: str = Field(..., description=MCP_CLIENT_KEY_DESCRIPTION)
     item_id: str = Field(..., description="市场 item ID")
     success: bool = Field(..., description="是否成功")
+    version_unchanged: bool = Field(
+        False,
+        description="内容未变化，市场版本未增加",
+    )
 
 
 class MarketPublishContext(BaseModel):
@@ -558,6 +585,7 @@ async def update_my_mcp(
                 )
 
     merged_data = existing.model_dump(mode="json")
+    previous_version = merged_data.get("version") or "1.0.0"
 
     if "env" in update_data and update_data["env"] is not None:
         update_data["env"] = restore_original_values(
@@ -570,10 +598,31 @@ async def update_my_mcp(
             existing.headers or {},
         )
 
+    # R2 版本决策：先取出显式 version，再合并其他字段
+    explicit_version = update_data.pop("version", None)
+
+    # 计算"内容是否真有变化"——比较除 version/updated_at 外的字段
+    existing_dump = existing.model_dump(mode="json")
+    content_changed = False
+    for k, v in update_data.items():
+        if k in ("version", "updated_at"):
+            continue
+        if existing_dump.get(k) != v:
+            content_changed = True
+            break
+
     merged_data.update(update_data)
     merged_data["updated_at"] = datetime.now(timezone.utc).isoformat()
-    # 编辑内容时 bump patch 版本号
-    merged_data["version"] = _bump_patch(merged_data.get("version") or "1.0.0")
+
+    if explicit_version:
+        merged_data["version"] = explicit_version
+        bump_reason = "explicit"
+    elif content_changed:
+        merged_data["version"] = _bump_patch(previous_version)
+        bump_reason = "auto"
+    else:
+        merged_data["version"] = previous_version
+        bump_reason = "unchanged"
 
     updated_client = MCPClientConfig.model_validate(merged_data)
     agent_config.mcp.clients[client_key] = updated_client
@@ -588,6 +637,9 @@ async def update_my_mcp(
 
     detail = _mask_sensitive_values(updated_client)
     detail.client_key = client_key
+    detail.version_changed = merged_data["version"] != previous_version
+    detail.previous_version = previous_version
+    detail.bump_reason = bump_reason
     return detail
 
 
@@ -661,8 +713,8 @@ async def _publish_client_to_market(
     client: MCPClientConfig,
     overwrite: bool = False,
 ) -> PublishMCPResult:
-    """复用单个 MCP 的市场发布逻辑。"""
-    item = await marketplace.publish_mcp(
+    """复用单个 MCP 的市场发布逻辑（透传 source_user_* / operator_*）."""
+    item, version_unchanged = await marketplace.publish_mcp(
         publish_context.source_id,
         MarketPublishMCPRequest(
             client_key=client_key,
@@ -675,12 +727,19 @@ async def _publish_client_to_market(
             config=client.model_dump(mode="json"),
             overwrite=overwrite,
             version=client.version,
+            # MCP 路径：操作者 = 内容来源（同一人，spec §6.3）
+            source_user_id=publish_context.user_id,
+            source_user_name=publish_context.user_name,
+            source_user_version=client.version,
+            operator_id=publish_context.user_id,
+            operator_name=publish_context.user_name,
         ),
     )
     return PublishMCPResult(
         client_key=client_key,
         success=True,
         item_id=item.item_id,
+        version_unchanged=version_unchanged,
     )
 
 
@@ -735,10 +794,21 @@ async def publish_single_my_mcp_to_market(
                 "existing_version": exc.existing_version,
             },
         ) from exc
+    except MCPVersionConflictError as exc:
+        # F3 修复：MCP 版本快照撞车不再静默吞掉
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "MCP_VERSION_CONFLICT",
+                "message": str(exc),
+                "hint": "本次同步内容与已有版本撞车，请稍后重试或联系管理员",
+            },
+        ) from exc
     return PublishSingleMCPResponse(
         client_key=result.client_key,
         item_id=result.item_id or "",
         success=result.success,
+        version_unchanged=result.version_unchanged,
     )
 
 
@@ -797,6 +867,14 @@ async def publish_my_mcp_to_market(
                     client_key=client_key,
                     success=False,
                     error=str(exc),
+                ),
+            )
+        except MCPVersionConflictError as exc:
+            results.append(
+                PublishMCPResult(
+                    client_key=client_key,
+                    success=False,
+                    error=f"版本冲突：{exc}",
                 ),
             )
         except Exception as exc:  # pylint: disable=broad-except

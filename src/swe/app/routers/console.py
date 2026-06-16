@@ -26,7 +26,7 @@ from starlette.responses import StreamingResponse
 
 from agentscope_runtime.engine.schemas.agent_schemas import AgentRequest
 from ..agent_context import get_agent_for_request
-from ...config.context import resolve_scope_preferred_tenant_id
+from ...config.context import resolve_request_effective_tenant_id
 
 logger = logging.getLogger(__name__)
 
@@ -120,7 +120,7 @@ _PREVIEW_TYPE_BY_MIME: dict[str, PreviewType] = {
 
 def _request_runtime_tenant_id(request: Request) -> str | None:
     """优先返回请求已解析的 runtime scope，避免回退到逻辑 tenant。"""
-    return resolve_scope_preferred_tenant_id(
+    return resolve_request_effective_tenant_id(
         getattr(request.state, "tenant_id", None),
         getattr(request.state, "source_id", None),
         getattr(request.state, "scope_id", None),

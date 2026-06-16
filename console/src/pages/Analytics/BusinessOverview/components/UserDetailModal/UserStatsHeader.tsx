@@ -14,16 +14,21 @@ import { useTranslation } from "react-i18next";
 import {
   MCPToolUsage,
   ModelUsage,
+  SessionResourceFilter,
   SessionStats,
   SkillUsage,
   UserStats,
 } from "../../../../../api/modules/tracing";
 import styles from "./index.module.less";
 
+const COLLAPSED_USAGE_ITEM_THRESHOLD = 4;
+
 interface UserStatsHeaderProps {
   userStats: UserStats;
   sessionStats?: SessionStats | null;
   collapsed?: boolean;
+  activeResourceFilter?: SessionResourceFilter | null;
+  onResourceFilterChange?: (filter: SessionResourceFilter) => void;
   onToggleCollapsed?: () => void;
 }
 
@@ -31,6 +36,21 @@ interface UsageItem {
   name: string;
   count: number;
   error_count?: number;
+  filter: SessionResourceFilter;
+}
+
+function isSameResourceFilter(
+  current: SessionResourceFilter | null | undefined,
+  candidate: SessionResourceFilter,
+): boolean {
+  if (!current || current.type !== candidate.type || current.name !== candidate.name) {
+    return false;
+  }
+  return (
+    current.type !== "mcp_tool" ||
+    candidate.type !== "mcp_tool" ||
+    current.mcp_server === candidate.mcp_server
+  );
 }
 
 function getActiveUsageStats(
@@ -71,88 +91,114 @@ function UsageBlock({
   title,
   items,
   colorFn,
+  activeResourceFilter,
+  onResourceFilterChange,
 }: {
   title: string;
   items: UsageItem[];
   colorFn?: (item: UsageItem) => string;
+  activeResourceFilter?: SessionResourceFilter | null;
+  onResourceFilterChange?: (filter: SessionResourceFilter) => void;
 }) {
   const tagRowRef = useRef<HTMLDivElement | null>(null);
-  const [hasOverflow, setHasOverflow] = useState(false);
+  const [expanded, setExpanded] = useState(false);
+  const [heightOverflow, setHeightOverflow] = useState(false);
+
+  const orderedItems = useMemo(() => {
+    if (expanded) return items;
+
+    const selectedIndex = items.findIndex((item) =>
+      isSameResourceFilter(activeResourceFilter, item.filter),
+    );
+    if (selectedIndex <= 0) return items;
+
+    const selectedItem = items[selectedIndex];
+    return [
+      selectedItem,
+      ...items.slice(0, selectedIndex),
+      ...items.slice(selectedIndex + 1),
+    ];
+  }, [activeResourceFilter, expanded, items]);
+
+  const canExpand =
+    items.length > COLLAPSED_USAGE_ITEM_THRESHOLD || heightOverflow;
+
+  useEffect(() => {
+    setExpanded(false);
+  }, [items]);
 
   useEffect(() => {
     const node = tagRowRef.current;
     if (!node) return;
 
     const measureOverflow = () => {
-      setHasOverflow(node.scrollWidth > node.clientWidth + 1);
+      setHeightOverflow(node.scrollHeight > node.clientHeight + 1);
     };
 
     measureOverflow();
+    if (typeof ResizeObserver === "undefined") return;
     const resizeObserver = new ResizeObserver(measureOverflow);
     resizeObserver.observe(node);
     return () => resizeObserver.disconnect();
-  }, [items]);
+  }, [orderedItems, expanded]);
 
-  const tooltipTitle = (
-    <div className={styles.usageTooltipContent}>
-      <div className={styles.usageTooltipTitle}>{title}明细</div>
-      {items.length > 0 ? (
-        <div className={styles.usageTooltipList}>
-          {items.map((item) => (
-            <div className={styles.usageTooltipItem} key={item.name}>
-              <span className={styles.usageTooltipName}>{item.name}</span>
-              <span className={styles.usageTooltipCount}>
-                {item.count} calls
-                {item.error_count && item.error_count > 0
-                  ? ` / 失败 ${item.error_count}`
-                  : ""}
-              </span>
-            </div>
-          ))}
-        </div>
-      ) : (
-        <div className={styles.usageTooltipEmpty}>暂无数据</div>
-      )}
-    </div>
-  );
-
-  const content = (
+  return (
     <div className={styles.usageBlock}>
       <div className={styles.usageBlockHeader}>
         <span>{title}</span>
-        <strong>{formatNumber(items.length)}</strong>
-      </div>
-      <div className={styles.compactTagRow} ref={tagRowRef}>
-        {items.length > 0 ? (
-          items.map((item) => (
-            <Tag
-              key={item.name}
-              color={colorFn ? colorFn(item) : "default"}
-              className={styles.usageTag}
+        <div className={styles.usageBlockHeaderMeta}>
+          <strong>{formatNumber(items.length)}</strong>
+          {canExpand ? (
+            <button
+              type="button"
+              className={styles.usageExpandButton}
+              aria-label={`${expanded ? "收起" : "展开"}${title}标签`}
+              aria-expanded={expanded}
+              onClick={() => setExpanded((current) => !current)}
             >
-              {item.name} · {item.count}
-            </Tag>
-          ))
+              {expanded ? "收起" : "展开"}
+              {expanded ? <ChevronUp size={12} /> : <ChevronDown size={12} />}
+            </button>
+          ) : null}
+        </div>
+      </div>
+      <div
+        className={`${styles.compactTagRow} ${
+          canExpand && !expanded ? styles.compactTagRowCollapsed : ""
+        }`}
+        ref={tagRowRef}
+      >
+        {items.length > 0 ? (
+          orderedItems.map((item) => {
+            const selected = isSameResourceFilter(
+              activeResourceFilter,
+              item.filter,
+            );
+            return (
+              <button
+                type="button"
+                key={`${item.filter.type}-${item.name}`}
+                className={`${styles.usageTagButton} ${
+                  selected ? styles.usageTagButtonSelected : ""
+                }`}
+                aria-label={`${selected ? "取消" : "筛选"}${title}：${item.name}`}
+                aria-pressed={selected}
+                onClick={() => onResourceFilterChange?.(item.filter)}
+              >
+                <Tag
+                  color={colorFn ? colorFn(item) : "default"}
+                  className={styles.usageTag}
+                >
+                  {item.name} · {item.count}
+                </Tag>
+              </button>
+            );
+          })
         ) : (
           <span className={styles.emptyUsageText}>暂无记录</span>
         )}
       </div>
     </div>
-  );
-
-  if (!hasOverflow) {
-    return content;
-  }
-
-  return (
-    <Tooltip
-      title={tooltipTitle}
-      placement="bottomLeft"
-      overlayClassName={styles.usageTooltipOverlay}
-      mouseEnterDelay={0.2}
-    >
-      {content}
-    </Tooltip>
   );
 }
 
@@ -160,6 +206,8 @@ export default function UserStatsHeader({
   userStats,
   sessionStats,
   collapsed = false,
+  activeResourceFilter,
+  onResourceFilterChange,
   onToggleCollapsed,
 }: UserStatsHeaderProps) {
   const { t } = useTranslation();
@@ -171,6 +219,7 @@ export default function UserStatsHeader({
       activeUsageStats.model_usage.map((model) => ({
         name: model.model_name,
         count: model.count,
+        filter: { type: "model" as const, name: model.model_name },
       })),
     [activeUsageStats.model_usage],
   );
@@ -181,6 +230,11 @@ export default function UserStatsHeader({
         name: `${tool.tool_name} (${tool.mcp_server})`,
         count: tool.count,
         error_count: tool.error_count,
+        filter: {
+          type: "mcp_tool" as const,
+          name: tool.tool_name,
+          mcp_server: tool.mcp_server,
+        },
       })),
     [activeUsageStats.mcp_tools_used],
   );
@@ -190,6 +244,7 @@ export default function UserStatsHeader({
       activeUsageStats.skills_used.map((skill) => ({
         name: skill.skill_name,
         count: skill.count,
+        filter: { type: "skill" as const, name: skill.skill_name },
       })),
     [activeUsageStats.skills_used],
   );
@@ -246,8 +301,20 @@ export default function UserStatsHeader({
           </div>
         </div>
         <div className={styles.statsHeaderActions}>
-          <Tag color={isSessionSelected ? "processing" : "default"}>
-            {isSessionSelected ? "已选中会话" : "未筛选会话"}
+          <Tag
+            color={
+              activeResourceFilter
+                ? "processing"
+                : isSessionSelected
+                  ? "processing"
+                  : "default"
+            }
+          >
+            {activeResourceFilter
+              ? "已筛选会话"
+              : isSessionSelected
+                ? "已选中会话"
+                : "未筛选会话"}
           </Tag>
           <Tooltip title={collapsed ? "展开洞察" : "收起洞察"}>
             <button
@@ -281,18 +348,26 @@ export default function UserStatsHeader({
           </div>
 
           <div className={styles.usageSummary}>
-            <UsageBlock title="模型" items={modelItems} />
+            <UsageBlock
+              title="模型"
+              items={modelItems}
+              activeResourceFilter={activeResourceFilter}
+              onResourceFilterChange={onResourceFilterChange}
+            />
             <UsageBlock
               title="MCP 工具"
               items={mcpToolItems}
               colorFn={(item) =>
                 item.error_count && item.error_count > 0 ? "error" : "default"
               }
+              activeResourceFilter={activeResourceFilter}
+              onResourceFilterChange={onResourceFilterChange}
             />
             <UsageBlock
               title="技能"
               items={skillItems}
-              colorFn={() => "blue"}
+              activeResourceFilter={activeResourceFilter}
+              onResourceFilterChange={onResourceFilterChange}
             />
           </div>
         </>
