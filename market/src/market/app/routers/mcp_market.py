@@ -250,6 +250,98 @@ async def publish_mcp(
     )
 
 
+async def _parse_upload_json(
+    file: Optional[UploadFile],
+    form: UploadMCPFormData,
+) -> tuple[Optional[dict], Optional[str], Optional[str]]:
+    """解析上传的 JSON 数据（file 与 raw_json 二选一）。
+
+    Returns:
+        (file_data, source_filename, error_message) — 成功时 error_message 为 None。
+    """
+    has_file = file is not None and file.filename
+    has_raw_json = bool(form.raw_json and form.raw_json.strip())
+    if not has_file and not has_raw_json:
+        return None, None, "Either file or raw_json is required"
+
+    if has_file:
+        assert file is not None  # 给类型检查器看的，has_file 已经保证
+        if not file.filename.endswith(".json"):
+            return None, None, "Only .json files are accepted"
+        try:
+            content = await file.read()
+            file_data = json.loads(content.decode("utf-8"))
+        except (json.JSONDecodeError, UnicodeDecodeError) as e:
+            return None, None, f"Invalid JSON: {e}"
+        return file_data, file.filename, None
+
+    # 粘贴 JSON 路径
+    try:
+        file_data = json.loads(form.raw_json or "")
+    except json.JSONDecodeError as e:
+        return None, None, f"Invalid JSON: {e}"
+    return file_data, "pasted.json", None
+
+
+def _build_publish_request_from_upload(
+    form: UploadMCPFormData,
+    client_key: str,
+    inferred_name: str,
+    config: dict,
+    x_user_id: Optional[str],
+    x_user_name: Optional[str],
+) -> PublishMCPRequest:
+    """从上传数据构建 PublishMCPRequest。"""
+    final_name = form.name or inferred_name
+    uploaded_version = config.get("version", "")
+    return PublishMCPRequest(
+        client_key=client_key,
+        name=final_name,
+        chinese_name=form.chinese_name or "",
+        description=form.description or config.get("description", ""),
+        guidance=form.guidance or "",
+        creator_id=x_user_id or "unknown",
+        creator_name=unquote(x_user_name or ""),
+        category_id=None,
+        bbk_ids=json.loads(form.bbk_ids) if form.bbk_ids else [],
+        config=config,
+        version=uploaded_version,
+        overwrite=True,  # 管理员手动上传即意图覆盖同名条目
+        # admin zip 上传：source_user 留空，version=v0.0.0（spec R6）
+        source_user_id="",
+        source_user_name="",
+        source_user_version="v0.0.0",
+        operator_id=x_user_id or "",
+        operator_name=unquote(x_user_name or ""),
+    )
+
+
+async def _do_upload_publish(
+    svc,
+    source_id: str,
+    req: PublishMCPRequest,
+) -> UploadMCPResponse:
+    """执行市场发布并处理异常。"""
+    try:
+        _, version_unchanged = await svc.publish_mcp(source_id, req)
+        return UploadMCPResponse(
+            success=True,
+            version_unchanged=version_unchanged,
+        )
+    except MCPNameConflictError as exc:
+        return UploadMCPResponse(
+            success=False,
+            error=str(exc),
+        )
+    except MCPVersionConflictError as exc:
+        return UploadMCPResponse(
+            success=False,
+            error=f"版本冲突：{exc}",
+        )
+    except Exception as e:
+        return UploadMCPResponse(success=False, error=str(e))
+
+
 @router.post(
     "/market/mcp/upload",
     response_model=UploadMCPResponse,
@@ -272,36 +364,12 @@ async def upload_mcp(
     source_id = require_source_id(x_source_id)
     _require_manager(x_manager)
 
-    # 二选一校验：file 与 raw_json 必须有且仅有一个有效值
-    has_file = file is not None and file.filename
-    has_raw_json = bool(form.raw_json and form.raw_json.strip())
-    if not has_file and not has_raw_json:
-        return UploadMCPResponse(
-            success=False,
-            error="Either file or raw_json is required",
-        )
+    file_data, source_filename, error = await _parse_upload_json(file, form)
+    if error is not None:
+        return UploadMCPResponse(success=False, error=error)
 
-    if has_file:
-        # 文件路径：保留原有 .json 扩展名校验
-        assert file is not None  # 给类型检查器看的，has_file 已经保证
-        if not file.filename.endswith(".json"):
-            return UploadMCPResponse(
-                success=False,
-                error="Only .json files are accepted",
-            )
-        try:
-            content = await file.read()
-            file_data = json.loads(content.decode("utf-8"))
-        except (json.JSONDecodeError, UnicodeDecodeError) as e:
-            return UploadMCPResponse(success=False, error=f"Invalid JSON: {e}")
-        source_filename = file.filename
-    else:
-        # 粘贴 JSON 路径：直接解析字符串，filename 用占位以便复用下游 inferred_name 推断
-        try:
-            file_data = json.loads(form.raw_json or "")
-        except json.JSONDecodeError as e:
-            return UploadMCPResponse(success=False, error=f"Invalid JSON: {e}")
-        source_filename = "pasted.json"
+    # _parse_upload_json 返回 None 仅在 error 非 None 时，此处已排除 error
+    assert file_data is not None and source_filename is not None
 
     try:
         client_key, inferred_name, config = _extract_upload_payload(
@@ -311,51 +379,17 @@ async def upload_mcp(
     except ValueError as e:
         return UploadMCPResponse(success=False, error=str(e))
 
-    final_name = form.name or inferred_name
-
-    # 构建发布请求
-    # 从上传的 config 中提取 version（如有），确保手动上传也能携带版本号
-    uploaded_version = config.get("version", "")
-    req = PublishMCPRequest(
-        client_key=client_key,
-        name=final_name,
-        chinese_name=form.chinese_name or "",
-        description=form.description or config.get("description", ""),
-        guidance=form.guidance or "",
-        creator_id=x_user_id or "unknown",
-        creator_name=unquote(x_user_name or ""),
-        category_id=None,
-        bbk_ids=json.loads(form.bbk_ids) if form.bbk_ids else [],
-        config=config,
-        version=uploaded_version,
-        overwrite=True,  # 管理员手动上传即意图覆盖同名条目
-        # admin zip 上传：source_user 留空，version=v0.0.0（spec R6）
-        source_user_id="",
-        source_user_name="",
-        source_user_version="v0.0.0",
-        operator_id=x_user_id or "",
-        operator_name=unquote(x_user_name or ""),
+    req = _build_publish_request_from_upload(
+        form,
+        client_key,
+        inferred_name,
+        config,
+        x_user_id,
+        x_user_name,
     )
 
     svc = request.app.state.marketplace
-    try:
-        _, version_unchanged = await svc.publish_mcp(source_id, req)
-        return UploadMCPResponse(
-            success=True,
-            version_unchanged=version_unchanged,
-        )
-    except MCPNameConflictError as exc:
-        return UploadMCPResponse(
-            success=False,
-            error=str(exc),
-        )
-    except MCPVersionConflictError as exc:
-        return UploadMCPResponse(
-            success=False,
-            error=f"版本冲突：{exc}",
-        )
-    except Exception as e:
-        return UploadMCPResponse(success=False, error=str(e))
+    return await _do_upload_publish(svc, source_id, req)
 
 
 @router.post(
