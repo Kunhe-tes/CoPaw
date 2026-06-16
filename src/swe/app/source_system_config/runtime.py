@@ -10,6 +10,9 @@ from typing import Any, Generator
 from swe.config.config import ToolResultCompactConfig
 
 from .registry import (
+    CRON_TASK_SESSION_CLEANUP_CRON_SETTING,
+    CRON_TASK_SESSION_CLEANUP_ENABLED_SETTING,
+    CRON_TASK_SESSION_CLEANUP_RETENTION_DAYS_SETTING,
     CRON_UNREAD_AUTO_PAUSE_ENABLED_SETTING,
     CRON_UNREAD_AUTO_PAUSE_THRESHOLD_SETTING,
     FILE_READ_TRUNCATION_ENABLED_SETTING,
@@ -42,6 +45,15 @@ class CronUnreadAutoPauseConfig:
 
     enabled: bool
     threshold: int
+
+
+@dataclass(frozen=True)
+class CronTaskSessionCleanupConfig:
+    """定时任务会话历史清理的运行时配置。"""
+
+    enabled: bool
+    retention_days: int
+    cron: str
 
 
 @contextmanager
@@ -156,6 +168,42 @@ def resolve_cron_unread_auto_pause_config(
             normalized_section.get(
                 "threshold",
                 CRON_UNREAD_AUTO_PAUSE_THRESHOLD_SETTING.default_value,
+            ),
+        ),
+    )
+
+
+def resolve_cron_task_session_cleanup_config(
+    source_config: Any | None = None,
+) -> CronTaskSessionCleanupConfig:
+    """解析当前 source 的定时任务会话历史清理配置。"""
+    raw_config = _extract_config_payload(source_config)
+    merged = merge_source_system_config_with_defaults(raw_config)
+    raw_section = merged.get("cron_task_session_cleanup")
+    section = raw_section if isinstance(raw_section, dict) else {}
+    normalized = normalize_registered_setting_values(
+        {"cron_task_session_cleanup": section},
+    )
+    normalized_section = normalized.get("cron_task_session_cleanup")
+    if not isinstance(normalized_section, dict):
+        normalized_section = {}
+    return CronTaskSessionCleanupConfig(
+        enabled=bool(
+            normalized_section.get(
+                "enabled",
+                CRON_TASK_SESSION_CLEANUP_ENABLED_SETTING.default_value,
+            ),
+        ),
+        retention_days=int(
+            normalized_section.get(
+                "retention_days",
+                CRON_TASK_SESSION_CLEANUP_RETENTION_DAYS_SETTING.default_value,
+            ),
+        ),
+        cron=str(
+            normalized_section.get(
+                "cron",
+                CRON_TASK_SESSION_CLEANUP_CRON_SETTING.default_value,
             ),
         ),
     )

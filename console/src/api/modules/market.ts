@@ -24,6 +24,7 @@ export interface MarketSkill {
   updated_at: string | null;
   call_count: number;
   user_count: number;
+  version_unchanged?: boolean;
 }
 
 export interface MarketSkillDetail extends MarketSkill {
@@ -128,6 +129,18 @@ export const marketApi = {
   listCategories: async (sourceId: string): Promise<Category[]> => {
     const opts = mergeHeaders({ "X-Source-Id": sourceId });
     return request<Category[]>("/market/categories", opts);
+  },
+
+  createCategory: async (sourceId: string, name: string): Promise<Category> => {
+    const opts: RequestInit = {
+      method: "POST",
+      ...(mergeHeaders({
+        "Content-Type": "application/json",
+        "X-Source-Id": sourceId,
+      })),
+      body: JSON.stringify({ name }),
+    };
+    return request<Category>("/market/categories", opts);
   },
 
   listMarketSkills: async (

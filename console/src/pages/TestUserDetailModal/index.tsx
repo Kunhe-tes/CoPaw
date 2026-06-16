@@ -4,6 +4,7 @@ import { User } from "lucide-react";
 import type { Message } from "../../api/types";
 import type {
   SessionListItem,
+  SessionResourceFilter,
   SessionStats,
   UserStats,
 } from "../../api/modules/tracing";
@@ -238,6 +239,8 @@ const mockMessagesBySession: Record<string, Message[]> = {
 export default function TestUserDetailModalPage() {
   const [open, setOpen] = useState(true);
   const [statsCollapsed, setStatsCollapsed] = useState(false);
+  const [resourceFilter, setResourceFilter] =
+    useState<SessionResourceFilter | null>(null);
   const [sessionsCollapsed, setSessionsCollapsed] = useState(false);
   const [selectedSessionId, setSelectedSessionId] = useState(
     mockSessions[0].session_id,
@@ -303,8 +306,16 @@ export default function TestUserDetailModalPage() {
           <div className={modalStyles.topSection}>
             <UserStatsHeader
               userStats={mockUserStats}
-              sessionStats={selectedSessionStats}
+              sessionStats={resourceFilter ? null : selectedSessionStats}
               collapsed={statsCollapsed}
+              activeResourceFilter={resourceFilter}
+              onResourceFilterChange={(nextFilter) =>
+                setResourceFilter((currentFilter) =>
+                  JSON.stringify(currentFilter) === JSON.stringify(nextFilter)
+                    ? null
+                    : nextFilter,
+                )
+              }
               onToggleCollapsed={() => setStatsCollapsed((value) => !value)}
             />
           </div>

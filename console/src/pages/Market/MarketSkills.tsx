@@ -584,10 +584,12 @@ export function MarketSkills({ sourceId, isManager }: MarketSkillsProps) {
             {mcpDetailMode === "detail" && selectedMCP ? (
               <MCPDetailDrawer
                 mcp={selectedMCP}
+                sourceId={sourceId}
                 onDistribute={isManager ? () => openMCPDistributeModal(selectedMCP) : undefined}
                 onRecall={isManager ? () => openMCPRecallModal(selectedMCP) : undefined}
                 onEdit={() => void openMCPEditModal(selectedMCP)}
                 onDelete={isManager ? () => confirmDeleteMCP(selectedMCP) : undefined}
+                onRefresh={refreshMCP}
                 canEdit={isManager}
                 isManager={isManager}
               />
@@ -634,6 +636,7 @@ export function MarketSkills({ sourceId, isManager }: MarketSkillsProps) {
         sourceId={sourceId}
         onClose={() => setUploadModalOpen(false)}
         onSuccess={refreshSkillsAndDetail}
+        onCategoryAdded={refreshCategories}
       />
 
       {/* 统一分发弹窗 */}

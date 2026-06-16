@@ -22,6 +22,8 @@ from .version_models import (
     VersionSwitchResult,
     VersionDeleteResult,
 )
+from ..utils.skill_md import extract_version as _extract_version_md
+from ..utils.version import bump_patch as _shared_bump_patch
 
 logger = logging.getLogger(__name__)
 
@@ -64,6 +66,9 @@ class SkillVersionService:
         creator_name: str = "",
         current_market_version: Optional[str] = None,
         created_at: Optional[str] = None,
+        source_user_id: str = "",
+        source_user_name: str = "",
+        source_user_version: str = "",
     ) -> SkillVersion:
         """创建新版本快照.
 
@@ -100,6 +105,7 @@ class SkillVersionService:
 
         # 获取版本历史中的最新版本（用于递增和 diff 计算）
         last_version_from_history = ""
+        last_version_signature = ""
         last_version_dir: Optional[Path] = None
         if manifest.versions:
             # 按创建时间排序，获取最新版本
@@ -109,17 +115,23 @@ class SkillVersionService:
                 reverse=True,
             )
             last_version_from_history = sorted_versions[0].version_id
+            last_version_signature = sorted_versions[0].signature
             last_version_dir = self._get_version_dir(
                 source_id,
                 item_id,
                 last_version_from_history,
             )
 
-        # 提取版本号
-        version_id = self._extract_version_from_skill(
-            skill_dir,
+        # 先计算新内容签名（市场版本号生成依赖签名比对）
+        new_signature = self._calculate_signature(skill_dir)
+
+        # R3: 市场端版本号独立于 SKILL.md，由签名 + 历史决定
+        version_id = self._derive_market_version_id(
+            new_signature=new_signature,
             current_market_version=current_market_version,
             last_version_from_history=last_version_from_history,
+            last_version_signature=last_version_signature,
+            existing_ids=existing_ids,
         )
 
         # 确保版本号唯一，处理冲突情况
@@ -129,31 +141,29 @@ class SkillVersionService:
                 (v for v in manifest.versions if v.version_id == version_id),
                 None,
             )
-            # 计算新内容的签名
-            new_signature = self._calculate_signature(skill_dir)
             if (
                 existing_version_info
                 and existing_version_info.signature == new_signature
             ):
-                # 同版本同内容 → 跳过，不创建新快照
+                # R7: 同版本同内容 → 完全 no-op
+                # 不创建快照、不修改 is_current、不更新 manifest
                 logger.info(
-                    "Version %s already exists with same content, skipping snapshot creation",
+                    "Version %s already exists with same content, skipping snapshot creation (R7 no-op)",
                     version_id,
                 )
-                # 更新 is_current 标记
-                for v in manifest.versions:
-                    v.is_current = v.version_id == version_id
-                self._save_versions_manifest(source_id, item_id, manifest)
                 return existing_version_info
             else:
-                # 同版本不同内容 → 报错，要求用户指定新版本
+                # 同版本不同内容 → 报错，要求调用方处理
+                # 注意：F2 修订后，此分支只在历史 version_id 与 _bump_patch
+                # 后的结果发生罕见碰撞时触发；publish_skill 上层会捕获 ValueError
+                # 转 409 让前端可见。
                 raise ValueError(
                     f"Version {version_id} already exists with different content. "
-                    f"Please specify a new version in SKILL.md or allow auto-bump.",
+                    f"Please specify a new version or allow auto-bump.",
                 )
 
-        # 计算签名
-        signature = self._calculate_signature(skill_dir)
+        # 复用上面已计算的签名
+        signature = new_signature
 
         # 复制文件到版本目录
         version_dir = self._get_version_dir(source_id, item_id, version_id)
@@ -190,6 +200,9 @@ class SkillVersionService:
             signature=signature,
             is_current=True,
             is_initial=is_initial,
+            source_user_id=source_user_id,
+            source_user_name=source_user_name,
+            source_user_version=source_user_version,
         )
 
         # 更新版本清单：将所有其他版本的 is_current 设为 False
@@ -574,19 +587,12 @@ class SkillVersionService:
                 message="Cannot delete current version",
             )
 
-        # 如果删除的是初始版本，需要重新设置新的初始版本（如果有其他版本）
-        if target_version.is_initial and len(manifest.versions) > 1:
-            # 找到最早的剩余版本作为新的初始版本
-            remaining_versions = [
-                v for v in manifest.versions if v.version_id != version_id
-            ]
-            if remaining_versions:
-                # 按创建时间排序，最早的作为初始版本
-                sorted_remaining = sorted(
-                    remaining_versions,
-                    key=lambda v: v.created_at,
-                )
-                sorted_remaining[0].is_initial = True
+        # 禁止删除初始版本（与 MCP 行为对称，避免破坏版本血脉）
+        if target_version.is_initial:
+            return VersionDeleteResult(
+                success=False,
+                message="Cannot delete initial version",
+            )
 
         # 删除版本目录
         version_dir = self._get_version_dir(source_id, item_id, version_id)
@@ -660,31 +666,52 @@ class SkillVersionService:
         path.parent.mkdir(parents=True, exist_ok=True)
         _atomic_write_json(path, manifest.model_dump())
 
+    def _derive_market_version_id(
+        self,
+        new_signature: str,
+        current_market_version: Optional[str],
+        last_version_from_history: str,
+        last_version_signature: str,
+        existing_ids: set[str],
+    ) -> str:
+        """决定本次快照的市场端 version_id（R3 隔离 + R2 自动递增）.
+
+        优先级（不再读取 SKILL.md 的 version 字段，市场版本号完全独立于用户工作区）：
+
+        1. 没有历史 → 用 current_market_version 或 1.0.0 作为首版
+        2. 有历史 + 内容签名等于历史最新版 → 复用历史 version_id
+           （R7 的 no-op 由调用方继续处理）
+        3. 有历史 + 内容签名不同 → 在历史最新版上 _bump_version 直到不撞 existing_ids
+        """
+        # 1. 无历史 → 首版
+        if not last_version_from_history:
+            return current_market_version or "1.0.0"
+
+        # 2. 内容未变 → 复用最近一次的 version_id（让上层走 R7 no-op）
+        if last_version_signature and new_signature == last_version_signature:
+            return last_version_from_history
+
+        # 3. 内容变了 → 自动递增，并避开历史已有的 version_id
+        candidate = self._bump_version(last_version_from_history)
+        # 极小概率撞车（人工 switch_version 后回到旧版再编辑）：继续 bump
+        # 上限 100 次，避免极端情况下死循环
+        for _ in range(100):
+            if candidate not in existing_ids:
+                return candidate
+            candidate = self._bump_version(candidate)
+        return candidate
+
     def _extract_version_from_skill(
         self,
         skill_dir: Path,
         current_market_version: Optional[str] = None,
         last_version_from_history: Optional[str] = None,
     ) -> str:
-        """从 SKILL.md 提取版本号.
+        """[Deprecated] 旧版本号生成接口，保留作为静态工具.
 
-        版本号生成策略（按优先级）：
-        1. SKILL.md 有 version 字段 → 直接使用（用户明确指定）
-        2. current_market_version 存在 → 使用它（保持市场版本一致）
-        3. 版本历史存在 → 接着最后版本递增
-        4. 新技能 → 默认 1.0.0
-
-        注意：调用方应确保 current_market_version 已正确设置（考虑 SKILL.md 版本）
-
-        Args:
-            skill_dir: 技能目录
-            current_market_version: 市场索引中的当前版本号（已考虑 SKILL.md）
-            last_version_from_history: 版本历史中的最新版本号
-
-        Returns:
-            版本号字符串
+        已不在 create_version_snapshot 主流程中使用——由 _derive_market_version_id
+        取代。仅保留供潜在外部调用方读取 SKILL.md 中的版本号字符串。
         """
-        # 1. 从 SKILL.md 提取版本号（最高优先级）
         skill_md_path = skill_dir / "SKILL.md"
         if skill_md_path.exists():
             version = self._extract_version_from_frontmatter(
@@ -692,79 +719,29 @@ class SkillVersionService:
             )
             if version:
                 return version
-
-        # 2. 使用市场索引中的当前版本号（与标题版本对齐）
         if current_market_version:
             return current_market_version
-
-        # 3. 版本历史存在，接着最后版本递增
         if last_version_from_history:
             return self._bump_version(last_version_from_history)
-
-        # 4. 新技能，默认使用 1.0.0
         return "1.0.0"
 
     def _bump_version(self, version: str) -> str:
-        """递增版本号的 patch 部分.
-
-        Args:
-            version: 版本号字符串，如 "1.0.8"
-
-        Returns:
-            递增后的版本号，如 "1.0.9"
-        """
-        parts = version.split(".")
-        if len(parts) == 3:
-            try:
-                parts[2] = str(int(parts[2]) + 1)
-                return ".".join(parts)
-            except ValueError:
-                pass
-        elif len(parts) == 2:
-            try:
-                parts[1] = str(int(parts[1]) + 1)
-                return f"{parts[0]}.{parts[1]}.0"
-            except ValueError:
-                pass
-        # 无法解析，添加 .1
-        return f"{version}.1"
+        """递增版本号的 patch 部分（委托共享工具）."""
+        return _shared_bump_patch(version)
 
     def _extract_version_from_frontmatter(
         self,
         md_content: str,
     ) -> str:
-        """从 SKILL.md frontmatter 中提取 version."""
-        return self._extract_version_from_frontmatter_static(md_content)
+        """从 SKILL.md frontmatter 中提取 version（委托共享工具）."""
+        return _extract_version_md(md_content)
 
     @staticmethod
     def _extract_version_from_frontmatter_static(
         md_content: str,
     ) -> str:
         """从 SKILL.md frontmatter 中提取 version（静态方法，供外部调用）."""
-        if not md_content.startswith("---"):
-            return ""
-        try:
-            end_idx = md_content.index("---", 3)
-            fm_text = md_content[3:end_idx].strip()
-        except ValueError:
-            return ""
-
-        for line in fm_text.split("\n"):
-            if ":" in line:
-                key, val = line.split(":", 1)
-                key = key.strip().lower()
-                val = val.strip()
-                if key == "version" and val:
-                    # 移除引号（双引号或单引号）
-                    if val.startswith('"') and val.endswith('"'):
-                        val = val[1:-1]
-                    elif val.startswith("'") and val.endswith("'"):
-                        val = val[1:-1]
-                    # 移除 v 前缀（如 v1.0.0）
-                    if val.lower().startswith("v"):
-                        val = val[1:]
-                    return val
-        return ""
+        return _extract_version_md(md_content)
 
     def _calculate_signature(
         self,

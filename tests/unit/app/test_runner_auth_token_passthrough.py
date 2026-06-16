@@ -40,9 +40,11 @@ async def test_query_handler_injects_auth_headers_into_mcp_headers_and_context(
         _mcp,
         passthrough_headers=None,
         session_id=None,
+        trace_id=None,
     ):
         captured["passthrough_headers"] = passthrough_headers
         captured["session_id"] = session_id
+        captured["trace_id"] = trace_id
         return []
 
     class FakeAgent:
@@ -93,6 +95,7 @@ async def test_query_handler_injects_auth_headers_into_mcp_headers_and_context(
         session_id="session-1",
         user_id="user-1",
         channel="console",
+        trace_id="trace-1",
         auth_token="token-123",
         cookie="foo=bar; com.cmb.dw.rtl.sso.token=auth-123",
     )
@@ -107,6 +110,7 @@ async def test_query_handler_injects_auth_headers_into_mcp_headers_and_context(
         "cookie": "foo=bar; com.cmb.dw.rtl.sso.token=auth-123",
     }
     assert captured["session_id"] == "session-1"
+    assert captured["trace_id"] == "trace-1"
     assert captured["request_context"]["auth_token"] == "token-123"
 
 
@@ -126,9 +130,11 @@ async def test_query_handler_keeps_existing_passthrough_headers(monkeypatch):
         _mcp,
         passthrough_headers=None,
         session_id=None,
+        trace_id=None,
     ):
         captured["passthrough_headers"] = passthrough_headers
         captured["session_id"] = session_id
+        captured["trace_id"] = trace_id
         return []
 
     class FakeAgent:
@@ -186,6 +192,7 @@ async def test_query_handler_keeps_existing_passthrough_headers(monkeypatch):
         session_id="session-1",
         user_id="user-1",
         channel="console",
+        trace_id="trace-1",
         auth_token="token-123",
         cookie="foo=bar; com.cmb.dw.rtl.sso.token=auth-123",
     )
@@ -201,4 +208,5 @@ async def test_query_handler_keeps_existing_passthrough_headers(monkeypatch):
         "cookie": "foo=bar; com.cmb.dw.rtl.sso.token=auth-123",
     }
     assert captured["session_id"] == "session-1"
+    assert captured["trace_id"] == "trace-1"
     assert captured["request_context"]["auth_token"] == "token-123"

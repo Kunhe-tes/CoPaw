@@ -84,14 +84,19 @@ class ProviderManager:
         # any necessary state (e.g., cached models).
         self.tenant_id = tenant_id
         self.builtin_providers: Dict[str, Provider] = {}
+        self._builtin_provider_defaults: Dict[str, Provider] = {}
         self.custom_providers: Dict[str, Provider] = {}
         self.active_model: ModelSlotConfig | None = None
-        self._file_mtimes: dict[str, float] = {}
+        self._file_freshness_tokens: dict[str, tuple[int, int]] = {}
         self.root_path = self._get_tenant_root_path(tenant_id)
         self.builtin_path = self.root_path / "builtin"
         self.custom_path = self.root_path / "custom"
         self._prepare_disk_storage()
         self._init_builtins()
+        self._builtin_provider_defaults = {
+            provider_id: provider.model_copy(deep=True)
+            for provider_id, provider in self.builtin_providers.items()
+        }
         try:
             self._migrate_legacy_providers()
         except Exception as e:
@@ -494,24 +499,28 @@ class ProviderManager:
 
     def _record_mtimes(self):
         """Snapshot modification times of all provider config files."""
-        mtimes: dict[str, float] = {}
+        mtimes: dict[str, tuple[int, int]] = {}
         for provider_id in self.builtin_providers:
             path = self.builtin_path / f"{provider_id}.json"
             if path.exists():
-                mtimes[str(path)] = path.stat().st_mtime
+                mtimes[str(path)] = self._file_token(path)
         for path in self.custom_path.glob("*.json"):
-            mtimes[str(path)] = path.stat().st_mtime
+            mtimes[str(path)] = self._file_token(path)
         active_path = self.root_path / "active_model.json"
         if active_path.exists():
-            mtimes[str(active_path)] = active_path.stat().st_mtime
-        self._file_mtimes = mtimes
+            mtimes[str(active_path)] = self._file_token(active_path)
+        self._file_freshness_tokens = mtimes
+
+    def _file_token(self, path: Path) -> tuple[int, int]:
+        stat = path.stat()
+        return stat.st_mtime_ns, stat.st_size
 
     def _update_mtime(self, path: Path):
         """Update cached mtime for a single file after writing."""
         if path.exists():
-            self._file_mtimes[str(path)] = path.stat().st_mtime
+            self._file_freshness_tokens[str(path)] = self._file_token(path)
         else:
-            self._file_mtimes.pop(str(path), None)
+            self._file_freshness_tokens.pop(str(path), None)
 
     def _refresh_if_stale(self):
         """Reload providers whose files changed on disk since last snapshot."""
@@ -561,10 +570,10 @@ class ProviderManager:
             path_str = str(path)
             current.add(path_str)
             try:
-                mtime = path.stat().st_mtime
-                if path_str not in self._file_mtimes:
+                token = self._file_token(path)
+                if path_str not in self._file_freshness_tokens:
                     new.append(path)
-                elif self._file_mtimes[path_str] != mtime:
+                elif self._file_freshness_tokens[path_str] != token:
                     changed.append(path)
             except OSError:
                 pass
@@ -576,7 +585,7 @@ class ProviderManager:
         """Detect custom provider files that were removed."""
         removed: list[str] = []
         custom_prefix = str(self.custom_path)
-        for path_str in list(self._file_mtimes):
+        for path_str in list(self._file_freshness_tokens):
             if (
                 path_str.startswith(custom_prefix)
                 and path_str not in current_paths
@@ -593,8 +602,10 @@ class ProviderManager:
         """Check if a file has changed since last snapshot."""
         try:
             if path.exists():
-                mtime = path.stat().st_mtime
-                return self._file_mtimes.get(str(path)) != mtime
+                return self._file_freshness_tokens.get(
+                    str(path),
+                ) != self._file_token(path)
+            return str(path) in self._file_freshness_tokens
         except OSError:
             pass
         return False
@@ -610,6 +621,17 @@ class ProviderManager:
                 builtin.api_key = provider.api_key
                 builtin.extra_models = provider.extra_models
                 builtin.generate_kwargs.update(provider.generate_kwargs)
+            else:
+                self._reset_builtin_provider(provider_id)
+
+    def _reset_builtin_provider(self, provider_id: str) -> None:
+        default_provider = self._builtin_provider_defaults.get(provider_id)
+        if default_provider is None:
+            self.builtin_providers.pop(provider_id, None)
+            return
+        self.builtin_providers[provider_id] = default_provider.model_copy(
+            deep=True,
+        )
 
     def _apply_custom_refresh(
         self,
@@ -622,6 +644,8 @@ class ProviderManager:
             provider = self.load_provider(path.stem, is_builtin=False)
             if provider:
                 self.custom_providers[provider.id] = provider
+            else:
+                self.custom_providers.pop(path.stem, None)
 
         for path_str in removed:
             provider_id = Path(path_str).stem
@@ -629,9 +653,7 @@ class ProviderManager:
 
     def _apply_active_model_refresh(self) -> None:
         """Apply changes for active model."""
-        active_model = self.load_active_model()
-        if active_model:
-            self.active_model = active_model
+        self.active_model = self.load_active_model()
 
     async def list_provider_info(self) -> List[ProviderInfo]:
         self._refresh_if_stale()
@@ -659,6 +681,7 @@ class ProviderManager:
 
     def get_active_model(self) -> ModelSlotConfig | None:
         # Return the currently active provider/model configuration.
+        self._refresh_if_stale()
         return self.active_model
 
     def update_provider(self, provider_id: str, config: Dict) -> bool:
@@ -741,7 +764,7 @@ class ProviderManager:
             provider_path = self.custom_path / f"{provider_id}.json"
             if provider_path.exists():
                 os.remove(provider_path)
-            self._file_mtimes.pop(str(provider_path), None)
+            self._file_freshness_tokens.pop(str(provider_path), None)
             return True
         return False
 

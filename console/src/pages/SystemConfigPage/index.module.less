@@ -89,6 +89,22 @@
   border-top: none;
 }
 
+.scheduledTaskSection {
+  display: grid;
+  gap: 12px;
+  padding: 18px 0;
+  border-top: 1px solid rgba(5, 5, 5, 0.06);
+}
+
+.scheduledTaskSection:first-child {
+  padding-top: 0;
+  border-top: none;
+}
+
+.scheduledTaskSection:last-child {
+  padding-bottom: 0;
+}
+
 .toolOutputSectionHeader {
   display: flex;
   align-items: flex-start;
@@ -131,6 +147,10 @@
   width: 100%;
 }
 
+.numberField :global(.ant-select) {
+  width: 100%;
+}
+
 .actionRow {
   display: flex;
   justify-content: flex-end;
@@ -163,6 +183,10 @@
   }
 
   .toolOutputSection {
+    border-top-color: rgba(255, 255, 255, 0.08);
+  }
+
+  .scheduledTaskSection {
     border-top-color: rgba(255, 255, 255, 0.08);
   }
 }
