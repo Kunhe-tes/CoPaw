@@ -34,6 +34,7 @@ from ...marketplace.schemas import (
 from ...marketplace.service import (
     MarketItem,
     SkillNameConflictError,
+    SkillVersionConflictError,
     load_index,
     save_index,
 )
@@ -72,11 +73,11 @@ def _require_manager(x_manager: Optional[str]) -> None:
 def _parse_skill_metadata(
     skill_dir: Path,
     skill_name: str,
-) -> tuple[dict, str, str, str]:
+) -> tuple[dict, str, str, str, str]:
     """解析技能元数据.
 
     Returns:
-        (skill_json, skill_md, name, description)
+        (skill_json, skill_md, name, description, version)
     """
     skill_json_path = skill_dir / "skill.json"
     skill_md_path = skill_dir / "SKILL.md"
@@ -85,6 +86,7 @@ def _parse_skill_metadata(
     skill_md = ""
     name_from_skill = skill_name
     description_from_skill = ""
+    version_from_skill = ""
 
     # 读取 skill.json
     if skill_json_path.exists():
@@ -94,47 +96,50 @@ def _parse_skill_metadata(
             )
             name_from_skill = skill_json.get("name", skill_name)
             description_from_skill = skill_json.get("description", "")
+            version_from_skill = skill_json.get("version", "")
         except json.JSONDecodeError:
             pass
 
     # 读取 SKILL.md 并解析 frontmatter
     if skill_md_path.exists():
         skill_md = skill_md_path.read_text(encoding="utf-8")
-        name_from_skill, description_from_skill = _parse_frontmatter(
-            skill_md,
-            name_from_skill,
-            description_from_skill,
+        name_from_skill, description_from_skill, version_from_md = (
+            _parse_frontmatter(
+                skill_md,
+                name_from_skill,
+                description_from_skill,
+            )
         )
+        # SKILL.md 中的 version 优先级更高（与版本历史对齐）
+        if version_from_md:
+            version_from_skill = version_from_md
 
-    return skill_json, skill_md, name_from_skill, description_from_skill
+    return (
+        skill_json,
+        skill_md,
+        name_from_skill,
+        description_from_skill,
+        version_from_skill,
+    )
 
 
 def _parse_frontmatter(
     skill_md: str,
     default_name: str,
     default_desc: str,
-) -> tuple[str, str]:
-    """从 SKILL.md 解析 frontmatter."""
-    if not skill_md.startswith("---"):
-        return default_name, default_desc
+) -> tuple[str, str, str]:
+    """从 SKILL.md 解析 frontmatter（委托共享工具）.
 
-    try:
-        end_idx = skill_md.index("---", 3)
-        fm_text = skill_md[3:end_idx].strip()
-        name = default_name
-        desc = default_desc
-        for line in fm_text.split("\n"):
-            if ":" in line:
-                key, val = line.split(":", 1)
-                key = key.strip().lower()
-                val = val.strip()
-                if key == "name":
-                    name = val
-                elif key == "description":
-                    desc = val
-        return name, desc
-    except ValueError:
-        return default_name, default_desc
+    Returns:
+        (name, description, version)
+    """
+    from ...utils.skill_md import extract_metadata
+
+    meta = extract_metadata(skill_md)
+    name = meta["name"] or default_name
+    desc = meta["description"] or default_desc
+    version = meta["version"]
+    return name, desc, version
 
 
 def _copy_skill_to_market(
@@ -211,6 +216,7 @@ async def _log_publish_operation(
 def _create_market_item(
     name: str,
     description: str,
+    version: str,
     user_id: str,
     user_name: str,
     category_id: Optional[int],
@@ -222,7 +228,7 @@ def _create_market_item(
         item_type="skill",
         name=name,
         description=description,
-        version="1.0.0",
+        version=version or "1.0.0",
         creator_id=user_id,
         creator_name=user_name,
         category_id=category_id,
@@ -253,7 +259,7 @@ def _process_single_skill(
     """
     from ...marketplace.service import _bump_patch
 
-    skill_json, skill_md, name, description = _parse_skill_metadata(
+    skill_json, skill_md, name, description, version = _parse_skill_metadata(
         skill_dir,
         skill_name,
     )
@@ -263,15 +269,9 @@ def _process_single_skill(
     existing = next((i for i in items if i.name == name), None)
 
     if existing:
-        # 不允许覆盖时，返回冲突提示
-        if not overwrite and existing.status == "active":
-            return (
-                None,
-                {"skill_name": name, "suggested_name": f"{name}_1"},
-                name,
-            )
-
-        # 允许覆盖时，更新现有条目
+        # R4: 同名 → 续接到现有条目（无论 creator 是否相同）
+        # F1 修复：市场版本号独立于 SKILL.md，始终走 _bump_patch（spec R3）。
+        # SKILL.md 中的 version 仅作为 source_user_version 写入快照元数据。
         now = datetime.now(timezone.utc).isoformat()
         existing.created_at = now
         existing.status = "active"
@@ -283,10 +283,11 @@ def _process_single_skill(
         existing.updated_at = now
         item = existing
     else:
-        # 创建新市场条目
+        # 创建新市场条目，市场首发版本固定为 1.0.0（不再继承 SKILL.md version）
         item = _create_market_item(
             name,
             description,
+            "",  # 让 _create_market_item 内部 fallback 到 1.0.0
             user_id,
             user_name,
             category_id,
@@ -301,21 +302,29 @@ def _process_single_skill(
     )
     _copy_skill_to_market(skill_dir, market_skill_dir, skill_json, skill_md)
 
-    save_index(svc.marketplace_root, source_id, items)
-
     # 创建版本快照
+    # admin zip 路径：source_user_id="" 表示无来源；source_user_version="v0.0.0"（spec R6）
     version_svc = SkillVersionService(svc.marketplace_root)
     try:
-        version_svc.create_version_snapshot(
+        snapshot = version_svc.create_version_snapshot(
             source_id=source_id,
             item_id=item.item_id,
             skill_dir=market_skill_dir,
-            description=f"上传版本 {item.version}",
-            creator=user_name,
+            description="",  # 去掉重复的版本号信息
+            creator=user_id,
+            creator_name=user_name,
             current_market_version=item.version,
+            source_user_id="",
+            source_user_name="",
+            source_user_version="v0.0.0",
         )
+        # F2：让 MarketItem.version 严格跟随快照的 version_id（处理 R7 复用历史 id 场景）
+        if snapshot.version_id and snapshot.version_id != item.version:
+            item.version = snapshot.version_id
     except Exception as e:
         logger.warning("Failed to create version snapshot: %s", e)
+
+    save_index(svc.marketplace_root, source_id, items)
 
     return name, None, name
 
@@ -393,7 +402,7 @@ async def publish_skill_upload(
 
                 # 记录首次解析的名称和描述
                 if parsed_name is None and first_name:
-                    skill_json, skill_md, _, desc = _parse_skill_metadata(
+                    skill_json, skill_md, _, desc, _ = _parse_skill_metadata(
                         skill_dir,
                         skill_name,
                     )
@@ -443,14 +452,30 @@ async def publish_skill(
     request: Request,
     x_source_id: Optional[str] = Header(default=None, alias="X-Source-Id"),
     x_manager: Optional[str] = Header(default=None, alias="X-Manager"),
+    x_user_id: Optional[str] = Header(default=None, alias="X-User-Id"),
+    x_user_name: Optional[str] = Header(default=None, alias="X-User-Name"),
 ):
     """上架技能（管理员）."""
     source_id = require_source_id(x_source_id)
     _require_manager(x_manager)
     svc = request.app.state.marketplace
+    operator_name = ""
+    if x_user_name:
+        from urllib.parse import unquote
+
+        try:
+            operator_name = unquote(x_user_name)
+        except Exception:  # pylint: disable=broad-except
+            operator_name = x_user_name
     try:
-        item = await svc.publish_skill(source_id, req)
+        item, version_unchanged = await svc.publish_skill(
+            source_id,
+            req,
+            operator_id=x_user_id or "",
+            operator_name=operator_name,
+        )
     except SkillNameConflictError as exc:
+        # 同名续接后此分支理论上不会触发；保留为兜底
         raise HTTPException(
             status_code=409,
             detail={
@@ -460,6 +485,16 @@ async def publish_skill(
                 "existing_creator_id": exc.existing_creator_id,
                 "existing_creator_name": exc.existing_creator_name,
                 "existing_version": exc.existing_version,
+            },
+        ) from exc
+    except SkillVersionConflictError as exc:
+        # F3 修复：版本快照撞车不再静默吞掉，让前端可见
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "VERSION_CONFLICT",
+                "message": str(exc),
+                "hint": "本次同步内容与已有版本撞车，请稍后重试或联系管理员",
             },
         ) from exc
     return MarketSkillResponse(
@@ -474,6 +509,7 @@ async def publish_skill(
         status=item.status,
         created_at=item.created_at,
         updated_at=item.updated_at,
+        version_unchanged=version_unchanged,
     )
 
 

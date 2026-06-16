@@ -36,6 +36,14 @@ from .tracing import (
     SessionStats,
     UserMessageItem,
 )
+from .subtask import (
+    SubtaskModel,
+    SubtaskCreateRequest,
+    SubtaskCreateResponse,
+    SubtaskSyncStatusResponse,
+    SubtaskSyncDetailItem,
+    ExecutionAsyncStatusResponse,
+)
 
 __all__ = [
     # Cron models
@@ -71,4 +79,11 @@ __all__ = [
     "SessionListItem",
     "SessionStats",
     "UserMessageItem",
+    # Subtask models
+    "SubtaskModel",
+    "SubtaskCreateRequest",
+    "SubtaskCreateResponse",
+    "SubtaskSyncStatusResponse",
+    "SubtaskSyncDetailItem",
+    "ExecutionAsyncStatusResponse",
 ]

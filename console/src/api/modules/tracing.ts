@@ -55,9 +55,6 @@ export interface TaskStatusSummary {
   cancelled: number;
   read_count: number;
   new_cron_tasks: number;
-  // 点击数统计
-  click_count: number;
-  click_by_button_type: Record<string, number>;
 }
 
 export interface DepthSummary {
@@ -172,9 +169,10 @@ export interface UserListItem {
   total_conversations: number;
   total_tokens: number;
   last_active: string | null;
-  // 三种口径统计字段
+  // 四种口径统计字段
   manual_calls: number;
   cron_executions: number;
+  cron_success: number;
   cron_reads: number;
 }
 
@@ -211,6 +209,11 @@ export interface SessionListItem {
   first_active: string | null;
   last_active: string | null;
 }
+
+export type SessionResourceFilter =
+  | { type: "model"; name: string }
+  | { type: "skill"; name: string }
+  | { type: "mcp_tool"; name: string; mcp_server: string };
 
 export interface SessionStats {
   session_id: string;
@@ -552,6 +555,9 @@ export const tracingApi = {
       end_date?: string;
       bbk_ids?: string;
       has_error?: boolean;
+      resource_type?: SessionResourceFilter["type"];
+      resource_name?: string;
+      mcp_server?: string;
     },
   ): Promise<{
     items: SessionListItem[];

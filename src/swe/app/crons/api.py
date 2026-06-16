@@ -11,6 +11,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, Field
 
 from ...config.context import (
+    resolve_request_effective_tenant_id,
     resolve_runtime_tenant_id,
     resolve_scope_id,
     resolve_scope_preferred_tenant_id,
@@ -19,7 +20,13 @@ from ...config.context import (
 from ...config.utils import list_logical_tenant_ids
 from ...providers.provider_manager import ProviderManager
 from ..identity_resolver import resolve_user_identity
-from .broadcast import compute_broadcast_offsets, shift_cron_expression
+from .broadcast import (
+    DEFAULT_BROADCAST_OFFSET_WINDOW_HOURS,
+    MAX_BROADCAST_OFFSET_WINDOW_HOURS,
+    MIN_BROADCAST_OFFSET_WINDOW_HOURS,
+    compute_broadcast_offsets,
+    shift_cron_expression,
+)
 from .manager import CronManager
 from .models import CronJobListItem, CronJobSpec, CronJobView
 
@@ -81,6 +88,12 @@ class CronBroadcastTarget(BaseModel):
 class CronBroadcastRequest(BaseModel):
     target_tenant_ids: list[str] = Field(default_factory=list)
     targets: list[CronBroadcastTarget] = Field(default_factory=list)
+    enable_offset: bool = True
+    offset_window_hours: int = Field(
+        default=DEFAULT_BROADCAST_OFFSET_WINDOW_HOURS,
+        ge=MIN_BROADCAST_OFFSET_WINDOW_HOURS,
+        le=MAX_BROADCAST_OFFSET_WINDOW_HOURS,
+    )
 
 
 class CronBroadcastTenantResult(BaseModel):
@@ -247,7 +260,7 @@ def _validate_cron_job_model_slot(
 ) -> None:
     if spec.task_type != "agent" or spec.model_slot is None:
         return
-    tenant_id = resolve_scope_preferred_tenant_id(
+    tenant_id = resolve_request_effective_tenant_id(
         getattr(request.state, "tenant_id", None),
         getattr(request.state, "source_id", None),
         getattr(request.state, "scope_id", None),
@@ -503,11 +516,22 @@ def _build_broadcast_context(
     source_job: CronJobSpec,
     normalized_tenants: list[str],
     target_identity_by_tenant: dict[str, dict[str, str | None]],
+    *,
+    enable_offset: bool = True,
+    offset_window_hours: int = DEFAULT_BROADCAST_OFFSET_WINDOW_HOURS,
 ) -> _BroadcastContext:
     source_id = _request_source_id(request)
+    offsets = (
+        compute_broadcast_offsets(
+            len(normalized_tenants),
+            window_hours=offset_window_hours,
+        )
+        if enable_offset
+        else [0] * len(normalized_tenants)
+    )
     return _BroadcastContext(
         source_job=source_job,
-        offsets=compute_broadcast_offsets(len(normalized_tenants)),
+        offsets=offsets,
         multi_agent_manager=_get_broadcast_multi_agent_manager(request),
         tenant_workspace_pool=getattr(
             request.app.state,
@@ -526,6 +550,13 @@ def _resolve_broadcast_schedule(
     timezone_name: str,
     offset: int,
 ) -> _BroadcastSchedule:
+    if offset <= 0:
+        return _BroadcastSchedule(
+            cron=source_job.schedule.cron,
+            timezone=timezone_name,
+            offset_minutes=0,
+            warning="",
+        )
     shifted = shift_cron_expression(
         source_job.schedule.cron,
         timezone_name,
@@ -823,7 +854,10 @@ async def _broadcast_to_tenants(
     )
 
 
-def _is_broadcast_child_of(job: CronJobSpec | None, source_job_id: str) -> bool:
+def _is_broadcast_child_of(
+    job: CronJobSpec | None,
+    source_job_id: str,
+) -> bool:
     if job is None:
         return False
     return (job.meta or {}).get("broadcast_source_job_id") == source_job_id
@@ -1024,14 +1058,18 @@ async def broadcast_job(
             detail="No target tenant IDs provided",
         )
 
-    normalized_tenants, target_identity_by_tenant = _normalize_broadcast_targets(
-        body,
+    normalized_tenants, target_identity_by_tenant = (
+        _normalize_broadcast_targets(
+            body,
+        )
     )
     context = _build_broadcast_context(
         request,
         source_job,
         normalized_tenants,
         target_identity_by_tenant,
+        enable_offset=body.enable_offset,
+        offset_window_hours=body.offset_window_hours,
     )
     results = await _broadcast_to_tenants(context, normalized_tenants)
     return CronBroadcastResponse(results=results)

@@ -314,12 +314,6 @@ class TaskStatusSummary(BaseModel):
     cancelled: int = 0  # 已取消/跳过次数
     read_count: int = 0  # 已读次数
     new_cron_tasks: int = 0  # 新增定时任务数（本时间段内创建的）
-    # 点击数统计
-    click_count: int = 0  # 点击数（按 cron_task_id 去重）
-    click_by_button_type: dict[str, int] = Field(
-        default_factory=dict,
-        description="按 button_type 分类的点击数",
-    )
 
 
 class ErrorSummary(BaseModel):
@@ -553,10 +547,11 @@ class UserListItem(BaseModel):
     total_tokens: int = 0
     total_skills: int = 0
     last_active: Optional[datetime] = None
-    # 三个口径统计字段
+    # 四个口径统计字段
     manual_calls: int = Field(default=0, description="主动使用次数")
-    cron_executions: int = Field(default=0, description="定时任务执行数")
-    cron_reads: int = Field(default=0, description="定时任务结果查看数")
+    cron_executions: int = Field(default=0, description="任务执行数")
+    cron_success: int = Field(default=0, description="任务成功数")
+    cron_reads: int = Field(default=0, description="结果查看数")
 
 
 class TraceListItem(BaseModel):

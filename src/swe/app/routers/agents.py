@@ -22,10 +22,11 @@ from ...config.config import (
 from ...config.utils import (
     load_config,
     save_config,
+    get_tenant_request_working_dir,
     get_tenant_working_dir_strict,
     get_tenant_config_path_strict,
 )
-from ...config.context import resolve_scope_preferred_tenant_id
+from ...config.context import resolve_request_effective_tenant_id
 from ...agents.memory.agent_md_manager import AgentMdManager
 from ...agents.utils import copy_builtin_qa_md_files
 from ..multi_agent_manager import MultiAgentManager
@@ -46,7 +47,7 @@ def _request_source_id(request: Request | None) -> str | None:
 def _request_effective_tenant_id(request: Request | None) -> str | None:
     if request is None:
         return None
-    return resolve_scope_preferred_tenant_id(
+    return resolve_request_effective_tenant_id(
         _request_tenant_id(request),
         _request_source_id(request),
         getattr(request.state, "scope_id", None),
