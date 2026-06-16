@@ -45,6 +45,27 @@ function formatDateTime(value: string): string {
   });
 }
 
+/** 在版本号字符串前补 "v"（仅用于展示，不改变请求/接口里的原值）。 */
+function displayVersion(versionId: string): string {
+  if (!versionId) return "";
+  return /^v/i.test(versionId) ? versionId : `v${versionId}`;
+}
+
+/**
+ * 把 SkillVersion 上的 source_user_* 拼成单行描述，避免与头部 version_id 重复。
+ *
+ * 规则（仅展示"用户同步版本"）：
+ * - 无 source_user_version 或 = "v0.0.0"（admin zip 路径） → 不显示
+ * - source_user_version == 市场 version_id → 不显示（信息重复）
+ * - 否则 → "用户同步版本 vX.Y.Z"
+ */
+function describeSource(version: SkillVersion): string | null {
+  const userVersion = version.source_user_version?.trim();
+  if (!userVersion || userVersion === "v0.0.0") return null;
+  if (userVersion === version.version_id) return null;
+  return `用户同步版本 ${displayVersion(userVersion)}`;
+}
+
 export function VersionHistoryModal(props: VersionHistoryModalProps) {
   const {
     open,
@@ -99,7 +120,7 @@ export function VersionHistoryModal(props: VersionHistoryModalProps) {
     try {
       const result = await skillVersionApi.switchVersion(sourceId, itemId, versionId);
       if (result.success) {
-        message.success(`已切换到版本 ${versionId}`);
+        message.success(`已切换到版本 ${displayVersion(versionId)}`);
         onVersionSwitched?.();
         // 刷新版本列表
         const data = await skillVersionApi.listVersions(sourceId, itemId);
@@ -127,7 +148,7 @@ export function VersionHistoryModal(props: VersionHistoryModalProps) {
     try {
       const result = await skillVersionApi.deleteVersion(sourceId, itemId, versionId);
       if (result.success) {
-        message.success(`已删除版本 ${versionId}`);
+        message.success(`已删除版本 ${displayVersion(versionId)}`);
         // 刷新版本列表
         const data = await skillVersionApi.listVersions(sourceId, itemId);
         setVersions(data.versions || []);
@@ -186,8 +207,8 @@ export function VersionHistoryModal(props: VersionHistoryModalProps) {
               const isCurrent = version.is_current;
               const isInitial = version.is_initial;
               const canSwitch = !isCurrent && isManager;
-              // 只有当前版本不能删除，初始版本也可以删除（删除后会有警告提示）
-              const canDelete = !isCurrent && isManager;
+              // 与 MCP 行为对称：当前版本和初始版本都不可删除
+              const canDelete = !isCurrent && !isInitial && isManager;
 
               return (
                 <div
@@ -226,7 +247,7 @@ export function VersionHistoryModal(props: VersionHistoryModalProps) {
                         </Tag>
                       )}
                       <Text strong style={{ fontSize: 14 }}>
-                        {version.version_id}
+                        {displayVersion(version.version_id)}
                       </Text>
                       <Text type="secondary" style={{ fontSize: 12 }}>
                         <ClockCircleOutlined style={{ marginRight: 4 }} />
@@ -237,7 +258,8 @@ export function VersionHistoryModal(props: VersionHistoryModalProps) {
                         {(() => {
                           const name = version.created_by_name?.trim();
                           const id = version.created_by?.trim();
-                          if (name && id) return `${name}/${id}`;
+                          // name 与 id 相同时只显示一次，避免 "80112233/80112233"
+                          if (name && id) return name === id ? name : `${name}/${id}`;
                           if (name) return name;
                           if (id) return id;
                           return "-";
@@ -248,7 +270,7 @@ export function VersionHistoryModal(props: VersionHistoryModalProps) {
                       {canSwitch && (
                         <Popconfirm
                           title="确定切换到此版本？"
-                          description={`将技能从 ${currentVersionInfo?.version_id || '当前版本'} 切换到 ${version.version_id}`}
+                          description={`将技能从 ${displayVersion(currentVersionInfo?.version_id || '') || '当前版本'} 切换到 ${displayVersion(version.version_id)}`}
                           onConfirm={() => handleSwitchVersion(version.version_id)}
                           okText="切换"
                           cancelText="取消"
@@ -276,8 +298,8 @@ export function VersionHistoryModal(props: VersionHistoryModalProps) {
                       )}
                       {canDelete && (
                         <Popconfirm
-                          title={isInitial ? "确定删除初始版本？" : "确定删除此版本？"}
-                          description={isInitial ? "删除初始版本后，最早的剩余版本将成为新初始版本" : "删除后无法恢复"}
+                          title="确定删除此版本？"
+                          description="删除后无法恢复"
                           onConfirm={() => handleDeleteVersion(version.version_id)}
                           okText="删除"
                           okButtonProps={{ danger: true }}
@@ -300,6 +322,14 @@ export function VersionHistoryModal(props: VersionHistoryModalProps) {
                       {version.description}
                     </Text>
                   )}
+                  {(() => {
+                    const sourceLine = describeSource(version);
+                    return sourceLine ? (
+                      <Text type="secondary" style={{ fontSize: 12, marginTop: 4, display: "block" }}>
+                        {sourceLine}
+                      </Text>
+                    ) : null;
+                  })()}
                 </div>
               );
             })}

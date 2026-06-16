@@ -140,8 +140,12 @@ export function PublishModal({ open, sourceId, userId, onClose, onSuccess, initi
         agent_id: "default",
         overwrite,
       };
-      await marketApi.publishSkill(sourceId, payload);
-      message.success(initialData ? "同步成功" : "上架成功");
+      const result = await marketApi.publishSkill(sourceId, payload);
+      if (result.version_unchanged) {
+        message.warning("内容与市场最新版本一致，市场版本未增加");
+      } else {
+        message.success(initialData ? "同步成功" : "上架成功");
+      }
       form.resetFields();
       onClose();
       onSuccess();

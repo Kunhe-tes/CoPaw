@@ -155,7 +155,10 @@ const SkillDetailPanel = memo(function SkillDetailPanel({
             )}
             {skill.version && (
               <Text type="secondary" style={{ fontSize: 12 }}>
-                版本: v{skill.version}
+                {skill.is_received ? "接收版本" : "我的版本"}: v
+                {skill.is_received
+                  ? skill.received_version || skill.version
+                  : skill.version}
               </Text>
             )}
           </div>

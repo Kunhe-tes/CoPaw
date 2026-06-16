@@ -11,13 +11,15 @@ import {
   Upload,
   message,
   Alert,
+  Segmented,
+  Tooltip,
 } from "antd";
 import {
   InboxOutlined,
   CheckOutlined,
   CopyOutlined,
+  InfoCircleOutlined,
 } from "@ant-design/icons";
-import { ChevronDown, ChevronRight } from "lucide-react";
 import { marketMcpApi } from "../../api/modules/marketMcp";
 import { BBK_ID_MAP } from "../../constants/bbk";
 import { copyToClipboard } from "../../utils/clipboard";
@@ -43,7 +45,10 @@ const MCP_JSON_TEMPLATE = `{
 type ParsedUploadConfig = {
   suggestedName: string;
   hasRawName: boolean;
-  file: File;
+  /** 文件上传时为原 File；粘贴模式下为 null */
+  file: File | null;
+  /** 粘贴模式下为原始 JSON 文本；文件上传时为 null */
+  rawJson: string | null;
 };
 
 function baseNameFromFile(fileName: string): string {
@@ -67,9 +72,15 @@ function inferTransport(config: Record<string, unknown>): "stdio" | "streamable_
   return null;
 }
 
-function parseMcpUploadFile(file: File, raw: string): ParsedUploadConfig {
+/**
+ * 解析 MCP JSON 内容，校验格式并提取建议的 name。
+ * 文件上传走 parseMcpUploadFile，粘贴上传走 parseMcpUploadRaw —— 两者复用同一段校验逻辑。
+ */
+function extractMcpNameAndConfig(
+  raw: string,
+  fallbackName: string,
+): { suggestedName: string; hasRawName: boolean } {
   const parsed = JSON.parse(raw) as Record<string, unknown>;
-  const fallbackName = baseNameFromFile(file.name);
 
   let candidateName = "";
   let candidateConfig: Record<string, unknown> | null = null;
@@ -116,7 +127,27 @@ function parseMcpUploadFile(file: File, raw: string): ParsedUploadConfig {
   return {
     suggestedName: finalName,
     hasRawName: !!candidateName?.trim(),
+  };
+}
+
+function parseMcpUploadFile(file: File, raw: string): ParsedUploadConfig {
+  const fallbackName = baseNameFromFile(file.name);
+  const { suggestedName, hasRawName } = extractMcpNameAndConfig(raw, fallbackName);
+  return {
+    suggestedName,
+    hasRawName,
     file,
+    rawJson: null,
+  };
+}
+
+function parseMcpUploadRaw(raw: string): ParsedUploadConfig {
+  const { suggestedName, hasRawName } = extractMcpNameAndConfig(raw, "");
+  return {
+    suggestedName,
+    hasRawName,
+    file: null,
+    rawJson: raw,
   };
 }
 
@@ -136,7 +167,9 @@ export function MCPUploadModal({
   const [parsedUpload, setParsedUpload] = useState<ParsedUploadConfig | null>(null);
   const [fileName, setFileName] = useState<string>("");
   const [jsonTemplateCopied, setJsonTemplateCopied] = useState(false);
-  const [showJsonTemplate, setShowJsonTemplate] = useState(false);
+  const [uploadMode, setUploadMode] = useState<"file" | "paste">("file");
+  const [pasteContent, setPasteContent] = useState<string>("");
+  const [pasteError, setPasteError] = useState<string>("");
 
   const handleCopyJsonTemplate = async () => {
     const success = await copyToClipboard(MCP_JSON_TEMPLATE);
@@ -176,30 +209,90 @@ export function MCPUploadModal({
     return false; // 阻止自动上传
   };
 
+  // 解析粘贴的 JSON 内容
+  const handlePasteChange = (value: string) => {
+    setPasteContent(value);
+    if (!value.trim()) {
+      setParsedUpload(null);
+      setPasteError("");
+      return;
+    }
+    try {
+      const parsed = parseMcpUploadRaw(value);
+      setParsedUpload(parsed);
+      setPasteError("");
+      // 粘贴模式下 JSON 是权威：只要 JSON 里能解析出 name，就把表单 name 同步过去，
+      // 让用户在 JSON 里改 name 时下方输入框跟着变。
+      if (parsed.hasRawName) {
+        form.setFieldsValue({ name: parsed.suggestedName });
+      }
+    } catch (error) {
+      setParsedUpload(null);
+      setPasteError(error instanceof Error ? error.message : "JSON 解析失败");
+    }
+  };
+
+  // 切换上传模式：清掉对侧已经解析好的状态，避免歧义
+  const handleModeChange = (mode: "file" | "paste") => {
+    setUploadMode(mode);
+    setParsedUpload(null);
+    setFileName("");
+    setPasteError("");
+    if (mode === "paste") {
+      // 切到粘贴模式时把模板预填进去，并立刻解析一次同步 name 字段
+      setPasteContent(MCP_JSON_TEMPLATE);
+      try {
+        const parsed = parseMcpUploadRaw(MCP_JSON_TEMPLATE);
+        setParsedUpload(parsed);
+        if (parsed.hasRawName) {
+          form.setFieldsValue({ name: parsed.suggestedName });
+        }
+      } catch {
+        // 模板本身合法，不会走到这里；万一异常也安静失败
+      }
+    } else {
+      setPasteContent("");
+    }
+  };
+
   const handleSubmit = async () => {
     try {
       const values = await form.validateFields();
 
       if (!parsedUpload) {
-        message.error("请先上传 MCP 配置文件");
+        message.error(
+          uploadMode === "file" ? "请先上传 MCP 配置文件" : "请粘贴 MCP JSON 配置",
+        );
         return;
       }
 
       setLoading(true);
 
-      await marketMcpApi.uploadMCP({
+      // 严格按当前 tab 决定上传方式，避免依赖 parsedUpload 内部字段做隐式判断
+      const payload =
+        uploadMode === "file"
+          ? { file: parsedUpload.file as File }
+          : { raw_json: parsedUpload.rawJson as string };
+
+      const result = await marketMcpApi.uploadMCP({
         name: values.name,
         chinese_name: values.chinese_name,
         description: values.description,
         guidance: values.guidance,
         bbk_ids: values.bbk_ids,
-        file: parsedUpload.file,
+        ...payload,
       });
 
-      message.success("上传成功");
+      if (result.version_unchanged) {
+        message.warning("内容与市场最新版本一致，市场版本未增加");
+      } else {
+        message.success("上传成功");
+      }
       form.resetFields();
       setParsedUpload(null);
       setFileName("");
+      setPasteContent("");
+      setPasteError("");
       onSuccess();
       onClose();
     } catch (err) {
@@ -215,7 +308,9 @@ export function MCPUploadModal({
     setParsedUpload(null);
     setFileName("");
     setJsonTemplateCopied(false);
-    setShowJsonTemplate(false);
+    setUploadMode("file");
+    setPasteContent("");
+    setPasteError("");
     onClose();
   };
 
@@ -236,89 +331,107 @@ export function MCPUploadModal({
     >
       <Alert
         type="info"
-        message="上传 .json 格式的 MCP 配置文件，系统将自动解析名称与标识。"
-        style={{ marginBottom: 16 }}
         showIcon
+        style={{ marginBottom: 16 }}
+        message={
+          <span>
+            上传 .json 文件或直接粘贴 JSON 配置，系统将自动解析名称与标识。
+            <Button
+              type="link"
+              size="small"
+              onClick={() => void handleCopyJsonTemplate()}
+              icon={jsonTemplateCopied ? <CheckOutlined /> : <CopyOutlined />}
+              style={{ paddingInline: 4, height: "auto" }}
+            >
+              {jsonTemplateCopied ? "已复制" : "复制 JSON 模板"}
+            </Button>
+          </span>
+        }
       />
 
-      <div
-        style={{
-          marginBottom: 16,
-          padding: "14px 16px",
-          borderRadius: 8,
-          border: "1px solid #ffe7ba",
-          background: "#fffbe6",
-        }}
-      >
-        <p style={{ margin: "0 0 12px", fontSize: 13, color: "#8b6d1f" }}>
-          需要帮助？可以复制 JSON 模板，按需修改后上传。
-        </p>
-        <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: showJsonTemplate ? 12 : 0 }}>
-          <Button onClick={() => void handleCopyJsonTemplate()} style={{ borderRadius: 8 }}>
-            {jsonTemplateCopied ? <CheckOutlined /> : <CopyOutlined />}
-            {jsonTemplateCopied ? "模板已复制" : "复制 JSON 模板"}
-          </Button>
-          <Button
-            type="text"
-            onClick={() => setShowJsonTemplate((prev) => !prev)}
-            style={{ borderRadius: 8, color: "#8b6d1f" }}
-          >
-            {showJsonTemplate ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
-            {showJsonTemplate ? "隐藏模板" : "查看模板"}
-          </Button>
-        </div>
-        {showJsonTemplate ? (
-          <div style={{ maxHeight: 180, overflow: "auto" }}>
-            <pre
-              style={{
-                margin: 0,
-                padding: 12,
-                borderRadius: 8,
-                border: "1px solid #f0ebe1",
-                background: "#ffffff",
-                fontSize: 12,
-                lineHeight: 1.6,
-                color: "#434a57",
-                overflowX: "auto",
-              }}
-            >
-              <code>{MCP_JSON_TEMPLATE}</code>
-            </pre>
-          </div>
-        ) : null}
-      </div>
-
-      <Dragger
-        accept=".json"
-        beforeUpload={parseFile}
-        showUploadList={false}
+      <Segmented
+        block
+        value={uploadMode}
+        onChange={(value) => handleModeChange(value as "file" | "paste")}
+        options={[
+          { label: "文件上传", value: "file" },
+          { label: "粘贴 JSON", value: "paste" },
+        ]}
         style={{ marginBottom: 16 }}
-      >
-        <p className="ant-upload-drag-icon">
-          <InboxOutlined />
-        </p>
-        <p className="ant-upload-text">点击或拖拽文件到此区域</p>
-        <p className="ant-upload-hint">支持 .json 格式的 MCP 配置文件</p>
-      </Dragger>
+      />
 
-      {fileName && (
-        <Alert
-          type="success"
-          message={`已解析文件: ${fileName}`}
-          style={{ marginBottom: 16 }}
-          showIcon
-        />
+      {uploadMode === "file" ? (
+        <>
+          <Dragger
+            accept=".json"
+            beforeUpload={parseFile}
+            showUploadList={false}
+            style={{ marginBottom: 16 }}
+          >
+            <p className="ant-upload-drag-icon">
+              <InboxOutlined />
+            </p>
+            <p className="ant-upload-text">点击或拖拽文件到此区域</p>
+            <p className="ant-upload-hint">支持 .json 格式的 MCP 配置文件</p>
+          </Dragger>
+
+          {fileName && (
+            <Alert
+              type="success"
+              message={`已解析文件: ${fileName}`}
+              style={{ marginBottom: 16 }}
+              showIcon
+            />
+          )}
+        </>
+      ) : (
+        <>
+          <Input.TextArea
+            value={pasteContent}
+            onChange={(e) => handlePasteChange(e.target.value)}
+            placeholder="粘贴 MCP JSON 配置，支持 mcpServers 或顶层 config 结构"
+            rows={10}
+            style={{
+              marginBottom: 12,
+              fontFamily:
+                "ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono', 'Courier New', monospace",
+              fontSize: 12,
+            }}
+          />
+          {pasteError ? (
+            <Alert
+              type="error"
+              message={pasteError}
+              style={{ marginBottom: 16 }}
+              showIcon
+            />
+          ) : parsedUpload && parsedUpload.rawJson ? (
+            <Alert
+              type="success"
+              message={`已解析配置: ${parsedUpload.suggestedName || "(未识别名称)"}`}
+              style={{ marginBottom: 16 }}
+              showIcon
+            />
+          ) : null}
+        </>
       )}
 
       <Form form={form} layout="vertical">
         <Form.Item
           name="name"
-          label="英文名称 *（英文名称 = json 文件名 = 配置里的 name）"
+          label={
+            <span style={{ display: "inline-flex", alignItems: "center", gap: 4 }}>
+              英文名称
+              <Tooltip title="英文名称 = json 文件名 = 配置里的 name">
+                <InfoCircleOutlined style={{ color: "#8c8c8c", cursor: "help" }} />
+              </Tooltip>
+            </span>
+          }
           rules={[{ required: true, message: "请输入英文名称" }]}
         >
           <Input
             placeholder="输入英文名称"
-            disabled={!!parsedUpload?.hasRawName}
+            disabled={uploadMode === "paste" || (uploadMode === "file" && !!parsedUpload?.hasRawName)}
           />
         </Form.Item>
 
