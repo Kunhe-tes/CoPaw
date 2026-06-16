@@ -12,7 +12,7 @@ from typing import Optional, Tuple
 
 import httpx
 
-from ...config.constant import (
+from ....config.constant import (
     ASYNC_TASK_QUERY_URL,
     ASYNC_TASK_APP_KEY,
     ASYNC_TASK_ENV_TAG,
@@ -92,14 +92,14 @@ class SyncService:
             Tuple of (status, error_message)
         """
         return_code = data.get("returnCode", "")
-        if return_code != "SUC000":
+        if return_code != "SUC0000":
             return None, f"returnCode={return_code}"
 
-        action_results = data.get("actionResults", [])
-        if not action_results:
-            return None, "No actionResults"
+        body = data.get("body", [])
+        if not body:
+            return None, "No body"
 
-        status = action_results[0].get("status", "")
+        status = body.get("status", "")
         if status not in VALID_SUBTASK_STATUSES:
             return None, f"Invalid status={status}"
 
@@ -351,7 +351,7 @@ class SyncService:
 
         if not trace_id:
             logger.warning("Execution has no trace_id: id=%s", execution_id)
-            return None
+            return "success"
 
         subtasks = await self.query_service.get_subtasks_by_trace_id(trace_id)
 
