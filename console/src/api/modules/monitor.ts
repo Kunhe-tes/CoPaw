@@ -146,17 +146,22 @@ export interface CronJobOverviewSummaryMetric {
   footerValue?: string;
 }
 
-export interface CronJobOverviewBranchBehaviorRow {
+export interface CronJobOverviewBranchRankingRow {
   rank: number | "...";
+  bbkId: string;
   branchName: string;
+  managerCount: string;
+  totalTasks: string;
+  successCount: string;
+  successRate: string;
   readTasks: string;
-  readRate: string;
-  directTasks: string;
-  directClickRate: string;
-  browseTasks: string;
-  browseClickRate: string;
-  phoneTasks: string;
-  phoneClickRate: string;
+  planCount: string;
+  insightCount: string;
+  phoneCount: string;
+  planClicks: string;
+  insightClicks: string;
+  phoneClicks: string;
+  errorCount: string;
 }
 
 export interface CronJobOverviewFailureReason {
@@ -184,7 +189,7 @@ export interface CronJobOverviewAnomalyRankRow {
 
 export interface CronJobOverviewPageData {
   summaryMetrics: CronJobOverviewSummaryMetric[];
-  branchBehaviorRows: CronJobOverviewBranchBehaviorRow[];
+  branchRankingRows: CronJobOverviewBranchRankingRow[];
   failureReasons: CronJobOverviewFailureReason[];
   anomalySummary: CronJobOverviewAnomalySummary;
   anomalyRankRows: CronJobOverviewAnomalyRankRow[];
@@ -211,24 +216,27 @@ export interface CronOverviewStatsResponse {
   error_rate: number;
 }
 
-export interface CronBranchBehaviorItem {
+export interface CronBranchRankingItem {
   bbk_id: string;
   bbk_name: string;
+  manager_count: number;
   total_tasks: number;
+  success_count: number;
+  success_rate: number;
   read_tasks: number;
-  read_rate: number;
-  plan_click_tasks: number;
-  plan_click_rate: number;
-  insight_click_tasks: number;
-  insight_click_rate: number;
-  phone_click_tasks: number;
-  phone_click_rate: number;
+  plan_count: number;
+  insight_count: number;
+  phone_count: number;
+  plan_clicks: number;
+  insight_clicks: number;
+  phone_clicks: number;
+  error_count: number;
 }
 
-export interface CronBranchBehaviorResponse {
+export interface CronBranchRankingResponse {
   start_date: string;
   end_date: string;
-  items: CronBranchBehaviorItem[];
+  items: CronBranchRankingItem[];
 }
 
 export interface CronErrorReasonItem {
@@ -253,6 +261,59 @@ export interface CronBranchErrorResponse {
   affected_manager_count: number;
   error_reasons: CronErrorReasonItem[];
   branch_error_rank: CronBranchErrorRankItem[];
+}
+
+export interface BranchSkillItem {
+  skill_name: string;
+  cron_task_count: number;
+  success_count: number;
+  success_rate: number;
+  read_count: number;
+  error_count: number;
+}
+
+export interface BranchSkillResponse {
+  start_date: string;
+  end_date: string;
+  bbk_id: string;
+  bbk_name: string;
+  items: BranchSkillItem[];
+}
+
+export interface BranchSkillManagerItem {
+  user_id: string;
+  user_name: string;
+  read_count: number;
+  plan_count: number;
+  insight_count: number;
+  phone_count: number;
+  last_click_time: string | null;
+}
+
+export interface BranchSkillManagerResponse {
+  start_date: string;
+  end_date: string;
+  bbk_id: string;
+  skill_name: string;
+  items: BranchSkillManagerItem[];
+}
+
+export interface BranchSkillManagerCustomerItem {
+  customer_id: string;
+  customer_name: string;
+  clicked_plan: boolean;
+  clicked_insight: boolean;
+  clicked_phone: boolean;
+  click_time: string | null;
+}
+
+export interface BranchSkillManagerCustomerResponse {
+  start_date: string;
+  end_date: string;
+  bbk_id: string;
+  skill_name: string;
+  user_id: string;
+  items: BranchSkillManagerCustomerItem[];
 }
 
 export interface SubscriptionOverviewItem {
@@ -315,7 +376,7 @@ function formatPercentText(value: number | null | undefined) {
 
 function mapCronJobOverviewPageData(
   stats: CronOverviewStatsResponse,
-  behavior: CronBranchBehaviorResponse,
+  behavior: CronBranchRankingResponse,
   branchError: CronBranchErrorResponse,
 ): CronJobOverviewPageData {
   return {
@@ -343,17 +404,22 @@ function mapCronJobOverviewPageData(
         footerValue: formatInteger(stats.error_count),
       },
     ],
-    branchBehaviorRows: behavior.items.map((item, index) => ({
+    branchRankingRows: behavior.items.map((item, index) => ({
       rank: index + 1,
+      bbkId: item.bbk_id || "",
       branchName: item.bbk_name || item.bbk_id || "-",
+      managerCount: formatInteger(item.manager_count),
+      totalTasks: formatInteger(item.total_tasks),
+      successCount: formatInteger(item.success_count),
+      successRate: formatPercentText(item.success_rate),
       readTasks: formatInteger(item.read_tasks),
-      readRate: formatPercentText(item.read_rate),
-      directTasks: formatInteger(item.plan_click_tasks),
-      directClickRate: formatPercentText(item.plan_click_rate),
-      browseTasks: formatInteger(item.insight_click_tasks),
-      browseClickRate: formatPercentText(item.insight_click_rate),
-      phoneTasks: formatInteger(item.phone_click_tasks),
-      phoneClickRate: formatPercentText(item.phone_click_rate),
+      planCount: formatInteger(item.plan_count),
+      insightCount: formatInteger(item.insight_count),
+      phoneCount: formatInteger(item.phone_count),
+      planClicks: formatInteger(item.plan_clicks),
+      insightClicks: formatInteger(item.insight_clicks),
+      phoneClicks: formatInteger(item.phone_clicks),
+      errorCount: formatInteger(item.error_count),
     })),
     failureReasons: branchError.error_reasons.map((item, index) => ({
       name: item.reason || "其他",
@@ -410,9 +476,9 @@ export const monitorApi = {
     return request(`/monitor/cron/overview-stats${buildQuery(filters)}`);
   },
 
-  getCronBranchBehavior: async (
+  getCronBranchRanking: async (
     filters?: CronJobOverviewDateFilters,
-  ): Promise<CronBranchBehaviorResponse> => {
+  ): Promise<CronBranchRankingResponse> => {
     return request(`/monitor/cron/branch-behavior${buildQuery(filters)}`);
   },
 
@@ -422,15 +488,44 @@ export const monitorApi = {
     return request(`/monitor/cron/branch-error${buildQuery(filters)}`);
   },
 
+  getBranchSkills: async (params: {
+    bbk_id: string;
+    start_date?: string;
+    end_date?: string;
+  }): Promise<BranchSkillResponse> => {
+    return request(`/monitor/cron/branch-skills${buildQuery(params)}`);
+  },
+
+  getBranchSkillManagers: async (params: {
+    bbk_id: string;
+    skill_name: string;
+    start_date?: string;
+    end_date?: string;
+  }): Promise<BranchSkillManagerResponse> => {
+    return request(`/monitor/cron/branch-skill-managers${buildQuery(params)}`);
+  },
+
+  getBranchSkillManagerCustomers: async (params: {
+    bbk_id: string;
+    skill_name: string;
+    user_id: string;
+    start_date?: string;
+    end_date?: string;
+  }): Promise<BranchSkillManagerCustomerResponse> => {
+    return request(
+      `/monitor/cron/branch-skill-manager-customers${buildQuery(params)}`,
+    );
+  },
+
   getCronJobOverviewPageData: async (
     filters?: CronJobOverviewDateFilters,
   ): Promise<CronJobOverviewPageData> => {
-    const [stats, behavior, branchError] = await Promise.all([
+    const [stats, ranking, branchError] = await Promise.all([
       monitorApi.getCronOverviewStats(filters),
-      monitorApi.getCronBranchBehavior(filters),
+      monitorApi.getCronBranchRanking(filters),
       monitorApi.getCronBranchError(filters),
     ]);
-    return mapCronJobOverviewPageData(stats, behavior, branchError);
+    return mapCronJobOverviewPageData(stats, ranking, branchError);
   },
 
   // Get cron jobs list

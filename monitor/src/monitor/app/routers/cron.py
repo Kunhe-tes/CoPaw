@@ -17,8 +17,11 @@ from ..models.cron import (
     CronJobQueryParams,
     CronOverviewResponse,
     CronOverviewStatsResponse,
-    CronBranchBehaviorResponse,
+    CronBranchRankingResponse,
     CronBranchErrorResponse,
+    BranchSkillResponse,
+    BranchSkillManagerResponse,
+    BranchSkillManagerCustomerResponse,
     ExecutionModel,
     ExecutionQueryParams,
     PaginatedResponse,
@@ -480,7 +483,7 @@ async def get_overview_stats(
     )
 
 
-@router.get("/branch-behavior", response_model=CronBranchBehaviorResponse)
+@router.get("/branch-behavior", response_model=CronBranchRankingResponse)
 async def get_branch_behavior(
     request: Request,
     start_date: str | None = Query(
@@ -496,10 +499,10 @@ async def get_branch_behavior(
         description="分行号筛选（逗号分隔）",
     ),
     service: QueryService = Depends(get_query_service),
-) -> CronBranchBehaviorResponse:
-    """获取分行层行为分析。
+) -> CronBranchRankingResponse:
+    """获取分行综合排行。
 
-    返回各分行的已读任务数、已读率、方案点击数、洞察点击数等行为数据。
+    返回各分行的覆盖客户经理数、定时任务数、成功执行数、成功率、已读任务数。
 
     Args:
         start_date: 开始日期筛选 (YYYY-MM-DD格式)
@@ -508,7 +511,7 @@ async def get_branch_behavior(
         service: Query service
 
     Returns:
-        分行行为分析数据
+        分行综合排行数据
     """
     actual_source_id = _get_source_id_from_header(request)
     return await service.get_branch_behavior(
@@ -554,5 +557,131 @@ async def get_branch_error(
         start_date=start_date,
         end_date=end_date,
         bbk_ids=bbk_ids,
+        source_id=actual_source_id,
+    )
+
+
+@router.get("/branch-skills", response_model=BranchSkillResponse)
+async def get_branch_skills(
+    request: Request,
+    bbk_id: str = Query(..., description="分行ID"),
+    start_date: str | None = Query(
+        default=None,
+        description="开始日期 (YYYY-MM-DD)",
+    ),
+    end_date: str | None = Query(
+        default=None,
+        description="结束日期 (YYYY-MM-DD)",
+    ),
+    service: QueryService = Depends(get_query_service),
+) -> BranchSkillResponse:
+    """获取分行技能维度数据。
+
+    返回指定分行在时间范围内的技能统计，包括定时任务数、
+    成功执行数、成功率、已读任务数、报错次数。
+
+    Args:
+        bbk_id: 分行ID
+        start_date: 开始日期
+        end_date: 结束日期
+        service: Query service
+
+    Returns:
+        技能维度列表
+    """
+    actual_source_id = _get_source_id_from_header(request)
+    return await service.get_branch_skills(
+        bbk_id=bbk_id,
+        start_date=start_date,
+        end_date=end_date,
+        source_id=actual_source_id,
+    )
+
+
+@router.get(
+    "/branch-skill-managers",
+    response_model=BranchSkillManagerResponse,
+)
+async def get_branch_skill_managers(
+    request: Request,
+    bbk_id: str = Query(..., description="分行ID"),
+    skill_name: str = Query(..., description="技能名称"),
+    start_date: str | None = Query(
+        default=None,
+        description="开始日期 (YYYY-MM-DD)",
+    ),
+    end_date: str | None = Query(
+        default=None,
+        description="结束日期 (YYYY-MM-DD)",
+    ),
+    service: QueryService = Depends(get_query_service),
+) -> BranchSkillManagerResponse:
+    """获取技能下的客户经理维度数据。
+
+    返回指定分行、指定技能下的客户经理统计，包括已读次数、
+    方案次数、洞察次数、电访次数、最后一次点击时间。
+
+    Args:
+        bbk_id: 分行ID
+        skill_name: 技能名称
+        start_date: 开始日期
+        end_date: 结束日期
+        service: Query service
+
+    Returns:
+        客户经理维度列表
+    """
+    actual_source_id = _get_source_id_from_header(request)
+    return await service.get_branch_skill_managers(
+        bbk_id=bbk_id,
+        skill_name=skill_name,
+        start_date=start_date,
+        end_date=end_date,
+        source_id=actual_source_id,
+    )
+
+
+@router.get(
+    "/branch-skill-manager-customers",
+    response_model=BranchSkillManagerCustomerResponse,
+)
+async def get_branch_skill_manager_customers(
+    request: Request,
+    bbk_id: str = Query(..., description="分行ID"),
+    skill_name: str = Query(..., description="技能名称"),
+    user_id: str = Query(..., description="客户经理ID"),
+    start_date: str | None = Query(
+        default=None,
+        description="开始日期 (YYYY-MM-DD)",
+    ),
+    end_date: str | None = Query(
+        default=None,
+        description="结束日期 (YYYY-MM-DD)",
+    ),
+    service: QueryService = Depends(get_query_service),
+) -> BranchSkillManagerCustomerResponse:
+    """获取客户经理下的客户维度数据。
+
+    返回指定分行、指定技能、指定客户经理下的客户统计，包括
+    是否点击方案、是否点击洞察、是否点击电访、点击时间。
+
+    Args:
+        bbk_id: 分行ID
+        skill_name: 技能名称
+        user_id: 客户经理ID
+        start_date: 开始日期
+        end_date: 结束日期
+        service: Query service
+
+    Returns:
+        客户维度列表
+    """
+    actual_source_id = _get_source_id_from_header(request)
+    return await service.get_branch_skill_manager_customers(
+        bbk_id=bbk_id,
+        skill_name=skill_name,
+        user_id=user_id,
+        start_date=start_date,
+        end_date=end_date,
         source_id=actual_source_id,
     )
