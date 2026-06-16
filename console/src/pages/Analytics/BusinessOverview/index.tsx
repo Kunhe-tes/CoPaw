@@ -494,10 +494,9 @@ function getNiceAxisMax(value: number): number {
   }
   const magnitude = 10 ** Math.floor(Math.log10(value));
   const normalized = value / magnitude;
-  if (normalized <= 1) return magnitude;
-  if (normalized <= 2) return 2 * magnitude;
-  if (normalized <= 5) return 5 * magnitude;
-  return 10 * magnitude;
+  const candidates = [1, 1.5, 2, 2.5, 5, 10];
+  const candidate = candidates.find((item) => normalized <= item) ?? 10;
+  return candidate * magnitude;
 }
 
 function formatTrendAxisLabel(value: number, axisMax: number): string {
@@ -549,22 +548,16 @@ export function buildTrendSvgData(trendData: TrendDatum[]) {
     ...trendData.map((item) => safeNumber(item.users)),
     0,
   );
-  const maxCalls = Math.max(
-    rawMaxCalls,
-    1,
-  );
-  const maxUsers = Math.max(
-    rawMaxUsers,
-    1,
-  );
   const leftAxisMax = getNiceAxisMax(rawMaxUsers);
   const rightAxisMax = getNiceAxisMax(rawMaxCalls);
+  const userScaleMax = Math.max(leftAxisMax, 1);
+  const callScaleMax = Math.max(rightAxisMax, 1);
   const step = trendData.length > 1 ? chartWidth / (trendData.length - 1) : 0;
   const labelInterval = getLabelInterval(trendData.length);
   const barWidth = getBarWidth(trendData.length, step);
 
   const bars = trendData.map((item, index) => {
-    const barHeight = (safeNumber(item.users) / maxUsers) * (chartHeight - 8);
+    const barHeight = (safeNumber(item.users) / userScaleMax) * chartHeight;
     const x = chartLeft + index * step - barWidth / 2;
     const label = item.date.includes(":")
       ? dayjs(item.date).format("HH:mm")
@@ -585,7 +578,7 @@ export function buildTrendSvgData(trendData: TrendDatum[]) {
     const y =
       chartTop +
       chartHeight -
-      (safeNumber(item.calls) / maxCalls) * chartHeight;
+      (safeNumber(item.calls) / callScaleMax) * chartHeight;
     return { x, y };
   });
 
