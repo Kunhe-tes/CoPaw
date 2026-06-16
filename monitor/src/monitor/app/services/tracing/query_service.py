@@ -665,13 +665,14 @@ class TracingQueryService:  # pylint: disable=too-many-public-methods
             is_prev: bool = False,
         ) -> int:
             # 技能调用量单独取 span 表口径，避免把普通 trace 误计为技能调用。
+            # 使用 DISTINCT trace_id 去重，与排行榜口径一致。
             time_compare = "<" if is_prev else "<="
             if source_id == "all":
                 exclude_placeholders = ", ".join(
                     ["%s"] * len(EXCLUDED_SOURCE_IDS),
                 )
                 query = f"""
-                    SELECT COUNT(*) as total
+                    SELECT COUNT(DISTINCT trace_id) as total
                     FROM swe_tracing_spans
                     WHERE start_time >= %s AND start_time {time_compare} %s
                       AND source_id NOT IN ({exclude_placeholders})
@@ -682,7 +683,7 @@ class TracingQueryService:  # pylint: disable=too-many-public-methods
                 row = await self._db.fetch_one(query, params)
             else:
                 query = f"""
-                    SELECT COUNT(*) as total
+                    SELECT COUNT(DISTINCT trace_id) as total
                     FROM swe_tracing_spans
                     WHERE source_id = %s AND start_time >= %s AND start_time {time_compare} %s
                       AND user_id != 'default'
@@ -1929,12 +1930,12 @@ class TracingQueryService:  # pylint: disable=too-many-public-methods
         end_date: datetime,
         bbk_ids: Optional[str] = None,
     ) -> int:
-        """获取技能调用总次数（无 LIMIT）."""
+        """获取技能调用总次数（去重 trace_id，与排行榜口径一致）."""
         bbk_filter_sql, bbk_filter_params = build_bbk_in_filter(bbk_ids)
         if source_id == "all":
             exclude_placeholders = ", ".join(["%s"] * len(EXCLUDED_SOURCE_IDS))
             query = f"""
-                SELECT COUNT(*) as total
+                SELECT COUNT(DISTINCT trace_id) as total
                 FROM swe_tracing_spans
                 WHERE start_time >= %s AND start_time <= %s
                   AND skill_name IS NOT NULL
@@ -1950,7 +1951,7 @@ class TracingQueryService:  # pylint: disable=too-many-public-methods
             row = await self._db.fetch_one(query, params)
         else:
             query = f"""
-                SELECT COUNT(*) as total
+                SELECT COUNT(DISTINCT trace_id) as total
                 FROM swe_tracing_spans
                 WHERE source_id = %s AND start_time >= %s AND start_time <= %s
                   AND skill_name IS NOT NULL
