@@ -1087,6 +1087,66 @@ describe("SessionApi identity mapping", () => {
     expect(refreshed[0]?.name).toBe("new title");
   });
 
+  it("keeps the generated title after finishing a stream with local message sync", async () => {
+    const sessionApi = new SessionApi();
+
+    await sessionApi.createSession({
+      name: "original question",
+      messages: [],
+    });
+
+    const logicalSessionId = sessionApi.getPendingSessionId();
+    expect(logicalSessionId).toBeTruthy();
+
+    apiMocks.listChats.mockResolvedValue([
+      {
+        id: "chat-real-title",
+        name: "original question",
+        session_id: logicalSessionId,
+        user_id: "user-1",
+        channel: "console",
+        meta: {},
+        status: "running",
+        created_at: "2026-06-10T00:00:00Z",
+      },
+    ]);
+
+    await sessionApi.updateSession({
+      id: logicalSessionId!,
+      messages: [],
+      generating: true,
+    });
+
+    sessionApi.patchSessionTitle({
+      chat_id: "chat-real-title",
+      session_id: logicalSessionId,
+      session_title: "generated title",
+    });
+
+    const synced = await sessionApi.updateSession(
+      {
+        id: logicalSessionId!,
+        messages: [
+          {
+            id: "message-1",
+            role: "assistant",
+            msgStatus: "finished",
+            cards: [],
+          },
+        ],
+        generating: false,
+      },
+      { refreshList: false },
+    );
+
+    expect(synced[0]?.name).toBe("generated title");
+    expect(
+      (synced[0] as { meta?: Record<string, unknown> })?.meta,
+    ).toMatchObject({
+      session_title_generated: true,
+    });
+  });
+
   it("filters stale task sessions from later pages", async () => {
     const sessionApi = new SessionApi();
     cronJobApiMocks.listCronJobs.mockResolvedValue([]);
