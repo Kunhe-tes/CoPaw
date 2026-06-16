@@ -260,7 +260,12 @@ CREATE TABLE IF NOT EXISTS swe_cron_subtasks (
     trace_id     VARCHAR(64) NOT NULL COMMENT '主任务trace_id',
     task_id      VARCHAR(128) NOT NULL COMMENT '子任务task_id',
     filename     VARCHAR(512) NOT NULL COMMENT '文件名',
-    status       VARCHAR(16) DEFAULT NULL COMMENT '子任务状态: SUC/FAIL/PART_SUC',
+    task_type    VARCHAR(16) DEFAULT NULL COMMENT '任务类型: list/plan',
+    custuid      VARCHAR(64) DEFAULT NULL COMMENT '任务中客户ID',
+    cust_nm      VARCHAR(255) DEFAULT NULL COMMENT '任务中客户名称',
+    notification_content_wplus VARCHAR(5000) DEFAULT NULL COMMENT 'W+渠道通知消息内容',
+    notification_content_zhaohu VARCHAR(5000) DEFAULT NULL COMMENT '招乎渠道通知消息内容',
+    status       VARCHAR(16) DEFAULT NULL COMMENT '子任务状态: SUC/FAIL/PART_SUC/TIMEOUT',
     info         VARCHAR(2048) DEFAULT '' COMMENT '预留扩展信息',
     created_at   DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
     updated_at   DATETIME DEFAULT NULL COMMENT '更新时间',
@@ -268,6 +273,8 @@ CREATE TABLE IF NOT EXISTS swe_cron_subtasks (
     UNIQUE INDEX uk_trace_task (trace_id, task_id),
     INDEX idx_trace_id (trace_id),
     INDEX idx_status (status),
+    INDEX idx_task_type (task_type),
+    INDEX idx_custuid (custuid),
     INDEX idx_created_at (created_at)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='定时任务子任务表';
 """
@@ -292,6 +299,48 @@ ALTER TABLE swe_cron_subtasks
 ADD COLUMN filename VARCHAR(512) NOT NULL COMMENT '文件名'
 AFTER task_id
 """
+
+# SQL for adding new columns to cron_subtasks table
+ALTER_CRON_SUBTASKS_NEW_COLUMNS = [
+    """
+    ALTER TABLE swe_cron_subtasks
+    ADD COLUMN task_type VARCHAR(16) DEFAULT NULL
+    COMMENT '任务类型: list/plan'
+    AFTER filename
+    """,
+    """
+    ALTER TABLE swe_cron_subtasks
+    ADD COLUMN custuid VARCHAR(64) DEFAULT NULL
+    COMMENT '任务中客户ID'
+    AFTER task_type
+    """,
+    """
+    ALTER TABLE swe_cron_subtasks
+    ADD COLUMN cust_nm VARCHAR(255) DEFAULT NULL
+    COMMENT '任务中客户名称'
+    AFTER custuid
+    """,
+    """
+    ALTER TABLE swe_cron_subtasks
+    ADD COLUMN notification_content_wplus VARCHAR(5000) DEFAULT NULL
+    COMMENT 'W+渠道通知消息内容'
+    AFTER cust_nm
+    """,
+    """
+    ALTER TABLE swe_cron_subtasks
+    ADD COLUMN notification_content_zhaohu VARCHAR(5000) DEFAULT NULL
+    COMMENT '招乎渠道通知消息内容'
+    AFTER notification_content_wplus
+    """,
+    """
+    ALTER TABLE swe_cron_subtasks
+    ADD INDEX idx_task_type (task_type)
+    """,
+    """
+    ALTER TABLE swe_cron_subtasks
+    ADD INDEX idx_custuid (custuid)
+    """,
+]
 
 
 async def init_database_tables() -> None:
@@ -342,6 +391,15 @@ async def init_database_tables() -> None:
             if "duplicate" not in message and "exists" not in message:
                 raise
         logger.info("Ensured cron subtasks filename column")
+
+        for statement in ALTER_CRON_SUBTASKS_NEW_COLUMNS:
+            try:
+                await db.execute(statement)
+            except Exception as exc:  # pylint: disable=broad-except
+                message = str(exc).lower()
+                if "duplicate" not in message and "exists" not in message:
+                    raise
+        logger.info("Ensured cron subtasks new columns")
 
         await _ensure_cron_jobs_extra_schema()
 
