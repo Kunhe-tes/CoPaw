@@ -27,15 +27,33 @@ def _resolve_store_key(tenant_id: Optional[str] = None) -> str:
     """Resolve the isolation key for transient console messages."""
     try:
         from swe.config.context import (
+            canonicalize_scope_id,
+            decode_scope_id,
             get_current_scope_id,
-            resolve_scope_preferred_tenant_id,
+            get_current_source_id,
+            get_current_tenant_id,
+            resolve_request_effective_tenant_id,
         )
 
-        store_key = resolve_scope_preferred_tenant_id(
-            tenant_id,
-            None,
-            get_current_scope_id(),
-        )
+        if tenant_id is None:
+            store_key = resolve_request_effective_tenant_id(
+                get_current_tenant_id(),
+                get_current_source_id(),
+                get_current_scope_id(),
+            )
+        else:
+            try:
+                decode_scope_id(tenant_id)
+                store_key = canonicalize_scope_id(tenant_id)
+            except ValueError:
+                if tenant_id.startswith("default_"):
+                    store_key = tenant_id
+                else:
+                    store_key = resolve_request_effective_tenant_id(
+                        tenant_id,
+                        get_current_source_id(),
+                        get_current_scope_id(),
+                    )
         if store_key is not None:
             return store_key
     except Exception:
@@ -46,16 +64,59 @@ def _resolve_store_key(tenant_id: Optional[str] = None) -> str:
 def _iter_matching_store_keys(tenant_id: Optional[str]) -> List[str]:
     """Return store keys that belong to the requested tenant/scope."""
     if tenant_id is None:
-        return ["default"]
+        try:
+            from swe.config.context import (
+                get_current_scope_id,
+                get_current_source_id,
+                get_current_tenant_id,
+                resolve_request_effective_tenant_id,
+            )
+
+            effective_tenant_id = resolve_request_effective_tenant_id(
+                get_current_tenant_id(),
+                get_current_source_id(),
+                get_current_scope_id(),
+            )
+            keys = [
+                key
+                for key in (
+                    effective_tenant_id,
+                    get_current_tenant_id(),
+                    "default",
+                )
+                if key
+            ]
+            return list(dict.fromkeys(keys))
+        except Exception:
+            return ["default"]
 
     try:
-        from swe.config.context import resolve_runtime_tenant_id
+        from swe.config.context import (
+            get_current_scope_id,
+            get_current_source_id,
+            resolve_request_effective_tenant_id,
+            resolve_runtime_tenant_id,
+        )
 
         canonical_tenant_id = resolve_runtime_tenant_id(tenant_id, None)
+        request_effective_tenant_id = resolve_request_effective_tenant_id(
+            tenant_id,
+            get_current_source_id(),
+            get_current_scope_id(),
+        )
     except Exception:
         canonical_tenant_id = tenant_id
+        request_effective_tenant_id = tenant_id
 
-    keys = {canonical_tenant_id or tenant_id}
+    keys = {
+        key
+        for key in (
+            canonical_tenant_id or tenant_id,
+            request_effective_tenant_id,
+            tenant_id,
+        )
+        if key
+    }
     try:
         from swe.config.context import decode_scope_id
 

@@ -7,7 +7,7 @@ import logging
 
 from fastapi import APIRouter, HTTPException, Query, Request
 
-from ...config.context import resolve_scope_preferred_tenant_id
+from ...config.context import resolve_request_effective_tenant_id
 from ...config.utils import (
     get_tenant_storage_config_path,
     load_config,
@@ -57,7 +57,7 @@ async def _get_target_workspace(
 ):
     """按目标用户获取 SWE 工作区，避免通过 Monitor 二次转发。"""
     source_id = _request_source_id(request)
-    target_tenant_id = resolve_scope_preferred_tenant_id(
+    target_tenant_id = resolve_request_effective_tenant_id(
         target_user_id,
         source_id,
     )

@@ -39,6 +39,7 @@ from .context import (
     decode_scope_id,
     get_current_effective_tenant_id,
     get_current_scope_id,
+    resolve_request_effective_tenant_id,
     resolve_storage_tenant_id,
     get_current_source_id,
     get_current_tenant_id,
@@ -955,6 +956,25 @@ def get_tenant_working_dir_strict(tenant_id: str | None = None) -> Path:
         )
 
     return migrate_legacy_scope_dir_if_needed(WORKING_DIR, tenant_id)
+
+
+def get_tenant_request_working_dir(tenant_id: str | None = None) -> Path:
+    """按请求访问语义解析租户目录。
+
+    ``default`` 用户在存在 ``source_id`` 时固定走 ``default_{source}``，
+    非 ``default`` 用户维持 runtime scope 目录语义。
+    """
+    resolved_tenant_id = resolve_request_effective_tenant_id(
+        tenant_id if tenant_id is not None else get_current_tenant_id(),
+        get_current_source_id(),
+        get_current_scope_id(),
+    )
+    if resolved_tenant_id is None:
+        raise TenantContextError(
+            "Tenant context required. "
+            "Ensure this code runs within a tenant-scoped request or context.",
+        )
+    return migrate_legacy_scope_dir_if_needed(WORKING_DIR, resolved_tenant_id)
 
 
 def get_tenant_config_path_strict(tenant_id: str | None = None) -> Path:

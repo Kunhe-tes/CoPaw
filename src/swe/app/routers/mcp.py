@@ -22,7 +22,7 @@ from ...config.config import (
     load_agent_config,
     save_agent_config,
 )
-from ...config.context import resolve_scope_preferred_tenant_id
+from ...config.context import resolve_request_effective_tenant_id
 from ...config.utils import (
     get_tenant_working_dir_strict,
     list_logical_tenant_ids,
@@ -219,7 +219,7 @@ def _request_source_id(request: Request) -> str | None:
 
 
 def _request_effective_tenant_id(request: Request) -> str | None:
-    return resolve_scope_preferred_tenant_id(
+    return resolve_request_effective_tenant_id(
         _request_tenant_id(request),
         _request_source_id(request),
         getattr(request.state, "scope_id", None),
