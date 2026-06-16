@@ -100,6 +100,10 @@ _Avoid_: model cache, global provider list, system model config
 The active LLM selection for a tenant, used by agent work when no narrower **Execution Model Slot** is specified.
 _Avoid_: global model, system default model
 
+**Empty Model Output**:
+A model-call outcome where the provider call succeeds but returns no usable assistant content for the runtime to continue or complete agent work. Text, tool-use, structured content, and reasoning content are all usable model content; empty strings, whitespace-only text, empty lists, and missing content are not. **Empty Model Output** is scoped to model-call handling, not to a whole Scheduled Run or chat turn that merely ends with no visible text.
+_Avoid_: output_len=0, blank reply, empty cron output
+
 **Source System Configuration**:
 A source-scoped runtime configuration surface for behavior shared by requests from the same external source. It is not a tenant configuration and does not describe user, organization, or workspace identity.
 _Avoid_: system feature configuration, tenant config, user config
@@ -457,6 +461,21 @@ Resolved as **System Runtime Diagnostic**. The existing lightweight health endpo
 
 **"Health Endpoint"**:
 Resolved as **Liveness Probe** when referring to `/api/health/health`. It is not a readiness check and does not report dependency availability.
+
+**"output_len=0"**:
+Resolved as **Empty Model Output** only when discussing a successful model call that returns no usable assistant content. Scheduled Run or stream-level `output_len=0` remains an execution symptom and must not be treated as the canonical model-call concept.
+
+**"Thinking-Only Model Output"**:
+Resolved as not being **Empty Model Output**. Reasoning content is usable model content even when no user-visible final text is present.
+
+**"Empty Model Output Retry Count"**:
+Resolved as a fixed single retry for each model call. This retry is independent from normal transient-error LLM retry settings and still applies when normal LLM retry is disabled.
+
+**"Streaming Empty Model Output"**:
+Resolved at the whole-stream boundary. An individual empty stream chunk does not trigger an **Empty Model Output** retry; a completed stream that produced no usable model content triggers one full model-call retry.
+
+**"Exhausted Empty Model Output Retry"**:
+Resolved as an explicit model-call failure. If the fixed single retry also returns **Empty Model Output**, Swe raises a diagnostic error instead of treating the call as successfully completed.
 
 **"Flask Worker Usage"**:
 Resolved as **Request Execution Load**. Swe does not run Flask or a multi-worker web-server pool; the diagnostic reports the load and responsiveness of the single-worker Uvicorn/FastAPI backend instead of tenant-level workload statistics or Supervisor process state.
