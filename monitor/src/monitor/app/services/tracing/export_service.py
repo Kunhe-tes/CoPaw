@@ -230,7 +230,7 @@ class TracingExportService:
         excel_headers = [
             "追踪ID",
             "用户ID",
-            "用户名",
+            "用户姓名",
             "会话ID",
             "渠道",
             "用户消息",

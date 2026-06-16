@@ -403,6 +403,7 @@ class ConsoleChannel(BaseChannel):
             send_meta = getattr(request, "channel_meta", None) or {}
             send_meta.setdefault("bot_prefix", self.bot_prefix)
             last_response = None
+            reply_text = ""
             event_count = 0
             title_emitted = False
             title_task_waited = False
@@ -524,6 +525,9 @@ class ConsoleChannel(BaseChannel):
 
                     parts = self._message_to_content_parts(event)
                     self._print_parts(parts, ev_type)
+                    for p in parts:
+                        if hasattr(p, "text") and p.text:
+                            reply_text += p.text
 
                 elif obj == "response":
                     last_response = event
@@ -542,7 +546,7 @@ class ConsoleChannel(BaseChannel):
                 self._print_error(err_msg)
 
             to_handle = request.user_id or ""
-            await self._try_session_end_push(request, to_handle)
+            await self._try_session_end_push(request, to_handle, reply_text)
             if self._on_reply_sent:
                 self._on_reply_sent(
                     self.channel,

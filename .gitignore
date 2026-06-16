@@ -127,3 +127,7 @@ CRON_JOB_OVERVIEW_FRONTEND_BACKUP.md
 openspec/changes/cron-job-overview-failed-detail-modal/proposal.md
 openspec/changes/cron-job-overview-failed-detail-modal/tasks.md
 openspec/changes/cron-job-overview-failed-detail-modal/specs/cron-job-overview-failed-detail-modal/spec.md
+
+# personal debug scripts (not meant to be tracked)
+/diff_dir.py
+/diff_dir_*/

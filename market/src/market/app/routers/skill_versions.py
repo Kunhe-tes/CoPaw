@@ -62,7 +62,7 @@ def _parse_skill_md_frontmatter(
     default_name: str,
     default_desc: str,
 ) -> tuple[str, str]:
-    """解析 SKILL.md frontmatter 提取 name 和 description.
+    """解析 SKILL.md frontmatter 提取 name 和 description（委托共享工具）.
 
     Args:
         skill_md_content: SKILL.md 文件内容
@@ -72,28 +72,11 @@ def _parse_skill_md_frontmatter(
     Returns:
         (name, description) 元组
     """
-    name = default_name
-    desc = default_desc
+    from ...utils.skill_md import extract_metadata
 
-    if not skill_md_content.startswith("---"):
-        return name, desc
-
-    try:
-        end_idx = skill_md_content.index("---", 3)
-        fm_text = skill_md_content[3:end_idx].strip()
-        for line in fm_text.split("\n"):
-            if ":" not in line:
-                continue
-            key, val = line.split(":", 1)
-            key = key.strip().lower()
-            val = val.strip()
-            if key == "name" and val:
-                name = val
-            elif key == "description" and val:
-                desc = val
-    except ValueError:
-        pass
-
+    meta = extract_metadata(skill_md_content)
+    name = meta["name"] or default_name
+    desc = meta["description"] or default_desc
     return name, desc
 
 
@@ -104,7 +87,7 @@ def _update_skill_index(
     skill_dir: Path,
     version_id: str,
 ) -> None:
-    """切换版本后更新市场索引中的技能信息."""
+    """切换版本后更新市场索引中的技能信息（R8：同步 creator_id/name）."""
     items = load_index(marketplace.marketplace_root, source_id)
     item = next((i for i in items if i.item_id == item_id), None)
 
@@ -112,20 +95,39 @@ def _update_skill_index(
         return
 
     skill_md_path = skill_dir / "SKILL.md"
-    if not skill_md_path.exists():
-        return
+    if skill_md_path.exists():
+        skill_md_content = skill_md_path.read_text(encoding="utf-8")
+        new_name, new_desc = _parse_skill_md_frontmatter(
+            skill_md_content,
+            item.name,
+            item.description,
+        )
+        item.name = new_name
+        item.description = new_desc
 
-    skill_md_content = skill_md_path.read_text(encoding="utf-8")
-    new_name, new_desc = _parse_skill_md_frontmatter(
-        skill_md_content,
-        item.name,
-        item.description,
-    )
-
-    item.name = new_name
-    item.description = new_desc
     item.version = version_id
     item.updated_at = datetime.now(timezone.utc).isoformat()
+
+    # R8: 同步更新 creator_id/creator_name 到目标快照的来源
+    from ...marketplace.version_service import SkillVersionService
+
+    svc = SkillVersionService(marketplace.marketplace_root)
+    manifest = svc._load_versions_manifest(source_id, item_id)
+    target = next(
+        (v for v in manifest.versions if v.version_id == version_id),
+        None,
+    )
+    if target is not None:
+        # 优先使用 source_user_*；为空时回退到 created_by
+        if target.source_user_id:
+            item.creator_id = target.source_user_id
+            item.creator_name = (
+                target.source_user_name or target.source_user_id
+            )
+        elif target.created_by:
+            item.creator_id = target.created_by
+            item.creator_name = target.created_by_name or target.created_by
+
     save_index(marketplace.marketplace_root, source_id, items)
 
 

@@ -2255,9 +2255,9 @@ class CronManager:  # pylint: disable=too-many-public-methods
                     "broadcast_original_timezone",
                 ) or notification_timezone
             elif delay_minutes > 0:
-                notification_due_at = (
-                    end_time or actual_time
-                ) + timedelta(minutes=delay_minutes)
+                notification_due_at = (end_time or actual_time) + timedelta(
+                    minutes=delay_minutes,
+                )
 
         await self._monitor_sync_client.record_execution(
             job=job,

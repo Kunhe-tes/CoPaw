@@ -43,8 +43,14 @@ interface SessionApiWithIntent {
   setSelectedSessionIntent?: (sessionId: string | undefined | null) => void;
 }
 
+interface SessionApiWithTitlePatch extends SessionApiWithIntent {
+  patchSessionTitle?: (
+    payload: unknown,
+  ) => IAgentScopeRuntimeWebUISession[] | void;
+}
+
 interface SessionOptions {
-  api?: IAgentScopeRuntimeWebUISessionAPI & SessionApiWithIntent;
+  api?: IAgentScopeRuntimeWebUISessionAPI & SessionApiWithTitlePatch;
 }
 
 interface LoadSessionMessagesOptions {
@@ -111,7 +117,10 @@ async function loadSessionMessages({
     );
 
     if (session?.generating) {
-      emit({ type: "handleReconnect", data: { session_id: requestedSessionId } });
+      emit({
+        type: "handleReconnect",
+        data: { session_id: requestedSessionId },
+      });
     }
 
     return true;
@@ -142,7 +151,9 @@ function getTitlePatchPayload(
   }
 
   const sessionId =
-    typeof titlePatch.session_id === "string" ? titlePatch.session_id.trim() : "";
+    typeof titlePatch.session_id === "string"
+      ? titlePatch.session_id.trim()
+      : "";
   const chatId =
     typeof titlePatch.chat_id === "string" ? titlePatch.chat_id.trim() : "";
   if (!sessionId && !chatId) {
@@ -161,8 +172,8 @@ function sessionMatchesTitlePatch(
   payload: NormalizedSessionTitlePatchPayload,
 ) {
   const candidateIds = new Set<string>(
-    [payload.session_id, payload.chat_id].filter(
-      (id): id is string => Boolean(id),
+    [payload.session_id, payload.chat_id].filter((id): id is string =>
+      Boolean(id),
     ),
   );
 
@@ -237,7 +248,9 @@ export function ChatAnywhereSessionsContextProvider(props: {
   const [currentSessionId, setCurrentSessionId, getCurrentSessionId] =
     useGetState<string | undefined>(undefined);
   const [isSessionLoading, setSessionLoading] = useGetState<boolean>(false);
-  const [isSessionsListLoading, setSessionsListLoading] = useGetState<boolean>(true);
+  const [isSessionsListLoading, setSessionsListLoading] =
+    useGetState<boolean>(true);
+  const sessionApi = options.api;
 
   useMount(async () => {
     setSessionsListLoading(true);
@@ -259,10 +272,11 @@ export function ChatAnywhereSessionsContextProvider(props: {
     {
       type: SESSION_TITLE_PATCH_EVENT,
       callback: (event) => {
+        sessionApi?.patchSessionTitle?.(event.detail);
         setSessions(patchSessionTitleInList(getSessions(), event.detail));
       },
     },
-    [getSessions, setSessions],
+    [getSessions, sessionApi, setSessions],
   );
 
   return (
@@ -327,12 +341,8 @@ export const useChatAnywhereSessionsState = () => {
 };
 
 export const useChatAnywhereSessions = () => {
-  const {
-    setSessions,
-    getSessions,
-    getCurrentSessionId,
-    setCurrentSessionId,
-  } = useContextSelector(ChatAnywhereSessionsContext, (v) => v);
+  const { setSessions, getSessions, getCurrentSessionId, setCurrentSessionId } =
+    useContextSelector(ChatAnywhereSessionsContext, (v) => v);
   const options = useChatAnywhereOptions((v) => v.session);
   const setMessages = useContextSelector(
     ChatAnywhereMessagesContext,

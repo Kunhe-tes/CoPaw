@@ -1,0 +1,45 @@
+{
+  "enabled": true,
+  "events": {
+    "PostToolUse": [
+      {
+        "id": "http-auth-failure-guard-post-tool-use",
+        "matcher": {
+          "tools": ["call_protected_api"]
+        },
+        "hooks": [
+          {
+            "id": "http-auth-failure-context-post-tool-use",
+            "type": "command",
+            "argv": [
+              "python",
+              "scripts/http_auth_failure_guard.py"
+            ],
+            "timeout": 5,
+            "failPolicy": "allow"
+          }
+        ]
+      }
+    ],
+    "PostToolUseFailure": [
+      {
+        "id": "http-auth-failure-guard-post-tool-use-failure",
+        "matcher": {
+          "tools": ["call_protected_api"]
+        },
+        "hooks": [
+          {
+            "id": "http-auth-failure-context-post-tool-use-failure",
+            "type": "command",
+            "argv": [
+              "python",
+              "scripts/http_auth_failure_guard.py"
+            ],
+            "timeout": 5,
+            "failPolicy": "allow"
+          }
+        ]
+      }
+    ]
+  }
+}

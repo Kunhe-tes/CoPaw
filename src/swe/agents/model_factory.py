@@ -931,6 +931,7 @@ def _get_model_runtime_configs(
 def _wrap_model_with_tracing(
     provider_id: str,
     model: ChatModelBase,
+    trace_context: Optional[dict[str, Any]] = None,
 ) -> ChatModelBase:
     """Wrap model with tracing and token recording.
 
@@ -945,7 +946,11 @@ def _wrap_model_with_tracing(
         try:
             trace_mgr = get_trace_manager()
             if trace_mgr.enabled:
-                return TracingModelWrapper(provider_id, wrapped)
+                return TracingModelWrapper(
+                    provider_id,
+                    wrapped,
+                    trace_context=trace_context,
+                )
         except RuntimeError:
             pass
     return wrapped
@@ -953,6 +958,7 @@ def _wrap_model_with_tracing(
 
 def create_model_and_formatter(
     agent_id: Optional[str] = None,
+    trace_context: Optional[dict[str, Any]] = None,
 ) -> Tuple[ChatModelBase, FormatterBase]:
     """Factory method to create model and formatter instances.
 
@@ -1014,7 +1020,11 @@ def create_model_and_formatter(
         formatter = _create_formatter_instance(model.__class__)
 
         # Wrap with tracing and token recording
-        wrapped_model = _wrap_model_with_tracing(provider_id, model)
+        wrapped_model = _wrap_model_with_tracing(
+            provider_id,
+            model,
+            trace_context=trace_context,
+        )
 
         # Wrap with retry logic for transient LLM API errors
         wrapped_model = RetryChatModel(

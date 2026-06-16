@@ -11,6 +11,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, Field
 
 from ...config.context import (
+    resolve_request_effective_tenant_id,
     resolve_runtime_tenant_id,
     resolve_scope_id,
     resolve_scope_preferred_tenant_id,
@@ -259,7 +260,7 @@ def _validate_cron_job_model_slot(
 ) -> None:
     if spec.task_type != "agent" or spec.model_slot is None:
         return
-    tenant_id = resolve_scope_preferred_tenant_id(
+    tenant_id = resolve_request_effective_tenant_id(
         getattr(request.state, "tenant_id", None),
         getattr(request.state, "source_id", None),
         getattr(request.state, "scope_id", None),
@@ -387,6 +388,9 @@ def _build_broadcast_job(
     tenant_name: str | None = None,
     bbk_id: str | None = None,
 ) -> CronJobSpec:
+    resolved_scope_id = None
+    if not (target_tenant_id == "default" and source_id is not None):
+        resolved_scope_id = resolve_scope_id(target_tenant_id, source_id)
     meta = dict(source_job.meta or {})
     for key in (
         *PRESERVED_CHILD_META_KEYS,
@@ -441,7 +445,7 @@ def _build_broadcast_job(
             "bbk_id": target_bbk_id,
             "source_id": source_id,
             "tenant_name": target_tenant_name,
-            "scope_id": resolve_scope_id(target_tenant_id, source_id),
+            "scope_id": resolved_scope_id,
             "schedule": source_job.schedule.model_copy(
                 update={
                     "cron": cron,
@@ -853,7 +857,10 @@ async def _broadcast_to_tenants(
     )
 
 
-def _is_broadcast_child_of(job: CronJobSpec | None, source_job_id: str) -> bool:
+def _is_broadcast_child_of(
+    job: CronJobSpec | None,
+    source_job_id: str,
+) -> bool:
     if job is None:
         return False
     return (job.meta or {}).get("broadcast_source_job_id") == source_job_id
@@ -1054,8 +1061,10 @@ async def broadcast_job(
             detail="No target tenant IDs provided",
         )
 
-    normalized_tenants, target_identity_by_tenant = _normalize_broadcast_targets(
-        body,
+    normalized_tenants, target_identity_by_tenant = (
+        _normalize_broadcast_targets(
+            body,
+        )
     )
     context = _build_broadcast_context(
         request,

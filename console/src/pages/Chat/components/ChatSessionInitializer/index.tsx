@@ -42,8 +42,6 @@ const ChatSessionInitializer: React.FC = () => {
   currentSessionIdRef.current = currentSessionId;
 
   useEffect(() => {
-    if (!sessions.length) return;
-
     const { requestedSessionId, resolvedSessionId } = getInitialSessionSelection({
       pathname: location.pathname,
       sessionList: sessions,
@@ -52,14 +50,17 @@ const ChatSessionInitializer: React.FC = () => {
     if (!resolvedSessionId) return;
 
     const matching = sessions.find((s) => s.id === resolvedSessionId);
-    if (matching && currentSessionIdRef.current !== matching.id) {
+    const targetSessionId = matching?.id ?? resolvedSessionId;
+
+    if (currentSessionIdRef.current !== targetSessionId) {
       const sessionAgentId = getSessionAgentId(
-        (matching as { meta?: Record<string, unknown> | null }).meta,
+        (matching as { meta?: Record<string, unknown> | null } | undefined)
+          ?.meta,
       );
       if (sessionAgentId && sessionAgentId !== selectedAgent) {
         setSelectedAgent(sessionAgentId);
       }
-      setCurrentSessionId(matching.id);
+      setCurrentSessionId(targetSessionId);
     }
 
     if (
