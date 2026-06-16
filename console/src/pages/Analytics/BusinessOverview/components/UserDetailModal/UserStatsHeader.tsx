@@ -14,6 +14,7 @@ import { useTranslation } from "react-i18next";
 import {
   MCPToolUsage,
   ModelUsage,
+  SessionResourceFilter,
   SessionStats,
   SkillUsage,
   UserStats,
@@ -24,6 +25,8 @@ interface UserStatsHeaderProps {
   userStats: UserStats;
   sessionStats?: SessionStats | null;
   collapsed?: boolean;
+  activeResourceFilter?: SessionResourceFilter | null;
+  onResourceFilterChange?: (filter: SessionResourceFilter) => void;
   onToggleCollapsed?: () => void;
 }
 
@@ -31,6 +34,21 @@ interface UsageItem {
   name: string;
   count: number;
   error_count?: number;
+  filter: SessionResourceFilter;
+}
+
+function isSameResourceFilter(
+  current: SessionResourceFilter | null | undefined,
+  candidate: SessionResourceFilter,
+): boolean {
+  if (!current || current.type !== candidate.type || current.name !== candidate.name) {
+    return false;
+  }
+  return (
+    current.type !== "mcp_tool" ||
+    candidate.type !== "mcp_tool" ||
+    current.mcp_server === candidate.mcp_server
+  );
 }
 
 function getActiveUsageStats(
@@ -71,10 +89,14 @@ function UsageBlock({
   title,
   items,
   colorFn,
+  activeResourceFilter,
+  onResourceFilterChange,
 }: {
   title: string;
   items: UsageItem[];
   colorFn?: (item: UsageItem) => string;
+  activeResourceFilter?: SessionResourceFilter | null;
+  onResourceFilterChange?: (filter: SessionResourceFilter) => void;
 }) {
   const tagRowRef = useRef<HTMLDivElement | null>(null);
   const [hasOverflow, setHasOverflow] = useState(false);
@@ -88,6 +110,7 @@ function UsageBlock({
     };
 
     measureOverflow();
+    if (typeof ResizeObserver === "undefined") return;
     const resizeObserver = new ResizeObserver(measureOverflow);
     resizeObserver.observe(node);
     return () => resizeObserver.disconnect();
@@ -124,15 +147,31 @@ function UsageBlock({
       </div>
       <div className={styles.compactTagRow} ref={tagRowRef}>
         {items.length > 0 ? (
-          items.map((item) => (
-            <Tag
-              key={item.name}
-              color={colorFn ? colorFn(item) : "default"}
-              className={styles.usageTag}
-            >
-              {item.name} · {item.count}
-            </Tag>
-          ))
+          items.map((item) => {
+            const selected = isSameResourceFilter(
+              activeResourceFilter,
+              item.filter,
+            );
+            return (
+              <button
+                type="button"
+                key={`${item.filter.type}-${item.name}`}
+                className={`${styles.usageTagButton} ${
+                  selected ? styles.usageTagButtonSelected : ""
+                }`}
+                aria-label={`${selected ? "取消" : "筛选"}${title}：${item.name}`}
+                aria-pressed={selected}
+                onClick={() => onResourceFilterChange?.(item.filter)}
+              >
+                <Tag
+                  color={colorFn ? colorFn(item) : "default"}
+                  className={styles.usageTag}
+                >
+                  {item.name} · {item.count}
+                </Tag>
+              </button>
+            );
+          })
         ) : (
           <span className={styles.emptyUsageText}>暂无记录</span>
         )}
@@ -160,6 +199,8 @@ export default function UserStatsHeader({
   userStats,
   sessionStats,
   collapsed = false,
+  activeResourceFilter,
+  onResourceFilterChange,
   onToggleCollapsed,
 }: UserStatsHeaderProps) {
   const { t } = useTranslation();
@@ -171,6 +212,7 @@ export default function UserStatsHeader({
       activeUsageStats.model_usage.map((model) => ({
         name: model.model_name,
         count: model.count,
+        filter: { type: "model" as const, name: model.model_name },
       })),
     [activeUsageStats.model_usage],
   );
@@ -181,6 +223,11 @@ export default function UserStatsHeader({
         name: `${tool.tool_name} (${tool.mcp_server})`,
         count: tool.count,
         error_count: tool.error_count,
+        filter: {
+          type: "mcp_tool" as const,
+          name: tool.tool_name,
+          mcp_server: tool.mcp_server,
+        },
       })),
     [activeUsageStats.mcp_tools_used],
   );
@@ -190,6 +237,7 @@ export default function UserStatsHeader({
       activeUsageStats.skills_used.map((skill) => ({
         name: skill.skill_name,
         count: skill.count,
+        filter: { type: "skill" as const, name: skill.skill_name },
       })),
     [activeUsageStats.skills_used],
   );
@@ -246,8 +294,20 @@ export default function UserStatsHeader({
           </div>
         </div>
         <div className={styles.statsHeaderActions}>
-          <Tag color={isSessionSelected ? "processing" : "default"}>
-            {isSessionSelected ? "已选中会话" : "未筛选会话"}
+          <Tag
+            color={
+              activeResourceFilter
+                ? "processing"
+                : isSessionSelected
+                  ? "processing"
+                  : "default"
+            }
+          >
+            {activeResourceFilter
+              ? "已筛选会话"
+              : isSessionSelected
+                ? "已选中会话"
+                : "未筛选会话"}
           </Tag>
           <Tooltip title={collapsed ? "展开洞察" : "收起洞察"}>
             <button
@@ -281,18 +341,27 @@ export default function UserStatsHeader({
           </div>
 
           <div className={styles.usageSummary}>
-            <UsageBlock title="模型" items={modelItems} />
+            <UsageBlock
+              title="模型"
+              items={modelItems}
+              activeResourceFilter={activeResourceFilter}
+              onResourceFilterChange={onResourceFilterChange}
+            />
             <UsageBlock
               title="MCP 工具"
               items={mcpToolItems}
               colorFn={(item) =>
                 item.error_count && item.error_count > 0 ? "error" : "default"
               }
+              activeResourceFilter={activeResourceFilter}
+              onResourceFilterChange={onResourceFilterChange}
             />
             <UsageBlock
               title="技能"
               items={skillItems}
               colorFn={() => "blue"}
+              activeResourceFilter={activeResourceFilter}
+              onResourceFilterChange={onResourceFilterChange}
             />
           </div>
         </>

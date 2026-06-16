@@ -179,7 +179,31 @@ def build_cron_bbk_in_filter(bbk_ids: Optional[str]) -> tuple[str, list[str]]:
     return f" AND j.bbk_id IN ({placeholders})", ids
 
 
-class TracingQueryService:
+def _summarize_task_status_rows(rows: list[dict]) -> tuple[int, int, int, int]:
+    """汇总定时任务状态及已读数量."""
+    success = 0
+    failed = 0
+    cancelled = 0
+    read_count = 0
+
+    for row in rows:
+        status = row["status"]
+        count = row["count"]
+
+        if status == "success":
+            success += count
+        elif status in ("error", "timeout"):
+            failed += count
+        elif status in ("cancelled", "skipped"):
+            cancelled += count
+
+        if row["is_read"]:
+            read_count += count
+
+    return success, failed, cancelled, read_count
+
+
+class TracingQueryService:  # pylint: disable=too-many-public-methods
     """运营看板查询服务."""
 
     def __init__(self, db: DatabaseConnection):
@@ -2297,27 +2321,9 @@ class TracingQueryService:
 
         rows = await self._db.fetch_all(query, params)
 
-        # 按状态汇总
-        success = 0
-        failed = 0
-        cancelled = 0
-        read_count = 0
-
-        for row in rows:
-            status = row["status"]
-            is_read = row["is_read"]
-            count = row["count"]
-
-            if status == "success":
-                success += count
-            elif status in ("error", "timeout"):
-                failed += count
-            elif status in ("cancelled", "skipped"):
-                cancelled += count
-
-            if is_read:
-                read_count += count
-
+        success, failed, cancelled, read_count = _summarize_task_status_rows(
+            rows,
+        )
         total_tasks = success + failed + cancelled
 
         # 查询本时间段内新增的定时任务数（按 created_at 过滤）
@@ -3376,45 +3382,102 @@ class TracingQueryService:
         start_date: Optional[datetime],
         end_date: Optional[datetime],
         has_error: Optional[bool],
+        resource_type: Optional[str] = None,
+        resource_name: Optional[str] = None,
+        mcp_server: Optional[str] = None,
     ) -> tuple[list[str], list[Any]]:
         """构建 get_sessions 的 WHERE 条件."""
         exclude_placeholders = ", ".join(["%s"] * len(EXCLUDED_SOURCE_IDS))
         if source_id == "all":
             where_clauses: list[str] = [
-                f"source_id NOT IN ({exclude_placeholders})",
+                f"t.source_id NOT IN ({exclude_placeholders})",
             ]
             params: list[Any] = list(EXCLUDED_SOURCE_IDS)
         else:
-            where_clauses = ["source_id = %s"]
+            where_clauses = ["t.source_id = %s"]
             params = [source_id]
 
         if user_id:
-            where_clauses.append("user_id = %s")
+            where_clauses.append("t.user_id = %s")
             params.append(user_id)
         if session_id:
-            where_clauses.append("session_id LIKE %s")
+            where_clauses.append("t.session_id LIKE %s")
             params.append(f"%{session_id}%")
         if bbk_ids:
             bbk_filter_sql, bbk_params = build_bbk_in_filter(bbk_ids)
             where_clauses.append(
-                f"bbk_id IN ({', '.join(['%s'] * len(bbk_params))})",
+                f"t.bbk_id IN ({', '.join(['%s'] * len(bbk_params))})",
             )
             params.extend(bbk_params)
         if start_date:
-            where_clauses.append("start_time >= %s")
+            where_clauses.append("t.start_time >= %s")
             params.append(start_date)
         if end_date:
-            where_clauses.append("start_time <= %s")
+            where_clauses.append("t.start_time <= %s")
             params.append(end_date)
+
+        resource_date_clauses: list[str] = []
+        resource_date_params: list[Any] = []
+        if start_date:
+            resource_date_clauses.append("resource.start_time >= %s")
+            resource_date_params.append(start_date)
+        if end_date:
+            resource_date_clauses.append("resource.start_time <= %s")
+            resource_date_params.append(end_date)
+        resource_date_sql = (
+            " AND " + " AND ".join(resource_date_clauses)
+            if resource_date_clauses
+            else ""
+        )
+
+        if resource_type == "model" and resource_name:
+            where_clauses.append(
+                "EXISTS (SELECT 1 FROM swe_tracing_traces resource "
+                "WHERE resource.source_id = t.source_id "
+                "AND resource.session_id = t.session_id "
+                "AND resource.model_name = %s"
+                f"{resource_date_sql})",
+            )
+            params.append(resource_name)
+            params.extend(resource_date_params)
+        elif resource_type == "skill" and resource_name:
+            where_clauses.append(
+                "EXISTS (SELECT 1 FROM swe_tracing_spans resource "
+                "WHERE resource.source_id = t.source_id "
+                "AND resource.session_id = t.session_id "
+                "AND resource.event_type = 'skill_invocation' "
+                "AND resource.skill_name = %s"
+                f"{resource_date_sql})",
+            )
+            params.append(resource_name)
+            params.extend(resource_date_params)
+        elif resource_type == "mcp_tool" and resource_name and mcp_server:
+            where_clauses.append(
+                "EXISTS (SELECT 1 FROM swe_tracing_spans resource "
+                "WHERE resource.source_id = t.source_id "
+                "AND resource.session_id = t.session_id "
+                "AND resource.event_type = 'tool_call_end' "
+                "AND resource.tool_name = %s "
+                "AND resource.mcp_server = %s"
+                f"{resource_date_sql})",
+            )
+            params.extend([resource_name, mcp_server])
+            params.extend(resource_date_params)
 
         # 报错会话筛选
         if has_error is True:
             where_clauses.append(
-                "session_id IN (SELECT DISTINCT session_id FROM swe_tracing_traces WHERE status = 'error')",
+                "EXISTS (SELECT 1 FROM swe_tracing_traces error_trace "
+                "WHERE error_trace.source_id = t.source_id "
+                "AND error_trace.session_id = t.session_id "
+                "AND error_trace.status = 'error')",
             )
         elif has_error is False:
             where_clauses.append(
-                "session_id NOT IN (SELECT DISTINCT session_id FROM swe_tracing_traces WHERE status = 'error')",
+                "NOT EXISTS (SELECT 1 FROM swe_tracing_traces error_trace "
+                "WHERE error_trace.source_id = t.source_id "
+                "AND error_trace.session_id = t.session_id "
+                "AND error_trace.status = 'error')",
             )
 
         return where_clauses, params
@@ -3494,6 +3557,9 @@ class TracingQueryService:
         end_date: Optional[datetime] = None,
         bbk_ids: Optional[str] = None,
         has_error: Optional[bool] = None,
+        resource_type: Optional[str] = None,
+        resource_name: Optional[str] = None,
+        mcp_server: Optional[str] = None,
     ) -> tuple[list[SessionListItem], int]:
         """获取会话列表."""
         # 构建 WHERE 条件
@@ -3505,6 +3571,9 @@ class TracingQueryService:
             start_date,
             end_date,
             has_error,
+            resource_type,
+            resource_name,
+            mcp_server,
         )
         where_sql = " AND ".join(where_clauses) if where_clauses else "1=1"
 
@@ -3517,7 +3586,7 @@ class TracingQueryService:
         )
 
         # 获取总数
-        count_query = f"SELECT COUNT(DISTINCT session_id) as total FROM swe_tracing_traces WHERE {where_sql}"
+        count_query = f"SELECT COUNT(DISTINCT t.session_id) as total FROM swe_tracing_traces t WHERE {where_sql}"
         count_row = await self._db.fetch_one(count_query, tuple(params))
         total = count_row["total"] if count_row else 0
 

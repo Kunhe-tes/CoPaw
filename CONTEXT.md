@@ -92,6 +92,10 @@ _Avoid_: model params, cron model
 The behavior where a **Scheduled Run** uses the current **Tenant Default Model** when its configured **Execution Model Slot** cannot be used. The fallback is silent in the user interface but must remain visible in operational records.
 _Avoid_: hard failure, invisible fallback
 
+**Tenant Provider Configuration**:
+The tenant-scoped set of LLM provider definitions and model choices available for model selection. One **Tenant Provider Configuration** contains many provider entries and identifies at most one **Tenant Default Model**.
+_Avoid_: model cache, global provider list, system model config
+
 **Tenant Default Model**:
 The active LLM selection for a tenant, used by agent work when no narrower **Execution Model Slot** is specified.
 _Avoid_: global model, system default model
