@@ -22,6 +22,8 @@ class PublishSkillRequest(BaseModel):
     skill_name: Optional[str] = None
     agent_id: str = "default"
     overwrite: bool = False
+    # 用户工作区版本号，用于版本快照的 source_user_version
+    source_user_version: str = ""
 
 
 class DistributeRequest(BaseModel):
@@ -154,6 +156,7 @@ class UploadSkillResponse(BaseModel):
     name: str | None = None
     description: str | None = None
     conflicts: list[dict] | None = None
+    version_unchanged: bool = False
 
 
 class MCPDistributionRequest(BaseModel):

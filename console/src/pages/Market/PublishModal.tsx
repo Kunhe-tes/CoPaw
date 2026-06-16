@@ -87,6 +87,7 @@ interface PublishModalProps {
     skillJson: Record<string, unknown>;
     skillMd: string;
     skillDirName?: string; // 技能目录名，用于同步整个目录
+    version?: string; // 用户工作区版本号
   };
 }
 
@@ -139,16 +140,17 @@ export function PublishModal({ open, sourceId, userId, onClose, onSuccess, initi
         skill_name: initialData?.skillDirName,
         agent_id: "default",
         overwrite,
+        source_user_version: initialData?.version,
       };
       const result = await marketApi.publishSkill(sourceId, payload);
       if (result.version_unchanged) {
-        message.warning("内容与市场最新版本一致，市场版本未增加");
+        message.info(initialData ? "当前内容已是最新，无需重复同步" : "内容没有变化，无需重新上架");
       } else {
         message.success(initialData ? "同步成功" : "上架成功");
+        onSuccess();
       }
       form.resetFields();
       onClose();
-      onSuccess();
     } catch (err) {
       // Ant Design 表单校验失败时直接返回，不进入冲突/错误逻辑
       if (err && typeof err === "object" && "errorFields" in err) {

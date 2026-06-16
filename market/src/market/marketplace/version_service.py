@@ -747,13 +747,39 @@ class SkillVersionService:
         self,
         skill_dir: Path,
     ) -> str:
-        """计算技能目录内容签名."""
+        """计算技能目录内容签名.
+
+        对文本文件（.md / .json / .yaml / .yml / .txt / .toml）统一换行符
+        为 LF 后再计算，避免因 write_text 在 Windows 上产生 CRLF 而导致
+        内容相同但签名不同（跨路径 R7 no-op 失效）。
+        """
+        _TEXT_EXTENSIONS = frozenset(
+            {
+                ".md",
+                ".json",
+                ".yaml",
+                ".yml",
+                ".txt",
+                ".toml",
+            },
+        )
         digest = hashlib.sha256()
         for path in sorted(skill_dir.rglob("*")):
             if path.is_file() and not self._is_ignored(path):
                 rel = path.relative_to(skill_dir)
                 digest.update(str(rel).encode("utf-8"))
-                digest.update(path.read_bytes())
+                if path.suffix.lower() in _TEXT_EXTENSIONS:
+                    # 文本文件：统一换行符为 LF
+                    try:
+                        content = path.read_text(encoding="utf-8")
+                        digest.update(
+                            content.replace("\r\n", "\n").encode("utf-8"),
+                        )
+                    except (UnicodeDecodeError, OSError):
+                        # 编码异常时回退到原始字节
+                        digest.update(path.read_bytes())
+                else:
+                    digest.update(path.read_bytes())
         return digest.hexdigest()
 
     def _is_ignored(

@@ -448,6 +448,7 @@ def _copy_skill_files(
                 (skill_dir / "SKILL.md").write_text(
                     req.skill_md,
                     encoding="utf-8",
+                    newline="",
                 )
     else:
         # 未提供 skill_name，只写入 SKILL.md
@@ -455,6 +456,7 @@ def _copy_skill_files(
             (skill_dir / "SKILL.md").write_text(
                 req.skill_md,
                 encoding="utf-8",
+                newline="",
             )
 
 
@@ -864,8 +866,16 @@ class MarketplaceService:
         items = load_index(self.marketplace_root, source_id)
         existing = next((i for i in items if i.name == req.name), None)
 
-        # R4: 同名 → 续接到现有 MarketItem，无论 creator 是否相同
-        # （SkillNameConflictError 已退役，相关 422/409 响应不再产生）
+        # R4: 同名 → 续接到现有 MarketItem，但需先确认覆盖意图
+        # 未显式 overwrite 时抛冲突异常，由前端弹窗让用户确认
+        if existing is not None and not req.overwrite:
+            raise SkillNameConflictError(
+                existing_item_id=existing.item_id,
+                existing_name=existing.name,
+                existing_creator_id=existing.creator_id,
+                existing_creator_name=existing.creator_name,
+                existing_version=existing.version,
+            )
 
         item = _upsert_skill_item(items, existing, req)
 
@@ -886,15 +896,18 @@ class MarketplaceService:
         # 创建版本快照
         # source_user_*：内容来源是 req.creator_*（PublishSkillRequest 显式指定）
         # created_by_*：操作者（admin），未传则与 source_user 相同（向后兼容）
-        skill_md_path = skill_dir / "SKILL.md"
-        source_user_version = ""
-        if skill_md_path.exists():
-            try:
-                source_user_version = _extract_version_md(
-                    skill_md_path.read_text(encoding="utf-8"),
-                )
-            except OSError:
-                pass
+        # source_user_version 优先使用请求中传入的值（前端从 manifest 获取），
+        # 其次从 SKILL.md frontmatter 提取（兼容旧调用方或不传的场景）。
+        source_user_version = req.source_user_version
+        if not source_user_version:
+            skill_md_path = skill_dir / "SKILL.md"
+            if skill_md_path.exists():
+                try:
+                    source_user_version = _extract_version_md(
+                        skill_md_path.read_text(encoding="utf-8"),
+                    )
+                except OSError:
+                    pass
 
         version_svc = SkillVersionService(self.marketplace_root)
         version_unchanged = False
@@ -2131,9 +2144,19 @@ class MarketplaceService:
             None,
         )
 
+        # 未显式 overwrite 时抛冲突异常，由前端弹窗让用户确认
+        if existing is not None and not req.overwrite:
+            raise MCPNameConflictError(
+                existing_item_id=existing.item_id,
+                existing_name=existing.name,
+                existing_creator_id=existing.creator_id,
+                existing_creator_name=existing.creator_name,
+                existing_version=existing.version,
+            )
+
         now = datetime.now(timezone.utc).isoformat()
         if existing is not None:
-            # 同名 → 续接到现有条目
+            # 同名（已确认覆盖） → 续接到现有条目
             self._apply_publish_update(existing, req, now)
             item = existing
         else:
