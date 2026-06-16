@@ -50,7 +50,7 @@ describe("SessionApi identity mapping", () => {
         items,
         total: items.length,
         page: 1,
-        page_size: 50,
+        page_size: 200,
         has_more: false,
       };
     });
@@ -733,14 +733,14 @@ describe("SessionApi identity mapping", () => {
       ],
       total: 3,
       page: 1,
-      page_size: 50,
+      page_size: 200,
       has_more: true,
     });
 
     const list = await sessionApi.getSessionList();
 
     expect(apiMocks.listChatsPage).toHaveBeenCalledWith({
-      page_size: 50,
+      page_size: 200,
       cursor: null,
     });
     expect(list.map((session) => session.id)).toEqual([
@@ -767,7 +767,7 @@ describe("SessionApi identity mapping", () => {
       items: chats.slice(0, 50),
       total: chats.length,
       page: 1,
-      page_size: 50,
+      page_size: 200,
       has_more: true,
     });
 
@@ -808,7 +808,7 @@ describe("SessionApi identity mapping", () => {
         ],
         total: 3,
         page: 1,
-        page_size: 50,
+        page_size: 200,
         has_more: true,
       })
       .mockResolvedValueOnce({
@@ -836,7 +836,7 @@ describe("SessionApi identity mapping", () => {
         ],
         total: 3,
         page: 2,
-        page_size: 50,
+        page_size: 200,
         has_more: false,
       });
 
@@ -845,7 +845,7 @@ describe("SessionApi identity mapping", () => {
 
     expect(apiMocks.listChatsPage).toHaveBeenLastCalledWith({
       page: 2,
-      page_size: 50,
+      page_size: 200,
     });
     expect(list.map((session) => session.id)).toEqual([
       "chat-3",
@@ -861,7 +861,7 @@ describe("SessionApi identity mapping", () => {
       items: [],
       total: 1,
       page: 1,
-      page_size: 50,
+      page_size: 200,
       has_more: true,
     });
     await sessionApi.getSessionList();
@@ -878,7 +878,7 @@ describe("SessionApi identity mapping", () => {
       items: [],
       total: 1,
       page: 2,
-      page_size: 50,
+      page_size: 200,
       has_more: false,
     });
     await Promise.all([first, second]);
@@ -892,7 +892,7 @@ describe("SessionApi identity mapping", () => {
       items: [],
       total: 2,
       page: 1,
-      page_size: 50,
+      page_size: 200,
       has_more: true,
     });
     await sessionApi.getSessionList();
@@ -912,7 +912,7 @@ describe("SessionApi identity mapping", () => {
         items: [],
         total: 1,
         page: 1,
-        page_size: 50,
+        page_size: 200,
         has_more: true,
       })
       .mockResolvedValueOnce({
@@ -930,7 +930,7 @@ describe("SessionApi identity mapping", () => {
         ],
         total: 1,
         page: 2,
-        page_size: 50,
+        page_size: 200,
         has_more: false,
       });
 
@@ -954,7 +954,7 @@ describe("SessionApi identity mapping", () => {
       items: [],
       total: 100,
       page: 1,
-      page_size: 50,
+      page_size: 200,
       has_more: true,
     });
     apiMocks.listChats.mockResolvedValue([]);
@@ -992,7 +992,7 @@ describe("SessionApi identity mapping", () => {
         items: [],
         total: 100,
         page: 1,
-        page_size: 50,
+        page_size: 200,
         has_more: true,
         next_cursor: "cursor-1",
       })
@@ -1000,7 +1000,7 @@ describe("SessionApi identity mapping", () => {
         items: [],
         total: 100,
         page: 2,
-        page_size: 50,
+        page_size: 200,
         has_more: false,
         next_cursor: null,
       });
@@ -1009,11 +1009,11 @@ describe("SessionApi identity mapping", () => {
     await sessionApi.loadMoreSessions();
 
     expect(apiMocks.listChatsPage).toHaveBeenNthCalledWith(1, {
-      page_size: 50,
+      page_size: 200,
       cursor: null,
     });
     expect(apiMocks.listChatsPage).toHaveBeenNthCalledWith(2, {
-      page_size: 50,
+      page_size: 200,
       cursor: "cursor-1",
     });
   });
@@ -1036,7 +1036,7 @@ describe("SessionApi identity mapping", () => {
         ],
         total: 2,
         page: 1,
-        page_size: 50,
+        page_size: 200,
         has_more: true,
       })
       .mockResolvedValueOnce({
@@ -1054,7 +1054,7 @@ describe("SessionApi identity mapping", () => {
         ],
         total: 2,
         page: 2,
-        page_size: 50,
+        page_size: 200,
         has_more: false,
       })
       .mockResolvedValueOnce({
@@ -1072,7 +1072,7 @@ describe("SessionApi identity mapping", () => {
         ],
         total: 2,
         page: 1,
-        page_size: 50,
+        page_size: 200,
         has_more: true,
       });
 
@@ -1155,7 +1155,7 @@ describe("SessionApi identity mapping", () => {
         items: [],
         total: 1,
         page: 1,
-        page_size: 50,
+        page_size: 200,
         has_more: true,
       })
       .mockResolvedValueOnce({
@@ -1173,7 +1173,7 @@ describe("SessionApi identity mapping", () => {
         ],
         total: 1,
         page: 2,
-        page_size: 50,
+        page_size: 200,
         has_more: false,
       });
 

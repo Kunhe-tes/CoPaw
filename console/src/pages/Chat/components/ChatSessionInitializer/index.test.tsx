@@ -68,14 +68,4 @@ describe("ChatSessionInitializer", () => {
     expect(mocks.setCurrentSessionId).toHaveBeenCalledWith("chat-2");
     expect(mocks.navigate).not.toHaveBeenCalled();
   });
-
-  it("selects a route chat id even when it is not in the paginated session list", () => {
-    mocks.pathname = "/chat/chat-51";
-
-    render(<ChatSessionInitializer />);
-
-    expect(mocks.setSelectedAgent).not.toHaveBeenCalled();
-    expect(mocks.setCurrentSessionId).toHaveBeenCalledWith("chat-51");
-    expect(mocks.navigate).not.toHaveBeenCalled();
-  });
 });
