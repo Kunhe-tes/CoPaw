@@ -726,6 +726,16 @@ def _resolve_runtime_tenant_for_paths(
     if tenant_id is None:
         return get_current_effective_tenant_id()
 
+    if tenant_id == "default":
+        return resolve_request_effective_tenant_id(
+            tenant_id,
+            get_current_source_id(),
+            get_current_scope_id(),
+        )
+
+    if tenant_id.startswith("default_"):
+        return tenant_id
+
     current_scope_id = get_current_scope_id()
     if current_scope_id is not None and tenant_id == get_current_tenant_id():
         return canonicalize_scope_id(current_scope_id)

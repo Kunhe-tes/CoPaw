@@ -53,7 +53,7 @@ from ...agents.skills_manager import (
     update_single_builtin,
 )
 from ...config.utils import (
-    get_tenant_working_dir_strict,
+    get_tenant_request_working_dir,
     list_logical_tenant_ids,
 )
 from ...config.context import resolve_request_effective_tenant_id
@@ -277,7 +277,7 @@ def _request_effective_tenant_id(request: Request) -> str | None:
 
 
 def _request_tenant_working_dir(request: Request) -> Path:
-    return get_tenant_working_dir_strict(_request_effective_tenant_id(request))
+    return get_tenant_request_working_dir(_request_tenant_id(request))
 
 
 def _request_source_id(request: Request) -> str | None:

@@ -3,6 +3,7 @@
 
 # pylint: disable=protected-access,redefined-outer-name,unused-import
 
+import asyncio
 from datetime import datetime
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -152,6 +153,43 @@ class TestCurrentTraceContext:
 
         set_current_trace(None)
         assert get_current_trace() is None
+
+    @pytest.mark.asyncio
+    async def test_create_task_inherits_trace_context_snapshot(self):
+        """子任务会继承创建瞬间的 trace context 快照，便于排查串链。"""
+        trace_a = TraceContext(
+            trace_id="trace-a",
+            user_id="user-a",
+            session_id="session-a",
+            channel="console",
+            source_id="source-a",
+        )
+        trace_b = TraceContext(
+            trace_id="trace-b",
+            user_id="user-b",
+            session_id="session-b",
+            channel="console",
+            source_id="source-b",
+        )
+
+        gate = asyncio.Event()
+        observed: dict[str, str | None] = {}
+
+        async def read_trace_after_switch() -> None:
+            await gate.wait()
+            ctx = get_current_trace()
+            observed["trace_id"] = ctx.trace_id if ctx else None
+
+        set_current_trace(trace_a)
+        task = asyncio.create_task(read_trace_after_switch())
+        set_current_trace(trace_b)
+        gate.set()
+        await task
+
+        assert observed["trace_id"] == "trace-a"
+        assert get_current_trace() is trace_b
+
+        set_current_trace(None)
 
 
 class TestTraceManager:
@@ -961,6 +999,46 @@ class TestSessionName:
         assert ctx.user_name == "John Doe"
         assert ctx.bbk_id == "branch-001"
 
+        await manager.close()
+
+    @pytest.mark.asyncio
+    async def test_setup_skill_detector_does_not_start_skill_immediately(
+        self,
+        enabled_config,
+        mock_db,
+        monkeypatch,
+    ):
+        """Layer 0 仅做检测缓存，正式 skill span 由会话 detector 启动。"""
+        manager = TraceManager(enabled_config, mock_db)
+        await manager.initialize()
+
+        trace_id = await manager.start_trace(
+            user_id="user-1",
+            session_id="session-1",
+            channel="console",
+            source_id="source-1",
+            user_message="use xlsx to analyze",
+        )
+
+        detector_instance = MagicMock()
+        detector_instance.detect_from_user_message.return_value = (
+            "xlsx",
+            0.9,
+        )
+        detector_instance.start_skill = AsyncMock()
+
+        monkeypatch.setattr(
+            "swe.agents.skill_invocation_detector.SkillInvocationDetector",
+            lambda **kwargs: detector_instance,
+        )
+
+        await manager.setup_skill_detector(
+            trace_id=trace_id,
+            enabled_skills=["xlsx"],
+        )
+
+        detector_instance.detect_from_user_message.assert_called_once()
+        detector_instance.start_skill.assert_not_awaited()
         await manager.close()
 
     def test_trace_model_with_session_name(self):

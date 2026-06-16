@@ -27,10 +27,12 @@ class FakeWorkspace:
         agent_id: str,
         workspace_dir: str,
         tenant_id: str | None = None,
+        source_system_config_service=None,
     ):
         self.agent_id = agent_id
         self.workspace_dir = workspace_dir
         self.tenant_id = tenant_id
+        self.source_system_config_service = source_system_config_service
         self.manager = None
         self.started = False
 
@@ -64,6 +66,10 @@ class ChannelConfig:
 
 
 class MCPConfig:
+    pass
+
+
+class MCPClientConfig:
     pass
 
 
@@ -149,22 +155,8 @@ get_workspace_skill_manifest_path = (
 reconcile_pool_manifest = skills_manager.reconcile_pool_manifest
 
 
-def _install_test_stubs() -> dict[str, object | None]:
-    module_names = [
-        "swe.config.utils",
-        "swe.config.context",
-        "swe.config.config",
-        "swe.agents.utils.file_handling",
-        "swe.app.utils",
-        "swe.agents.memory.agent_md_manager",
-        "swe.agents.utils",
-        "swe.app.multi_agent_manager",
-        "swe.app.workspace",
-    ]
-    original_modules: dict[str, object | None] = {}
-    for name in module_names:
-        original_modules[name] = sys.modules.get(name)
-
+def _create_config_utils_stub() -> types.ModuleType:
+    """创建 config.utils 模块存根。"""
     config_utils = types.ModuleType("swe.config.utils")
     config_utils.load_config = lambda *args, **kwargs: None
     config_utils.save_config = lambda *args, **kwargs: None
@@ -176,7 +168,17 @@ def _install_test_stubs() -> dict[str, object | None]:
         if tenant_id
         else (_ for _ in ()).throw(RuntimeError("tenant context required"))
     )
+    config_utils.get_tenant_request_working_dir = lambda tenant_id=None: (
+        Path("/tmp") / tenant_id
+        if tenant_id
+        else (_ for _ in ()).throw(RuntimeError("tenant context required"))
+    )
     config_utils.get_tenant_config_path = (
+        lambda tenant_id=None: Path("/tmp")
+        / (tenant_id or "global")
+        / "config.json"
+    )
+    config_utils.get_tenant_storage_config_path = (
         lambda tenant_id=None: Path("/tmp")
         / (tenant_id or "global")
         / "config.json"
@@ -186,7 +188,43 @@ def _install_test_stubs() -> dict[str, object | None]:
         if tenant_id
         else (_ for _ in ()).throw(RuntimeError("tenant context required"))
     )
-    sys.modules["swe.config.utils"] = config_utils
+    return config_utils
+
+
+def _create_config_module_stub() -> types.ModuleType:
+    """创建 config.config 模块存根。"""
+    config_config = types.ModuleType("swe.config.config")
+    config_config.AgentProfileRef = AgentProfileRef
+    config_config.AgentProfileConfig = AgentProfileConfig
+    config_config.ChannelConfig = ChannelConfig
+    config_config.MCPConfig = MCPConfig
+    config_config.MCPClientConfig = MCPClientConfig
+    config_config.HeartbeatConfig = HeartbeatConfig
+    config_config.ToolsConfig = ToolsConfig
+    config_config.generate_short_agent_id = lambda: "stubid"
+    config_config.load_agent_config = lambda agent_id: None
+    config_config.save_agent_config = lambda agent_id, config: None
+    return config_config
+
+
+def _install_test_stubs() -> dict[str, object | None]:
+    module_names = [
+        "swe.config.utils",
+        "swe.config.context",
+        "swe.config.config",
+        "swe.agents.utils.file_handling",
+        "swe.app.utils",
+        "swe.agents.memory.agent_md_manager",
+        "swe.agents.utils",
+        "swe.app.multi_agent_manager",
+        "swe.app.workspace",
+        "swe.app.workspace.tenant_init_source_store",
+    ]
+    original_modules: dict[str, object | None] = {}
+    for name in module_names:
+        original_modules[name] = sys.modules.get(name)
+
+    sys.modules["swe.config.utils"] = _create_config_utils_stub()
 
     context_path = SRC_ROOT / "swe" / "config" / "context.py"
     context_spec = importlib.util.spec_from_file_location(
@@ -198,17 +236,7 @@ def _install_test_stubs() -> dict[str, object | None]:
     sys.modules["swe.config.context"] = context_module
     context_spec.loader.exec_module(context_module)
 
-    config_config = types.ModuleType("swe.config.config")
-    config_config.AgentProfileRef = AgentProfileRef
-    config_config.AgentProfileConfig = AgentProfileConfig
-    config_config.ChannelConfig = ChannelConfig
-    config_config.MCPConfig = MCPConfig
-    config_config.HeartbeatConfig = HeartbeatConfig
-    config_config.ToolsConfig = ToolsConfig
-    config_config.generate_short_agent_id = lambda: "stubid"
-    config_config.load_agent_config = lambda agent_id: None
-    config_config.save_agent_config = lambda agent_id, config: None
-    sys.modules["swe.config.config"] = config_config
+    sys.modules["swe.config.config"] = _create_config_module_stub()
 
     file_handling = types.ModuleType("swe.agents.utils.file_handling")
     file_handling.read_text_file_with_encoding_fallback = lambda path: ""
@@ -235,6 +263,14 @@ def _install_test_stubs() -> dict[str, object | None]:
     workspace_module = types.ModuleType("swe.app.workspace")
     workspace_module.Workspace = FakeWorkspace
     sys.modules["swe.app.workspace"] = workspace_module
+
+    tenant_init_source_store = types.ModuleType(
+        "swe.app.workspace.tenant_init_source_store",
+    )
+    tenant_init_source_store.get_tenant_init_source_store = lambda: None
+    sys.modules["swe.app.workspace.tenant_init_source_store"] = (
+        tenant_init_source_store
+    )
     return original_modules
 
 
@@ -288,9 +324,9 @@ def test_get_tenant_aware_config_uses_effective_default_for_source(
 ):
     expected_config = SimpleNamespace(name="source-config")
     observed = {}
-    scope_id = encode_scope_id("default", "ruice")
+    effective_tenant_id = "default_ruice"
 
-    def fake_get_tenant_config_path(tenant_id=None):
+    def fake_get_tenant_storage_config_path(tenant_id=None):
         observed["tenant_id"] = tenant_id
         return Path("/tmp") / str(tenant_id) / "config.json"
 
@@ -300,8 +336,8 @@ def test_get_tenant_aware_config_uses_effective_default_for_source(
 
     monkeypatch.setattr(
         agent_context,
-        "get_tenant_config_path",
-        fake_get_tenant_config_path,
+        "get_tenant_storage_config_path",
+        fake_get_tenant_storage_config_path,
         raising=False,
     )
     monkeypatch.setattr(agent_context, "load_config", fake_load_config)
@@ -312,8 +348,47 @@ def test_get_tenant_aware_config_uses_effective_default_for_source(
     )
 
     assert resolved is expected_config
-    assert observed["tenant_id"] == scope_id
-    assert observed["path"] == Path(f"/tmp/{scope_id}/config.json")
+    assert observed["tenant_id"] == effective_tenant_id
+    assert observed["path"] == Path(
+        f"/tmp/{effective_tenant_id}/config.json",
+    )
+
+
+def test_multi_agent_manager_loads_storage_config_path(
+    monkeypatch,
+):
+    expected_config = SimpleNamespace(name="storage-config")
+    observed = {}
+
+    def fake_get_tenant_storage_config_path(tenant_id=None):
+        observed["tenant_id"] = tenant_id
+        return Path("/tmp") / str(tenant_id) / "config.json"
+
+    def fake_load_config(path=None):
+        observed["path"] = path
+        return expected_config
+
+    monkeypatch.setattr(
+        multi_agent_manager,
+        "get_tenant_storage_config_path",
+        fake_get_tenant_storage_config_path,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        multi_agent_manager,
+        "load_config",
+        fake_load_config,
+    )
+
+    resolved = (
+        multi_agent_manager.MultiAgentManager._load_agent_config_for_tenant(
+            "default_CMSJY",
+        )
+    )
+
+    assert resolved is expected_config
+    assert observed["tenant_id"] == "default_CMSJY"
+    assert observed["path"] == Path("/tmp/default_CMSJY/config.json")
 
 
 def test_agents_router_uses_effective_default_tenant_for_source(
@@ -321,7 +396,7 @@ def test_agents_router_uses_effective_default_tenant_for_source(
 ):
     expected_config = SimpleNamespace(name="source-config")
     observed = {}
-    scope_id = encode_scope_id("default", "ruice")
+    effective_tenant_id = "default_ruice"
 
     def fake_get_tenant_config_path_strict(tenant_id=None):
         observed["tenant_id"] = tenant_id
@@ -345,8 +420,10 @@ def test_agents_router_uses_effective_default_tenant_for_source(
     resolved = agents_router._get_tenant_config(request)
 
     assert resolved is expected_config
-    assert observed["tenant_id"] == scope_id
-    assert observed["path"] == Path(f"/tmp/{scope_id}/config.json")
+    assert observed["tenant_id"] == effective_tenant_id
+    assert observed["path"] == Path(
+        f"/tmp/{effective_tenant_id}/config.json",
+    )
 
 
 def test_agents_router_prefers_request_scope_id_over_logical_tenant() -> None:
@@ -365,7 +442,7 @@ def test_agents_router_prefers_request_scope_id_over_logical_tenant() -> None:
 
 def test_update_agent_schedules_reload_for_effective_tenant(monkeypatch):
     observed: dict[str, object] = {}
-    scope_id = encode_scope_id("default", "ruice")
+    effective_tenant_id = "default_ruice"
     config = SimpleNamespace(
         agents=SimpleNamespace(
             profiles={"default": SimpleNamespace(enabled=True)},
@@ -379,13 +456,13 @@ def test_update_agent_schedules_reload_for_effective_tenant(monkeypatch):
         id="default",
         name="updated",
         description="updated description",
-        workspace_dir=f"/tmp/{scope_id}/workspaces/default",
+        workspace_dir=f"/tmp/{effective_tenant_id}/workspaces/default",
     )
     existing = AgentProfileConfig(
         id="default",
         name="before",
         description="before",
-        workspace_dir=f"/tmp/{scope_id}/workspaces/default",
+        workspace_dir=f"/tmp/{effective_tenant_id}/workspaces/default",
     )
 
     monkeypatch.setattr(agents_router, "_get_tenant_config", lambda _: config)
@@ -433,7 +510,7 @@ def test_update_agent_schedules_reload_for_effective_tenant(monkeypatch):
     assert observed["reload"] == (
         request,
         "default",
-        scope_id,
+        effective_tenant_id,
     )
 
 
@@ -530,7 +607,7 @@ def test_get_agent_for_request_uses_effective_tenant_for_source_scoped_default(
     monkeypatch,
 ):
     observed: dict[str, object] = {}
-    scope_id = encode_scope_id("default", "ruice")
+    effective_tenant_id = "default_ruice"
     config = SimpleNamespace(
         agents=SimpleNamespace(
             profiles={"default": SimpleNamespace(enabled=True)},
@@ -545,7 +622,7 @@ def test_get_agent_for_request_uses_effective_tenant_for_source_scoped_default(
             return SimpleNamespace(
                 agent_id=agent_id,
                 tenant_id=tenant_id,
-                workspace_dir=f"/tmp/{scope_id}/workspaces/default",
+                workspace_dir=f"/tmp/{effective_tenant_id}/workspaces/default",
             )
 
     request = SimpleNamespace(
@@ -578,8 +655,11 @@ def test_get_agent_for_request_uses_effective_tenant_for_source_scoped_default(
     assert observed["config_source_id"] == "ruice"
     assert observed["config_scope_id"] is None
     assert observed["manager_agent_id"] == "default"
-    assert observed["manager_tenant_id"] == scope_id
-    assert resolved.workspace_dir == f"/tmp/{scope_id}/workspaces/default"
+    assert observed["manager_tenant_id"] == effective_tenant_id
+    assert (
+        resolved.workspace_dir
+        == f"/tmp/{effective_tenant_id}/workspaces/default"
+    )
     assert request.state.tenant_id == "default"
 
 
@@ -593,7 +673,7 @@ def test_multi_agent_manager_uses_tenant_config_when_tenant_id_provided(
 
     monkeypatch.setattr(
         multi_agent_manager,
-        "get_tenant_config_path",
+        "get_tenant_storage_config_path",
         lambda tenant_id=None: Path(f"/tmp/{tenant_id}/config.json"),
         raising=False,
     )

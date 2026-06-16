@@ -24,7 +24,7 @@ from ...config.config import (
 )
 from ...config.context import resolve_request_effective_tenant_id
 from ...config.utils import (
-    get_tenant_working_dir_strict,
+    get_tenant_request_working_dir,
     list_logical_tenant_ids,
 )
 from ..workspace.tenant_initializer import TenantInitializer
@@ -227,7 +227,7 @@ def _request_effective_tenant_id(request: Request) -> str | None:
 
 
 def _request_tenant_working_dir(request: Request) -> FilePath:
-    return get_tenant_working_dir_strict(_request_effective_tenant_id(request))
+    return get_tenant_request_working_dir(_request_tenant_id(request))
 
 
 def _get_multi_agent_manager(request: Request) -> Any:

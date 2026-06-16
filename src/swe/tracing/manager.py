@@ -589,20 +589,7 @@ class TraceManager:
                         skill,
                         confidence,
                     )
-                if skill and confidence >= 0.7:
-                    # Start skill through detector to properly track span_id
-                    await detector.start_skill(
-                        skill_name=skill,
-                        trigger_tool="user_message",
-                        trigger_reason="declared",
-                        confidence=confidence,
-                    )
-                    logger.info(
-                        "Skill started: '%s' (confidence: %.2f)",
-                        skill,
-                        confidence,
-                    )
-                elif skill:
+                if skill and confidence < 0.7:
                     logger.info(
                         "Skill detected but confidence too low: '%s' (confidence: %.2f < 0.5)",
                         skill,
