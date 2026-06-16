@@ -16,6 +16,18 @@ _Avoid_: create subagent, custom subagent, subagent profile
 Alias for **SubAgent Run** when emphasizing the parent-to-worker handoff rather than the worker identity.
 _Avoid_: subagent creation
 
+**Background SubAgent Run**:
+A **SubAgent Run** that is started by the Main Agent and observed later through status, result retrieval, or cancellation. It is still one run of a **SubAgent Definition**, not a new definition.
+_Avoid_: detached subagent, subprocess subagent
+
+**SubAgent Run Cancellation**:
+The act of cancelling the background asyncio task that owns a **Background SubAgent Run** and marking that run as cancelled. It does not imply recursively terminating tool-owned subprocesses unless a later execution backend explicitly supports that behavior.
+_Avoid_: kill process tree, hard stop all tools
+
+**SubAgent Execution Backend**:
+The runtime mechanism used to execute a **SubAgent Run**, such as an in-process task or a separate operating-system process. It is an implementation boundary and does not change the meaning of **SubAgent Run**.
+_Avoid_: subagent type, agent definition source
+
 **Main Agent**:
 The user-facing agent that owns global task understanding, user interaction, mode decisions, and final responses.
 _Avoid_: parent bot, orchestrator bot
@@ -47,6 +59,14 @@ _Avoid_: hidden plan API update, out-of-band form submission
 **Planning Clarification Dismissal**:
 The user's decision to close the current Planning Clarification Card without submitting a Plan Interaction Response. It leaves Plan Mode active and restores normal chat input for the user.
 _Avoid_: exit Plan Mode, reject plan, submit empty response
+
+**Planning Clarification Replay**:
+The behavior of showing a Planning Clarification Card again after a page reload or session restore. It is not part of the intended user flow for a card that was already displayed once in the current chat.
+_Avoid_: history replay, reload restoration, persistent clarification prompt
+
+**Planning Clarification Instance**:
+One visible Planning Clarification Card occurrence tied to a specific assistant message. Two cards with the same内容 but different assistant messages are different instances.
+_Avoid_: content fingerprint, semantic duplicate, shared clarification prompt
 
 **Plan Interaction Tool**:
 A built-in Main Agent tool that emits Plan Interaction Cards through validated structured metadata.
@@ -129,6 +149,15 @@ _Avoid_: token usage, usage statistics, cost usage
 **"Create SubAgent"**:
 Resolved to mean creating a **SubAgent Run**, not creating a new **SubAgent Definition**. User-defined SubAgent Definition CRUD/UI is outside the next stage.
 
+**"Async SubAgent Creation"**:
+Resolved to mean starting a **Background SubAgent Run** that can be queried, completed, or cancelled by run id.
+
+**"SubAgent Subprocess"**:
+Resolved as a possible **SubAgent Execution Backend**, not the definition of a SubAgent lifecycle. Choosing a subprocess backend should be treated separately from adding background run status and cancellation semantics.
+
+**"Cancel SubAgent"**:
+Resolved for the next stage as **SubAgent Run Cancellation** of the asyncio task that owns the run. Recursive termination of shell/tool subprocesses is outside the next stage.
+
 **"Enter Plan Mode"**:
 Resolved to require an **Explicit Plan Entry** such as a chat-window toggle or `/plan` command. Automatic silent switching is outside the next stage.
 
@@ -164,6 +193,27 @@ Resolved to support only `single_choice`, `multi_choice`, `text_input`, and `pla
 
 **"Plan Card Submission"**:
 Resolved as a normal next chat turn carrying **Plan Interaction Response** metadata, not a separate plan-state API call.
+
+**"Planning Clarification Replay"**:
+Resolved to not reappear after a page reload or session restore once the card has already been shown in the current chat flow.
+
+**"Planning Clarification Instance"**:
+Resolved as assistant-message scoped. A later assistant message that repeats the same clarification content is treated as a new instance and may render again.
+
+**"Planning Clarification Submission Scope"**:
+Resolved as assistant-message scoped. Submitting a Planning Clarification Card marks that assistant message's clarification instance as handled, and does not suppress a repeated clarification from a later assistant message.
+
+**"Planning Clarification Display Memory"**:
+Resolved as session-scoped memory of assistant-message instances that have already displayed a Planning Clarification Card. Reloading or restoring the same chat must not display those seen instances again. The storage key is `swe_seen_plan_clarification_instances`.
+
+**"Planning Clarification First Display Timing"**:
+Resolved as realtime stream display. A Planning Clarification Card may render as soon as its structured metadata first appears in the active assistant stream, but that displayed instance must not reappear after reload or session restore.
+
+**"Planning Clarification Seen Moment"**:
+Resolved as the first client render of that assistant-message instance. Once the card has been rendered once in the live UI, it is considered seen even if the stream continues updating the same response.
+
+**"Planning Clarification Live Update"**:
+Resolved as continuing to update the currently visible Planning Clarification Card while its live assistant response changes. The seen state only prevents replay after reload or session restore; it does not freeze the active card.
 
 **"Dismiss Planning Clarification"**:
 Resolved as a **Planning Clarification Dismissal** that closes only the current clarification, restores normal chat input, keeps Plan Mode active, and submits no message.

@@ -87,6 +87,50 @@ function renderActiveClarification(
   );
 }
 
+function createClarificationMessage({
+  messageId,
+  originalId,
+  traceId,
+  prompt = "Pick scope",
+}: {
+  messageId: string;
+  originalId: string;
+  traceId: string;
+  prompt?: string;
+}): IAgentScopeRuntimeWebUIMessage<unknown> {
+  return {
+    id: messageId,
+    role: "assistant",
+    cards: [
+      {
+        code: "AgentScopeRuntimeResponseCard",
+        data: {
+          id: `response-${messageId}`,
+          output: [
+            {
+              role: "assistant",
+              id: messageId,
+              metadata: {
+                original_id: originalId,
+                trace_id: traceId,
+              },
+            },
+          ],
+        },
+      },
+      {
+        code: "PlanInteraction",
+        data: {
+          card_type: "plan_clarification",
+          kind: "single_choice",
+          prompt,
+          options: [{ id: "small", label: "Small" }],
+        },
+      },
+    ],
+  };
+}
+
 describe("Plan interaction cards", () => {
   afterEach(() => {
     cleanup();
@@ -830,6 +874,99 @@ describe("Plan interaction cards", () => {
     );
 
     expect(screen.getByText("Pick scope")).toBeInTheDocument();
+  });
+
+  it("stores a seen clarification instance when it first renders", async () => {
+    renderActiveClarification([
+      createClarificationMessage({
+        messageId: "message-1",
+        originalId: "assistant-stable-1",
+        traceId: "trace-stable-1",
+      }),
+    ]);
+
+    await waitFor(() =>
+      expect(screen.getByRole("region", { name: "Pick scope" })).toBeVisible(),
+    );
+    const seenStorage = JSON.parse(
+      sessionStorage.getItem("swe_seen_plan_clarification_instances") || "[]",
+    ) as string[];
+    expect(seenStorage.join(" ")).toContain("assistant-stable-1");
+  });
+
+  it("does not replay a seen clarification after session restore", async () => {
+    const messages = [
+      createClarificationMessage({
+        messageId: "message-1",
+        originalId: "assistant-stable-1",
+        traceId: "trace-stable-1",
+      }),
+    ];
+    const { unmount } = renderActiveClarification(messages);
+
+    await waitFor(() =>
+      expect(screen.getByRole("region", { name: "Pick scope" })).toBeVisible(),
+    );
+    unmount();
+    renderActiveClarification(messages);
+
+    expect(screen.queryByText("Pick scope")).not.toBeInTheDocument();
+  });
+
+  it("renders a repeated clarification from a later assistant message", async () => {
+    const firstMessage = createClarificationMessage({
+      messageId: "message-1",
+      originalId: "assistant-stable-1",
+      traceId: "trace-stable-1",
+    });
+    const { unmount } = renderActiveClarification([firstMessage]);
+
+    await waitFor(() =>
+      expect(screen.getByRole("region", { name: "Pick scope" })).toBeVisible(),
+    );
+    unmount();
+
+    renderActiveClarification([
+      firstMessage,
+      createClarificationMessage({
+        messageId: "message-2",
+        originalId: "assistant-stable-2",
+        traceId: "trace-stable-2",
+      }),
+    ]);
+
+    expect(screen.getByText("Pick scope")).toBeInTheDocument();
+  });
+
+  it("does not suppress a later repeated clarification after submitting the first instance", async () => {
+    const submit = captureSubmitEvents();
+    const firstMessage = createClarificationMessage({
+      messageId: "message-1",
+      originalId: "assistant-stable-1",
+      traceId: "trace-stable-1",
+    });
+    const { unmount } = renderActiveClarification([firstMessage]);
+
+    await waitFor(() =>
+      expect(screen.getByRole("region", { name: "Pick scope" })).toBeVisible(),
+    );
+    fireEvent.keyDown(screen.getByRole("region", { name: "Pick scope" }), {
+      key: "Enter",
+    });
+    await waitFor(() => expect(submit.handler).toHaveBeenCalledTimes(1));
+    unmount();
+
+    renderActiveClarification([
+      firstMessage,
+      createClarificationMessage({
+        messageId: "message-2",
+        originalId: "assistant-stable-2",
+        traceId: "trace-stable-2",
+      }),
+    ]);
+
+    expect(screen.getByText("Pick scope")).toBeInTheDocument();
+    submit.cleanup();
   });
 
   it("submits review decisions with distinct Plan Review payloads", async () => {
