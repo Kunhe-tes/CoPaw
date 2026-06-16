@@ -784,8 +784,7 @@ async def get_active_models(
         tenant_id,
     )
     root_path = ProviderManager._get_tenant_root_path(provider_tenant_id)
-    global_model = ProviderManager._load_active_model_from_root(
-        provider_tenant_id,
+    global_model = ProviderManager._read_active_model_from_root(
         root_path,
     )
     duration_ms = int((time.perf_counter() - started_at) * 1000)
