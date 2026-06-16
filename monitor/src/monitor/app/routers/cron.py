@@ -17,7 +17,7 @@ from ..models.cron import (
     CronJobQueryParams,
     CronOverviewResponse,
     CronOverviewStatsResponse,
-    CronBranchBehaviorResponse,
+    CronBranchRankingResponse,
     CronBranchErrorResponse,
     ExecutionModel,
     ExecutionQueryParams,
@@ -480,7 +480,7 @@ async def get_overview_stats(
     )
 
 
-@router.get("/branch-behavior", response_model=CronBranchBehaviorResponse)
+@router.get("/branch-behavior", response_model=CronBranchRankingResponse)
 async def get_branch_behavior(
     request: Request,
     start_date: str | None = Query(
@@ -496,10 +496,10 @@ async def get_branch_behavior(
         description="分行号筛选（逗号分隔）",
     ),
     service: QueryService = Depends(get_query_service),
-) -> CronBranchBehaviorResponse:
-    """获取分行层行为分析。
+) -> CronBranchRankingResponse:
+    """获取分行综合排行。
 
-    返回各分行的已读任务数、已读率、方案点击数、洞察点击数等行为数据。
+    返回各分行的覆盖客户经理数、定时任务数、成功执行数、成功率、已读任务数。
 
     Args:
         start_date: 开始日期筛选 (YYYY-MM-DD格式)
@@ -508,7 +508,7 @@ async def get_branch_behavior(
         service: Query service
 
     Returns:
-        分行行为分析数据
+        分行综合排行数据
     """
     actual_source_id = _get_source_id_from_header(request)
     return await service.get_branch_behavior(

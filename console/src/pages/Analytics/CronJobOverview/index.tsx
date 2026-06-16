@@ -105,7 +105,7 @@ const summaryMetricDefinitions: SummaryMetricDefinition[] = [
 
 const emptyOverviewData: CronJobOverviewPageData = {
   summaryMetrics: [],
-  branchBehaviorRows: [],
+  branchRankingRows: [],
   failureReasons: [],
   anomalySummary: {
     affectedBranches: "-",
@@ -207,37 +207,37 @@ function SummaryCard({ metric }: { metric: SummaryMetricView }) {
   );
 }
 
-function BehaviorTable({ data }: { data: CronJobOverviewPageData["branchBehaviorRows"] }) {
+function RankingTable({ data }: { data: CronJobOverviewPageData["branchRankingRows"] }) {
   return (
     <section className={`${styles.panel} ${styles.behaviorPanel}`}>
       <div className={styles.tableScroller}>
         <table className={styles.behaviorTable}>
+          <colgroup>
+            <col style={{ width: 42 }} />
+            <col style={{ width: 95 }} />
+            <col style={{ width: 85 }} />
+            <col style={{ width: 75 }} />
+            <col style={{ width: 75 }} />
+            <col style={{ width: 60 }} />
+            <col style={{ width: 75 }} />
+            <col style={{ width: 120 }} />
+            <col style={{ width: 120 }} />
+            <col style={{ width: 120 }} />
+            <col style={{ width: 75 }} />
+          </colgroup>
           <thead>
             <tr>
-              <th rowSpan={2} className={styles.indexCell} />
-              <th rowSpan={2}>分行名称</th>
-              <th colSpan={2} className={styles.groupRead}>
-                已读
-              </th>
-              <th colSpan={2} className={styles.groupDirect}>
-                查看方案
-              </th>
-              <th colSpan={2} className={styles.groupBrowse}>
-                点击去洞察
-              </th>
-              <th colSpan={2} className={styles.groupPhone}>
-                点击去电访
-              </th>
-            </tr>
-            <tr>
+              <th className={styles.indexCell} />
+              <th>分行名称</th>
+              <th>覆盖客户经理数</th>
+              <th>定时任务数</th>
+              <th>成功执行数</th>
+              <th>成功率</th>
               <th>已读任务数</th>
-              <th>已读率</th>
-              <th>查看方案任务数</th>
-              <th>方案点击率</th>
-              <th>点击去洞察任务数</th>
-              <th>洞察点击率</th>
-              <th>点击去电访任务数</th>
-              <th>电访点击率</th>
+              <th>查看方案任务数/点击数</th>
+              <th>点击去洞察任务数/点击数</th>
+              <th>点击去电访任务数/点击数</th>
+              <th>报错执行次数</th>
             </tr>
           </thead>
           <tbody>
@@ -245,14 +245,15 @@ function BehaviorTable({ data }: { data: CronJobOverviewPageData["branchBehavior
               <tr key={`${row.branchName}-${index}`} className={row.rank === "..." ? styles.mutedRow : undefined}>
                 <td className={styles.indexCell}>{row.rank}</td>
                 <td className={styles.branchName}>{row.branchName}</td>
+                <td>{row.managerCount}</td>
+                <td>{row.totalTasks}</td>
+                <td>{row.successCount}</td>
+                <td>{row.successRate}</td>
                 <td>{row.readTasks}</td>
-                <td>{row.readRate}</td>
-                <td>{row.directTasks}</td>
-                <td>{row.directClickRate}</td>
-                <td>{row.browseTasks}</td>
-                <td>{row.browseClickRate}</td>
-                <td>{row.phoneTasks}</td>
-                <td>{row.phoneClickRate}</td>
+                <td>{row.planCount}/{row.planClicks}</td>
+                <td>{row.insightCount}/{row.insightClicks}</td>
+                <td>{row.phoneCount}/{row.phoneClicks}</td>
+                <td>{row.errorCount}</td>
               </tr>
             ))}
           </tbody>
@@ -784,7 +785,7 @@ export default function CronJobOverviewPage() {
           >
             <ArrowLeft size={20} />
           </button>
-          <h1>定时任务概览</h1>
+          <h1>定时任务详情</h1>
         </div>
         <div className={styles.toolbar}>
           <div className={styles.toolbarLeft}>
@@ -884,8 +885,8 @@ export default function CronJobOverviewPage() {
       <p className={styles.formulaNote}>
         说明： 执行成功率 = 成功执行次数 / 任务执行次数； 任务已读率 = 已读任务去重数 / 已执行任务去重数； 执行报错率 = 报错执行次数 / 任务执行次数
       </p>
-      <h2 className={styles.sectionHeading}>分行层行为分析</h2>
-      <BehaviorTable data={overviewData.branchBehaviorRows} />
+      <h2 className={styles.sectionHeading}>分行综合排行</h2>
+      <RankingTable data={overviewData.branchRankingRows} />
 
       <section className={styles.anomalySection}>
         <div className={styles.anomalyLeft}>

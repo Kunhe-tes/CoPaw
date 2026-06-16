@@ -318,7 +318,7 @@
 }
 
 .behaviorPanel .tableScroller {
-  max-height: calc(var(--behavior-header-row-height) * 2 + var(--behavior-body-row-height) * 5);
+  max-height: calc(var(--behavior-header-row-height) + var(--behavior-body-row-height) * 5);
   overflow: auto;
 }
 
@@ -350,7 +350,7 @@
 .behaviorTable,
 .rankTable {
   width: 100%;
-  min-width: 1060px;
+  min-width: 960px;
   border-collapse: collapse;
   table-layout: fixed;
 }
@@ -366,13 +366,15 @@
 
 .behaviorTable th,
 .rankTable th {
-  height: 48px;
+  min-height: 48px;
   padding: 8px 10px;
   color: #31405f;
   background: #f7faff;
   font-size: 14px;
-  line-height: 1.25;
+  line-height: 1.35;
   font-weight: 800;
+  word-break: break-all;
+  overflow: hidden;
 }
 
 .behaviorTable td,
@@ -384,6 +386,8 @@
   font-size: 14px;
   font-weight: 700;
   font-variant-numeric: tabular-nums;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .behaviorTable tbody tr:hover td,
@@ -399,26 +403,6 @@
 .branchName {
   color: #26324d !important;
   font-weight: 800 !important;
-}
-
-.groupRead {
-  color: #2478ff !important;
-  background: #f4f8ff !important;
-}
-
-.groupDirect {
-  color: #8a4ff5 !important;
-  background: #fbf7ff !important;
-}
-
-.groupBrowse {
-  color: #25a892 !important;
-  background: #f5fffc !important;
-}
-
-.groupPhone {
-  color: #ff6f2c !important;
-  background: #fff8f3 !important;
 }
 
 .mutedRow td {

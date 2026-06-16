@@ -636,36 +636,33 @@ class CronOverviewStatsResponse(BaseModel):
     error_rate: float = Field(default=0.0, description="报错率")
 
 
-class CronBranchBehaviorItem(BaseModel):
-    """分行层行为分析单项。"""
+class CronBranchRankingItem(BaseModel):
+    """分行综合排行单项。"""
 
     bbk_id: str = Field(..., description="分行ID")
     bbk_name: str = Field(..., description="分行名称")
-    total_tasks: int = Field(default=0, description="该分行定时任务总数")
-    read_tasks: int = Field(
-        default=0,
-        description="已读任务数（按job_id去重）",
-    )
-    read_rate: float = Field(default=0.0, description="已读率")
-    plan_click_tasks: int = Field(
-        default=0,
-        description="方案点击数（按job_id去重）",
-    )
-    plan_click_rate: float = Field(default=0.0, description="方案点击率")
-    insight_click_tasks: int = Field(default=0, description="洞察点击数")
-    insight_click_rate: float = Field(default=0.0, description="洞察点击率")
-    phone_click_tasks: int = Field(default=0, description="电访点击数")
-    phone_click_rate: float = Field(default=0.0, description="电访点击率")
+    manager_count: int = Field(default=0, description="覆盖客户经理数")
+    total_tasks: int = Field(default=0, description="定时任务数")
+    success_count: int = Field(default=0, description="成功执行数")
+    success_rate: float = Field(default=0.0, description="成功率")
+    read_tasks: int = Field(default=0, description="已读任务数")
+    plan_count: int = Field(default=0, description="查看方案任务数")
+    insight_count: int = Field(default=0, description="点击去洞察任务数")
+    phone_count: int = Field(default=0, description="点击去电访任务数")
+    plan_clicks: int = Field(default=0, description="查看方案点击数")
+    insight_clicks: int = Field(default=0, description="点击去洞察点击数")
+    phone_clicks: int = Field(default=0, description="点击去电访点击数")
+    error_count: int = Field(default=0, description="报错执行次数")
 
 
-class CronBranchBehaviorResponse(BaseModel):
-    """分行层行为分析响应。"""
+class CronBranchRankingResponse(BaseModel):
+    """分行综合排行响应。"""
 
     start_date: str = Field(..., description="开始日期")
     end_date: str = Field(..., description="结束日期")
-    items: List[CronBranchBehaviorItem] = Field(
+    items: List[CronBranchRankingItem] = Field(
         default_factory=list,
-        description="分行行为分析列表",
+        description="分行综合排行列表",
     )
 
 
