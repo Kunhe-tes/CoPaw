@@ -1394,7 +1394,7 @@ class CronManager:  # pylint: disable=too-many-public-methods
             unread_count = int(meta.get("task_unread_execution_count", 0) or 0)
             if unread_count == 0:
                 return False, True
-            meta["task_unread_execution_count"] = 0
+            meta["task_unread_execution_count"] = unread_count - 1
             jobs_file.jobs[index] = job.model_copy(update={"meta": meta})
             return True, True
         return False, False
@@ -2255,9 +2255,9 @@ class CronManager:  # pylint: disable=too-many-public-methods
                     "broadcast_original_timezone",
                 ) or notification_timezone
             elif delay_minutes > 0:
-                notification_due_at = (
-                    end_time or actual_time
-                ) + timedelta(minutes=delay_minutes)
+                notification_due_at = (end_time or actual_time) + timedelta(
+                    minutes=delay_minutes,
+                )
 
         await self._monitor_sync_client.record_execution(
             job=job,

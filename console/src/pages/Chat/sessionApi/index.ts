@@ -144,6 +144,66 @@ interface ExtendedSession extends IAgentScopeRuntimeWebUISession {
   generating?: boolean;
 }
 
+interface SessionTitlePatchPayload {
+  chat_id?: unknown;
+  session_id?: unknown;
+  session_title?: unknown;
+}
+
+interface NormalizedSessionTitlePatchPayload {
+  chat_id?: string;
+  session_id?: string;
+  session_title: string;
+}
+
+function getSessionTitlePatchPayload(
+  payload: unknown,
+): NormalizedSessionTitlePatchPayload | undefined {
+  if (!payload || typeof payload !== "object") {
+    return undefined;
+  }
+
+  const titlePatch = payload as SessionTitlePatchPayload;
+  const sessionTitle =
+    typeof titlePatch.session_title === "string"
+      ? titlePatch.session_title.trim()
+      : "";
+  if (!sessionTitle) {
+    return undefined;
+  }
+
+  const sessionId =
+    typeof titlePatch.session_id === "string"
+      ? titlePatch.session_id.trim()
+      : "";
+  const chatId =
+    typeof titlePatch.chat_id === "string" ? titlePatch.chat_id.trim() : "";
+  if (!sessionId && !chatId) {
+    return undefined;
+  }
+
+  return {
+    chat_id: chatId || undefined,
+    session_id: sessionId || undefined,
+    session_title: sessionTitle,
+  };
+}
+
+function sessionMatchesTitlePatch(
+  session: ExtendedSession,
+  payload: NormalizedSessionTitlePatchPayload,
+): boolean {
+  const candidateIds = new Set<string>(
+    [payload.session_id, payload.chat_id].filter((id): id is string =>
+      Boolean(id),
+    ),
+  );
+
+  return [session.id, session.realId, session.sessionId].some(
+    (id) => typeof id === "string" && candidateIds.has(id),
+  );
+}
+
 // ---------------------------------------------------------------------------
 // Message conversion helpers: backend flat messages → card-based UI format
 // ---------------------------------------------------------------------------
@@ -1119,6 +1179,40 @@ export class SessionApi implements IAgentScopeRuntimeWebUISessionAPI {
       realId: current.realId,
       sessionId: current.sessionId,
     } as ExtendedSession;
+  }
+
+  patchSessionTitle(payload: unknown): IAgentScopeRuntimeWebUISession[] {
+    const titlePatch = getSessionTitlePatchPayload(payload);
+    if (!titlePatch) {
+      return [...this.sessionList];
+    }
+
+    this.sessionList = this.sessionList.map((session) => {
+      const extendedSession = session as ExtendedSession;
+      if (!sessionMatchesTitlePatch(extendedSession, titlePatch)) {
+        return session;
+      }
+      if (extendedSession.meta?.session_kind === TASK_SESSION_KIND) {
+        return session;
+      }
+
+      const generatedMeta =
+        extendedSession.meta?.[SESSION_TITLE_GENERATED_META_KEY] === true;
+      if (extendedSession.name === titlePatch.session_title && generatedMeta) {
+        return session;
+      }
+
+      return {
+        ...extendedSession,
+        name: titlePatch.session_title,
+        meta: {
+          ...extendedSession.meta,
+          [SESSION_TITLE_GENERATED_META_KEY]: true,
+        },
+      } as ExtendedSession;
+    });
+
+    return [...this.sessionList];
   }
 
   private getPendingSessions(): ExtendedSession[] {
