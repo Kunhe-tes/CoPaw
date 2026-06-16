@@ -4,7 +4,8 @@ import { buildAuthHeaders } from "../authHeaders";
 export interface SkillVersion {
   version_id: string;
   created_at: string;
-  created_by: string;
+  created_by: string;  // 用户 ID
+  created_by_name: string;  // 用户名称
   description: string;
   signature: string;
   is_current: boolean;

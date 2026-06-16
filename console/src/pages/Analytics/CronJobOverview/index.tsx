@@ -1,41 +1,34 @@
 import {
+  AlertTriangle,
+  Banknote,
   CalendarDays,
   CheckCircle2,
   ChevronRight,
-  Clock3,
-  PlaySquare,
-  ShieldCheck,
-  TrendingDown,
-  TrendingUp,
-  Workflow,
+  Eye,
+  Landmark,
+  RefreshCw,
+  UserRoundCheck,
   type LucideIcon,
 } from "lucide-react";
-import { useEffect, useState } from "react";
 import { DatePicker, Input, Modal, Pagination, Select, Spin, Tooltip } from "antd";
 import { WarningOutlined } from "@ant-design/icons";
-import type { Dayjs } from "dayjs";
-import dayjs from "dayjs";
-import { monitorApi, CronOverviewResponse, ExecutionItem } from "../../../api/modules/monitor";
+import dayjs, { type Dayjs } from "dayjs";
+import { useEffect, useState, type CSSProperties } from "react";
+import { useSearchParams } from "react-router-dom";
+import {
+  monitorApi,
+  type ExecutionItem,
+  type CronJobOverviewFailureReason,
+  type CronJobOverviewDateFilters,
+  type CronJobOverviewPageData,
+} from "../../../api/modules/monitor";
+import { BBK_ID_MAP, BBK_ID_TO_NAME_MAP } from "../../../constants/bbk";
 import styles from "./index.module.less";
 
+const { Option } = Select;
+
 type TimeRange = "day" | "week" | "month" | "custom";
-
-type MetricCard = {
-  key: string;
-  title: string;
-  value: string;
-  compare: string;
-  trend: "up" | "down" | null;
-  accent: string;
-  icon: LucideIcon;
-};
-
-type DistributionItem = {
-  name: string;
-  value: number;
-  percent?: number;
-  color?: string;
-};
+type SummaryMetricTone = "blue" | "green" | "orange" | "red";
 
 const failureReasonOptions = [
   "渠道不存在",
@@ -47,14 +40,125 @@ const failureReasonOptions = [
 
 type FailureReason = (typeof failureReasonOptions)[number];
 
-const formatNumber = (value: number) => value.toLocaleString("en-US");
-const formatPercent = (value: number) => `${value.toFixed(2)}%`;
 const quickTooltipProps = {
   mouseEnterDelay: 0,
   mouseLeaveDelay: 0,
 } as const;
-const truncateAxisLabel = (value: string, maxLength = 6) =>
-  value.length > maxLength ? `${value.slice(0, maxLength)}...` : value;
+
+type SummaryMetricDefinition = {
+  key: string;
+  title: string;
+  unit?: string;
+  footerLabel?: string;
+  tone: SummaryMetricTone;
+  icon: LucideIcon;
+};
+
+type SummaryMetricView = SummaryMetricDefinition & {
+  value: string;
+  footerValue?: string;
+};
+
+const summaryMetricDefinitions: SummaryMetricDefinition[] = [
+  {
+    key: "branches",
+    title: "覆盖分行数",
+    unit: "家",
+    footerLabel: "客户经理数",
+    tone: "blue",
+    icon: Landmark,
+  },
+  {
+    key: "tasks",
+    title: "定时任务数",
+    unit: "个",
+    footerLabel: "任务执行次数",
+    tone: "blue",
+    icon: CalendarDays,
+  },
+  {
+    key: "success",
+    title: "执行成功率",
+    unit: "%",
+    footerLabel: "成功执行数",
+    tone: "green",
+    icon: CheckCircle2,
+  },
+  {
+    key: "alert",
+    title: "执行报错率",
+    unit: "%",
+    footerLabel: "失败执行数",
+    tone: "red",
+    icon: AlertTriangle,
+  },
+  {
+    key: "read",
+    title: "任务已读率",
+    unit: "%",
+    footerLabel: "已读任务数",
+    tone: "orange",
+    icon: Eye,
+  },
+];
+
+const emptyOverviewData: CronJobOverviewPageData = {
+  summaryMetrics: [],
+  branchBehaviorRows: [],
+  failureReasons: [],
+  anomalySummary: {
+    affectedBranches: "-",
+    affectedBranchesUnit: "家",
+    affectedManagers: "-",
+    affectedManagersUnit: "人",
+  },
+  anomalyRankRows: [],
+};
+
+function isValidDateParam(value: string | null) {
+  if (!value) {
+    return false;
+  }
+  const parsed = dayjs(value);
+  return parsed.isValid() && parsed.format("YYYY-MM-DD") === value;
+}
+
+function getInitialDateRange(searchParams: URLSearchParams): [Dayjs, Dayjs] {
+  const startDate = searchParams.get("start_date");
+  const endDate = searchParams.get("end_date");
+
+  if (isValidDateParam(startDate) && isValidDateParam(endDate)) {
+    return [dayjs(startDate), dayjs(endDate)];
+  }
+
+  return [dayjs(), dayjs()];
+}
+
+function getTimeRangeForDateRange([start, end]: [Dayjs, Dayjs]): TimeRange {
+  const today = dayjs();
+
+  if (start.isSame(today, "day") && end.isSame(today, "day")) {
+    return "day";
+  }
+  if (
+    start.isSame(today.subtract(6, "day"), "day") &&
+    end.isSame(today, "day")
+  ) {
+    return "week";
+  }
+  if (
+    start.isSame(today.subtract(29, "day"), "day") &&
+    end.isSame(today, "day")
+  ) {
+    return "month";
+  }
+  return "custom";
+}
+
+function getInitialBbkIds(searchParams: URLSearchParams) {
+  const bbkIds = searchParams.get("bbk_ids");
+  return bbkIds ? bbkIds.split(",").map((item) => item.trim()).filter(Boolean) : [];
+}
 
 const classifyFailureReason = (errorMessage: string): FailureReason => {
   const message = errorMessage || "";
@@ -75,626 +179,228 @@ const classifyFailureReason = (errorMessage: string): FailureReason => {
   return "其他";
 };
 
-const hashString = (value: string) => {
-  let hash = 0;
-  for (let index = 0; index < value.length; index += 1) {
-    hash = (hash * 31 + value.charCodeAt(index)) >>> 0;
-  }
-  return hash.toString(36);
-};
+function SummaryCard({ metric }: { metric: SummaryMetricView }) {
+  const Icon = metric.icon;
 
-const metricDefinitions = [
-  {
-    key: "total",
-    title: "定时任务数",
-    accent: "#2563eb",
-    icon: Workflow,
-  },
-  {
-    key: "runs",
-    title: "执行次数",
-    accent: "#f97316",
-    icon: PlaySquare,
-  },
-  {
-    key: "success_rate",
-    title: "执行成功率",
-    accent: "#16a34a",
-    icon: ShieldCheck,
-  },
-  {
-    key: "avg_cost",
-    title: "平均耗时",
-    accent: "#2563eb",
-    icon: Clock3,
-  },
-] as const;
-
-const formatMetricValue = (key: string, value: number | undefined) => {
-  if (value === undefined || value === null) {
-    return "-";
-  }
-  if (key === "success_rate") {
-    return `${value.toFixed(2)}%`;
-  }
-  if (key === "avg_cost") {
-    if (value < 60000) {
-      return `${Math.round(value / 1000)}s`;
-    }
-    return `${(value / 60000).toFixed(2)}min`;
-  }
-  return formatNumber(value);
-};
-
-function SectionTitle({ children }: { children: React.ReactNode }) {
   return (
-    <div className={styles.sectionTitle}>
-      <span />
-      <h2>{children}</h2>
+    <article className={`${styles.summaryCard} ${styles[metric.tone]}`}>
+      <div className={styles.summaryMain}>
+        <span className={styles.summaryIcon}>
+          <Icon size={28} />
+        </span>
+        <div className={styles.summaryText}>
+          <span className={styles.summaryTitle}>{metric.title}</span>
+          <strong>
+            {metric.value}
+            {metric.unit ? <em>{metric.unit}</em> : null}
+          </strong>
+        </div>
+      </div>
+      {metric.footerLabel && metric.footerValue ? (
+        <div className={styles.summaryFooter}>
+          <span>{metric.footerLabel}</span>
+          <strong>{metric.footerValue}</strong>
+        </div>
+      ) : null}
+    </article>
+  );
+}
+
+function BehaviorTable({ data }: { data: CronJobOverviewPageData["branchBehaviorRows"] }) {
+  return (
+    <section className={`${styles.panel} ${styles.behaviorPanel}`}>
+      <div className={styles.tableScroller}>
+        <table className={styles.behaviorTable}>
+          <thead>
+            <tr>
+              <th rowSpan={2} className={styles.indexCell} />
+              <th rowSpan={2}>分行名称</th>
+              <th colSpan={2} className={styles.groupRead}>
+                已读
+              </th>
+              <th colSpan={2} className={styles.groupDirect}>
+                查看方案
+              </th>
+              <th colSpan={2} className={styles.groupBrowse}>
+                点击去洞察
+              </th>
+              <th colSpan={2} className={styles.groupPhone}>
+                点击去电访
+              </th>
+            </tr>
+            <tr>
+              <th>已读任务数</th>
+              <th>已读率</th>
+              <th>查看方案任务数</th>
+              <th>方案点击率</th>
+              <th>点击去洞察任务数</th>
+              <th>洞察点击率</th>
+              <th>点击去电访任务数</th>
+              <th>电访点击率</th>
+            </tr>
+          </thead>
+          <tbody>
+            {data.map((row, index) => (
+              <tr key={`${row.branchName}-${index}`} className={row.rank === "..." ? styles.mutedRow : undefined}>
+                <td className={styles.indexCell}>{row.rank}</td>
+                <td className={styles.branchName}>{row.branchName}</td>
+                <td>{row.readTasks}</td>
+                <td>{row.readRate}</td>
+                <td>{row.directTasks}</td>
+                <td>{row.directClickRate}</td>
+                <td>{row.browseTasks}</td>
+                <td>{row.browseClickRate}</td>
+                <td>{row.phoneTasks}</td>
+                <td>{row.phoneClickRate}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </section>
+  );
+}
+
+function DonutChart({ items }: { items: CronJobOverviewFailureReason[] }) {
+  const total = items.reduce((sum, item) => sum + item.count, 0);
+  const radius = 44;
+  const circumference = 2 * Math.PI * radius;
+  let offset = 0;
+
+  return (
+    <div className={styles.donutWrap}>
+      <svg className={styles.donutChart} viewBox="0 0 116 116" role="img" aria-label="报错原因分布">
+        <circle cx="58" cy="58" r={radius} fill="none" stroke="#edf3fb" strokeWidth="16" />
+        {items.map((item) => {
+          const dash = total > 0 ? (item.count / total) * circumference : 0;
+          const segmentStyle = {
+            "--dash": dash,
+            "--gap": circumference - dash,
+            "--offset": -offset,
+            "--segment-color": item.color,
+          } as CSSProperties;
+          offset += dash;
+
+          return (
+            <circle
+              key={item.name}
+              className={styles.donutSegment}
+              cx="58"
+              cy="58"
+              r={radius}
+              fill="none"
+              strokeWidth="16"
+              style={segmentStyle}
+            />
+          );
+        })}
+      </svg>
+      <div className={styles.donutCenter}>
+        <strong>{total.toLocaleString("en-US")}</strong>
+        <span>报错执行次数</span>
+      </div>
     </div>
   );
 }
 
-function MetricCard({ metric }: { metric: MetricCard }) {
-  const Icon = metric.icon;
-  const isCostMetric = metric.key === "avg_cost";
-  const isPositiveTrend = isCostMetric
-    ? metric.trend === "down"
-    : metric.trend === "up";
-  const trendClassName = metric.trend
-    ? isPositiveTrend
-      ? styles.goodTrend
-      : styles.hotTrend
-    : "";
-  const compareLabel = metric.key === "total" ? "数量" : "环比";
-  const showCompareLabel = metric.compare !== "-";
-
+function FailureReasonPanel({
+  data,
+  onOpenDetail,
+}: {
+  data: CronJobOverviewFailureReason[];
+  onOpenDetail: () => void;
+}) {
   return (
-    <article
-      className={styles.metricCard}
-      style={{ borderTopColor: metric.accent }}
-    >
-      <div className={styles.metricHeader}>
-        <i
-          style={{
-            color: "#ffffff",
-            backgroundColor: metric.accent,
-          }}
+    <article className={styles.reasonPanel}>
+      <div className={styles.reasonPanelHeader}>
+        <h3>报错原因分布（按报错执行次数）</h3>
+        <button
+          type="button"
+          className={styles.linkButton}
+          onClick={onOpenDetail}
         >
-          <Icon size={22} />
-        </i>
-        <div className={styles.metricText}>
-          <span className={styles.metricTitle}>{metric.title}</span>
-          <strong>{metric.value}</strong>
-          {metric.compare ? (
-            <div className={`${styles.metricCompare} ${trendClassName}`}>
-              {showCompareLabel ? <span>{compareLabel}</span> : null}
-              {metric.trend === "up" ? <TrendingUp size={14} /> : null}
-              {metric.trend === "down" ? <TrendingDown size={14} /> : null}
-              <em>{metric.compare}</em>
-            </div>
-          ) : null}
-        </div>
+          查看详情
+          <ChevronRight size={14} />
+        </button>
       </div>
-    </article>
-  );
-}
-
-const polarPoint = (cx: number, cy: number, radius: number, angle: number) => ({
-  x: cx + radius * Math.cos(angle),
-  y: cy + radius * Math.sin(angle),
-});
-
-function seamCurve(
-  cx: number,
-  cy: number,
-  outerRadius: number,
-  innerRadius: number,
-  angle: number,
-  fromOuter: boolean,
-) {
-  const outer = polarPoint(cx, cy, outerRadius, angle);
-  const inner = polarPoint(cx, cy, innerRadius, angle);
-  const control = polarPoint(cx, cy, (outerRadius + innerRadius) / 2, angle + 0.22);
-  const end = fromOuter ? inner : outer;
-
-  return `Q ${control.x.toFixed(3)} ${control.y.toFixed(3)} ${end.x.toFixed(3)} ${end.y.toFixed(3)}`;
-}
-
-function donutSegmentPath(
-  startAngle: number,
-  endAngle: number,
-  cx = 74,
-  cy = 74,
-  outerRadius = 56,
-  innerRadius = 39,
-) {
-  const outerStart = polarPoint(cx, cy, outerRadius, startAngle);
-  const outerEnd = polarPoint(cx, cy, outerRadius, endAngle);
-  const innerStart = polarPoint(cx, cy, innerRadius, startAngle);
-  const largeArcFlag = endAngle - startAngle > Math.PI ? 1 : 0;
-
-  return [
-    `M ${outerStart.x.toFixed(3)} ${outerStart.y.toFixed(3)}`,
-    `A ${outerRadius} ${outerRadius} 0 ${largeArcFlag} 1 ${outerEnd.x.toFixed(3)} ${outerEnd.y.toFixed(3)}`,
-    seamCurve(cx, cy, outerRadius, innerRadius, endAngle, true),
-    `A ${innerRadius} ${innerRadius} 0 ${largeArcFlag} 0 ${innerStart.x.toFixed(3)} ${innerStart.y.toFixed(3)}`,
-    seamCurve(cx, cy, outerRadius, innerRadius, startAngle, false),
-    "Z",
-  ].join(" ");
-}
-
-function CurvedDonutChart({
-  items,
-  centerValue,
-  centerLabel,
-}: {
-  items: DistributionItem[];
-  centerValue: string;
-  centerLabel: string;
-}) {
-  const total = items.reduce((sum, item) => sum + item.value, 0);
-  const nonZeroItems = items.filter((item) => item.value > 0);
-  const singleValueItem = nonZeroItems.length === 1 ? nonZeroItems[0] : null;
-  const singleValueItemIndex = singleValueItem
-    ? items.findIndex((item) => item.name === singleValueItem.name)
-    : -1;
-  const gradientPrefix = `donut-${hashString(
-    `${centerLabel}-${items.map((item) => item.name).join("-")}`,
-  )}`;
-  let currentAngle = -Math.PI / 2;
-
-  return (
-    <svg
-      className={styles.curvedDonut}
-      viewBox="0 0 148 148"
-      role="img"
-      aria-label={`${centerLabel} ${centerValue}`}
-    >
-      <defs>
-        {items.map((item, index) => {
-          const color = item.color || "#94a3b8";
-          return (
-            <radialGradient
-              key={item.name}
-              id={`${gradientPrefix}-${index}`}
-              cx="50%"
-              cy="50%"
-              r="62%"
-            >
-              <stop offset="58%" stopColor={color} stopOpacity="0.72" />
-              <stop offset="100%" stopColor={color} />
-            </radialGradient>
-          );
-        })}
-      </defs>
-      {singleValueItem ? (
-        <Tooltip
-          {...quickTooltipProps}
-          title={`${singleValueItem.name}: ${formatNumber(singleValueItem.value)}${
-            singleValueItem.percent !== undefined
-              ? ` (${singleValueItem.percent.toFixed(2)}%)`
-              : ""
-          }`}
-        >
-          <circle
-            cx="74"
-            cy="74"
-            r="47.5"
-            fill="none"
-            stroke={`url(#${gradientPrefix}-${singleValueItemIndex})`}
-            strokeWidth="17"
-          />
-        </Tooltip>
-      ) : (
-        items.map((item, index) => {
-          const angle = total ? (item.value / total) * Math.PI * 2 : 0;
-          const startAngle = currentAngle;
-          const endAngle = currentAngle + angle;
-          currentAngle = endAngle;
-
-          return (
-            <Tooltip
-              key={item.name}
-              {...quickTooltipProps}
-              title={`${item.name}: ${formatNumber(item.value)}${
-                item.percent !== undefined ? ` (${item.percent.toFixed(2)}%)` : ""
-              }`}
-            >
-              <path
-                d={donutSegmentPath(startAngle, endAngle)}
-                fill={`url(#${gradientPrefix}-${index})`}
-              />
-            </Tooltip>
-          );
-        })
-      )}
-      {!total ? (
-        <Tooltip {...quickTooltipProps} title={`${centerLabel}: 0`}>
-          <circle
-            cx="74"
-            cy="74"
-            r="47.5"
-            fill="none"
-            stroke="#e2e8f0"
-            strokeWidth="17"
-          />
-        </Tooltip>
-      ) : null}
-      <text
-        x="74"
-        y="68"
-        textAnchor="middle"
-        className={styles.curvedDonutValue}
-      >
-        {centerValue}
-      </text>
-      <text
-        x="74"
-        y="86"
-        textAnchor="middle"
-        className={styles.curvedDonutLabel}
-      >
-        {centerLabel}
-      </text>
-    </svg>
-  );
-}
-
-function Panel({
-  title,
-  children,
-  action,
-}: {
-  title: string;
-  children: React.ReactNode;
-  action?: React.ReactNode;
-}) {
-  return (
-    <article className={styles.panel}>
-      <div className={styles.panelHeader}>
-        <h3>{title}</h3>
-        {action}
-      </div>
-      {children}
-    </article>
-  );
-}
-
-function DonutPanel({
-  title,
-  items,
-  centerValue,
-  centerLabel,
-}: {
-  title: string;
-  items: DistributionItem[];
-  centerValue: string;
-  centerLabel: string;
-}) {
-  return (
-    <Panel title={title}>
-      <div className={styles.donutLayout}>
-        <CurvedDonutChart
-          items={items}
-          centerValue={centerValue}
-          centerLabel={centerLabel}
-        />
-        <div className={styles.legendList}>
-          {items.map((item) => (
-            <div key={item.name} className={styles.legendRow}>
+      <div className={styles.reasonContent}>
+        <DonutChart items={data} />
+        <div className={styles.reasonLegend}>
+          {data.map((item) => (
+            <div key={item.name} className={styles.reasonRow}>
               <span>
                 <i style={{ backgroundColor: item.color }} />
                 {item.name}
               </span>
               <strong>
-                {formatNumber(item.value)} ({item.percent.toFixed(2)}%)
+                {item.percent.toFixed(2)}% ({item.count})
               </strong>
             </div>
           ))}
         </div>
       </div>
-    </Panel>
+    </article>
   );
 }
 
-function FailureReasonChart({
-  items,
+function MiniSummaryCard({
+  icon,
+  title,
+  value,
+  unit,
+  tone = "blue",
 }: {
-  items: DistributionItem[];
+  icon: LucideIcon;
+  title: string;
+  value: string;
+  unit: string;
+  tone?: SummaryMetricTone;
 }) {
-  const maxValue = Math.max(...items.map((item) => item.value), 1);
+  const Icon = icon;
 
   return (
-    <div className={styles.failureChart}>
-      {items.map((item) => (
-        <div key={item.name} className={styles.failureRow}>
-          <Tooltip {...quickTooltipProps} title={item.name} placement="topLeft">
-            <span className={styles.failureLabel}>
-              {truncateAxisLabel(item.name)}
-            </span>
-          </Tooltip>
-          <div className={styles.failureBarTrack}>
-            <span
-              className={styles.failureBar}
-              style={{
-                width: `${Math.max(5, (item.value / maxValue) * 100)}%`,
-              }}
-            />
-          </div>
-          <strong className={styles.failureValue}>
-            {item.value}
-            {item.percent !== undefined ? ` (${item.percent.toFixed(2)}%)` : ""}
-          </strong>
-        </div>
-      ))}
-    </div>
-  );
-}
-
-function normalizeStack<T extends Record<string, string | number>>(
-  row: T,
-  keys: string[],
-) {
-  const total = keys.reduce((sum, key) => sum + Number(row[key]), 0);
-
-  return keys.reduce<Record<string, number>>((result, key, index) => {
-    if (!total) {
-      result[key] = 0;
-      return result;
-    }
-
-    if (index === keys.length - 1) {
-      const previousTotal = keys
-        .slice(0, -1)
-        .reduce((sum, prevKey) => sum + result[prevKey], 0);
-      result[key] = Number((100 - previousTotal).toFixed(2));
-      return result;
-    }
-
-    result[key] = Number(((Number(row[key]) / total) * 100).toFixed(2));
-    return result;
-  }, {});
-}
-
-function curvedStackSegmentPath(
-  start: number,
-  end: number,
-  isFirst: boolean,
-  isLast: boolean,
-) {
-  const height = 12;
-  const curveOffset = 2.4;
-  const rightBoundary = isLast
-    ? `L ${end.toFixed(3)} ${height}`
-    : `Q ${(end + curveOffset).toFixed(3)} ${(height / 2).toFixed(3)} ${end.toFixed(3)} ${height}`;
-  const leftBoundary = isFirst
-    ? `L ${start.toFixed(3)} 0`
-    : `Q ${(start + curveOffset).toFixed(3)} ${(height / 2).toFixed(3)} ${start.toFixed(3)} 0`;
-
-  return [
-    `M ${start.toFixed(3)} 0`,
-    `L ${end.toFixed(3)} 0`,
-    rightBoundary,
-    `L ${start.toFixed(3)} ${height}`,
-    leftBoundary,
-    "Z",
-  ].join(" ");
-}
-
-function BranchLegend({
-  items,
-}: {
-  items: Array<{ label: string; color: string }>;
-}) {
-  return (
-    <div className={styles.branchLegend}>
-      {items.map((item) => (
-        <span key={item.label}>
-          <i style={{ backgroundColor: item.color }} />
-          {item.label}
-        </span>
-      ))}
-    </div>
-  );
-}
-
-function BranchTaskCell({
-  name,
-  rows,
-  maxValue,
-}: {
-  name: string;
-  rows: DistributionItem[];
-  maxValue: number;
-}) {
-  const task = rows.find((item) => item.name === name);
-  const value = task?.value ?? 0;
-
-  return (
-    <div className={styles.branchBarRow}>
-      <span className={styles.branchName}>{name}</span>
-      <div className={styles.branchBarTrack}>
-        <span
-          className={styles.branchSingleBar}
-          style={{ width: `${Math.max(5, (value / maxValue) * 100)}%` }}
-        />
+    <article className={`${styles.miniSummaryCard} ${styles[tone]}`}>
+      <span className={styles.miniIcon}>
+        <Icon size={26} />
+      </span>
+      <div>
+        <span>{title}</span>
+        <strong>
+          {value}
+          <em>{unit}</em>
+        </strong>
       </div>
-      <strong>{formatNumber(value)}</strong>
-    </div>
+    </article>
   );
 }
 
-function BranchStackCell<T extends { name: string } & Record<string, string | number>>({
-  name,
-  rows,
-  keys,
-  colors,
-  labels,
-  primaryKey,
-}: {
-  name: string;
-  rows: T[];
-  keys: string[];
-  colors: string[];
-  labels: Record<string, string>;
-  primaryKey: string;
-}) {
-  const row = rows.find((item) => item.name === name);
-  const normalized = row ? normalizeStack(row, keys) : {};
-  const total = row
-    ? keys.reduce((sum, key) => sum + Number(row[key] ?? 0), 0)
-    : 0;
-  const primaryPercent = total
-    ? (Number(row?.[primaryKey] ?? 0) / total) * 100
-    : 0;
-  const gradientPrefix = `branch-stack-${name.replace(
-    /[^a-zA-Z0-9_-]/g,
-    "-",
-  )}-${keys.join("-")}`;
-  let currentStart = 0;
-
+function RankTable({ data }: { data: CronJobOverviewPageData["anomalyRankRows"] }) {
   return (
-    <div className={styles.branchBarRow}>
-      <span className={styles.branchName}>{name}</span>
-      <svg
-        className={styles.branchStackTrack}
-        viewBox="0 0 100 12"
-        preserveAspectRatio="none"
-      >
-        <defs>
-          {colors.map((color, index) => (
-            <linearGradient
-              key={color}
-              id={`${gradientPrefix}-${index}`}
-              x1="0"
-              y1="0"
-              x2="1"
-              y2="0"
-            >
-              <stop offset="0%" stopColor={color} />
-              <stop offset="100%" stopColor={color} stopOpacity="0.72" />
-            </linearGradient>
-          ))}
-        </defs>
-        {keys.map((key, index) => {
-          const value = normalized[key] ?? 0;
-          if (value <= 0) {
-            return null;
-          }
-
-          const start = currentStart;
-          const end = Math.min(100, currentStart + value);
-          currentStart = end;
-
-          return (
-            <Tooltip
-              key={key}
-              {...quickTooltipProps}
-              title={`${labels[key] ?? key}: ${formatNumber(Number(row?.[key] ?? 0))}`}
-            >
-              <path
-                d={curvedStackSegmentPath(
-                  start,
-                  end,
-                  index === 0,
-                  index === keys.length - 1,
-                )}
-                fill={`url(#${gradientPrefix}-${index})`}
-              />
-            </Tooltip>
-          );
-        })}
-      </svg>
-      <strong>{formatPercent(primaryPercent)}</strong>
-    </div>
-  );
-}
-
-function BranchSharedOverview({
-  branchTasks,
-  branchExecution,
-  branchRead,
-}: {
-  branchTasks: DistributionItem[];
-  branchExecution: Array<{
-    name: string;
-    success: number;
-    failed: number;
-    skipped: number;
-  }>;
-  branchRead: Array<{
-    name: string;
-    read: number;
-    unread: number;
-  }>;
-}) {
-  const branchNames = branchTasks.map((item) => item.name);
-  const maxTaskValue = Math.max(...branchTasks.map((item) => item.value), 1);
-
-  return (
-    <section className={styles.branchSharedSection}>
-      <div className={styles.branchSharedScroller}>
-        <div className={styles.branchSharedGrid}>
-          <article className={styles.branchHeaderCard}>
-            <h3>分行定时任务数量</h3>
-            <div className={styles.branchLegendSpacer} />
-          </article>
-          <article className={styles.branchHeaderCard}>
-            <h3>分行执行结果分布</h3>
-            <BranchLegend
-              items={[
-                { label: "成功", color: "#16a34a" },
-                { label: "失败", color: "#ef4444" },
-                { label: "已取消/跳过", color: "#94a3b8" },
-              ]}
-            />
-          </article>
-          <article className={styles.branchHeaderCard}>
-            <h3>分行阅读状态分布</h3>
-            <BranchLegend
-              items={[
-                { label: "已读", color: "#2563eb" },
-                { label: "未读", color: "#f97316" },
-              ]}
-            />
-          </article>
-
-          {branchNames.map((name) => (
-            <div key={name} className={styles.branchSharedRow}>
-              <div className={styles.branchCell}>
-                <BranchTaskCell name={name} rows={branchTasks} maxValue={maxTaskValue} />
-              </div>
-              <div className={styles.branchCell}>
-                <BranchStackCell
-                  name={name}
-                  rows={branchExecution}
-                  keys={["success", "failed", "skipped"]}
-                  colors={["#16a34a", "#ef4444", "#94a3b8"]}
-                  labels={{
-                    success: "执行成功次数",
-                    failed: "执行失败次数",
-                    skipped: "任务取消次数",
-                  }}
-                  primaryKey="success"
-                />
-              </div>
-              <div className={styles.branchCell}>
-                <BranchStackCell
-                  name={name}
-                  rows={branchRead}
-                  keys={["read", "unread"]}
-                  colors={["#2563eb", "#f97316"]}
-                  labels={{
-                    read: "\u5df2\u8bfb\u6570\u91cf",
-                    unread: "\u672a\u8bfb\u6570\u91cf",
-                  }}
-                  primaryKey="read"
-                />
-              </div>
-            </div>
-          ))}
-        </div>
+    <section className={`${styles.panel} ${styles.rankPanel}`}>
+      <h2>分行异常排行</h2>
+      <div className={styles.tableScroller}>
+        <table className={styles.rankTable}>
+          <thead>
+            <tr>
+              <th className={styles.indexCell} />
+              <th>分行名称</th>
+              <th>报错执行次数</th>
+              <th>报错率</th>
+              <th>受影响客户经理数</th>
+            </tr>
+          </thead>
+          <tbody>
+            {data.map((row) => (
+              <tr key={row.rank}>
+                <td className={styles.indexCell}>{row.rank}</td>
+                <td className={styles.branchName}>{row.branchName}</td>
+                <td>{row.alertExecutions}</td>
+                <td>{row.alertRate}</td>
+                <td>{row.affectedManagers}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
       </div>
     </section>
   );
@@ -749,9 +455,7 @@ function FailedTaskModal({
       open={open}
       className={styles.failedTaskModal}
       title={
-        <div
-          className={styles.failedTaskModalTitle}
-        >
+        <div className={styles.failedTaskModalTitle}>
           <span className={styles.failedTaskWarningIcon}>
             <WarningOutlined />
           </span>
@@ -767,7 +471,10 @@ function FailedTaskModal({
         <Input.Search
           value={keyword}
           onChange={(event) => setKeyword(event.target.value)}
-          onSearch={(val) => { setKeyword(val); handleFilterChange(); }}
+          onSearch={(val) => {
+            setKeyword(val);
+            handleFilterChange();
+          }}
           allowClear
           placeholder="输入用户ID筛选"
           className={styles.failedTaskSearch}
@@ -803,7 +510,11 @@ function FailedTaskModal({
                 <span className={styles.failedTaskName}>{task.job_name}</span>
                 <span>{task.tenant_name}</span>
                 <span>{task.tenant_id}</span>
-                <span>{task.actual_time ? dayjs(task.actual_time).format("YYYY-MM-DD HH:mm:ss") : "-"}</span>
+                <span>
+                  {task.actual_time
+                    ? dayjs(task.actual_time).format("YYYY-MM-DD HH:mm:ss")
+                    : "-"}
+                </span>
                 <span>
                   {task.duration_ms === undefined || task.duration_ms === null
                     ? "-"
@@ -840,76 +551,165 @@ function FailedTaskModal({
 }
 
 export default function CronJobOverviewPage() {
-  const [timeRange, setTimeRange] = useState<TimeRange>("week");
-  const [dateRange, setDateRange] = useState<[Dayjs, Dayjs]>([
-    dayjs().subtract(6, "day"),
-    dayjs(),
-  ]);
-  const [overview, setOverview] = useState<CronOverviewResponse | null>(null);
-  const [overviewLoading, setOverviewLoading] = useState(false);
+  const [searchParams, setSearchParams] = useSearchParams();
+  const initialDateRange = getInitialDateRange(searchParams);
+  const [overviewData, setOverviewData] = useState<CronJobOverviewPageData>(emptyOverviewData);
+  const [loading, setLoading] = useState(false);
+  const [timeRange, setTimeRange] = useState<TimeRange>(
+    getTimeRangeForDateRange(initialDateRange),
+  );
+  const [dateRange, setDateRange] = useState<[Dayjs, Dayjs]>(initialDateRange);
+  const [bbkIds, setBbkIds] = useState<string[]>(() => getInitialBbkIds(searchParams));
   const [failedTaskModalOpen, setFailedTaskModalOpen] = useState(false);
   const [failedTasks, setFailedTasks] = useState<ExecutionItem[]>([]);
   const [failedTasksLoading, setFailedTasksLoading] = useState(false);
 
-  const getDateRangeParams = (range: [Dayjs, Dayjs]) => ({
-    start_time: range[0].startOf("day").format("YYYY-MM-DDTHH:mm:ss"),
-    end_time: range[1].endOf("day").format("YYYY-MM-DDTHH:mm:ss"),
+  const getOverviewFilters = (): CronJobOverviewDateFilters => ({
+    start_date: dateRange[0].format("YYYY-MM-DD"),
+    end_date: dateRange[1].format("YYYY-MM-DD"),
+    bbk_ids: bbkIds.length > 0 ? bbkIds.join(",") : undefined,
   });
 
+  const getExecutionDateRangeParams = () => ({
+    start_time: dateRange[0].startOf("day").format("YYYY-MM-DDTHH:mm:ss"),
+    end_time: dateRange[1].endOf("day").format("YYYY-MM-DDTHH:mm:ss"),
+  });
+
+  useEffect(() => {
+    let ignore = false;
+
+    async function loadOverview() {
+      setLoading(true);
+      try {
+        const response = await monitorApi.getCronJobOverviewPageData(getOverviewFilters());
+        if (!ignore) {
+          setOverviewData(response);
+        }
+      } catch (error) {
+        console.warn("Failed to fetch cron job overview page data.", error);
+      } finally {
+        if (!ignore) {
+          setLoading(false);
+        }
+      }
+    }
+
+    loadOverview();
+
+    return () => {
+      ignore = true;
+    };
+  }, [dateRange, bbkIds]);
+
+  useEffect(() => {
+    const nextParams = new URLSearchParams();
+    nextParams.set("start_date", dateRange[0].format("YYYY-MM-DD"));
+    nextParams.set("end_date", dateRange[1].format("YYYY-MM-DD"));
+    if (bbkIds.length > 0) {
+      nextParams.set("bbk_ids", bbkIds.join(","));
+    }
+    setSearchParams(nextParams, { replace: true });
+  }, [dateRange, bbkIds, setSearchParams]);
+
   const fetchOverview = async () => {
-    setOverviewLoading(true);
+    setLoading(true);
     try {
-      const params = getDateRangeParams(dateRange);
-      const response = await monitorApi.getCronOverview(params);
-      setOverview(response);
+      const response = await monitorApi.getCronJobOverviewPageData(getOverviewFilters());
+      setOverviewData(response);
     } catch (error) {
-      console.error("Failed to fetch cron overview:", error);
+      console.warn("Failed to fetch cron job overview page data.", error);
     } finally {
-      setOverviewLoading(false);
+      setLoading(false);
     }
   };
 
   const fetchFailedTasks = async () => {
     setFailedTasksLoading(true);
+    setFailedTasks([]);
     try {
-      const params = {
-        ...getDateRangeParams(dateRange),
-        status: "error",
-      };
       const pageSize = 100;
-      let page = 1;
-      let total = 0;
+      const activeBbkIds = bbkIds.filter(Boolean);
+      const selectedBbkIds = activeBbkIds.length > 0 ? activeBbkIds : [undefined];
+      const selectedBbkIdSet = new Set(activeBbkIds);
       const allTasks: ExecutionItem[] = [];
+      console.info("[cron failed tasks debug] start fetch", {
+        dateRange: getExecutionDateRangeParams(),
+        activeBbkIds,
+        selectedBbkIds,
+      });
 
-      do {
-        const response = await monitorApi.getExecutions(page, pageSize, params);
-        if (response.items.length === 0) {
-          break;
-        }
-        allTasks.push(...response.items);
-        total = response.total;
-        page += 1;
-      } while (allTasks.length < total);
+      for (const bbkId of selectedBbkIds) {
+        let page = 1;
+        let total = 0;
 
-      setFailedTasks(allTasks);
+        do {
+          const response = await monitorApi.getExecutions(page, pageSize, {
+            ...getExecutionDateRangeParams(),
+            status: "error",
+            bbk_id: bbkId,
+          });
+          console.info("[cron failed tasks debug] response page", {
+            requestedBbkId: bbkId,
+            page,
+            total: response.total,
+            itemCount: response.items.length,
+            sample: response.items.slice(0, 5).map((task) => ({
+              id: task.id,
+              jobId: task.job_id,
+              tenantId: task.tenant_id,
+              bbkId: task.bbk_id,
+              status: task.status,
+            })),
+          });
+          if (response.items.length === 0) {
+            break;
+          }
+          allTasks.push(...response.items);
+          total = response.total;
+          page += 1;
+        } while ((page - 1) * pageSize < total);
+      }
+
+      const tasksById = new Map<number, ExecutionItem>();
+      allTasks
+        .filter((task) =>
+          selectedBbkIdSet.size === 0 ? true : selectedBbkIdSet.has(task.bbk_id || ""),
+        )
+        .forEach((task) => {
+          tasksById.set(task.id, task);
+        });
+      console.info("[cron failed tasks debug] final tasks", {
+        activeBbkIds,
+        rawCount: allTasks.length,
+        filteredCount: tasksById.size,
+        filteredSample: Array.from(tasksById.values()).slice(0, 5).map((task) => ({
+          id: task.id,
+          jobId: task.job_id,
+          tenantId: task.tenant_id,
+          bbkId: task.bbk_id,
+          status: task.status,
+        })),
+      });
+      setFailedTasks(
+        Array.from(tasksById.values()).sort((a, b) => {
+          const left = a.actual_time ? dayjs(a.actual_time).valueOf() : 0;
+          const right = b.actual_time ? dayjs(b.actual_time).valueOf() : 0;
+          return right - left;
+        }),
+      );
     } catch (error) {
-      console.error("Failed to fetch failed tasks:", error);
+      console.warn("Failed to fetch failed cron executions.", error);
     } finally {
       setFailedTasksLoading(false);
     }
   };
 
   useEffect(() => {
-    fetchOverview();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [timeRange, dateRange]);
-
-  useEffect(() => {
     if (failedTaskModalOpen) {
       fetchFailedTasks();
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [failedTaskModalOpen, dateRange]);
+  }, [failedTaskModalOpen, dateRange, bbkIds]);
 
   const handleModeChange = (nextRange: TimeRange) => {
     setTimeRange(nextRange);
@@ -924,9 +724,7 @@ export default function CronJobOverviewPage() {
     }
   };
 
-  const handleDateRangeChange = (
-    dates: null | [Dayjs | null, Dayjs | null],
-  ) => {
+  const handleDateRangeChange = (dates: null | [Dayjs | null, Dayjs | null]) => {
     if (!dates?.[0] || !dates?.[1]) {
       return;
     }
@@ -956,73 +754,49 @@ export default function CronJobOverviewPage() {
   const disabledDate = (current: Dayjs | null): boolean =>
     !!current && current.isAfter(dayjs().startOf("day"), "day");
 
-  const getOverviewMetricValue = (key: string) =>
-    overview?.metrics.find((item) => item.key === key)?.value;
-
-  const getOverviewMetricCompare = (key: string) =>
-    overview?.metrics.find((item) => item.key === key)?.compare ?? "";
-
-  const getOverviewMetricTrend = (key: string) =>
-    overview?.metrics.find((item) => item.key === key)?.trend ?? "up";
-
-  const metricCards = metricDefinitions.map((definition) => ({
-    key: definition.key,
-    title: definition.title,
-    value: formatMetricValue(definition.key, getOverviewMetricValue(definition.key)),
-    compare: getOverviewMetricCompare(definition.key),
-    trend: getOverviewMetricTrend(definition.key),
-    accent: definition.accent,
-    icon: definition.icon,
-  }));
-
-  const taskStatus = overview?.task_status ?? [];
-  const executionResult = overview?.execution_result ?? [];
-  const readStatus = overview?.read_status ?? [];
-  const failureReasons = overview?.failure_reasons ?? [];
-  const branchTasks = overview?.branch_tasks ?? [];
-  const branchExecution = overview?.branch_execution ?? [];
-  const branchRead = overview?.branch_read ?? [];
+  const summaryMetricValues = new Map(
+    overviewData.summaryMetrics.map((metric) => [metric.key, metric]),
+  );
+  const summaryMetrics = summaryMetricDefinitions.map((definition) => {
+    const metricValue = summaryMetricValues.get(definition.key);
+    const footerValue =
+      definition.key === "branches"
+        ? summaryMetricValues.get("managers")?.value
+        : metricValue?.footerValue;
+    return {
+      ...definition,
+      value: metricValue?.value ?? "-",
+      footerValue,
+    };
+  });
 
   return (
-    <div className={styles.cronOverviewPage}>
-      <header className={styles.pageHeader}>
+    <main className={styles.cronOverviewPage}>
+      {loading ? <div className={styles.loadingBar}>加载中...</div> : null}
+      <header className={styles.header}>
+        <div className={styles.titleRow}>
+          <h1>定时任务概览</h1>
+        </div>
         <div className={styles.toolbar}>
           <div className={styles.toolbarLeft}>
-            <div className={styles.titleWrap}>
-              <h1>定时任务概览</h1>
-            </div>
-          </div>
-          <div className={styles.toolbarRight}>
             <div className={styles.segmentedControl}>
               <button
                 type="button"
-                className={
-                  timeRange === "day"
-                    ? styles.segmentActive
-                    : styles.segmentButton
-                }
+                className={timeRange === "day" ? styles.segmentActive : styles.segmentButton}
                 onClick={() => handleModeChange("day")}
               >
                 今天
               </button>
               <button
                 type="button"
-                className={
-                  timeRange === "week"
-                    ? styles.segmentActive
-                    : styles.segmentButton
-                }
+                className={timeRange === "week" ? styles.segmentActive : styles.segmentButton}
                 onClick={() => handleModeChange("week")}
               >
                 近7天
               </button>
               <button
                 type="button"
-                className={
-                  timeRange === "month"
-                    ? styles.segmentActive
-                    : styles.segmentButton
-                }
+                className={timeRange === "month" ? styles.segmentActive : styles.segmentButton}
                 onClick={() => handleModeChange("month")}
               >
                 近30天
@@ -1041,72 +815,101 @@ export default function CronJobOverviewPage() {
               />
             </div>
           </div>
+
+          <div className={styles.toolbarRight}>
+            <Select
+              className={styles.scopeSelect}
+              mode="multiple"
+              value={bbkIds}
+              onChange={setBbkIds}
+              placeholder="全部分行"
+              maxTagCount="responsive"
+              maxTagPlaceholder={(omittedValues) => (
+                <Tooltip
+                  title={omittedValues
+                    .map((item) => {
+                      const value = String(item.value ?? "");
+                      return BBK_ID_TO_NAME_MAP[value] || value;
+                    })
+                    .join("、")}
+                >
+                  <span>+{omittedValues.length} 个分行</span>
+                </Tooltip>
+              )}
+              allowClear
+              showSearch
+              filterOption={(input, option) => {
+                const searchValue = input.toLowerCase();
+                const optionValue = String(option?.value ?? "");
+                const optionLabel = BBK_ID_TO_NAME_MAP[optionValue] || "";
+                return (
+                  optionValue.toLowerCase().includes(searchValue) ||
+                  optionLabel.toLowerCase().includes(searchValue)
+                );
+              }}
+            >
+              {BBK_ID_MAP.map((item) => (
+                <Option key={item.value} value={item.value}>
+                  {item.label}
+                </Option>
+              ))}
+            </Select>
+            <button
+              type="button"
+              className={styles.refreshButton}
+              onClick={fetchOverview}
+            >
+              <RefreshCw size={16} />
+              刷新
+            </button>
+          </div>
         </div>
       </header>
 
-      <SectionTitle>任务总体概览</SectionTitle>
-      <Spin spinning={overviewLoading} tip="加载中...">
-        <section className={styles.metricGrid}>
-          {metricCards.map((metric) => (
-            <MetricCard key={metric.key} metric={metric} />
-          ))}
-        </section>
-      </Spin>
+      <section className={styles.summaryGrid} aria-label="概览指标">
+        {summaryMetrics.map((metric) => (
+          <SummaryCard key={metric.key} metric={metric} />
+        ))}
+      </section>
 
-      <SectionTitle>任务状态与触达情况</SectionTitle>
-      <Spin spinning={overviewLoading} tip="加载中...">
-        <section className={styles.statusGrid}>
-          <DonutPanel
-            title="任务状态分布"
-            items={taskStatus}
-            centerValue={formatNumber(branchTasks.reduce((sum, item) => sum + item.value, 0))}
-            centerLabel="总任务数"
-          />
-          <DonutPanel
-            title="执行结果分布"
-            items={executionResult}
-            centerValue={formatNumber(executionResult.reduce((sum, item) => sum + item.value, 0))}
-            centerLabel="总执行次数"
-          />
-          <Panel
-            title="任务失败原因分布"
-            action={
-              <button
-                type="button"
-                className={styles.linkButton}
-                onClick={() => setFailedTaskModalOpen(true)}
-              >
-                查看详情
-                <ChevronRight size={14} />
-              </button>
-            }
-          >
-            <FailureReasonChart items={failureReasons} />
-          </Panel>
-          <DonutPanel
-            title="任务阅读状态分布"
-            items={readStatus}
-            centerValue={formatNumber(readStatus.reduce((sum, item) => sum + item.value, 0))}
-            centerLabel="成功执行次数"
-          />
-        </section>
-      </Spin>
+      <p className={styles.formulaNote}>
+        说明： 执行成功率 = 成功执行次数 / 任务执行次数； 任务已读率 = 已读任务去重数 / 已执行任务去重数； 执行报错率 = 报错执行次数 / 任务执行次数
+      </p>
+      <h2 className={styles.sectionHeading}>分行层行为分析</h2>
+      <BehaviorTable data={overviewData.branchBehaviorRows} />
 
-      <SectionTitle>分行任务执行与触达概况</SectionTitle>
-      <Spin spinning={overviewLoading} tip="加载中...">
-        <BranchSharedOverview
-          branchTasks={branchTasks}
-          branchExecution={branchExecution}
-          branchRead={branchRead}
-        />
-      </Spin>
+      <section className={styles.anomalySection}>
+        <div className={styles.anomalyLeft}>
+          <h2>分行层异常诊断</h2>
+          <div className={styles.miniSummaryGrid}>
+            <MiniSummaryCard
 
+              icon={Banknote}
+              title="受影响分行数"
+              value={overviewData.anomalySummary.affectedBranches}
+              unit={overviewData.anomalySummary.affectedBranchesUnit}
+            />
+            <MiniSummaryCard
+              icon={UserRoundCheck}
+              title="受影响客户经理数"
+              value={overviewData.anomalySummary.affectedManagers}
+              unit={overviewData.anomalySummary.affectedManagersUnit}
+              tone="orange"
+            />
+          </div>
+          <FailureReasonPanel
+            data={overviewData.failureReasons}
+            onOpenDetail={() => setFailedTaskModalOpen(true)}
+          />
+        </div>
+        <RankTable data={overviewData.anomalyRankRows} />
+      </section>
       <FailedTaskModal
         open={failedTaskModalOpen}
         onClose={() => setFailedTaskModalOpen(false)}
         tasks={failedTasks}
         loading={failedTasksLoading}
       />
-    </div>
+    </main>
   );
 }

@@ -1,13 +1,8 @@
 import { Layout, Space, Select, Switch } from "antd";
-// ==================== 语言/主题切换暂时隐藏 (Kun He) ====================
-// import LanguageSwitcher from "../components/LanguageSwitcher/index";
 // import ThemeToggleButton from "../components/ThemeToggleButton";
-// ==================== 语言/主题切换暂时隐藏结束 ====================
 import styles from "./index.module.less";
 import { useTheme } from "../contexts/ThemeContext";
-// ==================== 品牌主题 (Kun He) ====================
 import { useBrandTheme } from "../contexts/BrandThemeContext";
-// ==================== 品牌主题结束 ====================
 import { useState, useEffect } from "react";
 import { useIframeStore } from "../stores/iframeStore";
 import { DEFAULT_BBK_ID, DEFAULT_USER_ID, DEFAULT_USER_NAME } from "../constants/identity";
@@ -21,10 +16,8 @@ const REAL_USER_NAME_KEY = "swe-real-user-name";
 const REAL_USER_BBK_KEY = "swe-real-user-bbk";
 export default function Header() {
   const { isDark } = useTheme();
-  // ==================== 品牌主题 (Kun He) ====================
   // 获取动态品牌配置，用于显示正确的 logo
   const { theme: brandTheme } = useBrandTheme();
-  // ==================== 品牌主题结束 ====================
 
   const isSuperManager = useIframeStore((state) => state.isSuperManager);
   const manager = useIframeStore((state) => state.manager);
@@ -146,10 +139,7 @@ export default function Header() {
           {/* ==================== 品牌主题结束 ==================== */}
         </div>
         <Space size="middle">
-          {/* ==================== 语言/主题切换暂时隐藏 (Kun He) ==================== */}
-          {/* <LanguageSwitcher /> */}
           {/* <ThemeToggleButton /> */}
-          {/* ==================== 语言/主题切换暂时隐藏结束 ==================== */}
           {canUseOpsMode && (
             <Switch
               checked={opsMode}
