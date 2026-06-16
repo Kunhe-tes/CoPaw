@@ -806,6 +806,15 @@ class TraceManager:
         if span is None:
             logger.warning("Span not found for update: %s", span_id)
             return
+        if span.trace_id != trace_id:
+            logger.error(
+                "Cross-trace span update rejected: span_id=%s "
+                "requested_trace_id=%s actual_trace_id=%s",
+                span_id,
+                trace_id,
+                span.trace_id,
+            )
+            return
 
         self._update_span_fields(
             span,
@@ -815,7 +824,7 @@ class TraceManager:
             error,
         )
         self._update_trace_totals(
-            trace_id,
+            span.trace_id,
             span,
             output_tokens,
             input_tokens,

@@ -742,6 +742,53 @@ class TestTraceManager:
 
         await manager.close()
 
+    @pytest.mark.asyncio
+    async def test_update_span_rejects_cross_trace_pending_span(
+        self,
+        enabled_config,
+        mock_db,
+        caplog,
+    ):
+        """跨 trace 更新 pending span 时必须拒绝，避免污染汇总字段。"""
+        manager = TraceManager(enabled_config, mock_db)
+        await manager.initialize()
+
+        trace_a = await manager.start_trace(
+            user_id="user-1",
+            session_id="session-a",
+            channel="console",
+            source_id="default",
+        )
+        trace_b = await manager.start_trace(
+            user_id="user-1",
+            session_id="session-b",
+            channel="console",
+            source_id="default",
+        )
+
+        span_id = await manager.emit_tool_call_start(
+            trace_id=trace_b,
+            tool_name="read_file",
+            tool_input={"path": "README.md"},
+            source_id="default",
+        )
+
+        with caplog.at_level("ERROR"):
+            await manager.emit_tool_call_end(
+                trace_id=trace_a,
+                span_id=span_id,
+                tool_output="ok",
+            )
+
+        trace_a_obj = manager._active_traces[trace_a]
+        trace_b_obj = manager._active_traces[trace_b]
+        span = manager._pending_spans[span_id]
+
+        assert trace_a_obj.tools_used == []
+        assert trace_b_obj.tools_used == ["read_file"]
+        assert span.end_time is None
+        await manager.close()
+
 
 class TestGlobalManager:
     """Tests for global manager functions."""
