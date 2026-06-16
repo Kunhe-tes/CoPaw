@@ -1102,7 +1102,7 @@ class CronManager:  # pylint: disable=too-many-public-methods
             unread_count = int(meta.get("task_unread_execution_count", 0) or 0)
             if unread_count == 0:
                 return False, True
-            meta["task_unread_execution_count"] = unread_count - 1
+            meta["task_unread_execution_count"] = 0
             jobs_file.jobs[index] = job.model_copy(update={"meta": meta})
             return True, True
         return False, False
