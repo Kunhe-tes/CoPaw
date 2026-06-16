@@ -259,6 +259,7 @@ CREATE TABLE IF NOT EXISTS swe_cron_subtasks (
     id           BIGINT AUTO_INCREMENT PRIMARY KEY COMMENT '主键ID',
     trace_id     VARCHAR(64) NOT NULL COMMENT '主任务trace_id',
     task_id      VARCHAR(128) NOT NULL COMMENT '子任务task_id',
+    filename     VARCHAR(512) NOT NULL COMMENT '文件名',
     status       VARCHAR(16) DEFAULT NULL COMMENT '子任务状态: SUC/FAIL/PART_SUC',
     info         VARCHAR(2048) DEFAULT '' COMMENT '预留扩展信息',
     created_at   DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
@@ -284,6 +285,13 @@ ALTER_CRON_EXECUTIONS_ASYNC_STATUS = [
     ADD INDEX idx_async_status (async_status)
     """,
 ]
+
+# SQL for adding filename column to cron_subtasks table
+ALTER_CRON_SUBTASKS_FILENAME = """
+ALTER TABLE swe_cron_subtasks
+ADD COLUMN filename VARCHAR(512) NOT NULL COMMENT '文件名'
+AFTER task_id
+"""
 
 
 async def init_database_tables() -> None:
@@ -326,6 +334,14 @@ async def init_database_tables() -> None:
                 if "duplicate" not in message and "exists" not in message:
                     raise
         logger.info("Ensured cron execution async_status column")
+
+        try:
+            await db.execute(ALTER_CRON_SUBTASKS_FILENAME)
+        except Exception as exc:  # pylint: disable=broad-except
+            message = str(exc).lower()
+            if "duplicate" not in message and "exists" not in message:
+                raise
+        logger.info("Ensured cron subtasks filename column")
 
         await _ensure_cron_jobs_extra_schema()
 

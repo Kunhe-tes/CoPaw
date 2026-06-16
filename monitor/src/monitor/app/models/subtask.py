@@ -27,6 +27,7 @@ class SubtaskModel(BaseModel):
     id: Optional[int] = Field(default=None, description="主键ID")
     trace_id: str = Field(..., description="主任务trace_id")
     task_id: str = Field(..., description="子任务task_id")
+    filename: str = Field(..., description="文件名")
     status: Optional[str] = Field(
         default=None,
         description="子任务状态: SUC/FAIL/PART_SUC",
@@ -61,6 +62,12 @@ class SubtaskCreateRequest(BaseModel):
         min_length=1,
         max_length=128,
         description="子任务task_id",
+    )
+    filename: str = Field(
+        ...,
+        min_length=1,
+        max_length=512,
+        description="文件名",
     )
 
 

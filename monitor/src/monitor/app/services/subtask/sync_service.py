@@ -7,6 +7,7 @@ Provides methods for:
 """
 
 import logging
+from datetime import datetime
 from typing import Optional, Tuple
 
 import httpx
@@ -16,6 +17,7 @@ from ...config.constant import (
     ASYNC_TASK_APP_KEY,
     ASYNC_TASK_ENV_TAG,
     ASYNC_TASK_API_KEY,
+    ASYNC_TASK_TIMEOUT_HOUR,
 )
 from .query_service import QueryService, get_query_service
 from ...models.subtask import (
@@ -186,7 +188,24 @@ class SyncService:
         self,
         batch_size: int = BATCH_SIZE,
     ) -> SubtaskSyncStatusResponse:
-        """Sync subtask statuses from external API."""
+        """Sync subtask statuses from external API.
+
+        If current time is past timeout hour, mark all pending subtasks as timeout
+        instead of querying external API.
+        """
+        # Check if past timeout hour
+        now = datetime.now()
+        timeout_hour = ASYNC_TASK_TIMEOUT_HOUR
+        is_timeout = now.hour >= timeout_hour
+
+        if is_timeout:
+            logger.info(
+                "Current time %s is past %d:00, marking pending subtasks as timeout",
+                now.strftime("%H:%M"),
+                timeout_hour,
+            )
+            return await self._mark_pending_as_timeout(batch_size)
+
         if not self._is_configured():
             logger.warning("External API not configured, skipping sync")
             return SubtaskSyncStatusResponse(
@@ -223,6 +242,50 @@ class SyncService:
                 response.total_updated += 1
             else:
                 response.total_failed += 1
+
+        return response
+
+    async def _mark_pending_as_timeout(
+        self,
+        batch_size: int = BATCH_SIZE,
+    ) -> SubtaskSyncStatusResponse:
+        """Mark all pending subtasks as timeout status."""
+        subtasks = await self.query_service.get_pending_subtasks(
+            limit=batch_size,
+        )
+        if not subtasks:
+            logger.debug("No pending subtasks to mark as timeout")
+            return SubtaskSyncStatusResponse(
+                success=True,
+                total_scanned=0,
+                total_updated=0,
+                total_failed=0,
+            )
+
+        response = SubtaskSyncStatusResponse(
+            success=True,
+            total_scanned=len(subtasks),
+        )
+
+        for subtask in subtasks:
+            await self.query_service.update_subtask_status(
+                subtask.task_id,
+                subtask.trace_id,
+                "TIMEOUT",
+            )
+
+            detail = SubtaskSyncDetailItem(
+                task_id=subtask.task_id,
+                old_status=subtask.status,
+                new_status="TIMEOUT",
+            )
+            response.details.append(detail)
+            response.total_updated += 1
+
+            logger.info(
+                "Marked subtask as timeout: task_id=%s",
+                subtask.task_id[:20],
+            )
 
         return response
 
@@ -296,7 +359,8 @@ class SyncService:
             return "success"
 
         for subtask in subtasks:
-            if subtask.status in ("FAIL", "PART_SUC"):
+            # FAIL, PART_SUC, or TIMEOUT means error
+            if subtask.status in ("FAIL", "PART_SUC", "TIMEOUT"):
                 return "error"
             if subtask.status is None or subtask.status == "":
                 logger.debug(

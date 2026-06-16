@@ -33,12 +33,12 @@ async def create_subtask(
 ) -> SubtaskCreateResponse:
     """Create a subtask record.
 
-    Creates a new subtask record with trace_id and task_id.
+    Creates a new subtask record with trace_id, task_id, and filename.
     The record is initialized with status=NULL, created_at=now(),
     updated_at=NULL.
 
     Args:
-        request: Create request with trace_id and task_id
+        request: Create request with trace_id, task_id, and filename
         query_service: Query service
 
     Returns:
@@ -48,6 +48,7 @@ async def create_subtask(
         return await query_service.create_subtask(
             trace_id=request.trace_id,
             task_id=request.task_id,
+            filename=request.filename,
         )
     except Exception as e:
         logger.error("Failed to create subtask: %s", e)

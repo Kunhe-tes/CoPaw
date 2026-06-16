@@ -32,12 +32,14 @@ class QueryService:
         self,
         trace_id: str,
         task_id: str,
+        filename: str,
     ) -> SubtaskCreateResponse:
         """Create a subtask record.
 
         Args:
             trace_id: Main task trace_id
             task_id: Subtask task_id
+            filename: File name
 
         Returns:
             SubtaskCreateResponse with creation result
@@ -68,15 +70,16 @@ class QueryService:
             INSERT INTO swe_cron_subtasks (
                 trace_id,
                 task_id,
+                filename,
                 status,
                 info,
                 created_at,
                 updated_at
             )
-            VALUES (%s, %s, NULL, '', %s, NULL)
+            VALUES (%s, %s, %s, NULL, '', %s, NULL)
         """
         now = datetime.now()
-        await self.db.execute(query, (trace_id, task_id, now))
+        await self.db.execute(query, (trace_id, task_id, filename, now))
 
         # Get the inserted ID
         id_query = "SELECT LAST_INSERT_ID() AS id"
@@ -84,9 +87,10 @@ class QueryService:
         inserted_id = row.get("id") if row else None
 
         logger.info(
-            "Created subtask: trace_id=%s task_id=%s id=%s",
+            "Created subtask: trace_id=%s task_id=%s filename=%s id=%s",
             trace_id[:20],
             task_id[:20],
+            filename[:30],
             inserted_id,
         )
 
@@ -114,7 +118,7 @@ class QueryService:
             return None
 
         query = """
-            SELECT id, trace_id, task_id, status, info, created_at, updated_at
+            SELECT id, trace_id, task_id, filename, status, info, created_at, updated_at
             FROM swe_cron_subtasks
             WHERE trace_id = %s AND task_id = %s
         """
@@ -126,6 +130,7 @@ class QueryService:
             id=row.get("id"),
             trace_id=row.get("trace_id") or "",
             task_id=row.get("task_id") or "",
+            filename=row.get("filename") or "",
             status=row.get("status"),
             info=row.get("info") or "",
             created_at=row.get("created_at"),
@@ -148,7 +153,7 @@ class QueryService:
             return []
 
         query = """
-            SELECT id, trace_id, task_id, status, info, created_at, updated_at
+            SELECT id, trace_id, task_id, filename, status, info, created_at, updated_at
             FROM swe_cron_subtasks
             WHERE status IS NULL OR status = ''
             ORDER BY created_at ASC
@@ -160,6 +165,7 @@ class QueryService:
                 id=row.get("id"),
                 trace_id=row.get("trace_id") or "",
                 task_id=row.get("task_id") or "",
+                filename=row.get("filename") or "",
                 status=row.get("status"),
                 info=row.get("info") or "",
                 created_at=row.get("created_at"),
@@ -184,7 +190,7 @@ class QueryService:
             return []
 
         query = """
-            SELECT id, trace_id, task_id, status, info, created_at, updated_at
+            SELECT id, trace_id, task_id, filename, status, info, created_at, updated_at
             FROM swe_cron_subtasks
             WHERE trace_id = %s
         """
@@ -194,6 +200,7 @@ class QueryService:
                 id=row.get("id"),
                 trace_id=row.get("trace_id") or "",
                 task_id=row.get("task_id") or "",
+                filename=row.get("filename") or "",
                 status=row.get("status"),
                 info=row.get("info") or "",
                 created_at=row.get("created_at"),
