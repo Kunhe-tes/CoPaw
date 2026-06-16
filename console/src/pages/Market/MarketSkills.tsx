@@ -125,14 +125,15 @@ export function MarketSkills({ sourceId, isManager }: MarketSkillsProps) {
   const refreshMCP = useCallback(async () => {
     setMcpLoading(true);
     try {
-      const data = await marketMcpApi.listMarketMCP(selectedCategory ?? undefined);
+      // MCP 目前不支持分类，不传递 category_id 参数
+      const data = await marketMcpApi.listMarketMCP();
       setMcpList(data);
     } catch (err) {
       console.error("获取 MCP 列表失败:", err);
     } finally {
       setMcpLoading(false);
     }
-  }, [sourceId, selectedCategory]);
+  }, [sourceId]);
 
   // 切换资源类型时刷新
   useEffect(() => {
