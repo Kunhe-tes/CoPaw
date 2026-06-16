@@ -453,9 +453,11 @@ class RetryChatModel(ChatModelBase):
         )
         attempts = retries + 1
         empty_output_retries_remaining = EMPTY_MODEL_OUTPUT_MAX_RETRIES
-        last_exc: Exception | None = None
+        transient_attempt = 1
+        call_attempt = 0
 
-        for attempt in range(1, attempts + EMPTY_MODEL_OUTPUT_MAX_RETRIES + 1):
+        while True:
+            call_attempt += 1
             # Acquire a semaphore slot, with a timeout to prevent
             # indefinite blocking. `acquired` tracks whether the slot was
             # taken so the final block can skip the release on
@@ -501,8 +503,9 @@ class RetryChatModel(ChatModelBase):
                         result,
                         args,
                         kwargs,
-                        attempt,
+                        transient_attempt,
                         attempts,
+                        call_attempt,
                         limiter,
                         limiter_scope,
                         workload,
@@ -515,13 +518,13 @@ class RetryChatModel(ChatModelBase):
                             "LLM call returned empty model output after "
                             f"retry: model={self.model_name}, "
                             "stream=false, "
-                            f"attempt={attempt}",
+                            f"attempt={call_attempt}",
                         )
                     empty_output_retries_remaining -= 1
                     logger.warning(
                         "LLM call returned empty model output "
                         "(attempt %d, model=%s). Retrying once ...",
-                        attempt,
+                        call_attempt,
                         self.model_name,
                     )
                     continue
@@ -529,35 +532,37 @@ class RetryChatModel(ChatModelBase):
                 return result
 
             except Exception as exc:
-                last_exc = exc
                 if _is_retryable(exc) and _is_rate_limit(exc):
                     await limiter.report_rate_limit(_extract_retry_after(exc))
 
-                if not _is_retryable(exc) or attempt >= attempts:
+                if not _is_retryable(exc) or transient_attempt >= attempts:
                     raise
 
-                delay = _compute_backoff(attempt, self._retry_config)
+                delay = _compute_backoff(transient_attempt, self._retry_config)
                 logger.warning(
                     "LLM call failed (attempt %d/%d): %s. "
                     "Retrying in %.1fs ...",
-                    attempt,
+                    transient_attempt,
                     attempts,
                     exc,
                     delay,
                 )
                 if self._on_retry:
                     try:
-                        await self._on_retry(attempt, attempts, exc, delay)
+                        await self._on_retry(
+                            transient_attempt,
+                            attempts,
+                            exc,
+                            delay,
+                        )
                     except Exception:
                         pass  # 回调失败不影响重试逻辑
+                transient_attempt += 1
                 await asyncio.sleep(delay)
 
             finally:
                 if owns_semaphore and acquired:
                     limiter.release()
-
-        # Should be unreachable, but satisfies the type-checker.
-        raise last_exc  # type: ignore[misc]
 
     async def _handle_stream_failure(
         self,
@@ -654,8 +659,9 @@ class RetryChatModel(ChatModelBase):
         stream: AsyncGenerator[ChatResponse, None],
         call_args: tuple,
         call_kwargs: dict,
-        current_attempt: int,
+        current_transient_attempt: int,
         max_attempts: int,
+        current_call_attempt: int,
         limiter: LLMRateLimiter,
         limiter_scope: RateLimiterScopeKey,
         workload: LLMWorkload,
@@ -664,6 +670,8 @@ class RetryChatModel(ChatModelBase):
         """Yield chunks from *stream*; on transient failure, retry the full
         request and yield from the new stream instead."""
         empty_output_retries_remaining = EMPTY_MODEL_OUTPUT_MAX_RETRIES
+        transient_attempt = current_transient_attempt
+        call_attempt = current_call_attempt
         limiter.begin_stream()
         try:
             try:
@@ -682,7 +690,7 @@ class RetryChatModel(ChatModelBase):
                 empty_output_retries_remaining = (
                     self._consume_empty_output_retry(
                         empty_output_retries_remaining,
-                        attempt=current_attempt,
+                        attempt=call_attempt,
                         stream=True,
                         message="LLM stream returned empty model output",
                     )
@@ -690,17 +698,16 @@ class RetryChatModel(ChatModelBase):
             except Exception as failed_exc:
                 await self._handle_stream_failure(
                     failed_exc,
-                    current_attempt,
+                    transient_attempt,
                     max_attempts,
                     limiter,
                     "LLM stream failed",
                 )
+                transient_attempt += 1
 
             # Retry loop for stream failures
-            for attempt in range(
-                current_attempt + 1,
-                max_attempts + EMPTY_MODEL_OUTPUT_MAX_RETRIES + 1,
-            ):
+            while True:
+                call_attempt += 1
                 acquired = False
                 owns_semaphore = True
                 try:
@@ -735,7 +742,7 @@ class RetryChatModel(ChatModelBase):
                             return  # stream completed without error
                         empty_output_retries_remaining = self._consume_empty_output_retry(
                             empty_output_retries_remaining,
-                            attempt=attempt,
+                            attempt=call_attempt,
                             stream=True,
                             message="LLM stream returned empty model output",
                         )
@@ -747,7 +754,7 @@ class RetryChatModel(ChatModelBase):
 
                     empty_output_retries_remaining = self._consume_empty_output_retry(
                         empty_output_retries_remaining,
-                        attempt=attempt,
+                        attempt=call_attempt,
                         stream=True,
                         message="LLM stream retry returned empty model output",
                     )
@@ -756,11 +763,12 @@ class RetryChatModel(ChatModelBase):
                 except Exception as retry_exc:
                     await self._handle_stream_failure(
                         retry_exc,
-                        attempt,
+                        transient_attempt,
                         max_attempts,
                         limiter,
                         "LLM stream retry failed",
                     )
+                    transient_attempt += 1
 
                 finally:
                     if owns_semaphore and acquired:
