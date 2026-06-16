@@ -589,20 +589,7 @@ class TraceManager:
                         skill,
                         confidence,
                     )
-                if skill and confidence >= 0.7:
-                    # Start skill through detector to properly track span_id
-                    await detector.start_skill(
-                        skill_name=skill,
-                        trigger_tool="user_message",
-                        trigger_reason="declared",
-                        confidence=confidence,
-                    )
-                    logger.info(
-                        "Skill started: '%s' (confidence: %.2f)",
-                        skill,
-                        confidence,
-                    )
-                elif skill:
+                if skill and confidence < 0.7:
                     logger.info(
                         "Skill detected but confidence too low: '%s' (confidence: %.2f < 0.5)",
                         skill,
@@ -819,6 +806,15 @@ class TraceManager:
         if span is None:
             logger.warning("Span not found for update: %s", span_id)
             return
+        if span.trace_id != trace_id:
+            logger.error(
+                "Cross-trace span update rejected: span_id=%s "
+                "requested_trace_id=%s actual_trace_id=%s",
+                span_id,
+                trace_id,
+                span.trace_id,
+            )
+            return
 
         self._update_span_fields(
             span,
@@ -828,7 +824,7 @@ class TraceManager:
             error,
         )
         self._update_trace_totals(
-            trace_id,
+            span.trace_id,
             span,
             output_tokens,
             input_tokens,

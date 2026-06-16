@@ -1,7 +1,11 @@
 # -*- coding: utf-8 -*-
 
+import sys
+import types
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
+
+sys.modules.setdefault("segno", types.ModuleType("segno"))
 
 from swe.config.config import (
     AgentProfileConfig,
@@ -282,4 +286,55 @@ async def test_distribute_channel_config_keeps_console_accessible_when_env_filte
     assert [item.success for item in result.results] == [True]
     saved_config = mock_save.call_args.args[1]
     assert saved_config.channels.console.enabled is True
+
+
+async def test_distribute_channel_config_writes_default_target_to_source_template():
+    request = Mock()
+    source_agent = SimpleNamespace(
+        agent_id="source-agent",
+        tenant_id="default_ruice",
+    )
+    source_config = AgentProfileConfig(
+        id="source-agent",
+        name="Source Agent",
+        channels=None,
+    )
+    target_config = AgentProfileConfig(
+        id="default",
+        name="Default Agent",
+        channels=None,
+    )
+
+    with (
+        patch(
+            "swe.app.agent_context.get_agent_for_request",
+            return_value=source_agent,
+        ),
+        patch(
+            "swe.app.routers.config.get_available_channels",
+            return_value=["console"],
+        ),
+        patch(
+            "swe.config.config.load_agent_config",
+            side_effect=[source_config, target_config],
+        ),
+        patch(
+            "swe.app.routers.config._prepare_target_tenant",
+            return_value=("default", "default_ruice", True),
+        ),
+        patch("swe.app.routers.config.schedule_agent_reload"),
+        patch("swe.config.config.save_agent_config") as mock_save,
+    ):
+        result = await distribute_channel_config(
+            request,
+            "console",
+            ChannelDistributionRequest(
+                target_tenant_ids=["default"],
+                overwrite=True,
+            ),
+        )
+
+    assert [item.success for item in result.results] == [True]
+    assert mock_save.call_args.kwargs["tenant_id"] == "default_ruice"
+    saved_config = mock_save.call_args.args[1]
     assert saved_config.channels.zhaohu.enabled is False

@@ -900,6 +900,55 @@ def test_broadcast_child_inherits_notification_delay_minutes():
     assert target_manager.created[0].meta["notification_delay_minutes"] == 120
 
 
+def test_broadcast_to_default_user_uses_source_template_without_scope():
+    source_job = CronJobSpec.model_validate(
+        {
+            **_job_spec("job-source"),
+            "schedule": ScheduleSpec(
+                cron="0 9 * * *",
+            ).model_dump(mode="json"),
+            "tenant_id": "tenant-a",
+            "source_id": "source-a",
+            "scope_id": encode_scope_id("tenant-a", "source-a"),
+        },
+    )
+    source_manager = _Manager({"job-source": source_job})
+    target_manager = _Manager()
+    multi_agent_manager = _MultiAgentManager(
+        {
+            "default_source-a": _Workspace(target_manager),
+        },
+    )
+    tenant_pool = _TenantWorkspacePool()
+    client = _build_client(
+        source_manager,
+        multi_agent_manager=multi_agent_manager,
+        tenant_workspace_pool=tenant_pool,
+    )
+    _install_provider_manager(
+        {},
+        providers_by_tenant={"default_source-a": {}},
+    )
+
+    response = client.post(
+        "/cron/jobs/job-source/broadcast",
+        json={"target_tenant_ids": ["default"]},
+    )
+
+    assert response.status_code == 200
+    assert tenant_pool.calls == [
+        {
+            "tenant_id": "default",
+            "source_id": "source-a",
+            "tenant_name": None,
+            "bbk_id": None,
+        },
+    ]
+    assert target_manager.created[0].tenant_id == "default"
+    assert target_manager.created[0].source_id == "source-a"
+    assert target_manager.created[0].scope_id is None
+
+
 def test_broadcast_clears_stale_fallback_meta_when_source_model_slot_missing():
     source_job = CronJobSpec.model_validate(
         {
