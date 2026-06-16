@@ -17,6 +17,7 @@
 - [x] 3.2 Make usage tags keyboard-operable filter controls with semantic pressed or selected state and accessible labels.
 - [x] 3.3 Add persistent selected-tag styling using the applicable Console design tokens or established local patterns, with distinct border, background, text emphasis, hover, and focus-visible states.
 - [x] 3.4 Preserve tag wrapping and long-label readability for selected and unselected tags.
+- [x] 3.5 Add compact expand/collapse behavior for dense usage tag groups and keep unselected skill tags visually consistent with other unselected tags.
 
 ## 4. Automated Verification
 
