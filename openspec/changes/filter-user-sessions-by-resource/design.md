@@ -12,6 +12,7 @@ The resource usage data already has stable identifiers: model name, skill name, 
 - Enforce one active resource filter across the three resource types while allowing combination with the existing error filter.
 - Keep the filter choices stable by showing user-level usage summary data whenever a resource filter is active.
 - Make the selected tag visibly and semantically distinct from unselected tags.
+- Keep dense tag groups readable by defaulting long lists to a compact collapsed view with an explicit expand/collapse control.
 - Preserve pagination totals, source isolation, user, branch, date, and error constraints in resource-filtered queries.
 
 **Non-Goals:**
@@ -54,9 +55,13 @@ When no resource filter is active, selecting a session may continue to show that
 
 ### Give selected tags persistent visual and semantic state
 
-Usage tags will become keyboard-operable controls. The active tag will receive a dedicated selected class and an accessible selected/pressed state. The selected treatment will use persistent border, background, text emphasis, and focus-visible styling so it remains distinguishable from unselected and hover states without relying on color alone. Existing resource tone differences may remain, but selected styling will be consistent across all three resource types.
+Usage tags will become keyboard-operable controls. The active tag will receive a dedicated selected class and an accessible selected/pressed state. The selected treatment will use persistent border, background, text emphasis, and focus-visible styling so it remains distinguishable from unselected and hover states without relying on color alone. Unselected model, MCP tool, and skill tags will share a neutral base treatment so the selected color is reserved for the active filter state.
 
 The selected state will use existing Console design tokens or established local values. No new shared design-system rule is introduced by this scoped interaction.
+
+### Collapse long usage tag groups
+
+Each model, MCP tool, and skill block will keep long tag groups compact by default, showing a short wrapped preview with a clear expand/collapse button when the group exceeds the compact threshold or available height. Expanding reveals the full list in place without changing filter state. If a selected tag would otherwise be hidden by the collapsed preview, it is kept visible at the front of the compact group so the active filter remains discoverable.
 
 ### Combine resource and error filters with AND semantics
 
