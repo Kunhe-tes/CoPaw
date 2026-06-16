@@ -2736,8 +2736,10 @@ class QueryService:
     ) -> BranchSkillManagerResponse:
         """获取分行+技能的客户经理维度数据。
 
-        从 swe_html_preview_click_events 出发，通过 cron_executions
-        联结 traces，筛选 skills_used 包含指定技能的行，按客户经理聚合。
+        从 swe_cron_executions 出发，联结 jobs 获取 tenant_name，
+        联结 traces 筛选技能，LEFT JOIN click_events 统计点击指标。
+        无点击记录时 plan/insight/phone 计数为 0，last_click_time 为 None。
+        user_name 取自 swe_cron_jobs.tenant_name。
         """
         db = get_db_connection()
 
@@ -2745,32 +2747,45 @@ class QueryService:
         start_str = start_date or start_time.strftime("%Y-%m-%d")
         end_str = end_date or end_time.strftime("%Y-%m-%d")
 
-        source_where = " AND c.source_id = %s" if source_id else ""
+        source_where = " AND j.source_id = %s" if source_id else ""
+        click_source_on = " AND c.source_id = %s" if source_id else ""
 
         sql = f"""
             SELECT
-                c.user_id,
-                MAX(t.user_name) AS user_name,
+                j.tenant_id AS user_id,
+                MAX(j.tenant_name) AS user_name,
                 COUNT(DISTINCT CASE WHEN e.is_read = 1 THEN e.id END) AS read_count,
                 COUNT(DISTINCT CASE WHEN c.button_type = 'plan' THEN c.id END) AS plan_count,
                 COUNT(DISTINCT CASE WHEN c.button_type = 'insight' THEN c.id END) AS insight_count,
                 COUNT(DISTINCT CASE WHEN c.button_type = 'phone' THEN c.id END) AS phone_count,
                 MAX(c.clicked_at) AS last_click_time
-            FROM swe_html_preview_click_events c
-            JOIN swe_cron_executions e ON c.cron_task_id COLLATE utf8mb4_unicode_ci = e.job_id
+            FROM swe_cron_executions e
+            JOIN swe_cron_jobs j ON e.job_id COLLATE utf8mb4_unicode_ci = j.id
             JOIN swe_tracing_traces t ON e.trace_id COLLATE utf8mb4_unicode_ci = t.trace_id
-            WHERE c.bbk_id = %s
+            LEFT JOIN swe_html_preview_click_events c
+                ON c.cron_task_id COLLATE utf8mb4_unicode_ci = e.job_id
+                AND c.clicked_at >= %s AND c.clicked_at <= %s
+                {click_source_on}
+            WHERE j.bbk_id = %s
+              AND e.actual_time >= %s AND e.actual_time <= %s
               AND t.skills_used IS NOT NULL
               AND JSON_CONTAINS(t.skills_used, JSON_QUOTE(%s))
-              AND c.clicked_at >= %s AND c.clicked_at <= %s
               AND t.session_id LIKE 'cron-task%%'
               {source_where}
-            GROUP BY c.user_id
+            GROUP BY j.tenant_id
             ORDER BY read_count DESC
         """
-        params: list = [bbk_id, skill_name, start_time, end_time]
+        params: list = [
+            start_time,
+            end_time,
+            bbk_id,
+            start_time,
+            end_time,
+            skill_name,
+        ]
         if source_id:
-            params.append(source_id)
+            params.insert(2, source_id)  # click_source_on placeholder
+            params.append(source_id)  # source_where placeholder
         rows = await db.fetch_all(sql, tuple(params))
 
         items: list[BranchSkillManagerItem] = []
