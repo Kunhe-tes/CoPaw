@@ -83,6 +83,25 @@ def convert_row_times_direct(row: dict, time_fields: List[str]) -> dict:
 class QueryService:
     """Service for querying cron data."""
 
+    # 分行综合排行仅展示的 10 项技能（同时匹配英文标识和中文名称）
+    _ALLOWED_BRANCH_SKILLS: set[str] = {
+        "insurance_mkt",
+        "保险营销客户分析技能",
+        "deposit_scale_growth_skill",
+        "存款规模增长与产品配置技能",
+        "fund_redeem_monitor",
+        "基金赎回实时监控技能",
+        "lc_breaking",
+        "单一持仓理财/定期客户破冰方案",
+        "global-market-report",
+        "全球市场复盘报告",
+        "存款到期客户经营方案技能",
+        "高AUM理财低收益客户调仓技能",
+        "基金亏损客户关怀陪伴文案",
+        "智能推荐保险计划书",
+        "黄金持仓客户陪伴技能",
+    }
+
     def __init__(self) -> None:
         """Initialize query service."""
         pass
@@ -2657,6 +2676,8 @@ class QueryService:
             for sk in skills:
                 sk = str(sk).strip() if sk else ""
                 if not sk:
+                    continue
+                if sk not in self._ALLOWED_BRANCH_SKILLS:
                     continue
                 if sk not in skill_jobs:
                     self._init_skill_dicts(
