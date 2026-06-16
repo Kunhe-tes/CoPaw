@@ -2563,6 +2563,43 @@ class QueryService:
         skill_read[sk] = 0
         skill_error[sk] = 0
 
+    @staticmethod
+    def _parse_skills_used(value: Any) -> Optional[list]:
+        """Parse skills_used field into a list of skill name strings.
+
+        Returns None if the value cannot be parsed into a valid list.
+        """
+        if isinstance(value, str):
+            try:
+                value = json.loads(value)
+            except (TypeError, ValueError):
+                return None
+        if not isinstance(value, list):
+            return None
+        return value
+
+    @staticmethod
+    def _count_skill_execution(
+        skill_jobs: dict,
+        skill_total: dict,
+        skill_success: dict,
+        skill_read: dict,
+        skill_error: dict,
+        sk: str,
+        job_id: str,
+        status: str,
+        is_read: bool,
+    ) -> None:
+        """Count a single skill execution in the aggregation dicts."""
+        skill_total[sk] += 1
+        skill_jobs[sk].add(job_id)
+        if status == "success":
+            skill_success[sk] += 1
+        if is_read:
+            skill_read[sk] += 1
+        if status in ("error", "timeout", "cancelled"):
+            skill_error[sk] += 1
+
     async def get_branch_skills(
         self,
         bbk_id: str,
@@ -2611,13 +2648,8 @@ class QueryService:
         skill_error: dict[str, int] = {}
 
         for row in rows:
-            skills = row["skills_used"]
-            if isinstance(skills, str):
-                try:
-                    skills = json.loads(skills)
-                except (TypeError, ValueError):
-                    continue
-            if not isinstance(skills, list):
+            skills = self._parse_skills_used(row["skills_used"])
+            if not skills:
                 continue
             job_id = row["job_id"]
             status = (row["status"] or "").lower()
@@ -2635,14 +2667,17 @@ class QueryService:
                         skill_error,
                         sk,
                     )
-                skill_total[sk] += 1
-                skill_jobs[sk].add(job_id)
-                if status == "success":
-                    skill_success[sk] += 1
-                if is_read:
-                    skill_read[sk] += 1
-                if status in ("error", "timeout", "cancelled"):
-                    skill_error[sk] += 1
+                self._count_skill_execution(
+                    skill_jobs,
+                    skill_total,
+                    skill_success,
+                    skill_read,
+                    skill_error,
+                    sk,
+                    job_id,
+                    status,
+                    is_read,
+                )
 
         items: list[BranchSkillItem] = []
         for skill_name, jobs in skill_jobs.items():
@@ -2694,7 +2729,7 @@ class QueryService:
         sql = f"""
             SELECT
                 c.user_id,
-                c.user_id AS user_name,
+                MAX(t.user_name) AS user_name,
                 COUNT(DISTINCT CASE WHEN e.is_read = 1 THEN e.id END) AS read_count,
                 COUNT(DISTINCT CASE WHEN c.button_type = 'plan' THEN c.id END) AS plan_count,
                 COUNT(DISTINCT CASE WHEN c.button_type = 'insight' THEN c.id END) AS insight_count,
