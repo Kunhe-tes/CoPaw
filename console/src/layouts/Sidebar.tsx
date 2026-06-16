@@ -82,6 +82,8 @@ export default function Sidebar({ selectedKey }: SidebarProps) {
   const [collapsed, setCollapsed] = useState(false);
   const [openKeys, setOpenKeys] = useState<string[]>([...DEFAULT_OPEN_KEYS]);
   const canManageCurrentSourceConfig = isSuperManager || manager;
+  const sourceId = useIframeStore((state) => state.source);
+  const isRMassistSource = sourceId === "RMASSIST";
   const canUseSystemCheck = isSuperManager || manager;
 
   // ── Effects ──────────────────────────────────────────────────────────────
@@ -271,12 +273,16 @@ export default function Sidebar({ selectedKey }: SidebarProps) {
       path: "/analytics/business-overview",
       label: t("nav.analyticsBusinessOverview", "运营看板"),
     },
-    {
-      key: "analytics-claw-data-overview",
-      icon: <SparkBarChartLine size={18} />,
-      path: "/analytics/claw-data-overview",
-      label: t("nav.analyticsClawDataOverview", "Claw数据看板"),
-    },
+    ...(isRMassistSource
+      ? [
+        {
+          key: "analytics-claw-data-overview",
+          icon: <SparkBarChartLine size={18} />,
+          path: "/analytics/claw-data-overview",
+          label: t("nav.analyticsClawDataOverview", "Claw数据看板"),
+        },
+      ]
+    : []),
     {
       key: "analytics-messages",
       icon: <SparkSearchLine size={18} />,
@@ -447,13 +453,17 @@ export default function Sidebar({ selectedKey }: SidebarProps) {
             : t("nav.analyticsBusinessOverview", "运营看板"),
           icon: <SparkBarChartLine size={16} />,
         },
-        {
-          key: "analytics-claw-data-overview",
-          label: collapsed
-            ? null
-            : t("nav.analyticsClawDataOverview", "Claw数据看板"),
-          icon: <SparkBarChartLine size={16} />,
-        },
+        ...(isRMassistSource
+          ? [
+              {
+                key: "analytics-claw-data-overview",
+                label: collapsed
+                  ? null
+                  : t("nav.analyticsClawDataOverview", "Claw数据看板"),
+                icon: <SparkBarChartLine size={16} />,
+              },
+          ]
+        : []),
         {
           key: "analytics-messages",
           label: collapsed ? null : t("nav.analyticsMessages", "Messages"),
