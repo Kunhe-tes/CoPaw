@@ -409,6 +409,79 @@
   color: #7b879d;
 }
 
+.selectedRow td {
+  background: #e6f4ff !important;
+}
+
+/* Inline drill-down expansion below ranking table */
+.drillDownContainer {
+  display: flex;
+  gap: 16px;
+  margin-top: 20px;
+  margin-bottom: 28px;
+}
+
+.drillDownColumn {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  border: 1px solid #edf1f7;
+  border-radius: 12px;
+  overflow: hidden;
+  background: #ffffff;
+  max-height: 380px;
+}
+
+.drillDownTableScroll {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+
+  :global(.ant-table) {
+    table-layout: fixed;
+  }
+
+  :global(.ant-table-thead) > tr > :global(.ant-table-cell) {
+    text-align: center !important;
+    vertical-align: middle !important;
+    padding: 8px 4px !important;
+    font-size: 13px;
+    font-weight: 700;
+    white-space: normal !important;
+    word-break: break-all;
+    background: #f8fafc;
+    color: #31405f;
+  }
+
+  :global(.ant-table-tbody) > tr > :global(.ant-table-cell) {
+    text-align: center !important;
+    vertical-align: middle !important;
+    white-space: normal !important;
+    word-break: break-all;
+    padding: 6px 4px !important;
+  }
+}
+
+.drillDownTitle {
+  margin: 0;
+  padding: 12px 16px;
+  color: #26324d;
+  font-size: 15px;
+  font-weight: 800;
+  background: #f8fafc;
+  border-bottom: 1px solid #edf1f7;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.drillDownSubTitle {
+  color: #64748b;
+  font-size: 13px;
+  font-weight: 600;
+}
+
 .anomalySection {
   --rank-panel-offset: 45px;
   --anomaly-section-height: 430px;

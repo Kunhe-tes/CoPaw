@@ -709,6 +709,91 @@ class CronBranchErrorResponse(BaseModel):
 
 
 # ============================================================
+# Branch skill drill-down models
+# ============================================================
+
+
+class BranchSkillItem(BaseModel):
+    """分行技能维度单项。"""
+
+    skill_name: str = Field(..., description="技能名称")
+    cron_task_count: int = Field(default=0, description="定时任务数")
+    success_count: int = Field(default=0, description="成功执行数")
+    success_rate: float = Field(default=0.0, description="成功率")
+    read_count: int = Field(default=0, description="已读任务数")
+    error_count: int = Field(default=0, description="报错次数")
+
+
+class BranchSkillResponse(BaseModel):
+    """分行技能维度响应。"""
+
+    start_date: str = Field(..., description="开始日期")
+    end_date: str = Field(..., description="结束日期")
+    bbk_id: str = Field(..., description="分行ID")
+    bbk_name: str = Field(..., description="分行名称")
+    items: List[BranchSkillItem] = Field(
+        default_factory=list,
+        description="技能维度列表",
+    )
+
+
+class BranchSkillManagerItem(BaseModel):
+    """分行+技能的客户经理维度单项。"""
+
+    user_id: str = Field(..., description="客户经理ID")
+    user_name: str = Field(default="", description="客户经理姓名")
+    read_count: int = Field(default=0, description="已读次数")
+    plan_count: int = Field(default=0, description="方案次数")
+    insight_count: int = Field(default=0, description="洞察次数")
+    phone_count: int = Field(default=0, description="电访次数")
+    last_click_time: Optional[str] = Field(
+        default=None,
+        description="最后一次点击时间",
+    )
+
+
+class BranchSkillManagerResponse(BaseModel):
+    """分行+技能的客户经理维度响应。"""
+
+    start_date: str = Field(..., description="开始日期")
+    end_date: str = Field(..., description="结束日期")
+    bbk_id: str = Field(..., description="分行ID")
+    skill_name: str = Field(..., description="技能名称")
+    items: List[BranchSkillManagerItem] = Field(
+        default_factory=list,
+        description="客户经理维度列表",
+    )
+
+
+class BranchSkillManagerCustomerItem(BaseModel):
+    """分行+技能+客户经理的客户维度单项。"""
+
+    customer_id: str = Field(default="", description="客户ID")
+    customer_name: str = Field(default="", description="客户名称")
+    clicked_plan: bool = Field(default=False, description="是否点击方案")
+    clicked_insight: bool = Field(default=False, description="是否点击洞察")
+    clicked_phone: bool = Field(default=False, description="是否点击电访")
+    click_time: Optional[str] = Field(
+        default=None,
+        description="点击客户的时间",
+    )
+
+
+class BranchSkillManagerCustomerResponse(BaseModel):
+    """分行+技能+客户经理的客户维度响应。"""
+
+    start_date: str = Field(..., description="开始日期")
+    end_date: str = Field(..., description="结束日期")
+    bbk_id: str = Field(..., description="分行ID")
+    skill_name: str = Field(..., description="技能名称")
+    user_id: str = Field(..., description="客户经理ID")
+    items: List[BranchSkillManagerCustomerItem] = Field(
+        default_factory=list,
+        description="客户维度列表",
+    )
+
+
+# ============================================================
 # Helper functions for converting from SWE models
 # ============================================================
 

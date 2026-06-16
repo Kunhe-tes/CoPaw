@@ -11,7 +11,7 @@ import {
   UserRoundCheck,
   type LucideIcon,
 } from "lucide-react";
-import { DatePicker, Input, Modal, Pagination, Select, Spin, Tooltip } from "antd";
+import { DatePicker, Input, Modal, Pagination, Select, Spin, Table, Tooltip } from "antd";
 import { WarningOutlined } from "@ant-design/icons";
 import dayjs, { type Dayjs } from "dayjs";
 import { useEffect, useState, type CSSProperties } from "react";
@@ -22,6 +22,9 @@ import {
   type CronJobOverviewFailureReason,
   type CronJobOverviewDateFilters,
   type CronJobOverviewPageData,
+  type BranchSkillItem,
+  type BranchSkillManagerItem,
+  type BranchSkillManagerCustomerItem,
 } from "../../../api/modules/monitor";
 import { BBK_ID_MAP, BBK_ID_TO_NAME_MAP } from "../../../constants/bbk";
 import styles from "./index.module.less";
@@ -45,6 +48,18 @@ const quickTooltipProps = {
   mouseEnterDelay: 0,
   mouseLeaveDelay: 0,
 } as const;
+
+const SKILL_NAME_MAP: Record<string, string> = {
+  insurance_mkt: "保险营销客户分析技能",
+  deposit_scale_growth_skill: "存款规模增长与产品配置技能",
+  fund_redeem_monitor: "基金赎回实时监控技能",
+  lc_breaking: "单一持仓理财/定期客户破冰方案",
+  "global-market-report": "全球市场复盘报告",
+};
+
+function formatSkillName(key: string): string {
+  return SKILL_NAME_MAP[key] || key;
+}
 
 type SummaryMetricDefinition = {
   key: string;
@@ -207,7 +222,15 @@ function SummaryCard({ metric }: { metric: SummaryMetricView }) {
   );
 }
 
-function RankingTable({ data }: { data: CronJobOverviewPageData["branchRankingRows"] }) {
+function RankingTable({
+  data,
+  onRowClick,
+  selectedBranchId,
+}: {
+  data: CronJobOverviewPageData["branchRankingRows"];
+  onRowClick: (bbkId: string, bbkName: string) => void;
+  selectedBranchId: string | null;
+}) {
   return (
     <section className={`${styles.panel} ${styles.behaviorPanel}`}>
       <div className={styles.tableScroller}>
@@ -242,7 +265,19 @@ function RankingTable({ data }: { data: CronJobOverviewPageData["branchRankingRo
           </thead>
           <tbody>
             {data.map((row, index) => (
-              <tr key={`${row.branchName}-${index}`} className={row.rank === "..." ? styles.mutedRow : undefined}>
+              <tr
+                key={`${row.branchName}-${index}`}
+                className={
+                  `${row.rank === "..." ? styles.mutedRow : ""} ${row.bbkId && row.bbkId === selectedBranchId ? styles.selectedRow : ""}`.trim() ||
+                  undefined
+                }
+                onClick={() => {
+                  if (row.bbkId && row.rank !== "...") {
+                    onRowClick(row.bbkId, row.branchName);
+                  }
+                }}
+                style={row.bbkId && row.rank !== "..." ? { cursor: "pointer" } : undefined}
+              >
                 <td className={styles.indexCell}>{row.rank}</td>
                 <td className={styles.branchName}>{row.branchName}</td>
                 <td>{row.managerCount}</td>
@@ -567,6 +602,17 @@ export default function CronJobOverviewPage() {
   const [failedTasks, setFailedTasks] = useState<ExecutionItem[]>([]);
   const [failedTasksLoading, setFailedTasksLoading] = useState(false);
 
+  // Inline drill-down state for branch ranking expansion
+  const [selectedBranch, setSelectedBranch] = useState<{ bbk_id: string; bbk_name: string } | null>(null);
+  const [skills, setSkills] = useState<BranchSkillItem[]>([]);
+  const [skillsLoading, setSkillsLoading] = useState(false);
+  const [selectedSkill, setSelectedSkill] = useState<string | null>(null);
+  const [managers, setManagers] = useState<BranchSkillManagerItem[]>([]);
+  const [managersLoading, setManagersLoading] = useState(false);
+  const [selectedManager, setSelectedManager] = useState<string | null>(null);
+  const [customers, setCustomers] = useState<BranchSkillManagerCustomerItem[]>([]);
+  const [customersLoading, setCustomersLoading] = useState(false);
+
   const getOverviewFilters = (): CronJobOverviewDateFilters => ({
     start_date: dateRange[0].format("YYYY-MM-DD"),
     end_date: dateRange[1].format("YYYY-MM-DD"),
@@ -577,6 +623,112 @@ export default function CronJobOverviewPage() {
     start_time: dateRange[0].startOf("day").format("YYYY-MM-DDTHH:mm:ss"),
     end_time: dateRange[1].endOf("day").format("YYYY-MM-DDTHH:mm:ss"),
   });
+
+  const getDrawerDateParams = () => ({
+    start_date: dateRange[0].format("YYYY-MM-DD"),
+    end_date: dateRange[1].format("YYYY-MM-DD"),
+  });
+
+  const handleSelectBranch = async (bbkId: string, bbkName: string) => {
+    if (selectedBranch?.bbk_id === bbkId) {
+      setSelectedBranch(null);
+      setSelectedSkill(null);
+      setSelectedManager(null);
+      setSkills([]);
+      setManagers([]);
+      setCustomers([]);
+      return;
+    }
+    setSelectedBranch({ bbk_id: bbkId, bbk_name: bbkName });
+    setSelectedSkill(null);
+    setSelectedManager(null);
+    setSkills([]);
+    setManagers([]);
+    setCustomers([]);
+
+    setSkillsLoading(true);
+    try {
+      const dateParams = getDrawerDateParams();
+      const response = await monitorApi.getBranchSkills({
+        bbk_id: bbkId,
+        ...dateParams,
+      });
+      setSkills(response.items);
+      if (response.items.length > 0) {
+        setSelectedSkill(response.items[0].skill_name);
+      }
+    } catch (error) {
+      console.warn("Failed to fetch branch skills.", error);
+    } finally {
+      setSkillsLoading(false);
+    }
+  };
+
+  // Fetch managers when skill changes
+  useEffect(() => {
+    if (!selectedBranch || !selectedSkill) return;
+
+    let ignore = false;
+    async function fetchManagers() {
+      setManagersLoading(true);
+      setManagers([]);
+      setSelectedManager(null);
+      setCustomers([]);
+      try {
+        const dateParams = getDrawerDateParams();
+        const response = await monitorApi.getBranchSkillManagers({
+          bbk_id: selectedBranch!.bbk_id,
+          skill_name: selectedSkill!,
+          ...dateParams,
+        });
+        if (!ignore) {
+          setManagers(response.items);
+          if (response.items.length > 0) {
+            setSelectedManager(response.items[0].user_id);
+          }
+        }
+      } catch (error) {
+        console.warn("Failed to fetch branch skill managers.", error);
+      } finally {
+        if (!ignore) {
+          setManagersLoading(false);
+        }
+      }
+    }
+    fetchManagers();
+    return () => { ignore = true; };
+  }, [selectedBranch, selectedSkill, dateRange]);
+
+  // Fetch customers when manager changes
+  useEffect(() => {
+    if (!selectedBranch || !selectedSkill || !selectedManager) return;
+
+    let ignore = false;
+    async function fetchCustomers() {
+      setCustomersLoading(true);
+      setCustomers([]);
+      try {
+        const dateParams = getDrawerDateParams();
+        const response = await monitorApi.getBranchSkillManagerCustomers({
+          bbk_id: selectedBranch!.bbk_id,
+          skill_name: selectedSkill!,
+          user_id: selectedManager!,
+          ...dateParams,
+        });
+        if (!ignore) {
+          setCustomers(response.items);
+        }
+      } catch (error) {
+        console.warn("Failed to fetch branch skill manager customers.", error);
+      } finally {
+        if (!ignore) {
+          setCustomersLoading(false);
+        }
+      }
+    }
+    fetchCustomers();
+    return () => { ignore = true; };
+  }, [selectedBranch, selectedSkill, selectedManager, dateRange]);
 
   useEffect(() => {
     let ignore = false;
@@ -886,7 +1038,152 @@ export default function CronJobOverviewPage() {
         说明： 执行成功率 = 成功执行次数 / 任务执行次数； 任务已读率 = 已读任务去重数 / 已执行任务去重数； 执行报错率 = 报错执行次数 / 任务执行次数
       </p>
       <h2 className={styles.sectionHeading}>分行综合排行</h2>
-      <RankingTable data={overviewData.branchRankingRows} />
+      <RankingTable
+        data={overviewData.branchRankingRows}
+        onRowClick={handleSelectBranch}
+        selectedBranchId={selectedBranch?.bbk_id ?? null}
+      />
+
+      {selectedBranch && (
+        <div className={styles.drillDownContainer}>
+          {/* Column 1: Skills */}
+          <div className={styles.drillDownColumn}>
+            <h3 className={styles.drillDownTitle}>
+              当前分行下的技能明细
+              <span className={styles.drillDownSubTitle}>（{selectedBranch.bbk_name}）</span>
+            </h3>
+            <div className={styles.drillDownTableScroll}>
+            <Table
+              dataSource={skills}
+              rowKey="skill_name"
+              loading={skillsLoading}
+              size="small"
+              pagination={false}
+              onRow={(record) => ({
+                onClick: () => setSelectedSkill(record.skill_name),
+                style: {
+                  cursor: "pointer",
+                  background: record.skill_name === selectedSkill ? "#e6f4ff" : undefined,
+                },
+              })}
+              columns={[
+                { title: "技能名称", dataIndex: "skill_name", key: "skill_name", width: 130, align: "center", render: (v: string) => formatSkillName(v) },
+                { title: "定时任务数", dataIndex: "cron_task_count", key: "cron_task_count", width: 60, align: "center" },
+                { title: "成功执行数", dataIndex: "success_count", key: "success_count", width: 60, align: "center" },
+                {
+                  title: "成功率",
+                  dataIndex: "success_rate",
+                  key: "success_rate",
+                  width: 48,
+                  align: "center",
+                  render: (v: number) => (v != null ? `${v.toFixed(1)}%` : "-"),
+                },
+                { title: "已读任务数", dataIndex: "read_count", key: "read_count", width: 60, align: "center" },
+                { title: "报错次数", dataIndex: "error_count", key: "error_count", width: 55, align: "center" },
+              ]}
+            />
+            </div>
+          </div>
+
+          {/* Column 2: Managers */}
+          <div className={styles.drillDownColumn}>
+            <h3 className={styles.drillDownTitle}>
+              该技能下的客户经理明细
+              {selectedSkill && (
+                <span className={styles.drillDownSubTitle}>（{formatSkillName(selectedSkill)}）</span>
+              )}
+            </h3>
+            <div className={styles.drillDownTableScroll}>
+            <Table
+              dataSource={managers}
+              rowKey="user_id"
+              loading={managersLoading}
+              size="small"
+              pagination={false}
+              onRow={(record) => ({
+                onClick: () => setSelectedManager(record.user_id),
+                style: {
+                  cursor: "pointer",
+                  background: record.user_id === selectedManager ? "#e6f4ff" : undefined,
+                },
+              })}
+              columns={[
+                { title: "客户经理", dataIndex: "user_name", key: "user_name", width: 80, align: "center" },
+                { title: "已读次数", dataIndex: "read_count", key: "read_count", width: 50, align: "center" },
+                { title: "方案次数", dataIndex: "plan_count", key: "plan_count", width: 50, align: "center" },
+                { title: "洞察次数", dataIndex: "insight_count", key: "insight_count", width: 50, align: "center" },
+                { title: "电访次数", dataIndex: "phone_count", key: "phone_count", width: 50, align: "center" },
+                {
+                  title: "最后点击时间",
+                  dataIndex: "last_click_time",
+                  key: "last_click_time",
+                  width: 100,
+                  align: "center",
+                  render: (v: string) => (v ? dayjs(v).format("MM-DD HH:mm") : "-"),
+                },
+              ]}
+            />
+            </div>
+          </div>
+
+          {/* Column 3: Customers */}
+          <div className={styles.drillDownColumn}>
+            <h3 className={styles.drillDownTitle}>
+              该客户经理下的客户明细
+              {selectedManager && managers.length > 0 && (
+                <span className={styles.drillDownSubTitle}>
+                  （{managers.find((m) => m.user_id === selectedManager)?.user_name || selectedManager}）
+                </span>
+              )}
+            </h3>
+            <div className={styles.drillDownTableScroll}>
+            <Table
+              dataSource={customers}
+              rowKey="customer_id"
+              loading={customersLoading}
+              size="small"
+              pagination={false}
+              columns={[
+                { title: "客户名称", dataIndex: "customer_name", key: "customer_name", width: 90, align: "center" },
+                { title: "客户ID", dataIndex: "customer_id", key: "customer_id", width: 75, align: "center" },
+                {
+                  title: "点击方案",
+                  dataIndex: "clicked_plan",
+                  key: "clicked_plan",
+                  width: 55,
+                  align: "center",
+                  render: (v: boolean) => (v ? "是" : "否"),
+                },
+                {
+                  title: "点击洞察",
+                  dataIndex: "clicked_insight",
+                  key: "clicked_insight",
+                  width: 55,
+                  align: "center",
+                  render: (v: boolean) => (v ? "是" : "否"),
+                },
+                {
+                  title: "点击电访",
+                  dataIndex: "clicked_phone",
+                  key: "clicked_phone",
+                  width: 55,
+                  align: "center",
+                  render: (v: boolean) => (v ? "是" : "否"),
+                },
+                {
+                  title: "点击客户时间",
+                  dataIndex: "click_time",
+                  key: "click_time",
+                  width: 110,
+                  align: "center",
+                  render: (v: string) => (v ? dayjs(v).format("MM-DD HH:mm:ss") : "-"),
+                },
+              ]}
+            />
+            </div>
+          </div>
+        </div>
+      )}
 
       <section className={styles.anomalySection}>
         <div className={styles.anomalyLeft}>

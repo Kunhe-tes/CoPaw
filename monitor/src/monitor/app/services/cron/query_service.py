@@ -5,6 +5,7 @@ Provides methods to query job definitions and execution history
 for the frontend overview page.
 """
 
+import json
 import logging
 from datetime import datetime, timedelta
 from typing import List, Optional, Tuple, Any, Dict
@@ -23,6 +24,12 @@ from ...models.cron import (
     CronBranchErrorResponse,
     CronBranchErrorRankItem,
     CronErrorReasonItem,
+    BranchSkillItem,
+    BranchSkillResponse,
+    BranchSkillManagerItem,
+    BranchSkillManagerResponse,
+    BranchSkillManagerCustomerItem,
+    BranchSkillManagerCustomerResponse,
     CronJobModel,
     CronJobQueryParams,
     ExecutionModel,
@@ -2540,6 +2547,278 @@ class QueryService:
             microsecond=0,
         )
         return start_time, end_time
+
+    @staticmethod
+    def _init_skill_dicts(
+        skill_jobs: dict,
+        skill_total: dict,
+        skill_success: dict,
+        skill_read: dict,
+        skill_error: dict,
+        sk: str,
+    ) -> None:
+        skill_jobs[sk] = set()
+        skill_total[sk] = 0
+        skill_success[sk] = 0
+        skill_read[sk] = 0
+        skill_error[sk] = 0
+
+    async def get_branch_skills(
+        self,
+        bbk_id: str,
+        start_date: Optional[str] = None,
+        end_date: Optional[str] = None,
+        source_id: Optional[str] = None,
+    ) -> BranchSkillResponse:
+        """获取分行技能维度数据。
+
+        从 swe_cron_executions + swe_tracing_traces 链路，
+        提取 skills_used JSON 数组并聚合统计每项技能的执行情况。
+        """
+        db = get_db_connection()
+
+        start_time, end_time = self._parse_date_range(start_date, end_date)
+        start_str = start_date or start_time.strftime("%Y-%m-%d")
+        end_str = end_date or end_time.strftime("%Y-%m-%d")
+
+        source_where = " AND j.source_id = %s" if source_id else ""
+
+        sql = f"""
+            SELECT
+                e.job_id,
+                e.status,
+                e.is_read,
+                t.skills_used
+            FROM swe_cron_executions e
+            JOIN swe_cron_jobs j ON e.job_id = j.id
+            JOIN swe_tracing_traces t ON e.trace_id COLLATE utf8mb4_unicode_ci = t.trace_id
+            WHERE j.bbk_id = %s
+              AND e.actual_time >= %s AND e.actual_time <= %s
+              AND t.session_id LIKE 'cron-task%%'
+              AND t.skills_used IS NOT NULL
+              {source_where}
+        """
+        params: list = [bbk_id, start_time, end_time]
+        if source_id:
+            params.append(source_id)
+        rows = await db.fetch_all(sql, tuple(params))
+
+        seen_jobs: set[str] = set()
+        skill_jobs: dict[str, set[str]] = {}
+        skill_total: dict[str, int] = {}
+        skill_success: dict[str, int] = {}
+        skill_read: dict[str, int] = {}
+        skill_error: dict[str, int] = {}
+
+        for row in rows:
+            skills = row["skills_used"]
+            if isinstance(skills, str):
+                try:
+                    skills = json.loads(skills)
+                except (TypeError, ValueError):
+                    continue
+            if not isinstance(skills, list):
+                continue
+            job_id = row["job_id"]
+            status = (row["status"] or "").lower()
+            is_read = bool(row["is_read"])
+            for sk in skills:
+                sk = str(sk).strip() if sk else ""
+                if not sk:
+                    continue
+                if sk not in skill_jobs:
+                    self._init_skill_dicts(
+                        skill_jobs,
+                        skill_total,
+                        skill_success,
+                        skill_read,
+                        skill_error,
+                        sk,
+                    )
+                skill_total[sk] += 1
+                skill_jobs[sk].add(job_id)
+                if status == "success":
+                    skill_success[sk] += 1
+                if is_read:
+                    skill_read[sk] += 1
+                if status in ("error", "timeout", "cancelled"):
+                    skill_error[sk] += 1
+
+        items: list[BranchSkillItem] = []
+        for skill_name, jobs in skill_jobs.items():
+            task_count = len(jobs)
+            success = skill_success.get(skill_name, 0)
+            exec_total = skill_total.get(skill_name, 0)
+            items.append(
+                BranchSkillItem(
+                    skill_name=skill_name,
+                    cron_task_count=task_count,
+                    success_count=success,
+                    success_rate=self._percent(success, exec_total),
+                    read_count=skill_read.get(skill_name, 0),
+                    error_count=skill_error.get(skill_name, 0),
+                ),
+            )
+
+        items.sort(key=lambda item: item.cron_task_count, reverse=True)
+
+        return BranchSkillResponse(
+            start_date=start_str,
+            end_date=end_str,
+            bbk_id=bbk_id,
+            bbk_name=get_bbk_name_by_id(bbk_id) or bbk_id,
+            items=items,
+        )
+
+    async def get_branch_skill_managers(
+        self,
+        bbk_id: str,
+        skill_name: str,
+        start_date: Optional[str] = None,
+        end_date: Optional[str] = None,
+        source_id: Optional[str] = None,
+    ) -> BranchSkillManagerResponse:
+        """获取分行+技能的客户经理维度数据。
+
+        从 swe_html_preview_click_events 出发，通过 cron_executions
+        联结 traces，筛选 skills_used 包含指定技能的行，按客户经理聚合。
+        """
+        db = get_db_connection()
+
+        start_time, end_time = self._parse_date_range(start_date, end_date)
+        start_str = start_date or start_time.strftime("%Y-%m-%d")
+        end_str = end_date or end_time.strftime("%Y-%m-%d")
+
+        source_where = " AND c.source_id = %s" if source_id else ""
+
+        sql = f"""
+            SELECT
+                c.user_id,
+                c.user_id AS user_name,
+                COUNT(DISTINCT CASE WHEN e.is_read = 1 THEN e.id END) AS read_count,
+                COUNT(DISTINCT CASE WHEN c.button_type = 'plan' THEN c.id END) AS plan_count,
+                COUNT(DISTINCT CASE WHEN c.button_type = 'insight' THEN c.id END) AS insight_count,
+                COUNT(DISTINCT CASE WHEN c.button_type = 'phone' THEN c.id END) AS phone_count,
+                MAX(c.clicked_at) AS last_click_time
+            FROM swe_html_preview_click_events c
+            JOIN swe_cron_executions e ON c.cron_task_id = e.job_id
+            JOIN swe_tracing_traces t ON e.trace_id COLLATE utf8mb4_unicode_ci = t.trace_id
+            WHERE c.bbk_id = %s
+              AND t.skills_used IS NOT NULL
+              AND JSON_CONTAINS(t.skills_used, JSON_QUOTE(%s))
+              AND c.clicked_at >= %s AND c.clicked_at <= %s
+              AND t.session_id LIKE 'cron-task%%'
+              {source_where}
+            GROUP BY c.user_id
+            ORDER BY read_count DESC
+        """
+        params: list = [bbk_id, skill_name, start_time, end_time]
+        if source_id:
+            params.append(source_id)
+        rows = await db.fetch_all(sql, tuple(params))
+
+        items: list[BranchSkillManagerItem] = []
+        for row in rows:
+            last_click = row["last_click_time"]
+            items.append(
+                BranchSkillManagerItem(
+                    user_id=row["user_id"] or "",
+                    user_name=row["user_name"] or "",
+                    read_count=row["read_count"] or 0,
+                    plan_count=row["plan_count"] or 0,
+                    insight_count=row["insight_count"] or 0,
+                    phone_count=row["phone_count"] or 0,
+                    last_click_time=(
+                        last_click.strftime("%Y-%m-%d %H:%M:%S")
+                        if last_click
+                        else None
+                    ),
+                ),
+            )
+
+        return BranchSkillManagerResponse(
+            start_date=start_str,
+            end_date=end_str,
+            bbk_id=bbk_id,
+            skill_name=skill_name,
+            items=items,
+        )
+
+    async def get_branch_skill_manager_customers(
+        self,
+        bbk_id: str,
+        skill_name: str,
+        user_id: str,
+        start_date: Optional[str] = None,
+        end_date: Optional[str] = None,
+        source_id: Optional[str] = None,
+    ) -> BranchSkillManagerCustomerResponse:
+        """获取分行+技能+客户经理的客户维度数据。
+
+        从 swe_html_preview_click_events 出发，通过 cron_executions
+        联结 traces，筛选 skills_used 包含指定技能以及指定客户经理的行，
+        按客户聚合点击行为。
+        """
+        db = get_db_connection()
+
+        start_time, end_time = self._parse_date_range(start_date, end_date)
+        start_str = start_date or start_time.strftime("%Y-%m-%d")
+        end_str = end_date or end_time.strftime("%Y-%m-%d")
+
+        source_where = " AND c.source_id = %s" if source_id else ""
+
+        sql = f"""
+            SELECT
+                c.customer_id,
+                c.customer_name,
+                MAX(CASE WHEN c.button_type = 'plan' THEN 1 ELSE 0 END) AS clicked_plan,
+                MAX(CASE WHEN c.button_type = 'insight' THEN 1 ELSE 0 END) AS clicked_insight,
+                MAX(CASE WHEN c.button_type = 'phone' THEN 1 ELSE 0 END) AS clicked_phone,
+                MAX(c.clicked_at) AS click_time
+            FROM swe_html_preview_click_events c
+            JOIN swe_cron_executions e ON c.cron_task_id = e.job_id
+            JOIN swe_tracing_traces t ON e.trace_id COLLATE utf8mb4_unicode_ci = t.trace_id
+            WHERE c.bbk_id = %s
+              AND c.user_id = %s
+              AND t.skills_used IS NOT NULL
+              AND JSON_CONTAINS(t.skills_used, JSON_QUOTE(%s))
+              AND c.clicked_at >= %s AND c.clicked_at <= %s
+              AND t.session_id LIKE 'cron-task%%'
+              {source_where}
+            GROUP BY c.customer_id, c.customer_name
+            ORDER BY click_time DESC
+        """
+        params: list = [bbk_id, user_id, skill_name, start_time, end_time]
+        if source_id:
+            params.append(source_id)
+        rows = await db.fetch_all(sql, tuple(params))
+
+        items: list[BranchSkillManagerCustomerItem] = []
+        for row in rows:
+            click_time = row["click_time"]
+            items.append(
+                BranchSkillManagerCustomerItem(
+                    customer_id=row["customer_id"] or "",
+                    customer_name=row["customer_name"] or "",
+                    clicked_plan=bool(row["clicked_plan"]),
+                    clicked_insight=bool(row["clicked_insight"]),
+                    clicked_phone=bool(row["clicked_phone"]),
+                    click_time=(
+                        click_time.strftime("%Y-%m-%d %H:%M:%S")
+                        if click_time
+                        else None
+                    ),
+                ),
+            )
+
+        return BranchSkillManagerCustomerResponse(
+            start_date=start_str,
+            end_date=end_str,
+            bbk_id=bbk_id,
+            skill_name=skill_name,
+            user_id=user_id,
+            items=items,
+        )
 
     def _build_bbk_filter(
         self,

@@ -148,6 +148,7 @@ export interface CronJobOverviewSummaryMetric {
 
 export interface CronJobOverviewBranchRankingRow {
   rank: number | "...";
+  bbkId: string;
   branchName: string;
   managerCount: string;
   totalTasks: string;
@@ -262,6 +263,59 @@ export interface CronBranchErrorResponse {
   branch_error_rank: CronBranchErrorRankItem[];
 }
 
+export interface BranchSkillItem {
+  skill_name: string;
+  cron_task_count: number;
+  success_count: number;
+  success_rate: number;
+  read_count: number;
+  error_count: number;
+}
+
+export interface BranchSkillResponse {
+  start_date: string;
+  end_date: string;
+  bbk_id: string;
+  bbk_name: string;
+  items: BranchSkillItem[];
+}
+
+export interface BranchSkillManagerItem {
+  user_id: string;
+  user_name: string;
+  read_count: number;
+  plan_count: number;
+  insight_count: number;
+  phone_count: number;
+  last_click_time: string | null;
+}
+
+export interface BranchSkillManagerResponse {
+  start_date: string;
+  end_date: string;
+  bbk_id: string;
+  skill_name: string;
+  items: BranchSkillManagerItem[];
+}
+
+export interface BranchSkillManagerCustomerItem {
+  customer_id: string;
+  customer_name: string;
+  clicked_plan: boolean;
+  clicked_insight: boolean;
+  clicked_phone: boolean;
+  click_time: string | null;
+}
+
+export interface BranchSkillManagerCustomerResponse {
+  start_date: string;
+  end_date: string;
+  bbk_id: string;
+  skill_name: string;
+  user_id: string;
+  items: BranchSkillManagerCustomerItem[];
+}
+
 export interface SubscriptionOverviewItem {
   subscription_key: string;
   task_name: string;
@@ -352,6 +406,7 @@ function mapCronJobOverviewPageData(
     ],
     branchRankingRows: behavior.items.map((item, index) => ({
       rank: index + 1,
+      bbkId: item.bbk_id || "",
       branchName: item.bbk_name || item.bbk_id || "-",
       managerCount: formatInteger(item.manager_count),
       totalTasks: formatInteger(item.total_tasks),
@@ -431,6 +486,35 @@ export const monitorApi = {
     filters?: CronJobOverviewDateFilters,
   ): Promise<CronBranchErrorResponse> => {
     return request(`/monitor/cron/branch-error${buildQuery(filters)}`);
+  },
+
+  getBranchSkills: async (params: {
+    bbk_id: string;
+    start_date?: string;
+    end_date?: string;
+  }): Promise<BranchSkillResponse> => {
+    return request(`/monitor/cron/branch-skills${buildQuery(params)}`);
+  },
+
+  getBranchSkillManagers: async (params: {
+    bbk_id: string;
+    skill_name: string;
+    start_date?: string;
+    end_date?: string;
+  }): Promise<BranchSkillManagerResponse> => {
+    return request(`/monitor/cron/branch-skill-managers${buildQuery(params)}`);
+  },
+
+  getBranchSkillManagerCustomers: async (params: {
+    bbk_id: string;
+    skill_name: string;
+    user_id: string;
+    start_date?: string;
+    end_date?: string;
+  }): Promise<BranchSkillManagerCustomerResponse> => {
+    return request(
+      `/monitor/cron/branch-skill-manager-customers${buildQuery(params)}`,
+    );
   },
 
   getCronJobOverviewPageData: async (
