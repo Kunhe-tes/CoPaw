@@ -2757,7 +2757,7 @@ class QueryService:
                 COUNT(DISTINCT CASE WHEN c.button_type = 'phone' THEN c.id END) AS phone_count,
                 MAX(c.clicked_at) AS last_click_time
             FROM swe_html_preview_click_events c
-            JOIN swe_cron_executions e ON c.cron_task_id = e.job_id
+            JOIN swe_cron_executions e ON c.cron_task_id COLLATE utf8mb4_unicode_ci = e.job_id
             JOIN swe_tracing_traces t ON e.trace_id COLLATE utf8mb4_unicode_ci = t.trace_id
             WHERE c.bbk_id = %s
               AND t.skills_used IS NOT NULL
@@ -2832,7 +2832,7 @@ class QueryService:
                 MAX(CASE WHEN c.button_type = 'phone' THEN 1 ELSE 0 END) AS clicked_phone,
                 MAX(c.clicked_at) AS click_time
             FROM swe_html_preview_click_events c
-            JOIN swe_cron_executions e ON c.cron_task_id = e.job_id
+            JOIN swe_cron_executions e ON c.cron_task_id COLLATE utf8mb4_unicode_ci = e.job_id
             JOIN swe_tracing_traces t ON e.trace_id COLLATE utf8mb4_unicode_ci = t.trace_id
             WHERE c.bbk_id = %s
               AND c.user_id = %s
