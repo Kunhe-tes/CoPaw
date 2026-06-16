@@ -47,6 +47,7 @@ class MarketSkillResponse(BaseModel):
     updated_at: Optional[str]
     call_count: int = 0
     user_count: int = 0
+    version_unchanged: bool = False
 
 
 class SkillUserStat(BaseModel):
@@ -195,6 +196,7 @@ class MarketMCPItem(BaseModel):
     bbk_ids: list[str] = Field(default_factory=list)
     created_at: Optional[str] = None
     updated_at: Optional[str] = None
+    version_unchanged: bool = False
     call_count: int = 0
     user_count: int = 0
 
@@ -242,6 +244,12 @@ class PublishMCPRequest(BaseModel):
     config: dict
     overwrite: bool = False
     version: str = ""  # 发布者本地版本号，首次发布时作为市场条目初始版本
+    # T9 R5/R6 新增：分别记录"内容来源用户"与"操作者"
+    source_user_id: str = ""
+    source_user_name: str = ""
+    source_user_version: str = ""
+    operator_id: str = ""
+    operator_name: str = ""
 
 
 class UploadMCPResponse(BaseModel):
@@ -249,6 +257,7 @@ class UploadMCPResponse(BaseModel):
 
     success: bool
     error: Optional[str] = None
+    version_unchanged: bool = False
 
 
 class UpdateMarketMCPMetadataRequest(BaseModel):

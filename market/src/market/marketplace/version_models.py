@@ -14,12 +14,16 @@ class SkillVersion(BaseModel):
 
     version_id: str
     created_at: str  # ISO8601 时间字符串
-    created_by: str = ""  # 用户 ID
-    created_by_name: str = ""  # 用户名称
+    created_by: str = ""  # 操作者 ID（按按钮的人，admin 的 X-User-Id）
+    created_by_name: str = ""  # 操作者名称
     description: str = ""
     signature: str = ""  # 内容签名（SHA256）
     is_current: bool = False
     is_initial: bool = False
+    # 新增：内容来源用户。空串表示无来源（admin 走 zip 上传路径）
+    source_user_id: str = ""
+    source_user_name: str = ""
+    source_user_version: str = ""
 
 
 class VersionsManifest(BaseModel):
@@ -79,3 +83,27 @@ class VersionDeleteResult(BaseModel):
     success: bool
     deleted_version: str = ""
     message: str = ""
+
+
+class MCPVersion(BaseModel):
+    """单个 MCP 版本信息（与 SkillVersion 字段对齐）."""
+
+    version_id: str
+    created_at: str
+    created_by: str = ""
+    created_by_name: str = ""
+    description: str = ""
+    signature: str = ""  # SHA256(canonical_json(mcp.json))
+    is_current: bool = False
+    is_initial: bool = False
+    source_user_id: str = ""
+    source_user_name: str = ""
+    source_user_version: str = ""
+
+
+class MCPVersionsManifest(BaseModel):
+    """MCP 版本清单文件结构."""
+
+    client_key: str = ""
+    name: str = ""
+    versions: list[MCPVersion] = Field(default_factory=list)

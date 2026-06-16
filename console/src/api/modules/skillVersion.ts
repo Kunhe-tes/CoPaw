@@ -10,6 +10,10 @@ export interface SkillVersion {
   signature: string;
   is_current: boolean;
   is_initial: boolean;
+  // R5 / R6：内容来源用户（按按钮的人 vs 提交内容的人）
+  source_user_id: string;
+  source_user_name: string;
+  source_user_version: string;
 }
 
 export interface VersionsManifest {

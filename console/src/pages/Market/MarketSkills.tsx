@@ -584,10 +584,12 @@ export function MarketSkills({ sourceId, isManager }: MarketSkillsProps) {
             {mcpDetailMode === "detail" && selectedMCP ? (
               <MCPDetailDrawer
                 mcp={selectedMCP}
+                sourceId={sourceId}
                 onDistribute={isManager ? () => openMCPDistributeModal(selectedMCP) : undefined}
                 onRecall={isManager ? () => openMCPRecallModal(selectedMCP) : undefined}
                 onEdit={() => void openMCPEditModal(selectedMCP)}
                 onDelete={isManager ? () => confirmDeleteMCP(selectedMCP) : undefined}
+                onRefresh={refreshMCP}
                 canEdit={isManager}
                 isManager={isManager}
               />

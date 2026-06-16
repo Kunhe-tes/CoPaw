@@ -826,9 +826,9 @@ export function VersionCompareDrawer(props: VersionCompareDrawerProps) {
             版本比对
           </Text>
           <div style={{ marginTop: 4, display: "flex", alignItems: "center", gap: 8 }}>
-            <Tag color="blue" style={{ borderRadius: 6 }}>{baseVersion}</Tag>
+            <Tag color="blue" style={{ borderRadius: 6 }}>{/^v/i.test(baseVersion) ? baseVersion : `v${baseVersion}`}</Tag>
             <Text type="secondary" style={{ fontSize: 12 }}>→</Text>
-            <Tag color="green" style={{ borderRadius: 6 }}>{targetVersion}</Tag>
+            <Tag color="green" style={{ borderRadius: 6 }}>{/^v/i.test(targetVersion) ? targetVersion : `v${targetVersion}`}</Tag>
           </div>
         </div>
         <Space size={8}>

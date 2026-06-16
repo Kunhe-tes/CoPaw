@@ -332,74 +332,35 @@ def _get_existing_skill_names(skills_dir: Path) -> set[str]:
 
 
 def _parse_frontmatter_description(skill_md_path: Path) -> str:
-    """从 SKILL.md frontmatter 中提取 description."""
+    """从 SKILL.md frontmatter 中提取 description（委托共享工具）."""
+    from ...utils.skill_md import extract_metadata
+
     if not skill_md_path.exists():
         return ""
     try:
         content = skill_md_path.read_text(encoding="utf-8")
-        if not content.startswith("---"):
-            return ""
-        end_idx = content.index("---", 3)
-        fm_text = content[3:end_idx].strip()
-        for line in fm_text.split("\n"):
-            if ":" in line:
-                key, val = line.split(":", 1)
-                key = key.strip().lower()
-                val = val.strip()
-                if key == "description":
-                    return val
-    except (ValueError, OSError):
-        pass
-    return ""
+    except OSError:
+        return ""
+    return extract_metadata(content).get("description", "")
 
 
 def _parse_frontmatter_version(skill_md_path: Path) -> str:
-    """从 SKILL.md frontmatter 中提取 version."""
+    """从 SKILL.md frontmatter 中提取 version（委托共享工具）."""
+    from ...utils.skill_md import extract_version
+
     if not skill_md_path.exists():
         return ""
     try:
-        content = skill_md_path.read_text(encoding="utf-8")
-        if not content.startswith("---"):
-            return ""
-        end_idx = content.index("---", 3)
-        fm_text = content[3:end_idx].strip()
-        for line in fm_text.split("\n"):
-            if ":" in line:
-                key, val = line.split(":", 1)
-                key = key.strip().lower()
-                val = val.strip()
-                if key == "version":
-                    # 移除引号（双引号或单引号）
-                    if val.startswith('"') and val.endswith('"'):
-                        val = val[1:-1]
-                    elif val.startswith("'") and val.endswith("'"):
-                        val = val[1:-1]
-                    # 移除 v 前缀（如 v1.0.0）
-                    if val.lower().startswith("v"):
-                        val = val[1:]
-                    return val
-    except (ValueError, OSError):
-        pass
-    return ""
+        return extract_version(skill_md_path.read_text(encoding="utf-8"))
+    except OSError:
+        return ""
 
 
 def _bump_patch_version(version: str) -> str:
-    """递增版本号的 patch 部分：'1.0.0' -> '1.0.1'."""
-    parts = version.split(".")
-    if len(parts) == 3:
-        try:
-            parts[2] = str(int(parts[2]) + 1)
-            return ".".join(parts)
-        except ValueError:
-            pass
-    elif len(parts) == 2:
-        try:
-            parts[1] = str(int(parts[1]) + 1)
-            return f"{parts[0]}.{parts[1]}.0"
-        except ValueError:
-            pass
-    # 无法解析，添加 .1
-    return f"{version}.1"
+    """递增版本号的 patch 部分（委托共享工具）."""
+    from ...utils.version import bump_patch
+
+    return bump_patch(version)
 
 
 def _build_skill_metadata(
