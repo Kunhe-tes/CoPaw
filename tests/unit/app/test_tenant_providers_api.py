@@ -7,7 +7,11 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import swe.app.routers.providers as providers_router
 from swe.app.routers.providers import _distribute_providers_to_tenant
-from swe.config.context import encode_scope_id, resolve_runtime_tenant_id
+from swe.config.context import (
+    encode_scope_id,
+    resolve_runtime_tenant_id,
+    resolve_storage_tenant_id,
+)
 from swe.app.routers.providers import tenant_providers_router
 from swe.providers.models import ModelSlotConfig
 from swe.providers.provider import ProviderInfo
@@ -206,7 +210,11 @@ def test_distribute_providers_writes_target_source_scope(
         '{"provider_id":"openai","model":"gpt-5"}',
         encoding="utf-8",
     )
-    monkeypatch.setattr(providers_router, "SECRET_DIR", secret_dir)
+    monkeypatch.setattr(
+        providers_router,
+        "get_tenant_storage_providers_dir",
+        lambda tenant_id: secret_dir / tenant_id / "providers",
+    )
     monkeypatch.setattr(
         providers_router,
         "TenantInitializer",
@@ -226,3 +234,54 @@ def test_distribute_providers_writes_target_source_scope(
         secret_dir / target_scope_id / "providers" / "active_model.json"
     ).exists()
     assert not (secret_dir / "tenant-b" / "providers").exists()
+
+
+def test_distribute_providers_writes_default_target_to_source_template(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    """分发到 default 时应写入 default_{source} 的 secret 命名空间。"""
+
+    class FakeTenantInitializer:
+        def __init__(self, base_working_dir, tenant_id, source_id=None):
+            del base_working_dir
+            self.effective_tenant_id = resolve_storage_tenant_id(
+                tenant_id,
+                source_id,
+            )
+
+        def has_seeded_bootstrap(self):
+            return True
+
+        def ensure_seeded_bootstrap(self):
+            raise AssertionError("不应在已初始化租户上触发 bootstrap")
+
+    secret_dir = tmp_path / ".swe.secret"
+    source_providers_dir = tmp_path / "source" / "providers"
+    source_providers_dir.mkdir(parents=True)
+    (source_providers_dir / "active_model.json").write_text(
+        '{"provider_id":"openai","model":"gpt-5"}',
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        providers_router,
+        "get_tenant_storage_providers_dir",
+        lambda tenant_id: secret_dir / tenant_id / "providers",
+    )
+    monkeypatch.setattr(
+        providers_router,
+        "TenantInitializer",
+        FakeTenantInitializer,
+    )
+
+    result = _distribute_providers_to_tenant(
+        source_providers_dir=source_providers_dir,
+        target_tenant_id="default",
+        source_working_dir=tmp_path / ".swe" / "default_source-a",
+        source_id="source-a",
+    )
+
+    assert result.success is True
+    assert (
+        secret_dir / "default_source-a" / "providers" / "active_model.json"
+    ).exists()

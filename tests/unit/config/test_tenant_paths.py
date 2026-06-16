@@ -87,6 +87,7 @@ utils_module = importlib.reload(utils_module)
 TenantContextError = context_module.TenantContextError
 encode_scope_id = context_module.encode_scope_id
 resolve_storage_tenant_id = context_module.resolve_storage_tenant_id
+resolve_runtime_tenant_id = context_module.resolve_runtime_tenant_id
 resolve_request_effective_tenant_id = (
     context_module.resolve_request_effective_tenant_id
 )
@@ -220,6 +221,13 @@ class TestTenantPathStrictHelpers:
 
         assert path == WORKING_DIR / "default_CMSJY"
 
+    def test_default_user_strict_working_dir_uses_storage_template(self):
+        """逻辑 default 经公共 strict helper 也应直达 default_{source}。"""
+        with tenant_context(tenant_id="default", source_id="CMSJY"):
+            path = get_tenant_working_dir_strict("default")
+
+        assert path == WORKING_DIR / "default_CMSJY"
+
     def test_default_user_request_effective_tenant_skips_scope(self):
         """default 用户请求有效租户解析不应返回 scope_id。"""
         scope_id = encode_scope_id("default", "CMSJY")
@@ -230,6 +238,26 @@ class TestTenantPathStrictHelpers:
                 "CMSJY",
                 scope_id,
             )
+            == "default_CMSJY"
+        )
+
+    def test_explicit_default_source_template_stays_as_template_id(self):
+        """显式 default_{source} 目录不应再被重编码成 scope。"""
+        with tenant_context(tenant_id="default", source_id="CMSJY"):
+            working_dir = get_tenant_working_dir_strict("default_CMSJY")
+            config_path = get_tenant_config_path_strict("default_CMSJY")
+
+        assert working_dir == WORKING_DIR / "default_CMSJY"
+        assert config_path == WORKING_DIR / "default_CMSJY" / "config.json"
+
+    def test_default_source_template_runtime_and_storage_are_idempotent(self):
+        """default_{source} 进入公共解析层后应保持幂等。"""
+        assert (
+            resolve_runtime_tenant_id("default_CMSJY", "CMSJY")
+            == "default_CMSJY"
+        )
+        assert (
+            resolve_storage_tenant_id("default_CMSJY", "CMSJY")
             == "default_CMSJY"
         )
 

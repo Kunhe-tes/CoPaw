@@ -174,7 +174,18 @@ class SWEAgent(ToolGuardMixin, ReActAgent):
         sys_prompt = self._build_sys_prompt()
 
         # Create model and formatter using factory method
-        model, formatter = create_model_and_formatter(agent_id=agent_config.id)
+        model, formatter = create_model_and_formatter(
+            agent_id=agent_config.id,
+            trace_context={
+                "trace_id": self._request_context.get("trace_id"),
+                "user_id": self._request_context.get("user_id"),
+                "session_id": self._request_context.get("session_id"),
+                "channel": self._request_context.get("channel"),
+                "source_id": self._request_context.get("source_id"),
+                "user_name": self._request_context.get("user_name"),
+                "bbk_id": self._request_context.get("bbk_id"),
+            },
+        )
 
         # Get model info from ProviderManager (single source of truth)
         try:

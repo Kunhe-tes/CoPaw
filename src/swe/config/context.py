@@ -301,6 +301,8 @@ def resolve_runtime_tenant_id(
     """
     if tenant_id is None:
         return None
+    if tenant_id.startswith("default_"):
+        return tenant_id
     legacy_prefix = f"{_LEGACY_SCOPE_ID_PREFIX}."
     if tenant_id.startswith(legacy_prefix):
         return canonicalize_scope_id(tenant_id)
@@ -345,6 +347,8 @@ def resolve_storage_tenant_id(
         if not source_id:
             return "default"
         return f"default_{source_id}"
+    if tenant_id.startswith("default_"):
+        return tenant_id
 
     resolved_scope_id = scope_id
     if resolved_scope_id is not None:
