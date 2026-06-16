@@ -59,6 +59,9 @@ export default function useChatSessionHandler() {
       messages: IAgentScopeRuntimeWebUIMessage[],
       generating?: boolean,
       options?: IAgentScopeRuntimeWebUISessionUpdateOptions,
+      sessionPatch?: {
+        name?: string;
+      },
     ) => {
       if (!sessionId) {
         return;
@@ -68,6 +71,7 @@ export default function useChatSessionHandler() {
         id: sessionId,
         messages,
         ...(typeof generating === "boolean" ? { generating } : {}),
+        ...sessionPatch,
       }, options);
     },
     [updateSession],
