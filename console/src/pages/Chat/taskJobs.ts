@@ -91,6 +91,21 @@ export function partitionTasksByPauseState(
   );
 }
 
+export function getTaskPauseStatusText(
+  sidebarMeta: TaskSidebarMeta,
+): string | null {
+  if (sidebarMeta.state === "auto-paused") {
+    if (sidebarMeta.unreadCount <= 0) {
+      return "已自动暂停 · 已清理";
+    }
+    return `已自动暂停 · 连续 ${sidebarMeta.unreadCount} 次未读`;
+  }
+  if (sidebarMeta.state === "manual-paused") {
+    return "已手动暂停";
+  }
+  return null;
+}
+
 export function shouldMarkTaskReadOnOpen(job: CronJobSpecOutput): boolean {
   return !getTaskSidebarMeta(job).canResume;
 }

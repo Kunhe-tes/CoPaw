@@ -356,6 +356,94 @@ def test_load_provider_invalid_json_returns_none(isolated_secret_dir) -> None:
     assert loaded is None
 
 
+def test_get_active_model_refreshes_external_file_changes(
+    isolated_secret_dir,
+) -> None:
+    manager = ProviderManager()
+    active_path = manager.root_path / "active_model.json"
+    active_path.write_text(
+        json.dumps({"provider_id": "openai", "model": "gpt-5"}),
+        encoding="utf-8",
+    )
+
+    assert manager.get_active_model() == ModelSlotConfig(
+        provider_id="openai",
+        model="gpt-5",
+    )
+
+
+async def test_get_active_model_returns_none_after_external_delete(
+    isolated_secret_dir,
+    monkeypatch,
+) -> None:
+    manager = ProviderManager()
+    _seed_builtins(manager, _openai_provider())
+    monkeypatch.setattr(manager, "maybe_probe_multimodal", lambda *_: None)
+    await manager.activate_model("openai", "gpt-5")
+
+    (manager.root_path / "active_model.json").unlink()
+
+    assert manager.get_active_model() is None
+
+
+async def test_get_active_model_returns_none_for_invalid_external_file(
+    isolated_secret_dir,
+    monkeypatch,
+) -> None:
+    manager = ProviderManager()
+    _seed_builtins(manager, _openai_provider())
+    monkeypatch.setattr(manager, "maybe_probe_multimodal", lambda *_: None)
+    await manager.activate_model("openai", "gpt-5")
+
+    (manager.root_path / "active_model.json").write_text(
+        "{invalid-json",
+        encoding="utf-8",
+    )
+
+    assert manager.get_active_model() is None
+
+
+async def test_invalid_external_custom_provider_file_removes_cached_provider(
+    isolated_secret_dir,
+) -> None:
+    manager = ProviderManager()
+    custom = OpenAIProvider(
+        id="custom-bad",
+        name="Custom Bad",
+        base_url="https://custom.example/v1",
+        api_key="sk-custom",
+    )
+    await manager.add_custom_provider(custom)
+
+    (manager.custom_path / "custom-bad.json").write_text(
+        "{invalid-json",
+        encoding="utf-8",
+    )
+
+    await manager.list_provider_info()
+
+    assert manager.get_provider("custom-bad") is None
+
+
+async def test_invalid_external_builtin_provider_file_falls_back_to_default(
+    isolated_secret_dir,
+    monkeypatch,
+) -> None:
+    _patch_builtins(monkeypatch, _openai_provider())
+    manager = ProviderManager()
+    assert manager.update_provider("openai", {"api_key": "sk-customized"})
+    assert manager.get_provider("openai").api_key == "sk-customized"
+
+    (manager.builtin_path / "openai.json").write_text(
+        "{invalid-json",
+        encoding="utf-8",
+    )
+
+    await manager.list_provider_info()
+
+    assert manager.get_provider("openai").api_key == ""
+
+
 def test_migrate_legacy_file_and_persist_active_model(
     isolated_secret_dir,
     monkeypatch,

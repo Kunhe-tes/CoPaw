@@ -42,6 +42,7 @@ TOKEN_EXPIRY_SECONDS = 7 * 24 * 3600
 # Paths that do NOT require authentication
 _PUBLIC_PATHS: frozenset[str] = frozenset(
     {
+        "/api/health/health",
         "/api/auth/login",
         "/api/auth/status",
         "/api/auth/register",

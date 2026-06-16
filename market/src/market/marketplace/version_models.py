@@ -14,7 +14,8 @@ class SkillVersion(BaseModel):
 
     version_id: str
     created_at: str  # ISO8601 时间字符串
-    created_by: str = ""
+    created_by: str = ""  # 用户 ID
+    created_by_name: str = ""  # 用户名称
     description: str = ""
     signature: str = ""  # 内容签名（SHA256）
     is_current: bool = False
