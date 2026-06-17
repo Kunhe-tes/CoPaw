@@ -2207,6 +2207,11 @@ class AgentRunner(Runner):
             "tenant_id": self.tenant_id or "",
             "source_id": _request_source_id(request),
             "trace_id": getattr(request, "trace_id", None),
+            "channel_manager": getattr(
+                getattr(self, "_workspace", None),
+                "channel_manager",
+                None,
+            ),
             "transcript_path": (
                 self.session._get_save_path(session_id, user_id)
                 if hasattr(self.session, "_get_save_path")

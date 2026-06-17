@@ -80,6 +80,40 @@ def _make_completed_event(text: str) -> MagicMock:
     return event
 
 
+@pytest.mark.asyncio
+async def test_cron_approval_card_hook_is_noop_for_now():
+    ch = _make_channel()
+    ch.send_custom_card = AsyncMock()
+
+    code, msg = await ch.send_cron_approval_card(
+        request_id="approval-1",
+        session_id="cron-task:job-1",
+        user_id="user-1",
+        tool_name="execute_shell_command",
+        result_summary="",
+        tool_input={"cmd": "echo hi"},
+    )
+
+    assert (code, msg) == (0, "noop")
+    ch.send_custom_card.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_cron_approval_result_hook_is_noop_for_now():
+    ch = _make_channel()
+    ch.send_custom_card = AsyncMock()
+
+    code, msg = await ch.send_cron_approval_result(
+        request_id="approval-1",
+        session_id="cron-task:job-1",
+        user_id="user-1",
+        decision="approved",
+    )
+
+    assert (code, msg) == (0, "noop")
+    ch.send_custom_card.assert_not_called()
+
+
 # ---------------------------------------------------------------------------
 # Tests for _run_task_llm_and_notify
 # ---------------------------------------------------------------------------

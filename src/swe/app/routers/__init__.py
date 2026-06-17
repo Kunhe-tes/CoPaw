@@ -10,6 +10,7 @@ from fastapi import APIRouter
 _ROUTER_MODULES = (
     (".agents", "router"),
     (".agent", "router"),
+    (".approvals", "router"),
     (".config", "router"),
     (".console", "router"),
     ("..crons.api", "router"),
@@ -51,6 +52,7 @@ _ROUTER_MODULES = (
 _MODULE_EXPORTS = {
     "agent",
     "agents",
+    "approvals",
     "auth",
     "config",
     "console",
