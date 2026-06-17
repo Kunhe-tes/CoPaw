@@ -58,7 +58,7 @@ const TASK_SESSION_KIND = "task";
 const TASK_RUN_SECTION_STEP = "step";
 const TASK_RUN_SECTION_FINAL = "final";
 const SESSION_TITLE_GENERATED_META_KEY = "session_title_generated";
-const SESSION_PAGE_SIZE = 50;
+const SESSION_PAGE_SIZE = 100;
 
 // ---------------------------------------------------------------------------
 // Window globals
