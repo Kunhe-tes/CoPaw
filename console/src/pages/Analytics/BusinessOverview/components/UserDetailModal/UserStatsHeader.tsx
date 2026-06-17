@@ -21,6 +21,8 @@ import {
 } from "../../../../../api/modules/tracing";
 import styles from "./index.module.less";
 
+const COLLAPSED_USAGE_ITEM_THRESHOLD = 4;
+
 interface UserStatsHeaderProps {
   userStats: UserStats;
   sessionStats?: SessionStats | null;
@@ -99,14 +101,38 @@ function UsageBlock({
   onResourceFilterChange?: (filter: SessionResourceFilter) => void;
 }) {
   const tagRowRef = useRef<HTMLDivElement | null>(null);
-  const [hasOverflow, setHasOverflow] = useState(false);
+  const [expanded, setExpanded] = useState(false);
+  const [heightOverflow, setHeightOverflow] = useState(false);
+
+  const orderedItems = useMemo(() => {
+    if (expanded) return items;
+
+    const selectedIndex = items.findIndex((item) =>
+      isSameResourceFilter(activeResourceFilter, item.filter),
+    );
+    if (selectedIndex <= 0) return items;
+
+    const selectedItem = items[selectedIndex];
+    return [
+      selectedItem,
+      ...items.slice(0, selectedIndex),
+      ...items.slice(selectedIndex + 1),
+    ];
+  }, [activeResourceFilter, expanded, items]);
+
+  const canExpand =
+    items.length > COLLAPSED_USAGE_ITEM_THRESHOLD || heightOverflow;
+
+  useEffect(() => {
+    setExpanded(false);
+  }, [items]);
 
   useEffect(() => {
     const node = tagRowRef.current;
     if (!node) return;
 
     const measureOverflow = () => {
-      setHasOverflow(node.scrollWidth > node.clientWidth + 1);
+      setHeightOverflow(node.scrollHeight > node.clientHeight + 1);
     };
 
     measureOverflow();
@@ -114,40 +140,36 @@ function UsageBlock({
     const resizeObserver = new ResizeObserver(measureOverflow);
     resizeObserver.observe(node);
     return () => resizeObserver.disconnect();
-  }, [items]);
+  }, [orderedItems, expanded]);
 
-  const tooltipTitle = (
-    <div className={styles.usageTooltipContent}>
-      <div className={styles.usageTooltipTitle}>{title}明细</div>
-      {items.length > 0 ? (
-        <div className={styles.usageTooltipList}>
-          {items.map((item) => (
-            <div className={styles.usageTooltipItem} key={item.name}>
-              <span className={styles.usageTooltipName}>{item.name}</span>
-              <span className={styles.usageTooltipCount}>
-                {item.count} calls
-                {item.error_count && item.error_count > 0
-                  ? ` / 失败 ${item.error_count}`
-                  : ""}
-              </span>
-            </div>
-          ))}
-        </div>
-      ) : (
-        <div className={styles.usageTooltipEmpty}>暂无数据</div>
-      )}
-    </div>
-  );
-
-  const content = (
+  return (
     <div className={styles.usageBlock}>
       <div className={styles.usageBlockHeader}>
         <span>{title}</span>
-        <strong>{formatNumber(items.length)}</strong>
+        <div className={styles.usageBlockHeaderMeta}>
+          <strong>{formatNumber(items.length)}</strong>
+          {canExpand ? (
+            <button
+              type="button"
+              className={styles.usageExpandButton}
+              aria-label={`${expanded ? "收起" : "展开"}${title}标签`}
+              aria-expanded={expanded}
+              onClick={() => setExpanded((current) => !current)}
+            >
+              {expanded ? "收起" : "展开"}
+              {expanded ? <ChevronUp size={12} /> : <ChevronDown size={12} />}
+            </button>
+          ) : null}
+        </div>
       </div>
-      <div className={styles.compactTagRow} ref={tagRowRef}>
+      <div
+        className={`${styles.compactTagRow} ${
+          canExpand && !expanded ? styles.compactTagRowCollapsed : ""
+        }`}
+        ref={tagRowRef}
+      >
         {items.length > 0 ? (
-          items.map((item) => {
+          orderedItems.map((item) => {
             const selected = isSameResourceFilter(
               activeResourceFilter,
               item.filter,
@@ -177,21 +199,6 @@ function UsageBlock({
         )}
       </div>
     </div>
-  );
-
-  if (!hasOverflow) {
-    return content;
-  }
-
-  return (
-    <Tooltip
-      title={tooltipTitle}
-      placement="bottomLeft"
-      overlayClassName={styles.usageTooltipOverlay}
-      mouseEnterDelay={0.2}
-    >
-      {content}
-    </Tooltip>
   );
 }
 
@@ -359,7 +366,6 @@ export default function UserStatsHeader({
             <UsageBlock
               title="技能"
               items={skillItems}
-              colorFn={() => "blue"}
               activeResourceFilter={activeResourceFilter}
               onResourceFilterChange={onResourceFilterChange}
             />
