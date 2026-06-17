@@ -336,6 +336,13 @@
   margin-bottom: 18px;
 }
 
+.sectionHeadingHint {
+  color: #94a3b8;
+  font-size: 13px;
+  font-weight: 400;
+  margin-left: 8px;
+}
+
 .anomalyLeft h2 span {
   color: #52607a;
   font-size: 15px;
@@ -390,7 +397,14 @@
   text-overflow: ellipsis;
 }
 
-.behaviorTable tbody tr:hover td,
+.behaviorTable tbody tr {
+  transition: background 0.15s ease;
+}
+
+.behaviorTable tbody tr:hover td {
+  background: #e6f4ff;
+}
+
 .rankTable tbody tr:hover td {
   background: #fbfdff;
 }
@@ -405,12 +419,30 @@
   font-weight: 800 !important;
 }
 
+.branchNameLink {
+  color: #2563eb !important;
+  font-weight: 800 !important;
+
+  span {
+    border-bottom: 1px dashed #2563eb;
+  }
+
+  &:hover span {
+    border-bottom-color: #1a5cd8;
+    color: #1a5cd8;
+  }
+}
+
 .mutedRow td {
   color: #7b879d;
 }
 
 .selectedRow td {
   background: #e6f4ff !important;
+}
+
+.clickableRow {
+  cursor: pointer;
 }
 
 /* Inline drill-down expansion below ranking table */
@@ -460,6 +492,34 @@
     white-space: normal !important;
     word-break: break-all;
     padding: 6px 4px !important;
+  }
+}
+
+.drillRow {
+  cursor: pointer;
+
+  :global(td) {
+    transition: background 0.15s ease;
+  }
+
+  &:hover :global(td) {
+    background: #e6f4ff !important;
+  }
+}
+
+.drillSelectedRow {
+  :global(td) {
+    background: #e6f4ff !important;
+  }
+}
+
+.drillHoverRow {
+  :global(td) {
+    transition: background 0.15s ease;
+  }
+
+  &:hover :global(td) {
+    background: #e6f4ff !important;
   }
 }
 

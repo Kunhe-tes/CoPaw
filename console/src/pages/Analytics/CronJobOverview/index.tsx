@@ -274,22 +274,27 @@ function RankingTable({
             </tr>
           </thead>
           <tbody>
-            {data.map((row, index) => (
+            {data.map((row, index) => {
+              const isClickable = row.bbkId && row.rank !== "...";
+              const isSelected = row.bbkId && row.bbkId === selectedBranchId;
+
+              return (
               <tr
                 key={`${row.branchName}-${index}`}
                 className={
-                  `${row.rank === "..." ? styles.mutedRow : ""} ${row.bbkId && row.bbkId === selectedBranchId ? styles.selectedRow : ""}`.trim() ||
+                  `${row.rank === "..." ? styles.mutedRow : ""} ${isSelected ? styles.selectedRow : ""} ${isClickable ? styles.clickableRow : ""}`.trim() ||
                   undefined
                 }
                 onClick={() => {
-                  if (row.bbkId && row.rank !== "...") {
+                  if (isClickable) {
                     onRowClick(row.bbkId, row.branchName);
                   }
                 }}
-                style={row.bbkId && row.rank !== "..." ? { cursor: "pointer" } : undefined}
               >
                 <td className={styles.indexCell}>{row.rank}</td>
-                <td className={styles.branchName}>{row.branchName}</td>
+                <td className={isClickable ? styles.branchNameLink : styles.branchName}>
+                  <span>{row.branchName}</span>
+                </td>
                 <td>{row.managerCount}</td>
                 <td>{row.totalTasks}</td>
                 <td>{row.successCount}</td>
@@ -300,7 +305,8 @@ function RankingTable({
                 <td>{row.phoneCount}/{row.phoneClicks}</td>
                 <td>{row.errorCount}</td>
               </tr>
-            ))}
+            );
+            })}
           </tbody>
         </table>
       </div>
@@ -675,6 +681,16 @@ export default function CronJobOverviewPage() {
     }
   };
 
+  // Collapse drill-down when date range changes
+  useEffect(() => {
+    setSelectedBranch(null);
+    setSelectedSkill(null);
+    setSelectedManager(null);
+    setSkills([]);
+    setManagers([]);
+    setCustomers([]);
+  }, [dateRange]);
+
   // Fetch managers when skill changes
   useEffect(() => {
     if (!selectedBranch || !selectedSkill) return;
@@ -1048,7 +1064,10 @@ export default function CronJobOverviewPage() {
       <p className={styles.formulaNote}>
         说明： 执行成功率 = 成功执行次数 / 任务执行次数； 任务已读率 = 已读任务去重数 / 已执行任务去重数； 执行报错率 = 报错执行次数 / 任务执行次数
       </p>
-      <h2 className={styles.sectionHeading}>分行综合排行</h2>
+      <h2 className={styles.sectionHeading}>
+        分行综合排行
+        <span className={styles.sectionHeadingHint}>（点击分行查看明细）</span>
+      </h2>
       <RankingTable
         data={overviewData.branchRankingRows}
         onRowClick={handleSelectBranch}
@@ -1070,12 +1089,11 @@ export default function CronJobOverviewPage() {
               loading={skillsLoading}
               size="small"
               pagination={false}
+              rowClassName={(record) =>
+                record.skill_name === selectedSkill ? styles.drillSelectedRow : styles.drillRow
+              }
               onRow={(record) => ({
                 onClick: () => setSelectedSkill(record.skill_name),
-                style: {
-                  cursor: "pointer",
-                  background: record.skill_name === selectedSkill ? "#e6f4ff" : undefined,
-                },
               })}
               columns={[
                 { title: "技能名称", dataIndex: "skill_name", key: "skill_name", width: 130, align: "center", render: (v: string) => formatSkillName(v) },
@@ -1111,12 +1129,11 @@ export default function CronJobOverviewPage() {
               loading={managersLoading}
               size="small"
               pagination={false}
+              rowClassName={(record) =>
+                record.user_id === selectedManager ? styles.drillSelectedRow : styles.drillRow
+              }
               onRow={(record) => ({
                 onClick: () => setSelectedManager(record.user_id),
-                style: {
-                  cursor: "pointer",
-                  background: record.user_id === selectedManager ? "#e6f4ff" : undefined,
-                },
               })}
               columns={[
                 { title: "客户经理", dataIndex: "user_name", key: "user_name", width: 80, align: "center" },
@@ -1154,6 +1171,7 @@ export default function CronJobOverviewPage() {
               loading={customersLoading}
               size="small"
               pagination={false}
+              rowClassName={styles.drillHoverRow}
               columns={[
                 { title: "客户名称", dataIndex: "customer_name", key: "customer_name", width: 90, align: "center" },
                 { title: "客户ID", dataIndex: "customer_id", key: "customer_id", width: 75, align: "center" },
