@@ -57,7 +57,7 @@ export const marketMcpApi = {
    */
   uploadMCP: async (
     data: MCPUploadRequest
-  ): Promise<MarketMCPItem> => {
+  ): Promise<UploadMCPResponse> => {
     const formData = new FormData();
     if (data.file) {
       formData.append("file", data.file);

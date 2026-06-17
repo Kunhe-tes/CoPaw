@@ -82,6 +82,7 @@ export default function MySkillsPage() {
     skillJson: Record<string, unknown>;
     skillMd: string;
     skillDirName?: string; // 技能目录名，用于同步整个目录
+    version?: string; // 用户工作区版本号，用于版本快照的 source_user_version
   } | null>(null);
 
   // Conflict rename modal for upload
@@ -491,6 +492,7 @@ export default function MySkillsPage() {
         skillJson,
         skillMd,
         skillDirName: skill.skill_name, // 传递目录名，用于同步整个目录
+        version: skill.version, // 传递用户工作区版本号
       });
       setPublishModalOpen(true);
     } catch (err) {

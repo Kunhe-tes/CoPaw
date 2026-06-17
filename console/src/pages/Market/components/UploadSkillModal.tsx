@@ -115,13 +115,15 @@ export default function UploadSkillModal({
       }
 
       // 成功
-      if (result.count > 0) {
+      if (result.version_unchanged) {
+        message.info({ content: "当前内容已是最新，无需重复上传", key: "upload" });
+      } else if (result.count > 0) {
         const actionText = overwrite ? "更新" : "导入";
         message.success({ content: `上传成功，${actionText} ${result.count} 个技能`, key: "upload" });
+        onSuccess();
       } else {
         message.info({ content: "未导入新技能，可能已存在", key: "upload" });
       }
-      onSuccess();
       onClose();
     } catch (err) {
       const errorMsg = err instanceof Error ? err.message : "上传失败";

@@ -117,11 +117,11 @@ export function PublishMCPModal({
         overwrite,
       });
       if (result.version_unchanged) {
-        message.warning("内容与市场最新版本一致，市场版本未增加");
+        message.info("当前内容已是最新，无需重复同步");
       } else {
         message.success("同步成功");
+        onSuccess();
       }
-      onSuccess();
     } catch (err) {
       // 尝试提取 409 冲突详情
       const conflict = extractConflictDetail(err);
