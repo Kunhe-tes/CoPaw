@@ -58,42 +58,8 @@ interface LoadSessionMessagesOptions {
   clearBeforeLoad: boolean;
   options: SessionOptions;
   setMessages: (messages: IAgentScopeRuntimeWebUIMessage[]) => void;
-  setSessions?: (sessions: IAgentScopeRuntimeWebUISession[]) => void;
-  getSessions?: () => IAgentScopeRuntimeWebUISession[];
   getCurrentSessionId: () => string | undefined;
   setSessionLoading?: (loading: boolean) => void;
-}
-
-type SessionWithBackendIdentity = IAgentScopeRuntimeWebUISession & {
-  realId?: string;
-};
-
-function getBackendIdentityKeys(
-  session: IAgentScopeRuntimeWebUISession,
-): string[] {
-  const candidate = session as SessionWithBackendIdentity;
-  return [candidate.id, candidate.realId].filter(
-    (value): value is string => Boolean(value),
-  );
-}
-
-export function mergeRecoveredSessionIntoList(
-  sessions: IAgentScopeRuntimeWebUISession[],
-  recoveredSession: IAgentScopeRuntimeWebUISession | undefined | null,
-): IAgentScopeRuntimeWebUISession[] {
-  if (!recoveredSession?.id) {
-    return sessions;
-  }
-
-  const recoveredKeys = getBackendIdentityKeys(recoveredSession);
-  const exists = sessions.some((session) =>
-    getBackendIdentityKeys(session).some((key) => recoveredKeys.includes(key)),
-  );
-  if (exists) {
-    return sessions;
-  }
-
-  return [recoveredSession, ...sessions];
 }
 
 async function loadSessionMessages({
@@ -101,8 +67,6 @@ async function loadSessionMessages({
   clearBeforeLoad,
   options,
   setMessages,
-  setSessions,
-  getSessions,
   getCurrentSessionId,
   setSessionLoading,
 }: LoadSessionMessagesOptions): Promise<boolean> {
@@ -143,16 +107,6 @@ async function loadSessionMessages({
     }
 
     const messages = session?.messages || [];
-    if (setSessions && getSessions) {
-      const currentSessions = getSessions();
-      const nextSessions = mergeRecoveredSessionIntoList(
-        currentSessions,
-        session,
-      );
-      if (nextSessions !== currentSessions) {
-        setSessions(nextSessions);
-      }
-    }
     setMessages(
       messages.map((item) => {
         return {
@@ -358,14 +312,6 @@ export const useChatAnywhereSessionLoader = () => {
     ChatAnywhereMessagesContext,
     (v) => v.setMessages,
   );
-  const setSessions = useContextSelector(
-    ChatAnywhereSessionsContext,
-    (v) => v.setSessions,
-  );
-  const getSessions = useContextSelector(
-    ChatAnywhereSessionsContext,
-    (v) => v.getSessions,
-  );
   const getCurrentSessionId = useContextSelector(
     ChatAnywhereSessionsContext,
     (v) => v.getCurrentSessionId,
@@ -381,8 +327,6 @@ export const useChatAnywhereSessionLoader = () => {
       clearBeforeLoad: true,
       options,
       setMessages,
-      setSessions,
-      getSessions,
       getCurrentSessionId,
       setSessionLoading,
     });
@@ -454,12 +398,10 @@ export const useChatAnywhereSessions = () => {
         clearBeforeLoad: false,
         options,
         setMessages,
-        setSessions,
-        getSessions,
         getCurrentSessionId,
       });
     },
-    [getCurrentSessionId, options, setMessages, setSessions, getSessions],
+    [getCurrentSessionId, options, setMessages],
   );
 
   return {
