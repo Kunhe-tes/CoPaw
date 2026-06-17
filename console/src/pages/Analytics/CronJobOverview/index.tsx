@@ -1147,7 +1147,7 @@ export default function CronJobOverviewPage() {
                   key: "last_click_time",
                   width: 100,
                   align: "center",
-                  render: (v: string) => (v ? dayjs(v).format("YYYY-MM-DD HH:mm") : "-"),
+                  render: (v: string) => (v ? dayjs(v).format("YYYY-MM-DD HH:mm:ss") : "-"),
                 },
               ]}
             />
