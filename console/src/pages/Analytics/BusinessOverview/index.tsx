@@ -669,6 +669,7 @@ export default function BusinessOverviewPage() {
   const [activeHasMore, setActiveHasMore] = useState(true);
   const [activeLoading, setActiveLoading] = useState(false);
   const activeLoadingRef = useRef(false);
+  const activeListRef = useRef<HTMLDivElement | null>(null);
   // 用户过滤类型：filtered(过滤IT人员) / all(全部用户)
   const [activeFilterType, setActiveFilterType] = useState<"filtered" | "all">("all");
   // 使用深度卡片默认隐藏
@@ -678,6 +679,7 @@ export default function BusinessOverviewPage() {
   const [skillsHasMore, setSkillsHasMore] = useState(true);
   const [skillsLoading, setSkillsLoading] = useState(false);
   const skillsLoadingRef = useRef(false);
+  const skillsListRef = useRef<HTMLDivElement | null>(null);
   const [errorSummaryData, setErrorSummaryData] = useState<ErrorSummary | null>(null);
   const [taskStatusSummary, setTaskStatusSummary] =
     useState<TaskStatusSummary | null>(null);
@@ -817,7 +819,8 @@ export default function BusinessOverviewPage() {
           );
           return [...previous, ...dedupedUsers];
         });
-        setActiveHasMore(mappedUsers.length === 10);
+        const loadedCount = append ? page * 10 : mappedUsers.length;
+        setActiveHasMore(loadedCount < (result.total || 0));
       } catch (error) {
         console.error("Failed to fetch active users:", error);
       } finally {
@@ -858,8 +861,8 @@ export default function BusinessOverviewPage() {
           setSkills(rows);
         }
 
-        // 如果返回的数据少于 pageSize，说明没有更多数据了
-        setSkillsHasMore(rows.length >= pageSize);
+        const loadedCount = append ? page * pageSize : rows.length;
+        setSkillsHasMore(loadedCount < (result.total || 0));
       } catch (error) {
         console.error("Failed to fetch skills:", error);
       } finally {
@@ -923,7 +926,10 @@ export default function BusinessOverviewPage() {
 
   useEffect(() => {
     fetchDashboard();
-    fetchSkills();
+    setSkills([]);
+    setSkillsPage(1);
+    setSkillsHasMore(true);
+    fetchSkills(1, false);
     fetchErrorSummary();
     fetchTaskStatusSummary();
     fetchDepthSummary();
@@ -939,6 +945,8 @@ export default function BusinessOverviewPage() {
   // 活跃用户请求独立处理，避免 activeFilterType 变化触发其他请求
   useEffect(() => {
     setActivePage(1);
+    setActiveHasMore(true);
+    setActiveUsers([]);
     fetchActiveUsers(1, false);
   }, [
     fetchActiveUsers,
@@ -1020,6 +1028,40 @@ export default function BusinessOverviewPage() {
     },
     [skillsHasMore, skillsPage, fetchSkills],
   );
+
+  useEffect(() => {
+    if (!skillsHasMore || skillsLoading || skills.length === 0) {
+      return;
+    }
+
+    const list = skillsListRef.current;
+    if (!list) {
+      return;
+    }
+
+    if (list.scrollHeight <= list.clientHeight + 4) {
+      const nextPage = skillsPage + 1;
+      setSkillsPage(nextPage);
+      fetchSkills(nextPage, true);
+    }
+  }, [fetchSkills, skills, skillsHasMore, skillsLoading, skillsPage]);
+
+  useEffect(() => {
+    if (!activeHasMore || activeLoading || activeUsers.length === 0) {
+      return;
+    }
+
+    const list = activeListRef.current;
+    if (!list) {
+      return;
+    }
+
+    if (list.scrollHeight <= list.clientHeight + 4) {
+      const nextPage = activePage + 1;
+      setActivePage(nextPage);
+      fetchActiveUsers(nextPage, true);
+    }
+  }, [activeHasMore, activeLoading, activePage, activeUsers, fetchActiveUsers]);
 
   const disabledDate = (current: Dayjs | null): boolean =>
     !!current && current.isAfter(dayjs().startOf("day"), "day");
@@ -1438,7 +1480,11 @@ export default function BusinessOverviewPage() {
             <span>结果查看</span>
             <span>主动调用</span>
           </div>
-          <div className={styles.rankList} onScroll={handleActiveScroll}>
+          <div
+            ref={activeListRef}
+            className={styles.rankList}
+            onScroll={handleActiveScroll}
+          >
             {activeLoading && activeUsers.length === 0 ? (
               <div className={styles.listFootnote}>加载中...</div>
             ) : activeUsers.length === 0 ? (
@@ -1622,7 +1668,11 @@ export default function BusinessOverviewPage() {
             <span>技能</span>
             <span>调用次数</span>
           </div>
-          <div className={styles.rankList} onScroll={handleSkillsScroll}>
+          <div
+            ref={skillsListRef}
+            className={styles.rankList}
+            onScroll={handleSkillsScroll}
+          >
             {skillsLoading && skills.length === 0 ? (
               <div className={styles.listFootnote}>加载中...</div>
             ) : skills.length === 0 ? (

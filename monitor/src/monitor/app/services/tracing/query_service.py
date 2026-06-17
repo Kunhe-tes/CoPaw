@@ -1932,18 +1932,22 @@ class TracingQueryService:  # pylint: disable=too-many-public-methods
         end_date: datetime,
         bbk_ids: Optional[str] = None,
     ) -> int:
-        """获取技能调用总次数（去重 trace_id，与排行榜口径一致）."""
+        """获取技能调用总次数（按技能分组后累加，和排行榜口径一致）."""
         bbk_filter_sql, bbk_filter_params = build_bbk_in_filter(bbk_ids)
         if source_id == "all":
             exclude_placeholders = ", ".join(["%s"] * len(EXCLUDED_SOURCE_IDS))
             query = f"""
-                SELECT COUNT(DISTINCT trace_id) as total
-                FROM swe_tracing_spans
-                WHERE start_time >= %s AND start_time <= %s
-                  AND skill_name IS NOT NULL
-                  AND bbk_id IS NOT NULL AND bbk_id != ''
-                  AND source_id NOT IN ({exclude_placeholders})
-                  AND user_id != 'default'{bbk_filter_sql}
+                SELECT COALESCE(SUM(skill_count), 0) as total
+                FROM (
+                    SELECT skill_name, COUNT(DISTINCT trace_id) as skill_count
+                    FROM swe_tracing_spans
+                    WHERE start_time >= %s AND start_time <= %s
+                      AND skill_name IS NOT NULL
+                      AND bbk_id IS NOT NULL AND bbk_id != ''
+                      AND source_id NOT IN ({exclude_placeholders})
+                      AND user_id != 'default'{bbk_filter_sql}
+                    GROUP BY skill_name
+                ) skill_totals
             """
             params = (
                 start_date,
@@ -1954,12 +1958,16 @@ class TracingQueryService:  # pylint: disable=too-many-public-methods
             row = await self._db.fetch_one(query, params)
         else:
             query = f"""
-                SELECT COUNT(DISTINCT trace_id) as total
-                FROM swe_tracing_spans
-                WHERE source_id = %s AND start_time >= %s AND start_time <= %s
-                  AND skill_name IS NOT NULL
-                  AND bbk_id IS NOT NULL AND bbk_id != ''
-                  AND user_id != 'default'{bbk_filter_sql}
+                SELECT COALESCE(SUM(skill_count), 0) as total
+                FROM (
+                    SELECT skill_name, COUNT(DISTINCT trace_id) as skill_count
+                    FROM swe_tracing_spans
+                    WHERE source_id = %s AND start_time >= %s AND start_time <= %s
+                      AND skill_name IS NOT NULL
+                      AND bbk_id IS NOT NULL AND bbk_id != ''
+                      AND user_id != 'default'{bbk_filter_sql}
+                    GROUP BY skill_name
+                ) skill_totals
             """
             params = (source_id, start_date, end_date, *bbk_filter_params)
             row = await self._db.fetch_one(query, params)
