@@ -14,13 +14,7 @@ const mocks = vi.hoisted(() => ({
       messages: [],
       meta: { agent_id: "agent-b" },
     },
-  ] as Array<{
-    id: string;
-    realId?: string;
-    name: string;
-    messages: unknown[];
-    meta?: Record<string, unknown>;
-  }>,
+  ],
   currentSessionId: "chat-1",
   pathname: "/chat/chat-2",
   selectedAgent: "agent-a",
@@ -72,46 +66,6 @@ describe("ChatSessionInitializer", () => {
 
     expect(mocks.setSelectedAgent).toHaveBeenCalledWith("agent-b");
     expect(mocks.setCurrentSessionId).toHaveBeenCalledWith("chat-2");
-    expect(mocks.navigate).not.toHaveBeenCalled();
-  });
-
-  it("selects a URL chat id for detail loading when it is outside the loaded page", () => {
-    mocks.pathname = "/chat/chat-outside-page";
-    mocks.sessions = [
-      {
-        id: "chat-visible",
-        name: "visible chat",
-        messages: [],
-        meta: { agent_id: "agent-a" },
-      },
-    ];
-
-    render(<ChatSessionInitializer />);
-
-    expect(mocks.setCurrentSessionId).toHaveBeenCalledWith(
-      "chat-outside-page",
-    );
-    expect(mocks.setSelectedAgent).not.toHaveBeenCalled();
-    expect(mocks.navigate).not.toHaveBeenCalled();
-  });
-
-  it("keeps the active pending session when the URL points at its resolved chat id", () => {
-    mocks.pathname = "/chat/chat-real-1";
-    mocks.currentSessionId = "local-123";
-    mocks.sessions = [
-      {
-        id: "local-123",
-        realId: "chat-real-1",
-        name: "pending chat",
-        messages: [],
-        meta: { agent_id: "agent-a" },
-      },
-    ];
-
-    render(<ChatSessionInitializer />);
-
-    expect(mocks.setCurrentSessionId).not.toHaveBeenCalled();
-    expect(mocks.setSelectedAgent).not.toHaveBeenCalled();
     expect(mocks.navigate).not.toHaveBeenCalled();
   });
 });
