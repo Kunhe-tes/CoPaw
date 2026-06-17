@@ -449,7 +449,7 @@ class TracingQueryService:  # pylint: disable=too-many-public-methods
         """
         skills_query = f"""
             SELECT CASE WHEN bbk_id = 'V00' THEN '100' ELSE bbk_id END AS bbk_id,
-                   COUNT(*) AS value
+                   COUNT(DISTINCT trace_id) AS value
             FROM swe_tracing_spans
             WHERE {span_where}
               AND skill_name IS NOT NULL
@@ -1885,6 +1885,7 @@ class TracingQueryService:  # pylint: disable=too-many-public-methods
                 FROM swe_tracing_spans
                 WHERE start_time >= %s AND start_time <= %s
                   AND skill_name IS NOT NULL
+                  AND bbk_id IS NOT NULL AND bbk_id != ''
                   AND source_id NOT IN ({exclude_placeholders})
                   AND user_id != 'default'{bbk_filter_sql}
                 GROUP BY skill_name
@@ -1906,6 +1907,7 @@ class TracingQueryService:  # pylint: disable=too-many-public-methods
                 FROM swe_tracing_spans
                 WHERE source_id = %s AND start_time >= %s AND start_time <= %s
                   AND skill_name IS NOT NULL
+                  AND bbk_id IS NOT NULL AND bbk_id != ''
                   AND user_id != 'default'{bbk_filter_sql}
                 GROUP BY skill_name
                 ORDER BY count DESC
@@ -1939,6 +1941,7 @@ class TracingQueryService:  # pylint: disable=too-many-public-methods
                 FROM swe_tracing_spans
                 WHERE start_time >= %s AND start_time <= %s
                   AND skill_name IS NOT NULL
+                  AND bbk_id IS NOT NULL AND bbk_id != ''
                   AND source_id NOT IN ({exclude_placeholders})
                   AND user_id != 'default'{bbk_filter_sql}
             """
@@ -1955,6 +1958,7 @@ class TracingQueryService:  # pylint: disable=too-many-public-methods
                 FROM swe_tracing_spans
                 WHERE source_id = %s AND start_time >= %s AND start_time <= %s
                   AND skill_name IS NOT NULL
+                  AND bbk_id IS NOT NULL AND bbk_id != ''
                   AND user_id != 'default'{bbk_filter_sql}
             """
             params = (source_id, start_date, end_date, *bbk_filter_params)
@@ -2147,6 +2151,7 @@ class TracingQueryService:  # pylint: disable=too-many-public-methods
             base_where = f"""
                 start_time >= %s AND start_time <= %s
                 AND skill_name IS NOT NULL
+                AND bbk_id IS NOT NULL AND bbk_id != ''
                 AND source_id NOT IN ({exclude_placeholders})
                 AND user_id != 'default'{bbk_filter_sql}
             """
@@ -2160,6 +2165,7 @@ class TracingQueryService:  # pylint: disable=too-many-public-methods
             base_where = f"""
                 source_id = %s AND start_time >= %s AND start_time <= %s
                 AND skill_name IS NOT NULL
+                AND bbk_id IS NOT NULL AND bbk_id != ''
                 AND user_id != 'default'{bbk_filter_sql}
             """
             count_params = [
