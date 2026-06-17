@@ -124,7 +124,7 @@ async def test_external_approve_submits_console_approve_message() -> None:
 
     with tenant_context(tenant_id="tenant-a", source_id="source-a"):
         pending = await service.create_pending(
-            session_id="cron-task:job-1",
+            session_id="session-1",
             user_id="user-1",
             channel="console",
             tool_name="execute_shell_command",
@@ -150,16 +150,16 @@ async def test_external_approve_submits_console_approve_message() -> None:
 
     assert result.submitted is True
     assert result.reconnect is True
-    assert result.chat_id == "chat:cron-task:job-1"
+    assert result.chat_id == "chat:session-1"
     assert workspace.chat_manager.calls[0]["channel"] == "console"
 
     attach = workspace.task_tracker.attach_calls[0]
     payload = attach["payload"]
-    assert attach["run_key"] == "chat:cron-task:job-1"
+    assert attach["run_key"] == "chat:session-1"
     assert payload["channel_id"] == "console"
     assert payload["sender_id"] == "user-1"
     assert payload["content_parts"][0].text == f"/approve {pending.request_id}"
-    assert payload["meta"]["session_id"] == "cron-task:job-1"
+    assert payload["meta"]["session_id"] == "session-1"
     assert payload["meta"]["source_id"] == "source-a"
     assert payload["meta"]["approval_request_id"] == pending.request_id
     assert payload["meta"]["approval_source_channel"] == "zhaohu"
@@ -200,7 +200,7 @@ async def test_external_decision_does_not_resubmit_completed_approval() -> None:
 
 
 @pytest.mark.asyncio
-async def test_pending_notification_is_limited_to_cron_sessions() -> None:
+async def test_pending_notification_applies_to_all_sessions() -> None:
     service = ApprovalService()
     workspace = _workspace()
 
@@ -230,5 +230,6 @@ async def test_pending_notification_is_limited_to_cron_sessions() -> None:
         )
 
     zhaohu = workspace.channel_manager.zhaohu
-    assert len(zhaohu.pending_calls) == 1
+    assert len(zhaohu.pending_calls) == 2
     assert zhaohu.pending_calls[0]["request_id"] == cron_pending.request_id
+    assert zhaohu.pending_calls[1]["request_id"] == normal_pending.request_id

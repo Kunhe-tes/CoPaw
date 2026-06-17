@@ -52,11 +52,6 @@ class ExternalApprovalSubmission:
     reconnect: bool = False
     is_new_run: bool = False
 
-
-def _is_cron_approval(pending: PendingApproval) -> bool:
-    return pending.session_id.startswith("cron-task:")
-
-
 def _command_for_decision(
     decision: ExternalApprovalDecision,
     request_id: str,
@@ -154,8 +149,6 @@ async def notify_cron_approval_pending(
     workflow boundary in place so the real rich card implementation can fill
     it later.
     """
-    if not _is_cron_approval(pending):
-        return
     zhaohu = await _get_channel(channel_manager, ZHAOHU_CHANNEL)
     if zhaohu is None:
         return
@@ -192,8 +185,6 @@ async def notify_cron_approval_result(
     source_channel: str,
 ) -> None:
     """Notify zhaohu about the submitted approval result."""
-    if not _is_cron_approval(pending):
-        return
     channel_manager = getattr(workspace, "channel_manager", None)
     zhaohu = await _get_channel(channel_manager, ZHAOHU_CHANNEL)
     if zhaohu is None:
