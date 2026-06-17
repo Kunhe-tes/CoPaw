@@ -62,6 +62,10 @@ const ChatSessionInitializer: React.FC = () => {
       setCurrentSessionId(matching.id);
     }
 
+    if (!matching && currentSessionIdRef.current !== resolvedSessionId) {
+      setCurrentSessionId(resolvedSessionId);
+    }
+
     if (
       requestedSessionId &&
       resolvedSessionId !== requestedSessionId &&
