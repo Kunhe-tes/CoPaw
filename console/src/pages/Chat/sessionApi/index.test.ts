@@ -59,10 +59,14 @@ describe("SessionApi identity mapping", () => {
       currentSessionId?: string;
       currentUserId?: string;
       currentChannel?: string;
+      __env__?: {
+        chatSessionPageSize?: number | string;
+      };
     };
     runtimeWindow.currentSessionId = undefined;
     runtimeWindow.currentUserId = undefined;
     runtimeWindow.currentChannel = undefined;
+    runtimeWindow.__env__ = {};
   });
 
   it("keeps the logical session id stable after the first reply resolves a real chat id", async () => {
@@ -1086,6 +1090,73 @@ describe("SessionApi identity mapping", () => {
     expect(apiMocks.listChatsPage).toHaveBeenNthCalledWith(2, {
       page_size: 100,
       cursor: "cursor-1",
+    });
+  });
+
+  it("uses runtime configured chat session page size", async () => {
+    const runtimeWindow = window as Window & {
+      __env__?: {
+        chatSessionPageSize?: number | string;
+      };
+    };
+    runtimeWindow.__env__ = {
+      chatSessionPageSize: "42",
+    };
+    const sessionApi = new SessionApi();
+    apiMocks.listChatsPage
+      .mockResolvedValueOnce({
+        items: [],
+        total: 100,
+        page: 1,
+        page_size: 42,
+        has_more: true,
+        next_cursor: "cursor-1",
+      })
+      .mockResolvedValueOnce({
+        items: [],
+        total: 100,
+        page: 2,
+        page_size: 42,
+        has_more: false,
+        next_cursor: null,
+      });
+
+    await sessionApi.getSessionList();
+    await sessionApi.loadMoreSessions();
+
+    expect(apiMocks.listChatsPage).toHaveBeenNthCalledWith(1, {
+      page_size: 42,
+      cursor: null,
+    });
+    expect(apiMocks.listChatsPage).toHaveBeenNthCalledWith(2, {
+      page_size: 42,
+      cursor: "cursor-1",
+    });
+  });
+
+  it("falls back to the default page size for invalid runtime config", async () => {
+    const runtimeWindow = window as Window & {
+      __env__?: {
+        chatSessionPageSize?: number | string;
+      };
+    };
+    runtimeWindow.__env__ = {
+      chatSessionPageSize: "invalid",
+    };
+    const sessionApi = new SessionApi();
+    apiMocks.listChatsPage.mockResolvedValue({
+      items: [],
+      total: 0,
+      page: 1,
+      page_size: 100,
+      has_more: false,
+    });
+
+    await sessionApi.getSessionList();
+
+    expect(apiMocks.listChatsPage).toHaveBeenCalledWith({
+      page_size: 100,
+      cursor: null,
     });
   });
 

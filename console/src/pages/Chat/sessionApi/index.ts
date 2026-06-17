@@ -58,7 +58,7 @@ const TASK_SESSION_KIND = "task";
 const TASK_RUN_SECTION_STEP = "step";
 const TASK_RUN_SECTION_FINAL = "final";
 const SESSION_TITLE_GENERATED_META_KEY = "session_title_generated";
-const SESSION_PAGE_SIZE = 100;
+const DEFAULT_SESSION_PAGE_SIZE = 100;
 
 // ---------------------------------------------------------------------------
 // Window globals
@@ -71,6 +71,18 @@ interface CustomWindow extends Window {
 }
 
 declare const window: CustomWindow;
+
+function getSessionPageSize(): number {
+  const configured = window.__env__?.chatSessionPageSize;
+  const pageSize =
+    typeof configured === "number"
+      ? configured
+      : Number.parseInt(String(configured || ""), 10);
+
+  return Number.isInteger(pageSize) && pageSize > 0
+    ? pageSize
+    : DEFAULT_SESSION_PAGE_SIZE;
+}
 
 // ---------------------------------------------------------------------------
 // Local helper types
@@ -1371,7 +1383,7 @@ export class SessionApi implements IAgentScopeRuntimeWebUISessionAPI {
 
         const [chatPage, jobsResult] = await Promise.all([
           api.listChatsPage({
-            page_size: SESSION_PAGE_SIZE,
+            page_size: getSessionPageSize(),
             cursor: null,
           }),
           cronJobApi.listCronJobs().catch(() => null),
@@ -1532,9 +1544,10 @@ export class SessionApi implements IAgentScopeRuntimeWebUISessionAPI {
     }
 
     const nextPage = this.sessionPage + 1;
+    const pageSize = getSessionPageSize();
     const paginationParams = this.nextSessionCursor
-      ? { page_size: SESSION_PAGE_SIZE, cursor: this.nextSessionCursor }
-      : { page: nextPage, page_size: SESSION_PAGE_SIZE };
+      ? { page_size: pageSize, cursor: this.nextSessionCursor }
+      : { page: nextPage, page_size: pageSize };
     this.sessionPageRequest = (async () => {
       try {
         const [chatPage, jobsResult] = await Promise.all([

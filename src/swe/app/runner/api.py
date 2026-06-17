@@ -365,8 +365,7 @@ async def list_chats(
     page_size: Optional[int] = Query(
         None,
         ge=1,
-        le=500,
-        description="Chats per page (maximum 500)",
+        description="Chats per page",
     ),
     cursor: Optional[str] = Query(
         None,
