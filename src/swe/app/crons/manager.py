@@ -1285,12 +1285,16 @@ class CronManager:  # pylint: disable=too-many-public-methods
         meta = spec.meta or {}
         state = self.get_state(spec.id)
         creator_user_id = meta.get("creator_user_id")
+        visible_in_my_tasks = bool(
+            spec.task_type in {"agent", "text"}
+            and creator_user_id
+            and creator_user_id == user_id
+        )
+        pause_reason = meta.get("pause_reason")
+        if visible_in_my_tasks and not pause_reason and not spec.enabled:
+            pause_reason = MANUAL_PAUSE_REASON
         return CronTaskView(
-            visible_in_my_tasks=bool(
-                spec.task_type in {"agent", "text"}
-                and creator_user_id
-                and creator_user_id == user_id,
-            ),
+            visible_in_my_tasks=visible_in_my_tasks,
             chat_id=meta.get("task_chat_id"),
             session_id=meta.get("task_session_id"),
             has_scheduled_result=bool(
@@ -1304,8 +1308,8 @@ class CronManager:  # pylint: disable=too-many-public-methods
             ),
             last_scheduled_run_at=meta.get("task_last_scheduled_run_at"),
             is_running=state.last_status == "running",
-            is_paused=bool(meta.get("pause_reason")),
-            pause_reason=meta.get("pause_reason"),
+            is_paused=bool(pause_reason),
+            pause_reason=pause_reason,
             auto_paused_at=meta.get("auto_paused_at"),
         )
 
