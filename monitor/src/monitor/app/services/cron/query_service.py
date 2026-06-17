@@ -83,6 +83,25 @@ def convert_row_times_direct(row: dict, time_fields: List[str]) -> dict:
 class QueryService:
     """Service for querying cron data."""
 
+    # 分行综合排行仅展示的 10 项技能（同时匹配英文标识和中文名称）
+    _ALLOWED_BRANCH_SKILLS: set[str] = {
+        "insurance_mkt",
+        "保险营销客户分析技能",
+        "deposit_scale_growth_skill",
+        "存款规模增长与产品配置技能",
+        "fund_redeem_monitor",
+        "基金赎回实时监控技能",
+        "lc_breaking",
+        "单一持仓理财/定期客户破冰方案",
+        "global-market-report",
+        "全球市场复盘报告",
+        "存款到期客户经营方案技能",
+        "高AUM理财低收益客户调仓技能",
+        "基金亏损客户关怀陪伴文案",
+        "智能推荐保险计划书",
+        "黄金持仓客户陪伴技能",
+    }
+
     def __init__(self) -> None:
         """Initialize query service."""
         pass
@@ -2563,6 +2582,43 @@ class QueryService:
         skill_read[sk] = 0
         skill_error[sk] = 0
 
+    @staticmethod
+    def _parse_skills_used(value: Any) -> Optional[list]:
+        """Parse skills_used field into a list of skill name strings.
+
+        Returns None if the value cannot be parsed into a valid list.
+        """
+        if isinstance(value, str):
+            try:
+                value = json.loads(value)
+            except (TypeError, ValueError):
+                return None
+        if not isinstance(value, list):
+            return None
+        return value
+
+    @staticmethod
+    def _count_skill_execution(
+        skill_jobs: dict,
+        skill_total: dict,
+        skill_success: dict,
+        skill_read: dict,
+        skill_error: dict,
+        sk: str,
+        job_id: str,
+        status: str,
+        is_read: bool,
+    ) -> None:
+        """Count a single skill execution in the aggregation dicts."""
+        skill_total[sk] += 1
+        skill_jobs[sk].add(job_id)
+        if status == "success":
+            skill_success[sk] += 1
+        if is_read:
+            skill_read[sk] += 1
+        if status in ("error", "timeout", "cancelled"):
+            skill_error[sk] += 1
+
     async def get_branch_skills(
         self,
         bbk_id: str,
@@ -2611,13 +2667,8 @@ class QueryService:
         skill_error: dict[str, int] = {}
 
         for row in rows:
-            skills = row["skills_used"]
-            if isinstance(skills, str):
-                try:
-                    skills = json.loads(skills)
-                except (TypeError, ValueError):
-                    continue
-            if not isinstance(skills, list):
+            skills = self._parse_skills_used(row["skills_used"])
+            if not skills:
                 continue
             job_id = row["job_id"]
             status = (row["status"] or "").lower()
@@ -2625,6 +2676,8 @@ class QueryService:
             for sk in skills:
                 sk = str(sk).strip() if sk else ""
                 if not sk:
+                    continue
+                if sk not in self._ALLOWED_BRANCH_SKILLS:
                     continue
                 if sk not in skill_jobs:
                     self._init_skill_dicts(
@@ -2635,14 +2688,17 @@ class QueryService:
                         skill_error,
                         sk,
                     )
-                skill_total[sk] += 1
-                skill_jobs[sk].add(job_id)
-                if status == "success":
-                    skill_success[sk] += 1
-                if is_read:
-                    skill_read[sk] += 1
-                if status in ("error", "timeout", "cancelled"):
-                    skill_error[sk] += 1
+                self._count_skill_execution(
+                    skill_jobs,
+                    skill_total,
+                    skill_success,
+                    skill_read,
+                    skill_error,
+                    sk,
+                    job_id,
+                    status,
+                    is_read,
+                )
 
         items: list[BranchSkillItem] = []
         for skill_name, jobs in skill_jobs.items():
@@ -2680,8 +2736,10 @@ class QueryService:
     ) -> BranchSkillManagerResponse:
         """获取分行+技能的客户经理维度数据。
 
-        从 swe_html_preview_click_events 出发，通过 cron_executions
-        联结 traces，筛选 skills_used 包含指定技能的行，按客户经理聚合。
+        从 swe_cron_executions 出发，联结 jobs 获取 tenant_name，
+        联结 traces 筛选技能，LEFT JOIN click_events 统计点击指标。
+        无点击记录时 plan/insight/phone 计数为 0，last_click_time 为 None。
+        user_name 取自 swe_cron_jobs.tenant_name。
         """
         db = get_db_connection()
 
@@ -2689,32 +2747,45 @@ class QueryService:
         start_str = start_date or start_time.strftime("%Y-%m-%d")
         end_str = end_date or end_time.strftime("%Y-%m-%d")
 
-        source_where = " AND c.source_id = %s" if source_id else ""
+        source_where = " AND j.source_id = %s" if source_id else ""
+        click_source_on = " AND c.source_id = %s" if source_id else ""
 
         sql = f"""
             SELECT
-                c.user_id,
-                c.user_id AS user_name,
+                j.tenant_id AS user_id,
+                MAX(j.tenant_name) AS user_name,
                 COUNT(DISTINCT CASE WHEN e.is_read = 1 THEN e.id END) AS read_count,
                 COUNT(DISTINCT CASE WHEN c.button_type = 'plan' THEN c.id END) AS plan_count,
                 COUNT(DISTINCT CASE WHEN c.button_type = 'insight' THEN c.id END) AS insight_count,
                 COUNT(DISTINCT CASE WHEN c.button_type = 'phone' THEN c.id END) AS phone_count,
                 MAX(c.clicked_at) AS last_click_time
-            FROM swe_html_preview_click_events c
-            JOIN swe_cron_executions e ON c.cron_task_id = e.job_id
+            FROM swe_cron_executions e
+            JOIN swe_cron_jobs j ON e.job_id COLLATE utf8mb4_unicode_ci = j.id
             JOIN swe_tracing_traces t ON e.trace_id COLLATE utf8mb4_unicode_ci = t.trace_id
-            WHERE c.bbk_id = %s
+            LEFT JOIN swe_html_preview_click_events c
+                ON c.cron_task_id COLLATE utf8mb4_unicode_ci = e.job_id
+                AND c.clicked_at >= %s AND c.clicked_at <= %s
+                {click_source_on}
+            WHERE j.bbk_id = %s
+              AND e.actual_time >= %s AND e.actual_time <= %s
               AND t.skills_used IS NOT NULL
               AND JSON_CONTAINS(t.skills_used, JSON_QUOTE(%s))
-              AND c.clicked_at >= %s AND c.clicked_at <= %s
               AND t.session_id LIKE 'cron-task%%'
               {source_where}
-            GROUP BY c.user_id
+            GROUP BY j.tenant_id
             ORDER BY read_count DESC
         """
-        params: list = [bbk_id, skill_name, start_time, end_time]
+        params: list = [
+            start_time,
+            end_time,
+            bbk_id,
+            start_time,
+            end_time,
+            skill_name,
+        ]
         if source_id:
-            params.append(source_id)
+            params.insert(2, source_id)  # click_source_on placeholder
+            params.append(source_id)  # source_where placeholder
         rows = await db.fetch_all(sql, tuple(params))
 
         items: list[BranchSkillManagerItem] = []
@@ -2776,7 +2847,7 @@ class QueryService:
                 MAX(CASE WHEN c.button_type = 'phone' THEN 1 ELSE 0 END) AS clicked_phone,
                 MAX(c.clicked_at) AS click_time
             FROM swe_html_preview_click_events c
-            JOIN swe_cron_executions e ON c.cron_task_id = e.job_id
+            JOIN swe_cron_executions e ON c.cron_task_id COLLATE utf8mb4_unicode_ci = e.job_id
             JOIN swe_tracing_traces t ON e.trace_id COLLATE utf8mb4_unicode_ci = t.trace_id
             WHERE c.bbk_id = %s
               AND c.user_id = %s
