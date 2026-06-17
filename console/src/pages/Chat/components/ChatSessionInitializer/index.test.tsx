@@ -68,4 +68,21 @@ describe("ChatSessionInitializer", () => {
     expect(mocks.setCurrentSessionId).toHaveBeenCalledWith("chat-2");
     expect(mocks.navigate).not.toHaveBeenCalled();
   });
+
+  it("selects a deep-linked session that is not in the current page", () => {
+    mocks.pathname = "/chat/chat-101";
+
+    render(<ChatSessionInitializer />);
+
+    expect(mocks.setCurrentSessionId).toHaveBeenCalledWith("chat-101");
+  });
+
+  it("does not replace an active local pending session during real id resolution", () => {
+    mocks.currentSessionId = "1777001065201000";
+    mocks.pathname = "/chat/chat-real-1";
+
+    render(<ChatSessionInitializer />);
+
+    expect(mocks.setCurrentSessionId).not.toHaveBeenCalled();
+  });
 });
