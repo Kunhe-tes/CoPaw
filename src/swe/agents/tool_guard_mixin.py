@@ -1472,6 +1472,17 @@ class ToolGuardMixin:
             result=guard_result,
             extra=extra,
         )
+        try:
+            from swe.app.approvals import notify_cron_approval_pending
+
+            await notify_cron_approval_pending(
+                pending_request,
+                channel_manager=self._request_context.get("channel_manager"),
+            )
+        except Exception:
+            logger.exception(
+                "Tool guard: failed to notify cron approval request",
+            )
 
         guardians = list(
             {f.guardian for f in guard_result.findings if f.guardian},

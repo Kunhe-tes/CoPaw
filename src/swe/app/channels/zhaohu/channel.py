@@ -565,6 +565,24 @@ class ZhaohuChannel(BaseChannel):
             )
             return (-1, "request failed")
 
+    async def send_cron_approval_card(
+        self,
+        **_: object,
+    ) -> tuple[int, str]:
+        """Placeholder for sending cron approval rich cards.
+
+        The approval workflow is wired first; the actual Zhaohu card format
+        and callback binding will be implemented separately.
+        """
+        return (0, "noop")
+
+    async def send_cron_approval_result(
+        self,
+        **_: object,
+    ) -> tuple[int, str]:
+        """Placeholder for sending cron approval result notifications."""
+        return (0, "noop")
+
     def _build_claw_url(
         self,
         chat_id: str,

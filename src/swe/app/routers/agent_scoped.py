@@ -80,6 +80,7 @@ def create_agent_scoped_router() -> APIRouter:
     middleware is applied. Agent namespace is per-tenant.
     """
     from .agent import router as agent_router
+    from .approvals import router as approvals_router
     from .skills import router as skills_router
     from .tools import router as tools_router
     from .config import router as config_router
@@ -110,6 +111,7 @@ def create_agent_scoped_router() -> APIRouter:
     # /agents/{agentId}/tools/* -> tools_router
     # /agents/{agentId}/workspace/* -> workspace_router
     router.include_router(scoped_agent_router)
+    router.include_router(approvals_router)
     router.include_router(chats_router)
     router.include_router(config_router)
     router.include_router(cron_router)
