@@ -53,6 +53,48 @@ const mockUserStats: UserStats = {
       avg_duration_ms: 520,
       error_count: 0,
     },
+    {
+      tool_name: "search_cust_infos",
+      mcp_server: "mcp-wmutcusmng-st",
+      count: 2,
+      avg_duration_ms: 610,
+      error_count: 0,
+    },
+    {
+      tool_name: "get_daily_must_call_list",
+      mcp_server: "AIGC数据",
+      count: 1,
+      avg_duration_ms: 420,
+      error_count: 0,
+    },
+    {
+      tool_name: "query_bbk_product_pool",
+      mcp_server: "智能体平台",
+      count: 1,
+      avg_duration_ms: 560,
+      error_count: 0,
+    },
+    {
+      tool_name: "query_customer_aum",
+      mcp_server: "智能体平台",
+      count: 1,
+      avg_duration_ms: 630,
+      error_count: 0,
+    },
+    {
+      tool_name: "slots",
+      mcp_server: "智能体平台",
+      count: 1,
+      avg_duration_ms: 320,
+      error_count: 0,
+    },
+    {
+      tool_name: "query_cust_labels",
+      mcp_server: "智能体平台",
+      count: 1,
+      avg_duration_ms: 380,
+      error_count: 0,
+    },
   ],
 };
 

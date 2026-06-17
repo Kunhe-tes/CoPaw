@@ -108,4 +108,70 @@ describe("UserStatsHeader resource filters", () => {
       name: "risk-check",
     });
   });
+
+  it("keeps skill tags neutral until they are selected", () => {
+    render(
+      <UserStatsHeader
+        userStats={userStats}
+        onResourceFilterChange={vi.fn()}
+      />,
+    );
+
+    expect(screen.getByText("risk-check · 2").className).not.toContain("blue");
+  });
+
+  it("collapses long usage lists and expands them on demand", () => {
+    const manySkillsStats: UserStats = {
+      ...userStats,
+      skills_used: Array.from({ length: 6 }, (_, index) => ({
+        skill_name: `skill-${index + 1}`,
+        count: index + 1,
+        avg_duration_ms: 100,
+      })),
+    };
+
+    render(
+      <UserStatsHeader
+        userStats={manySkillsStats}
+        onResourceFilterChange={vi.fn()}
+      />,
+    );
+
+    const expandButton = screen.getByRole("button", {
+      name: "展开技能标签",
+    });
+    expect(expandButton).toHaveAttribute("aria-expanded", "false");
+
+    fireEvent.click(expandButton);
+
+    const collapseButton = screen.getByRole("button", {
+      name: "收起技能标签",
+    });
+    expect(collapseButton).toHaveAttribute("aria-expanded", "true");
+  });
+
+  it("keeps a selected tag first when a long list is collapsed", () => {
+    const manySkillsStats: UserStats = {
+      ...userStats,
+      skills_used: Array.from({ length: 6 }, (_, index) => ({
+        skill_name: `skill-${index + 1}`,
+        count: index + 1,
+        avg_duration_ms: 100,
+      })),
+    };
+
+    render(
+      <UserStatsHeader
+        userStats={manySkillsStats}
+        activeResourceFilter={{ type: "skill", name: "skill-6" }}
+        onResourceFilterChange={vi.fn()}
+      />,
+    );
+
+    const skillButtons = screen.getAllByRole("button", {
+      name: /技能：skill-/,
+    });
+    expect(skillButtons[0]).toHaveAttribute("aria-pressed", "true");
+    expect(skillButtons[0]).toHaveAccessibleName("取消技能：skill-6");
+  });
 });
