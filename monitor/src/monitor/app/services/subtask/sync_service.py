@@ -17,7 +17,6 @@ from ....config.constant import (
     ASYNC_TASK_APP_KEY,
     ASYNC_TASK_ENV_TAG,
     ASYNC_TASK_API_KEY,
-    ASYNC_TASK_TIMEOUT_HOUR,
 )
 from .query_service import QueryService, get_query_service
 from ...models.subtask import (
@@ -37,6 +36,9 @@ BATCH_SIZE = 50
 
 # 有效状态值
 VALID_SUBTASK_STATUSES = ("SUC", "FAIL", "PART_SUC")
+
+# 兜底超时小时数
+FALLBACK_TIMEOUT_HOURS = 24
 
 
 class SyncService:
@@ -153,19 +155,19 @@ class SyncService:
         subtask: SubtaskModel,
         now: datetime,
     ) -> bool:
-        """Check if pending subtask exceeds 24 hours.
+        """Check if pending subtask exceeds fallback timeout hours.
 
         Args:
             subtask: Subtask to check
             now: Current datetime
 
         Returns:
-            True if exceeds 24 hours, False otherwise
+            True if exceeds timeout, False otherwise
         """
         if not subtask.created_at:
             return False
         hours_pending = (now - subtask.created_at).total_seconds() / 3600
-        return hours_pending > 24
+        return hours_pending > FALLBACK_TIMEOUT_HOURS
 
     async def _process_pending_subtask(
         self,
@@ -188,13 +190,14 @@ class SyncService:
             old_status=subtask.status,
         )
 
-        # 兜底检查：超过24小时的pending子任务
+        # 兜底检查：超过24小时的pending子任务标记TIMEOUT
         if self._check_pending_timeout(subtask, now):
             hours_pending = int(
                 (now - subtask.created_at).total_seconds() / 3600,
             )
             logger.warning(
-                "Subtask pending over 24h, marking TIMEOUT: task_id=%s hours=%d",
+                "Subtask pending over %dh, marking TIMEOUT: task_id=%s hours=%d",
+                FALLBACK_TIMEOUT_HOURS,
                 subtask.task_id[:20],
                 hours_pending,
             )
@@ -204,17 +207,16 @@ class SyncService:
                 "TIMEOUT",
             )
             detail.new_status = "TIMEOUT"
-            detail.error = "Pending over 24h, fallback TIMEOUT"
+            detail.error = (
+                f"Pending over {FALLBACK_TIMEOUT_HOURS}h, fallback TIMEOUT"
+            )
             return detail
 
         if not self._is_configured():
             detail.error = "API not configured"
             return detail
 
-        status, error = await self._query_task_status(
-            client,
-            subtask.task_id,
-        )
+        status, error = await self._query_task_status(client, subtask.task_id)
         if status:
             await self.query_service.update_subtask_status(
                 subtask.task_id,
@@ -236,96 +238,25 @@ class SyncService:
             )
         return detail
 
-    async def _process_non_pending_subtask(
-        self,
-        client: httpx.AsyncClient,
-        subtask: SubtaskModel,
-        is_timeout: bool,
-    ) -> SubtaskSyncDetailItem:
-        """Process subtask with FAIL/PART_SUC/TIMEOUT status.
-
-        Args:
-            client: HTTP client
-            subtask: Subtask to process
-            is_timeout: Whether current time exceeds timeout threshold
-
-        Returns:
-            SubtaskSyncDetailItem with processing result
-        """
-        detail = SubtaskSyncDetailItem(
-            task_id=subtask.task_id,
-            old_status=subtask.status,
-        )
-
-        if is_timeout:
-            detail.error = "Timeout, skip update for non-pending status"
-            logger.debug(
-                "Skip update for subtask %s (status=%s, timeout mode)",
-                subtask.task_id[:20],
-                subtask.status,
-            )
-            return detail
-
-        if not self._is_configured():
-            detail.error = "API not configured"
-            return detail
-
-        status, error = await self._query_task_status(
-            client,
-            subtask.task_id,
-        )
-        if status and status != subtask.status:
-            await self.query_service.update_subtask_status(
-                subtask.task_id,
-                subtask.trace_id,
-                status,
-            )
-            detail.new_status = status
-            logger.info(
-                "Updated subtask status: task_id=%s old=%s new=%s",
-                subtask.task_id[:20],
-                subtask.status,
-                status,
-            )
-        else:
-            detail.error = error or "Status unchanged"
-            logger.debug(
-                "Subtask status unchanged: task_id=%s status=%s",
-                subtask.task_id[:20],
-                subtask.status,
-            )
-        return detail
-
     async def sync_subtask_status(
         self,
         batch_size: int = BATCH_SIZE,
     ) -> SubtaskSyncStatusResponse:
         """Sync subtask statuses from external API.
 
-        查询范围：
-        1. 所有无状态的子任务（不限制时间）
-        2. 当天创建的 FAIL/PART_SUC/TIMEOUT 状态子任务
-
-        处理逻辑：
-        - NULL/空: 始终查询API并更新，超过24小时查询失败则标记TIMEOUT
-        - FAIL/PART_SUC/TIMEOUT: 超时→跳过，未超时→查询有变化才更新
+        只查询无状态的子任务，查询API并更新。
+        过24小时的pending子任务标记TIMEOUT（兜底）。
+        FAIL/PART_SUC/TIMEOUT/SUC 视为终态，不再查询。
         """
         now = datetime.now()
-        timeout_hour = ASYNC_TASK_TIMEOUT_HOUR
-        is_timeout = now.hour >= timeout_hour
 
-        logger.info(
-            "Starting subtask sync: time=%s timeout_hour=%d is_timeout=%s",
-            now.strftime("%H:%M"),
-            timeout_hour,
-            is_timeout,
-        )
+        logger.info("Starting subtask sync: time=%s", now.strftime("%H:%M"))
 
         subtasks = await self.query_service.get_today_pending_subtasks(
             limit=batch_size,
         )
         if not subtasks:
-            logger.debug("No subtasks to sync")
+            logger.debug("No pending subtasks to sync")
             return SubtaskSyncStatusResponse(
                 success=True,
                 total_scanned=0,
@@ -341,21 +272,7 @@ class SyncService:
         client = await self._get_client()
 
         for subtask in subtasks:
-            # 原状态为 NULL/空：始终查询API并更新
-            if subtask.status is None or subtask.status == "":
-                detail = await self._process_pending_subtask(
-                    client,
-                    subtask,
-                    now,
-                )
-            else:
-                # 原状态为 FAIL/PART_SUC/TIMEOUT
-                detail = await self._process_non_pending_subtask(
-                    client,
-                    subtask,
-                    is_timeout,
-                )
-
+            detail = await self._process_pending_subtask(client, subtask, now)
             response.details.append(detail)
             if detail.new_status:
                 response.total_updated += 1
@@ -370,21 +287,13 @@ class SyncService:
     ) -> ExecutionAsyncStatusResponse:
         """Sync execution async_status from subtask statuses.
 
-        根据时间阈值分类处理：
-        - 无subtasks → success
-        - 超时模式：全有状态才聚合，有pending跳过
-        - 正常模式：全SUC→success，否则跳过
+        只要子任务都有状态，即可聚合更新主任务状态：
+        - 没有 subtasks → success
+        - 存在 FAIL/PART_SUC/TIMEOUT → error
+        - 全部 SUC → success
+        - 存在无状态子任务 → 跳过，等待下次同步
         """
-        now = datetime.now()
-        timeout_hour = ASYNC_TASK_TIMEOUT_HOUR
-        is_timeout = now.hour >= timeout_hour
-
-        logger.info(
-            "Starting execution async_status sync: time=%s timeout_hour=%d is_timeout=%s",
-            now.strftime("%H:%M"),
-            timeout_hour,
-            is_timeout,
-        )
+        logger.info("Starting execution async_status sync")
 
         executions = await self.query_service.get_pending_executions(
             limit=batch_size,
@@ -415,7 +324,6 @@ class SyncService:
                     "Execution has no trace_id: id=%s",
                     execution_id,
                 )
-                # 无trace_id，标记success
                 await self.query_service.update_execution_async_status(
                     execution_id,
                     "success",
@@ -442,57 +350,37 @@ class SyncService:
                 )
                 continue
 
-            if is_timeout:
-                # 超时模式
-                # 检查是否有无状态子任务
-                has_pending = any(
-                    s.status is None or s.status == "" for s in subtasks
+            # 检查是否有无状态子任务
+            has_pending = any(
+                s.status is None or s.status == "" for s in subtasks
+            )
+            if has_pending:
+                logger.debug(
+                    "Execution has pending subtasks, skip: id=%s trace_id=%s",
+                    execution_id,
+                    trace_id[:20],
                 )
-                if has_pending:
-                    # 存在无状态子任务，不更新
-                    logger.debug(
-                        "Execution has pending subtasks, skip: id=%s trace_id=%s",
-                        execution_id,
-                        trace_id[:20],
-                    )
-                    continue
+                continue
 
-                # 全部有状态，按规则聚合
-                has_error = any(
-                    s.status in ("FAIL", "PART_SUC", "TIMEOUT")
-                    for s in subtasks
-                )
-                async_status = "error" if has_error else "success"
-                await self.query_service.update_execution_async_status(
-                    execution_id,
-                    async_status,
-                )
-                response.total_updated += 1
-                if async_status == "success":
-                    response.total_success += 1
-                else:
-                    response.total_error += 1
-                logger.info(
-                    "Updated execution async_status (timeout mode): id=%s status=%s",
-                    execution_id,
-                    async_status,
-                )
+            # 全部有状态，按规则聚合
+            has_error = any(
+                s.status in ("FAIL", "PART_SUC", "TIMEOUT") for s in subtasks
+            )
+            async_status = "error" if has_error else "success"
+            await self.query_service.update_execution_async_status(
+                execution_id,
+                async_status,
+            )
+            response.total_updated += 1
+            if async_status == "success":
+                response.total_success += 1
             else:
-                # 正常模式
-                # 只有全部 SUC 才更新
-                all_suc = all(s.status == "SUC" for s in subtasks)
-                if all_suc:
-                    await self.query_service.update_execution_async_status(
-                        execution_id,
-                        "success",
-                    )
-                    response.total_updated += 1
-                    response.total_success += 1
-                    logger.info(
-                        "Updated execution async_status (normal mode): id=%s status=success",
-                        execution_id,
-                    )
-                # 否则不更新，继续等待
+                response.total_error += 1
+            logger.info(
+                "Updated execution async_status: id=%s status=%s",
+                execution_id,
+                async_status,
+            )
 
         return response
 

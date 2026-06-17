@@ -227,8 +227,7 @@ class QueryService:
         """Get subtasks for status sync.
 
         查询范围：
-        1. 所有无状态的子任务（status IS NULL OR status = ''），不限制时间
-        2. 当天创建的 FAIL/PART_SUC/TIMEOUT 状态子任务
+        只查询无状态的子任务（status IS NULL OR status = ''），不限制时间
 
         Args:
             limit: Maximum number of records to return
@@ -239,25 +238,16 @@ class QueryService:
         if not self.db:
             return []
 
-        # 当天00:00:00
-        today_start = datetime.now().replace(
-            hour=0,
-            minute=0,
-            second=0,
-            microsecond=0,
-        )
-
         query = """
             SELECT id, trace_id, task_id, filename, task_type, custuid, cust_nm,
                    notification_content_wplus, notification_content_zhaohu,
                    status, info, created_at, updated_at
             FROM swe_cron_subtasks
-            WHERE (status IS NULL OR status = '')
-               OR (created_at >= %s AND status IN ('FAIL', 'PART_SUC', 'TIMEOUT'))
+            WHERE status IS NULL OR status = ''
             ORDER BY created_at ASC
             LIMIT %s
         """
-        rows = await self.db.fetch_all(query, (today_start, limit))
+        rows = await self.db.fetch_all(query, (limit,))
         return [
             SubtaskModel(
                 id=row.get("id"),
