@@ -224,10 +224,11 @@ class QueryService:
         self,
         limit: int = BATCH_SIZE,
     ) -> list[SubtaskModel]:
-        """Get subtasks created today for status sync.
+        """Get subtasks for status sync.
 
-        只查询当天创建的子任务（created_at >= 当天00:00:00），
-        排除已成功(SUC)的终态子任务。
+        查询范围：
+        1. 所有无状态的子任务（status IS NULL OR status = ''），不限制时间
+        2. 当天创建的 FAIL/PART_SUC/TIMEOUT 状态子任务
 
         Args:
             limit: Maximum number of records to return
@@ -251,8 +252,8 @@ class QueryService:
                    notification_content_wplus, notification_content_zhaohu,
                    status, info, created_at, updated_at
             FROM swe_cron_subtasks
-            WHERE created_at >= %s
-            AND (status IS NULL OR status = '' OR status != 'SUC')
+            WHERE (status IS NULL OR status = '')
+               OR (created_at >= %s AND status IN ('FAIL', 'PART_SUC', 'TIMEOUT'))
             ORDER BY created_at ASC
             LIMIT %s
         """

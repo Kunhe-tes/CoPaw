@@ -148,15 +148,166 @@ class SyncService:
             )
             return None, str(e)
 
+    def _check_pending_timeout(
+        self,
+        subtask: SubtaskModel,
+        now: datetime,
+    ) -> bool:
+        """Check if pending subtask exceeds 24 hours.
+
+        Args:
+            subtask: Subtask to check
+            now: Current datetime
+
+        Returns:
+            True if exceeds 24 hours, False otherwise
+        """
+        if not subtask.created_at:
+            return False
+        hours_pending = (now - subtask.created_at).total_seconds() / 3600
+        return hours_pending > 24
+
+    async def _process_pending_subtask(
+        self,
+        client: httpx.AsyncClient,
+        subtask: SubtaskModel,
+        now: datetime,
+    ) -> SubtaskSyncDetailItem:
+        """Process subtask with NULL/empty status.
+
+        Args:
+            client: HTTP client
+            subtask: Subtask to process
+            now: Current datetime
+
+        Returns:
+            SubtaskSyncDetailItem with processing result
+        """
+        detail = SubtaskSyncDetailItem(
+            task_id=subtask.task_id,
+            old_status=subtask.status,
+        )
+
+        # 兜底检查：超过24小时的pending子任务
+        if self._check_pending_timeout(subtask, now):
+            hours_pending = int(
+                (now - subtask.created_at).total_seconds() / 3600,
+            )
+            logger.warning(
+                "Subtask pending over 24h, marking TIMEOUT: task_id=%s hours=%d",
+                subtask.task_id[:20],
+                hours_pending,
+            )
+            await self.query_service.update_subtask_status(
+                subtask.task_id,
+                subtask.trace_id,
+                "TIMEOUT",
+            )
+            detail.new_status = "TIMEOUT"
+            detail.error = "Pending over 24h, fallback TIMEOUT"
+            return detail
+
+        if not self._is_configured():
+            detail.error = "API not configured"
+            return detail
+
+        status, error = await self._query_task_status(
+            client,
+            subtask.task_id,
+        )
+        if status:
+            await self.query_service.update_subtask_status(
+                subtask.task_id,
+                subtask.trace_id,
+                status,
+            )
+            detail.new_status = status
+            logger.info(
+                "Synced subtask status: task_id=%s status=%s",
+                subtask.task_id[:20],
+                status,
+            )
+        else:
+            detail.error = error or "Unknown error"
+            logger.warning(
+                "Failed to query task %s: %s",
+                subtask.task_id[:20],
+                detail.error,
+            )
+        return detail
+
+    async def _process_non_pending_subtask(
+        self,
+        client: httpx.AsyncClient,
+        subtask: SubtaskModel,
+        is_timeout: bool,
+    ) -> SubtaskSyncDetailItem:
+        """Process subtask with FAIL/PART_SUC/TIMEOUT status.
+
+        Args:
+            client: HTTP client
+            subtask: Subtask to process
+            is_timeout: Whether current time exceeds timeout threshold
+
+        Returns:
+            SubtaskSyncDetailItem with processing result
+        """
+        detail = SubtaskSyncDetailItem(
+            task_id=subtask.task_id,
+            old_status=subtask.status,
+        )
+
+        if is_timeout:
+            detail.error = "Timeout, skip update for non-pending status"
+            logger.debug(
+                "Skip update for subtask %s (status=%s, timeout mode)",
+                subtask.task_id[:20],
+                subtask.status,
+            )
+            return detail
+
+        if not self._is_configured():
+            detail.error = "API not configured"
+            return detail
+
+        status, error = await self._query_task_status(
+            client,
+            subtask.task_id,
+        )
+        if status and status != subtask.status:
+            await self.query_service.update_subtask_status(
+                subtask.task_id,
+                subtask.trace_id,
+                status,
+            )
+            detail.new_status = status
+            logger.info(
+                "Updated subtask status: task_id=%s old=%s new=%s",
+                subtask.task_id[:20],
+                subtask.status,
+                status,
+            )
+        else:
+            detail.error = error or "Status unchanged"
+            logger.debug(
+                "Subtask status unchanged: task_id=%s status=%s",
+                subtask.task_id[:20],
+                subtask.status,
+            )
+        return detail
+
     async def sync_subtask_status(
         self,
         batch_size: int = BATCH_SIZE,
     ) -> SubtaskSyncStatusResponse:
         """Sync subtask statuses from external API.
 
-        只查询当天创建的子任务，按原状态和时间阈值分类处理：
-        - SUC: 终态，跳过（查询已排除）
-        - NULL/空: 始终查询API并更新
+        查询范围：
+        1. 所有无状态的子任务（不限制时间）
+        2. 当天创建的 FAIL/PART_SUC/TIMEOUT 状态子任务
+
+        处理逻辑：
+        - NULL/空: 始终查询API并更新，超过24小时查询失败则标记TIMEOUT
         - FAIL/PART_SUC/TIMEOUT: 超时→跳过，未超时→查询有变化才更新
         """
         now = datetime.now()
@@ -170,12 +321,11 @@ class SyncService:
             is_timeout,
         )
 
-        # 只查询当天的子任务（排除SUC终态）
         subtasks = await self.query_service.get_today_pending_subtasks(
             limit=batch_size,
         )
         if not subtasks:
-            logger.debug("No today subtasks to sync")
+            logger.debug("No subtasks to sync")
             return SubtaskSyncStatusResponse(
                 success=True,
                 total_scanned=0,
@@ -191,89 +341,26 @@ class SyncService:
         client = await self._get_client()
 
         for subtask in subtasks:
-            detail = SubtaskSyncDetailItem(
-                task_id=subtask.task_id,
-                old_status=subtask.status,
-            )
-
             # 原状态为 NULL/空：始终查询API并更新
             if subtask.status is None or subtask.status == "":
-                if not self._is_configured():
-                    detail.error = "API not configured"
-                    response.total_failed += 1
-                else:
-                    status, error = await self._query_task_status(
-                        client,
-                        subtask.task_id,
-                    )
-                    if status:
-                        await self.query_service.update_subtask_status(
-                            subtask.task_id,
-                            subtask.trace_id,
-                            status,
-                        )
-                        detail.new_status = status
-                        response.total_updated += 1
-                        logger.info(
-                            "Synced subtask status: task_id=%s status=%s",
-                            subtask.task_id[:20],
-                            status,
-                        )
-                    else:
-                        detail.error = error or "Unknown error"
-                        response.total_failed += 1
-                        logger.warning(
-                            "Failed to query task %s: %s",
-                            subtask.task_id[:20],
-                            detail.error,
-                        )
-                response.details.append(detail)
-                continue
-
-            # 原状态为 FAIL/PART_SUC/TIMEOUT
-            if is_timeout:
-                # 超时，不查询，不更新
-                detail.error = "Timeout, skip update for non-pending status"
-                response.total_failed += 1
-                logger.debug(
-                    "Skip update for subtask %s (status=%s, timeout mode)",
-                    subtask.task_id[:20],
-                    subtask.status,
+                detail = await self._process_pending_subtask(
+                    client,
+                    subtask,
+                    now,
                 )
             else:
-                # 未超时，查询API，状态变化时更新
-                if not self._is_configured():
-                    detail.error = "API not configured"
-                    response.total_failed += 1
-                else:
-                    status, error = await self._query_task_status(
-                        client,
-                        subtask.task_id,
-                    )
-                    if status and status != subtask.status:
-                        await self.query_service.update_subtask_status(
-                            subtask.task_id,
-                            subtask.trace_id,
-                            status,
-                        )
-                        detail.new_status = status
-                        response.total_updated += 1
-                        logger.info(
-                            "Updated subtask status: task_id=%s old=%s new=%s",
-                            subtask.task_id[:20],
-                            subtask.status,
-                            status,
-                        )
-                    else:
-                        detail.error = error or "Status unchanged"
-                        response.total_failed += 1
-                        logger.debug(
-                            "Subtask status unchanged: task_id=%s status=%s",
-                            subtask.task_id[:20],
-                            subtask.status,
-                        )
+                # 原状态为 FAIL/PART_SUC/TIMEOUT
+                detail = await self._process_non_pending_subtask(
+                    client,
+                    subtask,
+                    is_timeout,
+                )
 
             response.details.append(detail)
+            if detail.new_status:
+                response.total_updated += 1
+            else:
+                response.total_failed += 1
 
         return response
 

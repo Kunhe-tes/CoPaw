@@ -2,9 +2,10 @@
 
 ## Context
 
-优化两个同步接口的状态更新逻辑，增加时间阈值判断和当天数据过滤，避免不必要的 API 调用和状态更新。
+优化两个同步接口的状态更新逻辑，增加时间阈值判断和兜底机制，避免不必要的 API 调用和历史数据无法处理的问题。
 
 **变更日期**: 2026-06-16
+**补充修复**: 2026-06-17（修复历史数据漏洞）
 
 ---
 
@@ -26,24 +27,30 @@
 
 ### 新逻辑
 
-**查询范围调整：**
-- 只查询当天创建的子任务（created_at >= 当天 00:00:00）
-- 排除已成功(SUC)的终态子任务
+**查询范围调整（修复历史数据漏洞）：**
+1. **所有无状态的子任务**（status IS NULL OR status = ''）- **不限制时间**
+2. **当天创建的 FAIL/PART_SUC/TIMEOUT 状态子任务**
+
+**兜底机制：**
+- 超过24小时的 pending 子任务，直接标记 TIMEOUT，强制推进状态
 
 **按原状态分类处理：**
 
 | 原状态 | 当前时间 >= timeout_hour | 当前时间 < timeout_hour | 处理方式 |
 |--------|--------------------------|-------------------------|----------|
-| NULL/空 | 始终查询API并更新 | 始终查询API并更新 | 查询更新 |
-| FAIL/PART_SUC/TIMEOUT | 不查询，不更新 | 查询API，状态变化时更新 | 有变化才更新 |
+| NULL/空 | 始终查询API并更新，超过24h标记TIMEOUT | 始终查询API并更新，超过24h标记TIMEOUT | 查询更新+兜底 |
+| FAIL/PART_SUC/TIMEOUT（当天） | 不查询，不更新 | 查询API，状态变化时更新 | 有变化才更新 |
 | SUC | 已通过查询排除 | 已通过查询排除 | 终态，不处理 |
 
 **流程图：**
 ```
-1. 获取当天创建的子任务（created_at >= 当天00:00:00，排除SUC）
+1. 获取待同步子任务：
+   - 所有无状态的子任务（不限制时间）
+   - 当天创建的 FAIL/PART_SUC/TIMEOUT 子任务
 2. 对每个子任务：
    a. 如果原状态为 NULL/空：
-      - 始终查询API并更新（不管是否超时）
+      - 检查是否超过24小时 → 标记 TIMEOUT（兜底）
+      - 否则查询API并更新
    b. 如果原状态为 FAIL/PART_SUC/TIMEOUT：
       - 时间 >= threshold → 跳过（不查询，不更新）
       - 时间 < threshold → 查询API，状态变化时更新
@@ -86,14 +93,28 @@
 
 ---
 
+## 漏洞修复
+
+### 原问题
+原来的逻辑只查询当天创建的子任务，可能导致：
+- 昨天创建的 pending 子任务无法被查询
+- execution.async_status 永远无法更新
+- 消息永远无法发送
+
+### 修复方案
+1. **放宽查询范围**：无状态子任务不限制时间
+2. **添加兜底机制**：超过24小时的 pending 子任务标记 TIMEOUT
+
+---
+
 ## 修改文件列表
 
 | 文件 | 修改内容 |
 |------|----------|
 | `database/schema.py` | 新增5个字段定义，新增ALTER语句 |
 | `models/subtask.py` | SubtaskModel新增5个字段，SubtaskCreateRequest新增5个可选字段 |
-| `services/subtask/query_service.py` | 新增 get_today_pending_subtasks() 方法，新增5个字段参数 |
-| `services/subtask/sync_service.py` | 重构 sync_subtask_status() 和 sync_execution_async_status() 逻辑 |
+| `services/subtask/query_service.py` | 新增 get_today_pending_subtasks() 方法，查询逻辑调整 |
+| `services/subtask/sync_service.py` | 重构同步逻辑，添加24小时兜底机制 |
 | `routers/subtask.py` | 传递新字段参数 |
 
 ---
@@ -108,8 +129,8 @@
 
 ## Verification
 
-1. 验证当天子任务过滤正确（只查询 created_at >= 00:00:00）
-2. 验证 NULL/空状态始终查询API
-3. 验证 FAIL/PART_SUC/TIMEOUT 在超时模式下跳过
-4. 验证无 subtasks 的 execution 标记为 success
-5. 验证聚合逻辑正确
+1. 验证无状态子任务查询不限制时间
+2. 验证当天 FAIL/PART_SUC/TIMEOUT 子任务查询正确
+3. 验证超过24小时 pending 子任务标记 TIMEOUT
+4. 验证聚合逻辑正确
+5. 验证历史数据能正常处理
