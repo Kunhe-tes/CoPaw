@@ -500,6 +500,13 @@ async def lifespan(
 
             init_zhaohu_binding_module(db_connection)
             logger.info("ZhaohuChannelBinding module initialized")
+
+            from .asset_upload_record.router import (
+                init_asset_upload_record_module,
+            )
+
+            init_asset_upload_record_module(db_connection)
+            logger.info("AssetUploadRecord module initialized")
         except Exception as e:
             logger.warning(
                 "Failed to initialize greeting/featured_case modules: %s",

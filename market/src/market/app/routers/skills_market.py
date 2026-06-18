@@ -162,9 +162,14 @@ def _copy_skill_to_market(
         else:
             existing.unlink()
 
-    # 复制 SKILL.md
+    # 复制 SKILL.md（newline="" 防止 Windows 上 write_text 把 LF 转为 CRLF，
+    # 导致与 copytree 路径写入的文件签名不一致，R7 no-op 跨路径失效）
     if skill_md:
-        (market_skill_dir / "SKILL.md").write_text(skill_md, encoding="utf-8")
+        (market_skill_dir / "SKILL.md").write_text(
+            skill_md,
+            encoding="utf-8",
+            newline="",
+        )
 
     # 复制其他文件（排除 skill.json）
     for f in skill_dir.iterdir():
@@ -248,14 +253,14 @@ def _process_single_skill(
     user_name: str,
     category_id: Optional[int],
     overwrite: bool = False,
-) -> tuple[Optional[str], Optional[dict], Optional[str]]:
+) -> tuple[Optional[str], Optional[dict], Optional[str], bool]:
     """处理单个技能的上架逻辑.
 
     Args:
         overwrite: 是否覆盖同名技能，默认 False（返回冲突）
 
     Returns:
-        (imported_name, conflict_info, parsed_name_for_first)
+        (imported_name, conflict_info, parsed_name_for_first, version_unchanged)
     """
     from ...marketplace.service import _bump_patch
 
@@ -268,8 +273,21 @@ def _process_single_skill(
     items = load_index(svc.marketplace_root, source_id)
     existing = next((i for i in items if i.name == name), None)
 
+    # 未显式 overwrite 时返回冲突信息，由前端弹窗让用户确认
+    if existing and not overwrite:
+        conflict_info = {
+            "skill_name": name,
+            "suggested_name": name,
+            "existing_creator_id": existing.creator_id,
+            "existing_creator_name": existing.creator_name,
+            "existing_version": existing.version,
+        }
+        return None, conflict_info, name, False
+
+    version_unchanged = False
+
     if existing:
-        # R4: 同名 → 续接到现有条目（无论 creator 是否相同）
+        # R4: 同名（已确认覆盖） → 续接到现有条目（无论 creator 是否相同）
         # F1 修复：市场版本号独立于 SKILL.md，始终走 _bump_patch（spec R3）。
         # SKILL.md 中的 version 仅作为 source_user_version 写入快照元数据。
         now = datetime.now(timezone.utc).isoformat()
@@ -320,13 +338,15 @@ def _process_single_skill(
         )
         # F2：让 MarketItem.version 严格跟随快照的 version_id（处理 R7 复用历史 id 场景）
         if snapshot.version_id and snapshot.version_id != item.version:
+            # 版本被回滚 = R7 no-op（内容未变）
+            version_unchanged = True
             item.version = snapshot.version_id
     except Exception as e:
         logger.warning("Failed to create version snapshot: %s", e)
 
     save_index(svc.marketplace_root, source_id, items)
 
-    return name, None, name
+    return name, None, name, version_unchanged
 
 
 @router.post(
@@ -378,24 +398,30 @@ async def publish_skill_upload(
     conflicts = []
     parsed_name = None
     parsed_description = None
+    has_unchanged = False
 
     try:
         for skill_dir, skill_name in found_skills:
-            imported_name, conflict, first_name = await asyncio.to_thread(
-                _process_single_skill,
-                skill_dir,
-                skill_name,
-                svc,
-                source_id,
-                x_user_id,
-                user_name,
-                category_id,
-                overwrite,  # 传递 overwrite 参数
+            imported_name, conflict, first_name, version_unchanged = (
+                await asyncio.to_thread(
+                    _process_single_skill,
+                    skill_dir,
+                    skill_name,
+                    svc,
+                    source_id,
+                    x_user_id,
+                    user_name,
+                    category_id,
+                    overwrite,  # 传递 overwrite 参数
+                )
             )
 
             if conflict:
                 conflicts.append(conflict)
                 continue
+
+            if version_unchanged:
+                has_unchanged = True
 
             if imported_name:
                 imported.append(imported_name)
@@ -436,6 +462,7 @@ async def publish_skill_upload(
         enabled=True,
         name=parsed_name,
         description=parsed_description,
+        version_unchanged=has_unchanged,
     )
     if conflicts:
         result.conflicts = conflicts

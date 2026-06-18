@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import type { CronJobSpecOutput } from "../../api/types";
 import {
+  getTaskOpenTarget,
   getTaskNextRunTooltipText,
   getTaskNextRunTooltipTimes,
   getTaskPauseStatusText,
@@ -239,5 +240,39 @@ describe("getTaskNextRunTooltipText", () => {
 
     expect(tooltip).toContain("之后三次运行时间");
     expect(tooltip).toContain("06-04");
+  });
+});
+
+describe("getTaskOpenTarget", () => {
+  it("prefers task chat_id over compatibility session ids", () => {
+    const target = getTaskOpenTarget(
+      taskJob({
+        task: {
+          visible_in_my_tasks: true,
+          has_scheduled_result: true,
+          latest_scheduled_preview: "done",
+          unread_execution_count: 1,
+          is_running: false,
+          is_paused: false,
+          pause_reason: null,
+          chat_id: "chat-outside-page",
+          session_id: "task-session-id",
+        },
+        request: {
+          input: [{ role: "user", content: "ping" }],
+          session_id: "request-session-id",
+        },
+        dispatch: {
+          type: "channel",
+          channel: "console",
+          target: {
+            user_id: "user-1",
+            session_id: "dispatch-session-id",
+          },
+        },
+      }),
+    );
+
+    expect(target).toBe("chat-outside-page");
   });
 });

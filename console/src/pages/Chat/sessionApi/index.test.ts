@@ -50,7 +50,7 @@ describe("SessionApi identity mapping", () => {
         items,
         total: items.length,
         page: 1,
-        page_size: 200,
+        page_size: 100,
         has_more: false,
       };
     });
@@ -59,10 +59,14 @@ describe("SessionApi identity mapping", () => {
       currentSessionId?: string;
       currentUserId?: string;
       currentChannel?: string;
+      __env__?: {
+        chatSessionPageSize?: number | string;
+      };
     };
     runtimeWindow.currentSessionId = undefined;
     runtimeWindow.currentUserId = undefined;
     runtimeWindow.currentChannel = undefined;
+    runtimeWindow.__env__ = {};
   });
 
   it("keeps the logical session id stable after the first reply resolves a real chat id", async () => {
@@ -733,14 +737,14 @@ describe("SessionApi identity mapping", () => {
       ],
       total: 3,
       page: 1,
-      page_size: 200,
+      page_size: 100,
       has_more: true,
     });
 
     const list = await sessionApi.getSessionList();
 
     expect(apiMocks.listChatsPage).toHaveBeenCalledWith({
-      page_size: 200,
+      page_size: 100,
       cursor: null,
     });
     expect(list.map((session) => session.id)).toEqual([
@@ -767,7 +771,7 @@ describe("SessionApi identity mapping", () => {
       items: chats.slice(0, 50),
       total: chats.length,
       page: 1,
-      page_size: 200,
+      page_size: 100,
       has_more: true,
     });
 
@@ -808,7 +812,7 @@ describe("SessionApi identity mapping", () => {
         ],
         total: 3,
         page: 1,
-        page_size: 200,
+        page_size: 100,
         has_more: true,
       })
       .mockResolvedValueOnce({
@@ -836,7 +840,7 @@ describe("SessionApi identity mapping", () => {
         ],
         total: 3,
         page: 2,
-        page_size: 200,
+        page_size: 100,
         has_more: false,
       });
 
@@ -845,7 +849,7 @@ describe("SessionApi identity mapping", () => {
 
     expect(apiMocks.listChatsPage).toHaveBeenLastCalledWith({
       page: 2,
-      page_size: 200,
+      page_size: 100,
     });
     expect(list.map((session) => session.id)).toEqual([
       "chat-3",
@@ -861,7 +865,7 @@ describe("SessionApi identity mapping", () => {
       items: [],
       total: 1,
       page: 1,
-      page_size: 200,
+      page_size: 100,
       has_more: true,
     });
     await sessionApi.getSessionList();
@@ -878,7 +882,7 @@ describe("SessionApi identity mapping", () => {
       items: [],
       total: 1,
       page: 2,
-      page_size: 200,
+      page_size: 100,
       has_more: false,
     });
     await Promise.all([first, second]);
@@ -892,7 +896,7 @@ describe("SessionApi identity mapping", () => {
       items: [],
       total: 2,
       page: 1,
-      page_size: 200,
+      page_size: 100,
       has_more: true,
     });
     await sessionApi.getSessionList();
@@ -912,7 +916,7 @@ describe("SessionApi identity mapping", () => {
         items: [],
         total: 1,
         page: 1,
-        page_size: 200,
+        page_size: 100,
         has_more: true,
       })
       .mockResolvedValueOnce({
@@ -930,7 +934,7 @@ describe("SessionApi identity mapping", () => {
         ],
         total: 1,
         page: 2,
-        page_size: 200,
+        page_size: 100,
         has_more: false,
       });
 
@@ -954,7 +958,7 @@ describe("SessionApi identity mapping", () => {
       items: [],
       total: 100,
       page: 1,
-      page_size: 200,
+      page_size: 100,
       has_more: true,
     });
     apiMocks.listChats.mockResolvedValue([]);
@@ -985,6 +989,77 @@ describe("SessionApi identity mapping", () => {
     expect(apiMocks.listChats).not.toHaveBeenCalled();
   });
 
+  it("keeps pagination state when recovering a deep-linked chat outside loaded pages", async () => {
+    const sessionApi = new SessionApi();
+    apiMocks.listChatsPage
+      .mockResolvedValueOnce({
+        items: [
+          {
+            id: "chat-new",
+            name: "new",
+            session_id: "session-new",
+            user_id: "user-1",
+            channel: "console",
+            meta: {},
+            status: "idle",
+            created_at: "2026-06-10T00:00:00Z",
+          },
+        ],
+        total: 3,
+        page: 1,
+        page_size: 100,
+        has_more: true,
+        next_cursor: "cursor-1",
+      })
+      .mockResolvedValueOnce({
+        items: [
+          {
+            id: "chat-old",
+            name: "old",
+            session_id: "session-old",
+            user_id: "user-1",
+            channel: "console",
+            meta: {},
+            status: "idle",
+            created_at: "2026-01-01T00:00:00Z",
+          },
+        ],
+        total: 3,
+        page: 2,
+        page_size: 100,
+        has_more: false,
+        next_cursor: null,
+      });
+    apiMocks.getChat.mockResolvedValue({
+      chat: {
+        id: "chat-deep-link",
+        name: "deep linked",
+        session_id: "session-deep-link",
+        user_id: "user-1",
+        channel: "console",
+        meta: {},
+        status: "idle",
+        created_at: "2026-02-01T00:00:00Z",
+      },
+      status: "idle",
+      messages: [],
+    });
+
+    await sessionApi.getSessionList();
+    await sessionApi.getSession("chat-deep-link");
+    const list = await sessionApi.loadMoreSessions();
+
+    expect(apiMocks.listChatsPage).toHaveBeenNthCalledWith(2, {
+      page_size: 100,
+      cursor: "cursor-1",
+    });
+    expect(list.map((session) => session.id)).toEqual([
+      "chat-deep-link",
+      "chat-new",
+      "chat-old",
+    ]);
+  });
+
   it("continues history pagination with the backend cursor", async () => {
     const sessionApi = new SessionApi();
     apiMocks.listChatsPage
@@ -992,7 +1067,7 @@ describe("SessionApi identity mapping", () => {
         items: [],
         total: 100,
         page: 1,
-        page_size: 200,
+        page_size: 100,
         has_more: true,
         next_cursor: "cursor-1",
       })
@@ -1000,7 +1075,7 @@ describe("SessionApi identity mapping", () => {
         items: [],
         total: 100,
         page: 2,
-        page_size: 200,
+        page_size: 100,
         has_more: false,
         next_cursor: null,
       });
@@ -1009,13 +1084,131 @@ describe("SessionApi identity mapping", () => {
     await sessionApi.loadMoreSessions();
 
     expect(apiMocks.listChatsPage).toHaveBeenNthCalledWith(1, {
-      page_size: 200,
+      page_size: 100,
       cursor: null,
     });
     expect(apiMocks.listChatsPage).toHaveBeenNthCalledWith(2, {
-      page_size: 200,
+      page_size: 100,
       cursor: "cursor-1",
     });
+  });
+
+  it("uses runtime configured chat session page size", async () => {
+    const runtimeWindow = window as Window & {
+      __env__?: {
+        chatSessionPageSize?: number | string;
+      };
+    };
+    runtimeWindow.__env__ = {
+      chatSessionPageSize: "42",
+    };
+    const sessionApi = new SessionApi();
+    apiMocks.listChatsPage
+      .mockResolvedValueOnce({
+        items: [],
+        total: 100,
+        page: 1,
+        page_size: 42,
+        has_more: true,
+        next_cursor: "cursor-1",
+      })
+      .mockResolvedValueOnce({
+        items: [],
+        total: 100,
+        page: 2,
+        page_size: 42,
+        has_more: false,
+        next_cursor: null,
+      });
+
+    await sessionApi.getSessionList();
+    await sessionApi.loadMoreSessions();
+
+    expect(apiMocks.listChatsPage).toHaveBeenNthCalledWith(1, {
+      page_size: 42,
+      cursor: null,
+    });
+    expect(apiMocks.listChatsPage).toHaveBeenNthCalledWith(2, {
+      page_size: 42,
+      cursor: "cursor-1",
+    });
+  });
+
+  it("falls back to the default page size for invalid runtime config", async () => {
+    const runtimeWindow = window as Window & {
+      __env__?: {
+        chatSessionPageSize?: number | string;
+      };
+    };
+    runtimeWindow.__env__ = {
+      chatSessionPageSize: "invalid",
+    };
+    const sessionApi = new SessionApi();
+    apiMocks.listChatsPage.mockResolvedValue({
+      items: [],
+      total: 0,
+      page: 1,
+      page_size: 100,
+      has_more: false,
+    });
+
+    await sessionApi.getSessionList();
+
+    expect(apiMocks.listChatsPage).toHaveBeenCalledWith({
+      page_size: 100,
+      cursor: null,
+    });
+  });
+
+  it("keeps distinct chats that share a logical session id across pages", async () => {
+    const sessionApi = new SessionApi();
+    apiMocks.listChatsPage
+      .mockResolvedValueOnce({
+        items: [
+          {
+            id: "chat-first",
+            name: "first",
+            session_id: "shared-logical-session",
+            user_id: "user-1",
+            channel: "console",
+            meta: {},
+            status: "idle",
+            created_at: "2026-06-10T00:00:00Z",
+          },
+        ],
+        total: 2,
+        page: 1,
+        page_size: 100,
+        has_more: true,
+        next_cursor: "cursor-1",
+      })
+      .mockResolvedValueOnce({
+        items: [
+          {
+            id: "chat-second",
+            name: "second",
+            session_id: "shared-logical-session",
+            user_id: "user-1",
+            channel: "console",
+            meta: {},
+            status: "idle",
+            created_at: "2026-06-09T00:00:00Z",
+          },
+        ],
+        total: 2,
+        page: 2,
+        page_size: 100,
+        has_more: false,
+        next_cursor: null,
+      });
+
+    await sessionApi.getSessionList();
+    const list = await sessionApi.loadMoreSessions();
+
+    expect(list.map((session) => session.id)).toEqual([
+      "chat-first",
+      "chat-second",
+    ]);
   });
 
   it("keeps loaded older pages when page one is refreshed", async () => {
@@ -1036,7 +1229,7 @@ describe("SessionApi identity mapping", () => {
         ],
         total: 2,
         page: 1,
-        page_size: 200,
+        page_size: 100,
         has_more: true,
       })
       .mockResolvedValueOnce({
@@ -1054,7 +1247,7 @@ describe("SessionApi identity mapping", () => {
         ],
         total: 2,
         page: 2,
-        page_size: 200,
+        page_size: 100,
         has_more: false,
       })
       .mockResolvedValueOnce({
@@ -1072,7 +1265,7 @@ describe("SessionApi identity mapping", () => {
         ],
         total: 2,
         page: 1,
-        page_size: 200,
+        page_size: 100,
         has_more: true,
       });
 
@@ -1155,7 +1348,7 @@ describe("SessionApi identity mapping", () => {
         items: [],
         total: 1,
         page: 1,
-        page_size: 200,
+        page_size: 100,
         has_more: true,
       })
       .mockResolvedValueOnce({
@@ -1173,7 +1366,7 @@ describe("SessionApi identity mapping", () => {
         ],
         total: 1,
         page: 2,
-        page_size: 200,
+        page_size: 100,
         has_more: false,
       });
 

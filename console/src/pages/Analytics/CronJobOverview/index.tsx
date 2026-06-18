@@ -55,7 +55,17 @@ const SKILL_NAME_MAP: Record<string, string> = {
   fund_redeem_monitor: "基金赎回实时监控技能",
   lc_breaking: "单一持仓理财/定期客户破冰方案",
   "global-market-report": "全球市场复盘报告",
+  "存款到期客户经营方案技能": "存款到期客户经营方案技能",
+  "高AUM理财低收益客户调仓技能": "高AUM理财低收益客户调仓技能",
+  "基金亏损客户关怀陪伴文案": "基金亏损客户关怀陪伴文案",
+  "智能推荐保险计划书": "智能推荐保险计划书",
+  "黄金持仓客户陪伴技能": "黄金持仓客户陪伴技能",
 };
+
+const ALLOWED_SKILLS = new Set([
+  ...Object.keys(SKILL_NAME_MAP),
+  ...Object.values(SKILL_NAME_MAP),
+]);
 
 function formatSkillName(key: string): string {
   return SKILL_NAME_MAP[key] || key;
@@ -653,9 +663,10 @@ export default function CronJobOverviewPage() {
         bbk_id: bbkId,
         ...dateParams,
       });
-      setSkills(response.items);
-      if (response.items.length > 0) {
-        setSelectedSkill(response.items[0].skill_name);
+      const filtered = response.items.filter((item) => ALLOWED_SKILLS.has(item.skill_name));
+      setSkills(filtered);
+      if (filtered.length > 0) {
+        setSelectedSkill(filtered[0].skill_name);
       }
     } catch (error) {
       console.warn("Failed to fetch branch skills.", error);
@@ -1119,7 +1130,7 @@ export default function CronJobOverviewPage() {
                   key: "last_click_time",
                   width: 100,
                   align: "center",
-                  render: (v: string) => (v ? dayjs(v).format("MM-DD HH:mm") : "-"),
+                  render: (v: string) => (v ? dayjs(v).format("YYYY-MM-DD HH:mm") : "-"),
                 },
               ]}
             />
@@ -1176,7 +1187,7 @@ export default function CronJobOverviewPage() {
                   key: "click_time",
                   width: 110,
                   align: "center",
-                  render: (v: string) => (v ? dayjs(v).format("MM-DD HH:mm:ss") : "-"),
+                  render: (v: string) => (v ? dayjs(v).format("YYYY-MM-DD HH:mm:ss") : "-"),
                 },
               ]}
             />

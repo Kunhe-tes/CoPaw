@@ -44,6 +44,7 @@ _ROUTER_MODULES = (
     (".internal", "public_router"),
     (".system_check", "router"),
     ("..source_system_config", "router"),
+    ("..asset_upload_record", "router"),
 )
 
 _MODULE_EXPORTS = {

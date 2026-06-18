@@ -284,7 +284,7 @@ export function MCPUploadModal({
       });
 
       if (result.version_unchanged) {
-        message.warning("内容与市场最新版本一致，市场版本未增加");
+        message.info("当前内容已是最新，无需重复上传");
       } else {
         message.success("上传成功");
       }
@@ -293,7 +293,9 @@ export function MCPUploadModal({
       setFileName("");
       setPasteContent("");
       setPasteError("");
-      onSuccess();
+      if (!result.version_unchanged) {
+        onSuccess();
+      }
       onClose();
     } catch (err) {
       console.error("上传失败:", err);

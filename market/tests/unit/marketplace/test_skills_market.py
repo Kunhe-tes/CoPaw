@@ -223,7 +223,7 @@ def test_publish_skill_upload_reactivates_inactive_skill(tmp_path):
 
     zip_buffer.seek(0)
     resp = client.post(
-        "/api/market/skills/publish-upload",
+        "/api/market/skills/publish-upload?overwrite=true",
         files={"file": ("skill.zip", zip_buffer, "application/zip")},
         headers={
             "X-Source-Id": "src_a",
