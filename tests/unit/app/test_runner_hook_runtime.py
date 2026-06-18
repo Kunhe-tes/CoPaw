@@ -1830,6 +1830,107 @@ async def test_runner_hook_conversation_snapshot_unavailable_without_agent(
 
 
 @pytest.mark.asyncio
+async def test_session_start_hook_conversation_snapshot_uses_persisted_memory(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    runner = AgentRunner(agent_id="test-agent", workspace_dir=tmp_path)
+    runner.session = SafeJSONSession(save_dir=str(tmp_path))
+    await runner.session.save_merged_state(
+        session_id="session-1",
+        user_id="user-1",
+        state={
+            "agent": {
+                "memory": {
+                    "content": [
+                        [
+                            Msg(
+                                name="user",
+                                role="user",
+                                content="resumed question",
+                            ).to_dict(),
+                            [],
+                        ],
+                        [
+                            Msg(
+                                name="Friday",
+                                role="assistant",
+                                content="resumed answer",
+                            ).to_dict(),
+                            [],
+                        ],
+                    ],
+                },
+            },
+        },
+    )
+    seen_payloads: list[dict] = []
+
+    async def fake_execute_handler_result(handler, context, *, workspace_dir):
+        del workspace_dir
+        seen_payloads.append(context.to_handler_payload())
+        from swe.agents.hook_runtime.models import HookHandlerResult
+
+        return HookHandlerResult(handler_id=handler.id, order=0)
+
+    monkeypatch.setattr(
+        "swe.agents.hook_runtime.runtime.execute_handler",
+        fake_execute_handler_result,
+    )
+
+    await _emit_runner_hook(
+        HookEventName.SESSION_START,
+        request=SimpleNamespace(
+            session_id="session-1",
+            user_id="user-1",
+            channel="console",
+            channel_meta={},
+        ),
+        runner=runner,
+        tenant_hooks=HookConfig(),
+        agent_config=_agent_config(
+            HookConfig(
+                enabled=True,
+                events={
+                    HookEventName.SESSION_START: [
+                        HookMatcherGroupConfig(
+                            hooks=[
+                                CommandHookHandlerConfig(
+                                    id="policy",
+                                    command="unused",
+                                    includeConversationSnapshot=True,
+                                ),
+                            ],
+                        ),
+                    ],
+                },
+            ),
+        ),
+        overlay=HookSessionOverlay(),
+        source="startup",
+    )
+
+    assert seen_payloads[0]["hook_event_name"] == "SessionStart"
+    assert seen_payloads[0]["conversation_snapshot"] == [
+        {
+            "role": "user",
+            "content": [{"type": "text", "text": "resumed question"}],
+        },
+        {
+            "role": "assistant",
+            "content": [{"type": "text", "text": "resumed answer"}],
+        },
+    ]
+    assert seen_payloads[0]["conversation_snapshot_meta"] == {
+        "included_messages": 2,
+        "omitted_messages": 0,
+        "limit": 50,
+        "reasoning_omitted": False,
+        "media_content_omitted": False,
+    }
+
+
+@pytest.mark.asyncio
 async def test_query_handler_stop_hook_blocks_completion(
     monkeypatch,
     tmp_path,
