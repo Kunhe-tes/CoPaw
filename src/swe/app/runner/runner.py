@@ -48,6 +48,9 @@ from ...agents.skills_manager import (
     get_workspace_skills_dir,
 )
 from ...agents.hook_runtime import HookRuntime
+from ...agents.hook_runtime.conversation_snapshot import (
+    capture_conversation_snapshot,
+)
 from ...agents.hook_runtime.models import (
     HookConfig,
     HookContext,
@@ -645,6 +648,7 @@ async def _emit_runner_hook(
     assistant_response: str | None = None,
     source: str | None = None,
     model: str | None = None,
+    agent: Any | None = None,
 ) -> MergedHookResult:
     agent_hooks = getattr(agent_config, "hooks", None)
     if not isinstance(agent_hooks, HookConfig):
@@ -663,9 +667,16 @@ async def _emit_runner_hook(
         source=source,
         model=model,
     )
+
+    async def _conversation_snapshot_provider():
+        return await capture_conversation_snapshot(
+            getattr(agent, "memory", None) if agent is not None else None,
+        )
+
     return await runtime.emit(
         context,
         workspace_dir=Path(runner.workspace_dir or WORKING_DIR),
+        conversation_snapshot_provider=_conversation_snapshot_provider,
     )
 
 
@@ -743,7 +754,7 @@ async def _build_and_connect_mcp_clients(
                 trace_id=trace_id,
             )
             if client is not None:
-                await client.connect()
+                await client.connect(timeout=_MCP_CONNECT_TIMEOUT_SECONDS)
                 clients.append(client)
                 logger.info(f"MCP client '{key}' created and connected")
         except asyncio.CancelledError:
@@ -2664,6 +2675,7 @@ class AgentRunner(Runner):
             overlay=runtime.hook_overlay,
             prompt=plan.original_user_message,
             assistant_response=outcome.assistant_response,
+            agent=runtime.agent,
         )
 
     async def _stream_completion_lifecycle(
@@ -2778,6 +2790,7 @@ class AgentRunner(Runner):
             overlay=runtime.hook_overlay,
             prompt=plan.original_user_message,
             assistant_response=outcome.assistant_response,
+            agent=runtime.agent,
         )
         stop_context = _format_hook_additional_context(stop_hook_result)
         if stop_context:
@@ -3688,7 +3701,14 @@ class AgentRunner(Runner):
                     ):
                         yield msg, last
         finally:
-            reset_current_file_url_network(file_url_network_token)
+            try:
+                reset_current_file_url_network(file_url_network_token)
+            except ValueError:
+                logger.debug(
+                    "Skipped file URL network context reset from a different "
+                    "async context",
+                    exc_info=True,
+                )
             cleanup_runtime = attempt_state.runtime
             cleanup_state_loaded = attempt_state.session_state_loaded
             if cleanup_runtime is None and retry_state.prev_agent is not None:

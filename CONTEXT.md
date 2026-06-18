@@ -204,6 +204,10 @@ _Avoid_: hook boundary outcome, raw handler payload
 A redacted and size-bounded representation of hook-adjacent text or structured data used for diagnosis without retaining the original payload.
 _Avoid_: raw prompt, raw tool input, raw tool output, full updated input
 
+**Hook Conversation Snapshot**:
+A bounded hook-facing snapshot of the current session's message list at one Hook Runtime boundary, including normal user, assistant, tool-call, and tool-result messages while excluding reasoning content. A **Hook Conversation Snapshot** is not the saved transcript file and is not the full Agent state.
+_Avoid_: full context, transcript contents, agent state dump, reasoning trace
+
 **Session Skill Freshness**:
 The cross-turn behavior that determines when a chat session starts using updated skill content. In this context, **Session Skill Freshness** means skill changes take effect on the next turn, not during an in-flight turn.
 _Avoid_: skill hot reload, mid-turn skill reload, live skill patch

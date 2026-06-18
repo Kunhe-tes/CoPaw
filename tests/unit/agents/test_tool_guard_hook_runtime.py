@@ -81,6 +81,75 @@ async def test_no_hook_config_preserves_tool_execution(tmp_path) -> None:
     assert agent.memory.content == []
 
 
+@pytest.mark.asyncio
+async def test_tool_hook_conversation_snapshot_uses_current_memory(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    agent = _FakeAgent(tmp_path)
+    agent._agent_config.hooks = HookConfig(
+        enabled=True,
+        events={
+            HookEventName.PRE_TOOL_USE: [
+                HookMatcherGroupConfig(
+                    hooks=[
+                        CommandHookHandlerConfig(
+                            id="audit",
+                            command="echo {}",
+                            includeConversationSnapshot=True,
+                        ),
+                    ],
+                ),
+            ],
+        },
+    )
+    await agent.memory.add(Msg("user", "hello", "user"))
+    await agent.memory.add(
+        Msg(
+            "Friday",
+            [
+                {"type": "thinking", "thinking": "hidden"},
+                {"type": "text", "text": "visible reply"},
+            ],
+            "assistant",
+        ),
+    )
+    seen_payloads: list[dict] = []
+
+    async def fake_execute_handler(handler, context, *, workspace_dir):
+        del handler, workspace_dir
+        seen_payloads.append(context.to_handler_payload())
+        return HookHandlerResult(handler_id="audit", order=0)
+
+    monkeypatch.setattr(
+        "swe.agents.hook_runtime.runtime.execute_handler",
+        fake_execute_handler,
+    )
+
+    await agent._emit_tool_hook(
+        HookEventName.PRE_TOOL_USE,
+        tool_name="read_file",
+        tool_input={"path": "README.md"},
+        tool_use_id="tool-1",
+    )
+
+    assert seen_payloads[0]["conversation_snapshot"][0] == {
+        "role": "user",
+        "content": [{"type": "text", "text": "hello"}],
+    }
+    assert seen_payloads[0]["conversation_snapshot"][1] == {
+        "role": "assistant",
+        "content": [{"type": "text", "text": "visible reply"}],
+    }
+    assert seen_payloads[0]["conversation_snapshot_meta"] == {
+        "included_messages": 2,
+        "omitted_messages": 0,
+        "limit": 50,
+        "reasoning_omitted": True,
+        "media_content_omitted": False,
+    }
+
+
 def test_tool_hooks_enabled_accepts_loaded_skill_sources(tmp_path) -> None:
     agent = _FakeAgent(tmp_path)
     agent._request_context["_hook_overlay_model"] = HookSessionState(

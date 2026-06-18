@@ -26,6 +26,7 @@ from agentscope.message import Msg, ToolResultBlock
 from ..constant import AGENT_WATCHDOG_TIMEOUT, QUERY_TIMEOUT_SECONDS
 from ..app.runner.tool_output_frames import tool_output_invocation
 from .hook_runtime import HookRuntime
+from .hook_runtime.conversation_snapshot import capture_conversation_snapshot
 from .hook_runtime.models import (
     HookConfig,
     HookContext,
@@ -751,9 +752,16 @@ class ToolGuardMixin:
             tool_response=tool_response,
             error=error,
         )
+
+        async def _conversation_snapshot_provider():
+            return await capture_conversation_snapshot(
+                getattr(self, "memory", None),
+            )
+
         result = await runtime.emit(
             context,
             workspace_dir=Path(getattr(self, "_workspace_dir", None) or "."),
+            conversation_snapshot_provider=_conversation_snapshot_provider,
         )
         self._request_context["hook_overlay"] = overlay.model_dump(
             mode="json",

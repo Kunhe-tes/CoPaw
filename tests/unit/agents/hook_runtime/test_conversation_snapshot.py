@@ -1,0 +1,204 @@
+# -*- coding: utf-8 -*-
+from __future__ import annotations
+
+from swe.agents.hook_runtime.conversation_snapshot import (
+    build_handler_conversation_snapshot,
+)
+
+
+def test_conversation_snapshot_keeps_only_allowed_message_content() -> None:
+    candidate = {
+        "messages": [
+            {
+                "role": "system",
+                "name": "system",
+                "content": "internal instructions",
+                "metadata": {"secret": "keep-out"},
+                "timestamp": "2026-06-18T00:00:00Z",
+            },
+            {
+                "role": "user",
+                "name": "user",
+                "content": "hello",
+                "metadata": {"source": "console"},
+                "timestamp": "2026-06-18T00:00:01Z",
+            },
+            {
+                "role": "assistant",
+                "name": "Friday",
+                "content": [
+                    {"type": "thinking", "thinking": "hidden"},
+                    {"type": "text", "text": "visible"},
+                    {
+                        "type": "tool_use",
+                        "id": "tool-1",
+                        "name": "read_file",
+                        "input": {"path": "README.md"},
+                        "extra": "drop",
+                    },
+                    {
+                        "type": "custom_block",
+                        "value": "drop",
+                    },
+                ],
+                "metadata": {"debug": True},
+                "timestamp": "2026-06-18T00:00:02Z",
+            },
+            {
+                "role": "system",
+                "content": [
+                    {
+                        "type": "text",
+                        "text": "internal tool instruction",
+                    },
+                    {
+                        "type": "tool_result",
+                        "id": "tool-1",
+                        "name": "read_file",
+                        "output": "ok",
+                        "debug": "drop",
+                    },
+                ],
+            },
+        ],
+    }
+
+    payload = build_handler_conversation_snapshot(candidate, limit=50)
+
+    assert payload["conversation_snapshot"] == [
+        {
+            "role": "user",
+            "content": [{"type": "text", "text": "hello"}],
+        },
+        {
+            "role": "assistant",
+            "content": [
+                {"type": "text", "text": "visible"},
+                {
+                    "type": "tool_use",
+                    "id": "tool-1",
+                    "name": "read_file",
+                    "input": {"path": "README.md"},
+                },
+            ],
+        },
+        {
+            "role": "system",
+            "content": [
+                {
+                    "type": "tool_result",
+                    "id": "tool-1",
+                    "name": "read_file",
+                    "output": "ok",
+                },
+            ],
+        },
+    ]
+    assert payload["conversation_snapshot_meta"] == {
+        "included_messages": 3,
+        "omitted_messages": 0,
+        "limit": 50,
+        "reasoning_omitted": True,
+        "media_content_omitted": False,
+    }
+
+
+def test_conversation_snapshot_keeps_media_reference_only() -> None:
+    payload = build_handler_conversation_snapshot(
+        {
+            "messages": [
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "image",
+                            "file_url": "file:///tmp/image.png",
+                            "media_type": "image/png",
+                            "data": "base64-payload",
+                        },
+                    ],
+                },
+            ],
+        },
+        limit=50,
+    )
+
+    assert payload["conversation_snapshot"] == [
+        {
+            "role": "user",
+            "content": [
+                {
+                    "type": "image",
+                    "file_url": "file:///tmp/image.png",
+                    "media_type": "image/png",
+                    "content_omitted": True,
+                },
+            ],
+        },
+    ]
+    assert (
+        payload["conversation_snapshot_meta"]["media_content_omitted"] is True
+    )
+
+
+def test_conversation_snapshot_sanitizes_nested_tool_result_output() -> None:
+    payload = build_handler_conversation_snapshot(
+        {
+            "messages": [
+                {
+                    "role": "system",
+                    "content": [
+                        {
+                            "type": "tool_result",
+                            "id": "tool-1",
+                            "name": "inspect",
+                            "output": {
+                                "summary": "ok",
+                                "metadata": {"hidden": "kept"},
+                                "image": {
+                                    "type": "image",
+                                    "media_type": "image/png",
+                                    "data": "base64-payload",
+                                },
+                                "items": [
+                                    {
+                                        "type": "thinking",
+                                        "thinking": "hidden chain",
+                                    },
+                                    {"value": "visible"},
+                                ],
+                            },
+                        },
+                    ],
+                },
+            ],
+        },
+        limit=50,
+    )
+
+    assert payload["conversation_snapshot"] == [
+        {
+            "role": "system",
+            "content": [
+                {
+                    "type": "tool_result",
+                    "id": "tool-1",
+                    "name": "inspect",
+                    "output": {
+                        "summary": "ok",
+                        "metadata": {"hidden": "kept"},
+                        "image": {
+                            "type": "image",
+                            "media_type": "image/png",
+                            "content_omitted": True,
+                        },
+                        "items": [{"value": "visible"}],
+                    },
+                },
+            ],
+        },
+    ]
+    assert payload["conversation_snapshot_meta"]["reasoning_omitted"] is True
+    assert (
+        payload["conversation_snapshot_meta"]["media_content_omitted"] is True
+    )
