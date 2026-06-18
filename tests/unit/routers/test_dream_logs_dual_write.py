@@ -19,11 +19,39 @@ from swe.app.routers.dream_logs import (
 from swe.config.context import encode_scope_id
 
 
+class _FakeGovernanceStore:
+    """为归档清理测试提供文件治理读模型。"""
+
+    def __init__(self, service: "_FakeGovernanceService") -> None:
+        self.service = service
+        self.is_available = True
+
+    async def list_archive_items(self, source_id: str, **filters):
+        """按路由传入的过滤条件返回归档文件状态。"""
+        rows = [
+            row
+            for row in self.service.archive_records
+            if row.source_id == source_id
+        ]
+        target_user_ids = filters.get("target_user_ids")
+        if target_user_ids is not None:
+            rows = [row for row in rows if row.target_user_id in target_user_ids]
+        target_agent_id = filters.get("target_agent_id")
+        if target_agent_id:
+            rows = [
+                row
+                for row in rows
+                if row.target_agent_id == target_agent_id
+            ]
+        return rows
+
+
 class _FakeGovernanceService:
     """记录路由触发的数据库读模型写入。"""
 
     def __init__(self) -> None:
-        self.store = SimpleNamespace(is_available=True)
+        self.archive_records: list[SimpleNamespace] = []
+        self.store = _FakeGovernanceStore(self)
         self.fail_archive_upsert = False
         self.fail_rollback = False
         self.fail_protected_upsert = False
@@ -56,6 +84,17 @@ class _FakeGovernanceService:
     async def delete_archive_items(self, **kwargs):
         """记录 archive 删除双写。"""
         self.delete_archive_calls.append(kwargs)
+        ids = set(kwargs.get("archive_item_ids") or [])
+        self.archive_records = [
+            row
+            for row in self.archive_records
+            if not (
+                row.source_id == kwargs.get("source_id")
+                and row.target_user_id == kwargs.get("target_user_id")
+                and row.target_agent_id == kwargs.get("target_agent_id")
+                and row.archive_item_id in ids
+            )
+        ]
 
     async def upsert_cleanup_audit(self, record):
         """记录 cleanup audit 双写。"""
@@ -326,6 +365,109 @@ def test_purge_archive_writes_audit_and_removes_archive_state(
     assert service.audit_calls[0]["target_user_id"] == "alice"
 
 
+def test_purge_archive_accepts_post_without_delete_body_dependency(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    """单个归档清理可走 POST，避免中间层丢弃 DELETE body。"""
+    client, service = _client(tmp_path, monkeypatch)
+    workspace = _workspace(tmp_path, "alice", "source-a")
+    archive_file = workspace / "governance" / "archive" / "files" / "archive-1"
+    archive_file.parent.mkdir(parents=True, exist_ok=True)
+    archive_file.write_text("old", encoding="utf-8")
+    (workspace / ARCHIVE_INDEX_FILE).parent.mkdir(parents=True, exist_ok=True)
+    (workspace / ARCHIVE_INDEX_FILE).write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "items": [
+                    {
+                        "id": "archive-1",
+                        "original_path": "old.md",
+                        "archive_path": "governance/archive/files/archive-1",
+                        "size_bytes": 3,
+                        "mtime": "2026-05-24T09:00:00Z",
+                        "archived_at": "2026-05-24T10:00:00Z",
+                        "archived_by": "admin",
+                        "archive_reason": "manual",
+                    },
+                ],
+            },
+        ),
+        encoding="utf-8",
+    )
+
+    response = client.post(
+        "/dream-logs/archive/items",
+        json={
+            "archive_item_ids": ["archive-1"],
+            "target_user_id": "alice",
+            "target_agent_id": "default",
+            "reason": "manual_clear",
+        },
+        headers={
+            "X-Source-Id": "source-a",
+            "X-Tenant-Id": "manager",
+            "X-User-Role": "manager",
+            "X-User-Id": "admin",
+        },
+    )
+
+    assert response.status_code == 200
+    assert not archive_file.exists()
+    assert service.delete_archive_calls[0]["archive_item_ids"] == ["archive-1"]
+
+
+def test_purge_archive_uses_database_record_when_index_missing(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    """单个归档清理应按页面读模型记录补齐本地索引缺失的归档项。"""
+    client, service = _client(tmp_path, monkeypatch)
+    workspace = _workspace(tmp_path, "alice", "source-a")
+    archive_file = workspace / "governance" / "archive" / "files" / "archive-db"
+    archive_file.parent.mkdir(parents=True, exist_ok=True)
+    archive_file.write_text("old", encoding="utf-8")
+    service.archive_records.append(
+        SimpleNamespace(
+            source_id="source-a",
+            target_user_id="alice",
+            target_agent_id="default",
+            archive_item_id="archive-db",
+            original_path="old.md",
+            archive_path="governance/archive/files/archive-db",
+            size_bytes=3,
+            mtime="2026-05-24T09:00:00Z",
+            archived_at="2026-05-24T10:00:00Z",
+            archived_by="admin",
+            archive_reason="manual",
+            raw_item={},
+        ),
+    )
+
+    response = client.post(
+        "/dream-logs/archive/items",
+        json={
+            "archive_item_ids": ["archive-db"],
+            "target_user_id": "alice",
+            "target_agent_id": "default",
+            "reason": "manual_clear",
+        },
+        headers={
+            "X-Source-Id": "source-a",
+            "X-Tenant-Id": "manager",
+            "X-User-Role": "manager",
+            "X-User-Id": "admin",
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json()["files_deleted"] == ["old.md"]
+    assert not archive_file.exists()
+    assert service.delete_archive_calls[0]["archive_item_ids"] == ["archive-db"]
+    assert service.archive_records == []
+
+
 def test_file_governance_rejects_invalid_target_agent_id(
     tmp_path,
     monkeypatch,
@@ -378,6 +520,98 @@ def test_file_governance_rejects_overlong_target_agent_id(
     )
 
     assert response.status_code == 400
+
+
+def test_purge_expired_accepts_missing_body(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    """过期归档清理不应因前端未传 JSON body 返回 422。"""
+    client, service = _client(tmp_path, monkeypatch)
+    workspace = _workspace(tmp_path, "alice", "source-a")
+    archive_file = workspace / "governance" / "archive" / "files" / "archive-1"
+    archive_file.parent.mkdir(parents=True, exist_ok=True)
+    archive_file.write_text("old", encoding="utf-8")
+    (workspace / ARCHIVE_INDEX_FILE).parent.mkdir(parents=True, exist_ok=True)
+    (workspace / ARCHIVE_INDEX_FILE).write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "items": [
+                    {
+                        "id": "archive-1",
+                        "original_path": "old.md",
+                        "archive_path": "governance/archive/files/archive-1",
+                        "size_bytes": 3,
+                        "mtime": "2000-01-01T00:00:00Z",
+                        "archived_at": "2000-01-01T00:00:00Z",
+                        "archived_by": "admin",
+                        "archive_reason": "manual",
+                    },
+                ],
+            },
+        ),
+        encoding="utf-8",
+    )
+
+    response = client.post(
+        "/dream-logs/archive/purge-expired",
+        headers={
+            "X-Source-Id": "source-a",
+            "X-Tenant-Id": "manager",
+            "X-User-Role": "manager",
+            "X-User-Id": "admin",
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json()["files_deleted"] == ["old.md"]
+    assert service.delete_archive_calls[0]["archive_item_ids"] == ["archive-1"]
+
+
+def test_purge_expired_uses_database_archive_records_when_index_missing(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    """页面列表来自读模型时，过期清理也应能找到同一批归档记录。"""
+    client, service = _client(tmp_path, monkeypatch)
+    workspace = _workspace(tmp_path, "alice", "source-a")
+    archive_file = workspace / "governance" / "archive" / "files" / "archive-db"
+    archive_file.parent.mkdir(parents=True, exist_ok=True)
+    archive_file.write_text("old", encoding="utf-8")
+    service.archive_records.append(
+        SimpleNamespace(
+            source_id="source-a",
+            target_user_id="alice",
+            target_agent_id="default",
+            archive_item_id="archive-db",
+            original_path="old.md",
+            archive_path="governance/archive/files/archive-db",
+            size_bytes=3,
+            mtime="2000-01-01T00:00:00Z",
+            archived_at="2000-01-01T00:00:00Z",
+            archived_by="admin",
+            archive_reason="manual",
+            raw_item={},
+        ),
+    )
+
+    response = client.post(
+        "/dream-logs/archive/purge-expired",
+        json={"reason": "expired_10_days"},
+        headers={
+            "X-Source-Id": "source-a",
+            "X-Tenant-Id": "manager",
+            "X-User-Role": "manager",
+            "X-User-Id": "admin",
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json()["files_deleted"] == ["old.md"]
+    assert not archive_file.exists()
+    assert service.delete_archive_calls[0]["archive_item_ids"] == ["archive-db"]
+    assert service.archive_records == []
 
 
 def test_purge_expired_uses_source_and_distinct_audit_events(

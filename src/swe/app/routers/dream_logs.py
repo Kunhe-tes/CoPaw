@@ -2856,6 +2856,74 @@ def _archive_db_row_to_response(row: Any) -> ArchiveItem:
     )
 
 
+def _archive_db_row_to_index_item(row: Any) -> dict[str, Any]:
+    """把读模型归档行转换为本地索引条目结构，用于补齐清理目标。"""
+    raw_item = getattr(row, "raw_item", None)
+    item = dict(raw_item) if isinstance(raw_item, dict) else {}
+    item.update(
+        {
+            "id": str(getattr(row, "archive_item_id", None) or item.get("id") or ""),
+            "original_path": str(
+                getattr(row, "original_path", None)
+                or item.get("original_path")
+                or "",
+            ),
+            "archive_path": str(
+                getattr(row, "archive_path", None)
+                or item.get("archive_path")
+                or "",
+            ),
+            "size_bytes": int(
+                getattr(row, "size_bytes", None)
+                or item.get("size_bytes")
+                or 0,
+            ),
+            "mtime": str(getattr(row, "mtime", None) or item.get("mtime") or ""),
+            "archived_at": str(
+                getattr(row, "archived_at", None)
+                or item.get("archived_at")
+                or "",
+            ),
+            "archived_by": str(
+                getattr(row, "archived_by", None)
+                or item.get("archived_by")
+                or "",
+            ),
+            "archive_reason": str(
+                getattr(row, "archive_reason", None)
+                or item.get("archive_reason")
+                or "",
+            ),
+        },
+    )
+    return item
+
+
+async def _load_archive_read_model_rows(
+    service: Any,
+    *,
+    source_id: str,
+    target_user_ids: list[str],
+    target_agent_id: Optional[str],
+) -> list[Any]:
+    """读取归档读模型，失败时退回本地索引清理路径。"""
+    if service is None or not target_user_ids:
+        return []
+    store = getattr(service, "store", None)
+    list_archive_items = getattr(store, "list_archive_items", None)
+    if list_archive_items is None:
+        return []
+    try:
+        return await list_archive_items(
+            source_id,
+            target_user_ids=target_user_ids,
+            target_agent_id=target_agent_id,
+        )
+    except Exception as exc:
+        logger.warning("Failed to load archive read model rows: %s", exc)
+        return []
+
+
 def _protected_db_row_to_response(row: Any) -> ProtectedFileInfo:
     """把数据库保护文件状态行转换为管理侧响应模型。"""
     return ProtectedFileInfo(
@@ -3192,13 +3260,22 @@ async def restore_archive_item(
 def _purge_archive_items(
     workspace_dir: Path,
     archive_item_ids: set[str],
+    *,
+    fallback_items: Optional[list[dict[str, Any]]] = None,
 ) -> tuple[list[str], int]:
     """删除归档文件并返回原路径列表和释放大小。"""
     index = _load_archive_index(workspace_dir)
+    items = list(index.get("items", []))
+    indexed_ids = {str(item.get("id") or "") for item in items}
+    for item in fallback_items or []:
+        item_id = str(item.get("id") or "")
+        if item_id in archive_item_ids and item_id not in indexed_ids:
+            items.append(item)
+            indexed_ids.add(item_id)
     deleted_paths: list[str] = []
     total_size = 0
     found_ids: set[str] = set()
-    for item in index.get("items", []):
+    for item in items:
         item_id = str(item.get("id") or "")
         if item_id not in archive_item_ids:
             continue
@@ -3289,8 +3366,7 @@ def _build_purge_audit_payload(
     }
 
 
-@router.delete("/archive/items", response_model=ArchivePurgeResponse)
-async def purge_archive_items(
+async def _purge_archive_items_for_request(
     request: Request,
     body: ArchivePurgeRequest,
 ) -> ArchivePurgeResponse:
@@ -3306,9 +3382,23 @@ async def purge_archive_items(
         source_id,
         body.target_agent_id,
     )
+    service = _get_optional_continuous_governance_service(request)
+    archive_item_ids = set(body.archive_item_ids)
+    fallback_rows = await _load_archive_read_model_rows(
+        service,
+        source_id=source_id,
+        target_user_ids=[body.target_user_id],
+        target_agent_id=body.target_agent_id,
+    )
+    fallback_items = [
+        _archive_db_row_to_index_item(row)
+        for row in fallback_rows
+        if str(getattr(row, "archive_item_id", "") or "") in archive_item_ids
+    ]
     deleted_paths, total_size = _purge_archive_items(
         workspace_dir,
-        set(body.archive_item_ids),
+        archive_item_ids,
+        fallback_items=fallback_items,
     )
     event_id = uuid.uuid4().hex
     audit = _build_purge_audit_record(
@@ -3322,7 +3412,6 @@ async def purge_archive_items(
         reason=body.reason,
     )
     _append_archive_admin_audit(_get_workspace_dir(request), audit)
-    service = _get_optional_continuous_governance_service(request)
     if service is not None:
         try:
             await service.delete_archive_items(
@@ -3353,21 +3442,43 @@ async def purge_archive_items(
     )
 
 
+@router.delete("/archive/items", response_model=ArchivePurgeResponse)
+async def purge_archive_items(
+    request: Request,
+    body: ArchivePurgeRequest,
+) -> ArchivePurgeResponse:
+    """兼容旧版 DELETE 调用的手动归档清理入口。"""
+    return await _purge_archive_items_for_request(request, body)
+
+
+@router.post("/archive/items", response_model=ArchivePurgeResponse)
+async def purge_archive_items_by_post(
+    request: Request,
+    body: ArchivePurgeRequest,
+) -> ArchivePurgeResponse:
+    """避免代理丢弃 DELETE body 的手动归档清理入口。"""
+    return await _purge_archive_items_for_request(request, body)
+
+
 @router.post("/archive/purge-expired", response_model=ArchivePurgeResponse)
 async def purge_expired_archive_items(
     request: Request,
-    body: ArchivePurgeExpiredRequest,
+    body: Optional[ArchivePurgeExpiredRequest] = Body(default=None),
 ) -> ArchivePurgeResponse:
     """管理员清理当前渠道下超过 10 天的归档文件。"""
+    body = body or ArchivePurgeExpiredRequest()
     _ensure_report_permission(request)
     source_id = _get_report_source_id(request)
     all_deleted: list[str] = []
     total_size = 0
     last_event_id = uuid.uuid4().hex
-    for tenant_id, agent_id, workspace_dir in await _source_archive_workspaces(
+    service = _get_optional_continuous_governance_service(request)
+    workspace_entries = await _source_archive_workspaces(
         request,
         agent_id=body.target_agent_id,
-    ):
+    )
+    pending_groups: dict[tuple[str, str], dict[str, Any]] = {}
+    for tenant_id, agent_id, workspace_dir in workspace_entries:
         if body.target_user_id and tenant_id != body.target_user_id:
             continue
         expired_ids = {
@@ -3377,7 +3488,65 @@ async def purge_expired_archive_items(
         }
         if not expired_ids:
             continue
-        deleted_paths, deleted_size = _purge_archive_items(workspace_dir, expired_ids)
+        pending_groups[(tenant_id, agent_id)] = {
+            "workspace_dir": workspace_dir,
+            "archive_item_ids": expired_ids,
+            "fallback_items": [],
+        }
+
+    allowed_target_user_ids = sorted(
+        {tenant_id for tenant_id, _, _ in workspace_entries},
+    )
+    if body.target_user_id:
+        target_user_ids = (
+            [body.target_user_id]
+            if body.target_user_id in allowed_target_user_ids
+            else []
+        )
+    else:
+        target_user_ids = allowed_target_user_ids
+    read_model_rows = await _load_archive_read_model_rows(
+        service,
+        source_id=source_id,
+        target_user_ids=target_user_ids,
+        target_agent_id=body.target_agent_id,
+    )
+    for row in read_model_rows:
+        if not _archive_item_expired(
+            {"archived_at": getattr(row, "archived_at", "")},
+        ):
+            continue
+        archive_item_id = str(getattr(row, "archive_item_id", "") or "")
+        if not archive_item_id:
+            continue
+        tenant_id = str(getattr(row, "target_user_id", "") or "")
+        agent_id = str(
+            getattr(row, "target_agent_id", None) or DEFAULT_REPORT_AGENT_ID,
+        )
+        workspace_dir = _target_workspace_dir(
+            _get_workspace_root(request),
+            tenant_id,
+            source_id,
+            agent_id,
+        )
+        group = pending_groups.setdefault(
+            (tenant_id, agent_id),
+            {
+                "workspace_dir": workspace_dir,
+                "archive_item_ids": set(),
+                "fallback_items": [],
+            },
+        )
+        group["archive_item_ids"].add(archive_item_id)
+        group["fallback_items"].append(_archive_db_row_to_index_item(row))
+
+    for (tenant_id, agent_id), group in pending_groups.items():
+        expired_ids = group["archive_item_ids"]
+        deleted_paths, deleted_size = _purge_archive_items(
+            group["workspace_dir"],
+            expired_ids,
+            fallback_items=group["fallback_items"],
+        )
         all_deleted.extend(deleted_paths)
         total_size += deleted_size
         event_id = uuid.uuid4().hex
@@ -3394,7 +3563,6 @@ async def purge_expired_archive_items(
         )
         audit["scope"] = "expired_10_days"
         _append_archive_admin_audit(_get_workspace_dir(request), audit)
-        service = _get_optional_continuous_governance_service(request)
         if service is not None:
             try:
                 await service.delete_archive_items(

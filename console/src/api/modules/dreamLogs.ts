@@ -201,7 +201,7 @@ export const dreamLogsApi = {
     reason?: string;
   }): Promise<ArchivePurgeResponse> =>
     request("/dream-logs/archive/items", {
-      method: "DELETE",
+      method: "POST",
       body: JSON.stringify(body),
     }),
 
