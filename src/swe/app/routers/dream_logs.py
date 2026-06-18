@@ -2856,43 +2856,81 @@ def _archive_db_row_to_response(row: Any) -> ArchiveItem:
     )
 
 
+def _archive_row_value(
+    row: Any,
+    item: dict[str, Any],
+    row_field: str,
+    item_field: str,
+    default: Any,
+) -> Any:
+    """按读模型优先、本地 raw_item 兜底的顺序读取归档字段。"""
+    value = getattr(row, row_field, None)
+    if value:
+        return value
+    value = item.get(item_field)
+    if value:
+        return value
+    return default
+
+
+def _archive_row_text(
+    row: Any,
+    item: dict[str, Any],
+    row_field: str,
+    item_field: str,
+) -> str:
+    """读取归档文本字段，并保持旧逻辑的字符串化行为。"""
+    return str(_archive_row_value(row, item, row_field, item_field, ""))
+
+
+def _archive_row_int(
+    row: Any,
+    item: dict[str, Any],
+    row_field: str,
+    item_field: str,
+) -> int:
+    """读取归档数字字段，并保持旧逻辑的 int 转换行为。"""
+    return int(_archive_row_value(row, item, row_field, item_field, 0))
+
+
 def _archive_db_row_to_index_item(row: Any) -> dict[str, Any]:
     """把读模型归档行转换为本地索引条目结构，用于补齐清理目标。"""
     raw_item = getattr(row, "raw_item", None)
     item = dict(raw_item) if isinstance(raw_item, dict) else {}
     item.update(
         {
-            "id": str(getattr(row, "archive_item_id", None) or item.get("id") or ""),
-            "original_path": str(
-                getattr(row, "original_path", None)
-                or item.get("original_path")
-                or "",
+            "id": _archive_row_text(row, item, "archive_item_id", "id"),
+            "original_path": _archive_row_text(
+                row,
+                item,
+                "original_path",
+                "original_path",
             ),
-            "archive_path": str(
-                getattr(row, "archive_path", None)
-                or item.get("archive_path")
-                or "",
+            "archive_path": _archive_row_text(
+                row,
+                item,
+                "archive_path",
+                "archive_path",
             ),
-            "size_bytes": int(
-                getattr(row, "size_bytes", None)
-                or item.get("size_bytes")
-                or 0,
+            "size_bytes": _archive_row_int(row, item, "size_bytes", "size_bytes"),
+            "mtime": _archive_row_text(row, item, "mtime", "mtime"),
+            "archived_at": _archive_row_text(
+                row,
+                item,
+                "archived_at",
+                "archived_at",
             ),
-            "mtime": str(getattr(row, "mtime", None) or item.get("mtime") or ""),
-            "archived_at": str(
-                getattr(row, "archived_at", None)
-                or item.get("archived_at")
-                or "",
+            "archived_by": _archive_row_text(
+                row,
+                item,
+                "archived_by",
+                "archived_by",
             ),
-            "archived_by": str(
-                getattr(row, "archived_by", None)
-                or item.get("archived_by")
-                or "",
-            ),
-            "archive_reason": str(
-                getattr(row, "archive_reason", None)
-                or item.get("archive_reason")
-                or "",
+            "archive_reason": _archive_row_text(
+                row,
+                item,
+                "archive_reason",
+                "archive_reason",
             ),
         },
     )
@@ -2922,6 +2960,111 @@ async def _load_archive_read_model_rows(
     except Exception as exc:
         logger.warning("Failed to load archive read model rows: %s", exc)
         return []
+
+
+def _archive_index_expired_item_ids(workspace_dir: Path) -> set[str]:
+    """按过期清理入口的旧语义从本地索引读取过期条目 id。"""
+    return {
+        str(item.get("id") or "")
+        for item in _load_archive_index(workspace_dir).get("items", [])
+        if _archive_item_expired(item)
+    }
+
+
+def _archive_purge_group(
+    workspace_dir: Path,
+    archive_item_ids: set[str],
+) -> dict[str, Any]:
+    """构造同一用户和 Agent 下的一组待清理归档条目。"""
+    return {
+        "workspace_dir": workspace_dir,
+        "archive_item_ids": set(archive_item_ids),
+        "fallback_items": [],
+    }
+
+
+def _expired_archive_groups_from_indexes(
+    workspace_entries: list[tuple[str, str, Path]],
+    target_user_id: Optional[str],
+) -> dict[tuple[str, str], dict[str, Any]]:
+    """从各工作区本地索引收集已过期的归档清理分组。"""
+    pending_groups: dict[tuple[str, str], dict[str, Any]] = {}
+    for tenant_id, agent_id, workspace_dir in workspace_entries:
+        if target_user_id and tenant_id != target_user_id:
+            continue
+        expired_ids = _archive_index_expired_item_ids(workspace_dir)
+        if not expired_ids:
+            continue
+        pending_groups[(tenant_id, agent_id)] = _archive_purge_group(
+            workspace_dir,
+            expired_ids,
+        )
+    return pending_groups
+
+
+def _archive_read_model_target_user_ids(
+    workspace_entries: list[tuple[str, str, Path]],
+    target_user_id: Optional[str],
+) -> list[str]:
+    """计算允许从读模型补齐归档记录的目标用户范围。"""
+    allowed_target_user_ids = sorted(
+        {tenant_id for tenant_id, _, _ in workspace_entries},
+    )
+    if target_user_id is None:
+        return allowed_target_user_ids
+    if target_user_id in allowed_target_user_ids:
+        return [target_user_id]
+    return []
+
+
+def _expired_archive_row_context(
+    request: Request,
+    source_id: str,
+    row: Any,
+) -> Optional[tuple[str, str, Path, str, dict[str, Any]]]:
+    """把已过期的读模型归档行转换为清理分组所需上下文。"""
+    if not _archive_item_expired({"archived_at": getattr(row, "archived_at", "")}):
+        return None
+    archive_item_id = str(getattr(row, "archive_item_id", "") or "")
+    if not archive_item_id:
+        return None
+    tenant_id = str(getattr(row, "target_user_id", "") or "")
+    agent_id = str(
+        getattr(row, "target_agent_id", None) or DEFAULT_REPORT_AGENT_ID,
+    )
+    workspace_dir = _target_workspace_dir(
+        _get_workspace_root(request),
+        tenant_id,
+        source_id,
+        agent_id,
+    )
+    return (
+        tenant_id,
+        agent_id,
+        workspace_dir,
+        archive_item_id,
+        _archive_db_row_to_index_item(row),
+    )
+
+
+def _append_expired_archive_read_model_rows(
+    request: Request,
+    source_id: str,
+    pending_groups: dict[tuple[str, str], dict[str, Any]],
+    read_model_rows: list[Any],
+) -> None:
+    """用读模型补齐本地索引缺失的过期归档记录。"""
+    for row in read_model_rows:
+        row_context = _expired_archive_row_context(request, source_id, row)
+        if row_context is None:
+            continue
+        tenant_id, agent_id, workspace_dir, archive_item_id, item = row_context
+        group = pending_groups.setdefault(
+            (tenant_id, agent_id),
+            _archive_purge_group(workspace_dir, set()),
+        )
+        group["archive_item_ids"].add(archive_item_id)
+        group["fallback_items"].append(item)
 
 
 def _protected_db_row_to_response(row: Any) -> ProtectedFileInfo:
@@ -3366,6 +3509,92 @@ def _build_purge_audit_payload(
     }
 
 
+async def _purge_expired_archive_group(
+    request: Request,
+    service: Any,
+    source_id: str,
+    tenant_id: str,
+    agent_id: str,
+    group: dict[str, Any],
+    reason: str,
+) -> tuple[list[str], int, str]:
+    """清理单个用户和 Agent 组合下的过期归档并同步审计状态。"""
+    expired_ids = group["archive_item_ids"]
+    deleted_paths, deleted_size = _purge_archive_items(
+        group["workspace_dir"],
+        expired_ids,
+        fallback_items=group["fallback_items"],
+    )
+    event_id = uuid.uuid4().hex
+    audit = _build_purge_audit_record(
+        request,
+        event_id=event_id,
+        operation="auto_purge_archive",
+        target_user_id=tenant_id,
+        target_agent_id=agent_id,
+        files_count=len(deleted_paths),
+        total_size_bytes=deleted_size,
+        reason=reason,
+    )
+    audit["scope"] = "expired_10_days"
+    _append_archive_admin_audit(_get_workspace_dir(request), audit)
+    if service is not None:
+        try:
+            await service.delete_archive_items(
+                source_id=source_id,
+                target_user_id=tenant_id,
+                target_agent_id=agent_id,
+                archive_item_ids=list(expired_ids),
+            )
+            await service.upsert_cleanup_audit(audit)
+        except Exception as exc:
+            await _record_dual_write_health(
+                request,
+                source_id=source_id,
+                target_user_id=tenant_id,
+                target_agent_id=agent_id,
+                entity_type="cleanup_audit",
+                entity_id=event_id,
+                error=exc,
+                payload={"audit": audit, "archive_item_ids": list(expired_ids)},
+            )
+    return deleted_paths, deleted_size, event_id
+
+
+async def _purge_expired_archive_groups(
+    request: Request,
+    service: Any,
+    source_id: str,
+    pending_groups: dict[tuple[str, str], dict[str, Any]],
+    reason: str,
+) -> ArchivePurgeResponse:
+    """逐组清理过期归档，并汇总为接口响应。"""
+    all_deleted: list[str] = []
+    total_size = 0
+    last_event_id = uuid.uuid4().hex
+    for (tenant_id, agent_id), group in pending_groups.items():
+        deleted_paths, deleted_size, event_id = await _purge_expired_archive_group(
+            request,
+            service,
+            source_id,
+            tenant_id,
+            agent_id,
+            group,
+            reason,
+        )
+        all_deleted.extend(deleted_paths)
+        total_size += deleted_size
+        last_event_id = event_id
+    return ArchivePurgeResponse(
+        success=True,
+        message="Purged expired archive items",
+        files_deleted=all_deleted,
+        files_count=len(all_deleted),
+        total_size_bytes=total_size,
+        audit_event_id=last_event_id,
+    )
+
+
 async def _purge_archive_items_for_request(
     request: Request,
     body: ArchivePurgeRequest,
@@ -3469,127 +3698,36 @@ async def purge_expired_archive_items(
     body = body or ArchivePurgeExpiredRequest()
     _ensure_report_permission(request)
     source_id = _get_report_source_id(request)
-    all_deleted: list[str] = []
-    total_size = 0
-    last_event_id = uuid.uuid4().hex
     service = _get_optional_continuous_governance_service(request)
     workspace_entries = await _source_archive_workspaces(
         request,
         agent_id=body.target_agent_id,
     )
-    pending_groups: dict[tuple[str, str], dict[str, Any]] = {}
-    for tenant_id, agent_id, workspace_dir in workspace_entries:
-        if body.target_user_id and tenant_id != body.target_user_id:
-            continue
-        expired_ids = {
-            str(item.get("id") or "")
-            for item in _load_archive_index(workspace_dir).get("items", [])
-            if _archive_item_expired(item)
-        }
-        if not expired_ids:
-            continue
-        pending_groups[(tenant_id, agent_id)] = {
-            "workspace_dir": workspace_dir,
-            "archive_item_ids": expired_ids,
-            "fallback_items": [],
-        }
-
-    allowed_target_user_ids = sorted(
-        {tenant_id for tenant_id, _, _ in workspace_entries},
+    pending_groups = _expired_archive_groups_from_indexes(
+        workspace_entries,
+        body.target_user_id,
     )
-    if body.target_user_id:
-        target_user_ids = (
-            [body.target_user_id]
-            if body.target_user_id in allowed_target_user_ids
-            else []
-        )
-    else:
-        target_user_ids = allowed_target_user_ids
     read_model_rows = await _load_archive_read_model_rows(
         service,
         source_id=source_id,
-        target_user_ids=target_user_ids,
+        target_user_ids=_archive_read_model_target_user_ids(
+            workspace_entries,
+            body.target_user_id,
+        ),
         target_agent_id=body.target_agent_id,
     )
-    for row in read_model_rows:
-        if not _archive_item_expired(
-            {"archived_at": getattr(row, "archived_at", "")},
-        ):
-            continue
-        archive_item_id = str(getattr(row, "archive_item_id", "") or "")
-        if not archive_item_id:
-            continue
-        tenant_id = str(getattr(row, "target_user_id", "") or "")
-        agent_id = str(
-            getattr(row, "target_agent_id", None) or DEFAULT_REPORT_AGENT_ID,
-        )
-        workspace_dir = _target_workspace_dir(
-            _get_workspace_root(request),
-            tenant_id,
-            source_id,
-            agent_id,
-        )
-        group = pending_groups.setdefault(
-            (tenant_id, agent_id),
-            {
-                "workspace_dir": workspace_dir,
-                "archive_item_ids": set(),
-                "fallback_items": [],
-            },
-        )
-        group["archive_item_ids"].add(archive_item_id)
-        group["fallback_items"].append(_archive_db_row_to_index_item(row))
-
-    for (tenant_id, agent_id), group in pending_groups.items():
-        expired_ids = group["archive_item_ids"]
-        deleted_paths, deleted_size = _purge_archive_items(
-            group["workspace_dir"],
-            expired_ids,
-            fallback_items=group["fallback_items"],
-        )
-        all_deleted.extend(deleted_paths)
-        total_size += deleted_size
-        event_id = uuid.uuid4().hex
-        last_event_id = event_id
-        audit = _build_purge_audit_record(
-            request,
-            event_id=event_id,
-            operation="auto_purge_archive",
-            target_user_id=tenant_id,
-            target_agent_id=agent_id,
-            files_count=len(deleted_paths),
-            total_size_bytes=deleted_size,
-            reason=body.reason,
-        )
-        audit["scope"] = "expired_10_days"
-        _append_archive_admin_audit(_get_workspace_dir(request), audit)
-        if service is not None:
-            try:
-                await service.delete_archive_items(
-                    source_id=source_id,
-                    target_user_id=tenant_id,
-                    target_agent_id=agent_id,
-                    archive_item_ids=list(expired_ids),
-                )
-                await service.upsert_cleanup_audit(audit)
-            except Exception as exc:
-                await _record_dual_write_health(
-                    request,
-                    source_id=source_id,
-                    target_user_id=tenant_id,
-                    target_agent_id=agent_id,
-                    entity_type="cleanup_audit",
-                    entity_id=event_id,
-                    error=exc,
-                    payload={"audit": audit, "archive_item_ids": list(expired_ids)},
-                )
-    return ArchivePurgeResponse(
-        success=True,
-        message="Purged expired archive items",
-        files_deleted=all_deleted,
-        files_count=len(all_deleted),
-        total_size_bytes=total_size,
-        audit_event_id=last_event_id,
+    _append_expired_archive_read_model_rows(
+        request,
+        source_id,
+        pending_groups,
+        read_model_rows,
+    )
+    return await _purge_expired_archive_groups(
+        request,
+        service,
+        source_id,
+        pending_groups,
+        body.reason,
     )
 
 
