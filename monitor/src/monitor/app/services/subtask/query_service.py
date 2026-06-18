@@ -33,6 +33,11 @@ class QueryService:
         trace_id: str,
         task_id: str,
         filename: str,
+        task_type: Optional[str] = None,
+        custuid: Optional[str] = None,
+        cust_nm: Optional[str] = None,
+        notification_content_wplus: Optional[str] = None,
+        notification_content_zhaohu: Optional[str] = None,
     ) -> SubtaskCreateResponse:
         """Create a subtask record.
 
@@ -40,6 +45,11 @@ class QueryService:
             trace_id: Main task trace_id
             task_id: Subtask task_id
             filename: File name
+            task_type: Task type (list/plan)
+            custuid: Customer ID
+            cust_nm: Customer name
+            notification_content_wplus: W+ channel notification content
+            notification_content_zhaohu: Zhaohu channel notification content
 
         Returns:
             SubtaskCreateResponse with creation result
@@ -71,15 +81,33 @@ class QueryService:
                 trace_id,
                 task_id,
                 filename,
+                task_type,
+                custuid,
+                cust_nm,
+                notification_content_wplus,
+                notification_content_zhaohu,
                 status,
                 info,
                 created_at,
                 updated_at
             )
-            VALUES (%s, %s, %s, NULL, '', %s, NULL)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, NULL, '', %s, NULL)
         """
         now = datetime.now()
-        await self.db.execute(query, (trace_id, task_id, filename, now))
+        await self.db.execute(
+            query,
+            (
+                trace_id,
+                task_id,
+                filename,
+                task_type,
+                custuid,
+                cust_nm,
+                notification_content_wplus,
+                notification_content_zhaohu,
+                now,
+            ),
+        )
 
         # Get the inserted ID
         id_query = "SELECT LAST_INSERT_ID() AS id"
@@ -118,7 +146,9 @@ class QueryService:
             return None
 
         query = """
-            SELECT id, trace_id, task_id, filename, status, info, created_at, updated_at
+            SELECT id, trace_id, task_id, filename, task_type, custuid, cust_nm,
+                   notification_content_wplus, notification_content_zhaohu,
+                   status, info, created_at, updated_at
             FROM swe_cron_subtasks
             WHERE trace_id = %s AND task_id = %s
         """
@@ -131,6 +161,11 @@ class QueryService:
             trace_id=row.get("trace_id") or "",
             task_id=row.get("task_id") or "",
             filename=row.get("filename") or "",
+            task_type=row.get("task_type"),
+            custuid=row.get("custuid"),
+            cust_nm=row.get("cust_nm"),
+            notification_content_wplus=row.get("notification_content_wplus"),
+            notification_content_zhaohu=row.get("notification_content_zhaohu"),
             status=row.get("status"),
             info=row.get("info") or "",
             created_at=row.get("created_at"),
@@ -153,7 +188,9 @@ class QueryService:
             return []
 
         query = """
-            SELECT id, trace_id, task_id, filename, status, info, created_at, updated_at
+            SELECT id, trace_id, task_id, filename, task_type, custuid, cust_nm,
+                   notification_content_wplus, notification_content_zhaohu,
+                   status, info, created_at, updated_at
             FROM swe_cron_subtasks
             WHERE status IS NULL OR status = ''
             ORDER BY created_at ASC
@@ -166,6 +203,66 @@ class QueryService:
                 trace_id=row.get("trace_id") or "",
                 task_id=row.get("task_id") or "",
                 filename=row.get("filename") or "",
+                task_type=row.get("task_type"),
+                custuid=row.get("custuid"),
+                cust_nm=row.get("cust_nm"),
+                notification_content_wplus=row.get(
+                    "notification_content_wplus",
+                ),
+                notification_content_zhaohu=row.get(
+                    "notification_content_zhaohu",
+                ),
+                status=row.get("status"),
+                info=row.get("info") or "",
+                created_at=row.get("created_at"),
+                updated_at=row.get("updated_at"),
+            )
+            for row in rows
+        ]
+
+    async def get_today_pending_subtasks(
+        self,
+        limit: int = BATCH_SIZE,
+    ) -> list[SubtaskModel]:
+        """Get subtasks for status sync.
+
+        查询范围：
+        只查询无状态的子任务（status IS NULL OR status = ''），不限制时间
+
+        Args:
+            limit: Maximum number of records to return
+
+        Returns:
+            List of SubtaskModel
+        """
+        if not self.db:
+            return []
+
+        query = """
+            SELECT id, trace_id, task_id, filename, task_type, custuid, cust_nm,
+                   notification_content_wplus, notification_content_zhaohu,
+                   status, info, created_at, updated_at
+            FROM swe_cron_subtasks
+            WHERE status IS NULL OR status = ''
+            ORDER BY created_at ASC
+            LIMIT %s
+        """
+        rows = await self.db.fetch_all(query, (limit,))
+        return [
+            SubtaskModel(
+                id=row.get("id"),
+                trace_id=row.get("trace_id") or "",
+                task_id=row.get("task_id") or "",
+                filename=row.get("filename") or "",
+                task_type=row.get("task_type"),
+                custuid=row.get("custuid"),
+                cust_nm=row.get("cust_nm"),
+                notification_content_wplus=row.get(
+                    "notification_content_wplus",
+                ),
+                notification_content_zhaohu=row.get(
+                    "notification_content_zhaohu",
+                ),
                 status=row.get("status"),
                 info=row.get("info") or "",
                 created_at=row.get("created_at"),
@@ -190,7 +287,9 @@ class QueryService:
             return []
 
         query = """
-            SELECT id, trace_id, task_id, filename, status, info, created_at, updated_at
+            SELECT id, trace_id, task_id, filename, task_type, custuid, cust_nm,
+                   notification_content_wplus, notification_content_zhaohu,
+                   status, info, created_at, updated_at
             FROM swe_cron_subtasks
             WHERE trace_id = %s
         """
@@ -201,6 +300,15 @@ class QueryService:
                 trace_id=row.get("trace_id") or "",
                 task_id=row.get("task_id") or "",
                 filename=row.get("filename") or "",
+                task_type=row.get("task_type"),
+                custuid=row.get("custuid"),
+                cust_nm=row.get("cust_nm"),
+                notification_content_wplus=row.get(
+                    "notification_content_wplus",
+                ),
+                notification_content_zhaohu=row.get(
+                    "notification_content_zhaohu",
+                ),
                 status=row.get("status"),
                 info=row.get("info") or "",
                 created_at=row.get("created_at"),

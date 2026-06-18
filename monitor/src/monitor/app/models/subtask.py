@@ -28,9 +28,23 @@ class SubtaskModel(BaseModel):
     trace_id: str = Field(..., description="主任务trace_id")
     task_id: str = Field(..., description="子任务task_id")
     filename: str = Field(..., description="文件名")
+    task_type: Optional[str] = Field(
+        default=None,
+        description="任务类型: list/plan",
+    )
+    custuid: Optional[str] = Field(default=None, description="任务中客户ID")
+    cust_nm: Optional[str] = Field(default=None, description="任务中客户名称")
+    notification_content_wplus: Optional[str] = Field(
+        default=None,
+        description="W+渠道通知消息内容",
+    )
+    notification_content_zhaohu: Optional[str] = Field(
+        default=None,
+        description="招乎渠道通知消息内容",
+    )
     status: Optional[str] = Field(
         default=None,
-        description="子任务状态: SUC/FAIL/PART_SUC",
+        description="子任务状态: SUC/FAIL/PART_SUC/TIMEOUT",
     )
     info: str = Field(default="", description="预留扩展信息")
     created_at: Optional[datetime] = Field(
@@ -68,6 +82,31 @@ class SubtaskCreateRequest(BaseModel):
         min_length=1,
         max_length=512,
         description="文件名",
+    )
+    task_type: Optional[str] = Field(
+        default=None,
+        max_length=16,
+        description="任务类型: list/plan",
+    )
+    custuid: Optional[str] = Field(
+        default=None,
+        max_length=64,
+        description="任务中客户ID",
+    )
+    cust_nm: Optional[str] = Field(
+        default=None,
+        max_length=255,
+        description="任务中客户名称",
+    )
+    notification_content_wplus: Optional[str] = Field(
+        default=None,
+        max_length=5000,
+        description="W+渠道通知消息内容",
+    )
+    notification_content_zhaohu: Optional[str] = Field(
+        default=None,
+        max_length=5000,
+        description="招乎渠道通知消息内容",
     )
 
 
