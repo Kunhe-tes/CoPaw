@@ -675,11 +675,9 @@ async def _emit_runner_hook(
 
     async def _conversation_snapshot_provider():
         if agent is not None:
-            snapshot = await capture_conversation_snapshot(
+            return await capture_conversation_snapshot(
                 getattr(agent, "memory", None),
             )
-            if snapshot is not None:
-                return snapshot
         return await _capture_persisted_runner_conversation_snapshot(
             request=request,
             runner=runner,
