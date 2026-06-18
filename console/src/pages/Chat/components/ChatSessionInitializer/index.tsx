@@ -23,6 +23,10 @@ function matchesRequestedSession(
   );
 }
 
+function isLocalTimestampSessionId(sessionId: string | undefined): boolean {
+  return Boolean(sessionId && /^\d+$/.test(sessionId));
+}
+
 /**
  * URL chatId → context currentSessionId (one direction of bidirectional sync).
  *
@@ -62,7 +66,11 @@ const ChatSessionInitializer: React.FC = () => {
       setCurrentSessionId(matching.id);
     }
 
-    if (!matching && currentSessionIdRef.current !== resolvedSessionId) {
+    if (
+      !matching &&
+      currentSessionIdRef.current !== resolvedSessionId &&
+      !isLocalTimestampSessionId(currentSessionIdRef.current)
+    ) {
       setCurrentSessionId(resolvedSessionId);
     }
 
