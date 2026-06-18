@@ -18,7 +18,7 @@ from datetime import datetime, time, timezone, timedelta
 from pathlib import Path
 from typing import Any, Optional
 
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, Body, HTTPException, Request
 from pydantic import BaseModel, Field
 
 from ..continuous_governance.models import GOVERNANCE_ID_MAX_LENGTH
