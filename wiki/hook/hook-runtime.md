@@ -440,7 +440,7 @@ handler 收到的是一个 JSON 对象。为了避免把“模型层支持”和
 | `tool_name` | 工具名 |
 | `tool_input` | 工具输入对象 |
 | `tool_use_id` | 工具调用 ID |
-| `tool_response` | 工具成功输出；主要见于 `PostToolUse` |
+| `tool_response` | 当前工具调用的成功业务输出；主要见于 `PostToolUse` |
 | `error` | 工具失败信息；主要见于 `PostToolUseFailure` |
 
 ### 当前实现支持的完整字段
@@ -471,14 +471,14 @@ handler 收到的是一个 JSON 对象。为了避免把“模型层支持”和
 | `tool_name` | 部分 | `PreToolUse` / `PostToolUse` / `PostToolUseFailure` 传 |
 | `tool_input` | 部分 | `PreToolUse` / `PostToolUse` / `PostToolUseFailure` 传 |
 | `tool_use_id` | 部分 | `PreToolUse` / `PostToolUse` / `PostToolUseFailure` 传 |
-| `tool_response` | 部分 | 主要见于 `PostToolUse` |
+| `tool_response` | 部分 | 主要见于 `PostToolUse`，值为当前工具调用最终 `tool_result.output`；无法提取时省略 |
 | `assistant_response` | 部分 | 主要见于 `BeforeStop` 和 `Stop` |
 | `error` | 部分 | 主要见于 `PostToolUseFailure` |
 
 这张表的关键结论是：
 
 - 如果你写的是 runner 侧 hook，例如 `SessionStart`、`UserPromptSubmit`、`BeforeStop`、`Stop`，重点看 `prompt`、`assistant_response`、`source`、`model`。
-- 如果你写的是 tool 侧 hook，例如 `PreToolUse`、`PostToolUse`、`PostToolUseFailure`，重点看 `tool_name`、`tool_input`、`tool_use_id`、`tool_response`、`error`。
+- 如果你写的是 tool 侧 hook，例如 `PreToolUse`、`PostToolUse`、`PostToolUseFailure`，重点看 `tool_name`、`tool_input`、`tool_use_id`、`tool_response`、`error`。其中 `tool_response` 是当前工具调用的业务输出，不是完整 `tool_result` 块，也不需要通过 `includeConversationSnapshot` 获取。
 - `permission_mode`、`effort`、`agent_type` 虽然在模型里有字段，但当前实现还没有把它们接进真实 hook payload，不要把它们当成当前可依赖入参。
 
 ### 两类典型 payload 样子
@@ -526,11 +526,11 @@ handler 收到的是一个 JSON 对象。为了避免把“模型层支持”和
     "command": "echo hello"
   },
   "tool_use_id": "toolu_123",
-  "tool_response": {
-    "content": "hello"
-  }
+  "tool_response": "hello"
 }
 ```
+
+`PostToolUse.tool_response` 表示当前工具调用的最终业务输出。运行时会从同一 `tool_use_id` 对应的终态 `tool_result.output` 提取该值；它不包含 live/intermediate chunks，不包含完整 `tool_result` 的 `type` / `id` / `name` 包装，也不复用 `Hook Conversation Snapshot`。如果运行时无法找到对应终态输出，会省略 `tool_response` 字段，但仍继续发送 `PostToolUse`。
 
 例如 `execute_shell_command` 的工具输入字段是：
 

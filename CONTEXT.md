@@ -204,6 +204,10 @@ _Avoid_: hook boundary outcome, raw handler payload
 A redacted and size-bounded representation of hook-adjacent text or structured data used for diagnosis without retaining the original payload.
 _Avoid_: raw prompt, raw tool input, raw tool output, full updated input
 
+**Current Tool Response**:
+The successful output produced by the current tool invocation for the active `PostToolUse` boundary. A **Current Tool Response** is the tool's business output, not the full persisted `tool_result` block and not a **Hook Conversation Snapshot**.
+_Avoid_: full tool result block, conversation snapshot, AgentScope acting return value
+
 **Hook Conversation Snapshot**:
 A bounded hook-facing snapshot of the current session's message list at one Hook Runtime boundary, including normal user, assistant, tool-call, and tool-result messages while excluding reasoning content. A **Hook Conversation Snapshot** is not the saved transcript file and is not the full Agent state.
 _Avoid_: full context, transcript contents, agent state dump, reasoning trace
@@ -383,6 +387,9 @@ Resolved as **Source System Configuration** in this context. The configuration i
 
 **"Tool Result Compression Switch"**:
 Resolved as controlling **Historical Tool Result Compaction** only. **File Read Truncation** needs an independent switch.
+
+**"PostToolUse tool_response"**:
+Resolved as **Current Tool Response**: the current tool invocation's business output. It must not mean the full persisted `tool_result` block, the AgentScope `_acting()` return value, or data recovered through **Hook Conversation Snapshot**.
 
 **"Immediate Truncation Configuration Placement"**:
 Resolved as sibling configuration under **Source System Configuration**, not nested inside the **Historical Tool Result Compaction** configuration.

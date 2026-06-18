@@ -42,7 +42,52 @@ class _BaseAgent:
         return Msg("Friday", "base reasoning", "assistant")
 
 
+class _AgentScopeLikeBaseAgent:
+    async def _acting(self, tool_call):
+        await self.memory.add(
+            Msg(
+                "system",
+                [
+                    {
+                        "type": "tool_result",
+                        "id": tool_call["id"],
+                        "name": tool_call["name"],
+                        "output": tool_call["input"].get("output"),
+                    },
+                ],
+                "system",
+            ),
+        )
+        return None
+
+    async def _reasoning(self, tool_choice=None):
+        return Msg("Friday", "base reasoning", "assistant")
+
+
 class _FakeAgent(ToolGuardMixin, _BaseAgent):
+    name = "Friday"
+
+    def __init__(self, tmp_path: Path):
+        self._request_context = {
+            "session_id": "session-1",
+            "user_id": "user-1",
+            "channel": "console",
+            "agent_id": "agent-1",
+        }
+        self._agent_config = SimpleNamespace()
+        self._workspace_dir = tmp_path
+        self.memory = _Memory()
+        self.printed = []
+        self._tool_guard_lock = asyncio.Lock()
+
+    def _ensure_tool_guard(self) -> None:
+        self._tool_guard_engine = SimpleNamespace(enabled=False)
+
+    async def print(self, msg, *args, **kwargs):
+        self.printed.append(msg)
+
+
+class _AgentScopeLikeFakeAgent(ToolGuardMixin, _AgentScopeLikeBaseAgent):
     name = "Friday"
 
     def __init__(self, tmp_path: Path):
@@ -204,6 +249,125 @@ def test_build_tool_hook_context_includes_correlation_fields(tmp_path) -> None:
     assert context.trace_id == "trace-1"
     assert context.chat_id == "chat-1"
     assert context.turn_id == "turn-1"
+
+
+@pytest.mark.asyncio
+async def test_extract_current_tool_response_matches_latest_tool_result(
+    tmp_path,
+) -> None:
+    agent = _FakeAgent(tmp_path)
+    await agent.memory.add(
+        Msg(
+            "system",
+            [
+                {
+                    "type": "tool_result",
+                    "id": "tool-1",
+                    "name": "read_file",
+                    "output": {"version": "old"},
+                },
+            ],
+            "system",
+        ),
+    )
+    await agent.memory.add(
+        Msg(
+            "system",
+            [
+                {
+                    "type": "tool_result",
+                    "id": "tool-2",
+                    "name": "read_file",
+                    "output": {"version": "other"},
+                },
+                {
+                    "type": "tool_result",
+                    "id": "tool-1",
+                    "name": "read_file",
+                    "output": {},
+                },
+            ],
+            "system",
+        ),
+    )
+
+    assert agent._extract_current_tool_response("tool-1") == {}
+    assert agent._extract_current_tool_response("tool-2") == {
+        "version": "other",
+    }
+    assert agent._extract_current_tool_response("missing") is None
+
+    for index, output in enumerate(([], "", 0, False), start=3):
+        tool_id = f"tool-{index}"
+        await agent.memory.add(
+            Msg(
+                "system",
+                [
+                    {
+                        "type": "tool_result",
+                        "id": tool_id,
+                        "name": "read_file",
+                        "output": output,
+                    },
+                ],
+                "system",
+            ),
+        )
+        assert agent._extract_current_tool_response(tool_id) == output
+
+
+@pytest.mark.asyncio
+async def test_post_tool_hook_receives_current_tool_response_from_memory(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    agent = _AgentScopeLikeFakeAgent(tmp_path)
+    agent._agent_config.hooks = HookConfig(
+        enabled=True,
+        events={
+            HookEventName.POST_TOOL_USE: [
+                HookMatcherGroupConfig(
+                    hooks=[
+                        CommandHookHandlerConfig(
+                            id="audit",
+                            command="echo {}",
+                        ),
+                    ],
+                ),
+            ],
+        },
+    )
+    seen_payloads: list[dict] = []
+
+    async def fake_execute_handler(handler, context, *, workspace_dir):
+        del handler, workspace_dir
+        seen_payloads.append(context.to_handler_payload())
+        return HookHandlerResult(handler_id="audit", order=0)
+
+    monkeypatch.setattr(
+        "swe.agents.hook_runtime.runtime.execute_handler",
+        fake_execute_handler,
+    )
+
+    result = await agent._acting(
+        {
+            "id": "tool-1",
+            "name": "market-movement",
+            "input": {
+                "output": {
+                    "reportUrl": "https://example.test/report.html",
+                    "summary": {"sourceData": {"shanghai": 3021.4}},
+                },
+            },
+        },
+    )
+
+    assert result is None
+    assert seen_payloads[0]["hook_event_name"] == "PostToolUse"
+    assert seen_payloads[0]["tool_response"] == {
+        "reportUrl": "https://example.test/report.html",
+        "summary": {"sourceData": {"shanghai": 3021.4}},
+    }
 
 
 @pytest.mark.asyncio

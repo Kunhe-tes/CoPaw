@@ -269,6 +269,53 @@ class ToolGuardMixin:
                     return True
         return False
 
+    def _extract_current_tool_response(self, tool_use_id: str) -> Any | None:
+        """Return the terminal output for the current tool result."""
+        if not tool_use_id:
+            return None
+
+        content = getattr(getattr(self, "memory", None), "content", None)
+        if not isinstance(content, list):
+            return None
+        memory_entries: list[Any] = content
+
+        for entry in memory_entries[::-1]:
+            message = (
+                entry[0]
+                if isinstance(entry, (tuple, list)) and entry
+                else entry
+            )
+            blocks = getattr(message, "content", None)
+            if not isinstance(blocks, list):
+                continue
+            for block in reversed(blocks):
+                block_data = self._tool_result_block_to_dict(block)
+                if not block_data:
+                    continue
+                if block_data.get("type") != "tool_result":
+                    continue
+                if block_data.get("id") != tool_use_id:
+                    continue
+                return block_data.get("output")
+        return None
+
+    @staticmethod
+    def _tool_result_block_to_dict(block: Any) -> dict[str, Any] | None:
+        if isinstance(block, dict):
+            return block
+
+        model_dump = getattr(block, "model_dump", None)
+        if callable(model_dump):
+            dumped = model_dump(mode="json", exclude_none=True)
+            return dumped if isinstance(dumped, dict) else None
+
+        to_dict = getattr(block, "to_dict", None)
+        if callable(to_dict):
+            dumped = to_dict()
+            return dumped if isinstance(dumped, dict) else None
+
+        return None
+
     def _set_forced_tool_replay_approval(
         self,
         replay_approval: Any,
@@ -1021,12 +1068,14 @@ class ToolGuardMixin:
                 tool_name,
                 tool_input,
             )
+            tool_use_id = str(tool_call.get("id") or "")
+            tool_response = self._extract_current_tool_response(tool_use_id)
             post_hook_result = await self._emit_tool_hook(
                 HookEventName.POST_TOOL_USE,
                 tool_name=tool_name,
                 tool_input=tool_input,
-                tool_use_id=str(tool_call.get("id") or ""),
-                tool_response=result,
+                tool_use_id=tool_use_id,
+                tool_response=tool_response,
             )
             await self._record_tool_hook_result(
                 post_hook_result,
