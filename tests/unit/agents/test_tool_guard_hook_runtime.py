@@ -317,6 +317,38 @@ async def test_extract_current_tool_response_matches_latest_tool_result(
 
 
 @pytest.mark.asyncio
+async def test_extract_current_tool_response_omits_structured_failure_output(
+    tmp_path,
+) -> None:
+    agent = _FakeAgent(tmp_path)
+    await agent.memory.add(
+        Msg(
+            "system",
+            [
+                {
+                    "type": "tool_result",
+                    "id": "tool-1",
+                    "name": "execute_shell_command",
+                    "output": {
+                        "isError": True,
+                        "error_type": "tool_timeout",
+                        "content": [
+                            {
+                                "type": "text",
+                                "text": "Error: Tool timed out.",
+                            },
+                        ],
+                    },
+                },
+            ],
+            "system",
+        ),
+    )
+
+    assert agent._extract_current_tool_response("tool-1") is None
+
+
+@pytest.mark.asyncio
 async def test_post_tool_hook_receives_current_tool_response_from_memory(
     monkeypatch,
     tmp_path,
@@ -368,6 +400,63 @@ async def test_post_tool_hook_receives_current_tool_response_from_memory(
         "reportUrl": "https://example.test/report.html",
         "summary": {"sourceData": {"shanghai": 3021.4}},
     }
+
+
+@pytest.mark.asyncio
+async def test_post_tool_hook_omits_structured_failure_tool_response(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    agent = _AgentScopeLikeFakeAgent(tmp_path)
+    agent._agent_config.hooks = HookConfig(
+        enabled=True,
+        events={
+            HookEventName.POST_TOOL_USE: [
+                HookMatcherGroupConfig(
+                    hooks=[
+                        CommandHookHandlerConfig(
+                            id="audit",
+                            command="echo {}",
+                        ),
+                    ],
+                ),
+            ],
+        },
+    )
+    seen_payloads: list[dict] = []
+
+    async def fake_execute_handler(handler, context, *, workspace_dir):
+        del handler, workspace_dir
+        seen_payloads.append(context.to_handler_payload())
+        return HookHandlerResult(handler_id="audit", order=0)
+
+    monkeypatch.setattr(
+        "swe.agents.hook_runtime.runtime.execute_handler",
+        fake_execute_handler,
+    )
+
+    result = await agent._acting(
+        {
+            "id": "tool-1",
+            "name": "execute_shell_command",
+            "input": {
+                "output": {
+                    "isError": True,
+                    "error_type": "tool_timeout",
+                    "content": [
+                        {
+                            "type": "text",
+                            "text": "Error: Tool timed out.",
+                        },
+                    ],
+                },
+            },
+        },
+    )
+
+    assert result is None
+    assert seen_payloads[0]["hook_event_name"] == "PostToolUse"
+    assert "tool_response" not in seen_payloads[0]
 
 
 @pytest.mark.asyncio

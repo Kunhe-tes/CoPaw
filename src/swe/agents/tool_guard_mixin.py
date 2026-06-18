@@ -296,8 +296,15 @@ class ToolGuardMixin:
                     continue
                 if block_data.get("id") != tool_use_id:
                     continue
-                return block_data.get("output")
+                output = block_data.get("output")
+                if self._is_structured_failure_output(output):
+                    return None
+                return output
         return None
+
+    @staticmethod
+    def _is_structured_failure_output(output: Any) -> bool:
+        return isinstance(output, dict) and output.get("isError") is True
 
     @staticmethod
     def _tool_result_block_to_dict(block: Any) -> dict[str, Any] | None:
