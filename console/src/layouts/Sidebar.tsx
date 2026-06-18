@@ -185,6 +185,13 @@ export default function Sidebar({ selectedKey }: SidebarProps) {
       path: "/my-mcp",
       label: t("nav.myMcp"),
     },
+    // 应用市场
+    {
+      key: "market",
+      icon: <Store size={18} />,
+      path: "/market",
+      label: t("nav.market"),
+    },
     // 运行中心
     {
       key: "cron-jobs",
@@ -209,13 +216,6 @@ export default function Sidebar({ selectedKey }: SidebarProps) {
       icon: <SparkVoiceChat01Line size={18} />,
       path: "/heartbeat",
       label: t("nav.heartbeat"),
-    },
-    // 应用市场
-    {
-      key: "market",
-      icon: <Store size={18} />,
-      path: "/market",
-      label: t("nav.market"),
     },
     // 系统设置
     {
@@ -352,7 +352,13 @@ export default function Sidebar({ selectedKey }: SidebarProps) {
         },
       ],
     },
-    // 3. 运行中心
+    // 3. 应用市场（单独一级）
+    {
+      key: "market",
+      label: collapsed ? null : t("nav.market"),
+      icon: <Store size={16} />,
+    },
+    // 4. 运行中心
     {
       key: "run-center",
       label: collapsed ? null : t("nav.runCenter"),
@@ -379,12 +385,6 @@ export default function Sidebar({ selectedKey }: SidebarProps) {
           icon: <SparkVoiceChat01Line size={16} />,
         },
       ],
-    },
-    // 4. 应用市场（单独一级）
-    {
-      key: "market",
-      label: collapsed ? null : t("nav.market"),
-      icon: <Store size={16} />,
     },
     // 5. 系统设置
     {
