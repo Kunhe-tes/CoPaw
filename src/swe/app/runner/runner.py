@@ -1504,6 +1504,18 @@ def _request_source_id(request: AgentRequest) -> str:
     )
 
 
+def _request_approval_source_channel(
+    request: Any | None,
+) -> str | None:
+    channel_meta = getattr(request, "channel_meta", None) or {}
+    if not isinstance(channel_meta, dict):
+        return None
+    source_channel = channel_meta.get("approval_source_channel")
+    if isinstance(source_channel, str) and source_channel.strip():
+        return source_channel.strip()
+    return None
+
+
 def _request_user_name(request: AgentRequest) -> str | None:
     """按兼容顺序读取通道注入的用户名称。"""
     return getattr(request, "user_name", None) or getattr(
@@ -1686,6 +1698,7 @@ class AgentRunner(Runner):
         self,
         session_id: str,
         query: str | None,
+        request: Any | None = None,
     ) -> tuple[Msg | None, bool, dict[str, Any] | None]:
         """Check for a pending tool-guard approval for *session_id*.
 
@@ -1768,6 +1781,11 @@ class AgentRunner(Runner):
                         approved_tool_call["_approval_replay"] = (
                             replay_metadata
                         )
+            await self._notify_console_approval_result(
+                record,
+                ApprovalDecision.APPROVED,
+                request,
+            )
             return None, True, approved_tool_call
 
         explicit_deny = _is_denial(normalized)
@@ -1776,9 +1794,14 @@ class AgentRunner(Runner):
             if explicit_deny
             else ApprovalDecision.DENIED
         )
-        await svc.resolve_request(
+        resolved = await svc.resolve_request(
             pending.request_id,
             denial_decision,
+        )
+        await self._notify_console_approval_result(
+            resolved or pending,
+            denial_decision,
+            request,
         )
         return (
             Msg(
@@ -1798,6 +1821,45 @@ class AgentRunner(Runner):
             None,
         )
 
+    async def _notify_console_approval_result(
+        self,
+        pending: Any,
+        decision: ApprovalDecision,
+        request: Any | None,
+    ) -> None:
+        from ..approvals.external import (
+            CONSOLE_CHANNEL,
+            ExternalApprovalDecision,
+            notify_cron_approval_result,
+        )
+
+        source_channel = _request_approval_source_channel(request)
+        if source_channel and source_channel != CONSOLE_CHANNEL:
+            return
+
+        workspace = getattr(self, "_workspace", None)
+        if workspace is None:
+            return
+
+        external_decision = (
+            ExternalApprovalDecision.APPROVE
+            if decision == ApprovalDecision.APPROVED
+            else ExternalApprovalDecision.DENY
+        )
+        try:
+            await notify_cron_approval_result(
+                workspace,
+                pending,
+                decision=external_decision,
+                source_channel=source_channel or CONSOLE_CHANNEL,
+            )
+        except Exception:
+            logger.exception(
+                "zhaohu console approval result notification failed: "
+                "request_id=%s",
+                getattr(pending, "request_id", None),
+            )
+
     async def _prepare_query_preflight(
         self,
         *,
@@ -1811,7 +1873,11 @@ class AgentRunner(Runner):
             approval_response,
             approval_consumed,
             approved_tool_call,
-        ) = await self._resolve_pending_approval(session_id, query)
+        ) = await self._resolve_pending_approval(
+            session_id,
+            query,
+            request=request,
+        )
         if approval_response is not None:
             return _QueryPreflight(
                 response=approval_response,
