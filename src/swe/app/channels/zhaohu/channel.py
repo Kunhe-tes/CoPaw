@@ -34,6 +34,8 @@ _SUMMARY_LIMIT = 50
 _DEFAULT_CHANNEL = "ZH"
 _DEFAULT_NET = "DMZ"
 _DEFAULT_TIMEOUT = 15.0
+_APPROVAL_TEXT_LIMIT = 800
+_APPROVAL_INPUT_LIMIT = 600
 
 # Message dedup: keep processed IDs for 5 minutes
 _DEDUP_TTL_SECONDS = 300
@@ -565,23 +567,153 @@ class ZhaohuChannel(BaseChannel):
             )
             return (-1, "request failed")
 
+    def _format_approval_tool_input(self, tool_input: object) -> str:
+        """把工具参数格式化为可读文本，避免通知正文无限增长。"""
+        if not tool_input:
+            return ""
+        try:
+            text = json.dumps(
+                tool_input,
+                ensure_ascii=False,
+                indent=2,
+                default=str,
+            )
+        except Exception:
+            text = str(tool_input)
+        return _truncate(_normalize_text(text), _APPROVAL_INPUT_LIMIT)
+
+    def _build_approval_pending_text(
+        self,
+        *,
+        request_id: str,
+        session_id: str,
+        user_id: str,
+        tool_name: str,
+        result_summary: str,
+        findings_count: object,
+        tool_input: object,
+    ) -> str:
+        """构建不含审批按钮的工具审批待处理通知正文。"""
+        lines = [
+            "工具调用需要审批",
+            f"工具：{tool_name or 'unknown'}",
+            f"风险数量：{findings_count or 0}",
+        ]
+        summary = _truncate(
+            _normalize_text(str(result_summary or "")),
+            _APPROVAL_TEXT_LIMIT,
+        )
+        if summary:
+            lines.extend(["风险摘要：", summary])
+        params_text = self._format_approval_tool_input(tool_input)
+        if params_text:
+            lines.extend(["调用参数：", params_text])
+        lines.extend(
+            [
+                f"审批请求：{request_id}",
+                f"会话：{session_id or '-'}",
+                f"用户：{user_id or '-'}",
+                "请在控制台处理该工具审批。",
+            ],
+        )
+        return "\n".join(lines)
+
+    def _build_approval_result_text(
+        self,
+        *,
+        request_id: str,
+        session_id: str,
+        user_id: str,
+        tool_name: str,
+        decision: str,
+        source_channel: str,
+    ) -> str:
+        """构建不含按钮的工具审批结果通知正文。"""
+        decision_text = "通过" if decision == "approved" else "拒绝"
+        lines = [
+            f"工具审批已{decision_text}",
+            f"工具：{tool_name or 'unknown'}",
+            f"审批请求：{request_id}",
+            f"会话：{session_id or '-'}",
+            f"用户：{user_id or '-'}",
+        ]
+        if source_channel:
+            lines.append(f"审批来源：{source_channel}")
+        return "\n".join(lines)
+
     async def send_cron_approval_card(
         self,
+        *,
+        request_id: str,
+        session_id: str,
+        user_id: str,
+        tool_name: str,
+        result_summary: str = "",
+        findings_count: object = 0,
+        tool_input: object = None,
         **_: object,
     ) -> tuple[int, str]:
-        """Placeholder for sending cron approval rich cards.
+        """发送工具审批待处理通知，本阶段只发正文信息，不发按钮。"""
+        if not user_id:
+            logger.warning(
+                "zhaohu approval pending notification skipped: user_id is empty",
+            )
+            return (-1, "user_id is empty")
 
-        The approval workflow is wired first; the actual Zhaohu card format
-        and callback binding will be implemented separately.
-        """
-        return (0, "noop")
+        text = self._build_approval_pending_text(
+            request_id=request_id,
+            session_id=session_id,
+            user_id=user_id,
+            tool_name=tool_name,
+            result_summary=result_summary,
+            findings_count=findings_count,
+            tool_input=tool_input,
+        )
+        await self.send(
+            user_id,
+            text,
+            {
+                "session_id": session_id,
+                "notification_summary": "工具调用需要审批",
+            },
+        )
+        return (0, "sent")
 
     async def send_cron_approval_result(
         self,
+        *,
+        request_id: str,
+        session_id: str,
+        user_id: str,
+        tool_name: str = "",
+        decision: str,
+        source_channel: str = "",
         **_: object,
     ) -> tuple[int, str]:
-        """Placeholder for sending cron approval result notifications."""
-        return (0, "noop")
+        """发送工具审批结果通知，本阶段只发正文信息，不发按钮。"""
+        if not user_id:
+            logger.warning(
+                "zhaohu approval result notification skipped: user_id is empty",
+            )
+            return (-1, "user_id is empty")
+
+        text = self._build_approval_result_text(
+            request_id=request_id,
+            session_id=session_id,
+            user_id=user_id,
+            tool_name=tool_name,
+            decision=decision,
+            source_channel=source_channel,
+        )
+        await self.send(
+            user_id,
+            text,
+            {
+                "session_id": session_id,
+                "notification_summary": "工具审批结果",
+            },
+        )
+        return (0, "sent")
 
     def _build_claw_url(
         self,
