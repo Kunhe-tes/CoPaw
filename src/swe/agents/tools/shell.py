@@ -13,7 +13,7 @@ import subprocess
 import sys
 import tempfile
 from pathlib import Path
-from typing import Optional
+from typing import Any, Awaitable, Optional
 
 from agentscope.message import TextBlock
 from agentscope.tool import ToolResponse
@@ -770,7 +770,10 @@ async def _terminate_unix_process_group(
     proc: asyncio.subprocess.Process,
 ) -> None:
     """Terminate a Unix subprocess group, escalating to SIGKILL if needed."""
-    pgid = os.getpgid(proc.pid)
+    try:
+        pgid = os.getpgid(proc.pid)
+    except ProcessLookupError:
+        pgid = proc.pid
     os.killpg(pgid, signal.SIGTERM)
     try:
         await asyncio.wait_for(proc.wait(), timeout=2)
@@ -874,11 +877,17 @@ async def _execute_unix_subprocess(
     stderr_task = asyncio.create_task(
         _read_stream(proc.stderr, "stderr", stderr_chunks),
     )
+    wait_task: asyncio.Task[int] | None = None
 
     try:
-        await asyncio.wait_for(proc.wait(), timeout=timeout)
+        wait_task = asyncio.create_task(proc.wait())
+        tasks = (wait_task, stdout_task, stderr_task)
+        done, pending = await asyncio.wait(tasks, timeout=timeout)
+        if pending:
+            raise asyncio.TimeoutError
         returncode = proc.returncode if proc.returncode is not None else -1
-        await asyncio.gather(stdout_task, stderr_task)
+        for task in done:
+            task.result()
         return (
             returncode,
             smart_decode(b"".join(stdout_chunks)),
@@ -899,7 +908,16 @@ async def _execute_unix_subprocess(
                 await proc.wait()
             except (ProcessLookupError, OSError):
                 pass
-        await asyncio.gather(stdout_task, stderr_task, return_exceptions=True)
+        timeout_tasks: list[Awaitable[Any]] = [stdout_task, stderr_task]
+        if wait_task is not None:
+            timeout_tasks.append(wait_task)
+        try:
+            await asyncio.wait_for(
+                asyncio.gather(*timeout_tasks, return_exceptions=True),
+                timeout=1,
+            )
+        except asyncio.TimeoutError:
+            pass
         stdout_str = smart_decode(b"".join(stdout_chunks))
         stderr_str = smart_decode(b"".join(stderr_chunks))
         if stderr_str:
@@ -909,8 +927,8 @@ async def _execute_unix_subprocess(
         await emit_tool_output_text("stderr", stderr_suffix)
         return -1, stdout_str, stderr_str
     finally:
-        for task in (stdout_task, stderr_task):
-            if not task.done():
+        for task in (stdout_task, stderr_task, wait_task):
+            if task is not None and not task.done():
                 task.cancel()
 
 

@@ -1,4 +1,5 @@
 # -*- coding: utf-8 -*-
+import asyncio
 import os
 import sys
 
@@ -47,3 +48,25 @@ async def test_unix_shell_emits_live_stdout_and_stderr_frames(tmp_path):
         frame["tool_name"] == "execute_shell_command" for frame in frames
     )
     assert [frame["sequence"] for frame in frames] == [1, 2]
+
+
+@pytest.mark.asyncio
+async def test_unix_shell_timeout_covers_background_pipe_holders(tmp_path):
+    if sys.platform == "win32":
+        pytest.skip("Unix subprocess live output is not used on Windows")
+
+    from swe.agents.tools import shell
+
+    returncode, stdout, stderr = await asyncio.wait_for(
+        shell._execute_unix_subprocess(
+            "sleep 2 & echo done",
+            tmp_path,
+            0.1,
+            os.environ.copy(),
+        ),
+        timeout=1,
+    )
+
+    assert returncode == -1
+    assert stdout == "done"
+    assert "TimeoutError" in stderr
