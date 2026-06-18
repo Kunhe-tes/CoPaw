@@ -32,6 +32,9 @@ interface ProviderModelState {
   loadModelData: (
     params?: GetActiveModelsRequest,
   ) => Promise<ProviderModelData>;
+  loadActiveModelData: (
+    params?: GetActiveModelsRequest,
+  ) => Promise<ActiveModelsInfo | null>;
   setActiveModels: (activeModels: ActiveModelsInfo | null) => void;
   invalidate: (options?: { providers?: boolean; active?: boolean }) => void;
   reset: () => void;
@@ -41,6 +44,8 @@ const providerCache = new Map<string, ProviderCacheEntry>();
 const activeCache = new Map<string, ActiveCacheEntry>();
 const providerInflight = new Map<string, Promise<ProviderInfo[]>>();
 const activeInflight = new Map<string, Promise<ActiveModelsInfo | null>>();
+let providerCacheGeneration = 0;
+let activeCacheGeneration = 0;
 
 function buildActiveModelQuery(params?: GetActiveModelsRequest): string {
   if (!params?.scope && !params?.agent_id) {
@@ -119,14 +124,22 @@ async function loadProviders(key: string): Promise<ProviderInfo[]> {
   const pending = providerInflight.get(key);
   if (pending) return pending;
 
-  const loadPromise = request<ProviderInfo[]>("/models")
+  const loadGeneration = providerCacheGeneration;
+  const loadPromise: Promise<ProviderInfo[]> = request<ProviderInfo[]>(
+    "/models",
+  )
     .then((providers) => (Array.isArray(providers) ? providers : []))
     .then((providers) => {
+      if (loadGeneration !== providerCacheGeneration) {
+        return readFreshProviders(key) ?? [];
+      }
       providerCache.set(key, { providers, loadedAt: Date.now() });
       return providers;
     })
     .finally(() => {
-      providerInflight.delete(key);
+      if (providerInflight.get(key) === loadPromise) {
+        providerInflight.delete(key);
+      }
     });
 
   providerInflight.set(key, loadPromise);
@@ -143,17 +156,24 @@ async function loadActiveModels(
   const pending = activeInflight.get(key);
   if (pending) return pending;
 
-  const loadPromise = request<ActiveModelsInfo>(
-    buildActiveModelQuery(params ?? { scope: "effective" }),
-  )
-    .then((activeModels) => activeModels || null)
-    .then((activeModels) => {
-      activeCache.set(key, { activeModels, loadedAt: Date.now() });
-      return activeModels;
-    })
-    .finally(() => {
-      activeInflight.delete(key);
-    });
+  const loadGeneration = activeCacheGeneration;
+  const loadPromise: Promise<ActiveModelsInfo | null> =
+    request<ActiveModelsInfo>(
+      buildActiveModelQuery(params ?? { scope: "effective" }),
+    )
+      .then((activeModels) => activeModels || null)
+      .then((activeModels) => {
+        if (loadGeneration !== activeCacheGeneration) {
+          return readFreshActive(key) ?? null;
+        }
+        activeCache.set(key, { activeModels, loadedAt: Date.now() });
+        return activeModels;
+      })
+      .finally(() => {
+        if (activeInflight.get(key) === loadPromise) {
+          activeInflight.delete(key);
+        }
+      });
 
   activeInflight.set(key, loadPromise);
   return loadPromise;
@@ -174,6 +194,8 @@ export const useProviderModelStore = create<ProviderModelState>((set) => ({
   async loadModelData(params) {
     const providerKey = providerCacheKey();
     const activeKey = activeCacheKey(params);
+    const providerLoadGeneration = providerCacheGeneration;
+    const activeLoadGeneration = activeCacheGeneration;
     set({ loading: true, error: null });
     return Promise.all([
       loadProviders(providerKey),
@@ -184,23 +206,53 @@ export const useProviderModelStore = create<ProviderModelState>((set) => ({
           providers,
           activeModels: activeModels || null,
         };
-        set({
-          ...data,
+        set((state) => ({
+          providers:
+            providerLoadGeneration === providerCacheGeneration
+              ? providers
+              : state.providers,
+          activeModels:
+            activeLoadGeneration === activeCacheGeneration
+              ? activeModels || null
+              : state.activeModels,
           loading: false,
           error: null,
-        });
+        }));
         return data;
       })
       .catch((error) => {
         const message = error instanceof Error ? error.message : String(error);
-        set({
-          providers: [],
-          activeModels: null,
+        set((state) => ({
+          providers:
+            providerLoadGeneration === providerCacheGeneration
+              ? []
+              : state.providers,
+          activeModels:
+            activeLoadGeneration === activeCacheGeneration
+              ? null
+              : state.activeModels,
           loading: false,
-          error: message,
-        });
+          error:
+            providerLoadGeneration === providerCacheGeneration ||
+            activeLoadGeneration === activeCacheGeneration
+              ? message
+              : state.error,
+        }));
         throw error;
       });
+  },
+
+  async loadActiveModelData(params) {
+    const activeKey = activeCacheKey(params);
+    const activeLoadGeneration = activeCacheGeneration;
+    const activeModels = await loadActiveModels(activeKey, params);
+    set((state) => ({
+      activeModels:
+        activeLoadGeneration === activeCacheGeneration
+          ? activeModels || null
+          : state.activeModels,
+    }));
+    return activeModels;
   },
 
   setActiveModels(activeModels) {
@@ -215,6 +267,8 @@ export const useProviderModelStore = create<ProviderModelState>((set) => ({
     const clearActive = options?.active ?? true;
 
     if (clearProviders && clearActive) {
+      providerCacheGeneration += 1;
+      activeCacheGeneration += 1;
       providerCache.clear();
       activeCache.clear();
       providerInflight.clear();
@@ -224,11 +278,13 @@ export const useProviderModelStore = create<ProviderModelState>((set) => ({
     }
 
     if (clearProviders) {
+      providerCacheGeneration += 1;
       providerCache.clear();
       providerInflight.clear();
     }
 
     if (clearActive) {
+      activeCacheGeneration += 1;
       activeCache.clear();
       activeInflight.clear();
     }
@@ -240,6 +296,8 @@ export const useProviderModelStore = create<ProviderModelState>((set) => ({
   },
 
   reset() {
+    providerCacheGeneration += 1;
+    activeCacheGeneration += 1;
     providerCache.clear();
     activeCache.clear();
     providerInflight.clear();

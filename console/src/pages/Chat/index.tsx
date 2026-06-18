@@ -497,7 +497,9 @@ export default function ChatPage() {
   const sourceSystemConfig = useSourceSystemConfigStore(
     (state) => state.config,
   );
-  const loadModelData = useProviderModelStore((state) => state.loadModelData);
+  const loadActiveModelData = useProviderModelStore(
+    (state) => state.loadActiveModelData,
+  );
   const taskProgressEnabled = isChatTaskProgressEnabled(sourceSystemConfig);
 
   // useTransition for non-urgent state updates (badge clearing)
@@ -1220,7 +1222,7 @@ export default function ChatPage() {
       };
 
       try {
-        const { activeModels } = await loadModelData({
+        const activeModels = await loadActiveModelData({
           scope: "effective",
         });
         if (
@@ -1327,7 +1329,7 @@ export default function ChatPage() {
         timeoutSignal.cleanup();
       }
     },
-    [loadModelData, resolveLogicalRequestSessionId, resolveRequestChatId],
+    [loadActiveModelData, resolveLogicalRequestSessionId, resolveRequestChatId],
   );
 
   const handleFileUpload = useCallback(

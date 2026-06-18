@@ -126,4 +126,58 @@ describe("providerModelStore", () => {
       "/models/active?scope=effective&agent_id=agent-b",
     );
   });
+
+  it("loads active model data without fetching the provider list", async () => {
+    vi.mocked(request).mockResolvedValueOnce({
+      active_llm: { provider_id: "openai", model: "gpt-4" },
+    });
+
+    const store = useProviderModelStore.getState();
+    const activeModels = await store.loadActiveModelData({
+      scope: "effective",
+    });
+
+    expect(activeModels?.active_llm?.model).toBe("gpt-4");
+    expect(useProviderModelStore.getState().activeModels).toBe(activeModels);
+    expect(useProviderModelStore.getState().providers).toEqual([]);
+    expect(request).toHaveBeenCalledTimes(1);
+    expect(request).toHaveBeenCalledWith("/models/active?scope=effective");
+  });
+
+  it("does not repopulate provider state or cache from an invalidated in-flight load", async () => {
+    let resolveStaleProviders: (providers: ProviderInfo[]) => void = () => {};
+    let providerCalls = 0;
+
+    vi.mocked(request).mockImplementation(async (url) => {
+      if (url === "/models") {
+        providerCalls += 1;
+        if (providerCalls === 1) {
+          return new Promise<ProviderInfo[]>((resolve) => {
+            resolveStaleProviders = resolve;
+          });
+        }
+        return [provider("fresh")];
+      }
+
+      return {
+        active_llm: { provider_id: "openai", model: "gpt-4" },
+      };
+    });
+
+    const store = useProviderModelStore.getState();
+    const pendingLoad = store.loadModelData();
+
+    expect(request).toHaveBeenCalledWith("/models");
+
+    store.invalidate({ providers: true, active: false });
+    resolveStaleProviders([provider("stale")]);
+    await pendingLoad;
+
+    expect(useProviderModelStore.getState().providers).toEqual([]);
+
+    const reloaded = await store.loadModelData();
+
+    expect(reloaded.providers[0]?.id).toBe("fresh");
+    expect(providerCalls).toBe(2);
+  });
 });
