@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 import asyncio
 import os
+import signal
 import sys
 
 import pytest
@@ -70,3 +71,45 @@ async def test_unix_shell_timeout_covers_background_pipe_holders(tmp_path):
     assert returncode == -1
     assert stdout == "done"
     assert "TimeoutError" in stderr
+
+
+@pytest.mark.asyncio
+async def test_unix_shell_timeout_kills_sigterm_ignoring_pipe_holders(
+    tmp_path,
+):
+    if sys.platform == "win32":
+        pytest.skip("Unix subprocess live output is not used on Windows")
+
+    from swe.agents.tools import shell
+
+    pid_file = tmp_path / "background.pid"
+    background_pid: int | None = None
+    try:
+        returncode, stdout, stderr = await asyncio.wait_for(
+            shell._execute_unix_subprocess(
+                (
+                    "trap '' TERM; "
+                    "while :; do sleep 1; done & "
+                    f"echo $! > {pid_file}; "
+                    "echo done"
+                ),
+                tmp_path,
+                0.1,
+                os.environ.copy(),
+            ),
+            timeout=4,
+        )
+
+        background_pid = int(pid_file.read_text().strip())
+
+        assert returncode == -1
+        assert stdout == "done"
+        assert "TimeoutError" in stderr
+        with pytest.raises(ProcessLookupError):
+            os.kill(background_pid, 0)
+    finally:
+        if background_pid is not None:
+            try:
+                os.killpg(os.getpgid(background_pid), signal.SIGKILL)
+            except ProcessLookupError:
+                pass

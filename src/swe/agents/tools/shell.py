@@ -774,12 +774,48 @@ async def _terminate_unix_process_group(
         pgid = os.getpgid(proc.pid)
     except ProcessLookupError:
         pgid = proc.pid
-    os.killpg(pgid, signal.SIGTERM)
     try:
-        await asyncio.wait_for(proc.wait(), timeout=2)
-    except asyncio.TimeoutError:
-        os.killpg(pgid, signal.SIGKILL)
-        await asyncio.wait_for(proc.wait(), timeout=2)
+        os.killpg(pgid, signal.SIGTERM)
+    except ProcessLookupError:
+        return
+    if not await _wait_for_unix_process_group_exit(pgid, proc, timeout=2):
+        try:
+            os.killpg(pgid, signal.SIGKILL)
+        except ProcessLookupError:
+            return
+        await _wait_for_unix_process_group_exit(pgid, proc, timeout=2)
+
+
+def _unix_process_group_exists(pgid: int) -> bool:
+    """Return whether any process is still present in the process group."""
+    try:
+        os.killpg(pgid, 0)
+    except ProcessLookupError:
+        return False
+    return True
+
+
+async def _wait_for_unix_process_group_exit(
+    pgid: int,
+    proc: asyncio.subprocess.Process,
+    timeout: float,
+) -> bool:
+    """Wait for the spawned process group to disappear."""
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + timeout
+    while _unix_process_group_exists(pgid):
+        remaining = deadline - loop.time()
+        if remaining <= 0:
+            return False
+        delay = min(0.05, remaining)
+        if proc.returncode is None:
+            try:
+                await asyncio.wait_for(proc.wait(), timeout=delay)
+            except asyncio.TimeoutError:
+                pass
+        else:
+            await asyncio.sleep(delay)
+    return True
 
 
 async def _drain_unix_subprocess_output(
