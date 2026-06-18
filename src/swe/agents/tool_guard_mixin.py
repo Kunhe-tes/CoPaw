@@ -24,6 +24,7 @@ from typing import Any, Literal
 from agentscope.message import Msg, ToolResultBlock
 
 from ..constant import AGENT_WATCHDOG_TIMEOUT, QUERY_TIMEOUT_SECONDS
+from ..app.runner.tool_output_frames import tool_output_invocation
 from .hook_runtime import HookRuntime
 from .hook_runtime.models import (
     HookConfig,
@@ -153,36 +154,40 @@ class ToolGuardMixin:
             tool_call_id=tool_call_id,
             reason="tool_execution",
         ):
-            if self._tool_has_specific_timeout(tool_name):
-                return await super()._acting(tool_call)  # type: ignore[misc]
+            with tool_output_invocation(
+                tool_call_id=tool_call_id,
+                tool_name=tool_name,
+            ):
+                if self._tool_has_specific_timeout(tool_name):
+                    return await super()._acting(tool_call)  # type: ignore[misc]
 
-            started_at = time.monotonic()
-            try:
-                return await asyncio.wait_for(
-                    super()._acting(tool_call),  # type: ignore[misc]
-                    timeout=LOCAL_TOOL_EXECUTION_HARD_TIMEOUT,
-                )
-            except asyncio.TimeoutError:
-                elapsed = time.monotonic() - started_at
-                timeout_text = (
-                    f"Error: Tool {tool_name} timed out after "
-                    f"{LOCAL_TOOL_EXECUTION_HARD_TIMEOUT:.2f}s "
-                    f"(elapsed {elapsed:.2f}s)."
-                )
-                logger.warning(
-                    "Local tool hard timeout: tool_name=%s tool_call_id=%s "
-                    "elapsed=%.3fs timeout=%.3fs",
-                    tool_name,
-                    tool_call_id,
-                    elapsed,
-                    LOCAL_TOOL_EXECUTION_HARD_TIMEOUT,
-                )
-                await self._persist_local_tool_timeout_result(
-                    tool_call_id,
-                    tool_name,
-                    timeout_text,
-                )
-                return None
+                started_at = time.monotonic()
+                try:
+                    return await asyncio.wait_for(
+                        super()._acting(tool_call),  # type: ignore[misc]
+                        timeout=LOCAL_TOOL_EXECUTION_HARD_TIMEOUT,
+                    )
+                except asyncio.TimeoutError:
+                    elapsed = time.monotonic() - started_at
+                    timeout_text = (
+                        f"Error: Tool {tool_name} timed out after "
+                        f"{LOCAL_TOOL_EXECUTION_HARD_TIMEOUT:.2f}s "
+                        f"(elapsed {elapsed:.2f}s)."
+                    )
+                    logger.warning(
+                        "Local tool hard timeout: tool_name=%s tool_call_id=%s "
+                        "elapsed=%.3fs timeout=%.3fs",
+                        tool_name,
+                        tool_call_id,
+                        elapsed,
+                        LOCAL_TOOL_EXECUTION_HARD_TIMEOUT,
+                    )
+                    await self._persist_local_tool_timeout_result(
+                        tool_call_id,
+                        tool_name,
+                        timeout_text,
+                    )
+                    return None
 
     async def _persist_local_tool_timeout_result(
         self,

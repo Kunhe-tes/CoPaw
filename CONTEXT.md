@@ -136,6 +136,26 @@ _Avoid_: tool result compression configuration
 The user-visible lifecycle state of one user-visible tool invocation during a Main Agent run. A **Tool Call Status** describes an individual tool invocation as running, successful, or failed; failed means the tool itself failed, not that the user stopped or cancelled the overall Main Agent run. The start of a tool invocation carries the running status, and the tool's returned output carries the successful or failed terminal status.
 _Avoid_: tool event status, frontend tool result, trace status
 
+**Tool Output Frame**:
+A live, user-visible presentation update for textual output produced while one tool invocation is still running. A **Tool Output Frame** belongs to exactly one **Tool Call Status** lifecycle, preserves its output source when known, is ordered only within that tool invocation, is not visible to the Main Agent as model context, and is not itself the final tool result remembered by the Main Agent.
+_Avoid_: partial tool result, durable output chunk, tool memory frame, streaming object result
+
+**Live Tool Output Area**:
+The user-visible region inside a tool card where **Tool Output Frames** for that tool invocation are rendered during execution. A **Live Tool Output Area** is part of the tool presentation, not a separate assistant message in the conversation, and the final tool result becomes the card's authoritative output when it arrives.
+_Avoid_: log chat message, separate output bubble, global tool log
+
+**Terminal Tool Result Precedence**:
+The rule that a successful or failed final tool result replaces the **Live Tool Output Area** as the authoritative tool-card output. If a tool is cancelled without a final result, the card may keep the last live output as cancellation context.
+_Avoid_: live output as final result, partial result precedence
+
+**Live Tool Output Guard**:
+The narrow runtime protection applied before **Tool Output Frames** are sent for live presentation. A **Live Tool Output Guard** controls live output eligibility, live display limits, live replay limits, source preservation, and required redaction for real-time frames without replacing the existing final tool-result rules.
+_Avoid_: tool output policy, final result policy, historical compaction policy
+
+**Live Stream Replay**:
+The best-effort restoration of live presentation events for a Main Agent run that is still active when the user reconnects. **Live Stream Replay** may include **Tool Output Frames** from the active run, but it is not historical recovery after the run has ended.
+_Avoid_: chat history replay, durable tool log, completed-run output restore
+
 **Tool Error Summary**:
 A user-visible, bounded explanation attached to a failed **Tool Call Status**. A **Tool Error Summary** is not an audit record, diagnostic log, or full raw tool failure.
 _Avoid_: raw tool error, tool failure log, audit error
@@ -368,6 +388,21 @@ Resolved as **Tool Execution Error** for explicit tool-declared failure, with ge
 
 **"Canonical Failed Tool Output Shape"**:
 Resolved as **Structured Tool Failure Result**, using the MCP-style `isError=true` result shape rather than plain-text failure strings.
+
+**"Streaming Tool Output Scope"**:
+Resolved as **Tool Output Frame** support for long-running tools with naturally incremental textual output. Ordinary one-shot tools should not split their final result into artificial frames.
+
+**"Initial Live Tool Output Scope"**:
+Resolved as shell-style terminal tools only. MCP, file-reading, search, browser, and structured business tools do not emit **Tool Output Frames** in the first version.
+
+**"Live Tool Output Limit"**:
+Resolved as a presentation and live-replay protection for the **Live Tool Output Area** only. When the final tool result arrives, the tool card's authoritative output follows the normal final-result rules rather than the live-output limit.
+
+**"Live Tool Output Default Limit"**:
+Resolved as 64KB or 2000 lines for the **Live Tool Output Area**, whichever is reached first. When the limit is exceeded, Swe keeps the most recent live output and shows an explicit omission marker.
+
+**"Tool Output Frame Stream Shape"**:
+Resolved as a dedicated presentation event for **Tool Output Frames**, not a final tool-output message and not a model-visible content delta.
 
 **"Immediate Truncation Defaults"**:
 Resolved as preserving existing runtime behavior when a source has no explicit override. File reads keep their current default limit.

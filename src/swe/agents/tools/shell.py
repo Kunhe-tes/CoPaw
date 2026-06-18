@@ -19,6 +19,10 @@ from agentscope.message import TextBlock
 from agentscope.tool import ToolResponse
 
 from ..tool_failure import ToolExecutionError
+from ...app.runner.tool_output_frames import (
+    ToolOutputSource,
+    emit_tool_output_text,
+)
 from ...envs.runtime import build_runtime_env
 from ...security.tenant_path_boundary import (
     is_path_within_tenant_with_base,
@@ -822,6 +826,30 @@ async def _execute_unix_subprocess(
     env: dict[str, str],
 ) -> tuple[int, str, str]:
     """Execute a shell command on Unix-like platforms."""
+    stdout_chunks: list[bytes] = []
+    stderr_chunks: list[bytes] = []
+
+    def _decode_live_chunk(chunk: bytes) -> str:
+        try:
+            return chunk.decode("utf-8")
+        except UnicodeDecodeError:
+            encoding = locale.getpreferredencoding(False) or "utf-8"
+            return chunk.decode(encoding, errors="replace")
+
+    async def _read_stream(
+        stream: asyncio.StreamReader | None,
+        source: ToolOutputSource,
+        chunks: list[bytes],
+    ) -> None:
+        if stream is None:
+            return
+        while True:
+            chunk = await stream.read(4096)
+            if not chunk:
+                break
+            chunks.append(chunk)
+            await emit_tool_output_text(source, _decode_live_chunk(chunk))
+
     proc = await asyncio.create_subprocess_shell(
         cmd,
         stdout=asyncio.subprocess.PIPE,
@@ -832,17 +860,58 @@ async def _execute_unix_subprocess(
         start_new_session=True,
     )
 
-    try:
-        # Apply timeout to communicate directly; wait()+communicate()
-        # can hang if descendants keep stdout/stderr pipes open.
+    if not all(hasattr(proc, attr) for attr in ("stdout", "stderr", "wait")):
         stdout, stderr = await asyncio.wait_for(
             proc.communicate(),
             timeout=timeout,
         )
         returncode = proc.returncode if proc.returncode is not None else -1
         return returncode, smart_decode(stdout), smart_decode(stderr)
+
+    stdout_task = asyncio.create_task(
+        _read_stream(proc.stdout, "stdout", stdout_chunks),
+    )
+    stderr_task = asyncio.create_task(
+        _read_stream(proc.stderr, "stderr", stderr_chunks),
+    )
+
+    try:
+        await asyncio.wait_for(proc.wait(), timeout=timeout)
+        returncode = proc.returncode if proc.returncode is not None else -1
+        await asyncio.gather(stdout_task, stderr_task)
+        return (
+            returncode,
+            smart_decode(b"".join(stdout_chunks)),
+            smart_decode(b"".join(stderr_chunks)),
+        )
     except asyncio.TimeoutError:
-        return await _handle_unix_subprocess_timeout(proc, timeout)
+        stderr_suffix = (
+            f"⚠️ TimeoutError: The command execution exceeded "
+            f"the timeout of {timeout} seconds. "
+            f"Please consider increasing the timeout value if this command "
+            f"requires more time to complete."
+        )
+        try:
+            await _terminate_unix_process_group(proc)
+        except (ProcessLookupError, OSError):
+            try:
+                proc.kill()
+                await proc.wait()
+            except (ProcessLookupError, OSError):
+                pass
+        await asyncio.gather(stdout_task, stderr_task, return_exceptions=True)
+        stdout_str = smart_decode(b"".join(stdout_chunks))
+        stderr_str = smart_decode(b"".join(stderr_chunks))
+        if stderr_str:
+            stderr_str += f"\n{stderr_suffix}"
+        else:
+            stderr_str = stderr_suffix
+        await emit_tool_output_text("stderr", stderr_suffix)
+        return -1, stdout_str, stderr_str
+    finally:
+        for task in (stdout_task, stderr_task):
+            if not task.done():
+                task.cancel()
 
 
 async def _execute_platform_subprocess(
