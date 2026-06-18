@@ -141,6 +141,77 @@ def test_conversation_snapshot_keeps_media_reference_only() -> None:
     )
 
 
+def test_conversation_snapshot_reports_meta_when_message_is_fully_omitted() -> (
+    None
+):
+    payload = build_handler_conversation_snapshot(
+        {
+            "messages": [
+                {
+                    "role": "assistant",
+                    "content": [
+                        {"type": "thinking", "thinking": "hidden"},
+                    ],
+                },
+                {
+                    "role": "system",
+                    "content": [
+                        {
+                            "type": "image",
+                            "data": "base64-payload",
+                        },
+                    ],
+                },
+            ],
+        },
+        limit=50,
+    )
+
+    assert payload["conversation_snapshot"] == []
+    assert payload["conversation_snapshot_meta"]["reasoning_omitted"] is True
+    assert (
+        payload["conversation_snapshot_meta"]["media_content_omitted"] is True
+    )
+
+
+def test_conversation_snapshot_preserves_existing_media_omission_marker() -> (
+    None
+):
+    payload = build_handler_conversation_snapshot(
+        {
+            "messages": [
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "image",
+                            "file_url": "file:///tmp/image.png",
+                            "media_type": "image/png",
+                            "content_omitted": True,
+                        },
+                    ],
+                },
+            ],
+            "meta": {"media_content_omitted": True},
+        },
+        limit=50,
+    )
+
+    assert payload["conversation_snapshot"] == [
+        {
+            "role": "user",
+            "content": [
+                {
+                    "type": "image",
+                    "file_url": "file:///tmp/image.png",
+                    "media_type": "image/png",
+                    "content_omitted": True,
+                },
+            ],
+        },
+    ]
+
+
 def test_conversation_snapshot_sanitizes_nested_tool_result_output() -> None:
     payload = build_handler_conversation_snapshot(
         {

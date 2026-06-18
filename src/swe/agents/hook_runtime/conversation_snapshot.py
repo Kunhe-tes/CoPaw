@@ -26,6 +26,7 @@ MEDIA_REFERENCE_KEYS = {
     "size",
     "width",
     "height",
+    "content_omitted",
 }
 INLINE_MEDIA_KEYS = {
     "base64",
@@ -111,12 +112,12 @@ def normalize_conversation_snapshot_messages(
 
     for message in messages:
         item, item_meta = _normalize_message(message)
-        if item is None:
-            continue
         reasoning_omitted = reasoning_omitted or item_meta["reasoning_omitted"]
         media_content_omitted = (
             media_content_omitted or item_meta["media_content_omitted"]
         )
+        if item is None:
+            continue
         normalized.append(item)
 
     return normalized, {
@@ -259,7 +260,7 @@ def _block_to_dict(block: Any) -> dict[str, Any] | None:
 
 
 def _media_reference_block(block: dict[str, Any]) -> dict[str, Any]:
-    omitted = False
+    omitted = bool(block.get("content_omitted"))
     reference: dict[str, Any] = {}
     for key, value in block.items():
         if key in INLINE_MEDIA_KEYS:

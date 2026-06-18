@@ -247,6 +247,11 @@ def _get_agent_memory_content(states: dict[str, Any]) -> list[Any] | None:
     return content
 
 
+@dataclass(frozen=True)
+class _PersistedMemorySnapshot:
+    content: list[Any]
+
+
 def _last_tool_guard_denied_index(content: list[Any]) -> int | None:
     for index in range(len(content) - 1, -1, -1):
         if _is_tool_guard_denied_entry(content[index]):
@@ -669,14 +674,65 @@ async def _emit_runner_hook(
     )
 
     async def _conversation_snapshot_provider():
-        return await capture_conversation_snapshot(
-            getattr(agent, "memory", None) if agent is not None else None,
+        if agent is not None:
+            snapshot = await capture_conversation_snapshot(
+                getattr(agent, "memory", None),
+            )
+            if snapshot is not None:
+                return snapshot
+        return await _capture_persisted_runner_conversation_snapshot(
+            request=request,
+            runner=runner,
         )
 
     return await runtime.emit(
         context,
         workspace_dir=Path(runner.workspace_dir or WORKING_DIR),
         conversation_snapshot_provider=_conversation_snapshot_provider,
+    )
+
+
+async def _capture_persisted_runner_conversation_snapshot(
+    *,
+    request: Any,
+    runner: "AgentRunner",
+) -> dict[str, Any] | None:
+    if getattr(request, "skip_history", False):
+        return None
+
+    session = getattr(runner, "session", None)
+    get_session_state_dict = getattr(session, "get_session_state_dict", None)
+    if not callable(get_session_state_dict):
+        return None
+
+    session_id = getattr(request, "session_id", None)
+    if not session_id:
+        return None
+
+    try:
+        state = await get_session_state_dict(
+            session_id=_coerce_session_storage_id(session_id),
+            user_id=_coerce_session_storage_user_id(
+                getattr(request, "user_id", None),
+            ),
+            allow_not_exist=True,
+        )
+    except Exception:
+        logger.debug(
+            "Failed to load persisted memory for hook snapshot",
+            exc_info=True,
+        )
+        return None
+
+    if not isinstance(state, dict):
+        return None
+
+    content = _get_agent_memory_content(state)
+    if content is None:
+        return None
+
+    return await capture_conversation_snapshot(
+        _PersistedMemorySnapshot(content=content),
     )
 
 
