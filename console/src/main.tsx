@@ -11,6 +11,9 @@ import {
   fetchAndSetUserName,
 } from "./utils/iframeMessage";
 import { isExternalTokenEnabled, ensureValidToken } from "./api/externalToken";
+import { applyConsoleDesignTokens } from "./config/consoleDesignTokens";
+
+applyConsoleDesignTokens();
 
 /**
  * 初始化流程：

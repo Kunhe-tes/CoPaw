@@ -750,6 +750,7 @@
     "switchFailed": "切换模型失败"
   },
   "models": {
+    "breadcrumbLabel": "模型管理页面路径",
     "llmConfiguration": "LLM 配置",
     "providersTitle": "提供商",
     "providersDescription": "为每个提供商配置 API 密钥和端点。",
@@ -831,6 +832,15 @@
     "custom": "自定义",
     "builtin": "内置",
     "addProvider": "添加提供商",
+    "distributeProviders": "分发提供商",
+    "distributeProvidersTitle": "分发提供商配置",
+    "distributeProvidersHint": "将当前租户的全部提供商配置复制到选中的目标租户。",
+    "distributeProvidersWarning": "这会覆盖目标租户中同 ID 的提供商配置，配置中的密钥也会一并复制。",
+    "distributeProvidersSuccess": "已完成 {{count}} 个租户的提供商分发",
+    "noProviders": "没有匹配的提供商",
+    "noProvidersHint": "请调整搜索条件，或添加一个自定义提供商。",
+    "more": "更多",
+    "moreActions": "更多操作",
     "addProviderTitle": "添加自定义提供商",
     "providerIdLabel": "提供商 ID",
     "providerIdPlaceholder": "例如 openai, google, anthropic",
