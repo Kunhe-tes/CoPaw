@@ -108,6 +108,10 @@ _Avoid_: output_len=0, blank reply, empty cron output
 A source-scoped runtime configuration surface for behavior shared by requests from the same external source. It is not a tenant configuration and does not describe user, organization, or workspace identity.
 _Avoid_: system feature configuration, tenant config, user config
 
+**Runtime Request Identity**:
+The tenant and source context that determines which runtime configuration and model selection a request observes. One **Runtime Request Identity** resolves to one **Tenant Provider Configuration** view for provider and active-model reads.
+_Avoid_: cache key, auth header set, iframe context
+
 **Mandatory Console Channel**:
 The built-in **Console Channel** is a runtime invariant that is always treated as enabled for every agent and tenant, including when no explicit channel entry has been saved yet. Users may configure its other fields, but persisted, imported, or interactive configuration must not disable it.
 _Avoid_: optional console, disabled console, console toggle
