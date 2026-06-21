@@ -21,12 +21,12 @@ The project SHALL maintain only the latest `console/DESIGN.md` as the single com
 
 ### Requirement: Light-theme design foundation
 
-The design system SHALL define a light-theme, Claude-inspired warm editorial foundation for non-conversation typography, color roles, surfaces, borders, spacing, radii, shadows, icons, interactions, and visual states while retaining an independent Conversation Workspace theme.
+The design system SHALL define a light-theme, CoPaw-first foundation for non-conversation typography, color roles, surfaces, borders, spacing, radii, shadows, icons, interactions, and visual states while retaining an independent Conversation Workspace theme.
 
 #### Scenario: A redesigned management surface is rendered
 
 - **WHEN** a surface covered by the Management Console theme is displayed
-- **THEN** it SHALL use the documented warm canvas, warm ink, restrained borders, coral action roles, and locally hosted management typography without requiring an external web-font service
+- **THEN** it SHALL use the documented white embedded canvas, restrained borders, blue action roles, and platform management typography without requiring an external web-font service
 
 #### Scenario: Conversation Workspace is rendered
 
@@ -40,7 +40,7 @@ The design system SHALL define a light-theme, Claude-inspired warm editorial fou
 
 ### Requirement: Conversation and management patterns
 
-The design system SHALL define one shared foundation with a Claude-inspired Management Console pattern and a visually independent Conversation Workspace pattern.
+The design system SHALL define one shared foundation with a CoPaw-first Management Console pattern and a visually independent Conversation Workspace pattern.
 
 #### Scenario: A conversation UI is designed
 
@@ -50,19 +50,18 @@ The design system SHALL define one shared foundation with a Claude-inspired Mana
 #### Scenario: A management page is designed
 
 - **WHEN** a future change modifies a configuration or operational page
-- **THEN** it SHALL select the applicable standard-management, list-detail, or dashboard template, use medium-high information density, and consume the documented Claude-inspired Management Console roles
+- **THEN** it SHALL select the applicable standard-management, list-detail, or dashboard template, use medium-high information density, and consume the documented CoPaw Management Console roles
 
 ### Requirement: Two-round calibration
 
-The Claude-inspired design-system migration SHALL be calibrated through two visual review rounds using the real global navigation and model-management page.
+The CoPaw-first design-system migration SHALL be calibrated through visual review using the real global navigation and model-management page.
 
-#### Scenario: First Claude-inspired implementation round completes
+#### Scenario: First implementation round completes
 
 - **WHEN** the updated design document, scoped themes, fonts, and trial surfaces are implemented
 - **THEN** browser review results and user feedback SHALL be used to revise the single `console/DESIGN.md` and implementation together
 
-#### Scenario: Final Claude-inspired calibration completes
+#### Scenario: Final calibration completes
 
 - **WHEN** the revised trial surfaces pass the second agreed review, including chat isolation and Windows font review
 - **THEN** the resulting `console/DESIGN.md` SHALL be treated as the latest baseline for subsequent non-conversation page migrations
-

@@ -6,6 +6,7 @@ This document is the single design source of truth for new and modified user-fac
 
 - Status: white-first embedded baseline under calibration.
 - Reference implementation: global Header/navigation and `/models`.
+- Strategic product context: root `PRODUCT.md` describes users, purpose, and anti-references for Impeccable-assisted work; this file remains the Console UI visual authority.
 - Ownership: update this document in the same OpenSpec change whenever an accepted UI change introduces or revises a reusable visual rule.
 - Adoption: new and modified UI follows this document; untouched legacy UI migrates through separate changes.
 
@@ -19,20 +20,56 @@ This document is the single design source of truth for new and modified user-fac
 
 ## Reference Direction
 
-CoPaw uses an adapted reference strategy:
+CoPaw does not adopt named third-party product styles as visual authorities. The Console uses its own white-first embedded management language, tuned for Chinese AI operations, host-product integration, compact workflows, configured logos, and the independent Conversation Workspace identity.
 
-- [Claude](https://github.com/VoltAgent/awesome-design-md/tree/main/design-md/claude) is a structural reference for restraint, gentle boundaries, spacing, radii, editorial rhythm, and quiet confidence. Its warm palette is not a project requirement.
-- [Linear](https://github.com/VoltAgent/awesome-design-md/tree/main/design-md/linear.app) remains a secondary reference for compact information hierarchy and low-distraction interaction. Its dark-only palette is not copied.
-- CoPaw uses its own white-first embedded palette, operational density, Chinese typography, configured logos, and Conversation Workspace identity.
-- The Conversation Workspace keeps `#3769FC` as its fixed emphasis color unless a later approved chat-specific change revises it.
+Impeccable may be used as a review framework for AI-assisted UI work. It helps detect generic AI design patterns, weak typography, low contrast, excessive decoration, overflow risk, incomplete states, and other finish issues. It is not a visual style to copy, and it does not replace this document.
 
-External references are inspiration only. When they conflict with this document, this document wins. The target is a white-first Chinese AI management console that integrates with white embedding hosts, not a visual clone of an external product.
+The Conversation Workspace keeps `#3769FC` as its fixed emphasis color unless a later approved chat-specific change revises it.
+
+When outside examples or prior explorations inform a decision, rewrite the durable rule as a CoPaw-specific principle before it becomes authoritative. Archived OpenSpec changes preserve historical exploration; this document remains the day-to-day design source of truth.
 
 ## Product Character
 
 The Console should feel integrated, calm, precise, and quietly capable. Management surfaces should use white-first embedding, near-white functional grouping, practical whitespace, readable hierarchy, and compact discoverable operations without creating a competing visual brand inside the host product.
 
-Avoid decorative gradients, oversized cards, heavy shadows, excessive rounded containers, large saturated accent areas, and low-density marketing layouts.
+The target is advanced enterprise SaaS product UI: familiar enough to trust immediately, refined enough to avoid commodity admin-panel sloppiness, and restrained enough that repeated operational work stays comfortable. Product confidence comes from hierarchy, alignment, durable states, and predictable controls rather than spectacle.
+
+Avoid decorative gradients, oversized cards, heavy shadows, excessive rounded containers, large saturated accent areas, low-density marketing layouts, generic "AI dashboard" hero composition, and visuals that only look good with perfect demo data.
+
+## Enterprise SaaS Quality Bar
+
+Future Console UI should pass these product checks before being treated as complete:
+
+- **Task-first composition**: the first viewport exposes the current task, current state, and primary operation. Do not lead management surfaces with marketing hero copy, large illustrations, or feature explanations.
+- **Earned familiarity**: use standard SaaS affordances for navigation, filters, tables, forms, menus, dialogs, tabs, status badges, and pagination. Do not invent controls for flavor.
+- **Medium-high density**: prefer compact rows, clear grouping, and efficient desktop width usage. Increase whitespace only when it improves scanning or reduces decision load.
+- **Stable vocabulary**: the same operation type should use the same button hierarchy, icon scale, control height, state treatment, and confirmation pattern across pages.
+- **Visible operations**: primary actions stay visible and named. Secondary actions may be quieter, but required operations must not be hidden behind hover-only controls.
+- **State completeness**: any new or revised workflow accounts for loading, empty, error, disabled, unavailable, permission-limited, in-progress, success, and destructive states when applicable.
+- **Real-data resilience**: designs must survive long Chinese names, long English identifiers, provider URLs, IDs, empty values, large counts, many rows, and narrow embedded containers.
+- **No AI slop**: avoid one-note palettes, purple/blue gradient drama, nested cards, vague "insight" panels, decorative bokeh/orbs, oversized rounded pills, and generic icon-card grids that do not map to real operations.
+
+Good Console screens should feel like reliable tools used by people with work to finish: quiet, precise, and a little sharper than expected.
+
+## Impeccable-Assisted Quality Gate
+
+Impeccable may be used as a design-review and detector layer for Console UI work. Its findings are review input that must be reconciled against this document; they are not automatic requirements.
+
+Recommended routine uses:
+
+- Run `node .agents/skills/impeccable/scripts/context.mjs --target console` at the start of an Impeccable-assisted Console review to load `PRODUCT.md` context. Read this file separately because the authoritative Console design document lives at `console/DESIGN.md`.
+- Use `audit`, `critique`, `polish`, `layout`, `typeset`, and `harden` to review new UI, substantial visible changes, reusable visual rules, and pre-ship polishing.
+- Use detector output to look for nested cards, generic gradients, low-contrast text, over-rounded containers, cramped spacing, skipped heading structure, small touch targets, text overflow, unstable responsive layouts, and missing loading, empty, error, disabled, focus, and in-progress states.
+- Record recurring valid findings as updates to this document or central design tokens when they reveal a reusable rule.
+
+Cautious or restricted uses:
+
+- Do not run or commit the output of `init`, `document`, or other context-generating commands in a way that creates a competing `DESIGN.md`, `PRODUCT.md`, or equivalent live project authority.
+- Do not run `/impeccable init` for this repository unless a future approved change explicitly replaces this context strategy.
+- Treat `colorize`, `bolder`, `quieter`, `delight`, `animate`, `overdrive`, and similar identity-shifting commands as exploratory unless the user has explicitly approved that visual direction through the repository workflow.
+- If Impeccable flags a deliberate CoPaw choice, such as platform font stacks, white-first management surfaces, neutral text roles, compact operational density, or `#3769FC`, resolve it by documenting the decision here or by using narrow detector configuration. Do not rely on informal memory.
+
+Automatic Impeccable hooks are optional. Adding `.codex/hooks.json`, `.agents/skills/impeccable`, `.impeccable/config.json`, or similar tool files requires an accepted change that explains the files added, approval steps, expected detector scope, and rollback path.
 
 ## Theme Architecture
 
@@ -184,6 +221,43 @@ Shared rules:
 - Use the UI font for operational interfaces and reserve the editorial font for content-led moments.
 - Empty, loading, error, disabled, unavailable, and in-progress states use consistent spacing, icon scale, title, explanation, and recovery-action placement.
 - Select, dropdown, and menu overlays on Management Console surfaces use white elevated panels, near-white hover states, and `Primary soft` selected states instead of neutral gray selection fills.
+- Data tables and dense lists should keep row rhythm stable under hover, selection, loading, and inline action states. Use truncation, wrapping, tooltips, or detail expansion intentionally; never let a long value push primary operations off screen.
+- Forms should use visible labels, compact helper text, inline validation near the field, and preserved user input after recoverable errors. Avoid placeholder-only labels.
+- Filters and search controls should sit close to the result set they affect, expose active filter state, and provide a clear reset path when no results are returned.
+
+## Production Hardening
+
+Designs that only work with ideal content are not complete. New and modified UI must be hardened against the data and conditions users actually produce.
+
+### Dynamic Text And Data
+
+- Long names, URLs, model IDs, provider IDs, paths, tenant labels, and generated titles need explicit overflow behavior.
+- Single-line metadata may truncate with an accessible full-value affordance when the complete value matters.
+- Multi-line descriptions should wrap without breaking cards, tables, or action alignment.
+- Empty, null, unknown, unavailable, and pending values should use consistent copy and muted visual treatment rather than leaving blank holes.
+- Large counts, high row totals, and many filter options should preserve layout stability and provide search, pagination, grouping, or progressive disclosure as appropriate.
+
+### Internationalized Content
+
+- Chinese UI text must remain readable at documented sizes and weights on Windows and macOS.
+- English identifiers, mixed CJK/Latin strings, punctuation, and technical values must not create horizontal page overflow.
+- Avoid fixed text containers that only fit short English labels. Use flexible widths, `min-width: 0` in flex/grid layouts, and wrapping where needed.
+- Icon-only controls require accessible names and visible affordances; text labels are preferred for primary or risky operations.
+
+### Operational States
+
+- Loading states should preserve surrounding layout and communicate what is loading. Prefer skeletons or stable placeholders for content regions over isolated spinners.
+- Empty states should explain what is missing and expose the next valid action when one exists.
+- Error states should state what failed, keep user input when possible, and provide retry, correction, or navigation recovery.
+- Permission-limited states should explain access constraints without presenting unusable primary actions as if they were available.
+- Destructive and irreversible operations require clear confirmation, explicit target naming, and consistent button hierarchy.
+
+### Responsive And Embedded Behavior
+
+- Management pages must remain usable in embedded host containers and with `hideMenu=true` when the route supports it.
+- No page-level horizontal overflow is allowed at the required desktop verification sizes.
+- Collapsed navigation, narrow content columns, and long text must not overlap page actions, tabs, filter bars, dialogs, or table controls.
+- Hover, focus, selected, expanded, and loading states must not resize fixed-format controls or shift surrounding layout.
 
 ## Model Management Reference Pattern
 

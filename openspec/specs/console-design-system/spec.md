@@ -5,26 +5,70 @@ TBD - created by archiving change establish-console-design-system. Update Purpos
 ## Requirements
 ### Requirement: Committed Console design source of truth
 
-The project SHALL maintain `console/DESIGN.md` as the single committed design entry point for new and modified UI under `console/`.
+The project SHALL maintain `console/DESIGN.md` as the single committed design entry point for new and modified UI under `console/`, and SHALL treat product context, external design references, and AI design tools as inputs that must be adapted into CoPaw-specific rules before becoming authoritative.
 
 #### Scenario: AI or developer starts a Console UI change
 
 - **WHEN** a change creates or modifies user-visible UI under `console/`
 - **THEN** the change SHALL use `console/DESIGN.md` as its project design authority
 
-#### Scenario: External design references are consulted
+#### Scenario: Product context is consulted
 
-- **WHEN** Linear, Vercel, Claude, or another external design reference informs a decision
-- **THEN** `console/DESIGN.md` SHALL record the adapted principle or link without requiring a vendored external `DESIGN.md` as a second authority
+- **WHEN** `PRODUCT.md` informs a Console UI decision
+- **THEN** it SHALL guide strategic product intent only, while visual requirements remain governed by `console/DESIGN.md`
+
+#### Scenario: Outside examples are consulted
+
+- **WHEN** an outside product example, archived exploration, or AI design tool informs a decision
+- **THEN** `console/DESIGN.md` SHALL record the adapted CoPaw-specific principle or link without requiring a vendored external `DESIGN.md` as a second authority
+
+#### Scenario: AI design tooling produces project context
+
+- **WHEN** an AI design tool generates or proposes product context, design context, palette changes, typography changes, or reusable visual rules
+- **THEN** the generated content SHALL remain advisory until an approved change updates `console/DESIGN.md` or the central Console design tokens
+
+#### Scenario: Prior external-reference exploration exists
+
+- **WHEN** a previous exploration favored a specific external visual direction
+- **THEN** future Console design work SHALL evaluate that direction against CoPaw's product character, embedding needs, Chinese management density, accessibility requirements, and real surface verification rather than treating the external reference as a permanent style mandate
+
+#### Scenario: Prior named-style migration remains open
+
+- **WHEN** a prior OpenSpec change describes named third-party palette, typography, or migration requirements that conflict with the accepted CoPaw-first design direction
+- **THEN** the affected specs SHALL be synchronized so the prior change is archived, superseded, or amended without remaining as a competing active Console design mandate
+
+### Requirement: Enterprise SaaS product quality bar
+
+The Console design system SHALL define enterprise SaaS product-quality rules that prevent generic AI-generated UI patterns and preserve task-focused, durable, operational interfaces.
+
+#### Scenario: A management page is designed
+
+- **WHEN** a future change creates or modifies a management page
+- **THEN** the page SHALL prioritize task completion, scannable hierarchy, compact operational density, stable component vocabulary, visible primary actions, and reusable page patterns over marketing-style hero sections, decorative cards, gradients, or novelty interactions
+
+#### Scenario: Component states are specified
+
+- **WHEN** a reusable interactive component or visible workflow state is introduced or revised
+- **THEN** the design SHALL account for default, hover, focus, active, disabled, loading, empty, error, unavailable, permission-limited, and in-progress states as applicable
+
+#### Scenario: Real product data is rendered
+
+- **WHEN** user-visible text, tables, cards, filters, or lists render dynamic data
+- **THEN** the layout SHALL handle long Chinese and English text, short or empty values, high item counts, large numbers, special characters, and narrow embedded containers without unintended clipping, overlap, layout shift, or horizontal page overflow
 
 ### Requirement: Light-theme design foundation
 
-The design system SHALL define a light-theme, system-font visual foundation for typography, color roles, surfaces, borders, spacing, radii, shadows, icons, interactions, and visual states.
+The design system SHALL define a light-theme, CoPaw-first foundation for non-conversation typography, color roles, surfaces, borders, spacing, radii, shadows, icons, interactions, and visual states while retaining an independent Conversation Workspace theme.
 
-#### Scenario: A redesigned surface is rendered
+#### Scenario: A redesigned management surface is rendered
 
-- **WHEN** a surface covered by the new design system is displayed
-- **THEN** it SHALL use the documented light-theme roles and SHALL NOT require an external web font
+- **WHEN** a surface covered by the Management Console theme is displayed
+- **THEN** it SHALL use the documented white embedded canvas, restrained borders, blue action roles, and platform management typography without requiring an external web-font service
+
+#### Scenario: Conversation Workspace is rendered
+
+- **WHEN** the Conversation Workspace is displayed during this migration
+- **THEN** it SHALL retain its existing `#3769FC` emphasis and existing conversation typography and presentation
 
 #### Scenario: Dark-theme infrastructure remains present
 
@@ -33,17 +77,17 @@ The design system SHALL define a light-theme, system-font visual foundation for 
 
 ### Requirement: Conversation and management patterns
 
-The design system SHALL define one shared foundation with distinct Conversation Workspace and Management Console patterns.
+The design system SHALL define one shared foundation with a CoPaw-first Management Console pattern and a visually independent Conversation Workspace pattern.
 
 #### Scenario: A conversation UI is designed
 
 - **WHEN** a future change modifies the chat workspace
-- **THEN** it SHALL preserve `#3769FC` as the conversation emphasis and prioritize conversation/current-task content, composer, task/history lists, execution details, guidance, and global navigation in that order
+- **THEN** it SHALL preserve `#3769FC` as the conversation emphasis unless that later approved change explicitly revises the chat identity, and it SHALL prioritize conversation/current-task content, composer, task/history lists, execution details, guidance, and global navigation in that order
 
 #### Scenario: A management page is designed
 
 - **WHEN** a future change modifies a configuration or operational page
-- **THEN** it SHALL select the applicable standard-management, list-detail, or dashboard template and use medium-high information density
+- **THEN** it SHALL select the applicable standard-management, list-detail, or dashboard template, use medium-high information density, and consume the documented CoPaw Management Console roles
 
 ### Requirement: Incremental adoption
 
@@ -89,17 +133,17 @@ Redesigned Console surfaces SHALL be verified at desktop viewport sizes `1280x72
 
 ### Requirement: Two-round calibration
 
-The first design-system implementation SHALL be calibrated through two visual review rounds using the real navigation and model-management page.
+The CoPaw-first design-system migration SHALL be calibrated through visual review using the real global navigation and model-management page.
 
 #### Scenario: First implementation round completes
 
-- **WHEN** the initial design document and trial surfaces are implemented
-- **THEN** browser review results and user feedback SHALL be used to revise the document and implementation together
+- **WHEN** the updated design document, scoped themes, fonts, and trial surfaces are implemented
+- **THEN** browser review results and user feedback SHALL be used to revise the single `console/DESIGN.md` and implementation together
 
 #### Scenario: Final calibration completes
 
-- **WHEN** the revised trial surfaces pass the second agreed review
-- **THEN** the resulting `console/DESIGN.md` SHALL be treated as the baseline for subsequent page migrations
+- **WHEN** the revised trial surfaces pass the second agreed review, including chat isolation and Windows font review
+- **THEN** the resulting `console/DESIGN.md` SHALL be treated as the latest baseline for subsequent non-conversation page migrations
 
 ### Requirement: Embedding-first blue-gray management palette
 
@@ -110,10 +154,10 @@ The Management Console design system SHALL use a white-first embedded palette ce
 - **WHEN** a management surface covered by the design system is displayed
 - **THEN** it SHALL use the documented white canvas, white operational surfaces, near-white subtle surfaces, neutral border/text hierarchy, and blue primary-action roles without warm cream, coral, or large blue-gray canvas roles
 
-#### Scenario: Claude is used as a design reference
+#### Scenario: Outside visual guidance is used
 
-- **WHEN** a future UI change consults Claude design guidance
-- **THEN** it SHALL treat Claude as a reference for restraint, hierarchy, spacing, boundaries, and radii rather than as the mandatory color palette
+- **WHEN** a future UI change consults outside visual guidance
+- **THEN** it SHALL translate useful qualities into CoPaw-specific rules rather than treating the outside source as a mandatory color palette, typography system, or product style
 
 ### Requirement: Configurable palette workflow
 
@@ -123,4 +167,3 @@ The design authority SHALL document the semantic color roles, their configured v
 
 - **WHEN** the approved management palette needs another adjustment
 - **THEN** the implementation SHALL preserve semantic role names and update the central token configuration, documentation, and visual verification together
-

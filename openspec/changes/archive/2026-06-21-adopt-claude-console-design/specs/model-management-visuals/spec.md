@@ -2,23 +2,23 @@
 
 ### Requirement: Complete model-management trial scope
 
-The `/models` redesign SHALL cover the default LLM configuration, provider management content, provider cards, search and action controls, provider/model dialogs, and all existing visual states using the Claude-inspired Management Console theme.
+The `/models` redesign SHALL cover the default LLM configuration, provider management content, provider cards, search and action controls, provider/model dialogs, and all existing visual states using the CoPaw Management Console theme.
 
 #### Scenario: User opens model management
 
 - **WHEN** the `/models` route renders successfully
-- **THEN** the default model area and provider-management area SHALL present one coherent warm editorial management-page hierarchy with coral primary actions and compact operational typography
+- **THEN** the default model area and provider-management area SHALL present one coherent white-first management-page hierarchy with blue primary actions and compact operational typography
 
 #### Scenario: User opens an existing provider or model dialog
 
 - **WHEN** an existing configuration, model-management, distribution, local-runtime, or related dialog is opened
-- **THEN** the dialog SHALL use the Claude-inspired Management Console roles while retaining its existing fields, validation, actions, and outcomes
+- **THEN** the dialog SHALL use the CoPaw Management Console roles while retaining its existing fields, validation, actions, and outcomes
 
 ### Requirement: Compact identifiable provider cards
 
-Provider cards SHALL use a compact Claude-inspired management-card layout and visibly retain provider icon, provider name, provider ID, availability, key connection summary including Base URL when applicable, model count, and operation access.
+Provider cards SHALL use a compact CoPaw management-card layout and visibly retain provider icon, provider name, provider ID, availability, key connection summary including Base URL when applicable, model count, and operation access.
 
-The compact layout SHALL use a grouped identity region, one continuous aligned summary list, warm low-contrast boundaries, and an unfilled action row rather than multiple nested panels, heavy shadows, or oversized internal padding. The page SHALL provide one concise icon-and-breadcrumb anchor above the management content without duplicating the current page title.
+The compact layout SHALL use a grouped identity region, one continuous aligned summary list, restrained low-contrast boundaries, and an unfilled action row rather than multiple nested panels, heavy shadows, or oversized internal padding. The page SHALL provide one concise icon-and-breadcrumb anchor above the management content without duplicating the current page title.
 
 #### Scenario: A remote provider card renders
 
@@ -28,7 +28,7 @@ The compact layout SHALL use a grouped identity region, one continuous aligned s
 #### Scenario: A local provider card renders
 
 - **WHEN** a local provider is included in the results
-- **THEN** its local/runtime identity and model summary SHALL remain distinguishable within the same warm card system
+- **THEN** its local/runtime identity and model summary SHALL remain distinguishable within the same management card system
 
 ### Requirement: Adaptive desktop layout
 

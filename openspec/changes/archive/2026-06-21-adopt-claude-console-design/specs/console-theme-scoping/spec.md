@@ -2,7 +2,7 @@
 
 ### Requirement: Layered Console theme roles
 
-The Console SHALL define reusable base roles, a Claude-inspired Management Console theme, and an independent Conversation Workspace theme rather than using page-specific colors as the design-system interface.
+The Console SHALL define reusable base roles, a CoPaw Management Console theme, and an independent Conversation Workspace theme rather than using page-specific colors as the design-system interface.
 
 #### Scenario: A future non-conversation page is migrated
 
@@ -16,11 +16,11 @@ The Console SHALL define reusable base roles, a Claude-inspired Management Conso
 
 ### Requirement: Conversation Workspace isolation
 
-The Claude-inspired Management Console theme SHALL NOT change the Conversation Workspace's existing `#3769FC` emphasis, typography, content surfaces, independent conversation sidebar, composer, or conversation-specific presentation during this change.
+The CoPaw Management Console theme SHALL NOT change the Conversation Workspace's existing `#3769FC` emphasis, typography, content surfaces, independent conversation sidebar, composer, or conversation-specific presentation during this change.
 
 #### Scenario: Chat renders beside global navigation
 
-- **WHEN** the standalone shell displays Claude-inspired global navigation beside the Conversation Workspace
+- **WHEN** the standalone shell displays global navigation beside the Conversation Workspace
 - **THEN** the global navigation SHALL use the Management theme while the chat content region and conversation sidebar retain their existing Conversation theme
 
 #### Scenario: Management font declarations are loaded
@@ -41,4 +41,3 @@ The Management Console theme SHALL be applied through an explicit reusable scope
 
 - **WHEN** a migrated management page renders with `hideMenu=true`
 - **THEN** its management theme SHALL remain available without requiring the global Header or Sidebar
-
