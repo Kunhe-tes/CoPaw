@@ -227,6 +227,8 @@ Skill 级 `hooks/hooks.json` 示例：
 | `timeout` | 否 | 单个 handler 超时时间，单位秒，默认 `10`。 |
 | `statusMessage` | 否 | 阻断或审批时显示给用户的提示文案。 |
 | `once` | 否 | `true` 表示同一会话内、同一事件上只执行一次。 |
+| `includeConversationSnapshot` | 否 | `true` 时，仅该 handler 会额外收到 `conversation_snapshot` 和 `conversation_snapshot_meta`。默认 `false`。 |
+| `conversationSnapshotLimit` | 否 | 快照最多携带多少条最近消息。默认 `50`，最大 `200`；仅在 `includeConversationSnapshot: true` 时生效。 |
 | `failPolicy` | 否 | handler 自身执行失败时的处理策略，支持 `allow` 或 `block`。`command` / `http` 默认 `allow`，`prompt` 默认 `block`。 |
 
 ### `once: true` 的实际含义
@@ -238,6 +240,44 @@ Skill 级 `hooks/hooks.json` 示例：
 - 同一个 handler ID
 
 只运行一次。跨轮次也会记住，直到该会话结束或会话状态被清空。
+
+### `includeConversationSnapshot` 的实际语义
+
+这是新增的 handler 级开关，不是全局开关。
+
+- 只有显式写了 `includeConversationSnapshot: true` 的 handler，才会收到快照字段。
+- 快照来自当前 Agent 的内存消息，不是去读 `transcript_path` 回放持久化记录。
+- `conversationSnapshotLimit` 是“每个 handler 自己的截断上限”，所以不同 handler 可以拿到不同长度的快照。
+- 当前事件本身仍然通过 `prompt`、`tool_input`、`tool_response`、`assistant_response`、`error` 等字段单独传入；快照不会重复制造一份“当前事件副本”。
+
+配置示例：
+
+```json
+{
+  "id": "post-tool-audit",
+  "type": "http",
+  "url": "http://127.0.0.1:9000/hooks/mcp-posttool",
+  "includeConversationSnapshot": true,
+  "conversationSnapshotLimit": 20,
+  "timeout": 5,
+  "failPolicy": "allow"
+}
+```
+
+如果运行时当前拿不到 Agent 内存，handler 仍会继续执行，但会收到：
+
+```json
+{
+  "conversation_snapshot": [],
+  "conversation_snapshot_meta": {
+    "included_messages": 0,
+    "omitted_messages": 0,
+    "limit": 50,
+    "unavailable": true,
+    "unavailable_reason": "agent_memory_unavailable"
+  }
+}
+```
 
 ### `if` 表达式怎么写
 
@@ -442,6 +482,8 @@ handler 收到的是一个 JSON 对象。为了避免把“模型层支持”和
 | `tool_use_id` | 工具调用 ID |
 | `tool_response` | 当前工具调用的成功业务输出；主要见于 `PostToolUse` |
 | `error` | 工具失败信息；主要见于 `PostToolUseFailure` |
+| `conversation_snapshot` | 最近对话快照；仅在 handler 打开 `includeConversationSnapshot` 时出现 |
+| `conversation_snapshot_meta` | 快照的截断/脱敏/不可用说明；仅在 handler 打开 `includeConversationSnapshot` 时出现 |
 
 ### 当前实现支持的完整字段
 
@@ -474,11 +516,14 @@ handler 收到的是一个 JSON 对象。为了避免把“模型层支持”和
 | `tool_response` | 部分 | 主要见于 `PostToolUse`，值为当前工具调用最终 `tool_result.output`；无法提取时省略 |
 | `assistant_response` | 部分 | 主要见于 `BeforeStop` 和 `Stop` |
 | `error` | 部分 | 主要见于 `PostToolUseFailure` |
+| `conversation_snapshot` | 部分 | 仅对声明了 `includeConversationSnapshot: true` 的 handler 注入；值是当前内存里最近若干条规范化消息 |
+| `conversation_snapshot_meta` | 部分 | 与 `conversation_snapshot` 配套；包含 `included_messages`、`omitted_messages`、`limit` 以及可选的 `reasoning_omitted` / `media_content_omitted` / `unavailable` 信息 |
 
 这张表的关键结论是：
 
 - 如果你写的是 runner 侧 hook，例如 `SessionStart`、`UserPromptSubmit`、`BeforeStop`、`Stop`，重点看 `prompt`、`assistant_response`、`source`、`model`。
 - 如果你写的是 tool 侧 hook，例如 `PreToolUse`、`PostToolUse`、`PostToolUseFailure`，重点看 `tool_name`、`tool_input`、`tool_use_id`、`tool_response`、`error`。其中 `tool_response` 是当前工具调用的业务输出，不是完整 `tool_result` 块，也不需要通过 `includeConversationSnapshot` 获取。
+- 如果你要把“当前事件字段”与“最近对话上下文”一起送给外部策略，就同时使用事件字段和 `conversation_snapshot`，不要试图只从快照里反推当前事件。
 - `permission_mode`、`effort`、`agent_type` 虽然在模型里有字段，但当前实现还没有把它们接进真实 hook payload，不要把它们当成当前可依赖入参。
 
 ### 两类典型 payload 样子
@@ -531,6 +576,75 @@ handler 收到的是一个 JSON 对象。为了避免把“模型层支持”和
 ```
 
 `PostToolUse.tool_response` 表示当前工具调用的最终业务输出。运行时会从同一 `tool_use_id` 对应的终态 `tool_result.output` 提取该值；它不包含 live/intermediate chunks，不包含完整 `tool_result` 的 `type` / `id` / `name` 包装，也不复用 `Hook Conversation Snapshot`。如果运行时无法找到对应终态输出，会省略 `tool_response` 字段，但仍继续发送 `PostToolUse`。
+
+#### 3. `PostToolUse` 同时带 `tool_response` 和会话快照
+
+如果某个 handler 打开了 `includeConversationSnapshot`，它拿到的 payload 典型会像这样：
+
+```json
+{
+  "hook_event_name": "PostToolUse",
+  "tool_name": "execute_shell_command",
+  "tool_input": {
+    "command": "echo hello"
+  },
+  "tool_use_id": "toolu_123",
+  "tool_response": "hello",
+  "conversation_snapshot": [
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "text",
+          "text": "帮我执行一个 echo 命令"
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "type": "text",
+          "text": "我先执行这个命令。"
+        },
+        {
+          "type": "tool_use",
+          "id": "toolu_123",
+          "name": "execute_shell_command",
+          "input": {
+            "command": "echo hello"
+          }
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "type": "tool_result",
+          "id": "toolu_123",
+          "name": "execute_shell_command",
+          "output": "hello"
+        }
+      ]
+    }
+  ],
+  "conversation_snapshot_meta": {
+    "included_messages": 3,
+    "omitted_messages": 0,
+    "limit": 20,
+    "reasoning_omitted": true,
+    "media_content_omitted": false
+  }
+}
+```
+
+这里要区分两层语义：
+
+- `tool_response` 是“这一次工具调用最终产出的业务结果”，方便直接做审计、摘要或规则判断。
+- `conversation_snapshot` 是“最近对话上下文的裁剪视图”，方便策略服务理解这次工具调用前后的语境。
+
+不要把两者混用。最稳妥的做法是：规则判断优先读 `tool_response`，需要补上下文时再读快照。
 
 例如 `execute_shell_command` 的工具输入字段是：
 
