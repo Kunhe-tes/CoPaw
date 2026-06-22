@@ -18,7 +18,12 @@ import httpx
 from ..config.constant import SWE_INTERNAL_URL, SWE_INTERNAL_TOKEN
 from ..database.connection import DatabaseConnection
 from ..security import SkillScanError, scan_skill_directory
-from ..utils.skill_md import extract_version as _extract_version_md
+from ..utils.skill_md import (
+    extract_cn_name_from_title,
+    extract_skill_id,
+    extract_version as _extract_version_md,
+    parse_frontmatter,
+)
 from ..utils.version import bump_patch as _shared_bump_patch
 from .fs import (
     _atomic_write_json,
@@ -460,6 +465,53 @@ def _copy_skill_files(
             )
 
 
+def _extract_cn_name_from_md(md_content: str, skill_name: str) -> str:
+    """从 SKILL.md 中提取 cn_name.
+
+    解析优先级：
+    1. frontmatter metadata.cn_name 或顶层 cn_name / chinese_name
+    2. SKILL.md 一级标题
+    3. skill_name fallback
+
+    Args:
+        md_content: SKILL.md 文件内容
+        skill_name: 技能目录名（用作 fallback）
+
+    Returns:
+        cn_name 字段值
+    """
+    if not md_content:
+        return skill_name
+
+    # 优先级 1: frontmatter metadata.cn_name 或顶层 cn_name / chinese_name
+    fm = parse_frontmatter(md_content)
+
+    # 先检查顶层 cn_name
+    cn_name = fm.get("cn_name")
+    if cn_name and isinstance(cn_name, str):
+        return cn_name
+
+    # 检查顶层 chinese_name
+    chinese_name = fm.get("chinese_name")
+    if chinese_name and isinstance(chinese_name, str):
+        return chinese_name
+
+    # 检查 metadata.cn_name
+    metadata_dict = fm.get("metadata", {})
+    if isinstance(metadata_dict, dict):
+        metadata_cn_name = metadata_dict.get("cn_name")
+        if metadata_cn_name and isinstance(metadata_cn_name, str):
+            return metadata_cn_name
+
+    # 优先级 2: SKILL.md 一级标题
+    cn_name = extract_cn_name_from_title(md_content)
+    if cn_name:
+        return cn_name
+
+    # 优先级 3: skill_name fallback
+    return skill_name
+
+
 def _build_skill_metadata_for_manifest(
     skill_dir: Path,
     skill_name: str,
@@ -474,6 +526,9 @@ def _build_skill_metadata_for_manifest(
     name = skill_name
     description = ""
     version_text = ""
+    skill_id = ""
+    cn_name = ""
+    md_content = ""
 
     # 从 SKILL.md 读取基本信息
     if skill_md_path.exists():
@@ -484,9 +539,14 @@ def _build_skill_metadata_for_manifest(
         except OSError:
             pass
 
+    # 提取 skill_id 和 cn_name
+    if md_content:
+        skill_id = extract_skill_id(md_content, source, skill_name)
+        cn_name = _extract_cn_name_from_md(md_content, skill_name)
+
     now = datetime.now(timezone.utc).isoformat()
 
-    return {
+    result = {
         "name": name,
         "description": description,
         "version_text": version_text or "1.0.0",
@@ -497,6 +557,14 @@ def _build_skill_metadata_for_manifest(
         "requirements": {"require_bins": [], "require_envs": []},
         "updated_at": now,
     }
+
+    # 添加 skill_id 和 cn_name（如果非空）
+    if skill_id:
+        result["skill_id"] = skill_id
+    if cn_name:
+        result["cn_name"] = cn_name
+
+    return result
 
 
 class MarketplaceService:
@@ -1199,6 +1267,13 @@ class MarketplaceService:
         # 将技能名称规范化为目录名（保留中文等 Unicode 字符）
         safe_skill_name = normalize_skill_name(item.name)
 
+        # 提取 skill_id 和 cn_name
+        skill_id, cn_name = self._extract_skill_id_cn_name_from_market(
+            source_id,
+            item_id,
+            safe_skill_name,
+        )
+
         target_users = await self._resolve_target_users(source_id, req)
         count = 0
         conflicts: list[dict] = []
@@ -1216,6 +1291,8 @@ class MarketplaceService:
                     description=item.description,
                     distributed_by=operator_id,
                     version=item.version,
+                    skill_id=skill_id,
+                    cn_name=cn_name,
                 )
 
                 if result.get("status") == "conflict":
@@ -1376,6 +1453,121 @@ class MarketplaceService:
         )
         return created_at, updated_at
 
+    def _resolve_skill_id_cn_name(
+        self,
+        skill_dir: Path,
+        skill_name: str,
+        source: str,
+        manifest_metadata: dict[str, Any],
+    ) -> tuple[str, str]:
+        """解析 skill_id 和 cn_name 字段.
+
+        skill_id 解析优先级：
+        1. frontmatter metadata.skill_id
+        2. manifest metadata.skill_id（分发时写入）
+        3. 自动生成：{source}_{skill_name}
+
+        cn_name 解析优先级：
+        1. manifest metadata.cn_name（分发时写入）
+        2. frontmatter metadata.cn_name 或顶层 chinese_name
+        3. SKILL.md 一级标题
+        4. skill_name fallback
+
+        Args:
+            skill_dir: 技能目录路径
+            skill_name: 技能目录名
+            source: 技能来源（customized / marketplace:xxx）
+            manifest_metadata: workspace manifest 中的 metadata 字段
+
+        Returns:
+            (skill_id, cn_name) 元组
+        """
+        skill_md_path = skill_dir / "SKILL.md"
+        md_content = ""
+        if skill_md_path.exists():
+            try:
+                md_content = skill_md_path.read_text(encoding="utf-8")
+            except OSError:
+                pass
+
+        # 解析 skill_id
+        # 优先级 1: frontmatter metadata.skill_id
+        skill_id = extract_skill_id(md_content, source, skill_name)
+
+        # 优先级 2: manifest metadata.skill_id（分发时写入，覆盖自动生成）
+        manifest_skill_id = manifest_metadata.get("skill_id")
+        if manifest_skill_id and isinstance(manifest_skill_id, str):
+            skill_id = manifest_skill_id
+
+        # 解析 cn_name
+        cn_name = ""
+
+        # 优先级 1: manifest metadata.cn_name（分发时写入）
+        manifest_cn_name = manifest_metadata.get("cn_name")
+        if manifest_cn_name and isinstance(manifest_cn_name, str):
+            cn_name = manifest_cn_name
+
+        # 优先级 2: frontmatter metadata.cn_name 或顶层 chinese_name
+        if not cn_name and md_content:
+            fm = parse_frontmatter(md_content)
+            metadata_cn_name = fm.get("cn_name")
+            if metadata_cn_name and isinstance(metadata_cn_name, str):
+                cn_name = metadata_cn_name
+            else:
+                metadata_dict = fm.get("metadata", {})
+                if isinstance(metadata_dict, dict):
+                    metadata_cn_name = metadata_dict.get("cn_name")
+                    if metadata_cn_name and isinstance(metadata_cn_name, str):
+                        cn_name = metadata_cn_name
+
+        # 优先级 3: SKILL.md 一级标题
+        if not cn_name and md_content:
+            cn_name = extract_cn_name_from_title(md_content)
+
+        # 优先级 4: skill_name fallback
+        if not cn_name:
+            cn_name = skill_name
+
+        return skill_id, cn_name
+
+    def _extract_skill_id_cn_name_from_market(
+        self,
+        source_id: str,
+        item_id: str,
+        skill_name: str,
+    ) -> tuple[str, str]:
+        """从市场条目目录中提取 skill_id 和 cn_name.
+
+        Args:
+            source_id: 来源 ID
+            item_id: 市场条目 ID
+            skill_name: 技能目录名
+
+        Returns:
+            (skill_id, cn_name) 元组
+        """
+        skill_dir = get_skill_dir(
+            self.marketplace_root,
+            source_id,
+            item_id,
+        )
+        skill_md_path = skill_dir / "SKILL.md"
+        md_content = ""
+        if skill_md_path.exists():
+            try:
+                md_content = skill_md_path.read_text(encoding="utf-8")
+            except OSError:
+                pass
+
+        # 解析 skill_id（source 使用 marketplace）
+        source = f"marketplace:{item_id}"
+        skill_id = extract_skill_id(md_content, source, skill_name)
+
+        # 解析 cn_name
+        cn_name = _extract_cn_name_from_md(md_content, skill_name)
+
+        return skill_id, cn_name
+
     def _build_my_skill_item(
         self,
         skill_dir: Path,
@@ -1403,6 +1595,12 @@ class MarketplaceService:
             manifest_entry,
             manifest_metadata,
         )
+        skill_id, cn_name = self._resolve_skill_id_cn_name(
+            skill_dir,
+            skill_name,
+            source,
+            manifest_metadata,
+        )
         is_received = source.startswith("marketplace:")
         has_update = (
             is_received
@@ -1428,6 +1626,8 @@ class MarketplaceService:
             creator_name=_decode_creator_name(creator_name or ""),
             created_at=created_at,
             updated_at=updated_at,
+            skill_id=skill_id,
+            cn_name=cn_name,
         )
 
     async def _get_stats(
