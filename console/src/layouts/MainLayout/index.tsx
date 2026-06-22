@@ -51,6 +51,8 @@ import MarketPage from "../../pages/Market";
 import MySkillsPage from "../../pages/MySkills";
 import MyMCPPage from "../../pages/MyMCP";
 
+import { useDynamicRender } from "@/components/agentscope-chat/DynamicRenderContext";
+
 const { Content } = Layout;
 
 const pathToKey: Record<string, string> = {
@@ -97,6 +99,9 @@ export default function MainLayout() {
   const currentPath = location.pathname;
   const selectedKey = pathToKey[currentPath] || "chat";
 
+  // 动态渲染模版上下文
+  const dynamicRender = useDynamicRender(); // 使用 useDynamicRender 钩子
+
   // ==================== iframe 集成 (Kun He) ====================
   // Sidebar 显示控制：
   // iframe 传递的 hideMenu === true 时隐藏 Sidebar
@@ -113,6 +118,11 @@ export default function MainLayout() {
   useEffect(() => {
     loadEffectiveConfig(activeSourceId);
   }, [activeSourceId, loadEffectiveConfig]);
+
+  // 初始化动态渲染模版（应用启动时预加载）
+  useEffect(() => {
+    dynamicRender.initialize();
+  }, [dynamicRender]);
 
   return (
     <Layout className={styles.mainLayout}>
