@@ -64,3 +64,55 @@ def extract_metadata(md_content: str) -> Dict[str, str]:
         "version": extract_version(md_content),
         "chinese_name": _str("chinese_name"),
     }
+
+
+def extract_skill_id(md_content: str, source: str, skill_name: str) -> str:
+    """提取或生成技能唯一标识符.
+
+    解析优先级：
+    1. metadata.skill_id（frontmatter）
+    2. 自动生成：f"{source}_{skill_name}"
+
+    Args:
+        md_content: SKILL.md 文件内容
+        source: 技能来源（builtin/customized/marketplace）
+        skill_name: 技能目录名
+
+    Returns:
+        skill_id 字段值，若 frontmatter 未指定则自动生成
+    """
+    fm = parse_frontmatter(md_content)
+
+    # 从顶层 metadata 中提取 skill_id
+    metadata = fm.get("metadata", {})
+    if isinstance(metadata, dict):
+        skill_id = metadata.get("skill_id", "")
+        if isinstance(skill_id, str) and skill_id:
+            return skill_id
+
+    # 自动生成：{source}_{skill_name}
+    return f"{source}_{skill_name}"
+
+
+def extract_cn_name_from_title(md_content: str) -> str:
+    """从 SKILL.md 一级标题提取中文展示名.
+
+    Args:
+        md_content: SKILL.md 文件内容
+
+    Returns:
+        一级标题内容（去除 # 前缀和空格），若无标题则返回空串
+    """
+    if not md_content:
+        return ""
+
+    # 查找第一个一级标题（以 # 开头，且后面不是 #）
+    for line in md_content.split("\n"):
+        stripped = line.strip()
+        if stripped.startswith("#") and not stripped.startswith("##"):
+            # 去除 # 和前后空格
+            title = stripped[1:].strip()
+            if title:
+                return title
+
+    return ""
