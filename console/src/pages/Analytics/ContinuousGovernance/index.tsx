@@ -35,6 +35,7 @@ import {
   UserX,
 } from "lucide-react";
 import { dreamLogsApi } from "../../../api/modules/dreamLogs";
+import { fetchBbkBySource, type BbkInfo } from "../../../api/modules/userInfo";
 import type {
   ArchiveAdminAuditRecord,
   ArchiveItem,
@@ -50,10 +51,13 @@ import type {
   ReconcileHealthInfo,
 } from "../../../api/types/dreamLogs";
 import { BBK_ID_MAP, getBbkDisplayName } from "../../../constants/bbk";
+import { DEFAULT_SOURCE_ID } from "../../../constants/identity";
+import { useIframeStore } from "../../../stores/iframeStore";
 import styles from "./index.module.less";
 
 const { RangePicker } = DatePicker;
 const DEFAULT_AGENT_ID = "default";
+const FILE_DETAIL_DEFAULT_PAGE_SIZE = 10;
 
 type DateRange = [Dayjs, Dayjs] | null;
 type ActiveTab = "governance" | "files";
@@ -83,6 +87,11 @@ interface KpiConfig {
   value: string;
   accent: string;
   icon: typeof Users;
+}
+
+interface BbkOption {
+  label: string;
+  value: string;
 }
 
 const STATUS_COLORS: Record<string, string> = {
@@ -200,6 +209,23 @@ function buildFileGovernanceParams(
   if (params.user_search) next.user_search = params.user_search;
   if (params.agent_id) next.target_agent_id = params.agent_id;
   return next;
+}
+
+function buildBbkOptions(items: BbkInfo[]): BbkOption[] {
+  const seen = new Set<string>();
+  const options = items.reduce<BbkOption[]>((acc, item) => {
+    const value = item.bbk_id?.trim();
+    if (!value || seen.has(value)) {
+      return acc;
+    }
+    seen.add(value);
+    acc.push({
+      value,
+      label: item.bbk_name?.trim() || getBbkDisplayName(value),
+    });
+    return acc;
+  }, []);
+  return options.length ? options : BBK_ID_MAP;
 }
 
 function KpiCard({ item }: { item: KpiConfig }) {
@@ -511,7 +537,13 @@ function StatusChart({ data }: { data: DreamLogReportStatusBucket[] }) {
   );
 }
 
-function BbkChart({ data }: { data: DreamLogReportBbkBucket[] }) {
+function BbkChart({
+  data,
+  getBbkName,
+}: {
+  data: DreamLogReportBbkBucket[];
+  getBbkName: (bbkId?: string) => string;
+}) {
   const maxValue = Math.max(...data.map((item) => item.executions), 1);
   if (!data.length) {
     return (
@@ -525,7 +557,7 @@ function BbkChart({ data }: { data: DreamLogReportBbkBucket[] }) {
       {data.map((item) => (
         <div key={item.bbk_id} className={styles.distributionRow}>
           <span className={styles.distributionName}>
-            {getBbkDisplayName(item.bbk_id)}
+            {getBbkName(item.bbk_id)}
           </span>
           <div className={styles.distributionTrack}>
             <div
@@ -541,6 +573,7 @@ function BbkChart({ data }: { data: DreamLogReportBbkBucket[] }) {
 }
 
 export default function ContinuousGovernancePage() {
+  const sourceId = useIframeStore((state) => state.source) || DEFAULT_SOURCE_ID;
   const [activeTab, setActiveTab] = useState<ActiveTab>("governance");
   const [draft, setDraft] = useState<FilterDraft>(() => buildDefaultDraft());
   const [query, setQuery] = useState<DreamLogReportParams>(() =>
@@ -551,10 +584,22 @@ export default function ContinuousGovernancePage() {
     useState<ArchiveReportResponse | null>(null);
   const [archiveItems, setArchiveItems] = useState<ArchiveItem[]>([]);
   const [archiveTotal, setArchiveTotal] = useState(0);
+  const [archivePage, setArchivePage] = useState(1);
+  const [archivePageSize, setArchivePageSize] = useState(
+    FILE_DETAIL_DEFAULT_PAGE_SIZE,
+  );
   const [protectedFiles, setProtectedFiles] = useState<ProtectedFileInfo[]>([]);
   const [protectedTotal, setProtectedTotal] = useState(0);
+  const [protectedPage, setProtectedPage] = useState(1);
+  const [protectedPageSize, setProtectedPageSize] = useState(
+    FILE_DETAIL_DEFAULT_PAGE_SIZE,
+  );
   const [adminAudits, setAdminAudits] = useState<ArchiveAdminAuditRecord[]>([]);
   const [auditTotal, setAuditTotal] = useState(0);
+  const [auditPage, setAuditPage] = useState(1);
+  const [auditPageSize, setAuditPageSize] = useState(
+    FILE_DETAIL_DEFAULT_PAGE_SIZE,
+  );
   const [archiveLoaded, setArchiveLoaded] = useState(false);
   const [loading, setLoading] = useState(false);
   const [archiveLoading, setArchiveLoading] = useState(false);
@@ -568,6 +613,7 @@ export default function ContinuousGovernancePage() {
   const [recordsPageSize, setRecordsPageSize] = useState(10);
   const [detailRecord, setDetailRecord] =
     useState<DreamLogReportRecord | null>(null);
+  const [bbkOptions, setBbkOptions] = useState<BbkOption[]>(BBK_ID_MAP);
 
   const fetchReport = useCallback(async (params: DreamLogReportParams) => {
     setLoading(true);
@@ -590,20 +636,35 @@ export default function ContinuousGovernancePage() {
       const [reportData, itemsData, protectedData, auditsData] =
         await Promise.all([
           dreamLogsApi.archiveReport(fileParams),
-          dreamLogsApi.listArchiveItems({ ...fileParams, page_size: 100 }),
-          dreamLogsApi.listProtectedFiles({ ...fileParams, page_size: 100 }),
+          dreamLogsApi.listArchiveItems({
+            ...fileParams,
+            page: archivePage,
+            page_size: archivePageSize,
+          }),
+          dreamLogsApi.listProtectedFiles({
+            ...fileParams,
+            page: protectedPage,
+            page_size: protectedPageSize,
+          }),
           dreamLogsApi.listArchiveAdminAudits({
             ...fileParams,
-            page_size: 100,
+            page: auditPage,
+            page_size: auditPageSize,
           }),
         ]);
       setArchiveReport(reportData);
       setArchiveItems(itemsData.items || []);
       setArchiveTotal(itemsData.total || 0);
+      setArchivePage(itemsData.page || archivePage);
+      setArchivePageSize(itemsData.page_size || archivePageSize);
       setProtectedFiles(protectedData.items || []);
       setProtectedTotal(protectedData.total || 0);
+      setProtectedPage(protectedData.page || protectedPage);
+      setProtectedPageSize(protectedData.page_size || protectedPageSize);
       setAdminAudits(auditsData.items || []);
       setAuditTotal(auditsData.total || 0);
+      setAuditPage(auditsData.page || auditPage);
+      setAuditPageSize(auditsData.page_size || auditPageSize);
       setArchiveLoaded(true);
     } catch (error) {
       console.error("Failed to fetch file governance report:", error);
@@ -618,13 +679,40 @@ export default function ContinuousGovernancePage() {
     } finally {
       setArchiveLoading(false);
     }
-  }, [query]);
+  }, [
+    archivePage,
+    archivePageSize,
+    auditPage,
+    auditPageSize,
+    protectedPage,
+    protectedPageSize,
+    query,
+  ]);
+
+  useEffect(() => {
+    let cancelled = false;
+
+    async function loadBbkOptions() {
+      const items = await fetchBbkBySource(sourceId);
+      if (!cancelled) {
+        setBbkOptions(buildBbkOptions(items));
+      }
+    }
+
+    void loadBbkOptions();
+    return () => {
+      cancelled = true;
+    };
+  }, [sourceId]);
 
   useEffect(() => {
     void fetchReport(query);
   }, [fetchReport, query]);
 
   useEffect(() => {
+    setArchivePage(1);
+    setProtectedPage(1);
+    setAuditPage(1);
     setArchiveLoaded(false);
   }, [query]);
 
@@ -767,6 +855,24 @@ export default function ContinuousGovernancePage() {
     ];
   }, [archiveReport]);
 
+  const bbkNameMap = useMemo(
+    () =>
+      bbkOptions.reduce<Record<string, string>>((acc, item) => {
+        acc[item.value] = item.label;
+        return acc;
+      }, {}),
+    [bbkOptions],
+  );
+
+  const formatBbkName = useCallback(
+    (bbkId?: string) => {
+      if (!bbkId) return "-";
+      if (bbkId === "other" || bbkId === "unassigned") return "其他";
+      return bbkNameMap[bbkId] || getBbkDisplayName(bbkId);
+    },
+    [bbkNameMap],
+  );
+
   const userColumns: ColumnsType<DreamLogReportUserRow> = [
     {
       title: "用户 ID",
@@ -787,7 +893,7 @@ export default function ContinuousGovernancePage() {
       dataIndex: "bbk_id",
       key: "bbk_id",
       width: 150,
-      render: (value) => getBbkDisplayName(value),
+      render: (value) => formatBbkName(value),
     },
     {
       title: "执行次数",
@@ -1126,7 +1232,7 @@ export default function ContinuousGovernancePage() {
           className={styles.filterControl}
           placeholder="机构 BBK"
           value={draft.bbk_id}
-          options={BBK_ID_MAP}
+          options={bbkOptions}
           onChange={(value) => setDraft((prev) => ({ ...prev, bbk_id: value }))}
           allowClear
           showSearch
@@ -1226,7 +1332,10 @@ export default function ContinuousGovernancePage() {
           <div className={styles.panelHeader}>
             <span>机构分布</span>
           </div>
-          <BbkChart data={report?.bbk_distribution || []} />
+          <BbkChart
+            data={report?.bbk_distribution || []}
+            getBbkName={formatBbkName}
+          />
         </section>
       </div>
 
@@ -1292,7 +1401,18 @@ export default function ContinuousGovernancePage() {
           columns={archiveColumns}
           dataSource={archiveItems}
           scroll={{ x: 870 }}
-          pagination={false}
+          pagination={{
+            current: archivePage,
+            pageSize: archivePageSize,
+            total: archiveTotal,
+            showSizeChanger: true,
+            showTotal: (total) => `共 ${total} 个`,
+            onChange: (page, pageSize) => {
+              setArchivePage(page);
+              setArchivePageSize(pageSize);
+              setArchiveLoaded(false);
+            },
+          }}
         />
       </section>
 
@@ -1310,7 +1430,18 @@ export default function ContinuousGovernancePage() {
           columns={protectedColumns}
           dataSource={protectedFiles}
           scroll={{ x: 980 }}
-          pagination={false}
+          pagination={{
+            current: protectedPage,
+            pageSize: protectedPageSize,
+            total: protectedTotal,
+            showSizeChanger: true,
+            showTotal: (total) => `共 ${total} 个`,
+            onChange: (page, pageSize) => {
+              setProtectedPage(page);
+              setProtectedPageSize(pageSize);
+              setArchiveLoaded(false);
+            },
+          }}
         />
       </section>
 
@@ -1326,7 +1457,18 @@ export default function ContinuousGovernancePage() {
           columns={auditColumns}
           dataSource={adminAudits}
           scroll={{ x: 1040 }}
-          pagination={false}
+          pagination={{
+            current: auditPage,
+            pageSize: auditPageSize,
+            total: auditTotal,
+            showSizeChanger: true,
+            showTotal: (total) => `共 ${total} 条记录`,
+            onChange: (page, pageSize) => {
+              setAuditPage(page);
+              setAuditPageSize(pageSize);
+              setArchiveLoaded(false);
+            },
+          }}
         />
       </section>
     </>

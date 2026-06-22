@@ -20,10 +20,18 @@ const mocks = vi.hoisted(() => ({
     report: vi.fn(),
     reportUserRecords: vi.fn(),
   },
+  fetchBbkBySource: vi.fn(),
 }));
 
 vi.mock("../../../api/modules/dreamLogs", () => ({
   dreamLogsApi: mocks.dreamLogsApi,
+}));
+vi.mock("../../../api/modules/userInfo", () => ({
+  fetchBbkBySource: mocks.fetchBbkBySource,
+}));
+vi.mock("../../../stores/iframeStore", () => ({
+  useIframeStore: (selector: (state: { source: string }) => unknown) =>
+    selector({ source: "RMASSIST" }),
 }));
 
 describe("ContinuousGovernancePage", () => {
@@ -33,6 +41,10 @@ describe("ContinuousGovernancePage", () => {
 
   beforeEach(() => {
     vi.clearAllMocks();
+    mocks.fetchBbkBySource.mockResolvedValue([
+      { bbk_id: "bbk-1", bbk_name: "杭州分行" },
+      { bbk_id: "3302", bbk_name: "南京分行" },
+    ]);
     mocks.dreamLogsApi.report.mockResolvedValue({
       summary: {
         covered_users: 10,
@@ -164,9 +176,9 @@ describe("ContinuousGovernancePage", () => {
           expired: true,
         },
       ],
-      total: 1,
+      total: 11,
       page: 1,
-      page_size: 100,
+      page_size: 10,
     });
     mocks.dreamLogsApi.listProtectedFiles.mockResolvedValue({
       items: [
@@ -184,7 +196,7 @@ describe("ContinuousGovernancePage", () => {
       ],
       total: 1,
       page: 1,
-      page_size: 100,
+      page_size: 10,
     });
     mocks.dreamLogsApi.listArchiveAdminAudits.mockResolvedValue({
       summary: {
@@ -219,7 +231,7 @@ describe("ContinuousGovernancePage", () => {
       ],
       total: 1,
       page: 1,
-      page_size: 100,
+      page_size: 10,
     });
   });
 
@@ -246,6 +258,7 @@ describe("ContinuousGovernancePage", () => {
     expect(screen.queryByText("model timeout")).not.toBeInTheDocument();
     expect(screen.queryByPlaceholderText("Agent")).not.toBeInTheDocument();
     expect(screen.getByText("其他")).toBeInTheDocument();
+    expect((await screen.findAllByText("杭州分行")).length).toBeGreaterThan(0);
     expect(screen.getByText("手动")).toBeInTheDocument();
     expect(screen.getByText("自动")).toBeInTheDocument();
     expect(screen.getByText("节省空间趋势")).toBeInTheDocument();
@@ -254,6 +267,18 @@ describe("ContinuousGovernancePage", () => {
       screen.queryByTestId("governance-kpi-archive_files"),
     ).not.toBeInTheDocument();
   }, 10000);
+
+  it("loads all source branches for the BBK filter", async () => {
+    render(<ContinuousGovernancePage />);
+
+    await waitFor(() => {
+      expect(mocks.fetchBbkBySource).toHaveBeenCalledWith("RMASSIST");
+    });
+
+    fireEvent.mouseDown(screen.getByText("机构 BBK"));
+
+    expect(await screen.findByText("南京分行")).toBeInTheDocument();
+  });
 
   it("keeps refresh with query actions and removes the top dashboard title", async () => {
     render(<ContinuousGovernancePage />);
@@ -342,15 +367,18 @@ describe("ContinuousGovernancePage", () => {
       expect(mocks.dreamLogsApi.archiveReport).toHaveBeenCalledTimes(1);
       expect(mocks.dreamLogsApi.listArchiveItems).toHaveBeenCalledWith({
         target_agent_id: "default",
-        page_size: 100,
+        page: 1,
+        page_size: 10,
       });
       expect(mocks.dreamLogsApi.listProtectedFiles).toHaveBeenCalledWith({
         target_agent_id: "default",
-        page_size: 100,
+        page: 1,
+        page_size: 10,
       });
       expect(mocks.dreamLogsApi.listArchiveAdminAudits).toHaveBeenCalledWith({
         target_agent_id: "default",
-        page_size: 100,
+        page: 1,
+        page_size: 10,
       });
     });
 
@@ -383,6 +411,34 @@ describe("ContinuousGovernancePage", () => {
     expect(
       screen.queryByRole("columnheader", { name: "存在状态" }),
     ).not.toBeInTheDocument();
+  }, 20000);
+
+  it("requests file cleanup details by table page", async () => {
+    render(<ContinuousGovernancePage />);
+
+    await screen.findAllByText("Alice");
+    fireEvent.click(screen.getByRole("tab", { name: "文件清理与归档" }));
+
+    await waitFor(() => {
+      expect(mocks.dreamLogsApi.listArchiveItems).toHaveBeenLastCalledWith({
+        target_agent_id: "default",
+        page: 1,
+        page_size: 10,
+      });
+    });
+
+    const archiveSection = screen.getByText("归档文件").closest("section");
+    expect(archiveSection).not.toBeNull();
+    const secondPage = within(archiveSection as HTMLElement).getByTitle("2");
+    fireEvent.click(secondPage);
+
+    await waitFor(() => {
+      expect(mocks.dreamLogsApi.listArchiveItems).toHaveBeenLastCalledWith({
+        target_agent_id: "default",
+        page: 2,
+        page_size: 10,
+      });
+    });
   }, 20000);
 
   it("shows reconcile health separately from core metrics", async () => {
@@ -462,17 +518,20 @@ describe("ContinuousGovernancePage", () => {
     expect(mocks.dreamLogsApi.listArchiveItems).toHaveBeenCalledWith({
       user_search: "Alice",
       target_agent_id: "default",
-      page_size: 100,
+      page: 1,
+      page_size: 10,
     });
     expect(mocks.dreamLogsApi.listProtectedFiles).toHaveBeenCalledWith({
       user_search: "Alice",
       target_agent_id: "default",
-      page_size: 100,
+      page: 1,
+      page_size: 10,
     });
     expect(mocks.dreamLogsApi.listArchiveAdminAudits).toHaveBeenCalledWith({
       user_search: "Alice",
       target_agent_id: "default",
-      page_size: 100,
+      page: 1,
+      page_size: 10,
     });
   });
 

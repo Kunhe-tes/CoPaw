@@ -273,16 +273,6 @@ export default function Sidebar({ selectedKey }: SidebarProps) {
       path: "/analytics/business-overview",
       label: t("nav.analyticsBusinessOverview", "运营看板"),
     },
-    ...(isRMassistSource
-      ? [
-          {
-            key: "analytics-claw-data-overview",
-            icon: <SparkBarChartLine size={18} />,
-            path: "/analytics/claw-data-overview",
-            label: t("nav.analyticsClawDataOverview", "Claw数据看板"),
-          },
-        ]
-      : []),
     ...(canManageCurrentSourceConfig
       ? [
           {
@@ -290,6 +280,16 @@ export default function Sidebar({ selectedKey }: SidebarProps) {
             icon: <SparkRefreshLine size={18} />,
             path: "/analytics/continuous-governance",
             label: t("nav.analyticsContinuousGovernance", "质量工程看板"),
+          },
+        ]
+      : []),
+    ...(isRMassistSource
+      ? [
+          {
+            key: "analytics-claw-data-overview",
+            icon: <SparkBarChartLine size={18} />,
+            path: "/analytics/claw-data-overview",
+            label: t("nav.analyticsClawDataOverview", "Claw数据看板"),
           },
         ]
       : []),
@@ -463,17 +463,6 @@ export default function Sidebar({ selectedKey }: SidebarProps) {
             : t("nav.analyticsBusinessOverview", "运营看板"),
           icon: <SparkBarChartLine size={16} />,
         },
-        ...(isRMassistSource
-          ? [
-              {
-                key: "analytics-claw-data-overview",
-                label: collapsed
-                  ? null
-                  : t("nav.analyticsClawDataOverview", "Claw数据看板"),
-                icon: <SparkBarChartLine size={16} />,
-              },
-            ]
-          : []),
         ...(canManageCurrentSourceConfig
           ? [
               {
@@ -482,6 +471,17 @@ export default function Sidebar({ selectedKey }: SidebarProps) {
                   ? null
                   : t("nav.analyticsContinuousGovernance", "质量工程看板"),
                 icon: <SparkRefreshLine size={16} />,
+              },
+            ]
+          : []),
+        ...(isRMassistSource
+          ? [
+              {
+                key: "analytics-claw-data-overview",
+                label: collapsed
+                  ? null
+                  : t("nav.analyticsClawDataOverview", "Claw数据看板"),
+                icon: <SparkBarChartLine size={16} />,
               },
             ]
           : []),
