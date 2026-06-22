@@ -6,6 +6,7 @@ from __future__ import annotations
 import json
 import asyncio
 from datetime import timedelta
+from types import SimpleNamespace
 
 import pytest
 
@@ -292,6 +293,66 @@ async def test_mcp_tools_missing_server_is_fail(tmp_path, monkeypatch):
 
     assert result.status == "fail"
     assert result.details["failures"][0]["message"] == "server not found"
+
+
+@pytest.mark.asyncio
+async def test_mcp_tools_uses_fresh_agent_config_when_workspace_cache_is_stale(
+    tmp_path,
+    monkeypatch,
+):
+    """MCP 配置更新后，自检应读取最新 agent.json 而不是旧 workspace 缓存。"""
+    stale_workspace = SimpleNamespace(
+        agent_id="default",
+        tenant_id="alice_source-a",
+        config=SimpleNamespace(mcp=SimpleNamespace(clients={})),
+    )
+    fresh_client = SimpleNamespace(enabled=True, name="toolbox")
+    context = _context(tmp_path, monkeypatch)
+    context.workspace = stale_workspace
+
+    monkeypatch.setattr(
+        strategies_module,
+        "load_agent_config",
+        lambda agent_id, tenant_id=None: SimpleNamespace(
+            mcp=SimpleNamespace(clients={"toolbox": fresh_client}),
+        ),
+    )
+
+    class _McpClient:
+        async def connect(self):
+            return None
+
+        async def list_tools(self, timeout=None):
+            return [SimpleNamespace(name="search")]
+
+    async def _create_client(client_config, **kwargs):
+        assert client_config is fresh_client
+        return _McpClient()
+
+    monkeypatch.setattr(
+        runner_module,
+        "_create_mcp_client_with_headers",
+        _create_client,
+    )
+
+    async def _cleanup_clients(clients):
+        return None
+
+    monkeypatch.setattr(
+        runner_module,
+        "_cleanup_mcp_clients",
+        _cleanup_clients,
+    )
+
+    result = await McpToolsAvailableStrategy().run(
+        context,
+        SkillReadinessCheckConfig(
+            name="mcp_tools_available",
+            params={"servers": [{"name": "toolbox", "tools": ["search"]}]},
+        ),
+    )
+
+    assert result.status == "pass"
 
 
 class _SlowMcpClient:

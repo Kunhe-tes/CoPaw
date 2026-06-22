@@ -18,6 +18,7 @@ from ...app.crons.auth_state import (
     utc_now,
 )
 from ...app.crons.models import CronJobSpec, cron_skill_ids_contains
+from ...config.config import load_agent_config
 from ...config.context import resolve_request_effective_tenant_id
 from ...config.utils import get_tenant_secrets_dir, get_tenant_working_dir
 from ...providers.models import ModelSlotConfig
@@ -417,7 +418,7 @@ class McpToolsAvailableStrategy:
                 _elapsed_ms(started_at),
             )
 
-        mcp_config = getattr(getattr(context.workspace, "config", None), "mcp", None)
+        mcp_config = _get_mcp_config(context)
         configured_clients = getattr(mcp_config, "clients", {}) or {}
         failures: list[dict[str, Any]] = []
         for requirement in servers:
@@ -569,6 +570,22 @@ def _find_mcp_client_config(
         if getattr(client, "name", None) == server_name:
             return client
     return None
+
+
+def _get_mcp_config(context: SkillReadinessCheckContext) -> Any | None:
+    workspace = context.workspace
+    agent_id = getattr(workspace, "agent_id", None)
+    if agent_id:
+        tenant_id = getattr(workspace, "tenant_id", None) or context.scope_id
+        try:
+            return getattr(
+                load_agent_config(str(agent_id), tenant_id=tenant_id),
+                "mcp",
+                None,
+            )
+        except Exception:  # noqa: BLE001
+            pass
+    return getattr(getattr(workspace, "config", None), "mcp", None)
 
 
 async def _list_missing_mcp_tools(

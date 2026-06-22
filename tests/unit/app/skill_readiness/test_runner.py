@@ -15,7 +15,12 @@ from swe.app.skill_readiness.models import (
 )
 from swe.app.skill_readiness.runner import SkillReadinessRunner
 from swe.app.skill_readiness.strategies import SkillReadinessCheckContext
-from swe.config.context import get_current_source_id, get_current_tenant_id
+from swe.config.context import (
+    get_current_source_id,
+    get_current_tenant_id,
+    reset_current_passthrough_headers,
+    set_current_passthrough_headers,
+)
 
 
 class _ContextRecordingStrategy:
@@ -33,6 +38,22 @@ class _ContextRecordingStrategy:
                 get_current_source_id(),
             ),
         )
+        return SkillReadinessCheckResult(
+            check_name=self.name,
+            display_name=self.display_name,
+            status="pass",
+        )
+
+
+class _HeaderRecordingStrategy:
+    name = "context_check"
+    display_name = "Context Check"
+
+    def __init__(self):
+        self.seen = []
+
+    async def run(self, context, config):
+        self.seen.append(dict(context.passthrough_headers))
         return SkillReadinessCheckResult(
             check_name=self.name,
             display_name=self.display_name,
@@ -81,6 +102,35 @@ async def test_user_check_runs_with_owner_tenant_and_source_context():
     )
 
     assert strategy.seen == [("alice", "alice", "source-a")]
+
+
+@pytest.mark.asyncio
+async def test_user_check_passes_request_headers_to_mcp_context():
+    """MCP 可用性自检需要沿用触发请求透传的鉴权 header。"""
+    strategy = _HeaderRecordingStrategy()
+    runner = SkillReadinessRunner(
+        store=_ProgressStore(),
+        registry=_Registry(strategy),
+        user_concurrency=1,
+    )
+    token = set_current_passthrough_headers(
+        {"cookie": "auth=token-1"},
+    )
+
+    try:
+        await runner.run(
+            run_id="run-1",
+            source_id="source-a",
+            skill_id="skill-a",
+            owners=[SkillReadinessOwner(user_id="alice")],
+            config=SkillReadinessConfig(
+                checks=[SkillReadinessCheckConfig(name="context_check")],
+            ),
+        )
+    finally:
+        reset_current_passthrough_headers(token)
+
+    assert strategy.seen == [{"cookie": "auth=token-1"}]
 
 
 class _FailingStore(_ProgressStore):

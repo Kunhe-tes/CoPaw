@@ -10,6 +10,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 from ..tenant_context import bind_tenant_context
+from ...config.context import get_current_passthrough_headers
 from .models import (
     SkillReadinessCheckConfig,
     SkillReadinessCheckResult,
@@ -242,6 +243,7 @@ class SkillReadinessRunner:
             owner=owner,
             cron_manager=getattr(workspace, "cron_manager", None),
             workspace=workspace,
+            passthrough_headers=dict(get_current_passthrough_headers() or {}),
         )
 
     def _timeout_results(

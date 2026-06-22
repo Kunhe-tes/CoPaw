@@ -3374,7 +3374,57 @@ async def restore_archive_item(
         source_id,
         body.target_agent_id,
     )
-    index, item = _find_archive_item(workspace_dir, body.archive_item_id)
+    actor, _ = _request_actor(request)
+    original_path, protected_payload = _restore_archive_item_locally(
+        workspace_dir,
+        body.archive_item_id,
+        actor=actor,
+        protect_after_restore=body.protect_after_restore,
+    )
+    service = _get_optional_continuous_governance_service(request)
+    await _sync_archive_restore_to_service(
+        request,
+        service,
+        source_id,
+        body,
+        original_path,
+        protected_payload,
+    )
+    return ArchiveRestoreResponse(
+        success=True,
+        message="Restored archive item",
+        restored_path=original_path,
+        protected=body.protect_after_restore,
+    )
+
+
+def _build_restored_protected_payload(
+    restore_path: Path,
+    protected_item: dict[str, Any] | None,
+    actor: str,
+) -> dict[str, Any]:
+    stat = restore_path.stat() if restore_path.exists() else None
+    return {
+        "protected_at": str(
+            (protected_item or {}).get("protected_at") or "",
+        ),
+        "protected_by": str(
+            (protected_item or {}).get("protected_by") or actor,
+        ),
+        "exists": restore_path.exists(),
+        "size_bytes": stat.st_size if stat else None,
+        "mtime": _file_mtime_iso(restore_path) if stat else None,
+    }
+
+
+def _restore_archive_item_locally(
+    workspace_dir: Path,
+    archive_item_id: str,
+    *,
+    actor: str,
+    protect_after_restore: bool,
+) -> tuple[str, dict[str, Any]]:
+    index, item = _find_archive_item(workspace_dir, archive_item_id)
     original_path = _normalise_workspace_relative_path(
         str(item.get("original_path") or ""),
     )
@@ -3387,82 +3437,78 @@ async def restore_archive_item(
         raise HTTPException(status_code=404, detail="Archived file not found")
     if restore_path.exists():
         raise HTTPException(status_code=409, detail="Restore target exists")
+
     restore_path.parent.mkdir(parents=True, exist_ok=True)
     shutil.move(str(archive_file), str(restore_path))
     index["items"] = [
         row
         for row in index.get("items", [])
-        if str(row.get("id") or "") != body.archive_item_id
+        if str(row.get("id") or "") != archive_item_id
     ]
     _save_archive_index(workspace_dir, index)
 
-    actor, _ = _request_actor(request)
-    protected_item: dict[str, Any] | None = None
-    if body.protect_after_restore:
-        protected_item = _add_protected_path(
-            workspace_dir,
-            original_path,
-            actor=actor,
-            reason="restored_from_archive",
-        )
-    protected_payload: dict[str, Any] = {}
-    if body.protect_after_restore:
-        stat = restore_path.stat() if restore_path.exists() else None
-        protected_payload = {
-            "protected_at": str(
-                (protected_item or {}).get("protected_at") or "",
-            ),
-            "protected_by": str(
-                (protected_item or {}).get("protected_by") or actor,
-            ),
-            "exists": restore_path.exists(),
-            "size_bytes": stat.st_size if stat else None,
-            "mtime": _file_mtime_iso(restore_path) if stat else None,
-        }
-    service = _get_optional_continuous_governance_service(request)
-    if service is not None:
-        try:
-            await service.delete_archive_items(
-                source_id=source_id,
-                target_user_id=body.target_user_id,
-                target_agent_id=body.target_agent_id,
-                archive_item_ids=[body.archive_item_id],
-            )
-            if body.protect_after_restore:
-                await service.upsert_protected_file(
-                    source_id=source_id,
-                    target_user_id=body.target_user_id,
-                    target_agent_id=body.target_agent_id,
-                    path=original_path,
-                    protected_at=protected_payload["protected_at"],
-                    protected_by=protected_payload["protected_by"],
-                    reason="restored_from_archive",
-                    exists=protected_payload["exists"],
-                    size_bytes=protected_payload["size_bytes"],
-                    mtime=protected_payload["mtime"],
-                )
-        except Exception as exc:
-            await _record_dual_write_health(
-                request,
-                source_id=source_id,
-                target_user_id=body.target_user_id,
-                target_agent_id=body.target_agent_id,
-                entity_type="archive_restore",
-                entity_id=body.archive_item_id,
-                error=exc,
-                payload={
-                    "archive_item_id": body.archive_item_id,
-                    "original_path": original_path,
-                    "protect_after_restore": body.protect_after_restore,
-                    **protected_payload,
-                },
-            )
-    return ArchiveRestoreResponse(
-        success=True,
-        message="Restored archive item",
-        restored_path=original_path,
-        protected=body.protect_after_restore,
+    if not protect_after_restore:
+        return original_path, {}
+
+    protected_item = _add_protected_path(
+        workspace_dir,
+        original_path,
+        actor=actor,
+        reason="restored_from_archive",
     )
+    return original_path, _build_restored_protected_payload(
+        restore_path,
+        protected_item,
+        actor,
+    )
+
+
+async def _sync_archive_restore_to_service(
+    request: Request,
+    service: Any,
+    source_id: str,
+    body: ArchiveRestoreRequest,
+    original_path: str,
+    protected_payload: dict[str, Any],
+) -> None:
+    if service is None:
+        return
+    try:
+        await service.delete_archive_items(
+            source_id=source_id,
+            target_user_id=body.target_user_id,
+            target_agent_id=body.target_agent_id,
+            archive_item_ids=[body.archive_item_id],
+        )
+        if body.protect_after_restore:
+            await service.upsert_protected_file(
+                source_id=source_id,
+                target_user_id=body.target_user_id,
+                target_agent_id=body.target_agent_id,
+                path=original_path,
+                protected_at=protected_payload["protected_at"],
+                protected_by=protected_payload["protected_by"],
+                reason="restored_from_archive",
+                exists=protected_payload["exists"],
+                size_bytes=protected_payload["size_bytes"],
+                mtime=protected_payload["mtime"],
+            )
+    except Exception as exc:
+        await _record_dual_write_health(
+            request,
+            source_id=source_id,
+            target_user_id=body.target_user_id,
+            target_agent_id=body.target_agent_id,
+            entity_type="archive_restore",
+            entity_id=body.archive_item_id,
+            error=exc,
+            payload={
+                "archive_item_id": body.archive_item_id,
+                "original_path": original_path,
+                "protect_after_restore": body.protect_after_restore,
+                **protected_payload,
+            },
+        )
 
 
 def _purge_archive_items(
