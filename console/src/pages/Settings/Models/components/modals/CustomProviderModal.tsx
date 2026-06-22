@@ -56,6 +56,7 @@ export function CustomProviderModal({
 
   return (
     <Modal
+      rootClassName="console-management-modal"
       title={t("models.addProviderTitle")}
       open={open}
       onCancel={onClose}

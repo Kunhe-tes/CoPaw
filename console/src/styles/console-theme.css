@@ -1,0 +1,63 @@
+.console-management-theme {
+  color: var(--console-management-text);
+  font-family: var(--console-font-ui);
+  background: var(--console-management-canvas);
+}
+
+.page-content:has(.console-management-theme) {
+  background: var(--console-management-canvas) !important;
+  border-color: transparent !important;
+  border-radius: 0;
+}
+
+.page-container:has(.console-management-theme) {
+  padding-right: 0;
+  padding-bottom: 0;
+  background: var(--console-management-canvas);
+}
+
+.console-management-modal {
+  color: var(--console-management-text);
+  font-family: var(--console-font-ui);
+}
+
+.console-management-modal .swe-modal-content,
+.console-management-modal .ant-modal-content {
+  color: var(--console-management-text);
+  background: var(--console-management-surface);
+  border: 1px solid var(--console-management-border);
+  box-shadow: var(--console-management-shadow-raised);
+}
+
+.console-management-modal .swe-modal-title,
+.console-management-modal .ant-modal-title {
+  color: var(--console-management-text);
+  font-family: var(--console-font-ui);
+  font-weight: 600;
+}
+
+.console-management-modal .swe-modal-header,
+.console-management-modal .ant-modal-header {
+  background: var(--console-management-surface);
+  border-bottom-color: var(--console-management-border);
+}
+
+.console-management-modal .swe-btn-primary:not(:disabled),
+.console-management-modal .ant-btn-primary:not(:disabled) {
+  background: var(--console-management-primary);
+  border-color: var(--console-management-primary);
+}
+
+.console-management-modal .swe-btn-primary:not(:disabled):hover,
+.console-management-modal .ant-btn-primary:not(:disabled):hover {
+  background: var(--console-management-primary-hover) !important;
+  border-color: var(--console-management-primary-hover) !important;
+}
+
+.console-management-editorial {
+  font-family: var(--console-font-editorial);
+}
+
+.console-technical-value {
+  font-family: var(--console-font-mono);
+}

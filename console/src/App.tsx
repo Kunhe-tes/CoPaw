@@ -24,6 +24,7 @@ import { getApiUrl, getApiToken, clearAuthToken } from "./api/config";
 import { buildAuthHeaders } from "./api/authHeaders";
 import "./styles/layout.css";
 import "./styles/form-override.css";
+import "./styles/console-theme.css";
 
 const GlobalStyle = createGlobalStyle`
 * {
