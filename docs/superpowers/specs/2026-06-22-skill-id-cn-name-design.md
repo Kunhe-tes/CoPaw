@@ -413,14 +413,16 @@ ALTER TABLE swe_tracing_spans ADD COLUMN cn_name ...;
 ```json
 {
   "tenant_id": "default",
-  "force": false
+  "force": false,
+  "dry_run": false
 }
 ```
 
 | 参数 | 类型 | 必填 | 说明 |
 |------|------|------|------|
-| `tenant_id` | string | 是 | 要初始化的租户 ID |
+| `tenant_id` | string | 否 | 要初始化的租户 ID，默认为当前请求租户 |
 | `force` | boolean | 否 | 是否强制重新初始化（覆盖已有 skill_id） |
+| `dry_run` | boolean | 否 | 试运行模式，仅统计不实际写入 |
 
 **响应示例：**
 
@@ -428,6 +430,7 @@ ALTER TABLE swe_tracing_spans ADD COLUMN cn_name ...;
 {
   "success": true,
   "tenant_id": "default",
+  "dry_run": false,
   "total_skills": 15,
   "processed": 15,
   "updated_manifest": 8,
@@ -466,20 +469,27 @@ flowchart TD
 
 ```python
 async def init_skill_history_data(
-    tenant_id: str,
+    tenant_id: str | None = None,
     force: bool = False,
+    dry_run: bool = False,
 ) -> dict[str, Any]:
     """初始化历史技能数据
 
     Args:
-        tenant_id: 租户 ID
+        tenant_id: 租户 ID，默认为当前请求租户
         force: 是否强制重新初始化
+        dry_run: 试运行模式，仅统计不实际写入
 
     Returns:
         初始化结果统计
     """
+    # 使用当前租户作为默认值
+    if tenant_id is None:
+        tenant_id = get_current_effective_tenant_id()
+
     results = {
         "tenant_id": tenant_id,
+        "dry_run": dry_run,
         "total_skills": 0,
         "processed": 0,
         "updated_manifest": 0,
@@ -515,18 +525,20 @@ async def init_skill_history_data(
                 metadata["cn_name"] = cn_name
                 results["updated_manifest"] += 1
 
-            # 更新 manifest
-            entry["metadata"] = metadata
+            # 更新 manifest（仅在非 dry_run 模式）
+            if not dry_run:
+                entry["metadata"] = metadata
 
-            # 同步到数据库
-            await sync_skill_to_db(
-                skill_id=skill_id,
-                skill_name=skill_name,
-                cn_name=cn_name,
-                tenant_id=tenant_id,
-                entry=entry,
-            )
-            results["inserted_db"] += 1
+                # 同步到数据库
+                await sync_skill_to_db(
+                    skill_id=skill_id,
+                    skill_name=skill_name,
+                    cn_name=cn_name,
+                    tenant_id=tenant_id,
+                    entry=entry,
+                )
+                results["inserted_db"] += 1
+
             results["processed"] += 1
 
         except Exception as e:
@@ -535,8 +547,9 @@ async def init_skill_history_data(
                 "error": str(e),
             })
 
-    # 3. 保存更新后的 manifest
-    write_skill_pool_manifest(manifest, tenant_id)
+    # 3. 保存更新后的 manifest（仅在非 dry_run 模式）
+    if not dry_run:
+        write_skill_pool_manifest(manifest, tenant_id)
 
     return results
 ```
@@ -572,13 +585,18 @@ async def init_skill_history_data(
 ```python
 @app.command("init-history")
 def init_history_command(
-    tenant_id: str = typer.Option("default", help="Tenant ID"),
+    tenant_id: str = typer.Option(None, help="Tenant ID (default: current tenant)"),
     force: bool = typer.Option(False, help="Force re-initialize"),
+    dry_run: bool = typer.Option(False, help="Dry run mode, only count without writing"),
 ):
     """Initialize historical skill data with skill_id and cn_name."""
-    result = asyncio.run(init_skill_history_data(tenant_id, force))
+    result = asyncio.run(init_skill_history_data(tenant_id, force, dry_run))
 
-    console.print(f"[green]Successfully initialized {result['processed']} skills[/green]")
+    if result["dry_run"]:
+        console.print("[yellow]Dry run mode - no actual changes made[/yellow]")
+
+    console.print(f"[green]Successfully processed {result['processed']} skills[/green]")
+    console.print(f"  Tenant: {result['tenant_id']}")
     console.print(f"  Total: {result['total_skills']}")
     console.print(f"  Manifest updated: {result['updated_manifest']}")
     console.print(f"  Database inserted: {result['inserted_db']}")
