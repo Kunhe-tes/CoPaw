@@ -349,7 +349,7 @@ class QueryService:
         # Query with pagination - JOIN with jobs table to get tenant metadata.
         offset = (params.page - 1) * params.page_size
         query_sql = f"""
-            SELECT e.*, j.tenant_name, j.bbk_id AS bbk_id, e.bbk_id AS execution_bbk_id
+            SELECT e.*, j.tenant_name, j.bbk_id AS bbk_id
             FROM swe_cron_executions e
             LEFT JOIN swe_cron_jobs j ON e.job_id = j.id
             WHERE {where_clause}
@@ -368,7 +368,7 @@ class QueryService:
                     "id": row.get("id"),
                     "job_id": row.get("job_id"),
                     "job_bbk_id": row.get("bbk_id"),
-                    "execution_bbk_id": row.get("execution_bbk_id"),
+                    "bbk_id": row.get("bbk_id"),
                     "tenant_id": row.get("tenant_id"),
                     "status": row.get("status"),
                 }
