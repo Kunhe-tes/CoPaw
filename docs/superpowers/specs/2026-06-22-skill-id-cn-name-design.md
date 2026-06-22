@@ -56,21 +56,31 @@ metadata:
 
 ```
 1. metadata.skill_id（frontmatter）
-2. 自动生成：f"{tenant_id}_{skill_name}"
+2. 自动生成：f"{source}_{skill_name}"
 ```
+
+**注意：** skill_id 不包含 tenant_id，同一技能（相同 source 和 skill_name）在所有租户中共享同一 skill_id。这便于跨系统同步和统计。
+
+**示例：**
+- `builtin_xlsx`：内置 xlsx 技能，所有租户共享
+- `marketplace_report_generator`：市场分发技能，所有租户共享
+- `customized_my_tool`：用户自定义技能（若不同租户创建同名技能，仍共享 ID）
 
 ### 1.4 幂等生成规则
 
 **skill_id 自动生成规则：**
 
 ```python
-skill_id = f"{tenant_id}_{skill_name}"
+skill_id = f"{source}_{skill_name}"
 ```
 
-示例：`default_xlsx`
+示例：
+- `builtin_xlsx`
+- `marketplace_report_generator`
+- `customized_my_tool`
 
 **幂等性保证：**
-- 同一租户 + 同一目录名 → 同一 skill_id
+- 同一来源 + 同一目录名 → 同一 skill_id（跨租户共享）
 - 技能内容变化不影响 skill_id（保持稳定）
 - 已有技能通过 `skill_name` 判断是否同一技能
 
@@ -141,13 +151,15 @@ CREATE TABLE swe_skills (
 
 | 字段 | 说明 |
 |------|------|
-| `skill_id` | 唯一标识符，来自 `metadata.skill_id` 或自动生成 |
+| `skill_id` | 唯一标识符，来自 `metadata.skill_id` 或自动生成 `{source}_{skill_name}`，跨租户共享 |
 | `skill_name` | 目录名，运行时标识 |
 | `cn_name` | 中文展示名，来自解析逻辑 |
 | `tenant_id` | 租户隔离 |
 | `tenant_name` | 租户名称展示 |
 | `bbk_id` | BBK 用户标识关联 |
 | `source` | 来源：`builtin`/`customized`/`marketplace` |
+
+**注意：** 同一 skill_id 可能对应多条记录（多个租户拥有同一技能），UNIQUE KEY 为 `(skill_id, tenant_id)`。
 
 ### 3.3 同步时机
 
@@ -420,21 +432,24 @@ ALTER TABLE swe_tracing_spans ADD COLUMN cn_name ...;
 
 | 参数 | 类型 | 必填 | 说明 |
 |------|------|------|------|
-| `tenant_id` | string | 否 | 要初始化的租户 ID，默认为当前请求租户 |
+| `tenant_id` | string | 否 | 要初始化的租户 ID，不传时初始化所有租户的技能 |
 | `force` | boolean | 否 | 是否强制重新初始化（覆盖已有 skill_id） |
 | `dry_run` | boolean | 否 | 试运行模式，仅统计不实际写入 |
+
+**注意：** 同一技能可能被市场分发给多个用户（多租户拥有同一 skill_name），此时每个租户会生成独立的 `skill_id = "{tenant_id}_{skill_name}"`。
 
 **响应示例：**
 
 ```json
 {
   "success": true,
-  "tenant_id": "default",
+  "tenant_id": "all",
   "dry_run": false,
-  "total_skills": 15,
-  "processed": 15,
-  "updated_manifest": 8,
-  "inserted_db": 15,
+  "total_tenants": 3,
+  "total_skills": 45,
+  "processed": 45,
+  "updated_manifest": 20,
+  "inserted_db": 45,
   "skipped": 0,
   "errors": []
 }
@@ -476,20 +491,17 @@ async def init_skill_history_data(
     """初始化历史技能数据
 
     Args:
-        tenant_id: 租户 ID，默认为当前请求租户
+        tenant_id: 租户 ID，不传时初始化所有租户的技能
         force: 是否强制重新初始化
         dry_run: 试运行模式，仅统计不实际写入
 
     Returns:
         初始化结果统计
     """
-    # 使用当前租户作为默认值
-    if tenant_id is None:
-        tenant_id = get_current_effective_tenant_id()
-
     results = {
-        "tenant_id": tenant_id,
+        "tenant_id": tenant_id or "all",
         "dry_run": dry_run,
+        "total_tenants": 0,
         "total_skills": 0,
         "processed": 0,
         "updated_manifest": 0,
@@ -498,58 +510,70 @@ async def init_skill_history_data(
         "errors": [],
     }
 
-    # 1. 读取 manifest
-    manifest = read_skill_pool_manifest(tenant_id)
-    skills = manifest.get("skills", {})
-    results["total_skills"] = len(skills)
+    # 获取要处理的租户列表
+    if tenant_id:
+        tenant_ids = [tenant_id]
+    else:
+        # 初始化所有租户
+        tenant_ids = list_all_tenant_ids()
 
-    # 2. 遍历每个技能
-    for skill_name, entry in skills.items():
-        try:
-            metadata = entry.get("metadata", {})
+    results["total_tenants"] = len(tenant_ids)
 
-            # skill_id 处理
-            skill_id = metadata.get("skill_id")
-            if not skill_id or force:
-                skill_id = f"{tenant_id}_{skill_name}"
-                metadata["skill_id"] = skill_id
-                results["updated_manifest"] += 1
+    for tid in tenant_ids:
+        # 1. 读取 manifest
+        manifest = read_skill_pool_manifest(tid)
+        skills = manifest.get("skills", {})
+        results["total_skills"] += len(skills)
 
-            # cn_name 处理
-            cn_name = metadata.get("cn_name")
-            if not cn_name or force:
-                # 尝试从一级标题提取
-                cn_name = _extract_cn_name_from_skill_md(skill_dir)
-                if not cn_name:
-                    cn_name = skill_name
-                metadata["cn_name"] = cn_name
-                results["updated_manifest"] += 1
+        # 2. 遍历每个技能
+        for skill_name, entry in skills.items():
+            try:
+                metadata = entry.get("metadata", {})
 
-            # 更新 manifest（仅在非 dry_run 模式）
-            if not dry_run:
-                entry["metadata"] = metadata
+                # skill_id 处理（基于 source，不含 tenant_id）
+                skill_id = metadata.get("skill_id")
+                if not skill_id or force:
+                    source = entry.get("source", "customized")
+                    skill_id = f"{source}_{skill_name}"
+                    metadata["skill_id"] = skill_id
+                    results["updated_manifest"] += 1
 
-                # 同步到数据库
-                await sync_skill_to_db(
-                    skill_id=skill_id,
-                    skill_name=skill_name,
-                    cn_name=cn_name,
-                    tenant_id=tenant_id,
-                    entry=entry,
-                )
-                results["inserted_db"] += 1
+                # cn_name 处理
+                cn_name = metadata.get("cn_name")
+                if not cn_name or force:
+                    # 尝试从一级标题提取
+                    cn_name = _extract_cn_name_from_skill_md(skill_dir)
+                    if not cn_name:
+                        cn_name = skill_name
+                    metadata["cn_name"] = cn_name
+                    results["updated_manifest"] += 1
 
-            results["processed"] += 1
+                # 更新 manifest（仅在非 dry_run 模式）
+                if not dry_run:
+                    entry["metadata"] = metadata
 
-        except Exception as e:
-            results["errors"].append({
-                "skill_name": skill_name,
-                "error": str(e),
-            })
+                    # 同步到数据库
+                    await sync_skill_to_db(
+                        skill_id=skill_id,
+                        skill_name=skill_name,
+                        cn_name=cn_name,
+                        tenant_id=tid,
+                        entry=entry,
+                    )
+                    results["inserted_db"] += 1
 
-    # 3. 保存更新后的 manifest（仅在非 dry_run 模式）
-    if not dry_run:
-        write_skill_pool_manifest(manifest, tenant_id)
+                results["processed"] += 1
+
+            except Exception as e:
+                results["errors"].append({
+                    "tenant_id": tid,
+                    "skill_name": skill_name,
+                    "error": str(e),
+                })
+
+        # 3. 保存更新后的 manifest（仅在非 dry_run 模式）
+        if not dry_run:
+            write_skill_pool_manifest(manifest, tid)
 
     return results
 ```
@@ -585,7 +609,7 @@ async def init_skill_history_data(
 ```python
 @app.command("init-history")
 def init_history_command(
-    tenant_id: str = typer.Option(None, help="Tenant ID (default: current tenant)"),
+    tenant_id: str = typer.Option(None, help="Tenant ID (default: all tenants)"),
     force: bool = typer.Option(False, help="Force re-initialize"),
     dry_run: bool = typer.Option(False, help="Dry run mode, only count without writing"),
 ):
@@ -596,13 +620,13 @@ def init_history_command(
         console.print("[yellow]Dry run mode - no actual changes made[/yellow]")
 
     console.print(f"[green]Successfully processed {result['processed']} skills[/green]")
-    console.print(f"  Tenant: {result['tenant_id']}")
-    console.print(f"  Total: {result['total_skills']}")
+    console.print(f"  Tenants: {result['total_tenants']}")
+    console.print(f"  Total skills: {result['total_skills']}")
     console.print(f"  Manifest updated: {result['updated_manifest']}")
     console.print(f"  Database inserted: {result['inserted_db']}")
 
     if result["errors"]:
         console.print("[red]Errors:[/red]")
         for err in result["errors"]:
-            console.print(f"  - {err['skill_name']}: {err['error']}")
+            console.print(f"  - [{err['tenant_id']}] {err['skill_name']}: {err['error']}")
 ```
