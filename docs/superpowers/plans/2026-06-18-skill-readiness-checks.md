@@ -522,4 +522,3 @@ Expected: validation passes.
 Run the available GitNexus change-detection command or MCP `detect_changes` equivalent. If CLI help does not expose it, run `npx gitnexus analyze` and record that MCP change detection was unavailable.
 
 Expected: affected scope is limited to readiness, cron binding, Monitor sync schema, and Console market/cron UI.
-

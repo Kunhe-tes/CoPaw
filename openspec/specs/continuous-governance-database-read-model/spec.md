@@ -86,4 +86,3 @@ The system SHALL apply user-dimension filters to the Managed Source User Set for
 - **WHEN** a Continuous Governance Administrator filters Continuous Governance Records by date, trigger, or outcome
 - **THEN** coverage, governed-user counts, success metrics, trends, and distributions use those record filters
 - **AND** the File Governance State Report is not narrowed by those record filters
-
