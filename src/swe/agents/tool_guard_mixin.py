@@ -157,38 +157,6 @@ class ToolGuardMixin:
             return True
         return tool_name in _TOOLS_WITH_SPECIFIC_TIMEOUTS
 
-    def _get_last_tool_result_from_memory(
-        self,
-        tool_call_id: str,
-    ) -> dict | None:
-        """从 memory 中获取最新的 tool_result 消息内容。
-
-        AgentScope 的 _acting 方法总是返回 None，但会把工具结果放入 memory。
-        这个方法用于从 memory 中提取最新工具执行的结果。
-
-        Args:
-            tool_call_id: 工具调用 ID
-
-        Returns:
-            tool_result 的 output 字段内容，或 None
-        """
-        try:
-            memory_content = getattr(self, "memory", None)
-            if memory_content is None:
-                return None
-            content = getattr(memory_content, "content", [])
-            if not content:
-                return None
-            for msg, _marks in reversed(content):
-                if msg.role == "system":
-                    tool_results = msg.get_content_blocks("tool_result")
-                    for tr in tool_results:
-                        if tr.get("id") == tool_call_id:
-                            return tr.get("output")
-            return None
-        except Exception:
-            return None
-
     async def _run_tool_call_with_hard_timeout(
         self,
         tool_call: dict[str, Any],
@@ -317,7 +285,12 @@ class ToolGuardMixin:
                     return True
         return False
 
-    def _extract_current_tool_response(self, tool_use_id: str) -> Any | None:
+    def _extract_current_tool_response(
+        self,
+        tool_use_id: str,
+        *,
+        include_structured_failure: bool = False,
+    ) -> Any | None:
         """Return the terminal output for the current tool result."""
         if not tool_use_id:
             return None
@@ -346,6 +319,8 @@ class ToolGuardMixin:
                     continue
                 output = block_data.get("output")
                 if self._is_structured_failure_output(output):
+                    if include_structured_failure:
+                        return output
                     return None
                 return output
         return None
@@ -720,20 +695,6 @@ class ToolGuardMixin:
 
         if tool_output is None:
             return None, None
-
-        # 处理 ToolResponse 类型（AgentScope MCP 工具返回）
-        try:
-            from agentscope.tool import ToolResponse
-
-            if isinstance(tool_output, ToolResponse):
-                content = tool_output.content
-                if isinstance(content, dict):
-                    if content.get("isError"):
-                        return None, self._extract_dict_error_content(content)
-                    return content.get("content") or str(content), None
-                return str(content), None
-        except ImportError:
-            pass
 
         # 处理MCP CallToolResult类型
         try:
@@ -1193,16 +1154,16 @@ class ToolGuardMixin:
                 tool_name,
                 tool_input,
             )
-            tool_call_id = str(tool_call.get("id") or "")
-            actual_result = self._get_last_tool_result_from_memory(
-                tool_call_id,
-            )
-
-            if actual_result is not None:
-                result = actual_result
-
-            tool_use_id = tool_call_id
-            tool_response = actual_result
+            tool_use_id = str(tool_call.get("id") or "")
+            tool_response = self._extract_current_tool_response(tool_use_id)
+            trace_tool_output = result
+            if trace_tool_output is None:
+                # post hook 不应把结构化失败当作正常结果继续消费，
+                # 但 tracing 仍需要读取原始失败 payload 来提取 error。
+                trace_tool_output = self._extract_current_tool_response(
+                    tool_use_id,
+                    include_structured_failure=True,
+                )
             post_hook_result = await self._emit_tool_hook(
                 HookEventName.POST_TOOL_USE,
                 tool_name=tool_name,
@@ -1214,7 +1175,7 @@ class ToolGuardMixin:
                 post_hook_result,
                 event_name=HookEventName.POST_TOOL_USE,
             )
-            await self._emit_tool_trace_end(span_id, result)
+            await self._emit_tool_trace_end(span_id, trace_tool_output)
 
             if getattr(self, "_tool_guard_forced_replay_active", False):
                 self._tool_guard_forced_replay_active = False
