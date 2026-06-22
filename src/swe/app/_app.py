@@ -468,6 +468,27 @@ async def lifespan(
     except Exception as e:
         logger.warning("Failed to initialize source system config: %s", e)
 
+    # --- 初始化技能就绪检查存储 ---
+    try:
+        from .skill_readiness.service import build_skill_readiness_service
+        from .skill_readiness.store import SkillReadinessStore
+
+        skill_readiness_store = SkillReadinessStore(db_connection)
+        app.state.skill_readiness_store = skill_readiness_store
+        app.state.skill_readiness_service = build_skill_readiness_service(
+            skill_readiness_store,
+            multi_agent_manager=multi_agent_manager,
+        )
+        if skill_readiness_store.is_available:
+            await skill_readiness_store.initialize()
+            logger.info("SkillReadiness storage initialized")
+        else:
+            logger.warning(
+                "SkillReadiness storage skipped: database is not connected",
+            )
+    except Exception as e:
+        logger.warning("Failed to initialize skill readiness storage: %s", e)
+
     # --- 初始化持续治理管理侧数据库读模型 ---
     try:
         from .continuous_governance.service import ContinuousGovernanceService

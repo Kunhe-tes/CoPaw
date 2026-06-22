@@ -551,7 +551,7 @@ export function SkillDetailDrawer(
                     }}
                   >
                     <UserOutlined style={{ fontSize: 12 }} />
-                    查看拥有用户
+                    用户可执行性
                   </Button>
                 )}
                 {onRecall && (
