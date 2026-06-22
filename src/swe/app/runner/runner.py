@@ -435,6 +435,51 @@ def _approval_replay_metadata(record) -> dict[str, Any] | None:
     }
 
 
+def _approved_tool_call_from_record(record) -> dict[str, Any] | None:
+    """从审批记录恢复需要重放的工具调用和队列上下文。"""
+    if not isinstance(record.extra, dict):
+        return None
+    candidate = record.extra.get("tool_call")
+    if not isinstance(candidate, dict):
+        return None
+
+    approved_tool_call = dict(candidate)
+    _copy_list_extra(
+        approved_tool_call,
+        record.extra,
+        source_key="sibling_tool_calls",
+        target_key="_sibling_tool_calls",
+    )
+    _copy_list_extra(
+        approved_tool_call,
+        record.extra,
+        source_key="remaining_queue",
+        target_key="_remaining_queue",
+    )
+    _copy_list_extra(
+        approved_tool_call,
+        record.extra,
+        source_key="thinking_blocks",
+        target_key="_thinking_blocks",
+    )
+    replay_metadata = _approval_replay_metadata(record)
+    if replay_metadata is not None:
+        approved_tool_call["_approval_replay"] = replay_metadata
+    return approved_tool_call
+
+
+def _copy_list_extra(
+    target: dict[str, Any],
+    extra: dict[str, Any],
+    *,
+    source_key: str,
+    target_key: str,
+) -> None:
+    value = extra.get(source_key)
+    if isinstance(value, list):
+        target[target_key] = value
+
+
 async def _select_pending_approval(
     svc,
     *,
@@ -1759,28 +1804,8 @@ class AgentRunner(Runner):
                 pending.request_id,
                 ApprovalDecision.APPROVED,
             )
-            approved_tool_call: dict[str, Any] | None = None
             record = resolved or pending
-            if isinstance(record.extra, dict):
-                candidate = record.extra.get("tool_call")
-                if isinstance(candidate, dict):
-                    approved_tool_call = dict(candidate)
-                    siblings = record.extra.get("sibling_tool_calls")
-                    if isinstance(siblings, list):
-                        approved_tool_call["_sibling_tool_calls"] = siblings
-                    remaining = record.extra.get("remaining_queue")
-                    if isinstance(remaining, list):
-                        approved_tool_call["_remaining_queue"] = remaining
-                    thinking_blocks = record.extra.get("thinking_blocks")
-                    if isinstance(thinking_blocks, list):
-                        approved_tool_call["_thinking_blocks"] = (
-                            thinking_blocks
-                        )
-                    replay_metadata = _approval_replay_metadata(record)
-                    if replay_metadata is not None:
-                        approved_tool_call["_approval_replay"] = (
-                            replay_metadata
-                        )
+            approved_tool_call = _approved_tool_call_from_record(record)
             await self._notify_console_approval_result(
                 record,
                 ApprovalDecision.APPROVED,
