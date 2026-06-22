@@ -25,9 +25,51 @@ CREATE TABLE IF NOT EXISTS swe_skills (
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='技能注册表';
 
 -- 扩展追踪表：添加 skill_id 和 cn_name 字段
-ALTER TABLE swe_tracing_spans
-ADD COLUMN IF NOT EXISTS skill_id VARCHAR(128) DEFAULT '' COMMENT '技能唯一标识符' AFTER skill_name,
-ADD COLUMN IF NOT EXISTS cn_name VARCHAR(256) DEFAULT '' COMMENT '技能中文展示名' AFTER skill_id;
+-- MySQL 不支持 ADD COLUMN IF NOT EXISTS，使用存储过程实现安全添加
 
--- 为新字段添加索引（可选，用于按 skill_id 查询统计）
-CREATE INDEX IF NOT EXISTS idx_skill_id ON swe_tracing_spans(skill_id);
+DELIMITER //
+
+DROP PROCEDURE IF EXISTS add_column_if_not_exists //
+
+CREATE PROCEDURE add_column_if_not_exists()
+BEGIN
+    -- 添加 skill_id 字段
+    IF NOT EXISTS (
+        SELECT * FROM information_schema.columns
+        WHERE table_schema = DATABASE()
+        AND table_name = 'swe_tracing_spans'
+        AND column_name = 'skill_id'
+    ) THEN
+        ALTER TABLE swe_tracing_spans
+        ADD COLUMN skill_id VARCHAR(128) DEFAULT '' COMMENT '技能唯一标识符' AFTER skill_name;
+    END IF;
+
+    -- 添加 cn_name 字段
+    IF NOT EXISTS (
+        SELECT * FROM information_schema.columns
+        WHERE table_schema = DATABASE()
+        AND table_name = 'swe_tracing_spans'
+        AND column_name = 'cn_name'
+    ) THEN
+        ALTER TABLE swe_tracing_spans
+        ADD COLUMN cn_name VARCHAR(256) DEFAULT '' COMMENT '技能中文展示名' AFTER skill_id;
+    END IF;
+
+    -- 添加 skill_id 索引（如果不存在）
+    IF NOT EXISTS (
+        SELECT * FROM information_schema.statistics
+        WHERE table_schema = DATABASE()
+        AND table_name = 'swe_tracing_spans'
+        AND index_name = 'idx_skill_id'
+    ) THEN
+        CREATE INDEX idx_skill_id ON swe_tracing_spans(skill_id);
+    END IF;
+END //
+
+DELIMITER ;
+
+-- 执行存储过程
+CALL add_column_if_not_exists();
+
+-- 清理存储过程
+DROP PROCEDURE IF EXISTS add_column_if_not_exists;
