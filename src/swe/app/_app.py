@@ -795,6 +795,8 @@ _CONSOLE_STATIC_DIR = _resolve_console_static_dir()
 _CONSOLE_INDEX = (
     Path(_CONSOLE_STATIC_DIR) / "index.html" if _CONSOLE_STATIC_DIR else None
 )
+_console_path = Path(_CONSOLE_STATIC_DIR)
+_assets_dir = _console_path / "assets"
 logger.info(f"STATIC_DIR: {_CONSOLE_STATIC_DIR}")
 
 
@@ -891,89 +893,102 @@ async def serve_user_static(
     return FileResponse(Path(target), media_type=media_type)
 
 
-# Console static files and SPA fallback
-# Register these AFTER API routes to ensure proper routing priority
-if os.path.isdir(_CONSOLE_STATIC_DIR):
-    _console_path = Path(_CONSOLE_STATIC_DIR)
+def _serve_console_index():
+    if _CONSOLE_INDEX and _CONSOLE_INDEX.exists():
+        return FileResponse(_CONSOLE_INDEX)
 
-    def _serve_console_index():
-        if _CONSOLE_INDEX and _CONSOLE_INDEX.exists():
-            return FileResponse(_CONSOLE_INDEX)
+    raise HTTPException(status_code=404, detail="Not Found")
 
+
+def _serve_console_file(file_name: str, media_type: str):
+    file_path = _console_path / file_name
+    if file_path.is_file():
+        return FileResponse(file_path, media_type=media_type)
+    raise HTTPException(status_code=404, detail="Not Found")
+
+
+def _console_logo():
+    return _serve_console_file("logo.png", "image/png")
+
+
+def _console_dark_logo():
+    return _serve_console_file("dark-logo.png", "image/png")
+
+
+def _console_icon():
+    return _serve_console_file("swe-symbol.svg", "image/svg+xml")
+
+
+def _console_dark_icon():
+    return _serve_console_file("swe-dark.png", "image/png")
+
+
+def _console_spa_alias(full_path: str = ""):
+    _ = full_path
+    return _serve_console_index()
+
+
+def _console_assets(file_path: str):
+    """Serve static assets from console assets directory.
+    Uses dynamic file lookup so assets can be added after startup.
+    """
+    if not _assets_dir.is_dir():
+        raise HTTPException(
+            status_code=404,
+            detail="Assets directory not found",
+        )
+    full_path = _assets_dir / file_path
+    try:
+        full_path.resolve().relative_to(_assets_dir.resolve())
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail="Not Found") from exc
+    if not full_path.is_file():
         raise HTTPException(status_code=404, detail="Not Found")
+    # Guess content type
+    content_type, _ = mimetypes.guess_type(str(full_path))
+    return FileResponse(full_path, media_type=content_type)
 
-    @app.get("/logo.png")
-    def _console_logo():
-        f = _console_path / "logo.png"
-        if f.is_file():
-            return FileResponse(f, media_type="image/png")
+
+def _console_spa(full_path: str):
+    # Prevent catching common system/special paths
+    if full_path in ("docs", "redoc", "openapi.json"):
         raise HTTPException(status_code=404, detail="Not Found")
-
-    @app.get("/dark-logo.png")
-    def _console_dark_logo():
-        f = _console_path / "dark-logo.png"
-        if f.is_file():
-            return FileResponse(f, media_type="image/png")
+    # Skip API routes (should already be matched due to registration order)
+    if full_path.startswith("api/") or full_path == "api":
         raise HTTPException(status_code=404, detail="Not Found")
+    return _serve_console_index()
 
-    @app.get("/swe-symbol.svg")
-    def _console_icon():
-        f = _console_path / "swe-symbol.svg"
-        if f.is_file():
-            return FileResponse(f, media_type="image/svg+xml")
-        raise HTTPException(status_code=404, detail="Not Found")
 
-    @app.get("/swe-dark.png")
-    def _console_dark_icon():
-        f = _console_path / "swe-dark.png"
-        if f.is_file():
-            return FileResponse(f, media_type="image/png")
-        raise HTTPException(status_code=404, detail="Not Found")
+def _register_console_static_routes() -> None:
+    if not os.path.isdir(_CONSOLE_STATIC_DIR):
+        return
 
-    _assets_dir = _console_path / "assets"
+    app.add_api_route("/logo.png", _console_logo, methods=["GET"])
+    app.add_api_route("/dark-logo.png", _console_dark_logo, methods=["GET"])
+    app.add_api_route("/swe-symbol.svg", _console_icon, methods=["GET"])
+    app.add_api_route("/swe-dark.png", _console_dark_icon, methods=["GET"])
     if _assets_dir.is_dir():
         app.mount(
             "/assets",
             StaticFiles(directory=str(_assets_dir)),
             name="assets",
         )
+    app.add_api_route("/console", _console_spa_alias, methods=["GET"])
+    app.add_api_route("/console/", _console_spa_alias, methods=["GET"])
+    app.add_api_route(
+        "/console/{full_path:path}",
+        _console_spa_alias,
+        methods=["GET"],
+    )
+    app.add_api_route(
+        "/static/{file_path:path}",
+        _console_assets,
+        methods=["GET"],
+    )
+    # SPA fallback 必须最后注册，避免吞掉前面的 API 和系统路由。
+    app.add_api_route("/{full_path:path}", _console_spa, methods=["GET"])
 
-    @app.get("/console")
-    @app.get("/console/")
-    @app.get("/console/{full_path:path}")
-    def _console_spa_alias(full_path: str = ""):
-        _ = full_path
-        return _serve_console_index()
 
-    @app.get("/static/{file_path:path}")
-    def _console_assets(file_path: str):
-        """Serve static assets from console assets directory.
-        Uses dynamic file lookup so assets can be added after startup.
-        """
-        if not _assets_dir.is_dir():
-            raise HTTPException(
-                status_code=404,
-                detail="Assets directory not found",
-            )
-        full_path = _assets_dir / file_path
-        try:
-            full_path.resolve().relative_to(_assets_dir.resolve())
-        except ValueError as exc:
-            raise HTTPException(status_code=404, detail="Not Found") from exc
-        if not full_path.is_file():
-            raise HTTPException(status_code=404, detail="Not Found")
-        # Guess content type
-        content_type, _ = mimetypes.guess_type(str(full_path))
-        return FileResponse(full_path, media_type=content_type)
-
-    # SPA fallback: catch-all route for frontend routing
-    # Must be registered AFTER all API routes to avoid conflicts
-    @app.get("/{full_path:path}")
-    def _console_spa(full_path: str):
-        # Prevent catching common system/special paths
-        if full_path in ("docs", "redoc", "openapi.json"):
-            raise HTTPException(status_code=404, detail="Not Found")
-        # Skip API routes (should already be matched due to registration order)
-        if full_path.startswith("api/") or full_path == "api":
-            raise HTTPException(status_code=404, detail="Not Found")
-        return _serve_console_index()
+# Console static files and SPA fallback
+# Register these AFTER API routes to ensure proper routing priority
+_register_console_static_routes()
