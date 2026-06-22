@@ -263,6 +263,52 @@ async def _reset_scope_sensitive_runtime_state(app: FastAPI) -> None:
     logger.info("Scope-sensitive runtime caches reset")
 
 
+async def _initialize_database_connection():
+    """初始化应用数据库连接，并保留 localhost 模式的轻量启动语义。"""
+    database_config = get_database_config()
+    logger.info(
+        "Database config: host=%s, port=%s, database=%s",
+        database_config.host,
+        database_config.port,
+        database_config.database,
+    )
+
+    if database_config.host == "localhost":
+        logger.info("Database connection is disabled for localhost")
+        return None
+
+    if not database_config.host:
+        return None
+
+    try:
+        from ..database import DatabaseConnection
+
+        db_connection = DatabaseConnection(database_config)
+        await db_connection.connect()
+        if not db_connection.is_connected:
+            raise RuntimeError(
+                "Database connection failed. "
+                "Please check database configuration.",
+            )
+        logger.info(
+            "Database connection established: %s",
+            database_config.host,
+        )
+        return db_connection
+    except Exception as e:
+        import traceback
+
+        logger.error(
+            "Failed to initialize database connection: %s\n%s",
+            e,
+            traceback.format_exc(),
+        )
+        raise RuntimeError(
+            "Database connection is required. "
+            "Please check database configuration.",
+        ) from e
+
+
 @asynccontextmanager
 async def lifespan(
     app: FastAPI,
@@ -321,47 +367,7 @@ async def lifespan(
     # See design.md for lazy-loading architecture.
 
     # --- Initialize database connection (required for tracing and instance modules) ---
-    db_connection = None
-    database_config = get_database_config()
-    logger.info(
-        "Database config: host=%s, port=%s, database=%s",
-        database_config.host,
-        database_config.port,
-        database_config.database,
-    )
-
-    if database_config.host != "localhost":
-        if database_config.host:
-            try:
-                from ..database import DatabaseConnection
-
-                db_connection = DatabaseConnection(database_config)
-                await db_connection.connect()
-                if not db_connection.is_connected:
-                    raise RuntimeError(
-                        "Database connection failed. Please check database configuration.",
-                    )
-                logger.info(
-                    "Database connection established: %s",
-                    database_config.host,
-                )
-            except Exception as e:
-                import traceback
-
-                logger.error(
-                    "Failed to initialize database connection: %s\n%s",
-                    e,
-                    traceback.format_exc(),
-                )
-                raise RuntimeError(
-                    "Database connection is required. Please check database configuration.",
-                ) from e
-        # else:
-        #     raise RuntimeError(
-        #         "Database host is required. Please configure SWE_DB_HOST environment variable.",
-        #     )
-    else:
-        logger.info("Database connection is disabled for localhost")
+    db_connection = await _initialize_database_connection()
 
     # --- Initialize tracing manager ---
     try:
