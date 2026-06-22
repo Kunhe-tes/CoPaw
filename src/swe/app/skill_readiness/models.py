@@ -55,6 +55,12 @@ class SkillReadinessOwner(BaseModel):
     user_id: str = Field(..., min_length=1, max_length=128)
     user_name: str | None = Field(default=None, max_length=200)
     bbk_id: str | None = Field(default=None, max_length=128)
+    skill_name: str | None = Field(default=None, max_length=200)
+    market_version: str | None = Field(default=None, max_length=128)
+    installed_version: str | None = Field(default=None, max_length=128)
+    received_version: str | None = Field(default=None, max_length=128)
+    enabled: bool | None = None
+    has_update: bool | None = None
 
 
 class SkillReadinessRunProgress(BaseModel):

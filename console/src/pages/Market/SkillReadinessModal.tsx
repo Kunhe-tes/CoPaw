@@ -26,6 +26,7 @@ import { skillReadinessApi } from "../../api/modules/skillReadiness";
 import type {
   SkillReadinessCheckResult,
   SkillReadinessOverview,
+  SkillReadinessOwner,
   SkillReadinessResultsPage,
   SkillReadinessRunProgress,
   SkillReadinessRunStatus,
@@ -62,6 +63,12 @@ const CHECK_STATUS_LABELS = {
   skip: "跳过",
 } as const;
 
+const DEFAULT_OWNER_SUMMARY = {
+  total_users: 0,
+  lookup_failed_users: 0,
+  failure_summary: null,
+};
+
 function formatDateTime(value: string | null | undefined): string {
   if (!value) return "-";
   const date = new Date(value);
@@ -88,6 +95,28 @@ function getErrorText(error: unknown, fallback: string): string {
     return error.message;
   }
   return fallback;
+}
+
+function renderNullableText(value: string | null | undefined): ReactNode {
+  return value || "-";
+}
+
+function renderEnabledTag(value: boolean | null | undefined): ReactNode {
+  if (value === null || value === undefined) return "-";
+  return (
+    <Tag color={value ? "green" : "default"}>
+      {value ? "已启用" : "已停用"}
+    </Tag>
+  );
+}
+
+function renderUpdateTag(value: boolean | null | undefined): ReactNode {
+  if (value === null || value === undefined) return "-";
+  return (
+    <Tag color={value ? "orange" : "blue"}>
+      {value ? "可更新" : "已同步"}
+    </Tag>
+  );
 }
 
 function renderDetails(details: Record<string, unknown>): ReactNode {
@@ -357,6 +386,9 @@ export function SkillReadinessModal({
   }, [loadOverview, overview?.startable, target.skillId, target.valid]);
 
   const activeRun = results?.run || overview?.latest_run || null;
+  const ownerSummary = overview?.owner_summary ?? DEFAULT_OWNER_SUMMARY;
+  const configChecks = overview?.config_checks ?? [];
+  const ownerRows = overview?.owners ?? [];
   const abnormalUsers = results?.items.filter(
     (item) => item.aggregate_status === "abnormal",
   ) || [];
@@ -369,7 +401,7 @@ export function SkillReadinessModal({
       title: "用户",
       dataIndex: "user_name",
       key: "user_name",
-      render: (_value: string | null, record: { user_id: string; user_name: string | null }) => (
+      render: (_value: string | null, record: SkillReadinessOwner) => (
         <div style={{ display: "grid", gap: 2 }}>
           <Text strong>{record.user_name || record.user_id}</Text>
           <Text type="secondary" style={{ fontSize: 12 }}>
@@ -383,6 +415,36 @@ export function SkillReadinessModal({
       dataIndex: "bbk_id",
       key: "bbk_id",
       render: (value: string | null) => value || "-",
+    },
+    {
+      title: "技能目录",
+      dataIndex: "skill_name",
+      key: "skill_name",
+      render: renderNullableText,
+    },
+    {
+      title: "市场版本",
+      dataIndex: "market_version",
+      key: "market_version",
+      render: renderNullableText,
+    },
+    {
+      title: "用户版本",
+      dataIndex: "installed_version",
+      key: "installed_version",
+      render: renderNullableText,
+    },
+    {
+      title: "状态",
+      dataIndex: "enabled",
+      key: "enabled",
+      render: renderEnabledTag,
+    },
+    {
+      title: "版本",
+      dataIndex: "has_update",
+      key: "has_update",
+      render: renderUpdateTag,
     },
   ];
 
@@ -619,23 +681,9 @@ export function SkillReadinessModal({
             description="skill-id 仅支持字母、数字、下划线、点、冒号和短横线；没有 skill_id 时会降级使用 skill_name。"
           />
         )}
-        {target.valid && target.idSource === "skill_name" && (
-          <Alert
-            type="warning"
-            showIcon
-            message="当前技能未返回 skill_id，已按 skill_name 查询"
-          />
-        )}
-
         <Spin spinning={overviewLoading}>
           {overview ? (
             <Space direction="vertical" size={14} style={{ width: "100%" }}>
-              <Alert
-                type={overview.config_found ? "success" : "warning"}
-                showIcon
-                message={overview.config_message}
-              />
-
               <div
                 style={{
                   display: "grid",
@@ -653,7 +701,7 @@ export function SkillReadinessModal({
                 >
                   <Text type="secondary">拥有用户</Text>
                   <Title level={4} style={{ margin: "4px 0 0" }}>
-                    {overview.owner_summary.total_users}
+                    {ownerSummary.total_users}
                   </Title>
                 </div>
                 <div
@@ -666,7 +714,7 @@ export function SkillReadinessModal({
                 >
                   <Text type="secondary">用户查询失败</Text>
                   <Title level={4} style={{ margin: "4px 0 0" }}>
-                    {overview.owner_summary.lookup_failed_users}
+                    {ownerSummary.lookup_failed_users}
                   </Title>
                 </div>
                 <div
@@ -679,29 +727,29 @@ export function SkillReadinessModal({
                 >
                   <Text type="secondary">配置检查项</Text>
                   <Title level={4} style={{ margin: "4px 0 0" }}>
-                    {overview.config_checks.filter((item) => item.enabled).length}
+                    {configChecks.filter((item) => item.enabled).length}
                     <Text type="secondary" style={{ fontSize: 13 }}>
                       {" "}
-                      / {overview.config_checks.length}
+                      / {configChecks.length}
                     </Text>
                   </Title>
                 </div>
               </div>
 
-              {overview.owner_summary.failure_summary && (
+              {ownerSummary.failure_summary && (
                 <Alert
                   type="warning"
                   showIcon
-                  message={overview.owner_summary.failure_summary}
+                  message={ownerSummary.failure_summary}
                 />
               )}
 
               <div>
                 <Text strong>自检配置</Text>
                 <div style={{ marginTop: 8 }}>
-                  {overview.config_checks.length ? (
+                  {configChecks.length ? (
                     <Space size={[8, 8]} wrap>
-                      {overview.config_checks.map((check) => (
+                      {configChecks.map((check) => (
                         <Tag
                           key={check.name}
                           color={check.enabled ? "blue" : "default"}
@@ -725,7 +773,7 @@ export function SkillReadinessModal({
                   rowKey="user_id"
                   size="small"
                   style={{ marginTop: 8 }}
-                  dataSource={overview.owners}
+                  dataSource={ownerRows}
                   pagination={{ pageSize: 6, hideOnSinglePage: true }}
                   columns={ownerColumns}
                   locale={{ emptyText: "当前没有查询到分配用户" }}

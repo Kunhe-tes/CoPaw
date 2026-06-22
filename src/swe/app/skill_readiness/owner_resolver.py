@@ -240,9 +240,78 @@ class SkillOwnerResolver:
             except Exception as exc:  # noqa: BLE001
                 return None, f"{user.user_id}: {exc}"
 
-            if any(_skill_matches(skill, skill_id) for skill in skills):
-                return user, None
+            matched_skill = _find_matching_skill(skills, skill_id)
+            if matched_skill is not None:
+                return _owner_with_skill(user, matched_skill), None
         return None, None
+
+
+def _find_matching_skill(
+    skills: list[dict[str, Any]],
+    skill_id: str,
+) -> dict[str, Any] | None:
+    for skill in skills:
+        if _skill_matches(skill, skill_id):
+            return skill
+    return None
+
+
+def _owner_with_skill(
+    user: SkillReadinessOwner,
+    skill: dict[str, Any],
+) -> SkillReadinessOwner:
+    skill_version = _text_or_none(skill.get("version"))
+    received_version = _text_or_none(skill.get("received_version"))
+    installed_version = (
+        _text_or_none(skill.get("installed_version"))
+        or received_version
+        or skill_version
+    )
+    market_version = (
+        _text_or_none(skill.get("market_version"))
+        or _text_or_none(skill.get("latest_version"))
+        or skill_version
+    )
+    has_update = _bool_or_none(skill.get("has_update"))
+    if has_update is None:
+        has_update = bool(
+            market_version
+            and installed_version
+            and market_version != installed_version,
+        )
+    return user.model_copy(
+        update={
+            "skill_name": _text_or_none(
+                skill.get("skill_name") or skill.get("name"),
+            ),
+            "market_version": market_version,
+            "installed_version": installed_version,
+            "received_version": received_version,
+            "enabled": _bool_or_none(skill.get("enabled")),
+            "has_update": has_update,
+        },
+    )
+
+
+def _text_or_none(value: Any) -> str | None:
+    text = str(value or "").strip()
+    return text or None
+
+
+def _bool_or_none(value: Any) -> bool | None:
+    if isinstance(value, bool):
+        return value
+    if value is None:
+        return None
+    if isinstance(value, (int, float)):
+        return bool(value)
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized in {"true", "1", "yes"}:
+            return True
+        if normalized in {"false", "0", "no"}:
+            return False
+    return None
 
 
 def _skill_matches(skill: dict[str, Any], skill_id: str) -> bool:

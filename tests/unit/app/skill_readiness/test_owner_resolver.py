@@ -26,9 +26,25 @@ class _Users:
 class _Market:
     async def list_user_skills(self, source_id, user_id):
         if user_id == "alice":
-            return [{"skill_id": "skill-a", "skill_name": "same-name"}]
+            return [
+                {
+                    "skill_id": "skill-a",
+                    "skill_name": "same-name",
+                    "version": "2.0.0",
+                    "received_version": "1.0.0",
+                    "enabled": True,
+                    "has_update": True,
+                },
+            ]
         if user_id == "bob":
-            return [{"source": "marketplace:skill-a", "skill_name": "x"}]
+            return [
+                {
+                    "source": "marketplace:skill-a",
+                    "skill_name": "x",
+                    "version": "2.0.0",
+                    "enabled": False,
+                },
+            ]
         raise RuntimeError("market down")
 
 
@@ -42,6 +58,16 @@ async def test_owner_resolver_matches_skill_id_source_and_keeps_failures():
     result = await resolver.resolve_owners("source-a", "skill-a")
 
     assert [owner.user_id for owner in result.owners] == ["alice", "bob"]
+    alice, bob = result.owners
+    assert alice.skill_name == "same-name"
+    assert alice.market_version == "2.0.0"
+    assert alice.installed_version == "1.0.0"
+    assert alice.received_version == "1.0.0"
+    assert alice.enabled is True
+    assert alice.has_update is True
+    assert bob.installed_version == "2.0.0"
+    assert bob.enabled is False
+    assert bob.has_update is False
     assert result.failed_users == 1
     assert "cathy" in (result.failure_summary or "")
 

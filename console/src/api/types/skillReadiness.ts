@@ -24,6 +24,12 @@ export interface SkillReadinessOwner {
   user_id: string;
   user_name: string | null;
   bbk_id: string | null;
+  skill_name?: string | null;
+  market_version?: string | null;
+  installed_version?: string | null;
+  received_version?: string | null;
+  enabled?: boolean | null;
+  has_update?: boolean | null;
 }
 
 export interface SkillReadinessRunProgress {

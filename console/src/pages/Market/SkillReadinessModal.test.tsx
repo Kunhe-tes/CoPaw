@@ -63,6 +63,12 @@ function buildOverview(
         user_id: "user-a",
         user_name: "Alice",
         bbk_id: "1001",
+        skill_name: "sales-helper",
+        market_version: "2.0.0",
+        installed_version: "1.0.0",
+        received_version: "1.0.0",
+        enabled: true,
+        has_update: true,
       },
     ],
     latest_run: null,
@@ -161,6 +167,9 @@ describe("SkillReadinessModal", () => {
 
     expect(await screen.findByText("按 skill_name 降级")).toBeInTheDocument();
     expect(await screen.findByText("未查询到自检配置")).toBeInTheDocument();
+    expect(
+      screen.queryByText("当前技能未返回 skill_id，已按 skill_name 查询"),
+    ).not.toBeInTheDocument();
     expect(screen.getByRole("button", { name: /开始检查/ })).toBeDisabled();
   });
 
@@ -170,6 +179,11 @@ describe("SkillReadinessModal", () => {
     );
 
     await screen.findByText("已查询到自检配置");
+    expect(await screen.findByText("sales-helper")).toBeInTheDocument();
+    expect(await screen.findByText("2.0.0")).toBeInTheDocument();
+    expect(await screen.findByText("1.0.0")).toBeInTheDocument();
+    expect(await screen.findByText("已启用")).toBeInTheDocument();
+    expect(await screen.findByText("可更新")).toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: /开始检查/ }));
 
     await waitFor(() => {
@@ -204,22 +218,34 @@ describe("SkillReadinessModal", () => {
       resolveSecond(
         buildOverview({
           skill_id: "skill-b",
-          config_message: "skill-b 配置",
+          owners: [
+            {
+              user_id: "user-b",
+              user_name: "Skill B Owner",
+              bbk_id: "1002",
+            },
+          ],
         }),
       );
     });
-    expect(await screen.findByText("skill-b 配置")).toBeInTheDocument();
+    expect(await screen.findByText("Skill B Owner")).toBeInTheDocument();
 
     await act(async () => {
       resolveFirst(
         buildOverview({
           skill_id: "skill-a",
-          config_message: "skill-a 配置",
+          owners: [
+            {
+              user_id: "user-a",
+              user_name: "Skill A Owner",
+              bbk_id: "1001",
+            },
+          ],
         }),
       );
     });
 
-    expect(screen.queryByText("skill-a 配置")).not.toBeInTheDocument();
+    expect(screen.queryByText("Skill A Owner")).not.toBeInTheDocument();
   });
 
   it("filters failed users by check while requesting full check details", async () => {
@@ -274,5 +300,22 @@ describe("SkillReadinessModal", () => {
         }),
       );
     });
+  });
+
+  it("uses default owner metrics when overview omits owner_summary", async () => {
+    mocks.getSkillReadinessOverview.mockResolvedValue({
+      ...buildOverview(),
+      owner_summary: undefined,
+      owners: undefined,
+      config_checks: undefined,
+    } as unknown as SkillReadinessOverview);
+
+    render(
+      <SkillReadinessModal open skill={buildSkill()} onClose={vi.fn()} />,
+    );
+
+    expect(await screen.findByText("已查询到自检配置")).toBeInTheDocument();
+    expect(await screen.findAllByText("0")).toHaveLength(2);
+    expect(screen.getByText("0 / 0")).toBeInTheDocument();
   });
 });
