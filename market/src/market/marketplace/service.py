@@ -1933,6 +1933,15 @@ class MarketplaceService:
 
         try:
             target.write_text(content, encoding="utf-8")
+            logger.info(
+                "保存技能文件: user_id=%s, agent_id=%s, skill_name=%s, "
+                "file_path=%s, workspace=%s",
+                user_id,
+                agent_id,
+                skill_name,
+                file_path,
+                str(skill_dir),
+            )
 
             current_time = datetime.now(timezone.utc).isoformat()
 
