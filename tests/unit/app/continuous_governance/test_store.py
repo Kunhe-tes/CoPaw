@@ -131,7 +131,10 @@ async def test_time_filters_are_bound_as_iso_strings(store, mock_db) -> None:
 
 
 @pytest.mark.asyncio
-async def test_archive_and_protected_state_are_idempotent(store, mock_db) -> None:
+async def test_archive_and_protected_state_are_idempotent(
+    store,
+    mock_db,
+) -> None:
     """文件治理状态使用稳定业务键做 upsert。"""
     await store.upsert_archive_item(
         ArchiveItemRecord(

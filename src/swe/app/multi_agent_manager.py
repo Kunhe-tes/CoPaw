@@ -328,9 +328,7 @@ class MultiAgentManager:
             agent_id=agent_id,
             workspace_dir=agent_ref.workspace_dir,
             tenant_id=tenant_id,
-            source_system_config_service=(
-                self._source_system_config_service
-            ),
+            source_system_config_service=(self._source_system_config_service),
             continuous_governance_service=(
                 self._continuous_governance_service
             ),

@@ -8,7 +8,10 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
-from ...config.context import is_valid_identity_value, resolve_runtime_tenant_id
+from ...config.context import (
+    is_valid_identity_value,
+    resolve_runtime_tenant_id,
+)
 from .models import ArchiveItemRecord, CleanupAuditRecord, ProtectedFileRecord
 from .models import GOVERNANCE_ID_MAX_LENGTH
 from .service import ContinuousGovernanceService
@@ -45,7 +48,9 @@ async def backfill_continuous_governance_source(
             resolve_runtime_tenant_id(target_user_id, source_id)
             or target_user_id
         )
-        for target_agent_id, workspace_dir in _iter_agent_workspaces(tenant_dir):
+        for target_agent_id, workspace_dir in _iter_agent_workspaces(
+            tenant_dir,
+        ):
             counts["governance_records"] += await _backfill_dream_logs(
                 service,
                 workspace_dir=workspace_dir,
@@ -96,10 +101,9 @@ def _iter_agent_workspaces(tenant_dir: Path) -> list[tuple[str, Path]]:
 
 def _is_backfillable_agent_id(agent_id: str) -> bool:
     """只回填可作为路径片段且能写入读模型字段的 agent 标识。"""
-    return (
-        len(agent_id) <= TARGET_AGENT_ID_MAX_LENGTH
-        and is_valid_identity_value(agent_id)
-    )
+    return len(
+        agent_id,
+    ) <= TARGET_AGENT_ID_MAX_LENGTH and is_valid_identity_value(agent_id)
 
 
 async def _backfill_dream_logs(
@@ -235,7 +239,9 @@ async def _backfill_source_cleanup_audits(
 ) -> int:
     """导入当前 source 下所有操作者 workspace 里的管理员审计。"""
     count = 0
-    for scope_dir in workspace_root.iterdir() if workspace_root.exists() else []:
+    for scope_dir in (
+        workspace_root.iterdir() if workspace_root.exists() else []
+    ):
         if not scope_dir.is_dir() or "." not in scope_dir.name:
             continue
         for _, workspace_dir in _iter_agent_workspaces(scope_dir):

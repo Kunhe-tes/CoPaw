@@ -35,13 +35,13 @@ class _FakeGovernanceStore:
         ]
         target_user_ids = filters.get("target_user_ids")
         if target_user_ids is not None:
-            rows = [row for row in rows if row.target_user_id in target_user_ids]
+            rows = [
+                row for row in rows if row.target_user_id in target_user_ids
+            ]
         target_agent_id = filters.get("target_agent_id")
         if target_agent_id:
             rows = [
-                row
-                for row in rows
-                if row.target_agent_id == target_agent_id
+                row for row in rows if row.target_agent_id == target_agent_id
             ]
         return rows
 
@@ -137,13 +137,16 @@ class _FakeTenantSourceStore:
         ]
 
 
-def _client(tmp_path: Path, monkeypatch) -> tuple[TestClient, _FakeGovernanceService]:
+def _client(
+    tmp_path: Path,
+    monkeypatch,
+) -> tuple[TestClient, _FakeGovernanceService]:
     """创建带 workspace 和 fake governance service 的测试客户端。"""
     service = _FakeGovernanceService()
     monkeypatch.setattr(
         "swe.app.workspace.tenant_init_source_store"
         ".get_tenant_init_source_store",
-        lambda: _FakeTenantSourceStore(),
+        _FakeTenantSourceStore,
     )
     app = FastAPI()
     app.state.continuous_governance_service = service
@@ -171,7 +174,12 @@ def _client(tmp_path: Path, monkeypatch) -> tuple[TestClient, _FakeGovernanceSer
 
 def _workspace(tmp_path: Path, tenant_id: str, source_id: str) -> Path:
     """定位测试 workspace。"""
-    path = tmp_path / encode_scope_id(tenant_id, source_id) / "workspaces" / "default"
+    path = (
+        tmp_path
+        / encode_scope_id(tenant_id, source_id)
+        / "workspaces"
+        / "default"
+    )
     path.mkdir(parents=True, exist_ok=True)
     return path
 
@@ -259,7 +267,10 @@ def test_rollback_failure_health_keeps_original_timestamp(
     assert payload["rollback_files"] == ["MEMORY.md"]
 
 
-def test_archive_orphan_files_writes_archive_state(tmp_path, monkeypatch) -> None:
+def test_archive_orphan_files_writes_archive_state(
+    tmp_path,
+    monkeypatch,
+) -> None:
     """当前 workspace 归档操作应写入文件治理状态。"""
     client, service = _client(tmp_path, monkeypatch)
     workspace = _workspace(tmp_path, "manager", "source-a")
@@ -278,7 +289,9 @@ def test_archive_orphan_files_writes_archive_state(tmp_path, monkeypatch) -> Non
     assert response.status_code == 200
     assert service.archive_calls[0]["source_id"] == "source-a"
     assert service.archive_calls[0]["target_user_id"] == "manager"
-    assert service.archive_calls[0]["items"][0]["original_path"] == "orphan.txt"
+    assert (
+        service.archive_calls[0]["items"][0]["original_path"] == "orphan.txt"
+    )
 
 
 def test_archive_db_failure_records_reconcile_health(
@@ -361,7 +374,9 @@ def test_purge_archive_writes_audit_and_removes_archive_state(
 
     assert response.status_code == 200
     assert service.delete_archive_calls[0]["archive_item_ids"] == ["archive-1"]
-    assert service.audit_calls[0]["event_id"] == response.json()["audit_event_id"]
+    assert (
+        service.audit_calls[0]["event_id"] == response.json()["audit_event_id"]
+    )
     assert service.audit_calls[0]["target_user_id"] == "alice"
 
 
@@ -425,7 +440,9 @@ def test_purge_archive_uses_database_record_when_index_missing(
     """单个归档清理应按页面读模型记录补齐本地索引缺失的归档项。"""
     client, service = _client(tmp_path, monkeypatch)
     workspace = _workspace(tmp_path, "alice", "source-a")
-    archive_file = workspace / "governance" / "archive" / "files" / "archive-db"
+    archive_file = (
+        workspace / "governance" / "archive" / "files" / "archive-db"
+    )
     archive_file.parent.mkdir(parents=True, exist_ok=True)
     archive_file.write_text("old", encoding="utf-8")
     service.archive_records.append(
@@ -464,7 +481,9 @@ def test_purge_archive_uses_database_record_when_index_missing(
     assert response.status_code == 200
     assert response.json()["files_deleted"] == ["old.md"]
     assert not archive_file.exists()
-    assert service.delete_archive_calls[0]["archive_item_ids"] == ["archive-db"]
+    assert service.delete_archive_calls[0]["archive_item_ids"] == [
+        "archive-db",
+    ]
     assert service.archive_records == []
 
 
@@ -576,7 +595,9 @@ def test_purge_expired_uses_database_archive_records_when_index_missing(
     """页面列表来自读模型时，过期清理也应能找到同一批归档记录。"""
     client, service = _client(tmp_path, monkeypatch)
     workspace = _workspace(tmp_path, "alice", "source-a")
-    archive_file = workspace / "governance" / "archive" / "files" / "archive-db"
+    archive_file = (
+        workspace / "governance" / "archive" / "files" / "archive-db"
+    )
     archive_file.parent.mkdir(parents=True, exist_ok=True)
     archive_file.write_text("old", encoding="utf-8")
     service.archive_records.append(
@@ -610,7 +631,9 @@ def test_purge_expired_uses_database_archive_records_when_index_missing(
     assert response.status_code == 200
     assert response.json()["files_deleted"] == ["old.md"]
     assert not archive_file.exists()
-    assert service.delete_archive_calls[0]["archive_item_ids"] == ["archive-db"]
+    assert service.delete_archive_calls[0]["archive_item_ids"] == [
+        "archive-db",
+    ]
     assert service.archive_records == []
 
 
@@ -620,12 +643,20 @@ def test_purge_expired_uses_source_and_distinct_audit_events(
 ) -> None:
     """批量清理过期归档应按 workspace 写独立 audit 事件。"""
     client, service = _client(tmp_path, monkeypatch)
-    for tenant_id, archive_id in [("alice", "archive-a"), ("manager", "archive-m")]:
+    for tenant_id, archive_id in [
+        ("alice", "archive-a"),
+        ("manager", "archive-m"),
+    ]:
         workspace = _workspace(tmp_path, tenant_id, "source-a")
-        archive_file = workspace / "governance" / "archive" / "files" / archive_id
+        archive_file = (
+            workspace / "governance" / "archive" / "files" / archive_id
+        )
         archive_file.parent.mkdir(parents=True, exist_ok=True)
         archive_file.write_text("old", encoding="utf-8")
-        (workspace / ARCHIVE_INDEX_FILE).parent.mkdir(parents=True, exist_ok=True)
+        (workspace / ARCHIVE_INDEX_FILE).parent.mkdir(
+            parents=True,
+            exist_ok=True,
+        )
         (workspace / ARCHIVE_INDEX_FILE).write_text(
             json.dumps(
                 {
@@ -676,10 +707,15 @@ def test_purge_expired_skips_invalid_agent_directories(
         (valid_workspace, "archive-valid"),
         (invalid_workspace, "archive-invalid"),
     ]:
-        archive_file = workspace / "governance" / "archive" / "files" / archive_id
+        archive_file = (
+            workspace / "governance" / "archive" / "files" / archive_id
+        )
         archive_file.parent.mkdir(parents=True, exist_ok=True)
         archive_file.write_text("old", encoding="utf-8")
-        (workspace / ARCHIVE_INDEX_FILE).parent.mkdir(parents=True, exist_ok=True)
+        (workspace / ARCHIVE_INDEX_FILE).parent.mkdir(
+            parents=True,
+            exist_ok=True,
+        )
         (workspace / ARCHIVE_INDEX_FILE).write_text(
             json.dumps(
                 {
@@ -714,7 +750,9 @@ def test_purge_expired_skips_invalid_agent_directories(
 
     assert response.status_code == 200
     assert response.json()["files_deleted"] == ["archive-valid.md"]
-    assert [row["target_agent_id"] for row in service.audit_calls] == ["default"]
+    assert [row["target_agent_id"] for row in service.audit_calls] == [
+        "default",
+    ]
     assert (
         invalid_workspace
         / "governance"
@@ -829,8 +867,9 @@ def test_restore_protect_failure_health_keeps_protected_metadata(
 
     assert response.status_code == 200
     protected_index = json.loads(
-        (workspace / "governance" / "archive" / "protected_paths.json")
-        .read_text(encoding="utf-8"),
+        (
+            workspace / "governance" / "archive" / "protected_paths.json"
+        ).read_text(encoding="utf-8"),
     )
     workspace_protected = protected_index["paths"][0]
     payload = service.health_calls[0]["payload"]
@@ -849,7 +888,9 @@ def test_remove_protected_file_deletes_database_state(
     """取消保护时应删除 DB 保护状态。"""
     client, service = _client(tmp_path, monkeypatch)
     workspace = _workspace(tmp_path, "alice", "source-a")
-    protected_path = workspace / "governance" / "archive" / "protected_paths.json"
+    protected_path = (
+        workspace / "governance" / "archive" / "protected_paths.json"
+    )
     protected_path.parent.mkdir(parents=True, exist_ok=True)
     protected_path.write_text(
         json.dumps(
@@ -897,7 +938,7 @@ def test_dual_write_workspace_governance_records_imports_new_records_only(
     monkeypatch.setattr(
         "swe.app.workspace.tenant_init_source_store"
         ".get_tenant_init_source_store",
-        lambda: _FakeTenantSourceStore(),
+        _FakeTenantSourceStore,
     )
     workspace = _workspace(tmp_path, "alice", "source-a")
     (workspace / "dream_logs.json").write_text(

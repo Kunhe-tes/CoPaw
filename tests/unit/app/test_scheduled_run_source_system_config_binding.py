@@ -7,6 +7,7 @@ import asyncio
 import json
 from pathlib import Path
 from types import SimpleNamespace
+from typing import Any, cast
 from unittest.mock import Mock
 from unittest.mock import AsyncMock, patch
 
@@ -21,7 +22,10 @@ from swe.app.crons.models import (
     JobRuntimeSpec,
     ScheduleSpec,
 )
-from swe.app.routers.dream_logs import ArchiveItem, DreamArchiveMaintenanceResult
+from swe.app.routers.dream_logs import (
+    ArchiveItem,
+    DreamArchiveMaintenanceResult,
+)
 from swe.app.source_system_config.models import (
     EffectiveSourceSystemConfig,
     SourceSystemConfig,
@@ -724,18 +728,25 @@ async def test_run_dream_dual_writes_new_records_from_workspace(
     await manager.run_dream()
 
     assert len(governance_service.calls) == 1
-    call = governance_service.calls[0]
+    call = cast(dict[str, Any], governance_service.calls[0])
     assert call["source_id"] == "source-a"
     assert call["target_user_id"] == "tenant-a"
     assert call["target_agent_id"] == "default"
     assert call["record"]["id"] == "new-record"
-    assert governance_service.archive_calls[0]["source_id"] == "source-a"
-    assert governance_service.archive_calls[0]["items"][0]["original_path"] == "old.md"
-    assert governance_service.delete_archive_calls[0]["archive_item_ids"] == [
+    archive_call = cast(dict[str, Any], governance_service.archive_calls[0])
+    archive_items = cast(list[dict[str, Any]], archive_call["items"])
+    assert archive_call["source_id"] == "source-a"
+    assert archive_items[0]["original_path"] == "old.md"
+    delete_archive_call = cast(
+        dict[str, Any],
+        governance_service.delete_archive_calls[0],
+    )
+    assert delete_archive_call["archive_item_ids"] == [
         "archive-expired",
     ]
-    assert governance_service.audit_calls[0]["operation"] == "purge_expired_archive"
-    assert governance_service.audit_calls[0]["target_user_id"] == "tenant-a"
+    audit_call = cast(dict[str, Any], governance_service.audit_calls[0])
+    assert audit_call["operation"] == "purge_expired_archive"
+    assert audit_call["target_user_id"] == "tenant-a"
 
 
 @pytest.mark.asyncio

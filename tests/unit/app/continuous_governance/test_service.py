@@ -34,7 +34,9 @@ class _FakeStore:
         rows = [row for row in self.records if row.source_id == source_id]
         target_user_ids = filters.get("target_user_ids")
         if target_user_ids is not None:
-            rows = [row for row in rows if row.target_user_id in target_user_ids]
+            rows = [
+                row for row in rows if row.target_user_id in target_user_ids
+            ]
         if filters.get("target_agent_id"):
             rows = [
                 row
@@ -49,11 +51,15 @@ class _FakeStore:
 
     async def list_archive_items(self, source_id: str, **filters):
         """返回文件归档状态。"""
-        return [row for row in self.archive_items if row.source_id == source_id]
+        return [
+            row for row in self.archive_items if row.source_id == source_id
+        ]
 
     async def list_protected_files(self, source_id: str, **filters):
         """返回文件保护状态。"""
-        return [row for row in self.protected_files if row.source_id == source_id]
+        return [
+            row for row in self.protected_files if row.source_id == source_id
+        ]
 
     async def list_cleanup_audits(self, source_id: str, **filters):
         """返回管理员清理审计。"""
@@ -338,7 +344,9 @@ async def test_health_is_returned_separately_from_core_metrics() -> None:
 
 
 @pytest.mark.asyncio
-async def test_upsert_workspace_governance_record_dual_writes_identity() -> None:
+async def test_upsert_workspace_governance_record_dual_writes_identity() -> (
+    None
+):
     """workspace 治理记录应转换为 source-scoped 数据库行。"""
     store = _FakeStore()
     service = ContinuousGovernanceService(store)

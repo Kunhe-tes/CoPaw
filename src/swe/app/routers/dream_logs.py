@@ -45,6 +45,7 @@ class DreamArchiveMaintenanceResult:
     purged_paths: list[str] = field(default_factory=list)
     purged_size_bytes: int = 0
 
+
 # 治理任务运行状态（模块级共享，兼容线程+协程）
 _current_run_lock = threading.Lock()
 _current_run: dict = {
@@ -611,7 +612,9 @@ def _isoformat(dt: datetime) -> str:
 
 def _file_mtime_iso(path: Path) -> str:
     """读取文件最后修改时间并转换成 UTC ISO 字符串。"""
-    return _isoformat(datetime.fromtimestamp(path.stat().st_mtime, timezone.utc))
+    return _isoformat(
+        datetime.fromtimestamp(path.stat().st_mtime, timezone.utc),
+    )
 
 
 def _atomic_write_json(path: Path, data: dict[str, Any]) -> None:
@@ -649,7 +652,10 @@ def _protected_paths_path(workspace_dir: Path) -> Path:
 
 def _load_archive_index(workspace_dir: Path) -> dict[str, Any]:
     """读取归档索引，保证返回结构包含 items。"""
-    data = _load_json_file(_archive_index_path(workspace_dir), {"version": 1, "items": []})
+    data = _load_json_file(
+        _archive_index_path(workspace_dir),
+        {"version": 1, "items": []},
+    )
     items = data.get("items")
     if not isinstance(items, list):
         data["items"] = []
@@ -718,7 +724,9 @@ def _protected_path_set(workspace_dir: Path) -> set[str]:
     for item in data.get("paths", []):
         if isinstance(item, dict) and item.get("path"):
             try:
-                protected.add(_normalise_workspace_relative_path(str(item["path"])))
+                protected.add(
+                    _normalise_workspace_relative_path(str(item["path"])),
+                )
             except HTTPException:
                 continue
     return protected
@@ -739,7 +747,10 @@ def _resolve_workspace_file(
     relative_path = _normalise_workspace_relative_path(filepath)
     if _is_root_keep_file(relative_path) or _is_keep_dir_path(relative_path):
         raise HTTPException(status_code=403, detail="Protected path")
-    if not allow_protected and _is_protected_path(workspace_dir, relative_path):
+    if not allow_protected and _is_protected_path(
+        workspace_dir,
+        relative_path,
+    ):
         raise HTTPException(status_code=409, detail="File is protected")
     file_path = workspace_dir / Path(*relative_path.split("/"))
     try:
@@ -749,18 +760,25 @@ def _resolve_workspace_file(
     return relative_path, file_path
 
 
-def _archive_item_expired(item: dict[str, Any], now: Optional[datetime] = None) -> bool:
+def _archive_item_expired(
+    item: dict[str, Any],
+    now: Optional[datetime] = None,
+) -> bool:
     """判断归档项是否超过 10 天清理期限。"""
     archived_at = str(item.get("archived_at") or "")
     if not archived_at:
         return False
     try:
-        archived_dt = datetime.fromisoformat(archived_at.replace("Z", "+00:00"))
+        archived_dt = datetime.fromisoformat(
+            archived_at.replace("Z", "+00:00"),
+        )
     except ValueError:
         return False
     if archived_dt.tzinfo is None:
         archived_dt = archived_dt.replace(tzinfo=timezone.utc)
-    return (now or _utc_now()) - archived_dt.astimezone(timezone.utc) >= timedelta(
+    return (now or _utc_now()) - archived_dt.astimezone(
+        timezone.utc,
+    ) >= timedelta(
         days=ARCHIVE_PURGE_DAYS,
     )
 
@@ -791,9 +809,10 @@ def _validate_target_agent_id(target_agent_id: str) -> str:
     """校验可作为 workspace 路径片段的 agent 标识。"""
     from ...config.context import is_valid_identity_value
 
-    if (
-        len(target_agent_id) > TARGET_AGENT_ID_MAX_LENGTH
-        or not is_valid_identity_value(target_agent_id)
+    if len(
+        target_agent_id,
+    ) > TARGET_AGENT_ID_MAX_LENGTH or not is_valid_identity_value(
+        target_agent_id,
     ):
         raise HTTPException(status_code=400, detail="Invalid target agent id")
     return target_agent_id
@@ -903,7 +922,9 @@ def _get_file_type(filepath: Path) -> str:
 
 def _get_agent_id(request: Request) -> str:
     """Get agent_id from request header or default."""
-    return _validate_target_agent_id(request.headers.get("X-Agent-Id", "default"))
+    return _validate_target_agent_id(
+        request.headers.get("X-Agent-Id", "default"),
+    )
 
 
 def _get_workspace_dir(request: Request) -> Path:
@@ -1092,7 +1113,12 @@ def _iter_agent_workspace_dirs(
             raise HTTPException(status_code=403, detail="Access denied")
         return [(safe_agent_id, workspace_dir)]
     if not workspaces_dir.exists():
-        return [(DEFAULT_REPORT_AGENT_ID, workspaces_dir / DEFAULT_REPORT_AGENT_ID)]
+        return [
+            (
+                DEFAULT_REPORT_AGENT_ID,
+                workspaces_dir / DEFAULT_REPORT_AGENT_ID,
+            ),
+        ]
     return [
         (path.name, path)
         for path in sorted(workspaces_dir.iterdir())
@@ -1232,7 +1258,9 @@ def _get_continuous_governance_service(request: Request) -> Any:
     return service
 
 
-def _get_optional_continuous_governance_service(request: Request) -> Any | None:
+def _get_optional_continuous_governance_service(
+    request: Request,
+) -> Any | None:
     """当前 workspace 操作尽力获取数据库读模型服务。"""
     service = getattr(
         request.app.state,
@@ -1308,7 +1336,10 @@ async def _record_service_reconcile_health(
             payload=payload,
         )
     except Exception as exc:
-        logger.warning("Failed to record continuous governance health: %s", exc)
+        logger.warning(
+            "Failed to record continuous governance health: %s",
+            exc,
+        )
 
 
 async def dual_write_dream_archive_maintenance_result(
@@ -1533,7 +1564,9 @@ def _build_report_summary(
 ) -> DreamLogReportSummary:
     """从用户行和记录构建汇总指标。"""
     total_executions = len(records)
-    success_count = sum(1 for record in records if record["status"] == "success")
+    success_count = sum(
+        1 for record in records if record["status"] == "success"
+    )
     failed_count = sum(1 for record in records if record["status"] == "failed")
     total_duration_ms = sum(record["duration_ms"] for record in records)
     return DreamLogReportSummary(
@@ -1543,19 +1576,21 @@ def _build_report_summary(
         total_executions=total_executions,
         success_count=success_count,
         failed_count=failed_count,
-        success_rate=round(
-            success_count * 100 / total_executions,
-            2,
-        )
-        if total_executions
-        else 0,
+        success_rate=(
+            round(
+                success_count * 100 / total_executions,
+                2,
+            )
+            if total_executions
+            else 0
+        ),
         total_files_changed=sum(
             record["total_files_changed"] for record in records
         ),
         total_size_saved=sum(record["total_size_saved"] for record in records),
-        avg_duration_ms=total_duration_ms // total_executions
-        if total_executions
-        else 0,
+        avg_duration_ms=(
+            total_duration_ms // total_executions if total_executions else 0
+        ),
         last_execution=max(
             (record["timestamp"] for record in records),
             default=None,
@@ -1626,7 +1661,9 @@ def _build_bbk_distribution(
         bucket["user_count"] += 1
         bucket["governed_users"] += 1 if user.executions else 0
         bucket["executions"] += user.executions
-        bucket["success_count"] += round(user.executions * user.success_rate / 100)
+        bucket["success_count"] += round(
+            user.executions * user.success_rate / 100,
+        )
 
     return [
         DreamLogReportBbkBucket(
@@ -1634,12 +1671,14 @@ def _build_bbk_distribution(
             user_count=values["user_count"],
             governed_users=values["governed_users"],
             executions=values["executions"],
-            success_rate=round(
-                values["success_count"] * 100 / values["executions"],
-                2,
-            )
-            if values["executions"]
-            else 0,
+            success_rate=(
+                round(
+                    values["success_count"] * 100 / values["executions"],
+                    2,
+                )
+                if values["executions"]
+                else 0
+            ),
         )
         for bbk_id, values in sorted(buckets.items())
     ]
@@ -1651,7 +1690,9 @@ def _build_user_row(
 ) -> DreamLogReportUserRow:
     """构建持续治理用户明细行。"""
     executions = len(records)
-    success_count = sum(1 for record in records if record["status"] == "success")
+    success_count = sum(
+        1 for record in records if record["status"] == "success"
+    )
     failed_count = sum(1 for record in records if record["status"] == "failed")
     latest_error = next(
         (record.get("error") for record in records if record.get("error")),
@@ -1663,9 +1704,9 @@ def _build_user_row(
         bbk_id=tenant.get("bbk_id"),
         agents=sorted({record["agent_id"] for record in records}),
         executions=executions,
-        success_rate=round(success_count * 100 / executions, 2)
-        if executions
-        else 0,
+        success_rate=(
+            round(success_count * 100 / executions, 2) if executions else 0
+        ),
         failed_count=failed_count,
         total_files_changed=sum(
             record["total_files_changed"] for record in records
@@ -1731,13 +1772,14 @@ async def get_dream_logs_report(
             DreamLogReportBbkBucket(**item.model_dump())
             for item in report.bbk_distribution
         ],
-        users=[DreamLogReportUserRow(**item.model_dump()) for item in report.users],
+        users=[
+            DreamLogReportUserRow(**item.model_dump()) for item in report.users
+        ],
         total=report.total,
         page=report.page,
         page_size=report.page_size,
         health=[
-            ReconcileHealthInfo(**item.model_dump())
-            for item in report.health
+            ReconcileHealthInfo(**item.model_dump()) for item in report.health
         ],
     )
 
@@ -2035,7 +2077,9 @@ async def rollback_dream_optimization(
                     target_user_id=target_user_id,
                     target_agent_id=target_agent_id,
                     record_id=record_id,
-                    rollback_timestamp=records[record_idx]["rollback_timestamp"],
+                    rollback_timestamp=records[record_idx][
+                        "rollback_timestamp"
+                    ],
                     rollback_files=rolled_back_files,
                 )
             except Exception as exc:
@@ -2115,7 +2159,11 @@ async def trigger_dream_optimization(request: Request) -> TriggerResponse:
         async def _wrapped_dream():
             _set_running("manual")
             try:
-                maintenance_workspace_value = getattr(runner, "workspace_dir", None)
+                maintenance_workspace_value = getattr(
+                    runner,
+                    "workspace_dir",
+                    None,
+                )
                 workspace_dir = (
                     Path(maintenance_workspace_value)
                     if maintenance_workspace_value
@@ -2123,7 +2171,10 @@ async def trigger_dream_optimization(request: Request) -> TriggerResponse:
                 )
                 before_record_ids = {
                     str(record.get("id") or "")
-                    for record in _load_dream_logs(workspace_dir).get("records", [])
+                    for record in _load_dream_logs(workspace_dir).get(
+                        "records",
+                        [],
+                    )
                     if isinstance(record, dict) and record.get("id")
                 }
                 await runner.memory_manager.dream_memory(
@@ -2477,7 +2528,10 @@ def _archive_workspace_files(
     archived_items: list[ArchiveItem] = []
     now = _isoformat(_utc_now())
     for filepath in filepaths:
-        relative_path, file_path = _resolve_workspace_file(workspace_dir, filepath)
+        relative_path, file_path = _resolve_workspace_file(
+            workspace_dir,
+            filepath,
+        )
         if not file_path.exists() or not file_path.is_file():
             raise HTTPException(status_code=404, detail="File not found")
 
@@ -2612,7 +2666,9 @@ async def archive_orphan_files(
     "/orphan-files/archive-auto-run",
     response_model=ArchiveOperationResponse,
 )
-async def archive_old_orphan_files(request: Request) -> ArchiveOperationResponse:
+async def archive_old_orphan_files(
+    request: Request,
+) -> ArchiveOperationResponse:
     """自动归档超过 3 天未修改的孤立文件。"""
     workspace_dir = _get_workspace_dir(request)
     candidates = _old_orphan_file_candidates(workspace_dir)
@@ -2813,7 +2869,9 @@ async def _ensure_target_user_in_current_source(
         if target_user_id == _get_logical_tenant_id(request):
             return
         raise
-    allowed_user_ids = {str(tenant.get("tenant_id") or "") for tenant in tenants}
+    allowed_user_ids = {
+        str(tenant.get("tenant_id") or "") for tenant in tenants
+    }
     if target_user_id not in allowed_user_ids:
         raise HTTPException(status_code=403, detail="Target user out of scope")
 
@@ -2912,7 +2970,12 @@ def _archive_db_row_to_index_item(row: Any) -> dict[str, Any]:
                 "archive_path",
                 "archive_path",
             ),
-            "size_bytes": _archive_row_int(row, item, "size_bytes", "size_bytes"),
+            "size_bytes": _archive_row_int(
+                row,
+                item,
+                "size_bytes",
+                "size_bytes",
+            ),
             "mtime": _archive_row_text(row, item, "mtime", "mtime"),
             "archived_at": _archive_row_text(
                 row,
@@ -3023,7 +3086,9 @@ def _expired_archive_row_context(
     row: Any,
 ) -> Optional[tuple[str, str, Path, str, dict[str, Any]]]:
     """把已过期的读模型归档行转换为清理分组所需上下文。"""
-    if not _archive_item_expired({"archived_at": getattr(row, "archived_at", "")}):
+    if not _archive_item_expired(
+        {"archived_at": getattr(row, "archived_at", "")},
+    ):
         return None
     archive_item_id = str(getattr(row, "archive_item_id", "") or "")
     if not archive_item_id:
@@ -3556,7 +3621,10 @@ async def _purge_expired_archive_group(
                 entity_type="cleanup_audit",
                 entity_id=event_id,
                 error=exc,
-                payload={"audit": audit, "archive_item_ids": list(expired_ids)},
+                payload={
+                    "audit": audit,
+                    "archive_item_ids": list(expired_ids),
+                },
             )
     return deleted_paths, deleted_size, event_id
 
@@ -3573,14 +3641,16 @@ async def _purge_expired_archive_groups(
     total_size = 0
     last_event_id = uuid.uuid4().hex
     for (tenant_id, agent_id), group in pending_groups.items():
-        deleted_paths, deleted_size, event_id = await _purge_expired_archive_group(
-            request,
-            service,
-            source_id,
-            tenant_id,
-            agent_id,
-            group,
-            reason,
+        deleted_paths, deleted_size, event_id = (
+            await _purge_expired_archive_group(
+                request,
+                service,
+                source_id,
+                tenant_id,
+                agent_id,
+                group,
+                reason,
+            )
         )
         all_deleted.extend(deleted_paths)
         total_size += deleted_size
@@ -3602,7 +3672,10 @@ async def _purge_archive_items_for_request(
     """管理员手动清理指定归档文件并写入清理审计。"""
     _ensure_report_permission(request)
     if not body.archive_item_ids:
-        raise HTTPException(status_code=400, detail="No archive items provided")
+        raise HTTPException(
+            status_code=400,
+            detail="No archive items provided",
+        )
     await _ensure_target_user_in_current_source(request, body.target_user_id)
     source_id = _get_report_source_id(request)
     workspace_dir = _target_workspace_dir(
@@ -3659,7 +3732,10 @@ async def _purge_archive_items_for_request(
                 entity_type="cleanup_audit",
                 entity_id=event_id,
                 error=exc,
-                payload={"audit": audit, "archive_item_ids": body.archive_item_ids},
+                payload={
+                    "audit": audit,
+                    "archive_item_ids": body.archive_item_ids,
+                },
             )
     return ArchivePurgeResponse(
         success=True,
@@ -3737,7 +3813,9 @@ def _collect_admin_audits(
 ) -> list[ArchiveAdminAuditRecord]:
     """扫描工作区根目录下当前渠道的管理员清理审计。"""
     records: list[ArchiveAdminAuditRecord] = []
-    for audit_path in workspace_root.glob("*/workspaces/*/" + ARCHIVE_ADMIN_AUDIT_FILE):
+    for audit_path in workspace_root.glob(
+        "*/workspaces/*/" + ARCHIVE_ADMIN_AUDIT_FILE,
+    ):
         for record in _read_archive_admin_audit(audit_path):
             if record.get("source_id") != source_id:
                 continue
@@ -3755,18 +3833,25 @@ def _build_admin_audit_summary(
     """根据管理员清理审计明细构造顶部指标。"""
     return ArchiveAdminAuditSummary(
         total_operations=len(records),
-        success_operations=sum(1 for row in records if row.status == "success"),
+        success_operations=sum(
+            1 for row in records if row.status == "success"
+        ),
         failed_operations=sum(1 for row in records if row.status == "failed"),
         partial_success_operations=sum(
             1 for row in records if row.status == "partial_success"
         ),
-        manual_operations=sum(1 for row in records if row.operation == "purge_archive"),
+        manual_operations=sum(
+            1 for row in records if row.operation == "purge_archive"
+        ),
         auto_operations=sum(
             1 for row in records if row.operation == "auto_purge_archive"
         ),
         total_files_cleared=sum(row.files_count for row in records),
         total_size_cleared_bytes=sum(row.total_size_bytes for row in records),
-        last_operation_at=max((row.timestamp for row in records), default=None),
+        last_operation_at=max(
+            (row.timestamp for row in records),
+            default=None,
+        ),
     )
 
 
@@ -3867,7 +3952,6 @@ async def get_archive_report(
     return ArchiveReportResponse(
         summary=ArchiveReportSummary(**report.summary.model_dump()),
         health=[
-            ReconcileHealthInfo(**item.model_dump())
-            for item in report.health
+            ReconcileHealthInfo(**item.model_dump()) for item in report.health
         ],
     )

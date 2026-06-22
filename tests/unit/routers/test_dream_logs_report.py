@@ -33,9 +33,7 @@ class _FakeTenantSourceStore:
     async def get_by_source(self, source_id: str) -> list[dict[str, Any]]:
         """只返回指定 source 的用户，模拟数据库隔离口径。"""
         self.calls.append(source_id)
-        return [
-            row for row in self.rows if row.get("source_id") == source_id
-        ]
+        return [row for row in self.rows if row.get("source_id") == source_id]
 
 
 class _FakeContinuousGovernanceStore:
@@ -64,7 +62,9 @@ class _FakeContinuousGovernanceStore:
         rows = [row for row in self.records if row.source_id == source_id]
         target_user_ids = filters.get("target_user_ids")
         if target_user_ids is not None:
-            rows = [row for row in rows if row.target_user_id in target_user_ids]
+            rows = [
+                row for row in rows if row.target_user_id in target_user_ids
+            ]
         if filters.get("target_agent_id"):
             rows = [
                 row
@@ -91,7 +91,11 @@ class _FakeContinuousGovernanceStore:
     async def list_protected_files(self, source_id: str, **filters):
         """返回保护状态读模型。"""
         return _filter_file_rows(
-            [row for row in self.protected_files if row.source_id == source_id],
+            [
+                row
+                for row in self.protected_files
+                if row.source_id == source_id
+            ],
             filters,
         )
 
@@ -110,7 +114,9 @@ def _filter_file_rows(rows, filters: dict[str, Any]):
         rows = [row for row in rows if row.target_user_id in target_user_ids]
     if filters.get("target_agent_id"):
         rows = [
-            row for row in rows if row.target_agent_id == filters["target_agent_id"]
+            row
+            for row in rows
+            if row.target_agent_id == filters["target_agent_id"]
         ]
     return rows
 
@@ -218,6 +224,11 @@ def _write_dream_logs(
     agent_id: str = "default",
 ) -> None:
     workspace_dir = _tenant_agent_dir(base_dir, tenant_id, source_id, agent_id)
+    timestamps = [
+        timestamp
+        for record in records
+        if isinstance((timestamp := record.get("timestamp")), str)
+    ]
     stats = {
         "total_executions": len(records),
         "success_count": sum(
@@ -235,10 +246,7 @@ def _write_dream_logs(
         "total_duration_ms": sum(
             record.get("duration_ms", 0) for record in records
         ),
-        "last_execution": max(
-            (record.get("timestamp") for record in records),
-            default=None,
-        ),
+        "last_execution": max(timestamps, default=None),
     }
     (workspace_dir / "dream_logs.json").write_text(
         json.dumps({"records": records, "stats": stats}),
@@ -977,7 +985,10 @@ def test_report_rejects_invalid_agent_filter(tmp_path, monkeypatch) -> None:
     assert response.status_code == 400
 
 
-def test_archive_items_reject_overlong_agent_filter(tmp_path, monkeypatch) -> None:
+def test_archive_items_reject_overlong_agent_filter(
+    tmp_path,
+    monkeypatch,
+) -> None:
     """文件治理列表 agent 过滤条件不能超过读模型字段长度。"""
     rows = [{"tenant_id": "alice", "source_id": "source-a"}]
     client, _, _ = _client(tmp_path, monkeypatch, rows)

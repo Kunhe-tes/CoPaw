@@ -321,7 +321,9 @@ def _prune_task_session_state(
     parts.memory_state["content"] = run_result.retained_content
     parts.next_state["task_runs"] = run_result.adjusted_runs
     parts.next_state[TASK_MESSAGES_STATE_KEY] = message_result.kept_messages
-    changed = run_result.removed_runs > 0 or message_result.removed_messages > 0
+    changed = (
+        run_result.removed_runs > 0 or message_result.removed_messages > 0
+    )
     return _TaskSessionCleanupSnapshot(
         state=parts.next_state,
         changed=changed,
@@ -886,8 +888,10 @@ class CronManager:  # pylint: disable=too-many-public-methods
         if self._source_system_config_service is None or not source_id:
             return resolve_cron_task_session_cleanup_config(None)
         try:
-            source_config = await self._source_system_config_service.resolve_config(
-                source_id,
+            source_config = (
+                await self._source_system_config_service.resolve_config(
+                    source_id,
+                )
             )
         except Exception:
             logger.warning(
@@ -1292,7 +1296,7 @@ class CronManager:  # pylint: disable=too-many-public-methods
         visible_in_my_tasks = bool(
             spec.task_type in {"agent", "text"}
             and creator_user_id
-            and creator_user_id == user_id
+            and creator_user_id == user_id,
         )
         pause_reason = meta.get("pause_reason")
         if visible_in_my_tasks and not pause_reason and not spec.enabled:
@@ -2113,16 +2117,20 @@ class CronManager:  # pylint: disable=too-many-public-methods
             result["sessions_cleaned"] += 1
             result["runs_removed"] += snapshot.removed_runs
             result["messages_removed"] += snapshot.removed_messages
-            async with self._lock:
-                await self._mutate_jobs_file_locked(
-                    lambda jobs_file, job_id=job.id, snap=snapshot: (
-                        self._apply_task_session_cleanup_meta(
-                            jobs_file,
-                            job_id,
-                            snap,
-                        )
-                    ),
+
+            def _apply_cleanup_meta(
+                jobs_file: JobsFile,
+                job_id: str = job.id,
+                snap: _TaskSessionCleanupSnapshot = snapshot,
+            ) -> tuple[bool, None]:
+                return self._apply_task_session_cleanup_meta(
+                    jobs_file,
+                    job_id,
+                    snap,
                 )
+
+            async with self._lock:
+                await self._mutate_jobs_file_locked(_apply_cleanup_meta)
         logger.info("Task session cleanup result: %s", result)
         return result
 
@@ -2696,10 +2704,9 @@ class CronManager:  # pylint: disable=too-many-public-methods
     def _continuous_governance_target_agent_id(self) -> str | None:
         """返回可安全写入持续治理读模型的 agent 标识。"""
         agent_id = self._agent_id or "default"
-        if (
-            len(agent_id) > GOVERNANCE_ID_MAX_LENGTH
-            or not is_valid_identity_value(agent_id)
-        ):
+        if len(
+            agent_id,
+        ) > GOVERNANCE_ID_MAX_LENGTH or not is_valid_identity_value(agent_id):
             logger.warning(
                 "Skip continuous governance dual-write for invalid agent id",
             )
@@ -2717,7 +2724,12 @@ class CronManager:  # pylint: disable=too-many-public-methods
     ) -> None:
         """cron dream 完成后把新增治理记录写入数据库读模型。"""
         service = self._continuous_governance_service
-        if workspace_dir is None or not source_id or not tenant_id or not agent_id:
+        if (
+            workspace_dir is None
+            or not source_id
+            or not tenant_id
+            or not agent_id
+        ):
             return
         if service is None:
             return

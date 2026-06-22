@@ -69,7 +69,9 @@ class ContinuousGovernanceService:
             bbk_id=bbk_id,
             user_search=user_search,
         )
-        target_user_ids = [str(row.get("tenant_id") or "") for row in filtered_tenants]
+        target_user_ids = [
+            str(row.get("tenant_id") or "") for row in filtered_tenants
+        ]
         records = await self.store.list_governance_records(
             source_id,
             target_user_ids=target_user_ids,
@@ -82,7 +84,10 @@ class ContinuousGovernanceService:
         health = await self.store.list_reconcile_health(source_id)
         records_by_user = _group_records_by_user(records)
         user_rows = [
-            _build_user_row(tenant, records_by_user[str(tenant.get("tenant_id") or "")])
+            _build_user_row(
+                tenant,
+                records_by_user[str(tenant.get("tenant_id") or "")],
+            )
             for tenant in filtered_tenants
         ]
         user_rows.sort(
@@ -123,7 +128,9 @@ class ContinuousGovernanceService:
         page_size: int = 20,
     ) -> GovernanceUserRecordsData | None:
         """查询单个用户的治理记录。"""
-        if not any(str(row.get("tenant_id") or "") == user_id for row in tenants):
+        if not any(
+            str(row.get("tenant_id") or "") == user_id for row in tenants
+        ):
             return None
         safe_page, safe_page_size = _normalise_page(page, page_size)
         records = await self.store.list_governance_records(
@@ -181,7 +188,9 @@ class ContinuousGovernanceService:
         return ArchiveReportData(
             summary=ArchiveReportSummaryData(
                 archived_files=len(archive_items),
-                archived_size_bytes=sum(item.size_bytes for item in archive_items),
+                archived_size_bytes=sum(
+                    item.size_bytes for item in archive_items
+                ),
                 pending_purge_files=len(pending_items),
                 pending_purge_size_bytes=sum(
                     item.size_bytes for item in pending_items
@@ -201,7 +210,9 @@ class ContinuousGovernanceService:
                     1 for item in audits if item.status == "failed"
                 ),
                 purged_files=sum(item.files_count for item in audits),
-                purged_size_bytes=sum(item.total_size_bytes for item in audits),
+                purged_size_bytes=sum(
+                    item.total_size_bytes for item in audits
+                ),
                 last_purge_at=_latest_audit_time(audits),
             ),
             health=health,
@@ -393,7 +404,9 @@ class ContinuousGovernanceService:
                 source_id=str(record.get("source_id") or ""),
                 source_name=record.get("source_name"),
                 target_user_id=str(record.get("target_user_id") or ""),
-                target_agent_id=str(record.get("target_agent_id") or "default"),
+                target_agent_id=str(
+                    record.get("target_agent_id") or "default",
+                ),
                 scope=str(record.get("scope") or ""),
                 files_count=int(record.get("files_count") or 0),
                 total_size_bytes=int(record.get("total_size_bytes") or 0),
@@ -730,20 +743,28 @@ def _build_user_row(
     success_count = sum(1 for record in records if record.status == "success")
     failed_count = sum(1 for record in records if record.status == "failed")
     executions = len(records)
-    latest_error = next((record.error for record in records if record.error), None)
+    latest_error = next(
+        (record.error for record in records if record.error),
+        None,
+    )
     return GovernanceReportUserRow(
         user_id=str(tenant.get("tenant_id") or ""),
         user_name=tenant.get("tenant_name"),
         bbk_id=tenant.get("bbk_id"),
         agents=sorted({record.target_agent_id for record in records}),
         executions=executions,
-        success_rate=round(success_count * 100 / executions, 2)
-        if executions
-        else 0,
+        success_rate=(
+            round(success_count * 100 / executions, 2) if executions else 0
+        ),
         failed_count=failed_count,
-        total_files_changed=sum(record.total_files_changed for record in records),
+        total_files_changed=sum(
+            record.total_files_changed for record in records
+        ),
         total_size_saved=sum(record.total_size_saved for record in records),
-        last_execution=max((record.timestamp for record in records), default=None),
+        last_execution=max(
+            (record.timestamp for record in records),
+            default=None,
+        ),
         latest_error=latest_error,
     )
 
@@ -764,15 +785,22 @@ def _build_summary(
         total_executions=total_executions,
         success_count=success_count,
         failed_count=failed_count,
-        success_rate=round(success_count * 100 / total_executions, 2)
-        if total_executions
-        else 0,
-        total_files_changed=sum(record.total_files_changed for record in records),
+        success_rate=(
+            round(success_count * 100 / total_executions, 2)
+            if total_executions
+            else 0
+        ),
+        total_files_changed=sum(
+            record.total_files_changed for record in records
+        ),
         total_size_saved=sum(record.total_size_saved for record in records),
-        avg_duration_ms=total_duration // total_executions
-        if total_executions
-        else 0,
-        last_execution=max((record.timestamp for record in records), default=None),
+        avg_duration_ms=(
+            total_duration // total_executions if total_executions else 0
+        ),
+        last_execution=max(
+            (record.timestamp for record in records),
+            default=None,
+        ),
     )
 
 
@@ -841,19 +869,23 @@ def _build_bbk_distribution(
         bucket["user_count"] += 1
         bucket["governed_users"] += 1
         bucket["executions"] += user.executions
-        bucket["success_count"] += round(user.executions * user.success_rate / 100)
+        bucket["success_count"] += round(
+            user.executions * user.success_rate / 100,
+        )
     return [
         GovernanceReportBbkBucket(
             bbk_id=bbk_id,
             user_count=values["user_count"],
             governed_users=values["governed_users"],
             executions=values["executions"],
-            success_rate=round(
-                values["success_count"] * 100 / values["executions"],
-                2,
-            )
-            if values["executions"]
-            else 0,
+            success_rate=(
+                round(
+                    values["success_count"] * 100 / values["executions"],
+                    2,
+                )
+                if values["executions"]
+                else 0
+            ),
         )
         for bbk_id, values in sorted(
             buckets.items(),

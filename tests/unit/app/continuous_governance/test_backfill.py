@@ -78,7 +78,9 @@ class _IdempotentStore:
 
 def _workspace(root: Path, tenant_id: str, source_id: str) -> Path:
     """创建测试 workspace。"""
-    path = root / encode_scope_id(tenant_id, source_id) / "workspaces" / "default"
+    path = (
+        root / encode_scope_id(tenant_id, source_id) / "workspaces" / "default"
+    )
     path.mkdir(parents=True, exist_ok=True)
     return path
 
@@ -252,4 +254,7 @@ async def test_backfill_skips_agent_ids_that_are_not_safe_path_segments(
 def test_backfill_agent_id_length_matches_read_model() -> None:
     """agent 标识长度边界与数据库读模型字段保持一致。"""
     assert _is_backfillable_agent_id("a" * TARGET_AGENT_ID_MAX_LENGTH) is True
-    assert _is_backfillable_agent_id("a" * (TARGET_AGENT_ID_MAX_LENGTH + 1)) is False
+    assert (
+        _is_backfillable_agent_id("a" * (TARGET_AGENT_ID_MAX_LENGTH + 1))
+        is False
+    )

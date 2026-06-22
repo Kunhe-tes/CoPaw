@@ -644,7 +644,9 @@ def _row_to_governance_record(row: dict[str, Any]) -> GovernanceRecord:
         output_tokens=int(row.get("output_tokens") or 0),
         summary=str(row.get("summary") or ""),
         error=row.get("error_text"),
-        rollback_timestamp=_optional_string_time(row.get("rollback_timestamp")),
+        rollback_timestamp=_optional_string_time(
+            row.get("rollback_timestamp"),
+        ),
         rollback_files=list(_load_json(row.get("rollback_files_json"), [])),
         raw_record=dict(_load_json(row.get("raw_record_json"), {})),
     )
