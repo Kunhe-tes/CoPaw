@@ -3,6 +3,8 @@
 
 from __future__ import annotations
 
+from urllib.parse import quote
+
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
@@ -127,6 +129,19 @@ def test_overview_uses_header_source_and_rejects_query_override():
     assert ok_response.status_code == 200
     assert service.overview_calls == [("source-a", "skill-a")]
     assert bad_response.status_code == 400
+
+
+def test_overview_accepts_chinese_skill_id():
+    client, service = _client()
+    skill_id = "存款到期客户评分"
+
+    response = client.get(
+        f"/api/skill-readiness/skills/{quote(skill_id)}/overview",
+        headers={"X-User-Role": "manager", "X-Source-Id": "source-a"},
+    )
+
+    assert response.status_code == 200
+    assert service.overview_calls == [("source-a", skill_id)]
 
 
 def test_results_passes_check_failure_filter():

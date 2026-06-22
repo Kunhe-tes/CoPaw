@@ -38,7 +38,7 @@ _CRONTAB_NUM_TO_NAME: dict[str, str] = {
 DEFAULT_CRON_TIMEOUT_SECONDS = 7200
 DEFAULT_CRON_MISFIRE_GRACE_SECONDS = 300
 MAX_CRON_SKILL_IDS_LENGTH = 200
-_SKILL_ID_PATTERN = re.compile(r"^[A-Za-z0-9_.:-]+$")
+_SKILL_ID_SAFE_CHARS = frozenset("_.:-")
 _SKILL_ID_SPLIT_PATTERN = re.compile(r"[,\s]+")
 
 
@@ -76,7 +76,7 @@ def normalize_cron_skill_ids(value: Any) -> str:
             skill_id = item.strip()
             if not skill_id:
                 continue
-            if not _SKILL_ID_PATTERN.fullmatch(skill_id):
+            if not _is_skill_id(skill_id):
                 raise ValueError(f"invalid skill_ids item: {skill_id}")
             if skill_id not in seen:
                 seen.add(skill_id)
@@ -98,6 +98,12 @@ def cron_skill_ids_contains(skill_ids: Any, skill_id: str) -> bool:
     if not normalized or not target or "," in target:
         return False
     return f",{target}," in f",{normalized},"
+
+
+def _is_skill_id(value: str) -> bool:
+    return bool(value) and all(
+        char.isalnum() or char in _SKILL_ID_SAFE_CHARS for char in value
+    )
 
 
 class ScheduleSpec(BaseModel):

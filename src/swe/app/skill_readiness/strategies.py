@@ -8,6 +8,7 @@ import json
 import re
 import time
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any, Protocol
 
 from ...app.crons.auth_state import (
@@ -139,7 +140,7 @@ class ProfileIdentityBlockStrategy:
     ) -> SkillReadinessCheckResult:
         _ = config
         started_at = time.perf_counter()
-        profile_path = get_tenant_working_dir(context.scope_id) / "PROFILE.md"
+        profile_path = _resolve_profile_path(context)
         if not profile_path.is_file():
             return _result(
                 self.name,
@@ -513,6 +514,13 @@ def _extract_profile_field(content: str, field: str) -> str | None:
         return None
     value = match.group("value").strip()
     return value or None
+
+
+def _resolve_profile_path(context: SkillReadinessCheckContext) -> Path:
+    workspace_dir = getattr(context.workspace, "workspace_dir", None)
+    if workspace_dir:
+        return Path(workspace_dir).expanduser() / "PROFILE.md"
+    return get_tenant_working_dir(context.scope_id) / "PROFILE.md"
 
 
 async def _list_bound_jobs(

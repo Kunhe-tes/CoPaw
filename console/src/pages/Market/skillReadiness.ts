@@ -1,6 +1,6 @@
 import type { MarketSkill, MarketSkillDetail } from "../../api/modules/market";
 
-const SKILL_READINESS_ID_PATTERN = /^[A-Za-z0-9_.:-]+$/;
+const SKILL_READINESS_ID_PATTERN = /^[\p{L}\p{N}_.:-]+$/u;
 
 export interface SkillReadinessTarget {
   skillId: string;

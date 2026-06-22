@@ -27,7 +27,14 @@ class _Store:
         self.config = SkillReadinessConfigRecord(
             skill_id="skill-a",
             config=SkillReadinessConfig.model_validate(
-                {"checks": [{"name": "cron_auth_valid"}]},
+                {
+                    "checks": [
+                        {
+                            "name": "cron_auth_valid",
+                            "params": {"required": True},
+                        },
+                    ],
+                },
             ),
             updated_at=datetime.now(),
         )
@@ -147,6 +154,7 @@ async def test_overview_reports_config_owner_and_latest_summary():
     assert result.config_found is True
     assert result.startable is True
     assert result.config_checks[0].display_name == "定时任务鉴权"
+    assert result.config_checks[0].params == {"required": True}
     assert result.owner_summary.lookup_failed_users == 1
     assert [owner.user_id for owner in result.owners] == ["alice"]
 

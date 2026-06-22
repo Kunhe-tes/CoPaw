@@ -12,6 +12,7 @@ export interface SkillReadinessConfigCheckSummary {
   name: string;
   display_name: string;
   enabled: boolean;
+  params?: Record<string, unknown>;
 }
 
 export interface SkillReadinessOwnerSummary {

@@ -128,6 +128,7 @@ class SkillReadinessConfigCheckSummary(BaseModel):
     name: str
     display_name: str
     enabled: bool = True
+    params: dict[str, Any] = Field(default_factory=dict)
 
 
 class SkillReadinessOwnerSummary(BaseModel):

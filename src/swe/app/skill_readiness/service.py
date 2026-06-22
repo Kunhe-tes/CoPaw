@@ -189,6 +189,7 @@ class SkillReadinessService:
                 name=check.name,
                 display_name=self.registry.display_name_for(check.name),
                 enabled=check.enabled,
+                params=check.params,
             )
             for check in config.checks
         ]

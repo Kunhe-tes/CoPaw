@@ -109,6 +109,37 @@ async def test_profile_identity_block_requires_heading_and_fields(
     assert result.status == "pass"
 
 
+@pytest.mark.asyncio
+async def test_profile_identity_block_uses_current_workspace_profile(
+    tmp_path,
+    monkeypatch,
+):
+    context = _context(tmp_path, monkeypatch)
+    workspace_dir = tmp_path / "work" / "alice" / "workspaces" / "default"
+    workspace_dir.mkdir(parents=True)
+    workspace_dir.joinpath("PROFILE.md").write_text(
+        "### 用户身份信息\n"
+        "分行号：001\n"
+        "网点机构编号：002\n"
+        "岗位编号：003\n"
+        "客户经理ID：alice\n",
+        encoding="utf-8",
+    )
+    context.workspace = type(
+        "Workspace",
+        (),
+        {"workspace_dir": workspace_dir},
+    )()
+
+    result = await ProfileIdentityBlockStrategy().run(
+        context,
+        SkillReadinessCheckConfig(name="profile_identity_block"),
+    )
+
+    assert result.status == "pass"
+    assert result.details == {}
+
+
 class _CronManager:
     def __init__(self, jobs):
         self.jobs = jobs

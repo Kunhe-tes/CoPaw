@@ -7,6 +7,7 @@ import {
   Empty,
   Modal,
   Pagination,
+  Popover,
   Progress,
   Segmented,
   Space,
@@ -17,6 +18,8 @@ import {
   message,
 } from "antd";
 import {
+  CaretDownOutlined,
+  CaretRightOutlined,
   PlayCircleOutlined,
   ReloadOutlined,
   SafetyCertificateOutlined,
@@ -25,6 +28,7 @@ import type { MarketSkill, MarketSkillDetail } from "../../api/modules/market";
 import { skillReadinessApi } from "../../api/modules/skillReadiness";
 import type {
   SkillReadinessCheckResult,
+  SkillReadinessConfigCheckSummary,
   SkillReadinessOverview,
   SkillReadinessOwner,
   SkillReadinessResultsPage,
@@ -119,14 +123,11 @@ function renderUpdateTag(value: boolean | null | undefined): ReactNode {
   );
 }
 
-function renderDetails(details: Record<string, unknown>): ReactNode {
-  if (!details || Object.keys(details).length === 0) {
-    return null;
-  }
+function renderJsonBlock(value: unknown): ReactNode {
   return (
     <pre
       style={{
-        margin: "6px 0 0",
+        margin: 0,
         padding: 8,
         borderRadius: 6,
         backgroundColor: "#fafafa",
@@ -135,10 +136,88 @@ function renderDetails(details: Record<string, unknown>): ReactNode {
         lineHeight: 1.5,
         whiteSpace: "pre-wrap",
         wordBreak: "break-word",
+        maxWidth: 520,
+        maxHeight: 260,
+        overflow: "auto",
       }}
     >
-      {JSON.stringify(details, null, 2)}
+      {JSON.stringify(value, null, 2)}
     </pre>
+  );
+}
+
+function renderConfigPopoverContent(
+  check: SkillReadinessConfigCheckSummary,
+): ReactNode {
+  return (
+    <Space direction="vertical" size={6}>
+      <Text strong>{check.display_name}</Text>
+      <Text type="secondary" style={{ fontSize: 12 }}>
+        name: {check.name}
+      </Text>
+      <Text type="secondary" style={{ fontSize: 12 }}>
+        状态: {check.enabled ? "启用" : "停用"}
+      </Text>
+      {renderJsonBlock({ params: check.params ?? {} })}
+    </Space>
+  );
+}
+
+function renderConfigTag(check: SkillReadinessConfigCheckSummary): ReactNode {
+  return (
+    <Popover
+      key={check.name}
+      trigger="hover"
+      placement="top"
+      content={renderConfigPopoverContent(check)}
+    >
+      <Tag color={check.enabled ? "blue" : "default"}>
+        {check.display_name}
+        {check.enabled ? "" : "（停用）"}
+      </Tag>
+    </Popover>
+  );
+}
+
+function hasDetails(details: Record<string, unknown>): boolean {
+  return Boolean(details && Object.keys(details).length);
+}
+
+function renderCheckMessage(check: SkillReadinessCheckResult): ReactNode {
+  if (!check.message) {
+    return null;
+  }
+  const textType = check.status === "fail" ? "danger" : "secondary";
+  if (!hasDetails(check.details)) {
+    return (
+      <Text
+        type={textType}
+        style={{ display: "block", marginTop: 6, fontSize: 12 }}
+      >
+        {check.message}
+      </Text>
+    );
+  }
+  return (
+    <Collapse
+      ghost
+      size="small"
+      expandIcon={({ isActive }) =>
+        isActive ? <CaretDownOutlined /> : <CaretRightOutlined />
+      }
+      style={{ marginTop: 4 }}
+      items={[
+        {
+          key: "details",
+          label: (
+            <Text type={textType} style={{ fontSize: 12 }}>
+              {check.message}
+            </Text>
+          ),
+          children: renderJsonBlock(check.details),
+        },
+      ]}
+    />
   );
 }
 
@@ -164,28 +243,88 @@ function renderCheckResult(check: SkillReadinessCheckResult): ReactNode {
           {check.duration_ms}ms
         </Text>
       </div>
-      {check.message && (
-        <Text
-          type={check.status === "fail" ? "danger" : "secondary"}
-          style={{ display: "block", marginTop: 6, fontSize: 12 }}
-        >
-          {check.message}
-        </Text>
-      )}
-      {renderDetails(check.details)}
+      {renderCheckMessage(check)}
     </div>
   );
 }
 
-function renderUserResult(user: SkillReadinessUserResult): ReactNode {
+function renderUserMeta(user: SkillReadinessUserResult): ReactNode {
+  return (
+    <div style={{ minWidth: 0, flex: "1 1 180px" }}>
+      <Text strong>{user.user_name || user.user_id}</Text>
+      <Text
+        type="secondary"
+        style={{ display: "block", fontSize: 12, marginTop: 2 }}
+      >
+        {user.user_id}
+        {user.bbk_id ? ` · ${user.bbk_id}` : ""}
+      </Text>
+    </div>
+  );
+}
+
+function renderAggregateTag(user: SkillReadinessUserResult): ReactNode {
   const abnormal = user.aggregate_status === "abnormal";
+  return (
+    <Tag color={abnormal ? "red" : "green"} style={{ margin: 0 }}>
+      {abnormal ? "异常" : "正常"}
+    </Tag>
+  );
+}
+
+function renderCheckStatusTags(
+  checks: SkillReadinessCheckResult[],
+): ReactNode {
+  return (
+    <Space size={[4, 4]} wrap>
+      {checks.map((check) => (
+        <Tag
+          key={check.check_name}
+          color={CHECK_STATUS_COLORS[check.status]}
+          style={{ margin: 0 }}
+        >
+          {check.display_name}：{CHECK_STATUS_LABELS[check.status]}
+        </Tag>
+      ))}
+    </Space>
+  );
+}
+
+function renderUserOverviewLabel(user: SkillReadinessUserResult): ReactNode {
+  return (
+    <div
+      style={{
+        display: "flex",
+        gap: 10,
+        alignItems: "center",
+        flexWrap: "wrap",
+        width: "100%",
+      }}
+    >
+      {renderUserMeta(user)}
+      {renderAggregateTag(user)}
+      <div style={{ flex: "2 1 360px" }}>
+        {renderCheckStatusTags(user.checks)}
+      </div>
+    </div>
+  );
+}
+
+function renderSelectedCheckUserResult(
+  user: SkillReadinessUserResult,
+  selectedCheckName: string,
+): ReactNode {
+  const checks = user.checks.filter(
+    (check) =>
+      check.check_name === selectedCheckName && check.status === "fail",
+  );
   return (
     <div
       key={user.user_id}
       style={{
         borderRadius: 8,
-        border: abnormal ? "1px solid #ffccc7" : "1px solid #f0f0f0",
-        backgroundColor: abnormal ? "#fff2f0" : "#fff",
+        border: "1px solid #ffccc7",
+        backgroundColor: "#fff2f0",
         padding: 12,
       }}
     >
@@ -198,30 +337,19 @@ function renderUserResult(user: SkillReadinessUserResult): ReactNode {
           marginBottom: 10,
         }}
       >
-        <div style={{ minWidth: 0, flex: "1 1 220px" }}>
-          <Text strong>{user.user_name || user.user_id}</Text>
-          <Text
-            type="secondary"
-            style={{ display: "block", fontSize: 12, marginTop: 2 }}
-          >
-            {user.user_id}
-            {user.bbk_id ? ` · ${user.bbk_id}` : ""}
-          </Text>
-        </div>
-        <Tag color={abnormal ? "red" : "green"} style={{ margin: 0 }}>
-          {abnormal ? "异常" : "正常"}
-        </Tag>
+        {renderUserMeta(user)}
+        {renderAggregateTag(user)}
       </div>
       {user.summary && (
         <Text
-          type={abnormal ? "danger" : "secondary"}
+          type="danger"
           style={{ display: "block", marginBottom: 10, fontSize: 12 }}
         >
           {user.summary}
         </Text>
       )}
       <Space direction="vertical" size={8} style={{ width: "100%" }}>
-        {user.checks.map(renderCheckResult)}
+        {checks.map(renderCheckResult)}
       </Space>
     </div>
   );
@@ -248,6 +376,7 @@ export function SkillReadinessModal({
   );
   const [page, setPage] = useState(1);
   const [pageSize, setPageSize] = useState(20);
+  const [resultsRefreshToken, setResultsRefreshToken] = useState(0);
   const overviewRequestSeq = useRef(0);
   const activeSkillRef = useRef("");
 
@@ -291,6 +420,7 @@ export function SkillReadinessModal({
       setSelectedCheckName(null);
       setPage(1);
       setPageSize(20);
+      setResultsRefreshToken(0);
       return;
     }
     setOverview(null);
@@ -300,6 +430,7 @@ export function SkillReadinessModal({
     setSelectedCheckName(null);
     setPage(1);
     setPageSize(20);
+    setResultsRefreshToken(0);
     void loadOverview();
   }, [open, loadOverview, target.skillId, target.valid]);
 
@@ -311,12 +442,13 @@ export function SkillReadinessModal({
     }
 
     let cancelled = false;
+    const effectiveStatus = selectedCheckName ? "all" : statusFilter;
     setResultsLoading(true);
     skillReadinessApi
       .getSkillReadinessResults(runId, {
         page,
         page_size: pageSize,
-        status: statusFilter,
+        status: effectiveStatus,
         check_name: selectedCheckName || undefined,
         check_status: selectedCheckName ? "fail" : undefined,
       })
@@ -345,9 +477,15 @@ export function SkillReadinessModal({
     overview?.latest_run?.run_id,
     page,
     pageSize,
+    resultsRefreshToken,
     selectedCheckName,
     statusFilter,
   ]);
+
+  const refreshReadiness = useCallback(() => {
+    void loadOverview();
+    setResultsRefreshToken((current) => current + 1);
+  }, [loadOverview]);
 
   const startRun = useCallback(async () => {
     if (!target.valid || !overview?.startable) {
@@ -389,12 +527,6 @@ export function SkillReadinessModal({
   const ownerSummary = overview?.owner_summary ?? DEFAULT_OWNER_SUMMARY;
   const configChecks = overview?.config_checks ?? [];
   const ownerRows = overview?.owners ?? [];
-  const abnormalUsers = results?.items.filter(
-    (item) => item.aggregate_status === "abnormal",
-  ) || [];
-  const normalUsers = results?.items.filter(
-    (item) => item.aggregate_status === "normal",
-  ) || [];
 
   const ownerColumns = [
     {
@@ -512,6 +644,7 @@ export function SkillReadinessModal({
             danger={summary.fail_count > 0}
             onClick={() => {
               setSelectedCheckName(selected ? null : summary.check_name);
+              setStatusFilter("all");
               setPage(1);
             }}
           >
@@ -526,7 +659,24 @@ export function SkillReadinessModal({
     </Text>
   );
 
-  const resultsContent = activeRun ? (
+  const configPanel = (
+    <div>
+      <Text strong>自检配置</Text>
+      <div style={{ marginTop: 8 }}>
+        {configChecks.length ? (
+          <Space size={[8, 8]} wrap>
+            {configChecks.map(renderConfigTag)}
+          </Space>
+        ) : (
+          <Text type="secondary" style={{ fontSize: 12 }}>
+            没有自检配置
+          </Text>
+        )}
+      </div>
+    </div>
+  );
+
+  const resultsContent = (
     <Space direction="vertical" size={12} style={{ width: "100%" }}>
       <div
         style={{
@@ -539,74 +689,104 @@ export function SkillReadinessModal({
       >
         <Space direction="vertical" size={4}>
           <Text strong>检查结果</Text>
-          {selectedCheckName && (
+          {activeRun && selectedCheckName && (
             <Text type="secondary" style={{ fontSize: 12 }}>
-              当前仅筛选该检查项为 fail 的用户，仍展示每个用户的全量检查项。
+              当前仅展示该检查项失败的用户。
             </Text>
           )}
         </Space>
-        <Segmented
-          value={statusFilter}
-          options={[
-            { label: "全部", value: "all" },
-            { label: "异常", value: "abnormal" },
-            { label: "正常", value: "normal" },
-          ]}
-          onChange={(value) => {
-            setStatusFilter(value as UserStatusFilter);
-            setPage(1);
-          }}
-        />
+        {activeRun && !selectedCheckName && (
+          <Segmented
+            value={statusFilter}
+            options={[
+              { label: "全部", value: "all" },
+              { label: "异常", value: "abnormal" },
+              { label: "正常", value: "normal" },
+            ]}
+            onChange={(value) => {
+              setStatusFilter(value as UserStatusFilter);
+              setPage(1);
+            }}
+          />
+        )}
       </div>
 
-      <div>{checkSummary}</div>
+      {runSummary}
 
-      <Spin spinning={resultsLoading}>
-        {!results || results.items.length === 0 ? (
-          <Empty
-            image={Empty.PRESENTED_IMAGE_SIMPLE}
-            description="当前筛选条件下没有结果"
-          />
-        ) : (
-          <Space direction="vertical" size={10} style={{ width: "100%" }}>
-            {abnormalUsers.map(renderUserResult)}
-            {normalUsers.length > 0 && (
-              <Collapse
-                size="small"
-                items={[
-                  {
-                    key: "normal-users",
-                    label: `正常用户（${normalUsers.length}）`,
-                    children: (
-                      <Space
-                        direction="vertical"
-                        size={10}
-                        style={{ width: "100%" }}
-                      >
-                        {normalUsers.map(renderUserResult)}
-                      </Space>
-                    ),
-                  },
-                ]}
+      {activeRun && (
+        <>
+          <div>{checkSummary}</div>
+
+          <Spin spinning={resultsLoading}>
+            {!results || results.items.length === 0 ? (
+              <Empty
+                image={Empty.PRESENTED_IMAGE_SIMPLE}
+                description="当前筛选条件下没有结果"
               />
+            ) : (
+              <Space direction="vertical" size={10} style={{ width: "100%" }}>
+                {selectedCheckName ? (
+                  results.items.map((user) =>
+                    renderSelectedCheckUserResult(user, selectedCheckName),
+                  )
+                ) : (
+                  <Collapse
+                    size="small"
+                    items={results.items.map((user) => ({
+                      key: user.user_id,
+                      label: renderUserOverviewLabel(user),
+                      children: (
+                        <Space
+                          direction="vertical"
+                          size={8}
+                          style={{ width: "100%" }}
+                        >
+                          {user.summary && (
+                            <Text
+                              type={
+                                user.aggregate_status === "abnormal"
+                                  ? "danger"
+                                  : "secondary"
+                              }
+                              style={{
+                                display: "block",
+                                fontSize: 12,
+                              }}
+                            >
+                              {user.summary}
+                            </Text>
+                          )}
+                          <Space
+                            direction="vertical"
+                            size={8}
+                            style={{ width: "100%" }}
+                          >
+                            {user.checks.map(renderCheckResult)}
+                          </Space>
+                        </Space>
+                      ),
+                    }))}
+                  />
+                )}
+                <Pagination
+                  size="small"
+                  current={page}
+                  pageSize={pageSize}
+                  total={results.total}
+                  showSizeChanger
+                  showTotal={(total) => `共 ${total} 条`}
+                  onChange={(nextPage, nextPageSize) => {
+                    setPage(nextPage);
+                    setPageSize(nextPageSize);
+                  }}
+                />
+              </Space>
             )}
-            <Pagination
-              size="small"
-              current={page}
-              pageSize={pageSize}
-              total={results.total}
-              showSizeChanger
-              showTotal={(total) => `共 ${total} 条`}
-              onChange={(nextPage, nextPageSize) => {
-                setPage(nextPage);
-                setPageSize(nextPageSize);
-              }}
-            />
-          </Space>
-        )}
-      </Spin>
+          </Spin>
+        </>
+      )}
     </Space>
-  ) : null;
+  );
 
   return (
     <Modal
@@ -625,9 +805,9 @@ export function SkillReadinessModal({
         <Button
           key="refresh"
           icon={<ReloadOutlined />}
-          loading={overviewLoading}
+          loading={overviewLoading || resultsLoading}
           disabled={!target.valid}
-          onClick={loadOverview}
+          onClick={refreshReadiness}
         >
           刷新
         </Button>,
@@ -678,7 +858,7 @@ export function SkillReadinessModal({
             type="error"
             showIcon
             message="当前技能没有可用于查询的有效 skill-id"
-            description="skill-id 仅支持字母、数字、下划线、点、冒号和短横线；没有 skill_id 时会降级使用 skill_name。"
+            description="skill-id 仅支持中文、字母、数字、下划线、点、冒号和短横线；没有 skill_id 时会降级使用 skill_name。"
           />
         )}
         <Spin spinning={overviewLoading}>
@@ -744,28 +924,7 @@ export function SkillReadinessModal({
                 />
               )}
 
-              <div>
-                <Text strong>自检配置</Text>
-                <div style={{ marginTop: 8 }}>
-                  {configChecks.length ? (
-                    <Space size={[8, 8]} wrap>
-                      {configChecks.map((check) => (
-                        <Tag
-                          key={check.name}
-                          color={check.enabled ? "blue" : "default"}
-                        >
-                          {check.display_name}
-                          {check.enabled ? "" : "（停用）"}
-                        </Tag>
-                      ))}
-                    </Space>
-                  ) : (
-                    <Text type="secondary" style={{ fontSize: 12 }}>
-                      没有自检配置
-                    </Text>
-                  )}
-                </div>
-              </div>
+              {configPanel}
 
               <div>
                 <Text strong>拥有用户</Text>
@@ -774,13 +933,18 @@ export function SkillReadinessModal({
                   size="small"
                   style={{ marginTop: 8 }}
                   dataSource={ownerRows}
-                  pagination={{ pageSize: 6, hideOnSinglePage: true }}
+                  pagination={{
+                    pageSize: 5,
+                    showSizeChanger: true,
+                    pageSizeOptions: [5, 10, 20, 50],
+                    showTotal: (total) => `共 ${total} 个用户`,
+                  }}
                   columns={ownerColumns}
                   locale={{ emptyText: "当前没有查询到分配用户" }}
+                  scroll={{ x: 900 }}
                 />
               </div>
 
-              {runSummary}
               {resultsContent}
             </Space>
           ) : (

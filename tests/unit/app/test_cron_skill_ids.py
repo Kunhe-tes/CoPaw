@@ -61,6 +61,17 @@ def test_cron_job_spec_normalizes_skill_ids_string_and_list_values():
     assert list_job.skill_ids == "alpha,beta,gamma"
 
 
+def test_cron_job_spec_accepts_chinese_skill_ids():
+    job = CronJobSpec.model_validate(
+        _job_payload(skill_ids="存款到期客户评分, 授信预警"),
+    )
+    helper = getattr(cron_models, "cron_skill_ids_contains", None)
+
+    assert job.skill_ids == "存款到期客户评分,授信预警"
+    assert helper(job.skill_ids, "存款到期客户评分") is True
+    assert helper(job.skill_ids, "存款") is False
+
+
 def test_cron_job_spec_rejects_invalid_skill_id():
     with pytest.raises(ValidationError, match="skill_ids"):
         CronJobSpec.model_validate(_job_payload(skill_ids="ok,bad/id"))

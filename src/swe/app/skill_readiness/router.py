@@ -3,7 +3,6 @@
 
 from __future__ import annotations
 
-import re
 from typing import Literal
 
 from fastapi import APIRouter, HTTPException, Query, Request
@@ -24,7 +23,7 @@ from .store import SkillReadinessStoreUnavailable
 router = APIRouter(prefix="/skill-readiness", tags=["skill-readiness"])
 
 MANAGER_ROLES = frozenset({"manager", "admin"})
-_SKILL_ID_PATTERN = re.compile(r"^[A-Za-z0-9_.:-]+$")
+_SKILL_ID_SAFE_CHARS = frozenset("_.:-")
 
 
 @router.get(
@@ -163,6 +162,10 @@ def _reject_source_query_override(request: Request) -> None:
 
 def _validate_skill_id(skill_id: str) -> str:
     normalized = skill_id.strip() if isinstance(skill_id, str) else ""
-    if not normalized or not _SKILL_ID_PATTERN.fullmatch(normalized):
+    if not normalized or not all(_is_skill_id_char(ch) for ch in normalized):
         raise HTTPException(status_code=400, detail="Invalid skill_id format")
     return normalized
+
+
+def _is_skill_id_char(value: str) -> bool:
+    return value.isalnum() or value in _SKILL_ID_SAFE_CHARS
