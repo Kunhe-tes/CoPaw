@@ -894,6 +894,167 @@ async def test_runtime_emits_prompt_command_and_http_handlers_concurrently(
 
 
 @pytest.mark.asyncio
+async def test_runtime_injects_conversation_snapshot_per_handler(
+    monkeypatch,
+) -> None:
+    from swe.agents.hook_runtime.runtime import HookRuntime
+
+    seen_payloads: dict[str, dict] = {}
+
+    async def fake_execute_handler(handler, context, *, workspace_dir):
+        del workspace_dir
+        seen_payloads[handler.id] = context.to_handler_payload()
+        return HookHandlerResult(handler_id=handler.id, order=0)
+
+    async def snapshot_provider():
+        return {
+            "messages": [
+                {
+                    "role": "user",
+                    "content": "first",
+                },
+                {
+                    "role": "assistant",
+                    "content": [
+                        {"type": "thinking", "thinking": "hidden"},
+                        {"type": "text", "text": "visible"},
+                        {
+                            "type": "tool_use",
+                            "id": "tool-1",
+                            "name": "read_file",
+                            "input": {"path": "README.md"},
+                        },
+                    ],
+                },
+                {
+                    "role": "system",
+                    "content": [
+                        {
+                            "type": "tool_result",
+                            "id": "tool-1",
+                            "name": "read_file",
+                            "output": "ok",
+                        },
+                    ],
+                },
+            ],
+            "meta": {
+                "reasoning_omitted": True,
+                "media_content_omitted": False,
+            },
+        }
+
+    monkeypatch.setattr(
+        "swe.agents.hook_runtime.runtime.execute_handler",
+        fake_execute_handler,
+    )
+
+    runtime = HookRuntime(
+        tenant_config=HookConfig(
+            enabled=True,
+            events={
+                HookEventName.PRE_TOOL_USE: [
+                    HookMatcherGroupConfig(
+                        hooks=[
+                            CommandHookHandlerConfig(
+                                id="with-snapshot",
+                                command="echo",
+                                includeConversationSnapshot=True,
+                                conversationSnapshotLimit=2,
+                            ),
+                            CommandHookHandlerConfig(
+                                id="without-snapshot",
+                                command="echo",
+                            ),
+                        ],
+                    ),
+                ],
+            },
+        ),
+    )
+
+    await runtime.emit(
+        _context(),
+        workspace_dir=Path("/tmp"),
+        conversation_snapshot_provider=snapshot_provider,
+    )
+
+    assert "conversation_snapshot" not in seen_payloads["without-snapshot"]
+    snapshot_payload = seen_payloads["with-snapshot"]
+    assert [
+        item["role"] for item in snapshot_payload["conversation_snapshot"]
+    ] == [
+        "assistant",
+        "system",
+    ]
+    assert snapshot_payload["conversation_snapshot"][0]["content"] == [
+        {"type": "text", "text": "visible"},
+        {
+            "type": "tool_use",
+            "id": "tool-1",
+            "name": "read_file",
+            "input": {"path": "README.md"},
+        },
+    ]
+    assert snapshot_payload["conversation_snapshot_meta"] == {
+        "included_messages": 2,
+        "omitted_messages": 1,
+        "limit": 2,
+        "reasoning_omitted": True,
+        "media_content_omitted": False,
+    }
+
+
+@pytest.mark.asyncio
+async def test_runtime_marks_conversation_snapshot_unavailable(
+    monkeypatch,
+) -> None:
+    from swe.agents.hook_runtime.runtime import HookRuntime
+
+    seen_payloads: list[dict] = []
+
+    async def fake_execute_handler(handler, context, *, workspace_dir):
+        del handler, workspace_dir
+        seen_payloads.append(context.to_handler_payload())
+        return HookHandlerResult(handler_id="cmd", order=0)
+
+    monkeypatch.setattr(
+        "swe.agents.hook_runtime.runtime.execute_handler",
+        fake_execute_handler,
+    )
+
+    runtime = HookRuntime(
+        tenant_config=HookConfig(
+            enabled=True,
+            events={
+                HookEventName.PRE_TOOL_USE: [
+                    HookMatcherGroupConfig(
+                        hooks=[
+                            CommandHookHandlerConfig(
+                                id="cmd",
+                                command="echo",
+                                includeConversationSnapshot=True,
+                            ),
+                        ],
+                    ),
+                ],
+            },
+        ),
+    )
+
+    await runtime.emit(_context(), workspace_dir=Path("/tmp"))
+
+    assert seen_payloads[0]["conversation_snapshot"] == []
+    assert seen_payloads[0]["conversation_snapshot_meta"] == {
+        "included_messages": 0,
+        "omitted_messages": 0,
+        "limit": 50,
+        "unavailable": True,
+        "unavailable_reason": "agent_memory_unavailable",
+    }
+
+
+@pytest.mark.asyncio
 async def test_runtime_logs_hook_telemetry_for_executed_handlers(
     monkeypatch,
 ) -> None:

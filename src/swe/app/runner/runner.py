@@ -48,6 +48,9 @@ from ...agents.skills_manager import (
     get_workspace_skills_dir,
 )
 from ...agents.hook_runtime import HookRuntime
+from ...agents.hook_runtime.conversation_snapshot import (
+    capture_conversation_snapshot,
+)
 from ...agents.hook_runtime.models import (
     HookConfig,
     HookContext,
@@ -242,6 +245,11 @@ def _get_agent_memory_content(states: dict[str, Any]) -> list[Any] | None:
     if not isinstance(content, list) or not content:
         return None
     return content
+
+
+@dataclass(frozen=True)
+class _PersistedMemorySnapshot:
+    content: list[Any]
 
 
 def _last_tool_guard_denied_index(content: list[Any]) -> int | None:
@@ -645,6 +653,7 @@ async def _emit_runner_hook(
     assistant_response: str | None = None,
     source: str | None = None,
     model: str | None = None,
+    agent: Any | None = None,
 ) -> MergedHookResult:
     agent_hooks = getattr(agent_config, "hooks", None)
     if not isinstance(agent_hooks, HookConfig):
@@ -663,9 +672,65 @@ async def _emit_runner_hook(
         source=source,
         model=model,
     )
+
+    async def _conversation_snapshot_provider():
+        if agent is not None:
+            return await capture_conversation_snapshot(
+                getattr(agent, "memory", None),
+            )
+        return await _capture_persisted_runner_conversation_snapshot(
+            request=request,
+            runner=runner,
+        )
+
     return await runtime.emit(
         context,
         workspace_dir=Path(runner.workspace_dir or WORKING_DIR),
+        conversation_snapshot_provider=_conversation_snapshot_provider,
+    )
+
+
+async def _capture_persisted_runner_conversation_snapshot(
+    *,
+    request: Any,
+    runner: "AgentRunner",
+) -> dict[str, Any] | None:
+    if getattr(request, "skip_history", False):
+        return None
+
+    session = getattr(runner, "session", None)
+    get_session_state_dict = getattr(session, "get_session_state_dict", None)
+    if not callable(get_session_state_dict):
+        return None
+
+    session_id = getattr(request, "session_id", None)
+    if not session_id:
+        return None
+
+    try:
+        state = await get_session_state_dict(
+            session_id=_coerce_session_storage_id(session_id),
+            user_id=_coerce_session_storage_user_id(
+                getattr(request, "user_id", None),
+            ),
+            allow_not_exist=True,
+        )
+    except Exception:
+        logger.debug(
+            "Failed to load persisted memory for hook snapshot",
+            exc_info=True,
+        )
+        return None
+
+    if not isinstance(state, dict):
+        return None
+
+    content = _get_agent_memory_content(state)
+    if content is None:
+        return None
+
+    return await capture_conversation_snapshot(
+        _PersistedMemorySnapshot(content=content),
     )
 
 
@@ -743,7 +808,7 @@ async def _build_and_connect_mcp_clients(
                 trace_id=trace_id,
             )
             if client is not None:
-                await client.connect()
+                await client.connect(timeout=_MCP_CONNECT_TIMEOUT_SECONDS)
                 clients.append(client)
                 logger.info(f"MCP client '{key}' created and connected")
         except asyncio.CancelledError:
@@ -2664,6 +2729,7 @@ class AgentRunner(Runner):
             overlay=runtime.hook_overlay,
             prompt=plan.original_user_message,
             assistant_response=outcome.assistant_response,
+            agent=runtime.agent,
         )
 
     async def _stream_completion_lifecycle(
@@ -2778,6 +2844,7 @@ class AgentRunner(Runner):
             overlay=runtime.hook_overlay,
             prompt=plan.original_user_message,
             assistant_response=outcome.assistant_response,
+            agent=runtime.agent,
         )
         stop_context = _format_hook_additional_context(stop_hook_result)
         if stop_context:
@@ -3688,7 +3755,14 @@ class AgentRunner(Runner):
                     ):
                         yield msg, last
         finally:
-            reset_current_file_url_network(file_url_network_token)
+            try:
+                reset_current_file_url_network(file_url_network_token)
+            except ValueError:
+                logger.debug(
+                    "Skipped file URL network context reset from a different "
+                    "async context",
+                    exc_info=True,
+                )
             cleanup_runtime = attempt_state.runtime
             cleanup_state_loaded = attempt_state.session_state_loaded
             if cleanup_runtime is None and retry_state.prev_agent is not None:

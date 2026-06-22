@@ -100,9 +100,17 @@ _Avoid_: model cache, global provider list, system model config
 The active LLM selection for a tenant, used by agent work when no narrower **Execution Model Slot** is specified.
 _Avoid_: global model, system default model
 
+**Empty Model Output**:
+A model-call outcome where the provider call succeeds but returns no usable assistant content for the runtime to continue or complete agent work. Text, tool-use, structured content, and reasoning content are all usable model content; empty strings, whitespace-only text, empty lists, and missing content are not. **Empty Model Output** is scoped to model-call handling, not to a whole Scheduled Run or chat turn that merely ends with no visible text.
+_Avoid_: output_len=0, blank reply, empty cron output
+
 **Source System Configuration**:
 A source-scoped runtime configuration surface for behavior shared by requests from the same external source. It is not a tenant configuration and does not describe user, organization, or workspace identity.
 _Avoid_: system feature configuration, tenant config, user config
+
+**Runtime Request Identity**:
+The tenant and source context that determines which runtime configuration and model selection a request observes. One **Runtime Request Identity** resolves to one **Tenant Provider Configuration** view for provider and active-model reads.
+_Avoid_: cache key, auth header set, iframe context
 
 **Mandatory Console Channel**:
 The built-in **Console Channel** is a runtime invariant that is always treated as enabled for every agent and tenant, including when no explicit channel entry has been saved yet. Users may configure its other fields, but persisted, imported, or interactive configuration must not disable it.
@@ -131,6 +139,26 @@ _Avoid_: tool result compression configuration
 **Tool Call Status**:
 The user-visible lifecycle state of one user-visible tool invocation during a Main Agent run. A **Tool Call Status** describes an individual tool invocation as running, successful, or failed; failed means the tool itself failed, not that the user stopped or cancelled the overall Main Agent run. The start of a tool invocation carries the running status, and the tool's returned output carries the successful or failed terminal status.
 _Avoid_: tool event status, frontend tool result, trace status
+
+**Tool Output Frame**:
+A live, user-visible presentation update for textual output produced while one tool invocation is still running. A **Tool Output Frame** belongs to exactly one **Tool Call Status** lifecycle, preserves its output source when known, is ordered only within that tool invocation, is not visible to the Main Agent as model context, and is not itself the final tool result remembered by the Main Agent.
+_Avoid_: partial tool result, durable output chunk, tool memory frame, streaming object result
+
+**Live Tool Output Area**:
+The user-visible region inside a tool card where **Tool Output Frames** for that tool invocation are rendered during execution. A **Live Tool Output Area** is part of the tool presentation, not a separate assistant message in the conversation, and the final tool result becomes the card's authoritative output when it arrives.
+_Avoid_: log chat message, separate output bubble, global tool log
+
+**Terminal Tool Result Precedence**:
+The rule that a successful or failed final tool result replaces the **Live Tool Output Area** as the authoritative tool-card output. If a tool is cancelled without a final result, the card may keep the last live output as cancellation context.
+_Avoid_: live output as final result, partial result precedence
+
+**Live Tool Output Guard**:
+The narrow runtime protection applied before **Tool Output Frames** are sent for live presentation. A **Live Tool Output Guard** controls live output eligibility, live display limits, live replay limits, source preservation, and required redaction for real-time frames without replacing the existing final tool-result rules.
+_Avoid_: tool output policy, final result policy, historical compaction policy
+
+**Live Stream Replay**:
+The best-effort restoration of live presentation events for a Main Agent run that is still active when the user reconnects. **Live Stream Replay** may include **Tool Output Frames** from the active run, but it is not historical recovery after the run has ended.
+_Avoid_: chat history replay, durable tool log, completed-run output restore
 
 **Tool Error Summary**:
 A user-visible, bounded explanation attached to a failed **Tool Call Status**. A **Tool Error Summary** is not an audit record, diagnostic log, or full raw tool failure.
@@ -179,6 +207,14 @@ _Avoid_: hook boundary outcome, raw handler payload
 **Hook Payload Preview**:
 A redacted and size-bounded representation of hook-adjacent text or structured data used for diagnosis without retaining the original payload.
 _Avoid_: raw prompt, raw tool input, raw tool output, full updated input
+
+**Current Tool Response**:
+The successful output produced by the current tool invocation for the active `PostToolUse` boundary. A **Current Tool Response** is the tool's business output, not the full persisted `tool_result` block and not a **Hook Conversation Snapshot**.
+_Avoid_: full tool result block, conversation snapshot, AgentScope acting return value
+
+**Hook Conversation Snapshot**:
+A bounded hook-facing snapshot of the current session's message list at one Hook Runtime boundary, including normal user, assistant, tool-call, and tool-result messages while excluding reasoning content. A **Hook Conversation Snapshot** is not the saved transcript file and is not the full Agent state.
+_Avoid_: full context, transcript contents, agent state dump, reasoning trace
 
 **Session Skill Freshness**:
 The cross-turn behavior that determines when a chat session starts using updated skill content. In this context, **Session Skill Freshness** means skill changes take effect on the next turn, not during an in-flight turn.
@@ -356,6 +392,9 @@ Resolved as **Source System Configuration** in this context. The configuration i
 **"Tool Result Compression Switch"**:
 Resolved as controlling **Historical Tool Result Compaction** only. **File Read Truncation** needs an independent switch.
 
+**"PostToolUse tool_response"**:
+Resolved as **Current Tool Response**: the current tool invocation's business output. It must not mean the full persisted `tool_result` block, the AgentScope `_acting()` return value, or data recovered through **Hook Conversation Snapshot**.
+
 **"Immediate Truncation Configuration Placement"**:
 Resolved as sibling configuration under **Source System Configuration**, not nested inside the **Historical Tool Result Compaction** configuration.
 
@@ -364,6 +403,21 @@ Resolved as **Tool Execution Error** for explicit tool-declared failure, with ge
 
 **"Canonical Failed Tool Output Shape"**:
 Resolved as **Structured Tool Failure Result**, using the MCP-style `isError=true` result shape rather than plain-text failure strings.
+
+**"Streaming Tool Output Scope"**:
+Resolved as **Tool Output Frame** support for long-running tools with naturally incremental textual output. Ordinary one-shot tools should not split their final result into artificial frames.
+
+**"Initial Live Tool Output Scope"**:
+Resolved as shell-style terminal tools only. MCP, file-reading, search, browser, and structured business tools do not emit **Tool Output Frames** in the first version.
+
+**"Live Tool Output Limit"**:
+Resolved as a presentation and live-replay protection for the **Live Tool Output Area** only. When the final tool result arrives, the tool card's authoritative output follows the normal final-result rules rather than the live-output limit.
+
+**"Live Tool Output Default Limit"**:
+Resolved as 64KB or 2000 lines for the **Live Tool Output Area**, whichever is reached first. When the limit is exceeded, Swe keeps the most recent live output and shows an explicit omission marker.
+
+**"Tool Output Frame Stream Shape"**:
+Resolved as a dedicated presentation event for **Tool Output Frames**, not a final tool-output message and not a model-visible content delta.
 
 **"Immediate Truncation Defaults"**:
 Resolved as preserving existing runtime behavior when a source has no explicit override. File reads keep their current default limit.
@@ -457,6 +511,21 @@ Resolved as **System Runtime Diagnostic**. The existing lightweight health endpo
 
 **"Health Endpoint"**:
 Resolved as **Liveness Probe** when referring to `/api/health/health`. It is not a readiness check and does not report dependency availability.
+
+**"output_len=0"**:
+Resolved as **Empty Model Output** only when discussing a successful model call that returns no usable assistant content. Scheduled Run or stream-level `output_len=0` remains an execution symptom and must not be treated as the canonical model-call concept.
+
+**"Thinking-Only Model Output"**:
+Resolved as not being **Empty Model Output**. Reasoning content is usable model content even when no user-visible final text is present.
+
+**"Empty Model Output Retry Count"**:
+Resolved as a fixed single retry for each model call. This retry is independent from normal transient-error LLM retry settings and still applies when normal LLM retry is disabled.
+
+**"Streaming Empty Model Output"**:
+Resolved at the whole-stream boundary. An individual empty stream chunk does not trigger an **Empty Model Output** retry; a completed stream that produced no usable model content triggers one full model-call retry.
+
+**"Exhausted Empty Model Output Retry"**:
+Resolved as an explicit model-call failure. If the fixed single retry also returns **Empty Model Output**, Swe raises a diagnostic error instead of treating the call as successfully completed.
 
 **"Flask Worker Usage"**:
 Resolved as **Request Execution Load**. Swe does not run Flask or a multi-worker web-server pool; the diagnostic reports the load and responsiveness of the single-worker Uvicorn/FastAPI backend instead of tenant-level workload statistics or Supervisor process state.
