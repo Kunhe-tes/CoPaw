@@ -385,6 +385,9 @@ export default function UploadSkillModal({
               autoFocus
             />
           </Modal>
+          <p style={{ color: "#8c8c8c", fontSize: 12 }}>
+            提示：技能名称和描述将从 zip 包中的 SKILL.md frontmatter 自动解析
+          </p>
         </>
       )}
     </Modal>
