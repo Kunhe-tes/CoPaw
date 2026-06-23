@@ -1311,6 +1311,26 @@ def _default_builtin_tools() -> Dict[str, BuiltinToolConfig]:
             enabled=True,
             description="Execute shell commands",
         ),
+        "start_background_process": BuiltinToolConfig(
+            name="start_background_process",
+            enabled=True,
+            description="Start a managed background shell process",
+        ),
+        "list_background_processes": BuiltinToolConfig(
+            name="list_background_processes",
+            enabled=True,
+            description="List managed background shell processes",
+        ),
+        "get_process_output": BuiltinToolConfig(
+            name="get_process_output",
+            enabled=True,
+            description="Read managed background process output",
+        ),
+        "stop_background_process": BuiltinToolConfig(
+            name="stop_background_process",
+            enabled=True,
+            description="Stop a managed background shell process",
+        ),
         "read_file": BuiltinToolConfig(
             name="read_file",
             enabled=True,

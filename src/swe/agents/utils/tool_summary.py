@@ -18,6 +18,7 @@ logger = logging.getLogger(__name__)
 
 MODEL_SUMMARY_TIMEOUT_SECONDS = 0.6
 _MODEL_SUMMARY_CACHE_LIMIT = 256
+_SHELL_COMMAND_TOOLS = {"execute_shell_command", "start_background_process"}
 
 TOOL_DISPLAY_NAMES = {
     "read_file": "读取文件",
@@ -172,7 +173,7 @@ def _extract_common_object(arguments: Any) -> str:
 
 def _get_call_object_hint(tool_name: str, arguments: Any) -> str:
     """Return a safe object hint for call-summary prompts."""
-    if tool_name == "execute_shell_command":
+    if tool_name in _SHELL_COMMAND_TOOLS:
         return "无"
     if tool_name == "browser_use":
         return _extract_browser_object(arguments) or "无"
@@ -202,7 +203,12 @@ def _build_call_action_hint(
 ) -> str:
     """Build a concrete user-facing action hint for summaries."""
     display_name = get_tool_display_name(tool_name, server_label)
-    if tool_name == "execute_shell_command":
+    if tool_name in _SHELL_COMMAND_TOOLS:
+        if tool_name != "execute_shell_command":
+            display_name = get_tool_display_name(
+                "execute_shell_command",
+                server_label,
+            )
         return f"开始{display_name}"
 
     obj = _get_call_object_hint(tool_name, arguments)
@@ -238,7 +244,7 @@ def _generate_rule_based_output_summary(
 ) -> str:
     """Generate a rule-based summary for tool output."""
     display_name = get_tool_display_name(tool_name)
-    if tool_name == "execute_shell_command":
+    if tool_name in _SHELL_COMMAND_TOOLS:
         parsed = (
             _parse_json_like(output) if isinstance(output, str) else output
         )
@@ -283,7 +289,7 @@ def _normalize_preview(value: Any, max_length: int = 1200) -> str:
 
 def _redact_for_model(kind: str, tool_name: str, value: Any) -> str:
     """Redact sensitive or overly technical details before prompting."""
-    if tool_name == "execute_shell_command":
+    if tool_name in _SHELL_COMMAND_TOOLS:
         if kind == "call":
             return "执行了一项系统操作，请概括目的，不要透露命令、参数、路径。"
         return "系统操作已返回结果，请概括是否完成，不要透露输出细节。"

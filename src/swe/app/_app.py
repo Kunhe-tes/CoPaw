@@ -570,6 +570,15 @@ async def _shutdown_lifespan_resources(
 ) -> None:
     """按依赖顺序关闭生命周期资源。"""
     try:
+        from ..agents.tools.background_process import (
+            managed_background_process_manager,
+        )
+
+        managed_background_process_manager.stop_all()
+    except Exception as e:
+        logger.warning("Error stopping managed background processes: %s", e)
+
+    try:
         await runtime_diagnostic_manager.stop()
     except Exception as e:
         logger.warning("Error stopping runtime diagnostic manager: %s", e)

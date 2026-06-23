@@ -17,6 +17,21 @@ def test_rule_call_summary_hides_shell_details() -> None:
     assert summary == "开始执行操作"
 
 
+def test_rule_call_summary_hides_background_process_command() -> None:
+    shell_summary = tool_summary.generate_tool_call_summary(
+        tool_name="execute_shell_command",
+        arguments='{"command": "rm -rf /tmp/demo"}',
+    )
+    summary = tool_summary.generate_tool_call_summary(
+        tool_name="start_background_process",
+        arguments='{"command": "rm -rf /tmp/demo"}',
+    )
+
+    assert summary == shell_summary
+    assert "rm -rf" not in summary
+    assert "/tmp/demo" not in summary
+
+
 def test_rule_call_summary_keeps_browser_search_target() -> None:
     summary = tool_summary.generate_tool_call_summary(
         tool_name="browser_use",

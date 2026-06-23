@@ -12,6 +12,8 @@ import signal
 import subprocess
 import sys
 import tempfile
+from contextlib import AbstractContextManager
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Awaitable, Optional
 
@@ -744,6 +746,56 @@ def _prepare_subprocess_env() -> dict[str, str]:
     return env
 
 
+@dataclass(frozen=True)
+class PreparedShellCommand:
+    """Shell 工具共享的已校验启动参数。"""
+
+    command: str
+    working_dir: Path
+    env: dict[str, str]
+    python_runtime_guard: AbstractContextManager[None]
+
+
+def prepare_shell_command(
+    command: str,
+    cwd: Optional[Path | str] = None,
+) -> PreparedShellCommand:
+    """归一化并校验 Shell 命令，生成可执行启动参数。"""
+    cmd = _collapse_embedded_newlines((command or "").strip())
+
+    from .shell_interceptor import intercept_command
+
+    cmd, _was_intercepted = intercept_command(cmd)
+
+    try:
+        working_dir = _resolve_cwd(cwd)
+    except TenantPathBoundaryError as e:
+        _raise_shell_error("permission_denied", f"Error: {e}")
+
+    path_error = _validate_shell_paths(cmd, base_dir=working_dir)
+    if path_error:
+        error_type = (
+            "permission_denied"
+            if "outside the allowed workspace" in path_error
+            else "invalid_arguments"
+        )
+        _raise_shell_error(error_type, path_error)
+
+    env = _prepare_subprocess_env()
+    python_runtime_guard = prepare_python_runtime_path_guard_env(
+        env,
+        tenant_root=get_current_tenant_root(),
+        base_dir=working_dir,
+    )
+
+    return PreparedShellCommand(
+        command=cmd,
+        working_dir=working_dir,
+        env=env,
+        python_runtime_guard=python_runtime_guard,
+    )
+
+
 def _format_shell_response(
     returncode: int,
     stdout_str: str,
@@ -1017,47 +1069,19 @@ async def execute_shell_command(
             return code will be -1 and stderr will contain timeout information.
     """
 
-    cmd = _collapse_embedded_newlines((command or "").strip())
-
-    # Intercept command and inject tenant isolation params if applicable
-    from .shell_interceptor import intercept_command
-
-    cmd, _was_intercepted = intercept_command(cmd)
-
-    # Validate and resolve the working directory against tenant boundary
-    try:
-        working_dir = _resolve_cwd(cwd)
-    except TenantPathBoundaryError as e:
-        _raise_shell_error("permission_denied", f"Error: {e}")
-
-    # Validate explicit path tokens in the command, using working_dir as base for relative paths
-    path_error = _validate_shell_paths(cmd, base_dir=working_dir)
-    if path_error:
-        error_type = (
-            "permission_denied"
-            if "outside the allowed workspace" in path_error
-            else "invalid_arguments"
-        )
-        _raise_shell_error(error_type, path_error)
-
-    env = _prepare_subprocess_env()
-    python_runtime_guard = prepare_python_runtime_path_guard_env(
-        env,
-        tenant_root=get_current_tenant_root(),
-        base_dir=working_dir,
-    )
+    prepared = prepare_shell_command(command, cwd)
 
     try:
-        with python_runtime_guard:
+        with prepared.python_runtime_guard:
             (
                 returncode,
                 stdout_str,
                 stderr_str,
             ) = await _execute_platform_subprocess(
-                cmd,
-                working_dir,
+                prepared.command,
+                prepared.working_dir,
                 timeout,
-                env,
+                prepared.env,
             )
 
         response_text = _format_shell_response(

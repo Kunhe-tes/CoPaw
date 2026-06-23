@@ -45,12 +45,16 @@ from .tool_guard_mixin import ToolGuardMixin
 from .tools import (
     edit_file,
     execute_shell_command,
+    get_process_output,
     get_current_time,
     get_token_usage,
     glob_search,
     grep_search,
+    list_background_processes,
     read_file,
     set_user_timezone,
+    start_background_process,
+    stop_background_process,
     write_file,
     create_memory_search_tool,
     copy_file_to_static,
@@ -281,6 +285,10 @@ class SWEAgent(ToolGuardMixin, ReActAgent):
         # Map of tool functions
         tool_functions = {
             "execute_shell_command": execute_shell_command,
+            "start_background_process": start_background_process,
+            "list_background_processes": list_background_processes,
+            "get_process_output": get_process_output,
+            "stop_background_process": stop_background_process,
             "read_file": read_file,
             "write_file": write_file,
             "edit_file": edit_file,

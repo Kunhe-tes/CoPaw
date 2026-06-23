@@ -10,7 +10,7 @@
 ## See GuardThreatCategory for the full threat taxonomy.
 #
 - id: cron_security
-  tools: [execute_shell_command]
+  tools: [execute_shell_command, start_background_process]
   params: [command]
   category: command_injection
   severity: HIGH

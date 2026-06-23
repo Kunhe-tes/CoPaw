@@ -673,6 +673,30 @@ class TestResolveCwd:
 class TestExecuteShellCommand:
     """Integration tests for execute_shell_command with tenant boundary."""
 
+    def test_prepare_shell_command_reuses_shell_boundary_context(
+        self,
+        mock_working_dir: Path,
+    ):
+        """共享 Shell 准备逻辑应统一解析 cwd 和租户环境。"""
+        from swe.agents.tools.shell import prepare_shell_command
+
+        tenant_dir = mock_working_dir / "test_tenant"
+
+        with tenant_context(
+            tenant_id="test_tenant",
+            user_id="user_a",
+            workspace_dir=tenant_dir,
+        ):
+            prepared = prepare_shell_command(
+                "echo ok",
+                cwd=str(tenant_dir),
+            )
+
+        assert prepared.command == "echo ok"
+        assert prepared.working_dir == tenant_dir.resolve()
+        assert "PATH" in prepared.env
+        assert prepared.python_runtime_guard is not None
+
     @pytest.mark.asyncio
     async def test_accepts_string_cwd_within_tenant(
         self,

@@ -72,3 +72,46 @@ def test_database_rules_block_when_source_switch_enabled(tmp_path):
         )
 
     assert [finding.rule_id for finding in findings] == ["DB_CLI_TOOL"]
+
+
+def test_shell_guard_rules_apply_to_start_background_process():
+    """后台进程启动必须进入 Shell 风险审查。"""
+    guardian = RuleBasedToolGuardian()
+
+    shell_findings = guardian.guard(
+        "execute_shell_command",
+        {"command": "swe cron create --name demo"},
+    )
+    background_findings = guardian.guard(
+        "start_background_process",
+        {"command": "swe cron create --name demo"},
+    )
+
+    assert [finding.rule_id for finding in shell_findings] == ["cron_security"]
+    assert [finding.rule_id for finding in background_findings] == [
+        "cron_security",
+    ]
+
+
+def test_database_guard_rules_apply_to_start_background_process():
+    """后台 Shell 启动必须进入数据库访问审查。"""
+    guardian = RuleBasedToolGuardian()
+
+    mysql_findings = guardian.guard(
+        "start_background_process",
+        {"command": "mysql -uroot"},
+    )
+    sqlite_findings = guardian.guard(
+        "start_background_process",
+        {"command": "sqlite3 app.db 'select 1'"},
+    )
+    python_findings = guardian.guard(
+        "start_background_process",
+        {"command": "python -c \"import pymysql\""},
+    )
+
+    assert [finding.rule_id for finding in mysql_findings] == ["DB_CLI_TOOL"]
+    assert [finding.rule_id for finding in sqlite_findings] == ["DB_CLI_TOOL"]
+    assert [finding.rule_id for finding in python_findings] == [
+        "DB_PYTHON_MODULE_IMPORT",
+    ]
