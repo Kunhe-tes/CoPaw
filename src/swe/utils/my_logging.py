@@ -2,6 +2,7 @@
 """Logging setup for SWE: asynchronous console output."""
 
 import atexit
+import io
 import logging
 import logging.handlers
 import os
@@ -9,6 +10,7 @@ import platform
 import queue
 import sys
 import threading
+from typing import TextIO
 
 _ASYNC_LOG_QUEUE_MAXSIZE = 10000
 _HIGH_PRIORITY_WAIT_SECONDS = 0.05
@@ -249,8 +251,48 @@ class _AsyncQueueLogHandler(logging.Handler):
         self.dispatcher.enqueue(record)
 
 
+class _Utf8StderrStream(io.TextIOBase):
+    """UTF-8 text wrapper that never closes the underlying stderr buffer."""
+
+    encoding = "utf-8"
+    errors = "replace"
+
+    def __init__(self, text_stream: TextIO) -> None:
+        self._text_stream = text_stream
+        self._buffer = getattr(text_stream, "buffer", None)
+
+    def write(self, text: str) -> int:
+        if self._buffer is None:
+            return self._text_stream.write(text)
+        data = text.encode(self.encoding, errors=self.errors)
+        self._buffer.write(data)
+        if getattr(self, "line_buffering", False) and "\n" in text:
+            self.flush()
+        return len(text)
+
+    def flush(self) -> None:
+        if self._buffer is not None:
+            self._buffer.flush()
+            return
+        self._text_stream.flush()
+
+    def isatty(self) -> bool:
+        return bool(
+            hasattr(self._text_stream, "isatty")
+            and self._text_stream.isatty(),
+        )
+
+    @property
+    def line_buffering(self) -> bool:
+        return bool(getattr(self._text_stream, "line_buffering", False))
+
+    def close(self) -> None:
+        self.flush()
+        super().close()
+
+
 def _create_stderr_handler(formatter: logging.Formatter) -> logging.Handler:
-    handler = logging.StreamHandler(sys.stderr)
+    handler = logging.StreamHandler(_Utf8StderrStream(sys.stderr))
     handler.setFormatter(formatter)
     return handler
 

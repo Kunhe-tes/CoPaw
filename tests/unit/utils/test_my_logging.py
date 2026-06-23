@@ -2,6 +2,7 @@
 import io
 import logging
 import queue
+import sys
 
 from swe.utils import my_logging
 from swe.utils.my_logging import ColorFormatter, setup_logger
@@ -127,6 +128,27 @@ def test_shutdown_logger_is_repeatable() -> None:
     my_logging.shutdown_logger()
 
     assert logging.getLogger(my_logging.LOG_NAMESPACE).handlers == []
+
+
+def test_setup_logger_preserves_utf8_output_on_non_utf8_stderr(
+    monkeypatch,
+) -> None:
+    my_logging.shutdown_logger()
+
+    raw_stderr = io.BytesIO()
+    wrapped_stderr = io.TextIOWrapper(
+        raw_stderr,
+        encoding="ascii",
+        errors="strict",
+        write_through=True,
+    )
+    monkeypatch.setattr(sys, "stderr", wrapped_stderr)
+
+    logger = setup_logger("info")
+    logger.info("标题：你好")
+    my_logging.shutdown_logger()
+
+    assert "标题：你好".encode("utf-8") in raw_stderr.getvalue()
 
 
 def test_file_log_handler_api_is_removed() -> None:
