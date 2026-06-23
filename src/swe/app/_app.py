@@ -22,10 +22,9 @@ from ..constant import (
     LOG_LEVEL_ENV,
     CORS_ORIGINS,
     WORKING_DIR,
-    FILE_LOG_ENABLED,
 )
 from ..__version__ import __version__
-from ..utils.my_logging import setup_logger, add_swe_file_handler
+from ..utils.my_logging import setup_logger, shutdown_logger
 from .auth import AuthMiddleware
 from .middleware.tenant_identity import TenantIdentityMiddleware
 from .middleware.tenant_workspace import TenantWorkspaceMiddleware
@@ -315,13 +314,6 @@ async def lifespan(
 ):  # pylint: disable=too-many-statements,too-many-branches
     startup_start_time = time.time()
     _configure_async_thread_pools()
-    if FILE_LOG_ENABLED:
-        add_swe_file_handler(WORKING_DIR / "swe.log")
-    else:
-        logger.info(
-            "File logging disabled via SWE_FILE_LOG_ENABLED=false; "
-            "stdout/stderr logging remains enabled.",
-        )
 
     # Auto-register admin from env vars (for automated deployments)
     from .auth import auto_register_from_env
@@ -642,6 +634,7 @@ async def lifespan(
                 logger.error(f"Error stopping tenant workspaces: {e}")
 
         logger.info("Application shutdown complete")
+        shutdown_logger()
 
 
 app = FastAPI(
