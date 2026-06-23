@@ -174,6 +174,16 @@ class MemoryCompactionHook:
             if running_config.memory_summary.memory_summary_enabled:
                 self.memory_manager.add_async_summary_task(
                     messages=messages_to_compact,
+                    chat_model=agent.model,
+                    formatter=agent.formatter,
+                    scope_id=str(
+                        getattr(agent, "_request_context", {}).get(
+                            "session_id",
+                            "",
+                        )
+                        or "",
+                    )
+                    or None,
                 )
 
             await self._print_status_message(
@@ -185,6 +195,8 @@ class MemoryCompactionHook:
                 compact_content = await self.memory_manager.compact_memory(
                     messages=messages_to_compact,
                     previous_summary=memory.get_compressed_summary(),
+                    _bound_chat_model=agent.model,
+                    _bound_formatter=agent.formatter,
                 )
                 if not compact_content:
                     await self._print_status_message(

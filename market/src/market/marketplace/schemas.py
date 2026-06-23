@@ -11,6 +11,7 @@ class PublishSkillRequest(BaseModel):
     """上架技能请求体."""
 
     name: str
+    chinese_name: str = ""
     description: str = ""
     creator_id: str
     creator_name: str = ""
@@ -38,6 +39,7 @@ class MarketSkillResponse(BaseModel):
 
     item_id: str
     name: str
+    chinese_name: str = ""
     description: str
     version: str
     creator_id: str
@@ -83,6 +85,9 @@ class MySkillItem(BaseModel):
     creator_name: Optional[str] = None
     created_at: Optional[str] = None  # 技能创建/接收时间
     updated_at: Optional[str] = None  # 技能最后更新时间
+    # 新增字段
+    skill_id: str = ""  # 唯一标识符，跨租户共享
+    cn_name: str = Field(default="", max_length=50)  # 中文展示名
 
 
 class BatchOperationRequest(BaseModel):
@@ -155,8 +160,26 @@ class UploadSkillResponse(BaseModel):
     enabled: bool = True
     name: str | None = None
     description: str | None = None
+    skill_id: str | None = None
+    cn_name: str | None = None
     conflicts: list[dict] | None = None
     version_unchanged: bool = False
+
+
+class ParseZipResponse(BaseModel):
+    """解析 zip 文件响应."""
+
+    skill_name: str | None = None
+    cn_name: str | None = None
+    skill_id: str | None = None
+    description: str | None = None
+    exists: bool = False
+    error: str | None = None
+    skill_id_conflict: str | None = None  # 我的技能场景：skill_id 冲突提示
+    skill_id_used_count: int = 0  # 应用市场场景：持有该 skill_id 的用户数量
+    skill_id_used_by: list[str] = Field(
+        default_factory=list,
+    )  # 应用市场场景：用户列表（最多3个）
 
 
 class MCPDistributionRequest(BaseModel):

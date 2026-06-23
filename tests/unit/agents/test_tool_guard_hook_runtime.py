@@ -514,6 +514,81 @@ async def test_post_tool_hook_omits_structured_failure_tool_response(
 
 
 @pytest.mark.asyncio
+async def test_tool_trace_uses_structured_failure_output_from_memory(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    agent = _AgentScopeLikeFakeAgent(tmp_path)
+    agent._request_context.update(
+        {
+            "trace_id": "trace-structured-error",
+            "source_id": "source-structured-error",
+        },
+    )
+    emitted_end_events: list[dict[str, object]] = []
+
+    class FakeTraceManager:
+        async def emit_tool_call_start(self, **kwargs):
+            del kwargs
+            return "span-structured-error"
+
+        async def emit_tool_call_end(
+            self,
+            trace_id,
+            span_id,
+            tool_output,
+            error,
+        ):
+            emitted_end_events.append(
+                {
+                    "trace_id": trace_id,
+                    "span_id": span_id,
+                    "tool_output": tool_output,
+                    "error": error,
+                },
+            )
+
+    monkeypatch.setattr(
+        "swe.agents.tool_guard_mixin.has_trace_manager",
+        lambda: True,
+    )
+    fake_trace_manager = FakeTraceManager()
+    monkeypatch.setattr(
+        "swe.agents.tool_guard_mixin.get_trace_manager",
+        lambda: fake_trace_manager,
+    )
+
+    result = await agent._acting(
+        {
+            "id": "tool-structured-error",
+            "name": "test_http_585_error",
+            "input": {
+                "output": {
+                    "isError": True,
+                    "error_type": "mcp_tool_error",
+                    "content": [
+                        {
+                            "type": "text",
+                            "text": "HTTP error status 585 - MCP server 返回错误",
+                        },
+                    ],
+                },
+            },
+        },
+    )
+
+    assert result is None
+    assert emitted_end_events == [
+        {
+            "trace_id": "trace-structured-error",
+            "span_id": "span-structured-error",
+            "tool_output": None,
+            "error": "HTTP error status 585 - MCP server 返回错误",
+        },
+    ]
+
+
+@pytest.mark.asyncio
 async def test_pre_tool_hook_updated_input_replaces_tool_call(
     tmp_path,
 ) -> None:
