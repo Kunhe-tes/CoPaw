@@ -377,6 +377,48 @@ def _process_skill_upload_single(
     return name, None, name, resolved_cn_name, version_unchanged
 
 
+async def _process_published_skill_record(
+    skill_dir: Path,
+    skill_name: str,
+    imported_name: str,
+    resolved_cn_name: str,
+    svc,
+    source_id: str,
+    x_user_id: str,
+    user_name: str,
+    parsed_name: Optional[str],
+    parsed_description: Optional[str],
+    parsed_cn_name: Optional[str],
+) -> tuple[Optional[str], Optional[str], Optional[str]]:
+    """处理已发布技能的记录逻辑.
+
+    Returns:
+        (parsed_name, parsed_description, parsed_cn_name) 更新后的值
+    """
+    # 记录首次解析的名称和描述
+    if parsed_name is None and imported_name:
+        skill_json, skill_md, _, desc, _ = _parse_skill_metadata(
+            skill_dir,
+            skill_name,
+        )
+        parsed_name = imported_name
+        parsed_description = desc
+
+    # 记录首次解析的中文名
+    if parsed_cn_name is None:
+        parsed_cn_name = resolved_cn_name
+
+    # 异步记录操作日志
+    item = next(
+        (i for i in load_index(svc.marketplace_root, source_id) if i.name == imported_name),
+        None,
+    )
+    if item:
+        await _log_publish_operation(svc, source_id, x_user_id, user_name, item)
+
+    return parsed_name, parsed_description, parsed_cn_name
+
+
 @router.post(
     "/market/skills/publish-upload",
     response_model=UploadSkillResponse,
@@ -460,37 +502,21 @@ async def publish_skill_upload(
 
             if imported_name:
                 imported.append(imported_name)
-
-                # 记录首次解析的名称和描述
-                if parsed_name is None and first_name:
-                    skill_json, skill_md, _, desc, _ = _parse_skill_metadata(
+                parsed_name, parsed_description, parsed_cn_name = (
+                    await _process_published_skill_record(
                         skill_dir,
                         skill_name,
-                    )
-                    parsed_name = first_name
-                    parsed_description = desc
-
-                # 记录首次解析的中文名
-                if parsed_cn_name is None:
-                    parsed_cn_name = resolved_cn_name
-
-                # 异步记录操作日志
-                item = next(
-                    (
-                        i
-                        for i in load_index(svc.marketplace_root, source_id)
-                        if i.name == imported_name
-                    ),
-                    None,
-                )
-                if item:
-                    await _log_publish_operation(
+                        imported_name,
+                        resolved_cn_name,
                         svc,
                         source_id,
                         x_user_id,
                         user_name,
-                        item,
+                        parsed_name,
+                        parsed_description,
+                        parsed_cn_name,
                     )
+                )
     finally:
         if tmp_dir.exists():
             shutil.rmtree(tmp_dir, ignore_errors=True)
