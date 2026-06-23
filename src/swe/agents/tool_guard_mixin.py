@@ -285,7 +285,12 @@ class ToolGuardMixin:
                     return True
         return False
 
-    def _extract_current_tool_response(self, tool_use_id: str) -> Any | None:
+    def _extract_current_tool_response(
+        self,
+        tool_use_id: str,
+        *,
+        include_structured_failure: bool = False,
+    ) -> Any | None:
         """Return the terminal output for the current tool result."""
         if not tool_use_id:
             return None
@@ -314,6 +319,8 @@ class ToolGuardMixin:
                     continue
                 output = block_data.get("output")
                 if self._is_structured_failure_output(output):
+                    if include_structured_failure:
+                        return output
                     return None
                 return output
         return None
@@ -1149,6 +1156,14 @@ class ToolGuardMixin:
             )
             tool_use_id = str(tool_call.get("id") or "")
             tool_response = self._extract_current_tool_response(tool_use_id)
+            trace_tool_output = result
+            if trace_tool_output is None:
+                # post hook 不应把结构化失败当作正常结果继续消费，
+                # 但 tracing 仍需要读取原始失败 payload 来提取 error。
+                trace_tool_output = self._extract_current_tool_response(
+                    tool_use_id,
+                    include_structured_failure=True,
+                )
             post_hook_result = await self._emit_tool_hook(
                 HookEventName.POST_TOOL_USE,
                 tool_name=tool_name,
@@ -1160,7 +1175,7 @@ class ToolGuardMixin:
                 post_hook_result,
                 event_name=HookEventName.POST_TOOL_USE,
             )
-            await self._emit_tool_trace_end(span_id, result)
+            await self._emit_tool_trace_end(span_id, trace_tool_output)
 
             if getattr(self, "_tool_guard_forced_replay_active", False):
                 self._tool_guard_forced_replay_active = False

@@ -715,6 +715,8 @@ class TraceManager:
         input_tokens: Optional[int] = None,
         tool_name: Optional[str] = None,
         skill_name: Optional[str] = None,
+        skill_id: Optional[str] = None,
+        cn_name: Optional[str] = None,
         skill_description: Optional[str] = None,
         tool_input: Optional[dict[str, Any]] = None,
         start_time: Optional[datetime] = None,
@@ -774,6 +776,8 @@ class TraceManager:
             input_tokens=input_tokens,
             tool_name=tool_name,
             skill_name=skill_name,
+            skill_id=skill_id,
+            cn_name=cn_name,
             skill_description=skill_description,
             tool_input=tool_input,
             mcp_server=mcp_server,
@@ -1038,6 +1042,8 @@ class TraceManager:
         ctx = get_current_trace()
         primary_skill: Optional[str] = None
         skill_description: Optional[str] = None
+        skill_id: Optional[str] = None
+        cn_name: Optional[str] = None
 
         if ctx and ctx.trace_id == trace_id:
             try:
@@ -1057,6 +1063,11 @@ class TraceManager:
                         skill_description = detector.get_skill_description(
                             primary_skill,
                         )
+                    # Get skill_id and cn_name from detector cache
+                    if primary_skill and hasattr(detector, "_skill_ids"):
+                        skill_id = detector._skill_ids.get(primary_skill)
+                    if primary_skill and hasattr(detector, "_skill_cn_names"):
+                        cn_name = detector._skill_cn_names.get(primary_skill)
                 else:
                     # Fallback to registry-based attribution
                     from ..agents.skill_tool_registry import (
@@ -1086,6 +1097,8 @@ class TraceManager:
             tool_input=tool_input,
             mcp_server=mcp_server,
             skill_name=primary_skill,
+            skill_id=skill_id,
+            cn_name=cn_name,
             skill_description=skill_description,
             user_name=user_name,
             bbk_id=bbk_id,
@@ -1142,6 +1155,8 @@ class TraceManager:
         skill_input: Optional[dict[str, Any]] = None,
         user_name: Optional[str] = None,
         bbk_id: Optional[str] = None,
+        skill_id: Optional[str] = None,
+        cn_name: Optional[str] = None,
         skill_description: Optional[str] = None,
     ) -> str:
         """Emit skill invocation event.
@@ -1156,6 +1171,8 @@ class TraceManager:
             skill_input: Optional skill input parameters
             user_name: Optional user name
             bbk_id: Optional BBK identifier
+            skill_id: Optional skill unique identifier
+            cn_name: Optional Chinese display name
             skill_description: Optional skill description
 
         Returns:
@@ -1170,6 +1187,8 @@ class TraceManager:
             session_id=session_id,
             channel=channel,
             skill_name=skill_name,
+            skill_id=skill_id,
+            cn_name=cn_name,
             skill_description=skill_description,
             tool_input=skill_input,
             user_name=user_name,
