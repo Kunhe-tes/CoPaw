@@ -1304,11 +1304,14 @@ class MarketplaceService:
         safe_skill_name = normalize_skill_name(item.name)
 
         # 提取 skill_id 和 cn_name
-        skill_id, cn_name = self._extract_skill_id_cn_name_from_market(
+        # cn_name 优先使用 MarketItem 的 chinese_name（数据库存储值）
+        skill_id, cn_name_from_md = self._extract_skill_id_cn_name_from_market(
             source_id,
             item_id,
             safe_skill_name,
         )
+        # cn_name 优先级：MarketItem.chinese_name > SKILL.md 提取值
+        cn_name = item.chinese_name or cn_name_from_md
 
         target_users = await self._resolve_target_users(source_id, req)
         count = 0
