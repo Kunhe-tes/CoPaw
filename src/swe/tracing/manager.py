@@ -114,6 +114,26 @@ def set_current_trace(ctx: Optional[TraceContext]) -> None:
     _current_trace.set(ctx)
 
 
+def capture_current_trace_context() -> Optional[dict[str, Any]]:
+    """捕获当前 trace 的轻量上下文快照。
+
+    返回普通字典而不是 TraceContext 实例，避免调用方把可变上下文对象跨
+    协程长期持有后又读到别的运行态。
+    """
+    ctx = get_current_trace()
+    if ctx is None:
+        return None
+    return {
+        "trace_id": ctx.trace_id,
+        "user_id": ctx.user_id,
+        "session_id": ctx.session_id,
+        "channel": ctx.channel,
+        "source_id": ctx.source_id,
+        "user_name": ctx.user_name,
+        "bbk_id": ctx.bbk_id,
+    }
+
+
 class TraceManager:
     """Manager for trace lifecycle and event collection.
 
