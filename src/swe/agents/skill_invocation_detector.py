@@ -272,11 +272,31 @@ class SkillInvocationDetector:
                             )
                         # Cache skill_id and cn_name
                         skill_id = metadata.get("skill_id", "")
+                        cn_name = metadata.get("cn_name", "")
                         if skill_id:
                             self._skill_ids[skill_name] = str(skill_id)
-                        cn_name = metadata.get("cn_name", "")
+                            logger.debug(
+                                "Cached skill_id for '%s': %s",
+                                skill_name,
+                                skill_id,
+                            )
+                        else:
+                            logger.debug(
+                                "No skill_id in metadata for '%s'",
+                                skill_name,
+                            )
                         if cn_name:
                             self._skill_cn_names[skill_name] = str(cn_name)
+                            logger.debug(
+                                "Cached cn_name for '%s': %s",
+                                skill_name,
+                                cn_name,
+                            )
+                        else:
+                            logger.debug(
+                                "No cn_name in metadata for '%s'",
+                                skill_name,
+                            )
                 except Exception as e:
                     logger.warning("Failed to read skill manifest: %s", e)
 
@@ -765,6 +785,15 @@ class SkillInvocationDetector:
         # Get skill_id and cn_name from cache
         skill_id = self._skill_ids.get(skill_name)
         cn_name = self._skill_cn_names.get(skill_name)
+
+        # Debug log for skill_id and cn_name
+        logger.debug(
+            "start_skill: skill_name=%s, skill_id=%s, cn_name=%s, description=%s",
+            skill_name,
+            skill_id,
+            cn_name,
+            skill_description[:50] if skill_description else None,
+        )
 
         # Emit tracing event first to get span_id
         span_id = None

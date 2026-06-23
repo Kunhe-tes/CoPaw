@@ -120,8 +120,18 @@ class TestExtractSkillId:
         skill_id = extract_skill_id(SAMPLE_MD_WITH_SKILL_ID, "builtin", "xlsx")
         assert skill_id == "xlsx_001"
 
-    def test_auto_generate_when_missing(self):
-        """当 frontmatter 没有 skill_id 时自动生成."""
+    def test_auto_generate_customized_with_creator(self):
+        """用户自建技能：包含 creator_id 区分同租户不同用户."""
+        skill_id = extract_skill_id(
+            SAMPLE_MD_NO_SKILL_ID,
+            "customized",
+            "my_skill",
+            creator_id="alice",
+        )
+        assert skill_id == "customized_alice_my_skill"
+
+    def test_auto_generate_customized_without_creator(self):
+        """用户自建技能：无 creator_id 时使用简化格式."""
         skill_id = extract_skill_id(
             SAMPLE_MD_NO_SKILL_ID,
             "customized",
@@ -135,25 +145,79 @@ class TestExtractSkillId:
         skill_id = extract_skill_id(md_content, "builtin", "pdf")
         assert skill_id == "builtin_pdf"
 
-    def test_marketplace_source_prefix(self):
-        """市场分发技能的 skill_id 前缀."""
+    def test_marketplace_source_uses_item_id(self):
+        """市场分发技能：直接使用 item_id 作为 skill_id."""
         md_content = "---\nname: report\n---\n# 报表生成"
-        skill_id = extract_skill_id(md_content, "marketplace", "report")
-        assert skill_id == "marketplace_report"
+        skill_id = extract_skill_id(
+            md_content,
+            "marketplace:item_12345",
+            "report",
+        )
+        assert skill_id == "item_12345"
 
     def test_empty_content_auto_generate(self):
         """空内容时自动生成 skill_id."""
-        skill_id = extract_skill_id("", "customized", "test_skill")
-        assert skill_id == "customized_test_skill"
+        skill_id = extract_skill_id(
+            "",
+            "customized",
+            "test_skill",
+            creator_id="bob",
+        )
+        assert skill_id == "customized_bob_test_skill"
 
     def test_different_skill_names_different_ids(self):
         """不同技能名生成不同 skill_id."""
         md_content = "---\nname: skill\n---"
-        skill_id_1 = extract_skill_id(md_content, "customized", "skill_a")
-        skill_id_2 = extract_skill_id(md_content, "customized", "skill_b")
+        skill_id_1 = extract_skill_id(
+            md_content,
+            "customized",
+            "skill_a",
+            creator_id="alice",
+        )
+        skill_id_2 = extract_skill_id(
+            md_content,
+            "customized",
+            "skill_b",
+            creator_id="alice",
+        )
         assert skill_id_1 != skill_id_2
-        assert skill_id_1 == "customized_skill_a"
-        assert skill_id_2 == "customized_skill_b"
+        assert skill_id_1 == "customized_alice_skill_a"
+        assert skill_id_2 == "customized_alice_skill_b"
+
+    def test_same_skill_name_different_creators(self):
+        """同一技能名不同创建者生成不同 skill_id."""
+        md_content = "---\nname: skill\n---"
+        skill_id_alice = extract_skill_id(
+            md_content,
+            "customized",
+            "data_analysis",
+            creator_id="alice",
+        )
+        skill_id_bob = extract_skill_id(
+            md_content,
+            "customized",
+            "data_analysis",
+            creator_id="bob",
+        )
+        assert skill_id_alice != skill_id_bob
+        assert skill_id_alice == "customized_alice_data_analysis"
+        assert skill_id_bob == "customized_bob_data_analysis"
+
+    def test_marketplace_distribution_consistent(self):
+        """市场分发技能：所有接收者的 skill_id 一致."""
+        md_content = "---\nname: report\n---"
+        skill_id_1 = extract_skill_id(
+            md_content,
+            "marketplace:item_12345",
+            "report",
+        )
+        skill_id_2 = extract_skill_id(
+            md_content,
+            "marketplace:item_12345",
+            "report",
+        )
+        assert skill_id_1 == skill_id_2
+        assert skill_id_1 == "item_12345"
 
 
 class TestExtractCnNameFromTitle:
@@ -214,13 +278,21 @@ version: "1.0"
 class TestSkillIdCrossTenantSharing:
     """测试 skill_id 跨租户共享特性."""
 
-    def test_same_skill_same_id(self):
-        """相同技能在不同租户共享同一 skill_id."""
+    def test_marketplace_distribution_consistent(self):
+        """市场分发技能：不同租户接收者共享同一 skill_id（item_id）."""
         md_content = "---\nname: report\n---\n# 报表生成"
-        # 不同租户的分发技能使用相同 skill_id
-        skill_id_1 = extract_skill_id(md_content, "marketplace", "report")
-        skill_id_2 = extract_skill_id(md_content, "marketplace", "report")
-        assert skill_id_1 == skill_id_2 == "marketplace_report"
+        # 不同租户的分发技能使用相同 skill_id（基于 item_id）
+        skill_id_1 = extract_skill_id(
+            md_content,
+            "marketplace:item_12345",
+            "report",
+        )
+        skill_id_2 = extract_skill_id(
+            md_content,
+            "marketplace:item_12345",
+            "report",
+        )
+        assert skill_id_1 == skill_id_2 == "item_12345"
 
     def test_metadata_skill_id_tenant_independent(self):
         """metadata 中指定的 skill_id 与租户无关."""
@@ -231,9 +303,29 @@ class TestSkillIdCrossTenantSharing:
         )
         skill_id_2 = extract_skill_id(
             SAMPLE_MD_WITH_SKILL_ID,
-            "marketplace",
+            "marketplace:item_12345",
             "xlsx",
         )
         # 即使 source 不同，metadata 中的 skill_id 优先
         assert skill_id_1 == "xlsx_001"
         assert skill_id_2 == "xlsx_001"
+
+    def test_customized_skills_per_user_unique(self):
+        """用户自建技能：同租户不同用户的同名技能 skill_id 不同."""
+        md_content = "---\nname: analysis\n---\n# 数据分析"
+        skill_id_alice = extract_skill_id(
+            md_content,
+            "customized",
+            "data_analysis",
+            creator_id="alice",
+        )
+        skill_id_bob = extract_skill_id(
+            md_content,
+            "customized",
+            "data_analysis",
+            creator_id="bob",
+        )
+        # 同租户不同用户上传同名技能，skill_id 不同
+        assert skill_id_alice != skill_id_bob
+        assert skill_id_alice == "customized_alice_data_analysis"
+        assert skill_id_bob == "customized_bob_data_analysis"

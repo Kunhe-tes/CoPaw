@@ -1022,6 +1022,8 @@ class TraceManager:
         ctx = get_current_trace()
         primary_skill: Optional[str] = None
         skill_description: Optional[str] = None
+        skill_id: Optional[str] = None
+        cn_name: Optional[str] = None
 
         if ctx and ctx.trace_id == trace_id:
             try:
@@ -1041,6 +1043,11 @@ class TraceManager:
                         skill_description = detector.get_skill_description(
                             primary_skill,
                         )
+                    # Get skill_id and cn_name from detector cache
+                    if primary_skill and hasattr(detector, "_skill_ids"):
+                        skill_id = detector._skill_ids.get(primary_skill)
+                    if primary_skill and hasattr(detector, "_skill_cn_names"):
+                        cn_name = detector._skill_cn_names.get(primary_skill)
                 else:
                     # Fallback to registry-based attribution
                     from ..agents.skill_tool_registry import (
@@ -1070,6 +1077,8 @@ class TraceManager:
             tool_input=tool_input,
             mcp_server=mcp_server,
             skill_name=primary_skill,
+            skill_id=skill_id,
+            cn_name=cn_name,
             skill_description=skill_description,
             user_name=user_name,
             bbk_id=bbk_id,
