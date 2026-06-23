@@ -29,12 +29,19 @@ export default function useChatSessionHandler() {
    * 更新会话名称（仅在第一次消息时）
    */
   const updateSessionName = useCallback(
-    async (query: string, messages: IAgentScopeRuntimeWebUIMessage[]) => {
+    async (
+      query: string,
+      messages: IAgentScopeRuntimeWebUIMessage[],
+      options?: IAgentScopeRuntimeWebUISessionUpdateOptions,
+    ) => {
       if (messages.length === 0) {
-        await updateSession({
-          id: getCurrentSessionId(),
-          name: query,
-        });
+        await updateSession(
+          {
+            id: getCurrentSessionId(),
+            name: query,
+          },
+          options,
+        );
       }
     },
     [getCurrentSessionId, updateSession],
@@ -59,20 +66,19 @@ export default function useChatSessionHandler() {
       messages: IAgentScopeRuntimeWebUIMessage[],
       generating?: boolean,
       options?: IAgentScopeRuntimeWebUISessionUpdateOptions,
-      sessionPatch?: {
-        name?: string;
-      },
     ) => {
       if (!sessionId) {
         return;
       }
 
-      await updateSession({
-        id: sessionId,
-        messages,
-        ...(typeof generating === "boolean" ? { generating } : {}),
-        ...sessionPatch,
-      }, options);
+      await updateSession(
+        {
+          id: sessionId,
+          messages,
+          ...(typeof generating === "boolean" ? { generating } : {}),
+        },
+        options,
+      );
     },
     [updateSession],
   );

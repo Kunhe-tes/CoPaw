@@ -41,6 +41,22 @@ from ..tracing import has_trace_manager, get_trace_manager, get_current_trace
 
 logger = logging.getLogger(__name__)
 
+
+def _current_task_label() -> str:
+    """返回当前 asyncio task 的诊断标识。"""
+    task = asyncio.current_task()
+    if task is None:
+        return "no-task"
+    return f"task-{id(task)}"
+
+
+def _trace_field(trace_ctx: Any, field: str, default: Any = "") -> Any:
+    """安全读取 trace 上下文字段，避免诊断日志反向打断 tracing。"""
+    if trace_ctx is None:
+        return default
+    return getattr(trace_ctx, field, default)
+
+
 _DEFAULT_LOCAL_TOOL_EXECUTION_HARD_TIMEOUT = min(
     QUERY_TIMEOUT_SECONDS,
     max(AGENT_WATCHDOG_TIMEOUT * 2.0, AGENT_WATCHDOG_TIMEOUT + 60.0),
@@ -546,20 +562,31 @@ class ToolGuardMixin:
         if not has_trace_manager():
             return ""
         try:
-            trace_ctx = get_current_trace()
+            trace_ctx = self._resolve_trace_context_for_tracing()
             if trace_ctx:
+                logger.debug(
+                    "Tool trace start: trace_id=%s user_id=%s session_id=%s "
+                    "source_id=%s tool=%s mcp_server=%s task=%s",
+                    _trace_field(trace_ctx, "trace_id", None),
+                    _trace_field(trace_ctx, "user_id", ""),
+                    _trace_field(trace_ctx, "session_id", ""),
+                    _trace_field(trace_ctx, "source_id", ""),
+                    tool_name,
+                    mcp_server,
+                    _current_task_label(),
+                )
                 trace_mgr = get_trace_manager()
                 return await trace_mgr.emit_tool_call_start(
-                    trace_id=trace_ctx.trace_id,
+                    trace_id=_trace_field(trace_ctx, "trace_id", ""),
                     tool_name=tool_name,
                     tool_input=tool_input,
-                    source_id=trace_ctx.source_id,
-                    user_id=trace_ctx.user_id,
-                    session_id=trace_ctx.session_id,
-                    channel=trace_ctx.channel,
+                    source_id=_trace_field(trace_ctx, "source_id", ""),
+                    user_id=_trace_field(trace_ctx, "user_id", ""),
+                    session_id=_trace_field(trace_ctx, "session_id", ""),
+                    channel=_trace_field(trace_ctx, "channel", ""),
                     mcp_server=mcp_server,
-                    user_name=trace_ctx.user_name,
-                    bbk_id=trace_ctx.bbk_id,
+                    user_name=_trace_field(trace_ctx, "user_name", None),
+                    bbk_id=_trace_field(trace_ctx, "bbk_id", None),
                 )
         except Exception as e:
             logger.debug("Failed to emit tool start event: %s", e)
@@ -578,10 +605,19 @@ class ToolGuardMixin:
         if not span_id or not has_trace_manager():
             return
         try:
-            trace_ctx = get_current_trace()
+            trace_ctx = self._resolve_trace_context_for_tracing()
             if not trace_ctx:
                 return
 
+            logger.debug(
+                "Tool trace end: trace_id=%s session_id=%s source_id=%s "
+                "span_id=%s task=%s",
+                _trace_field(trace_ctx, "trace_id", None),
+                _trace_field(trace_ctx, "session_id", ""),
+                _trace_field(trace_ctx, "source_id", ""),
+                span_id,
+                _current_task_label(),
+            )
             trace_mgr = get_trace_manager()
             output_str, mcp_error = self._resolve_tool_output_and_error(
                 tool_output,
@@ -589,13 +625,49 @@ class ToolGuardMixin:
             )
 
             await trace_mgr.emit_tool_call_end(
-                trace_id=trace_ctx.trace_id,
+                trace_id=_trace_field(trace_ctx, "trace_id", ""),
                 span_id=span_id,
                 tool_output=output_str,
                 error=mcp_error,
             )
         except Exception as e:
             logger.debug("Failed to emit tool end event: %s", e)
+
+    def _resolve_trace_context_for_tracing(self) -> Any | None:
+        """优先使用 request_context 绑定的 trace，上下文缺失时回退。"""
+        request_context = getattr(self, "_request_context", {}) or {}
+        bound_trace_id = str(request_context.get("trace_id") or "")
+        if bound_trace_id:
+            current_trace = get_current_trace()
+            if current_trace is not None and getattr(
+                current_trace,
+                "trace_id",
+                None,
+            ) not in {None, bound_trace_id}:
+                logger.warning(
+                    "Tool tracing detected mismatched current trace; "
+                    "using request-bound trace instead. current=%s bound=%s "
+                    "task=%s",
+                    getattr(current_trace, "trace_id", None),
+                    bound_trace_id,
+                    _current_task_label(),
+                )
+            return type(
+                "_RequestTraceContext",
+                (),
+                {
+                    "trace_id": bound_trace_id,
+                    "user_id": str(request_context.get("user_id") or ""),
+                    "session_id": str(
+                        request_context.get("session_id") or "",
+                    ),
+                    "channel": str(request_context.get("channel") or ""),
+                    "source_id": str(request_context.get("source_id") or ""),
+                    "user_name": request_context.get("user_name"),
+                    "bbk_id": request_context.get("bbk_id"),
+                },
+            )()
+        return get_current_trace()
 
     def _resolve_tool_output_and_error(
         self,

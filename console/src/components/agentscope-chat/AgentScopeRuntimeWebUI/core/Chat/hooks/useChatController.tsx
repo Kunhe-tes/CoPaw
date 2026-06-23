@@ -140,10 +140,22 @@ export default function useChatController() {
         return;
       }
 
-      const shouldUpdateSessionName = messageHandler.getMessages().length === 0;
+      const messages = messageHandler.getMessages();
+      if (activeSessionId) {
+        await sessionHandler.updateSessionName(data.query, messages, {
+          refreshList: false,
+        });
+      }
 
       messageHandler.createRequestMessage(data);
+      await sessionHandler.syncSessionMessagesForSession(
+        activeSessionId,
+        messageHandler.getMessages(),
+        true,
+        { refreshList: false },
+      );
       setLoading(true);
+      await sleep(100);
 
       currentQARef.current.abortController = new AbortController();
       messageHandler.createResponseMessage();
@@ -155,10 +167,8 @@ export default function useChatController() {
         activeSessionId,
         messageHandler.getMessages(),
         true,
-        undefined,
-        shouldUpdateSessionName ? { name: data.query } : undefined,
+        { refreshList: false },
       );
-      await sleep(100);
 
       await request(historyMessages, data.biz_params, owner);
     },
@@ -225,7 +235,9 @@ export default function useChatController() {
         await stopActiveRunInBackground();
       },
       submit: async (data) => {
-        if (followUpSessionIdRef.current !== sessionHandler.getCurrentSessionId()) {
+        if (
+          followUpSessionIdRef.current !== sessionHandler.getCurrentSessionId()
+        ) {
           return;
         }
 

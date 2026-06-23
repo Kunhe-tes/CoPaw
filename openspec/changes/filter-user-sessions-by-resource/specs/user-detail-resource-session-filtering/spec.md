@@ -41,6 +41,27 @@ The modal SHALL render the active resource tag with a persistent visual and sema
 - **WHEN** the operator clears the active resource filter
 - **THEN** no resource tag displays the selected state
 
+#### Scenario: Display unselected tags
+- **WHEN** no resource filter is active
+- **THEN** model, MCP tool, and skill tags use the same neutral base tag treatment so skill tags are not visually confused with the selected state
+
+### Requirement: Long resource tag lists are collapsible
+The modal SHALL keep long model, MCP tool, and skill tag groups compact by default and allow operators to expand or collapse each group in place.
+
+#### Scenario: Display a long tag group
+- **WHEN** a resource tag group exceeds the compact display threshold or available preview height
+- **THEN** the modal shows the group in a collapsed wrapped preview with an explicit expand control
+
+#### Scenario: Expand and collapse a long tag group
+- **WHEN** the operator activates the expand control for a collapsed tag group
+- **THEN** the full tag group is shown in place and the control changes to a collapse action
+- **WHEN** the operator activates the collapse control
+- **THEN** the group returns to its compact preview without changing the active resource filter
+
+#### Scenario: Keep the active tag discoverable in a collapsed group
+- **WHEN** a resource tag group is collapsed and the active resource tag belongs to that group
+- **THEN** the active tag remains visible in the collapsed preview
+
 ### Requirement: Resource filtering combines with error filtering
 The modal SHALL combine an active resource filter with the existing error-session filter using AND semantics.
 

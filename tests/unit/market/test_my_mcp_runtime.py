@@ -32,10 +32,8 @@ def test_resolve_effective_tenant_id_keeps_non_default_tenant() -> None:
 
 
 def test_resolve_effective_tenant_id_scopes_default_with_source() -> None:
-    """default tenant 也必须使用统一的 scope 编码。"""
-    assert resolve_effective_tenant_id("default", "SRC_A") == (
-        encode_scope_id("default", "SRC_A")
-    )
+    """default tenant 在 source 场景下应直达 default_{source}。"""
+    assert resolve_effective_tenant_id("default", "SRC_A") == ("default_SRC_A")
 
 
 def test_resolve_effective_tenant_id_rejects_path_traversal() -> None:
@@ -68,8 +66,8 @@ def test_my_mcp_context_requires_source_id(tmp_path) -> None:
 def test_load_and_save_agent_config_under_market_runtime(tmp_path) -> None:
     """market runtime 应能独立读写 tenant 下的 agent.json。"""
     swe_root = tmp_path / ".swe"
-    scope_id = encode_scope_id("default", "SRC_A")
-    workspace_dir = swe_root / scope_id / "workspaces" / "default"
+    effective_tenant_id = "default_SRC_A"
+    workspace_dir = swe_root / effective_tenant_id / "workspaces" / "default"
     workspace_dir.mkdir(parents=True, exist_ok=True)
 
     root_config = AgentsRootConfig(
@@ -83,7 +81,7 @@ def test_load_and_save_agent_config_under_market_runtime(tmp_path) -> None:
             },
         ),
     )
-    save_root_config(swe_root, scope_id, root_config)
+    save_root_config(swe_root, effective_tenant_id, root_config)
 
     agent_config = AgentProfileConfig(
         id="default",
@@ -100,9 +98,18 @@ def test_load_and_save_agent_config_under_market_runtime(tmp_path) -> None:
             },
         ),
     )
-    save_agent_config(swe_root, scope_id, "default", agent_config)
+    save_agent_config(
+        swe_root,
+        effective_tenant_id,
+        "default",
+        agent_config,
+    )
 
-    loaded = load_agent_config(swe_root, scope_id, "default")
+    loaded = load_agent_config(
+        swe_root,
+        effective_tenant_id,
+        "default",
+    )
 
     assert loaded.id == "default"
     assert loaded.name == "Default Agent"
@@ -120,12 +127,12 @@ def test_market_runtime_load_agent_config_requires_existing_agent_json(
 ) -> None:
     """market runtime 不应在读取时隐式回填 agent.json。"""
     swe_root = tmp_path / ".swe"
-    scope_id = encode_scope_id("default", "SRC_A")
-    workspace_dir = swe_root / scope_id / "workspaces" / "default"
+    effective_tenant_id = "default_SRC_A"
+    workspace_dir = swe_root / effective_tenant_id / "workspaces" / "default"
 
     save_root_config(
         swe_root,
-        scope_id,
+        effective_tenant_id,
         AgentsRootConfig(
             agents=RootAgentsSection(
                 active_agent="default",
@@ -140,6 +147,10 @@ def test_market_runtime_load_agent_config_requires_existing_agent_json(
     )
 
     with pytest.raises(FileNotFoundError):
-        load_agent_config(swe_root, scope_id, "default")
+        load_agent_config(
+            swe_root,
+            effective_tenant_id,
+            "default",
+        )
 
     assert not (workspace_dir / "agent.json").exists()

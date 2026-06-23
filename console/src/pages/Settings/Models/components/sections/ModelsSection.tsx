@@ -171,11 +171,9 @@ export function ModelsSection({
         Modal.confirm({
           title: t("models.distributeResultTitle"),
           content: (
-            <div style={{ display: "grid", gap: 8 }}>
+            <div className={styles.modalResultStack}>
               <div>{t("models.distributeSuccessList")}</div>
-              <pre style={{ margin: 0, whiteSpace: "pre-wrap" }}>
-                {lines.join("\n")}
-              </pre>
+              <pre className={styles.modalResultPre}>{lines.join("\n")}</pre>
               {failed.length > 0 ? (
                 <div>{t("models.distributeFailureInlineHint")}</div>
               ) : null}
@@ -196,7 +194,7 @@ export function ModelsSection({
         Modal.confirm({
           title: t("models.distributePartialFailureTitle"),
           content: (
-            <pre style={{ margin: 0, whiteSpace: "pre-wrap" }}>
+            <pre className={styles.modalResultPre}>
               {failureLines.join("\n")}
             </pre>
           ),
@@ -231,6 +229,7 @@ export function ModelsSection({
           <label className={styles.slotLabel}>{t("models.provider")}</label>
           <Select
             style={{ width: "100%" }}
+            popupClassName={styles.managementSelectDropdown}
             placeholder={t("models.selectProvider")}
             value={selectedProviderId}
             onChange={handleProviderChange}
@@ -245,6 +244,7 @@ export function ModelsSection({
           <label className={styles.slotLabel}>{t("models.model")}</label>
           <Select
             style={{ width: "100%" }}
+            popupClassName={styles.managementSelectDropdown}
             placeholder={
               hasModels ? t("models.selectModel") : t("models.addModelFirst")
             }
@@ -260,14 +260,13 @@ export function ModelsSection({
           />
         </div>
 
-        <div
-          className={styles.slotField}
-          style={{ flex: "0 0 auto", minWidth: "120px" }}
-        >
-          <label className={styles.slotLabel} style={{ visibility: "hidden" }}>
+        <div className={`${styles.slotField} ${styles.slotActions}`}>
+          <label
+            className={`${styles.slotLabel} ${styles.visuallyHiddenLabel}`}
+          >
             {t("models.actions")}
           </label>
-          <div style={{ display: "grid", gap: 8 }}>
+          <div className={styles.slotActionButtons}>
             <Button
               type="primary"
               loading={saving}
@@ -289,9 +288,9 @@ export function ModelsSection({
           </div>
         </div>
       </div>
-      <p className={styles.slotDescription}>{t("models.llmDescription")}</p>
 
       <Modal
+        rootClassName="console-management-modal"
         open={distributionOpen}
         title={t("models.distributeTitle")}
         onCancel={closeDistributionModal}
@@ -301,25 +300,15 @@ export function ModelsSection({
           loading: distributionSubmitting,
         }}
       >
-        <div style={{ display: "grid", gap: 12 }}>
-          <div style={{ color: "#666", fontSize: 12 }}>
-            {t("models.distributeHint")}
-          </div>
-          <div style={{ fontWeight: 500 }}>
+        <div className={styles.modalStack}>
+          <div className={styles.modalHint}>{t("models.distributeHint")}</div>
+          <div className={styles.modalCurrentValue}>
             {t("models.distributeCurrentSource", {
               provider: currentProvider?.name || currentSlot?.provider_id || "",
               model: currentSlot?.model || "",
             })}
           </div>
-          <div
-            style={{
-              padding: 12,
-              borderRadius: 8,
-              background: "#fff7e6",
-              border: "1px solid #ffd591",
-              color: "#8c5a00",
-            }}
-          >
+          <div className={styles.warningNotice}>
             {t("models.distributeOverwriteWarning")}
           </div>
           <TenantSelector

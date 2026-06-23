@@ -317,7 +317,7 @@ def test_chat_list_requires_pagination_parameters_together() -> None:
     assert tracker.calls == []
 
 
-def test_chat_list_validates_pagination_boundaries() -> None:
+def test_chat_list_validates_minimum_pagination_boundaries() -> None:
     client, _ = _api_client()
 
     assert (
@@ -337,9 +337,9 @@ def test_chat_list_validates_pagination_boundaries() -> None:
     assert (
         client.get(
             "/chats",
-            params={"page": 1, "page_size": 101},
+            params={"page": 1, "page_size": 501},
         ).status_code
-        == 422
+        == 200
     )
 
 

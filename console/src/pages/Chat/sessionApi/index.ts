@@ -58,7 +58,7 @@ const TASK_SESSION_KIND = "task";
 const TASK_RUN_SECTION_STEP = "step";
 const TASK_RUN_SECTION_FINAL = "final";
 const SESSION_TITLE_GENERATED_META_KEY = "session_title_generated";
-const SESSION_PAGE_SIZE = 50;
+const DEFAULT_SESSION_PAGE_SIZE = 100;
 
 // ---------------------------------------------------------------------------
 // Window globals
@@ -71,6 +71,18 @@ interface CustomWindow extends Window {
 }
 
 declare const window: CustomWindow;
+
+function getSessionPageSize(): number {
+  const configured = window.__env__?.chatSessionPageSize;
+  const pageSize =
+    typeof configured === "number"
+      ? configured
+      : Number.parseInt(String(configured || ""), 10);
+
+  return Number.isInteger(pageSize) && pageSize > 0
+    ? pageSize
+    : DEFAULT_SESSION_PAGE_SIZE;
+}
 
 // ---------------------------------------------------------------------------
 // Local helper types
@@ -142,6 +154,67 @@ interface ExtendedSession extends IAgentScopeRuntimeWebUISession {
   createdAt?: string | null;
   /** Whether the backend is still generating a response for this session. */
   generating?: boolean;
+  skipInitialResolve?: boolean;
+}
+
+interface SessionTitlePatchPayload {
+  chat_id?: unknown;
+  session_id?: unknown;
+  session_title?: unknown;
+}
+
+interface NormalizedSessionTitlePatchPayload {
+  chat_id?: string;
+  session_id?: string;
+  session_title: string;
+}
+
+function getSessionTitlePatchPayload(
+  payload: unknown,
+): NormalizedSessionTitlePatchPayload | undefined {
+  if (!payload || typeof payload !== "object") {
+    return undefined;
+  }
+
+  const titlePatch = payload as SessionTitlePatchPayload;
+  const sessionTitle =
+    typeof titlePatch.session_title === "string"
+      ? titlePatch.session_title.trim()
+      : "";
+  if (!sessionTitle) {
+    return undefined;
+  }
+
+  const sessionId =
+    typeof titlePatch.session_id === "string"
+      ? titlePatch.session_id.trim()
+      : "";
+  const chatId =
+    typeof titlePatch.chat_id === "string" ? titlePatch.chat_id.trim() : "";
+  if (!sessionId && !chatId) {
+    return undefined;
+  }
+
+  return {
+    chat_id: chatId || undefined,
+    session_id: sessionId || undefined,
+    session_title: sessionTitle,
+  };
+}
+
+function sessionMatchesTitlePatch(
+  session: ExtendedSession,
+  payload: NormalizedSessionTitlePatchPayload,
+): boolean {
+  const candidateIds = new Set<string>(
+    [payload.session_id, payload.chat_id].filter((id): id is string =>
+      Boolean(id),
+    ),
+  );
+
+  return [session.id, session.realId, session.sessionId].some(
+    (id) => typeof id === "string" && candidateIds.has(id),
+  );
 }
 
 // ---------------------------------------------------------------------------
@@ -1121,6 +1194,40 @@ export class SessionApi implements IAgentScopeRuntimeWebUISessionAPI {
     } as ExtendedSession;
   }
 
+  patchSessionTitle(payload: unknown): IAgentScopeRuntimeWebUISession[] {
+    const titlePatch = getSessionTitlePatchPayload(payload);
+    if (!titlePatch) {
+      return [...this.sessionList];
+    }
+
+    this.sessionList = this.sessionList.map((session) => {
+      const extendedSession = session as ExtendedSession;
+      if (!sessionMatchesTitlePatch(extendedSession, titlePatch)) {
+        return session;
+      }
+      if (extendedSession.meta?.session_kind === TASK_SESSION_KIND) {
+        return session;
+      }
+
+      const generatedMeta =
+        extendedSession.meta?.[SESSION_TITLE_GENERATED_META_KEY] === true;
+      if (extendedSession.name === titlePatch.session_title && generatedMeta) {
+        return session;
+      }
+
+      return {
+        ...extendedSession,
+        name: titlePatch.session_title,
+        meta: {
+          ...extendedSession.meta,
+          [SESSION_TITLE_GENERATED_META_KEY]: true,
+        },
+      } as ExtendedSession;
+    });
+
+    return [...this.sessionList];
+  }
+
   private getPendingSessions(): ExtendedSession[] {
     return this.sessionList.filter(isPendingLocalSession) as ExtendedSession[];
   }
@@ -1277,7 +1384,7 @@ export class SessionApi implements IAgentScopeRuntimeWebUISessionAPI {
 
         const [chatPage, jobsResult] = await Promise.all([
           api.listChatsPage({
-            page_size: SESSION_PAGE_SIZE,
+            page_size: getSessionPageSize(),
             cursor: null,
           }),
           cronJobApi.listCronJobs().catch(() => null),
@@ -1438,9 +1545,10 @@ export class SessionApi implements IAgentScopeRuntimeWebUISessionAPI {
     }
 
     const nextPage = this.sessionPage + 1;
+    const pageSize = getSessionPageSize();
     const paginationParams = this.nextSessionCursor
-      ? { page_size: SESSION_PAGE_SIZE, cursor: this.nextSessionCursor }
-      : { page: nextPage, page_size: SESSION_PAGE_SIZE };
+      ? { page_size: pageSize, cursor: this.nextSessionCursor }
+      : { page: nextPage, page_size: pageSize };
     this.sessionPageRequest = (async () => {
       try {
         const [chatPage, jobsResult] = await Promise.all([
@@ -1607,6 +1715,11 @@ export class SessionApi implements IAgentScopeRuntimeWebUISessionAPI {
         return this.getResolvedLocalTimestampSession(sessionId, fromList);
       }
 
+      if (fromList?.skipInitialResolve) {
+        fromList.skipInitialResolve = false;
+        return this.getLocalSession(sessionId);
+      }
+
       // The stream may already have created a backend chat while this tab still
       // only knows the local timestamp id. Refresh once so switching back to a
       // running local session can resolve its backend status before reconnecting.
@@ -1754,6 +1867,7 @@ export class SessionApi implements IAgentScopeRuntimeWebUISessionAPI {
       name: session.name || DEFAULT_SESSION_NAME,
       messages: [],
       meta: {},
+      skipInitialResolve: true,
     } as ExtendedSession;
     // ==================== userId 统一整改结束 ====================
 

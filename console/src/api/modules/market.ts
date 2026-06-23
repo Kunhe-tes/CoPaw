@@ -10,6 +10,7 @@ import type { DistributionRecord, RecallResultItem, RecallResponse } from "../ty
 
 export interface MarketSkill {
   item_id: string;
+  skill_id?: string | null;
   name: string;
   skill_name?: string;
   chinese_name?: string;
@@ -55,6 +56,8 @@ export interface PublishSkillRequest {
   skill_name?: string;
   agent_id?: string;
   overwrite?: boolean;
+  // 用户工作区版本号，用于版本快照的 source_user_version
+  source_user_version?: string;
 }
 
 export interface DistributeRequest {
@@ -320,6 +323,7 @@ export const marketApi = {
       skill_name: string;
       suggested_name: string;
     }>;
+    version_unchanged?: boolean;
   }> => {
     const headers = Object.fromEntries(
       (mergeHeaders({
@@ -337,6 +341,7 @@ export const marketApi = {
         skill_name: string;
         suggested_name: string;
       }>;
+      version_unchanged?: boolean;
     }>;
   },
 

@@ -32,7 +32,32 @@
 .titleRow {
   display: flex;
   align-items: center;
+  gap: 8px;
   min-height: 34px;
+}
+
+.backButton {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 34px;
+  height: 34px;
+  padding: 0;
+  color: #2478ff;
+  background: #edf2ff;
+  border: none;
+  border-radius: 8px;
+  cursor: pointer;
+  transition: background 0.2s, color 0.2s;
+
+  &:hover {
+    background: #d6e4ff;
+    color: #1a5cd8;
+  }
+
+  &:active {
+    background: #c2d4ff;
+  }
 }
 
 .header h1 {
@@ -293,7 +318,7 @@
 }
 
 .behaviorPanel .tableScroller {
-  max-height: calc(var(--behavior-header-row-height) * 2 + var(--behavior-body-row-height) * 5);
+  max-height: calc(var(--behavior-header-row-height) + var(--behavior-body-row-height) * 5);
   overflow: auto;
 }
 
@@ -311,6 +336,13 @@
   margin-bottom: 18px;
 }
 
+.sectionHeadingHint {
+  color: #94a3b8;
+  font-size: 13px;
+  font-weight: 400;
+  margin-left: 8px;
+}
+
 .anomalyLeft h2 span {
   color: #52607a;
   font-size: 15px;
@@ -325,7 +357,7 @@
 .behaviorTable,
 .rankTable {
   width: 100%;
-  min-width: 1060px;
+  min-width: 960px;
   border-collapse: collapse;
   table-layout: fixed;
 }
@@ -341,13 +373,15 @@
 
 .behaviorTable th,
 .rankTable th {
-  height: 48px;
+  min-height: 48px;
   padding: 8px 10px;
   color: #31405f;
   background: #f7faff;
   font-size: 14px;
-  line-height: 1.25;
+  line-height: 1.35;
   font-weight: 800;
+  word-break: break-all;
+  overflow: hidden;
 }
 
 .behaviorTable td,
@@ -359,9 +393,18 @@
   font-size: 14px;
   font-weight: 700;
   font-variant-numeric: tabular-nums;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
-.behaviorTable tbody tr:hover td,
+.behaviorTable tbody tr {
+  transition: background 0.15s ease;
+}
+
+.behaviorTable tbody tr:hover td {
+  background: #e6f4ff;
+}
+
 .rankTable tbody tr:hover td {
   background: #fbfdff;
 }
@@ -376,28 +419,127 @@
   font-weight: 800 !important;
 }
 
-.groupRead {
-  color: #2478ff !important;
-  background: #f4f8ff !important;
-}
+.branchNameLink {
+  color: #2563eb !important;
+  font-weight: 800 !important;
 
-.groupDirect {
-  color: #8a4ff5 !important;
-  background: #fbf7ff !important;
-}
+  span {
+    border-bottom: 1px dashed #2563eb;
+  }
 
-.groupBrowse {
-  color: #25a892 !important;
-  background: #f5fffc !important;
-}
-
-.groupPhone {
-  color: #ff6f2c !important;
-  background: #fff8f3 !important;
+  &:hover span {
+    border-bottom-color: #1a5cd8;
+    color: #1a5cd8;
+  }
 }
 
 .mutedRow td {
   color: #7b879d;
+}
+
+.selectedRow td {
+  background: #e6f4ff !important;
+}
+
+.clickableRow {
+  cursor: pointer;
+}
+
+/* Inline drill-down expansion below ranking table */
+.drillDownContainer {
+  display: flex;
+  gap: 16px;
+  margin-top: 20px;
+  margin-bottom: 28px;
+}
+
+.drillDownColumn {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  border: 1px solid #edf1f7;
+  border-radius: 12px;
+  overflow: hidden;
+  background: #ffffff;
+  max-height: 380px;
+}
+
+.drillDownTableScroll {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+
+  :global(.ant-table) {
+    table-layout: fixed;
+  }
+
+  :global(.ant-table-thead) > tr > :global(.ant-table-cell) {
+    text-align: center !important;
+    vertical-align: middle !important;
+    padding: 8px 4px !important;
+    font-size: 13px;
+    font-weight: 700;
+    white-space: normal !important;
+    word-break: break-all;
+    background: #f8fafc;
+    color: #31405f;
+  }
+
+  :global(.ant-table-tbody) > tr > :global(.ant-table-cell) {
+    text-align: center !important;
+    vertical-align: middle !important;
+    white-space: normal !important;
+    word-break: break-all;
+    padding: 6px 4px !important;
+  }
+}
+
+.drillRow {
+  cursor: pointer;
+
+  :global(td) {
+    transition: background 0.15s ease;
+  }
+
+  &:hover :global(td) {
+    background: #e6f4ff !important;
+  }
+}
+
+.drillSelectedRow {
+  :global(td) {
+    background: #e6f4ff !important;
+  }
+}
+
+.drillHoverRow {
+  :global(td) {
+    transition: background 0.15s ease;
+  }
+
+  &:hover :global(td) {
+    background: #e6f4ff !important;
+  }
+}
+
+.drillDownTitle {
+  margin: 0;
+  padding: 12px 16px;
+  color: #26324d;
+  font-size: 15px;
+  font-weight: 800;
+  background: #f8fafc;
+  border-bottom: 1px solid #edf1f7;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.drillDownSubTitle {
+  color: #64748b;
+  font-size: 13px;
+  font-weight: 600;
 }
 
 .anomalySection {

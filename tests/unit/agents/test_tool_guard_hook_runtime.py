@@ -111,6 +111,60 @@ class _AgentScopeLikeFakeAgent(ToolGuardMixin, _AgentScopeLikeBaseAgent):
 
 
 @pytest.mark.asyncio
+async def test_tool_trace_prefers_request_context_over_current_trace(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    agent = _FakeAgent(tmp_path)
+    agent._request_context.update(
+        {
+            "trace_id": "trace-request",
+            "source_id": "source-request",
+        },
+    )
+    emitted_events = []
+
+    class FakeTraceContext:
+        trace_id = "trace-current"
+        user_id = "user-current"
+        session_id = "session-current"
+        channel = "console"
+        source_id = "source-current"
+        user_name = None
+        bbk_id = None
+
+    class FakeTraceManager:
+        async def emit_tool_call_start(self, **kwargs):
+            emitted_events.append(kwargs)
+            return "span-1"
+
+    monkeypatch.setattr(
+        "swe.agents.tool_guard_mixin.has_trace_manager",
+        lambda: True,
+    )
+    monkeypatch.setattr(
+        "swe.agents.tool_guard_mixin.get_current_trace",
+        FakeTraceContext,
+    )
+    monkeypatch.setattr(
+        "swe.agents.tool_guard_mixin.get_trace_manager",
+        FakeTraceManager,
+    )
+
+    span_id = await agent._emit_tool_trace_start(
+        "read_file",
+        {"path": "README.md"},
+        None,
+    )
+
+    assert span_id == "span-1"
+    assert emitted_events[0]["trace_id"] == "trace-request"
+    assert emitted_events[0]["user_id"] == "user-1"
+    assert emitted_events[0]["session_id"] == "session-1"
+    assert emitted_events[0]["source_id"] == "source-request"
+
+
+@pytest.mark.asyncio
 async def test_no_hook_config_preserves_tool_execution(tmp_path) -> None:
     agent = _FakeAgent(tmp_path)
 

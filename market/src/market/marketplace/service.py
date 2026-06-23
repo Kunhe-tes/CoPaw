@@ -10,7 +10,7 @@ import shutil
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Callable, Optional
+from typing import TYPE_CHECKING, Any, Callable, Optional
 from urllib.parse import unquote
 
 import httpx
@@ -62,6 +62,9 @@ from .schemas import (
     SkillUserStat,
 )
 from .version_service import SkillVersionService
+
+if TYPE_CHECKING:
+    from .mcp_version_service import MCPVersionService
 
 logger = logging.getLogger(__name__)
 
@@ -445,6 +448,7 @@ def _copy_skill_files(
                 (skill_dir / "SKILL.md").write_text(
                     req.skill_md,
                     encoding="utf-8",
+                    newline="",
                 )
     else:
         # 未提供 skill_name，只写入 SKILL.md
@@ -452,6 +456,7 @@ def _copy_skill_files(
             (skill_dir / "SKILL.md").write_text(
                 req.skill_md,
                 encoding="utf-8",
+                newline="",
             )
 
 
@@ -861,8 +866,16 @@ class MarketplaceService:
         items = load_index(self.marketplace_root, source_id)
         existing = next((i for i in items if i.name == req.name), None)
 
-        # R4: 同名 → 续接到现有 MarketItem，无论 creator 是否相同
-        # （SkillNameConflictError 已退役，相关 422/409 响应不再产生）
+        # R4: 同名 → 续接到现有 MarketItem，但需先确认覆盖意图
+        # 未显式 overwrite 时抛冲突异常，由前端弹窗让用户确认
+        if existing is not None and not req.overwrite:
+            raise SkillNameConflictError(
+                existing_item_id=existing.item_id,
+                existing_name=existing.name,
+                existing_creator_id=existing.creator_id,
+                existing_creator_name=existing.creator_name,
+                existing_version=existing.version,
+            )
 
         item = _upsert_skill_item(items, existing, req)
 
@@ -883,15 +896,18 @@ class MarketplaceService:
         # 创建版本快照
         # source_user_*：内容来源是 req.creator_*（PublishSkillRequest 显式指定）
         # created_by_*：操作者（admin），未传则与 source_user 相同（向后兼容）
-        skill_md_path = skill_dir / "SKILL.md"
-        source_user_version = ""
-        if skill_md_path.exists():
-            try:
-                source_user_version = _extract_version_md(
-                    skill_md_path.read_text(encoding="utf-8"),
-                )
-            except OSError:
-                pass
+        # source_user_version 优先使用请求中传入的值（前端从 manifest 获取），
+        # 其次从 SKILL.md frontmatter 提取（兼容旧调用方或不传的场景）。
+        source_user_version = req.source_user_version
+        if not source_user_version:
+            skill_md_path = skill_dir / "SKILL.md"
+            if skill_md_path.exists():
+                try:
+                    source_user_version = _extract_version_md(
+                        skill_md_path.read_text(encoding="utf-8"),
+                    )
+                except OSError:
+                    pass
 
         version_svc = SkillVersionService(self.marketplace_root)
         version_unchanged = False
@@ -1990,7 +2006,123 @@ class MarketplaceService:
         target.status = "active"
         target.updated_at = now
 
-    async def publish_mcp(  # pylint: disable=too-many-statements
+    @staticmethod
+    def _resolve_source_user(
+        req: PublishMCPRequest,
+        item: MarketItem,
+    ) -> tuple[str, str, str]:
+        """解析 source_user_* 字段（兼容新旧调用方）。
+
+        语义：
+        - 调用方显式提供 source_user_version → 信任原值
+        - 未提供 → 退化为 creator 兜底
+
+        Returns:
+            (source_user_id, source_user_name, source_user_version)
+        """
+        raw_src_ver = getattr(req, "source_user_version", "")
+        if raw_src_ver:
+            return (
+                getattr(req, "source_user_id", ""),
+                getattr(req, "source_user_name", ""),
+                raw_src_ver,
+            )
+        return (
+            getattr(req, "source_user_id", "") or req.creator_id,
+            getattr(req, "source_user_name", "") or req.creator_name,
+            req.version or item.version,
+        )
+
+    def _resolve_mcp_version_by_signature(
+        self,
+        source_id: str,
+        item: MarketItem,
+        version_svc: "MCPVersionService",
+        mcp_dir: Path,
+    ) -> bool:
+        """F2: 按签名+历史决定 item.version，返回 version_unchanged 标志。
+
+        - 同内容再同步 → 复用历史 version_id（R7 no-op）
+        - 内容变化但 item.version 撞历史 → 自动 bump 避开
+        """
+        manifest = version_svc._load_manifest(source_id, item.item_id)
+        new_sig = version_svc._calculate_signature(mcp_dir)
+        existing_ids = {v.version_id for v in manifest.versions}
+
+        if not manifest.versions:
+            return False
+
+        sorted_versions = sorted(
+            manifest.versions,
+            key=lambda v: v.created_at,
+            reverse=True,
+        )
+        last_version = sorted_versions[0]
+        if last_version.signature == new_sig:
+            # 内容未变 → 复用历史最新版的 version_id（让 R7 no-op 接管）
+            item.version = last_version.version_id
+            return True
+        if item.version in existing_ids:
+            # 内容变了但 item.version 已在历史中 → 在历史最新版上 _bump_patch
+            candidate = _bump_patch(last_version.version_id)
+            for _ in range(100):
+                if candidate not in existing_ids:
+                    break
+                candidate = _bump_patch(candidate)
+            item.version = candidate
+        return False
+
+    def _create_mcp_version_snapshot(
+        self,
+        source_id: str,
+        item: MarketItem,
+        version_svc: "MCPVersionService",
+        mcp_dir: Path,
+        operator_id: str,
+        operator_name: str,
+        source_user_id: str,
+        source_user_name: str,
+        source_user_version: str,
+    ) -> bool:
+        """创建 MCP 版本快照，处理冲突与异常。
+
+        Returns:
+            version_unchanged 标志（快照回滚版本号时为 True）。
+        """
+        try:
+            snapshot = version_svc.create_version_snapshot(
+                source_id=source_id,
+                item_id=item.item_id,
+                mcp_dir=mcp_dir,
+                version_id=item.version,
+                creator=operator_id,
+                creator_name=operator_name,
+                description="",  # F2 修复：留空避免与头部版本号重复展示
+                source_user_id=source_user_id,
+                source_user_name=source_user_name,
+                source_user_version=source_user_version,
+            )
+            if snapshot.version_id and snapshot.version_id != item.version:
+                # 快照回滚版本号 = R7 no-op
+                item.version = snapshot.version_id
+                return True
+        except ValueError as e:
+            logger.warning(
+                "MCP version snapshot conflict for item %s: %s",
+                item.item_id,
+                e,
+            )
+            raise MCPVersionConflictError(str(e)) from e
+        except Exception as e:  # pylint: disable=broad-except
+            logger.error(
+                "Failed to create MCP version snapshot for item %s: %s",
+                item.item_id,
+                e,
+                exc_info=True,
+            )
+        return False
+
+    async def publish_mcp(
         self,
         source_id: str,
         req: PublishMCPRequest,
@@ -2012,9 +2144,19 @@ class MarketplaceService:
             None,
         )
 
+        # 未显式 overwrite 时抛冲突异常，由前端弹窗让用户确认
+        if existing is not None and not req.overwrite:
+            raise MCPNameConflictError(
+                existing_item_id=existing.item_id,
+                existing_name=existing.name,
+                existing_creator_id=existing.creator_id,
+                existing_creator_name=existing.creator_name,
+                existing_version=existing.version,
+            )
+
         now = datetime.now(timezone.utc).isoformat()
         if existing is not None:
-            # 同名 → 续接到现有条目
+            # 同名（已确认覆盖） → 续接到现有条目
             self._apply_publish_update(existing, req, now)
             item = existing
         else:
@@ -2059,89 +2201,35 @@ class MarketplaceService:
 
         mcp_dir = get_mcp_dir(self.marketplace_root, source_id, item.item_id)
         version_svc = MCPVersionService(self.marketplace_root)
-        # source_user_* 语义：
-        # - 调用方显式提供 source_user_version（任何非空值）→ 信任原值，
-        #   即使 source_user_id 为空也保留为空（admin zip 路径）。
-        # - 调用方未提供 source_user_version（默认空字符串，旧 API 调用）→
-        #   退化为 source_user_id = creator_id, source_user_name = creator_name,
-        #   source_user_version = req.version or item.version。
-        raw_src_ver = getattr(req, "source_user_version", "")
-        if raw_src_ver:
-            source_user_id = getattr(req, "source_user_id", "")
-            source_user_name = getattr(req, "source_user_name", "")
-            source_user_version = raw_src_ver
-        else:
-            source_user_id = (
-                getattr(req, "source_user_id", "") or req.creator_id
-            )
-            source_user_name = (
-                getattr(req, "source_user_name", "") or req.creator_name
-            )
-            source_user_version = req.version or item.version
+
+        source_user_id, source_user_name, source_user_version = (
+            self._resolve_source_user(req, item)
+        )
         # operator 未传时回退到 creator（保持 created_by 永远有值，便于 R8 回退）
         operator_id = getattr(req, "operator_id", "") or req.creator_id
         operator_name = getattr(req, "operator_name", "") or req.creator_name
 
-        # F2: 与 SkillVersionService 对称——MCP 版本号也由 signature + 历史决定，
-        # 而不是直接用 item.version（用户本地版本）。这样保证：
-        # - 同内容再同步 → 复用历史 version_id（R7 no-op）
-        # - 内容变化但 item.version 撞历史 → 自动 bump 避开
-        manifest = version_svc._load_manifest(source_id, item.item_id)
-        new_sig = version_svc._calculate_signature(mcp_dir)
-        existing_ids = {v.version_id for v in manifest.versions}
-        version_unchanged = False
+        # F2: 按签名+历史决定版本号
+        version_unchanged = self._resolve_mcp_version_by_signature(
+            source_id,
+            item,
+            version_svc,
+            mcp_dir,
+        )
 
-        if manifest.versions:
-            sorted_versions = sorted(
-                manifest.versions,
-                key=lambda v: v.created_at,
-                reverse=True,
-            )
-            last_version = sorted_versions[0]
-            if last_version.signature == new_sig:
-                # 内容未变 → 复用历史最新版的 version_id（让 R7 no-op 接管）
-                version_unchanged = True
-                item.version = last_version.version_id
-            elif item.version in existing_ids:
-                # 内容变了但 item.version 已在历史中 → 在历史最新版上 _bump_patch
-                candidate = _bump_patch(last_version.version_id)
-                for _ in range(100):
-                    if candidate not in existing_ids:
-                        break
-                    candidate = _bump_patch(candidate)
-                item.version = candidate
-
-        try:
-            snapshot = version_svc.create_version_snapshot(
-                source_id=source_id,
-                item_id=item.item_id,
-                mcp_dir=mcp_dir,
-                version_id=item.version,
-                creator=operator_id,
-                creator_name=operator_name,
-                description="",  # F2 修复：留空避免与头部版本号重复展示
-                source_user_id=source_user_id,
-                source_user_name=source_user_name,
-                source_user_version=source_user_version,
-            )
-            if snapshot.version_id and snapshot.version_id != item.version:
-                # 快照回滚版本号 = R7 no-op
-                version_unchanged = True
-                item.version = snapshot.version_id
-        except ValueError as e:
-            logger.warning(
-                "MCP version snapshot conflict for item %s: %s",
-                item.item_id,
-                e,
-            )
-            raise MCPVersionConflictError(str(e)) from e
-        except Exception as e:  # pylint: disable=broad-except
-            logger.error(
-                "Failed to create MCP version snapshot for item %s: %s",
-                item.item_id,
-                e,
-                exc_info=True,
-            )
+        snapshot_unchanged = self._create_mcp_version_snapshot(
+            source_id,
+            item,
+            version_svc,
+            mcp_dir,
+            operator_id,
+            operator_name,
+            source_user_id,
+            source_user_name,
+            source_user_version,
+        )
+        if snapshot_unchanged:
+            version_unchanged = True
 
         # 更新索引（在快照创建之后，以便 item.version 反映最终值）
         save_index(self.marketplace_root, source_id, items)

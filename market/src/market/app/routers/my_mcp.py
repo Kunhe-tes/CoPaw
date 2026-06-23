@@ -557,6 +557,68 @@ async def create_my_mcp(
     return detail
 
 
+def _check_distributed_mcp_sensitive_fields(
+    existing: MCPClientConfig,
+    update_data: dict,
+) -> None:
+    """校验分发的 MCP 不允许修改敏感字段，违规则抛 403。"""
+    if not _is_distributed_from_market(existing):
+        return
+    for field in SENSITIVE_FIELDS:
+        if field in update_data:
+            raise HTTPException(
+                403,
+                detail=f"Cannot modify '{field}' for distributed MCP",
+            )
+
+
+def _restore_sensitive_dicts(
+    update_data: dict,
+    existing: MCPClientConfig,
+) -> None:
+    """对 env/headers 字段还原被遮蔽的原始值（原地修改 update_data）。"""
+    if "env" in update_data and update_data["env"] is not None:
+        update_data["env"] = restore_original_values(
+            update_data["env"],
+            existing.env or {},
+        )
+    if "headers" in update_data and update_data["headers"] is not None:
+        update_data["headers"] = restore_original_values(
+            update_data["headers"],
+            existing.headers or {},
+        )
+
+
+def _resolve_version(
+    update_data: dict,
+    existing_dump: dict,
+    previous_version: str,
+) -> tuple[str, str]:
+    """R2 版本决策：返回 (final_version, bump_reason)。
+
+    逻辑：
+    - 显式指定 version → 使用它（explicit）
+    - 内容有变化 → 自动 bump patch（auto）
+    - 内容未变 → 保持原版本（unchanged）
+    """
+    explicit_version = update_data.pop("version", None)
+
+    # 计算"内容是否真有变化"——比较除 version/updated_at 外的字段
+    content_changed = False
+    for k, v in update_data.items():
+        if k in ("version", "updated_at"):
+            continue
+        if existing_dump.get(k) != v:
+            content_changed = True
+            break
+
+    if explicit_version:
+        return explicit_version, "explicit"
+    if content_changed:
+        return _bump_patch(previous_version), "auto"
+    return previous_version, "unchanged"
+
+
 @router.put("/{client_key}", response_model=MyMCPDetail)
 async def update_my_mcp(
     request: Request,
@@ -576,53 +638,23 @@ async def update_my_mcp(
     existing = agent_config.mcp.clients[client_key]
     update_data = body.model_dump(exclude_unset=True)
 
-    if _is_distributed_from_market(existing):
-        for field in SENSITIVE_FIELDS:
-            if field in update_data:
-                raise HTTPException(
-                    403,
-                    detail=f"Cannot modify '{field}' for distributed MCP",
-                )
+    _check_distributed_mcp_sensitive_fields(existing, update_data)
 
     merged_data = existing.model_dump(mode="json")
     previous_version = merged_data.get("version") or "1.0.0"
 
-    if "env" in update_data and update_data["env"] is not None:
-        update_data["env"] = restore_original_values(
-            update_data["env"],
-            existing.env or {},
-        )
-    if "headers" in update_data and update_data["headers"] is not None:
-        update_data["headers"] = restore_original_values(
-            update_data["headers"],
-            existing.headers or {},
-        )
+    _restore_sensitive_dicts(update_data, existing)
 
-    # R2 版本决策：先取出显式 version，再合并其他字段
-    explicit_version = update_data.pop("version", None)
-
-    # 计算"内容是否真有变化"——比较除 version/updated_at 外的字段
-    existing_dump = existing.model_dump(mode="json")
-    content_changed = False
-    for k, v in update_data.items():
-        if k in ("version", "updated_at"):
-            continue
-        if existing_dump.get(k) != v:
-            content_changed = True
-            break
+    # R2 版本决策
+    final_version, bump_reason = _resolve_version(
+        update_data,
+        existing.model_dump(mode="json"),
+        previous_version,
+    )
 
     merged_data.update(update_data)
     merged_data["updated_at"] = datetime.now(timezone.utc).isoformat()
-
-    if explicit_version:
-        merged_data["version"] = explicit_version
-        bump_reason = "explicit"
-    elif content_changed:
-        merged_data["version"] = _bump_patch(previous_version)
-        bump_reason = "auto"
-    else:
-        merged_data["version"] = previous_version
-        bump_reason = "unchanged"
+    merged_data["version"] = final_version
 
     updated_client = MCPClientConfig.model_validate(merged_data)
     agent_config.mcp.clients[client_key] = updated_client
@@ -637,7 +669,7 @@ async def update_my_mcp(
 
     detail = _mask_sensitive_values(updated_client)
     detail.client_key = client_key
-    detail.version_changed = merged_data["version"] != previous_version
+    detail.version_changed = final_version != previous_version
     detail.previous_version = previous_version
     detail.bump_reason = bump_reason
     return detail
