@@ -984,6 +984,103 @@ async def parse_skill_zip(
         return ParseZipResponse(error=f"Failed to parse zip: {e}")
 
 
+async def _log_upload_operation(
+    svc,
+    source_id: str,
+    user_id: str,
+    user_name: str,
+    bbk_id: str,
+    imported_skills: list[str],
+) -> None:
+    """记录上传操作日志."""
+    if not svc.db.is_connected or not imported_skills:
+        return
+    try:
+        await svc.db.execute(
+            """
+            INSERT INTO swe_user_item_operation_logs
+                (source_id, user_id, user_name, bbk_id, operation,
+                 item_type, item_name)
+            VALUES (%s, %s, %s, %s, %s, %s, %s)
+            """,
+            (
+                source_id,
+                user_id,
+                user_name,
+                bbk_id,
+                "upload",
+                "skill",
+                ",".join(imported_skills),
+            ),
+        )
+    except Exception as e:
+        logger.warning("Failed to log upload operation: %s", e)
+
+
+async def _check_skill_id_conflict(
+    svc,
+    skill_id: str,
+    skill_name: str,
+    user_id: str,
+) -> None:
+    """检查 skill_id 冲突，冲突时抛出 HTTPException."""
+    if not skill_id or not svc.db.is_connected:
+        return
+
+    existing_row = await svc.db.fetch_one(
+        """
+        SELECT skill_name, cn_name FROM swe_skills
+        WHERE skill_id = %s AND tenant_id = %s
+        """,
+        (skill_id, user_id),
+    )
+    if existing_row:
+        existing_skill_name = existing_row.get("skill_name", "")
+        if existing_skill_name != skill_name:
+            existing_cn_name = existing_row.get("cn_name", "")
+            conflict_display = existing_cn_name or existing_skill_name
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"skill_id '{skill_id}' 已被技能 '{conflict_display}' 占用，"
+                    "请修改 SKILL.md 的 metadata.skill_id"
+                ),
+            )
+
+
+async def _register_uploaded_skill_to_db(
+    svc,
+    skill_name: str,
+    skill_metadata: dict,
+    user_id: str,
+    user_name: str,
+    bbk_id: str,
+    source_id: str,
+    enabled: bool,
+) -> None:
+    """注册技能到数据库."""
+    skill_id = skill_metadata.get("skill_id", "")
+    cn_name_val = skill_metadata.get("cn_name", skill_name)
+    version_text = skill_metadata.get("version", "1.0.0")
+    description = skill_metadata.get("description", "")
+
+    await _check_skill_id_conflict(svc, skill_id, skill_name, user_id)
+
+    await svc.skill_registry.insert_skill(
+        skill_id=skill_id,
+        skill_name=skill_name,
+        cn_name=cn_name_val,
+        tenant_id=user_id,
+        tenant_name=user_name,
+        bbk_id=bbk_id,
+        source="customized",
+        source_id=source_id,
+        enabled=enabled,
+        description=description,
+        version_text=version_text,
+    )
+
+
 @router.post("/market/skills/upload", response_model=UploadSkillResponse)
 async def upload_skill_to_workspace(
     request: Request,
@@ -1047,29 +1144,11 @@ async def upload_skill_to_workspace(
 
     # Log upload operation
     imported_skills = result.get("imported") or []
-    if svc.db.is_connected and imported_skills:
-        try:
-            await svc.db.execute(
-                """
-                INSERT INTO swe_user_item_operation_logs
-                    (source_id, user_id, user_name, bbk_id, operation,
-                     item_type, item_name)
-                VALUES (%s, %s, %s, %s, %s, %s, %s)
-                """,
-                (
-                    source_id,
-                    x_user_id,
-                    user_name,
-                    bbk_id,
-                    "upload",
-                    "skill",
-                    ",".join(imported_skills),
-                ),
-            )
-        except Exception as e:
-            logger.warning("Failed to log upload operation: %s", e)
+    await _log_upload_operation(
+        svc, source_id, x_user_id, user_name, bbk_id, imported_skills
+    )
 
-    # 注册技能到 manifest（使用已构建的 metadata）
+    # 注册技能到 manifest 和数据库
     if result.get("imported"):
         skills_metadata = result.get("skills_metadata") or {}
         for skill_name in result["imported"]:
@@ -1084,51 +1163,16 @@ async def upload_skill_to_workspace(
                 extra_metadata=skill_metadata,
             )
 
-            # 写入 swe_skills 表（技能注册表）
-            if imported_skills:
-                skill_id = skill_metadata.get("skill_id", "")
-                cn_name_val = skill_metadata.get("cn_name", skill_name)
-                version_text = skill_metadata.get("version", "1.0.0")
-                description = skill_metadata.get("description", "")
-
-                # 检查 skill_id 冲突（后端硬阻断）
-                if skill_id and svc.db.is_connected:
-                    existing_row = await svc.db.fetch_one(
-                        """
-                        SELECT skill_name, cn_name FROM swe_skills
-                        WHERE skill_id = %s AND tenant_id = %s
-                        """,
-                        (skill_id, x_user_id),
-                    )
-                    if existing_row:
-                        existing_skill_name = existing_row.get(
-                            "skill_name",
-                            "",
-                        )
-                        # 如果技能名不同，说明是不同技能抢占 skill_id，拒绝写入
-                        if existing_skill_name != skill_name:
-                            existing_cn_name = existing_row.get("cn_name", "")
-                            conflict_display = (
-                                existing_cn_name or existing_skill_name
-                            )
-                            raise HTTPException(
-                                status_code=400,
-                                detail=f"skill_id '{skill_id}' 已被技能 '{conflict_display}' 占用，请修改 SKILL.md 的 metadata.skill_id",
-                            )
-
-                await svc.skill_registry.insert_skill(
-                    skill_id=skill_id,
-                    skill_name=skill_name,
-                    cn_name=cn_name_val,
-                    tenant_id=x_user_id,
-                    tenant_name=user_name,
-                    bbk_id=bbk_id,
-                    source="customized",
-                    source_id=source_id,
-                    enabled=enable,
-                    description=description,
-                    version_text=version_text,
-                )
+            await _register_uploaded_skill_to_db(
+                svc,
+                skill_name,
+                skill_metadata,
+                x_user_id,
+                user_name,
+                bbk_id,
+                source_id,
+                enable,
+            )
 
     # 移除 skills_metadata，不返回给前端
     skills_metadata = result.pop("skills_metadata", None)
