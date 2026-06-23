@@ -263,6 +263,52 @@ async def _reset_scope_sensitive_runtime_state(app: FastAPI) -> None:
     logger.info("Scope-sensitive runtime caches reset")
 
 
+async def _initialize_database_connection():
+    """初始化应用数据库连接，并保留 localhost 模式的轻量启动语义。"""
+    database_config = get_database_config()
+    logger.info(
+        "Database config: host=%s, port=%s, database=%s",
+        database_config.host,
+        database_config.port,
+        database_config.database,
+    )
+
+    if database_config.host == "localhost":
+        logger.info("Database connection is disabled for localhost")
+        return None
+
+    if not database_config.host:
+        return None
+
+    try:
+        from ..database import DatabaseConnection
+
+        db_connection = DatabaseConnection(database_config)
+        await db_connection.connect()
+        if not db_connection.is_connected:
+            raise RuntimeError(
+                "Database connection failed. "
+                "Please check database configuration.",
+            )
+        logger.info(
+            "Database connection established: %s",
+            database_config.host,
+        )
+        return db_connection
+    except Exception as e:
+        import traceback
+
+        logger.error(
+            "Failed to initialize database connection: %s\n%s",
+            e,
+            traceback.format_exc(),
+        )
+        raise RuntimeError(
+            "Database connection is required. "
+            "Please check database configuration.",
+        ) from e
+
+
 @asynccontextmanager
 async def lifespan(
     app: FastAPI,
@@ -321,47 +367,7 @@ async def lifespan(
     # See design.md for lazy-loading architecture.
 
     # --- Initialize database connection (required for tracing and instance modules) ---
-    db_connection = None
-    database_config = get_database_config()
-    logger.info(
-        "Database config: host=%s, port=%s, database=%s",
-        database_config.host,
-        database_config.port,
-        database_config.database,
-    )
-
-    if database_config.host != "localhost":
-        if database_config.host:
-            try:
-                from ..database import DatabaseConnection
-
-                db_connection = DatabaseConnection(database_config)
-                await db_connection.connect()
-                if not db_connection.is_connected:
-                    raise RuntimeError(
-                        "Database connection failed. Please check database configuration.",
-                    )
-                logger.info(
-                    "Database connection established: %s",
-                    database_config.host,
-                )
-            except Exception as e:
-                import traceback
-
-                logger.error(
-                    "Failed to initialize database connection: %s\n%s",
-                    e,
-                    traceback.format_exc(),
-                )
-                raise RuntimeError(
-                    "Database connection is required. Please check database configuration.",
-                ) from e
-        # else:
-        #     raise RuntimeError(
-        #         "Database host is required. Please configure SWE_DB_HOST environment variable.",
-        #     )
-    else:
-        logger.info("Database connection is disabled for localhost")
+    db_connection = await _initialize_database_connection()
 
     # --- Initialize tracing manager ---
     try:
@@ -467,6 +473,45 @@ async def lifespan(
         logger.info("SourceSystemConfig module initialized")
     except Exception as e:
         logger.warning("Failed to initialize source system config: %s", e)
+
+    # --- 初始化技能就绪检查存储 ---
+    try:
+        from .skill_readiness.service import build_skill_readiness_service
+        from .skill_readiness.store import SkillReadinessStore
+
+        skill_readiness_store = SkillReadinessStore(db_connection)
+        app.state.skill_readiness_store = skill_readiness_store
+        app.state.skill_readiness_service = build_skill_readiness_service(
+            skill_readiness_store,
+            multi_agent_manager=multi_agent_manager,
+        )
+        if skill_readiness_store.is_available:
+            await skill_readiness_store.initialize()
+            logger.info("SkillReadiness storage initialized")
+        else:
+            logger.warning(
+                "SkillReadiness storage skipped: database is not connected",
+            )
+    except Exception as e:
+        logger.warning("Failed to initialize skill readiness storage: %s", e)
+
+    # --- 初始化持续治理管理侧数据库读模型 ---
+    try:
+        from .continuous_governance.service import ContinuousGovernanceService
+        from .continuous_governance.store import ContinuousGovernanceStore
+
+        app.state.continuous_governance_service = ContinuousGovernanceService(
+            ContinuousGovernanceStore(db_connection),
+        )
+        multi_agent_manager.set_continuous_governance_service(
+            app.state.continuous_governance_service,
+        )
+        tenant_workspace_pool.set_continuous_governance_service(
+            app.state.continuous_governance_service,
+        )
+        logger.info("ContinuousGovernance module initialized")
+    except Exception as e:
+        logger.warning("Failed to initialize continuous governance: %s", e)
 
     # --- Initialize greeting and featured_case modules ---
     if db_connection is not None:

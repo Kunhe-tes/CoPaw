@@ -248,6 +248,50 @@ _Avoid_: user-visible message, persistent banner, historical chat message, silen
 The point at which a skill becomes part of the session's durable dependency set because the runtime actually activated it, rather than merely suspecting it. Only a **Confirmed Skill Association** can add a skill to the **Session Associated Skill Set**.
 _Avoid_: low-confidence guess, enabled-skill membership, possible skill match
 
+**Market Skill Owner Set**:
+The current set of users who own a market skill within one source, as resolved by market skill owner reverse lookup. A **Market Skill Owner Set** is based on current user skill state and is not a historical distribution audit; readiness workflows resolve this set server-side so the displayed owner list and checked user set share the same source of truth.
+_Avoid_: assigned users, distribution history, skill install log
+
+**Skill Readiness Skill Id**:
+The `skill_id` value used to find readiness configuration and related scheduled jobs for a market skill. A **Skill Readiness Skill Id** normally comes from the market-provided skill id; before that id exists, the market skill's stable `skill_name` may be used as a fallback value while keeping the field name `skill_id`; allowed values use only letters, digits, underscore, hyphen, dot, and colon.
+_Avoid_: skill_key, display name, version, historical distribution id
+
+**Skill Readiness Configuration**:
+A runtime configuration keyed by **Skill Readiness Skill Id** that declares which readiness checks apply to a market skill and what parameters those checks use. A **Skill Readiness Configuration** is stored as runtime configuration, not as a deployment-local YAML file; source identity belongs to readiness execution and result isolation rather than the base configuration key.
+_Avoid_: static checklist, local YAML, global skill rule
+
+**Skill Readiness Run**:
+One asynchronous execution that checks the full **Market Skill Owner Set** for one **Skill Readiness Skill Id** within a specific source. A **Skill Readiness Run** uses `source_id` to resolve the user set, user runtime directories, scheduled jobs, credentials, and result isolation.
+_Avoid_: configuration lookup, frontend scan, historical distribution audit
+
+**Skill Readiness Run Progress**:
+The observable progress counts for a **Skill Readiness Run**. `failed_users` means users whose readiness result is abnormal, not backend task failures.
+_Avoid_: backend failure count, transport error count
+
+**Skill Readiness Run Status**:
+The lifecycle state of a **Skill Readiness Run** as shown to administrators. `partial` means some user results are available while non-fatal lookup or check failures prevented a fully complete run.
+_Avoid_: backend process status, HTTP request status
+
+**Skill Readiness User Result**:
+The readiness outcome for one user inside a **Skill Readiness Run**. A **Skill Readiness User Result** is abnormal when any configured readiness check for that user fails.
+_Avoid_: tenant health, backend task result, owner lookup row
+
+**Skill Readiness Check Status**:
+The normalized outcome of one readiness check. A check is `pass`, `fail`, or `skip`; technical errors are represented as `fail` with an explanatory message and details rather than a separate status.
+_Avoid_: error status, exception category, backend failure class
+
+**Skill Readiness Check Name**:
+The stable strategy name of one readiness check inside configuration and results. New readiness check types extend this name registry and generic result payloads rather than adding per-check database columns or per-check APIs.
+_Avoid_: KPI, metric column, hard-coded result field
+
+**Profile Identity Block**:
+The fixed user identity section appended to `PROFILE.md` through the agent initialization API, containing fields such as branch id, outlet organization id, position id, and customer manager id. A **Profile Identity Block** is distinct from free-form profile memories or general user preference notes.
+_Avoid_: arbitrary profile content, memory note, full user info API payload
+
+**Skill Readiness Job Binding**:
+The relationship between a **Scheduled Job** and one or more **Skill Readiness Skill Id** values. A paused **Scheduled Job** still counts as a binding, while a disabled job does not count as executable for readiness checks; copied or broadcast jobs preserve the binding unless explicitly changed.
+_Avoid_: skill_key binding, skill distribution record, cron tag
+
 **Missing Associated Skill**:
 An associated skill whose previously recorded directory can no longer be resolved at freshness-check time. In this context, a **Missing Associated Skill** does not trigger a refresh or notice by itself, and its snapshot entry is silently removed.
 _Avoid_: failed refresh, implicit invalidation, required user repair
