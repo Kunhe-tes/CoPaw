@@ -100,6 +100,7 @@ class CronJobModel(BaseModel):
     task_session_id: str = Field(default="", description="关联会话ID")
     job_origin: str = Field(default="manual", description="任务来源")
     subscription_key: str = Field(default="", description="订阅任务稳定分组ID")
+    skill_ids: str = Field(default="", description="绑定技能ID，逗号分隔")
     meta: str = Field(default="", description="扩展元数据 (JSON字符串)")
 
     # 状态追踪
@@ -316,6 +317,11 @@ class CronJobSyncRequest(BaseModel):
     task_session_id: str = Field(default="", description="关联会话ID")
     job_origin: str = Field(default="manual", description="任务来源")
     subscription_key: str = Field(default="", description="订阅任务稳定分组ID")
+    skill_ids: str = Field(
+        default="",
+        max_length=200,
+        description="绑定技能ID，逗号分隔",
+    )
     meta: str = Field(default="", description="扩展元数据 (JSON字符串)")
 
     # 状态
@@ -881,6 +887,7 @@ def convert_spec_to_sync_request(
         task_session_id=task_session_id,
         job_origin=job_origin,
         subscription_key=subscription_key,
+        skill_ids=spec_dict.get("skill_ids", ""),
         meta=json.dumps(meta, ensure_ascii=False) if meta else "",
         status=status,
         pause_reason=pause_reason,

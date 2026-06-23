@@ -10,6 +10,7 @@ import type { DistributionRecord, RecallResultItem, RecallResponse } from "../ty
 
 export interface MarketSkill {
   item_id: string;
+  skill_id?: string | null;
   name: string;
   skill_name?: string;
   chinese_name?: string;

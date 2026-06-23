@@ -238,11 +238,9 @@ async def run_daemon_approve(
         pending = await svc.get_pending_by_session(session_id)
         if pending is None:
             return (
-                "**No pending approval**\n\n"
-                "- There is no tool-guard approval waiting for this "
-                "session.\n"
-                "- This command is only valid when a sensitive tool "
-                "call is awaiting your review."
+                "**没有待审批请求**\n\n"
+                "- 当前会话没有等待处理的工具审批。\n"
+                "- 该命令仅在敏感工具调用等待你审核时有效。"
             )
         await svc.resolve_request(
             pending.request_id,

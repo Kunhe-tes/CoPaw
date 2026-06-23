@@ -433,12 +433,12 @@ CHANNEL_CONSUME_TIMEOUT = EnvVarLoader.get_float(
 try:
     TOOL_GUARD_APPROVAL_TIMEOUT_SECONDS = max(
         float(
-            os.environ.get("SWE_TOOL_GUARD_APPROVAL_TIMEOUT_SECONDS", "600"),
+            os.environ.get("SWE_TOOL_GUARD_APPROVAL_TIMEOUT_SECONDS", "7200"),
         ),
         1.0,
     )
 except (TypeError, ValueError):
-    TOOL_GUARD_APPROVAL_TIMEOUT_SECONDS = 600.0
+    TOOL_GUARD_APPROVAL_TIMEOUT_SECONDS = 7200.0
 
 # Marker prepended to every truncation notice.
 # Format:

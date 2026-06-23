@@ -647,8 +647,8 @@ export function SkillDetailDrawer(
                       backgroundColor: "#faf9f5",
                     }}
                   >
-                    <UserOutlined style={{ fontSize: 14 }} />
-                    查看拥有用户
+<UserOutlined style={{ fontSize: 12 }} />
+                    用户可执行性
                   </Button>
                 )}
                 {/* 低频操作：更多下拉 */}
