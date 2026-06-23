@@ -301,6 +301,25 @@ async def test_run_summary_model_reuses_cached_model_within_same_trace(
     assert len(created) == 1
 
 
+def test_reset_summary_caches_disposes_cached_models() -> None:
+    closed = []
+
+    class FakeModel:
+        def close(self) -> None:
+            closed.append("closed")
+
+    tool_summary._summary_models_by_trace = OrderedDict(
+        [(("trace-a", ("tenant-a", "agent-a")), FakeModel())],
+    )
+    tool_summary._model_summary_cache = {"key": "value"}
+
+    tool_summary.reset_summary_caches()
+
+    assert closed == ["closed"]
+    assert tool_summary._summary_models_by_trace == OrderedDict()
+    assert tool_summary._model_summary_cache == {}
+
+
 @pytest.mark.asyncio
 async def test_run_summary_model_reuses_cached_model_without_trace_within_scope(
     monkeypatch,
@@ -431,3 +450,58 @@ async def test_run_summary_model_evicts_oldest_cached_trace(
         "trace-3",
         "trace-1",
     ]
+
+
+@pytest.mark.asyncio
+async def test_run_summary_model_eviction_disposes_oldest_cached_model(
+    monkeypatch,
+) -> None:
+    closed = []
+    trace_ids = iter(
+        [
+            {"trace_id": "trace-1"},
+            {"trace_id": "trace-2"},
+            {"trace_id": "trace-3"},
+        ],
+    )
+
+    class FakeModel:
+        def __init__(self, label: str) -> None:
+            self.label = label
+
+        async def __call__(self, _messages):
+            return "查看资料内容"
+
+        async def aclose(self) -> None:
+            closed.append(self.label)
+
+    def fake_create_model_and_formatter(*, trace_context=None):
+        return FakeModel(trace_context["trace_id"]), object()
+
+    monkeypatch.setattr(
+        tool_summary,
+        "create_model_and_formatter",
+        fake_create_model_and_formatter,
+    )
+    monkeypatch.setattr(
+        tool_summary,
+        "capture_current_trace_context",
+        lambda: next(trace_ids),
+    )
+    monkeypatch.setattr(
+        tool_summary,
+        "_runtime_scope_key",
+        lambda: ("tenant-a", "agent-a"),
+    )
+    monkeypatch.setattr(
+        tool_summary,
+        "_summary_models_by_trace",
+        OrderedDict(),
+    )
+    monkeypatch.setattr(tool_summary, "_SUMMARY_MODEL_CACHE_LIMIT", 2)
+
+    await tool_summary._run_summary_model("读取文件")
+    await tool_summary._run_summary_model("读取文件")
+    await tool_summary._run_summary_model("读取文件")
+
+    assert closed == ["trace-1"]

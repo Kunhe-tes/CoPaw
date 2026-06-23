@@ -102,6 +102,27 @@ async def test_reset_model_clears_cached_models(monkeypatch) -> None:
     assert len(created) == 2
 
 
+def test_reset_model_disposes_cached_models() -> None:
+    closed = []
+
+    class FakeModel:
+        def close(self) -> None:
+            closed.append("closed")
+
+    suggestion_service.SuggestionService._models_by_trace = (
+        suggestion_service.OrderedDict(
+            [(("trace-a", ("tenant-a", "agent-a")), FakeModel())],
+        )
+    )
+
+    suggestion_service.SuggestionService.reset_model()
+
+    assert closed == ["closed"]
+    assert suggestion_service.SuggestionService._models_by_trace == (
+        suggestion_service.OrderedDict()
+    )
+
+
 @pytest.mark.asyncio
 async def test_get_model_reuses_cached_model_without_trace_within_scope(
     monkeypatch,
@@ -219,3 +240,51 @@ async def test_get_model_evicts_oldest_cached_trace(monkeypatch) -> None:
         "trace-3",
         "trace-1",
     ]
+
+
+@pytest.mark.asyncio
+async def test_get_model_eviction_disposes_oldest_cached_model(
+    monkeypatch,
+) -> None:
+    closed = []
+    trace_ids = iter(
+        [
+            {"trace_id": "trace-1"},
+            {"trace_id": "trace-2"},
+            {"trace_id": "trace-3"},
+        ],
+    )
+
+    class FakeModel:
+        def __init__(self, label: str) -> None:
+            self.label = label
+
+        async def aclose(self) -> None:
+            closed.append(self.label)
+
+    def fake_create_model_and_formatter(*, trace_context=None):
+        return FakeModel(trace_context["trace_id"]), object()
+
+    suggestion_service.SuggestionService.reset_model()
+    monkeypatch.setattr(
+        suggestion_service,
+        "create_model_and_formatter",
+        fake_create_model_and_formatter,
+    )
+    monkeypatch.setattr(
+        suggestion_service,
+        "capture_current_trace_context",
+        lambda: next(trace_ids),
+    )
+    monkeypatch.setattr(
+        suggestion_service.SuggestionService,
+        "_runtime_scope_key",
+        lambda: ("tenant-a", "agent-a"),
+    )
+    monkeypatch.setattr(suggestion_service, "_MODEL_CACHE_LIMIT", 2)
+
+    await suggestion_service.SuggestionService.get_model()
+    await suggestion_service.SuggestionService.get_model()
+    await suggestion_service.SuggestionService.get_model()
+
+    assert closed == ["trace-1"]

@@ -12,6 +12,10 @@ from swe.agents.model_factory import create_model_and_formatter
 from swe.tracing import capture_current_trace_context
 from swe.config.context import get_current_effective_tenant_id
 from swe.app.agent_context import get_current_agent_id
+from swe.runtime_cache import (
+    dispose_cached_model,
+    dispose_cached_model_async,
+)
 
 logger = logging.getLogger(__name__)
 _MODEL_CACHE_LIMIT = 32
@@ -134,7 +138,10 @@ class SuggestionService:
                 )
                 cls._models_by_trace[cache_key] = model
                 while len(cls._models_by_trace) > _MODEL_CACHE_LIMIT:
-                    cls._models_by_trace.popitem(last=False)
+                    _, evicted_model = cls._models_by_trace.popitem(
+                        last=False,
+                    )
+                    await dispose_cached_model_async(evicted_model)
             else:
                 cls._models_by_trace.move_to_end(cache_key)
         return model
@@ -142,7 +149,10 @@ class SuggestionService:
     @classmethod
     def reset_model(cls) -> None:
         """清理建议模型缓存，用于配置刷新或测试隔离。"""
+        cached_models = list(cls._models_by_trace.values())
         cls._models_by_trace.clear()
+        for model in cached_models:
+            dispose_cached_model(model)
 
 
 def _extract_text_from_response(response) -> str:

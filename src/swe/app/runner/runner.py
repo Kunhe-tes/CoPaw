@@ -3575,6 +3575,10 @@ class AgentRunner(Runner):
             preflight=attempt_input.preflight,
         )
         if attempt_state.runtime_start.block_response is not None:
+            await self._end_trace_if_needed(
+                attempt_input.trace_id,
+                TraceStatus.COMPLETED,
+            )
             yield attempt_state.runtime_start.block_response, True
             attempt_state.should_return = True
             return

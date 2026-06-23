@@ -17,6 +17,7 @@ from ...agents.model_factory import create_model_and_formatter
 from ...tracing import capture_current_trace_context
 from ...config.context import get_current_effective_tenant_id
 from ...app.agent_context import get_current_agent_id
+from ...runtime_cache import dispose_cached_model, dispose_cached_model_async
 
 logger = logging.getLogger(__name__)
 
@@ -62,6 +63,15 @@ def _summary_trace_cache_key(
     """按 trace 和运行时作用域生成摘要模型缓存键。"""
     trace_id = str((trace_context or {}).get("trace_id") or "").strip()
     return (trace_id or "__no_trace__"), _runtime_scope_key()
+
+
+def reset_summary_caches() -> None:
+    """清理摘要生成相关缓存。"""
+    cached_models = list(_summary_models_by_trace.values())
+    _summary_models_by_trace.clear()
+    _model_summary_cache.clear()
+    for model in cached_models:
+        dispose_cached_model(model)
 
 
 def get_tool_display_name(
@@ -400,7 +410,10 @@ async def _get_summary_model():
             )
             _summary_models_by_trace[cache_key] = model
             while len(_summary_models_by_trace) > _SUMMARY_MODEL_CACHE_LIMIT:
-                _summary_models_by_trace.popitem(last=False)
+                _, evicted_model = _summary_models_by_trace.popitem(
+                    last=False,
+                )
+                await dispose_cached_model_async(evicted_model)
         else:
             _summary_models_by_trace.move_to_end(cache_key)
     return model
