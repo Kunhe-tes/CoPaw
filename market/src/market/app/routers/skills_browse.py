@@ -790,7 +790,11 @@ async def _check_skill_name_exists_market(
     """应用市场场景：检查市场索引中是否有同名技能."""
     items = load_index(svc.marketplace_root, source_id)
     existing = next(
-        (i for i in items if i.name == safe_skill_name and i.item_type == "skill"),
+        (
+            i
+            for i in items
+            if i.name == safe_skill_name and i.item_type == "skill"
+        ),
         None,
     )
     return existing is not None
@@ -841,7 +845,9 @@ async def _check_skill_id_conflict_market(
             """,
             (skill_id, safe_skill_name),
         )
-        used_count = count_row.get("cnt", len(rows)) if count_row else len(rows)
+        used_count = (
+            count_row.get("cnt", len(rows)) if count_row else len(rows)
+        )
 
         used_by: list[str] = []
         for r in rows[:3]:
@@ -947,63 +953,29 @@ async def parse_skill_zip(
             except OSError:
                 pass
 
-        # 提取 cn_name（优先 metadata.cn_name，其次一级标题）
-        cn_name = ""
-        fm = parse_frontmatter(md_content) if md_content else {}
-        metadata = fm.get("metadata", {})
-        if isinstance(metadata, dict):
-            cn_name = metadata.get("cn_name", "")
-        if not cn_name:
-            cn_name = extract_cn_name_from_title(md_content)
-        if not cn_name:
-            cn_name = skill_name
-
-        # 提取 skill_id
-        # 应用市场场景：不绑定特定用户，使用 market source 或 metadata.skill_id
-        if market_mode:
-            # 市场场景：优先 metadata.skill_id，其次留空（分发时自动生成 item_id）
-            skill_id = ""
-            if isinstance(metadata, dict):
-                skill_id = metadata.get("skill_id", "") or ""
-            # 注意：市场场景下若无 metadata.skill_id，则不生成 skill_id
-            # 分发时会自动使用 item_id 作为 skill_id
-        else:
-            # 我的技能场景：source 使用 "customized"，creator_id 使用 x_user_id
-            # 此时 x_user_id 已在前面校验过，必然存在
-            assert x_user_id is not None
-            skill_id = extract_skill_id(
-                md_content,
-                "customized",
-                skill_name,
-                creator_id=x_user_id,
-            )
-
-        # 提取 description
-        description = fm.get("description", "") or ""
+        # 提取预览元数据：cn_name、skill_id、description
+        cn_name, skill_id, description = _extract_skill_preview_metadata(
+            skill_dir,
+            skill_name,
+            md_content,
+            market_mode,
+            x_user_id,
+        )
 
         # 判重校验：使用 normalize_skill_name 获取实际目录名，检查是否已存在
         safe_skill_name = normalize_skill_name(skill_name)
-        exists = False
-        if market_mode:
-            exists = await _check_skill_name_exists_market(svc, source_id, safe_skill_name)
-        elif x_user_id:
-            exists = _check_skill_name_exists_user(
-                swe_root, x_user_id, agent_id, source_id, safe_skill_name
+        exists, skill_id_conflict, skill_id_used_count, skill_id_used_by = (
+            await _check_skill_duplicates_and_conflicts(
+                svc,
+                market_mode,
+                source_id,
+                x_user_id,
+                swe_root,
+                agent_id,
+                safe_skill_name,
+                skill_id,
             )
-
-        # 检查 skill_id 是否已存在于数据库
-        skill_id_conflict = None
-        skill_id_used_count = 0
-        skill_id_used_by: list[str] = []
-
-        if market_mode:
-            skill_id_used_count, skill_id_used_by = await _check_skill_id_conflict_market(
-                svc, skill_id, safe_skill_name
-            )
-        elif x_user_id:
-            skill_id_conflict = await _check_skill_id_conflict_user(
-                svc, skill_id, safe_skill_name, x_user_id
-            )
+        )
 
         # 清理临时目录
         if tmp_dir and tmp_dir.exists():
@@ -1025,6 +997,120 @@ async def parse_skill_zip(
     except Exception as e:
         logger.warning("Failed to parse zip: %s", e)
         return ParseZipResponse(error=f"Failed to parse zip: {e}")
+
+
+def _extract_skill_preview_metadata(
+    skill_dir: Path,
+    skill_name: str,
+    md_content: str,
+    market_mode: bool,
+    x_user_id: Optional[str],
+) -> tuple[str, str, str]:
+    """从 SKILL.md 提取预览元数据.
+
+    Args:
+        skill_dir: 技能目录
+        skill_name: 技能名称
+        md_content: SKILL.md 内容
+        market_mode: 是否市场模式
+        x_user_id: 用户 ID（非市场模式必填）
+
+    Returns:
+        (cn_name, skill_id, description)
+    """
+    # 提取 cn_name
+    cn_name = ""
+    fm = parse_frontmatter(md_content) if md_content else {}
+    metadata = fm.get("metadata", {})
+    if isinstance(metadata, dict):
+        cn_name = metadata.get("cn_name", "")
+    if not cn_name:
+        cn_name = extract_cn_name_from_title(md_content)
+    if not cn_name:
+        cn_name = skill_name
+
+    # 提取 skill_id
+    if market_mode:
+        # 市场场景：优先 metadata.skill_id，其次留空
+        skill_id = ""
+        if isinstance(metadata, dict):
+            skill_id = metadata.get("skill_id", "") or ""
+    else:
+        # 我的技能场景：source 使用 "customized"
+        assert x_user_id is not None
+        skill_id = extract_skill_id(
+            md_content,
+            "customized",
+            skill_name,
+            creator_id=x_user_id,
+        )
+
+    # 提取 description
+    description = fm.get("description", "") or ""
+
+    return cn_name, skill_id, description
+
+
+async def _check_skill_duplicates_and_conflicts(
+    svc,
+    market_mode: bool,
+    source_id: str,
+    x_user_id: Optional[str],
+    swe_root: Path,
+    agent_id: str,
+    safe_skill_name: str,
+    skill_id: str,
+) -> tuple[bool, Optional[str], int, list[str]]:
+    """检查技能判重和 skill_id 冲突.
+
+    Args:
+        svc: Marketplace 服务
+        market_mode: 是否市场模式
+        source_id: 租户 ID
+        x_user_id: 用户 ID
+        swe_root: SWE 根目录
+        agent_id: Agent ID
+        safe_skill_name: 安全技能名
+        skill_id: 技能 ID
+
+    Returns:
+        (exists, skill_id_conflict, skill_id_used_count, skill_id_used_by)
+        skill_id_conflict 为 Optional[str]，表示冲突信息字符串
+    """
+    exists = False
+    skill_id_conflict = None
+    skill_id_used_count = 0
+    skill_id_used_by: list[str] = []
+
+    if market_mode:
+        exists = await _check_skill_name_exists_market(
+            svc,
+            source_id,
+            safe_skill_name,
+        )
+        skill_id_used_count, skill_id_used_by = (
+            await _check_skill_id_conflict_market(
+                svc,
+                skill_id,
+                safe_skill_name,
+            )
+        )
+    elif x_user_id:
+        exists = _check_skill_name_exists_user(
+            swe_root,
+            x_user_id,
+            agent_id,
+            source_id,
+            safe_skill_name,
+        )
+        skill_id_conflict = await _check_skill_id_conflict_user(
+            svc,
+            skill_id,
+            safe_skill_name,
+            x_user_id,
+        )
+
+    return exists, skill_id_conflict, skill_id_used_count, skill_id_used_by
 
 
 async def _log_upload_operation(
@@ -1188,7 +1274,12 @@ async def upload_skill_to_workspace(
     # Log upload operation
     imported_skills = result.get("imported") or []
     await _log_upload_operation(
-        svc, source_id, x_user_id, user_name, bbk_id, imported_skills
+        svc,
+        source_id,
+        x_user_id,
+        user_name,
+        bbk_id,
+        imported_skills,
     )
 
     # 注册技能到 manifest 和数据库

@@ -1507,6 +1507,38 @@ class MarketplaceService:
         )
         return created_at, updated_at
 
+    def _extract_cn_name_from_frontmatter(self, md_content: str) -> str:
+        """从 SKILL.md frontmatter 提取 cn_name.
+
+        优先级：
+        1. 顶层 cn_name
+        2. metadata.cn_name
+
+        Args:
+            md_content: SKILL.md 文件内容
+
+        Returns:
+            cn_name 或空字符串
+        """
+        if not md_content:
+            return ""
+
+        fm = parse_frontmatter(md_content)
+
+        # 优先级 1: 顶层 cn_name
+        cn_name = fm.get("cn_name")
+        if cn_name and isinstance(cn_name, str):
+            return cn_name
+
+        # 优先级 2: metadata.cn_name
+        metadata_dict = fm.get("metadata", {})
+        if isinstance(metadata_dict, dict):
+            cn_name = metadata_dict.get("cn_name")
+            if cn_name and isinstance(cn_name, str):
+                return cn_name
+
+        return ""
+
     def _resolve_skill_id_cn_name(
         self,
         skill_dir: Path,
@@ -1571,21 +1603,12 @@ class MarketplaceService:
         if manifest_cn_name and isinstance(manifest_cn_name, str):
             cn_name = manifest_cn_name
 
-        # 优先级 2: frontmatter metadata.cn_name 或顶层 chinese_name
-        if not cn_name and md_content:
-            fm = parse_frontmatter(md_content)
-            metadata_cn_name = fm.get("cn_name")
-            if metadata_cn_name and isinstance(metadata_cn_name, str):
-                cn_name = metadata_cn_name
-            else:
-                metadata_dict = fm.get("metadata", {})
-                if isinstance(metadata_dict, dict):
-                    metadata_cn_name = metadata_dict.get("cn_name")
-                    if metadata_cn_name and isinstance(metadata_cn_name, str):
-                        cn_name = metadata_cn_name
+        # 优先级 2: frontmatter metadata.cn_name 或顶层 cn_name
+        if not cn_name:
+            cn_name = self._extract_cn_name_from_frontmatter(md_content)
 
         # 优先级 3: SKILL.md 一级标题
-        if not cn_name and md_content:
+        if not cn_name:
             cn_name = extract_cn_name_from_title(md_content)
 
         # 优先级 4: skill_name fallback
@@ -2075,30 +2098,10 @@ class MarketplaceService:
             existing_content = None
 
         content_changed = existing_content != content
-        cn_name_changed = False
-
-        # 如果有 cn_name 参数，检查是否需要更新 SKILL.md frontmatter
-        if cn_name:
-            skill_md_path = skill_dir / "SKILL.md"
-            if skill_md_path.exists():
-                try:
-                    md_content = skill_md_path.read_text(encoding="utf-8")
-                    from ..utils.skill_md import parse_frontmatter
-
-                    fm = parse_frontmatter(md_content)
-                    metadata = fm.get("metadata", {})
-                    if isinstance(metadata, dict):
-                        existing_cn_name = metadata.get("cn_name", "")
-                        logger.info(
-                            "cn_name check: existing=%s, new=%s, changed=%s",
-                            existing_cn_name,
-                            cn_name,
-                            cn_name != existing_cn_name,
-                        )
-                        if cn_name != existing_cn_name:
-                            cn_name_changed = True
-                except (OSError, UnicodeDecodeError):
-                    cn_name_changed = True  # 无法读取，假定需要更新
+        cn_name_changed = cn_name and self._check_cn_name_changed(
+            skill_dir,
+            cn_name,
+        )
 
         # 内容和中文名都没变化，无需写入文件
         if not content_changed and not cn_name_changed:
@@ -2129,56 +2132,15 @@ class MarketplaceService:
 
             # 处理 skill.json：自动创建或更新
             skill_json_path = skill_dir / "skill.json"
-
-            if skill_json_path.exists():
-                # 更新现有 skill.json 的 updated_at、version 和 cn_name
-                try:
-                    skill_data = json.loads(
-                        skill_json_path.read_text(encoding="utf-8"),
-                    )
-                    skill_data["updated_at"] = current_time
-                    skill_data["version"] = new_version
-                    if cn_name:
-                        skill_data["cn_name"] = cn_name
-                    skill_json_path.write_text(
-                        json.dumps(skill_data, ensure_ascii=False, indent=2),
-                        encoding="utf-8",
-                    )
-                except (json.JSONDecodeError, OSError) as e:
-                    logger.warning(
-                        "Failed to update skill.json updated_at: %s",
-                        e,
-                    )
-            else:
-                # 自动创建基础 skill.json
-                base_skill_data = {
-                    "name": skill_name,
-                    "description": "",
-                    "version": new_version,
-                    "creator_id": user_id,
-                    "creator_name": user_name or "",
-                    "created_at": current_time,
-                    "source": "customized",
-                    "cn_name": cn_name or "",
-                }
-                try:
-                    skill_json_path.write_text(
-                        json.dumps(
-                            base_skill_data,
-                            ensure_ascii=False,
-                            indent=2,
-                        ),
-                        encoding="utf-8",
-                    )
-                    logger.info(
-                        "Auto-created skill.json for %s",
-                        skill_name,
-                    )
-                except OSError as e:
-                    logger.warning(
-                        "Failed to auto-create skill.json: %s",
-                        e,
-                    )
+            self._update_skill_json_file(
+                skill_json_path,
+                skill_name,
+                new_version,
+                cn_name,
+                user_id,
+                user_name,
+                current_time,
+            )
 
             # 同步 bump manifest 中的 version_text 和 cn_name
             self._update_skill_in_manifest(
@@ -2193,6 +2155,98 @@ class MarketplaceService:
             return (True, new_version)
         except Exception:
             return (False, None)
+
+    def _check_cn_name_changed(self, skill_dir: Path, cn_name: str) -> bool:
+        """检查 SKILL.md frontmatter 中的 cn_name 是否需要更新.
+
+        Args:
+            skill_dir: 技能目录路径
+            cn_name: 新的中文名
+
+        Returns:
+            是否需要更新
+        """
+        skill_md_path = skill_dir / "SKILL.md"
+        if not skill_md_path.exists():
+            return False
+
+        try:
+            md_content = skill_md_path.read_text(encoding="utf-8")
+            from ..utils.skill_md import parse_frontmatter
+
+            fm = parse_frontmatter(md_content)
+            metadata = fm.get("metadata", {})
+            if isinstance(metadata, dict):
+                existing_cn_name = metadata.get("cn_name", "")
+                logger.info(
+                    "cn_name check: existing=%s, new=%s, changed=%s",
+                    existing_cn_name,
+                    cn_name,
+                    cn_name != existing_cn_name,
+                )
+                return cn_name != existing_cn_name
+        except (OSError, UnicodeDecodeError):
+            return True  # 无法读取，假定需要更新
+
+        return False
+
+    def _update_skill_json_file(
+        self,
+        skill_json_path: Path,
+        skill_name: str,
+        new_version: str,
+        cn_name: str | None,
+        user_id: str,
+        user_name: str | None,
+        current_time: str,
+    ) -> None:
+        """更新或创建 skill.json 文件.
+
+        Args:
+            skill_json_path: skill.json 文件路径
+            skill_name: 技能名称
+            new_version: 新版本号
+            cn_name: 中文名（可选）
+            user_id: 用户 ID
+            user_name: 用户名（可选）
+            current_time: 当前时间字符串
+        """
+        if skill_json_path.exists():
+            # 更新现有 skill.json
+            try:
+                skill_data = json.loads(
+                    skill_json_path.read_text(encoding="utf-8"),
+                )
+                skill_data["updated_at"] = current_time
+                skill_data["version"] = new_version
+                if cn_name:
+                    skill_data["cn_name"] = cn_name
+                skill_json_path.write_text(
+                    json.dumps(skill_data, ensure_ascii=False, indent=2),
+                    encoding="utf-8",
+                )
+            except (json.JSONDecodeError, OSError) as e:
+                logger.warning("Failed to update skill.json updated_at: %s", e)
+        else:
+            # 自动创建基础 skill.json
+            base_skill_data = {
+                "name": skill_name,
+                "description": "",
+                "version": new_version,
+                "creator_id": user_id,
+                "creator_name": user_name or "",
+                "created_at": current_time,
+                "source": "customized",
+                "cn_name": cn_name or "",
+            }
+            try:
+                skill_json_path.write_text(
+                    json.dumps(base_skill_data, ensure_ascii=False, indent=2),
+                    encoding="utf-8",
+                )
+                logger.info("Auto-created skill.json for %s", skill_name)
+            except OSError as e:
+                logger.warning("Failed to auto-create skill.json: %s", e)
 
     async def delete_skill(
         self,
