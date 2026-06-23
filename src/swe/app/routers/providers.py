@@ -797,7 +797,6 @@ async def get_active_models(
             scope,
             root_path,
         )
-    logger.info("Returning tenant-level active model: %s", global_model)
     return ActiveModelsInfo(active_llm=global_model)
 
 
