@@ -782,6 +782,118 @@ async def read_market_skill_file(
     return FileContentResponse(content=content, file_type=file_type)
 
 
+async def _check_skill_name_exists_market(
+    svc,
+    source_id: str,
+    safe_skill_name: str,
+) -> bool:
+    """应用市场场景：检查市场索引中是否有同名技能."""
+    items = load_index(svc.marketplace_root, source_id)
+    existing = next(
+        (i for i in items if i.name == safe_skill_name and i.item_type == "skill"),
+        None,
+    )
+    return existing is not None
+
+
+def _check_skill_name_exists_user(
+    swe_root: Path,
+    user_id: str,
+    agent_id: str,
+    source_id: str,
+    safe_skill_name: str,
+) -> bool:
+    """用户场景：检查用户目录中是否有同名技能."""
+    skills_dir = get_user_skills_dir(swe_root, user_id, agent_id, source_id)
+    existing_names = _get_existing_skill_names(skills_dir)
+    return safe_skill_name in existing_names
+
+
+async def _check_skill_id_conflict_market(
+    svc,
+    skill_id: str,
+    safe_skill_name: str,
+) -> tuple[int, list[str]]:
+    """应用市场场景：检查 skill_id 冲突.
+
+    Returns:
+        (used_count, used_by_list)
+    """
+    if not skill_id or not svc.db.is_connected:
+        return 0, []
+
+    try:
+        rows = await svc.db.fetch_all(
+            """
+            SELECT DISTINCT skill_name, cn_name, tenant_name, tenant_id FROM swe_skills
+            WHERE skill_id = %s AND skill_name != %s
+            LIMIT 10
+            """,
+            (skill_id, safe_skill_name),
+        )
+        if not rows:
+            return 0, []
+
+        count_row = await svc.db.fetch_one(
+            """
+            SELECT COUNT(DISTINCT skill_name) as cnt FROM swe_skills
+            WHERE skill_id = %s AND skill_name != %s
+            """,
+            (skill_id, safe_skill_name),
+        )
+        used_count = count_row.get("cnt", len(rows)) if count_row else len(rows)
+
+        used_by: list[str] = []
+        for r in rows[:3]:
+            display_name = r.get("cn_name") or r.get("skill_name", "")
+            used_by.append(display_name)
+        for r in rows[:3]:
+            user_name = r.get("tenant_name", "") or r.get("tenant_id", "")
+            used_by.append(user_name)
+
+        return used_count, used_by
+    except Exception as e:
+        logger.warning("Failed to check skill_id conflict: %s", e)
+        return 0, []
+
+
+async def _check_skill_id_conflict_user(
+    svc,
+    skill_id: str,
+    safe_skill_name: str,
+    user_id: str,
+) -> Optional[str]:
+    """用户场景：检查 skill_id 冲突.
+
+    Returns:
+        冲突信息字符串，无冲突返回 None
+    """
+    if not skill_id or not svc.db.is_connected:
+        return None
+
+    try:
+        row = await svc.db.fetch_one(
+            """
+            SELECT skill_name, cn_name FROM swe_skills
+            WHERE skill_id = %s AND tenant_id = %s
+            """,
+            (skill_id, user_id),
+        )
+        if not row:
+            return None
+
+        existing_skill_name = row.get("skill_name", "")
+        if existing_skill_name == safe_skill_name:
+            return None  # 同技能名，视为覆盖操作
+
+        existing_cn_name = row.get("cn_name", "")
+        conflict_display = existing_cn_name or existing_skill_name
+        return f"skill_id '{skill_id}' 已被技能 '{conflict_display}' 占用"
+    except Exception as e:
+        logger.warning("Failed to check skill_id conflict: %s", e)
+        return None
+
+
 @router.post("/market/skills/parse-zip", response_model=ParseZipResponse)
 async def parse_skill_zip(
     request: Request,
@@ -873,94 +985,25 @@ async def parse_skill_zip(
         safe_skill_name = normalize_skill_name(skill_name)
         exists = False
         if market_mode:
-            # 应用市场场景：检查市场索引中是否有同名技能
-            items = load_index(svc.marketplace_root, source_id)
-            existing = next(
-                (
-                    i
-                    for i in items
-                    if i.name == safe_skill_name and i.item_type == "skill"
-                ),
-                None,
-            )
-            exists = existing is not None
+            exists = await _check_skill_name_exists_market(svc, source_id, safe_skill_name)
         elif x_user_id:
-            # 我的技能场景：检查用户目录
-            skills_dir = get_user_skills_dir(
-                swe_root,
-                x_user_id,
-                agent_id,
-                source_id,
+            exists = _check_skill_name_exists_user(
+                swe_root, x_user_id, agent_id, source_id, safe_skill_name
             )
-            existing_names = _get_existing_skill_names(skills_dir)
-            exists = safe_skill_name in existing_names
 
         # 检查 skill_id 是否已存在于数据库
         skill_id_conflict = None
         skill_id_used_count = 0
         skill_id_used_by: list[str] = []
-        if skill_id and svc.db.is_connected:
-            try:
-                if market_mode:
-                    # 应用市场场景：检查是否有不同技能名使用该 skill_id
-                    # 同一 skill_id 被同一技能名使用（分发场景）是正常的，不冲突
-                    rows = await svc.db.fetch_all(
-                        """
-                        SELECT DISTINCT skill_name, cn_name FROM swe_skills
-                        WHERE skill_id = %s AND skill_name != %s
-                        LIMIT 10
-                        """,
-                        (skill_id, safe_skill_name),
-                    )
-                    if rows:
-                        skill_id_used_count = len(rows)
-                        # 获取总数（不同技能名数量）
-                        count_row = await svc.db.fetch_one(
-                            """
-                            SELECT COUNT(DISTINCT skill_name) as cnt FROM swe_skills
-                            WHERE skill_id = %s AND skill_name != %s
-                            """,
-                            (skill_id, safe_skill_name),
-                        )
-                        if count_row:
-                            skill_id_used_count = count_row.get(
-                                "cnt",
-                                len(rows),
-                            )
-                        # 返回占用的技能名称列表（优先 cn_name）
-                        for r in rows[:3]:
-                            display_name = r.get("cn_name") or r.get(
-                                "skill_name",
-                                "",
-                            )
-                            skill_id_used_by.append(display_name)
-                        for r in rows[:3]:
-                            user_name = r.get("tenant_name", "") or r.get(
-                                "tenant_id",
-                                "",
-                            )
-                            skill_id_used_by.append(user_name)
-                else:
-                    # 我的技能场景：同租户查询
-                    row = await svc.db.fetch_one(
-                        """
-                        SELECT skill_name, cn_name FROM swe_skills
-                        WHERE skill_id = %s AND tenant_id = %s
-                        """,
-                        (skill_id, x_user_id),
-                    )
-                    if row:
-                        # skill_id 已存在
-                        existing_skill_name = row.get("skill_name", "")
-                        existing_cn_name = row.get("cn_name", "")
-                        # 如果技能名也相同，视为覆盖操作，不提示冲突
-                        if existing_skill_name != safe_skill_name:
-                            conflict_display = (
-                                existing_cn_name or existing_skill_name
-                            )
-                            skill_id_conflict = f"skill_id '{skill_id}' 已被技能 '{conflict_display}' 占用"
-            except Exception as e:
-                logger.warning("Failed to check skill_id conflict: %s", e)
+
+        if market_mode:
+            skill_id_used_count, skill_id_used_by = await _check_skill_id_conflict_market(
+                svc, skill_id, safe_skill_name
+            )
+        elif x_user_id:
+            skill_id_conflict = await _check_skill_id_conflict_user(
+                svc, skill_id, safe_skill_name, x_user_id
+            )
 
         # 清理临时目录
         if tmp_dir and tmp_dir.exists():
