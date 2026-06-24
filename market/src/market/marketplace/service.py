@@ -1300,7 +1300,7 @@ class MarketplaceService:
                     tenant_id=user["tenant_id"],
                     tenant_name=user.get("tenant_name", ""),
                     bbk_id=user.get("bbk_id", ""),
-                    source="marketplace",
+                    source=f"marketplace:{item_id}",
                     source_id=source_id,
                     enabled=True,
                     description=item.description,
