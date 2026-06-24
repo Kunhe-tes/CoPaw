@@ -42,6 +42,7 @@ class MarketSkillResponse(BaseModel):
 
     item_id: str
     name: str
+    skill_id: str = ""
     chinese_name: str = ""
     description: str
     version: str

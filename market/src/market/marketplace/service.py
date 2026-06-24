@@ -1150,6 +1150,7 @@ class MarketplaceService:
                 MarketSkillResponse(
                     item_id=item.item_id,
                     name=item.name,
+                    skill_id=item.skill_id,
                     chinese_name=item.chinese_name,
                     description=item.description,
                     version=item.version,
@@ -1183,6 +1184,7 @@ class MarketplaceService:
         return MarketSkillDetail(
             item_id=item.item_id,
             name=item.name,
+            skill_id=item.skill_id,
             chinese_name=item.chinese_name,
             description=item.description,
             version=item.version,

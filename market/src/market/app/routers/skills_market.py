@@ -1610,13 +1610,10 @@ async def update_skill_cn_name(
     if item is None:
         raise HTTPException(status_code=404, detail="Skill not found")
 
-    # 如果传入的 skill_id 为空，使用 MarketItem 的 skill_id 作为 fallback
-    skill_id = req.skill_id or item.skill_id
-
     result = await svc.update_skill_cn_name(
         source_id=source_id,
         item_id=item_id,
-        skill_id=skill_id,
+        skill_id=req.skill_id,
         skill_name=item.name,
         chinese_name=req.chinese_name,
         sync_to_users=req.sync_to_users,
