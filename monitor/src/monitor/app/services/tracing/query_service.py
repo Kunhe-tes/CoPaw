@@ -3471,9 +3471,7 @@ class TracingQueryService:  # pylint: disable=too-many-public-methods
         end_date: Optional[datetime],
     ) -> None:
         """添加基础参数过滤条件."""
-        if user_id:
-            where_clauses.append("t.user_id = %s")
-            params.append(user_id)
+        self._append_filter(where_clauses, params, "t.user_id = %s", user_id)
         if session_id:
             where_clauses.append("t.session_id LIKE %s")
             params.append(f"%{session_id}%")
@@ -3483,12 +3481,30 @@ class TracingQueryService:  # pylint: disable=too-many-public-methods
                 f"t.bbk_id IN ({', '.join(['%s'] * len(bbk_params))})",
             )
             params.extend(bbk_params)
-        if start_date:
-            where_clauses.append("t.start_time >= %s")
-            params.append(start_date)
-        if end_date:
-            where_clauses.append("t.start_time <= %s")
-            params.append(end_date)
+        self._append_filter(
+            where_clauses,
+            params,
+            "t.start_time >= %s",
+            start_date,
+        )
+        self._append_filter(
+            where_clauses,
+            params,
+            "t.start_time <= %s",
+            end_date,
+        )
+
+    def _append_filter(
+        self,
+        where_clauses: list[str],
+        params: list[Any],
+        clause: str,
+        value: Optional[Any],
+    ) -> None:
+        """添加单个过滤条件."""
+        if value:
+            where_clauses.append(clause)
+            params.append(value)
 
     def _build_resource_date_sql(
         self,
@@ -3522,39 +3538,88 @@ class TracingQueryService:  # pylint: disable=too-many-public-methods
         resource_date_params: list[Any],
     ) -> None:
         """添加资源类型过滤条件."""
-        if resource_type == "model" and resource_name:
-            where_clauses.append(
-                "EXISTS (SELECT 1 FROM swe_tracing_traces resource "
-                "WHERE resource.source_id = t.source_id "
-                "AND resource.session_id = t.session_id "
-                "AND resource.model_name = %s"
-                f"{resource_date_sql})",
+        if not resource_type or not resource_name:
+            return
+        handlers = {
+            "model": self._add_model_filter,
+            "skill": self._add_skill_filter,
+            "mcp_tool": self._add_mcp_tool_filter,
+        }
+        handler = handlers.get(resource_type)
+        if handler:
+            handler(
+                where_clauses,
+                params,
+                resource_name,
+                mcp_server,
+                resource_date_sql,
+                resource_date_params,
             )
-            params.append(resource_name)
-            params.extend(resource_date_params)
-        elif resource_type == "skill" and resource_name:
-            where_clauses.append(
-                "EXISTS (SELECT 1 FROM swe_tracing_spans resource "
-                "WHERE resource.source_id = t.source_id "
-                "AND resource.session_id = t.session_id "
-                "AND resource.event_type = 'skill_invocation' "
-                "AND resource.skill_name = %s"
-                f"{resource_date_sql})",
-            )
-            params.append(resource_name)
-            params.extend(resource_date_params)
-        elif resource_type == "mcp_tool" and resource_name and mcp_server:
-            where_clauses.append(
-                "EXISTS (SELECT 1 FROM swe_tracing_spans resource "
-                "WHERE resource.source_id = t.source_id "
-                "AND resource.session_id = t.session_id "
-                "AND resource.event_type = 'tool_call_end' "
-                "AND resource.tool_name = %s "
-                "AND resource.mcp_server = %s"
-                f"{resource_date_sql})",
-            )
-            params.extend([resource_name, mcp_server])
-            params.extend(resource_date_params)
+
+    def _add_model_filter(
+        self,
+        where_clauses: list[str],
+        params: list[Any],
+        resource_name: str,
+        mcp_server: Optional[str],
+        resource_date_sql: str,
+        resource_date_params: list[Any],
+    ) -> None:
+        """添加模型资源过滤."""
+        where_clauses.append(
+            "EXISTS (SELECT 1 FROM swe_tracing_traces resource "
+            "WHERE resource.source_id = t.source_id "
+            "AND resource.session_id = t.session_id "
+            "AND resource.model_name = %s"
+            f"{resource_date_sql})",
+        )
+        params.append(resource_name)
+        params.extend(resource_date_params)
+
+    def _add_skill_filter(
+        self,
+        where_clauses: list[str],
+        params: list[Any],
+        resource_name: str,
+        mcp_server: Optional[str],
+        resource_date_sql: str,
+        resource_date_params: list[Any],
+    ) -> None:
+        """添加技能资源过滤."""
+        where_clauses.append(
+            "EXISTS (SELECT 1 FROM swe_tracing_spans resource "
+            "WHERE resource.source_id = t.source_id "
+            "AND resource.session_id = t.session_id "
+            "AND resource.event_type = 'skill_invocation' "
+            "AND resource.skill_name = %s"
+            f"{resource_date_sql})",
+        )
+        params.append(resource_name)
+        params.extend(resource_date_params)
+
+    def _add_mcp_tool_filter(
+        self,
+        where_clauses: list[str],
+        params: list[Any],
+        resource_name: str,
+        mcp_server: Optional[str],
+        resource_date_sql: str,
+        resource_date_params: list[Any],
+    ) -> None:
+        """添加 MCP 工具资源过滤."""
+        if not mcp_server:
+            return
+        where_clauses.append(
+            "EXISTS (SELECT 1 FROM swe_tracing_spans resource "
+            "WHERE resource.source_id = t.source_id "
+            "AND resource.session_id = t.session_id "
+            "AND resource.event_type = 'tool_call_end' "
+            "AND resource.tool_name = %s "
+            "AND resource.mcp_server = %s"
+            f"{resource_date_sql})",
+        )
+        params.extend([resource_name, mcp_server])
+        params.extend(resource_date_params)
 
     def _add_error_filter(
         self,
