@@ -179,19 +179,35 @@ def build_cron_bbk_in_filter(bbk_ids: Optional[str]) -> tuple[str, list[str]]:
     return f" AND j.bbk_id IN ({placeholders})", ids
 
 
-def _summarize_task_status_rows(rows: list[dict]) -> tuple[int, int, int, int]:
-    """汇总定时任务状态及已读数量."""
+def _summarize_task_status_rows(
+    rows: list[dict],
+) -> tuple[int, int, int, int, int]:
+    """汇总定时任务状态及已读数量.
+
+    返回: (success, running, failed, cancelled, read_count)
+    """
     success = 0
+    running = 0
     failed = 0
     cancelled = 0
     read_count = 0
 
     for row in rows:
         status = row["status"]
+        async_status = row.get("async_status")
         count = row["count"]
 
+        # 综合状态判断
         if status == "success":
-            success += count
+            if async_status == "success":
+                success += count
+            elif async_status is None or async_status == "":
+                running += count
+            elif async_status == "error":
+                failed += count
+            else:
+                # 其他 async_status 值视为运行中
+                running += count
         elif status in ("error", "timeout"):
             failed += count
         elif status in ("cancelled", "skipped"):
@@ -200,7 +216,7 @@ def _summarize_task_status_rows(rows: list[dict]) -> tuple[int, int, int, int]:
         if row["is_read"]:
             read_count += count
 
-    return success, failed, cancelled, read_count
+    return success, running, failed, cancelled, read_count
 
 
 class TracingQueryService:  # pylint: disable=too-many-public-methods
@@ -2287,7 +2303,7 @@ class TracingQueryService:  # pylint: disable=too-many-public-methods
 
         if source_id == "all":
             query = f"""
-                SELECT e.status, e.is_read, COUNT(*) AS count
+                SELECT e.status, e.async_status, e.is_read, COUNT(*) AS count
                 FROM swe_cron_executions e
                 INNER JOIN swe_cron_jobs j ON e.job_id = j.id
                 WHERE e.actual_time >= %s AND e.actual_time < %s
@@ -2296,7 +2312,7 @@ class TracingQueryService:  # pylint: disable=too-many-public-methods
                   AND j.source_id NOT IN ({exclude_placeholders})
                   AND j.tenant_id != 'default'
                   {bbk_filter_sql}
-                GROUP BY e.status, e.is_read
+                GROUP BY e.status, e.async_status, e.is_read
             """
             params = (
                 start_date,
@@ -2306,7 +2322,7 @@ class TracingQueryService:  # pylint: disable=too-many-public-methods
             )
         else:
             query = f"""
-                SELECT e.status, e.is_read, COUNT(*) AS count
+                SELECT e.status, e.async_status, e.is_read, COUNT(*) AS count
                 FROM swe_cron_executions e
                 INNER JOIN swe_cron_jobs j ON e.job_id = j.id
                 WHERE e.actual_time >= %s AND e.actual_time < %s
@@ -2315,16 +2331,18 @@ class TracingQueryService:  # pylint: disable=too-many-public-methods
                   AND j.tenant_id != 'default'
                   AND j.source_id = %s
                   {bbk_filter_sql}
-                GROUP BY e.status, e.is_read
+                GROUP BY e.status, e.async_status, e.is_read
             """
             params = (start_date, end_date, source_id, *bbk_filter_params)
 
         rows = await self._db.fetch_all(query, params)
 
-        success, failed, cancelled, read_count = _summarize_task_status_rows(
-            rows,
+        success, running, failed, cancelled, read_count = (
+            _summarize_task_status_rows(
+                rows,
+            )
         )
-        total_tasks = success + failed + cancelled
+        total_tasks = success + running + failed + cancelled
 
         # 查询本时间段内新增的定时任务数（按 created_at 过滤）
         if source_id == "all":
@@ -2371,6 +2389,7 @@ class TracingQueryService:  # pylint: disable=too-many-public-methods
         return TaskStatusSummary(
             total_tasks=total_tasks,
             success=success,
+            running=running,
             failed=failed,
             cancelled=cancelled,
             read_count=read_count,

@@ -68,7 +68,7 @@ const METRIC_ACCENT_COLORS = [
   "#7c3aed",
 ];
 
-const DONUT_COLORS = ["#18b368", "#ef4444", "#94a3b8"];
+const DONUT_COLORS = ["#18b368", "#f97316", "#ef4444", "#94a3b8"]; // 成功、运行中、失败、取消
 const safeNumber = (value: unknown): number =>
   typeof value === "number" && !Number.isNaN(value) ? value : 0;
 
@@ -234,16 +234,22 @@ function buildExecutionSummary(
       color: DONUT_COLORS[0],
     },
     {
+      key: "running",
+      label: "运行中",
+      value: safeNumber(summary?.running),
+      color: DONUT_COLORS[1],
+    },
+    {
       key: "failed",
       label: "失败",
       value: safeNumber(summary?.failed),
-      color: DONUT_COLORS[1],
+      color: DONUT_COLORS[2],
     },
     {
       key: "cancelled",
       label: "已取消/跳过",
       value: safeNumber(summary?.cancelled),
-      color: DONUT_COLORS[2],
+      color: DONUT_COLORS[3],
     },
   ];
 }
