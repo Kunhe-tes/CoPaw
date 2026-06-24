@@ -284,18 +284,15 @@ def _resolve_skill_cn_name_and_id(
     if not resolved_cn_name:
         resolved_cn_name = name  # fallback 到技能名
 
-    # 提取 skill_id：优先 metadata.skill_id，否则自动生成
+    # 提取 skill_id（从 SKILL.md metadata.skill_id）
     resolved_skill_id = ""
     if skill_md:
-        fm = parse_frontmatter(skill_md)
-        metadata = fm.get("metadata", {})
-        if isinstance(metadata, dict):
-            resolved_skill_id = metadata.get("skill_id", "") or ""
-    if not resolved_skill_id:
-        # 无 skill_id 时自动生成：skill_{uuid[:8]}
-        import uuid
-
-        resolved_skill_id = f"skill_{uuid.uuid4().hex[:8]}"
+        resolved_skill_id = extract_skill_id(
+            skill_md,
+            source="",  # 市场上传时 item_id 未生成，使用空 source
+            skill_name=name,
+            creator_id=user_id,
+        )
 
     return resolved_cn_name, resolved_skill_id
 
