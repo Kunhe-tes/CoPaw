@@ -6,13 +6,14 @@ import {
   MoreOutlined,
   UserOutlined,
 } from "@ant-design/icons";
-import { Button, Checkbox, Dropdown, Input, message, Modal, Spin, Table, Tag, Tooltip, Typography, type MenuProps } from "antd";
+import { Button, Checkbox, Collapse, Dropdown, Input, message, Modal, Spin, Table, Tag, Tooltip, Typography, type MenuProps } from "antd";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { Send, Undo2, Trash2, Archive, Users, PhoneCall, Tag as TagIcon, GitBranch, Calendar, CheckCircle } from "lucide-react";
 import { marketApi, MarketSkillDetail } from "../../api/modules/market";
 import type { FileContentResponse } from "../../api/modules/mySkills";
 import type { DistributionRecord } from "../../api/types";
+import { BBK_ID_TO_NAME_MAP } from "../../constants/bbk";
 import { VersionHistoryModal } from "./Skills/VersionHistoryModal";
 import styles from "./SkillDetailDrawer.module.less";
 
@@ -320,7 +321,39 @@ export function SkillDetailDrawer(
   const [distributions, setDistributions] = useState<DistributionRecord[]>([]);
   const [selectedUserIds, setSelectedUserIds] = useState<string[]>([]);
   const [syncToUsers, setSyncToUsers] = useState(true);
-  const [showUserList, setShowUserList] = useState(false);
+
+  // 分发记录去重（同一用户多次分发只保留最新记录）
+  const uniqueDistributions = useMemo(() => {
+    const userMap = new Map<string, DistributionRecord>();
+    for (const dist of distributions) {
+      const existing = userMap.get(dist.target_user_id);
+      if (
+        !existing ||
+        (dist.distributed_at &&
+          (!existing.distributed_at || dist.distributed_at > existing.distributed_at))
+      ) {
+        userMap.set(dist.target_user_id, dist);
+      }
+    }
+    return Array.from(userMap.values());
+  }, [distributions]);
+
+  // 按机构分组分发记录
+  const groupedDistributions = useMemo(() => {
+    const groups: Record<string, DistributionRecord[]> = {};
+    for (const dist of uniqueDistributions) {
+      const bbkId = dist.target_bbk_id || "unknown";
+      if (!groups[bbkId]) {
+        groups[bbkId] = [];
+      }
+      groups[bbkId].push(dist);
+    }
+    return Object.entries(groups).map(([bbkId, records]) => ({
+      bbkId,
+      bbkName: bbkId === "unknown" ? "未分配机构" : BBK_ID_TO_NAME_MAP[bbkId] || bbkId,
+      records,
+    }));
+  }, [uniqueDistributions]);
 
   // 编辑开始
   const handleEditStart = useCallback(() => {
@@ -333,7 +366,6 @@ export function SkillDetailDrawer(
     setIsEditing(false);
     setDraftCnName("");
     setSyncModalOpen(false);
-    setShowUserList(false);
   }, []);
 
   // 执行保存
@@ -351,7 +383,6 @@ export function SkillDetailDrawer(
       message.success("保存成功");
       setIsEditing(false);
       setSyncModalOpen(false);
-      setShowUserList(false);
       onRefresh?.();
     } catch {
       message.error("保存失败");
@@ -374,9 +405,10 @@ export function SkillDetailDrawer(
     try {
       const dists = await marketApi.getSkillDistributions(sourceId, skill.item_id);
       setDistributions(dists);
-      setSelectedUserIds(dists.map((d) => d.target_user_id));
-      setShowUserList(false);
-      if (dists.length > 0) {
+      // 默认选中去重后的用户ID
+      const uniqueIds = Array.from(new Set(dists.map((d) => d.target_user_id)));
+      setSelectedUserIds(uniqueIds);
+      if (uniqueIds.length > 0) {
         setSyncModalOpen(true);
       } else {
         // 无分发记录，直接保存
@@ -812,11 +844,11 @@ export function SkillDetailDrawer(
               setSyncToUsers(e.target.checked);
               if (e.target.checked && selectedUserIds.length === 0) {
                 // 开启同步时，默认全选
-                setSelectedUserIds(distributions.map((d) => d.target_user_id));
+                setSelectedUserIds(uniqueDistributions.map((d) => d.target_user_id));
               }
             }}
           >
-            同步更新已分发用户的技能名称（共 {distributions.length} 位用户）
+            同步更新已分发用户的技能名称（共 {uniqueDistributions.length} 位用户）
           </Checkbox>
         </div>
 
@@ -827,90 +859,95 @@ export function SkillDetailDrawer(
           </div>
         )}
 
-        {/* 展开/收起用户列表 */}
-        {syncToUsers && (
-          <div
-            style={{
-              borderTop: "1px solid #f0f0f0",
-              paddingTop: 12,
-            }}
-          >
-            <div
-              style={{
-                display: "flex",
-                alignItems: "center",
-                justifyContent: "space-between",
-                marginBottom: showUserList ? 12 : 0,
-                cursor: "pointer",
-                color: "#3769fc",
-                fontSize: 13,
-              }}
-              onClick={() => setShowUserList(!showUserList)}
-            >
-              <span>
-                {showUserList ? "收起用户列表" : "展开选择具体用户"}
-              </span>
-              <span style={{ fontSize: 10 }}>
-                {showUserList ? "▲" : "▼"}
-              </span>
+        {/* 用户列表 - 仅在同步开启时显示 */}
+        {syncToUsers && uniqueDistributions.length > 0 && (
+          <>
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 8 }}>
+              <div style={{ fontWeight: 500 }}>已分发用户</div>
+              <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+                <Checkbox
+                  checked={selectedUserIds.length === uniqueDistributions.length}
+                  indeterminate={selectedUserIds.length > 0 && selectedUserIds.length < uniqueDistributions.length}
+                  onChange={(e) => {
+                    if (e.target.checked) {
+                      setSelectedUserIds(uniqueDistributions.map((d) => d.target_user_id));
+                    } else {
+                      setSelectedUserIds([]);
+                    }
+                  }}
+                >
+                  全选
+                </Checkbox>
+                <a onClick={() => setSelectedUserIds([])} style={{ fontSize: 12 }}>
+                  清空
+                </a>
+              </div>
             </div>
 
-            {/* 用户表格 - 展开时显示 */}
-            {showUserList && (
-              <>
-                {/* 快捷操作 */}
-                <div style={{ marginBottom: 8, display: "flex", gap: 8 }}>
-                  <Button
-                    size="small"
-                    onClick={() =>
-                      setSelectedUserIds(distributions.map((d) => d.target_user_id))
-                    }
-                  >
-                    全选
-                  </Button>
-                  <Button
-                    size="small"
-                    onClick={() => setSelectedUserIds([])}
-                  >
-                    取消全选
-                  </Button>
-                  <span style={{ color: "#8c8c8c", fontSize: 12, marginLeft: 8 }}>
-                    已选 {selectedUserIds.length} 位
+            {/* 按机构分组展示 */}
+            <Collapse
+              size="small"
+              style={{ maxHeight: 280, overflow: "auto" }}
+              items={groupedDistributions.map((group) => ({
+                key: group.bbkId,
+                label: (
+                  <span style={{ fontSize: 13 }}>
+                    <UserOutlined style={{ marginRight: 6, color: "#1677ff" }} />
+                    {group.bbkName}
+                    <span style={{ color: "#999", marginLeft: 8 }}>
+                      {group.records.length} 人
+                    </span>
                   </span>
-                </div>
+                ),
+                children: (
+                  <div
+                    style={{
+                      display: "grid",
+                      gridTemplateColumns: "repeat(auto-fit, minmax(130px, 1fr))",
+                      gap: 4,
+                    }}
+                  >
+                    {group.records.map((dist) => {
+                      const displayName = dist.target_user_name || dist.target_user_id;
+                      const selected = selectedUserIds.includes(dist.target_user_id);
+                      return (
+                        <div
+                          key={dist.target_user_id}
+                          onClick={() => {
+                            if (selected) {
+                              setSelectedUserIds((prev) => prev.filter((id) => id !== dist.target_user_id));
+                            } else {
+                              setSelectedUserIds((prev) => [...prev, dist.target_user_id]);
+                            }
+                          }}
+                          style={{
+                            fontSize: 12,
+                            color: "#333",
+                            padding: "4px 8px",
+                            borderRadius: 4,
+                            cursor: "pointer",
+                            backgroundColor: selected ? "#e6f4ff" : "transparent",
+                            border: selected ? "1px solid #1890ff" : "1px solid transparent",
+                            overflow: "hidden",
+                            textOverflow: "ellipsis",
+                            whiteSpace: "nowrap",
+                          }}
+                          title={displayName}
+                        >
+                          {displayName}
+                        </div>
+                      );
+                    })}
+                  </div>
+                ),
+              }))}
+            />
 
-                <Table
-                  dataSource={distributions}
-                  columns={[
-                    {
-                      title: "用户名称",
-                      dataIndex: "target_user_name",
-                      key: "target_user_name",
-                      render: (name: string, record: DistributionRecord) =>
-                        name || record.target_user_id,
-                    },
-                    {
-                      title: "分发时间",
-                      dataIndex: "distributed_at",
-                      key: "distributed_at",
-                      width: 100,
-                      render: (time: string | null) =>
-                        time ? new Date(time).toLocaleDateString("zh-CN") : "-",
-                    },
-                  ]}
-                  rowSelection={{
-                    type: "checkbox",
-                    selectedRowKeys: selectedUserIds,
-                    onChange: (keys) => setSelectedUserIds(keys as string[]),
-                  }}
-                  rowKey="target_user_id"
-                  pagination={{ pageSize: 10, size: "small" }}
-                  size="small"
-                  scroll={{ y: 200 }}
-                />
-              </>
-            )}
-          </div>
+            {/* 选择汇总 */}
+            <div style={{ color: "#666", fontSize: 12, marginTop: 8 }}>
+              已选择 {selectedUserIds.length} 位用户
+            </div>
+          </>
         )}
       </Modal>
     </>
