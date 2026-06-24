@@ -3141,6 +3141,193 @@ class MarketplaceService:
         save_index(self.marketplace_root, source_id, items)
         return item
 
+    def _update_market_item_cn_name(
+        self,
+        source_id: str,
+        item_id: str,
+        chinese_name: str,
+    ) -> MarketItem:
+        """更新 index.json 中技能条目的 chinese_name."""
+        items = load_index(self.marketplace_root, source_id)
+        item = next(
+            (
+                i
+                for i in items
+                if i.item_id == item_id and i.item_type == "skill"
+            ),
+            None,
+        )
+        if item is None:
+            raise ValueError(f"Skill item '{item_id}' not found")
+
+        item.chinese_name = chinese_name
+        item.updated_at = datetime.now(timezone.utc).isoformat()
+        save_index(self.marketplace_root, source_id, items)
+        return item
+
+    def _check_cn_name_exists_in_frontmatter(self, skill_dir: Path) -> bool:
+        """检查 SKILL.md frontmatter 中是否存在 cn_name 字段."""
+        skill_md_path = skill_dir / "SKILL.md"
+        if not skill_md_path.exists():
+            return False
+
+        try:
+            content = skill_md_path.read_text(encoding="utf-8")
+            fm = parse_frontmatter(content)
+            metadata = fm.get("metadata", {})
+            return "cn_name" in metadata
+        except (OSError, UnicodeDecodeError):
+            return False
+
+    def _update_frontmatter_cn_name_if_exists(
+        self,
+        skill_dir: Path,
+        cn_name: str,
+    ) -> bool:
+        """条件更新 SKILL.md frontmatter，只有存在 cn_name 时才更新."""
+        if self._check_cn_name_exists_in_frontmatter(skill_dir):
+            self._update_cn_name_in_frontmatter(skill_dir, cn_name)
+            return True
+        return False
+
+    def _update_skill_manifest_cn_name_only(
+        self,
+        user_id: str,
+        skill_name: str,
+        cn_name: str,
+        agent_id: str = "default",
+        source_id: str | None = None,
+    ) -> bool:
+        """仅更新 manifest 中的 cn_name 字段."""
+        now = datetime.now(timezone.utc).isoformat()
+
+        def _update(payload: dict) -> bool:
+            entry = payload.get("skills", {}).get(skill_name)
+            if entry is None:
+                return False
+            metadata = entry.get("metadata", {})
+            metadata["cn_name"] = cn_name
+            metadata["updated_at"] = now
+            entry["metadata"] = metadata
+            entry["updated_at"] = now
+            return True
+
+        return mutate_user_skill_manifest(
+            self.swe_root,
+            user_id,
+            agent_id,
+            _update,
+            source_id,
+        )
+
+    def _sync_cn_name_to_user_workspace(
+        self,
+        tenant_id: str,
+        skill_name: str,
+        cn_name: str,
+        source_id: str,
+    ) -> bool:
+        """同步更新单个用户 workspace 的技能名称文件."""
+        try:
+            skills_dir = get_user_skills_dir(
+                self.swe_root,
+                tenant_id,
+                "default",
+                source_id,
+            )
+            skill_dir = skills_dir / skill_name
+            if not skill_dir.exists():
+                return False
+
+            # 更新 manifest
+            self._update_skill_manifest_cn_name_only(
+                tenant_id,
+                skill_name,
+                cn_name,
+                "default",
+                source_id,
+            )
+            # 条件更新 SKILL.md
+            self._update_frontmatter_cn_name_if_exists(skill_dir, cn_name)
+            return True
+        except Exception as e:
+            logger.warning(
+                "Failed to sync cn_name to user %s: %s",
+                tenant_id,
+                e,
+            )
+            return False
+
+    async def update_skill_cn_name(
+        self,
+        source_id: str,
+        item_id: str,
+        skill_id: str,
+        skill_name: str,
+        chinese_name: str,
+        sync_to_users: bool,
+        target_user_ids: list[str],
+    ) -> dict:
+        """更新市场技能中文名，可选同步用户空间."""
+        # 1. 更新市场条目
+        item = self._update_market_item_cn_name(
+            source_id,
+            item_id,
+            chinese_name,
+        )
+
+        # 2. 若 sync_to_users=True，同步用户空间
+        synced_users = 0
+        errors = []
+        distribution_count = 0
+
+        if sync_to_users:
+            # 获取已分发用户列表
+            distributions = await self.get_distributions(
+                source_id,
+                item_id,
+                "skill",
+            )
+            distribution_count = len(distributions)
+            users_to_sync = target_user_ids or [
+                d.target_user_id for d in distributions
+            ]
+
+            for user_id in users_to_sync:
+                # 更新数据库
+                if self.skill_registry.is_connected():
+                    await self.skill_registry.update_cn_name_by_skill_id(
+                        skill_id,
+                        user_id,
+                        chinese_name,
+                    )
+                # 更新用户 workspace 文件
+                success = self._sync_cn_name_to_user_workspace(
+                    user_id,
+                    skill_name,
+                    chinese_name,
+                    source_id,
+                )
+                if success:
+                    synced_users += 1
+                else:
+                    errors.append(
+                        {
+                            "user_id": user_id,
+                            "reason": "workspace sync failed",
+                        },
+                    )
+
+        return {
+            "success": True,
+            "market_updated": True,
+            "synced_users": synced_users,
+            "skipped_users": (
+                distribution_count - synced_users if sync_to_users else 0
+            ),
+            "errors": errors,
+        }
+
     async def _get_mcp_stats(
         self,
         client_key: str,

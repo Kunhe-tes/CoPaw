@@ -1,16 +1,18 @@
 import type { ReactNode } from "react";
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import {
+  EditOutlined,
   HistoryOutlined,
   MoreOutlined,
   UserOutlined,
 } from "@ant-design/icons";
-import { Button, Dropdown, Modal, Spin, Table, Tag, Tooltip, Typography, type MenuProps } from "antd";
+import { Button, Checkbox, Dropdown, Input, message, Modal, Spin, Table, Tag, Tooltip, Typography, type MenuProps } from "antd";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { Send, Undo2, Trash2, Archive, Users, PhoneCall, Tag as TagIcon, GitBranch, Calendar, CheckCircle } from "lucide-react";
 import { marketApi, MarketSkillDetail } from "../../api/modules/market";
 import type { FileContentResponse } from "../../api/modules/mySkills";
+import type { DistributionRecord } from "../../api/types";
 import { VersionHistoryModal } from "./Skills/VersionHistoryModal";
 import styles from "./SkillDetailDrawer.module.less";
 
@@ -310,6 +312,83 @@ export function SkillDetailDrawer(
   const [versionHistoryOpen, setVersionHistoryOpen] = useState(false);
   const normalizedCategoryName = categoryName?.trim();
 
+  // 编辑中文名相关状态
+  const [isEditing, setIsEditing] = useState(false);
+  const [draftCnName, setDraftCnName] = useState("");
+  const [isSaving, setIsSaving] = useState(false);
+  const [syncModalOpen, setSyncModalOpen] = useState(false);
+  const [distributions, setDistributions] = useState<DistributionRecord[]>([]);
+  const [selectedUserIds, setSelectedUserIds] = useState<string[]>([]);
+  const [syncToUsers, setSyncToUsers] = useState(true);
+
+  // 编辑开始
+  const handleEditStart = useCallback(() => {
+    setIsEditing(true);
+    setDraftCnName(skill?.chinese_name || "");
+  }, [skill?.chinese_name]);
+
+  // 编辑取消
+  const handleEditCancel = useCallback(() => {
+    setIsEditing(false);
+    setDraftCnName("");
+    setSyncModalOpen(false);
+  }, []);
+
+  // 保存点击：检查是否有分发记录
+  const handleSaveClick = useCallback(async () => {
+    if (!skill || !sourceId) return;
+
+    if (draftCnName === skill.chinese_name) {
+      message.info("名称未变化");
+      setIsEditing(false);
+      return;
+    }
+
+    // 查询分发记录
+    try {
+      const dists = await marketApi.getSkillDistributions(sourceId, skill.item_id);
+      setDistributions(dists);
+      setSelectedUserIds(dists.map((d) => d.target_user_id));
+      if (dists.length > 0) {
+        setSyncModalOpen(true);
+      } else {
+        // 无分发记录，直接保存
+        await handleSave(false, []);
+      }
+    } catch {
+      // 查询失败时直接保存（不同步）
+      await handleSave(false, []);
+    }
+  }, [skill, sourceId, draftCnName]);
+
+  // 执行保存
+  const handleSave = useCallback(async (sync: boolean, userIds: string[]) => {
+    if (!skill || !sourceId) return;
+
+    setIsSaving(true);
+    try {
+      await marketApi.updateSkillCnName(sourceId, skill.item_id, {
+        skill_id: skill.skill_id || "",
+        chinese_name: draftCnName,
+        sync_to_users: sync,
+        target_user_ids: userIds,
+      });
+      message.success("保存成功");
+      setIsEditing(false);
+      setSyncModalOpen(false);
+      onRefresh?.();
+    } catch {
+      message.error("保存失败");
+    } finally {
+      setIsSaving(false);
+    }
+  }, [skill, sourceId, draftCnName, onRefresh]);
+
+  // 同步确认弹窗确认
+  const handleSyncConfirm = useCallback(() => {
+    handleSave(syncToUsers, syncToUsers ? selectedUserIds : []);
+  }, [handleSave, syncToUsers, selectedUserIds]);
+
   const moreMenuItems: MenuProps["items"] = useMemo(() => {
     const items: MenuProps["items"] = [];
     if (onRecall) {
@@ -457,15 +536,61 @@ export function SkillDetailDrawer(
             </Tag>
 
             {/* 中文名（大号） + 技能名（小号） */}
-            <span style={CHINESE_NAME_STYLE}>
-              {chineseName}
-              {chineseName && skillName && (
-                <span style={SKILL_NAME_STYLE}> ({skillName})</span>
-              )}
-              {!chineseName && skillName && (
-                <span style={CHINESE_NAME_STYLE}>{skillName}</span>
-              )}
-            </span>
+            {isEditing ? (
+              <Input
+                value={draftCnName}
+                onChange={(e) => setDraftCnName(e.target.value)}
+                style={{ width: 200, fontSize: 14 }}
+                maxLength={50}
+                showCount
+                placeholder="输入中文名称"
+              />
+            ) : (
+              <span style={CHINESE_NAME_STYLE}>
+                {chineseName}
+                {chineseName && skillName && (
+                  <span style={SKILL_NAME_STYLE}> ({skillName})</span>
+                )}
+                {!chineseName && skillName && (
+                  <span style={CHINESE_NAME_STYLE}>{skillName}</span>
+                )}
+              </span>
+            )}
+
+            {/* 编辑按钮 */}
+            {isManager && !isEditing && (
+              <Tooltip title="编辑中文名">
+                <Button
+                  size="small"
+                  icon={<EditOutlined />}
+                  onClick={handleEditStart}
+                  style={{ height: 24, borderRadius: 4 }}
+                />
+              </Tooltip>
+            )}
+
+            {/* 编辑时显示保存/取消按钮 */}
+            {isManager && isEditing && (
+              <>
+                <Button
+                  size="small"
+                  onClick={handleEditCancel}
+                  disabled={isSaving}
+                  style={{ height: 24, borderRadius: 4 }}
+                >
+                  取消
+                </Button>
+                <Button
+                  size="small"
+                  type="primary"
+                  onClick={handleSaveClick}
+                  loading={isSaving}
+                  style={{ height: 24, borderRadius: 4 }}
+                >
+                  保存
+                </Button>
+              </>
+            )}
 
             {/* 分类 */}
             {normalizedCategoryName && (
@@ -662,6 +787,56 @@ export function SkillDetailDrawer(
         onClose={() => setVersionHistoryOpen(false)}
         onVersionSwitched={onRefresh}
       />
+
+      {/* 同步确认弹窗 */}
+      <Modal
+        open={syncModalOpen}
+        title="同步设置"
+        onCancel={handleEditCancel}
+        onOk={handleSyncConfirm}
+        okText="确认保存"
+        cancelText="取消"
+        okButtonProps={{ loading: isSaving }}
+        width={500}
+      >
+        <div style={{ marginBottom: 16 }}>
+          技能「{skill.chinese_name}」已分发给以下用户：
+        </div>
+
+        {/* 用户列表 Checkbox */}
+        <div style={{ maxHeight: 200, overflow: "auto", marginBottom: 16 }}>
+          <Checkbox.Group
+            value={selectedUserIds}
+            onChange={(vals) => setSelectedUserIds(vals as string[])}
+            disabled={!syncToUsers}
+          >
+            {distributions.map((d) => (
+              <div key={d.target_user_id} style={{ marginBottom: 8 }}>
+                <Checkbox value={d.target_user_id}>
+                  {d.target_user_name || d.target_user_id}
+                </Checkbox>
+              </div>
+            ))}
+          </Checkbox.Group>
+        </div>
+
+        {/* 同步选项 */}
+        <div style={{ marginBottom: 8 }}>
+          <Checkbox
+            checked={syncToUsers}
+            onChange={(e) => setSyncToUsers(e.target.checked)}
+          >
+            同步更新已分发用户的技能名称（共 {selectedUserIds.length} 位用户）
+          </Checkbox>
+        </div>
+
+        {/* 提示 */}
+        {syncToUsers && (
+          <div style={{ color: "#666", fontSize: 12 }}>
+            同步更新后，用户下次会话将看到新名称
+          </div>
+        )}
+      </Modal>
     </>
   );
 }

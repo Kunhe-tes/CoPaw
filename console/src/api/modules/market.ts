@@ -6,7 +6,7 @@ import type {
   FileTreeNode,
   MySkill,
 } from "./mySkills";
-import type { DistributionRecord, RecallResultItem, RecallResponse } from "../types";
+import type { DistributionRecord, RecallResponse } from "../types";
 
 export interface MarketSkill {
   item_id: string;
@@ -432,6 +432,35 @@ export const marketApi = {
       `/market/skills/${itemId}/recall`,
       opts
     );
+  },
+
+  // 更新技能中文名
+  updateSkillCnName: async (
+    sourceId: string,
+    itemId: string,
+    data: {
+      skill_id: string;
+      chinese_name: string;
+      sync_to_users?: boolean;
+      target_user_ids?: string[];
+    }
+  ): Promise<{
+    success: boolean;
+    market_updated: boolean;
+    synced_users: number;
+    skipped_users: number;
+    errors: Array<{ user_id: string; reason: string }>;
+  }> => {
+    const opts: RequestInit = {
+      method: "PATCH",
+      ...(mergeHeaders({
+        "Content-Type": "application/json",
+        "X-Source-Id": sourceId,
+        "X-Manager": "true",
+      })),
+      body: JSON.stringify(data),
+    };
+    return request(`/market/skills/${itemId}`, opts);
   },
 
   listUserMarketSkills: async (

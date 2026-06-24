@@ -446,6 +446,49 @@ class SkillRegistry:
             logger.warning("Failed to update swe_skills: %s", e)
             return False
 
+    async def update_cn_name_by_skill_id(
+        self,
+        skill_id: str,
+        tenant_id: str,
+        cn_name: str,
+    ) -> bool:
+        """按 skill_id 更新 cn_name，只更新 marketplace 来源.
+
+        用于市场技能中文名同步时，精准定位已分发用户的技能记录，
+        避免误更新同名自建技能（skill_name 相同但 skill_id 不同）。
+
+        Args:
+            skill_id: 技能唯一标识符
+            tenant_id: 租户ID
+            cn_name: 新的中文展示名
+
+        Returns:
+            是否成功更新
+        """
+        if not self.is_connected():
+            logger.warning("Database not connected, skip update swe_skills")
+            return False
+
+        try:
+            await self.db.execute(
+                """
+                UPDATE swe_skills
+                SET cn_name = %s, updated_at = CURRENT_TIMESTAMP
+                WHERE skill_id = %s AND tenant_id = %s AND source = 'marketplace'
+                """,
+                (cn_name, skill_id, tenant_id),
+            )
+            logger.info(
+                "Updated swe_skills cn_name by skill_id: skill_id=%s, tenant=%s, cn_name=%s",
+                skill_id,
+                tenant_id,
+                cn_name,
+            )
+            return True
+        except Exception as e:
+            logger.warning("Failed to update cn_name by skill_id: %s", e)
+            return False
+
     async def list_unique_skills_by_source_id(
         self,
         source_id: str,

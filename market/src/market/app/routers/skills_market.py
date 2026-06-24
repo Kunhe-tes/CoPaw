@@ -1467,6 +1467,60 @@ async def get_skill_distributions(
     return distributions
 
 
+class _UpdateSkillRequest(BaseModel):
+    """更新技能中文名请求体."""
+
+    skill_id: str
+    chinese_name: str
+    sync_to_users: bool = False
+    target_user_ids: list[str] = Field(default_factory=list)
+
+
+class _UpdateSkillResponse(BaseModel):
+    """更新技能中文名响应体."""
+
+    success: bool
+    market_updated: bool
+    synced_users: int
+    skipped_users: int
+    errors: list[dict]
+
+
+@router.patch("/market/skills/{item_id}")
+async def update_skill_cn_name(
+    item_id: str,
+    req: _UpdateSkillRequest,
+    request: Request,
+    x_source_id: Optional[str] = Header(default=None, alias="X-Source-Id"),
+    x_manager: Optional[str] = Header(default=None, alias="X-Manager"),
+):
+    """更新市场技能中文名，可选同步用户空间."""
+    source_id = require_source_id(x_source_id)
+    _require_manager(x_manager)
+    svc = request.app.state.marketplace
+
+    # 从 MarketItem 获取 skill_name
+    items = load_index(svc.marketplace_root, source_id)
+    item = next(
+        (i for i in items if i.item_id == item_id and i.item_type == "skill"),
+        None,
+    )
+    if item is None:
+        raise HTTPException(status_code=404, detail="Skill not found")
+
+    result = await svc.update_skill_cn_name(
+        source_id=source_id,
+        item_id=item_id,
+        skill_id=req.skill_id,
+        skill_name=item.name,
+        chinese_name=req.chinese_name,
+        sync_to_users=req.sync_to_users,
+        target_user_ids=req.target_user_ids,
+    )
+
+    return _UpdateSkillResponse(**result)
+
+
 @router.post(
     "/market/skills/recall",
 )
