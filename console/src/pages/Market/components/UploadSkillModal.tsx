@@ -147,6 +147,7 @@ export default function UploadSkillModal({
           category_id: selectedCategory,
           overwrite,
           cn_name: cnName.trim(),
+          skill_id: skillId,  // 传入 parse-zip 生成的 skill_id
         }
       );
 

@@ -95,6 +95,7 @@ async function _uploadZipToMarket(
     rename_map?: Record<string, string>;
     category_id?: number;
     cn_name?: string;
+    skill_id?: string;
   }
 ): Promise<Record<string, unknown>> {
   const formData = new FormData();
@@ -118,6 +119,9 @@ async function _uploadZipToMarket(
   }
   if (options?.cn_name) {
     params.set("cn_name", options.cn_name);
+  }
+  if (options?.skill_id) {
+    params.set("skill_id", options.skill_id);
   }
   const qs = params.toString();
   const url = getApiUrl(`${endpoint}${qs ? `?${qs}` : ""}`);
@@ -368,6 +372,7 @@ export const marketApi = {
       category_id?: number;
       overwrite?: boolean;
       cn_name?: string;
+      skill_id?: string;
     }
   ): Promise<{
     imported: string[];

@@ -386,12 +386,14 @@ def _process_skill_upload_single(
     category_id: Optional[int],
     overwrite: bool = False,
     cn_name: str = "",
+    skill_id: str = "",  # parse-zip 生成的 skill_id
 ) -> tuple[Optional[str], Optional[dict], Optional[str], str, bool]:
     """处理单个技能的上架逻辑.
 
     Args:
         overwrite: 是否覆盖同名技能，默认 False（返回冲突）
         cn_name: 用户输入的中文展示名
+        skill_id: parse-zip 生成的 skill_id，前端传入确保一致性
 
     Returns:
         (imported_name, conflict_info, parsed_name_for_first, resolved_cn_name, version_unchanged)
@@ -401,13 +403,23 @@ def _process_skill_upload_single(
         skill_name,
     )
 
-    # 解析 cn_name 和 skill_id
-    resolved_cn_name, resolved_skill_id = _resolve_skill_cn_name_and_id(
-        skill_md,
-        name,
-        cn_name,
-        user_id,
-    )
+    # 直接使用前端传入的 cn_name 和 skill_id（parse-zip 已解析）
+    # 如果前端未传（向后兼容），则从 SKILL.md 解析
+    resolved_cn_name = cn_name.strip() if cn_name else ""
+    final_skill_id = skill_id.strip() if skill_id else ""
+
+    # 向后兼容：前端未传时，从 SKILL.md 解析
+    if not resolved_cn_name or not final_skill_id:
+        parsed_cn_name, parsed_skill_id = _resolve_skill_cn_name_and_id(
+            skill_md,
+            name,
+            resolved_cn_name,
+            user_id,
+        )
+        if not resolved_cn_name:
+            resolved_cn_name = parsed_cn_name
+        if not final_skill_id:
+            final_skill_id = parsed_skill_id
 
     # 检查市场是否已存在同名技能
     items = load_index(svc.marketplace_root, source_id)
@@ -433,7 +445,7 @@ def _process_skill_upload_single(
             existing,
             description,
             resolved_cn_name,
-            resolved_skill_id,
+            final_skill_id,
             user_id,
             user_name,
             category_id,
@@ -449,7 +461,7 @@ def _process_skill_upload_single(
             user_id,
             user_name,
             category_id,
-            skill_id=resolved_skill_id,
+            skill_id=final_skill_id,
         )
         items.append(item)
 
@@ -540,6 +552,7 @@ async def publish_skill_upload(
     category_id: Optional[int] = None,
     overwrite: bool = False,
     cn_name: str = "",
+    skill_id: str = "",  # parse-zip 生成的 skill_id
     x_source_id: Optional[str] = Header(default=None, alias="X-Source-Id"),
     x_manager: Optional[str] = Header(default=None, alias="X-Manager"),
     x_user_id: Optional[str] = Header(default=None, alias="X-User-Id"),
@@ -549,6 +562,7 @@ async def publish_skill_upload(
 
     Args:
         overwrite: 是否覆盖同名技能，默认 False（返回冲突提示）
+        skill_id: parse-zip 生成的 skill_id，前端传入确保一致性
     """
     source_id = require_source_id(x_source_id)
     _require_manager(x_manager)
@@ -599,8 +613,9 @@ async def publish_skill_upload(
                 x_user_id,
                 user_name,
                 category_id,
-                overwrite,  # 传递 overwrite 参数
-                cn_name,  # 传递中文展示名
+                overwrite,
+                cn_name,
+                skill_id,  # 传递 parse-zip 生成的 skill_id
             )
 
             if conflict:
