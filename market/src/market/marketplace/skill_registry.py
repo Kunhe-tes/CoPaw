@@ -474,7 +474,7 @@ class SkillRegistry:
                 """
                 UPDATE swe_skills
                 SET cn_name = %s, updated_at = CURRENT_TIMESTAMP
-                WHERE skill_id = %s AND tenant_id = %s AND source LIKE 'marketplace%'
+                WHERE skill_id = %s AND tenant_id = %s AND source LIKE 'marketplace%%'
                 """,
                 (cn_name, skill_id, tenant_id),
             )
