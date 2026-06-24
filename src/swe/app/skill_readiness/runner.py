@@ -18,6 +18,7 @@ from .models import (
     SkillReadinessOwner,
     SkillReadinessUserResult,
 )
+from .owner_resolver import OwnerLookupResult, SkillOwnerResolver
 from .store import SkillReadinessStore
 from .strategies import (
     SkillReadinessCheckContext,
@@ -38,6 +39,7 @@ class SkillReadinessRunner:
         store: SkillReadinessStore,
         registry: SkillReadinessStrategyRegistry,
         *,
+        owner_resolver: SkillOwnerResolver | None = None,
         multi_agent_manager: Any | None = None,
         agent_id: str = "default",
         user_concurrency: int = DEFAULT_USER_CONCURRENCY,
@@ -45,10 +47,30 @@ class SkillReadinessRunner:
     ):
         self.store = store
         self.registry = registry
+        self.owner_resolver = owner_resolver
         self.multi_agent_manager = multi_agent_manager
         self.agent_id = agent_id
         self.user_concurrency = max(1, user_concurrency)
         self.user_timeout_seconds = max(1.0, user_timeout_seconds)
+        self._owner_refresh_tasks: set[tuple[str, str]] = set()
+
+    def schedule_owner_refresh(
+        self,
+        *,
+        source_id: str,
+        skill_id: str,
+    ) -> asyncio.Task | None:
+        """后台刷新 overview 使用的 owner 快照，避免请求等待。"""
+        key = (source_id, skill_id)
+        if key in self._owner_refresh_tasks:
+            return None
+        self._owner_refresh_tasks.add(key)
+        task = asyncio.create_task(
+            self.refresh_owner_snapshot(source_id=source_id, skill_id=skill_id),
+            name=f"skill-readiness-owner-refresh-{source_id}-{skill_id}",
+        )
+        task.add_done_callback(lambda _task: self._owner_refresh_tasks.discard(key))
+        return task
 
     def schedule(
         self,
@@ -56,8 +78,8 @@ class SkillReadinessRunner:
         run_id: str,
         source_id: str,
         skill_id: str,
-        owners: list[SkillReadinessOwner],
         config: SkillReadinessConfig,
+        owners: list[SkillReadinessOwner] | None = None,
         partial_failure_summary: str | None = None,
     ) -> asyncio.Task:
         """创建后台任务，调用方不需要等待结果。"""
@@ -79,12 +101,30 @@ class SkillReadinessRunner:
         run_id: str,
         source_id: str,
         skill_id: str,
-        owners: list[SkillReadinessOwner],
         config: SkillReadinessConfig,
+        owners: list[SkillReadinessOwner] | None = None,
         partial_failure_summary: str | None = None,
     ) -> None:
         """执行完整 owner 集合的检查并更新运行状态。"""
         try:
+            if owners is None:
+                owner_lookup = await self._resolve_owners(source_id, skill_id)
+                await self._record_owner_snapshot(source_id, skill_id, owner_lookup)
+                owners = owner_lookup.owners
+                partial_failure_summary = _join_failure_summaries(
+                    partial_failure_summary,
+                    owner_lookup.failure_summary,
+                )
+                if not owners and owner_lookup.failed_users:
+                    await self.store.update_run_progress(
+                        run_id,
+                        total_users=owner_lookup.total_users,
+                        status="failed",
+                        failure_summary=partial_failure_summary,
+                        completed_at=_utc_now(),
+                    )
+                    return
+
             await self.store.update_run_progress(
                 run_id,
                 total_users=len(owners),
@@ -141,6 +181,73 @@ class SkillReadinessRunner:
                 failure_summary=str(exc),
                 completed_at=_utc_now(),
             )
+
+    async def refresh_owner_snapshot(
+        self,
+        *,
+        source_id: str,
+        skill_id: str,
+    ) -> None:
+        """异步刷新 owner 快照，供 overview 下次读取。"""
+        try:
+            await self.store.mark_owner_lookup_running(source_id, skill_id)
+            owner_lookup = await self._resolve_owners(source_id, skill_id)
+            await self._record_owner_snapshot(source_id, skill_id, owner_lookup)
+        except Exception:  # noqa: BLE001
+            logger.exception(
+                "skill readiness owner refresh failed: %s/%s",
+                source_id,
+                skill_id,
+            )
+
+    async def _resolve_owners(
+        self,
+        source_id: str,
+        skill_id: str,
+    ) -> OwnerLookupResult:
+        if self.owner_resolver is None:
+            return OwnerLookupResult(
+                owners=[],
+                total_users=0,
+                failed_users=1,
+                failures=["owner resolver unavailable"],
+            )
+        try:
+            return await self.owner_resolver.resolve_owners(source_id, skill_id)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "skill readiness owner lookup failed: %s/%s",
+                source_id,
+                skill_id,
+                exc_info=True,
+            )
+            return OwnerLookupResult(
+                owners=[],
+                total_users=0,
+                failed_users=1,
+                failures=[str(exc)],
+            )
+
+    async def _record_owner_snapshot(
+        self,
+        source_id: str,
+        skill_id: str,
+        owner_lookup: OwnerLookupResult,
+    ) -> None:
+        status = (
+            "failed"
+            if not owner_lookup.owners and owner_lookup.failed_users
+            else "completed"
+        )
+        await self.store.record_owner_snapshot(
+            source_id,
+            skill_id,
+            status=status,
+            total_users=owner_lookup.total_users,
+            owners=owner_lookup.owners,
+            failed_users=owner_lookup.failed_users,
+            failure_summary=owner_lookup.failure_summary,
+        )
 
     async def _run_one_user_guarded(
         self,

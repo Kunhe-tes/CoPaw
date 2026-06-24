@@ -3,7 +3,6 @@
 
 from __future__ import annotations
 
-import logging
 from typing import Any
 
 from .models import (
@@ -16,12 +15,10 @@ from .models import (
     SkillReadinessRunSummary,
     SkillReadinessStartRunResponse,
 )
-from .owner_resolver import OwnerLookupResult, SkillOwnerResolver
+from .owner_resolver import SkillOwnerResolver
 from .runner import SkillReadinessRunner
 from .store import SkillReadinessStore
 from .strategies import SkillReadinessStrategyRegistry
-
-logger = logging.getLogger(__name__)
 
 
 class SkillReadinessConfigMissing(ValueError):
@@ -42,12 +39,10 @@ class SkillReadinessService:
     def __init__(
         self,
         store: SkillReadinessStore,
-        owner_resolver: SkillOwnerResolver,
         registry: SkillReadinessStrategyRegistry,
         runner: SkillReadinessRunner,
     ):
         self.store = store
-        self.owner_resolver = owner_resolver
         self.registry = registry
         self.runner = runner
 
@@ -57,23 +52,34 @@ class SkillReadinessService:
         skill_id: str,
     ) -> SkillReadinessOverview:
         config_record = await self.store.get_config(skill_id)
-        owner_lookup = await self._resolve_owners(source_id, skill_id)
+        owner_snapshot = await self.store.get_owner_snapshot(source_id, skill_id)
+        self.runner.schedule_owner_refresh(
+            source_id=source_id,
+            skill_id=skill_id,
+        )
         latest_run = await self.store.get_latest_run(source_id, skill_id)
         latest_summary = await self._build_run_summary(latest_run)
 
         config = config_record.config if config_record else None
+        owner_summary = (
+            owner_snapshot.owner_summary
+            if owner_snapshot is not None
+            else SkillReadinessOwnerSummary()
+        )
         return SkillReadinessOverview(
             skill_id=skill_id,
             config_found=config is not None,
             startable=bool(config and config.is_startable),
             config_message=_config_message(config),
             config_checks=self._config_check_summaries(config),
-            owner_summary=SkillReadinessOwnerSummary(
-                total_users=len(owner_lookup.owners),
-                lookup_failed_users=owner_lookup.failed_users,
-                failure_summary=owner_lookup.failure_summary,
+            owner_summary=owner_summary,
+            owners=owner_snapshot.owners if owner_snapshot is not None else [],
+            owner_lookup_status=(
+                owner_snapshot.status if owner_snapshot is not None else "running"
             ),
-            owners=owner_lookup.owners,
+            owner_lookup_updated_at=(
+                owner_snapshot.updated_at if owner_snapshot is not None else None
+            ),
             latest_run=latest_summary,
         )
 
@@ -93,35 +99,20 @@ class SkillReadinessService:
                 "skill readiness config has no enabled checks",
             )
 
-        owner_lookup = await self._resolve_owners(source_id, skill_id)
         run, reused = await self.store.get_or_create_running_run(
             source_id,
             skill_id,
             config,
-            owner_lookup_summary=owner_lookup.as_summary(),
+            owner_lookup_summary={"status": "pending"},
         )
         if reused:
             return SkillReadinessStartRunResponse(run=run, reused=True)
-        if not owner_lookup.owners and owner_lookup.failed_users:
-            failed_run = await self.store.update_run_progress(
-                run.run_id,
-                total_users=owner_lookup.total_users,
-                status="failed",
-                failure_summary=owner_lookup.failure_summary,
-            )
-            return SkillReadinessStartRunResponse(run=failed_run, reused=False)
 
-        run = await self.store.update_run_progress(
-            run.run_id,
-            total_users=len(owner_lookup.owners),
-        )
         self.runner.schedule(
             run_id=run.run_id,
             source_id=source_id,
             skill_id=skill_id,
-            owners=owner_lookup.owners,
             config=config,
-            partial_failure_summary=owner_lookup.failure_summary,
         )
         return SkillReadinessStartRunResponse(run=run, reused=False)
 
@@ -156,27 +147,6 @@ class SkillReadinessService:
             page=max(page, 1),
             page_size=min(max(page_size, 1), 100),
         )
-
-    async def _resolve_owners(
-        self,
-        source_id: str,
-        skill_id: str,
-    ) -> OwnerLookupResult:
-        try:
-            return await self.owner_resolver.resolve_owners(source_id, skill_id)
-        except Exception as exc:  # noqa: BLE001
-            logger.warning(
-                "skill readiness owner lookup failed: %s/%s",
-                source_id,
-                skill_id,
-                exc_info=True,
-            )
-            return OwnerLookupResult(
-                owners=[],
-                total_users=0,
-                failed_users=1,
-                failures=[str(exc)],
-            )
 
     def _config_check_summaries(
         self,
@@ -223,14 +193,15 @@ def build_skill_readiness_service(
     from .strategies import build_default_strategy_registry
 
     registry = build_default_strategy_registry()
+    owner_resolver = SkillOwnerResolver()
     runner = SkillReadinessRunner(
         store,
         registry,
+        owner_resolver=owner_resolver,
         multi_agent_manager=multi_agent_manager,
     )
     return SkillReadinessService(
         store=store,
-        owner_resolver=SkillOwnerResolver(),
         registry=registry,
         runner=runner,
     )

@@ -13,6 +13,7 @@ from swe.app.skill_readiness.models import (
     SkillReadinessConfig,
     SkillReadinessOwner,
 )
+from swe.app.skill_readiness.owner_resolver import OwnerLookupResult
 from swe.app.skill_readiness.runner import SkillReadinessRunner
 from swe.app.skill_readiness.strategies import SkillReadinessCheckContext
 from swe.config.context import (
@@ -73,12 +74,30 @@ class _ProgressStore:
     def __init__(self):
         self.progress_updates = []
         self.user_results = []
+        self.owner_snapshots = []
+        self.owner_lookup_running = []
 
     async def update_run_progress(self, run_id, **kwargs):
         self.progress_updates.append(kwargs)
 
     async def record_user_result(self, run_id, user_result):
         self.user_results.append(user_result)
+
+    async def mark_owner_lookup_running(self, source_id, skill_id):
+        self.owner_lookup_running.append((source_id, skill_id))
+
+    async def record_owner_snapshot(self, source_id, skill_id, **kwargs):
+        self.owner_snapshots.append((source_id, skill_id, kwargs))
+
+
+class _OwnerResolver:
+    def __init__(self, result):
+        self.result = result
+        self.calls = []
+
+    async def resolve_owners(self, source_id, skill_id):
+        self.calls.append((source_id, skill_id))
+        return self.result
 
 
 @pytest.mark.asyncio
@@ -131,6 +150,98 @@ async def test_user_check_passes_request_headers_to_mcp_context():
         reset_current_passthrough_headers(token)
 
     assert strategy.seen == [{"cookie": "auth=token-1"}]
+
+
+@pytest.mark.asyncio
+async def test_run_resolves_owners_when_not_provided():
+    """start_run 调度后由 runner 在后台解析 owner 并写入快照。"""
+    store = _ProgressStore()
+    strategy = _ContextRecordingStrategy()
+    resolver = _OwnerResolver(
+        OwnerLookupResult(
+            owners=[SkillReadinessOwner(user_id="alice")],
+            total_users=2,
+            failed_users=1,
+            failures=["bob: market down"],
+        ),
+    )
+    runner = SkillReadinessRunner(
+        store=store,
+        registry=_Registry(strategy),
+        owner_resolver=resolver,
+        user_concurrency=1,
+    )
+
+    await runner.run(
+        run_id="run-1",
+        source_id="source-a",
+        skill_id="skill-a",
+        config=SkillReadinessConfig(
+            checks=[SkillReadinessCheckConfig(name="context_check")],
+        ),
+    )
+
+    assert resolver.calls == [("source-a", "skill-a")]
+    assert store.owner_snapshots[0][2]["status"] == "completed"
+    assert store.owner_snapshots[0][2]["failed_users"] == 1
+    assert store.progress_updates[0]["total_users"] == 1
+    assert store.progress_updates[-1]["status"] == "partial"
+    assert [result.user_id for result in store.user_results] == ["alice"]
+
+
+@pytest.mark.asyncio
+async def test_run_marks_failed_when_owner_lookup_all_fails():
+    """owner 全量解析失败时 run 在后台失败，而不是阻塞 start_run。"""
+    store = _ProgressStore()
+    resolver = _OwnerResolver(
+        OwnerLookupResult(
+            owners=[],
+            total_users=2,
+            failed_users=2,
+            failures=["market down", "tenant source down"],
+        ),
+    )
+    runner = SkillReadinessRunner(
+        store=store,
+        registry=_Registry(_ContextRecordingStrategy()),
+        owner_resolver=resolver,
+    )
+
+    await runner.run(
+        run_id="run-1",
+        source_id="source-a",
+        skill_id="skill-a",
+        config=SkillReadinessConfig(
+            checks=[SkillReadinessCheckConfig(name="context_check")],
+        ),
+    )
+
+    assert store.owner_snapshots[0][2]["status"] == "failed"
+    assert store.progress_updates[-1]["status"] == "failed"
+    assert store.progress_updates[-1]["total_users"] == 2
+    assert store.user_results == []
+
+
+@pytest.mark.asyncio
+async def test_refresh_owner_snapshot_marks_running_and_records_result():
+    """overview 触发刷新时先标记 running，再保存最新快照。"""
+    store = _ProgressStore()
+    resolver = _OwnerResolver(
+        OwnerLookupResult(
+            owners=[SkillReadinessOwner(user_id="alice")],
+            total_users=1,
+        ),
+    )
+    runner = SkillReadinessRunner(
+        store=store,
+        registry=_Registry(_ContextRecordingStrategy()),
+        owner_resolver=resolver,
+    )
+
+    await runner.refresh_owner_snapshot(source_id="source-a", skill_id="skill-a")
+
+    assert store.owner_lookup_running == [("source-a", "skill-a")]
+    assert store.owner_snapshots[0][2]["owners"][0].user_id == "alice"
 
 
 class _FailingStore(_ProgressStore):

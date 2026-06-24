@@ -11,9 +11,9 @@ from swe.app.skill_readiness.models import (
     SkillReadinessConfig,
     SkillReadinessConfigRecord,
     SkillReadinessOwner,
+    SkillReadinessOwnerSnapshot,
     SkillReadinessRunProgress,
 )
-from swe.app.skill_readiness.owner_resolver import OwnerLookupResult
 from swe.app.skill_readiness.service import (
     SkillReadinessConfigMissing,
     SkillReadinessRunNotFound,
@@ -41,6 +41,7 @@ class _Store:
         self.running = None
         self.created = []
         self.latest = None
+        self.owner_snapshot = None
         self.list_args = []
         self.get_or_create_calls = []
 
@@ -51,6 +52,9 @@ class _Store:
 
     async def get_latest_run(self, source_id, skill_id):
         return self.latest
+
+    async def get_owner_snapshot(self, source_id, skill_id):
+        return self.owner_snapshot
 
     async def get_check_summaries(self, run_id):
         return []
@@ -110,38 +114,21 @@ class _Store:
         return [], 0
 
 
-class _Resolver:
-    async def resolve_owners(self, source_id, skill_id):
-        return OwnerLookupResult(
-            owners=[SkillReadinessOwner(user_id="alice")],
-            total_users=1,
-            failed_users=1,
-            failures=["bob: market down"],
-        )
-
-
-class _AllFailedResolver:
-    async def resolve_owners(self, source_id, skill_id):
-        return OwnerLookupResult(
-            owners=[],
-            total_users=2,
-            failed_users=2,
-            failures=["market down", "tenant source down"],
-        )
-
-
 class _Runner:
     def __init__(self):
         self.scheduled = []
+        self.owner_refreshes = []
 
     def schedule(self, **kwargs):
         self.scheduled.append(kwargs)
 
+    def schedule_owner_refresh(self, **kwargs):
+        self.owner_refreshes.append(kwargs)
 
-def _service(store=None, resolver=None, runner=None):
+
+def _service(store=None, runner=None):
     return SkillReadinessService(
         store=store or _Store(),
-        owner_resolver=resolver or _Resolver(),
         registry=build_default_strategy_registry(),
         runner=runner or _Runner(),
     )
@@ -149,7 +136,23 @@ def _service(store=None, resolver=None, runner=None):
 
 @pytest.mark.asyncio
 async def test_overview_reports_config_owner_and_latest_summary():
-    result = await _service().get_overview("source-a", "skill-a")
+    store = _Store()
+    runner = _Runner()
+    store.owner_snapshot = SkillReadinessOwnerSnapshot(
+        source_id="source-a",
+        skill_id="skill-a",
+        status="completed",
+        total_users=2,
+        owner_users=1,
+        failed_users=1,
+        failure_summary="bob: market down",
+        owners=[SkillReadinessOwner(user_id="alice")],
+    )
+
+    result = await _service(store=store, runner=runner).get_overview(
+        "source-a",
+        "skill-a",
+    )
 
     assert result.config_found is True
     assert result.startable is True
@@ -157,6 +160,24 @@ async def test_overview_reports_config_owner_and_latest_summary():
     assert result.config_checks[0].params == {"required": True}
     assert result.owner_summary.lookup_failed_users == 1
     assert [owner.user_id for owner in result.owners] == ["alice"]
+    assert result.owner_lookup_status == "completed"
+    assert runner.owner_refreshes == [
+        {"source_id": "source-a", "skill_id": "skill-a"},
+    ]
+
+
+@pytest.mark.asyncio
+async def test_overview_without_snapshot_reports_owner_lookup_running():
+    runner = _Runner()
+
+    result = await _service(runner=runner).get_overview("source-a", "skill-a")
+
+    assert result.owner_lookup_status == "running"
+    assert result.owner_summary.total_users == 0
+    assert result.owners == []
+    assert runner.owner_refreshes == [
+        {"source_id": "source-a", "skill_id": "skill-a"},
+    ]
 
 
 @pytest.mark.asyncio
@@ -193,8 +214,10 @@ async def test_start_run_schedules_owner_checks_and_records_partial_summary():
     )
 
     assert response.reused is False
-    assert response.run.total_users == 1
-    assert runner.scheduled[0]["partial_failure_summary"] == "bob: market down"
+    assert response.run.total_users == 0
+    assert runner.scheduled[0]["run_id"] == "run-created"
+    assert "owners" not in runner.scheduled[0]
+    assert "partial_failure_summary" not in runner.scheduled[0]
 
 
 @pytest.mark.asyncio
@@ -207,23 +230,22 @@ async def test_start_run_uses_atomic_get_or_create_after_owner_lookup():
 
     assert len(store.get_or_create_calls) == 1
     assert store.get_or_create_calls[0][0:2] == ("source-a", "skill-a")
+    assert store.get_or_create_calls[0][3] == {"status": "pending"}
 
 
 @pytest.mark.asyncio
-async def test_start_run_marks_run_failed_when_owner_lookup_all_fails():
+async def test_start_run_returns_running_run_before_owner_lookup_finishes():
     runner = _Runner()
     store = _Store()
 
-    response = await _service(
-        store=store,
-        resolver=_AllFailedResolver(),
-        runner=runner,
-    ).start_run("source-a", "skill-a")
+    response = await _service(store=store, runner=runner).start_run(
+        "source-a",
+        "skill-a",
+    )
 
-    assert response.run.status == "failed"
-    assert response.run.total_users == 2
-    assert response.run.failure_summary == "market down; tenant source down"
-    assert runner.scheduled == []
+    assert response.run.status == "running"
+    assert response.run.total_users == 0
+    assert runner.scheduled[0]["run_id"] == "run-created"
 
 
 @pytest.mark.asyncio

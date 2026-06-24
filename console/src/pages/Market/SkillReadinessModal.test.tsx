@@ -71,6 +71,8 @@ function buildOverview(
         has_update: true,
       },
     ],
+    owner_lookup_status: "completed",
+    owner_lookup_updated_at: null,
     latest_run: null,
     ...overrides,
   };

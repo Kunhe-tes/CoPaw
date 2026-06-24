@@ -527,6 +527,7 @@ export function SkillReadinessModal({
   const ownerSummary = overview?.owner_summary ?? DEFAULT_OWNER_SUMMARY;
   const configChecks = overview?.config_checks ?? [];
   const ownerRows = overview?.owners ?? [];
+  const ownerLookupRunning = overview?.owner_lookup_status === "running";
 
   const ownerColumns = [
     {
@@ -940,7 +941,11 @@ export function SkillReadinessModal({
                     showTotal: (total) => `共 ${total} 个用户`,
                   }}
                   columns={ownerColumns}
-                  locale={{ emptyText: "当前没有查询到分配用户" }}
+                  locale={{
+                    emptyText: ownerLookupRunning
+                      ? "正在生成中"
+                      : "当前没有查询到分配用户",
+                  }}
                   scroll={{ x: 900 }}
                 />
               </div>
