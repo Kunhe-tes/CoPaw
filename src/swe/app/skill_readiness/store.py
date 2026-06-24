@@ -167,10 +167,10 @@ class SkillReadinessStore:
         self,
         source_id: str,
         skill_id: str,
-    ) -> None:
-        """标记 owner 查询正在刷新；已有快照内容保留给 overview 展示。"""
+    ) -> bool:
+        """抢占 owner 刷新权；已有 running 刷新时返回 False。"""
         db = self._require_db()
-        await self._call_db(
+        affected = await self._call_db(
             "mark owner lookup running",
             db.execute,
             f"""
@@ -180,10 +180,11 @@ class SkillReadinessStore:
                 VALUES (%s, %s, 'running', '[]')
                 ON DUPLICATE KEY UPDATE
                     status = 'running',
-                    updated_at = CURRENT_TIMESTAMP
+                    updated_at = updated_at
             """,
             (source_id, skill_id),
         )
+        return int(affected or 0) > 0
 
     async def record_owner_snapshot(
         self,

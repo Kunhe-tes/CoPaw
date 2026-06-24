@@ -3,12 +3,15 @@
 
 from __future__ import annotations
 
+from datetime import datetime
 from typing import Any
 
 from .models import (
+    OwnerLookupStatus,
     SkillReadinessConfig,
     SkillReadinessConfigCheckSummary,
     SkillReadinessOverview,
+    SkillReadinessOwnerSnapshot,
     SkillReadinessOwnerSummary,
     SkillReadinessResultsPage,
     SkillReadinessRunProgress,
@@ -53,10 +56,6 @@ class SkillReadinessService:
     ) -> SkillReadinessOverview:
         config_record = await self.store.get_config(skill_id)
         owner_snapshot = await self.store.get_owner_snapshot(source_id, skill_id)
-        self.runner.schedule_owner_refresh(
-            source_id=source_id,
-            skill_id=skill_id,
-        )
         latest_run = await self.store.get_latest_run(source_id, skill_id)
         latest_summary = await self._build_run_summary(latest_run)
 
@@ -74,12 +73,11 @@ class SkillReadinessService:
             config_checks=self._config_check_summaries(config),
             owner_summary=owner_summary,
             owners=owner_snapshot.owners if owner_snapshot is not None else [],
-            owner_lookup_status=(
-                owner_snapshot.status if owner_snapshot is not None else "running"
+            owner_lookup_status=_owner_lookup_status(
+                owner_snapshot,
+                latest_summary,
             ),
-            owner_lookup_updated_at=(
-                owner_snapshot.updated_at if owner_snapshot is not None else None
-            ),
+            owner_lookup_updated_at=_owner_snapshot_data_time(owner_snapshot),
             latest_run=latest_summary,
         )
 
@@ -182,6 +180,33 @@ def _config_message(config: SkillReadinessConfig | None) -> str:
     if not config.is_startable:
         return "自检配置没有启用的检查项"
     return "已查询到自检配置"
+
+
+def _owner_snapshot_data_time(
+    owner_snapshot: SkillReadinessOwnerSnapshot | None,
+) -> datetime | None:
+    if owner_snapshot is None:
+        return None
+    if owner_snapshot.status != "running":
+        return owner_snapshot.updated_at
+    if (
+        owner_snapshot.total_users
+        or owner_snapshot.owners
+        or owner_snapshot.failed_users
+    ):
+        return owner_snapshot.updated_at
+    return None
+
+
+def _owner_lookup_status(
+    owner_snapshot: SkillReadinessOwnerSnapshot | None,
+    latest_run: SkillReadinessRunSummary | None,
+) -> OwnerLookupStatus:
+    if owner_snapshot is not None:
+        return owner_snapshot.status
+    if latest_run is not None and latest_run.status == "running":
+        return "running"
+    return "idle"
 
 
 def build_skill_readiness_service(

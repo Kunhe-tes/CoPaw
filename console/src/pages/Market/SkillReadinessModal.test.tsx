@@ -194,6 +194,47 @@ describe("SkillReadinessModal", () => {
     expect(await screen.findByText(/run-1/)).toBeInTheDocument();
   });
 
+  it("shows owner lookup data time on overview results", async () => {
+    mocks.getSkillReadinessOverview.mockResolvedValue(
+      buildOverview({
+        owner_lookup_updated_at: "2026-06-24T10:30:00Z",
+      }),
+    );
+
+    render(
+      <SkillReadinessModal open skill={buildSkill()} onClose={vi.fn()} />,
+    );
+
+    expect(await screen.findByText(/数据时间：/)).toHaveTextContent(
+      "数据时间：",
+    );
+    expect(await screen.findByText(/2026/)).toBeInTheDocument();
+  });
+
+  it("shows start hint before owner data is generated", async () => {
+    mocks.getSkillReadinessOverview.mockResolvedValue(
+      buildOverview({
+        owner_summary: {
+          total_users: 0,
+          lookup_failed_users: 0,
+          failure_summary: null,
+        },
+        owners: [],
+        owner_lookup_status: "idle",
+        owner_lookup_updated_at: null,
+      }),
+    );
+
+    render(
+      <SkillReadinessModal open skill={buildSkill()} onClose={vi.fn()} />,
+    );
+
+    expect(
+      await screen.findByText("开始检查后生成拥有用户和检查结果"),
+    ).toBeInTheDocument();
+    expect(await screen.findByText("数据时间：开始检查后生成")).toBeInTheDocument();
+  });
+
   it("ignores stale overview responses after switching skills", async () => {
     let resolveFirst: (value: SkillReadinessOverview) => void = () => {};
     let resolveSecond: (value: SkillReadinessOverview) => void = () => {};

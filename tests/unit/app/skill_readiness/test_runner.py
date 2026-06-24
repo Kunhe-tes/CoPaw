@@ -76,6 +76,7 @@ class _ProgressStore:
         self.user_results = []
         self.owner_snapshots = []
         self.owner_lookup_running = []
+        self.owner_lookup_claimed = True
 
     async def update_run_progress(self, run_id, **kwargs):
         self.progress_updates.append(kwargs)
@@ -85,6 +86,7 @@ class _ProgressStore:
 
     async def mark_owner_lookup_running(self, source_id, skill_id):
         self.owner_lookup_running.append((source_id, skill_id))
+        return self.owner_lookup_claimed
 
     async def record_owner_snapshot(self, source_id, skill_id, **kwargs):
         self.owner_snapshots.append((source_id, skill_id, kwargs))
@@ -182,6 +184,7 @@ async def test_run_resolves_owners_when_not_provided():
     )
 
     assert resolver.calls == [("source-a", "skill-a")]
+    assert store.owner_lookup_running == [("source-a", "skill-a")]
     assert store.owner_snapshots[0][2]["status"] == "completed"
     assert store.owner_snapshots[0][2]["failed_users"] == 1
     assert store.progress_updates[0]["total_users"] == 1
@@ -242,6 +245,30 @@ async def test_refresh_owner_snapshot_marks_running_and_records_result():
 
     assert store.owner_lookup_running == [("source-a", "skill-a")]
     assert store.owner_snapshots[0][2]["owners"][0].user_id == "alice"
+
+
+@pytest.mark.asyncio
+async def test_refresh_owner_snapshot_skips_when_db_claim_is_running():
+    """其他实例已在刷新同一 source/skill 时，本实例不再解析 owner。"""
+    store = _ProgressStore()
+    store.owner_lookup_claimed = False
+    resolver = _OwnerResolver(
+        OwnerLookupResult(
+            owners=[SkillReadinessOwner(user_id="alice")],
+            total_users=1,
+        ),
+    )
+    runner = SkillReadinessRunner(
+        store=store,
+        registry=_Registry(_ContextRecordingStrategy()),
+        owner_resolver=resolver,
+    )
+
+    await runner.refresh_owner_snapshot(source_id="source-a", skill_id="skill-a")
+
+    assert store.owner_lookup_running == [("source-a", "skill-a")]
+    assert resolver.calls == []
+    assert store.owner_snapshots == []
 
 
 class _FailingStore(_ProgressStore):

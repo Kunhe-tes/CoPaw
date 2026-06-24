@@ -202,12 +202,28 @@ async def test_mark_owner_lookup_running_preserves_cached_snapshot(
     mock_db,
 ) -> None:
     """刷新开始时只标记 running，不清空已缓存的 owner 列表。"""
-    await store.mark_owner_lookup_running("source-a", "skill-a")
+    claimed = await store.mark_owner_lookup_running("source-a", "skill-a")
 
     query, params = mock_db.execute.await_args.args
+    assert claimed is True
     assert "ON DUPLICATE KEY UPDATE" in query
+    assert "status = 'running'" in query
     assert "owners_json = VALUES" not in query
+    assert "updated_at = updated_at" in query
     assert params == ("source-a", "skill-a")
+
+
+@pytest.mark.asyncio
+async def test_mark_owner_lookup_running_returns_false_for_existing_running(
+    store,
+    mock_db,
+) -> None:
+    """DB 层已有 running claim 时不再触发新的 owner 刷新。"""
+    mock_db.execute.return_value = 0
+
+    claimed = await store.mark_owner_lookup_running("source-a", "skill-a")
+
+    assert claimed is False
 
 
 @pytest.mark.asyncio

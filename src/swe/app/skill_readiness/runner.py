@@ -108,6 +108,7 @@ class SkillReadinessRunner:
         """执行完整 owner 集合的检查并更新运行状态。"""
         try:
             if owners is None:
+                await self.store.mark_owner_lookup_running(source_id, skill_id)
                 owner_lookup = await self._resolve_owners(source_id, skill_id)
                 await self._record_owner_snapshot(source_id, skill_id, owner_lookup)
                 owners = owner_lookup.owners
@@ -190,7 +191,12 @@ class SkillReadinessRunner:
     ) -> None:
         """异步刷新 owner 快照，供 overview 下次读取。"""
         try:
-            await self.store.mark_owner_lookup_running(source_id, skill_id)
+            claimed = await self.store.mark_owner_lookup_running(
+                source_id,
+                skill_id,
+            )
+            if not claimed:
+                return
             owner_lookup = await self._resolve_owners(source_id, skill_id)
             await self._record_owner_snapshot(source_id, skill_id, owner_lookup)
         except Exception:  # noqa: BLE001

@@ -528,6 +528,24 @@ export function SkillReadinessModal({
   const configChecks = overview?.config_checks ?? [];
   const ownerRows = overview?.owners ?? [];
   const ownerLookupRunning = overview?.owner_lookup_status === "running";
+  const ownerLookupIdle = overview?.owner_lookup_status === "idle";
+  let ownerLookupDataTime = "-";
+  if (ownerLookupRunning) {
+    ownerLookupDataTime = "正在生成中";
+  } else if (ownerLookupIdle) {
+    ownerLookupDataTime = "开始检查后生成";
+  }
+  if (overview?.owner_lookup_updated_at) {
+    ownerLookupDataTime = `${formatDateTime(overview.owner_lookup_updated_at)}${
+      ownerLookupRunning ? "（检查中）" : ""
+    }`;
+  }
+  let ownerEmptyText = "当前没有查询到分配用户";
+  if (ownerLookupRunning) {
+    ownerEmptyText = "正在生成中";
+  } else if (ownerLookupIdle) {
+    ownerEmptyText = "开始检查后生成拥有用户和检查结果";
+  }
 
   const ownerColumns = [
     {
@@ -928,7 +946,20 @@ export function SkillReadinessModal({
               {configPanel}
 
               <div>
-                <Text strong>拥有用户</Text>
+                <div
+                  style={{
+                    display: "flex",
+                    alignItems: "center",
+                    justifyContent: "space-between",
+                    gap: 8,
+                    flexWrap: "wrap",
+                  }}
+                >
+                  <Text strong>拥有用户</Text>
+                  <Text type="secondary" style={{ fontSize: 12 }}>
+                    数据时间：{ownerLookupDataTime}
+                  </Text>
+                </div>
                 <Table
                   rowKey="user_id"
                   size="small"
@@ -942,9 +973,7 @@ export function SkillReadinessModal({
                   }}
                   columns={ownerColumns}
                   locale={{
-                    emptyText: ownerLookupRunning
-                      ? "正在生成中"
-                      : "当前没有查询到分配用户",
+                    emptyText: ownerEmptyText,
                   }}
                   scroll={{ x: 900 }}
                 />

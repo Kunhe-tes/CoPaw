@@ -138,6 +138,7 @@ def _service(store=None, runner=None):
 async def test_overview_reports_config_owner_and_latest_summary():
     store = _Store()
     runner = _Runner()
+    updated_at = datetime(2026, 6, 24, 10, 30)
     store.owner_snapshot = SkillReadinessOwnerSnapshot(
         source_id="source-a",
         skill_id="skill-a",
@@ -147,6 +148,7 @@ async def test_overview_reports_config_owner_and_latest_summary():
         failed_users=1,
         failure_summary="bob: market down",
         owners=[SkillReadinessOwner(user_id="alice")],
+        updated_at=updated_at,
     )
 
     result = await _service(store=store, runner=runner).get_overview(
@@ -161,23 +163,54 @@ async def test_overview_reports_config_owner_and_latest_summary():
     assert result.owner_summary.lookup_failed_users == 1
     assert [owner.user_id for owner in result.owners] == ["alice"]
     assert result.owner_lookup_status == "completed"
-    assert runner.owner_refreshes == [
-        {"source_id": "source-a", "skill_id": "skill-a"},
-    ]
+    assert result.owner_lookup_updated_at == updated_at
+    assert runner.owner_refreshes == []
 
 
 @pytest.mark.asyncio
-async def test_overview_without_snapshot_reports_owner_lookup_running():
+async def test_overview_without_snapshot_reports_idle_before_run_starts():
     runner = _Runner()
 
     result = await _service(runner=runner).get_overview("source-a", "skill-a")
 
-    assert result.owner_lookup_status == "running"
+    assert result.owner_lookup_status == "idle"
+    assert result.owner_lookup_updated_at is None
     assert result.owner_summary.total_users == 0
     assert result.owners == []
-    assert runner.owner_refreshes == [
-        {"source_id": "source-a", "skill_id": "skill-a"},
-    ]
+    assert runner.owner_refreshes == []
+
+
+@pytest.mark.asyncio
+async def test_overview_without_snapshot_reports_running_while_run_is_running():
+    store = _Store()
+    store.latest = SkillReadinessRunProgress(
+        run_id="run-1",
+        source_id="source-a",
+        skill_id="skill-a",
+        status="running",
+    )
+
+    result = await _service(store=store).get_overview("source-a", "skill-a")
+
+    assert result.owner_lookup_status == "running"
+    assert result.owner_lookup_updated_at is None
+    assert result.owners == []
+
+
+@pytest.mark.asyncio
+async def test_overview_running_placeholder_has_no_owner_data_time():
+    store = _Store()
+    store.owner_snapshot = SkillReadinessOwnerSnapshot(
+        source_id="source-a",
+        skill_id="skill-a",
+        status="running",
+        updated_at=datetime(2026, 6, 24, 10, 30),
+    )
+
+    result = await _service(store=store).get_overview("source-a", "skill-a")
+
+    assert result.owner_lookup_status == "running"
+    assert result.owner_lookup_updated_at is None
 
 
 @pytest.mark.asyncio
