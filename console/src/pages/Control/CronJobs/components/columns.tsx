@@ -16,6 +16,7 @@ type CronJob = CronJobSpecOutput;
 
 export interface BroadcastParentInfo {
   sourceJobId: string;
+  sourceJobName: string;
   sourceTenantId: string;
   sourceTenantName: string;
   sourceBbkId: string;
@@ -49,6 +50,7 @@ export function getBroadcastParentInfo(job: CronJob): BroadcastParentInfo {
   const meta = job.meta || {};
   return {
     sourceJobId: optionalMetaText(meta.broadcast_source_job_id),
+    sourceJobName: optionalMetaText(meta.broadcast_source_job_name),
     sourceTenantId: optionalMetaText(meta.broadcast_source_tenant_id),
     sourceTenantName: optionalMetaText(meta.broadcast_source_tenant_name),
     sourceBbkId: optionalMetaText(meta.broadcast_source_bbk_id),
@@ -60,17 +62,14 @@ export function isBroadcastChildJob(job: CronJob): boolean {
 }
 
 function formatParentUser(info: BroadcastParentInfo): string {
-  if (!info.sourceTenantId && !info.sourceTenantName && !info.sourceBbkId) {
+  if (!info.sourceTenantId && !info.sourceTenantName) {
     return "未记录";
   }
-  const userLabel = info.sourceTenantName
+  return info.sourceTenantName
     ? `${info.sourceTenantName}${
         info.sourceTenantId ? ` (${info.sourceTenantId})` : ""
       }`
     : info.sourceTenantId;
-  return [userLabel || "未记录", info.sourceBbkId ? `BBK: ${info.sourceBbkId}` : ""]
-    .filter(Boolean)
-    .join(" / ");
 }
 
 function renderBroadcastChildTag(record: CronJob) {
@@ -83,6 +82,10 @@ function renderBroadcastChildTag(record: CronJob) {
       <div>
         <span className={styles.broadcastChildPopoverLabel}>父用户</span>
         <span>{formatParentUser(parentInfo)}</span>
+      </div>
+      <div>
+        <span className={styles.broadcastChildPopoverLabel}>父任务</span>
+        <span>{parentInfo.sourceJobName || "未记录"}</span>
       </div>
       <div>
         <span className={styles.broadcastChildPopoverLabel}>父任务ID</span>

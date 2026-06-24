@@ -77,6 +77,7 @@ describe("CronJobs columns", () => {
     const job = buildCronJob({
       meta: {
         broadcast_source_job_id: "parent-job",
+        broadcast_source_job_name: "Parent Task",
         broadcast_source_tenant_id: "tenant-parent",
         broadcast_source_tenant_name: "Parent User",
         broadcast_source_bbk_id: "BBK001",
@@ -86,6 +87,7 @@ describe("CronJobs columns", () => {
     expect(isBroadcastChildJob(job)).toBe(true);
     expect(getBroadcastParentInfo(job)).toEqual({
       sourceJobId: "parent-job",
+      sourceJobName: "Parent Task",
       sourceTenantId: "tenant-parent",
       sourceTenantName: "Parent User",
       sourceBbkId: "BBK001",
