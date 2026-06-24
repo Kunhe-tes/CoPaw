@@ -90,7 +90,7 @@ The global Header and navigation use the Management Console theme even when disp
 The current baseline uses platform fonts so it works without downloading font assets or depending on a runtime font CDN.
 
 ```css
---console-font-ui: "Segoe UI", "Microsoft YaHei", "PingFang SC",
+--console-font-ui: "Microsoft YaHei", "PingFang SC",
   "Helvetica Neue", sans-serif;
 
 --console-font-editorial: Georgia, "Songti SC", "SimSun", serif;
@@ -177,7 +177,7 @@ Use a 4px base rhythm. Preferred steps: `4, 8, 12, 16, 20, 24, 32, 40`.
 
 - The Header and global navigation use white, low-distraction surfaces with restrained text hierarchy, light boundaries, and blue reserved for concise interaction emphasis.
 - The current page owns visual attention. Navigation uses pale blue hover and selection surfaces, moderate text weight, and restrained icon color.
-- All first-level navigation entries, including expandable groups and direct root links, use the same UI font, 13px size, 600 weight, and 36px line box. Second-level entries also use 13px but rely on 400 weight, indentation, quieter color, and selection treatment to preserve hierarchy.
+- All first-level navigation entries, including expandable groups and direct root links, use the same UI font, 14px size, 600 weight, and 36px line box. Second-level entries also use 14px but rely on 400 weight, indentation, quieter color, and selection treatment to preserve hierarchy.
 - Global navigation may appear beside the blue Conversation Workspace without changing either theme's identity.
 - Preserve menu structure, ordering, labels, routes, permissions, expanded groups, and collapse behavior.
 - Preserve the `hideMenu` contract: embedded hosts may remove both Header and global Sidebar.

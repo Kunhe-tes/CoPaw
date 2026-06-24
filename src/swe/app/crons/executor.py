@@ -946,6 +946,7 @@ class CronExecutor:
         )
         if trace_id:
             req["trace_id"] = trace_id
+            req["trace_attach_existing"] = True
 
         return runtime_tenant_id, trace_id, req, AgentStreamState()
 
