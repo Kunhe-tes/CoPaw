@@ -143,7 +143,7 @@ function CronJobsPage() {
 
   const handleBroadcast = (job: CronJob) => {
     if (isBroadcastChildJob(job)) {
-      message.warning("被分发子任务不支持广播到租户");
+      message.warning("分发子任务不支持广播到租户");
       return;
     }
     setBroadcastingJob(job);
@@ -156,7 +156,7 @@ function CronJobsPage() {
 
   const handleManageChildren = (job: CronJob) => {
     if (isBroadcastChildJob(job)) {
-      message.warning("被分发子任务不支持查看分发用户");
+      message.warning("分发子任务不支持查看分发用户");
       return;
     }
     setChildrenManagementJob(job);

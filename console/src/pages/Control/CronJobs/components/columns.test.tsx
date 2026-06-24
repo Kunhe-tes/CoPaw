@@ -77,7 +77,6 @@ describe("CronJobs columns", () => {
     const job = buildCronJob({
       meta: {
         broadcast_source_job_id: "parent-job",
-        broadcast_source_job_name: "parent task",
         broadcast_source_tenant_id: "tenant-parent",
         broadcast_source_tenant_name: "Parent User",
         broadcast_source_bbk_id: "BBK001",
@@ -87,7 +86,6 @@ describe("CronJobs columns", () => {
     expect(isBroadcastChildJob(job)).toBe(true);
     expect(getBroadcastParentInfo(job)).toEqual({
       sourceJobId: "parent-job",
-      sourceJobName: "parent task",
       sourceTenantId: "tenant-parent",
       sourceTenantName: "Parent User",
       sourceBbkId: "BBK001",
@@ -106,7 +104,7 @@ describe("CronJobs columns", () => {
     render(<>{column?.render?.(undefined, job, 0)}</>);
 
     expect(screen.getByText("test job")).toBeTruthy();
-    expect(screen.getByText("被分发子任务")).toBeTruthy();
+    expect(screen.getByText("分发子任务")).toBeTruthy();
   });
 
   it("disables broadcast actions for broadcast child tasks", () => {

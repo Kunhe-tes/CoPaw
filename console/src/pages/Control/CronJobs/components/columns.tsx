@@ -16,7 +16,6 @@ type CronJob = CronJobSpecOutput;
 
 export interface BroadcastParentInfo {
   sourceJobId: string;
-  sourceJobName: string;
   sourceTenantId: string;
   sourceTenantName: string;
   sourceBbkId: string;
@@ -50,7 +49,6 @@ export function getBroadcastParentInfo(job: CronJob): BroadcastParentInfo {
   const meta = job.meta || {};
   return {
     sourceJobId: optionalMetaText(meta.broadcast_source_job_id),
-    sourceJobName: optionalMetaText(meta.broadcast_source_job_name),
     sourceTenantId: optionalMetaText(meta.broadcast_source_tenant_id),
     sourceTenantName: optionalMetaText(meta.broadcast_source_tenant_name),
     sourceBbkId: optionalMetaText(meta.broadcast_source_bbk_id),
@@ -80,17 +78,11 @@ function renderBroadcastChildTag(record: CronJob) {
   if (!parentInfo.sourceJobId) {
     return null;
   }
-  const parentTask =
-    parentInfo.sourceJobName || parentInfo.sourceJobId || "未记录";
   const content = (
     <div className={styles.broadcastChildPopover}>
       <div>
         <span className={styles.broadcastChildPopoverLabel}>父用户</span>
         <span>{formatParentUser(parentInfo)}</span>
-      </div>
-      <div>
-        <span className={styles.broadcastChildPopoverLabel}>父任务</span>
-        <span>{parentTask}</span>
       </div>
       <div>
         <span className={styles.broadcastChildPopoverLabel}>父任务ID</span>
@@ -102,7 +94,7 @@ function renderBroadcastChildTag(record: CronJob) {
   return (
     <Popover content={content} placement="topLeft" trigger="hover">
       <Tag color="blue" className={styles.broadcastChildTag}>
-        被分发子任务
+        分发子任务
       </Tag>
     </Popover>
   );

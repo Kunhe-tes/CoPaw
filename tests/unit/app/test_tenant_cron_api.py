@@ -1072,6 +1072,49 @@ def test_broadcast_job_persists_target_identity_from_request():
     ]
 
 
+def test_broadcast_job_falls_back_to_request_identity_for_parent_meta():
+    source_job = CronJobSpec.model_validate(
+        {
+            **_job_spec("job-source"),
+            "schedule": ScheduleSpec(
+                cron="0 9 * * *",
+            ).model_dump(mode="json"),
+        },
+    )
+    source_manager = _Manager({"job-source": source_job})
+    target_manager = _Manager()
+    multi_agent_manager = _MultiAgentManager(
+        {
+            encode_scope_id("tenant-b", "source-a"): _Workspace(
+                target_manager,
+            ),
+        },
+    )
+    client = _build_client(
+        source_manager,
+        multi_agent_manager=multi_agent_manager,
+        tenant_workspace_pool=_TenantWorkspacePool(),
+    )
+    _install_provider_manager(
+        {},
+        providers_by_tenant={
+            encode_scope_id("tenant-b", "source-a"): {},
+        },
+    )
+
+    response = client.post(
+        "/cron/jobs/job-source/broadcast",
+        json={"target_tenant_ids": ["tenant-b"]},
+    )
+
+    assert response.status_code == 200
+    created_child = target_manager.created[0]
+    assert created_child.meta["broadcast_source_job_id"] == "job-source"
+    assert created_child.meta["broadcast_source_tenant_id"] == "tenant-a"
+    assert created_child.meta["broadcast_source_tenant_name"] == "Alice"
+    assert created_child.meta["broadcast_source_bbk_id"] == "1001"
+
+
 def test_cron_provider_manager_respects_explicit_target_scope(
     monkeypatch,
     tmp_path: Path,

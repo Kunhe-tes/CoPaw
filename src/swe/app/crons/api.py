@@ -7,6 +7,7 @@ import uuid
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
+from urllib.parse import unquote
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, Field
@@ -537,6 +538,66 @@ def _optional_text(value: Any) -> str | None:
         return None
     text = str(value).strip()
     return text or None
+
+
+def _request_optional_text(
+    request: Request,
+    state_name: str,
+    header_name: str | None = None,
+    *,
+    decode: bool = False,
+) -> str | None:
+    value = getattr(request.state, state_name, None)
+    if value is None and header_name:
+        value = request.headers.get(header_name)
+    if decode and isinstance(value, str):
+        value = unquote(value)
+    return _optional_text(value)
+
+
+def _source_job_with_request_identity(
+    source_job: CronJobSpec,
+    request: Request,
+) -> CronJobSpec:
+    updates: dict[str, str] = {}
+    if not _optional_text(source_job.tenant_id):
+        tenant_id = _request_optional_text(
+            request,
+            "tenant_id",
+            "X-Tenant-Id",
+        )
+        if tenant_id:
+            updates["tenant_id"] = tenant_id
+    if not _optional_text(source_job.tenant_name):
+        tenant_name = _request_optional_text(
+            request,
+            "user_name",
+            "X-User-Name",
+            decode=True,
+        )
+        if tenant_name:
+            updates["tenant_name"] = tenant_name
+    if not _optional_text(source_job.bbk_id):
+        bbk_id = _request_optional_text(request, "bbk_id", "X-Bbk-Id")
+        if bbk_id:
+            updates["bbk_id"] = bbk_id
+    if not _optional_text(source_job.source_id):
+        source_id = _request_optional_text(request, "source_id", "X-Source-Id")
+        if source_id:
+            updates["source_id"] = source_id
+    if not _optional_text(source_job.scope_id):
+        scope_id = _request_optional_text(request, "scope_id")
+        tenant_id = updates.get("tenant_id") or _optional_text(
+            source_job.tenant_id,
+        )
+        source_id = updates.get("source_id") or _optional_text(
+            source_job.source_id,
+        )
+        if not scope_id and tenant_id and source_id:
+            scope_id = resolve_scope_id(tenant_id, source_id)
+        if scope_id:
+            updates["scope_id"] = scope_id
+    return source_job.model_copy(update=updates) if updates else source_job
 
 
 def _build_broadcast_job(
@@ -1226,6 +1287,7 @@ async def broadcast_job(
     source_job = await mgr.get_job(job_id)
     if not source_job:
         raise HTTPException(status_code=404, detail="job not found")
+    source_job = _source_job_with_request_identity(source_job, request)
     if not body.target_tenant_ids and not body.targets:
         raise HTTPException(
             status_code=400,

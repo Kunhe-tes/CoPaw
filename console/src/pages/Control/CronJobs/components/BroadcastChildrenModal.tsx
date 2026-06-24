@@ -159,16 +159,6 @@ export function BroadcastChildrenModal({
     })();
   }, [open, job?.id]);
 
-  useEffect(() => {
-    if (!open || !job || !isLookupRunning) {
-      return undefined;
-    }
-    const timer = window.setInterval(() => {
-      void loadChildren();
-    }, 2000);
-    return () => window.clearInterval(timer);
-  }, [open, job?.id, isLookupRunning]);
-
   const batchRefs = selectedItems.map((item) => ({
     tenant_id: item.tenant_id,
     job_id: item.job_id,
