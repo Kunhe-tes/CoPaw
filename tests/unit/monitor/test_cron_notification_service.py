@@ -15,6 +15,26 @@ def test_claim_due_notifications_uses_skip_locked() -> None:
     assert "FOR UPDATE SKIP LOCKED" in source
 
 
+def test_claim_due_notifications_requires_status_and_async_success() -> None:
+    """领取待通知记录时必须同时满足主状态和异步状态成功。"""
+    source = inspect.getsource(
+        CronNotificationService._claim_due_notification_ids,
+    )
+
+    assert "e.status = 'success'" in source
+    assert "e.async_status = 'success'" in source
+
+
+def test_fetch_claimed_notifications_rechecks_success_statuses() -> None:
+    """发送前取回记录时也要复核主状态和异步状态。"""
+    source = inspect.getsource(
+        CronNotificationService._fetch_claimed_notifications,
+    )
+
+    assert "e.status = 'success'" in source
+    assert "e.async_status = 'success'" in source
+
+
 def test_claim_due_notifications_filters_allowed_source_ids() -> None:
     """领取待通知记录时必须按配置的 source 范围过滤。"""
     source = inspect.getsource(

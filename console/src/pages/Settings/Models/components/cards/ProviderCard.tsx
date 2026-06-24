@@ -6,29 +6,15 @@ interface ProviderCardProps {
   provider: ProviderInfo;
   activeModels: ActiveModelsInfo | null;
   onSaved: () => void;
-  isHover: boolean;
-  onMouseEnter: () => void;
-  onMouseLeave: () => void;
 }
 
 export function ProviderCard({
   provider,
   activeModels,
   onSaved,
-  isHover,
-  onMouseEnter,
-  onMouseLeave,
 }: ProviderCardProps) {
   if (provider.id === "copaw-local") {
-    return (
-      <LocalProviderCard
-        provider={provider}
-        onSaved={onSaved}
-        isHover={isHover}
-        onMouseEnter={onMouseEnter}
-        onMouseLeave={onMouseLeave}
-      />
-    );
+    return <LocalProviderCard provider={provider} onSaved={onSaved} />;
   }
 
   return (
@@ -36,9 +22,6 @@ export function ProviderCard({
       provider={provider}
       activeModels={activeModels}
       onSaved={onSaved}
-      isHover={isHover}
-      onMouseEnter={onMouseEnter}
-      onMouseLeave={onMouseLeave}
     />
   );
 }

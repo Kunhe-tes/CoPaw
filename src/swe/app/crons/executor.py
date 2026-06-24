@@ -20,6 +20,7 @@ from ..identity_resolver import resolve_user_identity
 from ...config.llm_workload import LLM_WORKLOAD_CRON, bind_llm_workload
 from ...config.context import (
     canonicalize_scope_id,
+    resolve_request_effective_tenant_id,
     resolve_scope_id,
     resolve_storage_tenant_id,
 )
@@ -222,11 +223,12 @@ class CronExecutor:
         tenant_id = getattr(job, "tenant_id", None)
         source_id = getattr(job, "source_id", None)
         job_scope_id = getattr(job, "scope_id", None)
-        scope_id = (
-            canonicalize_scope_id(job_scope_id)
-            if job_scope_id is not None
-            else resolve_scope_id(tenant_id, source_id)
-        )
+        if job_scope_id is not None:
+            scope_id = canonicalize_scope_id(job_scope_id)
+        elif tenant_id == "default" and source_id is not None:
+            scope_id = None
+        else:
+            scope_id = resolve_scope_id(tenant_id, source_id)
         if tenant_id:
             dispatch_meta["tenant_id"] = tenant_id
         if source_id:
@@ -935,15 +937,22 @@ class CronExecutor:
         )
         assert job.request is not None
         req = self._build_agent_request(job, target_user_id, target_session_id)
-        self._apply_auth_token(job, dispatch_meta, req)
-
         trace_id = await self._create_trace_for_agent_job(
             job,
             target_user_id,
             target_session_id,
         )
+
+        try:
+            self._apply_auth_token(job, dispatch_meta, req)
+        except Exception as exc:
+            await self._handle_agent_generic_exception(job, trace_id, exc)
+            setattr(exc, "cron_trace_id", trace_id)
+            raise
+
         if trace_id:
             req["trace_id"] = trace_id
+            req["trace_attach_existing"] = True
 
         return runtime_tenant_id, trace_id, req, AgentStreamState()
 
@@ -1323,9 +1332,14 @@ class CronExecutor:
         scope_id = (
             canonicalize_scope_id(job.scope_id)
             if job.scope_id is not None
-            else resolve_scope_id(
-                getattr(job, "tenant_id", None),
-                job.source_id,
+            else (
+                None
+                if getattr(job, "tenant_id", None) == "default"
+                and job.source_id is not None
+                else resolve_scope_id(
+                    getattr(job, "tenant_id", None),
+                    job.source_id,
+                )
             )
         )
         if scope_id:
@@ -1348,9 +1362,17 @@ class CronExecutor:
         runtime_tenant_id = (
             canonicalize_scope_id(job.scope_id)
             if job.scope_id is not None
-            else resolve_scope_id(
-                getattr(job, "tenant_id", None),
-                getattr(job, "source_id", None),
+            else (
+                resolve_request_effective_tenant_id(
+                    getattr(job, "tenant_id", None),
+                    getattr(job, "source_id", None),
+                    None,
+                )
+                if getattr(job, "tenant_id", None) == "default"
+                else resolve_scope_id(
+                    getattr(job, "tenant_id", None),
+                    getattr(job, "source_id", None),
+                )
             )
         )
         try:

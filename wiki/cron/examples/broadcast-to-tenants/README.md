@@ -42,6 +42,8 @@ $body = @{
     }
   )
   target_tenant_ids = @("tenant-b", "tenant-c")
+  enable_offset = $true
+  offset_window_hours = 4
 } | ConvertTo-Json -Depth 5
 
 curl.exe -X POST "$baseUrl/api/cron/jobs/$jobId/broadcast" `
@@ -52,7 +54,7 @@ curl.exe -X POST "$baseUrl/api/cron/jobs/$jobId/broadcast" `
   -d $body
 ```
 
-`targets` 是推荐字段，能让后端把目标租户展示身份持久化到子任务；`target_tenant_ids` 仍保留兼容旧调用方。
+`targets` 是推荐字段，能让后端把目标租户展示身份持久化到子任务；`target_tenant_ids` 仍保留兼容旧调用方。`enable_offset` 默认开启，设为 `$false` 时所有目标沿用原 cron；`offset_window_hours` 默认 4，取值 1-24。
 
 返回示例：
 
@@ -115,6 +117,6 @@ curl.exe -X POST "$baseUrl/api/cron/jobs/$jobId/broadcast" `
 
 ## 排查重点
 
-- 如果目标租户已经有同源子任务，API 会跳过重复创建。
+- 如果目标租户已经有同源子任务，API 会刷新已有子任务，不重复创建。
 - 如果错峰时间看起来不对，先看返回的 `offset_minutes` 和子任务 `meta.broadcast_original_cron`。
 - 如果子任务展示身份缺失，先确认请求体是否传了 `targets[].tenant_name` 和 `targets[].bbk_id`，再看 `src/swe/app/crons/api.py` 的 `_normalize_broadcast_targets()` 与 `_build_broadcast_job()`。

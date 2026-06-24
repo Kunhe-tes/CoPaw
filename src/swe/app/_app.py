@@ -1,11 +1,14 @@
 # -*- coding: utf-8 -*-
 # pylint: disable=redefined-outer-name,unused-argument
+import asyncio
 import mimetypes
 import os
 import time
 from contextlib import asynccontextmanager
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
+import anyio
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
@@ -19,14 +22,14 @@ from ..constant import (
     LOG_LEVEL_ENV,
     CORS_ORIGINS,
     WORKING_DIR,
-    FILE_LOG_ENABLED,
 )
 from ..__version__ import __version__
-from ..utils.my_logging import setup_logger, add_swe_file_handler
+from ..utils.my_logging import setup_logger, shutdown_logger
 from .auth import AuthMiddleware
 from .middleware.tenant_identity import TenantIdentityMiddleware
 from .middleware.tenant_workspace import TenantWorkspaceMiddleware
 from .middleware.header_passthrough import HeaderPassthroughMiddleware
+from .middleware.liveness_probe import LivenessProbeMiddleware
 from .middleware.runtime_static_gzip import RuntimeStaticGZipMiddleware
 from .middleware.sse_diagnostic import SSEDiagnosticMiddleware
 from .source_system_config.middleware import SourceSystemConfigMiddleware
@@ -179,6 +182,65 @@ agent_app = AgentApp(
 runtime_diagnostic_manager = RuntimeDiagnosticManager()
 
 
+def _build_internal_cron_callback_url() -> str:
+    """构造外部调度平台回调到 SWE 的内部 cron callback 地址。"""
+    base = (
+        os.environ.get("SWE_SERVER_DOMAIN", "").strip()
+        or "http://localhost:8000"
+    )
+    return f"{base}/api/internal/cron/callback"
+
+
+def _get_positive_int_env(name: str, default: int) -> int:
+    raw_value = os.environ.get(name)
+    if raw_value is None:
+        return default
+
+    try:
+        value = int(raw_value)
+    except (TypeError, ValueError):
+        logger.warning(
+            "Invalid %s=%r; using default %s",
+            name,
+            raw_value,
+            default,
+        )
+        return default
+
+    if value <= 0:
+        logger.warning(
+            "Invalid %s=%r; using default %s",
+            name,
+            raw_value,
+            default,
+        )
+        return default
+
+    return value
+
+
+def _configure_async_thread_pools() -> None:
+    anyio_thread_tokens = _get_positive_int_env("ANYIO_THREAD_TOKENS", 64)
+    asyncio_executor_workers = _get_positive_int_env(
+        "ASYNCIO_EXECUTOR_WORKERS",
+        64,
+    )
+
+    anyio_limiter = anyio.to_thread.current_default_thread_limiter()
+    anyio_limiter.total_tokens = anyio_thread_tokens
+
+    loop = asyncio.get_running_loop()
+    loop.set_default_executor(
+        ThreadPoolExecutor(max_workers=asyncio_executor_workers),
+    )
+    logger.info(
+        "Configured async thread pools: anyio_thread_tokens=%s, "
+        "asyncio_executor_workers=%s",
+        anyio_thread_tokens,
+        asyncio_executor_workers,
+    )
+
+
 async def _reset_scope_sensitive_runtime_state(app: FastAPI) -> None:
     """在开始提供 source-scoped 流量前清空长期运行态缓存。"""
     existing_manager = getattr(app.state, "multi_agent_manager", None)
@@ -200,18 +262,58 @@ async def _reset_scope_sensitive_runtime_state(app: FastAPI) -> None:
     logger.info("Scope-sensitive runtime caches reset")
 
 
+async def _initialize_database_connection():
+    """初始化应用数据库连接，并保留 localhost 模式的轻量启动语义。"""
+    database_config = get_database_config()
+    logger.info(
+        "Database config: host=%s, port=%s, database=%s",
+        database_config.host,
+        database_config.port,
+        database_config.database,
+    )
+
+    if database_config.host == "localhost":
+        logger.info("Database connection is disabled for localhost")
+        return None
+
+    if not database_config.host:
+        return None
+
+    try:
+        from ..database import DatabaseConnection
+
+        db_connection = DatabaseConnection(database_config)
+        await db_connection.connect()
+        if not db_connection.is_connected:
+            raise RuntimeError(
+                "Database connection failed. "
+                "Please check database configuration.",
+            )
+        logger.info(
+            "Database connection established: %s",
+            database_config.host,
+        )
+        return db_connection
+    except Exception as e:
+        import traceback
+
+        logger.error(
+            "Failed to initialize database connection: %s\n%s",
+            e,
+            traceback.format_exc(),
+        )
+        raise RuntimeError(
+            "Database connection is required. "
+            "Please check database configuration.",
+        ) from e
+
+
 @asynccontextmanager
 async def lifespan(
     app: FastAPI,
 ):  # pylint: disable=too-many-statements,too-many-branches
     startup_start_time = time.time()
-    if FILE_LOG_ENABLED:
-        add_swe_file_handler(WORKING_DIR / "swe.log")
-    else:
-        logger.info(
-            "File logging disabled via SWE_FILE_LOG_ENABLED=false; "
-            "stdout/stderr logging remains enabled.",
-        )
+    _configure_async_thread_pools()
 
     # Auto-register admin from env vars (for automated deployments)
     from .auth import auto_register_from_env
@@ -257,47 +359,7 @@ async def lifespan(
     # See design.md for lazy-loading architecture.
 
     # --- Initialize database connection (required for tracing and instance modules) ---
-    db_connection = None
-    database_config = get_database_config()
-    logger.info(
-        "Database config: host=%s, port=%s, database=%s",
-        database_config.host,
-        database_config.port,
-        database_config.database,
-    )
-
-    if database_config.host != "localhost":
-        if database_config.host:
-            try:
-                from ..database import DatabaseConnection
-
-                db_connection = DatabaseConnection(database_config)
-                await db_connection.connect()
-                if not db_connection.is_connected:
-                    raise RuntimeError(
-                        "Database connection failed. Please check database configuration.",
-                    )
-                logger.info(
-                    "Database connection established: %s",
-                    database_config.host,
-                )
-            except Exception as e:
-                import traceback
-
-                logger.error(
-                    "Failed to initialize database connection: %s\n%s",
-                    e,
-                    traceback.format_exc(),
-                )
-                raise RuntimeError(
-                    "Database connection is required. Please check database configuration.",
-                ) from e
-        # else:
-        #     raise RuntimeError(
-        #         "Database host is required. Please configure SWE_DB_HOST environment variable.",
-        #     )
-    else:
-        logger.info("Database connection is disabled for localhost")
+    db_connection = await _initialize_database_connection()
 
     # --- Initialize tracing manager ---
     try:
@@ -359,19 +421,89 @@ async def lifespan(
     try:
         from .source_system_config.service import SourceSystemConfigService
         from .source_system_config.store import SourceSystemConfigStore
+        from .source_system_config.task_binding_store import (
+            SourceSystemTaskBindingStore,
+        )
+        from .source_system_config.task_scheduler import (
+            SourceSystemTaskScheduler,
+        )
+        from .workspace.workspace import _build_scheduler_adapter
 
-        app.state.source_system_config_service = SourceSystemConfigService(
+        source_config_service = SourceSystemConfigService(
             SourceSystemConfigStore(db_connection),
         )
+        app.state.source_system_config_service = source_config_service
+        app.state.source_system_task_scheduler = None
+
+        scheduler_adapter = _build_scheduler_adapter()
+        has_task_binding_db = db_connection is not None and bool(
+            getattr(db_connection, "is_connected", False),
+        )
+        if has_task_binding_db:
+            app.state.source_system_task_scheduler = SourceSystemTaskScheduler(
+                binding_store=SourceSystemTaskBindingStore(
+                    db_connection,
+                ),
+                scheduler_adapter=scheduler_adapter,
+                callback_url=_build_internal_cron_callback_url(),
+                tenant_scope_store_factory=(
+                    lambda: tenant_workspace_pool.init_source_store
+                ),
+                multi_agent_manager=multi_agent_manager,
+                agent_id="default",
+            )
+        else:
+            logger.warning(
+                "Source system task scheduler skipped: database is not connected",
+            )
         multi_agent_manager.set_source_system_config_service(
-            app.state.source_system_config_service,
+            source_config_service,
         )
         tenant_workspace_pool.set_source_system_config_service(
-            app.state.source_system_config_service,
+            source_config_service,
         )
         logger.info("SourceSystemConfig module initialized")
     except Exception as e:
         logger.warning("Failed to initialize source system config: %s", e)
+
+    # --- 初始化技能就绪检查存储 ---
+    try:
+        from .skill_readiness.service import build_skill_readiness_service
+        from .skill_readiness.store import SkillReadinessStore
+
+        skill_readiness_store = SkillReadinessStore(db_connection)
+        app.state.skill_readiness_store = skill_readiness_store
+        app.state.skill_readiness_service = build_skill_readiness_service(
+            skill_readiness_store,
+            multi_agent_manager=multi_agent_manager,
+        )
+        if skill_readiness_store.is_available:
+            await skill_readiness_store.initialize()
+            logger.info("SkillReadiness storage initialized")
+        else:
+            logger.warning(
+                "SkillReadiness storage skipped: database is not connected",
+            )
+    except Exception as e:
+        logger.warning("Failed to initialize skill readiness storage: %s", e)
+
+    # --- 初始化持续治理管理侧数据库读模型 ---
+    try:
+        from .continuous_governance.service import ContinuousGovernanceService
+        from .continuous_governance.store import ContinuousGovernanceStore
+
+        app.state.continuous_governance_service = ContinuousGovernanceService(
+            ContinuousGovernanceStore(db_connection),
+        )
+        multi_agent_manager.set_continuous_governance_service(
+            app.state.continuous_governance_service,
+        )
+        tenant_workspace_pool.set_continuous_governance_service(
+            app.state.continuous_governance_service,
+        )
+        logger.info("ContinuousGovernance module initialized")
+    except Exception as e:
+        logger.warning("Failed to initialize continuous governance: %s", e)
 
     # --- Initialize greeting and featured_case modules ---
     if db_connection is not None:
@@ -405,6 +537,13 @@ async def lifespan(
 
             init_zhaohu_binding_module(db_connection)
             logger.info("ZhaohuChannelBinding module initialized")
+
+            from .asset_upload_record.router import (
+                init_asset_upload_record_module,
+            )
+
+            init_asset_upload_record_module(db_connection)
+            logger.info("AssetUploadRecord module initialized")
         except Exception as e:
             logger.warning(
                 "Failed to initialize greeting/featured_case modules: %s",
@@ -495,6 +634,7 @@ async def lifespan(
                 logger.error(f"Error stopping tenant workspaces: {e}")
 
         logger.info("Application shutdown complete")
+        shutdown_logger()
 
 
 app = FastAPI(
@@ -548,6 +688,11 @@ app.add_middleware(
     SSEDiagnosticMiddleware,
     manager=runtime_diagnostic_manager,
 )
+
+# Keep the Kubernetes liveness probe outside business middleware. This proves
+# the process can answer HTTP without touching auth, tenant, source, DB, or
+# Agent runtime paths.
+app.add_middleware(LivenessProbeMiddleware)
 
 
 # Console static dir: env, or swe package data (console), or cwd.

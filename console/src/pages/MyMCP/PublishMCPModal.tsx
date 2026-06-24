@@ -112,12 +112,16 @@ export function PublishMCPModal({
       const values = await form.validateFields();
       setLoading(true);
 
-      await myMcpApi.publishSingleToMarket(clientKey, {
+      const result = await myMcpApi.publishSingleToMarket(clientKey, {
         bbk_ids: values.bbk_ids,
         overwrite,
       });
-      message.success("同步成功");
-      onSuccess();
+      if (result.version_unchanged) {
+        message.info("当前内容已是最新，无需重复同步");
+      } else {
+        message.success("同步成功");
+        onSuccess();
+      }
     } catch (err) {
       // 尝试提取 409 冲突详情
       const conflict = extractConflictDetail(err);

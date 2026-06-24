@@ -136,6 +136,10 @@ class SchedulerAdapter(ABC):
         cron: str,
         callback_url: str,
         source_id: str = "",
+        *,
+        scope_id: str = "",
+        from_id: str = "",
+        source_level: bool = False,
     ) -> str:
         """向外部调度平台注册一个定时任务。
 
@@ -165,6 +169,10 @@ class SchedulerAdapter(ABC):
         cron: str,
         callback_url: str,
         source_id: str = "",
+        *,
+        scope_id: str = "",
+        from_id: str = "",
+        source_level: bool = False,
     ) -> None:
         """更新外部平台上已注册的任务。
 
@@ -224,6 +232,9 @@ class NoopSchedulerAdapter(SchedulerAdapter):
         cron: str,
         callback_url: str,
         source_id: str = "",
+        scope_id: str = "",
+        from_id: str = "",
+        source_level: bool = False,
     ) -> str:
         logger.debug(
             "NoopAdapter.register_job: tenant=%s agent=%s type=%s name=%s job=%s cron=%s url=%s",
@@ -248,6 +259,9 @@ class NoopSchedulerAdapter(SchedulerAdapter):
         cron: str,
         callback_url: str,
         source_id: str = "",
+        scope_id: str = "",
+        from_id: str = "",
+        source_level: bool = False,
     ) -> None:
         logger.debug(
             "NoopAdapter.update_job: ext_id=%s tenant=%s agent=%s type=%s name=%s job=%s cron=%s",
@@ -330,6 +344,9 @@ class RealSchedulerAdapter(SchedulerAdapter):
         cron: str,
         callback_url: str,
         source_id: str = "",
+        scope_id: str = "",
+        from_id: str = "",
+        source_level: bool = False,
     ) -> str:
         payload = self._build_add_payload(
             tenant_id,
@@ -340,6 +357,9 @@ class RealSchedulerAdapter(SchedulerAdapter):
             cron,
             callback_url,
             source_id=source_id,
+            scope_id=scope_id,
+            from_id=from_id,
+            source_level=source_level,
         )
         resp_data = await self._post("/job-admin/v2/add-job", payload)
         ext_id = str(resp_data.get("content", ""))
@@ -366,6 +386,9 @@ class RealSchedulerAdapter(SchedulerAdapter):
         cron: str,
         callback_url: str,
         source_id: str = "",
+        scope_id: str = "",
+        from_id: str = "",
+        source_level: bool = False,
     ) -> None:
         payload = self._build_add_payload(
             tenant_id,
@@ -376,6 +399,9 @@ class RealSchedulerAdapter(SchedulerAdapter):
             cron,
             callback_url,
             source_id=source_id,
+            scope_id=scope_id,
+            from_id=from_id,
+            source_level=source_level,
         )
         payload["id"] = int(external_id)
         await self._post("/job-admin/v2/update-job", payload)
@@ -470,6 +496,9 @@ class RealSchedulerAdapter(SchedulerAdapter):
         agent_id: str,
         task_type: str,
         job_id: str,
+        *,
+        scope_id: str = "",
+        from_id: str = "",
     ) -> str:
         """将回调上下文参数编码为 base64 JSON，放入 jobParam。
 
@@ -480,11 +509,11 @@ class RealSchedulerAdapter(SchedulerAdapter):
             {
                 "tenant_id": tenant_id,
                 "source_id": source_id,
-                "scopeId": f"{tenant_id}-{source_id}",
+                "scopeId": scope_id or f"{tenant_id}-{source_id}",
                 "agent_id": agent_id,
                 "task_type": task_type,
                 "job_id": job_id,
-                "fromId": tenant_id,
+                "fromId": from_id or tenant_id,
             },
         )
         return base64.urlsafe_b64encode(payload.encode()).decode()
@@ -499,15 +528,25 @@ class RealSchedulerAdapter(SchedulerAdapter):
         cron: str,
         callback_url: str,
         source_id: str = "",
+        *,
+        scope_id: str = "",
+        from_id: str = "",
+        source_level: bool = False,
     ) -> dict:
         """构建 add-job / update-job 的请求体。"""
-        identity = tenant_id
-        if source_id:
-            identity = f"{tenant_id}/{source_id}"
-        job_desc = _truncate(
-            f"[SWE] {identity}/{agent_id}/{task_type} - {job_name}",
-            _MAX_JOBDESC_CHARS,
-        )
+        if source_level:
+            job_desc = _truncate(
+                f"[SWE] {source_id}/{job_name}",
+                _MAX_JOBDESC_CHARS,
+            )
+        else:
+            identity = tenant_id
+            if source_id:
+                identity = f"{tenant_id}/{source_id}"
+            job_desc = _truncate(
+                f"[SWE] {identity}/{agent_id}/{task_type} - {job_name}",
+                _MAX_JOBDESC_CHARS,
+            )
         glue_remark = _truncate(job_id, _MAX_GLUEREMARK_CHARS)
         payload: dict = {
             "jobDesc": job_desc,
@@ -527,6 +566,8 @@ class RealSchedulerAdapter(SchedulerAdapter):
                 agent_id,
                 task_type,
                 job_id,
+                scope_id=scope_id,
+                from_id=from_id,
             ),
         }
         if self._mis_fire_strategy is not None:

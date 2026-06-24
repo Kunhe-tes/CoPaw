@@ -181,9 +181,7 @@ def _clean_file_url_base(value: str | None) -> str | None:
 def resolve_file_url_base(network: Any = None) -> tuple[str, str]:
     """解析静态文件访问域名，并返回实际生效的网络。"""
     requested_network = normalize_file_url_network(
-        network
-        if network is not None
-        else get_current_file_url_network(),
+        network if network is not None else get_current_file_url_network(),
     )
     office_base = (
         _clean_file_url_base(os.getenv("FILE_URL_OFFICE"))
@@ -303,6 +301,12 @@ def resolve_runtime_tenant_id(
     """
     if tenant_id is None:
         return None
+    if tenant_id == "default":
+        if not source_id:
+            return "default"
+        return f"default_{source_id}"
+    if tenant_id.startswith("default_"):
+        return tenant_id
     legacy_prefix = f"{_LEGACY_SCOPE_ID_PREFIX}."
     if tenant_id.startswith(legacy_prefix):
         return canonicalize_scope_id(tenant_id)
@@ -347,6 +351,8 @@ def resolve_storage_tenant_id(
         if not source_id:
             return "default"
         return f"default_{source_id}"
+    if tenant_id.startswith("default_"):
+        return tenant_id
 
     resolved_scope_id = scope_id
     if resolved_scope_id is not None:
@@ -376,6 +382,31 @@ def resolve_scope_preferred_tenant_id(
     if scope_id is not None:
         return canonicalize_scope_id(scope_id)
     return resolve_runtime_tenant_id(tenant_id, source_id)
+
+
+def resolve_request_effective_tenant_id(
+    tenant_id: str | None,
+    source_id: str | None = None,
+    scope_id: str | None = None,
+) -> str | None:
+    """解析请求应访问的有效租户目录。
+
+    规则：
+    - ``default + source`` 固定访问 ``default_{source}``
+    - 其他租户继续优先使用显式/当前 ``scope_id``
+    - 无 ``source`` 时保持既有 runtime 解析行为
+    """
+    if tenant_id is None:
+        return None
+
+    if tenant_id == "default":
+        return resolve_storage_tenant_id(tenant_id, source_id)
+
+    return resolve_scope_preferred_tenant_id(
+        tenant_id,
+        source_id,
+        scope_id,
+    )
 
 
 def resolve_runtime_identity(

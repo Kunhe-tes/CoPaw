@@ -1765,9 +1765,9 @@ def _resolve_agent_root_config_path(
     if tenant_id is None:
         return None
 
-    from .utils import get_tenant_config_path
+    from .utils import get_tenant_storage_config_path
 
-    return get_tenant_config_path(tenant_id)
+    return get_tenant_storage_config_path(tenant_id)
 
 
 def load_agent_config(

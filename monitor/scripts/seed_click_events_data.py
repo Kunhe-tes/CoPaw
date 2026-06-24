@@ -74,7 +74,7 @@ CREATE TABLE IF NOT EXISTS swe_html_preview_click_events (
   INDEX idx_task_clicked (cron_task_id, clicked_at),
   INDEX idx_button_type_clicked (button_type, clicked_at),
   INDEX idx_source_clicked (source_id, clicked_at)
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='HTML 预览按钮点击明细'
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='HTML 预览按钮点击明细'
 """
 
 
@@ -148,7 +148,9 @@ async def create_click_events(db, cron_tasks, start_date, end_date, source_id):
             )
 
             button_type = random.choices(
-                BUTTON_TYPES, weights=BUTTON_WEIGHTS, k=1
+                BUTTON_TYPES,
+                weights=BUTTON_WEIGHTS,
+                k=1,
             )[0]
             button_name = random.choice(BUTTON_NAMES[button_type])
             button_id = f"btn-{uuid.uuid4().hex[:8]}"
@@ -158,7 +160,7 @@ async def create_click_events(db, cron_tasks, start_date, end_date, source_id):
 
             customer_id = f"CUST-{random.randint(10000, 99999)}"
             customer_name = random.choice(
-                ["张三", "李四", "王五", "赵六", "钱七", "祝话", "程广泛"]
+                ["张三", "李四", "王五", "赵六", "钱七", "祝话", "程广泛"],
             )
 
             customer_info = {
@@ -247,7 +249,7 @@ async def verify_results(db, source_id, start_date, end_date):
         (source_id, start_date, end_date),
     )
     print(
-        f"  总点击数: {result['total_clicks']}, 唯一任务数: {result['unique_tasks']}"
+        f"  总点击数: {result['total_clicks']}, 唯一任务数: {result['unique_tasks']}",
     )
 
     # 验证 button_type 分布统计
@@ -269,7 +271,7 @@ async def verify_results(db, source_id, start_date, end_date):
 async def main():
     """生成近30天 HTML 预览点击事件测试数据."""
     parser = argparse.ArgumentParser(
-        description="生成 HTML 预览点击事件测试数据"
+        description="生成 HTML 预览点击事件测试数据",
     )
     parser.add_argument(
         "--source-id",

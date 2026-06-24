@@ -156,6 +156,8 @@ export interface PublishMCPResult {
   success: boolean;
   /** 错误信息 */
   error?: string;
+  /** 内容未变化，市场版本未增加 */
+  version_unchanged?: boolean;
 }
 
 /** 发布响应 */
@@ -172,6 +174,8 @@ export interface PublishSingleMCPResponse {
   item_id: string;
   /** 是否成功 */
   success: boolean;
+  /** 内容未变化，市场版本未增加 */
+  version_unchanged?: boolean;
 }
 
 /** MCP 测试连接结果 */

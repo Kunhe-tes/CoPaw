@@ -57,7 +57,7 @@ describe("SystemConfigPage", () => {
   }
 
   function getToolResultCompactSwitch() {
-    return screen.getAllByRole("switch")[3];
+    return screen.getAllByRole("switch")[4];
   }
 
   afterEach(() => {
@@ -104,9 +104,7 @@ describe("SystemConfigPage", () => {
     render(<SystemConfigPage />);
 
     expect(await screen.findByText("403")).toBeTruthy();
-    expect(
-      screen.getByText("仅管理员可访问当前系统配置页面。"),
-    ).toBeTruthy();
+    expect(screen.getByText("仅管理员可访问当前系统配置页面。")).toBeTruthy();
     expect(mocks.sourceSystemConfigApi.getCurrent).not.toHaveBeenCalled();
   });
 
@@ -186,6 +184,74 @@ describe("SystemConfigPage", () => {
           cron_unread_auto_pause: {
             enabled: false,
             threshold: 12,
+          },
+        },
+      });
+    });
+  });
+
+  it("saves cron task session cleanup settings", async () => {
+    mocks.sourceSystemConfigApi.getCurrent.mockResolvedValueOnce({
+      source_id: "portal",
+      config: {
+        provider_policy: { default_model: "qwen-max" },
+        cron_task_session_cleanup: {
+          enabled: true,
+          retention_days: 30,
+          cron: "0 1 * * *",
+          unknown_retained: "yes",
+        },
+      },
+      version: 1,
+      is_default: false,
+      updated_by: "alice",
+      updated_at: "2026-05-20 22:00:00",
+    });
+    mocks.sourceSystemConfigApi.updateCurrent.mockResolvedValue({
+      source_id: "portal",
+      config: {
+        provider_policy: { default_model: "qwen-max" },
+        cron_task_session_cleanup: {
+          enabled: true,
+          retention_days: 45,
+          cron: "30 2 * * *",
+          unknown_retained: "yes",
+        },
+      },
+      version: 2,
+      is_default: false,
+      updated_by: "alice",
+      updated_at: "2026-05-21 10:00:00",
+    });
+
+    render(<SystemConfigPage />);
+
+    const scheduledTaskCardTitle = await screen.findByText("定时任务设置");
+    const scheduledTaskCard = scheduledTaskCardTitle.closest(".ant-card");
+    expect(screen.getByText("定时任务未读自动暂停").closest(".ant-card")).toBe(
+      scheduledTaskCard,
+    );
+    expect(screen.getByText("定时任务会话历史清理").closest(".ant-card")).toBe(
+      scheduledTaskCard,
+    );
+    expect(screen.getByText("01:00")).toBeTruthy();
+
+    fireEvent.change(screen.getByDisplayValue("30"), {
+      target: { value: "45" },
+    });
+    fireEvent.mouseDown(screen.getByRole("combobox", { name: "每日运行时间" }));
+    fireEvent.click(await screen.findByText("02:30"));
+    fireEvent.click(screen.getByRole("button", { name: "common.save" }));
+
+    await waitFor(() => {
+      expect(mocks.sourceSystemConfigApi.updateCurrent).toHaveBeenCalledWith({
+        config: {
+          provider_policy: { default_model: "qwen-max" },
+          cron_task_session_cleanup: {
+            enabled: true,
+            retention_days: 45,
+            cron: "30 2 * * *",
+            unknown_retained: "yes",
           },
         },
       });

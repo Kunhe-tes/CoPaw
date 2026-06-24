@@ -279,10 +279,29 @@ export default createGlobalStyle`
   }
 
   &-empty {
-    padding: 16px 0;
+    min-height: 116px;
+    padding: 24px 16px;
+    border-radius: ${DESIGN_TOKENS.radiusCard}px;
+    background: rgba(55, 105, 252, 0.035);
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
     text-align: center;
+  }
+
+  &-empty-title {
+    color: ${DESIGN_TOKENS.colorTextMuted};
+    font-size: 14px;
+    font-weight: 500;
+    line-height: 20px;
+  }
+
+  &-empty-description {
+    margin-top: 12px;
     color: ${DESIGN_TOKENS.colorTextMuted};
     font-size: 13px;
+    line-height: 20px;
   }
 }
 

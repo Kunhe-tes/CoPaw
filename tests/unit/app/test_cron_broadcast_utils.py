@@ -1,6 +1,8 @@
 # -*- coding: utf-8 -*-
 """定时任务广播错峰工具测试。"""
 
+import pytest
+
 from swe.app.crons.broadcast import (
     compute_broadcast_offsets,
     shift_cron_expression,
@@ -11,6 +13,17 @@ def test_compute_broadcast_offsets_spreads_inside_four_hour_window():
     assert compute_broadcast_offsets(1) == [0]
     assert compute_broadcast_offsets(3) == [0, 120, 240]
     assert compute_broadcast_offsets(5) == [0, 60, 120, 180, 240]
+
+
+def test_compute_broadcast_offsets_uses_configured_hour_window():
+    assert compute_broadcast_offsets(3, window_hours=1) == [0, 30, 60]
+    assert compute_broadcast_offsets(4, window_hours=24) == [0, 480, 960, 1440]
+
+
+@pytest.mark.parametrize("window_hours", [0, 25])
+def test_compute_broadcast_offsets_rejects_invalid_hour_window(window_hours):
+    with pytest.raises(ValueError, match="between 1 and 24"):
+        compute_broadcast_offsets(3, window_hours=window_hours)
 
 
 def test_shift_daily_cron_uses_job_timezone_and_crosses_day_boundary():

@@ -7,6 +7,7 @@ from market.marketplace.fs import (
     get_mcp_dir,
     get_mcp_config_path,
     _mask_env_value,
+    get_user_skills_dir,
 )
 
 
@@ -30,6 +31,22 @@ def test_get_mcp_config_path():
     config_path = get_mcp_config_path(marketplace_root, source_id, item_id)
     expected = marketplace_root / source_id / "mcp" / item_id / "mcp.json"
     assert config_path == expected
+
+
+def test_get_user_skills_dir_uses_default_source_template():
+    """default 用户技能目录应直达 default_{source}。"""
+    swe_root = Path("/tmp/.swe")
+
+    skills_dir = get_user_skills_dir(
+        swe_root,
+        "default",
+        "default",
+        "CMSJY",
+    )
+
+    assert skills_dir == (
+        swe_root / "default_CMSJY" / "workspaces" / "default" / "skills"
+    )
 
 
 def test_mask_env_value_short():

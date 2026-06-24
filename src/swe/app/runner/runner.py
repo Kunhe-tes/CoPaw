@@ -35,11 +35,7 @@ from .command_dispatch import (
 )
 from .query_error_dump import write_query_error_dump
 from .retry_classifier import is_query_retryable
-from .session import (
-    RunnerSessionProtocol,
-    SafeJSONSession,
-    SESSION_SKILL_SNAPSHOT_STATE_KEY,
-)
+from .session import SafeJSONSession, SESSION_SKILL_SNAPSHOT_STATE_KEY
 from .stream_boundary import normalize_reasoning_boundary_stream
 from .task_progress import attach_task_progress
 from .utils import build_env_context
@@ -52,6 +48,9 @@ from ...agents.skills_manager import (
     get_workspace_skills_dir,
 )
 from ...agents.hook_runtime import HookRuntime
+from ...agents.hook_runtime.conversation_snapshot import (
+    capture_conversation_snapshot,
+)
 from ...agents.hook_runtime.models import (
     HookConfig,
     HookContext,
@@ -224,6 +223,97 @@ def _extract_memory_entry_payload(entry: Any) -> dict[str, Any] | None:
     return None
 
 
+def _is_tool_guard_denied_entry(entry: Any) -> bool:
+    return (
+        isinstance(entry, list)
+        and len(entry) >= 2
+        and isinstance(entry[1], list)
+        and TOOL_GUARD_DENIED_MARK in entry[1]
+    )
+
+
+def _get_agent_memory_content(states: dict[str, Any]) -> list[Any] | None:
+    agent_state = states.get("agent", {})
+    if not isinstance(agent_state, dict):
+        return None
+
+    memory_state = agent_state.get("memory", {})
+    if not isinstance(memory_state, dict):
+        return None
+
+    content = memory_state.get("content", [])
+    if not isinstance(content, list) or not content:
+        return None
+    return content
+
+
+@dataclass(frozen=True)
+class _PersistedMemorySnapshot:
+    content: list[Any]
+
+
+def _last_tool_guard_denied_index(content: list[Any]) -> int | None:
+    for index in range(len(content) - 1, -1, -1):
+        if _is_tool_guard_denied_entry(content[index]):
+            return index
+    return None
+
+
+def _is_assistant_memory_entry(entry: Any) -> bool:
+    return (
+        isinstance(entry, list)
+        and len(entry) >= 1
+        and isinstance(entry[0], dict)
+        and entry[0].get("role") == "assistant"
+    )
+
+
+def _remove_following_denial_explanation(
+    content: list[Any],
+    denied_entry_index: int | None,
+) -> bool:
+    if denied_entry_index is None:
+        return False
+
+    explanation_index = denied_entry_index + 1
+    if explanation_index >= len(content):
+        return False
+
+    if not _is_assistant_memory_entry(content[explanation_index]):
+        return False
+
+    del content[explanation_index]
+    return True
+
+
+def _strip_tool_guard_denied_marks(content: list[Any]) -> int:
+    stripped_count = 0
+    for entry in content:
+        if _is_tool_guard_denied_entry(entry):
+            entry[1].remove(TOOL_GUARD_DENIED_MARK)
+            stripped_count += 1
+    return stripped_count
+
+
+def _build_denial_response_memory_entry(
+    denial_response: Msg,
+) -> list[Any]:
+    ts = getattr(denial_response, "timestamp", None)
+    msg_dict = {
+        "id": getattr(denial_response, "id", ""),
+        "name": getattr(denial_response, "name", "Friday"),
+        "role": getattr(denial_response, "role", "assistant"),
+        "content": denial_response.content,
+        "metadata": getattr(
+            denial_response,
+            "metadata",
+            None,
+        ),
+        "timestamp": str(ts) if ts is not None else "",
+    }
+    return [msg_dict, []]
+
+
 def _extract_text_from_message_content(content: Any) -> str:
     """从消息内容中提取可展示文本。"""
     if isinstance(content, str):
@@ -391,7 +481,7 @@ def _hook_config_enabled(
 
 
 async def _load_session_hook_overlay(
-    session: RunnerSessionProtocol | None,
+    session: Any | None,
     *,
     session_id: str,
     user_id: str,
@@ -563,6 +653,7 @@ async def _emit_runner_hook(
     assistant_response: str | None = None,
     source: str | None = None,
     model: str | None = None,
+    agent: Any | None = None,
 ) -> MergedHookResult:
     agent_hooks = getattr(agent_config, "hooks", None)
     if not isinstance(agent_hooks, HookConfig):
@@ -581,9 +672,65 @@ async def _emit_runner_hook(
         source=source,
         model=model,
     )
+
+    async def _conversation_snapshot_provider():
+        if agent is not None:
+            return await capture_conversation_snapshot(
+                getattr(agent, "memory", None),
+            )
+        return await _capture_persisted_runner_conversation_snapshot(
+            request=request,
+            runner=runner,
+        )
+
     return await runtime.emit(
         context,
         workspace_dir=Path(runner.workspace_dir or WORKING_DIR),
+        conversation_snapshot_provider=_conversation_snapshot_provider,
+    )
+
+
+async def _capture_persisted_runner_conversation_snapshot(
+    *,
+    request: Any,
+    runner: "AgentRunner",
+) -> dict[str, Any] | None:
+    if getattr(request, "skip_history", False):
+        return None
+
+    session = getattr(runner, "session", None)
+    get_session_state_dict = getattr(session, "get_session_state_dict", None)
+    if not callable(get_session_state_dict):
+        return None
+
+    session_id = getattr(request, "session_id", None)
+    if not session_id:
+        return None
+
+    try:
+        state = await get_session_state_dict(
+            session_id=_coerce_session_storage_id(session_id),
+            user_id=_coerce_session_storage_user_id(
+                getattr(request, "user_id", None),
+            ),
+            allow_not_exist=True,
+        )
+    except Exception:
+        logger.debug(
+            "Failed to load persisted memory for hook snapshot",
+            exc_info=True,
+        )
+        return None
+
+    if not isinstance(state, dict):
+        return None
+
+    content = _get_agent_memory_content(state)
+    if content is None:
+        return None
+
+    return await capture_conversation_snapshot(
+        _PersistedMemorySnapshot(content=content),
     )
 
 
@@ -627,6 +774,7 @@ async def _build_and_connect_mcp_clients(
     mcp_config: MCPConfig | None,
     passthrough_headers: dict[str, str] | None = None,
     session_id: str | None = None,
+    trace_id: str | None = None,
 ) -> list[Any]:
     """Build and connect MCP clients from config for single request use.
 
@@ -634,6 +782,7 @@ async def _build_and_connect_mcp_clients(
         mcp_config: MCP configuration from agent_config.mcp
         passthrough_headers: Headers to merge for HTTP transport clients
         session_id: Request-scoped session identifier for reserved headers
+        trace_id: Request-scoped trace identifier for reserved headers
 
     Returns:
         List of connected MCP client instances (all created for this request)
@@ -656,9 +805,10 @@ async def _build_and_connect_mcp_clients(
                 client_config,
                 passthrough_headers,
                 session_id=session_id,
+                trace_id=trace_id,
             )
             if client is not None:
-                await client.connect()
+                await client.connect(timeout=_MCP_CONNECT_TIMEOUT_SECONDS)
                 clients.append(client)
                 logger.info(f"MCP client '{key}' created and connected")
         except asyncio.CancelledError:
@@ -684,6 +834,7 @@ async def _create_mcp_client_with_headers(
     client_config: MCPClientConfig,
     passthrough_headers: dict[str, str] | None = None,
     session_id: str | None = None,
+    trace_id: str | None = None,
 ) -> Any:
     """Create a single MCP client with optional header passthrough.
 
@@ -694,6 +845,7 @@ async def _create_mcp_client_with_headers(
         client_config: Single MCP client configuration
         passthrough_headers: Headers to merge for HTTP transport
         session_id: Request-scoped session identifier for reserved headers
+        trace_id: Request-scoped trace identifier for reserved headers
 
     Returns:
         MCP client instance (not yet connected)
@@ -705,6 +857,7 @@ async def _create_mcp_client_with_headers(
         "headers": client_config.headers or None,
         "passthrough_headers": dict(passthrough_headers or {}) or None,
         "session_id": session_id,
+        "trace_id": trace_id,
         "timeout": _MCP_HTTP_TIMEOUT_SECONDS,
         "sse_read_timeout": _MCP_HTTP_SSE_READ_TIMEOUT_SECONDS,
         "command": client_config.command,
@@ -745,6 +898,7 @@ async def _create_mcp_client_with_headers(
         client_config.headers,
         passthrough_headers=passthrough_headers,
         session_id=session_id,
+        trace_id=trace_id,
     )
 
     client = HttpStatefulClient(
@@ -1352,19 +1506,21 @@ def _request_source_id(request: AgentRequest) -> str:
 
 def _request_user_name(request: AgentRequest) -> str | None:
     """按兼容顺序读取通道注入的用户名称。"""
-    return getattr(request, "user_name", None) or getattr(
-        getattr(request, "state", None),
-        "user_name",
-        None,
+    channel_meta = getattr(request, "channel_meta", None) or {}
+    return (
+        getattr(request, "user_name", None)
+        or getattr(getattr(request, "state", None), "user_name", None)
+        or channel_meta.get("user_name")
     )
 
 
 def _request_bbk_id(request: AgentRequest) -> str | None:
     """按兼容顺序读取通道注入的 BBK 标识。"""
-    return getattr(request, "bbk_id", None) or getattr(
-        getattr(request, "state", None),
-        "bbk_id",
-        None,
+    channel_meta = getattr(request, "channel_meta", None) or {}
+    return (
+        getattr(request, "bbk_id", None)
+        or getattr(getattr(request, "state", None), "bbk_id", None)
+        or channel_meta.get("bbk_id")
     )
 
 
@@ -1508,7 +1664,7 @@ class AgentRunner(Runner):
         self._workspace: Any = None  # Workspace instance for control commands
         self.memory_manager: BaseMemoryManager | None = None
         self._task_tracker = task_tracker  # Task tracker for background tasks
-        self.session: RunnerSessionProtocol | None = None
+        self.session: Any | None = None
 
     def set_chat_manager(self, chat_manager):
         """Set chat manager for auto-registration.
@@ -1726,8 +1882,8 @@ class AgentRunner(Runner):
     ) -> str | None:
         """启动 query 追踪；追踪不可用时只记录日志并继续主流程。
 
-        如果 request 中已有 trace_id（由外部传入），则使用 attach_existing 模式
-        仅设置 context 而不创建新的数据库记录。
+        默认情况下，query 请求总是创建新的 trace。
+        只有显式声明要续接外部 trace 时，才会使用 attach_existing 模式。
         """
         if not has_trace_manager():
             return None
@@ -1736,8 +1892,8 @@ class AgentRunner(Runner):
             trace_mgr = get_trace_manager()
             if not trace_mgr.enabled:
                 return None
-            # 检查是否已有外部传入的 trace_id
             existing_trace_id = getattr(request, "trace_id", None)
+            attach_existing = self._should_attach_existing_trace(request)
             resolved_identity = await resolve_user_identity(
                 tenant_id=getattr(request, "user_id", None),
                 source_id=_request_source_id(request),
@@ -1754,9 +1910,8 @@ class AgentRunner(Runner):
                 user_name=resolved_identity.user_name,
                 bbk_id=resolved_identity.bbk_id,
                 session_name=_session_name_from_messages(msgs),
-                trace_id=existing_trace_id,  # 使用传入的 trace_id 或 None
-                attach_existing=existing_trace_id
-                is not None,  # 如果有传入 trace_id，仅 attach
+                trace_id=existing_trace_id if attach_existing else None,
+                attach_existing=attach_existing,
             )
             if trace_id:
                 # 通道层负责把事件发给前端，这里写回 request 让 SSE 能透传 trace_id。
@@ -1766,6 +1921,19 @@ class AgentRunner(Runner):
         except Exception as e:
             logger.warning("Failed to start trace: %s", e)
             return None
+
+    @staticmethod
+    def _should_attach_existing_trace(request: AgentRequest) -> bool:
+        """判断当前请求是否显式要求续接已有 trace。"""
+        trace_id = getattr(request, "trace_id", None)
+        if not trace_id:
+            return False
+
+        if bool(getattr(request, "trace_attach_existing", False)):
+            return True
+
+        channel_meta = getattr(request, "channel_meta", None) or {}
+        return bool(channel_meta.get("trace_attach_existing"))
 
     async def _generate_session_title_before_stream(
         self,
@@ -2052,6 +2220,8 @@ class AgentRunner(Runner):
             "agent_id": self.agent_id,
             "tenant_id": self.tenant_id or "",
             "source_id": _request_source_id(request),
+            "user_name": _request_user_name(request),
+            "bbk_id": _request_bbk_id(request),
             "trace_id": getattr(request, "trace_id", None),
             "transcript_path": (
                 self.session._get_save_path(session_id, user_id)
@@ -2406,6 +2576,7 @@ class AgentRunner(Runner):
                 agent_config.mcp,
                 passthrough_headers=passthrough_headers or None,
                 session_id=session_id,
+                trace_id=getattr(request, "trace_id", None),
             )
 
             turn_id = f"turn-{uuid4().hex}"
@@ -2574,6 +2745,7 @@ class AgentRunner(Runner):
             overlay=runtime.hook_overlay,
             prompt=plan.original_user_message,
             assistant_response=outcome.assistant_response,
+            agent=runtime.agent,
         )
 
     async def _stream_completion_lifecycle(
@@ -2688,6 +2860,7 @@ class AgentRunner(Runner):
             overlay=runtime.hook_overlay,
             prompt=plan.original_user_message,
             assistant_response=outcome.assistant_response,
+            agent=runtime.agent,
         )
         stop_context = _format_hook_additional_context(stop_hook_result)
         if stop_context:
@@ -3402,6 +3575,10 @@ class AgentRunner(Runner):
             preflight=attempt_input.preflight,
         )
         if attempt_state.runtime_start.block_response is not None:
+            await self._end_trace_if_needed(
+                attempt_input.trace_id,
+                TraceStatus.COMPLETED,
+            )
             yield attempt_state.runtime_start.block_response, True
             attempt_state.should_return = True
             return
@@ -3598,7 +3775,14 @@ class AgentRunner(Runner):
                     ):
                         yield msg, last
         finally:
-            reset_current_file_url_network(file_url_network_token)
+            try:
+                reset_current_file_url_network(file_url_network_token)
+            except ValueError:
+                logger.debug(
+                    "Skipped file URL network context reset from a different "
+                    "async context",
+                    exc_info=True,
+                )
             cleanup_runtime = attempt_state.runtime
             cleanup_state_loaded = attempt_state.session_state_loaded
             if cleanup_runtime is None and retry_state.prev_agent is not None:
@@ -3911,70 +4095,33 @@ class AgentRunner(Runner):
             return
 
         try:
-
-            def _is_marked(entry):
-                return (
-                    isinstance(entry, list)
-                    and len(entry) >= 2
-                    and isinstance(entry[1], list)
-                    and TOOL_GUARD_DENIED_MARK in entry[1]
-                )
-
-            last_marked_idx = -1
             modified = False
 
-            def _cleanup_state(states: dict[str, Any]) -> dict[str, Any]:
-                nonlocal modified, last_marked_idx
-                agent_state = states.get("agent", {})
-                if not isinstance(agent_state, dict):
-                    return states
+            def _cleanup_state(
+                states: dict[str, Any],
+            ) -> dict[str, Any] | None:
+                nonlocal modified
+                content = _get_agent_memory_content(states)
+                if content is None:
+                    return None
 
-                memory_state = agent_state.get("memory", {})
-                if not isinstance(memory_state, dict):
-                    return states
-
-                content = memory_state.get("content", [])
-                if not isinstance(content, list) or not content:
-                    return states
-
-                for i, entry in enumerate(content):
-                    if _is_marked(entry):
-                        last_marked_idx = i
-
-                if last_marked_idx >= 0 and last_marked_idx + 1 < len(content):
-                    next_entry = content[last_marked_idx + 1]
-                    if (
-                        isinstance(next_entry, list)
-                        and len(next_entry) >= 1
-                        and isinstance(next_entry[0], dict)
-                        and next_entry[0].get("role") == "assistant"
-                    ):
-                        del content[last_marked_idx + 1]
-                        modified = True
-
-                for entry in content:
-                    if _is_marked(entry):
-                        entry[1].remove(TOOL_GUARD_DENIED_MARK)
-                        modified = True
-
-                if denial_response is not None:
-                    ts = getattr(denial_response, "timestamp", None)
-                    msg_dict = {
-                        "id": getattr(denial_response, "id", ""),
-                        "name": getattr(denial_response, "name", "Friday"),
-                        "role": getattr(denial_response, "role", "assistant"),
-                        "content": denial_response.content,
-                        "metadata": getattr(
-                            denial_response,
-                            "metadata",
-                            None,
-                        ),
-                        "timestamp": str(ts) if ts is not None else "",
-                    }
-                    content.append([msg_dict, []])
+                last_marked_idx = _last_tool_guard_denied_index(content)
+                if _remove_following_denial_explanation(
+                    content,
+                    last_marked_idx,
+                ):
                     modified = True
 
-                return states
+                if _strip_tool_guard_denied_marks(content):
+                    modified = True
+
+                if denial_response is not None:
+                    content.append(
+                        _build_denial_response_memory_entry(denial_response),
+                    )
+                    modified = True
+
+                return states if modified else None
 
             await self.session.mutate_session_state(
                 session_id=storage_session_id,

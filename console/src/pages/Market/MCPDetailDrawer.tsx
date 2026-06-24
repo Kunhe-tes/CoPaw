@@ -14,7 +14,7 @@ import {
   Typography,
   message,
 } from "antd";
-import { ThunderboltOutlined } from "@ant-design/icons";
+import { ThunderboltOutlined, HistoryOutlined } from "@ant-design/icons";
 import {
   Calendar,
   GitBranch,
@@ -28,15 +28,18 @@ import {
 } from "lucide-react";
 import { marketMcpApi } from "../../api/modules/marketMcp";
 import type { MarketMCPDetail, MCPTestResult } from "../../api/types";
+import { MCPVersionHistoryModal } from "./components/MCPVersionHistoryModal";
 
 const { Title, Paragraph, Text } = Typography;
 
 interface MCPDetailDrawerProps {
   mcp: MarketMCPDetail | null;
+  sourceId?: string;
   onDistribute?: () => void;
   onRecall?: () => void;
   onEdit?: () => void;
   onDelete?: () => void;
+  onRefresh?: () => void;
   canEdit?: boolean;
   isManager?: boolean;
 }
@@ -64,15 +67,18 @@ const footerButtonStyle = {
 
 export function MCPDetailDrawer({
   mcp,
+  sourceId,
   onDistribute,
   onRecall,
   onEdit,
   onDelete,
+  onRefresh,
   canEdit = false,
   isManager = false,
 }: MCPDetailDrawerProps) {
   const [testLoading, setTestLoading] = useState(false);
   const [testResult, setTestResult] = useState<MCPTestResult | null>(null);
+  const [versionHistoryOpen, setVersionHistoryOpen] = useState(false);
 
   if (!mcp) return null;
 
@@ -135,6 +141,16 @@ export function MCPDetailDrawer({
 
   return (
     <div style={{ padding: 4 }}>
+      <MCPVersionHistoryModal
+        open={versionHistoryOpen}
+        itemId={mcp.item_id}
+        mcpName={mcp.name}
+        currentVersion={mcp.version || ""}
+        sourceId={sourceId || ""}
+        isManager={isManager}
+        onClose={() => setVersionHistoryOpen(false)}
+        onVersionSwitched={onRefresh}
+      />
       <div
         style={{
           display: "grid",
@@ -321,6 +337,19 @@ export function MCPDetailDrawer({
               </div>
 
               <Space wrap size={8}>
+                <Button
+                  size="small"
+                  onClick={() => setVersionHistoryOpen(true)}
+                  style={{
+                    ...footerButtonStyle,
+                    color: "#5e5d59",
+                    border: "1px solid #d9d9d9",
+                    backgroundColor: "#fff",
+                  }}
+                >
+                  <HistoryOutlined style={{ fontSize: 12 }} />
+                  版本历史
+                </Button>
                 {isManager && onDistribute && (
                   <Button
                     size="small"

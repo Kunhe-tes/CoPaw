@@ -3,6 +3,7 @@ import { describe, expect, it, vi, beforeEach } from "vitest";
 import UserDetailModal from "./index";
 
 const sessionCardListMock = vi.hoisted(() => vi.fn());
+const userStatsHeaderMock = vi.hoisted(() => vi.fn());
 
 const tracingApiMock = vi.hoisted(() => ({
   getUserStats: vi.fn(),
@@ -16,7 +17,10 @@ vi.mock("../../../../../api/modules/tracing", () => ({
 }));
 
 vi.mock("./UserStatsHeader", () => ({
-  default: () => <div data-testid="user-stats-header" />,
+  default: (props: unknown) => {
+    userStatsHeaderMock(props);
+    return <div data-testid="user-stats-header" />;
+  },
 }));
 
 vi.mock("./SessionCardList", () => ({
@@ -34,6 +38,7 @@ describe("UserDetailModal", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     sessionCardListMock.mockClear();
+    userStatsHeaderMock.mockClear();
     tracingApiMock.getUserStats.mockResolvedValue({});
     tracingApiMock.getSessions.mockResolvedValue({
       items: [
@@ -85,6 +90,12 @@ describe("UserDetailModal", () => {
     expect(tracingApiMock.getSessions).toHaveBeenCalledWith(1, 10, {
       user_id: "user-001",
       bbk_ids: "100",
+      start_date: "2026-05-20",
+      end_date: "2026-05-20",
+      has_error: undefined,
+      resource_type: undefined,
+      resource_name: undefined,
+      mcp_server: undefined,
     });
     expect(tracingApiMock.getUserChats).toHaveBeenCalledWith("user-001");
 
@@ -131,6 +142,110 @@ describe("UserDetailModal", () => {
       expect(tracingApiMock.getSessions).toHaveBeenCalledWith(2, 20, {
         user_id: "user-001",
         bbk_ids: "100",
+        start_date: "2026-05-20",
+        end_date: "2026-05-20",
+        has_error: undefined,
+        resource_type: undefined,
+        resource_name: undefined,
+        mcp_server: undefined,
+      });
+    });
+  });
+
+  it("replaces and clears the active resource filter while keeping error filtering", async () => {
+    render(
+      <UserDetailModal
+        open
+        userId="user-001"
+        startDate="2026-05-20"
+        endDate="2026-05-20"
+        bbkIds="100"
+        onClose={vi.fn()}
+      />,
+    );
+
+    await waitFor(() => expect(userStatsHeaderMock).toHaveBeenCalled());
+    let headerProps = userStatsHeaderMock.mock.calls[
+      userStatsHeaderMock.mock.calls.length - 1
+    ][0] as {
+      onResourceFilterChange: (filter: {
+        type: "skill" | "model";
+        name: string;
+      }) => void;
+    };
+
+    await act(async () => {
+      headerProps.onResourceFilterChange({ type: "skill", name: "risk-check" });
+    });
+
+    await waitFor(() => {
+      expect(tracingApiMock.getSessions).toHaveBeenLastCalledWith(1, 10, {
+        user_id: "user-001",
+        bbk_ids: "100",
+        start_date: "2026-05-20",
+        end_date: "2026-05-20",
+        has_error: undefined,
+        resource_type: "skill",
+        resource_name: "risk-check",
+        mcp_server: undefined,
+      });
+    });
+
+    const listProps = sessionCardListMock.mock.calls[
+      sessionCardListMock.mock.calls.length - 1
+    ][0] as {
+      onToggleErrorFilter: () => void;
+    };
+    await act(async () => listProps.onToggleErrorFilter());
+
+    await waitFor(() => {
+      expect(tracingApiMock.getSessions).toHaveBeenLastCalledWith(1, 10, {
+        user_id: "user-001",
+        bbk_ids: "100",
+        start_date: "2026-05-20",
+        end_date: "2026-05-20",
+        has_error: true,
+        resource_type: "skill",
+        resource_name: "risk-check",
+        mcp_server: undefined,
+      });
+    });
+
+    headerProps = userStatsHeaderMock.mock.calls[
+      userStatsHeaderMock.mock.calls.length - 1
+    ][0] as typeof headerProps;
+    await act(async () => {
+      headerProps.onResourceFilterChange({ type: "model", name: "gpt-5" });
+    });
+    await waitFor(() => {
+      expect(tracingApiMock.getSessions).toHaveBeenLastCalledWith(1, 10, {
+        user_id: "user-001",
+        bbk_ids: "100",
+        start_date: "2026-05-20",
+        end_date: "2026-05-20",
+        has_error: true,
+        resource_type: "model",
+        resource_name: "gpt-5",
+        mcp_server: undefined,
+      });
+    });
+
+    headerProps = userStatsHeaderMock.mock.calls[
+      userStatsHeaderMock.mock.calls.length - 1
+    ][0] as typeof headerProps;
+    await act(async () => {
+      headerProps.onResourceFilterChange({ type: "model", name: "gpt-5" });
+    });
+    await waitFor(() => {
+      expect(tracingApiMock.getSessions).toHaveBeenLastCalledWith(1, 10, {
+        user_id: "user-001",
+        bbk_ids: "100",
+        start_date: "2026-05-20",
+        end_date: "2026-05-20",
+        has_error: true,
+        resource_type: undefined,
+        resource_name: undefined,
+        mcp_server: undefined,
       });
     });
   });

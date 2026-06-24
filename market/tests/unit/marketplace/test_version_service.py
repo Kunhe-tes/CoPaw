@@ -449,8 +449,8 @@ version: "1.0.0"
     assert "current version" in result.message.lower()
 
 
-def test_delete_initial_version_succeeds_and_reassigns(tmp_path):
-    """测试删除初始版本成功，并自动重新分配初始版本."""
+def test_delete_initial_version_is_rejected(tmp_path):
+    """初始版本不可删除（与 MCP 行为对称，避免破坏版本血脉）."""
     svc = _make_version_service(tmp_path)
 
     skill_md_v1 = """---
@@ -474,14 +474,16 @@ version: "1.0.0"
         creator="user",
     )
 
-    # 创建第二个版本，使 v1 成为初始版本
-    skill_md_v2 = """---
+    # 内容变化，创建第二个版本（让 v1 不再是 current 但仍是 initial）
+    (skill_dir / "SKILL.md").write_text(
+        """---
 name: "测试技能"
-version: "1.0.1"
+version: "1.0.0"
 ---
-# v2
-"""
-    (skill_dir / "SKILL.md").write_text(skill_md_v2, encoding="utf-8")
+# v2 changed body
+""",
+        encoding="utf-8",
+    )
     svc.create_version_snapshot(
         source_id="src_a",
         item_id="item_1",
@@ -490,26 +492,30 @@ version: "1.0.1"
         creator="user",
     )
 
-    # 删除初始版本 v1（应该成功）
+    # 尝试删除初始版本 → 应被拒绝
+    manifest = svc._load_versions_manifest("src_a", "item_1")
+    initial_version_id = next(
+        v.version_id for v in manifest.versions if v.is_initial
+    )
     result = svc.delete_version(
         source_id="src_a",
         item_id="item_1",
-        version_id="1.0.0",
+        version_id=initial_version_id,
     )
 
-    assert result.success
-    assert result.deleted_version == "1.0.0"
+    assert result.success is False
+    assert "initial" in result.message.lower()
 
-    # 验证版本目录已删除
+    # 版本目录依然存在
     version_dir = (
-        tmp_path / "market" / "src_a" / "skill_versions" / "item_1" / "1.0.0"
+        tmp_path
+        / "market"
+        / "src_a"
+        / "skill_versions"
+        / "item_1"
+        / initial_version_id
     )
-    assert not version_dir.exists()
-
-    # 验证新的初始版本是 v2
-    manifest = svc._load_versions_manifest("src_a", "item_1")
-    v2 = next(v for v in manifest.versions if v.version_id == "1.0.1")
-    assert v2.is_initial
+    assert version_dir.exists()
 
 
 def test_generate_timestamp_version_when_no_version_in_skill_md(tmp_path):
@@ -572,7 +578,12 @@ name: "测试技能"
 
 
 def test_version_bump_from_history(tmp_path):
-    """测试版本历史存在时，接着最后版本递增."""
+    """测试版本历史存在 + 内容变化时，接着最后版本递增（F2 新逻辑）.
+
+    F2 修复后，市场端 version_id 由 signature + 历史决定：
+    - 内容未变 → 复用历史 version_id（R7 no-op）
+    - 内容变化 → _bump_version 历史最新版
+    """
     svc = _make_version_service(tmp_path)
 
     skill_md = """---
@@ -597,7 +608,15 @@ name: "测试技能"
         current_market_version="1.0.5",
     )
 
-    # 再次创建版本，SKILL.md 无版本号时，应接着历史版本递增
+    # 修改内容（让 signature 变化）
+    skill_md_v2 = """---
+name: "测试技能"
+---
+# 测试技能 - 新增了一行
+"""
+    (skill_dir / "SKILL.md").write_text(skill_md_v2, encoding="utf-8")
+
+    # 再次创建版本，应接着历史版本递增
     version2 = svc.create_version_snapshot(
         source_id="src_a",
         item_id="item_3",
@@ -699,3 +718,167 @@ version: "1.0.0"
     assert "version_info" in detail
     assert "file_tree" in detail
     assert len(detail["file_tree"]) >= 1
+
+
+def test_create_snapshot_with_source_user(tmp_path):
+    """T3：创建快照时记录 source_user_* 字段."""
+    svc = _make_version_service(tmp_path)
+    skill_md = """---
+name: t
+version: "1.0.0"
+---
+正文
+"""
+    skill_dir = _create_skill_dir(tmp_path, "src1", "item1", skill_md=skill_md)
+
+    version = svc.create_version_snapshot(
+        source_id="src1",
+        item_id="item1",
+        skill_dir=skill_dir,
+        creator="admin_id",
+        creator_name="admin",
+        source_user_id="alice_id",
+        source_user_name="alice",
+        source_user_version="1.5.2",
+    )
+
+    assert version.created_by == "admin_id"
+    assert version.created_by_name == "admin"
+    assert version.source_user_id == "alice_id"
+    assert version.source_user_name == "alice"
+    assert version.source_user_version == "1.5.2"
+
+
+def test_create_snapshot_without_source_user_defaults_to_empty(tmp_path):
+    """T3：admin 直接 zip 上传场景默认 source_user_* 为空."""
+    svc = _make_version_service(tmp_path)
+    skill_md = """---
+name: t
+version: "1.0.0"
+---
+正文
+"""
+    skill_dir = _create_skill_dir(tmp_path, "src1", "item1", skill_md=skill_md)
+
+    version = svc.create_version_snapshot(
+        source_id="src1",
+        item_id="item1",
+        skill_dir=skill_dir,
+        creator="admin_id",
+        creator_name="admin",
+    )
+
+    assert version.source_user_id == ""
+    assert version.source_user_name == ""
+    assert version.source_user_version == ""
+
+
+def test_old_versions_json_loads_with_default_empty_source_user(tmp_path):
+    """T3：向后兼容——旧 versions.json 没有 source_user_* 字段时读出来为空串."""
+    svc = _make_version_service(tmp_path)
+    versions_path = (
+        tmp_path
+        / "market"
+        / "src1"
+        / "skill_versions"
+        / "item1"
+        / "versions.json"
+    )
+    versions_path.parent.mkdir(parents=True, exist_ok=True)
+    versions_path.write_text(
+        json.dumps(
+            {
+                "skill_name": "old",
+                "versions": [
+                    {
+                        "version_id": "1.0.0",
+                        "created_at": "2025-01-01T00:00:00+00:00",
+                        "created_by": "u1",
+                        "created_by_name": "user1",
+                        "description": "legacy",
+                        "signature": "sig",
+                        "is_current": True,
+                        "is_initial": True,
+                    },
+                ],
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+
+    listed = svc.list_versions("src1", "item1")
+    assert listed["versions"][0]["source_user_id"] == ""
+    assert listed["versions"][0]["source_user_name"] == ""
+    assert listed["versions"][0]["source_user_version"] == ""
+
+
+def test_same_version_same_content_does_not_flip_is_current(tmp_path):
+    """T4 R7：同 signature 时复用历史 version_id 并 no-op，不翻 is_current.
+
+    F2 修复后市场版本号由 signature + 历史决定，不再读 SKILL.md。
+    所以 R7 触发条件改为：当前内容 signature == 历史最新版 signature。
+    """
+    svc = _make_version_service(tmp_path)
+    skill_md_v1 = """---
+name: t
+---
+v1 content
+"""
+    skill_md_v2 = """---
+name: t
+---
+v2 content
+"""
+    skill_dir = _create_skill_dir(
+        tmp_path,
+        "src1",
+        "item1",
+        skill_md=skill_md_v1,
+    )
+
+    # 创建首版（version_id=1.0.0，signature=sigA）
+    v1 = svc.create_version_snapshot(
+        source_id="src1",
+        item_id="item1",
+        skill_dir=skill_dir,
+        creator="u1",
+        creator_name="user1",
+    )
+    assert v1.is_current is True
+    assert v1.version_id == "1.0.0"
+
+    # 升级（内容变化 → signature 变化 → 自动 bump 到 1.0.1）
+    (skill_dir / "SKILL.md").write_text(skill_md_v2, encoding="utf-8")
+    v2 = svc.create_version_snapshot(
+        source_id="src1",
+        item_id="item1",
+        skill_dir=skill_dir,
+        creator="u2",
+        creator_name="user2",
+    )
+    assert v2.is_current is True
+    assert v2.version_id == "1.0.1"
+
+    # 当前 current=1.0.1（signature=sigB）。再次用相同内容创建快照：
+    # signature 与历史最新版相同 → 复用 version_id=1.0.1 → R7 no-op
+    svc.create_version_snapshot(
+        source_id="src1",
+        item_id="item1",
+        skill_dir=skill_dir,
+        creator="u3",
+        creator_name="user3",
+    )
+
+    # R7：v1.0.1 仍是 current，不应被翻回旧版本，且不应产生新快照
+    listed = svc.list_versions("src1", "item1")
+    current_ids = [
+        v["version_id"] for v in listed["versions"] if v["is_current"]
+    ]
+    assert current_ids == [
+        "1.0.1",
+    ], f"R7 violated: current should remain 1.0.1, got {current_ids}"
+    # 也不应产生新快照（依然只有 2 条）
+    assert (
+        len(listed["versions"]) == 2
+    ), f"R7 violated: snapshot count should stay 2, got {len(listed['versions'])}"

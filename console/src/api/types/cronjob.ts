@@ -61,6 +61,7 @@ export interface CronJobSpecInput {
   schedule: CronJobSchedule;
   task_type?: "text" | "agent";
   text?: string;
+  skill_ids?: string;
   model_slot?: ModelSlotConfig | null;
   request?: CronJobRequest;
   dispatch: CronJobDispatch;
@@ -95,6 +96,11 @@ export interface CronBroadcastTarget {
   tenant_id: string;
   tenant_name?: string | null;
   bbk_id?: string | null;
+}
+
+export interface CronBroadcastOptions {
+  enable_offset?: boolean;
+  offset_window_hours?: number;
 }
 
 export interface CronBroadcastResponse {

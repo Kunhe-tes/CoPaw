@@ -156,6 +156,31 @@
   align-items: center;
 }
 
+.broadcastOffsetControls {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px 20px;
+  align-items: center;
+  padding: 10px 12px;
+  border: 1px solid #ece9e2;
+  border-radius: 6px;
+  background: #fcfbf8;
+}
+
+.broadcastOffsetSwitch,
+.broadcastOffsetWindow {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.broadcastOffsetWindow {
+  :global(.ant-input-number),
+  :global(.swe-input-number) {
+    width: 88px;
+  }
+}
+
 /* Action column */
 .actionColumn {
   display: flex;
@@ -212,5 +237,10 @@
 
   .formHelperLink {
     color: #69b1ff !important;
+  }
+
+  .broadcastOffsetControls {
+    border-color: rgba(255, 255, 255, 0.12);
+    background: rgba(255, 255, 255, 0.04);
   }
 }

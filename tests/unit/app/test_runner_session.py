@@ -68,7 +68,9 @@ async def test_session_write_runs_off_event_loop_thread(
 
     allow_write.set()
     await save_task
-    assert json.loads((tmp_path / "session-1.json").read_text()) == {
+    assert json.loads(
+        (tmp_path / "session-1.json").read_text(encoding="utf-8"),
+    ) == {
         "message": "你好",
     }
 

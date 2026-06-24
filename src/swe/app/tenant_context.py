@@ -81,7 +81,11 @@ def bind_tenant_context(
     resolved_scope_id = (
         canonicalize_scope_id(scope_id)
         if scope_id is not None
-        else resolve_scope_id(tenant_id, source_id)
+        else (
+            None
+            if tenant_id == "default" and source_id is not None
+            else resolve_scope_id(tenant_id, source_id)
+        )
     )
     try:
         if tenant_id is not None:

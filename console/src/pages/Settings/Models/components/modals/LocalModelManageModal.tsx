@@ -503,6 +503,7 @@ export function LocalModelManageModal({
 
   return (
     <Modal
+      rootClassName="console-management-modal"
       title={t("models.localModelsTitle", { provider: provider.name })}
       open={open}
       onCancel={handleClose}

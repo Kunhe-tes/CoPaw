@@ -46,20 +46,38 @@ async def test_publish_skill_creates_index_entry(tmp_path):
 
 @pytest.mark.asyncio
 async def test_publish_skill_increments_version_on_republish(tmp_path):
+    """F1/F2 修复后：内容变化才 bump；内容不变走 R7 no-op，版本号不动."""
     from market.marketplace.schemas import PublishSkillRequest
 
     svc = _make_service(tmp_path)
-    req = PublishSkillRequest(
+    req1 = PublishSkillRequest(
         name="skill_a",
         description="",
         creator_id="u1",
         creator_name="",
         skill_json={},
-        skill_md="",
+        skill_md="# v1",
     )
-    await svc.publish_skill("src_a", req)
-    item2 = await svc.publish_skill("src_a", req)
-    assert item2.version == "1.0.1"
+    item1 = await svc.publish_skill("src_a", req1)
+    assert item1.version == "1.0.0"
+
+    # 同样内容再 publish 一次 → R7 no-op，版本不动
+    item_same = await svc.publish_skill("src_a", req1)
+    assert (
+        item_same.version == "1.0.0"
+    ), "内容未变化时市场版本不应 bump（R7 no-op）"
+
+    # 改了内容再 publish → 自动 bump 到 1.0.1
+    req2 = PublishSkillRequest(
+        name="skill_a",
+        description="",
+        creator_id="u1",
+        creator_name="",
+        skill_json={},
+        skill_md="# v2 changed",
+    )
+    item2 = await svc.publish_skill("src_a", req2)
+    assert item2.version == "1.0.1", "内容变化时市场版本应自动 bump"
 
 
 @pytest.mark.asyncio
@@ -491,3 +509,169 @@ async def test_recall_mcp_by_name_removes_client_from_agent_config(tmp_path):
     assert result.results[0].success is True
     assert "my-mcp-tool" not in config_data["mcp"]["clients"]
     assert "other-client" in config_data["mcp"]["clients"]
+
+
+@pytest.mark.asyncio
+async def test_publish_skill_appends_version_for_different_user(tmp_path):
+    """T5 R4：不同用户同名 skill → 续接到现有 MarketItem，不再抛 SkillNameConflictError."""
+    from market.marketplace.schemas import PublishSkillRequest
+    from market.marketplace.fs import load_index
+
+    svc = _make_service(tmp_path)
+    # 用户 A 首发
+    req_a = PublishSkillRequest(
+        name="demo",
+        description="a",
+        creator_id="alice",
+        creator_name="Alice",
+        skill_json={"name": "demo"},
+        skill_md='---\nname: demo\nversion: "1.0.0"\n---\n',
+    )
+    item_a = await svc.publish_skill("src_a", req_a)
+
+    # 用户 B 同名同步（不同 creator_id），不传 overwrite
+    req_b = PublishSkillRequest(
+        name="demo",
+        description="b",
+        creator_id="bob",
+        creator_name="Bob",
+        skill_json={"name": "demo"},
+        skill_md='---\nname: demo\nversion: "2.0.0"\n---\n',
+    )
+    item_b = await svc.publish_skill("src_a", req_b)
+
+    # 续接到同一个 item_id
+    assert item_b.item_id == item_a.item_id
+    # creator 跟随当前上传者
+    assert item_b.creator_id == "bob"
+
+    # 市场上仍只有一条
+    items = load_index(tmp_path / "market", "src_a")
+    demos = [i for i in items if i.name == "demo"]
+    assert len(demos) == 1
+
+
+@pytest.mark.asyncio
+async def test_publish_skill_records_source_user_from_creator(tmp_path):
+    """T6 R6：admin 走 PublishSkillRequest 时，source_user_id=req.creator_id;
+    source_user_version 来自被引用用户工作区的 SKILL.md 中的版本.
+    operator_* 用作 created_by."""
+    from market.marketplace.schemas import PublishSkillRequest
+    from market.marketplace.version_service import SkillVersionService
+
+    svc = _make_service(tmp_path)
+    req = PublishSkillRequest(
+        name="demo",
+        description="d",
+        creator_id="alice",
+        creator_name="Alice",
+        skill_json={"name": "demo"},
+        skill_md='---\nname: demo\nversion: "1.5.2"\n---\nbody',
+    )
+    item = await svc.publish_skill(
+        "src_a",
+        req,
+        operator_id="admin_id",
+        operator_name="Admin",
+    )
+
+    vsvc = SkillVersionService(tmp_path / "market")
+    listed = vsvc.list_versions("src_a", item.item_id)
+    snap = listed["versions"][0]
+    assert snap["source_user_id"] == "alice"
+    assert snap["source_user_name"] == "Alice"
+    assert snap["source_user_version"] == "1.5.2"
+    assert snap["created_by"] == "admin_id"
+    assert snap["created_by_name"] == "Admin"
+
+
+@pytest.mark.asyncio
+async def test_publish_mcp_appends_for_different_user(tmp_path):
+    """T9 R4 + F1 R3：不同用户同名 MCP → 续接到现有 item，市场版本独立递增（不跟随用户本地版本）。"""
+    from market.marketplace.schemas import PublishMCPRequest
+    from market.marketplace.fs import load_index
+    from market.marketplace.mcp_version_service import MCPVersionService
+
+    svc = _make_service(tmp_path)
+
+    # alice 首发（本地版本 1.0.0 → 市场首版 1.0.0）
+    item_a = await svc.publish_mcp(
+        "src_a",
+        PublishMCPRequest(
+            client_key="m1",
+            name="demo_mcp",
+            description="a",
+            creator_id="alice",
+            creator_name="Alice",
+            config={"name": "demo_mcp", "transport": "stdio", "command": "/a"},
+            version="1.0.0",
+        ),
+    )
+
+    # bob 同名同步（本地版本 2.0.0，但市场版本独立 _bump_patch 到 1.0.1）
+    item_b = await svc.publish_mcp(
+        "src_a",
+        PublishMCPRequest(
+            client_key="m1",
+            name="demo_mcp",
+            description="b",
+            creator_id="bob",
+            creator_name="Bob",
+            config={"name": "demo_mcp", "transport": "stdio", "command": "/b"},
+            version="2.0.0",
+        ),
+    )
+
+    assert item_b.item_id == item_a.item_id
+    items = load_index(tmp_path / "market", "src_a")
+    demos = [i for i in items if i.name == "demo_mcp"]
+    assert len(demos) == 1
+
+    # F1 R3：市场版本独立递增，不再 follow 用户本地版本
+    assert item_b.version == "1.0.1"
+
+    # 快照里应有两个版本：1.0.0（alice 首发）和 1.0.1（bob 续接）
+    vsvc = MCPVersionService(tmp_path / "market")
+    listed = vsvc.list_versions("src_a", item_a.item_id)
+    ids = sorted(v["version_id"] for v in listed["versions"])
+    assert ids == ["1.0.0", "1.0.1"]
+    # 最新快照 source_user 是 bob，且 source_user_version 保留 bob 的本地版本 2.0.0
+    current = next(v for v in listed["versions"] if v["is_current"])
+    assert current["version_id"] == "1.0.1"
+    assert current["source_user_id"] == "bob"
+    assert current["source_user_version"] == "2.0.0"
+
+
+@pytest.mark.asyncio
+async def test_publish_mcp_admin_zip_source_user_empty(tmp_path):
+    """T9 R6：admin zip 路径（显式 source_user_id="" + v0.0.0）应记录正确."""
+    from market.marketplace.schemas import PublishMCPRequest
+    from market.marketplace.mcp_version_service import MCPVersionService
+
+    svc = _make_service(tmp_path)
+
+    item = await svc.publish_mcp(
+        "src_a",
+        PublishMCPRequest(
+            client_key="m2",
+            name="zipmcp",
+            description="d",
+            creator_id="admin_id",
+            creator_name="Admin",
+            config={"name": "zipmcp", "transport": "stdio", "command": "/x"},
+            version="1.0.0",
+            source_user_id="",
+            source_user_name="",
+            source_user_version="v0.0.0",
+            operator_id="admin_id",
+            operator_name="Admin",
+        ),
+    )
+
+    vsvc = MCPVersionService(tmp_path / "market")
+    listed = vsvc.list_versions("src_a", item.item_id)
+    snap = listed["versions"][0]
+    assert snap["source_user_id"] == ""
+    assert snap["source_user_name"] == ""
+    assert snap["source_user_version"] == "v0.0.0"
+    assert snap["created_by"] == "admin_id"

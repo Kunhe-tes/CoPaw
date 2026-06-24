@@ -11,9 +11,9 @@ from pydantic import BaseModel, Field
 from ..agent_context import get_agent_for_request
 from ..crons.auth_state import (
     cleanup_cron_auth_except_source,
-    ensure_user_info_from_access_token,
     extract_access_token_from_cookie,
     get_auth_snapshot,
+    save_user_info_from_access_token,
 )
 from ..auth import (
     authenticate,
@@ -154,7 +154,7 @@ async def configure_cron_auth(
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     workspace = await get_agent_for_request(request)
-    ensured = ensure_user_info_from_access_token(
+    save_user_info_from_access_token(
         access_token,
         cookie_header=cookie_header,
         tenant_id=workspace.tenant_id,
@@ -166,7 +166,7 @@ async def configure_cron_auth(
     )
     return {
         "configured": snapshot.configured,
-        "user_info_status": ("reused" if ensured.reused else "refreshed"),
+        "user_info_status": "refreshed",
         "user_info_expires_at": snapshot.user_info_expires_at,
         "auth_token_expires_at": snapshot.auth_token_expires_at,
         "has_auth_token": snapshot.has_auth_token,

@@ -12,6 +12,7 @@ Verifies that:
 import sys
 import logging
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import Mock, patch, AsyncMock
 
 sys.path.insert(0, str(Path(__file__).parent.parent.parent.parent / "src"))
@@ -61,6 +62,90 @@ class TestMinimalStartup:
         import swe.app._app as app_module
 
         assert hasattr(app_module, "ensure_default_agent_exists")
+
+    def test_async_thread_pool_config_defaults_to_64(
+        self,
+        monkeypatch,
+    ):
+        """Startup thread pool tuning uses 64 workers by default."""
+        import swe.app._app as app_module
+
+        assert hasattr(app_module, "_configure_async_thread_pools")
+
+        monkeypatch.delenv("ANYIO_THREAD_TOKENS", raising=False)
+        monkeypatch.delenv("ASYNCIO_EXECUTOR_WORKERS", raising=False)
+
+        limiter = SimpleNamespace(total_tokens=0)
+        fake_loop = Mock()
+        executor_workers: list[int] = []
+
+        class FakeThreadPoolExecutor:
+            def __init__(self, max_workers: int):
+                executor_workers.append(max_workers)
+
+        monkeypatch.setattr(
+            app_module.anyio.to_thread,
+            "current_default_thread_limiter",
+            lambda: limiter,
+        )
+        monkeypatch.setattr(
+            app_module.asyncio,
+            "get_running_loop",
+            lambda: fake_loop,
+        )
+        monkeypatch.setattr(
+            app_module,
+            "ThreadPoolExecutor",
+            FakeThreadPoolExecutor,
+        )
+
+        app_module._configure_async_thread_pools()
+
+        assert limiter.total_tokens == 64
+        assert executor_workers == [64]
+        fake_loop.set_default_executor.assert_called_once()
+
+    def test_async_thread_pool_config_uses_env_overrides(
+        self,
+        monkeypatch,
+    ):
+        """Startup thread pool tuning can be adjusted by environment."""
+        import swe.app._app as app_module
+
+        assert hasattr(app_module, "_configure_async_thread_pools")
+
+        monkeypatch.setenv("ANYIO_THREAD_TOKENS", "72")
+        monkeypatch.setenv("ASYNCIO_EXECUTOR_WORKERS", "80")
+
+        limiter = SimpleNamespace(total_tokens=0)
+        fake_loop = Mock()
+        executor_workers: list[int] = []
+
+        class FakeThreadPoolExecutor:
+            def __init__(self, max_workers: int):
+                executor_workers.append(max_workers)
+
+        monkeypatch.setattr(
+            app_module.anyio.to_thread,
+            "current_default_thread_limiter",
+            lambda: limiter,
+        )
+        monkeypatch.setattr(
+            app_module.asyncio,
+            "get_running_loop",
+            lambda: fake_loop,
+        )
+        monkeypatch.setattr(
+            app_module,
+            "ThreadPoolExecutor",
+            FakeThreadPoolExecutor,
+        )
+
+        app_module._configure_async_thread_pools()
+
+        assert limiter.total_tokens == 72
+        assert executor_workers == [80]
+        fake_loop.set_default_executor.assert_called_once()
 
 
 class TestTenantBootstrapBoundaries:

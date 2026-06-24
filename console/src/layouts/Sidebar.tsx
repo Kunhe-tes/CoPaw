@@ -82,6 +82,8 @@ export default function Sidebar({ selectedKey }: SidebarProps) {
   const [collapsed, setCollapsed] = useState(false);
   const [openKeys, setOpenKeys] = useState<string[]>([...DEFAULT_OPEN_KEYS]);
   const canManageCurrentSourceConfig = isSuperManager || manager;
+  const sourceId = useIframeStore((state) => state.source);
+  const isRMassistSource = sourceId === "RMASSIST";
   const canUseSystemCheck = isSuperManager || manager;
 
   // ── Effects ──────────────────────────────────────────────────────────────
@@ -183,6 +185,13 @@ export default function Sidebar({ selectedKey }: SidebarProps) {
       path: "/my-mcp",
       label: t("nav.myMcp"),
     },
+    // 应用市场
+    {
+      key: "market",
+      icon: <Store size={18} />,
+      path: "/market",
+      label: t("nav.market"),
+    },
     // 运行中心
     {
       key: "cron-jobs",
@@ -207,13 +216,6 @@ export default function Sidebar({ selectedKey }: SidebarProps) {
       icon: <SparkVoiceChat01Line size={18} />,
       path: "/heartbeat",
       label: t("nav.heartbeat"),
-    },
-    // 应用市场
-    {
-      key: "market",
-      icon: <Store size={18} />,
-      path: "/market",
-      label: t("nav.market"),
     },
     // 系统设置
     {
@@ -271,12 +273,26 @@ export default function Sidebar({ selectedKey }: SidebarProps) {
       path: "/analytics/business-overview",
       label: t("nav.analyticsBusinessOverview", "运营看板"),
     },
-    {
-      key: "analytics-claw-data-overview",
-      icon: <SparkBarChartLine size={18} />,
-      path: "/analytics/claw-data-overview",
-      label: t("nav.analyticsClawDataOverview", "Claw数据看板"),
-    },
+    ...(canManageCurrentSourceConfig
+      ? [
+          {
+            key: "analytics-continuous-governance",
+            icon: <SparkRefreshLine size={18} />,
+            path: "/analytics/continuous-governance",
+            label: t("nav.analyticsContinuousGovernance", "质量工程看板"),
+          },
+        ]
+      : []),
+    ...(isRMassistSource
+      ? [
+          {
+            key: "analytics-claw-data-overview",
+            icon: <SparkBarChartLine size={18} />,
+            path: "/analytics/claw-data-overview",
+            label: t("nav.analyticsClawDataOverview", "Claw数据看板"),
+          },
+        ]
+      : []),
     {
       key: "analytics-messages",
       icon: <SparkSearchLine size={18} />,
@@ -346,7 +362,13 @@ export default function Sidebar({ selectedKey }: SidebarProps) {
         },
       ],
     },
-    // 3. 运行中心
+    // 3. 应用市场（单独一级）
+    {
+      key: "market",
+      label: collapsed ? null : t("nav.market"),
+      icon: <Store size={16} />,
+    },
+    // 4. 运行中心
     {
       key: "run-center",
       label: collapsed ? null : t("nav.runCenter"),
@@ -373,12 +395,6 @@ export default function Sidebar({ selectedKey }: SidebarProps) {
           icon: <SparkVoiceChat01Line size={16} />,
         },
       ],
-    },
-    // 4. 应用市场（单独一级）
-    {
-      key: "market",
-      label: collapsed ? null : t("nav.market"),
-      icon: <Store size={16} />,
     },
     // 5. 系统设置
     {
@@ -447,13 +463,28 @@ export default function Sidebar({ selectedKey }: SidebarProps) {
             : t("nav.analyticsBusinessOverview", "运营看板"),
           icon: <SparkBarChartLine size={16} />,
         },
-        {
-          key: "analytics-claw-data-overview",
-          label: collapsed
-            ? null
-            : t("nav.analyticsClawDataOverview", "Claw数据看板"),
-          icon: <SparkBarChartLine size={16} />,
-        },
+        ...(canManageCurrentSourceConfig
+          ? [
+              {
+                key: "analytics-continuous-governance",
+                label: collapsed
+                  ? null
+                  : t("nav.analyticsContinuousGovernance", "质量工程看板"),
+                icon: <SparkRefreshLine size={16} />,
+              },
+            ]
+          : []),
+        ...(isRMassistSource
+          ? [
+              {
+                key: "analytics-claw-data-overview",
+                label: collapsed
+                  ? null
+                  : t("nav.analyticsClawDataOverview", "Claw数据看板"),
+                icon: <SparkBarChartLine size={16} />,
+              },
+            ]
+          : []),
         {
           key: "analytics-messages",
           label: collapsed ? null : t("nav.analyticsMessages", "Messages"),

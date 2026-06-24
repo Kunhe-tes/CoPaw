@@ -16,6 +16,12 @@ from ..models.cron import (
     CronJobModel,
     CronJobQueryParams,
     CronOverviewResponse,
+    CronOverviewStatsResponse,
+    CronBranchRankingResponse,
+    CronBranchErrorResponse,
+    BranchSkillResponse,
+    BranchSkillManagerResponse,
+    BranchSkillManagerCustomerResponse,
     ExecutionModel,
     ExecutionQueryParams,
     PaginatedResponse,
@@ -216,6 +222,7 @@ async def list_executions(
     request: Request,
     job_id: str | None = Query(default=None, description="任务ID筛选"),
     tenant_id: str | None = Query(default=None, description="租户ID筛选"),
+    bbk_id: str | None = Query(default=None, description="分行号筛选"),
     status: str | None = Query(default=None, description="执行状态筛选"),
     start_time: datetime | None = Query(
         default=None,
@@ -235,6 +242,7 @@ async def list_executions(
         request: FastAPI request object
         job_id: Job ID filter
         tenant_id: Tenant ID filter
+        bbk_id: BBK ID filter
         status: Status filter
         start_time: Start time filter
         end_time: End time filter
@@ -246,9 +254,22 @@ async def list_executions(
         Paginated execution list
     """
     actual_source_id = _get_source_id_from_header(request)
+    logger.warning(
+        "[cron executions debug] request received: source_id=%s job_id=%s tenant_id=%s bbk_id=%s status=%s start_time=%s end_time=%s page=%s page_size=%s",
+        actual_source_id,
+        job_id,
+        tenant_id,
+        bbk_id,
+        status,
+        start_time,
+        end_time,
+        page,
+        page_size,
+    )
     params = ExecutionQueryParams(
         job_id=job_id,
         tenant_id=tenant_id,
+        bbk_id=bbk_id,
         source_id=actual_source_id,
         status=status,
         start_time=start_time,
@@ -419,5 +440,248 @@ async def get_unread_count(
     actual_source_id = _get_source_id_from_header(request)
     return await service.get_unread_count(
         tenant_id,
+        source_id=actual_source_id,
+    )
+
+
+@router.get("/overview-stats", response_model=CronOverviewStatsResponse)
+async def get_overview_stats(
+    request: Request,
+    start_date: str | None = Query(
+        default=None,
+        description="开始日期 (YYYY-MM-DD)",
+    ),
+    end_date: str | None = Query(
+        default=None,
+        description="结束日期 (YYYY-MM-DD)",
+    ),
+    bbk_ids: str | None = Query(
+        default=None,
+        description="分行号筛选（逗号分隔）",
+    ),
+    service: QueryService = Depends(get_query_service),
+) -> CronOverviewStatsResponse:
+    """获取定时任务概览统计。
+
+    返回时间范围内的定时任务总数、执行次数、成功率、已读率等统计数据。
+
+    Args:
+        start_date: 开始日期筛选 (YYYY-MM-DD格式)
+        end_date: 结束日期筛选 (YYYY-MM-DD格式)
+        bbk_ids: 分行号筛选（多个用逗号分隔，不传代表查所有分行）
+        service: Query service
+
+    Returns:
+        概览统计数据
+    """
+    actual_source_id = _get_source_id_from_header(request)
+    return await service.get_overview_stats(
+        start_date=start_date,
+        end_date=end_date,
+        bbk_ids=bbk_ids,
+        source_id=actual_source_id,
+    )
+
+
+@router.get("/branch-behavior", response_model=CronBranchRankingResponse)
+async def get_branch_behavior(
+    request: Request,
+    start_date: str | None = Query(
+        default=None,
+        description="开始日期 (YYYY-MM-DD)",
+    ),
+    end_date: str | None = Query(
+        default=None,
+        description="结束日期 (YYYY-MM-DD)",
+    ),
+    bbk_ids: str | None = Query(
+        default=None,
+        description="分行号筛选（逗号分隔）",
+    ),
+    service: QueryService = Depends(get_query_service),
+) -> CronBranchRankingResponse:
+    """获取分行综合排行。
+
+    返回各分行的覆盖客户经理数、定时任务数、成功执行数、成功率、已读任务数。
+
+    Args:
+        start_date: 开始日期筛选 (YYYY-MM-DD格式)
+        end_date: 结束日期筛选 (YYYY-MM-DD格式)
+        bbk_ids: 分行号筛选（多个用逗号分隔）
+        service: Query service
+
+    Returns:
+        分行综合排行数据
+    """
+    actual_source_id = _get_source_id_from_header(request)
+    return await service.get_branch_behavior(
+        start_date=start_date,
+        end_date=end_date,
+        bbk_ids=bbk_ids,
+        source_id=actual_source_id,
+    )
+
+
+@router.get("/branch-error", response_model=CronBranchErrorResponse)
+async def get_branch_error(
+    request: Request,
+    start_date: str | None = Query(
+        default=None,
+        description="开始日期 (YYYY-MM-DD)",
+    ),
+    end_date: str | None = Query(
+        default=None,
+        description="结束日期 (YYYY-MM-DD)",
+    ),
+    bbk_ids: str | None = Query(
+        default=None,
+        description="分行号筛选（逗号分隔）",
+    ),
+    service: QueryService = Depends(get_query_service),
+) -> CronBranchErrorResponse:
+    """获取分行层异常执行数据。
+
+    返回受影响分行数量、报错原因分布、分行异常排行等数据。
+
+    Args:
+        start_date: 开始日期筛选 (YYYY-MM-DD格式)
+        end_date: 结束日期筛选 (YYYY-MM-DD格式)
+        bbk_ids: 分行号筛选（多个用逗号分隔）
+        service: Query service
+
+    Returns:
+        分行异常执行数据
+    """
+    actual_source_id = _get_source_id_from_header(request)
+    return await service.get_branch_error(
+        start_date=start_date,
+        end_date=end_date,
+        bbk_ids=bbk_ids,
+        source_id=actual_source_id,
+    )
+
+
+@router.get("/branch-skills", response_model=BranchSkillResponse)
+async def get_branch_skills(
+    request: Request,
+    bbk_id: str = Query(..., description="分行ID"),
+    start_date: str | None = Query(
+        default=None,
+        description="开始日期 (YYYY-MM-DD)",
+    ),
+    end_date: str | None = Query(
+        default=None,
+        description="结束日期 (YYYY-MM-DD)",
+    ),
+    service: QueryService = Depends(get_query_service),
+) -> BranchSkillResponse:
+    """获取分行技能维度数据。
+
+    返回指定分行在时间范围内的技能统计，包括定时任务数、
+    成功执行数、成功率、已读任务数、报错次数。
+
+    Args:
+        bbk_id: 分行ID
+        start_date: 开始日期
+        end_date: 结束日期
+        service: Query service
+
+    Returns:
+        技能维度列表
+    """
+    actual_source_id = _get_source_id_from_header(request)
+    return await service.get_branch_skills(
+        bbk_id=bbk_id,
+        start_date=start_date,
+        end_date=end_date,
+        source_id=actual_source_id,
+    )
+
+
+@router.get(
+    "/branch-skill-managers",
+    response_model=BranchSkillManagerResponse,
+)
+async def get_branch_skill_managers(
+    request: Request,
+    bbk_id: str = Query(..., description="分行ID"),
+    skill_name: str = Query(..., description="技能名称"),
+    start_date: str | None = Query(
+        default=None,
+        description="开始日期 (YYYY-MM-DD)",
+    ),
+    end_date: str | None = Query(
+        default=None,
+        description="结束日期 (YYYY-MM-DD)",
+    ),
+    service: QueryService = Depends(get_query_service),
+) -> BranchSkillManagerResponse:
+    """获取技能下的客户经理维度数据。
+
+    返回指定分行、指定技能下的客户经理统计，包括已读次数、
+    方案次数、洞察次数、电访次数、最后一次点击时间。
+
+    Args:
+        bbk_id: 分行ID
+        skill_name: 技能名称
+        start_date: 开始日期
+        end_date: 结束日期
+        service: Query service
+
+    Returns:
+        客户经理维度列表
+    """
+    actual_source_id = _get_source_id_from_header(request)
+    return await service.get_branch_skill_managers(
+        bbk_id=bbk_id,
+        skill_name=skill_name,
+        start_date=start_date,
+        end_date=end_date,
+        source_id=actual_source_id,
+    )
+
+
+@router.get(
+    "/branch-skill-manager-customers",
+    response_model=BranchSkillManagerCustomerResponse,
+)
+async def get_branch_skill_manager_customers(
+    request: Request,
+    bbk_id: str = Query(..., description="分行ID"),
+    skill_name: str = Query(..., description="技能名称"),
+    user_id: str = Query(..., description="客户经理ID"),
+    start_date: str | None = Query(
+        default=None,
+        description="开始日期 (YYYY-MM-DD)",
+    ),
+    end_date: str | None = Query(
+        default=None,
+        description="结束日期 (YYYY-MM-DD)",
+    ),
+    service: QueryService = Depends(get_query_service),
+) -> BranchSkillManagerCustomerResponse:
+    """获取客户经理下的客户维度数据。
+
+    返回指定分行、指定技能、指定客户经理下的客户统计，包括
+    是否点击方案、是否点击洞察、是否点击电访、点击时间。
+
+    Args:
+        bbk_id: 分行ID
+        skill_name: 技能名称
+        user_id: 客户经理ID
+        start_date: 开始日期
+        end_date: 结束日期
+        service: Query service
+
+    Returns:
+        客户维度列表
+    """
+    actual_source_id = _get_source_id_from_header(request)
+    return await service.get_branch_skill_manager_customers(
+        bbk_id=bbk_id,
+        skill_name=skill_name,
+        user_id=user_id,
+        start_date=start_date,
+        end_date=end_date,
         source_id=actual_source_id,
     )

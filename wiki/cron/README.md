@@ -13,7 +13,7 @@
 3. 然后看 [Cron 执行上下文](cron-execution-context.md)，理解 scheduled run 如何恢复 tenant、source、model、cookie 和 runner 上下文。
 4. 如果问题和任务列表、未读、完成提醒或 Monitor 数据有关，看 [Cron Monitor 与通知](cron-monitor-notification.md)。
 5. 如果问题涉及可配置完成通知延迟、广播通知延迟叠加、CLI / Console 延迟配置，看 [Cron 通知延迟](cron-notification-delay.md)。
-6. 如果问题涉及多租户广播、heartbeat、dream 或多实例部署，看 [Cron 广播与系统任务](cron-broadcast-system.md)。
+6. 如果问题涉及多租户广播、source 级会话历史清理、heartbeat、dream 或多实例部署，看 [Cron 广播与系统任务](cron-broadcast-system.md)。
 7. 如果问题涉及查看分发给哪些用户、批量删除或重跑分发子任务，看 [Cron 分发子任务管理](cron-distribution-management.md)。
 8. 最后用 [Cron 排查与提交脉络](cron-troubleshooting-history.md) 定位常见问题和相关提交。
 
@@ -26,7 +26,7 @@
 | [Cron 执行上下文](cron-execution-context.md) | 单次执行流程、成功/取消判定、source 隔离、model_slot、cron_auth.json 和 cookie 来源 |
 | [Cron Monitor 与通知](cron-monitor-notification.md) | 任务卡片、未读计数、自动暂停、Monitor 同步、完成通知领取和推送 |
 | [Cron 通知延迟](cron-notification-delay.md) | `meta.notification_delay_minutes`、自动/手动执行差异、广播 offset 叠加、CLI 和 Console 配置 |
-| [Cron 广播与系统任务](cron-broadcast-system.md) | 广播任务如何派生子任务、heartbeat / dream 怎么跑、多实例 coordination 当前边界 |
+| [Cron 广播与系统任务](cron-broadcast-system.md) | 广播任务如何派生子任务、source 级会话历史清理如何注册和执行、heartbeat / dream 怎么跑、多实例 coordination 当前边界 |
 | [Cron 分发子任务管理](cron-distribution-management.md) | 反查分发子任务、批量删除、批量重跑、重新分发覆盖配置的字段边界 |
 | [Cron 排查与提交脉络](cron-troubleshooting-history.md) | pending approval、source 串租户、Monitor 取消态、通知缺失、星期转换等问题怎么查 |
 
@@ -62,6 +62,8 @@
 | 单次执行 | `src/swe/app/crons/executor.py` | 绑定 tenant/source/model/auth，上下文内执行 text 或 agent 任务 |
 | 外部调度适配 | `src/swe/app/crons/scheduler_adapter.py` | `NoopSchedulerAdapter` 与 `RealSchedulerAdapter`，对接外部 job-admin API |
 | 外部回调 | `src/swe/app/routers/internal.py` | `/api/internal/cron/callback` 解码 `jobParam` 并分发 job / heartbeat / dream |
+| Source 系统任务调度 | `src/swe/app/source_system_config/task_scheduler.py` | 根据 source 系统特性配置注册、更新、暂停 source 级清理任务，并按 source 枚举 runtime scope 执行清理 |
+| Source 系统任务绑定 | `src/swe/app/source_system_config/task_binding_store.py` | 按 `source_id + task_type` 保存外部调度任务 ID，避免同一 source 下多个 tenant 重复注册清理任务 |
 | 授权状态 | `src/swe/app/crons/auth_state.py` | 保存 `cron_auth.json`，刷新 user_info/auth_token/cookie |
 | Monitor 同步客户端 | `src/swe/app/crons/monitor_sync_client.py` | SWE 调用 Monitor 同步 job、execution、通知领取状态 |
 | 完成通知 worker | `src/swe/app/crons/notification_worker.py` | 后台扫描 Monitor pending 通知并推送完成提醒 |
@@ -77,4 +79,5 @@
 - 当前基线已包含 `f0ed1c9e fix(cron): handle chained swe cron commands`，Agent shell 拦截器可以处理 `echo ready && swe cron list` 这类链式命令。
 - 当前本地修改补充了 `meta.notification_delay_minutes`，自动成功执行的完成通知可以按任务配置延迟，广播子任务会在原有错峰通知 offset 上继续叠加这个延迟。
 - 当前本地修改补充了分发子任务管理：任意任务都能反查子任务，已分发子任务支持批量删除和批量重跑，重新分发会覆盖任务定义配置但保留目标用户身份和暂停状态。
+- 当前本地修改把定时任务会话历史清理收敛为 source 级系统任务：配置仍在 `swe_source_system_config`，外部任务绑定记录在 `swe_source_system_task_binding`，同一 `source_id` 只注册一条清理任务。
 - 这里记录的是当前代码真实行为，不把尚未装配的 coordination 原语描述成已经生效的运行路径。

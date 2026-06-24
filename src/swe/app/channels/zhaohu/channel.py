@@ -1932,6 +1932,21 @@ class ZhaohuChannel(BaseChannel):
                 },
             )
 
+        # 支持多链接 (link_items: list of {url, text})
+        for item in meta.get("link_items", []):
+            message_blocks.append(
+                {
+                    "type": "link",
+                    "value": [
+                        {
+                            "subtype": "2",
+                            "subvalue": item.get("url", ""),
+                            "text": item.get("text", "点击查看"),
+                        },
+                    ],
+                },
+            )
+
         # 支持自定义 summary
         notification_summary = meta.get("notification_summary") or summary
 

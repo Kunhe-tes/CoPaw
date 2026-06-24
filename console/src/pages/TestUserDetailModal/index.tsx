@@ -4,6 +4,7 @@ import { User } from "lucide-react";
 import type { Message } from "../../api/types";
 import type {
   SessionListItem,
+  SessionResourceFilter,
   SessionStats,
   UserStats,
 } from "../../api/modules/tracing";
@@ -50,6 +51,48 @@ const mockUserStats: UserStats = {
       mcp_server: "crm",
       count: 2,
       avg_duration_ms: 520,
+      error_count: 0,
+    },
+    {
+      tool_name: "search_cust_infos",
+      mcp_server: "mcp-wmutcusmng-st",
+      count: 2,
+      avg_duration_ms: 610,
+      error_count: 0,
+    },
+    {
+      tool_name: "get_daily_must_call_list",
+      mcp_server: "AIGC数据",
+      count: 1,
+      avg_duration_ms: 420,
+      error_count: 0,
+    },
+    {
+      tool_name: "query_bbk_product_pool",
+      mcp_server: "智能体平台",
+      count: 1,
+      avg_duration_ms: 560,
+      error_count: 0,
+    },
+    {
+      tool_name: "query_customer_aum",
+      mcp_server: "智能体平台",
+      count: 1,
+      avg_duration_ms: 630,
+      error_count: 0,
+    },
+    {
+      tool_name: "slots",
+      mcp_server: "智能体平台",
+      count: 1,
+      avg_duration_ms: 320,
+      error_count: 0,
+    },
+    {
+      tool_name: "query_cust_labels",
+      mcp_server: "智能体平台",
+      count: 1,
+      avg_duration_ms: 380,
       error_count: 0,
     },
   ],
@@ -238,6 +281,8 @@ const mockMessagesBySession: Record<string, Message[]> = {
 export default function TestUserDetailModalPage() {
   const [open, setOpen] = useState(true);
   const [statsCollapsed, setStatsCollapsed] = useState(false);
+  const [resourceFilter, setResourceFilter] =
+    useState<SessionResourceFilter | null>(null);
   const [sessionsCollapsed, setSessionsCollapsed] = useState(false);
   const [selectedSessionId, setSelectedSessionId] = useState(
     mockSessions[0].session_id,
@@ -303,8 +348,16 @@ export default function TestUserDetailModalPage() {
           <div className={modalStyles.topSection}>
             <UserStatsHeader
               userStats={mockUserStats}
-              sessionStats={selectedSessionStats}
+              sessionStats={resourceFilter ? null : selectedSessionStats}
               collapsed={statsCollapsed}
+              activeResourceFilter={resourceFilter}
+              onResourceFilterChange={(nextFilter) =>
+                setResourceFilter((currentFilter) =>
+                  JSON.stringify(currentFilter) === JSON.stringify(nextFilter)
+                    ? null
+                    : nextFilter,
+                )
+              }
               onToggleCollapsed={() => setStatsCollapsed((value) => !value)}
             />
           </div>

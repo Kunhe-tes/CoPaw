@@ -494,10 +494,12 @@ export function MCPDetailPanel({
               <InfoRow label="名称" value={mcp.name} />
               {mcp.version && (
                 <InfoRow
-                  label="版本"
+                  label={isDistributed ? "接收版本" : "我的版本"}
                   value={
-                    isDistributed && mcp.creator_name
-                      ? `v${mcp.version}（由 ${mcp.creator_name} 创建）`
+                    isDistributed
+                      ? `v${mcp.received_version || mcp.version}${
+                          mcp.creator_name ? `（由 ${mcp.creator_name} 创建）` : ""
+                        }`
                       : `v${mcp.version}`
                   }
                 />

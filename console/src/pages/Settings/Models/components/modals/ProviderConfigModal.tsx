@@ -516,6 +516,7 @@ export function ProviderConfigModal({
 
   return (
     <Modal
+      rootClassName="console-management-modal"
       title={t("models.configureProvider", { name: provider.name })}
       open={open}
       onCancel={onClose}

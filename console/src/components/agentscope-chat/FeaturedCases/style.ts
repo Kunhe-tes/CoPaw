@@ -103,15 +103,16 @@ export default createGlobalStyle`
 
   &-card-text {
     flex: 1;
-    padding: 8px 16px;
-    font-size: 12px;
-    line-height: 18px;
+    padding: 8px 14px;
+    font-size: 13px;
+    line-height: 22px;
     color: ${DESIGN_TOKENS.colorTextSecondary};
     display: -webkit-box;
     -webkit-box-orient: vertical;
     -webkit-line-clamp: 5;
     overflow: hidden;
     text-overflow: ellipsis;
+    word-break: break-all;
   }
 
   /* Hover overlay */

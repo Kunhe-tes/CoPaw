@@ -3,6 +3,7 @@ import type {
   CronBroadcastChildRef,
   CronBroadcastChildrenBatchResponse,
   CronBroadcastChildrenResponse,
+  CronBroadcastOptions,
   CronBroadcastResponse,
   CronBroadcastTarget,
   CronJobSpecInput,
@@ -67,7 +68,11 @@ export const cronJobApi = {
   listCronBroadcastTenants: () =>
     request<{ tenant_ids: string[] }>("/cron/broadcast/tenants"),
 
-  broadcastCronJob: (jobId: string, targets: CronBroadcastTarget[]) =>
+  broadcastCronJob: (
+    jobId: string,
+    targets: CronBroadcastTarget[],
+    options: CronBroadcastOptions = {},
+  ) =>
     request<CronBroadcastResponse>(
       `/cron/jobs/${encodeURIComponent(jobId)}/broadcast`,
       {
@@ -75,6 +80,8 @@ export const cronJobApi = {
         body: JSON.stringify({
           target_tenant_ids: targets.map((target) => target.tenant_id),
           targets,
+          enable_offset: options.enable_offset ?? true,
+          offset_window_hours: options.offset_window_hours ?? 4,
         }),
       },
     ),

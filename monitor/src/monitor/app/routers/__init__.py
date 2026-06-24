@@ -6,6 +6,7 @@ from .sync import router as sync_router
 from .cron import router as cron_router
 from .tracing import router as tracing_router
 from .warmup import router as warmup_router
+from .subtask import router as subtask_router
 
 api_router = APIRouter()
 api_router.include_router(health_router, tags=["health"])
@@ -14,3 +15,4 @@ api_router.include_router(cron_router, tags=["cron"])
 api_router.include_router(tracing_router, tags=["tracing"])
 # 暴露手动预热和状态查询入口，便于自动恢复失败后人工补跑。
 api_router.include_router(warmup_router, tags=["warmup"])
+api_router.include_router(subtask_router, tags=["subtask"])

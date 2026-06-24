@@ -469,6 +469,27 @@ describe("ExpandablePanel tasks", () => {
     mocks.setSessionLoading.mockReset();
   });
 
+  it("shows a non-interactive fallback when there are no tasks", () => {
+    render(
+      <ExpandablePanel
+        visible
+        type="tasks"
+        onClose={vi.fn()}
+        tasks={[]}
+        sessions={[]}
+        onTaskClick={vi.fn()}
+        toolbarRef={{ current: document.createElement("div") }}
+      />,
+    );
+
+    expect(screen.getByText("暂无任务")).toBeInTheDocument();
+    expect(
+      screen.getByText("创建任务，让 AI 帮你自动推进"),
+    ).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "去创建" })).toBeNull();
+    expect(screen.queryByRole("link", { name: "去创建" })).toBeNull();
+  });
+
   it("collapses paused tasks without showing aggregate unread state", () => {
     render(
       <ExpandablePanel
@@ -555,6 +576,31 @@ describe("ExpandablePanel tasks", () => {
     expect(
       container.querySelector(".expandable-panel-task-card--selected"),
     ).toBeInTheDocument();
+  });
+
+  it("shows cleaned text for auto-paused tasks with cleared unread count", async () => {
+    const task = taskJob("cleaned", {
+      paused: true,
+      unreadCount: 0,
+      pauseReason: "auto_unread_threshold",
+    });
+    render(
+      <ExpandablePanel
+        visible
+        type="tasks"
+        onClose={vi.fn()}
+        tasks={[task]}
+        selectedTaskId={task.id}
+        sessions={[]}
+        onTaskClick={vi.fn()}
+        toolbarRef={{ current: document.createElement("div") }}
+      />,
+    );
+
+    await waitFor(() => {
+      expect(screen.getByText("已自动暂停 · 已清理")).toBeVisible();
+    });
+    expect(screen.queryByText("已自动暂停 · 连续 0 次未读")).toBeNull();
   });
 
   it("keeps an unselected task collapsed when it becomes paused", () => {

@@ -96,6 +96,7 @@ export function ModelManageModal({
   ];
   return (
     <Modal
+      rootClassName="console-management-modal"
       title={t("models.manageModelsTitle", { provider: provider.name })}
       open={open}
       onCancel={handleClose}

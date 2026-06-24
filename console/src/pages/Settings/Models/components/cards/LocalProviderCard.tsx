@@ -3,23 +3,18 @@ import { Card, Button } from "@agentscope-ai/design";
 import type { ProviderInfo } from "../../../../../api/types";
 import { ModelManageModal } from "../modals/ModelManageModal";
 import { useTranslation } from "react-i18next";
+import { AppstoreOutlined } from "@ant-design/icons";
 import styles from "../../index.module.less";
 import { providerIcon } from "../providerIcon";
 
 interface LocalProviderCardProps {
   provider: ProviderInfo;
   onSaved: () => void;
-  isHover: boolean;
-  onMouseEnter: () => void;
-  onMouseLeave: () => void;
 }
 
 export function LocalProviderCard({
   provider,
   onSaved,
-  isHover,
-  onMouseEnter,
-  onMouseLeave,
 }: LocalProviderCardProps) {
   const { t } = useTranslation();
   const [modelManageOpen, setModelManageOpen] = useState(false);
@@ -32,20 +27,30 @@ export function LocalProviderCard({
 
   return (
     <Card
-      hoverable
-      onMouseEnter={onMouseEnter}
-      onMouseLeave={onMouseLeave}
       className={`${styles.providerCard} ${
         statusReady ? styles.enabledCard : ""
-      } ${isHover ? styles.hover : styles.normal}`}
+      }`}
     >
-      {/* Card Header with Icon and Status */}
-      <div className={styles.cardHeaderRow}>
-        <img
-          src={providerIcon(provider.id)}
-          alt={provider.name}
-          className={styles.providerIcon}
-        />
+      <div className={styles.cardIdentity}>
+        <div className={styles.providerBrand}>
+          <div className={styles.providerIconFrame}>
+            <img
+              src={providerIcon(provider.id)}
+              alt={provider.name}
+              className={styles.providerIcon}
+            />
+          </div>
+          <div className={styles.providerTitleText}>
+            <div className={styles.providerNameLine} title={provider.name}>
+              <span className={styles.cardName}>{provider.name}</span>
+              <span className={styles.localTag}>{t("models.local")}</span>
+            </div>
+            <div className={styles.providerIdLine} title={provider.id}>
+              <span className={styles.providerFieldLabel}>ID</span>
+              <span className={styles.providerIdText}>{provider.id}</span>
+            </div>
+          </div>
+        </div>
         <div className={styles.cardStatusHeader}>
           <span
             className={styles.statusDot}
@@ -66,13 +71,6 @@ export function LocalProviderCard({
         </div>
       </div>
 
-      {/* Title Row */}
-      <div className={styles.cardTitleRow}>
-        <span className={styles.cardName}>{provider.name}</span>
-        <span className={styles.localTag}>{t("models.local")}</span>
-      </div>
-
-      {/* Info Section */}
       <div className={styles.cardInfo}>
         <div className={styles.infoRow}>
           <span className={styles.infoLabel}>{t("models.localType")}:</span>
@@ -88,22 +86,17 @@ export function LocalProviderCard({
         </div>
       </div>
 
-      {/* Actions - only show on hover */}
-      {isHover && (
-        <div className={styles.cardActions}>
-          <Button
-            type="default"
-            size="small"
-            onClick={(e) => {
-              e.stopPropagation();
-              setModelManageOpen(true);
-            }}
-            className={styles.actionBtn}
-          >
-            {t("models.models")}
-          </Button>
-        </div>
-      )}
+      <div className={styles.cardActions}>
+        <Button
+          type="text"
+          size="small"
+          icon={<AppstoreOutlined />}
+          onClick={() => setModelManageOpen(true)}
+          className={styles.actionBtn}
+        >
+          {t("models.models")}
+        </Button>
+      </div>
 
       <ModelManageModal
         provider={provider}

@@ -174,7 +174,18 @@ class SWEAgent(ToolGuardMixin, ReActAgent):
         sys_prompt = self._build_sys_prompt()
 
         # Create model and formatter using factory method
-        model, formatter = create_model_and_formatter(agent_id=agent_config.id)
+        model, formatter = create_model_and_formatter(
+            agent_id=agent_config.id,
+            trace_context={
+                "trace_id": self._request_context.get("trace_id"),
+                "user_id": self._request_context.get("user_id"),
+                "session_id": self._request_context.get("session_id"),
+                "channel": self._request_context.get("channel"),
+                "source_id": self._request_context.get("source_id"),
+                "user_name": self._request_context.get("user_name"),
+                "bbk_id": self._request_context.get("bbk_id"),
+            },
+        )
 
         # Get model info from ProviderManager (single source of truth)
         try:
@@ -218,6 +229,7 @@ class SWEAgent(ToolGuardMixin, ReActAgent):
             memory=self.memory,
             memory_manager=self.memory_manager,
             enable_memory_manager=self._enable_memory_manager,
+            request_context=self._request_context,
         )
 
         # Register hooks
@@ -563,8 +575,6 @@ class SWEAgent(ToolGuardMixin, ReActAgent):
         if self._enable_memory_manager and self.memory_manager is not None:
             # update memory manager
             self.memory = self.memory_manager.get_in_memory_memory()
-            self.memory_manager.chat_model = self.model
-            self.memory_manager.formatter = self.formatter
 
             # Register memory_search as a tool function
             self.toolkit.register_tool_function(
@@ -857,6 +867,7 @@ class SWEAgent(ToolGuardMixin, ReActAgent):
                     "passthrough_headers",
                 ),
                 session_id=rebuild_info.get("session_id"),
+                trace_id=rebuild_info.get("trace_id"),
             )
             timeout = rebuild_info.get(
                 "timeout",

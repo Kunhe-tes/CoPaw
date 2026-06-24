@@ -67,6 +67,7 @@
     "analyticsBusinessOverview": "运营看板",
     "analyticsClawDataOverview": "claw数据看板",
     "analyticsCronJobOverview": "定时任务概览",
+    "analyticsContinuousGovernance": "质量工程看板",
     "instance": "实例管理",
     "instanceOverview": "概览",
     "instanceInstances": "实例列表",
@@ -750,6 +751,7 @@
     "switchFailed": "切换模型失败"
   },
   "models": {
+    "breadcrumbLabel": "模型管理页面路径",
     "llmConfiguration": "LLM 配置",
     "providersTitle": "提供商",
     "providersDescription": "为每个提供商配置 API 密钥和端点。",
@@ -831,6 +833,15 @@
     "custom": "自定义",
     "builtin": "内置",
     "addProvider": "添加提供商",
+    "distributeProviders": "分发提供商",
+    "distributeProvidersTitle": "分发提供商配置",
+    "distributeProvidersHint": "将当前租户的全部提供商配置复制到选中的目标租户。",
+    "distributeProvidersWarning": "这会覆盖目标租户中同 ID 的提供商配置，配置中的密钥也会一并复制。",
+    "distributeProvidersSuccess": "已完成 {{count}} 个租户的提供商分发",
+    "noProviders": "没有匹配的提供商",
+    "noProvidersHint": "请调整搜索条件，或添加一个自定义提供商。",
+    "more": "更多",
+    "moreActions": "更多操作",
     "addProviderTitle": "添加自定义提供商",
     "providerIdLabel": "提供商 ID",
     "providerIdPlaceholder": "例如 openai, google, anthropic",
@@ -1686,7 +1697,13 @@
       "deleteFailed": "删除失败",
       "noFiles": "暂无备份文件",
       "previewTitle": "文件预览",
-      "previewFailed": "获取文件内容失败"
+      "previewFailed": "获取文件内容失败",
+      "task": "治理任务",
+      "taskTitle": "治理任务 {{recordId}}",
+      "unlinkedTask": "未关联治理任务",
+      "fileCount": "{{count}} 个备份文件",
+      "rollbackTaskConfirm": "确定要按本次治理任务回退全部文件吗？",
+      "rollbackFileConfirm": "确定要回退这个文件吗？"
     },
     "file": {
       "filename": "文件名",

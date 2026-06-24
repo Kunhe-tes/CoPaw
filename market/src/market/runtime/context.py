@@ -96,12 +96,14 @@ def resolve_effective_tenant_id(
     tenant_id: str,
     source_id: str | None,
 ) -> str:
-    """解析 market 本地状态使用的运行时 scope 标识。"""
+    """解析 market 本地状态使用的有效租户目录标识。"""
     if not source_id:
         try:
             return canonicalize_scope_id(tenant_id)
         except ValueError:
             return tenant_id
+    if tenant_id == "default":
+        return f"default_{source_id}"
     return encode_scope_id(tenant_id, source_id)
 
 

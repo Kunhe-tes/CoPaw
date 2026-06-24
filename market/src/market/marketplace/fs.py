@@ -254,9 +254,11 @@ def resolve_effective_user_id(
     user_id: str,
     source_id: str | None = None,
 ) -> str:
-    """解析用户本地状态使用的运行时 scope 标识。"""
+    """解析用户本地状态使用的有效目录标识。"""
     if not source_id:
         return user_id
+    if user_id == "default":
+        return f"default_{source_id}"
     return encode_scope_id(user_id, source_id)
 
 
@@ -327,6 +329,8 @@ def copy_skill_to_user(
     distributed_by: str,
     version: str,
     agent_id: str = DEFAULT_AGENT_ID,
+    skill_id: str = "",
+    cn_name: str = "",
 ) -> dict:
     """将市场技能复制到用户工作目录，返回分发元数据供 manifest 使用.
 
@@ -343,6 +347,8 @@ def copy_skill_to_user(
         description: 技能描述（用于前端展示）
         distributed_by: 分发者标识
         version: 技能版本
+        skill_id: 技能唯一标识符（跨租户共享）
+        cn_name: 中文展示名
 
     Returns:
         {"status": "distributed", "metadata": {...}} 或 {"status": "conflict", "reason": "customized"}
@@ -415,6 +421,12 @@ def copy_skill_to_user(
         "distributed_by": distributed_by,
         "received_version": version,
     }
+
+    # 添加 skill_id 和 cn_name
+    if skill_id:
+        metadata["skill_id"] = skill_id
+    if cn_name:
+        metadata["cn_name"] = cn_name
 
     # 保留原有 created_at（重复分发时不覆盖首次创建时间）
     if existing_created_at:

@@ -6,6 +6,7 @@ from __future__ import annotations
 import inspect
 
 from swe.app.middleware.sse_diagnostic import SSEDiagnosticMiddleware
+from swe.app.middleware.liveness_probe import LivenessProbeMiddleware
 from swe.app.runtime_diagnostic import RuntimeDiagnosticManager
 
 
@@ -26,6 +27,12 @@ def test_app_installs_sse_diagnostic_middleware_with_shared_manager() -> None:
     )
 
     assert middleware.kwargs["manager"] is runtime_diagnostic_manager
+
+
+def test_app_installs_liveness_probe_as_outermost_middleware() -> None:
+    from swe.app._app import app
+
+    assert app.user_middleware[0].cls is LivenessProbeMiddleware
 
 
 def test_lifespan_starts_and_stops_runtime_diagnostic_manager() -> None:

@@ -105,16 +105,10 @@ def test_cleanup_cron_auth_except_source_keeps_rmassist_only(tmp_path):
     assert set(result.kept_tenant_ids) == {legacy_keep, keep_scope}
     assert set(result.missing_tenant_ids) == {"tenant-without-auth"}
     assert (
-        tmp_path
-        / keep_scope
-        / ".secret"
-        / auth_state.CRON_AUTH_FILE_NAME
+        tmp_path / keep_scope / ".secret" / auth_state.CRON_AUTH_FILE_NAME
     ).is_file()
     assert (
-        tmp_path
-        / legacy_keep
-        / ".secret"
-        / auth_state.CRON_AUTH_FILE_NAME
+        tmp_path / legacy_keep / ".secret" / auth_state.CRON_AUTH_FILE_NAME
     ).is_file()
     assert not (
         tmp_path
@@ -123,16 +117,10 @@ def test_cleanup_cron_auth_except_source_keeps_rmassist_only(tmp_path):
         / auth_state.CRON_AUTH_FILE_NAME
     ).exists()
     assert not (
-        tmp_path
-        / delete_scope
-        / ".secret"
-        / auth_state.CRON_AUTH_FILE_NAME
+        tmp_path / delete_scope / ".secret" / auth_state.CRON_AUTH_FILE_NAME
     ).exists()
     assert not (
-        tmp_path
-        / raw_tenant
-        / ".secret"
-        / auth_state.CRON_AUTH_FILE_NAME
+        tmp_path / raw_tenant / ".secret" / auth_state.CRON_AUTH_FILE_NAME
     ).exists()
 
 
@@ -325,11 +313,11 @@ def test_resolve_auth_token_for_execution_includes_cookie_header(
 
 
 @pytest.mark.asyncio
-async def test_configure_cron_auth_returns_reused_status(monkeypatch):
+async def test_configure_cron_auth_always_refreshes_user_info(monkeypatch):
     async def fake_get_agent_for_request(_request):
         return SimpleNamespace(tenant_id="tenant-a", workspace_dir="/tmp/ws")
 
-    ensured_args = {}
+    saved_args = {}
 
     monkeypatch.setattr(
         auth_router,
@@ -342,18 +330,15 @@ async def test_configure_cron_auth_returns_reused_status(monkeypatch):
         lambda cookie: "token-from-cookie",
     )
 
-    def fake_ensure_user_info_from_access_token(*args, **kwargs):
-        ensured_args["args"] = args
-        ensured_args["kwargs"] = kwargs
-        return auth_state.CronUserInfoEnsureResult(
-            state=auth_state.CronAuthState(),
-            reused=True,
-        )
+    def fake_save_user_info_from_access_token(*args, **kwargs):
+        saved_args["args"] = args
+        saved_args["kwargs"] = kwargs
+        return auth_state.CronAuthState()
 
     monkeypatch.setattr(
         auth_router,
-        "ensure_user_info_from_access_token",
-        fake_ensure_user_info_from_access_token,
+        "save_user_info_from_access_token",
+        fake_save_user_info_from_access_token,
     )
     monkeypatch.setattr(
         auth_router,
@@ -373,9 +358,9 @@ async def test_configure_cron_auth_returns_reused_status(monkeypatch):
         request=SimpleNamespace(),
     )
 
-    assert response["user_info_status"] == "reused"
-    assert ensured_args["args"] == ("token-from-cookie",)
-    assert ensured_args["kwargs"]["cookie_header"] == (
+    assert response["user_info_status"] == "refreshed"
+    assert saved_args["args"] == ("token-from-cookie",)
+    assert saved_args["kwargs"]["cookie_header"] == (
         "foo=bar; com.cmb.dw.rtl.sso.token=token-from-cookie"
     )
 
@@ -397,11 +382,8 @@ async def test_configure_cron_auth_returns_refreshed_status(monkeypatch):
     )
     monkeypatch.setattr(
         auth_router,
-        "ensure_user_info_from_access_token",
-        lambda *args, **kwargs: auth_state.CronUserInfoEnsureResult(
-            state=auth_state.CronAuthState(),
-            reused=False,
-        ),
+        "save_user_info_from_access_token",
+        lambda *args, **kwargs: auth_state.CronAuthState(),
     )
     monkeypatch.setattr(
         auth_router,

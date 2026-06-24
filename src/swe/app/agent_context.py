@@ -21,6 +21,7 @@ from ..config.context import (
     get_current_user_id,
     get_current_source_id,
     TenantContextError,
+    resolve_request_effective_tenant_id,
     resolve_runtime_tenant_id,
     resolve_storage_tenant_id,
 )
@@ -68,13 +69,12 @@ def _resolve_effective_tenant_id(
     source_id: Optional[str] = None,
     scope_id: Optional[str] = None,
 ) -> Optional[str]:
-    """Resolve the runtime tenant ID for scoped workspace/config access."""
-    resolved_scope_id = scope_id or get_current_scope_id()
-    if resolved_scope_id is not None:
-        return canonicalize_scope_id(resolved_scope_id)
-    if tenant_id is None:
-        return None
-    return resolve_runtime_tenant_id(tenant_id, source_id)
+    """Resolve request-effective tenant ID for scoped workspace/config access."""
+    return resolve_request_effective_tenant_id(
+        tenant_id,
+        source_id,
+        scope_id or get_current_scope_id(),
+    )
 
 
 def _resolve_user_id(request: Request) -> Optional[str]:

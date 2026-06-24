@@ -24,7 +24,9 @@ from typing import Any, Literal
 from agentscope.message import Msg, ToolResultBlock
 
 from ..constant import AGENT_WATCHDOG_TIMEOUT, QUERY_TIMEOUT_SECONDS
+from ..app.runner.tool_output_frames import tool_output_invocation
 from .hook_runtime import HookRuntime
+from .hook_runtime.conversation_snapshot import capture_conversation_snapshot
 from .hook_runtime.models import (
     HookConfig,
     HookContext,
@@ -38,6 +40,22 @@ from ..security.tool_guard.models import TOOL_GUARD_DENIED_MARK
 from ..tracing import has_trace_manager, get_trace_manager, get_current_trace
 
 logger = logging.getLogger(__name__)
+
+
+def _current_task_label() -> str:
+    """返回当前 asyncio task 的诊断标识。"""
+    task = asyncio.current_task()
+    if task is None:
+        return "no-task"
+    return f"task-{id(task)}"
+
+
+def _trace_field(trace_ctx: Any, field: str, default: Any = "") -> Any:
+    """安全读取 trace 上下文字段，避免诊断日志反向打断 tracing。"""
+    if trace_ctx is None:
+        return default
+    return getattr(trace_ctx, field, default)
+
 
 _DEFAULT_LOCAL_TOOL_EXECUTION_HARD_TIMEOUT = min(
     QUERY_TIMEOUT_SECONDS,
@@ -153,36 +171,40 @@ class ToolGuardMixin:
             tool_call_id=tool_call_id,
             reason="tool_execution",
         ):
-            if self._tool_has_specific_timeout(tool_name):
-                return await super()._acting(tool_call)  # type: ignore[misc]
+            with tool_output_invocation(
+                tool_call_id=tool_call_id,
+                tool_name=tool_name,
+            ):
+                if self._tool_has_specific_timeout(tool_name):
+                    return await super()._acting(tool_call)  # type: ignore[misc]
 
-            started_at = time.monotonic()
-            try:
-                return await asyncio.wait_for(
-                    super()._acting(tool_call),  # type: ignore[misc]
-                    timeout=LOCAL_TOOL_EXECUTION_HARD_TIMEOUT,
-                )
-            except asyncio.TimeoutError:
-                elapsed = time.monotonic() - started_at
-                timeout_text = (
-                    f"Error: Tool {tool_name} timed out after "
-                    f"{LOCAL_TOOL_EXECUTION_HARD_TIMEOUT:.2f}s "
-                    f"(elapsed {elapsed:.2f}s)."
-                )
-                logger.warning(
-                    "Local tool hard timeout: tool_name=%s tool_call_id=%s "
-                    "elapsed=%.3fs timeout=%.3fs",
-                    tool_name,
-                    tool_call_id,
-                    elapsed,
-                    LOCAL_TOOL_EXECUTION_HARD_TIMEOUT,
-                )
-                await self._persist_local_tool_timeout_result(
-                    tool_call_id,
-                    tool_name,
-                    timeout_text,
-                )
-                return None
+                started_at = time.monotonic()
+                try:
+                    return await asyncio.wait_for(
+                        super()._acting(tool_call),  # type: ignore[misc]
+                        timeout=LOCAL_TOOL_EXECUTION_HARD_TIMEOUT,
+                    )
+                except asyncio.TimeoutError:
+                    elapsed = time.monotonic() - started_at
+                    timeout_text = (
+                        f"Error: Tool {tool_name} timed out after "
+                        f"{LOCAL_TOOL_EXECUTION_HARD_TIMEOUT:.2f}s "
+                        f"(elapsed {elapsed:.2f}s)."
+                    )
+                    logger.warning(
+                        "Local tool hard timeout: tool_name=%s tool_call_id=%s "
+                        "elapsed=%.3fs timeout=%.3fs",
+                        tool_name,
+                        tool_call_id,
+                        elapsed,
+                        LOCAL_TOOL_EXECUTION_HARD_TIMEOUT,
+                    )
+                    await self._persist_local_tool_timeout_result(
+                        tool_call_id,
+                        tool_name,
+                        timeout_text,
+                    )
+                    return None
 
     async def _persist_local_tool_timeout_result(
         self,
@@ -262,6 +284,67 @@ class ToolGuardMixin:
                 if block.get("id") == tool_use_id:
                     return True
         return False
+
+    def _extract_current_tool_response(
+        self,
+        tool_use_id: str,
+        *,
+        include_structured_failure: bool = False,
+    ) -> Any | None:
+        """Return the terminal output for the current tool result."""
+        if not tool_use_id:
+            return None
+
+        content = getattr(getattr(self, "memory", None), "content", None)
+        if not isinstance(content, list):
+            return None
+        memory_entries: list[Any] = content
+
+        for entry in memory_entries[::-1]:
+            message = (
+                entry[0]
+                if isinstance(entry, (tuple, list)) and entry
+                else entry
+            )
+            blocks = getattr(message, "content", None)
+            if not isinstance(blocks, list):
+                continue
+            for block in reversed(blocks):
+                block_data = self._tool_result_block_to_dict(block)
+                if not block_data:
+                    continue
+                if block_data.get("type") != "tool_result":
+                    continue
+                if block_data.get("id") != tool_use_id:
+                    continue
+                output = block_data.get("output")
+                if self._is_structured_failure_output(output):
+                    if include_structured_failure:
+                        return output
+                    return None
+                return output
+        return None
+
+    @staticmethod
+    def _is_structured_failure_output(output: Any) -> bool:
+        return isinstance(output, dict) and output.get("isError") is True
+
+    @staticmethod
+    def _tool_result_block_to_dict(block: Any) -> dict[str, Any] | None:
+        if isinstance(block, dict):
+            return block
+
+        model_dump = getattr(block, "model_dump", None)
+        if callable(model_dump):
+            dumped = model_dump(mode="json", exclude_none=True)
+            return dumped if isinstance(dumped, dict) else None
+
+        to_dict = getattr(block, "to_dict", None)
+        if callable(to_dict):
+            dumped = to_dict()
+            return dumped if isinstance(dumped, dict) else None
+
+        return None
 
     def _set_forced_tool_replay_approval(
         self,
@@ -486,20 +569,31 @@ class ToolGuardMixin:
         if not has_trace_manager():
             return ""
         try:
-            trace_ctx = get_current_trace()
+            trace_ctx = self._resolve_trace_context_for_tracing()
             if trace_ctx:
+                logger.debug(
+                    "Tool trace start: trace_id=%s user_id=%s session_id=%s "
+                    "source_id=%s tool=%s mcp_server=%s task=%s",
+                    _trace_field(trace_ctx, "trace_id", None),
+                    _trace_field(trace_ctx, "user_id", ""),
+                    _trace_field(trace_ctx, "session_id", ""),
+                    _trace_field(trace_ctx, "source_id", ""),
+                    tool_name,
+                    mcp_server,
+                    _current_task_label(),
+                )
                 trace_mgr = get_trace_manager()
                 return await trace_mgr.emit_tool_call_start(
-                    trace_id=trace_ctx.trace_id,
+                    trace_id=_trace_field(trace_ctx, "trace_id", ""),
                     tool_name=tool_name,
                     tool_input=tool_input,
-                    source_id=trace_ctx.source_id,
-                    user_id=trace_ctx.user_id,
-                    session_id=trace_ctx.session_id,
-                    channel=trace_ctx.channel,
+                    source_id=_trace_field(trace_ctx, "source_id", ""),
+                    user_id=_trace_field(trace_ctx, "user_id", ""),
+                    session_id=_trace_field(trace_ctx, "session_id", ""),
+                    channel=_trace_field(trace_ctx, "channel", ""),
                     mcp_server=mcp_server,
-                    user_name=trace_ctx.user_name,
-                    bbk_id=trace_ctx.bbk_id,
+                    user_name=_trace_field(trace_ctx, "user_name", None),
+                    bbk_id=_trace_field(trace_ctx, "bbk_id", None),
                 )
         except Exception as e:
             logger.debug("Failed to emit tool start event: %s", e)
@@ -518,10 +612,19 @@ class ToolGuardMixin:
         if not span_id or not has_trace_manager():
             return
         try:
-            trace_ctx = get_current_trace()
+            trace_ctx = self._resolve_trace_context_for_tracing()
             if not trace_ctx:
                 return
 
+            logger.debug(
+                "Tool trace end: trace_id=%s session_id=%s source_id=%s "
+                "span_id=%s task=%s",
+                _trace_field(trace_ctx, "trace_id", None),
+                _trace_field(trace_ctx, "session_id", ""),
+                _trace_field(trace_ctx, "source_id", ""),
+                span_id,
+                _current_task_label(),
+            )
             trace_mgr = get_trace_manager()
             output_str, mcp_error = self._resolve_tool_output_and_error(
                 tool_output,
@@ -529,13 +632,49 @@ class ToolGuardMixin:
             )
 
             await trace_mgr.emit_tool_call_end(
-                trace_id=trace_ctx.trace_id,
+                trace_id=_trace_field(trace_ctx, "trace_id", ""),
                 span_id=span_id,
                 tool_output=output_str,
                 error=mcp_error,
             )
         except Exception as e:
             logger.debug("Failed to emit tool end event: %s", e)
+
+    def _resolve_trace_context_for_tracing(self) -> Any | None:
+        """优先使用 request_context 绑定的 trace，上下文缺失时回退。"""
+        request_context = getattr(self, "_request_context", {}) or {}
+        bound_trace_id = str(request_context.get("trace_id") or "")
+        if bound_trace_id:
+            current_trace = get_current_trace()
+            if current_trace is not None and getattr(
+                current_trace,
+                "trace_id",
+                None,
+            ) not in {None, bound_trace_id}:
+                logger.warning(
+                    "Tool tracing detected mismatched current trace; "
+                    "using request-bound trace instead. current=%s bound=%s "
+                    "task=%s",
+                    getattr(current_trace, "trace_id", None),
+                    bound_trace_id,
+                    _current_task_label(),
+                )
+            return type(
+                "_RequestTraceContext",
+                (),
+                {
+                    "trace_id": bound_trace_id,
+                    "user_id": str(request_context.get("user_id") or ""),
+                    "session_id": str(
+                        request_context.get("session_id") or "",
+                    ),
+                    "channel": str(request_context.get("channel") or ""),
+                    "source_id": str(request_context.get("source_id") or ""),
+                    "user_name": request_context.get("user_name"),
+                    "bbk_id": request_context.get("bbk_id"),
+                },
+            )()
+        return get_current_trace()
 
     def _resolve_tool_output_and_error(
         self,
@@ -746,9 +885,16 @@ class ToolGuardMixin:
             tool_response=tool_response,
             error=error,
         )
+
+        async def _conversation_snapshot_provider():
+            return await capture_conversation_snapshot(
+                getattr(self, "memory", None),
+            )
+
         result = await runtime.emit(
             context,
             workspace_dir=Path(getattr(self, "_workspace_dir", None) or "."),
+            conversation_snapshot_provider=_conversation_snapshot_provider,
         )
         self._request_context["hook_overlay"] = overlay.model_dump(
             mode="json",
@@ -1008,18 +1154,28 @@ class ToolGuardMixin:
                 tool_name,
                 tool_input,
             )
+            tool_use_id = str(tool_call.get("id") or "")
+            tool_response = self._extract_current_tool_response(tool_use_id)
+            trace_tool_output = result
+            if trace_tool_output is None:
+                # post hook 不应把结构化失败当作正常结果继续消费，
+                # 但 tracing 仍需要读取原始失败 payload 来提取 error。
+                trace_tool_output = self._extract_current_tool_response(
+                    tool_use_id,
+                    include_structured_failure=True,
+                )
             post_hook_result = await self._emit_tool_hook(
                 HookEventName.POST_TOOL_USE,
                 tool_name=tool_name,
                 tool_input=tool_input,
-                tool_use_id=str(tool_call.get("id") or ""),
-                tool_response=result,
+                tool_use_id=tool_use_id,
+                tool_response=tool_response,
             )
             await self._record_tool_hook_result(
                 post_hook_result,
                 event_name=HookEventName.POST_TOOL_USE,
             )
-            await self._emit_tool_trace_end(span_id, result)
+            await self._emit_tool_trace_end(span_id, trace_tool_output)
 
             if getattr(self, "_tool_guard_forced_replay_active", False):
                 self._tool_guard_forced_replay_active = False

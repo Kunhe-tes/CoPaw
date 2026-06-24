@@ -3,6 +3,7 @@
 
 from typing import NoReturn
 
+import logging
 from fastapi import APIRouter, HTTPException, Request
 
 from swe.config.context import is_valid_identity_value
@@ -19,6 +20,8 @@ from .service import (
     SourceSystemConfigService,
 )
 from .store import SourceSystemConfigStoreUnavailable
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(
     prefix="/source-system-config",
@@ -85,6 +88,60 @@ def _raise_invalid_storage_data(exc: Exception) -> NoReturn:
     ) from exc
 
 
+def _get_scheduler_identity(
+    request: Request,
+    *,
+    updated_by: str | None,
+):
+    """按最后修改配置的请求身份构造外部调度回调参数。"""
+    from .task_scheduler import SourceSchedulerIdentity
+
+    tenant_id = str(
+        getattr(request.state, "tenant_id", None)
+        or request.headers.get("X-Tenant-Id")
+        or updated_by
+        or "",
+    )
+    return SourceSchedulerIdentity(
+        tenant_id=tenant_id,
+        from_id=tenant_id,
+        updated_by=updated_by,
+    )
+
+
+async def _refresh_cleanup_source_task(
+    request: Request,
+    *,
+    source_id: str,
+    updated_by: str | None,
+) -> None:
+    """配置变更后刷新当前 source 的清理系统任务。"""
+    scheduler = getattr(
+        request.app.state,
+        "source_system_task_scheduler",
+        None,
+    )
+    if scheduler is None:
+        logger.warning("Source system task scheduler is not initialized")
+        return
+
+    try:
+        config = await _get_service(request).resolve_config(
+            source_id,
+            force_refresh=True,
+        )
+        await scheduler.refresh_task_session_cleanup(
+            source_id=source_id,
+            config=config,
+            identity=_get_scheduler_identity(
+                request,
+                updated_by=updated_by,
+            ),
+        )
+    except Exception:  # noqa: BLE001
+        logger.exception("刷新 source 定时任务会话清理系统任务失败")
+
+
 @router.get("/effective", response_model=EffectiveSourceSystemConfig)
 async def get_effective_source_system_config(
     request: Request,
@@ -126,11 +183,17 @@ async def upsert_current_source_system_config(
     source_id = _get_request_source_id(request)
     service = _get_service(request)
     try:
-        return await service.upsert_current_source_config(
+        response = await service.upsert_current_source_config(
             source_id,
             payload.config,
             updated_by=updated_by,
         )
+        await _refresh_cleanup_source_task(
+            request,
+            source_id=source_id,
+            updated_by=updated_by,
+        )
+        return response
     except SourceSystemConfigStoreUnavailable as exc:
         _raise_storage_unavailable(exc)
     except ValueError as exc:
@@ -142,7 +205,7 @@ async def delete_current_source_system_config(
     request: Request,
 ) -> dict[str, bool]:
     """删除当前请求 source_id 的原始配置。"""
-    _require_manager(request)
+    updated_by = _require_manager(request)
     source_id = _get_request_source_id(request)
     service = _get_service(request)
     try:
@@ -151,6 +214,11 @@ async def delete_current_source_system_config(
         _raise_storage_unavailable(exc)
     if not deleted:
         raise HTTPException(status_code=404, detail="Source config not found")
+    await _refresh_cleanup_source_task(
+        request,
+        source_id=source_id,
+        updated_by=updated_by,
+    )
     return {"deleted": True}
 
 
@@ -214,6 +282,11 @@ async def upsert_source_system_config(
     except ValueError as exc:
         _raise_invalid_storage_data(exc)
     service.invalidate(source_id)
+    await _refresh_cleanup_source_task(
+        request,
+        source_id=source_id,
+        updated_by=updated_by,
+    )
     return record
 
 
@@ -223,7 +296,7 @@ async def delete_source_system_config(
     request: Request,
 ) -> dict[str, bool]:
     """删除指定 source 的系统配置。"""
-    _require_manager(request)
+    updated_by = _require_manager(request)
     _validate_source_id(source_id)
     service = _get_service(request)
     try:
@@ -233,4 +306,9 @@ async def delete_source_system_config(
     service.invalidate(source_id)
     if not deleted:
         raise HTTPException(status_code=404, detail="Source config not found")
+    await _refresh_cleanup_source_task(
+        request,
+        source_id=source_id,
+        updated_by=updated_by,
+    )
     return {"deleted": True}

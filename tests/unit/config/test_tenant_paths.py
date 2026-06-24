@@ -87,7 +87,12 @@ utils_module = importlib.reload(utils_module)
 TenantContextError = context_module.TenantContextError
 encode_scope_id = context_module.encode_scope_id
 resolve_storage_tenant_id = context_module.resolve_storage_tenant_id
+resolve_runtime_tenant_id = context_module.resolve_runtime_tenant_id
+resolve_request_effective_tenant_id = (
+    context_module.resolve_request_effective_tenant_id
+)
 tenant_context = context_module.tenant_context
+get_tenant_request_working_dir = utils_module.get_tenant_request_working_dir
 get_tenant_working_dir_strict = utils_module.get_tenant_working_dir_strict
 get_tenant_config_path_strict = utils_module.get_tenant_config_path_strict
 get_tenant_storage_config_path = utils_module.get_tenant_storage_config_path
@@ -208,6 +213,53 @@ class TestTenantPathStrictHelpers:
             path = get_tenant_working_dir_strict("tenant-a")
 
         assert path == WORKING_DIR / encode_scope_id("tenant-a", "source-a")
+
+    def test_default_user_request_working_dir_uses_storage_template(self):
+        """default 用户在请求访问时应直接命中 default_{source} 目录。"""
+        with tenant_context(tenant_id="default", source_id="CMSJY"):
+            path = get_tenant_request_working_dir("default")
+
+        assert path == WORKING_DIR / "default_CMSJY"
+
+    def test_default_user_strict_working_dir_uses_storage_template(self):
+        """逻辑 default 经公共 strict helper 也应直达 default_{source}。"""
+        with tenant_context(tenant_id="default", source_id="CMSJY"):
+            path = get_tenant_working_dir_strict("default")
+
+        assert path == WORKING_DIR / "default_CMSJY"
+
+    def test_default_user_request_effective_tenant_skips_scope(self):
+        """default 用户请求有效租户解析不应返回 scope_id。"""
+        scope_id = encode_scope_id("default", "CMSJY")
+
+        assert (
+            resolve_request_effective_tenant_id(
+                "default",
+                "CMSJY",
+                scope_id,
+            )
+            == "default_CMSJY"
+        )
+
+    def test_explicit_default_source_template_stays_as_template_id(self):
+        """显式 default_{source} 目录不应再被重编码成 scope。"""
+        with tenant_context(tenant_id="default", source_id="CMSJY"):
+            working_dir = get_tenant_working_dir_strict("default_CMSJY")
+            config_path = get_tenant_config_path_strict("default_CMSJY")
+
+        assert working_dir == WORKING_DIR / "default_CMSJY"
+        assert config_path == WORKING_DIR / "default_CMSJY" / "config.json"
+
+    def test_default_source_template_runtime_and_storage_are_idempotent(self):
+        """default_{source} 进入公共解析层后应保持幂等。"""
+        assert (
+            resolve_runtime_tenant_id("default_CMSJY", "CMSJY")
+            == "default_CMSJY"
+        )
+        assert (
+            resolve_storage_tenant_id("default_CMSJY", "CMSJY")
+            == "default_CMSJY"
+        )
 
     def test_scope_like_raw_tenant_uses_current_scope_context(self):
         """形似 scope 的 raw tenant 也必须落到当前 source 对应目录。"""

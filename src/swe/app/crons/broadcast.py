@@ -10,6 +10,9 @@ from typing import Optional
 
 DAY_NAMES = ("mon", "tue", "wed", "thu", "fri", "sat", "sun")
 DAY_TO_INDEX = {name: index for index, name in enumerate(DAY_NAMES)}
+DEFAULT_BROADCAST_OFFSET_WINDOW_HOURS = 4
+MIN_BROADCAST_OFFSET_WINDOW_HOURS = 1
+MAX_BROADCAST_OFFSET_WINDOW_HOURS = 24
 NUM_TO_DAY = {
     "0": "sun",
     "1": "mon",
@@ -32,13 +35,22 @@ class ShiftedCron:
     error: str = ""
 
 
-def compute_broadcast_offsets(count: int) -> list[int]:
-    """在 4 小时窗口内为目标租户计算均匀错峰分钟数。"""
+def compute_broadcast_offsets(
+    count: int,
+    *,
+    window_hours: int = DEFAULT_BROADCAST_OFFSET_WINDOW_HOURS,
+) -> list[int]:
+    """在指定小时窗口内为目标租户计算均匀错峰分钟数。"""
+    if (
+        window_hours < MIN_BROADCAST_OFFSET_WINDOW_HOURS
+        or window_hours > MAX_BROADCAST_OFFSET_WINDOW_HOURS
+    ):
+        raise ValueError("broadcast offset window must be between 1 and 24 hours")
     if count <= 0:
         return []
     if count == 1:
         return [0]
-    step = 240 / (count - 1)
+    step = window_hours * 60 / (count - 1)
     return [round(index * step) for index in range(count)]
 
 

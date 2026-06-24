@@ -1025,6 +1025,7 @@ class BaseChannel(ABC):
         self,
         request: "AgentRequest",
         to_handle: str,
+        reply_text: str = "",
     ) -> None:
         """If session-end push is enabled, send notification via zhaohu."""
         if not self._should_session_end_push():
@@ -1039,17 +1040,48 @@ class BaseChannel(ABC):
             query = self._extract_user_query(request)
             if len(query) > 30:
                 prefix = query[:30]
-                text = f"{prefix}...任务已完成请及时查看"
+                text = f"【{prefix}...】任务已完成请及时查看"
             else:
                 text = (
-                    f"{query}任务已完成请及时查看"
+                    f"【{query}】任务已完成请及时查看"
                     if query
                     else "任务已完成请及时查看"
                 )
-            await zhaohu_ch.send(to_handle, text)
+            meta = {}
+            links = self._extract_file_links(reply_text)
+            if links:
+                meta["link_items"] = [
+                    {"url": url, "text": name} for name, url in links
+                ]
+                await zhaohu_ch.send(to_handle, text, meta or None)
             logger.info("session-end push sent via zhaohu to %s", to_handle)
         except Exception:
             logger.exception("session-end push failed for %s", to_handle)
+
+    def _extract_file_links(self, text: str) -> list[tuple[str, str]]:
+        """Extract file links and names from reply text by matching FILE_URL prefix.
+
+        URL format: {FILE_URL}/static/{scope_id}/{agent_id}/{filename}
+        e.g. http://localhost:8088/static/ODAyNDU2MDQ.Uk1BU1NJU1Q/default/报告.pdf
+        """
+        import os
+        import re
+
+        base = os.getenv("FILE_URL", "http://localhost:8088").rstrip("/")
+        pattern = (
+            re.escape(base)
+            + r"/static/[^/\s]+/[^/\s]+/[^/\s]+\.[a-zA-Z]{1,10}"
+        )
+        matches = re.findall(pattern, text)
+        seen = set()
+        result = []
+        for url in matches:
+            if url in seen:
+                continue
+            seen.add(url)
+            name = url.rsplit("/", 1)[-1] if "/" in url else ""
+            result.append((name, url))
+        return result
 
     def _extract_user_query(self, request: "AgentRequest") -> str:
         """Extract user's query text from request."""

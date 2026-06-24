@@ -179,7 +179,31 @@ def build_cron_bbk_in_filter(bbk_ids: Optional[str]) -> tuple[str, list[str]]:
     return f" AND j.bbk_id IN ({placeholders})", ids
 
 
-class TracingQueryService:
+def _summarize_task_status_rows(rows: list[dict]) -> tuple[int, int, int, int]:
+    """汇总定时任务状态及已读数量."""
+    success = 0
+    failed = 0
+    cancelled = 0
+    read_count = 0
+
+    for row in rows:
+        status = row["status"]
+        count = row["count"]
+
+        if status == "success":
+            success += count
+        elif status in ("error", "timeout"):
+            failed += count
+        elif status in ("cancelled", "skipped"):
+            cancelled += count
+
+        if row["is_read"]:
+            read_count += count
+
+    return success, failed, cancelled, read_count
+
+
+class TracingQueryService:  # pylint: disable=too-many-public-methods
     """运营看板查询服务."""
 
     def __init__(self, db: DatabaseConnection):
@@ -425,10 +449,9 @@ class TracingQueryService:
         """
         skills_query = f"""
             SELECT CASE WHEN bbk_id = 'V00' THEN '100' ELSE bbk_id END AS bbk_id,
-                   COUNT(*) AS value
+                   COUNT(DISTINCT trace_id) AS value
             FROM swe_tracing_spans
             WHERE {span_where}
-              AND event_type = 'skill_invocation'
               AND skill_name IS NOT NULL
             GROUP BY CASE WHEN bbk_id = 'V00' THEN '100' ELSE bbk_id END
             ORDER BY value DESC
@@ -642,29 +665,28 @@ class TracingQueryService:
             is_prev: bool = False,
         ) -> int:
             # 技能调用量单独取 span 表口径，避免把普通 trace 误计为技能调用。
+            # 使用 DISTINCT trace_id 去重，与排行榜口径一致。
             time_compare = "<" if is_prev else "<="
             if source_id == "all":
                 exclude_placeholders = ", ".join(
                     ["%s"] * len(EXCLUDED_SOURCE_IDS),
                 )
                 query = f"""
-                    SELECT COUNT(*) as total
+                    SELECT COUNT(DISTINCT trace_id) as total
                     FROM swe_tracing_spans
                     WHERE start_time >= %s AND start_time {time_compare} %s
                       AND source_id NOT IN ({exclude_placeholders})
                       AND user_id != 'default'
-                      AND event_type = 'skill_invocation'
                       AND skill_name IS NOT NULL{bbk_filter_sql}
                 """
                 params = (s, e, *EXCLUDED_SOURCE_IDS, *bbk_filter_params)
                 row = await self._db.fetch_one(query, params)
             else:
                 query = f"""
-                    SELECT COUNT(*) as total
+                    SELECT COUNT(DISTINCT trace_id) as total
                     FROM swe_tracing_spans
                     WHERE source_id = %s AND start_time >= %s AND start_time {time_compare} %s
                       AND user_id != 'default'
-                      AND event_type = 'skill_invocation'
                       AND skill_name IS NOT NULL{bbk_filter_sql}
                 """
                 params = (source_id, s, e, *bbk_filter_params)
@@ -1099,14 +1121,15 @@ class TracingQueryService:
             filter_user_type: 'filtered' 过滤80/IT开头用户，'all' 仅过滤default用户
             metric_type: 口径类型（仅影响默认排序，不影响返回字段）
         """
-        # 排序映射表
+        # 排序映射表（按四列依次降序：任务执行数、任务成功数、结果查看数、主动调用数）
         order_by_map = {
-            "manual": "manual_calls DESC, user_id ASC",
-            "cron_exec": "cron_executions DESC, user_id ASC",
-            "cron_read": "cron_reads DESC, user_id ASC",
-            "manual_calls": "manual_calls DESC, user_id ASC",
-            "cron_executions": "cron_executions DESC, user_id ASC",
-            "cron_reads": "cron_reads DESC, user_id ASC",
+            "manual": "cron_executions DESC, cron_success DESC, cron_reads DESC, manual_calls DESC, user_id ASC",
+            "cron_exec": "cron_executions DESC, cron_success DESC, cron_reads DESC, manual_calls DESC, user_id ASC",
+            "cron_read": "cron_executions DESC, cron_success DESC, cron_reads DESC, manual_calls DESC, user_id ASC",
+            "manual_calls": "cron_executions DESC, cron_success DESC, cron_reads DESC, manual_calls DESC, user_id ASC",
+            "cron_executions": "cron_executions DESC, cron_success DESC, cron_reads DESC, manual_calls DESC, user_id ASC",
+            "cron_success": "cron_executions DESC, cron_success DESC, cron_reads DESC, manual_calls DESC, user_id ASC",
+            "cron_reads": "cron_executions DESC, cron_success DESC, cron_reads DESC, manual_calls DESC, user_id ASC",
             "last_active": "last_active DESC, user_id ASC",
         }
 
@@ -1114,8 +1137,8 @@ class TracingQueryService:
         if sort_by and sort_by in order_by_map:
             order_by = order_by_map[sort_by]
         else:
-            metric_key = metric_type or "manual"
-            order_by = order_by_map.get(metric_key, order_by_map["manual"])
+            # 默认按四列依次降序排序
+            order_by = order_by_map["manual"]
 
         # 构建 WHERE 条件和参数
         where_sql, params = self._build_traces_where_clause(
@@ -1185,9 +1208,9 @@ class TracingQueryService:
         params.append("default")
         if filter_user_type == "filtered":
             where_clauses.append(
-                "(t.user_id NOT LIKE %s AND t.user_id NOT LIKE %s)",
+                "(t.user_id NOT LIKE %s AND t.user_id NOT LIKE %s AND t.user_id != %s)",
             )
-            params.extend(["80%%", "IT%%"])
+            params.extend(["80%%", "IT%%", "agent_default"])
 
         if user_id:
             where_clauses.append("t.user_id LIKE %s")
@@ -1259,9 +1282,10 @@ class TracingQueryService:
                        MAX(t.start_time) as last_active,
                        COUNT(CASE WHEN t.session_id NOT LIKE 'cron-task:%%' THEN 1 END) as manual_calls,
                        COALESCE(MAX(ce.cron_executions), 0) as cron_executions,
+                       COALESCE(MAX(ce.cron_success), 0) as cron_success,
                        (SELECT COUNT(*) FROM swe_tracing_spans s
                         WHERE s.trace_id IN (SELECT trace_id FROM swe_tracing_traces WHERE user_id = t.user_id)
-                        AND s.event_type = 'skill_invocation') as total_skills,
+                        AND s.skill_name IS NOT NULL) as total_skills,
                        MAX(t.user_name) as user_name,
                        MAX(t.bbk_id) as bbk_id,
                        COALESCE(MAX(ce.cron_reads), 0) as cron_reads
@@ -1269,6 +1293,7 @@ class TracingQueryService:
                 LEFT JOIN (
                     SELECT j.tenant_id as user_id,
                            COUNT(*) as cron_executions,
+                           SUM(CASE WHEN e.status = 'success' THEN 1 ELSE 0 END) as cron_success,
                            SUM(CASE WHEN e.is_read = TRUE THEN 1 ELSE 0 END) as cron_reads
                     FROM swe_cron_executions e
                     INNER JOIN swe_cron_jobs j ON e.job_id = j.id
@@ -1290,10 +1315,11 @@ class TracingQueryService:
                        MAX(t.start_time) as last_active,
                        COUNT(CASE WHEN t.session_id NOT LIKE 'cron-task:%%' THEN 1 END) as manual_calls,
                        COALESCE(MAX(ce.cron_executions), 0) as cron_executions,
+                       COALESCE(MAX(ce.cron_success), 0) as cron_success,
                        (SELECT COUNT(*) FROM swe_tracing_spans s
                         WHERE s.source_id = %s
                         AND s.trace_id IN (SELECT trace_id FROM swe_tracing_traces WHERE user_id = t.user_id AND source_id = %s)
-                        AND s.event_type = 'skill_invocation') as total_skills,
+                        AND s.skill_name IS NOT NULL) as total_skills,
                        MAX(t.user_name) as user_name,
                        MAX(t.bbk_id) as bbk_id,
                        COALESCE(MAX(ce.cron_reads), 0) as cron_reads
@@ -1301,6 +1327,7 @@ class TracingQueryService:
                 LEFT JOIN (
                     SELECT j.tenant_id as user_id,
                            COUNT(*) as cron_executions,
+                           SUM(CASE WHEN e.status = 'success' THEN 1 ELSE 0 END) as cron_success,
                            SUM(CASE WHEN e.is_read = TRUE THEN 1 ELSE 0 END) as cron_reads
                     FROM swe_cron_executions e
                     INNER JOIN swe_cron_jobs j ON e.job_id = j.id
@@ -1334,6 +1361,7 @@ class TracingQueryService:
             last_active=row["last_active"],
             manual_calls=row["manual_calls"] or 0,
             cron_executions=row["cron_executions"] or 0,
+            cron_success=row["cron_success"] or 0,
             cron_reads=row["cron_reads"] or 0,
         )
 
@@ -1607,8 +1635,8 @@ class TracingQueryService:
             query = f"""
                 SELECT
                     COUNT(DISTINCT user_id) as total_users,
-                    COUNT(DISTINCT CASE WHEN user_id LIKE '80%%' OR user_id LIKE 'IT%%' THEN user_id END) as it_users,
-                    COUNT(DISTINCT CASE WHEN user_id NOT LIKE '80%%' AND user_id NOT LIKE 'IT%%' THEN user_id END) as business_users
+                    COUNT(DISTINCT CASE WHEN user_id LIKE '80%%' OR user_id LIKE 'IT%%' OR user_id = 'agent_default' THEN user_id END) as it_users,
+                    COUNT(DISTINCT CASE WHEN user_id NOT LIKE '80%%' AND user_id NOT LIKE 'IT%%' AND user_id != 'agent_default' THEN user_id END) as business_users
                 FROM swe_tracing_traces
                 WHERE start_time >= %s AND start_time <= %s
                   AND source_id NOT IN ({exclude_placeholders})
@@ -1625,8 +1653,8 @@ class TracingQueryService:
             query = f"""
                 SELECT
                     COUNT(DISTINCT user_id) as total_users,
-                    COUNT(DISTINCT CASE WHEN user_id LIKE '80%%' OR user_id LIKE 'IT%%' THEN user_id END) as it_users,
-                    COUNT(DISTINCT CASE WHEN user_id NOT LIKE '80%%' AND user_id NOT LIKE 'IT%%' THEN user_id END) as business_users
+                    COUNT(DISTINCT CASE WHEN user_id LIKE '80%%' OR user_id LIKE 'IT%%' OR user_id = 'agent_default' THEN user_id END) as it_users,
+                    COUNT(DISTINCT CASE WHEN user_id NOT LIKE '80%%' AND user_id NOT LIKE 'IT%%' AND user_id != 'agent_default' THEN user_id END) as business_users
                 FROM swe_tracing_traces
                 WHERE source_id = %s AND start_time >= %s AND start_time <= %s
                   AND user_id != 'default'{bbk_filter_sql}
@@ -1852,12 +1880,12 @@ class TracingQueryService:
             exclude_placeholders = ", ".join(["%s"] * len(EXCLUDED_SOURCE_IDS))
             query = f"""
                 SELECT skill_name, MAX(skill_description) as skill_description,
-                       COUNT(*) as count,
+                       COUNT(DISTINCT trace_id) as count,
                        AVG(duration_ms) as avg_duration
                 FROM swe_tracing_spans
                 WHERE start_time >= %s AND start_time <= %s
-                  AND event_type = 'skill_invocation'
                   AND skill_name IS NOT NULL
+                  AND bbk_id IS NOT NULL AND bbk_id != ''
                   AND source_id NOT IN ({exclude_placeholders})
                   AND user_id != 'default'{bbk_filter_sql}
                 GROUP BY skill_name
@@ -1874,12 +1902,12 @@ class TracingQueryService:
         else:
             query = f"""
                 SELECT skill_name, MAX(skill_description) as skill_description,
-                       COUNT(*) as count,
+                       COUNT(DISTINCT trace_id) as count,
                        AVG(duration_ms) as avg_duration
                 FROM swe_tracing_spans
                 WHERE source_id = %s AND start_time >= %s AND start_time <= %s
-                  AND event_type = 'skill_invocation'
                   AND skill_name IS NOT NULL
+                  AND bbk_id IS NOT NULL AND bbk_id != ''
                   AND user_id != 'default'{bbk_filter_sql}
                 GROUP BY skill_name
                 ORDER BY count DESC
@@ -1904,18 +1932,22 @@ class TracingQueryService:
         end_date: datetime,
         bbk_ids: Optional[str] = None,
     ) -> int:
-        """获取技能调用总次数（无 LIMIT）."""
+        """获取技能调用总次数（按技能分组后累加，和排行榜口径一致）."""
         bbk_filter_sql, bbk_filter_params = build_bbk_in_filter(bbk_ids)
         if source_id == "all":
             exclude_placeholders = ", ".join(["%s"] * len(EXCLUDED_SOURCE_IDS))
             query = f"""
-                SELECT COUNT(*) as total
-                FROM swe_tracing_spans
-                WHERE start_time >= %s AND start_time <= %s
-                  AND event_type = 'skill_invocation'
-                  AND skill_name IS NOT NULL
-                  AND source_id NOT IN ({exclude_placeholders})
-                  AND user_id != 'default'{bbk_filter_sql}
+                SELECT COALESCE(SUM(skill_count), 0) as total
+                FROM (
+                    SELECT skill_name, COUNT(DISTINCT trace_id) as skill_count
+                    FROM swe_tracing_spans
+                    WHERE start_time >= %s AND start_time <= %s
+                      AND skill_name IS NOT NULL
+                      AND bbk_id IS NOT NULL AND bbk_id != ''
+                      AND source_id NOT IN ({exclude_placeholders})
+                      AND user_id != 'default'{bbk_filter_sql}
+                    GROUP BY skill_name
+                ) skill_totals
             """
             params = (
                 start_date,
@@ -1926,12 +1958,16 @@ class TracingQueryService:
             row = await self._db.fetch_one(query, params)
         else:
             query = f"""
-                SELECT COUNT(*) as total
-                FROM swe_tracing_spans
-                WHERE source_id = %s AND start_time >= %s AND start_time <= %s
-                  AND event_type = 'skill_invocation'
-                  AND skill_name IS NOT NULL
-                  AND user_id != 'default'{bbk_filter_sql}
+                SELECT COALESCE(SUM(skill_count), 0) as total
+                FROM (
+                    SELECT skill_name, COUNT(DISTINCT trace_id) as skill_count
+                    FROM swe_tracing_spans
+                    WHERE source_id = %s AND start_time >= %s AND start_time <= %s
+                      AND skill_name IS NOT NULL
+                      AND bbk_id IS NOT NULL AND bbk_id != ''
+                      AND user_id != 'default'{bbk_filter_sql}
+                    GROUP BY skill_name
+                ) skill_totals
             """
             params = (source_id, start_date, end_date, *bbk_filter_params)
             row = await self._db.fetch_one(query, params)
@@ -2123,6 +2159,7 @@ class TracingQueryService:
             base_where = f"""
                 start_time >= %s AND start_time <= %s
                 AND skill_name IS NOT NULL
+                AND bbk_id IS NOT NULL AND bbk_id != ''
                 AND source_id NOT IN ({exclude_placeholders})
                 AND user_id != 'default'{bbk_filter_sql}
             """
@@ -2136,6 +2173,7 @@ class TracingQueryService:
             base_where = f"""
                 source_id = %s AND start_time >= %s AND start_time <= %s
                 AND skill_name IS NOT NULL
+                AND bbk_id IS NOT NULL AND bbk_id != ''
                 AND user_id != 'default'{bbk_filter_sql}
             """
             count_params = [
@@ -2158,7 +2196,7 @@ class TracingQueryService:
         offset = (page - 1) * page_size
         data_query = f"""
             SELECT skill_name, MAX(skill_description) as skill_description,
-                   COUNT(*) as count,
+                   COUNT(DISTINCT trace_id) as count,
                    AVG(duration_ms) as avg_duration
             FROM swe_tracing_spans
             WHERE {base_where}
@@ -2291,39 +2329,21 @@ class TracingQueryService:
 
         rows = await self._db.fetch_all(query, params)
 
-        # 按状态汇总
-        success = 0
-        failed = 0
-        cancelled = 0
-        read_count = 0
-
-        for row in rows:
-            status = row["status"]
-            is_read = row["is_read"]
-            count = row["count"]
-
-            if status == "success":
-                success += count
-            elif status in ("error", "timeout"):
-                failed += count
-            elif status in ("cancelled", "skipped"):
-                cancelled += count
-
-            if is_read:
-                read_count += count
-
+        success, failed, cancelled, read_count = _summarize_task_status_rows(
+            rows,
+        )
         total_tasks = success + failed + cancelled
 
         # 查询本时间段内新增的定时任务数（按 created_at 过滤）
         if source_id == "all":
             new_cron_query = f"""
                 SELECT COUNT(*) AS count
-                FROM swe_cron_jobs
-                WHERE created_at >= %s AND created_at < %s
-                  AND status != 'deleted'
-                  AND deleted_at IS NULL
-                  AND source_id NOT IN ({exclude_placeholders})
-                  AND tenant_id != 'default'
+                FROM swe_cron_jobs j
+                WHERE j.created_at >= %s AND j.created_at < %s
+                  AND j.status != 'deleted'
+                  AND j.deleted_at IS NULL
+                  AND j.source_id NOT IN ({exclude_placeholders})
+                  AND j.tenant_id != 'default'
                   {bbk_filter_sql}
             """
             new_cron_params = (
@@ -2333,67 +2353,28 @@ class TracingQueryService:
                 *bbk_filter_params,
             )
         else:
-            new_cron_query = """
+            new_cron_query = f"""
                 SELECT COUNT(*) AS count
-                FROM swe_cron_jobs
-                WHERE created_at >= %s AND created_at < %s
-                  AND status != 'deleted'
-                  AND deleted_at IS NULL
-                  AND tenant_id != 'default'
-                  AND source_id = %s
+                FROM swe_cron_jobs j
+                WHERE j.created_at >= %s AND j.created_at < %s
+                  AND j.status != 'deleted'
+                  AND j.deleted_at IS NULL
+                  AND j.tenant_id != 'default'
+                  AND j.source_id = %s
+                  {bbk_filter_sql}
             """
-            new_cron_params = (start_date, end_date, source_id)
+            new_cron_params = (
+                start_date,
+                end_date,
+                source_id,
+                *bbk_filter_params,
+            )
 
         new_cron_result = await self._db.fetch_one(
             new_cron_query,
             new_cron_params,
         )
         new_cron_tasks = new_cron_result["count"] if new_cron_result else 0
-
-        # 查询点击数统计（从 swe_html_preview_click_events）
-        if source_id == "all":
-            click_query = f"""
-                SELECT
-                    COUNT(DISTINCT cron_task_id) AS click_count,
-                    button_type,
-                    MAX(button_name) AS button_name
-                FROM swe_html_preview_click_events
-                WHERE clicked_at >= %s AND clicked_at < %s
-                  AND source_id NOT IN ({exclude_placeholders})
-                  {bbk_filter_sql}
-                  AND cron_task_id IS NOT NULL
-                GROUP BY button_type
-            """
-            click_params = (
-                start_date,
-                end_date,
-                *EXCLUDED_SOURCE_IDS,
-                *bbk_filter_params,
-            )
-        else:
-            click_query = """
-                SELECT
-                    COUNT(DISTINCT cron_task_id) AS click_count,
-                    button_type,
-                    MAX(button_name) AS button_name
-                FROM swe_html_preview_click_events
-                WHERE clicked_at >= %s AND clicked_at < %s
-                  AND source_id = %s
-                  AND cron_task_id IS NOT NULL
-                GROUP BY button_type
-            """
-            click_params = (start_date, end_date, source_id)
-
-        click_rows = await self._db.fetch_all(click_query, click_params)
-
-        # 汇总点击数
-        click_count = 0
-        click_by_button_type: dict[str, int] = {}
-        for row in click_rows:
-            btn_name = row["button_name"] or row["button_type"] or "unknown"
-            btn_count = row["click_count"] or 0
-            click_by_button_type[btn_name] = btn_count
-            click_count += btn_count
 
         return TaskStatusSummary(
             total_tasks=total_tasks,
@@ -2402,8 +2383,6 @@ class TracingQueryService:
             cancelled=cancelled,
             read_count=read_count,
             new_cron_tasks=new_cron_tasks,
-            click_count=click_count,
-            click_by_button_type=click_by_button_type,
         )
 
     async def get_error_summary(
@@ -2882,7 +2861,6 @@ class TracingQueryService:
             exclude_placeholders = ", ".join(["%s"] * len(EXCLUDED_SOURCE_IDS))
             base_where = f"""
                 s.start_time >= %s AND s.start_time <= %s
-                AND s.event_type = 'skill_invocation'
                 AND s.skill_name = %s
                 AND s.source_id NOT IN ({exclude_placeholders})
                 AND s.user_id != 'default'
@@ -2896,7 +2874,6 @@ class TracingQueryService:
         else:
             base_where = """
                 s.source_id = %s AND s.start_time >= %s AND s.start_time <= %s
-                AND s.event_type = 'skill_invocation'
                 AND s.skill_name = %s
                 AND s.user_id != 'default'
             """
@@ -3307,11 +3284,10 @@ class TracingQueryService:
         if source_id == "all":
             skill_query = f"""
                 SELECT skill_name, MAX(skill_description) as skill_description,
-                       COUNT(*) as count,
+                       COUNT(DISTINCT trace_id) as count,
                        AVG(duration_ms) as avg_duration
                 FROM swe_tracing_spans
                 WHERE user_id = %s AND start_time >= %s AND start_time <= %s
-                  AND event_type = 'skill_invocation'
                   AND skill_name IS NOT NULL{bbk_filter_sql}
                 GROUP BY skill_name
                 ORDER BY count DESC
@@ -3323,11 +3299,10 @@ class TracingQueryService:
         else:
             skill_query = f"""
                 SELECT skill_name, MAX(skill_description) as skill_description,
-                       COUNT(*) as count,
+                       COUNT(DISTINCT trace_id) as count,
                        AVG(duration_ms) as avg_duration
                 FROM swe_tracing_spans
                 WHERE source_id = %s AND user_id = %s AND start_time >= %s AND start_time <= %s
-                  AND event_type = 'skill_invocation'
                   AND skill_name IS NOT NULL{bbk_filter_sql}
                 GROUP BY skill_name
                 ORDER BY count DESC
@@ -3411,48 +3386,177 @@ class TracingQueryService:
         start_date: Optional[datetime],
         end_date: Optional[datetime],
         has_error: Optional[bool],
+        resource_type: Optional[str] = None,
+        resource_name: Optional[str] = None,
+        mcp_server: Optional[str] = None,
     ) -> tuple[list[str], list[Any]]:
         """构建 get_sessions 的 WHERE 条件."""
+        # 初始化基础条件
+        where_clauses, params = self._init_source_filter(source_id)
+
+        # 添加基础过滤条件
+        self._add_basic_filters(
+            where_clauses,
+            params,
+            user_id,
+            session_id,
+            bbk_ids,
+            start_date,
+            end_date,
+        )
+
+        # 添加资源类型过滤
+        resource_date_sql, resource_date_params = (
+            self._build_resource_date_sql(
+                start_date,
+                end_date,
+            )
+        )
+        self._add_resource_filter(
+            where_clauses,
+            params,
+            resource_type,
+            resource_name,
+            mcp_server,
+            resource_date_sql,
+            resource_date_params,
+        )
+
+        # 添加错误状态过滤
+        self._add_error_filter(where_clauses, has_error)
+
+        return where_clauses, params
+
+    def _init_source_filter(
+        self,
+        source_id: str,
+    ) -> tuple[list[str], list[Any]]:
+        """初始化 source_id 过滤条件."""
         exclude_placeholders = ", ".join(["%s"] * len(EXCLUDED_SOURCE_IDS))
         if source_id == "all":
-            where_clauses: list[str] = [
-                f"source_id NOT IN ({exclude_placeholders})",
-            ]
-            params: list[Any] = list(EXCLUDED_SOURCE_IDS)
+            where_clauses = [f"t.source_id NOT IN ({exclude_placeholders})"]
+            params = list(EXCLUDED_SOURCE_IDS)
         else:
-            where_clauses = ["source_id = %s"]
+            where_clauses = ["t.source_id = %s"]
             params = [source_id]
+        return where_clauses, params
 
+    def _add_basic_filters(
+        self,
+        where_clauses: list[str],
+        params: list[Any],
+        user_id: Optional[str],
+        session_id: Optional[str],
+        bbk_ids: Optional[str],
+        start_date: Optional[datetime],
+        end_date: Optional[datetime],
+    ) -> None:
+        """添加基础参数过滤条件."""
         if user_id:
-            where_clauses.append("user_id = %s")
+            where_clauses.append("t.user_id = %s")
             params.append(user_id)
         if session_id:
-            where_clauses.append("session_id LIKE %s")
+            where_clauses.append("t.session_id LIKE %s")
             params.append(f"%{session_id}%")
         if bbk_ids:
             bbk_filter_sql, bbk_params = build_bbk_in_filter(bbk_ids)
             where_clauses.append(
-                f"bbk_id IN ({', '.join(['%s'] * len(bbk_params))})",
+                f"t.bbk_id IN ({', '.join(['%s'] * len(bbk_params))})",
             )
             params.extend(bbk_params)
         if start_date:
-            where_clauses.append("start_time >= %s")
+            where_clauses.append("t.start_time >= %s")
             params.append(start_date)
         if end_date:
-            where_clauses.append("start_time <= %s")
+            where_clauses.append("t.start_time <= %s")
             params.append(end_date)
 
-        # 报错会话筛选
+    def _build_resource_date_sql(
+        self,
+        start_date: Optional[datetime],
+        end_date: Optional[datetime],
+    ) -> tuple[str, list[Any]]:
+        """构建资源子查询的日期条件."""
+        resource_date_clauses: list[str] = []
+        resource_date_params: list[Any] = []
+        if start_date:
+            resource_date_clauses.append("resource.start_time >= %s")
+            resource_date_params.append(start_date)
+        if end_date:
+            resource_date_clauses.append("resource.start_time <= %s")
+            resource_date_params.append(end_date)
+        resource_date_sql = (
+            " AND " + " AND ".join(resource_date_clauses)
+            if resource_date_clauses
+            else ""
+        )
+        return resource_date_sql, resource_date_params
+
+    def _add_resource_filter(
+        self,
+        where_clauses: list[str],
+        params: list[Any],
+        resource_type: Optional[str],
+        resource_name: Optional[str],
+        mcp_server: Optional[str],
+        resource_date_sql: str,
+        resource_date_params: list[Any],
+    ) -> None:
+        """添加资源类型过滤条件."""
+        if resource_type == "model" and resource_name:
+            where_clauses.append(
+                "EXISTS (SELECT 1 FROM swe_tracing_traces resource "
+                "WHERE resource.source_id = t.source_id "
+                "AND resource.session_id = t.session_id "
+                "AND resource.model_name = %s"
+                f"{resource_date_sql})",
+            )
+            params.append(resource_name)
+            params.extend(resource_date_params)
+        elif resource_type == "skill" and resource_name:
+            where_clauses.append(
+                "EXISTS (SELECT 1 FROM swe_tracing_spans resource "
+                "WHERE resource.source_id = t.source_id "
+                "AND resource.session_id = t.session_id "
+                "AND resource.event_type = 'skill_invocation' "
+                "AND resource.skill_name = %s"
+                f"{resource_date_sql})",
+            )
+            params.append(resource_name)
+            params.extend(resource_date_params)
+        elif resource_type == "mcp_tool" and resource_name and mcp_server:
+            where_clauses.append(
+                "EXISTS (SELECT 1 FROM swe_tracing_spans resource "
+                "WHERE resource.source_id = t.source_id "
+                "AND resource.session_id = t.session_id "
+                "AND resource.event_type = 'tool_call_end' "
+                "AND resource.tool_name = %s "
+                "AND resource.mcp_server = %s"
+                f"{resource_date_sql})",
+            )
+            params.extend([resource_name, mcp_server])
+            params.extend(resource_date_params)
+
+    def _add_error_filter(
+        self,
+        where_clauses: list[str],
+        has_error: Optional[bool],
+    ) -> None:
+        """添加错误状态过滤条件."""
         if has_error is True:
             where_clauses.append(
-                "session_id IN (SELECT DISTINCT session_id FROM swe_tracing_traces WHERE status = 'error')",
+                "EXISTS (SELECT 1 FROM swe_tracing_traces error_trace "
+                "WHERE error_trace.source_id = t.source_id "
+                "AND error_trace.session_id = t.session_id "
+                "AND error_trace.status = 'error')",
             )
         elif has_error is False:
             where_clauses.append(
-                "session_id NOT IN (SELECT DISTINCT session_id FROM swe_tracing_traces WHERE status = 'error')",
+                "NOT EXISTS (SELECT 1 FROM swe_tracing_traces error_trace "
+                "WHERE error_trace.source_id = t.source_id "
+                "AND error_trace.session_id = t.session_id "
+                "AND error_trace.status = 'error')",
             )
-
-        return where_clauses, params
 
     def _build_skill_date_conditions(
         self,
@@ -3460,7 +3564,7 @@ class TracingQueryService:
         end_date: Optional[datetime],
     ) -> tuple[str, list[Any]]:
         """构建技能统计子查询的日期筛选条件."""
-        skill_date_conditions = "s.event_type = 'skill_invocation'"
+        skill_date_conditions = "s.skill_name IS NOT NULL"
         skill_params: list[Any] = []
         if start_date:
             skill_date_conditions += " AND s.start_time >= %s"
@@ -3529,6 +3633,9 @@ class TracingQueryService:
         end_date: Optional[datetime] = None,
         bbk_ids: Optional[str] = None,
         has_error: Optional[bool] = None,
+        resource_type: Optional[str] = None,
+        resource_name: Optional[str] = None,
+        mcp_server: Optional[str] = None,
     ) -> tuple[list[SessionListItem], int]:
         """获取会话列表."""
         # 构建 WHERE 条件
@@ -3540,6 +3647,9 @@ class TracingQueryService:
             start_date,
             end_date,
             has_error,
+            resource_type,
+            resource_name,
+            mcp_server,
         )
         where_sql = " AND ".join(where_clauses) if where_clauses else "1=1"
 
@@ -3552,7 +3662,7 @@ class TracingQueryService:
         )
 
         # 获取总数
-        count_query = f"SELECT COUNT(DISTINCT session_id) as total FROM swe_tracing_traces WHERE {where_sql}"
+        count_query = f"SELECT COUNT(DISTINCT t.session_id) as total FROM swe_tracing_traces t WHERE {where_sql}"
         count_row = await self._db.fetch_one(count_query, tuple(params))
         total = count_row["total"] if count_row else 0
 
@@ -3881,7 +3991,6 @@ class TracingQueryService:
                 FROM swe_tracing_spans
                 WHERE source_id NOT IN ({exclude_placeholders})
                       AND session_id = %s AND start_time >= %s AND start_time <= %s
-                  AND event_type = 'skill_invocation'
                   AND skill_name IS NOT NULL
                   {bbk_filter_sql}
                 GROUP BY skill_name
@@ -3904,7 +4013,6 @@ class TracingQueryService:
                    AVG(duration_ms) as avg_duration
             FROM swe_tracing_spans
             WHERE source_id = %s AND session_id = %s AND start_time >= %s AND start_time <= %s
-              AND event_type = 'skill_invocation'
               AND skill_name IS NOT NULL
               {bbk_filter_sql}
             GROUP BY skill_name

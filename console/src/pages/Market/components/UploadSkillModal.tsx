@@ -1,6 +1,6 @@
 import { useState, useEffect } from "react";
-import { Modal, Upload, Select, message, Spin, Button } from "antd";
-import { InboxOutlined, ExclamationCircleOutlined } from "@ant-design/icons";
+import { Modal, Upload, Select, Input, message, Spin, Button, Form, Tooltip, Alert } from "antd";
+import { InboxOutlined, ExclamationCircleOutlined, PlusOutlined, InfoCircleOutlined } from "@ant-design/icons";
 import type { UploadProps } from "antd";
 import { marketApi, type Category } from "../../../api/modules/market";
 
@@ -8,6 +8,7 @@ interface UploadSkillModalProps {
   open: boolean;
   onClose: () => void;
   onSuccess: () => void;
+  onCategoryAdded?: () => void;
   sourceId: string;
 }
 
@@ -17,15 +18,26 @@ export default function UploadSkillModal({
   open,
   onClose,
   onSuccess,
+  onCategoryAdded,
   sourceId,
 }: UploadSkillModalProps) {
   const [categories, setCategories] = useState<Category[]>([]);
   const [selectedCategory, setSelectedCategory] = useState<number | null>(null);
   const [file, setFile] = useState<File | null>(null);
+  const [cnName, setCnName] = useState("");
+  const [skillId, setSkillId] = useState("");
+  const [skillName, setSkillName] = useState("");
+  const [parsingZip, setParsingZip] = useState(false);
+  const [skillIdUsedCount, setSkillIdUsedCount] = useState(0);
+  const [skillIdUsedBy, setSkillIdUsedBy] = useState<string[]>([]);
   const [uploading, setUploading] = useState(false);
   const [loadingCategories, setLoadingCategories] = useState(false);
   const [showConfirm, setShowConfirm] = useState(false);
   const [conflictNames, setConflictNames] = useState<string[]>([]);
+  const [skillExists, setSkillExists] = useState(false);  // 同名技能已存在（允许覆盖）
+  const [addCategoryModalOpen, setAddCategoryModalOpen] = useState(false);
+  const [newCategoryName, setNewCategoryName] = useState("");
+  const [addingCategory, setAddingCategory] = useState(false);
 
   const loadCategories = async () => {
     setLoadingCategories(true);
@@ -46,12 +58,67 @@ export default function UploadSkillModal({
     if (open) {
       loadCategories();
       setFile(null);
+      setCnName("");
+      setSkillId("");
+      setSkillName("");
+      setSkillIdUsedCount(0);
+      setSkillIdUsedBy([]);
       setSelectedCategory(null);
       setShowConfirm(false);
       setConflictNames([]);
+      setSkillExists(false);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open]);
+
+  // 解析 zip 文件
+  const parseZipFile = async (selectedFile: File) => {
+    setParsingZip(true);
+    try {
+      const result = await marketApi.parseSkillZip(sourceId, selectedFile, true);
+      if (result.error) {
+        message.error(result.error);
+        setParsingZip(false);
+        return;
+      }
+
+      // 设置预解析结果
+      setCnName(result.cn_name || result.skill_name || "");
+      setSkillId(result.skill_id || "");
+      setSkillName(result.skill_name || "");
+      setSkillIdUsedCount(result.skill_id_used_count || 0);
+      setSkillIdUsedBy(result.skill_id_used_by || []);
+      setSkillExists(result.exists || false);
+    } catch (err) {
+      const errorMsg = err instanceof Error ? err.message : "解析失败";
+      message.error(errorMsg);
+    } finally {
+      setParsingZip(false);
+    }
+  };
+
+  const handleAddCategory = async () => {
+    const trimmed = newCategoryName.trim();
+    if (!trimmed) {
+      message.error("请输入分类名称");
+      return;
+    }
+    setAddingCategory(true);
+    try {
+      const newCat = await marketApi.createCategory(sourceId, trimmed);
+      message.success(`分类 "${newCat.name}" 创建成功`);
+      setAddCategoryModalOpen(false);
+      setNewCategoryName("");
+      await loadCategories();
+      setSelectedCategory(newCat.id);
+      onCategoryAdded?.();
+    } catch (err) {
+      const errorMsg = err instanceof Error ? err.message : "创建失败";
+      message.error(errorMsg);
+    } finally {
+      setAddingCategory(false);
+    }
+  };
 
   const handleUpload = async (overwrite: boolean = false) => {
     if (!file) {
@@ -60,6 +127,17 @@ export default function UploadSkillModal({
     }
     if (selectedCategory === null) {
       message.error("请选择技能分类");
+      return;
+    }
+    if (!cnName.trim()) {
+      message.error("请输入中文名称");
+      return;
+    }
+
+    // 同名技能存在时，显示确认弹窗（和我的技能一样）
+    if (skillExists && !overwrite) {
+      setConflictNames([skillName]);
+      setShowConfirm(true);
       return;
     }
 
@@ -73,6 +151,7 @@ export default function UploadSkillModal({
         {
           category_id: selectedCategory,
           overwrite,
+          cn_name: cnName.trim(),
         }
       );
 
@@ -87,13 +166,15 @@ export default function UploadSkillModal({
       }
 
       // 成功
-      if (result.count > 0) {
+      if (result.version_unchanged) {
+        message.info({ content: "当前内容已是最新，无需重复上传", key: "upload" });
+      } else if (result.count > 0) {
         const actionText = overwrite ? "更新" : "导入";
         message.success({ content: `上传成功，${actionText} ${result.count} 个技能`, key: "upload" });
+        onSuccess();
       } else {
         message.info({ content: "未导入新技能，可能已存在", key: "upload" });
       }
-      onSuccess();
       onClose();
     } catch (err) {
       const errorMsg = err instanceof Error ? err.message : "上传失败";
@@ -121,12 +202,19 @@ export default function UploadSkillModal({
       setFile(file);
       setShowConfirm(false);
       setConflictNames([]);
+      // 调用预解析
+      parseZipFile(file);
       return false;
     },
     onRemove: () => {
       setFile(null);
       setShowConfirm(false);
       setConflictNames([]);
+      setCnName("");
+      setSkillId("");
+      setSkillName("");
+      setSkillIdUsedCount(0);
+      setSkillIdUsedBy([]);
     },
     fileList: file ? [file as any] : [],
   };
@@ -143,8 +231,8 @@ export default function UploadSkillModal({
       okText={showConfirm ? undefined : "上传"}
       cancelText={showConfirm ? undefined : "取消"}
       okButtonProps={{
-        loading: uploading,
-        disabled: !file || selectedCategory === null,
+        loading: uploading || parsingZip,
+        disabled: !file || selectedCategory === null || skillIdUsedCount > 0,
       }}
       footer={showConfirm ? null : undefined}
       destroyOnClose
@@ -182,12 +270,45 @@ export default function UploadSkillModal({
               <p className="ant-upload-text">拖拽 .zip 文件到此处</p>
               <p className="ant-upload-hint">或点击选择文件（需包含 SKILL.md）</p>
             </Dragger>
-            {file && (
+            {parsingZip && (
+              <div style={{ textAlign: "center", marginTop: 8 }}>
+                <Spin size="small" />
+                <span style={{ marginLeft: 8, color: "#8c8c8c" }}>正在解析...</span>
+              </div>
+            )}
+            {file && !parsingZip && (
               <p style={{ color: "#52c41a", marginTop: 8 }}>
                 已选择: {file.name}
+                {skillName && <span style={{ color: "#8c8c8c" }}> ({skillName})</span>}
               </p>
             )}
           </div>
+
+          {/* 同名技能提示（允许覆盖） */}
+          {skillExists && !parsingZip && skillIdUsedCount === 0 && (
+            <Alert
+              type="warning"
+              showIcon
+              style={{ marginBottom: 16 }}
+              message={`检测到同名技能 "${skillName}" 已存在`}
+              description="点击上传将覆盖现有技能版本并创建版本快照，您可以在版本历史中查看和回滚"
+            />
+          )}
+
+          {/* skill_id 冲突提示（禁止上传） */}
+          {skillIdUsedCount > 0 && !parsingZip && (
+            <Alert
+              type="error"
+              showIcon
+              style={{ marginBottom: 16 }}
+              message={`skill_id '${skillId}' 已被占用`}
+              description={
+                skillIdUsedCount <= 3
+                  ? `已被其他技能占用：${skillIdUsedBy.join("、")}`
+                  : `已被 ${skillIdUsedCount} 个其他技能占用`
+              }
+            />
+          )}
 
           <div style={{ marginBottom: 16 }}>
             <label style={{ display: "block", marginBottom: 8 }}>
@@ -196,19 +317,74 @@ export default function UploadSkillModal({
             {loadingCategories ? (
               <Spin size="small" />
             ) : (
-              <Select
-                style={{ width: "100%" }}
-                value={selectedCategory}
-                onChange={setSelectedCategory}
-                placeholder="选择分类"
-                options={categories.map((c) => ({ label: c.name, value: c.id }))}
-              />
+              <div style={{ display: "flex", gap: 8 }}>
+                <Select
+                  style={{ flex: 1 }}
+                  value={selectedCategory}
+                  onChange={setSelectedCategory}
+                  placeholder="选择分类"
+                  options={categories.map((c) => ({ label: c.name, value: c.id }))}
+                />
+                <Button
+                  icon={<PlusOutlined />}
+                  onClick={() => setAddCategoryModalOpen(true)}
+                  title="新增分类"
+                />
+              </div>
             )}
           </div>
 
-          <p style={{ color: "#8c8c8c", fontSize: 12 }}>
-            提示：技能名称和描述将从 zip 包中的 SKILL.md frontmatter 自动解析
-          </p>
+          <div style={{ marginBottom: 16 }}>
+            <label style={{ display: "block", marginBottom: 8 }}>
+              中文名称 <span style={{ color: "#ff4d4f" }}>*</span>
+            </label>
+            <Input
+              placeholder="请输入技能中文展示名"
+              value={cnName}
+              onChange={(e) => setCnName(e.target.value)}
+              maxLength={50}
+              showCount
+            />
+          </div>
+
+          {skillId && !parsingZip && (
+            <div style={{ marginBottom: 16 }}>
+              <label style={{ display: "block", marginBottom: 8 }}>
+                技能唯一标识
+                <Tooltip title="来自 SKILL.md metadata.skill_id。分发时若未指定则使用市场条目 ID">
+                  <InfoCircleOutlined style={{ marginLeft: 4, color: "#8c8c8c" }} />
+                </Tooltip>
+              </label>
+              <Input value={skillId} disabled />
+              <p style={{ color: "#8c8c8c", fontSize: 12, marginTop: 4 }}>
+                分发时直接使用此 skill_id，若无指定则使用市场条目 ID
+              </p>
+            </div>
+          )}
+
+          {/* 新增分类弹窗 */}
+          <Modal
+            title="新增分类"
+            open={addCategoryModalOpen}
+            onOk={handleAddCategory}
+            onCancel={() => {
+              setAddCategoryModalOpen(false);
+              setNewCategoryName("");
+            }}
+            confirmLoading={addingCategory}
+            okText="创建"
+            cancelText="取消"
+            destroyOnClose
+          >
+            <Input
+              placeholder="请输入分类名称"
+              value={newCategoryName}
+              onChange={(e) => setNewCategoryName(e.target.value)}
+              onPressEnter={handleAddCategory}
+              maxLength={128}
+              autoFocus
+            />
+          </Modal>
         </>
       )}
     </Modal>

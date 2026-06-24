@@ -90,6 +90,7 @@ class CronNotificationService:
                         FROM swe_cron_executions e
                         {source_filter_join}
                         WHERE e.status = 'success'
+                          AND e.async_status = 'success'
                           AND e.notification_status = 'pending'
                           AND e.notification_due_at <= %s
                           AND (
@@ -156,6 +157,8 @@ class CronNotificationService:
             LEFT JOIN swe_cron_jobs j ON e.job_id = j.id
             WHERE e.id IN ({placeholders})
               AND e.notification_lock_owner = %s
+              AND e.status = 'success'
+              AND e.async_status = 'success'
               AND e.notification_status = 'pending'
             ORDER BY e.notification_due_at, e.id
             """,

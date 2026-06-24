@@ -4,7 +4,9 @@
 Provides TracingModelWrapper that intercepts LLM calls to record tracing events.
 """
 
+import asyncio
 import logging
+from types import SimpleNamespace
 from typing import Any, AsyncGenerator, Optional, Sequence, Union
 
 from agentscope.model._model_response import ChatResponse
@@ -12,6 +14,14 @@ from agentscope.model._model_response import ChatResponse
 from .manager import get_trace_manager, get_current_trace
 
 logger = logging.getLogger(__name__)
+
+
+def _current_task_label() -> str:
+    """返回当前 asyncio task 的诊断标识。"""
+    task = asyncio.current_task()
+    if task is None:
+        return "no-task"
+    return f"task-{id(task)}"
 
 
 class TracingModelWrapper:
@@ -27,6 +37,7 @@ class TracingModelWrapper:
         self,
         provider_id: str,
         model: Any,
+        trace_context: Optional[dict[str, Any]] = None,
     ):
         """Initialize tracing model wrapper.
 
@@ -41,6 +52,7 @@ class TracingModelWrapper:
             "config",
             {},
         ).get("model_name", "unknown")
+        self._trace_context = dict(trace_context or {})
 
     @property
     def model_name(self) -> str:
@@ -90,7 +102,7 @@ class TracingModelWrapper:
             )
 
         # Get trace context
-        trace_ctx = get_current_trace()
+        trace_ctx = self._resolve_trace_context()
         if trace_ctx is None:
             # 记录缺少 trace context 的情况，帮助排查 token 为 0 的问题
             logger.warning(
@@ -106,6 +118,19 @@ class TracingModelWrapper:
                 tool_choice,
                 **kwargs,
             )
+
+        logger.debug(
+            "TracingModelWrapper preparing LLM span: trace_id=%s "
+            "user_id=%s session_id=%s source_id=%s task=%s provider=%s "
+            "model=%s",
+            trace_ctx.trace_id,
+            trace_ctx.user_id,
+            trace_ctx.session_id,
+            trace_ctx.source_id,
+            _current_task_label(),
+            self.provider_id,
+            self._model_name,
+        )
 
         # Emit LLM_INPUT event
         span_id = await self._emit_llm_start(trace_ctx, trace_mgr)
@@ -161,6 +186,36 @@ class TracingModelWrapper:
                         trace_error,
                     )
             raise
+
+    def _resolve_trace_context(self) -> Any | None:
+        """优先使用请求绑定的 trace 上下文，缺失时回退到 ContextVar。"""
+        bound_trace_id = str(self._trace_context.get("trace_id") or "")
+        current_trace = get_current_trace()
+        if not bound_trace_id:
+            return current_trace
+
+        if current_trace is not None and getattr(
+            current_trace,
+            "trace_id",
+            None,
+        ) not in {None, bound_trace_id}:
+            logger.warning(
+                "TracingModelWrapper detected mismatched current trace; "
+                "using bound trace context instead. current=%s bound=%s task=%s",
+                getattr(current_trace, "trace_id", None),
+                bound_trace_id,
+                _current_task_label(),
+            )
+
+        return SimpleNamespace(
+            trace_id=bound_trace_id,
+            user_id=str(self._trace_context.get("user_id") or ""),
+            session_id=str(self._trace_context.get("session_id") or ""),
+            channel=str(self._trace_context.get("channel") or ""),
+            source_id=str(self._trace_context.get("source_id") or ""),
+            user_name=self._trace_context.get("user_name"),
+            bbk_id=self._trace_context.get("bbk_id"),
+        )
 
     async def _wrap_stream(
         self,

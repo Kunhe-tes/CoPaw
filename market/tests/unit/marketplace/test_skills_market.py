@@ -223,7 +223,7 @@ def test_publish_skill_upload_reactivates_inactive_skill(tmp_path):
 
     zip_buffer.seek(0)
     resp = client.post(
-        "/api/market/skills/publish-upload",
+        "/api/market/skills/publish-upload?overwrite=true",
         files={"file": ("skill.zip", zip_buffer, "application/zip")},
         headers={
             "X-Source-Id": "src_a",
@@ -245,3 +245,166 @@ def test_publish_skill_upload_reactivates_inactive_skill(tmp_path):
     reactivated_item = next(i for i in items if i.item_id == item_id)
     assert reactivated_item.status == "active"
     assert reactivated_item.version == "1.0.1"  # patch 版本递增
+
+
+def test_switch_version_updates_market_item_creator(tmp_path):
+    """T4 R8：switch_version 同步更新 MarketItem.creator_id/creator_name 到目标快照来源."""
+    import json as _json
+    from market.marketplace.fs import save_index, load_index
+    from market.marketplace.models import MarketItem
+    from market.app.routers.skill_versions import _update_skill_index
+
+    marketplace_root = tmp_path / "market"
+    source_id = "src1"
+    item_id = "item1"
+    skill_dir = marketplace_root / source_id / "skills" / item_id
+    skill_dir.mkdir(parents=True, exist_ok=True)
+    (skill_dir / "SKILL.md").write_text(
+        '---\nname: t\ndescription: d\nversion: "2.0.0"\n---\n',
+        encoding="utf-8",
+    )
+
+    # 起始：creator=alice，市场版本 2.0.0
+    save_index(
+        marketplace_root,
+        source_id,
+        [
+            MarketItem(
+                item_id=item_id,
+                item_type="skill",
+                name="t",
+                description="d",
+                version="2.0.0",
+                creator_id="alice_id",
+                creator_name="alice",
+                status="active",
+            ),
+        ],
+    )
+
+    # 准备 versions.json：v1.0.0 source_user=bob
+    versions_path = (
+        marketplace_root
+        / source_id
+        / "skill_versions"
+        / item_id
+        / "versions.json"
+    )
+    versions_path.parent.mkdir(parents=True, exist_ok=True)
+    versions_path.write_text(
+        _json.dumps(
+            {
+                "skill_name": "t",
+                "versions": [
+                    {
+                        "version_id": "1.0.0",
+                        "created_at": "2025-01-01T00:00:00+00:00",
+                        "created_by": "admin",
+                        "created_by_name": "admin",
+                        "source_user_id": "bob_id",
+                        "source_user_name": "bob",
+                        "source_user_version": "1.0.0",
+                        "signature": "x",
+                        "is_current": True,
+                        "is_initial": True,
+                        "description": "",
+                    },
+                ],
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+
+    class _FakeMarketplace:
+        pass
+
+    fake = _FakeMarketplace()
+    fake.marketplace_root = marketplace_root
+
+    _update_skill_index(fake, source_id, item_id, skill_dir, "1.0.0")
+
+    items = load_index(marketplace_root, source_id)
+    item = items[0]
+    assert item.version == "1.0.0"
+    # R8: creator_id/name 跟随目标快照的 source_user_*
+    assert item.creator_id == "bob_id"
+    assert item.creator_name == "bob"
+
+
+def test_switch_version_falls_back_to_created_by_when_no_source_user(tmp_path):
+    """T4 R8 边界：source_user_* 为空时回退到 created_by."""
+    import json as _json
+    from market.marketplace.fs import save_index, load_index
+    from market.marketplace.models import MarketItem
+    from market.app.routers.skill_versions import _update_skill_index
+
+    marketplace_root = tmp_path / "market"
+    source_id = "src1"
+    item_id = "item2"
+    skill_dir = marketplace_root / source_id / "skills" / item_id
+    skill_dir.mkdir(parents=True, exist_ok=True)
+    (skill_dir / "SKILL.md").write_text(
+        '---\nname: t\ndescription: d\nversion: "1.0.0"\n---\n',
+        encoding="utf-8",
+    )
+    save_index(
+        marketplace_root,
+        source_id,
+        [
+            MarketItem(
+                item_id=item_id,
+                item_type="skill",
+                name="t",
+                description="d",
+                version="2.0.0",
+                creator_id="alice_id",
+                creator_name="alice",
+                status="active",
+            ),
+        ],
+    )
+    versions_path = (
+        marketplace_root
+        / source_id
+        / "skill_versions"
+        / item_id
+        / "versions.json"
+    )
+    versions_path.parent.mkdir(parents=True, exist_ok=True)
+    versions_path.write_text(
+        _json.dumps(
+            {
+                "skill_name": "t",
+                "versions": [
+                    {
+                        "version_id": "1.0.0",
+                        "created_at": "2025-01-01T00:00:00+00:00",
+                        "created_by": "admin_id",
+                        "created_by_name": "Admin",
+                        "source_user_id": "",
+                        "source_user_name": "",
+                        "source_user_version": "",
+                        "signature": "x",
+                        "is_current": True,
+                        "is_initial": True,
+                        "description": "",
+                    },
+                ],
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+
+    class _FakeMarketplace:
+        pass
+
+    fake = _FakeMarketplace()
+    fake.marketplace_root = marketplace_root
+    _update_skill_index(fake, source_id, item_id, skill_dir, "1.0.0")
+
+    items = load_index(marketplace_root, source_id)
+    item = items[0]
+    assert item.creator_id == "admin_id"
+    assert item.creator_name == "Admin"
