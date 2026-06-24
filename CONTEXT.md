@@ -196,6 +196,10 @@ _Avoid_: mandatory trace span linkage, uncorrelated hook log
 The versioned JSON shape inside a **Hook Telemetry Log Message**. The schema records correlation fields, boundary-level outcome fields, and handler-level details while excluding raw hook payloads by default.
 _Avoid_: ad-hoc log fields, raw payload schema, trace span schema
 
+**Application Log Output Pipeline**:
+The operational path that carries Swe application log records from runtime emission to process-visible outputs. An **Application Log Output Pipeline** transports ordinary and structured log records without changing their domain meaning or schema.
+_Avoid_: telemetry schema, audit log, business operation log, tool output frame
+
 **Hook Boundary Outcome**:
 The merged result of one Hook Runtime boundary after all matching handlers have been resolved and combined.
 _Avoid_: handler result, raw hook output, final log line
@@ -576,6 +580,9 @@ Resolved as **Request Execution Load**. Swe does not run Flask or a multi-worker
 
 **"Diagnostic Instance"**:
 Resolved as a **Runtime Instance**, meaning one running Swe service container. It is distinct from the business-facing instance records used for user allocation.
+
+**"Logging System"**:
+Resolved as the **Application Log Output Pipeline** when discussing asynchronous logging output. It does not mean changing **Hook Telemetry Log Message** schema, business operation logs, tracing storage, or **Tool Output Frames**.
 
 ## Example Dialogue
 

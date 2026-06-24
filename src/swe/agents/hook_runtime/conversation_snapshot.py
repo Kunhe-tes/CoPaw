@@ -192,58 +192,77 @@ def _normalize_content(
     role: str,
 ) -> tuple[Any, dict[str, bool]]:
     if isinstance(content, str):
-        if role == "system":
-            return None, {
-                "reasoning_omitted": False,
-                "media_content_omitted": False,
-            }
-        return [{"type": "text", "text": content}], {
-            "reasoning_omitted": False,
-            "media_content_omitted": False,
-        }
+        return _normalize_string_content(content, role)
     if not isinstance(content, list):
-        return None, {
-            "reasoning_omitted": False,
-            "media_content_omitted": False,
-        }
+        return None, _snapshot_meta()
 
     blocks: list[dict[str, Any]] = []
-    reasoning_omitted = False
-    media_content_omitted = False
+    meta = _snapshot_meta()
     for block in content:
-        raw = _block_to_dict(block)
-        if raw is None:
-            continue
-        block_type = str(raw.get("type") or "text")
-        if block_type in REASONING_BLOCK_TYPES:
-            reasoning_omitted = True
-            continue
-        if role == "system" and block_type != "tool_result":
-            if block_type in MEDIA_BLOCK_TYPES:
-                media_content_omitted = True
-            continue
-        if block_type in MEDIA_BLOCK_TYPES:
-            blocks.append(_media_reference_block(raw))
-            media_content_omitted = True
-            continue
-        if block_type in ALLOWED_BLOCK_KEYS:
-            allowed_block, allowed_meta = _allowlisted_block(raw, block_type)
-            reasoning_omitted = (
-                reasoning_omitted or allowed_meta["reasoning_omitted"]
-            )
-            media_content_omitted = (
-                media_content_omitted or allowed_meta["media_content_omitted"]
-            )
-            blocks.append(allowed_block)
+        normalized_block, block_meta = _normalize_content_block(block, role)
+        _merge_snapshot_meta(meta, block_meta)
+        if normalized_block is not _OMIT:
+            blocks.append(normalized_block)
+
     if not blocks:
-        return None, {
-            "reasoning_omitted": reasoning_omitted,
-            "media_content_omitted": media_content_omitted,
-        }
-    return blocks, {
+        return None, meta
+    return blocks, meta
+
+
+def _normalize_string_content(
+    content: str,
+    role: str,
+) -> tuple[Any, dict[str, bool]]:
+    if role == "system":
+        return None, _snapshot_meta()
+    return [{"type": "text", "text": content}], _snapshot_meta()
+
+
+def _normalize_content_block(
+    block: Any,
+    role: str,
+) -> tuple[Any, dict[str, bool]]:
+    raw = _block_to_dict(block)
+    if raw is None:
+        return _OMIT, _snapshot_meta()
+
+    block_type = str(raw.get("type") or "text")
+    if block_type in REASONING_BLOCK_TYPES:
+        return _OMIT, _snapshot_meta(reasoning_omitted=True)
+    if role == "system" and block_type != "tool_result":
+        return _OMIT, _snapshot_meta(
+            media_content_omitted=block_type in MEDIA_BLOCK_TYPES,
+        )
+    if block_type in MEDIA_BLOCK_TYPES:
+        return _media_reference_block(raw), _snapshot_meta(
+            media_content_omitted=True,
+        )
+    if block_type not in ALLOWED_BLOCK_KEYS:
+        return _OMIT, _snapshot_meta()
+    return _allowlisted_block(raw, block_type)
+
+
+def _snapshot_meta(
+    *,
+    reasoning_omitted: bool = False,
+    media_content_omitted: bool = False,
+) -> dict[str, bool]:
+    return {
         "reasoning_omitted": reasoning_omitted,
         "media_content_omitted": media_content_omitted,
     }
+
+
+def _merge_snapshot_meta(
+    target: dict[str, bool],
+    incoming: dict[str, bool],
+) -> None:
+    target["reasoning_omitted"] = (
+        target["reasoning_omitted"] or incoming["reasoning_omitted"]
+    )
+    target["media_content_omitted"] = (
+        target["media_content_omitted"] or incoming["media_content_omitted"]
+    )
 
 
 def _block_to_dict(block: Any) -> dict[str, Any] | None:
@@ -285,85 +304,73 @@ def _allowlisted_block(
 ) -> tuple[dict[str, Any], dict[str, bool]]:
     allowed = ALLOWED_BLOCK_KEYS[block_type]
     result: dict[str, Any] = {}
-    reasoning_omitted = False
-    media_content_omitted = False
+    meta = _snapshot_meta()
     for key, value in block.items():
         if key not in allowed:
             continue
         if key not in {"input", "output"}:
             result[key] = value
             continue
-        sanitized, meta = _sanitize_nested_snapshot_value(value)
-        reasoning_omitted = reasoning_omitted or meta["reasoning_omitted"]
-        media_content_omitted = (
-            media_content_omitted or meta["media_content_omitted"]
-        )
+        sanitized, nested_meta = _sanitize_nested_snapshot_value(value)
+        _merge_snapshot_meta(meta, nested_meta)
         if sanitized is not _OMIT:
             result[key] = sanitized
-    return result, {
-        "reasoning_omitted": reasoning_omitted,
-        "media_content_omitted": media_content_omitted,
-    }
+    return result, meta
 
 
 def _sanitize_nested_snapshot_value(value: Any) -> tuple[Any, dict[str, bool]]:
-    reasoning_omitted = False
-    media_content_omitted = False
-
     if isinstance(value, dict):
-        value_type = value.get("type")
-        if value_type in REASONING_BLOCK_TYPES:
-            return _OMIT, {
-                "reasoning_omitted": True,
-                "media_content_omitted": False,
-            }
-        if value_type in MEDIA_BLOCK_TYPES:
-            return _media_reference_block(value), {
-                "reasoning_omitted": False,
-                "media_content_omitted": True,
-            }
-
-        result: dict[str, Any] = {}
-        for key, nested_value in value.items():
-            sanitized, meta = _sanitize_nested_snapshot_value(nested_value)
-            reasoning_omitted = reasoning_omitted or meta["reasoning_omitted"]
-            media_content_omitted = (
-                media_content_omitted or meta["media_content_omitted"]
-            )
-            if sanitized is not _OMIT:
-                result[key] = sanitized
-        return result, {
-            "reasoning_omitted": reasoning_omitted,
-            "media_content_omitted": media_content_omitted,
-        }
-
+        typed_snapshot = _sanitize_typed_snapshot_dict(value)
+        if typed_snapshot is not None:
+            return typed_snapshot
+        return _sanitize_snapshot_dict(value)
     if isinstance(value, list):
-        items: list[Any] = []
-        for nested_value in value:
-            sanitized, meta = _sanitize_nested_snapshot_value(nested_value)
-            reasoning_omitted = reasoning_omitted or meta["reasoning_omitted"]
-            media_content_omitted = (
-                media_content_omitted or meta["media_content_omitted"]
-            )
-            if sanitized is not _OMIT:
-                items.append(sanitized)
-        return items, {
-            "reasoning_omitted": reasoning_omitted,
-            "media_content_omitted": media_content_omitted,
-        }
+        return _sanitize_snapshot_list(value)
+    return _sanitize_snapshot_scalar(value)
 
+
+def _sanitize_typed_snapshot_dict(
+    value: dict[str, Any],
+) -> tuple[Any, dict[str, bool]] | None:
+    value_type = value.get("type")
+    if value_type in REASONING_BLOCK_TYPES:
+        return _OMIT, _snapshot_meta(reasoning_omitted=True)
+    if value_type in MEDIA_BLOCK_TYPES:
+        return _media_reference_block(value), _snapshot_meta(
+            media_content_omitted=True,
+        )
+    return None
+
+
+def _sanitize_snapshot_dict(
+    value: dict[str, Any],
+) -> tuple[dict[str, Any], dict[str, bool]]:
+    result: dict[str, Any] = {}
+    meta = _snapshot_meta()
+    for key, nested_value in value.items():
+        sanitized, nested_meta = _sanitize_nested_snapshot_value(nested_value)
+        _merge_snapshot_meta(meta, nested_meta)
+        if sanitized is not _OMIT:
+            result[key] = sanitized
+    return result, meta
+
+
+def _sanitize_snapshot_list(
+    value: list[Any],
+) -> tuple[list[Any], dict[str, bool]]:
+    items: list[Any] = []
+    meta = _snapshot_meta()
+    for nested_value in value:
+        sanitized, nested_meta = _sanitize_nested_snapshot_value(nested_value)
+        _merge_snapshot_meta(meta, nested_meta)
+        if sanitized is not _OMIT:
+            items.append(sanitized)
+    return items, meta
+
+
+def _sanitize_snapshot_scalar(value: Any) -> tuple[Any, dict[str, bool]]:
     if isinstance(value, str) and value.startswith("data:"):
-        return _OMIT, {
-            "reasoning_omitted": False,
-            "media_content_omitted": True,
-        }
+        return _OMIT, _snapshot_meta(media_content_omitted=True)
     if isinstance(value, bytes | bytearray):
-        return _OMIT, {
-            "reasoning_omitted": False,
-            "media_content_omitted": True,
-        }
-
-    return value, {
-        "reasoning_omitted": False,
-        "media_content_omitted": False,
-    }
+        return _OMIT, _snapshot_meta(media_content_omitted=True)
+    return value, _snapshot_meta()
