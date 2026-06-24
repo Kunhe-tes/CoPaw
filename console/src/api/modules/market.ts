@@ -58,6 +58,9 @@ export interface PublishSkillRequest {
   overwrite?: boolean;
   // 用户工作区版本号，用于版本快照的 source_user_version
   source_user_version?: string;
+  // 同步模式：直接传递用户已有的 skill_id 和 cn_name，无需再解析
+  skill_id?: string;
+  cn_name?: string;
 }
 
 export interface DistributeRequest {

@@ -320,6 +320,7 @@ export function SkillDetailDrawer(
   const [distributions, setDistributions] = useState<DistributionRecord[]>([]);
   const [selectedUserIds, setSelectedUserIds] = useState<string[]>([]);
   const [syncToUsers, setSyncToUsers] = useState(true);
+  const [showUserList, setShowUserList] = useState(false);
 
   // 编辑开始
   const handleEditStart = useCallback(() => {
@@ -332,34 +333,8 @@ export function SkillDetailDrawer(
     setIsEditing(false);
     setDraftCnName("");
     setSyncModalOpen(false);
+    setShowUserList(false);
   }, []);
-
-  // 保存点击：检查是否有分发记录
-  const handleSaveClick = useCallback(async () => {
-    if (!skill || !sourceId) return;
-
-    if (draftCnName === skill.chinese_name) {
-      message.info("名称未变化");
-      setIsEditing(false);
-      return;
-    }
-
-    // 查询分发记录
-    try {
-      const dists = await marketApi.getSkillDistributions(sourceId, skill.item_id);
-      setDistributions(dists);
-      setSelectedUserIds(dists.map((d) => d.target_user_id));
-      if (dists.length > 0) {
-        setSyncModalOpen(true);
-      } else {
-        // 无分发记录，直接保存
-        await handleSave(false, []);
-      }
-    } catch {
-      // 查询失败时直接保存（不同步）
-      await handleSave(false, []);
-    }
-  }, [skill, sourceId, draftCnName]);
 
   // 执行保存
   const handleSave = useCallback(async (sync: boolean, userIds: string[]) => {
@@ -376,6 +351,7 @@ export function SkillDetailDrawer(
       message.success("保存成功");
       setIsEditing(false);
       setSyncModalOpen(false);
+      setShowUserList(false);
       onRefresh?.();
     } catch {
       message.error("保存失败");
@@ -383,6 +359,34 @@ export function SkillDetailDrawer(
       setIsSaving(false);
     }
   }, [skill, sourceId, draftCnName, onRefresh]);
+
+  // 保存点击：检查是否有分发记录
+  const handleSaveClick = useCallback(async () => {
+    if (!skill || !sourceId) return;
+
+    if (draftCnName === skill.chinese_name) {
+      message.info("名称未变化");
+      setIsEditing(false);
+      return;
+    }
+
+    // 查询分发记录
+    try {
+      const dists = await marketApi.getSkillDistributions(sourceId, skill.item_id);
+      setDistributions(dists);
+      setSelectedUserIds(dists.map((d) => d.target_user_id));
+      setShowUserList(false);
+      if (dists.length > 0) {
+        setSyncModalOpen(true);
+      } else {
+        // 无分发记录，直接保存
+        await handleSave(false, []);
+      }
+    } catch {
+      // 查询失败时直接保存（不同步）
+      await handleSave(false, []);
+    }
+  }, [skill, sourceId, draftCnName, handleSave]);
 
   // 同步确认弹窗确认
   const handleSyncConfirm = useCallback(() => {
@@ -561,10 +565,11 @@ export function SkillDetailDrawer(
             {isManager && !isEditing && (
               <Tooltip title="编辑中文名">
                 <Button
+                  type="text"
                   size="small"
-                  icon={<EditOutlined />}
+                  icon={<EditOutlined style={{ fontSize: 12, color: "#3769fc" }} />}
                   onClick={handleEditStart}
-                  style={{ height: 24, borderRadius: 4 }}
+                  style={{ padding: 4 }}
                 />
               </Tooltip>
             )}
@@ -797,43 +802,114 @@ export function SkillDetailDrawer(
         okText="确认保存"
         cancelText="取消"
         okButtonProps={{ loading: isSaving }}
-        width={500}
+        width={520}
       >
-        <div style={{ marginBottom: 16 }}>
-          技能「{skill.chinese_name}」已分发给以下用户：
-        </div>
-
-        {/* 用户列表 Checkbox */}
-        <div style={{ maxHeight: 200, overflow: "auto", marginBottom: 16 }}>
-          <Checkbox.Group
-            value={selectedUserIds}
-            onChange={(vals) => setSelectedUserIds(vals as string[])}
-            disabled={!syncToUsers}
-          >
-            {distributions.map((d) => (
-              <div key={d.target_user_id} style={{ marginBottom: 8 }}>
-                <Checkbox value={d.target_user_id}>
-                  {d.target_user_name || d.target_user_id}
-                </Checkbox>
-              </div>
-            ))}
-          </Checkbox.Group>
-        </div>
-
-        {/* 同步选项 */}
-        <div style={{ marginBottom: 8 }}>
+        {/* 同步选项 - 主选项 */}
+        <div style={{ marginBottom: 12 }}>
           <Checkbox
             checked={syncToUsers}
-            onChange={(e) => setSyncToUsers(e.target.checked)}
+            onChange={(e) => {
+              setSyncToUsers(e.target.checked);
+              if (e.target.checked && selectedUserIds.length === 0) {
+                // 开启同步时，默认全选
+                setSelectedUserIds(distributions.map((d) => d.target_user_id));
+              }
+            }}
           >
-            同步更新已分发用户的技能名称（共 {selectedUserIds.length} 位用户）
+            同步更新已分发用户的技能名称（共 {distributions.length} 位用户）
           </Checkbox>
         </div>
 
         {/* 提示 */}
         {syncToUsers && (
-          <div style={{ color: "#666", fontSize: 12 }}>
+          <div style={{ color: "#666", fontSize: 12, marginBottom: 12 }}>
             同步更新后，用户下次会话将看到新名称
+          </div>
+        )}
+
+        {/* 展开/收起用户列表 */}
+        {syncToUsers && (
+          <div
+            style={{
+              borderTop: "1px solid #f0f0f0",
+              paddingTop: 12,
+            }}
+          >
+            <div
+              style={{
+                display: "flex",
+                alignItems: "center",
+                justifyContent: "space-between",
+                marginBottom: showUserList ? 12 : 0,
+                cursor: "pointer",
+                color: "#3769fc",
+                fontSize: 13,
+              }}
+              onClick={() => setShowUserList(!showUserList)}
+            >
+              <span>
+                {showUserList ? "收起用户列表" : "展开选择具体用户"}
+              </span>
+              <span style={{ fontSize: 10 }}>
+                {showUserList ? "▲" : "▼"}
+              </span>
+            </div>
+
+            {/* 用户表格 - 展开时显示 */}
+            {showUserList && (
+              <>
+                {/* 快捷操作 */}
+                <div style={{ marginBottom: 8, display: "flex", gap: 8 }}>
+                  <Button
+                    size="small"
+                    onClick={() =>
+                      setSelectedUserIds(distributions.map((d) => d.target_user_id))
+                    }
+                  >
+                    全选
+                  </Button>
+                  <Button
+                    size="small"
+                    onClick={() => setSelectedUserIds([])}
+                  >
+                    取消全选
+                  </Button>
+                  <span style={{ color: "#8c8c8c", fontSize: 12, marginLeft: 8 }}>
+                    已选 {selectedUserIds.length} 位
+                  </span>
+                </div>
+
+                <Table
+                  dataSource={distributions}
+                  columns={[
+                    {
+                      title: "用户名称",
+                      dataIndex: "target_user_name",
+                      key: "target_user_name",
+                      render: (name: string, record: DistributionRecord) =>
+                        name || record.target_user_id,
+                    },
+                    {
+                      title: "分发时间",
+                      dataIndex: "distributed_at",
+                      key: "distributed_at",
+                      width: 100,
+                      render: (time: string | null) =>
+                        time ? new Date(time).toLocaleDateString("zh-CN") : "-",
+                    },
+                  ]}
+                  rowSelection={{
+                    type: "checkbox",
+                    selectedRowKeys: selectedUserIds,
+                    onChange: (keys) => setSelectedUserIds(keys as string[]),
+                  }}
+                  rowKey="target_user_id"
+                  pagination={{ pageSize: 10, size: "small" }}
+                  size="small"
+                  scroll={{ y: 200 }}
+                />
+              </>
+            )}
           </div>
         )}
       </Modal>

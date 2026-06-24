@@ -227,6 +227,7 @@ def _create_market_item(
     user_id: str,
     user_name: str,
     category_id: Optional[int],
+    skill_id: str = "",
 ) -> MarketItem:
     """创建市场条目."""
     now = datetime.now(timezone.utc).isoformat()
@@ -234,6 +235,7 @@ def _create_market_item(
         item_id=str(uuid.uuid4()),
         item_type="skill",
         name=name,
+        skill_id=skill_id,
         chinese_name=chinese_name,
         description=description,
         version=version or "1.0.0",
@@ -245,6 +247,133 @@ def _create_market_item(
         created_at=now,
         updated_at=now,
     )
+
+
+def _resolve_skill_cn_name_and_id(
+    skill_md: str,
+    name: str,
+    cn_name: str,
+    user_id: str,
+) -> tuple[str, str]:
+    """解析技能的 cn_name 和 skill_id.
+
+    Args:
+        skill_md: SKILL.md 内容
+        name: 技能名称
+        cn_name: 用户输入的中文展示名
+        user_id: 用户 ID
+
+    Returns:
+        (resolved_cn_name, resolved_skill_id)
+    """
+    from ...utils.skill_md import (
+        extract_cn_name_from_title,
+        extract_skill_id,
+        parse_frontmatter,
+    )
+
+    # 解析 chinese_name：优先用户输入，其次 metadata.cn_name，再次一级标题
+    resolved_cn_name = cn_name.strip() if cn_name else ""
+    if not resolved_cn_name:
+        fm = parse_frontmatter(skill_md) if skill_md else {}
+        metadata = fm.get("metadata", {})
+        if isinstance(metadata, dict):
+            resolved_cn_name = metadata.get("cn_name", "") or ""
+    if not resolved_cn_name and skill_md:
+        resolved_cn_name = extract_cn_name_from_title(skill_md)
+    if not resolved_cn_name:
+        resolved_cn_name = name  # fallback 到技能名
+
+    # 提取 skill_id（从 SKILL.md metadata.skill_id）
+    resolved_skill_id = ""
+    if skill_md:
+        resolved_skill_id = extract_skill_id(
+            skill_md,
+            source="",  # 市场上传时 item_id 未生成，使用空 source
+            skill_name=name,
+            creator_id=user_id,
+        )
+
+    return resolved_cn_name, resolved_skill_id
+
+
+def _update_existing_market_item(
+    existing: MarketItem,
+    description: str,
+    cn_name: str,
+    skill_id: str,
+    user_id: str,
+    user_name: str,
+    category_id: Optional[int],
+) -> bool:
+    """更新已有的市场条目.
+
+    Returns:
+        cn_name 是否发生变化
+    """
+    from ...marketplace.service import _bump_patch
+
+    now = datetime.now(timezone.utc).isoformat()
+    cn_name_changed = existing.chinese_name != cn_name
+    existing.created_at = now
+    existing.status = "active"
+    existing.chinese_name = cn_name
+    existing.description = description
+    existing.version = _bump_patch(existing.version)
+    existing.creator_id = user_id
+    existing.creator_name = user_name
+    existing.category_id = category_id
+    existing.updated_at = now
+    # 同名技能覆盖时，复用已有 skill_id（若已有）
+    if existing.skill_id:
+        skill_id = existing.skill_id
+    elif not existing.skill_id and skill_id:
+        existing.skill_id = skill_id
+    return cn_name_changed
+
+
+def _create_market_version_snapshot(
+    svc,
+    source_id: str,
+    item: MarketItem,
+    market_skill_dir: Path,
+    user_id: str,
+    user_name: str,
+    cn_name_changed: bool,
+) -> bool:
+    """创建市场版本快照.
+
+    Args:
+        cn_name_changed: cn_name 是否发生变化
+
+    Returns:
+        version_unchanged 标志
+    """
+    version_svc = SkillVersionService(svc.marketplace_root)
+    version_unchanged = False
+    try:
+        snapshot = version_svc.create_version_snapshot(
+            source_id=source_id,
+            item_id=item.item_id,
+            skill_dir=market_skill_dir,
+            description="",  # 去掉重复的版本号信息
+            creator=user_id,
+            creator_name=user_name,
+            current_market_version=item.version,
+            source_user_id="",
+            source_user_name="",
+            source_user_version="v0.0.0",
+        )
+        # F2：让 MarketItem.version 严格跟随快照的 version_id
+        # F3：cn_name 变化时不应返回 version_unchanged，即使文件内容未变
+        if snapshot.version_id and snapshot.version_id != item.version:
+            version_unchanged = not cn_name_changed
+            item.version = snapshot.version_id
+        elif cn_name_changed:
+            version_unchanged = False
+    except Exception as e:
+        logger.warning("Failed to create version snapshot: %s", e)
+    return version_unchanged
 
 
 def _process_skill_upload_single(
@@ -267,25 +396,18 @@ def _process_skill_upload_single(
     Returns:
         (imported_name, conflict_info, parsed_name_for_first, resolved_cn_name, version_unchanged)
     """
-    from ...marketplace.service import _bump_patch
-    from ...utils.skill_md import extract_cn_name_from_title, parse_frontmatter
-
     skill_json, skill_md, name, description, version = _parse_skill_metadata(
         skill_dir,
         skill_name,
     )
 
-    # 解析 chinese_name：优先用户输入，其次 metadata.cn_name，再次一级标题
-    resolved_cn_name = cn_name.strip() if cn_name else ""
-    if not resolved_cn_name:
-        fm = parse_frontmatter(skill_md) if skill_md else {}
-        metadata = fm.get("metadata", {})
-        if isinstance(metadata, dict):
-            resolved_cn_name = metadata.get("cn_name", "") or ""
-    if not resolved_cn_name and skill_md:
-        resolved_cn_name = extract_cn_name_from_title(skill_md)
-    if not resolved_cn_name:
-        resolved_cn_name = name  # fallback 到技能名
+    # 解析 cn_name 和 skill_id
+    resolved_cn_name, resolved_skill_id = _resolve_skill_cn_name_and_id(
+        skill_md,
+        name,
+        cn_name,
+        user_id,
+    )
 
     # 检查市场是否已存在同名技能
     items = load_index(svc.marketplace_root, source_id)
@@ -303,27 +425,22 @@ def _process_skill_upload_single(
         return None, conflict_info, name, resolved_cn_name, False
 
     version_unchanged = False
-    cn_name_changed = False  # 记录中文名是否变化
+    cn_name_changed = False
 
     if existing:
-        # R4: 同名（已确认覆盖） → 续接到现有条目（无论 creator 是否相同）
-        # F1 修复：市场版本号独立于 SKILL.md，始终走 _bump_patch（spec R3）。
-        # SKILL.md 中的 version 仅作为 source_user_version 写入快照元数据。
-        now = datetime.now(timezone.utc).isoformat()
-        # 检查中文名是否变化（existing 存在时才需要检查）
-        cn_name_changed = existing.chinese_name != resolved_cn_name
-        existing.created_at = now
-        existing.status = "active"
-        existing.chinese_name = resolved_cn_name
-        existing.description = description
-        existing.version = _bump_patch(existing.version)
-        existing.creator_id = user_id
-        existing.creator_name = user_name
-        existing.category_id = category_id
-        existing.updated_at = now
+        # R4: 同名（已确认覆盖） → 续接到现有条目
+        cn_name_changed = _update_existing_market_item(
+            existing,
+            description,
+            resolved_cn_name,
+            resolved_skill_id,
+            user_id,
+            user_name,
+            category_id,
+        )
         item = existing
     else:
-        # 创建新市场条目，市场首发版本固定为 1.0.0（不再继承 SKILL.md version）
+        # 创建新市场条目，市场首发版本固定为 1.0.0
         item = _create_market_item(
             name,
             resolved_cn_name,
@@ -332,6 +449,7 @@ def _process_skill_upload_single(
             user_id,
             user_name,
             category_id,
+            skill_id=resolved_skill_id,
         )
         items.append(item)
 
@@ -344,33 +462,15 @@ def _process_skill_upload_single(
     _copy_skill_to_market(skill_dir, market_skill_dir, skill_json, skill_md)
 
     # 创建版本快照
-    # admin zip 路径：source_user_id="" 表示无来源；source_user_version="v0.0.0"（spec R6）
-    version_svc = SkillVersionService(svc.marketplace_root)
-    try:
-        snapshot = version_svc.create_version_snapshot(
-            source_id=source_id,
-            item_id=item.item_id,
-            skill_dir=market_skill_dir,
-            description="",  # 去掉重复的版本号信息
-            creator=user_id,
-            creator_name=user_name,
-            current_market_version=item.version,
-            source_user_id="",
-            source_user_name="",
-            source_user_version="v0.0.0",
-        )
-        # F2：让 MarketItem.version 严格跟随快照的 version_id（处理 R7 复用历史 id 场景）
-        # F3：cn_name 变化时不应返回 version_unchanged，即使文件内容未变
-        if snapshot.version_id and snapshot.version_id != item.version:
-            # 版本被回滚 = R7 no-op（内容未变）
-            # 但如果 cn_name 变化了，仍然算作有变更
-            version_unchanged = not cn_name_changed
-            item.version = snapshot.version_id
-        elif cn_name_changed:
-            # 即使版本号相同，cn_name 变化也算有变更
-            version_unchanged = False
-    except Exception as e:
-        logger.warning("Failed to create version snapshot: %s", e)
+    version_unchanged = _create_market_version_snapshot(
+        svc,
+        source_id,
+        item,
+        market_skill_dir,
+        user_id,
+        user_name,
+        cn_name_changed,
+    )
 
     save_index(svc.marketplace_root, source_id, items)
 
