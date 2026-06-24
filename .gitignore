@@ -32,6 +32,7 @@ website/public/search-index.json
 # misc
 .env
 .env.*
+.venv*
 providers.json
 envs.json
 !.env.example

@@ -131,7 +131,11 @@ export default function MainLayout() {
         {/* 条件渲染 Sidebar：根据 origin 参数或 hideMenu 决定是否显示 */}
         {!shouldHideSidebar && <Sidebar selectedKey={selectedKey} />}
         {/* ==================== iframe 集成结束 ==================== */}
-        <Content className="page-container">
+        <Content
+          className={`page-container${
+            shouldHideSidebar ? "" : " page-container--with-sidebar"
+          }`}
+        >
           <ConsoleCronBubble />
           <div className="page-content">
             <Routes>
