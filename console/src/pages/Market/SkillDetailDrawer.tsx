@@ -908,7 +908,9 @@ export function SkillDetailDrawer(
                     }}
                   >
                     {group.records.map((dist) => {
-                      const displayName = dist.target_user_name || dist.target_user_id;
+                      const displayName = dist.target_user_name
+                        ? `${dist.target_user_name} (${dist.target_user_id})`
+                        : dist.target_user_id;
                       const selected = selectedUserIds.includes(dist.target_user_id);
                       return (
                         <div
