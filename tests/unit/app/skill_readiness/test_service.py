@@ -62,14 +62,14 @@ class _Store:
     async def get_running_run(self, source_id, skill_id):
         return self.running
 
-    async def create_run(self, source_id, skill_id, config, owner_lookup_summary=None):
+    async def create_run(self, source_id, skill_id, config):
         run = SkillReadinessRunProgress(
             run_id="run-created",
             source_id=source_id,
             skill_id=skill_id,
             status="running",
         )
-        self.created.append((run, owner_lookup_summary))
+        self.created.append(run)
         return run
 
     async def get_or_create_running_run(
@@ -77,10 +77,9 @@ class _Store:
         source_id,
         skill_id,
         config,
-        owner_lookup_summary=None,
     ):
         self.get_or_create_calls.append(
-            (source_id, skill_id, config, owner_lookup_summary),
+            (source_id, skill_id, config),
         )
         if self.running is not None:
             return self.running, True
@@ -88,7 +87,6 @@ class _Store:
             source_id,
             skill_id,
             config,
-            owner_lookup_summary=owner_lookup_summary,
         ), False
 
     async def update_run_progress(self, run_id, **kwargs):
@@ -263,7 +261,6 @@ async def test_start_run_uses_atomic_get_or_create_after_owner_lookup():
 
     assert len(store.get_or_create_calls) == 1
     assert store.get_or_create_calls[0][0:2] == ("source-a", "skill-a")
-    assert store.get_or_create_calls[0][3] == {"status": "pending"}
 
 
 @pytest.mark.asyncio

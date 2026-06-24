@@ -101,7 +101,6 @@ class SkillReadinessService:
             source_id,
             skill_id,
             config,
-            owner_lookup_summary={"status": "pending"},
         )
         if reused:
             return SkillReadinessStartRunResponse(run=run, reused=True)

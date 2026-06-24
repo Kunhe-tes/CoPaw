@@ -293,7 +293,6 @@ async def test_create_run_persists_snapshot_and_returns_created_row(
         SkillReadinessConfig.model_validate(
             {"checks": [{"name": "cron_auth_valid"}]},
         ),
-        owner_lookup_summary={"owners": 2},
     )
 
     query, params = mock_db.execute.await_args.args
@@ -302,7 +301,7 @@ async def test_create_run_persists_snapshot_and_returns_created_row(
     assert json.loads(params[7]) == {
         "checks": [{"name": "cron_auth_valid", "enabled": True, "params": {}}],
     }
-    assert json.loads(params[8]) == {"owners": 2}
+    assert params[8] is None
     assert result.run_id == "generated"
 
 

@@ -234,7 +234,6 @@ class SkillReadinessStore:
         source_id: str,
         skill_id: str,
         config_snapshot: SkillReadinessConfig,
-        owner_lookup_summary: dict[str, Any] | None = None,
     ) -> SkillReadinessRunProgress:
         """创建新的 running 运行记录。"""
         db = self._require_db()
@@ -246,9 +245,9 @@ class SkillReadinessStore:
                 INSERT INTO {_RUN_TABLE} (
                     run_id, source_id, skill_id, status, total_users,
                     completed_users, failed_users, config_snapshot,
-                    owner_lookup_summary, failure_summary, started_at
+                    failure_summary, started_at
                 )
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, CURRENT_TIMESTAMP)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, CURRENT_TIMESTAMP)
             """,
             (
                 run_id,
@@ -259,7 +258,6 @@ class SkillReadinessStore:
                 0,
                 0,
                 _dump_json(config_snapshot.model_dump(mode="json")),
-                _dump_json(owner_lookup_summary or {}),
                 None,
             ),
         )
@@ -298,7 +296,6 @@ class SkillReadinessStore:
         source_id: str,
         skill_id: str,
         config_snapshot: SkillReadinessConfig,
-        owner_lookup_summary: dict[str, Any] | None = None,
     ) -> tuple[SkillReadinessRunProgress, bool]:
         """复用正在运行的 run，不存在时创建新 run。"""
         db = self._require_db()
@@ -328,7 +325,6 @@ class SkillReadinessStore:
                         source_id,
                         skill_id,
                         config_snapshot,
-                        owner_lookup_summary=owner_lookup_summary,
                     )
                     return run, False
                 finally:
@@ -975,7 +971,6 @@ _CREATE_TABLE_QUERIES = (
             completed_users INT NOT NULL DEFAULT 0,
             failed_users INT NOT NULL DEFAULT 0,
             config_snapshot TEXT NOT NULL,
-            owner_lookup_summary TEXT NULL,
             failure_summary TEXT NULL,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             started_at TIMESTAMP NULL DEFAULT NULL,
