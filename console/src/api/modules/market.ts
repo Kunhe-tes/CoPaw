@@ -10,6 +10,7 @@ import type { DistributionRecord, RecallResultItem, RecallResponse } from "../ty
 
 export interface MarketSkill {
   item_id: string;
+  skill_id?: string | null;
   name: string;
   skill_name?: string;
   chinese_name?: string;
@@ -90,6 +91,7 @@ async function _uploadZipToMarket(
     target_name?: string;
     rename_map?: Record<string, string>;
     category_id?: number;
+    cn_name?: string;
   }
 ): Promise<Record<string, unknown>> {
   const formData = new FormData();
@@ -110,6 +112,9 @@ async function _uploadZipToMarket(
   }
   if (options?.category_id !== undefined) {
     params.set("category_id", String(options.category_id));
+  }
+  if (options?.cn_name) {
+    params.set("cn_name", options.cn_name);
   }
   const qs = params.toString();
   const url = getApiUrl(`${endpoint}${qs ? `?${qs}` : ""}`);
@@ -263,6 +268,48 @@ export const marketApi = {
     );
   },
 
+  parseSkillZip: async (
+    sourceId: string,
+    file: File,
+    marketMode?: boolean
+  ): Promise<{
+    skill_name?: string;
+    cn_name?: string;
+    skill_id?: string;
+    description?: string;
+    exists?: boolean;
+    error?: string;
+    skill_id_conflict?: string;
+    skill_id_used_count?: number;
+    skill_id_used_by?: string[];
+  }> => {
+    const formData = new FormData();
+    formData.append("file", file);
+
+    let url = getApiUrl("/market/skills/parse-zip");
+    if (marketMode) {
+      url += "?market_mode=true";
+    }
+    const headers = Object.fromEntries(
+      (mergeHeaders({
+        "X-Source-Id": sourceId,
+      }).headers as Headers).entries(),
+    );
+
+    const response = await fetch(url, {
+      method: "POST",
+      headers: new Headers(headers),
+      body: formData,
+    });
+
+    if (!response.ok) {
+      const text = await response.text();
+      return { error: text };
+    }
+
+    return await response.json();
+  },
+
   uploadSkillToWorkspace: async (
     sourceId: string,
     file: File,
@@ -272,6 +319,7 @@ export const marketApi = {
       target_name?: string;
       rename_map?: Record<string, string>;
       category_id?: number;
+      cn_name?: string;
     }
   ): Promise<{
     imported: string[];
@@ -279,6 +327,8 @@ export const marketApi = {
     enabled: boolean;
     name?: string;
     description?: string;
+    skill_id?: string;
+    cn_name?: string;
     conflicts?: Array<{
       reason: string;
       skill_name: string;
@@ -297,6 +347,8 @@ export const marketApi = {
       enabled: boolean;
       name?: string;
       description?: string;
+      skill_id?: string;
+      cn_name?: string;
       conflicts?: Array<{
         reason: string;
         skill_name: string;
@@ -311,6 +363,7 @@ export const marketApi = {
     options?: {
       category_id?: number;
       overwrite?: boolean;
+      cn_name?: string;
     }
   ): Promise<{
     imported: string[];

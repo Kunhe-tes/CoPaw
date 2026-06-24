@@ -1,6 +1,6 @@
 import { memo } from "react";
-import { Typography, Button, Spin, Tag, Popconfirm, Tooltip } from "antd";
-import { StarOutlined, RocketOutlined } from "@ant-design/icons";
+import { Typography, Button, Spin, Tag, Popconfirm, Tooltip, Input } from "antd";
+import { StarOutlined, RocketOutlined, UserOutlined, ClockCircleOutlined, CalendarOutlined, TagOutlined } from "@ant-design/icons";
 import { Power, Trash2, Pencil, PencilLine } from "lucide-react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
@@ -54,6 +54,7 @@ interface SkillDetailPanelProps {
   fileType: string | null;
   isEditing: boolean;
   draftContent: string;
+  draftCnName: string;  // 编辑中的中文名
   isSaving: boolean;
   togglingSkill: string | null;
   isManager: boolean;
@@ -61,6 +62,7 @@ interface SkillDetailPanelProps {
   onEditCancel: () => void;
   onSave: () => void;
   onDraftChange: (content: string) => void;
+  onCnNameChange: (cnName: string) => void;  // 中文名修改
   onToggleEnabled: (skill: MySkill) => void;
   onDelete: (skill: MySkill) => void;
   onSyncToMarket: (skill: MySkill) => void;
@@ -73,6 +75,7 @@ const SkillDetailPanel = memo(function SkillDetailPanel({
   fileType,
   isEditing,
   draftContent,
+  draftCnName,
   isSaving,
   togglingSkill,
   isManager,
@@ -80,6 +83,7 @@ const SkillDetailPanel = memo(function SkillDetailPanel({
   onEditCancel,
   onSave,
   onDraftChange,
+  onCnNameChange,
   onToggleEnabled,
   onDelete,
   onSyncToMarket,
@@ -116,52 +120,119 @@ const SkillDetailPanel = memo(function SkillDetailPanel({
         }}
       >
         <div style={{ flex: 1, minWidth: 0 }}>
-          <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap", marginBottom: 8 }}>
-            <Text strong style={{ fontSize: 16, color: "#262626" }}>
-              {skill.display_name || skill.skill_name}
-            </Text>
-            {skill.source === "customized" && (
-              <Tag color="green" style={{ fontSize: 11, borderRadius: 4 }}>自定义</Tag>
-            )}
-            {skill.is_received && (
-              <Tag color="orange" style={{ fontSize: 11, borderRadius: 4 }}>接收的</Tag>
-            )}
-            {isDisabled && (
-              <Tag color="red" style={{ fontSize: 11, borderRadius: 4 }}>已禁用</Tag>
-            )}
-          </div>
-          <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
-            {skill.category && (
-              <Tag style={{ fontSize: 11, borderRadius: 4, backgroundColor: "#f5f5f5", border: "1px solid #d9d9d9" }}>
-                {skill.category}
-              </Tag>
-            )}
-            {skill.creator_name && (
-              <Text type="secondary" style={{ fontSize: 12 }}>
-                创建者: {skill.creator_name}
-              </Text>
-            )}
-            {skill.created_at && (
-              <Text type="secondary" style={{ fontSize: 12 }}>
-                创建: {dayjs(skill.created_at).format("YYYY-MM-DD")}
-              </Text>
-            )}
-            {skill.updated_at && (
-              <Tooltip title={dayjs(skill.updated_at).format("YYYY-MM-DD HH:mm:ss")}>
-                <Text type="secondary" style={{ fontSize: 12 }}>
-                  更新: {dayjs(skill.updated_at).fromNow()}
+          {/* 第一行：中文名 + 技能名 + 状态标签 */}
+          <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 4 }}>
+            {/* 中文名：编辑模式为输入框，非编辑模式为主标题 */}
+            {isEditing ? (
+              <Input
+                placeholder="输入中文名称"
+                value={draftCnName}
+                onChange={(e) => onCnNameChange(e.target.value)}
+                style={{ width: 240, fontSize: 14 }}
+                maxLength={50}
+                showCount
+              />
+            ) : (
+              <Tooltip title={skill.cn_name || skill.display_name || skill.skill_name}>
+                <Text
+                  strong
+                  style={{
+                    fontSize: 16,
+                    color: "#262626",
+                    maxWidth: 400,
+                    overflow: "hidden",
+                    textOverflow: "ellipsis",
+                    whiteSpace: "nowrap",
+                  }}
+                >
+                  {skill.cn_name || skill.display_name || skill.skill_name}
                 </Text>
               </Tooltip>
             )}
-            {skill.version && (
-              <Text type="secondary" style={{ fontSize: 12 }}>
-                {skill.is_received ? "接收版本" : "我的版本"}: v
-                {skill.is_received
-                  ? skill.received_version || skill.version
-                  : skill.version}
-              </Text>
+            {/* 技能名：副标题，灰色小字（非编辑模式且与中文名不同时显示） */}
+            {!isEditing && skill.skill_name && (skill.cn_name || skill.display_name) && skill.skill_name !== (skill.cn_name || skill.display_name) && (
+              <Tooltip title={`技能名: ${skill.skill_name}`}>
+                <Text
+                  style={{
+                    fontSize: 11,
+                    color: "#8c8c8c",
+                    maxWidth: 120,
+                    overflow: "hidden",
+                    textOverflow: "ellipsis",
+                    whiteSpace: "nowrap",
+                  }}
+                >
+                  {skill.skill_name}
+                </Text>
+              </Tooltip>
             )}
+            {/* 状态标签：最多显示1个关键状态 */}
+            {isDisabled ? (
+              <Tag color="red" style={{ fontSize: 11, borderRadius: 4, margin: 0 }}>已禁用</Tag>
+            ) : skill.is_received ? (
+              <Tag color="orange" style={{ fontSize: 11, borderRadius: 4, margin: 0 }}>接收的</Tag>
+            ) : null}
           </div>
+
+          {/* 第二行：次要信息（图标化，一行） */}
+          {!isEditing && (
+            <div style={{ display: "flex", alignItems: "center", gap: 6, color: "#8c8c8c", fontSize: 12 }}>
+              {skill.creator_name && (
+                <span style={{ display: "inline-flex", alignItems: "center", gap: 4 }}>
+                  <UserOutlined style={{ fontSize: 12 }} />
+                  <span style={{ maxWidth: 80, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                    {skill.creator_name}
+                  </span>
+                </span>
+              )}
+              {skill.creator_name && skill.created_at && (
+                <span style={{ color: "#d9d9d9" }}>·</span>
+              )}
+              {skill.created_at && (
+                <span style={{ display: "inline-flex", alignItems: "center", gap: 4 }}>
+                  <CalendarOutlined style={{ fontSize: 12 }} />
+                  <span>{dayjs(skill.created_at).format("YYYY-MM-DD")}</span>
+                </span>
+              )}
+              {skill.created_at && skill.updated_at && (
+                <span style={{ color: "#d9d9d9" }}>·</span>
+              )}
+              {skill.updated_at && (
+                <Tooltip title={dayjs(skill.updated_at).format("YYYY-MM-DD HH:mm:ss")}>
+                  <span style={{ display: "inline-flex", alignItems: "center", gap: 4 }}>
+                    <ClockCircleOutlined style={{ fontSize: 12 }} />
+                    <span>更新于 {dayjs(skill.updated_at).fromNow()}</span>
+                  </span>
+                </Tooltip>
+              )}
+              {(skill.creator_name || skill.created_at || skill.updated_at) && skill.version && (
+                <span style={{ color: "#d9d9d9" }}>·</span>
+              )}
+              {skill.version && (
+                <span style={{ display: "inline-flex", alignItems: "center", gap: 4 }}>
+                  <TagOutlined style={{ fontSize: 12 }} />
+                  <span>v{skill.is_received ? skill.received_version || skill.version : skill.version}</span>
+                </span>
+              )}
+              {skill.version && skill.category && (
+                <span style={{ color: "#d9d9d9" }}>·</span>
+              )}
+              {skill.category && (
+                <Tag
+                  style={{
+                    fontSize: 11,
+                    borderRadius: 4,
+                    margin: 0,
+                    backgroundColor: "#fafafa",
+                    border: "1px solid #e8e8e8",
+                    color: "#8c8c8c",
+                  }}
+                >
+                  {skill.category}
+                </Tag>
+              )}
+            </div>
+          )}
         </div>
         <div style={{ display: "flex", gap: 8, flexShrink: 0 }}>
           <Popconfirm

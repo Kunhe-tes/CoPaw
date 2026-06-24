@@ -22,7 +22,7 @@ Hook Runtime 用于在 Agent 的关键运行节点挂接自定义策略。你可
 
 - `PreToolUse` 是最常用的事件：可以拒绝工具、要求审批、改写工具输入。
 - `BeforeStop` 是“完成门禁”：候选回复已经生成后才触发；返回 `block` 会让 Agent 在同一次请求里继续做事，而不是立刻结束。
-- `PostToolUse` 和 `PostToolUseFailure` 不能撤销已经发生的工具调用，它们更适合补充审计或诊断信息。
+- `PostToolUse` 和 `PostToolUseFailure` 不能撤销已经发生的工具调用，它们更适合补充审计或诊断信息；普通工具执行路径会触发它们，但既有 Tool Guard 的预批准执行分支当前会绕过后置 hook。
 - Skill 自带 hook 只有在该 Skill 在当前会话里被激活后才会生效。
 - 多个 handler 会并发执行，不要依赖“前一个 handler 的输出给后一个 handler 使用”。
 
@@ -65,6 +65,10 @@ Hook Runtime 用于在 Agent 的关键运行节点挂接自定义策略。你可
 | `PostToolUseFailure` | 工具调用抛出失败后 | 工具失败仍然会失败；hook 只能补充诊断信息 | 记录错误、提示排查方向 |
 | `BeforeStop` | 候选回复已经流出后、正式结束前 | 用户通常已经看到了候选回复；若返回 `block`，系统会继续同一任务 | 完成门禁、测试门禁、发布前检查 |
 | `Stop` | 系统允许结束后、当前轮真正结束前 | 如果被阻断，用户会再看到一条阻断说明，本轮结束 | 最终审计、写入收尾上下文 |
+
+实际请求路径里还有一个顺序细节：如果当前请求带有文本用户输入，`UserPromptSubmit` 会在 preflight 阶段先执行；之后系统装配 Agent 主流程时才执行 `SessionStart`。所以上表按生命周期概念排序，不表示所有请求里严格按表格顺序触发。
+
+工具后置事件也有一个例外：普通工具成功或失败后会分别触发 `PostToolUse` / `PostToolUseFailure`；但如果工具走的是既有 Tool Guard 的预批准执行分支，当前实现会直接执行并返回，不进入这两个后置 hook。
 
 ### 关于 `BeforeStop` 和 `Stop`
 
@@ -226,7 +230,7 @@ Skill 级 `hooks/hooks.json` 示例：
 | `if` | 否 | 条件表达式；结果为假时跳过该 handler。 |
 | `timeout` | 否 | 单个 handler 超时时间，单位秒，默认 `10`。 |
 | `statusMessage` | 否 | 阻断或审批时显示给用户的提示文案。 |
-| `once` | 否 | `true` 表示同一会话内、同一事件上只执行一次。 |
+| `once` | 否 | `true` 表示同一实际生效租户、同一用户、同一会话、同一事件、同一 handler ID 只执行一次。 |
 | `includeConversationSnapshot` | 否 | `true` 时，仅该 handler 会额外收到 `conversation_snapshot` 和 `conversation_snapshot_meta`。默认 `false`。 |
 | `conversationSnapshotLimit` | 否 | 快照最多携带多少条最近消息。默认 `50`，最大 `200`；仅在 `includeConversationSnapshot: true` 时生效。 |
 | `failPolicy` | 否 | handler 自身执行失败时的处理策略，支持 `allow` 或 `block`。`command` / `http` 默认 `allow`，`prompt` 默认 `block`。 |
@@ -235,6 +239,8 @@ Skill 级 `hooks/hooks.json` 示例：
 
 `once: true` 不是“同一条命令只执行一次”，而是：
 
+- 同一个实际生效租户
+- 同一个用户
 - 同一个会话
 - 同一个事件
 - 同一个 handler ID
@@ -246,7 +252,7 @@ Skill 级 `hooks/hooks.json` 示例：
 这是新增的 handler 级开关，不是全局开关。
 
 - 只有显式写了 `includeConversationSnapshot: true` 的 handler，才会收到快照字段。
-- 快照来自当前 Agent 的内存消息，不是去读 `transcript_path` 回放持久化记录。
+- 快照优先来自当前 Agent 的内存消息；runner 早期事件还没有可用 Agent 时，会尝试读取 session state 中保存的 memory。它不是去读 `transcript_path` 回放完整持久化记录。
 - `conversationSnapshotLimit` 是“每个 handler 自己的截断上限”，所以不同 handler 可以拿到不同长度的快照。
 - 当前事件本身仍然通过 `prompt`、`tool_input`、`tool_response`、`assistant_response`、`error` 等字段单独传入；快照不会重复制造一份“当前事件副本”。
 
@@ -329,6 +335,18 @@ Skill 级 `hooks/hooks.json` 示例：
   "failPolicy": "block"
 }
 ```
+
+可用字段：
+
+| 字段 | 必填 | 说明 |
+| --- | --- | --- |
+| `argv` | 二选一 | 参数数组形式。推荐写法，尤其适合调用脚本。 |
+| `command` | 二选一 | shell 命令字符串。普通租户级 / Agent 级 hook 可用；Skill 级 hook 禁用。 |
+| `shell` | 否 | 使用 `command` 字符串时可指定 shell，支持 `sh`、`bash`、`zsh`、`cmd`、`powershell`。 |
+| `cwd` | 否 | handler 执行目录。普通 hook 必须在当前 workspace 内；Skill hook 必须在 Skill 目录和 workspace 内。 |
+| `env` | 否 | 追加给子进程的字面量环境变量。Skill 级 hook 禁用。 |
+
+模型层里还会拒绝 `async` 和 `asyncRewake`，当前 command hook 不支持异步后台执行。
 
 #### 建议做法
 
@@ -503,7 +521,7 @@ handler 收到的是一个 JSON 对象。为了避免把“模型层支持”和
 | `permission_mode` | 否 | 当前模型层支持，但当前 hook 构造逻辑未注入 |
 | `effort` | 否 | 当前模型层支持，但当前 hook 构造逻辑未注入 |
 | `agent_type` | 否 | 当前模型层支持，但当前 hook 构造逻辑未注入 |
-| `source_id` | 部分 | runner 侧事件会传；tool 侧事件当前不传 |
+| `source_id` | 部分 | runner 侧事件会传；正常请求路径下 tool 侧事件也会从请求上下文传入；缺失 request context 时可能为空 |
 | `workspace_dir` | 是 | 全部事件都会传，通常与 `cwd` 相同 |
 | `chat_id` | 部分 | 请求上下文里有 chat 时会传 |
 | `turn_id` | 部分 | 请求上下文里有 turn 时会传 |
@@ -516,7 +534,7 @@ handler 收到的是一个 JSON 对象。为了避免把“模型层支持”和
 | `tool_response` | 部分 | 主要见于 `PostToolUse`，值为当前工具调用最终 `tool_result.output`；无法提取时省略 |
 | `assistant_response` | 部分 | 主要见于 `BeforeStop` 和 `Stop` |
 | `error` | 部分 | 主要见于 `PostToolUseFailure` |
-| `conversation_snapshot` | 部分 | 仅对声明了 `includeConversationSnapshot: true` 的 handler 注入；值是当前内存里最近若干条规范化消息 |
+| `conversation_snapshot` | 部分 | 仅对声明了 `includeConversationSnapshot: true` 的 handler 注入；值是当前 Agent 内存或 session state memory 里的最近若干条规范化消息 |
 | `conversation_snapshot_meta` | 部分 | 与 `conversation_snapshot` 配套；包含 `included_messages`、`omitted_messages`、`limit` 以及可选的 `reasoning_omitted` / `media_content_omitted` / `unavailable` 信息 |
 
 这张表的关键结论是：
@@ -930,6 +948,8 @@ Skill 自带 `http` handler：
 
 当前实现里，Skill 自带 HTTP hook 默认允许加载；旧版文档里提到的“先配置 URL 白名单再允许 Skill HTTP hook”已经不是当前默认行为。
 
+当前配置模型和 runner 里仍保留 `security.skill_hook_http.approved_urls` 读取逻辑，但默认加载路径不会把这个列表当作强制 allowlist 使用；只有内部调用者显式传入 callable 校验器时，loader 才会按校验器拒绝未批准 URL。
+
 这也是当前实现里最需要谨慎处理的边界：
 
 - HTTP handler 收到的是完整 HookContext 请求体，当前不会像 `prompt` handler 一样先做敏感字段脱敏。
@@ -1309,6 +1329,8 @@ Skill 自带 `http` handler：
 - 追加结果摘要
 - 告诉后续推理“这一步虽然执行了，但有风险”
 
+注意：普通工具成功路径会触发 `PostToolUse`；既有 Tool Guard 的预批准执行分支当前会绕过这个后置 hook，所以不要把它当作所有工具成功路径的强制审计点。
+
 ### `PostToolUseFailure` 返回了 `block`，为什么原错误还在
 
 因为这个事件的职责是“补充失败诊断”，不是“吞掉原失败”。
@@ -1318,6 +1340,8 @@ Skill 自带 `http` handler：
 1. `PostToolUseFailure` 会运行
 2. hook 可以写入诊断信息
 3. 原始工具失败仍然会继续向上抛出
+
+注意：这描述的是普通工具失败路径；既有 Tool Guard 的预批准执行分支当前不在后置 hook 的 `try` / `except` 包裹内，失败时也不会触发 `PostToolUseFailure`。
 
 ### command hook 报路径越界
 

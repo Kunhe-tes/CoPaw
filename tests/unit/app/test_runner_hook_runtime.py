@@ -1467,6 +1467,52 @@ async def test_query_handler_before_stop_defers_completion_side_effects(
 
 
 @pytest.mark.asyncio
+async def test_stream_single_query_attempt_ends_trace_when_runtime_blocked(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    runner = AgentRunner(agent_id="test-agent", workspace_dir=tmp_path)
+    runner._prepare_query_runtime = AsyncMock(
+        return_value=_RuntimeStartResult(
+            block_response=Msg(
+                name="Friday",
+                role="assistant",
+                content="blocked",
+            ),
+        ),
+    )
+    runner._end_trace_if_needed = AsyncMock()
+
+    attempt_input = _QueryAttemptInput(
+        request=SimpleNamespace(),
+        msgs=[],
+        query="hello",
+        preflight=_QueryPreflight(),
+        trace_id="trace-blocked",
+    )
+    outcome = _QueryTurnOutcome()
+    retry_state = _RetryState()
+    attempt_state = _QueryAttemptState()
+
+    outputs = [
+        item
+        async for item in runner._stream_single_query_attempt(
+            attempt_input=attempt_input,
+            outcome=outcome,
+            retry_state=retry_state,
+            attempt_state=attempt_state,
+        )
+    ]
+
+    assert [item[0].get_text_content() for item in outputs] == ["blocked"]
+    assert attempt_state.should_return is True
+    runner._end_trace_if_needed.assert_awaited_once_with(
+        "trace-blocked",
+        "completed",
+    )
+
+
+@pytest.mark.asyncio
 async def test_query_handler_aggregate_budget_counts_before_stop_only(
     monkeypatch,
     tmp_path,

@@ -643,7 +643,10 @@ async def test_before_stop_prompt_handler_invalid_output_uses_fail_policy(
 
     monkeypatch.setattr(
         "swe.agents.hook_runtime.executor.create_model_and_formatter",
-        lambda agent_id=None: (fake_model, object()),
+        lambda agent_id=None, trace_context=None: (
+            fake_model,
+            object(),
+        ),
     )
 
     result = await execute_handler(
@@ -696,8 +699,9 @@ async def test_prompt_handler_binds_context_and_redacts_model_input(
         observed["messages"] = messages
         return '{"decision":"deny","reason":"secret request"}'
 
-    def fake_create_model_and_formatter(agent_id=None):
+    def fake_create_model_and_formatter(agent_id=None, trace_context=None):
         observed["agent_id"] = agent_id
+        observed["trace_context"] = trace_context
         from swe.config.context import (
             get_current_source_id,
             get_current_tenant_id,
@@ -735,6 +739,8 @@ async def test_prompt_handler_binds_context_and_redacts_model_input(
     assert observed["user_id"] == "user-1"
     assert observed["source_id"] == "web"
     assert observed["workspace_dir"] == Path(context.workspace_dir)
+    assert observed["trace_context"]["trace_id"] == context.trace_id
+    assert observed["trace_context"]["session_id"] == context.session_id
     prompt_text = observed["messages"][0]["content"]
     assert "Reject leaked secrets." in prompt_text
     assert "HookContext JSON" in prompt_text
@@ -776,7 +782,10 @@ async def test_prompt_handler_extracts_streaming_delta_and_cumulative_chunks(
 
     monkeypatch.setattr(
         "swe.agents.hook_runtime.executor.create_model_and_formatter",
-        lambda agent_id=None: (fake_model, object()),
+        lambda agent_id=None, trace_context=None: (
+            fake_model,
+            object(),
+        ),
     )
     handler = PromptHookHandlerConfig(id="policy", prompt="Allow safe work.")
 
@@ -820,7 +829,10 @@ async def test_prompt_handler_timeout_closes_stream(
 
     monkeypatch.setattr(
         "swe.agents.hook_runtime.executor.create_model_and_formatter",
-        lambda agent_id=None: (fake_model, object()),
+        lambda agent_id=None, trace_context=None: (
+            fake_model,
+            object(),
+        ),
     )
     handler = PromptHookHandlerConfig(
         id="policy",

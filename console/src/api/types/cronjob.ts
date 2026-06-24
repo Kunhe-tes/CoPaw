@@ -61,6 +61,7 @@ export interface CronJobSpecInput {
   schedule: CronJobSchedule;
   task_type?: "text" | "agent";
   text?: string;
+  skill_ids?: string;
   model_slot?: ModelSlotConfig | null;
   request?: CronJobRequest;
   dispatch: CronJobDispatch;
