@@ -9,7 +9,11 @@ from contextvars import ContextVar
 from typing import Optional, TYPE_CHECKING
 from fastapi import Request
 
-from ..config.utils import load_config, get_tenant_config_path
+from ..config.utils import (
+    load_config,
+    get_tenant_config_path,
+    get_tenant_storage_config_path,
+)
 from ..config.context import (
     canonicalize_scope_id,
     get_current_scope_id,
@@ -17,7 +21,9 @@ from ..config.context import (
     get_current_user_id,
     get_current_source_id,
     TenantContextError,
+    resolve_request_effective_tenant_id,
     resolve_runtime_tenant_id,
+    resolve_storage_tenant_id,
 )
 from .middleware.tenant_workspace import TenantWorkspaceContext
 
@@ -63,13 +69,12 @@ def _resolve_effective_tenant_id(
     source_id: Optional[str] = None,
     scope_id: Optional[str] = None,
 ) -> Optional[str]:
-    """Resolve the runtime tenant ID for scoped workspace/config access."""
-    resolved_scope_id = scope_id or get_current_scope_id()
-    if resolved_scope_id is not None:
-        return canonicalize_scope_id(resolved_scope_id)
-    if tenant_id is None:
-        return None
-    return resolve_runtime_tenant_id(tenant_id, source_id)
+    """Resolve request-effective tenant ID for scoped workspace/config access."""
+    return resolve_request_effective_tenant_id(
+        tenant_id,
+        source_id,
+        scope_id or get_current_scope_id(),
+    )
 
 
 def _resolve_user_id(request: Request) -> Optional[str]:
@@ -144,14 +149,14 @@ def _get_tenant_aware_config(
         source_id = get_current_source_id()
     if scope_id is None:
         scope_id = get_current_scope_id()
-    effective_tenant_id = _resolve_effective_tenant_id(
+    storage_tenant_id = resolve_storage_tenant_id(
         tenant_id,
         source_id,
         scope_id=scope_id,
     )
-    if effective_tenant_id is None:
+    if storage_tenant_id is None:
         return load_config()
-    return load_config(get_tenant_config_path(effective_tenant_id))
+    return load_config(get_tenant_storage_config_path(storage_tenant_id))
 
 
 async def get_agent_for_request(

@@ -12,6 +12,7 @@ class HtmlPreviewClickEventCreate(BaseModel):
 
     source_id: Optional[str] = Field(default=None, max_length=64)
     user_id: Optional[str] = Field(default=None, max_length=128)
+    user_name: Optional[str] = Field(default=None, max_length=255)
     bbk_id: Optional[str] = Field(default=None, max_length=128)
     cron_task_id: Optional[str] = Field(default=None, max_length=128)
     cron_task_name: Optional[str] = Field(default=None, max_length=255)
@@ -69,6 +70,8 @@ class HtmlPreviewCustomerClickSummaryItem(BaseModel):
     phone_count: int = 0
     plan_count: int = 0
     total_click_count: int = 0
+    last_clicked_user_id: Optional[str] = None
+    last_clicked_user_name: Optional[str] = None
     last_clicked_at: Optional[datetime] = None
 
 
@@ -87,6 +90,7 @@ class HtmlPreviewClickEventItem(BaseModel):
     id: int
     source_id: Optional[str] = None
     user_id: Optional[str] = None
+    user_name: Optional[str] = None
     bbk_id: Optional[str] = None
     cron_task_id: Optional[str] = None
     cron_task_name: Optional[str] = None
@@ -165,6 +169,16 @@ class HtmlPreviewListSummaryResponse(BaseModel):
     """HTML 名单维度统计查询响应。"""
 
     success: bool = True
+    total: int = 0
+    clicked_list_count: int = 0
+    page: int = 1
+    page_size: int = 20
+    summary: HtmlPreviewListSummaryItem = Field(
+        default_factory=lambda: HtmlPreviewListSummaryItem(
+            list_key="all",
+            list_name="全部名单",
+        ),
+    )
     items: list[HtmlPreviewListSummaryItem] = Field(default_factory=list)
 
 
@@ -175,6 +189,23 @@ class HtmlPreviewCustomerClickItem(BaseModel):
     customer_name: str = "未知客户"
     list_key: Optional[str] = None
     list_name: Optional[str] = None
+    insight_count: int = 0
+    phone_count: int = 0
+    plan_count: int = 0
+    total_click_count: int = 0
+    last_clicked_user_id: Optional[str] = None
+    last_clicked_user_name: Optional[str] = None
+    manager_clicks: list["HtmlPreviewCustomerManagerClickItem"] = Field(
+        default_factory=list,
+    )
+    last_clicked_at: Optional[datetime] = None
+
+
+class HtmlPreviewCustomerManagerClickItem(BaseModel):
+    """客户经理维度点击统计。"""
+
+    user_id: str
+    user_name: Optional[str] = None
     insight_count: int = 0
     phone_count: int = 0
     plan_count: int = 0

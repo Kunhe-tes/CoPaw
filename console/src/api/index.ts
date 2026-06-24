@@ -21,7 +21,6 @@ import { tokenUsageApi } from "./modules/tokenUsage";
 import { toolsApi } from "./modules/tools";
 import { securityApi } from "./modules/security";
 import { userTimezoneApi } from "./modules/userTimezone";
-import { languageApi } from "./modules/language";
 import { instanceApi } from "./modules/instance";
 import { marketApi } from "./modules/market";
 import { mySkillsApi } from "./modules/mySkills";
@@ -29,6 +28,8 @@ import { myMcpApi } from "./modules/myMcp";
 import { marketMcpApi } from "./modules/marketMcp";
 import { feedbackApi } from "./modules/feedback";
 import { htmlPreviewEventsApi } from "./modules/htmlPreviewEvents";
+import { systemCheckApi } from "./modules/systemCheck";
+import { skillReadinessApi } from "./modules/skillReadiness";
 
 export const api = {
   // Root
@@ -81,9 +82,6 @@ export const api = {
   // User Timezone
   ...userTimezoneApi,
 
-  // Language
-  ...languageApi,
-
   // Instance Management
   ...instanceApi,
 
@@ -104,6 +102,12 @@ export const api = {
 
   // HTML Preview Events
   ...htmlPreviewEventsApi,
+
+  // System Check
+  ...systemCheckApi,
+
+  // Skill Readiness
+  ...skillReadinessApi,
 };
 
 export default api;
@@ -114,3 +118,4 @@ export * from "./modules/market";
 export * from "./modules/mySkills";
 export * from "./modules/myMcp";
 export * from "./modules/marketMcp";
+export * from "./modules/skillReadiness";

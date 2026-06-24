@@ -7,6 +7,26 @@ import { useAgentStore } from "@/stores/agentStore";
 import { getInitialSessionSelection } from "../../sessionApi/initialSessionSelection";
 import { getSessionAgentId } from "../../sessionApi/sessionAgent";
 
+function matchesRequestedSession(
+  session: unknown,
+  requestedSessionId: string,
+): boolean {
+  const candidate = session as
+    | {
+        id?: string;
+        realId?: string;
+      }
+    | undefined;
+  return (
+    candidate?.id === requestedSessionId ||
+    candidate?.realId === requestedSessionId
+  );
+}
+
+function isLocalTimestampSessionId(sessionId: string | undefined): boolean {
+  return Boolean(sessionId && /^\d+$/.test(sessionId));
+}
+
 /**
  * URL chatId → context currentSessionId (one direction of bidirectional sync).
  *
@@ -47,8 +67,17 @@ const ChatSessionInitializer: React.FC = () => {
     }
 
     if (
+      !matching &&
+      currentSessionIdRef.current !== resolvedSessionId &&
+      !isLocalTimestampSessionId(currentSessionIdRef.current)
+    ) {
+      setCurrentSessionId(resolvedSessionId);
+    }
+
+    if (
       requestedSessionId &&
-      resolvedSessionId !== requestedSessionId
+      resolvedSessionId !== requestedSessionId &&
+      !matchesRequestedSession(matching, requestedSessionId)
     ) {
       navigate(`/chat/${resolvedSessionId}`, { replace: true });
     }

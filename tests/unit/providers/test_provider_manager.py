@@ -280,6 +280,30 @@ def test_ensure_storage_uses_requested_tenant_with_current_source(
     assert not (isolated_secret_dir / current_scope_id / "providers").exists()
 
 
+def test_get_instance_preserves_explicit_scoped_target_tenant(
+    isolated_secret_dir,
+) -> None:
+    target_scope_id = encode_scope_id("tenant-b", "source-b")
+
+    with tenant_context(tenant_id="tenant-a", source_id="source-a"):
+        manager = ProviderManager.get_instance(target_scope_id)
+
+    assert manager.tenant_id == target_scope_id
+
+
+def test_ensure_storage_preserves_explicit_scoped_target_tenant(
+    isolated_secret_dir,
+) -> None:
+    target_scope_id = encode_scope_id("tenant-b", "source-b")
+    current_scope_id = encode_scope_id("tenant-a", "source-a")
+
+    with tenant_context(tenant_id="tenant-a", source_id="source-a"):
+        ProviderManager.ensure_tenant_provider_storage(target_scope_id)
+
+    assert (isolated_secret_dir / target_scope_id / "providers").exists()
+    assert not (isolated_secret_dir / current_scope_id / "providers").exists()
+
+
 def test_provider_storage_keeps_legacy_scope_directory_untouched(
     isolated_secret_dir,
 ) -> None:
@@ -332,7 +356,95 @@ def test_load_provider_invalid_json_returns_none(isolated_secret_dir) -> None:
     assert loaded is None
 
 
-def test_migrate_legacy_file_and_persist_active_model(
+def test_get_active_model_refreshes_external_file_changes(
+    isolated_secret_dir,
+) -> None:
+    manager = ProviderManager()
+    active_path = manager.root_path / "active_model.json"
+    active_path.write_text(
+        json.dumps({"provider_id": "openai", "model": "gpt-5"}),
+        encoding="utf-8",
+    )
+
+    assert manager.get_active_model() == ModelSlotConfig(
+        provider_id="openai",
+        model="gpt-5",
+    )
+
+
+async def test_get_active_model_returns_none_after_external_delete(
+    isolated_secret_dir,
+    monkeypatch,
+) -> None:
+    manager = ProviderManager()
+    _seed_builtins(manager, _openai_provider())
+    monkeypatch.setattr(manager, "maybe_probe_multimodal", lambda *_: None)
+    await manager.activate_model("openai", "gpt-5")
+
+    (manager.root_path / "active_model.json").unlink()
+
+    assert manager.get_active_model() is None
+
+
+async def test_get_active_model_returns_none_for_invalid_external_file(
+    isolated_secret_dir,
+    monkeypatch,
+) -> None:
+    manager = ProviderManager()
+    _seed_builtins(manager, _openai_provider())
+    monkeypatch.setattr(manager, "maybe_probe_multimodal", lambda *_: None)
+    await manager.activate_model("openai", "gpt-5")
+
+    (manager.root_path / "active_model.json").write_text(
+        "{invalid-json",
+        encoding="utf-8",
+    )
+
+    assert manager.get_active_model() is None
+
+
+async def test_invalid_external_custom_provider_file_removes_cached_provider(
+    isolated_secret_dir,
+) -> None:
+    manager = ProviderManager()
+    custom = OpenAIProvider(
+        id="custom-bad",
+        name="Custom Bad",
+        base_url="https://custom.example/v1",
+        api_key="sk-custom",
+    )
+    await manager.add_custom_provider(custom)
+
+    (manager.custom_path / "custom-bad.json").write_text(
+        "{invalid-json",
+        encoding="utf-8",
+    )
+
+    await manager.list_provider_info()
+
+    assert manager.get_provider("custom-bad") is None
+
+
+async def test_invalid_external_builtin_provider_file_falls_back_to_default(
+    isolated_secret_dir,
+    monkeypatch,
+) -> None:
+    _patch_builtins(monkeypatch, _openai_provider())
+    manager = ProviderManager()
+    assert manager.update_provider("openai", {"api_key": "sk-customized"})
+    assert manager.get_provider("openai").api_key == "sk-customized"
+
+    (manager.builtin_path / "openai.json").write_text(
+        "{invalid-json",
+        encoding="utf-8",
+    )
+
+    await manager.list_provider_info()
+
+    assert manager.get_provider("openai").api_key == ""
+
+
+def test_provider_manager_ignores_legacy_providers_json(
     isolated_secret_dir,
     monkeypatch,
 ) -> None:
@@ -357,29 +469,22 @@ def test_migrate_legacy_file_and_persist_active_model(
 
     manager = ProviderManager()
 
-    assert legacy_file.exists() is False
-    assert manager.active_model is not None
-    assert manager.active_model.provider_id == "dashscope"
-    assert manager.active_model.model == "qwen3-max"
+    assert legacy_file.exists()
+    assert manager.active_model is None
 
     dashscope_provider = manager.get_provider("dashscope")
     assert dashscope_provider is not None
-    assert dashscope_provider.api_key == "sk-test-legacy-secret"
+    assert dashscope_provider.api_key == ""
 
-    legacy_custom = manager.get_provider("mydash")
-    assert legacy_custom is not None
-    assert isinstance(legacy_custom, OpenAIProvider)
-    assert len(legacy_custom.extra_models) == 1
-    assert legacy_custom.extra_models[0].id == "qwen3-max"
-    assert legacy_custom.api_key == "sk-test-legacy-custom-secret"
+    assert manager.get_provider("mydash") is None
 
     legacy_ollama = manager.get_provider("ollama")
-    assert legacy_ollama.base_url == "http://myhost:11434"
+    assert legacy_ollama.base_url != "http://myhost:11434"
 
     active_model_file = (
         isolated_secret_dir / "default" / "providers" / "active_model.json"
     )
-    assert active_model_file.exists()
+    assert not active_model_file.exists()
 
 
 async def test_add_custom_provider_conflict_resolution_loops_until_unique(
@@ -742,13 +847,13 @@ class TestProviderManagerTenantIsolation:
 
 
 class TestLegacyTenantModelsRecovery:
-    """Tests for recovery from legacy tenant_models.json."""
+    """Tests for ignoring legacy tenant_models.json."""
 
-    def test_recover_active_model_from_legacy_tenant_models(
+    def test_ignores_legacy_tenant_models_without_active_model_file(
         self,
         isolated_secret_dir,
     ) -> None:
-        """ProviderManager recovers active model from legacy tenant_models.json."""
+        """ProviderManager only reads providers/active_model.json."""
         import json
         from swe.tenant_models.manager import TenantModelManager
 
@@ -804,21 +909,12 @@ class TestLegacyTenantModelsRecovery:
         # Initialize ProviderManager for this tenant
         manager = ProviderManager(tenant_id=tenant_id)
 
-        # Active model should be recovered from legacy config
-        assert manager.active_model is not None
-        assert manager.active_model.provider_id == "test-openai"
-        assert manager.active_model.model == "gpt-4"
+        assert manager.active_model is None
 
-        # Verify active_model.json was created
         active_model_file = (
             isolated_secret_dir / tenant_id / "providers" / "active_model.json"
         )
-        assert active_model_file.exists()
-
-        # Reload and verify it's read from new location (not legacy)
-        reloaded = ProviderManager(tenant_id=tenant_id)
-        assert reloaded.active_model.provider_id == "test-openai"
-        assert reloaded.active_model.model == "gpt-4"
+        assert not active_model_file.exists()
 
     def test_no_recovery_when_active_model_exists(
         self,
@@ -875,11 +971,11 @@ class TestLegacyTenantModelsRecovery:
         assert manager.active_model.provider_id == "existing-provider"
         assert manager.active_model.model == "existing-model"
 
-    def test_recovery_fallback_to_default_tenant(
+    def test_no_fallback_to_default_tenant_models(
         self,
         isolated_secret_dir,
     ) -> None:
-        """Recovery falls back to default tenant if tenant-specific config missing."""
+        """ProviderManager does not inherit default tenant_models.json."""
         import json
         from swe.tenant_models.manager import TenantModelManager
 
@@ -927,15 +1023,10 @@ class TestLegacyTenantModelsRecovery:
         # Initialize ProviderManager for new tenant
         manager = ProviderManager(tenant_id=new_tenant_id)
 
-        # Should recover from default tenant's legacy config
-        # (local slot from local_first mode = ollama/llama3)
-        assert manager.active_model is not None
-        assert manager.active_model.provider_id == "ollama"
-        assert manager.active_model.model == "llama3"
+        assert manager.active_model is None
 
-        # Should save to new tenant's active_model.json
         new_active_file = provider_dir / "active_model.json"
-        assert new_active_file.exists()
+        assert not new_active_file.exists()
 
 
 class TestProviderManagerEnsureStorage:

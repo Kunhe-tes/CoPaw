@@ -1,0 +1,3 @@
+# Tool Call Status Is Rebuilt for Presentation
+
+Tool Call Status is a user-visible presentation contract for tool invocation lifecycle, not part of the Main Agent's durable memory. We will attach `tool_status` and `tool_error` to live tool messages in the stream, and rebuild the same fields when reading saved chat history from persisted tool-use/tool-result records, rather than writing those display fields into agent memory. This keeps model memory clean, lets old histories gain status presentation where the raw tool records contain enough information, and requires the live stream and history conversion paths to share the same status/error normalization rules.

@@ -12,6 +12,7 @@ pretty-printed to the terminal.
 
 from __future__ import annotations
 
+import asyncio
 import copy
 import logging
 import os
@@ -159,6 +160,26 @@ class ConsoleChannel(BaseChannel):
         """Media directory"""
         return self._media_dir
 
+    def clone(self, config) -> "ConsoleChannel":
+        """Clone console channel while preserving workspace media context."""
+        return self.__class__.from_config(
+            process=self._process,
+            config=config,
+            on_reply_sent=self._on_reply_sent,
+            show_tool_details=getattr(self, "_show_tool_details", True),
+            filter_tool_messages=getattr(
+                config,
+                "filter_tool_messages",
+                False,
+            ),
+            filter_thinking=getattr(
+                config,
+                "filter_thinking",
+                False,
+            ),
+            workspace_dir=self._workspace_dir,
+        )
+
     @classmethod
     def from_env(
         cls,
@@ -167,7 +188,7 @@ class ConsoleChannel(BaseChannel):
     ) -> "ConsoleChannel":
         return cls(
             process=process,
-            enabled=os.getenv("CONSOLE_CHANNEL_ENABLED", "1") == "1",
+            enabled=True,
             bot_prefix=os.getenv("CONSOLE_BOT_PREFIX", ""),
             on_reply_sent=on_reply_sent,
             media_dir=os.getenv("CONSOLE_MEDIA_DIR", ""),
@@ -200,7 +221,7 @@ class ConsoleChannel(BaseChannel):
         """
         return cls(
             process=process,
-            enabled=config.enabled,
+            enabled=True,
             bot_prefix=config.bot_prefix or "",
             on_reply_sent=on_reply_sent,
             show_tool_details=show_tool_details,
@@ -382,7 +403,76 @@ class ConsoleChannel(BaseChannel):
             send_meta = getattr(request, "channel_meta", None) or {}
             send_meta.setdefault("bot_prefix", self.bot_prefix)
             last_response = None
+            reply_text = ""
             event_count = 0
+            title_emitted = False
+            title_task_waited = False
+            buffered_initial_events: list[str] = []
+
+            def flush_buffered_initial_events() -> list[str]:
+                """取出被标题事件阻塞的外层初始事件。"""
+                nonlocal buffered_initial_events
+                events = buffered_initial_events
+                buffered_initial_events = []
+                return events
+
+            def should_buffer_before_title(
+                obj: Any,
+                status: Any,
+            ) -> bool:
+                """外层 response 启动帧应等标题事件先发给前端。"""
+                status_value = getattr(status, "value", status)
+                return (
+                    not title_emitted
+                    and obj == "response"
+                    and str(status_value).lower() == "in_progress"
+                )
+
+            async def build_session_title_event() -> str | None:
+                """生成标题刷新事件；标题任务存在时先等待其完成。"""
+                nonlocal send_meta, title_emitted, title_task_waited
+                if title_emitted:
+                    return None
+
+                title_task = getattr(request, "_session_title_task", None)
+                if title_task is not None and not title_task_waited:
+                    title_task_waited = True
+                    try:
+                        await asyncio.shield(title_task)
+                    except asyncio.CancelledError:
+                        if getattr(title_task, "cancelled", lambda: False)():
+                            logger.debug("异步标题任务已取消")
+                        else:
+                            raise
+                    except Exception:
+                        logger.warning("等待异步标题任务失败", exc_info=True)
+
+                send_meta = getattr(request, "channel_meta", None) or send_meta
+                session_title = send_meta.get("session_title")
+                if not session_title:
+                    return None
+
+                title_emitted = True
+                return (
+                    "data: "
+                    + json.dumps(
+                        {
+                            "object": "session_title_updated",
+                            "session_id": getattr(
+                                request,
+                                "session_id",
+                                "",
+                            ),
+                            "session_title": session_title,
+                        },
+                        ensure_ascii=False,
+                    )
+                    + "\n\n"
+                )
+
+            title_event = await build_session_title_event()
+            if title_event:
+                yield title_event
 
             async for event in self._process(request):
                 event_count += 1
@@ -397,6 +487,12 @@ class ConsoleChannel(BaseChannel):
                     status,
                     ev_type,
                 )
+
+                title_event = await build_session_title_event()
+                if title_event:
+                    yield title_event
+                    for buffered in flush_buffered_initial_events():
+                        yield buffered
 
                 if (
                     event.object == "response"
@@ -414,6 +510,12 @@ class ConsoleChannel(BaseChannel):
                                 event.output.append(media_message)
 
                 data = _event_to_sse_json(event, request)
+                if should_buffer_before_title(obj, status):
+                    buffered_initial_events.append(f"data: {data}\n\n")
+                    continue
+
+                for buffered in flush_buffered_initial_events():
+                    yield buffered
                 yield f"data: {data}\n\n"
 
                 if obj == "message" and status == RunStatus.Completed:
@@ -423,9 +525,15 @@ class ConsoleChannel(BaseChannel):
 
                     parts = self._message_to_content_parts(event)
                     self._print_parts(parts, ev_type)
+                    for p in parts:
+                        if hasattr(p, "text") and p.text:
+                            reply_text += p.text
 
                 elif obj == "response":
                     last_response = event
+
+            for buffered in flush_buffered_initial_events():
+                yield buffered
 
             logger.info(
                 "console stream done: event_count=%s has_response=%s",
@@ -438,6 +546,7 @@ class ConsoleChannel(BaseChannel):
                 self._print_error(err_msg)
 
             to_handle = request.user_id or ""
+            await self._try_session_end_push(request, to_handle, reply_text)
             if self._on_reply_sent:
                 self._on_reply_sent(
                     self.channel,

@@ -37,7 +37,11 @@ describe("htmlPreviewEventsApi", () => {
       Authorization: "Bearer token",
       "X-Source-Id": "copaw",
     });
-    mocks.getIframeContext.mockReturnValue({ source: "copaw", bbk: "branch-1" });
+    mocks.getIframeContext.mockReturnValue({
+      source: "copaw",
+      bbk: "branch-1",
+      userName: "张经理",
+    });
     mocks.getUserId.mockReturnValue("user-1");
   });
 
@@ -67,6 +71,7 @@ describe("htmlPreviewEventsApi", () => {
     expect(JSON.parse(fetchMock.mock.calls[0][1].body)).toMatchObject({
       source_id: "copaw",
       user_id: "user-1",
+      user_name: "张经理",
       bbk_id: "branch-1",
       file_url: "https://example.com/a.html",
       button_id: "follow",
@@ -169,7 +174,8 @@ describe("htmlPreviewEventsApi", () => {
     await htmlPreviewEventsApi.getLists({
       startTime: "2026-05-30T00:00:00.000Z",
       bbkIds: "branch-1",
-      limit: 20,
+      page: 2,
+      pageSize: 20,
     });
     await htmlPreviewEventsApi.getCustomerClicks({
       startTime: "2026-05-30T00:00:00.000Z",
@@ -181,7 +187,7 @@ describe("htmlPreviewEventsApi", () => {
 
     expect(mocks.request).toHaveBeenNthCalledWith(
       1,
-      "/html-preview/lists?start_time=2026-05-30T00%3A00%3A00.000Z&bbk_ids=branch-1&limit=20",
+      "/html-preview/lists?start_time=2026-05-30T00%3A00%3A00.000Z&bbk_ids=branch-1&page=2&page_size=20",
     );
     expect(mocks.request).toHaveBeenNthCalledWith(
       2,

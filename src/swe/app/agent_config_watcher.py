@@ -13,7 +13,12 @@ import logging
 from pathlib import Path
 from typing import Any, Optional, TYPE_CHECKING
 
-from ..config.config import load_agent_config
+from ..config.channel_invariants import include_mandatory_channels
+from ..config.config import (
+    load_agent_config,
+    normalize_channel_config_set,
+    normalize_single_channel_config,
+)
 from ..config.utils import get_available_channels
 
 if TYPE_CHECKING:
@@ -126,16 +131,16 @@ class AgentConfigWatcher:
 
         try:
             agent_config = self._load_agent_config()
-            if agent_config.channels:
-                self._last_channels = agent_config.channels.model_copy(
-                    deep=True,
-                )
-                self._last_channels_hash = self._channels_hash(
-                    agent_config.channels,
-                )
-            else:
-                self._last_channels = None
-                self._last_channels_hash = None
+            normalized_channels = normalize_channel_config_set(
+                agent_config.channels,
+                materialize_missing_console=True,
+            )
+            self._last_channels = normalized_channels
+            self._last_channels_hash = (
+                self._channels_hash(normalized_channels)
+                if normalized_channels is not None
+                else None
+            )
 
             self._last_heartbeat_hash = _heartbeat_hash(
                 agent_config.heartbeat,
@@ -169,6 +174,87 @@ class AgentConfigWatcher:
             return ch.model_dump(mode="json")
         return None
 
+    @staticmethod
+    def _channel_enabled(ch: Any) -> bool:
+        """Return whether a channel config is enabled."""
+        if ch is None:
+            return False
+        if isinstance(ch, dict):
+            return bool(ch.get("enabled", False))
+        return bool(getattr(ch, "enabled", False))
+
+    @staticmethod
+    def _extra_channel_configs(channels: Any) -> dict[str, Any]:
+        """Return ad-hoc channel configs stored in pydantic extras."""
+        return getattr(channels, "__pydantic_extra__", None) or {}
+
+    @staticmethod
+    def _channel_config_for_name(
+        channels: Any,
+        extra_channels: dict[str, Any],
+        name: str,
+    ) -> Any:
+        """Return the named channel config from model fields or extras."""
+        return getattr(channels, name, None) or extra_channels.get(name)
+
+    @classmethod
+    def _resolve_channel_change_action(
+        cls,
+        new_ch: Any,
+        old_ch: Any,
+    ) -> str | None:
+        """Return the channel action needed for a before/after config pair."""
+        if new_ch is None and old_ch is None:
+            return None
+        if new_ch is None:
+            return "remove"
+        if old_ch is None and not cls._channel_enabled(new_ch):
+            return None
+        new_dump = cls._channel_dump(new_ch)
+        old_dump = cls._channel_dump(old_ch)
+        if new_dump is not None and new_dump == old_dump:
+            return None
+        return "reload"
+
+    def _channel_names_for_diff(
+        self,
+        new_channels: ChannelConfig,
+        old_channels: ChannelConfig | None,
+    ) -> tuple[list[str], dict[str, Any], dict[str, Any]]:
+        """Return channel names and extra config maps participating in diff."""
+        extra_new = self._extra_channel_configs(new_channels)
+        extra_old = (
+            self._extra_channel_configs(old_channels) if old_channels else {}
+        )
+        channel_names = include_mandatory_channels(
+            (
+                *get_available_channels(),
+                *extra_new.keys(),
+                *extra_old.keys(),
+            ),
+        )
+        return channel_names, extra_new, extra_old
+
+    async def _remove_one_channel(
+        self,
+        name: str,
+        new_channels: ChannelConfig,
+        old_ch: Any,
+    ) -> None:
+        """Remove one channel and restore config state if removal fails."""
+        logger.info(
+            f"AgentConfigWatcher ({self._agent_id}): "
+            f"channel '{name}' removed, stopping",
+        )
+        try:
+            await self._channel_manager.remove_channel(name)
+        except Exception:
+            logger.exception(
+                f"AgentConfigWatcher ({self._agent_id}): "
+                f"failed to remove channel '{name}'",
+            )
+            setattr(new_channels, name, old_ch)
+
     async def _reload_one_channel(
         self,
         name: str,
@@ -178,14 +264,25 @@ class AgentConfigWatcher:
     ) -> None:
         """Reload a single channel; on failure revert new_channels entry."""
         try:
+            new_ch = normalize_single_channel_config(
+                name,
+                new_ch,
+                materialize_missing=(name == "console"),
+            )
+            setattr(new_channels, name, new_ch)
             old_channel = await self._channel_manager.get_channel(name)
             if old_channel is None:
-                logger.warning(
+                logger.info(
                     f"AgentConfigWatcher ({self._agent_id}): "
-                    f"channel '{name}' not found, skip",
+                    f"channel '{name}' not loaded, creating",
                 )
-                return
-            new_channel = old_channel.clone(new_ch)
+                new_channel = self._channel_manager.instantiate_channel(
+                    name,
+                    new_ch,
+                    workspace_dir=self._workspace_dir,
+                )
+            else:
+                new_channel = old_channel.clone(new_ch)
             await self._channel_manager.replace_channel(new_channel)
             logger.info(
                 f"AgentConfigWatcher ({self._agent_id}): "
@@ -200,34 +297,43 @@ class AgentConfigWatcher:
 
     async def _apply_channel_changes(self, agent_config: Any) -> None:
         """Diff channels and reload changed ones; update snapshot."""
-        if not agent_config.channels:
+        new_channels = normalize_channel_config_set(
+            agent_config.channels,
+            materialize_missing_console=True,
+        )
+        if new_channels is None:
             return
 
-        new_hash = self._channels_hash(agent_config.channels)
+        new_hash = self._channels_hash(new_channels)
         if new_hash == self._last_channels_hash:
             return
 
-        new_channels = agent_config.channels
         old_channels = self._last_channels
-        extra_new = getattr(new_channels, "__pydantic_extra__", None) or {}
-        extra_old = (
-            getattr(old_channels, "__pydantic_extra__", None)
-            if old_channels
-            else {}
+        channel_names, extra_new, extra_old = self._channel_names_for_diff(
+            new_channels,
+            old_channels,
         )
 
-        for name in get_available_channels():
-            new_ch = getattr(new_channels, name, None) or extra_new.get(name)
+        for name in channel_names:
+            new_ch = self._channel_config_for_name(
+                new_channels,
+                extra_new,
+                name,
+            )
             old_ch = (
-                getattr(old_channels, name, None) or extra_old.get(name)
+                self._channel_config_for_name(
+                    old_channels,
+                    extra_old,
+                    name,
+                )
                 if old_channels
                 else None
             )
-            if new_ch is None:
+            action = self._resolve_channel_change_action(new_ch, old_ch)
+            if action is None:
                 continue
-            new_dump = self._channel_dump(new_ch)
-            old_dump = self._channel_dump(old_ch)
-            if new_dump is not None and new_dump == old_dump:
+            if action == "remove":
+                await self._remove_one_channel(name, new_channels, old_ch)
                 continue
             logger.info(
                 f"AgentConfigWatcher ({self._agent_id}): "

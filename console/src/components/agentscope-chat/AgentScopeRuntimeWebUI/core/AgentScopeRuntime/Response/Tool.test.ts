@@ -1,4 +1,13 @@
-import { describe, expect, it } from "vitest";
+import React from "react";
+import { cleanup, render, screen } from "@testing-library/react";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import {
+  AgentScopeRuntimeContentType,
+  AgentScopeRuntimeMessageType,
+  AgentScopeRuntimeRunStatus,
+  type IAgentScopeRuntimeMessage,
+} from "../types";
+import Tool from "./Tool";
 import {
   buildToolTitle,
   getToolDisplayName,
@@ -6,7 +15,90 @@ import {
   resolveToolName,
 } from "./ToolTitle";
 
+const mockOptions = vi.hoisted(() => ({
+  customToolRenderConfig: {} as Record<string, any>,
+}));
+
+vi.mock("@/components/agentscope-chat", () => ({
+  ToolCall: ({
+    loading,
+    msgStatus,
+    output,
+  }: {
+    loading: boolean;
+    msgStatus: string;
+    output: unknown;
+  }) =>
+    React.createElement("div", {
+      "data-loading": String(loading),
+      "data-msg-status": msgStatus,
+      "data-output": typeof output === "string" ? output : JSON.stringify(output),
+      "data-testid": "tool-call",
+    }),
+}));
+
+vi.mock("../../Context/ChatAnywhereOptionsContext", () => ({
+  useChatAnywhereOptions: (selector: (value: any) => any) =>
+    selector({
+      customToolRenderConfig: mockOptions.customToolRenderConfig,
+    }),
+}));
+
+vi.mock("./Approval", () => ({
+  default: () => React.createElement("div", { "data-testid": "approval" }),
+}));
+
+function toolMessage({
+  toolName = "execute_shell_command",
+  toolStatus,
+  liveOutput,
+}: {
+  toolName?: string;
+  toolStatus?: "running" | "success" | "failed";
+  liveOutput?: string;
+}): IAgentScopeRuntimeMessage {
+  return {
+    id: "tool-message",
+    object: "message",
+    role: "assistant",
+    type: AgentScopeRuntimeMessageType.PLUGIN_CALL_OUTPUT,
+    status: AgentScopeRuntimeRunStatus.Completed,
+    content: [
+      {
+        type: AgentScopeRuntimeContentType.DATA,
+        status: AgentScopeRuntimeRunStatus.Completed,
+        data: {
+          name: toolName,
+          arguments: { command: "echo ok" },
+          summary: "开始执行操作",
+          tool_status: "running",
+          live_output: liveOutput,
+        },
+      },
+      {
+        type: AgentScopeRuntimeContentType.DATA,
+        status: AgentScopeRuntimeRunStatus.Completed,
+        data: {
+          name: toolName,
+          output: "Error: this text is controlled by backend status",
+          output_summary: "输出摘要",
+          tool_error: toolStatus === "failed" ? "Tool error" : null,
+          tool_status: toolStatus,
+        },
+      },
+    ],
+  };
+}
+
 describe("tool call title", () => {
+  afterEach(() => {
+    cleanup();
+  });
+
+  beforeEach(() => {
+    mockOptions.customToolRenderConfig = {};
+  });
+
   it("keeps a clean backend summary with the concrete object", () => {
     const title = buildToolTitle({
       loading: true,
@@ -129,5 +221,80 @@ describe("tool call title", () => {
 
     expect(toolName).toBe("search_customer_cases");
     expect(title).toBe("正在调用：search_customer_cases");
+  });
+
+  it("passes backend failed tool_status to the default tool card", () => {
+    render(
+      React.createElement(Tool, {
+        data: toolMessage({ toolStatus: "failed" }),
+      }),
+    );
+
+    expect(screen.getByTestId("tool-call")).toHaveAttribute(
+      "data-msg-status",
+      AgentScopeRuntimeRunStatus.Failed,
+    );
+    expect(screen.getByTestId("tool-call")).toHaveAttribute(
+      "data-loading",
+      "false",
+    );
+  });
+
+  it("uses live output before a final tool output arrives", () => {
+    const message = toolMessage({ liveOutput: "running tests\n" });
+    message.content = message.content.slice(0, 1);
+    message.type = AgentScopeRuntimeMessageType.PLUGIN_CALL;
+    message.status = AgentScopeRuntimeRunStatus.InProgress;
+
+    render(
+      React.createElement(Tool, {
+        data: message,
+      }),
+    );
+
+    expect(screen.getByTestId("tool-call")).toHaveAttribute(
+      "data-output",
+      "running tests\n",
+    );
+  });
+
+  it("uses final output instead of live output when both are present", () => {
+    render(
+      React.createElement(Tool, {
+        data: toolMessage({
+          liveOutput: "partial output\n",
+          toolStatus: "success",
+        }),
+      }),
+    );
+
+    expect(screen.getByTestId("tool-call")).toHaveAttribute(
+      "data-output",
+      "Error: this text is controlled by backend status",
+    );
+  });
+
+  it("passes normalized status to custom tool renders", () => {
+    mockOptions.customToolRenderConfig = {
+      custom_tool: ({ data }: { data: IAgentScopeRuntimeMessage }) =>
+        React.createElement("div", {
+          "data-status": data.status,
+          "data-testid": "custom-tool",
+        }),
+    };
+
+    render(
+      React.createElement(Tool, {
+        data: toolMessage({
+          toolName: "custom_tool",
+          toolStatus: "failed",
+        }),
+      }),
+    );
+
+    expect(screen.getByTestId("custom-tool")).toHaveAttribute(
+      "data-status",
+      AgentScopeRuntimeRunStatus.Failed,
+    );
   });
 });

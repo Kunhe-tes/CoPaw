@@ -3,7 +3,7 @@ import { flushSync } from "react-dom";
 import { useNavigate, useLocation } from "react-router-dom";
 import { Image, Modal } from "antd";
 import { useContextSelector } from "use-context-selector";
-import { useVirtualizer } from "@tanstack/react-virtual";
+import useChatAnywhereEventEmitter from "@/components/agentscope-chat/AgentScopeRuntimeWebUI/core/Context/useChatAnywhereEventEmitter";
 import Style from "./style";
 import ChatTaskList from "../ChatTaskList";
 import type { CronJobSpecOutput } from "@/api/types";
@@ -15,23 +15,28 @@ import { isHistorySessionActive } from "./historySessions";
 import sendIcon from "../../../../assets/icons/new_chat.svg";
 import operateIcon from "../../../../assets/icons/operate.svg";
 import guideImage from "@/assets/others/note.png";
-import { OPS_MODE_KEY } from "@/layouts/Header";
-// import { useChatAnywhereSessionsState } from '@/components/agentscope-chat';
-import { ChatAnywhereSessionsContext } from "@/components/agentscope-chat";
-import { useChatAnywhereMessages } from "@/components/agentscope-chat/AgentScopeRuntimeWebUI/core/Context/ChatAnywhereMessagesContext";
+import {
+  ChatAnywhereSessionsContext,
+  type IAgentScopeRuntimeWebUISession,
+} from "@/components/agentscope-chat";
 import { useAgentStore } from "@/stores/agentStore";
-import { useIframeStore } from "@/stores/iframeStore";
 import sessionApi from "../../sessionApi";
 import { getSessionAgentId } from "../../sessionApi/sessionAgent";
 import { resolveRequestedSessionId } from "../../sessionApi/resolvedSessionMapping";
 import { HistorySessionRow } from "./HistorySessionRow";
 import { HistorySkeleton } from "./HistorySkeleton";
+import { HistoryInfiniteScrollTrigger } from "./HistoryInfiniteScrollTrigger";
+import { mergeConcurrentSessions } from "./mergeConcurrentSessions";
 
 /** Extended session type with additional backend fields */
 interface ExtendedHistorySession extends HistorySession {
   channel?: string;
   realId?: string;
 }
+
+type SessionIdentity = Partial<IAgentScopeRuntimeWebUISession> & {
+  realId?: string;
+};
 
 function HistoryIcon() {
   return (
@@ -100,9 +105,12 @@ export default function ChatSidebar(props: ChatSidebarProps) {
   const navigate = useNavigate();
   const location = useLocation();
   const [historyCollapsed, setHistoryCollapsed] = useState(false);
+  const [isLoadingMoreHistory, setIsLoadingMoreHistory] = useState(false);
+  const [loadMoreHistoryFailed, setLoadMoreHistoryFailed] = useState(false);
   const [collapsed, setCollapsed] = useState(false);
   const [activePanel, setActivePanel] = useState<PanelType>(null);
   const toolbarRef = useRef<HTMLDivElement>(null);
+  const historyScrollContainerRef = useRef<HTMLDivElement>(null);
   // Guide image preview state
   const [guidePreviewVisible, setGuidePreviewVisible] = useState(false);
   // const { sessions: sharedSessions, setSessionLoading, setSessions } = useChatAnywhereSessionsState();
@@ -118,103 +126,54 @@ export default function ChatSidebar(props: ChatSidebarProps) {
     ChatAnywhereSessionsContext,
     (value) => value.setSessions,
   );
-  const setCurrentSessionId = useContextSelector(
+  const getSessions = useContextSelector(
     ChatAnywhereSessionsContext,
-    (value) => value.setCurrentSessionId,
+    (value) => value.getSessions,
   );
   const isSessionsListLoading = useContextSelector(
     ChatAnywhereSessionsContext,
     (value) => value.isSessionsListLoading,
   );
-  const setSessionsListLoading = useContextSelector(
-    ChatAnywhereSessionsContext,
-    (value) => value.setSessionsListLoading,
-  );
-  const { removeAllMessages } = useChatAnywhereMessages();
   const { selectedAgent, setSelectedAgent } = useAgentStore();
-  const userId = useIframeStore((state) => state.userId);
-  const source = useIframeStore((state) => state.source);
-  const identityKey = `${userId ?? ""}|${source ?? ""}`;
-  const previousIdentityKeyRef = useRef(identityKey);
-  const previousOpsModeRef = useRef(
-    sessionStorage.getItem(OPS_MODE_KEY) === "true",
-  );
 
   const currentChatId = location.pathname.match(/^\/chat\/(.+)$/)?.[1] || null;
   const currentChatIdRef = useRef<string | null>(currentChatId);
-  const pathnameRef = useRef(location.pathname);
   currentChatIdRef.current = currentChatId;
-  pathnameRef.current = location.pathname;
-
-  useEffect(() => {
-    if (previousIdentityKeyRef.current === identityKey) {
-      return;
-    }
-
-    const opsModeEnabled = sessionStorage.getItem(OPS_MODE_KEY) === "true";
-    const isOpsModeIdentityChange =
-      opsModeEnabled || previousOpsModeRef.current;
-    previousIdentityKeyRef.current = identityKey;
-    previousOpsModeRef.current = opsModeEnabled;
-    if (!isOpsModeIdentityChange) {
-      return;
-    }
-
-    let cancelled = false;
-    sessionApi.resetForIdentityChange();
-    setSessionsListLoading(true);
-    setSessionLoading(false);
-    setCurrentSessionId(undefined);
-    setSessions([]);
-    removeAllMessages();
-
-    if (pathnameRef.current.startsWith("/chat/")) {
-      navigate("/chat", { replace: true });
-    }
-
-    void sessionApi
-      .getSessionList()
-      .then((sessionList) => {
-        if (cancelled) {
-          return;
-        }
-        setSessions(sessionList);
-        setCurrentSessionId(sessionList[0]?.id);
-      })
-      .catch(() => {
-        if (!cancelled) {
-          setSessions([]);
-          setCurrentSessionId(undefined);
-        }
-      })
-      .finally(() => {
-        if (!cancelled) {
-          setSessionsListLoading(false);
-        }
-      });
-
-    return () => {
-      cancelled = true;
-    };
-  }, [
-    identityKey,
-    navigate,
-    removeAllMessages,
-    setCurrentSessionId,
-    setSessionLoading,
-    setSessions,
-    setSessionsListLoading,
-  ]);
 
   // 刷新共享 sessions 状态
-  const refreshSessions = useCallback(async () => {
+  const refreshSessions = useCallback(
+    async (excludedSessions: SessionIdentity[] = []) => {
+      try {
+        const sessionList = await sessionApi.getSessionList();
+        setSessions(
+          mergeConcurrentSessions(
+            sessionList,
+            getSessions(),
+            false,
+            excludedSessions,
+          ),
+        );
+        setLoadMoreHistoryFailed(false);
+      } catch {
+        // ignore
+      }
+    },
+    [getSessions, setSessions],
+  );
+
+  const loadMoreSessions = useCallback(async () => {
+    if (isLoadingMoreHistory || !sessionApi.hasMoreSessions()) return;
+    setIsLoadingMoreHistory(true);
+    setLoadMoreHistoryFailed(false);
     try {
-      const sessionList = await sessionApi.getSessionList();
-      setSessions(sessionList);
+      const sessionList = await sessionApi.loadMoreSessions();
+      setSessions(mergeConcurrentSessions(sessionList, getSessions(), true));
     } catch {
-      // ignore
+      setLoadMoreHistoryFailed(true);
+    } finally {
+      setIsLoadingMoreHistory(false);
     }
-  }, [setSessions]);
+  }, [getSessions, isLoadingMoreHistory, setSessions]);
 
   // 监听 visibilitychange 刷新 sessions
   useEffect(() => {
@@ -231,6 +190,17 @@ export default function ChatSidebar(props: ChatSidebarProps) {
     };
   }, [refreshSessions]);
 
+  // 异步标题生成完成后刷新侧边栏
+  useChatAnywhereEventEmitter(
+    {
+      type: "refreshSessionList",
+      callback: () => {
+        void refreshSessions();
+      },
+    },
+    [refreshSessions],
+  );
+
   // 使用共享 sessions 状态，过滤并转换
   const sessions = useMemo(() => {
     return sharedSessions
@@ -245,15 +215,7 @@ export default function ChatSidebar(props: ChatSidebarProps) {
   }, [sharedSessions]);
   const sessionsRef = useRef(sessions);
   sessionsRef.current = sessions;
-
-  // Virtual scrolling setup for history list
-  const historyListRef = useRef<HTMLDivElement>(null);
-  const rowVirtualizer = useVirtualizer({
-    count: sessions.length,
-    getScrollElement: () => historyListRef.current,
-    estimateSize: () => 52,
-    overscan: 5,
-  });
+  const historyTotal = Math.max(sessionApi.getSessionTotal(), sessions.length);
 
   const handleToggleHistory = useCallback(() => {
     setHistoryCollapsed((prev) => !prev);
@@ -328,7 +290,7 @@ export default function ChatSidebar(props: ChatSidebarProps) {
   const handleDeleteSession = useCallback(
     (
       sessionId: string,
-      _backendId: string | null,
+      backendId: string | null,
       sessionName: string = "新会话",
     ) => {
       Modal.confirm({
@@ -340,6 +302,9 @@ export default function ChatSidebar(props: ChatSidebarProps) {
         cancelText: "取消",
         cancelButtonProps: { type: "text" },
         onOk: async () => {
+          const removedSession = backendId
+            ? { id: sessionId, realId: backendId }
+            : { id: sessionId };
           await sessionApi.removeSession({ id: sessionId });
 
           if (currentChatIdRef.current === sessionId) {
@@ -351,7 +316,7 @@ export default function ChatSidebar(props: ChatSidebarProps) {
             }
           }
 
-          await refreshSessions();
+          await refreshSessions([removedSession]);
         },
       });
     },
@@ -383,6 +348,7 @@ export default function ChatSidebar(props: ChatSidebarProps) {
             type="tasks"
             onClose={handleClosePanel}
             tasks={tasks}
+            selectedTaskId={selectedTaskId}
             sessions={sessions}
             onTaskClick={handleTaskOpen}
             onTaskPause={onTaskPause}
@@ -399,6 +365,11 @@ export default function ChatSidebar(props: ChatSidebarProps) {
             sessions={sessions}
             onTaskClick={handleTaskOpen}
             toolbarRef={toolbarRef}
+            hasMoreSessions={sessionApi.hasMoreSessions()}
+            sessionTotal={historyTotal}
+            isLoadingMoreSessions={isLoadingMoreHistory}
+            loadMoreSessionsFailed={loadMoreHistoryFailed}
+            onLoadMoreSessions={() => void loadMoreSessions()}
           />
           <button
             className="chat-sidebar-collapse-toggle"
@@ -437,7 +408,10 @@ export default function ChatSidebar(props: ChatSidebarProps) {
                 新建会话
               </button>
             </div>
-            <div className="chat-sidebar-content-record-list">
+            <div
+              className="chat-sidebar-content-record-list"
+              ref={historyScrollContainerRef}
+            >
               <ChatTaskList
                 tasks={tasks}
                 selectedTaskId={selectedTaskId}
@@ -456,31 +430,21 @@ export default function ChatSidebar(props: ChatSidebarProps) {
                 >
                   <div className="chat-sidebar-history-title">
                     <HistoryIcon />
-                    历史记录({sessions.length})
+                    历史记录({historyTotal})
                   </div>
                   <ToggleIcon collapsed={historyCollapsed} />
                 </div>
                 {!historyCollapsed &&
                   (isSessionsListLoading ? (
                     <HistorySkeleton count={8} />
-                  ) : sessions.length === 0 ? (
-                    <div className="chat-sidebar-history-empty">
-                      暂无历史记录
-                    </div>
                   ) : (
-                    <div
-                      ref={historyListRef}
-                      className="chat-sidebar-history-list"
-                    >
-                      <div
-                        style={{
-                          height: `${rowVirtualizer.getTotalSize()}px`,
-                          width: "100%",
-                          position: "relative",
-                        }}
-                      >
-                        {rowVirtualizer.getVirtualItems().map((virtualItem) => {
-                          const session = sessions[virtualItem.index];
+                    <div className="chat-sidebar-history-list">
+                      {sessions.length === 0 ? (
+                        <div className="chat-sidebar-history-empty">
+                          暂无历史记录
+                        </div>
+                      ) : (
+                        sessions.map((session) => {
                           const ext = session as ExtendedHistorySession;
                           return (
                             <HistorySessionRow
@@ -493,18 +457,17 @@ export default function ChatSidebar(props: ChatSidebarProps) {
                               )}
                               onSessionClick={handleSessionClick}
                               onSessionDelete={handleDeleteSession}
-                              style={{
-                                position: "absolute",
-                                top: 0,
-                                left: 0,
-                                width: "100%",
-                                height: `${virtualItem.size}px`,
-                                transform: `translateY(${virtualItem.start}px)`,
-                              }}
                             />
                           );
-                        })}
-                      </div>
+                        })
+                      )}
+                      <HistoryInfiniteScrollTrigger
+                        scrollContainerRef={historyScrollContainerRef}
+                        hasMore={sessionApi.hasMoreSessions()}
+                        loading={isLoadingMoreHistory}
+                        failed={loadMoreHistoryFailed}
+                        onLoadMore={() => void loadMoreSessions()}
+                      />
                     </div>
                   ))}
               </div>
@@ -513,11 +476,11 @@ export default function ChatSidebar(props: ChatSidebarProps) {
 
           <div className="chat-sidebar-footer">
             {/* 暂时隐藏，后续需要时再开放
-            <div className="chat-sidebar-footer-item">
-              <img src={skillMarketIcon} alt="发送" width="24" height="24" />
-              skill市场
-            </div>
-            <div className="chat-sidebar-footer-divider" /> */}
+            <div className="chat-sidebar-footer-item">
+              <img src={skillMarketIcon} alt="发送" width="24" height="24" />
+              skill市场
+            </div>
+            <div className="chat-sidebar-footer-divider" /> */}
             <div
               className="chat-sidebar-footer-item"
               onClick={handleOpenGuide}

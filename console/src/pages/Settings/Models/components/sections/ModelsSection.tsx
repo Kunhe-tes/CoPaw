@@ -6,7 +6,8 @@ import api from "../../../../../api";
 import { useTranslation } from "react-i18next";
 import { useAppMessage } from "../../../../../hooks/useAppMessage";
 import { useIframeStore } from "../../../../../stores/iframeStore";
-import { TenantTargetPicker } from "../../../../../components/TenantTargetPicker";
+import { getUserId } from "../../../../../utils/identity";
+import { TenantSelector } from "../../../../../components/TenantSelector";
 import styles from "../../index.module.less";
 
 interface ModelsSectionProps {
@@ -46,11 +47,10 @@ export function ModelsSection({
   );
   const [dirty, setDirty] = useState(false);
   const [distributionOpen, setDistributionOpen] = useState(false);
-  const [distributionLoading, setDistributionLoading] = useState(false);
   const [distributionSubmitting, setDistributionSubmitting] = useState(false);
-  const [distributionTenantIds, setDistributionTenantIds] = useState<string[]>([]);
   const [selectedDistributionTenantIds, setSelectedDistributionTenantIds] =
     useState<string[]>([]);
+  const currentTenantId = getUserId();
 
   const { message } = useAppMessage();
 
@@ -79,7 +79,9 @@ export function ModelsSection({
   }, [currentSlot?.provider_id, currentSlot?.model]);
 
   const chosenProvider = providers.find((p) => p.id === selectedProviderId);
-  const currentProvider = providers.find((p) => p.id === currentSlot?.provider_id);
+  const currentProvider = providers.find(
+    (p) => p.id === currentSlot?.provider_id,
+  );
   const modelOptions = [
     ...(chosenProvider?.models ?? []),
     ...(chosenProvider?.extra_models ?? []),
@@ -121,7 +123,7 @@ export function ModelsSection({
     }
   };
 
-  const openDistributionModal = async () => {
+  const openDistributionModal = () => {
     if (!currentSlot?.provider_id || !currentSlot?.model) return;
 
     if (dirty) {
@@ -135,17 +137,6 @@ export function ModelsSection({
 
     setDistributionOpen(true);
     setSelectedDistributionTenantIds([]);
-    setDistributionLoading(true);
-    try {
-      const result = await api.listActiveModelDistributionTenants();
-      setDistributionTenantIds(result.tenant_ids || []);
-    } catch (error) {
-      const errMsg =
-        error instanceof Error ? error.message : t("models.distributeFailed");
-      message.error(errMsg);
-    } finally {
-      setDistributionLoading(false);
-    }
   };
 
   const closeDistributionModal = () => {
@@ -174,15 +165,15 @@ export function ModelsSection({
             : "";
           return `• ${item.tenant_id}${suffix}`;
         });
-        message.success(t("models.distributeSuccess", { count: succeeded.length }));
+        message.success(
+          t("models.distributeSuccess", { count: succeeded.length }),
+        );
         Modal.confirm({
           title: t("models.distributeResultTitle"),
           content: (
-            <div style={{ display: "grid", gap: 8 }}>
+            <div className={styles.modalResultStack}>
               <div>{t("models.distributeSuccessList")}</div>
-              <pre style={{ margin: 0, whiteSpace: "pre-wrap" }}>
-                {lines.join("\n")}
-              </pre>
+              <pre className={styles.modalResultPre}>{lines.join("\n")}</pre>
               {failed.length > 0 ? (
                 <div>{t("models.distributeFailureInlineHint")}</div>
               ) : null}
@@ -195,12 +186,15 @@ export function ModelsSection({
 
       if (failed.length > 0) {
         const failureLines = failed.map(
-          (item) => `• ${item.tenant_id}: ${item.error || t("models.distributeFailed")}`,
+          (item) =>
+            `• ${item.tenant_id}: ${
+              item.error || t("models.distributeFailed")
+            }`,
         );
         Modal.confirm({
           title: t("models.distributePartialFailureTitle"),
           content: (
-            <pre style={{ margin: 0, whiteSpace: "pre-wrap" }}>
+            <pre className={styles.modalResultPre}>
               {failureLines.join("\n")}
             </pre>
           ),
@@ -225,7 +219,8 @@ export function ModelsSection({
     currentSlot.provider_id === selectedProviderId &&
     currentSlot.model === selectedModel;
   const canSave = dirty && !!selectedProviderId && !!selectedModel;
-  const canDistribute = manager && !!currentSlot?.provider_id && !!currentSlot?.model;
+  const canDistribute =
+    manager && !!currentSlot?.provider_id && !!currentSlot?.model;
 
   return (
     <div className={styles.slotSection}>
@@ -234,6 +229,7 @@ export function ModelsSection({
           <label className={styles.slotLabel}>{t("models.provider")}</label>
           <Select
             style={{ width: "100%" }}
+            popupClassName={styles.managementSelectDropdown}
             placeholder={t("models.selectProvider")}
             value={selectedProviderId}
             onChange={handleProviderChange}
@@ -248,6 +244,7 @@ export function ModelsSection({
           <label className={styles.slotLabel}>{t("models.model")}</label>
           <Select
             style={{ width: "100%" }}
+            popupClassName={styles.managementSelectDropdown}
             placeholder={
               hasModels ? t("models.selectModel") : t("models.addModelFirst")
             }
@@ -263,14 +260,13 @@ export function ModelsSection({
           />
         </div>
 
-        <div
-          className={styles.slotField}
-          style={{ flex: "0 0 auto", minWidth: "120px" }}
-        >
-          <label className={styles.slotLabel} style={{ visibility: "hidden" }}>
+        <div className={`${styles.slotField} ${styles.slotActions}`}>
+          <label
+            className={`${styles.slotLabel} ${styles.visuallyHiddenLabel}`}
+          >
             {t("models.actions")}
           </label>
-          <div style={{ display: "grid", gap: 8 }}>
+          <div className={styles.slotActionButtons}>
             <Button
               type="primary"
               loading={saving}
@@ -292,9 +288,9 @@ export function ModelsSection({
           </div>
         </div>
       </div>
-      <p className={styles.slotDescription}>{t("models.llmDescription")}</p>
 
       <Modal
+        rootClassName="console-management-modal"
         open={distributionOpen}
         title={t("models.distributeTitle")}
         onCancel={closeDistributionModal}
@@ -304,34 +300,22 @@ export function ModelsSection({
           loading: distributionSubmitting,
         }}
       >
-        <div style={{ display: "grid", gap: 12 }}>
-          <div style={{ color: "#666", fontSize: 12 }}>{t("models.distributeHint")}</div>
-          <div style={{ fontWeight: 500 }}>
+        <div className={styles.modalStack}>
+          <div className={styles.modalHint}>{t("models.distributeHint")}</div>
+          <div className={styles.modalCurrentValue}>
             {t("models.distributeCurrentSource", {
               provider: currentProvider?.name || currentSlot?.provider_id || "",
               model: currentSlot?.model || "",
             })}
           </div>
-          <div
-            style={{
-              padding: 12,
-              borderRadius: 8,
-              background: "#fff7e6",
-              border: "1px solid #ffd591",
-              color: "#8c5a00",
-            }}
-          >
+          <div className={styles.warningNotice}>
             {t("models.distributeOverwriteWarning")}
           </div>
-          {distributionLoading ? (
-            <div>{t("models.loading")}</div>
-          ) : (
-            <TenantTargetPicker
-              tenantIds={distributionTenantIds}
-              selectedTenantIds={selectedDistributionTenantIds}
-              onChange={setSelectedDistributionTenantIds}
-            />
-          )}
+          <TenantSelector
+            selectedTenantIds={selectedDistributionTenantIds}
+            onChange={setSelectedDistributionTenantIds}
+            excludeTenantId={currentTenantId}
+          />
         </div>
       </Modal>
     </div>

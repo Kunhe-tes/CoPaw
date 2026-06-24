@@ -7,8 +7,12 @@ import logging
 
 from fastapi import APIRouter, HTTPException, Query, Request
 
-from ...config.context import resolve_scope_preferred_tenant_id
-from ...config.utils import get_tenant_config_path, load_config
+from ...config.context import resolve_request_effective_tenant_id
+from ...config.utils import (
+    get_tenant_storage_config_path,
+    load_config,
+)
+from ..identity_resolver import resolve_user_identity
 from ..runner.api import (
     TASK_RUNS_STATE_KEY,
     _annotate_approval_action_statuses,
@@ -40,7 +44,7 @@ def _request_agent_id(request: Request, tenant_id: str | None) -> str:
         return agent_id
 
     config = (
-        load_config(get_tenant_config_path(tenant_id))
+        load_config(get_tenant_storage_config_path(tenant_id))
         if tenant_id
         else load_config()
     )
@@ -53,18 +57,34 @@ async def _get_target_workspace(
 ):
     """按目标用户获取 SWE 工作区，避免通过 Monitor 二次转发。"""
     source_id = _request_source_id(request)
-    target_tenant_id = resolve_scope_preferred_tenant_id(
+    target_tenant_id = resolve_request_effective_tenant_id(
         target_user_id,
         source_id,
     )
 
     pool = getattr(request.app.state, "tenant_workspace_pool", None)
     if pool is not None:
+        # 该入口也可能触发租户首次初始化，先补齐身份字段再写映射表。
+        resolved_identity = await resolve_user_identity(
+            tenant_id=target_user_id,
+            source_id=source_id,
+            user_name=None,
+            bbk_id=request.headers.get("X-Bbk-Id"),
+            headers={
+                key: value
+                for key, value in {
+                    "Content-Type": "application/json",
+                    "Authorization": request.headers.get("Authorization"),
+                }.items()
+                if value
+            },
+            allow_remote_lookup=True,
+        )
         await pool.ensure_bootstrap(
             target_user_id,
             source_id=source_id,
-            tenant_name=None,
-            bbk_id=request.headers.get("X-Bbk-Id"),
+            tenant_name=resolved_identity.user_name,
+            bbk_id=resolved_identity.bbk_id,
         )
 
     manager = getattr(request.app.state, "multi_agent_manager", None)

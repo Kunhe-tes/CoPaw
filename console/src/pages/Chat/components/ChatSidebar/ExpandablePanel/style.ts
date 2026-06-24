@@ -74,6 +74,32 @@ export default createGlobalStyle`
   flex-direction: column;
 }
 
+.expandable-panel-task-empty {
+  min-height: 116px;
+  padding: 24px 16px;
+  border-radius: ${DESIGN_TOKENS.radiusCard}px;
+  background: rgba(55, 105, 252, 0.035);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  text-align: center;
+}
+
+.expandable-panel-task-empty-title {
+  color: ${DESIGN_TOKENS.colorTextMuted};
+  font-size: 14px;
+  font-weight: 500;
+  line-height: 20px;
+}
+
+.expandable-panel-task-empty-description {
+  margin-top: 12px;
+  color: ${DESIGN_TOKENS.colorTextMuted};
+  font-size: 13px;
+  line-height: 20px;
+}
+
 /* ─── Task card styles ─── */
 .expandable-panel-task-card {
   padding: ${DESIGN_TOKENS.panelTaskCardPadding}px;
@@ -108,6 +134,89 @@ export default createGlobalStyle`
     background:
       linear-gradient(90deg, rgba(55, 105, 252, 0.12), rgba(55, 105, 252, 0.04));
     box-shadow: inset 0 0 0 1px rgba(55, 105, 252, 0.12);
+  }
+
+  &--selected {
+    border-color: rgba(55, 105, 252, 0.32);
+    box-shadow: inset 3px 0 0 #3769FC;
+  }
+}
+
+.expandable-panel-paused-group {
+  margin: 0 0 6px;
+}
+
+.expandable-panel-paused-toggle {
+  width: 100%;
+  min-height: 30px;
+  padding: 0 4px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  color: ${DESIGN_TOKENS.colorTextMuted};
+  font-size: 12px;
+  line-height: 18px;
+  text-align: left;
+  cursor: pointer;
+  transition: color 0.15s ease;
+
+  &::after {
+    content: "";
+    height: 1px;
+    flex: 1 1 auto;
+    margin-left: 4px;
+    background: rgba(17, 20, 45, 0.06);
+  }
+
+  &:hover {
+    color: ${DESIGN_TOKENS.colorTextSecondary};
+  }
+
+  &:focus-visible {
+    outline: 2px solid rgba(55, 105, 252, 0.32);
+    outline-offset: 1px;
+  }
+}
+
+.expandable-panel-paused-label {
+  min-width: 0;
+  color: inherit;
+  font-weight: 400;
+}
+
+.expandable-panel-paused-count {
+  flex: 0 0 auto;
+  color: inherit;
+  font-size: 12px;
+  font-weight: 400;
+  line-height: 18px;
+  font-variant-numeric: tabular-nums;
+}
+
+.expandable-panel-paused-chevron {
+  width: 10px;
+  height: 10px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: ${DESIGN_TOKENS.colorTextMuted};
+  transition: transform 0.2s ease;
+
+  &--collapsed {
+    transform: rotate(-90deg);
+  }
+}
+
+.expandable-panel-paused-items {
+  display: flex;
+  flex-direction: column;
+  margin-top: 4px;
+
+  &[hidden] {
+    display: none;
   }
 }
 
@@ -244,6 +353,27 @@ export default createGlobalStyle`
   color: ${DESIGN_TOKENS.colorTextMuted};
 }
 
+.dark-mode .expandable-panel-paused-toggle {
+  color: rgba(255, 255, 255, 0.46);
+}
+
+.dark-mode .expandable-panel-paused-toggle:hover {
+  color: rgba(255, 255, 255, 0.70);
+}
+
+.dark-mode .expandable-panel-paused-toggle::after {
+  background: rgba(255, 255, 255, 0.08);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .expandable-panel,
+  .expandable-panel-paused-toggle,
+  .expandable-panel-paused-chevron {
+    animation: none;
+    transition: none;
+  }
+}
+
 /* ─── History row styles ─── */
 .expandable-panel-history-item {
   padding: 10px 0;
@@ -285,4 +415,5 @@ export default createGlobalStyle`
   color: ${DESIGN_TOKENS.colorTextMuted};
   font-size: 13px;
 }
+
 `;

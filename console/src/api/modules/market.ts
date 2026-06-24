@@ -4,12 +4,15 @@ import { getApiUrl } from "../config";
 import type {
   FileContentResponse,
   FileTreeNode,
+  MySkill,
 } from "./mySkills";
 import type { DistributionRecord, RecallResultItem, RecallResponse } from "../types";
 
 export interface MarketSkill {
   item_id: string;
+  skill_id?: string | null;
   name: string;
+  skill_name?: string;
   chinese_name?: string;
   description: string;
   version: string;
@@ -22,6 +25,7 @@ export interface MarketSkill {
   updated_at: string | null;
   call_count: number;
   user_count: number;
+  version_unchanged?: boolean;
 }
 
 export interface MarketSkillDetail extends MarketSkill {
@@ -51,6 +55,9 @@ export interface PublishSkillRequest {
   // 可选：指定用户技能目录名，用于同步整个目录
   skill_name?: string;
   agent_id?: string;
+  overwrite?: boolean;
+  // 用户工作区版本号，用于版本快照的 source_user_version
+  source_user_version?: string;
 }
 
 export interface DistributeRequest {
@@ -84,6 +91,7 @@ async function _uploadZipToMarket(
     target_name?: string;
     rename_map?: Record<string, string>;
     category_id?: number;
+    cn_name?: string;
   }
 ): Promise<Record<string, unknown>> {
   const formData = new FormData();
@@ -105,6 +113,9 @@ async function _uploadZipToMarket(
   if (options?.category_id !== undefined) {
     params.set("category_id", String(options.category_id));
   }
+  if (options?.cn_name) {
+    params.set("cn_name", options.cn_name);
+  }
   const qs = params.toString();
   const url = getApiUrl(`${endpoint}${qs ? `?${qs}` : ""}`);
 
@@ -125,6 +136,18 @@ export const marketApi = {
   listCategories: async (sourceId: string): Promise<Category[]> => {
     const opts = mergeHeaders({ "X-Source-Id": sourceId });
     return request<Category[]>("/market/categories", opts);
+  },
+
+  createCategory: async (sourceId: string, name: string): Promise<Category> => {
+    const opts: RequestInit = {
+      method: "POST",
+      ...(mergeHeaders({
+        "Content-Type": "application/json",
+        "X-Source-Id": sourceId,
+      })),
+      body: JSON.stringify({ name }),
+    };
+    return request<Category>("/market/categories", opts);
   },
 
   listMarketSkills: async (
@@ -211,6 +234,20 @@ export const marketApi = {
     return request<void>(`/market/skills/${itemId}`, opts);
   },
 
+  deleteSkill: async (
+    sourceId: string,
+    itemId: string,
+  ): Promise<void> => {
+    const opts: RequestInit = {
+      method: "DELETE",
+      ...(mergeHeaders({
+        "X-Source-Id": sourceId,
+        "X-Manager": "true",
+      })),
+    };
+    return request<void>(`/market/skills/${itemId}/delete`, opts);
+  },
+
   distributeSkill: async (
     sourceId: string,
     itemId: string,
@@ -231,6 +268,48 @@ export const marketApi = {
     );
   },
 
+  parseSkillZip: async (
+    sourceId: string,
+    file: File,
+    marketMode?: boolean
+  ): Promise<{
+    skill_name?: string;
+    cn_name?: string;
+    skill_id?: string;
+    description?: string;
+    exists?: boolean;
+    error?: string;
+    skill_id_conflict?: string;
+    skill_id_used_count?: number;
+    skill_id_used_by?: string[];
+  }> => {
+    const formData = new FormData();
+    formData.append("file", file);
+
+    let url = getApiUrl("/market/skills/parse-zip");
+    if (marketMode) {
+      url += "?market_mode=true";
+    }
+    const headers = Object.fromEntries(
+      (mergeHeaders({
+        "X-Source-Id": sourceId,
+      }).headers as Headers).entries(),
+    );
+
+    const response = await fetch(url, {
+      method: "POST",
+      headers: new Headers(headers),
+      body: formData,
+    });
+
+    if (!response.ok) {
+      const text = await response.text();
+      return { error: text };
+    }
+
+    return await response.json();
+  },
+
   uploadSkillToWorkspace: async (
     sourceId: string,
     file: File,
@@ -240,6 +319,7 @@ export const marketApi = {
       target_name?: string;
       rename_map?: Record<string, string>;
       category_id?: number;
+      cn_name?: string;
     }
   ): Promise<{
     imported: string[];
@@ -247,6 +327,8 @@ export const marketApi = {
     enabled: boolean;
     name?: string;
     description?: string;
+    skill_id?: string;
+    cn_name?: string;
     conflicts?: Array<{
       reason: string;
       skill_name: string;
@@ -265,6 +347,8 @@ export const marketApi = {
       enabled: boolean;
       name?: string;
       description?: string;
+      skill_id?: string;
+      cn_name?: string;
       conflicts?: Array<{
         reason: string;
         skill_name: string;
@@ -278,6 +362,8 @@ export const marketApi = {
     file: File,
     options?: {
       category_id?: number;
+      overwrite?: boolean;
+      cn_name?: string;
     }
   ): Promise<{
     imported: string[];
@@ -289,6 +375,7 @@ export const marketApi = {
       skill_name: string;
       suggested_name: string;
     }>;
+    version_unchanged?: boolean;
   }> => {
     const headers = Object.fromEntries(
       (mergeHeaders({
@@ -306,6 +393,7 @@ export const marketApi = {
         skill_name: string;
         suggested_name: string;
       }>;
+      version_unchanged?: boolean;
     }>;
   },
 
@@ -343,5 +431,27 @@ export const marketApi = {
       `/market/skills/${itemId}/recall`,
       opts
     );
+  },
+
+  listUserMarketSkills: async (
+    sourceId: string,
+    userId: string,
+  ): Promise<MySkill[]> => {
+    const headers = {
+      "X-Source-Id": sourceId,
+      "X-User-Id": userId,
+      "X-Tenant-Id": userId,
+    };
+    const [mine, received] = await Promise.all([
+      request<MySkill[]>("/market/skills/mine", mergeHeaders(headers)),
+      request<MySkill[]>("/market/skills/received", mergeHeaders(headers)),
+    ]);
+    const byName = new Map<string, MySkill>();
+    for (const skill of [...(mine || []), ...(received || [])]) {
+      if (!byName.has(skill.skill_name)) {
+        byName.set(skill.skill_name, skill);
+      }
+    }
+    return Array.from(byName.values());
   },
 };

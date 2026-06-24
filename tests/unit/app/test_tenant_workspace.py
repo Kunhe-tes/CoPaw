@@ -8,6 +8,7 @@ and context reset after response.
 """
 
 import sys
+import logging
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, Mock, patch
 
@@ -223,6 +224,44 @@ class TestTenantWorkspaceHelpers:
         response = await middleware.dispatch(mock_req, call_next)
 
         assert response.status_code == 200
+
+    @pytest.mark.asyncio
+    async def test_get_workspace_logs_bootstrap_duration(self):
+        """Workspace bootstrap path emits timing diagnostics."""
+        from swe.app.middleware import tenant_workspace as workspace_module
+        from swe.app.middleware.tenant_workspace import (
+            TenantWorkspaceMiddleware,
+        )
+
+        mock_req = MagicMock(spec=Request)
+        mock_req.state = MagicMock()
+        mock_req.state.tenant_id = "tenant-1"
+        mock_req.state.source_id = None
+        mock_req.state.scope_id = None
+        mock_req.state.user_name = "alice"
+        mock_req.state.bbk_id = "bbk-1"
+        mock_req.app = MagicMock()
+        mock_req.app.state = MagicMock()
+
+        pool = MagicMock()
+        pool.ensure_bootstrap = AsyncMock()
+        pool.get_tenant_workspace_dir = MagicMock(
+            return_value=Path("/tmp/tenant-1"),
+        )
+        mock_req.app.state.tenant_workspace_pool = pool
+
+        middleware = TenantWorkspaceMiddleware(app=MagicMock())
+
+        with patch.object(workspace_module.logger, "debug") as mock_debug:
+            context = await middleware._get_workspace(mock_req, "tenant-1")
+
+        assert context is not None
+        assert any(
+            call.args
+            and "ensure_bootstrap duration_ms=" in call.args[0]
+            and call.args[2] == "tenant-1"
+            for call in mock_debug.call_args_list
+        )
 
 
 class TestTenantWorkspaceContextReset:

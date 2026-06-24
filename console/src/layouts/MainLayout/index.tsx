@@ -1,10 +1,5 @@
 import { Layout } from "antd";
-import {
-  Routes,
-  Route,
-  useLocation,
-  Navigate,
-} from "react-router-dom";
+import { Routes, Route, useLocation, Navigate } from "react-router-dom";
 import { useEffect } from "react";
 
 // ==================== iframe 集成 (Kun He) ====================
@@ -27,6 +22,7 @@ import GreetingPage from "../../pages/Control/Greeting";
 import HeartbeatPage from "../../pages/Control/Heartbeat";
 import AgentConfigPage from "../../pages/Agent/Config";
 import SystemConfigPage from "../../pages/SystemConfigPage";
+import SystemCheckPage from "../../pages/SystemCheck";
 import SkillsPage from "../../pages/Agent/Skills";
 import SkillPoolPage from "../../pages/Agent/SkillPool";
 import ToolsPage from "../../pages/Agent/Tools";
@@ -50,6 +46,8 @@ import MarketPage from "../../pages/Market";
 import MySkillsPage from "../../pages/MySkills";
 import MyMCPPage from "../../pages/MyMCP";
 
+import { useDynamicRender } from "@/components/agentscope-chat/DynamicRenderContext";
+
 const { Content } = Layout;
 
 const pathToKey: Record<string, string> = {
@@ -70,6 +68,7 @@ const pathToKey: Record<string, string> = {
   "/environments": "environments",
   "/agent-config": "agent-config",
   "/system-config-page": "system-config-page",
+  "/system-check": "system-check",
   "/security": "security",
   "/token-usage": "token-usage",
   "/voice-transcription": "voice-transcription",
@@ -78,6 +77,9 @@ const pathToKey: Record<string, string> = {
   "/analytics/messages": "analytics-messages",
   "/analytics/traces": "analytics-traces",
   "/analytics/business-overview": "analytics-business-overview",
+  "/analytics/claw-data-overview": "analytics-claw-data-overview",
+  "/analytics/cron-job-overview": "analytics-cron-job-overview",
+  "/analytics/continuous-governance": "analytics-continuous-governance",
   "/instance/overview": "instance-overview",
   "/instance/instances": "instance-instances",
   "/instance/allocations": "instance-allocations",
@@ -92,6 +94,9 @@ export default function MainLayout() {
   const location = useLocation();
   const currentPath = location.pathname;
   const selectedKey = pathToKey[currentPath] || "chat";
+
+  // 动态渲染模版上下文
+  const dynamicRender = useDynamicRender(); // 使用 useDynamicRender 钩子
 
   // ==================== iframe 集成 (Kun He) ====================
   // Sidebar 显示控制：
@@ -110,6 +115,11 @@ export default function MainLayout() {
     loadEffectiveConfig(activeSourceId);
   }, [activeSourceId, loadEffectiveConfig]);
 
+  // 初始化动态渲染模版（应用启动时预加载）
+  useEffect(() => {
+    dynamicRender.initialize();
+  }, [dynamicRender]);
+
   return (
     <Layout className={styles.mainLayout}>
       {/* ==================== 首页改版 (Kun He) ==================== */}
@@ -121,7 +131,11 @@ export default function MainLayout() {
         {/* 条件渲染 Sidebar：根据 origin 参数或 hideMenu 决定是否显示 */}
         {!shouldHideSidebar && <Sidebar selectedKey={selectedKey} />}
         {/* ==================== iframe 集成结束 ==================== */}
-        <Content className="page-container">
+        <Content
+          className={`page-container${
+            shouldHideSidebar ? "" : " page-container--with-sidebar"
+          }`}
+        >
           <ConsoleCronBubble />
           <div className="page-content">
             <Routes>
@@ -130,10 +144,7 @@ export default function MainLayout() {
               <Route path="/channels" element={<ChannelsPage />} />
               <Route path="/sessions" element={<SessionsPage />} />
               <Route path="/cron-jobs" element={<CronJobsPage />} />
-              <Route
-                path="/greeting-management"
-                element={<GreetingPage />}
-              />
+              <Route path="/greeting-management" element={<GreetingPage />} />
               <Route
                 path="/featured-cases-management"
                 element={<FeaturedCasesPage />}
@@ -149,6 +160,7 @@ export default function MainLayout() {
               <Route path="/environments" element={<EnvironmentsPage />} />
               <Route path="/agent-config" element={<AgentConfigPage />} />
               <Route path="/system-config-page" element={<SystemConfigPage />} />
+              <Route path="/system-check" element={<SystemCheckPage />} />
               <Route path="/security" element={<SecurityPage />} />
               <Route path="/token-usage" element={<TokenUsagePage />} />
               <Route
@@ -158,10 +170,19 @@ export default function MainLayout() {
               <Route path="/analytics/*" element={<AnalyticsPage />} />
               <Route path="/monitor/*" element={<MonitorPage />} />
               <Route path="/instance/*" element={<InstancePage />} />
-              <Route path="/continuous-iteration" element={<ContinuousIterationPage />} />
+              <Route
+                path="/continuous-iteration"
+                element={<ContinuousIterationPage />}
+              />
               {/* ==================== 测试路由 ==================== */}
-              <Route path="/test-download-card" element={<TestDownloadCardPage />} />
-              <Route path="/test-user-detail-modal" element={<TestUserDetailModalPage />} />
+              <Route
+                path="/test-download-card"
+                element={<TestDownloadCardPage />}
+              />
+              <Route
+                path="/test-user-detail-modal"
+                element={<TestUserDetailModalPage />}
+              />
               {/* ==================== 测试路由结束 ==================== */}
               <Route path="/market" element={<MarketPage />} />
               <Route path="/my-skills" element={<MySkillsPage />} />

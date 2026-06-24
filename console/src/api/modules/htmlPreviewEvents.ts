@@ -24,6 +24,7 @@ function withClickRuntimeContext(
     ...payload,
     source_id: payload.source_id || iframeContext.source || DEFAULT_SOURCE_ID,
     user_id: payload.user_id || getUserId(),
+    user_name: payload.user_name || iframeContext.userName || null,
     bbk_id: payload.bbk_id || iframeContext.bbk || null,
   };
 }
@@ -129,9 +130,17 @@ export const htmlPreviewEventsApi = {
     startTime?: string | null;
     endTime?: string | null;
     bbkIds?: string | null;
+    page?: number;
+    pageSize?: number;
     limit?: number;
   }) => {
     const search = buildSearchParams(params);
+    if (params?.page) {
+      search.set("page", String(params.page));
+    }
+    if (params?.pageSize) {
+      search.set("page_size", String(params.pageSize));
+    }
     const query = search.toString();
     return request<HtmlPreviewListSummaryResponse>(
       `/html-preview/lists${query ? `?${query}` : ""}`,

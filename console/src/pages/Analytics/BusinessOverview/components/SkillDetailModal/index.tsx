@@ -3,7 +3,7 @@ import { Modal, Spin, Pagination, Tag, Empty, message } from "antd";
 import { Wrench, User, Bot } from "lucide-react";
 import dayjs from "dayjs";
 import { tracingApi, TraceListItem, TraceDetail } from "../../../../../api/modules/tracing";
-import { getBbkDisplayName } from "../../types";
+import { getBbkDisplayName } from "../../../../../constants/bbk";
 import styles from "./index.module.less";
 
 interface SkillDetailModalProps {

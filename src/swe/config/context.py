@@ -7,10 +7,18 @@ in a multi-tenant environment.
 """
 
 import base64
+import logging
+import os
+from contextlib import contextmanager
 from contextvars import ContextVar, Token
 from pathlib import Path
 from typing import Any, Generator
-from contextlib import contextmanager
+
+logger = logging.getLogger(__name__)
+
+FILE_URL_NETWORK_OFFICE = "office"
+FILE_URL_NETWORK_BUSINESS = "business"
+_DEFAULT_FILE_URL_BASE = "http://localhost:8088"
 
 # Context variable to store the current tenant ID
 current_tenant_id: ContextVar[str | None] = ContextVar(
@@ -40,6 +48,12 @@ current_source_id: ContextVar[str | None] = ContextVar(
 current_scope_id: ContextVar[str | None] = ContextVar(
     "current_scope_id",
     default=None,
+)
+
+# 静态文件访问域名需要跟随请求网络环境，默认保持办公网兼容旧行为。
+current_file_url_network: ContextVar[str] = ContextVar(
+    "current_file_url_network",
+    default=FILE_URL_NETWORK_OFFICE,
 )
 
 _LEGACY_SCOPE_ID_PREFIX = "scope.v1"
@@ -128,6 +142,61 @@ def set_current_scope_id(scope_id: str | None) -> Token:
 def reset_current_scope_id(token: Token) -> None:
     """Reset the current runtime scope ID using a token."""
     current_scope_id.reset(token)
+
+
+def normalize_file_url_network(value: Any) -> str:
+    """规范化静态文件访问网络，未知值回退到办公网。"""
+    network = str(value or "").strip().lower()
+    if network in {FILE_URL_NETWORK_OFFICE, FILE_URL_NETWORK_BUSINESS}:
+        return network
+    if network:
+        logger.warning(
+            "Invalid file_url_network=%r, fallback to office network",
+            value,
+        )
+    return FILE_URL_NETWORK_OFFICE
+
+
+def get_current_file_url_network() -> str:
+    """读取当前请求的静态文件访问网络。"""
+    return current_file_url_network.get()
+
+
+def set_current_file_url_network(value: Any) -> Token:
+    """设置当前请求的静态文件访问网络。"""
+    return current_file_url_network.set(normalize_file_url_network(value))
+
+
+def reset_current_file_url_network(token: Token) -> None:
+    """重置当前请求的静态文件访问网络。"""
+    current_file_url_network.reset(token)
+
+
+def _clean_file_url_base(value: str | None) -> str | None:
+    """清理静态文件域名配置，空字符串视为未配置。"""
+    base = (value or "").strip().rstrip("/")
+    return base or None
+
+
+def resolve_file_url_base(network: Any = None) -> tuple[str, str]:
+    """解析静态文件访问域名，并返回实际生效的网络。"""
+    requested_network = normalize_file_url_network(
+        network if network is not None else get_current_file_url_network(),
+    )
+    office_base = (
+        _clean_file_url_base(os.getenv("FILE_URL_OFFICE"))
+        or _clean_file_url_base(os.getenv("FILE_URL"))
+        or _DEFAULT_FILE_URL_BASE
+    )
+    if requested_network == FILE_URL_NETWORK_BUSINESS:
+        business_base = _clean_file_url_base(os.getenv("FILE_URL_BUSINESS"))
+        if business_base:
+            return business_base, FILE_URL_NETWORK_BUSINESS
+        logger.warning(
+            "FILE_URL_BUSINESS is not configured, "
+            "fallback to office network",
+        )
+    return office_base, FILE_URL_NETWORK_OFFICE
 
 
 def is_valid_identity_value(identity: str) -> bool:
@@ -232,6 +301,12 @@ def resolve_runtime_tenant_id(
     """
     if tenant_id is None:
         return None
+    if tenant_id == "default":
+        if not source_id:
+            return "default"
+        return f"default_{source_id}"
+    if tenant_id.startswith("default_"):
+        return tenant_id
     legacy_prefix = f"{_LEGACY_SCOPE_ID_PREFIX}."
     if tenant_id.startswith(legacy_prefix):
         return canonicalize_scope_id(tenant_id)
@@ -247,6 +322,57 @@ def resolve_runtime_tenant_id(
     return tenant_id
 
 
+def resolve_storage_tenant_id(
+    tenant_id: str | None,
+    source_id: str | None,
+    *,
+    scope_id: str | None = None,
+) -> str | None:
+    """解析配置、目录与模板资产使用的存储租户标识。
+
+    这里显式区分 runtime 与 storage 两种语义：
+
+    - default + source：固定落到 ``default_{source}`` 模板目录
+    - 非 default + source：保持当前 runtime scope 目录策略
+    - 历史/显式 scope：继续 canonicalize 兼容
+
+    Args:
+        tenant_id: 逻辑 tenant 或已编码 scope。
+        source_id: 来源标识。
+        scope_id: 可选显式 runtime scope。
+
+    Returns:
+        用于目录和配置访问的存储租户标识。
+    """
+    if tenant_id is None:
+        return None
+
+    if tenant_id == "default":
+        if not source_id:
+            return "default"
+        return f"default_{source_id}"
+    if tenant_id.startswith("default_"):
+        return tenant_id
+
+    resolved_scope_id = scope_id
+    if resolved_scope_id is not None:
+        return canonicalize_scope_id(resolved_scope_id)
+
+    legacy_prefix = f"{_LEGACY_SCOPE_ID_PREFIX}."
+    if tenant_id.startswith(legacy_prefix):
+        return canonicalize_scope_id(tenant_id)
+
+    decoded_identity = _decode_runtime_scope_identity(
+        tenant_id,
+        source_id,
+    )
+    if decoded_identity is not None:
+        return decoded_identity[2]
+
+    runtime_tenant_id = resolve_runtime_tenant_id(tenant_id, source_id)
+    return runtime_tenant_id or tenant_id
+
+
 def resolve_scope_preferred_tenant_id(
     tenant_id: str | None,
     source_id: str | None = None,
@@ -256,6 +382,31 @@ def resolve_scope_preferred_tenant_id(
     if scope_id is not None:
         return canonicalize_scope_id(scope_id)
     return resolve_runtime_tenant_id(tenant_id, source_id)
+
+
+def resolve_request_effective_tenant_id(
+    tenant_id: str | None,
+    source_id: str | None = None,
+    scope_id: str | None = None,
+) -> str | None:
+    """解析请求应访问的有效租户目录。
+
+    规则：
+    - ``default + source`` 固定访问 ``default_{source}``
+    - 其他租户继续优先使用显式/当前 ``scope_id``
+    - 无 ``source`` 时保持既有 runtime 解析行为
+    """
+    if tenant_id is None:
+        return None
+
+    if tenant_id == "default":
+        return resolve_storage_tenant_id(tenant_id, source_id)
+
+    return resolve_scope_preferred_tenant_id(
+        tenant_id,
+        source_id,
+        scope_id,
+    )
 
 
 def resolve_runtime_identity(

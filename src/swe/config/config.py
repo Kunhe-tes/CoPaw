@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 import json
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any, Optional, Dict, List, Literal
 from enum import Enum
 
@@ -192,6 +193,7 @@ class ZhaohuConfig(BaseChannelConfig):
             "",
         ),
     )
+    session_end_push_enabled: bool = False
 
 
 class ConsoleConfig(BaseChannelConfig):
@@ -208,6 +210,98 @@ class ChannelConfig(BaseModel):
 
     console: ConsoleConfig = ConsoleConfig()
     zhaohu: ZhaohuConfig = ZhaohuConfig()
+
+
+CHANNEL_MANAGEMENT_META_KEYS = frozenset({"_constraints", "isBuiltin"})
+CONSOLE_CHANNEL_REASON_KEY = "channels.constraints.console_enabled_mandatory"
+CONSOLE_CHANNEL_REASON = (
+    "Console channel is system-managed and always enabled."
+)
+
+
+def get_channel_management_constraints(
+    channel_name: str,
+) -> dict[str, dict[str, Any]]:
+    """Return sparse field-level constraints for channel management."""
+    if channel_name != "console":
+        return {}
+    return {
+        "enabled": {
+            "readOnly": True,
+            "enforcedValue": True,
+            "reasonKey": CONSOLE_CHANNEL_REASON_KEY,
+            "reason": CONSOLE_CHANNEL_REASON,
+        },
+    }
+
+
+def strip_channel_management_meta(value: Any) -> Any:
+    """Remove management-only metadata from incoming channel payloads."""
+    if isinstance(value, dict):
+        return {
+            key: item
+            for key, item in value.items()
+            if key not in CHANNEL_MANAGEMENT_META_KEYS
+        }
+    return value
+
+
+def normalize_single_channel_config(
+    channel_name: str,
+    value: Any,
+    *,
+    materialize_missing: bool = False,
+):
+    """Normalize one channel config according to system invariants."""
+    if channel_name != "console":
+        return strip_channel_management_meta(value)
+
+    if value is None:
+        return ConsoleConfig() if materialize_missing else None
+
+    value = strip_channel_management_meta(value)
+    if isinstance(value, dict):
+        normalized = dict(value)
+        normalized["enabled"] = True
+        return normalized
+
+    if isinstance(value, BaseModel):
+        copied = value.model_copy(deep=True)
+        if hasattr(copied, "enabled"):
+            copied.enabled = True
+        return copied
+
+    if isinstance(value, SimpleNamespace):
+        normalized = SimpleNamespace(**vars(value))
+        normalized.enabled = True
+        return normalized
+
+    if hasattr(value, "enabled"):
+        setattr(value, "enabled", True)
+    return value
+
+
+def normalize_channel_config_set(
+    channels: ChannelConfig | None,
+    *,
+    materialize_missing_console: bool = False,
+) -> ChannelConfig | None:
+    """Normalize a ChannelConfig object without writing it back to disk."""
+    if channels is None:
+        if not materialize_missing_console:
+            return None
+        normalized = ChannelConfig()
+        normalized.console.enabled = True
+        normalized.zhaohu.enabled = False
+        return normalized
+
+    normalized = channels.model_copy(deep=True)
+    normalized.console = normalize_single_channel_config(
+        "console",
+        normalized.console,
+        materialize_missing=True,
+    )
+    return normalized
 
 
 class LastApiConfig(BaseModel):
@@ -1671,9 +1765,9 @@ def _resolve_agent_root_config_path(
     if tenant_id is None:
         return None
 
-    from .utils import get_tenant_config_path
+    from .utils import get_tenant_storage_config_path
 
-    return get_tenant_config_path(tenant_id)
+    return get_tenant_storage_config_path(tenant_id)
 
 
 def load_agent_config(

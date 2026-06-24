@@ -12,7 +12,14 @@ import { IAgentScopeRuntimeMessage, AgentScopeRuntimeRunStatus } from "../core/A
 interface CopyFileToStaticData {
   name: string;
   arguments: { file_path: string };
-  output: { ok: boolean; path?: string; message?: string; error?: string };
+  output: {
+    ok: boolean;
+    path?: string;
+    url?: string;
+    network?: "office" | "business" | string;
+    message?: string;
+    error?: string;
+  };
 }
 
 interface CopyFileToStaticProps {
@@ -55,11 +62,43 @@ function extractPlainText(value: any): string | null {
   return null;
 }
 
+function parseMarkdownStaticPath(path?: string): {
+  fileName?: string;
+  url?: string;
+} {
+  if (!path) {
+    return {};
+  }
+  const pathMatch = path.match(/!\[([^\]]+)\]\(([^)]+)\)/);
+  if (!pathMatch) {
+    return {};
+  }
+  return {
+    fileName: pathMatch[1],
+    url: pathMatch[2],
+  };
+}
+
+function fileNameFromUrl(url?: string): string | undefined {
+  if (!url) {
+    return undefined;
+  }
+  try {
+    const parsedUrl = new URL(url);
+    const lastSegment = parsedUrl.pathname.split("/").filter(Boolean).pop();
+    return lastSegment ? decodeURIComponent(lastSegment) : undefined;
+  } catch {
+    const cleanPath = url.split(/[?#]/)[0];
+    const lastSegment = cleanPath.split("/").filter(Boolean).pop();
+    return lastSegment ? decodeURIComponent(lastSegment) : undefined;
+  }
+}
+
 /**
  * Parse the tool output JSON to extract filename and URL
- * Output format: { ok: true, path: "![filename](url)", message: "..." }
+ * Output format: { ok: true, url: "...", path: "![filename](url)", message: "..." }
  */
-function parseToolOutput(output: CopyFileToStaticData["output"]): {
+export function parseToolOutput(output: CopyFileToStaticData["output"]): {
   success: boolean;
   fileName?: string;
   url?: string;
@@ -86,6 +125,17 @@ function parseToolOutput(output: CopyFileToStaticData["output"]): {
 
   if (!parsedOutput.ok) {
     return { success: false, error: parsedOutput.error || "工具执行失败" };
+  }
+
+  const markdownPath = parseMarkdownStaticPath(parsedOutput.path);
+  const structuredUrl =
+    typeof parsedOutput.url === "string" && parsedOutput.url.trim()
+      ? parsedOutput.url.trim()
+      : undefined;
+  const selectedUrl = structuredUrl || markdownPath.url;
+  if (selectedUrl) {
+    const fileName = markdownPath.fileName || fileNameFromUrl(selectedUrl);
+    return { success: true, fileName, url: selectedUrl };
   }
 
   if (!parsedOutput.path) {

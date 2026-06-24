@@ -1,3 +1,15 @@
+export interface ChannelFieldConstraint<T = unknown> {
+  readOnly?: boolean;
+  enforcedValue?: T;
+  reasonKey?: string;
+  reason?: string;
+}
+
+export interface ChannelConstraints {
+  enabled?: ChannelFieldConstraint<boolean>;
+  [key: string]: ChannelFieldConstraint | undefined;
+}
+
 export interface BaseChannelConfig {
   enabled: boolean;
   bot_prefix: string;
@@ -7,6 +19,8 @@ export interface BaseChannelConfig {
   group_policy?: "open" | "allowlist";
   allow_from?: string[];
   require_mention?: boolean;
+  isBuiltin?: boolean;
+  _constraints?: ChannelConstraints;
 }
 
 export interface IMessageChannelConfig extends BaseChannelConfig {
@@ -115,6 +129,7 @@ export interface ZhaohuConfig extends BaseChannelConfig {
   robot_open_id: string;
   client_id: string;
   client_secret: string;
+  session_end_push_enabled?: boolean;
 }
 
 export interface ChannelConfig {

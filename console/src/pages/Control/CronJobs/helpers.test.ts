@@ -5,6 +5,7 @@ import {
   buildCronJobFormValues,
   buildCronJobSubmitPayload,
   getBroadcastResultMessage,
+  normalizeSkillIdsInput,
 } from "./helpers";
 
 function buildCronJob(
@@ -63,6 +64,19 @@ describe("CronJobs helpers", () => {
     expect(result.cronDaysOfWeek).toEqual(["mon", "wed"]);
   });
 
+  it("hydrates notification delay as hours when stored minutes divide by 60", () => {
+    const result = buildCronJobFormValues(
+      buildCronJob({
+        meta: {
+          notification_delay_minutes: 120,
+        },
+      }),
+    );
+
+    expect(result.notificationDelayValue).toBe(2);
+    expect(result.notificationDelayUnit).toBe("hours");
+  });
+
   it("builds submit payload with explicit model_slot for agent jobs", () => {
     const result = buildCronJobSubmitPayload({
       ...buildCronJob(),
@@ -70,6 +84,8 @@ describe("CronJobs helpers", () => {
       cronTime: dayjs().hour(8).minute(30),
       cronDaysOfWeek: ["mon", "fri"],
       execution_model_key: "openai::gpt-5.4",
+      notificationDelayValue: 2,
+      notificationDelayUnit: "hours",
       request: {
         input: JSON.stringify([{ role: "user", content: [] }]),
       },
@@ -80,7 +96,39 @@ describe("CronJobs helpers", () => {
       provider_id: "openai",
       model: "gpt-5.4",
     });
+    expect(result.meta?.notification_delay_minutes).toBe(120);
     expect(result.request?.input).toEqual([{ role: "user", content: [] }]);
+  });
+
+  it("normalizes manually entered skill ids before submit", () => {
+    expect(normalizeSkillIdsInput("a, b\nc a")).toBe("a,b,c");
+  });
+
+  it("rejects invalid skill id characters", () => {
+    expect(() => normalizeSkillIdsInput("bad/id")).toThrow();
+  });
+
+  it("rejects skill ids beyond the API length limit", () => {
+    expect(() => normalizeSkillIdsInput("x".repeat(201))).toThrow();
+  });
+
+  it("maps form skillIds to API skill_ids in submit payload", () => {
+    const result = buildCronJobSubmitPayload({
+      ...buildCronJob(),
+      skillIds: "a b",
+    });
+
+    expect(result.skill_ids).toBe("a,b");
+  });
+
+  it("hydrates API skill_ids into form skillIds when editing", () => {
+    const result = buildCronJobFormValues(
+      buildCronJob({
+        skill_ids: "a,b",
+      }),
+    );
+
+    expect(result.skillIds).toBe("a,b");
   });
 
   it("clears model_slot for text jobs on submit", () => {
@@ -117,7 +165,7 @@ describe("CronJobs helpers", () => {
       ]),
     ).toEqual({
       tone: "warning",
-      text: "Broadcasted 1 tenants, 1 using tenant default model",
+      text: "Broadcasted 1 tenants, 1 with warnings",
     });
   });
 

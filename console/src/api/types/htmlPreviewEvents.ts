@@ -1,6 +1,7 @@
 export interface HtmlPreviewClickEventPayload {
   source_id?: string | null;
   user_id?: string | null;
+  user_name?: string | null;
   bbk_id?: string | null;
   cron_task_id?: string | null;
   cron_task_name?: string | null;
@@ -47,6 +48,7 @@ export interface HtmlPreviewClickEventItem {
   id: number;
   source_id?: string | null;
   user_id?: string | null;
+  user_name?: string | null;
   bbk_id?: string | null;
   cron_task_id?: string | null;
   cron_task_name?: string | null;
@@ -76,6 +78,8 @@ export interface HtmlPreviewCustomerClickSummaryItem {
   phone_count: number;
   plan_count: number;
   total_click_count: number;
+  last_clicked_user_id?: string | null;
+  last_clicked_user_name?: string | null;
   last_clicked_at?: string | null;
 }
 
@@ -126,6 +130,11 @@ export interface HtmlPreviewListSummaryItem {
 
 export interface HtmlPreviewListSummaryResponse {
   success: boolean;
+  total?: number;
+  clicked_list_count?: number;
+  page?: number;
+  page_size?: number;
+  summary?: HtmlPreviewListSummaryItem;
   items: HtmlPreviewListSummaryItem[];
 }
 
@@ -134,6 +143,19 @@ export interface HtmlPreviewCustomerClickItem {
   customer_name: string;
   list_key?: string | null;
   list_name?: string | null;
+  insight_count: number;
+  phone_count: number;
+  plan_count: number;
+  total_click_count: number;
+  last_clicked_user_id?: string | null;
+  last_clicked_user_name?: string | null;
+  manager_clicks?: HtmlPreviewCustomerManagerClickItem[];
+  last_clicked_at?: string | null;
+}
+
+export interface HtmlPreviewCustomerManagerClickItem {
+  user_id: string;
+  user_name?: string | null;
   insight_count: number;
   phone_count: number;
   plan_count: number;

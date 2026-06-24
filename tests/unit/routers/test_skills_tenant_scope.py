@@ -10,7 +10,7 @@ from importlib.machinery import ModuleSpec
 from pathlib import Path
 from types import ModuleType, SimpleNamespace
 from typing import cast
-from swe.config.context import encode_scope_id
+from swe.config.context import encode_scope_id, resolve_storage_tenant_id
 
 SRC_ROOT = Path(__file__).parent.parent.parent.parent / "src"
 _ROUTER_FILE = SRC_ROOT / "swe" / "app" / "routers" / "skills.py"
@@ -166,7 +166,7 @@ def test_list_pool_skills_passes_tenant_working_dir(
 
     monkeypatch.setattr(
         skills_router,
-        "get_tenant_working_dir_strict",
+        "get_tenant_request_working_dir",
         resolve_tenant_dir,
     )
 
@@ -205,7 +205,7 @@ def test_list_pool_skills_returns_tenant_local_results(
 
     monkeypatch.setattr(
         skills_router,
-        "get_tenant_working_dir_strict",
+        "get_tenant_request_working_dir",
         lambda tenant_id=None: tmp_path / str(tenant_id),
     )
 
@@ -252,7 +252,7 @@ def test_update_pool_skill_config_uses_tenant_manifest_path(
 
     monkeypatch.setattr(
         skills_router,
-        "get_tenant_working_dir_strict",
+        "get_tenant_request_working_dir",
         resolve_tenant_dir,
     )
 
@@ -310,7 +310,7 @@ def test_update_pool_skill_config_only_mutates_current_tenant(
 
     monkeypatch.setattr(
         skills_router,
-        "get_tenant_working_dir_strict",
+        "get_tenant_request_working_dir",
         lambda tenant_id=None: tmp_path / str(tenant_id),
     )
 
@@ -340,9 +340,11 @@ def test_list_broadcast_tenants_returns_discovered_tenant_ids(
         _source_id=None,
         *,
         source_filter=False,
+        include_templates=False,
     ):
+        assert include_templates is True
         del source_filter
-        return ["default", "tenant-a", "tenant-b"]
+        return ["default_ruice", "tenant-a", "tenant-b"]
 
     monkeypatch.setattr(
         skills_router,
@@ -352,7 +354,7 @@ def test_list_broadcast_tenants_returns_discovered_tenant_ids(
 
     result = asyncio.run(skills_router.list_broadcast_tenants(_request()))
 
-    assert result.tenant_ids == ["default", "tenant-a", "tenant-b"]
+    assert result.tenant_ids == ["default_ruice", "tenant-a", "tenant-b"]
 
 
 def test_list_broadcast_tenants_uses_source_scoped_logical_ids(
@@ -364,10 +366,12 @@ def test_list_broadcast_tenants_uses_source_scoped_logical_ids(
         source_id: str | None = None,
         *,
         source_filter: bool = False,
+        include_templates: bool = False,
     ) -> list[str]:
+        assert include_templates is True
         del source_filter
         observed.append(source_id)
-        return ["default", "tenant-a"]
+        return ["default_ruice", "tenant-a"]
 
     monkeypatch.setattr(
         skills_router,
@@ -380,14 +384,14 @@ def test_list_broadcast_tenants_uses_source_scoped_logical_ids(
     )
 
     assert observed == ["ruice"]
-    assert result.tenant_ids == ["default", "tenant-a"]
+    assert result.tenant_ids == ["default_ruice", "tenant-a"]
 
 
 def test_list_workspace_skill_sources_uses_effective_tenant_id(
     monkeypatch,
 ) -> None:
     observed: list[str | None] = []
-    scope_id = encode_scope_id("default", "ruice")
+    effective_tenant_id = "default_ruice"
 
     def fake_list_workspaces(
         tenant_id: str | None = None,
@@ -397,7 +401,9 @@ def test_list_workspace_skill_sources_uses_effective_tenant_id(
             {
                 "agent_id": "default",
                 "agent_name": "Default",
-                "workspace_dir": f"/tmp/{scope_id}/workspaces/default",
+                "workspace_dir": (
+                    f"/tmp/{effective_tenant_id}/workspaces/default"
+                ),
             },
         ]
 
@@ -414,8 +420,10 @@ def test_list_workspace_skill_sources_uses_effective_tenant_id(
         ),
     )
 
-    assert observed == [scope_id]
-    assert result[0].workspace_dir == f"/tmp/{scope_id}/workspaces/default"
+    assert observed == [effective_tenant_id]
+    assert result[0].workspace_dir == (
+        f"/tmp/{effective_tenant_id}/workspaces/default"
+    )
 
 
 def test_upload_workspace_skill_to_pool_uses_effective_tenant_id(
@@ -423,12 +431,13 @@ def test_upload_workspace_skill_to_pool_uses_effective_tenant_id(
     tmp_path: Path,
 ) -> None:
     observed: dict[str, object] = {"workspace_tenant_ids": []}
-    scope_id = encode_scope_id("default", "ruice")
+    effective_tenant_id = "default_ruice"
 
     monkeypatch.setattr(
         skills_router,
-        "get_tenant_working_dir_strict",
-        lambda tenant_id=None: tmp_path / str(tenant_id),
+        "get_tenant_request_working_dir",
+        lambda tenant_id=None: tmp_path
+        / (effective_tenant_id if tenant_id == "default" else str(tenant_id)),
     )
 
     def fake_workspace_dir_for_agent(
@@ -439,7 +448,7 @@ def test_upload_workspace_skill_to_pool_uses_effective_tenant_id(
         workspace_tenant_ids = observed["workspace_tenant_ids"]
         assert isinstance(workspace_tenant_ids, list)
         workspace_tenant_ids.append(tenant_id)
-        return tmp_path / scope_id / "workspaces" / agent_id
+        return tmp_path / effective_tenant_id / "workspaces" / agent_id
 
     class FakeSkillPoolService:
         def __init__(self, *, working_dir: Path) -> None:
@@ -481,10 +490,10 @@ def test_upload_workspace_skill_to_pool_uses_effective_tenant_id(
         ),
     )
 
-    assert observed["workspace_tenant_ids"] == [scope_id]
-    assert observed["working_dir"] == tmp_path / scope_id
+    assert observed["workspace_tenant_ids"] == [effective_tenant_id]
+    assert observed["working_dir"] == tmp_path / effective_tenant_id
     assert observed["workspace_dir"] == (
-        tmp_path / scope_id / "workspaces" / "default"
+        tmp_path / effective_tenant_id / "workspaces" / "default"
     )
     assert result == {"success": True, "name": "guidance"}
 
@@ -494,12 +503,13 @@ def test_download_pool_skill_to_workspaces_uses_effective_tenant_id(
     tmp_path: Path,
 ) -> None:
     observed: dict[str, object] = {"workspace_tenant_ids": []}
-    scope_id = encode_scope_id("default", "ruice")
+    effective_tenant_id = "default_ruice"
 
     monkeypatch.setattr(
         skills_router,
-        "get_tenant_working_dir_strict",
-        lambda tenant_id=None: tmp_path / str(tenant_id),
+        "get_tenant_request_working_dir",
+        lambda tenant_id=None: tmp_path
+        / (effective_tenant_id if tenant_id == "default" else str(tenant_id)),
     )
 
     def fake_workspace_dir_for_agent(
@@ -510,7 +520,7 @@ def test_download_pool_skill_to_workspaces_uses_effective_tenant_id(
         workspace_tenant_ids = observed["workspace_tenant_ids"]
         assert isinstance(workspace_tenant_ids, list)
         workspace_tenant_ids.append((agent_id, tenant_id))
-        return tmp_path / scope_id / "workspaces" / agent_id
+        return tmp_path / effective_tenant_id / "workspaces" / agent_id
 
     class FakeSkillPoolService:
         def __init__(self, working_dir: Path) -> None:
@@ -582,10 +592,10 @@ def test_download_pool_skill_to_workspaces_uses_effective_tenant_id(
     )
 
     assert observed["workspace_tenant_ids"] == [
-        ("default", scope_id),
-        ("default", scope_id),
+        ("default", effective_tenant_id),
+        ("default", effective_tenant_id),
     ]
-    assert observed["working_dir"] == tmp_path / scope_id
+    assert observed["working_dir"] == tmp_path / effective_tenant_id
     assert result == {
         "downloaded": [
             {
@@ -625,7 +635,7 @@ def test_broadcast_pool_skills_to_bootstrapped_tenant(
 
     monkeypatch.setattr(
         skills_router,
-        "get_tenant_working_dir_strict",
+        "get_tenant_request_working_dir",
         lambda tenant_id=None: tmp_path / str(tenant_id),
     )
 
@@ -708,8 +718,9 @@ def test_broadcast_pool_skills_bootstraps_missing_tenant(
 
     monkeypatch.setattr(
         skills_router,
-        "get_tenant_working_dir_strict",
-        lambda tenant_id=None: tmp_path / str(tenant_id),
+        "get_tenant_request_working_dir",
+        lambda tenant_id=None: tmp_path
+        / resolve_storage_tenant_id(tenant_id, "ruice"),
     )
 
     bootstrap_calls: list[str] = []
@@ -801,7 +812,7 @@ def test_broadcast_pool_skills_uses_source_scoped_default_as_source(
     monkeypatch,
     tmp_path: Path,
 ) -> None:
-    source_tenant = tmp_path / encode_scope_id("default", "ruice")
+    source_tenant = tmp_path / "default_ruice"
     target_tenant = tmp_path / "tenant-b"
     target_workspace = target_tenant / "workspaces" / "default"
 
@@ -816,8 +827,9 @@ def test_broadcast_pool_skills_uses_source_scoped_default_as_source(
 
     monkeypatch.setattr(
         skills_router,
-        "get_tenant_working_dir_strict",
-        lambda tenant_id=None: tmp_path / str(tenant_id),
+        "get_tenant_request_working_dir",
+        lambda tenant_id=None: tmp_path
+        / resolve_storage_tenant_id(tenant_id, "ruice"),
     )
 
     class FakeInitializer:
@@ -854,10 +866,83 @@ def test_broadcast_pool_skills_uses_source_scoped_default_as_source(
     )
 
     assert result.results[0].success is True
+
+
+def test_broadcast_pool_skills_writes_default_target_to_source_template(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    source_tenant = tmp_path / "default_ruice"
+    target_tenant = tmp_path / "default_ruice"
+    target_workspace = target_tenant / "workspaces" / "default"
+
+    _write_skill(
+        get_skill_pool_dir(working_dir=source_tenant) / "guidance",
+        "default source guidance",
+    )
+    reconcile_pool_manifest(working_dir=source_tenant)
+    _write_workspace_scaffold(target_workspace)
+    reconcile_workspace_manifest(target_workspace)
+    reconcile_pool_manifest(working_dir=target_tenant)
+
+    monkeypatch.setattr(
+        skills_router,
+        "get_tenant_request_working_dir",
+        lambda tenant_id=None: tmp_path
+        / ("default_ruice" if tenant_id == "default" else str(tenant_id)),
+    )
+
+    class FakeInitializer:
+        def __init__(
+            self,
+            base_working_dir: Path,
+            tenant_id: str,
+            source_id: str | None = None,
+        ):
+            del base_working_dir
+            self.tenant_dir = tmp_path / (
+                "default_ruice"
+                if tenant_id == "default" and source_id == "ruice"
+                else tenant_id
+            )
+
+        def has_seeded_bootstrap(self) -> bool:
+            return True
+
+        def ensure_seeded_bootstrap(self) -> dict[str, object]:
+            raise AssertionError("should not bootstrap an existing tenant")
+
+    monkeypatch.setitem(
+        sys.modules,
+        "swe.app.workspace.tenant_initializer",
+        SimpleNamespace(TenantInitializer=FakeInitializer),
+    )
+
+    result = asyncio.run(
+        skills_router.broadcast_pool_skills_to_default_agents(
+            _request("default", "ruice"),
+            skills_router.BroadcastDefaultAgentsRequest(
+                skill_names=["guidance"],
+                target_tenant_ids=["default"],
+                overwrite=True,
+            ),
+        ),
+    )
+
+    assert result.results[0].success is True
+    assert (target_tenant / "skill_pool" / "guidance" / "SKILL.md").exists()
+    assert (
+        target_tenant
+        / "workspaces"
+        / "default"
+        / "skills"
+        / "guidance"
+        / "SKILL.md"
+    ).exists()
     copied_skill = (
         get_skill_pool_dir(working_dir=target_tenant) / "guidance" / "SKILL.md"
     ).read_text(encoding="utf-8")
-    assert "source scoped guidance" in copied_skill
+    assert "default source guidance" in copied_skill
 
 
 def test_broadcast_pool_skills_reports_partial_success(
@@ -873,7 +958,7 @@ def test_broadcast_pool_skills_reports_partial_success(
 
     monkeypatch.setattr(
         skills_router,
-        "get_tenant_working_dir_strict",
+        "get_tenant_request_working_dir",
         lambda tenant_id=None: tmp_path / str(tenant_id),
     )
 
@@ -941,7 +1026,7 @@ def test_broadcast_pool_skills_rejects_missing_source_skill(
 ) -> None:
     monkeypatch.setattr(
         skills_router,
-        "get_tenant_working_dir_strict",
+        "get_tenant_request_working_dir",
         lambda tenant_id=None: tmp_path / str(tenant_id),
     )
 

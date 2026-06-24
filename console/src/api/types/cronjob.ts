@@ -34,6 +34,7 @@ export interface CronJobRequest {
 
 export interface CronJobState {
   next_run_at?: string | null;
+  next_run_times?: string[] | null;
   last_run_at?: string | null;
   last_status?: "success" | "error" | "running" | "skipped" | "cancelled" | null;
   last_error?: string | null;
@@ -60,6 +61,7 @@ export interface CronJobSpecInput {
   schedule: CronJobSchedule;
   task_type?: "text" | "agent";
   text?: string;
+  skill_ids?: string;
   model_slot?: ModelSlotConfig | null;
   request?: CronJobRequest;
   dispatch: CronJobDispatch;
@@ -90,8 +92,55 @@ export interface CronBroadcastTenantResult {
   warning: string;
 }
 
+export interface CronBroadcastTarget {
+  tenant_id: string;
+  tenant_name?: string | null;
+  bbk_id?: string | null;
+}
+
+export interface CronBroadcastOptions {
+  enable_offset?: boolean;
+  offset_window_hours?: number;
+}
+
 export interface CronBroadcastResponse {
   results: CronBroadcastTenantResult[];
+}
+
+export interface CronBroadcastChildItem {
+  tenant_id: string;
+  tenant_name?: string | null;
+  bbk_id?: string | null;
+  job_id: string;
+  job_name: string;
+  enabled: boolean;
+  cron: string;
+  timezone: string;
+  offset_minutes: number;
+  last_status?: string | null;
+  last_run_at?: string | null;
+  last_error?: string | null;
+}
+
+export interface CronBroadcastChildrenResponse {
+  items: CronBroadcastChildItem[];
+}
+
+export interface CronBroadcastChildRef {
+  tenant_id: string;
+  job_id: string;
+}
+
+export interface CronBroadcastChildOperationResult {
+  tenant_id: string;
+  job_id: string;
+  success: boolean;
+  status: "deleted" | "started" | "skipped" | "failed" | string;
+  message: string;
+}
+
+export interface CronBroadcastChildrenBatchResponse {
+  results: CronBroadcastChildOperationResult[];
 }
 
 export type CronJobSpecInputLegacy = Record<string, unknown>;

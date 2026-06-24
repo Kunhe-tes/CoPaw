@@ -20,6 +20,7 @@ logger = logging.getLogger(__name__)
 _EXPORT_HEADERS = [
     "trace_id",
     "user_id",
+    "user_name",
     "session_id",
     "channel",
     "user_message",
@@ -227,14 +228,15 @@ class TracingExportService:
 
         # Excel 表头（中文）
         excel_headers = [
-            "Trace ID",
-            "User ID",
-            "Session ID",
-            "Channel",
-            "User Message",
-            "Model Name",
-            "Start Time",
-            "Duration (ms)",
+            "追踪ID",
+            "用户ID",
+            "用户姓名",
+            "会话ID",
+            "渠道",
+            "用户消息",
+            "模型名称",
+            "开始时间",
+            "耗时（ms）",
         ]
 
         for column, header in enumerate(excel_headers, 1):
@@ -249,12 +251,12 @@ class TracingExportService:
             for column, value in enumerate(self._build_export_row(message), 1):
                 cell = ws.cell(row=row, column=column, value=value)
                 cell.border = thin_border
-                if column == 5:  # 用户消息列自动换行
+                if column == 6:  # 用户消息列自动换行（列位置调整）
                     cell.alignment = Alignment(wrap_text=True, vertical="top")
 
         # 设置列宽
         for column, width in enumerate(
-            [36, 20, 36, 15, 60, 25, 22, 12],
+            [36, 20, 15, 36, 15, 60, 25, 22, 12],
             1,
         ):
             ws.column_dimensions[get_column_letter(column)].width = width
@@ -285,6 +287,7 @@ class TracingExportService:
         return [
             message.trace_id,
             message.user_id,
+            message.user_name or "",
             message.session_id,
             message.channel,
             message.user_message or "",

@@ -39,6 +39,36 @@ from ...constant import (
 logger = logging.getLogger(__name__)
 
 
+async def _cancel_lifecycle_task(
+    lifecycle_task: asyncio.Task | None,
+) -> None:
+    """主动取消生命周期任务，避免超时清理被底层 I/O 反向卡住。"""
+    if lifecycle_task is None:
+        return
+
+    lifecycle_task.cancel()
+    try:
+        await lifecycle_task
+    except asyncio.CancelledError:
+        current_task = asyncio.current_task()
+        if current_task is not None and current_task.cancelling():
+            raise
+
+
+async def _finalize_lifecycle_task(
+    lifecycle_task: asyncio.Task | None,
+) -> None:
+    """Ensure a lifecycle task is drained without masking the caller error."""
+    if lifecycle_task is None:
+        return
+
+    if lifecycle_task.done():
+        await asyncio.gather(lifecycle_task, return_exceptions=True)
+        return
+
+    await _cancel_lifecycle_task(lifecycle_task)
+
+
 async def _call_with_timeout(
     coro,
     timeout: float,
@@ -222,6 +252,7 @@ class StdIOStatefulClient(StatefulClientBase):
         self._reload_event = asyncio.Event()
         self._ready_event = asyncio.Event()
         self._stop_event = asyncio.Event()
+        self._startup_waiter: asyncio.Future[None] | None = None
 
         # Session state
         self.session: ClientSession | None = None
@@ -261,6 +292,11 @@ class StdIOStatefulClient(StatefulClientBase):
                     # Mark as connected and signal ready
                     self.is_connected = True
                     self._ready_event.set()
+                    if (
+                        self._startup_waiter is not None
+                        and not self._startup_waiter.done()
+                    ):
+                        self._startup_waiter.set_result(None)
                     logger.info(f"MCP client connected: {self.name}")
 
                     # Wait for reload or stop signal
@@ -287,6 +323,11 @@ class StdIOStatefulClient(StatefulClientBase):
                 # Context manager exits cleanly in THIS task
 
             except Exception as e:
+                startup_failed = (
+                    self._startup_waiter is not None
+                    and not self._startup_waiter.done()
+                    and not self.is_connected
+                )
                 logger.error(
                     f"Error in MCP client lifecycle for {self.name}: {e}",
                     exc_info=True,
@@ -295,6 +336,9 @@ class StdIOStatefulClient(StatefulClientBase):
                 self.is_connected = False
                 self._cached_tools = None
                 self._ready_event.clear()
+                if startup_failed:
+                    self._startup_waiter.set_exception(e)
+                    break
                 await asyncio.sleep(1)
 
         logger.info(f"MCP client lifecycle task exited: {self.name}")
@@ -317,20 +361,42 @@ class StdIOStatefulClient(StatefulClientBase):
 
         # Start lifecycle task
         self._stop_event.clear()
+        self._ready_event.clear()
+        self._startup_waiter = asyncio.get_running_loop().create_future()
         self._lifecycle_task = asyncio.create_task(self._run_lifecycle())
 
         # Wait for initial connection
         try:
-            await asyncio.wait_for(self._ready_event.wait(), timeout=timeout)
+            await asyncio.wait_for(
+                asyncio.shield(self._startup_waiter),
+                timeout=timeout,
+            )
         except asyncio.TimeoutError:
             logger.error(
                 f"Timeout waiting for MCP client '{self.name}' to connect",
             )
-            # Clean up failed task
             self._stop_event.set()
-            if self._lifecycle_task:
-                await self._lifecycle_task
+            await _finalize_lifecycle_task(self._lifecycle_task)
+            self._lifecycle_task = None
+            self.session = None
+            self.is_connected = False
+            self._cached_tools = None
+            self._ready_event.clear()
+            if self._startup_waiter and not self._startup_waiter.done():
+                self._startup_waiter.cancel()
+            self._startup_waiter = None
             raise
+        except Exception:
+            self._stop_event.set()
+            await _finalize_lifecycle_task(self._lifecycle_task)
+            self._lifecycle_task = None
+            self.session = None
+            self.is_connected = False
+            self._cached_tools = None
+            self._ready_event.clear()
+            self._startup_waiter = None
+            raise
+        self._startup_waiter = None
 
     async def close(self, ignore_errors: bool = True) -> None:
         """Close MCP client and clean up resources.
@@ -560,6 +626,7 @@ class HttpStatefulClient(StatefulClientBase):
         self._reload_event = asyncio.Event()
         self._ready_event = asyncio.Event()
         self._stop_event = asyncio.Event()
+        self._startup_waiter: asyncio.Future[None] | None = None
 
         # Session state
         self.session: ClientSession | None = None
@@ -636,6 +703,11 @@ class HttpStatefulClient(StatefulClientBase):
                     # Mark as connected and signal ready
                     self.is_connected = True
                     self._ready_event.set()
+                    if (
+                        self._startup_waiter is not None
+                        and not self._startup_waiter.done()
+                    ):
+                        self._startup_waiter.set_result(None)
                     logger.info(f"MCP client connected: {self.name}")
 
                     # Wait for reload or stop signal
@@ -660,6 +732,11 @@ class HttpStatefulClient(StatefulClientBase):
                 # Context manager exits cleanly in THIS task
 
             except Exception as e:
+                startup_failed = (
+                    self._startup_waiter is not None
+                    and not self._startup_waiter.done()
+                    and not self.is_connected
+                )
                 logger.error(
                     f"Error in MCP client lifecycle for {self.name}: {e}",
                     exc_info=True,
@@ -668,6 +745,9 @@ class HttpStatefulClient(StatefulClientBase):
                 self.is_connected = False
                 self._cached_tools = None
                 self._ready_event.clear()
+                if startup_failed:
+                    self._startup_waiter.set_exception(e)
+                    break
                 await asyncio.sleep(1)
 
         logger.info(f"MCP client lifecycle task exited: {self.name}")
@@ -689,18 +769,41 @@ class HttpStatefulClient(StatefulClientBase):
             )
 
         self._stop_event.clear()
+        self._ready_event.clear()
+        self._startup_waiter = asyncio.get_running_loop().create_future()
         self._lifecycle_task = asyncio.create_task(self._run_lifecycle())
 
         try:
-            await asyncio.wait_for(self._ready_event.wait(), timeout=timeout)
+            await asyncio.wait_for(
+                asyncio.shield(self._startup_waiter),
+                timeout=timeout,
+            )
         except asyncio.TimeoutError:
             logger.error(
                 f"Timeout waiting for MCP client '{self.name}' to connect",
             )
             self._stop_event.set()
-            if self._lifecycle_task:
-                await self._lifecycle_task
+            await _finalize_lifecycle_task(self._lifecycle_task)
+            self._lifecycle_task = None
+            self.session = None
+            self.is_connected = False
+            self._cached_tools = None
+            self._ready_event.clear()
+            if self._startup_waiter and not self._startup_waiter.done():
+                self._startup_waiter.cancel()
+            self._startup_waiter = None
             raise
+        except Exception:
+            self._stop_event.set()
+            await _finalize_lifecycle_task(self._lifecycle_task)
+            self._lifecycle_task = None
+            self.session = None
+            self.is_connected = False
+            self._cached_tools = None
+            self._ready_event.clear()
+            self._startup_waiter = None
+            raise
+        self._startup_waiter = None
 
     async def close(self, ignore_errors: bool = True) -> None:
         """Close MCP client and clean up resources.

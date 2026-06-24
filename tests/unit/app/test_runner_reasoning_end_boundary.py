@@ -139,6 +139,8 @@ async def test_stream_tool_call_uses_async_summary(monkeypatch) -> None:
     ]
 
     assert events[0].content[0].data["summary"] == "搜索 tenant 相关代码"
+    assert events[0].content[0].data["tool_status"] == "running"
+    assert "tool_error" not in events[0].content[0].data
 
 
 @pytest.mark.asyncio
@@ -178,6 +180,8 @@ async def test_stream_tool_output_falls_back_to_rule_summary(
     ]
 
     assert events[0].content[0].data["output_summary"] == "共找到 2 项内容"
+    assert events[0].content[0].data["tool_status"] == "success"
+    assert events[0].content[0].data["tool_error"] is None
 
 
 @pytest.mark.asyncio
@@ -228,8 +232,133 @@ async def test_stream_tool_output_summary_timeout_does_not_block_stream(
 
     assert started.is_set()
     assert events[0].content[0].data["output_summary"] == "共找到 2 项内容"
+    assert events[0].content[0].data["tool_status"] == "success"
+    assert events[0].content[0].data["tool_error"] is None
 
     release.set()
+
+
+@pytest.mark.asyncio
+async def test_stream_tool_output_marks_failed_status(monkeypatch) -> None:
+    event = Message(
+        id="tool-4",
+        type=MessageType.FUNCTION_CALL_OUTPUT,
+        role=Role.ASSISTANT,
+        status=RunStatus.InProgress,
+        content=[
+            DataContent(
+                data={
+                    "name": "grep_search",
+                    "output": {"error": "permission denied"},
+                },
+                delta=False,
+                index=0,
+            ),
+        ],
+    )
+
+    async def source():
+        yield event
+
+    async def fake_summary(**_kwargs):
+        return "failed summary"
+
+    monkeypatch.setattr(
+        "swe.app.runner.stream_boundary.async_generate_tool_output_summary",
+        fake_summary,
+    )
+
+    events = [
+        item async for item in normalize_reasoning_boundary_stream(source())
+    ]
+
+    assert events[0].content[0].data["tool_status"] == "failed"
+    assert events[0].content[0].data["tool_error"] == "permission denied"
+    assert events[0].content[0].data["output_summary"] == "failed summary"
+
+
+@pytest.mark.asyncio
+async def test_stream_tool_output_marks_structured_json_failure(
+    monkeypatch,
+) -> None:
+    event = Message(
+        id="tool-4b",
+        type=MessageType.FUNCTION_CALL_OUTPUT,
+        role=Role.ASSISTANT,
+        status=RunStatus.InProgress,
+        content=[
+            DataContent(
+                data={
+                    "name": "grep_search",
+                    "output": (
+                        '{"isError": true, "error_type": "permission_denied", '
+                        '"content": [{"type": "text", '
+                        '"text": "permission denied"}]}'
+                    ),
+                },
+                delta=False,
+                index=0,
+            ),
+        ],
+    )
+
+    async def source():
+        yield event
+
+    async def fake_summary(**_kwargs):
+        return "failed summary"
+
+    monkeypatch.setattr(
+        "swe.app.runner.stream_boundary.async_generate_tool_output_summary",
+        fake_summary,
+    )
+
+    events = [
+        item async for item in normalize_reasoning_boundary_stream(source())
+    ]
+
+    assert events[0].content[0].data["tool_status"] == "failed"
+    assert events[0].content[0].data["tool_error"] == "permission denied"
+    assert events[0].content[0].data["output_summary"] == "failed summary"
+
+
+@pytest.mark.asyncio
+async def test_stream_silent_tool_event_is_filtered_before_status_enrichment(
+    monkeypatch,
+) -> None:
+    event = Message(
+        id="tool-5",
+        type=MessageType.FUNCTION_CALL,
+        role=Role.ASSISTANT,
+        status=RunStatus.InProgress,
+        content=[
+            DataContent(
+                data={
+                    "name": "update_task_progress",
+                    "arguments": '{"done": true}',
+                },
+                delta=False,
+                index=0,
+            ),
+        ],
+    )
+
+    async def source():
+        yield event
+
+    async def unexpected_summary(**_kwargs):
+        raise AssertionError("silent tool should not be enriched")
+
+    monkeypatch.setattr(
+        "swe.app.runner.stream_boundary.async_generate_tool_call_summary",
+        unexpected_summary,
+    )
+
+    events = [
+        item async for item in normalize_reasoning_boundary_stream(source())
+    ]
+
+    assert events == []
 
 
 async def _collect_events(stream) -> list[Message]:

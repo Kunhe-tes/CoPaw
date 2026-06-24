@@ -4,6 +4,7 @@
 """Tests for model_factory tenant integration."""
 
 import sys
+import logging
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -279,6 +280,67 @@ class TestFileBlockSupportFormatter:
         )
         assert "developer" not in {message["role"] for message in messages}
 
+    def test_formatter_supports_structured_failed_tool_result(self):
+        """Structured failed tool outputs remain readable to the model."""
+        from agentscope.formatter import OpenAIChatFormatter
+
+        formatter_class = _create_file_block_support_formatter(
+            OpenAIChatFormatter,
+        )
+
+        text, multimodal = formatter_class.convert_tool_result_to_string(
+            {
+                "isError": True,
+                "error_type": "permission_denied",
+                "content": [
+                    {
+                        "type": "text",
+                        "text": "permission denied",
+                    },
+                ],
+            },
+        )
+
+        assert text == "permission denied"
+        assert multimodal == []
+
+    def test_formatter_supports_file_blocks(self):
+        """File blocks are converted into readable text and metadata."""
+        from agentscope.formatter import OpenAIChatFormatter
+
+        formatter_class = _create_file_block_support_formatter(
+            OpenAIChatFormatter,
+        )
+
+        text, multimodal = formatter_class.convert_tool_result_to_string(
+            [
+                {
+                    "type": "text",
+                    "text": "artifact generated",
+                },
+                {
+                    "type": "file",
+                    "path": "/tmp/report.txt",
+                    "name": "report.txt",
+                },
+            ],
+        )
+
+        assert text == (
+            "- artifact generated\n"
+            "- The returned file 'report.txt' can be found at: /tmp/report.txt"
+        )
+        assert multimodal == [
+            (
+                "/tmp/report.txt",
+                {
+                    "type": "file",
+                    "path": "/tmp/report.txt",
+                    "name": "report.txt",
+                },
+            ),
+        ]
+
 
 class TestCreateModelAndFormatterTenantIntegration:
     """Tests for tenant-aware model creation."""
@@ -390,6 +452,53 @@ class TestCreateModelAndFormatterTenantIntegration:
                 str(call) for call in mock_pm_class.get_instance.call_args_list
             ]
             assert any("tenant-a" in call for call in calls)
+
+    def test_logs_model_factory_duration(self):
+        """Factory emits timing diagnostics for model creation."""
+        import swe.agents.model_factory as model_factory_module
+        from swe.agents.model_factory import create_model_and_formatter
+
+        with patch(
+            "swe.agents.model_factory.ProviderManager",
+        ) as mock_pm_class:
+            mock_manager = MagicMock()
+            from swe.providers.models import ModelSlotConfig
+
+            mock_manager.get_active_model.return_value = ModelSlotConfig(
+                provider_id="openai",
+                model="gpt-4",
+            )
+            mock_pm_class.get_instance.return_value = mock_manager
+            mock_pm_class.ensure_tenant_provider_storage = MagicMock()
+
+            mock_provider = MagicMock()
+            mock_model = MagicMock()
+            mock_model.__class__.__name__ = "OpenAIChatModel"
+            mock_provider.get_chat_model_instance.return_value = mock_model
+            mock_manager.get_provider.return_value = mock_provider
+
+            with patch.object(
+                model_factory_module.logger,
+                "debug",
+            ) as mock_debug:
+                with patch(
+                    "swe.agents.model_factory._create_formatter_instance",
+                ):
+                    with patch(
+                        "swe.agents.model_factory.TokenRecordingModelWrapper",
+                        side_effect=lambda _provider_id, model: model,
+                    ):
+                        with patch(
+                            "swe.agents.model_factory.RetryChatModel",
+                            side_effect=lambda model, **_kwargs: model,
+                        ):
+                            create_model_and_formatter()
+
+        assert any(
+            call.args
+            and "create_model_and_formatter_duration_ms=" in call.args[0]
+            for call in mock_debug.call_args_list
+        )
 
     def test_passes_effective_tenant_and_agent_scope_to_retry_model(self):
         """Factory propagates limiter scope and config to RetryChatModel."""

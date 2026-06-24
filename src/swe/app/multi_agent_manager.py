@@ -7,10 +7,14 @@ including lazy loading, lifecycle management, and hot reloading.
 
 import asyncio
 import logging
+import time
 from typing import Dict, Set, Optional
 
 from .workspace import Workspace
-from ..config.utils import load_config, get_tenant_config_path
+from ..config.utils import (
+    get_tenant_storage_config_path,
+    load_config,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -29,12 +33,14 @@ class MultiAgentManager:
         self,
         *,
         source_system_config_service: object | None = None,
+        continuous_governance_service: object | None = None,
     ):
         """Initialize multi-agent manager."""
         self.agents: Dict[str, Workspace] = {}
         self._lock = asyncio.Lock()
         self._cleanup_tasks: Set[asyncio.Task] = set()
         self._source_system_config_service = source_system_config_service
+        self._continuous_governance_service = continuous_governance_service
         logger.debug("MultiAgentManager initialized")
 
     def set_source_system_config_service(
@@ -43,6 +49,13 @@ class MultiAgentManager:
     ) -> None:
         """Update the source config service for future workspaces."""
         self._source_system_config_service = source_system_config_service
+
+    def set_continuous_governance_service(
+        self,
+        continuous_governance_service: object | None,
+    ) -> None:
+        """更新后续工作区使用的持续治理服务。"""
+        self._continuous_governance_service = continuous_governance_service
 
     @staticmethod
     def _cache_key(agent_id: str, tenant_id: Optional[str] = None) -> str:
@@ -53,9 +66,9 @@ class MultiAgentManager:
 
     @staticmethod
     def _load_agent_config_for_tenant(tenant_id: Optional[str] = None):
-        """Load agent config from tenant path when tenant context is provided."""
+        """按存储语义加载租户配置，避免请求目录再次回退到 runtime scope。"""
         if tenant_id:
-            return load_config(get_tenant_config_path(tenant_id))
+            return load_config(get_tenant_storage_config_path(tenant_id))
         return load_config()
 
     async def get_agent(
@@ -78,11 +91,17 @@ class MultiAgentManager:
         Raises:
             ValueError: If agent ID not found in configuration
         """
+        started_at = time.perf_counter()
         cache_key = self._cache_key(agent_id, tenant_id)
         async with self._lock:
             # Return existing agent if already loaded
             if cache_key in self.agents:
-                logger.debug(f"Returning cached agent: {cache_key}")
+                duration_ms = int((time.perf_counter() - started_at) * 1000)
+                logger.debug(
+                    "workspace_cache_hit cache_key=%s duration_ms=%d",
+                    cache_key,
+                    duration_ms,
+                )
                 return self.agents[cache_key]
 
             # Load configuration to get agent reference
@@ -102,7 +121,12 @@ class MultiAgentManager:
                 agent_id=agent_id,
                 workspace_dir=agent_ref.workspace_dir,
                 tenant_id=tenant_id,
-                source_system_config_service=self._source_system_config_service,
+                source_system_config_service=(
+                    self._source_system_config_service
+                ),
+                continuous_governance_service=(
+                    self._continuous_governance_service
+                ),
             )
 
             try:
@@ -110,6 +134,12 @@ class MultiAgentManager:
                 instance.set_manager(self)  # Set manager reference
                 self.agents[cache_key] = instance
                 logger.info(f"Workspace created and started: {cache_key}")
+                duration_ms = int((time.perf_counter() - started_at) * 1000)
+                logger.debug(
+                    "workspace_cache_miss cache_key=%s duration_ms=%d",
+                    cache_key,
+                    duration_ms,
+                )
                 return instance
             except Exception as e:
                 logger.error(f"Failed to start workspace {cache_key}: {e}")
@@ -298,7 +328,10 @@ class MultiAgentManager:
             agent_id=agent_id,
             workspace_dir=agent_ref.workspace_dir,
             tenant_id=tenant_id,
-            source_system_config_service=self._source_system_config_service,
+            source_system_config_service=(self._source_system_config_service),
+            continuous_governance_service=(
+                self._continuous_governance_service
+            ),
         )
 
         # Step 3.5: Set reusable components from old instance (if any)

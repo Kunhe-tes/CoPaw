@@ -8,21 +8,65 @@ import {
   buildExecutionModelKey,
   parseExecutionModelKey,
 } from "@/hooks/useExecutionModelOptions";
+import {
+  getNotificationDelayFormValue,
+  toNotificationDelayMinutes,
+  type NotificationDelayUnit,
+} from "@/utils/cron";
 import type { CronParts } from "./components/parseCron";
 import { parseCron, serializeCron } from "./components/parseCron";
+
+const SKILL_IDS_PATTERN = /^[A-Za-z0-9_.:-]+$/;
+const MAX_SKILL_IDS_LENGTH = 200;
 
 export type CronJobFormValues = CronJobSpecOutput & {
   cronType?: string;
   cronTime?: dayjs.Dayjs;
   cronDaysOfWeek?: string[];
   cronCustom?: string;
+  skillIds?: string;
   execution_model_key?: string;
+  notificationDelayValue?: number;
+  notificationDelayUnit?: NotificationDelayUnit;
 };
+
+export function normalizeSkillIdsInput(value?: unknown): string | undefined {
+  if (typeof value !== "string") {
+    return undefined;
+  }
+
+  const skillIds = Array.from(
+    new Set(
+      value
+        .trim()
+        .split(/[,\s]+/)
+        .filter(Boolean),
+    ),
+  );
+
+  for (const skillId of skillIds) {
+    if (!SKILL_IDS_PATTERN.test(skillId)) {
+      throw new Error("技能ID只能包含字母、数字、下划线、点、冒号和短横线");
+    }
+  }
+
+  const normalized = skillIds.join(",");
+  if (!normalized) {
+    return undefined;
+  }
+  if (normalized.length > MAX_SKILL_IDS_LENGTH) {
+    throw new Error("绑定技能ID总长度不能超过200个字符");
+  }
+  return normalized;
+}
 
 export function buildCronJobFormValues(
   job: CronJobSpecOutput,
 ): CronJobFormValues {
   const cronParts = parseCron(job.schedule?.cron || "0 9 * * *");
+  const notificationDelay = getNotificationDelayFormValue(
+    job.meta?.notification_delay_minutes,
+  );
   const formValues: CronJobFormValues = {
     ...job,
     request: {
@@ -32,7 +76,10 @@ export function buildCronJobFormValues(
         : "",
     },
     cronType: cronParts.type,
+    skillIds: job.skill_ids || "",
     execution_model_key: buildExecutionModelKey(job.model_slot),
+    notificationDelayValue: notificationDelay.value,
+    notificationDelayUnit: notificationDelay.unit,
   };
 
   if (cronParts.type === "daily" || cronParts.type === "weekly") {
@@ -71,13 +118,29 @@ export function buildCronJobSubmitPayload(
   const cronExpression = serializeCron(cronParts);
   const {
     execution_model_key: executionModelKey,
+    notificationDelayValue,
+    notificationDelayUnit,
+    skillIds,
+    skill_ids: existingSkillIds,
     ...rawValues
   } = values;
+  const normalizedSkillIds = normalizeSkillIdsInput(
+    skillIds ?? existingSkillIds,
+  );
+  const notificationDelayMinutes = toNotificationDelayMinutes(
+    notificationDelayValue,
+    notificationDelayUnit || "minutes",
+  );
   let processedValues: Record<string, any> = {
     ...rawValues,
     schedule: {
       ...values.schedule,
       cron: cronExpression,
+    },
+    skill_ids: normalizedSkillIds,
+    meta: {
+      ...(values.meta || {}),
+      notification_delay_minutes: notificationDelayMinutes,
     },
     model_slot:
       values.task_type === "agent"
@@ -114,7 +177,7 @@ export function getBroadcastResultMessage(
   if (warningCount > 0) {
     return {
       tone: "warning",
-      text: `Broadcasted ${successCount} tenants, ${warningCount} using tenant default model`,
+      text: `Broadcasted ${successCount} tenants, ${warningCount} with warnings`,
     };
   }
   return {

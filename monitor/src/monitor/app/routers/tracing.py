@@ -7,7 +7,7 @@
 
 import logging
 from datetime import datetime, timedelta
-from typing import List, Optional
+from typing import List, Literal, Optional
 
 import httpx
 from fastapi import APIRouter, Query, HTTPException, Request, Body
@@ -17,6 +17,8 @@ from pydantic import BaseModel, Field
 logger = logging.getLogger(__name__)
 
 from ..models.tracing import (
+    ErrorItem,
+    ErrorListResponse,
     ErrorSummary,
     OverviewStats,
     TraceDetail,
@@ -29,6 +31,8 @@ from ..models.tracing import (
     DepthSummary,
     ExtractCustomerNamesRequest,
     ExtractCustomerNamesResponse,
+    InputTokensMismatchItem,
+    InputTokensFixItem,
 )
 from ..services.tracing import TracingQueryService, TracingExportService
 from ..services.tracing.extract_service import ExtractCustomerNamesService
@@ -85,6 +89,44 @@ def _parse_date(
             status_code=400,
             detail=f"Invalid {field_name} format",
         ) from exc
+
+
+def _validate_session_resource_filter(
+    resource_type: Optional[Literal["model", "skill", "mcp_tool"]],
+    resource_name: Optional[str],
+    mcp_server: Optional[str],
+) -> tuple[Optional[str], Optional[str], Optional[str]]:
+    """Validate and normalize optional session resource filtering."""
+    normalized_name = resource_name.strip() if resource_name else None
+    normalized_server = mcp_server.strip() if mcp_server else None
+
+    if resource_type is None:
+        if normalized_name or normalized_server:
+            raise HTTPException(
+                status_code=400,
+                detail="resource_type is required when resource filter fields are provided",
+            )
+        return None, None, None
+
+    if not normalized_name:
+        raise HTTPException(
+            status_code=400,
+            detail="resource_name is required",
+        )
+
+    if resource_type == "mcp_tool":
+        if not normalized_server:
+            raise HTTPException(
+                status_code=400,
+                detail="mcp_server is required for mcp_tool filters",
+            )
+    elif normalized_server:
+        raise HTTPException(
+            status_code=400,
+            detail="mcp_server is only valid for mcp_tool filters",
+        )
+
+    return resource_type, normalized_name, normalized_server
 
 
 router = APIRouter(prefix="/monitor/tracing", tags=["tracing"])
@@ -149,13 +191,17 @@ async def get_users(
     end_date: Optional[str] = Query(None, description="结束日期 (YYYY-MM-DD)"),
     sort_by: Optional[str] = Query(
         None,
-        description="排序字段: conversations, last_active",
+        description="排序字段: manual_calls, cron_executions, cron_reads, last_active",
     ),
     filter_user_type: Optional[str] = Query(
         "filtered",
         description="用户过滤类型: filtered(过滤80/IT开头用户), all(仅过滤default用户)",
     ),
     bbk_ids: Optional[str] = Query(None, description="按分行号筛选"),
+    metric_type: Optional[str] = Query(
+        "manual",
+        description="口径类型: manual(主动使用), cron_exec(定时执行), cron_read(结果查看)",
+    ),
 ) -> dict:
     """获取用户列表及其统计信息.
 
@@ -165,8 +211,9 @@ async def get_users(
         user_id: 按用户 ID 筛选
         start_date: 开始日期筛选
         end_date: 结束日期筛选
-        sort_by: 排序字段（conversations, last_active）
-        filter_user_type: 用户过滤类型（filtered/all）
+        sort_by: 排序字段
+        filter_user_type: 用户过滤类型
+        metric_type: 口径类型（manual/cron_exec/cron_read）
 
     Returns:
         分页的用户列表及统计信息
@@ -187,12 +234,14 @@ async def get_users(
         sort_by,
         filter_user_type,
         bbk_ids,
+        metric_type,
     )
     return {
         "items": [u.model_dump() for u in users],
         "total": total,
         "page": page,
         "page_size": page_size,
+        "metric_type": metric_type,
     }
 
 
@@ -321,6 +370,36 @@ async def get_trace_detail(
     return detail
 
 
+@router.get("/session/{session_id}/traces")
+async def get_session_traces(
+    session_id: str,
+    request: Request,
+    error_trace_id: Optional[str] = Query(
+        None,
+        description="报错的 Trace ID（用于标记报错轮次）",
+    ),
+) -> dict:
+    """获取 Session 所有轮次的对话.
+
+    返回该会话的所有对话轮次，按时间顺序排列，
+    并标记报错发生的轮次。
+
+    Args:
+        session_id: 会话 ID
+        error_trace_id: 报错的 Trace ID（可选）
+
+    Returns:
+        包含所有轮次的对话数据
+    """
+    service = TracingQueryService.get_instance()
+
+    result = await service.get_session_traces(session_id, error_trace_id)
+    if result is None:
+        raise HTTPException(status_code=404, detail="Session not found")
+
+    return result
+
+
 @router.get(
     "/traces/{trace_id}/timeline",
     response_model=TraceDetailWithTimeline,
@@ -373,6 +452,19 @@ async def get_sessions(
     ),
     end_date: Optional[str] = Query(None, description="结束日期 (YYYY-MM-DD)"),
     bbk_ids: Optional[str] = Query(None, description="按分行号筛选"),
+    has_error: Optional[bool] = Query(None, description="是否筛选报错会话"),
+    resource_type: Optional[Literal["model", "skill", "mcp_tool"]] = Query(
+        None,
+        description="资源筛选类型",
+    ),
+    resource_name: Optional[str] = Query(
+        None,
+        description="模型名、技能名或 MCP 工具名",
+    ),
+    mcp_server: Optional[str] = Query(
+        None,
+        description="MCP 服务名，仅 mcp_tool 类型使用",
+    ),
 ) -> dict:
     """获取会话列表及其统计信息.
 
@@ -383,6 +475,10 @@ async def get_sessions(
         session_id: 按会话 ID 筛选（模糊匹配）
         start_date: 开始日期筛选
         end_date: 结束日期筛选
+        has_error: 是否筛选报错会话（True=只返回报错会话，None=返回全部）
+        resource_type: 资源筛选类型
+        resource_name: 资源名称
+        mcp_server: MCP 服务名
 
     Returns:
         分页的会话列表及统计信息
@@ -392,6 +488,13 @@ async def get_sessions(
 
     start = _parse_date(start_date, "start_date")
     end = _parse_date(end_date, "end_date", add_day=True)
+    resource_type, resource_name, mcp_server = (
+        _validate_session_resource_filter(
+            resource_type,
+            resource_name,
+            mcp_server,
+        )
+    )
 
     sessions, total = await service.get_sessions(
         source_id=actual_source_id,
@@ -402,6 +505,10 @@ async def get_sessions(
         start_date=start,
         end_date=end,
         bbk_ids=bbk_ids,
+        has_error=has_error,
+        resource_type=resource_type,
+        resource_name=resource_name,
+        mcp_server=mcp_server,
     )
     return {
         "items": [s.model_dump() for s in sessions],
@@ -1020,6 +1127,46 @@ async def get_error_summary(
     return summary
 
 
+@router.get("/error/list", response_model=ErrorListResponse)
+async def get_error_list(
+    request: Request,
+    start_date: Optional[str] = Query(
+        None,
+        description="开始日期 (YYYY-MM-DD)",
+    ),
+    end_date: Optional[str] = Query(None, description="结束日期 (YYYY-MM-DD)"),
+    bbk_ids: Optional[str] = Query(None, description="分行ID筛选"),
+    error_type: Optional[str] = Query(
+        None,
+        description="错误类型: llm_input / tool_call_end",
+    ),
+    search: Optional[str] = Query(None, description="搜索关键词"),
+    page: int = Query(1, ge=1, description="页码"),
+    page_size: int = Query(10, ge=1, le=100, description="每页数量"),
+) -> ErrorListResponse:
+    """获取报错列表.
+
+    返回错误详情列表，支持按错误类型过滤和关键词搜索。
+    """
+    actual_source_id = _get_source_id_from_header(request)
+    service = TracingQueryService.get_instance()
+
+    start = _parse_date(start_date, "start_date")
+    end = _parse_date(end_date, "end_date", add_day=True)
+
+    result = await service.get_error_list(
+        actual_source_id,
+        start,
+        end,
+        bbk_ids,
+        error_type,
+        search,
+        page,
+        page_size,
+    )
+    return result
+
+
 # ===== 使用深度统计 =====
 
 
@@ -1199,6 +1346,7 @@ async def batch_update_tracing_user_info(
 
     按 user_id 去重查询，对每个唯一 user_id 只调用一次 API，
     然后批量更新该 user_id 对应的所有 traces 和 spans（不限定 source_id）。
+    只要 user_name 或 bbk_id 任一缺失，就纳入回填范围。
 
     Args:
         request: FastAPI 请求对象
@@ -1229,7 +1377,10 @@ async def batch_update_tracing_user_info(
         FROM swe_tracing_traces
         WHERE user_id IS NOT NULL
           AND user_id != ''
-          AND (user_name IS NULL OR user_name = '')
+          AND (
+                user_name IS NULL OR user_name = ''
+                OR bbk_id IS NULL OR bbk_id = ''
+          )
         LIMIT %s
     """
     unique_users = await db.fetch_all(query, (batch_size,))
@@ -1249,7 +1400,10 @@ async def batch_update_tracing_user_info(
         SELECT COUNT(*) as cnt
         FROM swe_tracing_traces
         WHERE user_id IN ({placeholders})
-          AND (user_name IS NULL OR user_name = '')
+          AND (
+                user_name IS NULL OR user_name = ''
+                OR bbk_id IS NULL OR bbk_id = ''
+          )
     """
     count_result = await db.fetch_one(count_query, tuple(unique_user_ids))
     total = count_result["cnt"] if count_result else 0
@@ -1292,7 +1446,10 @@ async def batch_update_tracing_user_info(
             UPDATE swe_tracing_traces
             SET user_name = %s, bbk_id = %s
             WHERE user_id = %s
-              AND (user_name IS NULL OR user_name = '')
+              AND (
+                    user_name IS NULL OR user_name = ''
+                    OR bbk_id IS NULL OR bbk_id = ''
+              )
         """
         traces_updated = await db.execute_many(traces_query, updates_by_user)
 
@@ -1301,7 +1458,10 @@ async def batch_update_tracing_user_info(
             UPDATE swe_tracing_spans
             SET user_name = %s, bbk_id = %s
             WHERE user_id = %s
-              AND (user_name IS NULL OR user_name = '')
+              AND (
+                    user_name IS NULL OR user_name = ''
+                    OR bbk_id IS NULL OR bbk_id = ''
+              )
         """
         spans_updated = await db.execute_many(spans_query, updates_by_user)
 
@@ -1392,3 +1552,136 @@ async def extract_customer_names(
             status_code=500,
             detail=f"Failed to extract customer names: {e}",
         ) from e
+
+
+# ===== Input Tokens 修复 =====
+
+
+class InputTokensMismatchListResponse(BaseModel):
+    """input_tokens 不匹配列表响应."""
+
+    items: List[InputTokensMismatchItem] = Field(
+        default_factory=list,
+        description="不匹配列表",
+    )
+    total: int = Field(..., description="总数")
+    page: int = Field(..., description="当前页码")
+    page_size: int = Field(..., description="每页数量")
+
+
+class InputTokensFixRequest(BaseModel):
+    """input_tokens 修复请求."""
+
+    trace_ids: List[str] = Field(
+        ...,
+        description="待修复的 trace_id 列表",
+    )
+    dry_run: bool = Field(
+        default=True,
+        description="是否为预览模式（true=仅返回预览，不实际更新）",
+    )
+
+
+class InputTokensFixResponse(BaseModel):
+    """input_tokens 修复响应."""
+
+    dry_run: bool = Field(..., description="是否为预览模式")
+    fixed_count: int = Field(..., description="修复（或预览）的记录数")
+    items: List[InputTokensFixItem] = Field(
+        default_factory=list,
+        description="修复详情列表",
+    )
+
+
+@router.get(
+    "/input-tokens/check",
+    response_model=InputTokensMismatchListResponse,
+    summary="检查 input_tokens 不匹配",
+    description="查询 trace 表与 span 表 input_tokens 不一致的记录",
+)
+async def check_input_tokens_mismatch(
+    request: Request,
+    page: int = Query(1, ge=1, description="页码"),
+    page_size: int = Query(20, ge=1, le=100, description="每页数量"),
+    start_date: Optional[str] = Query(
+        None,
+        description="开始日期 (YYYY-MM-DD)",
+    ),
+    end_date: Optional[str] = Query(None, description="结束日期 (YYYY-MM-DD)"),
+) -> InputTokensMismatchListResponse:
+    """检查 input_tokens 不匹配的 trace.
+
+    通过比对 trace.total_input_tokens 与 span 表汇总值，
+    找出存在差异的记录，供后续修复接口使用。
+
+    Args:
+        page: 页码
+        page_size: 每页数量
+        start_date: 开始日期筛选
+        end_date: 结束日期筛选
+
+    Returns:
+        不匹配的 trace 列表
+    """
+    service = TracingQueryService.get_instance()
+
+    start = _parse_date(start_date, "start_date")
+    end = _parse_date(end_date, "end_date", add_day=True)
+
+    items, total = await service.check_input_tokens_mismatch(
+        page=page,
+        page_size=page_size,
+        start_date=start,
+        end_date=end,
+    )
+
+    return InputTokensMismatchListResponse(
+        items=items,
+        total=total,
+        page=page,
+        page_size=page_size,
+    )
+
+
+@router.post(
+    "/input-tokens/fix",
+    response_model=InputTokensFixResponse,
+    summary="修复 input_tokens",
+    description="修复 trace 表 input_tokens 与 span 表汇总值不一致的记录",
+)
+async def fix_input_tokens_mismatch(
+    request: Request,
+    body: InputTokensFixRequest,
+) -> InputTokensFixResponse:
+    """修复 input_tokens 不匹配.
+
+    根据提供的 trace_id 列表，将 trace.total_input_tokens 更新为
+    span 表汇总值。支持 dry_run 模式预览修复结果。
+
+    Args:
+        body: 修复请求，包含 trace_ids 和 dry_run 标志
+
+    Returns:
+        修复结果详情
+
+    Raises:
+        HTTPException: trace_ids 为空时返回 400 错误
+    """
+    if not body.trace_ids:
+        raise HTTPException(
+            status_code=400,
+            detail="trace_ids is required",
+        )
+
+    service = TracingQueryService.get_instance()
+
+    result = await service.fix_input_tokens_mismatch(
+        trace_ids=body.trace_ids,
+        dry_run=body.dry_run,
+    )
+
+    return InputTokensFixResponse(
+        dry_run=body.dry_run,
+        fixed_count=result["fixed_count"],
+        items=result["items"],
+    )

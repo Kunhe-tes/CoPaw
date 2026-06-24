@@ -3,6 +3,8 @@
 It provides a unified interface to manage providers, such as listing available
 providers, adding/removing custom providers, and fetching provider details."""
 
+from __future__ import annotations
+
 import asyncio
 import json
 import logging
@@ -10,6 +12,7 @@ import os
 import shutil
 import threading
 import time
+from typing import TYPE_CHECKING, Dict, List
 
 try:
     import fcntl
@@ -21,11 +24,8 @@ try:
 except ImportError:  # pragma: no cover (Unix)
     msvcrt = None
 from pathlib import Path
-from typing import Dict, List
 
 from pydantic import BaseModel
-
-from agentscope.model import ChatModelBase
 
 from swe.providers.provider import (
     ModelInfo,
@@ -33,12 +33,11 @@ from swe.providers.provider import (
     ProviderInfo,
 )
 from swe.providers.models import ModelSlotConfig
-from swe.providers.openai_provider import OpenAIProvider
-from swe.providers.anthropic_provider import AnthropicProvider
-
-# from swe.providers.gemini_provider import GeminiProvider
-from swe.providers.ollama_provider import OllamaProvider
 from swe.constant import SECRET_DIR
+from swe.runtime_cache import reset_scope_bound_model_caches
+
+if TYPE_CHECKING:
+    from agentscope.model import ChatModelBase
 
 logger = logging.getLogger(__name__)
 
@@ -75,6 +74,7 @@ class ProviderManager:
         with cls._instances_lock:
             cls._instances.clear()
             cls._instance = None
+        reset_scope_bound_model_caches()
 
     def __init__(self, tenant_id: str = "default") -> None:
         """Initialize provider manager for a specific tenant.
@@ -86,18 +86,19 @@ class ProviderManager:
         # any necessary state (e.g., cached models).
         self.tenant_id = tenant_id
         self.builtin_providers: Dict[str, Provider] = {}
+        self._builtin_provider_defaults: Dict[str, Provider] = {}
         self.custom_providers: Dict[str, Provider] = {}
         self.active_model: ModelSlotConfig | None = None
-        self._file_mtimes: dict[str, float] = {}
+        self._file_freshness_tokens: dict[str, tuple[int, int]] = {}
         self.root_path = self._get_tenant_root_path(tenant_id)
         self.builtin_path = self.root_path / "builtin"
         self.custom_path = self.root_path / "custom"
         self._prepare_disk_storage()
         self._init_builtins()
-        try:
-            self._migrate_legacy_providers()
-        except Exception as e:
-            logger.warning("Failed to migrate legacy providers: %s", e)
+        self._builtin_provider_defaults = {
+            provider_id: provider.model_copy(deep=True)
+            for provider_id, provider in self.builtin_providers.items()
+        }
         self._init_from_storage()
         self._apply_default_annotations()
         self._record_mtimes()
@@ -245,30 +246,35 @@ class ProviderManager:
     def _resolve_effective_provider_tenant_id(
         tenant_id: str | None,
     ) -> str:
-        """解析 provider 存储使用的运行时租户标识。"""
+        """解析 provider 存储使用的 storage 租户标识。"""
         from ..config.context import (
             canonicalize_scope_id,
             get_current_scope_id,
             get_current_source_id,
-            resolve_runtime_identity,
+            get_current_tenant_id,
+            resolve_storage_tenant_id,
         )
 
-        requested_tenant_id = tenant_id or "default"
-        current_scope_id = get_current_scope_id()
-        source_id = get_current_source_id()
-        if current_scope_id is not None:
-            _, current_source_id, _ = resolve_runtime_identity(
-                current_scope_id,
-            )
-            source_id = source_id or current_source_id
-            if tenant_id is None or requested_tenant_id == current_scope_id:
-                return canonicalize_scope_id(current_scope_id)
+        requested_tenant_id = tenant_id or get_current_tenant_id() or "default"
+        if tenant_id is not None:
+            try:
+                return canonicalize_scope_id(requested_tenant_id)
+            except ValueError:
+                # 显式传入的是逻辑 tenant/default 模板名时，仍需结合当前
+                # source 做 storage 解析；但不能继续套用当前请求 scope，
+                # 否则会把目标租户错误重定向回源租户目录。
+                resolved_tenant_id = resolve_storage_tenant_id(
+                    requested_tenant_id,
+                    get_current_source_id(),
+                )
+                return resolved_tenant_id or requested_tenant_id
 
-        _, _, scope_id = resolve_runtime_identity(
+        resolved_tenant_id = resolve_storage_tenant_id(
             requested_tenant_id,
-            source_id,
+            get_current_source_id(),
+            scope_id=get_current_scope_id(),
         )
-        return scope_id or requested_tenant_id
+        return resolved_tenant_id or requested_tenant_id
 
     @staticmethod
     def ensure_tenant_provider_storage(tenant_id: str | None) -> None:
@@ -280,8 +286,8 @@ class ProviderManager:
         an empty directory structure is created.
 
         当显式传入 tenant_id 且当前上下文带有 source/scope 时，会写入
-        目标租户在当前 source 下的运行时 scope；未传入 tenant_id 时
-        继续沿用当前请求 scope。
+        目标租户在当前 source 下的 storage 目录；未传入 tenant_id 时
+        继续沿用当前请求对应的 storage 语义。
 
         Args:
             tenant_id: The tenant ID to ensure storage for. If None, uses "default".
@@ -417,8 +423,8 @@ class ProviderManager:
         each tenant has its own isolated ProviderManager instance.
 
         当显式传入 tenant_id 且当前上下文带有 source/scope 时，单例 key
-        会解析为目标租户在当前 source 下的运行时 scope；未传入
-        tenant_id 时继续沿用当前请求 scope。
+        会解析为目标租户在当前 source 下的 storage 目录；未传入
+        tenant_id 时继续沿用当前请求对应的 storage 语义。
 
         Args:
             tenant_id: The tenant ID. If None, uses "default" tenant.
@@ -491,24 +497,28 @@ class ProviderManager:
 
     def _record_mtimes(self):
         """Snapshot modification times of all provider config files."""
-        mtimes: dict[str, float] = {}
+        mtimes: dict[str, tuple[int, int]] = {}
         for provider_id in self.builtin_providers:
             path = self.builtin_path / f"{provider_id}.json"
             if path.exists():
-                mtimes[str(path)] = path.stat().st_mtime
+                mtimes[str(path)] = self._file_token(path)
         for path in self.custom_path.glob("*.json"):
-            mtimes[str(path)] = path.stat().st_mtime
+            mtimes[str(path)] = self._file_token(path)
         active_path = self.root_path / "active_model.json"
         if active_path.exists():
-            mtimes[str(active_path)] = active_path.stat().st_mtime
-        self._file_mtimes = mtimes
+            mtimes[str(active_path)] = self._file_token(active_path)
+        self._file_freshness_tokens = mtimes
+
+    def _file_token(self, path: Path) -> tuple[int, int]:
+        stat = path.stat()
+        return stat.st_mtime_ns, stat.st_size
 
     def _update_mtime(self, path: Path):
         """Update cached mtime for a single file after writing."""
         if path.exists():
-            self._file_mtimes[str(path)] = path.stat().st_mtime
+            self._file_freshness_tokens[str(path)] = self._file_token(path)
         else:
-            self._file_mtimes.pop(str(path), None)
+            self._file_freshness_tokens.pop(str(path), None)
 
     def _refresh_if_stale(self):
         """Reload providers whose files changed on disk since last snapshot."""
@@ -535,6 +545,7 @@ class ProviderManager:
         self._apply_custom_refresh(changed_custom, new_custom, removed_custom)
         if active_changed:
             self._apply_active_model_refresh()
+        reset_scope_bound_model_caches()
         self._record_mtimes()
 
     def _detect_changed_builtins(self) -> list[str]:
@@ -558,10 +569,10 @@ class ProviderManager:
             path_str = str(path)
             current.add(path_str)
             try:
-                mtime = path.stat().st_mtime
-                if path_str not in self._file_mtimes:
+                token = self._file_token(path)
+                if path_str not in self._file_freshness_tokens:
                     new.append(path)
-                elif self._file_mtimes[path_str] != mtime:
+                elif self._file_freshness_tokens[path_str] != token:
                     changed.append(path)
             except OSError:
                 pass
@@ -573,7 +584,7 @@ class ProviderManager:
         """Detect custom provider files that were removed."""
         removed: list[str] = []
         custom_prefix = str(self.custom_path)
-        for path_str in list(self._file_mtimes):
+        for path_str in list(self._file_freshness_tokens):
             if (
                 path_str.startswith(custom_prefix)
                 and path_str not in current_paths
@@ -590,8 +601,10 @@ class ProviderManager:
         """Check if a file has changed since last snapshot."""
         try:
             if path.exists():
-                mtime = path.stat().st_mtime
-                return self._file_mtimes.get(str(path)) != mtime
+                return self._file_freshness_tokens.get(
+                    str(path),
+                ) != self._file_token(path)
+            return str(path) in self._file_freshness_tokens
         except OSError:
             pass
         return False
@@ -607,6 +620,17 @@ class ProviderManager:
                 builtin.api_key = provider.api_key
                 builtin.extra_models = provider.extra_models
                 builtin.generate_kwargs.update(provider.generate_kwargs)
+            else:
+                self._reset_builtin_provider(provider_id)
+
+    def _reset_builtin_provider(self, provider_id: str) -> None:
+        default_provider = self._builtin_provider_defaults.get(provider_id)
+        if default_provider is None:
+            self.builtin_providers.pop(provider_id, None)
+            return
+        self.builtin_providers[provider_id] = default_provider.model_copy(
+            deep=True,
+        )
 
     def _apply_custom_refresh(
         self,
@@ -619,6 +643,8 @@ class ProviderManager:
             provider = self.load_provider(path.stem, is_builtin=False)
             if provider:
                 self.custom_providers[provider.id] = provider
+            else:
+                self.custom_providers.pop(path.stem, None)
 
         for path_str in removed:
             provider_id = Path(path_str).stem
@@ -626,9 +652,7 @@ class ProviderManager:
 
     def _apply_active_model_refresh(self) -> None:
         """Apply changes for active model."""
-        active_model = self.load_active_model()
-        if active_model:
-            self.active_model = active_model
+        self.active_model = self.load_active_model()
 
     async def list_provider_info(self) -> List[ProviderInfo]:
         self._refresh_if_stale()
@@ -656,6 +680,7 @@ class ProviderManager:
 
     def get_active_model(self) -> ModelSlotConfig | None:
         # Return the currently active provider/model configuration.
+        self._refresh_if_stale()
         return self.active_model
 
     def update_provider(self, provider_id: str, config: Dict) -> bool:
@@ -671,6 +696,7 @@ class ProviderManager:
             provider,
             is_builtin=provider_id in self.builtin_providers,
         )
+        reset_scope_bound_model_caches()
         return True
 
     async def fetch_provider_models(
@@ -728,6 +754,7 @@ class ProviderManager:
         provider.support_connection_check = False
         self.custom_providers[provider.id] = provider
         self._save_provider(provider, is_builtin=False)
+        reset_scope_bound_model_caches()
         return await provider.get_info()
 
     def remove_custom_provider(self, provider_id: str) -> bool:
@@ -738,7 +765,8 @@ class ProviderManager:
             provider_path = self.custom_path / f"{provider_id}.json"
             if provider_path.exists():
                 os.remove(provider_path)
-            self._file_mtimes.pop(str(provider_path), None)
+            self._file_freshness_tokens.pop(str(provider_path), None)
+            reset_scope_bound_model_caches()
             return True
         return False
 
@@ -758,6 +786,7 @@ class ProviderManager:
             model=model_id,
         )
         self.save_active_model(self.active_model)
+        reset_scope_bound_model_caches()
 
         self.maybe_probe_multimodal(provider_id, model_id)
 
@@ -803,6 +832,7 @@ class ProviderManager:
             provider,
             is_builtin=provider_id in self.builtin_providers,
         )
+        reset_scope_bound_model_caches()
         return await provider.get_info()
 
     async def delete_model_from_provider(
@@ -818,6 +848,7 @@ class ProviderManager:
             provider,
             is_builtin=provider_id in self.builtin_providers,
         )
+        reset_scope_bound_model_caches()
         return await provider.get_info()
 
     async def probe_model_multimodal(
@@ -950,6 +981,10 @@ class ProviderManager:
 
     def _provider_from_data(self, data: Dict) -> Provider:
         """Deserialize provider data to a concrete provider type."""
+        from swe.providers.anthropic_provider import AnthropicProvider
+        from swe.providers.ollama_provider import OllamaProvider
+        from swe.providers.openai_provider import OpenAIProvider
+
         provider_id = str(data.get("id", ""))
         chat_model = str(data.get("chat_model", ""))
 
@@ -963,7 +998,16 @@ class ProviderManager:
 
     def save_active_model(self, active_model: ModelSlotConfig):
         """Save the active provider/model configuration to disk."""
-        active_path = self.root_path / "active_model.json"
+        self._save_active_model_to_root(self.root_path, active_model)
+        self._update_mtime(self.root_path / "active_model.json")
+
+    @staticmethod
+    def _save_active_model_to_root(
+        root_path: Path,
+        active_model: ModelSlotConfig,
+    ) -> None:
+        """Save the active provider/model configuration under a provider root."""
+        active_path = root_path / "active_model.json"
         with open(active_path, "w", encoding="utf-8") as f:
             json.dump(
                 active_model.model_dump(),
@@ -975,17 +1019,14 @@ class ProviderManager:
             os.chmod(active_path, 0o600)
         except OSError:
             pass
-        self._update_mtime(active_path)
 
-    def load_active_model(self) -> ModelSlotConfig | None:
-        """Load the active provider/model configuration from disk.
+    @staticmethod
+    def _read_active_model_from_root(
+        root_path: Path,
+    ) -> ModelSlotConfig | None:
+        """Read active provider/model configuration from active_model.json."""
+        active_path = root_path / "active_model.json"
 
-        If active_model.json doesn't exist but legacy tenant_models.json does,
-        recovers the active slot from the legacy config and migrates it.
-        """
-        active_path = self.root_path / "active_model.json"
-
-        # Try to load from new location first
         if active_path.exists():
             try:
                 with open(active_path, "r", encoding="utf-8") as f:
@@ -994,141 +1035,11 @@ class ProviderManager:
             except Exception:
                 return None
 
-        # Recovery: migrate from legacy tenant_models.json if it exists
-        legacy_config = self._recover_from_legacy_tenant_models()
-        if legacy_config:
-            logger.info(
-                "Recovered active model from legacy tenant_models.json "
-                "for tenant %s: %s/%s",
-                self.tenant_id,
-                legacy_config.provider_id,
-                legacy_config.model,
-            )
-            # Save to new location for future reads
-            self.save_active_model(legacy_config)
-            return legacy_config
-
         return None
 
-    def _recover_from_legacy_tenant_models(self) -> ModelSlotConfig | None:
-        """Recover active model from legacy tenant_models.json.
-
-        This provides one-time migration for tenants that have tenant_models.json
-        but don't yet have providers/active_model.json.
-
-        Returns:
-            ModelSlotConfig if recovery succeeded, None otherwise.
-        """
-        try:
-            from swe.tenant_models.manager import TenantModelManager
-
-            # Check if legacy config exists for this tenant
-            legacy_path = TenantModelManager.get_config_path(self.tenant_id)
-            if not legacy_path.exists():
-                # Try default tenant as fallback
-                if self.tenant_id != "default":
-                    legacy_path = TenantModelManager.get_config_path("default")
-                    if not legacy_path.exists():
-                        return None
-                else:
-                    return None
-
-            # Load and extract active slot from legacy config
-            legacy_config = TenantModelManager.load(self.tenant_id)
-            if not legacy_config:
-                return None
-
-            active_slot = legacy_config.get_active_slot()
-            if active_slot and active_slot.provider_id and active_slot.model:
-                return ModelSlotConfig(
-                    provider_id=active_slot.provider_id,
-                    model=active_slot.model,
-                )
-        except Exception as e:
-            logger.debug(
-                "Failed to recover from legacy tenant_models.json "
-                "for tenant %s: %s",
-                self.tenant_id,
-                e,
-            )
-        return None
-
-    def _migrate_legacy_providers(self):
-        """Migrate from legacy providers.json format to the new structure."""
-        legacy_path = SECRET_DIR / "providers.json"
-        if not legacy_path.exists() or not legacy_path.is_file():
-            return
-
-        with open(legacy_path, "r", encoding="utf-8") as f:
-            legacy_data = json.load(f)
-
-        self._migrate_builtin_providers(legacy_data.get("providers", {}))
-        self._migrate_custom_providers(legacy_data.get("custom_providers", {}))
-        self._migrate_active_model_config(legacy_data.get("active_llm", {}))
-
-        try:
-            os.remove(legacy_path)
-        except Exception:
-            logger.warning(
-                "Failed to remove legacy providers.json after migration.",
-            )
-
-    def _migrate_builtin_providers(self, builtin_providers: dict) -> None:
-        """Migrate built-in providers from legacy format."""
-        for provider_id, config in builtin_providers.items():
-            provider = self.get_provider(provider_id)
-            if not provider:
-                logger.warning(
-                    "Legacy provider '%s' not found in registry, skipping.",
-                    provider_id,
-                )
-                continue
-            self._apply_builtin_provider_config(provider, config)
-            self._save_provider(provider, is_builtin=True)
-
-    def _apply_builtin_provider_config(
-        self,
-        provider: Provider,
-        config: dict,
-    ) -> None:
-        """Apply legacy config to a built-in provider."""
-        if "api_key" in config:
-            provider.api_key = config["api_key"]
-        if "extra_models" in config:
-            provider.extra_models = [
-                ModelInfo.model_validate(model)
-                for model in config["extra_models"]
-            ]
-        if not provider.freeze_url and "base_url" in config:
-            provider.base_url = config["base_url"]
-
-    def _migrate_custom_providers(self, custom_providers: dict) -> None:
-        """Migrate custom providers from legacy format."""
-        for provider_id, data in custom_providers.items():
-            custom_provider = OpenAIProvider(
-                id=provider_id,
-                name=data.get("name", provider_id),
-                base_url=data.get("base_url", ""),
-                api_key=data.get("api_key", ""),
-                is_custom=True,
-            )
-            if "models" in data:
-                custom_provider.extra_models = [
-                    ModelInfo.model_validate(model) for model in data["models"]
-                ]
-            if "chat_model" in data:
-                custom_provider.chat_model = data["chat_model"]
-            self._save_provider(custom_provider, is_builtin=False)
-
-    def _migrate_active_model_config(self, active_model: dict) -> None:
-        """Migrate active model from legacy format."""
-        if not active_model:
-            return
-        try:
-            self.active_model = ModelSlotConfig.model_validate(active_model)
-            self.save_active_model(self.active_model)
-        except Exception:
-            logger.warning("Failed to migrate active model, using default.")
+    def load_active_model(self) -> ModelSlotConfig | None:
+        """Load the active provider/model configuration from disk."""
+        return self._read_active_model_from_root(self.root_path)
 
     def _init_from_storage(self):
         """Initialize all providers and active model from disk storage."""

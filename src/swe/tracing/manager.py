@@ -10,7 +10,7 @@ import uuid
 from contextvars import ContextVar
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Literal, Optional
 
 from .config import TracingConfig
 from ..database import DatabaseConnection
@@ -112,6 +112,26 @@ def get_current_trace() -> Optional[TraceContext]:
 def set_current_trace(ctx: Optional[TraceContext]) -> None:
     """Set the current trace context."""
     _current_trace.set(ctx)
+
+
+def capture_current_trace_context() -> Optional[dict[str, Any]]:
+    """捕获当前 trace 的轻量上下文快照。
+
+    返回普通字典而不是 TraceContext 实例，避免调用方把可变上下文对象跨
+    协程长期持有后又读到别的运行态。
+    """
+    ctx = get_current_trace()
+    if ctx is None:
+        return None
+    return {
+        "trace_id": ctx.trace_id,
+        "user_id": ctx.user_id,
+        "session_id": ctx.session_id,
+        "channel": ctx.channel,
+        "source_id": ctx.source_id,
+        "user_name": ctx.user_name,
+        "bbk_id": ctx.bbk_id,
+    }
 
 
 class TraceManager:
@@ -289,11 +309,12 @@ class TraceManager:
         if not self.enabled:
             return trace_id or str(uuid.uuid4())
 
+        requested_trace_id = trace_id
         trace_id = trace_id or str(uuid.uuid4())
 
         # 如果是 attach_existing 模式，检查 trace 是否已存在
         if attach_existing:
-            attached = await self._handle_attach_existing(
+            attach_result = await self._handle_attach_existing(
                 trace_id,
                 user_id,
                 session_id,
@@ -303,8 +324,10 @@ class TraceManager:
                 bbk_id,
                 session_name,
             )
-            if attached:
+            if attach_result == "attached":
                 return trace_id
+            if attach_result == "identity_mismatch" and requested_trace_id:
+                trace_id = str(uuid.uuid4())
 
         # Sanitize inputs
         user_message, model_output = self._sanitize_inputs(
@@ -353,6 +376,23 @@ class TraceManager:
 
         return trace_id
 
+    @staticmethod
+    def _can_attach_to_trace(
+        existing_trace: Trace,
+        *,
+        user_id: str,
+        session_id: str,
+        channel: str,
+        source_id: str,
+    ) -> bool:
+        """判断请求身份是否允许复用已有 trace。"""
+        return (
+            (existing_trace.user_id or "") == user_id
+            and (existing_trace.session_id or "") == session_id
+            and (existing_trace.channel or "") == channel
+            and (existing_trace.source_id or "") == source_id
+        )
+
     async def _handle_attach_existing(
         self,
         trace_id: str,
@@ -363,7 +403,7 @@ class TraceManager:
         user_name: Optional[str],
         bbk_id: Optional[str],
         session_name: Optional[str],
-    ) -> bool:
+    ) -> Literal["attached", "not_found", "identity_mismatch"]:
         """处理 attach_existing 模式，检查并复用已存在的 trace。
 
         Args:
@@ -377,13 +417,39 @@ class TraceManager:
             session_name: Session name
 
         Returns:
-            True 如果成功 attach，False 如果不存在需要创建新 trace
+            attached: 成功 attach 到已有 trace
+            not_found: 未找到已有 trace，应沿用传入 trace_id 创建
+            identity_mismatch: 找到了 trace，但身份不匹配，必须改用新 trace_id
         """
         existing_trace = self._active_traces.get(
             trace_id,
         ) or await self.store.get_trace(trace_id)
         if not existing_trace:
-            return False
+            return "not_found"
+
+        if not self._can_attach_to_trace(
+            existing_trace,
+            user_id=user_id,
+            session_id=session_id,
+            channel=channel,
+            source_id=source_id,
+        ):
+            logger.warning(
+                "Reject attach_existing for trace_id=%s due to identity "
+                "mismatch: incoming(user_id=%s, session_id=%s, channel=%s, "
+                "source_id=%s) existing(user_id=%s, session_id=%s, "
+                "channel=%s, source_id=%s)",
+                trace_id,
+                user_id,
+                session_id,
+                channel,
+                source_id,
+                existing_trace.user_id or "",
+                existing_trace.session_id or "",
+                existing_trace.channel or "",
+                existing_trace.source_id or "",
+            )
+            return "identity_mismatch"
 
         # 仅设置 context，不创建数据库记录
         ctx = TraceContext(
@@ -399,7 +465,7 @@ class TraceManager:
         )
         ctx.trace = existing_trace
         set_current_trace(ctx)
-        return True
+        return "attached"
 
     def _sanitize_inputs(
         self,
@@ -461,6 +527,24 @@ class TraceManager:
 
         # 如果第一条消息为空，使用当前消息作为会话名称
         return session_name
+
+    async def update_session_name(
+        self,
+        trace_id: str,
+        session_name: str,
+    ) -> None:
+        """更新 trace 的 session_name（DB + 内存 TraceContext）。
+
+        Args:
+            trace_id: Trace 标识
+            session_name: 新的会话名称
+        """
+        await self.store.update_session_name(trace_id, session_name)
+        ctx = get_current_trace()
+        if ctx and ctx.trace_id == trace_id:
+            ctx.session_name = session_name
+            if ctx.trace:
+                ctx.trace.session_name = session_name
 
     async def setup_skill_detector(
         self,
@@ -525,20 +609,7 @@ class TraceManager:
                         skill,
                         confidence,
                     )
-                if skill and confidence >= 0.7:
-                    # Start skill through detector to properly track span_id
-                    await detector.start_skill(
-                        skill_name=skill,
-                        trigger_tool="user_message",
-                        trigger_reason="declared",
-                        confidence=confidence,
-                    )
-                    logger.info(
-                        "Skill started: '%s' (confidence: %.2f)",
-                        skill,
-                        confidence,
-                    )
-                elif skill:
+                if skill and confidence < 0.7:
                     logger.info(
                         "Skill detected but confidence too low: '%s' (confidence: %.2f < 0.5)",
                         skill,
@@ -644,6 +715,8 @@ class TraceManager:
         input_tokens: Optional[int] = None,
         tool_name: Optional[str] = None,
         skill_name: Optional[str] = None,
+        skill_id: Optional[str] = None,
+        cn_name: Optional[str] = None,
         skill_description: Optional[str] = None,
         tool_input: Optional[dict[str, Any]] = None,
         start_time: Optional[datetime] = None,
@@ -703,13 +776,15 @@ class TraceManager:
             input_tokens=input_tokens,
             tool_name=tool_name,
             skill_name=skill_name,
+            skill_id=skill_id,
+            cn_name=cn_name,
             skill_description=skill_description,
             tool_input=tool_input,
             mcp_server=mcp_server,
         )
 
-        # Update trace statistics (skills_used, tools_used)
-        self._update_trace_totals(trace_id, span, None)
+        # Update trace statistics (skills_used, tools_used, input_tokens if > 0)
+        self._update_trace_totals(trace_id, span, None, input_tokens)
 
         # Add to pending cache and queue atomically
         # 在锁内检查是否需要立即 flush，避免锁外检查导致的竞态条件
@@ -755,6 +830,15 @@ class TraceManager:
         if span is None:
             logger.warning("Span not found for update: %s", span_id)
             return
+        if span.trace_id != trace_id:
+            logger.error(
+                "Cross-trace span update rejected: span_id=%s "
+                "requested_trace_id=%s actual_trace_id=%s",
+                span_id,
+                trace_id,
+                span.trace_id,
+            )
+            return
 
         self._update_span_fields(
             span,
@@ -764,9 +848,10 @@ class TraceManager:
             error,
         )
         self._update_trace_totals(
-            trace_id,
+            span.trace_id,
             span,
             output_tokens,
+            input_tokens,
             is_update=True,
         )
 
@@ -824,7 +909,8 @@ class TraceManager:
         self,
         trace_id: str,
         span: Span,
-        output_tokens: Optional[int],
+        output_tokens: Optional[int] = None,
+        input_tokens: Optional[int] = None,
         is_update: bool = False,
     ) -> None:
         """Update trace statistics from span.
@@ -832,8 +918,9 @@ class TraceManager:
         Args:
             trace_id: Trace identifier
             span: Span object
-            output_tokens: Output token count
-            is_update: If True, this is an update to existing span (don't re-add input_tokens)
+            output_tokens: Output token count (累加传入值)
+            input_tokens: Input token count (累加传入值，仅在 update 时有值)
+            is_update: If True, this is an update to existing span
         """
         trace = self._active_traces.get(trace_id)
         if not trace:
@@ -841,9 +928,9 @@ class TraceManager:
 
         if output_tokens:
             trace.total_output_tokens += output_tokens
-        # Only add input_tokens when first emitting the span, not when updating
-        if span.input_tokens and not is_update:
-            trace.total_input_tokens += span.input_tokens
+        # input_tokens 累加传入参数值（非 span 字段），避免重复累加
+        if input_tokens and input_tokens > 0:
+            trace.total_input_tokens += input_tokens
         # 只在 trace.model_name 为空时设置，保留第一个模型作为主模型
         # 避免用户切换活跃模型后覆盖 trace 的 model_name
         if span.model_name and not trace.model_name:
@@ -955,6 +1042,8 @@ class TraceManager:
         ctx = get_current_trace()
         primary_skill: Optional[str] = None
         skill_description: Optional[str] = None
+        skill_id: Optional[str] = None
+        cn_name: Optional[str] = None
 
         if ctx and ctx.trace_id == trace_id:
             try:
@@ -974,6 +1063,11 @@ class TraceManager:
                         skill_description = detector.get_skill_description(
                             primary_skill,
                         )
+                    # Get skill_id and cn_name from detector cache
+                    if primary_skill and hasattr(detector, "_skill_ids"):
+                        skill_id = detector._skill_ids.get(primary_skill)
+                    if primary_skill and hasattr(detector, "_skill_cn_names"):
+                        cn_name = detector._skill_cn_names.get(primary_skill)
                 else:
                     # Fallback to registry-based attribution
                     from ..agents.skill_tool_registry import (
@@ -1003,6 +1097,8 @@ class TraceManager:
             tool_input=tool_input,
             mcp_server=mcp_server,
             skill_name=primary_skill,
+            skill_id=skill_id,
+            cn_name=cn_name,
             skill_description=skill_description,
             user_name=user_name,
             bbk_id=bbk_id,
@@ -1059,6 +1155,8 @@ class TraceManager:
         skill_input: Optional[dict[str, Any]] = None,
         user_name: Optional[str] = None,
         bbk_id: Optional[str] = None,
+        skill_id: Optional[str] = None,
+        cn_name: Optional[str] = None,
         skill_description: Optional[str] = None,
     ) -> str:
         """Emit skill invocation event.
@@ -1073,6 +1171,8 @@ class TraceManager:
             skill_input: Optional skill input parameters
             user_name: Optional user name
             bbk_id: Optional BBK identifier
+            skill_id: Optional skill unique identifier
+            cn_name: Optional Chinese display name
             skill_description: Optional skill description
 
         Returns:
@@ -1087,6 +1187,8 @@ class TraceManager:
             session_id=session_id,
             channel=channel,
             skill_name=skill_name,
+            skill_id=skill_id,
+            cn_name=cn_name,
             skill_description=skill_description,
             tool_input=skill_input,
             user_name=user_name,

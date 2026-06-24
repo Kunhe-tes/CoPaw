@@ -1,6 +1,15 @@
 import { useState, useEffect, useRef } from "react";
-import { Button, Card, Form, Modal, Table } from "@agentscope-ai/design";
+import {
+  Button,
+  Card,
+  Form,
+  InputNumber,
+  Modal,
+  Switch,
+  Table,
+} from "@agentscope-ai/design";
 import type {
+  CronBroadcastTarget,
   CronBroadcastTenantResult,
   CronJobSpecOutput,
 } from "../../../api/types";
@@ -11,10 +20,12 @@ import {
   JobDrawer,
   useCronJobs,
   DEFAULT_FORM_VALUES,
+  BroadcastChildrenModal,
 } from "./components";
 import { PageHeader } from "@/components/PageHeader";
-import { TenantTargetPicker } from "@/components/TenantTargetPicker";
+import { TenantSelector } from "@/components/TenantSelector";
 import { useAppMessage } from "../../../hooks/useAppMessage";
+import { getUserId } from "../../../utils/identity";
 import {
   buildExecutionModelKey,
   useExecutionModelOptions,
@@ -27,6 +38,7 @@ import {
 import styles from "./index.module.less";
 
 type CronJob = CronJobSpecOutput;
+const DEFAULT_BROADCAST_OFFSET_WINDOW_HOURS = 4;
 
 function CronJobsPage() {
   const { t } = useTranslation();
@@ -43,17 +55,26 @@ function CronJobsPage() {
   const [drawerOpen, setDrawerOpen] = useState(false);
   const [editingJob, setEditingJob] = useState<CronJob | null>(null);
   const [broadcastingJob, setBroadcastingJob] = useState<CronJob | null>(null);
-  const [broadcastTenantIds, setBroadcastTenantIds] = useState<string[]>([]);
   const [selectedBroadcastTenantIds, setSelectedBroadcastTenantIds] = useState<
     string[]
+  >([]);
+  const [selectedBroadcastTargets, setSelectedBroadcastTargets] = useState<
+    CronBroadcastTarget[]
   >([]);
   const [broadcastResults, setBroadcastResults] = useState<
     CronBroadcastTenantResult[]
   >([]);
+  const [broadcastOffsetEnabled, setBroadcastOffsetEnabled] = useState(true);
+  const [broadcastOffsetWindowHours, setBroadcastOffsetWindowHours] = useState(
+    DEFAULT_BROADCAST_OFFSET_WINDOW_HOURS,
+  );
+  const [childrenManagementJob, setChildrenManagementJob] =
+    useState<CronJob | null>(null);
   const [broadcasting, setBroadcasting] = useState(false);
   const [saving, setSaving] = useState(false);
   const [form] = Form.useForm<CronJob>();
   const userTimezoneRef = useRef("UTC");
+  const currentTenantId = getUserId();
   const {
     loading: executionModelLoading,
     options: executionModelOptions,
@@ -119,32 +140,65 @@ function CronJobsPage() {
     });
   };
 
-  const handleBroadcast = async (job: CronJob) => {
+  const handleBroadcast = (job: CronJob) => {
     setBroadcastingJob(job);
     setSelectedBroadcastTenantIds([]);
+    setSelectedBroadcastTargets([]);
     setBroadcastResults([]);
-    try {
-      const res = await api.listCronBroadcastTenants();
-      setBroadcastTenantIds(res.tenant_ids || []);
-    } catch (error) {
-      console.error("Failed to load broadcast tenants", error);
-      message.error("Failed to load tenants");
-      setBroadcastTenantIds([]);
-    }
+    setBroadcastOffsetEnabled(true);
+    setBroadcastOffsetWindowHours(DEFAULT_BROADCAST_OFFSET_WINDOW_HOURS);
+  };
+
+  const handleManageChildren = (job: CronJob) => {
+    setChildrenManagementJob(job);
   };
 
   const handleBroadcastCancel = () => {
     setBroadcastingJob(null);
     setSelectedBroadcastTenantIds([]);
+    setSelectedBroadcastTargets([]);
     setBroadcastResults([]);
+    setBroadcastOffsetEnabled(true);
+    setBroadcastOffsetWindowHours(DEFAULT_BROADCAST_OFFSET_WINDOW_HOURS);
+  };
+
+  const handleBroadcastOffsetWindowChange = (
+    value: number | string | null,
+  ) => {
+    const numericValue = Number(value);
+    if (!Number.isFinite(numericValue)) {
+      setBroadcastOffsetWindowHours(DEFAULT_BROADCAST_OFFSET_WINDOW_HOURS);
+      return;
+    }
+    setBroadcastOffsetWindowHours(
+      Math.min(24, Math.max(1, Math.round(numericValue))),
+    );
   };
 
   const handleBroadcastConfirm = async () => {
     if (!broadcastingJob) return;
     const targetTenantIds = Array.from(new Set(selectedBroadcastTenantIds));
+    const targetByTenantId = new Map(
+      selectedBroadcastTargets.map((target) => [target.tenant_id, target]),
+    );
+    const targets = targetTenantIds.map((tenantId) => {
+      const target = targetByTenantId.get(tenantId);
+      return {
+        tenant_id: tenantId,
+        tenant_name: target?.tenant_name ?? null,
+        bbk_id: target?.bbk_id ?? null,
+      };
+    });
     setBroadcasting(true);
     try {
-      const res = await api.broadcastCronJob(broadcastingJob.id, targetTenantIds);
+      const res = await api.broadcastCronJob(
+        broadcastingJob.id,
+        targets,
+        {
+          enable_offset: broadcastOffsetEnabled,
+          offset_window_hours: broadcastOffsetWindowHours,
+        },
+      );
       const resultMessage = getBroadcastResultMessage(res.results);
       if (resultMessage.tone === "warning") {
         message.warning(resultMessage.text);
@@ -194,6 +248,7 @@ function CronJobsPage() {
     onToggleEnabled: handleToggleEnabled,
     onExecuteNow: handleExecuteNow,
     onBroadcast: handleBroadcast,
+    onManageChildren: handleManageChildren,
     onEdit: handleEdit,
     onDelete: handleDelete,
     onCopySuccess: () => message.success(t("common.copied")),
@@ -220,7 +275,7 @@ function CronJobsPage() {
           dataSource={jobs}
           loading={loading}
           rowKey="id"
-          scroll={{ x: 2840 }}
+          scroll={{ x: 3010 }}
           pagination={{
             pageSize: 10,
           }}
@@ -239,6 +294,12 @@ function CronJobsPage() {
         onSubmit={handleSubmit}
       />
 
+      <BroadcastChildrenModal
+        open={Boolean(childrenManagementJob)}
+        job={childrenManagementJob}
+        onClose={() => setChildrenManagementJob(null)}
+      />
+
       <Modal
         open={Boolean(broadcastingJob)}
         title="广播到租户"
@@ -254,14 +315,40 @@ function CronJobsPage() {
           <div style={{ display: "grid", gap: 12 }}>
             <div>
               任务：{broadcastingJob.name}；时区：
-              {broadcastingJob.schedule?.timezone || "UTC"}；将在原执行时间前 4
-              小时内均匀错峰。
+              {broadcastingJob.schedule?.timezone || "UTC"}；
+              {broadcastOffsetEnabled
+                ? `优先在原执行时间前 ${broadcastOffsetWindowHours} 小时内均匀错峰，无法安全错峰的 cron 会按原表达式分发。`
+                : "按原执行时间分发，不做错峰。"}
             </div>
-            <TenantTargetPicker
-              tenantIds={broadcastTenantIds}
+            <div className={styles.broadcastOffsetControls}>
+              <div className={styles.broadcastOffsetSwitch}>
+                <span>启用错峰</span>
+                <Switch
+                  checked={broadcastOffsetEnabled}
+                  onChange={(checked) =>
+                    setBroadcastOffsetEnabled(Boolean(checked))
+                  }
+                />
+              </div>
+              <div className={styles.broadcastOffsetWindow}>
+                <span>错峰窗口</span>
+                <InputNumber
+                  min={1}
+                  max={24}
+                  precision={0}
+                  value={broadcastOffsetWindowHours}
+                  disabled={!broadcastOffsetEnabled}
+                  onChange={handleBroadcastOffsetWindowChange}
+                />
+                <span>小时</span>
+              </div>
+            </div>
+            <TenantSelector
               selectedTenantIds={selectedBroadcastTenantIds}
               onChange={setSelectedBroadcastTenantIds}
+              onSelectionInfoChange={setSelectedBroadcastTargets}
               hint="选择需要接收该定时任务的租户"
+              excludeTenantId={currentTenantId}
             />
             {broadcastResults.length > 0 && (
               <div style={{ display: "grid", gap: 6 }}>

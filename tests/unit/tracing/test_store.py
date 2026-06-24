@@ -122,6 +122,19 @@ class TestTraceOperations:
         mock_db.execute.assert_called_once()
 
     @pytest.mark.asyncio
+    async def test_update_session_name(self, config, mock_db):
+        """更新会话标题时，应只按 trace_id 修改 session_name。"""
+        store = TraceStore(config, mock_db)
+
+        await store.update_session_name("trace-1", "销售复盘")
+
+        mock_db.execute.assert_called_once()
+        query, params = mock_db.execute.call_args.args
+        assert "UPDATE swe_tracing_traces SET session_name = %s" in query
+        assert "WHERE trace_id = %s" in query
+        assert params == ("销售复盘", "trace-1")
+
+    @pytest.mark.asyncio
     async def test_get_trace(self, config, mock_db):
         """Test getting a trace."""
         now = datetime.now()
@@ -248,6 +261,9 @@ class TestSpanOperations:
                 "output_tokens": None,
                 "tool_name": None,
                 "skill_name": None,
+                "skill_id": None,
+                "skill_cn_name": None,
+                "skill_description": None,
                 "tool_input": None,
                 "tool_output": None,
                 "error": None,

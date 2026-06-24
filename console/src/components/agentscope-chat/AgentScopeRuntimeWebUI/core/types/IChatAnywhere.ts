@@ -337,6 +337,7 @@ export interface IAgentScopeRuntimeWebUISessionAPI {
    */
   updateSession?: (
     session: Partial<IAgentScopeRuntimeWebUISession>,
+    options?: IAgentScopeRuntimeWebUISessionUpdateOptions,
   ) => Promise<IAgentScopeRuntimeWebUISession[]>;
   /**
    * @description 创建会话
@@ -352,6 +353,16 @@ export interface IAgentScopeRuntimeWebUISessionAPI {
   removeSession?: (
     session: Partial<IAgentScopeRuntimeWebUISession>,
   ) => Promise<IAgentScopeRuntimeWebUISession[]>;
+  /**
+   * @description 同步外部标题补丁到会话缓存
+   */
+  patchSessionTitle?: (
+    payload: unknown,
+  ) => IAgentScopeRuntimeWebUISession[] | void;
+}
+
+export interface IAgentScopeRuntimeWebUISessionUpdateOptions {
+  refreshList?: boolean;
 }
 
 /**

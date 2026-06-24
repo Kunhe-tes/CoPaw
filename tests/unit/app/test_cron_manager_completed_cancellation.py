@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import asyncio
+from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 
 from agentscope_runtime.engine.schemas.agent_schemas import RunStatus
@@ -18,6 +19,7 @@ from swe.app.crons.models import (
     ScheduleSpec,
 )
 from swe.providers.models import ModelSlotConfig
+from swe.tracing.models import TraceStatus
 
 
 class _Repo:
@@ -46,6 +48,30 @@ class _PendingRunner:
         if _never_emit_stream_chunk():
             yield None
         await asyncio.sleep(30)
+
+
+class _EmptyStreamRunner:
+    """模拟返回空流的 Runner（没有任何事件，包括 Completed 或 Failed）。"""
+
+    async def stream_query(self, _req):
+        # 不 yield 任何事件，直接返回
+        return
+        yield  # pylint: disable=unreachable # 使方法成为 generator
+
+
+class _FailedRunner:
+    """模拟模型调用失败的 Runner，返回 Failed 事件而不抛出异常。"""
+
+    async def stream_query(self, _req):
+        # 模拟 runner 在模型失败时的行为：yield Failed 事件，不抛出异常
+        yield SimpleNamespace(
+            object="message",
+            status=RunStatus.Failed,
+            error=SimpleNamespace(
+                code="model_error",
+                message="Model not available",
+            ),
+        )
 
 
 class _ChannelManager:
@@ -95,6 +121,129 @@ def _build_agent_job() -> CronJobSpec:
         ),
         runtime=JobRuntimeSpec(timeout_seconds=60),
     )
+
+
+def _build_broadcast_agent_job() -> CronJobSpec:
+    job = _build_agent_job()
+    return job.model_copy(
+        update={
+            "meta": {
+                "broadcast_offset_minutes": 20,
+                "broadcast_notification_policy": "original_schedule",
+                "broadcast_original_timezone": "Asia/Shanghai",
+            },
+        },
+    )
+
+
+def test_automatic_execution_applies_notification_delay():
+    """自动执行成功时，任务级通知延迟应写入 Monitor due time。"""
+
+    async def _run():
+        job = _build_agent_job().model_copy(
+            update={"meta": {"notification_delay_minutes": 120}},
+        )
+        monitor = _MonitorSyncClient()
+        manager = CronManager(
+            repo=_Repo(job),
+            runner=_Runner(),
+            channel_manager=_ChannelManager(),
+        )
+        manager._monitor_sync_client = (
+            monitor  # pylint: disable=protected-access
+        )
+        actual_time = datetime(2026, 6, 4, 10, 0, tzinfo=timezone.utc)
+
+        await manager._sync_execution_to_monitor(  # pylint: disable=protected-access
+            job=job,
+            exec_status="success",
+            actual_time=actual_time,
+            end_time=actual_time,
+            duration_ms=100,
+            error_message="",
+            output_preview="done",
+            is_manual=False,
+        )
+
+        return monitor.records[-1], actual_time
+
+    record, actual_time = asyncio.run(_run())
+
+    assert record["notification_due_at"] == actual_time + timedelta(
+        minutes=120,
+    )
+
+
+def test_manual_execution_does_not_apply_notification_delay():
+    """手动执行保持即时通知，不套用任务级通知延迟。"""
+
+    async def _run():
+        job = _build_agent_job().model_copy(
+            update={"meta": {"notification_delay_minutes": 120}},
+        )
+        monitor = _MonitorSyncClient()
+        manager = CronManager(
+            repo=_Repo(job),
+            runner=_Runner(),
+            channel_manager=_ChannelManager(),
+        )
+        manager._monitor_sync_client = (
+            monitor  # pylint: disable=protected-access
+        )
+        actual_time = datetime(2026, 6, 4, 10, 0, tzinfo=timezone.utc)
+
+        await manager._sync_execution_to_monitor(  # pylint: disable=protected-access
+            job=job,
+            exec_status="success",
+            actual_time=actual_time,
+            end_time=actual_time,
+            duration_ms=100,
+            error_message="",
+            output_preview="done",
+            is_manual=True,
+        )
+
+        return monitor.records[-1]
+
+    record = asyncio.run(_run())
+
+    assert record["notification_due_at"] is None
+
+
+def test_invalid_notification_delay_defaults_to_immediate():
+    """非法通知延迟按 0 处理，避免 pending 记录被错误延后。"""
+
+    async def _run():
+        job = _build_agent_job().model_copy(
+            update={"meta": {"notification_delay_minutes": "bad"}},
+        )
+        monitor = _MonitorSyncClient()
+        manager = CronManager(
+            repo=_Repo(job),
+            runner=_Runner(),
+            channel_manager=_ChannelManager(),
+        )
+        manager._monitor_sync_client = (
+            monitor  # pylint: disable=protected-access
+        )
+        actual_time = datetime(2026, 6, 4, 10, 0, tzinfo=timezone.utc)
+
+        await manager._sync_execution_to_monitor(  # pylint: disable=protected-access
+            job=job,
+            exec_status="success",
+            actual_time=actual_time,
+            end_time=actual_time,
+            duration_ms=100,
+            error_message="",
+            output_preview="done",
+            is_manual=False,
+        )
+
+        return monitor.records[-1]
+
+    record = asyncio.run(_run())
+
+    assert record["notification_due_at"] is None
 
 
 def test_completed_agent_output_cancelled_before_stream_close_keeps_success(
@@ -313,3 +462,352 @@ def test_failed_execution_still_syncs_model_meta(monkeypatch):
         },
         "fallback_reason": "provider_not_found",
     }
+
+
+def test_failed_event_marks_execution_as_error(monkeypatch):
+    """当 runner yield Failed 事件时，应正确标记为错误而不是成功。
+
+    这是针对模型调用失败场景的关键测试：
+    - runner 不抛出异常，而是 yield Failed 事件
+    - executor 应检测 Failed 事件并正确处理为失败
+    - 不应将 CancelledError 视为成功
+    """
+    warning_messages: list[str] = []
+
+    def fake_executor_warning(message, *args, **_kwargs) -> None:
+        try:
+            text = str(message) % args if args else str(message)
+        except TypeError:
+            text = str(message)
+        warning_messages.append(text)
+
+    monkeypatch.setattr(
+        "swe.app.crons.executor.logger.warning",
+        fake_executor_warning,
+    )
+
+    async def _run():
+        job = _build_agent_job()
+        channel_manager = _ChannelManager()
+        monitor = _MonitorSyncClient()
+        manager = CronManager(
+            repo=_Repo(job),
+            runner=_FailedRunner(),
+            channel_manager=channel_manager,
+        )
+        manager._monitor_sync_client = (
+            monitor  # pylint: disable=protected-access
+        )
+
+        try:
+            await manager._execute_once(  # pylint: disable=protected-access
+                job,
+                is_manual=False,
+            )
+        except RuntimeError:
+            # executor 应在检测到 Failed 事件后抛出 RuntimeError
+            pass
+
+        return manager, channel_manager, monitor
+
+    manager, channel_manager, monitor = asyncio.run(_run())
+
+    state = manager.get_state("job-cancel-after-output")
+    # 验证：应该记录为 error 或 cancelled，不是 success
+    assert state.last_status in ("error", "cancelled")
+    # 验证：Monitor 同步应记录为 error
+    assert monitor.records[-1]["status"] == "error"
+    # 验证：应该看到 failed 事件的日志
+    assert any("failed" in message.lower() for message in warning_messages)
+
+
+def test_empty_stream_marks_execution_as_error():
+    """当 runner 返回空流（没有任何 Completed 或 Failed 事件）时，
+    应正确标记为错误而不是成功。
+
+    这是针对模型不可用等场景的测试：
+    - runner 可能返回空流而不是 yield Failed 事件
+    - executor 应检测没有 Completed 事件并正确处理为失败
+    """
+
+    async def _run():
+        job = _build_agent_job()
+        channel_manager = _ChannelManager()
+        monitor = _MonitorSyncClient()
+        manager = CronManager(
+            repo=_Repo(job),
+            runner=_EmptyStreamRunner(),
+            channel_manager=channel_manager,
+        )
+        manager._monitor_sync_client = (
+            monitor  # pylint: disable=protected-access
+        )
+
+        try:
+            await manager._execute_once(  # pylint: disable=protected-access
+                job,
+                is_manual=False,
+            )
+        except RuntimeError:
+            # executor 应在检测到没有 Completed 事件后抛出 RuntimeError
+            pass
+
+        return manager, channel_manager, monitor
+
+    manager, channel_manager, monitor = asyncio.run(_run())
+
+    state = manager.get_state("job-cancel-after-output")
+    # 验证：应该记录为 error，不是 success
+    assert state.last_status == "error"
+    # 验证：Monitor 同步应记录为 error
+    assert monitor.records[-1]["status"] == "error"
+    # 验证：没有发送任何事件
+    assert len(channel_manager.events) == 0
+
+
+def test_failed_execution_preserves_trace_id(monkeypatch):
+    """验证执行失败时 trace_id 仍能正确传递到 Monitor。
+
+    这是确保 trace_id 在失败场景下也能被保存的关键测试：
+    - executor 在失败时应将 trace_id 附加到异常
+    - manager 应从异常获取 trace_id
+    - trace_id 应被同步到 Monitor
+    """
+    fake_trace_id = "test-trace-id-for-failure"
+
+    async def fake_start_trace(**_kwargs):
+        return fake_trace_id
+
+    async def fake_end_trace(*_args, **_kwargs):
+        return None
+
+    # Mock trace_manager 使 trace_id 被创建
+    monkeypatch.setattr(
+        "swe.app.crons.executor.has_trace_manager",
+        lambda: True,
+    )
+    monkeypatch.setattr(
+        "swe.app.crons.executor.get_trace_manager",
+        lambda: SimpleNamespace(
+            enabled=True,
+            start_trace=fake_start_trace,
+            end_trace=fake_end_trace,
+        ),
+    )
+
+    async def _run():
+        job = _build_agent_job()
+        channel_manager = _ChannelManager()
+        monitor = _MonitorSyncClient()
+        manager = CronManager(
+            repo=_Repo(job),
+            runner=_EmptyStreamRunner(),
+            channel_manager=channel_manager,
+        )
+        manager._monitor_sync_client = (
+            monitor  # pylint: disable=protected-access
+        )
+
+        try:
+            await manager._execute_once(  # pylint: disable=protected-access
+                job,
+                is_manual=False,
+            )
+        except RuntimeError:
+            pass
+
+        return monitor
+
+    monitor = asyncio.run(_run())
+
+    # 验证：trace_id 应被正确传递到 Monitor
+    assert monitor.records[-1]["status"] == "error"
+    assert monitor.records[-1]["trace_id"] == fake_trace_id
+
+
+def test_auth_failure_preserves_trace_id_and_raises(monkeypatch):
+    fake_trace_id = "test-trace-id-for-auth-failure"
+    end_trace_calls: list[tuple[object, ...]] = []
+
+    async def fake_start_trace(**_kwargs):
+        return fake_trace_id
+
+    async def fake_end_trace(*args, **_kwargs):
+        end_trace_calls.append(args)
+
+    def fake_resolve_auth_token_for_execution(**_kwargs):
+        raise ValueError("cron auth user_info is expired")
+
+    monkeypatch.setattr(
+        "swe.app.crons.executor.has_trace_manager",
+        lambda: True,
+    )
+    monkeypatch.setattr(
+        "swe.app.crons.executor.get_trace_manager",
+        lambda: SimpleNamespace(
+            enabled=True,
+            start_trace=fake_start_trace,
+            end_trace=fake_end_trace,
+        ),
+    )
+    monkeypatch.setattr(
+        "swe.app.crons.executor.resolve_auth_token_for_execution",
+        fake_resolve_auth_token_for_execution,
+    )
+
+    async def _run():
+        job = _build_agent_job()
+        channel_manager = _ChannelManager()
+        monitor = _MonitorSyncClient()
+        manager = CronManager(
+            repo=_Repo(job),
+            runner=_Runner(),
+            channel_manager=channel_manager,
+        )
+        manager._monitor_sync_client = (
+            monitor  # pylint: disable=protected-access
+        )
+
+        captured_error = None
+        try:
+            await manager._execute_once(  # pylint: disable=protected-access
+                job,
+                is_manual=False,
+            )
+        except RuntimeError as exc:
+            captured_error = exc
+
+        return captured_error, monitor
+
+    captured_error, monitor = asyncio.run(_run())
+
+    assert captured_error is not None
+    assert str(captured_error) == (
+        "cron auth user_info is expired; "
+        "please refresh cron auth configuration"
+    )
+    assert monitor.records[-1]["status"] == "error"
+    assert monitor.records[-1]["trace_id"] == fake_trace_id
+    assert end_trace_calls == [
+        (
+            fake_trace_id,
+            TraceStatus.ERROR,
+            (
+                "cron auth user_info is expired; "
+                "please refresh cron auth configuration"
+            ),
+        ),
+    ]
+
+
+def test_manual_broadcast_execution_does_not_delay_notification():
+    """手动执行分发任务时，不应沿用原计划的通知延迟。"""
+
+    async def _run():
+        job = _build_broadcast_agent_job()
+        monitor = _MonitorSyncClient()
+        manager = CronManager(
+            repo=_Repo(job),
+            runner=_Runner(),
+            channel_manager=_ChannelManager(),
+        )
+        manager._monitor_sync_client = (
+            monitor  # pylint: disable=protected-access
+        )
+        actual_time = datetime(2026, 6, 4, 10, 0, tzinfo=timezone.utc)
+
+        await manager._sync_execution_to_monitor(  # pylint: disable=protected-access
+            job=job,
+            exec_status="success",
+            actual_time=actual_time,
+            end_time=actual_time,
+            duration_ms=100,
+            error_message="",
+            output_preview="done",
+            is_manual=True,
+        )
+
+        return monitor.records[-1]
+
+    record = asyncio.run(_run())
+
+    assert record["notification_due_at"] is None
+
+
+def test_automatic_broadcast_execution_keeps_original_schedule_delay():
+    """自动执行分发任务时，仍按分发 offset 延迟通知。"""
+
+    async def _run():
+        job = _build_broadcast_agent_job()
+        monitor = _MonitorSyncClient()
+        manager = CronManager(
+            repo=_Repo(job),
+            runner=_Runner(),
+            channel_manager=_ChannelManager(),
+        )
+        manager._monitor_sync_client = (
+            monitor  # pylint: disable=protected-access
+        )
+        actual_time = datetime(2026, 6, 4, 10, 0, tzinfo=timezone.utc)
+
+        await manager._sync_execution_to_monitor(  # pylint: disable=protected-access
+            job=job,
+            exec_status="success",
+            actual_time=actual_time,
+            end_time=actual_time,
+            duration_ms=100,
+            error_message="",
+            output_preview="done",
+            is_manual=False,
+        )
+
+        return monitor.records[-1], actual_time
+
+    record, actual_time = asyncio.run(_run())
+
+    assert record["notification_due_at"] == actual_time + timedelta(minutes=20)
+    assert record["notification_timezone"] == "Asia/Shanghai"
+
+
+def test_automatic_broadcast_execution_stacks_notification_delay():
+    """自动执行分发子任务时，通知延迟应叠加在分发 offset 之后。"""
+
+    async def _run():
+        job = _build_broadcast_agent_job().model_copy(
+            update={
+                "meta": {
+                    **_build_broadcast_agent_job().meta,
+                    "notification_delay_minutes": 120,
+                },
+            },
+        )
+        monitor = _MonitorSyncClient()
+        manager = CronManager(
+            repo=_Repo(job),
+            runner=_Runner(),
+            channel_manager=_ChannelManager(),
+        )
+        manager._monitor_sync_client = (
+            monitor  # pylint: disable=protected-access
+        )
+        actual_time = datetime(2026, 6, 4, 10, 0, tzinfo=timezone.utc)
+
+        await manager._sync_execution_to_monitor(  # pylint: disable=protected-access
+            job=job,
+            exec_status="success",
+            actual_time=actual_time,
+            end_time=actual_time,
+            duration_ms=100,
+            error_message="",
+            output_preview="done",
+            is_manual=False,
+        )
+
+        return monitor.records[-1], actual_time
+
+    record, actual_time = asyncio.run(_run())
+
+    assert record["notification_due_at"] == actual_time + timedelta(
+        minutes=140,
+    )
+    assert record["notification_timezone"] == "Asia/Shanghai"

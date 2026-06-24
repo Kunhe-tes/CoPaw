@@ -23,6 +23,7 @@ from swe.agents.hook_runtime.models import (
     HookDecision,
     HookEventName,
     HookHandlerResult,
+    HookOutput,
     HttpHookHandlerConfig,
     PromptHookHandlerConfig,
     HookMatcherGroupConfig,
@@ -642,7 +643,10 @@ async def test_before_stop_prompt_handler_invalid_output_uses_fail_policy(
 
     monkeypatch.setattr(
         "swe.agents.hook_runtime.executor.create_model_and_formatter",
-        lambda agent_id=None: (fake_model, object()),
+        lambda agent_id=None, trace_context=None: (
+            fake_model,
+            object(),
+        ),
     )
 
     result = await execute_handler(
@@ -695,8 +699,9 @@ async def test_prompt_handler_binds_context_and_redacts_model_input(
         observed["messages"] = messages
         return '{"decision":"deny","reason":"secret request"}'
 
-    def fake_create_model_and_formatter(agent_id=None):
+    def fake_create_model_and_formatter(agent_id=None, trace_context=None):
         observed["agent_id"] = agent_id
+        observed["trace_context"] = trace_context
         from swe.config.context import (
             get_current_source_id,
             get_current_tenant_id,
@@ -734,6 +739,8 @@ async def test_prompt_handler_binds_context_and_redacts_model_input(
     assert observed["user_id"] == "user-1"
     assert observed["source_id"] == "web"
     assert observed["workspace_dir"] == Path(context.workspace_dir)
+    assert observed["trace_context"]["trace_id"] == context.trace_id
+    assert observed["trace_context"]["session_id"] == context.session_id
     prompt_text = observed["messages"][0]["content"]
     assert "Reject leaked secrets." in prompt_text
     assert "HookContext JSON" in prompt_text
@@ -775,7 +782,10 @@ async def test_prompt_handler_extracts_streaming_delta_and_cumulative_chunks(
 
     monkeypatch.setattr(
         "swe.agents.hook_runtime.executor.create_model_and_formatter",
-        lambda agent_id=None: (fake_model, object()),
+        lambda agent_id=None, trace_context=None: (
+            fake_model,
+            object(),
+        ),
     )
     handler = PromptHookHandlerConfig(id="policy", prompt="Allow safe work.")
 
@@ -819,7 +829,10 @@ async def test_prompt_handler_timeout_closes_stream(
 
     monkeypatch.setattr(
         "swe.agents.hook_runtime.executor.create_model_and_formatter",
-        lambda agent_id=None: (fake_model, object()),
+        lambda agent_id=None, trace_context=None: (
+            fake_model,
+            object(),
+        ),
     )
     handler = PromptHookHandlerConfig(
         id="policy",
@@ -890,6 +903,312 @@ async def test_runtime_emits_prompt_command_and_http_handlers_concurrently(
         ("start", "prompt"),
     ]
     assert events[-3:] == [("end", "cmd"), ("end", "http"), ("end", "prompt")]
+
+
+@pytest.mark.asyncio
+async def test_runtime_injects_conversation_snapshot_per_handler(
+    monkeypatch,
+) -> None:
+    from swe.agents.hook_runtime.runtime import HookRuntime
+
+    seen_payloads: dict[str, dict] = {}
+
+    async def fake_execute_handler(handler, context, *, workspace_dir):
+        del workspace_dir
+        seen_payloads[handler.id] = context.to_handler_payload()
+        return HookHandlerResult(handler_id=handler.id, order=0)
+
+    async def snapshot_provider():
+        return {
+            "messages": [
+                {
+                    "role": "user",
+                    "content": "first",
+                },
+                {
+                    "role": "assistant",
+                    "content": [
+                        {"type": "thinking", "thinking": "hidden"},
+                        {"type": "text", "text": "visible"},
+                        {
+                            "type": "tool_use",
+                            "id": "tool-1",
+                            "name": "read_file",
+                            "input": {"path": "README.md"},
+                        },
+                    ],
+                },
+                {
+                    "role": "system",
+                    "content": [
+                        {
+                            "type": "tool_result",
+                            "id": "tool-1",
+                            "name": "read_file",
+                            "output": "ok",
+                        },
+                    ],
+                },
+            ],
+            "meta": {
+                "reasoning_omitted": True,
+                "media_content_omitted": False,
+            },
+        }
+
+    monkeypatch.setattr(
+        "swe.agents.hook_runtime.runtime.execute_handler",
+        fake_execute_handler,
+    )
+
+    runtime = HookRuntime(
+        tenant_config=HookConfig(
+            enabled=True,
+            events={
+                HookEventName.PRE_TOOL_USE: [
+                    HookMatcherGroupConfig(
+                        hooks=[
+                            CommandHookHandlerConfig(
+                                id="with-snapshot",
+                                command="echo",
+                                includeConversationSnapshot=True,
+                                conversationSnapshotLimit=2,
+                            ),
+                            CommandHookHandlerConfig(
+                                id="without-snapshot",
+                                command="echo",
+                            ),
+                        ],
+                    ),
+                ],
+            },
+        ),
+    )
+
+    await runtime.emit(
+        _context(),
+        workspace_dir=Path("/tmp"),
+        conversation_snapshot_provider=snapshot_provider,
+    )
+
+    assert "conversation_snapshot" not in seen_payloads["without-snapshot"]
+    snapshot_payload = seen_payloads["with-snapshot"]
+    assert [
+        item["role"] for item in snapshot_payload["conversation_snapshot"]
+    ] == [
+        "assistant",
+        "system",
+    ]
+    assert snapshot_payload["conversation_snapshot"][0]["content"] == [
+        {"type": "text", "text": "visible"},
+        {
+            "type": "tool_use",
+            "id": "tool-1",
+            "name": "read_file",
+            "input": {"path": "README.md"},
+        },
+    ]
+    assert snapshot_payload["conversation_snapshot_meta"] == {
+        "included_messages": 2,
+        "omitted_messages": 1,
+        "limit": 2,
+        "reasoning_omitted": True,
+        "media_content_omitted": False,
+    }
+
+
+@pytest.mark.asyncio
+async def test_runtime_marks_conversation_snapshot_unavailable(
+    monkeypatch,
+) -> None:
+    from swe.agents.hook_runtime.runtime import HookRuntime
+
+    seen_payloads: list[dict] = []
+
+    async def fake_execute_handler(handler, context, *, workspace_dir):
+        del handler, workspace_dir
+        seen_payloads.append(context.to_handler_payload())
+        return HookHandlerResult(handler_id="cmd", order=0)
+
+    monkeypatch.setattr(
+        "swe.agents.hook_runtime.runtime.execute_handler",
+        fake_execute_handler,
+    )
+
+    runtime = HookRuntime(
+        tenant_config=HookConfig(
+            enabled=True,
+            events={
+                HookEventName.PRE_TOOL_USE: [
+                    HookMatcherGroupConfig(
+                        hooks=[
+                            CommandHookHandlerConfig(
+                                id="cmd",
+                                command="echo",
+                                includeConversationSnapshot=True,
+                            ),
+                        ],
+                    ),
+                ],
+            },
+        ),
+    )
+
+    await runtime.emit(_context(), workspace_dir=Path("/tmp"))
+
+    assert seen_payloads[0]["conversation_snapshot"] == []
+    assert seen_payloads[0]["conversation_snapshot_meta"] == {
+        "included_messages": 0,
+        "omitted_messages": 0,
+        "limit": 50,
+        "unavailable": True,
+        "unavailable_reason": "agent_memory_unavailable",
+    }
+
+
+@pytest.mark.asyncio
+async def test_runtime_logs_hook_telemetry_for_executed_handlers(
+    monkeypatch,
+) -> None:
+    from swe.agents.hook_runtime.runtime import HookRuntime
+
+    log_messages: list[str] = []
+
+    async def fake_execute_handler(handler, context, *, workspace_dir):
+        if handler.id == "policy":
+            return HookHandlerResult(
+                handler_id=handler.id,
+                order=0,
+                decision=HookDecision.ASK,
+                reason="approval required for token abc123",
+                output=HookOutput(
+                    system_message="raw system should not log",
+                    hookSpecificOutput={
+                        "permissionDecision": "ask",
+                        "permissionDecisionReason": "approval required",
+                        "additionalContext": "raw context should not log",
+                        "updatedInput": {"cmd": "echo changed"},
+                    },
+                ),
+            )
+        return HookHandlerResult(
+            handler_id=handler.id,
+            order=0,
+            failed=True,
+            failure_type="timeout",
+            reason="handler timed out",
+        )
+
+    monkeypatch.setattr(
+        "swe.agents.hook_runtime.runtime.execute_handler",
+        fake_execute_handler,
+    )
+    monkeypatch.setattr(
+        "swe.agents.hook_runtime.runtime.logger.info",
+        lambda message, *args: log_messages.append(message % args),
+    )
+
+    runtime = HookRuntime(
+        tenant_config=HookConfig(
+            enabled=True,
+            events={
+                HookEventName.PRE_TOOL_USE: [
+                    HookMatcherGroupConfig(
+                        id="guards",
+                        hooks=[
+                            CommandHookHandlerConfig(
+                                id="policy",
+                                command="echo",
+                            ),
+                            HttpHookHandlerConfig(
+                                id="notify",
+                                url="https://hooks.example/notify",
+                            ),
+                        ],
+                    ),
+                ],
+            },
+        ),
+    )
+    context_data = _context().model_dump(mode="json")
+    context_data.update(
+        trace_id="trace-1",
+        prompt="raw prompt should not log",
+    )
+    context = HookContext(**context_data)
+
+    await runtime.emit(context, workspace_dir=Path("/tmp"))
+
+    messages = [
+        message
+        for message in log_messages
+        if message.startswith("HOOK_TELEMETRY ")
+    ]
+    assert len(messages) == 1
+    payload = json.loads(messages[0].removeprefix("HOOK_TELEMETRY "))
+
+    assert payload["schema"] == "hook_telemetry.v1"
+    assert payload["hook_event_name"] == "PreToolUse"
+    assert payload["trace_id"] == "trace-1"
+    assert payload["source_id"] == "source-a"
+    assert payload["handler_count"] == 2
+    assert payload["decision"] == "ask"
+    assert payload["blocked"] is False
+    assert payload["has_updated_input"] is True
+    assert payload["updated_input_handler_ids"] == ["policy"]
+    assert payload["has_additional_context"] is True
+    assert payload["additional_context_handler_ids"] == ["policy"]
+    assert payload["has_system_messages"] is True
+    assert payload["system_message_handler_ids"] == ["policy"]
+    assert payload["permission_decisions"] == [
+        {
+            "handler_id": "policy",
+            "decision": "ask",
+            "reason_preview": "approval required",
+        },
+    ]
+    assert isinstance(payload["duration_ms"], int)
+    assert payload["duration_ms"] >= 0
+    assert [
+        (item["handler_id"], item["group_id"], item["type"])
+        for item in payload["handlers"]
+    ] == [
+        ("policy", "guards", "command"),
+        ("notify", "guards", "http"),
+    ]
+    assert all(
+        isinstance(item["duration_ms"], int) for item in payload["handlers"]
+    )
+    assert payload["handlers"][1]["failed"] is True
+    assert payload["handlers"][1]["failure_type"] == "timeout"
+    serialized = json.dumps(payload, ensure_ascii=False)
+    assert "raw prompt should not log" not in serialized
+    assert "raw context should not log" not in serialized
+    assert "raw system should not log" not in serialized
+    assert "echo changed" not in serialized
+    assert "https://hooks.example/notify" not in serialized
+
+
+@pytest.mark.asyncio
+async def test_runtime_does_not_log_hook_telemetry_without_handlers(
+    monkeypatch,
+) -> None:
+    from swe.agents.hook_runtime.runtime import HookRuntime
+
+    log_messages: list[str] = []
+    monkeypatch.setattr(
+        "swe.agents.hook_runtime.runtime.logger.info",
+        lambda message, *args: log_messages.append(message % args),
+    )
+    runtime = HookRuntime(tenant_config=HookConfig(enabled=True))
+
+    await runtime.emit(_context(), workspace_dir=Path("/tmp"))
+
+    assert not [
+        message
+        for message in log_messages
+        if message.startswith("HOOK_TELEMETRY ")
+    ]
 
 
 def test_merge_priority_additional_context_and_updated_input_conflict() -> (

@@ -12,6 +12,7 @@ from .models import (
     HtmlPreviewCustomerClickSummaryItem,
     HtmlPreviewListSnapshotCreate,
     HtmlPreviewListSummaryItem,
+    HtmlPreviewListSummaryResponse,
 )
 from .store import HtmlPreviewClickStore
 
@@ -120,15 +121,17 @@ class HtmlPreviewClickService:
         start_time: Optional[datetime] = None,
         end_time: Optional[datetime] = None,
         bbk_ids: Optional[list[str]] = None,
-        limit: int = 100,
-    ) -> list[HtmlPreviewListSummaryItem]:
+        page: int = 1,
+        page_size: int = 20,
+    ) -> HtmlPreviewListSummaryResponse:
         """查询名单维度统计。"""
         return await self.store.list_lists(
             source_id=source_id,
             start_time=start_time,
             end_time=end_time,
             bbk_ids=bbk_ids,
-            limit=limit,
+            page=page,
+            page_size=page_size,
         )
 
     async def list_customer_clicks(

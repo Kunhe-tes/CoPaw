@@ -111,7 +111,11 @@ function matchExt(suffix: string, ext: string[]): boolean {
 
 export type FileType = "previewable" | "unsupported";
 
-const AUTO_PREVIEW_MARKERS = ["[auto-preview]", "存款到期完整客户名单"];
+const AUTO_PREVIEW_MARKERS = [
+  "[auto-preview]",
+  "auto-preview",
+  "存款到期完整客户名单",
+];
 const HTML_PREVIEW_EXTS = ["html", "htm"];
 
 function safeDecodeValue(value: string): string {
@@ -195,4 +199,40 @@ function getIconUrlByExt(ext: string): string {
     html: mdIcon, htm: mdIcon, xhtml: mdIcon,
   };
   return extToIcon[ext] || zipIcon;
+}
+
+/**
+ * 从 URL 中提取 resultId 参数
+ */
+export function extractResultIdFromUrl(url: string): string | null {
+  try {
+    const urlObj = new URL(url, window.location.origin);
+    const resultId = urlObj.searchParams.get("resultId");
+    return resultId;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * 从 URL 中提取 templateId 参数
+ */
+export function extractTemplateIdFromUrl(url: string): string | null {
+  try {
+    const urlObj = new URL(url, window.location.origin);
+    const templateId = urlObj.searchParams.get("templateId");
+    return templateId;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * 判断是否为动态渲染类型的 HTML 链接
+ * 条件：URL 包含 resultId 和 templateId 参数
+ */
+export function isDynamicRenderHtmlLink(url: string): boolean {
+  const resultId = extractResultIdFromUrl(url);
+  const templateId = extractTemplateIdFromUrl(url);
+  return !!(resultId && templateId);
 }

@@ -17,7 +17,7 @@ import {
   ensureValidToken,
   isExternalTokenEnabled,
 } from "../api/externalToken";
-import { getTargetCookie } from "./cookie-utils";
+import { getWPlusCookie } from "./cookie-utils";
 import { authApi } from "../api/modules/auth";
 import { envApi } from "../api/modules/env";
 import { buildAuthHeaders as buildCookieHeaders } from "../api/authHeaders";
@@ -168,10 +168,10 @@ function initializeUser(userId: string): void {
  * 处理 USER_DATA 消息
  * 父窗口发送的用户数据消息处理逻辑
  */
-function handleUserDataMessage(
+async function handleUserDataMessage(
   message: IframeUserDataMessage,
   origin: string,
-): void {
+): Promise<void> {
   const store = useIframeStore.getState();
   const authHeaders = buildAuthHeaders(message);
   const nextUserId = message.data.sapId ?? null;
@@ -190,8 +190,11 @@ function handleUserDataMessage(
     bbk: message.data.bbkId ?? null,
   });
 
+  // 等待 userName 获取完成后再标记初始化完成
+  // 确保 X-User-Name header 在后续请求中可用
+  await fetchAndSetUserName();
+
   store.markInitialized();
-  void fetchAndSetUserName();
   // sendMessageToParent({ type: "READY_RESPONSE", initialized: true });
   // 只在W发起
   // const headers = buildCookieHeaders();
@@ -240,7 +243,8 @@ function handleMessage(event: MessageEvent): void {
 
   switch (message.type) {
     case "USER_DATA":
-      handleUserDataMessage(message, event.origin);
+      // 异步处理，等待 userName 获取完成后再标记 initialized
+      void handleUserDataMessage(message, event.origin);
       break;
     case "HEARTBEAT":
       handleHeartbeatMessage(message.timestamp);
@@ -344,13 +348,13 @@ export async function handleUrlOriginParam(): Promise<void> {
   const sessionIdParam = urlParams.get("sessionId");
   const taskIdParam = urlParams.get("taskId");
   // 从 cookie 读取用户信息
-  const userId = getTargetCookie("userid");
-  const sysId = getTargetCookie("sysid");
-  const vbbk = getTargetCookie("vbbk");
-  const vorgcode = getTargetCookie("vorgcode");
-  const subBranchId = getTargetCookie("subBranchId");
-  const vorglvl = getTargetCookie("vorglvl");
-  const positionId = getTargetCookie("positionID");
+  const userId = getWPlusCookie("userid");
+  const sysId = getWPlusCookie("sysid");
+  const vbbk = getWPlusCookie("vbbk");
+  const vorgcode = getWPlusCookie("vorgcode");
+  const subBranchId = getWPlusCookie("subBranchId");
+  const vorglvl = getWPlusCookie("vorglvl");
+  const positionId = getWPlusCookie("positionID");
 
   if (!userId) {
     return;
@@ -432,12 +436,12 @@ async function initFromUrlParams(userId: string): Promise<void> {
  */
 async function fetchAndApplyCustomerInfoFromCookie(userId: string): Promise<void> {
   try {
-    const sysId = getTargetCookie("sysid") ?? "";
-    const vbbk = getTargetCookie("vbbk") ?? "";
-    const vorgcode = getTargetCookie("vorgcode") ?? "";
-    const subBranchId = getTargetCookie("subBranchId") ?? "";
-    const vorglvl = getTargetCookie("vorglvl") ?? "";
-    const positionId = getTargetCookie("positionID") ?? "";
+    const sysId = getWPlusCookie("sysid") ?? "";
+    const vbbk = getWPlusCookie("vbbk") ?? "";
+    const vorgcode = getWPlusCookie("vorgcode") ?? "";
+    const subBranchId = getWPlusCookie("subBranchId") ?? "";
+    const vorglvl = getWPlusCookie("vorglvl") ?? "";
+    const positionId = getWPlusCookie("positionID") ?? "";
 
     const targetUserData = {
       inputParams: {
@@ -471,7 +475,7 @@ async function fetchAndApplyCustomerInfoFromCookie(userId: string): Promise<void
       } else {
         // 接口未返回新cookie，刷新document.cookie的值到store
         store.setContext({
-          token: getTargetCookie("token"),
+          token: getWPlusCookie("token"),
           userChange: false,
         });
       }
@@ -495,7 +499,7 @@ function syncOriginYEnvFromCurrentContext(): Promise<void> {
     const store = useIframeStore.getState();
     const headers = buildCookieHeaders();
     const cookieValue = headers["x-header-cookie"] || document.cookie;
-    const token = store.token || getTargetCookie("token") || "";
+    const token = store.token || getWPlusCookie("token") || "";
 
     await envApi.patchEnvs({
       values: {

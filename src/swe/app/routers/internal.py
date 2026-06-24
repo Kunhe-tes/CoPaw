@@ -14,10 +14,12 @@ from fastapi import APIRouter, Body, File, Header, HTTPException, Request
 from fastapi import UploadFile
 from pydantic import BaseModel, Field
 
+from ..identity_resolver import resolve_user_identity
 from ...config.context import (
     is_valid_identity_value,
     resolve_runtime_tenant_id,
     resolve_scope_id,
+    resolve_storage_tenant_id,
 )
 from ...config.scope_conversion import (
     decode_canonical_scope_id,
@@ -25,6 +27,7 @@ from ...config.scope_conversion import (
 )
 from ...config.utils import list_all_tenant_ids
 from ...constant import WORKING_DIR
+from ..workspace.tenant_initializer import TenantInitializer
 
 router = APIRouter(prefix="/internal", tags=["internal"])
 public_router = APIRouter(prefix="/assets", tags=["assets"])
@@ -123,6 +126,16 @@ _PREVIEW_PLACEHOLDER_HTML = """<!doctype html>
 """
 
 
+def _list_runtime_tenant_ids() -> list[str]:
+    """返回参与运行态维护的租户列表，显式排除模板目录。"""
+    tenant_ids = list_all_tenant_ids()
+    return [
+        tenant_id
+        for tenant_id in tenant_ids
+        if tenant_id == "default" or not tenant_id.startswith("default_")
+    ]
+
+
 class InternalErrorResponse(BaseModel):
     detail: str = Field(..., description="Error detail message.")
 
@@ -194,6 +207,39 @@ class InternalScopeDecodeResponse(BaseModel):
     items: Optional[list[InternalScopeDecodeItem]] = None
 
 
+class InternalBatchInitializeTenantsRequest(BaseModel):
+    """批量初始化租户请求。"""
+
+    tenant_ids: str = Field(..., description="逗号分隔的租户 ID 字符串")
+    source_id: str = Field(..., min_length=1, description="来源标识")
+    fail_fast: bool = Field(
+        default=False,
+        description="单个租户失败时是否立即终止后续处理",
+    )
+
+
+class InternalBatchInitializeTenantResult(BaseModel):
+    """单个租户初始化结果。"""
+
+    tenant_id: str
+    tenant_name: Optional[str] = None
+    bbk_id: Optional[str] = None
+    status: str
+    message: str
+
+
+class InternalBatchInitializeTenantsResponse(BaseModel):
+    """批量初始化租户响应。"""
+
+    success: bool
+    total: int
+    success_count: int
+    fail_count: int
+    results: list[InternalBatchInitializeTenantResult] = Field(
+        default_factory=list,
+    )
+
+
 def _verify_internal_token(token: Optional[str]) -> None:
     """验证内部服务 Token（如果配置了的话）."""
     if _INTERNAL_TOKEN:
@@ -203,6 +249,46 @@ def _verify_internal_token(token: Optional[str]) -> None:
 
 def _http_400(detail: str) -> HTTPException:
     return HTTPException(status_code=400, detail=detail)
+
+
+def _parse_batch_tenant_ids(raw_tenant_ids: str) -> list[str]:
+    """解析批量租户字符串并去重。"""
+    tenant_ids: list[str] = []
+    seen: set[str] = set()
+    for raw_tenant_id in raw_tenant_ids.split(","):
+        tenant_id = raw_tenant_id.strip()
+        if not tenant_id:
+            continue
+        if not is_valid_identity_value(tenant_id):
+            raise _http_400(f"Invalid tenant_id: {tenant_id}")
+        if tenant_id in seen:
+            continue
+        seen.add(tenant_id)
+        tenant_ids.append(tenant_id)
+    if not tenant_ids:
+        raise _http_400("tenant_ids must not be empty")
+    return tenant_ids
+
+
+async def _is_tenant_already_bootstrapped(
+    pool: Any,
+    tenant_id: str,
+    source_id: str,
+) -> bool:
+    """判断租户目录是否已经完成 bootstrap。"""
+    base_working_dir = getattr(pool, "_base_working_dir", None)
+    if base_working_dir is None:
+        return False
+
+    try:
+        initializer = TenantInitializer(
+            base_working_dir,
+            tenant_id,
+            source_id=source_id,
+        )
+        return initializer.has_seeded_bootstrap()
+    except Exception:
+        return False
 
 
 def _require_internal_token(
@@ -455,10 +541,29 @@ async def _save_uploaded_asset_file(
     asset_file = _get_asset_file_path(safe_file_name)
     asset_file.write_bytes(content)
 
+    asset_path = _build_asset_path(safe_file_name)
+    file_size = len(content)
+
+    try:
+        from ..asset_upload_record.router import get_service
+
+        service = get_service()
+        await service.create_record(
+            file_name=safe_file_name,
+            file_size=file_size,
+            asset_path=asset_path,
+        )
+    except Exception:
+        logger.warning(
+            "Failed to persist upload record for file: %s",
+            safe_file_name,
+            exc_info=True,
+        )
+
     return InternalAssetUploadResponse(
         file_name=safe_file_name,
-        asset_path=_build_asset_path(safe_file_name),
-        size=len(content),
+        asset_path=asset_path,
+        size=file_size,
     )
 
 
@@ -583,6 +688,128 @@ async def internal_scope_decode(
     return InternalScopeDecodeResponse(items=response_items)
 
 
+@router.post(
+    "/tenants/batch-initialize",
+    response_model=InternalBatchInitializeTenantsResponse,
+    responses={
+        400: {"model": InternalErrorResponse},
+        503: {"model": InternalErrorResponse},
+    },
+)
+async def internal_batch_initialize_tenants(
+    payload: InternalBatchInitializeTenantsRequest,
+    request: Request,
+) -> InternalBatchInitializeTenantsResponse:
+    """公开批量补齐身份并初始化租户，不校验内部服务 Token。"""
+
+    if not is_valid_identity_value(payload.source_id):
+        raise _http_400("Invalid source_id")
+
+    tenant_ids = _parse_batch_tenant_ids(payload.tenant_ids)
+
+    pool = getattr(request.app.state, "tenant_workspace_pool", None)
+    if pool is None:
+        raise HTTPException(
+            status_code=503,
+            detail="Tenant pool not available",
+        )
+
+    auth_header = request.headers.get("Authorization")
+    headers = {
+        key: value
+        for key, value in {
+            "Content-Type": "application/json",
+            "Authorization": auth_header,
+        }.items()
+        if value
+    }
+    results: list[InternalBatchInitializeTenantResult] = []
+    success_count = 0
+    fail_count = 0
+
+    for tenant_id in tenant_ids:
+        resolved_identity = await resolve_user_identity(
+            tenant_id=tenant_id,
+            source_id=payload.source_id,
+            user_name=None,
+            bbk_id=None,
+            headers=headers,
+            allow_remote_lookup=True,
+        )
+        if not resolved_identity.user_name or not resolved_identity.bbk_id:
+            fail_count += 1
+            results.append(
+                InternalBatchInitializeTenantResult(
+                    tenant_id=tenant_id,
+                    tenant_name=resolved_identity.user_name,
+                    bbk_id=resolved_identity.bbk_id,
+                    status="failed",
+                    message="user identity not resolved",
+                ),
+            )
+            if payload.fail_fast:
+                break
+            continue
+
+        if await _is_tenant_already_bootstrapped(
+            pool,
+            tenant_id,
+            payload.source_id,
+        ):
+            success_count += 1
+            results.append(
+                InternalBatchInitializeTenantResult(
+                    tenant_id=tenant_id,
+                    tenant_name=resolved_identity.user_name,
+                    bbk_id=resolved_identity.bbk_id,
+                    status="success",
+                    message="skipped",
+                ),
+            )
+            continue
+
+        try:
+            await pool.ensure_bootstrap(
+                tenant_id,
+                source_id=payload.source_id,
+                tenant_name=resolved_identity.user_name,
+                bbk_id=resolved_identity.bbk_id,
+            )
+        except Exception as exc:
+            fail_count += 1
+            results.append(
+                InternalBatchInitializeTenantResult(
+                    tenant_id=tenant_id,
+                    tenant_name=resolved_identity.user_name,
+                    bbk_id=resolved_identity.bbk_id,
+                    status="failed",
+                    message=str(exc),
+                ),
+            )
+            if payload.fail_fast:
+                break
+            continue
+
+        success_count += 1
+        results.append(
+            InternalBatchInitializeTenantResult(
+                tenant_id=tenant_id,
+                tenant_name=resolved_identity.user_name,
+                bbk_id=resolved_identity.bbk_id,
+                status="success",
+                message="initialized",
+            ),
+        )
+
+    return InternalBatchInitializeTenantsResponse(
+        success=fail_count == 0 and success_count == len(tenant_ids),
+        total=len(tenant_ids),
+        success_count=success_count,
+        fail_count=fail_count,
+        results=results,
+    )
+
+
 @public_router.post(
     "/upload",
     response_model=InternalAssetUploadResponse,
@@ -685,9 +912,9 @@ async def _get_cron_manager(manager, tenant_id: str, agent_id: str):
 
 def _get_configured_agent_ids(tenant_id: str) -> list[str]:
     """读取指定租户配置中的所有 Agent ID。"""
-    from ...config.utils import get_tenant_config_path, load_config
+    from ...config.utils import get_tenant_storage_config_path, load_config
 
-    config = load_config(get_tenant_config_path(tenant_id))
+    config = load_config(get_tenant_storage_config_path(tenant_id))
     return sorted(config.agents.profiles.keys())
 
 
@@ -699,7 +926,7 @@ async def register_missing_cron_jobs(request: Request):
         logger.warning("MultiAgentManager not initialized")
         raise HTTPException(status_code=503, detail="Manager not available")
 
-    tenant_ids = list_all_tenant_ids()
+    tenant_ids = _list_runtime_tenant_ids()
     summary: dict[str, Any] = {
         "tenant_count": len(tenant_ids),
         "agent_count": 0,
@@ -775,7 +1002,7 @@ async def refresh_external_cron_jobs(request: Request):
         logger.warning("MultiAgentManager not initialized")
         raise HTTPException(status_code=503, detail="Manager not available")
 
-    tenant_ids = list_all_tenant_ids()
+    tenant_ids = _list_runtime_tenant_ids()
     summary: dict[str, Any] = {
         "tenant_count": len(tenant_ids),
         "agent_count": 0,
@@ -840,6 +1067,73 @@ async def refresh_external_cron_jobs(request: Request):
 
 
 @router.post("/cron/callback")
+async def _dispatch_cron_task(
+    request: Request,
+    task_type: str,
+    tenant_id: str,
+    source_id: Optional[str],
+    agent_id: str,
+    job_id: str,
+) -> None:
+    """根据 task_type 分发定时任务到对应处理器。"""
+    if task_type == "cleanup":
+        if not source_id:
+            raise HTTPException(
+                status_code=400,
+                detail="source_id required for task_type=cleanup",
+            )
+        source_scheduler = getattr(
+            request.app.state,
+            "source_system_task_scheduler",
+            None,
+        )
+        if source_scheduler is None:
+            raise HTTPException(
+                status_code=503,
+                detail="Source system task scheduler not available",
+            )
+        cleanup_result = await source_scheduler.run_task_session_cleanup(
+            source_id=source_id,
+        )
+        logger.info(
+            "Source task session cleanup result: %s",
+            cleanup_result,
+        )
+        return
+
+    manager = getattr(request.app.state, "multi_agent_manager", None)
+    if manager is None:
+        logger.warning("MultiAgentManager not initialized")
+        raise HTTPException(
+            status_code=503,
+            detail="Manager not available",
+        )
+    runtime_tenant_id = (
+        resolve_runtime_tenant_id(tenant_id, source_id) or tenant_id
+    )
+    mgr = await _get_cron_manager(manager, runtime_tenant_id, agent_id)
+    if mgr is None:
+        raise HTTPException(
+            status_code=404,
+            detail="CronManager not found",
+        )
+    if task_type == "heartbeat":
+        await mgr.run_heartbeat()
+    elif task_type == "dream":
+        await mgr.run_dream()
+    else:
+        if not job_id:
+            raise HTTPException(
+                status_code=400,
+                detail="job_id required for task_type=job",
+            )
+        await mgr.run_job(
+            job_id,
+            is_manual=False,
+            source_id=source_id,
+        )
+
+
 async def internal_cron_callback(
     request: Request,
     x_internal_token: Optional[str] = Header(
@@ -860,7 +1154,6 @@ async def internal_cron_callback(
 
     job_param = body.get("jobParam") or body.get("job_param") or ""
     if job_param:
-        # base64 JSON 包裹格式：jobParam 编码后下发，回调时原样传回
         try:
             params = json.loads(base64.urlsafe_b64decode(job_param))
         except Exception as e:
@@ -870,7 +1163,6 @@ async def internal_cron_callback(
                 detail=f"Invalid jobParam: {e}",
             )
     else:
-        # 直接参数格式：外部平台直接将参数字段展开在 body 中
         params = body
 
     try:
@@ -885,34 +1177,15 @@ async def internal_cron_callback(
             detail=f"Missing required param in callback body: {e}",
         )
 
-    manager = getattr(request.app.state, "multi_agent_manager", None)
-    if manager is None:
-        logger.warning("MultiAgentManager not initialized")
-        raise HTTPException(status_code=503, detail="Manager not available")
-
-    runtime_tenant_id = resolve_runtime_tenant_id(tenant_id, source_id)
-    mgr = await _get_cron_manager(manager, runtime_tenant_id, agent_id)
-    if mgr is None:
-        raise HTTPException(status_code=404, detail="CronManager not found")
-
     try:
-        if task_type == "heartbeat":
-            await mgr.run_heartbeat()
-        elif task_type == "dream":
-            await mgr.run_dream()
-        else:
-            if not job_id:
-                raise HTTPException(
-                    status_code=400,
-                    detail="job_id required for task_type=job",
-                )
-            # 调度回调触发的执行是自动执行，不是手动执行
-            await mgr.run_job(
-                job_id,
-                is_manual=False,
-                source_id=source_id,
-            )
-
+        await _dispatch_cron_task(
+            request,
+            task_type,
+            tenant_id,
+            source_id,
+            agent_id,
+            job_id,
+        )
         logger.info(
             "Callback dispatched: type=%s tenant=%s agent=%s job=%s",
             task_type,

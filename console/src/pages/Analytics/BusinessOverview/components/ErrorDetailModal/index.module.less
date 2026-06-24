@@ -1,0 +1,586 @@
+// Modal 全屏样式
+.errorDetailModal {
+  max-width: none;
+  margin: 0;
+  padding: 0;
+
+  :global(.ant-modal-content) {
+    height: 100vh;
+    padding: 0;
+    overflow: hidden;
+    border-radius: 0;
+    box-shadow: none;
+  }
+
+  :global(.ant-modal-header) {
+    margin: 0;
+    padding: 18px 24px 16px;
+    border-bottom: 1px solid #f0f0f0;
+  }
+
+  :global(.ant-modal-close) {
+    top: 16px;
+    right: 20px;
+  }
+
+  :global(.ant-modal-body) {
+    padding: 0;
+  }
+}
+
+.errorDetailModalBody {
+  height: calc(100vh - 78px);
+  padding: 0 !important;
+  background: #f5f6f8;
+}
+
+.modalContent {
+  display: flex;
+  gap: 16px;
+  height: 100%;
+  min-height: 0;
+  padding: 18px 22px 22px;
+}
+
+.leftPanel {
+  width: 420px;
+  flex-shrink: 0;
+  display: flex;
+  flex-direction: column;
+  border: 1px solid #f0f0f0;
+  border-radius: 6px;
+  background: #fff;
+  overflow: hidden;
+}
+
+.leftPanelHeader {
+  flex-shrink: 0;
+  padding: 12px;
+  border-bottom: 1px solid #f0f0f0;
+  background: #fff;
+}
+
+.errorListScroll {
+  flex: 1;
+  overflow-y: auto;
+  padding: 8px 12px 12px;
+}
+
+.rightPanel {
+  flex: 1;
+  overflow-y: auto;
+  border: 1px solid #f0f0f0;
+  border-radius: 6px;
+  padding: 12px;
+  background: #fff;
+}
+
+// 错误列表
+.errorListHeader {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 12px;
+}
+
+.errorListTitle {
+  font-weight: 600;
+  font-size: 14px;
+  color: #262626;
+}
+
+.errorListCount {
+  background: #ef4444;
+  color: #fff;
+  padding: 2px 8px;
+  border-radius: 12px;
+  font-size: 11px;
+}
+
+.errorListFilters {
+  display: flex;
+  gap: 8px;
+  margin-bottom: 12px;
+}
+
+.errorListLoading,
+.errorListEmpty {
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  height: 200px;
+  color: #999;
+}
+
+.errorCard {
+  padding: 12px;
+  border: 1px solid #e8e8e8;
+  border-radius: 6px;
+  cursor: pointer;
+  margin-bottom: 8px;
+  transition: all 0.2s;
+
+  &:hover {
+    border-color: #ef4444;
+    background: #fafafa;
+  }
+
+  &.selected {
+    border-color: #ef4444;
+    background: #fef2f2;
+  }
+}
+
+.errorCardHeader {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 6px;
+}
+
+.errorTypeTag {
+  padding: 2px 8px;
+  border-radius: 4px;
+  font-size: 10px;
+  color: #fff;
+}
+
+.errorTypeTagModel {
+  background: #f59e0b;
+}
+
+.errorTypeTagTool {
+  background: #ef4444;
+}
+
+.errorCardTime {
+  font-size: 11px;
+  color: #666;
+}
+
+.errorCardMessage {
+  font-size: 13px;
+  color: #ef4444;
+  font-weight: 500;
+  margin-bottom: 4px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.errorCardMeta {
+  display: flex;
+  gap: 8px;
+  font-size: 11px;
+  color: #666;
+  margin-bottom: 4px;
+}
+
+.errorCardTrace {
+  font-size: 11px;
+  color: #999;
+}
+
+.errorTraceId {
+  color: #2563eb;
+}
+
+.loadingMore {
+  padding: 12px;
+  text-align: center;
+  font-size: 12px;
+  color: #666;
+}
+
+.detailLoading {
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  height: 200px;
+}
+
+// 右侧面板卡片样式
+.errorSummaryCard {
+  background: linear-gradient(135deg, #fef2f2 0%, #fee2e2 100%);
+  border: 1px solid #fecaca;
+  border-radius: 8px;
+  padding: 12px;
+  margin-bottom: 12px;
+}
+
+.errorSummaryHeader {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 6px;
+}
+
+.errorSummaryTitle {
+  font-weight: 600;
+  color: #dc2626;
+}
+
+.errorSummaryContent {
+  color: #7f1d1d;
+  line-height: 1.4;
+}
+
+.errorSummaryMeta {
+  margin-top: 8px;
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+
+.conversationInfoCard {
+  background: linear-gradient(135deg, #f8fafc 0%, #f1f5f9 100%);
+  border: 1px solid #e2e8f0;
+  border-radius: 8px;
+  padding: 12px;
+  margin-bottom: 12px;
+}
+
+.conversationInfoHeader {
+  font-weight: 600;
+  color: #374151;
+  margin-bottom: 10px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.conversationInfoGrid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+}
+
+.conversationInfoItem {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 12px;
+}
+
+.conversationInfoLabel {
+  color: #6b7280;
+}
+
+.conversationInfoValue {
+  font-weight: 500;
+}
+
+.conversationInfoBadge {
+  background: #eff6ff;
+  color: #1d4ed8;
+  padding: 2px 6px;
+  border-radius: 4px;
+}
+
+.traceIdWrap {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.traceIdText {
+  color: #2563eb;
+  font-family: monospace;
+}
+
+.copyIconBtn {
+  background: none;
+  border: none;
+  color: #2563eb;
+  cursor: pointer;
+  padding: 2px;
+  display: flex;
+  align-items: center;
+  transition: color 0.2s;
+
+  &:hover {
+    color: #1d4ed8;
+  }
+}
+
+.statusError {
+  background: #fef2f2;
+  color: #ef4444;
+  padding: 2px 6px;
+  border-radius: 4px;
+  font-size: 11px;
+}
+
+.conversationContentCard {
+  background: #fff;
+  border: 1px solid #e5e7eb;
+  border-radius: 8px;
+  padding: 12px;
+  margin-bottom: 12px;
+}
+
+.conversationContentHeader {
+  font-weight: 600;
+  color: #374151;
+  margin-bottom: 10px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.conversationBlock {
+  margin-bottom: 12px;
+
+  &:last-child {
+    margin-bottom: 0;
+  }
+}
+
+.conversationBlockHeader {
+  color: #6b7280;
+  font-size: 11px;
+  margin-bottom: 4px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.conversationBlockContent {
+  border-radius: 6px;
+  padding: 10px;
+  line-height: 1.5;
+  font-size: 12px;
+}
+
+.userMessageBlock {
+  background: linear-gradient(135deg, #e0f2fe 0%, #bae6fd 100%);
+}
+
+.toolCallBlock {
+  background: #f9fafb;
+  border: 1px solid #e5e7eb;
+  font-size: 11px;
+}
+
+.toolCallHeader {
+  color: #6b7280;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.toolCallSuccess {
+  color: #059669;
+}
+
+.modelResponseBlock {
+  background: #f5f5f5;
+  border: 1px solid #fee2e2;
+}
+
+.modelResponseError {
+  color: #ef4444;
+  font-weight: 500;
+  margin-bottom: 8px;
+  padding-bottom: 8px;
+  border-bottom: 1px solid #fecaca;
+}
+
+.modelResponseEmpty {
+  color: #9ca3af;
+  font-size: 11px;
+}
+
+.callChainCard {
+  background: #fff;
+  border: 1px solid #e5e7eb;
+  border-radius: 8px;
+  padding: 12px;
+}
+
+.callChainHeader {
+  font-weight: 600;
+  color: #374151;
+  margin-bottom: 8px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.callChainFlow {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  align-items: center;
+}
+
+.callChainStep {
+  background: #f5f5f5;
+  padding: 6px 10px;
+  border-radius: 6px;
+  font-size: 11px;
+}
+
+.callChainStepSuccess {
+  color: #059669;
+}
+
+.callChainStepError {
+  background: linear-gradient(135deg, #fef2f2 0%, #fee2e2 100%);
+  border: 1px solid #fecaca;
+  color: #dc2626;
+}
+
+.callChainArrow {
+  color: #9ca3af;
+}
+
+.callChainEmpty {
+  color: #9ca3af;
+  font-size: 12px;
+}
+
+// Session 时间线样式
+.sessionRoundInfo {
+  font-size: 11px;
+  color: #6b7280;
+  margin-left: 8px;
+}
+
+.errorRoundHint {
+  color: #ef4444;
+  font-weight: 500;
+}
+
+.sessionTimeline {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.roundCard {
+  border: 1px solid #e5e7eb;
+  border-radius: 8px;
+  padding: 10px;
+  transition: all 0.2s;
+}
+
+.roundError {
+  background: linear-gradient(135deg, #fef2f2 0%, #fee2e2 100%);
+  border-color: #fecaca;
+}
+
+.roundHeader {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+
+.roundNumberBadge {
+  background: #eff6ff;
+  color: #1d4ed8;
+  padding: 2px 8px;
+  border-radius: 4px;
+  font-size: 11px;
+  font-weight: 500;
+}
+
+.roundTime {
+  font-size: 10px;
+  color: #6b7280;
+}
+
+.roundModel {
+  font-size: 10px;
+  color: #6b7280;
+}
+
+.roundStatus {
+  font-size: 11px;
+}
+
+.statusSuccess {
+  color: #059669;
+}
+
+.roundContent {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.roundMessageBlock {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.roundMessageLabel {
+  font-size: 10px;
+  color: #6b7280;
+}
+
+.roundMessageText {
+  background: #f5f5f5;
+  border-radius: 4px;
+  padding: 8px;
+  font-size: 12px;
+  line-height: 1.4;
+}
+
+.roundMessageText.modelResponseError {
+  background: #fee2e2;
+  border: 1px solid #fecaca;
+}
+
+.emptyResponse {
+  color: #9ca3af;
+  font-size: 11px;
+}
+
+.roundTools {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  flex-wrap: wrap;
+}
+
+.roundToolsLabel {
+  font-size: 10px;
+  color: #6b7280;
+}
+
+.roundToolTag {
+  background: #fef3c7;
+  color: #b45309;
+  padding: 2px 6px;
+  border-radius: 4px;
+  font-size: 10px;
+}
+
+.roundMetrics {
+  display: flex;
+  gap: 12px;
+  font-size: 10px;
+  color: #6b7280;
+}
+
+.roundErrorInfo {
+  background: #fee2e2;
+  border-radius: 4px;
+  padding: 6px 8px;
+  font-size: 11px;
+  color: #dc2626;
+}
+
+.roundSeparator {
+  display: flex;
+  justify-content: center;
+  padding: 4px 0;
+}
+
+.roundArrow {
+  color: #9ca3af;
+  font-size: 14px;
+}

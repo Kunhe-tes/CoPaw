@@ -1,7 +1,10 @@
 import { useCallback } from "react";
 import ReactDOM from "react-dom";
 import { useChatAnywhereSessions } from "../../Context/ChatAnywhereSessionsContext";
-import { IAgentScopeRuntimeWebUIMessage } from "@/components/agentscope-chat";
+import {
+  IAgentScopeRuntimeWebUIMessage,
+  IAgentScopeRuntimeWebUISessionUpdateOptions,
+} from "@/components/agentscope-chat";
 
 /**
  * 处理会话创建和更新的 Hook
@@ -26,12 +29,19 @@ export default function useChatSessionHandler() {
    * 更新会话名称（仅在第一次消息时）
    */
   const updateSessionName = useCallback(
-    async (query: string, messages: IAgentScopeRuntimeWebUIMessage[]) => {
+    async (
+      query: string,
+      messages: IAgentScopeRuntimeWebUIMessage[],
+      options?: IAgentScopeRuntimeWebUISessionUpdateOptions,
+    ) => {
       if (messages.length === 0) {
-        await updateSession({
-          id: getCurrentSessionId(),
-          name: query,
-        });
+        await updateSession(
+          {
+            id: getCurrentSessionId(),
+            name: query,
+          },
+          options,
+        );
       }
     },
     [getCurrentSessionId, updateSession],
@@ -55,16 +65,20 @@ export default function useChatSessionHandler() {
       sessionId: string | undefined,
       messages: IAgentScopeRuntimeWebUIMessage[],
       generating?: boolean,
+      options?: IAgentScopeRuntimeWebUISessionUpdateOptions,
     ) => {
       if (!sessionId) {
         return;
       }
 
-      await updateSession({
-        id: sessionId,
-        messages,
-        ...(typeof generating === "boolean" ? { generating } : {}),
-      });
+      await updateSession(
+        {
+          id: sessionId,
+          messages,
+          ...(typeof generating === "boolean" ? { generating } : {}),
+        },
+        options,
+      );
     },
     [updateSession],
   );

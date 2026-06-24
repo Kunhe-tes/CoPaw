@@ -1,0 +1,105 @@
+## 数据库访问检测规则
+## =========================================================================
+## RuleBasedToolGuardian 使用的正则签名规则。
+## 用于检测 execute_shell_command 参数中的 Python 数据库模块、
+## 数据库 CLI 工具和数据库连接串。
+##
+## 这些规则受 source 级功能开关控制：
+##   feature_switches.database_access_guard_enabled (default: true)
+## 开关关闭时，本文件中的所有规则都会跳过。
+## 严重级别：CRITICAL，直接阻断，不进入审批流。
+
+## ── Python 数据库模块 import ──────────────────────────────────────────
+- id: DB_PYTHON_MODULE_IMPORT
+  tools: [execute_shell_command]
+  params: [command]
+  category: data_exfiltration
+  severity: CRITICAL
+  patterns:
+    - '\bimport\s+pymysql\b'
+    - '\bfrom\s+pymysql\b'
+    - '\bimport\s+sqlalchemy\b'
+    - '\bfrom\s+sqlalchemy\b'
+    - '\bimport\s+psycopg2\b'
+    - '\bfrom\s+psycopg2\b'
+    - '\bimport\s+cx_Oracle\b'
+    - '\bfrom\s+cx_Oracle\b'
+    - '\bimport\s+pyodbc\b'
+    - '\bfrom\s+pyodbc\b'
+    - '\bimport\s+sqlite3\b'
+    - '\bimport\s+mysql\.connector\b'
+    - '\bfrom\s+mysql\.connector\b'
+    - '\bimport\s+pymongo\b'
+    - '\bfrom\s+pymongo\b'
+    - '\bimport\s+pymssql\b'
+    - '\bfrom\s+pymssql\b'
+    - '\bimport\s+oracledb\b'
+    - '\bfrom\s+oracledb\b'
+    - '\bimport\s+asyncpg\b'
+    - '\bfrom\s+asyncpg\b'
+    - '\bimport\s+aiomysql\b'
+    - '\bfrom\s+aiomysql\b'
+    - '\bimport\s+redis\b'
+    - '\bfrom\s+redis\b'
+    - '\bimport\s+pandas\b.*\bread_sql\b'
+    - '\bimport\s+DBUtils\b'
+    - '\bfrom\s+DBUtils\b'
+  description: '检测到 Python 数据库模块导入，可能直连数据库'
+  remediation: '请使用项目提供的数据库查询工具，而非通过 Python 命令行直连数据库。'
+
+## ── DB CLI 工具 ──────────────────────────────────────────────────────
+- id: DB_CLI_TOOL
+  tools: [execute_shell_command]
+  params: [command]
+  category: data_exfiltration
+  severity: CRITICAL
+  patterns:
+    - '\bmysql\b(?!\s+(--help|-h\b|--version|-V\b))'
+    - '\bmysqldump\b'
+    - '\bpsql\b(?!\s+(--help|-h\b|--version|-V\b))'
+    - '\bsqlplus\b(?!\s+(-H\b|-help\b|-V\b|-\?))'
+    - '\bsqlcmd\b(?!\s+(-\?|-\!))'
+    - '\bmongo\b(?!\s+(--help|-h\b|--version))'
+    - '\bredis-cli\b'
+    - '\bpg_dump\b'
+    - '\bsqlite3\b(?!\s+(--help|-h\b|--version))'
+    - '\bpg_restore\b'
+    - '\bsqldf\b'
+    - '\bdatagrip\b'
+    - '\busql\b'
+    - '\bdbeaver\b'
+    - '\bosql\b'
+    - '\bisql\b'
+    - '\bdb2\b'
+    - '\bneo4j-admin\b'
+    - '\bcqlsh\b'
+    - '\bcassandra-cli\b'
+    - '\bhbase\s+shell\b'
+    - '\bzookeeper-cli\b'
+    - '\betcdctl\b'
+  description: '检测到数据库 CLI 工具调用，可能直连数据库'
+  remediation: '请使用项目提供的数据库查询工具，而非通过命令行直连数据库。'
+
+## ── 数据库连接串与端口 ────────────────────────────────────────────────
+- id: DB_CONNECTION_STRING
+  tools: [execute_shell_command]
+  params: [command]
+  category: data_exfiltration
+  severity: CRITICAL
+  patterns:
+    - 'mysql://\S+'
+    - 'mysql\+pymysql://\S+'
+    - 'postgresql://\S+'
+    - 'postgres://\S+'
+    - 'sqlite://\S+'
+    - 'oracle://\S+'
+    - 'oracle\+cx_oracle://\S+'
+    - 'mssql://\S+'
+    - 'mssql\+pyodbc://\S+'
+    - '\bredis://\S+'
+    - '\bmongodb://\S+'
+    - 'jdbc:\S+'
+    - '\bDSN=\S+'
+    - '\bconnect\(.*(localhost|127\.0\.0\.1|0\.0\.0\.0).*\)'
+  description: '检测到数据库连接串，可能直连数据库'
+  remediation: '请使用项目提供的数据库查询工具，而非通过连接串直连数据库。'

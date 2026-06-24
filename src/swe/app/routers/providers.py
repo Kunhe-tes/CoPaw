@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import logging
 import shutil
+import time
 from pathlib import Path as PathlibPath
 from typing import List, Literal, Optional
 from copy import deepcopy
@@ -23,12 +24,13 @@ from pydantic import BaseModel, Field
 from ...config.context import (
     get_current_effective_tenant_id,
     resolve_scope_preferred_tenant_id,
+    resolve_storage_tenant_id,
 )
 from ...config.utils import (
-    get_tenant_working_dir_strict,
+    get_tenant_storage_providers_dir,
+    get_tenant_storage_working_dir,
     list_logical_tenant_ids,
 )
-from ...constant import SECRET_DIR
 from ...providers.models import ModelSlotConfig
 from ...providers.provider import ProviderInfo, ModelInfo
 from ...providers.provider_manager import ActiveModelsInfo, ProviderManager
@@ -37,6 +39,8 @@ from ..workspace.tenant_initializer import TenantInitializer
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/models", tags=["models"])
+
+_PROVIDER_API_SLOW_LOG_MS = 500
 
 ChatModelName = Literal[
     "OpenAIChatModel",
@@ -67,18 +71,59 @@ def get_provider_manager(request: Request) -> ProviderManager:
     Raises:
         HTTPException: If tenant ID is not available in request context.
     """
+    started_at = time.perf_counter()
+    resolve_started_at = started_at
     tenant_id = _get_effective_tenant_id(request)
+    resolve_ms = int((time.perf_counter() - resolve_started_at) * 1000)
 
     if tenant_id is None:
         # For exempt routes or backward compatibility, use default tenant
         tenant_id = "default"
         logger.debug("No tenant ID in request, using default tenant")
 
+    provider_tenant_id = ProviderManager._resolve_effective_provider_tenant_id(
+        tenant_id,
+    )
+    cache_hit_before = provider_tenant_id in ProviderManager._instances
+    root_path = ProviderManager._get_tenant_root_path(provider_tenant_id)
+
     # Ensure tenant provider storage exists before accessing ProviderManager
+    ensure_started_at = time.perf_counter()
     ProviderManager.ensure_tenant_provider_storage(tenant_id)
+    ensure_ms = int((time.perf_counter() - ensure_started_at) * 1000)
 
     # Return tenant-specific provider manager
-    return ProviderManager.get_instance(tenant_id)
+    get_instance_started_at = time.perf_counter()
+    manager = ProviderManager.get_instance(tenant_id)
+    get_instance_ms = int(
+        (time.perf_counter() - get_instance_started_at) * 1000,
+    )
+    total_ms = int((time.perf_counter() - started_at) * 1000)
+
+    if total_ms >= _PROVIDER_API_SLOW_LOG_MS:
+        logger.info(
+            "provider_manager_dependency_slow path=%s total_ms=%d "
+            "resolve_ms=%d ensure_ms=%d get_instance_ms=%d "
+            "route_tenant_id=%s provider_tenant_id=%s manager_tenant_id=%s "
+            "source_id=%s scope_id=%s cache_hit_before=%s "
+            "cache_hit_after=%s root_path=%s root_exists=%s",
+            request.url.path,
+            total_ms,
+            resolve_ms,
+            ensure_ms,
+            get_instance_ms,
+            tenant_id,
+            provider_tenant_id,
+            manager.tenant_id,
+            _request_source_id(request),
+            getattr(request.state, "scope_id", None),
+            cache_hit_before,
+            manager.tenant_id in ProviderManager._instances,
+            root_path,
+            root_path.exists(),
+        )
+
+    return manager
 
 
 class ProviderConfigRequest(BaseModel):
@@ -152,7 +197,7 @@ def _request_tenant_id(request: Request) -> str | None:
 
 
 def _request_tenant_working_dir(request: Request):
-    return get_tenant_working_dir_strict(_get_effective_tenant_id(request))
+    return get_tenant_storage_working_dir(_get_effective_tenant_id(request))
 
 
 def _request_source_id(request: Request) -> str | None:
@@ -160,11 +205,11 @@ def _request_source_id(request: Request) -> str | None:
 
 
 def _get_effective_tenant_id(request: Request) -> str | None:
-    """从请求上下文获取有效租户 ID。"""
-    return resolve_scope_preferred_tenant_id(
+    """从请求上下文获取 storage 语义的有效租户 ID。"""
+    return resolve_storage_tenant_id(
         _request_tenant_id(request),
         _request_source_id(request),
-        getattr(request.state, "scope_id", None),
+        scope_id=getattr(request.state, "scope_id", None),
     )
 
 
@@ -198,8 +243,8 @@ def _distribute_providers_to_tenant(
     if not was_bootstrapped:
         initializer.ensure_seeded_bootstrap()
 
-    target_providers_dir = (
-        SECRET_DIR / initializer.effective_tenant_id / "providers"
+    target_providers_dir = get_tenant_storage_providers_dir(
+        initializer.effective_tenant_id,
     )
 
     # Remove existing target directory if exists
@@ -278,8 +323,12 @@ async def _distribute_active_model_to_tenant(
     if not was_bootstrapped:
         initializer.ensure_seeded_bootstrap()
 
-    ProviderManager.ensure_tenant_provider_storage(target_tenant_id)
-    target_manager = ProviderManager.get_instance(target_tenant_id)
+    ProviderManager.ensure_tenant_provider_storage(
+        initializer.effective_tenant_id,
+    )
+    target_manager = ProviderManager.get_instance(
+        initializer.effective_tenant_id,
+    )
     target_manager.overwrite_provider_payload(provider_payload)
     await target_manager.activate_model(
         source_active_model.provider_id,
@@ -310,7 +359,20 @@ async def _distribute_active_model_to_tenant(
 async def list_all_providers(
     manager: ProviderManager = Depends(get_provider_manager),
 ) -> List[ProviderInfo]:
-    return await manager.list_provider_info()
+    started_at = time.perf_counter()
+    providers = await manager.list_provider_info()
+    duration_ms = int((time.perf_counter() - started_at) * 1000)
+    if duration_ms >= _PROVIDER_API_SLOW_LOG_MS:
+        logger.info(
+            "provider_list_info_slow tenant_id=%s duration_ms=%d "
+            "provider_count=%d custom_count=%d root_path=%s",
+            manager.tenant_id,
+            duration_ms,
+            len(providers),
+            len(manager.custom_providers),
+            manager.root_path,
+        )
+    return providers
 
 
 @router.put(
@@ -693,8 +755,7 @@ async def remove_model_endpoint(
     summary="Get effective active LLM",
 )
 async def get_active_models(
-    _request: Request,  # Kept for API signature compatibility
-    manager: ProviderManager = Depends(get_provider_manager),
+    request: Request,
     scope: ActiveModelReadScope = Query(default="effective"),
     _agent_id: Optional[str] = Query(default=None),  # Deprecated
 ) -> ActiveModelsInfo:
@@ -708,6 +769,7 @@ async def get_active_models(
     - agent: DEPRECATED - treated as 'global' for backward compatibility
     """
     # Short-term compatibility: normalize legacy 'agent' scope to 'global'
+    started_at = time.perf_counter()
     if scope == "agent":
         logger.warning(
             "Received deprecated scope='agent' for get_active_models. "
@@ -716,8 +778,25 @@ async def get_active_models(
 
     # For 'effective' and 'global', return the tenant-level active model
     # Agent-level model fallback is removed as models are now tenant-scoped
-    global_model = manager.get_active_model()
-    logger.info("Returning tenant-level active model: %s", global_model)
+    tenant_id = _get_effective_tenant_id(request) or "default"
+    ProviderManager.ensure_tenant_provider_storage(tenant_id)
+    provider_tenant_id = ProviderManager._resolve_effective_provider_tenant_id(
+        tenant_id,
+    )
+    root_path = ProviderManager._get_tenant_root_path(provider_tenant_id)
+    global_model = ProviderManager._read_active_model_from_root(
+        root_path,
+    )
+    duration_ms = int((time.perf_counter() - started_at) * 1000)
+    if duration_ms >= _PROVIDER_API_SLOW_LOG_MS:
+        logger.info(
+            "provider_active_model_read_slow tenant_id=%s duration_ms=%d "
+            "scope=%s root_path=%s",
+            provider_tenant_id,
+            duration_ms,
+            scope,
+            root_path,
+        )
     return ActiveModelsInfo(active_llm=global_model)
 
 
@@ -775,6 +854,7 @@ async def list_active_model_distribution_tenants(
         tenant_ids=await list_logical_tenant_ids(
             _request_source_id(request),
             source_filter=True,
+            include_templates=True,
         ),
     )
 
@@ -876,7 +956,9 @@ async def distribute_providers(
         )
 
     # 获取源 providers 目录
-    source_providers_dir = SECRET_DIR / effective_tenant_id / "providers"
+    source_providers_dir = get_tenant_storage_providers_dir(
+        effective_tenant_id,
+    )
     if not source_providers_dir.exists():
         raise HTTPException(
             status_code=400,

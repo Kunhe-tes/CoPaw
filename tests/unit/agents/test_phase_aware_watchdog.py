@@ -4,7 +4,6 @@ from __future__ import annotations
 import asyncio
 from contextlib import suppress
 from pathlib import Path
-import time
 
 from agentscope.memory import InMemoryMemory
 from agentscope.message import Msg, ToolResultBlock
@@ -124,7 +123,10 @@ async def test_generic_local_tool_hard_timeout_returns_none_after_delivery(
 
     assert result is None
     assert agent.printed
-    output_text = agent.printed[-1].content[0]["output"][0]["text"]
+    output = agent.printed[-1].content[0]["output"]
+    assert output["isError"] is True
+    assert output["error_type"] == "tool_timeout"
+    output_text = output["content"][0]["text"]
     assert "slow_local_tool" in output_text
     assert "timed out" in output_text
     assert "0.01" in output_text
@@ -187,13 +189,19 @@ async def test_generic_local_tool_hard_timeout_is_printed_and_persisted(
 
     assert result is None
     assert agent.printed
-    printed_text = agent.printed[-1].content[0]["output"][0]["text"]
+    printed_output = agent.printed[-1].content[0]["output"]
+    assert printed_output["isError"] is True
+    assert printed_output["error_type"] == "tool_timeout"
+    printed_text = printed_output["content"][0]["text"]
     assert "slow_local_tool" in printed_text
     assert "timed out" in printed_text
 
     assert len(agent.memory.content) == 1
     persisted_msg, _marks = agent.memory.content[0]
-    persisted_text = persisted_msg.content[0]["output"][0]["text"]
+    persisted_output = persisted_msg.content[0]["output"]
+    assert persisted_output["isError"] is True
+    assert persisted_output["error_type"] == "tool_timeout"
+    persisted_text = persisted_output["content"][0]["text"]
     assert "slow_local_tool" in persisted_text
     assert "timed out" in persisted_text
 
@@ -265,7 +273,7 @@ async def test_file_write_diagnostics_include_size_and_timing_not_content(
 
 
 @pytest.mark.asyncio
-async def test_file_write_runs_blocking_io_off_event_loop(
+async def test_write_file_runs_blocking_io_off_event_loop(
     tmp_path: Path,
     monkeypatch,
 ):
@@ -275,8 +283,12 @@ async def test_file_write_runs_blocking_io_off_event_loop(
     done = False
     ticks = 0
 
-    def blocking_write(**_kwargs):
-        time.sleep(0.05)
+    async def slow_write(**kwargs):
+        await asyncio.sleep(0.05)
+        Path(kwargs["file_path"]).write_text(
+            kwargs["content"],
+            encoding=kwargs["encoding"],
+        )
 
     async def heartbeat():
         nonlocal ticks
@@ -288,7 +300,7 @@ async def test_file_write_runs_blocking_io_off_event_loop(
     monkeypatch.setattr(
         file_io,
         "_write_content_with_diagnostics",
-        blocking_write,
+        slow_write,
     )
 
     with monkeypatch.context() as m:
@@ -300,4 +312,53 @@ async def test_file_write_runs_blocking_io_off_event_loop(
             done = True
             await heartbeat_task
 
+    assert (workspace_dir / "note.txt").read_text(
+        encoding="utf-8-sig",
+    ) == "content"
+    assert ticks > 0
+
+
+@pytest.mark.asyncio
+async def test_append_file_runs_blocking_io_off_event_loop(
+    tmp_path: Path,
+    monkeypatch,
+):
+    tenant_dir = tmp_path / "tenant_a"
+    workspace_dir = tenant_dir / "workspaces" / "agent_a"
+    workspace_dir.mkdir(parents=True)
+    target = workspace_dir / "note.txt"
+    target.write_text("base", encoding="utf-8-sig")
+    done = False
+    ticks = 0
+
+    async def slow_write(**kwargs):
+        await asyncio.sleep(0.05)
+        Path(kwargs["file_path"]).write_text(
+            kwargs["content"],
+            encoding=kwargs["encoding"],
+        )
+
+    async def heartbeat():
+        nonlocal ticks
+        while not done:
+            await asyncio.sleep(0.005)
+            if not done:
+                ticks += 1
+
+    monkeypatch.setattr(
+        file_io,
+        "_write_content_with_diagnostics",
+        slow_write,
+    )
+
+    with monkeypatch.context() as m:
+        m.setattr("swe.security.tenant_path_boundary.WORKING_DIR", tmp_path)
+        with tenant_context(tenant_id="tenant_a", workspace_dir=workspace_dir):
+            heartbeat_task = asyncio.create_task(heartbeat())
+            await asyncio.sleep(0)
+            await file_io.append_file("note.txt", " content")
+            done = True
+            await heartbeat_task
+
+    assert target.read_text(encoding="utf-8-sig") == "base content"
     assert ticks > 0

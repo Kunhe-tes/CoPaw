@@ -154,6 +154,36 @@ def _build_agent_job(workspace_dir: str, timeout_seconds: int = 1) -> object:
     )
 
 
+@pytest.mark.asyncio
+async def test_prepare_agent_execution_marks_trace_for_attach_existing(
+    monkeypatch,
+) -> None:
+    executor = CronExecutor(
+        runner=_Runner(),
+        channel_manager=_ChannelManager(),
+    )
+    job = _build_agent_job("/tmp/tenant-a/workspaces/alpha")
+
+    monkeypatch.setattr(
+        executor,
+        "_create_trace_for_agent_job",
+        lambda *_args, **_kwargs: asyncio.sleep(0, result="trace-cron"),
+    )
+
+    _runtime_tenant_id, trace_id, req, _stream_state = (
+        await executor._prepare_agent_execution(
+            job,
+            "user-a",
+            "session-a",
+            {},
+        )
+    )
+
+    assert trace_id == "trace-cron"
+    assert req["trace_id"] == "trace-cron"
+    assert req["trace_attach_existing"] is True
+
+
 class _Provider:
     def __init__(self, models: list[str]):
         self._models = set(models)
@@ -302,6 +332,48 @@ def test_build_agent_request_includes_runtime_scope():
         "tenant-a",
         "source-a",
     )
+
+
+def test_build_agent_request_skips_scope_for_default_source_template():
+    executor = CronExecutor(
+        runner=_Runner(),
+        channel_manager=_ChannelManager(),
+    )
+    job = _build_agent_job(
+        "/tmp/default_source-a/workspaces/default",
+    ).model_copy(
+        update={
+            "tenant_id": "default",
+            "source_id": "source-a",
+            "scope_id": None,
+        },
+    )
+
+    req = executor._build_agent_request(job, "default", "session-a")
+
+    assert req["source_id"] == "source-a"
+    assert "scope_id" not in req
+
+
+def test_build_agent_request_removes_stale_trace_id():
+    executor = CronExecutor(
+        runner=_Runner(),
+        channel_manager=_ChannelManager(),
+    )
+    job = _build_agent_job("/tmp/tenant-a/workspaces/beta").model_copy(
+        update={
+            "request": CronJobRequest.model_validate(
+                {
+                    "input": [{"content": [{"text": "ping"}]}],
+                    "trace_id": "stale-trace-id",
+                },
+            ),
+        },
+    )
+
+    req = executor._build_agent_request(job, "user-a", "session-a")
+
+    assert "trace_id" not in req
 
 
 def test_apply_auth_token_uses_runtime_scope(monkeypatch):
@@ -475,14 +547,15 @@ def test_execute_allows_agent_job_when_user_info_missing(monkeypatch):
     )
     monkeypatch.setattr(executor._runner, "stream_query", fake_stream_query)
 
-    asyncio.run(
-        executor._execute_job(
-            job,
-            "user-a",
-            "session-a",
-            {"workspace_dir": "/tmp/tenant-a/workspaces/beta"},
-        ),
-    )
+    with pytest.raises(RuntimeError, match="did not complete"):
+        asyncio.run(
+            executor._execute_job(
+                job,
+                "user-a",
+                "session-a",
+                {"workspace_dir": "/tmp/tenant-a/workspaces/beta"},
+            ),
+        )
 
     assert observed["req"]["user_id"] == "user-a"
     assert observed["req"]["session_id"] == "session-a"
@@ -523,14 +596,15 @@ def test_execute_injects_auth_token_and_cookie_into_agent_request(monkeypatch):
     )
     monkeypatch.setattr(executor._runner, "stream_query", fake_stream_query)
 
-    asyncio.run(
-        executor._execute_job(
-            job,
-            "user-a",
-            "session-a",
-            {"workspace_dir": "/tmp/tenant-a/workspaces/beta"},
-        ),
-    )
+    with pytest.raises(RuntimeError, match="did not complete"):
+        asyncio.run(
+            executor._execute_job(
+                job,
+                "user-a",
+                "session-a",
+                {"workspace_dir": "/tmp/tenant-a/workspaces/beta"},
+            ),
+        )
 
     assert observed["req"]["auth_token"] == "auth-123"
     assert observed["req"]["cookie"] == (

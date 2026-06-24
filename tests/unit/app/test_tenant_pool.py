@@ -6,9 +6,11 @@ Tests lazy creation, cache hits, concurrent creation safety, and stop-all cleanu
 
 # pylint: disable=wrong-import-position,protected-access,unused-import
 import asyncio
+import logging
 import json
 import sys
 from pathlib import Path
+from unittest.mock import AsyncMock, patch
 
 sys.path.insert(0, str(Path(__file__).parent.parent.parent.parent / "src"))
 
@@ -656,6 +658,67 @@ class TestTenantBootstrapInitSourceMapping:
         assert observed["source_id"] == "ruice"
         assert observed["init_source"] == "default_ruice"
         assert scope_id in pool
+
+
+class TestTenantBootstrapObservability:
+    """Tests for bootstrap timing diagnostics."""
+
+    @pytest.mark.asyncio
+    async def test_ensure_bootstrap_logs_fast_path_hit(
+        self,
+        tmp_path,
+        monkeypatch,
+    ):
+        """Fast-path hit should emit a cache-hit timing log."""
+        import swe.app.workspace.tenant_pool as tenant_pool_module
+
+        pool = TenantWorkspacePool(tmp_path)
+        pool._workspaces["tenant-1"] = TenantWorkspaceEntry(
+            tenant_id="tenant-1",
+        )
+
+        async def fake_check(*_args, **_kwargs) -> bool:
+            return True
+
+        monkeypatch.setattr(pool, "_check_existing_bootstrap", fake_check)
+        with patch.object(tenant_pool_module.logger, "debug") as mock_debug:
+            await pool.ensure_bootstrap("tenant-1")
+
+        assert any(
+            call.args
+            and "bootstrap_fast_path_hit tenant_id=%s" in call.args[0]
+            and call.args[1] == "tenant-1"
+            for call in mock_debug.call_args_list
+        )
+
+    @pytest.mark.asyncio
+    async def test_ensure_bootstrap_logs_fast_path_miss(
+        self,
+        tmp_path,
+        monkeypatch,
+    ):
+        """Fast-path miss should emit a miss timing log."""
+        import swe.app.workspace.tenant_pool as tenant_pool_module
+
+        pool = TenantWorkspacePool(tmp_path)
+
+        async def fake_check(*_args, **_kwargs) -> bool:
+            return False
+
+        perform_bootstrap = AsyncMock()
+
+        monkeypatch.setattr(pool, "_check_existing_bootstrap", fake_check)
+        monkeypatch.setattr(pool, "_perform_bootstrap", perform_bootstrap)
+        with patch.object(tenant_pool_module.logger, "debug") as mock_debug:
+            await pool.ensure_bootstrap("tenant-1")
+
+        perform_bootstrap.assert_awaited_once()
+        assert any(
+            call.args
+            and "bootstrap_fast_path_miss tenant_id=%s" in call.args[0]
+            and call.args[1] == "tenant-1"
+            for call in mock_debug.call_args_list
+        )
 
 
 class TestTenantWorkspaceDirectoryLayout:

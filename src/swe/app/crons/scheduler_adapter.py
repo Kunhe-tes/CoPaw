@@ -23,23 +23,40 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 _MAX_JOBDESC_CHARS = 200
 _MAX_GLUEREMARK_CHARS = 60
-_MAX_CRON_CHARS = 20
 _SCHEDULER_DOW_NUMBERS = {
-    "mon": "1",
-    "tue": "2",
-    "wed": "3",
-    "thu": "4",
-    "fri": "5",
-    "sat": "6",
-    "sun": "7",
-    "0": "7",
-    "1": "1",
-    "2": "2",
-    "3": "3",
-    "4": "4",
-    "5": "5",
-    "6": "6",
-    "7": "7",
+    "sun": "1",
+    "mon": "2",
+    "tue": "3",
+    "wed": "4",
+    "thu": "5",
+    "fri": "6",
+    "sat": "7",
+    "0": "1",
+    "1": "2",
+    "2": "3",
+    "3": "4",
+    "4": "5",
+    "5": "6",
+    "6": "7",
+    "7": "1",
+}
+_CRONTAB_DOW_ORDER = ("mon", "tue", "wed", "thu", "fri", "sat", "sun")
+_CRONTAB_DOW_NAMES = {
+    "mon": "mon",
+    "tue": "tue",
+    "wed": "wed",
+    "thu": "thu",
+    "fri": "fri",
+    "sat": "sat",
+    "sun": "sun",
+    "0": "sun",
+    "1": "mon",
+    "2": "tue",
+    "3": "wed",
+    "4": "thu",
+    "5": "fri",
+    "6": "sat",
+    "7": "sun",
 }
 
 
@@ -62,11 +79,37 @@ def _normalize_scheduler_dow_token(token: str) -> str:
         return f"{_normalize_scheduler_dow_token(base)}/{step}"
     if "-" in token:
         start, end = token.split("-", 1)
+        scheduler_range = _normalize_scheduler_dow_range(start, end)
+        if scheduler_range is not None:
+            return scheduler_range
         return (
             f"{_normalize_scheduler_dow_value(start)}-"
             f"{_normalize_scheduler_dow_value(end)}"
         )
     return _normalize_scheduler_dow_value(token)
+
+
+def _normalize_scheduler_dow_range(start: str, end: str) -> str | None:
+    """将内部星期范围转换为外部平台范围，跨周日时展开成列表。"""
+    start_name = _CRONTAB_DOW_NAMES.get(start.lower())
+    end_name = _CRONTAB_DOW_NAMES.get(end.lower())
+    if start_name is None or end_name is None:
+        return None
+
+    start_index = _CRONTAB_DOW_ORDER.index(start_name)
+    end_index = _CRONTAB_DOW_ORDER.index(end_name)
+    if start_index > end_index:
+        return None
+
+    scheduler_values = [
+        _SCHEDULER_DOW_NUMBERS[name]
+        for name in _CRONTAB_DOW_ORDER[start_index : end_index + 1]
+    ]
+    first = int(scheduler_values[0])
+    last = int(scheduler_values[-1])
+    if first <= last:
+        return f"{first}-{last}"
+    return ",".join(scheduler_values)
 
 
 def _normalize_scheduler_dow(field: str) -> str:
@@ -93,6 +136,10 @@ class SchedulerAdapter(ABC):
         cron: str,
         callback_url: str,
         source_id: str = "",
+        *,
+        scope_id: str = "",
+        from_id: str = "",
+        source_level: bool = False,
     ) -> str:
         """向外部调度平台注册一个定时任务。
 
@@ -122,6 +169,10 @@ class SchedulerAdapter(ABC):
         cron: str,
         callback_url: str,
         source_id: str = "",
+        *,
+        scope_id: str = "",
+        from_id: str = "",
+        source_level: bool = False,
     ) -> None:
         """更新外部平台上已注册的任务。
 
@@ -181,6 +232,9 @@ class NoopSchedulerAdapter(SchedulerAdapter):
         cron: str,
         callback_url: str,
         source_id: str = "",
+        scope_id: str = "",
+        from_id: str = "",
+        source_level: bool = False,
     ) -> str:
         logger.debug(
             "NoopAdapter.register_job: tenant=%s agent=%s type=%s name=%s job=%s cron=%s url=%s",
@@ -205,6 +259,9 @@ class NoopSchedulerAdapter(SchedulerAdapter):
         cron: str,
         callback_url: str,
         source_id: str = "",
+        scope_id: str = "",
+        from_id: str = "",
+        source_level: bool = False,
     ) -> None:
         logger.debug(
             "NoopAdapter.update_job: ext_id=%s tenant=%s agent=%s type=%s name=%s job=%s cron=%s",
@@ -287,6 +344,9 @@ class RealSchedulerAdapter(SchedulerAdapter):
         cron: str,
         callback_url: str,
         source_id: str = "",
+        scope_id: str = "",
+        from_id: str = "",
+        source_level: bool = False,
     ) -> str:
         payload = self._build_add_payload(
             tenant_id,
@@ -297,6 +357,9 @@ class RealSchedulerAdapter(SchedulerAdapter):
             cron,
             callback_url,
             source_id=source_id,
+            scope_id=scope_id,
+            from_id=from_id,
+            source_level=source_level,
         )
         resp_data = await self._post("/job-admin/v2/add-job", payload)
         ext_id = str(resp_data.get("content", ""))
@@ -323,6 +386,9 @@ class RealSchedulerAdapter(SchedulerAdapter):
         cron: str,
         callback_url: str,
         source_id: str = "",
+        scope_id: str = "",
+        from_id: str = "",
+        source_level: bool = False,
     ) -> None:
         payload = self._build_add_payload(
             tenant_id,
@@ -333,6 +399,9 @@ class RealSchedulerAdapter(SchedulerAdapter):
             cron,
             callback_url,
             source_id=source_id,
+            scope_id=scope_id,
+            from_id=from_id,
+            source_level=source_level,
         )
         payload["id"] = int(external_id)
         await self._post("/job-admin/v2/update-job", payload)
@@ -427,6 +496,9 @@ class RealSchedulerAdapter(SchedulerAdapter):
         agent_id: str,
         task_type: str,
         job_id: str,
+        *,
+        scope_id: str = "",
+        from_id: str = "",
     ) -> str:
         """将回调上下文参数编码为 base64 JSON，放入 jobParam。
 
@@ -437,11 +509,11 @@ class RealSchedulerAdapter(SchedulerAdapter):
             {
                 "tenant_id": tenant_id,
                 "source_id": source_id,
-                "scopeId": f"{tenant_id}-{source_id}",
+                "scopeId": scope_id or f"{tenant_id}-{source_id}",
                 "agent_id": agent_id,
                 "task_type": task_type,
                 "job_id": job_id,
-                "fromId": tenant_id,
+                "fromId": from_id or tenant_id,
             },
         )
         return base64.urlsafe_b64encode(payload.encode()).decode()
@@ -456,21 +528,31 @@ class RealSchedulerAdapter(SchedulerAdapter):
         cron: str,
         callback_url: str,
         source_id: str = "",
+        *,
+        scope_id: str = "",
+        from_id: str = "",
+        source_level: bool = False,
     ) -> dict:
         """构建 add-job / update-job 的请求体。"""
-        identity = tenant_id
-        if source_id:
-            identity = f"{tenant_id}/{source_id}"
-        job_desc = _truncate(
-            f"[SWE] {identity}/{agent_id}/{task_type} - {job_name}",
-            _MAX_JOBDESC_CHARS,
-        )
+        if source_level:
+            job_desc = _truncate(
+                f"[SWE] {source_id}/{job_name}",
+                _MAX_JOBDESC_CHARS,
+            )
+        else:
+            identity = tenant_id
+            if source_id:
+                identity = f"{tenant_id}/{source_id}"
+            job_desc = _truncate(
+                f"[SWE] {identity}/{agent_id}/{task_type} - {job_name}",
+                _MAX_JOBDESC_CHARS,
+            )
         glue_remark = _truncate(job_id, _MAX_GLUEREMARK_CHARS)
         payload: dict = {
             "jobDesc": job_desc,
             "jobGroup": self._job_group,
             "glueRemark": glue_remark,
-            "jobCron": _truncate(self._normalize_cron(cron), _MAX_CRON_CHARS),
+            "jobCron": self._normalize_cron(cron),
             "author": self._author,
             "alarmEmail": self._alarm_email,
             "glueType": self._glue_type,
@@ -484,6 +566,8 @@ class RealSchedulerAdapter(SchedulerAdapter):
                 agent_id,
                 task_type,
                 job_id,
+                scope_id=scope_id,
+                from_id=from_id,
             ),
         }
         if self._mis_fire_strategy is not None:

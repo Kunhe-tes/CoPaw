@@ -39,12 +39,14 @@ class CronNotificationService:
         now_utc: datetime,
         limit: int,
         stale_lock_seconds: int = 600,
+        source_ids: list[str] | None = None,
     ) -> list[ClaimedCronNotification]:
         ids = await self._claim_due_notification_ids(
             lock_owner=lock_owner,
             now_utc=now_utc,
             limit=limit,
             stale_lock_seconds=stale_lock_seconds,
+            source_ids=source_ids,
         )
         if not ids:
             return []
@@ -57,33 +59,57 @@ class CronNotificationService:
         now_utc: datetime,
         limit: int,
         stale_lock_seconds: int,
+        source_ids: list[str] | None,
     ) -> list[int]:
         db = get_db_connection()
         normalized_now = _to_beijing_naive(now_utc)
         stale_before = normalized_now - timedelta(seconds=stale_lock_seconds)
+        source_filter_join = ""
+        source_filter_clause = ""
+        source_filter_params: tuple[str, ...] = ()
+        normalized_source_ids = _normalize_source_ids(source_ids)
+        if normalized_source_ids:
+            placeholders = ", ".join(["%s"] * len(normalized_source_ids))
+            source_filter_join = (
+                "LEFT JOIN swe_cron_jobs j ON e.job_id = j.id"
+            )
+            source_filter_clause = (
+                f"AND (j.source_id IN ({placeholders}) "
+                "OR j.source_id IS NULL "
+                "OR j.source_id = '')"
+            )
+            source_filter_params = tuple(normalized_source_ids)
 
         async with db.acquire() as conn:
             await conn.begin()
             try:
                 async with conn.cursor() as cur:
                     await cur.execute(
-                        """
-                        SELECT id
-                        FROM swe_cron_executions
-                        WHERE status = 'success'
-                          AND notification_status = 'pending'
-                          AND notification_due_at <= %s
+                        f"""
+                        SELECT e.id
+                        FROM swe_cron_executions e
+                        {source_filter_join}
+                        WHERE e.status = 'success'
+                          AND e.async_status = 'success'
+                          AND e.notification_status = 'pending'
+                          AND e.notification_due_at <= %s
                           AND (
-                              notification_lock_owner IS NULL
-                              OR notification_lock_owner = ''
-                              OR notification_locked_at IS NULL
-                              OR notification_locked_at < %s
+                              e.notification_lock_owner IS NULL
+                              OR e.notification_lock_owner = ''
+                              OR e.notification_locked_at IS NULL
+                              OR e.notification_locked_at < %s
                           )
-                        ORDER BY notification_due_at, id
+                          {source_filter_clause}
+                        ORDER BY e.notification_due_at, e.id
                         LIMIT %s
                         FOR UPDATE SKIP LOCKED
                         """,
-                        (normalized_now, stale_before, limit),
+                        (
+                            normalized_now,
+                            stale_before,
+                            *source_filter_params,
+                            limit,
+                        ),
                     )
                     rows = await cur.fetchall()
                     ids = [int(row[0]) for row in rows]
@@ -131,6 +157,8 @@ class CronNotificationService:
             LEFT JOIN swe_cron_jobs j ON e.job_id = j.id
             WHERE e.id IN ({placeholders})
               AND e.notification_lock_owner = %s
+              AND e.status = 'success'
+              AND e.async_status = 'success'
               AND e.notification_status = 'pending'
             ORDER BY e.notification_due_at, e.id
             """,
@@ -186,6 +214,15 @@ def _to_beijing_naive(value: datetime) -> datetime:
     if value.tzinfo is None:
         return value
     return value.astimezone(timezone(timedelta(hours=8))).replace(tzinfo=None)
+
+
+def _normalize_source_ids(source_ids: list[str] | None) -> list[str]:
+    normalized = []
+    for source_id in source_ids or []:
+        value = str(source_id or "").strip()
+        if value and value not in normalized:
+            normalized.append(value)
+    return normalized
 
 
 _notification_service: Optional[CronNotificationService] = None

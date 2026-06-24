@@ -1,7 +1,7 @@
 import { useEffect, useState, useRef, useCallback, useMemo } from "react";
 import { useNavigate } from "react-router-dom";
-import { Typography, Card, Spin, Button, Space, Input, message, Tag, Empty, Checkbox, Modal, Popconfirm, Tooltip } from "antd";
-import { PlusOutlined, UploadOutlined, ShopOutlined, RightOutlined, DownOutlined, FolderOutlined, FileOutlined, StarOutlined, SearchOutlined } from "@ant-design/icons";
+import { Typography, Card, Spin, Button, Space, Input, message, Tag, Empty, Checkbox, Modal, Popconfirm, Tooltip, Alert } from "antd";
+import { PlusOutlined, UploadOutlined, ShopOutlined, RightOutlined, DownOutlined, FolderOutlined, FileOutlined, StarOutlined, SearchOutlined, InfoCircleOutlined, ExclamationCircleOutlined } from "@ant-design/icons";
 import { CheckCircle } from "lucide-react";
 import dayjs from "dayjs";
 import relativeTime from "dayjs/plugin/relativeTime";
@@ -13,7 +13,6 @@ import { DEFAULT_SOURCE_ID } from "../../constants/identity";
 import { MySkill, mySkillsApi, FileTreeNode } from "../../api/modules/mySkills";
 import { marketApi } from "../../api/modules/market";
 import { PublishModal } from "../Market/PublishModal";
-import { useConflictRenameModal } from "../Agent/Skills/components";
 import { SkillDetailPanel, splitMarkdownFrontmatter, mergeMarkdownFrontmatter } from "./SkillDetailPanel";
 import styles from "./index.module.less";
 
@@ -67,12 +66,24 @@ export default function MySkillsPage() {
   const [skillFiles, setSkillFiles] = useState<Record<string, FileTreeNode[]>>({});
   const [isEditing, setIsEditing] = useState(false);
   const [draftContent, setDraftContent] = useState("");
+  const [draftCnName, setDraftCnName] = useState("");  // 编辑中的中文名
   const [isSaving, setIsSaving] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   // Batch operation state
   const [batchMode, setBatchMode] = useState<boolean>(false);
   const [selectedForBatch, setSelectedForBatch] = useState<Set<string>>(new Set());
+
+  // Upload cn_name input modal state
+  const [uploadModalOpen, setUploadModalOpen] = useState(false);
+  const [pendingUploadFile, setPendingUploadFile] = useState<File | null>(null);
+  const [uploadCnName, setUploadCnName] = useState("");
+  const [uploadSkillId, setUploadSkillId] = useState("");
+  const [uploadSkillName, setUploadSkillName] = useState("");
+  const [uploading, setUploading] = useState(false);
+  const [parsingZip, setParsingZip] = useState(false);
+  const [uploadConflict, setUploadConflict] = useState<string | null>(null); // 同名技能冲突
+  const [uploadSkillIdConflict, setUploadSkillIdConflict] = useState<string | null>(null); // skill_id 冲突
 
   // Sync to market state
   const [publishModalOpen, setPublishModalOpen] = useState(false);
@@ -82,11 +93,8 @@ export default function MySkillsPage() {
     skillJson: Record<string, unknown>;
     skillMd: string;
     skillDirName?: string; // 技能目录名，用于同步整个目录
+    version?: string; // 用户工作区版本号，用于版本快照的 source_user_version
   } | null>(null);
-
-  // Conflict rename modal for upload
-  // 冲突处理：强制使用覆盖模式（不允许重命名为新名称）
-  const { showConflictRenameModal, conflictRenameModal } = useConflictRenameModal({ forceOverwrite: true });
 
   // Debounce search
   const debounceTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
@@ -121,99 +129,117 @@ export default function MySkillsPage() {
     if (!file) return;
     e.target.value = "";
 
-    let renameMap: Record<string, string> | undefined;
-    let overwrite = false;
-    while (true) {
-      try {
-        message.loading({ content: `正在上传 ${file.name}...`, key: "upload" });
-        const result = await marketApi.uploadSkillToWorkspace(
-          sourceId,
-          file,
-          { enable: true, overwrite, rename_map: renameMap }
-        );
-
-        // 检查冲突
-        const conflicts = Array.isArray(result.conflicts) ? result.conflicts : [];
-        if (conflicts.length > 0) {
-          message.destroy("upload");
-          const resolveResult = await showConflictRenameModal(
-            conflicts.map((c: { skill_name?: string; original_name?: string; suggested_name?: string }) => ({
-              key: c.original_name || c.skill_name || "",
-              label: c.original_name || c.skill_name || "",
-              suggested_name: c.suggested_name || "",
-            }))
-          );
-          if (!resolveResult) {
-            // 用户取消
-            break;
-          }
-          if (resolveResult.mode === "overwrite") {
-            // 用户选择覆盖
-            overwrite = true;
-            renameMap = undefined;
-          } else {
-            // 用户选择重命名
-            renameMap = { ...renameMap, ...resolveResult.renameMap };
-            overwrite = false;
-          }
-          continue;  // 重新上传
-        }
-
-        // 成功或无新技能
-        if (result.count > 0) {
-          message.success({ content: `上传成功，导入 ${result.count} 个技能`, key: "upload" });
-        } else {
-          message.info({ content: "未导入新技能，可能已存在", key: "upload" });
-        }
-        await refresh();
-
-        // 刷新上传技能的文件树缓存并自动展开
-        const importedNames = result.imported || [];
-        if (importedNames.length > 0) {
-          // 清除已上传技能的文件树缓存
-          setSkillFiles((prev) => {
-            const next = { ...prev };
-            for (const name of importedNames) {
-              delete next[name];
-            }
-            return next;
-          });
-
-          // 自动展开第一个导入的技能并加载其文件树
-          const firstImportedName = importedNames[0];
-          try {
-            const files = await mySkillsApi.listSkillFiles(firstImportedName);
-            const sortedFiles = sortFileTreeNodes(files, true);
-            setSkillFiles((prev) => ({ ...prev, [firstImportedName]: sortedFiles }));
-
-            // 刷新后重新获取最新的技能列表
-            const latestCreated = await mySkillsApi.getCreatedSkills();
-            const latestReceived = await mySkillsApi.getReceivedSkills();
-            const allSkills = [...latestCreated, ...latestReceived];
-            const newSkill = allSkills.find(s => s.skill_name === firstImportedName);
-            if (newSkill) {
-              setSelectedSkill(newSkill);
-              setExpandedSkills(new Set([firstImportedName]));
-            }
-
-            // 自动选择 SKILL.md
-            const skillMdFile = sortedFiles.find((f) => f.name === "SKILL.md" && f.type === "file");
-            if (skillMdFile) {
-              const res = await mySkillsApi.readSkillFile(firstImportedName, "SKILL.md");
-              setSelectedFile("SKILL.md");
-              setFileContent(res.content);
-              setFileType(res.file_type);
-            }
-          } catch (err) {
-            console.error("Failed to load skill files after upload:", err);
-          }
-        }
-        break;
-      } catch (err) {
-        const errorMsg = err instanceof Error ? err.message : "上传失败";
-        message.error({ content: errorMsg, key: "upload" });
-        break;
+    // 调用 parse-zip API 获取默认值
+    setParsingZip(true);
+    try {
+      const result = await marketApi.parseSkillZip(sourceId, file);
+      if (result.error) {
+        message.error(result.error);
+        setParsingZip(false);
+        return;
       }
+
+      // 设置默认值并弹出弹窗
+      setPendingUploadFile(file);
+      setUploadCnName(result.cn_name || result.skill_name || "");
+      setUploadSkillId(result.skill_id || "");
+      setUploadSkillName(result.skill_name || "");
+      // 区分两种冲突：同名技能（允许覆盖）和 skill_id 冲突（禁止上传）
+      if (result.exists) {
+        setUploadConflict(`检测到同名技能 "${result.skill_name}" 已存在`);
+        setUploadSkillIdConflict(null);
+      } else if (result.skill_id_conflict) {
+        setUploadConflict(null);
+        setUploadSkillIdConflict(result.skill_id_conflict);
+      } else {
+        setUploadConflict(null);
+        setUploadSkillIdConflict(null);
+      }
+      setUploadModalOpen(true);
+    } catch (err) {
+      const errorMsg = err instanceof Error ? err.message : "解析 zip 文件失败";
+      message.error(errorMsg);
+    } finally {
+      setParsingZip(false);
+    }
+  };
+
+  const handleConfirmUpload = async (overwrite: boolean = false) => {
+    const file = pendingUploadFile;
+    if (!file) return;
+
+    const cnName = uploadCnName.trim();
+    if (!cnName) {
+      message.error("请输入中文名称");
+      return;
+    }
+
+    setUploading(true);
+
+    try {
+      message.loading({ content: `正在上传 ${file.name}...`, key: "upload" });
+      const result = await marketApi.uploadSkillToWorkspace(
+        sourceId,
+        file,
+        { enable: true, overwrite, cn_name: cnName }
+      );
+
+      // 成功
+      setUploadModalOpen(false);
+      if (result.count > 0) {
+        message.success({ content: `上传成功，导入 ${result.count} 个技能`, key: "upload" });
+      } else {
+        message.info({ content: "未导入新技能，可能已存在", key: "upload" });
+      }
+      await refresh();
+
+      // 刷新上传技能的文件树缓存并自动展开
+      const importedNames = result.imported || [];
+      if (importedNames.length > 0) {
+        setSkillFiles((prev) => {
+          const next = { ...prev };
+          for (const name of importedNames) {
+            delete next[name];
+          }
+          return next;
+        });
+
+        const firstImportedName = importedNames[0];
+        try {
+          const files = await mySkillsApi.listSkillFiles(firstImportedName);
+          const sortedFiles = sortFileTreeNodes(files, true);
+          setSkillFiles((prev) => ({ ...prev, [firstImportedName]: sortedFiles }));
+
+          const latestCreated = await mySkillsApi.getCreatedSkills();
+          const latestReceived = await mySkillsApi.getReceivedSkills();
+          const allSkills = [...latestCreated, ...latestReceived];
+          const newSkill = allSkills.find(s => s.skill_name === firstImportedName);
+          if (newSkill) {
+            setSelectedSkill(newSkill);
+            setExpandedSkills(new Set([firstImportedName]));
+          }
+
+          const skillMdFile = sortedFiles.find((f) => f.name === "SKILL.md" && f.type === "file");
+          if (skillMdFile) {
+            const res = await mySkillsApi.readSkillFile(firstImportedName, "SKILL.md");
+            setSelectedFile("SKILL.md");
+            setFileContent(res.content);
+            setFileType(res.file_type);
+          }
+        } catch (err) {
+          console.error("Failed to load skill files after upload:", err);
+        }
+      }
+    } catch (err) {
+      const errorMsg = err instanceof Error ? err.message : "上传失败";
+      message.error({ content: errorMsg, key: "upload" });
+    } finally {
+      setUploading(false);
+      setPendingUploadFile(null);
+      setUploadCnName("");
+      setUploadSkillId("");
+      setUploadSkillName("");
+      setUploadConflict(null);
     }
   };
 
@@ -318,8 +344,14 @@ export default function MySkillsPage() {
       }
       message.success(`${action === "enable" ? "启用" : "禁用"}成功`);
       refresh();
-    } catch (err) {
-      message.error(`${action === "enable" ? "启用" : "禁用"}失败`);
+    } catch (err: unknown) {
+      const errObj = err as Error & { status?: number; data?: { detail?: { reason?: string; detail?: string } } };
+      const detail = errObj?.data?.detail;
+      if (detail?.reason === "security_scan_failed") {
+        message.error(`启用失败：安全扫描未通过，${detail.detail || "请检查技能内容"}`);
+      } else {
+        message.error(`${action === "enable" ? "启用" : "禁用"}失败`);
+      }
     } finally {
       setTogglingSkill(null);
     }
@@ -387,20 +419,45 @@ export default function MySkillsPage() {
 
   const handleSaveContent = useCallback(async () => {
     if (!selectedSkill || !selectedFile || !isEditing) return;
+
+    // 检查内容和中文名是否发生了变化
+    const frontmatter = splitMarkdownFrontmatter(selectedFile, fileContent);
+    const contentChanged = draftContent !== frontmatter.editableContent;
+    const cnNameChanged = draftCnName !== (selectedSkill.cn_name || "");
+
+    if (!contentChanged && !cnNameChanged) {
+      message.info("内容未变化，无需保存");
+      setIsEditing(false);
+      return;
+    }
+
     setIsSaving(true);
     try {
       // 对于 Markdown 文件，合并 frontmatter
-      const frontmatter = splitMarkdownFrontmatter(selectedFile, fileContent);
       const contentToSave = frontmatter.hasFrontmatter
         ? mergeMarkdownFrontmatter(frontmatter.protectedPrefix, draftContent)
         : draftContent;
 
-      await mySkillsApi.saveSkillFile(selectedSkill.skill_name, selectedFile, contentToSave);
-      setFileContent(contentToSave);
+      // 保存文件，如果中文名有变化则传入 cn_name 参数
+      await mySkillsApi.saveSkillFile(
+        selectedSkill.skill_name,
+        selectedFile,
+        contentToSave,
+        cnNameChanged ? draftCnName : undefined
+      );
       setIsEditing(false);
+      setDraftCnName("");
       message.success("保存成功，可新开会话试一试效果。");
 
-      // 刷新单个技能数据（更新 updated_at 显示）
+      // 重新读取文件内容（后端可能更新了 frontmatter 中的 version 等字段）
+      try {
+        const res = await mySkillsApi.readSkillFile(selectedSkill.skill_name, selectedFile);
+        setFileContent(res.content);
+      } catch {
+        setFileContent(contentToSave);
+      }
+
+      // 刷新单个技能数据（更新 version、updated_at、cn_name 显示）
       const updatedSkill = await refreshSkill(selectedSkill.skill_name);
       if (updatedSkill) {
         setSelectedSkill(updatedSkill);
@@ -410,20 +467,22 @@ export default function MySkillsPage() {
     } finally {
       setIsSaving(false);
     }
-  }, [selectedSkill, selectedFile, isEditing, draftContent, fileContent, refreshSkill]);
+  }, [selectedSkill, selectedFile, isEditing, draftContent, draftCnName, fileContent, refreshSkill]);
 
-  // 编辑开始：初始化 draftContent
+  // 编辑开始：初始化 draftContent 和 draftCnName
   const handleEditStart = useCallback(() => {
     setIsEditing(true);
     const frontmatter = splitMarkdownFrontmatter(selectedFile, fileContent);
     setDraftContent(frontmatter.editableContent);
-  }, [selectedFile, fileContent]);
+    setDraftCnName(selectedSkill?.cn_name || "");
+  }, [selectedFile, fileContent, selectedSkill]);
 
-  // 编辑取消：重置 draftContent
+  // 编辑取消：重置 draftContent 和 draftCnName
   const handleEditCancel = useCallback(() => {
     setIsEditing(false);
     const frontmatter = splitMarkdownFrontmatter(selectedFile, fileContent);
     setDraftContent(frontmatter.editableContent);
+    setDraftCnName("");
   }, [selectedFile, fileContent]);
 
   // Navigate to marketplace
@@ -470,6 +529,7 @@ export default function MySkillsPage() {
         skillJson,
         skillMd,
         skillDirName: skill.skill_name, // 传递目录名，用于同步整个目录
+        version: skill.version, // 传递用户工作区版本号
       });
       setPublishModalOpen(true);
     } catch (err) {
@@ -771,6 +831,7 @@ export default function MySkillsPage() {
               icon={<UploadOutlined />}
               onClick={handleUploadClick}
               style={{ flex: 1 }}
+              loading={parsingZip}
             >
               上传技能
             </Button>
@@ -856,6 +917,7 @@ export default function MySkillsPage() {
           fileType={fileType}
           isEditing={isEditing}
           draftContent={draftContent}
+          draftCnName={draftCnName}
           isSaving={isSaving}
           togglingSkill={togglingSkill}
           isManager={isManager}
@@ -863,6 +925,7 @@ export default function MySkillsPage() {
           onEditCancel={handleEditCancel}
           onSave={handleSaveContent}
           onDraftChange={setDraftContent}
+          onCnNameChange={setDraftCnName}
           onToggleEnabled={handleToggleEnabled}
           onDelete={handleDelete}
           onSyncToMarket={handleSyncToMarket}
@@ -888,14 +951,93 @@ export default function MySkillsPage() {
           setPublishInitialData(null);
         }}
         onSuccess={() => {
-          message.success("上架成功");
           refresh();
         }}
         initialData={publishInitialData}
       />
 
-      {/* Conflict rename modal */}
-      {conflictRenameModal}
-    </div>
+      {/* 上传技能弹窗 */}
+      <Modal
+        title="上传技能"
+        open={uploadModalOpen}
+        onCancel={() => {
+          setUploadModalOpen(false);
+          setPendingUploadFile(null);
+          setUploadCnName("");
+          setUploadSkillId("");
+          setUploadSkillName("");
+          setUploadConflict(null);
+          setUploadSkillIdConflict(null);
+        }}
+        confirmLoading={uploading}
+        okText={uploadConflict ? "覆盖上传" : "上传"}
+        okButtonProps={{
+          disabled: !!uploadSkillIdConflict,
+        }}
+        cancelText="取消"
+        destroyOnClose
+        onOk={() => handleConfirmUpload(uploadConflict ? true : false)}
+      >
+        <p style={{ marginBottom: 16, color: "#595959" }}>
+          已选择文件: {pendingUploadFile?.name}
+        </p>
+
+        {uploadConflict && (
+          <Alert
+            type="warning"
+            showIcon
+            message={uploadConflict}
+            description="覆盖将更新现有技能，保留原有数据"
+            style={{ marginBottom: 16 }}
+          />
+        )}
+
+        {uploadSkillIdConflict && (
+          <Alert
+            type="error"
+            showIcon
+            message={`skill_id 冲突`}
+            description={`${uploadSkillIdConflict}，请修改 SKILL.md 的 metadata.skill_id 后重新上传`}
+            style={{ marginBottom: 16 }}
+          />
+        )}
+
+        {uploadSkillName && (
+          <div style={{ marginBottom: 16 }}>
+            <label style={{ display: "block", marginBottom: 8, fontWeight: 500 }}>
+              技能名
+            </label>
+            <Input value={uploadSkillName} disabled />
+          </div>
+        )}
+
+        {uploadSkillId && (
+          <div style={{ marginBottom: 16 }}>
+            <label style={{ display: "block", marginBottom: 8, fontWeight: 500 }}>
+              技能唯一标识
+              <Tooltip title="优先从 SKILL.md metadata.skill_id 提取，若无则自动生成：customized_创建者ID_技能名">
+                <InfoCircleOutlined style={{ marginLeft: 4, color: "#8c8c8c" }} />
+              </Tooltip>
+            </label>
+            <Input value={uploadSkillId} disabled />
+          </div>
+        )}
+
+        <div style={{ marginBottom: 16 }}>
+          <label style={{ display: "block", marginBottom: 8, fontWeight: 500 }}>
+            中文名称 <span style={{ color: "#ff4d4f" }}>*</span>
+          </label>
+          <Input
+            placeholder="请输入技能中文展示名"
+            value={uploadCnName}
+            onChange={(e) => setUploadCnName(e.target.value)}
+            maxLength={50}
+            showCount
+            autoFocus
+          />
+        </div>
+      </Modal>
+
+      </div>
   );
 }

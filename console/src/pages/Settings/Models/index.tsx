@@ -1,6 +1,12 @@
 import { useCallback, useMemo, useState } from "react";
-import { Button, Input, Modal } from "@agentscope-ai/design";
-import { PlusOutlined, SearchOutlined, SendOutlined } from "@ant-design/icons";
+import { Button, ConfigProvider, Input, Modal } from "@agentscope-ai/design";
+import {
+  RightOutlined,
+  SettingOutlined,
+  PlusOutlined,
+  SearchOutlined,
+  SendOutlined,
+} from "@ant-design/icons";
 import { useProviders } from "./useProviders";
 import {
   LoadingState,
@@ -8,12 +14,13 @@ import {
   CustomProviderModal,
   ModelsSection,
 } from "./components";
-import { PageHeader } from "@/components/PageHeader";
 import { useTranslation } from "react-i18next";
 import { useAppMessage } from "@/hooks/useAppMessage";
 import { useIframeStore } from "@/stores/iframeStore";
-import { TenantTargetPicker } from "@/components/TenantTargetPicker";
+import { getUserId } from "@/utils/identity";
+import { TenantSelector } from "@/components/TenantSelector";
 import api from "@/api";
+import { CONSOLE_MANAGEMENT_TOKENS } from "@/config/consoleDesignTokens";
 import type { ProviderInfo } from "../../../api/types/provider";
 import styles from "./index.module.less";
 
@@ -26,17 +33,15 @@ function ModelsPage() {
   const { message } = useAppMessage();
   const manager = useIframeStore((state) => state.manager);
   const { providers, activeModels, loading, error, fetchAll } = useProviders();
-  const [hoveredCard, setHoveredCard] = useState<string | null>(null);
   const [addProviderOpen, setAddProviderOpen] = useState(false);
   const [searchQuery, setSearchQuery] = useState("");
 
   // 供应商全量分发状态
   const [providersDistOpen, setProvidersDistOpen] = useState(false);
-  const [providersDistLoading, setProvidersDistLoading] = useState(false);
   const [providersDistSubmitting, setProvidersDistSubmitting] = useState(false);
-  const [providersDistTenantIds, setProvidersDistTenantIds] = useState<string[]>([]);
   const [selectedProvidersDistTenantIds, setSelectedProvidersDistTenantIds] =
     useState<string[]>([]);
+  const currentTenantId = getUserId();
 
   const refreshProvidersSilently = useCallback(() => {
     void fetchAll(false);
@@ -62,30 +67,11 @@ function ModelsPage() {
     };
   }, [providers, searchQuery]);
 
-  const handleMouseEnter = (providerId: string) => {
-    setHoveredCard(providerId);
-  };
-
-  const handleMouseLeave = () => {
-    setHoveredCard(null);
-  };
-
   // ===== 供应商全量分发 =====
 
-  const openProvidersDistModal = async () => {
+  const openProvidersDistModal = () => {
     setProvidersDistOpen(true);
     setSelectedProvidersDistTenantIds([]);
-    setProvidersDistLoading(true);
-    try {
-      const result = await api.listActiveModelDistributionTenants();
-      setProvidersDistTenantIds(result.tenant_ids || []);
-    } catch (error) {
-      const errMsg =
-        error instanceof Error ? error.message : t("models.distributeFailed");
-      message.error(errMsg);
-    } finally {
-      setProvidersDistLoading(false);
-    }
   };
 
   const closeProvidersDistModal = () => {
@@ -120,11 +106,9 @@ function ModelsPage() {
         Modal.confirm({
           title: t("models.distributeResultTitle"),
           content: (
-            <div style={{ display: "grid", gap: 8 }}>
+            <div className={styles.modalResultStack}>
               <div>{t("models.distributeSuccessList")}</div>
-              <pre style={{ margin: 0, whiteSpace: "pre-wrap" }}>
-                {lines.join("\n")}
-              </pre>
+              <pre className={styles.modalResultPre}>{lines.join("\n")}</pre>
               {failed.length > 0 ? (
                 <div>{t("models.distributeFailureInlineHint")}</div>
               ) : null}
@@ -137,12 +121,15 @@ function ModelsPage() {
 
       if (failed.length > 0) {
         const failureLines = failed.map(
-          (item) => `• ${item.tenant_id}: ${item.error || t("models.distributeFailed")}`,
+          (item) =>
+            `• ${item.tenant_id}: ${
+              item.error || t("models.distributeFailed")
+            }`,
         );
         Modal.confirm({
           title: t("models.distributePartialFailureTitle"),
           content: (
-            <pre style={{ margin: 0, whiteSpace: "pre-wrap" }}>
+            <pre className={styles.modalResultPre}>
               {failureLines.join("\n")}
             </pre>
           ),
@@ -169,146 +156,202 @@ function ModelsPage() {
         provider={provider}
         activeModels={activeModels}
         onSaved={refreshProvidersSilently}
-        isHover={hoveredCard === provider.id}
-        onMouseEnter={() => handleMouseEnter(provider.id)}
-        onMouseLeave={handleMouseLeave}
       />
     ));
 
+  const visibleProviderCount = regularProviders.length + localProviders.length;
+
   return (
-    <div className={styles.settingsPage}>
-      {loading ? (
-        <LoadingState message={t("models.loading")} />
-      ) : error ? (
-        <LoadingState message={error} error onRetry={fetchAll} />
-      ) : (
-        <>
-          {/* ---- LLM Section (top) ---- */}
-          <PageHeader
-            parent={t("nav.systemSettings")}
-            current={t("models.llmTitle")}
-          />
-          {/* ---- Scrollable Content ---- */}
-          <div className={styles.content}>
-            <ModelsSection
-              providers={providers}
-              activeModels={activeModels}
-              onSaved={fetchAll}
-            />
-            {/* ---- Providers Section ---- */}
-            <div className={styles.providersBlock}>
-              <div className={styles.sectionHeaderRow}>
-                <PageHeader
-                  current={t("models.providersTitle")}
-                  className={styles.providersPageHeader}
-                />
-                <div className={styles.headerRight}>
-                  {/* ---- Search ---- */}
-                  <div className={styles.searchRow}>
-                    <Input
-                      placeholder={t("models.searchPlaceholder")}
-                      value={searchQuery}
-                      onChange={(e) => setSearchQuery(e.target.value)}
-                      onPressEnter={() => {}}
-                      className={styles.searchInput}
-                      prefix={<SearchOutlined />}
-                      allowClear
-                    />
-                    <Button
-                      type="primary"
-                      icon={<SearchOutlined />}
-                      onClick={() => fetchAll()}
-                      className={styles.searchBtn}
-                    >
-                      {t("models.search")}
-                    </Button>
+    <ConfigProvider
+      theme={{
+        token: {
+          colorPrimary: CONSOLE_MANAGEMENT_TOKENS.colorPrimary,
+          colorLink: CONSOLE_MANAGEMENT_TOKENS.colorPrimaryHover,
+          colorText: CONSOLE_MANAGEMENT_TOKENS.colorText,
+          colorTextSecondary: CONSOLE_MANAGEMENT_TOKENS.colorTextSecondary,
+          colorBorder: CONSOLE_MANAGEMENT_TOKENS.colorBorder,
+          colorBgLayout: CONSOLE_MANAGEMENT_TOKENS.colorCanvas,
+          colorBgContainer: CONSOLE_MANAGEMENT_TOKENS.colorSurface,
+          colorBgElevated: CONSOLE_MANAGEMENT_TOKENS.colorSurface,
+          fontFamily: CONSOLE_MANAGEMENT_TOKENS.fontUi,
+          borderRadius: 8,
+        },
+        components: {
+          Select: {
+            optionActiveBg: CONSOLE_MANAGEMENT_TOKENS.colorSurfaceSubtle,
+            optionSelectedBg: CONSOLE_MANAGEMENT_TOKENS.colorPrimarySoft,
+            optionSelectedColor: CONSOLE_MANAGEMENT_TOKENS.colorText,
+          },
+        },
+      }}
+    >
+      <div className={`${styles.settingsPage} console-management-theme`}>
+        {loading ? (
+          <LoadingState message={t("models.loading")} />
+        ) : error ? (
+          <LoadingState message={error} error onRetry={fetchAll} />
+        ) : (
+          <>
+            <div className={styles.pageHeading}>
+              <div className={styles.pageHeadingIcon} aria-hidden="true">
+                <SettingOutlined />
+              </div>
+              <nav
+                className={styles.breadcrumbTrail}
+                aria-label={t("models.breadcrumbLabel")}
+              >
+                <span className={styles.pageEyebrow}>
+                  {t("nav.systemSettings")}
+                </span>
+                <RightOutlined className={styles.breadcrumbChevron} />
+                <span className={styles.breadcrumbCurrent} aria-current="page">
+                  {t("nav.models")}
+                </span>
+              </nav>
+              <h1 className={styles.visuallyHiddenHeading}>
+                {t("nav.models")}
+              </h1>
+            </div>
+            <div className={styles.content}>
+              <div className={styles.contentInner}>
+                <section className={styles.managementSection}>
+                  <div className={styles.managementSectionHeader}>
+                    <div>
+                      <h2 className={styles.managementSectionTitle}>
+                        {t("models.llmTitle")}
+                      </h2>
+                      <p className={styles.managementSectionDescription}>
+                        {t("models.llmDescription")}
+                      </p>
+                    </div>
                   </div>
-                  <Button
-                    type="primary"
-                    icon={<PlusOutlined />}
-                    onClick={() => setAddProviderOpen(true)}
-                    className={styles.addProviderBtn}
-                  >
-                    {t("models.addProvider")}
-                  </Button>
-                  <Button
-                    icon={<SendOutlined />}
-                    onClick={openProvidersDistModal}
-                    className={styles.addProviderBtn}
-                    disabled={!manager}
-                  >
-                    {t("models.distributeProviders")}
-                  </Button>
-                </div>
+                  <ModelsSection
+                    providers={providers}
+                    activeModels={activeModels}
+                    onSaved={fetchAll}
+                  />
+                </section>
+
+                <section
+                  className={`${styles.managementSection} ${styles.providersBlock}`}
+                >
+                  <div className={styles.sectionHeaderRow}>
+                    <div>
+                      <h2 className={styles.managementSectionTitle}>
+                        {t("models.providersTitle")}
+                      </h2>
+                      <p className={styles.managementSectionDescription}>
+                        {t("models.providersDescription")}
+                      </p>
+                    </div>
+                    <div className={styles.headerRight}>
+                      <div className={styles.searchRow}>
+                        <Input
+                          placeholder={t("models.searchPlaceholder")}
+                          value={searchQuery}
+                          onChange={(e) => setSearchQuery(e.target.value)}
+                          onPressEnter={() => {}}
+                          className={styles.searchInput}
+                          prefix={<SearchOutlined />}
+                          allowClear
+                        />
+                        <Button
+                          type="primary"
+                          icon={<SearchOutlined />}
+                          onClick={() => fetchAll()}
+                          className={styles.searchBtn}
+                        >
+                          {t("models.search")}
+                        </Button>
+                      </div>
+                      <Button
+                        type="primary"
+                        icon={<PlusOutlined />}
+                        onClick={() => setAddProviderOpen(true)}
+                        className={styles.addProviderBtn}
+                      >
+                        {t("models.addProvider")}
+                      </Button>
+                      <Button
+                        icon={<SendOutlined />}
+                        onClick={openProvidersDistModal}
+                        className={styles.addProviderBtn}
+                        disabled={!manager}
+                      >
+                        {t("models.distributeProviders")}
+                      </Button>
+                    </div>
+                  </div>
+
+                  {visibleProviderCount === 0 ? (
+                    <div className={styles.emptyState}>
+                      <div className={styles.emptyStateTitle}>
+                        {t("models.noProviders", "没有匹配的提供商")}
+                      </div>
+                      <div className={styles.emptyStateDescription}>
+                        {t(
+                          "models.noProvidersHint",
+                          "请调整搜索条件，或添加一个自定义提供商。",
+                        )}
+                      </div>
+                    </div>
+                  ) : null}
+
+                  {localProviders.length > 0 && (
+                    <div className={styles.providerGroup}>
+                      <div className={styles.providerCards}>
+                        {renderProviderCards(localProviders)}
+                      </div>
+                    </div>
+                  )}
+
+                  {regularProviders.length > 0 && (
+                    <div className={styles.providerGroup}>
+                      <div className={styles.providerCards}>
+                        {renderProviderCards(regularProviders)}
+                      </div>
+                    </div>
+                  )}
+                </section>
               </div>
 
-              {localProviders.length > 0 && (
-                <div className={styles.providerGroup}>
-                  {/* <h4 className={styles.providerGroupTitle}>
-                  {t("models.localEmbedded")}
-                </h4> */}
-                  <div className={styles.providerCards}>
-                    {renderProviderCards(localProviders)}
+              <CustomProviderModal
+                open={addProviderOpen}
+                onClose={() => setAddProviderOpen(false)}
+                onSaved={fetchAll}
+              />
+
+              {/* 供应商全量分发 Modal */}
+              <Modal
+                rootClassName="console-management-modal"
+                open={providersDistOpen}
+                title={t("models.distributeProvidersTitle")}
+                onCancel={closeProvidersDistModal}
+                onOk={handleDistributeProviders}
+                okButtonProps={{
+                  disabled: !selectedProvidersDistTenantIds.length,
+                  loading: providersDistSubmitting,
+                }}
+              >
+                <div className={styles.modalStack}>
+                  <div className={styles.modalHint}>
+                    {t("models.distributeProvidersHint")}
                   </div>
-                </div>
-              )}
-
-              {regularProviders.length > 0 && (
-                <div className={styles.providerGroup}>
-                  <div className={styles.providerCards}>
-                    {renderProviderCards(regularProviders)}
+                  <div className={styles.dangerNotice}>
+                    {t("models.distributeProvidersWarning")}
                   </div>
-                </div>
-              )}
-            </div>
-
-            <CustomProviderModal
-              open={addProviderOpen}
-              onClose={() => setAddProviderOpen(false)}
-              onSaved={fetchAll}
-            />
-
-            {/* 供应商全量分发 Modal */}
-            <Modal
-              open={providersDistOpen}
-              title={t("models.distributeProvidersTitle")}
-              onCancel={closeProvidersDistModal}
-              onOk={handleDistributeProviders}
-              okButtonProps={{
-                disabled: !selectedProvidersDistTenantIds.length,
-                loading: providersDistSubmitting,
-              }}
-            >
-              <div style={{ display: "grid", gap: 12 }}>
-                <div style={{ color: "#666", fontSize: 12 }}>
-                  {t("models.distributeProvidersHint")}
-                </div>
-                <div
-                  style={{
-                    padding: 12,
-                    borderRadius: 8,
-                    background: "#fff2f0",
-                    border: "1px solid #ffccc7",
-                    color: "#cf1322",
-                  }}
-                >
-                  {t("models.distributeProvidersWarning")}
-                </div>
-                {providersDistLoading ? (
-                  <div>{t("models.loading")}</div>
-                ) : (
-                  <TenantTargetPicker
-                    tenantIds={providersDistTenantIds}
+                  <TenantSelector
                     selectedTenantIds={selectedProvidersDistTenantIds}
                     onChange={setSelectedProvidersDistTenantIds}
+                    excludeTenantId={currentTenantId}
                   />
-                )}
-              </div>
-            </Modal>
-          </div>
-        </>
-      )}
-    </div>
+                </div>
+              </Modal>
+            </div>
+          </>
+        )}
+      </div>
+    </ConfigProvider>
   );
 }
 

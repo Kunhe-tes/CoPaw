@@ -308,6 +308,7 @@ class MonitorSyncClient:
             "source_id": self._get_or_empty(spec_dict, "source_id"),
             "enabled": self._get_or_default(spec_dict, "enabled", True),
             "task_type": self._get_or_default(spec_dict, "task_type", "agent"),
+            "skill_ids": self._get_or_empty(spec_dict, "skill_ids"),
             "text_content": self._get_or_empty(spec_dict, "text"),
             "request_input": self._build_request_input(spec_dict),
         }
@@ -621,19 +622,23 @@ class MonitorSyncClient:
         now_utc: datetime,
         limit: int,
         stale_lock_seconds: int = 600,
+        source_ids: Optional[list[str]] = None,
     ) -> list[Dict[str, Any]]:
         """Claim cron execution records that are ready for notification."""
         if not self._enabled:
             return []
         client = await self._get_client()
+        payload: Dict[str, Any] = {
+            "lock_owner": lock_owner,
+            "now_utc": self._format_optional_time(now_utc),
+            "limit": limit,
+            "stale_lock_seconds": stale_lock_seconds,
+        }
+        if source_ids:
+            payload["source_ids"] = source_ids
         response = await client.post(
             "/monitor/sync/notifications/claim",
-            json={
-                "lock_owner": lock_owner,
-                "now_utc": self._format_optional_time(now_utc),
-                "limit": limit,
-                "stale_lock_seconds": stale_lock_seconds,
-            },
+            json=payload,
         )
         if 200 <= response.status_code < 300:
             data = response.json()

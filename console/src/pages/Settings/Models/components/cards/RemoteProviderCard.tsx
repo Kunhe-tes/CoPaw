@@ -1,5 +1,11 @@
 import { useState } from "react";
-import { Card, Button, Modal } from "@agentscope-ai/design";
+import { Card, Button, Dropdown, Modal } from "@agentscope-ai/design";
+import {
+  AppstoreOutlined,
+  DeleteOutlined,
+  MoreOutlined,
+  SettingOutlined,
+} from "@ant-design/icons";
 import type { ProviderInfo, ActiveModelsInfo } from "../../../../../api/types";
 import { ProviderConfigModal } from "../modals/ProviderConfigModal";
 import { ModelManageModal } from "../modals/ModelManageModal";
@@ -17,26 +23,19 @@ interface RemoteProviderCardProps {
   provider: ProviderInfo;
   activeModels: ActiveModelsInfo | null;
   onSaved: () => void;
-  isHover: boolean;
-  onMouseEnter: () => void;
-  onMouseLeave: () => void;
 }
 
 export function RemoteProviderCard({
   provider,
   activeModels,
   onSaved,
-  isHover,
-  onMouseEnter,
-  onMouseLeave,
 }: RemoteProviderCardProps) {
   const { t } = useTranslation();
   const { message } = useAppMessage();
   const [modalOpen, setModalOpen] = useState(false);
   const [modelManageOpen, setModelManageOpen] = useState(false);
 
-  const handleDeleteProvider = (e: React.MouseEvent) => {
-    e.stopPropagation();
+  const handleDeleteProvider = () => {
     Modal.confirm({
       title: t("models.deleteProvider"),
       content: t("models.deleteProviderConfirm", { name: provider.name }),
@@ -105,20 +104,30 @@ export function RemoteProviderCard({
 
   return (
     <Card
-      hoverable
-      onMouseEnter={onMouseEnter}
-      onMouseLeave={onMouseLeave}
       className={`${styles.providerCard} ${
         isAvailable ? styles.enabledCard : ""
-      } ${isHover ? styles.hover : styles.normal}`}
+      }`}
     >
-      {/* Card Header with Icon and Status */}
-      <div className={styles.cardHeaderRow}>
-        <img
-          src={providerIcon(provider.id)}
-          alt={provider.name}
-          className={styles.providerIcon}
-        />
+      <div className={styles.cardIdentity}>
+        <div className={styles.providerBrand}>
+          <div className={styles.providerIconFrame}>
+            <img
+              src={providerIcon(provider.id)}
+              alt={provider.name}
+              className={styles.providerIcon}
+            />
+          </div>
+          <div className={styles.providerTitleText}>
+            <div className={styles.providerNameLine} title={provider.name}>
+              <span className={styles.cardName}>{provider.name}</span>
+              {providerTag}
+            </div>
+            <div className={styles.providerIdLine} title={provider.id}>
+              <span className={styles.providerFieldLabel}>ID</span>
+              <span className={styles.providerIdText}>{provider.id}</span>
+            </div>
+          </div>
+        </div>
         <div className={styles.cardStatusHeader}>
           <span
             className={styles.statusDot}
@@ -141,13 +150,6 @@ export function RemoteProviderCard({
         </div>
       </div>
 
-      {/* Title Row */}
-      <div className={styles.cardTitleRow}>
-        <span className={styles.cardName}>{provider.name}</span>
-        {providerTag}
-      </div>
-
-      {/* Info Section */}
       <div className={styles.cardInfo}>
         <div className={styles.infoRow}>
           <span className={styles.infoLabel}>Base URL:</span>
@@ -168,7 +170,7 @@ export function RemoteProviderCard({
           )}
         </div>
         <div className={styles.infoRow}>
-          <span className={styles.infoLabel}>Model:</span>
+          <span className={styles.infoLabel}>{t("models.model")}:</span>
           <span className={styles.infoValue}>
             {totalCount > 0
               ? t("models.modelsCount", { count: totalCount })
@@ -177,44 +179,50 @@ export function RemoteProviderCard({
         </div>
       </div>
 
-      {/* Actions - only show on hover */}
-      {isHover && (
-        <div className={styles.cardActions}>
-          <Button
-            type="default"
-            size="small"
-            onClick={(e) => {
-              e.stopPropagation();
-              setModelManageOpen(true);
+      <div className={styles.cardActions}>
+        <Button
+          type="text"
+          size="small"
+          icon={<AppstoreOutlined />}
+          onClick={() => setModelManageOpen(true)}
+          className={styles.actionBtn}
+        >
+          {t("models.models")}
+        </Button>
+        <Button
+          type="text"
+          size="small"
+          icon={<SettingOutlined />}
+          onClick={() => setModalOpen(true)}
+          className={styles.actionBtn}
+        >
+          {t("models.settings")}
+        </Button>
+        {provider.is_custom && (
+          <Dropdown
+            trigger={["click"]}
+            menu={{
+              items: [
+                {
+                  key: "delete",
+                  danger: true,
+                  icon: <DeleteOutlined />,
+                  label: t("common.delete"),
+                  onClick: handleDeleteProvider,
+                },
+              ],
             }}
-            className={styles.actionBtn}
           >
-            {t("models.models")}
-          </Button>
-          <Button
-            type="default"
-            size="small"
-            onClick={(e) => {
-              e.stopPropagation();
-              setModalOpen(true);
-            }}
-            className={styles.actionBtn}
-          >
-            {t("models.settings")}
-          </Button>
-          {provider.is_custom && (
             <Button
-              type="default"
+              type="text"
               size="small"
-              danger
-              onClick={handleDeleteProvider}
-              className={styles.actionBtn}
-            >
-              {t("common.delete")}
-            </Button>
-          )}
-        </div>
-      )}
+              icon={<MoreOutlined />}
+              aria-label={t("models.moreActions", "更多操作")}
+              className={styles.moreActionBtn}
+            />
+          </Dropdown>
+        )}
+      </div>
 
       <ProviderConfigModal
         provider={provider}

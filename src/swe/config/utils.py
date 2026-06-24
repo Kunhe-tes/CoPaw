@@ -22,6 +22,7 @@ from ..constant import (
     CHATS_FILE,
     PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH_ENV,
     RUNNING_IN_CONTAINER,
+    SECRET_DIR,
     WORKING_DIR,
 )
 from .config import (
@@ -38,6 +39,8 @@ from .context import (
     decode_scope_id,
     get_current_effective_tenant_id,
     get_current_scope_id,
+    resolve_request_effective_tenant_id,
+    resolve_storage_tenant_id,
     get_current_source_id,
     get_current_tenant_id,
     resolve_runtime_tenant_id,
@@ -723,6 +726,16 @@ def _resolve_runtime_tenant_for_paths(
     if tenant_id is None:
         return get_current_effective_tenant_id()
 
+    if tenant_id == "default":
+        return resolve_request_effective_tenant_id(
+            tenant_id,
+            get_current_source_id(),
+            get_current_scope_id(),
+        )
+
+    if tenant_id.startswith("default_"):
+        return tenant_id
+
     current_scope_id = get_current_scope_id()
     if current_scope_id is not None and tenant_id == get_current_tenant_id():
         return canonicalize_scope_id(current_scope_id)
@@ -734,6 +747,37 @@ def _resolve_runtime_tenant_for_paths(
         pass
 
     return resolve_runtime_tenant_id(tenant_id, get_current_source_id())
+
+
+def _resolve_storage_tenant_for_paths(
+    tenant_id: str | None,
+) -> str | None:
+    """把路径 helper 的输入统一收敛到 storage 语义。"""
+    if tenant_id is None:
+        return resolve_storage_tenant_id(
+            get_current_tenant_id(),
+            get_current_source_id(),
+            scope_id=get_current_scope_id(),
+        )
+
+    current_scope_id = get_current_scope_id()
+    if current_scope_id is not None and tenant_id == get_current_tenant_id():
+        return resolve_storage_tenant_id(
+            tenant_id,
+            get_current_source_id(),
+            scope_id=current_scope_id,
+        )
+
+    try:
+        decode_scope_id(tenant_id)
+        return canonicalize_scope_id(tenant_id)
+    except ValueError:
+        pass
+
+    return resolve_storage_tenant_id(
+        tenant_id,
+        get_current_source_id(),
+    )
 
 
 def migrate_legacy_scope_dir_if_needed(base_dir: Path, tenant_id: str) -> Path:
@@ -775,6 +819,19 @@ def get_tenant_config_path(tenant_id: str | None = None) -> Path:
         Path to tenant config.json.
     """
     return get_tenant_working_dir(tenant_id) / "config.json"
+
+
+def get_tenant_storage_working_dir(tenant_id: str | None = None) -> Path:
+    """Get tenant-specific working directory using storage semantics."""
+    resolved_tenant_id = _resolve_storage_tenant_for_paths(tenant_id)
+    if not resolved_tenant_id:
+        resolved_tenant_id = "default"
+    return migrate_legacy_scope_dir_if_needed(WORKING_DIR, resolved_tenant_id)
+
+
+def get_tenant_storage_config_path(tenant_id: str | None = None) -> Path:
+    """Get tenant-specific config.json path using storage semantics."""
+    return get_tenant_storage_working_dir(tenant_id) / "config.json"
 
 
 def get_tenant_jobs_path(tenant_id: str | None = None) -> Path:
@@ -837,6 +894,25 @@ def get_tenant_secrets_dir(tenant_id: str | None = None) -> Path:
     return get_tenant_working_dir(tenant_id) / ".secret"
 
 
+def get_tenant_storage_secrets_dir(tenant_id: str | None = None) -> Path:
+    """Get tenant-specific secrets directory using storage semantics."""
+    return get_tenant_storage_working_dir(tenant_id) / ".secret"
+
+
+def get_tenant_storage_providers_dir(tenant_id: str | None = None) -> Path:
+    """Get tenant-specific provider directory using storage semantics."""
+    resolved_tenant_id = _resolve_storage_tenant_for_paths(tenant_id)
+    if not resolved_tenant_id:
+        resolved_tenant_id = "default"
+    return (
+        migrate_legacy_scope_dir_if_needed(
+            SECRET_DIR,
+            resolved_tenant_id,
+        )
+        / "providers"
+    )
+
+
 def get_tenant_heartbeat_path(tenant_id: str | None = None) -> Path:
     """Get tenant-specific HEARTBEAT.md path.
 
@@ -892,6 +968,25 @@ def get_tenant_working_dir_strict(tenant_id: str | None = None) -> Path:
     return migrate_legacy_scope_dir_if_needed(WORKING_DIR, tenant_id)
 
 
+def get_tenant_request_working_dir(tenant_id: str | None = None) -> Path:
+    """按请求访问语义解析租户目录。
+
+    ``default`` 用户在存在 ``source_id`` 时固定走 ``default_{source}``，
+    非 ``default`` 用户维持 runtime scope 目录语义。
+    """
+    resolved_tenant_id = resolve_request_effective_tenant_id(
+        tenant_id if tenant_id is not None else get_current_tenant_id(),
+        get_current_source_id(),
+        get_current_scope_id(),
+    )
+    if resolved_tenant_id is None:
+        raise TenantContextError(
+            "Tenant context required. "
+            "Ensure this code runs within a tenant-scoped request or context.",
+        )
+    return migrate_legacy_scope_dir_if_needed(WORKING_DIR, resolved_tenant_id)
+
+
 def get_tenant_config_path_strict(tenant_id: str | None = None) -> Path:
     """Get tenant config path, raising if tenant context unavailable.
 
@@ -935,6 +1030,7 @@ async def list_logical_tenant_ids(
     source_id: str | None = None,
     *,
     source_filter: bool = False,
+    include_templates: bool = False,
 ) -> list[str]:
     """Return tenant IDs, optionally filtered by source_id.
 
@@ -944,6 +1040,8 @@ async def list_logical_tenant_ids(
             - Database unavailable: return empty list
             - source_id empty: return empty list
             - Otherwise: return tenants from swe_tenant_init_source table
+        include_templates: Whether template tenants should be included when
+            querying source-filtered tenant lists.
 
     Returns:
         List of tenant IDs.
@@ -956,7 +1054,10 @@ async def list_logical_tenant_ids(
         store = get_tenant_init_source_store()
         if store is None or not source_id:
             return []
-        rows = await store.get_by_source(source_id)
+        rows = await store.get_by_source(
+            source_id,
+            include_templates=include_templates,
+        )
         return sorted(
             tid
             for tid in {row["tenant_id"] for row in rows}
@@ -979,7 +1080,9 @@ async def list_logical_tenant_ids(
         try:
             logical_tenant_id, scope_source_id = decode_scope_id(tenant_id)
         except ValueError:
-            # default_{source_id} 模板目录和普通租户目录都保留
+            # default_{source_id} 模板目录不应暴露给 source-scoped 调用方。
+            if tenant_id.startswith("default_"):
+                continue
             logical_tenant_ids.append(tenant_id)
             continue
         if scope_source_id != source_id:

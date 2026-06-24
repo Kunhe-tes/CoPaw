@@ -15,6 +15,7 @@ import type { CronJobSpecOutput } from "../../../../api/types";
 import { TIMEZONE_OPTIONS, DEFAULT_FORM_VALUES } from "./constants";
 import type { ExecutionModelOption } from "@/hooks/useExecutionModelOptions";
 import { DEFAULT_EXECUTION_MODEL_KEY } from "@/hooks/useExecutionModelOptions";
+import { normalizeSkillIdsInput } from "../helpers";
 import styles from "../index.module.less";
 
 type CronJob = CronJobSpecOutput;
@@ -43,6 +44,16 @@ export function JobDrawer({
   onSubmit,
 }: JobDrawerProps) {
   const { t } = useTranslation();
+  const validateSkillIds = (_: unknown, value: string) => {
+    try {
+      normalizeSkillIdsInput(value);
+      return Promise.resolve();
+    } catch (error) {
+      return Promise.reject(
+        error instanceof Error ? error : new Error("绑定技能ID格式不正确"),
+      );
+    }
+  };
 
   return (
     <Drawer
@@ -242,6 +253,20 @@ export function JobDrawer({
           />
         </Form.Item>
 
+        <Form.Item label="通知延迟">
+          <div className={styles.inlineFieldGroup}>
+            <Form.Item name="notificationDelayValue" noStyle>
+              <InputNumber min={0} style={{ flex: 1 }} placeholder="0" />
+            </Form.Item>
+            <Form.Item name="notificationDelayUnit" noStyle>
+              <Select style={{ width: 140 }}>
+                <Select.Option value="minutes">分钟</Select.Option>
+                <Select.Option value="hours">小时</Select.Option>
+              </Select>
+            </Form.Item>
+          </div>
+        </Form.Item>
+
         <Form.Item
           name="task_type"
           label={t("cronJobs.taskType")}
@@ -263,6 +288,14 @@ export function JobDrawer({
             <Select.Option value="text">text</Select.Option>
             <Select.Option value="agent">agent</Select.Option>
           </Select>
+        </Form.Item>
+
+        <Form.Item
+          name="skillIds"
+          label="绑定技能ID"
+          rules={[{ validator: validateSkillIds }]}
+        >
+          <Input.TextArea rows={2} placeholder="skill-a, skill_b" />
         </Form.Item>
 
         <Form.Item

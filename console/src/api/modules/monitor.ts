@@ -13,6 +13,7 @@ export interface FilterOptionsResponse {
   users: FilterOption[];
   bbk_ids: FilterOption[];
   channels: FilterOption[];
+  source_ids: FilterOption[];
   job_names: FilterOption[];
   job_ids: FilterOption[];
 }
@@ -39,6 +40,8 @@ export interface CronJobItem {
   creator_user_id: string;
   task_chat_id: string;
   task_session_id: string;
+  job_origin: string;
+  subscription_key: string;
   meta: string;
   status: string;
   pause_reason: string;
@@ -55,6 +58,7 @@ export interface ExecutionItem {
   job_name: string;
   tenant_id: string;
   tenant_name: string;
+  bbk_id?: string;
   scheduled_time: string | null;
   actual_time: string;
   end_time: string | null;
@@ -97,11 +101,431 @@ export interface UnreadCountResponse {
   total_unread: number;
 }
 
+export interface CronOverviewMetricItem {
+  key: string;
+  value: number;
+  compare: string;
+  trend: "up" | "down" | null;
+}
+
+export interface CronOverviewDistributionItem {
+  name: string;
+  value: number;
+  percent: number;
+}
+
+export interface CronOverviewBranchExecutionItem {
+  name: string;
+  success: number;
+  failed: number;
+  skipped: number;
+}
+
+export interface CronOverviewBranchReadItem {
+  name: string;
+  read: number;
+  unread: number;
+}
+
+export interface CronOverviewResponse {
+  start_time: string | null;
+  end_time: string | null;
+  metrics: CronOverviewMetricItem[];
+  task_status: CronOverviewDistributionItem[];
+  execution_result: CronOverviewDistributionItem[];
+  read_status: CronOverviewDistributionItem[];
+  failure_reasons: CronOverviewDistributionItem[];
+  branch_tasks: CronOverviewDistributionItem[];
+  branch_execution: CronOverviewBranchExecutionItem[];
+  branch_read: CronOverviewBranchReadItem[];
+}
+
+export interface CronJobOverviewSummaryMetric {
+  key: string;
+  value: string;
+  footerValue?: string;
+}
+
+export interface CronJobOverviewBranchRankingRow {
+  rank: number | "...";
+  bbkId: string;
+  branchName: string;
+  managerCount: string;
+  totalTasks: string;
+  successCount: string;
+  successRate: string;
+  readTasks: string;
+  planCount: string;
+  insightCount: string;
+  phoneCount: string;
+  planClicks: string;
+  insightClicks: string;
+  phoneClicks: string;
+  errorCount: string;
+}
+
+export interface CronJobOverviewFailureReason {
+  name: string;
+  count: number;
+  percent: number;
+  color: string;
+}
+
+export interface CronJobOverviewAnomalySummary {
+  affectedBranches: string;
+  affectedBranchesUnit: string;
+  affectedManagers: string;
+  affectedManagersUnit: string;
+}
+
+export interface CronJobOverviewAnomalyRankRow {
+  rank: number;
+  branchName: string;
+  alertExecutions: string;
+  alertRate: string;
+  affectedManagers: string;
+  latestAlertTime: string;
+}
+
+export interface CronJobOverviewPageData {
+  summaryMetrics: CronJobOverviewSummaryMetric[];
+  branchRankingRows: CronJobOverviewBranchRankingRow[];
+  failureReasons: CronJobOverviewFailureReason[];
+  anomalySummary: CronJobOverviewAnomalySummary;
+  anomalyRankRows: CronJobOverviewAnomalyRankRow[];
+}
+
+export interface CronJobOverviewDateFilters {
+  start_date?: string;
+  end_date?: string;
+  bbk_ids?: string;
+}
+
+export interface CronOverviewStatsResponse {
+  start_date: string;
+  end_date: string;
+  total_tasks: number;
+  total_executions: number;
+  branch_count: number;
+  tenant_count: number;
+  success_rate: number;
+  success_count: number;
+  read_tasks: number;
+  read_rate: number;
+  error_count: number;
+  error_rate: number;
+}
+
+export interface CronBranchRankingItem {
+  bbk_id: string;
+  bbk_name: string;
+  manager_count: number;
+  total_tasks: number;
+  success_count: number;
+  success_rate: number;
+  read_tasks: number;
+  plan_count: number;
+  insight_count: number;
+  phone_count: number;
+  plan_clicks: number;
+  insight_clicks: number;
+  phone_clicks: number;
+  error_count: number;
+}
+
+export interface CronBranchRankingResponse {
+  start_date: string;
+  end_date: string;
+  items: CronBranchRankingItem[];
+}
+
+export interface CronErrorReasonItem {
+  reason: string;
+  count: number;
+  percent: number;
+}
+
+export interface CronBranchErrorRankItem {
+  bbk_id: string;
+  bbk_name: string;
+  total_executions: number;
+  error_count: number;
+  error_rate: number;
+  affected_managers: number;
+}
+
+export interface CronBranchErrorResponse {
+  start_date: string;
+  end_date: string;
+  affected_branch_count: number;
+  affected_manager_count: number;
+  error_reasons: CronErrorReasonItem[];
+  branch_error_rank: CronBranchErrorRankItem[];
+}
+
+export interface BranchSkillItem {
+  skill_name: string;
+  cron_task_count: number;
+  success_count: number;
+  success_rate: number;
+  read_count: number;
+  error_count: number;
+}
+
+export interface BranchSkillResponse {
+  start_date: string;
+  end_date: string;
+  bbk_id: string;
+  bbk_name: string;
+  items: BranchSkillItem[];
+}
+
+export interface BranchSkillManagerItem {
+  user_id: string;
+  user_name: string;
+  read_count: number;
+  plan_count: number;
+  insight_count: number;
+  phone_count: number;
+  last_click_time: string | null;
+}
+
+export interface BranchSkillManagerResponse {
+  start_date: string;
+  end_date: string;
+  bbk_id: string;
+  skill_name: string;
+  items: BranchSkillManagerItem[];
+}
+
+export interface BranchSkillManagerCustomerItem {
+  customer_id: string;
+  customer_name: string;
+  clicked_plan: boolean;
+  clicked_insight: boolean;
+  clicked_phone: boolean;
+  click_time: string | null;
+}
+
+export interface BranchSkillManagerCustomerResponse {
+  start_date: string;
+  end_date: string;
+  bbk_id: string;
+  skill_name: string;
+  user_id: string;
+  items: BranchSkillManagerCustomerItem[];
+}
+
+export interface SubscriptionOverviewItem {
+  subscription_key: string;
+  task_name: string;
+  subscriber_count: number;
+  total_task_count: number;
+  running_task_count: number;
+  pending_task_count: number;
+  executed_task_count: number;
+  failed_task_count: number;
+  avg_duration_ms: number;
+  success_rate: number;
+}
+
+export interface SubscriptionDetailItem {
+  job_id: string;
+  subscriber_id: string;
+  subscriber_name: string;
+  bbk_id: string;
+  enabled: boolean;
+  execution_status: string;
+  execution_time: string | null;
+}
+
+const CRON_FAILURE_REASON_COLORS = ["#1d6ff2", "#38a8f5", "#7a8cf0", "#ff821c", "#67cdb9"];
+
+function appendDefinedParams(
+  params: URLSearchParams,
+  filters?: object,
+) {
+  if (!filters) {
+    return;
+  }
+  Object.entries(filters).forEach(([key, value]) => {
+    if (typeof value === "string" && value !== "") {
+      params.append(key, value);
+    }
+  });
+}
+
+function buildQuery(filters?: object) {
+  const params = new URLSearchParams();
+  appendDefinedParams(params, filters);
+  const query = params.toString();
+  return query ? `?${query}` : "";
+}
+
+function formatInteger(value: number | null | undefined) {
+  return Math.round(Number(value || 0)).toLocaleString("en-US");
+}
+
+function formatPercentValue(value: number | null | undefined) {
+  return Number(value || 0).toFixed(2);
+}
+
+function formatPercentText(value: number | null | undefined) {
+  return `${formatPercentValue(value)}%`;
+}
+
+function mapCronJobOverviewPageData(
+  stats: CronOverviewStatsResponse,
+  behavior: CronBranchRankingResponse,
+  branchError: CronBranchErrorResponse,
+): CronJobOverviewPageData {
+  return {
+    summaryMetrics: [
+      { key: "branches", value: formatInteger(stats.branch_count) },
+      { key: "managers", value: formatInteger(stats.tenant_count) },
+      {
+        key: "tasks",
+        value: formatInteger(stats.total_tasks),
+        footerValue: `${formatInteger(stats.total_executions)} 次`,
+      },
+      {
+        key: "success",
+        value: formatPercentValue(stats.success_rate),
+        footerValue: formatInteger(stats.success_count),
+      },
+      {
+        key: "read",
+        value: formatPercentValue(stats.read_rate),
+        footerValue: formatInteger(stats.read_tasks),
+      },
+      {
+        key: "alert",
+        value: formatPercentValue(stats.error_rate),
+        footerValue: formatInteger(stats.error_count),
+      },
+    ],
+    branchRankingRows: behavior.items.map((item, index) => ({
+      rank: index + 1,
+      bbkId: item.bbk_id || "",
+      branchName: item.bbk_name || item.bbk_id || "-",
+      managerCount: formatInteger(item.manager_count),
+      totalTasks: formatInteger(item.total_tasks),
+      successCount: formatInteger(item.success_count),
+      successRate: formatPercentText(item.success_rate),
+      readTasks: formatInteger(item.read_tasks),
+      planCount: formatInteger(item.plan_count),
+      insightCount: formatInteger(item.insight_count),
+      phoneCount: formatInteger(item.phone_count),
+      planClicks: formatInteger(item.plan_clicks),
+      insightClicks: formatInteger(item.insight_clicks),
+      phoneClicks: formatInteger(item.phone_clicks),
+      errorCount: formatInteger(item.error_count),
+    })),
+    failureReasons: branchError.error_reasons.map((item, index) => ({
+      name: item.reason || "其他",
+      count: Number(item.count || 0),
+      percent: Number(item.percent || 0),
+      color: CRON_FAILURE_REASON_COLORS[index % CRON_FAILURE_REASON_COLORS.length],
+    })),
+    anomalySummary: {
+      affectedBranches: formatInteger(branchError.affected_branch_count),
+      affectedBranchesUnit: "家",
+      affectedManagers: formatInteger(branchError.affected_manager_count),
+      affectedManagersUnit: "人",
+    },
+    anomalyRankRows: branchError.branch_error_rank.map((item, index) => ({
+      rank: index + 1,
+      branchName: item.bbk_name || item.bbk_id || "-",
+      alertExecutions: formatInteger(item.error_count),
+      alertRate: formatPercentText(item.error_rate),
+      affectedManagers: formatInteger(item.affected_managers),
+      latestAlertTime: "",
+    })),
+  };
+}
+
 // API functions
 export const monitorApi = {
   // Get filter options for dropdown selects
   getFilterOptions: async (): Promise<FilterOptionsResponse> => {
     return request(`/monitor/cron/filter-options`);
+  },
+
+  // Get page-shaped aggregate data for the cron overview
+  getCronOverview: async (filters?: {
+    tenant_id?: string;
+    bbk_id?: string;
+    start_time?: string;
+    end_time?: string;
+  }): Promise<CronOverviewResponse> => {
+    const params = new URLSearchParams();
+    if (filters) {
+      Object.entries(filters).forEach(([key, value]) => {
+        if (value !== undefined && value !== null && value !== "") {
+          params.append(key, value);
+        }
+      });
+    }
+    const query = params.toString();
+    return request(`/monitor/cron/overview${query ? `?${query}` : ""}`);
+  },
+
+  getCronOverviewStats: async (
+    filters?: CronJobOverviewDateFilters,
+  ): Promise<CronOverviewStatsResponse> => {
+    return request(`/monitor/cron/overview-stats${buildQuery(filters)}`);
+  },
+
+  getCronBranchRanking: async (
+    filters?: CronJobOverviewDateFilters,
+  ): Promise<CronBranchRankingResponse> => {
+    return request(`/monitor/cron/branch-behavior${buildQuery(filters)}`);
+  },
+
+  getCronBranchError: async (
+    filters?: CronJobOverviewDateFilters,
+  ): Promise<CronBranchErrorResponse> => {
+    return request(`/monitor/cron/branch-error${buildQuery(filters)}`);
+  },
+
+  getBranchSkills: async (params: {
+    bbk_id: string;
+    start_date?: string;
+    end_date?: string;
+  }): Promise<BranchSkillResponse> => {
+    return request(`/monitor/cron/branch-skills${buildQuery(params)}`);
+  },
+
+  getBranchSkillManagers: async (params: {
+    bbk_id: string;
+    skill_name: string;
+    start_date?: string;
+    end_date?: string;
+  }): Promise<BranchSkillManagerResponse> => {
+    return request(`/monitor/cron/branch-skill-managers${buildQuery(params)}`);
+  },
+
+  getBranchSkillManagerCustomers: async (params: {
+    bbk_id: string;
+    skill_name: string;
+    user_id: string;
+    start_date?: string;
+    end_date?: string;
+  }): Promise<BranchSkillManagerCustomerResponse> => {
+    return request(
+      `/monitor/cron/branch-skill-manager-customers${buildQuery(params)}`,
+    );
+  },
+
+  getCronJobOverviewPageData: async (
+    filters?: CronJobOverviewDateFilters,
+  ): Promise<CronJobOverviewPageData> => {
+    const [stats, ranking, branchError] = await Promise.all([
+      monitorApi.getCronOverviewStats(filters),
+      monitorApi.getCronBranchRanking(filters),
+      monitorApi.getCronBranchError(filters),
+    ]);
+    return mapCronJobOverviewPageData(stats, ranking, branchError);
   },
 
   // Get cron jobs list
@@ -112,6 +536,7 @@ export const monitorApi = {
       tenant_id?: string;
       bbk_id?: string;
       creator_user_id?: string;
+      job_origin?: string;
       status?: string;
       enabled?: boolean;
     },
@@ -141,6 +566,7 @@ export const monitorApi = {
     filters?: {
       job_id?: string;
       tenant_id?: string;
+      bbk_id?: string;
       status?: string;
       start_time?: string;
       end_time?: string;
@@ -162,6 +588,62 @@ export const monitorApi = {
   // Get single execution
   getExecution: async (executionId: number): Promise<ExecutionItem> => {
     return request(`/monitor/cron/executions/${executionId}`);
+  },
+
+  // Get subscription-level overview rows
+  getSubscriptionOverview: async (
+    page = 1,
+    pageSize = 20,
+    filters?: {
+      keyword?: string;
+      tenant_id?: string;
+      bbk_id?: string;
+      source_id?: string;
+      start_time?: string;
+      end_time?: string;
+    },
+  ): Promise<PaginatedResponse<SubscriptionOverviewItem>> => {
+    const params = new URLSearchParams();
+    params.append("page", page.toString());
+    params.append("page_size", pageSize.toString());
+    if (filters) {
+      Object.entries(filters).forEach(([key, value]) => {
+        if (value !== undefined && value !== null && value !== "") {
+          params.append(key, value);
+        }
+      });
+    }
+    return request(`/monitor/cron/subscription-overview?${params.toString()}`);
+  },
+
+  // Get subscription detail rows for a drawer/table
+  getSubscriptionDetails: async (
+    subscriptionKey: string,
+    page = 1,
+    pageSize = 20,
+    filters?: {
+      tenant_id?: string;
+      bbk_id?: string;
+      source_id?: string;
+      start_time?: string;
+      end_time?: string;
+    },
+  ): Promise<PaginatedResponse<SubscriptionDetailItem>> => {
+    const params = new URLSearchParams();
+    params.append("page", page.toString());
+    params.append("page_size", pageSize.toString());
+    if (filters) {
+      Object.entries(filters).forEach(([key, value]) => {
+        if (value !== undefined && value !== null && value !== "") {
+          params.append(key, value);
+        }
+      });
+    }
+    return request(
+      `/monitor/cron/subscription-overview/${encodeURIComponent(
+        subscriptionKey,
+      )}/jobs?${params.toString()}`,
+    );
   },
 
   // Export jobs to Excel

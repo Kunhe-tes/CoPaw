@@ -22,6 +22,7 @@ from ...agents.utils.tool_summary import (
     generate_tool_call_summary,
     generate_tool_output_summary,
 )
+from .tool_status import apply_running_tool_status, apply_terminal_tool_status
 
 logger = logging.getLogger(__name__)
 
@@ -171,7 +172,10 @@ async def _enrich_tool_message(event: Message) -> None:
         for content in contents:
             if getattr(content, "type", None) != ContentType.DATA:
                 continue
-            data = getattr(content, "data", None) or {}
+            data = getattr(content, "data", None)
+            if not isinstance(data, dict):
+                data = {}
+                content.data = data
             tool_name = data.get("name", "")
             arguments = data.get("arguments", "{}")
             server_label = data.get("server_label")
@@ -190,6 +194,7 @@ async def _enrich_tool_message(event: Message) -> None:
                 summary_kind="call",
                 tool_name=tool_name,
             )
+            apply_running_tool_status(data)
 
     elif event.type in (
         MessageType.FUNCTION_CALL_OUTPUT,
@@ -199,7 +204,10 @@ async def _enrich_tool_message(event: Message) -> None:
         for content in contents:
             if getattr(content, "type", None) != ContentType.DATA:
                 continue
-            data = getattr(content, "data", None) or {}
+            data = getattr(content, "data", None)
+            if not isinstance(data, dict):
+                data = {}
+                content.data = data
             tool_name = data.get("name", "")
             output = data.get("output", "")
             arguments = data.get("arguments")
@@ -217,6 +225,7 @@ async def _enrich_tool_message(event: Message) -> None:
                 summary_kind="output",
                 tool_name=tool_name,
             )
+            apply_terminal_tool_status(data)
 
 
 async def normalize_reasoning_boundary_stream(

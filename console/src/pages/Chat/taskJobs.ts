@@ -10,6 +10,11 @@ export interface TaskSidebarMeta {
   canDelete: boolean;
 }
 
+export interface TaskGroups {
+  runnableTasks: CronJobSpecOutput[];
+  pausedTasks: CronJobSpecOutput[];
+}
+
 const AUTO_PAUSE_REASON = "auto_unread_threshold";
 export const TASK_COMPLETED_STATUS_TEXT = "已完成";
 
@@ -69,6 +74,38 @@ export function getTaskSidebarMeta(job: CronJobSpecOutput): TaskSidebarMeta {
   };
 }
 
+export function partitionTasksByPauseState(
+  jobs: CronJobSpecOutput[],
+): TaskGroups {
+  return jobs.reduce<TaskGroups>(
+    (groups, job) => {
+      const state = getTaskSidebarMeta(job).state;
+      if (state === "auto-paused" || state === "manual-paused") {
+        groups.pausedTasks.push(job);
+      } else {
+        groups.runnableTasks.push(job);
+      }
+      return groups;
+    },
+    { runnableTasks: [], pausedTasks: [] },
+  );
+}
+
+export function getTaskPauseStatusText(
+  sidebarMeta: TaskSidebarMeta,
+): string | null {
+  if (sidebarMeta.state === "auto-paused") {
+    if (sidebarMeta.unreadCount <= 0) {
+      return "已自动暂停 · 已清理";
+    }
+    return `已自动暂停 · 连续 ${sidebarMeta.unreadCount} 次未读`;
+  }
+  if (sidebarMeta.state === "manual-paused") {
+    return "已手动暂停";
+  }
+  return null;
+}
+
 export function shouldMarkTaskReadOnOpen(job: CronJobSpecOutput): boolean {
   return !getTaskSidebarMeta(job).canResume;
 }
@@ -89,6 +126,34 @@ export function getTaskNextRunText(job: CronJobSpecOutput): string | null {
   }
 
   return `下次运行：${formatted}`;
+}
+
+export function getTaskNextRunTooltipText(
+  job: CronJobSpecOutput,
+): string | undefined {
+  const runTimes = getTaskNextRunTooltipTimes(job);
+
+  if (runTimes.length === 0) {
+    return undefined;
+  }
+
+  return ["之后三次运行时间", ...runTimes].join("\n");
+}
+
+export function getTaskNextRunTooltipTimes(job: CronJobSpecOutput): string[] {
+  const runTimes = (job.state?.next_run_times || [])
+    .map(formatListTime)
+    .filter(Boolean)
+    .slice(0, 3);
+
+  if (runTimes.length === 0) {
+    const nextRun = formatListTime(job.state?.next_run_at);
+    if (nextRun) {
+      runTimes.push(nextRun);
+    }
+  }
+
+  return runTimes;
 }
 
 export function getTaskOpenTarget(job: CronJobSpecOutput): string | null {

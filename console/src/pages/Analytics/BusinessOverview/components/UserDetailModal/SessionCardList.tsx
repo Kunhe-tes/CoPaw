@@ -1,5 +1,6 @@
 import { Pagination, Spin, Tooltip, message } from "antd";
 import {
+  AlertCircle,
   Copy,
   Layers3,
   MessageSquareText,
@@ -20,9 +21,11 @@ interface SessionCardListProps {
   loading: boolean;
   selectedSessionId: string | null;
   collapsed?: boolean;
+  hasErrorFilter?: boolean;
   onSelect: (sessionId: string) => void;
   onPageChange: (page: number, pageSize: number) => void;
   onToggleCollapsed?: () => void;
+  onToggleErrorFilter?: () => void;
 }
 
 export default function SessionCardList({
@@ -33,9 +36,11 @@ export default function SessionCardList({
   loading,
   selectedSessionId,
   collapsed = false,
+  hasErrorFilter = false,
   onSelect,
   onPageChange,
   onToggleCollapsed,
+  onToggleErrorFilter,
 }: SessionCardListProps) {
   // 格式化 Token 数量显示
   const formatTokens = (tokens: number) => {
@@ -110,16 +115,39 @@ export default function SessionCardList({
     <div className={styles.sessionList}>
       <div className={styles.sessionListHeader}>
         <div className={styles.sessionListTitle}>会话列表</div>
-        <Tooltip title="收起会话列表" placement="right">
-          <button
-            type="button"
-            className={styles.sessionPanelToggle}
-            onClick={onToggleCollapsed}
+        <div className={styles.sessionListActions}>
+          {/* 报错会话筛选按钮 */}
+          {onToggleErrorFilter && (
+            <Tooltip
+              title={hasErrorFilter ? "显示全部会话" : "筛选报错会话"}
+              placement="right"
+            >
+              <button
+                type="button"
+                className={
+                  hasErrorFilter
+                    ? styles.errorFilterButtonActive
+                    : styles.errorFilterButton
+                }
+                onClick={onToggleErrorFilter}
+                aria-label={hasErrorFilter ? "显示全部会话" : "筛选报错会话"}
+              >
+                <AlertCircle size={16} />
+              </button>
+            </Tooltip>
+          )}
+          {/* 收起会话列表按钮 */}
+          <Tooltip title="收起会话列表" placement="right">
+            <button
+              type="button"
+              className={styles.sessionPanelToggle}
+              onClick={onToggleCollapsed}
             aria-label="收起会话列表"
           >
             <PanelLeftClose size={16} />
           </button>
         </Tooltip>
+        </div>
       </div>
 
       {loading ? (

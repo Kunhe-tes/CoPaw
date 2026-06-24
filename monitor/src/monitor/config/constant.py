@@ -267,3 +267,20 @@ EXTRACT_CUSTOMER_NAMES_URL = EnvVarLoader.get_str(
     "MONITOR_EXTRACT_CUSTOMER_NAMES_URL",
     "",
 )
+
+# ============================================================
+# 异步任务状态查询 API 配置
+# ============================================================
+
+ASYNC_TASK_QUERY_URL = EnvVarLoader.get_str("MONITOR_ASYNC_TASK_QUERY_URL", "")
+ASYNC_TASK_APP_KEY = EnvVarLoader.get_str("MONITOR_ASYNC_TASK_APP_KEY", "")
+ASYNC_TASK_ENV_TAG = EnvVarLoader.get_str("MONITOR_ASYNC_TASK_ENV_TAG", "")
+ASYNC_TASK_API_KEY = EnvVarLoader.get_str("MONITOR_ASYNC_TASK_API_KEY", "")
+
+# 超时时间阈值（小时），超过该时间不再查询状态，直接标记为 timeout
+ASYNC_TASK_TIMEOUT_HOUR = EnvVarLoader.get_int(
+    "MONITOR_ASYNC_TASK_TIMEOUT_HOUR",
+    18,
+    min_value=0,
+    max_value=23,
+)

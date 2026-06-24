@@ -25,8 +25,8 @@ from agentscope.tool import Toolkit
 from anyio import ClosedResourceError
 from pydantic import BaseModel
 
+from ..app.mcp.http_headers import build_mcp_http_headers
 from ..app.mcp.stdio_launcher import build_tenant_aware_stdio_launch_config
-from ..app.mcp.http_headers import resolve_mcp_http_headers
 from .command_handler import CommandHandler
 from ..app.mcp import HttpStatefulClient, StdIOStatefulClient
 from .hooks import BootstrapHook, MemoryCompactionHook
@@ -42,6 +42,7 @@ from .skills_manager import (
     get_workspace_skills_dir,
     resolve_effective_skills,
 )
+from .tool_failure import normalize_tool_function_errors
 from .tool_guard_mixin import ToolGuardMixin
 from .tools import (
     edit_file,
@@ -325,7 +326,18 @@ class SWEAgent(ToolGuardMixin, ReActAgent):
         sys_prompt = self._build_sys_prompt()
 
         # Create model and formatter using factory method
-        model, formatter = create_model_and_formatter(agent_id=agent_config.id)
+        model, formatter = create_model_and_formatter(
+            agent_id=agent_config.id,
+            trace_context={
+                "trace_id": self._request_context.get("trace_id"),
+                "user_id": self._request_context.get("user_id"),
+                "session_id": self._request_context.get("session_id"),
+                "channel": self._request_context.get("channel"),
+                "source_id": self._request_context.get("source_id"),
+                "user_name": self._request_context.get("user_name"),
+                "bbk_id": self._request_context.get("bbk_id"),
+            },
+        )
 
         # Get model info from ProviderManager (single source of truth)
         try:
@@ -369,6 +381,7 @@ class SWEAgent(ToolGuardMixin, ReActAgent):
             memory=self.memory,
             memory_manager=self.memory_manager,
             enable_memory_manager=self._enable_memory_manager,
+            request_context=self._request_context,
         )
 
         # Register hooks
@@ -501,6 +514,7 @@ class SWEAgent(ToolGuardMixin, ReActAgent):
                 tool_name,
                 async_exec,
             )
+            self._normalize_registered_tool_functions(toolkit, [tool_name])
 
         # Auto-register background task management tools if any *enabled*
         # tool has async_execution set
@@ -547,6 +561,20 @@ class SWEAgent(ToolGuardMixin, ReActAgent):
             )
 
         return toolkit
+
+    @staticmethod
+    def _normalize_registered_tool_functions(
+        toolkit: Toolkit,
+        tool_names: list[str],
+    ) -> None:
+        """Wrap registered tools so failures use Swe's structured contract."""
+        for tool_name in tool_names:
+            tool_entry = toolkit.tools.get(tool_name)
+            if tool_entry is None:
+                continue
+            tool_entry.original_func = normalize_tool_function_errors(
+                tool_entry.original_func,
+            )
 
     def _register_skills(self, toolkit: Toolkit) -> None:
         """Load and register skills from workspace directory.
@@ -775,8 +803,6 @@ class SWEAgent(ToolGuardMixin, ReActAgent):
         if self._enable_memory_manager and self.memory_manager is not None:
             # update memory manager
             self.memory = self.memory_manager.get_in_memory_memory()
-            self.memory_manager.chat_model = self.model
-            self.memory_manager.formatter = self.formatter
 
             # Register memory_search as a tool function
             self.toolkit.register_tool_function(
@@ -855,6 +881,7 @@ class SWEAgent(ToolGuardMixin, ReActAgent):
             if hasattr(client, "on_progress_callback"):
                 client.on_progress_callback = self._reset_watchdog
             try:
+                existing_tool_names = set(self.toolkit.tools)
                 await self.toolkit.register_mcp_client(
                     client,
                     namesake_strategy=namesake_strategy,
@@ -862,6 +889,10 @@ class SWEAgent(ToolGuardMixin, ReActAgent):
                 # Wire watchdog callback into MCPToolFunction instances
                 # registered by this client.
                 self._wire_mcp_progress_callbacks(client)
+                self._normalize_registered_tool_functions(
+                    self.toolkit,
+                    sorted(set(self.toolkit.tools) - existing_tool_names),
+                )
             except (ClosedResourceError, asyncio.CancelledError) as error:
                 if self._should_propagate_cancelled_error(error):
                     raise
@@ -878,11 +909,18 @@ class SWEAgent(ToolGuardMixin, ReActAgent):
                             self._reset_watchdog
                         )
                     try:
+                        existing_tool_names = set(self.toolkit.tools)
                         await self.toolkit.register_mcp_client(
                             recovered_client,
                             namesake_strategy=namesake_strategy,
                         )
                         self._wire_mcp_progress_callbacks(recovered_client)
+                        self._normalize_registered_tool_functions(
+                            self.toolkit,
+                            sorted(
+                                set(self.toolkit.tools) - existing_tool_names,
+                            ),
+                        )
                         continue
                     except asyncio.CancelledError as recover_error:
                         if self._should_propagate_cancelled_error(
@@ -1051,15 +1089,46 @@ class SWEAgent(ToolGuardMixin, ReActAgent):
                 )
                 return rebuilt_client
 
-            raw_headers = rebuild_info.get("headers") or {}
-            headers = resolve_mcp_http_headers(raw_headers)
+            headers = build_mcp_http_headers(
+                rebuild_info.get("headers"),
+                passthrough_headers=rebuild_info.get(
+                    "passthrough_headers",
+                ),
+                session_id=rebuild_info.get("session_id"),
+                trace_id=rebuild_info.get("trace_id"),
+            )
+            timeout = rebuild_info.get(
+                "timeout",
+                getattr(client, "timeout", None),
+            )
+            sse_read_timeout = rebuild_info.get(
+                "sse_read_timeout",
+                getattr(client, "sse_read_timeout", None),
+            )
+            http_client_kwargs = {
+                "timeout": timeout,
+                "sse_read_timeout": sse_read_timeout,
+            }
             rebuilt_client = HttpStatefulClient(
                 name=name,
                 transport=transport,
                 url=rebuild_info.get("url"),
                 headers=headers,
+                **{
+                    key: value
+                    for key, value in http_client_kwargs.items()
+                    if value is not None
+                },
             )
-            setattr(rebuilt_client, "_swe_rebuild_info", rebuild_info)
+            setattr(
+                rebuilt_client,
+                "_swe_rebuild_info",
+                {
+                    **rebuild_info,
+                    "timeout": timeout,
+                    "sse_read_timeout": sse_read_timeout,
+                },
+            )
             return rebuilt_client
         except Exception:  # pylint: disable=broad-except
             return None

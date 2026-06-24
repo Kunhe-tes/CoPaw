@@ -14,7 +14,7 @@ import {
   Typography,
   message,
 } from "antd";
-import { ThunderboltOutlined } from "@ant-design/icons";
+import { ThunderboltOutlined, HistoryOutlined } from "@ant-design/icons";
 import {
   Calendar,
   GitBranch,
@@ -28,15 +28,18 @@ import {
 } from "lucide-react";
 import { marketMcpApi } from "../../api/modules/marketMcp";
 import type { MarketMCPDetail, MCPTestResult } from "../../api/types";
+import { MCPVersionHistoryModal } from "./components/MCPVersionHistoryModal";
 
 const { Title, Paragraph, Text } = Typography;
 
 interface MCPDetailDrawerProps {
   mcp: MarketMCPDetail | null;
+  sourceId?: string;
   onDistribute?: () => void;
   onRecall?: () => void;
   onEdit?: () => void;
   onDelete?: () => void;
+  onRefresh?: () => void;
   canEdit?: boolean;
   isManager?: boolean;
 }
@@ -64,15 +67,18 @@ const footerButtonStyle = {
 
 export function MCPDetailDrawer({
   mcp,
+  sourceId,
   onDistribute,
   onRecall,
   onEdit,
   onDelete,
+  onRefresh,
   canEdit = false,
   isManager = false,
 }: MCPDetailDrawerProps) {
   const [testLoading, setTestLoading] = useState(false);
   const [testResult, setTestResult] = useState<MCPTestResult | null>(null);
+  const [versionHistoryOpen, setVersionHistoryOpen] = useState(false);
 
   if (!mcp) return null;
 
@@ -135,6 +141,16 @@ export function MCPDetailDrawer({
 
   return (
     <div style={{ padding: 4 }}>
+      <MCPVersionHistoryModal
+        open={versionHistoryOpen}
+        itemId={mcp.item_id}
+        mcpName={mcp.name}
+        currentVersion={mcp.version || ""}
+        sourceId={sourceId || ""}
+        isManager={isManager}
+        onClose={() => setVersionHistoryOpen(false)}
+        onVersionSwitched={onRefresh}
+      />
       <div
         style={{
           display: "grid",
@@ -187,13 +203,42 @@ export function MCPDetailDrawer({
                     <Text style={{ fontSize: 12, color: "#5e5d59" }}>
                       连接成功，共 {testResult.tools.length} 个工具：
                     </Text>
-                    <div style={{ display: "grid", gap: 4, fontSize: 12, color: "#87867f" }}>
-                      {testResult.tools.slice(0, 10).map((tool) => (
-                        <div key={tool.name}>- {tool.name}</div>
+                    <div
+                      style={{
+                        display: "grid",
+                        gap: 6,
+                        fontSize: 12,
+                        maxHeight: 200,
+                        overflow: "auto",
+                        padding: "4px 0",
+                      }}
+                    >
+                      {testResult.tools.map((tool) => (
+                        <div
+                          key={tool.name}
+                          style={{
+                            padding: "6px 8px",
+                            borderRadius: 6,
+                            backgroundColor: "#f5f5f5",
+                          }}
+                        >
+                          <div style={{ fontWeight: 500, color: "#434a57" }}>
+                            {tool.name}
+                          </div>
+                          {tool.description ? (
+                            <div
+                              style={{
+                                marginTop: 2,
+                                color: "#87867f",
+                                fontSize: 11,
+                                lineHeight: 1.4,
+                              }}
+                            >
+                              {tool.description}
+                            </div>
+                          ) : null}
+                        </div>
                       ))}
-                      {testResult.tools.length > 10 ? (
-                        <div>... 等 {testResult.tools.length - 10} 个</div>
-                      ) : null}
                     </div>
                   </div>
                 ) : (
@@ -292,6 +337,19 @@ export function MCPDetailDrawer({
               </div>
 
               <Space wrap size={8}>
+                <Button
+                  size="small"
+                  onClick={() => setVersionHistoryOpen(true)}
+                  style={{
+                    ...footerButtonStyle,
+                    color: "#5e5d59",
+                    border: "1px solid #d9d9d9",
+                    backgroundColor: "#fff",
+                  }}
+                >
+                  <HistoryOutlined style={{ fontSize: 12 }} />
+                  版本历史
+                </Button>
                 {isManager && onDistribute && (
                   <Button
                     size="small"
@@ -303,13 +361,16 @@ export function MCPDetailDrawer({
                     分发
                   </Button>
                 )}
-                {/* 撤回功能临时隐藏，后续启用时移除 false 条件 */}
-                {isManager && onRecall && false && (
+                {isManager && onRecall && (
                   <Button
                     size="small"
-                    danger
                     onClick={onRecall}
-                    style={{ ...footerButtonStyle }}
+                    style={{
+                      ...footerButtonStyle,
+                      color: "#5e5d59",
+                      border: "1px solid #d9d9d9",
+                      backgroundColor: "#fff",
+                    }}
                   >
                     <Undo2 size={12} />
                     撤回

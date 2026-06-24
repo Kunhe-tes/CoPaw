@@ -13,7 +13,8 @@ from pathlib import Path
 from fastapi import APIRouter, Body, HTTPException, Request
 
 from ...config.context import canonicalize_scope_id
-from ...config.utils import get_tenant_working_dir
+from ...config.context import resolve_request_effective_tenant_id
+from ...config.utils import get_tenant_request_working_dir
 
 router = APIRouter(prefix="/settings", tags=["settings"])
 
@@ -29,15 +30,17 @@ def _get_settings_file(request: Request) -> Path:
     Returns:
         Path to tenant settings.json.
     """
-    # 优先使用 request 级 scope_id，避免 source-scoped 请求回退到逻辑 tenant。
-    tenant_id = getattr(request.state, "scope_id", None)
+    tenant_id = resolve_request_effective_tenant_id(
+        getattr(request.state, "tenant_id", None),
+        getattr(request.state, "source_id", None),
+        getattr(request.state, "scope_id", None),
+    )
     if tenant_id is None:
         tenant_id = getattr(request.state, "tenant_id", None)
-    else:
+    if tenant_id and tenant_id == getattr(request.state, "scope_id", None):
         tenant_id = canonicalize_scope_id(tenant_id)
 
-    # Use tenant-specific directory
-    tenant_dir = get_tenant_working_dir(tenant_id)
+    tenant_dir = get_tenant_request_working_dir(tenant_id)
     return tenant_dir / "settings.json"
 
 

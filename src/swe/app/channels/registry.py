@@ -10,6 +10,7 @@ import threading
 from typing import TYPE_CHECKING
 
 from ...constant import CUSTOM_CHANNELS_DIR
+from ...config.channel_invariants import MANDATORY_CHANNEL_KEYS
 from .base import BaseChannel
 
 if TYPE_CHECKING:
@@ -21,9 +22,6 @@ _BUILTIN_SPECS: dict[str, tuple[str, str]] = {
     "console": (".console", "ConsoleChannel"),
     "zhaohu": (".zhaohu", "ZhaohuChannel"),
 }
-
-# Required channels must load; failures are raised, not skipped.
-_REQUIRED_CHANNEL_KEYS: frozenset[str] = frozenset({"console"})
 
 _BUILTIN_CHANNEL_CACHE: dict[str, type[BaseChannel]] | None = None
 _BUILTIN_CHANNEL_CACHE_LOCK = threading.Lock()
@@ -48,7 +46,7 @@ def _load_builtin_channels() -> dict[str, type[BaseChannel]]:
                     f"{module_name}.{class_name} is not a BaseChannel subtype",
                 )
         except Exception:
-            if key in _REQUIRED_CHANNEL_KEYS:
+            if key in MANDATORY_CHANNEL_KEYS:
                 logger.error(
                     'failed to load required built-in channel "%s"',
                     key,

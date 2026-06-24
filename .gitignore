@@ -32,6 +32,7 @@ website/public/search-index.json
 # misc
 .env
 .env.*
+.venv*
 providers.json
 envs.json
 !.env.example
@@ -90,7 +91,24 @@ AGENTS.md
 CLAUDE.md
 .claude
 .codex
+!.claude/
+.claude/*
+!.claude/skills/
+.claude/skills/*
+!.claude/skills/copaw-f2e-review/
+!.claude/skills/copaw-f2e-review/SKILL.md
+!.codex/
+.codex/*
+!.codex/skills/
+.codex/skills/*
+!.codex/skills/copaw-f2e-review/
+.codex/skills/copaw-f2e-review/*
+!.codex/skills/copaw-f2e-review/SKILL.md
+!.codex/skills/copaw-f2e-review/agents/
+.codex/skills/copaw-f2e-review/agents/*
+!.codex/skills/copaw-f2e-review/agents/openai.yaml
 *.tmp
+skills-lock.json
 
 # Build cache
 .cache/  # Includes conda_unpack_wheels/ for Windows packaging workaround
@@ -119,3 +137,16 @@ src/.hypothesis/
 /venv_swe/
 /venv_monitor/
 /.codegraph/
+openspec/changes/cron-job-overview-api-mapping/design.md
+openspec/changes/cron-job-overview-api-mapping/proposal.md
+openspec/changes/cron-job-overview-api-mapping/tasks.md
+openspec/changes/cron-job-overview-api-mapping/specs/cron-job-overview-api-mapping/spec.md
+sample.png
+CRON_JOB_OVERVIEW_FRONTEND_BACKUP.md
+openspec/changes/cron-job-overview-failed-detail-modal/proposal.md
+openspec/changes/cron-job-overview-failed-detail-modal/tasks.md
+openspec/changes/cron-job-overview-failed-detail-modal/specs/cron-job-overview-failed-detail-modal/spec.md
+
+# personal debug scripts (not meant to be tracked)
+/diff_dir.py
+/diff_dir_*/

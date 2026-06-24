@@ -14,11 +14,11 @@ from ...config import (
     load_config,
     save_config,
     ChannelConfig,
-    ChannelConfigUnion,
     get_available_channels,
     ToolGuardConfig,
     ToolGuardRuleConfig,
 )
+from ...config.channel_invariants import include_mandatory_channels
 from ..channels.registry import BUILTIN_CHANNEL_KEYS
 from ...config.config import (
     AgentsLLMRoutingConfig,
@@ -27,6 +27,10 @@ from ...config.config import (
     SkillScannerConfig,
     SkillScannerWhitelistEntry,
     ZhaohuConfig,
+    get_channel_management_constraints,
+    normalize_channel_config_set,
+    normalize_single_channel_config,
+    strip_channel_management_meta,
 )
 
 from .schemas_config import HeartbeatBody
@@ -93,43 +97,86 @@ _CHANNEL_CONFIG_CLASS_MAP = {
 }
 
 
+def _ensure_manageable_channel_config(
+    channels: ChannelConfig | None,
+) -> ChannelConfig:
+    """Materialize console-safe channel defaults for management writes."""
+    if channels is not None:
+        return channels
+
+    normalized = normalize_channel_config_set(
+        None,
+        materialize_missing_console=True,
+    )
+    if normalized is None:
+        raise RuntimeError("Channel config normalization returned None")
+    return normalized
+
+
+def _channel_to_management_payload(
+    channel_name: str,
+    channel_data: Any,
+    *,
+    include_builtin: bool = True,
+    materialize_missing: bool = False,
+) -> dict[str, Any]:
+    normalized = normalize_single_channel_config(
+        channel_name,
+        channel_data,
+        materialize_missing=materialize_missing,
+    )
+    if normalized is None:
+        payload: dict[str, Any] = {"enabled": False, "bot_prefix": ""}
+    elif hasattr(normalized, "model_dump"):
+        payload = normalized.model_dump()
+    elif isinstance(normalized, dict):
+        payload = dict(normalized)
+    else:
+        payload = dict(vars(normalized))
+
+    payload = strip_channel_management_meta(payload)
+    if include_builtin:
+        payload["isBuiltin"] = channel_name in BUILTIN_CHANNEL_KEYS
+    constraints = get_channel_management_constraints(channel_name)
+    if constraints:
+        payload["_constraints"] = constraints
+    return payload
+
+
 @router.get(
     "/channels",
     summary="List all channels",
     description="Retrieve configuration for all available channels",
 )
 async def list_channels(request: Request) -> dict:
-    """List all channel configs (filtered by available channels)."""
+    """List all channel configs, including mandatory built-ins."""
     from ..agent_context import get_agent_and_config_for_request
 
     _, agent_config = await get_agent_and_config_for_request(request)
-    available = get_available_channels()
-
-    # Get channel configs from agent's config (with fallback to empty)
-    channels_config = agent_config.channels
-    if channels_config is None:
-        # No channels config yet, use empty defaults
-        all_configs = {}
-    else:
-        all_configs = channels_config.model_dump()
-        extra = getattr(channels_config, "__pydantic_extra__", None) or {}
-        all_configs.update(extra)
+    available = include_mandatory_channels(get_available_channels())
 
     # Return all available channels (use default config if not saved)
     result = {}
     for key in available:
-        if key in all_configs:
-            channel_data = (
-                dict(all_configs[key])
-                if isinstance(all_configs[key], dict)
-                else all_configs[key]
-            )
+        if agent_config.channels is None:
+            channel_data = None
         else:
-            # Channel registered but no config saved yet, use empty default
-            channel_data = {"enabled": False, "bot_prefix": ""}
-        if isinstance(channel_data, dict):
-            channel_data["isBuiltin"] = key in BUILTIN_CHANNEL_KEYS
-        result[key] = channel_data
+            channel_data = getattr(agent_config.channels, key, None)
+            if channel_data is None:
+                extra = (
+                    getattr(
+                        agent_config.channels,
+                        "__pydantic_extra__",
+                        None,
+                    )
+                    or {}
+                )
+                channel_data = extra.get(key)
+        result[key] = _channel_to_management_payload(
+            key,
+            channel_data,
+            materialize_missing=(key == "console"),
+        )
 
     return result
 
@@ -140,13 +187,12 @@ async def list_channels(request: Request) -> dict:
     description="Return all available channel type identifiers",
 )
 async def list_channel_types() -> List[str]:
-    """Return available channel type identifiers (env-filtered)."""
-    return list(get_available_channels())
+    """Return channel type identifiers, including mandatory built-ins."""
+    return list(include_mandatory_channels(get_available_channels()))
 
 
 @router.put(
     "/channels",
-    response_model=ChannelConfig,
     summary="Update all channels",
     description="Update configuration for all channels at once",
 )
@@ -156,13 +202,17 @@ async def put_channels(
         ...,
         description="Complete channel configuration",
     ),
-) -> ChannelConfig:
+) -> dict[str, Any]:
     """Update all channel configs."""
     from ..agent_context import get_agent_and_config_for_request
     from ...config.config import save_agent_config
 
     agent, agent_config = await get_agent_and_config_for_request(request)
-    agent_config.channels = channels_config
+    normalized_channels = normalize_channel_config_set(
+        channels_config,
+        materialize_missing_console=True,
+    )
+    agent_config.channels = normalized_channels
     save_agent_config(
         agent.agent_id,
         agent_config,
@@ -176,7 +226,14 @@ async def put_channels(
         tenant_id=agent.tenant_id,
     )
 
-    return channels_config
+    return {
+        key: _channel_to_management_payload(
+            key,
+            getattr(normalized_channels, key, None),
+            materialize_missing=(key == "console"),
+        )
+        for key in include_mandatory_channels(get_available_channels())
+    }
 
 
 async def _get_weixin_base_url(request: Request) -> str:
@@ -288,7 +345,6 @@ async def get_weixin_qrcode_status(
 
 @router.get(
     "/channels/{channel_name}",
-    response_model=ChannelConfigUnion,
     summary="Get channel config",
     description="Retrieve configuration for a specific channel by name",
 )
@@ -299,11 +355,11 @@ async def get_channel(
         description="Name of the channel to retrieve",
         min_length=1,
     ),
-) -> ChannelConfigUnion:
+) -> dict[str, Any]:
     """Get a specific channel config by name."""
     from ..agent_context import get_agent_and_config_for_request
 
-    available = get_available_channels()
+    available = include_mandatory_channels(get_available_channels())
     if channel_name not in available:
         raise HTTPException(
             status_code=404,
@@ -312,6 +368,12 @@ async def get_channel(
 
     _, agent_config = await get_agent_and_config_for_request(request)
     channels = agent_config.channels
+    if channels is None and channel_name == "console":
+        return _channel_to_management_payload(
+            channel_name,
+            None,
+            materialize_missing=True,
+        )
     if channels is None:
         raise HTTPException(
             status_code=404,
@@ -323,16 +385,25 @@ async def get_channel(
         extra = getattr(channels, "__pydantic_extra__", None) or {}
         single_channel_config = extra.get(channel_name)
     if single_channel_config is None:
+        if channel_name == "console":
+            return _channel_to_management_payload(
+                channel_name,
+                None,
+                materialize_missing=True,
+            )
         raise HTTPException(
             status_code=404,
             detail=f"Channel '{channel_name}' not found",
         )
-    return single_channel_config
+    return _channel_to_management_payload(
+        channel_name,
+        single_channel_config,
+        materialize_missing=(channel_name == "console"),
+    )
 
 
 @router.put(
     "/channels/{channel_name}",
-    response_model=ChannelConfigUnion,
     summary="Update channel config",
     description="Update configuration for a specific channel by name",
 )
@@ -347,12 +418,12 @@ async def put_channel(
         ...,
         description="Updated channel configuration",
     ),
-) -> ChannelConfigUnion:
+) -> dict[str, Any]:
     """Update a specific channel config by name."""
     from ..agent_context import get_agent_and_config_for_request
     from ...config.config import save_agent_config
 
-    available = get_available_channels()
+    available = include_mandatory_channels(get_available_channels())
     if channel_name not in available:
         raise HTTPException(
             status_code=404,
@@ -363,14 +434,28 @@ async def put_channel(
 
     # Initialize channels if not exists
     if agent_config.channels is None:
-        agent_config.channels = ChannelConfig()
+        agent_config.channels = _ensure_manageable_channel_config(
+            agent_config.channels,
+        )
 
+    single_channel_config = strip_channel_management_meta(
+        single_channel_config,
+    )
     config_class = _CHANNEL_CONFIG_CLASS_MAP.get(channel_name)
     if config_class is not None:
         channel_config = config_class(**single_channel_config)
+        channel_config = normalize_single_channel_config(
+            channel_name,
+            channel_config,
+            materialize_missing=(channel_name == "console"),
+        )
     else:
         # For custom channels, just use the dict
-        channel_config = single_channel_config
+        channel_config = normalize_single_channel_config(
+            channel_name,
+            single_channel_config,
+            materialize_missing=(channel_name == "console"),
+        )
 
     # Set channel config in agent's config
     setattr(agent_config.channels, channel_name, channel_config)
@@ -387,7 +472,18 @@ async def put_channel(
         tenant_id=agent.tenant_id,
     )
 
-    return channel_config
+    # zhaohu 渠道配置更新时持久化绑定信息
+    await _persist_zhaohu_binding(
+        agent.tenant_id,
+        channel_config,
+        source_id=_request_source_id(request),
+    )
+
+    return _channel_to_management_payload(
+        channel_name,
+        channel_config,
+        materialize_missing=(channel_name == "console"),
+    )
 
 
 def _request_source_id(request: Request) -> str | None:
@@ -396,6 +492,52 @@ def _request_source_id(request: Request) -> str | None:
 
 def _request_tenant_id(request: Request) -> str | None:
     return getattr(request.state, "tenant_id", None)
+
+
+async def _persist_zhaohu_binding(
+    tenant_id: str,
+    channel_config: Any,
+    source_id: str | None = None,
+) -> None:
+    """当 zhaohu 渠道配置更新时，将绑定信息持久化到数据库供其他模块使用。"""
+    from ..channels.zhaohu.binding_store import get_zhaohu_binding_store
+    from ...config.context import decode_scope_id
+
+    if not isinstance(channel_config, ZhaohuConfig):
+        return
+
+    store = get_zhaohu_binding_store()
+    if store is None:
+        return
+
+    robot_id = getattr(channel_config, "robot_open_id", "") or ""
+    # source_id 优先使用传入值（来自请求头 X-Source-Id），否则 fallback 到渠道配置
+    effective_source_id = (
+        source_id or getattr(channel_config, "channel", None) or "zhaohu"
+    )
+    if not tenant_id or not robot_id:
+        return
+
+    # tenant_id 解码：MDAw.MDAw -> 取前半段 MDAw -> 解码为 000
+    try:
+        decoded_parts = decode_scope_id(tenant_id)
+        effective_tenant_id = decoded_parts[0] if decoded_parts else tenant_id
+    except Exception:
+        effective_tenant_id = tenant_id
+
+    try:
+        await store.upsert_binding(
+            tenant_id=effective_tenant_id,
+            source_id=effective_source_id,
+            robot_id=robot_id,
+        )
+    except Exception:
+        import logging
+
+        logging.getLogger(__name__).warning(
+            "zhaohu binding persist failed: tenant=%s",
+            effective_tenant_id,
+        )
 
 
 def _get_multi_agent_manager(request: Request):
@@ -414,14 +556,21 @@ def _extract_source_channel_config(source_channels, channel_name: str):
 
 
 def _build_fields_to_distribute(
+    channel_name: str,
     source_channel,
     fields: Optional[List[str]],
 ) -> dict:
+    source_channel = normalize_single_channel_config(
+        channel_name,
+        source_channel,
+        materialize_missing=(channel_name == "console"),
+    )
     source_dump = (
         source_channel.model_dump()
         if hasattr(source_channel, "model_dump")
         else dict(source_channel)
     )
+    source_dump = strip_channel_management_meta(source_dump)
     if fields:
         return {k: v for k, v in source_dump.items() if k in fields}
     return source_dump
@@ -458,12 +607,24 @@ def _apply_distributed_channel_values(
                 fields_to_distribute,
                 overwrite,
             )
-            setattr(target_channels, channel_name, config_class(**merged))
+            setattr(
+                target_channels,
+                channel_name,
+                normalize_single_channel_config(
+                    channel_name,
+                    config_class(**merged),
+                    materialize_missing=(channel_name == "console"),
+                ),
+            )
             return
         setattr(
             target_channels,
             channel_name,
-            config_class(**fields_to_distribute),
+            normalize_single_channel_config(
+                channel_name,
+                config_class(**fields_to_distribute),
+                materialize_missing=(channel_name == "console"),
+            ),
         )
         return
 
@@ -483,16 +644,16 @@ def _prepare_target_tenant(
     request: Request,
     tenant_id: str,
 ):
-    from ...config.context import resolve_runtime_tenant_id
-    from ...config.utils import get_tenant_working_dir_strict
+    from ...config.context import resolve_storage_tenant_id
+    from ...config.utils import get_tenant_storage_working_dir
     from ..workspace.tenant_initializer import TenantInitializer
 
     validated_tenant_id = _validate_target_tenant_id(tenant_id)
-    effective_tid = resolve_runtime_tenant_id(
+    effective_tid = resolve_storage_tenant_id(
         validated_tenant_id,
         _request_source_id(request),
     )
-    tenant_working_dir = get_tenant_working_dir_strict(effective_tid)
+    tenant_working_dir = get_tenant_storage_working_dir(effective_tid)
     initializer = TenantInitializer(
         tenant_working_dir.parent,
         validated_tenant_id,
@@ -523,6 +684,7 @@ async def list_channel_distribution_tenants(
     tenant_ids = await list_logical_tenant_ids(
         _request_source_id(request),
         source_filter=True,
+        include_templates=True,
     )
     return {"tenant_ids": tenant_ids}
 
@@ -557,7 +719,7 @@ async def distribute_channel_config(
             results=[],
         )
 
-    available = get_available_channels()
+    available = include_mandatory_channels(get_available_channels())
     if channel_name not in available:
         raise HTTPException(
             status_code=404,
@@ -571,15 +733,23 @@ async def distribute_channel_config(
         tenant_id=source_agent.tenant_id,
     )
     source_channels = source_config.channels
-    if source_channels is None:
+    source_channel = None
+    if source_channels is not None:
+        source_channel = _extract_source_channel_config(
+            source_channels,
+            channel_name,
+        )
+    if source_channel is None and channel_name == "console":
+        source_channel = normalize_single_channel_config(
+            channel_name,
+            None,
+            materialize_missing=True,
+        )
+    elif source_channels is None:
         raise HTTPException(
             status_code=400,
             detail="Source agent has no channel config",
         )
-    source_channel = _extract_source_channel_config(
-        source_channels,
-        channel_name,
-    )
     if source_channel is None:
         raise HTTPException(
             status_code=400,
@@ -588,6 +758,7 @@ async def distribute_channel_config(
 
     # 确定要分发的字段（fields 仅控制"分发哪些字段"）
     fields_to_distribute = _build_fields_to_distribute(
+        channel_name,
         source_channel,
         body.fields,
     )
@@ -616,7 +787,9 @@ async def distribute_channel_config(
             original_target_config = target_config.model_copy(deep=True)
 
             if target_config.channels is None:
-                target_config.channels = ChannelConfig()
+                target_config.channels = _ensure_manageable_channel_config(
+                    target_config.channels,
+                )
 
             _apply_distributed_channel_values(
                 target_config.channels,
@@ -651,6 +824,20 @@ async def distribute_channel_config(
                     tenant_id=effective_target_tenant_id,
                 )
                 raise
+
+            # zhaohu 渠道分发时持久化绑定信息
+            if channel_name == "zhaohu":
+                distributed_zhaohu = getattr(
+                    target_config.channels,
+                    "zhaohu",
+                    None,
+                )
+                if distributed_zhaohu is not None:
+                    await _persist_zhaohu_binding(
+                        effective_target_tenant_id,
+                        distributed_zhaohu,
+                        source_id=_request_source_id(request),
+                    )
 
             results.append(
                 ChannelDistributionTenantResult(

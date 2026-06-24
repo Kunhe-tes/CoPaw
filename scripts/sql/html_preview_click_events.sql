@@ -3,6 +3,7 @@ CREATE TABLE IF NOT EXISTS swe_html_preview_click_events (
 
   source_id VARCHAR(64) NULL COMMENT '来源标识',
   user_id VARCHAR(128) NULL COMMENT '点击用户标识',
+  user_name VARCHAR(255) NULL COMMENT '点击用户名称/客户经理姓名',
   bbk_id VARCHAR(128) NULL COMMENT '分行/机构标识，预留给运营看板筛选',
 
   cron_task_id VARCHAR(128) NULL COMMENT '定时任务ID',
@@ -16,7 +17,7 @@ CREATE TABLE IF NOT EXISTS swe_html_preview_click_events (
   button_id VARCHAR(255) NULL COMMENT '按钮稳定标识',
   button_name VARCHAR(255) NULL COMMENT '按钮展示名称',
   button_text VARCHAR(512) NULL COMMENT '按钮文本兜底',
-  button_type VARCHAR(32) NULL COMMENT '按钮类型：insight/phone/other',
+  button_type VARCHAR(32) NULL COMMENT '按钮类型：insight/phone/plan/other',
   customer_id VARCHAR(128) NULL COMMENT '客户唯一标识',
   customer_name VARCHAR(255) NULL COMMENT '客户展示名称',
   customer_info JSON NULL COMMENT '点击按钮所在行的客户扩展信息',

@@ -14,10 +14,12 @@ import { useTranslation } from "react-i18next";
 import type { FormInstance } from "antd";
 import { useCallback, useRef, useState } from "react";
 import { getChannelLabel, type ChannelKey } from "./constants";
-import { TenantTargetPicker } from "../../../../components/TenantTargetPicker";
+import { getUserId } from "../../../../utils/identity";
+import { TenantSelector } from "../../../../components/TenantSelector";
 import styles from "../index.module.less";
 import { useTheme } from "../../../../contexts/ThemeContext";
 import { api } from "../../../../api";
+import type { ChannelConstraints } from "../../../../api/types";
 
 const WECOM_SDK_URL =
   "https://wwcdn.weixin.qq.com/node/wework/js/wecom-aibot-sdk@0.1.0.min.js";
@@ -114,6 +116,7 @@ interface ChannelDrawerProps {
   saving: boolean;
   initialValues: Record<string, unknown> | undefined;
   isBuiltin: boolean;
+  constraints?: ChannelConstraints;
   onClose: () => void;
   onSubmit: (values: Record<string, unknown>) => void;
 }
@@ -126,6 +129,7 @@ export function ChannelDrawer({
   saving,
   initialValues,
   isBuiltin,
+  constraints,
   onClose,
   onSubmit,
 }: ChannelDrawerProps) {
@@ -133,6 +137,16 @@ export function ChannelDrawer({
   const { isDark } = useTheme();
   const currentLang = i18n.language?.startsWith("zh") ? "zh" : "en";
   const label = activeKey ? getChannelLabel(activeKey, t) : activeLabel;
+  const enabledConstraint = constraints?.enabled;
+  const enabledReadOnly = Boolean(enabledConstraint?.readOnly);
+  const translatedEnabledReason = enabledConstraint?.reasonKey
+    ? t(enabledConstraint.reasonKey)
+    : undefined;
+  const enabledHelp =
+    translatedEnabledReason &&
+    translatedEnabledReason !== enabledConstraint?.reasonKey
+      ? translatedEnabledReason
+      : enabledConstraint?.reason;
   const sdkLoadedRef = useRef(false);
   const { message } = useAppMessage();
 
@@ -144,12 +158,11 @@ export function ChannelDrawer({
 
   // 通道配置分发状态
   const [distributeOpen, setDistributeOpen] = useState(false);
-  const [distributeLoading, setDistributeLoading] = useState(false);
   const [distributeSubmitting, setDistributeSubmitting] = useState(false);
-  const [distributeTenantIds, setDistributeTenantIds] = useState<string[]>([]);
   const [selectedDistributeTenantIds, setSelectedDistributeTenantIds] =
     useState<string[]>([]);
   const [distributeOverwrite, setDistributeOverwrite] = useState(false);
+  const currentTenantId = getUserId();
 
   const stopWeixinPoll = useCallback(() => {
     if (weixinPollRef.current) {
@@ -258,20 +271,9 @@ export function ChannelDrawer({
 
   // ── 通道配置分发 ──────────────────────────────────────────────────────────
 
-  const handleOpenDistribute = async () => {
+  const handleOpenDistribute = () => {
     setDistributeOpen(true);
     setSelectedDistributeTenantIds([]);
-    setDistributeLoading(true);
-    try {
-      const result = await api.listChannelDistributionTenants();
-      setDistributeTenantIds(result.tenant_ids || []);
-    } catch (error) {
-      message.error(
-        error instanceof Error ? error.message : "加载租户列表失败",
-      );
-    } finally {
-      setDistributeLoading(false);
-    }
   };
 
   const handleDistribute = async () => {
@@ -280,18 +282,21 @@ export function ChannelDrawer({
     try {
       const result = await api.distributeChannelConfig(activeKey, {
         target_tenant_ids: selectedDistributeTenantIds,
-        fields: ["robot_open_id", "client_id", "client_secret"],
+        fields: ["enabled", "bot_prefix", "filter_tool_messages", "filter_thinking", "robot_open_id", "client_id", "client_secret", "session_end_push_enabled"],
         overwrite: distributeOverwrite,
       });
       const items = result.results || [];
       const succeeded = items.filter((r) => r.success);
       const failed = items.filter((r) => !r.success);
       if (succeeded.length > 0) {
-        message.success(t("channels.distributeSuccess", { count: succeeded.length }));
+        message.success(
+          t("channels.distributeSuccess", { count: succeeded.length }),
+        );
       }
       if (failed.length > 0) {
         const lines = failed.map(
-          (r) => `• ${r.tenant_id}: ${r.error || t("channels.distributeFailed")}`,
+          (r) =>
+            `• ${r.tenant_id}: ${r.error || t("channels.distributeFailed")}`,
         );
         Modal.confirm({
           title: t("channels.distributePartialFailure"),
@@ -307,9 +312,7 @@ export function ChannelDrawer({
       setDistributeOpen(false);
     } catch (error) {
       message.error(
-        error instanceof Error
-          ? error.message
-          : t("channels.distributeFailed"),
+        error instanceof Error ? error.message : t("channels.distributeFailed"),
       );
     } finally {
       setDistributeSubmitting(false);
@@ -1114,8 +1117,9 @@ export function ChannelDrawer({
             name="enabled"
             label={t("common.enabled")}
             valuePropName="checked"
+            extra={enabledHelp}
           >
-            <Switch />
+            <Switch disabled={enabledReadOnly} />
           </Form.Item>
 
           {activeKey !== "voice" && (
@@ -1142,6 +1146,13 @@ export function ChannelDrawer({
               >
                 <Switch />
               </Form.Item>
+              <Form.Item
+              name="session_end_push_enabled"
+              label={t("channels.sessionEndPushEnabled")}
+              valuePropName="checked"
+            >
+              <Switch />
+            </Form.Item>
             </>
           )}
 
@@ -1179,15 +1190,11 @@ export function ChannelDrawer({
             />
             <span>{t("channels.distributeOverwrite")}</span>
           </div>
-          {distributeLoading ? (
-            <div>{t("common.loading")}</div>
-          ) : (
-            <TenantTargetPicker
-              tenantIds={distributeTenantIds}
-              selectedTenantIds={selectedDistributeTenantIds}
-              onChange={setSelectedDistributeTenantIds}
-            />
-          )}
+          <TenantSelector
+            selectedTenantIds={selectedDistributeTenantIds}
+            onChange={setSelectedDistributeTenantIds}
+            excludeTenantId={currentTenantId}
+          />
         </div>
       </Modal>
     </Drawer>

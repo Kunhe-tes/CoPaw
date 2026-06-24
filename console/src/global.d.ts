@@ -12,9 +12,11 @@ declare global {
       env?: string;
       serviceUnitId?: string;
       systemCode?: string;
-      systemSecret?: string;
+      systemSect?: string;
       responseFeedbackUserWhitelist?: string[];
+      chatSessionPageSize?: number | string;
     };
+    __postMsgSwe__?: string;
   }
 }
 

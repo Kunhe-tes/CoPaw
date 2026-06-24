@@ -1,4 +1,4 @@
-import React, { useEffect, useRef, useCallback } from "react";
+import React, { useEffect, useRef, useCallback, useId, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import type { CronJobSpecOutput } from "@/api/types";
 import type { IAgentScopeRuntimeWebUISession } from "@/components/agentscope-chat";
@@ -7,7 +7,10 @@ import { TasksIconSmall, HistoryIconSmall } from "../CollapsedToolbar/icons";
 import Style from "./style";
 import {
   getTaskNextRunText,
+  getTaskNextRunTooltipTimes,
+  getTaskPauseStatusText,
   getTaskSidebarMeta,
+  partitionTasksByPauseState,
   TASK_COMPLETED_STATUS_TEXT,
 } from "../../../taskJobs";
 import { formatListTime } from "../../../listTimeFormat";
@@ -17,12 +20,15 @@ import {
   type HistorySession,
 } from "../historySessions";
 import TaskActionMenu from "../../TaskActionMenu";
+import TaskNextRunTooltip from "../../TaskNextRunTooltip";
+import { HistoryInfiniteScrollTrigger } from "../HistoryInfiniteScrollTrigger";
 
 export interface ExpandablePanelProps {
   visible: boolean;
   type: "tasks" | "history";
   onClose: () => void;
   tasks: CronJobSpecOutput[];
+  selectedTaskId?: string;
   sessions: IAgentScopeRuntimeWebUISession[];
   onTaskClick: (task: CronJobSpecOutput) => void;
   onTaskPause?: (task: CronJobSpecOutput) => void;
@@ -30,6 +36,11 @@ export interface ExpandablePanelProps {
   onTaskResume?: (task: CronJobSpecOutput) => void;
   onTaskDelete?: (task: CronJobSpecOutput) => void;
   toolbarRef: React.RefObject<HTMLElement | null>;
+  hasMoreSessions?: boolean;
+  sessionTotal?: number;
+  isLoadingMoreSessions?: boolean;
+  loadMoreSessionsFailed?: boolean;
+  onLoadMoreSessions?: () => void;
 }
 
 export default function ExpandablePanel({
@@ -37,6 +48,7 @@ export default function ExpandablePanel({
   type,
   onClose,
   tasks,
+  selectedTaskId,
   sessions,
   onTaskClick,
   onTaskPause,
@@ -44,6 +56,11 @@ export default function ExpandablePanel({
   onTaskResume,
   onTaskDelete,
   toolbarRef,
+  hasMoreSessions = false,
+  sessionTotal,
+  isLoadingMoreSessions = false,
+  loadMoreSessionsFailed = false,
+  onLoadMoreSessions,
 }: ExpandablePanelProps) {
   const panelRef = useRef<HTMLDivElement>(null);
 
@@ -90,6 +107,7 @@ export default function ExpandablePanel({
         {type === "tasks" ? (
           <TasksContent
             tasks={tasks}
+            selectedTaskId={selectedTaskId}
             onTaskClick={onTaskClick}
             onTaskPause={onTaskPause}
             onTaskRun={onTaskRun}
@@ -97,7 +115,15 @@ export default function ExpandablePanel({
             onTaskDelete={onTaskDelete}
           />
         ) : (
-          <HistoryContent sessions={sessions} onClose={onClose} />
+          <HistoryContent
+            sessions={sessions}
+            onClose={onClose}
+            hasMoreSessions={hasMoreSessions}
+            sessionTotal={sessionTotal ?? sessions.length}
+            isLoadingMoreSessions={isLoadingMoreSessions}
+            loadMoreSessionsFailed={loadMoreSessionsFailed}
+            onLoadMoreSessions={onLoadMoreSessions}
+          />
         )}
       </div>
     </>
@@ -106,6 +132,7 @@ export default function ExpandablePanel({
 
 function TasksContent({
   tasks,
+  selectedTaskId,
   onTaskClick,
   onTaskPause,
   onTaskRun,
@@ -113,12 +140,123 @@ function TasksContent({
   onTaskDelete,
 }: {
   tasks: CronJobSpecOutput[];
+  selectedTaskId?: string;
   onTaskClick: (task: CronJobSpecOutput) => void;
   onTaskPause?: (task: CronJobSpecOutput) => void;
   onTaskRun?: (task: CronJobSpecOutput) => void;
   onTaskResume?: (task: CronJobSpecOutput) => void;
   onTaskDelete?: (task: CronJobSpecOutput) => void;
 }) {
+  const [pausedCollapsed, setPausedCollapsed] = useState(true);
+  const pausedRegionId = useId();
+  const { runnableTasks, pausedTasks } = partitionTasksByPauseState(tasks);
+  const selectedTaskIsPaused = pausedTasks.some(
+    (task) => task.id === selectedTaskId,
+  );
+
+  useEffect(() => {
+    if (selectedTaskIsPaused) {
+      setPausedCollapsed(false);
+    }
+  }, [selectedTaskId, selectedTaskIsPaused]);
+
+  const renderTask = (task: CronJobSpecOutput) => {
+    const sidebarMeta = getTaskSidebarMeta(task);
+    const pauseStatusText = getTaskPauseStatusText(sidebarMeta);
+    const nextRunText = getTaskNextRunText(task);
+    const nextRunTooltipTimes = getTaskNextRunTooltipTimes(task);
+
+    return (
+      <div
+        key={task.id}
+        className={`expandable-panel-task-card${
+          task.id === selectedTaskId
+            ? " expandable-panel-task-card--selected"
+            : ""
+        }${
+          sidebarMeta.state !== "active" && sidebarMeta.state !== "running"
+            ? " expandable-panel-task-card--paused"
+            : ""
+        }${
+          sidebarMeta.state === "auto-paused"
+            ? " expandable-panel-task-card--auto-paused"
+            : ""
+        }${
+          sidebarMeta.state === "running"
+            ? " expandable-panel-task-card--running"
+            : ""
+        }`}
+        onClick={() => onTaskClick(task)}
+        role="button"
+        tabIndex={0}
+      >
+        <div className="expandable-panel-task-title-row">
+          <span className="expandable-panel-task-title">
+            {task.name || task.id}
+          </span>
+          {(sidebarMeta.unreadCount > 0 ||
+            sidebarMeta.canPause ||
+            sidebarMeta.canRun ||
+            sidebarMeta.canResume ||
+            sidebarMeta.canDelete) && (
+            <div className="expandable-panel-task-trailing">
+              {sidebarMeta.unreadCount > 0 && (
+                <span className="expandable-panel-task-badge">
+                  {sidebarMeta.unreadCount > 99
+                    ? "99+"
+                    : sidebarMeta.unreadCount}
+                </span>
+              )}
+              {(sidebarMeta.canPause ||
+                sidebarMeta.canRun ||
+                sidebarMeta.canResume ||
+                sidebarMeta.canDelete) && (
+                <div className="expandable-panel-task-actions">
+                  <TaskActionMenu
+                    task={task}
+                    sidebarMeta={sidebarMeta}
+                    classNamePrefix="expandable-panel-task"
+                    onTaskPause={onTaskPause}
+                    onTaskRun={onTaskRun}
+                    onTaskResume={onTaskResume}
+                    onTaskDelete={onTaskDelete}
+                  />
+                </div>
+              )}
+            </div>
+          )}
+        </div>
+        {pauseStatusText && (
+          <div
+            className={`expandable-panel-task-status ${
+              sidebarMeta.state === "auto-paused"
+                ? "expandable-panel-task-status--auto"
+                : "expandable-panel-task-status--manual"
+            }`}
+          >
+            {pauseStatusText}
+          </div>
+        )}
+        {(task.task?.latest_scheduled_preview ||
+          task.task?.last_scheduled_run_at) && (
+          <div className="expandable-panel-task-subtitle">
+            {task.task?.last_scheduled_run_at && (
+              <span className="expandable-panel-task-time">
+                {formatListTime(task.task.last_scheduled_run_at)}
+              </span>
+            )}
+            {TASK_COMPLETED_STATUS_TEXT}
+          </div>
+        )}
+        {nextRunText && (
+          <TaskNextRunTooltip runTimes={nextRunTooltipTimes}>
+            <div className="expandable-panel-task-next-run">{nextRunText}</div>
+          </TaskNextRunTooltip>
+        )}
+      </div>
+    );
+  };
+
   return (
     <>
       <div className="expandable-panel-header">
@@ -129,98 +267,63 @@ function TasksContent({
       </div>
       <div className="expandable-panel-content">
         {tasks.length === 0 ? (
-          <div className="expandable-panel-empty">暂无任务</div>
+          <div className="expandable-panel-task-empty">
+            <div className="expandable-panel-task-empty-title">暂无任务</div>
+            <div className="expandable-panel-task-empty-description">
+              创建任务，让 AI 帮你自动推进
+            </div>
+          </div>
         ) : (
-          tasks.map((task) => {
-            const sidebarMeta = getTaskSidebarMeta(task);
-            const nextRunText = getTaskNextRunText(task);
-
-            return (
-              <div
-                key={task.id}
-                className={`expandable-panel-task-card${
-                  sidebarMeta.state !== "active" &&
-                  sidebarMeta.state !== "running"
-                    ? " expandable-panel-task-card--paused"
-                    : ""
-                }${
-                  sidebarMeta.state === "auto-paused"
-                    ? " expandable-panel-task-card--auto-paused"
-                    : ""
-                }`}
-                onClick={() => onTaskClick(task)}
-                role="button"
-                tabIndex={0}
-              >
-                <div className="expandable-panel-task-title-row">
-                  <span className="expandable-panel-task-title">
-                    {task.name || task.id}
+          <>
+            {pausedTasks.length > 0 && (
+              <div className="expandable-panel-paused-group">
+                <button
+                  type="button"
+                  className="expandable-panel-paused-toggle"
+                  aria-label={`已暂停任务 ${pausedTasks.length}`}
+                  aria-expanded={!pausedCollapsed}
+                  aria-controls={pausedRegionId}
+                  onClick={() => setPausedCollapsed((prev) => !prev)}
+                >
+                  <span
+                    className={`expandable-panel-paused-chevron${
+                      pausedCollapsed
+                        ? " expandable-panel-paused-chevron--collapsed"
+                        : ""
+                    }`}
+                    aria-hidden="true"
+                  >
+                    <svg width="10" height="6" viewBox="0 0 10 6" fill="none">
+                      <path
+                        d="M1 1L5 5L9 1"
+                        stroke="currentColor"
+                        strokeWidth="1.5"
+                        strokeLinecap="round"
+                        strokeLinejoin="round"
+                      />
+                    </svg>
                   </span>
-                  {(sidebarMeta.unreadCount > 0 ||
-                    sidebarMeta.canPause ||
-                    sidebarMeta.canRun ||
-                    sidebarMeta.canResume ||
-                    sidebarMeta.canDelete) && (
-                    <div className="expandable-panel-task-trailing">
-                      {sidebarMeta.unreadCount > 0 && (
-                        <span className="expandable-panel-task-badge">
-                          {sidebarMeta.unreadCount > 99
-                            ? "99+"
-                            : sidebarMeta.unreadCount}
-                        </span>
-                      )}
-                      {(sidebarMeta.canPause ||
-                        sidebarMeta.canRun ||
-                        sidebarMeta.canResume ||
-                        sidebarMeta.canDelete) && (
-                        <div className="expandable-panel-task-actions">
-                          <TaskActionMenu
-                            task={task}
-                            sidebarMeta={sidebarMeta}
-                            classNamePrefix="expandable-panel-task"
-                            onTaskPause={onTaskPause}
-                            onTaskRun={onTaskRun}
-                            onTaskResume={onTaskResume}
-                            onTaskDelete={onTaskDelete}
-                          />
-                        </div>
-                      )}
-                    </div>
-                  )}
+                  <span className="expandable-panel-paused-label">
+                    已暂停任务
+                  </span>
+                  <span
+                    className="expandable-panel-paused-count"
+                    aria-hidden="true"
+                  >
+                    {pausedTasks.length}
+                  </span>
+                </button>
+                <div
+                  id={pausedRegionId}
+                  className="expandable-panel-paused-items"
+                  hidden={pausedCollapsed}
+                >
+                  {pausedTasks.map(renderTask)}
                 </div>
-                {sidebarMeta.state !== "active" &&
-                  sidebarMeta.state !== "running" && (
-                    <div
-                      className={`expandable-panel-task-status ${
-                        sidebarMeta.state === "auto-paused"
-                          ? "expandable-panel-task-status--auto"
-                          : "expandable-panel-task-status--manual"
-                      }`}
-                    >
-                      {sidebarMeta.state === "auto-paused"
-                        ? `已自动暂停 · 连续 ${sidebarMeta.unreadCount} 次未读`
-                        : "已手动暂停"}
-                    </div>
-                  )}
-                {(task.task?.latest_scheduled_preview ||
-                  task.task?.last_scheduled_run_at) && (
-                  <div className="expandable-panel-task-subtitle">
-                    {task.task?.last_scheduled_run_at && (
-                      <span className="expandable-panel-task-time">
-                        {formatListTime(task.task.last_scheduled_run_at)}
-                      </span>
-                    )}
-                    {TASK_COMPLETED_STATUS_TEXT}
-                  </div>
-                )}
-                {nextRunText && (
-                  <div className="expandable-panel-task-next-run">
-                    {nextRunText}
-                  </div>
-                )}
               </div>
-            );
-          })
+            )}
+            {runnableTasks.map(renderTask)}
+          </>
         )}
       </div>
     </>
@@ -230,11 +333,22 @@ function TasksContent({
 function HistoryContent({
   sessions,
   onClose,
+  hasMoreSessions,
+  sessionTotal,
+  isLoadingMoreSessions,
+  loadMoreSessionsFailed,
+  onLoadMoreSessions,
 }: {
   sessions: IAgentScopeRuntimeWebUISession[];
   onClose: () => void;
+  hasMoreSessions: boolean;
+  sessionTotal: number;
+  isLoadingMoreSessions: boolean;
+  loadMoreSessionsFailed: boolean;
+  onLoadMoreSessions?: () => void;
 }) {
   const navigate = useNavigate();
+  const scrollContainerRef = useRef<HTMLDivElement>(null);
   const { currentSessionId, setSessionLoading } =
     useChatAnywhereSessionsState();
 
@@ -262,30 +376,36 @@ function HistoryContent({
       <div className="expandable-panel-header">
         <HistoryIconSmall />
         <span className="expandable-panel-header-title">
-          历史记录({sessions.length})
+          历史记录({sessionTotal})
         </span>
       </div>
-      <div className="expandable-panel-content">
-        {sessions.length === 0 ? (
+      <div className="expandable-panel-content" ref={scrollContainerRef}>
+        {sessions.length === 0 && (
           <div className="expandable-panel-empty">暂无历史记录</div>
-        ) : (
-          sessions.map((session) => (
-            <div
-              key={session.id}
-              className="expandable-panel-history-item"
-              onClick={() => handleSessionClick(session)}
-              role="button"
-              tabIndex={0}
-            >
-              <div className="expandable-panel-history-title">
-                {session.name || "新会话"}
-              </div>
-              <div className="expandable-panel-history-time">
-                {formatListTime((session as any).createdAt)}
-              </div>
-            </div>
-          ))
         )}
+        {sessions.map((session) => (
+          <div
+            key={session.id}
+            className="expandable-panel-history-item"
+            onClick={() => handleSessionClick(session)}
+            role="button"
+            tabIndex={0}
+          >
+            <div className="expandable-panel-history-title">
+              {session.name || "新会话"}
+            </div>
+            <div className="expandable-panel-history-time">
+              {formatListTime((session as HistorySession).createdAt)}
+            </div>
+          </div>
+        ))}
+        <HistoryInfiniteScrollTrigger
+          scrollContainerRef={scrollContainerRef}
+          hasMore={hasMoreSessions}
+          loading={isLoadingMoreSessions}
+          failed={loadMoreSessionsFailed}
+          onLoadMore={() => onLoadMoreSessions?.()}
+        />
       </div>
     </>
   );

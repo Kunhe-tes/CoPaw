@@ -1,4 +1,9 @@
 ALTER TABLE swe_html_preview_click_events
+ADD COLUMN IF NOT EXISTS user_name VARCHAR(255) NULL
+COMMENT '点击用户名称/客户经理姓名'
+AFTER user_id;
+
+ALTER TABLE swe_html_preview_click_events
 ADD COLUMN IF NOT EXISTS list_key VARCHAR(1024) NULL
 COMMENT '名单稳定标识，默认使用文件链接'
 AFTER file_name;
@@ -10,7 +15,7 @@ AFTER list_key;
 
 ALTER TABLE swe_html_preview_click_events
 ADD COLUMN IF NOT EXISTS button_type VARCHAR(32) NULL
-COMMENT '按钮类型：insight/phone/other'
+COMMENT '按钮类型：insight/phone/plan/other'
 AFTER button_text;
 
 ALTER TABLE swe_html_preview_click_events

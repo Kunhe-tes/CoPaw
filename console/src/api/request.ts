@@ -48,9 +48,14 @@ function buildHeaders(
 ): Headers {
   // 统一转为 Headers，保证后续读取和写入行为一致。
   const headers = extra instanceof Headers ? extra : new Headers(extra);
+  const hasBody = body !== undefined && body !== null;
 
   // 仅对通常携带请求体的方法补默认 Content-Type。
-  if (method && ["POST", "PUT", "PATCH"].includes(method.toUpperCase())) {
+  if (
+    method &&
+    hasBody &&
+    ["POST", "PUT", "PATCH", "DELETE"].includes(method.toUpperCase())
+  ) {
     // FormData 需要浏览器自动生成 multipart boundary，不能强行写死 Content-Type。
     if (!headers.has("Content-Type") && !(body instanceof FormData)) {
       headers.set("Content-Type", "application/json");
@@ -84,12 +89,30 @@ async function throwRequestError(response: Response): Promise<never> {
   const contentType = response.headers.get("content-type") || "";
   const errorMessage = getErrorMessageFromBody(text, contentType);
 
-  // 保留原始响应体，方便 parseErrorDetail() 提取结构化字段。
-  const finalMessage = errorMessage
-    ? `${errorMessage} - ${text}`
-    : `Request failed: ${response.status} ${response.statusText}`;
+  // JSON 响应已提取到 detail/message/error 时不再拼接原始 JSON
+  const isJson = contentType.includes("application/json");
+  const finalMessage = isJson && errorMessage
+    ? errorMessage
+    : errorMessage
+      ? `${errorMessage} - ${text}`
+      : `Request failed: ${response.status} ${response.statusText}`;
 
-  throw new Error(finalMessage);
+  const error = new Error(finalMessage);
+  // 将 HTTP 状态码和解析后的响应体挂载到 Error 上，
+  // 方便调用方根据 status / data 做差异化处理（如 409 同名冲突）。
+  (error as Error & { status?: number; data?: unknown }).status =
+    response.status;
+
+  if (contentType.includes("application/json") && text) {
+    try {
+      (error as Error & { status?: number; data?: unknown }).data =
+        JSON.parse(text);
+    } catch {
+      // 忽略 JSON 解析失败
+    }
+  }
+
+  throw error;
 }
 
 function throwLocalAuthError(): never {

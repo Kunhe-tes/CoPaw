@@ -10,8 +10,10 @@ Example:
 """
 
 import base64
+import json
 import logging
 import os
+import time
 from typing import List, Sequence, Tuple, Type, Any, Union, Optional
 from urllib.parse import urlparse
 
@@ -636,8 +638,99 @@ def _create_file_block_support_formatter(
             return _strip_top_level_message_name(messages)
 
         @staticmethod
+        def _extract_text_from_tool_result_dict(
+            output: dict,
+        ) -> str | None:
+            content = output.get("content")
+            if not isinstance(content, list):
+                return None
+
+            textual_output = [
+                block["text"]
+                for block in content
+                if (
+                    isinstance(block, dict)
+                    and block.get("type") == "text"
+                    and isinstance(block.get("text"), str)
+                )
+            ]
+            if not textual_output:
+                return None
+            return "\n".join(textual_output)
+
+        @staticmethod
+        def _convert_non_file_tool_result_block(
+            block: dict,
+        ) -> tuple[str, Sequence[Tuple[str, dict]]]:
+            return base_formatter_class.convert_tool_result_to_string(
+                [block],
+            )
+
+        @staticmethod
+        def _convert_file_block_tool_result(
+            block: dict,
+        ) -> tuple[str, tuple[str, dict]]:
+            file_path = block.get("path", "") or block.get("url", "")
+            file_name = block.get("name", file_path)
+            text = (
+                f"The returned file '{file_name}' "
+                f"can be found at: {file_path}"
+            )
+            return text, (file_path, block)
+
+        @staticmethod
+        def _join_tool_result_text(
+            textual_output: list[str],
+        ) -> str:
+            if not textual_output:
+                return ""
+            if len(textual_output) == 1:
+                return textual_output[0]
+            return "\n".join(f"- {item}" for item in textual_output)
+
+        @staticmethod
+        def _convert_tool_result_with_file_blocks(
+            output: List[dict],
+            error: ValueError,
+        ) -> tuple[str, Sequence[Tuple[str, dict]]]:
+            textual_output: list[str] = []
+            multimodal_data: list[Tuple[str, dict]] = []
+
+            for block in output:
+                if not isinstance(block, dict) or "type" not in block:
+                    raise ValueError(
+                        f"Invalid block: {block}, "
+                        "expected a dict with 'type' key",
+                    ) from error
+
+                if block["type"] == "file":
+                    text, file_data = (
+                        FileBlockSupportFormatter._convert_file_block_tool_result(
+                            block,
+                        )
+                    )
+                    textual_output.append(text)
+                    multimodal_data.append(file_data)
+                    continue
+
+                text, data = (
+                    FileBlockSupportFormatter._convert_non_file_tool_result_block(
+                        block,
+                    )
+                )
+                textual_output.append(text)
+                multimodal_data.extend(data)
+
+            return (
+                FileBlockSupportFormatter._join_tool_result_text(
+                    textual_output,
+                ),
+                multimodal_data,
+            )
+
+        @staticmethod
         def convert_tool_result_to_string(
-            output: Union[str, List[dict]],
+            output: Union[str, List[dict], dict],
         ) -> tuple[str, Sequence[Tuple[str, dict]]]:
             """Extend parent class to support file blocks.
 
@@ -652,58 +745,25 @@ def _create_file_block_support_formatter(
             if isinstance(output, str):
                 return output, []
 
-            # Try parent class method first
+            if isinstance(output, dict):
+                text = FileBlockSupportFormatter._extract_text_from_tool_result_dict(
+                    output,
+                )
+                if text is not None:
+                    return text, []
+                return json.dumps(output, ensure_ascii=False), []
+
             try:
                 return base_formatter_class.convert_tool_result_to_string(
                     output,
                 )
-            except ValueError as e:
-                if "Unsupported block type: file" not in str(e):
+            except ValueError as error:
+                if "Unsupported block type: file" not in str(error):
                     raise
-
-                # Handle output containing file blocks
-                textual_output = []
-                multimodal_data = []
-
-                for block in output:
-                    if not isinstance(block, dict) or "type" not in block:
-                        raise ValueError(
-                            f"Invalid block: {block}, "
-                            "expected a dict with 'type' key",
-                        ) from e
-
-                    if block["type"] == "file":
-                        file_path = block.get("path", "") or block.get(
-                            "url",
-                            "",
-                        )
-                        file_name = block.get("name", file_path)
-
-                        textual_output.append(
-                            f"The returned file '{file_name}' "
-                            f"can be found at: {file_path}",
-                        )
-                        multimodal_data.append((file_path, block))
-                    else:
-                        # Delegate other block types to parent class
-                        (
-                            text,
-                            data,
-                        ) = base_formatter_class.convert_tool_result_to_string(
-                            [block],
-                        )
-                        textual_output.append(text)
-                        multimodal_data.extend(data)
-
-                if len(textual_output) == 0:
-                    return "", multimodal_data
-                elif len(textual_output) == 1:
-                    return textual_output[0], multimodal_data
-                else:
-                    return (
-                        "\n".join("- " + _ for _ in textual_output),
-                        multimodal_data,
-                    )
+                return FileBlockSupportFormatter._convert_tool_result_with_file_blocks(
+                    output,
+                    error,
+                )
 
     FileBlockSupportFormatter.__name__ = (
         f"FileBlockSupport{base_formatter_class.__name__}"
@@ -922,6 +982,7 @@ def _get_model_runtime_configs(
 def _wrap_model_with_tracing(
     provider_id: str,
     model: ChatModelBase,
+    trace_context: Optional[dict[str, Any]] = None,
 ) -> ChatModelBase:
     """Wrap model with tracing and token recording.
 
@@ -936,7 +997,11 @@ def _wrap_model_with_tracing(
         try:
             trace_mgr = get_trace_manager()
             if trace_mgr.enabled:
-                return TracingModelWrapper(provider_id, wrapped)
+                return TracingModelWrapper(
+                    provider_id,
+                    wrapped,
+                    trace_context=trace_context,
+                )
         except RuntimeError:
             pass
     return wrapped
@@ -944,6 +1009,7 @@ def _wrap_model_with_tracing(
 
 def create_model_and_formatter(
     agent_id: Optional[str] = None,
+    trace_context: Optional[dict[str, Any]] = None,
 ) -> Tuple[ChatModelBase, FormatterBase]:
     """Factory method to create model and formatter instances.
 
@@ -960,57 +1026,76 @@ def create_model_and_formatter(
     Example:
         >>> model, formatter = create_model_and_formatter()
     """
+    started_at = time.perf_counter()
+
     # Resolve tenant and tenant-local agent identity.
     tenant_id = _get_tenant_id()
     resolved_agent_id = _get_agent_id(agent_id, tenant_id)
 
-    # Try to get model from tenant-aware ProviderManager
-    # This is the primary and only supported path for active model resolution
-    model_slot = None
-    retry_config, rate_limit_config = _get_model_runtime_configs(
-        resolved_agent_id,
-        tenant_id,
-    )
-
-    # Ensure tenant provider storage exists before accessing ProviderManager
-    ProviderManager.ensure_tenant_provider_storage(tenant_id)
-    manager = ProviderManager.get_instance(tenant_id)
-
-    # Get model slot from active model configuration
-    model_slot = _get_model_slot(manager)
-    if not model_slot or not model_slot.provider_id or not model_slot.model:
-        raise ValueError(
-            "No tenant model configuration found. "
-            "Please configure a model for this tenant using the admin panel "
-            "or ensure provider configuration is properly set. "
-            "Multi-tenant isolation requires explicit model config.",
+    try:
+        # Try to get model from tenant-aware ProviderManager
+        # This is the primary and only supported path for active model resolution
+        model_slot = None
+        retry_config, rate_limit_config = _get_model_runtime_configs(
+            resolved_agent_id,
+            tenant_id,
         )
 
-    # Get provider and create model instance
-    provider = manager.get_provider(model_slot.provider_id)
-    if provider is None:
-        raise ValueError(f"Provider '{model_slot.provider_id}' not found.")
+        # Ensure tenant provider storage exists before accessing ProviderManager
+        ProviderManager.ensure_tenant_provider_storage(tenant_id)
+        manager = ProviderManager.get_instance(tenant_id)
 
-    model = provider.get_chat_model_instance(model_slot.model)
-    provider_id = model_slot.provider_id
+        # Get model slot from active model configuration
+        model_slot = _get_model_slot(manager)
+        if (
+            not model_slot
+            or not model_slot.provider_id
+            or not model_slot.model
+        ):
+            raise ValueError(
+                "No tenant model configuration found. "
+                "Please configure a model for this tenant using the admin panel "
+                "or ensure provider configuration is properly set. "
+                "Multi-tenant isolation requires explicit model config.",
+            )
 
-    # Create the formatter based on the real model class
-    formatter = _create_formatter_instance(model.__class__)
+        # Get provider and create model instance
+        provider = manager.get_provider(model_slot.provider_id)
+        if provider is None:
+            raise ValueError(f"Provider '{model_slot.provider_id}' not found.")
 
-    # Wrap with tracing and token recording
-    wrapped_model = _wrap_model_with_tracing(provider_id, model)
+        model = provider.get_chat_model_instance(model_slot.model)
+        provider_id = model_slot.provider_id
 
-    # Wrap with retry logic for transient LLM API errors
-    wrapped_model = RetryChatModel(
-        wrapped_model,
-        retry_config=retry_config,
-        rate_limit_config=rate_limit_config,
-        tenant_id=tenant_id,
-        agent_id=resolved_agent_id,
-        on_retry=None,  # 模型层重试回调，后续可通过上下文变量传递事件
-    )
+        # Create the formatter based on the real model class
+        formatter = _create_formatter_instance(model.__class__)
 
-    return wrapped_model, formatter
+        # Wrap with tracing and token recording
+        wrapped_model = _wrap_model_with_tracing(
+            provider_id,
+            model,
+            trace_context=trace_context,
+        )
+
+        # Wrap with retry logic for transient LLM API errors
+        wrapped_model = RetryChatModel(
+            wrapped_model,
+            retry_config=retry_config,
+            rate_limit_config=rate_limit_config,
+            tenant_id=tenant_id,
+            agent_id=resolved_agent_id,
+            on_retry=None,  # 模型层重试回调，后续可通过上下文变量传递事件
+        )
+
+        return wrapped_model, formatter
+    finally:
+        logger.debug(
+            "create_model_and_formatter_duration_ms=%d tenant_id=%s "
+            "agent_id=%s",
+            int((time.perf_counter() - started_at) * 1000),
+            tenant_id,
+            resolved_agent_id,
+        )
 
 
 def _create_formatter_instance(

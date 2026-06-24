@@ -3,6 +3,7 @@
 
 # pylint: disable=protected-access,redefined-outer-name,unused-import
 
+import asyncio
 from datetime import datetime
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -153,6 +154,43 @@ class TestCurrentTraceContext:
         set_current_trace(None)
         assert get_current_trace() is None
 
+    @pytest.mark.asyncio
+    async def test_create_task_inherits_trace_context_snapshot(self):
+        """子任务会继承创建瞬间的 trace context 快照，便于排查串链。"""
+        trace_a = TraceContext(
+            trace_id="trace-a",
+            user_id="user-a",
+            session_id="session-a",
+            channel="console",
+            source_id="source-a",
+        )
+        trace_b = TraceContext(
+            trace_id="trace-b",
+            user_id="user-b",
+            session_id="session-b",
+            channel="console",
+            source_id="source-b",
+        )
+
+        gate = asyncio.Event()
+        observed: dict[str, str | None] = {}
+
+        async def read_trace_after_switch() -> None:
+            await gate.wait()
+            ctx = get_current_trace()
+            observed["trace_id"] = ctx.trace_id if ctx else None
+
+        set_current_trace(trace_a)
+        task = asyncio.create_task(read_trace_after_switch())
+        set_current_trace(trace_b)
+        gate.set()
+        await task
+
+        assert observed["trace_id"] == "trace-a"
+        assert get_current_trace() is trace_b
+
+        set_current_trace(None)
+
 
 class TestTraceManager:
     """Tests for TraceManager class."""
@@ -237,6 +275,103 @@ class TestTraceManager:
             trace_id in manager._active_traces
         )  # pylint: disable=protected-access
         assert get_current_trace() is not None
+
+        await manager.close()
+
+    @pytest.mark.asyncio
+    async def test_attach_existing_trace_with_matching_identity(
+        self,
+        enabled_config,
+        mock_db,
+    ):
+        """Matching attach_existing request should reuse the trace."""
+        manager = TraceManager(enabled_config, mock_db)
+        await manager.initialize()
+
+        trace_id = await manager.start_trace(
+            user_id="user-1",
+            session_id="session-1",
+            channel="console",
+            source_id="source-1",
+        )
+
+        attached_trace_id = await manager.start_trace(
+            user_id="user-1",
+            session_id="session-1",
+            channel="console",
+            source_id="source-1",
+            trace_id=trace_id,
+            attach_existing=True,
+        )
+
+        assert attached_trace_id == trace_id
+        assert get_current_trace() is not None
+        assert get_current_trace().trace_id == trace_id
+        assert get_current_trace().attached is True
+
+        await manager.close()
+
+    @pytest.mark.asyncio
+    async def test_attach_existing_trace_with_mismatched_identity_uses_new_id(
+        self,
+        enabled_config,
+        mock_db,
+    ):
+        """Mismatched attach_existing request must not reuse the old trace."""
+        manager = TraceManager(enabled_config, mock_db)
+        await manager.initialize()
+
+        trace_id = await manager.start_trace(
+            user_id="user-1",
+            session_id="session-1",
+            channel="console",
+            source_id="source-1",
+        )
+
+        new_trace_id = await manager.start_trace(
+            user_id="user-1",
+            session_id="session-2",
+            channel="console",
+            source_id="source-1",
+            trace_id=trace_id,
+            attach_existing=True,
+        )
+
+        assert new_trace_id != trace_id
+        assert get_current_trace() is not None
+        assert get_current_trace().trace_id == new_trace_id
+        assert get_current_trace().session_id == "session-2"
+        assert get_current_trace().attached is False
+        assert trace_id in manager._active_traces
+        assert new_trace_id in manager._active_traces
+
+        await manager.close()
+
+    @pytest.mark.asyncio
+    async def test_attach_existing_trace_not_found_keeps_requested_id(
+        self,
+        enabled_config,
+        mock_db,
+    ):
+        """Missing attach target should still reuse caller-provided trace_id."""
+        manager = TraceManager(enabled_config, mock_db)
+        await manager.initialize()
+
+        requested_trace_id = "external-trace-id"
+        new_trace_id = await manager.start_trace(
+            user_id="user-1",
+            session_id="session-1",
+            channel="console",
+            source_id="source-1",
+            trace_id=requested_trace_id,
+            attach_existing=True,
+        )
+
+        assert new_trace_id == requested_trace_id
+        assert get_current_trace() is not None
+        assert get_current_trace().trace_id == requested_trace_id
+        assert get_current_trace().attached is False
+        assert requested_trace_id in manager._active_traces
 
         await manager.close()
 
@@ -607,6 +742,53 @@ class TestTraceManager:
 
         await manager.close()
 
+    @pytest.mark.asyncio
+    async def test_update_span_rejects_cross_trace_pending_span(
+        self,
+        enabled_config,
+        mock_db,
+        caplog,
+    ):
+        """跨 trace 更新 pending span 时必须拒绝，避免污染汇总字段。"""
+        manager = TraceManager(enabled_config, mock_db)
+        await manager.initialize()
+
+        trace_a = await manager.start_trace(
+            user_id="user-1",
+            session_id="session-a",
+            channel="console",
+            source_id="default",
+        )
+        trace_b = await manager.start_trace(
+            user_id="user-1",
+            session_id="session-b",
+            channel="console",
+            source_id="default",
+        )
+
+        span_id = await manager.emit_tool_call_start(
+            trace_id=trace_b,
+            tool_name="read_file",
+            tool_input={"path": "README.md"},
+            source_id="default",
+        )
+
+        with caplog.at_level("ERROR"):
+            await manager.emit_tool_call_end(
+                trace_id=trace_a,
+                span_id=span_id,
+                tool_output="ok",
+            )
+
+        trace_a_obj = manager._active_traces[trace_a]
+        trace_b_obj = manager._active_traces[trace_b]
+        span = manager._pending_spans[span_id]
+
+        assert trace_a_obj.tools_used == []
+        assert trace_b_obj.tools_used == ["read_file"]
+        assert span.end_time is None
+        await manager.close()
+
 
 class TestGlobalManager:
     """Tests for global manager functions."""
@@ -864,6 +1046,46 @@ class TestSessionName:
         assert ctx.user_name == "John Doe"
         assert ctx.bbk_id == "branch-001"
 
+        await manager.close()
+
+    @pytest.mark.asyncio
+    async def test_setup_skill_detector_does_not_start_skill_immediately(
+        self,
+        enabled_config,
+        mock_db,
+        monkeypatch,
+    ):
+        """Layer 0 仅做检测缓存，正式 skill span 由会话 detector 启动。"""
+        manager = TraceManager(enabled_config, mock_db)
+        await manager.initialize()
+
+        trace_id = await manager.start_trace(
+            user_id="user-1",
+            session_id="session-1",
+            channel="console",
+            source_id="source-1",
+            user_message="use xlsx to analyze",
+        )
+
+        detector_instance = MagicMock()
+        detector_instance.detect_from_user_message.return_value = (
+            "xlsx",
+            0.9,
+        )
+        detector_instance.start_skill = AsyncMock()
+
+        monkeypatch.setattr(
+            "swe.agents.skill_invocation_detector.SkillInvocationDetector",
+            lambda **kwargs: detector_instance,
+        )
+
+        await manager.setup_skill_detector(
+            trace_id=trace_id,
+            enabled_skills=["xlsx"],
+        )
+
+        detector_instance.detect_from_user_message.assert_called_once()
+        detector_instance.start_skill.assert_not_awaited()
         await manager.close()
 
     def test_trace_model_with_session_name(self):

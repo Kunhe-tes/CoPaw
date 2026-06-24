@@ -1,6 +1,7 @@
 // ─── MainLayout ───────────────────────────────────────────────────────────────
 .mainLayout {
   height: 100vh;
+  background: var(--console-management-canvas);
 }
 
 .pageContainer {
@@ -14,8 +15,10 @@
   display: flex;
   align-items: center;
   justify-content: space-between;
-  background: #ffffff;
-  border-bottom: 1px solid rgba(0, 0, 0, 0.06);
+  color: var(--console-management-text);
+  font-family: var(--console-font-ui);
+  background: var(--console-management-navigation);
+  border-bottom: 1px solid var(--console-management-border);
 }
 
 .headerTitle {
@@ -29,11 +32,13 @@
 
 // ─── Sidebar ─────────────────────────────────────────────────────────────────
 .sider {
-  background: #ffffff !important;
-  border-right: 0;
+  color: var(--console-management-text);
+  font-family: var(--console-font-ui);
+  background: var(--console-management-navigation) !important;
+  border-right: 1px solid var(--console-management-border);
   overflow: auto;
-  height: calc(100vh - 64px);
-  padding: 8px;
+  height: calc(100vh - 56px);
+  padding: 10px 8px 8px;
   display: flex;
   flex-direction: column;
 
@@ -63,7 +68,7 @@
     position: sticky;
     top: 0;
     z-index: 10;
-    background: #ffffff;
+    background: var(--console-management-navigation);
     margin-bottom: 12px;
   }
 
@@ -131,37 +136,49 @@
 
   :global {
     .swe-menu {
-      background: #ffffff !important;
+      background: transparent !important;
       border-inline-end: 0 !important;
-      color: var(--colorText, #1a1716);
+      color: var(--console-management-text);
+    }
+
+    .swe-menu-inline .swe-menu-sub.swe-menu-inline {
+      background: transparent !important;
     }
 
     .swe-menu-submenu-title {
       height: 36px !important;
-      margin: 6px 0 4px !important;
-      padding: 0 8px 0 8px !important;
+      margin: 8px 0 3px !important;
+      padding: 0 9px !important;
       border-radius: 8px !important;
+      font-family: var(--console-font-ui) !important;
       font-size: 14px !important;
-      font-weight: 400 !important;
+      font-weight: 600 !important;
       line-height: 36px !important;
       letter-spacing: normal !important;
-      color: var(--colorText, #1a1716) !important;
+      color: var(--console-management-text-secondary) !important;
       cursor: pointer !important;
       transition:
         background-color 0.16s ease,
         color 0.16s ease;
 
       &:hover {
-        background: rgba(26, 23, 22, 0.04) !important;
-        color: var(--colorText, #1a1716) !important;
+        background: color-mix(
+          in srgb,
+          var(--console-management-primary) 8%,
+          transparent
+        ) !important;
+        color: var(--console-management-text) !important;
       }
 
       .swe-menu-item-icon {
-        color: var(--colorTextSecondary, rgba(26, 23, 22, 0.45)) !important;
+        color: var(--console-management-text-muted) !important;
       }
 
       .swe-menu-title-content {
         margin-inline-start: 8px !important;
+        font-family: inherit !important;
+        font-size: inherit !important;
+        font-weight: inherit !important;
       }
     }
 
@@ -171,17 +188,19 @@
       justify-content: center;
       inset-inline-end: 8px !important;
       width: 14px;
-      color: var(--colorTextSecondary, rgba(26, 23, 22, 0.45)) !important;
+      color: var(--console-management-text-muted) !important;
     }
 
     .swe-menu-item {
       position: relative;
       height: 36px !important;
-      margin: 3px 0 !important;
-      padding: 0 10px 0 30px !important;
+      margin: 2px 0 !important;
+      padding: 0 10px 0 32px !important;
       border-radius: 8px !important;
-      color: var(--colorText, #1a1716) !important;
+      color: var(--console-management-text-secondary) !important;
+      font-family: var(--console-font-ui) !important;
       font-size: 14px !important;
+      font-weight: 400 !important;
       line-height: 36px !important;
       letter-spacing: normal !important;
       transition:
@@ -200,13 +219,17 @@
       }
 
       &:hover {
-        background: rgba(55, 105, 252, 0.06) !important;
-        color: var(--colorText, #1a1716) !important;
+        background: color-mix(
+          in srgb,
+          var(--console-management-primary) 9%,
+          transparent
+        ) !important;
+        color: var(--console-management-text) !important;
       }
 
       .swe-menu-item-icon {
         display: inline-flex !important;
-        color: var(--colorTextSecondary, rgba(26, 23, 22, 0.45)) !important;
+        color: var(--console-management-text-muted) !important;
       }
 
       .swe-menu-title-content {
@@ -218,8 +241,10 @@
       height: 36px !important;
       margin: 2px 0 8px !important;
       padding: 0 8px !important;
-      color: var(--colorText, #1a1716) !important;
-      font-weight: 400 !important;
+      color: var(--console-management-text-secondary) !important;
+      font-family: var(--console-font-ui) !important;
+      font-size: 14px !important;
+      font-weight: 600 !important;
       line-height: 36px !important;
 
       &::before {
@@ -228,20 +253,23 @@
 
       .swe-menu-item-icon {
         display: inline-flex !important;
-        color: var(--colorTextSecondary, rgba(26, 23, 22, 0.45)) !important;
+        color: var(--console-management-text-muted) !important;
       }
 
       .swe-menu-title-content {
         margin-inline-start: 8px !important;
+        font-family: inherit !important;
+        font-size: inherit !important;
+        font-weight: inherit !important;
       }
     }
 
     .swe-menu-root > .swe-menu-item-selected {
-      background: rgba(55, 105, 252, 0.1) !important;
-      color: #3769fc !important;
+      background: var(--console-management-primary-soft) !important;
+      color: var(--console-management-text) !important;
 
       .swe-menu-item-icon {
-        color: #3769fc !important;
+        color: var(--console-management-primary) !important;
       }
     }
 
@@ -255,12 +283,15 @@
 
       .swe-menu-title-content {
         margin-inline-start: 0 !important;
+        font-family: inherit !important;
+        font-size: inherit !important;
+        font-weight: inherit !important;
       }
     }
 
     .swe-menu-item-selected {
-      background: rgba(55, 105, 252, 0.1) !important;
-      color: #3769fc !important;
+      background: var(--console-management-primary-soft) !important;
+      color: var(--console-management-text) !important;
       display: flex !important;
       align-items: center !important;
       justify-content: flex-start !important;
@@ -276,22 +307,22 @@
     }
 
     .swe-menu-submenu .swe-menu-item-selected {
-      color: #3769fc !important;
-      font-weight: 500 !important;
+      color: var(--console-management-text) !important;
+      font-weight: 600 !important;
 
       .swe-menu-item-icon {
-        color: #3769fc !important;
+        color: var(--console-management-primary) !important;
       }
     }
 
     .swe-menu-submenu-selected > .swe-menu-submenu-title {
-      background: rgba(55, 105, 252, 0.08) !important;
-      color: var(--colorText, #1a1716) !important;
+      background: transparent !important;
+      color: var(--console-management-text) !important;
       box-shadow: none;
 
       .swe-menu-item-icon,
       .swe-menu-submenu-arrow {
-        color: #3769fc !important;
+        color: var(--console-management-text-secondary) !important;
       }
     }
   }
@@ -311,6 +342,10 @@
       background: #1a1a1a !important;
       border-inline-end: 0 !important;
       color: rgba(255, 255, 255, 0.82);
+    }
+
+    .swe-menu-inline .swe-menu-sub.swe-menu-inline {
+      background: #1a1a1a !important;
     }
 
     .swe-menu-submenu-title {
@@ -410,7 +445,7 @@
 
 .versionBadge {
   font-size: 12px;
-  color: #1a171673;
+  color: var(--console-management-text-muted);
   font-weight: 600;
   line-height: 1;
   position: relative;
@@ -427,13 +462,13 @@
 
 .collapseBtn {
   margin: auto;
-  color: #3769fc;
+  color: var(--console-management-primary);
 }
 
 // ─── Auth actions (account + logout) ──────────────────────────────────────────
 .authActions {
-  padding: 10px 8px;
-  border-top: 1px solid #f0f0f0;
+  padding: 10px 4px 8px;
+  border-top: 1px solid var(--console-management-border);
 }
 
 .authBtn {
@@ -441,11 +476,16 @@
   align-items: center;
   gap: 8px;
   justify-content: flex-start;
-  color: rgba(0, 0, 0, 0.65);
+  color: var(--console-management-text-secondary);
+  border-radius: 8px;
 
   &:hover {
-    color: rgba(0, 0, 0, 0.88) !important;
-    background: rgba(0, 0, 0, 0.04) !important;
+    color: var(--console-management-text) !important;
+    background: color-mix(
+      in srgb,
+      var(--console-management-primary) 9%,
+      transparent
+    ) !important;
   }
 }
 
@@ -463,20 +503,24 @@
   z-index: 10;
   width: 100%;
   margin: 0;
-  padding: 8px 0;
+  padding: 8px 2px 2px;
   display: flex;
   align-items: center;
   justify-content: flex-end;
 }
 
 .collapseToggle {
-  color: rgba(0, 0, 0, 0.45);
+  width: 36px;
+  height: 36px;
+  color: var(--console-management-text-secondary);
+  border: 1px solid transparent;
   border-radius: 8px;
   transition: all 0.2s;
 
   &:hover {
-    background: rgba(0, 0, 0, 0.06) !important;
-    color: #3769fc !important;
+    background: var(--console-management-surface) !important;
+    border-color: var(--console-management-border-strong) !important;
+    color: var(--console-management-primary) !important;
   }
 }
 
@@ -503,22 +547,27 @@
   display: flex;
   align-items: center;
   justify-content: center;
-  border-radius: 10px;
+  border-radius: 8px;
   border: none;
   background: transparent;
   cursor: pointer;
-  color: rgba(0, 0, 0, 0.55);
+  color: var(--console-management-text-secondary);
   transition: all 0.15s;
 
   &:hover {
-    background: rgba(0, 0, 0, 0.06);
-    color: rgba(0, 0, 0, 0.88);
+    background: color-mix(
+      in srgb,
+      var(--console-management-primary) 9%,
+      transparent
+    );
+    color: var(--console-management-text);
   }
 }
 
 .collapsedNavItemActive {
-  background: rgba(55, 105, 252, 0.08) !important;
-  color: rgba(0, 0, 0, 0.88) !important;
+  background: var(--console-management-primary-soft) !important;
+  color: var(--console-management-primary) !important;
+  box-shadow: var(--console-management-shadow);
 }
 
 // ─── Update Modal ─────────────────────────────────────────────────────────────

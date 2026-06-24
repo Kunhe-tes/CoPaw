@@ -1,6 +1,10 @@
 import { createContext, useContextSelector } from "use-context-selector";
 import { IAgentScopeRuntimeWebUISessionsContext } from "../types/ISessions";
-import { IAgentScopeRuntimeWebUISessionAPI, IAgentScopeRuntimeWebUIMessage } from "../types";
+import {
+  IAgentScopeRuntimeWebUISessionAPI,
+  IAgentScopeRuntimeWebUIMessage,
+  IAgentScopeRuntimeWebUISessionUpdateOptions,
+} from "../types";
 import { useGetState, useMount } from "ahooks";
 import { IAgentScopeRuntimeWebUISession } from "../types/ISessions";
 import React from "react";
@@ -8,16 +12,45 @@ import { ChatAnywhereMessagesContext } from "./ChatAnywhereMessagesContext";
 import { useChatAnywhereOptions } from "./ChatAnywhereOptionsContext";
 import ReactDOM from "react-dom";
 import { useAsyncEffect } from "ahooks";
-import { emit } from "./useChatAnywhereEventEmitter";
+import useChatAnywhereEventEmitter, {
+  emit,
+} from "./useChatAnywhereEventEmitter";
 import { getInitialSessionId } from "@/pages/Chat/sessionApi/initialSessionSelection";
 import { shouldApplySessionLoadResult } from "@/pages/Chat/sessionApi/sessionRaceGuard";
+
+export const SESSION_TITLE_PATCH_EVENT = "patchSessionTitle";
+export const SESSION_TITLE_GENERATED_META_KEY = "session_title_generated";
+
+interface SessionTitlePatchPayload {
+  chat_id?: string;
+  session_id?: string;
+  session_title?: string;
+}
+
+interface NormalizedSessionTitlePatchPayload {
+  chat_id?: string;
+  session_id?: string;
+  session_title: string;
+}
+
+type SessionWithTitleIdentity = IAgentScopeRuntimeWebUISession & {
+  meta?: Record<string, unknown>;
+  realId?: string;
+  sessionId?: string;
+};
 
 interface SessionApiWithIntent {
   setSelectedSessionIntent?: (sessionId: string | undefined | null) => void;
 }
 
+interface SessionApiWithTitlePatch extends SessionApiWithIntent {
+  patchSessionTitle?: (
+    payload: unknown,
+  ) => IAgentScopeRuntimeWebUISession[] | void;
+}
+
 interface SessionOptions {
-  api?: IAgentScopeRuntimeWebUISessionAPI & SessionApiWithIntent;
+  api?: IAgentScopeRuntimeWebUISessionAPI & SessionApiWithTitlePatch;
 }
 
 interface LoadSessionMessagesOptions {
@@ -84,7 +117,10 @@ async function loadSessionMessages({
     );
 
     if (session?.generating) {
-      emit({ type: "handleReconnect", data: { session_id: requestedSessionId } });
+      emit({
+        type: "handleReconnect",
+        data: { session_id: requestedSessionId },
+      });
     }
 
     return true;
@@ -96,6 +132,96 @@ async function loadSessionMessages({
       setSessionLoading?.(false);
     }
   }
+}
+
+function getTitlePatchPayload(
+  payload: unknown,
+): NormalizedSessionTitlePatchPayload | undefined {
+  if (!payload || typeof payload !== "object") {
+    return undefined;
+  }
+
+  const titlePatch = payload as SessionTitlePatchPayload;
+  const sessionTitle =
+    typeof titlePatch.session_title === "string"
+      ? titlePatch.session_title.trim()
+      : "";
+  if (!sessionTitle) {
+    return undefined;
+  }
+
+  const sessionId =
+    typeof titlePatch.session_id === "string"
+      ? titlePatch.session_id.trim()
+      : "";
+  const chatId =
+    typeof titlePatch.chat_id === "string" ? titlePatch.chat_id.trim() : "";
+  if (!sessionId && !chatId) {
+    return undefined;
+  }
+
+  return {
+    chat_id: chatId || undefined,
+    session_id: sessionId || undefined,
+    session_title: sessionTitle,
+  };
+}
+
+function sessionMatchesTitlePatch(
+  session: SessionWithTitleIdentity,
+  payload: NormalizedSessionTitlePatchPayload,
+) {
+  const candidateIds = new Set<string>(
+    [payload.session_id, payload.chat_id].filter((id): id is string =>
+      Boolean(id),
+    ),
+  );
+
+  return [session.id, session.realId, session.sessionId].some(
+    (id) => typeof id === "string" && candidateIds.has(id),
+  );
+}
+
+export function patchSessionTitleInList(
+  sessions: IAgentScopeRuntimeWebUISession[],
+  payload: unknown,
+) {
+  const titlePatch = getTitlePatchPayload(payload);
+  if (!titlePatch) {
+    return sessions;
+  }
+
+  let changed = false;
+  const patchedSessions = sessions.map((session) => {
+    const sessionWithIdentity = session as SessionWithTitleIdentity;
+    if (!sessionMatchesTitlePatch(sessionWithIdentity, titlePatch)) {
+      return session;
+    }
+    if (sessionWithIdentity.meta?.session_kind === "task") {
+      return session;
+    }
+
+    const generatedMeta =
+      sessionWithIdentity.meta?.[SESSION_TITLE_GENERATED_META_KEY] === true;
+    if (
+      sessionWithIdentity.name === titlePatch.session_title &&
+      generatedMeta
+    ) {
+      return session;
+    }
+
+    changed = true;
+    return {
+      ...sessionWithIdentity,
+      name: titlePatch.session_title,
+      meta: {
+        ...sessionWithIdentity.meta,
+        [SESSION_TITLE_GENERATED_META_KEY]: true,
+      },
+    };
+  });
+
+  return changed ? patchedSessions : sessions;
 }
 
 export const ChatAnywhereSessionsContext =
@@ -122,7 +248,9 @@ export function ChatAnywhereSessionsContextProvider(props: {
   const [currentSessionId, setCurrentSessionId, getCurrentSessionId] =
     useGetState<string | undefined>(undefined);
   const [isSessionLoading, setSessionLoading] = useGetState<boolean>(false);
-  const [isSessionsListLoading, setSessionsListLoading] = useGetState<boolean>(true);
+  const [isSessionsListLoading, setSessionsListLoading] =
+    useGetState<boolean>(true);
+  const sessionApi = options.api;
 
   useMount(async () => {
     setSessionsListLoading(true);
@@ -139,6 +267,17 @@ export function ChatAnywhereSessionsContextProvider(props: {
       setSessionsListLoading(false);
     }
   });
+
+  useChatAnywhereEventEmitter(
+    {
+      type: SESSION_TITLE_PATCH_EVENT,
+      callback: (event) => {
+        sessionApi?.patchSessionTitle?.(event.detail);
+        setSessions(patchSessionTitleInList(getSessions(), event.detail));
+      },
+    },
+    [getSessions, sessionApi, setSessions],
+  );
 
   return (
     <ChatAnywhereSessionsContext.Provider
@@ -202,12 +341,8 @@ export const useChatAnywhereSessionsState = () => {
 };
 
 export const useChatAnywhereSessions = () => {
-  const {
-    setSessions,
-    getSessions,
-    getCurrentSessionId,
-    setCurrentSessionId,
-  } = useContextSelector(ChatAnywhereSessionsContext, (v) => v);
+  const { setSessions, getSessions, getCurrentSessionId, setCurrentSessionId } =
+    useContextSelector(ChatAnywhereSessionsContext, (v) => v);
   const options = useChatAnywhereOptions((v) => v.session);
   const setMessages = useContextSelector(
     ChatAnywhereMessagesContext,
@@ -227,9 +362,12 @@ export const useChatAnywhereSessions = () => {
   );
 
   const updateSession = React.useCallback(
-    async (session: Partial<IAgentScopeRuntimeWebUISession>) => {
+    async (
+      session: Partial<IAgentScopeRuntimeWebUISession>,
+      updateOptions?: IAgentScopeRuntimeWebUISessionUpdateOptions,
+    ) => {
       const res = session.id
-        ? await options.api.updateSession(session)
+        ? await options.api.updateSession(session, updateOptions)
         : await options.api.createSession(session);
 
       setSessions(res);

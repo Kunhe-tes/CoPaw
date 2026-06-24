@@ -67,6 +67,37 @@ class TestMonitorSyncClient:
         # Should not raise, just return silently
         await client.sync_job(job)
 
+    @pytest.mark.asyncio
+    async def test_claim_due_notifications_sends_source_ids(self):
+        """领取通知请求需要带上配置的 source 过滤范围。"""
+        client = MonitorSyncClient("http://test:8080/api")
+        posted = {}
+
+        class _Response:
+            status_code = 200
+            text = ""
+
+            def json(self):
+                return []
+
+        class _HttpClient:
+            async def post(self, path, json):
+                posted["path"] = path
+                posted["json"] = json
+                return _Response()
+
+        client._client = _HttpClient()
+
+        await client.claim_due_notifications(
+            lock_owner="worker-1",
+            now_utc=datetime(2026, 5, 19, 10, 0, tzinfo=timezone.utc),
+            limit=5,
+            source_ids=["source-a", "source-b"],
+        )
+
+        assert posted["path"] == "/monitor/sync/notifications/claim"
+        assert posted["json"]["source_ids"] == ["source-a", "source-b"]
+
 
 class TestSyncRequestFormat:
     """Tests for sync request data format."""

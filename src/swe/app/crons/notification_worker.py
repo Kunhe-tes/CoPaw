@@ -6,6 +6,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import re
 import socket
 from datetime import datetime, timezone
 from typing import Any, Optional
@@ -21,6 +22,7 @@ logger = logging.getLogger(__name__)
 SCAN_INTERVAL_ENV = "SWE_CRON_NOTIFICATION_SCAN_SECONDS"
 BATCH_SIZE_ENV = "SWE_CRON_NOTIFICATION_BATCH_SIZE"
 MAX_ATTEMPTS_ENV = "SWE_CRON_NOTIFICATION_MAX_ATTEMPTS"
+SOURCE_IDS_ENV = "SWE_CRON_NOTIFICATION_SOURCE_IDS"
 
 
 class CronNotificationWorker:
@@ -56,6 +58,7 @@ class CronNotificationWorker:
             minimum=1,
             maximum=10,
         )
+        self._source_ids = _get_source_ids_env()
         self._app_timezone = app_timezone or _load_app_timezone()
         self._lock_owner = f"{socket.gethostname()}:{os.getpid()}:{uuid4()}"
         self._task: Optional[asyncio.Task] = None
@@ -86,6 +89,7 @@ class CronNotificationWorker:
             lock_owner=self._lock_owner,
             now_utc=now_utc,
             limit=self._batch_size,
+            source_ids=self._source_ids,
         )
         for row in rows:
             await self._send_one(row)
@@ -161,3 +165,13 @@ def _load_app_timezone() -> str:
         return load_config().user_timezone or "UTC"
     except Exception:
         return "UTC"
+
+
+def _get_source_ids_env() -> list[str] | None:
+    raw_value = os.environ.get(SOURCE_IDS_ENV, "")
+    source_ids = []
+    for item in re.split(r"[\s,]+", raw_value):
+        source_id = item.strip()
+        if source_id and source_id not in source_ids:
+            source_ids.append(source_id)
+    return source_ids or None

@@ -1,7 +1,8 @@
 import { useState, useEffect, useCallback } from "react";
 import { Modal, Radio, Alert } from "@agentscope-ai/design";
 import { useTranslation } from "react-i18next";
-import { TenantTargetPicker } from "../../../../components/TenantTargetPicker";
+import { getUserId } from "../../../../utils/identity";
+import { TenantSelector } from "../../../../components/TenantSelector";
 import api from "../../../../api";
 import type { AgentConfigDistributionTenantResult } from "../../../../api/types/agent";
 import styles from "./DistributeModal.module.less";
@@ -22,30 +23,16 @@ export function DistributeModal({
   onSuccess,
 }: DistributeModalProps) {
   const { t } = useTranslation();
-  const [tenantIds, setTenantIds] = useState<string[]>([]);
   const [selectedTenantIds, setSelectedTenantIds] = useState<string[]>([]);
   const [overwrite, setOverwrite] = useState(true);
-  const [loading, setLoading] = useState(false);
   const [distributing, setDistributing] = useState(false);
+  const currentTenantId = getUserId();
 
-  // 打开时加载租户列表
+  // 打开时清空选择
   useEffect(() => {
     if (!open) return;
-    setLoading(true);
     setSelectedTenantIds([]);
-    api
-      .listAgentConfigDistributionTenants()
-      .then((result) => {
-        setTenantIds(result.tenant_ids || []);
-      })
-      .catch((err) => {
-        const errMsg = err instanceof Error ? err.message : String(err);
-        Modal.error({ title: t("common.error"), content: errMsg });
-      })
-      .finally(() => {
-        setLoading(false);
-      });
-  }, [open, t]);
+  }, [open]);
 
   const handleDistribute = useCallback(async () => {
     if (!selectedTenantIds.length) return;
@@ -56,8 +43,11 @@ export function DistributeModal({
         target_tenant_ids: selectedTenantIds,
         overwrite,
       });
-      const items: AgentConfigDistributionTenantResult[] =
-        Array.isArray(result.results) ? result.results : [];
+      const items: AgentConfigDistributionTenantResult[] = Array.isArray(
+        result.results,
+      )
+        ? result.results
+        : [];
       const succeeded = items.filter((item) => item.success);
       const failed = items.filter((item) => !item.success);
 
@@ -133,7 +123,7 @@ export function DistributeModal({
       okText={t("agentConfig.distributeConfirm")}
       cancelText={t("common.cancel")}
       confirmLoading={distributing}
-      okButtonProps={{ disabled: !selectedTenantIds.length || loading }}
+      okButtonProps={{ disabled: !selectedTenantIds.length }}
       width={640}
     >
       <div className={styles.modalContent}>
@@ -152,19 +142,15 @@ export function DistributeModal({
             value={overwrite}
             onChange={(e) => setOverwrite(e.target.value)}
           >
-            <Radio value={true}>
-              {t("agentConfig.distributeOverwrite")}
-            </Radio>
-            <Radio value={false}>
-              {t("agentConfig.distributeFillEmpty")}
-            </Radio>
+            <Radio value={true}>{t("agentConfig.distributeOverwrite")}</Radio>
+            <Radio value={false}>{t("agentConfig.distributeFillEmpty")}</Radio>
           </Radio.Group>
         </div>
 
-        <TenantTargetPicker
-          tenantIds={tenantIds}
+        <TenantSelector
           selectedTenantIds={selectedTenantIds}
           onChange={setSelectedTenantIds}
+          excludeTenantId={currentTenantId}
         />
       </div>
     </Modal>

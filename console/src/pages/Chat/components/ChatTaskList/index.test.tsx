@@ -47,9 +47,41 @@ function taskJob(
   };
 }
 
+function pausedTask(
+  id: string,
+  unreadCount = 0,
+  pauseReason: "manual" | "auto_unread_threshold" = "manual",
+): CronJobSpecOutput {
+  return taskJob({
+    id,
+    name: `暂停任务 ${id}`,
+    enabled: false,
+    task: {
+      visible_in_my_tasks: true,
+      has_scheduled_result: false,
+      latest_scheduled_preview: "",
+      unread_execution_count: unreadCount,
+      is_running: false,
+      is_paused: true,
+      pause_reason: pauseReason,
+    },
+  });
+}
+
 describe("ChatTaskList actions", () => {
   afterEach(() => {
     cleanup();
+  });
+
+  it("shows a non-interactive fallback when there are no tasks", () => {
+    render(<ChatTaskList tasks={[]} />);
+
+    expect(screen.getByText("暂无任务")).toBeInTheDocument();
+    expect(
+      screen.getByText("创建任务，让 AI 帮你自动推进"),
+    ).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "去创建" })).toBeNull();
+    expect(screen.queryByRole("link", { name: "去创建" })).toBeNull();
   });
 
   it("opens stop, execute and delete actions from the overflow menu", async () => {
@@ -112,6 +144,7 @@ describe("ChatTaskList actions", () => {
     render(
       <ChatTaskList
         tasks={[task]}
+        selectedTaskId={task.id}
         onTaskResume={onTaskResume}
         onTaskDelete={vi.fn()}
       />,
@@ -133,6 +166,80 @@ describe("ChatTaskList actions", () => {
     expect(onTaskResume).toHaveBeenCalledWith(task);
   });
 
+  it("collapses paused tasks by default without unread aggregation", () => {
+    render(
+      <ChatTaskList
+        tasks={[
+          taskJob({ id: "active", name: "正常任务" }),
+          pausedTask("p1", 3),
+        ]}
+      />,
+    );
+
+    const toggle = screen.getByRole("button", { name: "已暂停任务 1" });
+    const activeTask = screen.getByText("正常任务");
+    expect(toggle).toHaveAttribute("aria-expanded", "false");
+    expect(activeTask).toBeVisible();
+    expect(
+      toggle.compareDocumentPosition(activeTask) &
+        Node.DOCUMENT_POSITION_FOLLOWING,
+    ).not.toBe(0);
+    expect(screen.queryByText("暂停任务 p1")).not.toBeVisible();
+    expect(toggle).not.toHaveTextContent("3");
+  });
+
+  it("expands and collapses paused tasks from the disclosure", () => {
+    render(<ChatTaskList tasks={[pausedTask("p1")]} />);
+
+    const toggle = screen.getByRole("button", { name: "已暂停任务 1" });
+    fireEvent.click(toggle);
+    expect(toggle).toHaveAttribute("aria-expanded", "true");
+    expect(screen.getByText("暂停任务 p1")).toBeVisible();
+
+    fireEvent.click(toggle);
+    expect(toggle).toHaveAttribute("aria-expanded", "false");
+    expect(screen.getByText("暂停任务 p1")).not.toBeVisible();
+  });
+
+  it("automatically expands when the selected task is paused", async () => {
+    const task = pausedTask("selected");
+    render(<ChatTaskList tasks={[task]} selectedTaskId={task.id} />);
+
+    await waitFor(() => {
+      expect(
+        screen.getByRole("button", { name: "已暂停任务 1" }),
+      ).toHaveAttribute("aria-expanded", "true");
+    });
+    expect(screen.getByText("暂停任务 selected")).toBeVisible();
+  });
+
+  it("shows cleaned text for auto-paused tasks with cleared unread count", async () => {
+    const task = pausedTask("cleaned", 0, "auto_unread_threshold");
+    render(<ChatTaskList tasks={[task]} selectedTaskId={task.id} />);
+
+    await waitFor(() => {
+      expect(screen.getByText("已自动暂停 · 已清理")).toBeVisible();
+    });
+    expect(screen.queryByText("已自动暂停 · 连续 0 次未读")).toBeNull();
+  });
+
+  it("keeps the group collapsed when an unselected task becomes paused", () => {
+    const active = taskJob({ id: "changing", name: "状态变化任务" });
+    const { rerender } = render(<ChatTaskList tasks={[active]} />);
+
+    rerender(<ChatTaskList tasks={[pausedTask("changing")]} />);
+
+    expect(
+      screen.getByRole("button", { name: "已暂停任务 1" }),
+    ).toHaveAttribute("aria-expanded", "false");
+    expect(screen.getByText("暂停任务 changing")).not.toBeVisible();
+  });
+
+  it("does not render a paused disclosure without paused tasks", () => {
+    render(<ChatTaskList tasks={[taskJob()]} />);
+    expect(screen.queryByText(/已暂停任务/)).toBeNull();
+  });
+
   it("shows completed status instead of scheduled result preview", () => {
     const task = taskJob({
       task: {
@@ -143,7 +250,7 @@ describe("ChatTaskList actions", () => {
         is_running: false,
         is_paused: false,
         pause_reason: null,
-        last_scheduled_run_at: "2026-05-21T08:00:00Z" as any,
+        last_scheduled_run_at: "2026-05-21T08:00:00Z",
       },
     });
 
@@ -172,5 +279,35 @@ describe("ChatTaskList actions", () => {
     expect(
       container.querySelector(".chat-task-list-item-action-trigger"),
     ).toBeInTheDocument();
+  });
+
+  it("shows upcoming run times in a styled hover tooltip", async () => {
+    const task = taskJob({
+      state: {
+        next_run_at: "2026-06-04T01:00:00Z",
+        next_run_times: [
+          "2026-06-04T01:00:00Z",
+          "2026-06-05T01:00:00Z",
+          "2026-06-06T01:00:00Z",
+        ],
+      },
+    });
+    const { container } = render(<ChatTaskList tasks={[task]} />);
+
+    const nextRun = container.querySelector(".chat-task-list-item-next-run");
+
+    expect(nextRun).not.toHaveAttribute("title");
+    fireEvent.mouseEnter(nextRun as Element);
+
+    await waitFor(() => {
+      expect(screen.getByText("之后三次运行时间")).toBeInTheDocument();
+    });
+    const tooltip = screen.getByRole("tooltip");
+    expect(tooltip).toHaveTextContent("1");
+    expect(tooltip).toHaveTextContent("2");
+    expect(tooltip).toHaveTextContent("3");
+    expect(tooltip).toHaveTextContent("06-04");
+    expect(tooltip).toHaveTextContent("06-05");
+    expect(tooltip).toHaveTextContent("06-06");
   });
 });

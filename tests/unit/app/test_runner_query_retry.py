@@ -3,10 +3,18 @@
 
 import asyncio
 import errno
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, patch
 
 import pytest
 
+from src.swe.app.runner.runner import AgentRunner
 from src.swe.app.runner.retry_classifier import is_query_retryable
+from src.swe.tracing.manager import (
+    TraceContext,
+    get_current_trace,
+    set_current_trace,
+)
 
 # ── is_query_retryable 基础分类测试 ──
 
@@ -220,16 +228,213 @@ class TestHttpxRetryable:
         except ImportError:
             pytest.skip("httpx not installed")
 
-    def test_httpx_remote_protocol_error_retryable(self):
-        try:
-            import httpx
 
-            assert (
-                is_query_retryable(httpx.RemoteProtocolError("protocol"))
-                is True
-            )
-        except ImportError:
-            pytest.skip("httpx not installed")
+@pytest.mark.asyncio
+async def test_end_trace_if_needed_clears_attached_trace_context(tmp_path):
+    runner = AgentRunner(agent_id="test-agent", workspace_dir=tmp_path)
+    attached_ctx = TraceContext(
+        trace_id="trace-1",
+        user_id="user-1",
+        session_id="session-1",
+        channel="console",
+        source_id="source-1",
+        attached=True,
+    )
+    set_current_trace(attached_ctx)
+
+    mock_trace_manager = AsyncMock()
+
+    with (
+        patch(
+            "src.swe.app.runner.runner.has_trace_manager",
+            return_value=True,
+        ),
+        patch(
+            "src.swe.app.runner.runner.get_trace_manager",
+            return_value=mock_trace_manager,
+        ),
+    ):
+        await runner._end_trace_if_needed("trace-1", status="completed")
+
+    assert get_current_trace() is None
+    mock_trace_manager.end_trace.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_start_query_trace_does_not_attach_stale_request_trace_id_by_default(
+    tmp_path,
+):
+    runner = AgentRunner(agent_id="test-agent", workspace_dir=tmp_path)
+    request = SimpleNamespace(
+        trace_id="trace-stale",
+        user_id="user-1",
+        session_id="session-1",
+        channel="console",
+        source_id="source-1",
+        channel_meta={},
+    )
+    start_trace = AsyncMock(return_value="trace-new")
+    trace_manager = SimpleNamespace(enabled=True, start_trace=start_trace)
+
+    with (
+        patch(
+            "src.swe.app.runner.runner.has_trace_manager",
+            return_value=True,
+        ),
+        patch(
+            "src.swe.app.runner.runner.get_trace_manager",
+            return_value=trace_manager,
+        ),
+        patch(
+            "src.swe.app.runner.runner.resolve_user_identity",
+            AsyncMock(
+                return_value=SimpleNamespace(user_name=None, bbk_id=None),
+            ),
+        ),
+    ):
+        trace_id = await runner._start_query_trace(request, [])
+
+    assert trace_id == "trace-new"
+    assert request.trace_id == "trace-new"
+    start_trace.assert_awaited_once()
+    kwargs = start_trace.await_args.kwargs
+    assert kwargs["trace_id"] is None
+    assert kwargs["attach_existing"] is False
+
+
+@pytest.mark.asyncio
+async def test_start_query_trace_allows_explicit_attach_existing_trace(
+    tmp_path,
+):
+    runner = AgentRunner(agent_id="test-agent", workspace_dir=tmp_path)
+    request = SimpleNamespace(
+        trace_id="trace-existing",
+        user_id="user-1",
+        session_id="session-1",
+        channel="console",
+        source_id="source-1",
+        channel_meta={"trace_attach_existing": True},
+    )
+    start_trace = AsyncMock(return_value="trace-existing")
+    trace_manager = SimpleNamespace(enabled=True, start_trace=start_trace)
+
+    with (
+        patch(
+            "src.swe.app.runner.runner.has_trace_manager",
+            return_value=True,
+        ),
+        patch(
+            "src.swe.app.runner.runner.get_trace_manager",
+            return_value=trace_manager,
+        ),
+        patch(
+            "src.swe.app.runner.runner.resolve_user_identity",
+            AsyncMock(
+                return_value=SimpleNamespace(user_name=None, bbk_id=None),
+            ),
+        ),
+    ):
+        trace_id = await runner._start_query_trace(request, [])
+
+    assert trace_id == "trace-existing"
+    start_trace.assert_awaited_once()
+    kwargs = start_trace.await_args.kwargs
+    assert kwargs["trace_id"] == "trace-existing"
+    assert kwargs["attach_existing"] is True
+
+
+@pytest.mark.asyncio
+async def test_end_trace_if_needed_prevents_attached_trace_leak_to_next_request(
+    tmp_path,
+):
+    runner = AgentRunner(agent_id="test-agent", workspace_dir=tmp_path)
+    set_current_trace(
+        TraceContext(
+            trace_id="trace-attached",
+            user_id="user-1",
+            session_id="session-1",
+            channel="console",
+            source_id="source-1",
+            attached=True,
+        ),
+    )
+
+    with (
+        patch(
+            "src.swe.app.runner.runner.has_trace_manager",
+            return_value=True,
+        ),
+        patch(
+            "src.swe.app.runner.runner.get_trace_manager",
+            return_value=AsyncMock(),
+        ),
+    ):
+        await runner._end_trace_if_needed(
+            "trace-attached",
+            status="completed",
+        )
+
+    assert get_current_trace() is None
+
+    next_request_ctx = TraceContext(
+        trace_id="trace-next",
+        user_id="user-1",
+        session_id="session-2",
+        channel="console",
+        source_id="source-1",
+    )
+    set_current_trace(next_request_ctx)
+    assert get_current_trace().trace_id == "trace-next"
+    assert get_current_trace().attached is False
+    set_current_trace(None)
+
+
+@pytest.mark.asyncio
+async def test_end_trace_if_needed_keeps_other_attached_trace_context(
+    tmp_path,
+):
+    runner = AgentRunner(agent_id="test-agent", workspace_dir=tmp_path)
+    attached_ctx = TraceContext(
+        trace_id="trace-other",
+        user_id="user-1",
+        session_id="session-1",
+        channel="console",
+        source_id="source-1",
+        attached=True,
+    )
+    set_current_trace(attached_ctx)
+
+    mock_trace_manager = AsyncMock()
+
+    with (
+        patch(
+            "src.swe.app.runner.runner.has_trace_manager",
+            return_value=True,
+        ),
+        patch(
+            "src.swe.app.runner.runner.get_trace_manager",
+            return_value=mock_trace_manager,
+        ),
+    ):
+        await runner._end_trace_if_needed("trace-current", status="completed")
+
+    assert get_current_trace() is attached_ctx
+    mock_trace_manager.end_trace.assert_awaited_once_with(
+        "trace-current",
+        status="completed",
+    )
+    set_current_trace(None)
+
+
+def test_httpx_remote_protocol_error_retryable():
+    try:
+        import httpx
+
+        assert (
+            is_query_retryable(httpx.RemoteProtocolError("protocol")) is True
+        )
+    except ImportError:
+        pytest.skip("httpx not installed")
 
 
 # ── 退避计算测试 ──

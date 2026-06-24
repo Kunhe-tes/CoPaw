@@ -17,9 +17,8 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 from .skills import BroadcastTenantListResponse
 from ..agent_context import get_current_agent_id
-from ...config.context import resolve_scope_preferred_tenant_id
 from ...config.utils import (
-    get_tenant_working_dir_strict,
+    get_tenant_request_working_dir,
     list_logical_tenant_ids,
 )
 
@@ -255,6 +254,7 @@ async def list_broadcast_tenants(
         tenant_ids=await list_logical_tenant_ids(
             getattr(request.state, "source_id", None),
             source_filter=True,
+            include_templates=True,
         ),
     )
 
@@ -300,12 +300,7 @@ async def broadcast_workspace_files(
     tenant_id = str(getattr(request.state, "tenant_id", None) or "default")
     raw_source_id = getattr(request.state, "source_id", None)
     source_id = str(raw_source_id) if raw_source_id else None
-    effective_tenant_id = resolve_scope_preferred_tenant_id(
-        tenant_id,
-        source_id,
-        getattr(request.state, "scope_id", None),
-    )
-    source_working_dir = get_tenant_working_dir_strict(effective_tenant_id)
+    source_working_dir = get_tenant_request_working_dir(tenant_id)
 
     # MD files live in the default agent workspace, not the tenant root.
     default_ws_dir = source_working_dir / "workspaces" / get_current_agent_id()

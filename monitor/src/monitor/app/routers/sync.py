@@ -37,6 +37,7 @@ class ClaimNotificationsRequest(BaseModel):
     now_utc: datetime | None = None
     limit: int = Field(default=20, ge=1, le=100)
     stale_lock_seconds: int = Field(default=600, ge=60, le=3600)
+    source_ids: list[str] = Field(default_factory=list)
 
 
 class MarkNotificationSentRequest(BaseModel):
@@ -180,6 +181,7 @@ async def claim_notifications(
             now_utc=request.now_utc or datetime.now(timezone.utc),
             limit=request.limit,
             stale_lock_seconds=request.stale_lock_seconds,
+            source_ids=request.source_ids,
         )
     except Exception as e:
         logger.error("Failed to claim cron notifications: %s", e)

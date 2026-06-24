@@ -23,17 +23,11 @@ import {
   Users,
   Zap,
 } from "lucide-react";
-import { DatePicker, Select, Switch, Tooltip, message } from "antd";
+import { DatePicker, Select, Tooltip, message } from "antd";
 import ReactECharts from "echarts-for-react";
 import type { Dayjs } from "dayjs";
 import dayjs from "dayjs";
 import styles from "./index.module.less";
-import { htmlPreviewEventsApi } from "../../../api/modules/htmlPreviewEvents";
-import type {
-  HtmlPreviewCustomerClickItem,
-  HtmlPreviewClickSummaryItem,
-  HtmlPreviewListSummaryItem,
-} from "../../../api/types/htmlPreviewEvents";
 import {
   tracingApi,
   type BranchMetricItem,
@@ -45,6 +39,8 @@ import {
 } from "../../../api/modules/tracing";
 import UserDetailModal from "./components/UserDetailModal";
 import SkillDetailModal from "./components/SkillDetailModal";
+import ErrorDetailModal from "./components/ErrorDetailModal";
+import HtmlPreviewClickAnalysis from "./components/HtmlPreviewClickAnalysis";
 import { BBK_ID_MAP, BBK_ID_TO_NAME_MAP, getBbkDisplayName } from "../../../constants/bbk";
 import {
   formatChange,
@@ -323,16 +319,18 @@ function TaskFunnel({ taskStatusSummary }: { taskStatusSummary: TaskStatusSummar
       trigger: "item",
       formatter: (params: { name: string; data: { rawValue: number } }) =>
         `${params.name}: ${formatNumber(params.data.rawValue)}`,
+      extraCssText: "max-width: 200px; white-space: normal;",
     },
     legend: {
       data: chartData.map((item) => item.name),
-      top: 0,
+      orient: "horizontal",
+      bottom: 0,
       itemWidth: 10,
       itemHeight: 10,
-      itemGap: 16,
+      itemGap: 12,
       textStyle: {
         color: "#475569",
-        fontSize: 12,
+        fontSize: 11,
         fontWeight: 500,
       },
     },
@@ -349,8 +347,8 @@ function TaskFunnel({ taskStatusSummary }: { taskStatusSummary: TaskStatusSummar
         type: "funnel",
         left: "5%",
         right: "40%",
-        top: "15%",
-        bottom: "10%",
+        top: "5%",
+        bottom: "25%",
         min: 0,
         max: totalTasks,
         minSize: "35%",
@@ -361,9 +359,9 @@ function TaskFunnel({ taskStatusSummary }: { taskStatusSummary: TaskStatusSummar
           show: true,
           position: "inside",
           formatter: (params: { name: string; data: { rawValue: number } }) =>
-            `${params.name}  ${formatNumber(params.data.rawValue)}`,
+            `${params.name}${formatNumber(params.data.rawValue)}`,
           color: "#fff",
-          fontSize: 12,
+          fontSize: 10,
           fontWeight: 600,
         },
         itemStyle: {
@@ -383,7 +381,7 @@ function TaskFunnel({ taskStatusSummary }: { taskStatusSummary: TaskStatusSummar
       {
         type: "group",
         left: "68%",
-        top: "28%",
+        top: "18%",
         children: [
           {
             type: "circle",
@@ -392,12 +390,12 @@ function TaskFunnel({ taskStatusSummary }: { taskStatusSummary: TaskStatusSummar
           },
           {
             type: "line",
-            shape: { x1: 3, y1: 0, x2: 3, y2: 30 },
+            shape: { x1: 3, y1: 0, x2: 3, y2: 20 },
             style: { stroke: "#94a3b8", lineWidth: 1, lineDash: [3, 2] },
           },
           {
             type: "circle",
-            shape: { cx: 3, cy: 30, r: 3 },
+            shape: { cx: 3, cy: 20, r: 3 },
             style: { fill: "#94a3b8" },
           },
           {
@@ -405,9 +403,9 @@ function TaskFunnel({ taskStatusSummary }: { taskStatusSummary: TaskStatusSummar
             style: {
               text: `→ ${successRate}%`,
               x: 12,
-              y: 15,
+              y: 10,
               fill: "#64748b",
-              fontSize: 11,
+              fontSize: 10,
               fontWeight: 500,
             },
           },
@@ -417,7 +415,7 @@ function TaskFunnel({ taskStatusSummary }: { taskStatusSummary: TaskStatusSummar
       {
         type: "group",
         left: "68%",
-        top: "56%",
+        top: "38%",
         children: [
           {
             type: "circle",
@@ -426,12 +424,12 @@ function TaskFunnel({ taskStatusSummary }: { taskStatusSummary: TaskStatusSummar
           },
           {
             type: "line",
-            shape: { x1: 3, y1: 0, x2: 3, y2: 30 },
+            shape: { x1: 3, y1: 0, x2: 3, y2: 20 },
             style: { stroke: "#94a3b8", lineWidth: 1, lineDash: [3, 2] },
           },
           {
             type: "circle",
-            shape: { cx: 3, cy: 30, r: 3 },
+            shape: { cx: 3, cy: 20, r: 3 },
             style: { fill: "#94a3b8" },
           },
           {
@@ -439,9 +437,9 @@ function TaskFunnel({ taskStatusSummary }: { taskStatusSummary: TaskStatusSummar
             style: {
               text: `→ ${readRate}%`,
               x: 12,
-              y: 15,
+              y: 10,
               fill: "#64748b",
-              fontSize: 11,
+              fontSize: 10,
               fontWeight: 500,
             },
           },
@@ -452,7 +450,7 @@ function TaskFunnel({ taskStatusSummary }: { taskStatusSummary: TaskStatusSummar
 
   return (
     <div className={styles.funnelWrap}>
-      <ReactECharts option={option} style={{ height: 160 }} />
+      <ReactECharts option={option} style={{ height: 200 }} />
     </div>
   );
 }
@@ -496,10 +494,9 @@ function getNiceAxisMax(value: number): number {
   }
   const magnitude = 10 ** Math.floor(Math.log10(value));
   const normalized = value / magnitude;
-  if (normalized <= 1) return magnitude;
-  if (normalized <= 2) return 2 * magnitude;
-  if (normalized <= 5) return 5 * magnitude;
-  return 10 * magnitude;
+  const candidates = [1, 1.5, 2, 2.5, 5, 10];
+  const candidate = candidates.find((item) => normalized <= item) ?? 10;
+  return candidate * magnitude;
 }
 
 function formatTrendAxisLabel(value: number, axisMax: number): string {
@@ -535,12 +532,12 @@ function buildTrendAxisTicks(axisMax: number): TrendAxisTick[] {
 }
 
 export function buildTrendSvgData(trendData: TrendDatum[]) {
-  const width = 428;
+  const width = 580;
   const height = 244;
-  const chartLeft = 34;
-  const chartRight = 34;
-  const chartTop = 18;
-  const chartBottom = 34;
+  const chartLeft = 18;
+  const chartRight = 18;
+  const chartTop = 10;
+  const chartBottom = 36;
   const chartWidth = width - chartLeft - chartRight;
   const chartHeight = height - chartTop - chartBottom;
   const rawMaxCalls = Math.max(
@@ -551,22 +548,16 @@ export function buildTrendSvgData(trendData: TrendDatum[]) {
     ...trendData.map((item) => safeNumber(item.users)),
     0,
   );
-  const maxCalls = Math.max(
-    rawMaxCalls,
-    1,
-  );
-  const maxUsers = Math.max(
-    rawMaxUsers,
-    1,
-  );
   const leftAxisMax = getNiceAxisMax(rawMaxUsers);
   const rightAxisMax = getNiceAxisMax(rawMaxCalls);
+  const userScaleMax = Math.max(leftAxisMax, 1);
+  const callScaleMax = Math.max(rightAxisMax, 1);
   const step = trendData.length > 1 ? chartWidth / (trendData.length - 1) : 0;
   const labelInterval = getLabelInterval(trendData.length);
   const barWidth = getBarWidth(trendData.length, step);
 
   const bars = trendData.map((item, index) => {
-    const barHeight = (safeNumber(item.users) / maxUsers) * (chartHeight - 8);
+    const barHeight = (safeNumber(item.users) / userScaleMax) * chartHeight;
     const x = chartLeft + index * step - barWidth / 2;
     const label = item.date.includes(":")
       ? dayjs(item.date).format("HH:mm")
@@ -587,7 +578,7 @@ export function buildTrendSvgData(trendData: TrendDatum[]) {
     const y =
       chartTop +
       chartHeight -
-      (safeNumber(item.calls) / maxCalls) * chartHeight;
+      (safeNumber(item.calls) / callScaleMax) * chartHeight;
     return { x, y };
   });
 
@@ -678,31 +669,22 @@ export default function BusinessOverviewPage() {
   const [activeHasMore, setActiveHasMore] = useState(true);
   const [activeLoading, setActiveLoading] = useState(false);
   const activeLoadingRef = useRef(false);
+  const activeListRef = useRef<HTMLDivElement | null>(null);
   // 用户过滤类型：filtered(过滤IT人员) / all(全部用户)
   const [activeFilterType, setActiveFilterType] = useState<"filtered" | "all">("all");
+  // 使用深度卡片默认隐藏
+  const [hideDepthCard] = useState(true);
   const [skills, setSkills] = useState<SkillUsage[]>([]);
   const [skillsPage, setSkillsPage] = useState(1);
   const [skillsHasMore, setSkillsHasMore] = useState(true);
   const [skillsLoading, setSkillsLoading] = useState(false);
   const skillsLoadingRef = useRef(false);
+  const skillsListRef = useRef<HTMLDivElement | null>(null);
   const [errorSummaryData, setErrorSummaryData] = useState<ErrorSummary | null>(null);
   const [taskStatusSummary, setTaskStatusSummary] =
     useState<TaskStatusSummary | null>(null);
   const [depthSummary, setDepthSummary] = useState<DepthSummary | null>(null);
-  const [htmlPreviewClicks, setHtmlPreviewClicks] = useState<
-    HtmlPreviewClickSummaryItem[]
-  >([]);
-  const [htmlPreviewLists, setHtmlPreviewLists] = useState<
-    HtmlPreviewListSummaryItem[]
-  >([]);
-  const [htmlPreviewCustomerClicks, setHtmlPreviewCustomerClicks] = useState<
-    HtmlPreviewCustomerClickItem[]
-  >([]);
-  const [selectedHtmlPreviewListKey, setSelectedHtmlPreviewListKey] =
-    useState<string>("all");
-  const [includeUnclickedCustomers, setIncludeUnclickedCustomers] =
-    useState(false);
-  const [htmlPreviewLoading, setHtmlPreviewLoading] = useState(false);
+  const [htmlPreviewRefreshKey, setHtmlPreviewRefreshKey] = useState(0);
   const [errorLoading, setErrorLoading] = useState(false);
   const errorLoadingRef = useRef(false);
   const [modalOpen, setModalOpen] = useState(false);
@@ -710,6 +692,7 @@ export default function BusinessOverviewPage() {
   const [selectedUserName, setSelectedUserName] = useState<string | null>(null);
   const [skillModalOpen, setSkillModalOpen] = useState(false);
   const [selectedSkillName, setSelectedSkillName] = useState("");
+  const [errorModalOpen, setErrorModalOpen] = useState(false);
   const [activeTrendIndex, setActiveTrendIndex] = useState<number | null>(null);
 
   const startDateText = useMemo(
@@ -724,6 +707,15 @@ export default function BusinessOverviewPage() {
   const effectiveBbkIds = useMemo(() => {
     return bbkIds.length === 0 ? undefined : bbkIds;
   }, [bbkIds]);
+  const cronJobOverviewPath = useMemo(() => {
+    const params = new URLSearchParams();
+    params.set("start_date", startDateText);
+    params.set("end_date", endDateText);
+    if (effectiveBbkIds?.length) {
+      params.set("bbk_ids", effectiveBbkIds.join(","));
+    }
+    return `/analytics/cron-job-overview?${params.toString()}`;
+  }, [effectiveBbkIds, endDateText, startDateText]);
 
   const transformUserData = useCallback(
     (items: Record<string, unknown>[]): UserRow[] =>
@@ -737,6 +729,11 @@ export default function BusinessOverviewPage() {
         lastActive: item.last_active
           ? dayjs(String(item.last_active)).format("YYYY-MM-DD HH:mm")
           : "-",
+        // 四种口径统计字段
+        manualCalls: safeNumber(item.manual_calls),
+        cronExecutions: safeNumber(item.cron_executions),
+        cronSuccess: safeNumber(item.cron_success),
+        cronReads: safeNumber(item.cron_reads),
       })),
     [],
   );
@@ -800,20 +797,30 @@ export default function BusinessOverviewPage() {
       setActiveLoading(true);
 
       try {
+        // 默认按主动使用次数排序，后端返回三个口径数据
         const result = await tracingApi.getUsers(page, 10, {
           start_date: startDateText,
           end_date: endDateText,
           bbk_ids: effectiveBbkIds?.join(","),
-          sort_by: "conversations",
+          sort_by: "manual_calls",
           filter_user_type: activeFilterType,
         });
         const mappedUsers = transformUserData(
           result.items as unknown as Record<string, unknown>[],
         );
-        setActiveUsers((previous) =>
-          append ? [...previous, ...mappedUsers] : mappedUsers,
-        );
-        setActiveHasMore(mappedUsers.length === 10);
+        setActiveUsers((previous) => {
+          if (!append) {
+            return mappedUsers;
+          }
+          // 按 userId 去重，避免分页数据漂移导致的重复
+          const existingIds = new Set(previous.map((u) => u.userId));
+          const dedupedUsers = mappedUsers.filter(
+            (u) => !existingIds.has(u.userId),
+          );
+          return [...previous, ...dedupedUsers];
+        });
+        const loadedCount = append ? page * 10 : mappedUsers.length;
+        setActiveHasMore(loadedCount < (result.total || 0));
       } catch (error) {
         console.error("Failed to fetch active users:", error);
       } finally {
@@ -842,13 +849,20 @@ export default function BusinessOverviewPage() {
         const rows = result.items || [];
 
         if (append) {
-          setSkills(prev => [...prev, ...rows]);
+          setSkills((prev) => {
+            // 按 skill_name 去重，避免分页数据漂移导致的重复
+            const existingNames = new Set(prev.map((s) => s.skill_name));
+            const dedupedSkills = rows.filter(
+              (s) => !existingNames.has(s.skill_name),
+            );
+            return [...prev, ...dedupedSkills];
+          });
         } else {
           setSkills(rows);
         }
 
-        // 如果返回的数据少于 pageSize，说明没有更多数据了
-        setSkillsHasMore(rows.length >= pageSize);
+        const loadedCount = append ? page * pageSize : rows.length;
+        setSkillsHasMore(loadedCount < (result.total || 0));
       } catch (error) {
         console.error("Failed to fetch skills:", error);
       } finally {
@@ -910,103 +924,29 @@ export default function BusinessOverviewPage() {
     }
   }, [effectiveBbkIds, endDateText, startDateText]);
 
-  const fetchHtmlPreviewClicks = useCallback(async () => {
-    setHtmlPreviewLoading(true);
-    try {
-      const params = {
-        startTime: dateRange[0].startOf("day").toISOString(),
-        endTime: dateRange[1].endOf("day").toISOString(),
-        bbkIds: effectiveBbkIds?.join(","),
-        limit: 100,
-      };
-      const selectedListKey =
-        selectedHtmlPreviewListKey === "all"
-          ? null
-          : selectedHtmlPreviewListKey;
-      const detailParams = {
-        ...params,
-        listKey: selectedListKey,
-      };
-      const [summaryResult, listResult, customerResult] = await Promise.allSettled([
-        htmlPreviewEventsApi.getSummary(detailParams),
-        htmlPreviewEventsApi.getLists(params),
-        htmlPreviewEventsApi.getCustomerClicks({
-          ...detailParams,
-          includeUnclicked: includeUnclickedCustomers,
-          limit: 500,
-        }),
-      ]);
-      if (summaryResult.status === "fulfilled") {
-        setHtmlPreviewClicks(summaryResult.value.items || []);
-      } else {
-        console.error(
-          "Failed to fetch HTML preview click summary:",
-          summaryResult.reason,
-        );
-        setHtmlPreviewClicks([]);
-      }
-      if (listResult.status === "fulfilled") {
-        setHtmlPreviewLists(listResult.value.items || []);
-      } else {
-        console.error(
-          "Failed to fetch HTML preview list summary:",
-          listResult.reason,
-        );
-        setHtmlPreviewLists([]);
-      }
-      if (customerResult.status === "fulfilled") {
-        setHtmlPreviewCustomerClicks(customerResult.value.items || []);
-      } else {
-        console.error(
-          "Failed to fetch HTML preview customer clicks:",
-          customerResult.reason,
-        );
-        setHtmlPreviewCustomerClicks([]);
-      }
-    } catch (error) {
-      console.error("Failed to fetch HTML preview click statistics:", error);
-      setHtmlPreviewClicks([]);
-      setHtmlPreviewLists([]);
-      setHtmlPreviewCustomerClicks([]);
-    } finally {
-      setHtmlPreviewLoading(false);
-    }
-  }, [
-    dateRange,
-    effectiveBbkIds,
-    includeUnclickedCustomers,
-    selectedHtmlPreviewListKey,
-  ]);
-
   useEffect(() => {
     fetchDashboard();
-    fetchSkills();
+    setSkills([]);
+    setSkillsPage(1);
+    setSkillsHasMore(true);
+    fetchSkills(1, false);
     fetchErrorSummary();
     fetchTaskStatusSummary();
     fetchDepthSummary();
-    fetchHtmlPreviewClicks();
     // 活跃用户请求由独立的 useEffect 处理
   }, [
     fetchDashboard,
     fetchDepthSummary,
     fetchErrorSummary,
-    fetchHtmlPreviewClicks,
     fetchSkills,
     fetchTaskStatusSummary,
   ]);
 
-  useEffect(() => {
-    if (
-      selectedHtmlPreviewListKey !== "all" &&
-      !htmlPreviewLists.some((item) => item.list_key === selectedHtmlPreviewListKey)
-    ) {
-      setSelectedHtmlPreviewListKey("all");
-    }
-  }, [htmlPreviewLists, selectedHtmlPreviewListKey]);
-
   // 活跃用户请求独立处理，避免 activeFilterType 变化触发其他请求
   useEffect(() => {
     setActivePage(1);
+    setActiveHasMore(true);
+    setActiveUsers([]);
     fetchActiveUsers(1, false);
   }, [
     fetchActiveUsers,
@@ -1089,6 +1029,40 @@ export default function BusinessOverviewPage() {
     [skillsHasMore, skillsPage, fetchSkills],
   );
 
+  useEffect(() => {
+    if (!skillsHasMore || skillsLoading || skills.length === 0) {
+      return;
+    }
+
+    const list = skillsListRef.current;
+    if (!list) {
+      return;
+    }
+
+    if (list.scrollHeight <= list.clientHeight + 4) {
+      const nextPage = skillsPage + 1;
+      setSkillsPage(nextPage);
+      fetchSkills(nextPage, true);
+    }
+  }, [fetchSkills, skills, skillsHasMore, skillsLoading, skillsPage]);
+
+  useEffect(() => {
+    if (!activeHasMore || activeLoading || activeUsers.length === 0) {
+      return;
+    }
+
+    const list = activeListRef.current;
+    if (!list) {
+      return;
+    }
+
+    if (list.scrollHeight <= list.clientHeight + 4) {
+      const nextPage = activePage + 1;
+      setActivePage(nextPage);
+      fetchActiveUsers(nextPage, true);
+    }
+  }, [activeHasMore, activeLoading, activePage, activeUsers, fetchActiveUsers]);
+
   const disabledDate = (current: Dayjs | null): boolean =>
     !!current && current.isAfter(dayjs().startOf("day"), "day");
 
@@ -1108,103 +1082,6 @@ export default function BusinessOverviewPage() {
     () => buildErrorSummary(errorSummaryData),
     [errorSummaryData],
   );
-  const selectedHtmlPreviewList = useMemo(
-    () =>
-      htmlPreviewLists.find(
-        (item) => item.list_key === selectedHtmlPreviewListKey,
-      ) || null,
-    [htmlPreviewLists, selectedHtmlPreviewListKey],
-  );
-  const displayedHtmlPreviewLists = useMemo(
-    () =>
-      selectedHtmlPreviewListKey === "all"
-        ? htmlPreviewLists
-        : htmlPreviewLists.filter(
-            (item) => item.list_key === selectedHtmlPreviewListKey,
-          ),
-    [htmlPreviewLists, selectedHtmlPreviewListKey],
-  );
-  const htmlPreviewListCount = displayedHtmlPreviewLists.length;
-  const htmlPreviewInsightClicks = useMemo(
-    () =>
-      displayedHtmlPreviewLists.reduce(
-        (sum, item) => sum + safeNumber(item.insight_count),
-        0,
-      ),
-    [displayedHtmlPreviewLists],
-  );
-  const htmlPreviewPhoneClicks = useMemo(
-    () =>
-      displayedHtmlPreviewLists.reduce(
-        (sum, item) => sum + safeNumber(item.phone_count),
-        0,
-      ),
-    [displayedHtmlPreviewLists],
-  );
-  const htmlPreviewPlanClicks = useMemo(
-    () =>
-      displayedHtmlPreviewLists.reduce(
-        (sum, item) => sum + safeNumber(item.plan_count),
-        0,
-      ),
-    [displayedHtmlPreviewLists],
-  );
-  const htmlPreviewTotalClicks = useMemo(
-    () =>
-      displayedHtmlPreviewLists.reduce(
-        (sum, item) => sum + safeNumber(item.total_click_count),
-        0,
-      ),
-    [displayedHtmlPreviewLists],
-  );
-  const htmlPreviewMaxActionClicks = Math.max(
-    htmlPreviewInsightClicks,
-    htmlPreviewPhoneClicks,
-    htmlPreviewPlanClicks,
-    1,
-  );
-  const htmlPreviewActionTotal =
-    htmlPreviewInsightClicks + htmlPreviewPhoneClicks + htmlPreviewPlanClicks;
-  const htmlPreviewInsightPercent =
-    htmlPreviewActionTotal > 0
-      ? Math.round((htmlPreviewInsightClicks / htmlPreviewActionTotal) * 100)
-      : 0;
-  const htmlPreviewPhonePercent =
-    htmlPreviewActionTotal > 0
-      ? Math.round((htmlPreviewPhoneClicks / htmlPreviewActionTotal) * 100)
-      : 0;
-  const htmlPreviewPlanPercent =
-    htmlPreviewActionTotal > 0
-      ? Math.round((htmlPreviewPlanClicks / htmlPreviewActionTotal) * 100)
-      : 0;
-  const htmlPreviewCustomerTotal = useMemo(
-    () =>
-      displayedHtmlPreviewLists.reduce(
-        (sum, item) => sum + safeNumber(item.customer_count),
-        0,
-      ),
-    [displayedHtmlPreviewLists],
-  );
-  const htmlPreviewClickedCustomerCount = useMemo(
-    () =>
-      displayedHtmlPreviewLists.reduce(
-        (sum, item) => sum + safeNumber(item.clicked_customer_count),
-        0,
-      ),
-    [displayedHtmlPreviewLists],
-  );
-  const htmlPreviewLatestClick = useMemo(() => {
-    const sortedClickTimes = htmlPreviewClicks
-      .map((item) => item.last_clicked_at)
-      .filter(Boolean)
-      .sort();
-    const latest = sortedClickTimes[sortedClickTimes.length - 1];
-    return latest ? dayjs(latest).format("YYYY-MM-DD HH:mm") : "-";
-  }, [htmlPreviewClicks]);
-  const hasHtmlPreviewAnalysisData =
-    htmlPreviewClicks.length > 0 ||
-    htmlPreviewLists.length > 0 ||
-    htmlPreviewCustomerClicks.length > 0;
   const trendSvg = useMemo(() => buildTrendSvgData(trendData), [trendData]);
   const activeTrendZone =
     activeTrendIndex === null ? null : trendSvg.hoverZones[activeTrendIndex] ?? null;
@@ -1289,6 +1166,17 @@ export default function BusinessOverviewPage() {
                 </Tooltip>
               )}
               allowClear
+              showSearch
+              filterOption={(input, option) => {
+                const searchValue = input.toLowerCase();
+                const optionValue = String(option?.value ?? "");
+                const optionLabel = BBK_ID_TO_NAME_MAP[optionValue] || "";
+                // 支持按分行号或分行名搜索
+                return (
+                  optionValue.toLowerCase().includes(searchValue) ||
+                  optionLabel.toLowerCase().includes(searchValue)
+                );
+              }}
             >
               {BBK_ID_MAP.map((item) => (
                 <Option key={item.value} value={item.value}>
@@ -1306,7 +1194,7 @@ export default function BusinessOverviewPage() {
                 fetchErrorSummary();
                 fetchTaskStatusSummary();
                 fetchDepthSummary();
-                fetchHtmlPreviewClicks();
+                setHtmlPreviewRefreshKey((value) => value + 1);
               }}
             >
               <RotateCw size={16} />
@@ -1393,7 +1281,7 @@ export default function BusinessOverviewPage() {
       </section>
 
       <section
-        className={styles.analysisGrid}
+        className={hideDepthCard ? styles.analysisGrid : styles.analysisGridWithDepth}
         data-testid="overview-analysis-grid"
       >
         <article className={styles.panelLarge}>
@@ -1425,6 +1313,7 @@ export default function BusinessOverviewPage() {
               <svg
                 viewBox={`0 0 ${trendSvg.width} ${trendSvg.height}`}
                 className={styles.trendSvg}
+                preserveAspectRatio="xMidYMid meet"
               >
                 <defs>
                   <linearGradient
@@ -1439,8 +1328,8 @@ export default function BusinessOverviewPage() {
                   </linearGradient>
                 </defs>
 
-                {[0, 1, 2, 3, 4].map((row) => {
-                  const y = trendSvg.chartTop + (trendSvg.chartHeight / 4) * row;
+                {[0, 1, 2, 3, 4, 5].map((row) => {
+                  const y = trendSvg.chartTop + (trendSvg.chartHeight / 5) * row;
                   return (
                     <line
                       key={`grid-${row}`}
@@ -1479,7 +1368,7 @@ export default function BusinessOverviewPage() {
                       }
                     />
                     {bar.showLabel && (
-                      <text x={bar.x + bar.width / 2} y={233} className={styles.axisLabel}>
+                      <text x={bar.x + bar.width / 2} y={trendSvg.height - trendSvg.chartBottom + 22} className={styles.axisLabel}>
                         {bar.label}
                       </text>
                     )}
@@ -1586,10 +1475,19 @@ export default function BusinessOverviewPage() {
           <div className={styles.rankHeader}>
             <span>排名</span>
             <span>用户</span>
-            <span>使用次数</span>
+            <span>任务执行</span>
+            <span>任务成功</span>
+            <span>结果查看</span>
+            <span>主动调用</span>
           </div>
-          <div className={styles.rankList} onScroll={handleActiveScroll}>
-            {activeUsers.length === 0 ? (
+          <div
+            ref={activeListRef}
+            className={styles.rankList}
+            onScroll={handleActiveScroll}
+          >
+            {activeLoading && activeUsers.length === 0 ? (
+              <div className={styles.listFootnote}>加载中...</div>
+            ) : activeUsers.length === 0 ? (
               <div className={styles.emptyState}>暂无用户数据</div>
             ) : (
               activeUsers.map((item, index) => {
@@ -1633,55 +1531,66 @@ export default function BusinessOverviewPage() {
                       </span>
                     </Tooltip>
                     <span className={styles.rankCalls}>
-                      {formatNumber(item.calls)}
+                      {formatNumber(item.cronExecutions)}
+                    </span>
+                    <span className={styles.rankCalls}>
+                      {formatNumber(item.cronSuccess)}
+                    </span>
+                    <span className={styles.rankCalls}>
+                      {formatNumber(item.cronReads)}
+                    </span>
+                    <span className={styles.rankCalls}>
+                      {formatNumber(item.manualCalls)}
                     </span>
                   </button>
                 );
               })
             )}
-            {activeLoading && (
+            {activeLoading && activeUsers.length > 0 && (
               <div className={styles.listFootnote}>加载中...</div>
             )}
           </div>
         </article>
 
-        <article className={styles.panelMedium}>
-          <div className={styles.panelHeader}>
-            <h3 className={styles.panelTitle}>使用深度</h3>
-          </div>
-          <div className={styles.depthGrid}>
-            {depthCards.map((card) => (
-              <div key={card.key} className={styles.depthCard}>
-                <div className={styles.depthIconWrap}>
-                  {card.key === "avg-rounds" && <MessageCircleMore size={15} />}
-                  {card.key === "multi-round" && <Users size={15} />}
-                  {card.key === "avg-duration" && <Clock3 size={15} />}
-                  {card.key === "avg-sessions" && <ArrowUpRight size={15} />}
+        {!hideDepthCard && (
+          <article className={styles.panelMedium}>
+            <div className={styles.panelHeader}>
+              <h3 className={styles.panelTitle}>使用深度</h3>
+            </div>
+            <div className={styles.depthGrid}>
+              {depthCards.map((card) => (
+                <div key={card.key} className={styles.depthCard}>
+                  <div className={styles.depthIconWrap}>
+                    {card.key === "avg-rounds" && <MessageCircleMore size={15} />}
+                    {card.key === "multi-round" && <Users size={15} />}
+                    {card.key === "avg-duration" && <Clock3 size={15} />}
+                    {card.key === "avg-sessions" && <ArrowUpRight size={15} />}
+                  </div>
+                  <div className={styles.depthValue}>{card.valueText}</div>
+                  <Tooltip title={card.title} placement="top">
+                    <div className={styles.depthTitle}>{card.title}</div>
+                  </Tooltip>
+                  <div
+                    className={
+                      card.changeDirection === "up"
+                        ? styles.metricChangeUp
+                        : card.changeDirection === "down"
+                        ? styles.metricChangeDown
+                        : styles.metricChangeFlat
+                    }
+                  >
+                    环比
+                    {card.changeDirection === "up" && <TrendingUp size={12} />}
+                    {card.changeDirection === "down" && (
+                      <TrendingDown size={12} />
+                    )}
+                    {card.changeText}
+                  </div>
                 </div>
-                <div className={styles.depthValue}>{card.valueText}</div>
-                <Tooltip title={card.title} placement="top">
-                  <div className={styles.depthTitle}>{card.title}</div>
-                </Tooltip>
-                <div
-                  className={
-                    card.changeDirection === "up"
-                      ? styles.metricChangeUp
-                      : card.changeDirection === "down"
-                      ? styles.metricChangeDown
-                      : styles.metricChangeFlat
-                  }
-                >
-                  环比
-                  {card.changeDirection === "up" && <TrendingUp size={12} />}
-                  {card.changeDirection === "down" && (
-                    <TrendingDown size={12} />
-                  )}
-                  {card.changeText}
-                </div>
-              </div>
-            ))}
-          </div>
-        </article>
+              ))}
+            </div>
+          </article>
+        )}
       </section>
 
       <section
@@ -1694,7 +1603,7 @@ export default function BusinessOverviewPage() {
             <button
               type="button"
               className={styles.detailLink}
-              onClick={() => navigate("/monitor/cron-overview")}
+              onClick={() => navigate(cronJobOverviewPath)}
             >
               查看详情
               <ChevronRight size={14} />
@@ -1754,8 +1663,19 @@ export default function BusinessOverviewPage() {
           <div className={styles.panelHeader}>
             <h3 className={styles.panelTitle}>技能使用排行榜</h3>
           </div>
-          <div className={styles.rankList} onScroll={handleSkillsScroll}>
-            {skills.length === 0 ? (
+          <div className={styles.skillRankHeader}>
+            <span>排名</span>
+            <span>技能</span>
+            <span>调用次数</span>
+          </div>
+          <div
+            ref={skillsListRef}
+            className={styles.rankList}
+            onScroll={handleSkillsScroll}
+          >
+            {skillsLoading && skills.length === 0 ? (
+              <div className={styles.listFootnote}>加载中...</div>
+            ) : skills.length === 0 ? (
               <div className={styles.emptyState}>暂无技能数据</div>
             ) : (
               skills.map((skill, index) => {
@@ -1774,7 +1694,7 @@ export default function BusinessOverviewPage() {
                   <button
                     key={`${skill.skill_name}-${rank}`}
                     type="button"
-                    className={styles.rankRow}
+                    className={styles.skillRankRow}
                     onClick={() => {
                       setSelectedSkillName(skill.skill_name);
                       setSkillModalOpen(true);
@@ -1803,14 +1723,14 @@ export default function BusinessOverviewPage() {
                         {truncateName(skill.skill_name, 20)}
                       </span>
                     </Tooltip>
-                    <span className={styles.rankCalls}>
+                    <span className={styles.skillRankCalls}>
                       {formatNumber(skill.count)}
                     </span>
                   </button>
                 );
               })
             )}
-            {skillsLoading && (
+            {skillsLoading && skills.length > 0 && (
               <div className={styles.listFootnote}>加载中...</div>
             )}
           </div>
@@ -1819,6 +1739,14 @@ export default function BusinessOverviewPage() {
         <article className={styles.panelLarge}>
           <div className={styles.panelHeader}>
             <h3 className={styles.panelTitle}>报错分析</h3>
+            <button
+              type="button"
+              className={styles.detailLink}
+              onClick={() => setErrorModalOpen(true)}
+            >
+              查看详情
+              <ChevronRight size={14} />
+            </button>
           </div>
           <div className={styles.donutLayoutCompact}>
             <div className={styles.donutCompact}>
@@ -1876,249 +1804,11 @@ export default function BusinessOverviewPage() {
         </article>
       </section>
 
-      <section
-        className={styles.htmlPreviewSection}
-        data-testid="html-preview-click-section"
-      >
-        <article className={styles.panelLarge}>
-          <div className={styles.panelHeader}>
-            <h3 className={styles.panelTitle}>客户经营点击分析</h3>
-            <span className={styles.panelMeta}>
-              最近点击：{htmlPreviewLatestClick}
-            </span>
-          </div>
-          <div className={styles.htmlPreviewFilters}>
-            <Select
-              className={styles.htmlPreviewListSelect}
-              value={selectedHtmlPreviewListKey}
-              onChange={setSelectedHtmlPreviewListKey}
-              placeholder="全部名单"
-              showSearch
-              optionFilterProp="label"
-            >
-              <Option value="all" label="全部名单">
-                全部名单
-              </Option>
-              {htmlPreviewLists.map((item) => (
-                <Option
-                  key={item.list_key}
-                  value={item.list_key}
-                  label={item.list_name}
-                >
-                  {item.list_name}
-                </Option>
-              ))}
-            </Select>
-            <label className={styles.htmlPreviewSwitch}>
-              <Switch
-                size="small"
-                checked={includeUnclickedCustomers}
-                onChange={setIncludeUnclickedCustomers}
-              />
-              <span>显示未点击客户</span>
-            </label>
-          </div>
-          {!hasHtmlPreviewAnalysisData ? (
-            <div className={styles.emptyChartState}>
-              <Database className={styles.emptyBreakdownIcon} />
-              <span>
-                {htmlPreviewLoading ? "加载中..." : "暂无客户经营点击数据"}
-              </span>
-            </div>
-          ) : (
-            <div className={styles.htmlPreviewDashboard}>
-              <div className={styles.htmlPreviewStats}>
-                <div className={styles.htmlPreviewStatCard}>
-                  <span>名单数</span>
-                  <strong>{formatNumber(htmlPreviewListCount)}</strong>
-                </div>
-                <div className={styles.htmlPreviewStatCard}>
-                  <span>名单总客户数</span>
-                  <strong>{formatNumber(htmlPreviewCustomerTotal)}</strong>
-                </div>
-                <div className={styles.htmlPreviewStatCard}>
-                  <span>被点击客户数</span>
-                  <strong>{formatNumber(htmlPreviewClickedCustomerCount)}</strong>
-                </div>
-                <div className={styles.htmlPreviewStatCard}>
-                  <span>点击总数</span>
-                  <strong>{formatNumber(htmlPreviewTotalClicks)}</strong>
-                </div>
-              </div>
-              <div className={styles.htmlPreviewDistribution}>
-                <div className={styles.htmlPreviewTopTitle}>点击分布</div>
-                <div className={styles.htmlPreviewDistributionRows}>
-                  <div className={styles.htmlPreviewDistributionRow}>
-                    <div className={styles.htmlPreviewDistributionMeta}>
-                      <span>洞察</span>
-                      <strong>
-                        {formatNumber(htmlPreviewInsightClicks)}
-                        <em>{htmlPreviewInsightPercent}%</em>
-                      </strong>
-                    </div>
-                    <div className={styles.htmlPreviewDistributionTrack}>
-                      <i
-                        className={styles.htmlPreviewInsightBar}
-                        style={{
-                          width: `${Math.max(
-                            6,
-                            (htmlPreviewInsightClicks /
-                              htmlPreviewMaxActionClicks) *
-                              100,
-                          )}%`,
-                        }}
-                      />
-                    </div>
-                  </div>
-                  <div className={styles.htmlPreviewDistributionRow}>
-                    <div className={styles.htmlPreviewDistributionMeta}>
-                      <span>电访</span>
-                      <strong>
-                        {formatNumber(htmlPreviewPhoneClicks)}
-                        <em>{htmlPreviewPhonePercent}%</em>
-                      </strong>
-                    </div>
-                    <div className={styles.htmlPreviewDistributionTrack}>
-                      <i
-                        className={styles.htmlPreviewPhoneBar}
-                        style={{
-                          width: `${Math.max(
-                            6,
-                            (htmlPreviewPhoneClicks /
-                              htmlPreviewMaxActionClicks) *
-                              100,
-                          )}%`,
-                        }}
-                      />
-                    </div>
-                  </div>
-                  <div className={styles.htmlPreviewDistributionRow}>
-                    <div className={styles.htmlPreviewDistributionMeta}>
-                      <span>方案</span>
-                      <strong>
-                        {formatNumber(htmlPreviewPlanClicks)}
-                        <em>{htmlPreviewPlanPercent}%</em>
-                      </strong>
-                    </div>
-                    <div className={styles.htmlPreviewDistributionTrack}>
-                      <i
-                        className={styles.htmlPreviewPlanBar}
-                        style={{
-                          width: `${Math.max(
-                            6,
-                            (htmlPreviewPlanClicks /
-                              htmlPreviewMaxActionClicks) *
-                              100,
-                          )}%`,
-                        }}
-                      />
-                    </div>
-                  </div>
-                </div>
-              </div>
-              <div className={styles.htmlPreviewTopList}>
-                <div className={styles.htmlPreviewTopTitle}>名单点击概览</div>
-                {displayedHtmlPreviewLists.slice(0, 5).map((item) => (
-                  <div
-                    key={item.list_key}
-                    className={styles.htmlPreviewListRow}
-                  >
-                    <Tooltip
-                      title={item.file_name || item.file_url || item.list_name}
-                      placement="top"
-                    >
-                      <span className={styles.htmlPreviewTopName}>
-                        {item.list_name}
-                      </span>
-                    </Tooltip>
-                    <div className={styles.htmlPreviewListMetrics}>
-                      <span>
-                        <em>名单客户</em>
-                        <strong>{formatNumber(item.customer_count)}</strong>
-                      </span>
-                      <span>
-                        <em>点击客户</em>
-                        <strong>
-                          {formatNumber(item.clicked_customer_count)}
-                        </strong>
-                      </span>
-                      <span>
-                        <em>洞察</em>
-                        <strong>{formatNumber(item.insight_count)}</strong>
-                      </span>
-                      <span>
-                        <em>电访</em>
-                        <strong>{formatNumber(item.phone_count)}</strong>
-                      </span>
-                      <span>
-                        <em>方案</em>
-                        <strong>{formatNumber(item.plan_count)}</strong>
-                      </span>
-                    </div>
-                  </div>
-                ))}
-                {displayedHtmlPreviewLists.length === 0 && (
-                  <div className={styles.htmlPreviewEmptyLine}>
-                    暂无名单点击概览数据
-                  </div>
-                )}
-              </div>
-              <div className={styles.htmlPreviewEventList}>
-                <div className={styles.htmlPreviewTopTitle}>客户点击明细</div>
-                {selectedHtmlPreviewList && (
-                  <div className={styles.htmlPreviewSelectedList}>
-                    当前名单：{selectedHtmlPreviewList.list_name}
-                  </div>
-                )}
-                {htmlPreviewCustomerClicks.length === 0 ? (
-                  <div className={styles.htmlPreviewEmptyLine}>
-                    暂无客户点击明细
-                  </div>
-                ) : (
-                  <div className={styles.htmlPreviewCustomerTable}>
-                    <div className={styles.htmlPreviewCustomerHeader}>
-                      <span>客户</span>
-                      <span>洞察</span>
-                      <span>电访</span>
-                      <span>方案</span>
-                      <span>总点击</span>
-                      <span>最近</span>
-                    </div>
-                    {htmlPreviewCustomerClicks.map((item) => (
-                      <div
-                        key={`${item.customer_id || item.customer_name}-${
-                          item.last_clicked_at || ""
-                        }`}
-                        className={styles.htmlPreviewCustomerRow}
-                      >
-                        <div className={styles.htmlPreviewCustomerCell}>
-                          <span className={styles.htmlPreviewCustomerName}>
-                            {item.customer_name || "未知客户"}
-                          </span>
-                          {item.customer_id && (
-                            <span className={styles.htmlPreviewCustomerId}>
-                              {item.customer_id}
-                            </span>
-                          )}
-                        </div>
-                        <strong>{formatNumber(item.insight_count)}</strong>
-                        <strong>{formatNumber(item.phone_count)}</strong>
-                        <strong>{formatNumber(item.plan_count)}</strong>
-                        <strong>{formatNumber(item.total_click_count)}</strong>
-                        <span className={styles.htmlPreviewEventTime}>
-                          {item.last_clicked_at
-                            ? dayjs(item.last_clicked_at).format("MM-DD HH:mm")
-                            : "-"}
-                        </span>
-                      </div>
-                    ))}
-                  </div>
-                )}
-              </div>
-            </div>
-          )}
-        </article>
-      </section>
+      <HtmlPreviewClickAnalysis
+        dateRange={dateRange}
+        effectiveBbkIds={effectiveBbkIds}
+        refreshKey={htmlPreviewRefreshKey}
+      />
 
       <UserDetailModal
         open={modalOpen}
@@ -2142,6 +1832,14 @@ export default function BusinessOverviewPage() {
           setSkillModalOpen(false);
           setSelectedSkillName("");
         }}
+      />
+
+      <ErrorDetailModal
+        open={errorModalOpen}
+        startDate={startDateText}
+        endDate={endDateText}
+        bbkIds={effectiveBbkIds?.join(",")}
+        onClose={() => setErrorModalOpen(false)}
       />
     </div>
   );

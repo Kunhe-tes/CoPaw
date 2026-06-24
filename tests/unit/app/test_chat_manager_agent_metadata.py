@@ -129,3 +129,31 @@ async def test_get_or_create_chat_merges_agent_metadata_for_existing_chat() -> (
         "session_kind": "chat",
         "agent_id": "agent-b",
     }
+
+
+async def test_update_chat_name_merges_title_metadata() -> None:
+    """更新自动标题时，应保留已有 meta 并写入生成标记。"""
+    repo = _InMemoryChatRepo()
+    manager = ChatManager(repo=repo)
+    chat = await manager.get_or_create_chat(
+        "session-1",
+        "user-1",
+        "console",
+        name="hello",
+        meta={"agent_id": "agent-a"},
+    )
+
+    updated = await manager.update_chat_name(
+        chat.id,
+        "销售复盘",
+        meta={"session_title_generated": True},
+    )
+    stored = await repo.get_chat(chat.id)
+
+    assert updated is True
+    assert stored is not None
+    assert stored.name == "销售复盘"
+    assert stored.meta == {
+        "agent_id": "agent-a",
+        "session_title_generated": True,
+    }

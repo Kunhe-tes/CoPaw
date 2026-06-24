@@ -4,6 +4,7 @@
 import logging
 from datetime import datetime
 from typing import Optional
+from urllib.parse import unquote
 
 from fastapi import APIRouter, HTTPException, Query, Request
 
@@ -88,6 +89,15 @@ def _get_request_user_id(request: Request) -> Optional[str]:
     )
 
 
+def _get_request_user_name(request: Request) -> Optional[str]:
+    """从请求上下文解析当前用户名称。"""
+    value = _first_text(
+        getattr(request.state, "user_name", None),
+        request.headers.get("X-User-Name"),
+    )
+    return unquote(value) if value else None
+
+
 def _get_request_bbk_id(request: Request) -> Optional[str]:
     """从请求上下文解析当前分行/机构标识。"""
     return _first_text(
@@ -118,6 +128,10 @@ async def create_html_preview_click_event(
             "user_id": _first_text(
                 _get_request_user_id(request),
                 event.user_id,
+            ),
+            "user_name": _first_text(
+                _get_request_user_name(request),
+                event.user_name,
             ),
             "bbk_id": _first_text(_get_request_bbk_id(request), event.bbk_id),
             "clicked_at": event.clicked_at or datetime.now(),
@@ -168,7 +182,9 @@ async def create_html_preview_list_snapshot(
         logger.exception("保存 HTML 预览名单快照失败: %s", exc)
         raise HTTPException(
             status_code=500,
-            detail="保存 HTML 预览名单快照失败，请检查数据库表结构与后端日志。",
+            detail=(
+                "保存 HTML 预览名单快照失败，" "请检查数据库表结构与后端日志。"
+            ),
         ) from exc
     return HtmlPreviewListSnapshotResponse(customer_count=count)
 
@@ -272,7 +288,9 @@ async def list_html_preview_lists(
     start_time: Optional[datetime] = None,
     end_time: Optional[datetime] = None,
     bbk_ids: Optional[str] = None,
-    limit: int = Query(default=100, ge=1, le=200),
+    page: int = Query(default=1, ge=1),
+    page_size: Optional[int] = Query(default=None, ge=1, le=100),
+    limit: Optional[int] = Query(default=None, ge=1, le=200),
 ) -> HtmlPreviewListSummaryResponse:
     """查询 HTML 名单维度统计。"""
     try:
@@ -280,14 +298,15 @@ async def list_html_preview_lists(
     except RuntimeError as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
 
-    items = await service.list_lists(
+    resolved_page_size = page_size or (min(limit, 100) if limit else 100)
+    return await service.list_lists(
         source_id=_get_request_source_id(request),
         start_time=start_time,
         end_time=end_time,
         bbk_ids=_split_text_list(bbk_ids),
-        limit=limit,
+        page=page,
+        page_size=resolved_page_size,
     )
-    return HtmlPreviewListSummaryResponse(items=items)
 
 
 @router.get(
