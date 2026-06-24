@@ -92,6 +92,12 @@ export default function UploadSkillModal({
       setSkillIdUsedCount(result.skill_id_used_count || 0);
       setSkillIdUsedBy(result.skill_id_used_by || []);
       setSkillExists(result.exists || false);
+
+      // 同名技能存在时，直接显示确认弹窗
+      if (result.exists && result.skill_id_used_count === 0) {
+        setConflictNames([result.skill_name || ""]);
+        setShowConfirm(true);
+      }
     } catch (err) {
       const errorMsg = err instanceof Error ? err.message : "解析失败";
       message.error(errorMsg);
@@ -254,6 +260,9 @@ export default function UploadSkillModal({
           </div>
           <div style={{ marginBottom: 16, color: "#595959" }}>
             覆盖将更新现有技能版本并创建版本快照，您可以在版本历史中查看和回滚。
+            {skillIdReused && (
+              <span style={{ color: "#52c41a" }}> 同时复用已有 skill_id。</span>
+            )}
           </div>
           <div style={{ display: "flex", justifyContent: "flex-end", gap: 12 }}>
             <Button onClick={() => setShowConfirm(false)} disabled={uploading}>
@@ -287,17 +296,6 @@ export default function UploadSkillModal({
               </p>
             )}
           </div>
-
-          {/* 同名技能提示（复用 skill_id） */}
-          {skillExists && !parsingZip && skillIdUsedCount === 0 && (
-            <Alert
-              type="warning"
-              showIcon
-              style={{ marginBottom: 16 }}
-              message={`检测到同名技能 "${skillName}" 已存在`}
-              description="将复用已有技能的 skill_id，更新现有技能版本"
-            />
-          )}
 
           {/* skill_id 冲突提示（禁止上传） */}
           {skillIdUsedCount > 0 && !parsingZip && (
