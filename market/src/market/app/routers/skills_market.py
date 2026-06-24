@@ -1544,3 +1544,302 @@ async def recall_skill(
     except ValueError as e:
         raise HTTPException(status_code=404, detail=str(e))
     return result.model_dump()
+
+
+class _InitMarketSkillsRequest(BaseModel):
+    """初始化市场技能请求参数."""
+
+    source_ids: list[str] = Field(
+        default_factory=list,
+        description="来源ID列表，不传或为空时初始化所有来源",
+    )
+    dry_run: bool = Field(
+        default=False,
+        description="试运行模式，仅统计不实际写入",
+    )
+
+
+class _InitMarketSkillsResult(TypedDict):
+    """初始化市场技能返回结果."""
+
+    dry_run: bool
+    source_ids: list[str]
+    total_items: int
+    processed: int
+    updated: int
+    skipped: int
+    errors: list[dict]
+    details: list[dict]
+
+
+def _truncate_chinese_name(cn_name: str, max_length: int = 50) -> str:
+    """截断中文名，防止过长."""
+    if len(cn_name) > max_length:
+        return cn_name[:max_length]
+    return cn_name
+
+
+def _extract_skill_metadata_from_md(
+    skill_md_path: Path,
+    item_id: str,
+    item_name: str,
+) -> tuple[str, str]:
+    """从 SKILL.md 提取 skill_id 和 chinese_name.
+
+    Args:
+        skill_md_path: SKILL.md 文件路径
+        item_id: 市场条目 ID
+        item_name: 技能名称
+
+    Returns:
+        (skill_id, chinese_name)
+    """
+    from ...utils.skill_md import (
+        extract_skill_id,
+        extract_cn_name_from_title,
+        parse_frontmatter,
+    )
+
+    skill_id = ""
+    chinese_name = ""
+
+    if not skill_md_path.exists():
+        return skill_id, chinese_name
+
+    try:
+        md_content = skill_md_path.read_text(encoding="utf-8")
+
+        # 提取 skill_id（市场技能 source 为 marketplace:{item_id}）
+        skill_id = extract_skill_id(
+            md_content,
+            f"marketplace:{item_id}",
+            item_name,
+            creator_id="",
+        )
+
+        # 提取 chinese_name：优先 frontmatter，其次一级标题
+        fm = parse_frontmatter(md_content)
+        metadata = fm.get("metadata", {})
+        if isinstance(metadata, dict):
+            chinese_name = metadata.get("cn_name", "") or metadata.get(
+                "chinese_name",
+                "",
+            )
+        if not chinese_name:
+            chinese_name = extract_cn_name_from_title(md_content)
+    except OSError as e:
+        logger.warning(
+            "读取 SKILL.md 失败: item_id=%s, error=%s",
+            item_id,
+            e,
+        )
+
+    return skill_id, chinese_name
+
+
+def _process_single_skill_item(
+    item: MarketItem,
+    marketplace_root: Path,
+    source_id: str,
+) -> tuple[str, str, bool]:
+    """处理单个技能条目，提取 skill_id 和 chinese_name.
+
+    Args:
+        item: 市场条目
+        marketplace_root: 市场根目录
+        source_id: 来源 ID
+
+    Returns:
+        (skill_id, chinese_name, needs_update)
+    """
+    skill_dir = get_skill_dir(marketplace_root, source_id, item.item_id)
+    skill_md_path = skill_dir / "SKILL.md"
+
+    # 提取 skill_id 和 chinese_name
+    skill_id, chinese_name = _extract_skill_metadata_from_md(
+        skill_md_path,
+        item.item_id,
+        item.name,
+    )
+
+    # fallback: skill_id 使用 item_id
+    if not skill_id:
+        skill_id = item.item_id
+
+    # fallback: chinese_name 使用 MarketItem.chinese_name 或 name
+    if not chinese_name:
+        chinese_name = item.chinese_name or item.name
+
+    # 截断 chinese_name（最多50字）
+    chinese_name = _truncate_chinese_name(chinese_name, 50)
+
+    # 检查是否需要更新
+    needs_update = False
+    if not item.skill_id and skill_id:
+        item.skill_id = skill_id
+        needs_update = True
+    if not item.chinese_name and chinese_name:
+        item.chinese_name = chinese_name
+        needs_update = True
+
+    return skill_id, chinese_name, needs_update
+
+
+def _process_source_id_skills(
+    source_id: str,
+    marketplace_root: Path,
+    dry_run: bool,
+    results: _InitMarketSkillsResult,
+) -> None:
+    """处理单个 source_id 下的所有技能.
+
+    Args:
+        source_id: 来源 ID
+        marketplace_root: 市场根目录
+        dry_run: 试运行模式
+        results: 结果统计
+    """
+    logger.info("处理 source_id=%s", source_id)
+
+    # 加载 index.json
+    items = load_index(marketplace_root, source_id)
+    logger.debug(
+        "加载 index.json: source_id=%s, items=%d",
+        source_id,
+        len(items),
+    )
+
+    # 过滤 skill 类型
+    skill_items = [item for item in items if item.item_type == "skill"]
+    results["total_items"] += len(skill_items)
+    logger.debug(
+        "过滤 skill 类型: source_id=%s, skill_items=%d",
+        source_id,
+        len(skill_items),
+    )
+
+    updated_items = []
+    for item in skill_items:
+        skill_id, chinese_name, needs_update = _process_single_skill_item(
+            item,
+            marketplace_root,
+            source_id,
+        )
+
+        results["processed"] += 1
+
+        if needs_update:
+            updated_items.append(item)
+            results["updated"] += 1
+            results["details"].append(
+                {
+                    "source_id": source_id,
+                    "item_id": item.item_id,
+                    "name": item.name,
+                    "skill_id": skill_id,
+                    "chinese_name": chinese_name,
+                },
+            )
+            logger.info(
+                "更新条目: source_id=%s, item_id=%s, name=%s, skill_id=%s, chinese_name=%s",
+                source_id,
+                item.item_id,
+                item.name,
+                skill_id,
+                chinese_name,
+            )
+        else:
+            results["skipped"] += 1
+            logger.info(
+                "跳过条目（无需更新）: source_id=%s, item_id=%s, name=%s",
+                source_id,
+                item.item_id,
+                item.name,
+            )
+
+    # 保存更新后的 index.json（非 dry_run 模式）
+    if updated_items and not dry_run:
+        save_index(marketplace_root, source_id, items)
+        logger.info(
+            "保存 index.json: source_id=%s, updated=%d",
+            source_id,
+            len(updated_items),
+        )
+    elif updated_items and dry_run:
+        logger.info(
+            "试运行模式，不保存: source_id=%s, would_update=%d",
+            source_id,
+            len(updated_items),
+        )
+
+
+@router.post(
+    "/market/admin/skills/init-market-skills",
+)
+async def init_market_skills(
+    request: Request,
+    payload: _InitMarketSkillsRequest,
+):
+    """初始化市场技能的 skill_id 和 chinese_name.
+
+    遍历 index.json 中 item_type == "skill" 的条目，
+    从 SKILL.md 提取 skill_id 和 chinese_name，
+    补充缺失的字段并保存。
+
+    Args:
+        payload.source_ids: 来源ID列表，不传或为空时初始化所有来源
+        payload.dry_run: 试运行模式，仅统计不实际写入
+    """
+    svc = request.app.state.marketplace
+    marketplace_root = svc.marketplace_root
+
+    results: _InitMarketSkillsResult = {
+        "dry_run": payload.dry_run,
+        "source_ids": [],
+        "total_items": 0,
+        "processed": 0,
+        "updated": 0,
+        "skipped": 0,
+        "errors": [],
+        "details": [],
+    }
+
+    # 确定 source_ids 列表
+    if payload.source_ids:
+        source_ids = payload.source_ids
+    else:
+        # 遍历 marketplace_root 下所有目录作为 source_ids
+        source_ids = []
+        for dir_path in marketplace_root.iterdir():
+            if dir_path.is_dir():
+                index_path = dir_path / "index.json"
+                if index_path.exists():
+                    source_ids.append(dir_path.name)
+
+    results["source_ids"] = source_ids
+
+    logger.info(
+        "开始初始化市场技能: dry_run=%s, source_ids=%s",
+        payload.dry_run,
+        source_ids,
+    )
+
+    for source_id in source_ids:
+        _process_source_id_skills(
+            source_id,
+            marketplace_root,
+            payload.dry_run,
+            results,
+        )
+
+    logger.info(
+        "初始化完成: dry_run=%s, total_items=%d, processed=%d, updated=%d, skipped=%d, errors=%d",
+        payload.dry_run,
+        results["total_items"],
+        results["processed"],
+        results["updated"],
+        results["skipped"],
+        len(results["errors"]),
+    )
+
+    return results
