@@ -488,7 +488,7 @@ export function SkillReadinessModal({
   }, [loadOverview]);
 
   const startRun = useCallback(async () => {
-    if (!target.valid || !overview?.startable) {
+    if (!target.valid || !overview) {
       return;
     }
 
@@ -500,7 +500,28 @@ export function SkillReadinessModal({
       if (activeSkillRef.current !== target.skillId) {
         return;
       }
-      message.success(response.reused ? "已有检查正在运行" : "已开始检查");
+      if (response.owner_lookup_only) {
+        message.success(
+          response.owner_lookup_scheduled
+            ? "已开始查询用户"
+            : "已有用户查询正在运行",
+        );
+        setOverview((current) =>
+          current && current.skill_id === target.skillId
+            ? {
+                ...current,
+                owner_lookup_status: "running",
+              }
+            : current,
+        );
+        setResults(null);
+        return;
+      }
+      if (!response.run) {
+        await loadOverview();
+        return;
+      }
+      message.success(response.reused ? "已有检查正在运行" : "已开始查询用户并检查");
       setOverview((current) =>
         current && current.skill_id === target.skillId
           ? {
@@ -521,7 +542,7 @@ export function SkillReadinessModal({
     } finally {
       setStarting(false);
     }
-  }, [loadOverview, overview?.startable, target.skillId, target.valid]);
+  }, [loadOverview, overview, target.skillId, target.valid]);
 
   const activeRun = results?.run || overview?.latest_run || null;
   const ownerSummary = overview?.owner_summary ?? DEFAULT_OWNER_SUMMARY;
@@ -529,11 +550,12 @@ export function SkillReadinessModal({
   const ownerRows = overview?.owners ?? [];
   const ownerLookupRunning = overview?.owner_lookup_status === "running";
   const ownerLookupIdle = overview?.owner_lookup_status === "idle";
+  const startButtonText = overview?.startable ? "查询用户并检查" : "查询用户";
   let ownerLookupDataTime = "-";
   if (ownerLookupRunning) {
     ownerLookupDataTime = "正在生成中";
   } else if (ownerLookupIdle) {
-    ownerLookupDataTime = "开始检查后生成";
+    ownerLookupDataTime = "查询用户后生成";
   }
   if (overview?.owner_lookup_updated_at) {
     ownerLookupDataTime = `${formatDateTime(overview.owner_lookup_updated_at)}${
@@ -544,7 +566,7 @@ export function SkillReadinessModal({
   if (ownerLookupRunning) {
     ownerEmptyText = "正在生成中";
   } else if (ownerLookupIdle) {
-    ownerEmptyText = "开始检查后生成拥有用户和检查结果";
+    ownerEmptyText = "查询用户后生成拥有用户";
   }
 
   const ownerColumns = [
@@ -835,10 +857,10 @@ export function SkillReadinessModal({
           type="primary"
           icon={<PlayCircleOutlined />}
           loading={starting}
-          disabled={!target.valid || !overview?.startable}
+          disabled={!target.valid || !overview}
           onClick={startRun}
         >
-          开始检查
+          {startButtonText}
         </Button>,
         <Button
           key="close"

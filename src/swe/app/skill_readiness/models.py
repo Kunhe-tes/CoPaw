@@ -191,8 +191,10 @@ class SkillReadinessOverview(BaseModel):
 class SkillReadinessStartRunResponse(BaseModel):
     """启动可执行性检查后的响应。"""
 
-    run: SkillReadinessRunProgress
+    run: SkillReadinessRunProgress | None = None
     reused: bool = False
+    owner_lookup_only: bool = False
+    owner_lookup_scheduled: bool = False
 
 
 class SkillReadinessResultsPage(BaseModel):

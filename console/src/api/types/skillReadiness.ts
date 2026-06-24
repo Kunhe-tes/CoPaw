@@ -81,8 +81,10 @@ export interface SkillReadinessOverview {
 }
 
 export interface SkillReadinessStartRunResponse {
-  run: SkillReadinessRunProgress;
+  run: SkillReadinessRunProgress | null;
   reused: boolean;
+  owner_lookup_only?: boolean;
+  owner_lookup_scheduled?: boolean;
 }
 
 export interface SkillReadinessCheckResult {

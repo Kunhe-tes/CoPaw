@@ -15,7 +15,6 @@ from swe.app.skill_readiness.models import (
     SkillReadinessRunProgress,
 )
 from swe.app.skill_readiness.service import (
-    SkillReadinessConfigMissing,
     SkillReadinessRunNotFound,
     SkillReadinessService,
 )
@@ -122,6 +121,7 @@ class _Runner:
 
     def schedule_owner_refresh(self, **kwargs):
         self.owner_refreshes.append(kwargs)
+        return object()
 
 
 def _service(store=None, runner=None):
@@ -212,9 +212,48 @@ async def test_overview_running_placeholder_has_no_owner_data_time():
 
 
 @pytest.mark.asyncio
-async def test_start_run_rejects_missing_config():
-    with pytest.raises(SkillReadinessConfigMissing):
-        await _service().start_run("source-a", "missing")
+async def test_start_run_refreshes_owners_when_config_missing():
+    runner = _Runner()
+
+    response = await _service(runner=runner).start_run("source-a", "missing")
+
+    assert response.run is None
+    assert response.owner_lookup_only is True
+    assert response.owner_lookup_scheduled is True
+    assert runner.owner_refreshes == [
+        {"source_id": "source-a", "skill_id": "missing"},
+    ]
+
+
+@pytest.mark.asyncio
+async def test_start_run_refreshes_owners_when_config_not_startable():
+    runner = _Runner()
+    store = _Store()
+    store.config = SkillReadinessConfigRecord(
+        skill_id="skill-a",
+        config=SkillReadinessConfig(
+            checks=[
+                {
+                    "name": "cron_auth_valid",
+                    "enabled": False,
+                },
+            ],
+        ),
+    )
+
+    response = await _service(store=store, runner=runner).start_run(
+        "source-a",
+        "skill-a",
+    )
+
+    assert response.run is None
+    assert response.owner_lookup_only is True
+    assert response.owner_lookup_scheduled is True
+    assert store.created == []
+    assert runner.scheduled == []
+    assert runner.owner_refreshes == [
+        {"source_id": "source-a", "skill_id": "skill-a"},
+    ]
 
 
 @pytest.mark.asyncio

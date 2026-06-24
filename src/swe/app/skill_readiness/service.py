@@ -88,14 +88,10 @@ class SkillReadinessService:
     ) -> SkillReadinessStartRunResponse:
         config_record = await self.store.get_config(skill_id)
         if config_record is None:
-            raise SkillReadinessConfigMissing(
-                "skill readiness config not found",
-            )
+            return self._start_owner_lookup_only(source_id, skill_id)
         config = config_record.config
         if not config.is_startable:
-            raise SkillReadinessConfigNotStartable(
-                "skill readiness config has no enabled checks",
-            )
+            return self._start_owner_lookup_only(source_id, skill_id)
 
         run, reused = await self.store.get_or_create_running_run(
             source_id,
@@ -112,6 +108,20 @@ class SkillReadinessService:
             config=config,
         )
         return SkillReadinessStartRunResponse(run=run, reused=False)
+
+    def _start_owner_lookup_only(
+        self,
+        source_id: str,
+        skill_id: str,
+    ) -> SkillReadinessStartRunResponse:
+        task = self.runner.schedule_owner_refresh(
+            source_id=source_id,
+            skill_id=skill_id,
+        )
+        return SkillReadinessStartRunResponse(
+            owner_lookup_only=True,
+            owner_lookup_scheduled=task is not None,
+        )
 
     async def get_results(
         self,

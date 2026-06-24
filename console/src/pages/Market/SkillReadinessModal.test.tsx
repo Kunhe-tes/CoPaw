@@ -148,7 +148,7 @@ describe("SkillReadinessModal", () => {
     cleanup();
   });
 
-  it("shows fallback skill_name and disables start when config is missing", async () => {
+  it("starts owner lookup when config is missing", async () => {
     mocks.getSkillReadinessOverview.mockResolvedValue(
       buildOverview({
         skill_id: "sales-helper",
@@ -158,6 +158,12 @@ describe("SkillReadinessModal", () => {
         config_checks: [],
       }),
     );
+    mocks.startSkillReadinessRun.mockResolvedValue({
+      reused: false,
+      run: null,
+      owner_lookup_only: true,
+      owner_lookup_scheduled: true,
+    });
 
     render(
       <SkillReadinessModal
@@ -172,7 +178,14 @@ describe("SkillReadinessModal", () => {
     expect(
       screen.queryByText("当前技能未返回 skill_id，已按 skill_name 查询"),
     ).not.toBeInTheDocument();
-    expect(screen.getByRole("button", { name: /开始检查/ })).toBeDisabled();
+    const startButton = screen.getByRole("button", { name: /查询用户/ });
+    expect(startButton).toBeEnabled();
+
+    fireEvent.click(startButton);
+
+    await waitFor(() => {
+      expect(mocks.startSkillReadinessRun).toHaveBeenCalledWith("sales-helper");
+    });
   });
 
   it("starts a readiness run for startable config", async () => {
@@ -186,7 +199,7 @@ describe("SkillReadinessModal", () => {
     expect(await screen.findByText("1.0.0")).toBeInTheDocument();
     expect(await screen.findByText("已启用")).toBeInTheDocument();
     expect(await screen.findByText("可更新")).toBeInTheDocument();
-    fireEvent.click(screen.getByRole("button", { name: /开始检查/ }));
+    fireEvent.click(screen.getByRole("button", { name: /查询用户并检查/ }));
 
     await waitFor(() => {
       expect(mocks.startSkillReadinessRun).toHaveBeenCalledWith("skill-001");
@@ -230,9 +243,9 @@ describe("SkillReadinessModal", () => {
     );
 
     expect(
-      await screen.findByText("开始检查后生成拥有用户和检查结果"),
+      await screen.findByText("查询用户后生成拥有用户"),
     ).toBeInTheDocument();
-    expect(await screen.findByText("数据时间：开始检查后生成")).toBeInTheDocument();
+    expect(await screen.findByText("数据时间：查询用户后生成")).toBeInTheDocument();
   });
 
   it("ignores stale overview responses after switching skills", async () => {
