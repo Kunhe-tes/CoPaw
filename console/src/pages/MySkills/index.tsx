@@ -1079,7 +1079,7 @@ metadata:
           >
             <QuestionCircleOutlined style={{ cursor: "pointer", color: "#1890ff" }} />
           </Popover>
-          <span>技能名称、描述和唯一标识从 SKILL.md frontmatter 自动解析</span>
+          <span>技能名称、描述和唯一标识从 SKILL.md frontmatter 自动解析，同名技能复用已有标识</span>
         </div>
       </Modal>
 
