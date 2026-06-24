@@ -175,6 +175,7 @@ class ParseZipResponse(BaseModel):
     description: str | None = None
     exists: bool = False
     error: str | None = None
+    skill_id_reused: bool = False  # 应用市场场景：是否复用已有 skill_id
     skill_id_conflict: str | None = None  # 我的技能场景：skill_id 冲突提示
     skill_id_used_count: int = 0  # 应用市场场景：持有该 skill_id 的用户数量
     skill_id_used_by: list[str] = Field(

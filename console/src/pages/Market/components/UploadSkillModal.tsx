@@ -27,6 +27,7 @@ export default function UploadSkillModal({
   const [cnName, setCnName] = useState("");
   const [skillId, setSkillId] = useState("");
   const [skillName, setSkillName] = useState("");
+  const [skillIdReused, setSkillIdReused] = useState(false);
   const [parsingZip, setParsingZip] = useState(false);
   const [skillIdUsedCount, setSkillIdUsedCount] = useState(0);
   const [skillIdUsedBy, setSkillIdUsedBy] = useState<string[]>([]);
@@ -61,6 +62,7 @@ export default function UploadSkillModal({
       setCnName("");
       setSkillId("");
       setSkillName("");
+      setSkillIdReused(false);
       setSkillIdUsedCount(0);
       setSkillIdUsedBy([]);
       setSelectedCategory(null);
@@ -86,6 +88,7 @@ export default function UploadSkillModal({
       setCnName(result.cn_name || result.skill_name || "");
       setSkillId(result.skill_id || "");
       setSkillName(result.skill_name || "");
+      setSkillIdReused(result.skill_id_reused || false);
       setSkillIdUsedCount(result.skill_id_used_count || 0);
       setSkillIdUsedBy(result.skill_id_used_by || []);
       setSkillExists(result.exists || false);
@@ -213,6 +216,7 @@ export default function UploadSkillModal({
       setCnName("");
       setSkillId("");
       setSkillName("");
+      setSkillIdReused(false);
       setSkillIdUsedCount(0);
       setSkillIdUsedBy([]);
     },
@@ -284,14 +288,14 @@ export default function UploadSkillModal({
             )}
           </div>
 
-          {/* 同名技能提示（允许覆盖） */}
+          {/* 同名技能提示（复用 skill_id） */}
           {skillExists && !parsingZip && skillIdUsedCount === 0 && (
             <Alert
               type="warning"
               showIcon
               style={{ marginBottom: 16 }}
               message={`检测到同名技能 "${skillName}" 已存在`}
-              description="点击上传将覆盖现有技能版本并创建版本快照，您可以在版本历史中查看和回滚"
+              description="将复用已有技能的 skill_id，更新现有技能版本"
             />
           )}
 
@@ -351,14 +355,20 @@ export default function UploadSkillModal({
             <div style={{ marginBottom: 16 }}>
               <label style={{ display: "block", marginBottom: 8 }}>
                 技能唯一标识
-                <Tooltip title="来自 SKILL.md metadata.skill_id。分发时若未指定则使用市场条目 ID">
+                <Tooltip title={
+                  skillIdReused
+                    ? "同名技能已存在，复用其 skill_id"
+                    : "优先从 SKILL.md metadata.skill_id 提取，若无则自动生成"
+                }>
                   <InfoCircleOutlined style={{ marginLeft: 4, color: "#8c8c8c" }} />
                 </Tooltip>
               </label>
               <Input value={skillId} disabled />
-              <p style={{ color: "#8c8c8c", fontSize: 12, marginTop: 4 }}>
-                分发时直接使用此 skill_id，若无指定则使用市场条目 ID
-              </p>
+              {skillIdReused && (
+                <p style={{ color: "#52c41a", fontSize: 12, marginTop: 4 }}>
+                  同名技能已存在，将复用此标识
+                </p>
+              )}
             </div>
           )}
 
@@ -386,7 +396,7 @@ export default function UploadSkillModal({
             />
           </Modal>
           <p style={{ color: "#8c8c8c", fontSize: 12 }}>
-            提示：技能名称和描述将从 zip 包中的 SKILL.md frontmatter 自动解析
+            提示：技能名称、描述和技能唯一标识将从 zip 包中的 SKILL.md frontmatter 自动解析，同名技能将复用已有标识
           </p>
         </>
       )}

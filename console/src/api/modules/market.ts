@@ -279,6 +279,7 @@ export const marketApi = {
     description?: string;
     exists?: boolean;
     error?: string;
+    skill_id_reused?: boolean;
     skill_id_conflict?: string;
     skill_id_used_count?: number;
     skill_id_used_by?: string[];

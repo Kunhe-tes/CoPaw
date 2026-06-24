@@ -786,8 +786,12 @@ async def _check_skill_name_exists_market(
     svc,
     source_id: str,
     safe_skill_name: str,
-) -> bool:
-    """应用市场场景：检查市场索引中是否有同名技能."""
+) -> tuple[bool, str]:
+    """应用市场场景：检查市场索引中是否有同名技能.
+
+    Returns:
+        (exists, existing_skill_id)
+    """
     items = load_index(svc.marketplace_root, source_id)
     existing = next(
         (
@@ -797,7 +801,9 @@ async def _check_skill_name_exists_market(
         ),
         None,
     )
-    return existing is not None
+    if existing:
+        return True, existing.skill_id or ""
+    return False, ""
 
 
 def _check_skill_name_exists_user(
@@ -964,18 +970,28 @@ async def parse_skill_zip(
 
         # 判重校验：使用 normalize_skill_name 获取实际目录名，检查是否已存在
         safe_skill_name = normalize_skill_name(skill_name)
-        exists, skill_id_conflict, skill_id_used_count, skill_id_used_by = (
-            await _check_skill_duplicates_and_conflicts(
-                svc,
-                market_mode,
-                source_id,
-                x_user_id,
-                swe_root,
-                agent_id,
-                safe_skill_name,
-                skill_id,
-            )
+        (
+            exists,
+            existing_skill_id,
+            skill_id_conflict,
+            skill_id_used_count,
+            skill_id_used_by,
+        ) = await _check_skill_duplicates_and_conflicts(
+            svc,
+            market_mode,
+            source_id,
+            x_user_id,
+            swe_root,
+            agent_id,
+            safe_skill_name,
+            skill_id,
         )
+
+        # 市场模式下，同名技能存在时复用已有 skill_id
+        skill_id_reused = False
+        if market_mode and exists and existing_skill_id:
+            skill_id = existing_skill_id
+            skill_id_reused = True
 
         # 清理临时目录
         if tmp_dir and tmp_dir.exists():
@@ -987,6 +1003,7 @@ async def parse_skill_zip(
             skill_id=skill_id,
             description=description,
             exists=exists,
+            skill_id_reused=skill_id_reused,
             skill_id_conflict=skill_id_conflict,
             skill_id_used_count=skill_id_used_count,
             skill_id_used_by=skill_id_used_by,
@@ -1031,10 +1048,15 @@ def _extract_skill_preview_metadata(
 
     # 提取 skill_id
     if market_mode:
-        # 市场场景：优先 metadata.skill_id，其次留空
+        # 市场场景：优先 metadata.skill_id，否则自动生成
         skill_id = ""
         if isinstance(metadata, dict):
             skill_id = metadata.get("skill_id", "") or ""
+        if not skill_id:
+            # 自动生成唯一标识：skill_{uuid[:8]}
+            import uuid
+
+            skill_id = f"skill_{uuid.uuid4().hex[:8]}"
     else:
         # 我的技能场景：source 使用 "customized"
         assert x_user_id is not None
@@ -1060,7 +1082,7 @@ async def _check_skill_duplicates_and_conflicts(
     agent_id: str,
     safe_skill_name: str,
     skill_id: str,
-) -> tuple[bool, Optional[str], int, list[str]]:
+) -> tuple[bool, str, Optional[str], int, list[str]]:
     """检查技能判重和 skill_id 冲突.
 
     Args:
@@ -1074,16 +1096,17 @@ async def _check_skill_duplicates_and_conflicts(
         skill_id: 技能 ID
 
     Returns:
-        (exists, skill_id_conflict, skill_id_used_count, skill_id_used_by)
+        (exists, existing_skill_id, skill_id_conflict, skill_id_used_count, skill_id_used_by)
         skill_id_conflict 为 Optional[str]，表示冲突信息字符串
     """
     exists = False
+    existing_skill_id = ""
     skill_id_conflict = None
     skill_id_used_count = 0
     skill_id_used_by: list[str] = []
 
     if market_mode:
-        exists = await _check_skill_name_exists_market(
+        exists, existing_skill_id = await _check_skill_name_exists_market(
             svc,
             source_id,
             safe_skill_name,
@@ -1110,7 +1133,13 @@ async def _check_skill_duplicates_and_conflicts(
             x_user_id,
         )
 
-    return exists, skill_id_conflict, skill_id_used_count, skill_id_used_by
+    return (
+        exists,
+        existing_skill_id,
+        skill_id_conflict,
+        skill_id_used_count,
+        skill_id_used_by,
+    )
 
 
 async def _log_upload_operation(
