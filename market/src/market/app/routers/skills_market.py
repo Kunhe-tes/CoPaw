@@ -1214,7 +1214,9 @@ async def _upsert_skill_to_db(
             source_id=source_id,
             enabled=entry.get("enabled", False),
             description=metadata.get("description", ""),
-            version_text=metadata.get("version_text", "1.0.0"),
+            version_text=metadata.get("version_text")
+            or metadata.get("received_version")
+            or "1.0.0",
         )
         return None
     except Exception as e:
