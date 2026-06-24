@@ -410,11 +410,21 @@ async def _process_published_skill_record(
 
     # 异步记录操作日志
     item = next(
-        (i for i in load_index(svc.marketplace_root, source_id) if i.name == imported_name),
+        (
+            i
+            for i in load_index(svc.marketplace_root, source_id)
+            if i.name == imported_name
+        ),
         None,
     )
     if item:
-        await _log_publish_operation(svc, source_id, x_user_id, user_name, item)
+        await _log_publish_operation(
+            svc,
+            source_id,
+            x_user_id,
+            user_name,
+            item,
+        )
 
     return parsed_name, parsed_description, parsed_cn_name
 
@@ -865,6 +875,16 @@ async def init_user_skills(
     return results
 
 
+class _ListSkillsRequest(BaseModel):
+    """查询技能列表请求参数."""
+
+    source_id: str = Field(..., description="来源ID")
+
+    # 预留未来扩展参数
+    # user_ids: list[str] | None = Field(default=None, description="用户ID列表")
+    # skill_types: list[str] | None = Field(default=None, description="技能类型过滤")
+
+
 class _InitSweSkillsRequest(BaseModel):
     """初始化 swe_skills 表请求参数."""
 
@@ -901,28 +921,32 @@ class _InitSweSkillsResult(TypedDict):
     details: list[dict]
 
 
-@router.get(
-    "/market/admin/skills/list-unique-by-source",
+@router.post(
+    "/market/skills/list",
 )
-async def list_unique_skills_by_source(
+async def list_skills(
     request: Request,
-    source_id: str,
+    body: _ListSkillsRequest,
 ):
-    """查询某个 source_id 的所有技能，按 skill_id 去重.
+    """查询技能列表.
 
     Args:
-        source_id: 来源ID
+        body: 请求参数，包含 source_id 等
 
     Returns:
-        技能列表，包含 skill_id、skill_name、cn_name
+        技能列表，每个 skill_id 只返回一条记录，包含 skill_id、skill_name、cn_name
     """
     from ...marketplace.skill_registry import SkillRegistry
 
     svc = request.app.state.marketplace
     registry = SkillRegistry(svc.db)
 
-    skills = await registry.list_unique_skills_by_source_id(source_id)
-    return {"source_id": source_id, "count": len(skills), "skills": skills}
+    skills = await registry.list_unique_skills_by_source_id(body.source_id)
+    return {
+        "source_id": body.source_id,
+        "count": len(skills),
+        "skills": skills,
+    }
 
 
 def _find_tenant_dirs_for_source_id(

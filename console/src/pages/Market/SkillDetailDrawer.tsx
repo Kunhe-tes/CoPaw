@@ -1,24 +1,20 @@
 import type { ReactNode } from "react";
 import { useEffect, useMemo, useState } from "react";
 import {
-  BarChartOutlined,
-  CalendarOutlined,
   HistoryOutlined,
   MoreOutlined,
-  ProfileOutlined,
-  TagOutlined,
   UserOutlined,
 } from "@ant-design/icons";
-import { Button, Dropdown, Modal, Spin, Table, Tag, Typography, type MenuProps } from "antd";
+import { Button, Dropdown, Modal, Spin, Table, Tag, Tooltip, Typography, type MenuProps } from "antd";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
-import { Send, Undo2, Trash2, Archive, Users, PhoneCall } from "lucide-react";
+import { Send, Undo2, Trash2, Archive, Users, PhoneCall, Tag as TagIcon, GitBranch, Calendar, CheckCircle } from "lucide-react";
 import { marketApi, MarketSkillDetail } from "../../api/modules/market";
 import type { FileContentResponse } from "../../api/modules/mySkills";
 import { VersionHistoryModal } from "./Skills/VersionHistoryModal";
 import styles from "./SkillDetailDrawer.module.less";
 
-const { Paragraph, Text, Title } = Typography;
+const { Text, Title } = Typography;
 
 interface SkillDetailDrawerProps {
   open: boolean;
@@ -37,89 +33,111 @@ interface SkillDetailDrawerProps {
 
 const FRONTMATTER_PATTERN = /^---\r?\n[\s\S]*?\r?\n---[ \t]*(?:\r?\n|$)/;
 
-const FOOTER_BUTTON_STYLE = {
-  height: 32,
-  padding: "0 16px",
-  borderRadius: 8,
-  fontSize: 13,
-  fontWeight: 500,
-  display: "inline-flex",
+// 顶栏样式 - 固定在顶部
+const HEADER_STYLE = {
+  position: "sticky",
+  top: 0,
+  zIndex: 10,
+  padding: "12px 20px",
+  backgroundColor: "#fff",
+  borderBottom: "1px solid #f0f0f0",
+  display: "flex",
+  justifyContent: "space-between",
   alignItems: "center",
-  gap: 6,
-  transition: "all 0.2s ease",
 } as const;
 
-const PRIMARY_BUTTON_STYLE = {
-  height: 32,
-  padding: "0 16px",
-  borderRadius: 8,
-  fontSize: 13,
-  fontWeight: 500,
+// 元数据项样式 - 淡色小字
+const META_ITEM_STYLE = {
   display: "inline-flex",
   alignItems: "center",
-  gap: 6,
-  background: "linear-gradient(135deg, #1890ff 0%, #096dd9 100%)",
-  border: "none",
-  boxShadow: "0 2px 8px rgba(24, 144, 255, 0.2)",
-} as const;
-
-const BASE_META_TAG_STYLE = {
-  margin: 0,
-  backgroundColor: "#f5f5f5",
-  color: "#5e5d59",
-  borderRadius: 999,
-  border: "1px solid #e8e8e8",
-  paddingInline: 10,
-  paddingBlock: 1,
+  gap: 4,
   fontSize: 12,
+  color: "#8c8c8c",
 } as const;
 
-const BASE_STAT_TAG_STYLE = {
+// 中文名样式 - 稍大
+const CHINESE_NAME_STYLE = {
+  fontSize: 14,
+  fontWeight: 500,
+  color: "#1a1a1a",
+} as const;
+
+// 技能名样式 - 小号
+const SKILL_NAME_STYLE = {
+  fontSize: 12,
+  color: "#8c8c8c",
+} as const;
+
+// 操作按钮样式 - 次要按钮（版本历史）
+const SECONDARY_BUTTON_STYLE = {
+  height: 28,
+  padding: "0 10px",
+  borderRadius: 6,
+  fontSize: 12,
+  fontWeight: 500,
+  display: "inline-flex",
+  alignItems: "center",
+  gap: 4,
+  border: "1px solid #d9d9d9",
+  backgroundColor: "#fafafa",
+  color: "#595959",
+} as const;
+
+// 主要按钮样式（分发）
+const PRIMARY_BUTTON_STYLE = {
+  height: 28,
+  padding: "0 12px",
+  borderRadius: 6,
+  fontSize: 12,
+  fontWeight: 500,
+  display: "inline-flex",
+  alignItems: "center",
+  gap: 4,
+  backgroundColor: "#3769fc",
+  color: "#fff",
+  border: "none",
+} as const;
+
+// 信息按钮样式（用户可执行性）
+const INFO_BUTTON_STYLE = {
+  height: 28,
+  padding: "0 10px",
+  borderRadius: 6,
+  fontSize: 12,
+  fontWeight: 500,
+  display: "inline-flex",
+  alignItems: "center",
+  gap: 4,
+  border: "1px solid #3769fc",
+  backgroundColor: "#fff",
+  color: "#3769fc",
+} as const;
+
+// 更多按钮样式（下拉）
+const MORE_BUTTON_STYLE = {
+  height: 28,
+  padding: "0 8px",
+  borderRadius: 6,
+  fontSize: 12,
+  fontWeight: 500,
+  display: "inline-flex",
+  alignItems: "center",
+  gap: 4,
+  border: "1px solid #d9d9d9",
+  backgroundColor: "#fff",
+  color: "#595959",
+} as const;
+
+// 统计徽章样式
+const STAT_TAG_STYLE = {
   margin: 0,
-  borderRadius: 8,
-  paddingInline: 10,
-  paddingBlock: 4,
+  borderRadius: 6,
+  paddingInline: 8,
+  paddingBlock: 2,
   fontSize: 12,
   display: "inline-flex",
   alignItems: "center",
   gap: 4,
-} as const;
-
-// 统计徽章样式 Token
-const STAT_BADGE_CALL = {
-  backgroundColor: "#eef4ff",
-  color: "#365d97",
-  border: "1px solid #d7e2f5",
-  borderRadius: 8,
-  padding: "4px 10px",
-  fontSize: 12,
-} as const;
-
-const STAT_BADGE_USER = {
-  backgroundColor: "#edf8f2",
-  color: "#2f7a55",
-  border: "1px solid #cfe4d9",
-  borderRadius: 8,
-  padding: "4px 10px",
-  fontSize: 12,
-} as const;
-
-// 状态标签样式 Token
-const STATUS_ACTIVE = {
-  backgroundColor: "#edf7f0",
-  color: "#2e7d4f",
-  borderRadius: 999,
-  padding: "2px 12px",
-  fontSize: 12,
-  fontWeight: 500,
-} as const;
-
-const STATUS_INACTIVE = {
-  backgroundColor: "#fff1f0",
-  color: "#cf1322",
-  borderRadius: 999,
-  padding: "2px 12px",
-  fontSize: 12,
 } as const;
 
 function formatDate(value: string | null): string {
@@ -156,11 +174,23 @@ function splitMarkdownFrontmatter(
 function renderPreviewContent(
   fileType: string | null,
   fileContent: string | null,
+  fallbackDescription: string | null = null,
 ): ReactNode {
+  // 加载失败时显示 fallback description
+  if (fileContent === null && fallbackDescription) {
+    return (
+      <div className={styles.streamingMarkdown}>
+        <Text style={{ fontSize: 14, color: "#1a1a1a", lineHeight: 1.7 }}>
+          {fallbackDescription}
+        </Text>
+      </div>
+    );
+  }
+
   if (fileContent === null) {
     return (
       <Text type="secondary" style={{ fontSize: 13 }}>
-        选择左侧文件查看内容
+        暂无文档内容
       </Text>
     );
   }
@@ -172,7 +202,7 @@ function renderPreviewContent(
           width: "100%",
           boxSizing: "border-box",
           border: "1px dashed #d9d9d9",
-          borderRadius: 12,
+          borderRadius: 8,
           padding: 24,
           backgroundColor: "#fafafa",
           textAlign: "center",
@@ -191,14 +221,6 @@ function renderPreviewContent(
           width: "100%",
           maxWidth: "100%",
           boxSizing: "border-box",
-          backgroundColor: "#fff",
-          borderRadius: 10,
-          padding: 12,
-          border: "1px solid #f0f0f0",
-          lineHeight: 1.7,
-          overflow: "hidden",
-          wordBreak: "break-word",
-          overflowWrap: "anywhere",
         }}
       >
         <div
@@ -226,12 +248,12 @@ function renderPreviewContent(
           margin: 0,
           width: "100%",
           boxSizing: "border-box",
-          backgroundColor: "#1f2430",
+          backgroundColor: "#1f1f1f",
           color: "#f5f5f5",
-          borderRadius: 10,
-          padding: 10,
+          borderRadius: 8,
+          padding: 16,
           overflow: "auto",
-          fontSize: 12,
+          fontSize: 13,
           lineHeight: 1.6,
           whiteSpace: "pre-wrap",
           wordBreak: "break-word",
@@ -250,11 +272,11 @@ function renderPreviewContent(
         width: "100%",
         boxSizing: "border-box",
         backgroundColor: "#fafafa",
-        borderRadius: 10,
-        padding: 10,
+        borderRadius: 8,
+        padding: 16,
         border: "1px solid #f0f0f0",
         overflow: "auto",
-        fontSize: 12,
+        fontSize: 13,
         lineHeight: 1.6,
         whiteSpace: "pre-wrap",
         wordBreak: "break-word",
@@ -286,8 +308,6 @@ export function SkillDetailDrawer(
   const [fileLoading, setFileLoading] = useState(false);
   const [previewError, setPreviewError] = useState<string | null>(null);
   const [versionHistoryOpen, setVersionHistoryOpen] = useState(false);
-  const displayTitle = skill?.chinese_name?.trim() || skill?.name || "";
-  const displayDescription = skill?.description || "暂无描述";
   const normalizedCategoryName = categoryName?.trim();
 
   const moreMenuItems: MenuProps["items"] = useMemo(() => {
@@ -371,12 +391,24 @@ export function SkillDetailDrawer(
 
   const userStatsColumns = useMemo(
     () => [
-      { title: "用户ID", dataIndex: "user_id", key: "user_id" },
-      { title: "用户名称", dataIndex: "user_name", key: "user_name" },
+      {
+        title: "用户ID",
+        dataIndex: "user_id",
+        key: "user_id",
+        width: "30%",
+      },
+      {
+        title: "用户名称",
+        dataIndex: "user_name",
+        key: "user_name",
+        width: "40%",
+      },
       {
         title: "调用次数",
         dataIndex: "call_count",
         key: "call_count",
+        width: "30%",
+        align: "right" as const,
         sorter: (
           a: { call_count: number },
           b: { call_count: number },
@@ -390,381 +422,240 @@ export function SkillDetailDrawer(
     return null;
   }
 
+  // 中文名和技能名
+  const chineseName = skill.chinese_name?.trim() || "";
+  const skillName = skill.name;
+
+  // 状态颜色和文字
+  const statusColor = skill.status === "active" ? "#52c41a" : "#ff4d4f";
+  const statusText = skill.status === "active" ? "已发布" : "已下架";
+
+  // 简介
+  const description = skill.description || "暂无描述";
+
   return (
     <>
-      <div style={{ height: "100%", overflow: "auto", padding: 12 }}>
+      <div style={{ height: "100%", display: "flex", flexDirection: "column", backgroundColor: "#fafafa" }}>
+        {/* 顶栏：固定 */}
+        <div style={HEADER_STYLE}>
+          {/* 左侧：元数据 */}
+          <div style={{ display: "flex", alignItems: "center", gap: 16 }}>
+            {/* 状态徽章（标题前） */}
+            <Tag
+              bordered={false}
+              style={{
+                margin: 0,
+                borderRadius: 6,
+                padding: "2px 8px",
+                fontSize: 12,
+                backgroundColor: skill.status === "active" ? "#f6ffed" : "#fff1f0",
+                color: statusColor,
+              }}
+            >
+              <CheckCircle size={12} style={{ marginRight: 4 }} />
+              {statusText}
+            </Tag>
+
+            {/* 中文名（大号） + 技能名（小号） */}
+            <span style={CHINESE_NAME_STYLE}>
+              {chineseName}
+              {chineseName && skillName && (
+                <span style={SKILL_NAME_STYLE}> ({skillName})</span>
+              )}
+              {!chineseName && skillName && (
+                <span style={CHINESE_NAME_STYLE}>{skillName}</span>
+              )}
+            </span>
+
+            {/* 分类 */}
+            {normalizedCategoryName && (
+              <span style={META_ITEM_STYLE}>
+                <TagIcon size={12} />
+                {normalizedCategoryName}
+              </span>
+            )}
+
+            {/* 版本 */}
+            <span style={META_ITEM_STYLE}>
+              <GitBranch size={12} />
+              v{skill.version}
+            </span>
+
+            {/* 创建时间 */}
+            <span style={META_ITEM_STYLE}>
+              <Calendar size={12} />
+              {formatDate(skill.created_at)}
+            </span>
+
+            {/* 创建人 */}
+            <span style={META_ITEM_STYLE}>
+              <Users size={12} />
+              {skill.creator_name || "未知"}
+            </span>
+          </div>
+
+          {/* 右侧：操作按钮 */}
+          <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+            <Button
+              onClick={() => setVersionHistoryOpen(true)}
+              style={SECONDARY_BUTTON_STYLE}
+            >
+              <HistoryOutlined style={{ fontSize: 12 }} />
+              版本历史
+            </Button>
+            {isManager && onDistribute && (
+              <Button
+                type="primary"
+                onClick={onDistribute}
+                style={PRIMARY_BUTTON_STYLE}
+              >
+                <Send size={12} />
+                分发
+              </Button>
+            )}
+            {isManager && onLookupOwners && (
+              <Button
+                onClick={onLookupOwners}
+                style={INFO_BUTTON_STYLE}
+              >
+                <UserOutlined style={{ fontSize: 12 }} />
+                用户可执行性
+              </Button>
+            )}
+            {isManager && moreMenuItems.length > 0 && (
+              <Dropdown menu={{ items: moreMenuItems }} trigger={["click"]}>
+                <Button style={MORE_BUTTON_STYLE}>
+                  <MoreOutlined style={{ fontSize: 12 }} />
+                </Button>
+              </Dropdown>
+            )}
+          </div>
+        </div>
+
+        {/* 主区域：文档 + 用户明细 */}
         <div
           style={{
             display: "flex",
             gap: 12,
-            flexWrap: "wrap",
-            alignItems: "flex-start",
+            padding: 16,
+            flex: 1,
+            minHeight: 0,
           }}
         >
-        <div
-          style={{
-            flex: "1 1 720px",
-            minWidth: 0,
-            backgroundColor: "#fff",
-            border: "1px solid #f0f0f0",
-            borderRadius: 16,
-            overflow: "hidden",
-            boxShadow: "rgba(0, 0, 0, 0.04) 0px 4px 16px",
-          }}
-        >
+          {/* 左侧：简介 + 文档内容（可滚动） */}
           <div
             style={{
-              padding: "10px 14px",
-              borderBottom: "1px solid #f0f0f0",
+              flex: isManager ? "1 1 auto" : "1 1 100%",
+              minWidth: 0,
               backgroundColor: "#fff",
+              borderRadius: 8,
+              padding: 20,
+              overflow: "auto",
             }}
           >
-            <Title
-              level={4}
-              style={{
-                margin: 0,
-                fontSize: 15,
-                fontWeight: 600,
-                color: "#141413",
-              }}
-            >
-              {displayTitle}
-            </Title>
+            {/* 简介 */}
+            <div style={{ marginBottom: 16, paddingBottom: 16, borderBottom: "1px solid #f0f0f0" }}>
+              <Text style={{ fontSize: 14, color: "#595959", lineHeight: 1.6 }}>
+                {description}
+              </Text>
+            </div>
+
+            {/* 文档内容 */}
+            {previewError ? (
+              <Text type="secondary">{previewError}</Text>
+            ) : fileLoading ? (
+              <div
+                style={{
+                  display: "flex",
+                  justifyContent: "center",
+                  alignItems: "center",
+                  minHeight: 200,
+                }}
+              >
+                <Spin />
+              </div>
+            ) : (
+              renderPreviewContent(
+                fileDetail?.file_type ?? null,
+                fileDetail?.content ?? null,
+              )
+            )}
           </div>
 
-          <div
-            style={{
-              padding: "8px 14px",
-              borderBottom: "1px solid #f0f0f0",
-              backgroundColor: "#fff",
-            }}
-          >
-            <Text
-              type="secondary"
-              style={{
-                fontSize: 13,
-                lineHeight: 1.6,
-                whiteSpace: "pre-wrap",
-                wordBreak: "break-word",
-              }}
-            >
-              {displayDescription}
-            </Text>
-          </div>
-
-          <div
-            style={{
-              display: "flex",
-              minHeight: 480,
-            }}
-          >
+          {/* 右侧：用户明细（固定，仅管理员） */}
+          {isManager && (
             <div
               style={{
-                flex: "1 1 auto",
-                width: "100%",
-                minWidth: 0,
-                padding: 12,
-                backgroundColor: "#fafafa",
-                height: "100%",
+                flex: "0 0 360px",
+                maxWidth: 360,
+                backgroundColor: "#fff",
+                borderRadius: 8,
+                padding: 16,
+                overflow: "hidden",
               }}
             >
-              {previewError ? (
-                <div
-                  style={{
-                    padding: 24,
-                    borderRadius: 12,
-                    backgroundColor: "#fff2f0",
-                    border: "1px solid #ffccc7",
-                  }}
-                >
-                  <Text type="danger">{previewError}</Text>
-                </div>
-              ) : fileLoading ? (
-                <div
-                  style={{
-                    display: "flex",
-                    justifyContent: "center",
-                    alignItems: "center",
-                    minHeight: 360,
-                  }}
-                >
-                  <Spin />
-                </div>
-              ) : (
-                renderPreviewContent(
-                  fileDetail?.file_type ?? null,
-                  fileDetail?.content ?? null,
-                )
-              )}
-            </div>
-          </div>
-        </div>
-
-        <div
-          style={{
-            flex: "0 1 360px",
-            width: "100%",
-            maxWidth: 360,
-            display: "flex",
-            flexDirection: "column",
-            gap: 10,
-          }}
-        >
-          <div
-            style={{
-              borderRadius: 16,
-              border: "1px solid #f0f0f0",
-              backgroundColor: "#fff",
-              padding: 14,
-              boxShadow: "rgba(0, 0, 0, 0.04) 0px 4px 16px",
-            }}
-          >
-            {/* Row 1: 标题 + 状态 + 统计徽章 */}
-            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 8 }}>
-              <div style={{ display: "flex", alignItems: "center", gap: 8, maxWidth: "70%" }}>
-                <Title
-                  level={4}
-                  style={{ margin: 0, color: "#141413", fontSize: 16, fontWeight: 600, lineHeight: 1.35 }}
-                >
-                  {skill.chinese_name?.trim() ? (
-                    <>
-                      {skill.chinese_name}
-                      <Text style={{ marginLeft: 8, fontSize: 14, fontWeight: 400, color: "#87867f" }}>
-                        ({skill.name})
-                      </Text>
-                    </>
-                  ) : (
-                    displayTitle
-                  )}
+              {/* 标题 + 统计数据 */}
+              <div
+                style={{
+                  display: "flex",
+                  alignItems: "center",
+                  justifyContent: "space-between",
+                  marginBottom: 12,
+                }}
+              >
+                <Title level={5} style={{ margin: 0, fontSize: 13, fontWeight: 500 }}>
+                  使用用户明细
                 </Title>
-                <Tag
-                  bordered={false}
-                  style={{
-                    ...skill.status === "active" ? STATUS_ACTIVE : STATUS_INACTIVE,
-                    marginLeft: 4,
-                  }}
-                >
-                  {skill.status === "active" ? "已发布" : "已下架"}
-                </Tag>
-              </div>
-              <div style={{ display: "flex", alignItems: "center", gap: 6, flexShrink: 0 }}>
-                <Tag
-                  bordered={false}
-                  style={{ ...BASE_STAT_TAG_STYLE, ...STAT_BADGE_CALL }}
-                >
-                  <PhoneCall size={12} />
-                  {formatMetricValue(skill.call_count)}
-                </Tag>
-                <Tag
-                  bordered={false}
-                  style={{ ...BASE_STAT_TAG_STYLE, ...STAT_BADGE_USER }}
-                >
-                  <Users size={12} />
-                  {formatMetricValue(skill.user_count)}
-                </Tag>
-              </div>
-            </div>
-
-            {/* Row 2: 描述 */}
-            <Paragraph
-              style={{
-                marginBottom: 12,
-                color: "#87867f",
-                fontSize: 13,
-                lineHeight: 1.6,
-              }}
-            >
-              {displayDescription}
-            </Paragraph>
-
-            {/* Row 3: 元数据标签 */}
-            <div style={{ display: "flex", flexWrap: "wrap", alignItems: "center", gap: 6, marginBottom: 12 }}>
-              {normalizedCategoryName && (
-                <Tag
-                  icon={<TagOutlined />}
-                  bordered={false}
-                  style={BASE_META_TAG_STYLE}
-                >
-                  {normalizedCategoryName}
-                </Tag>
-              )}
-              <Tag
-                icon={<ProfileOutlined />}
-                bordered={false}
-                style={BASE_META_TAG_STYLE}
-              >
-                v{skill.version}
-              </Tag>
-              <Tag
-                icon={<CalendarOutlined />}
-                bordered={false}
-                style={BASE_META_TAG_STYLE}
-              >
-                {formatDate(skill.created_at)}
-              </Tag>
-              <Tag
-                icon={<UserOutlined />}
-                bordered={false}
-                style={BASE_META_TAG_STYLE}
-              >
-                {skill.creator_name || "未知创建人"}
-              </Tag>
-            </div>
-
-            {/* Row 4: 操作按钮 */}
-            {isManager && (onDistribute || onLookupOwners || onRecall || onUnpublish || onDelete) && (
-              <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" }}>
-                {/* 高频操作 */}
-                <Button
-                  onClick={() => setVersionHistoryOpen(true)}
-                  style={{
-                    ...FOOTER_BUTTON_STYLE,
-                    color: "#5e5d59",
-                    border: "1px solid #e8e6dc",
-                    backgroundColor: "#faf9f5",
-                  }}
-                >
-                  <HistoryOutlined style={{ fontSize: 14 }} />
-                  版本历史
-                </Button>
-                {onDistribute && (
-                  <Button
-                    type="primary"
-                    onClick={onDistribute}
-                    style={PRIMARY_BUTTON_STYLE}
-                  >
-                    <Send size={14} />
-                    分发
-                  </Button>
-                )}
-                {onLookupOwners && (
-                  <Button
-                    onClick={onLookupOwners}
-                    style={{
-                      ...FOOTER_BUTTON_STYLE,
-                      color: "#5e5d59",
-                      border: "1px solid #e8e6dc",
-                      backgroundColor: "#faf9f5",
-                    }}
-                  >
-<UserOutlined style={{ fontSize: 12 }} />
-                    用户可执行性
-                  </Button>
-                )}
-                {/* 低频操作：更多下拉 */}
-                {(onRecall || onUnpublish || onDelete) && (
-                  <Dropdown
-                    menu={{ items: moreMenuItems }}
-                    trigger={["click"]}
-                  >
-                    <Button
+                <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                  <Tooltip title="累计调用次数（所有用户总调用）">
+                    <Tag
+                      bordered={false}
                       style={{
-                        ...FOOTER_BUTTON_STYLE,
-                        color: "#5e5d59",
-                        border: "1px solid #e8e6dc",
-                        backgroundColor: "#faf9f5",
+                        ...STAT_TAG_STYLE,
+                        backgroundColor: "#eef4ff",
+                        color: "#365d97",
                       }}
                     >
-                      <MoreOutlined style={{ fontSize: 14 }} />
-                      更多
-                    </Button>
-                  </Dropdown>
-                )}
+                      <PhoneCall size={12} />
+                      {formatMetricValue(skill.call_count)}
+                    </Tag>
+                  </Tooltip>
+                  <Tooltip title="使用用户数（至少调用过一次的用户）">
+                    <Tag
+                      bordered={false}
+                      style={{
+                        ...STAT_TAG_STYLE,
+                        backgroundColor: "#edf8f2",
+                        color: "#2f7a55",
+                      }}
+                    >
+                      <Users size={12} />
+                      {formatMetricValue(skill.user_count)}
+                    </Tag>
+                  </Tooltip>
+                </div>
               </div>
-            )}
-            {!isManager && (
-              <div style={{ display: "flex", gap: 10 }}>
-                <Button
-                  onClick={() => setVersionHistoryOpen(true)}
-                  style={{
-                    ...FOOTER_BUTTON_STYLE,
-                    color: "#5e5d59",
-                    border: "1px solid #e8e6dc",
-                    backgroundColor: "#faf9f5",
-                  }}
-                >
-                  <HistoryOutlined style={{ fontSize: 14 }} />
-                  版本历史
-                </Button>
-              </div>
-            )}
-          </div>
 
-          <div
-            style={{
-              borderRadius: 16,
-              border: "1px solid #f0f0f0",
-              backgroundColor: "#fff",
-              padding: 12,
-              boxShadow: "rgba(0, 0, 0, 0.03) 0px 2px 10px",
-            }}
-          >
-            <div
-              style={{
-                display: "flex",
-                alignItems: "center",
-                justifyContent: "space-between",
-                marginBottom: 10,
-              }}
-            >
-              <Title level={5} style={{ margin: 0, fontSize: 13, fontWeight: 500 }}>
-                使用用户明细
-              </Title>
-              <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
-                <Tag
-                  bordered={false}
-                  style={{
-                    ...BASE_STAT_TAG_STYLE,
-                    backgroundColor: "#eef4ff",
-                    color: "#365d97",
-                    border: "1px solid #d7e2f5",
-                    paddingInline: 8,
-                    paddingBlock: 0,
-                  }}
-                >
-                  <BarChartOutlined />
-                  <Text style={{ fontSize: 11, color: "inherit", fontWeight: 600 }}>
-                    {skill.call_count}
-                  </Text>
-                </Tag>
-                <Tag
-                  bordered={false}
-                  style={{
-                    ...BASE_STAT_TAG_STYLE,
-                    backgroundColor: "#edf8f2",
-                    color: "#2f7a55",
-                    border: "1px solid #cfe4d9",
-                    paddingInline: 8,
-                    paddingBlock: 0,
-                  }}
-                >
-                  <UserOutlined />
-                  <Text style={{ fontSize: 11, color: "inherit", fontWeight: 600 }}>
-                    {skill.user_count}
-                  </Text>
-                </Tag>
+              {/* 用户表格 */}
+              <div className={styles.usageTable}>
+                <Table
+                  dataSource={skill.user_stats}
+                  columns={userStatsColumns}
+                  rowKey="user_id"
+                  pagination={{ pageSize: 5, hideOnSinglePage: true, size: "small" }}
+                  size="small"
+                  scroll={{ y: 380 }}
+                />
               </div>
             </div>
-
-            <div className={styles.usageTable}>
-              <Table
-                dataSource={skill.user_stats}
-                columns={userStatsColumns}
-                rowKey="user_id"
-                pagination={{ pageSize: 5, hideOnSinglePage: true, size: "small" }}
-                size="small"
-                scroll={{ y: 260 }}
-              />
-            </div>
-          </div>
+          )}
         </div>
-      </div>
       </div>
 
       <VersionHistoryModal
         open={versionHistoryOpen}
         itemId={skill.item_id}
-        skillName={displayTitle}
+        skillName={chineseName || skillName}
         currentVersion={skill.version}
         sourceId={sourceId || ""}
         isManager={isManager}

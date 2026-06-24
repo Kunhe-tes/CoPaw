@@ -102,7 +102,9 @@ class SkillRegistry:
     ) -> bool:
         """插入或更新技能记录（两步操作：先查询再决定插入/更新）.
 
-        按 skill_name + tenant_id 判断是否存在，确保同用户同技能名只有一条记录。
+        按 skill_name + tenant_id + source_id 判断是否存在：
+        - 存在：更新现有记录
+        - 不存在：插入新记录
 
         Args:
             skill_id: 技能唯一标识符
@@ -255,10 +257,10 @@ class SkillRegistry:
         description: str = "",
         version_text: str = "1.0.0",
     ) -> bool:
-        """按 skill_name + tenant_id 幂等插入或更新技能记录.
+        """按 skill_name + tenant_id + source_id 幂等插入或更新技能记录.
 
         处理逻辑：
-        1. 先查询是否存在 skill_name + tenant_id 的记录
+        1. 先查询是否存在 skill_name + tenant_id + source_id 的记录
         2. 如果存在：更新 skill_id、cn_name 等字段
         3. 如果不存在：插入新记录
 
