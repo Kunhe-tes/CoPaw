@@ -30,7 +30,6 @@ from .middleware.tenant_identity import TenantIdentityMiddleware
 from .middleware.tenant_workspace import TenantWorkspaceMiddleware
 from .middleware.header_passthrough import HeaderPassthroughMiddleware
 from .middleware.liveness_probe import LivenessProbeMiddleware
-from .middleware.runtime_static_gzip import RuntimeStaticGZipMiddleware
 from .middleware.sse_diagnostic import SSEDiagnosticMiddleware
 from .source_system_config.middleware import SourceSystemConfigMiddleware
 from .routers import router as api_router, create_agent_scoped_router
@@ -667,8 +666,6 @@ app = FastAPI(
     openapi_url="/openapi.json" if DOCS_ENABLED else None,
 )
 app.state.runtime_diagnostic_manager = runtime_diagnostic_manager
-
-app.add_middleware(RuntimeStaticGZipMiddleware)
 
 # Apply CORS middleware if CORS_ORIGINS is set
 # Note: add_middleware inserts at the beginning of the stack, so the LAST
