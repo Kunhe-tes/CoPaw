@@ -93,15 +93,120 @@ class ProviderManager:
         self.root_path = self._get_tenant_root_path(tenant_id)
         self.builtin_path = self.root_path / "builtin"
         self.custom_path = self.root_path / "custom"
+        init_started_at = time.perf_counter()
+        logger.info(
+            "provider_manager_init_start tenant_id=%s root_path=%s "
+            "thread_id=%s",
+            tenant_id,
+            self.root_path,
+            threading.get_ident(),
+        )
+
+        step_started_at = time.perf_counter()
+        logger.info(
+            "provider_manager_init_step_start tenant_id=%s "
+            "step=prepare_disk_storage root_path=%s",
+            tenant_id,
+            self.root_path,
+        )
         self._prepare_disk_storage()
+        logger.info(
+            "provider_manager_init_step_done tenant_id=%s "
+            "step=prepare_disk_storage duration_ms=%d root_path=%s",
+            tenant_id,
+            int((time.perf_counter() - step_started_at) * 1000),
+            self.root_path,
+        )
+
+        step_started_at = time.perf_counter()
+        logger.info(
+            "provider_manager_init_step_start tenant_id=%s step=init_builtins",
+            tenant_id,
+        )
         self._init_builtins()
+        logger.info(
+            "provider_manager_init_step_done tenant_id=%s "
+            "step=init_builtins duration_ms=%d builtin_count=%d",
+            tenant_id,
+            int((time.perf_counter() - step_started_at) * 1000),
+            len(self.builtin_providers),
+        )
+
+        step_started_at = time.perf_counter()
+        logger.info(
+            "provider_manager_init_step_start tenant_id=%s "
+            "step=copy_builtin_defaults builtin_count=%d",
+            tenant_id,
+            len(self.builtin_providers),
+        )
         self._builtin_provider_defaults = {
             provider_id: provider.model_copy(deep=True)
             for provider_id, provider in self.builtin_providers.items()
         }
+        logger.info(
+            "provider_manager_init_step_done tenant_id=%s "
+            "step=copy_builtin_defaults duration_ms=%d",
+            tenant_id,
+            int((time.perf_counter() - step_started_at) * 1000),
+        )
+
+        step_started_at = time.perf_counter()
+        logger.info(
+            "provider_manager_init_step_start tenant_id=%s "
+            "step=init_from_storage root_path=%s",
+            tenant_id,
+            self.root_path,
+        )
         self._init_from_storage()
+        logger.info(
+            "provider_manager_init_step_done tenant_id=%s "
+            "step=init_from_storage duration_ms=%d builtin_count=%d "
+            "custom_count=%d active_model_set=%s",
+            tenant_id,
+            int((time.perf_counter() - step_started_at) * 1000),
+            len(self.builtin_providers),
+            len(self.custom_providers),
+            self.active_model is not None,
+        )
+
+        step_started_at = time.perf_counter()
+        logger.info(
+            "provider_manager_init_step_start tenant_id=%s "
+            "step=apply_default_annotations",
+            tenant_id,
+        )
         self._apply_default_annotations()
+        logger.info(
+            "provider_manager_init_step_done tenant_id=%s "
+            "step=apply_default_annotations duration_ms=%d",
+            tenant_id,
+            int((time.perf_counter() - step_started_at) * 1000),
+        )
+
+        step_started_at = time.perf_counter()
+        logger.info(
+            "provider_manager_init_step_start tenant_id=%s "
+            "step=record_mtimes root_path=%s",
+            tenant_id,
+            self.root_path,
+        )
         self._record_mtimes()
+        logger.info(
+            "provider_manager_init_step_done tenant_id=%s "
+            "step=record_mtimes duration_ms=%d freshness_token_count=%d",
+            tenant_id,
+            int((time.perf_counter() - step_started_at) * 1000),
+            len(self._file_freshness_tokens),
+        )
+        logger.info(
+            "provider_manager_init_done tenant_id=%s duration_ms=%d "
+            "builtin_count=%d custom_count=%d root_path=%s",
+            tenant_id,
+            int((time.perf_counter() - init_started_at) * 1000),
+            len(self.builtin_providers),
+            len(self.custom_providers),
+            self.root_path,
+        )
 
     @staticmethod
     def _get_tenant_root_path(tenant_id: str) -> Path:
@@ -441,13 +546,56 @@ class ProviderManager:
             return ProviderManager._instances[effective_tenant_id]
 
         # Slow path: create instance with lock
+        lock_started_at = time.perf_counter()
+        logger.info(
+            "provider_manager_instance_cache_miss route_tenant_id=%s "
+            "provider_tenant_id=%s cached_instances=%d thread_id=%s",
+            tenant_id,
+            effective_tenant_id,
+            len(ProviderManager._instances),
+            threading.get_ident(),
+        )
         with ProviderManager._instances_lock:
+            lock_wait_ms = int((time.perf_counter() - lock_started_at) * 1000)
+            logger.info(
+                "provider_manager_instance_lock_acquired route_tenant_id=%s "
+                "provider_tenant_id=%s wait_ms=%d cached_instances=%d "
+                "thread_id=%s",
+                tenant_id,
+                effective_tenant_id,
+                lock_wait_ms,
+                len(ProviderManager._instances),
+                threading.get_ident(),
+            )
             # Double-check after acquiring lock
             if effective_tenant_id not in ProviderManager._instances:
+                create_started_at = time.perf_counter()
+                logger.info(
+                    "provider_manager_instance_create_start "
+                    "route_tenant_id=%s provider_tenant_id=%s",
+                    tenant_id,
+                    effective_tenant_id,
+                )
                 ProviderManager._instances[effective_tenant_id] = (
                     ProviderManager(
                         effective_tenant_id,
                     )
+                )
+                logger.info(
+                    "provider_manager_instance_create_done "
+                    "route_tenant_id=%s provider_tenant_id=%s "
+                    "duration_ms=%d cached_instances=%d",
+                    tenant_id,
+                    effective_tenant_id,
+                    int((time.perf_counter() - create_started_at) * 1000),
+                    len(ProviderManager._instances),
+                )
+            else:
+                logger.info(
+                    "provider_manager_instance_reused_after_lock "
+                    "route_tenant_id=%s provider_tenant_id=%s",
+                    tenant_id,
+                    effective_tenant_id,
                 )
             return ProviderManager._instances[effective_tenant_id]
 
