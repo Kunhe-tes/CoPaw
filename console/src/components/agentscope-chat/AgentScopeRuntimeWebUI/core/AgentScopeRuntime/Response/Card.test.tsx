@@ -239,6 +239,50 @@ describe("AgentScopeRuntimeResponseCard", () => {
     expect(getDisclosureBody()).toHaveAttribute("hidden");
   });
 
+  it("folds earlier answer text and process content while keeping only the final answer visible", () => {
+    render(
+      <AgentScopeRuntimeResponseCard
+        data={response([
+          textMessage("message-1", "正文 A"),
+          textMessage(
+            "reason-1",
+            "执行过程 B",
+            AgentScopeRuntimeMessageType.REASONING,
+          ),
+          textMessage("message-2", "正文 C"),
+        ])}
+      />,
+    );
+
+    expect(
+      screen.getByRole("button", {
+        name: /展开执行过程 · 1 个步骤/,
+      }),
+    ).toBeInTheDocument();
+    expect(screen.getByText("正文 C")).toBeVisible();
+    expect(screen.getByText("正文 A")).not.toBeVisible();
+    expect(screen.getByText("执行过程 B")).not.toBeVisible();
+  });
+
+  it("does not count folded intermediate answer text as a process step", () => {
+    render(
+      <AgentScopeRuntimeResponseCard
+        data={response([
+          textMessage("message-1", "中间正文"),
+          textMessage("message-2", "最终正文"),
+        ])}
+      />,
+    );
+
+    const trigger = screen.getByRole("button", {
+      name: "展开执行过程",
+    });
+    expect(trigger).toBeInTheDocument();
+    expect(trigger).not.toHaveAccessibleName(/0 个步骤/);
+    expect(screen.getByText("最终正文")).toBeVisible();
+    expect(screen.getByText("中间正文")).not.toBeVisible();
+  });
+
   it("does not show duration from response-level timestamps alone", () => {
     render(
       <AgentScopeRuntimeResponseCard
@@ -435,6 +479,7 @@ describe("AgentScopeRuntimeResponseCard", () => {
     render(
       <AgentScopeRuntimeResponseCard
         data={response([
+          textMessage("message-1", "前置正文"),
           textMessage(
             "reason-1",
             "最后被误归类到 Thinking 的正文",
@@ -450,5 +495,6 @@ describe("AgentScopeRuntimeResponseCard", () => {
     expect(
       screen.getByRole("button", { name: /展开执行过程 · 1 个步骤/ }),
     ).toBeInTheDocument();
+    expect(screen.getByText("前置正文")).not.toBeVisible();
   });
 });
