@@ -43,16 +43,21 @@ Clicking an individual task from the sidebar SHALL preserve the existing task cl
 - **THEN** the corresponding cronjob run action is invoked through the existing task action handler
 
 ### Requirement: Task item edit action
-The sidebar task action menu SHALL provide an edit action for task items that expose task operations. Selecting the edit action SHALL open a task edit modal for that task without triggering task navigation.
+The sidebar task action menu SHALL provide an edit action only for stopped task items that are disabled for scheduled execution. Selecting the edit action SHALL open a task edit modal for that task without triggering task navigation.
 
 #### Scenario: Open task editor from sidebar action menu
-- **WHEN** the user opens a task item's action menu in "我的任务" and selects "编辑"
+- **WHEN** the user opens a stopped task item's action menu in "我的任务" and selects "编辑"
 - **THEN** the system opens a task edit modal for that task
 - **AND** the task item click navigation handler is not invoked
+
+#### Scenario: Hide task editor while enabled
+- **WHEN** a task is enabled for scheduled execution
+- **THEN** its sidebar action menu does not offer the edit action
 
 #### Scenario: Preserve existing task actions
 - **WHEN** the edit action is added to a task item's action menu
 - **THEN** existing stop, run, resume, and delete actions remain available according to the task's existing action eligibility
+- **AND** destructive delete remains unavailable while the task is enabled for scheduled execution
 
 ### Requirement: Chat sidebar task edit modal behavior
 The task edit modal opened from "我的任务" SHALL expose the same editable task content, validation, and submit semantics as Run Center scheduled-task editing. Saving SHALL update the existing cron job through the cronjob replace API and refresh the sidebar task list after a successful update.
