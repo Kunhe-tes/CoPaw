@@ -1563,19 +1563,21 @@ def _request_approval_source_channel(
 
 def _request_user_name(request: AgentRequest) -> str | None:
     """按兼容顺序读取通道注入的用户名称。"""
-    return getattr(request, "user_name", None) or getattr(
-        getattr(request, "state", None),
-        "user_name",
-        None,
+    channel_meta = getattr(request, "channel_meta", None) or {}
+    return (
+        getattr(request, "user_name", None)
+        or getattr(getattr(request, "state", None), "user_name", None)
+        or channel_meta.get("user_name")
     )
 
 
 def _request_bbk_id(request: AgentRequest) -> str | None:
     """按兼容顺序读取通道注入的 BBK 标识。"""
-    return getattr(request, "bbk_id", None) or getattr(
-        getattr(request, "state", None),
-        "bbk_id",
-        None,
+    channel_meta = getattr(request, "channel_meta", None) or {}
+    return (
+        getattr(request, "bbk_id", None)
+        or getattr(getattr(request, "state", None), "bbk_id", None)
+        or channel_meta.get("bbk_id")
     )
 
 
@@ -1971,8 +1973,8 @@ class AgentRunner(Runner):
     ) -> str | None:
         """启动 query 追踪；追踪不可用时只记录日志并继续主流程。
 
-        如果 request 中已有 trace_id（由外部传入），则使用 attach_existing 模式
-        仅设置 context 而不创建新的数据库记录。
+        默认情况下，query 请求总是创建新的 trace。
+        只有显式声明要续接外部 trace 时，才会使用 attach_existing 模式。
         """
         if not has_trace_manager():
             return None
@@ -1981,8 +1983,8 @@ class AgentRunner(Runner):
             trace_mgr = get_trace_manager()
             if not trace_mgr.enabled:
                 return None
-            # 检查是否已有外部传入的 trace_id
             existing_trace_id = getattr(request, "trace_id", None)
+            attach_existing = self._should_attach_existing_trace(request)
             resolved_identity = await resolve_user_identity(
                 tenant_id=getattr(request, "user_id", None),
                 source_id=_request_source_id(request),
@@ -1999,9 +2001,8 @@ class AgentRunner(Runner):
                 user_name=resolved_identity.user_name,
                 bbk_id=resolved_identity.bbk_id,
                 session_name=_session_name_from_messages(msgs),
-                trace_id=existing_trace_id,  # 使用传入的 trace_id 或 None
-                attach_existing=existing_trace_id
-                is not None,  # 如果有传入 trace_id，仅 attach
+                trace_id=existing_trace_id if attach_existing else None,
+                attach_existing=attach_existing,
             )
             if trace_id:
                 # 通道层负责把事件发给前端，这里写回 request 让 SSE 能透传 trace_id。
@@ -2011,6 +2012,19 @@ class AgentRunner(Runner):
         except Exception as e:
             logger.warning("Failed to start trace: %s", e)
             return None
+
+    @staticmethod
+    def _should_attach_existing_trace(request: AgentRequest) -> bool:
+        """判断当前请求是否显式要求续接已有 trace。"""
+        trace_id = getattr(request, "trace_id", None)
+        if not trace_id:
+            return False
+
+        if bool(getattr(request, "trace_attach_existing", False)):
+            return True
+
+        channel_meta = getattr(request, "channel_meta", None) or {}
+        return bool(channel_meta.get("trace_attach_existing"))
 
     async def _generate_session_title_before_stream(
         self,
@@ -2297,6 +2311,8 @@ class AgentRunner(Runner):
             "agent_id": self.agent_id,
             "tenant_id": self.tenant_id or "",
             "source_id": _request_source_id(request),
+            "user_name": _request_user_name(request),
+            "bbk_id": _request_bbk_id(request),
             "trace_id": getattr(request, "trace_id", None),
             "channel_manager": getattr(
                 getattr(self, "_workspace", None),
@@ -3655,6 +3671,10 @@ class AgentRunner(Runner):
             preflight=attempt_input.preflight,
         )
         if attempt_state.runtime_start.block_response is not None:
+            await self._end_trace_if_needed(
+                attempt_input.trace_id,
+                TraceStatus.COMPLETED,
+            )
             yield attempt_state.runtime_start.block_response, True
             attempt_state.should_return = True
             return

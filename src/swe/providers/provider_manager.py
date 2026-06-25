@@ -34,6 +34,7 @@ from swe.providers.provider import (
 )
 from swe.providers.models import ModelSlotConfig
 from swe.constant import SECRET_DIR
+from swe.runtime_cache import reset_scope_bound_model_caches
 
 if TYPE_CHECKING:
     from agentscope.model import ChatModelBase
@@ -73,6 +74,7 @@ class ProviderManager:
         with cls._instances_lock:
             cls._instances.clear()
             cls._instance = None
+        reset_scope_bound_model_caches()
 
     def __init__(self, tenant_id: str = "default") -> None:
         """Initialize provider manager for a specific tenant.
@@ -543,6 +545,7 @@ class ProviderManager:
         self._apply_custom_refresh(changed_custom, new_custom, removed_custom)
         if active_changed:
             self._apply_active_model_refresh()
+        reset_scope_bound_model_caches()
         self._record_mtimes()
 
     def _detect_changed_builtins(self) -> list[str]:
@@ -693,6 +696,7 @@ class ProviderManager:
             provider,
             is_builtin=provider_id in self.builtin_providers,
         )
+        reset_scope_bound_model_caches()
         return True
 
     async def fetch_provider_models(
@@ -750,6 +754,7 @@ class ProviderManager:
         provider.support_connection_check = False
         self.custom_providers[provider.id] = provider
         self._save_provider(provider, is_builtin=False)
+        reset_scope_bound_model_caches()
         return await provider.get_info()
 
     def remove_custom_provider(self, provider_id: str) -> bool:
@@ -761,6 +766,7 @@ class ProviderManager:
             if provider_path.exists():
                 os.remove(provider_path)
             self._file_freshness_tokens.pop(str(provider_path), None)
+            reset_scope_bound_model_caches()
             return True
         return False
 
@@ -780,6 +786,7 @@ class ProviderManager:
             model=model_id,
         )
         self.save_active_model(self.active_model)
+        reset_scope_bound_model_caches()
 
         self.maybe_probe_multimodal(provider_id, model_id)
 
@@ -825,6 +832,7 @@ class ProviderManager:
             provider,
             is_builtin=provider_id in self.builtin_providers,
         )
+        reset_scope_bound_model_caches()
         return await provider.get_info()
 
     async def delete_model_from_provider(
@@ -840,6 +848,7 @@ class ProviderManager:
             provider,
             is_builtin=provider_id in self.builtin_providers,
         )
+        reset_scope_bound_model_caches()
         return await provider.get_info()
 
     async def probe_model_multimodal(

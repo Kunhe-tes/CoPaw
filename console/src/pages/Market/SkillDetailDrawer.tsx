@@ -4,14 +4,15 @@ import {
   BarChartOutlined,
   CalendarOutlined,
   HistoryOutlined,
+  MoreOutlined,
   ProfileOutlined,
   TagOutlined,
   UserOutlined,
 } from "@ant-design/icons";
-import { Button, Popconfirm, Spin, Table, Tag, Typography } from "antd";
+import { Button, Dropdown, Modal, Spin, Table, Tag, Typography, type MenuProps } from "antd";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
-import { Send, Undo2, Trash2, Archive } from "lucide-react";
+import { Send, Undo2, Trash2, Archive, Users, PhoneCall } from "lucide-react";
 import { marketApi, MarketSkillDetail } from "../../api/modules/market";
 import type { FileContentResponse } from "../../api/modules/mySkills";
 import { VersionHistoryModal } from "./Skills/VersionHistoryModal";
@@ -37,13 +38,29 @@ interface SkillDetailDrawerProps {
 const FRONTMATTER_PATTERN = /^---\r?\n[\s\S]*?\r?\n---[ \t]*(?:\r?\n|$)/;
 
 const FOOTER_BUTTON_STYLE = {
-  height: 28,
-  padding: "0 12px",
+  height: 32,
+  padding: "0 16px",
   borderRadius: 8,
-  fontSize: 12,
+  fontSize: 13,
+  fontWeight: 500,
   display: "inline-flex",
   alignItems: "center",
-  gap: 4,
+  gap: 6,
+  transition: "all 0.2s ease",
+} as const;
+
+const PRIMARY_BUTTON_STYLE = {
+  height: 32,
+  padding: "0 16px",
+  borderRadius: 8,
+  fontSize: 13,
+  fontWeight: 500,
+  display: "inline-flex",
+  alignItems: "center",
+  gap: 6,
+  background: "linear-gradient(135deg, #1890ff 0%, #096dd9 100%)",
+  border: "none",
+  boxShadow: "0 2px 8px rgba(24, 144, 255, 0.2)",
 } as const;
 
 const BASE_META_TAG_STYLE = {
@@ -58,12 +75,51 @@ const BASE_META_TAG_STYLE = {
 } as const;
 
 const BASE_STAT_TAG_STYLE = {
-  ...BASE_META_TAG_STYLE,
+  margin: 0,
+  borderRadius: 8,
+  paddingInline: 10,
+  paddingBlock: 4,
+  fontSize: 12,
   display: "inline-flex",
   alignItems: "center",
   gap: 4,
+} as const;
+
+// 统计徽章样式 Token
+const STAT_BADGE_CALL = {
+  backgroundColor: "#eef4ff",
+  color: "#365d97",
+  border: "1px solid #d7e2f5",
+  borderRadius: 8,
+  padding: "4px 10px",
   fontSize: 12,
-  lineHeight: "20px",
+} as const;
+
+const STAT_BADGE_USER = {
+  backgroundColor: "#edf8f2",
+  color: "#2f7a55",
+  border: "1px solid #cfe4d9",
+  borderRadius: 8,
+  padding: "4px 10px",
+  fontSize: 12,
+} as const;
+
+// 状态标签样式 Token
+const STATUS_ACTIVE = {
+  backgroundColor: "#edf7f0",
+  color: "#2e7d4f",
+  borderRadius: 999,
+  padding: "2px 12px",
+  fontSize: 12,
+  fontWeight: 500,
+} as const;
+
+const STATUS_INACTIVE = {
+  backgroundColor: "#fff1f0",
+  color: "#cf1322",
+  borderRadius: 999,
+  padding: "2px 12px",
+  fontSize: 12,
 } as const;
 
 function formatDate(value: string | null): string {
@@ -73,6 +129,14 @@ function formatDate(value: string | null): string {
     return value;
   }
   return date.toLocaleDateString("zh-CN");
+}
+
+function formatMetricValue(value: number | null): string {
+  if (value === null) return "0";
+  if (value >= 100000000) return `${(value / 100000000).toFixed(1)}亿`;
+  if (value >= 10000) return `${(value / 10000).toFixed(1)}万`;
+  if (value >= 1000) return `${(value / 1000).toFixed(1)}k`;
+  return String(value);
 }
 
 function splitMarkdownFrontmatter(
@@ -225,6 +289,53 @@ export function SkillDetailDrawer(
   const displayTitle = skill?.chinese_name?.trim() || skill?.name || "";
   const displayDescription = skill?.description || "暂无描述";
   const normalizedCategoryName = categoryName?.trim();
+
+  const moreMenuItems: MenuProps["items"] = useMemo(() => {
+    const items: MenuProps["items"] = [];
+    if (onRecall) {
+      items.push({
+        key: "recall",
+        icon: <Undo2 size={12} />,
+        label: "撤回",
+        onClick: onRecall,
+      });
+    }
+    if (onUnpublish) {
+      items.push({
+        key: "unpublish",
+        icon: <Archive size={12} />,
+        label: "下架",
+        onClick: () => {
+          Modal.confirm({
+            title: "确认下架此技能？",
+            content: "下架后用户将无法查看此技能，但数据仍保留",
+            okText: "下架",
+            cancelText: "取消",
+            onOk: onUnpublish,
+          });
+        },
+      });
+    }
+    if (onDelete) {
+      items.push({
+        key: "delete",
+        icon: <Trash2 size={12} />,
+        label: "删除",
+        danger: true,
+        onClick: () => {
+          Modal.confirm({
+            title: "彻底删除此技能？",
+            content: "删除后技能文件和版本历史将全部清除，无法恢复",
+            okText: "删除",
+            okButtonProps: { danger: true },
+            cancelText: "取消",
+            onOk: onDelete,
+          });
+        },
+      });
+    }
+    return items;
+  }, [onRecall, onUnpublish, onDelete]);
 
   useEffect(() => {
     if (!open || !skill || !sourceId) {
@@ -404,31 +515,60 @@ export function SkillDetailDrawer(
               borderRadius: 16,
               border: "1px solid #f0f0f0",
               backgroundColor: "#fff",
-              padding: 12,
+              padding: 14,
               boxShadow: "rgba(0, 0, 0, 0.04) 0px 4px 16px",
             }}
           >
-            <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
-              <Title
-                level={4}
-                style={{ margin: 0, color: "#141413", fontSize: 15, fontWeight: 500, lineHeight: 1.35 }}
-              >
-                {skill.chinese_name?.trim() ? (
-                  <>
-                    {skill.chinese_name}
-                    <Text style={{ marginLeft: 8, fontSize: 14, fontWeight: 400, color: "#87867f" }}>
-                      ({skill.name})
-                    </Text>
-                  </>
-                ) : (
-                  displayTitle
-                )}
-              </Title>
+            {/* Row 1: 标题 + 状态 + 统计徽章 */}
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 8 }}>
+              <div style={{ display: "flex", alignItems: "center", gap: 8, maxWidth: "70%" }}>
+                <Title
+                  level={4}
+                  style={{ margin: 0, color: "#141413", fontSize: 16, fontWeight: 600, lineHeight: 1.35 }}
+                >
+                  {skill.chinese_name?.trim() ? (
+                    <>
+                      {skill.chinese_name}
+                      <Text style={{ marginLeft: 8, fontSize: 14, fontWeight: 400, color: "#87867f" }}>
+                        ({skill.name})
+                      </Text>
+                    </>
+                  ) : (
+                    displayTitle
+                  )}
+                </Title>
+                <Tag
+                  bordered={false}
+                  style={{
+                    ...skill.status === "active" ? STATUS_ACTIVE : STATUS_INACTIVE,
+                    marginLeft: 4,
+                  }}
+                >
+                  {skill.status === "active" ? "已发布" : "已下架"}
+                </Tag>
+              </div>
+              <div style={{ display: "flex", alignItems: "center", gap: 6, flexShrink: 0 }}>
+                <Tag
+                  bordered={false}
+                  style={{ ...BASE_STAT_TAG_STYLE, ...STAT_BADGE_CALL }}
+                >
+                  <PhoneCall size={12} />
+                  {formatMetricValue(skill.call_count)}
+                </Tag>
+                <Tag
+                  bordered={false}
+                  style={{ ...BASE_STAT_TAG_STYLE, ...STAT_BADGE_USER }}
+                >
+                  <Users size={12} />
+                  {formatMetricValue(skill.user_count)}
+                </Tag>
+              </div>
             </div>
+
+            {/* Row 2: 描述 */}
             <Paragraph
               style={{
-                marginTop: 6,
-                marginBottom: 10,
+                marginBottom: 12,
                 color: "#87867f",
                 fontSize: 13,
                 lineHeight: 1.6,
@@ -437,7 +577,8 @@ export function SkillDetailDrawer(
               {displayDescription}
             </Paragraph>
 
-            <div style={{ display: "flex", flexWrap: "wrap", alignItems: "center", gap: 6 }}>
+            {/* Row 3: 元数据标签 */}
+            <div style={{ display: "flex", flexWrap: "wrap", alignItems: "center", gap: 6, marginBottom: 12 }}>
               {normalizedCategoryName && (
                 <Tag
                   icon={<TagOutlined />}
@@ -468,75 +609,31 @@ export function SkillDetailDrawer(
               >
                 {skill.creator_name || "未知创建人"}
               </Tag>
-              <Tag
-                bordered={false}
-                style={{
-                  margin: 0,
-                  backgroundColor:
-                    skill.status === "active" ? "#edf7f0" : "#fff1f0",
-                  color:
-                    skill.status === "active" ? "#2e7d4f" : "#cf1322",
-                  borderRadius: 999,
-                  paddingInline: 12,
-                }}
-              >
-                {skill.status === "active" ? "已发布" : "已删除"}
-              </Tag>
-              <Tag
-                bordered={false}
-                style={{
-                  ...BASE_STAT_TAG_STYLE,
-                  backgroundColor: "#eef4ff",
-                  color: "#365d97",
-                  border: "1px solid #d7e2f5",
-                  paddingInline: 12,
-                }}
-              >
-                <BarChartOutlined />
-                <Text style={{ fontSize: 11, color: "#6a7fa5" }}>调用次数</Text>
-                <Text style={{ fontSize: 12, color: "inherit", fontWeight: 600 }}>
-                  {skill.call_count}
-                </Text>
-              </Tag>
-              <Tag
-                bordered={false}
-                style={{
-                  ...BASE_STAT_TAG_STYLE,
-                  backgroundColor: "#eef8f2",
-                  color: "#2f7a55",
-                  border: "1px solid #cfe4d9",
-                  paddingInline: 12,
-                }}
-              >
-                <UserOutlined />
-                <Text style={{ fontSize: 11, color: "#4c8669" }}>使用用户数</Text>
-                <Text style={{ fontSize: 12, color: "inherit", fontWeight: 600 }}>
-                  {skill.user_count}
-                </Text>
-              </Tag>
             </div>
 
+            {/* Row 4: 操作按钮 */}
             {isManager && (onDistribute || onLookupOwners || onRecall || onUnpublish || onDelete) && (
-              <div style={{ marginTop: 10, display: "flex", gap: 8, flexWrap: "wrap" }}>
+              <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" }}>
+                {/* 高频操作 */}
                 <Button
                   onClick={() => setVersionHistoryOpen(true)}
                   style={{
                     ...FOOTER_BUTTON_STYLE,
                     color: "#5e5d59",
-                    border: "1px solid #d9d9d9",
-                    backgroundColor: "#fff",
+                    border: "1px solid #e8e6dc",
+                    backgroundColor: "#faf9f5",
                   }}
                 >
-                  <HistoryOutlined style={{ fontSize: 12 }} />
+                  <HistoryOutlined style={{ fontSize: 14 }} />
                   版本历史
                 </Button>
                 {onDistribute && (
                   <Button
                     type="primary"
                     onClick={onDistribute}
-                    style={{ ...FOOTER_BUTTON_STYLE }}
+                    style={PRIMARY_BUTTON_STYLE}
                   >
-                    <Send size={12} />
+                    <Send size={14} />
                     分发
                   </Button>
                 )}
@@ -546,81 +643,47 @@ export function SkillDetailDrawer(
                     style={{
                       ...FOOTER_BUTTON_STYLE,
                       color: "#5e5d59",
-                      border: "1px solid #d9d9d9",
-                      backgroundColor: "#fff",
+                      border: "1px solid #e8e6dc",
+                      backgroundColor: "#faf9f5",
                     }}
                   >
-                    <UserOutlined style={{ fontSize: 12 }} />
+<UserOutlined style={{ fontSize: 12 }} />
                     用户可执行性
                   </Button>
                 )}
-                {onRecall && (
-                  <Button
-                    onClick={onRecall}
-                    style={{
-                      ...FOOTER_BUTTON_STYLE,
-                      color: "#5e5d59",
-                      border: "1px solid #d9d9d9",
-                      backgroundColor: "#fff",
-                    }}
-                  >
-                    <Undo2 size={12} />
-                    撤回
-                  </Button>
-                )}
-                {onUnpublish && (
-                  <Popconfirm
-                    title="确认下架此技能？"
-                    description="下架后用户将无法查看此技能，但数据仍保留"
-                    onConfirm={onUnpublish}
-                    okText="下架"
-                    cancelText="取消"
+                {/* 低频操作：更多下拉 */}
+                {(onRecall || onUnpublish || onDelete) && (
+                  <Dropdown
+                    menu={{ items: moreMenuItems }}
+                    trigger={["click"]}
                   >
                     <Button
                       style={{
                         ...FOOTER_BUTTON_STYLE,
                         color: "#5e5d59",
-                        border: "1px solid #d9d9d9",
-                        backgroundColor: "#fff",
+                        border: "1px solid #e8e6dc",
+                        backgroundColor: "#faf9f5",
                       }}
                     >
-                      <Archive size={12} />
-                      下架
+                      <MoreOutlined style={{ fontSize: 14 }} />
+                      更多
                     </Button>
-                  </Popconfirm>
-                )}
-                {onDelete && (
-                  <Popconfirm
-                    title="彻底删除此技能？"
-                    description="删除后技能文件和版本历史将全部清除，无法恢复"
-                    onConfirm={onDelete}
-                    okText="删除"
-                    okButtonProps={{ danger: true }}
-                    cancelText="取消"
-                  >
-                    <Button
-                      danger
-                      style={{ ...FOOTER_BUTTON_STYLE }}
-                    >
-                      <Trash2 size={12} />
-                      删除
-                    </Button>
-                  </Popconfirm>
+                  </Dropdown>
                 )}
               </div>
             )}
             {!isManager && (
-              <div style={{ marginTop: 10, display: "flex", gap: 8 }}>
+              <div style={{ display: "flex", gap: 10 }}>
                 <Button
                   onClick={() => setVersionHistoryOpen(true)}
                   style={{
                     ...FOOTER_BUTTON_STYLE,
                     color: "#5e5d59",
-                    border: "1px solid #d9d9d9",
-                    backgroundColor: "#fff",
+                    border: "1px solid #e8e6dc",
+                    backgroundColor: "#faf9f5",
                   }}
                 >
-                  <HistoryOutlined style={{ fontSize: 12 }} />
+                  <HistoryOutlined style={{ fontSize: 14 }} />
                   版本历史
                 </Button>
               </div>

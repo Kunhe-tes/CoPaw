@@ -12,6 +12,7 @@ import pytest
 from swe.app.skill_readiness.models import (
     SkillReadinessCheckResult,
     SkillReadinessConfig,
+    SkillReadinessOwner,
     SkillReadinessUserResult,
 )
 from swe.app.skill_readiness.store import SkillReadinessStore
@@ -89,6 +90,7 @@ async def test_initialize_executes_required_ddl(mock_db) -> None:
 
     assert "CREATE TABLE IF NOT EXISTS swe_skill_readiness_configs" in executed_sql
     assert "CREATE TABLE IF NOT EXISTS swe_skill_readiness_runs" in executed_sql
+    assert "CREATE TABLE IF NOT EXISTS swe_skill_readiness_owner_snapshots" in executed_sql
     assert "CREATE TABLE IF NOT EXISTS swe_skill_readiness_user_results" in executed_sql
     assert "CREATE TABLE IF NOT EXISTS swe_skill_readiness_check_results" in executed_sql
     assert "idx_skill_readiness_runs_state" in executed_sql
@@ -145,6 +147,83 @@ async def test_get_config_rejects_invalid_config(store, mock_db) -> None:
 
     with pytest.raises(ValueError, match="invalid skill readiness config"):
         await store.get_config("skill-a")
+
+
+@pytest.mark.asyncio
+async def test_get_owner_snapshot_parses_cached_owners(store, mock_db) -> None:
+    """overview 读取 owner 快照时应恢复用户明细和查询状态。"""
+    updated_at = datetime.now()
+    mock_db.fetch_one.return_value = {
+        "source_id": "source-a",
+        "skill_id": "skill-a",
+        "status": "completed",
+        "total_users": 2,
+        "owner_users": 1,
+        "failed_users": 1,
+        "failure_summary": "bob: market down",
+        "owners_json": json.dumps(
+            [{"user_id": "alice", "user_name": "Alice"}],
+        ),
+        "updated_at": updated_at,
+    }
+
+    snapshot = await store.get_owner_snapshot("source-a", "skill-a")
+
+    assert snapshot is not None
+    assert snapshot.status == "completed"
+    assert snapshot.owner_summary.total_users == 1
+    assert snapshot.owner_summary.lookup_failed_users == 1
+    assert [owner.user_id for owner in snapshot.owners] == ["alice"]
+    assert snapshot.updated_at == updated_at
+
+
+@pytest.mark.asyncio
+async def test_record_owner_snapshot_persists_owner_json(store, mock_db) -> None:
+    """后台 owner 查询完成后应保存快照，供 overview 下次直接读取。"""
+    await store.record_owner_snapshot(
+        "source-a",
+        "skill-a",
+        status="completed",
+        total_users=2,
+        owners=[SkillReadinessOwner(user_id="alice", user_name="Alice")],
+        failed_users=1,
+        failure_summary="bob: market down",
+    )
+
+    query, params = mock_db.execute.await_args.args
+    assert "INSERT INTO swe_skill_readiness_owner_snapshots" in query
+    assert params[0:6] == ("source-a", "skill-a", "completed", 2, 1, 1)
+    assert json.loads(params[7])[0]["user_id"] == "alice"
+
+
+@pytest.mark.asyncio
+async def test_mark_owner_lookup_running_preserves_cached_snapshot(
+    store,
+    mock_db,
+) -> None:
+    """刷新开始时只标记 running，不清空已缓存的 owner 列表。"""
+    claimed = await store.mark_owner_lookup_running("source-a", "skill-a")
+
+    query, params = mock_db.execute.await_args.args
+    assert claimed is True
+    assert "ON DUPLICATE KEY UPDATE" in query
+    assert "status = 'running'" in query
+    assert "owners_json = VALUES" not in query
+    assert "updated_at = updated_at" in query
+    assert params == ("source-a", "skill-a")
+
+
+@pytest.mark.asyncio
+async def test_mark_owner_lookup_running_returns_false_for_existing_running(
+    store,
+    mock_db,
+) -> None:
+    """DB 层已有 running claim 时不再触发新的 owner 刷新。"""
+    mock_db.execute.return_value = 0
+
+    claimed = await store.mark_owner_lookup_running("source-a", "skill-a")
+
+    assert claimed is False
 
 
 @pytest.mark.asyncio
@@ -214,7 +293,6 @@ async def test_create_run_persists_snapshot_and_returns_created_row(
         SkillReadinessConfig.model_validate(
             {"checks": [{"name": "cron_auth_valid"}]},
         ),
-        owner_lookup_summary={"owners": 2},
     )
 
     query, params = mock_db.execute.await_args.args
@@ -223,7 +301,7 @@ async def test_create_run_persists_snapshot_and_returns_created_row(
     assert json.loads(params[7]) == {
         "checks": [{"name": "cron_auth_valid", "enabled": True, "params": {}}],
     }
-    assert json.loads(params[8]) == {"owners": 2}
+    assert params[8] is None
     assert result.run_id == "generated"
 
 

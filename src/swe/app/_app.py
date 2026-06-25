@@ -23,10 +23,12 @@ from ..constant import (
     LOG_LEVEL_ENV,
     CORS_ORIGINS,
     WORKING_DIR,
-    FILE_LOG_ENABLED,
 )
 from ..__version__ import __version__
-from ..utils.my_logging import setup_logger, add_swe_file_handler
+from ..utils.my_logging import (
+    setup_logger,
+    shutdown_logger,
+)
 from .auth import AuthMiddleware
 from .middleware.tenant_identity import TenantIdentityMiddleware
 from .middleware.tenant_workspace import TenantWorkspaceMiddleware
@@ -318,16 +320,6 @@ def _env_int(key: str, default: int) -> int:
         return default
 
 
-def _configure_file_logging() -> None:
-    if FILE_LOG_ENABLED:
-        add_swe_file_handler(WORKING_DIR / "swe.log")
-        return
-    logger.info(
-        "File logging disabled via SWE_FILE_LOG_ENABLED=false; "
-        "stdout/stderr logging remains enabled.",
-    )
-
-
 async def _initialize_runtime_managers(
     app: FastAPI,
 ) -> tuple[TenantWorkspacePool, MultiAgentManager]:
@@ -441,6 +433,33 @@ def _initialize_source_system_config(
         logger.info("SourceSystemConfig module initialized")
     except Exception as e:
         logger.warning("Failed to initialize source system config: %s", e)
+
+async def _initialize_cron_broadcast_children_store(
+    app: FastAPI,
+    db_connection: Any | None,
+) -> None:
+    """初始化定时任务分发用户反查快照存储。"""
+    try:
+        from .crons.broadcast_children_store import CronBroadcastChildrenStore
+
+        cron_broadcast_children_store = CronBroadcastChildrenStore(
+            db_connection,
+        )
+        app.state.cron_broadcast_children_store = (
+            cron_broadcast_children_store
+        )
+        if cron_broadcast_children_store.is_available:
+            await cron_broadcast_children_store.initialize()
+            logger.info("Cron broadcast children snapshot storage initialized")
+        else:
+            logger.warning(
+                "Cron broadcast children snapshot storage uses memory fallback",
+            )
+    except Exception as e:
+        logger.warning(
+            "Failed to initialize cron broadcast children storage: %s",
+            e,
+        )
 
 
 async def _initialize_skill_readiness(
@@ -612,6 +631,8 @@ async def _shutdown_lifespan_resources(
     await _stop_tenant_workspace_pool(app)
     logger.info("Application shutdown complete")
 
+    shutdown_logger()
+
 
 async def _stop_multi_agent_manager(app: FastAPI) -> None:
     multi_agent_mgr = getattr(app.state, "multi_agent_manager", None)
@@ -641,7 +662,6 @@ async def lifespan(
 ):
     startup_start_time = time.time()
     _configure_async_thread_pools()
-    _configure_file_logging()
 
     # Auto-register admin from env vars (for automated deployments)
     from .auth import auto_register_from_env
@@ -676,6 +696,9 @@ async def lifespan(
         tenant_workspace_pool,
         multi_agent_manager,
     )
+
+    # --- 初始化定时任务分发用户反查快照 ---
+    await _initialize_cron_broadcast_children_store(app, db_connection)
 
     # --- 初始化技能就绪检查存储 ---
     await _initialize_skill_readiness(

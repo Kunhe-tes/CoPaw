@@ -12,6 +12,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 RunStatus = Literal["running", "completed", "partial", "failed"]
 AggregateStatus = Literal["normal", "abnormal"]
 CheckStatus = Literal["pass", "fail", "skip"]
+OwnerLookupStatus = Literal["idle", "running", "completed", "failed"]
 
 
 class SkillReadinessCheckConfig(BaseModel):
@@ -139,6 +140,29 @@ class SkillReadinessOwnerSummary(BaseModel):
     failure_summary: str | None = None
 
 
+class SkillReadinessOwnerSnapshot(BaseModel):
+    """最近一次技能拥有用户查询快照。"""
+
+    source_id: str = Field(..., min_length=1, max_length=128)
+    skill_id: str = Field(..., min_length=1, max_length=200)
+    status: OwnerLookupStatus = "idle"
+    total_users: int = Field(default=0, ge=0)
+    owner_users: int = Field(default=0, ge=0)
+    failed_users: int = Field(default=0, ge=0)
+    failure_summary: str | None = None
+    owners: list[SkillReadinessOwner] = Field(default_factory=list)
+    updated_at: datetime | None = None
+
+    @property
+    def owner_summary(self) -> SkillReadinessOwnerSummary:
+        """返回 overview 直接展示的拥有用户摘要。"""
+        return SkillReadinessOwnerSummary(
+            total_users=self.owner_users,
+            lookup_failed_users=self.failed_users,
+            failure_summary=self.failure_summary,
+        )
+
+
 class SkillReadinessRunSummary(SkillReadinessRunProgress):
     """运行进度和检查项聚合摘要。"""
 
@@ -159,14 +183,18 @@ class SkillReadinessOverview(BaseModel):
     )
     owner_summary: SkillReadinessOwnerSummary
     owners: list[SkillReadinessOwner] = Field(default_factory=list)
+    owner_lookup_status: OwnerLookupStatus = "idle"
+    owner_lookup_updated_at: datetime | None = None
     latest_run: SkillReadinessRunSummary | None = None
 
 
 class SkillReadinessStartRunResponse(BaseModel):
     """启动可执行性检查后的响应。"""
 
-    run: SkillReadinessRunProgress
+    run: SkillReadinessRunProgress | None = None
     reused: bool = False
+    owner_lookup_only: bool = False
+    owner_lookup_scheduled: bool = False
 
 
 class SkillReadinessResultsPage(BaseModel):
