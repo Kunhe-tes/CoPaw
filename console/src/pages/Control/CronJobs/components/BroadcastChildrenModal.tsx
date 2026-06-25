@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import type { Key } from "react";
-import { Alert, Space, Tag, Typography } from "antd";
+import { Alert, Input, Space, Tag, Typography } from "antd";
 import type { ColumnsType } from "antd/es/table";
 import { Button, Modal, Table } from "@agentscope-ai/design";
 import api from "../../../../api";
@@ -18,6 +18,8 @@ const MODAL_WIDTH = 1280;
 const MODAL_MAX_WIDTH = "calc(100vw - 48px)";
 const TABLE_SCROLL_X = 1120;
 const TABLE_SCROLL_Y = "calc(100vh - 380px)";
+const DEFAULT_TABLE_PAGE_SIZE = 8;
+const TABLE_PAGE_SIZE_OPTIONS = ["8", "20", "50", "100"];
 
 interface BroadcastChildrenModalProps {
   open: boolean;
@@ -27,6 +29,20 @@ interface BroadcastChildrenModalProps {
 
 function rowKey(item: CronBroadcastChildItem): string {
   return `${item.tenant_id}:${item.job_id}`;
+}
+
+function normalizeSearchKeyword(value: string): string {
+  return value.trim().toLowerCase();
+}
+
+function matchesTenantSearch(
+  item: CronBroadcastChildItem,
+  keyword: string,
+): boolean {
+  if (!keyword) return true;
+  return [item.tenant_name, item.tenant_id].some((value) =>
+    String(value || "").toLowerCase().includes(keyword),
+  );
 }
 
 function resultLine(item: CronBroadcastChildOperationResult): string {
@@ -97,11 +113,19 @@ export function BroadcastChildrenModal({
   const [operationResults, setOperationResults] = useState<
     CronBroadcastChildOperationResult[]
   >([]);
+  const [tablePage, setTablePage] = useState(1);
+  const [tablePageSize, setTablePageSize] = useState(DEFAULT_TABLE_PAGE_SIZE);
+  const [searchInputText, setSearchInputText] = useState("");
+  const [appliedSearchText, setAppliedSearchText] = useState("");
 
   const selectedItems = useMemo(() => {
     const selected = new Set(selectedRowKeys.map(String));
     return children.filter((item) => selected.has(rowKey(item)));
   }, [children, selectedRowKeys]);
+  const filteredChildren = useMemo(() => {
+    const keyword = normalizeSearchKeyword(appliedSearchText);
+    return children.filter((item) => matchesTenantSearch(item, keyword));
+  }, [children, appliedSearchText]);
   const duplicateTenantNameSummaries = useMemo(
     () => buildDuplicateTenantNameSummaries(children),
     [children],
@@ -151,13 +175,28 @@ export function BroadcastChildrenModal({
       setUpdatedAt(null);
       setSelectedRowKeys([]);
       setOperationResults([]);
+      setTablePage(1);
+      setTablePageSize(DEFAULT_TABLE_PAGE_SIZE);
+      setSearchInputText("");
+      setAppliedSearchText("");
       return;
     }
+    setTablePage(1);
+    setSearchInputText("");
+    setAppliedSearchText("");
     void (async () => {
       await loadChildren();
       await triggerBackgroundRefresh();
     })();
   }, [open, job?.id]);
+
+  useEffect(() => {
+    const maxPage = Math.max(
+      1,
+      Math.ceil(filteredChildren.length / tablePageSize),
+    );
+    setTablePage((current) => Math.min(current, maxPage));
+  }, [filteredChildren.length, tablePageSize]);
 
   const batchRefs = selectedItems.map((item) => ({
     tenant_id: item.tenant_id,
@@ -328,6 +367,21 @@ export function BroadcastChildrenModal({
           <Alert type="warning" showIcon message={failureSummary} />
         )}
 
+        <Input.Search
+          allowClear
+          enterButton="搜索"
+          placeholder="搜索用户姓名或 UID"
+          value={searchInputText}
+          onChange={(event) => {
+            setSearchInputText(event.target.value);
+          }}
+          onSearch={(value) => {
+            setAppliedSearchText(value);
+            setTablePage(1);
+          }}
+          style={{ maxWidth: 320 }}
+        />
+
         {operationResults.length > 0 && (
           <Alert
             type={hasFailedResults ? "warning" : "success"}
@@ -344,13 +398,23 @@ export function BroadcastChildrenModal({
         <Table
           rowKey={rowKey}
           columns={columns}
-          dataSource={children}
+          dataSource={filteredChildren}
           loading={loading || refreshing}
           rowSelection={{
             selectedRowKeys,
             onChange: setSelectedRowKeys,
           }}
-          pagination={{ pageSize: 8 }}
+          pagination={{
+            current: tablePage,
+            pageSize: tablePageSize,
+            showSizeChanger: true,
+            pageSizeOptions: TABLE_PAGE_SIZE_OPTIONS,
+            showTotal: (total) => `共 ${total} 条`,
+            onChange: (nextPage, nextPageSize) => {
+              setTablePage(nextPage);
+              setTablePageSize(nextPageSize || DEFAULT_TABLE_PAGE_SIZE);
+            },
+          }}
           locale={{ emptyText: tableEmptyText }}
           scroll={{ x: TABLE_SCROLL_X, y: TABLE_SCROLL_Y }}
         />

@@ -40,6 +40,8 @@ import styles from "./index.module.less";
 
 type CronJob = CronJobSpecOutput;
 const DEFAULT_BROADCAST_OFFSET_WINDOW_HOURS = 4;
+const DEFAULT_TABLE_PAGE_SIZE = 10;
+const TABLE_PAGE_SIZE_OPTIONS = ["10", "20", "50", "100"];
 
 function CronJobsPage() {
   const { t } = useTranslation();
@@ -73,6 +75,8 @@ function CronJobsPage() {
     useState<CronJob | null>(null);
   const [broadcasting, setBroadcasting] = useState(false);
   const [saving, setSaving] = useState(false);
+  const [tablePage, setTablePage] = useState(1);
+  const [tablePageSize, setTablePageSize] = useState(DEFAULT_TABLE_PAGE_SIZE);
   const [form] = Form.useForm<CronJob>();
   const userTimezoneRef = useRef("UTC");
   const currentTenantId = getUserId();
@@ -90,6 +94,11 @@ function CronJobsPage() {
       })
       .catch((err) => console.error("Failed to fetch user timezone:", err));
   }, []);
+
+  useEffect(() => {
+    const maxPage = Math.max(1, Math.ceil(jobs.length / tablePageSize));
+    setTablePage((current) => Math.min(current, maxPage));
+  }, [jobs.length, tablePageSize]);
 
   const handleCreate = () => {
     setEditingJob(null);
@@ -286,7 +295,15 @@ function CronJobsPage() {
           rowKey="id"
           scroll={{ x: 3010 }}
           pagination={{
-            pageSize: 10,
+            current: tablePage,
+            pageSize: tablePageSize,
+            showSizeChanger: true,
+            pageSizeOptions: TABLE_PAGE_SIZE_OPTIONS,
+            showTotal: (total) => `共 ${total} 条`,
+            onChange: (nextPage, nextPageSize) => {
+              setTablePage(nextPage);
+              setTablePageSize(nextPageSize || DEFAULT_TABLE_PAGE_SIZE);
+            },
           }}
         />
       </Card>
