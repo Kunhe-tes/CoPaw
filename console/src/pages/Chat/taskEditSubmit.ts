@@ -85,6 +85,13 @@ export function prepareCronTaskEditValues(
     return restValues;
   }
 
+  if (restValues.task_type === "text") {
+    return {
+      ...restValues,
+      text: taskContentText,
+    };
+  }
+
   return {
     ...restValues,
     request: {

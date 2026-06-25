@@ -86,6 +86,31 @@ describe("submitCronTaskEdit", () => {
     expect(replaceCronJob).toHaveBeenCalledWith("job-1", payload);
   });
 
+  it("writes plain task content text to text field for text jobs", async () => {
+    const replaceCronJob = vi.fn().mockResolvedValue({});
+    const task = buildCronJob({
+      task_type: "text",
+      text: "旧消息",
+      request: undefined,
+    });
+
+    const payload = await submitCronTaskEdit(
+      task,
+      {
+        ...task,
+        cronType: "daily",
+        cronTime: dayjs().hour(5).minute(0),
+        taskContentText: "今天 18 点提醒我整理日报",
+      },
+      replaceCronJob,
+    );
+
+    expect(payload.task_type).toBe("text");
+    expect(payload.text).toBe("今天 18 点提醒我整理日报");
+    expect(payload.request).toBeUndefined();
+    expect(replaceCronJob).toHaveBeenCalledWith("job-1", payload);
+  });
+
   it("normalizes form values and calls replaceCronJob for the edited task", async () => {
     const replaceCronJob = vi.fn().mockResolvedValue({});
     const task = buildCronJob();
