@@ -126,6 +126,28 @@ describe("ChatTaskList actions", () => {
     expect(onTaskClick).not.toHaveBeenCalled();
   });
 
+  it("opens edit from the overflow menu without selecting the task", async () => {
+    const onTaskClick = vi.fn();
+    const onTaskEdit = vi.fn();
+    const task = taskJob();
+
+    render(
+      <ChatTaskList
+        tasks={[task]}
+        onTaskClick={onTaskClick}
+        onTaskEdit={onTaskEdit}
+      />,
+    );
+
+    fireEvent.click(
+      screen.getByRole("button", { name: "更多任务操作：每日巡检" }),
+    );
+    fireEvent.click(await screen.findByText("编辑"));
+
+    expect(onTaskEdit).toHaveBeenCalledWith(task);
+    expect(onTaskClick).not.toHaveBeenCalled();
+  });
+
   it("opens resume and delete actions for paused scheduled tasks", async () => {
     const onTaskResume = vi.fn();
     const task = taskJob({
