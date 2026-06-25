@@ -296,7 +296,15 @@ def save_index(
     """原子写入市场索引."""
     path = get_index_path(marketplace_root, source_id)
     path.parent.mkdir(parents=True, exist_ok=True)
-    data = {"items": [item.model_dump() for item in items]}
+    # MCP 条目不写入 skill_id 字段（保持历史数据兼容）
+    data = {
+        "items": [
+            item.model_dump(
+                exclude={"skill_id"} if item.item_type != "skill" else set(),
+            )
+            for item in items
+        ],
+    }
     _atomic_write_json(path, data)
 
 
