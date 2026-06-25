@@ -124,30 +124,14 @@ export default function ChatTaskEditFormBody() {
       </Form.Item>
 
       <Form.Item
-        name={["request", "input"]}
+        name="taskContentText"
         label="任务内容"
         required
-        rules={[
-          { required: true, message: t("cronJobs.pleaseInputRequest") },
-          {
-            validator: (_, value) => {
-              if (!value) return Promise.resolve();
-              try {
-                JSON.parse(value);
-                return Promise.resolve();
-              } catch {
-                return Promise.reject(
-                  new Error(t("cronJobs.invalidJsonFormat")),
-                );
-              }
-            },
-          },
-        ]}
+        rules={[{ required: true, message: "请输入任务内容" }]}
       >
         <Input.TextArea
-          rows={8}
-          placeholder='[{"role":"user","content":[{"text":"Hello","type":"text"}]}]'
-          style={{ fontFamily: "monospace", fontSize: 12 }}
+          rows={6}
+          placeholder="例如：查询成都今天的天气"
         />
       </Form.Item>
     </>
