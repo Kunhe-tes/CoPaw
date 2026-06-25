@@ -4016,6 +4016,7 @@ class QueryService:
         source_id: Optional[str],
     ) -> list[dict]:
         """查询客户经理技能统计."""
+        placeholders, allowed_skills = self._build_allowed_skill_filter()
         source_where = " AND j.source_id = %s" if source_id else ""
         sql = f"""
             SELECT
@@ -4040,11 +4041,13 @@ class QueryService:
               AND e.actual_time >= %s AND e.actual_time <= %s
               AND t.skills_used IS NOT NULL AND t.session_id LIKE 'cron-task%%'
               AND JSON_LENGTH(t.skills_used) > idx.i
+              AND JSON_UNQUOTE(JSON_EXTRACT(t.skills_used, CONCAT('$[', idx.i, ']')))
+                IN ({placeholders})
               {source_where}
             GROUP BY skill_name
             ORDER BY success_count DESC
         """
-        params: list = [bbk_id, user_id, start_time, end_time]
+        params: list = [bbk_id, user_id, start_time, end_time] + allowed_skills
         if source_id:
             params.append(source_id)
         return await db.fetch_all(sql, tuple(params))
@@ -4053,12 +4056,10 @@ class QueryService:
         self,
         rows: list[dict],
     ) -> list[ManagerSkillItem]:
-        """构建客户经理技能统计结果."""
+        """构建客户经理技能统计结果（SQL已过滤白名单技能）."""
         items: list[ManagerSkillItem] = []
         for row in rows:
             skill_name = row["skill_name"]
-            if skill_name not in self._ALLOWED_BRANCH_SKILLS:
-                continue
             success_count = row["success_count"] or 0
             error_count = row["error_count"] or 0
             items.append(
