@@ -465,6 +465,29 @@ async def lifespan(
     except Exception as e:
         logger.warning("Failed to initialize source system config: %s", e)
 
+    # --- 初始化定时任务分发用户反查快照 ---
+    try:
+        from .crons.broadcast_children_store import CronBroadcastChildrenStore
+
+        cron_broadcast_children_store = CronBroadcastChildrenStore(
+            db_connection,
+        )
+        app.state.cron_broadcast_children_store = (
+            cron_broadcast_children_store
+        )
+        if cron_broadcast_children_store.is_available:
+            await cron_broadcast_children_store.initialize()
+            logger.info("Cron broadcast children snapshot storage initialized")
+        else:
+            logger.warning(
+                "Cron broadcast children snapshot storage uses memory fallback",
+            )
+    except Exception as e:
+        logger.warning(
+            "Failed to initialize cron broadcast children storage: %s",
+            e,
+        )
+
     # --- 初始化技能就绪检查存储 ---
     try:
         from .skill_readiness.service import build_skill_readiness_service
