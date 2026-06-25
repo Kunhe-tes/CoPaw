@@ -198,6 +198,7 @@ export default function ChatTaskList(props: ChatTaskListProps) {
               </div>
             ) : (
               <>
+                {runnableTasks.map(renderTask)}
                 {pausedTasks.length > 0 && (
                   <div className="chat-task-list-paused-group">
                     <button
@@ -228,7 +229,6 @@ export default function ChatTaskList(props: ChatTaskListProps) {
                     </div>
                   </div>
                 )}
-                {runnableTasks.map(renderTask)}
               </>
             )}
           </div>
