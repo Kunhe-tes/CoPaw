@@ -236,7 +236,7 @@ describe("ChatTaskList actions", () => {
     expect(toggle).toHaveAttribute("aria-expanded", "false");
     expect(activeTask).toBeVisible();
     expect(
-      toggle.compareDocumentPosition(activeTask) &
+      activeTask.compareDocumentPosition(toggle) &
         Node.DOCUMENT_POSITION_FOLLOWING,
     ).not.toBe(0);
     expect(screen.queryByText("暂停任务 p1")).not.toBeVisible();

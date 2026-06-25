@@ -86,17 +86,14 @@ import {
   shouldMarkTaskReadOnOpen,
 } from "./taskJobs";
 import {
-  CronJobFormBody,
   DEFAULT_FORM_VALUES,
 } from "../Control/CronJobs/components";
-import {
-  buildCronJobFormValues,
-} from "../Control/CronJobs/helpers";
-import { useExecutionModelOptions } from "@/hooks/useExecutionModelOptions";
+import { buildCronJobFormValues } from "../Control/CronJobs/helpers";
 import {
   submitCronTaskEdit,
   type CronTaskEditFormValues,
 } from "./taskEditSubmit";
+import ChatTaskEditFormBody from "./components/ChatTaskEditFormBody";
 import { shouldRefreshCurrentTaskMessages } from "./taskMessageRefresh";
 import { resolveCurrentFileUrlNetwork } from "./fileUrlNetwork";
 import { matchesResolvedChatId } from "./sessionApi/resolvedSessionMapping";
@@ -506,11 +503,6 @@ export default function ChatPage() {
     null,
   );
   const [taskEditSaving, setTaskEditSaving] = useState(false);
-  const {
-    loading: executionModelLoading,
-    options: executionModelOptions,
-    tenantDefaultLabel,
-  } = useExecutionModelOptions(true);
   const {
     sessions,
     setSessionLoading,
@@ -1825,17 +1817,15 @@ export default function ChatPage() {
         <Form
           form={taskEditForm}
           layout="vertical"
-          onFinish={handleTaskEditSubmit}
+          onFinish={() =>
+            handleTaskEditSubmit(
+              taskEditForm.getFieldsValue(true) as CronTaskEditFormValues,
+            )
+          }
           initialValues={DEFAULT_FORM_VALUES}
           className={styles.taskEditForm}
         >
-          <CronJobFormBody
-            form={taskEditForm}
-            executionModelOptions={executionModelOptions}
-            executionModelLoading={executionModelLoading}
-            tenantDefaultModelLabel={tenantDefaultLabel}
-            idDisabled
-          />
+          <ChatTaskEditFormBody />
         </Form>
       </Modal>
 
