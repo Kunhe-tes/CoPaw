@@ -1153,7 +1153,10 @@ export default function ChatPage() {
       taskEditForm.setFieldsValue(
         {
           ...formValues,
-          taskContentText: extractTaskContentText(formValues.request?.input),
+          taskContentText:
+            task.task_type === "text"
+              ? formValues.text || ""
+              : extractTaskContentText(formValues.request?.input),
         } as Parameters<
           typeof taskEditForm.setFieldsValue
         >[0],

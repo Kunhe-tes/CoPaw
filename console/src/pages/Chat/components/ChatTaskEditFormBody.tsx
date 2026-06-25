@@ -124,15 +124,36 @@ export default function ChatTaskEditFormBody() {
       </Form.Item>
 
       <Form.Item
-        name="taskContentText"
-        label="任务内容"
-        required
-        rules={[{ required: true, message: "请输入任务内容" }]}
+        noStyle
+        shouldUpdate={(prev, cur) => prev.task_type !== cur.task_type}
       >
-        <Input.TextArea
-          rows={6}
-          placeholder="例如：查询成都今天的天气"
-        />
+        {({ getFieldValue }) => {
+          const taskType = getFieldValue("task_type");
+          const isTextTask = taskType === "text";
+
+          return (
+            <Form.Item
+              name="taskContentText"
+              label={isTextTask ? "消息内容" : "请求内容"}
+              required
+              rules={[
+                {
+                  required: true,
+                  message: isTextTask ? "请输入消息内容" : "请输入请求内容",
+                },
+              ]}
+            >
+              <Input.TextArea
+                rows={6}
+                placeholder={
+                  isTextTask
+                    ? "例如：今天 18 点提醒我整理日报"
+                    : "例如：查询成都今天的天气"
+                }
+              />
+            </Form.Item>
+          );
+        }}
       </Form.Item>
     </>
   );
