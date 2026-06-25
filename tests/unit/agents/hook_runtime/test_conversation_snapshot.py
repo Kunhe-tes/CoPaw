@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 from swe.agents.hook_runtime.conversation_snapshot import (
+    _normalize_content,
+    _sanitize_nested_snapshot_value,
     build_handler_conversation_snapshot,
 )
 
@@ -273,3 +275,81 @@ def test_conversation_snapshot_sanitizes_nested_tool_result_output() -> None:
     assert (
         payload["conversation_snapshot_meta"]["media_content_omitted"] is True
     )
+
+
+def test_normalize_content_filters_system_and_media_blocks() -> None:
+    normalized, meta = _normalize_content(
+        [
+            {"type": "text", "text": "drop for system"},
+            {
+                "type": "image",
+                "file_url": "file:///tmp/image.png",
+                "data": "base64-payload",
+            },
+            {"type": "thinking", "thinking": "hidden"},
+            {
+                "type": "tool_result",
+                "id": "tool-1",
+                "name": "inspect",
+                "output": {"summary": "kept"},
+                "debug": "drop",
+            },
+        ],
+        role="system",
+    )
+
+    assert normalized == [
+        {
+            "type": "tool_result",
+            "id": "tool-1",
+            "name": "inspect",
+            "output": {"summary": "kept"},
+        },
+    ]
+    assert meta == {
+        "reasoning_omitted": True,
+        "media_content_omitted": True,
+    }
+
+
+def test_sanitize_nested_snapshot_value_omits_inline_media_scalars() -> None:
+    sanitized, meta = _sanitize_nested_snapshot_value(
+        {
+            "items": [
+                {"type": "reasoning", "thinking": "hidden"},
+                {
+                    "type": "image",
+                    "url": "https://example.com/image.png",
+                    "data": "base64-payload",
+                },
+                {
+                    "payload": [
+                        {"data_url": "data:image/png;base64,AAA"},
+                        {"blob": b"raw-bytes"},
+                        {"value": "visible"},
+                    ],
+                },
+            ],
+        },
+    )
+
+    assert sanitized == {
+        "items": [
+            {
+                "type": "image",
+                "url": "https://example.com/image.png",
+                "content_omitted": True,
+            },
+            {
+                "payload": [
+                    {},
+                    {},
+                    {"value": "visible"},
+                ],
+            },
+        ],
+    }
+    assert meta == {
+        "reasoning_omitted": True,
+        "media_content_omitted": True,
+    }
