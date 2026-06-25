@@ -90,6 +90,16 @@ function hasVisibleAnswerContent(message: IAgentScopeRuntimeMessage) {
   );
 }
 
+function findLastVisibleAnswerMessageIndex(
+  messages: IAgentScopeRuntimeMessage[],
+) {
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    if (hasVisibleAnswerContent(messages[index])) return index;
+  }
+
+  return -1;
+}
+
 function isToolMessageType(type: AgentScopeRuntimeMessageType) {
   return [
     AgentScopeRuntimeMessageType.PLUGIN_CALL,
@@ -111,6 +121,22 @@ function isHiddenToolMessage(message: IAgentScopeRuntimeMessage) {
       const toolName = resolveToolName(data);
       return toolName ? HIDDEN_PROCESS_TOOL_NAMES.has(toolName) : false;
     }),
+  );
+}
+
+function shouldFoldIntoProcessDisclosure(message: IAgentScopeRuntimeMessage) {
+  return (
+    message.type !== AgentScopeRuntimeMessageType.HEARTBEAT &&
+    !isHiddenToolMessage(message)
+  );
+}
+
+function shouldCountAsProcessStep(message: IAgentScopeRuntimeMessage) {
+  return (
+    message.type === AgentScopeRuntimeMessageType.REASONING ||
+    message.type === AgentScopeRuntimeMessageType.ERROR ||
+    isToolMessageType(message.type) ||
+    Boolean(getRetryStatus(message))
   );
 }
 
@@ -244,16 +270,17 @@ export default function AgentScopeRuntimeResponseCard(props: {
       props.data,
       messages,
     );
-    const hasAnswer = Boolean(
-      reasoningFallbackText ||
-        messages.some((message) => hasVisibleAnswerContent(message)),
-    );
+    const finalAnswerIndex = reasoningFallbackText
+      ? -1
+      : findLastVisibleAnswerMessageIndex(messages);
+    const hasAnswer = Boolean(reasoningFallbackText || finalAnswerIndex >= 0);
 
     if (!canCollapseProcess || !hasAnswer) {
       return {
         process: [] as IAgentScopeRuntimeMessage[],
         direct: messages,
         failedProcessCount: 0,
+        processStepCount: 0,
         toolCallCount: 0,
       };
     }
@@ -262,21 +289,21 @@ export default function AgentScopeRuntimeResponseCard(props: {
     const direct: IAgentScopeRuntimeMessage[] = [];
 
     messages.forEach((message) => {
-      if (
-        message.type === AgentScopeRuntimeMessageType.REASONING ||
-        (isToolMessageType(message.type) && !isHiddenToolMessage(message)) ||
-        Boolean(getRetryStatus(message))
-      ) {
-        process.push(message);
+      if (finalAnswerIndex >= 0 && message === messages[finalAnswerIndex]) {
+        direct.push(message);
         return;
       }
-      direct.push(message);
+
+      if (shouldFoldIntoProcessDisclosure(message)) {
+        process.push(message);
+      }
     });
 
     return {
       process,
       direct,
       failedProcessCount: process.filter(messageHasFailedProcess).length,
+      processStepCount: process.filter(shouldCountAsProcessStep).length,
       toolCallCount: process.filter((message) =>
         isToolMessageType(message.type),
       ).length,
@@ -304,7 +331,7 @@ export default function AgentScopeRuntimeResponseCard(props: {
         <ProcessDisclosure
           durationText={durationText}
           failedCount={groupedMessages.failedProcessCount}
-          processCount={groupedMessages.process.length}
+          processCount={groupedMessages.processStepCount}
           toolCallCount={groupedMessages.toolCallCount}
           status={
             props.data.status === AgentScopeRuntimeRunStatus.Canceled
