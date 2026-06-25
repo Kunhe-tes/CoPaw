@@ -182,7 +182,7 @@ export function CronJobFormBody({
                     <div style={{ marginBottom: 4 }}>
                       {t("cronJobs.cronExample")}
                     </div>
-                    <div>
+                    {/* <div>
                       {t("cronJobs.cronHelper")}{" "}
                       <a
                         href="https://crontab.guru/"
@@ -192,7 +192,7 @@ export function CronJobFormBody({
                       >
                         {t("cronJobs.cronHelperLink")} →
                       </a>
-                    </div>
+                    </div> */}
                   </div>
                 }
               >

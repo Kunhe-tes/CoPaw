@@ -60,7 +60,7 @@ The sidebar task action menu SHALL provide an edit action only for stopped task 
 - **AND** destructive delete remains unavailable while the task is enabled for scheduled execution
 
 ### Requirement: Chat sidebar task edit modal behavior
-The task edit modal opened from "我的任务" SHALL expose only task name, task execution time, and task content fields while preserving the existing cron job payload shape for fields that are not shown. Task content SHALL edit the existing request content field. Saving SHALL update the existing cron job through the cronjob replace API and refresh the sidebar task list after a successful update.
+The task edit modal opened from "我的任务" SHALL expose only task name, task execution time, and task content fields while preserving the existing cron job payload shape for fields that are not shown. Task content SHALL be edited as plain user-facing text and transformed by the frontend into the existing request content structure before submit. Saving SHALL update the existing cron job through the cronjob replace API and refresh the sidebar task list after a successful update.
 
 #### Scenario: Modal uses existing task values
 - **WHEN** the edit modal opens for a sidebar task

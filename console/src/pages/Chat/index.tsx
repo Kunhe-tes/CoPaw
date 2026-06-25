@@ -90,6 +90,7 @@ import {
 } from "../Control/CronJobs/components";
 import { buildCronJobFormValues } from "../Control/CronJobs/helpers";
 import {
+  extractTaskContentText,
   submitCronTaskEdit,
   type CronTaskEditFormValues,
 } from "./taskEditSubmit";
@@ -1147,9 +1148,13 @@ export default function ChatPage() {
 
   const handleTaskEdit = useCallback(
     (task: CronJobSpecOutput) => {
+      const formValues = buildCronJobFormValues(task);
       setEditingTask(task);
       taskEditForm.setFieldsValue(
-        buildCronJobFormValues(task) as Parameters<
+        {
+          ...formValues,
+          taskContentText: extractTaskContentText(formValues.request?.input),
+        } as Parameters<
           typeof taskEditForm.setFieldsValue
         >[0],
       );

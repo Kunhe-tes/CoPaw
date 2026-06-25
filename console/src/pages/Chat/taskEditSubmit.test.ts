@@ -1,7 +1,10 @@
 import dayjs from "dayjs";
 import { describe, expect, it, vi } from "vitest";
 import type { CronJobSpecOutput } from "@/api/types";
-import { submitCronTaskEdit } from "./taskEditSubmit";
+import {
+  extractTaskContentText,
+  submitCronTaskEdit,
+} from "./taskEditSubmit";
 
 function buildCronJob(
   overrides: Partial<CronJobSpecOutput> = {},
@@ -41,6 +44,48 @@ function buildCronJob(
 }
 
 describe("submitCronTaskEdit", () => {
+  it("extracts plain text from existing request input content", () => {
+    expect(
+      extractTaskContentText(
+        JSON.stringify([
+          {
+            role: "user",
+            content: [{ type: "text", text: "查询成都今天的天气" }],
+          },
+        ]),
+      ),
+    ).toBe("查询成都今天的天气");
+  });
+
+  it("wraps plain task content text into request input before saving", async () => {
+    const replaceCronJob = vi.fn().mockResolvedValue({});
+    const task = buildCronJob();
+
+    const payload = await submitCronTaskEdit(
+      task,
+      {
+        ...task,
+        cronType: "daily",
+        cronTime: dayjs().hour(5).minute(0),
+        taskContentText: "查询成都今天的天气",
+      },
+      replaceCronJob,
+    );
+
+    expect(payload.request?.input).toEqual([
+      {
+        role: "user",
+        content: [
+          {
+            text: "查询成都今天的天气",
+            type: "text",
+          },
+        ],
+      },
+    ]);
+    expect(replaceCronJob).toHaveBeenCalledWith("job-1", payload);
+  });
+
   it("normalizes form values and calls replaceCronJob for the edited task", async () => {
     const replaceCronJob = vi.fn().mockResolvedValue({});
     const task = buildCronJob();
