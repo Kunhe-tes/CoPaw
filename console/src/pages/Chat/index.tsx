@@ -1834,6 +1834,7 @@ export default function ChatPage() {
             executionModelOptions={executionModelOptions}
             executionModelLoading={executionModelLoading}
             tenantDefaultModelLabel={tenantDefaultLabel}
+            idDisabled
           />
         </Form>
       </Modal>

@@ -204,7 +204,7 @@ function TasksContent({
             sidebarMeta.canRun ||
             sidebarMeta.canResume ||
             sidebarMeta.canDelete ||
-            onTaskEdit) && (
+            (onTaskEdit && sidebarMeta.canEdit)) && (
             <div className="expandable-panel-task-trailing">
               {sidebarMeta.unreadCount > 0 && (
                 <span className="expandable-panel-task-badge">
@@ -217,7 +217,7 @@ function TasksContent({
                 sidebarMeta.canRun ||
                 sidebarMeta.canResume ||
                 sidebarMeta.canDelete ||
-                onTaskEdit) && (
+                (onTaskEdit && sidebarMeta.canEdit)) && (
                 <div className="expandable-panel-task-actions">
                   <TaskActionMenu
                     task={task}

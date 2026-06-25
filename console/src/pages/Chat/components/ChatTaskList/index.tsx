@@ -122,7 +122,7 @@ export default function ChatTaskList(props: ChatTaskListProps) {
             sidebarMeta.canRun ||
             sidebarMeta.canResume ||
             sidebarMeta.canDelete ||
-            onTaskEdit) && (
+            (onTaskEdit && sidebarMeta.canEdit)) && (
             <div className="chat-task-list-item-trailing">
               <div className="chat-task-list-item-actions">
                 <TaskActionMenu

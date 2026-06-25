@@ -65,7 +65,7 @@ export default function TaskActionMenu({
   const items = useMemo<MenuProps["items"]>(() => {
     const nextItems: NonNullable<MenuProps["items"]> = [];
 
-    if (onTaskEdit) {
+    if (onTaskEdit && sidebarMeta.canEdit) {
       nextItems.push({
         key: "edit",
         label: (
@@ -162,6 +162,7 @@ export default function TaskActionMenu({
     onTaskPause,
     onTaskResume,
     onTaskRun,
+    sidebarMeta.canEdit,
     sidebarMeta.canDelete,
     sidebarMeta.canPause,
     sidebarMeta.canResume,
