@@ -979,7 +979,7 @@ export default function CronJobOverviewPage() {
     setSelectedTaskManager(null);
     // Fetch task branch ranking
     fetchTaskBranchRanking();
-  }, [dateRange]);
+  }, [dateRange, bbkIds]);
 
   useEffect(() => {
     let ignore = false;
