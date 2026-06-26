@@ -361,6 +361,10 @@ async def get_session(
 async def list_chats(
     user_id: Optional[str] = Query(None, description="Filter by user ID"),
     channel: Optional[str] = Query(None, description="Filter by channel"),
+    exclude_session_kind: Optional[str] = Query(
+        None,
+        description="Exclude chats with this meta.session_kind value",
+    ),
     page: Optional[int] = Query(None, ge=1, description="Page number"),
     page_size: Optional[int] = Query(
         None,
@@ -409,6 +413,7 @@ async def list_chats(
             chat_page = await mgr.list_chats_cursor(
                 user_id=user_id,
                 channel=channel,
+                exclude_session_kind=exclude_session_kind,
                 page_size=page_size,
                 cursor=cursor or None,
             )
@@ -424,6 +429,7 @@ async def list_chats(
         chat_page = await mgr.list_chats_page(
             user_id=user_id,
             channel=channel,
+            exclude_session_kind=exclude_session_kind,
             page=page,
             page_size=page_size,
         )
@@ -433,7 +439,11 @@ async def list_chats(
             items.append(spec.model_copy(update={"status": status}))
         return chat_page.model_copy(update={"items": items})
 
-    chats = await mgr.list_chats(user_id=user_id, channel=channel)
+    chats = await mgr.list_chats(
+        user_id=user_id,
+        channel=channel,
+        exclude_session_kind=exclude_session_kind,
+    )
     result = []
     for spec in chats:
         status = await tracker.get_status(spec.id)
