@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import type { Key } from "react";
-import { Alert, Input, Space, Tag, Typography } from "antd";
+import { Alert, Input, Select, Space, Tag, Typography } from "antd";
 import type { ColumnsType } from "antd/es/table";
 import { Button, Modal, Table } from "@agentscope-ai/design";
 import api from "../../../../api";
@@ -35,6 +35,20 @@ function normalizeSearchKeyword(value: string): string {
   return value.trim().toLowerCase();
 }
 
+function normalizeBbkId(value?: string | null): string {
+  return String(value || "").trim();
+}
+
+function buildBbkIdOptions<T extends { bbk_id?: string | null }>(
+  items: T[],
+): { label: string; value: string }[] {
+  return Array.from(
+    new Set(items.map((item) => normalizeBbkId(item.bbk_id)).filter(Boolean)),
+  )
+    .sort((a, b) => a.localeCompare(b, "zh-CN", { numeric: true }))
+    .map((value) => ({ label: value, value }));
+}
+
 function matchesTenantSearch(
   item: CronBroadcastChildItem,
   keyword: string,
@@ -43,6 +57,14 @@ function matchesTenantSearch(
   return [item.tenant_name, item.tenant_id].some((value) =>
     String(value || "").toLowerCase().includes(keyword),
   );
+}
+
+function matchesBbkId(
+  item: CronBroadcastChildItem,
+  selectedBbkId: string,
+): boolean {
+  if (!selectedBbkId) return true;
+  return normalizeBbkId(item.bbk_id) === selectedBbkId;
 }
 
 function resultLine(item: CronBroadcastChildOperationResult): string {
@@ -117,6 +139,7 @@ export function BroadcastChildrenModal({
   const [tablePageSize, setTablePageSize] = useState(DEFAULT_TABLE_PAGE_SIZE);
   const [searchInputText, setSearchInputText] = useState("");
   const [appliedSearchText, setAppliedSearchText] = useState("");
+  const [selectedBbkId, setSelectedBbkId] = useState("");
 
   const selectedItems = useMemo(() => {
     const selected = new Set(selectedRowKeys.map(String));
@@ -124,8 +147,12 @@ export function BroadcastChildrenModal({
   }, [children, selectedRowKeys]);
   const filteredChildren = useMemo(() => {
     const keyword = normalizeSearchKeyword(appliedSearchText);
-    return children.filter((item) => matchesTenantSearch(item, keyword));
-  }, [children, appliedSearchText]);
+    return children.filter(
+      (item) =>
+        matchesTenantSearch(item, keyword) && matchesBbkId(item, selectedBbkId),
+    );
+  }, [children, appliedSearchText, selectedBbkId]);
+  const bbkIdOptions = useMemo(() => buildBbkIdOptions(children), [children]);
   const duplicateTenantNameSummaries = useMemo(
     () => buildDuplicateTenantNameSummaries(children),
     [children],
@@ -179,11 +206,13 @@ export function BroadcastChildrenModal({
       setTablePageSize(DEFAULT_TABLE_PAGE_SIZE);
       setSearchInputText("");
       setAppliedSearchText("");
+      setSelectedBbkId("");
       return;
     }
     setTablePage(1);
     setSearchInputText("");
     setAppliedSearchText("");
+    setSelectedBbkId("");
     void (async () => {
       await loadChildren();
       await triggerBackgroundRefresh();
@@ -367,20 +396,35 @@ export function BroadcastChildrenModal({
           <Alert type="warning" showIcon message={failureSummary} />
         )}
 
-        <Input.Search
-          allowClear
-          enterButton="搜索"
-          placeholder="搜索用户姓名或 UID"
-          value={searchInputText}
-          onChange={(event) => {
-            setSearchInputText(event.target.value);
-          }}
-          onSearch={(value) => {
-            setAppliedSearchText(value);
-            setTablePage(1);
-          }}
-          style={{ maxWidth: 320 }}
-        />
+        <Space wrap>
+          <Input.Search
+            allowClear
+            enterButton="搜索"
+            placeholder="搜索用户姓名或 UID"
+            value={searchInputText}
+            onChange={(event) => {
+              setSearchInputText(event.target.value);
+            }}
+            onSearch={(value) => {
+              setAppliedSearchText(value);
+              setTablePage(1);
+            }}
+            style={{ width: 320, maxWidth: "100%" }}
+          />
+          <Select
+            allowClear
+            placeholder="筛选机构"
+            options={bbkIdOptions}
+            value={selectedBbkId || undefined}
+            onChange={(value) => {
+              setSelectedBbkId(value || "");
+              setTablePage(1);
+            }}
+            showSearch
+            optionFilterProp="label"
+            style={{ width: 180, maxWidth: "100%" }}
+          />
+        </Space>
 
         {operationResults.length > 0 && (
           <Alert
