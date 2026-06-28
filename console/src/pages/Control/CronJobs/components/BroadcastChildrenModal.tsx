@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import type { Key } from "react";
 import { Alert, Space, Tag, Typography } from "antd";
 import type { ColumnsType } from "antd/es/table";
@@ -25,7 +25,16 @@ interface BroadcastChildrenModalProps {
   onClose: () => void;
 }
 
+interface ApplySnapshotOptions {
+  clearSelection?: boolean;
+  excludeRowKeys?: Set<string>;
+}
+
 function rowKey(item: CronBroadcastChildItem): string {
+  return `${item.tenant_id}:${item.job_id}`;
+}
+
+function operationResultKey(item: CronBroadcastChildOperationResult): string {
   return `${item.tenant_id}:${item.job_id}`;
 }
 
@@ -86,9 +95,8 @@ export function BroadcastChildrenModal({
   const [refreshing, setRefreshing] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   const [children, setChildren] = useState<CronBroadcastChildItem[]>([]);
-  const [lookupStatus, setLookupStatus] = useState<
-    CronBroadcastChildrenResponse["status"]
-  >("idle");
+  const [lookupStatus, setLookupStatus] =
+    useState<CronBroadcastChildrenResponse["status"]>("idle");
   const [tenantCount, setTenantCount] = useState(0);
   const [failedTenants, setFailedTenants] = useState(0);
   const [failureSummary, setFailureSummary] = useState<string | null>(null);
@@ -97,6 +105,7 @@ export function BroadcastChildrenModal({
   const [operationResults, setOperationResults] = useState<
     CronBroadcastChildOperationResult[]
   >([]);
+  const jobId = job?.id;
 
   const selectedItems = useMemo(() => {
     const selected = new Set(selectedRowKeys.map(String));
@@ -109,37 +118,54 @@ export function BroadcastChildrenModal({
   const hasFailedResults = operationResults.some((result) => !result.success);
   const isLookupRunning = lookupStatus === "running";
 
-  const applySnapshot = (response: CronBroadcastChildrenResponse) => {
-    setChildren(response.items || []);
-    setLookupStatus(response.status || "idle");
-    setTenantCount(response.tenant_count || 0);
-    setFailedTenants(response.failed_tenants || 0);
-    setFailureSummary(response.failure_summary || null);
-    setUpdatedAt(response.updated_at || null);
-  };
+  const applySnapshot = useCallback(
+    (
+      response: CronBroadcastChildrenResponse,
+      options: ApplySnapshotOptions = {},
+    ) => {
+      const items = response.items || [];
+      setChildren(
+        options.excludeRowKeys
+          ? items.filter((item) => !options.excludeRowKeys?.has(rowKey(item)))
+          : items,
+      );
+      setLookupStatus(response.status || "idle");
+      setTenantCount(response.tenant_count || 0);
+      setFailedTenants(response.failed_tenants || 0);
+      setFailureSummary(response.failure_summary || null);
+      setUpdatedAt(response.updated_at || null);
+      if (options.clearSelection) {
+        setSelectedRowKeys([]);
+      }
+    },
+    [],
+  );
 
-  const loadChildren = async () => {
-    if (!job) return;
+  const loadChildren = useCallback(async () => {
+    if (!jobId) return;
     setLoading(true);
     try {
-      const response = await api.listCronBroadcastChildren(job.id);
+      const response = await api.listCronBroadcastChildren(jobId);
       applySnapshot(response);
       setSelectedRowKeys([]);
     } finally {
       setLoading(false);
     }
-  };
+  }, [applySnapshot, jobId]);
 
-  const triggerBackgroundRefresh = async () => {
-    if (!job) return;
-    setRefreshing(true);
-    try {
-      const response = await api.refreshCronBroadcastChildren(job.id);
-      applySnapshot(response);
-    } finally {
-      setRefreshing(false);
-    }
-  };
+  const triggerBackgroundRefresh = useCallback(
+    async (options: ApplySnapshotOptions = {}) => {
+      if (!jobId) return;
+      setRefreshing(true);
+      try {
+        const response = await api.refreshCronBroadcastChildren(jobId);
+        applySnapshot(response, options);
+      } finally {
+        setRefreshing(false);
+      }
+    },
+    [applySnapshot, jobId],
+  );
 
   useEffect(() => {
     if (!open) {
@@ -157,7 +183,7 @@ export function BroadcastChildrenModal({
       await loadChildren();
       await triggerBackgroundRefresh();
     })();
-  }, [open, job?.id]);
+  }, [loadChildren, open, triggerBackgroundRefresh]);
 
   const batchRefs = selectedItems.map((item) => ({
     tenant_id: item.tenant_id,
@@ -170,7 +196,20 @@ export function BroadcastChildrenModal({
     try {
       const response = await api.deleteCronBroadcastChildren(job.id, batchRefs);
       setOperationResults(response.results || []);
-      await loadChildren();
+      const deletedRowKeys = new Set(
+        (response.results || [])
+          .filter((result) => result.success && result.status === "deleted")
+          .map(operationResultKey),
+      );
+      if (deletedRowKeys.size > 0) {
+        setChildren((current) =>
+          current.filter((item) => !deletedRowKeys.has(rowKey(item))),
+        );
+      }
+      await triggerBackgroundRefresh({
+        clearSelection: true,
+        excludeRowKeys: deletedRowKeys,
+      });
     } finally {
       setSubmitting(false);
     }
@@ -182,7 +221,7 @@ export function BroadcastChildrenModal({
     try {
       const response = await api.runCronBroadcastChildren(job.id, batchRefs);
       setOperationResults(response.results || []);
-      await loadChildren();
+      await triggerBackgroundRefresh({ clearSelection: true });
     } finally {
       setSubmitting(false);
     }
@@ -207,8 +246,8 @@ export function BroadcastChildrenModal({
   const tableEmptyText = isLookupRunning
     ? "正在生成中"
     : lookupStatus === "idle"
-      ? "点击刷新生成分发用户列表"
-      : "当前任务尚未分发给任何用户";
+    ? "点击刷新生成分发用户列表"
+    : "当前任务尚未分发给任何用户";
 
   const columns: ColumnsType<CronBroadcastChildItem> = [
     {
@@ -289,7 +328,12 @@ export function BroadcastChildrenModal({
         )}
 
         <Space wrap>
-          <Button onClick={loadChildren} loading={loading}>
+          <Button
+            onClick={() => {
+              void triggerBackgroundRefresh({ clearSelection: true });
+            }}
+            loading={loading || refreshing}
+          >
             刷新
           </Button>
           <Text type="secondary">状态：{lookupStatusText}</Text>
