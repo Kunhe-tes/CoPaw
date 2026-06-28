@@ -42,6 +42,12 @@ def _model_status_error(message: str, status_code: int = 429) -> Exception:
     return exc
 
 
+def _runtime_status_error(message: str, status_code: int = 500) -> Exception:
+    exc = Exception(message)
+    exc.status_code = status_code
+    return exc
+
+
 def _setup_runner(monkeypatch) -> AgentRunner:
     runner = AgentRunner(agent_id="test-agent")
     runner.session = SimpleNamespace(mutate_session_state=AsyncMock())
@@ -140,6 +146,44 @@ async def test_non_model_failures_keep_existing_error_path(monkeypatch):
             pass
 
     runner._handle_query_error.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_unmarked_transport_failures_keep_existing_error_path(
+    monkeypatch,
+):
+    failures = [
+        asyncio.TimeoutError("tool call timed out"),
+        ConnectionResetError("tool socket reset"),
+        _runtime_status_error("hook callback failed", 500),
+    ]
+
+    for failure in failures:
+        runner = _setup_runner(monkeypatch)
+
+        async def fail_with_runtime_error(
+            *_args,
+            failure_to_raise=failure,
+            **_kwargs,
+        ):
+            if _kwargs.get("yield_never"):
+                yield None
+            raise failure_to_raise
+
+        runner._load_query_retry_settings = lambda: (1, 0, 0.0, 0.0)
+        runner._stream_single_query_attempt = fail_with_runtime_error
+
+        with pytest.raises(type(failure)):
+            async for _ in runner._stream_query_after_preflight(
+                [Msg(name="user", role="user", content="hi")],
+                request=_request(),
+                query="hi",
+                session_id="session-1",
+                preflight=_QueryPreflight(),
+            ):
+                pass
+
+        runner._handle_query_error.assert_awaited_once()
 
 
 @pytest.mark.asyncio

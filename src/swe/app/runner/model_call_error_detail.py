@@ -228,16 +228,23 @@ def _has_model_marker(exc: BaseException, text: str) -> bool:
     return any(pattern.search(haystack) for pattern in _MODEL_MARKER_PATTERNS)
 
 
-def _classify(exc: BaseException) -> ModelCallFailureKind | None:
+def _classify(
+    exc: BaseException,
+    *,
+    chain_has_model_marker: bool,
+) -> ModelCallFailureKind | None:
     status = _status_code(exc)
     text = _detail_text(exc)
     lowered_text = text.lower()
     class_name = exc.__class__.__name__.lower()
+    has_model_marker = _has_model_marker(exc, text)
 
     if "empty model output" in lowered_text or (
         "emptymodeloutput" in class_name
     ):
         return ModelCallFailureKind.EMPTY_MODEL_OUTPUT
+    if not chain_has_model_marker:
+        return None
     if isinstance(exc, _TIMEOUT_TYPES) or "timed out" in lowered_text:
         return ModelCallFailureKind.TIMEOUT
     if isinstance(exc, _CONNECTION_TYPES):
@@ -250,7 +257,7 @@ def _classify(exc: BaseException) -> ModelCallFailureKind | None:
         return ModelCallFailureKind.PROVIDER_STATUS
     if _has_rate_limit_marker(text):
         return ModelCallFailureKind.RATE_LIMIT
-    if _has_model_marker(exc, text):
+    if has_model_marker:
         return ModelCallFailureKind.UNKNOWN_MODEL_CALL
     return None
 
@@ -259,8 +266,15 @@ def _recognizable_failures(
     exc: BaseException,
 ) -> list[tuple[BaseException, ModelCallFailureKind]]:
     failures: list[tuple[BaseException, ModelCallFailureKind]] = []
-    for item in _exception_chain(exc):
-        kind = _classify(item)
+    chain = _exception_chain(exc)
+    chain_has_model_marker = any(
+        _has_model_marker(item, _detail_text(item)) for item in chain
+    )
+    for item in chain:
+        kind = _classify(
+            item,
+            chain_has_model_marker=chain_has_model_marker,
+        )
         if kind is not None:
             failures.append((item, kind))
     return failures

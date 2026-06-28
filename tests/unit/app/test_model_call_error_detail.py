@@ -20,24 +20,47 @@ class _ResponseJson:
         return {"error": {"message": "json provider diagnostic"}}
 
 
+class _ToolResponseText:
+    text = "tool API returned server error"
+
+
 class _ProviderStatusError(Exception):
+    __module__ = "provider.runtime"
     status_code = 500
     response = _ResponseText()
 
 
 class _ProviderRateLimitError(Exception):
+    __module__ = "provider.runtime"
     status_code = 429
     body = {"message": "Rate limit exceeded for project"}
 
 
 class _ProviderMessageError(Exception):
+    __module__ = "provider.runtime"
     message = "provider message field"
 
 
+class _ToolStatusError(Exception):
+    __module__ = "tool_runtime"
+    status_code = 500
+    response = _ToolResponseText()
+
+
+class _ToolRateLimitError(Exception):
+    __module__ = "tool_runtime"
+    status_code = 429
+    body = {"message": "too many requests from tool API"}
+
+
 def test_classifies_timeout_rate_limit_connection_provider_and_unknown():
-    timeout = extract_model_call_failure_detail(asyncio.TimeoutError())
+    timeout = extract_model_call_failure_detail(
+        asyncio.TimeoutError("model provider timed out"),
+    )
     rate_limit = extract_model_call_failure_detail(_ProviderRateLimitError())
-    connection = extract_model_call_failure_detail(ConnectionResetError("RST"))
+    connection = extract_model_call_failure_detail(
+        ConnectionResetError("model provider socket reset"),
+    )
     provider = extract_model_call_failure_detail(_ProviderStatusError("bad"))
     unknown = extract_model_call_failure_detail(
         RuntimeError("model provider returned malformed chunks"),
@@ -62,6 +85,44 @@ def test_classifies_timeout_rate_limit_connection_provider_and_unknown():
 
     assert unknown is not None
     assert unknown.kind == ModelCallFailureKind.UNKNOWN_MODEL_CALL
+
+
+def test_ignores_unmarked_transport_and_status_failures():
+    assert (
+        extract_model_call_failure_detail(
+            asyncio.TimeoutError("tool call timed out"),
+        )
+        is None
+    )
+    assert (
+        extract_model_call_failure_detail(
+            ConnectionResetError("tool socket reset"),
+        )
+        is None
+    )
+    assert (
+        extract_model_call_failure_detail(
+            _ToolStatusError("hook callback failed"),
+        )
+        is None
+    )
+    assert (
+        extract_model_call_failure_detail(
+            _ToolRateLimitError("tool API quota exceeded"),
+        )
+        is None
+    )
+
+
+def test_uses_chain_model_marker_for_specific_inner_failure():
+    inner = asyncio.TimeoutError("timed out")
+    outer = RuntimeError("model call failed")
+    outer.__cause__ = inner
+
+    detail = extract_model_call_failure_detail(outer)
+
+    assert detail is not None
+    assert detail.kind == ModelCallFailureKind.TIMEOUT
 
 
 def test_uses_innermost_recognizable_failure_and_skips_plain_wrappers():
