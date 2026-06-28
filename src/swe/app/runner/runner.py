@@ -33,6 +33,12 @@ from .command_dispatch import (
     _is_command,
     run_command_path,
 )
+from .model_call_error_detail import (
+    MODEL_CALL_FAILED_MESSAGES_STATE_KEY,
+    ModelCallFailureDetail,
+    ModelCallFailedException,
+    extract_model_call_failure_detail,
+)
 from .query_error_dump import write_query_error_dump
 from .retry_classifier import is_query_retryable
 from .session import SafeJSONSession, SESSION_SKILL_SNAPSHOT_STATE_KEY
@@ -3012,6 +3018,60 @@ class AgentRunner(Runner):
             (f"{exc.args[0]}{suffix}" if exc.args else suffix.strip()),
         ) + exc.args[1:]
 
+    async def _persist_model_call_failed_detail(
+        self,
+        *,
+        request: AgentRequest,
+        detail: ModelCallFailureDetail,
+    ) -> None:
+        """Persist user-visible model-call failure detail outside memory."""
+        if self.session is None or not hasattr(
+            self.session,
+            "mutate_session_state",
+        ):
+            return
+
+        session_id = _coerce_session_storage_id(
+            getattr(request, "session_id", None),
+        )
+        user_id = _coerce_session_storage_user_id(
+            getattr(request, "user_id", None),
+        )
+        if not session_id:
+            return
+
+        record = {
+            "id": f"model-call-error-{uuid4().hex}",
+            "type": "error",
+            "role": "assistant",
+            "status": "failed",
+            "code": detail.code,
+            "message": detail.message,
+            "content": [],
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "metadata": {
+                "model_call_failed": True,
+                "kind": detail.kind.value,
+                "provider_status": detail.provider_status,
+                "truncated": detail.truncated,
+            },
+        }
+
+        def _append_record(state: dict[str, Any]) -> dict[str, Any]:
+            next_state = state if isinstance(state, dict) else {}
+            existing = next_state.get(MODEL_CALL_FAILED_MESSAGES_STATE_KEY)
+            records = list(existing) if isinstance(existing, list) else []
+            records.append(record)
+            next_state[MODEL_CALL_FAILED_MESSAGES_STATE_KEY] = records
+            return next_state
+
+        await self.session.mutate_session_state(
+            session_id=session_id,
+            mutator=_append_record,
+            user_id=user_id,
+            create_if_not_exist=True,
+        )
+
     async def _save_state_during_cleanup(
         self,
         *,
@@ -3756,6 +3816,36 @@ class AgentRunner(Runner):
                         max_retry_attempts,
                         e,
                     ):
+                        if getattr(request, "channel", DEFAULT_CHANNEL) == (
+                            DEFAULT_CHANNEL
+                        ):
+                            detail = extract_model_call_failure_detail(e)
+                            if detail is not None:
+                                logger.warning(
+                                    "Console model call failed after final "
+                                    "attempt: kind=%s status=%s truncated=%s",
+                                    detail.kind.value,
+                                    detail.provider_status,
+                                    detail.truncated,
+                                )
+                                await self._end_trace_if_needed(
+                                    trace_id,
+                                    TraceStatus.ERROR,
+                                    error=detail.message,
+                                )
+                                try:
+                                    await self._persist_model_call_failed_detail(
+                                        request=request,
+                                        detail=detail,
+                                    )
+                                except Exception:
+                                    logger.warning(
+                                        "Failed to persist model-call "
+                                        "failure detail for history",
+                                        exc_info=True,
+                                    )
+                                raise ModelCallFailedException(detail) from e
+
                         await self._handle_query_error(
                             request=request,
                             exc=e,
