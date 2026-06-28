@@ -1066,7 +1066,6 @@ async def refresh_external_cron_jobs(request: Request):
 # ── Unified callback endpoint (jobParam-based) ──
 
 
-@router.post("/cron/callback")
 async def _dispatch_cron_task(
     request: Request,
     task_type: str,
@@ -1134,6 +1133,7 @@ async def _dispatch_cron_task(
         )
 
 
+@router.post("/cron/callback")
 async def internal_cron_callback(
     request: Request,
     x_internal_token: Optional[str] = Header(
