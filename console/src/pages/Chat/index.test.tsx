@@ -231,6 +231,7 @@ vi.mock("../../api/modules/chat", () => ({
     updateChat: mocks.updateChat,
     uploadFile: vi.fn(),
   },
+  sessionApi: {},
 }));
 
 vi.mock("../../api/modules/cronjob", () => ({

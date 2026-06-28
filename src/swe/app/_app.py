@@ -30,7 +30,6 @@ from .middleware.tenant_identity import TenantIdentityMiddleware
 from .middleware.tenant_workspace import TenantWorkspaceMiddleware
 from .middleware.header_passthrough import HeaderPassthroughMiddleware
 from .middleware.liveness_probe import LivenessProbeMiddleware
-from .middleware.runtime_static_gzip import RuntimeStaticGZipMiddleware
 from .middleware.sse_diagnostic import SSEDiagnosticMiddleware
 from .source_system_config.middleware import SourceSystemConfigMiddleware
 from .routers import router as api_router, create_agent_scoped_router
@@ -466,6 +465,29 @@ async def lifespan(
     except Exception as e:
         logger.warning("Failed to initialize source system config: %s", e)
 
+    # --- 初始化定时任务分发用户反查快照 ---
+    try:
+        from .crons.broadcast_children_store import CronBroadcastChildrenStore
+
+        cron_broadcast_children_store = CronBroadcastChildrenStore(
+            db_connection,
+        )
+        app.state.cron_broadcast_children_store = (
+            cron_broadcast_children_store
+        )
+        if cron_broadcast_children_store.is_available:
+            await cron_broadcast_children_store.initialize()
+            logger.info("Cron broadcast children snapshot storage initialized")
+        else:
+            logger.warning(
+                "Cron broadcast children snapshot storage uses memory fallback",
+            )
+    except Exception as e:
+        logger.warning(
+            "Failed to initialize cron broadcast children storage: %s",
+            e,
+        )
+
     # --- 初始化技能就绪检查存储 ---
     try:
         from .skill_readiness.service import build_skill_readiness_service
@@ -644,8 +666,6 @@ app = FastAPI(
     openapi_url="/openapi.json" if DOCS_ENABLED else None,
 )
 app.state.runtime_diagnostic_manager = runtime_diagnostic_manager
-
-app.add_middleware(RuntimeStaticGZipMiddleware)
 
 # Apply CORS middleware if CORS_ORIGINS is set
 # Note: add_middleware inserts at the beginning of the stack, so the LAST

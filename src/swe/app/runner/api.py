@@ -20,6 +20,7 @@ from .models import (
     ChatHistory,
     ChatMessage,
 )
+from .model_call_error_detail import MODEL_CALL_FAILED_MESSAGES_STATE_KEY
 from .utils import agentscope_msg_to_message
 from ..approvals import get_approval_service
 
@@ -130,6 +131,38 @@ def _task_session_messages_from_state(state: dict) -> list[ChatMessage]:
                     "type": raw.get("type") or "message",
                     "role": raw.get("role") or "assistant",
                     "content": content,
+                    "metadata": raw.get("metadata") or {},
+                    "timestamp": raw.get("timestamp"),
+                },
+            ),
+        )
+    return messages
+
+
+def _model_call_failed_messages_from_state(state: dict) -> list[ChatMessage]:
+    raw_messages = state.get(MODEL_CALL_FAILED_MESSAGES_STATE_KEY, [])
+    if not isinstance(raw_messages, list):
+        return []
+
+    messages: list[ChatMessage] = []
+    for raw in raw_messages:
+        if not isinstance(raw, dict):
+            continue
+        if raw.get("code") != "model_call_failed":
+            continue
+        message = raw.get("message")
+        if not isinstance(message, str) or not message:
+            continue
+        messages.append(
+            ChatMessage.model_validate(
+                {
+                    "id": raw.get("id") or str(uuid4()),
+                    "type": "error",
+                    "role": "assistant",
+                    "status": "failed",
+                    "content": [],
+                    "code": "model_call_failed",
+                    "message": message,
                     "metadata": raw.get("metadata") or {},
                     "timestamp": raw.get("timestamp"),
                 },
@@ -573,10 +606,11 @@ async def get_chat(
     )
     status = await workspace.task_tracker.get_status(chat_id)
     task_messages = _task_session_messages_from_state(state)
+    model_call_failed_messages = _model_call_failed_messages_from_state(state)
     if not state:
         return ChatHistory(
             chat=chat_spec,
-            messages=task_messages,
+            messages=[*task_messages, *model_call_failed_messages],
             status=status,
         )
     memory_state = state.get("agent", {}).get("memory", {})
@@ -594,6 +628,7 @@ async def get_chat(
         else:
             messages = await _messages_from_memory_state(memory_state)
     messages.extend(task_messages)
+    messages.extend(model_call_failed_messages)
     messages.sort(key=_message_sort_key)
     messages = await _annotate_approval_action_statuses(messages)
     return ChatHistory(chat=chat_spec, messages=messages, status=status)

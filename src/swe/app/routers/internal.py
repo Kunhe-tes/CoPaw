@@ -1154,6 +1154,7 @@ async def internal_cron_callback(
 
     job_param = body.get("jobParam") or body.get("job_param") or ""
     if job_param:
+        # base64 JSON 包裹格式：jobParam 编码后下发，回调时原样传回
         try:
             params = json.loads(base64.urlsafe_b64decode(job_param))
         except Exception as e:
@@ -1163,6 +1164,7 @@ async def internal_cron_callback(
                 detail=f"Invalid jobParam: {e}",
             )
     else:
+        # 直接参数格式：外部平台直接将参数字段展开在 body 中
         params = body
 
     try:
