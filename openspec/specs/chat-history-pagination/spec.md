@@ -6,7 +6,7 @@ Define backward-compatible chat-list pagination and stable ordering while preser
 ## Requirements
 
 ### Requirement: Chat list pagination SHALL be optional and backward compatible
-The existing chat-list endpoint SHALL accept `page` and `page_size` as optional paired query parameters. It SHALL additionally accept `cursor` with `page_size` for stable continuation. A request that omits all pagination parameters SHALL preserve the existing top-level array response and existing unpaginated ordering. A paginated response SHALL contain `items`, `total`, `page`, `page_size`, `has_more`, and an optional `next_cursor`.
+The existing chat-list endpoint SHALL accept `page` and `page_size` as optional paired query parameters. It SHALL additionally accept `cursor` with `page_size` for stable continuation. The endpoint SHALL accept an optional `exclude_session_kind` filter that excludes chats whose `meta.session_kind` equals the supplied value before response shaping. A request that omits all pagination parameters SHALL preserve the existing top-level array response and existing unpaginated ordering. A paginated response SHALL contain `items`, `total`, `page`, `page_size`, `has_more`, and an optional `next_cursor`.
 
 #### Scenario: Existing caller omits pagination
 - **WHEN** a caller requests the chat list without `page` and `page_size`
@@ -31,6 +31,11 @@ The existing chat-list endpoint SHALL accept `page` and `page_size` as optional 
 - **THEN** the endpoint returns a bounded page and the cursor for the next stable page when more chats remain
 - **AND** existing page-number callers remain supported without changing their request or response shape
 
+#### Scenario: Caller excludes a session kind
+- **WHEN** a caller supplies `exclude_session_kind=task`
+- **THEN** chats whose `meta.session_kind` is `task` are excluded from the returned array or paginated `items`
+- **AND** paginated `total`, `has_more`, and `next_cursor` are calculated from the filtered chat set
+
 ### Requirement: Paginated chats SHALL use stable newest-first ordering
 Paginated chat-list requests SHALL apply existing filters first, then order matching chats by `updated_at` descending and `id` descending before slicing the requested page. Runtime status lookup SHALL be performed only for chats included in the requested page.
 
@@ -45,7 +50,7 @@ Cursor-based requests SHALL use immutable `created_at` descending and `id` desce
 - **THEN** their relative paginated order is determined by descending chat `id`
 
 #### Scenario: Filters are applied before pagination
-- **WHEN** a paginated request includes `user_id` or `channel`
+- **WHEN** a paginated request includes `user_id`, `channel`, or `exclude_session_kind`
 - **THEN** `total` counts only chats matching those filters
 - **AND** page boundaries are calculated only from matching chats
 
