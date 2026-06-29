@@ -2471,22 +2471,13 @@ class AgentRunner(Runner):
         runtime: _QueryRuntime,
         user_message: str,
     ) -> None:
-        """当用户消息显式声明技能时，启动本轮技能状态记录。"""
+        """预热消息级技能候选缓存，不在开局直接启动技能。"""
         if not user_message:
             return
 
-        skill, confidence = (
-            runtime.session_skill_detector.detect_from_user_message(
-                user_message,
-            )
+        runtime.session_skill_detector.detect_from_user_message(
+            user_message,
         )
-        if skill and confidence >= 0.7:
-            await runtime.session_skill_detector.start_skill(
-                skill_name=skill,
-                trigger_tool="user_message",
-                trigger_reason="declared",
-                confidence=confidence,
-            )
 
     async def _prepare_query_runtime(
         self,

@@ -24,11 +24,26 @@ from .skill_feature_inferencer import (
     get_skill_feature_inferencer,
 )
 from .skill_tool_registry import SkillToolRegistry, get_skill_tool_registry
-
 if TYPE_CHECKING:
     from ..tracing.manager import TraceManager
 
 logger = logging.getLogger(__name__)
+
+
+def _get_safe_mcp_tracing_logger() -> logging.Logger:
+    """获取调试 logger，初始化失败时回退到空 logger."""
+    try:
+        from ..utils.mcp_tracing_logger import get_mcp_tracing_logger
+
+        return get_mcp_tracing_logger()
+    except Exception:
+        fallback_logger = logging.getLogger("mcp_tracing_debug_fallback")
+        fallback_logger.addHandler(logging.NullHandler())
+        fallback_logger.propagate = False
+        return fallback_logger
+
+
+mcp_tracing_logger = _get_safe_mcp_tracing_logger()
 
 # 技能描述缓存
 _SKILL_DESCRIPTION_CACHE: dict[str, str] = {}
@@ -234,6 +249,7 @@ class SkillInvocationDetector:
         # Layer 0: User message detection cache
         self._message_detected_skill: Optional[str] = None
         self._message_detected_confidence: float = 0.0
+        self._pending_skill_md_continuation: Optional[str] = None
 
     def set_enabled_skills(self, skills: list[str]) -> None:
         """Set the list of enabled skills and cache their descriptions.
@@ -326,6 +342,10 @@ class SkillInvocationDetector:
         if skill:
             self._message_detected_skill = skill
             self._message_detected_confidence = confidence
+        else:
+            # 清理上一轮缓存，避免同一 detector 被复用时沿用陈旧命中。
+            self._message_detected_skill = None
+            self._message_detected_confidence = 0.0
 
         return skill, confidence
 
@@ -385,6 +405,30 @@ class SkillInvocationDetector:
         if len(self._recent_tools) > 10:
             self._recent_tools.pop(0)
 
+        pending_skill_md_continuation = self._pending_skill_md_continuation
+        mcp_tracing_logger.debug(
+            "[skill_detector] on_tool_call tool=%s mcp_server=%s "
+            "current=%s message_skill=%s message_conf=%.2f pending_skill_md=%s",
+            tool_name,
+            mcp_server,
+            self._context_manager.current_skill,
+            self._message_detected_skill,
+            self._message_detected_confidence,
+            pending_skill_md_continuation,
+        )
+        if tool_name != "read_file" or (
+            Path(tool_input.get("file_path", "")).name != "SKILL.md"
+        ):
+            # continuation 仅对 SKILL.md 之后紧邻的一次工具调用有效；
+            # 无论该次调用最终走到哪一层，进入本轮判定后都应消费。
+            if self._pending_skill_md_continuation is not None:
+                mcp_tracing_logger.debug(
+                    "[skill_detector] consume pending_skill_md=%s before tool=%s",
+                    self._pending_skill_md_continuation,
+                    tool_name,
+                )
+            self._pending_skill_md_continuation = None
+
         # Step 0: Check if Agent is reading a skill's SKILL.md (highest priority)
         # 当Agent主动读取某技能的SKILL.md文件时，直接激活该技能
         skill_from_md_read = self._detect_skill_from_skill_md_read(
@@ -396,6 +440,13 @@ class SkillInvocationDetector:
                 skill_from_md_read,
                 1.0,
                 tool_name,
+            )
+            self._pending_skill_md_continuation = skill_from_md_read
+            mcp_tracing_logger.debug(
+                "[skill_detector] skill_md_detected skill=%s tool=%s set_pending=%s",
+                skill_from_md_read,
+                tool_name,
+                self._pending_skill_md_continuation,
             )
             self._context_manager.record_tool_call(tool_name, mcp_server)
             return skill_from_md_read, {skill_from_md_read: 1.0}
@@ -409,6 +460,11 @@ class SkillInvocationDetector:
         ]
 
         if declared_skills:
+            mcp_tracing_logger.debug(
+                "[skill_detector] declared_skills tool=%s skills=%s",
+                tool_name,
+                declared_skills,
+            )
             return await self._handle_declared_skills(
                 declared_skills,
                 tool_name,
@@ -420,6 +476,7 @@ class SkillInvocationDetector:
             tool_name,
             tool_input,
             mcp_server,
+            pending_skill_md_continuation,
         )
 
     async def _handle_declared_skills(
@@ -481,6 +538,7 @@ class SkillInvocationDetector:
         tool_name: str,
         tool_input: dict[str, Any],
         mcp_server: Optional[str] = None,
+        pending_skill_md_continuation: Optional[str] = None,
     ) -> tuple[Optional[str], dict[str, float]]:
         """Infer skill attribution for tools without explicit declarations.
 
@@ -501,17 +559,6 @@ class SkillInvocationDetector:
         """
         enabled_skills = list(self._enabled_skills)
 
-        # Layer 0: Check cached user message detection
-        if (
-            self._message_detected_skill
-            and self._message_detected_confidence >= 0.7
-        ):
-            skill = self._message_detected_skill
-            confidence = self._message_detected_confidence
-            await self._ensure_skill_active(skill, confidence, tool_name)
-            self._context_manager.record_tool_call(tool_name, mcp_server)
-            return skill, {skill: confidence}
-
         # Layer 1: MCP server matching
         if mcp_server:
             skill, confidence = self._inferencer.infer_skill_from_mcp_server(
@@ -519,6 +566,14 @@ class SkillInvocationDetector:
                 enabled_skills,
             )
             if skill and confidence >= 0.8:
+                mcp_tracing_logger.debug(
+                    "[skill_detector] infer_by_mcp_server tool=%s server=%s "
+                    "skill=%s confidence=%.2f",
+                    tool_name,
+                    mcp_server,
+                    skill,
+                    confidence,
+                )
                 await self._ensure_skill_active(skill, confidence, tool_name)
                 self._context_manager.record_tool_call(tool_name, mcp_server)
                 return skill, {skill: confidence}
@@ -530,6 +585,13 @@ class SkillInvocationDetector:
             enabled_skills,
         )
         if skill and confidence >= 0.6:
+            mcp_tracing_logger.debug(
+                "[skill_detector] infer_by_tool_input tool=%s skill=%s "
+                "confidence=%.2f",
+                tool_name,
+                skill,
+                confidence,
+            )
             await self._ensure_skill_active(skill, confidence, tool_name)
             self._context_manager.record_tool_call(tool_name, mcp_server)
             return skill, {skill: confidence}
@@ -540,6 +602,14 @@ class SkillInvocationDetector:
             enabled_skills,
         )
         if skill and confidence >= 0.5:
+            mcp_tracing_logger.debug(
+                "[skill_detector] infer_by_tool_sequence tool=%s skill=%s "
+                "confidence=%.2f recent_tools=%s",
+                tool_name,
+                skill,
+                confidence,
+                self._recent_tools,
+            )
             await self._ensure_skill_active(skill, confidence, tool_name)
             self._context_manager.record_tool_call(tool_name, mcp_server)
             return skill, {skill: confidence}
@@ -552,6 +622,13 @@ class SkillInvocationDetector:
         if inferred:
             primary_skill = inferred[0][0]
             weights = dict(inferred)
+            mcp_tracing_logger.debug(
+                "[skill_detector] infer_by_tool_hint tool=%s primary_skill=%s "
+                "weights=%s",
+                tool_name,
+                primary_skill,
+                weights,
+            )
             await self._ensure_skill_active(
                 primary_skill,
                 weights.get(primary_skill, 0.4),
@@ -560,6 +637,47 @@ class SkillInvocationDetector:
             self._context_manager.record_tool_call(tool_name, mcp_server)
             return primary_skill, weights
 
+        current = self._context_manager.current_skill
+        pending = pending_skill_md_continuation
+        if current and pending and pending == current:
+            # 仅对紧随 SKILL.md 读取后的下一次无证据工具调用延续归因，
+            # 避免 current_skill 在整轮对无关工具产生粘性误归因。
+            mcp_tracing_logger.debug(
+                "[skill_detector] continue_after_skill_md tool=%s skill=%s",
+                tool_name,
+                current,
+            )
+            self._update_skill_state(current)
+            self._context_manager.record_tool_call(tool_name, mcp_server)
+            return current, {current: 1.0}
+
+        # Layer 0: 用户消息命中只作为最终兜底候选，优先级低于
+        # SKILL.md 激活出的紧邻 continuation。
+        if (
+            self._message_detected_skill
+            and self._message_detected_confidence >= 0.7
+        ):
+            skill = self._message_detected_skill
+            confidence = self._message_detected_confidence
+            mcp_tracing_logger.debug(
+                "[skill_detector] fallback_to_message_skill tool=%s skill=%s "
+                "confidence=%.2f",
+                tool_name,
+                skill,
+                confidence,
+            )
+            await self._ensure_skill_active(skill, confidence, tool_name)
+            self._context_manager.record_tool_call(tool_name, mcp_server)
+            return skill, {skill: confidence}
+
+        mcp_tracing_logger.debug(
+            "[skill_detector] no_attribution tool=%s current=%s pending=%s "
+            "message_skill=%s",
+            tool_name,
+            self._context_manager.current_skill,
+            pending_skill_md_continuation,
+            self._message_detected_skill,
+        )
         # No attribution possible
         return None, {}
 
@@ -915,6 +1033,7 @@ class SkillInvocationDetector:
         self._idle_counters.clear()
         self._recent_tools.clear()
         self._context_manager.clear()
+        self._pending_skill_md_continuation = None
         # Clear Layer 0 cache
         self._message_detected_skill = None
         self._message_detected_confidence = 0.0

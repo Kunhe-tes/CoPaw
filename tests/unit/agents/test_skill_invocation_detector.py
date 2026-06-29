@@ -899,6 +899,50 @@ class TestUserMessageDetection:
         assert detector._message_detected_skill is None
         assert detector._message_detected_confidence == 0.0
 
+    def test_detect_from_user_message_clears_stale_cache_on_miss(self):
+        """Test that a message miss clears previous cached detection."""
+        custom_feature = SkillFeature(
+            skill_name="test_skill",
+            trigger_keywords=["keyword"],
+        )
+        inferencer = SkillFeatureInferencer(
+            builtin_features={"test_skill": custom_feature},
+        )
+
+        detector = SkillInvocationDetector(inferencer=inferencer)
+        detector.set_enabled_skills(["test_skill"])
+
+        detector.detect_from_user_message("keyword hit")
+        assert detector._message_detected_skill == "test_skill"
+
+        skill, confidence = detector.detect_from_user_message("no related text")
+
+        assert skill is None
+        assert confidence == 0.0
+        assert detector._message_detected_skill is None
+        assert detector._message_detected_confidence == 0.0
+
+    @pytest.mark.asyncio
+    async def test_tool_input_evidence_beats_message_cache(self):
+        """Test strong tool evidence can override cached message detection."""
+        inferencer = SkillFeatureInferencer()
+        detector = SkillInvocationDetector(inferencer=inferencer)
+        detector.set_enabled_skills(["xlsx", "pdf"])
+
+        detected_skill, detected_confidence = detector.detect_from_user_message(
+            "please use pdf skill",
+        )
+        assert detected_skill == "pdf"
+        assert detected_confidence >= 0.7
+
+        skill, weights = await detector.on_tool_call(
+            "execute_shell_command",
+            {"command": "python analyze.py report.xlsx"},
+        )
+
+        assert skill == "xlsx"
+        assert weights.get("xlsx", 0) >= 0.8
+
 
 class TestMcpServerInference:
     """Tests for MCP server-based inference."""
@@ -1135,6 +1179,135 @@ class TestSkillMdReadDetection:
         # 应该识别为xlsx，而不是pdf
         assert skill == "xlsx"
         assert weights == {"xlsx": 1.0}
+
+    @pytest.mark.asyncio
+    async def test_skill_md_read_continues_active_skill_without_new_evidence(
+        self,
+    ):
+        """Test active skill continues after SKILL.md read without new evidence."""
+        detector = SkillInvocationDetector()
+        detector.set_enabled_skills(["weather"])
+
+        skill1, weights1 = await detector.on_tool_call(
+            "read_file",
+            {"file_path": "/workspace/skills/weather/SKILL.md"},
+        )
+
+        assert skill1 == "weather"
+        assert weights1 == {"weather": 1.0}
+
+        skill2, weights2 = await detector.on_tool_call(
+            "weather_query",
+            {"location": "Shanghai"},
+        )
+
+        assert skill2 == "weather"
+        assert weights2 == {"weather": 1.0}
+
+    @pytest.mark.asyncio
+    async def test_skill_md_read_continuation_only_applies_once(self):
+        """Test SKILL.md-based continuation is consumed after one tool call."""
+        detector = SkillInvocationDetector()
+        detector.set_enabled_skills(["weather"])
+
+        await detector.on_tool_call(
+            "read_file",
+            {"file_path": "/workspace/skills/weather/SKILL.md"},
+        )
+
+        skill1, weights1 = await detector.on_tool_call(
+            "weather_query",
+            {"location": "Shanghai"},
+        )
+        assert skill1 == "weather"
+        assert weights1 == {"weather": 1.0}
+
+        skill2, weights2 = await detector.on_tool_call(
+            "unknown_tool",
+            {"data": "generic"},
+        )
+        assert skill2 is None
+        assert weights2 == {}
+
+    @pytest.mark.asyncio
+    async def test_skill_md_read_continuation_expires_after_next_tool_attempt(
+        self,
+    ):
+        """Test SKILL.md continuation expires even if next call uses other evidence."""
+        detector = SkillInvocationDetector()
+        detector.set_enabled_skills(["weather", "xlsx"])
+
+        await detector.on_tool_call(
+            "read_file",
+            {"file_path": "/workspace/skills/weather/SKILL.md"},
+        )
+
+        skill1, weights1 = await detector.on_tool_call(
+            "execute_shell_command",
+            {"command": "python analyze.py report.xlsx"},
+        )
+        assert skill1 == "xlsx"
+        assert weights1.get("xlsx", 0) >= 0.8
+
+        skill2, weights2 = await detector.on_tool_call(
+            "unknown_tool",
+            {"data": "generic"},
+        )
+        assert skill2 is None
+        assert weights2 == {}
+
+    @pytest.mark.asyncio
+    async def test_skill_md_read_continuation_consumed_by_next_same_skill_match(
+        self,
+    ):
+        """Test SKILL.md continuation is consumed even if next call matches same skill."""
+        detector = SkillInvocationDetector()
+        detector.set_enabled_skills(["xlsx"])
+
+        await detector.on_tool_call(
+            "read_file",
+            {"file_path": "/workspace/skills/xlsx/SKILL.md"},
+        )
+
+        skill1, weights1 = await detector.on_tool_call(
+            "execute_shell_command",
+            {"command": "python analyze.py report.xlsx"},
+        )
+        assert skill1 == "xlsx"
+        assert weights1.get("xlsx", 0) >= 0.8
+
+        skill2, weights2 = await detector.on_tool_call(
+            "unknown_tool",
+            {"data": "generic"},
+        )
+        assert skill2 is None
+        assert weights2 == {}
+
+    @pytest.mark.asyncio
+    async def test_skill_md_continuation_beats_stale_message_cache(self):
+        """Test SKILL.md continuation wins over older message-level candidate."""
+        detector = SkillInvocationDetector()
+        detector.set_enabled_skills(["pdf", "xlsx"])
+
+        detected_skill, detected_confidence = detector.detect_from_user_message(
+            "please use pdf skill",
+        )
+        assert detected_skill == "pdf"
+        assert detected_confidence >= 0.7
+
+        skill1, weights1 = await detector.on_tool_call(
+            "read_file",
+            {"file_path": "/workspace/skills/xlsx/SKILL.md"},
+        )
+        assert skill1 == "xlsx"
+        assert weights1 == {"xlsx": 1.0}
+
+        skill2, weights2 = await detector.on_tool_call(
+            "unknown_tool",
+            {"data": "generic"},
+        )
+        assert skill2 == "xlsx"
+        assert weights2 == {"xlsx": 1.0}
 
     @pytest.mark.asyncio
     async def test_set_tracing_context_updates_source_id_for_emitted_skill(
