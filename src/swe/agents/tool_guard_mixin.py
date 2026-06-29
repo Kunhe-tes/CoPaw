@@ -1259,6 +1259,13 @@ class ToolGuardMixin:
                     tool_input,
                     guard_result=guard_result,
                 )
+            if not getattr(guard_result, "is_safe", True):
+                return _GuardAction(
+                    "auto_denied",
+                    tool_name,
+                    tool_input,
+                    guard_result=guard_result,
+                )
         return None
 
     async def _execute_guard_action(

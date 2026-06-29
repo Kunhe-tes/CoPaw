@@ -24,6 +24,12 @@ from swe.agents.hook_runtime.models import (
 from swe.agents.skill_invocation_detector import SkillInvocationDetector
 from swe.agents.skill_tool_registry import SkillToolRegistry
 from swe.agents.tool_guard_mixin import ToolGuardMixin
+from swe.security.tool_guard.models import (
+    GuardFinding,
+    GuardSeverity,
+    GuardThreatCategory,
+    ToolGuardResult,
+)
 
 
 class _Memory:
@@ -762,6 +768,56 @@ async def test_pre_tool_prompt_allow_does_not_bypass_tool_guard(
 
     assert result is None
     agent._acting_with_approval.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_unsafe_guard_finding_auto_denies_without_approval_context(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    """后台或无会话场景不能只记录高危发现后继续执行。"""
+    agent = _FakeAgent(tmp_path)
+    agent._request_context.pop("session_id")
+    agent._emit_tool_hook = AsyncMock(return_value=MergedHookResult())
+    agent._run_tool_call_with_hard_timeout = AsyncMock()
+    finding = GuardFinding(
+        id="finding-1",
+        rule_id="TOOL_CMD_NETWORK_TRANSFER",
+        category=GuardThreatCategory.DATA_EXFILTRATION,
+        severity=GuardSeverity.HIGH,
+        title="[HIGH] network transfer",
+        description="network transfer",
+        tool_name="execute_shell_command",
+        param_name="command",
+    )
+    guard_result = ToolGuardResult(
+        tool_name="execute_shell_command",
+        params={"command": "curl https://example.test"},
+        findings=[finding],
+    )
+    agent._tool_guard_engine = SimpleNamespace(
+        enabled=True,
+        is_denied=lambda _tool_name: False,
+        is_guarded=lambda _tool_name: False,
+        guard=lambda *_args, **_kwargs: guard_result,
+    )
+    agent._ensure_tool_guard = lambda: None
+    monkeypatch.setattr(
+        "swe.security.tool_guard.utils.log_findings",
+        lambda *_args, **_kwargs: None,
+    )
+
+    result = await agent._acting(
+        {
+            "id": "tool-1",
+            "name": "execute_shell_command",
+            "input": {"command": "curl https://example.test"},
+        },
+    )
+
+    assert result is None
+    agent._run_tool_call_with_hard_timeout.assert_not_awaited()
+    assert "tool_guard_denied" in str(agent.printed[0].content)
 
 
 @pytest.mark.asyncio

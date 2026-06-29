@@ -9,6 +9,53 @@
 ##                                   enforced by the surrounding ToolGuard/approval workflow when available).
 ## See GuardThreatCategory for the full threat taxonomy.
 #
+- id: TOOL_CMD_NETWORK_TRANSFER
+  tools: [execute_shell_command]
+  params: [command]
+  category: data_exfiltration
+  severity: HIGH
+  patterns:
+    - '(?:^|[;&|]\s*)\b(curl|wget|ftp|sftp|scp|rsync|nc|ncat|socat|iwr|irm)\b'
+  exclude_patterns:
+    - '^\s*(curl|wget|ftp|sftp|scp|rsync|nc|ncat|socat|iwr|irm)\s+(-h|--help|-V|--version|/\?)\s*$'
+  description: 'External network transfer command'
+  remediation: 'Block or require explicit approval before downloading, uploading, or tunneling data with shell network tools.'
+
+- id: TOOL_CMD_ENV_DUMP
+  tools: [execute_shell_command]
+  params: [command]
+  category: credential_exposure
+  severity: HIGH
+  patterns:
+    - '(?:^|[;&|]\s*)\b(env|printenv)\b'
+    - '(?:^|[;&|]\s*)set\s*(?:$|[;&|])'
+    - '\bcat\s+/proc/(self|\d+|\*)/environ\b'
+  description: 'Environment variable dump command'
+  remediation: 'Do not print raw environment variables because they may contain credentials, tokens, and internal service addresses.'
+
+- id: TOOL_CMD_SYSTEM_INVENTORY
+  tools: [execute_shell_command]
+  params: [command]
+  category: sensitive_file_access
+  severity: HIGH
+  patterns:
+    - '(?:^|[;&|]\s*)\b(systemctl|service|supervisorctl|journalctl|kubectl|netstat|ifconfig|route)\b'
+    - '(?:^|[;&|]\s*)\bss\b\s+-?[A-Za-z]*[tulnp]'
+    - '(?:^|[;&|]\s*)\blsof\b\s+[^;&|]*-i\b'
+    - '(?:^|[;&|]\s*)\bip\s+(addr|a|route|r|link)\b'
+  description: 'System inventory or internal topology command'
+  remediation: 'Avoid exposing service status, Kubernetes objects, network listeners, routes, and internal topology details.'
+
+- id: TOOL_CMD_DD_RESOURCE_ABUSE
+  tools: [execute_shell_command]
+  params: [command]
+  category: resource_abuse
+  severity: CRITICAL
+  patterns:
+    - '(?:^|[;&|]\s*)\bdd\b'
+  description: 'dd command can exhaust resources or overwrite devices'
+  remediation: 'Block dd by default. It can create unbounded CPU/IO pressure or overwrite raw devices.'
+
 - id: cron_security
   tools: [execute_shell_command, start_background_process]
   params: [command]
