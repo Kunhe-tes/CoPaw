@@ -69,7 +69,7 @@ function FilePreviewModal(props: FilePreviewModalProps) {
   const pollingTimerRef = useRef<NodeJS.Timeout | null>(null);
   // 存储动态渲染的 HTML 内容（直接渲染到 div 时使用）
   const [renderedHtmlContent, setRenderedHtmlContent] = useState<string | null>(
-    null
+    null,
   );
   const iframeRef = useRef<HTMLIFrameElement | null>(null);
   const cleanupClickTrackingRef = useRef<(() => void) | null>(null);
@@ -83,12 +83,12 @@ function FilePreviewModal(props: FilePreviewModalProps) {
   const isHtmlPreview = useMemo(
     () =>
       fileType === "previewable" && getContentType(fileName) === "text/html",
-    [fileName, fileType]
+    [fileName, fileType],
   );
   // 判断是否为动态渲染类型
   const isDynamicRender = useMemo(
     () => isDynamicRenderHtmlLink(fileUrl),
-    [fileUrl]
+    [fileUrl],
   );
 
   // 获取动态渲染数据的函数（带轮询逻辑）
@@ -134,7 +134,7 @@ function FilePreviewModal(props: FilePreviewModalProps) {
         setDynamicRenderLoading(false);
       }
     },
-    [renderTemplate, isTemplateListLoaded]
+    [renderTemplate, isTemplateListLoaded],
   );
 
   // fetch 文件数据并创建 Blob URL 或动态渲染
@@ -334,8 +334,11 @@ function FilePreviewModal(props: FilePreviewModalProps) {
       return;
     }
 
+    const shouldRecordHtmlPreviewEvents =
+      !trackingContext.disableEventRecording;
+
     // 直接使用 attachHtmlPreviewClickTracker，它已完整实现：
-    // 1. 点击事件上报
+    // 1. 点击事件上报（只读回放可禁用记录）
     // 2. 嵌套预览检测（支持 data-preview-modal 属性和动态渲染链接）
     try {
       cleanupClickTrackingRef.current = attachHtmlPreviewClickTracker({
@@ -349,10 +352,13 @@ function FilePreviewModal(props: FilePreviewModalProps) {
           listName: trackingListName,
           defaultCustomerInfo,
         },
-        reporter: htmlPreviewEventsApi.recordClick,
-        listSnapshotReporter: enableListSnapshotTracking
-          ? htmlPreviewEventsApi.recordListSnapshot
-          : undefined,
+        reporter: shouldRecordHtmlPreviewEvents
+          ? htmlPreviewEventsApi.recordClick
+          : () => undefined,
+        listSnapshotReporter:
+          shouldRecordHtmlPreviewEvents && enableListSnapshotTracking
+            ? htmlPreviewEventsApi.recordListSnapshot
+            : undefined,
         onOpenNestedPreview: setNestedPreview,
         getTemplateName: (templateId: number) => {
           return templateList.current.find((t) => t.templateId === templateId)
@@ -383,8 +389,8 @@ function FilePreviewModal(props: FilePreviewModalProps) {
         const tip = isFileGenerating
           ? "文件正在生成中，内容准备完成后，页面会自动展示最新预览"
           : dynamicRenderLoading
-            ? "正在渲染报告..."
-            : "加载中...";
+          ? "正在渲染报告..."
+          : "加载中...";
         return <Spin tip={tip} />;
       }
       if (error) {
@@ -511,12 +517,12 @@ function FilePreviewModal(props: FilePreviewModalProps) {
   const headerActions = useMemo(() => {
     const actions = [
       // <Tooltip key="copy" title="复制链接">
-      //   <IconButton
-      //     size="small"
-      //     icon={copied ? <SparkTrueLine style={{ color: "#52c41a" }} /> : <SparkCopyLine />}
-      //     onClick={handleCopy}
-      //     bordered={false}
-      //   />
+      //   <IconButton
+      //     size="small"
+      //     icon={copied ? <SparkTrueLine style={{ color: "#52c41a" }} /> : <SparkCopyLine />}
+      //     onClick={handleCopy}
+      //     bordered={false}
+      //   />
       // </Tooltip>,
       <Tooltip key="download" title="下载文件">
         <IconButton
@@ -537,7 +543,7 @@ function FilePreviewModal(props: FilePreviewModalProps) {
             onClick={handleFullscreen}
             bordered={false}
           />
-        </Tooltip>
+        </Tooltip>,
       );
     }
 
