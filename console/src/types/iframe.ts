@@ -42,6 +42,7 @@ export interface AuthHeaderItem {
  *   - hideMenu: 是否隐藏菜单（支持 boolean 或字符串 "true"/"false"）
  *   - isSuperManager: 是否为超级管理员
  *   - manager: 是否为普通管理员
+ *   - skipPreviewTracking: 是否跳过 HTML preview 埋点（支持 boolean 或字符串 "true"/"false"）
  *   - auth: 自定义 headers 数组
  */
 export interface IframeUserDataMessage {
@@ -61,6 +62,8 @@ export interface IframeUserDataMessage {
     isSuperManager?: boolean | string;
     /** 是否为普通管理员（支持 boolean 或字符串 "true"/"false"） */
     manager?: boolean | string;
+    /** 是否跳过 HTML preview 埋点（支持 boolean 或字符串 "true"/"false"） */
+    skipPreviewTracking?: boolean | string;
     /** 自定义 headers 数组，每项包含 headerName 和 headerValue */
     auth?: AuthHeaderItem[];
     /** 分行ID */
@@ -140,6 +143,8 @@ export interface IframeContext {
   isSuperManager: boolean;
   /** 是否为普通管理员 */
   manager: boolean;
+  /** 是否跳过 HTML preview 埋点 */
+  skipPreviewTracking: boolean;
   /** 自定义 headers 数组 */
   authHeaders: AuthHeaderItem[];
   /** 来源 origin */
