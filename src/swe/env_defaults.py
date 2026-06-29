@@ -15,6 +15,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+from functools import lru_cache
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
@@ -96,3 +97,24 @@ def get_current_env() -> str:
 def get_applied_env_defaults() -> dict[str, str]:
     """返回当前进程中由默认配置注入的环境变量。"""
     return dict(_APPLIED_DEFAULTS)
+
+
+@lru_cache(maxsize=1)
+def get_system_configuration_env_keys() -> frozenset[str]:
+    """Return backend-owned env keys declared by packaged env configs."""
+    config_dir = _get_package_dir() / "config" / "envs"
+    keys: set[str] = set()
+    for config_file in sorted(config_dir.glob("*.json")):
+        try:
+            with open(config_file, encoding="utf-8") as f:
+                data = json.load(f)
+        except (json.JSONDecodeError, OSError) as exc:
+            logger.warning(
+                "Failed to inspect environment config from %s: %s",
+                config_file,
+                exc,
+            )
+            continue
+        if isinstance(data, dict):
+            keys.update(str(key) for key in data)
+    return frozenset(keys)

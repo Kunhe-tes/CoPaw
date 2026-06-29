@@ -112,6 +112,14 @@ _Avoid_: system feature configuration, tenant config, user config
 The tenant and source context that determines which runtime configuration and model selection a request observes. One **Runtime Request Identity** resolves to one **Tenant Provider Configuration** view for provider and active-model reads.
 _Avoid_: cache key, auth header set, iframe context
 
+**System Configuration Environment Key**:
+A backend-owned configuration key used by Swe itself. A **System Configuration Environment Key** is not part of user-controlled runtime env and must not be exposed through user-invoked tool subprocesses.
+_Avoid_: user env, tenant env, ordinary shell env
+
+**User Tool Subprocess Environment**:
+The environment visible to a subprocess started by a user-invoked tool such as shell execution. A **User Tool Subprocess Environment** may include safe process basics and scoped runtime env, but excludes **System Configuration Environment Keys** and runtime boundary keys that expose or alter isolation internals.
+_Avoid_: process env, backend env, system environment
+
 **Mandatory Console Channel**:
 The built-in **Console Channel** is a runtime invariant that is always treated as enabled for every agent and tenant, including when no explicit channel entry has been saved yet. Users may configure its other fields, but persisted, imported, or interactive configuration must not disable it.
 _Avoid_: optional console, disabled console, console toggle

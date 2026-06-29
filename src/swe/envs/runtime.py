@@ -16,6 +16,7 @@ from swe.config.context import (
     resolve_scope_id,
 )
 from swe.config.utils import get_tenant_secrets_dir
+from swe.env_defaults import get_system_configuration_env_keys
 from swe.tracing.sanitizer import register_sensitive_values
 
 from .store import load_envs
@@ -39,6 +40,19 @@ PROTECTED_RUNTIME_ENV_KEYS = frozenset(
         "LD_LIBRARY_PATH",
         "DYLD_LIBRARY_PATH",
     },
+)
+
+_USER_TOOL_SUBPROCESS_ALLOWED_PROTECTED_ENV_KEYS = frozenset(
+    {
+        "PATH",
+        "HOME",
+        "SHELL",
+    },
+)
+
+_USER_TOOL_SUBPROCESS_BOUNDARY_ENV_KEYS = (
+    PROTECTED_RUNTIME_ENV_KEYS
+    - _USER_TOOL_SUBPROCESS_ALLOWED_PROTECTED_ENV_KEYS
 )
 
 MASKED_ENV_VALUE = "********"
@@ -111,6 +125,19 @@ def _filter_runtime_env(envs: Mapping[str, str]) -> dict[str, str]:
     }
 
 
+def _scrub_user_tool_subprocess_env(envs: Mapping[str, str]) -> dict[str, str]:
+    """删除不应继承到用户工具子进程的后端环境变量。"""
+    blocked_keys = (
+        get_system_configuration_env_keys()
+        | _USER_TOOL_SUBPROCESS_BOUNDARY_ENV_KEYS
+    )
+    return {
+        key: str(value)
+        for key, value in envs.items()
+        if key not in blocked_keys
+    }
+
+
 def load_tenant_runtime_env(
     *,
     runtime_scope_id: str | None = None,
@@ -160,7 +187,7 @@ def build_runtime_env(
         env.update({key: str(value) for key, value in call_mapping.items()})
 
     register_sensitive_values(tenant_env.values())
-    return env
+    return _scrub_user_tool_subprocess_env(env)
 
 
 def get_tenant_runtime_env_value(
