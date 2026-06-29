@@ -97,7 +97,7 @@ class SyncService:
         if return_code != "SUC0000":
             return None, f"returnCode={return_code}"
 
-        body = data.get("body", [])
+        body = data.get("body", {})
         if not body:
             return None, "No body"
 
@@ -283,106 +283,31 @@ class SyncService:
 
     async def sync_execution_async_status(
         self,
-        batch_size: int = 100,
+        batch_size: int = 200,  # noqa: ARG002 - 保留参数兼容性
     ) -> ExecutionAsyncStatusResponse:
         """Sync execution async_status from subtask statuses.
 
-        只要子任务都有状态，即可聚合更新主任务状态：
-        - 没有 subtasks → success
-        - 存在 FAIL/PART_SUC/TIMEOUT → error
-        - 全部 SUC → success
-        - 存在无状态子任务 → 跳过，等待下次同步
+        使用 JOIN 批量更新，高效处理大量数据：
+        - 没有 subtasks 或全部 SUC → success
+        - 存在 FAIL/PART_SUC/TIMEOUT 且没有 pending → error
+        - 存在 pending 子任务 → 不更新，等待下次同步
         """
-        logger.info("Starting execution async_status sync")
+        logger.info("Starting execution async_status sync (batch mode)")
 
-        executions = await self.query_service.get_pending_executions(
-            limit=batch_size,
-        )
-        if not executions:
-            logger.debug("No pending executions to sync")
-            return ExecutionAsyncStatusResponse(
-                success=True,
-                total_scanned=0,
-                total_updated=0,
-            )
+        (
+            success_count,
+            error_count,
+        ) = await self.query_service.batch_update_execution_async_status()
 
-        response = ExecutionAsyncStatusResponse(
+        total_updated = success_count + error_count
+
+        return ExecutionAsyncStatusResponse(
             success=True,
-            total_scanned=len(executions),
+            total_scanned=total_updated,
+            total_updated=total_updated,
+            total_success=success_count,
+            total_error=error_count,
         )
-
-        for execution in executions:
-            trace_id = execution.get("trace_id", "")
-            execution_id: int = execution.get("id") or 0
-
-            if execution_id == 0:
-                logger.warning("Execution has no id")
-                continue
-
-            if not trace_id:
-                logger.warning(
-                    "Execution has no trace_id: id=%s",
-                    execution_id,
-                )
-                await self.query_service.update_execution_async_status(
-                    execution_id,
-                    "success",
-                )
-                response.total_updated += 1
-                response.total_success += 1
-                continue
-
-            subtasks = await self.query_service.get_subtasks_by_trace_id(
-                trace_id,
-            )
-
-            # 没有 subtasks，标记 success
-            if not subtasks:
-                await self.query_service.update_execution_async_status(
-                    execution_id,
-                    "success",
-                )
-                response.total_updated += 1
-                response.total_success += 1
-                logger.info(
-                    "No subtasks, marked execution as success: id=%s",
-                    execution_id,
-                )
-                continue
-
-            # 检查是否有无状态子任务
-            has_pending = any(
-                s.status is None or s.status == "" for s in subtasks
-            )
-            if has_pending:
-                logger.debug(
-                    "Execution has pending subtasks, skip: id=%s trace_id=%s",
-                    execution_id,
-                    trace_id[:20],
-                )
-                continue
-
-            # 全部有状态，按规则聚合
-            has_error = any(
-                s.status in ("FAIL", "PART_SUC", "TIMEOUT") for s in subtasks
-            )
-            async_status = "error" if has_error else "success"
-            await self.query_service.update_execution_async_status(
-                execution_id,
-                async_status,
-            )
-            response.total_updated += 1
-            if async_status == "success":
-                response.total_success += 1
-            else:
-                response.total_error += 1
-            logger.info(
-                "Updated execution async_status: id=%s status=%s",
-                execution_id,
-                async_status,
-            )
-
-        return response
 
 
 # Global service instance
