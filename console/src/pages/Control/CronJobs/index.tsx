@@ -9,6 +9,7 @@ import {
   Table,
 } from "@agentscope-ai/design";
 import type {
+  CronBroadcastTaskResponse,
   CronBroadcastTarget,
   CronBroadcastTenantResult,
   CronJobSpecOutput,
@@ -35,6 +36,7 @@ import {
   buildCronJobFormValues,
   buildCronJobSubmitPayload,
   getBroadcastResultMessage,
+  getBroadcastTaskProgressText,
 } from "./helpers";
 import styles from "./index.module.less";
 
@@ -67,6 +69,8 @@ function CronJobsPage() {
   const [broadcastResults, setBroadcastResults] = useState<
     CronBroadcastTenantResult[]
   >([]);
+  const [broadcastTask, setBroadcastTask] =
+    useState<CronBroadcastTaskResponse | null>(null);
   const [broadcastOffsetEnabled, setBroadcastOffsetEnabled] = useState(true);
   const [broadcastOffsetWindowHours, setBroadcastOffsetWindowHours] = useState(
     DEFAULT_BROADCAST_OFFSET_WINDOW_HOURS,
@@ -150,7 +154,7 @@ function CronJobsPage() {
     });
   };
 
-  const handleBroadcast = (job: CronJob) => {
+  const handleBroadcast = async (job: CronJob) => {
     if (isBroadcastChildJob(job)) {
       message.warning("分发子任务不支持广播到租户");
       return;
@@ -159,8 +163,22 @@ function CronJobsPage() {
     setSelectedBroadcastTenantIds([]);
     setSelectedBroadcastTargets([]);
     setBroadcastResults([]);
+    setBroadcastTask(null);
     setBroadcastOffsetEnabled(true);
     setBroadcastOffsetWindowHours(DEFAULT_BROADCAST_OFFSET_WINDOW_HOURS);
+    setBroadcasting(true);
+    try {
+      const currentTask = await api.getCurrentCronBroadcastTask(job.id);
+      if (currentTask.task) {
+        setBroadcastTask(currentTask.task);
+        setBroadcastResults(currentTask.task.results);
+      }
+    } catch (error) {
+      console.error("Failed to fetch current cron broadcast task", error);
+      message.error("Broadcast status refresh failed");
+    } finally {
+      setBroadcasting(false);
+    }
   };
 
   const handleManageChildren = (job: CronJob) => {
@@ -176,6 +194,8 @@ function CronJobsPage() {
     setSelectedBroadcastTenantIds([]);
     setSelectedBroadcastTargets([]);
     setBroadcastResults([]);
+    setBroadcastTask(null);
+    setBroadcasting(false);
     setBroadcastOffsetEnabled(true);
     setBroadcastOffsetWindowHours(DEFAULT_BROADCAST_OFFSET_WINDOW_HOURS);
   };
@@ -208,6 +228,8 @@ function CronJobsPage() {
       };
     });
     setBroadcasting(true);
+    setBroadcastTask(null);
+    setBroadcastResults([]);
     try {
       const res = await api.broadcastCronJob(
         broadcastingJob.id,
@@ -217,13 +239,26 @@ function CronJobsPage() {
           offset_window_hours: broadcastOffsetWindowHours,
         },
       );
-      const resultMessage = getBroadcastResultMessage(res.results);
-      if (resultMessage.tone === "warning") {
-        message.warning(resultMessage.text);
-      } else {
-        message.success(resultMessage.text);
-      }
+      setBroadcastTask(res);
       setBroadcastResults(res.results);
+      if (res.status === "running") {
+        if (res.reused) {
+          message.info("Broadcast task is already running");
+        } else {
+          message.info("Broadcast started");
+        }
+        return;
+      }
+      if (res.status === "failed" && res.failure_summary) {
+        message.warning(getBroadcastTaskProgressText(res));
+      } else {
+        const resultMessage = getBroadcastResultMessage(res.results);
+        if (resultMessage.tone === "warning") {
+          message.warning(resultMessage.text);
+        } else {
+          message.success(resultMessage.text);
+        }
+      }
     } catch (error) {
       console.error("Failed to broadcast cron job", error);
       message.error("Broadcast failed");
@@ -333,7 +368,10 @@ function CronJobsPage() {
         onOk={handleBroadcastConfirm}
         confirmLoading={broadcasting}
         okButtonProps={{
-          disabled: selectedBroadcastTenantIds.length === 0,
+          disabled:
+            selectedBroadcastTenantIds.length === 0 ||
+            broadcasting ||
+            broadcastTask?.status === "running",
         }}
         width={640}
       >
@@ -376,6 +414,11 @@ function CronJobsPage() {
               hint="选择需要接收该定时任务的租户"
               excludeTenantId={currentTenantId}
             />
+            {broadcastTask && (
+              <div className={styles.broadcastTaskProgress}>
+                {getBroadcastTaskProgressText(broadcastTask)}
+              </div>
+            )}
             {broadcastResults.length > 0 && (
               <div style={{ display: "grid", gap: 6 }}>
                 {broadcastResults.map((item) => (

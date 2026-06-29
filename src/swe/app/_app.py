@@ -461,6 +461,30 @@ async def _initialize_cron_broadcast_children_store(
         )
 
 
+async def _initialize_cron_broadcast_task_store(
+    app: FastAPI,
+    db_connection: Any | None,
+) -> None:
+    """初始化定时任务广播分发进度存储。"""
+    try:
+        from .crons.broadcast_task_store import CronBroadcastTaskStore
+
+        cron_broadcast_task_store = CronBroadcastTaskStore(db_connection)
+        app.state.cron_broadcast_task_store = cron_broadcast_task_store
+        if cron_broadcast_task_store.is_available:
+            await cron_broadcast_task_store.initialize()
+            logger.info("Cron broadcast task storage initialized")
+        else:
+            logger.warning(
+                "Cron broadcast task storage uses memory fallback",
+            )
+    except Exception as e:
+        logger.warning(
+            "Failed to initialize cron broadcast task storage: %s",
+            e,
+        )
+
+
 async def _initialize_skill_readiness(
     app: FastAPI,
     db_connection: Any | None,
@@ -698,6 +722,7 @@ async def lifespan(
 
     # --- 初始化定时任务分发用户反查快照 ---
     await _initialize_cron_broadcast_children_store(app, db_connection)
+    await _initialize_cron_broadcast_task_store(app, db_connection)
 
     # --- 初始化技能就绪检查存储 ---
     await _initialize_skill_readiness(
