@@ -98,6 +98,28 @@ def test_build_runtime_env_removes_system_configuration_and_boundary_keys() -> (
     assert "PYTHONPATH" not in env
 
 
+def test_build_runtime_env_removes_non_default_backend_secrets() -> None:
+    from swe.envs.runtime import build_runtime_env
+
+    env = build_runtime_env(
+        base_env={
+            "PATH": "/usr/bin",
+            "SWE_AUTH_PASSWORD": "auth-secret",
+            "SWE_INTERNAL_TOKEN": "internal-secret",
+            "TITLE_API_KEY": "title-secret",
+            "ZHAOHU_CLIENT_SECRET": "zhaohu-secret",
+            "ZHAOHU_INTENT_API_KEY": "intent-secret",
+        },
+    )
+
+    assert env["PATH"] == "/usr/bin"
+    assert "SWE_AUTH_PASSWORD" not in env
+    assert "SWE_INTERNAL_TOKEN" not in env
+    assert "TITLE_API_KEY" not in env
+    assert "ZHAOHU_CLIENT_SECRET" not in env
+    assert "ZHAOHU_INTENT_API_KEY" not in env
+
+
 def test_missing_context_does_not_read_default_env_store(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

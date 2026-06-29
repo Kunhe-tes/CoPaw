@@ -23,6 +23,15 @@ logger = logging.getLogger(__name__)
 VALID_ENVS = ("dev", "prd")
 DEFAULT_ENV = "dev"
 _APPLIED_DEFAULTS: dict[str, str] = {}
+NON_DEFAULT_BACKEND_SECRET_ENV_KEYS = frozenset(
+    {
+        "SWE_AUTH_PASSWORD",
+        "SWE_INTERNAL_TOKEN",
+        "TITLE_API_KEY",
+        "ZHAOHU_CLIENT_SECRET",
+        "ZHAOHU_INTENT_API_KEY",
+    },
+)
 
 
 def _get_package_dir() -> Path:
@@ -118,3 +127,8 @@ def get_system_configuration_env_keys() -> frozenset[str]:
         if isinstance(data, dict):
             keys.update(str(key) for key in data)
     return frozenset(keys)
+
+
+def get_backend_owned_secret_env_keys() -> frozenset[str]:
+    """Return backend-owned secret env keys not declared in env configs."""
+    return NON_DEFAULT_BACKEND_SECRET_ENV_KEYS
