@@ -55,10 +55,15 @@ export default function ProcessDisclosure({
   const prefixCls = getPrefixCls("response-process-disclosure");
   const statusText = buildStatusText({ failedCount, status });
   const statusTone = getStatusTone({ failedCount, status });
-  const stepText = status === "running" ? "过程记录" : `${processCount} 个步骤`;
+  const stepText =
+    status === "running"
+      ? "过程记录"
+      : processCount > 0
+        ? `${processCount} 个步骤`
+        : null;
   const titleText = open ? "执行过程" : "执行过程已折叠";
   const labelParts = ["执行过程"];
-  labelParts.push(stepText);
+  if (stepText) labelParts.push(stepText);
   if (toolCallCount > 0) labelParts.push(`工具调用 ${toolCallCount} 次`);
   if (durationText) labelParts.push(`总耗时 ${durationText}`);
   if (statusText) labelParts.push(statusText);
@@ -80,10 +85,12 @@ export default function ProcessDisclosure({
           <span className={`${prefixCls}-copy`}>
             <span className={`${prefixCls}-title`}>{titleText}</span>
             <span className={`${prefixCls}-meta`}>
-              <span className={`${prefixCls}-metric`}>
-                <SparkTodoListLine aria-hidden="true" />
-                {stepText}
-              </span>
+              {stepText ? (
+                <span className={`${prefixCls}-metric`}>
+                  <SparkTodoListLine aria-hidden="true" />
+                  {stepText}
+                </span>
+              ) : null}
               {toolCallCount > 0 ? (
                 <span className={`${prefixCls}-metric`}>
                   <SparkToolLine aria-hidden="true" />

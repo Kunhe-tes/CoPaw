@@ -279,7 +279,7 @@ export default createGlobalStyle`
   }
 
   &-empty {
-    min-height: 116px;
+    min-height: 100px;
     padding: 24px 16px;
     border-radius: ${DESIGN_TOKENS.radiusCard}px;
     background: rgba(55, 105, 252, 0.035);

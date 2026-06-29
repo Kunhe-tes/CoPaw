@@ -814,7 +814,7 @@ class SkillInvocationDetector:
                     user_name=self._user_name,
                     bbk_id=self._bbk_id,
                     skill_id=skill_id,
-                    cn_name=cn_name,
+                    skill_cn_name=cn_name,
                     skill_description=skill_description,
                 )
             except Exception as e:
