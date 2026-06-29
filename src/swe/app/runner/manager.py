@@ -80,6 +80,7 @@ class ChatManager:
         self,
         user_id: Optional[str] = None,
         channel: Optional[str] = None,
+        exclude_session_kind: Optional[str] = None,
     ) -> list[ChatSpec]:
         """List chat specs with optional filters.
 
@@ -98,6 +99,7 @@ class ChatManager:
             return await self._repo.filter_chats(
                 user_id=user_id,
                 channel=channel,
+                exclude_session_kind=exclude_session_kind,
             )
 
     async def list_chats_page(
@@ -107,6 +109,7 @@ class ChatManager:
         page_size: int,
         user_id: Optional[str] = None,
         channel: Optional[str] = None,
+        exclude_session_kind: Optional[str] = None,
     ) -> ChatPage:
         """List one filtered chat page in stable newest-first order."""
         async with self._lock:
@@ -122,6 +125,7 @@ class ChatManager:
             return await self._repo.paginate_chats(
                 user_id=user_id,
                 channel=channel,
+                exclude_session_kind=exclude_session_kind,
                 page=page,
                 page_size=page_size,
             )
@@ -133,12 +137,14 @@ class ChatManager:
         cursor: str | None = None,
         user_id: Optional[str] = None,
         channel: Optional[str] = None,
+        exclude_session_kind: Optional[str] = None,
     ) -> ChatPage:
         """List a stable creation-ordered page using an opaque cursor."""
         async with self._lock:
             return await self._repo.paginate_chats_cursor(
                 user_id=user_id,
                 channel=channel,
+                exclude_session_kind=exclude_session_kind,
                 page_size=page_size,
                 cursor=cursor,
             )
@@ -315,6 +321,7 @@ class ChatManager:
         self,
         user_id: Optional[str] = None,
         channel: Optional[str] = None,
+        exclude_session_kind: Optional[str] = None,
     ) -> int:
         """Count chats matching filters.
 
@@ -329,6 +336,7 @@ class ChatManager:
             chats = await self._repo.filter_chats(
                 user_id=user_id,
                 channel=channel,
+                exclude_session_kind=exclude_session_kind,
             )
             return len(chats)
 

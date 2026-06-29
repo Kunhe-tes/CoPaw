@@ -1386,6 +1386,7 @@ export class SessionApi implements IAgentScopeRuntimeWebUISessionAPI {
           api.listChatsPage({
             page_size: getSessionPageSize(),
             cursor: null,
+            exclude_session_kind: TASK_SESSION_KIND,
           }),
           cronJobApi.listCronJobs().catch(() => null),
         ]);
@@ -1552,7 +1553,10 @@ export class SessionApi implements IAgentScopeRuntimeWebUISessionAPI {
     this.sessionPageRequest = (async () => {
       try {
         const [chatPage, jobsResult] = await Promise.all([
-          api.listChatsPage(paginationParams),
+          api.listChatsPage({
+            ...paginationParams,
+            exclude_session_kind: TASK_SESSION_KIND,
+          }),
           cronJobApi.listCronJobs().catch(() => null),
         ]);
         const activeTaskJobIds: ReadonlySet<string> | null =
