@@ -4,7 +4,10 @@
 
 from __future__ import annotations
 
+import base64
+import json
 from typing import Any
+from urllib.parse import parse_qs, urlparse
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -49,6 +52,13 @@ def _make_channel(**overrides: Any) -> ZhaohuChannel:
     ch = ZhaohuChannel(**defaults)
     ch._http = MagicMock()
     return ch
+
+
+def _decode_action_tag(url: str) -> dict[str, Any]:
+    params = parse_qs(urlparse(url).query)
+    encoded = params["actionParams"][0]
+    payload = json.loads(base64.b64decode(encoded).decode("utf-8"))
+    return payload["tag"]
 
 
 def _make_request(
@@ -102,23 +112,33 @@ async def test_cron_approval_card_sends_information_without_buttons():
     )
 
     assert (code, msg) == (0, "sent")
-    ch.send.assert_awaited_once()
-    to_handle, text, meta = ch.send.await_args.args
-    assert to_handle == "user-1"
-    assert "工具调用需要审批" in text
-    assert "execute_shell_command" in text
-    assert "发现 shell 风险" in text
-    assert "echo hi" in text
-    assert "approval-1" in text
-    assert "/approve" not in text
-    assert "/deny" not in text
-    assert meta["session_id"] == "cron-task:job-1"
-    assert meta["agent_id"] == "agent-a"
-    assert meta["agentId"] == "agent-a"
-    assert meta["tenant_id"] == "tenant-a"
-    assert meta["source_id"] == "source-a"
-    assert meta["notification_summary"] == "工具调用需要审批"
-    ch.send_custom_card.assert_not_called()
+    ch.send_custom_card.assert_awaited_once()
+    open_id, content = ch.send_custom_card.await_args.args
+    assert open_id == "user-1"
+    assert "execute_shell_command" in content[0]["list"][0]["content"]
+    assert "发现 shell 风险" in content[0]["list"][0]["content"]
+    assert "echo hi" in content[0]["list"][0]["content"]
+    assert "approval-1" in content[0]["list"][0]["content"]
+    assert "/approve" not in content[0]["list"][0]["content"]
+    assert "/deny" not in content[0]["list"][0]["content"]
+
+    approve_tag = _decode_action_tag(
+        content[1]["list"][0]["actionLink"]["url"],
+    )
+    reject_tag = _decode_action_tag(
+        content[1]["list"][1]["actionLink"]["url"],
+    )
+    for tag, action_type in (
+        (approve_tag, "approve"),
+        (reject_tag, "reject"),
+    ):
+        assert tag["request_id"] == "approval-1"
+        assert tag["type"] == action_type
+        assert tag["agent_id"] == "agent-a"
+        assert tag["agentId"] == "agent-a"
+        assert tag["tenant_id"] == "tenant-a"
+        assert tag["source_id"] == "source-a"
+    ch.send.assert_not_called()
 
 
 @pytest.mark.asyncio
