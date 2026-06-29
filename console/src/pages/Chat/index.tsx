@@ -803,6 +803,9 @@ export default function ChatPage() {
   const [feedbackItems, setFeedbackItems] = useState<FeedbackRecord[]>([]);
   const [feedbackLoading, setFeedbackLoading] = useState(false);
   const feedbackUserId = useIframeStore((state) => state.userId);
+  const skipPreviewTracking = useIframeStore(
+    (state) => state.skipPreviewTracking,
+  );
   const feedbackAllowed = useMemo(
     () => isResponseFeedbackUserAllowed(feedbackUserId),
     [feedbackUserId],
@@ -1511,8 +1514,9 @@ export default function ChatPage() {
     () => ({
       cronTaskId: feedbackTask?.cronTaskId || null,
       cronTaskName: feedbackTask?.cronTaskName || null,
+      disableEventRecording: skipPreviewTracking,
     }),
-    [feedbackTask],
+    [feedbackTask, skipPreviewTracking],
   );
 
   const options = useMemo(() => {

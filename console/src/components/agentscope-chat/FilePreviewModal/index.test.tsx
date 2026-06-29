@@ -220,4 +220,53 @@ describe("FilePreviewModal HTML preview recording", () => {
       defaultCustomerInfo: { customer_id: "CUST-001", name: "张三" },
     });
   });
+
+  it("suppresses iframe opt-out recording while preserving task metadata", async () => {
+    render(
+      <HtmlPreviewTrackingProvider
+        value={{
+          cronTaskId: "task-1",
+          cronTaskName: "到期客户任务",
+          disableEventRecording: true,
+        }}
+      >
+        <FilePreviewModal
+          open
+          onClose={vi.fn()}
+          fileUrl="https://example.test/report[auto-preview].html?resultId=result-1&templateId=1"
+          fileName="report[auto-preview].html"
+          enableClickTracking
+        />
+      </HtmlPreviewTrackingProvider>,
+    );
+
+    await waitFor(() => {
+      const node = document.querySelector("iframe");
+      expect(node).toBeTruthy();
+      return node as HTMLIFrameElement;
+    });
+
+    await waitFor(() => {
+      expect(attachHtmlPreviewClickTrackerMock).toHaveBeenCalled();
+    });
+
+    const trackerParams = getLatestTrackerParams();
+    expect(trackerParams.metadata).toMatchObject({
+      cronTaskId: "task-1",
+      cronTaskName: "到期客户任务",
+    });
+    expect(trackerParams.reporter).not.toBe(recordClickMock);
+    expect(trackerParams.listSnapshotReporter).toBeUndefined();
+
+    trackerParams.reporter({
+      file_url:
+        "https://example.test/report[auto-preview].html?resultId=result-1&templateId=1",
+      button_id: "plan",
+      button_name: "查看方案",
+      button_text: "查看方案",
+      clicked_at: new Date().toISOString(),
+    });
+    expect(recordClickMock).not.toHaveBeenCalled();
+    expect(recordListSnapshotMock).not.toHaveBeenCalled();
+  });
 });
