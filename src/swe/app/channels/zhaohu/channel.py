@@ -97,6 +97,29 @@ def _clean_payload(obj: Any) -> Any:
     return obj
 
 
+def _build_approval_result_text(
+    *,
+    request_id: str,
+    session_id: str,
+    user_id: str,
+    tool_name: str,
+    decision: str,
+    source_channel: str,
+) -> str:
+    """构建不含按钮的工具审批结果通知正文。"""
+    decision_text = "通过" if decision == "approved" else "拒绝"
+    lines = [
+        f"工具审批已{decision_text}",
+        f"工具：{tool_name or 'unknown'}",
+        f"审批请求：{request_id}",
+        f"会话：{session_id or '-'}",
+        f"用户：{user_id or '-'}",
+    ]
+    if source_channel:
+        lines.append(f"审批来源：{source_channel}")
+    return "\n".join(lines)
+
+
 class ZhaohuChannel(BaseChannel):
     """Official built-in Zhaohu channel (outbound push + inbound callback)."""
 
@@ -618,29 +641,6 @@ class ZhaohuChannel(BaseChannel):
         )
         return "\n".join(lines)
 
-    def _build_approval_result_text(
-        self,
-        *,
-        request_id: str,
-        session_id: str,
-        user_id: str,
-        tool_name: str,
-        decision: str,
-        source_channel: str,
-    ) -> str:
-        """构建不含按钮的工具审批结果通知正文。"""
-        decision_text = "通过" if decision == "approved" else "拒绝"
-        lines = [
-            f"工具审批已{decision_text}",
-            f"工具：{tool_name or 'unknown'}",
-            f"审批请求：{request_id}",
-            f"会话：{session_id or '-'}",
-            f"用户：{user_id or '-'}",
-        ]
-        if source_channel:
-            lines.append(f"审批来源：{source_channel}")
-        return "\n".join(lines)
-
     async def send_cron_approval_card(
         self,
         *,
@@ -672,19 +672,124 @@ class ZhaohuChannel(BaseChannel):
             findings_count=findings_count,
             tool_input=tool_input,
         )
-        await self.send(
-            user_id,
+        content = self._build_approval_task_initiated_card(
             text,
-            {
-                "session_id": session_id,
-                "agent_id": agent_id,
-                "agentId": agent_id,
-                "tenant_id": tenant_id,
-                "source_id": source_id,
-                "notification_summary": "工具调用需要审批",
-            },
+            agent_id,
+            request_id,
+        )
+        open_id = await self.deal_eight_sap_to_open(user_id)
+        await self.send_custom_card(
+            open_id,
+            content,
         )
         return (0, "sent")
+
+    @staticmethod
+    def _build_zhclient_url(tag: dict) -> str:
+        """Build zhclient:// URL for approval button actionLink.
+
+        Format: zhclient:///?actionCode=9&actionParams=UrlEncode(Base64(params))
+        Encoding: UTF-8
+        """
+        params = json.dumps({"tag": tag}, ensure_ascii=False)
+        encoded = url_quote(
+            base64.b64encode(params.encode("utf-8")).decode("utf-8"),
+        )
+        return f"zhclient:///?actionCode=9&actionParams={encoded}"
+
+    def _build_approval_task_initiated_card(
+        self,
+        task_content: str,
+        agent_id: str = "",
+        request_id: str = "",
+    ) -> list:
+        """Build card content for task initiated notification (Template 1).
+
+        Used when user message length > 10 (task assignment).
+
+        Args:
+            task_content: The original task content from user message
+
+        Returns:
+            Card content array for send_custom_card
+        """
+        # Template 1: Task initiated notification
+        approve_url = self._build_zhclient_url(
+            {
+                "agent_id": agent_id,
+                "request_id": request_id,
+                "type": "approve",
+            },
+        )
+        reject_url = self._build_zhclient_url(
+            {"agent_id": agent_id, "request_id": request_id, "type": "reject"},
+        )
+        card_content = [
+            {
+                "type": "content",
+                "list": [
+                    {
+                        "type": [0],
+                        "content": f"{task_content}",
+                        "style": 5,
+                    },
+                ],
+            },
+            {
+                "type": "operate",
+                "arrange": 0,
+                "list": [
+                    {
+                        "content": "通过",
+                        "style": 1,
+                        "action": 3,
+                        "tag": "approve",
+                        "disable": 0,
+                        "actionLink": {
+                            "url": approve_url,
+                            "pcUrl": approve_url,
+                            "mobileUrl": approve_url,
+                        },
+                    },
+                    {
+                        "content": "拒绝",
+                        "style": 0,
+                        "action": 3,
+                        "tag": "reject",
+                        "disable": 0,
+                        "actionLink": {
+                            "url": reject_url,
+                            "pcUrl": reject_url,
+                            "mobileUrl": reject_url,
+                        },
+                    },
+                ],
+            },
+        ]
+
+        return card_content
+
+    async def deal_eight_sap_to_open(self, send_addr):
+        if send_addr and len(send_addr) == 8:
+            logger.info(
+                "zhaohu _build_push_payload: send_addr is 8, querying user info for sapId=%s",
+                send_addr,
+            )
+            user_info = await self._query_user_info_by_sap(send_addr)
+            if user_info and user_info.get("openId"):
+                open_id = user_info.get("openId")
+                logger.info(
+                    "zhaohu _build_push_payload: sapId=%s -> openId=%s",
+                    send_addr,
+                    open_id,
+                )
+                send_addr = open_id
+            else:
+                logger.warning(
+                    "zhaohu _build_push_payload: failed to get openId for sapId=%s",
+                    send_addr,
+                )
+        return send_addr
 
     async def send_cron_approval_result(
         self,
@@ -704,7 +809,7 @@ class ZhaohuChannel(BaseChannel):
             )
             return (-1, "user_id is empty")
 
-        text = self._build_approval_result_text(
+        text = _build_approval_result_text(
             request_id=request_id,
             session_id=session_id,
             user_id=user_id,
