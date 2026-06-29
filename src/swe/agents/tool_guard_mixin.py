@@ -1421,6 +1421,9 @@ class ToolGuardMixin:
             "approval_kind": approval_kind,
             "tool_call": tool_call,
         }
+        extra["agent_id"] = self._request_context.get("agent_id")
+        extra["tenant_id"] = self._request_context.get("tenant_id")
+        extra["source_id"] = self._request_context.get("source_id")
         if hook_ask_handler_ids:
             extra["hook_ask_handler_ids"] = list(hook_ask_handler_ids)
 

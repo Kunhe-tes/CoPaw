@@ -156,6 +156,7 @@ async def notify_cron_approval_pending(
     if sender is None:
         return
 
+    approval_meta = pending.extra if isinstance(pending.extra, dict) else {}
     tool_call = pending.extra.get("tool_call") if pending.extra else None
     tool_input = tool_call.get("input") if isinstance(tool_call, dict) else {}
     try:
@@ -163,6 +164,9 @@ async def notify_cron_approval_pending(
             request_id=pending.request_id,
             session_id=pending.session_id,
             user_id=pending.user_id,
+            agent_id=approval_meta.get("agent_id") or "",
+            tenant_id=approval_meta.get("tenant_id") or "",
+            source_id=approval_meta.get("source_id") or "",
             tool_name=pending.tool_name,
             result_summary=pending.result_summary,
             findings_count=pending.findings_count,

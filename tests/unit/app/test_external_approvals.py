@@ -233,3 +233,33 @@ async def test_pending_notification_applies_to_all_sessions() -> None:
     assert len(zhaohu.pending_calls) == 2
     assert zhaohu.pending_calls[0]["request_id"] == cron_pending.request_id
     assert zhaohu.pending_calls[1]["request_id"] == normal_pending.request_id
+
+
+@pytest.mark.asyncio
+async def test_pending_notification_forwards_scope_metadata_from_extra() -> None:
+    service = ApprovalService()
+    workspace = _workspace()
+
+    with tenant_context(tenant_id="tenant-a", source_id="source-a"):
+        pending = await service.create_pending(
+            session_id="session-1",
+            user_id="user-1",
+            channel="console",
+            tool_name="execute_shell_command",
+            result=_Result(),
+            extra={
+                "agent_id": "agent-a",
+                "tenant_id": "tenant-a",
+                "source_id": "source-a",
+            },
+        )
+
+        await notify_cron_approval_pending(
+            pending,
+            channel_manager=workspace.channel_manager,
+        )
+
+    zhaohu = workspace.channel_manager.zhaohu
+    assert zhaohu.pending_calls[0]["agent_id"] == "agent-a"
+    assert zhaohu.pending_calls[0]["tenant_id"] == "tenant-a"
+    assert zhaohu.pending_calls[0]["source_id"] == "source-a"
