@@ -31,7 +31,7 @@ zhaohu_router = APIRouter(tags=["zhaohu"])
 class ZhaohuCallbackRequest(BaseModel):
     """Zhaohu message callback request body."""
 
-    msg_id: str = Field(default="", alias="msgId")
+    msg_id: Optional[str] = Field(default=None, alias="msgId")
     source_id: str = Field(default="", alias="sourceId")
     from_id: str = Field(default="", alias="fromId")
     to_id: str = Field(default="", alias="toId")
@@ -42,7 +42,7 @@ class ZhaohuCallbackRequest(BaseModel):
     timestamp: int = Field(default=0)
     custom_info: Optional[Any] = Field(default=None, alias="customInfo")
 
-    model_config = {"populate_by_name": True}
+    model_config = {"populate_by_name": True, "extra": "ignore"}
 
 
 # Default timeout for user query requests
