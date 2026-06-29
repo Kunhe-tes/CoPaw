@@ -3496,26 +3496,16 @@ class QueryService:
         ):
             skill_error[sk] += 1
 
-    async def get_branch_skills(
+    async def _fetch_branch_skills_raw_data(
         self,
+        db: DatabaseConnection,
         bbk_id: str,
-        start_date: Optional[str] = None,
-        end_date: Optional[str] = None,
-        source_id: Optional[str] = None,
-    ) -> BranchSkillResponse:
-        """获取分行技能维度数据。
-
-        从 swe_cron_executions + swe_tracing_traces 链路，
-        提取 skills_used JSON 数组并聚合统计每项技能的执行情况。
-        """
-        db = get_db_connection()
-
-        start_time, end_time = self._parse_date_range(start_date, end_date)
-        start_str = start_date or start_time.strftime("%Y-%m-%d")
-        end_str = end_date or end_time.strftime("%Y-%m-%d")
-
+        start_time: datetime,
+        end_time: datetime,
+        source_id: Optional[str],
+    ) -> list[dict]:
+        """获取分行技能原始执行数据."""
         source_where = " AND j.source_id = %s" if source_id else ""
-
         sql = f"""
             SELECT
                 e.job_id,
@@ -3535,9 +3525,13 @@ class QueryService:
         params: list = [bbk_id, start_time, end_time]
         if source_id:
             params.append(source_id)
-        rows = await db.fetch_all(sql, tuple(params))
+        return await db.fetch_all(sql, tuple(params))
 
-        seen_jobs: set[str] = set()
+    def _aggregate_branch_skills(
+        self,
+        rows: list[dict],
+    ) -> dict[str, dict[str, Any]]:
+        """聚合分行技能执行统计."""
         skill_jobs: dict[str, set[str]] = {}
         skill_total: dict[str, int] = {}
         skill_success: dict[str, int] = {}
@@ -3545,41 +3539,75 @@ class QueryService:
         skill_error: dict[str, int] = {}
 
         for row in rows:
-            skills = self._parse_skills_used(row["skills_used"])
-            if not skills:
+            self._process_skill_row(
+                row,
+                skill_jobs,
+                skill_total,
+                skill_success,
+                skill_read,
+                skill_error,
+            )
+
+        return {
+            "skill_jobs": skill_jobs,
+            "skill_total": skill_total,
+            "skill_success": skill_success,
+            "skill_read": skill_read,
+            "skill_error": skill_error,
+        }
+
+    def _process_skill_row(
+        self,
+        row: dict,
+        skill_jobs: dict[str, set[str]],
+        skill_total: dict[str, int],
+        skill_success: dict[str, int],
+        skill_read: dict[str, int],
+        skill_error: dict[str, int],
+    ) -> None:
+        """处理单行数据的技能聚合."""
+        skills = self._parse_skills_used(row["skills_used"])
+        if not skills:
+            return
+        job_id = row["job_id"]
+        status = (row["status"] or "").lower()
+        async_status = (row["async_status"] or "").lower()
+        is_read = bool(row["is_read"])
+        for sk in skills:
+            sk = str(sk).strip() if sk else ""
+            if not sk or sk not in self._ALLOWED_BRANCH_SKILLS:
                 continue
-            job_id = row["job_id"]
-            status = (row["status"] or "").lower()
-            async_status = (row["async_status"] or "").lower()
-            is_read = bool(row["is_read"])
-            for sk in skills:
-                sk = str(sk).strip() if sk else ""
-                if not sk:
-                    continue
-                if sk not in self._ALLOWED_BRANCH_SKILLS:
-                    continue
-                if sk not in skill_jobs:
-                    self._init_skill_dicts(
-                        skill_jobs,
-                        skill_total,
-                        skill_success,
-                        skill_read,
-                        skill_error,
-                        sk,
-                    )
-                self._count_skill_execution(
+            if sk not in skill_jobs:
+                self._init_skill_dicts(
                     skill_jobs,
                     skill_total,
                     skill_success,
                     skill_read,
                     skill_error,
                     sk,
-                    job_id,
-                    status,
-                    async_status,
-                    is_read,
                 )
+            self._count_skill_execution(
+                skill_jobs,
+                skill_total,
+                skill_success,
+                skill_read,
+                skill_error,
+                sk,
+                job_id,
+                status,
+                async_status,
+                is_read,
+            )
 
+    def _build_branch_skill_items(
+        self,
+        skill_jobs: dict[str, set[str]],
+        skill_total: dict[str, int],
+        skill_success: dict[str, int],
+        skill_read: dict[str, int],
+        skill_error: dict[str, int],
+    ) -> list[BranchSkillItem]:
+        """构建分行技能统计结果列表."""
         items: list[BranchSkillItem] = []
         for skill_name, jobs in skill_jobs.items():
             task_count = len(jobs)
@@ -3595,8 +3623,43 @@ class QueryService:
                     error_count=skill_error.get(skill_name, 0),
                 ),
             )
-
         items.sort(key=lambda item: item.cron_task_count, reverse=True)
+        return items
+
+    async def get_branch_skills(
+        self,
+        bbk_id: str,
+        start_date: Optional[str] = None,
+        end_date: Optional[str] = None,
+        source_id: Optional[str] = None,
+    ) -> BranchSkillResponse:
+        """获取分行技能维度数据。
+
+        从 swe_cron_executions + swe_tracing_traces 链路，
+        提取 skills_used JSON 数组并聚合统计每项技能的执行情况。
+        """
+        db = get_db_connection()
+        start_time, end_time = self._parse_date_range(start_date, end_date)
+        start_str = start_date or start_time.strftime("%Y-%m-%d")
+        end_str = end_date or end_time.strftime("%Y-%m-%d")
+
+        rows = await self._fetch_branch_skills_raw_data(
+            db,
+            bbk_id,
+            start_time,
+            end_time,
+            source_id,
+        )
+
+        stats = self._aggregate_branch_skills(rows)
+
+        items = self._build_branch_skill_items(
+            stats["skill_jobs"],
+            stats["skill_total"],
+            stats["skill_success"],
+            stats["skill_read"],
+            stats["skill_error"],
+        )
 
         return BranchSkillResponse(
             start_date=start_str,
