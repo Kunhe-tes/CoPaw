@@ -4478,7 +4478,7 @@ class TracingQueryService:  # pylint: disable=too-many-public-methods
         user_id = first_row.get("user_id", "")
         user_name = first_row.get("user_name")
 
-        # 从 ES 获取每个 trace 的 model_output
+        # 仅在 completed 状态下从 ES 获取 model_output
         from ...database.elasticsearch import get_es_client
 
         es_client = get_es_client()
@@ -4490,8 +4490,12 @@ class TracingQueryService:  # pylint: disable=too-many-public-methods
             trace_id = row["trace_id"]
             model_output = None
 
-            # 从 ES 获取 model_output
-            if es_client and es_client.is_connected:
+            # 仅在 completed 状态下从 ES 获取 model_output
+            if (
+                row.get("status") == TraceStatus.COMPLETED
+                and es_client
+                and es_client.is_connected
+            ):
                 model_output = await es_client.get_message(trace_id)
 
             # 解析 tools_used
@@ -4547,12 +4551,13 @@ class TracingQueryService:  # pylint: disable=too-many-public-methods
 
         spans = await self.get_spans(trace_id)
 
-        # 从 ES 获取 model_output
-        from ...database.elasticsearch import get_es_client
+        # 仅在 completed 状态下从 ES 获取 model_output
+        if trace.status == TraceStatus.COMPLETED:
+            from ...database.elasticsearch import get_es_client
 
-        es_client = get_es_client()
-        if es_client and es_client.is_connected:
-            trace.model_output = await es_client.get_message(trace_id)
+            es_client = get_es_client()
+            if es_client and es_client.is_connected:
+                trace.model_output = await es_client.get_message(trace_id)
 
         feedback = await self.get_trace_feedback(trace_id, trace.source_id)
 
@@ -4604,12 +4609,13 @@ class TracingQueryService:  # pylint: disable=too-many-public-methods
 
         spans = await self.get_spans(trace_id)
 
-        # 从 ES 获取 model_output
-        from ...database.elasticsearch import get_es_client
+        # 仅在 completed 状态下从 ES 获取 model_output
+        if trace.status == TraceStatus.COMPLETED:
+            from ...database.elasticsearch import get_es_client
 
-        es_client = get_es_client()
-        if es_client and es_client.is_connected:
-            trace.model_output = await es_client.get_message(trace_id)
+            es_client = get_es_client()
+            if es_client and es_client.is_connected:
+                trace.model_output = await es_client.get_message(trace_id)
 
         feedback = await self.get_trace_feedback(trace_id, trace.source_id)
         timeline = self._build_timeline(spans)
