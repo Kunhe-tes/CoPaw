@@ -55,7 +55,6 @@ export interface TaskStatusSummary {
   failed: number;
   cancelled: number;
   read_count: number;
-  new_cron_tasks: number;
 }
 
 export interface DepthSummary {

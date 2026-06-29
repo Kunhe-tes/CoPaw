@@ -144,6 +144,7 @@ export interface CronOverviewResponse {
 export interface CronJobOverviewSummaryMetric {
   key: string;
   value: string;
+  hintValue?: string;
   footerValue?: string;
 }
 
@@ -230,6 +231,7 @@ export interface CronOverviewStatsResponse {
   start_date: string;
   end_date: string;
   total_tasks: number;
+  new_cron_tasks: number;
   total_executions: number;
   branch_count: number;
   tenant_count: number;
@@ -470,6 +472,7 @@ function mapCronJobOverviewPageData(
       {
         key: "tasks",
         value: formatInteger(stats.total_tasks),
+        hintValue: `新增 ${formatInteger(stats.new_cron_tasks)} 个`,
         footerValue: `${formatInteger(stats.total_executions)} 次`,
       },
       {

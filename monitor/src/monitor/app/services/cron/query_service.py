@@ -1969,6 +1969,32 @@ class QueryService:
         row = await db.fetch_one(read_tasks_sql, tuple(params))
         return self._row_int(row, "read_tasks")
 
+    async def _fetch_overview_new_cron_tasks(
+        self,
+        db: Any,
+        start_time: datetime,
+        end_time: datetime,
+        bbk_filter_sql: str,
+        bbk_filter_params: List[Any],
+        source_filter_sql: str,
+        source_filter_params: List[Any],
+    ) -> int:
+        """查询时间范围内新增的定时任务数（按 created_at 时间判断）."""
+        new_tasks_sql = f"""
+            SELECT COUNT(*) AS new_cron_tasks
+            FROM swe_cron_jobs
+            WHERE created_at >= %s AND created_at <= %s
+              AND deleted_at IS NULL
+              AND status != 'deleted'
+              {bbk_filter_sql.replace('j.bbk_id', 'bbk_id')}
+              {source_filter_sql.replace('j.source_id', 'source_id')}
+        """
+        params = (
+            [start_time, end_time] + bbk_filter_params + source_filter_params
+        )
+        row = await db.fetch_one(new_tasks_sql, tuple(params))
+        return self._row_int(row, "new_cron_tasks")
+
     async def get_overview_stats(
         self,
         start_date: Optional[str] = None,
@@ -2036,6 +2062,15 @@ class QueryService:
             source_filter_sql,
             source_filter_params,
         )
+        new_cron_tasks = await self._fetch_overview_new_cron_tasks(
+            db,
+            start_time,
+            end_time,
+            bbk_filter_sql,
+            bbk_filter_params,
+            source_filter_sql,
+            source_filter_params,
+        )
 
         total_executions = execution_counts["total_executions"]
         executed_job_count = execution_counts["executed_job_count"]
@@ -2050,6 +2085,7 @@ class QueryService:
             start_date=start_str,
             end_date=end_str,
             total_tasks=total_tasks,
+            new_cron_tasks=new_cron_tasks,
             total_executions=total_executions,
             branch_count=branch_count,
             tenant_count=tenant_count,

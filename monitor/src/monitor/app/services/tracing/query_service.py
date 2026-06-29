@@ -2352,48 +2352,6 @@ class TracingQueryService:  # pylint: disable=too-many-public-methods
         )
         total_tasks = success + running + failed + cancelled
 
-        # 查询本时间段内新增的定时任务数（按 created_at 过滤）
-        if source_id == "all":
-            new_cron_query = f"""
-                SELECT COUNT(*) AS count
-                FROM swe_cron_jobs j
-                WHERE j.created_at >= %s AND j.created_at < %s
-                  AND j.status != 'deleted'
-                  AND j.deleted_at IS NULL
-                  AND j.source_id NOT IN ({exclude_placeholders})
-                  AND j.tenant_id != 'default'
-                  {bbk_filter_sql}
-            """
-            new_cron_params = (
-                start_date,
-                end_date,
-                *EXCLUDED_SOURCE_IDS,
-                *bbk_filter_params,
-            )
-        else:
-            new_cron_query = f"""
-                SELECT COUNT(*) AS count
-                FROM swe_cron_jobs j
-                WHERE j.created_at >= %s AND j.created_at < %s
-                  AND j.status != 'deleted'
-                  AND j.deleted_at IS NULL
-                  AND j.tenant_id != 'default'
-                  AND j.source_id = %s
-                  {bbk_filter_sql}
-            """
-            new_cron_params = (
-                start_date,
-                end_date,
-                source_id,
-                *bbk_filter_params,
-            )
-
-        new_cron_result = await self._db.fetch_one(
-            new_cron_query,
-            new_cron_params,
-        )
-        new_cron_tasks = new_cron_result["count"] if new_cron_result else 0
-
         return TaskStatusSummary(
             total_tasks=total_tasks,
             success=success,
@@ -2401,7 +2359,6 @@ class TracingQueryService:  # pylint: disable=too-many-public-methods
             failed=failed,
             cancelled=cancelled,
             read_count=read_count,
-            new_cron_tasks=new_cron_tasks,
         )
 
     async def get_error_summary(

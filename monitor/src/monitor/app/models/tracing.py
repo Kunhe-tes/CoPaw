@@ -314,7 +314,6 @@ class TaskStatusSummary(BaseModel):
     failed: int = 0  # 失败次数（综合判断）
     cancelled: int = 0  # 已取消/跳过次数
     read_count: int = 0  # 已读次数
-    new_cron_tasks: int = 0  # 新增定时任务数（本时间段内创建的）
 
 
 class ErrorSummary(BaseModel):

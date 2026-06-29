@@ -6,7 +6,6 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { UIEvent } from "react";
 import { useNavigate } from "react-router-dom";
 import {
-  ArrowUp,
   ArrowUpRight,
   CalendarDays,
   CheckSquare,
@@ -40,7 +39,6 @@ import {
 import UserDetailModal from "./components/UserDetailModal";
 import SkillDetailModal from "./components/SkillDetailModal";
 import ErrorDetailModal from "./components/ErrorDetailModal";
-import HtmlPreviewClickAnalysis from "./components/HtmlPreviewClickAnalysis";
 import { BBK_ID_MAP, BBK_ID_TO_NAME_MAP, getBbkDisplayName } from "../../../constants/bbk";
 import {
   formatChange,
@@ -152,7 +150,7 @@ function buildMetricCards(
         <>
           {formatNumber(taskStatusSummary?.total_tasks ?? 0)}
           <span className={styles.newCronHint}>
-            <ArrowUp size={10} className={styles.newCronIcon} />新增：{formatNumber(taskStatusSummary?.new_cron_tasks ?? 0)}个
+            已读任务数：{formatNumber(taskStatusSummary?.read_count ?? 0)}个
           </span>
         </>
       ),
@@ -1809,12 +1807,6 @@ export default function BusinessOverviewPage() {
           </div>
         </article>
       </section>
-
-      <HtmlPreviewClickAnalysis
-        dateRange={dateRange}
-        effectiveBbkIds={effectiveBbkIds}
-        refreshKey={htmlPreviewRefreshKey}
-      />
 
       <UserDetailModal
         open={modalOpen}

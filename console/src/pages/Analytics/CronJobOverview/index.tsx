@@ -89,6 +89,7 @@ type SummaryMetricDefinition = {
 type SummaryMetricView = SummaryMetricDefinition & {
   value: string;
   footerValue?: string;
+  hintValue?: string;
 };
 
 const summaryMetricDefinitions: SummaryMetricDefinition[] = [
@@ -238,6 +239,9 @@ function SummaryCard({ metric }: { metric: SummaryMetricView }) {
           <strong>
             {metric.value}
             {metric.unit ? <em>{metric.unit}</em> : null}
+            {metric.hintValue ? (
+              <span className={styles.summaryHint}>{metric.hintValue}</span>
+            ) : null}
           </strong>
         </div>
       </div>
@@ -1172,6 +1176,7 @@ export default function CronJobOverviewPage() {
     return {
       ...definition,
       value: metricValue?.value ?? "-",
+      hintValue: metricValue?.hintValue,
       footerValue,
     };
   });
