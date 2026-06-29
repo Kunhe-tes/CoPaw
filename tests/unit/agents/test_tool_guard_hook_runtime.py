@@ -116,6 +116,18 @@ class _AgentScopeLikeFakeAgent(ToolGuardMixin, _AgentScopeLikeBaseAgent):
         self.printed.append(msg)
 
 
+class _RecordingApprovalService:
+    def __init__(self) -> None:
+        self.create_pending_kwargs = None
+
+    async def cancel_stale_pending_for_tool_call(self, *args, **kwargs):
+        return 0
+
+    async def create_pending(self, **kwargs):
+        self.create_pending_kwargs = kwargs
+        return SimpleNamespace(request_id="approval-1", **kwargs)
+
+
 @pytest.mark.asyncio
 async def test_tool_trace_prefers_request_context_over_current_trace(
     tmp_path,
@@ -168,6 +180,47 @@ async def test_tool_trace_prefers_request_context_over_current_trace(
     assert emitted_events[0]["user_id"] == "user-1"
     assert emitted_events[0]["session_id"] == "session-1"
     assert emitted_events[0]["source_id"] == "source-request"
+
+
+@pytest.mark.asyncio
+async def test_tool_guard_pending_extra_includes_request_scope_ids(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    agent = _FakeAgent(tmp_path)
+    agent._request_context.update(
+        {
+            "agent_id": "agent-a",
+            "tenant_id": "tenant-a",
+            "source_id": "source-a",
+        },
+    )
+    approval_service = _RecordingApprovalService()
+    agent._tool_guard_approval_service = approval_service
+    notify = AsyncMock()
+    monkeypatch.setattr(
+        "swe.app.approvals.notify_cron_approval_pending",
+        notify,
+    )
+
+    await agent._acting_with_approval(
+        {
+            "id": "tool-1",
+            "name": "execute_shell_command",
+            "input": {"cmd": "echo hi"},
+        },
+        "execute_shell_command",
+        ToolGuardResult(
+            tool_name="execute_shell_command",
+            params={"cmd": "echo hi"},
+        ),
+    )
+
+    assert approval_service.create_pending_kwargs is not None
+    extra = approval_service.create_pending_kwargs["extra"]
+    assert extra["agent_id"] == "agent-a"
+    assert extra["tenant_id"] == "tenant-a"
+    assert extra["source_id"] == "source-a"
 
 
 @pytest.mark.asyncio

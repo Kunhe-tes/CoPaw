@@ -648,6 +648,9 @@ class ZhaohuChannel(BaseChannel):
         session_id: str,
         user_id: str,
         tool_name: str,
+        agent_id: str = "",
+        tenant_id: str = "",
+        source_id: str = "",
         result_summary: str = "",
         findings_count: object = 0,
         tool_input: object = None,
@@ -674,6 +677,10 @@ class ZhaohuChannel(BaseChannel):
             text,
             {
                 "session_id": session_id,
+                "agent_id": agent_id,
+                "agentId": agent_id,
+                "tenant_id": tenant_id,
+                "source_id": source_id,
                 "notification_summary": "工具调用需要审批",
             },
         )

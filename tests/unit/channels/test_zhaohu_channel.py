@@ -90,6 +90,9 @@ async def test_cron_approval_card_sends_information_without_buttons():
         request_id="approval-1",
         session_id="cron-task:job-1",
         user_id="user-1",
+        agent_id="agent-a",
+        tenant_id="tenant-a",
+        source_id="source-a",
         tool_name="execute_shell_command",
         result_summary="发现 shell 风险",
         findings_count=1,
@@ -110,6 +113,10 @@ async def test_cron_approval_card_sends_information_without_buttons():
     assert "/approve" not in text
     assert "/deny" not in text
     assert meta["session_id"] == "cron-task:job-1"
+    assert meta["agent_id"] == "agent-a"
+    assert meta["agentId"] == "agent-a"
+    assert meta["tenant_id"] == "tenant-a"
+    assert meta["source_id"] == "source-a"
     assert meta["notification_summary"] == "工具调用需要审批"
     ch.send_custom_card.assert_not_called()
 
