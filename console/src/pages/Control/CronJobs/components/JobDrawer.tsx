@@ -62,6 +62,7 @@ export function JobDrawer({
           executionModelOptions={executionModelOptions}
           executionModelLoading={executionModelLoading}
           tenantDefaultModelLabel={tenantDefaultModelLabel}
+          idDisabled={Boolean(editingJob)}
         />
       </Form>
     </Drawer>

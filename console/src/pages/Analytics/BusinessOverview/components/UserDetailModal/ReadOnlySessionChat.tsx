@@ -6,11 +6,10 @@ import {
   IAgentScopeRuntimeWebUIMessage,
   IAgentScopeRuntimeWebUIOptions,
 } from "@/components/agentscope-chat";
+import { HtmlPreviewTrackingProvider } from "@/components/agentscope-chat/HtmlPreviewTrackingContext";
 import { tracingApi } from "../../../../../api/modules/tracing";
 import type { Message } from "../../../../../api/types";
-import {
-  convertMessages,
-} from "../../../../Chat/sessionApi";
+import { convertMessages } from "../../../../Chat/sessionApi";
 import RuntimeRequestCard from "../../../../Chat/components/RuntimeRequestCard";
 import RuntimeResponseCard from "../../../../Chat/components/RuntimeResponseCard";
 import type {
@@ -149,26 +148,28 @@ export default function ReadOnlySessionChat({
           <Empty description="暂无聊天内容" />
         </div>
       ) : (
-        <AgentScopeRuntimeWebUIComposedProvider
-          options={READONLY_OPTIONS}
-          cards={READONLY_CARDS}
-        >
-          <div ref={chatContentRef} className={styles.readonlyChatBubbleList}>
-            <Bubble.List
-              pagination={false}
-              order="asc"
-              items={chatMessages}
-              classNames={{
-                wrapper: styles.readonlyBubbleWrapper,
-                list: styles.readonlyBubbleList,
-              }}
-            />
-            <ConversationQuickNav
-              messages={chatMessages}
-              scrollRootRef={chatContentRef}
-            />
-          </div>
-        </AgentScopeRuntimeWebUIComposedProvider>
+        <HtmlPreviewTrackingProvider value={{ disableEventRecording: true }}>
+          <AgentScopeRuntimeWebUIComposedProvider
+            options={READONLY_OPTIONS}
+            cards={READONLY_CARDS}
+          >
+            <div ref={chatContentRef} className={styles.readonlyChatBubbleList}>
+              <Bubble.List
+                pagination={false}
+                order="asc"
+                items={chatMessages}
+                classNames={{
+                  wrapper: styles.readonlyBubbleWrapper,
+                  list: styles.readonlyBubbleList,
+                }}
+              />
+              <ConversationQuickNav
+                messages={chatMessages}
+                scrollRootRef={chatContentRef}
+              />
+            </div>
+          </AgentScopeRuntimeWebUIComposedProvider>
+        </HtmlPreviewTrackingProvider>
       )}
     </div>
   );

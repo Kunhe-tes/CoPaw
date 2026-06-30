@@ -33,8 +33,8 @@ const ALLOWED_ORIGINS: string[] = [
   // 生产环境 - 从环境变量读取
   // ...(typeof import.meta !== "undefined" &&
   // import.meta.env?.VITE_ALLOWED_PARENT_ORIGINS
-  //   ? import.meta.env.VITE_ALLOWED_PARENT_ORIGINS.split(",").filter(Boolean)
-  //   : []),
+  //   ? import.meta.env.VITE_ALLOWED_PARENT_ORIGINS.split(",").filter(Boolean)
+  //   : []),
 ];
 
 /** 是否已注册监听器 */
@@ -185,6 +185,7 @@ async function handleUserDataMessage(
     hideMenu: toBoolean(message.data.hideMenu),
     isSuperManager: toBoolean(message.data.isSuperManager),
     manager: toBoolean(message.data.manager),
+    skipPreviewTracking: toBoolean(message.data.skipPreviewTracking),
     authHeaders,
     parentOrigin: origin,
     bbk: message.data.bbkId ?? null,
@@ -220,8 +221,8 @@ function handleReadyRequest(): void {
   // 父容器不需要知道初始化状态，已注释
   // const context = getIframeContext();
   // sendMessageToParent({
-  //   type: "READY_RESPONSE",
-  //   initialized: context.initialized,
+  //   type: "READY_RESPONSE",
+  //   initialized: context.initialized,
   // });
 }
 

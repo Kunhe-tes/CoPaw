@@ -128,12 +128,14 @@ class BaseChatRepository(ABC):
         self,
         user_id: Optional[str] = None,
         channel: Optional[str] = None,
+        exclude_session_kind: Optional[str] = None,
     ) -> list[ChatSpec]:
         """Filter chats by user_id and/or channel.
 
         Args:
             user_id: Optional user ID filter
             channel: Optional channel filter
+            exclude_session_kind: Optional meta.session_kind value to exclude
 
         Returns:
             Filtered list of chat specs
@@ -147,6 +149,13 @@ class BaseChatRepository(ABC):
         if channel is not None:
             results = [c for c in results if c.channel == channel]
 
+        if exclude_session_kind is not None:
+            results = [
+                c
+                for c in results
+                if (c.meta or {}).get("session_kind") != exclude_session_kind
+            ]
+
         return results
 
     async def paginate_chats(
@@ -156,9 +165,14 @@ class BaseChatRepository(ABC):
         page_size: int,
         user_id: Optional[str] = None,
         channel: Optional[str] = None,
+        exclude_session_kind: Optional[str] = None,
     ) -> ChatPage:
         """Return one filtered chat page in stable newest-first order."""
-        chats = await self.filter_chats(user_id=user_id, channel=channel)
+        chats = await self.filter_chats(
+            user_id=user_id,
+            channel=channel,
+            exclude_session_kind=exclude_session_kind,
+        )
 
         def _sort_key(chat: ChatSpec) -> tuple[float, str]:
             updated_at = chat.updated_at
@@ -222,9 +236,14 @@ class BaseChatRepository(ABC):
         cursor: str | None = None,
         user_id: Optional[str] = None,
         channel: Optional[str] = None,
+        exclude_session_kind: Optional[str] = None,
     ) -> ChatPage:
         """Return a stable page ordered by immutable creation identity."""
-        chats = await self.filter_chats(user_id=user_id, channel=channel)
+        chats = await self.filter_chats(
+            user_id=user_id,
+            channel=channel,
+            exclude_session_kind=exclude_session_kind,
+        )
         ordered = sorted(chats, key=self._cursor_sort_key, reverse=True)
         if cursor:
             boundary = self._decode_cursor(cursor)

@@ -86,15 +86,15 @@ import {
   shouldMarkTaskReadOnOpen,
 } from "./taskJobs";
 import {
-  CronJobFormBody,
   DEFAULT_FORM_VALUES,
 } from "../Control/CronJobs/components";
 import { buildCronJobFormValues } from "../Control/CronJobs/helpers";
-import { useExecutionModelOptions } from "@/hooks/useExecutionModelOptions";
 import {
+  extractTaskContentText,
   submitCronTaskEdit,
   type CronTaskEditFormValues,
 } from "./taskEditSubmit";
+import ChatTaskEditFormBody from "./components/ChatTaskEditFormBody";
 import { shouldRefreshCurrentTaskMessages } from "./taskMessageRefresh";
 import { resolveCurrentFileUrlNetwork } from "./fileUrlNetwork";
 import { matchesResolvedChatId } from "./sessionApi/resolvedSessionMapping";
@@ -509,11 +509,6 @@ export default function ChatPage() {
   );
   const [taskEditSaving, setTaskEditSaving] = useState(false);
   const {
-    loading: executionModelLoading,
-    options: executionModelOptions,
-    tenantDefaultLabel,
-  } = useExecutionModelOptions(true);
-  const {
     sessions,
     setSessionLoading,
     currentSessionId: activeSessionId,
@@ -812,6 +807,9 @@ export default function ChatPage() {
   const [feedbackItems, setFeedbackItems] = useState<FeedbackRecord[]>([]);
   const [feedbackLoading, setFeedbackLoading] = useState(false);
   const feedbackUserId = useIframeStore((state) => state.userId);
+  const skipPreviewTracking = useIframeStore(
+    (state) => state.skipPreviewTracking,
+  );
   const feedbackAllowed = useMemo(
     () => isResponseFeedbackUserAllowed(feedbackUserId),
     [feedbackUserId],
@@ -1157,9 +1155,16 @@ export default function ChatPage() {
 
   const handleTaskEdit = useCallback(
     (task: CronJobSpecOutput) => {
+      const formValues = buildCronJobFormValues(task);
       setEditingTask(task);
       taskEditForm.setFieldsValue(
-        buildCronJobFormValues(task) as Parameters<
+        {
+          ...formValues,
+          taskContentText:
+            task.task_type === "text"
+              ? formValues.text || ""
+              : extractTaskContentText(formValues.request?.input),
+        } as Parameters<
           typeof taskEditForm.setFieldsValue
         >[0],
       );
@@ -1491,8 +1496,9 @@ export default function ChatPage() {
     () => ({
       cronTaskId: feedbackTask?.cronTaskId || null,
       cronTaskName: feedbackTask?.cronTaskName || null,
+      disableEventRecording: skipPreviewTracking,
     }),
-    [feedbackTask],
+    [feedbackTask, skipPreviewTracking],
   );
 
   const options = useMemo(() => {
@@ -1805,16 +1811,15 @@ export default function ChatPage() {
         <Form
           form={taskEditForm}
           layout="vertical"
-          onFinish={handleTaskEditSubmit}
+          onFinish={() =>
+            handleTaskEditSubmit(
+              taskEditForm.getFieldsValue(true) as CronTaskEditFormValues,
+            )
+          }
           initialValues={DEFAULT_FORM_VALUES}
           className={styles.taskEditForm}
         >
-          <CronJobFormBody
-            form={taskEditForm}
-            executionModelOptions={executionModelOptions}
-            executionModelLoading={executionModelLoading}
-            tenantDefaultModelLabel={tenantDefaultLabel}
-          />
+          <ChatTaskEditFormBody />
         </Form>
       </Modal>
 

@@ -89,4 +89,48 @@
 1. 验证无状态子任务查询不限制时间
 2. 验证超过24小时 pending 子任务标记 TIMEOUT
 3. 验证主任务只要子任务都有状态就能聚合更新
-4. 验证聚合逻辑正确
+4. 验证批量更新 SQL 正确执行
+
+---
+
+## 性能优化（2026-06-17）
+
+### 问题
+原代码使用循环逐条处理 executions，batch_size=100 限制导致：
+- 大量任务时无法及时处理
+- `ORDER BY created_at DESC` 导致旧任务永远排在后面
+
+### 解决方案
+使用 SQL JOIN 批量更新，一次处理所有符合条件的 executions：
+
+```sql
+-- 更新 success
+UPDATE swe_cron_executions e
+SET async_status = 'success'
+WHERE (e.async_status IS NULL OR e.async_status = '')
+AND NOT EXISTS (
+    SELECT 1 FROM swe_cron_subtasks s
+    WHERE s.trace_id = e.trace_id
+    AND (s.status IS NULL OR s.status = '')
+)
+AND NOT EXISTS (
+    SELECT 1 FROM swe_cron_subtasks s
+    WHERE s.trace_id = e.trace_id
+    AND s.status IN ('FAIL', 'PART_SUC', 'TIMEOUT')
+);
+
+-- 更新 error
+UPDATE swe_cron_executions e
+SET async_status = 'error'
+WHERE (e.async_status IS NULL OR e.async_status = '')
+AND EXISTS (
+    SELECT 1 FROM swe_cron_subtasks s
+    WHERE s.trace_id = e.trace_id
+    AND s.status IN ('FAIL', 'PART_SUC', 'TIMEOUT')
+)
+AND NOT EXISTS (
+    SELECT 1 FROM swe_cron_subtasks s
+    WHERE s.trace_id = e.trace_id
+    AND (s.status IS NULL OR s.status = '')
+);
+```

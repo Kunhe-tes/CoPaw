@@ -81,7 +81,7 @@ export default createGlobalStyle`
     padding: 6px 10px;
     border: 1px solid transparent;
     border-radius: 10px;
-    background: transparent;
+    background: ${({ theme }) => theme.colorFillAlter};
     color: ${({ theme }) => theme.colorTextSecondary};
     cursor: pointer;
     font: inherit;
@@ -94,13 +94,13 @@ export default createGlobalStyle`
       color 0.18s ease;
 
     &:hover {
-      background: ${({ theme }) => theme.colorFillQuaternary};
+      background: ${({ theme }) => theme.colorFillTertiary};
       border-color: ${({ theme }) => theme.colorBorderSecondary};
       color: ${({ theme }) => theme.colorText};
     }
 
     &[aria-expanded="true"] {
-      background: ${({ theme }) => theme.colorFillQuaternary};
+      background: ${({ theme }) => theme.colorFillTertiary};
     }
 
     &:focus-visible {
@@ -208,7 +208,7 @@ export default createGlobalStyle`
 
   &-action {
     flex: 0 0 auto;
-    color: ${({ theme }) => theme.colorTextSecondary};
+    color: ${({ theme }) => theme.colorTextTertiary};
     font-weight: 500;
     white-space: nowrap;
     transition: color 0.18s ease;
