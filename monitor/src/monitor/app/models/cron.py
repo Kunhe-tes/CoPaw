@@ -632,6 +632,10 @@ class CronOverviewStatsResponse(BaseModel):
         default=0,
         description="定时任务总数（不包含已删除）",
     )
+    new_cron_tasks: int = Field(
+        default=0,
+        description="新增定时任务数（时间范围内创建的任务）",
+    )
     total_executions: int = Field(default=0, description="总执行次数")
     branch_count: int = Field(default=0, description="分行数量")
     tenant_count: int = Field(default=0, description="租户数量")
@@ -649,6 +653,10 @@ class CronOverviewStatsResponse(BaseModel):
         description="已读任务数（按job_id去重）",
     )
     read_rate: float = Field(default=0.0, description="已读率")
+    report_rate: float = Field(default=0.0, description="查看报告任务率")
+    report_count: int = Field(default=0, description="查看报告任务数")
+    insight_count: int = Field(default=0, description="点击去洞察任务数")
+    phone_count: int = Field(default=0, description="点击去电访任务数")
     error_count: int = Field(
         default=0,
         description="执行失败数（综合判断）",

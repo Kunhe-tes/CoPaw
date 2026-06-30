@@ -17,6 +17,10 @@ export interface OverviewStats {
   total_sessions: number;
   total_conversations: number;
   total_skill_calls: number;  // 技能调用总次数
+  // 客户点击统计
+  plan_customers: number;      // 查看方案客户数
+  insight_customers: number;   // 去洞察客户数
+  phone_customers: number;     // 去电访客户数
   avg_duration_ms: number;
   top_tools: ToolUsage[];
   top_skills: SkillUsage[];
@@ -55,7 +59,6 @@ export interface TaskStatusSummary {
   failed: number;
   cancelled: number;
   read_count: number;
-  new_cron_tasks: number;
 }
 
 export interface DepthSummary {
@@ -709,13 +712,14 @@ export const tracingApi = {
     tokensGrowth: number | null;
     sessionGrowth: number | null;
     userGrowth: number | null;
-    skillGrowth: number | null;
     cronGrowth: number | null;
     // 深度指标环比
     avgRoundsGrowth: number | null;
     multiRoundRatioGrowth: number | null;
     avgDurationGrowth: number | null;
     avgSessionsPerUserGrowth: number | null;
+    // 客户点击环比
+    planCustomersGrowth: number | null;
   }> => {
     const params = new URLSearchParams();
     params.append("start_date", startDate);
@@ -730,7 +734,16 @@ export const tracingApi = {
     endDate?: string,
     bbkIds?: string,
   ): Promise<{
-    trendData: { date: string; calls: number; tokens: number; users: number }[];
+    trendData: {
+      date: string;
+      calls: number;
+      tokens: number;
+      users: number;
+      read_tasks: number;
+      plan_customers: number;
+      insight_customers: number;
+      phone_customers: number;
+    }[];
   }> => {
     const params = new URLSearchParams();
     if (startDate) params.append("start_date", startDate);
@@ -746,7 +759,16 @@ export const tracingApi = {
     endDate?: string,
     bbkIds?: string,
   ): Promise<{
-    trendData: { date: string; calls: number; tokens: number; users: number }[];
+    trendData: {
+      date: string;
+      calls: number;
+      tokens: number;
+      users: number;
+      read_tasks: number;
+      plan_customers: number;
+      insight_customers: number;
+      phone_customers: number;
+    }[];
   }> => {
     const params = new URLSearchParams();
     if (startDate) params.append("start_date", startDate);
