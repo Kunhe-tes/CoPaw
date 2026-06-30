@@ -1081,7 +1081,7 @@ class CronManager:  # pylint: disable=too-many-public-methods
             return False
 
         # 先通知外部调度平台改名并停止
-        ext_id = self._states.get(job_id, CronJobState()).external_job_id
+        ext_id = self._get_existing_external_job_id(job_before_delete)
         if ext_id and self._scheduler_adapter is not None:
             try:
                 callback_url = self._build_callback_url(

@@ -5,6 +5,7 @@ import {
   IAgentScopeRuntimeWebUIOptions,
   type IAgentScopeRuntimeWebUISenderOptions,
   type IAgentScopeRuntimeWebUIRef,
+  useChatAnywhereSessions,
   useChatAnywhereSessionsState,
 } from "@/components/agentscope-chat";
 import AgentScopeRuntimeRequestCard from "@/components/agentscope-chat/AgentScopeRuntimeWebUI/core/AgentScopeRuntime/Request/Card";
@@ -146,6 +147,13 @@ import { isChatTaskProgressEnabled } from "./taskProgressConfig";
 const CHAT_ATTACHMENT_MAX_MB = 10;
 const TASK_RUNNING_POLL_MS = 30_000;
 
+function useExternalApprovalResolvedRefresh() {
+  const { refreshSession } = useChatAnywhereSessions();
+  return useCallback(() => {
+    void refreshSession();
+  }, [refreshSession]);
+}
+
 const chatCardRenderers = {
   AgentScopeRuntimeRequestCard: (props: {
     data: ChatRuntimeRequestCardData;
@@ -171,11 +179,18 @@ const chatCardRenderers = {
       />
     );
   },
-  ApprovalAction: (props: { data: ChatApprovalActionCardData }) => (
-    <ApprovalActionCard {...props} />
-  ),
+  ApprovalAction: (props: { data: ChatApprovalActionCardData }) => {
+    const onExternalApprovalResolved = useExternalApprovalResolvedRefresh();
+    return (
+      <ApprovalActionCard
+        {...props}
+        onExternalApprovalResolved={onExternalApprovalResolved}
+      />
+    );
+  },
   TaskRunGroupCard: (props: { data: ChatTaskRunGroupCardData }) => {
     const feedback = useChatFeedbackRenderContext();
+    const onExternalApprovalResolved = useExternalApprovalResolvedRefresh();
     return (
       <TaskRunGroupCard
         {...props}
@@ -183,6 +198,7 @@ const chatCardRenderers = {
         feedbackLookup={feedback.feedbackLookup}
         loadingFeedback={feedback.feedbackLookupPending}
         onFeedbackSaved={feedback.onFeedbackSaved}
+        onExternalApprovalResolved={onExternalApprovalResolved}
         sessionId={feedback.feedbackSessionId}
         task={feedback.feedbackTask}
       />

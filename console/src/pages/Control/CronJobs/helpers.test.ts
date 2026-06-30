@@ -5,6 +5,7 @@ import {
   buildCronJobFormValues,
   buildCronJobSubmitPayload,
   getBroadcastResultMessage,
+  getBroadcastTaskProgressText,
   normalizeSkillIdsInput,
 } from "./helpers";
 
@@ -199,5 +200,48 @@ describe("CronJobs helpers", () => {
       tone: "warning",
       text: "Broadcasted 1, failed 1",
     });
+  });
+
+  it("summarizes running broadcast task progress", () => {
+    expect(
+      getBroadcastTaskProgressText({
+        task_id: "task-1",
+        status: "running",
+        tenant_count: 5,
+        completed_count: 2,
+        failed_count: 1,
+        results: [],
+        reused: false,
+      }),
+    ).toBe("Broadcasting 2/5 tenants, failed 1");
+  });
+
+  it("summarizes completed broadcast task progress", () => {
+    expect(
+      getBroadcastTaskProgressText({
+        task_id: "task-1",
+        status: "completed",
+        tenant_count: 3,
+        completed_count: 3,
+        failed_count: 0,
+        results: [],
+        reused: false,
+      }),
+    ).toBe("Broadcast completed 3/3 tenants");
+  });
+
+  it("uses task-level broadcast failure summary", () => {
+    expect(
+      getBroadcastTaskProgressText({
+        task_id: "task-1",
+        status: "failed",
+        tenant_count: 3,
+        completed_count: 1,
+        failed_count: 0,
+        results: [],
+        failure_summary: "database unavailable",
+        reused: false,
+      }),
+    ).toBe("Broadcast failed: database unavailable");
   });
 });

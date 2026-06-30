@@ -1259,6 +1259,13 @@ class ToolGuardMixin:
                     tool_input,
                     guard_result=guard_result,
                 )
+            if not getattr(guard_result, "is_safe", True):
+                return _GuardAction(
+                    "auto_denied",
+                    tool_name,
+                    tool_input,
+                    guard_result=guard_result,
+                )
         return None
 
     async def _execute_guard_action(
@@ -1421,6 +1428,9 @@ class ToolGuardMixin:
             "approval_kind": approval_kind,
             "tool_call": tool_call,
         }
+        extra["agent_id"] = self._request_context.get("agent_id")
+        extra["tenant_id"] = self._request_context.get("tenant_id")
+        extra["source_id"] = self._request_context.get("source_id")
         if hook_ask_handler_ids:
             extra["hook_ask_handler_ids"] = list(hook_ask_handler_ids)
 
@@ -1472,6 +1482,17 @@ class ToolGuardMixin:
             result=guard_result,
             extra=extra,
         )
+        try:
+            from swe.app.approvals import notify_cron_approval_pending
+
+            await notify_cron_approval_pending(
+                pending_request,
+                channel_manager=self._request_context.get("channel_manager"),
+            )
+        except Exception:
+            logger.exception(
+                "Tool guard: failed to notify cron approval request",
+            )
 
         guardians = list(
             {f.guardian for f in guard_result.findings if f.guardian},

@@ -18,6 +18,7 @@ from swe.app.crons.models import (
     DispatchSpec,
     DispatchTarget,
     JobRuntimeSpec,
+    JobsFile,
     ScheduleSpec,
 )
 from swe.app.crons.scheduler_adapter import RealSchedulerAdapter
@@ -410,3 +411,50 @@ async def test_refresh_external_jobs_updates_existing_external_binding(
     assert payload["id"] == 42
     assert payload["jobDesc"].startswith("[SWE] tenant-a/source-a/default/job")
     assert _decode_job_param(payload["jobParam"])["source_id"] == "source-a"
+
+
+@pytest.mark.asyncio
+async def test_delete_job_uses_persisted_external_binding_when_state_missing(
+    tmp_path,
+) -> None:
+    """删除任务时即使内存状态缺失，也必须使用持久化的调度平台绑定。"""
+    adapter = CapturingSchedulerAdapter()
+    job = _sample_job(external_id="42")
+
+    class FakeRepo:
+        _path = tmp_path / "jobs.json"
+
+        def __init__(self) -> None:
+            self.jobs = [job]
+
+        async def load(self) -> JobsFile:
+            return JobsFile(jobs=list(self.jobs))
+
+        async def save(self, jobs_file: JobsFile) -> None:
+            self.jobs = list(jobs_file.jobs)
+
+        async def get_job(self, job_id: str) -> CronJobSpec | None:
+            for saved_job in self.jobs:
+                if saved_job.id == job_id:
+                    return saved_job
+            return None
+
+    repo = FakeRepo()
+    manager = CronManager(
+        repo=repo,
+        runner=SimpleNamespace(workspace_dir=None, _workspace=None),
+        channel_manager=object(),
+        agent_id="default",
+        tenant_id=encode_scope_id("tenant-a", "source-a"),
+        scheduler_adapter=adapter,
+    )
+
+    assert manager.get_state(job.id).external_job_id is None
+
+    deleted = await manager.delete_job(job.id)
+
+    assert deleted is True
+    assert repo.jobs == []
+    paths = [path for path, _ in adapter.requests]
+    assert "/job-admin/v2/update-job" in paths
+    assert "/job-admin/v2/update-job-run-states" in paths
