@@ -653,6 +653,10 @@ class CronOverviewStatsResponse(BaseModel):
         description="已读任务数（按job_id去重）",
     )
     read_rate: float = Field(default=0.0, description="已读率")
+    report_rate: float = Field(default=0.0, description="查看报告任务率")
+    report_count: int = Field(default=0, description="查看报告任务数")
+    insight_count: int = Field(default=0, description="点击去洞察任务数")
+    phone_count: int = Field(default=0, description="点击去电访任务数")
     error_count: int = Field(
         default=0,
         description="执行失败数（综合判断）",

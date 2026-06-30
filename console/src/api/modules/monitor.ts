@@ -240,6 +240,10 @@ export interface CronOverviewStatsResponse {
   running_count: number;
   read_tasks: number;
   read_rate: number;
+  report_rate: number;
+  report_count: number;
+  insight_count: number;
+  phone_count: number;
   error_count: number;
   error_rate: number;
 }
@@ -460,7 +464,7 @@ function formatPercentText(value: number | null | undefined) {
   return `${formatPercentValue(value)}%`;
 }
 
-function mapCronJobOverviewPageData(
+export function mapCronJobOverviewPageData(
   stats: CronOverviewStatsResponse,
   behavior: CronBranchRankingResponse,
   branchError: CronBranchErrorResponse,
@@ -485,6 +489,13 @@ function mapCronJobOverviewPageData(
         value: formatPercentValue(stats.read_rate),
         footerValue: formatInteger(stats.read_tasks),
       },
+      {
+        key: "report",
+        value: formatPercentValue(stats.report_rate),
+      },
+      { key: "report_count", value: formatInteger(stats.report_count) },
+      { key: "insight_count", value: formatInteger(stats.insight_count) },
+      { key: "phone_count", value: formatInteger(stats.phone_count) },
     ],
     branchRankingRows: behavior.items.map((item, index) => ({
       rank: index + 1,

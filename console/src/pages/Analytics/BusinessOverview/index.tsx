@@ -489,50 +489,104 @@ function buildTrendChartOption(trendData: TrendDatum[]) {
   return {
     tooltip: {
       trigger: "axis" as const,
-      axisPointer: { type: "cross" as const },
+      axisPointer: {
+        type: "cross" as const,
+        crossStyle: {
+          color: "#94a3b8",
+        },
+      },
+      backgroundColor: "rgba(15, 23, 42, 0.94)",
+      borderColor: "rgba(148, 163, 184, 0.18)",
+      textStyle: {
+        color: "#f8fafc",
+      },
     },
     legend: {
       data: [
-        "调用次数",
+        "调用量",
         "调用用户",
-        "已读任务数",
         "查看方案客户数",
         "去洞察客户数",
         "去电访客户数",
       ],
       bottom: 0,
+      itemWidth: 12,
+      itemHeight: 8,
+      itemGap: 14,
+      textStyle: {
+        color: "#64748b",
+        fontSize: 12,
+      },
     },
     grid: {
       left: 60,
       right: 60,
-      top: 20,
-      bottom: 40,
+      top: 28,
+      bottom: 52,
     },
     xAxis: {
       type: "category" as const,
       data: dates,
-      axisLabel: { interval: "auto" as const },
+      axisTick: { show: false },
+      axisLine: {
+        lineStyle: {
+          color: "#dbe3ef",
+        },
+      },
+      axisLabel: {
+        interval: "auto" as const,
+        color: "#64748b",
+      },
     },
     yAxis: [
       {
         type: "value" as const,
-        name: "调用/用户/任务",
+        name: "调用量 / 用户",
         position: "left" as const,
+        nameTextStyle: {
+          color: "#64748b",
+        },
+        splitLine: {
+          lineStyle: {
+            color: "#e9eff7",
+          },
+        },
+        axisLabel: {
+          color: "#94a3b8",
+        },
       },
       {
         type: "value" as const,
         name: "客户数",
         position: "right" as const,
+        nameTextStyle: {
+          color: "#64748b",
+        },
+        splitLine: {
+          show: false,
+        },
+        axisLabel: {
+          color: "#94a3b8",
+        },
       },
     ],
     series: [
       {
-        name: "调用次数",
-        type: "line" as const,
+        name: "调用量",
+        type: "bar" as const,
         yAxisIndex: 0,
         data: trendData.map((i) => i.calls),
-        smooth: true,
-        itemStyle: { color: "#2563eb" },
+        barWidth: 16,
+        itemStyle: {
+          color: "#4f7cff",
+          borderRadius: [8, 8, 0, 0],
+        },
+        emphasis: {
+          itemStyle: {
+            color: "#2f5ff0",
+          },
+        },
+        z: 1,
       },
       {
         name: "调用用户",
@@ -540,15 +594,13 @@ function buildTrendChartOption(trendData: TrendDatum[]) {
         yAxisIndex: 0,
         data: trendData.map((i) => i.users),
         smooth: true,
-        itemStyle: { color: "#22c55e" },
-      },
-      {
-        name: "已读任务数",
-        type: "line" as const,
-        yAxisIndex: 0,
-        data: trendData.map((i) => i.read_tasks),
-        smooth: true,
-        itemStyle: { color: "#f97316" },
+        lineStyle: {
+          color: "#94a3b8",
+          width: 2,
+          opacity: 0.75,
+        },
+        symbol: "none" as const,
+        z: 2,
       },
       {
         name: "查看方案客户数",
@@ -556,7 +608,18 @@ function buildTrendChartOption(trendData: TrendDatum[]) {
         yAxisIndex: 1,
         data: trendData.map((i) => i.plan_customers),
         smooth: true,
-        itemStyle: { color: "#3b82f6" },
+        symbol: "circle" as const,
+        symbolSize: 8,
+        lineStyle: {
+          color: "#f97316",
+          width: 3,
+        },
+        itemStyle: {
+          color: "#f97316",
+          borderColor: "#ffffff",
+          borderWidth: 2,
+        },
+        z: 4,
       },
       {
         name: "去洞察客户数",
@@ -564,7 +627,13 @@ function buildTrendChartOption(trendData: TrendDatum[]) {
         yAxisIndex: 1,
         data: trendData.map((i) => i.insight_customers),
         smooth: true,
-        itemStyle: { color: "#8b5cf6" },
+        symbol: "none" as const,
+        lineStyle: {
+          color: "#fb7185",
+          width: 2,
+          opacity: 0.72,
+        },
+        z: 2,
       },
       {
         name: "去电访客户数",
@@ -572,7 +641,18 @@ function buildTrendChartOption(trendData: TrendDatum[]) {
         yAxisIndex: 1,
         data: trendData.map((i) => i.phone_customers),
         smooth: true,
-        itemStyle: { color: "#ec4899" },
+        symbol: "circle" as const,
+        symbolSize: 8,
+        lineStyle: {
+          color: "#10b981",
+          width: 3,
+        },
+        itemStyle: {
+          color: "#10b981",
+          borderColor: "#ffffff",
+          borderWidth: 2,
+        },
+        z: 4,
       },
     ],
   };

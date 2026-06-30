@@ -9,10 +9,15 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { MemoryRouter } from "react-router-dom";
 import BusinessOverviewPage from "./index";
 
+const echartsRenderMock = vi.hoisted(() => ({
+  lastProps: null as null | { style?: Record<string, unknown>; option?: Record<string, unknown> },
+}));
+
 vi.mock("echarts-for-react", () => ({
-  default: (props: { style?: Record<string, unknown> }) => (
-    <div data-testid="echarts" style={props.style} />
-  ),
+  default: (props: { style?: Record<string, unknown>; option?: Record<string, unknown> }) => {
+    echartsRenderMock.lastProps = props;
+    return <div data-testid="echarts" style={props.style} />;
+  },
 }));
 
 const tracingApiMock = vi.hoisted(() => ({
@@ -288,6 +293,60 @@ describe("BusinessOverview trend chart", () => {
     });
     expect(screen.getByText("调用量趋势")).toBeInTheDocument();
     expect(screen.getByTestId("echarts")).toBeInTheDocument();
+  });
+
+  it("renders the redesigned trend chart hierarchy without read task metric", async () => {
+    renderBusinessOverview();
+
+    await waitFor(() => {
+      expect(echartsRenderMock.lastProps?.option).toBeTruthy();
+    });
+
+    const option = echartsRenderMock.lastProps?.option as {
+      legend?: { data?: string[] };
+      series?: Array<{ name?: string; type?: string; yAxisIndex?: number; z?: number }>;
+    };
+
+    expect(option.legend?.data).toEqual([
+      "调用量",
+      "调用用户",
+      "查看方案客户数",
+      "去洞察客户数",
+      "去电访客户数",
+    ]);
+    expect(option.series?.map((item) => item.name)).toEqual([
+      "调用量",
+      "调用用户",
+      "查看方案客户数",
+      "去洞察客户数",
+      "去电访客户数",
+    ]);
+    expect(option.series?.[0]).toMatchObject({
+      name: "调用量",
+      type: "bar",
+      yAxisIndex: 0,
+    });
+    expect(option.series?.[1]).toMatchObject({
+      name: "调用用户",
+      type: "line",
+      yAxisIndex: 0,
+    });
+    expect(option.series?.[2]).toMatchObject({
+      name: "查看方案客户数",
+      type: "line",
+      yAxisIndex: 1,
+    });
+    expect(option.series?.[3]).toMatchObject({
+      name: "去洞察客户数",
+      type: "line",
+      yAxisIndex: 1,
+    });
+    expect(option.series?.[4]).toMatchObject({
+      name: "去电访客户数",
+      type: "line",
+      yAxisIndex: 1,
+    });
+    expect(option.series?.some((item) => item.name === "已读任务数")).toBe(false);
   });
 
   it("renders the report-view customer card with current annotations and growth", async () => {

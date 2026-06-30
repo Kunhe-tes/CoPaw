@@ -94,7 +94,7 @@ type SummaryMetricView = SummaryMetricDefinition & {
   hintValue?: string;
 };
 
-// Multi-footer metric for "查看报告任务率" card
+// Multi-footer metric for "查看方案任务率" card
 type ReportMetricDefinition = {
   key: string;
   title: string;
@@ -104,7 +104,6 @@ type ReportMetricDefinition = {
   subItems: Array<{
     key: string;
     label: string;
-    icon: LucideIcon;
   }>;
 };
 
@@ -151,14 +150,14 @@ const summaryMetricDefinitions: SummaryMetricDefinition[] = [
 
 const reportMetricDefinition: ReportMetricDefinition = {
   key: "report",
-  title: "查看报告任务率",
+  title: "查看方案任务率",
   unit: "%",
   tone: "blue",
   icon: FileText,
   subItems: [
-    { key: "report_count", label: "查看报告任务数", icon: FileText },
-    { key: "insight_count", label: "去洞察任务数", icon: Search },
-    { key: "phone_count", label: "去电访任务数", icon: Phone },
+    { key: "report_count", label: "查看方案任务数" },
+    { key: "insight_count", label: "去洞察任务数" },
+    { key: "phone_count", label: "去电访任务数" },
   ],
 };
 
@@ -286,7 +285,7 @@ function ReportSummaryCard({ metric }: { metric: ReportMetricView }) {
   const Icon = metric.icon;
 
   return (
-    <article className={`${styles.summaryCard} ${styles.reportCard}`}>
+    <article className={`${styles.summaryCard} ${styles[metric.tone]}`}>
       <div className={styles.summaryMain}>
         <span className={styles.summaryIcon}>
           <Icon size={28} />
@@ -304,13 +303,9 @@ function ReportSummaryCard({ metric }: { metric: ReportMetricView }) {
       </div>
       <div className={styles.reportSubGrid}>
         {metric.subItems.map((item) => {
-          const SubIcon = item.icon;
           const value = metric.subValues[item.key] || "-";
           return (
             <div key={item.key} className={styles.reportSubItem}>
-              <span className={styles.reportSubIcon}>
-                <SubIcon size={16} />
-              </span>
               <span className={styles.reportSubLabel}>{item.label}</span>
               <strong className={styles.reportSubValue}>{value}</strong>
             </div>
@@ -440,7 +435,7 @@ function RankingTable({
               <th>已读任务数</th>
               <th>涉及客户经理数</th>
               <th>查看结果的客户经理数</th>
-              <th>查看经营方案客户经理数</th>
+              <th>查看方案客户经理数</th>
               <th>去洞察的客户经理数</th>
               <th>去电访的客户经理数</th>
               <th>推荐的客户数</th>
@@ -1371,7 +1366,7 @@ export default function CronJobOverviewPage() {
       </section>
 
       <p className={styles.formulaNote}>
-        说明： 执行成功率 = 成功执行次数 / 任务执行次数； 任务已读率 = 已读任务去重数 / 已执行任务去重数； 查看报告任务率 = 查看报告任务去重数 / 已执行任务去重数
+        说明： 执行成功率 = 成功执行次数 / 任务执行次数； 任务已读率 = 已读任务去重数 / 已执行任务去重数； 查看方案任务率 = 查看方案任务去重数 / 已执行任务去重数
       </p>
 
       {/* 任务视角分行排行 */}
@@ -1683,7 +1678,7 @@ export default function CronJobOverviewPage() {
       </Modal>
 
       {/* 技能视角分行排行 */}
-      <h2 className={styles.sectionHeading}>
+      <h2 className={`${styles.sectionHeading} ${styles.sectionHeadingSpacious}`}>
         技能视角-分行综合排行
         <span className={styles.sectionHeadingHint}>（点击分行查看明细）</span>
       </h2>
