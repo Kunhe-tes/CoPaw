@@ -75,7 +75,7 @@ const iconMap = {
   conversations: MessageCircleMore,
   sessions: CheckSquare,
   tokens: Coins,
-  skills: Zap,
+  customers: Users,
 };
 
 function mapBreakdown(
@@ -108,6 +108,9 @@ function buildMetricCards(
     userGrowth: number | null;
     skillGrowth: number | null;
     cronGrowth: number | null;
+    planCustomersGrowth: number | null;
+    insightCustomersGrowth: number | null;
+    phoneCustomersGrowth: number | null;
   },
 ): OverviewMetricCard[] {
   return [
@@ -169,13 +172,29 @@ function buildMetricCards(
       breakdown: mapBreakdown(overviewStats?.branch_breakdown?.tokens),
     },
     {
-      key: "skills",
-      title: "技能调用次数",
-      valueText: formatNumber(overviewStats?.total_skill_calls ?? 0),
-      changeText: formatChange(growthStats.skillGrowth),
-      changeDirection: toChangeDirection(growthStats.skillGrowth),
+      key: "customers",
+      title: "客户数",
+      valueText: (
+        <span className={styles.userValueWrap}>
+          <span className={styles.userTotal}>
+            {formatNumber(overviewStats?.plan_customers ?? 0)}
+          </span>
+          <span className={styles.userAnnotation}>
+            <span className={styles.annotationRow}>
+              <span className={styles.annotationDot} style={{ background: "#3b82f6" }} />
+              去洞察 {formatNumber(overviewStats?.insight_customers ?? 0)}
+            </span>
+            <span className={styles.annotationRow}>
+              <span className={styles.annotationDot} style={{ background: "#f97316" }} />
+              去电访 {formatNumber(overviewStats?.phone_customers ?? 0)}
+            </span>
+          </span>
+        </span>
+      ),
+      changeText: formatChange(growthStats.planCustomersGrowth),
+      changeDirection: toChangeDirection(growthStats.planCustomersGrowth),
       accentColor: METRIC_ACCENT_COLORS[4],
-      breakdown: mapBreakdown(overviewStats?.branch_breakdown?.skills),
+      breakdown: null,
     },
   ];
 }
@@ -655,6 +674,9 @@ export default function BusinessOverviewPage() {
     multiRoundRatioGrowth: number | null;
     avgDurationGrowth: number | null;
     avgSessionsPerUserGrowth: number | null;
+    planCustomersGrowth: number | null;
+    insightCustomersGrowth: number | null;
+    phoneCustomersGrowth: number | null;
   }>({
     callsGrowth: null,
     tokensGrowth: null,
@@ -666,6 +688,9 @@ export default function BusinessOverviewPage() {
     multiRoundRatioGrowth: null,
     avgDurationGrowth: null,
     avgSessionsPerUserGrowth: null,
+    planCustomersGrowth: null,
+    insightCustomersGrowth: null,
+    phoneCustomersGrowth: null,
   });
   const [trendData, setTrendData] = useState<TrendDatum[]>([]);
   const [activeUsers, setActiveUsers] = useState<UserRow[]>([]);
