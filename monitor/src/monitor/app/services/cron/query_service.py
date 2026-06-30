@@ -2310,6 +2310,7 @@ class QueryService:
 
         成功：status='success' AND async_status='success'
         失败：status='error' OR (status='success' AND async_status='error')
+        已读任务数：按 job_id 去重统计（与概览口径一致）
         """
         if not job_ids:
             return {
@@ -2324,7 +2325,7 @@ class QueryService:
                 COUNT(*) AS total_executions,
                 SUM(CASE WHEN status = 'success' AND async_status = 'success'
                     THEN 1 ELSE 0 END) AS success_count,
-                SUM(CASE WHEN is_read = 1 THEN 1 ELSE 0 END) AS read_tasks,
+                COUNT(DISTINCT CASE WHEN is_read = 1 THEN job_id END) AS read_tasks,
                 SUM(CASE WHEN status = 'error'
                          OR (status = 'success' AND async_status = 'error')
                     THEN 1 ELSE 0 END) AS error_count
@@ -2492,7 +2493,7 @@ class QueryService:
     ) -> dict[str, int]:
         """统计分行使用白名单技能的客户经理点击行为（技能视角）。
 
-        通过点击事件关联执行记录和 traces 表，筛选 skills_used 包含白名单技能的点击。
+        与任务视角口径一致：按点击时间范围筛选，通过 cron_task_id 关联获取技能信息。
         """
         source_where = " AND c.source_id = %s" if source_id else ""
         allowed_skills = list(self._ALLOWED_BRANCH_SKILLS)
@@ -2502,8 +2503,6 @@ class QueryService:
             SELECT c.button_type, COUNT(DISTINCT c.user_id) AS manager_count
             FROM swe_html_preview_click_events c
             JOIN swe_cron_executions e ON c.cron_task_id = e.job_id
-                AND c.clicked_at >= e.actual_time
-                AND c.clicked_at <= COALESCE(e.end_time, e.actual_time + INTERVAL 1 DAY)
             JOIN swe_tracing_traces t ON e.trace_id = t.trace_id
             CROSS JOIN (
                 SELECT 0 AS i UNION SELECT 1 UNION SELECT 2 UNION SELECT 3
@@ -2573,7 +2572,7 @@ class QueryService:
     ) -> dict[str, int]:
         """统计分行使用白名单技能的客户点击行为（技能视角）。
 
-        通过点击事件关联执行记录和 traces 表，筛选 skills_used 包含白名单技能的点击。
+        与任务视角口径一致：按点击时间范围筛选，通过 cron_task_id 关联获取技能信息。
         """
         source_where = " AND c.source_id = %s" if source_id else ""
         allowed_skills = list(self._ALLOWED_BRANCH_SKILLS)
@@ -2583,8 +2582,6 @@ class QueryService:
             SELECT c.button_type, COUNT(DISTINCT c.customer_id) AS customer_count
             FROM swe_html_preview_click_events c
             JOIN swe_cron_executions e ON c.cron_task_id = e.job_id
-                AND c.clicked_at >= e.actual_time
-                AND c.clicked_at <= COALESCE(e.end_time, e.actual_time + INTERVAL 1 DAY)
             JOIN swe_tracing_traces t ON e.trace_id = t.trace_id
             CROSS JOIN (
                 SELECT 0 AS i UNION SELECT 1 UNION SELECT 2 UNION SELECT 3

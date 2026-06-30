@@ -34,6 +34,7 @@ from .middleware.tenant_identity import TenantIdentityMiddleware
 from .middleware.tenant_workspace import TenantWorkspaceMiddleware
 from .middleware.header_passthrough import HeaderPassthroughMiddleware
 from .middleware.liveness_probe import LivenessProbeMiddleware
+from .middleware.provider_models_timing import ProviderModelsTimingMiddleware
 from .middleware.sse_diagnostic import SSEDiagnosticMiddleware
 from .source_system_config.middleware import SourceSystemConfigMiddleware
 from .routers import router as api_router, create_agent_scoped_router
@@ -468,9 +469,7 @@ async def _initialize_cron_broadcast_children_store(
         cron_broadcast_children_store = CronBroadcastChildrenStore(
             db_connection,
         )
-        app.state.cron_broadcast_children_store = (
-            cron_broadcast_children_store
-        )
+        app.state.cron_broadcast_children_store = cron_broadcast_children_store
         if cron_broadcast_children_store.is_available:
             await cron_broadcast_children_store.initialize()
             logger.info("Cron broadcast children snapshot storage initialized")
@@ -830,6 +829,9 @@ app.add_middleware(
     SSEDiagnosticMiddleware,
     manager=runtime_diagnostic_manager,
 )
+
+# 只针对模型列表接口记录业务中间件入口到响应生成的总耗时。
+app.add_middleware(ProviderModelsTimingMiddleware)
 
 # Keep the Kubernetes liveness probe outside business middleware. This proves
 # the process can answer HTTP without touching auth, tenant, source, DB, or
