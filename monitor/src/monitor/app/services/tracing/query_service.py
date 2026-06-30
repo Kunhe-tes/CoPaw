@@ -2924,7 +2924,7 @@ class TracingQueryService:  # pylint: disable=too-many-public-methods
                 FROM swe_tracing_spans s
                 JOIN swe_tracing_traces t ON s.trace_id = t.trace_id
                 WHERE {base_where}
-                ORDER BY t.start_time ASC
+                ORDER BY t.start_time DESC
                 LIMIT %s OFFSET %s
             """
             params = list(count_params) + [page_size, offset]
@@ -2945,7 +2945,7 @@ class TracingQueryService:  # pylint: disable=too-many-public-methods
                 FROM swe_tracing_spans s
                 JOIN swe_tracing_traces t ON s.trace_id = t.trace_id
                 WHERE {base_where}
-                ORDER BY t.start_time ASC
+                ORDER BY t.start_time DESC
                 LIMIT %s OFFSET %s
             """
             params = (
