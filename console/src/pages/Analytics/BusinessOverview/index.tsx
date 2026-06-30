@@ -105,11 +105,8 @@ function buildMetricCards(
     tokensGrowth: number | null;
     sessionGrowth: number | null;
     userGrowth: number | null;
-    skillGrowth: number | null;
     cronGrowth: number | null;
     planCustomersGrowth: number | null;
-    insightCustomersGrowth: number | null;
-    phoneCustomersGrowth: number | null;
   },
 ): OverviewMetricCard[] {
   return [
@@ -172,7 +169,7 @@ function buildMetricCards(
     },
     {
       key: "customers",
-      title: "客户数",
+      title: "查看报告客户数",
       valueText: (
         <span className={styles.userValueWrap}>
           <span className={styles.userTotal}>
@@ -181,11 +178,11 @@ function buildMetricCards(
           <span className={styles.userAnnotation}>
             <span className={styles.annotationRow}>
               <span className={styles.annotationDot} style={{ background: "#3b82f6" }} />
-              去洞察 {formatNumber(overviewStats?.insight_customers ?? 0)}
+              去洞察客户数 {formatNumber(overviewStats?.insight_customers ?? 0)}
             </span>
             <span className={styles.annotationRow}>
               <span className={styles.annotationDot} style={{ background: "#f97316" }} />
-              去电访 {formatNumber(overviewStats?.phone_customers ?? 0)}
+              去电访客户数 {formatNumber(overviewStats?.phone_customers ?? 0)}
             </span>
           </span>
         </span>
@@ -477,177 +474,102 @@ function TaskFunnel({ taskStatusSummary }: { taskStatusSummary: TaskStatusSummar
   );
 }
 
-function getLabelInterval(dataLength: number): number {
-  if (dataLength <= 7) return 1;
-  if (dataLength <= 14) return 2;
-  if (dataLength <= 24) return 3;
-  return 4;
-}
-
-function getBarWidth(dataLength: number, step: number): number {
-  const maxWidth = Math.floor(step * 0.6);
-  if (dataLength <= 7) return Math.min(20, maxWidth);
-  if (dataLength <= 14) return Math.min(12, maxWidth);
-  if (dataLength <= 24) return Math.min(8, maxWidth);
-  return Math.max(4, Math.min(5, maxWidth));
-}
-
-interface TrendAxisTick {
-  value: number;
-  label: string;
-}
-
-interface TrendHoverZone {
-  key: string;
-  label: string;
-  users: number;
-  calls: number;
-  x: number;
-  y: number;
-  width: number;
-  height: number;
-  pointX: number;
-  pointY: number;
-}
-
-function getNiceAxisMax(value: number): number {
-  if (value <= 0) {
-    return 0;
-  }
-  const magnitude = 10 ** Math.floor(Math.log10(value));
-  const normalized = value / magnitude;
-  const candidates = [1, 1.5, 2, 2.5, 5, 10];
-  const candidate = candidates.find((item) => normalized <= item) ?? 10;
-  return candidate * magnitude;
-}
-
-function formatTrendAxisLabel(value: number, axisMax: number): string {
-  if (value === 0) {
-    return "0";
-  }
-  if (axisMax >= 10000) {
-    const scaled = value / 10000;
-    return `${scaled.toFixed(Number.isInteger(scaled) ? 0 : 1)}W`;
-  }
-  if (axisMax >= 1000) {
-    const scaled = value / 1000;
-    return `${scaled.toFixed(Number.isInteger(scaled) ? 0 : 1)}K`;
-  }
-  return formatNumber(value);
-}
-
-function buildTrendAxisTicks(axisMax: number): TrendAxisTick[] {
-  if (axisMax <= 0) {
-    return Array.from({ length: 6 }, () => ({
-      value: 0,
-      label: "0",
-    }));
-  }
-  const step = axisMax / 5;
-  return Array.from({ length: 6 }, (_, index) => {
-    const value = step * (5 - index);
-    return {
-      value,
-      label: formatTrendAxisLabel(value, axisMax),
-    };
-  });
-}
-
-export function buildTrendSvgData(trendData: TrendDatum[]) {
-  const width = 580;
-  const height = 244;
-  const chartLeft = 18;
-  const chartRight = 18;
-  const chartTop = 10;
-  const chartBottom = 36;
-  const chartWidth = width - chartLeft - chartRight;
-  const chartHeight = height - chartTop - chartBottom;
-  const rawMaxCalls = Math.max(
-    ...trendData.map((item) => safeNumber(item.calls)),
-    0,
-  );
-  const rawMaxUsers = Math.max(
-    ...trendData.map((item) => safeNumber(item.users)),
-    0,
-  );
-  const leftAxisMax = getNiceAxisMax(rawMaxUsers);
-  const rightAxisMax = getNiceAxisMax(rawMaxCalls);
-  const userScaleMax = Math.max(leftAxisMax, 1);
-  const callScaleMax = Math.max(rightAxisMax, 1);
-  const step = trendData.length > 1 ? chartWidth / (trendData.length - 1) : 0;
-  const labelInterval = getLabelInterval(trendData.length);
-  const barWidth = getBarWidth(trendData.length, step);
-
-  const bars = trendData.map((item, index) => {
-    const barHeight = (safeNumber(item.users) / userScaleMax) * chartHeight;
-    const x = chartLeft + index * step - barWidth / 2;
-    const label = item.date.includes(":")
+function buildTrendChartOption(trendData: TrendDatum[]) {
+  const dates = trendData.map((item) =>
+    item.date.includes(":")
       ? dayjs(item.date).format("HH:mm")
-      : dayjs(item.date).format("MM-DD");
-    return {
-      key: item.date,
-      x,
-      y: chartTop + chartHeight - barHeight,
-      height: barHeight,
-      width: barWidth,
-      label,
-      showLabel: index % labelInterval === 0,
-    };
-  });
-
-  const points = trendData.map((item, index) => {
-    const x = chartLeft + index * step;
-    const y =
-      chartTop +
-      chartHeight -
-      (safeNumber(item.calls) / callScaleMax) * chartHeight;
-    return { x, y };
-  });
-
-  const hoverZones: TrendHoverZone[] = trendData.map((item, index) => {
-    const pointX = points[index]?.x ?? chartLeft;
-    const pointY = points[index]?.y ?? chartTop + chartHeight;
-    const zoneStart =
-      trendData.length === 1
-        ? chartLeft
-        : index === 0
-        ? chartLeft
-        : pointX - step / 2;
-    const zoneEnd =
-      trendData.length === 1
-        ? width - chartRight
-        : index === trendData.length - 1
-        ? width - chartRight
-        : pointX + step / 2;
-
-    return {
-      key: item.date,
-      label: bars[index]?.label ?? item.date,
-      users: safeNumber(item.users),
-      calls: safeNumber(item.calls),
-      x: zoneStart,
-      y: chartTop,
-      width: Math.max(zoneEnd - zoneStart, barWidth),
-      height: chartHeight,
-      pointX,
-      pointY,
-    };
-  });
+      : dayjs(item.date).format("MM-DD"),
+  );
 
   return {
-    width,
-    height,
-    chartLeft,
-    chartRight,
-    chartTop,
-    chartBottom,
-    chartHeight,
-    leftAxisTicks: buildTrendAxisTicks(leftAxisMax),
-    rightAxisTicks: buildTrendAxisTicks(rightAxisMax),
-    bars,
-    points,
-    hoverZones,
-    polyline: points.map((point) => `${point.x},${point.y}`).join(" "),
+    tooltip: {
+      trigger: "axis" as const,
+      axisPointer: { type: "cross" as const },
+    },
+    legend: {
+      data: [
+        "调用次数",
+        "调用用户",
+        "已读任务数",
+        "查看方案客户数",
+        "去洞察客户数",
+        "去电访客户数",
+      ],
+      bottom: 0,
+    },
+    grid: {
+      left: 60,
+      right: 60,
+      top: 20,
+      bottom: 40,
+    },
+    xAxis: {
+      type: "category" as const,
+      data: dates,
+      axisLabel: { interval: "auto" as const },
+    },
+    yAxis: [
+      {
+        type: "value" as const,
+        name: "调用/用户/任务",
+        position: "left" as const,
+      },
+      {
+        type: "value" as const,
+        name: "客户数",
+        position: "right" as const,
+      },
+    ],
+    series: [
+      {
+        name: "调用次数",
+        type: "line" as const,
+        yAxisIndex: 0,
+        data: trendData.map((i) => i.calls),
+        smooth: true,
+        itemStyle: { color: "#2563eb" },
+      },
+      {
+        name: "调用用户",
+        type: "line" as const,
+        yAxisIndex: 0,
+        data: trendData.map((i) => i.users),
+        smooth: true,
+        itemStyle: { color: "#22c55e" },
+      },
+      {
+        name: "已读任务数",
+        type: "line" as const,
+        yAxisIndex: 0,
+        data: trendData.map((i) => i.read_tasks),
+        smooth: true,
+        itemStyle: { color: "#f97316" },
+      },
+      {
+        name: "查看方案客户数",
+        type: "line" as const,
+        yAxisIndex: 1,
+        data: trendData.map((i) => i.plan_customers),
+        smooth: true,
+        itemStyle: { color: "#3b82f6" },
+      },
+      {
+        name: "去洞察客户数",
+        type: "line" as const,
+        yAxisIndex: 1,
+        data: trendData.map((i) => i.insight_customers),
+        smooth: true,
+        itemStyle: { color: "#8b5cf6" },
+      },
+      {
+        name: "去电访客户数",
+        type: "line" as const,
+        yAxisIndex: 1,
+        data: trendData.map((i) => i.phone_customers),
+        smooth: true,
+        itemStyle: { color: "#ec4899" },
+      },
+    ],
   };
 }
 
@@ -667,29 +589,23 @@ export default function BusinessOverviewPage() {
     tokensGrowth: number | null;
     sessionGrowth: number | null;
     userGrowth: number | null;
-    skillGrowth: number | null;
     cronGrowth: number | null;
     avgRoundsGrowth: number | null;
     multiRoundRatioGrowth: number | null;
     avgDurationGrowth: number | null;
     avgSessionsPerUserGrowth: number | null;
     planCustomersGrowth: number | null;
-    insightCustomersGrowth: number | null;
-    phoneCustomersGrowth: number | null;
   }>({
     callsGrowth: null,
     tokensGrowth: null,
     sessionGrowth: null,
     userGrowth: null,
-    skillGrowth: null,
     cronGrowth: null,
     avgRoundsGrowth: null,
     multiRoundRatioGrowth: null,
     avgDurationGrowth: null,
     avgSessionsPerUserGrowth: null,
     planCustomersGrowth: null,
-    insightCustomersGrowth: null,
-    phoneCustomersGrowth: null,
   });
   const [trendData, setTrendData] = useState<TrendDatum[]>([]);
   const [activeUsers, setActiveUsers] = useState<UserRow[]>([]);
@@ -721,7 +637,6 @@ export default function BusinessOverviewPage() {
   const [skillModalOpen, setSkillModalOpen] = useState(false);
   const [selectedSkillName, setSelectedSkillName] = useState("");
   const [errorModalOpen, setErrorModalOpen] = useState(false);
-  const [activeTrendIndex, setActiveTrendIndex] = useState<number | null>(null);
 
   const startDateText = useMemo(
     () => dateRange[0].format("YYYY-MM-DD"),
@@ -980,10 +895,6 @@ export default function BusinessOverviewPage() {
     fetchActiveUsers,
   ]);
 
-  useEffect(() => {
-    setActiveTrendIndex(null);
-  }, [trendData]);
-
   const handleModeChange = (nextRange: TimeRange) => {
     setTimeRange(nextRange);
     const today = dayjs();
@@ -1110,15 +1021,6 @@ export default function BusinessOverviewPage() {
     () => buildErrorSummary(errorSummaryData),
     [errorSummaryData],
   );
-  const trendSvg = useMemo(() => buildTrendSvgData(trendData), [trendData]);
-  const activeTrendZone =
-    activeTrendIndex === null ? null : trendSvg.hoverZones[activeTrendIndex] ?? null;
-  const trendTooltipStyle = activeTrendZone
-    ? {
-        left: `${Math.min(92, Math.max(8, (activeTrendZone.pointX / trendSvg.width) * 100))}%`,
-        top: `${Math.min(78, Math.max(10, (activeTrendZone.pointY / trendSvg.height) * 100))}%`,
-      }
-    : undefined;
   return (
     <div className={styles.businessOverviewPage}>
       <header className={styles.pageHeader}>
@@ -1316,155 +1218,11 @@ export default function BusinessOverviewPage() {
           <div className={styles.panelHeader}>
             <h3 className={styles.panelTitle}>调用量趋势</h3>
           </div>
-          <div className={styles.trendLegend}>
-            <span className={styles.legendItem}>
-              <i className={styles.legendBarMark} />
-              调用用户
-            </span>
-            <span className={styles.legendItem}>
-              <i className={styles.legendLineMark} />
-              调用次数
-            </span>
-          </div>
           <div className={styles.trendChart}>
-            <div className={styles.axisLeft}>
-              {trendSvg.leftAxisTicks.map((tick, index) => (
-                <span key={`left-${tick.value}-${index}`}>{tick.label}</span>
-              ))}
-            </div>
-            <div
-              className={styles.trendPlotArea}
-              onMouseLeave={() => {
-                setActiveTrendIndex(null);
-              }}
-            >
-              <svg
-                viewBox={`0 0 ${trendSvg.width} ${trendSvg.height}`}
-                className={styles.trendSvg}
-                preserveAspectRatio="xMidYMid meet"
-              >
-                <defs>
-                  <linearGradient
-                    id="overviewBarGradient"
-                    x1="0%"
-                    y1="0%"
-                    x2="0%"
-                    y2="100%"
-                  >
-                    <stop offset="0%" stopColor="#4f7fff" />
-                    <stop offset="100%" stopColor="#2563eb" />
-                  </linearGradient>
-                </defs>
-
-                {[0, 1, 2, 3, 4, 5].map((row) => {
-                  const y = trendSvg.chartTop + (trendSvg.chartHeight / 5) * row;
-                  return (
-                    <line
-                      key={`grid-${row}`}
-                      x1={trendSvg.chartLeft}
-                      y1={y}
-                      x2={trendSvg.width - trendSvg.chartRight}
-                      y2={y}
-                      className={styles.gridLine}
-                    />
-                  );
-                })}
-
-                {activeTrendZone && (
-                  <line
-                    x1={activeTrendZone.pointX}
-                    y1={trendSvg.chartTop}
-                    x2={activeTrendZone.pointX}
-                    y2={trendSvg.chartTop + trendSvg.chartHeight}
-                    className={styles.trendGuideLine}
-                  />
-                )}
-
-                {trendSvg.bars.map((bar, index) => (
-                  <g key={bar.key}>
-                    <rect
-                      x={bar.x}
-                      y={bar.y}
-                      width={bar.width}
-                      height={bar.height}
-                      rx="4"
-                      fill="url(#overviewBarGradient)"
-                      className={
-                        activeTrendIndex === index
-                          ? styles.trendBarActive
-                          : styles.trendBar
-                      }
-                    />
-                    {bar.showLabel && (
-                      <text x={bar.x + bar.width / 2} y={trendSvg.height - trendSvg.chartBottom + 22} className={styles.axisLabel}>
-                        {bar.label}
-                      </text>
-                    )}
-                  </g>
-                ))}
-
-                <polyline
-                  points={trendSvg.polyline}
-                  className={styles.trendLine}
-                />
-
-                {trendSvg.points.map((point, index) => (
-                  <circle
-                    key={`${point.x}-${point.y}`}
-                    cx={point.x}
-                    cy={point.y}
-                    r={activeTrendIndex === index ? "5.5" : "4.5"}
-                    className={
-                      activeTrendIndex === index
-                        ? styles.trendPointActive
-                        : styles.trendPoint
-                    }
-                  />
-                ))}
-
-                {trendSvg.hoverZones.map((zone, index) => (
-                  <rect
-                    key={`hover-${zone.key}`}
-                    data-testid={`trend-hover-zone-${index}`}
-                    x={zone.x}
-                    y={zone.y}
-                    width={zone.width}
-                    height={zone.height}
-                    className={styles.trendHoverZone}
-                    onMouseEnter={() => {
-                      setActiveTrendIndex(index);
-                    }}
-                  />
-                ))}
-              </svg>
-
-              {activeTrendZone && (
-                <div
-                  data-testid="trend-tooltip"
-                  className={styles.trendTooltip}
-                  style={trendTooltipStyle}
-                >
-                  <div className={styles.trendTooltipDate}>{activeTrendZone.label}</div>
-                  <div className={styles.trendTooltipRow}>
-                    <span className={styles.trendTooltipLabel}>调用用户</span>
-                    <strong className={styles.trendTooltipValue}>
-                      {formatNumber(activeTrendZone.users)}
-                    </strong>
-                  </div>
-                  <div className={styles.trendTooltipRow}>
-                    <span className={styles.trendTooltipLabel}>调用次数</span>
-                    <strong className={styles.trendTooltipValue}>
-                      {formatNumber(activeTrendZone.calls)}
-                    </strong>
-                  </div>
-                </div>
-              )}
-            </div>
-            <div className={styles.axisRight}>
-              {trendSvg.rightAxisTicks.map((tick, index) => (
-                <span key={`right-${tick.value}-${index}`}>{tick.label}</span>
-              ))}
-            </div>
+            <ReactECharts
+              option={buildTrendChartOption(trendData)}
+              style={{ height: 280 }}
+            />
           </div>
         </article>
 

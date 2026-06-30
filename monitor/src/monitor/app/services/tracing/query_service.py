@@ -587,8 +587,6 @@ class TracingQueryService:  # pylint: disable=too-many-public-methods
         统计范围：
         - 主事实表为 `swe_tracing_traces`，用于调用量、Token、会话数、
           活跃用户数等核心规模指标。
-        - 技能调用量来自 `swe_tracing_spans`，仅统计
-          `event_type='skill_invocation'` 且 `skill_name` 非空的记录。
         - 定时任务执行量来自 `swe_cron_executions` 与 `swe_cron_jobs` 的
           关联结果，口径为有效任务的执行记录数。
         - `source_id='all'` 时汇总全部正式平台，并排除
@@ -607,7 +605,6 @@ class TracingQueryService:  # pylint: disable=too-many-public-methods
         - `tokensGrowth`：资源消耗环比，口径为 `total_tokens` 汇总值。
         - `sessionGrowth`：会话数环比，口径为 `session_id` 去重数。
         - `userGrowth`：活跃用户数环比，口径为 `user_id` 去重数。
-        - `skillGrowth`：技能调用次数环比，口径为技能调用 span 数。
         - `cronGrowth`：定时任务执行次数环比，口径为 cron 执行记录数。
         - `avgRoundsGrowth`：单次会话平均轮数环比，口径为 `calls/sessions`。
         - `multiRoundRatioGrowth`：多轮会话占比环比，口径为大于 3 轮
@@ -688,40 +685,6 @@ class TracingQueryService:  # pylint: disable=too-many-public-methods
                 "sessions": row["sessions"] or 0,
                 "users": row["users"] or 0,
             }
-
-        async def get_skill_calls(
-            s: datetime,
-            e: datetime,
-            is_prev: bool = False,
-        ) -> int:
-            # 技能调用量单独取 span 表口径，避免把普通 trace 误计为技能调用。
-            # 使用 DISTINCT trace_id 去重，与排行榜口径一致。
-            time_compare = "<" if is_prev else "<="
-            if source_id == "all":
-                exclude_placeholders = ", ".join(
-                    ["%s"] * len(EXCLUDED_SOURCE_IDS),
-                )
-                query = f"""
-                    SELECT COUNT(DISTINCT trace_id) as total
-                    FROM swe_tracing_spans
-                    WHERE start_time >= %s AND start_time {time_compare} %s
-                      AND source_id NOT IN ({exclude_placeholders})
-                      AND user_id != 'default'
-                      AND skill_name IS NOT NULL{bbk_filter_sql}
-                """
-                params = (s, e, *EXCLUDED_SOURCE_IDS, *bbk_filter_params)
-                row = await self._db.fetch_one(query, params)
-            else:
-                query = f"""
-                    SELECT COUNT(DISTINCT trace_id) as total
-                    FROM swe_tracing_spans
-                    WHERE source_id = %s AND start_time >= %s AND start_time {time_compare} %s
-                      AND user_id != 'default'
-                      AND skill_name IS NOT NULL{bbk_filter_sql}
-                """
-                params = (source_id, s, e, *bbk_filter_params)
-                row = await self._db.fetch_one(query, params)
-            return int((row or {}).get("total") or 0)
 
         async def get_cron_tasks_count(
             s: datetime,
@@ -823,16 +786,6 @@ class TracingQueryService:  # pylint: disable=too-many-public-methods
 
         curr = await get_stats(start_date, end_date, is_prev=False)
         prev = await get_stats(prev_start, prev_end, is_prev=True)
-        curr_skill_calls = await get_skill_calls(
-            start_date,
-            end_date,
-            is_prev=False,
-        )
-        prev_skill_calls = await get_skill_calls(
-            prev_start,
-            prev_end,
-            is_prev=True,
-        )
         curr_cron_tasks = await get_cron_tasks_count(
             start_date,
             end_date,
@@ -935,10 +888,6 @@ class TracingQueryService:  # pylint: disable=too-many-public-methods
                 curr["users"],
                 prev["users"],
             ),  # user_id 去重口径
-            "skillGrowth": calc_growth(
-                curr_skill_calls,
-                prev_skill_calls,
-            ),  # skill_invocation span 数口径
             "cronGrowth": calc_growth(
                 curr_cron_tasks,
                 prev_cron_tasks,
@@ -950,14 +899,6 @@ class TracingQueryService:  # pylint: disable=too-many-public-methods
             "planCustomersGrowth": calc_growth(
                 curr_click_stats.get("plan", 0),
                 prev_click_stats.get("plan", 0),
-            ),
-            "insightCustomersGrowth": calc_growth(
-                curr_click_stats.get("insight", 0),
-                prev_click_stats.get("insight", 0),
-            ),
-            "phoneCustomersGrowth": calc_growth(
-                curr_click_stats.get("phone", 0),
-                prev_click_stats.get("phone", 0),
             ),
         }
 
