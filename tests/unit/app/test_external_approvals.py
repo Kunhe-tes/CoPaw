@@ -203,6 +203,9 @@ async def test_external_approve_submits_console_approve_message() -> None:
     assert memory_content[0][0]["metadata"]["approval_source_channel"] == (
         "zhaohu"
     )
+    assert memory_content[0][0]["metadata"]["external_approval_message"] is (
+        True
+    )
 
     zhaohu = workspace.channel_manager.zhaohu
     assert zhaohu.result_calls[0]["decision"] == "approved"
