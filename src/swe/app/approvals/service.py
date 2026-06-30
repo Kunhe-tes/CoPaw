@@ -106,6 +106,62 @@ class ApprovalService:
         scope_id = self._get_current_scope_id()
         return scope_id is not None and pending.scope_id == scope_id
 
+    @staticmethod
+    def _debug_record_summary(
+        pending: PendingApproval | None,
+    ) -> dict[str, Any] | None:
+        """Return a log-safe approval summary without tool input/output."""
+        if pending is None:
+            return None
+        extra = pending.extra if isinstance(pending.extra, dict) else {}
+        tool_call = extra.get("tool_call")
+        if not isinstance(tool_call, dict):
+            tool_call = {}
+        return {
+            "request_id": pending.request_id,
+            "scope_id": pending.scope_id,
+            "session_id": pending.session_id,
+            "user_id": pending.user_id,
+            "channel": pending.channel,
+            "tool_name": pending.tool_name,
+            "status": pending.status,
+            "created_at": pending.created_at,
+            "resolved_at": pending.resolved_at,
+            "consumed": pending.consumed,
+            "extra_tenant_id": extra.get("tenant_id"),
+            "extra_source_id": extra.get("source_id"),
+            "extra_agent_id": extra.get("agent_id"),
+            "approval_kind": extra.get("approval_kind"),
+            "tool_call_id": tool_call.get("id"),
+            "extra_keys": sorted(extra.keys()),
+        }
+
+    async def debug_request_lookup(self, request_id: str) -> dict[str, Any]:
+        """Return diagnostic data for an approval request lookup."""
+        async with self._lock:
+            pending = self._pending.get(request_id)
+            completed = self._completed.get(request_id)
+            recent_pending = sorted(
+                self._pending.values(),
+                key=lambda record: record.created_at,
+                reverse=True,
+            )[:5]
+            return {
+                "request_id": request_id,
+                "current_scope_id": self._get_current_scope_id(),
+                "pending_present": pending is not None,
+                "completed_present": completed is not None,
+                "pending_count": len(self._pending),
+                "completed_count": len(self._completed),
+                "audit_store_attached": self._store is not None,
+                "pending": self._debug_record_summary(pending),
+                "completed": self._debug_record_summary(completed),
+                "recent_pending": [
+                    self._debug_record_summary(record)
+                    for record in recent_pending
+                ],
+            }
+
     # ------------------------------------------------------------------
     # Core approval lifecycle
     # ------------------------------------------------------------------
@@ -157,10 +213,27 @@ class ApprovalService:
     ) -> PendingApproval | None:
         """Resolve one pending approval request."""
         async with self._lock:
+            scope_id = self._get_current_scope_id()
             pending = self._pending.get(request_id)
-            if pending is None or not self._matches_scope(pending):
+            if pending is None or pending.scope_id != scope_id:
                 completed = self._completed.get(request_id)
-                if completed is None or not self._matches_scope(completed):
+                if completed is None or completed.scope_id != scope_id:
+                    logger.warning(
+                        "Approval resolve miss: request_id=%s "
+                        "decision=%s current_scope_id=%s "
+                        "pending_present=%s completed_present=%s "
+                        "pending_count=%d completed_count=%d pending=%s "
+                        "completed=%s",
+                        request_id,
+                        decision.value,
+                        scope_id,
+                        pending is not None,
+                        completed is not None,
+                        len(self._pending),
+                        len(self._completed),
+                        self._debug_record_summary(pending),
+                        self._debug_record_summary(completed),
+                    )
                     return None
                 return completed
 
@@ -183,12 +256,31 @@ class ApprovalService:
     async def get_request(self, request_id: str) -> PendingApproval | None:
         """按当前 scope 获取 pending 或已完成的审批请求。"""
         async with self._lock:
-            pending = self._pending.get(request_id) or self._completed.get(
-                request_id,
-            )
-            if pending is None or not self._matches_scope(pending):
+            scope_id = self._get_current_scope_id()
+            pending = self._pending.get(request_id)
+            completed = self._completed.get(request_id)
+            record = pending or completed
+            if record is None:
+                logger.warning(
+                    "Approval lookup miss: request_id=%s "
+                    "current_scope_id=%s pending_count=%d "
+                    "completed_count=%d",
+                    request_id,
+                    scope_id,
+                    len(self._pending),
+                    len(self._completed),
+                )
                 return None
-            return pending
+            if record.scope_id != scope_id:
+                logger.warning(
+                    "Approval lookup scope mismatch: request_id=%s "
+                    "current_scope_id=%s record=%s",
+                    request_id,
+                    scope_id,
+                    self._debug_record_summary(record),
+                )
+                return None
+            return record
 
     async def get_pending_by_session(
         self,
