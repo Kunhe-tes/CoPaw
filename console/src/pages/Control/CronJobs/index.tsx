@@ -78,6 +78,7 @@ function CronJobsPage() {
   const [childrenManagementJob, setChildrenManagementJob] =
     useState<CronJob | null>(null);
   const [broadcasting, setBroadcasting] = useState(false);
+  const [broadcastRefreshing, setBroadcastRefreshing] = useState(false);
   const [saving, setSaving] = useState(false);
   const [tablePage, setTablePage] = useState(1);
   const [tablePageSize, setTablePageSize] = useState(DEFAULT_TABLE_PAGE_SIZE);
@@ -164,6 +165,7 @@ function CronJobsPage() {
     setSelectedBroadcastTargets([]);
     setBroadcastResults([]);
     setBroadcastTask(null);
+    setBroadcastRefreshing(false);
     setBroadcastOffsetEnabled(true);
     setBroadcastOffsetWindowHours(DEFAULT_BROADCAST_OFFSET_WINDOW_HOURS);
     setBroadcasting(true);
@@ -196,8 +198,33 @@ function CronJobsPage() {
     setBroadcastResults([]);
     setBroadcastTask(null);
     setBroadcasting(false);
+    setBroadcastRefreshing(false);
     setBroadcastOffsetEnabled(true);
     setBroadcastOffsetWindowHours(DEFAULT_BROADCAST_OFFSET_WINDOW_HOURS);
+  };
+
+  const handleBroadcastProgressRefresh = async () => {
+    if (
+      !broadcastingJob ||
+      !broadcastTask ||
+      broadcastTask.status !== "running"
+    ) {
+      return;
+    }
+    setBroadcastRefreshing(true);
+    try {
+      const refreshedTask = await api.getCronBroadcastTask(
+        broadcastingJob.id,
+        broadcastTask.task_id,
+      );
+      setBroadcastTask(refreshedTask);
+      setBroadcastResults(refreshedTask.results);
+    } catch (error) {
+      console.error("Failed to refresh cron broadcast task", error);
+      message.error("刷新分发进度失败");
+    } finally {
+      setBroadcastRefreshing(false);
+    }
   };
 
   const handleBroadcastOffsetWindowChange = (
@@ -228,6 +255,7 @@ function CronJobsPage() {
       };
     });
     setBroadcasting(true);
+    setBroadcastRefreshing(false);
     setBroadcastTask(null);
     setBroadcastResults([]);
     try {
@@ -416,7 +444,19 @@ function CronJobsPage() {
             />
             {broadcastTask && (
               <div className={styles.broadcastTaskProgress}>
-                {getBroadcastTaskProgressText(broadcastTask)}
+                <span className={styles.broadcastTaskProgressText}>
+                  {getBroadcastTaskProgressText(broadcastTask)}
+                </span>
+                {broadcastTask.status === "running" ? (
+                  <Button
+                    size="small"
+                    loading={broadcastRefreshing}
+                    disabled={broadcastRefreshing}
+                    onClick={handleBroadcastProgressRefresh}
+                  >
+                    刷新进度
+                  </Button>
+                ) : null}
               </div>
             )}
             {broadcastResults.length > 0 && (
