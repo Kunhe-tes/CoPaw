@@ -144,6 +144,7 @@ export interface CronOverviewResponse {
 export interface CronJobOverviewSummaryMetric {
   key: string;
   value: string;
+  hintValue?: string;
   footerValue?: string;
 }
 
@@ -230,6 +231,7 @@ export interface CronOverviewStatsResponse {
   start_date: string;
   end_date: string;
   total_tasks: number;
+  new_cron_tasks: number;
   total_executions: number;
   branch_count: number;
   tenant_count: number;
@@ -238,6 +240,10 @@ export interface CronOverviewStatsResponse {
   running_count: number;
   read_tasks: number;
   read_rate: number;
+  report_rate: number;
+  report_count: number;
+  insight_count: number;
+  phone_count: number;
   error_count: number;
   error_rate: number;
 }
@@ -458,7 +464,7 @@ function formatPercentText(value: number | null | undefined) {
   return `${formatPercentValue(value)}%`;
 }
 
-function mapCronJobOverviewPageData(
+export function mapCronJobOverviewPageData(
   stats: CronOverviewStatsResponse,
   behavior: CronBranchRankingResponse,
   branchError: CronBranchErrorResponse,
@@ -470,12 +476,13 @@ function mapCronJobOverviewPageData(
       {
         key: "tasks",
         value: formatInteger(stats.total_tasks),
+        hintValue: `新增 ${formatInteger(stats.new_cron_tasks)}`,
         footerValue: `${formatInteger(stats.total_executions)} 次`,
       },
       {
         key: "success",
         value: formatPercentValue(stats.success_rate),
-        footerValue: formatInteger(stats.success_count),
+        footerValue: `${formatInteger(stats.success_count)}/${formatInteger(stats.error_count)}`,
       },
       {
         key: "read",
@@ -483,10 +490,12 @@ function mapCronJobOverviewPageData(
         footerValue: formatInteger(stats.read_tasks),
       },
       {
-        key: "alert",
-        value: formatPercentValue(stats.error_rate),
-        footerValue: formatInteger(stats.error_count),
+        key: "report",
+        value: formatPercentValue(stats.report_rate),
       },
+      { key: "report_count", value: formatInteger(stats.report_count) },
+      { key: "insight_count", value: formatInteger(stats.insight_count) },
+      { key: "phone_count", value: formatInteger(stats.phone_count) },
     ],
     branchRankingRows: behavior.items.map((item, index) => ({
       rank: index + 1,

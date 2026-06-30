@@ -1,13 +1,15 @@
 import {
-  AlertTriangle,
   ArrowLeft,
   Banknote,
   CalendarDays,
   CheckCircle2,
   ChevronRight,
   Eye,
+  FileText,
   Landmark,
+  Phone,
   RefreshCw,
+  Search,
   UserRoundCheck,
   type LucideIcon,
 } from "lucide-react";
@@ -90,6 +92,26 @@ type SummaryMetricDefinition = {
 type SummaryMetricView = SummaryMetricDefinition & {
   value: string;
   footerValue?: string;
+  hintValue?: string;
+};
+
+// Multi-footer metric for "查看方案任务率" card
+type ReportMetricDefinition = {
+  key: string;
+  title: string;
+  unit?: string;
+  tone: SummaryMetricTone;
+  icon: LucideIcon;
+  subItems: Array<{
+    key: string;
+    label: string;
+  }>;
+};
+
+type ReportMetricView = ReportMetricDefinition & {
+  value: string;
+  hintValue?: string;
+  subValues: Record<string, string>;
 };
 
 const summaryMetricDefinitions: SummaryMetricDefinition[] = [
@@ -113,17 +135,9 @@ const summaryMetricDefinitions: SummaryMetricDefinition[] = [
     key: "success",
     title: "执行成功率",
     unit: "%",
-    footerLabel: "成功执行数",
+    footerLabel: "成功执行数/失败执行数",
     tone: "green",
     icon: CheckCircle2,
-  },
-  {
-    key: "alert",
-    title: "执行报错率",
-    unit: "%",
-    footerLabel: "失败执行数",
-    tone: "red",
-    icon: AlertTriangle,
   },
   {
     key: "read",
@@ -134,6 +148,19 @@ const summaryMetricDefinitions: SummaryMetricDefinition[] = [
     icon: Eye,
   },
 ];
+
+const reportMetricDefinition: ReportMetricDefinition = {
+  key: "report",
+  title: "查看方案任务率",
+  unit: "%",
+  tone: "blue",
+  icon: FileText,
+  subItems: [
+    { key: "report_count", label: "查看方案任务数" },
+    { key: "insight_count", label: "去洞察任务数" },
+    { key: "phone_count", label: "去电访任务数" },
+  ],
+};
 
 const emptyOverviewData: CronJobOverviewPageData = {
   summaryMetrics: [],
@@ -236,10 +263,15 @@ function SummaryCard({ metric }: { metric: SummaryMetricView }) {
         </span>
         <div className={styles.summaryText}>
           <span className={styles.summaryTitle}>{metric.title}</span>
-          <strong>
-            {metric.value}
-            {metric.unit ? <em>{metric.unit}</em> : null}
-          </strong>
+          <div className={styles.summaryValueRow}>
+            <strong>
+              {metric.value}
+              {metric.unit ? <em>{metric.unit}</em> : null}
+            </strong>
+            {metric.hintValue ? (
+              <span className={styles.summaryHint}>{metric.hintValue}</span>
+            ) : null}
+          </div>
         </div>
       </div>
       {metric.footerLabel && metric.footerValue ? (
@@ -248,6 +280,41 @@ function SummaryCard({ metric }: { metric: SummaryMetricView }) {
           <strong>{metric.footerValue}</strong>
         </div>
       ) : null}
+    </article>
+  );
+}
+
+function ReportSummaryCard({ metric }: { metric: ReportMetricView }) {
+  const Icon = metric.icon;
+
+  return (
+    <article className={`${styles.summaryCard} ${styles[metric.tone]}`}>
+      <div className={styles.summaryMain}>
+        <span className={styles.summaryIcon}>
+          <Icon size={28} />
+        </span>
+        <div className={styles.summaryText}>
+          <span className={styles.summaryTitle}>{metric.title}</span>
+          <strong>
+            {metric.value}
+            {metric.unit ? <em>{metric.unit}</em> : null}
+            {metric.hintValue ? (
+              <span className={styles.summaryHint}>{metric.hintValue}</span>
+            ) : null}
+          </strong>
+        </div>
+      </div>
+      <div className={styles.reportSubGrid}>
+        {metric.subItems.map((item) => {
+          const value = metric.subValues[item.key] || "-";
+          return (
+            <div key={item.key} className={styles.reportSubItem}>
+              <span className={styles.reportSubLabel}>{item.label}</span>
+              <strong className={styles.reportSubValue}>{value}</strong>
+            </div>
+          );
+        })}
+      </div>
     </article>
   );
 }
@@ -371,7 +438,7 @@ function RankingTable({
               <th>已读任务数</th>
               <th>涉及客户经理数</th>
               <th>查看结果的客户经理数</th>
-              <th>查看经营方案客户经理数</th>
+              <th>查看方案客户经理数</th>
               <th>去洞察的客户经理数</th>
               <th>去电访的客户经理数</th>
               <th>推荐的客户数</th>
@@ -1197,9 +1264,23 @@ export default function CronJobOverviewPage() {
     return {
       ...definition,
       value: metricValue?.value ?? "-",
+      hintValue: metricValue?.hintValue,
       footerValue,
     };
   });
+
+  // Build report metric view
+  const reportMetricValue = summaryMetricValues.get(reportMetricDefinition.key);
+  const reportMetric: ReportMetricView = {
+    ...reportMetricDefinition,
+    value: reportMetricValue?.value ?? "-",
+    hintValue: reportMetricValue?.hintValue,
+    subValues: {
+      report_count: summaryMetricValues.get("report_count")?.value ?? "-",
+      insight_count: summaryMetricValues.get("insight_count")?.value ?? "-",
+      phone_count: summaryMetricValues.get("phone_count")?.value ?? "-",
+    },
+  };
 
   return (
     <main className={styles.cronOverviewPage}>
@@ -1308,10 +1389,11 @@ export default function CronJobOverviewPage() {
         {summaryMetrics.map((metric) => (
           <SummaryCard key={metric.key} metric={metric} />
         ))}
+        <ReportSummaryCard metric={reportMetric} />
       </section>
 
       <p className={styles.formulaNote}>
-        说明： 执行成功率 = 成功执行次数 / 任务执行次数； 任务已读率 = 已读任务去重数 / 已执行任务去重数； 执行报错率 = 报错执行次数 / 任务执行次数
+        说明： 执行成功率 = 成功执行次数 / 任务执行次数； 任务已读率 = 已读执行次数 / 任务执行次数； 查看方案任务率 = 查看方案次数 / 任务执行次数
       </p>
 
       {/* 任务视角分行排行 */}
@@ -1623,7 +1705,7 @@ export default function CronJobOverviewPage() {
       </Modal>
 
       {/* 技能视角分行排行 */}
-      <h2 className={styles.sectionHeading}>
+      <h2 className={`${styles.sectionHeading} ${styles.sectionHeadingSpacious}`}>
         技能视角-分行综合排行
         <span className={styles.sectionHeadingHint}>（点击分行查看明细）</span>
       </h2>

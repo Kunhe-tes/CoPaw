@@ -330,6 +330,8 @@
 .panelMedium {
   min-height: 290px;
   padding: 18px 16px;
+  min-width: 0;
+  overflow: hidden;
 }
 
 .panelHeader {
@@ -427,10 +429,28 @@
 }
 
 .trendChart {
-  display: grid;
-  grid-template-columns: 28px minmax(0, 1fr) 28px;
-  align-items: stretch;
-  gap: 0px;
+  display: block;
+  width: 100%;
+  min-width: 0;
+  overflow: hidden;
+  position: relative;
+  isolation: isolate;
+}
+
+.trendChartCanvas {
+  width: 100%;
+  min-width: 0;
+  max-width: 100%;
+  overflow: hidden;
+}
+
+.trendChartCanvas :global(*) {
+  box-sizing: border-box;
+}
+
+.trendChartCanvas :global(canvas),
+.trendChartCanvas :global(div) {
+  max-width: 100%;
 }
 
 .axisLeft {

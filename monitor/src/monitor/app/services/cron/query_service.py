@@ -1988,7 +1988,7 @@ class QueryService:
         source_filter_params: List[Any],
     ) -> int:
         read_tasks_sql = f"""
-            SELECT COUNT(DISTINCT e.job_id) AS read_tasks
+            SELECT COUNT(*) AS read_tasks
             FROM swe_cron_executions e
             LEFT JOIN swe_cron_jobs j ON e.job_id = j.id
             WHERE e.actual_time >= %s AND e.actual_time <= %s
@@ -2003,6 +2003,32 @@ class QueryService:
         )
         row = await db.fetch_one(read_tasks_sql, tuple(params))
         return self._row_int(row, "read_tasks")
+
+    async def _fetch_overview_new_cron_tasks(
+        self,
+        db: Any,
+        start_time: datetime,
+        end_time: datetime,
+        bbk_filter_sql: str,
+        bbk_filter_params: List[Any],
+        source_filter_sql: str,
+        source_filter_params: List[Any],
+    ) -> int:
+        """查询时间范围内新增的定时任务数（按 created_at 时间判断）."""
+        new_tasks_sql = f"""
+            SELECT COUNT(*) AS new_cron_tasks
+            FROM swe_cron_jobs
+            WHERE created_at >= %s AND created_at <= %s
+              AND deleted_at IS NULL
+              AND status != 'deleted'
+              {bbk_filter_sql.replace('j.bbk_id', 'bbk_id')}
+              {source_filter_sql.replace('j.source_id', 'source_id')}
+        """
+        params = (
+            [start_time, end_time] + bbk_filter_params + source_filter_params
+        )
+        row = await db.fetch_one(new_tasks_sql, tuple(params))
+        return self._row_int(row, "new_cron_tasks")
 
     async def get_overview_stats(
         self,
@@ -2071,20 +2097,44 @@ class QueryService:
             source_filter_sql,
             source_filter_params,
         )
+        report_behavior_counts = (
+            await self._fetch_overview_report_behavior_counts(
+                db,
+                start_time,
+                end_time,
+                bbk_filter_sql,
+                bbk_filter_params,
+                source_filter_sql,
+                source_filter_params,
+            )
+        )
+        new_cron_tasks = await self._fetch_overview_new_cron_tasks(
+            db,
+            start_time,
+            end_time,
+            bbk_filter_sql,
+            bbk_filter_params,
+            source_filter_sql,
+            source_filter_params,
+        )
 
         total_executions = execution_counts["total_executions"]
-        executed_job_count = execution_counts["executed_job_count"]
         success_count = execution_counts["success_count"]
         running_count = execution_counts["running_count"]
         error_count = execution_counts["error_count"]
+        report_count = report_behavior_counts["report_count"]
+        insight_count = report_behavior_counts["insight_count"]
+        phone_count = report_behavior_counts["phone_count"]
         success_rate = self._percent(success_count, total_executions)
-        read_rate = self._percent(read_tasks, executed_job_count)
+        read_rate = self._percent(read_tasks, total_executions)
+        report_rate = self._percent(report_count, total_executions)
         error_rate = self._percent(error_count, total_executions)
 
         return CronOverviewStatsResponse(
             start_date=start_str,
             end_date=end_str,
             total_tasks=total_tasks,
+            new_cron_tasks=new_cron_tasks,
             total_executions=total_executions,
             branch_count=branch_count,
             tenant_count=tenant_count,
@@ -2093,9 +2143,62 @@ class QueryService:
             running_count=running_count,
             read_tasks=read_tasks,
             read_rate=read_rate,
+            report_rate=report_rate,
+            report_count=report_count,
+            insight_count=insight_count,
+            phone_count=phone_count,
             error_count=error_count,
             error_rate=error_rate,
         )
+
+    async def _fetch_overview_report_behavior_counts(
+        self,
+        db: Any,
+        start_time: datetime,
+        end_time: datetime,
+        bbk_filter_sql: str,
+        bbk_filter_params: List[Any],
+        source_filter_sql: str,
+        source_filter_params: List[Any],
+    ) -> dict[str, int]:
+        """查询概览中的查看方案/去洞察/去电访任务数。
+
+        三项指标都直接来自 swe_html_preview_click_events，
+        按 button_type 统计去重任务数。
+        """
+        behavior_params = [
+            start_time,
+            end_time,
+            *bbk_filter_params,
+            *source_filter_params,
+        ]
+        click_sql = f"""
+            SELECT
+                COUNT(DISTINCT CASE
+                    WHEN c.button_type = 'plan' THEN c.cron_task_id
+                END) AS report_count,
+                COUNT(DISTINCT CASE
+                    WHEN c.button_type = 'insight' THEN c.cron_task_id
+                END) AS insight_count,
+                COUNT(DISTINCT CASE
+                    WHEN c.button_type = 'phone' THEN c.cron_task_id
+                END) AS phone_count
+            FROM swe_html_preview_click_events c
+            JOIN swe_cron_jobs j
+              ON c.cron_task_id COLLATE utf8mb4_unicode_ci = j.id
+            WHERE c.clicked_at >= %s AND c.clicked_at <= %s
+              AND c.cron_task_id IS NOT NULL
+              AND j.deleted_at IS NULL
+              AND j.status != 'deleted'
+              {bbk_filter_sql.replace('j.bbk_id', 'c.bbk_id')}
+              {source_filter_sql.replace('j.source_id', 'c.source_id')}
+        """
+        click_row = await db.fetch_one(click_sql, tuple(behavior_params))
+        return {
+            "report_count": self._row_int(click_row, "report_count"),
+            "insight_count": self._row_int(click_row, "insight_count"),
+            "phone_count": self._row_int(click_row, "phone_count"),
+        }
 
     async def _fetch_branch_behavior_ids(
         self,
@@ -2310,7 +2413,7 @@ class QueryService:
 
         成功：status='success' AND async_status='success'
         失败：status='error' OR (status='success' AND async_status='error')
-        已读任务数：按 job_id 去重统计（与概览口径一致）
+        已读任务数：按已读执行次数统计（与概览口径一致）
         """
         if not job_ids:
             return {
@@ -2325,7 +2428,7 @@ class QueryService:
                 COUNT(*) AS total_executions,
                 SUM(CASE WHEN status = 'success' AND async_status = 'success'
                     THEN 1 ELSE 0 END) AS success_count,
-                COUNT(DISTINCT CASE WHEN is_read = 1 THEN job_id END) AS read_tasks,
+                SUM(CASE WHEN is_read = 1 THEN 1 ELSE 0 END) AS read_tasks,
                 SUM(CASE WHEN status = 'error'
                          OR (status = 'success' AND async_status = 'error')
                     THEN 1 ELSE 0 END) AS error_count
