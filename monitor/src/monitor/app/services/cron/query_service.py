@@ -2310,6 +2310,7 @@ class QueryService:
 
         成功：status='success' AND async_status='success'
         失败：status='error' OR (status='success' AND async_status='error')
+        已读任务数：按 job_id 去重统计（与概览口径一致）
         """
         if not job_ids:
             return {
@@ -2324,7 +2325,7 @@ class QueryService:
                 COUNT(*) AS total_executions,
                 SUM(CASE WHEN status = 'success' AND async_status = 'success'
                     THEN 1 ELSE 0 END) AS success_count,
-                SUM(CASE WHEN is_read = 1 THEN 1 ELSE 0 END) AS read_tasks,
+                COUNT(DISTINCT CASE WHEN is_read = 1 THEN job_id END) AS read_tasks,
                 SUM(CASE WHEN status = 'error'
                          OR (status = 'success' AND async_status = 'error')
                     THEN 1 ELSE 0 END) AS error_count
