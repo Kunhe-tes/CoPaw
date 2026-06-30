@@ -23,22 +23,27 @@ def _write_tenant_config(
     mcp_stdio: bool = True,
     cpu_time_limit_seconds: int | None = None,
     memory_max_mb: int | None = None,
+    shell_max_concurrent: int | None = None,
+    shell_acquire_timeout_seconds: float | None = None,
 ) -> None:
+    process_limits = {
+        "enabled": enabled,
+        "shell": shell,
+        "mcp_stdio": mcp_stdio,
+        "cpu_time_limit_seconds": cpu_time_limit_seconds,
+        "memory_max_mb": memory_max_mb,
+    }
+    if shell_max_concurrent is not None:
+        process_limits["shell_max_concurrent"] = shell_max_concurrent
+    if shell_acquire_timeout_seconds is not None:
+        process_limits["shell_acquire_timeout_seconds"] = (
+            shell_acquire_timeout_seconds
+        )
     tenant_dir = base_dir / tenant_id
     tenant_dir.mkdir(parents=True, exist_ok=True)
     save_config(
         Config.model_validate(
-            {
-                "security": {
-                    "process_limits": {
-                        "enabled": enabled,
-                        "shell": shell,
-                        "mcp_stdio": mcp_stdio,
-                        "cpu_time_limit_seconds": cpu_time_limit_seconds,
-                        "memory_max_mb": memory_max_mb,
-                    },
-                },
-            },
+            {"security": {"process_limits": process_limits}},
         ),
         tenant_dir / "config.json",
     )
@@ -85,6 +90,43 @@ def test_process_limits_config_defaults_to_disabled() -> None:
     assert config.security.process_limits.mcp_stdio is False
     assert config.security.process_limits.cpu_time_limit_seconds == 30
     assert config.security.process_limits.memory_max_mb == 150
+    assert config.security.process_limits.shell_max_concurrent == 5
+    assert config.security.process_limits.shell_acquire_timeout_seconds == 5
+
+
+def test_process_limits_config_rejects_shell_concurrency_without_shell_scope() -> (
+    None
+):
+    with pytest.raises(ValidationError):
+        Config.model_validate(
+            {
+                "security": {
+                    "process_limits": {
+                        "enabled": True,
+                        "shell": False,
+                        "mcp_stdio": True,
+                        "cpu_time_limit_seconds": None,
+                        "memory_max_mb": None,
+                        "shell_max_concurrent": 5,
+                    },
+                },
+            },
+        )
+
+
+def test_process_limits_config_rejects_zero_shell_acquire_timeout() -> None:
+    with pytest.raises(ValidationError):
+        Config.model_validate(
+            {
+                "security": {
+                    "process_limits": {
+                        "enabled": True,
+                        "shell": True,
+                        "shell_acquire_timeout_seconds": 0,
+                    },
+                },
+            },
+        )
 
 
 def test_resolve_current_process_limit_policy_uses_current_tenant_config(
@@ -100,6 +142,8 @@ def test_resolve_current_process_limit_policy_uses_current_tenant_config(
         enabled=True,
         cpu_time_limit_seconds=2,
         memory_max_mb=128,
+        shell_max_concurrent=7,
+        shell_acquire_timeout_seconds=1.5,
     )
     _write_tenant_config(
         tmp_path,
@@ -126,7 +170,21 @@ def test_resolve_current_process_limit_policy_uses_current_tenant_config(
     assert mcp_policy.tenant_id == "tenant-b"
     assert mcp_policy.cpu_time_limit_seconds == 4
     assert mcp_policy.memory_max_bytes == 256 * 1024 * 1024
+    assert mcp_policy.shell_max_concurrent is None
     assert mcp_policy.diagnostic is None
+
+    with (
+        patch("swe.constant.WORKING_DIR", tmp_path),
+        patch(
+            "swe.config.utils.WORKING_DIR",
+            tmp_path,
+        ),
+    ):
+        with tenant_context(tenant_id="tenant-a"):
+            shell_policy = resolve_current_process_limit_policy("shell")
+
+    assert shell_policy.shell_max_concurrent == 7
+    assert shell_policy.shell_acquire_timeout_seconds == 1.5
 
 
 def test_resolved_policy_builds_unix_preexec_fn(tmp_path: Path) -> None:

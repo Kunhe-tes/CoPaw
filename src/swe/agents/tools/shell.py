@@ -5,6 +5,7 @@
 
 import asyncio
 import ast
+from contextlib import asynccontextmanager
 import locale
 import os
 import re
@@ -16,7 +17,7 @@ import tempfile
 from contextlib import AbstractContextManager
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Awaitable, Optional
+from typing import Any, AsyncIterator, Awaitable, Callable, Optional
 
 from agentscope.message import TextBlock
 from agentscope.tool import ToolResponse
@@ -35,6 +36,10 @@ from ...security.tenant_path_boundary import (
 )
 from ...security.python_runtime_path_guard import (
     prepare_python_runtime_path_guard_env,
+)
+from ...security.process_limits import (
+    CurrentProcessLimitPolicy,
+    resolve_current_process_limit_policy,
 )
 
 # Commands that take string arguments which may look like paths
@@ -144,6 +149,9 @@ _DISALLOWED_SYSTEM_PATH_PREFIXES = (
     "/sys/",
     "/dev/",
 )
+
+_SHELL_SLOT_CONDITION = asyncio.Condition()
+_SHELL_SLOT_COUNTS: dict[str, int] = {}
 
 
 def _is_path_like(token: str) -> bool:
@@ -788,12 +796,91 @@ def _raise_shell_error(error_type: str, detail: str) -> None:
 def _classify_shell_failure(
     returncode: int,
     stderr_str: str,
+    *,
+    process_limits_enforced: bool = False,
+    memory_limit_enforced: bool = False,
 ) -> str:
     if returncode == -1 or "TimeoutError:" in stderr_str:
         return "tool_timeout"
     if "outside the allowed workspace" in stderr_str:
         return "permission_denied"
+    process_limit_signals = {signal.SIGKILL}
+    if hasattr(signal, "SIGXCPU"):
+        process_limit_signals.add(signal.SIGXCPU)
+    if (
+        process_limits_enforced
+        and returncode < 0
+        and abs(returncode) in process_limit_signals
+    ):
+        return "process_limit_exceeded"
+    if memory_limit_enforced and (
+        "MemoryError" in stderr_str
+        or "Cannot allocate memory" in stderr_str
+        or "Killed" in stderr_str
+    ):
+        return "process_limit_exceeded"
     return "shell_command_failed"
+
+
+def _format_process_limit_diagnostic(
+    response_text: str,
+    policy: CurrentProcessLimitPolicy,
+) -> str:
+    if not policy.diagnostic or policy.should_enforce:
+        return response_text
+    return (
+        f"{response_text}\n" f"[process-limit diagnostic]\n{policy.diagnostic}"
+    )
+
+
+def _shell_slot_key(policy: CurrentProcessLimitPolicy) -> str:
+    return policy.tenant_id or "default"
+
+
+@asynccontextmanager
+async def _tenant_shell_execution_slot(
+    policy: CurrentProcessLimitPolicy,
+) -> AsyncIterator[None]:
+    """Hold one process-local tenant shell execution slot when configured."""
+    max_concurrent = policy.shell_max_concurrent
+    if not policy.enabled or policy.scope != "shell" or max_concurrent is None:
+        yield
+        return
+
+    key = _shell_slot_key(policy)
+    timeout = policy.shell_acquire_timeout_seconds
+    acquired = False
+    try:
+        async with _SHELL_SLOT_CONDITION:
+            try:
+                await asyncio.wait_for(
+                    _SHELL_SLOT_CONDITION.wait_for(
+                        lambda: _SHELL_SLOT_COUNTS.get(key, 0)
+                        < max_concurrent,
+                    ),
+                    timeout=timeout,
+                )
+            except asyncio.TimeoutError:
+                _raise_shell_error(
+                    "shell_concurrency_limit_exceeded",
+                    (
+                        f"Tenant {key} has no available shell execution "
+                        f"slots (max {max_concurrent}) within {timeout} "
+                        "seconds."
+                    ),
+                )
+            _SHELL_SLOT_COUNTS[key] = _SHELL_SLOT_COUNTS.get(key, 0) + 1
+            acquired = True
+        yield
+    finally:
+        if acquired:
+            async with _SHELL_SLOT_CONDITION:
+                current = _SHELL_SLOT_COUNTS.get(key, 0)
+                if current <= 1:
+                    _SHELL_SLOT_COUNTS.pop(key, None)
+                else:
+                    _SHELL_SLOT_COUNTS[key] = current - 1
+                _SHELL_SLOT_CONDITION.notify_all()
 
 
 def _prepare_subprocess_env() -> dict[str, str]:
@@ -883,12 +970,14 @@ def _format_shell_response(
 
 async def _terminate_unix_process_group(
     proc: asyncio.subprocess.Process,
+    pgid: int | None = None,
 ) -> None:
     """Terminate a Unix subprocess group, escalating to SIGKILL if needed."""
-    try:
-        pgid = os.getpgid(proc.pid)
-    except ProcessLookupError:
-        pgid = proc.pid
+    if pgid is None:
+        try:
+            pgid = os.getpgid(proc.pid)
+        except ProcessLookupError:
+            pgid = proc.pid
     try:
         os.killpg(pgid, signal.SIGTERM)
     except ProcessLookupError:
@@ -906,6 +995,8 @@ def _unix_process_group_exists(pgid: int) -> bool:
     try:
         os.killpg(pgid, 0)
     except ProcessLookupError:
+        return False
+    except PermissionError:
         return False
     return True
 
@@ -931,6 +1022,20 @@ async def _wait_for_unix_process_group_exit(
         else:
             await asyncio.sleep(delay)
     return True
+
+
+async def _wait_for_unix_process_exit(
+    proc: asyncio.subprocess.Process,
+    timeout: float,
+) -> None:
+    """Wait until the shell process exits without waiting for pipe EOF."""
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + timeout
+    while proc.returncode is None:
+        remaining = deadline - loop.time()
+        if remaining <= 0:
+            raise asyncio.TimeoutError
+        await asyncio.sleep(min(0.05, remaining))
 
 
 async def _drain_unix_subprocess_output(
@@ -978,6 +1083,7 @@ async def _execute_unix_subprocess(
     working_dir: Path,
     timeout: int,
     env: dict[str, str],
+    preexec_fn: Callable[[], None] | None = None,
 ) -> tuple[int, str, str]:
     """Execute a shell command on Unix-like platforms."""
     stdout_chunks: list[bytes] = []
@@ -1011,6 +1117,7 @@ async def _execute_unix_subprocess(
         bufsize=0,
         cwd=str(working_dir),
         env=env,
+        preexec_fn=preexec_fn,
         start_new_session=True,
     )
 
@@ -1022,6 +1129,11 @@ async def _execute_unix_subprocess(
         returncode = proc.returncode if proc.returncode is not None else -1
         return returncode, smart_decode(stdout), smart_decode(stderr)
 
+    try:
+        process_group_id = os.getpgid(proc.pid)
+    except ProcessLookupError:
+        process_group_id = proc.pid
+
     stdout_task = asyncio.create_task(
         _read_stream(proc.stdout, "stdout", stdout_chunks),
     )
@@ -1031,19 +1143,23 @@ async def _execute_unix_subprocess(
     wait_task: asyncio.Task[int] | None = None
 
     try:
-        wait_task = asyncio.create_task(proc.wait())
-        tasks = (wait_task, stdout_task, stderr_task)
-        done, pending = await asyncio.wait(tasks, timeout=timeout)
-        if pending:
-            raise asyncio.TimeoutError
+        await _wait_for_unix_process_exit(proc, timeout=timeout)
         returncode = proc.returncode if proc.returncode is not None else -1
-        for task in done:
-            task.result()
-        return (
-            returncode,
-            smart_decode(b"".join(stdout_chunks)),
-            smart_decode(b"".join(stderr_chunks)),
-        )
+        await _terminate_unix_process_group(proc, process_group_id)
+        try:
+            await asyncio.wait_for(
+                asyncio.gather(
+                    stdout_task,
+                    stderr_task,
+                    return_exceptions=True,
+                ),
+                timeout=1,
+            )
+        except asyncio.TimeoutError:
+            pass
+        stdout_str = smart_decode(b"".join(stdout_chunks))
+        stderr_str = smart_decode(b"".join(stderr_chunks))
+        return returncode, stdout_str, stderr_str
     except asyncio.TimeoutError:
         stderr_suffix = (
             f"⚠️ TimeoutError: The command execution exceeded "
@@ -1052,7 +1168,7 @@ async def _execute_unix_subprocess(
             f"requires more time to complete."
         )
         try:
-            await _terminate_unix_process_group(proc)
+            await _terminate_unix_process_group(proc, process_group_id)
         except (ProcessLookupError, OSError):
             try:
                 proc.kill()
@@ -1060,8 +1176,8 @@ async def _execute_unix_subprocess(
             except (ProcessLookupError, OSError):
                 pass
         timeout_tasks: list[Awaitable[Any]] = [stdout_task, stderr_task]
-        if wait_task is not None:
-            timeout_tasks.append(wait_task)
+        wait_task = asyncio.create_task(proc.wait())
+        timeout_tasks.append(wait_task)
         try:
             await asyncio.wait_for(
                 asyncio.gather(*timeout_tasks, return_exceptions=True),
@@ -1088,6 +1204,7 @@ async def _execute_platform_subprocess(
     working_dir: Path,
     timeout: int,
     env: dict[str, str],
+    preexec_fn: Callable[[], None] | None = None,
 ) -> tuple[int, str, str]:
     """Execute a shell command on the active platform."""
     if sys.platform == "win32":
@@ -1099,7 +1216,13 @@ async def _execute_platform_subprocess(
             timeout,
             env,
         )
-    return await _execute_unix_subprocess(cmd, working_dir, timeout, env)
+    return await _execute_unix_subprocess(
+        cmd,
+        working_dir,
+        timeout,
+        env,
+        preexec_fn=preexec_fn,
+    )
 
 
 # pylint: disable=too-many-branches, too-many-statements
@@ -1133,28 +1256,45 @@ async def execute_shell_command(
     """
 
     prepared = prepare_shell_command(command, cwd)
+    process_limit_policy = resolve_current_process_limit_policy("shell")
+    preexec_fn = process_limit_policy.build_preexec_fn()
 
     try:
-        with prepared.python_runtime_guard:
-            (
-                returncode,
-                stdout_str,
-                stderr_str,
-            ) = await _execute_platform_subprocess(
-                prepared.command,
-                prepared.working_dir,
-                timeout,
-                prepared.env,
-            )
+        async with _tenant_shell_execution_slot(process_limit_policy):
+            with prepared.python_runtime_guard:
+                (
+                    returncode,
+                    stdout_str,
+                    stderr_str,
+                ) = await _execute_platform_subprocess(
+                    prepared.command,
+                    prepared.working_dir,
+                    timeout,
+                    prepared.env,
+                    preexec_fn=preexec_fn,
+                )
 
         response_text = _format_shell_response(
             returncode,
             stdout_str,
             stderr_str,
         )
+        response_text = _format_process_limit_diagnostic(
+            response_text,
+            process_limit_policy,
+        )
         if returncode != 0:
             _raise_shell_error(
-                _classify_shell_failure(returncode, stderr_str),
+                _classify_shell_failure(
+                    returncode,
+                    stderr_str,
+                    process_limits_enforced=(
+                        process_limit_policy.should_enforce
+                    ),
+                    memory_limit_enforced=(
+                        process_limit_policy.should_enforce_memory_limit
+                    ),
+                ),
                 response_text,
             )
 

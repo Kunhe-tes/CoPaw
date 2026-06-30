@@ -454,6 +454,27 @@ describe("AgentScopeRuntimeResponseCard", () => {
     expect(screen.getByText("执行失败")).toBeInTheDocument();
   });
 
+  it("keeps model_call_failed response errors directly visible with partial output", () => {
+    render(
+      <AgentScopeRuntimeResponseCard
+        data={{
+          ...response(
+            [textMessage("message-1", "partial answer")],
+            AgentScopeRuntimeRunStatus.Failed,
+          ),
+          error: {
+            code: "model_call_failed",
+            message: "provider diagnostic",
+          },
+        }}
+      />,
+    );
+
+    expect(screen.getByText("partial answer")).toBeInTheDocument();
+    expect(screen.getByText("provider diagnostic")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /执行过程/ })).toBeNull();
+  });
+
   it("summarizes failed process when a final answer exists", () => {
     render(
       <AgentScopeRuntimeResponseCard

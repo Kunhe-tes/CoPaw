@@ -44,9 +44,6 @@ export interface FilePreviewModalProps {
   defaultCustomerInfo?: Record<string, string> | null;
 }
 
-// 使用div渲染的模名称列表
-const divRenderableFiles = ["html_template_deposit_v3.html"];
-
 function FilePreviewModal(props: FilePreviewModalProps) {
   const {
     open,
@@ -72,29 +69,26 @@ function FilePreviewModal(props: FilePreviewModalProps) {
   const pollingTimerRef = useRef<NodeJS.Timeout | null>(null);
   // 存储动态渲染的 HTML 内容（直接渲染到 div 时使用）
   const [renderedHtmlContent, setRenderedHtmlContent] = useState<string | null>(
-    null
+    null,
   );
-  // 缓存动态渲染API返回的原始数据，避免重复请求
-  const [dynamicRenderCache, setDynamicRenderCache] = useState<Record<string, unknown> | null>(null);
-  // 用于直接渲染 HTML 的 ref
-  const contentDivRef = useRef<HTMLDivElement | null>(null);
   const iframeRef = useRef<HTMLIFrameElement | null>(null);
   const cleanupClickTrackingRef = useRef<(() => void) | null>(null);
   const cleanupCaptureClickRef = useRef<(() => void) | null>(null);
   const trackingContext = useHtmlPreviewTracking();
-  const { renderTemplate, templateList } = useDynamicRender();
+  const { renderTemplate, templateList, isTemplateListLoaded } =
+    useDynamicRender();
   const fileType = useMemo(() => getFileType(fileName), [fileName]);
   const isMarkdownFile = useMemo(() => /\.mdx?$/i.test(fileName), [fileName]);
   const { icon, color } = useMemo(() => getFileIcon(fileName, 48), [fileName]);
   const isHtmlPreview = useMemo(
     () =>
       fileType === "previewable" && getContentType(fileName) === "text/html",
-    [fileName, fileType]
+    [fileName, fileType],
   );
   // 判断是否为动态渲染类型
   const isDynamicRender = useMemo(
     () => isDynamicRenderHtmlLink(fileUrl),
-    [fileUrl]
+    [fileUrl],
   );
 
   // 获取动态渲染数据的函数（带轮询逻辑）
@@ -124,22 +118,10 @@ function FilePreviewModal(props: FilePreviewModalProps) {
           clearTimeout(pollingTimerRef.current);
           pollingTimerRef.current = null;
         }
-        // 缓存数据供下载使用
-        setDynamicRenderCache(res.data as Record<string, unknown>);
         const templateIdNum = parseInt(templateId, 10);
         const renderedHtml = await renderTemplate(templateIdNum, res.data);
         if (renderedHtml) {
-          // 通过templateList 获取模板名称
-          const templateName = templateList.find(
-            (t) => t.templateId === templateIdNum
-          )?.t;
-          if (divRenderableFiles.includes(templateName)) {
-            setRenderedHtmlContent(renderedHtml);
-          } else {
-            const blob = new Blob([renderedHtml], { type: "text/html" });
-            const url = URL.createObjectURL(blob);
-            setBlobUrl(url);
-          }
+          setRenderedHtmlContent(renderedHtml);
         } else {
           setError("模板渲染失败");
         }
@@ -152,7 +134,7 @@ function FilePreviewModal(props: FilePreviewModalProps) {
         setDynamicRenderLoading(false);
       }
     },
-    [renderTemplate]
+    [renderTemplate, isTemplateListLoaded],
   );
 
   // fetch 文件数据并创建 Blob URL 或动态渲染
@@ -237,61 +219,6 @@ function FilePreviewModal(props: FilePreviewModalProps) {
     };
   }, []);
 
-  // 处理捕获阶段的动态渲染链接点击事件
-  useEffect(() => {
-    const contentDiv = contentDivRef.current;
-    if (!contentDiv || !renderedHtmlContent) {
-      return;
-    }
-
-    // 在捕获阶段处理点击事件
-    const handleCaptureClick = (event: MouseEvent) => {
-      const target = event.target as HTMLElement;
-      const anchorElement = target.closest("a[data-preview-modal='true']");
-
-      if (
-        anchorElement &&
-        anchorElement instanceof HTMLAnchorElement &&
-        anchorElement.getAttribute("href")
-      ) {
-        // 使用 getAttribute 获取原始href，避免浏览器自动URL编码
-        const href = anchorElement.getAttribute("href") as string;
-        const resultId = extractResultIdFromUrl(href);
-        const templateId = extractTemplateIdFromUrl(href);
-        // 如果 href 包含 resultId 和 templateId，则阻止默认行为，进入嵌套预览
-        if (resultId && templateId) {
-          event.preventDefault();
-          event.stopPropagation();
-
-          // 提取文件名
-          const fileName = href.split("?")[0]?.split('/').pop() || 'preview.html';
-
-          // 设置嵌套预览
-          setNestedPreview({
-            fileUrl: href,
-            fileName,
-            listKey: fileUrl,
-            listName: fileName,
-            customerInfo: defaultCustomerInfo || null,
-          });
-        }
-      }
-    };
-
-    // 使用捕获阶段的事件监听
-    contentDiv.addEventListener("click", handleCaptureClick, true);
-
-    // 清理函数
-    cleanupCaptureClickRef.current = () => {
-      contentDiv.removeEventListener("click", handleCaptureClick, true);
-    };
-
-    return () => {
-      cleanupCaptureClickRef.current?.();
-      cleanupCaptureClickRef.current = null;
-    };
-  }, [renderedHtmlContent, fileUrl, defaultCustomerInfo]);
-
   useEffect(() => {
     if (!open) {
       cleanupClickTrackingRef.current?.();
@@ -300,7 +227,6 @@ function FilePreviewModal(props: FilePreviewModalProps) {
       cleanupCaptureClickRef.current = null;
       setNestedPreview(null);
       setRenderedHtmlContent(null);
-      setDynamicRenderCache(null);
       setIsFileGenerating(false);
       // 清理轮询定时器
       if (pollingTimerRef.current) {
@@ -338,7 +264,28 @@ function FilePreviewModal(props: FilePreviewModalProps) {
   const handleDownload = useCallback(async () => {
     // 动态渲染类型的特殊下载逻辑
     if (isDynamicRender) {
+      const downloadFunc = (htmlContent: string) => {
+        const blob = new Blob([htmlContent], { type: "text/html" });
+        const blobUrl = URL.createObjectURL(blob);
+
+        const link = document.createElement("a");
+        link.href = blobUrl;
+        link.download = fileName.endsWith(".html")
+          ? fileName
+          : `${fileName}.html`;
+        link.target = "_blank";
+        document.body.appendChild(link);
+        link.click();
+        document.body.removeChild(link);
+
+        // 清理Blob URL
+        setTimeout(() => URL.revokeObjectURL(blobUrl), 100);
+      };
       try {
+        if (renderedHtmlContent) {
+          downloadFunc(renderedHtmlContent);
+          return;
+        }
         const resultId = extractResultIdFromUrl(fileUrl);
         const templateId = extractTemplateIdFromUrl(fileUrl);
 
@@ -346,29 +293,16 @@ function FilePreviewModal(props: FilePreviewModalProps) {
           console.error("动态渲染链接缺少必要的参数");
           return;
         }
-
         // 优先使用缓存数据，避免重复请求接口
-        const renderData = dynamicRenderCache || (await dynamicRenderApi.getRecordData(resultId, templateId)).data;
+        const renderData = (
+          await dynamicRenderApi.getRecordData(resultId, templateId)
+        ).data;
         const templateIdNum = parseInt(templateId, 10);
         const renderedHtml = await renderTemplate(templateIdNum, renderData);
 
         if (renderedHtml) {
           // 将HTML内容转换为Blob进行下载
-          const blob = new Blob([renderedHtml], { type: "text/html" });
-          const blobUrl = URL.createObjectURL(blob);
-
-          const link = document.createElement("a");
-          link.href = blobUrl;
-          link.download = fileName.endsWith(".html")
-            ? fileName
-            : `${fileName}.html`;
-          link.target = "_blank";
-          document.body.appendChild(link);
-          link.click();
-          document.body.removeChild(link);
-
-          // 清理Blob URL
-          setTimeout(() => URL.revokeObjectURL(blobUrl), 100);
+          downloadFunc(renderedHtml);
         } else {
           console.error("模板渲染失败");
         }
@@ -385,7 +319,7 @@ function FilePreviewModal(props: FilePreviewModalProps) {
       link.click();
       document.body.removeChild(link);
     }
-  }, [fileUrl, fileName, isDynamicRender, renderTemplate, dynamicRenderCache]);
+  }, [fileUrl, fileName, isDynamicRender, renderTemplate, renderedHtmlContent]);
 
   const handleFullscreen = useCallback(() => {
     setFullscreen((prev) => !prev);
@@ -400,6 +334,12 @@ function FilePreviewModal(props: FilePreviewModalProps) {
       return;
     }
 
+    const shouldRecordHtmlPreviewEvents =
+      !trackingContext.disableEventRecording;
+
+    // 直接使用 attachHtmlPreviewClickTracker，它已完整实现：
+    // 1. 点击事件上报（只读回放可禁用记录）
+    // 2. 嵌套预览检测（支持 data-preview-modal 属性和动态渲染链接）
     try {
       cleanupClickTrackingRef.current = attachHtmlPreviewClickTracker({
         iframe,
@@ -412,11 +352,18 @@ function FilePreviewModal(props: FilePreviewModalProps) {
           listName: trackingListName,
           defaultCustomerInfo,
         },
-        reporter: htmlPreviewEventsApi.recordClick,
-        listSnapshotReporter: enableListSnapshotTracking
-          ? htmlPreviewEventsApi.recordListSnapshot
-          : undefined,
+        reporter: shouldRecordHtmlPreviewEvents
+          ? htmlPreviewEventsApi.recordClick
+          : () => undefined,
+        listSnapshotReporter:
+          shouldRecordHtmlPreviewEvents && enableListSnapshotTracking
+            ? htmlPreviewEventsApi.recordListSnapshot
+            : undefined,
         onOpenNestedPreview: setNestedPreview,
+        getTemplateName: (templateId: number) => {
+          return templateList.current.find((t) => t.templateId === templateId)
+            ?.templateName;
+        },
       });
     } catch (error) {
       console.warn("Failed to attach HTML preview click tracker:", error);
@@ -431,6 +378,7 @@ function FilePreviewModal(props: FilePreviewModalProps) {
     trackingListKey,
     trackingListName,
     trackingContext,
+    templateList,
   ]);
 
   const previewHeight = fullscreen ? "85vh" : "500px";
@@ -441,8 +389,8 @@ function FilePreviewModal(props: FilePreviewModalProps) {
         const tip = isFileGenerating
           ? "文件正在生成中，内容准备完成后，页面会自动展示最新预览"
           : dynamicRenderLoading
-            ? "正在渲染报告..."
-            : "加载中...";
+          ? "正在渲染报告..."
+          : "加载中...";
         return <Spin tip={tip} />;
       }
       if (error) {
@@ -487,13 +435,16 @@ function FilePreviewModal(props: FilePreviewModalProps) {
         );
       }
       if (renderedHtmlContent) {
-        // 动态渲染的 HTML 直接渲染到 div，点击事件可以直接监听
         return (
-          <div
-            ref={contentDivRef}
-            style={{ width: "100%", height: previewHeight, overflow: "auto" }}
-            dangerouslySetInnerHTML={{ __html: renderedHtmlContent }}
-          />
+          <div style={{ width: "100%", height: previewHeight }}>
+            <iframe
+              ref={iframeRef}
+              srcDoc={renderedHtmlContent}
+              style={{ width: "100%", height: "100%", border: "none" }}
+              title="File Preview"
+              onLoad={handleIframeLoad}
+            />
+          </div>
         );
       }
       if (blobUrl) {
@@ -566,12 +517,12 @@ function FilePreviewModal(props: FilePreviewModalProps) {
   const headerActions = useMemo(() => {
     const actions = [
       // <Tooltip key="copy" title="复制链接">
-      //   <IconButton
-      //     size="small"
-      //     icon={copied ? <SparkTrueLine style={{ color: "#52c41a" }} /> : <SparkCopyLine />}
-      //     onClick={handleCopy}
-      //     bordered={false}
-      //   />
+      //   <IconButton
+      //     size="small"
+      //     icon={copied ? <SparkTrueLine style={{ color: "#52c41a" }} /> : <SparkCopyLine />}
+      //     onClick={handleCopy}
+      //     bordered={false}
+      //   />
       // </Tooltip>,
       <Tooltip key="download" title="下载文件">
         <IconButton
@@ -592,7 +543,7 @@ function FilePreviewModal(props: FilePreviewModalProps) {
             onClick={handleFullscreen}
             bordered={false}
           />
-        </Tooltip>
+        </Tooltip>,
       );
     }
 
@@ -622,22 +573,10 @@ function FilePreviewModal(props: FilePreviewModalProps) {
             style={{
               display: "flex",
               alignItems: "center",
-              justifyContent: "space-between",
+              justifyContent: "end",
               width: "100%",
             }}
           >
-            <span
-              style={{
-                fontSize: "14px",
-                fontWeight: 500,
-                maxWidth: fullscreen ? "60vw" : "400px",
-                overflow: "hidden",
-                textOverflow: "ellipsis",
-                whiteSpace: "nowrap",
-              }}
-            >
-              {fileName}
-            </span>
             <div
               style={{
                 display: "flex",

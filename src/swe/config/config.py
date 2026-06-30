@@ -1505,6 +1505,8 @@ class ProcessLimitsConfig(BaseModel):
     mcp_stdio: bool = False
     cpu_time_limit_seconds: int | None = Field(default=30, ge=1)
     memory_max_mb: int | None = Field(default=150, ge=1)
+    shell_max_concurrent: int | None = Field(default=5, ge=1)
+    shell_acquire_timeout_seconds: float = Field(default=5, gt=0)
 
     @model_validator(mode="after")
     def validate_enabled_policy(self) -> "ProcessLimitsConfig":
@@ -1515,9 +1517,17 @@ class ProcessLimitsConfig(BaseModel):
             raise ValueError(
                 "enabled process_limits policy must target shell or mcp_stdio",
             )
-        if self.cpu_time_limit_seconds is None and self.memory_max_mb is None:
+        has_process_ceiling = (
+            self.cpu_time_limit_seconds is not None
+            or self.memory_max_mb is not None
+        )
+        has_shell_concurrency_limit = (
+            self.shell and self.shell_max_concurrent is not None
+        )
+        if not has_process_ceiling and not has_shell_concurrency_limit:
             raise ValueError(
-                "enabled process_limits policy requires at least one limit",
+                "enabled process_limits policy requires at least one "
+                "applicable limit",
             )
         return self
 

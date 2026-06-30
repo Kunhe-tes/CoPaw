@@ -33,6 +33,48 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/console", tags=["console"])
 
 MAX_UPLOAD_BYTES = 10 * 1024 * 1024
+DENIED_CHAT_ATTACHMENT_EXECUTABLE_EXTENSIONS = frozenset(
+    {
+        ".py",
+        ".pyw",
+        ".java",
+        ".class",
+        ".jar",
+        ".js",
+        ".mjs",
+        ".cjs",
+        ".jsx",
+        ".ts",
+        ".tsx",
+        ".sh",
+        ".bash",
+        ".zsh",
+        ".fish",
+        ".ps1",
+        ".bat",
+        ".cmd",
+        ".php",
+        ".rb",
+        ".pl",
+        ".lua",
+        ".go",
+        ".rs",
+        ".c",
+        ".cc",
+        ".cpp",
+        ".cxx",
+        ".h",
+        ".hpp",
+        ".cs",
+        ".kt",
+        ".kts",
+        ".swift",
+        ".exe",
+        ".dll",
+        ".so",
+        ".dylib",
+    },
+)
 _RECONNECT_ATTACH_ATTEMPTS = 10
 _RECONNECT_ATTACH_RETRY_DELAY_SECONDS = 0.1
 _CONSOLE_SSE_HEARTBEAT_SECONDS = 15
@@ -339,6 +381,12 @@ def _safe_filename(name: str) -> str:
     return re.sub(r"[^\w.\-]", "_", base)[:200] or "file"
 
 
+def _has_denied_chat_attachment_extension(filename: str | None) -> bool:
+    """Return True when the outer filename extension is denied."""
+    suffix = Path(filename or "").suffix.lower()
+    return suffix in DENIED_CHAT_ATTACHMENT_EXECUTABLE_EXTENSIONS
+
+
 def _extract_content_parts_from_mapping(request_data: dict) -> list[Any]:
     """从 dict 形态请求中提取完整 content parts。"""
     input_data = request_data.get("input", [])
@@ -636,6 +684,12 @@ async def post_console_upload(
     file: UploadFile = File(..., description="File to attach"),
 ) -> dict:
     """Save to console channel media_dir."""
+
+    if _has_denied_chat_attachment_extension(file.filename):
+        raise HTTPException(
+            status_code=400,
+            detail="Unsupported file type for chat attachment upload",
+        )
 
     workspace = await get_agent_for_request(request)
     console_channel = await workspace.channel_manager.get_channel("console")

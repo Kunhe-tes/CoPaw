@@ -33,6 +33,20 @@ const CLICKABLE_SELECTOR = "button,a,[role='button'],[data-track-id]";
 const NESTED_PREVIEW_SELECTOR = "a[data-preview-modal='true']";
 const CUSTOMER_DATA_PREFIX = "customer";
 const CUSTOMER_INFO_DATA_KEY = "customerInfo";
+
+// 从 URL 中提取 resultId 和 templateId 的正则表达式
+const RESULT_ID_REGEX = /[?&]resultId=([^&]+)/i;
+const TEMPLATE_ID_REGEX = /[?&]templateId=([^&]+)/i;
+
+function extractResultIdFromUrl(url: string): string | null {
+  const match = url.match(RESULT_ID_REGEX);
+  return match ? match[1] : null;
+}
+
+function extractTemplateIdFromUrl(url: string): string | null {
+  const match = url.match(TEMPLATE_ID_REGEX);
+  return match ? match[1] : null;
+}
 const CUSTOMER_NAME_HEADER_PATTERN = /^(客户姓名|客户名称|姓名)$/;
 const CUSTOMER_INFO_ALLOWED_KEYS = new Set([
   "customer_id",
@@ -64,10 +78,10 @@ function normalizeCustomerDatasetKey(key: string) {
 function getElementName(element: HTMLElement, buttonText: string | null) {
   return normalizeText(
     element.dataset.trackName ||
-      element.getAttribute("aria-label") ||
-      element.getAttribute("title") ||
-      element.getAttribute("name") ||
-      buttonText,
+    element.getAttribute("aria-label") ||
+    element.getAttribute("title") ||
+    element.getAttribute("name") ||
+    buttonText,
     255,
   );
 }
@@ -261,6 +275,12 @@ function getFileNameFromUrl(url: string) {
   }
 }
 
+// 检测链接是否为动态渲染链接（包含 resultId 和 templateId）
+function isDynamicRenderLink(link: HTMLAnchorElement): boolean {
+  const href = link.getAttribute("href") || link.href;
+  return !!(extractResultIdFromUrl(href) && extractTemplateIdFromUrl(href));
+}
+
 function resolveNestedPreviewUrl(
   link: HTMLAnchorElement,
   metadata: HtmlPreviewClickMetadata,
@@ -281,10 +301,10 @@ export function buildHtmlPreviewClickPayload(
   const buttonText = normalizeText(element.textContent, 512);
   const buttonId = normalizeText(
     element.dataset.trackId ||
-      element.id ||
-      element.getAttribute("name") ||
-      getClassFallbackId(element, buttonText) ||
-      buttonText,
+    element.id ||
+    element.getAttribute("name") ||
+    getClassFallbackId(element, buttonText) ||
+    buttonText,
     255,
   );
   const buttonName = getElementName(element, buttonText);
@@ -376,11 +396,12 @@ export function attachHtmlPreviewClickTracker(params: {
   reporter: HtmlPreviewClickReporter;
   listSnapshotReporter?: HtmlPreviewListSnapshotReporter;
   onOpenNestedPreview?: (preview: NestedHtmlPreviewRequest) => void;
+  getTemplateName?: (templateId: number) => string | undefined;
 }): () => void {
   const doc = params.iframe.contentDocument;
   const view = doc?.defaultView;
   if (!doc || !view) {
-    return () => {};
+    return () => { };
   }
 
   if (params.listSnapshotReporter) {
@@ -428,20 +449,46 @@ export function attachHtmlPreviewClickTracker(params: {
       console.warn("Failed to record HTML preview click:", error);
     }
 
+    // 处理嵌套预览 - 支持两种方式：
+    // 1. 带 data-preview-modal="true" 属性的链接
+    // 2. URL 中包含 resultId 和 templateId 的动态渲染链接
     const nestedPreviewLink = element.closest(NESTED_PREVIEW_SELECTOR);
+    const isDynamicRender = element.closest("a") && isDynamicRenderLink(element.closest("a")!);
+
     if (
       params.onOpenNestedPreview &&
-      nestedPreviewLink instanceof view.HTMLAnchorElement &&
-      nestedPreviewLink.href
+      ((nestedPreviewLink instanceof view.HTMLAnchorElement &&
+        nestedPreviewLink.href) ||
+        isDynamicRender)
     ) {
-      const nestedPreviewUrl = resolveNestedPreviewUrl(
-        nestedPreviewLink,
-        params.metadata,
-      );
+      let nestedPreviewUrl: string;
+      let previewFileName: string;
+
+      if (isDynamicRender) {
+        // 动态渲染链接：从 href 中提取 URL 并获取模板名称
+        const anchorElement = element.closest("a")!;
+        const href = anchorElement.getAttribute("href") || anchorElement.href;
+        const templateId = extractTemplateIdFromUrl(href);
+        nestedPreviewUrl = href;
+        previewFileName = href.split("?")[0]?.split("/").pop() || "preview.html";
+
+        // 如果提供了 getTemplateName 回调，使用它获取模板名称
+        if (templateId && params.getTemplateName) {
+          previewFileName = params.getTemplateName(parseInt(templateId, 10)) || previewFileName;
+        }
+      } else {
+        // data-preview-modal 属性链接
+        nestedPreviewUrl = resolveNestedPreviewUrl(
+          nestedPreviewLink as HTMLAnchorElement,
+          params.metadata,
+        );
+        previewFileName = getFileNameFromUrl(nestedPreviewUrl);
+      }
+
       event.preventDefault();
       params.onOpenNestedPreview({
         fileUrl: nestedPreviewUrl,
-        fileName: getFileNameFromUrl(nestedPreviewUrl),
+        fileName: previewFileName,
         listKey: payload.list_key || getListKey(params.metadata),
         listName: payload.list_name || getListName(params.metadata),
         customerInfo: payload.customer_info || null,
