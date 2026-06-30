@@ -84,6 +84,10 @@ _Avoid_: cron call, job instance
 A runtime boundary that starts scheduled work outside an incoming user HTTP request. It includes **Scheduled Job**, heartbeat, and dream execution, but not cron management API requests.
 _Avoid_: cron entry, cron API, scheduler callback
 
+**Managed Background Process**:
+An OS child process explicitly started by the **Main Agent** through built-in background-process tools. It can continue after the starting tool call returns, and the same owner scope can later list it, stop it, or read its captured output. A **Managed Background Process** is owned by source, tenant, user, chat session, agent, and workspace context. It is not an async tool task, scheduled job, scheduled run, or agent execution run.
+_Avoid_: async task, scheduled job, cron run, background hot patch
+
 **Execution Model Slot**:
 An optional model selection pinned to a **Scheduled Job**. If absent, each **Scheduled Run** uses the **Tenant Default Model** at execution time.
 _Avoid_: model params, cron model

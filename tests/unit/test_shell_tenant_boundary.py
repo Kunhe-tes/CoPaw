@@ -421,6 +421,30 @@ class TestValidateShellPaths:
             )
             assert result is None
 
+    def test_python_script_system_path_string_denied(
+        self,
+        mock_working_dir: Path,
+    ):
+        """ctypes/syscall scripts should not hide system path strings."""
+        tenant_dir = mock_working_dir / "test_tenant"
+        script = tenant_dir / "copy_opt.py"
+        script.write_text(
+            "import ctypes\n"
+            "ctypes.CDLL(None)\n"
+            "source = '/opt/python/bin/jp.py'\n"
+            "print(source)\n",
+        )
+
+        with tenant_context(tenant_id="test_tenant"):
+            result = _validate_shell_paths(
+                "python copy_opt.py",
+                base_dir=tenant_dir,
+            )
+
+        assert result is not None
+        assert "system path string" in result
+        assert "/opt/python/bin/jp.py" in result
+
     def test_python_script_symlink_outside_tenant_denied(
         self,
         mock_working_dir: Path,
@@ -493,6 +517,32 @@ class TestValidateShellPaths:
             )
             assert result is not None
             assert "outside the allowed workspace" in result
+
+    def test_home_env_path_denied(self, mock_working_dir: Path):
+        """Shell path variables should not bypass tenant path checks."""
+        tenant_dir = mock_working_dir / "test_tenant"
+        with tenant_context(tenant_id="test_tenant"):
+            result = _validate_shell_paths(
+                "cat $HOME/.ssh/id_rsa",
+                base_dir=tenant_dir,
+            )
+
+        assert result is not None
+        assert "environment path variable" in result
+        assert "$HOME" in result
+
+    def test_braced_home_env_path_denied(self, mock_working_dir: Path):
+        """Braced shell path variables should be rejected too."""
+        tenant_dir = mock_working_dir / "test_tenant"
+        with tenant_context(tenant_id="test_tenant"):
+            result = _validate_shell_paths(
+                "ls ${HOME}/.config",
+                base_dir=tenant_dir,
+            )
+
+        assert result is not None
+        assert "environment path variable" in result
+        assert "${HOME}" in result
 
     def test_relative_path_against_cwd_within_tenant_allowed(
         self,
@@ -682,6 +732,30 @@ class TestResolveCwd:
 
 class TestExecuteShellCommand:
     """Integration tests for execute_shell_command with tenant boundary."""
+
+    def test_prepare_shell_command_reuses_shell_boundary_context(
+        self,
+        mock_working_dir: Path,
+    ):
+        """共享 Shell 准备逻辑应统一解析 cwd 和租户环境。"""
+        from swe.agents.tools.shell import prepare_shell_command
+
+        tenant_dir = mock_working_dir / "test_tenant"
+
+        with tenant_context(
+            tenant_id="test_tenant",
+            user_id="user_a",
+            workspace_dir=tenant_dir,
+        ):
+            prepared = prepare_shell_command(
+                "echo ok",
+                cwd=str(tenant_dir),
+            )
+
+        assert prepared.command == "echo ok"
+        assert prepared.working_dir == tenant_dir.resolve()
+        assert "PATH" in prepared.env
+        assert prepared.python_runtime_guard is not None
 
     @pytest.mark.asyncio
     async def test_accepts_string_cwd_within_tenant(

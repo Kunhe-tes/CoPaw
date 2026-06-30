@@ -34,6 +34,8 @@ _SUMMARY_LIMIT = 50
 _DEFAULT_CHANNEL = "ZH"
 _DEFAULT_NET = "DMZ"
 _DEFAULT_TIMEOUT = 15.0
+_APPROVAL_TEXT_LIMIT = 800
+_APPROVAL_INPUT_LIMIT = 600
 
 # Message dedup: keep processed IDs for 5 minutes
 _DEDUP_TTL_SECONDS = 300
@@ -93,6 +95,28 @@ def _clean_payload(obj: Any) -> Any:
             out.append(cleaned)
         return out
     return obj
+
+
+def _build_approval_result_text(
+    *,
+    request_id: str,
+    session_id: str,
+    user_id: str,
+    tool_name: str,
+    decision: str,
+    source_channel: str,
+) -> str:
+    """构建不含按钮的工具审批结果通知正文。"""
+    decision_text = "通过" if decision == "approved" else "拒绝"
+    source_channel_text = "招乎" if source_channel == "zhaohu" else "平台"
+    lines = [
+        f"{tool_name or 'unknown'}工具审批已{decision_text}",
+        f"审批ID：{request_id}",
+        f"用户：{user_id or '-'}",
+    ]
+    if source_channel:
+        lines.append(f"审批来源：{source_channel_text}")
+    return "\n".join(lines)
 
 
 class ZhaohuChannel(BaseChannel):
@@ -564,6 +588,240 @@ class ZhaohuChannel(BaseChannel):
                 self.custom_card_url,
             )
             return (-1, "request failed")
+
+    def _format_approval_tool_input(self, tool_input: object) -> str:
+        """把工具参数格式化为可读文本，避免通知正文无限增长。"""
+        if not tool_input:
+            return ""
+        try:
+            text = json.dumps(
+                tool_input,
+                ensure_ascii=False,
+                indent=2,
+                default=str,
+            )
+        except Exception:
+            text = str(tool_input)
+        return _truncate(_normalize_text(text), _APPROVAL_INPUT_LIMIT)
+
+    def _build_approval_pending_text(
+        self,
+        *,
+        request_id: str,
+        session_id: str,
+        user_id: str,
+        tool_name: str,
+        result_summary: str,
+        findings_count: object,
+        tool_input: object,
+    ) -> str:
+        """构建不含审批按钮的工具审批待处理通知正文。"""
+        lines = [
+            f"{tool_name or 'unknown'}工具调用需要审批",
+        ]
+        params_text = self._format_approval_tool_input(tool_input)
+        if params_text:
+            lines.extend(["调用参数：", params_text])
+        lines.extend(
+            [
+                f"审批ID：{request_id}",
+                f"用户：{user_id or '-'}",
+            ],
+        )
+        return "\n".join(lines)
+
+    async def send_cron_approval_card(
+        self,
+        *,
+        request_id: str,
+        session_id: str,
+        user_id: str,
+        tool_name: str,
+        agent_id: str = "",
+        tenant_id: str = "",
+        source_id: str = "",
+        result_summary: str = "",
+        findings_count: object = 0,
+        tool_input: object = None,
+        **_: object,
+    ) -> tuple[int, str]:
+        """发送工具审批待处理通知，本阶段只发正文信息，不发按钮。"""
+        if not user_id:
+            logger.warning(
+                "zhaohu approval pending notification skipped: user_id is empty",
+            )
+            return (-1, "user_id is empty")
+
+        text = self._build_approval_pending_text(
+            request_id=request_id,
+            session_id=session_id,
+            user_id=user_id,
+            tool_name=tool_name,
+            result_summary=result_summary,
+            findings_count=findings_count,
+            tool_input=tool_input,
+        )
+        content = self._build_approval_task_initiated_card(
+            text,
+            agent_id=agent_id,
+            request_id=request_id,
+            tenant_id=tenant_id,
+            source_id=source_id,
+        )
+        open_id = await self.deal_eight_sap_to_open(user_id)
+        await self.send_custom_card(
+            open_id,
+            content,
+        )
+        return (0, "sent")
+
+    @staticmethod
+    def _build_zhclient_url(tag: dict) -> str:
+        """Build zhclient:// URL for approval button actionLink.
+
+        Format: zhclient:///?actionCode=9&actionParams=UrlEncode(Base64(params))
+        Encoding: UTF-8
+        """
+        params = json.dumps({"tag": tag}, ensure_ascii=False)
+        encoded = url_quote(
+            base64.b64encode(params.encode("utf-8")).decode("utf-8"),
+        )
+        return f"zhclient:///?actionCode=9&actionParams={encoded}"
+
+    def _build_approval_task_initiated_card(
+        self,
+        task_content: str,
+        agent_id: str = "",
+        request_id: str = "",
+        tenant_id: str = "",
+        source_id: str = "",
+    ) -> list:
+        """Build card content for task initiated notification (Template 1).
+
+        Used when user message length > 10 (task assignment).
+
+        Args:
+            task_content: The original task content from user message
+
+        Returns:
+            Card content array for send_custom_card
+        """
+        # Template 1: Task initiated notification
+        approval_tag = {
+            "agent_id": agent_id,
+            "agentId": agent_id,
+            "tenant_id": tenant_id,
+            "source_id": source_id,
+            "request_id": request_id,
+        }
+        approve_url = self._build_zhclient_url(
+            {**approval_tag, "type": "approve"},
+        )
+        reject_url = self._build_zhclient_url(
+            {**approval_tag, "type": "reject"},
+        )
+        card_content = [
+            {
+                "type": "content",
+                "list": [
+                    {
+                        "type": [0],
+                        "content": f"{task_content}",
+                        "style": 5,
+                    },
+                ],
+            },
+            {
+                "type": "operate",
+                "arrange": 0,
+                "list": [
+                    {
+                        "content": "通过",
+                        "style": 1,
+                        "action": 3,
+                        "tag": "approve",
+                        "disable": 0,
+                        "actionLink": {
+                            "url": approve_url,
+                            "pcUrl": approve_url,
+                            "mobileUrl": approve_url,
+                        },
+                    },
+                    {
+                        "content": "拒绝",
+                        "style": 0,
+                        "action": 3,
+                        "tag": "reject",
+                        "disable": 0,
+                        "actionLink": {
+                            "url": reject_url,
+                            "pcUrl": reject_url,
+                            "mobileUrl": reject_url,
+                        },
+                    },
+                ],
+            },
+        ]
+
+        return card_content
+
+    async def deal_eight_sap_to_open(self, send_addr):
+        if send_addr and len(send_addr) == 8:
+            logger.info(
+                "zhaohu _build_push_payload: send_addr is 8, querying user info for sapId=%s",
+                send_addr,
+            )
+            user_info = await self._query_user_info_by_sap(send_addr)
+            if user_info and user_info.get("openId"):
+                open_id = user_info.get("openId")
+                logger.info(
+                    "zhaohu _build_push_payload: sapId=%s -> openId=%s",
+                    send_addr,
+                    open_id,
+                )
+                send_addr = open_id
+            else:
+                logger.warning(
+                    "zhaohu _build_push_payload: failed to get openId for sapId=%s",
+                    send_addr,
+                )
+        return send_addr
+
+    async def send_cron_approval_result(
+        self,
+        *,
+        request_id: str,
+        session_id: str,
+        user_id: str,
+        tool_name: str = "",
+        decision: str,
+        source_channel: str = "",
+        **_: object,
+    ) -> tuple[int, str]:
+        """发送工具审批结果通知，本阶段只发正文信息，不发按钮。"""
+        if not user_id:
+            logger.warning(
+                "zhaohu approval result notification skipped: user_id is empty",
+            )
+            return (-1, "user_id is empty")
+
+        text = _build_approval_result_text(
+            request_id=request_id,
+            session_id=session_id,
+            user_id=user_id,
+            tool_name=tool_name,
+            decision=decision,
+            source_channel=source_channel,
+        )
+        await self.send(
+            user_id,
+            text,
+            {
+                "session_id": session_id,
+                "notification_summary": "工具审批结果",
+            },
+        )
+        return (0, "sent")
 
     def _build_claw_url(
         self,
@@ -1385,6 +1643,7 @@ class ZhaohuChannel(BaseChannel):
             user_name,
         )
         source_id = str(meta.get("source_id") or self.channel)
+        meta["source_id"] = source_id
         logger.info("source id final sourceId=%s", source_id)
 
         with bind_tenant_context(

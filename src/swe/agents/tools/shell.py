@@ -8,11 +8,14 @@ import ast
 from contextlib import asynccontextmanager
 import locale
 import os
+import re
 import shlex
 import signal
 import subprocess
 import sys
 import tempfile
+from contextlib import AbstractContextManager
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, AsyncIterator, Awaitable, Callable, Optional
 
@@ -127,6 +130,25 @@ _PYTHON_PATH_CALL_ARG_INDICES = {
 
 _PYTHON_SCAN_MAX_FILES = 128
 _PYTHON_SCAN_MAX_BYTES = 512 * 1024
+_DISALLOWED_SHELL_ENV_PATH_VARS = frozenset(
+    {"HOME", "PWD", "OLDPWD", "TMPDIR", "TEMP", "TMP"},
+)
+_DISALLOWED_SHELL_ENV_PATH_PATTERN = re.compile(
+    r"(?<!\\)\$(?:\{(?P<braced>[A-Za-z_][A-Za-z0-9_]*)\}|"
+    r"(?P<bare>[A-Za-z_][A-Za-z0-9_]*)\b)",
+)
+_RAW_WINDOWS_PATH_PATTERN = re.compile(
+    r"(?<![A-Za-z0-9_:])(?:[A-Za-z]:[\\/][^\s\"'`|;&<>]*|"
+    r"\\\\[^\s\"'`|;&<>]+)",
+)
+_DISALLOWED_SYSTEM_PATH_PREFIXES = (
+    "/opt/",
+    "/etc/",
+    "/root/",
+    "/proc/",
+    "/sys/",
+    "/dev/",
+)
 
 _SHELL_SLOT_CONDITION = asyncio.Condition()
 _SHELL_SLOT_COUNTS: dict[str, int] = {}
@@ -139,9 +161,26 @@ def _is_path_like(token: str) -> bool:
         token: The token to check.
 
     Returns:
-        True if the token looks like a path (starts with /, ./, ../, or ~).
+        True if the token looks like a path.
     """
-    return token.startswith(("/", "./", "../", "~"))
+    return token.startswith(("/", "\\", "./", "../", "~")) or re.match(
+        r"^[A-Za-z]:[\\/]",
+        token,
+    )
+
+
+def _find_disallowed_shell_env_path_reference(command: str) -> Optional[str]:
+    """Return a disallowed shell path variable reference if one is present."""
+    for match in _DISALLOWED_SHELL_ENV_PATH_PATTERN.finditer(command):
+        var_name = match.group("braced") or match.group("bare") or ""
+        if var_name in _DISALLOWED_SHELL_ENV_PATH_VARS:
+            return match.group(0)
+    return None
+
+
+def _extract_raw_windows_path_tokens(command: str) -> list[str]:
+    """Extract Windows absolute paths before POSIX shlex can drop backslashes."""
+    return [match.group(0) for match in _RAW_WINDOWS_PATH_PATTERN.finditer(command)]
 
 
 def _has_code_exec_flag(token: str) -> bool:
@@ -205,6 +244,9 @@ def _extract_path_tokens(command: str) -> tuple[list[str], bool]:
     is_exempt_cmd = cmd_name in _STRING_ARG_COMMANDS
     is_interpreter = cmd_name in _INTERPRETER_COMMANDS
 
+    if not is_exempt_cmd:
+        file_paths.extend(_extract_raw_windows_path_tokens(command))
+
     i = 0
     while i < len(tokens):
         token = tokens[i]
@@ -232,7 +274,8 @@ def _extract_path_tokens(command: str) -> tuple[list[str], bool]:
                     pass
             else:
                 # Non-exempt command: any path-like token is a file path
-                file_paths.append(token)
+                if token not in file_paths:
+                    file_paths.append(token)
 
         i += 1
 
@@ -299,6 +342,18 @@ def _scan_python_source_for_outside_path(
         tree = ast.parse(source)
     except SyntaxError:
         return None
+
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Constant) or not isinstance(
+            node.value,
+            str,
+        ):
+            continue
+        if node.value.startswith(("http://", "https://")):
+            continue
+        for prefix in _DISALLOWED_SYSTEM_PATH_PREFIXES:
+            if prefix in node.value:
+                return node.value
 
     constants = _collect_string_constants(tree)
     for node in ast.walk(tree):
@@ -409,7 +464,8 @@ def _validate_python_script_contents(
         outside_path = _scan_python_source_for_outside_path(source, base_dir)
         if outside_path:
             return (
-                "Error: Python code contains path outside the allowed workspace: "
+                "Error: Python code contains path outside the allowed "
+                "workspace or system path string: "
                 f"'{outside_path}'"
             )
         return None
@@ -446,7 +502,8 @@ def _validate_python_script_contents(
         )
         if outside_path:
             return (
-                "Error: Python script contains path outside the allowed workspace: "
+                "Error: Python script contains path outside the allowed "
+                "workspace or system path string: "
                 f"'{outside_path}'"
             )
 
@@ -463,6 +520,14 @@ def _validate_shell_paths(command: str, base_dir: Path) -> Optional[str]:
     Returns:
         Error message if any path escapes the tenant boundary, None otherwise.
     """
+    env_path_ref = _find_disallowed_shell_env_path_reference(command)
+    if env_path_ref:
+        return (
+            "Error: Shell command references disallowed environment path "
+            f"variable: '{env_path_ref}'. Use an explicit workspace-relative "
+            "path instead."
+        )
+
     file_paths, has_code_exec = _extract_path_tokens(command)
 
     # Reject commands with code execution flags (-c, -e, etc.)
@@ -831,6 +896,56 @@ def _prepare_subprocess_env() -> dict[str, str]:
     return env
 
 
+@dataclass(frozen=True)
+class PreparedShellCommand:
+    """Shell 工具共享的已校验启动参数。"""
+
+    command: str
+    working_dir: Path
+    env: dict[str, str]
+    python_runtime_guard: AbstractContextManager[None]
+
+
+def prepare_shell_command(
+    command: str,
+    cwd: Optional[Path | str] = None,
+) -> PreparedShellCommand:
+    """归一化并校验 Shell 命令，生成可执行启动参数。"""
+    cmd = _collapse_embedded_newlines((command or "").strip())
+
+    from .shell_interceptor import intercept_command
+
+    cmd, _was_intercepted = intercept_command(cmd)
+
+    try:
+        working_dir = _resolve_cwd(cwd)
+    except TenantPathBoundaryError as e:
+        _raise_shell_error("permission_denied", f"Error: {e}")
+
+    path_error = _validate_shell_paths(cmd, base_dir=working_dir)
+    if path_error:
+        error_type = (
+            "permission_denied"
+            if "outside the allowed workspace" in path_error
+            else "invalid_arguments"
+        )
+        _raise_shell_error(error_type, path_error)
+
+    env = _prepare_subprocess_env()
+    python_runtime_guard = prepare_python_runtime_path_guard_env(
+        env,
+        tenant_root=get_current_tenant_root(),
+        base_dir=working_dir,
+    )
+
+    return PreparedShellCommand(
+        command=cmd,
+        working_dir=working_dir,
+        env=env,
+        python_runtime_guard=python_runtime_guard,
+    )
+
+
 def _format_shell_response(
     returncode: int,
     stdout_str: str,
@@ -1140,50 +1255,22 @@ async def execute_shell_command(
             return code will be -1 and stderr will contain timeout information.
     """
 
-    cmd = _collapse_embedded_newlines((command or "").strip())
-
-    # Intercept command and inject tenant isolation params if applicable
-    from .shell_interceptor import intercept_command
-
-    cmd, _was_intercepted = intercept_command(cmd)
-
-    # Validate and resolve the working directory against tenant boundary
-    try:
-        working_dir = _resolve_cwd(cwd)
-    except TenantPathBoundaryError as e:
-        _raise_shell_error("permission_denied", f"Error: {e}")
-
-    # Validate explicit path tokens in the command, using working_dir as base for relative paths
-    path_error = _validate_shell_paths(cmd, base_dir=working_dir)
-    if path_error:
-        error_type = (
-            "permission_denied"
-            if "outside the allowed workspace" in path_error
-            else "invalid_arguments"
-        )
-        _raise_shell_error(error_type, path_error)
-
-    env = _prepare_subprocess_env()
-    python_runtime_guard = prepare_python_runtime_path_guard_env(
-        env,
-        tenant_root=get_current_tenant_root(),
-        base_dir=working_dir,
-    )
+    prepared = prepare_shell_command(command, cwd)
     process_limit_policy = resolve_current_process_limit_policy("shell")
     preexec_fn = process_limit_policy.build_preexec_fn()
 
     try:
         async with _tenant_shell_execution_slot(process_limit_policy):
-            with python_runtime_guard:
+            with prepared.python_runtime_guard:
                 (
                     returncode,
                     stdout_str,
                     stderr_str,
                 ) = await _execute_platform_subprocess(
-                    cmd,
-                    working_dir,
+                    prepared.command,
+                    prepared.working_dir,
                     timeout,
-                    env,
+                    prepared.env,
                     preexec_fn=preexec_fn,
                 )
 
