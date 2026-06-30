@@ -50,20 +50,21 @@ describe("DownloadFileCard", () => {
     });
   });
 
-  it("显式启用时自动打开带存款到期完整客户名单关键词的 HTML 预览", async () => {
+  it("页面级自动预览不再匹配存款到期完整客户名单关键词", () => {
     render(
-      <DownloadFileCard
-        url="https://example.test/static/report-1.html"
-        fileName="存款到期完整客户名单-2026-05-29.html"
-        autoPreview
-      />,
+      <AutoPreviewHtmlProvider triggerKey={1} onConsumed={vi.fn()}>
+        <DownloadFileCard
+          url="https://example.test/static/report-old.html"
+          fileName="存款到期完整客户名单-old.html"
+        />
+        <DownloadFileCard
+          url="https://example.test/static/report-new.html"
+          fileName="存款到期完整客户名单-new.html"
+        />
+      </AutoPreviewHtmlProvider>,
     );
 
-    await waitFor(() => {
-      expect(screen.getByTestId("file-preview-modal")).toHaveTextContent(
-        "存款到期完整客户名单-2026-05-29.html",
-      );
-    });
+    expect(screen.queryByTestId("file-preview-modal")).not.toBeInTheDocument();
   });
 
   it("普通 HTML 链接不自动打开预览", () => {
@@ -81,19 +82,19 @@ describe("DownloadFileCard", () => {
     render(
       <AutoPreviewHtmlProvider triggerKey={1} onConsumed={vi.fn()}>
         <DownloadFileCard
-          url="https://example.test/static/report-old.html"
-          fileName="存款到期完整客户名单-old.html"
+          url="https://example.test/static/report-old[auto-preview].html"
+          fileName="report-old[auto-preview].html"
         />
         <DownloadFileCard
-          url="https://example.test/static/report-new.html"
-          fileName="存款到期完整客户名单-new.html"
+          url="https://example.test/static/report-new[auto-preview].html"
+          fileName="report-new[auto-preview].html"
         />
       </AutoPreviewHtmlProvider>,
     );
 
     await waitFor(() => {
       expect(screen.getByTestId("file-preview-modal")).toHaveTextContent(
-        "存款到期完整客户名单-new.html",
+        "report-new[auto-preview].html",
       );
     });
     expect(screen.getAllByTestId("file-preview-modal")).toHaveLength(1);
