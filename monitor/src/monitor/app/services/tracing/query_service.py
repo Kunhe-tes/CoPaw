@@ -774,6 +774,53 @@ class TracingQueryService:  # pylint: disable=too-many-public-methods
             row = await self._db.fetch_one(query, query_params)
             return int((row or {}).get("total") or 0)
 
+        async def get_customer_click_stats_for_growth(
+            s: datetime,
+            e: datetime,
+            is_prev: bool = False,
+        ) -> dict[str, int]:
+            """获取客户点击统计（用于增长率计算）."""
+            time_compare = "<" if is_prev else "<="
+            if source_id == "all":
+                exclude_placeholders = ", ".join(
+                    ["%s"] * len(EXCLUDED_SOURCE_IDS),
+                )
+                query = f"""
+                    SELECT
+                        button_type,
+                        COUNT(DISTINCT CONCAT(COALESCE(cron_task_id, ''), '|', COALESCE(customer_id, ''))) as customer_count
+                    FROM swe_html_preview_click_events
+                    WHERE clicked_at >= %s AND clicked_at {time_compare} %s
+                      AND source_id NOT IN ({exclude_placeholders})
+                      AND button_type IN ('plan', 'insight', 'phone')
+                      AND cron_task_id IS NOT NULL
+                      AND customer_id IS NOT NULL{bbk_filter_sql}
+                    GROUP BY button_type
+                """
+                params = (s, e, *EXCLUDED_SOURCE_IDS, *bbk_filter_params)
+                rows = await self._db.fetch_all(query, params)
+            else:
+                query = f"""
+                    SELECT
+                        button_type,
+                        COUNT(DISTINCT CONCAT(COALESCE(cron_task_id, ''), '|', COALESCE(customer_id, ''))) as customer_count
+                    FROM swe_html_preview_click_events
+                    WHERE source_id = %s AND clicked_at >= %s AND clicked_at {time_compare} %s
+                      AND button_type IN ('plan', 'insight', 'phone')
+                      AND cron_task_id IS NOT NULL
+                      AND customer_id IS NOT NULL{bbk_filter_sql}
+                    GROUP BY button_type
+                """
+                params = (source_id, s, e, *bbk_filter_params)
+                rows = await self._db.fetch_all(query, params)
+
+            result = {"plan": 0, "insight": 0, "phone": 0}
+            for row in rows:
+                btn = row["button_type"]
+                if btn in result:
+                    result[btn] = row["customer_count"] or 0
+            return result
+
         curr = await get_stats(start_date, end_date, is_prev=False)
         prev = await get_stats(prev_start, prev_end, is_prev=True)
         curr_skill_calls = await get_skill_calls(
@@ -797,7 +844,19 @@ class TracingQueryService:  # pylint: disable=too-many-public-methods
             is_prev=True,
         )
 
-        # 深度指标与看板“使用深度”卡片口径保持一致：占比类指标和时长类
+        # 获取当前和上一周期的客户点击统计
+        curr_click_stats = await get_customer_click_stats_for_growth(
+            start_date,
+            end_date,
+            is_prev=False,
+        )
+        prev_click_stats = await get_customer_click_stats_for_growth(
+            prev_start,
+            prev_end,
+            is_prev=True,
+        )
+
+        # 深度指标与看板”使用深度”卡片口径保持一致：占比类指标和时长类
         # 指标都通过专用聚合函数获取，不与基础规模指标混算。
         curr_multi_round_ratio = await self._get_multi_round_ratio(
             source_id,
@@ -888,6 +947,18 @@ class TracingQueryService:  # pylint: disable=too-many-public-methods
             "multiRoundRatioGrowth": multi_round_ratio_growth,  # >3 轮会话占比口径
             "avgDurationGrowth": avg_duration_growth,  # 平均对话时长（秒）口径
             "avgSessionsPerUserGrowth": avg_sessions_per_user_growth,  # 人均会话数口径
+            "planCustomersGrowth": calc_growth(
+                curr_click_stats.get("plan", 0),
+                prev_click_stats.get("plan", 0),
+            ),
+            "insightCustomersGrowth": calc_growth(
+                curr_click_stats.get("insight", 0),
+                prev_click_stats.get("insight", 0),
+            ),
+            "phoneCustomersGrowth": calc_growth(
+                curr_click_stats.get("phone", 0),
+                prev_click_stats.get("phone", 0),
+            ),
         }
 
     async def get_daily_trend(
