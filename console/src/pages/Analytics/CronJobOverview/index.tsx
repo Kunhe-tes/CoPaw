@@ -263,12 +263,12 @@ function SummaryCard({ metric }: { metric: SummaryMetricView }) {
         </span>
         <div className={styles.summaryText}>
           <span className={styles.summaryTitle}>{metric.title}</span>
+          {metric.hintValue ? (
+            <span className={styles.summaryHint}>{metric.hintValue}</span>
+          ) : null}
           <strong>
             {metric.value}
             {metric.unit ? <em>{metric.unit}</em> : null}
-            {metric.hintValue ? (
-              <span className={styles.summaryHint}>{metric.hintValue}</span>
-            ) : null}
           </strong>
         </div>
       </div>
@@ -1391,7 +1391,7 @@ export default function CronJobOverviewPage() {
       </section>
 
       <p className={styles.formulaNote}>
-        说明： 执行成功率 = 成功执行次数 / 任务执行次数； 任务已读率 = 已读任务去重数 / 已执行任务去重数； 查看方案任务率 = 查看方案任务去重数 / 已执行任务去重数
+        说明： 执行成功率 = 成功执行次数 / 任务执行次数； 任务已读率 = 已读执行次数 / 任务执行次数； 查看方案任务率 = 查看方案次数 / 任务执行次数
       </p>
 
       {/* 任务视角分行排行 */}

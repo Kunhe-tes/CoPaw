@@ -1988,7 +1988,7 @@ class QueryService:
         source_filter_params: List[Any],
     ) -> int:
         read_tasks_sql = f"""
-            SELECT COUNT(DISTINCT e.job_id) AS read_tasks
+            SELECT COUNT(*) AS read_tasks
             FROM swe_cron_executions e
             LEFT JOIN swe_cron_jobs j ON e.job_id = j.id
             WHERE e.actual_time >= %s AND e.actual_time <= %s
@@ -2119,7 +2119,6 @@ class QueryService:
         )
 
         total_executions = execution_counts["total_executions"]
-        executed_job_count = execution_counts["executed_job_count"]
         success_count = execution_counts["success_count"]
         running_count = execution_counts["running_count"]
         error_count = execution_counts["error_count"]
@@ -2127,8 +2126,8 @@ class QueryService:
         insight_count = report_behavior_counts["insight_count"]
         phone_count = report_behavior_counts["phone_count"]
         success_rate = self._percent(success_count, total_executions)
-        read_rate = self._percent(read_tasks, executed_job_count)
-        report_rate = self._percent(report_count, executed_job_count)
+        read_rate = self._percent(read_tasks, total_executions)
+        report_rate = self._percent(report_count, total_executions)
         error_rate = self._percent(error_count, total_executions)
 
         return CronOverviewStatsResponse(
@@ -2164,9 +2163,9 @@ class QueryService:
     ) -> dict[str, int]:
         """查询概览中的查看方案/去洞察/去电访任务数。
 
-        查看方案任务数按“打开方案预览页”统计，不要求发生按钮点击；
+        查看方案任务数按“打开方案预览页”的任务数统计，不要求发生按钮点击；
         去洞察、去电访任务数按点击行为统计。
-        三项指标都限定为同周期内执行的任务，避免与执行去重口径偏离。
+        三项指标都限定为同周期内执行的任务。
         """
         view_sql = f"""
             SELECT COUNT(DISTINCT e.job_id) AS report_count
@@ -2190,7 +2189,6 @@ class QueryService:
             *source_filter_params,
         ]
         view_row = await db.fetch_one(view_sql, tuple(behavior_params))
-
         click_sql = f"""
             SELECT
                 COUNT(DISTINCT CASE
@@ -2430,7 +2428,7 @@ class QueryService:
 
         成功：status='success' AND async_status='success'
         失败：status='error' OR (status='success' AND async_status='error')
-        已读任务数：按 job_id 去重统计（与概览口径一致）
+        已读任务数：按已读执行次数统计（与概览口径一致）
         """
         if not job_ids:
             return {
@@ -2445,7 +2443,7 @@ class QueryService:
                 COUNT(*) AS total_executions,
                 SUM(CASE WHEN status = 'success' AND async_status = 'success'
                     THEN 1 ELSE 0 END) AS success_count,
-                COUNT(DISTINCT CASE WHEN is_read = 1 THEN job_id END) AS read_tasks,
+                SUM(CASE WHEN is_read = 1 THEN 1 ELSE 0 END) AS read_tasks,
                 SUM(CASE WHEN status = 'error'
                          OR (status = 'success' AND async_status = 'error')
                     THEN 1 ELSE 0 END) AS error_count

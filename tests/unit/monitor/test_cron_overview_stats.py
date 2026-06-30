@@ -46,7 +46,8 @@ async def test_get_overview_stats_includes_report_metrics(monkeypatch):
         end_date="2026-06-30",
     )
 
-    assert result.report_rate == 35.0
+    assert result.read_rate == 2.46
+    assert result.report_rate == 1.41
     assert result.report_count == 35
     assert result.insight_count == 12
     assert result.phone_count == 5
@@ -54,7 +55,7 @@ async def test_get_overview_stats_includes_report_metrics(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_fetch_overview_report_behavior_counts_uses_snapshot_for_plan_views():
-    """查看方案任务数应来自方案预览快照，洞察与电访仍来自点击。"""
+    """查看方案任务数应来自方案预览快照对应的任务数，洞察与电访仍来自点击。"""
     db = MagicMock()
     db.fetch_one = AsyncMock(
         side_effect=[
@@ -78,6 +79,7 @@ async def test_fetch_overview_report_behavior_counts_uses_snapshot_for_plan_view
     click_sql, click_params = db.fetch_one.await_args_list[1].args
 
     assert "JOIN swe_html_preview_list_snapshots s" in view_sql
+    assert "COUNT(DISTINCT e.job_id) AS report_count" in view_sql
     assert "s.cron_task_id COLLATE utf8mb4_unicode_ci = e.job_id" in view_sql
     assert "s.snapshot_at >= %s AND s.snapshot_at <= %s" in view_sql
     assert "AND j.bbk_id IN (%s, %s)" in view_sql
@@ -90,11 +92,30 @@ async def test_fetch_overview_report_behavior_counts_uses_snapshot_for_plan_view
     assert "c.clicked_at >= %s AND c.clicked_at <= %s" in click_sql
     assert list(click_params[4:]) == ["100", "V00", "src-1"]
 
-    assert result == {
-        "report_count": 8,
-        "insight_count": 3,
-        "phone_count": 1,
-    }
+    assert result == {"report_count": 8, "insight_count": 3, "phone_count": 1}
+
+
+@pytest.mark.asyncio
+async def test_fetch_overview_read_tasks_counts_read_executions():
+    """任务已读数应按已读执行次数统计，不再按任务去重。"""
+    db = MagicMock()
+    db.fetch_one = AsyncMock(return_value={"read_tasks": 9})
+    service = QueryService()
+
+    result = await service._fetch_overview_read_tasks(
+        db=db,
+        start_time=MagicMock(),
+        end_time=MagicMock(),
+        bbk_filter_sql="",
+        bbk_filter_params=[],
+        source_filter_sql="",
+        source_filter_params=[],
+    )
+
+    sql, _ = db.fetch_one.await_args.args
+    assert "COUNT(*) AS read_tasks" in sql
+    assert "COUNT(DISTINCT e.job_id)" not in sql
+    assert result == 9
 
 
 @pytest.mark.asyncio
@@ -178,3 +199,30 @@ async def test_fetch_branch_click_counts_uses_same_execution_window():
             },
         },
     }
+
+
+@pytest.mark.asyncio
+async def test_fetch_branch_execution_stats_counts_read_executions():
+    """分行综合排行的已读任务数应按已读执行次数统计，不再按任务去重。"""
+    db = MagicMock()
+    db.fetch_one = AsyncMock(
+        return_value={
+            "total_executions": 12,
+            "success_count": 8,
+            "read_tasks": 5,
+            "error_count": 2,
+        },
+    )
+    service = QueryService()
+
+    result = await service._fetch_branch_execution_stats(
+        db=db,
+        start_time=MagicMock(),
+        end_time=MagicMock(),
+        job_ids=["job-1", "job-2"],
+    )
+
+    sql, _ = db.fetch_one.await_args.args
+    assert "SUM(CASE WHEN is_read = 1 THEN 1 ELSE 0 END) AS read_tasks" in sql
+    assert "COUNT(DISTINCT CASE WHEN is_read = 1 THEN job_id END)" not in sql
+    assert result["read_tasks"] == 5

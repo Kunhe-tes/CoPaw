@@ -476,7 +476,7 @@ export function mapCronJobOverviewPageData(
       {
         key: "tasks",
         value: formatInteger(stats.total_tasks),
-        hintValue: `新增 ${formatInteger(stats.new_cron_tasks)} 个`,
+        hintValue: `新增 ${formatInteger(stats.new_cron_tasks)}`,
         footerValue: `${formatInteger(stats.total_executions)} 次`,
       },
       {
