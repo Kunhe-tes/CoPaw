@@ -261,7 +261,9 @@ async def _handle_custom_card(
         request.state.effective_tenant_id = request.state.scope_id
 
     user_id = getattr(request.state, "user_id", "")
+    state_scope_id = getattr(request.state, "scope_id", None)
 
+    from ..tenant_context import bind_tenant_context
     from ..routers.approvals import ExternalApprovalRequest, _submit_decision
     from ..approvals.external import ExternalApprovalDecision
 
@@ -276,12 +278,18 @@ async def _handle_custom_card(
         source_message_id=request_id,
     )
     try:
-        result = await _submit_decision(
-            request_id,
-            decision,
-            approval_body,
-            request,
-        )
+        with bind_tenant_context(
+            tenant_id=state_tenant_id,
+            user_id=user_id,
+            source_id=state_source_id,
+            scope_id=state_scope_id,
+        ):
+            result = await _submit_decision(
+                request_id,
+                decision,
+                approval_body,
+                request,
+            )
         return Response(
             content=result.model_dump_json(),
             media_type="application/json",
