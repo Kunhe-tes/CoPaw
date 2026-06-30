@@ -89,6 +89,7 @@ export interface ChatSidebarProps {
   onTaskRun?: (task: CronJobSpecOutput) => void;
   onTaskResume?: (task: CronJobSpecOutput) => void;
   onTaskDelete?: (task: CronJobSpecOutput) => void;
+  onTaskEdit?: (task: CronJobSpecOutput) => void;
 }
 
 export default function ChatSidebar(props: ChatSidebarProps) {
@@ -101,6 +102,7 @@ export default function ChatSidebar(props: ChatSidebarProps) {
     onTaskRun,
     onTaskResume,
     onTaskDelete,
+    onTaskEdit,
   } = props;
   const navigate = useNavigate();
   const location = useLocation();
@@ -355,6 +357,7 @@ export default function ChatSidebar(props: ChatSidebarProps) {
             onTaskRun={onTaskRun}
             onTaskResume={onTaskResume}
             onTaskDelete={onTaskDelete}
+            onTaskEdit={onTaskEdit}
             toolbarRef={toolbarRef}
           />
           <ExpandablePanel
@@ -420,6 +423,7 @@ export default function ChatSidebar(props: ChatSidebarProps) {
                 onTaskRun={onTaskRun}
                 onTaskResume={onTaskResume}
                 onTaskDelete={onTaskDelete}
+                onTaskEdit={onTaskEdit}
               />
               <div className="chat-sidebar-history">
                 <div

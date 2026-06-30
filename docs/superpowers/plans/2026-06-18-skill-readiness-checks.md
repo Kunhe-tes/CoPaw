@@ -345,7 +345,7 @@ mcp_tools_available -> MCP 工具可用性
 
 - [ ] **Step 4.3: Implement profile check**
 
-Read the tenant user's `PROFILE.md`, require heading `### 用户身份信息`, and require non-empty `分行号`, `网点机构编号`, `岗位编号`, `客户经理ID`.
+Read the tenant user's `PROFILE.md`, require a standalone `用户身份信息` line with optional Markdown heading markers, and require non-empty `分行号`, `网点机构编号`, `岗位编号`, `客户经理ID`.
 
 - [ ] **Step 4.4: Implement cron binding check**
 

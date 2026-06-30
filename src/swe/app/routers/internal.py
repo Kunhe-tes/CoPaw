@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Any, Dict, Optional
 from urllib.parse import unquote, urlsplit
 
-from fastapi import APIRouter, Body, File, Header, HTTPException, Request
+from fastapi import APIRouter, Body, File, Form, Header, HTTPException, Request
 from fastapi import UploadFile
 from pydantic import BaseModel, Field
 
@@ -533,6 +533,8 @@ def _read_text_asset(file_name: str) -> InternalTextAssetReadResponse:
 
 async def _save_uploaded_asset_file(
     file: UploadFile,
+    *,
+    template_flag: Optional[str] = None,
 ) -> InternalAssetUploadResponse:
     safe_file_name = _validate_asset_file_name(file.filename or "")
     content = await file.read()
@@ -552,6 +554,7 @@ async def _save_uploaded_asset_file(
             file_name=safe_file_name,
             file_size=file_size,
             asset_path=asset_path,
+            template_flag=template_flag,
         )
     except Exception:
         logger.warning(
@@ -819,9 +822,10 @@ async def internal_batch_initialize_tenants(
 )
 async def upload_asset(
     file: UploadFile = File(...),
+    template_flag: Optional[str] = Form(None),
 ) -> InternalAssetUploadResponse:
     """公开上传 asset 文件，不校验内部服务 Token。"""
-    return await _save_uploaded_asset_file(file)
+    return await _save_uploaded_asset_file(file, template_flag=template_flag)
 
 
 @public_router.get(

@@ -42,13 +42,69 @@ Clicking an individual task from the sidebar SHALL preserve the existing task cl
 - **WHEN** the user chooses the run action from a task item action menu
 - **THEN** the corresponding cronjob run action is invoked through the existing task action handler
 
+### Requirement: Task item edit action
+The sidebar task action menu SHALL provide an edit action only for stopped task items that are disabled for scheduled execution. Selecting the edit action SHALL open a task edit modal for that task without triggering task navigation.
+
+#### Scenario: Open task editor from sidebar action menu
+- **WHEN** the user opens a stopped task item's action menu in "我的任务" and selects "编辑"
+- **THEN** the system opens a task edit modal for that task
+- **AND** the task item click navigation handler is not invoked
+
+#### Scenario: Hide task editor while enabled
+- **WHEN** a task is enabled for scheduled execution
+- **THEN** its sidebar action menu does not offer the edit action
+
+#### Scenario: Preserve existing task actions
+- **WHEN** the edit action is added to a task item's action menu
+- **THEN** existing stop, run, resume, and delete actions remain available according to the task's existing action eligibility
+- **AND** destructive delete remains unavailable while the task is enabled for scheduled execution
+
+### Requirement: Chat sidebar task edit modal behavior
+The task edit modal opened from "我的任务" SHALL expose only task name, task execution time, and task content fields while preserving the existing cron job payload shape for fields that are not shown. For agent tasks, task content SHALL be edited as plain user-facing request text and transformed by the frontend into the existing request content structure before submit. For text tasks, task content SHALL edit the text message field directly. Saving SHALL update the existing cron job through the cronjob replace API and refresh the sidebar task list after a successful update.
+
+#### Scenario: Modal uses existing task values
+- **WHEN** the edit modal opens for a sidebar task
+- **THEN** the form fields are populated from that task using the same value mapping as Run Center scheduled-task editing
+- **AND** only task name, task execution time, and task content are available for editing
+
+#### Scenario: Save task edit
+- **WHEN** the user changes valid task fields and saves
+- **THEN** the system submits the normalized cron job payload to the existing cronjob update API for that task ID
+- **AND** the sidebar task list is refreshed after the update succeeds
+- **AND** the modal closes after the successful save
+
+#### Scenario: Validation prevents invalid save
+- **WHEN** the user enters invalid task data such as malformed request JSON or missing required fields
+- **THEN** the system prevents submission and keeps the modal open with validation feedback
+
+#### Scenario: Cancel task edit
+- **WHEN** the user cancels or closes the task edit modal
+- **THEN** the modal closes without updating the cron job
+
+### Requirement: Chat task editor visual treatment
+The task edit modal opened from "我的任务" SHALL follow `console/DESIGN.md` and frontend-design guidance for a light, operational Console overlay while preserving the existing Conversation Workspace emphasis color.
+
+#### Scenario: Modal layout is usable at desktop sizes
+- **WHEN** the modal is displayed at supported desktop viewport sizes
+- **THEN** labels, fields, footer actions, long task IDs, and JSON input remain readable without incoherent overlap or page-level horizontal overflow
+
+#### Scenario: Save state is visible
+- **WHEN** the task edit save request is in progress
+- **THEN** the save control displays an in-progress state and prevents duplicate submissions
+
 ### Requirement: History section in sidebar
-The sidebar SHALL display a "历史记录" section with a collapsible normally rendered list below the task section. The Console SHALL initially request a bounded first page of chat history, SHALL append older pages when the user scrolls near the end of the loaded history, SHALL automatically continue when the loaded rows do not fill the scroll container, and SHALL NOT require the previous virtual-list implementation. The section count SHALL reflect the server-reported total while including newer local pending sessions. Each history item SHALL display a title (color #4F5060) and a timestamp (color #808191) in "YYYY-MM-DD HH:mm" format. Paginated list loading SHALL preserve existing chat navigation, message display, session identity, generating state, and chat operation behavior.
+The sidebar SHALL display a "历史记录" section with a collapsible normally rendered list below the task section. The Console SHALL initially request a bounded first page of chat history, SHALL append older pages when the user scrolls near the end of the loaded history, SHALL automatically continue when the loaded rows do not fill the scroll container, and SHALL NOT require the previous virtual-list implementation. History pagination SHALL exclude task chats whose `meta.session_kind` is `task`, so the history list and section count do not include chats represented by "我的任务". The section count SHALL reflect the server-reported non-task total while including newer local pending sessions. Each history item SHALL display a title (color #4F5060) and a timestamp (color #808191) in "YYYY-MM-DD HH:mm" format. Paginated list loading SHALL preserve existing chat navigation, message display, session identity, generating state, and chat operation behavior.
 
 #### Scenario: History section displays the first page
 - **WHEN** the sidebar becomes visible and historical chats exist
 - **THEN** the Console requests and displays the first bounded page in newest-first order
 - **AND** each visible item shows its title and formatted timestamp
+
+#### Scenario: Task chats are excluded from history
+- **WHEN** persisted chats include task chats whose `meta.session_kind` is `task`
+- **THEN** the history page request excludes those task chats from the returned history rows
+- **AND** the "历史记录(N)" count does not include the excluded task chats
+- **AND** the "我的任务" section continues to use the cronjob API for its own task list and count
 
 #### Scenario: User scrolls to older history
 - **WHEN** the current page reports that older chats remain and the user scrolls near the bottom of the loaded history

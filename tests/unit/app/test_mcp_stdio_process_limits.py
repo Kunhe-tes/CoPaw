@@ -326,6 +326,52 @@ def test_stdio_launch_config_filters_protected_client_env(
     assert launch_config.env.get("PYTHONPATH") != "/client/python"
 
 
+def test_limited_stdio_launcher_keeps_pythonpath_for_wrapper_startup(
+    tenant_config_root: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from swe.app.mcp.stdio_launcher import (
+        build_tenant_aware_stdio_launch_config,
+    )
+
+    _write_process_limit_config(
+        tenant_config_root,
+        encode_scope_id("tenant-a", "source-a"),
+        enabled=True,
+        cpu_time_limit_seconds=2,
+    )
+    monkeypatch.setenv("PYTHONPATH", "/repo/src")
+
+    with tenant_context(tenant_id="tenant-a", source_id="source-a"):
+        launch_config = build_tenant_aware_stdio_launch_config("node")
+
+    assert launch_config.launch_command == sys.executable
+    assert launch_config.args == []
+    assert launch_config.env["PYTHONPATH"] == "/repo/src"
+
+
+def test_stdio_launcher_main_removes_wrapper_only_env_before_exec() -> None:
+    from swe.app.mcp.stdio_launcher import main
+
+    wrapper_env = {
+        "PATH": "/usr/bin",
+        "PYTHONPATH": "/repo/src",
+        "SWE_STDIO_LAUNCHER_DROP_ENV_KEYS": "PYTHONPATH",
+    }
+
+    with (
+        patch.dict(os.environ, wrapper_env, clear=True),
+        patch("swe.app.mcp.stdio_launcher.os.execvpe") as mock_execvpe,
+    ):
+        main(["--", "node", "server.js"])
+
+    mock_execvpe.assert_called_once()
+    exec_env = mock_execvpe.call_args.args[2]
+    assert exec_env["PATH"] == "/usr/bin"
+    assert "PYTHONPATH" not in exec_env
+    assert "SWE_STDIO_LAUNCHER_DROP_ENV_KEYS" not in exec_env
+
+
 def test_stdio_launch_config_missing_context_uses_process_env_only(
     tenant_config_root: Path,
 ) -> None:
