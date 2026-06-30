@@ -149,6 +149,13 @@ def get_provider_manager(request: Request) -> ProviderManager:
         root_path,
     )
     total_ms = int((time.perf_counter() - started_at) * 1000)
+    request.state.provider_manager_dependency_ms = total_ms
+    request.state.provider_manager_dependency_done_at = time.perf_counter()
+    request.state.provider_manager_dependency_ensure_ms = ensure_ms
+    request.state.provider_manager_dependency_get_instance_ms = get_instance_ms
+    request.state.provider_manager_dependency_cache_hit_before = (
+        cache_hit_before
+    )
 
     if total_ms >= _PROVIDER_API_SLOW_LOG_MS:
         logger.info(
@@ -407,19 +414,58 @@ async def _distribute_active_model_to_tenant(
     summary="List all providers",
 )
 async def list_all_providers(
+    request: Request,
     manager: ProviderManager = Depends(get_provider_manager),
 ) -> List[ProviderInfo]:
     started_at = time.perf_counter()
+    logger.info(
+        "provider_models_handler_start path=%s tenant_id=%s "
+        "manager_tenant_id=%s source_id=%s scope_id=%s builtin_count=%d "
+        "custom_count=%d root_path=%s",
+        request.url.path,
+        getattr(request.state, "tenant_id", None),
+        manager.tenant_id,
+        _request_source_id(request),
+        getattr(request.state, "scope_id", None),
+        len(manager.builtin_providers),
+        len(manager.custom_providers),
+        manager.root_path,
+    )
     providers = await manager.list_provider_info()
     duration_ms = int((time.perf_counter() - started_at) * 1000)
+    request.state.provider_models_handler_ms = duration_ms
+    request.state.provider_models_handler_done_at = time.perf_counter()
+    model_count = sum(len(provider.models) for provider in providers)
+    extra_model_count = sum(
+        len(provider.extra_models) for provider in providers
+    )
+    logger.info(
+        "provider_models_handler_done path=%s tenant_id=%s "
+        "manager_tenant_id=%s duration_ms=%d provider_count=%d "
+        "builtin_count=%d custom_count=%d model_count=%d "
+        "extra_model_count=%d root_path=%s",
+        request.url.path,
+        getattr(request.state, "tenant_id", None),
+        manager.tenant_id,
+        duration_ms,
+        len(providers),
+        len(manager.builtin_providers),
+        len(manager.custom_providers),
+        model_count,
+        extra_model_count,
+        manager.root_path,
+    )
     if duration_ms >= _PROVIDER_API_SLOW_LOG_MS:
         logger.info(
             "provider_list_info_slow tenant_id=%s duration_ms=%d "
-            "provider_count=%d custom_count=%d root_path=%s",
+            "provider_count=%d custom_count=%d model_count=%d "
+            "extra_model_count=%d root_path=%s",
             manager.tenant_id,
             duration_ms,
             len(providers),
             len(manager.custom_providers),
+            model_count,
+            extra_model_count,
             manager.root_path,
         )
     return providers
