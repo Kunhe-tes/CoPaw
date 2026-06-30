@@ -51,6 +51,8 @@ class CurrentProcessLimitPolicy:
     memory_max_mb: int | None
     should_enforce: bool
     should_enforce_memory_limit: bool = True
+    shell_max_concurrent: int | None = None
+    shell_acquire_timeout_seconds: float = 5
     diagnostic: str | None = None
 
     @property
@@ -111,6 +113,12 @@ def resolve_current_process_limit_policy(
     enabled = bool(process_limits.enabled and scope_enabled)
     cpu_time_limit_seconds = process_limits.cpu_time_limit_seconds
     memory_max_mb = process_limits.memory_max_mb
+    shell_max_concurrent = (
+        process_limits.shell_max_concurrent if scope == "shell" else None
+    )
+    shell_acquire_timeout_seconds = (
+        process_limits.shell_acquire_timeout_seconds if scope == "shell" else 5
+    )
 
     if not enabled:
         return CurrentProcessLimitPolicy(
@@ -121,6 +129,8 @@ def resolve_current_process_limit_policy(
             memory_max_mb=memory_max_mb,
             should_enforce=False,
             should_enforce_memory_limit=False,
+            shell_max_concurrent=None,
+            shell_acquire_timeout_seconds=shell_acquire_timeout_seconds,
         )
 
     if not _supports_unix_rlimits():
@@ -137,6 +147,8 @@ def resolve_current_process_limit_policy(
             memory_max_mb=memory_max_mb,
             should_enforce=False,
             should_enforce_memory_limit=False,
+            shell_max_concurrent=shell_max_concurrent,
+            shell_acquire_timeout_seconds=shell_acquire_timeout_seconds,
             diagnostic=diagnostic,
         )
 
@@ -163,5 +175,7 @@ def resolve_current_process_limit_policy(
         memory_max_mb=memory_max_mb,
         should_enforce=should_enforce,
         should_enforce_memory_limit=should_enforce_memory_limit,
+        shell_max_concurrent=shell_max_concurrent,
+        shell_acquire_timeout_seconds=shell_acquire_timeout_seconds,
         diagnostic=diagnostic,
     )

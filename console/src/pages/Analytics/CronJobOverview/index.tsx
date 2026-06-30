@@ -68,6 +68,7 @@ const SKILL_NAME_MAP: Record<string, string> = {
   "基金亏损客户关怀陪伴文案": "基金亏损客户关怀陪伴文案",
   "智能推荐保险计划书": "智能推荐保险计划书",
   "黄金持仓客户陪伴技能": "黄金持仓客户陪伴技能",
+  "query-fund-plus-cust": "固收+基金营销技能",
 };
 
 const ALLOWED_SKILLS = new Set([
@@ -1029,47 +1030,40 @@ export default function CronJobOverviewPage() {
     setSelectedModalSkill(null);
   };
 
-  // Collapse drill-down when date range changes
+  // Collapse drill-down and refresh all data when filters change
   useEffect(() => {
+    // Reset drill-down states
     setSelectedBranch(null);
     setManagerSummary([]);
     setManagerDetailModalOpen(false);
     setSelectedManagerForModal(null);
-    // Task view reset
     setSelectedTaskBranch(null);
     setTaskSkills([]);
     setTaskManagers([]);
     setTaskCustomers([]);
     setSelectedTaskSkill(null);
     setSelectedTaskManager(null);
-    // Fetch task branch ranking
-    fetchTaskBranchRanking();
-  }, [dateRange]);
 
-  useEffect(() => {
-    let ignore = false;
-
-    async function loadOverview() {
+    // Fetch all main data in parallel
+    const fetchAllData = async () => {
       setLoading(true);
+      setTaskBranchRankingLoading(true);
       try {
-        const response = await monitorApi.getCronJobOverviewPageData(getOverviewFilters());
-        if (!ignore) {
-          setOverviewData(response);
-        }
+        const [overviewResponse, taskRankingResponse] = await Promise.all([
+          monitorApi.getCronJobOverviewPageData(getOverviewFilters()),
+          monitorApi.getCronBranchTaskBehavior(getOverviewFilters()),
+        ]);
+        setOverviewData(overviewResponse);
+        setTaskBranchRankingRows(taskRankingResponse.items);
       } catch (error) {
-        console.warn("Failed to fetch cron job overview page data.", error);
+        console.warn("Failed to fetch cron job overview data.", error);
       } finally {
-        if (!ignore) {
-          setLoading(false);
-        }
+        setLoading(false);
+        setTaskBranchRankingLoading(false);
       }
-    }
-
-    loadOverview();
-
-    return () => {
-      ignore = true;
     };
+
+    fetchAllData();
   }, [dateRange, bbkIds]);
 
   useEffect(() => {
@@ -1081,6 +1075,37 @@ export default function CronJobOverviewPage() {
     }
     setSearchParams(nextParams, { replace: true });
   }, [dateRange, bbkIds, setSearchParams]);
+
+  const handleRefresh = async () => {
+    // Reset drill-down states
+    setSelectedBranch(null);
+    setManagerSummary([]);
+    setManagerDetailModalOpen(false);
+    setSelectedManagerForModal(null);
+    setSelectedTaskBranch(null);
+    setTaskSkills([]);
+    setTaskManagers([]);
+    setTaskCustomers([]);
+    setSelectedTaskSkill(null);
+    setSelectedTaskManager(null);
+
+    // Fetch all main data in parallel
+    setLoading(true);
+    setTaskBranchRankingLoading(true);
+    try {
+      const [overviewResponse, taskRankingResponse] = await Promise.all([
+        monitorApi.getCronJobOverviewPageData(getOverviewFilters()),
+        monitorApi.getCronBranchTaskBehavior(getOverviewFilters()),
+      ]);
+      setOverviewData(overviewResponse);
+      setTaskBranchRankingRows(taskRankingResponse.items);
+    } catch (error) {
+      console.warn("Failed to refresh cron job overview page data.", error);
+    } finally {
+      setLoading(false);
+      setTaskBranchRankingLoading(false);
+    }
+  };
 
   const fetchOverview = async () => {
     setLoading(true);
@@ -1349,7 +1374,7 @@ export default function CronJobOverviewPage() {
             <button
               type="button"
               className={styles.refreshButton}
-              onClick={fetchOverview}
+              onClick={handleRefresh}
             >
               <RefreshCw size={16} />
               刷新

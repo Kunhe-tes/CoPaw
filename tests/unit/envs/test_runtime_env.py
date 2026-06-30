@@ -68,6 +68,58 @@ def test_build_runtime_env_uses_scope_file_precedence_and_filters_protected(
     assert os.environ == before
 
 
+def test_build_runtime_env_removes_system_configuration_and_boundary_keys() -> (
+    None
+):
+    from swe.envs.runtime import build_runtime_env
+
+    env = build_runtime_env(
+        base_env={
+            "PATH": "/usr/bin",
+            "HOME": "/home/user",
+            "SWE_DB_ACCESS": "backend-secret",
+            "SWE_SECRET_DIR": "/srv/swe.secret",
+            "PYTHONPATH": "/backend/python",
+            "SWE_TENANT_PATH_GUARD_ROOT": "/tenant/root",
+        },
+        call_env={
+            "SWE_ZHAOHU_CLIENT_SECRET_POSEIDON": "call-secret",
+            "CALL_ONLY": "yes",
+        },
+    )
+
+    assert env["PATH"] == "/usr/bin"
+    assert env["HOME"] == "/home/user"
+    assert env["CALL_ONLY"] == "yes"
+    assert env["SWE_TENANT_PATH_GUARD_ROOT"] == "/tenant/root"
+    assert "SWE_DB_ACCESS" not in env
+    assert "SWE_ZHAOHU_CLIENT_SECRET_POSEIDON" not in env
+    assert "SWE_SECRET_DIR" not in env
+    assert "PYTHONPATH" not in env
+
+
+def test_build_runtime_env_removes_non_default_backend_secrets() -> None:
+    from swe.envs.runtime import build_runtime_env
+
+    env = build_runtime_env(
+        base_env={
+            "PATH": "/usr/bin",
+            "SWE_AUTH_PASSWORD": "auth-secret",
+            "SWE_INTERNAL_TOKEN": "internal-secret",
+            "TITLE_API_KEY": "title-secret",
+            "ZHAOHU_CLIENT_SECRET": "zhaohu-secret",
+            "ZHAOHU_INTENT_API_KEY": "intent-secret",
+        },
+    )
+
+    assert env["PATH"] == "/usr/bin"
+    assert "SWE_AUTH_PASSWORD" not in env
+    assert "SWE_INTERNAL_TOKEN" not in env
+    assert "TITLE_API_KEY" not in env
+    assert "ZHAOHU_CLIENT_SECRET" not in env
+    assert "ZHAOHU_INTENT_API_KEY" not in env
+
+
 def test_missing_context_does_not_read_default_env_store(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

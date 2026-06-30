@@ -1281,6 +1281,7 @@
       "tooltipImageOnly": "当前模型仅支持图片上传，单文件不超过 {{limit}}MB",
       "tooltipNoMultimodal": "当前模型未检测到多模态能力，图片或视频可能无法被正确处理，单文件不超过 {{limit}}MB",
       "fileSizeExceeded": "文件大小超过 {{limit}}MB 限制。当前文件：{{size}}MB",
+      "executableFileUnsupported": "不能上传可执行代码文件，请改为上传文档、媒体文件或压缩包。",
       "multimodalDisabled": "当前模型不支持文件上传",
       "multimodalWarning": "当前模型未检测到多模态能力，图片或视频可能无法被正确处理",
       "imageOnlyAccept": "当前模型仅支持图片文件",

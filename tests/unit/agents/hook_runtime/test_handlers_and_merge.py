@@ -358,6 +358,53 @@ async def test_command_handler_env_overrides_tenant_runtime_env(
 
 
 @pytest.mark.asyncio
+async def test_command_handler_env_excludes_system_configuration_keys(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setenv("SWE_DB_ACCESS", "backend-secret")
+    monkeypatch.setenv("SWE_SECRET_DIR", str(tmp_path / ".secret"))
+    observed = {}
+
+    class FakeProcess:
+        returncode = 0
+
+        async def communicate(self, payload):
+            del payload
+            return b"{}", b""
+
+    async def fake_create_subprocess_exec(*args, **kwargs):
+        observed.update(kwargs.get("env") or {})
+        return FakeProcess()
+
+    monkeypatch.setattr(
+        "swe.agents.hook_runtime.executor.asyncio.create_subprocess_exec",
+        fake_create_subprocess_exec,
+    )
+    handler = CommandHookHandlerConfig(
+        id="env",
+        argv=["python", str(tmp_path / "noop.py")],
+        env={
+            "SWE_ZHAOHU_CLIENT_SECRET_POSEIDON": "handler-secret",
+            "HOOK_TOKEN": "handler-token",
+        },
+    )
+    (tmp_path / "noop.py").write_text("print('{}')\n", encoding="utf-8")
+
+    result = await execute_handler(
+        handler,
+        _context(),
+        workspace_dir=tmp_path,
+    )
+
+    assert result.failed is False
+    assert observed["HOOK_TOKEN"] == "handler-token"
+    assert "SWE_DB_ACCESS" not in observed
+    assert "SWE_SECRET_DIR" not in observed
+    assert "SWE_ZHAOHU_CLIENT_SECRET_POSEIDON" not in observed
+
+
+@pytest.mark.asyncio
 async def test_http_handler_maps_2xx_json_and_409_block(monkeypatch) -> None:
     responses = [
         httpx.Response(
