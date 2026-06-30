@@ -3018,6 +3018,57 @@ class AgentRunner(Runner):
             (f"{exc.args[0]}{suffix}" if exc.args else suffix.strip()),
         ) + exc.args[1:]
 
+    async def _persist_model_call_failed_detail_safely(
+        self,
+        *,
+        request: AgentRequest,
+        detail: ModelCallFailureDetail,
+    ) -> None:
+        """保存模型调用失败详情，持久化异常不应覆盖原始失败信息。"""
+        try:
+            await self._persist_model_call_failed_detail(
+                request=request,
+                detail=detail,
+            )
+        except Exception:
+            logger.warning(
+                "Failed to persist model-call failure detail for history",
+                exc_info=True,
+            )
+
+    async def _raise_console_model_call_failed_if_needed(
+        self,
+        *,
+        request: AgentRequest,
+        exc: Exception,
+        trace_id: str | None,
+    ) -> None:
+        """在 Console 模型调用失败时抛出用户可见的结构化异常。"""
+        if getattr(request, "channel", DEFAULT_CHANNEL) != DEFAULT_CHANNEL:
+            return
+
+        detail = extract_model_call_failure_detail(exc)
+        if detail is None:
+            return
+
+        logger.warning(
+            "Console model call failed after final attempt: "
+            "kind=%s status=%s truncated=%s",
+            detail.kind.value,
+            detail.provider_status,
+            detail.truncated,
+        )
+        await self._end_trace_if_needed(
+            trace_id,
+            TraceStatus.ERROR,
+            error=detail.message,
+        )
+        await self._persist_model_call_failed_detail_safely(
+            request=request,
+            detail=detail,
+        )
+        raise ModelCallFailedException(detail) from exc
+
     async def _persist_model_call_failed_detail(
         self,
         *,
@@ -3816,36 +3867,11 @@ class AgentRunner(Runner):
                         max_retry_attempts,
                         e,
                     ):
-                        if getattr(request, "channel", DEFAULT_CHANNEL) == (
-                            DEFAULT_CHANNEL
-                        ):
-                            detail = extract_model_call_failure_detail(e)
-                            if detail is not None:
-                                logger.warning(
-                                    "Console model call failed after final "
-                                    "attempt: kind=%s status=%s truncated=%s",
-                                    detail.kind.value,
-                                    detail.provider_status,
-                                    detail.truncated,
-                                )
-                                await self._end_trace_if_needed(
-                                    trace_id,
-                                    TraceStatus.ERROR,
-                                    error=detail.message,
-                                )
-                                try:
-                                    await self._persist_model_call_failed_detail(
-                                        request=request,
-                                        detail=detail,
-                                    )
-                                except Exception:
-                                    logger.warning(
-                                        "Failed to persist model-call "
-                                        "failure detail for history",
-                                        exc_info=True,
-                                    )
-                                raise ModelCallFailedException(detail) from e
-
+                        await self._raise_console_model_call_failed_if_needed(
+                            request=request,
+                            exc=e,
+                            trace_id=trace_id,
+                        )
                         await self._handle_query_error(
                             request=request,
                             exc=e,
