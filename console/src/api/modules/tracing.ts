@@ -17,6 +17,10 @@ export interface OverviewStats {
   total_sessions: number;
   total_conversations: number;
   total_skill_calls: number;  // 技能调用总次数
+  // 客户点击统计
+  plan_customers: number;      // 查看方案客户数
+  insight_customers: number;   // 去洞察客户数
+  phone_customers: number;     // 去电访客户数
   avg_duration_ms: number;
   top_tools: ToolUsage[];
   top_skills: SkillUsage[];
@@ -715,6 +719,10 @@ export const tracingApi = {
     multiRoundRatioGrowth: number | null;
     avgDurationGrowth: number | null;
     avgSessionsPerUserGrowth: number | null;
+    // 客户点击环比
+    planCustomersGrowth: number | null;
+    insightCustomersGrowth: number | null;
+    phoneCustomersGrowth: number | null;
   }> => {
     const params = new URLSearchParams();
     params.append("start_date", startDate);
