@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import time
 from types import SimpleNamespace
+from typing import Any
 
 import pytest
 
@@ -14,6 +15,32 @@ from swe.security.tool_guard.approval import ApprovalDecision
 
 def _result():
     return SimpleNamespace(findings=[], findings_count=0)
+
+
+class _ZhaohuChannel:
+    def __init__(self) -> None:
+        self.result_calls: list[dict[str, Any]] = []
+
+    async def send_cron_approval_result(self, **kwargs):
+        self.result_calls.append(kwargs)
+        return (0, "noop")
+
+
+class _ChannelManager:
+    def __init__(self) -> None:
+        self.zhaohu = _ZhaohuChannel()
+
+    async def get_channel(self, name: str):
+        if name == "zhaohu":
+            return self.zhaohu
+        return None
+
+
+def _runner_with_zhaohu_workspace() -> tuple[AgentRunner, _ZhaohuChannel]:
+    runner = AgentRunner()
+    channel_manager = _ChannelManager()
+    runner.set_workspace(SimpleNamespace(channel_manager=channel_manager))
+    return runner, channel_manager.zhaohu
 
 
 @pytest.mark.asyncio
@@ -82,6 +109,38 @@ async def test_tool_guard_approval_is_consumed_as_preapproval() -> None:
         )
 
     assert consumed is True
+
+
+@pytest.mark.asyncio
+async def test_external_submission_status_marks_pending_as_submitted() -> None:
+    service = ApprovalService()
+    with tenant_context(tenant_id="tenant-a", source_id="source-a"):
+        pending = await service.create_pending(
+            session_id="session-1",
+            user_id="user-1",
+            channel="console",
+            tool_name="execute_shell_command",
+            result=_result(),
+        )
+
+        await service.record_external_submission(
+            pending,
+            decision="approve",
+            source_channel="zhaohu",
+            source_user_id="approver-1",
+            source_message_id="message-1",
+        )
+        status = await service.get_request_status(pending.request_id)
+        record = await service.get_request(pending.request_id)
+
+    assert status is not None
+    assert status["status"] == "submitted"
+    assert status["decision"] == "approve"
+    assert status["source_channel"] == "zhaohu"
+    assert status["source_user_id"] == "approver-1"
+    assert status["source_message_id"] == "message-1"
+    assert record is not None
+    assert record.status == "pending"
 
 
 @pytest.mark.asyncio
@@ -305,3 +364,189 @@ async def test_runner_rejects_requested_pending_id_from_other_source(
         assert (await service.get_request(pending.request_id)).status == (
             "pending"
         )
+
+
+@pytest.mark.asyncio
+async def test_runner_console_approve_notifies_zhaohu_result(
+    monkeypatch,
+) -> None:
+    service = ApprovalService()
+    with tenant_context(tenant_id="tenant-a", source_id="source-a"):
+        pending = await service.create_pending(
+            session_id="session-1",
+            user_id="user-1",
+            channel="console",
+            tool_name="execute_shell_command",
+            result=_result(),
+            extra={
+                "approval_kind": "tool_guard",
+                "tool_call": {
+                    "id": "tool-1",
+                    "name": "execute_shell_command",
+                    "input": {"cmd": "echo hi"},
+                },
+            },
+        )
+    monkeypatch.setattr(
+        "swe.app.approvals.service._approval_service",
+        service,
+    )
+    runner, zhaohu = _runner_with_zhaohu_workspace()
+
+    with tenant_context(tenant_id="tenant-a", source_id="source-a"):
+        response, consumed, approved_tool_call = (
+            await runner._resolve_pending_approval(
+                "session-1",
+                f"/approve {pending.request_id}",
+            )
+        )
+
+    assert response is None
+    assert consumed is True
+    assert approved_tool_call is not None
+    assert approved_tool_call["id"] == "tool-1"
+    assert zhaohu.result_calls == [
+        {
+            "request_id": pending.request_id,
+            "session_id": "session-1",
+            "user_id": "user-1",
+            "tool_name": "execute_shell_command",
+            "decision": "approved",
+            "source_channel": "console",
+        },
+    ]
+
+
+@pytest.mark.asyncio
+async def test_runner_console_deny_notifies_zhaohu_result(
+    monkeypatch,
+) -> None:
+    service = ApprovalService()
+    with tenant_context(tenant_id="tenant-a", source_id="source-a"):
+        pending = await service.create_pending(
+            session_id="session-1",
+            user_id="user-1",
+            channel="console",
+            tool_name="execute_shell_command",
+            result=_result(),
+        )
+    monkeypatch.setattr(
+        "swe.app.approvals.service._approval_service",
+        service,
+    )
+    runner, zhaohu = _runner_with_zhaohu_workspace()
+
+    with tenant_context(tenant_id="tenant-a", source_id="source-a"):
+        response, consumed, approved_tool_call = (
+            await runner._resolve_pending_approval(
+                "session-1",
+                f"/deny {pending.request_id}",
+            )
+        )
+
+    assert response is not None
+    assert consumed is True
+    assert approved_tool_call is None
+    assert zhaohu.result_calls == [
+        {
+            "request_id": pending.request_id,
+            "session_id": "session-1",
+            "user_id": "user-1",
+            "tool_name": "execute_shell_command",
+            "decision": "denied",
+            "source_channel": "console",
+        },
+    ]
+
+
+@pytest.mark.asyncio
+async def test_runner_console_approval_does_not_override_external_submission(
+    monkeypatch,
+) -> None:
+    service = ApprovalService()
+    with tenant_context(tenant_id="tenant-a", source_id="source-a"):
+        pending = await service.create_pending(
+            session_id="session-1",
+            user_id="user-1",
+            channel="console",
+            tool_name="execute_shell_command",
+            result=_result(),
+            extra={
+                "approval_kind": "tool_guard",
+                "tool_call": {
+                    "id": "tool-1",
+                    "name": "execute_shell_command",
+                    "input": {"cmd": "echo hi"},
+                },
+            },
+        )
+        await service.record_external_submission(
+            pending,
+            decision="approve",
+            source_channel="zhaohu",
+            source_user_id="approver-1",
+        )
+    monkeypatch.setattr(
+        "swe.app.approvals.service._approval_service",
+        service,
+    )
+    runner = AgentRunner()
+
+    with tenant_context(tenant_id="tenant-a", source_id="source-a"):
+        response, consumed, approved_tool_call = (
+            await runner._resolve_pending_approval(
+                "session-1",
+                f"/approve {pending.request_id}",
+            )
+        )
+        record = await service.get_request(pending.request_id)
+
+    assert response is not None
+    assert consumed is True
+    assert approved_tool_call is None
+    assert record is not None
+    assert record.status == "pending"
+
+
+@pytest.mark.asyncio
+async def test_runner_external_approval_does_not_duplicate_zhaohu_result(
+    monkeypatch,
+) -> None:
+    service = ApprovalService()
+    with tenant_context(tenant_id="tenant-a", source_id="source-a"):
+        pending = await service.create_pending(
+            session_id="session-1",
+            user_id="user-1",
+            channel="console",
+            tool_name="execute_shell_command",
+            result=_result(),
+        )
+        await service.record_external_submission(
+            pending,
+            decision="approve",
+            source_channel="zhaohu",
+        )
+    monkeypatch.setattr(
+        "swe.app.approvals.service._approval_service",
+        service,
+    )
+    runner, zhaohu = _runner_with_zhaohu_workspace()
+    request = SimpleNamespace(
+        channel_meta={
+            "approval_source_channel": "zhaohu",
+        },
+    )
+
+    with tenant_context(tenant_id="tenant-a", source_id="source-a"):
+        response, consumed, approved_tool_call = (
+            await runner._resolve_pending_approval(
+                "session-1",
+                f"/approve {pending.request_id}",
+                request=request,
+            )
+        )
+
+    assert response is None
+    assert consumed is True
+    assert approved_tool_call is None
+    assert zhaohu.result_calls == []

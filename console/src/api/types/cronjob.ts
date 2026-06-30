@@ -107,6 +107,24 @@ export interface CronBroadcastResponse {
   results: CronBroadcastTenantResult[];
 }
 
+export type CronBroadcastTaskStatus = "running" | "completed" | "failed";
+
+export interface CronBroadcastTaskResponse {
+  task_id: string;
+  status: CronBroadcastTaskStatus;
+  tenant_count: number;
+  completed_count: number;
+  failed_count: number;
+  results: CronBroadcastTenantResult[];
+  failure_summary?: string | null;
+  updated_at?: string | null;
+  reused: boolean;
+}
+
+export interface CronBroadcastCurrentTaskResponse {
+  task?: CronBroadcastTaskResponse | null;
+}
+
 export interface CronBroadcastChildItem {
   tenant_id: string;
   tenant_name?: string | null;

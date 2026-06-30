@@ -441,6 +441,51 @@ def _approval_replay_metadata(record) -> dict[str, Any] | None:
     }
 
 
+def _approved_tool_call_from_record(record) -> dict[str, Any] | None:
+    """从审批记录恢复需要重放的工具调用和队列上下文。"""
+    if not isinstance(record.extra, dict):
+        return None
+    candidate = record.extra.get("tool_call")
+    if not isinstance(candidate, dict):
+        return None
+
+    approved_tool_call = dict(candidate)
+    _copy_list_extra(
+        approved_tool_call,
+        record.extra,
+        source_key="sibling_tool_calls",
+        target_key="_sibling_tool_calls",
+    )
+    _copy_list_extra(
+        approved_tool_call,
+        record.extra,
+        source_key="remaining_queue",
+        target_key="_remaining_queue",
+    )
+    _copy_list_extra(
+        approved_tool_call,
+        record.extra,
+        source_key="thinking_blocks",
+        target_key="_thinking_blocks",
+    )
+    replay_metadata = _approval_replay_metadata(record)
+    if replay_metadata is not None:
+        approved_tool_call["_approval_replay"] = replay_metadata
+    return approved_tool_call
+
+
+def _copy_list_extra(
+    target: dict[str, Any],
+    extra: dict[str, Any],
+    *,
+    source_key: str,
+    target_key: str,
+) -> None:
+    value = extra.get(source_key)
+    if isinstance(value, list):
+        target[target_key] = value
+
+
 async def _select_pending_approval(
     svc,
     *,
@@ -1510,6 +1555,39 @@ def _request_source_id(request: AgentRequest) -> str:
     )
 
 
+def _request_approval_source_channel(
+    request: Any | None,
+) -> str | None:
+    channel_meta = getattr(request, "channel_meta", None) or {}
+    if not isinstance(channel_meta, dict):
+        return None
+    source_channel = channel_meta.get("approval_source_channel")
+    if isinstance(source_channel, str) and source_channel.strip():
+        return source_channel.strip()
+    return None
+
+
+def _external_approval_submission(record: Any) -> dict[str, Any] | None:
+    extra = getattr(record, "extra", None)
+    if not isinstance(extra, dict):
+        return None
+    submission = extra.get("external_submission")
+    if not isinstance(submission, dict):
+        return None
+    return submission
+
+
+def _request_matches_external_approval_submission(
+    request: Any | None,
+    submission: dict[str, Any],
+) -> bool:
+    submitted_channel = submission.get("source_channel")
+    if not isinstance(submitted_channel, str) or not submitted_channel.strip():
+        return False
+    request_channel = _request_approval_source_channel(request)
+    return request_channel == submitted_channel.strip()
+
+
 def _request_user_name(request: AgentRequest) -> str | None:
     """按兼容顺序读取通道注入的用户名称。"""
     channel_meta = getattr(request, "channel_meta", None) or {}
@@ -1694,6 +1772,7 @@ class AgentRunner(Runner):
         self,
         session_id: str,
         query: str | None,
+        request: Any | None = None,
     ) -> tuple[Msg | None, bool, dict[str, Any] | None]:
         """Check for a pending tool-guard approval for *session_id*.
 
@@ -1749,33 +1828,48 @@ class AgentRunner(Runner):
                 None,
             )
 
+        external_submission = _external_approval_submission(pending)
+        if external_submission is not None and (
+            not _request_matches_external_approval_submission(
+                request,
+                external_submission,
+            )
+        ):
+            source_channel = external_submission.get("source_channel")
+            if not isinstance(source_channel, str) or not source_channel:
+                source_channel = "external"
+            return (
+                Msg(
+                    name="Friday",
+                    role="assistant",
+                    content=[
+                        TextBlock(
+                            type="text",
+                            text=(
+                                f"Approval request `{pending.request_id}` "
+                                f"has already been submitted from "
+                                f"`{source_channel}`. Refresh the session "
+                                "to see the latest approval state."
+                            ),
+                        ),
+                    ],
+                ),
+                True,
+                None,
+            )
+
         if _is_approval(normalized):
             resolved = await svc.resolve_request(
                 pending.request_id,
                 ApprovalDecision.APPROVED,
             )
-            approved_tool_call: dict[str, Any] | None = None
             record = resolved or pending
-            if isinstance(record.extra, dict):
-                candidate = record.extra.get("tool_call")
-                if isinstance(candidate, dict):
-                    approved_tool_call = dict(candidate)
-                    siblings = record.extra.get("sibling_tool_calls")
-                    if isinstance(siblings, list):
-                        approved_tool_call["_sibling_tool_calls"] = siblings
-                    remaining = record.extra.get("remaining_queue")
-                    if isinstance(remaining, list):
-                        approved_tool_call["_remaining_queue"] = remaining
-                    thinking_blocks = record.extra.get("thinking_blocks")
-                    if isinstance(thinking_blocks, list):
-                        approved_tool_call["_thinking_blocks"] = (
-                            thinking_blocks
-                        )
-                    replay_metadata = _approval_replay_metadata(record)
-                    if replay_metadata is not None:
-                        approved_tool_call["_approval_replay"] = (
-                            replay_metadata
-                        )
+            approved_tool_call = _approved_tool_call_from_record(record)
+            await self._notify_console_approval_result(
+                record,
+                ApprovalDecision.APPROVED,
+                request,
+            )
             return None, True, approved_tool_call
 
         explicit_deny = _is_denial(normalized)
@@ -1784,9 +1878,14 @@ class AgentRunner(Runner):
             if explicit_deny
             else ApprovalDecision.DENIED
         )
-        await svc.resolve_request(
+        resolved = await svc.resolve_request(
             pending.request_id,
             denial_decision,
+        )
+        await self._notify_console_approval_result(
+            resolved or pending,
+            denial_decision,
+            request,
         )
         return (
             Msg(
@@ -1806,6 +1905,45 @@ class AgentRunner(Runner):
             None,
         )
 
+    async def _notify_console_approval_result(
+        self,
+        pending: Any,
+        decision: ApprovalDecision,
+        request: Any | None,
+    ) -> None:
+        from ..approvals.external import (
+            CONSOLE_CHANNEL,
+            ExternalApprovalDecision,
+            notify_cron_approval_result,
+        )
+
+        source_channel = _request_approval_source_channel(request)
+        if source_channel and source_channel != CONSOLE_CHANNEL:
+            return
+
+        workspace = getattr(self, "_workspace", None)
+        if workspace is None:
+            return
+
+        external_decision = (
+            ExternalApprovalDecision.APPROVE
+            if decision == ApprovalDecision.APPROVED
+            else ExternalApprovalDecision.DENY
+        )
+        try:
+            await notify_cron_approval_result(
+                workspace,
+                pending,
+                decision=external_decision,
+                source_channel=source_channel or CONSOLE_CHANNEL,
+            )
+        except Exception:
+            logger.exception(
+                "zhaohu console approval result notification failed: "
+                "request_id=%s",
+                getattr(pending, "request_id", None),
+            )
+
     async def _prepare_query_preflight(
         self,
         *,
@@ -1819,7 +1957,11 @@ class AgentRunner(Runner):
             approval_response,
             approval_consumed,
             approved_tool_call,
-        ) = await self._resolve_pending_approval(session_id, query)
+        ) = await self._resolve_pending_approval(
+            session_id,
+            query,
+            request=request,
+        )
         if approval_response is not None:
             return _QueryPreflight(
                 response=approval_response,
@@ -2229,6 +2371,11 @@ class AgentRunner(Runner):
             "user_name": _request_user_name(request),
             "bbk_id": _request_bbk_id(request),
             "trace_id": getattr(request, "trace_id", None),
+            "channel_manager": getattr(
+                getattr(self, "_workspace", None),
+                "channel_manager",
+                None,
+            ),
             "transcript_path": (
                 self.session._get_save_path(session_id, user_id)
                 if hasattr(self.session, "_get_save_path")

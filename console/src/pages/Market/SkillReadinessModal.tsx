@@ -11,6 +11,7 @@ import {
   Popover,
   Progress,
   Segmented,
+  Select,
   Space,
   Spin,
   Table,
@@ -130,6 +131,20 @@ function normalizeSearchKeyword(value: string): string {
   return value.trim().toLowerCase();
 }
 
+function normalizeBbkId(value?: string | null): string {
+  return String(value || "").trim();
+}
+
+function buildBbkIdOptions<T extends { bbk_id?: string | null }>(
+  items: T[],
+): { label: string; value: string }[] {
+  return Array.from(
+    new Set(items.map((item) => normalizeBbkId(item.bbk_id)).filter(Boolean)),
+  )
+    .sort((a, b) => a.localeCompare(b, "zh-CN", { numeric: true }))
+    .map((value) => ({ label: value, value }));
+}
+
 function matchesUserSearch(
   user: { user_id: string; user_name?: string | null },
   keyword: string,
@@ -138,6 +153,14 @@ function matchesUserSearch(
   return [user.user_name, user.user_id].some((value) =>
     String(value || "").toLowerCase().includes(keyword),
   );
+}
+
+function matchesBbkId(
+  user: { bbk_id?: string | null },
+  selectedBbkId: string,
+): boolean {
+  if (!selectedBbkId) return true;
+  return normalizeBbkId(user.bbk_id) === selectedBbkId;
 }
 
 function renderJsonBlock(value: unknown): ReactNode {
@@ -399,8 +422,10 @@ export function SkillReadinessModal({
   );
   const [ownerSearchInputText, setOwnerSearchInputText] = useState("");
   const [ownerAppliedSearchText, setOwnerAppliedSearchText] = useState("");
+  const [ownerSelectedBbkId, setOwnerSelectedBbkId] = useState("");
   const [resultSearchInputText, setResultSearchInputText] = useState("");
   const [resultAppliedSearchText, setResultAppliedSearchText] = useState("");
+  const [resultSelectedBbkId, setResultSelectedBbkId] = useState("");
   const [resultsRefreshToken, setResultsRefreshToken] = useState(0);
   const overviewRequestSeq = useRef(0);
   const activeSkillRef = useRef("");
@@ -449,8 +474,10 @@ export function SkillReadinessModal({
       setOwnerTablePageSize(DEFAULT_OWNER_TABLE_PAGE_SIZE);
       setOwnerSearchInputText("");
       setOwnerAppliedSearchText("");
+      setOwnerSelectedBbkId("");
       setResultSearchInputText("");
       setResultAppliedSearchText("");
+      setResultSelectedBbkId("");
       setResultsRefreshToken(0);
       return;
     }
@@ -465,23 +492,32 @@ export function SkillReadinessModal({
     setOwnerTablePageSize(DEFAULT_OWNER_TABLE_PAGE_SIZE);
     setOwnerSearchInputText("");
     setOwnerAppliedSearchText("");
+    setOwnerSelectedBbkId("");
     setResultSearchInputText("");
     setResultAppliedSearchText("");
+    setResultSelectedBbkId("");
     setResultsRefreshToken(0);
     void loadOverview();
   }, [open, loadOverview, target.skillId, target.valid]);
 
   useEffect(() => {
     const keyword = normalizeSearchKeyword(ownerAppliedSearchText);
-    const ownerCount = (overview?.owners ?? []).filter((owner) =>
-      matchesUserSearch(owner, keyword),
+    const ownerCount = (overview?.owners ?? []).filter(
+      (owner) =>
+        matchesUserSearch(owner, keyword) &&
+        matchesBbkId(owner, ownerSelectedBbkId),
     ).length;
     const maxPage = Math.max(
       1,
       Math.ceil(ownerCount / ownerTablePageSize),
     );
     setOwnerTablePage((current) => Math.min(current, maxPage));
-  }, [overview?.owners, ownerAppliedSearchText, ownerTablePageSize]);
+  }, [
+    overview?.owners,
+    ownerAppliedSearchText,
+    ownerSelectedBbkId,
+    ownerTablePageSize,
+  ]);
 
   useEffect(() => {
     const runId = overview?.latest_run?.run_id;
@@ -599,15 +635,31 @@ export function SkillReadinessModal({
   const ownerRows = overview?.owners ?? [];
   const filteredOwnerRows = useMemo(() => {
     const keyword = normalizeSearchKeyword(ownerAppliedSearchText);
-    return ownerRows.filter((owner) => matchesUserSearch(owner, keyword));
-  }, [ownerRows, ownerAppliedSearchText]);
+    return ownerRows.filter(
+      (owner) =>
+        matchesUserSearch(owner, keyword) &&
+        matchesBbkId(owner, ownerSelectedBbkId),
+    );
+  }, [ownerRows, ownerAppliedSearchText, ownerSelectedBbkId]);
+  const ownerBbkIdOptions = useMemo(
+    () => buildBbkIdOptions(ownerRows),
+    [ownerRows],
+  );
   const filteredResultItems = useMemo(() => {
     const keyword = normalizeSearchKeyword(resultAppliedSearchText);
-    return (results?.items ?? []).filter((user) =>
-      matchesUserSearch(user, keyword),
+    return (results?.items ?? []).filter(
+      (user) =>
+        matchesUserSearch(user, keyword) &&
+        matchesBbkId(user, resultSelectedBbkId),
     );
-  }, [results?.items, resultAppliedSearchText]);
-  const resultSearchActive = Boolean(resultAppliedSearchText.trim());
+  }, [results?.items, resultAppliedSearchText, resultSelectedBbkId]);
+  const resultBbkIdOptions = useMemo(
+    () => buildBbkIdOptions(results?.items ?? []),
+    [results?.items],
+  );
+  const resultFilterActive = Boolean(
+    resultAppliedSearchText.trim() || resultSelectedBbkId,
+  );
   const ownerLookupRunning = overview?.owner_lookup_status === "running";
   const ownerLookupIdle = overview?.owner_lookup_status === "idle";
   const startButtonText = overview?.startable ? "查询用户并检查" : "查询用户";
@@ -627,7 +679,7 @@ export function SkillReadinessModal({
     ownerEmptyText = "正在生成中";
   } else if (ownerLookupIdle) {
     ownerEmptyText = "查询用户后生成拥有用户";
-  } else if (ownerAppliedSearchText.trim()) {
+  } else if (ownerAppliedSearchText.trim() || ownerSelectedBbkId) {
     ownerEmptyText = "当前搜索条件下没有用户";
   }
 
@@ -820,20 +872,35 @@ export function SkillReadinessModal({
           )}
         </div>
         {activeRun && (
-          <Input.Search
-            allowClear
-            enterButton="搜索"
-            placeholder="搜索用户姓名或 ID"
-            value={resultSearchInputText}
-            onChange={(event) => {
-              setResultSearchInputText(event.target.value);
-            }}
-            onSearch={(value) => {
-              setResultAppliedSearchText(value);
-              setPage(1);
-            }}
-            style={{ maxWidth: 320 }}
-          />
+          <Space wrap>
+            <Input.Search
+              allowClear
+              enterButton="搜索"
+              placeholder="搜索用户姓名或 ID"
+              value={resultSearchInputText}
+              onChange={(event) => {
+                setResultSearchInputText(event.target.value);
+              }}
+              onSearch={(value) => {
+                setResultAppliedSearchText(value);
+                setPage(1);
+              }}
+              style={{ width: 320, maxWidth: "100%" }}
+            />
+            <Select
+              allowClear
+              placeholder="筛选机构"
+              options={resultBbkIdOptions}
+              value={resultSelectedBbkId || undefined}
+              onChange={(value) => {
+                setResultSelectedBbkId(value || "");
+                setPage(1);
+              }}
+              showSearch
+              optionFilterProp="label"
+              style={{ width: 180, maxWidth: "100%" }}
+            />
+          </Space>
         )}
       </div>
 
@@ -901,7 +968,7 @@ export function SkillReadinessModal({
                   total={results.total}
                   showSizeChanger
                   showTotal={(total) =>
-                    resultSearchActive
+                    resultFilterActive
                       ? `当前页匹配 ${filteredResultItems.length} 条 / 共 ${total} 条`
                       : `共 ${total} 条`
                   }
@@ -1071,20 +1138,35 @@ export function SkillReadinessModal({
                     数据时间：{ownerLookupDataTime}
                   </Text>
                 </div>
-                <Input.Search
-                  allowClear
-                  enterButton="搜索"
-                  placeholder="搜索用户姓名或 ID"
-                  value={ownerSearchInputText}
-                  onChange={(event) => {
-                    setOwnerSearchInputText(event.target.value);
-                  }}
-                  onSearch={(value) => {
-                    setOwnerAppliedSearchText(value);
-                    setOwnerTablePage(1);
-                  }}
-                  style={{ marginTop: 8, maxWidth: 320 }}
-                />
+                <Space wrap style={{ marginTop: 8 }}>
+                  <Input.Search
+                    allowClear
+                    enterButton="搜索"
+                    placeholder="搜索用户姓名或 ID"
+                    value={ownerSearchInputText}
+                    onChange={(event) => {
+                      setOwnerSearchInputText(event.target.value);
+                    }}
+                    onSearch={(value) => {
+                      setOwnerAppliedSearchText(value);
+                      setOwnerTablePage(1);
+                    }}
+                    style={{ width: 320, maxWidth: "100%" }}
+                  />
+                  <Select
+                    allowClear
+                    placeholder="筛选机构"
+                    options={ownerBbkIdOptions}
+                    value={ownerSelectedBbkId || undefined}
+                    onChange={(value) => {
+                      setOwnerSelectedBbkId(value || "");
+                      setOwnerTablePage(1);
+                    }}
+                    showSearch
+                    optionFilterProp="label"
+                    style={{ width: 180, maxWidth: "100%" }}
+                  />
+                </Space>
                 <Table
                   rowKey="user_id"
                   size="small"

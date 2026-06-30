@@ -77,6 +77,8 @@ def _start_app_process(
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
         text=True,
+        encoding="utf-8",
+        errors="replace",
         bufsize=1,
         cwd=str(Path(__file__).resolve().parents[2]),
         env=env,

@@ -185,7 +185,7 @@ describe("BroadcastChildrenModal", () => {
     expect(await screen.findByText("状态：生成中")).toBeInTheDocument();
     expect(screen.getByText("数据时间：正在生成中")).toBeInTheDocument();
 
-    fireEvent.click(screen.getByRole("button", { name: "刷新" }));
+    fireEvent.click(screen.getByRole("button", { name: /刷\s*新/ }));
 
     await waitFor(() => {
       expect(mocks.listCronBroadcastChildren).toHaveBeenCalledTimes(2);

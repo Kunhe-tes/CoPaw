@@ -215,6 +215,29 @@
   }
 }
 
+.broadcastTaskProgress {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  justify-content: space-between;
+  padding: 8px 10px;
+  border: 1px solid #d9ecff;
+  border-radius: 6px;
+  color: #0958d9;
+  background: #f3f9ff;
+  font-size: 12px;
+}
+
+.broadcastTaskProgressText {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+}
+
+.broadcastTaskProgressHint {
+  color: #5f6b7a;
+}
+
 /* Action column */
 .actionColumn {
   display: flex;
@@ -280,5 +303,15 @@
   .broadcastOffsetControls {
     border-color: rgba(255, 255, 255, 0.12);
     background: rgba(255, 255, 255, 0.04);
+  }
+
+  .broadcastTaskProgress {
+    border-color: rgba(105, 177, 255, 0.35);
+    color: #69b1ff;
+    background: rgba(22, 119, 255, 0.12);
+  }
+
+  .broadcastTaskProgressHint {
+    color: rgba(255, 255, 255, 0.55);
   }
 }

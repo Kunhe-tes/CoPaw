@@ -7,6 +7,7 @@ import time
 from contextlib import asynccontextmanager
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from typing import Any
 
 import anyio
 from fastapi import FastAPI, HTTPException
@@ -24,7 +25,10 @@ from ..constant import (
     WORKING_DIR,
 )
 from ..__version__ import __version__
-from ..utils.my_logging import setup_logger, shutdown_logger
+from ..utils.my_logging import (
+    setup_logger,
+    shutdown_logger,
+)
 from .auth import AuthMiddleware
 from .middleware.tenant_identity import TenantIdentityMiddleware
 from .middleware.tenant_workspace import TenantWorkspaceMiddleware
@@ -262,8 +266,8 @@ async def _reset_scope_sensitive_runtime_state(app: FastAPI) -> None:
     logger.info("Scope-sensitive runtime caches reset")
 
 
-async def _initialize_database_connection():
-    """初始化应用数据库连接，并保留 localhost 模式的轻量启动语义。"""
+async def _initialize_database_connection() -> Any | None:
+    """初始化数据库连接；未配置远端数据库时返回 None。"""
     database_config = get_database_config()
     logger.info(
         "Database config: host=%s, port=%s, database=%s",
@@ -275,7 +279,6 @@ async def _initialize_database_connection():
     if database_config.host == "localhost":
         logger.info("Database connection is disabled for localhost")
         return None
-
     if not database_config.host:
         return None
 
@@ -286,8 +289,7 @@ async def _initialize_database_connection():
         await db_connection.connect()
         if not db_connection.is_connected:
             raise RuntimeError(
-                "Database connection failed. "
-                "Please check database configuration.",
+                "Database connection failed. Please check database configuration.",
             )
         logger.info(
             "Database connection established: %s",
@@ -303,105 +305,73 @@ async def _initialize_database_connection():
             traceback.format_exc(),
         )
         raise RuntimeError(
-            "Database connection is required. "
-            "Please check database configuration.",
+            "Database connection is required. Please check database configuration.",
         ) from e
 
 
-@asynccontextmanager
-async def lifespan(
+def _env_enabled(key: str, default: str = "false") -> bool:
+    return os.environ.get(key, default).lower() in ("true", "1", "yes")
+
+
+def _env_int(key: str, default: int) -> int:
+    try:
+        return int(os.environ.get(key, str(default)))
+    except (TypeError, ValueError):
+        return default
+
+
+async def _initialize_runtime_managers(
     app: FastAPI,
-):  # pylint: disable=too-many-statements,too-many-branches
-    startup_start_time = time.time()
-    _configure_async_thread_pools()
-
-    # Auto-register admin from env vars (for automated deployments)
-    from .auth import auto_register_from_env
-
-    auto_register_from_env()
-
-    # --- Minimal startup: only ensure default agent declaration exists ---
-    logger.info("Performing minimal startup...")
-    ensure_default_agent_exists()
-
-    # source-scoped cutover 需要在开始接流量前清空旧的进程级缓存，
-    # 避免同一进程继续复用 tenant-only 运行态。
-    await _reset_scope_sensitive_runtime_state(app)
-
-    # --- Tenant workspace pool initialization (registry only, no runtime) ---
+) -> tuple[TenantWorkspacePool, MultiAgentManager]:
+    """初始化租户工作区池和多 Agent 管理器。"""
     logger.info("Initializing TenantWorkspacePool (registry only)...")
     tenant_workspace_pool = TenantWorkspacePool(WORKING_DIR)
     app.state.tenant_workspace_pool = tenant_workspace_pool
 
-    # --- Multi-agent manager initialization (container only, no agents started) ---
     logger.info("Initializing MultiAgentManager (container only)...")
     multi_agent_manager = MultiAgentManager()
-
-    # Expose to endpoints - multi-agent manager
     app.state.multi_agent_manager = multi_agent_manager
 
-    # Connect DynamicMultiAgentRunner to MultiAgentManager
     if isinstance(runner, DynamicMultiAgentRunner):
         runner.set_multi_agent_manager(multi_agent_manager)
 
-    # Helper function to get agent instance by ID (async)
     async def _get_agent_by_id(agent_id: str = None):
-        """Get agent instance by ID, or active agent if not specified."""
+        """按 ID 获取 Agent；未指定时使用当前激活 Agent。"""
         if agent_id is None:
             config = load_config(get_config_path())
             agent_id = config.agents.active_agent or "default"
         return await multi_agent_manager.get_agent(agent_id)
 
     app.state.get_agent_by_id = _get_agent_by_id
+    return tenant_workspace_pool, multi_agent_manager
 
-    # Note: ProviderManager, skill pool, and QA agent are initialized
-    # on-demand via their respective feature entrypoints.
-    # See design.md for lazy-loading architecture.
 
-    # --- Initialize database connection (required for tracing and instance modules) ---
-    db_connection = await _initialize_database_connection()
-
-    # --- Initialize tracing manager ---
+async def _initialize_tracing_manager(db_connection: Any | None) -> None:
+    """根据环境变量初始化 tracing；失败只降级记录日志。"""
     try:
         from ..tracing.config import TracingConfig
 
-        # Check tracing enabled from environment directly
-        tracing_enabled = os.environ.get(
-            "SWE_TRACING_ENABLED",
-            "false",
-        ).lower() in ("true", "1", "yes")
-
-        if tracing_enabled:
-            # Read tracing config from environment
-            def get_int(key: str, default: int) -> int:
-                try:
-                    return int(os.environ.get(key, str(default)))
-                except (TypeError, ValueError):
-                    return default
-
-            tracing_config = TracingConfig(
-                enabled=True,
-                batch_size=get_int("SWE_TRACING_BATCH_SIZE", 100),
-                flush_interval=get_int("SWE_TRACING_FLUSH_INTERVAL", 5),
-                retention_days=get_int("SWE_TRACING_RETENTION_DAYS", 30),
-                sanitize_output=os.environ.get(
-                    "SWE_TRACING_SANITIZE_OUTPUT",
-                    "true",
-                ).lower()
-                in ("true", "1", "yes"),
-                max_output_length=get_int(
-                    "SWE_TRACING_MAX_OUTPUT_LENGTH",
-                    500,
-                ),
-                database=db_connection.config if db_connection else None,
-            )
-            await init_trace_manager(tracing_config, db_connection)
-            logger.info(
-                "Tracing manager initialized (db_mode=%s)",
-                db_connection is not None,
-            )
-        else:
+        if not _env_enabled("SWE_TRACING_ENABLED"):
             logger.info("Tracing is disabled via SWE_TRACING_ENABLED")
+            return
+
+        tracing_config = TracingConfig(
+            enabled=True,
+            batch_size=_env_int("SWE_TRACING_BATCH_SIZE", 100),
+            flush_interval=_env_int("SWE_TRACING_FLUSH_INTERVAL", 5),
+            retention_days=_env_int("SWE_TRACING_RETENTION_DAYS", 30),
+            sanitize_output=_env_enabled(
+                "SWE_TRACING_SANITIZE_OUTPUT",
+                "true",
+            ),
+            max_output_length=_env_int("SWE_TRACING_MAX_OUTPUT_LENGTH", 500),
+            database=db_connection.config if db_connection else None,
+        )
+        await init_trace_manager(tracing_config, db_connection)
+        logger.info(
+            "Tracing manager initialized (db_mode=%s)",
+            db_connection is not None,
+        )
     except Exception as e:
         import traceback
 
@@ -411,13 +381,14 @@ async def lifespan(
             traceback.format_exc(),
         )
 
-    # --- Initialize instance module config---
-    # from .instance.router import init_instance_module
 
-    # init_instance_module(db_connection)
-    logger.info("Instance module initialized")
-
-    # --- 初始化 source 系统配置模块 ---
+def _initialize_source_system_config(
+    app: FastAPI,
+    db_connection: Any | None,
+    tenant_workspace_pool: TenantWorkspacePool,
+    multi_agent_manager: MultiAgentManager,
+) -> None:
+    """初始化 source system 配置和任务调度绑定。"""
     try:
         from .source_system_config.service import SourceSystemConfigService
         from .source_system_config.store import SourceSystemConfigStore
@@ -435,16 +406,13 @@ async def lifespan(
         app.state.source_system_config_service = source_config_service
         app.state.source_system_task_scheduler = None
 
-        scheduler_adapter = _build_scheduler_adapter()
         has_task_binding_db = db_connection is not None and bool(
             getattr(db_connection, "is_connected", False),
         )
         if has_task_binding_db:
             app.state.source_system_task_scheduler = SourceSystemTaskScheduler(
-                binding_store=SourceSystemTaskBindingStore(
-                    db_connection,
-                ),
-                scheduler_adapter=scheduler_adapter,
+                binding_store=SourceSystemTaskBindingStore(db_connection),
+                scheduler_adapter=_build_scheduler_adapter(),
                 callback_url=_build_internal_cron_callback_url(),
                 tenant_scope_store_factory=(
                     lambda: tenant_workspace_pool.init_source_store
@@ -466,7 +434,35 @@ async def lifespan(
     except Exception as e:
         logger.warning("Failed to initialize source system config: %s", e)
 
-    # --- 初始化定时任务分发用户反查快照 ---
+
+async def _initialize_approval_audit_store(
+    app: FastAPI,
+    db_connection: Any | None,
+) -> None:
+    """初始化工具审批审计存储。"""
+    try:
+        from .approvals import get_approval_service
+        from .approvals.store import ApprovalAuditStore
+
+        approval_audit_store = ApprovalAuditStore(db_connection)
+        app.state.approval_audit_store = approval_audit_store
+        get_approval_service().set_store(approval_audit_store)
+        if approval_audit_store.is_available:
+            await approval_audit_store.initialize()
+            logger.info("Approval audit storage initialized")
+        else:
+            logger.warning(
+                "Approval audit storage skipped: database is not connected",
+            )
+    except Exception as e:
+        logger.warning("Failed to initialize approval audit storage: %s", e)
+
+
+async def _initialize_cron_broadcast_children_store(
+    app: FastAPI,
+    db_connection: Any | None,
+) -> None:
+    """初始化定时任务分发用户反查快照存储。"""
     try:
         from .crons.broadcast_children_store import CronBroadcastChildrenStore
 
@@ -487,7 +483,37 @@ async def lifespan(
             e,
         )
 
-    # --- 初始化技能就绪检查存储 ---
+
+async def _initialize_cron_broadcast_task_store(
+    app: FastAPI,
+    db_connection: Any | None,
+) -> None:
+    """初始化定时任务广播分发进度存储。"""
+    try:
+        from .crons.broadcast_task_store import CronBroadcastTaskStore
+
+        cron_broadcast_task_store = CronBroadcastTaskStore(db_connection)
+        app.state.cron_broadcast_task_store = cron_broadcast_task_store
+        if cron_broadcast_task_store.is_available:
+            await cron_broadcast_task_store.initialize()
+            logger.info("Cron broadcast task storage initialized")
+        else:
+            logger.warning(
+                "Cron broadcast task storage uses memory fallback",
+            )
+    except Exception as e:
+        logger.warning(
+            "Failed to initialize cron broadcast task storage: %s",
+            e,
+        )
+
+
+async def _initialize_skill_readiness(
+    app: FastAPI,
+    db_connection: Any | None,
+    multi_agent_manager: MultiAgentManager,
+) -> None:
+    """初始化技能可执行性自检存储和服务。"""
     try:
         from .skill_readiness.service import build_skill_readiness_service
         from .skill_readiness.store import SkillReadinessStore
@@ -508,7 +534,14 @@ async def lifespan(
     except Exception as e:
         logger.warning("Failed to initialize skill readiness storage: %s", e)
 
-    # --- 初始化持续治理管理侧数据库读模型 ---
+
+def _initialize_continuous_governance(
+    app: FastAPI,
+    db_connection: Any | None,
+    tenant_workspace_pool: TenantWorkspacePool,
+    multi_agent_manager: MultiAgentManager,
+) -> None:
+    """初始化持续治理读模型服务。"""
     try:
         from .continuous_governance.service import ContinuousGovernanceService
         from .continuous_governance.store import ContinuousGovernanceStore
@@ -526,62 +559,61 @@ async def lifespan(
     except Exception as e:
         logger.warning("Failed to initialize continuous governance: %s", e)
 
-    # --- Initialize greeting and featured_case modules ---
-    if db_connection is not None:
-        try:
-            from .greeting.router import init_greeting_module
-            from .featured_case.router import init_featured_case_module
-            from .feedback.router import init_feedback_module
-            from .html_preview_clicks.router import (
-                init_html_preview_click_module,
-            )
 
-            init_greeting_module(db_connection)
-            init_featured_case_module(db_connection)
-            init_feedback_module(db_connection)
-            init_html_preview_click_module(db_connection)
-            logger.info(
-                "Greeting, FeaturedCase, Feedback and HTML preview click "
-                "modules initialized",
-            )
+def _initialize_database_backed_modules(db_connection: Any | None) -> None:
+    """初始化只在数据库可用时启用的附属模块。"""
+    if db_connection is None:
+        return
+    try:
+        from .greeting.router import init_greeting_module
+        from .featured_case.router import init_featured_case_module
+        from .feedback.router import init_feedback_module
+        from .html_preview_clicks.router import (
+            init_html_preview_click_module,
+        )
 
-            from .workspace.tenant_init_source_store import (
-                init_tenant_init_source_module,
-            )
+        init_greeting_module(db_connection)
+        init_featured_case_module(db_connection)
+        init_feedback_module(db_connection)
+        init_html_preview_click_module(db_connection)
+        logger.info(
+            "Greeting, FeaturedCase, Feedback and HTML preview click "
+            "modules initialized",
+        )
 
-            init_tenant_init_source_module(db_connection)
-            logger.info("TenantInitSource module initialized")
+        from .workspace.tenant_init_source_store import (
+            init_tenant_init_source_module,
+        )
 
-            from .channels.zhaohu.binding_store import (
-                init_zhaohu_binding_module,
-            )
+        init_tenant_init_source_module(db_connection)
+        logger.info("TenantInitSource module initialized")
 
-            init_zhaohu_binding_module(db_connection)
-            logger.info("ZhaohuChannelBinding module initialized")
+        from .channels.zhaohu.binding_store import (
+            init_zhaohu_binding_module,
+        )
 
-            from .asset_upload_record.router import (
-                init_asset_upload_record_module,
-            )
+        init_zhaohu_binding_module(db_connection)
+        logger.info("ZhaohuChannelBinding module initialized")
 
-            init_asset_upload_record_module(db_connection)
-            logger.info("AssetUploadRecord module initialized")
-        except Exception as e:
-            logger.warning(
-                "Failed to initialize greeting/featured_case modules: %s",
-                e,
-            )
+        from .asset_upload_record.router import (
+            init_asset_upload_record_module,
+        )
 
-    startup_elapsed = time.time() - startup_start_time
-    logger.info(
-        f"Application startup completed in {startup_elapsed:.3f} seconds "
-        f"(minimal initialization - runtimes deferred to first use)",
-    )
+        init_asset_upload_record_module(db_connection)
+        logger.info("AssetUploadRecord module initialized")
+    except Exception as e:
+        logger.warning(
+            "Failed to initialize greeting/featured_case modules: %s",
+            e,
+        )
 
-    # 启动服务心跳任务
+
+async def _start_lifespan_background_services(
+    app: FastAPI,
+    multi_agent_manager: MultiAgentManager,
+) -> None:
+    """启动生命周期内常驻的后台服务。"""
     await start_service_heartbeat()
-
-    # SWE 重启后通知 Monitor 触发定时任务恢复预热；延迟执行是为了确保
-    # 当前服务已经开始接收 Monitor 对 /cron/jobs 的回调请求。
     get_monitor_sync_client().schedule_swe_cron_warmup(
         start_delay_seconds=5.0,
     )
@@ -596,66 +628,156 @@ async def lifespan(
     except Exception as e:
         logger.warning("Failed to start runtime diagnostic manager: %s", e)
 
+
+async def _shutdown_lifespan_resources(
+    app: FastAPI,
+    db_connection: Any | None,
+) -> None:
+    """按依赖顺序关闭生命周期资源。"""
+    try:
+        from ..agents.tools.background_process import (
+            managed_background_process_manager,
+        )
+
+        managed_background_process_manager.stop_all()
+    except Exception as e:
+        logger.warning("Error stopping managed background processes: %s", e)
+
+    try:
+        await runtime_diagnostic_manager.stop()
+    except Exception as e:
+        logger.warning("Error stopping runtime diagnostic manager: %s", e)
+
+    cron_notification_worker = getattr(
+        app.state,
+        "cron_notification_worker",
+        None,
+    )
+    if cron_notification_worker is not None:
+        try:
+            await cron_notification_worker.stop()
+        except Exception as e:
+            logger.warning("Error stopping cron notification worker: %s", e)
+
+    try:
+        await close_trace_manager()
+        logger.info("Tracing manager closed")
+    except Exception as e:
+        logger.warning("Error closing tracing manager: %s", e)
+
+    if db_connection:
+        try:
+            await db_connection.close()
+            logger.info("Database connection closed")
+        except Exception as e:
+            logger.warning("Error closing database connection: %s", e)
+
+    await stop_service_heartbeat()
+    await _stop_multi_agent_manager(app)
+    await _stop_tenant_workspace_pool(app)
+    logger.info("Application shutdown complete")
+
+    shutdown_logger()
+
+
+async def _stop_multi_agent_manager(app: FastAPI) -> None:
+    multi_agent_mgr = getattr(app.state, "multi_agent_manager", None)
+    if multi_agent_mgr is None:
+        return
+    logger.info("Stopping MultiAgentManager...")
+    try:
+        await multi_agent_mgr.stop_all()
+    except Exception as e:
+        logger.error(f"Error stopping MultiAgentManager: {e}")
+
+
+async def _stop_tenant_workspace_pool(app: FastAPI) -> None:
+    tenant_pool = getattr(app.state, "tenant_workspace_pool", None)
+    if tenant_pool is None:
+        return
+    logger.info("Stopping all tenant workspaces...")
+    try:
+        await tenant_pool.stop_all()
+    except Exception as e:
+        logger.error(f"Error stopping tenant workspaces: {e}")
+
+
+@asynccontextmanager
+async def lifespan(
+    app: FastAPI,
+):
+    startup_start_time = time.time()
+    _configure_async_thread_pools()
+
+    # Auto-register admin from env vars (for automated deployments)
+    from .auth import auto_register_from_env
+
+    auto_register_from_env()
+
+    # --- Minimal startup: only ensure default agent declaration exists ---
+    logger.info("Performing minimal startup...")
+    ensure_default_agent_exists()
+
+    # source-scoped cutover 需要在开始接流量前清空旧的进程级缓存，
+    # 避免同一进程继续复用 tenant-only 运行态。
+    await _reset_scope_sensitive_runtime_state(app)
+    tenant_workspace_pool, multi_agent_manager = (
+        await _initialize_runtime_managers(app)
+    )
+
+    # Note: ProviderManager, skill pool, and QA agent are initialized
+    # on-demand via their respective feature entrypoints.
+    # See design.md for lazy-loading architecture.
+
+    # --- Initialize database connection (required for tracing and instance modules) ---
+    db_connection = await _initialize_database_connection()
+
+    await _initialize_tracing_manager(db_connection)
+    logger.info("Instance module initialized")
+
+    # --- 初始化 source 系统配置模块 ---
+    _initialize_source_system_config(
+        app,
+        db_connection,
+        tenant_workspace_pool,
+        multi_agent_manager,
+    )
+
+    # --- 初始化定时任务分发用户反查快照 ---
+    await _initialize_approval_audit_store(app, db_connection)
+    await _initialize_cron_broadcast_children_store(app, db_connection)
+    await _initialize_cron_broadcast_task_store(app, db_connection)
+
+    # --- 初始化技能就绪检查存储 ---
+    await _initialize_skill_readiness(
+        app,
+        db_connection,
+        multi_agent_manager,
+    )
+
+    # --- 初始化持续治理管理侧数据库读模型 ---
+    _initialize_continuous_governance(
+        app,
+        db_connection,
+        tenant_workspace_pool,
+        multi_agent_manager,
+    )
+
+    _initialize_database_backed_modules(db_connection)
+
+    startup_elapsed = time.time() - startup_start_time
+    logger.info(
+        f"Application startup completed in {startup_elapsed:.3f} seconds "
+        f"(minimal initialization - runtimes deferred to first use)",
+    )
+
+    # 启动服务心跳任务
+    await _start_lifespan_background_services(app, multi_agent_manager)
+
     try:
         yield
     finally:
-        try:
-            await runtime_diagnostic_manager.stop()
-        except Exception as e:
-            logger.warning("Error stopping runtime diagnostic manager: %s", e)
-
-        cron_notification_worker = getattr(
-            app.state,
-            "cron_notification_worker",
-            None,
-        )
-        if cron_notification_worker is not None:
-            try:
-                await cron_notification_worker.stop()
-            except Exception as e:
-                logger.warning(
-                    "Error stopping cron notification worker: %s",
-                    e,
-                )
-
-        # Close tracing manager
-        try:
-            await close_trace_manager()
-            logger.info("Tracing manager closed")
-        except Exception as e:
-            logger.warning("Error closing tracing manager: %s", e)
-
-        # Close database connection
-        if db_connection:
-            try:
-                await db_connection.close()
-                logger.info("Database connection closed")
-            except Exception as e:
-                logger.warning("Error closing database connection: %s", e)
-
-        # 停止服务心跳并发送关闭信号
-        await stop_service_heartbeat()
-
-        # Stop multi-agent manager (stops all agents and their components)
-        multi_agent_mgr = getattr(app.state, "multi_agent_manager", None)
-        if multi_agent_mgr is not None:
-            logger.info("Stopping MultiAgentManager...")
-            try:
-                await multi_agent_mgr.stop_all()
-            except Exception as e:
-                logger.error(f"Error stopping MultiAgentManager: {e}")
-
-        # Stop all tenant workspaces
-        tenant_pool = getattr(app.state, "tenant_workspace_pool", None)
-        if tenant_pool is not None:
-            logger.info("Stopping all tenant workspaces...")
-            try:
-                await tenant_pool.stop_all()
-            except Exception as e:
-                logger.error(f"Error stopping tenant workspaces: {e}")
-
-        logger.info("Application shutdown complete")
-        shutdown_logger()
+        await _shutdown_lifespan_resources(app, db_connection)
 
 
 app = FastAPI(
@@ -754,6 +876,8 @@ _CONSOLE_STATIC_DIR = _resolve_console_static_dir()
 _CONSOLE_INDEX = (
     Path(_CONSOLE_STATIC_DIR) / "index.html" if _CONSOLE_STATIC_DIR else None
 )
+_console_path = Path(_CONSOLE_STATIC_DIR)
+_assets_dir = _console_path / "assets"
 logger.info(f"STATIC_DIR: {_CONSOLE_STATIC_DIR}")
 
 
@@ -850,89 +974,102 @@ async def serve_user_static(
     return FileResponse(Path(target), media_type=media_type)
 
 
-# Console static files and SPA fallback
-# Register these AFTER API routes to ensure proper routing priority
-if os.path.isdir(_CONSOLE_STATIC_DIR):
-    _console_path = Path(_CONSOLE_STATIC_DIR)
+def _serve_console_index():
+    if _CONSOLE_INDEX and _CONSOLE_INDEX.exists():
+        return FileResponse(_CONSOLE_INDEX)
 
-    def _serve_console_index():
-        if _CONSOLE_INDEX and _CONSOLE_INDEX.exists():
-            return FileResponse(_CONSOLE_INDEX)
+    raise HTTPException(status_code=404, detail="Not Found")
 
+
+def _serve_console_file(file_name: str, media_type: str):
+    file_path = _console_path / file_name
+    if file_path.is_file():
+        return FileResponse(file_path, media_type=media_type)
+    raise HTTPException(status_code=404, detail="Not Found")
+
+
+def _console_logo():
+    return _serve_console_file("logo.png", "image/png")
+
+
+def _console_dark_logo():
+    return _serve_console_file("dark-logo.png", "image/png")
+
+
+def _console_icon():
+    return _serve_console_file("swe-symbol.svg", "image/svg+xml")
+
+
+def _console_dark_icon():
+    return _serve_console_file("swe-dark.png", "image/png")
+
+
+def _console_spa_alias(full_path: str = ""):
+    _ = full_path
+    return _serve_console_index()
+
+
+def _console_assets(file_path: str):
+    """Serve static assets from console assets directory.
+    Uses dynamic file lookup so assets can be added after startup.
+    """
+    if not _assets_dir.is_dir():
+        raise HTTPException(
+            status_code=404,
+            detail="Assets directory not found",
+        )
+    full_path = _assets_dir / file_path
+    try:
+        full_path.resolve().relative_to(_assets_dir.resolve())
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail="Not Found") from exc
+    if not full_path.is_file():
         raise HTTPException(status_code=404, detail="Not Found")
+    # Guess content type
+    content_type, _ = mimetypes.guess_type(str(full_path))
+    return FileResponse(full_path, media_type=content_type)
 
-    @app.get("/logo.png")
-    def _console_logo():
-        f = _console_path / "logo.png"
-        if f.is_file():
-            return FileResponse(f, media_type="image/png")
+
+def _console_spa(full_path: str):
+    # Prevent catching common system/special paths
+    if full_path in ("docs", "redoc", "openapi.json"):
         raise HTTPException(status_code=404, detail="Not Found")
-
-    @app.get("/dark-logo.png")
-    def _console_dark_logo():
-        f = _console_path / "dark-logo.png"
-        if f.is_file():
-            return FileResponse(f, media_type="image/png")
+    # Skip API routes (should already be matched due to registration order)
+    if full_path.startswith("api/") or full_path == "api":
         raise HTTPException(status_code=404, detail="Not Found")
+    return _serve_console_index()
 
-    @app.get("/swe-symbol.svg")
-    def _console_icon():
-        f = _console_path / "swe-symbol.svg"
-        if f.is_file():
-            return FileResponse(f, media_type="image/svg+xml")
-        raise HTTPException(status_code=404, detail="Not Found")
 
-    @app.get("/swe-dark.png")
-    def _console_dark_icon():
-        f = _console_path / "swe-dark.png"
-        if f.is_file():
-            return FileResponse(f, media_type="image/png")
-        raise HTTPException(status_code=404, detail="Not Found")
+def _register_console_static_routes() -> None:
+    if not os.path.isdir(_CONSOLE_STATIC_DIR):
+        return
 
-    _assets_dir = _console_path / "assets"
+    app.add_api_route("/logo.png", _console_logo, methods=["GET"])
+    app.add_api_route("/dark-logo.png", _console_dark_logo, methods=["GET"])
+    app.add_api_route("/swe-symbol.svg", _console_icon, methods=["GET"])
+    app.add_api_route("/swe-dark.png", _console_dark_icon, methods=["GET"])
     if _assets_dir.is_dir():
         app.mount(
             "/assets",
             StaticFiles(directory=str(_assets_dir)),
             name="assets",
         )
+    app.add_api_route("/console", _console_spa_alias, methods=["GET"])
+    app.add_api_route("/console/", _console_spa_alias, methods=["GET"])
+    app.add_api_route(
+        "/console/{full_path:path}",
+        _console_spa_alias,
+        methods=["GET"],
+    )
+    app.add_api_route(
+        "/static/{file_path:path}",
+        _console_assets,
+        methods=["GET"],
+    )
+    # SPA fallback 必须最后注册，避免吞掉前面的 API 和系统路由。
+    app.add_api_route("/{full_path:path}", _console_spa, methods=["GET"])
 
-    @app.get("/console")
-    @app.get("/console/")
-    @app.get("/console/{full_path:path}")
-    def _console_spa_alias(full_path: str = ""):
-        _ = full_path
-        return _serve_console_index()
 
-    @app.get("/static/{file_path:path}")
-    def _console_assets(file_path: str):
-        """Serve static assets from console assets directory.
-        Uses dynamic file lookup so assets can be added after startup.
-        """
-        if not _assets_dir.is_dir():
-            raise HTTPException(
-                status_code=404,
-                detail="Assets directory not found",
-            )
-        full_path = _assets_dir / file_path
-        try:
-            full_path.resolve().relative_to(_assets_dir.resolve())
-        except ValueError as exc:
-            raise HTTPException(status_code=404, detail="Not Found") from exc
-        if not full_path.is_file():
-            raise HTTPException(status_code=404, detail="Not Found")
-        # Guess content type
-        content_type, _ = mimetypes.guess_type(str(full_path))
-        return FileResponse(full_path, media_type=content_type)
-
-    # SPA fallback: catch-all route for frontend routing
-    # Must be registered AFTER all API routes to avoid conflicts
-    @app.get("/{full_path:path}")
-    def _console_spa(full_path: str):
-        # Prevent catching common system/special paths
-        if full_path in ("docs", "redoc", "openapi.json"):
-            raise HTTPException(status_code=404, detail="Not Found")
-        # Skip API routes (should already be matched due to registration order)
-        if full_path.startswith("api/") or full_path == "api":
-            raise HTTPException(status_code=404, detail="Not Found")
-        return _serve_console_index()
+# Console static files and SPA fallback
+# Register these AFTER API routes to ensure proper routing priority
+_register_console_static_routes()
