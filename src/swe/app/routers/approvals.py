@@ -106,6 +106,23 @@ def _pending_snapshot(pending: object) -> dict[str, object]:
     }
 
 
+def _approval_service_snapshot(service: object) -> dict[str, object]:
+    return {
+        "repr": repr(service),
+        "object_id": hex(id(service)),
+        "type": (
+            f"{service.__class__.__module__}."
+            f"{service.__class__.__qualname__}"
+        ),
+        "has_debug_request_lookup": callable(
+            getattr(service, "debug_request_lookup", None),
+        ),
+        "pending_count": len(getattr(service, "_pending", {}) or {}),
+        "completed_count": len(getattr(service, "_completed", {}) or {}),
+        "store_attached": getattr(service, "_store", None) is not None,
+    }
+
+
 async def _submit_decision(
     request_id: str,
     decision: ExternalApprovalDecision,
@@ -115,17 +132,19 @@ async def _submit_decision(
     workspace = await get_agent_for_request(request)
     body = body or ExternalApprovalRequest()
     service = get_approval_service()
+    service_snapshot = _approval_service_snapshot(service)
     state_snapshot = _request_state_snapshot(request)
     header_snapshot = _request_header_snapshot(request)
     logger.info(
         "External approval submit begin: request_id=%s decision=%s "
         "source_channel=%s source_user_id=%s source_message_id=%s "
-        "state=%s headers=%s",
+        "approval_service=%s state=%s headers=%s",
         request_id,
         decision.value,
         body.source_channel,
         body.source_user_id,
         body.source_message_id,
+        service_snapshot,
         state_snapshot,
         header_snapshot,
     )
@@ -145,10 +164,12 @@ async def _submit_decision(
                 )
         logger.warning(
             "External approval not found: request_id=%s decision=%s "
-            "source_channel=%s state=%s headers=%s diagnostics=%s",
+            "source_channel=%s approval_service=%s state=%s headers=%s "
+            "diagnostics=%s",
             request_id,
             decision.value,
             body.source_channel,
+            service_snapshot,
             state_snapshot,
             header_snapshot,
             diagnostics,
