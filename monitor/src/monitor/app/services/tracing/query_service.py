@@ -262,6 +262,7 @@ class TracingQueryService:  # pylint: disable=too-many-public-methods
             (top_mcp_tools, mcp_servers),
             branch_breakdown,
             total_skill_calls,
+            customer_click_stats,
         ) = await self._fetch_overview_data(
             source_id,
             start_date,
@@ -283,6 +284,7 @@ class TracingQueryService:  # pylint: disable=too-many-public-methods
             mcp_servers=mcp_servers,
             branch_breakdown=branch_breakdown,
             total_skill_calls=total_skill_calls,
+            customer_click_stats=customer_click_stats,
         )
 
     async def _fetch_overview_data(
@@ -318,6 +320,12 @@ class TracingQueryService:  # pylint: disable=too-many-public-methods
                 end_date,
                 bbk_ids,
             ),
+            self._get_customer_click_stats(
+                source_id,
+                start_date,
+                end_date,
+                bbk_ids,
+            ),
         )
 
     def _build_overview_stats(
@@ -335,8 +343,11 @@ class TracingQueryService:  # pylint: disable=too-many-public-methods
         mcp_servers: list,
         branch_breakdown: Any,
         total_skill_calls: int = 0,
+        customer_click_stats: Optional[dict[str, int]] = None,
     ) -> OverviewStats:
         """构建运营概览统计对象."""
+        if customer_click_stats is None:
+            customer_click_stats = {}
         return OverviewStats(
             online_users=online_users,
             online_user_ids=online_user_ids,
@@ -354,6 +365,9 @@ class TracingQueryService:  # pylint: disable=too-many-public-methods
                 token_row["total_traces"] or 0 if token_row else 0
             ),
             total_skill_calls=total_skill_calls,
+            plan_customers=customer_click_stats.get("plan_customers", 0),
+            insight_customers=customer_click_stats.get("insight_customers", 0),
+            phone_customers=customer_click_stats.get("phone_customers", 0),
             avg_duration_ms=self._extract_avg_duration(token_row),
             top_tools=top_tools,
             top_skills=top_skills,
@@ -1988,6 +2002,75 @@ class TracingQueryService:  # pylint: disable=too-many-public-methods
             params = (source_id, start_date, end_date, *bbk_filter_params)
             row = await self._db.fetch_one(query, params)
         return int((row or {}).get("total") or 0)
+
+    async def _get_customer_click_stats(
+        self,
+        source_id: str,
+        start_date: datetime,
+        end_date: datetime,
+        bbk_ids: Optional[str] = None,
+    ) -> dict[str, int]:
+        """获取客户点击行为统计.
+
+        从 swe_html_preview_click_events 表按 button_type 分组，
+        统计 cron_task_id + customer_id 去重计数.
+
+        Returns:
+            dict with keys: plan_customers, insight_customers, phone_customers
+        """
+        db = self._db
+
+        # 构建 WHERE 条件
+        conditions = ["clicked_at >= %s", "clicked_at < %s"]
+        params: list = [start_date, end_date]
+
+        if source_id != "all":
+            conditions.append("source_id = %s")
+            params.append(source_id)
+        else:
+            # 排除测试平台
+            exclude_placeholders = ", ".join(["%s"] * len(EXCLUDED_SOURCE_IDS))
+            conditions.append(f"source_id NOT IN ({exclude_placeholders})")
+            params.extend(EXCLUDED_SOURCE_IDS)
+
+        bbk_filter_sql, bbk_filter_params = build_bbk_in_filter(bbk_ids)
+        if bbk_filter_sql:
+            conditions.append(bbk_filter_sql[4:])  # 移除 "AND " 前缀
+            params.extend(bbk_filter_params)
+
+        where_clause = " AND ".join(conditions)
+
+        # 查询各 button_type 的去重客户数
+        query = f"""
+            SELECT
+                button_type,
+                COUNT(DISTINCT CONCAT(COALESCE(cron_task_id, ''), '|', COALESCE(customer_id, ''))) as customer_count
+            FROM swe_html_preview_click_events
+            WHERE {where_clause}
+                AND button_type IN ('plan', 'insight', 'phone')
+                AND cron_task_id IS NOT NULL
+                AND customer_id IS NOT NULL
+            GROUP BY button_type
+        """
+
+        rows = await db.fetch_all(query, tuple(params))
+
+        result = {
+            "plan_customers": 0,
+            "insight_customers": 0,
+            "phone_customers": 0,
+        }
+
+        for row in rows:
+            button_type = row["button_type"]
+            if button_type == "plan":
+                result["plan_customers"] = row["customer_count"] or 0
+            elif button_type == "insight":
+                result["insight_customers"] = row["customer_count"] or 0
+            elif button_type == "phone":
+                result["phone_customers"] = row["customer_count"] or 0
+
+        return result
 
     async def _get_multi_round_ratio(
         self,
