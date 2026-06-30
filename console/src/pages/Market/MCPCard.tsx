@@ -5,8 +5,9 @@
  * - 列表卡片布局尽量贴近 CmbCoworkAgent-main 的应用市场卡片
  * - 只保留 MCP 市场自己的动作：详情 / 分发 / 删除
  */
-import { Button } from "antd";
-import { Calendar, GitBranch, Eye, Send, Trash2, Pencil, Users } from "lucide-react";
+import { Button, Tag, Popover } from "antd";
+import { Calendar, GitBranch, Eye, Send, Trash2, Pencil, Users, Building2 } from "lucide-react";
+import { BBK_ID_TO_NAME_MAP } from "../../constants/bbk";
 import type { MarketMCPItem } from "../../api/types";
 
 interface MCPCardProps {
@@ -81,23 +82,76 @@ export function MCPCard({
         }}
       >
         <div style={{ flex: 1, minWidth: 0 }}>
-          <div
-            style={{
-              fontWeight: 500,
-              fontSize: 15,
-              lineHeight: "22px",
-              color: "#141413",
-            }}
-          >
-            {mcp.chinese_name ? (
+          <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+            <div
+              style={{
+                fontWeight: 500,
+                fontSize: 15,
+                lineHeight: "22px",
+                color: "#141413",
+              }}
+            >
+              {mcp.chinese_name ? (
+                <>
+                  {mcp.chinese_name}
+                  <span style={{ marginLeft: 6, color: "#87867f", fontWeight: 400, fontSize: 14 }}>
+                    ({mcp.name})
+                  </span>
+                </>
+              ) : (
+                mcp.name
+              )}
+            </div>
+            {mcp.bbk_ids?.length > 0 && (
               <>
-                {mcp.chinese_name}
-                <span style={{ marginLeft: 6, color: "#87867f", fontWeight: 400, fontSize: 14 }}>
-                  ({mcp.name})
-                </span>
+                {/* 显示第一个分行 */}
+                <Tag
+                  style={{
+                    fontSize: 11,
+                    color: "#5e5d59",
+                    backgroundColor: "#f5f4ed",
+                    border: "1px solid #e8e6dc",
+                    borderRadius: 999,
+                    padding: "0 8px",
+                    display: "inline-flex",
+                    alignItems: "center",
+                    gap: 4,
+                  }}
+                >
+                  <Building2 size={12} style={{ color: "#87867f" }} />
+                  {BBK_ID_TO_NAME_MAP[mcp.bbk_ids[0]] || mcp.bbk_ids[0]}
+                </Tag>
+                {/* 如果有多个分行，显示 +N Popover */}
+                {mcp.bbk_ids.length > 1 && (
+                  <Popover
+                    trigger="hover"
+                    placement="bottom"
+                    content={
+                      <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+                        {mcp.bbk_ids.map((bbkId) => (
+                          <span key={bbkId} style={{ fontSize: 12 }}>
+                            {BBK_ID_TO_NAME_MAP[bbkId] || bbkId}
+                          </span>
+                        ))}
+                      </div>
+                    }
+                  >
+                    <Tag
+                      style={{
+                        fontSize: 11,
+                        color: "#87867f",
+                        backgroundColor: "#f5f4ed",
+                        border: "1px solid #e8e6dc",
+                        borderRadius: 999,
+                        padding: "0 8px",
+                        cursor: "pointer",
+                      }}
+                    >
+                      +{mcp.bbk_ids.length - 1}
+                    </Tag>
+                  </Popover>
+                )}
               </>
-            ) : (
-              mcp.name
             )}
           </div>
           {mcp.description ? (

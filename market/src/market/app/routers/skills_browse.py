@@ -665,17 +665,26 @@ def _import_skill_from_zip(
 async def list_skills(
     request: Request,
     category_id: Optional[int] = None,
+    bbk_ids: Optional[str] = Query(
+        default=None,
+        description="逗号分隔的分行ID列表",
+    ),
     x_source_id: Optional[str] = Header(default=None, alias="X-Source-Id"),
     x_bbk_id: Optional[str] = Header(default=None, alias="X-Bbk-Id"),
 ):
-    """浏览市场技能列表（按 source_id + bbk_id 过滤）."""
+    """浏览市场技能列表（按 source_id + category_id + bbk_ids 过滤）."""
     source_id = require_source_id(x_source_id)
     user_bbk_id = x_bbk_id or "100"
+    # 解析 bbk_ids 参数（逗号分隔）
+    parsed_bbk_ids = None
+    if bbk_ids:
+        parsed_bbk_ids = [b.strip() for b in bbk_ids.split(",") if b.strip()]
     svc = request.app.state.marketplace
     return await svc.list_skills(
         source_id,
         user_bbk_id,
         category_id=category_id,
+        bbk_ids=parsed_bbk_ids,
     )
 
 

@@ -21,12 +21,16 @@ export const marketMcpApi = {
    * 获取市场 MCP 列表
    */
   listMarketMCP: async (
-    categoryId?: number
+    categoryId?: number,
+    bbkIds?: string,
   ): Promise<MarketMCPItem[]> => {
     let url = "/market/mcp";
     const params = new URLSearchParams();
     if (categoryId !== undefined) {
       params.append("category_id", String(categoryId));
+    }
+    if (bbkIds !== undefined && bbkIds !== null) {
+      params.append("bbk_ids", bbkIds);
     }
     if (params.toString()) {
       url += `?${params.toString()}`;

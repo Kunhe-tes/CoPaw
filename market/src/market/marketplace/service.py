@@ -250,14 +250,8 @@ def _decode_creator_name(value: str) -> str:
 
 
 def _item_visible(item: MarketItem, user_bbk_id: str) -> bool:
-    """Return True if item is visible to user with given bbk_id."""
-    if item.status != "active":
-        return False
-    if user_bbk_id == "100":
-        return True
-    if not item.bbk_ids:
-        return True
-    return "100" in item.bbk_ids or user_bbk_id in item.bbk_ids
+    """Return True if item is active (bbk_ids is for attribution, not visibility)."""
+    return item.status == "active"
 
 
 def _preview_sort_key(path: Path) -> tuple[int, str]:
@@ -1129,16 +1123,22 @@ class MarketplaceService:
         source_id: str,
         user_bbk_id: str,
         category_id: Optional[int] = None,
+        bbk_ids: Optional[list[str]] = None,
     ) -> list[MarketSkillResponse]:
-        """列出市场技能，按 bbk_id 过滤，可选按分类过滤。"""
+        """列出市场技能，可选按分类和分行过滤。"""
         items = load_index(self.marketplace_root, source_id)
         visible = [
-            i
-            for i in items
-            if i.item_type == "skill" and _item_visible(i, user_bbk_id)
+            i for i in items if i.item_type == "skill" and i.status == "active"
         ]
         if category_id is not None:
             visible = [i for i in visible if i.category_id == category_id]
+        # 按 bbk_ids 过滤（技能的 bbk_ids 与请求的 bbk_ids 有交集）
+        if bbk_ids is not None and len(bbk_ids) > 0:
+            visible = [
+                i
+                for i in visible
+                if i.bbk_ids and any(b in i.bbk_ids for b in bbk_ids)
+            ]
 
         result = []
         for item in visible:
@@ -2531,27 +2531,35 @@ class MarketplaceService:
         source_id: str,
         user_bbk_id: str,
         category_id: Optional[int] = None,
+        bbk_ids: Optional[list[str]] = None,
     ) -> list[MarketMCPItem]:
         """列出市场 MCP 条目。
 
         Args:
             source_id: 来源 ID。
-            user_bbk_id: 用户 bbk_id，用于权限过滤。
+            user_bbk_id: 用户 bbk_id（保留参数兼容性，不再用于过滤）。
             category_id: 可选的分类 ID 过滤。
+            bbk_ids: 可选的分行 ID 过滤（交集匹配）。
 
         Returns:
             MCP 条目列表（含调用统计）。
         """
         items = load_index(self.marketplace_root, source_id)
         mcp_items = [
-            i
-            for i in items
-            if i.item_type == "mcp" and _item_visible(i, user_bbk_id)
+            i for i in items if i.item_type == "mcp" and i.status == "active"
         ]
         mcp_items = _sort_items_by_updated_at_desc(mcp_items)
 
         if category_id is not None:
             mcp_items = [i for i in mcp_items if i.category_id == category_id]
+
+        # 按 bbk_ids 过滤（MCP 的 bbk_ids 与请求的 bbk_ids 有交集）
+        if bbk_ids is not None and len(bbk_ids) > 0:
+            mcp_items = [
+                i
+                for i in mcp_items
+                if i.bbk_ids and any(b in i.bbk_ids for b in bbk_ids)
+            ]
 
         result = []
         for item in mcp_items:

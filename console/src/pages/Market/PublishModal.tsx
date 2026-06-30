@@ -256,11 +256,11 @@ export function PublishModal({ open, sourceId, userId, onClose, onSuccess, initi
             />
           )}
         </Form.Item>
-        <Form.Item name="bbk_ids" label="可见机构">
+        <Form.Item name="bbk_ids" label="所属分行" rules={[{ required: true, message: "请选择所属分行" }]}>
           <Select
             mode="multiple"
             allowClear
-            placeholder="不选择则全员可见"
+            placeholder="设置技能所属的分行"
             options={BBK_ID_MAP}
           />
         </Form.Item>
