@@ -228,6 +228,32 @@ def _parse_json_like(
         return None
 
 
+_OBJECT_ACTION_HINTS = {
+    "browser_use": "",
+    "read_file": "读取",
+    "write_file": "写入",
+    "append_file": "写入",
+    "edit_file": "编辑",
+    "grep_search": "搜索",
+    "memory_search": "搜索",
+    "glob_search": "查找",
+}
+
+
+def _format_object_action(
+    display_name: str,
+    obj: str,
+    action: str | None = None,
+) -> str:
+    if obj == "无":
+        return f"正在{display_name}"
+    if action is None:
+        return f"正在{display_name}：{obj}"
+    if action:
+        return f"正在{action} {obj}"
+    return f"正在 {obj}"
+
+
 def _build_call_action_hint(
     tool_name: str,
     server_label: Optional[str],
@@ -244,21 +270,13 @@ def _build_call_action_hint(
         return f"开始{display_name}"
 
     obj = _get_call_object_hint(tool_name, arguments)
-    if tool_name == "browser_use":
-        return f"正在 {obj}" if obj != "无" else f"正在{display_name}"
-    if tool_name == "read_file":
-        return f"正在读取 {obj}" if obj != "无" else f"正在{display_name}"
-    if tool_name in {"write_file", "append_file"}:
-        return f"正在写入 {obj}" if obj != "无" else f"正在{display_name}"
-    if tool_name == "edit_file":
-        return f"正在编辑 {obj}" if obj != "无" else f"正在{display_name}"
-    if tool_name in {"grep_search", "memory_search"}:
-        return f"正在搜索 {obj}" if obj != "无" else f"正在{display_name}"
-    if tool_name == "glob_search":
-        return f"正在查找 {obj}" if obj != "无" else f"正在{display_name}"
-    if obj != "无":
-        return f"正在{display_name}：{obj}"
-    return f"正在{display_name}"
+    if tool_name in _OBJECT_ACTION_HINTS:
+        return _format_object_action(
+            display_name,
+            obj,
+            _OBJECT_ACTION_HINTS[tool_name],
+        )
+    return _format_object_action(display_name, obj)
 
 
 def _generate_rule_based_call_summary(
