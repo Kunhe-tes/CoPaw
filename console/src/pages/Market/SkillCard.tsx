@@ -159,25 +159,25 @@ export function SkillCard({ skill, onClick, onDistribute, onLookupOwners, onUnpu
               )}
               {skill.bbk_ids?.length > 0 && (
                 <>
-                  {/* 显示第一个分行 */}
-                  <Tag
-                    style={{
-                      fontSize: 11,
-                      color: "#5e5d59",
-                      backgroundColor: "#f5f4ed",
-                      border: "1px solid #e8e6dc",
-                      borderRadius: 999,
-                      padding: "0 8px",
-                      display: "inline-flex",
-                      alignItems: "center",
-                      gap: 4,
-                    }}
-                  >
-                    <Building2 size={12} style={{ color: "#87867f" }} />
-                    {BBK_ID_TO_NAME_MAP[skill.bbk_ids[0]] || skill.bbk_ids[0]}
-                  </Tag>
-                  {/* 如果有多个分行，显示 +N Popover */}
-                  {skill.bbk_ids.length > 1 && (
+                  {/* 分行 Tag：单个分行直接显示，多个分行显示首个+N，hover展开全部 */}
+                  {skill.bbk_ids.length === 1 ? (
+                    <Tag
+                      style={{
+                        fontSize: 11,
+                        color: "#5e5d59",
+                        backgroundColor: "#f5f4ed",
+                        border: "1px solid #e8e6dc",
+                        borderRadius: 999,
+                        padding: "0 8px",
+                        display: "inline-flex",
+                        alignItems: "center",
+                        gap: 4,
+                      }}
+                    >
+                      <Building2 size={12} style={{ color: "#87867f" }} />
+                      {BBK_ID_TO_NAME_MAP[skill.bbk_ids[0]] || skill.bbk_ids[0]}
+                    </Tag>
+                  ) : (
                     <Popover
                       trigger="hover"
                       placement="bottom"
@@ -194,15 +194,20 @@ export function SkillCard({ skill, onClick, onDistribute, onLookupOwners, onUnpu
                       <Tag
                         style={{
                           fontSize: 11,
-                          color: "#87867f",
+                          color: "#5e5d59",
                           backgroundColor: "#f5f4ed",
                           border: "1px solid #e8e6dc",
                           borderRadius: 999,
                           padding: "0 8px",
+                          display: "inline-flex",
+                          alignItems: "center",
+                          gap: 4,
                           cursor: "pointer",
                         }}
                       >
-                        +{skill.bbk_ids.length - 1}
+                        <Building2 size={12} style={{ color: "#87867f" }} />
+                        {BBK_ID_TO_NAME_MAP[skill.bbk_ids[0]] || skill.bbk_ids[0]}
+                        <span style={{ color: "#87867f" }}>+{skill.bbk_ids.length - 1}</span>
                       </Tag>
                     </Popover>
                   )}
