@@ -18,6 +18,13 @@ The system SHALL resolve per-process launch limits from the current tenant's roo
 - **THEN** the system SHALL launch the subprocess without applying process ceilings
 - **AND** the subprocess SHALL remain subject to existing validation and timeout behavior
 
+#### Scenario: Shell concurrency policy uses tenant root config
+- **GIVEN** tenant `tenant-a` has `security.process_limits.enabled=true`
+- **AND** tenant `tenant-a` config enables shell enforcement with `shell_max_concurrent=5`
+- **WHEN** tenant-scoped builtin shell execution starts for `tenant-a`
+- **THEN** the system SHALL resolve the shell concurrency policy from `tenant-a`'s root config
+- **AND** the system SHALL NOT read shell concurrency settings from another tenant's config
+
 ### Requirement: Shell subprocesses SHALL honor configured per-process ceilings
 The system SHALL apply configured per-process CPU time and memory ceilings to tenant-scoped builtin shell subprocess launches on supported Unix platforms.
 
@@ -38,6 +45,38 @@ The system SHALL apply configured per-process CPU time and memory ceilings to te
 - **WHEN** a tenant-scoped builtin shell command exceeds the configured memory ceiling
 - **THEN** the operating system SHALL terminate or fail the subprocess
 - **AND** the builtin shell tool SHALL return a failure result indicating the command exceeded process limits
+
+### Requirement: Builtin shell execution SHALL enforce per-tenant local concurrency slots
+The system SHALL limit concurrent tenant-scoped builtin shell tool calls inside one Swe backend process with `security.process_limits.shell_max_concurrent`.
+
+#### Scenario: Shell execution acquires and releases a tenant slot
+- **GIVEN** tenant process limits are enabled for shell launches with `shell_max_concurrent=5`
+- **WHEN** a tenant-scoped builtin shell command starts
+- **THEN** the shell tool SHALL acquire one tenant shell execution slot before launching the subprocess
+- **AND** the shell tool SHALL release that slot only after the shell tool returns and Unix process group cleanup has completed
+
+#### Scenario: Shell execution waits briefly for a busy tenant slot
+- **GIVEN** tenant `tenant-a` already has `shell_max_concurrent` builtin shell commands in flight in the same Swe backend process
+- **WHEN** another builtin shell command starts for `tenant-a`
+- **THEN** the shell tool SHALL wait up to `security.process_limits.shell_acquire_timeout_seconds` for a tenant shell execution slot
+- **AND** if no slot becomes available, the shell tool SHALL fail before launching a subprocess with a shell concurrency limit failure
+
+#### Scenario: Shell slot limits do not count forked OS child processes
+- **GIVEN** one builtin shell command runs a script that forks child processes
+- **WHEN** the system evaluates tenant shell execution slots
+- **THEN** the script and its forked child processes SHALL count as one in-flight builtin shell execution
+- **AND** this capability SHALL NOT require counting every OS process forked by the script
+
+### Requirement: Builtin shell execution SHALL clean up its Unix process group
+The system SHALL terminate remaining processes in the Unix process group created for tenant-scoped builtin shell execution before the tool call is considered complete.
+
+#### Scenario: Successful shell command leaves a background process
+- **WHEN** a tenant-scoped builtin shell command exits successfully after starting a background process in the same Unix process group
+- **THEN** the shell tool SHALL terminate the remaining process group before returning success
+
+#### Scenario: Failed shell command leaves a background process
+- **WHEN** a tenant-scoped builtin shell command fails after starting a background process in the same Unix process group
+- **THEN** the shell tool SHALL terminate the remaining process group before returning failure
 
 ### Requirement: MCP `stdio` subprocesses SHALL honor the same configured ceilings
 The system SHALL apply the same tenant-scoped per-process CPU time and memory ceilings to tenant-scoped MCP `stdio` server subprocess launches, including rebuild paths that reconnect a stdio client from stored metadata.
@@ -73,4 +112,3 @@ The system SHALL avoid silently claiming process-limit enforcement on unsupporte
 - **WHEN** an in-scope subprocess launch occurs on a platform where this capability does not enforce process limits
 - **THEN** the system SHALL leave subprocess launch behavior unchanged
 - **AND** the system SHALL emit diagnostics indicating that process limits were not enforced on that platform
-

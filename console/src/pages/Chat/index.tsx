@@ -98,6 +98,10 @@ import ChatTaskEditFormBody from "./components/ChatTaskEditFormBody";
 import { shouldRefreshCurrentTaskMessages } from "./taskMessageRefresh";
 import { resolveCurrentFileUrlNetwork } from "./fileUrlNetwork";
 import { matchesResolvedChatId } from "./sessionApi/resolvedSessionMapping";
+import {
+  CHAT_ATTACHMENT_ACCEPT_HINT,
+  uploadChatAttachment,
+} from "./attachmentUploadPolicy";
 
 import RuntimeRequestCard from "./components/RuntimeRequestCard";
 import { FOLLOW_UP_SUBMIT_FAILED_EVENT } from "@/components/agentscope-chat/AgentScopeRuntimeWebUI/core/Chat/hooks/followUpSubmit";
@@ -1191,7 +1195,9 @@ export default function ChatPage() {
         void refreshJobs();
       } catch (error) {
         console.error("Failed to update cron task from chat sidebar:", error);
-        message.error(error instanceof SyntaxError ? "任务配置格式不正确" : "保存失败");
+        message.error(
+          error instanceof SyntaxError ? "任务配置格式不正确" : "保存失败",
+        );
       } finally {
         setTaskEditSaving(false);
       }
@@ -1407,41 +1413,17 @@ export default function ChatPage() {
       onError?: (e: Error) => void;
       onProgress?: (e: { percent?: number }) => void;
     }) => {
-      const { file, onSuccess, onError, onProgress } = options;
-      try {
-        // Warn when model has no multimodal support
-        if (!multimodalCaps.supportsMultimodal) {
-          message.warning(t("chat.attachments.multimodalWarning"));
-        } else if (
-          multimodalCaps.supportsImage &&
-          !multimodalCaps.supportsVideo &&
-          !file.type.startsWith("image/")
-        ) {
-          // Warn (not block) when only image is supported
-          message.warning(t("chat.attachments.imageOnlyWarning"));
-        }
-        const sizeMb = file.size / 1024 / 1024;
-        const isWithinLimit = sizeMb < CHAT_ATTACHMENT_MAX_MB;
-
-        if (!isWithinLimit) {
-          message.error(
-            t("chat.attachments.fileSizeExceeded", {
-              limit: CHAT_ATTACHMENT_MAX_MB,
-              size: sizeMb.toFixed(2),
-            }),
-          );
-          onError?.(new Error(`File size exceeds ${CHAT_ATTACHMENT_MAX_MB}MB`));
-          return;
-        }
-
-        const res = await chatApi.uploadFile(file);
-        onProgress?.({ percent: 100 });
-        onSuccess({ url: chatApi.filePreviewUrl(res.url) });
-      } catch (e) {
-        onError?.(e instanceof Error ? e : new Error(String(e)));
-      }
+      await uploadChatAttachment({
+        ...options,
+        message,
+        t,
+        multimodalCaps,
+        maxUploadMb: CHAT_ATTACHMENT_MAX_MB,
+        uploadFile: chatApi.uploadFile,
+        filePreviewUrl: chatApi.filePreviewUrl,
+      });
     },
-    [multimodalCaps, t],
+    [message, multimodalCaps, t],
   );
 
   // ==================== Drag & drop file upload (Kun He) ====================
@@ -1620,7 +1602,7 @@ export default function ChatPage() {
               </Tooltip>
             );
           },
-          accept: "*/*",
+          accept: CHAT_ATTACHMENT_ACCEPT_HINT,
           customRequest: handleFileUpload,
         },
         placeholder: t("chat.inputPlaceholder"),

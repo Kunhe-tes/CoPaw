@@ -15,6 +15,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+from functools import lru_cache
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
@@ -22,6 +23,15 @@ logger = logging.getLogger(__name__)
 VALID_ENVS = ("dev", "prd")
 DEFAULT_ENV = "dev"
 _APPLIED_DEFAULTS: dict[str, str] = {}
+NON_DEFAULT_BACKEND_SECRET_ENV_KEYS = frozenset(
+    {
+        "SWE_AUTH_PASSWORD",
+        "SWE_INTERNAL_TOKEN",
+        "TITLE_API_KEY",
+        "ZHAOHU_CLIENT_SECRET",
+        "ZHAOHU_INTENT_API_KEY",
+    },
+)
 
 
 def _get_package_dir() -> Path:
@@ -96,3 +106,29 @@ def get_current_env() -> str:
 def get_applied_env_defaults() -> dict[str, str]:
     """返回当前进程中由默认配置注入的环境变量。"""
     return dict(_APPLIED_DEFAULTS)
+
+
+@lru_cache(maxsize=1)
+def get_system_configuration_env_keys() -> frozenset[str]:
+    """Return backend-owned env keys declared by packaged env configs."""
+    config_dir = _get_package_dir() / "config" / "envs"
+    keys: set[str] = set()
+    for config_file in sorted(config_dir.glob("*.json")):
+        try:
+            with open(config_file, encoding="utf-8") as f:
+                data = json.load(f)
+        except (json.JSONDecodeError, OSError) as exc:
+            logger.warning(
+                "Failed to inspect environment config from %s: %s",
+                config_file,
+                exc,
+            )
+            continue
+        if isinstance(data, dict):
+            keys.update(str(key) for key in data)
+    return frozenset(keys)
+
+
+def get_backend_owned_secret_env_keys() -> frozenset[str]:
+    """Return backend-owned secret env keys not declared in env configs."""
+    return NON_DEFAULT_BACKEND_SECRET_ENV_KEYS

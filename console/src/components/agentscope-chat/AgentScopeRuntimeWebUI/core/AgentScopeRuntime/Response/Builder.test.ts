@@ -193,3 +193,48 @@ describe("AgentScopeRuntimeResponseBuilder tool output frames", () => {
     );
   });
 });
+
+describe("AgentScopeRuntimeResponseBuilder failed responses", () => {
+  it("preserves partial output when a terminal model_call_failed response has no output", () => {
+    const builder = new AgentScopeRuntimeResponseBuilder({
+      id: "response-1",
+      status: AgentScopeRuntimeRunStatus.InProgress,
+      created_at: 1,
+    });
+
+    builder.handle({
+      id: "message-1",
+      object: "message",
+      role: "assistant",
+      type: AgentScopeRuntimeMessageType.MESSAGE,
+      status: AgentScopeRuntimeRunStatus.Completed,
+      content: [
+        {
+          type: AgentScopeRuntimeContentType.TEXT,
+          status: AgentScopeRuntimeRunStatus.Completed,
+          text: "partial answer",
+        },
+      ],
+    });
+
+    builder.handle({
+      id: "response-1",
+      object: "response",
+      status: AgentScopeRuntimeRunStatus.Failed,
+      created_at: 1,
+      completed_at: 2,
+      output: [],
+      error: {
+        code: "model_call_failed",
+        message: "provider diagnostic",
+      },
+    });
+
+    expect(builder.data.status).toBe(AgentScopeRuntimeRunStatus.Failed);
+    expect(builder.data.error?.code).toBe("model_call_failed");
+    expect(builder.data.output).toHaveLength(1);
+    expect(
+      (builder.data.output[0].content[0] as { text?: string }).text,
+    ).toBe("partial answer");
+  });
+});
