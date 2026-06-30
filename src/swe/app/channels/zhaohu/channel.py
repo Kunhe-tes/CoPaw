@@ -108,15 +108,14 @@ def _build_approval_result_text(
 ) -> str:
     """构建不含按钮的工具审批结果通知正文。"""
     decision_text = "通过" if decision == "approved" else "拒绝"
+    source_channel_text = "招乎" if source_channel == "zhaohu" else "平台"
     lines = [
-        f"工具审批已{decision_text}",
-        f"工具：{tool_name or 'unknown'}",
-        f"审批请求：{request_id}",
-        f"会话：{session_id or '-'}",
+        f"{tool_name or 'unknown'}工具审批已{decision_text}",
+        f"审批ID：{request_id}",
         f"用户：{user_id or '-'}",
     ]
     if source_channel:
-        lines.append(f"审批来源：{source_channel}")
+        lines.append(f"审批来源：{source_channel_text}")
     return "\n".join(lines)
 
 
@@ -618,25 +617,15 @@ class ZhaohuChannel(BaseChannel):
     ) -> str:
         """构建不含审批按钮的工具审批待处理通知正文。"""
         lines = [
-            "工具调用需要审批",
-            f"工具：{tool_name or 'unknown'}",
-            f"风险数量：{findings_count or 0}",
+            f"{tool_name or 'unknown'}工具调用需要审批",
         ]
-        summary = _truncate(
-            _normalize_text(str(result_summary or "")),
-            _APPROVAL_TEXT_LIMIT,
-        )
-        if summary:
-            lines.extend(["风险摘要：", summary])
         params_text = self._format_approval_tool_input(tool_input)
         if params_text:
             lines.extend(["调用参数：", params_text])
         lines.extend(
             [
-                f"审批请求：{request_id}",
-                f"会话：{session_id or '-'}",
+                f"审批ID：{request_id}",
                 f"用户：{user_id or '-'}",
-                "请在控制台处理该工具审批。",
             ],
         )
         return "\n".join(lines)
