@@ -1158,6 +1158,60 @@ class TracingQueryService:  # pylint: disable=too-many-public-methods
             }
             for row in rows
         }
+
+        # 查询已读任务数（按小时）
+        read_tasks_query = f"""
+            SELECT
+                HOUR(e.actual_time) as hour_bucket,
+                COUNT(*) as read_tasks
+            FROM swe_cron_executions e
+            INNER JOIN swe_cron_jobs j ON e.job_id = j.id
+            WHERE e.actual_time >= %s AND e.actual_time <= %s
+              AND j.status != 'deleted'
+              AND j.deleted_at IS NULL
+              AND e.read_at IS NOT NULL{bbk_filter_sql.replace('bbk_id', 'j.bbk_id')}
+            GROUP BY HOUR(e.actual_time)
+        """
+        read_tasks_params = (start_date, end_date, *bbk_filter_params)
+        read_tasks_rows = await self._db.fetch_all(
+            read_tasks_query,
+            read_tasks_params,
+        )
+        read_tasks_hour_map = {
+            int(row["hour_bucket"]): row["read_tasks"] or 0
+            for row in read_tasks_rows
+        }
+
+        # 查询客户点击统计（按小时）
+        click_query = f"""
+            SELECT
+                HOUR(clicked_at) as hour_bucket,
+                button_type,
+                COUNT(DISTINCT CONCAT(COALESCE(cron_task_id, ''), '|', COALESCE(customer_id, ''))) as customer_count
+            FROM swe_html_preview_click_events
+            WHERE clicked_at >= %s AND clicked_at <= %s
+              AND button_type IN ('plan', 'insight', 'phone')
+              AND cron_task_id IS NOT NULL
+              AND customer_id IS NOT NULL{bbk_filter_sql}
+            GROUP BY HOUR(clicked_at), button_type
+        """
+        click_params = (start_date, end_date, *bbk_filter_params)
+        click_rows = await self._db.fetch_all(click_query, click_params)
+
+        # 按小时和类型组织数据
+        click_hour_map: dict[int, dict[str, int]] = {}
+        for row in click_rows:
+            hour_key = int(row["hour_bucket"])
+            if hour_key not in click_hour_map:
+                click_hour_map[hour_key] = {
+                    "plan": 0,
+                    "insight": 0,
+                    "phone": 0,
+                }
+            btn_type = row["button_type"]
+            if btn_type in click_hour_map[hour_key]:
+                click_hour_map[hour_key][btn_type] = row["customer_count"] or 0
+
         day_prefix = start_date.strftime("%Y-%m-%d")
         # 判断是否是今天：如果是今天，只返回到当前小时，避免显示未来无意义的时间点
         now = datetime.now()
@@ -1169,6 +1223,16 @@ class TracingQueryService:  # pylint: disable=too-many-public-methods
                 "calls": hour_map.get(hour, {}).get("calls", 0),
                 "tokens": hour_map.get(hour, {}).get("tokens", 0),
                 "users": hour_map.get(hour, {}).get("users", 0),
+                "read_tasks": read_tasks_hour_map.get(hour, 0),
+                "plan_customers": click_hour_map.get(hour, {}).get("plan", 0),
+                "insight_customers": click_hour_map.get(hour, {}).get(
+                    "insight",
+                    0,
+                ),
+                "phone_customers": click_hour_map.get(hour, {}).get(
+                    "phone",
+                    0,
+                ),
             }
             for hour in range(max_hour + 1)
         ]
