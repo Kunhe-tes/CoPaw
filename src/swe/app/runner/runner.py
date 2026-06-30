@@ -1561,6 +1561,27 @@ def _request_approval_source_channel(
     return None
 
 
+def _external_approval_submission(record: Any) -> dict[str, Any] | None:
+    extra = getattr(record, "extra", None)
+    if not isinstance(extra, dict):
+        return None
+    submission = extra.get("external_submission")
+    if not isinstance(submission, dict):
+        return None
+    return submission
+
+
+def _request_matches_external_approval_submission(
+    request: Any | None,
+    submission: dict[str, Any],
+) -> bool:
+    submitted_channel = submission.get("source_channel")
+    if not isinstance(submitted_channel, str) or not submitted_channel.strip():
+        return False
+    request_channel = _request_approval_source_channel(request)
+    return request_channel == submitted_channel.strip()
+
+
 def _request_user_name(request: AgentRequest) -> str | None:
     """按兼容顺序读取通道注入的用户名称。"""
     channel_meta = getattr(request, "channel_meta", None) or {}
@@ -1793,6 +1814,36 @@ class AgentRunner(Runner):
                                 f"timed out ({int(elapsed)}s) — denied.\n"
                                 f"工具 `{pending.tool_name}` 审批超时"
                                 f"（{int(elapsed)}s），已拒绝执行。"
+                            ),
+                        ),
+                    ],
+                ),
+                True,
+                None,
+            )
+
+        external_submission = _external_approval_submission(pending)
+        if external_submission is not None and (
+            not _request_matches_external_approval_submission(
+                request,
+                external_submission,
+            )
+        ):
+            source_channel = external_submission.get("source_channel")
+            if not isinstance(source_channel, str) or not source_channel:
+                source_channel = "external"
+            return (
+                Msg(
+                    name="Friday",
+                    role="assistant",
+                    content=[
+                        TextBlock(
+                            type="text",
+                            text=(
+                                f"Approval request `{pending.request_id}` "
+                                f"has already been submitted from "
+                                f"`{source_channel}`. Refresh the session "
+                                "to see the latest approval state."
                             ),
                         ),
                     ],

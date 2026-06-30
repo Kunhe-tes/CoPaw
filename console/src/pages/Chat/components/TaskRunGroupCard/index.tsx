@@ -312,6 +312,7 @@ function NestedTaskRunMessages(props: {
     feedback: FeedbackRecord,
     response: ChatRuntimeResponseCardData,
   ) => void;
+  onExternalApprovalResolved?: () => Promise<unknown> | unknown;
 }) {
   return (
     <>
@@ -354,6 +355,7 @@ function NestedTaskRunMessages(props: {
                 <ApprovalActionCard
                   key={key}
                   data={card.data as ChatApprovalActionCardData}
+                  onExternalApprovalResolved={props.onExternalApprovalResolved}
                 />
               );
             }
@@ -376,6 +378,7 @@ export default function TaskRunGroupCard(props: {
     feedback: FeedbackRecord,
     response: ChatRuntimeResponseCardData,
   ) => void;
+  onExternalApprovalResolved?: () => Promise<unknown> | unknown;
 }) {
   const { data } = props;
   const [resultExpanded, setResultExpanded] = useState(
@@ -463,6 +466,7 @@ export default function TaskRunGroupCard(props: {
           feedbackLookup={props.feedbackLookup}
           loadingFeedback={props.loadingFeedback}
           onFeedbackSaved={props.onFeedbackSaved}
+          onExternalApprovalResolved={props.onExternalApprovalResolved}
         />
       )}
       {resultExpanded && hasSteps && (
@@ -504,6 +508,7 @@ export default function TaskRunGroupCard(props: {
                 feedbackLookup={props.feedbackLookup}
                 loadingFeedback={props.loadingFeedback}
                 onFeedbackSaved={props.onFeedbackSaved}
+                onExternalApprovalResolved={props.onExternalApprovalResolved}
               />
             </div>
           )}

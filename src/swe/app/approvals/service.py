@@ -30,6 +30,7 @@ _GC_PENDING_MAX_AGE_SECONDS = max(
     TOOL_GUARD_APPROVAL_TIMEOUT_SECONDS,
 )
 _GC_MAX_PENDING = 200
+_EXTERNAL_SUBMISSION_EXTRA_KEY = "external_submission"
 
 
 # ------------------------------------------------------------------
@@ -134,6 +135,24 @@ class ApprovalService:
             "approval_kind": extra.get("approval_kind"),
             "tool_call_id": tool_call.get("id"),
             "extra_keys": sorted(extra.keys()),
+        }
+
+    @staticmethod
+    def _external_submission_summary(
+        pending: PendingApproval,
+    ) -> dict[str, Any] | None:
+        """Return log/API-safe metadata for an external decision submit."""
+        extra = pending.extra if isinstance(pending.extra, dict) else {}
+        submission = extra.get(_EXTERNAL_SUBMISSION_EXTRA_KEY)
+        if not isinstance(submission, dict):
+            return None
+        return {
+            "status": submission.get("status") or "submitted",
+            "decision": submission.get("decision"),
+            "source_channel": submission.get("source_channel"),
+            "source_user_id": submission.get("source_user_id"),
+            "source_message_id": submission.get("source_message_id"),
+            "submitted_at": submission.get("submitted_at"),
         }
 
     async def debug_request_lookup(self, request_id: str) -> dict[str, Any]:
@@ -281,6 +300,51 @@ class ApprovalService:
                 )
                 return None
             return record
+
+    async def get_request_status(
+        self,
+        request_id: str,
+    ) -> dict[str, Any] | None:
+        """Return the current status visible in the active runtime scope."""
+        async with self._lock:
+            scope_id = self._get_current_scope_id()
+            pending = self._pending.get(request_id)
+            completed = self._completed.get(request_id)
+            record = pending or completed
+            if record is None:
+                logger.info(
+                    "Approval status lookup miss: request_id=%s "
+                    "current_scope_id=%s pending_count=%d "
+                    "completed_count=%d",
+                    request_id,
+                    scope_id,
+                    len(self._pending),
+                    len(self._completed),
+                )
+                return None
+            if record.scope_id != scope_id:
+                logger.warning(
+                    "Approval status scope mismatch: request_id=%s "
+                    "current_scope_id=%s record=%s",
+                    request_id,
+                    scope_id,
+                    self._debug_record_summary(record),
+                )
+                return None
+
+            external_submission = self._external_submission_summary(record)
+            status = record.status
+            if status == "pending" and external_submission is not None:
+                status = external_submission.get("status") or "submitted"
+
+            response: dict[str, Any] = {
+                "request_id": record.request_id,
+                "status": status,
+                "session_id": record.session_id,
+            }
+            if external_submission is not None:
+                response.update(external_submission)
+            return response
 
     async def get_pending_by_session(
         self,
@@ -442,6 +506,25 @@ class ApprovalService:
         source_message_id: str | None = None,
     ) -> None:
         """记录外部渠道提交审批决策。"""
+        submission = {
+            "status": "submitted",
+            "decision": decision,
+            "source_channel": source_channel,
+            "source_user_id": source_user_id,
+            "source_message_id": source_message_id,
+            "submitted_at": time.time(),
+        }
+        async with self._lock:
+            record = (
+                self._pending.get(pending.request_id)
+                or self._completed.get(pending.request_id)
+                or pending
+            )
+            extra = dict(record.extra) if isinstance(record.extra, dict) else {}
+            extra[_EXTERNAL_SUBMISSION_EXTRA_KEY] = submission
+            record.extra = extra
+            pending = record
+
         await self._persist_request(
             pending,
             source_channel=source_channel,

@@ -56,6 +56,19 @@ class ExternalApprovalResponse(BaseModel):
         )
 
 
+class ApprovalStatusResponse(BaseModel):
+    """Current approval status for a frontend card."""
+
+    request_id: str
+    status: str
+    session_id: str | None = None
+    decision: str | None = None
+    source_channel: str | None = None
+    source_user_id: str | None = None
+    source_message_id: str | None = None
+    submitted_at: float | None = None
+
+
 def _request_state_snapshot(request: Request) -> dict[str, str | None]:
     return {
         "tenant_id": getattr(request.state, "tenant_id", None),
@@ -213,6 +226,25 @@ async def _submit_decision(
         submission.is_new_run,
     )
     return ExternalApprovalResponse.from_submission(submission)
+
+
+@router.get("/{request_id}/status", response_model=ApprovalStatusResponse)
+async def get_approval_status(
+    request_id: str,
+    request: Request,
+) -> ApprovalStatusResponse:
+    """Return approval state for click-time frontend conflict checks."""
+    service = get_approval_service()
+    status = await service.get_request_status(request_id)
+    if status is None:
+        logger.info(
+            "Approval status not visible: request_id=%s state=%s headers=%s",
+            request_id,
+            _request_state_snapshot(request),
+            _request_header_snapshot(request),
+        )
+        return ApprovalStatusResponse(request_id=request_id, status="missing")
+    return ApprovalStatusResponse(**status)
 
 
 @router.post("/{request_id}/approve", response_model=ExternalApprovalResponse)

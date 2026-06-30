@@ -112,6 +112,38 @@ async def test_tool_guard_approval_is_consumed_as_preapproval() -> None:
 
 
 @pytest.mark.asyncio
+async def test_external_submission_status_marks_pending_as_submitted() -> None:
+    service = ApprovalService()
+    with tenant_context(tenant_id="tenant-a", source_id="source-a"):
+        pending = await service.create_pending(
+            session_id="session-1",
+            user_id="user-1",
+            channel="console",
+            tool_name="execute_shell_command",
+            result=_result(),
+        )
+
+        await service.record_external_submission(
+            pending,
+            decision="approve",
+            source_channel="zhaohu",
+            source_user_id="approver-1",
+            source_message_id="message-1",
+        )
+        status = await service.get_request_status(pending.request_id)
+        record = await service.get_request(pending.request_id)
+
+    assert status is not None
+    assert status["status"] == "submitted"
+    assert status["decision"] == "approve"
+    assert status["source_channel"] == "zhaohu"
+    assert status["source_user_id"] == "approver-1"
+    assert status["source_message_id"] == "message-1"
+    assert record is not None
+    assert record.status == "pending"
+
+
+@pytest.mark.asyncio
 async def test_pending_approval_lookup_is_scope_aware_for_same_session() -> (
     None
 ):
@@ -428,6 +460,55 @@ async def test_runner_console_deny_notifies_zhaohu_result(
 
 
 @pytest.mark.asyncio
+async def test_runner_console_approval_does_not_override_external_submission(
+    monkeypatch,
+) -> None:
+    service = ApprovalService()
+    with tenant_context(tenant_id="tenant-a", source_id="source-a"):
+        pending = await service.create_pending(
+            session_id="session-1",
+            user_id="user-1",
+            channel="console",
+            tool_name="execute_shell_command",
+            result=_result(),
+            extra={
+                "approval_kind": "tool_guard",
+                "tool_call": {
+                    "id": "tool-1",
+                    "name": "execute_shell_command",
+                    "input": {"cmd": "echo hi"},
+                },
+            },
+        )
+        await service.record_external_submission(
+            pending,
+            decision="approve",
+            source_channel="zhaohu",
+            source_user_id="approver-1",
+        )
+    monkeypatch.setattr(
+        "swe.app.approvals.service._approval_service",
+        service,
+    )
+    runner = AgentRunner()
+
+    with tenant_context(tenant_id="tenant-a", source_id="source-a"):
+        response, consumed, approved_tool_call = (
+            await runner._resolve_pending_approval(
+                "session-1",
+                f"/approve {pending.request_id}",
+            )
+        )
+        record = await service.get_request(pending.request_id)
+
+    assert response is not None
+    assert consumed is True
+    assert approved_tool_call is None
+    assert record is not None
+    assert record.status == "pending"
+
+
+@pytest.mark.asyncio
 async def test_runner_external_approval_does_not_duplicate_zhaohu_result(
     monkeypatch,
 ) -> None:
@@ -439,6 +520,11 @@ async def test_runner_external_approval_does_not_duplicate_zhaohu_result(
             channel="console",
             tool_name="execute_shell_command",
             result=_result(),
+        )
+        await service.record_external_submission(
+            pending,
+            decision="approve",
+            source_channel="zhaohu",
         )
     monkeypatch.setattr(
         "swe.app.approvals.service._approval_service",
