@@ -19,7 +19,7 @@ from agentscope_runtime.engine.schemas.agent_schemas import (
     TextContent,
 )
 
-from .service import PendingApproval
+from .service import PendingApproval, get_approval_service
 
 logger = logging.getLogger(__name__)
 
@@ -65,6 +65,35 @@ def _status_for_decision(decision: ExternalApprovalDecision) -> str:
     if decision == ExternalApprovalDecision.APPROVE:
         return "approved"
     return "denied"
+
+
+async def _record_approval_event(
+    pending: PendingApproval,
+    event_type: str,
+    *,
+    status: str | None = None,
+    actor_channel: str | None = None,
+    actor_user_id: str | None = None,
+    source_message_id: str | None = None,
+    details: dict[str, Any] | None = None,
+) -> None:
+    try:
+        await get_approval_service().record_event(
+            pending,
+            event_type,
+            status=status,
+            actor_channel=actor_channel,
+            actor_user_id=actor_user_id,
+            source_message_id=source_message_id,
+            details=details,
+        )
+    except Exception:
+        logger.warning(
+            "approval audit event failed: request_id=%s event=%s",
+            pending.request_id,
+            event_type,
+            exc_info=True,
+        )
 
 
 async def _maybe_await(value: Any) -> Any:
@@ -160,7 +189,7 @@ async def notify_cron_approval_pending(
     tool_call = pending.extra.get("tool_call") if pending.extra else None
     tool_input = tool_call.get("input") if isinstance(tool_call, dict) else {}
     try:
-        await sender(
+        result = await sender(
             request_id=pending.request_id,
             session_id=pending.session_id,
             user_id=pending.user_id,
@@ -174,10 +203,22 @@ async def notify_cron_approval_pending(
             approve_command=f"/approve {pending.request_id}",
             deny_command=f"/deny {pending.request_id}",
         )
+        await _record_approval_event(
+            pending,
+            "pending_notified",
+            actor_channel=ZHAOHU_CHANNEL,
+            details={"result": result},
+        )
     except Exception:
         logger.exception(
             "zhaohu cron approval pending notification failed: request_id=%s",
             pending.request_id,
+        )
+        await _record_approval_event(
+            pending,
+            "notify_failed",
+            actor_channel=ZHAOHU_CHANNEL,
+            details={"phase": "pending"},
         )
 
 
@@ -198,7 +239,7 @@ async def notify_cron_approval_result(
         return
 
     try:
-        await sender(
+        result = await sender(
             request_id=pending.request_id,
             session_id=pending.session_id,
             user_id=pending.user_id,
@@ -206,10 +247,29 @@ async def notify_cron_approval_result(
             decision=_status_for_decision(decision),
             source_channel=source_channel,
         )
+        await _record_approval_event(
+            pending,
+            "result_notified",
+            status=_status_for_decision(decision),
+            actor_channel=ZHAOHU_CHANNEL,
+            details={
+                "source_channel": source_channel,
+                "result": result,
+            },
+        )
     except Exception:
         logger.exception(
             "zhaohu cron approval result notification failed: request_id=%s",
             pending.request_id,
+        )
+        await _record_approval_event(
+            pending,
+            "notify_failed",
+            actor_channel=ZHAOHU_CHANNEL,
+            details={
+                "phase": "result",
+                "source_channel": source_channel,
+            },
         )
 
 
@@ -268,6 +328,14 @@ async def submit_external_approval_decision(
         chat.id,
         payload,
         console_channel.stream_one,
+    )
+
+    await get_approval_service().record_external_submission(
+        pending,
+        decision=decision.value,
+        source_channel=source_channel,
+        source_user_id=source_user_id,
+        source_message_id=source_message_id,
     )
 
     await notify_cron_approval_result(

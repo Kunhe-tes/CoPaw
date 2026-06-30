@@ -75,10 +75,15 @@ class ApprovalService:
         self._pending: dict[str, PendingApproval] = {}
         self._completed: dict[str, PendingApproval] = {}
         self._channel_manager: Any | None = None
+        self._store: Any | None = None
 
     def set_channel_manager(self, channel_manager: Any) -> None:
         """Store a reference to the channel manager for push notifications."""
         self._channel_manager = channel_manager
+
+    def set_store(self, store: Any | None) -> None:
+        """设置审批审计存储。"""
+        self._store = store
 
     def _get_current_scope_id(self) -> str | None:
         """Resolve the current runtime scope for approval isolation."""
@@ -141,6 +146,8 @@ class ApprovalService:
             self._gc_pending_locked()
             self._gc_completed_locked()
 
+        await self._persist_request(pending)
+        await self.record_event(pending, "created", status=pending.status)
         return pending
 
     async def resolve_request(
@@ -169,6 +176,8 @@ class ApprovalService:
         if not pending.future.done():
             pending.future.set_result(decision)
 
+        await self._persist_request(pending)
+        await self.record_event(pending, "resolved", status=pending.status)
         return pending
 
     async def get_request(self, request_id: str) -> PendingApproval | None:
@@ -232,6 +241,7 @@ class ApprovalService:
         """
         now = time.time()
         cancelled = 0
+        cancelled_records: list[PendingApproval] = []
         async with self._lock:
             to_cancel = [
                 k
@@ -250,6 +260,7 @@ class ApprovalService:
                 pending.resolved_at = now
                 self._completed[k] = pending
                 cancelled += 1
+                cancelled_records.append(pending)
         if cancelled:
             logger.info(
                 "Tool guard: cancelled %d stale pending approval(s) "
@@ -257,6 +268,14 @@ class ApprovalService:
                 cancelled,
                 tool_call_id,
                 session_id[:8],
+            )
+        for record in cancelled_records:
+            await self._persist_request(record)
+            await self.record_event(
+                record,
+                "superseded",
+                status=record.status,
+                details={"tool_call_id": tool_call_id},
             )
         return cancelled
 
@@ -278,6 +297,7 @@ class ApprovalService:
         to be rejected (returns ``False``), preventing an approved
         ``rm foo.txt`` from being used to execute ``rm -rf /``.
         """
+        consumed_record: PendingApproval | None = None
         async with self._lock:
             for key, completed in list(self._completed.items()):
                 if self._is_completed_approval_match(
@@ -307,8 +327,93 @@ class ApprovalService:
                             return False
                     completed.consumed = True
                     self._completed[key] = completed
-                    return True
-        return False
+                    consumed_record = completed
+                    break
+        if consumed_record is None:
+            return False
+        consumed_at = time.time()
+        await self._persist_request(consumed_record, consumed_at=consumed_at)
+        await self.record_event(
+            consumed_record,
+            "consumed",
+            status=consumed_record.status,
+        )
+        return True
+
+    async def record_external_submission(
+        self,
+        pending: PendingApproval,
+        *,
+        decision: str,
+        source_channel: str,
+        source_user_id: str | None = None,
+        source_message_id: str | None = None,
+    ) -> None:
+        """记录外部渠道提交审批决策。"""
+        await self._persist_request(
+            pending,
+            source_channel=source_channel,
+            source_user_id=source_user_id,
+            source_message_id=source_message_id,
+        )
+        await self.record_event(
+            pending,
+            "decision_submitted",
+            status=pending.status,
+            actor_channel=source_channel,
+            actor_user_id=source_user_id,
+            source_message_id=source_message_id,
+            details={"decision": decision},
+        )
+
+    async def record_event(
+        self,
+        pending: PendingApproval,
+        event_type: str,
+        *,
+        status: str | None = None,
+        actor_channel: str | None = None,
+        actor_user_id: str | None = None,
+        source_message_id: str | None = None,
+        details: dict[str, Any] | None = None,
+    ) -> None:
+        """记录审批过程事件，审计失败不影响主链路。"""
+        store = self._store
+        if store is None:
+            return
+        try:
+            await store.add_event(
+                pending,
+                event_type,
+                status=status,
+                actor_channel=actor_channel,
+                actor_user_id=actor_user_id,
+                source_message_id=source_message_id,
+                details=details,
+            )
+        except Exception:
+            logger.warning(
+                "Approval audit event failed: %s",
+                event_type,
+                exc_info=True,
+            )
+
+    async def _persist_request(
+        self,
+        pending: PendingApproval,
+        **kwargs: Any,
+    ) -> None:
+        store = self._store
+        if store is None:
+            return
+        try:
+            await store.upsert_request(pending, **kwargs)
+        except Exception:
+            logger.warning(
+                "Approval audit request upsert failed: request_id=%s",
+                pending.request_id,
+                exc_info=True,
+            )
 
     def _is_completed_approval_match(
         self,

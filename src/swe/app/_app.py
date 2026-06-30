@@ -433,6 +433,30 @@ def _initialize_source_system_config(
     except Exception as e:
         logger.warning("Failed to initialize source system config: %s", e)
 
+
+async def _initialize_approval_audit_store(
+    app: FastAPI,
+    db_connection: Any | None,
+) -> None:
+    """初始化工具审批审计存储。"""
+    try:
+        from .approvals import get_approval_service
+        from .approvals.store import ApprovalAuditStore
+
+        approval_audit_store = ApprovalAuditStore(db_connection)
+        app.state.approval_audit_store = approval_audit_store
+        get_approval_service().set_store(approval_audit_store)
+        if approval_audit_store.is_available:
+            await approval_audit_store.initialize()
+            logger.info("Approval audit storage initialized")
+        else:
+            logger.warning(
+                "Approval audit storage skipped: database is not connected",
+            )
+    except Exception as e:
+        logger.warning("Failed to initialize approval audit storage: %s", e)
+
+
 async def _initialize_cron_broadcast_children_store(
     app: FastAPI,
     db_connection: Any | None,
@@ -721,6 +745,7 @@ async def lifespan(
     )
 
     # --- 初始化定时任务分发用户反查快照 ---
+    await _initialize_approval_audit_store(app, db_connection)
     await _initialize_cron_broadcast_children_store(app, db_connection)
     await _initialize_cron_broadcast_task_store(app, db_connection)
 
