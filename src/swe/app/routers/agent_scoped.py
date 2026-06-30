@@ -8,6 +8,9 @@ Note: For tenant-scoped deployments, tenant identity is resolved first
 before agent resolution. The agent namespace is per-tenant.
 """
 
+import logging
+import time
+
 from fastapi import APIRouter, Request
 from fastapi.routing import APIRoute
 from starlette.middleware.base import (
@@ -15,6 +18,15 @@ from starlette.middleware.base import (
     RequestResponseEndpoint,
 )
 from starlette.responses import Response
+
+from ..middleware.provider_models_timing import (
+    is_provider_models_list_request,
+    log_provider_models_middleware_before_next,
+    log_provider_models_middleware_done,
+    log_provider_models_middleware_error,
+)
+
+logger = logging.getLogger(__name__)
 
 
 class AgentContextMiddleware(BaseHTTPMiddleware):
@@ -35,11 +47,12 @@ class AgentContextMiddleware(BaseHTTPMiddleware):
         Tenant context (if set by prior middleware) takes precedence
         for agent namespace resolution.
         """
-        import logging
         from ..agent_context import set_current_agent_id
         from ...config.context import get_current_tenant_id
 
-        logger = logging.getLogger(__name__)
+        is_timing = is_provider_models_list_request(request)
+        started_at = time.perf_counter()
+        before_next_at = None
         agent_id = None
 
         # Log tenant context if available
@@ -66,8 +79,41 @@ class AgentContextMiddleware(BaseHTTPMiddleware):
         if agent_id:
             set_current_agent_id(agent_id)
 
-        response = await call_next(request)
-        return response
+        try:
+            if is_timing:
+                before_next_at = log_provider_models_middleware_before_next(
+                    logger,
+                    "AgentContextMiddleware",
+                    request,
+                    started_at,
+                    agent_id=agent_id,
+                    tenant_id=tenant_id,
+                )
+            response = await call_next(request)
+            if is_timing and before_next_at is not None:
+                log_provider_models_middleware_done(
+                    logger,
+                    "AgentContextMiddleware",
+                    request,
+                    started_at,
+                    before_next_at,
+                    response,
+                    agent_id=agent_id,
+                    tenant_id=tenant_id,
+                )
+            return response
+        except Exception:
+            if is_timing:
+                log_provider_models_middleware_error(
+                    logger,
+                    "AgentContextMiddleware",
+                    request,
+                    started_at,
+                    before_next_at,
+                    agent_id=agent_id,
+                    tenant_id=tenant_id,
+                )
+            raise
 
 
 def create_agent_scoped_router() -> APIRouter:
