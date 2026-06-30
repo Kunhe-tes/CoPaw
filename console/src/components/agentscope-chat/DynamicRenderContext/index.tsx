@@ -262,7 +262,7 @@ export function DynamicRenderProvider(props: DynamicRenderProviderProps) {
       initialize,
       getTemplateContent,
       renderTemplate,
-      templateList: templateListRef.current,
+      templateList: templateListRef,
     }),
     [
       isTemplateListLoaded,
