@@ -74,7 +74,35 @@ vi.mock("@/components/PageHeader", () => ({
 }));
 
 vi.mock("@/components/TenantSelector", () => ({
-  TenantSelector: () => <div>分发目标</div>,
+  TenantSelector: ({
+    onChange,
+    onSelectionInfoChange,
+  }: {
+    onChange: (tenantIds: string[]) => void;
+    onSelectionInfoChange?: (
+      targets: Array<{
+        tenant_id: string;
+        tenant_name?: string | null;
+        bbk_id?: string | null;
+      }>,
+    ) => void;
+  }) => (
+    <button
+      type="button"
+      onClick={() => {
+        onChange(["tenant-a"]);
+        onSelectionInfoChange?.([
+          {
+            tenant_id: "tenant-a",
+            tenant_name: "Tenant A",
+            bbk_id: "bbk-a",
+          },
+        ]);
+      }}
+    >
+      Select tenant
+    </button>
+  ),
 }));
 
 vi.mock("./components", () => ({
@@ -93,7 +121,9 @@ vi.mock("./components", () => ({
     toggleEnabled: vi.fn(),
     executeNow: vi.fn(),
   }),
-  createColumns: (handlers: { onBroadcast: (job: CronJobSpecOutput) => void }) => [
+  createColumns: (handlers: {
+    onBroadcast: (job: CronJobSpecOutput) => void;
+  }) => [
     {
       title: "名称",
       dataIndex: "name",
@@ -162,4 +192,55 @@ describe("CronJobsPage broadcast task refresh", () => {
       await screen.findByText("Broadcasting 4/5 tenants"),
     ).toBeInTheDocument();
   });
+
+  it("prevents a second broadcast from the visible completed result", async () => {
+    mocks.getCurrentCronBroadcastTask.mockResolvedValue({ task: null });
+    mocks.broadcastCronJob.mockResolvedValue({
+      task_id: "task-completed",
+      status: "completed",
+      tenant_count: 1,
+      completed_count: 1,
+      failed_count: 0,
+      results: [
+        {
+          tenant_id: "tenant-a",
+          success: true,
+          job_id: "job-copy",
+          cron: "0 5 * * thu,fri,sat,sun",
+          timezone: "Asia/Shanghai",
+          offset_minutes: 0,
+          notification_timezone: "Asia/Shanghai",
+          error: "",
+          warning: "",
+        },
+      ],
+      reused: false,
+    });
+
+    render(<CronJobsPage />);
+
+    fireEvent.click(screen.getByRole("button", { name: "广播到租户" }));
+    fireEvent.click(
+      await screen.findByRole("button", { name: "Select tenant" }),
+    );
+
+    const confirmButton = screen.getByRole("button", { name: /OK/ });
+    await waitFor(() => {
+      expect(confirmButton).not.toBeDisabled();
+    });
+    fireEvent.click(confirmButton);
+
+    await waitFor(() => {
+      expect(mocks.broadcastCronJob).toHaveBeenCalledTimes(1);
+    });
+    expect(
+      await screen.findByText("Broadcast completed 1/1 tenants"),
+    ).toBeInTheDocument();
+    const disabledConfirmButton = screen.getByRole("button", { name: /OK/ });
+    expect(disabledConfirmButton).toBeDisabled();
+
+    fireEvent.click(disabledConfirmButton);
+
+    expect(mocks.broadcastCronJob).toHaveBeenCalledTimes(1);
+  }, 10000);
 });

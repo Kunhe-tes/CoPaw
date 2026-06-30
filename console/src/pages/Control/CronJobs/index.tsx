@@ -90,6 +90,7 @@ function CronJobsPage() {
     options: executionModelOptions,
     tenantDefaultLabel,
   } = useExecutionModelOptions(true);
+  const hasVisibleBroadcastTask = Boolean(broadcastTask);
 
   useEffect(() => {
     api
@@ -227,9 +228,7 @@ function CronJobsPage() {
     }
   };
 
-  const handleBroadcastOffsetWindowChange = (
-    value: number | string | null,
-  ) => {
+  const handleBroadcastOffsetWindowChange = (value: number | string | null) => {
     const numericValue = Number(value);
     if (!Number.isFinite(numericValue)) {
       setBroadcastOffsetWindowHours(DEFAULT_BROADCAST_OFFSET_WINDOW_HOURS);
@@ -242,6 +241,14 @@ function CronJobsPage() {
 
   const handleBroadcastConfirm = async () => {
     if (!broadcastingJob) return;
+    if (hasVisibleBroadcastTask) {
+      if (broadcastTask?.status === "running") {
+        message.info("Broadcast task is already running");
+      } else {
+        message.info("Close and reopen this dialog to start another broadcast");
+      }
+      return;
+    }
     const targetTenantIds = Array.from(new Set(selectedBroadcastTenantIds));
     const targetByTenantId = new Map(
       selectedBroadcastTargets.map((target) => [target.tenant_id, target]),
@@ -259,14 +266,10 @@ function CronJobsPage() {
     setBroadcastTask(null);
     setBroadcastResults([]);
     try {
-      const res = await api.broadcastCronJob(
-        broadcastingJob.id,
-        targets,
-        {
-          enable_offset: broadcastOffsetEnabled,
-          offset_window_hours: broadcastOffsetWindowHours,
-        },
-      );
+      const res = await api.broadcastCronJob(broadcastingJob.id, targets, {
+        enable_offset: broadcastOffsetEnabled,
+        offset_window_hours: broadcastOffsetWindowHours,
+      });
       setBroadcastTask(res);
       setBroadcastResults(res.results);
       if (res.status === "running") {
@@ -399,7 +402,7 @@ function CronJobsPage() {
           disabled:
             selectedBroadcastTenantIds.length === 0 ||
             broadcasting ||
-            broadcastTask?.status === "running",
+            hasVisibleBroadcastTask,
         }}
         width={640}
       >
@@ -446,6 +449,11 @@ function CronJobsPage() {
               <div className={styles.broadcastTaskProgress}>
                 <span className={styles.broadcastTaskProgressText}>
                   {getBroadcastTaskProgressText(broadcastTask)}
+                  {broadcastTask.status !== "running" ? (
+                    <span className={styles.broadcastTaskProgressHint}>
+                      Close and reopen this dialog to start another broadcast.
+                    </span>
+                  ) : null}
                 </span>
                 {broadcastTask.status === "running" ? (
                   <Button

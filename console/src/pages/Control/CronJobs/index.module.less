@@ -229,7 +229,13 @@
 }
 
 .broadcastTaskProgressText {
+  display: grid;
+  gap: 2px;
   min-width: 0;
+}
+
+.broadcastTaskProgressHint {
+  color: #5f6b7a;
 }
 
 /* Action column */
@@ -303,5 +309,9 @@
     border-color: rgba(105, 177, 255, 0.35);
     color: #69b1ff;
     background: rgba(22, 119, 255, 0.12);
+  }
+
+  .broadcastTaskProgressHint {
+    color: rgba(255, 255, 255, 0.55);
   }
 }
