@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   cleanupIframeMessageListener,
   fetchAndSetUserName,
+  initIframeMessageListener,
   handleUrlOriginParam,
   resetIframeContextForStandalone,
 } from "./iframeMessage";
@@ -55,6 +56,52 @@ const mockedFetchCustomerInfo = vi.mocked(fetchCustomerInfo);
 const mockedFetchUserInit = vi.mocked(fetchUserInit);
 const mockedPatchEnvs = vi.mocked(envApi.patchEnvs);
 
+const originalWindowTopDescriptor = Object.getOwnPropertyDescriptor(
+  window,
+  "top",
+);
+
+function mockInIframe(): void {
+  Object.defineProperty(window, "top", {
+    configurable: true,
+    value: {},
+  });
+}
+
+function restoreWindowTop(): void {
+  if (originalWindowTopDescriptor) {
+    Object.defineProperty(window, "top", originalWindowTopDescriptor);
+  }
+}
+
+async function dispatchUserDataMessage(data: Record<string, unknown>) {
+  mockedFetchUserInfo.mockResolvedValueOnce({
+    code: "SUC0000",
+    message: "success",
+    result: true,
+    data: [{ userName: "张三", pathName: "某企业/总行/生产部" }],
+  });
+
+  mockInIframe();
+  initIframeMessageListener();
+  window.dispatchEvent(
+    new MessageEvent("message", {
+      origin: "https://parent.example",
+      data: {
+        type: "USER_DATA",
+        data: {
+          sapId: "80000001",
+          ...data,
+        },
+      },
+    }),
+  );
+
+  await vi.waitFor(() => {
+    expect(useIframeStore.getState().initialized).toBe(true);
+  });
+}
+
 describe("fetchAndSetUserName", () => {
   beforeEach(() => {
     sessionStorage.clear();
@@ -81,6 +128,7 @@ describe("fetchAndSetUserName", () => {
 
   afterEach(() => {
     cleanupIframeMessageListener();
+    restoreWindowTop();
     vi.useRealTimers();
   });
 
@@ -187,6 +235,34 @@ describe("fetchAndSetUserName", () => {
     expect(useIframeStore.getState().userName).toBeNull();
     expect(useIframeStore.getState().source).toBeNull();
     expect(useIframeStore.getState().authHeaders).toEqual([]);
+  });
+
+  it("USER_DATA skipPreviewTracking=true 时存储为跳过 preview 埋点", async () => {
+    await dispatchUserDataMessage({ skipPreviewTracking: true });
+
+    expect(useIframeStore.getState().skipPreviewTracking).toBe(true);
+  });
+
+  it('USER_DATA skipPreviewTracking="true" 时存储为跳过 preview 埋点', async () => {
+    await dispatchUserDataMessage({ skipPreviewTracking: "true" });
+
+    expect(useIframeStore.getState().skipPreviewTracking).toBe(true);
+  });
+
+  it("USER_DATA skipPreviewTracking=false 时保持记录 preview 埋点", async () => {
+    useIframeStore.getState().setContext({ skipPreviewTracking: true });
+
+    await dispatchUserDataMessage({ skipPreviewTracking: false });
+
+    expect(useIframeStore.getState().skipPreviewTracking).toBe(false);
+  });
+
+  it("USER_DATA 未传 skipPreviewTracking 时保持记录 preview 埋点", async () => {
+    useIframeStore.getState().setContext({ skipPreviewTracking: true });
+
+    await dispatchUserDataMessage({});
+
+    expect(useIframeStore.getState().skipPreviewTracking).toBe(false);
   });
 
   it("origin=Y 切换 userId 时清空旧 userName", async () => {

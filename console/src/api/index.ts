@@ -27,6 +27,7 @@ import { mySkillsApi } from "./modules/mySkills";
 import { myMcpApi } from "./modules/myMcp";
 import { marketMcpApi } from "./modules/marketMcp";
 import { feedbackApi } from "./modules/feedback";
+import { approvalApi } from "./modules/approval";
 import { htmlPreviewEventsApi } from "./modules/htmlPreviewEvents";
 import { systemCheckApi } from "./modules/systemCheck";
 import { skillReadinessApi } from "./modules/skillReadiness";
@@ -100,6 +101,9 @@ export const api = {
   // Feedback
   ...feedbackApi,
 
+  // Approvals
+  ...approvalApi,
+
   // HTML Preview Events
   ...htmlPreviewEventsApi,
 
@@ -119,3 +123,4 @@ export * from "./modules/mySkills";
 export * from "./modules/myMcp";
 export * from "./modules/marketMcp";
 export * from "./modules/skillReadiness";
+export * from "./modules/approval";

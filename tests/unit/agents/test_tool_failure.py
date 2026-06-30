@@ -29,6 +29,21 @@ def test_build_structured_failure_output_uses_canonical_shape() -> None:
     }
 
 
+def test_react_toolkit_registers_background_process_tools_by_default() -> None:
+    agent = object.__new__(SWEAgent)
+    agent._agent_config = SimpleNamespace()
+
+    toolkit = agent._create_toolkit()
+
+    for tool_name in (
+        "start_background_process",
+        "list_background_processes",
+        "get_process_output",
+        "stop_background_process",
+    ):
+        assert tool_name in toolkit.tools
+
+
 @pytest.mark.asyncio
 async def test_normalize_tool_function_errors_converts_tool_execution_error():
     async def failing_tool() -> ToolResponse:

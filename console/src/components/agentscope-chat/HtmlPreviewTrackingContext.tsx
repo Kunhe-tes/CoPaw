@@ -3,6 +3,7 @@ import React, { createContext, useContext } from "react";
 export interface HtmlPreviewTrackingContextValue {
   cronTaskId?: string | null;
   cronTaskName?: string | null;
+  disableEventRecording?: boolean;
 }
 
 const defaultValue: HtmlPreviewTrackingContextValue = {};

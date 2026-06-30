@@ -84,6 +84,10 @@ _Avoid_: cron call, job instance
 A runtime boundary that starts scheduled work outside an incoming user HTTP request. It includes **Scheduled Job**, heartbeat, and dream execution, but not cron management API requests.
 _Avoid_: cron entry, cron API, scheduler callback
 
+**Managed Background Process**:
+An OS child process explicitly started by the **Main Agent** through built-in background-process tools. It can continue after the starting tool call returns, and the same owner scope can later list it, stop it, or read its captured output. A **Managed Background Process** is owned by source, tenant, user, chat session, agent, and workspace context. It is not an async tool task, scheduled job, scheduled run, or agent execution run.
+_Avoid_: async task, scheduled job, cron run, background hot patch
+
 **Execution Model Slot**:
 An optional model selection pinned to a **Scheduled Job**. If absent, each **Scheduled Run** uses the **Tenant Default Model** at execution time.
 _Avoid_: model params, cron model
@@ -111,6 +115,34 @@ _Avoid_: system feature configuration, tenant config, user config
 **Runtime Request Identity**:
 The tenant and source context that determines which runtime configuration and model selection a request observes. One **Runtime Request Identity** resolves to one **Tenant Provider Configuration** view for provider and active-model reads.
 _Avoid_: cache key, auth header set, iframe context
+
+**System Configuration Environment Key**:
+A backend-owned configuration key used by Swe itself. A **System Configuration Environment Key** is not part of user-controlled runtime env and must not be exposed through user-invoked tool subprocesses.
+_Avoid_: user env, tenant env, ordinary shell env
+
+**User Tool Subprocess Environment**:
+The environment visible to a subprocess started by a user-invoked tool such as shell execution. A **User Tool Subprocess Environment** may include safe process basics and scoped runtime env, but excludes **System Configuration Environment Keys** and runtime boundary keys that expose or alter isolation internals.
+_Avoid_: process env, backend env, system environment
+
+**Built-in Shell Execution**:
+The user-invoked shell command execution path owned by Swe for a tenant-scoped request. **Built-in Shell Execution** is distinct from MCP `stdio` server launches and platform maintenance subprocesses.
+_Avoid_: arbitrary subprocess, MCP stdio launch, maintenance worker
+
+**Tenant Process Resource Limits**:
+A tenant-scoped policy that caps per-process CPU time and memory consumption for in-scope tenant subprocess launches. **Tenant Process Resource Limits** reduce host resource exhaustion risk; they are not a command intent classifier, command blacklist, or process-group aggregate resource budget.
+_Avoid_: command blacklist, shell denylist, resource timeout, process group quota
+
+**Process Limit Exceeded**:
+A tool failure outcome where a subprocess is terminated or fails because **Tenant Process Resource Limits** were applied. **Process Limit Exceeded** is distinct from a wall-clock timeout and from an ordinary shell command failure.
+_Avoid_: timeout, shell failed, command denied
+
+**Tenant Shell Execution Slot**:
+A per-tenant concurrency allowance for one in-flight **Built-in Shell Execution**. A **Tenant Shell Execution Slot** is held until the shell tool returns and its Unix process group cleanup has completed; it is not a count of every OS process forked by a script.
+_Avoid_: process count, PID quota, subprocess total
+
+**Shell Concurrency Limit Exceeded**:
+A tool failure outcome where **Built-in Shell Execution** cannot start because the tenant has no available **Tenant Shell Execution Slot** within the configured wait period. **Shell Concurrency Limit Exceeded** is distinct from **Process Limit Exceeded**, because no shell subprocess has been launched yet.
+_Avoid_: process limit exceeded, timeout, queue full
 
 **Mandatory Console Channel**:
 The built-in **Console Channel** is a runtime invariant that is always treated as enabled for every agent and tenant, including when no explicit channel entry has been saved yet. Users may configure its other fields, but persisted, imported, or interactive configuration must not disable it.

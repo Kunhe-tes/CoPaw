@@ -17,6 +17,7 @@
  * - hideMenu: 是否隐藏菜单
  * - isSuperManager: 是否为超级管理员
  * - manager: 是否为普通管理员
+ * - skipPreviewTracking: 是否跳过 HTML preview 埋点
  * - authHeaders: 自定义 headers 数组
  * - parentOrigin: 父窗口来源 origin
  * - subBranchId: 支行 ID
@@ -80,6 +81,7 @@ const initialState: IframeContext = {
   hideMenu: false,
   isSuperManager: false,
   manager: false,
+  skipPreviewTracking: false,
   authHeaders: [],
   parentOrigin: null,
   receivedAt: null,
@@ -130,6 +132,7 @@ export const useIframeStore = create<IframeStore>()(
         hideMenu: state.hideMenu,
         isSuperManager: state.isSuperManager,
         manager: state.manager,
+        skipPreviewTracking: state.skipPreviewTracking,
         authHeaders: state.authHeaders,
         parentOrigin: state.parentOrigin,
         sysId: state.sysId,

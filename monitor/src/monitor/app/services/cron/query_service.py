@@ -92,7 +92,7 @@ def convert_row_times_direct(row: dict, time_fields: List[str]) -> dict:
 class QueryService:
     """Service for querying cron data."""
 
-    # 分行综合排行仅展示的 10 项技能（同时匹配英文标识和中文名称）
+    # 分行综合排行仅展示的 11 项技能（同时匹配英文标识和中文名称）
     _ALLOWED_BRANCH_SKILLS: set[str] = {
         "insurance_mkt",
         "保险营销客户分析技能",
@@ -109,6 +109,8 @@ class QueryService:
         "基金亏损客户关怀陪伴文案",
         "智能推荐保险计划书",
         "黄金持仓客户陪伴技能",
+        "query-fund-plus-cust",
+        "固收+基金营销技能",
     }
 
     def __init__(self) -> None:
@@ -996,20 +998,27 @@ class QueryService:
         exec_where: str,
         exec_params: List,
     ) -> Dict[str, Any]:
+        """获取执行统计概览。
+
+        成功：status='success' AND async_status='success'
+        失败：status='error' OR (status='success' AND async_status='error')
+        """
         row = await db.fetch_one(
             f"""
             SELECT
                 COUNT(*) AS execution_count,
-                SUM(CASE WHEN e.status = 'success' THEN 1 ELSE 0 END)
-                    AS success_count,
+                SUM(CASE WHEN e.status = 'success' AND e.async_status = 'success'
+                    THEN 1 ELSE 0 END) AS success_count,
                 SUM(
                     CASE
                         WHEN e.status = 'error'
+                         OR (e.status = 'success' AND e.async_status = 'error')
                         THEN 1 ELSE 0
                     END
                 ) AS failure_count,
                 COALESCE(
-                    AVG(CASE WHEN e.status = 'success' THEN e.duration_ms END),
+                    AVG(CASE WHEN e.status = 'success' AND e.async_status = 'success'
+                        THEN e.duration_ms END),
                     0
                 ) AS avg_duration_ms
             FROM swe_cron_executions e
@@ -1186,20 +1195,31 @@ class QueryService:
         exec_where: str,
         exec_params: List,
     ) -> List[CronOverviewDistributionItem]:
+        """获取执行结果分布。
+
+        成功：status='success' AND async_status='success'
+        失败：status='error' OR (status='success' AND async_status='error')
+        运行中：status='success' AND (async_status IS NULL OR async_status='')
+        """
         rows = await db.fetch_all(
             f"""
             SELECT
                 CASE
-                    WHEN e.status = 'success' THEN '成功'
-                    WHEN e.status = 'error' THEN '失败'
+                    WHEN e.status = 'success' AND e.async_status = 'success'
+                        THEN '成功'
+                    WHEN e.status = 'error'
+                         OR (e.status = 'success' AND e.async_status = 'error')
+                        THEN '失败'
                     WHEN e.status = 'cancelled' THEN '已取消/跳过'
+                    WHEN e.status = 'success' AND (e.async_status IS NULL OR e.async_status = '')
+                        THEN '运行中'
                     ELSE e.status
                 END AS name,
                 COUNT(*) AS value
             FROM swe_cron_executions e
             LEFT JOIN swe_cron_jobs j ON e.job_id = j.id
             WHERE {exec_where}
-            GROUP BY e.status
+            GROUP BY name
             ORDER BY value DESC
             """,
             tuple(exec_params),
@@ -1219,6 +1239,7 @@ class QueryService:
         exec_where: str,
         exec_params: List,
     ) -> List[CronOverviewDistributionItem]:
+        """获取已读/未读分布（仅统计真正成功的执行）。"""
         rows = await db.fetch_all(
             f"""
             SELECT
@@ -1226,7 +1247,7 @@ class QueryService:
                 COUNT(*) AS value
             FROM swe_cron_executions e
             LEFT JOIN swe_cron_jobs j ON e.job_id = j.id
-            WHERE {exec_where} AND e.status = 'success'
+            WHERE {exec_where} AND e.status = 'success' AND e.async_status = 'success'
             GROUP BY e.is_read
             ORDER BY value DESC
             """,
@@ -1317,15 +1338,21 @@ class QueryService:
         exec_where: str,
         exec_params: List,
     ) -> List[CronOverviewBranchExecutionItem]:
+        """获取分行执行分布。
+
+        成功：status='success' AND async_status='success'
+        失败：status='error' OR (status='success' AND async_status='error')
+        """
         rows = await db.fetch_all(
             f"""
             SELECT
                 COALESCE(NULLIF(j.bbk_id, ''), 'unknown') AS name,
-                SUM(CASE WHEN e.status = 'success' THEN 1 ELSE 0 END)
-                    AS success,
+                SUM(CASE WHEN e.status = 'success' AND e.async_status = 'success'
+                    THEN 1 ELSE 0 END) AS success,
                 SUM(
                     CASE
                         WHEN e.status = 'error'
+                         OR (e.status = 'success' AND e.async_status = 'error')
                         THEN 1 ELSE 0
                     END
                 ) AS failed,
@@ -1355,6 +1382,7 @@ class QueryService:
         exec_where: str,
         exec_params: List,
     ) -> List[CronOverviewBranchReadItem]:
+        """获取分行已读/未读分布（仅统计真正成功的执行）。"""
         rows = await db.fetch_all(
             f"""
             SELECT
@@ -1363,7 +1391,7 @@ class QueryService:
                 SUM(CASE WHEN e.is_read = 0 THEN 1 ELSE 0 END) AS unread_count
             FROM swe_cron_executions e
             LEFT JOIN swe_cron_jobs j ON e.job_id = j.id
-            WHERE {exec_where} AND e.status = 'success'
+            WHERE {exec_where} AND e.status = 'success' AND e.async_status = 'success'
             GROUP BY j.bbk_id
             ORDER BY (read_count + unread_count) DESC, name ASC
             """,
@@ -1460,20 +1488,22 @@ class QueryService:
                         THEN 1 ELSE 0
                     END
                 ) AS pending_task_count,
-                SUM(CASE WHEN le.status = 'success' THEN 1 ELSE 0 END)
-                    AS executed_task_count,
+                SUM(CASE WHEN le.status = 'success' AND le.async_status = 'success'
+                    THEN 1 ELSE 0 END) AS executed_task_count,
                 SUM(
                     CASE
                         WHEN le.status IN ('error', 'timeout', 'cancelled')
+                         OR (le.status = 'success' AND le.async_status = 'error')
                         THEN 1 ELSE 0
                     END
                 ) AS failed_task_count,
                 COALESCE(
-                    AVG(CASE WHEN le.status = 'success' THEN le.duration_ms END),
+                    AVG(CASE WHEN le.status = 'success' AND le.async_status = 'success'
+                        THEN le.duration_ms END),
                     0
                 ) AS avg_duration_ms,
-                SUM(CASE WHEN le.status = 'success' THEN 1 ELSE 0 END)
-                    AS success_count,
+                SUM(CASE WHEN le.status = 'success' AND le.async_status = 'success'
+                    THEN 1 ELSE 0 END) AS success_count,
                 SUM(
                     CASE
                         WHEN le.status IN ('success', 'error', 'timeout', 'cancelled')
@@ -1752,6 +1782,7 @@ class QueryService:
                 SELECT id FROM swe_cron_executions
                 WHERE job_id = %s
                 AND status = 'success'
+                AND async_status = 'success'
                 AND is_read = FALSE
                 ORDER BY actual_time DESC
                 LIMIT 1
@@ -1787,7 +1818,11 @@ class QueryService:
         """
         db = get_db_connection()
 
-        conditions = ["e.status = 'success'", "e.is_read = FALSE"]
+        conditions = [
+            "e.status = 'success'",
+            "e.async_status = 'success'",
+            "e.is_read = FALSE",
+        ]
         sql_params: List = []
 
         if tenant_id:
@@ -2271,7 +2306,12 @@ class QueryService:
         end_time: datetime,
         job_ids: list[str],
     ) -> dict:
-        """直接从 swe_cron_executions 统计执行指标，不 JOIN swe_cron_jobs。"""
+        """直接从 swe_cron_executions 统计执行指标，不 JOIN swe_cron_jobs。
+
+        成功：status='success' AND async_status='success'
+        失败：status='error' OR (status='success' AND async_status='error')
+        已读任务数：按 job_id 去重统计（与概览口径一致）
+        """
         if not job_ids:
             return {
                 "total_executions": 0,
@@ -2283,9 +2323,12 @@ class QueryService:
         stats_sql = f"""
             SELECT
                 COUNT(*) AS total_executions,
-                SUM(CASE WHEN status = 'success' THEN 1 ELSE 0 END) AS success_count,
-                SUM(CASE WHEN is_read = 1 THEN 1 ELSE 0 END) AS read_tasks,
-                SUM(CASE WHEN status = 'error' THEN 1 ELSE 0 END) AS error_count
+                SUM(CASE WHEN status = 'success' AND async_status = 'success'
+                    THEN 1 ELSE 0 END) AS success_count,
+                COUNT(DISTINCT CASE WHEN is_read = 1 THEN job_id END) AS read_tasks,
+                SUM(CASE WHEN status = 'error'
+                         OR (status = 'success' AND async_status = 'error')
+                    THEN 1 ELSE 0 END) AS error_count
             FROM swe_cron_executions
             WHERE actual_time >= %s AND actual_time <= %s
               AND job_id IN ({placeholders})
@@ -2450,7 +2493,7 @@ class QueryService:
     ) -> dict[str, int]:
         """统计分行使用白名单技能的客户经理点击行为（技能视角）。
 
-        通过点击事件关联执行记录和 traces 表，筛选 skills_used 包含白名单技能的点击。
+        与任务视角口径一致：按点击时间范围筛选，通过 cron_task_id 关联获取技能信息。
         """
         source_where = " AND c.source_id = %s" if source_id else ""
         allowed_skills = list(self._ALLOWED_BRANCH_SKILLS)
@@ -2460,8 +2503,6 @@ class QueryService:
             SELECT c.button_type, COUNT(DISTINCT c.user_id) AS manager_count
             FROM swe_html_preview_click_events c
             JOIN swe_cron_executions e ON c.cron_task_id = e.job_id
-                AND c.clicked_at >= e.actual_time
-                AND c.clicked_at <= COALESCE(e.end_time, e.actual_time + INTERVAL 1 DAY)
             JOIN swe_tracing_traces t ON e.trace_id = t.trace_id
             CROSS JOIN (
                 SELECT 0 AS i UNION SELECT 1 UNION SELECT 2 UNION SELECT 3
@@ -2531,7 +2572,7 @@ class QueryService:
     ) -> dict[str, int]:
         """统计分行使用白名单技能的客户点击行为（技能视角）。
 
-        通过点击事件关联执行记录和 traces 表，筛选 skills_used 包含白名单技能的点击。
+        与任务视角口径一致：按点击时间范围筛选，通过 cron_task_id 关联获取技能信息。
         """
         source_where = " AND c.source_id = %s" if source_id else ""
         allowed_skills = list(self._ALLOWED_BRANCH_SKILLS)
@@ -2541,8 +2582,6 @@ class QueryService:
             SELECT c.button_type, COUNT(DISTINCT c.customer_id) AS customer_count
             FROM swe_html_preview_click_events c
             JOIN swe_cron_executions e ON c.cron_task_id = e.job_id
-                AND c.clicked_at >= e.actual_time
-                AND c.clicked_at <= COALESCE(e.end_time, e.actual_time + INTERVAL 1 DAY)
             JOIN swe_tracing_traces t ON e.trace_id = t.trace_id
             CROSS JOIN (
                 SELECT 0 AS i UNION SELECT 1 UNION SELECT 2 UNION SELECT 3
@@ -3437,42 +3476,38 @@ class QueryService:
         sk: str,
         job_id: str,
         status: str,
+        async_status: str,
         is_read: bool,
     ) -> None:
         """Count a single skill execution in the aggregation dicts."""
         skill_total[sk] += 1
         skill_jobs[sk].add(job_id)
-        if status == "success":
+        # 成功：status='success' AND async_status='success'
+        if status == "success" and async_status == "success":
             skill_success[sk] += 1
         if is_read:
             skill_read[sk] += 1
-        if status in ("error", "timeout", "cancelled"):
+        # 失败：status='error' OR (status='success' AND async_status='error')
+        if status in ("error", "timeout", "cancelled") or (
+            status == "success" and async_status == "error"
+        ):
             skill_error[sk] += 1
 
-    async def get_branch_skills(
+    async def _fetch_branch_skills_raw_data(
         self,
+        db: DatabaseConnection,
         bbk_id: str,
-        start_date: Optional[str] = None,
-        end_date: Optional[str] = None,
-        source_id: Optional[str] = None,
-    ) -> BranchSkillResponse:
-        """获取分行技能维度数据。
-
-        从 swe_cron_executions + swe_tracing_traces 链路，
-        提取 skills_used JSON 数组并聚合统计每项技能的执行情况。
-        """
-        db = get_db_connection()
-
-        start_time, end_time = self._parse_date_range(start_date, end_date)
-        start_str = start_date or start_time.strftime("%Y-%m-%d")
-        end_str = end_date or end_time.strftime("%Y-%m-%d")
-
+        start_time: datetime,
+        end_time: datetime,
+        source_id: Optional[str],
+    ) -> list[dict]:
+        """获取分行技能原始执行数据."""
         source_where = " AND j.source_id = %s" if source_id else ""
-
         sql = f"""
             SELECT
                 e.job_id,
                 e.status,
+                e.async_status,
                 e.is_read,
                 t.skills_used
             FROM swe_cron_executions e
@@ -3487,9 +3522,13 @@ class QueryService:
         params: list = [bbk_id, start_time, end_time]
         if source_id:
             params.append(source_id)
-        rows = await db.fetch_all(sql, tuple(params))
+        return await db.fetch_all(sql, tuple(params))
 
-        seen_jobs: set[str] = set()
+    def _aggregate_branch_skills(
+        self,
+        rows: list[dict],
+    ) -> dict[str, dict[str, Any]]:
+        """聚合分行技能执行统计."""
         skill_jobs: dict[str, set[str]] = {}
         skill_total: dict[str, int] = {}
         skill_success: dict[str, int] = {}
@@ -3497,39 +3536,75 @@ class QueryService:
         skill_error: dict[str, int] = {}
 
         for row in rows:
-            skills = self._parse_skills_used(row["skills_used"])
-            if not skills:
+            self._process_skill_row(
+                row,
+                skill_jobs,
+                skill_total,
+                skill_success,
+                skill_read,
+                skill_error,
+            )
+
+        return {
+            "skill_jobs": skill_jobs,
+            "skill_total": skill_total,
+            "skill_success": skill_success,
+            "skill_read": skill_read,
+            "skill_error": skill_error,
+        }
+
+    def _process_skill_row(
+        self,
+        row: dict,
+        skill_jobs: dict[str, set[str]],
+        skill_total: dict[str, int],
+        skill_success: dict[str, int],
+        skill_read: dict[str, int],
+        skill_error: dict[str, int],
+    ) -> None:
+        """处理单行数据的技能聚合."""
+        skills = self._parse_skills_used(row["skills_used"])
+        if not skills:
+            return
+        job_id = row["job_id"]
+        status = (row["status"] or "").lower()
+        async_status = (row["async_status"] or "").lower()
+        is_read = bool(row["is_read"])
+        for sk in skills:
+            sk = str(sk).strip() if sk else ""
+            if not sk or sk not in self._ALLOWED_BRANCH_SKILLS:
                 continue
-            job_id = row["job_id"]
-            status = (row["status"] or "").lower()
-            is_read = bool(row["is_read"])
-            for sk in skills:
-                sk = str(sk).strip() if sk else ""
-                if not sk:
-                    continue
-                if sk not in self._ALLOWED_BRANCH_SKILLS:
-                    continue
-                if sk not in skill_jobs:
-                    self._init_skill_dicts(
-                        skill_jobs,
-                        skill_total,
-                        skill_success,
-                        skill_read,
-                        skill_error,
-                        sk,
-                    )
-                self._count_skill_execution(
+            if sk not in skill_jobs:
+                self._init_skill_dicts(
                     skill_jobs,
                     skill_total,
                     skill_success,
                     skill_read,
                     skill_error,
                     sk,
-                    job_id,
-                    status,
-                    is_read,
                 )
+            self._count_skill_execution(
+                skill_jobs,
+                skill_total,
+                skill_success,
+                skill_read,
+                skill_error,
+                sk,
+                job_id,
+                status,
+                async_status,
+                is_read,
+            )
 
+    def _build_branch_skill_items(
+        self,
+        skill_jobs: dict[str, set[str]],
+        skill_total: dict[str, int],
+        skill_success: dict[str, int],
+        skill_read: dict[str, int],
+        skill_error: dict[str, int],
+    ) -> list[BranchSkillItem]:
+        """构建分行技能统计结果列表."""
         items: list[BranchSkillItem] = []
         for skill_name, jobs in skill_jobs.items():
             task_count = len(jobs)
@@ -3545,8 +3620,43 @@ class QueryService:
                     error_count=skill_error.get(skill_name, 0),
                 ),
             )
-
         items.sort(key=lambda item: item.cron_task_count, reverse=True)
+        return items
+
+    async def get_branch_skills(
+        self,
+        bbk_id: str,
+        start_date: Optional[str] = None,
+        end_date: Optional[str] = None,
+        source_id: Optional[str] = None,
+    ) -> BranchSkillResponse:
+        """获取分行技能维度数据。
+
+        从 swe_cron_executions + swe_tracing_traces 链路，
+        提取 skills_used JSON 数组并聚合统计每项技能的执行情况。
+        """
+        db = get_db_connection()
+        start_time, end_time = self._parse_date_range(start_date, end_date)
+        start_str = start_date or start_time.strftime("%Y-%m-%d")
+        end_str = end_date or end_time.strftime("%Y-%m-%d")
+
+        rows = await self._fetch_branch_skills_raw_data(
+            db,
+            bbk_id,
+            start_time,
+            end_time,
+            source_id,
+        )
+
+        stats = self._aggregate_branch_skills(rows)
+
+        items = self._build_branch_skill_items(
+            stats["skill_jobs"],
+            stats["skill_total"],
+            stats["skill_success"],
+            stats["skill_read"],
+            stats["skill_error"],
+        )
 
         return BranchSkillResponse(
             start_date=start_str,

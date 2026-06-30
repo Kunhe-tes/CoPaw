@@ -23,6 +23,7 @@ logger = logging.getLogger(__name__)
 
 MODEL_SUMMARY_TIMEOUT_SECONDS = 0.6
 _MODEL_SUMMARY_CACHE_LIMIT = 256
+_SHELL_COMMAND_TOOLS = {"execute_shell_command", "start_background_process"}
 _SUMMARY_MODEL_CACHE_LIMIT = 32
 
 TOOL_DISPLAY_NAMES = {
@@ -204,7 +205,7 @@ def _extract_common_object(arguments: Any) -> str:
 
 def _get_call_object_hint(tool_name: str, arguments: Any) -> str:
     """Return a safe object hint for call-summary prompts."""
-    if tool_name == "execute_shell_command":
+    if tool_name in _SHELL_COMMAND_TOOLS:
         return "无"
     if tool_name == "browser_use":
         return _extract_browser_object(arguments) or "无"
@@ -227,6 +228,32 @@ def _parse_json_like(
         return None
 
 
+_OBJECT_ACTION_HINTS = {
+    "browser_use": "",
+    "read_file": "读取",
+    "write_file": "写入",
+    "append_file": "写入",
+    "edit_file": "编辑",
+    "grep_search": "搜索",
+    "memory_search": "搜索",
+    "glob_search": "查找",
+}
+
+
+def _format_object_action(
+    display_name: str,
+    obj: str,
+    action: str | None = None,
+) -> str:
+    if obj == "无":
+        return f"正在{display_name}"
+    if action is None:
+        return f"正在{display_name}：{obj}"
+    if action:
+        return f"正在{action} {obj}"
+    return f"正在 {obj}"
+
+
 def _build_call_action_hint(
     tool_name: str,
     server_label: Optional[str],
@@ -234,25 +261,22 @@ def _build_call_action_hint(
 ) -> str:
     """Build a concrete user-facing action hint for summaries."""
     display_name = get_tool_display_name(tool_name, server_label)
-    if tool_name == "execute_shell_command":
+    if tool_name in _SHELL_COMMAND_TOOLS:
+        if tool_name != "execute_shell_command":
+            display_name = get_tool_display_name(
+                "execute_shell_command",
+                server_label,
+            )
         return f"开始{display_name}"
 
     obj = _get_call_object_hint(tool_name, arguments)
-    if tool_name == "browser_use":
-        return f"正在 {obj}" if obj != "无" else f"正在{display_name}"
-    if tool_name == "read_file":
-        return f"正在读取 {obj}" if obj != "无" else f"正在{display_name}"
-    if tool_name in {"write_file", "append_file"}:
-        return f"正在写入 {obj}" if obj != "无" else f"正在{display_name}"
-    if tool_name == "edit_file":
-        return f"正在编辑 {obj}" if obj != "无" else f"正在{display_name}"
-    if tool_name in {"grep_search", "memory_search"}:
-        return f"正在搜索 {obj}" if obj != "无" else f"正在{display_name}"
-    if tool_name == "glob_search":
-        return f"正在查找 {obj}" if obj != "无" else f"正在{display_name}"
-    if obj != "无":
-        return f"正在{display_name}：{obj}"
-    return f"正在{display_name}"
+    if tool_name in _OBJECT_ACTION_HINTS:
+        return _format_object_action(
+            display_name,
+            obj,
+            _OBJECT_ACTION_HINTS[tool_name],
+        )
+    return _format_object_action(display_name, obj)
 
 
 def _generate_rule_based_call_summary(
@@ -270,7 +294,7 @@ def _generate_rule_based_output_summary(
 ) -> str:
     """Generate a rule-based summary for tool output."""
     display_name = get_tool_display_name(tool_name)
-    if tool_name == "execute_shell_command":
+    if tool_name in _SHELL_COMMAND_TOOLS:
         parsed = (
             _parse_json_like(output) if isinstance(output, str) else output
         )
@@ -315,7 +339,7 @@ def _normalize_preview(value: Any, max_length: int = 1200) -> str:
 
 def _redact_for_model(kind: str, tool_name: str, value: Any) -> str:
     """Redact sensitive or overly technical details before prompting."""
-    if tool_name == "execute_shell_command":
+    if tool_name in _SHELL_COMMAND_TOOLS:
         if kind == "call":
             return "执行了一项系统操作，请概括目的，不要透露命令、参数、路径。"
         return "系统操作已返回结果，请概括是否完成，不要透露输出细节。"
