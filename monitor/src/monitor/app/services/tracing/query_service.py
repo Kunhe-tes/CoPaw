@@ -1013,6 +1013,58 @@ class TracingQueryService:  # pylint: disable=too-many-public-methods
             params = (source_id, start_date, end_date, *bbk_filter_params)
             rows = await self._db.fetch_all(query, params)
 
+        # 查询已读任务数
+        read_tasks_query = f"""
+            SELECT
+                DATE(e.actual_time) as date,
+                COUNT(*) as read_tasks
+            FROM swe_cron_executions e
+            INNER JOIN swe_cron_jobs j ON e.job_id = j.id
+            WHERE e.actual_time >= %s AND e.actual_time <= %s
+              AND j.status != 'deleted'
+              AND j.deleted_at IS NULL
+              AND e.read_at IS NOT NULL{bbk_filter_sql.replace('bbk_id', 'j.bbk_id')}
+            GROUP BY DATE(e.actual_time)
+        """
+        read_tasks_params = (start_date, end_date, *bbk_filter_params)
+        read_tasks_rows = await self._db.fetch_all(
+            read_tasks_query,
+            read_tasks_params,
+        )
+        read_tasks_map = {
+            row["date"].strftime("%Y-%m-%d") if row["date"] else "": row[
+                "read_tasks"
+            ]
+            or 0
+            for row in read_tasks_rows
+        }
+
+        # 查询客户点击统计
+        click_query = f"""
+            SELECT
+                DATE(clicked_at) as date,
+                button_type,
+                COUNT(DISTINCT CONCAT(COALESCE(cron_task_id, ''), '|', COALESCE(customer_id, ''))) as customer_count
+            FROM swe_html_preview_click_events
+            WHERE clicked_at >= %s AND clicked_at <= %s
+              AND button_type IN ('plan', 'insight', 'phone')
+              AND cron_task_id IS NOT NULL
+              AND customer_id IS NOT NULL{bbk_filter_sql}
+            GROUP BY DATE(clicked_at), button_type
+        """
+        click_params = (start_date, end_date, *bbk_filter_params)
+        click_rows = await self._db.fetch_all(click_query, click_params)
+
+        # 按日期和类型组织数据
+        click_map: dict[str, dict[str, int]] = {}
+        for row in click_rows:
+            date_key = row["date"].strftime("%Y-%m-%d") if row["date"] else ""
+            if date_key not in click_map:
+                click_map[date_key] = {"plan": 0, "insight": 0, "phone": 0}
+            btn_type = row["button_type"]
+            if btn_type in click_map[date_key]:
+                click_map[date_key][btn_type] = row["customer_count"] or 0
+
         return [
             {
                 "date": (
@@ -1021,6 +1073,22 @@ class TracingQueryService:  # pylint: disable=too-many-public-methods
                 "calls": row["calls"] or 0,
                 "tokens": row["tokens"] or 0,
                 "users": row["users"] or 0,
+                "read_tasks": read_tasks_map.get(
+                    row["date"].strftime("%Y-%m-%d") if row["date"] else "",
+                    0,
+                ),
+                "plan_customers": click_map.get(
+                    row["date"].strftime("%Y-%m-%d") if row["date"] else "",
+                    {},
+                ).get("plan", 0),
+                "insight_customers": click_map.get(
+                    row["date"].strftime("%Y-%m-%d") if row["date"] else "",
+                    {},
+                ).get("insight", 0),
+                "phone_customers": click_map.get(
+                    row["date"].strftime("%Y-%m-%d") if row["date"] else "",
+                    {},
+                ).get("phone", 0),
             }
             for row in rows
         ]
