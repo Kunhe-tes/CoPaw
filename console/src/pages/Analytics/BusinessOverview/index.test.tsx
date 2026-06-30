@@ -349,6 +349,7 @@ describe("BusinessOverview trend chart", () => {
     expect(option.series?.some((item) => item.name === "已读任务数")).toBe(false);
   });
 
+
   it("renders the report-view customer card with current annotations and growth", async () => {
     renderBusinessOverview();
 

@@ -263,13 +263,15 @@ function SummaryCard({ metric }: { metric: SummaryMetricView }) {
         </span>
         <div className={styles.summaryText}>
           <span className={styles.summaryTitle}>{metric.title}</span>
-          {metric.hintValue ? (
-            <span className={styles.summaryHint}>{metric.hintValue}</span>
-          ) : null}
-          <strong>
-            {metric.value}
-            {metric.unit ? <em>{metric.unit}</em> : null}
-          </strong>
+          <div className={styles.summaryValueRow}>
+            <strong>
+              {metric.value}
+              {metric.unit ? <em>{metric.unit}</em> : null}
+            </strong>
+            {metric.hintValue ? (
+              <span className={styles.summaryHint}>{metric.hintValue}</span>
+            ) : null}
+          </div>
         </div>
       </div>
       {metric.footerLabel && metric.footerValue ? (

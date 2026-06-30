@@ -916,6 +916,57 @@ class TracingQueryService:  # pylint: disable=too-many-public-methods
             end_date = datetime.now() + timedelta(days=1)
 
         bbk_filter_sql, bbk_filter_params = build_bbk_in_filter(bbk_ids)
+        query, params = self._build_daily_trend_trace_query(
+            source_id=source_id,
+            start_date=start_date,
+            end_date=end_date,
+            bbk_filter_sql=bbk_filter_sql,
+            bbk_filter_params=bbk_filter_params,
+        )
+        rows = await self._db.fetch_all(query, params)
+
+        # 查询已读任务数
+        read_tasks_query, read_tasks_params = (
+            self._build_daily_trend_read_tasks_query(
+                start_date=start_date,
+                end_date=end_date,
+                bbk_filter_sql=bbk_filter_sql,
+                bbk_filter_params=bbk_filter_params,
+            )
+        )
+        read_tasks_rows = await self._db.fetch_all(
+            read_tasks_query,
+            read_tasks_params,
+        )
+        read_tasks_map = self._build_daily_trend_read_tasks_map(
+            read_tasks_rows,
+        )
+
+        # 查询客户点击统计
+        click_query, click_params = self._build_daily_trend_click_query(
+            start_date=start_date,
+            end_date=end_date,
+            bbk_filter_sql=bbk_filter_sql,
+            bbk_filter_params=bbk_filter_params,
+        )
+        click_rows = await self._db.fetch_all(click_query, click_params)
+        click_map = self._build_daily_trend_click_map(click_rows)
+
+        return self._build_daily_trend_response(
+            rows=rows,
+            read_tasks_map=read_tasks_map,
+            click_map=click_map,
+        )
+
+    def _build_daily_trend_trace_query(
+        self,
+        source_id: str,
+        start_date: datetime,
+        end_date: datetime,
+        bbk_filter_sql: str,
+        bbk_filter_params: list[str],
+    ) -> tuple[str, tuple[Any, ...]]:
+        """构建日趋势主查询 SQL。"""
         if source_id == "all":
             exclude_placeholders = ", ".join(["%s"] * len(EXCLUDED_SOURCE_IDS))
             query = f"""
@@ -937,24 +988,31 @@ class TracingQueryService:  # pylint: disable=too-many-public-methods
                 *EXCLUDED_SOURCE_IDS,
                 *bbk_filter_params,
             )
-            rows = await self._db.fetch_all(query, params)
-        else:
-            query = f"""
-                SELECT
-                    DATE(start_time) as date,
-                    COUNT(*) as calls,
-                    COALESCE(SUM(total_tokens), 0) as tokens,
-                    COUNT(DISTINCT user_id) as users
-                FROM swe_tracing_traces
-                WHERE source_id = %s AND start_time >= %s AND start_time <= %s
-                  AND user_id != 'default'{bbk_filter_sql}
-                GROUP BY DATE(start_time)
-                ORDER BY date
-            """
-            params = (source_id, start_date, end_date, *bbk_filter_params)
-            rows = await self._db.fetch_all(query, params)
+            return query, params
 
-        # 查询已读任务数
+        query = f"""
+            SELECT
+                DATE(start_time) as date,
+                COUNT(*) as calls,
+                COALESCE(SUM(total_tokens), 0) as tokens,
+                COUNT(DISTINCT user_id) as users
+            FROM swe_tracing_traces
+            WHERE source_id = %s AND start_time >= %s AND start_time <= %s
+              AND user_id != 'default'{bbk_filter_sql}
+            GROUP BY DATE(start_time)
+            ORDER BY date
+        """
+        params = (source_id, start_date, end_date, *bbk_filter_params)
+        return query, params
+
+    def _build_daily_trend_read_tasks_query(
+        self,
+        start_date: datetime,
+        end_date: datetime,
+        bbk_filter_sql: str,
+        bbk_filter_params: list[str],
+    ) -> tuple[str, tuple[Any, ...]]:
+        """构建日趋势已读任务查询 SQL。"""
         read_tasks_query = f"""
             SELECT
                 DATE(e.actual_time) as date,
@@ -964,23 +1022,20 @@ class TracingQueryService:  # pylint: disable=too-many-public-methods
             WHERE e.actual_time >= %s AND e.actual_time <= %s
               AND j.status != 'deleted'
               AND j.deleted_at IS NULL
-              AND e.read_at IS NOT NULL{bbk_filter_sql.replace('bbk_id', 'j.bbk_id')}
+              AND e.read_at IS NOT NULL
+              {bbk_filter_sql.replace('bbk_id', 'j.bbk_id')}
             GROUP BY DATE(e.actual_time)
         """
-        read_tasks_params = (start_date, end_date, *bbk_filter_params)
-        read_tasks_rows = await self._db.fetch_all(
-            read_tasks_query,
-            read_tasks_params,
-        )
-        read_tasks_map = {
-            row["date"].strftime("%Y-%m-%d") if row["date"] else "": row[
-                "read_tasks"
-            ]
-            or 0
-            for row in read_tasks_rows
-        }
+        return read_tasks_query, (start_date, end_date, *bbk_filter_params)
 
-        # 查询客户点击统计
+    def _build_daily_trend_click_query(
+        self,
+        start_date: datetime,
+        end_date: datetime,
+        bbk_filter_sql: str,
+        bbk_filter_params: list[str],
+    ) -> tuple[str, tuple[Any, ...]]:
+        """构建日趋势客户点击查询 SQL。"""
         click_query = f"""
             SELECT
                 DATE(clicked_at) as date,
@@ -993,46 +1048,61 @@ class TracingQueryService:  # pylint: disable=too-many-public-methods
               AND customer_id IS NOT NULL{bbk_filter_sql}
             GROUP BY DATE(clicked_at), button_type
         """
-        click_params = (start_date, end_date, *bbk_filter_params)
-        click_rows = await self._db.fetch_all(click_query, click_params)
+        return click_query, (start_date, end_date, *bbk_filter_params)
 
-        # 按日期和类型组织数据
+    def _build_daily_trend_read_tasks_map(
+        self,
+        read_tasks_rows: list[dict[str, Any]],
+    ) -> dict[str, int]:
+        """构建日期到已读任务数的映射。"""
+        return {
+            self._format_daily_trend_date(row["date"]): row["read_tasks"] or 0
+            for row in read_tasks_rows
+        }
+
+    def _build_daily_trend_click_map(
+        self,
+        click_rows: list[dict[str, Any]],
+    ) -> dict[str, dict[str, int]]:
+        """按日期与按钮类型聚合客户点击数据。"""
         click_map: dict[str, dict[str, int]] = {}
         for row in click_rows:
-            date_key = row["date"].strftime("%Y-%m-%d") if row["date"] else ""
+            date_key = self._format_daily_trend_date(row["date"])
             if date_key not in click_map:
                 click_map[date_key] = {"plan": 0, "insight": 0, "phone": 0}
             btn_type = row["button_type"]
             if btn_type in click_map[date_key]:
                 click_map[date_key][btn_type] = row["customer_count"] or 0
+        return click_map
 
-        return [
-            {
-                "date": (
-                    row["date"].strftime("%Y-%m-%d") if row["date"] else ""
-                ),
-                "calls": row["calls"] or 0,
-                "tokens": row["tokens"] or 0,
-                "users": row["users"] or 0,
-                "read_tasks": read_tasks_map.get(
-                    row["date"].strftime("%Y-%m-%d") if row["date"] else "",
-                    0,
-                ),
-                "plan_customers": click_map.get(
-                    row["date"].strftime("%Y-%m-%d") if row["date"] else "",
-                    {},
-                ).get("plan", 0),
-                "insight_customers": click_map.get(
-                    row["date"].strftime("%Y-%m-%d") if row["date"] else "",
-                    {},
-                ).get("insight", 0),
-                "phone_customers": click_map.get(
-                    row["date"].strftime("%Y-%m-%d") if row["date"] else "",
-                    {},
-                ).get("phone", 0),
-            }
-            for row in rows
-        ]
+    def _build_daily_trend_response(
+        self,
+        rows: list[dict[str, Any]],
+        read_tasks_map: dict[str, int],
+        click_map: dict[str, dict[str, int]],
+    ) -> list[dict[str, Any]]:
+        """组装日趋势返回结果。"""
+        result: list[dict[str, Any]] = []
+        for row in rows:
+            date_key = self._format_daily_trend_date(row["date"])
+            click_stats = click_map.get(date_key, {})
+            result.append(
+                {
+                    "date": date_key,
+                    "calls": row["calls"] or 0,
+                    "tokens": row["tokens"] or 0,
+                    "users": row["users"] or 0,
+                    "read_tasks": read_tasks_map.get(date_key, 0),
+                    "plan_customers": click_stats.get("plan", 0),
+                    "insight_customers": click_stats.get("insight", 0),
+                    "phone_customers": click_stats.get("phone", 0),
+                },
+            )
+        return result
+
+    def _format_daily_trend_date(self, value: Any) -> str:
+        """格式化日趋势中的日期字段。"""
+        return value.strftime("%Y-%m-%d") if value else ""
 
     async def get_hourly_trend(
         self,

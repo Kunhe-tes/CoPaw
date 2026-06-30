@@ -54,14 +54,15 @@ async def test_get_overview_stats_includes_report_metrics(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_fetch_overview_report_behavior_counts_uses_snapshot_for_plan_views():
-    """查看方案任务数应来自方案预览快照对应的任务数，洞察与电访仍来自点击。"""
+async def test_fetch_overview_report_behavior_counts_reads_directly_from_click_events():
+    """概览卡片的查看方案/洞察/电访任务数应直接来自 HTML 点击表。"""
     db = MagicMock()
     db.fetch_one = AsyncMock(
-        side_effect=[
-            {"report_count": 8},
-            {"insight_count": 3, "phone_count": 1},
-        ],
+        return_value={
+            "report_count": 8,
+            "insight_count": 3,
+            "phone_count": 1,
+        },
     )
     service = QueryService()
 
@@ -75,22 +76,17 @@ async def test_fetch_overview_report_behavior_counts_uses_snapshot_for_plan_view
         source_filter_params=["src-1"],
     )
 
-    view_sql, view_params = db.fetch_one.await_args_list[0].args
-    click_sql, click_params = db.fetch_one.await_args_list[1].args
+    click_sql, click_params = db.fetch_one.await_args.args
 
-    assert "JOIN swe_html_preview_list_snapshots s" in view_sql
-    assert "COUNT(DISTINCT e.job_id) AS report_count" in view_sql
-    assert "s.cron_task_id COLLATE utf8mb4_unicode_ci = e.job_id" in view_sql
-    assert "s.snapshot_at >= %s AND s.snapshot_at <= %s" in view_sql
-    assert "AND j.bbk_id IN (%s, %s)" in view_sql
-    assert "AND j.source_id = %s" in view_sql
-    assert list(view_params[4:]) == ["100", "V00", "src-1"]
-
-    assert "JOIN swe_html_preview_click_events c" in click_sql
-    assert "c.button_type = 'insight'" in click_sql
-    assert "c.button_type = 'phone'" in click_sql
+    assert "FROM swe_html_preview_click_events c" in click_sql
+    assert "COUNT(DISTINCT CASE" in click_sql
+    assert "WHEN c.button_type = 'plan' THEN c.cron_task_id" in click_sql
+    assert "WHEN c.button_type = 'insight' THEN c.cron_task_id" in click_sql
+    assert "WHEN c.button_type = 'phone' THEN c.cron_task_id" in click_sql
     assert "c.clicked_at >= %s AND c.clicked_at <= %s" in click_sql
-    assert list(click_params[4:]) == ["100", "V00", "src-1"]
+    assert "AND c.bbk_id IN (%s, %s)" in click_sql
+    assert "AND c.source_id = %s" in click_sql
+    assert list(click_params[2:]) == ["100", "V00", "src-1"]
 
     assert result == {"report_count": 8, "insight_count": 3, "phone_count": 1}
 
@@ -119,43 +115,8 @@ async def test_fetch_overview_read_tasks_counts_read_executions():
 
 
 @pytest.mark.asyncio
-async def test_fetch_branch_plan_view_counts_uses_snapshot_rows():
-    """分行查看方案任务数应来自方案预览快照。"""
-    db = MagicMock()
-    db.fetch_all = AsyncMock(
-        return_value=[
-            {
-                "bbk_id": "100",
-                "task_count": 6,
-            },
-        ],
-    )
-    service = QueryService()
-
-    result = await service._fetch_branch_plan_view_counts(
-        db=db,
-        start_time=MagicMock(),
-        end_time=MagicMock(),
-        source_id="src-1",
-    )
-
-    sql, params = db.fetch_all.await_args.args
-
-    assert "JOIN swe_html_preview_list_snapshots s" in sql
-    assert (
-        "s.cron_task_id COLLATE utf8mb4_unicode_ci = executed_jobs.job_id"
-        in sql
-    )
-    assert "s.snapshot_at >= %s AND s.snapshot_at <= %s" in sql
-    assert "j.deleted_at IS NULL" in sql
-    assert "j.status != 'deleted'" in sql
-    assert params[-1] == "src-1"
-    assert result == {"100": 6}
-
-
-@pytest.mark.asyncio
-async def test_fetch_branch_click_counts_uses_same_execution_window():
-    """分行按钮点击统计应只统计同周期执行且被点击的任务。"""
+async def test_fetch_branch_click_counts_reads_directly_from_click_events():
+    """分行按钮点击统计应直接来自 HTML 点击表。"""
     db = MagicMock()
     db.fetch_all = AsyncMock(
         return_value=[
@@ -178,18 +139,13 @@ async def test_fetch_branch_click_counts_uses_same_execution_window():
 
     sql, params = db.fetch_all.await_args.args
 
-    assert "SELECT DISTINCT e.job_id, j.bbk_id" in sql
-    assert "FROM swe_cron_executions e" in sql
-    assert "JOIN swe_cron_jobs j ON e.job_id = j.id" in sql
-    assert "JOIN swe_html_preview_click_events c" in sql
-    assert (
-        "c.cron_task_id COLLATE utf8mb4_unicode_ci = executed_jobs.job_id"
-        in sql
-    )
-    assert "e.actual_time >= %s AND e.actual_time <= %s" in sql
-    assert "c.clicked_at >= %s AND c.clicked_at <= %s" in sql
-    assert "j.deleted_at IS NULL" in sql
-    assert "j.status != 'deleted'" in sql
+    assert "FROM swe_html_preview_click_events" in sql
+    assert "COUNT(DISTINCT cron_task_id) AS task_count" in sql
+    assert "COUNT(*) AS total_clicks" in sql
+    assert "clicked_at >= %s AND clicked_at <= %s" in sql
+    assert "cron_task_id IS NOT NULL" in sql
+    assert "bbk_id IS NOT NULL" in sql
+    assert "bbk_id != ''" in sql
     assert params[-1] == "src-1"
     assert result == {
         "100": {

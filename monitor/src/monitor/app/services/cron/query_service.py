@@ -2163,54 +2163,39 @@ class QueryService:
     ) -> dict[str, int]:
         """查询概览中的查看方案/去洞察/去电访任务数。
 
-        查看方案任务数按“打开方案预览页”的任务数统计，不要求发生按钮点击；
-        去洞察、去电访任务数按点击行为统计。
-        三项指标都限定为同周期内执行的任务。
-        """
-        view_sql = f"""
-            SELECT COUNT(DISTINCT e.job_id) AS report_count
-            FROM swe_cron_executions e
-            JOIN swe_cron_jobs j ON e.job_id = j.id
-            JOIN swe_html_preview_list_snapshots s
-              ON s.cron_task_id COLLATE utf8mb4_unicode_ci = e.job_id
-            WHERE e.actual_time >= %s AND e.actual_time <= %s
-              AND s.snapshot_at >= %s AND s.snapshot_at <= %s
-              AND j.deleted_at IS NULL
-              AND j.status != 'deleted'
-              {bbk_filter_sql}
-              {source_filter_sql}
+        三项指标都直接来自 swe_html_preview_click_events，
+        按 button_type 统计去重任务数。
         """
         behavior_params = [
-            start_time,
-            end_time,
             start_time,
             end_time,
             *bbk_filter_params,
             *source_filter_params,
         ]
-        view_row = await db.fetch_one(view_sql, tuple(behavior_params))
         click_sql = f"""
             SELECT
                 COUNT(DISTINCT CASE
-                    WHEN c.button_type = 'insight' THEN e.job_id
+                    WHEN c.button_type = 'plan' THEN c.cron_task_id
+                END) AS report_count,
+                COUNT(DISTINCT CASE
+                    WHEN c.button_type = 'insight' THEN c.cron_task_id
                 END) AS insight_count,
                 COUNT(DISTINCT CASE
-                    WHEN c.button_type = 'phone' THEN e.job_id
+                    WHEN c.button_type = 'phone' THEN c.cron_task_id
                 END) AS phone_count
-            FROM swe_cron_executions e
-            JOIN swe_cron_jobs j ON e.job_id = j.id
-            JOIN swe_html_preview_click_events c
-              ON c.cron_task_id COLLATE utf8mb4_unicode_ci = e.job_id
-            WHERE e.actual_time >= %s AND e.actual_time <= %s
-              AND c.clicked_at >= %s AND c.clicked_at <= %s
+            FROM swe_html_preview_click_events c
+            JOIN swe_cron_jobs j
+              ON c.cron_task_id COLLATE utf8mb4_unicode_ci = j.id
+            WHERE c.clicked_at >= %s AND c.clicked_at <= %s
+              AND c.cron_task_id IS NOT NULL
               AND j.deleted_at IS NULL
               AND j.status != 'deleted'
-              {bbk_filter_sql}
-              {source_filter_sql}
+              {bbk_filter_sql.replace('j.bbk_id', 'c.bbk_id')}
+              {source_filter_sql.replace('j.source_id', 'c.source_id')}
         """
         click_row = await db.fetch_one(click_sql, tuple(behavior_params))
         return {
-            "report_count": self._row_int(view_row, "report_count"),
+            "report_count": self._row_int(click_row, "report_count"),
             "insight_count": self._row_int(click_row, "insight_count"),
             "phone_count": self._row_int(click_row, "phone_count"),
         }
@@ -2486,37 +2471,27 @@ class QueryService:
         end_time: datetime,
         source_id: Optional[str],
     ) -> dict:
-        """查询各分行按钮点击统计（查看方案点击/去洞察/去电访）。"""
-        source_where = " AND j.source_id = %s" if source_id else ""
-        click_source_where = " AND c.source_id = %s" if source_id else ""
+        """查询各分行点击统计（查看方案/去洞察/去电访）。
+
+        从 swe_html_preview_click_events 按 bbk_id + button_type 聚合，
+        同时返回去重任务数 (COUNT(DISTINCT cron_task_id)) 和点击数 (COUNT(*))。
+        """
+        source_where = " AND source_id = %s" if source_id else ""
         click_sql = f"""
             SELECT
-                executed_jobs.bbk_id AS bbk_id,
-                c.button_type,
-                COUNT(DISTINCT executed_jobs.job_id) AS task_count,
+                bbk_id,
+                button_type,
+                COUNT(DISTINCT cron_task_id) AS task_count,
                 COUNT(*) AS total_clicks
-            FROM (
-                SELECT DISTINCT e.job_id, j.bbk_id
-                FROM swe_cron_executions e
-                JOIN swe_cron_jobs j ON e.job_id = j.id
-                WHERE e.actual_time >= %s AND e.actual_time <= %s
-                  AND j.deleted_at IS NULL
-                  AND j.status != 'deleted'
-                  AND j.bbk_id IS NOT NULL
-                  AND j.bbk_id != ''
-                  {source_where}
-            ) executed_jobs
-            JOIN swe_html_preview_click_events c
-              ON c.cron_task_id COLLATE utf8mb4_unicode_ci = executed_jobs.job_id
-            WHERE c.clicked_at >= %s AND c.clicked_at <= %s
-              AND c.cron_task_id IS NOT NULL
-              {click_source_where}
-            GROUP BY executed_jobs.bbk_id, c.button_type
+            FROM swe_html_preview_click_events
+            WHERE clicked_at >= %s AND clicked_at <= %s
+              AND cron_task_id IS NOT NULL
+              AND bbk_id IS NOT NULL
+              AND bbk_id != ''
+              {source_where}
+            GROUP BY bbk_id, button_type
         """
         params: list = [start_time, end_time]
-        if source_id:
-            params.append(source_id)
-        params.extend([start_time, end_time])
         if source_id:
             params.append(source_id)
         rows = await db.fetch_all(click_sql, tuple(params))
@@ -2532,52 +2507,6 @@ class QueryService:
                 "total_clicks": row["total_clicks"] or 0,
             }
         return result
-
-    async def _fetch_branch_plan_view_counts(
-        self,
-        db: Any,
-        start_time: datetime,
-        end_time: datetime,
-        source_id: Optional[str],
-    ) -> dict[str, int]:
-        """查询各分行查看方案任务数。
-
-        方案任务数按打开方案预览页统计，不要求发生按钮点击。
-        """
-        source_where = " AND j.source_id = %s" if source_id else ""
-        snapshot_source_where = " AND s.source_id = %s" if source_id else ""
-        view_sql = f"""
-            SELECT
-                executed_jobs.bbk_id AS bbk_id,
-                COUNT(DISTINCT executed_jobs.job_id) AS task_count
-            FROM (
-                SELECT DISTINCT e.job_id, j.bbk_id
-                FROM swe_cron_executions e
-                JOIN swe_cron_jobs j ON e.job_id = j.id
-                WHERE e.actual_time >= %s AND e.actual_time <= %s
-                  AND j.deleted_at IS NULL
-                  AND j.status != 'deleted'
-                  AND j.bbk_id IS NOT NULL
-                  AND j.bbk_id != ''
-                  {source_where}
-            ) executed_jobs
-            JOIN swe_html_preview_list_snapshots s
-              ON s.cron_task_id COLLATE utf8mb4_unicode_ci = executed_jobs.job_id
-            WHERE s.snapshot_at >= %s AND s.snapshot_at <= %s
-              AND s.cron_task_id IS NOT NULL
-              {snapshot_source_where}
-            GROUP BY executed_jobs.bbk_id
-        """
-        params: list = [start_time, end_time]
-        if source_id:
-            params.append(source_id)
-        params.extend([start_time, end_time])
-        if source_id:
-            params.append(source_id)
-        rows = await db.fetch_all(view_sql, tuple(params))
-        return {
-            str(row["bbk_id"]): int(row["task_count"] or 0) for row in rows
-        }
 
     async def _fetch_branch_skill_count(
         self,
@@ -3242,12 +3171,6 @@ class QueryService:
         )
 
         # 一次查询获取所有分行的点击统计
-        plan_view_counts = await self._fetch_branch_plan_view_counts(
-            db,
-            start_time,
-            end_time,
-            source_id,
-        )
         click_counts = await self._fetch_branch_click_counts(
             db,
             start_time,
@@ -3290,7 +3213,7 @@ class QueryService:
                     stats["success_count"],
                     stats["total_executions"],
                     stats["read_tasks"],
-                    plan_count=plan_view_counts.get(bbk_id, 0),
+                    plan_count=plan_clicks_data.get("task_count", 0),
                     insight_count=insight_clicks_data.get("task_count", 0),
                     phone_count=phone_clicks_data.get("task_count", 0),
                     plan_clicks=plan_clicks_data.get("total_clicks", 0),

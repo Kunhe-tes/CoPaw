@@ -144,7 +144,7 @@ function buildMetricCards(
     },
     {
       key: "cron_tasks",
-      title: "定时任务数",
+      title: "定时任务执行数",
       valueText: (
         <span className={styles.userValueWrap}>
           <span className={styles.userTotal}>
@@ -502,6 +502,8 @@ function buildTrendChartOption(trendData: TrendDatum[]) {
       },
     },
     legend: {
+      show: true,
+      type: "scroll" as const,
       data: [
         "调用量",
         "调用用户",
@@ -510,12 +512,19 @@ function buildTrendChartOption(trendData: TrendDatum[]) {
         "去电访客户数",
       ],
       bottom: 0,
+      left: "center" as const,
       itemWidth: 12,
       itemHeight: 8,
       itemGap: 14,
       textStyle: {
         color: "#64748b",
         fontSize: 12,
+        fontWeight: 600,
+      },
+      pageIconColor: "#2563eb",
+      pageIconInactiveColor: "#cbd5e1",
+      pageTextStyle: {
+        color: "#94a3b8",
       },
     },
     grid: {
@@ -1305,6 +1314,7 @@ export default function BusinessOverviewPage() {
           </div>
           <div className={styles.trendChart}>
             <ReactECharts
+              className={styles.trendChartCanvas}
               option={buildTrendChartOption(trendData)}
               style={{ height: 280, width: "100%", gridColumn: "1 / -1" }}
             />
