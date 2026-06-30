@@ -31,6 +31,7 @@ from swe.agents.tools.shell import (
     execute_shell_command,
     _classify_shell_failure,
     _extract_path_tokens,
+    _prepare_subprocess_env,
     _validate_shell_paths,
     _resolve_cwd,
 )
@@ -140,6 +141,37 @@ def _assert_tool_error(
 ) -> None:
     assert exc_info.value.error_type == error_type
     assert detail_contains in exc_info.value.detail
+
+
+def test_shell_subprocess_env_preserves_backend_storage_roots(
+    mock_working_dir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Shell 子进程应继承后端确定的 SWE 存储根路径。"""
+    backend_working_dir = mock_working_dir / "backend-working"
+    backend_secret_dir = mock_working_dir / "backend-working.secret"
+    monkeypatch.setenv("SWE_WORKING_DIR", str(backend_working_dir))
+    monkeypatch.setenv("SWE_SECRET_DIR", str(backend_secret_dir))
+
+    _write_scope_env(
+        mock_working_dir,
+        "test_tenant",
+        "source-a",
+        {
+            "SWE_WORKING_DIR": "/tmp/tenant-overrides-working",
+            "SWE_SECRET_DIR": "/tmp/tenant-overrides-secret",
+            "PYTHONPATH": "/tmp/tenant-pythonpath",
+            "APP_TOKEN": "tenant-secret",
+        },
+    )
+
+    with tenant_context(tenant_id="test_tenant", source_id="source-a"):
+        env = _prepare_subprocess_env()
+
+    assert env["SWE_WORKING_DIR"] == str(backend_working_dir)
+    assert env["SWE_SECRET_DIR"] == str(backend_secret_dir)
+    assert env["APP_TOKEN"] == "tenant-secret"
+    assert "PYTHONPATH" not in env
 
 
 # =============================================================================
