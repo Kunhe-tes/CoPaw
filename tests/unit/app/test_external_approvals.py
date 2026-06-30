@@ -108,12 +108,42 @@ class _TaskTracker:
         return asyncio.Queue(), True
 
 
+class _Session:
+    def __init__(self) -> None:
+        self.state: dict[str, Any] = {}
+        self.mutate_calls: list[dict[str, Any]] = []
+
+    async def mutate_session_state(
+        self,
+        *,
+        session_id: str,
+        mutator,
+        user_id: str = "",
+        create_if_not_exist: bool = True,
+        **_kwargs,
+    ) -> dict[str, Any]:
+        self.mutate_calls.append(
+            {
+                "session_id": session_id,
+                "user_id": user_id,
+                "create_if_not_exist": create_if_not_exist,
+            },
+        )
+        result = mutator(self.state)
+        if result is not None:
+            self.state = result
+        return self.state
+
+
 def _workspace(task_tracker: _TaskTracker | None = None) -> SimpleNamespace:
+    session = _Session()
     return SimpleNamespace(
         agent_id="agent-a",
         channel_manager=_ChannelManager(),
         chat_manager=_ChatManager(),
         task_tracker=task_tracker or _TaskTracker(),
+        runner=SimpleNamespace(session=session),
+        session=session,
     )
 
 
@@ -163,6 +193,16 @@ async def test_external_approve_submits_console_approve_message() -> None:
     assert payload["meta"]["source_id"] == "source-a"
     assert payload["meta"]["approval_request_id"] == pending.request_id
     assert payload["meta"]["approval_source_channel"] == "zhaohu"
+
+    memory_content = workspace.session.state["agent"]["memory"]["content"]
+    assert memory_content[0][0]["role"] == "user"
+    assert memory_content[0][0]["content"] == f"/approve {pending.request_id}"
+    assert memory_content[0][0]["metadata"]["approval_request_id"] == (
+        pending.request_id
+    )
+    assert memory_content[0][0]["metadata"]["approval_source_channel"] == (
+        "zhaohu"
+    )
 
     zhaohu = workspace.channel_manager.zhaohu
     assert zhaohu.result_calls[0]["decision"] == "approved"

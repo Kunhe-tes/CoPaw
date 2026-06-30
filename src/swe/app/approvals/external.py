@@ -11,8 +11,10 @@ import asyncio
 import inspect
 import logging
 from dataclasses import dataclass
+from datetime import datetime
 from enum import Enum
 from typing import Any
+from uuid import uuid4
 
 from agentscope_runtime.engine.schemas.agent_schemas import (
     ContentType,
@@ -30,6 +32,7 @@ APPROVAL_REQUEST_ID_META_KEY = "approval_request_id"
 APPROVAL_DECISION_META_KEY = "approval_decision"
 _RUN_IDLE_WAIT_SECONDS = 5.0
 _RUN_IDLE_POLL_SECONDS = 0.05
+_EXTERNAL_APPROVAL_MESSAGE_META_KEY = "external_approval_message"
 
 
 class ExternalApprovalDecision(str, Enum):
@@ -65,6 +68,132 @@ def _status_for_decision(decision: ExternalApprovalDecision) -> str:
     if decision == ExternalApprovalDecision.APPROVE:
         return "approved"
     return "denied"
+
+
+def _message_timestamp() -> str:
+    return datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
+
+
+def _external_approval_memory_entry(
+    *,
+    pending: PendingApproval,
+    command: str,
+    decision: ExternalApprovalDecision,
+    source_channel: str,
+    source_user_id: str | None = None,
+    source_message_id: str | None = None,
+) -> list[Any]:
+    return [
+        {
+            "id": str(uuid4()),
+            "name": pending.user_id or "external-approval",
+            "role": "user",
+            "content": command,
+            "metadata": {
+                _EXTERNAL_APPROVAL_MESSAGE_META_KEY: True,
+                APPROVAL_REQUEST_ID_META_KEY: pending.request_id,
+                APPROVAL_DECISION_META_KEY: decision.value,
+                APPROVAL_SOURCE_CHANNEL_META_KEY: source_channel,
+                "approval_source_user_id": source_user_id,
+                "approval_source_message_id": source_message_id,
+            },
+            "timestamp": _message_timestamp(),
+        },
+        [],
+    ]
+
+
+def _has_external_approval_memory_entry(
+    content: list[Any],
+    *,
+    request_id: str,
+    decision: ExternalApprovalDecision,
+) -> bool:
+    for entry in content:
+        if not isinstance(entry, list) or not entry:
+            continue
+        message = entry[0]
+        if not isinstance(message, dict):
+            continue
+        metadata = message.get("metadata")
+        if not isinstance(metadata, dict):
+            continue
+        if not metadata.get(_EXTERNAL_APPROVAL_MESSAGE_META_KEY):
+            continue
+        if metadata.get(APPROVAL_REQUEST_ID_META_KEY) != request_id:
+            continue
+        if metadata.get(APPROVAL_DECISION_META_KEY) == decision.value:
+            return True
+    return False
+
+
+async def _append_external_approval_message(
+    *,
+    workspace: Any,
+    pending: PendingApproval,
+    decision: ExternalApprovalDecision,
+    source_channel: str,
+    source_user_id: str | None = None,
+    source_message_id: str | None = None,
+) -> None:
+    runner = getattr(workspace, "runner", None)
+    session = getattr(runner, "session", None)
+    mutate_session_state = getattr(session, "mutate_session_state", None)
+    if not callable(mutate_session_state):
+        logger.debug(
+            "external approval message append skipped: session unavailable "
+            "request_id=%s",
+            pending.request_id,
+        )
+        return
+
+    command = _command_for_decision(decision, pending.request_id)
+
+    def _mutate(state: dict[str, Any]) -> dict[str, Any]:
+        agent_state = state.setdefault("agent", {})
+        if not isinstance(agent_state, dict):
+            agent_state = {}
+            state["agent"] = agent_state
+        memory_state = agent_state.setdefault("memory", {})
+        if not isinstance(memory_state, dict):
+            memory_state = {}
+            agent_state["memory"] = memory_state
+        memory_state.setdefault("_compressed_summary", "")
+        content = memory_state.setdefault("content", [])
+        if not isinstance(content, list):
+            content = []
+            memory_state["content"] = content
+        if _has_external_approval_memory_entry(
+            content,
+            request_id=pending.request_id,
+            decision=decision,
+        ):
+            return state
+        content.append(
+            _external_approval_memory_entry(
+                pending=pending,
+                command=command,
+                decision=decision,
+                source_channel=source_channel,
+                source_user_id=source_user_id,
+                source_message_id=source_message_id,
+            ),
+        )
+        return state
+
+    try:
+        await mutate_session_state(
+            session_id=pending.session_id,
+            user_id=pending.user_id or "external-approval",
+            mutator=_mutate,
+            create_if_not_exist=True,
+        )
+    except Exception:
+        logger.warning(
+            "external approval message append failed: request_id=%s",
+            pending.request_id,
+            exc_info=True,
+        )
 
 
 async def _record_approval_event(
@@ -323,6 +452,14 @@ async def submit_external_approval_decision(
         source_id=source_id,
         user_name=user_name,
         bbk_id=bbk_id,
+    )
+    await _append_external_approval_message(
+        workspace=workspace,
+        pending=pending,
+        decision=decision,
+        source_channel=source_channel,
+        source_user_id=source_user_id,
+        source_message_id=source_message_id,
     )
     _queue, is_new_run = await workspace.task_tracker.attach_or_start(
         chat.id,
