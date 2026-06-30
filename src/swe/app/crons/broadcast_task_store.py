@@ -135,12 +135,16 @@ class CronBroadcastTaskStore:
             "mark target running",
             self.db.execute,
             f"""
-                UPDATE {_ITEM_TABLE}
-                SET status = 'running',
+                INSERT INTO {_ITEM_TABLE} (
+                    task_id, tenant_id, status, result_json
+                )
+                VALUES (%s, %s, 'running', NULL)
+                ON DUPLICATE KEY UPDATE
+                    status = CASE
+                        WHEN status = 'pending' THEN 'running'
+                        ELSE status
+                    END,
                     updated_at = CURRENT_TIMESTAMP
-                WHERE task_id = %s
-                  AND tenant_id = %s
-                  AND status = 'pending'
             """,
             (task_id, tenant_id),
         )
@@ -173,18 +177,20 @@ class CronBroadcastTaskStore:
             "record target result",
             self.db.execute,
             f"""
-                UPDATE {_ITEM_TABLE}
-                SET status = %s,
-                    result_json = %s,
+                INSERT INTO {_ITEM_TABLE} (
+                    task_id, tenant_id, status, result_json
+                )
+                VALUES (%s, %s, %s, %s)
+                ON DUPLICATE KEY UPDATE
+                    status = VALUES(status),
+                    result_json = VALUES(result_json),
                     updated_at = CURRENT_TIMESTAMP
-                WHERE task_id = %s
-                  AND tenant_id = %s
             """,
             (
-                status,
-                json.dumps(result, ensure_ascii=False),
                 task_id,
                 tenant_id,
+                status,
+                json.dumps(result, ensure_ascii=False),
             ),
         )
 
@@ -325,18 +331,6 @@ class CronBroadcastTaskStore:
                 tenant_count=len(targets),
             )
             if inserted:
-                for target in targets:
-                    await self._call_db(
-                        "insert task item",
-                        self.db.execute,
-                        f"""
-                            INSERT INTO {_ITEM_TABLE} (
-                                task_id, tenant_id, status, result_json
-                            )
-                            VALUES (%s, %s, 'pending', NULL)
-                        """,
-                        (task_id, target),
-                    )
                 return (
                     CronBroadcastTaskSnapshot(
                         task_id=task_id,

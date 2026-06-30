@@ -184,3 +184,53 @@ def test_db_store_reuses_running_task_when_claim_insert_is_ignored():
     assert task.task_id == "task-existing"
     assert "INSERT IGNORE INTO swe_cron_broadcast_tasks" in sql
     assert "INSERT INTO swe_cron_broadcast_task_items" not in sql
+
+
+def test_db_store_start_task_does_not_preinsert_target_items():
+    db = _Db()
+    store = CronBroadcastTaskStore(db)
+
+    task, reused = asyncio.run(
+        store.start_task(
+            agent_id="default",
+            source_id="source-a",
+            tenant_id="tenant-a",
+            job_id="job-source",
+            target_tenant_ids=["tenant-a", "tenant-b", "tenant-c"],
+        ),
+    )
+
+    sql = "\n".join(query for query, _params in db.executed)
+    assert reused is False
+    assert task.tenant_count == 3
+    assert "INSERT IGNORE INTO swe_cron_broadcast_tasks" in sql
+    assert "INSERT INTO swe_cron_broadcast_task_items" not in sql
+
+
+def test_db_store_target_item_status_is_upserted_lazily():
+    db = _Db()
+    store = CronBroadcastTaskStore(db)
+
+    task, _ = _start_task(store)
+    asyncio.run(store.mark_target_running(task.task_id, "tenant-a"))
+    asyncio.run(
+        store.record_target_result(
+            task.task_id,
+            {
+                "tenant_id": "tenant-a",
+                "success": True,
+                "job_id": "child-a",
+                "cron": "0 9 * * *",
+                "timezone": "UTC",
+                "offset_minutes": 0,
+                "notification_timezone": "UTC",
+                "error": "",
+                "warning": "",
+            },
+        ),
+    )
+
+    sql = "\n".join(query for query, _params in db.executed)
+    assert "ON DUPLICATE KEY UPDATE" in sql
+    assert "VALUES (%s, %s, 'running', NULL)" in sql
+    assert "VALUES (%s, %s, %s, %s)" in sql
