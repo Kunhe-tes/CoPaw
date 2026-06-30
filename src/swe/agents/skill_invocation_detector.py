@@ -23,6 +23,7 @@ from .skill_feature_inferencer import (
     SkillFeatureInferencer,
     get_skill_feature_inferencer,
 )
+from .skill_runtime_profile import SkillRuntimeProfile
 from .skill_tool_registry import SkillToolRegistry, get_skill_tool_registry
 
 if TYPE_CHECKING:
@@ -231,6 +232,7 @@ class SkillInvocationDetector:
         self._skill_call_history: dict[str, int] = {}
         self._idle_counters: dict[str, int] = {}
         self._recent_tools: list[str] = []
+        self._skill_runtime_profiles: dict[str, SkillRuntimeProfile] = {}
 
         # Layer 0: User message detection cache
         self._message_detected_skill: Optional[str] = None
@@ -301,6 +303,27 @@ class SkillInvocationDetector:
                             )
                 except Exception as e:
                     logger.warning("Failed to read skill manifest: %s", e)
+
+    def set_skill_runtime_profiles(
+        self,
+        profiles: dict[str, SkillRuntimeProfile],
+    ) -> None:
+        """设置平台内部的 skill 运行时画像。"""
+        self._skill_runtime_profiles = dict(profiles)
+
+    def get_skill_runtime_profile(
+        self,
+        skill_name: str,
+    ) -> Optional[SkillRuntimeProfile]:
+        """返回 skill 的运行时画像，只供外部只读消费。"""
+        return self._skill_runtime_profiles.get(skill_name)
+
+    def _is_declared_tool_bootstrap_allowed(self, skill_name: str) -> bool:
+        """判断 skill 是否允许仅凭 declared tool 自动启动。"""
+        profile = self.get_skill_runtime_profile(skill_name)
+        if profile is None:
+            return True
+        return bool(profile.declared_tool_bootstrap_allowed)
 
     def detect_from_user_message(
         self,
@@ -424,13 +447,14 @@ class SkillInvocationDetector:
         declared_skills = [
             s for s in declared_skills if s in self._enabled_skills
         ]
-
         if declared_skills:
-            return await self._handle_declared_skills(
+            primary_skill, weights = await self._handle_declared_skills(
                 declared_skills,
                 tool_name,
                 tool_input,
             )
+            if primary_skill or weights:
+                return primary_skill, weights
 
         # Step 2-4: Fallback to inference for legacy skills
         return await self._infer_skill_attribution(
@@ -457,13 +481,20 @@ class SkillInvocationDetector:
             Tuple of (primary_skill, weights)
         """
         current = self._context_manager.current_skill
-
         # Check if current active skill is in the list
         if current and current in skills:
             # Continue current skill
             self._update_skill_state(current)
             self._context_manager.record_tool_call(tool_name)
             return current, {current: 1.0}
+
+        bootstrap_skills = [
+            skill
+            for skill in skills
+            if self._is_declared_tool_bootstrap_allowed(skill)
+        ]
+        if not bootstrap_skills:
+            return None, {}
 
         # Check if current skill should end (idle threshold)
         if current:
@@ -475,7 +506,11 @@ class SkillInvocationDetector:
                 current = None
 
         # Calculate weights for multi-skill attribution
-        weights = self._calculate_weights(skills, tool_name, tool_input)
+        weights = self._calculate_weights(
+            bootstrap_skills,
+            tool_name,
+            tool_input,
+        )
 
         # Select primary skill (highest weight)
         primary_skill = (
