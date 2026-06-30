@@ -712,7 +712,6 @@ export const tracingApi = {
     tokensGrowth: number | null;
     sessionGrowth: number | null;
     userGrowth: number | null;
-    skillGrowth: number | null;
     cronGrowth: number | null;
     // 深度指标环比
     avgRoundsGrowth: number | null;
@@ -721,8 +720,6 @@ export const tracingApi = {
     avgSessionsPerUserGrowth: number | null;
     // 客户点击环比
     planCustomersGrowth: number | null;
-    insightCustomersGrowth: number | null;
-    phoneCustomersGrowth: number | null;
   }> => {
     const params = new URLSearchParams();
     params.append("start_date", startDate);
@@ -737,7 +734,16 @@ export const tracingApi = {
     endDate?: string,
     bbkIds?: string,
   ): Promise<{
-    trendData: { date: string; calls: number; tokens: number; users: number }[];
+    trendData: {
+      date: string;
+      calls: number;
+      tokens: number;
+      users: number;
+      read_tasks: number;
+      plan_customers: number;
+      insight_customers: number;
+      phone_customers: number;
+    }[];
   }> => {
     const params = new URLSearchParams();
     if (startDate) params.append("start_date", startDate);
@@ -753,7 +759,16 @@ export const tracingApi = {
     endDate?: string,
     bbkIds?: string,
   ): Promise<{
-    trendData: { date: string; calls: number; tokens: number; users: number }[];
+    trendData: {
+      date: string;
+      calls: number;
+      tokens: number;
+      users: number;
+      read_tasks: number;
+      plan_customers: number;
+      insight_customers: number;
+      phone_customers: number;
+    }[];
   }> => {
     const params = new URLSearchParams();
     if (startDate) params.append("start_date", startDate);

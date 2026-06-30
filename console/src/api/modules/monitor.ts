@@ -478,17 +478,12 @@ function mapCronJobOverviewPageData(
       {
         key: "success",
         value: formatPercentValue(stats.success_rate),
-        footerValue: formatInteger(stats.success_count),
+        footerValue: `${formatInteger(stats.success_count)}/${formatInteger(stats.error_count)}`,
       },
       {
         key: "read",
         value: formatPercentValue(stats.read_rate),
         footerValue: formatInteger(stats.read_tasks),
-      },
-      {
-        key: "alert",
-        value: formatPercentValue(stats.error_rate),
-        footerValue: formatInteger(stats.error_count),
       },
     ],
     branchRankingRows: behavior.items.map((item, index) => ({

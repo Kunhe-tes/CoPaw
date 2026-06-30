@@ -146,12 +146,17 @@ function buildMetricCards(
       key: "cron_tasks",
       title: "定时任务数",
       valueText: (
-        <>
-          {formatNumber(taskStatusSummary?.total_tasks ?? 0)}
-          <span className={styles.newCronHint}>
-            已读任务数：{formatNumber(taskStatusSummary?.read_count ?? 0)}个
+        <span className={styles.userValueWrap}>
+          <span className={styles.userTotal}>
+            {formatNumber(taskStatusSummary?.total_tasks ?? 0)}
           </span>
-        </>
+          <span className={styles.userAnnotation}>
+            <span className={styles.annotationRow}>
+              <span className={styles.annotationDot} style={{ background: "#22c55e" }} />
+              已读 {formatNumber(taskStatusSummary?.read_count ?? 0)}
+            </span>
+          </span>
+        </span>
       ),
       changeText: formatChange(growthStats.cronGrowth),
       changeDirection: toChangeDirection(growthStats.cronGrowth),
@@ -1221,7 +1226,7 @@ export default function BusinessOverviewPage() {
           <div className={styles.trendChart}>
             <ReactECharts
               option={buildTrendChartOption(trendData)}
-              style={{ height: 280 }}
+              style={{ height: 280, width: "100%", gridColumn: "1 / -1" }}
             />
           </div>
         </article>
