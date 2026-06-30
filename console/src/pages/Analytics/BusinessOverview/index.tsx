@@ -20,7 +20,6 @@ import {
   TrendingUp,
   UserRound,
   Users,
-  Zap,
 } from "lucide-react";
 import { DatePicker, Select, Tooltip, message } from "antd";
 import ReactECharts from "echarts-for-react";
