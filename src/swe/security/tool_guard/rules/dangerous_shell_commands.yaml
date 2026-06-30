@@ -1,7 +1,7 @@
 ## Dangerous Shell Command Detection Rules
 ## =========================================================================
 ## Regex-signature rules for RuleBasedToolGuardian.
-## Scans execute_shell_command parameters for destructive, evasive,
+## Scans shell tool parameters for destructive, evasive,
 ## or privilege-escalating patterns before the agent executes them.
 ##
 ## Severity tiers: MEDIUM = broad catch-all (typically requires user review/confirmation),
@@ -10,7 +10,7 @@
 ## See GuardThreatCategory for the full threat taxonomy.
 #
 - id: TOOL_CMD_NETWORK_TRANSFER
-  tools: [execute_shell_command]
+  tools: [execute_shell_command, start_background_process]
   params: [command]
   category: data_exfiltration
   severity: HIGH
@@ -22,7 +22,7 @@
   remediation: 'Block or require explicit approval before downloading, uploading, or tunneling data with shell network tools.'
 
 - id: TOOL_CMD_ENV_DUMP
-  tools: [execute_shell_command]
+  tools: [execute_shell_command, start_background_process]
   params: [command]
   category: credential_exposure
   severity: HIGH
@@ -34,7 +34,7 @@
   remediation: 'Do not print raw environment variables because they may contain credentials, tokens, and internal service addresses.'
 
 - id: TOOL_CMD_SYSTEM_INVENTORY
-  tools: [execute_shell_command]
+  tools: [execute_shell_command, start_background_process]
   params: [command]
   category: sensitive_file_access
   severity: HIGH
@@ -47,7 +47,7 @@
   remediation: 'Avoid exposing service status, Kubernetes objects, network listeners, routes, and internal topology details.'
 
 - id: TOOL_CMD_DD_RESOURCE_ABUSE
-  tools: [execute_shell_command]
+  tools: [execute_shell_command, start_background_process]
   params: [command]
   category: resource_abuse
   severity: CRITICAL
