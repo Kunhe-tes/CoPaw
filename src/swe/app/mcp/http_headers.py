@@ -55,10 +55,13 @@ def build_mcp_http_headers(
     source_id = get_current_source_id()
     if tenant_id:
         merged_headers["x-swe-tenant-id"] = tenant_id
+        merged_headers["tenantid"] = tenant_id
     if source_id:
         merged_headers["x-swe-source-id"] = source_id
+        merged_headers["sourceid"] = source_id
     if session_id:
         merged_headers["x-swe-session-id"] = session_id
+        merged_headers["sessionid"] = session_id
     if trace_id:
         merged_headers["x-swe-trace-id"] = trace_id
         merged_headers["traceid"] = trace_id
