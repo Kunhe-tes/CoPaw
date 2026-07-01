@@ -29,6 +29,105 @@ def _is_models_list_request(request: Request) -> bool:
     return request.method == "GET" and request.url.path in _MODELS_LIST_PATHS
 
 
+def is_provider_models_list_request(request: Request) -> bool:
+    """供前置 middleware 复用的模型列表请求判断。"""
+    return _is_models_list_request(request)
+
+
+def is_provider_models_scope(scope: dict) -> bool:
+    """判断 ASGI scope 是否为 provider 模型列表请求。"""
+    return (
+        scope.get("type") == "http"
+        and scope.get("method") == "GET"
+        and scope.get("path") in _MODELS_LIST_PATHS
+    )
+
+
+def log_provider_models_middleware_before_next(
+    log: logging.Logger,
+    name: str,
+    request: Request,
+    started_at: float,
+    **fields: object,
+) -> float:
+    """记录前置 middleware 进入下游前的自身耗时。"""
+    before_next_at = time.perf_counter()
+    log.info(
+        "provider_models_middleware_before_next name=%s path=%s "
+        "pre_ms=%d tenant_id=%s source_id=%s scope_id=%s fields=%s",
+        name,
+        request.url.path,
+        int((before_next_at - started_at) * 1000),
+        getattr(request.state, "tenant_id", None),
+        getattr(request.state, "source_id", None),
+        getattr(request.state, "scope_id", None),
+        fields,
+    )
+    return before_next_at
+
+
+def log_provider_models_middleware_done(
+    log: logging.Logger,
+    name: str,
+    request: Request,
+    started_at: float,
+    before_next_at: float,
+    response: Response,
+    **fields: object,
+) -> None:
+    """记录前置 middleware 总耗时与下游耗时。"""
+    finished_at = time.perf_counter()
+    log.info(
+        "provider_models_middleware_done name=%s path=%s status_code=%s "
+        "total_ms=%d pre_ms=%d downstream_ms=%d tenant_id=%s source_id=%s "
+        "scope_id=%s fields=%s",
+        name,
+        request.url.path,
+        response.status_code,
+        int((finished_at - started_at) * 1000),
+        int((before_next_at - started_at) * 1000),
+        int((finished_at - before_next_at) * 1000),
+        getattr(request.state, "tenant_id", None),
+        getattr(request.state, "source_id", None),
+        getattr(request.state, "scope_id", None),
+        fields,
+    )
+
+
+def log_provider_models_middleware_error(
+    log: logging.Logger,
+    name: str,
+    request: Request,
+    started_at: float,
+    before_next_at: float | None = None,
+    **fields: object,
+) -> None:
+    """记录前置 middleware 异常耗时。"""
+    finished_at = time.perf_counter()
+    pre_ms = int(
+        ((before_next_at or finished_at) - started_at) * 1000,
+    )
+    downstream_ms = (
+        int((finished_at - before_next_at) * 1000)
+        if before_next_at is not None
+        else None
+    )
+    log.exception(
+        "provider_models_middleware_error name=%s path=%s total_ms=%d "
+        "pre_ms=%d downstream_ms=%s tenant_id=%s source_id=%s scope_id=%s "
+        "fields=%s",
+        name,
+        request.url.path,
+        int((finished_at - started_at) * 1000),
+        pre_ms,
+        downstream_ms,
+        getattr(request.state, "tenant_id", None),
+        getattr(request.state, "source_id", None),
+        getattr(request.state, "scope_id", None),
+        fields,
+    )
+
+
 class ProviderModelsTimingMiddleware(BaseHTTPMiddleware):
     """记录 GET /api/models 从业务中间件入口到响应生成的总耗时。"""
 

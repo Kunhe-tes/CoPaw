@@ -31,6 +31,12 @@ from fastapi import Request, Response
 from starlette.middleware.base import BaseHTTPMiddleware
 
 from ..constant import SECRET_DIR
+from .middleware.provider_models_timing import (
+    is_provider_models_list_request,
+    log_provider_models_middleware_before_next,
+    log_provider_models_middleware_done,
+    log_provider_models_middleware_error,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -351,19 +357,94 @@ class AuthMiddleware(BaseHTTPMiddleware):
         call_next,
     ) -> Response:
         """Check Bearer token on protected API routes; skip public paths."""
-        if self._should_skip_auth(request):
-            return await call_next(request)
+        is_timing = is_provider_models_list_request(request)
+        started_at = time.perf_counter()
+        before_next_at = None
+        skip_auth = False
+        token_present = False
+        token_valid = False
+        skip_started_at = time.perf_counter()
+        skip_auth = self._should_skip_auth(request)
+        skip_auth_ms = int((time.perf_counter() - skip_started_at) * 1000)
+        if skip_auth:
+            try:
+                if is_timing:
+                    before_next_at = (
+                        log_provider_models_middleware_before_next(
+                            logger,
+                            "AuthMiddleware",
+                            request,
+                            started_at,
+                            skip_auth=skip_auth,
+                            skip_auth_ms=skip_auth_ms,
+                        )
+                    )
+                response = await call_next(request)
+                if is_timing and before_next_at is not None:
+                    log_provider_models_middleware_done(
+                        logger,
+                        "AuthMiddleware",
+                        request,
+                        started_at,
+                        before_next_at,
+                        response,
+                        skip_auth=skip_auth,
+                        skip_auth_ms=skip_auth_ms,
+                    )
+                return response
+            except Exception:
+                if is_timing:
+                    log_provider_models_middleware_error(
+                        logger,
+                        "AuthMiddleware",
+                        request,
+                        started_at,
+                        before_next_at,
+                        skip_auth=skip_auth,
+                        skip_auth_ms=skip_auth_ms,
+                    )
+                raise
 
+        extract_started_at = time.perf_counter()
         token = self._extract_token(request)
+        extract_token_ms = int(
+            (time.perf_counter() - extract_started_at) * 1000,
+        )
+        token_present = bool(token)
         if not token:
+            if is_timing:
+                logger.info(
+                    "provider_models_middleware_auth_reject path=%s "
+                    "total_ms=%d skip_auth_ms=%d extract_token_ms=%d "
+                    "token_present=%s reason=missing_token",
+                    request.url.path,
+                    int((time.perf_counter() - started_at) * 1000),
+                    skip_auth_ms,
+                    extract_token_ms,
+                    token_present,
+                )
             return Response(
                 content=json.dumps({"detail": "Not authenticated"}),
                 status_code=401,
                 media_type="application/json",
             )
 
+        verify_started_at = time.perf_counter()
         user = verify_token(token)
+        verify_token_ms = int((time.perf_counter() - verify_started_at) * 1000)
         if user is None:
+            if is_timing:
+                logger.info(
+                    "provider_models_middleware_auth_reject path=%s "
+                    "total_ms=%d skip_auth_ms=%d extract_token_ms=%d "
+                    "verify_token_ms=%d token_present=%s reason=invalid_token",
+                    request.url.path,
+                    int((time.perf_counter() - started_at) * 1000),
+                    skip_auth_ms,
+                    extract_token_ms,
+                    verify_token_ms,
+                    token_present,
+                )
             return Response(
                 content=json.dumps(
                     {"detail": "Invalid or expired token"},
@@ -372,8 +453,55 @@ class AuthMiddleware(BaseHTTPMiddleware):
                 media_type="application/json",
             )
 
+        token_valid = True
         request.state.user = user
-        return await call_next(request)
+        try:
+            if is_timing:
+                before_next_at = log_provider_models_middleware_before_next(
+                    logger,
+                    "AuthMiddleware",
+                    request,
+                    started_at,
+                    skip_auth=skip_auth,
+                    skip_auth_ms=skip_auth_ms,
+                    extract_token_ms=extract_token_ms,
+                    verify_token_ms=verify_token_ms,
+                    token_present=token_present,
+                    token_valid=token_valid,
+                )
+            response = await call_next(request)
+            if is_timing and before_next_at is not None:
+                log_provider_models_middleware_done(
+                    logger,
+                    "AuthMiddleware",
+                    request,
+                    started_at,
+                    before_next_at,
+                    response,
+                    skip_auth=skip_auth,
+                    skip_auth_ms=skip_auth_ms,
+                    extract_token_ms=extract_token_ms,
+                    verify_token_ms=verify_token_ms,
+                    token_present=token_present,
+                    token_valid=token_valid,
+                )
+            return response
+        except Exception:
+            if is_timing:
+                log_provider_models_middleware_error(
+                    logger,
+                    "AuthMiddleware",
+                    request,
+                    started_at,
+                    before_next_at,
+                    skip_auth=skip_auth,
+                    skip_auth_ms=skip_auth_ms,
+                    extract_token_ms=extract_token_ms,
+                    verify_token_ms=verify_token_ms,
+                    token_present=token_present,
+                    token_valid=token_valid,
+                )
+            raise
 
     @staticmethod
     def _should_skip_auth(request: Request) -> bool:

@@ -37,6 +37,14 @@ class _FakeAgent:
         }
 
 
+class _StateAgent:
+    def __init__(self, state: dict) -> None:
+        self._state = state
+
+    def state_dict(self) -> dict:
+        return copy.deepcopy(self._state)
+
+
 class _AtomicSessionDouble:
     def __init__(self) -> None:
         self.state: dict = {}
@@ -204,6 +212,67 @@ async def test_regular_session_save_preserves_concurrent_key_update(
     assert session.state["task_messages"] == [
         {"id": "msg-1", "content": "persisted task update"},
     ]
+
+
+@pytest.mark.asyncio
+async def test_regular_session_save_dedupes_external_approval_message(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    session = _MutateOnlySession()
+    runner = _make_runner(monkeypatch, tmp_path, session)
+    request_id = "approval-1"
+    command = f"/approve {request_id}"
+    external_message = Msg(
+        name="user-1",
+        role="user",
+        content=command,
+        metadata={
+            "external_approval_message": True,
+            "approval_request_id": request_id,
+            "approval_decision": "approve",
+            "approval_source_channel": "zhaohu",
+        },
+    ).to_dict()
+    runner_message = Msg(
+        name="user-1",
+        role="user",
+        content=command,
+    ).to_dict()
+    agent = _StateAgent(
+        {
+            "memory": {
+                "content": [
+                    [external_message, []],
+                    [runner_message, []],
+                    [
+                        Msg(
+                            name="Friday",
+                            role="assistant",
+                            content="approved",
+                        ).to_dict(),
+                        [],
+                    ],
+                ],
+            },
+        },
+    )
+
+    await runner._save_regular_session_state(
+        agent,
+        session_id="session-1",
+        user_id="user-1",
+        hook_overlay=None,
+    )
+
+    content = session.state["agent"]["memory"]["content"]
+    user_messages = [
+        entry[0]
+        for entry in content
+        if isinstance(entry, list) and entry[0].get("role") == "user"
+    ]
+    assert [msg["content"] for msg in user_messages] == [command]
+    assert user_messages[0]["metadata"]["external_approval_message"] is True
 
 
 @pytest.mark.asyncio

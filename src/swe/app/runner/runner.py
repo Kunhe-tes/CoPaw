@@ -102,6 +102,9 @@ logger = logging.getLogger(__name__)
 TASK_RUNS_STATE_KEY = "task_runs"
 _INTERNAL_FOLLOW_UP_METADATA_KEY = "swe_internal_follow_up"
 _SKILL_FRESHNESS_NOTICE_METADATA_KEY = "swe_skill_freshness_notice"
+_EXTERNAL_APPROVAL_MESSAGE_META_KEY = "external_approval_message"
+_APPROVAL_REQUEST_ID_META_KEY = "approval_request_id"
+_APPROVAL_DECISION_META_KEY = "approval_decision"
 _SESSION_TITLE_GENERATED_META_KEY = "session_title_generated"
 _TASK_SESSION_KIND = "task"
 _BEFORE_STOP_FOLLOW_UP_REASON_TEMPLATE = (
@@ -340,6 +343,101 @@ def _extract_text_from_message_content(content: Any) -> str:
         if text.strip():
             texts.append(text.strip())
     return "\n".join(texts).strip()
+
+
+def _approval_message_key_from_text(text: str) -> tuple[str, str] | None:
+    normalized = " ".join(text.split())
+    request_id = _approval_request_id(normalized)
+    if request_id:
+        return ("approve", request_id)
+
+    request_id = _denial_request_id(normalized)
+    if request_id:
+        return ("deny", request_id)
+
+    return None
+
+
+def _external_approval_message_key(
+    message: dict[str, Any],
+) -> tuple[str, str] | None:
+    if message.get("role") != "user":
+        return None
+
+    text_key = _approval_message_key_from_text(
+        _extract_text_from_message_content(message.get("content")),
+    )
+    metadata = message.get("metadata")
+    if not isinstance(metadata, dict):
+        return text_key
+
+    meta_decision = metadata.get(_APPROVAL_DECISION_META_KEY)
+    if isinstance(meta_decision, str):
+        meta_decision = meta_decision.strip().lower()
+    if meta_decision not in {"approve", "deny"}:
+        meta_decision = text_key[0] if text_key else None
+
+    meta_request_id = metadata.get(_APPROVAL_REQUEST_ID_META_KEY)
+    if isinstance(meta_request_id, str) and meta_request_id.strip():
+        request_id = meta_request_id.strip().lower()
+    else:
+        request_id = text_key[1] if text_key else None
+
+    if meta_decision and request_id:
+        return (meta_decision, request_id)
+    return text_key
+
+
+def _dedupe_external_approval_messages_from_state(
+    agent_state: dict[str, Any],
+) -> int:
+    memory_state = agent_state.get("memory")
+    if not isinstance(memory_state, dict):
+        return 0
+
+    content = memory_state.get("content")
+    if not isinstance(content, list):
+        return 0
+
+    external_keys: set[tuple[str, str]] = set()
+    for entry in content:
+        message = _extract_memory_entry_payload(entry)
+        if not isinstance(message, dict):
+            continue
+        metadata = message.get("metadata")
+        if not isinstance(metadata, dict):
+            continue
+        if not metadata.get(_EXTERNAL_APPROVAL_MESSAGE_META_KEY):
+            continue
+        key = _external_approval_message_key(message)
+        if key is not None:
+            external_keys.add(key)
+
+    if not external_keys:
+        return 0
+
+    kept_entries: list[Any] = []
+    removed = 0
+    for entry in content:
+        message = _extract_memory_entry_payload(entry)
+        if not isinstance(message, dict):
+            kept_entries.append(entry)
+            continue
+
+        metadata = message.get("metadata")
+        is_external_entry = isinstance(metadata, dict) and bool(
+            metadata.get(_EXTERNAL_APPROVAL_MESSAGE_META_KEY),
+        )
+        key = _external_approval_message_key(message)
+        if key in external_keys and not is_external_entry:
+            removed += 1
+            continue
+        kept_entries.append(entry)
+
+    if removed:
+        memory_state["content"] = kept_entries
+
+    return removed
 
 
 def _build_task_run_record(
@@ -4261,9 +4359,10 @@ class AgentRunner(Runner):
 
         current_agent_state = agent.state_dict()
         stripped_count = 0
+        deduped_external_approvals = 0
 
         def _merge(existing_state: dict[str, Any]) -> dict[str, Any]:
-            nonlocal stripped_count
+            nonlocal stripped_count, deduped_external_approvals
             state_modules: dict[str, Any] = (
                 dict(existing_state)
                 if isinstance(existing_state, dict)
@@ -4288,6 +4387,11 @@ class AgentRunner(Runner):
             stripped_count = _strip_internal_follow_up_messages_from_state(
                 state_modules["agent"],
             )
+            deduped_external_approvals = (
+                _dedupe_external_approval_messages_from_state(
+                    state_modules["agent"],
+                )
+            )
             return state_modules
 
         await self.session.mutate_session_state(
@@ -4298,8 +4402,10 @@ class AgentRunner(Runner):
         )
         logger.info(
             "Saved session state with stripped_internal_follow_ups=%s "
+            "deduped_external_approvals=%s "
             "(session_id=%s)",
             stripped_count,
+            deduped_external_approvals,
             session_id,
         )
 
