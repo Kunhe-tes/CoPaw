@@ -33,6 +33,7 @@ import { MCPEditModal } from "./MCPEditModal";
 import { useMarket } from "./useMarket";
 import { marketApi, MarketSkill, MarketSkillDetail } from "../../api/modules/market";
 import { marketMcpApi } from "../../api/modules/marketMcp";
+import { BBK_ID_MAP, BBK_ID_TO_NAME_MAP } from "../../constants/bbk";
 import type { MarketMCPItem, MarketMCPDetail } from "../../api/types";
 
 type ResourceType = "skill" | "mcp";
@@ -51,6 +52,8 @@ export function MarketSkills({ sourceId, isManager }: MarketSkillsProps) {
     loading: skillsLoading,
     selectedCategory,
     setSelectedCategory,
+    selectedBbkId,
+    setSelectedBbkId,
     selectedSkill,
     detailDrawerOpen,
     setDetailDrawerOpen,
@@ -120,20 +123,20 @@ export function MarketSkills({ sourceId, isManager }: MarketSkillsProps) {
     }
   };
 
-  // Filter skills by search query
   // 刷新 MCP 列表
+  const [selectedMcpBbkId, setSelectedMcpBbkId] = useState<string | null>(null);
   const refreshMCP = useCallback(async () => {
     setMcpLoading(true);
     try {
-      // MCP 目前不支持分类，不传递 category_id 参数
-      const data = await marketMcpApi.listMarketMCP();
+      // MCP 目前不支持分类，只传递 bbk_ids 参数
+      const data = await marketMcpApi.listMarketMCP(undefined, selectedMcpBbkId ?? undefined);
       setMcpList(data);
     } catch (err) {
       console.error("获取 MCP 列表失败:", err);
     } finally {
       setMcpLoading(false);
     }
-  }, [sourceId]);
+  }, [sourceId, selectedMcpBbkId]);
 
   // 切换资源类型时刷新
   useEffect(() => {
@@ -272,17 +275,28 @@ export function MarketSkills({ sourceId, isManager }: MarketSkillsProps) {
     );
   });
 
-  // 按分类过滤
-  const displayedSkills = selectedCategory === null
-    ? filteredSkills
-    : filteredSkills.filter((s) => String(s.category_id) === String(selectedCategory));
+  // API 已按分类和分行过滤，前端只做搜索过滤
+  const displayedSkills = filteredSkills;
 
-  const displayedMCP = selectedCategory === null
-    ? filteredMCP
-    : filteredMCP.filter((m) => {
-      // MCP 暂不支持分类过滤
-      return true;
+  const displayedMCP = filteredMCP;
+
+  // 分行计数（基于 API 返回的 skills 数据）
+  const bbkCountMap = new Map<string, number>();
+  skills.forEach((s) => {
+    s.bbk_ids?.forEach((bbkId) => {
+      const count = bbkCountMap.get(bbkId) || 0;
+      bbkCountMap.set(bbkId, count + 1);
     });
+  });
+
+  // MCP 分行计数（基于 API 返回的 mcpList 数据）
+  const mcpBbkCountMap = new Map<string, number>();
+  mcpList.forEach((m) => {
+    m.bbk_ids?.forEach((bbkId) => {
+      const count = mcpBbkCountMap.get(bbkId) || 0;
+      mcpBbkCountMap.set(bbkId, count + 1);
+    });
+  });
 
   const isSkillDetailMode = (
     activeResourceType === "skill" &&
@@ -533,6 +547,65 @@ export function MarketSkills({ sourceId, isManager }: MarketSkillsProps) {
                     );
                   })}
                 </div>
+
+                {/* 所属分行筛选 */}
+                <div style={{ marginTop: 24, marginBottom: 12 }}>
+                  <Text strong style={{ fontSize: 14 }}>所属分行</Text>
+                  {selectedBbkId !== null && (
+                    <Button
+                      type="link"
+                      size="small"
+                      style={{ fontSize: 12, padding: "0 0 0 8px" }}
+                      onClick={() => setSelectedBbkId(null)}
+                    >
+                      清除
+                    </Button>
+                  )}
+                </div>
+                <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+                  <div
+                    onClick={() => setSelectedBbkId(null)}
+                    style={{
+                      display: "flex",
+                      alignItems: "center",
+                      justifyContent: "space-between",
+                      padding: "8px 12px",
+                      borderRadius: 6,
+                      cursor: "pointer",
+                      backgroundColor: selectedBbkId === null ? "#e6f7ff" : "transparent",
+                      color: selectedBbkId === null ? "#1890ff" : "inherit",
+                      transition: "all 0.15s ease",
+                    }}
+                  >
+                    <span>全部</span>
+                    <Tag style={{ margin: 0 }}>{skills.length}</Tag>
+                  </div>
+                  {BBK_ID_MAP.map((bbk) => {
+                    const isActive = selectedBbkId === bbk.value;
+                    const count = bbkCountMap.get(bbk.value) || 0;
+                    if (count === 0) return null;
+                    return (
+                      <div
+                        key={bbk.value}
+                        onClick={() => setSelectedBbkId(isActive ? null : bbk.value)}
+                        style={{
+                          display: "flex",
+                          alignItems: "center",
+                          justifyContent: "space-between",
+                          padding: "8px 12px",
+                          borderRadius: 6,
+                          cursor: "pointer",
+                          backgroundColor: isActive ? "#e6f7ff" : "transparent",
+                          color: isActive ? "#1890ff" : "inherit",
+                          transition: "all 0.15s ease",
+                        }}
+                      >
+                        <span>{bbk.label}</span>
+                        <Tag style={{ margin: 0 }}>{count}</Tag>
+                      </div>
+                    );
+                  })}
+                </div>
               </div>
 
               {/* 技能卡片列表 */}
@@ -540,9 +613,12 @@ export function MarketSkills({ sourceId, isManager }: MarketSkillsProps) {
                 <div style={{ marginBottom: 12 }}>
                   <Text type="secondary" style={{ fontSize: 12 }}>
                     {selectedCategory !== null
-                      ? `当前分类：${categories.find((c) => String(c.id) === String(selectedCategory))?.name || "未知"}`
-                      : "全部技能"}
-                    {" · 筛选结果 "}
+                      ? `分类：${categories.find((c) => String(c.id) === String(selectedCategory))?.name || "未知"}`
+                      : "分类：全部"}
+                    {selectedBbkId !== null
+                      ? ` · 分行：${BBK_ID_TO_NAME_MAP[selectedBbkId] || selectedBbkId}`
+                      : " · 分行：全部"}
+                    {" · 共 "}
                     {displayedSkills.length} 个
                   </Text>
                 </div>
@@ -579,53 +655,127 @@ export function MarketSkills({ sourceId, isManager }: MarketSkillsProps) {
             </>
           )
         ) : (
-          /* MCP 分支 */
-          <div style={{ flex: 1, padding: 16, overflow: "auto" }}>
-            {mcpDetailMode === "detail" && selectedMCP ? (
-              <MCPDetailDrawer
-                mcp={selectedMCP}
-                sourceId={sourceId}
-                onDistribute={isManager ? () => openMCPDistributeModal(selectedMCP) : undefined}
-                onRecall={isManager ? () => openMCPRecallModal(selectedMCP) : undefined}
-                onEdit={() => void openMCPEditModal(selectedMCP)}
-                onDelete={isManager ? () => confirmDeleteMCP(selectedMCP) : undefined}
-                onRefresh={refreshMCP}
-                canEdit={isManager}
-                isManager={isManager}
-              />
-            ) : (
-              <>
-                <div style={{ marginBottom: 12 }}>
-                  <Text type="secondary" style={{ fontSize: 12 }}>
-                    {"MCP 市场 · "}
-                    {displayedMCP.length} 个
-                  </Text>
-                </div>
-
-                {mcpLoading ? (
-                  <div style={{ display: "flex", justifyContent: "center", alignItems: "center", height: 200 }}>
-                    <Spin />
-                  </div>
-                ) : displayedMCP.length === 0 ? (
-                  <Empty description={searchQuery ? "未找到匹配的 MCP" : "暂无 MCP"} image={Empty.PRESENTED_IMAGE_SIMPLE} />
-                ) : (
-                  <div style={{ display: "grid", gridTemplateColumns: "repeat(2, 1fr)", gap: 16 }}>
-                    {displayedMCP.map((mcp) => (
-                      <MCPCard
-                        key={mcp.item_id}
-                        mcp={mcp}
-                        onOpenDetail={() => openMCPDetail(mcp.item_id)}
-                        onDistribute={isManager ? () => openMCPDistributeModal(mcp) : undefined}
-                        onEdit={() => void openMCPEditModal(mcp)}
-                        onDelete={isManager ? () => confirmDeleteMCP(mcp) : undefined}
-                        canEdit={isManager}
-                        isManager={isManager}
-                      />
-                    ))}
-                  </div>
+          /* MCP 分支 - 左侧侧边栏 + 右侧卡片列表 */
+          <div style={{ flex: 1, overflow: "hidden", display: "flex" }}>
+            {/* MCP 侧边栏 - 分行筛选 */}
+            <div
+              style={{
+                width: 200,
+                borderRight: "1px solid #f0f0f0",
+                padding: 16,
+                overflow: "auto",
+              }}
+            >
+              <div style={{ marginBottom: 12 }}>
+                <Text strong style={{ fontSize: 14 }}>所属分行</Text>
+                {selectedMcpBbkId !== null && (
+                  <Button
+                    type="link"
+                    size="small"
+                    style={{ fontSize: 12, padding: "0 0 0 8px" }}
+                    onClick={() => setSelectedMcpBbkId(null)}
+                  >
+                    清除
+                  </Button>
                 )}
-              </>
-            )}
+              </div>
+              <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+                <div
+                  onClick={() => setSelectedMcpBbkId(null)}
+                  style={{
+                    display: "flex",
+                    alignItems: "center",
+                    justifyContent: "space-between",
+                    padding: "8px 12px",
+                    borderRadius: 6,
+                    cursor: "pointer",
+                    backgroundColor: selectedMcpBbkId === null ? "#e6f7ff" : "transparent",
+                    color: selectedMcpBbkId === null ? "#1890ff" : "inherit",
+                    transition: "all 0.15s ease",
+                  }}
+                >
+                  <span>全部</span>
+                  <Tag style={{ margin: 0 }}>{mcpList.length}</Tag>
+                </div>
+                {BBK_ID_MAP.map((bbk) => {
+                  const isActive = selectedMcpBbkId === bbk.value;
+                  const count = mcpBbkCountMap.get(bbk.value) || 0;
+                  if (count === 0) return null;
+                  return (
+                    <div
+                      key={bbk.value}
+                      onClick={() => setSelectedMcpBbkId(isActive ? null : bbk.value)}
+                      style={{
+                        display: "flex",
+                        alignItems: "center",
+                        justifyContent: "space-between",
+                        padding: "8px 12px",
+                        borderRadius: 6,
+                        cursor: "pointer",
+                        backgroundColor: isActive ? "#e6f7ff" : "transparent",
+                        color: isActive ? "#1890ff" : "inherit",
+                        transition: "all 0.15s ease",
+                      }}
+                    >
+                      <span>{bbk.label}</span>
+                      <Tag style={{ margin: 0 }}>{count}</Tag>
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+
+            {/* MCP 卡片列表区域 */}
+            <div style={{ flex: 1, padding: 16, overflow: "auto" }}>
+              {mcpDetailMode === "detail" && selectedMCP ? (
+                <MCPDetailDrawer
+                  mcp={selectedMCP}
+                  sourceId={sourceId}
+                  onDistribute={isManager ? () => openMCPDistributeModal(selectedMCP) : undefined}
+                  onRecall={isManager ? () => openMCPRecallModal(selectedMCP) : undefined}
+                  onEdit={() => void openMCPEditModal(selectedMCP)}
+                  onDelete={isManager ? () => confirmDeleteMCP(selectedMCP) : undefined}
+                  onRefresh={refreshMCP}
+                  canEdit={isManager}
+                  isManager={isManager}
+                />
+              ) : (
+                <>
+                  <div style={{ marginBottom: 12 }}>
+                    <Text type="secondary" style={{ fontSize: 12 }}>
+                      {selectedMcpBbkId !== null
+                        ? `分行：${BBK_ID_TO_NAME_MAP[selectedMcpBbkId] || selectedMcpBbkId}`
+                        : "MCP 市场"}
+                      {" · 共 "}
+                      {displayedMCP.length} 个
+                    </Text>
+                  </div>
+
+                  {mcpLoading ? (
+                    <div style={{ display: "flex", justifyContent: "center", alignItems: "center", height: 200 }}>
+                      <Spin />
+                    </div>
+                  ) : displayedMCP.length === 0 ? (
+                    <Empty description={searchQuery ? "未找到匹配的 MCP" : "暂无 MCP"} image={Empty.PRESENTED_IMAGE_SIMPLE} />
+                  ) : (
+                    <div style={{ display: "grid", gridTemplateColumns: "repeat(2, 1fr)", gap: 16 }}>
+                      {displayedMCP.map((mcp) => (
+                        <MCPCard
+                          key={mcp.item_id}
+                          mcp={mcp}
+                          onOpenDetail={() => openMCPDetail(mcp.item_id)}
+                          onDistribute={isManager ? () => openMCPDistributeModal(mcp) : undefined}
+                          onEdit={() => void openMCPEditModal(mcp)}
+                          onDelete={isManager ? () => confirmDeleteMCP(mcp) : undefined}
+                          canEdit={isManager}
+                          isManager={isManager}
+                        />
+                      ))}
+                    </div>
+                  )}
+                </>
+              )}
+            </div>
           </div>
         )}
       </div>
