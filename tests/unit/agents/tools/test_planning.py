@@ -7,6 +7,7 @@ import inspect
 from pathlib import Path
 
 import pytest
+from agentscope.tool import Toolkit
 
 from swe.agents.tools.planning import (
     ask_plan_clarification,
@@ -136,6 +137,63 @@ async def test_ask_plan_clarification_accepts_string_fields() -> None:
             "required": False,
         },
     ]
+
+
+@pytest.mark.asyncio
+async def test_ask_plan_clarification_accepts_model_generated_choice_payload_strings() -> (
+    None
+):
+    response = await ask_plan_clarification(
+        prompt="升学路径因当前阶段和目标而异。请告诉我你的具体情况：",
+        kind="clarification",
+        options=(
+            '[{"label": "初中升高中", "description": "中考准备、志愿填报、择校等"}, '
+            '{"label": "高中升本科", "description": "高考、强基计划、综合评价、留学等"}, '
+            '{"label": "本科升研究生", "description": "考研、保研、留学申请等"}, '
+            '{"label": "其他/境外升学", "description": "专升本、博士申请、境外特定国家升学等"}]'
+        ),
+        allow_custom_response=True,
+    )
+
+    card = response.metadata["plan_interaction_card"]
+    assert card["kind"] == "single_choice"
+    assert card["allow_custom_response"] is True
+    assert card["options"] == [
+        {
+            "id": "初中升高中",
+            "label": "初中升高中",
+            "description": "中考准备、志愿填报、择校等",
+        },
+        {
+            "id": "高中升本科",
+            "label": "高中升本科",
+            "description": "高考、强基计划、综合评价、留学等",
+        },
+        {
+            "id": "本科升研究生",
+            "label": "本科升研究生",
+            "description": "考研、保研、留学申请等",
+        },
+        {
+            "id": "其他/境外升学",
+            "label": "其他/境外升学",
+            "description": "专升本、博士申请、境外特定国家升学等",
+        },
+    ]
+
+
+def test_ask_plan_clarification_tool_schema_guides_choice_kind() -> None:
+    toolkit = Toolkit()
+    toolkit.register_tool_function(ask_plan_clarification)
+
+    schema = toolkit.tools["ask_plan_clarification"].json_schema
+    properties = schema["function"]["parameters"]["properties"]
+
+    assert properties["kind"] == {
+        "enum": ["single_choice", "multi_choice", "text_input", "form"],
+        "type": "string",
+    }
+    assert {"type": "string"} in properties["options"]["anyOf"]
 
 
 @pytest.mark.asyncio

@@ -9,26 +9,34 @@
 - 模型调用 `ask_plan_clarification` 的表单模式时工具执行失败
 - 工具入参中的 `fields` 是 JSON 字符串，而不是原生数组
 - 常见报错为：`Error: 'str' object has no attribute 'get'`
+- 模型调用选择模式时把 `options` 作为 JSON 字符串传入，前端表现为每个字符都渲染成一个选项
+- 模型把 `kind` 传成 `clarification`、`choice` 等宽泛描述，后端报 `PlanClarificationCard.kind` 枚举校验失败
 
 ### 典型原因
 
 - 模型把表单字段数组再次序列化成 JSON 字符串
-- 计划澄清工具直接遍历字符串，导致单个字符进入字段归一化逻辑
-- 部分模型还会使用 `key` 代替 `id`，并省略可从 `options` 推断的字段类型
+- 模型把选择项数组再次序列化成 JSON 字符串
+- 计划澄清工具直接遍历字符串，导致单个字符进入字段或选项归一化逻辑
+- 部分模型还会使用 `key` 代替 `id`，省略可从 `options` 推断的字段类型，或只给选项提供 `label`/`description`
+- 工具 schema 如果把 `kind` 暴露为任意字符串，模型容易把工具用途描述误传成卡片协议枚举
 
 ### 第一落点
 
 - [src/swe/agents/tools/planning.py](../../src/swe/agents/tools/planning.py)
 - 重点看 `_normalize_form_fields()` 是否在字段归一化前解析 JSON 字符串并验证对象数组结构
+- 重点看 `_coerce_json_array()` 是否同时兼容 `fields` 和 `options` 的 JSON 字符串数组
 - 重点看 `_normalize_form_field()` 是否兼容 `key`，以及缺失 `type` 时是否按候选项推断类型
+- 重点看 `_normalize_choice_option()` 是否兼容 label-only 选项并保留 `description`
+- 重点看 `ask_plan_clarification()` 的 `kind` 注解是否向工具 schema 暴露受控枚举
 - 对应回归测试：
   - [tests/unit/agents/tools/test_planning.py](../../tests/unit/agents/tools/test_planning.py)
 
 ### 第一阶段处理
 
-- 先记录工具实际入参，确认 `fields` 是原生数组还是 JSON 字符串
-- JSON 字符串只允许解析为对象数组，非法 JSON 或非对象元素应返回明确参数错误
+- 先记录工具实际入参，确认 `fields` 和 `options` 是原生数组还是 JSON 字符串
+- JSON 字符串只允许解析为数组，非法 JSON 或非对象字段应返回明确参数错误
 - 无候选项的缺省字段归一为 `text`，有候选项的缺省字段归一为 `select`
+- 常见宽泛 `kind` 应在工具入口归一到 `single_choice`、`multi_choice`、`text_input` 或 `form`，不要放宽 `PlanClarificationCard` 领域模型
 
 ## MCP 注册时报 App not Subscribe This MCP Server
 
