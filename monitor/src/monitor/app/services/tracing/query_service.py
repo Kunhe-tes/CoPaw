@@ -487,6 +487,55 @@ class TracingQueryService:  # pylint: disable=too-many-public-methods
             ORDER BY value DESC
             LIMIT 5
         """
+        if source_id == "all":
+            customer_query = f"""
+                SELECT CASE WHEN bbk_id = 'V00' THEN '100' ELSE bbk_id END AS bbk_id,
+                       COUNT(
+                           DISTINCT CONCAT(
+                               COALESCE(cron_task_id, ''),
+                               '|',
+                               COALESCE(customer_id, '')
+                           )
+                       ) AS value
+                FROM swe_html_preview_click_events
+                WHERE clicked_at >= %s AND clicked_at < %s
+                  AND source_id NOT IN ({exclude_placeholders})
+                  AND bbk_id IS NOT NULL AND bbk_id != ''{bbk_filter_sql}
+                  AND button_type = 'plan'
+                  AND cron_task_id IS NOT NULL
+                  AND customer_id IS NOT NULL
+                GROUP BY CASE WHEN bbk_id = 'V00' THEN '100' ELSE bbk_id END
+                ORDER BY value DESC
+                LIMIT 5
+            """
+            customer_params = (
+                start_date,
+                end_date,
+                *EXCLUDED_SOURCE_IDS,
+                *bbk_params,
+            )
+        else:
+            customer_query = f"""
+                SELECT CASE WHEN bbk_id = 'V00' THEN '100' ELSE bbk_id END AS bbk_id,
+                       COUNT(
+                           DISTINCT CONCAT(
+                               COALESCE(cron_task_id, ''),
+                               '|',
+                               COALESCE(customer_id, '')
+                           )
+                       ) AS value
+                FROM swe_html_preview_click_events
+                WHERE source_id = %s
+                  AND clicked_at >= %s AND clicked_at < %s
+                  AND bbk_id IS NOT NULL AND bbk_id != ''{bbk_filter_sql}
+                  AND button_type = 'plan'
+                  AND cron_task_id IS NOT NULL
+                  AND customer_id IS NOT NULL
+                GROUP BY CASE WHEN bbk_id = 'V00' THEN '100' ELSE bbk_id END
+                ORDER BY value DESC
+                LIMIT 5
+            """
+            customer_params = (source_id, start_date, end_date, *bbk_params)
 
         # 定时任务分行统计查询
         cron_bbk_filter_sql, cron_bbk_params = build_cron_bbk_in_filter(
@@ -546,6 +595,10 @@ class TracingQueryService:  # pylint: disable=too-many-public-methods
         sessions_rows = await self._db.fetch_all(sessions_query, trace_params)
         tokens_rows = await self._db.fetch_all(tokens_query, trace_params)
         skills_rows = await self._db.fetch_all(skills_query, span_params)
+        customer_rows = await self._db.fetch_all(
+            customer_query,
+            customer_params,
+        )
         cron_rows = await self._db.fetch_all(cron_query, cron_params)
 
         def build_branch_items(rows: list) -> list[BranchMetricItem]:
@@ -572,6 +625,7 @@ class TracingQueryService:  # pylint: disable=too-many-public-methods
             tokens=build_branch_items(tokens_rows),
             skills=build_branch_items(skills_rows),
             cron_tasks=build_branch_items(cron_rows),
+            customers=build_branch_items(customer_rows),
         )
 
     async def get_growth_stats(

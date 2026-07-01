@@ -90,6 +90,7 @@ describe("BusinessOverview trend chart", () => {
         tokens: [],
         skills: [],
         cron_tasks: [],
+        customers: [{ bbk_id: "100", bbk_name: "总行", value: 30, percent: 100 }],
       },
     });
     tracingApiMock.getGrowthStats.mockResolvedValue({

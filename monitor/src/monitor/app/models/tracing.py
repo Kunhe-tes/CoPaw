@@ -299,6 +299,7 @@ class OverviewBranchBreakdown(BaseModel):
     tokens: list[BranchMetricItem] = Field(default_factory=list)
     skills: list[BranchMetricItem] = Field(default_factory=list)
     cron_tasks: list[BranchMetricItem] = Field(default_factory=list)
+    customers: list[BranchMetricItem] = Field(default_factory=list)
 
 
 class TaskStatusBreakdown(BaseModel):

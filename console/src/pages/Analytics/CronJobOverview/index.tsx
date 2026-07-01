@@ -57,6 +57,11 @@ const quickTooltipProps = {
   mouseLeaveDelay: 0,
 } as const;
 
+const DRILL_DOWN_TABLE_SCROLL = {
+  x: "max-content",
+  y: 300,
+} as const;
+
 const SKILL_NAME_MAP: Record<string, string> = {
   insurance_mkt: "保险营销客户分析技能",
   deposit_scale_growth_skill: "存款规模增长与产品配置技能",
@@ -1423,6 +1428,8 @@ export default function CronJobOverviewPage() {
                 loading={taskSkillsLoading}
                 size="small"
                 pagination={false}
+                sticky
+                scroll={DRILL_DOWN_TABLE_SCROLL}
                 onRow={(record) => ({
                   onClick: () => handleSelectTaskSkill(record.skill_name),
                   style: {
@@ -1471,6 +1478,8 @@ export default function CronJobOverviewPage() {
                 loading={taskManagersLoading}
                 size="small"
                 pagination={false}
+                sticky
+                scroll={DRILL_DOWN_TABLE_SCROLL}
                 onRow={(record) => ({
                   onClick: () => handleSelectTaskManager(record.user_id),
                   style: {
@@ -1514,6 +1523,8 @@ export default function CronJobOverviewPage() {
                 loading={taskCustomersLoading}
                 size="small"
                 pagination={false}
+                sticky
+                scroll={DRILL_DOWN_TABLE_SCROLL}
                 columns={[
                   { title: "客户名称", dataIndex: "customer_name", key: "customer_name", width: 90, align: "center" },
                   { title: "客户ID", dataIndex: "customer_id", key: "customer_id", width: 80, align: "center" },
@@ -1613,6 +1624,8 @@ export default function CronJobOverviewPage() {
                   loading={modalSkillsLoading}
                   size="small"
                   pagination={false}
+                  sticky
+                  scroll={DRILL_DOWN_TABLE_SCROLL}
                   onRow={(record) => ({
                     onClick: () => handleSelectModalSkill(record.skill_name),
                     style: {
@@ -1661,6 +1674,8 @@ export default function CronJobOverviewPage() {
                   loading={modalCustomersLoading}
                   size="small"
                   pagination={{ pageSize: 5 }}
+                  sticky
+                  scroll={DRILL_DOWN_TABLE_SCROLL}
                   columns={[
                     { title: "客户名称", dataIndex: "customer_name", key: "customer_name", width: 90, align: "center" },
                     { title: "客户ID", dataIndex: "customer_id", key: "customer_id", width: 80, align: "center" },
@@ -1730,6 +1745,8 @@ export default function CronJobOverviewPage() {
                 loading={managerSummaryLoading}
                 size="small"
                 pagination={false}
+                sticky
+                scroll={DRILL_DOWN_TABLE_SCROLL}
                 rowClassName={styles.drillHoverRow}
                 columns={[
                   {

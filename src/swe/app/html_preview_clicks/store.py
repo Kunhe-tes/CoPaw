@@ -2,7 +2,7 @@
 """HTML 预览点击统计数据库存储。"""
 
 import json
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from typing import Any, Optional
 
 from .models import (
@@ -17,6 +17,8 @@ from .models import (
 )
 
 CUSTOMER_SUMMARY_SCAN_LIMIT = 10000
+DB_TIME_OFFSET_HOURS = 8
+DB_TIMEZONE = timezone(timedelta(hours=DB_TIME_OFFSET_HOURS))
 
 
 class HtmlPreviewClickStore:
@@ -38,6 +40,15 @@ class HtmlPreviewClickStore:
             return None
         stripped = value.strip()
         return stripped or None
+
+    @staticmethod
+    def _shift_to_db_timezone(value: Optional[datetime]) -> datetime:
+        """把入库时间统一转换为数据库使用的东八区时间。"""
+        if value is None:
+            return datetime.now()
+        if value.tzinfo is None:
+            return value + timedelta(hours=DB_TIME_OFFSET_HOURS)
+        return value.astimezone(DB_TIMEZONE).replace(tzinfo=None)
 
     @classmethod
     def _list_key(cls, file_url: str, list_key: Optional[str]) -> str:
@@ -307,7 +318,7 @@ class HtmlPreviewClickStore:
                 normalized["customer_id"],
                 normalized["customer_name"],
                 self._encode_customer_info(event.customer_info),
-                event.clicked_at or datetime.now(),
+                self._shift_to_db_timezone(event.clicked_at),
             ),
         )
 
@@ -325,7 +336,7 @@ class HtmlPreviewClickStore:
             snapshot.list_name,
             snapshot.file_url,
         )
-        snapshot_at = snapshot.snapshot_at or datetime.now()
+        snapshot_at = self._shift_to_db_timezone(snapshot.snapshot_at)
         delete_query = """
             DELETE FROM swe_html_preview_list_snapshots
             WHERE source_id <=> %s AND bbk_id <=> %s AND list_key = %s
