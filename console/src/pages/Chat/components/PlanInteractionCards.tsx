@@ -30,12 +30,9 @@ import { useContextSelector } from "use-context-selector";
 const PLAN_CLARIFICATION_STORAGE_KEY = "copaw_submitted_plan_clarifications";
 const PLAN_CLARIFICATION_DISMISSAL_STORAGE_KEY =
   "copaw_dismissed_plan_clarifications";
-const PLAN_CLARIFICATION_SEEN_STORAGE_KEY =
-  "swe_seen_plan_clarification_instances";
 const PLAN_REVIEW_STORAGE_KEY = "copaw_submitted_plan_reviews";
 const PLAN_INTERACTION_CARD_CODE = "PlanInteraction";
 const RUNTIME_RESPONSE_CARD_CODE = "AgentScopeRuntimeResponseCard";
-const livePlanClarificationInstanceKeys = new Set<string>();
 
 function loadSubmittedInteractionKeys(storageKey: string): Set<string> {
   try {
@@ -63,32 +60,6 @@ function storeSubmittedInteractionKey(storageKey: string, key: string): void {
   } catch {
     return;
   }
-}
-
-function createPlanClarificationSeenKey(
-  sessionId: string | undefined,
-  stableSourceKey: string | null,
-  fallbackKey: string,
-): string {
-  return JSON.stringify({
-    session_id: sessionId || "unknown",
-    clarification:
-      stableSourceKey ||
-      JSON.stringify({
-        source: "instance",
-        instance_key: fallbackKey,
-      }),
-  });
-}
-
-function isSeenPlanClarificationInstance(
-  sessionId: string | undefined,
-  stableSourceKey: string | null,
-  fallbackKey: string,
-): boolean {
-  return loadSubmittedInteractionKeys(
-    PLAN_CLARIFICATION_SEEN_STORAGE_KEY,
-  ).has(createPlanClarificationSeenKey(sessionId, stableSourceKey, fallbackKey));
 }
 
 function loadSubmittedPlanIds(): Set<string> {
@@ -419,15 +390,6 @@ export function PlanClarificationCard({
   const resolvedSessionId =
     currentSessionId ||
     (window as Window & { currentSessionId?: string }).currentSessionId;
-  const seenStorageKey = useMemo(
-    () =>
-      createPlanClarificationSeenKey(
-        resolvedSessionId,
-        cardSourceKey || null,
-        cardInstanceKey || createPlanClarificationFingerprint(data),
-      ),
-    [cardInstanceKey, cardSourceKey, data, resolvedSessionId],
-  );
   const submissionKey = useMemo(
     () =>
       createPlanClarificationSubmissionKey(
@@ -552,17 +514,6 @@ export function PlanClarificationCard({
     setFocusedIndex(0);
     setActiveStep(0);
   }, [dismissalKey, interactionResetKey, submissionKey]);
-
-  useEffect(() => {
-    storeSubmittedInteractionKey(
-      PLAN_CLARIFICATION_SEEN_STORAGE_KEY,
-      seenStorageKey,
-    );
-    livePlanClarificationInstanceKeys.add(seenStorageKey);
-    return () => {
-      livePlanClarificationInstanceKeys.delete(seenStorageKey);
-    };
-  }, [seenStorageKey]);
 
   useEffect(() => {
     if (submitted || dismissed || !showChoiceRows) return;
@@ -903,30 +854,12 @@ export function PlanClarificationCard({
 }
 
 export function ActivePlanClarificationCard() {
-  const currentSessionId = useContextSelector(
-    ChatAnywhereSessionsContext,
-    (value) => value.currentSessionId,
-  );
-  const clarification = useContextSelector(ChatAnywhereMessagesContext, (value) =>
-    findLatestPlanClarificationCard(value.messages || []),
+  const clarification = useContextSelector(
+    ChatAnywhereMessagesContext,
+    (value) => findLatestPlanClarificationCard(value.messages || []),
   );
 
   if (!clarification) {
-    return null;
-  }
-  const seenKey = createPlanClarificationSeenKey(
-    currentSessionId || undefined,
-    clarification.sourceKey,
-    clarification.instanceKey,
-  );
-  if (
-    !livePlanClarificationInstanceKeys.has(seenKey) &&
-    isSeenPlanClarificationInstance(
-      currentSessionId || undefined,
-      clarification.sourceKey,
-      clarification.instanceKey,
-    )
-  ) {
     return null;
   }
   return (

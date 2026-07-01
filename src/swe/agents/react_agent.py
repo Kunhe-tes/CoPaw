@@ -80,6 +80,14 @@ _ACCEPTED_PLAN_SOURCE_META_KEY = "accepted_plan_source"
 _ACCEPTED_PLAN_SERVER_SOURCE = "server_plan_store"
 _INTERNAL_ACCEPTED_PLAN_TOOL_NAME = "accepted_plan_context"
 _INTERNAL_ACCEPTED_PLAN_TOOL_ID_KEY = "_accepted_plan_tool_call_id"
+_PLAN_MODE_CLARIFICATION_INSTRUCTION = (
+    "[Plan Mode Clarification Requirement]\n"
+    "use ask_plan_clarification tool，Interview "
+    "me relentlessly about every aspect of this "
+    "plan until we reach a shared understanding. "
+    "Walk down each branch of the design tree, "
+    "resolving dependencies between decisions one-by-one."
+)
 _PLAN_MODE_ALLOWED_TOOLS = frozenset(
     {
         "execute_shell_command",
@@ -750,6 +758,10 @@ class SWEAgent(ToolGuardMixin, ReActAgent):
                 "plan_mode_enabled",
             ),
         )
+        if plan_mode_enabled:
+            sys_prompt = (
+                sys_prompt + "\n\n" + _PLAN_MODE_CLARIFICATION_INSTRUCTION
+            )
         if not plan_mode_enabled and is_chat_task_progress_enabled(
             get_current_source_system_config(),
         ):

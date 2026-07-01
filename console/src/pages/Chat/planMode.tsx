@@ -65,10 +65,11 @@ export function getPlanModeForRequest(enabled: boolean): ChatPlanMode {
 
 export function resolveActivePlanModeSession<
   TSession extends PlanModeSessionLike,
->(sessions: TSession[], ids: Array<string | null | undefined>): TSession | null {
-  const idSet = new Set(
-    ids.filter((value): value is string => Boolean(value)),
-  );
+>(
+  sessions: TSession[],
+  ids: Array<string | null | undefined>,
+): TSession | null {
+  const idSet = new Set(ids.filter((value): value is string => Boolean(value)));
 
   if (idSet.size === 0) {
     return null;
@@ -122,7 +123,7 @@ export async function preparePlanModeSubmit(
   }
 
   if (!planCommandText) {
-    options.setPlanModeEnabled?.(true);
+    await options.persistPlanMode(true);
     return {
       shouldSubmit: false,
       clearInput: true,

@@ -133,6 +133,53 @@ class TestReactAgentTaskProgressPrompt:
         assert "Task Progress Requirement" not in prompt
         assert "update_task_progress" not in prompt
 
+    def test_build_sys_prompt_adds_plan_mode_clarification_instruction(
+        self,
+        monkeypatch,
+    ):
+        """Plan Mode 应默认要求用澄清工具深挖计划细节。"""
+        monkeypatch.setattr(
+            react_agent_module,
+            "build_system_prompt_from_working_dir",
+            lambda **_: "base prompt",
+        )
+        monkeypatch.setattr(
+            react_agent_module,
+            "build_multimodal_hint",
+            lambda: "",
+        )
+        agent = self._build_agent()
+        agent._request_context = {"plan_mode_enabled": True}
+
+        with bind_source_system_config(_build_effective_config(False)):
+            prompt = SWEAgent._build_sys_prompt(agent)
+
+        assert "use ask_plan_clarification tool" in prompt
+        assert "Walk down each branch of the design tree" in prompt
+
+    def test_build_sys_prompt_omits_plan_mode_instruction_in_normal_mode(
+        self,
+        monkeypatch,
+    ):
+        """普通模式不应携带 Plan Mode 的强追问指令。"""
+        monkeypatch.setattr(
+            react_agent_module,
+            "build_system_prompt_from_working_dir",
+            lambda **_: "base prompt",
+        )
+        monkeypatch.setattr(
+            react_agent_module,
+            "build_multimodal_hint",
+            lambda: "",
+        )
+        agent = self._build_agent()
+
+        with bind_source_system_config(_build_effective_config(False)):
+            prompt = SWEAgent._build_sys_prompt(agent)
+
+        assert "use ask_plan_clarification tool" not in prompt
+        assert "Walk down each branch of the design tree" not in prompt
+
     def test_build_sys_prompt_appends_env_context_after_base_and_hint(
         self,
         monkeypatch,

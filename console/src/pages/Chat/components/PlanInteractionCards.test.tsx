@@ -71,9 +71,7 @@ function renderActiveClarification(
   messages: IAgentScopeRuntimeWebUIMessage<unknown>[],
 ) {
   return render(
-    <ChatAnywhereSessionsContext.Provider
-      value={createSessionContextValue()}
-    >
+    <ChatAnywhereSessionsContext.Provider value={createSessionContextValue()}>
       <ChatAnywhereMessagesContext.Provider
         value={{
           messages,
@@ -669,9 +667,7 @@ describe("Plan interaction cards", () => {
     ];
 
     rerender(
-      <ChatAnywhereSessionsContext.Provider
-        value={createSessionContextValue()}
-      >
+      <ChatAnywhereSessionsContext.Provider value={createSessionContextValue()}>
         <ChatAnywhereMessagesContext.Provider
           value={{
             messages: secondMessages,
@@ -765,9 +761,7 @@ describe("Plan interaction cards", () => {
     ];
 
     rerender(
-      <ChatAnywhereSessionsContext.Provider
-        value={createSessionContextValue()}
-      >
+      <ChatAnywhereSessionsContext.Provider value={createSessionContextValue()}>
         <ChatAnywhereMessagesContext.Provider
           value={{
             messages: reloadedMessages,
@@ -858,9 +852,7 @@ describe("Plan interaction cards", () => {
     ];
 
     rerender(
-      <ChatAnywhereSessionsContext.Provider
-        value={createSessionContextValue()}
-      >
+      <ChatAnywhereSessionsContext.Provider value={createSessionContextValue()}>
         <ChatAnywhereMessagesContext.Provider
           value={{
             messages: secondMessages,
@@ -876,25 +868,7 @@ describe("Plan interaction cards", () => {
     expect(screen.getByText("Pick scope")).toBeInTheDocument();
   });
 
-  it("stores a seen clarification instance when it first renders", async () => {
-    renderActiveClarification([
-      createClarificationMessage({
-        messageId: "message-1",
-        originalId: "assistant-stable-1",
-        traceId: "trace-stable-1",
-      }),
-    ]);
-
-    await waitFor(() =>
-      expect(screen.getByRole("region", { name: "Pick scope" })).toBeVisible(),
-    );
-    const seenStorage = JSON.parse(
-      sessionStorage.getItem("swe_seen_plan_clarification_instances") || "[]",
-    ) as string[];
-    expect(seenStorage.join(" ")).toContain("assistant-stable-1");
-  });
-
-  it("does not replay a seen clarification after session restore", async () => {
+  it("keeps an unsubmitted clarification visible after session restore", async () => {
     const messages = [
       createClarificationMessage({
         messageId: "message-1",
@@ -910,7 +884,9 @@ describe("Plan interaction cards", () => {
     unmount();
     renderActiveClarification(messages);
 
-    expect(screen.queryByText("Pick scope")).not.toBeInTheDocument();
+    await waitFor(() =>
+      expect(screen.getByRole("region", { name: "Pick scope" })).toBeVisible(),
+    );
   });
 
   it("renders a repeated clarification from a later assistant message", async () => {
@@ -985,7 +961,9 @@ describe("Plan interaction cards", () => {
         }}
       />,
     );
-    expect(screen.queryByTestId("generic-operate-card")).not.toBeInTheDocument();
+    expect(
+      screen.queryByTestId("generic-operate-card"),
+    ).not.toBeInTheDocument();
     expect(screen.getByRole("region", { name: "Fix bug" })).toHaveAttribute(
       "data-plan-review-card",
       "true",

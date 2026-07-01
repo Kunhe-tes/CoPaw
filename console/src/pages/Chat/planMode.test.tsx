@@ -42,11 +42,7 @@ describe("Plan Mode frontend helpers", () => {
     const onChange = vi.fn();
 
     render(
-      <PlanModeMenuItem
-        enabled={false}
-        label="计划模式"
-        onChange={onChange}
-      />,
+      <PlanModeMenuItem enabled={false} label="计划模式" onChange={onChange} />,
     );
 
     fireEvent.click(screen.getByRole("switch", { name: "计划模式" }));
@@ -91,11 +87,7 @@ describe("Plan Mode frontend helpers", () => {
     ).not.toBeInTheDocument();
 
     rerender(
-      <ActivePlanModeButton
-        enabled
-        label="计划模式"
-        onDisable={onDisable}
-      />,
+      <ActivePlanModeButton enabled label="计划模式" onDisable={onDisable} />,
     );
 
     fireEvent.click(screen.getByRole("button", { name: "计划模式" }));
@@ -129,7 +121,7 @@ describe("Plan Mode frontend helpers", () => {
     });
   });
 
-  it("turns /plan alone into a state change without a request", async () => {
+  it("turns /plan alone into a persisted state change without a request", async () => {
     const persistPlanMode = vi.fn(async () => {});
     const setPlanModeEnabled = vi.fn();
 
@@ -145,8 +137,8 @@ describe("Plan Mode frontend helpers", () => {
       },
     );
 
-    expect(persistPlanMode).not.toHaveBeenCalled();
-    expect(setPlanModeEnabled).toHaveBeenCalledWith(true);
+    expect(persistPlanMode).toHaveBeenCalledWith(true);
+    expect(setPlanModeEnabled).not.toHaveBeenCalled();
     expect(result).toEqual({
       shouldSubmit: false,
       clearInput: true,
