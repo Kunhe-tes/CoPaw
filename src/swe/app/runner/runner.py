@@ -2278,6 +2278,7 @@ class AgentRunner(Runner):
         hook_overlay: HookSessionOverlay,
         auth_token: str | None,
         approved_tool_call: dict[str, Any] | None,
+        current_user_text: str = "",
     ) -> SWEAgent:
         """创建 SWEAgent，并注入本轮请求上下文。"""
         request_enable_subagents = getattr(
@@ -2308,6 +2309,7 @@ class AgentRunner(Runner):
             "user_name": _request_user_name(request),
             "bbk_id": _request_bbk_id(request),
             "trace_id": getattr(request, "trace_id", None),
+            "current_user_text": current_user_text,
             "transcript_path": (
                 self.session._get_save_path(session_id, user_id)
                 if hasattr(self.session, "_get_save_path")
@@ -2726,6 +2728,7 @@ class AgentRunner(Runner):
                 hook_overlay=hook_overlay,
                 auth_token=auth_token,
                 approved_tool_call=preflight.approved_tool_call,
+                current_user_text=query or _get_last_user_text(msgs) or "",
             )
             await agent.register_mcp_clients()
             agent.set_console_output_enabled(enabled=False)

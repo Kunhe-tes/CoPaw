@@ -187,9 +187,11 @@ def test_create_agent_for_query_enables_subagents_when_request_opts_in(
         hook_overlay=HookSessionOverlay(),
         auth_token=None,
         approved_tool_call=None,
+        current_user_text="请用子代理分析",
     )
 
     assert captured["request_context"]["enable_subagents"] is True
+    assert captured["request_context"]["current_user_text"] == "请用子代理分析"
 
 
 @pytest.mark.asyncio
