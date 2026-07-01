@@ -18,6 +18,7 @@ from ...app.subagents import (
     BackgroundSubAgentSupervisor,
     BackgroundSubAgentWaitSnapshot,
     DelegationSpec,
+    PermissionPolicy,
 )
 from ...app.subagents.models import BudgetConfig, ScopeConfig
 from ...config.config import AgentProfileConfig
@@ -133,6 +134,9 @@ def create_background_subagent_tools(
                 spec=spec,
                 parent_agent_config=parent_agent_config,
                 workspace_dir=workspace_dir,
+                parent_policy=_parent_policy_from_config(
+                    parent_agent_config,
+                ),
                 request_context=request_context,
             )
         except KeyError:
@@ -158,25 +162,45 @@ def create_background_subagent_tools(
         include_details: bool = False,
     ) -> ToolResponse:
         """Fetch one Background SubAgent Run in the current scope."""
-        record = await supervisor.get(
-            tool_scope,
-            run_id,
-        )
+        try:
+            record = await supervisor.get(
+                tool_scope,
+                run_id,
+            )
+        except ValueError:
+            return _json_response({"status": "not_found", "run_id": run_id})
         if record is None:
             return _json_response({"status": "not_found", "run_id": run_id})
-        return _json_response(_compact_record(record, include_details))
+        return _json_response(
+            _compact_record(
+                record,
+                include_details,
+                manageable=_is_manageable(supervisor, tool_scope, run_id),
+                run_store_dir=tool_scope.run_store_dir,
+            ),
+        )
 
     async def cancel_subagent(run_id: str) -> ToolResponse:
         """Cancel one active Background SubAgent Run in the current scope."""
-        result = await supervisor.cancel(
-            tool_scope,
-            run_id,
-        )
+        try:
+            result = await supervisor.cancel(
+                tool_scope,
+                run_id,
+            )
+        except ValueError:
+            return _json_response({"status": "not_found", "run_id": run_id})
         if result is None:
             return _json_response({"status": "not_found", "run_id": run_id})
         if isinstance(result, BackgroundSubAgentNotManageable):
             return _json_response(result.model_dump(mode="json"))
-        return _json_response(_compact_record(result, include_details=False))
+        return _json_response(
+            _compact_record(
+                result,
+                include_details=False,
+                manageable=False,
+                run_store_dir=tool_scope.run_store_dir,
+            ),
+        )
 
     return {
         "start_subagent": start_subagent,
@@ -202,7 +226,12 @@ def _serialize_start_result(
 ) -> dict[str, Any]:
     if isinstance(result, BackgroundSubAgentStartBlocked):
         return result.model_dump(mode="json")
-    return _compact_record(result, include_details=False)
+    return _compact_record(
+        result,
+        include_details=False,
+        manageable=False,
+        run_store_dir=None,
+    )
 
 
 def _serialize_wait_snapshot(
@@ -224,6 +253,8 @@ def _serialize_wait_snapshot(
 def _compact_record(
     record: Any,
     include_details: bool,
+    manageable: bool = False,
+    run_store_dir: Path | None = None,
 ) -> dict[str, Any]:
     payload = {
         "run_id": record.run_id,
@@ -236,13 +267,64 @@ def _compact_record(
         "result": _dump_json_value(getattr(record, "result", None)),
         "errors": _dump_json_value(getattr(record, "errors", [])),
         "worker": _dump_json_value(getattr(record, "worker", None)),
+        "manageable": manageable,
     }
+    stderr_tail = _stderr_tail(record, run_store_dir)
+    if stderr_tail is not None:
+        payload["stderr_tail"] = stderr_tail
     if include_details:
         payload["delegation_spec"] = record.spec.model_dump(mode="json")
         payload["effective_policy"] = record.effective_policy.model_dump(
             mode="json",
         )
     return payload
+
+
+def _parent_policy_from_config(parent_agent_config: Any) -> PermissionPolicy:
+    """Build parent readonly policy from enabled parent built-in tools."""
+    readonly = PermissionPolicy.readonly()
+    readonly_tools = set(readonly.tools.allow)
+    tools_config = getattr(parent_agent_config, "tools", None)
+    builtin_tools = getattr(tools_config, "builtin_tools", None)
+    if not isinstance(builtin_tools, dict):
+        return readonly
+    enabled = {
+        name
+        for name, config in builtin_tools.items()
+        if name in readonly_tools and getattr(config, "enabled", True)
+    }
+    return PermissionPolicy.readonly(
+        allow_tools=sorted(enabled),
+        deny_tools=sorted(readonly_tools - enabled),
+    )
+
+
+def _is_manageable(
+    supervisor: BackgroundSubAgentSupervisor,
+    scope: BackgroundSubAgentScope,
+    run_id: str,
+) -> bool:
+    checker = getattr(supervisor, "is_manageable", None)
+    if checker is None:
+        return False
+    return bool(checker(scope, run_id))
+
+
+def _stderr_tail(record: Any, run_store_dir: Path | None) -> str | None:
+    if getattr(record, "status", "") not in {"failed", "cancelled"}:
+        return None
+    worker = getattr(record, "worker", None)
+    stderr_log_path = getattr(worker, "stderr_log_path", None)
+    if not stderr_log_path or run_store_dir is None:
+        return None
+    path = Path(stderr_log_path)
+    try:
+        path.resolve().relative_to(run_store_dir.resolve())
+    except (OSError, ValueError):
+        return None
+    if not path.exists():
+        return None
+    return path.read_text(encoding="utf-8", errors="replace")[-4096:]
 
 
 def _dump_json_value(value: Any) -> Any:

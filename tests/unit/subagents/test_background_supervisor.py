@@ -136,6 +136,9 @@ async def test_wait_lazy_reaps_worker_without_result(tmp_path):
     assert snapshot.terminal_runs[0].status == "failed"
     assert record is not None
     assert record.status == "failed"
+    assert record.worker is not None
+    assert record.worker.exit_code == 1
+    assert record.errors[-1].code == "worker_exited_without_result"
 
 
 @pytest.mark.asyncio
@@ -170,3 +173,25 @@ async def test_cancel_terminates_process_group(
 
     assert response.status == "cancelled"
     assert signals == [signal.SIGTERM]
+
+
+@pytest.mark.asyncio
+async def test_start_failure_uses_structured_worker_start_error(tmp_path):
+    def _raising_popen(command, **kwargs):
+        raise OSError("no worker")
+
+    supervisor = BackgroundSubAgentSupervisor(
+        max_running_per_scope=1,
+        popen_factory=_raising_popen,
+    )
+    scope = _scope(tmp_path)
+
+    response = await supervisor.start(
+        scope=scope,
+        spec=_spec(),
+        parent_agent_config=_agent_config(tmp_path),
+        workspace_dir=tmp_path,
+    )
+
+    assert response.status == "failed"
+    assert response.errors[-1].code == "worker_start_failed"

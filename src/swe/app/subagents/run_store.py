@@ -309,6 +309,7 @@ class PerRunSubAgentRunStore:
         message: str,
         *,
         result: AgentResult | None = None,
+        error_code: str = "runtime_error",
     ) -> BackgroundSubAgentRunRecord:
         """Store a terminal background failure."""
         record = self._require(run_id)
@@ -320,7 +321,7 @@ class PerRunSubAgentRunStore:
             if result and result.errors
             else [
                 AgentError(
-                    code="runtime_error",
+                    code=error_code,
                     message=message,
                     recoverable=False,
                 ),
@@ -337,6 +338,31 @@ class PerRunSubAgentRunStore:
         )
         self._write(failed)
         return failed
+
+    async def mark_worker_exited(
+        self,
+        run_id: str,
+        *,
+        exit_code: int | None,
+    ) -> BackgroundSubAgentRunRecord:
+        """Persist worker exit summary without changing terminal status."""
+        record = self._require(run_id)
+        if record.worker is None:
+            return record
+        now = _now_utc()
+        updated = record.model_copy(
+            update={
+                "worker": record.worker.model_copy(
+                    update={
+                        "exit_code": exit_code,
+                        "exited_at": now,
+                    },
+                ),
+                "updated_at": now,
+            },
+        )
+        self._write(updated)
+        return updated
 
     async def cancel(self, run_id: str) -> BackgroundSubAgentRunRecord:
         """Mark a background run cancelled if still non-terminal."""

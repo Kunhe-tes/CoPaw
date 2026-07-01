@@ -150,7 +150,11 @@ class BackgroundSubAgentSupervisor:
         try:
             process = self._start_process(command, stderr_log_path)
         except Exception as exc:
-            return await store.fail(record.run_id, str(exc))
+            return await store.fail(
+                record.run_id,
+                str(exc),
+                error_code="worker_start_failed",
+            )
         running = await store.mark_running(
             record.run_id,
             worker_pid=process.pid,
@@ -218,6 +222,14 @@ class BackgroundSubAgentSupervisor:
         """Return whether this process currently manages runs in scope."""
         return bool(self._active_for_scope(scope))
 
+    def is_manageable(
+        self,
+        scope: BackgroundSubAgentScope,
+        run_id: str,
+    ) -> bool:
+        """Return whether this process has an active handle for a run."""
+        return run_id in self._active_for_scope(scope)
+
     async def _active_records(
         self,
         scope: BackgroundSubAgentScope,
@@ -243,8 +255,12 @@ class BackgroundSubAgentSupervisor:
         for run_id, handle in list(active.items()):
             if handle.process.poll() is None:
                 continue
-            record = await store.get(run_id)
-            if record is None:
+            try:
+                record = await store.mark_worker_exited(
+                    run_id,
+                    exit_code=handle.process.returncode,
+                )
+            except KeyError:
                 active.pop(run_id, None)
                 continue
             if record.status in TERMINAL_BACKGROUND_RUN_STATUSES:
@@ -254,7 +270,13 @@ class BackgroundSubAgentSupervisor:
                     f"{_WORKER_EXITED_WITHOUT_RESULT}: "
                     f"exit_code={handle.process.returncode}"
                 )
-                terminal_runs.append(await store.fail(run_id, message))
+                terminal_runs.append(
+                    await store.fail(
+                        run_id,
+                        message,
+                        error_code=_WORKER_EXITED_WITHOUT_RESULT,
+                    ),
+                )
             active.pop(run_id, None)
         return terminal_runs
 

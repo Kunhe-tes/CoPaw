@@ -513,6 +513,28 @@ def test_plan_mode_toolkit_excludes_synchronous_delegation(
     assert "delegate_to_subagent" not in SWEAgent._create_toolkit(agent).tools
 
 
+def test_plan_mode_toolkit_allows_background_subagent_intent(
+    tmp_path: Path,
+) -> None:
+    """Plan Mode may use readonly background SubAgent tools."""
+    agent = _bare_agent(
+        tmp_path,
+        request_context={
+            "agent_role": "main",
+            "plan_mode_enabled": True,
+            "enable_subagents": True,
+            "current_user_text": "请用 subAgent 检查计划风险",
+        },
+    )
+
+    tools = SWEAgent._create_toolkit(agent).tools
+
+    assert "start_subagent" in tools
+    assert "wait_subagent" in tools
+    assert "get_subagent" in tools
+    assert "cancel_subagent" in tools
+
+
 @pytest.mark.asyncio
 async def test_subagent_hard_policy_denies_before_hooks_and_approvals(
     tmp_path: Path,

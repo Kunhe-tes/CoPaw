@@ -108,6 +108,10 @@ _PLAN_MODE_ALLOWED_TOOLS = frozenset(
         "memory_search",
         "ask_plan_clarification",
         "submit_proposed_plan",
+        "start_subagent",
+        "wait_subagent",
+        "get_subagent",
+        "cancel_subagent",
     },
 )
 _PLAN_MODE_SHELL_META_CHARS = frozenset((";", "|", ">", "<", "&", "`", "$"))

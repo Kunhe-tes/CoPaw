@@ -63,7 +63,11 @@ async def run_worker(launch_spec_path: Path) -> int:
         await store.finish(launch_spec.run_id, result)
         return 0
     except Exception as exc:
-        await store.fail(launch_spec.run_id, str(exc))
+        await store.fail(
+            launch_spec.run_id,
+            str(exc),
+            error_code="worker_runtime_error",
+        )
         return 1
 
 
