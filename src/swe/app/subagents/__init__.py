@@ -31,13 +31,25 @@ from .run_store import (
     PerRunSubAgentRunStore,
     SubAgentRunStore,
 )
+from .supervisor import (
+    BackgroundSubAgentNotManageable,
+    BackgroundSubAgentScope,
+    BackgroundSubAgentStartBlocked,
+    BackgroundSubAgentSupervisor,
+    BackgroundSubAgentWaitSnapshot,
+)
 from .runtime import SubAgentRuntime
 
 __all__ = [
     "AgentRegistry",
     "AgentResult",
     "BackgroundRunStatus",
+    "BackgroundSubAgentNotManageable",
     "BackgroundSubAgentRunRecord",
+    "BackgroundSubAgentScope",
+    "BackgroundSubAgentStartBlocked",
+    "BackgroundSubAgentSupervisor",
+    "BackgroundSubAgentWaitSnapshot",
     "DelegationManager",
     "DelegationSpec",
     "DefinitionValidationError",
