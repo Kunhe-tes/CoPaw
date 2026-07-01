@@ -265,10 +265,10 @@ def test_subagent_toolkit_filters_builtins_and_excludes_delegate(
     assert "delegate_to_subagent" not in toolkit.tools
 
 
-def test_main_agent_registers_delegation_tool_only_when_enabled(
+def test_main_agent_never_registers_delegation_tool(
     tmp_path: Path,
 ) -> None:
-    """Normal chat defaults stay unchanged unless delegation is enabled."""
+    """Synchronous delegation is no longer part of the Main Agent toolkit."""
     disabled = _bare_agent(tmp_path, request_context={"agent_role": "main"})
     enabled = _bare_agent(
         tmp_path,
@@ -278,7 +278,9 @@ def test_main_agent_registers_delegation_tool_only_when_enabled(
     assert (
         "delegate_to_subagent" not in SWEAgent._create_toolkit(disabled).tools
     )
-    assert "delegate_to_subagent" in SWEAgent._create_toolkit(enabled).tools
+    assert (
+        "delegate_to_subagent" not in SWEAgent._create_toolkit(enabled).tools
+    )
     main_tools = SWEAgent._create_toolkit(disabled).tools
     assert "ask_plan_clarification" in main_tools
     assert "submit_proposed_plan" in main_tools
@@ -439,10 +441,10 @@ async def test_plan_interaction_tool_metadata_is_printed_and_persisted(
     )
 
 
-def test_plan_mode_toolkit_keeps_readonly_delegation_when_enabled(
+def test_plan_mode_toolkit_excludes_synchronous_delegation(
     tmp_path: Path,
 ) -> None:
-    """启用 SubAgent 时，Plan Mode 仍可同步只读委派。"""
+    """Plan Mode also uses background SubAgent tools, not sync delegation."""
     agent = _bare_agent(
         tmp_path,
         request_context={
@@ -452,7 +454,7 @@ def test_plan_mode_toolkit_keeps_readonly_delegation_when_enabled(
         },
     )
 
-    assert "delegate_to_subagent" in SWEAgent._create_toolkit(agent).tools
+    assert "delegate_to_subagent" not in SWEAgent._create_toolkit(agent).tools
 
 
 @pytest.mark.asyncio

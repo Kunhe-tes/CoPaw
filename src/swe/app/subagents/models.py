@@ -40,7 +40,6 @@ KNOWN_BUILTIN_TOOLS = frozenset(
         "get_token_usage",
         "copy_file_to_static",
         "update_task_progress",
-        "delegate_to_subagent",
     },
 )
 MVP_READONLY_TOOLS = frozenset(
@@ -60,7 +59,6 @@ MUTATING_TOOLS = frozenset(
         "get_token_usage",
         "copy_file_to_static",
         "update_task_progress",
-        "delegate_to_subagent",
     },
 )
 READONLY_ALLOWED_COMMANDS = (

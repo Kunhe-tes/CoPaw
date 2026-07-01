@@ -55,7 +55,6 @@ from .tools import (
     set_user_timezone,
     write_file,
     create_memory_search_tool,
-    create_delegate_to_subagent_tool,
     copy_file_to_static,
     update_task_progress,
     ask_plan_clarification,
@@ -553,20 +552,6 @@ class SWEAgent(ToolGuardMixin, ReActAgent):
                 logger.warning(
                     f"Failed to register task management tools: {e}",
                 )
-
-        if (
-            request_context.get("enable_subagents")
-            and request_context.get("agent_role", "main") != "subagent"
-        ):
-            toolkit.register_tool_function(
-                create_delegate_to_subagent_tool(
-                    manager=request_context.get("_delegation_manager"),
-                    parent_agent_config=self._agent_config,
-                    workspace_dir=self._workspace_dir,
-                    request_context=request_context,
-                ),
-                namesake_strategy=namesake_strategy,
-            )
 
         return toolkit
 
