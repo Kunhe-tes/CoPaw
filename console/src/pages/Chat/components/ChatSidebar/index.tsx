@@ -217,7 +217,10 @@ export default function ChatSidebar(props: ChatSidebarProps) {
   }, [sharedSessions]);
   const sessionsRef = useRef(sessions);
   sessionsRef.current = sessions;
-  const historyTotal = Math.max(sessionApi.getSessionTotal(), sessions.length);
+  const historyTotal = Math.max(
+    sessionApi.getSessionTotal() - tasks.length,
+    sessions.length,
+  );
 
   const handleToggleHistory = useCallback(() => {
     setHistoryCollapsed((prev) => !prev);

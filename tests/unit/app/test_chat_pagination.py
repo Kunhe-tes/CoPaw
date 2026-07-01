@@ -20,7 +20,6 @@ def _chat(
     *,
     user_id: str = "user-1",
     channel: str = "console",
-    meta: dict[str, object] | None = None,
 ) -> ChatSpec:
     return ChatSpec(
         id=chat_id,
@@ -28,7 +27,6 @@ def _chat(
         session_id=f"session-{chat_id}",
         user_id=user_id,
         channel=channel,
-        meta=meta or {},
         created_at=datetime.fromisoformat(updated_at),
         updated_at=datetime.fromisoformat(updated_at),
     )
@@ -79,30 +77,6 @@ async def test_repository_paginates_filtered_chats_newest_first() -> None:
     assert page.page == 1
     assert page.page_size == 2
     assert page.has_more is True
-
-
-async def test_repository_pagination_can_exclude_session_kind() -> None:
-    repo = _InMemoryChatRepository(
-        [
-            _chat("chat-visible", "2026-06-03T00:00:00+00:00"),
-            _chat(
-                "chat-task",
-                "2026-06-04T00:00:00+00:00",
-                meta={"session_kind": "task"},
-            ),
-            _chat("chat-old", "2026-06-01T00:00:00+00:00"),
-        ],
-    )
-
-    page = await repo.paginate_chats_cursor(
-        page_size=10,
-        cursor=None,
-        exclude_session_kind="task",
-    )
-
-    assert [chat.id for chat in page.items] == ["chat-visible", "chat-old"]
-    assert page.total == 2
-    assert page.has_more is False
 
 
 async def test_repository_returns_empty_page_after_last_result() -> None:
@@ -257,39 +231,6 @@ def test_chat_list_with_pagination_returns_metadata_and_page_statuses() -> (
     assert payload["page_size"] == 2
     assert payload["has_more"] is True
     assert tracker.calls == ["chat-z", "chat-a"]
-
-
-def test_chat_list_excludes_session_kind_from_pagination_total() -> None:
-    client, tracker = _api_client(
-        [
-            _chat("chat-visible", "2026-06-03T00:00:00+00:00"),
-            _chat(
-                "chat-task",
-                "2026-06-04T00:00:00+00:00",
-                meta={"session_kind": "task"},
-            ),
-            _chat("chat-old", "2026-06-01T00:00:00+00:00"),
-        ],
-    )
-
-    response = client.get(
-        "/chats",
-        params={
-            "page_size": 10,
-            "cursor": "",
-            "exclude_session_kind": "task",
-        },
-    )
-
-    assert response.status_code == 200
-    payload = response.json()
-    assert [chat["id"] for chat in payload["items"]] == [
-        "chat-visible",
-        "chat-old",
-    ]
-    assert payload["total"] == 2
-    assert payload["has_more"] is False
-    assert tracker.calls == ["chat-visible", "chat-old"]
 
 
 def test_chat_list_supports_stable_cursor_pagination() -> None:
