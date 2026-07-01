@@ -92,7 +92,6 @@ export const chatApi = {
     cursor?: string | null;
     user_id?: string;
     channel?: string;
-    exclude_session_kind?: string;
   }) => {
     const searchParams = new URLSearchParams({
       page_size: String(params.page_size),
@@ -105,9 +104,6 @@ export const chatApi = {
     }
     if (params.user_id) searchParams.append("user_id", params.user_id);
     if (params.channel) searchParams.append("channel", params.channel);
-    if (params.exclude_session_kind) {
-      searchParams.append("exclude_session_kind", params.exclude_session_kind);
-    }
     return request<ChatPage>(`/chats?${searchParams.toString()}`);
   },
 

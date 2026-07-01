@@ -171,6 +171,19 @@ describe("ChatSidebar infinite history scrolling", () => {
     expect(getAllByText("历史记录(120)").length).toBeGreaterThan(0);
   });
 
+  it("subtracts visible task count from the history total", () => {
+    const tasks = [
+      { id: "task-1", task: { unread_execution_count: 0 } },
+      { id: "task-2", task: { unread_execution_count: 0 } },
+    ];
+
+    const { getAllByText } = render(
+      <ChatSidebar tasks={tasks as never} />,
+    );
+
+    expect(getAllByText("历史记录(118)").length).toBeGreaterThan(0);
+  });
+
   it("excludes the deleted session when refreshing after delete", async () => {
     const nextSessions = [
       {
