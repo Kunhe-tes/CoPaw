@@ -23,14 +23,12 @@ from .skill_feature_inferencer import (
     SkillFeatureInferencer,
     get_skill_feature_inferencer,
 )
-from .skill_runtime_profile import SkillRuntimeProfile
 from .skill_tool_registry import SkillToolRegistry, get_skill_tool_registry
 
 if TYPE_CHECKING:
     from ..tracing.manager import TraceManager
 
 logger = logging.getLogger(__name__)
-
 
 # 技能描述缓存
 _SKILL_DESCRIPTION_CACHE: dict[str, str] = {}
@@ -232,12 +230,10 @@ class SkillInvocationDetector:
         self._skill_call_history: dict[str, int] = {}
         self._idle_counters: dict[str, int] = {}
         self._recent_tools: list[str] = []
-        self._skill_runtime_profiles: dict[str, SkillRuntimeProfile] = {}
 
         # Layer 0: User message detection cache
         self._message_detected_skill: Optional[str] = None
         self._message_detected_confidence: float = 0.0
-        self._pending_skill_md_continuation: Optional[str] = None
 
     def set_enabled_skills(self, skills: list[str]) -> None:
         """Set the list of enabled skills and cache their descriptions.
@@ -304,27 +300,6 @@ class SkillInvocationDetector:
                 except Exception as e:
                     logger.warning("Failed to read skill manifest: %s", e)
 
-    def set_skill_runtime_profiles(
-        self,
-        profiles: dict[str, SkillRuntimeProfile],
-    ) -> None:
-        """设置平台内部的 skill 运行时画像。"""
-        self._skill_runtime_profiles = dict(profiles)
-
-    def get_skill_runtime_profile(
-        self,
-        skill_name: str,
-    ) -> Optional[SkillRuntimeProfile]:
-        """返回 skill 的运行时画像，只供外部只读消费。"""
-        return self._skill_runtime_profiles.get(skill_name)
-
-    def _is_declared_tool_bootstrap_allowed(self, skill_name: str) -> bool:
-        """判断 skill 是否允许仅凭 declared tool 自动启动。"""
-        profile = self.get_skill_runtime_profile(skill_name)
-        if profile is None:
-            return True
-        return bool(profile.declared_tool_bootstrap_allowed)
-
     def detect_from_user_message(
         self,
         user_message: str,
@@ -351,10 +326,6 @@ class SkillInvocationDetector:
         if skill:
             self._message_detected_skill = skill
             self._message_detected_confidence = confidence
-        else:
-            # 清理上一轮缓存，避免同一 detector 被复用时沿用陈旧命中。
-            self._message_detected_skill = None
-            self._message_detected_confidence = 0.0
 
         return skill, confidence
 
@@ -414,16 +385,6 @@ class SkillInvocationDetector:
         if len(self._recent_tools) > 10:
             self._recent_tools.pop(0)
 
-        pending_skill_md_continuation = self._pending_skill_md_continuation
-        if tool_name != "read_file" or (
-            Path(tool_input.get("file_path", "")).name != "SKILL.md"
-        ):
-            # continuation 仅对 SKILL.md 之后紧邻的一次工具调用有效；
-            # 无论该次调用最终走到哪一层，进入本轮判定后都应消费。
-            if self._pending_skill_md_continuation is not None:
-                pass  # 消费 pending_skill_md_continuation
-            self._pending_skill_md_continuation = None
-
         # Step 0: Check if Agent is reading a skill's SKILL.md (highest priority)
         # 当Agent主动读取某技能的SKILL.md文件时，直接激活该技能
         skill_from_md_read = self._detect_skill_from_skill_md_read(
@@ -436,7 +397,6 @@ class SkillInvocationDetector:
                 1.0,
                 tool_name,
             )
-            self._pending_skill_md_continuation = skill_from_md_read
             self._context_manager.record_tool_call(tool_name, mcp_server)
             return skill_from_md_read, {skill_from_md_read: 1.0}
 
@@ -447,21 +407,19 @@ class SkillInvocationDetector:
         declared_skills = [
             s for s in declared_skills if s in self._enabled_skills
         ]
+
         if declared_skills:
-            primary_skill, weights = await self._handle_declared_skills(
+            return await self._handle_declared_skills(
                 declared_skills,
                 tool_name,
                 tool_input,
             )
-            if primary_skill or weights:
-                return primary_skill, weights
 
         # Step 2-4: Fallback to inference for legacy skills
         return await self._infer_skill_attribution(
             tool_name,
             tool_input,
             mcp_server,
-            pending_skill_md_continuation,
         )
 
     async def _handle_declared_skills(
@@ -481,20 +439,13 @@ class SkillInvocationDetector:
             Tuple of (primary_skill, weights)
         """
         current = self._context_manager.current_skill
+
         # Check if current active skill is in the list
         if current and current in skills:
             # Continue current skill
             self._update_skill_state(current)
             self._context_manager.record_tool_call(tool_name)
             return current, {current: 1.0}
-
-        bootstrap_skills = [
-            skill
-            for skill in skills
-            if self._is_declared_tool_bootstrap_allowed(skill)
-        ]
-        if not bootstrap_skills:
-            return None, {}
 
         # Check if current skill should end (idle threshold)
         if current:
@@ -506,11 +457,7 @@ class SkillInvocationDetector:
                 current = None
 
         # Calculate weights for multi-skill attribution
-        weights = self._calculate_weights(
-            bootstrap_skills,
-            tool_name,
-            tool_input,
-        )
+        weights = self._calculate_weights(skills, tool_name, tool_input)
 
         # Select primary skill (highest weight)
         primary_skill = (
@@ -534,7 +481,6 @@ class SkillInvocationDetector:
         tool_name: str,
         tool_input: dict[str, Any],
         mcp_server: Optional[str] = None,
-        pending_skill_md_continuation: Optional[str] = None,
     ) -> tuple[Optional[str], dict[str, float]]:
         """Infer skill attribution for tools without explicit declarations.
 
@@ -554,6 +500,17 @@ class SkillInvocationDetector:
             Tuple of (primary_skill, weights)
         """
         enabled_skills = list(self._enabled_skills)
+
+        # Layer 0: Check cached user message detection
+        if (
+            self._message_detected_skill
+            and self._message_detected_confidence >= 0.7
+        ):
+            skill = self._message_detected_skill
+            confidence = self._message_detected_confidence
+            await self._ensure_skill_active(skill, confidence, tool_name)
+            self._context_manager.record_tool_call(tool_name, mcp_server)
+            return skill, {skill: confidence}
 
         # Layer 1: MCP server matching
         if mcp_server:
@@ -602,27 +559,6 @@ class SkillInvocationDetector:
             )
             self._context_manager.record_tool_call(tool_name, mcp_server)
             return primary_skill, weights
-
-        current = self._context_manager.current_skill
-        pending = pending_skill_md_continuation
-        if current and pending and pending == current:
-            # 仅对紧随 SKILL.md 读取后的下一次无证据工具调用延续归因，
-            # 避免 current_skill 在整轮对无关工具产生粘性误归因。
-            self._update_skill_state(current)
-            self._context_manager.record_tool_call(tool_name, mcp_server)
-            return current, {current: 1.0}
-
-        # Layer 0: 用户消息命中只作为最终兜底候选，优先级低于
-        # SKILL.md 激活出的紧邻 continuation。
-        if (
-            self._message_detected_skill
-            and self._message_detected_confidence >= 0.7
-        ):
-            skill = self._message_detected_skill
-            confidence = self._message_detected_confidence
-            await self._ensure_skill_active(skill, confidence, tool_name)
-            self._context_manager.record_tool_call(tool_name, mcp_server)
-            return skill, {skill: confidence}
 
         # No attribution possible
         return None, {}
@@ -979,7 +915,6 @@ class SkillInvocationDetector:
         self._idle_counters.clear()
         self._recent_tools.clear()
         self._context_manager.clear()
-        self._pending_skill_md_continuation = None
         # Clear Layer 0 cache
         self._message_detected_skill = None
         self._message_detected_confidence = 0.0
