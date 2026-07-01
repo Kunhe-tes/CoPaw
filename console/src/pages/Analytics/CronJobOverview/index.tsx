@@ -13,7 +13,16 @@ import {
   UserRoundCheck,
   type LucideIcon,
 } from "lucide-react";
-import { DatePicker, Input, Modal, Pagination, Select, Spin, Table, Tooltip } from "antd";
+import {
+  DatePicker,
+  Input,
+  Modal,
+  Pagination,
+  Select,
+  Spin,
+  Table,
+  Tooltip,
+} from "antd";
 import { WarningOutlined } from "@ant-design/icons";
 import dayjs, { type Dayjs } from "dayjs";
 import { useEffect, useState, type CSSProperties } from "react";
@@ -68,11 +77,11 @@ const SKILL_NAME_MAP: Record<string, string> = {
   fund_redeem_monitor: "基金赎回实时监控技能",
   lc_breaking: "单一持仓理财/定期客户破冰方案",
   "global-market-report": "全球市场复盘报告",
-  "存款到期客户经营方案技能": "存款到期客户经营方案技能",
-  "高AUM理财低收益客户调仓技能": "高AUM理财低收益客户调仓技能",
-  "基金亏损客户关怀陪伴文案": "基金亏损客户关怀陪伴文案",
-  "智能推荐保险计划书": "智能推荐保险计划书",
-  "黄金持仓客户陪伴技能": "黄金持仓客户陪伴技能",
+  存款到期客户经营方案技能: "存款到期客户经营方案技能",
+  高AUM理财低收益客户调仓技能: "高AUM理财低收益客户调仓技能",
+  基金亏损客户关怀陪伴文案: "基金亏损客户关怀陪伴文案",
+  智能推荐保险计划书: "智能推荐保险计划书",
+  黄金持仓客户陪伴技能: "黄金持仓客户陪伴技能",
   "query-fund-plus-cust": "固收+基金营销技能",
 };
 
@@ -222,7 +231,12 @@ function getTimeRangeForDateRange([start, end]: [Dayjs, Dayjs]): TimeRange {
 
 function getInitialBbkIds(searchParams: URLSearchParams) {
   const bbkIds = searchParams.get("bbk_ids");
-  return bbkIds ? bbkIds.split(",").map((item) => item.trim()).filter(Boolean) : [];
+  return bbkIds
+    ? bbkIds
+        .split(",")
+        .map((item) => item.trim())
+        .filter(Boolean)
+    : [];
 }
 
 const classifyFailureReason = (
@@ -375,7 +389,9 @@ function TaskRankingTable({
                   <tr
                     key={`${row.bbk_id}-${index}`}
                     className={
-                      `${isSelected ? styles.selectedRow : ""} ${styles.clickableRow}`.trim() || undefined
+                      `${isSelected ? styles.selectedRow : ""} ${
+                        styles.clickableRow
+                      }`.trim() || undefined
                     }
                     onClick={() => onRowClick(row.bbk_id, row.bbk_name)}
                   >
@@ -388,9 +404,15 @@ function TaskRankingTable({
                     <td>{row.success_count}</td>
                     <td>{row.success_rate.toFixed(1)}%</td>
                     <td>{row.read_tasks}</td>
-                    <td>{row.plan_count}/{row.plan_clicks}</td>
-                    <td>{row.insight_count}/{row.insight_clicks}</td>
-                    <td>{row.phone_count}/{row.phone_clicks}</td>
+                    <td>
+                      {row.plan_count}/{row.plan_clicks}
+                    </td>
+                    <td>
+                      {row.insight_count}/{row.insight_clicks}
+                    </td>
+                    <td>
+                      {row.phone_count}/{row.phone_clicks}
+                    </td>
                     <td>{row.error_count}</td>
                   </tr>
                 );
@@ -458,37 +480,43 @@ function RankingTable({
               const isSelected = row.bbkId && row.bbkId === selectedBranchId;
 
               return (
-              <tr
-                key={`${row.branchName}-${index}`}
-                className={
-                  `${row.rank === "..." ? styles.mutedRow : ""} ${isSelected ? styles.selectedRow : ""} ${isClickable ? styles.clickableRow : ""}`.trim() ||
-                  undefined
-                }
-                onClick={() => {
-                  if (isClickable) {
-                    onRowClick(row.bbkId, row.branchName);
+                <tr
+                  key={`${row.branchName}-${index}`}
+                  className={
+                    `${row.rank === "..." ? styles.mutedRow : ""} ${
+                      isSelected ? styles.selectedRow : ""
+                    } ${isClickable ? styles.clickableRow : ""}`.trim() ||
+                    undefined
                   }
-                }}
-              >
-                <td className={styles.indexCell}>{row.rank}</td>
-                <td className={isClickable ? styles.branchNameLink : styles.branchName}>
-                  <span>{row.branchName}</span>
-                </td>
-                <td>{row.skillCount}</td>
-                <td>{row.totalTasks}</td>
-                <td>{row.successCount}</td>
-                <td>{row.readTasks}</td>
-                <td>{row.involvedManagers}</td>
-                <td>{row.resultViewManagers}</td>
-                <td>{row.planManagers}</td>
-                <td>{row.insightManagers}</td>
-                <td>{row.phoneManagers}</td>
-                <td>{row.recommendedCustomers}</td>
-                <td>{row.viewedCustomers}</td>
-                <td>{row.insightCustomers}</td>
-                <td>{row.phoneCustomers}</td>
-              </tr>
-            );
+                  onClick={() => {
+                    if (isClickable) {
+                      onRowClick(row.bbkId, row.branchName);
+                    }
+                  }}
+                >
+                  <td className={styles.indexCell}>{row.rank}</td>
+                  <td
+                    className={
+                      isClickable ? styles.branchNameLink : styles.branchName
+                    }
+                  >
+                    <span>{row.branchName}</span>
+                  </td>
+                  <td>{row.skillCount}</td>
+                  <td>{row.totalTasks}</td>
+                  <td>{row.successCount}</td>
+                  <td>{row.readTasks}</td>
+                  <td>{row.involvedManagers}</td>
+                  <td>{row.resultViewManagers}</td>
+                  <td>{row.planManagers}</td>
+                  <td>{row.insightManagers}</td>
+                  <td>{row.phoneManagers}</td>
+                  <td>{row.recommendedCustomers}</td>
+                  <td>{row.viewedCustomers}</td>
+                  <td>{row.insightCustomers}</td>
+                  <td>{row.phoneCustomers}</td>
+                </tr>
+              );
             })}
           </tbody>
         </table>
@@ -505,8 +533,20 @@ function DonutChart({ items }: { items: CronJobOverviewFailureReason[] }) {
 
   return (
     <div className={styles.donutWrap}>
-      <svg className={styles.donutChart} viewBox="0 0 116 116" role="img" aria-label="报错原因分布">
-        <circle cx="58" cy="58" r={radius} fill="none" stroke="#edf3fb" strokeWidth="16" />
+      <svg
+        className={styles.donutChart}
+        viewBox="0 0 116 116"
+        role="img"
+        aria-label="报错原因分布"
+      >
+        <circle
+          cx="58"
+          cy="58"
+          r={radius}
+          fill="none"
+          stroke="#edf3fb"
+          strokeWidth="16"
+        />
         {items.map((item) => {
           const dash = total > 0 ? (item.count / total) * circumference : 0;
           const segmentStyle = {
@@ -610,7 +650,11 @@ function MiniSummaryCard({
   );
 }
 
-function RankTable({ data }: { data: CronJobOverviewPageData["anomalyRankRows"] }) {
+function RankTable({
+  data,
+}: {
+  data: CronJobOverviewPageData["anomalyRankRows"];
+}) {
   return (
     <section className={`${styles.panel} ${styles.rankPanel}`}>
       <h2>分行异常排行</h2>
@@ -654,7 +698,9 @@ function FailedTaskModal({
   loading: boolean;
 }) {
   const [keyword, setKeyword] = useState("");
-  const [failureReason, setFailureReason] = useState<FailureReason | undefined>();
+  const [failureReason, setFailureReason] = useState<
+    FailureReason | undefined
+  >();
   const [currentPage, setCurrentPage] = useState(1);
   const pageSize = 5;
   const normalizedKeyword = keyword.trim().toLowerCase();
@@ -663,7 +709,11 @@ function FailedTaskModal({
       ? (task.tenant_id || "").toLowerCase().includes(normalizedKeyword)
       : true;
     const matchesFailureReason = failureReason
-      ? classifyFailureReason(task.error_message, task.async_status, task.status) === failureReason
+      ? classifyFailureReason(
+          task.error_message,
+          task.async_status,
+          task.status,
+        ) === failureReason
       : true;
 
     return matchesKeyword && matchesFailureReason;
@@ -796,44 +846,71 @@ export default function CronJobOverviewPage() {
   const navigate = useNavigate();
   const [searchParams, setSearchParams] = useSearchParams();
   const initialDateRange = getInitialDateRange(searchParams);
-  const [overviewData, setOverviewData] = useState<CronJobOverviewPageData>(emptyOverviewData);
+  const [overviewData, setOverviewData] =
+    useState<CronJobOverviewPageData>(emptyOverviewData);
   const [loading, setLoading] = useState(false);
   const [timeRange, setTimeRange] = useState<TimeRange>(
     getTimeRangeForDateRange(initialDateRange),
   );
   const [dateRange, setDateRange] = useState<[Dayjs, Dayjs]>(initialDateRange);
-  const [bbkIds, setBbkIds] = useState<string[]>(() => getInitialBbkIds(searchParams));
+  const [bbkIds, setBbkIds] = useState<string[]>(() =>
+    getInitialBbkIds(searchParams),
+  );
   const [failedTaskModalOpen, setFailedTaskModalOpen] = useState(false);
   const [failedTasks, setFailedTasks] = useState<ExecutionItem[]>([]);
   const [failedTasksLoading, setFailedTasksLoading] = useState(false);
 
   // Task view state (original ranking table)
-  const [taskBranchRankingRows, setTaskBranchRankingRows] = useState<CronBranchTaskRankingItem[]>([]);
-  const [taskBranchRankingLoading, setTaskBranchRankingLoading] = useState(false);
-  const [selectedTaskBranch, setSelectedTaskBranch] = useState<{ bbk_id: string; bbk_name: string } | null>(null);
-  const [selectedTaskSkill, setSelectedTaskSkill] = useState<string | null>(null);
-  const [selectedTaskManager, setSelectedTaskManager] = useState<string | null>(null);
+  const [taskBranchRankingRows, setTaskBranchRankingRows] = useState<
+    CronBranchTaskRankingItem[]
+  >([]);
+  const [taskBranchRankingLoading, setTaskBranchRankingLoading] =
+    useState(false);
+  const [selectedTaskBranch, setSelectedTaskBranch] = useState<{
+    bbk_id: string;
+    bbk_name: string;
+  } | null>(null);
+  const [selectedTaskSkill, setSelectedTaskSkill] = useState<string | null>(
+    null,
+  );
+  const [selectedTaskManager, setSelectedTaskManager] = useState<string | null>(
+    null,
+  );
   const [taskSkills, setTaskSkills] = useState<BranchSkillItem[]>([]);
   const [taskSkillsLoading, setTaskSkillsLoading] = useState(false);
-  const [taskManagers, setTaskManagers] = useState<BranchSkillManagerItem[]>([]);
+  const [taskManagers, setTaskManagers] = useState<BranchSkillManagerItem[]>(
+    [],
+  );
   const [taskManagersLoading, setTaskManagersLoading] = useState(false);
-  const [taskCustomers, setTaskCustomers] = useState<BranchSkillManagerCustomerItem[]>([]);
+  const [taskCustomers, setTaskCustomers] = useState<
+    BranchSkillManagerCustomerItem[]
+  >([]);
   const [taskCustomersLoading, setTaskCustomersLoading] = useState(false);
 
   // Skill view state (current ranking table with manager drill-down)
   // Inline drill-down state for branch ranking expansion
-  const [selectedBranch, setSelectedBranch] = useState<{ bbk_id: string; bbk_name: string } | null>(null);
-  const [managerSummary, setManagerSummary] = useState<BranchManagerSummaryItem[]>([]);
+  const [selectedBranch, setSelectedBranch] = useState<{
+    bbk_id: string;
+    bbk_name: string;
+  } | null>(null);
+  const [managerSummary, setManagerSummary] = useState<
+    BranchManagerSummaryItem[]
+  >([]);
   const [managerSummaryLoading, setManagerSummaryLoading] = useState(false);
 
   // Manager detail modal state
   const [managerDetailModalOpen, setManagerDetailModalOpen] = useState(false);
-  const [selectedManagerForModal, setSelectedManagerForModal] = useState<BranchManagerSummaryItem | null>(null);
+  const [selectedManagerForModal, setSelectedManagerForModal] =
+    useState<BranchManagerSummaryItem | null>(null);
   const [modalSkills, setModalSkills] = useState<ManagerSkillItem[]>([]);
   const [modalSkillsLoading, setModalSkillsLoading] = useState(false);
-  const [modalCustomers, setModalCustomers] = useState<ManagerCustomerItem[]>([]);
+  const [modalCustomers, setModalCustomers] = useState<ManagerCustomerItem[]>(
+    [],
+  );
   const [modalCustomersLoading, setModalCustomersLoading] = useState(false);
-  const [selectedModalSkill, setSelectedModalSkill] = useState<string | null>(null);
+  const [selectedModalSkill, setSelectedModalSkill] = useState<string | null>(
+    null,
+  );
 
   const getOverviewFilters = (): CronJobOverviewDateFilters => ({
     start_date: dateRange[0].format("YYYY-MM-DD"),
@@ -856,7 +933,9 @@ export default function CronJobOverviewPage() {
   const fetchTaskBranchRanking = async () => {
     setTaskBranchRankingLoading(true);
     try {
-      const response = await monitorApi.getCronBranchTaskBehavior(getOverviewFilters());
+      const response = await monitorApi.getCronBranchTaskBehavior(
+        getOverviewFilters(),
+      );
       setTaskBranchRankingRows(response.items);
     } catch (error) {
       console.warn("Failed to fetch task branch ranking.", error);
@@ -890,7 +969,9 @@ export default function CronJobOverviewPage() {
         bbk_id: bbkId,
         ...dateParams,
       });
-      const filtered = response.items.filter((item) => ALLOWED_SKILLS.has(item.skill_name));
+      const filtered = response.items.filter((item) =>
+        ALLOWED_SKILLS.has(item.skill_name),
+      );
       setTaskSkills(filtered);
     } catch (error) {
       console.warn("Failed to fetch task skills.", error);
@@ -1117,7 +1198,9 @@ export default function CronJobOverviewPage() {
   const fetchOverview = async () => {
     setLoading(true);
     try {
-      const response = await monitorApi.getCronJobOverviewPageData(getOverviewFilters());
+      const response = await monitorApi.getCronJobOverviewPageData(
+        getOverviewFilters(),
+      );
       setOverviewData(response);
     } catch (error) {
       console.warn("Failed to fetch cron job overview page data.", error);
@@ -1132,7 +1215,8 @@ export default function CronJobOverviewPage() {
     try {
       const pageSize = 100;
       const activeBbkIds = bbkIds.filter(Boolean);
-      const selectedBbkIds = activeBbkIds.length > 0 ? activeBbkIds : [undefined];
+      const selectedBbkIds =
+        activeBbkIds.length > 0 ? activeBbkIds : [undefined];
       const selectedBbkIdSet = new Set(activeBbkIds);
       const allTasks: ExecutionItem[] = [];
       console.info("[cron failed tasks debug] start fetch", {
@@ -1176,7 +1260,9 @@ export default function CronJobOverviewPage() {
       const tasksById = new Map<number, ExecutionItem>();
       allTasks
         .filter((task) =>
-          selectedBbkIdSet.size === 0 ? true : selectedBbkIdSet.has(task.bbk_id || ""),
+          selectedBbkIdSet.size === 0
+            ? true
+            : selectedBbkIdSet.has(task.bbk_id || ""),
         )
         .forEach((task) => {
           tasksById.set(task.id, task);
@@ -1185,13 +1271,15 @@ export default function CronJobOverviewPage() {
         activeBbkIds,
         rawCount: allTasks.length,
         filteredCount: tasksById.size,
-        filteredSample: Array.from(tasksById.values()).slice(0, 5).map((task) => ({
-          id: task.id,
-          jobId: task.job_id,
-          tenantId: task.tenant_id,
-          bbkId: task.bbk_id,
-          status: task.status,
-        })),
+        filteredSample: Array.from(tasksById.values())
+          .slice(0, 5)
+          .map((task) => ({
+            id: task.id,
+            jobId: task.job_id,
+            tenantId: task.tenant_id,
+            bbkId: task.bbk_id,
+            status: task.status,
+          })),
       });
       setFailedTasks(
         Array.from(tasksById.values()).sort((a, b) => {
@@ -1227,7 +1315,9 @@ export default function CronJobOverviewPage() {
     }
   };
 
-  const handleDateRangeChange = (dates: null | [Dayjs | null, Dayjs | null]) => {
+  const handleDateRangeChange = (
+    dates: null | [Dayjs | null, Dayjs | null],
+  ) => {
     if (!dates?.[0] || !dates?.[1]) {
       return;
     }
@@ -1306,21 +1396,33 @@ export default function CronJobOverviewPage() {
             <div className={styles.segmentedControl}>
               <button
                 type="button"
-                className={timeRange === "day" ? styles.segmentActive : styles.segmentButton}
+                className={
+                  timeRange === "day"
+                    ? styles.segmentActive
+                    : styles.segmentButton
+                }
                 onClick={() => handleModeChange("day")}
               >
                 今天
               </button>
               <button
                 type="button"
-                className={timeRange === "week" ? styles.segmentActive : styles.segmentButton}
+                className={
+                  timeRange === "week"
+                    ? styles.segmentActive
+                    : styles.segmentButton
+                }
                 onClick={() => handleModeChange("week")}
               >
                 近7天
               </button>
               <button
                 type="button"
-                className={timeRange === "month" ? styles.segmentActive : styles.segmentButton}
+                className={
+                  timeRange === "month"
+                    ? styles.segmentActive
+                    : styles.segmentButton
+                }
                 onClick={() => handleModeChange("month")}
               >
                 近30天
@@ -1398,7 +1500,9 @@ export default function CronJobOverviewPage() {
       </section>
 
       <p className={styles.formulaNote}>
-        说明： 执行成功率 = 成功执行次数 / 任务执行次数； 任务已读率 = 已读执行次数 / 任务执行次数； 查看方案任务率 = 查看方案次数 / 任务执行次数
+        说明： 执行成功率 = 成功执行次数 / 任务执行次数； 任务已读率 =
+        已读执行次数 / 任务执行次数； 查看方案任务率 = 查看方案次数 /
+        任务执行次数
       </p>
 
       {/* 任务视角分行排行 */}
@@ -1419,48 +1523,76 @@ export default function CronJobOverviewPage() {
           <div className={styles.drillDownColumn}>
             <h3 className={styles.drillDownTitle}>
               当前分行下的技能明细
-              <span className={styles.drillDownSubTitle}>（{selectedTaskBranch.bbk_name}）</span>
+              <span className={styles.drillDownSubTitle}>
+                （{selectedTaskBranch.bbk_name}）
+              </span>
             </h3>
-            <div className={styles.drillDownTableScroll}>
-              <Table
-                dataSource={taskSkills}
-                rowKey="skill_name"
-                loading={taskSkillsLoading}
-                size="small"
-                pagination={false}
-                sticky
-                scroll={DRILL_DOWN_TABLE_SCROLL}
-                onRow={(record) => ({
-                  onClick: () => handleSelectTaskSkill(record.skill_name),
-                  style: {
-                    cursor: "pointer",
-                    background: record.skill_name === selectedTaskSkill ? "#e6f4ff" : undefined,
-                  },
-                })}
-                columns={[
-                  {
-                    title: "技能名称",
-                    dataIndex: "skill_name",
-                    key: "skill_name",
-                    width: 130,
-                    align: "center",
-                    render: (v: string) => formatSkillName(v),
-                  },
-                  { title: "定时任务数", dataIndex: "cron_task_count", key: "cron_task_count", width: 60, align: "center" },
-                  { title: "成功执行数", dataIndex: "success_count", key: "success_count", width: 60, align: "center" },
-                  {
-                    title: "成功率",
-                    dataIndex: "success_rate",
-                    key: "success_rate",
-                    width: 48,
-                    align: "center",
-                    render: (v: number) => (v != null ? `${v.toFixed(1)}%` : "-"),
-                  },
-                  { title: "已读任务数", dataIndex: "read_count", key: "read_count", width: 60, align: "center" },
-                  { title: "报错次数", dataIndex: "error_count", key: "error_count", width: 55, align: "center" },
-                ]}
-              />
-            </div>
+            <Table
+              className={styles.drillDownTable}
+              dataSource={taskSkills}
+              rowKey="skill_name"
+              loading={taskSkillsLoading}
+              size="small"
+              pagination={false}
+              sticky
+              scroll={DRILL_DOWN_TABLE_SCROLL}
+              onRow={(record) => ({
+                onClick: () => handleSelectTaskSkill(record.skill_name),
+                style: {
+                  cursor: "pointer",
+                  background:
+                    record.skill_name === selectedTaskSkill
+                      ? "#e6f4ff"
+                      : undefined,
+                },
+              })}
+              columns={[
+                {
+                  title: "技能名称",
+                  dataIndex: "skill_name",
+                  key: "skill_name",
+                  width: 130,
+                  align: "center",
+                  render: (v: string) => formatSkillName(v),
+                },
+                {
+                  title: "定时任务数",
+                  dataIndex: "cron_task_count",
+                  key: "cron_task_count",
+                  width: 60,
+                  align: "center",
+                },
+                {
+                  title: "成功执行数",
+                  dataIndex: "success_count",
+                  key: "success_count",
+                  width: 60,
+                  align: "center",
+                },
+                {
+                  title: "成功率",
+                  dataIndex: "success_rate",
+                  key: "success_rate",
+                  width: 48,
+                  align: "center",
+                  render: (v: number) => (v != null ? `${v.toFixed(1)}%` : "-"),
+                },
+                {
+                  title: "已读任务数",
+                  dataIndex: "read_count",
+                  key: "read_count",
+                  width: 60,
+                  align: "center",
+                },
+                {
+                  title: "报错次数",
+                  dataIndex: "error_count",
+                  key: "error_count",
+                  width: 55,
+                  align: "center",
+                },
+              ]}
+            />
           </div>
 
           {/* 客户经理列 */}
@@ -1468,42 +1600,77 @@ export default function CronJobOverviewPage() {
             <h3 className={styles.drillDownTitle}>
               该技能下的客户经理明细
               {selectedTaskSkill && (
-                <span className={styles.drillDownSubTitle}>（{formatSkillName(selectedTaskSkill)}）</span>
+                <span className={styles.drillDownSubTitle}>
+                  （{formatSkillName(selectedTaskSkill)}）
+                </span>
               )}
             </h3>
-            <div className={styles.drillDownTableScroll}>
-              <Table
-                dataSource={taskManagers}
-                rowKey="user_id"
-                loading={taskManagersLoading}
-                size="small"
-                pagination={false}
-                sticky
-                scroll={DRILL_DOWN_TABLE_SCROLL}
-                onRow={(record) => ({
-                  onClick: () => handleSelectTaskManager(record.user_id),
-                  style: {
-                    cursor: "pointer",
-                    background: record.user_id === selectedTaskManager ? "#e6f4ff" : undefined,
-                  },
-                })}
-                columns={[
-                  { title: "客户经理", dataIndex: "user_name", key: "user_name", width: 80, align: "center" },
-                  { title: "已读次数", dataIndex: "read_count", key: "read_count", width: 50, align: "center" },
-                  { title: "方案次数", dataIndex: "plan_count", key: "plan_count", width: 50, align: "center" },
-                  { title: "洞察次数", dataIndex: "insight_count", key: "insight_count", width: 50, align: "center" },
-                  { title: "电访次数", dataIndex: "phone_count", key: "phone_count", width: 50, align: "center" },
-                  {
-                    title: "最后点击时间",
-                    dataIndex: "last_click_time",
-                    key: "last_click_time",
-                    width: 100,
-                    align: "center",
-                    render: (v: string) => (v ? dayjs(v).format("YYYY-MM-DD HH:mm") : "-"),
-                  },
-                ]}
-              />
-            </div>
+            <Table
+              className={styles.drillDownTable}
+              dataSource={taskManagers}
+              rowKey="user_id"
+              loading={taskManagersLoading}
+              size="small"
+              pagination={false}
+              sticky
+              scroll={DRILL_DOWN_TABLE_SCROLL}
+              onRow={(record) => ({
+                onClick: () => handleSelectTaskManager(record.user_id),
+                style: {
+                  cursor: "pointer",
+                  background:
+                    record.user_id === selectedTaskManager
+                      ? "#e6f4ff"
+                      : undefined,
+                },
+              })}
+              columns={[
+                {
+                  title: "客户经理",
+                  dataIndex: "user_name",
+                  key: "user_name",
+                  width: 80,
+                  align: "center",
+                },
+                {
+                  title: "已读次数",
+                  dataIndex: "read_count",
+                  key: "read_count",
+                  width: 50,
+                  align: "center",
+                },
+                {
+                  title: "方案次数",
+                  dataIndex: "plan_count",
+                  key: "plan_count",
+                  width: 50,
+                  align: "center",
+                },
+                {
+                  title: "洞察次数",
+                  dataIndex: "insight_count",
+                  key: "insight_count",
+                  width: 50,
+                  align: "center",
+                },
+                {
+                  title: "电访次数",
+                  dataIndex: "phone_count",
+                  key: "phone_count",
+                  width: 50,
+                  align: "center",
+                },
+                {
+                  title: "最后点击时间",
+                  dataIndex: "last_click_time",
+                  key: "last_click_time",
+                  width: 100,
+                  align: "center",
+                  render: (v: string) =>
+                    v ? dayjs(v).format("YYYY-MM-DD HH:mm") : "-",
+                },
+              ]}
+            />
           </div>
 
           {/* 客户列 */}
@@ -1512,49 +1679,63 @@ export default function CronJobOverviewPage() {
               该客户经理下的客户明细
               {selectedTaskManager && taskManagers.length > 0 && (
                 <span className={styles.drillDownSubTitle}>
-                  （{taskManagers.find((m) => m.user_id === selectedTaskManager)?.user_name || selectedTaskManager}）
+                  （
+                  {taskManagers.find((m) => m.user_id === selectedTaskManager)
+                    ?.user_name || selectedTaskManager}
+                  ）
                 </span>
               )}
             </h3>
-            <div className={styles.drillDownTableScroll}>
-              <Table
-                dataSource={taskCustomers}
-                rowKey="customer_id"
-                loading={taskCustomersLoading}
-                size="small"
-                pagination={false}
-                sticky
-                scroll={DRILL_DOWN_TABLE_SCROLL}
-                columns={[
-                  { title: "客户名称", dataIndex: "customer_name", key: "customer_name", width: 90, align: "center" },
-                  { title: "客户ID", dataIndex: "customer_id", key: "customer_id", width: 80, align: "center" },
-                  {
-                    title: "点击方案",
-                    dataIndex: "clicked_plan",
-                    key: "clicked_plan",
-                    width: 55,
-                    align: "center",
-                    render: (v: boolean) => (v ? "是" : "否"),
-                  },
-                  {
-                    title: "点击洞察",
-                    dataIndex: "clicked_insight",
-                    key: "clicked_insight",
-                    width: 55,
-                    align: "center",
-                    render: (v: boolean) => (v ? "是" : "否"),
-                  },
-                  {
-                    title: "点击电访",
-                    dataIndex: "clicked_phone",
-                    key: "clicked_phone",
-                    width: 55,
-                    align: "center",
-                    render: (v: boolean) => (v ? "是" : "否"),
-                  },
-                ]}
-              />
-            </div>
+            <Table
+              className={styles.drillDownTable}
+              dataSource={taskCustomers}
+              rowKey="customer_id"
+              loading={taskCustomersLoading}
+              size="small"
+              pagination={false}
+              sticky
+              scroll={DRILL_DOWN_TABLE_SCROLL}
+              columns={[
+                {
+                  title: "客户名称",
+                  dataIndex: "customer_name",
+                  key: "customer_name",
+                  width: 90,
+                  align: "center",
+                },
+                {
+                  title: "客户ID",
+                  dataIndex: "customer_id",
+                  key: "customer_id",
+                  width: 80,
+                  align: "center",
+                },
+                {
+                  title: "点击方案",
+                  dataIndex: "clicked_plan",
+                  key: "clicked_plan",
+                  width: 55,
+                  align: "center",
+                  render: (v: boolean) => (v ? "是" : "否"),
+                },
+                {
+                  title: "点击洞察",
+                  dataIndex: "clicked_insight",
+                  key: "clicked_insight",
+                  width: 55,
+                  align: "center",
+                  render: (v: boolean) => (v ? "是" : "否"),
+                },
+                {
+                  title: "点击电访",
+                  dataIndex: "clicked_phone",
+                  key: "clicked_phone",
+                  width: 55,
+                  align: "center",
+                  render: (v: boolean) => (v ? "是" : "否"),
+                },
+              ]}
+            />
           </div>
         </div>
       )}
@@ -1564,7 +1745,6 @@ export default function CronJobOverviewPage() {
           <h2>分行层异常诊断</h2>
           <div className={styles.miniSummaryGrid}>
             <MiniSummaryCard
-
               icon={Banknote}
               title="受影响分行数"
               value={overviewData.anomalySummary.affectedBranches}
@@ -1602,8 +1782,17 @@ export default function CronJobOverviewPage() {
           <span>
             客户经理详情
             {selectedManagerForModal && (
-              <span style={{ marginLeft: 8, fontWeight: "normal", color: "#64748b" }}>
-                （{selectedManagerForModal.user_name || selectedManagerForModal.user_id}）
+              <span
+                style={{
+                  marginLeft: 8,
+                  fontWeight: "normal",
+                  color: "#64748b",
+                }}
+              >
+                （
+                {selectedManagerForModal.user_name ||
+                  selectedManagerForModal.user_id}
+                ）
               </span>
             )}
           </span>
@@ -1617,46 +1806,73 @@ export default function CronJobOverviewPage() {
                 技能明细
                 <span className={styles.drillDownHint}>（点击查看客户）</span>
               </h3>
-              <div className={styles.drillDownTableScroll}>
-                <Table
-                  dataSource={modalSkills}
-                  rowKey="skill_name"
-                  loading={modalSkillsLoading}
-                  size="small"
-                  pagination={false}
-                  sticky
-                  scroll={DRILL_DOWN_TABLE_SCROLL}
-                  onRow={(record) => ({
-                    onClick: () => handleSelectModalSkill(record.skill_name),
-                    style: {
-                      cursor: "pointer",
-                      background: record.skill_name === selectedModalSkill ? "#e6f4ff" : undefined,
-                    },
-                  })}
-                  columns={[
-                    {
-                      title: "技能名称",
-                      dataIndex: "skill_name",
-                      key: "skill_name",
-                      width: 130,
-                      align: "center",
-                      render: (v: string) => formatSkillName(v),
-                    },
-                    { title: "定时任务数", dataIndex: "cron_task_count", key: "cron_task_count", width: 70, align: "center" },
-                    { title: "成功执行数", dataIndex: "success_count", key: "success_count", width: 70, align: "center" },
-                    {
-                      title: "成功率",
-                      dataIndex: "success_rate",
-                      key: "success_rate",
-                      width: 60,
-                      align: "center",
-                      render: (v: number) => (v != null ? `${v.toFixed(1)}%` : "-"),
-                    },
-                    { title: "已读任务数", dataIndex: "read_count", key: "read_count", width: 70, align: "center" },
-                    { title: "报错次数", dataIndex: "error_count", key: "error_count", width: 60, align: "center" },
-                  ]}
-                />
-              </div>
+              <Table
+                className={styles.drillDownTable}
+                dataSource={modalSkills}
+                rowKey="skill_name"
+                loading={modalSkillsLoading}
+                size="small"
+                pagination={false}
+                sticky
+                scroll={DRILL_DOWN_TABLE_SCROLL}
+                onRow={(record) => ({
+                  onClick: () => handleSelectModalSkill(record.skill_name),
+                  style: {
+                    cursor: "pointer",
+                    background:
+                      record.skill_name === selectedModalSkill
+                        ? "#e6f4ff"
+                        : undefined,
+                  },
+                })}
+                columns={[
+                  {
+                    title: "技能名称",
+                    dataIndex: "skill_name",
+                    key: "skill_name",
+                    width: 130,
+                    align: "center",
+                    render: (v: string) => formatSkillName(v),
+                  },
+                  {
+                    title: "定时任务数",
+                    dataIndex: "cron_task_count",
+                    key: "cron_task_count",
+                    width: 70,
+                    align: "center",
+                  },
+                  {
+                    title: "成功执行数",
+                    dataIndex: "success_count",
+                    key: "success_count",
+                    width: 70,
+                    align: "center",
+                  },
+                  {
+                    title: "成功率",
+                    dataIndex: "success_rate",
+                    key: "success_rate",
+                    width: 60,
+                    align: "center",
+                    render: (v: number) =>
+                      v != null ? `${v.toFixed(1)}%` : "-",
+                  },
+                  {
+                    title: "已读任务数",
+                    dataIndex: "read_count",
+                    key: "read_count",
+                    width: 70,
+                    align: "center",
+                  },
+                  {
+                    title: "报错次数",
+                    dataIndex: "error_count",
+                    key: "error_count",
+                    width: 60,
+                    align: "center",
+                  },
+                ]}
+              />
             </div>
 
             {/* 点击客户明细列 */}
@@ -1664,63 +1880,79 @@ export default function CronJobOverviewPage() {
               <h3 className={styles.drillDownTitle}>
                 点击客户明细
                 {selectedModalSkill && (
-                  <span className={styles.drillDownSubTitle}>（{formatSkillName(selectedModalSkill)}）</span>
+                  <span className={styles.drillDownSubTitle}>
+                    （{formatSkillName(selectedModalSkill)}）
+                  </span>
                 )}
               </h3>
-              <div className={styles.drillDownTableScroll}>
-                <Table
-                  dataSource={modalCustomers}
-                  rowKey="customer_id"
-                  loading={modalCustomersLoading}
-                  size="small"
-                  pagination={{ pageSize: 5 }}
-                  sticky
-                  scroll={DRILL_DOWN_TABLE_SCROLL}
-                  columns={[
-                    { title: "客户名称", dataIndex: "customer_name", key: "customer_name", width: 90, align: "center" },
-                    { title: "客户ID", dataIndex: "customer_id", key: "customer_id", width: 80, align: "center" },
-                    {
-                      title: "点击方案",
-                      dataIndex: "clicked_plan",
-                      key: "clicked_plan",
-                      width: 55,
-                      align: "center",
-                      render: (v: boolean) => (v ? "是" : "否"),
-                    },
-                    {
-                      title: "点击洞察",
-                      dataIndex: "clicked_insight",
-                      key: "clicked_insight",
-                      width: 55,
-                      align: "center",
-                      render: (v: boolean) => (v ? "是" : "否"),
-                    },
-                    {
-                      title: "点击电访",
-                      dataIndex: "clicked_phone",
-                      key: "clicked_phone",
-                      width: 55,
-                      align: "center",
-                      render: (v: boolean) => (v ? "是" : "否"),
-                    },
-                    {
-                      title: "点击时间",
-                      dataIndex: "click_time",
-                      key: "click_time",
-                      width: 100,
-                      align: "center",
-                      render: (v: string) => (v ? dayjs(v).format("YYYY-MM-DD HH:mm") : "-"),
-                    },
-                  ]}
-                />
-              </div>
+              <Table
+                className={styles.drillDownTable}
+                dataSource={modalCustomers}
+                rowKey="customer_id"
+                loading={modalCustomersLoading}
+                size="small"
+                pagination={{ pageSize: 5 }}
+                sticky
+                scroll={DRILL_DOWN_TABLE_SCROLL}
+                columns={[
+                  {
+                    title: "客户名称",
+                    dataIndex: "customer_name",
+                    key: "customer_name",
+                    width: 90,
+                    align: "center",
+                  },
+                  {
+                    title: "客户ID",
+                    dataIndex: "customer_id",
+                    key: "customer_id",
+                    width: 80,
+                    align: "center",
+                  },
+                  {
+                    title: "点击方案",
+                    dataIndex: "clicked_plan",
+                    key: "clicked_plan",
+                    width: 55,
+                    align: "center",
+                    render: (v: boolean) => (v ? "是" : "否"),
+                  },
+                  {
+                    title: "点击洞察",
+                    dataIndex: "clicked_insight",
+                    key: "clicked_insight",
+                    width: 55,
+                    align: "center",
+                    render: (v: boolean) => (v ? "是" : "否"),
+                  },
+                  {
+                    title: "点击电访",
+                    dataIndex: "clicked_phone",
+                    key: "clicked_phone",
+                    width: 55,
+                    align: "center",
+                    render: (v: boolean) => (v ? "是" : "否"),
+                  },
+                  {
+                    title: "点击时间",
+                    dataIndex: "click_time",
+                    key: "click_time",
+                    width: 100,
+                    align: "center",
+                    render: (v: string) =>
+                      v ? dayjs(v).format("YYYY-MM-DD HH:mm") : "-",
+                  },
+                ]}
+              />
             </div>
           </div>
         )}
       </Modal>
 
       {/* 技能视角分行排行 */}
-      <h2 className={`${styles.sectionHeading} ${styles.sectionHeadingSpacious}`}>
+      <h2
+        className={`${styles.sectionHeading} ${styles.sectionHeadingSpacious}`}
+      >
         技能视角-分行综合排行
         <span className={styles.sectionHeadingHint}>（点击分行查看明细）</span>
       </h2>
@@ -1736,45 +1968,94 @@ export default function CronJobOverviewPage() {
           <div className={styles.drillDownFullWidth}>
             <h3 className={styles.drillDownTitle}>
               当前分行下的客户经理明细
-              <span className={styles.drillDownSubTitle}>（{selectedBranch.bbk_name}）</span>
+              <span className={styles.drillDownSubTitle}>
+                （{selectedBranch.bbk_name}）
+              </span>
             </h3>
-            <div className={styles.drillDownTableScroll}>
-              <Table
-                dataSource={managerSummary}
-                rowKey="user_id"
-                loading={managerSummaryLoading}
-                size="small"
-                pagination={false}
-                sticky
-                scroll={DRILL_DOWN_TABLE_SCROLL}
-                rowClassName={styles.drillHoverRow}
-                columns={[
-                  {
-                    title: "客户经理名称",
-                    dataIndex: "user_name",
-                    key: "user_name",
-                    width: 100,
-                    align: "center",
-                    render: (v: string, record: BranchManagerSummaryItem) => (
-                      <span
-                        className={styles.clickableLink}
-                        onClick={() => handleOpenManagerDetail(record)}
-                      >
-                        {v || record.user_id}
-                      </span>
-                    ),
-                  },
-                  { title: "技能数量", dataIndex: "skill_count", key: "skill_count", width: 70, align: "center" },
-                  { title: "任务总数", dataIndex: "total_tasks", key: "total_tasks", width: 70, align: "center" },
-                  { title: "成功执行数", dataIndex: "success_count", key: "success_count", width: 70, align: "center" },
-                  { title: "已读任务数", dataIndex: "read_tasks", key: "read_tasks", width: 70, align: "center" },
-                  { title: "推荐客户数", dataIndex: "recommended_customers", key: "recommended_customers", width: 80, align: "center" },
-                  { title: "查看方案客户数", dataIndex: "viewed_customers", key: "viewed_customers", width: 90, align: "center" },
-                  { title: "去洞察客户数", dataIndex: "insight_customers", key: "insight_customers", width: 80, align: "center" },
-                  { title: "去电访客户数", dataIndex: "phone_customers", key: "phone_customers", width: 80, align: "center" },
-                ]}
-              />
-            </div>
+            <Table
+              className={styles.drillDownTable}
+              dataSource={managerSummary}
+              rowKey="user_id"
+              loading={managerSummaryLoading}
+              size="small"
+              pagination={false}
+              sticky
+              scroll={DRILL_DOWN_TABLE_SCROLL}
+              rowClassName={styles.drillHoverRow}
+              columns={[
+                {
+                  title: "客户经理名称",
+                  dataIndex: "user_name",
+                  key: "user_name",
+                  width: 100,
+                  align: "center",
+                  render: (v: string, record: BranchManagerSummaryItem) => (
+                    <span
+                      className={styles.clickableLink}
+                      onClick={() => handleOpenManagerDetail(record)}
+                    >
+                      {v || record.user_id}
+                    </span>
+                  ),
+                },
+                {
+                  title: "技能数量",
+                  dataIndex: "skill_count",
+                  key: "skill_count",
+                  width: 70,
+                  align: "center",
+                },
+                {
+                  title: "任务总数",
+                  dataIndex: "total_tasks",
+                  key: "total_tasks",
+                  width: 70,
+                  align: "center",
+                },
+                {
+                  title: "成功执行数",
+                  dataIndex: "success_count",
+                  key: "success_count",
+                  width: 70,
+                  align: "center",
+                },
+                {
+                  title: "已读任务数",
+                  dataIndex: "read_tasks",
+                  key: "read_tasks",
+                  width: 70,
+                  align: "center",
+                },
+                {
+                  title: "推荐客户数",
+                  dataIndex: "recommended_customers",
+                  key: "recommended_customers",
+                  width: 80,
+                  align: "center",
+                },
+                {
+                  title: "查看方案客户数",
+                  dataIndex: "viewed_customers",
+                  key: "viewed_customers",
+                  width: 90,
+                  align: "center",
+                },
+                {
+                  title: "去洞察客户数",
+                  dataIndex: "insight_customers",
+                  key: "insight_customers",
+                  width: 80,
+                  align: "center",
+                },
+                {
+                  title: "去电访客户数",
+                  dataIndex: "phone_customers",
+                  key: "phone_customers",
+                  width: 80,
+                  align: "center",
+                },
+              ]}
+            />
           </div>
         </div>
       )}
