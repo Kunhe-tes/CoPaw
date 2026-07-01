@@ -20,8 +20,24 @@ _Avoid_: subagent creation
 A **SubAgent Run** that is started by the Main Agent and observed later through status, result retrieval, or cancellation. It is still one run of a **SubAgent Definition**, not a new definition.
 _Avoid_: detached subagent, subprocess subagent
 
+**Background SubAgent Concurrency Limit**:
+The maximum number of **Background SubAgent Runs** that one runtime scope may have running at the same time. When the limit is reached, a new background start request is rejected as blocked rather than queued.
+_Avoid_: queue size, worker pool size, soft recommendation
+
+**Background SubAgent Run Status**:
+The lifecycle state of a **Background SubAgent Run** as observed by the Main Agent: `pending`, `running`, `paused`, `completed`, `failed`, `cancelled`, or `expired`. It is separate from the `status` field inside an **AgentResult**, which describes the delegated task outcome. `expired` is reserved for future supervisor cleanup semantics and is not emitted by the first background-tool implementation.
+_Avoid_: AgentResult status, tool call status, process exit code
+
+**Background SubAgent Tools**:
+The Main Agent tools for managing **Background SubAgent Runs**: `start_subagent`, `wait_subagent`, `get_subagent`, and `cancel_subagent`. They are the intended SubAgent tool surface for the next implementation stage.
+_Avoid_: agent tools, generic worker tools, synchronous delegate tool
+
+**wait_subagent Tool**:
+A Main Agent tool that performs a bounded wait and returns a compact status snapshot for the current tenant-and-agent scope's non-terminal **Background SubAgent Runs** by default.
+_Avoid_: list agents, background queue browser, automatic completion callback
+
 **SubAgent Run Cancellation**:
-The act of cancelling the background asyncio task that owns a **Background SubAgent Run** and marking that run as cancelled. It does not imply recursively terminating tool-owned subprocesses unless a later execution backend explicitly supports that behavior.
+The act of cancelling the execution handle that owns a **Background SubAgent Run** and marking that run as cancelled. It does not imply recursively terminating tool-owned subprocesses unless a later execution backend explicitly supports that behavior.
 _Avoid_: kill process tree, hard stop all tools
 
 **SubAgent Execution Backend**:
@@ -401,10 +417,10 @@ Resolved to mean creating a **SubAgent Run**, not creating a new **SubAgent Defi
 Resolved to mean starting a **Background SubAgent Run** that can be queried, completed, or cancelled by run id.
 
 **"SubAgent Subprocess"**:
-Resolved as a possible **SubAgent Execution Backend**, not the definition of a SubAgent lifecycle. Choosing a subprocess backend should be treated separately from adding background run status and cancellation semantics.
+Resolved as the next **SubAgent Execution Backend** for **Background SubAgent Runs**. It remains an execution mechanism, not a new kind of **SubAgent Definition**.
 
 **"Cancel SubAgent"**:
-Resolved for the next stage as **SubAgent Run Cancellation** of the asyncio task that owns the run. Recursive termination of shell/tool subprocesses is outside the next stage.
+Resolved for the next stage as **SubAgent Run Cancellation** of the subprocess process group that owns the run. If a terminal result has already been written, cancellation does not overwrite it.
 
 **"Enter Plan Mode"**:
 Resolved to require an **Explicit Plan Entry** such as a chat-window toggle or `/plan` command. Automatic silent switching is outside the next stage.
@@ -440,10 +456,10 @@ Resolved as outside the next Plan Mode design. The existing SubAgent runtime and
 Resolved as a **Hook Telemetry Log Message** emitted for log collection and analysis, not a Trace Span persisted in tracing storage and not a global logging format change.
 
 **"Plan Mode Delegation"**:
-Resolved as allowed but optional. Plan Mode may expose `delegate_to_subagent`, but it does not auto-call `plan-researcher` or any other built-in SubAgent.
+Resolved as allowed but optional. Plan Mode may expose readonly **Background SubAgent Tools**, but it does not auto-call `plan-researcher` or any other built-in SubAgent.
 
 **"Plan Mode Tool Scope"**:
-Resolved as the **Planning Readonly Policy**: `read_file`, `grep_search`, `glob_search`, `get_current_time`, readonly shell, and readonly `delegate_to_subagent` are allowed; `write_file`, `edit_file`, `copy_file_to_static`, `update_task_progress`, mutating shell, test commands, deployment commands, and migration commands are forbidden.
+Resolved as the **Planning Readonly Policy**: `read_file`, `grep_search`, `glob_search`, `get_current_time`, readonly shell, and readonly **Background SubAgent Tools** are allowed; `write_file`, `edit_file`, `copy_file_to_static`, `update_task_progress`, mutating shell, test commands, deployment commands, and migration commands are forbidden.
 
 **"Plan Interaction Types"**:
 Resolved to support only `single_choice`, `multi_choice`, `text_input`, and `plan_review` in the first version.
