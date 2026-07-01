@@ -5,12 +5,17 @@ from .builtins import builtin_definition_provider
 from .manager import DelegationManager
 from .models import (
     AgentResult,
+    BackgroundRunStatus,
+    BackgroundSubAgentRunRecord,
     DelegationSpec,
     DefinitionValidationError,
     EvidenceRef,
     PermissionPolicy,
     SubAgentDefinition,
     SubAgentRunRecord,
+    TERMINAL_BACKGROUND_RUN_STATUSES,
+    WorkerLaunchSpec,
+    WorkerProcessInfo,
     ToolAuthorizationDecision,
 )
 from .permissions import compose_effective_policy, validate_tool_call
@@ -23,6 +28,7 @@ from .registry import (
 from .run_store import (
     InMemorySubAgentRunStore,
     LocalJsonSubAgentRunStore,
+    PerRunSubAgentRunStore,
     SubAgentRunStore,
 )
 from .runtime import SubAgentRuntime
@@ -30,6 +36,8 @@ from .runtime import SubAgentRuntime
 __all__ = [
     "AgentRegistry",
     "AgentResult",
+    "BackgroundRunStatus",
+    "BackgroundSubAgentRunRecord",
     "DelegationManager",
     "DelegationSpec",
     "DefinitionValidationError",
@@ -37,6 +45,7 @@ __all__ = [
     "InMemoryDefinitionProvider",
     "InMemorySubAgentRunStore",
     "LocalJsonSubAgentRunStore",
+    "PerRunSubAgentRunStore",
     "PermissionPolicy",
     "SubAgentDefinition",
     "SubAgentDefinitionStore",
@@ -44,7 +53,10 @@ __all__ = [
     "SubAgentRunRecord",
     "SubAgentRuntime",
     "SubAgentRunStore",
+    "TERMINAL_BACKGROUND_RUN_STATUSES",
     "ToolAuthorizationDecision",
+    "WorkerLaunchSpec",
+    "WorkerProcessInfo",
     "builtin_definition_provider",
     "compose_effective_policy",
     "validate_tool_call",

@@ -6,13 +6,17 @@ from __future__ import annotations
 import json
 from pathlib import Path
 from typing import Protocol
+from uuid import uuid4
 
 from .models import (
     AgentError,
     AgentResult,
+    BackgroundSubAgentRunRecord,
     PermissionPolicy,
     SubAgentDefinition,
     SubAgentRunRecord,
+    TERMINAL_BACKGROUND_RUN_STATUSES,
+    WorkerProcessInfo,
     _now_utc,
 )
 from .models import DelegationSpec
@@ -216,3 +220,163 @@ class LocalJsonSubAgentRunStore(InMemorySubAgentRunStore):
         record = await super().cancel(run_id)
         self._save()
         return record
+
+
+class PerRunSubAgentRunStore:
+    """Per-run JSON store for Background SubAgent Runs."""
+
+    def __init__(self, run_store_dir: Path):
+        self._dir = Path(run_store_dir)
+
+    async def create(
+        self,
+        spec: DelegationSpec,
+        definition: SubAgentDefinition,
+        effective_policy: PermissionPolicy,
+    ) -> BackgroundSubAgentRunRecord:
+        """Create a pending background run record."""
+        record = BackgroundSubAgentRunRecord(
+            spec=spec,
+            definition_name=definition.name,
+            definition_version=definition.version,
+            definition_source=definition.source,
+            owner_scope=definition.owner_scope,
+            effective_policy=effective_policy,
+        )
+        self._write(record)
+        return record
+
+    async def mark_running(
+        self,
+        run_id: str,
+        *,
+        worker_pid: int,
+        stderr_log_path: str | None = None,
+    ) -> BackgroundSubAgentRunRecord:
+        """Mark a background run as running with worker metadata."""
+        record = self._require(run_id)
+        if record.status in TERMINAL_BACKGROUND_RUN_STATUSES:
+            return record
+        now = _now_utc()
+        running = record.model_copy(
+            update={
+                "status": "running",
+                "worker": WorkerProcessInfo(
+                    pid=worker_pid,
+                    started_at=now,
+                    stderr_log_path=stderr_log_path,
+                ),
+                "started_at": record.started_at or now,
+                "updated_at": now,
+            },
+        )
+        self._write(running)
+        return running
+
+    async def finish(
+        self,
+        run_id: str,
+        result: AgentResult,
+    ) -> BackgroundSubAgentRunRecord:
+        """Store a terminal result under lifecycle status completed."""
+        record = self._require(run_id)
+        if record.status in TERMINAL_BACKGROUND_RUN_STATUSES:
+            return record
+        now = _now_utc()
+        finished = record.model_copy(
+            update={
+                "status": "completed",
+                "result": result,
+                "finished_at": now,
+                "updated_at": now,
+            },
+        )
+        self._write(finished)
+        return finished
+
+    async def fail(
+        self,
+        run_id: str,
+        message: str,
+        *,
+        result: AgentResult | None = None,
+    ) -> BackgroundSubAgentRunRecord:
+        """Store a terminal background failure."""
+        record = self._require(run_id)
+        if record.status in TERMINAL_BACKGROUND_RUN_STATUSES:
+            return record
+        now = _now_utc()
+        errors = (
+            list(result.errors)
+            if result and result.errors
+            else [
+                AgentError(
+                    code="runtime_error",
+                    message=message,
+                    recoverable=False,
+                ),
+            ]
+        )
+        failed = record.model_copy(
+            update={
+                "status": "failed",
+                "result": result,
+                "errors": [*record.errors, *errors],
+                "finished_at": now,
+                "updated_at": now,
+            },
+        )
+        self._write(failed)
+        return failed
+
+    async def cancel(self, run_id: str) -> BackgroundSubAgentRunRecord:
+        """Mark a background run cancelled if still non-terminal."""
+        record = self._require(run_id)
+        if record.status in TERMINAL_BACKGROUND_RUN_STATUSES:
+            return record
+        now = _now_utc()
+        cancelled = record.model_copy(
+            update={
+                "status": "cancelled",
+                "finished_at": now,
+                "updated_at": now,
+            },
+        )
+        self._write(cancelled)
+        return cancelled
+
+    async def get(self, run_id: str) -> BackgroundSubAgentRunRecord | None:
+        """Return a background run by id from its individual JSON file."""
+        path = self._path(run_id)
+        if not path.exists():
+            return None
+        return BackgroundSubAgentRunRecord.model_validate(
+            json.loads(path.read_text(encoding="utf-8")),
+        )
+
+    def _require(self, run_id: str) -> BackgroundSubAgentRunRecord:
+        path = self._path(run_id)
+        if not path.exists():
+            raise KeyError(run_id)
+        return BackgroundSubAgentRunRecord.model_validate(
+            json.loads(path.read_text(encoding="utf-8")),
+        )
+
+    def _path(self, run_id: str) -> Path:
+        if Path(run_id).name != run_id:
+            raise ValueError("run_id must not contain path separators")
+        return self._dir / f"{run_id}.json"
+
+    def _write(self, record: BackgroundSubAgentRunRecord) -> None:
+        self._dir.mkdir(parents=True, exist_ok=True)
+        path = self._path(record.run_id)
+        tmp_path = self._dir / f".{record.run_id}.{uuid4().hex}.tmp"
+        tmp_path.write_text(
+            json.dumps(
+                record.model_dump(mode="json"),
+                ensure_ascii=False,
+                indent=2,
+            ),
+            encoding="utf-8",
+        )
+        tmp_path.replace(path)

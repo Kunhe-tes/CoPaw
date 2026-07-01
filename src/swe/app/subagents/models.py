@@ -7,7 +7,7 @@ from datetime import datetime, timezone
 from typing import Any, Literal
 from uuid import uuid4
 
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 DefinitionSource = Literal["builtin", "user"]
 AgentResultStatus = Literal[
@@ -26,6 +26,31 @@ RunStatus = Literal[
     "failed",
     "cancelled",
 ]
+BackgroundRunStatus = Literal[
+    "pending",
+    "running",
+    "paused",
+    "completed",
+    "failed",
+    "cancelled",
+    "expired",
+]
+TERMINAL_BACKGROUND_RUN_STATUSES = frozenset(
+    {"completed", "failed", "cancelled", "expired"},
+)
+SAFE_WORKER_REQUEST_CONTEXT_KEYS = frozenset(
+    {
+        "session_id",
+        "chat_id",
+        "turn_id",
+        "user_id",
+        "channel",
+        "source_id",
+        "trace_id",
+        "tenant_id",
+        "agent_id",
+    },
+)
 
 KNOWN_BUILTIN_TOOLS = frozenset(
     {
@@ -511,3 +536,58 @@ class SubAgentRunRecord(BaseModel):
     created_at: datetime = Field(default_factory=_now_utc)
     started_at: datetime | None = None
     finished_at: datetime | None = None
+
+
+class WorkerProcessInfo(BaseModel):
+    """Observable subprocess metadata for a Background SubAgent Run."""
+
+    pid: int
+    started_at: datetime = Field(default_factory=_now_utc)
+    exit_code: int | None = None
+    exited_at: datetime | None = None
+    stderr_log_path: str | None = None
+
+
+class WorkerLaunchSpec(BaseModel):
+    """Minimal JSON contract used to launch a SubAgent worker process."""
+
+    model_config = ConfigDict(extra="ignore")
+
+    run_id: str
+    run_store_dir: str
+    workspace_dir: str
+    parent_agent_config: dict[str, Any]
+    definition: SubAgentDefinition
+    delegation_spec: DelegationSpec
+    effective_policy: PermissionPolicy
+    request_context: dict[str, Any] = Field(default_factory=dict)
+    stderr_log_path: str | None = None
+
+    @model_validator(mode="after")
+    def keep_only_safe_request_context(self) -> "WorkerLaunchSpec":
+        self.request_context = {
+            key: value
+            for key, value in self.request_context.items()
+            if key in SAFE_WORKER_REQUEST_CONTEXT_KEYS
+        }
+        return self
+
+
+class BackgroundSubAgentRunRecord(BaseModel):
+    """Per-run persisted record for an observable Background SubAgent Run."""
+
+    run_id: str = Field(default_factory=lambda: f"subagent-{uuid4().hex[:12]}")
+    status: BackgroundRunStatus = "pending"
+    spec: DelegationSpec
+    definition_name: str
+    definition_version: str
+    definition_source: DefinitionSource
+    owner_scope: str
+    effective_policy: PermissionPolicy
+    worker: WorkerProcessInfo | None = None
+    result: AgentResult | None = None
+    errors: list[AgentError] = Field(default_factory=list)
+    created_at: datetime = Field(default_factory=_now_utc)
+    started_at: datetime | None = None
+    finished_at: datetime | None = None
+    updated_at: datetime = Field(default_factory=_now_utc)
