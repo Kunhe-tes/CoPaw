@@ -51,6 +51,33 @@ SAFE_WORKER_REQUEST_CONTEXT_KEYS = frozenset(
         "agent_id",
     },
 )
+SECRET_LIKE_FIELD_FRAGMENTS = (
+    "api_key",
+    "apikey",
+    "secret",
+    "password",
+    "credential",
+    "access_token",
+    "refresh_token",
+)
+
+
+def _drop_secret_like_fields(value: Any) -> Any:
+    if isinstance(value, dict):
+        safe: dict[str, Any] = {}
+        for key, item in value.items():
+            normalized = str(key).lower()
+            if any(
+                fragment in normalized
+                for fragment in SECRET_LIKE_FIELD_FRAGMENTS
+            ):
+                continue
+            safe[key] = _drop_secret_like_fields(item)
+        return safe
+    if isinstance(value, list):
+        return [_drop_secret_like_fields(item) for item in value]
+    return value
+
 
 KNOWN_BUILTIN_TOOLS = frozenset(
     {
@@ -565,6 +592,9 @@ class WorkerLaunchSpec(BaseModel):
 
     @model_validator(mode="after")
     def keep_only_safe_request_context(self) -> "WorkerLaunchSpec":
+        self.parent_agent_config = _drop_secret_like_fields(
+            self.parent_agent_config,
+        )
         self.request_context = {
             key: value
             for key, value in self.request_context.items()

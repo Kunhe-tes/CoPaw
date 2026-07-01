@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 from typing import Protocol
 from uuid import uuid4
@@ -250,7 +251,7 @@ class PerRunSubAgentRunStore:
         self,
         run_id: str,
         *,
-        worker_pid: int,
+        worker_pid: int | None = None,
         stderr_log_path: str | None = None,
     ) -> BackgroundSubAgentRunRecord:
         """Mark a background run as running with worker metadata."""
@@ -258,13 +259,21 @@ class PerRunSubAgentRunStore:
         if record.status in TERMINAL_BACKGROUND_RUN_STATUSES:
             return record
         now = _now_utc()
+        pid = worker_pid
+        if pid is None and record.worker is not None:
+            pid = record.worker.pid
+        if pid is None:
+            pid = os.getpid()
+        stderr_path = stderr_log_path
+        if stderr_path is None and record.worker is not None:
+            stderr_path = record.worker.stderr_log_path
         running = record.model_copy(
             update={
                 "status": "running",
                 "worker": WorkerProcessInfo(
-                    pid=worker_pid,
+                    pid=pid,
                     started_at=now,
-                    stderr_log_path=stderr_log_path,
+                    stderr_log_path=stderr_path,
                 ),
                 "started_at": record.started_at or now,
                 "updated_at": now,
