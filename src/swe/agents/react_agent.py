@@ -59,6 +59,11 @@ from .tools import (
     update_task_progress,
     ask_plan_clarification,
     create_submit_proposed_plan_tool,
+    build_background_subagent_scope,
+    create_background_subagent_tools,
+    get_default_background_subagent_supervisor,
+    has_explicit_subagent_run_id,
+    has_subagent_intent,
 )
 from .utils import process_file_and_media_blocks_in_message
 from ..utils.fs_text import sanitize_text_for_json
@@ -553,7 +558,65 @@ class SWEAgent(ToolGuardMixin, ReActAgent):
                     f"Failed to register task management tools: {e}",
                 )
 
+        self._register_background_subagent_tools(
+            toolkit,
+            namesake_strategy,
+            request_context,
+        )
+
         return toolkit
+
+    def _register_background_subagent_tools(
+        self,
+        toolkit: Toolkit,
+        namesake_strategy: NamesakeStrategy,
+        request_context: dict[str, Any],
+    ) -> None:
+        if not request_context.get("enable_subagents"):
+            return
+        if request_context.get("agent_role", "main") == "subagent":
+            return
+        supervisor = (
+            request_context.get(
+                "_subagent_supervisor",
+            )
+            or get_default_background_subagent_supervisor()
+        )
+        scope = build_background_subagent_scope(
+            parent_agent_config=self._agent_config,
+            request_context=request_context,
+        )
+        active = bool(
+            getattr(supervisor, "has_active_runs", lambda _scope: False)(
+                scope,
+            ),
+        )
+        intent = has_subagent_intent(request_context)
+        explicit_run_id = has_explicit_subagent_run_id(request_context)
+        if not (intent or active or explicit_run_id):
+            return
+        tools = create_background_subagent_tools(
+            supervisor=supervisor,
+            parent_agent_config=self._agent_config,
+            workspace_dir=(
+                self._workspace_dir
+                or Path(self._agent_config.workspace_dir or ".")
+            ),
+            request_context=request_context,
+        )
+        names = []
+        if intent:
+            names.append("start_subagent")
+        if intent or active:
+            names.append("wait_subagent")
+        if intent or active or explicit_run_id:
+            names.extend(["get_subagent", "cancel_subagent"])
+        for name in names:
+            toolkit.register_tool_function(
+                tools[name],
+                namesake_strategy=namesake_strategy,
+            )
+        self._normalize_registered_tool_functions(toolkit, names)
 
     @staticmethod
     def _normalize_registered_tool_functions(

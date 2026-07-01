@@ -292,6 +292,62 @@ def test_main_agent_never_registers_delegation_tool(
     )
 
 
+def test_background_subagent_tools_require_explicit_intent(
+    tmp_path: Path,
+) -> None:
+    """Main Agent sees start_subagent only after explicit SubAgent intent."""
+    hidden = _bare_agent(
+        tmp_path,
+        request_context={
+            "agent_role": "main",
+            "enable_subagents": True,
+            "current_user_text": "请分析这个模块",
+        },
+    )
+    visible = _bare_agent(
+        tmp_path,
+        request_context={
+            "agent_role": "main",
+            "enable_subagents": True,
+            "current_user_text": "请用子代理分析这个模块",
+        },
+    )
+
+    assert "start_subagent" not in SWEAgent._create_toolkit(hidden).tools
+    visible_tools = SWEAgent._create_toolkit(visible).tools
+    assert "start_subagent" in visible_tools
+    assert "wait_subagent" in visible_tools
+    assert "get_subagent" in visible_tools
+    assert "cancel_subagent" in visible_tools
+    assert "delegate_to_subagent" not in visible_tools
+
+
+def test_background_subagent_observe_tools_visible_with_active_runs(
+    tmp_path: Path,
+) -> None:
+    """Active scope runs expose wait/get/cancel without fresh start intent."""
+
+    class _Supervisor:
+        def has_active_runs(self, scope):
+            return True
+
+    agent = _bare_agent(
+        tmp_path,
+        request_context={
+            "agent_role": "main",
+            "enable_subagents": True,
+            "_subagent_supervisor": _Supervisor(),
+        },
+    )
+
+    tools = SWEAgent._create_toolkit(agent).tools
+
+    assert "start_subagent" not in tools
+    assert "wait_subagent" in tools
+    assert "get_subagent" in tools
+    assert "cancel_subagent" in tools
+
+
 def test_plan_mode_toolkit_excludes_mutating_tools(tmp_path: Path) -> None:
     """Plan Mode 只暴露规划所需的只读工具。"""
     agent = _bare_agent(

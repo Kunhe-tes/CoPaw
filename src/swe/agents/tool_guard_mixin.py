@@ -90,6 +90,10 @@ _PLAN_INTERACTION_TOOL_NAMES = frozenset(
     {
         "ask_plan_clarification",
         "submit_proposed_plan",
+        "start_subagent",
+        "wait_subagent",
+        "get_subagent",
+        "cancel_subagent",
     },
 )
 _APPROVAL_KIND_TOOL_GUARD = "tool_guard"
@@ -1307,36 +1311,39 @@ class ToolGuardMixin:
         tool_input: dict[str, Any],
         *,
         include_budget: bool,
-    ) -> dict | None:
+    ) -> bool:
         plan_mode_denial = self._plan_mode_policy_denial(
             tool_name,
             tool_input,
         )
         if plan_mode_denial is not None:
-            return await self._acting_plan_mode_policy_denied(
+            await self._acting_plan_mode_policy_denied(
                 tool_call,
                 tool_name,
                 plan_mode_denial,
             )
+            return True
 
         subagent_denial = self._subagent_policy_denial(tool_name, tool_input)
         if subagent_denial is not None:
-            return await self._acting_subagent_policy_denied(
+            await self._acting_subagent_policy_denied(
                 tool_call,
                 tool_name,
                 subagent_denial,
             )
+            return True
         if not include_budget:
-            return None
+            return False
 
         subagent_budget_denial = self._subagent_budget_denial()
         if subagent_budget_denial is not None:
-            return await self._acting_subagent_policy_denied(
+            await self._acting_subagent_policy_denied(
                 tool_call,
                 tool_name,
                 subagent_budget_denial,
             )
-        return None
+            return True
+        return False
 
     async def _acting(self, tool_call) -> dict | None:  # noqa: C901
         """Intercept sensitive tool calls before execution.
@@ -1364,14 +1371,14 @@ class ToolGuardMixin:
         # (agentscope ToolUseBlock) does not carry mcp_server.
         mcp_server = self._resolve_mcp_server(tool_name)
 
-        policy_denial = await self._acting_policy_denial(
+        policy_denied = await self._acting_policy_denial(
             tool_call,
             tool_name,
             tool_input,
             include_budget=True,
         )
-        if policy_denial is not None:
-            return policy_denial
+        if policy_denied:
+            return None
 
         pre_hook_result = await self._emit_tool_hook(
             HookEventName.PRE_TOOL_USE,
@@ -1383,14 +1390,14 @@ class ToolGuardMixin:
             tool_call = dict(tool_call)
             tool_call["input"] = pre_hook_result.updated_input
             tool_input = pre_hook_result.updated_input
-            policy_denial = await self._acting_policy_denial(
+            policy_denied = await self._acting_policy_denial(
                 tool_call,
                 tool_name,
                 tool_input,
                 include_budget=False,
             )
-            if policy_denial is not None:
-                return policy_denial
+            if policy_denied:
+                return None
         if pre_hook_result.decision in {
             HookDecision.BLOCK,
             HookDecision.DENY,
