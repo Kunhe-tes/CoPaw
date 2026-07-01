@@ -16,8 +16,10 @@ from typing import Optional, TypedDict
 from fastapi import (
     APIRouter,
     File,
+    Form,
     Header,
     HTTPException,
+    Query,
     Request,
     UploadFile,
     status,
@@ -227,7 +229,8 @@ def _create_market_item(
     user_id: str,
     user_name: str,
     category_id: Optional[int],
-    skill_id: str = "",
+    skill_id: Optional[str] = None,
+    bbk_ids: Optional[list[str]] = None,
 ) -> MarketItem:
     """创建市场条目."""
     now = datetime.now(timezone.utc).isoformat()
@@ -235,14 +238,14 @@ def _create_market_item(
         item_id=str(uuid.uuid4()),
         item_type="skill",
         name=name,
-        skill_id=skill_id,
+        skill_id=skill_id or "",
         chinese_name=chinese_name,
         description=description,
         version=version or "1.0.0",
         creator_id=user_id,
         creator_name=user_name,
         category_id=category_id,
-        bbk_ids=[],
+        bbk_ids=bbk_ids or [],
         status="active",
         created_at=now,
         updated_at=now,
@@ -305,6 +308,7 @@ def _update_existing_market_item(
     user_id: str,
     user_name: str,
     category_id: Optional[int],
+    bbk_ids: Optional[list[str]] = None,
 ) -> bool:
     """更新已有的市场条目.
 
@@ -323,6 +327,7 @@ def _update_existing_market_item(
     existing.creator_id = user_id
     existing.creator_name = user_name
     existing.category_id = category_id
+    existing.bbk_ids = bbk_ids or []
     existing.updated_at = now
     # 同名技能覆盖时，复用已有 skill_id（若已有）
     if existing.skill_id:
@@ -385,8 +390,9 @@ def _process_skill_upload_single(
     user_name: str,
     category_id: Optional[int],
     overwrite: bool = False,
-    cn_name: str = "",
-    skill_id: str = "",  # parse-zip 生成的 skill_id
+    cn_name: Optional[str] = None,
+    skill_id: Optional[str] = None,
+    bbk_ids: Optional[list[str]] = None,
 ) -> tuple[Optional[str], Optional[dict], Optional[str], str, bool]:
     """处理单个技能的上架逻辑.
 
@@ -394,6 +400,7 @@ def _process_skill_upload_single(
         overwrite: 是否覆盖同名技能，默认 False（返回冲突）
         cn_name: 用户输入的中文展示名
         skill_id: parse-zip 生成的 skill_id，前端传入确保一致性
+        bbk_ids: 所属分行 ID 列表
 
     Returns:
         (imported_name, conflict_info, parsed_name_for_first, resolved_cn_name, version_unchanged)
@@ -449,6 +456,7 @@ def _process_skill_upload_single(
             user_id,
             user_name,
             category_id,
+            bbk_ids,
         )
         item = existing
     else:
@@ -462,6 +470,7 @@ def _process_skill_upload_single(
             user_name,
             category_id,
             skill_id=final_skill_id,
+            bbk_ids=bbk_ids or [],
         )
         items.append(item)
 
@@ -549,10 +558,11 @@ async def _process_published_skill_record(
 async def publish_skill_upload(
     request: Request,
     file: UploadFile = File(..., description="Skill zip file to publish"),
-    category_id: Optional[int] = None,
-    overwrite: bool = False,
-    cn_name: str = "",
-    skill_id: str = "",  # parse-zip 生成的 skill_id
+    category_id: Optional[int] = Query(default=None),
+    overwrite: bool = Query(default=False),
+    cn_name: str = Query(default=""),
+    skill_id: str = Query(default=""),
+    bbk_ids: str = Query(default=""),
     x_source_id: Optional[str] = Header(default=None, alias="X-Source-Id"),
     x_manager: Optional[str] = Header(default=None, alias="X-Manager"),
     x_user_id: Optional[str] = Header(default=None, alias="X-User-Id"),
@@ -563,6 +573,7 @@ async def publish_skill_upload(
     Args:
         overwrite: 是否覆盖同名技能，默认 False（返回冲突提示）
         skill_id: parse-zip 生成的 skill_id，前端传入确保一致性
+        bbk_ids: 所属分行 ID，逗号分隔，如 "100,200"
     """
     source_id = require_source_id(x_source_id)
     _require_manager(x_manager)
@@ -574,6 +585,11 @@ async def publish_skill_upload(
 
     svc = request.app.state.marketplace
     user_name = decode_user_name(x_user_name) or x_user_id
+
+    # 解析 bbk_ids（逗号分隔）
+    parsed_bbk_ids = []
+    if bbk_ids.strip():
+        parsed_bbk_ids = [b.strip() for b in bbk_ids.split(",") if b.strip()]
 
     # 读取并验证 zip 文件
     data = await _read_validated_zip_upload(file)
@@ -616,6 +632,7 @@ async def publish_skill_upload(
                 overwrite,
                 cn_name,
                 skill_id,  # 传递 parse-zip 生成的 skill_id
+                parsed_bbk_ids,  # 传递所属分行
             )
 
             if conflict:

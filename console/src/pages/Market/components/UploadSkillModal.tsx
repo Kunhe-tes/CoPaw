@@ -3,6 +3,7 @@ import { Modal, Upload, Select, Input, message, Spin, Button, Tooltip, Alert, Po
 import { InboxOutlined, PlusOutlined, InfoCircleOutlined, QuestionCircleOutlined } from "@ant-design/icons";
 import type { UploadProps } from "antd";
 import { marketApi, type Category } from "../../../api/modules/market";
+import { BBK_ID_MAP } from "../../../constants/bbk";
 
 interface UploadSkillModalProps {
   open: boolean;
@@ -23,6 +24,7 @@ export default function UploadSkillModal({
 }: UploadSkillModalProps) {
   const [categories, setCategories] = useState<Category[]>([]);
   const [selectedCategory, setSelectedCategory] = useState<number | null>(null);
+  const [selectedBbkIds, setSelectedBbkIds] = useState<string[]>([]);
   const [file, setFile] = useState<File | null>(null);
   const [cnName, setCnName] = useState("");
   const [skillId, setSkillId] = useState("");
@@ -64,6 +66,7 @@ export default function UploadSkillModal({
       setSkillIdUsedCount(0);
       setSkillIdUsedBy([]);
       setSelectedCategory(null);
+      setSelectedBbkIds([]);
       setSkillExists(false);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -132,6 +135,10 @@ export default function UploadSkillModal({
       message.error("请输入中文名称");
       return;
     }
+    if (selectedBbkIds.length === 0) {
+      message.error("请选择所属分行");
+      return;
+    }
 
     // 同名技能存在时自动覆盖
     const overwrite = skillExists;
@@ -148,6 +155,7 @@ export default function UploadSkillModal({
           overwrite,
           cn_name: cnName.trim(),
           skill_id: skillId,  // 传入 parse-zip 生成的 skill_id
+          bbk_ids: selectedBbkIds,
         }
       );
 
@@ -294,6 +302,21 @@ export default function UploadSkillModal({
           onChange={(e) => setCnName(e.target.value)}
           maxLength={50}
           showCount
+        />
+      </div>
+
+      <div style={{ marginBottom: 16 }}>
+        <label style={{ display: "block", marginBottom: 8 }}>
+          所属分行 <span style={{ color: "#ff4d4f" }}>*</span>
+        </label>
+        <Select
+          mode="multiple"
+          allowClear
+          style={{ width: "100%" }}
+          placeholder="设置技能所属的分行"
+          value={selectedBbkIds}
+          onChange={setSelectedBbkIds}
+          options={BBK_ID_MAP}
         />
       </div>
 
