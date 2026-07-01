@@ -2,6 +2,42 @@
 
 本文档只收录仓库中已经出现过、且有明确入口可追的高频报错。
 
+## Shell 中运行 swe 时被 Python runtime guard 拦截 `/opt/.swe`
+
+### 症状
+
+- Agent shell 工具里执行 `swe ...` 命令失败
+- stderr 先出现导入期 warning：
+  - `swe: failed to load persisted envs on init`
+- 随后 CLI 启动阶段抛出：
+  - `TenantPathGuardError: Python runtime guard denied pathlib.is_file path outside the allowed workspace: /opt/.swe/config.json`
+- 同一栈里也可能先看到 `/opt/.swe.secret/envs.json` 被拒绝
+
+### 典型原因
+
+- shell 工具会向 Python 子进程注入 `sitecustomize` runtime guard，用于限制租户路径逃逸
+- shell 子进程环境如果丢失后端已确定的 `SWE_WORKING_DIR` / `SWE_SECRET_DIR`，`swe` CLI 会回退到默认 `~/.swe`
+- 容器内 `~` 可能解析为 `/opt`，于是 CLI 读取 `/opt/.swe/config.json` 和 `/opt/.swe.secret/envs.json`
+- 这些路径不属于当前租户 workspace，也不是普通 Python runtime 路径，因此被 guard 拦截
+
+### 第一落点
+
+- [src/swe/agents/tools/shell.py](../../src/swe/agents/tools/shell.py)
+- 重点看 `_prepare_subprocess_env()` 是否通过 `build_runtime_env(preserve_boundary_env_keys=...)` 保留后端边界变量
+- [src/swe/envs/runtime.py](../../src/swe/envs/runtime.py)
+- 重点看 `PROTECTED_RUNTIME_ENV_KEYS`、`_scrub_user_tool_subprocess_env()` 和 `preserve_boundary_env_keys`
+- [src/swe/security/python_runtime_path_guard.py](../../src/swe/security/python_runtime_path_guard.py)
+- 重点看 `prepare_python_runtime_path_guard_env()` 注入的 trusted paths / entrypoint roots
+
+### 第一阶段处理
+
+- shell 子进程应保留后端进程环境中的 `SWE_WORKING_DIR` 和 `SWE_SECRET_DIR`
+- 仍然不能允许租户持久化 env 或 call env 覆盖这两个变量
+- 回归测试应同时断言：
+  - shell 子进程 env 里存在后端 `SWE_WORKING_DIR` / `SWE_SECRET_DIR`
+  - 租户 `.secret/envs.json` 中同名 key 不会覆盖
+  - `PYTHONPATH` 等解释器边界变量仍被过滤
+
 ## MCP 注册时报 App not Subscribe This MCP Server
 
 ### 症状

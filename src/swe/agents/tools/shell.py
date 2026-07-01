@@ -5,7 +5,7 @@
 
 import asyncio
 import ast
-from contextlib import asynccontextmanager
+from contextlib import AbstractContextManager, asynccontextmanager
 import locale
 import os
 import re
@@ -14,7 +14,6 @@ import signal
 import subprocess
 import sys
 import tempfile
-from contextlib import AbstractContextManager
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, AsyncIterator, Awaitable, Callable, Optional
@@ -40,6 +39,13 @@ from ...security.python_runtime_path_guard import (
 from ...security.process_limits import (
     CurrentProcessLimitPolicy,
     resolve_current_process_limit_policy,
+)
+
+_SHELL_PRESERVED_BOUNDARY_ENV_KEYS = frozenset(
+    {
+        "SWE_WORKING_DIR",
+        "SWE_SECRET_DIR",
+    },
 )
 
 # Commands that take string arguments which may look like paths
@@ -163,9 +169,11 @@ def _is_path_like(token: str) -> bool:
     Returns:
         True if the token looks like a path.
     """
-    return token.startswith(("/", "\\", "./", "../", "~")) or re.match(
-        r"^[A-Za-z]:[\\/]",
-        token,
+    return token.startswith(("/", "\\", "./", "../", "~")) or bool(
+        re.match(
+            r"^[A-Za-z]:[\\/]",
+            token,
+        ),
     )
 
 
@@ -180,7 +188,9 @@ def _find_disallowed_shell_env_path_reference(command: str) -> Optional[str]:
 
 def _extract_raw_windows_path_tokens(command: str) -> list[str]:
     """Extract Windows absolute paths before POSIX shlex can drop backslashes."""
-    return [match.group(0) for match in _RAW_WINDOWS_PATH_PATTERN.finditer(command)]
+    return [
+        match.group(0) for match in _RAW_WINDOWS_PATH_PATTERN.finditer(command)
+    ]
 
 
 def _has_code_exec_flag(token: str) -> bool:
@@ -333,16 +343,8 @@ def _static_string_value(
     return None
 
 
-def _scan_python_source_for_outside_path(
-    source: str,
-    base_dir: Path,
-) -> Optional[str]:
-    """Find static Python file-access paths that escape tenant boundary."""
-    try:
-        tree = ast.parse(source)
-    except SyntaxError:
-        return None
-
+def _find_disallowed_system_path_literal(tree: ast.AST) -> Optional[str]:
+    """查找源码中静态出现的系统路径字面量。"""
     for node in ast.walk(tree):
         if not isinstance(node, ast.Constant) or not isinstance(
             node.value,
@@ -355,7 +357,15 @@ def _scan_python_source_for_outside_path(
             if prefix in node.value:
                 return node.value
 
-    constants = _collect_string_constants(tree)
+    return None
+
+
+def _find_outside_python_call_path(
+    tree: ast.AST,
+    constants: dict[str, str],
+    base_dir: Path,
+) -> Optional[str]:
+    """查找 Python 文件访问调用中越出租户边界的静态路径。"""
     for node in ast.walk(tree):
         if not isinstance(node, ast.Call):
             continue
@@ -375,6 +385,28 @@ def _scan_python_source_for_outside_path(
                 base_dir=base_dir,
             ):
                 return path_value
+
+    return None
+
+
+def _scan_python_source_for_outside_path(
+    source: str,
+    base_dir: Path,
+) -> Optional[str]:
+    """Find static Python file-access paths that escape tenant boundary."""
+    try:
+        tree = ast.parse(source)
+    except SyntaxError:
+        return None
+
+    system_path = _find_disallowed_system_path_literal(tree)
+    if system_path:
+        return system_path
+
+    constants = _collect_string_constants(tree)
+    outside_path = _find_outside_python_call_path(tree, constants, base_dir)
+    if outside_path:
+        return outside_path
 
     return None
 
@@ -885,7 +917,9 @@ async def _tenant_shell_execution_slot(
 
 def _prepare_subprocess_env() -> dict[str, str]:
     """Prepare subprocess environment with tenant env and active Python PATH."""
-    env = build_runtime_env()
+    env = build_runtime_env(
+        preserve_boundary_env_keys=_SHELL_PRESERVED_BOUNDARY_ENV_KEYS,
+    )
     python_bin_dir = str(Path(sys.executable).parent)
     existing_path = env.get("PATH", "")
     env["PATH"] = (
