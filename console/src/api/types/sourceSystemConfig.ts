@@ -1,5 +1,9 @@
 export interface SourceSystemConfig extends Record<string, unknown> {
   system_prompt_injections?: string[];
+  approval_notifications?: {
+    zhaohu_tool_guard_enabled?: boolean;
+    [key: string]: unknown;
+  };
 }
 
 export interface EffectiveSourceSystemConfig {

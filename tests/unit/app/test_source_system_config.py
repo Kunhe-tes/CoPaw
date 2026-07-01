@@ -29,6 +29,7 @@ from swe.app.source_system_config.runtime import (
     bind_source_system_config,
     get_current_source_system_config,
     get_system_prompt_injections,
+    is_zhaohu_tool_guard_notification_enabled,
     resolve_cron_task_session_cleanup_config,
     resolve_cron_unread_auto_pause_config,
     resolve_file_read_truncation_config,
@@ -69,6 +70,9 @@ DEFAULT_EXPECTED_SOURCE_CONFIG = {
         "enabled": False,
         "retention_days": 30,
         "cron": "0 1 * * *",
+    },
+    "approval_notifications": {
+        "zhaohu_tool_guard_enabled": False,
     },
 }
 
@@ -1484,6 +1488,57 @@ class TestSourceSystemConfigRuntime:
         assert result.enabled is False
         assert result.retention_days == 45
         assert result.cron == "30 2 * * *"
+
+    def test_zhaohu_tool_guard_notification_runtime_uses_defaults(self):
+        assert is_zhaohu_tool_guard_notification_enabled(None) is False
+
+    def test_zhaohu_tool_guard_notification_runtime_uses_enabled_source_config(self):
+        effective = EffectiveSourceSystemConfig(
+            source_id="portal",
+            config=SourceSystemConfig.model_validate(
+                {
+                    "approval_notifications": {
+                        "zhaohu_tool_guard_enabled": True,
+                    },
+                },
+            ).merged_with_defaults(),
+            raw_config=SourceSystemConfig.model_validate(
+                {
+                    "approval_notifications": {
+                        "zhaohu_tool_guard_enabled": True,
+                    },
+                },
+            ),
+            version=3,
+        )
+
+        result = is_zhaohu_tool_guard_notification_enabled(effective)
+
+        assert result is True
+
+    def test_zhaohu_tool_guard_notification_runtime_uses_disabled_source_config(self):
+        effective = EffectiveSourceSystemConfig(
+            source_id="portal",
+            config=SourceSystemConfig.model_validate(
+                {
+                    "approval_notifications": {
+                        "zhaohu_tool_guard_enabled": False,
+                    },
+                },
+            ).merged_with_defaults(),
+            raw_config=SourceSystemConfig.model_validate(
+                {
+                    "approval_notifications": {
+                        "zhaohu_tool_guard_enabled": False,
+                    },
+                },
+            ),
+            version=3,
+        )
+
+        result = is_zhaohu_tool_guard_notification_enabled(effective)
+
+        assert result is False
 
 
 class TestSourceSystemConfigMiddleware:

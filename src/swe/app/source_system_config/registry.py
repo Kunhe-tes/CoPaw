@@ -73,6 +73,14 @@ DATABASE_ACCESS_GUARD_ENABLED_SWITCH = SourceSystemConfigSwitch(
     default_value=True,
     value_type="bool",
 )
+APPROVAL_NOTIFICATIONS_ZHAOHU_TOOL_GUARD_ENABLED_SETTING = (
+    SourceSystemConfigSetting(
+        key="approval_notifications.zhaohu_tool_guard_enabled",
+        path=("approval_notifications", "zhaohu_tool_guard_enabled"),
+        default_value=False,
+        value_type="bool",
+    )
+)
 FILE_READ_TRUNCATION_ENABLED_SETTING = SourceSystemConfigSetting(
     key="file_read_truncation.enabled",
     path=("file_read_truncation", "enabled"),
@@ -139,6 +147,7 @@ CURRENT_SOURCE_SYSTEM_CONFIG_SETTINGS: tuple[
     TOOL_RESULT_COMPACT_OLD_MAX_BYTES_SETTING,
     TOOL_RESULT_COMPACT_RECENT_MAX_BYTES_SETTING,
     TOOL_RESULT_COMPACT_RETENTION_DAYS_SETTING,
+    APPROVAL_NOTIFICATIONS_ZHAOHU_TOOL_GUARD_ENABLED_SETTING,
     FILE_READ_TRUNCATION_ENABLED_SETTING,
     FILE_READ_TRUNCATION_MAX_BYTES_SETTING,
     CRON_UNREAD_AUTO_PAUSE_ENABLED_SETTING,
@@ -545,6 +554,7 @@ def _validate_explicit_tool_result_compact_ranges(
 
 
 __all__ = [
+    "APPROVAL_NOTIFICATIONS_ZHAOHU_TOOL_GUARD_ENABLED_SETTING",
     "CHAT_TASK_PROGRESS_ENABLED_SWITCH",
     "CRON_TASK_SESSION_CLEANUP_CRON_SETTING",
     "CRON_TASK_SESSION_CLEANUP_ENABLED_SETTING",

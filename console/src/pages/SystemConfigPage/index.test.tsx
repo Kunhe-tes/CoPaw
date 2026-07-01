@@ -52,12 +52,16 @@ describe("SystemConfigPage", () => {
     return screen.getAllByRole("switch")[0];
   }
 
-  function getCronUnreadAutoPauseSwitch() {
+  function getZhaohuToolGuardNotificationSwitch() {
     return screen.getAllByRole("switch")[2];
   }
 
+  function getCronUnreadAutoPauseSwitch() {
+    return screen.getAllByRole("switch")[3];
+  }
+
   function getToolResultCompactSwitch() {
-    return screen.getAllByRole("switch")[4];
+    return screen.getAllByRole("switch")[5];
   }
 
   afterEach(() => {
@@ -151,6 +155,39 @@ describe("SystemConfigPage", () => {
     });
     expect(loadEffectiveConfig).toHaveBeenCalledWith("portal");
     expect(mocks.messageApi.success).toHaveBeenCalled();
+  });
+
+  it("saves zhaohu Tool Guard approval notification switch changes", async () => {
+    mocks.sourceSystemConfigApi.updateCurrent.mockResolvedValue({
+      source_id: "portal",
+      config: {
+        approval_notifications: {
+          zhaohu_tool_guard_enabled: true,
+        },
+      },
+      version: 1,
+      is_default: false,
+      updated_by: "alice",
+      updated_at: "2026-05-20 22:00:00",
+    });
+
+    render(<SystemConfigPage />);
+
+    expect(await screen.findByText("Tool Guard 审批招乎通知")).toBeTruthy();
+
+    fireEvent.click(getZhaohuToolGuardNotificationSwitch());
+    fireEvent.click(screen.getByRole("button", { name: "common.save" }));
+
+    await waitFor(() => {
+      expect(mocks.sourceSystemConfigApi.updateCurrent).toHaveBeenCalledWith({
+        config: {
+          approval_notifications: {
+            zhaohu_tool_guard_enabled: true,
+          },
+        },
+      });
+    });
+    expect(loadEffectiveConfig).toHaveBeenCalledWith("portal");
   });
 
   it("saves cron unread auto pause settings", async () => {

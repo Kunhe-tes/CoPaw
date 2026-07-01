@@ -49,6 +49,26 @@ describe("SystemConfigPage registry compatibility", () => {
     });
   });
 
+  it("writes zhaohu Tool Guard approval notification switch values", () => {
+    const definition = CURRENT_SOURCE_SYSTEM_CONFIG_SWITCHES.find(
+      (item) =>
+        item.key === "approval_notifications.zhaohu_tool_guard_enabled",
+    );
+    if (!definition) {
+      throw new Error("zhaohu Tool Guard notification switch is not registered");
+    }
+
+    expect(definition.defaultValue).toBe(false);
+
+    const next = writeRegisteredSwitchValue({}, definition, true);
+
+    expect(next).toEqual({
+      approval_notifications: {
+        zhaohu_tool_guard_enabled: true,
+      },
+    });
+  });
+
   it("preserves nested tool config keys without native structuredClone", () => {
     vi.stubGlobal("structuredClone", undefined);
     const source = {

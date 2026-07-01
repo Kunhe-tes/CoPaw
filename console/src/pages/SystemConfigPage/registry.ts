@@ -66,6 +66,14 @@ export const CURRENT_SOURCE_SYSTEM_CONFIG_SWITCHES: CurrentSourceConfigSwitchDef
       title: "数据库访问拦截",
       description: "关闭后模型可通过 Python/命令行直连数据库，不再拦截。",
     },
+    {
+      key: "approval_notifications.zhaohu_tool_guard_enabled",
+      path: ["approval_notifications", "zhaohu_tool_guard_enabled"],
+      defaultValue: false,
+      title: "Tool Guard 审批招乎通知",
+      description:
+        "开启后，当前系统的 Tool Guard 审批会发送招乎待审批和审批结果通知。",
+    },
   ];
 
 export const TOOL_RESULT_COMPACT_DEFAULTS: ToolResultCompactConfig = {

@@ -10,6 +10,7 @@ from typing import Any, Generator
 from swe.config.config import ToolResultCompactConfig
 
 from .registry import (
+    APPROVAL_NOTIFICATIONS_ZHAOHU_TOOL_GUARD_ENABLED_SETTING,
     CRON_TASK_SESSION_CLEANUP_CRON_SETTING,
     CRON_TASK_SESSION_CLEANUP_ENABLED_SETTING,
     CRON_TASK_SESSION_CLEANUP_RETENTION_DAYS_SETTING,
@@ -205,6 +206,31 @@ def resolve_cron_task_session_cleanup_config(
                 "cron",
                 CRON_TASK_SESSION_CLEANUP_CRON_SETTING.default_value,
             ),
+        ),
+    )
+
+
+def is_zhaohu_tool_guard_notification_enabled(
+    source_config: Any | None = None,
+) -> bool:
+    """Return whether Tool Guard approvals should notify zhaohu."""
+    raw_config = _extract_config_payload(source_config)
+    merged = merge_source_system_config_with_defaults(raw_config)
+    raw_section = merged.get("approval_notifications")
+    section = raw_section if isinstance(raw_section, dict) else {}
+    normalized = normalize_registered_setting_values(
+        {"approval_notifications": section},
+    )
+    normalized_section = normalized.get("approval_notifications")
+    default_value = (
+        APPROVAL_NOTIFICATIONS_ZHAOHU_TOOL_GUARD_ENABLED_SETTING.default_value
+    )
+    if not isinstance(normalized_section, dict):
+        return bool(default_value)
+    return bool(
+        normalized_section.get(
+            "zhaohu_tool_guard_enabled",
+            default_value,
         ),
     )
 
