@@ -195,7 +195,7 @@ function buildMetricCards(
       changeText: formatChange(growthStats.planCustomersGrowth),
       changeDirection: toChangeDirection(growthStats.planCustomersGrowth),
       accentColor: METRIC_ACCENT_COLORS[4],
-      breakdown: null,
+      breakdown: mapBreakdown(overviewStats?.branch_breakdown?.customers),
     },
   ];
 }

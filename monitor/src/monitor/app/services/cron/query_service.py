@@ -3907,9 +3907,6 @@ class QueryService:
                 COUNT(DISTINCT c.customer_id) AS customer_count
             FROM swe_html_preview_click_events c
             JOIN swe_cron_executions e ON c.cron_task_id = e.job_id
-                AND c.clicked_at >= e.actual_time
-                AND c.clicked_at <= COALESCE(e.end_time,
-                    e.actual_time + INTERVAL 1 DAY)
             JOIN swe_tracing_traces t ON e.trace_id = t.trace_id
             CROSS JOIN (
                 SELECT 0 AS i UNION SELECT 1 UNION SELECT 2 UNION SELECT 3

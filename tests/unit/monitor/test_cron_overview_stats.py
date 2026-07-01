@@ -182,3 +182,35 @@ async def test_fetch_branch_execution_stats_counts_read_executions():
     assert "SUM(CASE WHEN is_read = 1 THEN 1 ELSE 0 END) AS read_tasks" in sql
     assert "COUNT(DISTINCT CASE WHEN is_read = 1 THEN job_id END)" not in sql
     assert result["read_tasks"] == 5
+
+
+@pytest.mark.asyncio
+async def test_fetch_manager_click_stats_matches_skill_view_click_scope():
+    """客户经理明细的客户数统计不应额外限制点击必须落在执行窗口内。"""
+    db = MagicMock()
+    db.fetch_all = AsyncMock(
+        return_value=[
+            {
+                "user_id": "u-1",
+                "button_type": "plan",
+                "customer_count": 4,
+            },
+        ],
+    )
+    service = QueryService()
+
+    result = await service._fetch_manager_click_stats(
+        db=db,
+        bbk_id="100",
+        start_time=MagicMock(),
+        end_time=MagicMock(),
+        source_id="src-1",
+    )
+
+    sql, params = db.fetch_all.await_args.args
+    assert "FROM swe_html_preview_click_events c" in sql
+    assert "JOIN swe_cron_executions e ON c.cron_task_id = e.job_id" in sql
+    assert "c.clicked_at >= e.actual_time" not in sql
+    assert "c.clicked_at <= COALESCE(e.end_time" not in sql
+    assert params[-1] == "src-1"
+    assert result == {"u-1": {"plan": 4}}
