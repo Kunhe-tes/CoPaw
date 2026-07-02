@@ -1706,6 +1706,17 @@ def _request_bbk_id(request: AgentRequest) -> str | None:
     )
 
 
+def _request_b3_trace_id(request: AgentRequest) -> str | None:
+    channel_meta = getattr(request, "channel_meta", None) or {}
+    trace_id = getattr(request, "b3_trace_id", None) or channel_meta.get(
+        "b3_trace_id",
+    )
+    if not isinstance(trace_id, str):
+        return None
+    trace_id = trace_id.strip()
+    return trace_id or None
+
+
 def _session_name_from_messages(msgs: list[Any]) -> str | None:
     """从第一条消息提取 trace 中展示的短会话名。"""
     if not msgs:
@@ -2140,6 +2151,7 @@ class AgentRunner(Runner):
                 return None
             existing_trace_id = getattr(request, "trace_id", None)
             attach_existing = self._should_attach_existing_trace(request)
+            new_trace_id = _request_b3_trace_id(request)
             resolved_identity = await resolve_user_identity(
                 tenant_id=getattr(request, "user_id", None),
                 source_id=_request_source_id(request),
@@ -2156,7 +2168,7 @@ class AgentRunner(Runner):
                 user_name=resolved_identity.user_name,
                 bbk_id=resolved_identity.bbk_id,
                 session_name=_session_name_from_messages(msgs),
-                trace_id=existing_trace_id if attach_existing else None,
+                trace_id=existing_trace_id if attach_existing else new_trace_id,
                 attach_existing=attach_existing,
             )
             if trace_id:

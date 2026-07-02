@@ -37,6 +37,15 @@ class HeaderPassthroughMiddleware(BaseHTTPMiddleware):
     """
 
     HEADER_PREFIX = "x-header-"
+    B3_HEADER_NAMES = {
+        "x-b3-businessid": "X-B3-BusinessId",
+        "x-b3-debug": "X-B3-Debug",
+        "x-b3-parentspanid": "X-B3-Parentspanid",
+        "x-b3-sampled": "X-B3-Sampled",
+        "x-b3-spanid": "X-B3-Spanid",
+        "x-b3-timestamp": "X-B3-Timestamp",
+        "x-b3-traceid": "X-B3-Traceid",
+    }
 
     def __init__(self, app: ASGIApp) -> None:
         """Initialize header passthrough middleware.
@@ -95,7 +104,9 @@ class HeaderPassthroughMiddleware(BaseHTTPMiddleware):
             if name_lower.startswith(self.HEADER_PREFIX):
                 # Strip prefix: x-header-cookie → cookie
                 mcp_name = name_lower[len(self.HEADER_PREFIX) :]
-                headers[mcp_name] = value
+                headers[self.B3_HEADER_NAMES.get(mcp_name, mcp_name)] = value
+            elif name_lower in self.B3_HEADER_NAMES:
+                headers[self.B3_HEADER_NAMES[name_lower]] = value
         return headers
 
 

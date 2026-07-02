@@ -185,6 +185,8 @@ async def test_query_handler_keeps_existing_passthrough_headers(monkeypatch):
         lambda: {
             "authorization": "Bearer existing",
             "cookie": "foo=existing",
+            "X-B3-Traceid": "8267fd70bacf497704fec30eaa353979",
+            "X-B3-Spanid": "32befd146889a61a",
         },
     )
 
@@ -206,6 +208,8 @@ async def test_query_handler_keeps_existing_passthrough_headers(monkeypatch):
     assert captured["passthrough_headers"] == {
         "authorization": "Bearer existing",
         "cookie": "foo=bar; com.cmb.dw.rtl.sso.token=auth-123",
+        "X-B3-Traceid": "8267fd70bacf497704fec30eaa353979",
+        "X-B3-Spanid": "32befd146889a61a",
     }
     assert captured["session_id"] == "session-1"
     assert captured["trace_id"] == "trace-1"

@@ -78,6 +78,7 @@ DENIED_CHAT_ATTACHMENT_EXECUTABLE_EXTENSIONS = frozenset(
 _RECONNECT_ATTACH_ATTEMPTS = 10
 _RECONNECT_ATTACH_RETRY_DELAY_SECONDS = 0.1
 _CONSOLE_SSE_HEARTBEAT_SECONDS = 15
+_B3_TRACE_ID_HEADER = "X-B3-Traceid"
 _CHAT_FILE_LIST_LIMIT = 500
 _TEXT_SNIFF_BYTES = 4096
 _TEXT_PREVIEW_MIME_PREFIX = "text/"
@@ -502,6 +503,14 @@ def _derive_chat_name(native_payload: dict) -> str:
     return "Media Message"
 
 
+def _extract_b3_trace_id(request: Request) -> str | None:
+    trace_id = request.headers.get(_B3_TRACE_ID_HEADER)
+    if trace_id is None:
+        return None
+    trace_id = trace_id.strip()
+    return trace_id or None
+
+
 async def _attach_reconnect_queue(
     workspace,
     tracker,
@@ -559,6 +568,10 @@ async def post_console_chat(
         native_payload = _extract_session_and_payload(request_data)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e)) from e
+
+    b3_trace_id = _extract_b3_trace_id(request)
+    if b3_trace_id:
+        native_payload["meta"]["b3_trace_id"] = b3_trace_id
 
     # Inject source_id from resolved request state for data isolation
     source_id = getattr(
