@@ -1389,11 +1389,31 @@ class MarketplaceService:
     def _get_active_market_versions(self, source_id: str) -> dict[str, str]:
         """读取当前来源下已发布技能的最新版本映射."""
         market_index = load_index(self.marketplace_root, source_id)
-        return {
-            item.name: item.version
-            for item in market_index
-            if item.status == "active"
-        }
+        versions: dict[str, str] = {}
+        for item in market_index:
+            if item.status != "active":
+                continue
+            for key in (item.item_id, item.skill_id, item.name):
+                if key:
+                    versions[key] = item.version
+        return versions
+
+    def _resolve_market_version(
+        self,
+        source: str,
+        skill_id: str,
+        skill_name: str,
+        display_name: str,
+        market_versions: dict[str, str],
+    ) -> str | None:
+        """Resolve the current market version from stable ids before names."""
+        source_item_id = ""
+        if source.startswith("marketplace:"):
+            source_item_id = source.removeprefix("marketplace:")
+        for key in (source_item_id, skill_id, skill_name, display_name):
+            if key and key in market_versions:
+                return market_versions[key]
+        return None
 
     def _read_skill_frontmatter(
         self,
@@ -1497,7 +1517,6 @@ class MarketplaceService:
             )
         )
         received_version = manifest_metadata.get("received_version")
-        market_version = market_versions.get(display_name)
         created_at, updated_at = self._resolve_skill_timestamps(
             manifest_entry,
             manifest_metadata,
@@ -1507,6 +1526,13 @@ class MarketplaceService:
             skill_name,
             source,
             manifest_metadata,
+        )
+        market_version = self._resolve_market_version(
+            source,
+            skill_id,
+            skill_name,
+            display_name,
+            market_versions,
         )
         is_received = source.startswith("marketplace:")
         has_update = (
@@ -1525,6 +1551,7 @@ class MarketplaceService:
             description=description,
             version=version or "1.0.0",
             received_version=received_version,
+            market_version=market_version,
             distributed_by=manifest_metadata.get("distributed_by"),
             is_received=is_received,
             has_update=has_update,

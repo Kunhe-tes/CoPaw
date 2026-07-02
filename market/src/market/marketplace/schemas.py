@@ -81,6 +81,7 @@ class MySkillItem(BaseModel):
     description: str = ""
     version: Optional[str] = None
     received_version: Optional[str] = None
+    market_version: Optional[str] = None
     distributed_by: Optional[str] = None
     is_received: bool = False
     has_update: bool = False

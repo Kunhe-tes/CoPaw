@@ -183,6 +183,22 @@ async def test_get_my_skills_returns_time_fields(tmp_path):
     agent_id = "default"
 
     # 创建用户技能目录
+    published_item_id = published.item_id
+    latest, _ = await svc.publish_skill(
+        source_id,
+        PublishSkillRequest(
+            name="Market Skill",
+            description="market desc updated",
+            creator_id="creator-1",
+            creator_name="寮犱笁",
+            skill_json={},
+            skill_md="# updated market skill",
+            overwrite=True,
+        ),
+    )
+    assert latest.item_id == published_item_id
+    assert latest.version == "1.0.1"
+
     skills_dir = get_user_skills_dir(
         tmp_path / "swe",
         user_id,
@@ -301,7 +317,7 @@ async def test_get_my_skills_reads_frontmatter_and_market_metadata(tmp_path):
     source_id = "test_source"
     agent_id = "default"
 
-    published = await svc.publish_skill(
+    published, _ = await svc.publish_skill(
         source_id,
         PublishSkillRequest(
             name="Market Skill",
@@ -312,6 +328,21 @@ async def test_get_my_skills_reads_frontmatter_and_market_metadata(tmp_path):
             skill_md="",
         ),
     )
+    published_item_id = published.item_id
+    latest, _ = await svc.publish_skill(
+        source_id,
+        PublishSkillRequest(
+            name="Market Skill",
+            description="market desc updated",
+            creator_id="creator-1",
+            creator_name="寮犱笁",
+            skill_json={},
+            skill_md="# updated market skill",
+            overwrite=True,
+        ),
+    )
+    assert latest.item_id == published_item_id
+    assert latest.version == "1.0.1"
 
     skills_dir = get_user_skills_dir(
         tmp_path / "swe",
@@ -323,7 +354,8 @@ async def test_get_my_skills_reads_frontmatter_and_market_metadata(tmp_path):
     skill_dir.mkdir(parents=True)
     (skill_dir / "SKILL.md").write_text(
         "---\n"
-        "name: Market Skill\n"
+        "name: Installed Alias\n"
+        "version: 1.0.0\n"
         "description: 从前言读取\n"
         "---\n"
         "# Market Skill\n",
@@ -344,12 +376,12 @@ async def test_get_my_skills_reads_frontmatter_and_market_metadata(tmp_path):
                 "version": 1,
                 "skills": {
                     "market_skill_copy": {
-                        "source": f"marketplace:{published.item_id}",
+                        "source": f"marketplace:{published_item_id}",
                         "enabled": False,
                         "created_at": "2025-05-14T10:00:00+00:00",
                         "updated_at": "2025-05-14T12:00:00+00:00",
                         "metadata": {
-                            "received_version": "0.9.0",
+                            "received_version": "1.0.0",
                             "distributed_by": "admin1",
                             "creator_name": "%E5%BC%A0%E4%B8%89",
                             "category_id": 9,
@@ -365,8 +397,11 @@ async def test_get_my_skills_reads_frontmatter_and_market_metadata(tmp_path):
     result = await svc.get_my_skills(source_id, user_id, agent_id)
 
     assert len(result) == 1
-    assert result[0].display_name == "Market Skill"
+    assert result[0].display_name == "Installed Alias"
     assert result[0].description == "从前言读取"
+    assert result[0].version == "1.0.0"
+    assert result[0].received_version == "1.0.0"
+    assert result[0].market_version == "1.0.1"
     assert result[0].is_received is True
     assert result[0].has_update is True
     assert result[0].enabled is False

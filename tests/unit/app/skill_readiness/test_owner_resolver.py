@@ -30,8 +30,9 @@ class _Market:
                 {
                     "skill_id": "skill-a",
                     "skill_name": "same-name",
-                    "version": "2.0.0",
+                    "version": "1.1.0",
                     "received_version": "1.0.0",
+                    "market_version": "2.0.0",
                     "enabled": True,
                     "has_update": True,
                 },
@@ -61,7 +62,7 @@ async def test_owner_resolver_matches_skill_id_source_and_keeps_failures():
     alice, bob = result.owners
     assert alice.skill_name == "same-name"
     assert alice.market_version == "2.0.0"
-    assert alice.installed_version == "1.0.0"
+    assert alice.installed_version == "1.1.0"
     assert alice.received_version == "1.0.0"
     assert alice.enabled is True
     assert alice.has_update is True
