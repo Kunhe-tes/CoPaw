@@ -137,6 +137,15 @@ class ApprovalService:
             "extra_keys": sorted(extra.keys()),
         }
 
+    def _request_id_inventory_locked(self) -> dict[str, Any]:
+        """Return current in-memory approval request ids for diagnostics."""
+        return {
+            "pending_request_ids": list(self._pending.keys()),
+            "completed_request_ids": list(self._completed.keys()),
+            "pending_count": len(self._pending),
+            "completed_count": len(self._completed),
+        }
+
     @staticmethod
     def _external_submission_summary(
         pending: PendingApproval,
@@ -234,6 +243,32 @@ class ApprovalService:
         async with self._lock:
             scope_id = self._get_current_scope_id()
             pending = self._pending.get(request_id)
+            inventory = self._request_id_inventory_locked()
+            completed_present = request_id in self._completed
+            logger.info(
+                "Approval resolve state: request_id=%s decision=%s "
+                "current_scope_id=%s pending_request_ids=%s "
+                "completed_request_ids=%s pending_count=%d "
+                "completed_count=%d pending_present=%s "
+                "completed_present=%s",
+                request_id,
+                decision.value,
+                scope_id,
+                inventory["pending_request_ids"],
+                inventory["completed_request_ids"],
+                inventory["pending_count"],
+                inventory["completed_count"],
+                pending is not None,
+                completed_present,
+                extra={
+                    **inventory,
+                    "approval_request_id": request_id,
+                    "approval_decision": decision.value,
+                    "approval_current_scope_id": scope_id,
+                    "approval_pending_present": pending is not None,
+                    "approval_completed_present": completed_present,
+                },
+            )
             if pending is None or pending.scope_id != scope_id:
                 completed = self._completed.get(request_id)
                 if completed is None or completed.scope_id != scope_id:
@@ -278,6 +313,28 @@ class ApprovalService:
             scope_id = self._get_current_scope_id()
             pending = self._pending.get(request_id)
             completed = self._completed.get(request_id)
+            inventory = self._request_id_inventory_locked()
+            logger.info(
+                "Approval lookup state: request_id=%s current_scope_id=%s "
+                "pending_request_ids=%s completed_request_ids=%s "
+                "pending_count=%d completed_count=%d pending_present=%s "
+                "completed_present=%s",
+                request_id,
+                scope_id,
+                inventory["pending_request_ids"],
+                inventory["completed_request_ids"],
+                inventory["pending_count"],
+                inventory["completed_count"],
+                pending is not None,
+                completed is not None,
+                extra={
+                    **inventory,
+                    "approval_request_id": request_id,
+                    "approval_current_scope_id": scope_id,
+                    "approval_pending_present": pending is not None,
+                    "approval_completed_present": completed is not None,
+                },
+            )
             record = pending or completed
             if record is None:
                 logger.warning(
@@ -633,6 +690,22 @@ class ApprovalService:
             pending.status = "timeout"
             pending.resolved_at = now
             self._completed[k] = pending
+        if expired:
+            inventory = self._request_id_inventory_locked()
+            logger.info(
+                "Approval pending GC expired records: gc_request_ids=%s "
+                "pending_request_ids=%s completed_request_ids=%s "
+                "pending_count=%d completed_count=%d",
+                expired,
+                inventory["pending_request_ids"],
+                inventory["completed_request_ids"],
+                inventory["pending_count"],
+                inventory["completed_count"],
+                extra={
+                    "approval_gc_request_ids": expired,
+                    **inventory,
+                },
+            )
 
         overflow = len(self._pending) - _GC_MAX_PENDING
         if overflow <= 0:
@@ -641,6 +714,7 @@ class ApprovalService:
             self._pending.items(),
             key=lambda item: item[1].created_at,
         )
+        overflow_ids: list[str] = []
         for key, pending in ordered[:overflow]:
             del self._pending[key]
             if not pending.future.done():
@@ -648,6 +722,23 @@ class ApprovalService:
             pending.status = "timeout"
             pending.resolved_at = now
             self._completed[key] = pending
+            overflow_ids.append(key)
+        if overflow_ids:
+            inventory = self._request_id_inventory_locked()
+            logger.warning(
+                "Approval pending GC overflow records: gc_request_ids=%s "
+                "pending_request_ids=%s completed_request_ids=%s "
+                "pending_count=%d completed_count=%d",
+                overflow_ids,
+                inventory["pending_request_ids"],
+                inventory["completed_request_ids"],
+                inventory["pending_count"],
+                inventory["completed_count"],
+                extra={
+                    "approval_gc_request_ids": overflow_ids,
+                    **inventory,
+                },
+            )
 
     def _gc_completed_locked(self) -> None:
         """Remove stale/overflow completed records.
