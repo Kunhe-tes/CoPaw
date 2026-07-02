@@ -128,6 +128,36 @@ class _RecordingApprovalService:
         return SimpleNamespace(request_id="approval-1", **kwargs)
 
 
+class _SplitApprovalService:
+    def __init__(self) -> None:
+        self.created_pending = None
+        self.queue_head = SimpleNamespace(
+            request_id="approval-old",
+            tool_name="execute_shell_command",
+            extra={
+                "tool_call": {
+                    "id": "tool-old",
+                    "name": "execute_shell_command",
+                    "input": {"cmd": "echo old"},
+                },
+            },
+        )
+
+    async def cancel_stale_pending_for_tool_call(self, *args, **kwargs):
+        return 0
+
+    async def create_pending(self, **kwargs):
+        self.created_pending = SimpleNamespace(
+            request_id="approval-new",
+            **kwargs,
+        )
+        return self.created_pending
+
+    async def get_pending_by_session(self, session_id):
+        assert session_id == "session-1"
+        return self.queue_head
+
+
 @pytest.mark.asyncio
 async def test_tool_trace_prefers_request_context_over_current_trace(
     tmp_path,
@@ -221,6 +251,44 @@ async def test_tool_guard_pending_extra_includes_request_scope_ids(
     assert extra["agent_id"] == "agent-a"
     assert extra["tenant_id"] == "tenant-a"
     assert extra["source_id"] == "source-a"
+
+
+@pytest.mark.asyncio
+async def test_waiting_approval_card_uses_notified_request_id(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    agent = _FakeAgent(tmp_path)
+    approval_service = _SplitApprovalService()
+    agent._tool_guard_approval_service = approval_service
+    notify = AsyncMock()
+    monkeypatch.setattr(
+        "swe.app.approvals.notify_cron_approval_pending",
+        notify,
+    )
+
+    await agent._acting_with_approval(
+        {
+            "id": "tool-new",
+            "name": "execute_shell_command",
+            "input": {"cmd": "echo new"},
+        },
+        "execute_shell_command",
+        ToolGuardResult(
+            tool_name="execute_shell_command",
+            params={"cmd": "echo new"},
+        ),
+    )
+
+    notified_pending = notify.await_args.args[0]
+    waiting_msg = await agent._emit_waiting_for_approval()
+
+    approval_action = waiting_msg.metadata["approval_action"]
+    assert notified_pending.request_id == "approval-new"
+    assert approval_action["requestId"] == notified_pending.request_id
+    assert approval_action["approveCommand"] == "/approve approval-new"
+    assert approval_action["denyCommand"] == "/deny approval-new"
+    assert approval_action["toolInput"] == {"cmd": "echo new"}
 
 
 @pytest.mark.asyncio

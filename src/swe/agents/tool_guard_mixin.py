@@ -430,8 +430,11 @@ class ToolGuardMixin:
         return result
 
     async def _get_pending_info_for_display(self) -> dict[str, Any]:
-        """Return pending tool info aligned with approval queue head."""
+        """Return pending tool info for the current waiting card."""
         fallback = getattr(self, "_tool_guard_pending_info", None) or {}
+        if fallback.get("request_id"):
+            return fallback
+
         session_id = str(self._request_context.get("session_id") or "")
         if not session_id:
             return fallback
