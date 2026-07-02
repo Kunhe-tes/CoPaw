@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import {
   Check,
   ChevronLeft,
@@ -7,10 +7,7 @@ import {
   ClipboardCheck,
   CornerDownLeft,
 } from "lucide-react";
-import {
-  ChatAnywhereSessionsContext,
-  type IAgentScopeRuntimeWebUIMessage,
-} from "@/components/agentscope-chat";
+import { type IAgentScopeRuntimeWebUIMessage } from "@/components/agentscope-chat";
 import { ChatAnywhereMessagesContext } from "@/components/agentscope-chat/AgentScopeRuntimeWebUI/core/Context/ChatAnywhereMessagesContext";
 import { emit } from "@/components/agentscope-chat/AgentScopeRuntimeWebUI/core/Context/useChatAnywhereEventEmitter";
 import type {
@@ -27,50 +24,8 @@ import {
 import styles from "./PlanInteractionCards.module.less";
 import { useContextSelector } from "use-context-selector";
 
-const PLAN_CLARIFICATION_STORAGE_KEY = "copaw_submitted_plan_clarifications";
-const PLAN_CLARIFICATION_DISMISSAL_STORAGE_KEY =
-  "copaw_dismissed_plan_clarifications";
-const PLAN_CLARIFICATION_SEEN_STORAGE_KEY =
-  "swe_seen_plan_clarification_instances";
-const PLAN_REVIEW_STORAGE_KEY = "copaw_submitted_plan_reviews";
 const PLAN_INTERACTION_CARD_CODE = "PlanInteraction";
 const RUNTIME_RESPONSE_CARD_CODE = "AgentScopeRuntimeResponseCard";
-
-function loadSubmittedInteractionKeys(storageKey: string): Set<string> {
-  try {
-    const raw = sessionStorage.getItem(storageKey);
-    if (!raw) return new Set();
-    const parsed = JSON.parse(raw);
-    if (!Array.isArray(parsed)) return new Set();
-    return new Set(
-      parsed.filter((item): item is string => typeof item === "string"),
-    );
-  } catch {
-    return new Set();
-  }
-}
-
-function storeSubmittedInteractionKey(storageKey: string, key: string): void {
-  if (!key) return;
-  const submittedIds = loadSubmittedInteractionKeys(storageKey);
-  submittedIds.add(key);
-  try {
-    sessionStorage.setItem(
-      storageKey,
-      JSON.stringify(Array.from(submittedIds)),
-    );
-  } catch {
-    return;
-  }
-}
-
-function loadSubmittedPlanIds(): Set<string> {
-  return loadSubmittedInteractionKeys(PLAN_REVIEW_STORAGE_KEY);
-}
-
-function storeSubmittedPlanId(planId: string): void {
-  storeSubmittedInteractionKey(PLAN_REVIEW_STORAGE_KEY, planId);
-}
 
 function optionLabels(
   options: PlanClarificationOption[] | undefined,
@@ -194,16 +149,22 @@ function findLatestPlanClarificationCard(
   instanceKey: string;
   sourceKey: string | null;
 } | null {
+  let hasLaterUserMessage = false;
   for (
     let messageIndex = messages.length - 1;
     messageIndex >= 0;
     messageIndex -= 1
   ) {
     const message = messages[messageIndex];
+    if (message?.role === "user") {
+      hasLaterUserMessage = true;
+      continue;
+    }
     const cards = message?.cards || [];
     for (let cardIndex = cards.length - 1; cardIndex >= 0; cardIndex -= 1) {
       const card = cards[cardIndex];
       if (
+        !hasLaterUserMessage &&
         card.code === PLAN_INTERACTION_CARD_CODE &&
         isPlanClarificationCardData(card.data)
       ) {
@@ -216,60 +177,6 @@ function findLatestPlanClarificationCard(
     }
   }
   return null;
-}
-
-function createPlanClarificationSubmissionKey(
-  data: ChatPlanClarificationCardData,
-  sessionId: string | undefined,
-  stableSourceKey: string | null = null,
-  fallbackKey: string | null = null,
-): string {
-  return JSON.stringify({
-    session_id: sessionId || "unknown",
-    clarification:
-      stableSourceKey ||
-      (fallbackKey
-        ? JSON.stringify({
-            source: "instance",
-            instance_key: fallbackKey,
-          })
-        : createPlanClarificationFingerprint(data)),
-  });
-}
-
-function createPlanClarificationDismissalKey(
-  sessionId: string | undefined,
-  stableSourceKey: string | null,
-  fallbackKey: string,
-): string {
-  return JSON.stringify({
-    session_id: sessionId || "unknown",
-    clarification:
-      stableSourceKey ||
-      JSON.stringify({
-        source: "content",
-        fingerprint: fallbackKey,
-      }),
-  });
-}
-
-function createPlanClarificationSeenKey(
-  data: ChatPlanClarificationCardData,
-  sessionId: string | undefined,
-  stableSourceKey: string | null,
-  fallbackKey: string | null,
-): string {
-  return JSON.stringify({
-    session_id: sessionId || "unknown",
-    clarification:
-      stableSourceKey ||
-      (fallbackKey
-        ? JSON.stringify({
-            source: "instance",
-            instance_key: fallbackKey,
-          })
-        : createPlanClarificationFingerprint(data)),
-  });
 }
 
 function boundedIndex(index: number, count: number): number {
@@ -388,16 +295,10 @@ function ChoiceRows({
 export function PlanClarificationCard({
   data,
   cardInstanceKey,
-  cardSourceKey,
 }: {
   data: ChatPlanClarificationCardData;
   cardInstanceKey?: string;
-  cardSourceKey?: string | null;
 }) {
-  const currentSessionId = useContextSelector(
-    ChatAnywhereSessionsContext,
-    (value) => value.currentSessionId,
-  );
   const [singleChoice, setSingleChoice] = useState<string>("");
   const [multiChoice, setMultiChoice] = useState<string[]>([]);
   const [textInput, setTextInput] = useState("");
@@ -408,55 +309,10 @@ export function PlanClarificationCard({
     Record<string, string | string[]>
   >({});
   const cardRef = useRef<HTMLElement | null>(null);
-  const displayedRef = useRef(false);
-  const resolvedSessionId =
-    currentSessionId ||
-    (window as Window & { currentSessionId?: string }).currentSessionId;
-  const submissionKey = useMemo(
-    () =>
-      createPlanClarificationSubmissionKey(
-        data,
-        resolvedSessionId,
-        cardSourceKey || null,
-        cardInstanceKey || null,
-      ),
-    [cardInstanceKey, cardSourceKey, data, resolvedSessionId],
-  );
-  const dismissalKey = useMemo(
-    () =>
-      createPlanClarificationDismissalKey(
-        resolvedSessionId,
-        cardSourceKey || null,
-        createPlanClarificationFingerprint(data),
-      ),
-    [cardSourceKey, data, resolvedSessionId],
-  );
-  const seenKey = useMemo(
-    () =>
-      createPlanClarificationSeenKey(
-        data,
-        resolvedSessionId,
-        cardSourceKey || null,
-        cardInstanceKey || null,
-      ),
-    [cardInstanceKey, cardSourceKey, data, resolvedSessionId],
-  );
-  const interactionResetKey = cardInstanceKey || dismissalKey;
-  const [submitted, setSubmitted] = useState(() =>
-    loadSubmittedInteractionKeys(PLAN_CLARIFICATION_STORAGE_KEY).has(
-      submissionKey,
-    ),
-  );
-  const [dismissed, setDismissed] = useState(() =>
-    loadSubmittedInteractionKeys(PLAN_CLARIFICATION_DISMISSAL_STORAGE_KEY).has(
-      dismissalKey,
-    ),
-  );
-  const [alreadySeen, setAlreadySeen] = useState(() =>
-    loadSubmittedInteractionKeys(PLAN_CLARIFICATION_SEEN_STORAGE_KEY).has(
-      seenKey,
-    ),
-  );
+  const interactionResetKey =
+    cardInstanceKey || createPlanClarificationFingerprint(data);
+  const [submitted, setSubmitted] = useState(false);
+  const [dismissed, setDismissed] = useState(false);
   const options = data.options || [];
   const fields = data.fields || [];
   const allowsCustomText =
@@ -534,22 +390,8 @@ export function PlanClarificationCard({
     data.kind === "text" || customActive || isSupplementStep;
 
   useEffect(() => {
-    setSubmitted(
-      loadSubmittedInteractionKeys(PLAN_CLARIFICATION_STORAGE_KEY).has(
-        submissionKey,
-      ),
-    );
-    setDismissed(
-      loadSubmittedInteractionKeys(
-        PLAN_CLARIFICATION_DISMISSAL_STORAGE_KEY,
-      ).has(dismissalKey),
-    );
-    setAlreadySeen(
-      loadSubmittedInteractionKeys(PLAN_CLARIFICATION_SEEN_STORAGE_KEY).has(
-        seenKey,
-      ),
-    );
-    displayedRef.current = false;
+    setSubmitted(false);
+    setDismissed(false);
     setSingleChoice("");
     setMultiChoice([]);
     setTextInput("");
@@ -557,51 +399,18 @@ export function PlanClarificationCard({
     setFormValues({});
     setFocusedIndex(0);
     setActiveStep(0);
-  }, [dismissalKey, interactionResetKey, seenKey, submissionKey]);
+  }, [interactionResetKey]);
 
   useEffect(() => {
-    if (submitted || dismissed || alreadySeen) return;
-    displayedRef.current = true;
-  }, [alreadySeen, dismissed, interactionResetKey, submitted]);
-
-  useEffect(() => {
-    const handleUserSubmit = () => {
-      if (!displayedRef.current || submitted || dismissed || alreadySeen)
-        return;
-      storeSubmittedInteractionKey(
-        PLAN_CLARIFICATION_SEEN_STORAGE_KEY,
-        seenKey,
-      );
-      setAlreadySeen(true);
-    };
-
-    document.addEventListener("handleSubmit", handleUserSubmit);
-    return () => {
-      document.removeEventListener("handleSubmit", handleUserSubmit);
-    };
-  }, [alreadySeen, dismissed, seenKey, submitted]);
-
-  useEffect(() => {
-    if (submitted || dismissed || alreadySeen || !showChoiceRows) return;
+    if (submitted || dismissed || !showChoiceRows) return;
     cardRef.current?.focus({ preventScroll: true });
-  }, [
-    alreadySeen,
-    boundedStep,
-    dismissed,
-    interactionResetKey,
-    showChoiceRows,
-    submitted,
-  ]);
+  }, [boundedStep, dismissed, interactionResetKey, showChoiceRows, submitted]);
 
   useEffect(() => {
     setFocusedIndex(0);
   }, [boundedStep]);
 
   const handleDismiss = () => {
-    storeSubmittedInteractionKey(
-      PLAN_CLARIFICATION_DISMISSAL_STORAGE_KEY,
-      dismissalKey,
-    );
     setDismissed(true);
   };
 
@@ -640,7 +449,6 @@ export function PlanClarificationCard({
             selected_option_ids: effectiveSelectedIds,
             text: effectiveText || undefined,
           };
-    storeSubmittedInteractionKey(PLAN_CLARIFICATION_STORAGE_KEY, submissionKey);
     setSubmitted(true);
     emit({
       type: "handleSubmit",
@@ -787,7 +595,7 @@ export function PlanClarificationCard({
     }
   };
 
-  if (submitted || dismissed || alreadySeen) return null;
+  if (submitted || dismissed) return null;
 
   return (
     <section
@@ -920,7 +728,6 @@ export function ActivePlanClarificationCard() {
     <PlanClarificationCard
       data={clarification.data}
       cardInstanceKey={clarification.instanceKey}
-      cardSourceKey={clarification.sourceKey}
     />
   );
 }
@@ -943,13 +750,10 @@ export function PlanReviewCard({ data }: { data: ChatPlanReviewCardData }) {
   const [feedback, setFeedback] = useState("");
   const resolvedByBackend = data.status === "submitted";
   const [submitted, setSubmitted] = useState(false);
-  const submittedStorageKey = useMemo(() => data.plan_id, [data.plan_id]);
 
   useEffect(() => {
-    setSubmitted(
-      resolvedByBackend || loadSubmittedPlanIds().has(submittedStorageKey),
-    );
-  }, [resolvedByBackend, submittedStorageKey]);
+    setSubmitted(resolvedByBackend);
+  }, [resolvedByBackend]);
 
   const handleDecision = (decision: "revise" | "execute" | "exit_plan") => {
     if (submitted) return;
@@ -963,7 +767,6 @@ export function PlanReviewCard({ data }: { data: ChatPlanReviewCardData }) {
         ? `Execute plan ${data.plan_id}`
         : "Exit Plan Mode";
 
-    storeSubmittedPlanId(data.plan_id);
     setSubmitted(true);
     emit({
       type: "handleSubmit",

@@ -132,19 +132,18 @@ function createClarificationMessage({
 describe("Plan interaction cards", () => {
   afterEach(() => {
     cleanup();
-    sessionStorage.clear();
     (window as Window & { currentSessionId?: string }).currentSessionId =
       undefined;
   });
 
-  it("marks an active clarification and persists dismissal in the session", () => {
+  it("hides a dismissed clarification only for the current render", () => {
     const data = {
       card_type: "plan_clarification" as const,
       kind: "single_choice" as const,
       prompt: "Pick scope",
       options: [{ id: "small", label: "Small" }],
     };
-    const { container, rerender } = render(
+    const { container, unmount } = render(
       <PlanClarificationCard data={data} />,
     );
 
@@ -156,8 +155,9 @@ describe("Plan interaction cards", () => {
       container.querySelector('[data-plan-clarification-active="true"]'),
     ).not.toBeInTheDocument();
 
-    rerender(<PlanClarificationCard data={data} />);
-    expect(screen.queryByText("Pick scope")).not.toBeInTheDocument();
+    unmount();
+    render(<PlanClarificationCard data={data} />);
+    expect(screen.getByText("Pick scope")).toBeInTheDocument();
   });
 
   it("uses focus-only initial state and submits the focused single choice with Enter", async () => {
@@ -601,7 +601,7 @@ describe("Plan interaction cards", () => {
     expect(screen.getAllByRole("button", { name: /Option/ })).toHaveLength(6);
   });
 
-  it("does not render an already submitted clarification in the same session", async () => {
+  it("hides a submitted clarification in the current render", async () => {
     const submit = captureSubmitEvents();
     const data = {
       card_type: "plan_clarification" as const,
@@ -609,15 +609,13 @@ describe("Plan interaction cards", () => {
       prompt: "Pick scope",
       options: [{ id: "small", label: "Small" }],
     };
-    const { unmount } = render(<PlanClarificationCard data={data} />);
+    render(<PlanClarificationCard data={data} />);
 
     fireEvent.keyDown(screen.getByRole("region", { name: "Pick scope" }), {
       key: "Enter",
     });
     await waitFor(() => expect(submit.handler).toHaveBeenCalledTimes(1));
 
-    unmount();
-    render(<PlanClarificationCard data={data} />);
     expect(screen.queryByText("Pick scope")).not.toBeInTheDocument();
     submit.cleanup();
   });
@@ -687,7 +685,7 @@ describe("Plan interaction cards", () => {
     expect(screen.getByRole("button", { name: "提交" })).toBeDisabled();
   });
 
-  it("keeps a dismissed clarification hidden after reload when runtime ids change", () => {
+  it("shows a dismissed clarification after reload when it is not superseded", () => {
     const firstMessages = [
       {
         id: "msg_runtime_1",
@@ -774,7 +772,7 @@ describe("Plan interaction cards", () => {
       </ChatAnywhereSessionsContext.Provider>,
     );
 
-    expect(screen.queryByText("Pick scope")).not.toBeInTheDocument();
+    expect(screen.getByText("Pick scope")).toBeInTheDocument();
   });
 
   it("shows a repeated clarification again when it is a new card instance", () => {
@@ -868,7 +866,7 @@ describe("Plan interaction cards", () => {
     expect(screen.getByText("Pick scope")).toBeInTheDocument();
   });
 
-  it("hides a displayed clarification after the user sends a message", async () => {
+  it("hides a clarification superseded by a later user message", async () => {
     const messages = [
       createClarificationMessage({
         messageId: "message-1",
@@ -888,16 +886,33 @@ describe("Plan interaction cards", () => {
       expect(screen.getByRole("region", { name: "Pick scope" })).toBeVisible(),
     );
 
-    document.dispatchEvent(
-      new CustomEvent("handleSubmit", {
-        detail: {
-          query: "Continue without answering",
-          fileList: [],
-        },
-      }),
-    );
     cleanup();
-    renderActiveClarification(messages);
+    renderActiveClarification([
+      ...messages,
+      {
+        id: "user-1",
+        role: "user" as const,
+        cards: [
+          {
+            code: "AgentScopeRuntimeRequestCard",
+            data: {
+              input: [
+                {
+                  role: "user",
+                  type: "message",
+                  content: [
+                    {
+                      type: "text",
+                      text: "Continue without answering",
+                    },
+                  ],
+                },
+              ],
+            },
+          },
+        ],
+      },
+    ]);
 
     expect(screen.queryByText("Pick scope")).not.toBeInTheDocument();
   });

@@ -72,13 +72,25 @@ _Avoid_: generic form, survey
 The user's structured answer to a Plan Interaction Card, submitted as the next normal chat turn with metadata that identifies the card and selected or entered value.
 _Avoid_: hidden plan API update, out-of-band form submission
 
+**Plan Interaction Event**:
+A persisted chat-context event that records a user's submitted action on a Plan Interaction Card, such as answering a clarification or deciding on a Proposed Plan. It is metadata, not user-visible prose, and it identifies the card by stable source identity first with runtime instance identity only as a fallback.
+_Avoid_: browser cache flag, local UI state, hidden text command
+
+**Plan Review Submission**:
+A Plan Interaction Event that records the user's `revise`, `execute`, or `exit_plan` decision for a Proposed Plan. Restored Plan Review Cards use this event and any backend-submitted status as the sources of truth for whether the review has already been handled.
+_Avoid_: browser-submitted flag, frontend-only review state
+
 **Planning Clarification Dismissal**:
-The user's decision to close the current Planning Clarification Card without submitting a Plan Interaction Response. It leaves Plan Mode active and restores normal chat input for the user.
+The user's decision to close the current Planning Clarification Card without submitting a Plan Interaction Response. It is a current-runtime UI action, leaves Plan Mode active, and restores normal chat input for the user; after session restore it is not remembered unless the clarification was superseded by a later user message.
 _Avoid_: exit Plan Mode, reject plan, submit empty response
 
 **Planning Clarification Replay**:
 The behavior of showing a Planning Clarification Card again after a page reload or session restore. It is not part of the intended user flow for a card that was already displayed once in the current chat.
 _Avoid_: history replay, reload restoration, persistent clarification prompt
+
+**Planning Clarification Supersession**:
+The point where a Planning Clarification Instance is overtaken by any later user message in the same chat session. A superseded clarification is not shown again when the session is restored, while a later assistant message may still create a new Planning Clarification Instance with the same content.
+_Avoid_: render-seen state, frontend cache flag, browser storage marker
 
 **Planning Clarification Instance**:
 One visible Planning Clarification Card occurrence tied to a specific assistant message. Two cards with the same内容 but different assistant messages are different instances.
@@ -477,13 +489,13 @@ Resolved as assistant-message scoped. A later assistant message that repeats the
 Resolved as assistant-message scoped. Submitting a Planning Clarification Card marks that assistant message's clarification instance as handled, and does not suppress a repeated clarification from a later assistant message.
 
 **"Planning Clarification Display Memory"**:
-Resolved as session-scoped memory of assistant-message instances that have already displayed a Planning Clarification Card. Reloading or restoring the same chat must not display those seen instances again. The storage key is `swe_seen_plan_clarification_instances`.
+Resolved as derived from chat history instead of browser storage. A displayed Planning Clarification Card is not hidden merely because it rendered once; it is hidden on restore only after **Planning Clarification Supersession** or a submitted response can be inferred from later chat context.
 
 **"Planning Clarification First Display Timing"**:
 Resolved as realtime stream display. A Planning Clarification Card may render as soon as its structured metadata first appears in the active assistant stream, but that displayed instance must not reappear after reload or session restore.
 
 **"Planning Clarification Seen Moment"**:
-Resolved as the first client render of that assistant-message instance. Once the card has been rendered once in the live UI, it is considered seen even if the stream continues updating the same response.
+Replaced by **Planning Clarification Supersession**. First client render alone does not make the clarification seen, resolved, or hidden on restore.
 
 **"Planning Clarification Live Update"**:
 Resolved as continuing to update the currently visible Planning Clarification Card while its live assistant response changes. The seen state only prevents replay after reload or session restore; it does not freeze the active card.
