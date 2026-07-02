@@ -92,6 +92,7 @@ from ...tracing.models import TraceStatus
 from ...config.context import (
     get_current_passthrough_headers,
 )
+from ...runtime_invocation_claims import runtime_invocation_claims_context
 from ..source_system_config import is_chat_task_progress_enabled
 from ..source_system_config.runtime import get_current_source_system_config
 
@@ -3946,6 +3947,11 @@ class AgentRunner(Runner):
         )
 
         trace_id = await self._start_query_trace(request, msgs)
+        runtime_claims_context = runtime_invocation_claims_context(
+            session_id=session_id,
+            trace_id=trace_id,
+        )
+        runtime_claims_context.__enter__()
         outcome = _QueryTurnOutcome()
 
         # ── Query 级别重试循环 ──
@@ -4038,6 +4044,14 @@ class AgentRunner(Runner):
                     ):
                         yield msg, last
         finally:
+            try:
+                runtime_claims_context.__exit__(None, None, None)
+            except ValueError:
+                logger.debug(
+                    "Skipped runtime invocation claims context reset from a "
+                    "different async context",
+                    exc_info=True,
+                )
             try:
                 reset_current_file_url_network(file_url_network_token)
             except ValueError:

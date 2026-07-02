@@ -116,6 +116,26 @@ _Avoid_: system feature configuration, tenant config, user config
 The tenant and source context that determines which runtime configuration and model selection a request observes. One **Runtime Request Identity** resolves to one **Tenant Provider Configuration** view for provider and active-model reads.
 _Avoid_: cache key, auth header set, iframe context
 
+**Runtime Invocation Claims**:
+Session, trace, tenant, and source claims that Swe passes across a runtime invocation boundary for a receiving tool or integration to interpret inside an already trusted channel. **Runtime Invocation Claims** are distinct from **Runtime Request Identity**, which is internal request context, and are not independently verifiable credentials.
+_Avoid_: runtime metadata, env/header info, credential, signed token
+
+**Canonical Runtime Claim Name**:
+The preferred external name for one **Runtime Invocation Claim** at a specific transport boundary. Canonical names are stable and transport-appropriate; compatibility aliases may exist only for boundaries that already require them.
+_Avoid_: env/header info, arbitrary key, passthrough name
+
+**Runtime Scope Claim**:
+The **Runtime Invocation Claim** that names the resolved runtime isolation scope for a call, derived from the current tenant and source context when such a scope exists. A **Runtime Scope Claim** complements the logical tenant and source claims; it does not replace either one.
+_Avoid_: tenant id, source id, effective tenant
+
+**Runtime-Owned Claim Name**:
+A claim name reserved for Swe-issued **Runtime Invocation Claims** at an invocation boundary. A **Runtime-Owned Claim Name** cannot be supplied or overridden by tenant env, tool config, passthrough headers, or handler config.
+_Avoid_: user env key, custom header, configurable claim
+
+**Runtime Invocation Claims Context**:
+The backend-local execution context that carries the current **Runtime Invocation Claims** to nested tool and integration launch points during one agent run. A **Runtime Invocation Claims Context** is not itself transmitted outside Swe.
+_Avoid_: global env, request identity, credential store
+
 **System Configuration Environment Key**:
 A backend-owned configuration key used by Swe itself. A **System Configuration Environment Key** is not part of user-controlled runtime env and must not be exposed through user-invoked tool subprocesses.
 _Avoid_: user env, tenant env, ordinary shell env

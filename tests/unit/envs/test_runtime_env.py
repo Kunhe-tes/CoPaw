@@ -26,7 +26,7 @@ def test_validate_env_key_rejects_malformed_and_protected_names() -> None:
 
     validate_env_key("API_TOKEN")
 
-    for key in ("", "1TOKEN", "BAD-NAME", "PATH"):
+    for key in ("", "1TOKEN", "BAD-NAME", "PATH", "SWE_TENANT_ID"):
         with pytest.raises(ValueError, match=key or "empty"):
             validate_env_key(key)
 
@@ -44,6 +44,7 @@ def test_build_runtime_env_uses_scope_file_precedence_and_filters_protected(
             "TENANT_ONLY": "present",
             "PATH": "/tenant/bin",
             "PYTHONPATH": "/tenant/python",
+            "SWE_TENANT_ID": "tenant-fake",
         },
         _tenant_env_path(tmp_path, "tenant-a", "source-a"),
     )
@@ -57,6 +58,7 @@ def test_build_runtime_env_uses_scope_file_precedence_and_filters_protected(
                 "API_TOKEN": "call-secret",
                 "CALL_ONLY": "yes",
                 "PYTHONPATH": "/call/python",
+                "SWE_SOURCE_ID": "source-fake",
             },
         )
 
@@ -65,6 +67,8 @@ def test_build_runtime_env_uses_scope_file_precedence_and_filters_protected(
     assert env["CALL_ONLY"] == "yes"
     assert env["PATH"] == "/usr/bin"
     assert "PYTHONPATH" not in env
+    assert "SWE_TENANT_ID" not in env
+    assert "SWE_SOURCE_ID" not in env
     assert os.environ == before
 
 

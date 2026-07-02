@@ -326,6 +326,36 @@ def test_stdio_launch_config_filters_protected_client_env(
     assert launch_config.env.get("PYTHONPATH") != "/client/python"
 
 
+def test_stdio_launch_config_injects_runtime_claim_env(
+    tenant_config_root: Path,
+) -> None:
+    from swe.app.mcp.stdio_launcher import (
+        build_tenant_aware_stdio_launch_config,
+    )
+    from swe.runtime_invocation_claims import runtime_invocation_claims_context
+
+    with (
+        tenant_context(tenant_id="tenant-a", source_id="source-a"),
+        runtime_invocation_claims_context(
+            session_id="session-1",
+            trace_id="trace-1",
+        ),
+    ):
+        launch_config = build_tenant_aware_stdio_launch_config(
+            "node",
+            env={"SWE_TENANT_ID": "fake-tenant"},
+        )
+
+    assert launch_config.env["SWE_TENANT_ID"] == "tenant-a"
+    assert launch_config.env["SWE_SOURCE_ID"] == "source-a"
+    assert launch_config.env["SWE_RUNTIME_SCOPE_ID"] == encode_scope_id(
+        "tenant-a",
+        "source-a",
+    )
+    assert launch_config.env["SWE_SESSION_ID"] == "session-1"
+    assert launch_config.env["SWE_TRACE_ID"] == "trace-1"
+
+
 def test_limited_stdio_launcher_keeps_pythonpath_for_wrapper_startup(
     tenant_config_root: Path,
     monkeypatch: pytest.MonkeyPatch,
