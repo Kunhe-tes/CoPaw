@@ -222,6 +222,57 @@ async def test_ask_plan_clarification_reports_indexed_field_id_errors() -> (
 
 
 @pytest.mark.asyncio
+async def test_ask_plan_clarification_reports_indexed_field_type_errors() -> (
+    None
+):
+    with pytest.raises(
+        ValueError,
+        match=r"clarification fields\[0\] type must be a string",
+    ):
+        await ask_plan_clarification(
+            prompt="请补充背景。",
+            kind="form",
+            fields=[{"name": "机构类型", "type": 3}],
+        )
+
+    with pytest.raises(
+        ValueError,
+        match=r"clarification fields\[1\] unsupported type: radio",
+    ):
+        await ask_plan_clarification(
+            prompt="请补充背景。",
+            kind="form",
+            fields=[
+                {"name": "机构类型", "options": ["银行"]},
+                {"name": "客户规模", "type": "radio"},
+            ],
+        )
+
+
+@pytest.mark.asyncio
+async def test_ask_plan_clarification_reports_indexed_field_option_errors() -> (
+    None
+):
+    with pytest.raises(
+        ValueError,
+        match=(
+            r"clarification fields\[0\]\.options\[0\] "
+            r"option id is required"
+        ),
+    ):
+        await ask_plan_clarification(
+            prompt="请补充背景。",
+            kind="form",
+            fields=[
+                {
+                    "name": "机构类型",
+                    "options": [{"description": "缺少选项名"}],
+                },
+            ],
+        )
+
+
+@pytest.mark.asyncio
 async def test_ask_plan_clarification_preserves_unified_form_field_types() -> (
     None
 ):

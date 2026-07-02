@@ -156,6 +156,30 @@ def _coerce_form_field_object(
     return field
 
 
+def _normalize_field_choice_options(
+    *,
+    options: list[Any],
+    field_index: int | None,
+) -> list[dict[str, Any]]:
+    normalized_options: list[dict[str, Any]] = []
+    for option_index, option in enumerate(options):
+        try:
+            normalized_options.append(_normalize_choice_option(option))
+        except ValueError as error:
+            field_path = (
+                f"fields[{field_index}].options[{option_index}]"
+                if field_index is not None
+                else f"field options[{option_index}]"
+            )
+            message = str(error)
+            if message.startswith("clarification "):
+                message = message.removeprefix("clarification ")
+            raise ValueError(
+                f"clarification {field_path} {message}",
+            ) from error
+    return normalized_options
+
+
 def _looks_like_form_field(option: Any) -> bool:
     """根据常见字段约定判断 options 是否实际承载表单字段定义。"""
     if isinstance(option, BaseModel):
@@ -209,10 +233,16 @@ def _normalize_form_field(
     if raw_type is None:
         raw_type = "single_choice" if field.get("options") else "text"
     if not isinstance(raw_type, str) or not raw_type.strip():
-        raise ValueError("clarification field type must be a string")
+        raise ValueError(
+            "clarification "
+            + _field_error_path(index, "type must be a string"),
+        )
     normalized_type = raw_type.strip().lower()
     if normalized_type not in _SUPPORTED_FORM_FIELD_TYPES:
-        raise ValueError(f"unsupported clarification field type: {raw_type}")
+        raise ValueError(
+            "clarification "
+            + _field_error_path(index, f"unsupported type: {raw_type}"),
+        )
 
     normalized: dict[str, Any] = {
         "id": field_id,
@@ -241,9 +271,10 @@ def _normalize_form_field(
                 "clarification "
                 + _field_error_path(index, f"{field_id} requires options"),
             )
-        normalized["options"] = [
-            _normalize_choice_option(option) for option in raw_options
-        ]
+        normalized["options"] = _normalize_field_choice_options(
+            options=raw_options,
+            field_index=index,
+        )
     return normalized
 
 
