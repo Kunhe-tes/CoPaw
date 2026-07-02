@@ -109,7 +109,7 @@ def _get_scheduler_identity(
     )
 
 
-async def _refresh_cleanup_source_task(
+async def _refresh_source_tasks(
     request: Request,
     *,
     source_id: str,
@@ -130,16 +130,27 @@ async def _refresh_cleanup_source_task(
             source_id,
             force_refresh=True,
         )
-        await scheduler.refresh_task_session_cleanup(
-            source_id=source_id,
-            config=config,
-            identity=_get_scheduler_identity(
-                request,
-                updated_by=updated_by,
-            ),
-        )
     except Exception:  # noqa: BLE001
-        logger.exception("刷新 source 定时任务会话清理系统任务失败")
+        logger.exception("刷新 source 定时任务配置解析失败")
+        return
+
+    identity = _get_scheduler_identity(
+        request,
+        updated_by=updated_by,
+    )
+    refreshers = (
+        ("task_session_cleanup", scheduler.refresh_task_session_cleanup),
+        ("archive_maintenance", scheduler.refresh_archive_maintenance),
+    )
+    for task_name, refresh in refreshers:
+        try:
+            await refresh(
+                source_id=source_id,
+                config=config,
+                identity=identity,
+            )
+        except Exception:  # noqa: BLE001
+            logger.exception("刷新 source 定时任务失败: %s", task_name)
 
 
 @router.get("/effective", response_model=EffectiveSourceSystemConfig)
@@ -188,7 +199,7 @@ async def upsert_current_source_system_config(
             payload.config,
             updated_by=updated_by,
         )
-        await _refresh_cleanup_source_task(
+        await _refresh_source_tasks(
             request,
             source_id=source_id,
             updated_by=updated_by,
@@ -214,7 +225,7 @@ async def delete_current_source_system_config(
         _raise_storage_unavailable(exc)
     if not deleted:
         raise HTTPException(status_code=404, detail="Source config not found")
-    await _refresh_cleanup_source_task(
+    await _refresh_source_tasks(
         request,
         source_id=source_id,
         updated_by=updated_by,
@@ -282,7 +293,7 @@ async def upsert_source_system_config(
     except ValueError as exc:
         _raise_invalid_storage_data(exc)
     service.invalidate(source_id)
-    await _refresh_cleanup_source_task(
+    await _refresh_source_tasks(
         request,
         source_id=source_id,
         updated_by=updated_by,
@@ -306,7 +317,7 @@ async def delete_source_system_config(
     service.invalidate(source_id)
     if not deleted:
         raise HTTPException(status_code=404, detail="Source config not found")
-    await _refresh_cleanup_source_task(
+    await _refresh_source_tasks(
         request,
         source_id=source_id,
         updated_by=updated_by,

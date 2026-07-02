@@ -418,6 +418,22 @@ def _initialize_source_system_config(
                     lambda: tenant_workspace_pool.init_source_store
                 ),
                 multi_agent_manager=multi_agent_manager,
+                tenant_dir_resolver=(
+                    tenant_workspace_pool.get_tenant_workspace_dir
+                ),
+                continuous_governance_service_factory=(
+                    lambda: getattr(
+                        app.state,
+                        "continuous_governance_service",
+                        None,
+                    )
+                ),
+                source_config_resolver=(
+                    lambda source_id: source_config_service.resolve_config(
+                        source_id,
+                        force_refresh=True,
+                    )
+                ),
                 agent_id="default",
             )
         else:

@@ -1141,6 +1141,32 @@ async def internal_cron_callback(
                 "Source task session cleanup result: %s",
                 cleanup_result,
             )
+        elif task_type == "archive_maintenance":
+            if not source_id:
+                raise HTTPException(
+                    status_code=400,
+                    detail=(
+                        "source_id required for "
+                        "task_type=archive_maintenance"
+                    ),
+                )
+            source_scheduler = getattr(
+                request.app.state,
+                "source_system_task_scheduler",
+                None,
+            )
+            if source_scheduler is None:
+                raise HTTPException(
+                    status_code=503,
+                    detail="Source system task scheduler not available",
+                )
+            archive_result = await source_scheduler.run_archive_maintenance(
+                source_id=source_id,
+            )
+            logger.info(
+                "Source archive maintenance result: %s",
+                archive_result,
+            )
         else:
             manager = getattr(request.app.state, "multi_agent_manager", None)
             if manager is None:
@@ -1169,7 +1195,9 @@ async def internal_cron_callback(
                         detail="job_id required for task_type=job",
                     )
                 # 调度回调触发的是自动执行，不应走手动执行分支。
-                dispatch_meta = build_b3_dispatch_meta(request.headers)
+                dispatch_meta = build_b3_dispatch_meta(
+                    getattr(request, "headers", {}),
+                )
                 run_kwargs = {
                     "is_manual": False,
                     "source_id": source_id,

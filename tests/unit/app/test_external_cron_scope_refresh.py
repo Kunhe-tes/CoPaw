@@ -381,6 +381,48 @@ async def test_callback_runs_source_cleanup_without_using_tenant_scope() -> None
 
 
 @pytest.mark.asyncio
+async def test_callback_runs_source_archive_maintenance_without_tenant_scope() -> None:
+    observed: dict[str, Any] = {}
+
+    class FakeSourceScheduler:
+        async def run_archive_maintenance(self, *, source_id: str):
+            observed["source_id"] = source_id
+            return {"enabled": True, "source_id": source_id}
+
+    params = {
+        "tenant_id": "tenant-a",
+        "source_id": "source-a",
+        "agent_id": "",
+        "task_type": "archive_maintenance",
+        "job_id": "_source_archive_maintenance",
+        "scopeId": "tenant-a-source-a",
+        "fromId": "tenant-a",
+    }
+    request = SimpleNamespace(
+        app=SimpleNamespace(
+            state=SimpleNamespace(
+                source_system_task_scheduler=FakeSourceScheduler(),
+            ),
+        ),
+    )
+
+    response = await internal_router.internal_cron_callback(
+        request=request,
+        body={
+            "jobParam": base64.urlsafe_b64encode(
+                json.dumps(params).encode(),
+            ).decode(),
+        },
+    )
+
+    assert response == {
+        "status": "ok",
+        "task_type": "archive_maintenance",
+    }
+    assert observed == {"source_id": "source-a"}
+
+
+@pytest.mark.asyncio
 async def test_refresh_external_jobs_updates_existing_external_binding(
     tmp_path,
 ) -> None:

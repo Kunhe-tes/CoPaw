@@ -713,7 +713,7 @@ async def test_run_dream_binds_source_config_from_runtime_scope() -> None:
 
 
 @pytest.mark.asyncio
-async def test_run_dream_dual_writes_new_records_from_workspace(
+async def test_run_dream_dual_writes_new_records_without_archive_maintenance(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -739,26 +739,16 @@ async def test_run_dream_dual_writes_new_records_from_workspace(
             encoding="utf-8",
         )
 
-    maintenance = DreamArchiveMaintenanceResult(
-        archived_items=[
-            ArchiveItem(
-                id="archive-1",
-                original_path="old.md",
-                archive_path="governance/archive/files/archive-1",
-                size_bytes=7,
-                mtime="2026-05-24T09:00:00Z",
-                archived_at="2026-05-25T09:00:00Z",
-                archived_by="dream_cron",
-                archive_reason="dream_auto_mtime_3_days",
-            ),
-        ],
-        purged_archive_item_ids=["archive-expired"],
-        purged_paths=["expired.md"],
-        purged_size_bytes=5,
-    )
+    archive_maintenance_called = False
+
+    def fail_if_archive_maintenance_runs(*_args, **_kwargs):
+        nonlocal archive_maintenance_called
+        archive_maintenance_called = True
+        raise AssertionError("dream must not trigger archive maintenance")
+
     monkeypatch.setattr(
         "swe.app.routers.dream_logs.run_dream_archive_maintenance",
-        lambda *_args, **_kwargs: maintenance,
+        fail_if_archive_maintenance_runs,
     )
     runner = SimpleNamespace(
         workspace_dir=workspace_dir,
@@ -782,20 +772,10 @@ async def test_run_dream_dual_writes_new_records_from_workspace(
     assert call["target_user_id"] == "tenant-a"
     assert call["target_agent_id"] == "default"
     assert call["record"]["id"] == "new-record"
-    archive_call = cast(dict[str, Any], governance_service.archive_calls[0])
-    archive_items = cast(list[dict[str, Any]], archive_call["items"])
-    assert archive_call["source_id"] == "source-a"
-    assert archive_items[0]["original_path"] == "old.md"
-    delete_archive_call = cast(
-        dict[str, Any],
-        governance_service.delete_archive_calls[0],
-    )
-    assert delete_archive_call["archive_item_ids"] == [
-        "archive-expired",
-    ]
-    audit_call = cast(dict[str, Any], governance_service.audit_calls[0])
-    assert audit_call["operation"] == "purge_expired_archive"
-    assert audit_call["target_user_id"] == "tenant-a"
+    assert archive_maintenance_called is False
+    assert governance_service.archive_calls == []
+    assert governance_service.delete_archive_calls == []
+    assert governance_service.audit_calls == []
 
 
 @pytest.mark.asyncio

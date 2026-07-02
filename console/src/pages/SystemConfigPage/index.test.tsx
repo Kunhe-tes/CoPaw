@@ -60,8 +60,12 @@ describe("SystemConfigPage", () => {
     return screen.getAllByRole("switch")[3];
   }
 
-  function getToolResultCompactSwitch() {
+  function getArchiveMaintenanceSwitch() {
     return screen.getAllByRole("switch")[5];
+  }
+
+  function getToolResultCompactSwitch() {
+    return screen.getAllByRole("switch")[6];
   }
 
   afterEach(() => {
@@ -288,6 +292,64 @@ describe("SystemConfigPage", () => {
             enabled: true,
             retention_days: 45,
             cron: "30 2 * * *",
+            unknown_retained: "yes",
+          },
+        },
+      });
+    });
+  });
+
+  it("saves archive maintenance settings", async () => {
+    mocks.sourceSystemConfigApi.getCurrent.mockResolvedValueOnce({
+      source_id: "portal",
+      config: {
+        provider_policy: { default_model: "qwen-max" },
+        archive_maintenance: {
+          enabled: true,
+          cron: "0 3 * * *",
+          unknown_retained: "yes",
+        },
+      },
+      version: 1,
+      is_default: false,
+      updated_by: "alice",
+      updated_at: "2026-05-20 22:00:00",
+    });
+    mocks.sourceSystemConfigApi.updateCurrent.mockResolvedValue({
+      source_id: "portal",
+      config: {
+        provider_policy: { default_model: "qwen-max" },
+        archive_maintenance: {
+          enabled: false,
+          cron: "30 3 * * *",
+          unknown_retained: "yes",
+        },
+      },
+      version: 2,
+      is_default: false,
+      updated_by: "alice",
+      updated_at: "2026-05-21 10:00:00",
+    });
+
+    render(<SystemConfigPage />);
+
+    expect(await screen.findByText("文件归档维护")).toBeTruthy();
+    expect(screen.getByText("03:00")).toBeTruthy();
+
+    fireEvent.mouseDown(
+      screen.getByRole("combobox", { name: "归档维护每日运行时间" }),
+    );
+    fireEvent.click(await screen.findByText("03:30"));
+    fireEvent.click(getArchiveMaintenanceSwitch());
+    fireEvent.click(screen.getByRole("button", { name: "common.save" }));
+
+    await waitFor(() => {
+      expect(mocks.sourceSystemConfigApi.updateCurrent).toHaveBeenCalledWith({
+        config: {
+          provider_policy: { default_model: "qwen-max" },
+          archive_maintenance: {
+            enabled: false,
+            cron: "30 3 * * *",
             unknown_retained: "yes",
           },
         },

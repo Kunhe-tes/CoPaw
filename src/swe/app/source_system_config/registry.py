@@ -129,6 +129,57 @@ CRON_TASK_SESSION_CLEANUP_CRON_SETTING = SourceSystemConfigSetting(
     default_value="0 1 * * *",
     value_type="str",
 )
+ARCHIVE_MAINTENANCE_ENABLED_SETTING = SourceSystemConfigSetting(
+    key="archive_maintenance.enabled",
+    path=("archive_maintenance", "enabled"),
+    default_value=True,
+    value_type="bool",
+)
+ARCHIVE_MAINTENANCE_CRON_SETTING = SourceSystemConfigSetting(
+    key="archive_maintenance.cron",
+    path=("archive_maintenance", "cron"),
+    default_value="0 3 * * *",
+    value_type="str",
+)
+ARCHIVE_MAINTENANCE_OLD_ORPHAN_DAYS_SETTING = SourceSystemConfigSetting(
+    key="archive_maintenance.old_orphan_days",
+    path=("archive_maintenance", "old_orphan_days"),
+    default_value=3,
+    value_type="int",
+    ge=1,
+)
+ARCHIVE_MAINTENANCE_MAX_WORKSPACES_PER_RUN_SETTING = (
+    SourceSystemConfigSetting(
+        key="archive_maintenance.max_workspaces_per_run",
+        path=("archive_maintenance", "max_workspaces_per_run"),
+        default_value=200,
+        value_type="int",
+        ge=1,
+    )
+)
+ARCHIVE_MAINTENANCE_MAX_FILES_PER_WORKSPACE_SETTING = (
+    SourceSystemConfigSetting(
+        key="archive_maintenance.max_files_per_workspace",
+        path=("archive_maintenance", "max_files_per_workspace"),
+        default_value=100,
+        value_type="int",
+        ge=1,
+    )
+)
+ARCHIVE_MAINTENANCE_MAX_FILES_PER_RUN_SETTING = SourceSystemConfigSetting(
+    key="archive_maintenance.max_files_per_run",
+    path=("archive_maintenance", "max_files_per_run"),
+    default_value=5000,
+    value_type="int",
+    ge=1,
+)
+ARCHIVE_MAINTENANCE_TIMEOUT_SECONDS_SETTING = SourceSystemConfigSetting(
+    key="archive_maintenance.timeout_seconds",
+    path=("archive_maintenance", "timeout_seconds"),
+    default_value=900,
+    value_type="int",
+    ge=1,
+)
 SYSTEM_PROMPT_INJECTIONS_PATH = ("system_prompt_injections",)
 SYSTEM_PROMPT_INJECTIONS_DEFAULT: list[str] = []
 
@@ -155,6 +206,13 @@ CURRENT_SOURCE_SYSTEM_CONFIG_SETTINGS: tuple[
     CRON_TASK_SESSION_CLEANUP_ENABLED_SETTING,
     CRON_TASK_SESSION_CLEANUP_RETENTION_DAYS_SETTING,
     CRON_TASK_SESSION_CLEANUP_CRON_SETTING,
+    ARCHIVE_MAINTENANCE_ENABLED_SETTING,
+    ARCHIVE_MAINTENANCE_CRON_SETTING,
+    ARCHIVE_MAINTENANCE_OLD_ORPHAN_DAYS_SETTING,
+    ARCHIVE_MAINTENANCE_MAX_WORKSPACES_PER_RUN_SETTING,
+    ARCHIVE_MAINTENANCE_MAX_FILES_PER_WORKSPACE_SETTING,
+    ARCHIVE_MAINTENANCE_MAX_FILES_PER_RUN_SETTING,
+    ARCHIVE_MAINTENANCE_TIMEOUT_SECONDS_SETTING,
 )
 
 _MISSING = object()
@@ -319,7 +377,10 @@ def normalize_registered_setting_values(
             continue
         if setting.value_type == "str":
             coerced = _coerce_registered_string_value(setting, value)
-            if setting is CRON_TASK_SESSION_CLEANUP_CRON_SETTING:
+            if setting in (
+                CRON_TASK_SESSION_CLEANUP_CRON_SETTING,
+                ARCHIVE_MAINTENANCE_CRON_SETTING,
+            ):
                 coerced = _normalize_daily_cron_value(setting, coerced)
             _set_nested_value(normalized, setting.path, coerced)
     if validate_cross_ranges:
@@ -554,6 +615,13 @@ def _validate_explicit_tool_result_compact_ranges(
 
 
 __all__ = [
+    "ARCHIVE_MAINTENANCE_CRON_SETTING",
+    "ARCHIVE_MAINTENANCE_ENABLED_SETTING",
+    "ARCHIVE_MAINTENANCE_MAX_FILES_PER_RUN_SETTING",
+    "ARCHIVE_MAINTENANCE_MAX_FILES_PER_WORKSPACE_SETTING",
+    "ARCHIVE_MAINTENANCE_MAX_WORKSPACES_PER_RUN_SETTING",
+    "ARCHIVE_MAINTENANCE_OLD_ORPHAN_DAYS_SETTING",
+    "ARCHIVE_MAINTENANCE_TIMEOUT_SECONDS_SETTING",
     "APPROVAL_NOTIFICATIONS_ZHAOHU_TOOL_GUARD_ENABLED_SETTING",
     "CHAT_TASK_PROGRESS_ENABLED_SWITCH",
     "CRON_TASK_SESSION_CLEANUP_CRON_SETTING",

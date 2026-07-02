@@ -2668,32 +2668,6 @@ class CronManager:  # pylint: disable=too-many-public-methods
                 agent_id=governance_agent_id,
                 before_record_ids=before_record_ids,
             )
-            if workspace_dir is not None:
-                from ..routers.dream_logs import (
-                    dual_write_dream_archive_maintenance_result,
-                    run_dream_archive_maintenance,
-                )
-
-                maintenance = run_dream_archive_maintenance(
-                    workspace_dir,
-                    actor="dream_cron",
-                )
-                if (
-                    maintenance is not None
-                    and self._continuous_governance_service is not None
-                    and source_id
-                    and tenant_id
-                    and governance_agent_id
-                ):
-                    await dual_write_dream_archive_maintenance_result(
-                        service=self._continuous_governance_service,
-                        source_id=source_id,
-                        target_user_id=tenant_id,
-                        target_agent_id=governance_agent_id,
-                        maintenance=maintenance,
-                        actor="dream_cron",
-                        source_name=source_id,
-                    )
         logger.debug("Dream task executed successfully")
 
     def _load_dream_record_ids(self, workspace_dir: Path | None) -> set[str]:

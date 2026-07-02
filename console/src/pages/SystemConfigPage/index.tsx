@@ -26,6 +26,7 @@ import { useSourceSystemConfigStore } from "@/stores/sourceSystemConfigStore";
 import { DEFAULT_SOURCE_ID } from "@/constants/identity";
 
 import {
+  ARCHIVE_MAINTENANCE_RUN_TIME_OPTIONS,
   CURRENT_SOURCE_SYSTEM_CONFIG_SWITCHES,
   CRON_TASK_SESSION_CLEANUP_RUN_TIME_OPTIONS,
   TOOL_RESULT_COMPACT_NUMBER_FIELDS,
@@ -33,6 +34,7 @@ import {
   enableImmediateTruncationConfig,
   formatSystemPromptInjectionText,
   parseSystemPromptInjectionText,
+  readArchiveMaintenanceConfig,
   readCronTaskSessionCleanupConfig,
   readCronUnreadAutoPauseConfig,
   readRegisteredSwitchValue,
@@ -40,6 +42,7 @@ import {
   readSystemPromptInjections,
   readToolResultCompactConfig,
   validateSourceSystemConfig,
+  writeArchiveMaintenanceValue,
   writeCronTaskSessionCleanupValue,
   writeCronUnreadAutoPauseValue,
   writeRegisteredSwitchValue,
@@ -253,6 +256,26 @@ export default function SystemConfigPage() {
     );
   };
 
+  const handleArchiveMaintenanceEnabledChange = (checked: boolean) => {
+    if (formDisabled) {
+      return;
+    }
+    setValidationError(null);
+    setDraftConfig((previous) =>
+      writeArchiveMaintenanceValue(previous, "enabled", checked),
+    );
+  };
+
+  const handleArchiveMaintenanceRunTimeChange = (value: string) => {
+    if (formDisabled) {
+      return;
+    }
+    setValidationError(null);
+    setDraftConfig((previous) =>
+      writeArchiveMaintenanceValue(previous, "run_time", value),
+    );
+  };
+
   const handleSystemPromptInjectionsChange = (value: string) => {
     if (formDisabled) {
       return;
@@ -384,6 +407,7 @@ export default function SystemConfigPage() {
   const cronUnreadAutoPauseConfig = readCronUnreadAutoPauseConfig(draftConfig);
   const cronTaskSessionCleanupConfig =
     readCronTaskSessionCleanupConfig(draftConfig);
+  const archiveMaintenanceConfig = readArchiveMaintenanceConfig(draftConfig);
   const systemPromptInjectionText = formatSystemPromptInjectionText(
     readSystemPromptInjections(draftConfig),
   );
@@ -730,6 +754,59 @@ export default function SystemConfigPage() {
                           }),
                         )}
                         onChange={handleCronTaskSessionCleanupRunTimeChange}
+                      />
+                    </label>
+                  </div>
+                </section>
+                <section className={styles.scheduledTaskSection}>
+                  <div className={styles.switchRow}>
+                    <div className={styles.switchCopy}>
+                      <span className={styles.switchTitle}>
+                        {t("sourceSystemConfigPage.archiveMaintenanceTitle", {
+                          defaultValue: "文件归档维护",
+                        })}
+                      </span>
+                      <span className={styles.switchDescription}>
+                        {t(
+                          "sourceSystemConfigPage.archiveMaintenanceDescription",
+                          {
+                            defaultValue:
+                              "每天按 source 维度归档旧孤儿文件，不会自动删除归档文件。",
+                          },
+                        )}
+                      </span>
+                    </div>
+                    <Switch
+                      checked={archiveMaintenanceConfig.enabled}
+                      disabled={formDisabled}
+                      onChange={handleArchiveMaintenanceEnabledChange}
+                    />
+                  </div>
+                  <div className={styles.numberGrid}>
+                    <label className={styles.numberField}>
+                      <span className={styles.numberLabel}>
+                        {t("sourceSystemConfigPage.archiveMaintenanceRunTime", {
+                          defaultValue: "归档维护每日运行时间",
+                        })}
+                      </span>
+                      <Select
+                        aria-label={t(
+                          "sourceSystemConfigPage.archiveMaintenanceRunTime",
+                          {
+                            defaultValue: "归档维护每日运行时间",
+                          },
+                        )}
+                        value={archiveMaintenanceConfig.run_time}
+                        disabled={
+                          formDisabled || !archiveMaintenanceConfig.enabled
+                        }
+                        options={ARCHIVE_MAINTENANCE_RUN_TIME_OPTIONS.map(
+                          (runTime) => ({
+                            label: runTime,
+                            value: runTime,
+                          }),
+                        )}
+                        onChange={handleArchiveMaintenanceRunTimeChange}
                       />
                     </label>
                   </div>
