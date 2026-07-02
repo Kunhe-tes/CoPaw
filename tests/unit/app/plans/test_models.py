@@ -101,7 +101,7 @@ def test_plan_clarification_card_supports_form_fields() -> None:
             {
                 "id": "industry",
                 "label": "所在行业",
-                "type": "select",
+                "type": "single_choice",
                 "options": [
                     {"id": "retail", "label": "零售/电商"},
                     {"id": "saas", "label": "SaaS/软件服务"},
@@ -111,7 +111,7 @@ def test_plan_clarification_card_supports_form_fields() -> None:
             {
                 "id": "current_challenges",
                 "label": "当前主要挑战",
-                "type": "textarea",
+                "type": "text",
                 "placeholder": "请补充",
             },
         ],
@@ -119,7 +119,7 @@ def test_plan_clarification_card_supports_form_fields() -> None:
 
     assert card.kind == "form"
     assert card.form_id == "customer_plan_clarification"
-    assert card.fields[0].type == "select"
+    assert card.fields[0].type == "single_choice"
     assert card.fields[1].placeholder == "请补充"
 
 

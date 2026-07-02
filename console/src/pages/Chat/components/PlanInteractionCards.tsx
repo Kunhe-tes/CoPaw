@@ -423,7 +423,7 @@ export function PlanClarificationCard({
   const options = data.options || [];
   const fields = data.fields || [];
   const allowsCustomText =
-    data.kind === "text_input" || data.allow_custom_response === true;
+    data.kind === "text" || data.allow_custom_response === true;
   const totalSteps =
     data.kind === "form"
       ? fields.length + (data.allow_custom_response ? 1 : 0)
@@ -436,7 +436,8 @@ export function PlanClarificationCard({
   const isSupplementStep =
     data.kind === "form" && !activeField && data.allow_custom_response === true;
   const activeOptions =
-    activeField?.type === "select" || activeField?.type === "multiselect"
+    activeField?.type === "single_choice" ||
+    activeField?.type === "multi_choice"
       ? activeField.options || []
       : options;
   const activeSelectedIds = activeField
@@ -473,7 +474,7 @@ export function PlanClarificationCard({
     })
     .filter(Boolean);
   const disabled =
-    data.kind === "text_input"
+    data.kind === "text"
       ? !trimmedText
       : data.kind === "form"
       ? !requiredFormFieldsSatisfied ||
@@ -490,10 +491,10 @@ export function PlanClarificationCard({
     !customActive &&
     (data.kind === "single_choice" ||
       data.kind === "multi_choice" ||
-      activeField?.type === "select" ||
-      activeField?.type === "multiselect");
+      activeField?.type === "single_choice" ||
+      activeField?.type === "multi_choice");
   const showCustomInput =
-    data.kind === "text_input" || customActive || isSupplementStep;
+    data.kind === "text" || customActive || isSupplementStep;
 
   useEffect(() => {
     setSubmitted(
@@ -536,17 +537,17 @@ export function PlanClarificationCard({
     const effectiveSelectedIds = selectedOverride || selectedIds;
     const effectiveSelectedLabels = optionLabels(options, effectiveSelectedIds);
     const effectiveText =
-      data.kind === "form" || data.kind === "text_input"
+      data.kind === "form" || data.kind === "text"
         ? trimmedText
         : effectiveChoiceText;
     const effectiveQuery =
-      data.kind === "text_input"
+      data.kind === "text"
         ? effectiveText
         : data.kind === "form"
         ? [...formQueryLines, effectiveText].filter(Boolean).join("\n")
         : [effectiveSelectedLabels, effectiveText].filter(Boolean).join("\n");
     const effectiveDisabled =
-      data.kind === "text_input"
+      data.kind === "text"
         ? !effectiveQuery
         : data.kind === "form"
         ? !requiredFormFieldsSatisfied || !effectiveQuery
@@ -611,7 +612,7 @@ export function PlanClarificationCard({
     if (activeField) {
       setFormValues((current) => {
         const currentValue = current[activeField.id];
-        if (activeField.type === "multiselect") {
+        if (activeField.type === "multi_choice") {
           const currentIds = Array.isArray(currentValue) ? currentValue : [];
           return {
             ...current,
@@ -792,32 +793,13 @@ export function PlanClarificationCard({
             }
           />
         ) : null}
-        {activeField?.type === "textarea" ? (
-          <textarea
-            autoFocus
-            className={styles.textArea}
-            aria-label={activeField.label}
-            placeholder={activeField.placeholder || activeField.label}
-            value={
-              typeof formValues[activeField.id] === "string"
-                ? (formValues[activeField.id] as string)
-                : ""
-            }
-            onChange={(event) =>
-              setFormValues((current) => ({
-                ...current,
-                [activeField.id]: event.target.value,
-              }))
-            }
-          />
-        ) : null}
         {showCustomInput ? (
           <textarea
             autoFocus
             className={styles.textArea}
             aria-label={pageTitle}
             placeholder={
-              data.kind === "text_input" ? data.prompt : "请输入自定义回复"
+              data.kind === "text" ? data.prompt : "请输入自定义回复"
             }
             value={textInput}
             onChange={(event) => setTextInput(event.target.value)}

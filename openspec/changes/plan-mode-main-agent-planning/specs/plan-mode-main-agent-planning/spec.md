@@ -108,7 +108,7 @@ The Main Agent SHALL have `ask_plan_clarification` and `submit_proposed_plan` to
 - **THEN** the frontend SHALL render a Planning Clarification Card that accepts multiple selected options
 
 #### Scenario: Clarification card supports text input
-- **WHEN** the Main Agent calls `ask_plan_clarification` with `kind="text_input"`
+- **WHEN** the Main Agent calls `ask_plan_clarification` with `kind="text"`
 - **THEN** the frontend SHALL render a Planning Clarification Card that accepts free-form text
 
 #### Scenario: Clarification response is next chat turn

@@ -333,7 +333,7 @@ describe("Plan interaction cards", () => {
       <PlanClarificationCard
         data={{
           card_type: "plan_clarification",
-          kind: "text_input",
+          kind: "text",
           prompt: "Add detail",
         }}
       />,
@@ -358,7 +358,7 @@ describe("Plan interaction cards", () => {
       <PlanClarificationCard
         data={{
           card_type: "plan_clarification",
-          kind: "text_input",
+          kind: "text",
           prompt: "Add detail",
         }}
       />,
@@ -385,14 +385,14 @@ describe("Plan interaction cards", () => {
             {
               id: "scope",
               label: "Scope",
-              type: "select",
+              type: "single_choice",
               required: true,
               options: [{ id: "small", label: "Small" }],
             },
             {
               id: "detail",
               label: "Detail",
-              type: "textarea",
+              type: "text",
             },
           ],
         }}
@@ -454,14 +454,14 @@ describe("Plan interaction cards", () => {
             {
               id: "industry",
               label: "所在行业",
-              type: "select",
+              type: "single_choice",
               required: true,
               options: [{ id: "retail", label: "零售/电商" }],
             },
             {
               id: "challenges",
               label: "当前主要挑战",
-              type: "textarea",
+              type: "text",
               placeholder: "请补充",
             },
           ],
@@ -501,7 +501,7 @@ describe("Plan interaction cards", () => {
     submit.cleanup();
   });
 
-  it("submits structured multiselect form values as selected option ids", async () => {
+  it("submits structured multi-choice form values as selected option ids", async () => {
     const submit = captureSubmitEvents();
     render(
       <PlanClarificationCard
@@ -514,7 +514,7 @@ describe("Plan interaction cards", () => {
             {
               id: "checks",
               label: "验证项",
-              type: "multiselect",
+              type: "multi_choice",
               required: true,
               options: [
                 { id: "frontend", label: "前端测试" },
@@ -557,7 +557,7 @@ describe("Plan interaction cards", () => {
             {
               id: "scope",
               label: "Scope",
-              type: "select",
+              type: "single_choice",
               required: true,
               options: [{ id: "small", label: "Small" }],
             },

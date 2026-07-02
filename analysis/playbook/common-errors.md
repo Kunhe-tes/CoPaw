@@ -35,8 +35,8 @@
 
 - 先记录工具实际入参，确认 `fields` 和 `options` 是原生数组还是 JSON 字符串
 - JSON 字符串只允许解析为数组，非法 JSON 或非对象字段应返回明确参数错误
-- 无候选项的缺省字段归一为 `text`，有候选项的缺省字段归一为 `select`
-- 常见宽泛 `kind` 应在工具入口归一到 `single_choice`、`multi_choice`、`text_input` 或 `form`，不要放宽 `PlanClarificationCard` 领域模型
+- 无候选项的缺省字段归一为 `text`，有候选项的缺省字段归一为 `single_choice`
+- `kind` 必须使用 `single_choice`、`multi_choice`、`text` 或 `form`，不要放宽 `PlanClarificationCard` 领域模型
 
 ## MCP 注册时报 App not Subscribe This MCP Server
 

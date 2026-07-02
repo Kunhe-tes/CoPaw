@@ -20,14 +20,13 @@ PlanReviewDecisionType = Literal["revise", "execute", "exit_plan"]
 PlanClarificationKind = Literal[
     "single_choice",
     "multi_choice",
-    "text_input",
+    "text",
     "form",
 ]
 PlanClarificationFieldType = Literal[
-    "select",
-    "multiselect",
     "text",
-    "textarea",
+    "single_choice",
+    "multi_choice",
 ]
 
 
@@ -69,11 +68,11 @@ class PlanClarificationField(_StrictPlanModel):
     @model_validator(mode="after")
     def _validate_field_shape(self) -> "PlanClarificationField":
         """限制字段类型和候选项的组合，避免前端收到矛盾配置。"""
-        needs_options = self.type in {"select", "multiselect"}
+        needs_options = self.type in {"single_choice", "multi_choice"}
         if needs_options and not self.options:
-            raise ValueError("select-like fields require options")
+            raise ValueError("choice fields require options")
         if not needs_options and self.options:
-            raise ValueError("text-like fields do not accept options")
+            raise ValueError("text fields do not accept options")
         return self
 
 

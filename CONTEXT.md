@@ -462,7 +462,7 @@ Resolved as allowed but optional. Plan Mode may expose readonly **Background Sub
 Resolved as the **Planning Readonly Policy**: `read_file`, `grep_search`, `glob_search`, `get_current_time`, readonly shell, and readonly **Background SubAgent Tools** are allowed; `write_file`, `edit_file`, `copy_file_to_static`, `update_task_progress`, mutating shell, test commands, deployment commands, and migration commands are forbidden.
 
 **"Plan Interaction Types"**:
-Resolved to support only `single_choice`, `multi_choice`, `text_input`, and `plan_review` in the first version.
+Resolved to support only `single_choice`, `multi_choice`, `text`, and `plan_review` in the first version.
 
 **"Plan Card Submission"**:
 Resolved as a normal next chat turn carrying **Plan Interaction Response** metadata, not a separate plan-state API call.

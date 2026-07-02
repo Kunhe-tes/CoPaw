@@ -16,7 +16,7 @@
 
 ## 3. Backend Planning Tools
 
-- [x] 3.1 Add failing tests for `ask_plan_clarification` output shapes for `single_choice`, `multi_choice`, and `text_input`.
+- [x] 3.1 Add failing tests for `ask_plan_clarification` output shapes for `single_choice`, `multi_choice`, and `text`.
 - [x] 3.2 Add failing tests for `submit_proposed_plan` persisting a Proposed Plan before emitting Plan Review Card metadata.
 - [x] 3.3 Implement `ask_plan_clarification` and `submit_proposed_plan` built-in tools.
 - [x] 3.4 Register planning tools for Main Agent in all modes and ensure SubAgents do not emit Plan Interaction Cards.

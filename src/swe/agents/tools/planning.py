@@ -18,37 +18,13 @@ from ...app.plans import (
 from ...constant import WORKING_DIR
 
 _PLAN_CARD_METADATA_KEY = "plan_interaction_card"
-_LEGACY_CLARIFICATION_KINDS = frozenset(
-    {"single_choice", "multi_choice", "text_input"},
+_DIRECT_CLARIFICATION_KINDS = frozenset(
+    {"single_choice", "multi_choice", "text"},
 )
-_SUPPORTED_CLARIFICATION_KINDS = _LEGACY_CLARIFICATION_KINDS | {"form"}
-_CLARIFICATION_KIND_ALIASES = {
-    "clarification": "single_choice",
-    "choice": "single_choice",
-    "radio": "single_choice",
-    "select": "single_choice",
-    "single": "single_choice",
-    "question": "single_choice",
-    "multi": "multi_choice",
-    "multiple": "multi_choice",
-    "multi_select": "multi_choice",
-    "multiselect": "multi_choice",
-    "checkbox": "multi_choice",
-    "checkboxes": "multi_choice",
-    "text": "text_input",
-    "input": "text_input",
-    "free_text": "text_input",
-    "textarea": "text_input",
-}
-_FORM_FIELD_TYPE_ALIASES = {
-    "select": "select",
-    "multiselect": "multiselect",
-    "multi_select": "multiselect",
-    "multi_choice": "multiselect",
-    "text": "text",
-    "text_input": "text",
-    "textarea": "textarea",
-}
+_SUPPORTED_CLARIFICATION_KINDS = _DIRECT_CLARIFICATION_KINDS | {"form"}
+_SUPPORTED_FORM_FIELD_TYPES = frozenset(
+    {"single_choice", "multi_choice", "text"},
+)
 
 
 def _coerce_json_array(value: Any, field_name: str) -> list[Any]:
@@ -104,7 +80,7 @@ def _looks_like_form_field(option: Any) -> bool:
 
 
 def _normalize_form_field(field: dict[str, Any]) -> dict[str, Any]:
-    """兼容 key/name/id、字符串候选项和输入类型别名。"""
+    """兼容 key/name/id 与字符串候选项。"""
     field_id = field.get("id") or field.get("name") or field.get("key")
     if not isinstance(field_id, str) or not field_id.strip():
         raise ValueError("clarification field id is required")
@@ -115,11 +91,11 @@ def _normalize_form_field(field: dict[str, Any]) -> dict[str, Any]:
 
     raw_type = field.get("type")
     if raw_type is None:
-        raw_type = "select" if field.get("options") else "text"
+        raw_type = "single_choice" if field.get("options") else "text"
     if not isinstance(raw_type, str) or not raw_type.strip():
         raise ValueError("clarification field type must be a string")
-    normalized_type = _FORM_FIELD_TYPE_ALIASES.get(raw_type.strip().lower())
-    if normalized_type is None:
+    normalized_type = raw_type.strip().lower()
+    if normalized_type not in _SUPPORTED_FORM_FIELD_TYPES:
         raise ValueError(f"unsupported clarification field type: {raw_type}")
 
     normalized: dict[str, Any] = {
@@ -135,7 +111,7 @@ def _normalize_form_field(field: dict[str, Any]) -> dict[str, Any]:
     if isinstance(description, str) and description.strip():
         normalized["description"] = description
 
-    if normalized_type in {"select", "multiselect"}:
+    if normalized_type in {"single_choice", "multi_choice"}:
         raw_options = field.get("options")
         if not isinstance(raw_options, list) or not raw_options:
             raise ValueError(
@@ -165,10 +141,7 @@ def _normalize_clarification_kind(
     normalized = kind.strip().lower()
     if normalized in _SUPPORTED_CLARIFICATION_KINDS:
         return normalized
-    alias = _CLARIFICATION_KIND_ALIASES.get(normalized)
-    if alias is not None:
-        return alias
-    return "single_choice" if raw_options else "text_input"
+    raise ValueError(f"unsupported clarification kind: {kind}")
 
 
 def _normalize_clarification_payload(
@@ -187,7 +160,7 @@ def _normalize_clarification_payload(
         }
 
     raw_options = _coerce_json_array(options, "options")
-    if kind not in _LEGACY_CLARIFICATION_KINDS and raw_options:
+    if kind not in _DIRECT_CLARIFICATION_KINDS and raw_options:
         if all(_looks_like_form_field(option) for option in raw_options):
             return {
                 "kind": "form",
@@ -211,7 +184,7 @@ def _normalize_clarification_payload(
 
 async def ask_plan_clarification(
     prompt: str,
-    kind: Literal["single_choice", "multi_choice", "text_input", "form"],
+    kind: Literal["single_choice", "multi_choice", "text", "form"],
     options: list[Any] | str | None = None,
     fields: list[dict[str, Any]] | str | None = None,
     allow_custom_response: bool = False,

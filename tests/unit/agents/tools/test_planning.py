@@ -35,7 +35,7 @@ def _text(response) -> str:
             "multi_choice",
             [{"id": "a", "label": "A"}, {"id": "b", "label": "B"}],
         ),
-        ("text_input", []),
+        ("text", []),
     ],
 )
 async def test_ask_plan_clarification_emits_card_metadata(
@@ -65,14 +65,14 @@ async def test_ask_plan_clarification_normalizes_form_payload() -> None:
             {
                 "name": "industry",
                 "label": "所在行业",
-                "type": "select",
+                "type": "single_choice",
                 "options": ["零售/电商", "SaaS/软件服务"],
                 "required": True,
             },
             {
                 "name": "current_challenges",
                 "label": "当前主要挑战",
-                "type": "textarea",
+                "type": "text",
                 "placeholder": "例如：获客成本高、流失率大",
             },
         ],
@@ -88,7 +88,7 @@ async def test_ask_plan_clarification_normalizes_form_payload() -> None:
         {
             "id": "industry",
             "label": "所在行业",
-            "type": "select",
+            "type": "single_choice",
             "options": [
                 {"id": "零售/电商", "label": "零售/电商"},
                 {"id": "SaaS/软件服务", "label": "SaaS/软件服务"},
@@ -98,7 +98,7 @@ async def test_ask_plan_clarification_normalizes_form_payload() -> None:
         {
             "id": "current_challenges",
             "label": "当前主要挑战",
-            "type": "textarea",
+            "type": "text",
             "options": [],
             "placeholder": "例如：获客成本高、流失率大",
             "required": False,
@@ -132,8 +132,48 @@ async def test_ask_plan_clarification_accepts_string_fields() -> None:
         {
             "id": "customer_type",
             "label": "客户类型",
-            "type": "select",
+            "type": "single_choice",
             "options": [{"id": "B2B", "label": "企业客户 (B2B)"}],
+            "required": False,
+        },
+    ]
+
+
+@pytest.mark.asyncio
+async def test_ask_plan_clarification_preserves_unified_form_field_types() -> (
+    None
+):
+    response = await ask_plan_clarification(
+        prompt="为了把通用方法变成你能直接执行的提分方案，请先回答以下问题。",
+        kind="form",
+        fields=(
+            '[{"key":"grade_level","label":"当前年级","type":"single_choice",'
+            '"options":["高一","高二","高三"]},'
+            '{"key":"target","label":"目标分数 / 目标院校 / 具体提分目标",'
+            '"type":"text"}]'
+        ),
+        allow_custom_response=True,
+    )
+
+    card = response.metadata["plan_interaction_card"]
+    assert card["kind"] == "form"
+    assert card["fields"] == [
+        {
+            "id": "grade_level",
+            "label": "当前年级",
+            "type": "single_choice",
+            "options": [
+                {"id": "高一", "label": "高一"},
+                {"id": "高二", "label": "高二"},
+                {"id": "高三", "label": "高三"},
+            ],
+            "required": False,
+        },
+        {
+            "id": "target",
+            "label": "目标分数 / 目标院校 / 具体提分目标",
+            "type": "text",
+            "options": [],
             "required": False,
         },
     ]
@@ -145,7 +185,7 @@ async def test_ask_plan_clarification_accepts_model_generated_choice_payload_str
 ):
     response = await ask_plan_clarification(
         prompt="升学路径因当前阶段和目标而异。请告诉我你的具体情况：",
-        kind="clarification",
+        kind="single_choice",
         options=(
             '[{"label": "初中升高中", "description": "中考准备、志愿填报、择校等"}, '
             '{"label": "高中升本科", "description": "高考、强基计划、综合评价、留学等"}, '
@@ -190,7 +230,7 @@ def test_ask_plan_clarification_tool_schema_guides_choice_kind() -> None:
     properties = schema["function"]["parameters"]["properties"]
 
     assert properties["kind"] == {
-        "enum": ["single_choice", "multi_choice", "text_input", "form"],
+        "enum": ["single_choice", "multi_choice", "text", "form"],
         "type": "string",
     }
     assert {"type": "string"} in properties["options"]["anyOf"]

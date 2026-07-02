@@ -124,7 +124,7 @@ export interface ChatApprovalActionCardData {
 export type PlanClarificationKind =
   | "single_choice"
   | "multi_choice"
-  | "text_input"
+  | "text"
   | "form";
 
 export interface PlanClarificationOption {
@@ -133,10 +133,9 @@ export interface PlanClarificationOption {
 }
 
 export type PlanClarificationFieldType =
-  | "select"
-  | "multiselect"
   | "text"
-  | "textarea";
+  | "single_choice"
+  | "multi_choice";
 
 export interface PlanClarificationField {
   id: string;
@@ -203,10 +202,7 @@ function normalizePlanClarificationFields(
       if (
         typeof record.id !== "string" ||
         typeof record.label !== "string" ||
-        (type !== "select" &&
-          type !== "multiselect" &&
-          type !== "text" &&
-          type !== "textarea")
+        (type !== "single_choice" && type !== "multi_choice" && type !== "text")
       ) {
         return null;
       }
@@ -215,7 +211,7 @@ function normalizePlanClarificationFields(
         ? record.options.filter(isPlanClarificationOption)
         : undefined;
       if (
-        (type === "select" || type === "multiselect") &&
+        (type === "single_choice" || type === "multi_choice") &&
         (!options || options.length === 0)
       ) {
         return null;
@@ -253,7 +249,7 @@ function normalizePlanInteractionCard(
     if (
       kind !== "single_choice" &&
       kind !== "multi_choice" &&
-      kind !== "text_input" &&
+      kind !== "text" &&
       kind !== "form"
     ) {
       return null;

@@ -8,7 +8,7 @@ Plan Mode needs to become an explicit, user-visible planning state for the Main 
 - Add Console request metadata passthrough for `mode`, `plan_interaction_response`, and related planning fields.
 - Add a Planning Readonly Policy for the Main Agent in Plan Mode that filters unavailable tools from the toolkit and hard-denies forbidden tool calls.
 - Add Main Agent planning interaction tools:
-  - `ask_plan_clarification` for `single_choice`, `multi_choice`, and `text_input` clarification cards.
+  - `ask_plan_clarification` for `single_choice`, `multi_choice`, and `text` clarification cards.
   - `submit_proposed_plan` for Proposed Plan review cards.
 - Persist Proposed Plans under the corresponding tenant Agent workspace `plans/` directory, using backend-generated `plan_id` values.
 - Add Plan Review Decision handling for:

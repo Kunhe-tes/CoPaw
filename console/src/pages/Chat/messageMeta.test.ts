@@ -113,14 +113,14 @@ describe("messageMeta", () => {
             {
               id: "industry",
               label: "所在行业",
-              type: "select",
+              type: "single_choice",
               required: true,
               options: [{ id: "retail", label: "零售/电商" }],
             },
             {
               id: "current_challenges",
               label: "当前主要挑战",
-              type: "textarea",
+              type: "text",
               placeholder: "请补充",
             },
           ],
@@ -139,7 +139,7 @@ describe("messageMeta", () => {
     expect(card.fields).toHaveLength(2);
     expect(card.fields?.[0]).toMatchObject({
       id: "industry",
-      type: "select",
+      type: "single_choice",
       required: true,
     });
   });
