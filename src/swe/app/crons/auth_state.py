@@ -136,7 +136,8 @@ def append_user_profile_from_cookie(cookie_header:str,workspace_dir:Path) -> Non
         vorgcode = cookies.get("com.cmb.dw.rtl.sso.vorgcode","未知")
         position_id = cookies.get("com.cmb.dw.rtl.sso.positionID","未知")
         user_id = cookies.get("com.cmb.dw.rtl.sso.userid","未知")
-
+        if branch_id == "V00":
+            return
         # 拼接text
         text = (
             f"\n###用户身份信息\n"
