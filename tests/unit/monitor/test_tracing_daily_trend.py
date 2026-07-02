@@ -74,7 +74,52 @@ class TestTracingDailyTrend:
     async def test_get_daily_trend_for_specific_source_uses_source_filter(
         self,
     ):
-        """指定 source_id 时应走平台精确过滤分支。"""
+        """非 RMASSIST 的日趋势不应查询客户点击指标。"""
+        db = AsyncMock()
+        service = TracingQueryService(db)
+        start = datetime(2026, 6, 1)
+        end = datetime(2026, 6, 2)
+
+        db.fetch_all.side_effect = [
+            [
+                {
+                    "date": datetime(2026, 6, 2),
+                    "calls": 1,
+                    "tokens": 8,
+                    "users": 1,
+                },
+            ],
+            [],
+        ]
+
+        result = await service.get_daily_trend(
+            source_id="tenant-a",
+            start_date=start,
+            end_date=end,
+            bbk_ids="201",
+        )
+
+        trace_sql, trace_params = db.fetch_all.call_args_list[0].args
+        read_sql, read_params = db.fetch_all.call_args_list[1].args
+
+        assert "WHERE source_id = %s" in trace_sql
+        assert trace_params == ("tenant-a", start, end, "201")
+        assert "j.source_id = %s" in read_sql
+        assert "DATE(e.read_at) as date" in read_sql
+        assert "WHERE e.read_at >= %s AND e.read_at <= %s" in read_sql
+        assert "GROUP BY DATE(e.read_at)" in read_sql
+        assert read_params == (start, end, "tenant-a", "201")
+        assert len(db.fetch_all.call_args_list) == 2
+        assert result[0]["read_tasks"] == 0
+        assert result[0]["plan_customers"] == 0
+        assert result[0]["insight_customers"] == 0
+        assert result[0]["phone_customers"] == 0
+
+    @pytest.mark.asyncio
+    async def test_get_daily_trend_for_rmassist_queries_click_metrics(
+        self,
+    ):
+        """RMASSIST 的日趋势仍应查询客户点击指标。"""
         db = AsyncMock()
         service = TracingQueryService(db)
         start = datetime(2026, 6, 1)
@@ -93,7 +138,33 @@ class TestTracingDailyTrend:
             [],
         ]
 
-        result = await service.get_daily_trend(
+        await service.get_daily_trend(
+            source_id="RMASSIST",
+            start_date=start,
+            end_date=end,
+            bbk_ids="201",
+        )
+
+        click_sql, click_params = db.fetch_all.call_args_list[2].args
+        assert "source_id = %s" in click_sql
+        assert click_params == (start, end, "RMASSIST", "201")
+
+    @pytest.mark.asyncio
+    async def test_get_hourly_trend_for_specific_source_filters_related_metrics(
+        self,
+    ):
+        """非 RMASSIST 的小时趋势不应查询客户点击指标。"""
+        db = AsyncMock()
+        service = TracingQueryService(db)
+        start = datetime(2026, 6, 1)
+        end = datetime(2026, 6, 2)
+
+        db.fetch_all.side_effect = [
+            [{"hour_bucket": 9, "calls": 2, "tokens": 6, "users": 1}],
+            [],
+        ]
+
+        result = await service.get_hourly_trend(
             source_id="tenant-a",
             start_date=start,
             end_date=end,
@@ -101,7 +172,45 @@ class TestTracingDailyTrend:
         )
 
         trace_sql, trace_params = db.fetch_all.call_args_list[0].args
+        read_sql, read_params = db.fetch_all.call_args_list[1].args
+
         assert "WHERE source_id = %s" in trace_sql
         assert trace_params == ("tenant-a", start, end, "201")
-        assert result[0]["read_tasks"] == 0
-        assert result[0]["plan_customers"] == 0
+        assert "j.source_id = %s" in read_sql
+        assert "HOUR(e.read_at) as hour_bucket" in read_sql
+        assert "WHERE e.read_at >= %s AND e.read_at <= %s" in read_sql
+        assert "GROUP BY HOUR(e.read_at)" in read_sql
+        assert read_params == (start, end, "tenant-a", "201")
+        assert len(db.fetch_all.call_args_list) == 2
+        assert result[9]["calls"] == 2
+        assert result[9]["read_tasks"] == 0
+        assert result[9]["plan_customers"] == 0
+        assert result[9]["insight_customers"] == 0
+        assert result[9]["phone_customers"] == 0
+
+    @pytest.mark.asyncio
+    async def test_get_hourly_trend_for_rmassist_queries_click_metrics(
+        self,
+    ):
+        """RMASSIST 的小时趋势仍应查询客户点击指标。"""
+        db = AsyncMock()
+        service = TracingQueryService(db)
+        start = datetime(2026, 6, 1)
+        end = datetime(2026, 6, 2)
+
+        db.fetch_all.side_effect = [
+            [{"hour_bucket": 9, "calls": 2, "tokens": 6, "users": 1}],
+            [],
+            [],
+        ]
+
+        await service.get_hourly_trend(
+            source_id="RMASSIST",
+            start_date=start,
+            end_date=end,
+            bbk_ids="201",
+        )
+
+        click_sql, click_params = db.fetch_all.call_args_list[2].args
+        assert "source_id = %s" in click_sql
+        assert click_params == (start, end, "RMASSIST", "201")

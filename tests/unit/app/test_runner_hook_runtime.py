@@ -2122,5 +2122,5 @@ async def test_query_handler_ends_request_skill_detector_in_finally(
     ]
 
     assert outputs[-1][0].get_text_content() == "agent reply"
-    detector.start_skill.assert_awaited_once()
+    detector.start_skill.assert_not_awaited()
     detector.on_reasoning_end.assert_awaited_once()

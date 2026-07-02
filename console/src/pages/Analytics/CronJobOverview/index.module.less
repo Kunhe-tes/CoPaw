@@ -48,7 +48,9 @@
   border: none;
   border-radius: 8px;
   cursor: pointer;
-  transition: background 0.2s, color 0.2s;
+  transition:
+    background 0.2s,
+    color 0.2s;
 
   &:hover {
     background: #d6e4ff;
@@ -378,7 +380,9 @@
 }
 
 .behaviorPanel .tableScroller {
-  max-height: calc(var(--behavior-header-row-height) + var(--behavior-body-row-height) * 5);
+  max-height: calc(
+    var(--behavior-header-row-height) + var(--behavior-body-row-height) * 5
+  );
   overflow: auto;
 }
 
@@ -533,13 +537,24 @@
   max-height: 380px;
 }
 
-.drillDownTableScroll {
+.drillDownTable {
   flex: 1;
   min-height: 0;
-  overflow-y: auto;
+
+  :global(.ant-spin-nested-loading),
+  :global(.ant-spin-container),
+  :global(.ant-table),
+  :global(.ant-table-container) {
+    height: 100%;
+  }
 
   :global(.ant-table) {
     table-layout: fixed;
+  }
+
+  :global(.ant-table-content) {
+    overflow-x: auto;
+    overflow-y: hidden;
   }
 
   :global(.ant-table-thead) > tr > :global(.ant-table-cell) {

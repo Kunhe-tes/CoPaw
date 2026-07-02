@@ -8,6 +8,7 @@ and resolves multi-skill attribution conflicts.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 from datetime import datetime
@@ -16,6 +17,7 @@ from pathlib import Path
 from typing import Any, Awaitable, Callable, Optional, TYPE_CHECKING
 
 from .skill_context_manager import (
+    SkillExecutionContext,
     SkillContextManager,
     get_skill_context_manager,
 )
@@ -234,6 +236,9 @@ class SkillInvocationDetector:
         # Layer 0: User message detection cache
         self._message_detected_skill: Optional[str] = None
         self._message_detected_confidence: float = 0.0
+        self._locked_skill_from_md: Optional[str] = None
+        self._pending_pruned_contexts: list[SkillExecutionContext] = []
+        self._pruned_context_tasks: set[asyncio.Task[None]] = set()
 
     def set_enabled_skills(self, skills: list[str]) -> None:
         """Set the list of enabled skills and cache their descriptions.
@@ -245,6 +250,33 @@ class SkillInvocationDetector:
             skills: List of skill names that are currently enabled
         """
         self._enabled_skills = set(skills)
+
+        # 技能启用集变化后，立即清理已经失效的 SKILL.md 锁定状态，
+        # 避免后续工具调用继续被已禁用技能短路归因。
+        if (
+            self._locked_skill_from_md
+            and self._locked_skill_from_md not in self._enabled_skills
+        ):
+            self._locked_skill_from_md = None
+
+        # 用户消息识别缓存同样依赖当前启用技能集合；
+        # 如果缓存技能已被禁用，必须同步失效，避免兜底层返回陈旧结果。
+        if (
+            self._message_detected_skill
+            and self._message_detected_skill not in self._enabled_skills
+        ):
+            self._message_detected_skill = None
+            self._message_detected_confidence = 0.0
+
+        removed_contexts = self._context_manager.prune_disabled_skills(
+            self._enabled_skills,
+        )
+        if removed_contexts:
+            logger.info(
+                "Pruned disabled skill contexts after enabled skills update: %s",
+                [context.skill_name for context in removed_contexts],
+            )
+            self._schedule_pruned_context_finalization(removed_contexts)
 
         # Pre-cache descriptions from workspace manifest
         if self._workspace_dir:
@@ -326,6 +358,9 @@ class SkillInvocationDetector:
         if skill:
             self._message_detected_skill = skill
             self._message_detected_confidence = confidence
+        else:
+            self._message_detected_skill = None
+            self._message_detected_confidence = 0.0
 
         return skill, confidence
 
@@ -380,6 +415,8 @@ class SkillInvocationDetector:
         """
         tool_input = tool_input or {}
 
+        await self._drain_pending_pruned_contexts()
+
         # Track recent tools for sequence matching
         self._recent_tools.append(tool_name)
         if len(self._recent_tools) > 10:
@@ -397,8 +434,19 @@ class SkillInvocationDetector:
                 1.0,
                 tool_name,
             )
+            self._locked_skill_from_md = skill_from_md_read
             self._context_manager.record_tool_call(tool_name, mcp_server)
             return skill_from_md_read, {skill_from_md_read: 1.0}
+
+        locked_skill = self._locked_skill_from_md
+        if locked_skill:
+            await self._ensure_skill_active(
+                locked_skill,
+                1.0,
+                tool_name,
+            )
+            self._context_manager.record_tool_call(tool_name, mcp_server)
+            return locked_skill, {locked_skill: 1.0}
 
         # Step 1: Check for explicit declaration
         declared_skills = self._registry.get_skills_for_tool(tool_name)
@@ -501,17 +549,6 @@ class SkillInvocationDetector:
         """
         enabled_skills = list(self._enabled_skills)
 
-        # Layer 0: Check cached user message detection
-        if (
-            self._message_detected_skill
-            and self._message_detected_confidence >= 0.7
-        ):
-            skill = self._message_detected_skill
-            confidence = self._message_detected_confidence
-            await self._ensure_skill_active(skill, confidence, tool_name)
-            self._context_manager.record_tool_call(tool_name, mcp_server)
-            return skill, {skill: confidence}
-
         # Layer 1: MCP server matching
         if mcp_server:
             skill, confidence = self._inferencer.infer_skill_from_mcp_server(
@@ -560,6 +597,18 @@ class SkillInvocationDetector:
             self._context_manager.record_tool_call(tool_name, mcp_server)
             return primary_skill, weights
 
+        # Layer 0: 用户消息命中只作为最终兜底候选，优先级低于
+        # 工具/MCP 等运行时证据。
+        if (
+            self._message_detected_skill
+            and self._message_detected_confidence >= 0.7
+        ):
+            skill = self._message_detected_skill
+            confidence = self._message_detected_confidence
+            await self._ensure_skill_active(skill, confidence, tool_name)
+            self._context_manager.record_tool_call(tool_name, mcp_server)
+            return skill, {skill: confidence}
+
         # No attribution possible
         return None, {}
 
@@ -594,6 +643,65 @@ class SkillInvocationDetector:
             trigger_reason="inferred",
             confidence=confidence,
         )
+
+    def _schedule_pruned_context_finalization(
+        self,
+        contexts: list[SkillExecutionContext],
+    ) -> None:
+        """为被裁剪的技能上下文安排 tracing 收尾."""
+        if not contexts:
+            return
+
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            self._pending_pruned_contexts.extend(contexts)
+            return
+
+        task = loop.create_task(self._finalize_pruned_contexts(contexts))
+        self._pruned_context_tasks.add(task)
+        task.add_done_callback(self._pruned_context_tasks.discard)
+
+    async def _drain_pending_pruned_contexts(self) -> None:
+        """在显式 await 边界补齐延迟的上下文收尾."""
+        if self._pending_pruned_contexts:
+            pending_contexts = self._pending_pruned_contexts
+            self._pending_pruned_contexts = []
+            await self._finalize_pruned_contexts(pending_contexts)
+
+        if self._pruned_context_tasks:
+            await asyncio.gather(
+                *list(self._pruned_context_tasks),
+                return_exceptions=True,
+            )
+
+    async def _finalize_pruned_contexts(
+        self,
+        contexts: list[SkillExecutionContext],
+    ) -> None:
+        """结束因启用技能变化而被移除的上下文."""
+        for context in contexts:
+            await self._emit_skill_end_for_context(context)
+
+    def _flush_pruned_contexts_for_reset(self) -> None:
+        """在 reset 前尽量完成被裁剪上下文的 tracing 收尾."""
+        pending_contexts = self._pending_pruned_contexts
+        self._pending_pruned_contexts = []
+
+        if not pending_contexts:
+            return
+
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            asyncio.run(self._finalize_pruned_contexts(pending_contexts))
+            return
+
+        task = loop.create_task(
+            self._finalize_pruned_contexts(pending_contexts),
+        )
+        self._pruned_context_tasks.add(task)
+        task.add_done_callback(self._pruned_context_tasks.discard)
 
     def _calculate_weights(
         self,
@@ -874,6 +982,16 @@ class SkillInvocationDetector:
         if context is None:
             return
 
+        await self._emit_skill_end_for_context(context)
+
+    async def _emit_skill_end_for_context(
+        self,
+        context: SkillExecutionContext,
+    ) -> None:
+        """根据上下文发出技能结束事件."""
+        if context is None:
+            return
+
         # Emit tracing event with span_id from context
         if self._trace_manager and self._trace_id and context.span_id:
             try:
@@ -897,6 +1015,8 @@ class SkillInvocationDetector:
 
         Ends all active skills when reasoning completes.
         """
+        await self._drain_pending_pruned_contexts()
+
         # End all skills in the stack (from top to bottom)
         while self._context_manager.skill_depth > 0:
             current = self._context_manager.current_skill
@@ -907,14 +1027,17 @@ class SkillInvocationDetector:
 
         # Clear any remaining state
         self._context_manager.clear()
+        self._locked_skill_from_md = None
 
     def reset(self) -> None:
         """Reset detector state for a new request."""
+        self._flush_pruned_contexts_for_reset()
         self._skill_activation_time.clear()
         self._skill_call_history.clear()
         self._idle_counters.clear()
         self._recent_tools.clear()
         self._context_manager.clear()
+        self._locked_skill_from_md = None
         # Clear Layer 0 cache
         self._message_detected_skill = None
         self._message_detected_confidence = 0.0

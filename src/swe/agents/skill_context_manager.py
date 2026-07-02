@@ -204,6 +204,42 @@ class SkillContextManager:
         self._current_context.set(None)
         self._context_stack.set([])
 
+    def prune_disabled_skills(
+        self,
+        enabled_skills: set[str],
+    ) -> list[SkillExecutionContext]:
+        """移除上下文栈中已被禁用的技能.
+
+        当启用技能集合发生变化时，技能执行上下文也必须同步收敛，
+        避免 current_skill 继续指向已失效技能。
+
+        Args:
+            enabled_skills: 当前仍然启用的技能集合
+
+        Returns:
+            被移除的技能上下文列表，顺序与原栈一致
+        """
+        stack = self._get_stack()
+        if not stack:
+            return []
+
+        kept_contexts = [
+            context
+            for context in stack
+            if context.skill_name in enabled_skills
+        ]
+        removed_contexts = [
+            context
+            for context in stack
+            if context.skill_name not in enabled_skills
+        ]
+
+        self._context_stack.set(kept_contexts)
+        self._current_context.set(
+            kept_contexts[-1] if kept_contexts else None,
+        )
+        return removed_contexts
+
     def get_all_contexts(self) -> list[SkillExecutionContext]:
         """Get all skill execution contexts in the stack.
 

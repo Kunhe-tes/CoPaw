@@ -10,6 +10,8 @@ This test module covers:
 
 # pylint: disable=protected-access,redefined-outer-name
 
+import asyncio
+from datetime import datetime
 import pytest
 from unittest.mock import AsyncMock
 
@@ -26,6 +28,7 @@ from swe.agents.skill_feature_inferencer import (
     reset_skill_feature_inferencer,
 )
 from swe.agents.skill_context_manager import (
+    SkillExecutionContext,
     SkillContextManager,
     get_skill_context_manager,
     reset_skill_context_manager,
@@ -899,6 +902,81 @@ class TestUserMessageDetection:
         assert detector._message_detected_skill is None
         assert detector._message_detected_confidence == 0.0
 
+    def test_detect_from_user_message_clears_stale_cache_on_miss(self):
+        """Test that a message miss clears previous cached detection."""
+        custom_feature = SkillFeature(
+            skill_name="test_skill",
+            trigger_keywords=["keyword"],
+        )
+        inferencer = SkillFeatureInferencer(
+            builtin_features={"test_skill": custom_feature},
+        )
+
+        detector = SkillInvocationDetector(inferencer=inferencer)
+        detector.set_enabled_skills(["test_skill"])
+
+        detector.detect_from_user_message("keyword hit")
+        assert detector._message_detected_skill == "test_skill"
+
+        skill, confidence = detector.detect_from_user_message(
+            "no related text",
+        )
+
+        assert skill is None
+        assert confidence == 0.0
+        assert detector._message_detected_skill is None
+        assert detector._message_detected_confidence == 0.0
+
+    @pytest.mark.asyncio
+    async def test_set_enabled_skills_clears_disabled_message_cache(self):
+        """Test enabled skill changes clear disabled message detection."""
+        inferencer = SkillFeatureInferencer()
+        detector = SkillInvocationDetector(inferencer=inferencer)
+        detector.set_enabled_skills(["xlsx", "pdf"])
+
+        detected_skill, detected_confidence = (
+            detector.detect_from_user_message(
+                "please use pdf skill",
+            )
+        )
+        assert detected_skill == "pdf"
+        assert detected_confidence >= 0.7
+
+        detector.set_enabled_skills(["xlsx"])
+
+        skill, weights = await detector.on_tool_call(
+            "unknown_tool",
+            {"data": "generic"},
+        )
+
+        assert skill is None
+        assert weights == {}
+        assert detector._message_detected_skill is None
+        assert detector._message_detected_confidence == 0.0
+
+    @pytest.mark.asyncio
+    async def test_tool_input_evidence_beats_message_cache(self):
+        """Test strong tool evidence can override cached message detection."""
+        inferencer = SkillFeatureInferencer()
+        detector = SkillInvocationDetector(inferencer=inferencer)
+        detector.set_enabled_skills(["xlsx", "pdf"])
+
+        detected_skill, detected_confidence = (
+            detector.detect_from_user_message(
+                "please use pdf skill",
+            )
+        )
+        assert detected_skill == "pdf"
+        assert detected_confidence >= 0.7
+
+        skill, weights = await detector.on_tool_call(
+            "execute_shell_command",
+            {"command": "python analyze.py report.xlsx"},
+        )
+
+        assert skill == "xlsx"
+        assert weights.get("xlsx", 0) >= 0.8
+
 
 class TestMcpServerInference:
     """Tests for MCP server-based inference."""
@@ -1135,6 +1213,285 @@ class TestSkillMdReadDetection:
         # 应该识别为xlsx，而不是pdf
         assert skill == "xlsx"
         assert weights == {"xlsx": 1.0}
+
+    @pytest.mark.asyncio
+    async def test_skill_md_read_continues_active_skill_without_new_evidence(
+        self,
+    ):
+        """Test active skill continues after SKILL.md read without new evidence."""
+        detector = SkillInvocationDetector()
+        detector.set_enabled_skills(["weather"])
+
+        skill1, weights1 = await detector.on_tool_call(
+            "read_file",
+            {"file_path": "/workspace/skills/weather/SKILL.md"},
+        )
+
+        assert skill1 == "weather"
+        assert weights1 == {"weather": 1.0}
+
+        skill2, weights2 = await detector.on_tool_call(
+            "weather_query",
+            {"location": "Shanghai"},
+        )
+
+        assert skill2 == "weather"
+        assert weights2 == {"weather": 1.0}
+
+    @pytest.mark.asyncio
+    async def test_skill_md_read_continuation_only_applies_once(self):
+        """Test SKILL.md locks the round even for later generic tool calls."""
+        detector = SkillInvocationDetector()
+        detector.set_enabled_skills(["weather"])
+
+        await detector.on_tool_call(
+            "read_file",
+            {"file_path": "/workspace/skills/weather/SKILL.md"},
+        )
+
+        skill1, weights1 = await detector.on_tool_call(
+            "weather_query",
+            {"location": "Shanghai"},
+        )
+        assert skill1 == "weather"
+        assert weights1 == {"weather": 1.0}
+
+        skill2, weights2 = await detector.on_tool_call(
+            "unknown_tool",
+            {"data": "generic"},
+        )
+        assert skill2 == "weather"
+        assert weights2 == {"weather": 1.0}
+
+    @pytest.mark.asyncio
+    async def test_skill_md_read_continuation_expires_after_next_tool_attempt(
+        self,
+    ):
+        """Test SKILL.md lock beats later strong tool evidence in same round."""
+        detector = SkillInvocationDetector()
+        detector.set_enabled_skills(["weather", "xlsx"])
+
+        await detector.on_tool_call(
+            "read_file",
+            {"file_path": "/workspace/skills/weather/SKILL.md"},
+        )
+
+        skill1, weights1 = await detector.on_tool_call(
+            "execute_shell_command",
+            {"command": "python analyze.py report.xlsx"},
+        )
+        assert skill1 == "weather"
+        assert weights1 == {"weather": 1.0}
+
+        skill2, weights2 = await detector.on_tool_call(
+            "unknown_tool",
+            {"data": "generic"},
+        )
+        assert skill2 == "weather"
+        assert weights2 == {"weather": 1.0}
+
+    @pytest.mark.asyncio
+    async def test_skill_md_read_continuation_consumed_by_next_same_skill_match(
+        self,
+    ):
+        """Test SKILL.md lock remains stable when later call matches same skill."""
+        detector = SkillInvocationDetector()
+        detector.set_enabled_skills(["xlsx"])
+
+        await detector.on_tool_call(
+            "read_file",
+            {"file_path": "/workspace/skills/xlsx/SKILL.md"},
+        )
+
+        skill1, weights1 = await detector.on_tool_call(
+            "execute_shell_command",
+            {"command": "python analyze.py report.xlsx"},
+        )
+        assert skill1 == "xlsx"
+        assert weights1.get("xlsx", 0) >= 0.8
+
+        skill2, weights2 = await detector.on_tool_call(
+            "unknown_tool",
+            {"data": "generic"},
+        )
+        assert skill2 == "xlsx"
+        assert weights2 == {"xlsx": 1.0}
+
+    @pytest.mark.asyncio
+    async def test_skill_md_continuation_beats_stale_message_cache(self):
+        """Test SKILL.md continuation wins over older message-level candidate."""
+        detector = SkillInvocationDetector()
+        detector.set_enabled_skills(["pdf", "xlsx"])
+
+        detected_skill, detected_confidence = (
+            detector.detect_from_user_message(
+                "please use pdf skill",
+            )
+        )
+        assert detected_skill == "pdf"
+        assert detected_confidence >= 0.7
+
+        skill1, weights1 = await detector.on_tool_call(
+            "read_file",
+            {"file_path": "/workspace/skills/xlsx/SKILL.md"},
+        )
+        assert skill1 == "xlsx"
+        assert weights1 == {"xlsx": 1.0}
+
+        skill2, weights2 = await detector.on_tool_call(
+            "unknown_tool",
+            {"data": "generic"},
+        )
+        assert skill2 == "xlsx"
+        assert weights2 == {"xlsx": 1.0}
+
+    @pytest.mark.asyncio
+    async def test_skill_md_locks_round_primary_skill(self):
+        """Test reading SKILL.md locks the round to that primary skill."""
+        detector = SkillInvocationDetector()
+        detector.set_enabled_skills(["weather", "xlsx", "pdf"])
+
+        skill1, weights1 = await detector.on_tool_call(
+            "read_file",
+            {"file_path": "/workspace/skills/weather/SKILL.md"},
+        )
+        assert skill1 == "weather"
+        assert weights1 == {"weather": 1.0}
+
+        skill2, weights2 = await detector.on_tool_call(
+            "execute_shell_command",
+            {"command": "python analyze.py report.xlsx"},
+        )
+        assert skill2 == "weather"
+        assert weights2 == {"weather": 1.0}
+
+        detector.detect_from_user_message("please use pdf skill")
+        skill3, weights3 = await detector.on_tool_call(
+            "unknown_tool",
+            {"data": "generic"},
+        )
+        assert skill3 == "weather"
+        assert weights3 == {"weather": 1.0}
+
+    @pytest.mark.asyncio
+    async def test_set_enabled_skills_clears_locked_skill_when_disabled(self):
+        """Test locked skill is cleared when it is no longer enabled."""
+        detector = SkillInvocationDetector()
+        detector.set_enabled_skills(["weather", "xlsx"])
+
+        skill1, weights1 = await detector.on_tool_call(
+            "read_file",
+            {"file_path": "/workspace/skills/weather/SKILL.md"},
+        )
+        assert skill1 == "weather"
+        assert weights1 == {"weather": 1.0}
+
+        detector.set_enabled_skills(["xlsx"])
+
+        skill2, weights2 = await detector.on_tool_call(
+            "execute_shell_command",
+            {"command": "python analyze.py report.xlsx"},
+        )
+        assert skill2 == "xlsx"
+        assert weights2.get("xlsx", 0) >= 0.8
+        assert detector._context_manager.current_skill == "xlsx"
+        assert detector._context_manager.active_skills == ["xlsx"]
+
+    @pytest.mark.asyncio
+    async def test_set_enabled_skills_clears_disabled_active_context(self):
+        """Test enabled skill changes also clear disabled active contexts."""
+        detector = SkillInvocationDetector()
+        detector.set_enabled_skills(["weather", "xlsx"])
+
+        skill1, weights1 = await detector.on_tool_call(
+            "read_file",
+            {"file_path": "/workspace/skills/weather/SKILL.md"},
+        )
+        assert skill1 == "weather"
+        assert weights1 == {"weather": 1.0}
+        assert detector._context_manager.current_skill == "weather"
+
+        detector.set_enabled_skills(["xlsx"])
+
+        assert detector._context_manager.current_skill is None
+        assert detector._context_manager.active_skills == []
+
+    @pytest.mark.asyncio
+    async def test_set_enabled_skills_ends_disabled_skill_tracing(self):
+        """Test disabling an active skill still closes its tracing span."""
+        trace_manager = AsyncMock()
+        trace_manager.emit_skill_invocation = AsyncMock(
+            return_value="span-weather",
+        )
+        trace_manager.end_skill_invocation = AsyncMock()
+
+        detector = SkillInvocationDetector(trace_manager=trace_manager)
+        detector.set_tracing_context(
+            trace_manager,
+            "trace-1",
+            "user-1",
+            "session-1",
+            "console",
+            "source-1",
+        )
+        detector.set_enabled_skills(["weather", "xlsx"])
+
+        skill1, weights1 = await detector.on_tool_call(
+            "read_file",
+            {"file_path": "/workspace/skills/weather/SKILL.md"},
+        )
+        assert skill1 == "weather"
+        assert weights1 == {"weather": 1.0}
+
+        detector._context_manager.record_tool_call("read_file")
+        detector.set_enabled_skills(["xlsx"])
+        await asyncio.sleep(0)
+
+        trace_manager.end_skill_invocation.assert_awaited_once()
+        assert (
+            trace_manager.end_skill_invocation.await_args.kwargs["trace_id"]
+            == "trace-1"
+        )
+        assert (
+            trace_manager.end_skill_invocation.await_args.kwargs["span_id"]
+            == "span-weather"
+        )
+
+    def test_reset_flushes_pending_pruned_context_tracing(self):
+        """Test reset drains deferred pruned contexts before clearing state."""
+        trace_manager = AsyncMock()
+        trace_manager.end_skill_invocation = AsyncMock()
+
+        detector = SkillInvocationDetector(trace_manager=trace_manager)
+        detector.set_tracing_context(
+            trace_manager,
+            "trace-1",
+            "user-1",
+            "session-1",
+            "console",
+            "source-1",
+        )
+        detector._pending_pruned_contexts = [
+            SkillExecutionContext(
+                skill_name="weather",
+                start_time=datetime.now(),
+                tools_called=["read_file"],
+                span_id="span-weather",
+            ),
+        ]
+
+        detector.reset()
+
+        trace_manager.end_skill_invocation.assert_awaited_once()
+        assert (
+            trace_manager.end_skill_invocation.await_args.kwargs["trace_id"]
+            == "trace-1"
+        )
+        assert (
+            trace_manager.end_skill_invocation.await_args.kwargs["span_id"]
+            == "span-weather"
+        )
+        assert detector._pending_pruned_contexts == []
 
     @pytest.mark.asyncio
     async def test_set_tracing_context_updates_source_id_for_emitted_skill(

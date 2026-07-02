@@ -1,4 +1,10 @@
-import { cleanup, render, screen, waitFor } from "@testing-library/react";
+import {
+  cleanup,
+  fireEvent,
+  render,
+  screen,
+  waitFor,
+} from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { MemoryRouter, Route, Routes } from "react-router-dom";
 import CronJobOverviewPage from "./index";
@@ -17,9 +23,9 @@ const monitorApiMock = vi.hoisted(() => ({
 }));
 
 vi.mock("../../../api/modules/monitor", async () => {
-  const actual = await vi.importActual<typeof import("../../../api/modules/monitor")>(
-    "../../../api/modules/monitor",
-  );
+  const actual = await vi.importActual<
+    typeof import("../../../api/modules/monitor")
+  >("../../../api/modules/monitor");
   return {
     ...actual,
     monitorApi: monitorApiMock,
@@ -33,7 +39,12 @@ describe("CronJobOverview summary cards", () => {
       summaryMetrics: [
         { key: "branches", value: "12" },
         { key: "managers", value: "86" },
-        { key: "tasks", value: "320", hintValue: "新增 12 个", footerValue: "2,480 次" },
+        {
+          key: "tasks",
+          value: "320",
+          hintValue: "新增 12 个",
+          footerValue: "2,480 次",
+        },
         { key: "success", value: "93.20", footerValue: "2,112/154" },
         { key: "read", value: "61.50", footerValue: "1,525" },
         { key: "report", value: "34.80" },
@@ -126,7 +137,9 @@ describe("CronJobOverview summary cards", () => {
     );
 
     await waitFor(() => {
-      expect(monitorApiMock.getCronJobOverviewPageData).toHaveBeenCalledTimes(1);
+      expect(monitorApiMock.getCronJobOverviewPageData).toHaveBeenCalledTimes(
+        1,
+      );
     });
 
     const reportTitle = await screen.findByText("查看方案任务率");
@@ -139,6 +152,101 @@ describe("CronJobOverview summary cards", () => {
     expect(screen.getByText("863")).toBeInTheDocument();
     expect(screen.getByText("512")).toBeInTheDocument();
     expect(screen.getByText("221")).toBeInTheDocument();
-    expect(screen.getByLabelText("概览指标").className).toContain(styles.summaryGrid);
+    expect(screen.getByLabelText("概览指标").className).toContain(
+      styles.summaryGrid,
+    );
+  });
+
+  it("renders expanded manager detail without extra drill-down scroll wrapper", async () => {
+    monitorApiMock.getCronJobOverviewPageData.mockResolvedValueOnce({
+      summaryMetrics: [
+        { key: "branches", value: "12" },
+        { key: "managers", value: "86" },
+        {
+          key: "tasks",
+          value: "320",
+          hintValue: "新增 12 个",
+          footerValue: "2,480 次",
+        },
+        { key: "success", value: "93.20", footerValue: "2,112/154" },
+        { key: "read", value: "61.50", footerValue: "1,525" },
+        { key: "report", value: "34.80" },
+        { key: "report_count", value: "863" },
+        { key: "insight_count", value: "512" },
+        { key: "phone_count", value: "221" },
+      ],
+      branchRankingRows: [
+        {
+          rank: 1,
+          branchName: "测试分行",
+          bbkId: "100",
+          skillCount: 3,
+          totalTasks: 20,
+          successCount: 18,
+          readTasks: 11,
+          involvedManagers: 5,
+          resultViewManagers: 4,
+          planManagers: 3,
+          insightManagers: 2,
+          phoneManagers: 1,
+          recommendedCustomers: 30,
+          viewedCustomers: 12,
+          insightCustomers: 5,
+          phoneCustomers: 2,
+        },
+      ],
+      failureReasons: [],
+      anomalySummary: {
+        affectedBranches: "0",
+        affectedBranchesUnit: "家",
+        affectedManagers: "0",
+        affectedManagersUnit: "人",
+      },
+      anomalyRankRows: [],
+    });
+    monitorApiMock.getBranchManagerSummary.mockResolvedValueOnce({
+      start_date: "2026-06-30",
+      end_date: "2026-06-30",
+      bbk_id: "100",
+      bbk_name: "测试分行",
+      items: [
+        {
+          user_id: "u1",
+          user_name: "张三",
+          skill_count: 2,
+          total_tasks: 10,
+          success_count: 9,
+          read_tasks: 6,
+          result_view_customers: 4,
+          plan_customers: 3,
+          insight_customers: 2,
+          phone_customers: 1,
+        },
+      ],
+    });
+
+    const { container } = render(
+      <MemoryRouter initialEntries={["/analytics/cron-job-overview"]}>
+        <Routes>
+          <Route
+            path="/analytics/cron-job-overview"
+            element={<CronJobOverviewPage />}
+          />
+        </Routes>
+      </MemoryRouter>,
+    );
+
+    fireEvent.click(await screen.findByText("测试分行"));
+
+    await waitFor(() => {
+      expect(monitorApiMock.getBranchManagerSummary).toHaveBeenCalledTimes(1);
+    });
+
+    expect(
+      await screen.findByText("当前分行下的客户经理明细"),
+    ).toBeInTheDocument();
+    expect(
+      container.querySelector(`.${styles.drillDownTableScroll}`),
+    ).toBeNull();
   });
 });
