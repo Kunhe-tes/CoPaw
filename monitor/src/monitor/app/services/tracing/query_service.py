@@ -1080,17 +1080,17 @@ class TracingQueryService:  # pylint: disable=too-many-public-methods
         )
         read_tasks_query = f"""
             SELECT
-                DATE(e.actual_time) as date,
+                DATE(e.read_at) as date,
                 COUNT(*) as read_tasks
             FROM swe_cron_executions e
             INNER JOIN swe_cron_jobs j ON e.job_id = j.id
-            WHERE e.actual_time >= %s AND e.actual_time <= %s
+            WHERE e.read_at >= %s AND e.read_at <= %s
               AND j.status != 'deleted'
               AND j.deleted_at IS NULL
               AND e.read_at IS NOT NULL
               {source_filter_sql}
               {bbk_filter_sql.replace('bbk_id', 'j.bbk_id')}
-            GROUP BY DATE(e.actual_time)
+            GROUP BY DATE(e.read_at)
         """
         return read_tasks_query, (
             start_date,
@@ -1281,16 +1281,16 @@ class TracingQueryService:  # pylint: disable=too-many-public-methods
         )
         read_tasks_query = f"""
             SELECT
-                HOUR(e.actual_time) as hour_bucket,
+                HOUR(e.read_at) as hour_bucket,
                 COUNT(*) as read_tasks
             FROM swe_cron_executions e
             INNER JOIN swe_cron_jobs j ON e.job_id = j.id
-            WHERE e.actual_time >= %s AND e.actual_time <= %s
+            WHERE e.read_at >= %s AND e.read_at <= %s
               AND j.status != 'deleted'
               AND j.deleted_at IS NULL
               AND e.read_at IS NOT NULL
               {read_source_filter_sql}{bbk_filter_sql.replace('bbk_id', 'j.bbk_id')}
-            GROUP BY HOUR(e.actual_time)
+            GROUP BY HOUR(e.read_at)
         """
         read_tasks_params = (
             start_date,
