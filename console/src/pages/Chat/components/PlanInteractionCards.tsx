@@ -30,6 +30,8 @@ import { useContextSelector } from "use-context-selector";
 const PLAN_CLARIFICATION_STORAGE_KEY = "copaw_submitted_plan_clarifications";
 const PLAN_CLARIFICATION_DISMISSAL_STORAGE_KEY =
   "copaw_dismissed_plan_clarifications";
+const PLAN_CLARIFICATION_SEEN_STORAGE_KEY =
+  "swe_seen_plan_clarification_instances";
 const PLAN_REVIEW_STORAGE_KEY = "copaw_submitted_plan_reviews";
 const PLAN_INTERACTION_CARD_CODE = "PlanInteraction";
 const RUNTIME_RESPONSE_CARD_CODE = "AgentScopeRuntimeResponseCard";
@@ -251,6 +253,25 @@ function createPlanClarificationDismissalKey(
   });
 }
 
+function createPlanClarificationSeenKey(
+  data: ChatPlanClarificationCardData,
+  sessionId: string | undefined,
+  stableSourceKey: string | null,
+  fallbackKey: string | null,
+): string {
+  return JSON.stringify({
+    session_id: sessionId || "unknown",
+    clarification:
+      stableSourceKey ||
+      (fallbackKey
+        ? JSON.stringify({
+            source: "instance",
+            instance_key: fallbackKey,
+          })
+        : createPlanClarificationFingerprint(data)),
+  });
+}
+
 function boundedIndex(index: number, count: number): number {
   if (count <= 0) return 0;
   return Math.min(Math.max(index, 0), count - 1);
@@ -387,6 +408,7 @@ export function PlanClarificationCard({
     Record<string, string | string[]>
   >({});
   const cardRef = useRef<HTMLElement | null>(null);
+  const displayedRef = useRef(false);
   const resolvedSessionId =
     currentSessionId ||
     (window as Window & { currentSessionId?: string }).currentSessionId;
@@ -409,6 +431,16 @@ export function PlanClarificationCard({
       ),
     [cardSourceKey, data, resolvedSessionId],
   );
+  const seenKey = useMemo(
+    () =>
+      createPlanClarificationSeenKey(
+        data,
+        resolvedSessionId,
+        cardSourceKey || null,
+        cardInstanceKey || null,
+      ),
+    [cardInstanceKey, cardSourceKey, data, resolvedSessionId],
+  );
   const interactionResetKey = cardInstanceKey || dismissalKey;
   const [submitted, setSubmitted] = useState(() =>
     loadSubmittedInteractionKeys(PLAN_CLARIFICATION_STORAGE_KEY).has(
@@ -418,6 +450,11 @@ export function PlanClarificationCard({
   const [dismissed, setDismissed] = useState(() =>
     loadSubmittedInteractionKeys(PLAN_CLARIFICATION_DISMISSAL_STORAGE_KEY).has(
       dismissalKey,
+    ),
+  );
+  const [alreadySeen, setAlreadySeen] = useState(() =>
+    loadSubmittedInteractionKeys(PLAN_CLARIFICATION_SEEN_STORAGE_KEY).has(
+      seenKey,
     ),
   );
   const options = data.options || [];
@@ -507,6 +544,12 @@ export function PlanClarificationCard({
         PLAN_CLARIFICATION_DISMISSAL_STORAGE_KEY,
       ).has(dismissalKey),
     );
+    setAlreadySeen(
+      loadSubmittedInteractionKeys(PLAN_CLARIFICATION_SEEN_STORAGE_KEY).has(
+        seenKey,
+      ),
+    );
+    displayedRef.current = false;
     setSingleChoice("");
     setMultiChoice([]);
     setTextInput("");
@@ -514,12 +557,41 @@ export function PlanClarificationCard({
     setFormValues({});
     setFocusedIndex(0);
     setActiveStep(0);
-  }, [dismissalKey, interactionResetKey, submissionKey]);
+  }, [dismissalKey, interactionResetKey, seenKey, submissionKey]);
 
   useEffect(() => {
-    if (submitted || dismissed || !showChoiceRows) return;
+    if (submitted || dismissed || alreadySeen) return;
+    displayedRef.current = true;
+  }, [alreadySeen, dismissed, interactionResetKey, submitted]);
+
+  useEffect(() => {
+    const handleUserSubmit = () => {
+      if (!displayedRef.current || submitted || dismissed || alreadySeen)
+        return;
+      storeSubmittedInteractionKey(
+        PLAN_CLARIFICATION_SEEN_STORAGE_KEY,
+        seenKey,
+      );
+      setAlreadySeen(true);
+    };
+
+    document.addEventListener("handleSubmit", handleUserSubmit);
+    return () => {
+      document.removeEventListener("handleSubmit", handleUserSubmit);
+    };
+  }, [alreadySeen, dismissed, seenKey, submitted]);
+
+  useEffect(() => {
+    if (submitted || dismissed || alreadySeen || !showChoiceRows) return;
     cardRef.current?.focus({ preventScroll: true });
-  }, [boundedStep, dismissed, interactionResetKey, showChoiceRows, submitted]);
+  }, [
+    alreadySeen,
+    boundedStep,
+    dismissed,
+    interactionResetKey,
+    showChoiceRows,
+    submitted,
+  ]);
 
   useEffect(() => {
     setFocusedIndex(0);
@@ -715,7 +787,7 @@ export function PlanClarificationCard({
     }
   };
 
-  if (submitted || dismissed) return null;
+  if (submitted || dismissed || alreadySeen) return null;
 
   return (
     <section

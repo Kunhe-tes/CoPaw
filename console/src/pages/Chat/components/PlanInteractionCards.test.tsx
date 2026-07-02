@@ -868,7 +868,7 @@ describe("Plan interaction cards", () => {
     expect(screen.getByText("Pick scope")).toBeInTheDocument();
   });
 
-  it("keeps an unsubmitted clarification visible after session restore", async () => {
+  it("hides a displayed clarification after the user sends a message", async () => {
     const messages = [
       createClarificationMessage({
         messageId: "message-1",
@@ -887,6 +887,19 @@ describe("Plan interaction cards", () => {
     await waitFor(() =>
       expect(screen.getByRole("region", { name: "Pick scope" })).toBeVisible(),
     );
+
+    document.dispatchEvent(
+      new CustomEvent("handleSubmit", {
+        detail: {
+          query: "Continue without answering",
+          fileList: [],
+        },
+      }),
+    );
+    cleanup();
+    renderActiveClarification(messages);
+
+    expect(screen.queryByText("Pick scope")).not.toBeInTheDocument();
   });
 
   it("renders a repeated clarification from a later assistant message", async () => {
