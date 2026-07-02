@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { SessionApi } from "./index";
+import { convertMessages, SessionApi } from "./index";
 
 const apiMocks = vi.hoisted(() => ({
   listChats: vi.fn(),
@@ -652,6 +652,51 @@ describe("SessionApi identity mapping", () => {
     expect(newData.collapsedByDefault).toBe(false);
     expect(JSON.stringify(oldData)).toContain("old final");
     expect(JSON.stringify(newData)).toContain("new final");
+  });
+
+  it("marks restored plan review cards submitted from later history responses", () => {
+    const messages = convertMessages([
+      {
+        id: "assistant-plan",
+        role: "assistant",
+        type: "message",
+        content: [{ type: "text", text: "Review this plan" }],
+        metadata: {
+          plan_interaction_card: {
+            card_type: "plan_review",
+            plan_id: "plan-restore-1",
+            title: "Restore check",
+            summary: "Plan summary",
+            steps: ["Step 1"],
+            risks: [],
+            verification: [],
+          },
+        },
+      },
+      {
+        id: "user-decision",
+        role: "user",
+        type: "message",
+        content: [{ type: "text", text: "Execute plan plan-restore-1" }],
+        metadata: {
+          plan_interaction_response: {
+            card_type: "plan_review",
+            plan_id: "plan-restore-1",
+            decision: "execute",
+          },
+        },
+      },
+    ]);
+
+    const planCard = messages[0]?.cards?.find(
+      (card) => card.code === "PlanInteraction",
+    );
+
+    expect(planCard?.data).toMatchObject({
+      card_type: "plan_review",
+      plan_id: "plan-restore-1",
+      status: "submitted",
+    });
   });
 
   it("does not treat a persisted logical session id as a unique backend chat id", async () => {

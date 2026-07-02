@@ -16,6 +16,7 @@ import { cronJobApi } from "../../../api/modules/cronjob";
 import type {
   ChatApprovalActionCardData,
   ChatPlanInteractionCardData,
+  ChatPlanReviewCardData,
   ChatRuntimeRequestCardData,
   ChatRuntimeResponseCardData,
   ChatTaskRunGroupCardData,
@@ -431,6 +432,69 @@ function isTaskSessionResultMessage(message: Message): boolean {
   );
 }
 
+function asRecord(value: unknown): Record<string, unknown> | null {
+  return value && typeof value === "object"
+    ? (value as Record<string, unknown>)
+    : null;
+}
+
+function extractSubmittedPlanReviewId(message: Message): string | null {
+  const record = asRecord(message);
+  const metadata = asRecord(record?.metadata);
+  const meta = asRecord(record?.meta);
+  const bizParams = asRecord(record?.biz_params);
+  const candidates = [
+    record?.plan_interaction_response,
+    metadata?.plan_interaction_response,
+    meta?.plan_interaction_response,
+    bizParams?.plan_interaction_response,
+  ];
+
+  for (const candidate of candidates) {
+    const response = asRecord(candidate);
+    if (!response) continue;
+    const planId = response.plan_id;
+    const decision = response.decision;
+    if (
+      typeof planId === "string" &&
+      planId &&
+      (decision === "revise" ||
+        decision === "execute" ||
+        decision === "exit_plan")
+    ) {
+      return planId;
+    }
+  }
+
+  return null;
+}
+
+function collectSubmittedPlanReviewIds(messages: Message[]): Set<string> {
+  return new Set(
+    messages
+      .map(extractSubmittedPlanReviewId)
+      .filter((planId): planId is string => Boolean(planId)),
+  );
+}
+
+function markSubmittedPlanReviewCard(
+  card: ChatPlanInteractionCardData | null,
+  submittedPlanReviewIds: Set<string>,
+): ChatPlanInteractionCardData | null {
+  if (
+    !card ||
+    card.card_type !== "plan_review" ||
+    !submittedPlanReviewIds.has(card.plan_id)
+  ) {
+    return card;
+  }
+
+  return {
+    ...card,
+    status: "submitted",
+  } satisfies ChatPlanReviewCardData;
+}
+
 /** Build a user card (AgentScopeRuntimeRequestCard) from a user message. */
 function buildUserCard(msg: Message): IAgentScopeRuntimeWebUIMessage {
   const contentParts = contentToRequestParts(msg.content);
@@ -466,6 +530,7 @@ function buildUserCard(msg: Message): IAgentScopeRuntimeWebUIMessage {
  */
 const buildResponseCard = (
   outputMessages: OutputMessage[],
+  submittedPlanReviewIds: Set<string>,
 ): IAgentScopeRuntimeWebUIMessage => {
   const timestamp = resolveGroupTimestamp(
     outputMessages.map((message) => ({
@@ -497,11 +562,13 @@ const buildResponseCard = (
       (found, message) => found ?? extractApprovalAction(message),
       null,
     );
-  const planInteractionCard =
+  const planInteractionCard = markSubmittedPlanReviewCard(
     normalizedMessages.reduce<ChatPlanInteractionCardData | null>(
       (found, message) => found ?? extractPlanInteractionCard(message),
       null,
-    );
+    ),
+    submittedPlanReviewIds,
+  );
 
   const cards: NonNullable<IAgentScopeRuntimeWebUIMessage["cards"]> = [
     {
@@ -558,6 +625,7 @@ export const convertMessages = (
   messages: Message[],
 ): IAgentScopeRuntimeWebUIMessage[] => {
   const result: IAgentScopeRuntimeWebUIMessage[] = [];
+  const submittedPlanReviewIds = collectSubmittedPlanReviewIds(messages);
   let i = 0;
 
   while (i < messages.length) {
@@ -565,7 +633,12 @@ export const convertMessages = (
       result.push(buildUserCard(messages[i++]));
     } else {
       if (isStandaloneOutputMessage(messages[i])) {
-        result.push(buildResponseCard([toOutputMessage(messages[i++])]));
+        result.push(
+          buildResponseCard(
+            [toOutputMessage(messages[i++])],
+            submittedPlanReviewIds,
+          ),
+        );
         continue;
       }
 
@@ -576,7 +649,9 @@ export const convertMessages = (
         }
         outputMsgs.push(toOutputMessage(messages[i++]));
       }
-      if (outputMsgs.length) result.push(buildResponseCard(outputMsgs));
+      if (outputMsgs.length) {
+        result.push(buildResponseCard(outputMsgs, submittedPlanReviewIds));
+      }
     }
   }
 
