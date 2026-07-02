@@ -3,13 +3,19 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   CRON_TASK_SESSION_CLEANUP_RUN_TIME_OPTIONS,
   CURRENT_SOURCE_SYSTEM_CONFIG_SWITCHES,
+  clearModelCallPolicyConfig,
+  enableModelCallPolicyConfig,
   normalizeSystemPromptInjections,
   readCronTaskSessionCleanupConfig,
   readCronUnreadAutoPauseConfig,
+  readLlmRateLimiterConfigState,
+  readQueryRetryConfigState,
   readSystemPromptInjections,
   validateSourceSystemConfig,
   writeCronTaskSessionCleanupValue,
   writeCronUnreadAutoPauseValue,
+  writeLlmRateLimiterValue,
+  writeQueryRetryValue,
   writeRegisteredSwitchValue,
   writeSystemPromptInjections,
   writeToolResultCompactValue,
@@ -158,6 +164,158 @@ describe("SystemConfigPage registry compatibility", () => {
     });
     expect(source.cron_unread_auto_pause).toEqual({
       enabled: true,
+    });
+  });
+
+  it("keeps query retry inherited until explicitly enabled", () => {
+    expect(readQueryRetryConfigState({})).toEqual({
+      explicit: false,
+      config: {
+        enabled: false,
+        max_retries: 3,
+        backoff_base: 2,
+        backoff_cap: 30,
+      },
+    });
+
+    const next = enableModelCallPolicyConfig({}, "query_retry");
+
+    expect(next).toEqual({
+      query_retry: {
+        enabled: false,
+        max_retries: 3,
+        backoff_base: 2,
+        backoff_cap: 30,
+      },
+    });
+  });
+
+  it("reads model call policy defaults from effective config", () => {
+    expect(
+      readQueryRetryConfigState(
+        {},
+        {
+          query_retry: {
+            enabled: true,
+            max_retries: 5,
+            backoff_base: 1.5,
+            backoff_cap: 60,
+          },
+        },
+      ),
+    ).toEqual({
+      explicit: false,
+      config: {
+        enabled: true,
+        max_retries: 5,
+        backoff_base: 1.5,
+        backoff_cap: 60,
+      },
+    });
+
+    expect(
+      enableModelCallPolicyConfig({}, "llm_rate_limiter", {
+        llm_rate_limiter: {
+          llm_max_concurrent: 8,
+          llm_chat_max_concurrent: 4,
+          llm_cron_max_concurrent: 6,
+          llm_max_qpm: 200,
+          llm_rate_limit_pause: 7,
+          llm_rate_limit_jitter: 2,
+          llm_acquire_timeout: 600,
+          llm_chat_acquire_timeout: 120,
+          llm_cron_acquire_timeout: null,
+        },
+      }),
+    ).toEqual({
+      llm_rate_limiter: {
+        llm_max_concurrent: 8,
+        llm_chat_max_concurrent: 4,
+        llm_cron_max_concurrent: 6,
+        llm_max_qpm: 200,
+        llm_rate_limit_pause: 7,
+        llm_rate_limit_jitter: 2,
+        llm_acquire_timeout: 600,
+        llm_chat_acquire_timeout: 120,
+        llm_cron_acquire_timeout: null,
+      },
+    });
+  });
+
+  it("writes and clears query retry overrides without mutating source", () => {
+    vi.stubGlobal("structuredClone", undefined);
+    const source = {
+      provider_policy: { default_model: "qwen-max" },
+      query_retry: {
+        enabled: true,
+        unknown_retained: "yes",
+      },
+    };
+
+    const next = writeQueryRetryValue(source, "max_retries", 2);
+    const cleared = clearModelCallPolicyConfig(next, "query_retry");
+
+    expect(next).toEqual({
+      provider_policy: { default_model: "qwen-max" },
+      query_retry: {
+        enabled: true,
+        max_retries: 2,
+        unknown_retained: "yes",
+      },
+    });
+    expect(cleared).toEqual({
+      provider_policy: { default_model: "qwen-max" },
+    });
+    expect(source.query_retry).toEqual({
+      enabled: true,
+      unknown_retained: "yes",
+    });
+  });
+
+  it("keeps llm rate limiter inherited until explicitly enabled", () => {
+    expect(readLlmRateLimiterConfigState({})).toEqual({
+      explicit: false,
+      config: {
+        llm_max_concurrent: 5,
+        llm_chat_max_concurrent: 2,
+        llm_cron_max_concurrent: 3,
+        llm_max_qpm: 100,
+        llm_rate_limit_pause: 5,
+        llm_rate_limit_jitter: 1,
+        llm_acquire_timeout: 300,
+        llm_chat_acquire_timeout: null,
+        llm_cron_acquire_timeout: null,
+      },
+    });
+  });
+
+  it("writes and clears llm rate limiter overrides without mutating source", () => {
+    vi.stubGlobal("structuredClone", undefined);
+    const source = {
+      provider_policy: { default_model: "qwen-max" },
+      llm_rate_limiter: {
+        llm_chat_max_concurrent: 1,
+        unknown_retained: "yes",
+      },
+    };
+
+    const next = writeLlmRateLimiterValue(source, "llm_max_qpm", 12);
+    const cleared = clearModelCallPolicyConfig(next, "llm_rate_limiter");
+
+    expect(next).toEqual({
+      provider_policy: { default_model: "qwen-max" },
+      llm_rate_limiter: {
+        llm_chat_max_concurrent: 1,
+        llm_max_qpm: 12,
+        unknown_retained: "yes",
+      },
+    });
+    expect(cleared).toEqual({
+      provider_policy: { default_model: "qwen-max" },
+    });
+    expect(source.llm_rate_limiter).toEqual({
+      llm_chat_max_concurrent: 1,
+      unknown_retained: "yes",
     });
   });
 

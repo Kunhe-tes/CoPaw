@@ -110,7 +110,11 @@ _Avoid_: output_len=0, blank reply, empty cron output
 
 **Source System Configuration**:
 A source-scoped runtime configuration surface for behavior shared by requests from the same external source. It is not a tenant configuration and does not describe user, organization, or workspace identity.
-_Avoid_: system feature configuration, tenant config, user config
+_Avoid_: system feature configuration, system feature config, 系统特性配置, tenant config, user config
+
+**Source System Configuration Override**:
+A value explicitly saved in **Source System Configuration** that replaces the corresponding broader runtime setting for requests from that source. Missing values are inheritance, not implicit overrides.
+_Avoid_: source default, tenant override, page default
 
 **Runtime Request Identity**:
 The tenant and source context that determines which runtime configuration and model selection a request observes. One **Runtime Request Identity** resolves to one **Tenant Provider Configuration** view for provider and active-model reads.
@@ -604,7 +608,7 @@ Resolved as a single **Aggregated Skill Freshness Notice** that lists each affec
 Resolved as exposing absence for **File Read Truncation** as inheriting the historical recent tool-result limit until independently configured.
 
 **"Tool Output Controls Scope"**:
-Resolved as limited to the Source System Configuration page and runtime resolution for this change. The Agent configuration page keeps the existing historical tool-result compaction controls for now.
+Resolved as limited to the Source System Configuration page and runtime resolution for current user-facing controls. The Agent configuration page no longer exposes historical tool-result compaction controls, while existing Agent runtime configuration remains available as inherited baseline behavior.
 
 **"System Self-Check"**:
 Resolved as **System Runtime Diagnostic**. The existing lightweight health endpoint remains a liveness probe, while the scheduled `HEARTBEAT.md` run remains an Agent Heartbeat.

@@ -3659,10 +3659,42 @@ class AgentRunner(Runner):
             pass
 
         retry_enabled, max_retries, backoff_base, backoff_cap = (
-            self._extract_retry_config(agent_config_for_retry)
+            self._extract_retry_config(
+                self._resolve_source_query_retry_config(
+                    agent_config_for_retry,
+                ),
+            )
         )
         max_retry_attempts = max_retries + 1 if retry_enabled else 1
         return max_retry_attempts, max_retries, backoff_base, backoff_cap
+
+    @staticmethod
+    def _resolve_source_query_retry_config(agent_config):
+        """应用当前 source 的显式 Query 重试覆盖。"""
+        if agent_config is None:
+            return None
+        try:
+            from ..source_system_config import resolve_query_retry_config
+
+            running = getattr(agent_config, "running", None)
+            if running is None:
+                return agent_config
+            query_retry = getattr(running, "query_retry", None)
+            if query_retry is None:
+                return agent_config
+            resolved = resolve_query_retry_config(query_retry)
+            if hasattr(agent_config, "model_copy"):
+                return agent_config.model_copy(
+                    update={
+                        "running": running.model_copy(
+                            update={"query_retry": resolved},
+                        ),
+                    },
+                )
+            setattr(running, "query_retry", resolved)
+        except Exception:
+            return agent_config
+        return agent_config
 
     async def _add_retry_notice_to_memory(
         self,

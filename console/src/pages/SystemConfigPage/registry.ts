@@ -34,11 +34,36 @@ export interface CronTaskSessionCleanupConfig {
   run_time: string;
 }
 
+export interface QueryRetryConfig {
+  enabled: boolean;
+  max_retries: number;
+  backoff_base: number;
+  backoff_cap: number;
+}
+
+export interface LlmRateLimiterConfig {
+  llm_max_concurrent: number;
+  llm_chat_max_concurrent: number | null;
+  llm_cron_max_concurrent: number | null;
+  llm_max_qpm: number;
+  llm_rate_limit_pause: number;
+  llm_rate_limit_jitter: number;
+  llm_acquire_timeout: number;
+  llm_chat_acquire_timeout: number | null;
+  llm_cron_acquire_timeout: number | null;
+}
+
 export type ImmediateTruncationConfigKey = "file_read_truncation";
+export type ModelCallPolicyConfigKey = "query_retry" | "llm_rate_limiter";
 
 export interface ImmediateTruncationState {
   explicit: boolean;
   config: ImmediateTruncationConfig;
+}
+
+export interface ModelCallPolicyState<T> {
+  explicit: boolean;
+  config: T;
 }
 
 export interface CurrentSourceConfigNumberDefinition {
@@ -47,6 +72,21 @@ export interface CurrentSourceConfigNumberDefinition {
   min: number;
   max?: number;
   step: number;
+}
+
+export interface QueryRetryNumberDefinition {
+  key: keyof Omit<QueryRetryConfig, "enabled">;
+  title: string;
+  min: number;
+  step: number;
+}
+
+export interface LlmRateLimiterNumberDefinition {
+  key: keyof LlmRateLimiterConfig;
+  title: string;
+  min: number;
+  step: number;
+  nullable?: boolean;
 }
 
 export const CURRENT_SOURCE_SYSTEM_CONFIG_SWITCHES: CurrentSourceConfigSwitchDefinition[] =
@@ -94,6 +134,25 @@ export const CRON_TASK_SESSION_CLEANUP_DEFAULTS: CronTaskSessionCleanupConfig =
     run_time: "01:00",
   };
 
+export const QUERY_RETRY_DEFAULTS: QueryRetryConfig = {
+  enabled: false,
+  max_retries: 3,
+  backoff_base: 2,
+  backoff_cap: 30,
+};
+
+export const LLM_RATE_LIMITER_DEFAULTS: LlmRateLimiterConfig = {
+  llm_max_concurrent: 5,
+  llm_chat_max_concurrent: 2,
+  llm_cron_max_concurrent: 3,
+  llm_max_qpm: 100,
+  llm_rate_limit_pause: 5,
+  llm_rate_limit_jitter: 1,
+  llm_acquire_timeout: 300,
+  llm_chat_acquire_timeout: null,
+  llm_cron_acquire_timeout: null,
+};
+
 export const CRON_TASK_SESSION_CLEANUP_RUN_TIME_OPTIONS = Array.from(
   { length: 48 },
   (_, index) => {
@@ -112,6 +171,9 @@ export const CRON_UNREAD_AUTO_PAUSE_MIN_THRESHOLD = 1;
 export const CRON_TASK_SESSION_CLEANUP_MIN_RETENTION_DAYS = 1;
 
 export const IMMEDIATE_TRUNCATION_MIN_BYTES = 1000;
+
+export const QUERY_RETRY_BACKOFF_BASE_MIN = 0.5;
+export const QUERY_RETRY_BACKOFF_CAP_MIN = 1;
 
 export const SYSTEM_PROMPT_INJECTION_SEPARATOR = /\n\s*\n/g;
 
@@ -142,6 +204,89 @@ export const TOOL_RESULT_COMPACT_NUMBER_FIELDS: CurrentSourceConfigNumberDefinit
       min: 1,
       max: 10,
       step: 1,
+    },
+  ];
+
+export const QUERY_RETRY_NUMBER_FIELDS: QueryRetryNumberDefinition[] = [
+  {
+    key: "max_retries",
+    title: "最大重试次数",
+    min: 1,
+    step: 1,
+  },
+  {
+    key: "backoff_base",
+    title: "基础退避秒数",
+    min: QUERY_RETRY_BACKOFF_BASE_MIN,
+    step: 0.1,
+  },
+  {
+    key: "backoff_cap",
+    title: "最大退避秒数",
+    min: QUERY_RETRY_BACKOFF_CAP_MIN,
+    step: 0.5,
+  },
+];
+
+export const LLM_RATE_LIMITER_NUMBER_FIELDS: LlmRateLimiterNumberDefinition[] =
+  [
+    {
+      key: "llm_max_concurrent",
+      title: "兜底并发数",
+      min: 1,
+      step: 1,
+    },
+    {
+      key: "llm_chat_max_concurrent",
+      title: "对话并发数",
+      min: 1,
+      step: 1,
+      nullable: true,
+    },
+    {
+      key: "llm_cron_max_concurrent",
+      title: "定时任务并发数",
+      min: 1,
+      step: 1,
+      nullable: true,
+    },
+    {
+      key: "llm_max_qpm",
+      title: "每分钟请求数",
+      min: 0,
+      step: 10,
+    },
+    {
+      key: "llm_rate_limit_pause",
+      title: "限流暂停秒数",
+      min: 1,
+      step: 0.5,
+    },
+    {
+      key: "llm_rate_limit_jitter",
+      title: "随机抖动秒数",
+      min: 0,
+      step: 0.5,
+    },
+    {
+      key: "llm_acquire_timeout",
+      title: "兜底等待秒数",
+      min: 10,
+      step: 10,
+    },
+    {
+      key: "llm_chat_acquire_timeout",
+      title: "对话等待秒数",
+      min: 10,
+      step: 10,
+      nullable: true,
+    },
+    {
+      key: "llm_cron_acquire_timeout",
+      title: "定时任务等待秒数",
+      min: 10,
+      step: 10,
+      nullable: true,
     },
   ];
 
@@ -369,6 +514,184 @@ export function writeCronTaskSessionCleanupValue(
   return nextConfig;
 }
 
+export function readQueryRetryConfigState(
+  config: SourceSystemConfig,
+  effectiveConfig?: SourceSystemConfig | null,
+): ModelCallPolicyState<QueryRetryConfig> {
+  const defaults = readQueryRetryDefaults(effectiveConfig);
+  const rawValue = config.query_retry;
+  if (!isPlainObject(rawValue)) {
+    return {
+      explicit: false,
+      config: defaults,
+    };
+  }
+  return {
+    explicit: true,
+    config: {
+      enabled:
+        typeof rawValue.enabled === "boolean"
+          ? rawValue.enabled
+          : defaults.enabled,
+      max_retries:
+        typeof rawValue.max_retries === "number"
+          ? rawValue.max_retries
+          : defaults.max_retries,
+      backoff_base:
+        typeof rawValue.backoff_base === "number"
+          ? rawValue.backoff_base
+          : defaults.backoff_base,
+      backoff_cap:
+        typeof rawValue.backoff_cap === "number"
+          ? rawValue.backoff_cap
+          : defaults.backoff_cap,
+    },
+  };
+}
+
+export function readLlmRateLimiterConfigState(
+  config: SourceSystemConfig,
+  effectiveConfig?: SourceSystemConfig | null,
+): ModelCallPolicyState<LlmRateLimiterConfig> {
+  const defaults = readLlmRateLimiterDefaults(effectiveConfig);
+  const rawValue = config.llm_rate_limiter;
+  if (!isPlainObject(rawValue)) {
+    return {
+      explicit: false,
+      config: defaults,
+    };
+  }
+  const readNumber = <K extends keyof LlmRateLimiterConfig>(
+    key: K,
+  ): LlmRateLimiterConfig[K] => {
+    const value = rawValue[key];
+    if (typeof value === "number" || value === null) {
+      return value as LlmRateLimiterConfig[K];
+    }
+    return defaults[key];
+  };
+  return {
+    explicit: true,
+    config: {
+      llm_max_concurrent: readNumber("llm_max_concurrent"),
+      llm_chat_max_concurrent: readNumber("llm_chat_max_concurrent"),
+      llm_cron_max_concurrent: readNumber("llm_cron_max_concurrent"),
+      llm_max_qpm: readNumber("llm_max_qpm"),
+      llm_rate_limit_pause: readNumber("llm_rate_limit_pause"),
+      llm_rate_limit_jitter: readNumber("llm_rate_limit_jitter"),
+      llm_acquire_timeout: readNumber("llm_acquire_timeout"),
+      llm_chat_acquire_timeout: readNumber("llm_chat_acquire_timeout"),
+      llm_cron_acquire_timeout: readNumber("llm_cron_acquire_timeout"),
+    },
+  };
+}
+
+export function enableModelCallPolicyConfig(
+  config: SourceSystemConfig,
+  configKey: ModelCallPolicyConfigKey,
+  effectiveConfig?: SourceSystemConfig | null,
+): SourceSystemConfig {
+  const nextConfig = clonePlainConfig(config);
+  nextConfig[configKey] =
+    configKey === "query_retry"
+      ? readQueryRetryDefaults(effectiveConfig)
+      : readLlmRateLimiterDefaults(effectiveConfig);
+  return nextConfig;
+}
+
+function readQueryRetryDefaults(
+  effectiveConfig?: SourceSystemConfig | null,
+): QueryRetryConfig {
+  const rawValue = effectiveConfig?.query_retry;
+  if (!isPlainObject(rawValue)) {
+    return { ...QUERY_RETRY_DEFAULTS };
+  }
+  return {
+    enabled:
+      typeof rawValue.enabled === "boolean"
+        ? rawValue.enabled
+        : QUERY_RETRY_DEFAULTS.enabled,
+    max_retries:
+      typeof rawValue.max_retries === "number"
+        ? rawValue.max_retries
+        : QUERY_RETRY_DEFAULTS.max_retries,
+    backoff_base:
+      typeof rawValue.backoff_base === "number"
+        ? rawValue.backoff_base
+        : QUERY_RETRY_DEFAULTS.backoff_base,
+    backoff_cap:
+      typeof rawValue.backoff_cap === "number"
+        ? rawValue.backoff_cap
+        : QUERY_RETRY_DEFAULTS.backoff_cap,
+  };
+}
+
+function readLlmRateLimiterDefaults(
+  effectiveConfig?: SourceSystemConfig | null,
+): LlmRateLimiterConfig {
+  const rawValue = effectiveConfig?.llm_rate_limiter;
+  if (!isPlainObject(rawValue)) {
+    return { ...LLM_RATE_LIMITER_DEFAULTS };
+  }
+  const readNumber = <K extends keyof LlmRateLimiterConfig>(
+    key: K,
+  ): LlmRateLimiterConfig[K] => {
+    const value = rawValue[key];
+    if (typeof value === "number" || value === null) {
+      return value as LlmRateLimiterConfig[K];
+    }
+    return LLM_RATE_LIMITER_DEFAULTS[key];
+  };
+  return {
+    llm_max_concurrent: readNumber("llm_max_concurrent"),
+    llm_chat_max_concurrent: readNumber("llm_chat_max_concurrent"),
+    llm_cron_max_concurrent: readNumber("llm_cron_max_concurrent"),
+    llm_max_qpm: readNumber("llm_max_qpm"),
+    llm_rate_limit_pause: readNumber("llm_rate_limit_pause"),
+    llm_rate_limit_jitter: readNumber("llm_rate_limit_jitter"),
+    llm_acquire_timeout: readNumber("llm_acquire_timeout"),
+    llm_chat_acquire_timeout: readNumber("llm_chat_acquire_timeout"),
+    llm_cron_acquire_timeout: readNumber("llm_cron_acquire_timeout"),
+  };
+}
+
+export function clearModelCallPolicyConfig(
+  config: SourceSystemConfig,
+  configKey: ModelCallPolicyConfigKey,
+): SourceSystemConfig {
+  const nextConfig = clonePlainConfig(config);
+  delete nextConfig[configKey];
+  return nextConfig;
+}
+
+export function writeQueryRetryValue<K extends keyof QueryRetryConfig>(
+  config: SourceSystemConfig,
+  key: K,
+  value: QueryRetryConfig[K],
+): SourceSystemConfig {
+  const nextConfig = clonePlainConfig(config);
+  const rawValue = nextConfig.query_retry;
+  if (!isPlainObject(rawValue)) {
+    nextConfig.query_retry = {};
+  }
+  (nextConfig.query_retry as Record<string, unknown>)[key] = value;
+  return nextConfig;
+}
+
+export function writeLlmRateLimiterValue<K extends keyof LlmRateLimiterConfig>(
+  config: SourceSystemConfig,
+  key: K,
+  value: LlmRateLimiterConfig[K],
+): SourceSystemConfig {
+  const nextConfig = clonePlainConfig(config);
+  const rawValue = nextConfig.llm_rate_limiter;
+  if (!isPlainObject(rawValue)) {
+    nextConfig.llm_rate_limiter = {};
+  }
+  (nextConfig.llm_rate_limiter as Record<string, unknown>)[key] = value;
+  return nextConfig;
+}
+
 export function normalizeSystemPromptInjections(value: unknown): string[] {
   if (!Array.isArray(value)) {
     return [];
@@ -454,7 +777,7 @@ export function writeImmediateTruncationValue<
   value: ImmediateTruncationConfig[K],
 ): SourceSystemConfig {
   const defaults = FILE_READ_TRUNCATION_DEFAULTS;
-  const nextConfig = structuredClone(config);
+  const nextConfig = clonePlainConfig(config);
   const rawValue = nextConfig[configKey];
   if (!isPlainObject(rawValue)) {
     nextConfig[configKey] = {};
@@ -493,7 +816,7 @@ export function clearImmediateTruncationConfig(
   config: SourceSystemConfig,
   configKey: ImmediateTruncationConfigKey,
 ): SourceSystemConfig {
-  const nextConfig = structuredClone(config);
+  const nextConfig = clonePlainConfig(config);
   delete nextConfig[configKey];
   return nextConfig;
 }
@@ -530,6 +853,65 @@ export function validateImmediateTruncationConfig(
   return null;
 }
 
+export function validateQueryRetryConfig(
+  state: ModelCallPolicyState<QueryRetryConfig>,
+): string | null {
+  if (!state.explicit) {
+    return null;
+  }
+  const config = state.config;
+  if (!Number.isInteger(config.max_retries) || config.max_retries < 1) {
+    return "最大重试次数不能小于 1";
+  }
+  if (config.backoff_base < QUERY_RETRY_BACKOFF_BASE_MIN) {
+    return `基础退避秒数不能小于 ${QUERY_RETRY_BACKOFF_BASE_MIN}`;
+  }
+  if (config.backoff_cap < QUERY_RETRY_BACKOFF_CAP_MIN) {
+    return `最大退避秒数不能小于 ${QUERY_RETRY_BACKOFF_CAP_MIN}`;
+  }
+  if (config.backoff_cap < config.backoff_base) {
+    return "最大退避秒数不能小于基础退避秒数";
+  }
+  return null;
+}
+
+export function validateLlmRateLimiterConfig(
+  state: ModelCallPolicyState<LlmRateLimiterConfig>,
+): string | null {
+  if (!state.explicit) {
+    return null;
+  }
+  const config = state.config;
+  for (const definition of LLM_RATE_LIMITER_NUMBER_FIELDS) {
+    const value = config[definition.key];
+    if (value == null && definition.nullable) {
+      continue;
+    }
+    if (typeof value !== "number" || value < definition.min) {
+      return `${definition.title}不能小于 ${definition.min}`;
+    }
+    if (
+      definition.step === 1 &&
+      !definition.nullable &&
+      !Number.isInteger(value)
+    ) {
+      return `${definition.title}必须是整数`;
+    }
+  }
+  const cooldown = config.llm_rate_limit_pause + config.llm_rate_limit_jitter;
+  const timeoutChecks: Array<[number | null, string]> = [
+    [config.llm_acquire_timeout, "兜底等待秒数"],
+    [config.llm_chat_acquire_timeout, "对话等待秒数"],
+    [config.llm_cron_acquire_timeout, "定时任务等待秒数"],
+  ];
+  for (const [value, label] of timeoutChecks) {
+    if (value != null && value <= cooldown) {
+      return `${label}必须大于限流暂停秒数与随机抖动秒数之和`;
+    }
+  }
+  return null;
+}
+
 export function validateCronUnreadAutoPauseConfig(
   config: CronUnreadAutoPauseConfig,
 ): string | null {
@@ -559,12 +941,19 @@ export function validateCronTaskSessionCleanupConfig(
 
 export function validateSourceSystemConfig(
   config: SourceSystemConfig,
+  effectiveConfig?: SourceSystemConfig | null,
 ): string | null {
   return (
     validateCronTaskSessionCleanupConfig(
       readCronTaskSessionCleanupConfig(config),
     ) ||
     validateCronUnreadAutoPauseConfig(readCronUnreadAutoPauseConfig(config)) ||
+    validateQueryRetryConfig(
+      readQueryRetryConfigState(config, effectiveConfig),
+    ) ||
+    validateLlmRateLimiterConfig(
+      readLlmRateLimiterConfigState(config, effectiveConfig),
+    ) ||
     validateToolOutputConfigs(config)
   );
 }
