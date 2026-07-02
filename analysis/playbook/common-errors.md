@@ -11,6 +11,7 @@
 - 常见报错为：`Error: 'str' object has no attribute 'get'`
 - 模型调用选择模式时把 `options` 作为 JSON 字符串传入，前端表现为每个字符都渲染成一个选项
 - 模型把 `kind` 传成 `clarification`、`choice` 等宽泛描述，后端报 `PlanClarificationCard.kind` 枚举校验失败
+- 模型把表单字段写成 `{"name": "机构类型", "description": "...", "options": [...]}`，没有提供 `label`，后端报 `clarification field label is required`
 
 ### 典型原因
 
@@ -19,6 +20,8 @@
 - 计划澄清工具直接遍历字符串，导致单个字符进入字段或选项归一化逻辑
 - 部分模型还会使用 `key` 代替 `id`，省略可从 `options` 推断的字段类型，或只给选项提供 `label`/`description`
 - 工具 schema 如果把 `kind` 暴露为任意字符串，模型容易把工具用途描述误传成卡片协议枚举
+- 部分模型会把 `name` 同时当字段标识和展示标签使用，而工具入口只把 `name` 当 `id` 兜底
+- 字段内部的 `options` 也可能被再次序列化为 JSON 字符串
 
 ### 第一落点
 
@@ -37,6 +40,9 @@
 - JSON 字符串只允许解析为数组，非法 JSON 或非对象字段应返回明确参数错误
 - 无候选项的缺省字段归一为 `text`，有候选项的缺省字段归一为 `single_choice`
 - `kind` 必须使用 `single_choice`、`multi_choice`、`text` 或 `form`，不要放宽 `PlanClarificationCard` 领域模型
+- 表单字段展示名按 `label/title/name/key/id` 顺序兜底，字段标识按 `id/key/name/label/title` 顺序兜底
+- 只有工具入口做宽松归一化，`PlanClarificationCard` 和 `PlanClarificationField` 继续保持严格协议
+- 错误信息需要带 `fields[index]`，便于从工具调用日志直接定位失败字段
 
 ## MCP 注册时报 App not Subscribe This MCP Server
 

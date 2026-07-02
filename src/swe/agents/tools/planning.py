@@ -7,6 +7,7 @@ from typing import Any, Literal
 
 from agentscope.message import TextBlock
 from agentscope.tool import ToolResponse
+from pydantic import BaseModel, ConfigDict, Field
 
 from ...app.plans import (
     JsonProposedPlanStore,
@@ -25,6 +26,62 @@ _SUPPORTED_CLARIFICATION_KINDS = _DIRECT_CLARIFICATION_KINDS | {"form"}
 _SUPPORTED_FORM_FIELD_TYPES = frozenset(
     {"single_choice", "multi_choice", "text"},
 )
+_FORM_FIELD_ID_KEYS = ("id", "key", "name", "label", "title")
+_FORM_FIELD_LABEL_KEYS = ("label", "title", "name", "key", "id")
+_FORM_FIELD_HINT_KEYS = frozenset(
+    {
+        "description",
+        "label",
+        "options",
+        "placeholder",
+        "required",
+        "title",
+        "type",
+    },
+)
+
+
+class PlanClarificationFormFieldInput(BaseModel):
+    """Lenient tool input shape for model-generated clarification form fields."""
+
+    model_config = ConfigDict(extra="allow")
+
+    id: str | None = Field(default=None, description="Stable field id.")
+    key: str | None = Field(
+        default=None,
+        description="Field key alias for id.",
+    )
+    name: str | None = Field(
+        default=None,
+        description=(
+            "Field name. If label is omitted, this is used as the visible label."
+        ),
+    )
+    label: str | None = Field(default=None, description="Visible field label.")
+    title: str | None = Field(
+        default=None,
+        description="Visible field title alias.",
+    )
+    type: Literal["single_choice", "multi_choice", "text"] | None = Field(
+        default=None,
+        description="Control type. Omit it to infer from options.",
+    )
+    options: list[Any] | str | None = Field(
+        default=None,
+        description="Choice options as an array or a JSON string array.",
+    )
+    placeholder: str | None = Field(
+        default=None,
+        description="Text input placeholder.",
+    )
+    required: bool | None = Field(
+        default=None,
+        description="Whether the field is required.",
+    )
+    description: str | None = Field(
+        default=None,
+        description="Short help text.",
+    )
 
 
 def _coerce_json_array(value: Any, field_name: str) -> list[Any]:
@@ -69,25 +126,84 @@ def _normalize_choice_option(option: Any) -> dict[str, Any]:
     return normalized
 
 
+def _field_error_path(index: int | None, suffix: str) -> str:
+    if index is None:
+        return f"field {suffix}"
+    return f"fields[{index}] {suffix}"
+
+
+def _first_non_empty_text(
+    data: dict[str, Any],
+    keys: tuple[str, ...],
+) -> str | None:
+    for key in keys:
+        value = data.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return None
+
+
+def _coerce_form_field_object(
+    field: Any,
+    index: int | None = None,
+) -> dict[str, Any]:
+    if isinstance(field, BaseModel):
+        field = field.model_dump(exclude_none=True)
+    if not isinstance(field, dict):
+        raise ValueError(
+            f"clarification {_field_error_path(index, 'must be an object')}",
+        )
+    return field
+
+
 def _looks_like_form_field(option: Any) -> bool:
     """根据常见字段约定判断 options 是否实际承载表单字段定义。"""
-    return (
-        isinstance(option, dict)
-        and isinstance(option.get("label"), str)
-        and isinstance(option.get("type"), str)
-        and isinstance(option.get("id") or option.get("name"), str)
+    if isinstance(option, BaseModel):
+        option = option.model_dump(exclude_none=True)
+    if not isinstance(option, dict):
+        return False
+
+    has_stable_name = any(
+        isinstance(option.get(key), str) and option[key].strip()
+        for key in ("id", "key", "name")
     )
+    has_label_with_type = (
+        any(
+            isinstance(option.get(key), str) and option[key].strip()
+            for key in ("label", "title")
+        )
+        and isinstance(option.get("type"), str)
+        and option["type"].strip()
+    )
+    has_field_hint = any(key in option for key in _FORM_FIELD_HINT_KEYS)
+    return (has_stable_name and has_field_hint) or has_label_with_type
 
 
-def _normalize_form_field(field: dict[str, Any]) -> dict[str, Any]:
+def _normalize_form_field(
+    field: dict[str, Any] | PlanClarificationFormFieldInput,
+    index: int | None = None,
+) -> dict[str, Any]:
     """兼容 key/name/id 与字符串候选项。"""
-    field_id = field.get("id") or field.get("name") or field.get("key")
-    if not isinstance(field_id, str) or not field_id.strip():
-        raise ValueError("clarification field id is required")
+    field = _coerce_form_field_object(field, index)
+    field_id = _first_non_empty_text(field, _FORM_FIELD_ID_KEYS)
+    if field_id is None:
+        raise ValueError(
+            "clarification "
+            + _field_error_path(
+                index,
+                "id is required; provide id, key, name, label, or title",
+            ),
+        )
 
-    label = field.get("label")
-    if not isinstance(label, str) or not label.strip():
-        raise ValueError("clarification field label is required")
+    label = _first_non_empty_text(field, _FORM_FIELD_LABEL_KEYS)
+    if label is None:
+        raise ValueError(
+            "clarification "
+            + _field_error_path(
+                index,
+                "label is required; provide label or name",
+            ),
+        )
 
     raw_type = field.get("type")
     if raw_type is None:
@@ -112,10 +228,18 @@ def _normalize_form_field(field: dict[str, Any]) -> dict[str, Any]:
         normalized["description"] = description
 
     if normalized_type in {"single_choice", "multi_choice"}:
-        raw_options = field.get("options")
-        if not isinstance(raw_options, list) or not raw_options:
+        raw_options = _coerce_json_array(
+            field.get("options"),
+            (
+                "fields[].options"
+                if index is None
+                else f"fields[{index}].options"
+            ),
+        )
+        if not raw_options:
             raise ValueError(
-                f"clarification field {field_id} requires options",
+                "clarification "
+                + _field_error_path(index, f"{field_id} requires options"),
             )
         normalized["options"] = [
             _normalize_choice_option(option) for option in raw_options
@@ -126,11 +250,10 @@ def _normalize_form_field(field: dict[str, Any]) -> dict[str, Any]:
 def _normalize_form_fields(fields: Any) -> list[dict[str, Any]]:
     """兼容模型把表单字段数组序列化为 JSON 字符串的情况。"""
     fields = _coerce_json_array(fields, "fields")
-    if not isinstance(fields, list) or any(
-        not isinstance(field, dict) for field in fields
-    ):
-        raise ValueError("clarification fields must be an array of objects")
-    return [_normalize_form_field(field) for field in fields]
+    return [
+        _normalize_form_field(field, index)
+        for index, field in enumerate(fields)
+    ]
 
 
 def _normalize_clarification_kind(
@@ -148,7 +271,7 @@ def _normalize_clarification_payload(
     *,
     kind: str,
     options: list[Any] | str | None,
-    fields: list[dict[str, Any]] | str | None,
+    fields: list[PlanClarificationFormFieldInput] | str | None,
 ) -> dict[str, Any]:
     """把旧式 choice/text 和新式表单 payload 收敛为统一卡片模型。"""
     if fields is not None:
@@ -167,7 +290,8 @@ def _normalize_clarification_payload(
                 "form_id": kind,
                 "options": [],
                 "fields": [
-                    _normalize_form_field(option) for option in raw_options
+                    _normalize_form_field(option, index)
+                    for index, option in enumerate(raw_options)
                 ],
             }
 
@@ -186,10 +310,22 @@ async def ask_plan_clarification(
     prompt: str,
     kind: Literal["single_choice", "multi_choice", "text", "form"],
     options: list[Any] | str | None = None,
-    fields: list[dict[str, Any]] | str | None = None,
+    fields: list[PlanClarificationFormFieldInput] | str | None = None,
     allow_custom_response: bool = False,
 ) -> ToolResponse:
-    """生成计划澄清卡片，让前端用结构化控件收集下一轮回复。"""
+    """生成计划澄清卡片，让前端用结构化控件收集下一轮回复。
+
+    Form example:
+    fields=[
+        {
+            "name": "机构类型",
+            "label": "机构类型",
+            "type": "single_choice",
+            "options": ["银行", "券商"],
+            "description": "您所在的金融机构类型",
+        }
+    ]
+    """
     payload = _normalize_clarification_payload(
         kind=kind,
         options=options,

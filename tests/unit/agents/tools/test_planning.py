@@ -140,6 +140,88 @@ async def test_ask_plan_clarification_accepts_string_fields() -> None:
 
 
 @pytest.mark.asyncio
+async def test_ask_plan_clarification_accepts_name_only_form_fields() -> None:
+    response = await ask_plan_clarification(
+        prompt="为了给您定制最落地的维护策略，我们需要先对齐几个关键背景。",
+        kind="form",
+        fields=(
+            '[{"name": "机构类型", "description": "您所在的金融机构类型", '
+            '"options": ["银行", "券商", "三方财富", "保险", "其他"]}, '
+            '{"name": "客户规模", "description": "您目前维护的 100w AUM 客户数量", '
+            '"options": ["100户以内", "100-150户", "150-200户", "200户以上"]}, '
+            '{"name": "核心痛点", "description": "您目前面临的最大挑战", '
+            '"options": ["客户流失/被竞品挖角", "AUM 增长遇到瓶颈", '
+            '"日常维护时间不够用", "合规与适当性压力", "产品同质化严重"]}]'
+        ),
+    )
+
+    card = response.metadata["plan_interaction_card"]
+    assert card["kind"] == "form"
+    assert card["fields"][0] == {
+        "id": "机构类型",
+        "label": "机构类型",
+        "type": "single_choice",
+        "options": [
+            {"id": "银行", "label": "银行"},
+            {"id": "券商", "label": "券商"},
+            {"id": "三方财富", "label": "三方财富"},
+            {"id": "保险", "label": "保险"},
+            {"id": "其他", "label": "其他"},
+        ],
+        "required": False,
+        "description": "您所在的金融机构类型",
+    }
+
+
+@pytest.mark.asyncio
+async def test_ask_plan_clarification_detects_name_only_form_fields_in_options() -> (
+    None
+):
+    response = await ask_plan_clarification(
+        prompt="请补充背景。",
+        kind="form",
+        options=[
+            {
+                "name": "机构类型",
+                "description": "您所在的金融机构类型",
+                "options": ["银行", "券商"],
+            },
+            {
+                "name": "核心痛点",
+                "options": '["客户流失", "维护时间不够"]',
+            },
+        ],
+    )
+
+    card = response.metadata["plan_interaction_card"]
+    assert card["kind"] == "form"
+    assert card["fields"][0]["label"] == "机构类型"
+    assert card["fields"][0]["type"] == "single_choice"
+    assert card["fields"][1]["options"] == [
+        {"id": "客户流失", "label": "客户流失"},
+        {"id": "维护时间不够", "label": "维护时间不够"},
+    ]
+
+
+@pytest.mark.asyncio
+async def test_ask_plan_clarification_reports_indexed_field_id_errors() -> (
+    None
+):
+    with pytest.raises(
+        ValueError,
+        match=(
+            r"clarification fields\[0\] id is required; "
+            r"provide id, key, name, label, or title"
+        ),
+    ):
+        await ask_plan_clarification(
+            prompt="请补充背景。",
+            kind="form",
+            fields=[{"description": "缺少字段名"}],
+        )
+
+
+@pytest.mark.asyncio
 async def test_ask_plan_clarification_preserves_unified_form_field_types() -> (
     None
 ):
@@ -234,6 +316,14 @@ def test_ask_plan_clarification_tool_schema_guides_choice_kind() -> None:
         "type": "string",
     }
     assert {"type": "string"} in properties["options"]["anyOf"]
+    defs = schema["function"]["parameters"]["$defs"]
+    field_schema = defs["PlanClarificationFormFieldInput"]
+    assert "name" in field_schema["properties"]
+    assert "label" in field_schema["properties"]
+    assert "options" in field_schema["properties"]
+    assert properties["fields"]["anyOf"][0]["items"] == {
+        "$ref": "#/$defs/PlanClarificationFormFieldInput",
+    }
 
 
 @pytest.mark.asyncio
