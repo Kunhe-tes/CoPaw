@@ -197,6 +197,10 @@ async def test_query_handler_keeps_existing_passthrough_headers(monkeypatch):
         trace_id="trace-1",
         auth_token="token-123",
         cookie="foo=bar; com.cmb.dw.rtl.sso.token=auth-123",
+        passthrough_headers={
+            "X-B3-BusinessId": "LQ1303LMES-WEB",
+            "X-B3-Traceid": "8267fd70bacf497704fec30eaa353979",
+        },
     )
     msgs = [SimpleNamespace(get_text_content=lambda: "hello")]
 
@@ -210,6 +214,7 @@ async def test_query_handler_keeps_existing_passthrough_headers(monkeypatch):
         "cookie": "foo=bar; com.cmb.dw.rtl.sso.token=auth-123",
         "X-B3-Traceid": "8267fd70bacf497704fec30eaa353979",
         "X-B3-Spanid": "32befd146889a61a",
+        "X-B3-BusinessId": "LQ1303LMES-WEB",
     }
     assert captured["session_id"] == "session-1"
     assert captured["trace_id"] == "trace-1"

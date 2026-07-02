@@ -184,6 +184,51 @@ async def test_prepare_agent_execution_marks_trace_for_attach_existing(
     assert req["trace_attach_existing"] is True
 
 
+@pytest.mark.asyncio
+async def test_prepare_agent_execution_uses_b3_dispatch_meta(monkeypatch):
+    executor = CronExecutor(
+        runner=_Runner(),
+        channel_manager=_ChannelManager(),
+    )
+    job = _build_agent_job("/tmp/tenant-a/workspaces/alpha")
+    observed = {}
+
+    async def fake_create_trace(*_args, **kwargs):
+        observed["trace_id"] = kwargs.get("trace_id")
+        return kwargs.get("trace_id") or "trace-cron"
+
+    monkeypatch.setattr(
+        executor,
+        "_create_trace_for_agent_job",
+        fake_create_trace,
+    )
+
+    _runtime_tenant_id, trace_id, req, _stream_state = (
+        await executor._prepare_agent_execution(
+            job,
+            "user-a",
+            "session-a",
+            {
+                "passthrough_headers": {
+                    "X-B3-Traceid": "8267fd70bacf497704fec30eaa353979",
+                    "X-B3-Spanid": "32befd146889a61a",
+                },
+                "b3_trace_id": "8267fd70bacf497704fec30eaa353979",
+            },
+        )
+    )
+
+    assert observed["trace_id"] == "8267fd70bacf497704fec30eaa353979"
+    assert trace_id == "8267fd70bacf497704fec30eaa353979"
+    assert req["trace_id"] == "8267fd70bacf497704fec30eaa353979"
+    assert req["trace_attach_existing"] is True
+    assert req["b3_trace_id"] == "8267fd70bacf497704fec30eaa353979"
+    assert req["passthrough_headers"] == {
+        "X-B3-Traceid": "8267fd70bacf497704fec30eaa353979",
+        "X-B3-Spanid": "32befd146889a61a",
+    }
+
+
 class _Provider:
     def __init__(self, models: list[str]):
         self._models = set(models)

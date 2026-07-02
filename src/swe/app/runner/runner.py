@@ -1717,6 +1717,25 @@ def _request_b3_trace_id(request: AgentRequest) -> str | None:
     return trace_id or None
 
 
+def _request_passthrough_headers(request: AgentRequest) -> dict[str, str]:
+    channel_meta = getattr(request, "channel_meta", None) or {}
+    headers = getattr(request, "passthrough_headers", None)
+    if headers is None and isinstance(channel_meta, dict):
+        headers = channel_meta.get("passthrough_headers")
+    if not isinstance(headers, dict):
+        return {}
+
+    normalized: dict[str, str] = {}
+    for name, value in headers.items():
+        if value is None:
+            continue
+        header_name = str(name).strip()
+        header_value = str(value).strip()
+        if header_name and header_value:
+            normalized[header_name] = header_value
+    return normalized
+
+
 def _session_name_from_messages(msgs: list[Any]) -> str | None:
     """从第一条消息提取 trace 中展示的短会话名。"""
     if not msgs:
@@ -2833,6 +2852,7 @@ class AgentRunner(Runner):
             passthrough_headers = dict[str, str](
                 get_current_passthrough_headers() or {},
             )
+            passthrough_headers.update(_request_passthrough_headers(request))
             if cookie_header:
                 passthrough_headers["cookie"] = cookie_header
             mcp_clients = await _build_and_connect_mcp_clients(

@@ -107,6 +107,54 @@ def test_internal_cron_callback_dispatches_job_param_tenant() -> None:
     )
 
 
+def test_internal_cron_callback_forwards_b3_headers_to_run_job() -> None:
+    cron_manager = SimpleNamespace(run_job=AsyncMock())
+    manager = SimpleNamespace(
+        get_agent=AsyncMock(
+            return_value=SimpleNamespace(cron_manager=cron_manager),
+        ),
+    )
+    client = _build_client(manager)
+
+    response = client.post(
+        "/internal/cron/callback",
+        json={
+            "tenant_id": "tenant-a",
+            "source_id": "source-a",
+            "agent_id": "default",
+            "task_type": "job",
+            "job_id": "job-1",
+        },
+        headers={
+            "X-B3-Traceid": "8267fd70bacf497704fec30eaa353979",
+            "X-B3-Spanid": "32befd146889a61a",
+            "X-B3-Parentspanid": "5be42cd2b570b6da",
+            "X-B3-Sampled": "1",
+            "X-B3-Debug": "0",
+            "X-B3-BusinessId": "LQ1303LMES-WEB",
+            "X-B3-Timestamp": "1782962021603",
+        },
+    )
+
+    assert response.status_code == 200
+    cron_manager.run_job.assert_awaited_once_with(
+        "job-1",
+        is_manual=False,
+        source_id="source-a",
+        dispatch_meta={
+            "passthrough_headers": {
+                "X-B3-Traceid": "8267fd70bacf497704fec30eaa353979",
+                "X-B3-Spanid": "32befd146889a61a",
+                "X-B3-Parentspanid": "5be42cd2b570b6da",
+                "X-B3-Sampled": "1",
+                "X-B3-Debug": "0",
+                "X-B3-BusinessId": "LQ1303LMES-WEB",
+                "X-B3-Timestamp": "1782962021603",
+            },
+            "b3_trace_id": "8267fd70bacf497704fec30eaa353979",
+        },
+    )
+
 def test_internal_scope_encode_single_item() -> None:
     client = _build_client(SimpleNamespace())
 

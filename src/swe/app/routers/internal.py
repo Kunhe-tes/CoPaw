@@ -15,6 +15,7 @@ from fastapi import UploadFile
 from pydantic import BaseModel, Field
 
 from ..identity_resolver import resolve_user_identity
+from ..b3_headers import build_b3_dispatch_meta
 from ...config.context import (
     is_valid_identity_value,
     resolve_runtime_tenant_id,
@@ -1168,11 +1169,14 @@ async def internal_cron_callback(
                         detail="job_id required for task_type=job",
                     )
                 # 调度回调触发的是自动执行，不应走手动执行分支。
-                await mgr.run_job(
-                    job_id,
-                    is_manual=False,
-                    source_id=source_id,
-                )
+                dispatch_meta = build_b3_dispatch_meta(request.headers)
+                run_kwargs = {
+                    "is_manual": False,
+                    "source_id": source_id,
+                }
+                if dispatch_meta:
+                    run_kwargs["dispatch_meta"] = dispatch_meta
+                await mgr.run_job(job_id, **run_kwargs)
         logger.info(
             "Callback dispatched: type=%s tenant=%s agent=%s job=%s",
             task_type,

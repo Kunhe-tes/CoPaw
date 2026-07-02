@@ -1228,6 +1228,7 @@ class CronManager:  # pylint: disable=too-many-public-methods
         job_id: str,
         is_manual: bool = True,
         source_id: str | None = None,
+        dispatch_meta: Optional[Dict[str, Any]] = None,
     ) -> None:
         """Trigger a job to run in the background (fire-and-forget).
 
@@ -1266,6 +1267,7 @@ class CronManager:  # pylint: disable=too-many-public-methods
                     job,
                     is_manual=is_manual,
                     source_id=source_id,
+                    dispatch_meta=dispatch_meta,
                 ),
                 name=f"cron-run-{job_id}",
             )
@@ -2468,6 +2470,7 @@ class CronManager:  # pylint: disable=too-many-public-methods
         self,
         job: CronJobSpec,
         is_manual: bool = False,
+        dispatch_meta: Optional[Dict[str, Any]] = None,
         source_id: str | None = None,
     ) -> None:
         job = await self._ensure_persisted_task_binding(job)
@@ -2507,7 +2510,10 @@ class CronManager:  # pylint: disable=too-many-public-methods
                     source_system_config,
                 ):
                     # 执行任务并获取执行结果
-                    exec_result = await self._executor.execute(job)
+                    exec_result = await self._executor.execute(
+                        job,
+                        dispatch_meta=dispatch_meta,
+                    )
                     trace_id = exec_result.trace_id
                     output_preview = exec_result.output_preview
                     input_snapshot = exec_result.input_snapshot

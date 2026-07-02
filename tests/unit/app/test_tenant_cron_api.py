@@ -103,6 +103,7 @@ class _Manager:
         self.jobs_by_id = dict(jobs_by_id or {})
         self.deleted = []
         self.ran = []
+        self.run_kwargs = []
 
     async def create_or_replace_job(self, spec):
         self.created.append(spec)
@@ -121,10 +122,11 @@ class _Manager:
         self.jobs_by_id.pop(job_id, None)
         return True
 
-    async def run_job(self, job_id):
+    async def run_job(self, job_id, **kwargs):
         if job_id not in self.jobs_by_id:
             raise KeyError(job_id)
         self.ran.append(job_id)
+        self.run_kwargs.append(kwargs)
 
     def get_state(self, job_id):
         return types.SimpleNamespace(model_dump=lambda mode=None: {})
@@ -413,6 +415,36 @@ def test_create_text_job_clears_model_slot():
     assert manager.created[0].model_slot is None
     assert response.json().get("model_slot") is None
 
+
+def test_run_job_forwards_b3_headers():
+    job = CronJobSpec.model_validate(_job_spec("job-1"))
+    manager = _Manager({"job-1": job})
+    client = _build_client(manager)
+
+    response = client.post(
+        "/cron/jobs/job-1/run",
+        headers={
+            "X-B3-Traceid": "8267fd70bacf497704fec30eaa353979",
+            "X-B3-Spanid": "32befd146889a61a",
+            "X-B3-BusinessId": "LQ1303LMES-WEB",
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json() == {"started": True}
+    assert manager.ran == ["job-1"]
+    assert manager.run_kwargs == [
+        {
+            "dispatch_meta": {
+                "passthrough_headers": {
+                    "X-B3-Traceid": "8267fd70bacf497704fec30eaa353979",
+                    "X-B3-Spanid": "32befd146889a61a",
+                    "X-B3-BusinessId": "LQ1303LMES-WEB",
+                },
+                "b3_trace_id": "8267fd70bacf497704fec30eaa353979",
+            },
+        },
+    ]
 
 def test_cron_broadcast_concurrency_uses_env_with_default(monkeypatch):
     monkeypatch.delenv(

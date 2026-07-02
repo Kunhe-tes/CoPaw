@@ -162,7 +162,7 @@ async def test_execute_once_binds_source_config_across_job_boundary(
     )
     observed: dict[str, str | None] = {}
 
-    async def fake_execute(_job):
+    async def fake_execute(_job, **_kwargs):
         current = get_current_source_system_config()
         observed["execute"] = None if current is None else current.source_id
         return SimpleNamespace(
@@ -203,6 +203,55 @@ async def test_execute_once_binds_source_config_across_job_boundary(
 
 
 @pytest.mark.asyncio
+async def test_execute_once_passes_dispatch_meta_to_executor(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    manager = CronManager(
+        repo=object(),
+        runner=object(),
+        channel_manager=object(),
+    )
+    observed: dict[str, object | None] = {}
+
+    async def fake_execute(_job, **kwargs):
+        observed["dispatch_meta"] = kwargs.get("dispatch_meta")
+        return SimpleNamespace(
+            trace_id="trace-1",
+            output_preview="",
+            input_snapshot=None,
+            executor_leader="",
+            execution_meta=None,
+        )
+
+    async def fake_success(_job):
+        return None
+
+    async def fake_finalize(**_kwargs):
+        return None
+
+    dispatch_meta = {
+        "passthrough_headers": {
+            "X-B3-Traceid": "8267fd70bacf497704fec30eaa353979",
+        },
+        "b3_trace_id": "8267fd70bacf497704fec30eaa353979",
+    }
+    monkeypatch.setattr(
+        manager,
+        "_executor",
+        SimpleNamespace(execute=fake_execute),
+    )
+    monkeypatch.setattr(manager, "_handle_success_notifications", fake_success)
+    monkeypatch.setattr(manager, "_finalize_execution_state", fake_finalize)
+
+    await manager._execute_once(  # pylint: disable=protected-access
+        _build_agent_job(),
+        dispatch_meta=dispatch_meta,
+    )
+
+    assert observed["dispatch_meta"] == dispatch_meta
+
+
+@pytest.mark.asyncio
 async def test_execute_once_falls_back_to_scope_source(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -218,7 +267,7 @@ async def test_execute_once_falls_back_to_scope_source(
     )
     observed: dict[str, str | None] = {}
 
-    async def fake_execute(_job):
+    async def fake_execute(_job, **_kwargs):
         current = get_current_source_system_config()
         observed["execute"] = None if current is None else current.source_id
         return SimpleNamespace(
@@ -265,7 +314,7 @@ async def test_execute_once_keeps_legacy_source_less_run_unbound(
     )
     observed: dict[str, str | None] = {}
 
-    async def fake_execute(_job):
+    async def fake_execute(_job, **_kwargs):
         current = get_current_source_system_config()
         observed["execute"] = None if current is None else current.source_id
         return SimpleNamespace(
@@ -312,7 +361,7 @@ async def test_execute_once_clears_inherited_request_source_when_unbound(
     )
     observed: dict[str, str | None] = {}
 
-    async def fake_execute(_job):
+    async def fake_execute(_job, **_kwargs):
         current = get_current_source_system_config()
         observed["execute"] = None if current is None else current.source_id
         return SimpleNamespace(
@@ -364,7 +413,7 @@ async def test_execute_once_keeps_sourced_run_unbound_when_service_missing(
     )
     observed: dict[str, str | None] = {}
 
-    async def fake_execute(_job):
+    async def fake_execute(_job, **_kwargs):
         current = get_current_source_system_config()
         observed["execute"] = None if current is None else current.source_id
         return SimpleNamespace(
@@ -411,7 +460,7 @@ async def test_run_job_manual_clears_request_source_for_legacy_unbound_job(
     created_tasks: list[asyncio.Task[None]] = []
     original_create_task = asyncio.create_task
 
-    async def fake_execute(_job):
+    async def fake_execute(_job, **_kwargs):
         current = get_current_source_system_config()
         observed["execute"] = None if current is None else current.source_id
         return SimpleNamespace(
@@ -481,7 +530,7 @@ async def test_run_job_uses_callback_source_for_legacy_unbound_job(
     created_tasks: list[asyncio.Task[None]] = []
     original_create_task = asyncio.create_task
 
-    async def fake_execute(_job):
+    async def fake_execute(_job, **_kwargs):
         current = get_current_source_system_config()
         observed["execute"] = None if current is None else current.source_id
         resolved = resolve_tool_result_compact_config(

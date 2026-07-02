@@ -20,6 +20,7 @@ from ...config.context import (
 )
 from ...config.utils import list_logical_tenant_ids
 from ...providers.provider_manager import ProviderManager
+from ..b3_headers import build_b3_dispatch_meta
 from ..identity_resolver import resolve_user_identity
 from .broadcast import (
     DEFAULT_BROADCAST_OFFSET_WINDOW_HOURS,
@@ -1666,9 +1667,17 @@ async def resume_job(
 
 
 @router.post("/jobs/{job_id}/run")
-async def run_job(job_id: str, mgr: CronManager = Depends(get_cron_manager)):
+async def run_job(
+    job_id: str,
+    request: Request,
+    mgr: CronManager = Depends(get_cron_manager),
+):
     try:
-        await mgr.run_job(job_id)
+        dispatch_meta = build_b3_dispatch_meta(request.headers)
+        if dispatch_meta:
+            await mgr.run_job(job_id, dispatch_meta=dispatch_meta)
+        else:
+            await mgr.run_job(job_id)
     except KeyError as e:
         raise HTTPException(status_code=404, detail="job not found") from e
     except Exception as e:
