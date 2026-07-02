@@ -767,7 +767,6 @@ describe("SessionApi identity mapping", () => {
     expect(apiMocks.listChatsPage).toHaveBeenCalledWith({
       page_size: 100,
       cursor: null,
-      exclude_session_kind: "task",
     });
     expect(list.map((session) => session.id)).toEqual([
       "chat-newest",
@@ -872,7 +871,6 @@ describe("SessionApi identity mapping", () => {
     expect(apiMocks.listChatsPage).toHaveBeenLastCalledWith({
       page: 2,
       page_size: 100,
-      exclude_session_kind: "task",
     });
     expect(list.map((session) => session.id)).toEqual([
       "chat-3",
@@ -1075,7 +1073,6 @@ describe("SessionApi identity mapping", () => {
     expect(apiMocks.listChatsPage).toHaveBeenNthCalledWith(2, {
       page_size: 100,
       cursor: "cursor-1",
-      exclude_session_kind: "task",
     });
     expect(list.map((session) => session.id)).toEqual([
       "chat-deep-link",
@@ -1110,12 +1107,10 @@ describe("SessionApi identity mapping", () => {
     expect(apiMocks.listChatsPage).toHaveBeenNthCalledWith(1, {
       page_size: 100,
       cursor: null,
-      exclude_session_kind: "task",
     });
     expect(apiMocks.listChatsPage).toHaveBeenNthCalledWith(2, {
       page_size: 100,
       cursor: "cursor-1",
-      exclude_session_kind: "task",
     });
   });
 
@@ -1153,12 +1148,10 @@ describe("SessionApi identity mapping", () => {
     expect(apiMocks.listChatsPage).toHaveBeenNthCalledWith(1, {
       page_size: 42,
       cursor: null,
-      exclude_session_kind: "task",
     });
     expect(apiMocks.listChatsPage).toHaveBeenNthCalledWith(2, {
       page_size: 42,
       cursor: "cursor-1",
-      exclude_session_kind: "task",
     });
   });
 
@@ -1185,7 +1178,6 @@ describe("SessionApi identity mapping", () => {
     expect(apiMocks.listChatsPage).toHaveBeenCalledWith({
       page_size: 100,
       cursor: null,
-      exclude_session_kind: "task",
     });
   });
 

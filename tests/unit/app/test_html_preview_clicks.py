@@ -2,7 +2,7 @@
 """HTML 预览点击统计模块测试。"""
 
 import importlib
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -40,7 +40,7 @@ def mock_db():
 
 @pytest.mark.asyncio
 async def test_create_event_writes_click_detail(mock_db):
-    """点击明细应按一期字段写入数据库。"""
+    """点击明细入库时应把 clicked_at 转成东八区时间。"""
     store = HtmlPreviewClickStore(mock_db)
     clicked_at = datetime(2026, 5, 30, 10, 0, 0)
 
@@ -84,7 +84,7 @@ async def test_create_event_writes_click_detail(mock_db):
         None,
         "祝话",
         '{"客户姓名": "祝话", "到期金额": "18.00万元"}',
-        clicked_at,
+        datetime(2026, 5, 30, 18, 0, 0),
     )
 
 
@@ -117,8 +117,36 @@ async def test_create_event_classifies_view_plan_click(mock_db):
 
 
 @pytest.mark.asyncio
+async def test_create_event_keeps_aware_datetime_absolute_time(mock_db):
+    """带时区的 clicked_at 入库时不应再重复加八小时。"""
+    store = HtmlPreviewClickStore(mock_db)
+    clicked_at = datetime(
+        2026,
+        5,
+        30,
+        10,
+        0,
+        0,
+        tzinfo=timezone(timedelta(hours=8)),
+    )
+
+    await store.create_event(
+        HtmlPreviewClickEventCreate(
+            source_id="copaw",
+            user_id="u-1",
+            bbk_id="branch-1",
+            file_url="https://example.com/a.html",
+            clicked_at=clicked_at,
+        ),
+    )
+
+    _, params = mock_db.execute.call_args[0]
+    assert params[17] == datetime(2026, 5, 30, 10, 0, 0)
+
+
+@pytest.mark.asyncio
 async def test_create_list_snapshot_writes_distinct_customers(mock_db):
-    """名单快照应覆盖旧快照并按客户去重写入。"""
+    """名单快照入库时应把 snapshot_at 转成东八区时间。"""
     store = HtmlPreviewClickStore(mock_db)
     snapshot_at = datetime(2026, 5, 30, 10, 0, 0)
 
@@ -161,6 +189,37 @@ async def test_create_list_snapshot_writes_distinct_customers(mock_db):
         "祝话",
         '{"客户姓名": "祝话"}',
     )
+    assert calls[1].args[1][11] == datetime(2026, 5, 30, 18, 0, 0)
+
+
+@pytest.mark.asyncio
+async def test_create_list_snapshot_keeps_aware_datetime_absolute_time(
+    mock_db,
+):
+    """带时区的 snapshot_at 入库时不应再重复加八小时。"""
+    store = HtmlPreviewClickStore(mock_db)
+    snapshot_at = datetime(
+        2026,
+        5,
+        30,
+        10,
+        0,
+        0,
+        tzinfo=timezone(timedelta(hours=8)),
+    )
+
+    await store.create_list_snapshot(
+        HtmlPreviewListSnapshotCreate(
+            source_id="copaw",
+            bbk_id="branch-1",
+            file_url="https://example.com/a.html",
+            snapshot_at=snapshot_at,
+            customers=[HtmlPreviewListSnapshotCustomer(customer_name="祝话")],
+        ),
+    )
+
+    calls = mock_db.execute.call_args_list
+    assert calls[1].args[1][11] == datetime(2026, 5, 30, 10, 0, 0)
 
 
 @pytest.mark.asyncio
@@ -519,6 +578,7 @@ async def test_list_lists_counts_only_valid_click_customers(mock_db):
     assert "WHEN" in event_query
     assert "THEN clicked_at" in event_query
 
+
 @pytest.mark.asyncio
 async def test_list_lists_queries_are_aiomysql_percent_safe(mock_db):
     """名单汇总 SQL 字面量百分号不应破坏 aiomysql 参数替换。"""
@@ -535,7 +595,10 @@ async def test_list_lists_queries_are_aiomysql_percent_safe(mock_db):
 
     for call in mock_db.fetch_all.call_args_list:
         query, params = call.args
-        query % tuple("escaped" for _ in params)
+        rendered_query = query % tuple("escaped" for _ in params)
+        assert rendered_query
+
+
 def test_build_list_summary_from_aggregates_preserves_current_merge_rules():
     """名单聚合应保持快照优先、事件补全、并集客户数覆盖的现有规则。"""
     clicked_at = datetime(2026, 5, 30, 11, 0, 0)
@@ -608,16 +671,28 @@ def test_build_list_summary_from_aggregates_preserves_current_merge_rules():
     assert event_only_item.customer_count == 3
     assert event_only_item.clicked_customer_count == 3
 
+
 def test_create_route_enriches_source_and_user(monkeypatch):
-    """路由应从请求上下文补齐来源和用户标识。"""
+    """路由应从来源和用户标识回查并覆盖 bbk_id。"""
 
     class _FakeService:
         async def create_event(self, event):
             assert event.source_id == "copaw"
             assert event.user_id == "user-9"
             assert event.user_name == "张经理"
-            assert event.bbk_id == "branch-1"
+            assert event.bbk_id == "branch-from-store"
             assert event.file_url == "https://example.com/a.html"
+
+    class _FakeTenantStore:
+        async def get_tenant_source_info(self, tenant_id, source_id):
+            assert tenant_id == "user-9"
+            assert source_id == "copaw"
+            return {"tenant_name": "张经理", "bbk_id": "branch-from-store"}
+
+    tenant_store = _FakeTenantStore()
+
+    def _get_tenant_store():
+        return tenant_store
 
     app = FastAPI()
 
@@ -631,6 +706,11 @@ def test_create_route_enriches_source_and_user(monkeypatch):
 
     app.include_router(html_preview_click_router)
     monkeypatch.setattr(html_preview_router_module, "_service", _FakeService())
+    monkeypatch.setattr(
+        html_preview_router_module,
+        "get_tenant_init_source_store",
+        _get_tenant_store,
+    )
 
     client = TestClient(app)
     response = client.post(
@@ -643,6 +723,53 @@ def test_create_route_enriches_source_and_user(monkeypatch):
             "file_url": "https://example.com/a.html",
             "button_id": "follow",
         },
+    )
+
+    assert response.status_code == 200
+    assert response.json()["success"] is True
+
+
+def test_create_route_keeps_fallback_bbk_when_lookup_misses(monkeypatch):
+    """回查不到 bbk_id 时应保留请求上下文中的分行。"""
+
+    class _FakeService:
+        async def create_event(self, event):
+            assert event.source_id == "copaw"
+            assert event.user_id == "user-9"
+            assert event.bbk_id == "branch-1"
+
+    class _FakeTenantStore:
+        async def get_tenant_source_info(self, tenant_id, source_id):
+            assert tenant_id == "user-9"
+            assert source_id == "copaw"
+            return None
+
+    tenant_store = _FakeTenantStore()
+
+    def _get_tenant_store():
+        return tenant_store
+
+    app = FastAPI()
+
+    @app.middleware("http")
+    async def _inject_state(request: Request, call_next):
+        request.state.source_id = "copaw"
+        request.state.user_id = "user-9"
+        request.state.bbk = "branch-1"
+        return await call_next(request)
+
+    app.include_router(html_preview_click_router)
+    monkeypatch.setattr(html_preview_router_module, "_service", _FakeService())
+    monkeypatch.setattr(
+        html_preview_router_module,
+        "get_tenant_init_source_store",
+        _get_tenant_store,
+    )
+
+    client = TestClient(app)
+    response = client.post(
+        "/html-preview/events",
+        json={"file_url": "https://example.com/a.html"},
     )
 
     assert response.status_code == 200
@@ -731,26 +858,43 @@ def test_customer_summary_route_returns_customer_items(monkeypatch):
 
 
 def test_list_snapshot_route_enriches_context(monkeypatch):
-    """名单快照路由应从请求上下文补齐来源和分行。"""
+    """名单快照路由应从 user_id 和 source_id 回查分行。"""
 
     class _FakeService:
         async def create_list_snapshot(self, snapshot):
             assert snapshot.source_id == "copaw"
-            assert snapshot.bbk_id == "branch-1"
+            assert snapshot.bbk_id == "branch-from-store"
             assert snapshot.list_key == "list-1"
             assert snapshot.customers[0].customer_name == "祝话"
             return 1
+
+    class _FakeTenantStore:
+        async def get_tenant_source_info(self, tenant_id, source_id):
+            assert tenant_id == "user-9"
+            assert source_id == "copaw"
+            return {"tenant_name": "张经理", "bbk_id": "branch-from-store"}
+
+    tenant_store = _FakeTenantStore()
+
+    def _get_tenant_store():
+        return tenant_store
 
     app = FastAPI()
 
     @app.middleware("http")
     async def _inject_state(request: Request, call_next):
         request.state.source_id = "copaw"
+        request.state.user_id = "user-9"
         request.state.bbk = "branch-1"
         return await call_next(request)
 
     app.include_router(html_preview_click_router)
     monkeypatch.setattr(html_preview_router_module, "_service", _FakeService())
+    monkeypatch.setattr(
+        html_preview_router_module,
+        "get_tenant_init_source_store",
+        _get_tenant_store,
+    )
 
     client = TestClient(app)
     response = client.post(
@@ -768,6 +912,58 @@ def test_list_snapshot_route_enriches_context(monkeypatch):
     payload = response.json()
     assert payload["success"] is True
     assert payload["customer_count"] == 1
+
+
+def test_list_snapshot_route_keeps_fallback_bbk_when_lookup_misses(
+    monkeypatch,
+):
+    """快照回查不到 bbk_id 时应保留请求上下文中的分行。"""
+
+    class _FakeService:
+        async def create_list_snapshot(self, snapshot):
+            assert snapshot.source_id == "copaw"
+            assert snapshot.bbk_id == "branch-1"
+            return 1
+
+    class _FakeTenantStore:
+        async def get_tenant_source_info(self, tenant_id, source_id):
+            assert tenant_id == "user-9"
+            assert source_id == "copaw"
+            return {}
+
+    tenant_store = _FakeTenantStore()
+
+    def _get_tenant_store():
+        return tenant_store
+
+    app = FastAPI()
+
+    @app.middleware("http")
+    async def _inject_state(request: Request, call_next):
+        request.state.source_id = "copaw"
+        request.state.user_id = "user-9"
+        request.state.bbk = "branch-1"
+        return await call_next(request)
+
+    app.include_router(html_preview_click_router)
+    monkeypatch.setattr(html_preview_router_module, "_service", _FakeService())
+    monkeypatch.setattr(
+        html_preview_router_module,
+        "get_tenant_init_source_store",
+        _get_tenant_store,
+    )
+
+    client = TestClient(app)
+    response = client.post(
+        "/html-preview/list-snapshot",
+        json={
+            "file_url": "https://example.com/a.html",
+            "customers": [{"customer_name": "祝话"}],
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json()["customer_count"] == 1
 
 
 def test_lists_route_returns_list_items(monkeypatch):

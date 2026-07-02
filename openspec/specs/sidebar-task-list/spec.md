@@ -93,17 +93,18 @@ The task edit modal opened from "我的任务" SHALL follow `console/DESIGN.md` 
 - **THEN** the save control displays an in-progress state and prevents duplicate submissions
 
 ### Requirement: History section in sidebar
-The sidebar SHALL display a "历史记录" section with a collapsible normally rendered list below the task section. The Console SHALL initially request a bounded first page of chat history, SHALL append older pages when the user scrolls near the end of the loaded history, SHALL automatically continue when the loaded rows do not fill the scroll container, and SHALL NOT require the previous virtual-list implementation. History pagination SHALL exclude task chats whose `meta.session_kind` is `task`, so the history list and section count do not include chats represented by "我的任务". The section count SHALL reflect the server-reported non-task total while including newer local pending sessions. Each history item SHALL display a title (color #4F5060) and a timestamp (color #808191) in "YYYY-MM-DD HH:mm" format. Paginated list loading SHALL preserve existing chat navigation, message display, session identity, generating state, and chat operation behavior.
+The sidebar SHALL display a "历史记录" section with a collapsible normally rendered list below the task section. The Console SHALL initially request a bounded first page of chat history, SHALL append older pages when the user scrolls near the end of the loaded history, SHALL automatically continue when the loaded rows do not fill the scroll container, and SHALL NOT require the previous virtual-list implementation. The history list SHALL hide task chats whose `meta.session_kind` is `task` while retaining the full paginated session data needed for task navigation and session identity resolution. The section count SHALL reflect the server-reported total minus the current visible task count while including newer local pending sessions. Each history item SHALL display a title (color #4F5060) and a timestamp (color #808191) in "YYYY-MM-DD HH:mm" format. Paginated list loading SHALL preserve existing chat navigation, message display, session identity, generating state, and chat operation behavior.
 
 #### Scenario: History section displays the first page
 - **WHEN** the sidebar becomes visible and historical chats exist
 - **THEN** the Console requests and displays the first bounded page in newest-first order
 - **AND** each visible item shows its title and formatted timestamp
 
-#### Scenario: Task chats are excluded from history
+#### Scenario: Task chats are hidden from history count and rows
 - **WHEN** persisted chats include task chats whose `meta.session_kind` is `task`
-- **THEN** the history page request excludes those task chats from the returned history rows
-- **AND** the "历史记录(N)" count does not include the excluded task chats
+- **THEN** the Console keeps the loaded task chat session data available for task navigation
+- **AND** task chats are not rendered as visible history rows
+- **AND** the "历史记录(N)" count subtracts the visible task count from the server-reported chat total
 - **AND** the "我的任务" section continues to use the cronjob API for its own task list and count
 
 #### Scenario: User scrolls to older history

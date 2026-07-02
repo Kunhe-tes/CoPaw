@@ -6,6 +6,7 @@ for later injection into MCP client HTTP requests.
 """
 
 import logging
+import time
 from typing import Callable, Awaitable
 
 from fastapi import Request
@@ -16,6 +17,12 @@ from starlette.types import ASGIApp
 from swe.config.context import (
     set_current_passthrough_headers,
     reset_current_passthrough_headers,
+)
+from swe.app.middleware.provider_models_timing import (
+    is_provider_models_list_request,
+    log_provider_models_middleware_before_next,
+    log_provider_models_middleware_done,
+    log_provider_models_middleware_error,
 )
 
 logger = logging.getLogger(__name__)
@@ -69,6 +76,8 @@ class HeaderPassthroughMiddleware(BaseHTTPMiddleware):
         Returns:
             The response from the next handler.
         """
+        is_timing = is_provider_models_list_request(request)
+        started_at = time.perf_counter()
         passthrough_headers = self._extract_passthrough_headers(request)
 
         token = None
@@ -80,9 +89,39 @@ class HeaderPassthroughMiddleware(BaseHTTPMiddleware):
                 f"{list(passthrough_headers.keys())}",
             )
 
+        before_next_at = None
         try:
+            if is_timing:
+                before_next_at = log_provider_models_middleware_before_next(
+                    logger,
+                    "HeaderPassthroughMiddleware",
+                    request,
+                    started_at,
+                    passthrough_header_count=len(passthrough_headers),
+                )
             response = await call_next(request)
+            if is_timing and before_next_at is not None:
+                log_provider_models_middleware_done(
+                    logger,
+                    "HeaderPassthroughMiddleware",
+                    request,
+                    started_at,
+                    before_next_at,
+                    response,
+                    passthrough_header_count=len(passthrough_headers),
+                )
             return response
+        except Exception:
+            if is_timing:
+                log_provider_models_middleware_error(
+                    logger,
+                    "HeaderPassthroughMiddleware",
+                    request,
+                    started_at,
+                    before_next_at,
+                    passthrough_header_count=len(passthrough_headers),
+                )
+            raise
         finally:
             if token:
                 reset_current_passthrough_headers(token)

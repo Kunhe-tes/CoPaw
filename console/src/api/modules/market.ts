@@ -96,6 +96,7 @@ async function _uploadZipToMarket(
     category_id?: number;
     cn_name?: string;
     skill_id?: string;
+    bbk_ids?: string[];
   }
 ): Promise<Record<string, unknown>> {
   const formData = new FormData();
@@ -122,6 +123,9 @@ async function _uploadZipToMarket(
   }
   if (options?.skill_id) {
     params.set("skill_id", options.skill_id);
+  }
+  if (options?.bbk_ids && options.bbk_ids.length > 0) {
+    params.set("bbk_ids", options.bbk_ids.join(","));
   }
   const qs = params.toString();
   const url = getApiUrl(`${endpoint}${qs ? `?${qs}` : ""}`);
@@ -159,12 +163,16 @@ export const marketApi = {
 
   listMarketSkills: async (
     sourceId: string,
-    categoryId?: number
+    categoryId?: number,
+    bbkIds?: string,
   ): Promise<MarketSkill[]> => {
     let url = "/market/skills";
     const params = new URLSearchParams();
     if (categoryId !== undefined) {
       params.append("category_id", String(categoryId));
+    }
+    if (bbkIds !== undefined && bbkIds !== null) {
+      params.append("bbk_ids", bbkIds);
     }
     if (params.toString()) {
       url += `?${params.toString()}`;
@@ -373,6 +381,7 @@ export const marketApi = {
       overwrite?: boolean;
       cn_name?: string;
       skill_id?: string;
+      bbk_ids?: string[];
     }
   ): Promise<{
     imported: string[];

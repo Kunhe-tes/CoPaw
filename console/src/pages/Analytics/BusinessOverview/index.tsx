@@ -26,6 +26,8 @@ import ReactECharts from "echarts-for-react";
 import type { Dayjs } from "dayjs";
 import dayjs from "dayjs";
 import styles from "./index.module.less";
+import { useIframeStore } from "../../../stores/iframeStore";
+import { DEFAULT_SOURCE_ID } from "../../../constants/identity";
 import {
   tracingApi,
   type BranchMetricItem,
@@ -195,7 +197,7 @@ function buildMetricCards(
       changeText: formatChange(growthStats.planCustomersGrowth),
       changeDirection: toChangeDirection(growthStats.planCustomersGrowth),
       accentColor: METRIC_ACCENT_COLORS[4],
-      breakdown: null,
+      breakdown: mapBreakdown(overviewStats?.branch_breakdown?.customers),
     },
   ];
 }
@@ -479,12 +481,123 @@ function TaskFunnel({ taskStatusSummary }: { taskStatusSummary: TaskStatusSummar
   );
 }
 
-function buildTrendChartOption(trendData: TrendDatum[]) {
+function buildTrendChartOption(
+  trendData: TrendDatum[],
+  showExtendedTrendMetrics: boolean,
+) {
   const dates = trendData.map((item) =>
     item.date.includes(":")
       ? dayjs(item.date).format("HH:mm")
       : dayjs(item.date).format("MM-DD"),
   );
+  const extendedLegend = [
+    "查看方案客户数",
+    "去洞察客户数",
+    "去电访客户数",
+  ];
+  const series = [
+    {
+      name: "调用量",
+      type: "bar" as const,
+      yAxisIndex: 0,
+      data: trendData.map((i) => i.calls),
+      barWidth: 16,
+      itemStyle: {
+        color: "#4f7cff",
+        borderRadius: [8, 8, 0, 0],
+      },
+      emphasis: {
+        itemStyle: {
+          color: "#2f5ff0",
+        },
+      },
+      z: 1,
+    },
+    {
+      name: "调用用户",
+      type: "line" as const,
+      yAxisIndex: 0,
+      data: trendData.map((i) => i.users),
+      smooth: true,
+      lineStyle: {
+        color: "#94a3b8",
+        width: 2,
+        opacity: 0.75,
+      },
+      symbol: "none" as const,
+      z: 2,
+    },
+    {
+      name: "已读任务数",
+      type: "line" as const,
+      yAxisIndex: 1,
+      data: trendData.map((i) => i.read_tasks),
+      smooth: true,
+      symbol: "none" as const,
+      lineStyle: {
+        color: "#c084fc",
+        width: 2,
+        opacity: 0.78,
+      },
+      z: 2,
+    },
+    ...(showExtendedTrendMetrics
+      ? [
+          {
+            name: "查看方案客户数",
+            type: "line" as const,
+            yAxisIndex: 1,
+            data: trendData.map((i) => i.plan_customers),
+            smooth: true,
+            symbol: "circle" as const,
+            symbolSize: 8,
+            lineStyle: {
+              color: "#f97316",
+              width: 3,
+            },
+            itemStyle: {
+              color: "#f97316",
+              borderColor: "#ffffff",
+              borderWidth: 2,
+            },
+            z: 4,
+          },
+          {
+            name: "去洞察客户数",
+            type: "line" as const,
+            yAxisIndex: 1,
+            data: trendData.map((i) => i.insight_customers),
+            smooth: true,
+            symbol: "none" as const,
+            lineStyle: {
+              color: "#fb7185",
+              width: 2,
+              opacity: 0.72,
+            },
+            z: 2,
+          },
+          {
+            name: "去电访客户数",
+            type: "line" as const,
+            yAxisIndex: 1,
+            data: trendData.map((i) => i.phone_customers),
+            smooth: true,
+            symbol: "circle" as const,
+            symbolSize: 8,
+            lineStyle: {
+              color: "#10b981",
+              width: 3,
+            },
+            itemStyle: {
+              color: "#10b981",
+              borderColor: "#ffffff",
+              borderWidth: 2,
+            },
+            z: 4,
+          },
+        ]
+      : []),
+  ];
 
   return {
     tooltip: {
@@ -507,9 +620,8 @@ function buildTrendChartOption(trendData: TrendDatum[]) {
       data: [
         "调用量",
         "调用用户",
-        "查看方案客户数",
-        "去洞察客户数",
-        "去电访客户数",
+        "已读任务数",
+        ...extendedLegend.filter(() => showExtendedTrendMetrics),
       ],
       bottom: 0,
       left: "center" as const,
@@ -566,7 +678,7 @@ function buildTrendChartOption(trendData: TrendDatum[]) {
       },
       {
         type: "value" as const,
-        name: "客户数",
+        name: showExtendedTrendMetrics ? "客户数/任务数" : "任务数",
         position: "right" as const,
         nameTextStyle: {
           color: "#64748b",
@@ -579,96 +691,13 @@ function buildTrendChartOption(trendData: TrendDatum[]) {
         },
       },
     ],
-    series: [
-      {
-        name: "调用量",
-        type: "bar" as const,
-        yAxisIndex: 0,
-        data: trendData.map((i) => i.calls),
-        barWidth: 16,
-        itemStyle: {
-          color: "#4f7cff",
-          borderRadius: [8, 8, 0, 0],
-        },
-        emphasis: {
-          itemStyle: {
-            color: "#2f5ff0",
-          },
-        },
-        z: 1,
-      },
-      {
-        name: "调用用户",
-        type: "line" as const,
-        yAxisIndex: 0,
-        data: trendData.map((i) => i.users),
-        smooth: true,
-        lineStyle: {
-          color: "#94a3b8",
-          width: 2,
-          opacity: 0.75,
-        },
-        symbol: "none" as const,
-        z: 2,
-      },
-      {
-        name: "查看方案客户数",
-        type: "line" as const,
-        yAxisIndex: 1,
-        data: trendData.map((i) => i.plan_customers),
-        smooth: true,
-        symbol: "circle" as const,
-        symbolSize: 8,
-        lineStyle: {
-          color: "#f97316",
-          width: 3,
-        },
-        itemStyle: {
-          color: "#f97316",
-          borderColor: "#ffffff",
-          borderWidth: 2,
-        },
-        z: 4,
-      },
-      {
-        name: "去洞察客户数",
-        type: "line" as const,
-        yAxisIndex: 1,
-        data: trendData.map((i) => i.insight_customers),
-        smooth: true,
-        symbol: "none" as const,
-        lineStyle: {
-          color: "#fb7185",
-          width: 2,
-          opacity: 0.72,
-        },
-        z: 2,
-      },
-      {
-        name: "去电访客户数",
-        type: "line" as const,
-        yAxisIndex: 1,
-        data: trendData.map((i) => i.phone_customers),
-        smooth: true,
-        symbol: "circle" as const,
-        symbolSize: 8,
-        lineStyle: {
-          color: "#10b981",
-          width: 3,
-        },
-        itemStyle: {
-          color: "#10b981",
-          borderColor: "#ffffff",
-          borderWidth: 2,
-        },
-        z: 4,
-      },
-    ],
+    series,
   };
 }
 
 export default function BusinessOverviewPage() {
   const navigate = useNavigate();
+  const sourceId = useIframeStore((state) => state.source) || DEFAULT_SOURCE_ID;
 
   const [timeRange, setTimeRange] = useState<TimeRange>("day");
   const [dateRange, setDateRange] = useState<[Dayjs, Dayjs]>([dayjs(), dayjs()]);
@@ -753,6 +782,7 @@ export default function BusinessOverviewPage() {
     }
     return `/analytics/cron-job-overview?${params.toString()}`;
   }, [effectiveBbkIds, endDateText, startDateText]);
+  const showExtendedTrendMetrics = sourceId === "RMASSIST";
 
   const transformUserData = useCallback(
     (items: Record<string, unknown>[]): UserRow[] =>
@@ -1315,7 +1345,7 @@ export default function BusinessOverviewPage() {
           <div className={styles.trendChart}>
             <ReactECharts
               className={styles.trendChartCanvas}
-              option={buildTrendChartOption(trendData)}
+              option={buildTrendChartOption(trendData, showExtendedTrendMetrics)}
               style={{ height: 280, width: "100%", gridColumn: "1 / -1" }}
             />
           </div>

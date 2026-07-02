@@ -2,6 +2,18 @@
 
 按问题类型给出优先查看的路径，减少无效搜索。
 
+## Shell 子进程 / Python runtime guard / `/opt/.swe`
+
+- shell 工具环境构造：[src/swe/agents/tools/shell.py](../../src/swe/agents/tools/shell.py)
+- 重点看 `_prepare_subprocess_env()` 是否保留后端 `SWE_WORKING_DIR` / `SWE_SECRET_DIR`
+- runtime env 过滤：[src/swe/envs/runtime.py](../../src/swe/envs/runtime.py)
+- 重点看 `PROTECTED_RUNTIME_ENV_KEYS`、`_scrub_user_tool_subprocess_env()` 和 `preserve_boundary_env_keys`
+- Python runtime guard 注入：[src/swe/security/python_runtime_path_guard.py](../../src/swe/security/python_runtime_path_guard.py)
+- 重点看 `prepare_python_runtime_path_guard_env()`、trusted paths 和 trusted entrypoint roots
+- 包导入期 env 加载：[src/swe/__init__.py](../../src/swe/__init__.py)、[src/swe/envs/store.py](../../src/swe/envs/store.py)
+- CLI 根命令读取 last API：[src/swe/cli/main.py](../../src/swe/cli/main.py)、[src/swe/config/utils.py](../../src/swe/config/utils.py)
+- 回归测试：[tests/unit/test_shell_tenant_boundary.py](../../tests/unit/test_shell_tenant_boundary.py)
+
 ## Console 复制 / Clipboard 权限策略
 
 - 通用复制工具：[console/src/utils/clipboard.ts](../../console/src/utils/clipboard.ts)

@@ -44,6 +44,7 @@ export interface OverviewBranchBreakdown {
   tokens: BranchMetricItem[];
   skills: BranchMetricItem[];
   cron_tasks: BranchMetricItem[];
+  customers: BranchMetricItem[];
 }
 
 export interface TaskStatusBreakdown {

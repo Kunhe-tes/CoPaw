@@ -40,6 +40,9 @@ const htmlPreviewEventsApiMock = vi.hoisted(() => ({
   getLists: vi.fn(),
   getCustomerClicks: vi.fn(),
 }));
+const iframeStoreMock = vi.hoisted(() => ({
+  source: "CMSJY",
+}));
 
 vi.mock("../../../api/modules/tracing", () => ({
   tracingApi: tracingApiMock,
@@ -53,7 +56,7 @@ vi.mock("../../../stores/iframeStore", () => ({
   useIframeStore: (selector: (state: unknown) => unknown) =>
     selector({
       isSuperManager: true,
-      source: "CMSJY",
+      source: iframeStoreMock.source,
       bbk: undefined,
     }),
 }));
@@ -73,6 +76,7 @@ describe("BusinessOverview trend chart", () => {
 
   beforeEach(() => {
     vi.clearAllMocks();
+    iframeStoreMock.source = "CMSJY";
     tracingApiMock.getOverview.mockResolvedValue({
       it_users: 20,
       business_users: 100,
@@ -90,6 +94,7 @@ describe("BusinessOverview trend chart", () => {
         tokens: [],
         skills: [],
         cron_tasks: [],
+        customers: [{ bbk_id: "100", bbk_name: "总行", value: 30, percent: 100 }],
       },
     });
     tracingApiMock.getGrowthStats.mockResolvedValue({
@@ -295,7 +300,7 @@ describe("BusinessOverview trend chart", () => {
     expect(screen.getByTestId("echarts")).toBeInTheDocument();
   });
 
-  it("renders the redesigned trend chart hierarchy without read task metric", async () => {
+  it("renders only three trend metrics for non-RMASSIST source", async () => {
     renderBusinessOverview();
 
     await waitFor(() => {
@@ -304,22 +309,20 @@ describe("BusinessOverview trend chart", () => {
 
     const option = echartsRenderMock.lastProps?.option as {
       legend?: { data?: string[] };
+      yAxis?: Array<{ name?: string }>;
       series?: Array<{ name?: string; type?: string; yAxisIndex?: number; z?: number }>;
     };
 
     expect(option.legend?.data).toEqual([
       "调用量",
       "调用用户",
-      "查看方案客户数",
-      "去洞察客户数",
-      "去电访客户数",
+      "已读任务数",
     ]);
+    expect(option.yAxis?.[1]?.name).toBe("任务数");
     expect(option.series?.map((item) => item.name)).toEqual([
       "调用量",
       "调用用户",
-      "查看方案客户数",
-      "去洞察客户数",
-      "去电访客户数",
+      "已读任务数",
     ]);
     expect(option.series?.[0]).toMatchObject({
       name: "调用量",
@@ -332,21 +335,62 @@ describe("BusinessOverview trend chart", () => {
       yAxisIndex: 0,
     });
     expect(option.series?.[2]).toMatchObject({
+      name: "已读任务数",
+      type: "line",
+      yAxisIndex: 1,
+    });
+    expect(option.series?.some((item) => item.name === "查看方案客户数")).toBe(false);
+    expect(option.series?.some((item) => item.name === "去洞察客户数")).toBe(false);
+    expect(option.series?.some((item) => item.name === "去电访客户数")).toBe(false);
+  });
+
+  it("renders six trend metrics for RMASSIST source", async () => {
+    iframeStoreMock.source = "RMASSIST";
+    renderBusinessOverview();
+
+    await waitFor(() => {
+      expect(echartsRenderMock.lastProps?.option).toBeTruthy();
+    });
+
+    const option = echartsRenderMock.lastProps?.option as {
+      legend?: { data?: string[] };
+      yAxis?: Array<{ name?: string }>;
+      series?: Array<{ name?: string; type?: string; yAxisIndex?: number; z?: number }>;
+    };
+
+    expect(option.legend?.data).toEqual([
+      "调用量",
+      "调用用户",
+      "已读任务数",
+      "查看方案客户数",
+      "去洞察客户数",
+      "去电访客户数",
+    ]);
+    expect(option.yAxis?.[1]?.name).toBe("客户数/任务数");
+    expect(option.series?.map((item) => item.name)).toEqual([
+      "调用量",
+      "调用用户",
+      "已读任务数",
+      "查看方案客户数",
+      "去洞察客户数",
+      "去电访客户数",
+    ]);
+    expect(option.series?.[3]).toMatchObject({
       name: "查看方案客户数",
       type: "line",
       yAxisIndex: 1,
     });
-    expect(option.series?.[3]).toMatchObject({
+    expect(option.series?.[4]).toMatchObject({
       name: "去洞察客户数",
       type: "line",
       yAxisIndex: 1,
     });
-    expect(option.series?.[4]).toMatchObject({
+    expect(option.series?.[5]).toMatchObject({
       name: "去电访客户数",
       type: "line",
       yAxisIndex: 1,
     });
-    expect(option.series?.some((item) => item.name === "已读任务数")).toBe(false);
+    expect(option.series?.some((item) => item.name === "已读任务数")).toBe(true);
   });
 
 
