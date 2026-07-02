@@ -1782,8 +1782,6 @@ class QueryService:
                 SELECT id FROM swe_cron_executions
                 WHERE job_id = %s
                 AND status = 'success'
-                AND async_status = 'success'
-                AND is_read = FALSE
                 ORDER BY actual_time DESC
                 LIMIT 1
             ) AS latest ON e.id = latest.id
