@@ -393,7 +393,7 @@ A Runtime Instance signal that only proves the backend request-serving process c
 _Avoid_: readiness check, system self-check, health diagnostic
 
 **Request Execution Load**:
-The current load and responsiveness of the backend request-serving runtime within one Runtime Instance, distinct from tenant or business-runtime usage.
+The current load and responsiveness of the backend request-serving runtime within one Runtime Instance. It prioritizes timely request handling, streaming progress, cancellation, timeout, and scheduled-run coordination over raw throughput, and is distinct from tenant or business-runtime usage.
 _Avoid_: Flask worker usage, ordinary HTTP throughput, request latency, tenant usage statistics, Agent Run count, LLM load
 
 **Runtime Instance**:
