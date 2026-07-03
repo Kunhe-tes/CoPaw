@@ -170,6 +170,11 @@ class TokenUsageManager:
         try:
             await asyncio.shield(save_task)
         except asyncio.CancelledError:
+            while not save_task.done():
+                try:
+                    await asyncio.shield(save_task)
+                except asyncio.CancelledError:
+                    continue
             await save_task
             raise
 

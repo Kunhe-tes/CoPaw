@@ -16,6 +16,77 @@ from swe.token_usage import manager as token_usage_manager_module
 from swe.token_usage.manager import TokenUsageManager
 
 
+class _SaveCancellationProbe:
+    """Instrument token usage saves for cancellation-order assertions."""
+
+    def __init__(self) -> None:
+        self.first_save_started = asyncio.Event()
+        self.first_save_can_finish = asyncio.Event()
+        self.first_save_finished = asyncio.Event()
+        self.second_save_started = asyncio.Event()
+        self.pending_save_tasks: list[asyncio.Task] = []
+        self.save_calls = 0
+        self.second_save_started_before_first_finished = False
+        self.save_events: list[str] = []
+
+    async def run_runtime_state_work(self, func, /, *args, **kwargs):
+        if func.__name__ != "_save_data_sync":
+            return func(*args, **kwargs)
+
+        self.save_calls += 1
+        save_call = self.save_calls
+        save_task = asyncio.create_task(
+            self._save_worker(save_call, func, *args, **kwargs),
+        )
+        self.pending_save_tasks.append(save_task)
+        return await asyncio.shield(save_task)
+
+    async def _save_worker(self, save_call, func, /, *args, **kwargs):
+        self.save_events.append(f"save-{save_call}-started")
+        if save_call == 1:
+            self.first_save_started.set()
+            await self.first_save_can_finish.wait()
+        if save_call == 2:
+            if not self.first_save_finished.is_set():
+                self.second_save_started_before_first_finished = True
+            self.second_save_started.set()
+
+        result = func(*args, **kwargs)
+        if save_call == 1:
+            self.first_save_finished.set()
+        self.save_events.append(f"save-{save_call}-finished")
+        return result
+
+    async def repeatedly_cancel_after_first_save_starts(
+        self,
+        record_task: asyncio.Task,
+    ) -> None:
+        await self.first_save_started.wait()
+        record_task.cancel()
+        await asyncio.sleep(0)
+        record_task.cancel()
+        await asyncio.sleep(0)
+
+    async def finish_saves(
+        self,
+        first_record: asyncio.Task,
+        second_record: asyncio.Task,
+    ) -> tuple[bool, list[object]]:
+        for _ in range(5):
+            await asyncio.sleep(0)
+
+        second_started_before_release = self.second_save_started.is_set()
+        self.first_save_can_finish.set()
+        results = await asyncio.gather(
+            first_record,
+            second_record,
+            return_exceptions=True,
+        )
+        if self.pending_save_tasks:
+            await asyncio.gather(*self.pending_save_tasks)
+        return second_started_before_release, results
+
+
 def test_token_usage_manager_uses_tenant_workspace_path(tmp_path):
     TokenUsageManager._instance = None
 
@@ -146,36 +217,12 @@ def test_cancelled_record_waits_for_inflight_save_before_releasing_lock(
     usage_path.write_text("{}", encoding="utf-8")
 
     async def run_scenario():
-        first_save_started = asyncio.Event()
-        first_save_can_finish = asyncio.Event()
-        first_save_finished = asyncio.Event()
-        pending_save_tasks: list[asyncio.Task] = []
-        state = {"save_calls": 0}
-
-        async def fake_run_runtime_state_work(func, /, *args, **kwargs):
-            if func.__name__ != "_save_data_sync":
-                return func(*args, **kwargs)
-
-            state["save_calls"] += 1
-            save_call = state["save_calls"]
-
-            async def save_worker():
-                if save_call == 1:
-                    first_save_started.set()
-                    await first_save_can_finish.wait()
-                result = func(*args, **kwargs)
-                if save_call == 1:
-                    first_save_finished.set()
-                return result
-
-            save_task = asyncio.create_task(save_worker())
-            pending_save_tasks.append(save_task)
-            return await asyncio.shield(save_task)
+        probe = _SaveCancellationProbe()
 
         monkeypatch.setattr(
             token_usage_manager_module,
             "run_runtime_state_work",
-            fake_run_runtime_state_work,
+            probe.run_runtime_state_work,
             raising=False,
         )
 
@@ -193,9 +240,9 @@ def test_cancelled_record_waits_for_inflight_save_before_releasing_lock(
                     at_date=date(2026, 4, 11),
                 ),
             )
-            await first_save_started.wait()
-            first_record.cancel()
-            await asyncio.sleep(0)
+            await probe.repeatedly_cancel_after_first_save_starts(
+                first_record,
+            )
 
             second_record = asyncio.create_task(
                 scoped_manager.record(
@@ -207,28 +254,22 @@ def test_cancelled_record_waits_for_inflight_save_before_releasing_lock(
                 ),
             )
 
-            try:
-                await asyncio.wait_for(
-                    asyncio.shield(second_record),
-                    timeout=0.05,
-                )
-                second_finished_before_first_save = True
-            except asyncio.TimeoutError:
-                second_finished_before_first_save = False
-            finally:
-                first_save_can_finish.set()
-                results = await asyncio.gather(
-                    first_record,
-                    second_record,
-                    return_exceptions=True,
-                )
-                if pending_save_tasks:
-                    await asyncio.gather(*pending_save_tasks)
+            second_started_before_release, results = await probe.finish_saves(
+                first_record,
+                second_record,
+            )
 
             assert isinstance(results[0], asyncio.CancelledError)
             assert results[1] is None
-            assert first_save_finished.is_set()
-            assert second_finished_before_first_save is False
+            assert probe.first_save_finished.is_set()
+            assert second_started_before_release is False
+            assert probe.second_save_started_before_first_finished is False
+            assert probe.save_events == [
+                "save-1-started",
+                "save-1-finished",
+                "save-2-started",
+                "save-2-finished",
+            ]
 
     asyncio.run(run_scenario())
 
