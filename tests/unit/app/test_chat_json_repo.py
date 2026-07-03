@@ -170,9 +170,11 @@ async def test_chat_repo_get_chat_reuses_valid_snapshot(
     repo = JsonChatRepository(tmp_path / "chats.json")
     chat = ChatSpec(session_id="s1", user_id="u1", channel="console")
     await repo.save(ChatsFile(version=1, chats=[chat]))
+    calls: list[str] = []
 
     async def fail_worker(func, /, *args, **kwargs):
-        if func.__name__ == "_load_sync":
+        calls.append(func.__name__)
+        if func.__name__ == "_load_and_prepare_snapshot_sync":
             raise AssertionError("snapshot should avoid full reload")
         return func(*args, **kwargs)
 
@@ -185,6 +187,7 @@ async def test_chat_repo_get_chat_reuses_valid_snapshot(
 
     assert loaded is not None
     assert loaded.session_id == "s1"
+    assert calls == ["_file_signature", "_copy_chat_sync"]
 
 
 @pytest.mark.asyncio
@@ -257,6 +260,30 @@ async def test_chat_repo_retries_when_file_changes_during_load(
     loaded_new = await repo.get_chat(new_chat.id)
     assert loaded_new is not None
     assert loaded_new.session_id == "new"
+
+
+@pytest.mark.asyncio
+async def test_chat_repo_get_chat_invalidates_published_snapshot_after_external_change(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "chats.json"
+    old_chat = ChatSpec(session_id="old", user_id="u1", channel="console")
+    new_chat = ChatSpec(
+        session_id="new-session-after-external-rewrite",
+        user_id="u1",
+        channel="console",
+    )
+
+    repo = JsonChatRepository(path)
+    await repo.save(ChatsFile(version=1, chats=[old_chat]))
+    _write_chats(path, [new_chat])
+
+    assert await repo.get_chat(old_chat.id) is None
+    loaded_new = await repo.get_chat(new_chat.id)
+
+    assert loaded_new is not None
+    assert loaded_new.id == new_chat.id
+    assert loaded_new.session_id == "new-session-after-external-rewrite"
 
 
 @pytest.mark.asyncio
