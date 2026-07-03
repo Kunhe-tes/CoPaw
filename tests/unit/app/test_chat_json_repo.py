@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import json
+import os
 import shutil
 from pathlib import Path
 
@@ -17,6 +18,15 @@ def _write_chats(path: Path, chats: list[ChatSpec]) -> None:
     path.write_text(
         json.dumps(ChatsFile(version=1, chats=chats).model_dump(mode="json")),
         encoding="utf-8",
+    )
+
+
+def _saved_chats_payload(chats: list[ChatSpec]) -> str:
+    return json.dumps(
+        ChatsFile(version=1, chats=chats).model_dump(mode="json"),
+        ensure_ascii=False,
+        indent=2,
+        sort_keys=True,
     )
 
 
@@ -171,17 +181,32 @@ async def test_chat_repo_get_chat_reuses_valid_snapshot(
     chat = ChatSpec(session_id="s1", user_id="u1", channel="console")
     await repo.save(ChatsFile(version=1, chats=[chat]))
     calls: list[str] = []
+    state = {"in_worker": False}
+    original_read_bytes = Path.read_bytes
+
+    def guarded_read_bytes(self: Path):
+        if self == repo.path:
+            assert state[
+                "in_worker"
+            ], "signature digest ran outside runtime worker"
+        return original_read_bytes(self)
 
     async def fail_worker(func, /, *args, **kwargs):
         calls.append(func.__name__)
+        assert not state["in_worker"]
+        state["in_worker"] = True
         if func.__name__ == "_load_and_prepare_snapshot_sync":
             raise AssertionError("snapshot should avoid full reload")
-        return func(*args, **kwargs)
+        try:
+            return func(*args, **kwargs)
+        finally:
+            state["in_worker"] = False
 
     monkeypatch.setattr(
         "swe.app.runner.repo.json_repo.run_runtime_state_work",
         fail_worker,
     )
+    monkeypatch.setattr(Path, "read_bytes", guarded_read_bytes)
 
     loaded = await repo.get_chat(chat.id)
 
@@ -284,6 +309,39 @@ async def test_chat_repo_get_chat_invalidates_published_snapshot_after_external_
     assert loaded_new is not None
     assert loaded_new.id == new_chat.id
     assert loaded_new.session_id == "new-session-after-external-rewrite"
+
+
+@pytest.mark.asyncio
+async def test_chat_repo_get_chat_invalidates_snapshot_after_same_size_rewrite_with_restored_mtime(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "chats.json"
+    old_chat = ChatSpec(session_id="old", user_id="u1", channel="console")
+    new_chat = old_chat.model_copy(
+        update={
+            "id": "00000000-0000-4000-8000-000000000000",
+            "session_id": "new",
+        },
+    )
+
+    repo = JsonChatRepository(path)
+    await repo.save(ChatsFile(version=1, chats=[old_chat]))
+    old_stat = path.stat()
+
+    new_payload = _saved_chats_payload([new_chat])
+    assert len(new_payload.encode("utf-8")) == old_stat.st_size
+    path.write_text(new_payload, encoding="utf-8")
+    os.utime(path, ns=(old_stat.st_atime_ns, old_stat.st_mtime_ns))
+
+    assert path.stat().st_size == old_stat.st_size
+    assert path.stat().st_mtime_ns == old_stat.st_mtime_ns
+
+    assert await repo.get_chat(old_chat.id) is None
+    loaded_new = await repo.get_chat(new_chat.id)
+
+    assert loaded_new is not None
+    assert loaded_new.id == new_chat.id
+    assert loaded_new.session_id == "new"
 
 
 @pytest.mark.asyncio

@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import shutil
 from dataclasses import dataclass
@@ -23,6 +24,7 @@ class _FileSignature:
     exists: bool
     mtime_ns: int | None = None
     size: int | None = None
+    digest: str | None = None
 
 
 @dataclass(frozen=True)
@@ -64,13 +66,16 @@ class JsonChatRepository(BaseChatRepository):
         return self._path
 
     def _file_signature(self) -> _FileSignature:
-        if not self._path.exists():
+        try:
+            contents = self._path.read_bytes()
+            stat_result = self._path.stat()
+        except FileNotFoundError:
             return _FileSignature(exists=False)
-        stat_result = self._path.stat()
         return _FileSignature(
             exists=True,
             mtime_ns=stat_result.st_mtime_ns,
             size=stat_result.st_size,
+            digest=hashlib.sha256(contents).hexdigest(),
         )
 
     def _load_sync(self) -> tuple[_FileSignature | None, ChatsFile]:
