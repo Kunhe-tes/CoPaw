@@ -13,6 +13,8 @@ from swe.runtime_workers import run_runtime_state_work
 from .base import BaseChatRepository
 from ..models import ChatSpec, ChatsFile
 
+_LOAD_STABLE_READ_ATTEMPTS = 3
+
 
 @dataclass(frozen=True)
 class _FileSignature:
@@ -21,6 +23,15 @@ class _FileSignature:
     exists: bool
     mtime_ns: int | None = None
     size: int | None = None
+
+
+@dataclass(frozen=True)
+class _SnapshotState:
+    """Private immutable snapshot container prepared off the event loop."""
+
+    signature: _FileSignature
+    chats_file: ChatsFile
+    chat_index: dict[str, ChatSpec]
 
 
 class JsonChatRepository(BaseChatRepository):
@@ -62,13 +73,27 @@ class JsonChatRepository(BaseChatRepository):
             size=stat_result.st_size,
         )
 
-    def _load_sync(self) -> tuple[_FileSignature, ChatsFile]:
-        if not self._path.exists():
-            return self._file_signature(), ChatsFile(version=1, chats=[])
+    def _load_sync(self) -> tuple[_FileSignature | None, ChatsFile]:
+        last_chats_file = ChatsFile(version=1, chats=[])
 
-        data = json.loads(self._path.read_text(encoding="utf-8"))
-        chats_file = ChatsFile.model_validate(data)
-        return self._file_signature(), chats_file
+        for _ in range(_LOAD_STABLE_READ_ATTEMPTS):
+            before_signature = self._file_signature()
+            if not before_signature.exists:
+                chats_file = ChatsFile(version=1, chats=[])
+                after_signature = self._file_signature()
+            else:
+                try:
+                    data = json.loads(self._path.read_text(encoding="utf-8"))
+                except FileNotFoundError:
+                    continue
+                chats_file = ChatsFile.model_validate(data)
+                after_signature = self._file_signature()
+
+            last_chats_file = chats_file
+            if before_signature == after_signature:
+                return after_signature, chats_file
+
+        return None, last_chats_file
 
     def _save_sync(self, chats_file: ChatsFile) -> _FileSignature:
         # Create parent directory if needed
@@ -87,14 +112,64 @@ class JsonChatRepository(BaseChatRepository):
         shutil.move(str(tmp_path), str(self._path))
         return self._file_signature()
 
-    def _set_snapshot(
+    def _prepare_snapshot_sync(
         self,
         signature: _FileSignature,
         chats_file: ChatsFile,
-    ) -> None:
-        self._snapshot_signature = signature
-        self._snapshot = chats_file
-        self._chat_index = {chat.id: chat for chat in chats_file.chats}
+    ) -> _SnapshotState:
+        snapshot = chats_file.model_copy(deep=True)
+        return _SnapshotState(
+            signature=signature,
+            chats_file=snapshot,
+            chat_index={chat.id: chat for chat in snapshot.chats},
+        )
+
+    def _load_and_prepare_snapshot_sync(
+        self,
+    ) -> tuple[_SnapshotState | None, ChatsFile]:
+        signature, chats_file = self._load_sync()
+        caller_chats_file = chats_file.model_copy(deep=True)
+        if signature is None:
+            return None, caller_chats_file
+        return (
+            self._prepare_snapshot_sync(signature, chats_file),
+            caller_chats_file,
+        )
+
+    def _save_and_prepare_snapshot_sync(
+        self,
+        chats_file: ChatsFile,
+    ) -> _SnapshotState:
+        chats_file_to_save = chats_file.model_copy(deep=True)
+        signature = self._save_sync(chats_file_to_save)
+        return self._prepare_snapshot_sync(signature, chats_file_to_save)
+
+    @staticmethod
+    def _copy_chat_sync(chat: ChatSpec | None) -> ChatSpec | None:
+        if chat is None:
+            return None
+        return chat.model_copy(deep=True)
+
+    @staticmethod
+    def _find_chat_copy_sync(
+        chats_file: ChatsFile,
+        chat_id: str,
+    ) -> ChatSpec | None:
+        for chat in chats_file.chats:
+            if chat.id == chat_id:
+                return chat.model_copy(deep=True)
+        return None
+
+    def _set_snapshot(self, snapshot_state: _SnapshotState | None) -> None:
+        if snapshot_state is None:
+            self._snapshot_signature = None
+            self._snapshot = None
+            self._chat_index = {}
+            return
+
+        self._snapshot_signature = snapshot_state.signature
+        self._snapshot = snapshot_state.chats_file
+        self._chat_index = snapshot_state.chat_index
 
     async def load(self) -> ChatsFile:
         """Load chat specs from JSON file.
@@ -102,8 +177,10 @@ class JsonChatRepository(BaseChatRepository):
         Returns:
             ChatsFile with all chat specs
         """
-        signature, chats_file = await run_runtime_state_work(self._load_sync)
-        self._set_snapshot(signature, chats_file)
+        snapshot_state, chats_file = await run_runtime_state_work(
+            self._load_and_prepare_snapshot_sync,
+        )
+        self._set_snapshot(snapshot_state)
         return chats_file
 
     async def save(self, chats_file: ChatsFile) -> None:
@@ -112,8 +189,11 @@ class JsonChatRepository(BaseChatRepository):
         Args:
             chats_file: ChatsFile to persist
         """
-        signature = await run_runtime_state_work(self._save_sync, chats_file)
-        self._set_snapshot(signature, chats_file)
+        snapshot_state = await run_runtime_state_work(
+            self._save_and_prepare_snapshot_sync,
+            chats_file,
+        )
+        self._set_snapshot(snapshot_state)
 
     async def get_chat(self, chat_id: str) -> ChatSpec | None:
         """Get chat spec by chat_id (UUID), reusing a valid snapshot index."""
@@ -122,7 +202,19 @@ class JsonChatRepository(BaseChatRepository):
             self._snapshot is not None
             and self._snapshot_signature == signature
         ):
-            return self._chat_index.get(chat_id)
+            return await run_runtime_state_work(
+                self._copy_chat_sync,
+                self._chat_index.get(chat_id),
+            )
 
-        await self.load()
-        return self._chat_index.get(chat_id)
+        chats_file = await self.load()
+        if self._snapshot is not None:
+            return await run_runtime_state_work(
+                self._copy_chat_sync,
+                self._chat_index.get(chat_id),
+            )
+        return await run_runtime_state_work(
+            self._find_chat_copy_sync,
+            chats_file,
+            chat_id,
+        )

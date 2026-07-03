@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import json
+import shutil
 from pathlib import Path
 
 import pytest
@@ -12,39 +13,79 @@ from swe.app.runner.models import ChatSpec, ChatsFile
 from swe.app.runner.repo.json_repo import JsonChatRepository
 
 
+def _write_chats(path: Path, chats: list[ChatSpec]) -> None:
+    path.write_text(
+        json.dumps(ChatsFile(version=1, chats=chats).model_dump(mode="json")),
+        encoding="utf-8",
+    )
+
+
 @pytest.mark.asyncio
 async def test_chat_repo_load_uses_runtime_state_worker(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     path = tmp_path / "chats.json"
-    path.write_text(
-        json.dumps(
-            ChatsFile(
-                version=1,
-                chats=[
-                    ChatSpec(session_id="s1", user_id="u1", channel="console"),
-                ],
-            ).model_dump(mode="json"),
-        ),
-        encoding="utf-8",
+    _write_chats(
+        path,
+        [ChatSpec(session_id="s1", user_id="u1", channel="console")],
     )
     calls: list[str] = []
+    operations: list[str] = []
+    state = {"in_worker": False}
+
+    original_read_text = Path.read_text
+    original_loads = json.loads
+    original_model_validate = ChatsFile.model_validate
+
+    def guarded_read_text(self: Path, *args, **kwargs):
+        if self == path:
+            assert state["in_worker"], "read_text ran outside runtime worker"
+            operations.append("read")
+        return original_read_text(self, *args, **kwargs)
+
+    def guarded_loads(*args, **kwargs):
+        assert state["in_worker"], "json.loads ran outside runtime worker"
+        operations.append("parse")
+        return original_loads(*args, **kwargs)
+
+    def guarded_model_validate(cls, *args, **kwargs):
+        assert state[
+            "in_worker"
+        ], "model validation ran outside runtime worker"
+        operations.append("validate")
+        return original_model_validate(*args, **kwargs)
 
     async def fake_worker(func, /, *args, **kwargs):
         calls.append(func.__name__)
-        return func(*args, **kwargs)
+        assert not state["in_worker"]
+        state["in_worker"] = True
+        try:
+            return func(*args, **kwargs)
+        finally:
+            state["in_worker"] = False
 
     monkeypatch.setattr(
         "swe.app.runner.repo.json_repo.run_runtime_state_work",
         fake_worker,
+    )
+    monkeypatch.setattr(Path, "read_text", guarded_read_text)
+    monkeypatch.setattr(
+        "swe.app.runner.repo.json_repo.json.loads",
+        guarded_loads,
+    )
+    monkeypatch.setattr(
+        ChatsFile,
+        "model_validate",
+        classmethod(guarded_model_validate),
     )
 
     repo = JsonChatRepository(path)
     loaded = await repo.load()
 
     assert [chat.session_id for chat in loaded.chats] == ["s1"]
-    assert calls == ["_load_sync"]
+    assert calls
+    assert operations == ["read", "parse", "validate"]
 
 
 @pytest.mark.asyncio
@@ -54,14 +95,57 @@ async def test_chat_repo_save_uses_runtime_state_worker(
 ) -> None:
     path = tmp_path / "chats.json"
     calls: list[str] = []
+    operations: list[str] = []
+    state = {"in_worker": False}
+
+    original_model_dump = ChatsFile.model_dump
+    original_dumps = json.dumps
+    original_write_text = Path.write_text
+    original_move = shutil.move
+
+    def guarded_model_dump(self: ChatsFile, *args, **kwargs):
+        assert state["in_worker"], "model dump ran outside runtime worker"
+        operations.append("dump")
+        return original_model_dump(self, *args, **kwargs)
+
+    def guarded_dumps(*args, **kwargs):
+        assert state["in_worker"], "json.dumps ran outside runtime worker"
+        operations.append("encode")
+        return original_dumps(*args, **kwargs)
+
+    def guarded_write_text(self: Path, *args, **kwargs):
+        if self == path.with_suffix(path.suffix + ".tmp"):
+            assert state["in_worker"], "write_text ran outside runtime worker"
+            operations.append("write")
+        return original_write_text(self, *args, **kwargs)
+
+    def guarded_move(*args, **kwargs):
+        assert state["in_worker"], "shutil.move ran outside runtime worker"
+        operations.append("move")
+        return original_move(*args, **kwargs)
 
     async def fake_worker(func, /, *args, **kwargs):
         calls.append(func.__name__)
-        return func(*args, **kwargs)
+        assert not state["in_worker"]
+        state["in_worker"] = True
+        try:
+            return func(*args, **kwargs)
+        finally:
+            state["in_worker"] = False
 
     monkeypatch.setattr(
         "swe.app.runner.repo.json_repo.run_runtime_state_work",
         fake_worker,
+    )
+    monkeypatch.setattr(ChatsFile, "model_dump", guarded_model_dump)
+    monkeypatch.setattr(
+        "swe.app.runner.repo.json_repo.json.dumps",
+        guarded_dumps,
+    )
+    monkeypatch.setattr(Path, "write_text", guarded_write_text)
+    monkeypatch.setattr(
+        "swe.app.runner.repo.json_repo.shutil.move",
+        guarded_move,
     )
 
     repo = JsonChatRepository(path)
@@ -72,7 +156,8 @@ async def test_chat_repo_save_uses_runtime_state_worker(
         ),
     )
 
-    assert calls == ["_save_sync"]
+    assert calls
+    assert operations == ["dump", "encode", "write", "move"]
     persisted = json.loads(path.read_text(encoding="utf-8"))
     assert persisted["chats"][0]["session_id"] == "s1"
 
@@ -100,3 +185,132 @@ async def test_chat_repo_get_chat_reuses_valid_snapshot(
 
     assert loaded is not None
     assert loaded.session_id == "s1"
+
+
+@pytest.mark.asyncio
+async def test_chat_repo_builds_snapshot_index_in_runtime_state_worker(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    path = tmp_path / "chats.json"
+    _write_chats(
+        path,
+        [ChatSpec(session_id="s1", user_id="u1", channel="console")],
+    )
+    state = {"in_worker": False}
+    original_getattribute = ChatSpec.__getattribute__
+
+    async def fake_worker(func, /, *args, **kwargs):
+        assert not state["in_worker"]
+        state["in_worker"] = True
+        try:
+            return func(*args, **kwargs)
+        finally:
+            state["in_worker"] = False
+
+    def guarded_getattribute(self: ChatSpec, name: str):
+        if name == "id":
+            assert state[
+                "in_worker"
+            ], "chat index built outside runtime worker"
+        return original_getattribute(self, name)
+
+    monkeypatch.setattr(
+        "swe.app.runner.repo.json_repo.run_runtime_state_work",
+        fake_worker,
+    )
+    monkeypatch.setattr(ChatSpec, "__getattribute__", guarded_getattribute)
+
+    repo = JsonChatRepository(path)
+    loaded = await repo.load()
+
+    assert [chat.session_id for chat in loaded.chats] == ["s1"]
+
+
+@pytest.mark.asyncio
+async def test_chat_repo_retries_when_file_changes_during_load(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    path = tmp_path / "chats.json"
+    old_chat = ChatSpec(session_id="old", user_id="u1", channel="console")
+    new_chat = ChatSpec(session_id="new", user_id="u1", channel="console")
+    _write_chats(path, [old_chat])
+
+    original_read_text = Path.read_text
+    swapped = False
+
+    def swapping_read_text(self: Path, *args, **kwargs):
+        nonlocal swapped
+        contents = original_read_text(self, *args, **kwargs)
+        if self == path and not swapped:
+            swapped = True
+            _write_chats(path, [new_chat])
+        return contents
+
+    monkeypatch.setattr(Path, "read_text", swapping_read_text)
+
+    repo = JsonChatRepository(path)
+    await repo.load()
+
+    assert await repo.get_chat(old_chat.id) is None
+    loaded_new = await repo.get_chat(new_chat.id)
+    assert loaded_new is not None
+    assert loaded_new.session_id == "new"
+
+
+@pytest.mark.asyncio
+async def test_chat_repo_load_result_mutation_does_not_pollute_cache(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "chats.json"
+    chat = ChatSpec(session_id="s1", user_id="u1", channel="console")
+    _write_chats(path, [chat])
+
+    repo = JsonChatRepository(path)
+    loaded = await repo.load()
+    loaded.chats[0].session_id = "mutated"
+
+    cached = await repo.get_chat(chat.id)
+
+    assert cached is not None
+    assert cached.session_id == "s1"
+
+
+@pytest.mark.asyncio
+async def test_chat_repo_save_input_mutation_does_not_pollute_cache(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "chats.json"
+    chat = ChatSpec(session_id="s1", user_id="u1", channel="console")
+    chats_file = ChatsFile(version=1, chats=[chat])
+
+    repo = JsonChatRepository(path)
+    await repo.save(chats_file)
+    chats_file.chats[0].session_id = "mutated"
+
+    cached = await repo.get_chat(chat.id)
+
+    assert cached is not None
+    assert cached.session_id == "s1"
+
+
+@pytest.mark.asyncio
+async def test_chat_repo_get_chat_returns_copy(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "chats.json"
+    chat = ChatSpec(session_id="s1", user_id="u1", channel="console")
+    _write_chats(path, [chat])
+
+    repo = JsonChatRepository(path)
+    first = await repo.get_chat(chat.id)
+    assert first is not None
+    first.session_id = "mutated"
+    first.meta["client"] = "changed"
+
+    second = await repo.get_chat(chat.id)
+
+    assert second is not None
+    assert second.session_id == "s1"
+    assert second.meta == {}
