@@ -5,16 +5,17 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Callable
-from typing import TypeVar
+from typing import ParamSpec, TypeVar
 
+P = ParamSpec("P")
 T = TypeVar("T")
 
 
 async def run_runtime_state_work(
-    func: Callable[..., T],
+    func: Callable[P, T],
     /,
-    *args,
-    **kwargs,
+    *args: P.args,
+    **kwargs: P.kwargs,
 ) -> T:
     """Run responsiveness-critical runtime-state work off the event loop."""
     return await asyncio.to_thread(func, *args, **kwargs)

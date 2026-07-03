@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import threading
 from contextvars import ContextVar
 
 import pytest
@@ -20,6 +21,19 @@ async def test_run_runtime_state_work_preserves_contextvars() -> None:
         return _scope.get()
 
     assert await run_runtime_state_work(read_scope) == "tenant-a.source-b"
+
+
+@pytest.mark.asyncio
+async def test_run_runtime_state_work_runs_off_event_loop_thread() -> None:
+    event_loop_thread_id = threading.get_ident()
+
+    def read_worker_thread_id() -> int:
+        return threading.get_ident()
+
+    assert (
+        await run_runtime_state_work(read_worker_thread_id)
+        != event_loop_thread_id
+    )
 
 
 @pytest.mark.asyncio
