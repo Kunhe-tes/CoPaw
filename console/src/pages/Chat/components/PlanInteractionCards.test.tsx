@@ -13,8 +13,10 @@ import type { IAgentScopeRuntimeWebUIMessage } from "@/components/agentscope-cha
 import { ChatAnywhereSessionsContext } from "@/components/agentscope-chat";
 import {
   ActivePlanClarificationCard,
+  ActivePlanReviewCard,
   PlanClarificationCard,
   PlanReviewCard,
+  PlanReviewSnapshot,
 } from "./PlanInteractionCards";
 import styles from "./PlanInteractionCards.module.less";
 
@@ -85,6 +87,24 @@ function renderActiveClarification(
   );
 }
 
+function renderActivePlanReview(
+  messages: IAgentScopeRuntimeWebUIMessage<unknown>[],
+) {
+  return render(
+    <ChatAnywhereSessionsContext.Provider value={createSessionContextValue()}>
+      <ChatAnywhereMessagesContext.Provider
+        value={{
+          messages,
+          setMessages: vi.fn(),
+          getMessages: () => messages,
+        }}
+      >
+        <ActivePlanReviewCard />
+      </ChatAnywhereMessagesContext.Provider>
+    </ChatAnywhereSessionsContext.Provider>,
+  );
+}
+
 function createClarificationMessage({
   messageId,
   originalId,
@@ -124,6 +144,52 @@ function createClarificationMessage({
           prompt,
           options: [{ id: "small", label: "Small" }],
         },
+      },
+    ],
+  };
+}
+
+function createReviewData(
+  overrides: Partial<React.ComponentProps<typeof PlanReviewCard>["data"]> = {},
+): React.ComponentProps<typeof PlanReviewCard>["data"] {
+  return {
+    card_type: "plan_review",
+    plan_id: "plan-123",
+    title: "Fix bug",
+    summary: "Investigate and patch",
+    steps: ["Read code", "Patch code"],
+    risks: ["Regression"],
+    verification: ["Focused tests"],
+    ...overrides,
+  };
+}
+
+function createReviewMessage({
+  messageId,
+  cardId,
+  title,
+  status,
+  submittedDecision,
+}: {
+  messageId: string;
+  cardId: string;
+  title: string;
+  status?: "pending" | "submitted";
+  submittedDecision?: "revise" | "execute" | "exit_plan";
+}): IAgentScopeRuntimeWebUIMessage<unknown> {
+  return {
+    id: messageId,
+    role: "assistant",
+    cards: [
+      {
+        id: cardId,
+        code: "PlanInteraction",
+        data: createReviewData({
+          plan_id: cardId,
+          title,
+          status,
+          submitted_decision: submittedDecision,
+        }),
       },
     ],
   };
@@ -973,11 +1039,116 @@ describe("Plan interaction cards", () => {
     submit.cleanup();
   });
 
-  it("submits review decisions with distinct Plan Review payloads", async () => {
+  it("renders only the latest unhandled plan review as the active card", () => {
+    renderActivePlanReview([
+      createReviewMessage({
+        messageId: "message-1",
+        cardId: "review-1",
+        title: "Older review",
+      }),
+      createReviewMessage({
+        messageId: "message-2",
+        cardId: "review-2",
+        title: "Submitted review",
+        status: "submitted",
+        submittedDecision: "execute",
+      }),
+      createReviewMessage({
+        messageId: "message-3",
+        cardId: "review-3",
+        title: "Latest review",
+      }),
+    ]);
+
+    expect(
+      screen.getByRole("region", { name: "Latest review" }),
+    ).toHaveAttribute("data-active-plan-review-card", "true");
+    expect(screen.queryByText("Older review")).not.toBeInTheDocument();
+    expect(screen.queryByText("Submitted review")).not.toBeInTheDocument();
+  });
+
+  it("renders no active plan review if a later user message supersedes it", () => {
+    renderActivePlanReview([
+      createReviewMessage({
+        messageId: "message-1",
+        cardId: "review-1",
+        title: "Plan to confirm",
+      }),
+      {
+        id: "user-1",
+        role: "user" as const,
+        cards: [],
+      },
+    ]);
+
+    expect(screen.queryByText("Plan to confirm")).not.toBeInTheDocument();
+  });
+
+  it("renders a read-only plan review snapshot with submitted execute status", () => {
+    render(
+      <PlanReviewSnapshot
+        data={createReviewData({
+          status: "submitted",
+          submitted_decision: "execute",
+        })}
+      />,
+    );
+
+    expect(screen.getByRole("region", { name: "Fix bug" })).toHaveAttribute(
+      "data-plan-review-snapshot",
+      "true",
+    );
+    expect(screen.getByText("已接受并开始执行")).toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: "Continue modifying" }),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: "Execute" }),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: "Exit Plan Mode" }),
+    ).not.toBeInTheDocument();
+  });
+
+  it("keeps action buttons in active plan review mode", () => {
+    render(<PlanReviewCard active data={createReviewData()} />);
+
+    expect(
+      screen.getByRole("button", { name: "Continue modifying" }),
+    ).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Execute" })).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "Exit Plan Mode" }),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByRole("textbox", { name: "反馈意见" }),
+    ).not.toBeInTheDocument();
+    expect(screen.queryByPlaceholderText("Feedback")).not.toBeInTheDocument();
+  });
+
+  it("renders long plan review summary in the body summary area", () => {
+    const longSummary =
+      "This summary is intentionally long so it should wrap inside the review body instead of being placed in a single-line header paragraph.";
+    const { container } = render(
+      <PlanReviewCard
+        active
+        data={createReviewData({ summary: longSummary })}
+      />,
+    );
+
+    expect(
+      container.querySelector(`.${styles.reviewSummary}`),
+    ).toHaveTextContent(longSummary);
+  });
+
+  it("calls continue modifying without submitting a plan review response", () => {
     const submit = captureSubmitEvents();
+    const onContinueModifying = vi.fn();
 
     render(
       <PlanReviewCard
+        active
+        onContinueModifying={onContinueModifying}
         data={{
           card_type: "plan_review",
           plan_id: "plan-123",
@@ -996,32 +1167,18 @@ describe("Plan interaction cards", () => {
       "data-plan-review-card",
       "true",
     );
-    expect(screen.getByText("Steps")).toBeInTheDocument();
-    expect(screen.getByText("Risks")).toBeInTheDocument();
-    expect(screen.getByText("Verification")).toBeInTheDocument();
+    expect(screen.getByText("执行步骤")).toBeInTheDocument();
+    expect(screen.getByText("风险提示")).toBeInTheDocument();
+    expect(screen.getByText("验证方式")).toBeInTheDocument();
     expect(screen.queryByText("Open questions")).not.toBeInTheDocument();
     expect(screen.queryByText(/Confidence:/)).not.toBeInTheDocument();
 
-    fireEvent.change(screen.getByPlaceholderText("Feedback"), {
-      target: { value: "Narrow the scope" },
-    });
     fireEvent.click(screen.getByRole("button", { name: "Continue modifying" }));
 
-    await waitFor(() => {
-      expect(submit.handler).toHaveBeenCalledTimes(1);
-    });
-    expect(submit.handler.mock.calls[0][0].detail).toMatchObject({
-      query: "Narrow the scope",
-      biz_params: {
-        mode: "plan",
-        plan_interaction_response: {
-          card_type: "plan_review",
-          plan_id: "plan-123",
-          decision: "revise",
-          feedback: "Narrow the scope",
-        },
-      },
-    });
+    expect(onContinueModifying).toHaveBeenCalledWith(
+      expect.objectContaining({ plan_id: "plan-123" }),
+    );
+    expect(submit.handler).not.toHaveBeenCalled();
 
     submit.cleanup();
   });
@@ -1031,6 +1188,7 @@ describe("Plan interaction cards", () => {
 
     render(
       <PlanReviewCard
+        active
         data={{
           card_type: "plan_review",
           plan_id: "plan-456",
@@ -1059,6 +1217,30 @@ describe("Plan interaction cards", () => {
       },
     });
     expect(screen.getByRole("button", { name: "Execute" })).toBeDisabled();
+
+    submit.cleanup();
+  });
+
+  it("exits plan mode locally without submitting a chat message", async () => {
+    const submit = captureSubmitEvents();
+    const onPlanModeDecision = vi.fn();
+
+    render(
+      <PlanReviewCard
+        active
+        onPlanModeDecision={onPlanModeDecision}
+        data={createReviewData({
+          plan_id: "plan-exit",
+          title: "Exit without message",
+        })}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "Exit Plan Mode" }));
+
+    expect(onPlanModeDecision).toHaveBeenCalledWith(false);
+    await Promise.resolve();
+    expect(submit.handler).not.toHaveBeenCalled();
 
     submit.cleanup();
   });

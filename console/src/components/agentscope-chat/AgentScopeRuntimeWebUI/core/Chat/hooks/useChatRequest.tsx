@@ -240,7 +240,11 @@ export default function useChatRequest(options: UseChatRequestOptions) {
         });
 
         if (responseData) {
-          builder.handle(responseData as never);
+          builder.handle({
+            ...responseData,
+            object: "response",
+            output: responseData.output ?? [],
+          } as never);
         }
 
         return builder;

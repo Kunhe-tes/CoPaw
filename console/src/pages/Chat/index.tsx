@@ -113,6 +113,7 @@ import { isResponseFeedbackUserAllowed } from "./components/ResponseFeedbackCard
 import ApprovalActionCard from "./components/ApprovalActionCard";
 import {
   ActivePlanClarificationCard,
+  ActivePlanReviewCard,
   PlanReviewCard,
 } from "./components/PlanInteractionCards";
 import TaskRunGroupCard from "./components/TaskRunGroupCard";
@@ -126,6 +127,7 @@ import {
   persistPlanModeState,
   preparePlanModeSubmit,
   resolveActivePlanModeSession,
+  isPlanModeSubmitCancelled,
   type PlanModeSessionLike,
 } from "./planMode";
 import { AutoPreviewHtmlProvider } from "@/components/agentscope-chat/AutoPreviewHtmlContext";
@@ -133,6 +135,7 @@ import { HtmlPreviewTrackingProvider } from "@/components/agentscope-chat/HtmlPr
 import type {
   ChatApprovalActionCardData,
   ChatPlanInteractionCardData,
+  ChatPlanReviewCardData,
   ChatRuntimeRequestCardData,
   ChatRuntimeResponseCardData,
   ChatTaskRunGroupCardData,
@@ -302,6 +305,10 @@ interface CommandSuggestion {
 type InputMessage = {
   role?: string;
   content?: unknown;
+};
+
+type PendingPlanRevision = {
+  planId: string;
 };
 
 function renderSuggestionLabel(command: string, description: string) {
@@ -936,12 +943,25 @@ export default function ChatPage() {
   const [planModeEnabled, setPlanModeEnabled] = useState(
     activePlanModeMetadataEnabled,
   );
+  const [pendingPlanRevision, setPendingPlanRevision] =
+    useState<PendingPlanRevision | null>(null);
   const activePlanModeSessionRef = useRef<PlanModeSession | null>(null);
   activePlanModeSessionRef.current = activePlanModeSession;
 
   useEffect(() => {
     setPlanModeEnabled(activePlanModeMetadataEnabled);
   }, [activePlanModeMetadataEnabled, activePlanModeSession?.id]);
+
+  const activePlanRevisionScopeKey =
+    activePlanModeSession?.id ||
+    activeSessionId ||
+    chatId ||
+    window.currentSessionId ||
+    "";
+
+  useEffect(() => {
+    setPendingPlanRevision(null);
+  }, [activePlanRevisionScopeKey]);
 
   const ensurePlanModeChatId = useCallback(
     async (
@@ -1005,6 +1025,28 @@ export default function ChatPage() {
     [ensurePlanModeChatId, message, t],
   );
 
+  const handleContinueModifyingPlan = useCallback(
+    (data: ChatPlanReviewCardData) => {
+      setPendingPlanRevision({
+        planId: data.plan_id,
+      });
+      setPlanModeEnabled(true);
+      if (!planModeEnabled) {
+        void persistPlanMode(true);
+      }
+    },
+    [persistPlanMode, planModeEnabled],
+  );
+
+  const handlePlanModeDecision = useCallback(
+    (enabled: boolean) => {
+      setPendingPlanRevision(null);
+      setPlanModeEnabled(enabled);
+      void persistPlanMode(enabled);
+    },
+    [persistPlanMode],
+  );
+
   const activePlanModeControl = useMemo(
     () => (
       <ActivePlanModeControl
@@ -1012,6 +1054,7 @@ export default function ChatPage() {
         label={t("chat.planMode.label", "计划模式")}
         displayLabel={t("chat.planMode.shortLabel", "计划")}
         onDisable={() => {
+          setPendingPlanRevision(null);
           void persistPlanMode(false);
         }}
       />
@@ -1718,11 +1761,48 @@ export default function ChatPage() {
       IAgentScopeRuntimeWebUISenderOptions["beforeSubmit"]
     > = async (data) => {
       if (isComposingRef.current) return false;
-      return preparePlanModeSubmit(data, {
+      const prepared = await preparePlanModeSubmit(data, {
         planModeEnabled,
         persistPlanMode,
         setPlanModeEnabled,
       });
+      if (isPlanModeSubmitCancelled(prepared)) {
+        return prepared;
+      }
+      const hasExplicitPlanInteractionResponse = Boolean(
+        prepared.biz_params &&
+          Object.prototype.hasOwnProperty.call(
+            prepared.biz_params,
+            "plan_interaction_response",
+          ),
+      );
+      if (hasExplicitPlanInteractionResponse) {
+        setPendingPlanRevision(null);
+        return prepared;
+      }
+      if (!pendingPlanRevision) {
+        return prepared;
+      }
+
+      const feedback = prepared.query.trim();
+      if (!feedback) {
+        return false;
+      }
+
+      setPendingPlanRevision(null);
+      return {
+        ...prepared,
+        biz_params: {
+          ...(prepared.biz_params || {}),
+          mode: "plan",
+          plan_interaction_response: {
+            card_type: "plan_review",
+            plan_id: pendingPlanRevision.planId,
+            decision: "revise",
+            feedback,
+          },
+        },
+      };
     };
 
     const planModeQuickMenuItems = [
@@ -1792,6 +1872,10 @@ export default function ChatPage() {
               <TaskProgressFloatingCard progress={taskProgress} />
             ) : null}
             <ActivePlanClarificationCard />
+            <ActivePlanReviewCard
+              onContinueModifying={handleContinueModifyingPlan}
+              onPlanModeDecision={handlePlanModeDecision}
+            />
           </>
         ),
         quickMenuItems: planModeQuickMenuItems,
@@ -1901,10 +1985,13 @@ export default function ChatPage() {
     chatId,
     activeSessionId,
     handleFileUpload,
+    handleContinueModifyingPlan,
+    handlePlanModeDecision,
     isComposingRef,
     isDark,
     multimodalCaps,
     composerDisabled,
+    pendingPlanRevision,
     persistPlanMode,
     planModeEnabled,
     resolveLogicalRequestSessionId,

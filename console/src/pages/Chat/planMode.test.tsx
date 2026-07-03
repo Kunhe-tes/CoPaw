@@ -1,5 +1,6 @@
 import React from "react";
 import {
+  act,
   cleanup,
   fireEvent,
   render,
@@ -19,6 +20,7 @@ import {
 describe("Plan Mode frontend helpers", () => {
   afterEach(() => {
     cleanup();
+    vi.useRealTimers();
   });
 
   it("initializes the toggle from ChatSpec meta", () => {
@@ -72,9 +74,9 @@ describe("Plan Mode frontend helpers", () => {
     });
   });
 
-  it("renders the active Plan Mode button only when enabled and dispatches disable clicks", async () => {
+  it("renders nothing when the active Plan Mode button is initially disabled", () => {
     const onDisable = vi.fn();
-    const { rerender } = render(
+    render(
       <ActivePlanModeButton
         enabled={false}
         label="计划模式"
@@ -85,8 +87,11 @@ describe("Plan Mode frontend helpers", () => {
     expect(
       screen.queryByRole("button", { name: "计划模式" }),
     ).not.toBeInTheDocument();
+  });
 
-    rerender(
+  it("renders the active Plan Mode button when enabled and dispatches disable clicks", async () => {
+    const onDisable = vi.fn();
+    render(
       <ActivePlanModeButton enabled label="计划模式" onDisable={onDisable} />,
     );
 
@@ -95,6 +100,82 @@ describe("Plan Mode frontend helpers", () => {
     await waitFor(() => {
       expect(onDisable).toHaveBeenCalledTimes(1);
     });
+  });
+
+  it("keeps the active Plan Mode button mounted while exiting, then unmounts it", () => {
+    vi.useFakeTimers();
+    const onDisable = vi.fn();
+    const { rerender } = render(
+      <ActivePlanModeButton enabled label="计划模式" onDisable={onDisable} />,
+    );
+
+    rerender(
+      <ActivePlanModeButton
+        enabled={false}
+        label="计划模式"
+        onDisable={onDisable}
+      />,
+    );
+
+    const exitingButton = screen.getByRole("button", { name: "计划模式" });
+    expect(exitingButton).toHaveAttribute("data-plan-mode-exiting", "true");
+    expect(exitingButton).toBeDisabled();
+
+    act(() => {
+      vi.advanceTimersByTime(180);
+    });
+
+    expect(
+      screen.queryByRole("button", { name: "计划模式" }),
+    ).not.toBeInTheDocument();
+  });
+
+  it("clears exiting state when active Plan Mode is enabled again", () => {
+    vi.useFakeTimers();
+    const onDisable = vi.fn();
+    const { rerender } = render(
+      <ActivePlanModeButton enabled label="计划模式" onDisable={onDisable} />,
+    );
+
+    rerender(
+      <ActivePlanModeButton
+        enabled={false}
+        label="计划模式"
+        onDisable={onDisable}
+      />,
+    );
+    rerender(
+      <ActivePlanModeButton enabled label="计划模式" onDisable={onDisable} />,
+    );
+
+    const button = screen.getByRole("button", { name: "计划模式" });
+    expect(button).not.toHaveAttribute("data-plan-mode-exiting", "true");
+    expect(button).not.toBeDisabled();
+
+    act(() => {
+      vi.advanceTimersByTime(180);
+    });
+
+    expect(
+      screen.getByRole("button", { name: "计划模式" }),
+    ).toBeInTheDocument();
+  });
+
+  it("renders the active Plan Mode button after starting disabled", () => {
+    const onDisable = vi.fn();
+    const { rerender } = render(
+      <ActivePlanModeButton
+        enabled={false}
+        label="计划模式"
+        onDisable={onDisable}
+      />,
+    );
+
+    rerender(
+      <ActivePlanModeButton enabled label="计划模式" onDisable={onDisable} />,
+    );
+
+    expect(screen.getByRole("button", { name: "计划模式" })).toBeInTheDocument();
   });
 
   it("turns /plan with text into a planning request", async () => {

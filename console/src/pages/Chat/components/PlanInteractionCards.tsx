@@ -4,7 +4,6 @@ import {
   ChevronLeft,
   ChevronRight,
   ChevronsUpDown,
-  ClipboardCheck,
   CornerDownLeft,
 } from "lucide-react";
 import { type IAgentScopeRuntimeWebUIMessage } from "@/components/agentscope-chat";
@@ -82,6 +81,14 @@ function isPlanClarificationCardData(
     Boolean(data) &&
     typeof data === "object" &&
     (data as { card_type?: unknown }).card_type === "plan_clarification"
+  );
+}
+
+function isPlanReviewCardData(data: unknown): data is ChatPlanReviewCardData {
+  return (
+    Boolean(data) &&
+    typeof data === "object" &&
+    (data as { card_type?: unknown }).card_type === "plan_review"
   );
 }
 
@@ -172,6 +179,40 @@ function findLatestPlanClarificationCard(
           data: card.data,
           instanceKey: `${message.id}:${card.id || card.code}:${cardIndex}`,
           sourceKey: resolveClarificationSourceKey(cards, card.data),
+        };
+      }
+    }
+  }
+  return null;
+}
+
+function findLatestPlanReviewCard(messages: IAgentScopeRuntimeWebUIMessage[]): {
+  data: ChatPlanReviewCardData;
+  instanceKey: string;
+} | null {
+  let hasLaterUserMessage = false;
+  for (
+    let messageIndex = messages.length - 1;
+    messageIndex >= 0;
+    messageIndex -= 1
+  ) {
+    const message = messages[messageIndex];
+    if (message?.role === "user") {
+      hasLaterUserMessage = true;
+      continue;
+    }
+    const cards = message?.cards || [];
+    for (let cardIndex = cards.length - 1; cardIndex >= 0; cardIndex -= 1) {
+      const card = cards[cardIndex];
+      if (
+        !hasLaterUserMessage &&
+        card.code === PLAN_INTERACTION_CARD_CODE &&
+        isPlanReviewCardData(card.data) &&
+        card.data.status !== "submitted"
+      ) {
+        return {
+          data: card.data,
+          instanceKey: `${message.id}:${card.id || card.code}:${cardIndex}`,
         };
       }
     }
@@ -746,27 +787,89 @@ function PlanList({ title, items }: { title: string; items: string[] }) {
   );
 }
 
-export function PlanReviewCard({ data }: { data: ChatPlanReviewCardData }) {
-  const [feedback, setFeedback] = useState("");
+function planReviewStatusText(data: ChatPlanReviewCardData): string {
+  switch (data.submitted_decision) {
+    case "execute":
+      return "已接受并开始执行";
+    case "revise":
+      return "已要求修改";
+    case "exit_plan":
+      return "已退出计划模式";
+    default:
+      return "计划待确认";
+  }
+}
+
+export function PlanReviewSnapshot({ data }: { data: ChatPlanReviewCardData }) {
+  return (
+    <section
+      className={styles.planReviewCard}
+      data-plan-review-snapshot="true"
+      role="region"
+      aria-label={data.title}
+    >
+      <header className={styles.reviewHeader}>
+        <div className={styles.reviewHeading}>
+          <div>
+            <strong>{data.title}</strong>
+            <p className={styles.reviewStatus}>{planReviewStatusText(data)}</p>
+          </div>
+        </div>
+      </header>
+
+      <div className={styles.reviewContent}>
+        <p className={styles.reviewSummary}>{data.summary}</p>
+        <PlanList title="执行步骤" items={data.steps} />
+        <PlanList title="风险提示" items={data.risks} />
+        <PlanList title="验证方式" items={data.verification} />
+        {data.feedback ? (
+          <section className={styles.reviewSection}>
+            <h4>修改意见</h4>
+            <p className={styles.reviewFeedbackSummary}>{data.feedback}</p>
+          </section>
+        ) : null}
+      </div>
+    </section>
+  );
+}
+
+function PlanReviewActiveCard({
+  data,
+  cardInstanceKey,
+  onContinueModifying,
+  onPlanModeDecision,
+}: {
+  data: ChatPlanReviewCardData;
+  cardInstanceKey?: string;
+  onContinueModifying?: (data: ChatPlanReviewCardData) => void;
+  onPlanModeDecision?: (enabled: boolean) => void;
+}) {
   const resolvedByBackend = data.status === "submitted";
   const [submitted, setSubmitted] = useState(false);
+  const interactionResetKey = cardInstanceKey || data.plan_id;
 
   useEffect(() => {
     setSubmitted(resolvedByBackend);
-  }, [resolvedByBackend]);
+  }, [interactionResetKey, resolvedByBackend]);
 
   const handleDecision = (decision: "revise" | "execute" | "exit_plan") => {
     if (submitted) return;
 
-    const trimmedFeedback = feedback.trim();
-    const mode = decision === "revise" ? "plan" : "normal";
-    const query =
-      decision === "revise"
-        ? trimmedFeedback || "Revise the plan"
-        : decision === "execute"
-        ? `Execute plan ${data.plan_id}`
-        : "Exit Plan Mode";
+    if (decision === "revise") {
+      onContinueModifying?.(data);
+      return;
+    }
 
+    if (decision === "exit_plan") {
+      onPlanModeDecision?.(false);
+      setSubmitted(true);
+      return;
+    }
+
+    const mode = "normal";
+    const query = `Execute plan ${data.plan_id}`;
+
+    onPlanModeDecision?.(false);
     setSubmitted(true);
     emit({
       type: "handleSubmit",
@@ -779,7 +882,6 @@ export function PlanReviewCard({ data }: { data: ChatPlanReviewCardData }) {
             card_type: "plan_review",
             plan_id: data.plan_id,
             decision,
-            feedback: trimmedFeedback || undefined,
           },
         },
       },
@@ -790,32 +892,23 @@ export function PlanReviewCard({ data }: { data: ChatPlanReviewCardData }) {
     <section
       className={styles.planReviewCard}
       data-plan-review-card="true"
+      data-active-plan-review-card="true"
       role="region"
       aria-label={data.title}
     >
       <header className={styles.reviewHeader}>
         <div className={styles.reviewHeading}>
-          <span className={styles.reviewIcon}>
-            <ClipboardCheck aria-hidden="true" size={16} />
-          </span>
           <div>
             <strong>{data.title}</strong>
-            <p>{data.summary}</p>
           </div>
         </div>
       </header>
 
       <div className={styles.reviewContent}>
-        <PlanList title="Steps" items={data.steps} />
-        <PlanList title="Risks" items={data.risks} />
-        <PlanList title="Verification" items={data.verification} />
-        <textarea
-          className={styles.reviewFeedback}
-          placeholder="Feedback"
-          value={feedback}
-          disabled={submitted}
-          onChange={(event) => setFeedback(event.target.value)}
-        />
+        <p className={styles.reviewSummary}>{data.summary}</p>
+        <PlanList title="执行步骤" items={data.steps} />
+        <PlanList title="风险提示" items={data.risks} />
+        <PlanList title="验证方式" items={data.verification} />
       </div>
 
       <footer className={styles.reviewActions}>
@@ -845,5 +938,56 @@ export function PlanReviewCard({ data }: { data: ChatPlanReviewCardData }) {
         </button>
       </footer>
     </section>
+  );
+}
+
+export function PlanReviewCard({
+  data,
+  active = false,
+  cardInstanceKey,
+  onContinueModifying,
+  onPlanModeDecision,
+}: {
+  data: ChatPlanReviewCardData;
+  active?: boolean;
+  cardInstanceKey?: string;
+  onContinueModifying?: (data: ChatPlanReviewCardData) => void;
+  onPlanModeDecision?: (enabled: boolean) => void;
+}) {
+  if (!active) {
+    return <PlanReviewSnapshot data={data} />;
+  }
+  return (
+    <PlanReviewActiveCard
+      data={data}
+      cardInstanceKey={cardInstanceKey}
+      onContinueModifying={onContinueModifying}
+      onPlanModeDecision={onPlanModeDecision}
+    />
+  );
+}
+
+export function ActivePlanReviewCard({
+  onContinueModifying,
+  onPlanModeDecision,
+}: {
+  onContinueModifying?: (data: ChatPlanReviewCardData) => void;
+  onPlanModeDecision?: (enabled: boolean) => void;
+}) {
+  const review = useContextSelector(ChatAnywhereMessagesContext, (value) =>
+    findLatestPlanReviewCard(value.messages || []),
+  );
+
+  if (!review) {
+    return null;
+  }
+  return (
+    <PlanReviewCard
+      active
+      data={review.data}
+      cardInstanceKey={review.instanceKey}
+      onContinueModifying={onContinueModifying}
+      onPlanModeDecision={onPlanModeDecision}
+    />
   );
 }

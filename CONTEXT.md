@@ -80,6 +80,26 @@ _Avoid_: browser cache flag, local UI state, hidden text command
 A Plan Interaction Event that records the user's `revise`, `execute`, or `exit_plan` decision for a Proposed Plan. Restored Plan Review Cards use this event and any backend-submitted status as the sources of truth for whether the review has already been handled.
 _Avoid_: browser-submitted flag, frontend-only review state
 
+**Plan Revision Input**:
+The next user-authored chat turn after the user chooses to continue modifying a Proposed Plan. It is the content submitted with a `revise` Plan Review Decision and keeps Plan Mode active.
+_Avoid_: empty revise click, implicit plan rejection
+
+**Plan Mode Exit Feedback**:
+The user-visible confirmation that an `exit_plan` Plan Review Decision succeeded. It is expressed by the Plan Mode control leaving the composer area, not by adding a chat message or starting a Main Agent run.
+_Avoid_: assistant exit message, plan execution result
+
+**Plan Review Snapshot**:
+A read-only historical presentation of a Proposed Plan after it has appeared in the chat history. A **Plan Review Snapshot** preserves review context but is not the active place for submitting a Plan Review Decision.
+_Avoid_: stale actionable card, replayed plan approval
+
+**Accepted Plan Review Snapshot**:
+A Plan Review Snapshot for a Proposed Plan whose `execute` Plan Review Decision has been submitted. It shows that the plan was accepted and normal Main Agent execution has started or will start.
+_Avoid_: active execution approval, editable accepted plan
+
+**Revised Plan Review Snapshot**:
+A Plan Review Snapshot for a Proposed Plan whose `revise` Plan Review Decision has been submitted. It shows that the previous proposal was sent back for modification and may include the user's Plan Revision Input as review context.
+_Avoid_: active revision form, rejected plan
+
 **Planning Clarification Dismissal**:
 The user's decision to close the current Planning Clarification Card without submitting a Plan Interaction Response. It is a current-runtime UI action, leaves Plan Mode active, and restores normal chat input for the user; after session restore it is not remembered unless the clarification was superseded by a later user message.
 _Avoid_: exit Plan Mode, reject plan, submit empty response

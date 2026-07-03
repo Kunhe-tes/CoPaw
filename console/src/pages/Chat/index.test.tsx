@@ -77,6 +77,9 @@ vi.mock("@/components/agentscope-chat", () => {
             onSubmit: vi.fn(),
           })}
         </div>
+        <div data-testid="chat-sender-before-ui">
+          {mocks.capturedOptions?.sender?.beforeUI}
+        </div>
         <div data-testid="chat-sender-prefix">
           {mocks.capturedOptions?.sender?.prefix}
         </div>
@@ -421,6 +424,32 @@ vi.mock("./components/ApprovalActionCard", () => ({
 }));
 
 vi.mock("./components/PlanInteractionCards", () => ({
+  ActivePlanReviewCard: (props: {
+    onContinueModifying?: (data: Record<string, any>) => void;
+    onPlanModeDecision?: (enabled: boolean) => void;
+  }) => (
+    <div data-testid="active-plan-review-card">
+      <button
+        type="button"
+        onClick={() =>
+          props.onContinueModifying?.({
+            card_type: "plan_review",
+            plan_id: "plan-123",
+            title: "Implementation plan",
+            summary: "Plan summary",
+            steps: [],
+            risks: [],
+            verification: [],
+          })
+        }
+      >
+        Continue modifying
+      </button>
+      <button type="button" onClick={() => props.onPlanModeDecision?.(false)}>
+        Exit Plan Mode
+      </button>
+    </div>
+  ),
   ActivePlanClarificationCard: () => null,
   PlanClarificationCard: () => null,
   PlanReviewCard: () => null,
@@ -562,6 +591,187 @@ describe("ChatPage plan mode wiring", () => {
     );
     expect(mocks.updateChat).toHaveBeenCalledWith("chat-real-created", {
       meta: { plan_mode_enabled: true },
+    });
+  });
+
+  it("renders the active plan review card in the sender before UI", () => {
+    render(<ChatPage />);
+
+    expect(screen.getByTestId("active-plan-review-card")).toBeInTheDocument();
+  });
+
+  it("defers Continue modifying and sends the next submission as plan revision feedback", async () => {
+    render(<ChatPage />);
+
+    fireEvent.click(screen.getByRole("button", { name: "Continue modifying" }));
+
+    await waitFor(() => {
+      expect(mocks.capturedOptions?.sender?.beforeSubmit).toBeDefined();
+    });
+
+    const result = await mocks.capturedOptions?.sender?.beforeSubmit({
+      query: "Narrow the implementation scope",
+      fileList: [],
+      biz_params: {},
+    });
+
+    expect(result).toMatchObject({
+      query: "Narrow the implementation scope",
+      biz_params: {
+        mode: "plan",
+        plan_interaction_response: {
+          card_type: "plan_review",
+          plan_id: "plan-123",
+          decision: "revise",
+          feedback: "Narrow the implementation scope",
+        },
+      },
+    });
+  });
+
+  it("preserves an explicit plan interaction response after Continue modifying and clears the pending revision", async () => {
+    render(<ChatPage />);
+
+    fireEvent.click(screen.getByRole("button", { name: "Continue modifying" }));
+
+    await waitFor(() => {
+      expect(mocks.capturedOptions?.sender?.beforeSubmit).toBeDefined();
+    });
+
+    const explicitResponse = {
+      card_type: "plan_review",
+      plan_id: "plan-123",
+      decision: "execute",
+    };
+    const explicitResult = await mocks.capturedOptions?.sender?.beforeSubmit({
+      query: "Execute plan plan-123",
+      fileList: [],
+      biz_params: {
+        mode: "normal",
+        plan_interaction_response: explicitResponse,
+      },
+    });
+
+    expect(explicitResult).toMatchObject({
+      query: "Execute plan plan-123",
+      biz_params: {
+        mode: "normal",
+        plan_interaction_response: explicitResponse,
+      },
+    });
+
+    const ordinaryResult = await mocks.capturedOptions?.sender?.beforeSubmit({
+      query: "Ordinary follow up",
+      fileList: [],
+      biz_params: {},
+    });
+
+    expect(ordinaryResult).toMatchObject({
+      query: "Ordinary follow up",
+      biz_params: {
+        mode: "plan",
+      },
+    });
+    expect(
+      ordinaryResult?.biz_params?.plan_interaction_response,
+    ).toBeUndefined();
+  });
+
+  it("clears pending revision when Exit Plan Mode is clicked after Continue modifying", async () => {
+    render(<ChatPage />);
+
+    fireEvent.click(screen.getByRole("button", { name: "Continue modifying" }));
+    fireEvent.click(screen.getByRole("button", { name: "Exit Plan Mode" }));
+
+    await waitFor(() => {
+      expect(mocks.updateChat).toHaveBeenCalledWith("chat-1", {
+        meta: { plan_mode_enabled: false },
+      });
+    });
+
+    const result = await mocks.capturedOptions?.sender?.beforeSubmit({
+      query: "Ordinary follow up",
+      fileList: [],
+      biz_params: {},
+    });
+
+    expect(result).toMatchObject({
+      query: "Ordinary follow up",
+    });
+    expect(result?.biz_params?.plan_interaction_response).toBeUndefined();
+  });
+
+  it("clears pending revision when the active Plan Mode control is disabled after Continue modifying", async () => {
+    mocks.inputDisabled = false;
+    render(<ChatPage />);
+
+    fireEvent.click(screen.getByRole("button", { name: "Continue modifying" }));
+    fireEvent.click(screen.getAllByRole("button", { name: "计划模式" })[0]);
+
+    await waitFor(() => {
+      expect(mocks.updateChat).toHaveBeenCalledWith("chat-1", {
+        meta: { plan_mode_enabled: false },
+      });
+    });
+
+    const result = await mocks.capturedOptions?.sender?.beforeSubmit({
+      query: "Ordinary follow up",
+      fileList: [],
+      biz_params: {},
+    });
+
+    expect(result).toMatchObject({
+      query: "Ordinary follow up",
+    });
+    expect(result?.biz_params?.plan_interaction_response).toBeUndefined();
+  });
+
+  it("does not clear or replace composer input when Continue modifying is clicked", () => {
+    const setContentHandler = vi.fn();
+    document.addEventListener(
+      "agentscope-runtime:set-input-content",
+      setContentHandler,
+    );
+
+    try {
+      render(<ChatPage />);
+
+      fireEvent.click(
+        screen.getByRole("button", { name: "Continue modifying" }),
+      );
+
+      expect(setContentHandler).not.toHaveBeenCalled();
+    } finally {
+      document.removeEventListener(
+        "agentscope-runtime:set-input-content",
+        setContentHandler,
+      );
+    }
+  });
+
+  it("blocks an empty submission after Continue modifying", async () => {
+    render(<ChatPage />);
+
+    fireEvent.click(screen.getByRole("button", { name: "Continue modifying" }));
+
+    const result = await mocks.capturedOptions?.sender?.beforeSubmit({
+      query: "   ",
+      fileList: [],
+      biz_params: {},
+    });
+
+    expect(result).toBe(false);
+  });
+
+  it("passes a Plan Mode decision callback that can close local Plan Mode state", async () => {
+    render(<ChatPage />);
+
+    fireEvent.click(screen.getByRole("button", { name: "Exit Plan Mode" }));
+
+    await waitFor(() => {
+      expect(mocks.updateChat).toHaveBeenCalledWith("chat-1", {
+        meta: { plan_mode_enabled: false },
+      });
     });
   });
 

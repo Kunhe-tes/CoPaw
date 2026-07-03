@@ -157,6 +157,8 @@ export interface ChatPlanClarificationCardData {
   allow_custom_response?: boolean;
 }
 
+export type PlanReviewDecision = "revise" | "execute" | "exit_plan";
+
 export interface ChatPlanReviewCardData {
   card_type: "plan_review";
   plan_id: string;
@@ -166,6 +168,8 @@ export interface ChatPlanReviewCardData {
   risks: string[];
   verification: string[];
   status?: "pending" | "submitted";
+  submitted_decision?: PlanReviewDecision;
+  feedback?: string;
 }
 
 export type ChatPlanInteractionCardData =
@@ -187,6 +191,10 @@ function isPlanClarificationOption(
     typeof (value as PlanClarificationOption).id === "string" &&
     typeof (value as PlanClarificationOption).label === "string"
   );
+}
+
+function isPlanReviewDecision(value: unknown): value is PlanReviewDecision {
+  return value === "revise" || value === "execute" || value === "exit_plan";
 }
 
 function normalizePlanClarificationFields(
@@ -294,6 +302,10 @@ function normalizePlanInteractionCard(
       risks: card.risks,
       verification: card.verification,
       status: card.status === "submitted" ? "submitted" : undefined,
+      submitted_decision: isPlanReviewDecision(card.submitted_decision)
+        ? card.submitted_decision
+        : undefined,
+      feedback: typeof card.feedback === "string" ? card.feedback : undefined,
     };
   }
 

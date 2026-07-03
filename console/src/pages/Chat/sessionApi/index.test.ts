@@ -696,6 +696,55 @@ describe("SessionApi identity mapping", () => {
       card_type: "plan_review",
       plan_id: "plan-restore-1",
       status: "submitted",
+      submitted_decision: "execute",
+    });
+  });
+
+  it("restores submitted plan review revise decisions with feedback", () => {
+    const messages = convertMessages([
+      {
+        id: "assistant-plan",
+        role: "assistant",
+        type: "message",
+        content: [{ type: "text", text: "Review this plan" }],
+        metadata: {
+          plan_interaction_card: {
+            card_type: "plan_review",
+            plan_id: "plan-restore-2",
+            title: "Restore revise",
+            summary: "Plan summary",
+            steps: ["Step 1"],
+            risks: [],
+            verification: [],
+          },
+        },
+      },
+      {
+        id: "user-decision",
+        role: "user",
+        type: "message",
+        content: [{ type: "text", text: "Revise the plan" }],
+        metadata: {
+          plan_interaction_response: {
+            card_type: "plan_review",
+            plan_id: "plan-restore-2",
+            decision: "revise",
+            feedback: "Add rollback verification.",
+          },
+        },
+      },
+    ]);
+
+    const planCard = messages[0]?.cards?.find(
+      (card) => card.code === "PlanInteraction",
+    );
+
+    expect(planCard?.data).toMatchObject({
+      card_type: "plan_review",
+      plan_id: "plan-restore-2",
+      status: "submitted",
+      submitted_decision: "revise",
+      feedback: "Add rollback verification.",
     });
   });
 

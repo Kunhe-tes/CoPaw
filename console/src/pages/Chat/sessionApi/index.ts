@@ -20,6 +20,7 @@ import type {
   ChatRuntimeRequestCardData,
   ChatRuntimeResponseCardData,
   ChatTaskRunGroupCardData,
+  PlanReviewDecision,
 } from "../messageMeta";
 import {
   extractPlanInteractionCard,
@@ -113,6 +114,12 @@ interface TaskRunMetadata {
   runId: string;
   runIndex: number;
   section: string;
+}
+
+interface SubmittedPlanReview {
+  planId: string;
+  decision: PlanReviewDecision;
+  feedback?: string;
 }
 
 function extractApprovalAction(
@@ -438,7 +445,13 @@ function asRecord(value: unknown): Record<string, unknown> | null {
     : null;
 }
 
-function extractSubmittedPlanReviewId(message: Message): string | null {
+function isPlanReviewDecision(value: unknown): value is PlanReviewDecision {
+  return value === "revise" || value === "execute" || value === "exit_plan";
+}
+
+function extractSubmittedPlanReview(
+  message: Message,
+): SubmittedPlanReview | null {
   const record = asRecord(message);
   const metadata = asRecord(record?.metadata);
   const meta = asRecord(record?.meta);
@@ -458,40 +471,50 @@ function extractSubmittedPlanReviewId(message: Message): string | null {
     if (
       typeof planId === "string" &&
       planId &&
-      (decision === "revise" ||
-        decision === "execute" ||
-        decision === "exit_plan")
+      isPlanReviewDecision(decision)
     ) {
-      return planId;
+      const feedback = response.feedback;
+      return {
+        planId,
+        decision,
+        feedback: typeof feedback === "string" ? feedback : undefined,
+      };
     }
   }
 
   return null;
 }
 
-function collectSubmittedPlanReviewIds(messages: Message[]): Set<string> {
-  return new Set(
-    messages
-      .map(extractSubmittedPlanReviewId)
-      .filter((planId): planId is string => Boolean(planId)),
-  );
+function collectSubmittedPlanReviews(
+  messages: Message[],
+): Map<string, SubmittedPlanReview> {
+  const submittedPlanReviews = new Map<string, SubmittedPlanReview>();
+  messages.forEach((message) => {
+    const submitted = extractSubmittedPlanReview(message);
+    if (submitted) {
+      submittedPlanReviews.set(submitted.planId, submitted);
+    }
+  });
+  return submittedPlanReviews;
 }
 
 function markSubmittedPlanReviewCard(
   card: ChatPlanInteractionCardData | null,
-  submittedPlanReviewIds: Set<string>,
+  submittedPlanReviews: Map<string, SubmittedPlanReview>,
 ): ChatPlanInteractionCardData | null {
-  if (
-    !card ||
-    card.card_type !== "plan_review" ||
-    !submittedPlanReviewIds.has(card.plan_id)
-  ) {
+  const submitted =
+    card?.card_type === "plan_review"
+      ? submittedPlanReviews.get(card.plan_id)
+      : undefined;
+  if (!card || card.card_type !== "plan_review" || !submitted) {
     return card;
   }
 
   return {
     ...card,
     status: "submitted",
+    submitted_decision: submitted.decision,
+    feedback: submitted.feedback,
   } satisfies ChatPlanReviewCardData;
 }
 
@@ -530,7 +553,7 @@ function buildUserCard(msg: Message): IAgentScopeRuntimeWebUIMessage {
  */
 const buildResponseCard = (
   outputMessages: OutputMessage[],
-  submittedPlanReviewIds: Set<string>,
+  submittedPlanReviews: Map<string, SubmittedPlanReview>,
 ): IAgentScopeRuntimeWebUIMessage => {
   const timestamp = resolveGroupTimestamp(
     outputMessages.map((message) => ({
@@ -567,7 +590,7 @@ const buildResponseCard = (
       (found, message) => found ?? extractPlanInteractionCard(message),
       null,
     ),
-    submittedPlanReviewIds,
+    submittedPlanReviews,
   );
 
   const cards: NonNullable<IAgentScopeRuntimeWebUIMessage["cards"]> = [
@@ -625,7 +648,7 @@ export const convertMessages = (
   messages: Message[],
 ): IAgentScopeRuntimeWebUIMessage[] => {
   const result: IAgentScopeRuntimeWebUIMessage[] = [];
-  const submittedPlanReviewIds = collectSubmittedPlanReviewIds(messages);
+  const submittedPlanReviews = collectSubmittedPlanReviews(messages);
   let i = 0;
 
   while (i < messages.length) {
@@ -636,7 +659,7 @@ export const convertMessages = (
         result.push(
           buildResponseCard(
             [toOutputMessage(messages[i++])],
-            submittedPlanReviewIds,
+            submittedPlanReviews,
           ),
         );
         continue;
@@ -650,7 +673,7 @@ export const convertMessages = (
         outputMsgs.push(toOutputMessage(messages[i++]));
       }
       if (outputMsgs.length) {
-        result.push(buildResponseCard(outputMsgs, submittedPlanReviewIds));
+        result.push(buildResponseCard(outputMsgs, submittedPlanReviews));
       }
     }
   }

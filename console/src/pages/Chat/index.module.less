@@ -338,6 +338,11 @@
     opacity: 0.48;
     cursor: not-allowed;
   }
+
+  &[data-plan-mode-exiting="true"] {
+    pointer-events: none;
+    animation: planModeActiveButtonExit 0.18s ease forwards;
+  }
 }
 
 .planModeActiveIcon,
@@ -374,6 +379,34 @@
 
   .planModeCloseIcon {
     color: rgba(255, 255, 255, 0.58);
+  }
+}
+
+@keyframes planModeActiveButtonExit {
+  from {
+    opacity: 0.48;
+    transform: translateY(0) scale(1);
+  }
+
+  to {
+    opacity: 0;
+    transform: translateY(2px) scale(0.92);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .planModeActiveButton[data-plan-mode-exiting="true"] {
+    animation: planModeActiveButtonExitReduced 0.18s linear forwards;
+  }
+}
+
+@keyframes planModeActiveButtonExitReduced {
+  from {
+    opacity: 0.48;
+  }
+
+  to {
+    opacity: 0;
   }
 }
 

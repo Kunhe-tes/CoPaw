@@ -5,6 +5,8 @@ import { CloseCircleFilled, OrderedListOutlined } from "@ant-design/icons";
 import { ComposerQuickMenuItem } from "@/components/agentscope-chat/ComposerQuickMenu";
 import styles from "./index.module.less";
 
+const PLAN_MODE_BUTTON_EXIT_MS = 180;
+
 export type ChatPlanMode = "plan" | "normal";
 
 export type PlanModeSubmitCancelled = {
@@ -232,7 +234,43 @@ export function ActivePlanModeButton({
   displayLabel?: string;
   onDisable: () => void;
 }) {
-  if (!enabled) {
+  const [isRendered, setIsRendered] = React.useState(enabled);
+  const [isExiting, setIsExiting] = React.useState(false);
+  const exitTimerRef = React.useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  React.useEffect(() => {
+    if (exitTimerRef.current) {
+      clearTimeout(exitTimerRef.current);
+      exitTimerRef.current = null;
+    }
+
+    if (enabled) {
+      setIsRendered(true);
+      setIsExiting(false);
+      return undefined;
+    }
+
+    if (!isRendered) {
+      setIsExiting(false);
+      return undefined;
+    }
+
+    setIsExiting(true);
+    exitTimerRef.current = setTimeout(() => {
+      setIsRendered(false);
+      setIsExiting(false);
+      exitTimerRef.current = null;
+    }, PLAN_MODE_BUTTON_EXIT_MS);
+
+    return () => {
+      if (exitTimerRef.current) {
+        clearTimeout(exitTimerRef.current);
+        exitTimerRef.current = null;
+      }
+    };
+  }, [enabled, isRendered]);
+
+  if (!enabled && !isRendered) {
     return null;
   }
 
@@ -241,7 +279,8 @@ export function ActivePlanModeButton({
       type="button"
       className={styles.planModeActiveButton}
       aria-label={label}
-      disabled={disabled}
+      data-plan-mode-exiting={isExiting ? "true" : undefined}
+      disabled={disabled || isExiting}
       onClick={onDisable}
     >
       <OrderedListOutlined className={styles.planModeActiveIcon} />
