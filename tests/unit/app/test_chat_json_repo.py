@@ -11,6 +11,7 @@ from pathlib import Path
 import pytest
 
 from swe.app.runner.models import ChatSpec, ChatsFile
+from swe.app.runner.repo import json_repo
 from swe.app.runner.repo.json_repo import JsonChatRepository
 
 
@@ -44,15 +45,27 @@ async def test_chat_repo_load_uses_runtime_state_worker(
     operations: list[str] = []
     state = {"in_worker": False}
 
+    original_read_bytes = Path.read_bytes
     original_read_text = Path.read_text
     original_loads = json.loads
     original_model_validate = ChatsFile.model_validate
+    original_sha256 = json_repo.hashlib.sha256
+
+    def guarded_read_bytes(self: Path):
+        if self == path:
+            assert state["in_worker"], "read_bytes ran outside runtime worker"
+            operations.append("read")
+        return original_read_bytes(self)
 
     def guarded_read_text(self: Path, *args, **kwargs):
         if self == path:
-            assert state["in_worker"], "read_text ran outside runtime worker"
-            operations.append("read")
+            raise AssertionError("load should not read text separately")
         return original_read_text(self, *args, **kwargs)
+
+    def guarded_sha256(*args, **kwargs):
+        assert state["in_worker"], "signature hash ran outside runtime worker"
+        operations.append("hash")
+        return original_sha256(*args, **kwargs)
 
     def guarded_loads(*args, **kwargs):
         assert state["in_worker"], "json.loads ran outside runtime worker"
@@ -79,7 +92,9 @@ async def test_chat_repo_load_uses_runtime_state_worker(
         "swe.app.runner.repo.json_repo.run_runtime_state_work",
         fake_worker,
     )
+    monkeypatch.setattr(Path, "read_bytes", guarded_read_bytes)
     monkeypatch.setattr(Path, "read_text", guarded_read_text)
+    monkeypatch.setattr(json_repo.hashlib, "sha256", guarded_sha256)
     monkeypatch.setattr(
         "swe.app.runner.repo.json_repo.json.loads",
         guarded_loads,
@@ -95,7 +110,7 @@ async def test_chat_repo_load_uses_runtime_state_worker(
 
     assert [chat.session_id for chat in loaded.chats] == ["s1"]
     assert calls
-    assert operations == ["read", "parse", "validate"]
+    assert operations == ["read", "hash", "parse", "validate"]
 
 
 @pytest.mark.asyncio
@@ -265,18 +280,18 @@ async def test_chat_repo_retries_when_file_changes_during_load(
     new_chat = ChatSpec(session_id="new", user_id="u1", channel="console")
     _write_chats(path, [old_chat])
 
-    original_read_text = Path.read_text
+    original_read_bytes = Path.read_bytes
     swapped = False
 
-    def swapping_read_text(self: Path, *args, **kwargs):
+    def swapping_read_bytes(self: Path) -> bytes:
         nonlocal swapped
-        contents = original_read_text(self, *args, **kwargs)
+        contents = original_read_bytes(self)
         if self == path and not swapped:
             swapped = True
             _write_chats(path, [new_chat])
         return contents
 
-    monkeypatch.setattr(Path, "read_text", swapping_read_text)
+    monkeypatch.setattr(Path, "read_bytes", swapping_read_bytes)
 
     repo = JsonChatRepository(path)
     await repo.load()
@@ -285,6 +300,40 @@ async def test_chat_repo_retries_when_file_changes_during_load(
     loaded_new = await repo.get_chat(new_chat.id)
     assert loaded_new is not None
     assert loaded_new.session_id == "new"
+
+
+@pytest.mark.asyncio
+async def test_chat_repo_load_parses_the_same_bytes_used_for_signature(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    path = tmp_path / "chats.json"
+    old_chat = ChatSpec(session_id="old", user_id="u1", channel="console")
+    new_chat = ChatSpec(session_id="new", user_id="u1", channel="console")
+    _write_chats(path, [old_chat])
+    new_payload = _saved_chats_payload([new_chat])
+    read_text_calls = 0
+
+    original_read_text = Path.read_text
+
+    def mismatched_read_text(self: Path, *args, **kwargs):
+        nonlocal read_text_calls
+        if self == path:
+            read_text_calls += 1
+            return new_payload
+        return original_read_text(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", mismatched_read_text)
+
+    repo = JsonChatRepository(path)
+    loaded = await repo.load()
+
+    assert read_text_calls == 0
+    assert [chat.id for chat in loaded.chats] == [old_chat.id]
+    assert await repo.get_chat(new_chat.id) is None
+    loaded_old = await repo.get_chat(old_chat.id)
+    assert loaded_old is not None
+    assert loaded_old.session_id == "old"
 
 
 @pytest.mark.asyncio

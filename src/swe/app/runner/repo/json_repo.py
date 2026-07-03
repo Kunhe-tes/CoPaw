@@ -67,14 +67,14 @@ class JsonChatRepository(BaseChatRepository):
         """Get the repository file path."""
         return self._path
 
-    def _file_signature(self) -> _FileSignature | None:
+    def _read_file_state(self) -> tuple[_FileSignature, bytes] | None:
         try:
             before_stat = self._path.stat()
         except FileNotFoundError:
             try:
                 self._path.stat()
             except FileNotFoundError:
-                return _FileSignature(exists=False)
+                return _FileSignature(exists=False), b""
             return None
 
         try:
@@ -98,7 +98,7 @@ class JsonChatRepository(BaseChatRepository):
         if before_identity != after_identity:
             return None
 
-        return _FileSignature(
+        signature = _FileSignature(
             exists=True,
             mtime_ns=after_stat.st_mtime_ns,
             ctime_ns=after_stat.st_ctime_ns,
@@ -106,32 +106,32 @@ class JsonChatRepository(BaseChatRepository):
             inode=after_stat.st_ino,
             digest=hashlib.sha256(contents).hexdigest(),
         )
+        return signature, contents
+
+    def _file_signature(self) -> _FileSignature | None:
+        state = self._read_file_state()
+        if state is None:
+            return None
+        signature, _ = state
+        return signature
 
     def _load_sync(self) -> tuple[_FileSignature | None, ChatsFile]:
         last_chats_file = ChatsFile(version=1, chats=[])
 
         for _ in range(_LOAD_STABLE_READ_ATTEMPTS):
-            before_signature = self._file_signature()
-            if before_signature is None:
+            state = self._read_file_state()
+            if state is None:
                 continue
+            signature, contents = state
 
-            if not before_signature.exists:
+            if not signature.exists:
                 chats_file = ChatsFile(version=1, chats=[])
-                after_signature = self._file_signature()
             else:
-                try:
-                    data = json.loads(self._path.read_text(encoding="utf-8"))
-                except FileNotFoundError:
-                    continue
+                data = json.loads(contents.decode("utf-8"))
                 chats_file = ChatsFile.model_validate(data)
-                after_signature = self._file_signature()
 
             last_chats_file = chats_file
-            if (
-                after_signature is not None
-                and before_signature == after_signature
-            ):
-                return after_signature, chats_file
+            return signature, chats_file
 
         return None, last_chats_file
 
