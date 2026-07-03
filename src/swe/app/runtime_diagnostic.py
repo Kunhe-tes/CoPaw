@@ -13,6 +13,7 @@ import time
 from collections.abc import Callable
 from typing import Any
 
+import anyio
 import psutil
 
 from swe.app.pod_resources import (
@@ -56,6 +57,9 @@ class RuntimeDiagnosticManager:
             [],
             tuple[int, int],
         ] = collect_pod_disk_io_bytes,
+        thread_limiter: Callable[[], Any] = (
+            anyio.to_thread.current_default_thread_limiter
+        ),
         log_sink: Callable[[str], None] | None = None,
         monotonic_time: Callable[[], float] = time.monotonic,
         sleep: Callable[[float], Any] = asyncio.sleep,
@@ -74,6 +78,7 @@ class RuntimeDiagnosticManager:
         self._disk_usage = disk_usage
         self._pod_open_fd_count = pod_open_fd_count
         self._pod_disk_io_bytes = pod_disk_io_bytes
+        self._thread_limiter = thread_limiter
         self._log_sink = log_sink or logger.info
         self._monotonic_time = monotonic_time
         self._sleep = sleep
@@ -386,6 +391,29 @@ class RuntimeDiagnosticManager:
             )
         return {"pod_open_fd_count": pod_open_fd_count, **disk_metrics}
 
+    def _threadpool_metrics(self) -> dict[str, object]:
+        empty: dict[str, object] = {
+            "anyio_threadpool_total_tokens": None,
+            "anyio_threadpool_borrowed_tokens": None,
+            "anyio_threadpool_available_tokens": None,
+        }
+        try:
+            limiter = self._thread_limiter()
+            total_tokens = int(limiter.total_tokens)
+            borrowed_tokens = int(limiter.borrowed_tokens)
+        except Exception:  # pylint: disable=broad-except
+            logger.exception(
+                "Failed to collect runtime diagnostic AnyIO threadpool metrics",
+            )
+            return empty
+
+        return {
+            "anyio_threadpool_total_tokens": total_tokens,
+            "anyio_threadpool_borrowed_tokens": borrowed_tokens,
+            "anyio_threadpool_available_tokens": total_tokens
+            - borrowed_tokens,
+        }
+
     def build_diagnostic_payload(self) -> dict[str, object]:
         """Build the current flat diagnostic-flow payload."""
         lag_samples = self._event_loop_lag_samples
@@ -415,6 +443,7 @@ class RuntimeDiagnosticManager:
                 ),
             },
         )
+        payload.update(self._threadpool_metrics())
         payload.update(self._process_metrics())
         payload.update(self._pod_metrics())
         payload.update(self._storage_metrics())
