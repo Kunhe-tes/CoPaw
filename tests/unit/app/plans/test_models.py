@@ -49,6 +49,17 @@ def test_proposed_plan_generates_backend_plan_id() -> None:
     assert plan.title == "Investigate failing tests"
 
 
+def test_proposed_plan_create_drops_blank_list_items() -> None:
+    plan = ProposedPlanCreate.model_validate(
+        {
+            **_plan_payload(),
+            "steps": ["Phase one", "", "  ", "Phase two"],
+        },
+    )
+
+    assert plan.steps == ["Phase one", "Phase two"]
+
+
 @pytest.mark.parametrize(
     "missing_field",
     [

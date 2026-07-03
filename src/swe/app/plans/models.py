@@ -105,11 +105,10 @@ class ProposedPlanCreate(_StrictPlanModel):
     )
     @classmethod
     def _non_empty_text_list(cls, value: list[str]) -> list[str]:
-        if not value:
+        cleaned = [item.strip() for item in value if item.strip()]
+        if not cleaned:
             raise ValueError("must not be empty")
-        if any(not item.strip() for item in value):
-            raise ValueError("items must not be empty")
-        return value
+        return cleaned
 
 
 class PlanReviewDecision(_StrictPlanModel):

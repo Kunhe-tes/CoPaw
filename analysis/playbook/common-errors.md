@@ -2,6 +2,35 @@
 
 本文档只收录仓库中已经出现过、且有明确入口可追的高频报错。
 
+## submit_proposed_plan 报 items must not be empty
+
+### 症状
+
+- 模型调用 `submit_proposed_plan` 时工具执行失败
+- 常见报错为：
+  - `1 validation error for ProposedPlanCreate`
+  - `steps Value error, items must not be empty`
+- 入参中的 `steps`、`risks` 或 `verification` 使用空字符串分隔段落，例如 `["阶段一", "...", "", "阶段二"]`
+
+### 典型原因
+
+- 模型把 Markdown/文本计划里的空行保留成列表中的 `""` 或空白字符串
+- `ProposedPlanCreate` 会校验计划列表字段，历史实现曾把任意空白列表项视为硬错误
+- 这类空项通常只是展示分隔符，不代表一条真实计划步骤
+
+### 第一落点
+
+- [src/swe/app/plans/models.py](../../src/swe/app/plans/models.py)
+- 重点看 `ProposedPlanCreate._non_empty_text_list()` 是否先清理空白项，再校验剩余有效项
+- 对应回归测试：
+  - [tests/unit/app/plans/test_models.py](../../tests/unit/app/plans/test_models.py)
+
+### 第一阶段处理
+
+- 工具调用侧不要主动传入空字符串作为分隔符，阶段标题可以作为普通步骤保留
+- 后端模型层可以清理空白列表项，但清理后列表为空时仍必须报 `must not be empty`
+- 不要放宽 `title`、`summary` 或未知字段校验，避免前端/模型注入未声明语义
+
 ## ask_plan_clarification 报 str object has no attribute get
 
 ### 症状
