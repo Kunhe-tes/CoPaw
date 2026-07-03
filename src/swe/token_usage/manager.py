@@ -164,7 +164,14 @@ class TokenUsageManager:
 
     async def _save_data(self, data: dict) -> None:
         """Persist token usage data to disk."""
-        await run_runtime_state_work(self._save_data_sync, data)
+        save_task = asyncio.create_task(
+            run_runtime_state_work(self._save_data_sync, data),
+        )
+        try:
+            await asyncio.shield(save_task)
+        except asyncio.CancelledError:
+            await save_task
+            raise
 
     async def record(
         self,

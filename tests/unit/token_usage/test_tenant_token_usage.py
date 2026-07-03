@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import sys
 from datetime import date
 from pathlib import Path
@@ -131,3 +132,108 @@ def test_token_usage_record_uses_runtime_state_worker(
     assert state["loads_in_worker"] is True
     assert state["dumps_in_worker"] is True
     assert state["worker_calls"] == ["_load_data_sync", "_save_data_sync"]
+
+
+def test_cancelled_record_waits_for_inflight_save_before_releasing_lock(
+    tmp_path,
+    monkeypatch,
+):
+    TokenUsageManager._instance = None
+
+    tenant_workspace = tmp_path / "tenant-d"
+    tenant_workspace.mkdir()
+    usage_path = tenant_workspace / "token_usage.json"
+    usage_path.write_text("{}", encoding="utf-8")
+
+    async def run_scenario():
+        first_save_started = asyncio.Event()
+        first_save_can_finish = asyncio.Event()
+        first_save_finished = asyncio.Event()
+        pending_save_tasks: list[asyncio.Task] = []
+        state = {"save_calls": 0}
+
+        async def fake_run_runtime_state_work(func, /, *args, **kwargs):
+            if func.__name__ != "_save_data_sync":
+                return func(*args, **kwargs)
+
+            state["save_calls"] += 1
+            save_call = state["save_calls"]
+
+            async def save_worker():
+                if save_call == 1:
+                    first_save_started.set()
+                    await first_save_can_finish.wait()
+                result = func(*args, **kwargs)
+                if save_call == 1:
+                    first_save_finished.set()
+                return result
+
+            save_task = asyncio.create_task(save_worker())
+            pending_save_tasks.append(save_task)
+            return await asyncio.shield(save_task)
+
+        monkeypatch.setattr(
+            token_usage_manager_module,
+            "run_runtime_state_work",
+            fake_run_runtime_state_work,
+            raising=False,
+        )
+
+        with tenant_context(
+            tenant_id="tenant-d",
+            workspace_dir=tenant_workspace,
+        ):
+            scoped_manager = TokenUsageManager.get_instance()
+            first_record = asyncio.create_task(
+                scoped_manager.record(
+                    provider_id="openai",
+                    model_name="gpt-5",
+                    prompt_tokens=1,
+                    completion_tokens=2,
+                    at_date=date(2026, 4, 11),
+                ),
+            )
+            await first_save_started.wait()
+            first_record.cancel()
+            await asyncio.sleep(0)
+
+            second_record = asyncio.create_task(
+                scoped_manager.record(
+                    provider_id="openai",
+                    model_name="gpt-5",
+                    prompt_tokens=10,
+                    completion_tokens=20,
+                    at_date=date(2026, 4, 11),
+                ),
+            )
+
+            try:
+                await asyncio.wait_for(
+                    asyncio.shield(second_record),
+                    timeout=0.05,
+                )
+                second_finished_before_first_save = True
+            except asyncio.TimeoutError:
+                second_finished_before_first_save = False
+            finally:
+                first_save_can_finish.set()
+                results = await asyncio.gather(
+                    first_record,
+                    second_record,
+                    return_exceptions=True,
+                )
+                if pending_save_tasks:
+                    await asyncio.gather(*pending_save_tasks)
+
+            assert isinstance(results[0], asyncio.CancelledError)
+            assert results[1] is None
+            assert first_save_finished.is_set()
+            assert second_finished_before_first_save is False
+
+    asyncio.run(run_scenario())
+
+    stored = json.loads(usage_path.read_text(encoding="utf-8"))
+    entry = stored["2026-04-11"]["openai:gpt-5"]
+    assert entry["prompt_tokens"] == 11
+    assert entry["completion_tokens"] == 22
+    assert entry["call_count"] == 2
