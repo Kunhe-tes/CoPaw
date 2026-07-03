@@ -490,3 +490,133 @@ async def test_chat_repo_get_chat_returns_copy(
     assert second is not None
     assert second.session_id == "s1"
     assert second.meta == {}
+
+
+@pytest.mark.asyncio
+async def test_chat_repo_load_missing_file_returns_empty_and_publishes_signature(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "chats.json"
+    repo = JsonChatRepository(path)
+
+    loaded = await repo.load()
+
+    assert loaded.chats == []
+    assert repo._snapshot_signature == json_repo._FileSignature(exists=False)
+
+
+@pytest.mark.asyncio
+async def test_chat_repo_save_clears_snapshot_when_signature_is_unstable(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    path = tmp_path / "chats.json"
+    old_chat = ChatSpec(session_id="old", user_id="u1", channel="console")
+    new_chat = ChatSpec(session_id="new", user_id="u1", channel="console")
+    repo = JsonChatRepository(path)
+    await repo.save(ChatsFile(version=1, chats=[old_chat]))
+    assert repo._snapshot is not None
+
+    original_save_sync = repo._save_sync
+
+    def save_without_stable_signature(chats_file: ChatsFile) -> None:
+        original_save_sync(chats_file)
+
+    monkeypatch.setattr(repo, "_save_sync", save_without_stable_signature)
+
+    await repo.save(ChatsFile(version=1, chats=[new_chat]))
+
+    persisted = json.loads(path.read_text(encoding="utf-8"))
+    assert [chat["session_id"] for chat in persisted["chats"]] == ["new"]
+    assert repo._snapshot_signature is None
+    assert repo._snapshot is None
+    assert repo._chat_index == {}
+
+
+@pytest.mark.asyncio
+async def test_chat_repo_load_raises_when_all_stable_read_attempts_fail(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    path = tmp_path / "chats.json"
+    _write_chats(
+        path,
+        [ChatSpec(session_id="existing", user_id="u1", channel="console")],
+    )
+    repo = JsonChatRepository(path)
+
+    monkeypatch.setattr(repo, "_read_file_state", lambda: None)
+
+    with pytest.raises(RuntimeError, match="unstable"):
+        await repo.load()
+
+
+@pytest.mark.asyncio
+async def test_chat_repo_get_chat_propagates_unstable_load_error(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    path = tmp_path / "chats.json"
+    chat = ChatSpec(session_id="existing", user_id="u1", channel="console")
+    _write_chats(path, [chat])
+    repo = JsonChatRepository(path)
+
+    monkeypatch.setattr(repo, "_read_file_state", lambda: None)
+
+    with pytest.raises(RuntimeError, match="unstable"):
+        await repo.get_chat(chat.id)
+
+
+@pytest.mark.asyncio
+async def test_chat_repo_upsert_does_not_save_after_unstable_load(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    path = tmp_path / "chats.json"
+    existing = ChatSpec(
+        session_id="existing",
+        user_id="u1",
+        channel="console",
+    )
+    incoming = ChatSpec(session_id="incoming", user_id="u1", channel="console")
+    _write_chats(path, [existing])
+    original_payload = path.read_text(encoding="utf-8")
+    repo = JsonChatRepository(path)
+
+    def fail_save(_chats_file: ChatsFile):
+        raise AssertionError("unstable load must not save empty state")
+
+    monkeypatch.setattr(repo, "_read_file_state", lambda: None)
+    monkeypatch.setattr(repo, "_save_sync", fail_save)
+
+    with pytest.raises(RuntimeError, match="unstable"):
+        await repo.upsert_chat(incoming)
+
+    assert path.read_text(encoding="utf-8") == original_payload
+
+
+@pytest.mark.asyncio
+async def test_chat_repo_delete_chats_does_not_save_after_unstable_load(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    path = tmp_path / "chats.json"
+    existing = ChatSpec(
+        session_id="existing",
+        user_id="u1",
+        channel="console",
+    )
+    _write_chats(path, [existing])
+    original_payload = path.read_text(encoding="utf-8")
+    repo = JsonChatRepository(path)
+
+    def fail_save(_chats_file: ChatsFile):
+        raise AssertionError("unstable load must not save empty state")
+
+    monkeypatch.setattr(repo, "_read_file_state", lambda: None)
+    monkeypatch.setattr(repo, "_save_sync", fail_save)
+
+    with pytest.raises(RuntimeError, match="unstable"):
+        await repo.delete_chats([existing.id])
+
+    assert path.read_text(encoding="utf-8") == original_payload

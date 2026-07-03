@@ -17,6 +17,10 @@ from ..models import ChatSpec, ChatsFile
 _LOAD_STABLE_READ_ATTEMPTS = 3
 
 
+class _UnstableChatRepositoryReadError(RuntimeError):
+    """Raised when chats.json cannot be read in a stable state."""
+
+
 @dataclass(frozen=True)
 class _FileSignature:
     """Observable chats.json state used to validate in-process snapshots."""
@@ -115,9 +119,7 @@ class JsonChatRepository(BaseChatRepository):
         signature, _ = state
         return signature
 
-    def _load_sync(self) -> tuple[_FileSignature | None, ChatsFile]:
-        last_chats_file = ChatsFile(version=1, chats=[])
-
+    def _load_sync(self) -> tuple[_FileSignature, ChatsFile]:
         for _ in range(_LOAD_STABLE_READ_ATTEMPTS):
             state = self._read_file_state()
             if state is None:
@@ -130,10 +132,12 @@ class JsonChatRepository(BaseChatRepository):
                 data = json.loads(contents.decode("utf-8"))
                 chats_file = ChatsFile.model_validate(data)
 
-            last_chats_file = chats_file
             return signature, chats_file
 
-        return None, last_chats_file
+        raise _UnstableChatRepositoryReadError(
+            "unstable chats repository read after "
+            f"{_LOAD_STABLE_READ_ATTEMPTS} attempts: {self._path}",
+        )
 
     def _save_sync(self, chats_file: ChatsFile) -> _FileSignature | None:
         # Create parent directory if needed
@@ -166,11 +170,9 @@ class JsonChatRepository(BaseChatRepository):
 
     def _load_and_prepare_snapshot_sync(
         self,
-    ) -> tuple[_SnapshotState | None, ChatsFile]:
+    ) -> tuple[_SnapshotState, ChatsFile]:
         signature, chats_file = self._load_sync()
         caller_chats_file = chats_file.model_copy(deep=True)
-        if signature is None:
-            return None, caller_chats_file
         return (
             self._prepare_snapshot_sync(signature, chats_file),
             caller_chats_file,
