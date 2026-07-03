@@ -38,7 +38,8 @@ def _publish(svc, source_id, name, bbk_ids=None):
         skill_md="",
         bbk_ids=bbk_ids or [],
     )
-    return asyncio.run(svc.publish_skill(source_id, req))
+    item, _ = asyncio.run(svc.publish_skill(source_id, req))
+    return item
 
 
 def test_list_skills_returns_active_items(tmp_path):
@@ -147,7 +148,10 @@ def test_get_my_skills_returns_list(tmp_path):
 
 
 def test_get_received_skills_returns_only_received(tmp_path):
-    from market.marketplace.fs import get_user_skills_dir
+    from market.marketplace.fs import (
+        get_user_skill_manifest_path,
+        get_user_skills_dir,
+    )
 
     skills_dir = get_user_skills_dir(
         tmp_path / "swe",
@@ -162,9 +166,30 @@ def test_get_received_skills_returns_only_received(tmp_path):
     )
     d2 = skills_dir / "received_skill"
     d2.mkdir(parents=True)
-    (d2 / "skill.json").write_text(
+    manifest_path = get_user_skill_manifest_path(
+        tmp_path / "swe",
+        "user2",
+        source_id="src_a",
+    )
+    manifest_path.parent.mkdir(parents=True, exist_ok=True)
+    manifest_path.write_text(
         json.dumps(
-            {"source": "marketplace:item-1", "received_version": "1.0.0"},
+            {
+                "schema_version": "workspace-skill-manifest.v1",
+                "version": 1,
+                "skills": {
+                    "created_skill": {
+                        "source": "customized",
+                        "metadata": {},
+                    },
+                    "received_skill": {
+                        "source": "marketplace:item-1",
+                        "metadata": {
+                            "received_version": "1.0.0",
+                        },
+                    },
+                },
+            },
         ),
         encoding="utf-8",
     )

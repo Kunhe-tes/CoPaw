@@ -83,7 +83,7 @@ def test_unpublish_skill_returns_204(tmp_path):
         skill_json={},
         skill_md="",
     )
-    item = asyncio.run(svc.publish_skill("src_a", req))
+    item, _ = asyncio.run(svc.publish_skill("src_a", req))
     client = TestClient(app)
     resp = client.delete(
         f"/api/market/skills/{item.item_id}",
@@ -125,7 +125,7 @@ def test_distribute_skill_returns_200(tmp_path):
         skill_json={},
         skill_md="",
     )
-    item = asyncio.run(svc.publish_skill("src_a", req))
+    item, _ = asyncio.run(svc.publish_skill("src_a", req))
     svc.db.fetch_all = AsyncMock(
         return_value=[
             {"tenant_id": "user1", "tenant_name": "User One", "bbk_id": "200"},
