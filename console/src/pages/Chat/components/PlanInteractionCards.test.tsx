@@ -1111,8 +1111,13 @@ describe("Plan interaction cards", () => {
   });
 
   it("keeps action buttons in active plan review mode", () => {
-    render(<PlanReviewCard active data={createReviewData()} />);
+    const { container } = render(
+      <PlanReviewCard active data={createReviewData()} />,
+    );
 
+    expect(
+      container.querySelector(`.${styles.planReviewActiveCard}`),
+    ).toBeInTheDocument();
     expect(
       screen.getByRole("button", { name: "Continue modifying" }),
     ).toBeInTheDocument();

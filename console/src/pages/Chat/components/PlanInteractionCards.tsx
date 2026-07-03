@@ -890,7 +890,7 @@ function PlanReviewActiveCard({
 
   return (
     <section
-      className={styles.planReviewCard}
+      className={`${styles.planReviewCard} ${styles.planReviewActiveCard}`}
       data-plan-review-card="true"
       data-active-plan-review-card="true"
       role="region"

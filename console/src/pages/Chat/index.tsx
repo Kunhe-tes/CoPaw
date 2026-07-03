@@ -114,7 +114,6 @@ import ApprovalActionCard from "./components/ApprovalActionCard";
 import {
   ActivePlanClarificationCard,
   ActivePlanReviewCard,
-  PlanReviewCard,
 } from "./components/PlanInteractionCards";
 import TaskRunGroupCard from "./components/TaskRunGroupCard";
 import TaskProgressFloatingCard from "./components/TaskProgressFloatingCard";
@@ -124,17 +123,18 @@ import {
   PlanModeMenuItem,
   getPlanModeEnabled,
   getPlanModeForRequest,
+  getScopedPlanModeEnabled,
   persistPlanModeState,
   preparePlanModeSubmit,
   resolveActivePlanModeSession,
   isPlanModeSubmitCancelled,
+  type PlanModeLocalState,
   type PlanModeSessionLike,
 } from "./planMode";
 import { AutoPreviewHtmlProvider } from "@/components/agentscope-chat/AutoPreviewHtmlContext";
 import { HtmlPreviewTrackingProvider } from "@/components/agentscope-chat/HtmlPreviewTrackingContext";
 import type {
   ChatApprovalActionCardData,
-  ChatPlanInteractionCardData,
   ChatPlanReviewCardData,
   ChatRuntimeRequestCardData,
   ChatRuntimeResponseCardData,
@@ -191,10 +191,7 @@ const chatCardRenderers = {
   ApprovalAction: (props: { data: ChatApprovalActionCardData }) => (
     <ApprovalActionCard {...props} />
   ),
-  PlanInteraction: (props: { data: ChatPlanInteractionCardData }) =>
-    props.data.card_type === "plan_clarification" ? null : (
-      <PlanReviewCard data={props.data} />
-    ),
+  PlanInteraction: () => null,
   TaskRunGroupCard: (props: { data: ChatTaskRunGroupCardData }) => {
     const feedback = useChatFeedbackRenderContext();
     return (
@@ -577,6 +574,7 @@ export default function ChatPage() {
   } = useExecutionModelOptions(true);
   const {
     sessions,
+    setSessions,
     setSessionLoading,
     currentSessionId: activeSessionId,
   } = useChatAnywhereSessionsState();
@@ -930,32 +928,67 @@ export default function ChatPage() {
       (feedbackLoading ||
         feedbackSessionId !== lastFeedbackSessionIdRef.current),
   );
+  const activePlanModeSessionIds = useMemo(
+    () => (chatId ? [chatId] : [activeSessionId]),
+    [activeSessionId, chatId],
+  );
   const activePlanModeSession = useMemo<PlanModeSession | null>(() => {
-    return resolveActivePlanModeSession(sessions, [
-      activeSessionId,
-      chatId,
-      window.currentSessionId,
-    ]) as PlanModeSession | null;
-  }, [activeSessionId, chatId, sessions]);
+    return resolveActivePlanModeSession(
+      sessions,
+      activePlanModeSessionIds,
+    ) as PlanModeSession | null;
+  }, [activePlanModeSessionIds, sessions]);
   const activePlanModeMetadataEnabled = getPlanModeEnabled(
     activePlanModeSession,
   );
-  const [planModeEnabled, setPlanModeEnabled] = useState(
-    activePlanModeMetadataEnabled,
-  );
+  const activePlanModeScopeKey = chatId || activeSessionId || "";
+  const [planModeLocalState, setPlanModeLocalState] =
+    useState<PlanModeLocalState>({
+      scopeKey: activePlanModeScopeKey,
+      enabled: activePlanModeMetadataEnabled,
+    });
+  const planModeEnabled = getScopedPlanModeEnabled({
+    metadataEnabled: activePlanModeMetadataEnabled,
+    localState: planModeLocalState,
+    scopeKey: activePlanModeScopeKey,
+  });
   const [pendingPlanRevision, setPendingPlanRevision] =
     useState<PendingPlanRevision | null>(null);
   const activePlanModeSessionRef = useRef<PlanModeSession | null>(null);
+  const activePlanModeScopeKeyRef = useRef(activePlanModeScopeKey);
   activePlanModeSessionRef.current = activePlanModeSession;
+  activePlanModeScopeKeyRef.current = activePlanModeScopeKey;
 
   useEffect(() => {
-    setPlanModeEnabled(activePlanModeMetadataEnabled);
-  }, [activePlanModeMetadataEnabled, activePlanModeSession?.id]);
+    setPlanModeLocalState({
+      scopeKey: activePlanModeScopeKey,
+      enabled: activePlanModeMetadataEnabled,
+    });
+  }, [activePlanModeMetadataEnabled, activePlanModeScopeKey]);
+
+  const setPlanModeEnabledForScope = useCallback(
+    (scopeKey: string, enabled: boolean) => {
+      setPlanModeLocalState((current) => {
+        if (activePlanModeScopeKeyRef.current !== scopeKey) {
+          return current;
+        }
+        return { scopeKey, enabled };
+      });
+    },
+    [],
+  );
+
+  const setPlanModeEnabledForActiveScope = useCallback(
+    (enabled: boolean) => {
+      setPlanModeEnabledForScope(activePlanModeScopeKeyRef.current, enabled);
+    },
+    [setPlanModeEnabledForScope],
+  );
 
   const activePlanRevisionScopeKey =
     activePlanModeSession?.id ||
-    activeSessionId ||
     chatId ||
+    activeSessionId ||
     window.currentSessionId ||
     "";
 
@@ -969,16 +1002,17 @@ export default function ChatPage() {
       meta: Record<string, unknown>,
     ): Promise<string | null> => {
       const candidateSessionId =
+        chatId ||
         session?.id ||
         activeSessionId ||
-        chatId ||
         window.currentSessionId ||
         "";
       const existingChatId =
+        (chatId ? sessionApi.getChatIdForSession(chatId) : null) ||
+        (chatId && !/^\d+$/.test(chatId) ? chatId : null) ||
         sessionApi.getChatIdForSession(candidateSessionId) ||
         session?.realId ||
-        (session?.id && !/^\d+$/.test(session.id) ? session.id : null) ||
-        (chatId ? sessionApi.getChatIdForSession(chatId) : null);
+        (session?.id && !/^\d+$/.test(session.id) ? session.id : null);
 
       if (existingChatId) {
         return existingChatId;
@@ -1005,24 +1039,36 @@ export default function ChatPage() {
 
   const persistPlanMode = useCallback(
     async (enabled: boolean) => {
+      const scopeKey = activePlanModeScopeKeyRef.current;
       await persistPlanModeState({
         enabled,
         session: activePlanModeSessionRef.current,
         ensureChatId: ensurePlanModeChatId,
         updateChat: chatApi.updateChat,
-        updateSession: async (session) =>
-          sessionApi.updateSession(
+        updateSession: async (session) => {
+          const nextSessions = await sessionApi.updateSession(
             session as Parameters<typeof sessionApi.updateSession>[0] & {
               meta: Record<string, unknown>;
             },
-          ),
-        setPlanModeEnabled,
+            { refreshList: false },
+          );
+          setSessions(nextSessions);
+        },
+        setPlanModeEnabled: (nextEnabled) => {
+          setPlanModeEnabledForScope(scopeKey, nextEnabled);
+        },
         onPersistError: () => {
           message.error(t("chat.planMode.persistFailed", "Plan Mode 保存失败"));
         },
       });
     },
-    [ensurePlanModeChatId, message, t],
+    [
+      ensurePlanModeChatId,
+      message,
+      setPlanModeEnabledForScope,
+      setSessions,
+      t,
+    ],
   );
 
   const handleContinueModifyingPlan = useCallback(
@@ -1030,21 +1076,21 @@ export default function ChatPage() {
       setPendingPlanRevision({
         planId: data.plan_id,
       });
-      setPlanModeEnabled(true);
+      setPlanModeEnabledForActiveScope(true);
       if (!planModeEnabled) {
         void persistPlanMode(true);
       }
     },
-    [persistPlanMode, planModeEnabled],
+    [persistPlanMode, planModeEnabled, setPlanModeEnabledForActiveScope],
   );
 
   const handlePlanModeDecision = useCallback(
     (enabled: boolean) => {
       setPendingPlanRevision(null);
-      setPlanModeEnabled(enabled);
+      setPlanModeEnabledForActiveScope(enabled);
       void persistPlanMode(enabled);
     },
-    [persistPlanMode],
+    [persistPlanMode, setPlanModeEnabledForActiveScope],
   );
 
   const activePlanModeControl = useMemo(
@@ -1764,7 +1810,7 @@ export default function ChatPage() {
       const prepared = await preparePlanModeSubmit(data, {
         planModeEnabled,
         persistPlanMode,
-        setPlanModeEnabled,
+        setPlanModeEnabled: setPlanModeEnabledForActiveScope,
       });
       if (isPlanModeSubmitCancelled(prepared)) {
         return prepared;
@@ -1978,6 +2024,7 @@ export default function ChatPage() {
       },
     } as unknown as IAgentScopeRuntimeWebUIOptions;
   }, [
+    activePlanModeControl,
     brandTheme.avatar,
     brandTheme.brandName,
     customFetch,
@@ -1996,7 +2043,9 @@ export default function ChatPage() {
     planModeEnabled,
     resolveLogicalRequestSessionId,
     resolveRequestChatId,
+    setPlanModeEnabledForActiveScope,
     taskProgress,
+    taskProgressEnabled,
     t,
   ]);
 

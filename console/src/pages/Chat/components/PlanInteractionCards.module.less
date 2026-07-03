@@ -59,6 +59,14 @@
     0 2px 10px rgba(78, 75, 65, 0.06);
 }
 
+.planReviewActiveCard {
+  display: flex;
+  height: 32vh;
+  max-height: 320px;
+  min-height: 180px;
+  flex-direction: column;
+}
+
 .reviewHeader {
   padding: 0 6px 9px;
 }
@@ -119,7 +127,13 @@
 
 .reviewContent {
   display: grid;
+  min-height: 0;
   gap: 6px;
+}
+
+.planReviewActiveCard .reviewContent {
+  overflow-y: auto;
+  padding-right: 2px;
 }
 
 .reviewSection {
@@ -554,6 +568,11 @@
   .planReviewCard {
     padding: 11px 7px 7px;
     border-radius: 14px;
+  }
+
+  .planReviewActiveCard {
+    height: 30vh;
+    min-height: 160px;
   }
 
   .cardHeader {

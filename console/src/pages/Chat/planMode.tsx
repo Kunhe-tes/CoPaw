@@ -26,6 +26,25 @@ export type PlanModeSessionLike = {
   meta?: Record<string, unknown> | null;
 };
 
+export type PlanModeLocalState = {
+  scopeKey: string;
+  enabled: boolean;
+};
+
+export function getScopedPlanModeEnabled({
+  metadataEnabled,
+  localState,
+  scopeKey,
+}: {
+  metadataEnabled: boolean;
+  localState: PlanModeLocalState;
+  scopeKey: string;
+}): boolean {
+  return localState.scopeKey === scopeKey
+    ? localState.enabled
+    : metadataEnabled;
+}
+
 type PersistPlanModeStateOptions<TSession extends PlanModeSessionLike> = {
   enabled: boolean;
   session: TSession | null;
@@ -77,13 +96,18 @@ export function resolveActivePlanModeSession<
     return null;
   }
 
-  return (
-    sessions.find((session) =>
+  for (const id of idSet) {
+    const match = sessions.find((session) =>
       [session.id, session.realId, session.sessionId, session.session_id].some(
-        (value) => Boolean(value && idSet.has(value)),
+        (value) => value === id,
       ),
-    ) || null
-  );
+    );
+    if (match) {
+      return match;
+    }
+  }
+
+  return null;
 }
 
 function withPlanMode(

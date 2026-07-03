@@ -12,6 +12,7 @@ import {
   ActivePlanModeButton,
   PlanModeMenuItem,
   getPlanModeEnabled,
+  getScopedPlanModeEnabled,
   persistPlanModeState,
   preparePlanModeSubmit,
   resolveActivePlanModeSession,
@@ -248,6 +249,16 @@ describe("Plan Mode frontend helpers", () => {
     });
   });
 
+  it("ignores local Plan Mode state from a different chat scope", () => {
+    expect(
+      getScopedPlanModeEnabled({
+        metadataEnabled: false,
+        localState: { scopeKey: "chat-a", enabled: true },
+        scopeKey: "chat-b",
+      }),
+    ).toBe(false);
+  });
+
   it("preserves explicit card-submitted request mode", async () => {
     const result = await preparePlanModeSubmit(
       {
@@ -303,6 +314,25 @@ describe("Plan Mode frontend helpers", () => {
       resolveActivePlanModeSession(sessions, ["logical-disabled"])?.meta
         ?.plan_mode_enabled,
     ).toBe(false);
+  });
+
+  it("prefers earlier current-session candidates over stale session ids", () => {
+    const sessions = [
+      {
+        id: "chat-old",
+        sessionId: "logical-old",
+        meta: { plan_mode_enabled: true },
+      },
+      {
+        id: "chat-current",
+        sessionId: "logical-current",
+        meta: { plan_mode_enabled: false },
+      },
+    ];
+
+    expect(
+      resolveActivePlanModeSession(sessions, ["chat-current", "chat-old"])?.id,
+    ).toBe("chat-current");
   });
 
   it("persists Plan Mode changes through chat metadata updates", async () => {

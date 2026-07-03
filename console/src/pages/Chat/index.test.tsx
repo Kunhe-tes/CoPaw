@@ -1,5 +1,6 @@
 import React from "react";
 import {
+  act,
   cleanup,
   fireEvent,
   render,
@@ -594,10 +595,170 @@ describe("ChatPage plan mode wiring", () => {
     });
   });
 
+  it("syncs persisted Plan Mode metadata back to the session context", async () => {
+    mocks.inputDisabled = false;
+    mocks.sessions = [
+      {
+        id: "chat-1",
+        realId: "chat-1",
+        sessionId: "chat-1",
+        name: "会话 1",
+        messages: [],
+        meta: { plan_mode_enabled: false },
+      },
+    ];
+    const updatedSessions = [
+      {
+        ...mocks.sessions[0],
+        meta: { plan_mode_enabled: true },
+      },
+    ];
+    mocks.updateChat.mockResolvedValueOnce({
+      meta: { plan_mode_enabled: true },
+    });
+    mocks.updateSession.mockResolvedValueOnce(updatedSessions);
+
+    render(<ChatPage />);
+
+    fireEvent.click(screen.getByRole("switch", { name: "计划模式" }));
+
+    await waitFor(() => {
+      expect(mocks.setSessions).toHaveBeenCalledWith(updatedSessions);
+    });
+  });
+
+  it("uses the route chat id instead of the previous active session for Plan Mode", () => {
+    mocks.inputDisabled = false;
+    mocks.pathname = "/chat/chat-2";
+    mocks.currentSessionId = "chat-1";
+    mocks.sessions = [
+      {
+        id: "chat-1",
+        realId: "chat-1",
+        sessionId: "chat-1",
+        name: "会话 1",
+        messages: [],
+        meta: { plan_mode_enabled: true },
+      },
+      {
+        id: "chat-2",
+        realId: "chat-2",
+        sessionId: "chat-2",
+        name: "会话 2",
+        messages: [],
+        meta: { plan_mode_enabled: false },
+      },
+    ];
+
+    render(<ChatPage />);
+
+    expect(screen.getByRole("switch", { name: "计划模式" })).toHaveAttribute(
+      "aria-checked",
+      "false",
+    );
+    expect(
+      screen.queryByRole("button", { name: "计划模式" }),
+    ).not.toBeInTheDocument();
+  });
+
+  it("does not fall back to the previous active Plan Mode session when the route chat is not loaded yet", () => {
+    mocks.inputDisabled = false;
+    mocks.pathname = "/chat/chat-2";
+    mocks.currentSessionId = "chat-1";
+    mocks.sessions = [
+      {
+        id: "chat-1",
+        realId: "chat-1",
+        sessionId: "chat-1",
+        name: "会话 1",
+        messages: [],
+        meta: { plan_mode_enabled: true },
+      },
+    ];
+
+    render(<ChatPage />);
+
+    expect(screen.getByRole("switch", { name: "计划模式" })).toHaveAttribute(
+      "aria-checked",
+      "false",
+    );
+    expect(
+      screen.queryByRole("button", { name: "计划模式" }),
+    ).not.toBeInTheDocument();
+  });
+
+  it("removes active Plan Mode controls after switching from an enabled chat to a disabled chat", async () => {
+    mocks.inputDisabled = false;
+    mocks.pathname = "/chat/chat-1";
+    mocks.currentSessionId = "chat-1";
+    mocks.sessions = [
+      {
+        id: "chat-1",
+        realId: "chat-1",
+        sessionId: "chat-1",
+        name: "会话 1",
+        messages: [],
+        meta: { plan_mode_enabled: true },
+      },
+      {
+        id: "chat-2",
+        realId: "chat-2",
+        sessionId: "chat-2",
+        name: "会话 2",
+        messages: [],
+        meta: { plan_mode_enabled: false },
+      },
+    ];
+
+    const { rerender } = render(<ChatPage />);
+
+    expect(
+      screen.getAllByRole("button", { name: "计划模式" }).length,
+    ).toBeGreaterThan(0);
+
+    mocks.pathname = "/chat/chat-2";
+    rerender(<ChatPage />);
+
+    await waitFor(() => {
+      expect(screen.getByRole("switch", { name: "计划模式" })).toHaveAttribute(
+        "aria-checked",
+        "false",
+      );
+    });
+
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 220));
+    });
+
+    expect(
+      screen.queryByRole("button", { name: "计划模式" }),
+    ).not.toBeInTheDocument();
+  });
+
   it("renders the active plan review card in the sender before UI", () => {
     render(<ChatPage />);
 
     expect(screen.getByTestId("active-plan-review-card")).toBeInTheDocument();
+  });
+
+  it("does not render plan review cards in the scrollable message renderer", () => {
+    render(<ChatPage />);
+
+    const renderer = mocks.capturedOptions?.cards?.PlanInteraction;
+
+    expect(
+      renderer?.({
+        data: {
+          card_type: "plan_review",
+          plan_id: "plan-123",
+          title: "Implementation plan",
+          summary: "Plan summary",
+          steps: [],
+          risks: [],
+          verification: [],
+        },
+      }),
+    ).toBeNull();
   });
 
   it("defers Continue modifying and sends the next submission as plan revision feedback", async () => {
