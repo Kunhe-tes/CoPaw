@@ -23,7 +23,9 @@ class _FileSignature:
 
     exists: bool
     mtime_ns: int | None = None
+    ctime_ns: int | None = None
     size: int | None = None
+    inode: int | None = None
     digest: str | None = None
 
 
@@ -65,16 +67,43 @@ class JsonChatRepository(BaseChatRepository):
         """Get the repository file path."""
         return self._path
 
-    def _file_signature(self) -> _FileSignature:
+    def _file_signature(self) -> _FileSignature | None:
+        try:
+            before_stat = self._path.stat()
+        except FileNotFoundError:
+            try:
+                self._path.stat()
+            except FileNotFoundError:
+                return _FileSignature(exists=False)
+            return None
+
         try:
             contents = self._path.read_bytes()
-            stat_result = self._path.stat()
+            after_stat = self._path.stat()
         except FileNotFoundError:
-            return _FileSignature(exists=False)
+            return None
+
+        before_identity = (
+            before_stat.st_size,
+            before_stat.st_mtime_ns,
+            before_stat.st_ctime_ns,
+            before_stat.st_ino,
+        )
+        after_identity = (
+            after_stat.st_size,
+            after_stat.st_mtime_ns,
+            after_stat.st_ctime_ns,
+            after_stat.st_ino,
+        )
+        if before_identity != after_identity:
+            return None
+
         return _FileSignature(
             exists=True,
-            mtime_ns=stat_result.st_mtime_ns,
-            size=stat_result.st_size,
+            mtime_ns=after_stat.st_mtime_ns,
+            ctime_ns=after_stat.st_ctime_ns,
+            size=after_stat.st_size,
+            inode=after_stat.st_ino,
             digest=hashlib.sha256(contents).hexdigest(),
         )
 
@@ -83,6 +112,9 @@ class JsonChatRepository(BaseChatRepository):
 
         for _ in range(_LOAD_STABLE_READ_ATTEMPTS):
             before_signature = self._file_signature()
+            if before_signature is None:
+                continue
+
             if not before_signature.exists:
                 chats_file = ChatsFile(version=1, chats=[])
                 after_signature = self._file_signature()
@@ -95,12 +127,15 @@ class JsonChatRepository(BaseChatRepository):
                 after_signature = self._file_signature()
 
             last_chats_file = chats_file
-            if before_signature == after_signature:
+            if (
+                after_signature is not None
+                and before_signature == after_signature
+            ):
                 return after_signature, chats_file
 
         return None, last_chats_file
 
-    def _save_sync(self, chats_file: ChatsFile) -> _FileSignature:
+    def _save_sync(self, chats_file: ChatsFile) -> _FileSignature | None:
         # Create parent directory if needed
         self._path.parent.mkdir(parents=True, exist_ok=True)
 
@@ -144,9 +179,11 @@ class JsonChatRepository(BaseChatRepository):
     def _save_and_prepare_snapshot_sync(
         self,
         chats_file: ChatsFile,
-    ) -> _SnapshotState:
+    ) -> _SnapshotState | None:
         chats_file_to_save = chats_file.model_copy(deep=True)
         signature = self._save_sync(chats_file_to_save)
+        if signature is None:
+            return None
         return self._prepare_snapshot_sync(signature, chats_file_to_save)
 
     @staticmethod

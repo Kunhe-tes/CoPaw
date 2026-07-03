@@ -345,6 +345,48 @@ async def test_chat_repo_get_chat_invalidates_snapshot_after_same_size_rewrite_w
 
 
 @pytest.mark.asyncio
+async def test_chat_repo_get_chat_reload_when_signature_read_races_with_rewrite(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    path = tmp_path / "chats.json"
+    old_chat = ChatSpec(session_id="old", user_id="u1", channel="console")
+    new_chat = old_chat.model_copy(
+        update={
+            "id": "00000000-0000-4000-8000-000000000000",
+            "session_id": "new",
+        },
+    )
+
+    repo = JsonChatRepository(path)
+    await repo.save(ChatsFile(version=1, chats=[old_chat]))
+    old_stat = path.stat()
+    new_payload = _saved_chats_payload([new_chat])
+    assert len(new_payload.encode("utf-8")) == old_stat.st_size
+
+    original_read_bytes = Path.read_bytes
+    swapped = False
+
+    def swapping_read_bytes(self: Path) -> bytes:
+        nonlocal swapped
+        contents = original_read_bytes(self)
+        if self == path and not swapped:
+            swapped = True
+            path.write_text(new_payload, encoding="utf-8")
+            os.utime(path, ns=(old_stat.st_atime_ns, old_stat.st_mtime_ns))
+        return contents
+
+    monkeypatch.setattr(Path, "read_bytes", swapping_read_bytes)
+
+    assert await repo.get_chat(old_chat.id) is None
+    loaded_new = await repo.get_chat(new_chat.id)
+
+    assert loaded_new is not None
+    assert loaded_new.id == new_chat.id
+    assert loaded_new.session_id == "new"
+
+
+@pytest.mark.asyncio
 async def test_chat_repo_load_result_mutation_does_not_pollute_cache(
     tmp_path: Path,
 ) -> None:
