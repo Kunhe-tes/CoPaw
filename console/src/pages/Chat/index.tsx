@@ -112,8 +112,7 @@ import RuntimeResponseCard from "./components/RuntimeResponseCard";
 import { isResponseFeedbackUserAllowed } from "./components/ResponseFeedbackCard/whitelist";
 import ApprovalActionCard from "./components/ApprovalActionCard";
 import {
-  ActivePlanClarificationCard,
-  ActivePlanReviewCard,
+  ActivePlanInteractionComposer,
 } from "./components/PlanInteractionCards";
 import TaskRunGroupCard from "./components/TaskRunGroupCard";
 import TaskProgressFloatingCard from "./components/TaskProgressFloatingCard";
@@ -1917,12 +1916,14 @@ export default function ChatPage() {
             {taskProgressEnabled ? (
               <TaskProgressFloatingCard progress={taskProgress} />
             ) : null}
-            <ActivePlanClarificationCard />
-            <ActivePlanReviewCard
-              onContinueModifying={handleContinueModifyingPlan}
-              onPlanModeDecision={handlePlanModeDecision}
-            />
           </>
+        ),
+        renderComposer: (defaultComposer) => (
+          <ActivePlanInteractionComposer
+            defaultComposer={defaultComposer}
+            onContinueModifying={handleContinueModifyingPlan}
+            onPlanModeDecision={handlePlanModeDecision}
+          />
         ),
         quickMenuItems: planModeQuickMenuItems,
         prefix:

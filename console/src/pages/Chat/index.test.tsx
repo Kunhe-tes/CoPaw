@@ -81,6 +81,11 @@ vi.mock("@/components/agentscope-chat", () => {
         <div data-testid="chat-sender-before-ui">
           {mocks.capturedOptions?.sender?.beforeUI}
         </div>
+        <div data-testid="chat-rendered-composer">
+          {mocks.capturedOptions?.sender?.renderComposer?.(
+            <div data-testid="default-composer">composer</div>,
+          )}
+        </div>
         <div data-testid="chat-sender-prefix">
           {mocks.capturedOptions?.sender?.prefix}
         </div>
@@ -425,11 +430,13 @@ vi.mock("./components/ApprovalActionCard", () => ({
 }));
 
 vi.mock("./components/PlanInteractionCards", () => ({
-  ActivePlanReviewCard: (props: {
+  ActivePlanInteractionComposer: (props: {
+    defaultComposer: React.ReactElement;
     onContinueModifying?: (data: Record<string, any>) => void;
     onPlanModeDecision?: (enabled: boolean) => void;
   }) => (
-    <div data-testid="active-plan-review-card">
+    <div data-testid="active-plan-interaction-composer">
+      {props.defaultComposer}
       <button
         type="button"
         onClick={() =>
@@ -451,7 +458,14 @@ vi.mock("./components/PlanInteractionCards", () => ({
       </button>
     </div>
   ),
-  ActivePlanClarificationCard: () => null,
+  ActivePlanReviewCard: () => {
+    throw new Error("ActivePlanReviewCard should not render outside composer");
+  },
+  ActivePlanClarificationCard: () => {
+    throw new Error(
+      "ActivePlanClarificationCard should not render outside composer",
+    );
+  },
   PlanClarificationCard: () => null,
   PlanReviewCard: () => null,
 }));
@@ -735,10 +749,18 @@ describe("ChatPage plan mode wiring", () => {
     ).not.toBeInTheDocument();
   });
 
-  it("renders the active plan review card in the sender before UI", () => {
+  it("renders the active plan interaction card as the sender composer replacement", () => {
     render(<ChatPage />);
 
-    expect(screen.getByTestId("active-plan-review-card")).toBeInTheDocument();
+    expect(mocks.capturedOptions?.sender?.renderComposer).toEqual(
+      expect.any(Function),
+    );
+    expect(
+      screen.queryByTestId("active-plan-review-card"),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.getByTestId("active-plan-interaction-composer"),
+    ).toBeInTheDocument();
   });
 
   it("does not render plan review cards in the scrollable message renderer", () => {
