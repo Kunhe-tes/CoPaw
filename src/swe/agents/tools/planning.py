@@ -3,7 +3,7 @@
 
 import json
 from pathlib import Path
-from typing import Any, Literal
+from typing import Annotated, Any, Literal
 
 from agentscope.message import TextBlock
 from agentscope.tool import ToolResponse
@@ -26,6 +26,11 @@ _SUPPORTED_CLARIFICATION_KINDS = _DIRECT_CLARIFICATION_KINDS | {"form"}
 _SUPPORTED_FORM_FIELD_TYPES = frozenset(
     {"single_choice", "multi_choice", "text"},
 )
+_TEXT_LIST_INPUT_DESCRIPTION = "Array of text items or a JSON string array."
+_TextListInput = Annotated[
+    list[str] | str,
+    Field(description=_TEXT_LIST_INPUT_DESCRIPTION),
+]
 _FORM_FIELD_ID_KEYS = ("id", "key", "name", "label", "title")
 _FORM_FIELD_LABEL_KEYS = ("label", "title", "name", "key", "id")
 _FORM_FIELD_HINT_KEYS = frozenset(
@@ -396,9 +401,9 @@ def create_submit_proposed_plan_tool(
     async def submit_proposed_plan(
         title: str,
         summary: str,
-        steps: list[str],
-        risks: list[str],
-        verification: list[str],
+        steps: _TextListInput,
+        risks: _TextListInput,
+        verification: _TextListInput,
     ) -> ToolResponse:
         """在没有未决问题时持久化 Proposed Plan，并返回审核卡片元数据。"""
         payload = ProposedPlanCreate(

@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import json
 from datetime import datetime, timezone
 from typing import Any, Literal
 from uuid import uuid4
@@ -85,6 +86,30 @@ class ProposedPlanCreate(_StrictPlanModel):
     risks: list[str]
     verification: list[str]
     metadata: dict[str, Any] = Field(default_factory=dict)
+
+    @field_validator(
+        "steps",
+        "risks",
+        "verification",
+        mode="before",
+    )
+    @classmethod
+    def _decode_json_text_list(cls, value: Any) -> Any:
+        if not isinstance(value, str):
+            return value
+
+        text = value.strip()
+        if not text:
+            return value
+
+        try:
+            decoded = json.loads(text)
+        except json.JSONDecodeError:
+            return value
+
+        if isinstance(decoded, list):
+            return decoded
+        return value
 
     @field_validator(
         "title",

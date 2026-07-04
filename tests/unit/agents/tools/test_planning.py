@@ -433,3 +433,24 @@ async def test_submit_proposed_plan_omits_removed_fields_from_signature(
 
     assert "open_questions" not in parameters
     assert "confidence" not in parameters
+
+
+def test_submit_proposed_plan_schema_accepts_json_encoded_text_lists(
+    tmp_path: Path,
+) -> None:
+    tool = create_submit_proposed_plan_tool(
+        request_context={},
+        workspace_dir=tmp_path,
+    )
+    toolkit = Toolkit()
+    toolkit.register_tool_function(tool)
+
+    properties = toolkit.tools["submit_proposed_plan"].json_schema["function"][
+        "parameters"
+    ]["properties"]
+
+    for field_name in ("steps", "risks", "verification"):
+        assert {"items": {"type": "string"}, "type": "array"} in properties[
+            field_name
+        ]["anyOf"]
+        assert {"type": "string"} in properties[field_name]["anyOf"]

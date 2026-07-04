@@ -31,6 +31,38 @@
 - 后端模型层可以清理空白列表项，但清理后列表为空时仍必须报 `must not be empty`
 - 不要放宽 `title`、`summary` 或未知字段校验，避免前端/模型注入未声明语义
 
+## submit_proposed_plan 报 Input should be a valid list
+
+### 症状
+
+- 模型调用 `submit_proposed_plan` 时工具执行失败
+- 常见报错为：
+  - `1 validation error for ProposedPlanCreate`
+  - `steps Input should be a valid list`
+- 入参中的 `steps`、`risks` 或 `verification` 是 JSON 字符串数组，例如 `"\n[\"阶段一\", \"阶段二\"]\n"`
+
+### 典型原因
+
+- 模型把工具参数里的数组再次序列化为 JSON 字符串
+- 工具 schema 如果只声明 `array`，部分模型仍可能把数组作为文本传入
+- `ProposedPlanCreate` 的领域字段仍是 `list[str]`，未做入口归一化时会在 Pydantic 列表类型校验处失败
+
+### 第一落点
+
+- [src/swe/agents/tools/planning.py](../../src/swe/agents/tools/planning.py)
+- 重点看 `submit_proposed_plan()` 的 `steps`、`risks`、`verification` 工具签名是否接受数组或 JSON 字符串数组
+- [src/swe/app/plans/models.py](../../src/swe/app/plans/models.py)
+- 重点看 `ProposedPlanCreate` 是否先把 JSON 字符串数组解码，再执行空白项清理和非空校验
+- 对应回归测试：
+  - [tests/unit/agents/tools/test_planning.py](../../tests/unit/agents/tools/test_planning.py)
+  - [tests/unit/app/plans/test_models.py](../../tests/unit/app/plans/test_models.py)
+
+### 第一阶段处理
+
+- 只兼容可解析为数组的 JSON 字符串，不把普通段落或 Markdown 文本自动拆成步骤
+- 解码后继续复用 `ProposedPlanCreate._non_empty_text_list()` 清理空白项，清理后为空仍报错
+- 不要把 `PlanReviewCard` 或持久化模型字段改成字符串，前端和存储协议仍统一使用 `list[str]`
+
 ## ask_plan_clarification 报 str object has no attribute get
 
 ### 症状

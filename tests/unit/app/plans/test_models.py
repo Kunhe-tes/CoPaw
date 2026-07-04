@@ -60,6 +60,20 @@ def test_proposed_plan_create_drops_blank_list_items() -> None:
     assert plan.steps == ["Phase one", "Phase two"]
 
 
+@pytest.mark.parametrize("field_name", ["steps", "risks", "verification"])
+def test_proposed_plan_create_accepts_json_encoded_text_lists(
+    field_name: str,
+) -> None:
+    plan = ProposedPlanCreate.model_validate(
+        {
+            **_plan_payload(),
+            field_name: '\n["Phase one", "Phase two"]\n',
+        },
+    )
+
+    assert getattr(plan, field_name) == ["Phase one", "Phase two"]
+
+
 @pytest.mark.parametrize(
     "missing_field",
     [
