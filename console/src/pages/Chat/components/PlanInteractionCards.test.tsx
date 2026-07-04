@@ -435,7 +435,208 @@ describe("Plan interaction cards", () => {
     submit.cleanup();
   });
 
-  it("makes a multi-choice custom response exclusive with predefined choices", async () => {
+  it("shows a custom text box by default for top-level single choice cards", () => {
+    render(
+      <PlanClarificationCard
+        data={{
+          card_type: "plan_clarification",
+          kind: "single_choice",
+          prompt: "Pick scope",
+          options: [{ id: "small", label: "Small" }],
+        }}
+      />,
+    );
+
+    expect(
+      screen.getByRole("textbox", { name: "Pick scope" }),
+    ).toBeInTheDocument();
+  });
+
+  it("single choice custom text clears the selected option and submits only text", async () => {
+    const submit = captureSubmitEvents();
+    render(
+      <PlanClarificationCard
+        data={{
+          card_type: "plan_clarification",
+          kind: "single_choice",
+          prompt: "Pick scope",
+          options: [{ id: "small", label: "Small" }],
+        }}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: /Small/ }));
+    fireEvent.change(screen.getByRole("textbox", { name: "Pick scope" }), {
+      target: { value: "Use a narrower module" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "提交" }));
+
+    await waitFor(() => expect(submit.handler).toHaveBeenCalledTimes(1));
+    expect(
+      submit.handler.mock.calls[0][0].detail.biz_params
+        .plan_interaction_response,
+    ).toMatchObject({
+      card_type: "plan_clarification",
+      kind: "single_choice",
+      selected_option_ids: [],
+      text: "Use a narrower module",
+    });
+    submit.cleanup();
+  });
+
+  it("single choice selecting an option clears custom text", () => {
+    render(
+      <PlanClarificationCard
+        data={{
+          card_type: "plan_clarification",
+          kind: "single_choice",
+          prompt: "Pick scope",
+          options: [{ id: "small", label: "Small" }],
+        }}
+      />,
+    );
+
+    const textbox = screen.getByRole("textbox", {
+      name: "Pick scope",
+    }) as HTMLTextAreaElement;
+    fireEvent.change(textbox, { target: { value: "Custom scope" } });
+    fireEvent.click(screen.getByRole("button", { name: /Small/ }));
+
+    expect(textbox.value).toBe("");
+  });
+
+  it("single choice Enter on the card submits custom text without the focused option", async () => {
+    const submit = captureSubmitEvents();
+    render(
+      <PlanClarificationCard
+        data={{
+          card_type: "plan_clarification",
+          kind: "single_choice",
+          prompt: "Pick scope",
+          options: [{ id: "small", label: "Small" }],
+        }}
+      />,
+    );
+
+    fireEvent.change(screen.getByRole("textbox", { name: "Pick scope" }), {
+      target: { value: "Custom scope" },
+    });
+    fireEvent.keyDown(screen.getByRole("region", { name: "Pick scope" }), {
+      key: "Enter",
+    });
+
+    await waitFor(() => expect(submit.handler).toHaveBeenCalledTimes(1));
+    expect(
+      submit.handler.mock.calls[0][0].detail.biz_params
+        .plan_interaction_response,
+    ).toMatchObject({
+      card_type: "plan_clarification",
+      kind: "single_choice",
+      selected_option_ids: [],
+      text: "Custom scope",
+    });
+    submit.cleanup();
+  });
+
+  it("multi choice submits selected options together with custom text", async () => {
+    const submit = captureSubmitEvents();
+    render(
+      <PlanClarificationCard
+        data={{
+          card_type: "plan_clarification",
+          kind: "multi_choice",
+          prompt: "Pick checks",
+          options: [
+            { id: "unit", label: "Unit tests" },
+            { id: "lint", label: "Lint" },
+          ],
+        }}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: /Unit tests/ }));
+    fireEvent.change(screen.getByRole("textbox", { name: "Pick checks" }), {
+      target: { value: "Also run smoke test" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "提交" }));
+
+    await waitFor(() => expect(submit.handler).toHaveBeenCalledTimes(1));
+    expect(
+      submit.handler.mock.calls[0][0].detail.biz_params
+        .plan_interaction_response,
+    ).toMatchObject({
+      card_type: "plan_clarification",
+      kind: "multi_choice",
+      selected_option_ids: ["unit"],
+      text: "Also run smoke test",
+    });
+    submit.cleanup();
+  });
+
+  it("multi choice allows submitting only custom text", async () => {
+    const submit = captureSubmitEvents();
+    render(
+      <PlanClarificationCard
+        data={{
+          card_type: "plan_clarification",
+          kind: "multi_choice",
+          prompt: "Pick checks",
+          options: [{ id: "unit", label: "Unit tests" }],
+        }}
+      />,
+    );
+
+    fireEvent.change(screen.getByRole("textbox", { name: "Pick checks" }), {
+      target: { value: "Manual QA only" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "提交" }));
+
+    await waitFor(() => expect(submit.handler).toHaveBeenCalledTimes(1));
+    expect(
+      submit.handler.mock.calls[0][0].detail.biz_params
+        .plan_interaction_response,
+    ).toMatchObject({
+      card_type: "plan_clarification",
+      kind: "multi_choice",
+      selected_option_ids: [],
+      text: "Manual QA only",
+    });
+    submit.cleanup();
+  });
+
+  it("multi choice preserves existing custom text when selecting options", async () => {
+    const submit = captureSubmitEvents();
+    render(
+      <PlanClarificationCard
+        data={{
+          card_type: "plan_clarification",
+          kind: "multi_choice",
+          prompt: "Pick checks",
+          options: [{ id: "unit", label: "Unit tests" }],
+        }}
+      />,
+    );
+
+    const textbox = screen.getByRole("textbox", { name: "Pick checks" });
+    fireEvent.change(textbox, { target: { value: "Manual QA" } });
+    fireEvent.click(screen.getByRole("button", { name: /Unit tests/ }));
+    expect(textbox).toHaveValue("Manual QA");
+    fireEvent.click(screen.getByRole("button", { name: "提交" }));
+
+    await waitFor(() => expect(submit.handler).toHaveBeenCalledTimes(1));
+    expect(
+      submit.handler.mock.calls[0][0].detail.biz_params
+        .plan_interaction_response,
+    ).toMatchObject({
+      card_type: "plan_clarification",
+      kind: "multi_choice",
+      selected_option_ids: ["unit"],
+      text: "Manual QA",
+    });
+    submit.cleanup();
+  });
+
+  it("keeps top-level multi-choice custom text additive even when custom response is allowed", async () => {
     const submit = captureSubmitEvents();
     render(
       <PlanClarificationCard
@@ -453,31 +654,24 @@ describe("Plan interaction cards", () => {
     );
 
     fireEvent.click(screen.getByRole("button", { name: /Lint/ }));
-    fireEvent.click(screen.getByRole("button", { name: /自定义回复/ }));
     expect(
-      screen.queryByRole("button", { name: /Lint/ }),
+      screen.queryByRole("button", { name: /自定义回复/ }),
     ).not.toBeInTheDocument();
-    fireEvent.keyDown(screen.getByPlaceholderText("请输入自定义回复"), {
-      key: "Escape",
-    });
     expect(screen.getByRole("button", { name: /Lint/ })).toHaveAttribute(
       "aria-pressed",
-      "false",
+      "true",
     );
-    fireEvent.click(screen.getByRole("button", { name: /自定义回复/ }));
-    fireEvent.change(screen.getByPlaceholderText("请输入自定义回复"), {
+    fireEvent.change(screen.getByRole("textbox", { name: "Pick checks" }), {
       target: { value: "Run security checks" },
     });
-    fireEvent.keyDown(screen.getByPlaceholderText("请输入自定义回复"), {
-      key: "Enter",
-    });
+    fireEvent.click(screen.getByRole("button", { name: "提交" }));
 
     await waitFor(() => expect(submit.handler).toHaveBeenCalledTimes(1));
     expect(submit.handler.mock.calls[0][0].detail).toMatchObject({
-      query: "Run security checks",
+      query: "Lint\nRun security checks",
       biz_params: {
         plan_interaction_response: {
-          selected_option_ids: [],
+          selected_option_ids: ["lint"],
           text: "Run security checks",
         },
       },

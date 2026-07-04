@@ -415,8 +415,12 @@ export function PlanClarificationCard({
   const [dismissed, setDismissed] = useState(false);
   const options = data.options || [];
   const fields = data.fields || [];
+  const isTopLevelChoice =
+    data.kind === "single_choice" || data.kind === "multi_choice";
   const allowsCustomText =
-    data.kind === "text" || data.allow_custom_response === true;
+    data.kind === "text" ||
+    isTopLevelChoice ||
+    data.allow_custom_response === true;
   const totalSteps =
     data.kind === "form"
       ? fields.length + (data.allow_custom_response ? 1 : 0)
@@ -455,7 +459,11 @@ export function PlanClarificationCard({
       ? multiChoice
       : [];
   const trimmedText = textInput.trim();
-  const effectiveChoiceText = customActive ? trimmedText : "";
+  const effectiveChoiceText = isTopLevelChoice
+    ? trimmedText
+    : customActive
+    ? trimmedText
+    : "";
   const requiredFormFieldsSatisfied = fields.every(
     (field) => !field.required || hasFormValue(formValues[field.id]),
   );
@@ -481,13 +489,15 @@ export function PlanClarificationCard({
   const pageTitle =
     data.kind === "form" ? activeField?.label || "补充说明" : data.prompt;
   const showChoiceRows =
-    !customActive &&
-    (data.kind === "single_choice" ||
-      data.kind === "multi_choice" ||
+    (isTopLevelChoice ||
       activeField?.type === "single_choice" ||
       activeField?.type === "multi_choice");
+  const showTopLevelChoiceCustomInput = isTopLevelChoice;
   const showCustomInput =
-    data.kind === "text" || customActive || isSupplementStep;
+    data.kind === "text" ||
+    showTopLevelChoiceCustomInput ||
+    customActive ||
+    isSupplementStep;
 
   useEffect(() => {
     setSubmitted(false);
@@ -500,6 +510,13 @@ export function PlanClarificationCard({
     setFocusedIndex(0);
     setActiveStep(0);
   }, [interactionResetKey]);
+
+  const handleCustomTextChange = (value: string) => {
+    setTextInput(value);
+    if (data.kind === "single_choice" && value.trim()) {
+      setSingleChoice("");
+    }
+  };
 
   useEffect(() => {
     if (submitted || dismissed || !showChoiceRows) return;
@@ -588,7 +605,7 @@ export function PlanClarificationCard({
 
   const selectActiveOption = (optionId: string) => {
     setCustomActive(false);
-    if (!activeField) {
+    if (!activeField && data.kind === "single_choice") {
       setTextInput("");
     }
     if (activeField) {
@@ -641,7 +658,8 @@ export function PlanClarificationCard({
       return;
     }
     const rowCount =
-      activeOptions.length + (data.kind !== "form" && allowsCustomText ? 1 : 0);
+      activeOptions.length +
+      (!isTopLevelChoice && data.kind !== "form" && allowsCustomText ? 1 : 0);
     if (event.key === "ArrowUp" || event.key === "ArrowDown") {
       event.preventDefault();
       setFocusedIndex((current) =>
@@ -666,14 +684,18 @@ export function PlanClarificationCard({
       if (index < rowCount) {
         event.preventDefault();
         setFocusedIndex(index);
-        if (index === activeOptions.length) activateCustomResponse();
-        else selectActiveOption(activeOptions[index].id);
+        if (index === activeOptions.length && !isTopLevelChoice) {
+          activateCustomResponse();
+        } else {
+          selectActiveOption(activeOptions[index].id);
+        }
       }
       return;
     }
     if (event.key === " ") {
       event.preventDefault();
-      const hasCustomRow = data.kind !== "form" && allowsCustomText;
+      const hasCustomRow =
+        !isTopLevelChoice && data.kind !== "form" && allowsCustomText;
       if (hasCustomRow && focusedIndex === activeOptions.length) {
         activateCustomResponse();
       } else if (activeOptions[focusedIndex]) {
@@ -686,6 +708,7 @@ export function PlanClarificationCard({
       if (
         data.kind === "single_choice" &&
         !singleChoice &&
+        !trimmedText &&
         activeOptions[focusedIndex]
       ) {
         const focusedOptionId = activeOptions[focusedIndex].id;
@@ -749,7 +772,9 @@ export function PlanClarificationCard({
             options={activeOptions}
             selectedIds={activeSelectedIds}
             focusedIndex={focusedIndex}
-            allowCustomResponse={data.kind !== "form" && allowsCustomText}
+            allowCustomResponse={
+              !isTopLevelChoice && data.kind !== "form" && allowsCustomText
+            }
             customActive={customActive}
             onFocusIndexChange={setFocusedIndex}
             onSelect={selectActiveOption}
@@ -781,10 +806,14 @@ export function PlanClarificationCard({
             className={styles.textArea}
             aria-label={pageTitle}
             placeholder={
-              data.kind === "text" ? data.prompt : "请输入自定义回复"
+              data.kind === "text"
+                ? data.prompt
+                : isTopLevelChoice
+                ? "输入自定义回复"
+                : "请输入自定义回复"
             }
             value={textInput}
-            onChange={(event) => setTextInput(event.target.value)}
+            onChange={(event) => handleCustomTextChange(event.target.value)}
           />
         ) : null}
       </div>
