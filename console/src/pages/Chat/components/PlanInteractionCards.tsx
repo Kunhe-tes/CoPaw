@@ -256,7 +256,10 @@ function findLatestActivePlanInteractionCard(
       }
 
       const instanceKey = `${message.id}:${card.id || card.code}:${cardIndex}`;
-      if (isPlanReviewCardData(card.data) && card.data.status !== "submitted") {
+      if (isPlanReviewCardData(card.data)) {
+        if (card.data.status === "submitted") {
+          return null;
+        }
         return {
           type: "review",
           data: card.data,
@@ -272,6 +275,8 @@ function findLatestActivePlanInteractionCard(
           sourceKey: resolveClarificationSourceKey(cards, card.data),
         };
       }
+
+      return null;
     }
   }
   return null;

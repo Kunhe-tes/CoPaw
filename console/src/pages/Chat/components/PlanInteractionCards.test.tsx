@@ -292,6 +292,29 @@ describe("Plan interaction cards", () => {
     ).not.toBeInTheDocument();
   });
 
+  it("does not resurrect older cards when the latest plan interaction is submitted", () => {
+    renderActiveComposer([
+      createClarificationMessage({
+        messageId: "assistant-clarification",
+        originalId: "original-1",
+        traceId: "trace-1",
+        prompt: "Older clarification",
+      }),
+      createReviewMessage({
+        messageId: "assistant-review",
+        cardId: "plan-2",
+        title: "Submitted plan",
+        status: "submitted",
+        submittedDecision: "execute",
+      }),
+    ]);
+
+    expect(screen.getByTestId("default-composer")).toBeInTheDocument();
+    expect(
+      screen.queryByRole("region", { name: "Older clarification" }),
+    ).not.toBeInTheDocument();
+  });
+
   it("restores the default composer after choosing to continue modifying a plan", () => {
     const onContinueModifying = vi.fn();
     renderActiveComposer(
