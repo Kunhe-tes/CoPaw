@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { type ReactElement, useEffect, useRef, useState } from "react";
 import {
   Check,
   ChevronLeft,
@@ -220,6 +220,63 @@ function findLatestPlanReviewCard(messages: IAgentScopeRuntimeWebUIMessage[]): {
   return null;
 }
 
+type ActivePlanInteraction =
+  | {
+      type: "clarification";
+      data: ChatPlanClarificationCardData;
+      instanceKey: string;
+      sourceKey: string | null;
+    }
+  | {
+      type: "review";
+      data: ChatPlanReviewCardData;
+      instanceKey: string;
+    };
+
+function findLatestActivePlanInteractionCard(
+  messages: IAgentScopeRuntimeWebUIMessage[],
+): ActivePlanInteraction | null {
+  let hasLaterUserMessage = false;
+  for (
+    let messageIndex = messages.length - 1;
+    messageIndex >= 0;
+    messageIndex -= 1
+  ) {
+    const message = messages[messageIndex];
+    if (message?.role === "user") {
+      hasLaterUserMessage = true;
+      continue;
+    }
+
+    const cards = message?.cards || [];
+    for (let cardIndex = cards.length - 1; cardIndex >= 0; cardIndex -= 1) {
+      const card = cards[cardIndex];
+      if (card.code !== PLAN_INTERACTION_CARD_CODE || hasLaterUserMessage) {
+        continue;
+      }
+
+      const instanceKey = `${message.id}:${card.id || card.code}:${cardIndex}`;
+      if (isPlanReviewCardData(card.data) && card.data.status !== "submitted") {
+        return {
+          type: "review",
+          data: card.data,
+          instanceKey,
+        };
+      }
+
+      if (isPlanClarificationCardData(card.data)) {
+        return {
+          type: "clarification",
+          data: card.data,
+          instanceKey,
+          sourceKey: resolveClarificationSourceKey(cards, card.data),
+        };
+      }
+    }
+  }
+  return null;
+}
+
 function boundedIndex(index: number, count: number): number {
   if (count <= 0) return 0;
   return Math.min(Math.max(index, 0), count - 1);
@@ -336,9 +393,11 @@ function ChoiceRows({
 export function PlanClarificationCard({
   data,
   cardInstanceKey,
+  onComplete,
 }: {
   data: ChatPlanClarificationCardData;
   cardInstanceKey?: string;
+  onComplete?: () => void;
 }) {
   const [singleChoice, setSingleChoice] = useState<string>("");
   const [multiChoice, setMultiChoice] = useState<string[]>([]);
@@ -453,6 +512,7 @@ export function PlanClarificationCard({
 
   const handleDismiss = () => {
     setDismissed(true);
+    onComplete?.();
   };
 
   const handleSubmit = (selectedOverride?: string[]) => {
@@ -491,6 +551,7 @@ export function PlanClarificationCard({
             text: effectiveText || undefined,
           };
     setSubmitted(true);
+    onComplete?.();
     emit({
       type: "handleSubmit",
       data: {
@@ -838,11 +899,13 @@ function PlanReviewActiveCard({
   cardInstanceKey,
   onContinueModifying,
   onPlanModeDecision,
+  onComplete,
 }: {
   data: ChatPlanReviewCardData;
   cardInstanceKey?: string;
   onContinueModifying?: (data: ChatPlanReviewCardData) => void;
   onPlanModeDecision?: (enabled: boolean) => void;
+  onComplete?: () => void;
 }) {
   const resolvedByBackend = data.status === "submitted";
   const [submitted, setSubmitted] = useState(false);
@@ -857,12 +920,15 @@ function PlanReviewActiveCard({
 
     if (decision === "revise") {
       onContinueModifying?.(data);
+      setSubmitted(true);
+      onComplete?.();
       return;
     }
 
     if (decision === "exit_plan") {
       onPlanModeDecision?.(false);
       setSubmitted(true);
+      onComplete?.();
       return;
     }
 
@@ -871,6 +937,7 @@ function PlanReviewActiveCard({
 
     onPlanModeDecision?.(false);
     setSubmitted(true);
+    onComplete?.();
     emit({
       type: "handleSubmit",
       data: {
@@ -947,12 +1014,14 @@ export function PlanReviewCard({
   cardInstanceKey,
   onContinueModifying,
   onPlanModeDecision,
+  onComplete,
 }: {
   data: ChatPlanReviewCardData;
   active?: boolean;
   cardInstanceKey?: string;
   onContinueModifying?: (data: ChatPlanReviewCardData) => void;
   onPlanModeDecision?: (enabled: boolean) => void;
+  onComplete?: () => void;
 }) {
   if (!active) {
     return <PlanReviewSnapshot data={data} />;
@@ -963,6 +1032,7 @@ export function PlanReviewCard({
       cardInstanceKey={cardInstanceKey}
       onContinueModifying={onContinueModifying}
       onPlanModeDecision={onPlanModeDecision}
+      onComplete={onComplete}
     />
   );
 }
@@ -988,6 +1058,52 @@ export function ActivePlanReviewCard({
       cardInstanceKey={review.instanceKey}
       onContinueModifying={onContinueModifying}
       onPlanModeDecision={onPlanModeDecision}
+    />
+  );
+}
+
+export function ActivePlanInteractionComposer({
+  defaultComposer,
+  onContinueModifying,
+  onPlanModeDecision,
+}: {
+  defaultComposer: ReactElement;
+  onContinueModifying?: (data: ChatPlanReviewCardData) => void;
+  onPlanModeDecision?: (enabled: boolean) => void;
+}) {
+  const interaction = useContextSelector(ChatAnywhereMessagesContext, (value) =>
+    findLatestActivePlanInteractionCard(value.messages || []),
+  );
+  const [completedInstanceKey, setCompletedInstanceKey] = useState<
+    string | null
+  >(null);
+
+  if (!interaction) {
+    return defaultComposer;
+  }
+
+  if (completedInstanceKey === interaction.instanceKey) {
+    return defaultComposer;
+  }
+
+  if (interaction.type === "review") {
+    return (
+      <PlanReviewCard
+        active
+        data={interaction.data}
+        cardInstanceKey={interaction.instanceKey}
+        onContinueModifying={onContinueModifying}
+        onPlanModeDecision={onPlanModeDecision}
+        onComplete={() => setCompletedInstanceKey(interaction.instanceKey)}
+      />
+    );
+  }
+
+  return (
+    <PlanClarificationCard
+      data={interaction.data}
+      cardInstanceKey={interaction.instanceKey}
+      onComplete={() => setCompletedInstanceKey(interaction.instanceKey)}
     />
   );
 }

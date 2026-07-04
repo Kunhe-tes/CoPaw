@@ -13,6 +13,7 @@ import type { IAgentScopeRuntimeWebUIMessage } from "@/components/agentscope-cha
 import { ChatAnywhereSessionsContext } from "@/components/agentscope-chat";
 import {
   ActivePlanClarificationCard,
+  ActivePlanInteractionComposer,
   ActivePlanReviewCard,
   PlanClarificationCard,
   PlanReviewCard,
@@ -100,6 +101,30 @@ function renderActivePlanReview(
         }}
       >
         <ActivePlanReviewCard />
+      </ChatAnywhereMessagesContext.Provider>
+    </ChatAnywhereSessionsContext.Provider>,
+  );
+}
+
+function renderActiveComposer(
+  messages: IAgentScopeRuntimeWebUIMessage<unknown>[],
+  callbacks: Partial<
+    React.ComponentProps<typeof ActivePlanInteractionComposer>
+  > = {},
+) {
+  return render(
+    <ChatAnywhereSessionsContext.Provider value={createSessionContextValue()}>
+      <ChatAnywhereMessagesContext.Provider
+        value={{
+          messages,
+          setMessages: vi.fn(),
+          getMessages: () => messages,
+        }}
+      >
+        <ActivePlanInteractionComposer
+          defaultComposer={<div data-testid="default-composer">composer</div>}
+          {...callbacks}
+        />
       </ChatAnywhereMessagesContext.Provider>
     </ChatAnywhereSessionsContext.Provider>,
   );
@@ -224,6 +249,73 @@ describe("Plan interaction cards", () => {
     unmount();
     render(<PlanClarificationCard data={data} />);
     expect(screen.getByText("Pick scope")).toBeInTheDocument();
+  });
+
+  it("replaces the composer with the latest active plan interaction card", () => {
+    renderActiveComposer([
+      createClarificationMessage({
+        messageId: "assistant-clarification",
+        originalId: "original-1",
+        traceId: "trace-1",
+        prompt: "Pick scope",
+      }),
+      createReviewMessage({
+        messageId: "assistant-review",
+        cardId: "plan-2",
+        title: "Review latest plan",
+      }),
+    ]);
+
+    expect(screen.queryByTestId("default-composer")).not.toBeInTheDocument();
+    expect(
+      screen.getByRole("region", { name: "Review latest plan" }),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByRole("region", { name: "Pick scope" }),
+    ).not.toBeInTheDocument();
+  });
+
+  it("falls back to the default composer when no active plan interaction exists", () => {
+    renderActiveComposer([
+      createReviewMessage({
+        messageId: "assistant-review",
+        cardId: "plan-2",
+        title: "Submitted plan",
+        status: "submitted",
+        submittedDecision: "execute",
+      }),
+    ]);
+
+    expect(screen.getByTestId("default-composer")).toBeInTheDocument();
+    expect(
+      screen.queryByRole("region", { name: "Submitted plan" }),
+    ).not.toBeInTheDocument();
+  });
+
+  it("restores the default composer after choosing to continue modifying a plan", () => {
+    const onContinueModifying = vi.fn();
+    renderActiveComposer(
+      [
+        createReviewMessage({
+          messageId: "assistant-review",
+          cardId: "plan-2",
+          title: "Review latest plan",
+        }),
+      ],
+      { onContinueModifying },
+    );
+
+    fireEvent.click(
+      screen.getByRole("button", { name: "Continue modifying" }),
+    );
+
+    expect(onContinueModifying).toHaveBeenCalledWith(
+      expect.objectContaining({ plan_id: "plan-2" }),
+    );
+    expect(screen.getByTestId("default-composer")).toBeInTheDocument();
+    expect(
+      screen.queryByRole("region", { name: "Review latest plan" }),
+    ).not.toBeInTheDocument();
   });
 
   it("uses focus-only initial state and submits the focused single choice with Enter", async () => {
