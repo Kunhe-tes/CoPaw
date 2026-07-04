@@ -249,6 +249,11 @@ export interface IAgentScopeRuntimeWebUISenderOptions {
    */
   afterUI?: React.ReactElement | React.ReactElement[];
   /**
+   * @description 自定义渲染输入框主体，可用来用阻塞式交互卡片替换默认输入框
+   * @descriptionEn Custom renderer for the main composer body, useful for replacing the default composer with a blocking interaction card
+   */
+  renderComposer?: (defaultComposer: React.ReactElement) => React.ReactElement;
+  /**
    * @description 提交前的钩子函数
    * @descriptionEn Hook function before submit
    */

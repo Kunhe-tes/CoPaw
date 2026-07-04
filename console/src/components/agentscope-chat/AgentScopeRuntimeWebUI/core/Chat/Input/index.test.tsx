@@ -373,4 +373,49 @@ describe("Chat Input restore flow", () => {
     expect(screen.getByTestId("chat-prefix")).toHaveTextContent("计划模式");
     expect(onDisable).toHaveBeenCalledTimes(1);
   });
+
+  it("lets sender.renderComposer replace the default composer controls", () => {
+    senderOptions.current = {
+      prefix: <button type="button">计划模式</button>,
+      quickMenuItems: [<button key="custom" type="button">自定义菜单</button>],
+      renderComposer: vi.fn(() => (
+        <section data-testid="composer-replacement">
+          <button type="button">提交卡片</button>
+        </section>
+      )),
+    };
+
+    render(<Input onCancel={vi.fn()} onSubmit={vi.fn()} />);
+
+    expect(screen.getByTestId("composer-replacement")).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "提交卡片", hidden: true }),
+    ).toBeInTheDocument();
+    expect(screen.queryByTestId("chat-input")).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: "快捷操作", hidden: true }),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: "计划模式", hidden: true }),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: "submit", hidden: true }),
+    ).not.toBeInTheDocument();
+    expect(senderOptions.current.renderComposer).toHaveBeenCalledTimes(1);
+  });
+
+  it("keeps the normal composer when sender.renderComposer returns the default composer", () => {
+    senderOptions.current = {
+      renderComposer: vi.fn(
+        (defaultComposer: React.ReactElement) => defaultComposer,
+      ),
+    };
+
+    render(<Input onCancel={vi.fn()} onSubmit={vi.fn()} />);
+
+    expect(screen.getByTestId("chat-input")).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "submit", hidden: true }),
+    ).toBeInTheDocument();
+  });
 });

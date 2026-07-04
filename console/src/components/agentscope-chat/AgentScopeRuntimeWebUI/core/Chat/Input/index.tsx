@@ -62,6 +62,7 @@ export default function Input({ onCancel, onSubmit }: InputProps) {
     beforeSubmit = async () => true,
     beforeUI,
     afterUI,
+    renderComposer,
     attachments,
     prefix,
     quickMenuItems,
@@ -187,6 +188,37 @@ export default function Input({ onCancel, onSubmit }: InputProps) {
     onCancel();
   }, [onCancel]);
 
+  const defaultComposer = (
+    <ChatInput
+      loading={inputContext.loading}
+      disabled={inputContext.disabled}
+      placeholder={placeholder}
+      value={content}
+      prefix={
+        <>
+          <ComposerQuickMenu
+            disabled={Boolean(inputContext.disabled)}
+            triggerLabel={t("chat.quickMenu.trigger", "快捷操作")}
+          >
+            {mergedQuickMenuItems}
+          </ComposerQuickMenu>
+          {prefix}
+        </>
+      }
+      header={fileList.length > 0 ? uploadFileListHeader : undefined}
+      onChange={handleContentChange}
+      maxLength={maxLength}
+      onSubmit={handleSubmit}
+      onCancel={handleCancel}
+      allowSpeech={allowSpeech}
+      onPasteFile={canHandlePasteFile}
+      suggestions={suggestions}
+    />
+  );
+  const renderedComposer = renderComposer
+    ? renderComposer(defaultComposer)
+    : defaultComposer;
+
   return (
     <div className={prefixCls}>
       <div
@@ -196,31 +228,7 @@ export default function Input({ onCancel, onSubmit }: InputProps) {
         }}
       >
         {beforeUI}
-        <ChatInput
-          loading={inputContext.loading}
-          disabled={inputContext.disabled}
-          placeholder={placeholder}
-          value={content}
-          prefix={
-            <>
-              <ComposerQuickMenu
-                disabled={Boolean(inputContext.disabled)}
-                triggerLabel={t("chat.quickMenu.trigger", "快捷操作")}
-              >
-                {mergedQuickMenuItems}
-              </ComposerQuickMenu>
-              {prefix}
-            </>
-          }
-          header={fileList.length > 0 ? uploadFileListHeader : undefined}
-          onChange={handleContentChange}
-          maxLength={maxLength}
-          onSubmit={handleSubmit}
-          onCancel={handleCancel}
-          allowSpeech={allowSpeech}
-          onPasteFile={canHandlePasteFile}
-          suggestions={suggestions}
-        />
+        {renderedComposer}
         {afterUI}
       </div>
       {disclaimer ? (
