@@ -63,6 +63,7 @@ import { Form, IconButton } from "@agentscope-ai/design";
 // import ChatActionGroup from "./components/ChatActionGroup";
 import ChatHeaderTitle from "./components/ChatHeaderTitle";
 import ChatSessionInitializer from "./components/ChatSessionInitializer";
+import SubAgentRunMonitor from "./components/SubAgentRunMonitor";
 import ConversationQuickNav from "@/components/ConversationQuickNav";
 // ==================== 首页改版 (Kun He) ====================
 import WelcomeCenterLayout from "@/components/agentscope-chat/WelcomeCenterLayout";
@@ -549,6 +550,7 @@ export default function ChatPage() {
   const [taskProgress, setTaskProgress] = useState<ChatTaskProgressData | null>(
     null,
   );
+  const [subAgentMonitorResetKey, setSubAgentMonitorResetKey] = useState(0);
   const { selectedAgent } = useAgentStore();
   const [modelRefreshKey, setModelRefreshKey] = useState(0);
   const [feedbackRefreshKey, setFeedbackRefreshKey] = useState(0);
@@ -1606,6 +1608,7 @@ export default function ChatPage() {
 
       const timeoutSignal = createTimedAbortSignal(data.signal);
       try {
+        setSubAgentMonitorResetKey((value) => value + 1);
         const response = await fetch(getApiUrl("/console/chat"), {
           method: "POST",
           headers,
@@ -1913,6 +1916,10 @@ export default function ChatPage() {
         beforeSubmit: handleBeforeSubmit,
         beforeUI: (
           <>
+            <SubAgentRunMonitor
+              chatId={feedbackChatId}
+              resetKey={subAgentMonitorResetKey}
+            />
             {taskProgressEnabled ? (
               <TaskProgressFloatingCard progress={taskProgress} />
             ) : null}
@@ -2032,6 +2039,7 @@ export default function ChatPage() {
     copyResponse,
     chatId,
     activeSessionId,
+    feedbackChatId,
     handleFileUpload,
     handleContinueModifyingPlan,
     handlePlanModeDecision,
@@ -2047,6 +2055,7 @@ export default function ChatPage() {
     setPlanModeEnabledForActiveScope,
     taskProgress,
     taskProgressEnabled,
+    subAgentMonitorResetKey,
     t,
   ]);
 

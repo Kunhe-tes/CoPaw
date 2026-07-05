@@ -235,6 +235,12 @@ vi.mock("../../stores/iframeStore", () => {
 vi.mock("../../api/modules/chat", () => ({
   chatApi: {
     createChat: mocks.createChat,
+    getSubAgentRuns: vi.fn(async () => ({
+      chat_id: "chat-1",
+      session_id: "chat-1",
+      runs: [],
+    })),
+    cancelSubAgentRun: vi.fn(async () => undefined),
     filePreviewUrl: vi.fn((filename: string) => `/preview/${filename}`),
     stopChat: vi.fn(async () => undefined),
     updateChat: mocks.updateChat,

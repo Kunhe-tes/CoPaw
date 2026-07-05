@@ -15,6 +15,7 @@ import {
   emitTaskProgressUpdate,
   extractTaskProgress,
 } from "@/pages/Chat/taskProgressEvents";
+import { emitSubAgentRunsRefreshIfPresent } from "@/pages/Chat/subAgentRunEvents";
 import { extractPlanInteractionCard } from "@/pages/Chat/messageMeta";
 import {
   isActiveChatRequestOwner,
@@ -412,6 +413,7 @@ export default function useChatRequest(options: UseChatRequestOptions) {
           if (streamedTaskProgress !== undefined) {
             emitTaskProgressUpdate(streamedTaskProgress, owner);
           }
+          emitSubAgentRunsRefreshIfPresent(chunkData);
           const res = agentScopeRuntimeResponseBuilder.handle(chunkData);
           const isTerminalResponse =
             res.status === AgentScopeRuntimeRunStatus.Completed ||
