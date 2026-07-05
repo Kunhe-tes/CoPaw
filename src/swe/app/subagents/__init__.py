@@ -5,6 +5,11 @@ from .builtins import builtin_definition_provider
 from .definition_service import SubAgentDefinitionService
 from .definition_store import DefinitionUpsertResult, SubAgentDefinitionStore
 from .manager import DelegationManager
+from .matcher import (
+    DefinitionMatchResult,
+    SubAgentDefinitionMatcher,
+    normalize_name,
+)
 from .models import (
     AgentResult,
     BackgroundRunStatus,
@@ -57,6 +62,7 @@ __all__ = [
     "BackgroundSubAgentWaitSnapshot",
     "DelegationManager",
     "DelegationSpec",
+    "DefinitionMatchResult",
     "DefinitionMatchMetadata",
     "DefinitionUpsertResult",
     "DefinitionValidationError",
@@ -67,6 +73,7 @@ __all__ = [
     "PerRunSubAgentRunStore",
     "PermissionPolicy",
     "SubAgentDefinition",
+    "SubAgentDefinitionMatcher",
     "SubAgentDefinitionService",
     "SubAgentDefinitionStore",
     "SubAgentDefinitionProvider",
@@ -82,5 +89,6 @@ __all__ = [
     "assign_subagent_nickname",
     "builtin_definition_provider",
     "compose_effective_policy",
+    "normalize_name",
     "validate_tool_call",
 ]

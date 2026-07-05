@@ -6,6 +6,7 @@ from __future__ import annotations
 from typing import Any
 
 from .definition_store import SubAgentDefinitionStore
+from .matcher import DefinitionMatchResult, SubAgentDefinitionMatcher
 from .models import (
     BudgetConfig,
     SubAgentDefinition,
@@ -29,10 +30,12 @@ class SubAgentDefinitionService:
         store: SubAgentDefinitionStore,
         builtin_registry: AgentRegistry,
         owner_scope: str = "stored",
+        matcher: SubAgentDefinitionMatcher | None = None,
     ):
         self._store = store
         self._builtin_registry = builtin_registry
         self._owner_scope = owner_scope
+        self._matcher = matcher or SubAgentDefinitionMatcher()
 
     def register(self, request: SubAgentRegistrationRequest) -> dict[str, Any]:
         """Upsert a stored definition unless it conflicts with a builtin."""
@@ -103,6 +106,13 @@ class SubAgentDefinitionService:
             )
             if definition.enabled
         ]
+
+    def match_start_request(
+        self,
+        request: SubAgentStartRequest,
+    ) -> DefinitionMatchResult | None:
+        """Match a compact start request against reusable definitions."""
+        return self._matcher.match(request, self.list_available_definitions())
 
     def _builtin_name_exists(self, name: str) -> bool:
         return any(
