@@ -52,6 +52,7 @@ class _Supervisor:
     def __init__(self, store: PerRunSubAgentRunStore) -> None:
         self.store = store
         self.cancel_calls: list[str] = []
+        self.wait_calls = 0
 
     async def get(self, _scope, run_id: str):
         return await self.store.get(run_id)
@@ -59,6 +60,10 @@ class _Supervisor:
     async def cancel(self, _scope, run_id: str):
         self.cancel_calls.append(run_id)
         return await self.store.cancel(run_id)
+
+    async def wait(self, _scope, *, timeout_ms: int = 0):
+        self.wait_calls += 1
+        return None
 
     def is_manageable(self, _scope, run_id: str) -> bool:
         return run_id == "subagent-running"
@@ -150,7 +155,7 @@ async def _create_run(
 
 
 def test_snapshot_returns_slim_current_chat_runs(tmp_path) -> None:
-    client, store, _ = _client(tmp_path)
+    client, store, supervisor = _client(tmp_path)
     started_at = datetime.now(timezone.utc) - timedelta(seconds=30)
 
     async def prepare() -> None:
@@ -201,6 +206,7 @@ def test_snapshot_returns_slim_current_chat_runs(tmp_path) -> None:
     completed = payload["runs"][1]
     assert completed["summary_preview"] == "完成" * 80
     assert completed["stoppable"] is False
+    assert supervisor.wait_calls == 1
 
 
 def test_cancel_running_run_marks_cancelled(tmp_path) -> None:
@@ -310,3 +316,42 @@ def test_cancel_not_manageable_run_reports_conflict(tmp_path) -> None:
     assert (
         response.json()["detail"] == "background_subagent_run_not_manageable"
     )
+
+
+def test_cancel_race_to_terminal_run_is_not_stoppable(tmp_path) -> None:
+    client, store, supervisor = _client(tmp_path)
+
+    async def prepare() -> None:
+        await _create_run(
+            store,
+            run_id="subagent-race",
+            session_id="session-1",
+            status="running",
+        )
+
+    import asyncio
+
+    asyncio.run(prepare())
+
+    async def completed_before_cancel(_scope, run_id):
+        return await store.finish(
+            run_id,
+            AgentResult(
+                task_id="task-1",
+                agent_run_id=run_id,
+                agent_name="plan-researcher",
+                status="completed",
+                summary="finished",
+                metrics=Metrics(elapsed_ms=10_000),
+            ),
+        )
+
+    supervisor.cancel = completed_before_cancel
+
+    response = client.post(
+        "/subagents/runs/subagent-race/cancel",
+        json={"chat_id": "chat-1"},
+    )
+
+    assert response.status_code == 409
+    assert response.json()["detail"] == "subagent run is not running"

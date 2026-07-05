@@ -96,6 +96,7 @@ class SubAgentMonitorService:
         chat_id: str,
         session_id: str,
     ) -> SubAgentRunSnapshot:
+        await self._reap_active_runs()
         records = await self._records_for_session(session_id)
         return SubAgentRunSnapshot(
             chat_id=chat_id,
@@ -119,7 +120,14 @@ class SubAgentMonitorService:
             return None
         if isinstance(result, BackgroundSubAgentNotManageable):
             raise SubAgentRunNotManageableError(result.reason)
+        if result.status != "cancelled":
+            raise ValueError("subagent run is not running")
         return self._snapshot_item(result)
+
+    async def _reap_active_runs(self) -> None:
+        wait = getattr(self._supervisor, "wait", None)
+        if wait is not None:
+            await wait(self._scope, timeout_ms=0)
 
     async def _records_for_session(
         self,

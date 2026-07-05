@@ -61,6 +61,14 @@ function run(overrides: Record<string, unknown> = {}) {
   };
 }
 
+function deferredSnapshot() {
+  let resolve!: (value: ReturnType<typeof snapshot>) => void;
+  const promise = new Promise<ReturnType<typeof snapshot>>((next) => {
+    resolve = next;
+  });
+  return { promise, resolve };
+}
+
 describe("SubAgentRunMonitor", () => {
   beforeEach(() => {
     vi.clearAllMocks();
@@ -132,6 +140,106 @@ describe("SubAgentRunMonitor", () => {
     });
 
     expect(mocks.getSubAgentRuns).toHaveBeenCalledTimes(2);
+  });
+
+  it("hides earlier runs after reset and shows later snapshot runs", async () => {
+    const oldRun = run({
+      run_id: "subagent-old",
+      agent_name: "old-agent",
+    });
+    const newRun = run({
+      run_id: "subagent-new",
+      agent_name: "new-agent",
+    });
+    mocks.getSubAgentRuns
+      .mockResolvedValueOnce(snapshot([oldRun]))
+      .mockResolvedValueOnce(snapshot([oldRun, newRun]));
+
+    const { rerender } = render(
+      <SubAgentRunMonitor chatId="chat-1" resetKey={0} />,
+    );
+    await flushPromises();
+    screen.getByText("1 个 SubAgent 运行中");
+
+    rerender(<SubAgentRunMonitor chatId="chat-1" resetKey={1} />);
+    await flushPromises();
+    expect(screen.queryByRole("button", { name: /SubAgent/i })).toBeNull();
+    expect(mocks.getSubAgentRuns).toHaveBeenCalledTimes(1);
+
+    await act(async () => {
+      document.dispatchEvent(new CustomEvent(SUBAGENT_RUNS_REFRESH_EVENT));
+    });
+
+    expect(await screen.findByText("1 个 SubAgent 运行中")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: /SubAgent/i }));
+    expect(screen.queryByText("old-agent")).toBeNull();
+    expect(screen.getByText("new-agent")).toBeInTheDocument();
+  });
+
+  it("ignores in-flight snapshots after reset without hiding new runs", async () => {
+    const pending = deferredSnapshot();
+    const oldRun = run({
+      run_id: "subagent-old",
+      agent_name: "old-agent",
+    });
+    const newRun = run({
+      run_id: "subagent-new",
+      agent_name: "new-agent",
+    });
+    mocks.getSubAgentRuns
+      .mockResolvedValueOnce(snapshot([oldRun]))
+      .mockReturnValueOnce(pending.promise)
+      .mockResolvedValueOnce(snapshot([oldRun, newRun]));
+
+    const { rerender } = render(
+      <SubAgentRunMonitor chatId="chat-1" resetKey={0} />,
+    );
+    await flushPromises();
+    screen.getByText("1 个 SubAgent 运行中");
+
+    await act(async () => {
+      document.dispatchEvent(new CustomEvent(SUBAGENT_RUNS_REFRESH_EVENT));
+    });
+
+    rerender(<SubAgentRunMonitor chatId="chat-1" resetKey={1} />);
+    await act(async () => {
+      pending.resolve(snapshot([oldRun, newRun]));
+    });
+
+    expect(screen.queryByRole("button", { name: /SubAgent/i })).toBeNull();
+
+    await act(async () => {
+      document.dispatchEvent(new CustomEvent(SUBAGENT_RUNS_REFRESH_EVENT));
+    });
+
+    expect(await screen.findByText("1 个 SubAgent 运行中")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: /SubAgent/i }));
+    expect(screen.queryByText("old-agent")).toBeNull();
+    expect(screen.getByText("new-agent")).toBeInTheDocument();
+  });
+
+  it("caps budget consumption while preserving snapshot status", async () => {
+    mocks.getSubAgentRuns.mockResolvedValue(
+      snapshot([
+        run({
+          budget_consumption: {
+            elapsed_ms: 150_000,
+            timeout_ms: 120_000,
+            ratio: 1.25,
+          },
+        }),
+      ]),
+    );
+
+    render(<SubAgentRunMonitor chatId="chat-1" resetKey={0} />);
+    fireEvent.click(await screen.findByRole("button", { name: /SubAgent/i }));
+
+    expect(screen.getByText("运行中")).toBeInTheDocument();
+    expect(
+      screen.getByRole("progressbar", {
+        name: "plan-researcher 时间预算消耗",
+      }),
+    ).toHaveAttribute("aria-valuenow", "100");
   });
 
   it("allows stopping only running runs", async () => {

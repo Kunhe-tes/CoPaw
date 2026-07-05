@@ -29,10 +29,15 @@ const STATUS_LABELS: Record<SubAgentRunStatus, string> = {
   expired: "已过期",
 };
 
-function hasNonTerminalRuns(snapshot: SubAgentRunSnapshot | null): boolean {
-  return Boolean(
-    snapshot?.runs.some((run) => !TERMINAL_STATUSES.has(run.status)),
-  );
+function hasNonTerminalRuns(runs: SubAgentRunSnapshotItem[]): boolean {
+  return runs.some((run) => !TERMINAL_STATUSES.has(run.status));
+}
+
+function isVisibleAfterReset(
+  run: SubAgentRunSnapshotItem,
+  hiddenRunIds: Set<string> | null,
+): boolean {
+  return !hiddenRunIds?.has(run.run_id);
 }
 
 function formatDuration(ms: number | null | undefined): string {
@@ -68,7 +73,10 @@ export default function SubAgentRunMonitor(props: {
   const [expanded, setExpanded] = useState(false);
   const [stoppingIds, setStoppingIds] = useState<Set<string>>(() => new Set());
   const [rowErrors, setRowErrors] = useState<Record<string, string>>({});
+  const [hiddenRunIds, setHiddenRunIds] = useState<Set<string> | null>(null);
   const requestSeqRef = useRef(0);
+  const resetKeyRef = useRef(resetKey);
+  const snapshotRef = useRef<SubAgentRunSnapshot | null>(null);
 
   const refresh = useCallback(async () => {
     if (!chatId) {
@@ -80,30 +88,55 @@ export default function SubAgentRunMonitor(props: {
     try {
       const next = await chatApi.getSubAgentRuns(chatId);
       if (requestSeqRef.current === seq) {
+        snapshotRef.current = next;
         setSnapshot(next);
       }
     } catch {
       if (requestSeqRef.current === seq) {
+        snapshotRef.current = null;
         setSnapshot(null);
       }
     }
   }, [chatId]);
 
   useEffect(() => {
+    snapshotRef.current = null;
     setSnapshot(null);
     setExpanded(false);
     setStoppingIds(new Set());
     setRowErrors({});
+    setHiddenRunIds(null);
     void refresh();
-  }, [refresh, resetKey]);
+  }, [refresh]);
 
   useEffect(() => {
-    if (!hasNonTerminalRuns(snapshot)) return undefined;
+    if (resetKeyRef.current === resetKey) return;
+    resetKeyRef.current = resetKey;
+    requestSeqRef.current += 1;
+    setSnapshot(null);
+    setExpanded(false);
+    setStoppingIds(new Set());
+    setRowErrors({});
+    setHiddenRunIds(
+      new Set(snapshotRef.current?.runs.map((run) => run.run_id) ?? []),
+    );
+  }, [resetKey]);
+
+  const visibleRuns = useMemo(
+    () =>
+      snapshot?.runs.filter((run) =>
+        isVisibleAfterReset(run, hiddenRunIds),
+      ) ?? [],
+    [hiddenRunIds, snapshot],
+  );
+
+  useEffect(() => {
+    if (!hasNonTerminalRuns(visibleRuns)) return undefined;
     const timer = window.setInterval(() => {
       void refresh();
     }, POLL_INTERVAL_MS);
     return () => window.clearInterval(timer);
-  }, [refresh, snapshot]);
+  }, [refresh, visibleRuns]);
 
   useEffect(() => {
     const handler = () => {
@@ -115,10 +148,8 @@ export default function SubAgentRunMonitor(props: {
   }, [refresh]);
 
   const activeCount = useMemo(
-    () =>
-      snapshot?.runs.filter((run) => !TERMINAL_STATUSES.has(run.status))
-        .length ?? 0,
-    [snapshot],
+    () => visibleRuns.filter((run) => !TERMINAL_STATUSES.has(run.status)).length,
+    [visibleRuns],
   );
 
   const handleStop = useCallback(
@@ -160,7 +191,7 @@ export default function SubAgentRunMonitor(props: {
     [chatId, message, refresh],
   );
 
-  if (!snapshot || snapshot.runs.length === 0) return null;
+  if (!snapshot || visibleRuns.length === 0) return null;
 
   return (
     <div className={styles.anchor}>
@@ -178,10 +209,10 @@ export default function SubAgentRunMonitor(props: {
               <i />
             </span>
             <span className={styles.title}>SubAgent 运行状态</span>
-            <span className={styles.count}>{snapshot.runs.length}</span>
+            <span className={styles.count}>{visibleRuns.length}</span>
           </button>
           <ul className={styles.list}>
-            {snapshot.runs.map((run) => {
+            {visibleRuns.map((run) => {
               const stopping = stoppingIds.has(run.run_id);
               return (
                 <li
