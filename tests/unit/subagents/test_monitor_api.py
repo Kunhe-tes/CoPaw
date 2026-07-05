@@ -106,7 +106,7 @@ async def _create_run(
     record = await store.create(
         DelegationSpec(
             parent_thread_id=session_id,
-            agent_name="plan-researcher",
+            name="plan-researcher",
             objective=objective,
             budget={"timeout_ms": 120_000},
         ),

@@ -70,7 +70,7 @@ async def test_wait_subagent_returns_compact_snapshot(tmp_path):
                     run_id="subagent-active",
                     status="running",
                     spec=SimpleNamespace(
-                        agent_name="plan-researcher",
+                        name="plan-researcher",
                         objective="Inspect",
                     ),
                     result=None,
@@ -103,7 +103,7 @@ async def test_start_subagent_serializes_real_run_record(tmp_path):
     )
     record = await PerRunSubAgentRunStore(tmp_path / "runs").create(
         DelegationSpec(
-            agent_name="plan-researcher",
+            name="plan-researcher",
             objective="Inspect",
         ),
         definition,
@@ -186,7 +186,7 @@ async def test_get_subagent_includes_manageable_and_stderr_tail(tmp_path):
     )
     store = PerRunSubAgentRunStore(run_store_dir)
     record = await store.create(
-        DelegationSpec(agent_name="plan-researcher", objective="Inspect"),
+        DelegationSpec(name="plan-researcher", objective="Inspect"),
         definition,
         PermissionPolicy.readonly(),
     )

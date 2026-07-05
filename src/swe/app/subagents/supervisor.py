@@ -45,7 +45,6 @@ def _effective_budget(
             definition_budget.max_tool_calls,
             spec_budget.max_tool_calls,
         ),
-        max_tokens=min(definition_budget.max_tokens, spec_budget.max_tokens),
         timeout_ms=min(definition_budget.timeout_ms, spec_budget.timeout_ms),
     )
 
@@ -133,7 +132,7 @@ class BackgroundSubAgentSupervisor:
                 limit=self._max_running_per_scope,
                 active_run_ids=sorted(active),
             )
-        definition = self._registry.resolve(spec.agent_name)
+        definition = self._registry.resolve(spec.name)
         effective_policy = compose_effective_policy(
             parent_policy or PermissionPolicy.readonly(),
             definition.permission,

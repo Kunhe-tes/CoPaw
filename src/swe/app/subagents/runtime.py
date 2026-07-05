@@ -173,10 +173,6 @@ class SubAgentRuntime:
             config.running.max_iters,
             budget.max_turns,
         )
-        config.running.max_input_length = min(
-            config.running.max_input_length,
-            budget.max_tokens,
-        )
         if config.tools is None:
             config.tools = ToolsConfig()
         if config.tools is not None:
@@ -240,10 +236,6 @@ class SubAgentRuntime:
                 definition_budget.max_tool_calls,
                 spec_budget.max_tool_calls,
             ),
-            max_tokens=min(
-                definition_budget.max_tokens,
-                spec_budget.max_tokens,
-            ),
             timeout_ms=min(
                 definition_budget.timeout_ms,
                 spec_budget.timeout_ms,
@@ -259,13 +251,13 @@ class SubAgentRuntime:
     ) -> str:
         return "\n\n".join(
             [
-                definition.prompt.system,
+                definition.instruction,
                 "Runtime safety: operate as a fresh-context readonly SubAgent. "
                 "Do not mutate files, run tests, use MCP, load skills, or "
                 "delegate to another SubAgent.",
                 f"Workspace: {workspace_dir}",
                 f"Effective allowed tools: {', '.join(policy.tools.allow)}",
-                definition.prompt.output_contract,
+                definition.output_contract,
                 f"Task id: {spec.task_id}",
             ],
         )
@@ -338,7 +330,7 @@ class SubAgentRuntime:
         return AgentResult(
             task_id=spec.task_id,
             agent_run_id=run_id,
-            agent_name=spec.agent_name,
+            agent_name=spec.name,
             status=status,
             summary=message,
             metrics=Metrics(),

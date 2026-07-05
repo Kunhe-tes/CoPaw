@@ -56,7 +56,7 @@ def _spec() -> DelegationSpec:
     return DelegationSpec(
         task_id="task-1",
         parent_thread_id="session-1",
-        agent_name="plan-researcher",
+        name="plan-researcher",
         objective="Find relevant files",
         background="User asked for a plan",
     )
@@ -187,7 +187,7 @@ async def test_runtime_applies_non_timeout_budgets_to_agent_context(
     monkeypatch,
     tmp_path: Path,
 ) -> None:
-    """Turns, token cap, and tool-call budgets affect the worker run."""
+    """Turns and tool-call budgets affect the worker run."""
     from swe.app.subagents import runtime as runtime_module
 
     _FakeSWEAgent.instances = []
@@ -213,7 +213,6 @@ async def test_runtime_applies_non_timeout_budgets_to_agent_context(
             "budget": BudgetConfig(
                 max_turns=4,
                 max_tool_calls=7,
-                max_tokens=9000,
                 timeout_ms=1000,
             ),
         },
@@ -223,7 +222,6 @@ async def test_runtime_applies_non_timeout_budgets_to_agent_context(
             "budget": BudgetConfig(
                 max_turns=2,
                 max_tool_calls=3,
-                max_tokens=1000,
                 timeout_ms=1000,
             ),
         },
@@ -242,11 +240,9 @@ async def test_runtime_applies_non_timeout_budgets_to_agent_context(
 
     created = _FakeSWEAgent.instances[0]
     assert created.kwargs["agent_config"].running.max_iters == 2
-    assert created.kwargs["agent_config"].running.max_input_length == 1000
     assert created.kwargs["request_context"]["subagent_budget"] == {
         "max_turns": 2,
         "max_tool_calls": 3,
-        "max_tokens": 1000,
         "timeout_ms": 1000,
     }
 
@@ -575,7 +571,7 @@ async def test_delegation_manager_rejects_unknown_and_nested_subagent(
     )
 
     unknown = await manager.delegate(
-        spec=_spec().model_copy(update={"agent_name": "missing"}),
+        spec=_spec().model_copy(update={"name": "missing"}),
         parent_agent_config=_agent_config(tmp_path),
         workspace_dir=tmp_path,
     )

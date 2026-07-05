@@ -29,7 +29,7 @@ def _spec() -> DelegationSpec:
     return DelegationSpec(
         task_id="task-1",
         parent_thread_id="session-1",
-        agent_name="plan-researcher",
+        name="plan-researcher",
         objective="Inspect worker behavior",
     )
 

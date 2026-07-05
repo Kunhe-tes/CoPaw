@@ -11,14 +11,14 @@ from .models import DefinitionValidationError, SubAgentDefinition
 
 
 class SubAgentDefinitionProvider(Protocol):
-    """Provider interface for built-in or future user definitions."""
+    """Provider interface for built-in or stored definitions."""
 
     def list_definitions(self) -> list[SubAgentDefinition]:
         """Return all definitions available from this provider."""
 
 
 class SubAgentDefinitionStore(SubAgentDefinitionProvider, Protocol):
-    """Future tenant/workspace store interface for user definitions."""
+    """Tenant-and-agent store interface for stored definitions."""
 
 
 class InMemoryDefinitionProvider:
@@ -41,12 +41,17 @@ class AgentRegistry:
 
     def _load(self, providers: list[SubAgentDefinitionProvider]) -> None:
         builtin_names: set[str] = set()
-        user_names: set[str] = set()
+        stored_names: set[str] = set()
         for provider in providers:
             for definition in provider.list_definitions():
                 errors = definition.validation_errors()
                 if errors:
                     raise DefinitionValidationError("; ".join(errors))
+                if definition.source == "run_scoped":
+                    raise DefinitionValidationError(
+                        "run_scoped definition cannot be loaded into the "
+                        f"SubAgent registry: {definition.name}",
+                    )
                 key = (definition.name, definition.version)
                 if key in self._definitions:
                     raise DefinitionValidationError(
@@ -54,19 +59,19 @@ class AgentRegistry:
                         f"{definition.name}@{definition.version}",
                     )
                 if definition.source == "builtin":
-                    if definition.name in user_names:
+                    if definition.name in stored_names:
                         raise DefinitionValidationError(
-                            "user definition cannot shadow builtin "
+                            "stored definition cannot shadow builtin "
                             f"SubAgent definition: {definition.name}",
                         )
                     builtin_names.add(definition.name)
                 elif definition.name in builtin_names:
                     raise DefinitionValidationError(
-                        "user definition cannot shadow builtin "
+                        "stored definition cannot shadow builtin "
                         f"SubAgent definition: {definition.name}",
                     )
                 else:
-                    user_names.add(definition.name)
+                    stored_names.add(definition.name)
                 self._definitions[key] = definition
 
     @staticmethod

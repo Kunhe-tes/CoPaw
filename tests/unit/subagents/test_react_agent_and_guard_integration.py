@@ -300,7 +300,6 @@ def test_background_subagent_tools_require_explicit_intent(
         tmp_path,
         request_context={
             "agent_role": "main",
-            "enable_subagents": True,
             "current_user_text": "请分析这个模块",
         },
     )
@@ -308,7 +307,6 @@ def test_background_subagent_tools_require_explicit_intent(
         tmp_path,
         request_context={
             "agent_role": "main",
-            "enable_subagents": True,
             "current_user_text": "请用子代理分析这个模块",
         },
     )

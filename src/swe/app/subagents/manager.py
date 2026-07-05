@@ -47,9 +47,9 @@ class DelegationManager:
         if (request_context or {}).get("agent_role") == "subagent":
             return self._blocked(spec, "Nested delegation is not allowed.")
         try:
-            definition = self._registry.resolve(spec.agent_name)
+            definition = self._registry.resolve(spec.name)
         except KeyError:
-            return self._failed(spec, f"Unknown SubAgent: {spec.agent_name}")
+            return self._failed(spec, f"Unknown SubAgent: {spec.name}")
         effective_policy = compose_effective_policy(
             parent_policy or PermissionPolicy.readonly(),
             definition.permission,
@@ -75,7 +75,7 @@ class DelegationManager:
         return AgentResult(
             task_id=spec.task_id,
             agent_run_id="",
-            agent_name=spec.agent_name,
+            agent_name=spec.name,
             status="failed",
             summary=message,
             errors=[
@@ -87,7 +87,7 @@ class DelegationManager:
         return AgentResult(
             task_id=spec.task_id,
             agent_run_id="",
-            agent_name=spec.agent_name,
+            agent_name=spec.name,
             status="blocked",
             summary=message,
             errors=[

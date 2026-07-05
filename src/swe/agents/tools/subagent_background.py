@@ -122,7 +122,7 @@ def create_background_subagent_tools(
         """Start a Background SubAgent Run and return its run identity."""
         spec = DelegationSpec(
             parent_thread_id=str(request_context.get("session_id") or ""),
-            agent_name=agent_name,
+            name=agent_name,
             objective=objective,
             background=background,
             scope=ScopeConfig.model_validate(scope or {}),
@@ -259,7 +259,7 @@ def _compact_record(
     payload = {
         "run_id": record.run_id,
         "status": record.status,
-        "agent_name": record.spec.agent_name,
+        "agent_name": record.spec.name,
         "objective": record.spec.objective,
         "created_at": _dump_json_value(getattr(record, "created_at", None)),
         "started_at": _dump_json_value(getattr(record, "started_at", None)),

@@ -166,7 +166,7 @@ class SubAgentMonitorService:
     ) -> SubAgentRunSnapshotItem:
         return SubAgentRunSnapshotItem(
             run_id=record.run_id,
-            agent_name=record.spec.agent_name,
+            agent_name=record.spec.name,
             objective=record.spec.objective,
             status=record.status,
             stoppable=record.status == "running",

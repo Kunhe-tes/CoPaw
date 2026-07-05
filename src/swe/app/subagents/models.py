@@ -7,9 +7,15 @@ from datetime import datetime, timezone
 from typing import Any, Literal
 from uuid import uuid4
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    field_validator,
+    model_validator,
+)
 
-DefinitionSource = Literal["builtin", "user"]
+DefinitionSource = Literal["builtin", "stored", "run_scoped"]
 AgentResultStatus = Literal[
     "completed",
     "partial",
@@ -60,6 +66,8 @@ SECRET_LIKE_FIELD_FRAGMENTS = (
     "access_token",
     "refresh_token",
 )
+MAX_MATCHING_LIST_ITEMS = 20
+MAX_MATCHING_LIST_ITEM_CHARS = 64
 
 
 def _drop_secret_like_fields(value: Any) -> Any:
@@ -134,6 +142,25 @@ class DefinitionValidationError(ValueError):
 
 def _now_utc() -> datetime:
     return datetime.now(timezone.utc)
+
+
+def _validate_limited_string_list(
+    values: list[str],
+    *,
+    field_name: str,
+    max_items: int = MAX_MATCHING_LIST_ITEMS,
+) -> list[str]:
+    if len(values) > max_items:
+        raise ValueError(f"{field_name} has too many items")
+    cleaned: list[str] = []
+    for value in values:
+        item = value.strip()
+        if not item:
+            raise ValueError(f"{field_name} contains an empty item")
+        if len(item) > MAX_MATCHING_LIST_ITEM_CHARS:
+            raise ValueError(f"{field_name} item exceeds 64 characters")
+        cleaned.append(item)
+    return cleaned
 
 
 class ToolSet(BaseModel):
@@ -230,13 +257,6 @@ class ModelRouting(BaseModel):
     behavior: Literal["inherit"] = "inherit"
 
 
-class PromptContract(BaseModel):
-    """Definition prompt and output contract."""
-
-    system: str
-    output_contract: str = "Return valid AgentResult JSON only."
-
-
 class IsolationConfig(BaseModel):
     """SubAgent context/workspace/memory isolation settings."""
 
@@ -250,9 +270,10 @@ class IsolationConfig(BaseModel):
 class BudgetConfig(BaseModel):
     """MVP execution budgets for a SubAgent run."""
 
+    model_config = ConfigDict(extra="forbid")
+
     max_turns: int = 6
     max_tool_calls: int = 30
-    max_tokens: int = 12000
     timeout_ms: int = 120000
 
 
@@ -264,36 +285,78 @@ class LifecycleConfig(BaseModel):
     allow_nested_delegation: bool = False
 
 
-class RoutingMetadata(BaseModel):
-    """Task routing hints for future planner use."""
-
-    task_types: list[str] = Field(default_factory=list)
-    trigger_keywords: list[str] = Field(default_factory=list)
-    priority: int = 100
-
-
 class SubAgentDefinition(BaseModel):
     """A named, versioned definition for a bounded SubAgent worker."""
 
+    model_config = ConfigDict(extra="forbid")
+
     name: str
     version: str = "1.0.0"
-    schema_version: str = "subagent.definition.v1"
+    schema_version: str = "subagent.definition.v2"
     source: DefinitionSource = "builtin"
     owner_scope: str = "builtin"
     enabled: bool = True
     created_at: datetime = Field(default_factory=_now_utc)
     updated_at: datetime = Field(default_factory=_now_utc)
     created_by: str | None = None
+    nickname: str | None = None
     description: str
     role: str = "researcher"
+    instruction: str
+    output_contract: str = "Return only valid AgentResult JSON."
     model: ModelRouting = Field(default_factory=ModelRouting)
-    prompt: PromptContract
     tools: ToolSet = Field(default_factory=ToolSet)
     permission: PermissionPolicy = Field(default_factory=PermissionPolicy)
     isolation: IsolationConfig = Field(default_factory=IsolationConfig)
     budget: BudgetConfig = Field(default_factory=BudgetConfig)
-    routing: RoutingMetadata = Field(default_factory=RoutingMetadata)
+    task_types: list[str] = Field(default_factory=list)
+    trigger_keywords: list[str] = Field(default_factory=list)
+    priority: int = 100
     lifecycle: LifecycleConfig = Field(default_factory=LifecycleConfig)
+
+    @field_validator("name", "description", "instruction", mode="after")
+    @classmethod
+    def _non_empty_string(cls, value: str) -> str:
+        value = value.strip()
+        if not value:
+            raise ValueError("field must be non-empty")
+        return value
+
+    @field_validator("instruction")
+    @classmethod
+    def _instruction_size(cls, value: str) -> str:
+        if len(value.encode("utf-8")) > 8192:
+            raise ValueError("instruction exceeds 8192 bytes")
+        return value
+
+    @field_validator("description")
+    @classmethod
+    def _description_size(cls, value: str) -> str:
+        if len(value.encode("utf-8")) > 1024:
+            raise ValueError("description exceeds 1024 bytes")
+        return value
+
+    @field_validator("output_contract")
+    @classmethod
+    def _output_contract_size(cls, value: str) -> str:
+        value = value.strip()
+        if not value:
+            raise ValueError("output_contract must be non-empty")
+        if len(value.encode("utf-8")) > 2048:
+            raise ValueError("output_contract exceeds 2048 bytes")
+        return value
+
+    @field_validator("task_types", "trigger_keywords")
+    @classmethod
+    def _validate_matching_lists(
+        cls,
+        value: list[str],
+        info: Any,
+    ) -> list[str]:
+        return _validate_limited_string_list(
+            value,
+            field_name=info.field_name,
+        )
 
     @classmethod
     def model_validate(cls, obj: Any, *args: Any, **kwargs: Any):
@@ -306,8 +369,8 @@ class SubAgentDefinition(BaseModel):
     def validation_errors(self) -> list[str]:
         """Return MVP safety validation errors for this definition."""
         errors: list[str] = []
-        if not self.prompt.system.strip():
-            errors.append("missing prompt")
+        if not self.instruction.strip():
+            errors.append("missing instruction")
         if self.lifecycle.allow_nested_delegation:
             errors.append("nested delegation is unsupported")
         if self.isolation.context != "fresh":
@@ -419,9 +482,11 @@ class ReturnPolicy(BaseModel):
 class DelegationSpec(BaseModel):
     """Structured task sent from a main agent to a named SubAgent."""
 
+    model_config = ConfigDict(extra="forbid")
+
     task_id: str = Field(default_factory=lambda: f"task-{uuid4().hex[:12]}")
     parent_thread_id: str = ""
-    agent_name: str
+    name: str
     objective: str
     background: str = ""
     mode_context: ModeContext = Field(default_factory=ModeContext)
@@ -435,6 +500,111 @@ class DelegationSpec(BaseModel):
     expected_output: ExpectedOutput = Field(default_factory=ExpectedOutput)
     budget: BudgetConfig = Field(default_factory=BudgetConfig)
     return_policy: ReturnPolicy = Field(default_factory=ReturnPolicy)
+
+    @field_validator("name", "objective", mode="after")
+    @classmethod
+    def _non_empty_required_string(cls, value: str) -> str:
+        value = value.strip()
+        if not value:
+            raise ValueError("field must be non-empty")
+        return value
+
+
+class SubAgentStartRequest(BaseModel):
+    """Compact request used by the main agent to start one SubAgent run."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    name: str
+    instruction: str
+    objective: str
+    background: str = ""
+
+    @field_validator("name", "instruction", "objective", mode="after")
+    @classmethod
+    def _non_empty_required_string(cls, value: str) -> str:
+        value = value.strip()
+        if not value:
+            raise ValueError("field must be non-empty")
+        return value
+
+    @field_validator("instruction")
+    @classmethod
+    def _instruction_size(cls, value: str) -> str:
+        if len(value.encode("utf-8")) > 8192:
+            raise ValueError("instruction exceeds 8192 bytes")
+        return value
+
+
+class SubAgentRegistrationRequest(BaseModel):
+    """Full request used by management tools to register stored definitions."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    name: str
+    instruction: str
+    description: str
+    nickname: str | None = None
+    trigger_keywords: list[str] = Field(default_factory=list)
+    task_types: list[str] = Field(default_factory=list)
+    priority: int = 100
+    budget: BudgetConfig = Field(default_factory=BudgetConfig)
+    output_contract: str = "Return only valid AgentResult JSON."
+    enabled: bool = True
+
+    @field_validator("name", "instruction", "description", mode="after")
+    @classmethod
+    def _non_empty_required_string(cls, value: str) -> str:
+        value = value.strip()
+        if not value:
+            raise ValueError("field must be non-empty")
+        return value
+
+    @field_validator("instruction")
+    @classmethod
+    def _instruction_size(cls, value: str) -> str:
+        if len(value.encode("utf-8")) > 8192:
+            raise ValueError("instruction exceeds 8192 bytes")
+        return value
+
+    @field_validator("description")
+    @classmethod
+    def _description_size(cls, value: str) -> str:
+        if len(value.encode("utf-8")) > 1024:
+            raise ValueError("description exceeds 1024 bytes")
+        return value
+
+    @field_validator("output_contract")
+    @classmethod
+    def _output_contract_size(cls, value: str) -> str:
+        value = value.strip()
+        if not value:
+            raise ValueError("output_contract must be non-empty")
+        if len(value.encode("utf-8")) > 2048:
+            raise ValueError("output_contract exceeds 2048 bytes")
+        return value
+
+    @field_validator("task_types", "trigger_keywords")
+    @classmethod
+    def _validate_matching_lists(
+        cls,
+        value: list[str],
+        info: Any,
+    ) -> list[str]:
+        return _validate_limited_string_list(
+            value,
+            field_name=info.field_name,
+        )
+
+
+class DefinitionMatchMetadata(BaseModel):
+    """Metadata describing deterministic definition matching for a run."""
+
+    matched: bool = False
+    definition_name: str | None = None
+    definition_source: DefinitionSource | None = None
+    score: float | None = None
+    reason: str | None = None
 
 
 class LineRange(BaseModel):
