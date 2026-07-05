@@ -40,6 +40,30 @@ _Avoid_: list agents, background queue browser, automatic completion callback
 The act of cancelling the execution handle that owns a **Background SubAgent Run** and marking that run as cancelled. It does not imply recursively terminating tool-owned subprocesses unless a later execution backend explicitly supports that behavior.
 _Avoid_: kill process tree, hard stop all tools
 
+**SubAgent Run Monitor**:
+A user-facing view that shows the **Background SubAgent Runs** associated with the current Main Agent conversation. It is scoped to the current conversation and is not an agent-wide operations console.
+_Avoid_: global subagent dashboard, worker pool monitor, all-agent status panel
+
+**SubAgent Run Snapshot**:
+A point-in-time observable summary of the current conversation's **Background SubAgent Runs**. It is the authoritative state used by user-facing monitoring surfaces, while live stream events may only prompt refresh.
+_Avoid_: stream-only state, frontend cache, tool result transcript
+
+**SubAgent Budget Consumption**:
+The portion of a **Background SubAgent Run**'s execution budget that has been used. In the first monitoring surface this means elapsed time against the run's time budget, not task completion percentage.
+_Avoid_: task progress, completion percent, model confidence
+
+**Frontend SubAgent Stop Request**:
+A user action from a **SubAgent Run Monitor** that asks the runtime to cancel one specific **Background SubAgent Run** directly. It is not a natural-language instruction for the Main Agent to decide whether to call a tool.
+_Avoid_: chat stop message, assistant-mediated cancellation, generic task stop
+
+**SubAgent Run Stop Eligibility**:
+The rule that only an actively running **Background SubAgent Run** can expose a user stop action in the **SubAgent Run Monitor**. Terminal, pending, paused, expired, and already-cancelled runs remain visible as status records but are not clickable stop targets.
+_Avoid_: remove record action, terminal cleanup button, clickable status row
+
+**SubAgent Stop Pending State**:
+The temporary user-facing state shown after a **Frontend SubAgent Stop Request** has been submitted and before the next **SubAgent Run Snapshot** confirms the run's terminal status. It disables repeated stop actions without implying the run has already been cancelled.
+_Avoid_: confirmed cancellation, terminal stopped state, retry button state
+
 **SubAgent Execution Backend**:
 The runtime mechanism used to execute a **SubAgent Run**, such as an in-process task or a separate operating-system process. It is an implementation boundary and does not change the meaning of **SubAgent Run**.
 _Avoid_: subagent type, agent definition source
