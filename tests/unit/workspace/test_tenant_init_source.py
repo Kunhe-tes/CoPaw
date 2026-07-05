@@ -741,14 +741,11 @@ class TestResolveEffectiveTenantId:
         assert resolve_effective_tenant_id("default", None) == "default"
 
     def test_default_with_source_returns_source_tenant(self):
-        """default + source_id 的 runtime 兼容别名仍返回 scope_id。"""
-        from swe.config.context import (
-            encode_scope_id,
-            resolve_effective_tenant_id,
-        )
+        """default + source_id 的 runtime 兼容别名返回模板目录。"""
+        from swe.config.context import resolve_effective_tenant_id
 
-        assert resolve_effective_tenant_id("default", "ruice") == (
-            encode_scope_id("default", "ruice")
+        assert (
+            resolve_effective_tenant_id("default", "ruice") == "default_ruice"
         )
 
     def test_default_with_source_storage_resolves_to_template_dir(self):
