@@ -13,6 +13,7 @@ from .models import (
     AgentError,
     AgentResult,
     BackgroundSubAgentRunRecord,
+    BudgetConfig,
     PermissionPolicy,
     SubAgentDefinition,
     SubAgentRunRecord,
@@ -234,6 +235,7 @@ class PerRunSubAgentRunStore:
         spec: DelegationSpec,
         definition: SubAgentDefinition,
         effective_policy: PermissionPolicy,
+        effective_budget: BudgetConfig | None = None,
     ) -> BackgroundSubAgentRunRecord:
         """Create a pending background run record."""
         record = BackgroundSubAgentRunRecord(
@@ -243,6 +245,7 @@ class PerRunSubAgentRunStore:
             definition_source=definition.source,
             owner_scope=definition.owner_scope,
             effective_policy=effective_policy,
+            effective_budget=effective_budget or BudgetConfig(),
         )
         self._write(record)
         return record

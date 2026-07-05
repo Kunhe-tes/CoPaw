@@ -614,6 +614,7 @@ class BackgroundSubAgentRunRecord(BaseModel):
     definition_source: DefinitionSource
     owner_scope: str
     effective_policy: PermissionPolicy
+    effective_budget: BudgetConfig = Field(default_factory=BudgetConfig)
     worker: WorkerProcessInfo | None = None
     result: AgentResult | None = None
     errors: list[AgentError] = Field(default_factory=list)

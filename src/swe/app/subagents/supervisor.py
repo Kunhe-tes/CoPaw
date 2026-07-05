@@ -21,6 +21,7 @@ from ...config.config import AgentProfileConfig
 from .builtins import builtin_definition_provider
 from .models import (
     BackgroundSubAgentRunRecord,
+    BudgetConfig,
     DelegationSpec,
     PermissionPolicy,
     TERMINAL_BACKGROUND_RUN_STATUSES,
@@ -32,6 +33,21 @@ from .run_store import PerRunSubAgentRunStore
 
 _CONCURRENCY_LIMIT_REASON = "background_subagent_concurrency_limit"
 _WORKER_EXITED_WITHOUT_RESULT = "worker_exited_without_result"
+
+
+def _effective_budget(
+    definition_budget: BudgetConfig,
+    spec_budget: BudgetConfig,
+) -> BudgetConfig:
+    return BudgetConfig(
+        max_turns=min(definition_budget.max_turns, spec_budget.max_turns),
+        max_tool_calls=min(
+            definition_budget.max_tool_calls,
+            spec_budget.max_tool_calls,
+        ),
+        max_tokens=min(definition_budget.max_tokens, spec_budget.max_tokens),
+        timeout_ms=min(definition_budget.timeout_ms, spec_budget.timeout_ms),
+    )
 
 
 class BackgroundSubAgentScope(BaseModel):
@@ -125,7 +141,13 @@ class BackgroundSubAgentSupervisor:
             workspace_policy or PermissionPolicy.readonly(),
         )
         store = PerRunSubAgentRunStore(scope.run_store_dir)
-        record = await store.create(spec, definition, effective_policy)
+        effective_budget = _effective_budget(definition.budget, spec.budget)
+        record = await store.create(
+            spec,
+            definition,
+            effective_policy,
+            effective_budget=effective_budget,
+        )
         launch_path = scope.run_store_dir / f"{record.run_id}.launch.json"
         stderr_log_path = scope.run_store_dir / f"{record.run_id}.stderr.log"
         launch_spec = WorkerLaunchSpec(
