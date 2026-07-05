@@ -17,10 +17,6 @@ class SubAgentDefinitionProvider(Protocol):
         """Return all definitions available from this provider."""
 
 
-class SubAgentDefinitionStore(SubAgentDefinitionProvider, Protocol):
-    """Tenant-and-agent store interface for stored definitions."""
-
-
 class InMemoryDefinitionProvider:
     """Simple provider used for built-ins and tests."""
 

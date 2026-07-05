@@ -2,6 +2,8 @@
 """SubAgent runtime primitives for bounded internal delegation."""
 
 from .builtins import builtin_definition_provider
+from .definition_service import SubAgentDefinitionService
+from .definition_store import DefinitionUpsertResult, SubAgentDefinitionStore
 from .manager import DelegationManager
 from .models import (
     AgentResult,
@@ -22,10 +24,10 @@ from .models import (
     ToolAuthorizationDecision,
 )
 from .permissions import compose_effective_policy, validate_tool_call
+from .nicknames import assign_subagent_nickname
 from .registry import (
     AgentRegistry,
     InMemoryDefinitionProvider,
-    SubAgentDefinitionStore,
     SubAgentDefinitionProvider,
 )
 from .run_store import (
@@ -56,6 +58,7 @@ __all__ = [
     "DelegationManager",
     "DelegationSpec",
     "DefinitionMatchMetadata",
+    "DefinitionUpsertResult",
     "DefinitionValidationError",
     "EvidenceRef",
     "InMemoryDefinitionProvider",
@@ -64,6 +67,7 @@ __all__ = [
     "PerRunSubAgentRunStore",
     "PermissionPolicy",
     "SubAgentDefinition",
+    "SubAgentDefinitionService",
     "SubAgentDefinitionStore",
     "SubAgentDefinitionProvider",
     "SubAgentRegistrationRequest",
@@ -75,6 +79,7 @@ __all__ = [
     "ToolAuthorizationDecision",
     "WorkerLaunchSpec",
     "WorkerProcessInfo",
+    "assign_subagent_nickname",
     "builtin_definition_provider",
     "compose_effective_policy",
     "validate_tool_call",
