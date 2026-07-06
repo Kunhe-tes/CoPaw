@@ -6,11 +6,14 @@ from __future__ import annotations
 import random
 
 BUILTIN_SUBAGENT_NICKNAMES = (
-    "研究员",
-    "分析员",
-    "洞察助手",
-    "策略顾问",
-    "风险观察员",
+    "Aristotle",
+    "Aquinas",
+    "Nash",
+    "Huygens",
+    "Kierkegaard",
+    "Carver",
+    "Epicurus",
+    "McClintock",
 )
 
 
