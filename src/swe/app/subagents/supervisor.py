@@ -23,7 +23,10 @@ from .models import (
     BackgroundSubAgentRunRecord,
     BudgetConfig,
     DelegationSpec,
+    DefinitionMatchMetadata,
     PermissionPolicy,
+    SubAgentDefinition,
+    SubAgentStartRequest,
     TERMINAL_BACKGROUND_RUN_STATUSES,
     WorkerLaunchSpec,
 )
@@ -123,8 +126,12 @@ class BackgroundSubAgentSupervisor:
         workspace_policy: PermissionPolicy | None = None,
         runtime_policy: PermissionPolicy | None = None,
         request_context: dict[str, Any] | None = None,
+        definition: SubAgentDefinition | None = None,
+        start_request: SubAgentStartRequest | None = None,
+        definition_match: DefinitionMatchMetadata | None = None,
     ) -> BackgroundSubAgentRunRecord | BackgroundSubAgentStartBlocked:
         """Create a run file and launch a worker unless the scope is full."""
+        _ = (start_request, definition_match)
         await self._reap_scope(scope)
         active = self._active_for_scope(scope)
         if len(active) >= self._max_running_per_scope:
@@ -132,7 +139,7 @@ class BackgroundSubAgentSupervisor:
                 limit=self._max_running_per_scope,
                 active_run_ids=sorted(active),
             )
-        definition = self._registry.resolve(spec.name)
+        definition = definition or self._registry.resolve(spec.name)
         effective_policy = compose_effective_policy(
             parent_policy or PermissionPolicy.readonly(),
             definition.permission,

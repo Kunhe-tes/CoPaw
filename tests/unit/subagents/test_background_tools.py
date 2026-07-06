@@ -17,6 +17,7 @@ from swe.app.subagents import (
     AgentRegistry,
     DelegationSpec,
     BackgroundSubAgentNotManageable,
+    DefinitionMatchMetadata,
     PerRunSubAgentRunStore,
     PermissionPolicy,
     builtin_definition_provider,
@@ -49,10 +50,15 @@ async def test_start_subagent_returns_blocked_without_run_file(tmp_path):
             "tenant_id": "tenant-1",
             "agent_id": "agent-1",
             "session_id": "session-1",
+            "_subagent_definition_store_dir": str(tmp_path / "definitions"),
         },
     )
 
-    response = await tools["start_subagent"]("plan-researcher", "Inspect")
+    response = await tools["start_subagent"](
+        name="plan-researcher",
+        instruction="Act as a readonly planning researcher.",
+        objective="Inspect",
+    )
     payload = json.loads(response.content[0]["text"])
 
     assert payload["status"] == "blocked"
@@ -86,7 +92,11 @@ async def test_wait_subagent_returns_compact_snapshot(tmp_path):
         supervisor=supervisor,
         parent_agent_config=_agent_config(tmp_path),
         workspace_dir=tmp_path,
-        request_context={"tenant_id": "tenant-1", "agent_id": "agent-1"},
+        request_context={
+            "tenant_id": "tenant-1",
+            "agent_id": "agent-1",
+            "_subagent_definition_store_dir": str(tmp_path / "definitions"),
+        },
     )
 
     response = await tools["wait_subagent"](timeout_ms=1)
@@ -115,10 +125,18 @@ async def test_start_subagent_serializes_real_run_record(tmp_path):
         supervisor=supervisor,
         parent_agent_config=_agent_config(tmp_path),
         workspace_dir=tmp_path,
-        request_context={"tenant_id": "tenant-1", "agent_id": "agent-1"},
+        request_context={
+            "tenant_id": "tenant-1",
+            "agent_id": "agent-1",
+            "_subagent_definition_store_dir": str(tmp_path / "definitions"),
+        },
     )
 
-    response = await tools["start_subagent"]("plan-researcher", "Inspect")
+    response = await tools["start_subagent"](
+        name="plan-researcher",
+        instruction="Act as a readonly planning researcher.",
+        objective="Inspect",
+    )
     payload = json.loads(response.content[0]["text"])
 
     assert payload["run_id"] == record.run_id
@@ -144,13 +162,194 @@ async def test_start_subagent_respects_disabled_parent_readonly_tools(
         supervisor=supervisor,
         parent_agent_config=config,
         workspace_dir=tmp_path,
-        request_context={"tenant_id": "tenant-1", "agent_id": "agent-1"},
+        request_context={
+            "tenant_id": "tenant-1",
+            "agent_id": "agent-1",
+            "_subagent_definition_store_dir": str(tmp_path / "definitions"),
+        },
     )
 
-    await tools["start_subagent"]("plan-researcher", "Inspect")
+    await tools["start_subagent"](
+        name="plan-researcher",
+        instruction="Act as a readonly planning researcher.",
+        objective="Inspect",
+    )
 
     assert "execute_shell_command" not in captured["parent_policy"].tools.allow
     assert "execute_shell_command" in captured["parent_policy"].tools.deny
+
+
+@pytest.mark.asyncio
+async def test_start_subagent_uses_compact_request_and_falls_back_run_scoped(
+    tmp_path,
+):
+    captured = {}
+
+    async def _start(**kwargs):
+        captured.update(kwargs)
+        return BackgroundSubAgentStartBlocked(limit=1)
+
+    supervisor = SimpleNamespace(start=_start)
+    tools = create_background_subagent_tools(
+        supervisor=supervisor,
+        parent_agent_config=_agent_config(tmp_path),
+        workspace_dir=tmp_path,
+        request_context={
+            "tenant_id": "tenant-1",
+            "agent_id": "agent-1",
+            "_subagent_definition_store_dir": str(tmp_path / "definitions"),
+        },
+    )
+
+    response = await tools["start_subagent"](
+        name="aum-customer-analyst",
+        instruction="Act as a customer strategy analyst.",
+        objective="Analyze 1M AUM customer maintenance.",
+        background="Need structured advice.",
+    )
+    payload = json.loads(response.content[0]["text"])
+
+    assert payload["status"] == "blocked"
+    assert captured["spec"].name == "aum-customer-analyst"
+    assert captured["definition"].source == "run_scoped"
+    assert captured["definition"].instruction == (
+        "Act as a customer strategy analyst."
+    )
+    assert captured["start_request"].name == "aum-customer-analyst"
+    assert captured["definition_match"].matched is False
+
+
+@pytest.mark.asyncio
+async def test_start_subagent_rejects_missing_instruction(tmp_path):
+    tools = create_background_subagent_tools(
+        supervisor=SimpleNamespace(),
+        parent_agent_config=_agent_config(tmp_path),
+        workspace_dir=tmp_path,
+        request_context={
+            "tenant_id": "tenant-1",
+            "agent_id": "agent-1",
+            "_subagent_definition_store_dir": str(tmp_path / "definitions"),
+        },
+    )
+
+    response = await tools["start_subagent"](
+        name="bad",
+        instruction=" ",
+        objective="Inspect",
+    )
+    payload = json.loads(response.content[0]["text"])
+
+    assert payload["status"] == "failed"
+    assert payload["reason"] == "invalid_request"
+
+
+@pytest.mark.asyncio
+async def test_start_subagent_rejects_old_agent_name_field(tmp_path):
+    tools = create_background_subagent_tools(
+        supervisor=SimpleNamespace(),
+        parent_agent_config=_agent_config(tmp_path),
+        workspace_dir=tmp_path,
+        request_context={
+            "tenant_id": "tenant-1",
+            "agent_id": "agent-1",
+            "_subagent_definition_store_dir": str(tmp_path / "definitions"),
+        },
+    )
+
+    response = await tools["start_subagent"](
+        agent_name="legacy",
+        objective="Inspect",
+    )
+    payload = json.loads(response.content[0]["text"])
+
+    assert payload["status"] == "failed"
+    assert payload["reason"] == "invalid_request"
+
+
+@pytest.mark.asyncio
+async def test_start_subagent_rejects_absent_instruction(tmp_path):
+    tools = create_background_subagent_tools(
+        supervisor=SimpleNamespace(),
+        parent_agent_config=_agent_config(tmp_path),
+        workspace_dir=tmp_path,
+        request_context={
+            "tenant_id": "tenant-1",
+            "agent_id": "agent-1",
+            "_subagent_definition_store_dir": str(tmp_path / "definitions"),
+        },
+    )
+
+    response = await tools["start_subagent"](
+        name="bad",
+        objective="Inspect",
+    )
+    payload = json.loads(response.content[0]["text"])
+
+    assert payload["status"] == "failed"
+    assert payload["reason"] == "invalid_request"
+
+
+@pytest.mark.asyncio
+async def test_register_subagent_definition_returns_registration_status(
+    tmp_path,
+):
+    tools = create_background_subagent_tools(
+        supervisor=SimpleNamespace(),
+        parent_agent_config=_agent_config(tmp_path),
+        workspace_dir=tmp_path,
+        request_context={
+            "tenant_id": "tenant-1",
+            "agent_id": "agent-1",
+            "_subagent_definition_store_dir": str(tmp_path / "definitions"),
+        },
+        include_registration_tool=True,
+    )
+
+    response = await tools["register_subagent_definition"](
+        name="aum-customer-analyst",
+        instruction="Act as a customer strategy analyst.",
+        description="Analyzes customer maintenance.",
+    )
+    payload = json.loads(response.content[0]["text"])
+
+    assert payload == {"status": "registered", "name": "aum-customer-analyst"}
+
+
+@pytest.mark.asyncio
+async def test_start_subagent_uses_matched_definition(tmp_path):
+    captured = {}
+
+    async def _start(**kwargs):
+        captured.update(kwargs)
+        return BackgroundSubAgentStartBlocked(limit=1)
+
+    supervisor = SimpleNamespace(start=_start)
+    tools = create_background_subagent_tools(
+        supervisor=supervisor,
+        parent_agent_config=_agent_config(tmp_path),
+        workspace_dir=tmp_path,
+        request_context={
+            "tenant_id": "tenant-1",
+            "agent_id": "agent-1",
+            "_subagent_definition_store_dir": str(tmp_path / "definitions"),
+        },
+    )
+
+    response = await tools["start_subagent"](
+        name="risk reviewer",
+        instruction="This should not override the matched definition.",
+        objective="Review risk in this plan.",
+    )
+    payload = json.loads(response.content[0]["text"])
+
+    assert payload["status"] == "blocked"
+    assert captured["definition"].name == "risk-reviewer"
+    assert captured["definition"].source == "builtin"
+    assert captured["definition"].instruction != (
+        "This should not override the matched definition."
+    )
+    assert isinstance(captured["definition_match"], DefinitionMatchMetadata)
+    assert captured["definition_match"].matched is True
 
 
 @pytest.mark.asyncio

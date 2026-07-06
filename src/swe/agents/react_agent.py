@@ -63,6 +63,7 @@ from .tools import (
     create_background_subagent_tools,
     get_default_background_subagent_supervisor,
     has_explicit_subagent_run_id,
+    has_subagent_registration_intent,
     has_subagent_intent,
 )
 from .utils import process_file_and_media_blocks_in_message
@@ -572,8 +573,6 @@ class SWEAgent(ToolGuardMixin, ReActAgent):
         namesake_strategy: NamesakeStrategy,
         request_context: dict[str, Any],
     ) -> None:
-        if not request_context.get("enable_subagents"):
-            return
         if request_context.get("agent_role", "main") == "subagent":
             return
         supervisor = (
@@ -592,8 +591,11 @@ class SWEAgent(ToolGuardMixin, ReActAgent):
             ),
         )
         intent = has_subagent_intent(request_context)
+        registration_intent = has_subagent_registration_intent(
+            request_context,
+        )
         explicit_run_id = has_explicit_subagent_run_id(request_context)
-        if not (intent or active or explicit_run_id):
+        if not (intent or registration_intent or active or explicit_run_id):
             return
         tools = create_background_subagent_tools(
             supervisor=supervisor,
@@ -603,10 +605,13 @@ class SWEAgent(ToolGuardMixin, ReActAgent):
                 or Path(self._agent_config.workspace_dir or ".")
             ),
             request_context=request_context,
+            include_registration_tool=registration_intent,
         )
         names = []
         if intent:
             names.append("start_subagent")
+        if registration_intent:
+            names.append("register_subagent_definition")
         if intent or active:
             names.append("wait_subagent")
         if intent or active or explicit_run_id:

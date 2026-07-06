@@ -320,6 +320,58 @@ def test_background_subagent_tools_require_explicit_intent(
     assert "delegate_to_subagent" not in visible_tools
 
 
+def test_register_subagent_definition_requires_registration_intent(
+    tmp_path: Path,
+) -> None:
+    """Registration tool is not exposed for ordinary SubAgent intent."""
+    normal = _bare_agent(
+        tmp_path,
+        request_context={
+            "agent_role": "main",
+            "current_user_text": "请用子代理分析这个模块",
+        },
+    )
+    registration = _bare_agent(
+        tmp_path,
+        request_context={
+            "agent_role": "main",
+            "current_user_text": "注册一个可复用 SubAgent Definition",
+        },
+    )
+
+    normal_tools = SWEAgent._create_toolkit(normal).tools
+    registration_tools = SWEAgent._create_toolkit(registration).tools
+
+    assert "start_subagent" in normal_tools
+    assert "register_subagent_definition" not in normal_tools
+    assert "register_subagent_definition" in registration_tools
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "帮我注册一个账号",
+        "讨论一下可复用代码结构",
+    ],
+)
+def test_register_subagent_definition_ignores_unrelated_registration_terms(
+    tmp_path: Path,
+    text: str,
+) -> None:
+    """Registration words alone do not expose SubAgent definition tools."""
+    agent = _bare_agent(
+        tmp_path,
+        request_context={
+            "agent_role": "main",
+            "current_user_text": text,
+        },
+    )
+
+    tools = SWEAgent._create_toolkit(agent).tools
+
+    assert "register_subagent_definition" not in tools
+
+
 def test_background_subagent_observe_tools_visible_with_active_runs(
     tmp_path: Path,
 ) -> None:

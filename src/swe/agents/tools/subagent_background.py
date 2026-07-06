@@ -12,15 +12,21 @@ from agentscope.message import TextBlock
 from agentscope.tool import ToolResponse
 
 from ...app.subagents import (
+    AgentRegistry,
     BackgroundSubAgentNotManageable,
     BackgroundSubAgentScope,
     BackgroundSubAgentStartBlocked,
     BackgroundSubAgentSupervisor,
     BackgroundSubAgentWaitSnapshot,
     DelegationSpec,
+    DefinitionMatchMetadata,
     PermissionPolicy,
+    SubAgentDefinitionService,
+    SubAgentDefinitionStore,
+    SubAgentRegistrationRequest,
+    SubAgentStartRequest,
+    builtin_definition_provider,
 )
-from ...app.subagents.models import BudgetConfig, ScopeConfig
 from ...config.config import AgentProfileConfig
 from ...config.utils import get_tenant_working_dir
 
@@ -32,6 +38,26 @@ _SUBAGENT_INTENT_TERMS = (
     "子 agent",
     "子Agent",
     "后台子代理",
+)
+_SUBAGENT_REGISTRATION_INTENT_TERMS = (
+    "register subagent",
+    "register_subagent",
+    "SubAgent Definition",
+    "subagent definition",
+    "subagent",
+    "SubAgent",
+    "subAgent",
+    "definition",
+    "Definition",
+    "子代理",
+    "子Agent",
+)
+_SUBAGENT_REGISTRATION_ACTION_TERMS = (
+    "register",
+    "registration",
+    "注册",
+    "登记",
+    "可复用",
 )
 _TEXT_CONTEXT_KEYS = (
     "current_user_text",
@@ -62,6 +88,20 @@ def has_subagent_intent(request_context: dict[str, Any]) -> bool:
         str(request_context.get(key) or "") for key in _TEXT_CONTEXT_KEYS
     )
     return any(term in text for term in _SUBAGENT_INTENT_TERMS)
+
+
+def has_subagent_registration_intent(
+    request_context: dict[str, Any],
+) -> bool:
+    """Return whether the current turn explicitly asks to register definitions."""
+    if request_context.get("subagent_registration_tools_requested") is True:
+        return True
+    text = "\n".join(
+        str(request_context.get(key) or "") for key in _TEXT_CONTEXT_KEYS
+    )
+    return any(
+        term in text for term in _SUBAGENT_REGISTRATION_INTENT_TERMS
+    ) and any(term in text for term in _SUBAGENT_REGISTRATION_ACTION_TERMS)
 
 
 def has_explicit_subagent_run_id(request_context: dict[str, Any]) -> bool:
@@ -105,49 +145,116 @@ def create_background_subagent_tools(
     parent_agent_config: AgentProfileConfig,
     workspace_dir: Path,
     request_context: dict[str, Any],
+    include_registration_tool: bool = False,
 ) -> dict[str, Callable[..., Any]]:
     """Create start/wait/get/cancel Background SubAgent tool callables."""
     tool_scope = build_background_subagent_scope(
         parent_agent_config=parent_agent_config,
         request_context=request_context,
     )
+    definition_service = _definition_service_for_tool(
+        request_context=request_context,
+        tool_scope=tool_scope,
+    )
 
     async def start_subagent(
-        agent_name: str,
-        objective: str,
+        name: str | None = None,
+        instruction: str | None = None,
+        objective: str | None = None,
         background: str = "",
-        scope: dict[str, Any] | None = None,
-        budget: dict[str, Any] | None = None,
+        **extra: Any,
     ) -> ToolResponse:
         """Start a Background SubAgent Run and return its run identity."""
-        spec = DelegationSpec(
-            parent_thread_id=str(request_context.get("session_id") or ""),
-            name=agent_name,
-            objective=objective,
-            background=background,
-            scope=ScopeConfig.model_validate(scope or {}),
-            budget=BudgetConfig.model_validate(budget or {}),
-        )
         try:
-            result = await supervisor.start(
-                scope=tool_scope,
-                spec=spec,
-                parent_agent_config=parent_agent_config,
-                workspace_dir=workspace_dir,
-                parent_policy=_parent_policy_from_config(
-                    parent_agent_config,
-                ),
-                request_context=request_context,
+            if extra:
+                raise ValueError(
+                    "unexpected fields: " + ", ".join(sorted(extra)),
+                )
+            start_request = SubAgentStartRequest.model_validate(
+                {
+                    "name": name,
+                    "instruction": instruction,
+                    "objective": objective,
+                    "background": background,
+                },
             )
-        except KeyError:
+        except Exception as exc:
             return _json_response(
                 {
                     "status": "failed",
-                    "reason": "unknown_subagent",
-                    "agent_name": agent_name,
+                    "reason": "invalid_request",
+                    "message": str(exc),
                 },
             )
+        match = definition_service.match_start_request(start_request)
+        if match is None:
+            definition_match = DefinitionMatchMetadata(matched=False)
+            definition = definition_service.build_run_scoped_definition(
+                start_request,
+                owner_scope=f"run:{tool_scope.tenant_id}:{tool_scope.agent_id}",
+            )
+        else:
+            definition_match = match.metadata
+            definition = match.definition
+        spec = DelegationSpec(
+            parent_thread_id=str(request_context.get("session_id") or ""),
+            name=start_request.name,
+            objective=start_request.objective,
+            background=start_request.background,
+        )
+        result = await supervisor.start(
+            scope=tool_scope,
+            spec=spec,
+            parent_agent_config=parent_agent_config,
+            workspace_dir=workspace_dir,
+            parent_policy=_parent_policy_from_config(
+                parent_agent_config,
+            ),
+            request_context=request_context,
+            definition=definition,
+            start_request=start_request,
+            definition_match=definition_match,
+        )
         return _json_response(_serialize_start_result(result))
+
+    async def register_subagent_definition(
+        name: str,
+        instruction: str,
+        description: str,
+        trigger_keywords: list[str] | None = None,
+        task_types: list[str] | None = None,
+        priority: int = 100,
+        budget: dict[str, Any] | None = None,
+        output_contract: str = "Return only valid AgentResult JSON.",
+        enabled: bool = True,
+        nickname: str | None = None,
+    ) -> ToolResponse:
+        """Register or update one stored SubAgent definition."""
+        try:
+            request = SubAgentRegistrationRequest.model_validate(
+                {
+                    "name": name,
+                    "instruction": instruction,
+                    "description": description,
+                    "nickname": nickname,
+                    "trigger_keywords": trigger_keywords or [],
+                    "task_types": task_types or [],
+                    "priority": priority,
+                    "budget": budget or {},
+                    "output_contract": output_contract,
+                    "enabled": enabled,
+                },
+            )
+            payload = definition_service.register(request)
+        except Exception as exc:
+            return _json_response(
+                {
+                    "status": "failed",
+                    "reason": "invalid_request",
+                    "message": str(exc),
+                },
+            )
+        return _json_response(payload)
 
     async def wait_subagent(timeout_ms: int = 3000) -> ToolResponse:
         """Wait briefly and return current Background SubAgent statuses."""
@@ -202,12 +309,35 @@ def create_background_subagent_tools(
             ),
         )
 
-    return {
+    tools: dict[str, Callable[..., Any]] = {
         "start_subagent": start_subagent,
         "wait_subagent": wait_subagent,
         "get_subagent": get_subagent,
         "cancel_subagent": cancel_subagent,
     }
+    if include_registration_tool:
+        tools["register_subagent_definition"] = register_subagent_definition
+    return tools
+
+
+def _definition_service_for_tool(
+    *,
+    request_context: dict[str, Any],
+    tool_scope: BackgroundSubAgentScope,
+) -> SubAgentDefinitionService:
+    explicit_definition_store_dir = request_context.get(
+        "_subagent_definition_store_dir",
+    )
+    if explicit_definition_store_dir:
+        store_dir = Path(explicit_definition_store_dir)
+    else:
+        store_dir = tool_scope.run_store_dir.parent / "subagent_definitions"
+    owner_scope = f"{tool_scope.tenant_id}/{tool_scope.agent_id}"
+    return SubAgentDefinitionService(
+        store=SubAgentDefinitionStore(store_dir),
+        builtin_registry=AgentRegistry([builtin_definition_provider()]),
+        owner_scope=owner_scope,
+    )
 
 
 def _json_response(payload: dict[str, Any]) -> ToolResponse:
