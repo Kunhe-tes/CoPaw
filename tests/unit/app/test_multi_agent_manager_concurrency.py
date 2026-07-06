@@ -11,6 +11,7 @@ from typing import Any
 import pytest
 
 import swe.app.multi_agent_manager as manager_module
+import swe.app.workspace.workspace as workspace_module
 from swe.app.multi_agent_manager import MultiAgentManager
 from swe.app.workspace.workspace import Workspace
 
@@ -1046,8 +1047,15 @@ async def test_workspace_stop_cleans_starting_services_before_started(
     class FakeServiceManager:
         services = {"runner": object()}
 
-        async def stop_all(self, *, final: bool = False) -> None:
-            stop_calls.append({"final": final})
+        async def stop_all(
+            self,
+            *,
+            final: bool = False,
+            stop_reused: bool = True,
+        ) -> None:
+            stop_calls.append(
+                {"final": final, "stop_reused": stop_reused},
+            )
 
     workspace._service_manager = FakeServiceManager()
     workspace._starting = True
@@ -1055,7 +1063,7 @@ async def test_workspace_stop_cleans_starting_services_before_started(
 
     await workspace.stop()
 
-    assert stop_calls == [{"final": True}]
+    assert stop_calls == [{"final": True, "stop_reused": True}]
     assert workspace._started is False
     assert workspace._starting is False
 
@@ -1076,8 +1084,15 @@ async def test_workspace_start_cancellation_stops_partially_started_services(
             start_entered.set()
             await cancel_may_finish.wait()
 
-        async def stop_all(self, *, final: bool = False) -> None:
-            stop_calls.append({"final": final})
+        async def stop_all(
+            self,
+            *,
+            final: bool = False,
+            stop_reused: bool = True,
+        ) -> None:
+            stop_calls.append(
+                {"final": final, "stop_reused": stop_reused},
+            )
 
     workspace._service_manager = FakeServiceManager()
     workspace._config = object()
@@ -1090,9 +1105,138 @@ async def test_workspace_start_cancellation_stops_partially_started_services(
     with pytest.raises(asyncio.CancelledError):
         await start_task
 
-    assert stop_calls == [{"final": True}]
+    assert stop_calls == [{"final": True, "stop_reused": False}]
     assert workspace._started is False
     assert workspace._starting is False
+
+
+@pytest.mark.asyncio
+async def test_workspace_start_cancellation_preserves_reused_services(
+    tmp_path,
+) -> None:
+    workspace = Workspace("default", tmp_path)
+    start_entered = asyncio.Event()
+    cancel_may_finish = asyncio.Event()
+    stop_calls: list[dict[str, Any]] = []
+
+    class FakeServiceManager:
+        reused_services = {"memory_manager"}
+
+        async def start_all(self) -> None:
+            start_entered.set()
+            await cancel_may_finish.wait()
+
+        async def stop_all(
+            self,
+            *,
+            final: bool = False,
+            stop_reused: bool = True,
+        ) -> None:
+            stop_calls.append(
+                {"final": final, "stop_reused": stop_reused},
+            )
+
+    workspace._service_manager = FakeServiceManager()
+    workspace._config = object()
+
+    start_task = asyncio.create_task(workspace.start())
+    await start_entered.wait()
+    start_task.cancel()
+    cancel_may_finish.set()
+
+    with pytest.raises(asyncio.CancelledError):
+        await start_task
+
+    assert stop_calls == [{"final": True, "stop_reused": False}]
+    assert workspace._started is False
+    assert workspace._starting is False
+
+
+@pytest.mark.asyncio
+async def test_reload_cancellation_preserves_old_reused_services(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    manager = MultiAgentManager()
+    cache_key = "tenant-a:default"
+    start_entered = asyncio.Event()
+    cancel_may_finish = asyncio.Event()
+    cleanup_stop_calls: list[dict[str, Any]] = []
+
+    class ReusedService:
+        def __init__(self) -> None:
+            self.stopped = False
+
+        async def close(self) -> None:
+            self.stopped = True
+
+    reused_service = ReusedService()
+
+    class OldServiceManager:
+        def get_reusable_services(self) -> dict[str, Any]:
+            return {"memory_manager": reused_service}
+
+    old_workspace = SimpleNamespace(_service_manager=OldServiceManager())
+    manager.agents[cache_key] = old_workspace
+    manager._touch_cache_entry(cache_key, old_workspace)
+
+    class FakeNewServiceManager:
+        def __init__(self) -> None:
+            self.services: dict[str, Any] = {}
+            self.reused_services: set[str] = set()
+
+        async def set_reusable(self, name: str, instance: Any) -> None:
+            self.services[name] = instance
+            self.reused_services.add(name)
+
+        async def start_all(self) -> None:
+            start_entered.set()
+            await cancel_may_finish.wait()
+
+        async def stop_all(
+            self,
+            *,
+            final: bool = False,
+            stop_reused: bool = True,
+        ) -> None:
+            cleanup_stop_calls.append(
+                {"final": final, "stop_reused": stop_reused},
+            )
+            if final and stop_reused:
+                service = self.services.get("memory_manager")
+                if service is not None:
+                    await service.close()
+
+    class ReloadWorkspace(Workspace):
+        def __init__(self, **kwargs: Any) -> None:
+            super().__init__(**kwargs)
+            self._service_manager = FakeNewServiceManager()
+
+    monkeypatch.setattr(manager_module, "Workspace", ReloadWorkspace)
+    monkeypatch.setattr(
+        workspace_module,
+        "load_agent_config",
+        lambda _agent_id, tenant_id=None: object(),
+    )
+    monkeypatch.setattr(
+        manager,
+        "_load_agent_config_for_tenant",
+        lambda _tenant_id=None: _config("default"),
+    )
+
+    reload_task = asyncio.create_task(
+        manager.reload_agent("default", tenant_id="tenant-a"),
+    )
+    await start_entered.wait()
+    reload_task.cancel()
+    cancel_may_finish.set()
+
+    with pytest.raises(asyncio.CancelledError):
+        await reload_task
+
+    assert cleanup_stop_calls == [{"final": True, "stop_reused": False}]
+    assert reused_service.stopped is False
+    assert manager.agents[cache_key] is old_workspace
 
 
 @pytest.mark.asyncio

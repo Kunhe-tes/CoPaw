@@ -383,33 +383,39 @@ class Workspace:
 
         except asyncio.CancelledError:
             logger.info(f"Workspace start cancelled: {self.agent_id}")
-            await self.stop()
+            await self.stop(final=True, stop_reused=False)
             raise
         except Exception as e:
             logger.error(
                 f"Failed to start agent instance {self.agent_id}: {e}",
             )
             # Clean up partially started components
-            await self.stop()
+            await self.stop(final=True, stop_reused=False)
             raise
 
-    async def stop(self, final: bool = True):
+    async def stop(self, final: bool = True, *, stop_reused: bool = True):
         """Stop agent instance and clean up all resources.
 
         Args:
             final: If True (default), stop ALL services including reusable.
                    If False, skip reusable services (for reload scenario).
+            stop_reused: If False, skip services borrowed from another
+                workspace even during final cleanup.
         """
         if not self._started and not self._starting:
             logger.debug(f"Workspace not started: {self.agent_id}")
             return
 
         logger.info(
-            f"Stopping agent instance: {self.agent_id} (final={final})",
+            f"Stopping agent instance: {self.agent_id} "
+            f"(final={final}, stop_reused={stop_reused})",
         )
 
         # Stop all services via ServiceManager (handles reuse automatically)
-        await self._service_manager.stop_all(final=final)
+        await self._service_manager.stop_all(
+            final=final,
+            stop_reused=stop_reused,
+        )
 
         self._started = False
         self._starting = False

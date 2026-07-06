@@ -328,19 +328,27 @@ class ServiceManager:
             f"{self.workspace.agent_id}",
         )
 
-    async def stop_all(self, final: bool = False) -> None:
+    async def stop_all(
+        self,
+        final: bool = False,
+        *,
+        stop_reused: bool = True,
+    ) -> None:
         """Stop all services in reverse priority order.
 
         Args:
             final: If True, stop ALL services including reusable ones.
                    If False (default), skip reusable services (for reload).
+            stop_reused: If False, skip services borrowed from another
+                workspace even during final cleanup.
 
         Reused services are skipped. Errors are logged but don't stop
         the shutdown process.
         """
         logger.debug(
             f"Stopping {len(self.services)} services "
-            f"({len(self.reused_services)} reused, final={final})",
+            f"({len(self.reused_services)} reused, "
+            f"final={final}, stop_reused={stop_reused})",
         )
 
         priority_groups = self._group_by_priority()
@@ -352,7 +360,11 @@ class ServiceManager:
             # Stop all services in this priority group concurrently
             results = await asyncio.gather(
                 *[
-                    self._stop_service(desc, final=final)
+                    self._stop_service(
+                        desc,
+                        final=final,
+                        stop_reused=stop_reused,
+                    )
                     for desc in descriptors
                 ],
                 return_exceptions=True,
@@ -369,6 +381,8 @@ class ServiceManager:
         self,
         descriptor: ServiceDescriptor,
         final: bool = False,
+        *,
+        stop_reused: bool = True,
     ) -> None:
         """Stop a single service.
 
@@ -376,6 +390,8 @@ class ServiceManager:
             descriptor: Service descriptor
             final: If True, stop service even if reusable.
                    If False, skip reusable services (for reload).
+            stop_reused: If False, skip services borrowed from another
+                workspace even when final is True.
         """
         name = descriptor.name
 
@@ -390,7 +406,7 @@ class ServiceManager:
 
         # Skip services that were reused from previous instance UNLESS final
         # (they don't belong to this instance, but must be stopped on final)
-        if name in self.reused_services and not final:
+        if name in self.reused_services and (not final or not stop_reused):
             logger.debug(
                 f"Skipped stopping reused service '{name}' "
                 f"(from previous instance) for {self.workspace.agent_id}",
