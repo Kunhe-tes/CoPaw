@@ -242,6 +242,25 @@ describe("SubAgentRunMonitor", () => {
     ).toHaveAttribute("aria-valuenow", "100");
   });
 
+  it("prefers run nickname for display labels", async () => {
+    mocks.getSubAgentRuns.mockResolvedValue(
+      snapshot([run({ nickname: "研究员" })]),
+    );
+
+    render(<SubAgentRunMonitor chatId="chat-1" resetKey={0} />);
+    fireEvent.click(await screen.findByRole("button", { name: /SubAgent/i }));
+
+    expect(screen.getByText("研究员")).toBeInTheDocument();
+    expect(
+      screen.queryByText("plan-researcher"),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.getByRole("progressbar", {
+        name: "研究员 时间预算消耗",
+      }),
+    ).toBeInTheDocument();
+  });
+
   it("allows stopping only running runs", async () => {
     mocks.getSubAgentRuns
       .mockResolvedValueOnce(snapshot([run()]))

@@ -57,9 +57,17 @@ export interface SubAgentBudgetConsumption {
 export interface SubAgentRunSnapshotItem {
   run_id: string;
   agent_name: string;
+  nickname?: string | null;
   objective: string;
   status: SubAgentRunStatus;
   stoppable: boolean;
+  definition_match?: {
+    matched: boolean;
+    definition_name?: string | null;
+    definition_source?: string | null;
+    score?: number | null;
+    reason?: string | null;
+  };
   budget_consumption: SubAgentBudgetConsumption;
   created_at?: string | null;
   started_at?: string | null;

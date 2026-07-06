@@ -16,9 +16,11 @@ from swe.app.subagents import (
     AgentResult,
     AgentRegistry,
     BackgroundSubAgentNotManageable,
+    DefinitionMatchMetadata,
     DelegationSpec,
     PerRunSubAgentRunStore,
     PermissionPolicy,
+    SubAgentStartRequest,
     builtin_definition_provider,
 )
 from swe.app.subagents.models import AgentError, Metrics
@@ -99,6 +101,8 @@ async def _create_run(
     session_id: str,
     status: str,
     objective: str = "Inspect repository",
+    nickname: str | None = None,
+    definition_match: DefinitionMatchMetadata | None = None,
 ):
     definition = AgentRegistry([builtin_definition_provider()]).resolve(
         "plan-researcher",
@@ -112,6 +116,15 @@ async def _create_run(
         ),
         definition,
         PermissionPolicy.readonly(),
+        start_request=SubAgentStartRequest.model_validate(
+            {
+                "name": "plan-researcher",
+                "instruction": "Research this run.",
+                "objective": objective,
+            },
+        ),
+        definition_match=definition_match,
+        nickname=nickname,
     )
     path = store._path(record.run_id)  # pylint: disable=protected-access
     record = record.model_copy(update={"run_id": run_id})
@@ -207,6 +220,35 @@ def test_snapshot_returns_slim_current_chat_runs(tmp_path) -> None:
     assert completed["summary_preview"] == "完成" * 80
     assert completed["stoppable"] is False
     assert supervisor.wait_calls == 1
+
+
+def test_monitor_snapshot_includes_nickname_and_definition_match(
+    tmp_path,
+) -> None:
+    client, store, _supervisor = _client(tmp_path)
+
+    async def prepare() -> None:
+        await _create_run(
+            store,
+            run_id="subagent-running",
+            session_id="session-1",
+            status="running",
+            nickname="研究员",
+            definition_match=DefinitionMatchMetadata(
+                matched=False,
+            ),
+        )
+
+    import asyncio
+
+    asyncio.run(prepare())
+
+    response = client.get("/subagents/runs", params={"chat_id": "chat-1"})
+
+    assert response.status_code == 200
+    run = response.json()["runs"][0]
+    assert run["nickname"] == "研究员"
+    assert run["definition_match"]["matched"] is False
 
 
 def test_cancel_running_run_marks_cancelled(tmp_path) -> None:

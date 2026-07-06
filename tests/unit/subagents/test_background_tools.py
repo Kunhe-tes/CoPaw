@@ -20,6 +20,7 @@ from swe.app.subagents import (
     DefinitionMatchMetadata,
     PerRunSubAgentRunStore,
     PermissionPolicy,
+    SubAgentStartRequest,
     builtin_definition_provider,
 )
 from swe.config.config import AgentProfileConfig, ToolsConfig
@@ -118,6 +119,20 @@ async def test_start_subagent_serializes_real_run_record(tmp_path):
         ),
         definition,
         PermissionPolicy.readonly(),
+        start_request=SubAgentStartRequest.model_validate(
+            {
+                "name": "plan-researcher",
+                "instruction": "Act as a readonly planning researcher.",
+                "objective": "Inspect",
+            },
+        ),
+        definition_match=DefinitionMatchMetadata(
+            matched=True,
+            definition_name="plan-researcher",
+            definition_source="builtin",
+            score=1.0,
+        ),
+        nickname="研究员",
     )
     supervisor = SimpleNamespace()
     supervisor.start = _AsyncReturn(record)
@@ -142,6 +157,9 @@ async def test_start_subagent_serializes_real_run_record(tmp_path):
     assert payload["run_id"] == record.run_id
     assert payload["created_at"]
     assert payload["manageable"] is False
+    assert payload["nickname"] == "研究员"
+    assert payload["definition_match"]["matched"] is True
+    assert payload["definition_match"]["definition_name"] == "plan-researcher"
 
 
 @pytest.mark.asyncio

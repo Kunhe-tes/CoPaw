@@ -43,9 +43,11 @@ class SubAgentRunSnapshotItem(BaseModel):
 
     run_id: str
     agent_name: str
+    nickname: str | None = None
     objective: str
     status: BackgroundRunStatus
     stoppable: bool
+    definition_match: dict[str, Any] = Field(default_factory=dict)
     budget_consumption: SubAgentBudgetConsumption
     created_at: str | None = None
     started_at: str | None = None
@@ -167,9 +169,11 @@ class SubAgentMonitorService:
         return SubAgentRunSnapshotItem(
             run_id=record.run_id,
             agent_name=record.spec.name,
+            nickname=record.nickname,
             objective=record.spec.objective,
             status=record.status,
             stoppable=record.status == "running",
+            definition_match=record.definition_match.model_dump(mode="json"),
             budget_consumption=_budget_consumption(record),
             created_at=_dump_time(record.created_at),
             started_at=_dump_time(record.started_at),

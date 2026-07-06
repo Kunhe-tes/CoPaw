@@ -390,7 +390,11 @@ def _compact_record(
         "run_id": record.run_id,
         "status": record.status,
         "agent_name": record.spec.name,
+        "nickname": getattr(record, "nickname", None),
         "objective": record.spec.objective,
+        "definition_match": _dump_json_value(
+            getattr(record, "definition_match", None),
+        ),
         "created_at": _dump_json_value(getattr(record, "created_at", None)),
         "started_at": _dump_json_value(getattr(record, "started_at", None)),
         "finished_at": _dump_json_value(getattr(record, "finished_at", None)),

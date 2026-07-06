@@ -63,6 +63,10 @@ function budgetLabel(run: SubAgentRunSnapshotItem): string {
   )} / ${formatDuration(run.budget_consumption.timeout_ms)}`;
 }
 
+function displayName(run: SubAgentRunSnapshotItem): string {
+  return run.nickname?.trim() || run.agent_name;
+}
+
 export default function SubAgentRunMonitor(props: {
   chatId: string | null;
   resetKey: number;
@@ -214,6 +218,7 @@ export default function SubAgentRunMonitor(props: {
           <ul className={styles.list}>
             {visibleRuns.map((run) => {
               const stopping = stoppingIds.has(run.run_id);
+              const name = displayName(run);
               return (
                 <li
                   key={run.run_id}
@@ -221,8 +226,8 @@ export default function SubAgentRunMonitor(props: {
                   data-status={stopping ? "stopping" : run.status}
                 >
                   <div className={styles.rowMain}>
-                    <span className={styles.name} title={run.agent_name}>
-                      {run.agent_name}
+                    <span className={styles.name} title={name}>
+                      {name}
                     </span>
                     <span className={styles.status}>
                       {stopping ? "停止中" : STATUS_LABELS[run.status]}
@@ -231,7 +236,7 @@ export default function SubAgentRunMonitor(props: {
                       <button
                         type="button"
                         className={styles.stopButton}
-                        aria-label={`停止 ${run.agent_name}`}
+                        aria-label={`停止 ${name}`}
                         title="停止运行"
                         disabled={stopping}
                         onClick={() => void handleStop(run)}
@@ -250,7 +255,7 @@ export default function SubAgentRunMonitor(props: {
                   <div
                     className={styles.progress}
                     role="progressbar"
-                    aria-label={`${run.agent_name} 时间预算消耗`}
+                    aria-label={`${name} 时间预算消耗`}
                     aria-valuemin={0}
                     aria-valuemax={100}
                     aria-valuenow={budgetPercent(run)}
