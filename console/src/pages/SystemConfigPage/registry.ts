@@ -616,7 +616,7 @@ export function validateCronTaskSessionCleanupConfig(
     !Number.isInteger(config.retention_days) ||
     config.retention_days < CRON_TASK_SESSION_CLEANUP_MIN_RETENTION_DAYS
   ) {
-    return `浠诲姟浼氳瘽鍘嗗彶淇濈暀澶╂暟涓嶈兘灏忎簬 ${CRON_TASK_SESSION_CLEANUP_MIN_RETENTION_DAYS}`;
+    return `任务会话历史保留天数不能小于 ${CRON_TASK_SESSION_CLEANUP_MIN_RETENTION_DAYS}`;
   }
   if (cronToDailyRunTime(config.cron) === null) {
     return "cron_task_session_cleanup.cron must be daily cron";
