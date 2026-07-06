@@ -8,6 +8,66 @@ This context defines the domain language for Swe's agent orchestration runtime, 
 A named, versioned worker profile that describes what kind of delegated work a SubAgent can perform. One **SubAgent Definition** can be used by many **SubAgent Runs**.
 _Avoid_: custom subagent, subagent template, agent config
 
+**Run-scoped SubAgent Definition**:
+A temporary **SubAgent Definition** supplied by the Main Agent for one **SubAgent Run**. It is validated like other SubAgent Definitions but is not stored for reuse, versioned as a reusable profile, or visible as a long-lived registry entry.
+_Avoid_: persistent custom subagent, saved worker profile
+
+**Run-scoped Definition Source**:
+The definition source value `run_scoped`, used to identify a **Run-scoped SubAgent Definition** in runtime records and audit data.
+_Avoid_: builtin, user, stored
+
+**Stored SubAgent Definition**:
+A reusable **SubAgent Definition** available through the definition registry across more than one **SubAgent Run**. Stored definitions may be built-in or user-owned, but user-owned persistence and CRUD are separate from run-scoped delegation.
+_Avoid_: temporary subagent, inline worker profile
+
+**SubAgent Definition Store**:
+The tenant-and-agent scoped store for **Stored SubAgent Definitions**. The first implementation stores one definition per JSON file and does not provide cross-pod registry consistency.
+_Avoid_: tenant-global registry, distributed definition database
+
+**Stored Definition Source**:
+The definition source value `stored`, used for reusable non-built-in **Stored SubAgent Definitions** regardless of whether they were created by a user, tenant admin, system import, or another registration flow.
+_Avoid_: user source, customized source
+
+**SubAgent Start Request**:
+The compact Main Agent tool request for starting one **SubAgent Run** with a **Run-scoped SubAgent Definition**. It must include a **SubAgent Name**, **Instruction**, and objective; it does not start a built-in or stored definition by name alone.
+_Avoid_: registration payload, full definition schema
+
+**SubAgent Definition Short-circuit Match**:
+The start-time decision to use an existing **Stored SubAgent Definition** or built-in definition instead of the **Run-scoped SubAgent Definition** described by a **SubAgent Start Request**. The request's **Instruction** may inform matching and audit records, but the matched definition's own **Instruction** controls execution.
+_Avoid_: instruction override, silent definition rewrite
+
+**Definition Match Metadata**:
+The audit data written to a **SubAgent Run** and returned by start/status tools to show whether a **SubAgent Definition Short-circuit Match** occurred, which definition was used, and why.
+_Avoid_: hidden routing decision, implicit reuse
+
+**Unknown SubAgent**:
+An error condition for registry-facing operations that require an existing **Stored SubAgent Definition** or built-in definition by name. It is not part of the compact **SubAgent Start Request**, which falls back to a **Run-scoped SubAgent Definition** when no short-circuit match is used.
+_Avoid_: start_subagent fallback failure, missing temporary worker
+
+**SubAgent Definition Registration Request**:
+The full request for creating or updating a **Stored SubAgent Definition** through a registry-facing entry point. It may include routing metadata, trigger keywords, execution budgets, tool policy, and other reusable profile fields.
+_Avoid_: start request, one-off delegation payload
+
+**SubAgent Definition Upsert**:
+The registration behavior that creates a new **Stored SubAgent Definition** or replaces the existing same-name definition in the same tenant-and-agent scope as a whole object. It does not patch-merge partial fields and cannot shadow a built-in definition name.
+_Avoid_: partial update, builtin override
+
+**Instruction**:
+The role and operating instructions for a **SubAgent Definition**. It is the canonical SubAgent term across user-facing requests, registration contracts, and runtime records, because it describes the delegated worker contract rather than a raw model-message implementation detail.
+_Avoid_: system_prompt, prompt text, hidden prompt, prompt.system
+
+**Instruction Size Limit**:
+An **Instruction** must be present and non-empty after trimming. Compact start requests reject instructions larger than 8 KB so the worker contract does not become a substitute for delegated task background or source material.
+_Avoid_: unlimited system prompt, embedded document payload
+
+**SubAgent Name**:
+The stable identifier field named `name`, used by the Main Agent or another runtime entry point to identify a **SubAgent Definition**. It is not the display label shown to users.
+_Avoid_: agent_name, display name, nickname, frontend title
+
+**SubAgent Nickname**:
+The user-facing display label for a **SubAgent Run** or **Stored SubAgent Definition**. It may be configured by a registration request or assigned from a built-in nickname pool; compact **SubAgent Start Requests** do not accept nickname input, but their run responses may still include an assigned nickname for display.
+_Avoid_: agent_name, registry key, stable identifier
+
 **SubAgent Run**:
 A single observable execution instance created when the main agent delegates work to a SubAgent Definition. A **SubAgent Run** is not a new SubAgent Definition.
 _Avoid_: create subagent, custom subagent, subagent profile
@@ -88,9 +148,21 @@ _Avoid_: tool approval, permission grant
 A structured chat UI card used by the Main Agent to ask for planning clarification or present a Proposed Plan. A Plan Interaction Card is user-facing and is not emitted directly by a SubAgent.
 _Avoid_: subagent question card, free-form prompt hack
 
+**Plan Interaction Composer Replacement**:
+A blocking chat composer state where one active Plan Interaction Card replaces the normal user input panel until the user completes or dismisses that card. It owns the visible input controls for that moment; the normal composer input, send action, attachments, quick menu, and Plan Mode prefix controls are not concurrently available.
+_Avoid_: card above composer, floating plan card, parallel input form
+
+**Active Plan Interaction Card**:
+The latest non-superseded Plan Interaction Card in the chat timeline that is currently waiting for user action. At most one Active Plan Interaction Card owns the Plan Interaction Composer Replacement at a time.
+_Avoid_: all pending cards, card type priority, parallel active cards
+
 **Planning Clarification Card**:
 A Plan Interaction Card that asks the user for missing planning information using single choice, multiple choice, or text input.
 _Avoid_: generic form, survey
+
+**Custom Clarification Response**:
+A user-authored text answer shown as an always-visible input on a top-level single-choice or multiple-choice Planning Clarification Card. For single choice it is mutually exclusive with selecting a listed option; for multiple choice it may be submitted together with listed options. It is not a field-level option inside a structured clarification form.
+_Avoid_: collapsed other option, form field other option, generated option, hidden option id
 
 **Plan Interaction Response**:
 The user's structured answer to a Plan Interaction Card, submitted as the next normal chat turn with metadata that identifies the card and selected or entered value.
@@ -467,7 +539,10 @@ _Avoid_: permanent active flag, shutdown-only invalidation
 ## Flagged Ambiguities
 
 **"Create SubAgent"**:
-Resolved to mean creating a **SubAgent Run**, not creating a new **SubAgent Definition**. User-defined SubAgent Definition CRUD/UI is outside the next stage.
+Resolved to distinguish two cases: starting work creates a **SubAgent Run**, while a Main Agent may also supply a **Run-scoped SubAgent Definition** for that single run. Creating a **Stored SubAgent Definition** with reusable persistence remains outside the next stage.
+
+**"Start Built-in SubAgent By Name"**:
+Resolved as outside the compact **SubAgent Start Request**. The Main Agent must provide a **SubAgent Name**, **Instruction**, and objective when calling the start tool; built-in or stored definition matching belongs to a separate registry-facing entry point.
 
 **"Async SubAgent Creation"**:
 Resolved to mean starting a **Background SubAgent Run** that can be queried, completed, or cancelled by run id.
