@@ -83,6 +83,7 @@ _TOOLS_WITH_SPECIFIC_TIMEOUTS = {
 }
 _APPROVAL_KIND_TOOL_GUARD = "tool_guard"
 _APPROVAL_KIND_HOOK_PRE_TOOL_USE = "hook_pre_tool_use"
+_PENDING_TOOL_SKILL_ATTRIBUTIONS_KEY = "_pending_tool_skill_attributions"
 
 
 class _GuardAction:
@@ -561,12 +562,14 @@ class ToolGuardMixin:
         tool_name: str,
         tool_input: dict[str, Any],
         mcp_server: str | None,
+        tool_call_id: str | None = None,
     ) -> str:
         """Emit tool call start trace event.
 
         Returns span_id or empty string.
         """
         if not has_trace_manager():
+            self._discard_precomputed_tool_skill_attribution(tool_call_id)
             return ""
         try:
             trace_ctx = self._resolve_trace_context_for_tracing()
@@ -583,6 +586,12 @@ class ToolGuardMixin:
                     _current_task_label(),
                 )
                 trace_mgr = get_trace_manager()
+                (
+                    has_precomputed_attribution,
+                    precomputed_attribution,
+                ) = self._consume_precomputed_tool_skill_attribution(
+                    tool_call_id,
+                )
                 return await trace_mgr.emit_tool_call_start(
                     trace_id=_trace_field(trace_ctx, "trace_id", ""),
                     tool_name=tool_name,
@@ -594,7 +603,10 @@ class ToolGuardMixin:
                     mcp_server=mcp_server,
                     user_name=_trace_field(trace_ctx, "user_name", None),
                     bbk_id=_trace_field(trace_ctx, "bbk_id", None),
+                    use_precomputed_attribution=(has_precomputed_attribution),
+                    precomputed_attribution=precomputed_attribution,
                 )
+            self._discard_precomputed_tool_skill_attribution(tool_call_id)
         except Exception as e:
             logger.debug("Failed to emit tool start event: %s", e)
         return ""
@@ -907,18 +919,60 @@ class ToolGuardMixin:
         tool_name: str,
         tool_input: dict[str, Any],
         mcp_server: str | None,
+        tool_call_id: str | None = None,
     ) -> None:
         detector = self._request_context.get("_skill_invocation_detector")
         if detector is None or not hasattr(detector, "on_tool_call"):
             return
         try:
-            await detector.on_tool_call(
+            primary_skill, _ = await detector.on_tool_call(
                 tool_name=tool_name,
                 tool_input=tool_input,
                 mcp_server=mcp_server,
             )
+            self._store_precomputed_tool_skill_attribution(
+                tool_call_id,
+                {"primary_skill": primary_skill},
+            )
         except Exception as exc:
             logger.debug("Skill detector tool notification failed: %s", exc)
+
+    def _store_precomputed_tool_skill_attribution(
+        self,
+        tool_call_id: str | None,
+        attribution: dict[str, Any],
+    ) -> None:
+        """缓存单次 tool call 的 skill attribution，供 tracing 复用。"""
+        if not tool_call_id:
+            return
+        request_context = getattr(self, "_request_context", {}) or {}
+        pending = request_context.get(_PENDING_TOOL_SKILL_ATTRIBUTIONS_KEY)
+        if not isinstance(pending, dict):
+            pending = {}
+            request_context[_PENDING_TOOL_SKILL_ATTRIBUTIONS_KEY] = pending
+        pending[tool_call_id] = dict(attribution)
+
+    def _consume_precomputed_tool_skill_attribution(
+        self,
+        tool_call_id: str | None,
+    ) -> tuple[bool, dict[str, Any] | None]:
+        """取出并消费预先计算的 tool attribution。"""
+        if not tool_call_id:
+            return False, None
+        request_context = getattr(self, "_request_context", {}) or {}
+        pending = request_context.get(_PENDING_TOOL_SKILL_ATTRIBUTIONS_KEY)
+        if not isinstance(pending, dict):
+            return False, None
+        if tool_call_id not in pending:
+            return False, None
+        return True, pending.pop(tool_call_id)
+
+    def _discard_precomputed_tool_skill_attribution(
+        self,
+        tool_call_id: str | None,
+    ) -> None:
+        """丢弃未被 tracing 消费的单次 tool attribution。"""
+        self._consume_precomputed_tool_skill_attribution(tool_call_id)
 
     @staticmethod
     def _hook_ask_handler_ids(result: MergedHookResult) -> list[str]:
@@ -1118,12 +1172,14 @@ class ToolGuardMixin:
             tool_name,
             tool_input,
             mcp_server,
+            str(tool_call.get("id") or ""),
         )
 
         span_id = await self._emit_tool_trace_start(
             tool_name,
             tool_input,
             mcp_server,
+            str(tool_call.get("id") or ""),
         )
 
         action: _GuardAction | None = None

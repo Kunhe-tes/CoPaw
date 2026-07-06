@@ -550,6 +550,7 @@ class TraceManager:
         self,
         trace_id: str,
         enabled_skills: list[str],
+        skill_runtime_profiles: Optional[dict[str, Any]] = None,
         workspace_dir: Optional[Path] = None,
     ) -> None:
         """Set up skill invocation detector for a trace.
@@ -594,6 +595,8 @@ class TraceManager:
                 workspace_dir=workspace_dir,
             )
             detector.set_enabled_skills(enabled_skills)
+            if skill_runtime_profiles:
+                detector.set_skill_runtime_profiles(skill_runtime_profiles)
 
             # Attach to context
             ctx.set_skill_detector(detector, enabled_skills)
@@ -782,7 +785,6 @@ class TraceManager:
             tool_input=tool_input,
             mcp_server=mcp_server,
         )
-
         # Update trace statistics (skills_used, tools_used, input_tokens if > 0)
         self._update_trace_totals(trace_id, span, None, input_tokens)
 
@@ -1016,6 +1018,8 @@ class TraceManager:
         mcp_server: Optional[str] = None,
         user_name: Optional[str] = None,
         bbk_id: Optional[str] = None,
+        use_precomputed_attribution: bool = False,
+        precomputed_attribution: Optional[dict[str, Any]] = None,
     ) -> str:
         """Emit tool call start event with multi-skill attribution.
 
@@ -1050,11 +1054,16 @@ class TraceManager:
                 # Use the detector if available on context
                 detector = getattr(ctx, "skill_detector", None)
                 if detector:
-                    primary_skill, _ = await detector.on_tool_call(
-                        tool_name=tool_name,
-                        tool_input=tool_input or {},
-                        mcp_server=mcp_server,
-                    )
+                    if use_precomputed_attribution:
+                        primary_skill = (precomputed_attribution or {}).get(
+                            "primary_skill",
+                        )
+                    else:
+                        primary_skill, _ = await detector.on_tool_call(
+                            tool_name=tool_name,
+                            tool_input=tool_input or {},
+                            mcp_server=mcp_server,
+                        )
                     # Get skill description from detector cache
                     if primary_skill and hasattr(
                         detector,
@@ -1067,7 +1076,13 @@ class TraceManager:
                     if primary_skill and hasattr(detector, "_skill_ids"):
                         skill_id = detector._skill_ids.get(primary_skill)
                     if primary_skill and hasattr(detector, "_skill_cn_names"):
-                        skill_cn_name = detector._skill_cn_names.get(primary_skill)
+                        skill_cn_name = detector._skill_cn_names.get(
+                            primary_skill,
+                        )
+                    primary_skill = self._resolve_skill_name_for_tool_span(
+                        detector=detector,
+                        primary_skill=primary_skill,
+                    )
                 else:
                     # Fallback to registry-based attribution
                     from ..agents.skill_tool_registry import (
@@ -1104,6 +1119,32 @@ class TraceManager:
             bbk_id=bbk_id,
         )
 
+    @staticmethod
+    def _resolve_skill_name_for_tool_span(
+        *,
+        detector: Any,
+        primary_skill: Optional[str],
+    ) -> Optional[str]:
+        """仅在 tracing 写出层过滤 tool span 的 skill_name。"""
+        if not primary_skill:
+            return None
+
+        profile = None
+        getter = getattr(detector, "get_skill_runtime_profile", None)
+        if callable(getter):
+            profile = getter(primary_skill)
+        elif hasattr(detector, "_skill_runtime_profiles"):
+            profile = getattr(detector, "_skill_runtime_profiles", {}).get(
+                primary_skill,
+            )
+
+        if profile is not None and bool(
+            getattr(profile, "has_hook_config", False),
+        ):
+            return None
+
+        return primary_skill
+
     async def emit_tool_call_end(
         self,
         trace_id: str,
@@ -1134,7 +1175,6 @@ class TraceManager:
 
         # Update event_type to TOOL_CALL_END for proper statistics
         span.event_type = EventType.TOOL_CALL_END
-
         # Update other fields, passing the span object to avoid re-fetching
         await self.update_span(
             span_id=span_id,
