@@ -92,6 +92,9 @@ export function TenantSelector({
   // 用户是否正在编辑额外输入框（避免输入时被外部状态覆盖）
   const [isEditingExtra, setIsEditingExtra] = useState(false);
 
+  // 模式切换标记（防止切换过程中的状态同步导致闪烁）
+  const isModeSwitchingRef = useRef(false);
+
   // 打开时自动加载租户信息
   useEffect(() => {
     setLoading(true);
@@ -124,7 +127,9 @@ export function TenantSelector({
   // 按机构过滤的用户 ID 列表
   const filteredTenantIds = useMemo(() => {
     if (targetMode !== "bbk_id") {
-      return availableTenantIds;
+      // user_id 模式下，filteredTenantIds 不再用于机构筛选
+      // 返回空数组，避免状态更新顺序问题导致显示混乱
+      return [];
     }
     if (selectedBbkIds.length === 0) {
       return [];
@@ -209,9 +214,11 @@ export function TenantSelector({
       .filter((group) => group.users.length > 0);
   }, [availableTenantIds, selectedBbkIds, targetMode, tenantLookup]);
 
-  // 同步外部选中状态到内部（仅在 user_id 模式下）
+  // 同步外部选中状态到内部（仅在 user_id 模式下且不在模式切换过程中）
   useEffect(() => {
     if (targetMode === "bbk_id") return;
+    // 模式切换过程中跳过同步，防止闪烁
+    if (isModeSwitchingRef.current) return;
 
     // 如果外部状态为空，清空内部状态（避免循环）
     if (selectedTenantIds.length === 0) {
@@ -244,38 +251,47 @@ export function TenantSelector({
   }, [availableTenantIds, selectedTenantIds, targetMode, isEditingExtra]);
 
   // 内部状态变更通知外部
-  // 注意：只在 user_id 模式下，且 mergedTenantIds 真正变化时才通知
+  // 注意：分成两个独立的 useEffect，避免依赖互相影响导致闪烁
   const prevMergedTenantIdsRef = useRef<string[]>([]);
 
+  // bbk_id 模式：监听 filteredTenantIds 变化
   useEffect(() => {
-    // bbk_id 模式下，直接使用 filteredTenantIds
-    if (targetMode === "bbk_id") {
-      if (!haveSameTenantIds(prevMergedTenantIdsRef.current, filteredTenantIds)) {
-        prevMergedTenantIdsRef.current = filteredTenantIds;
-        onChange(filteredTenantIds);
-      }
-      return;
+    if (targetMode !== "bbk_id") return;
+    if (!haveSameTenantIds(prevMergedTenantIdsRef.current, filteredTenantIds)) {
+      prevMergedTenantIdsRef.current = filteredTenantIds;
+      onChange(filteredTenantIds);
     }
+  }, [targetMode, filteredTenantIds, onChange]);
 
-    // user_id 模式下，检查 mergedTenantIds 是否变化
+  // user_id 模式：监听 mergedTenantIds 变化
+  useEffect(() => {
+    if (targetMode !== "user_id") return;
     if (!haveSameTenantIds(prevMergedTenantIdsRef.current, mergedTenantIds)) {
       prevMergedTenantIdsRef.current = mergedTenantIds;
       onChange(mergedTenantIds);
     }
-  }, [targetMode, filteredTenantIds, mergedTenantIds, onChange]);
+  }, [targetMode, mergedTenantIds, onChange]);
 
   useEffect(() => {
     onSelectionInfoChange?.(selectedTenantInfos);
   }, [onSelectionInfoChange, selectedTenantInfos]);
 
-  // 切换模式时清空选择
+  // 切换模式时清空选择（先清空状态，再切换模式，避免同步 useEffect 触发）
   const handleModeChange = useCallback((mode: "bbk_id" | "user_id") => {
-    setTargetMode(mode);
+    // 先清空所有状态
     setSelectedBbkIds([]);
     setFilterText("");
     setSelectedInListTenantIds([]);
     setExtraTenantIdsText("");
     setIsEditingExtra(false);
+    // 设置模式切换标记，防止同步 useEffect 在切换过程中触发
+    isModeSwitchingRef.current = true;
+    // 最后切换模式
+    setTargetMode(mode);
+    // 在下一个渲染周期清除标记
+    requestAnimationFrame(() => {
+      isModeSwitchingRef.current = false;
+    });
   }, []);
 
   // 全选/清空按钮（使用函数式更新避免依赖）
