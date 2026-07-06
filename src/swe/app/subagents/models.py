@@ -54,6 +54,7 @@ SAFE_WORKER_REQUEST_CONTEXT_KEYS = frozenset(
         "source_id",
         "trace_id",
         "tenant_id",
+        "scope_id",
         "agent_id",
     },
 )
@@ -68,6 +69,8 @@ SECRET_LIKE_FIELD_FRAGMENTS = (
 )
 MAX_MATCHING_LIST_ITEMS = 20
 MAX_MATCHING_LIST_ITEM_CHARS = 64
+START_OBJECTIVE_MAX_BYTES = 4096
+START_BACKGROUND_MAX_BYTES = 16384
 
 
 def _drop_secret_like_fields(value: Any) -> Any:
@@ -533,6 +536,20 @@ class SubAgentStartRequest(BaseModel):
     def _instruction_size(cls, value: str) -> str:
         if len(value.encode("utf-8")) > 8192:
             raise ValueError("instruction exceeds 8192 bytes")
+        return value
+
+    @field_validator("objective")
+    @classmethod
+    def _objective_size(cls, value: str) -> str:
+        if len(value.encode("utf-8")) > START_OBJECTIVE_MAX_BYTES:
+            raise ValueError("objective exceeds 4096 bytes")
+        return value
+
+    @field_validator("background")
+    @classmethod
+    def _background_size(cls, value: str) -> str:
+        if len(value.encode("utf-8")) > START_BACKGROUND_MAX_BYTES:
+            raise ValueError("background exceeds 16384 bytes")
         return value
 
 

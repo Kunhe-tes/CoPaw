@@ -6,6 +6,7 @@ from __future__ import annotations
 import asyncio
 from dataclasses import dataclass
 import json
+import logging
 import os
 from pathlib import Path
 import signal
@@ -18,6 +19,7 @@ from uuid import uuid4
 from pydantic import BaseModel, Field
 
 from ...config.config import AgentProfileConfig
+from ...config.context import get_current_scope_id
 from .builtins import builtin_definition_provider
 from .models import (
     BackgroundSubAgentRunRecord,
@@ -37,6 +39,7 @@ from .run_store import PerRunSubAgentRunStore
 
 _CONCURRENCY_LIMIT_REASON = "background_subagent_concurrency_limit"
 _WORKER_EXITED_WITHOUT_RESULT = "worker_exited_without_result"
+logger = logging.getLogger(__name__)
 
 
 def _effective_budget(
@@ -160,6 +163,14 @@ class BackgroundSubAgentSupervisor:
         )
         launch_path = scope.run_store_dir / f"{record.run_id}.launch.json"
         stderr_log_path = scope.run_store_dir / f"{record.run_id}.stderr.log"
+        worker_context = {
+            **(request_context or {}),
+            "tenant_id": scope.tenant_id,
+            "agent_id": scope.agent_id,
+        }
+        scope_id = get_current_scope_id()
+        if scope_id is not None:
+            worker_context["scope_id"] = scope_id
         launch_spec = WorkerLaunchSpec(
             run_id=record.run_id,
             run_store_dir=str(scope.run_store_dir),
@@ -171,8 +182,21 @@ class BackgroundSubAgentSupervisor:
             start_request=record.start_request,
             definition_match=record.definition_match,
             nickname=record.nickname,
-            request_context=request_context or {},
+            request_context=worker_context,
             stderr_log_path=str(stderr_log_path),
+        )
+        logger.info(
+            "background_subagent_start run_id=%s tenant_id=%s agent_id=%s "
+            "requested_name=%s definition_name=%s definition_source=%s "
+            "definition_matched=%s definition_match_reason=%s",
+            record.run_id,
+            scope.tenant_id,
+            scope.agent_id,
+            spec.name,
+            definition.name,
+            definition.source,
+            record.definition_match.matched,
+            record.definition_match.reason,
         )
         self._write_launch_spec(launch_path, launch_spec)
         command = [

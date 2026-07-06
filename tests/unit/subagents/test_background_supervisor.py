@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import signal
+import json
 from pathlib import Path
 
 import pytest
@@ -21,6 +22,7 @@ from swe.app.subagents import (
     builtin_definition_provider,
 )
 from swe.config.config import AgentProfileConfig
+from swe.app.tenant_context import bind_tenant_context
 
 
 class _FakeProcess:
@@ -189,6 +191,40 @@ async def test_start_persists_start_request_match_and_runtime_nickname(
     assert record.start_request.name == "plan-researcher"
     assert record.definition_match.matched is True
     assert record.definition_match.definition_name == "plan-researcher"
+
+
+@pytest.mark.asyncio
+async def test_start_launch_spec_carries_current_scope_id(tmp_path):
+    popen_factory = _FakePopenFactory()
+    supervisor = BackgroundSubAgentSupervisor(
+        max_running_per_scope=1,
+        popen_factory=popen_factory,
+    )
+    scope = _scope(tmp_path)
+
+    with bind_tenant_context(
+        tenant_id="tenant-1",
+        source_id="source-1",
+        scope_id="dGVuYW50LTE.c291cmNlLTE",
+        workspace_dir=tmp_path,
+    ):
+        started = await supervisor.start(
+            scope=scope,
+            spec=_spec(),
+            parent_agent_config=_agent_config(tmp_path),
+            workspace_dir=tmp_path,
+            request_context={
+                "tenant_id": "tenant-1",
+                "source_id": "source-1",
+            },
+        )
+
+    launch_path = scope.run_store_dir / f"{started.run_id}.launch.json"
+    launch = json.loads(launch_path.read_text(encoding="utf-8"))
+
+    assert launch["request_context"]["tenant_id"] == "tenant-1"
+    assert launch["request_context"]["source_id"] == "source-1"
+    assert launch["request_context"]["scope_id"] == "dGVuYW50LTE.c291cmNlLTE"
 
 
 @pytest.mark.asyncio

@@ -176,6 +176,65 @@ async def test_worker_writes_terminal_result_from_runtime(
 
 
 @pytest.mark.asyncio
+async def test_worker_binds_launch_identity(monkeypatch, tmp_path):
+    from swe.app.subagents import worker as worker_module
+    from swe.config.context import (
+        get_current_effective_tenant_id,
+        get_current_source_id,
+        get_current_tenant_id,
+        get_current_user_id,
+        get_current_workspace_dir,
+    )
+
+    observed = {}
+
+    class CapturingRuntime:
+        def __init__(self, store):
+            self.store = store
+
+        async def run(self, **kwargs):
+            observed["tenant_id"] = get_current_tenant_id()
+            observed["effective_tenant_id"] = get_current_effective_tenant_id()
+            observed["source_id"] = get_current_source_id()
+            observed["user_id"] = get_current_user_id()
+            observed["workspace_dir"] = get_current_workspace_dir()
+            observed["request_context"] = kwargs["request_context"]
+            return _result(kwargs["run"].run_id)
+
+    launch_path, run_id, run_store_dir = await _write_launch_spec(tmp_path)
+    raw = json.loads(launch_path.read_text(encoding="utf-8"))
+    raw["request_context"] = {
+        "session_id": "session-1",
+        "tenant_id": "tenant-1",
+        "source_id": "source-1",
+        "scope_id": "dGVuYW50LTE.c291cmNlLTE",
+        "user_id": "user-1",
+    }
+    launch_path.write_text(json.dumps(raw), encoding="utf-8")
+    monkeypatch.setattr(worker_module, "SubAgentRuntime", CapturingRuntime)
+
+    exit_code = await worker_module.run_worker(launch_path)
+    record = await PerRunSubAgentRunStore(run_store_dir).get(run_id)
+
+    assert exit_code == 0
+    assert record is not None
+    assert observed == {
+        "tenant_id": "tenant-1",
+        "effective_tenant_id": "dGVuYW50LTE.c291cmNlLTE",
+        "source_id": "source-1",
+        "user_id": "user-1",
+        "workspace_dir": tmp_path / "workspace",
+        "request_context": {
+            "session_id": "session-1",
+            "tenant_id": "tenant-1",
+            "source_id": "source-1",
+            "scope_id": "dGVuYW50LTE.c291cmNlLTE",
+            "user_id": "user-1",
+        },
+    }
+
+
+@pytest.mark.asyncio
 async def test_worker_exception_writes_failed(monkeypatch, tmp_path):
     from swe.app.subagents import worker as worker_module
 

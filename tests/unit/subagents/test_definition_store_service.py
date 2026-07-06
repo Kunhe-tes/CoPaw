@@ -177,6 +177,47 @@ def test_service_builds_run_scoped_definition(tmp_path: Path) -> None:
     assert definition.instruction == "Act as an analyst for this run."
 
 
+def test_service_truncates_run_scoped_description_by_utf8_bytes(
+    tmp_path: Path,
+) -> None:
+    service = SubAgentDefinitionService(
+        store=SubAgentDefinitionStore(tmp_path),
+        builtin_registry=AgentRegistry([builtin_definition_provider()]),
+    )
+    request = SubAgentStartRequest.model_validate(
+        {
+            "name": "ad-hoc-analyst",
+            "instruction": "Act as an analyst for this run.",
+            "objective": "分析" * 300,
+        },
+    )
+
+    definition = service.build_run_scoped_definition(
+        request,
+        owner_scope="tenant-a/agent-b",
+    )
+
+    assert len(definition.description.encode("utf-8")) <= 1024
+    assert definition.description
+
+
+def test_start_request_limits_objective_and_background_size() -> None:
+    base = {
+        "name": "ad-hoc-analyst",
+        "instruction": "Act as an analyst for this run.",
+        "objective": "Inspect",
+    }
+
+    with pytest.raises(ValueError, match="objective exceeds 4096 bytes"):
+        SubAgentStartRequest.model_validate(
+            {**base, "objective": "x" * 4097},
+        )
+    with pytest.raises(ValueError, match="background exceeds 16384 bytes"):
+        SubAgentStartRequest.model_validate(
+            {**base, "background": "x" * 16385},
+        )
+
+
 def test_assign_subagent_nickname_prefers_configured_value() -> None:
     assert assign_subagent_nickname("  研究伙伴  ") == "研究伙伴"
 

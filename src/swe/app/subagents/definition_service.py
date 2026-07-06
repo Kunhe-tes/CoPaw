@@ -19,6 +19,14 @@ DEFAULT_OUTPUT_CONTRACT = "Return only valid AgentResult JSON."
 MIN_REGISTRATION_MAX_TURNS = 1
 MIN_REGISTRATION_MAX_TOOL_CALLS = 0
 MIN_REGISTRATION_TIMEOUT_MS = 1000
+RUN_SCOPED_DESCRIPTION_MAX_BYTES = 1024
+
+
+def _truncate_utf8(value: str, max_bytes: int) -> str:
+    encoded = value.encode("utf-8")
+    if len(encoded) <= max_bytes:
+        return value
+    return encoded[:max_bytes].decode("utf-8", errors="ignore")
 
 
 class SubAgentDefinitionService:
@@ -90,7 +98,10 @@ class SubAgentDefinitionService:
                 "version": "run-scoped",
                 "source": "run_scoped",
                 "owner_scope": owner_scope,
-                "description": request.objective[:1024],
+                "description": _truncate_utf8(
+                    request.objective,
+                    RUN_SCOPED_DESCRIPTION_MAX_BYTES,
+                ),
                 "instruction": request.instruction,
                 "output_contract": DEFAULT_OUTPUT_CONTRACT,
                 "budget": BudgetConfig().model_dump(mode="json"),

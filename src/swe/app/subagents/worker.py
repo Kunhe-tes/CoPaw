@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Sequence
 
 from ...config.config import AgentProfileConfig
+from ..tenant_context import bind_tenant_context
 from .models import SubAgentRunRecord, WorkerLaunchSpec
 from .run_store import PerRunSubAgentRunStore
 from .runtime import SubAgentRuntime
@@ -52,17 +53,26 @@ async def run_worker(launch_spec_path: Path) -> int:
     )
     try:
         runtime = SubAgentRuntime(store=store)
-        result = await runtime.run(
-            run=runtime_record,
-            definition=launch_spec.definition,
-            spec=launch_spec.delegation_spec,
-            parent_agent_config=AgentProfileConfig.model_validate(
-                launch_spec.parent_agent_config,
-            ),
-            workspace_dir=Path(launch_spec.workspace_dir),
-            effective_policy=launch_spec.effective_policy,
-            request_context=launch_spec.request_context,
-        )
+        context = launch_spec.request_context
+        workspace_dir = Path(launch_spec.workspace_dir)
+        with bind_tenant_context(
+            tenant_id=str(context.get("tenant_id") or "default"),
+            user_id=context.get("user_id"),
+            workspace_dir=workspace_dir,
+            source_id=context.get("source_id"),
+            scope_id=context.get("scope_id"),
+        ):
+            result = await runtime.run(
+                run=runtime_record,
+                definition=launch_spec.definition,
+                spec=launch_spec.delegation_spec,
+                parent_agent_config=AgentProfileConfig.model_validate(
+                    launch_spec.parent_agent_config,
+                ),
+                workspace_dir=workspace_dir,
+                effective_policy=launch_spec.effective_policy,
+                request_context=context,
+            )
         await store.finish(launch_spec.run_id, result)
         return 0
     except Exception as exc:

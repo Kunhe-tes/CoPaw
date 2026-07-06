@@ -93,8 +93,8 @@ The Main Agent tools for managing **Background SubAgent Runs**: `start_subagent`
 _Avoid_: agent tools, generic worker tools, synchronous delegate tool
 
 **wait_subagent Tool**:
-A Main Agent tool that performs a bounded wait and returns a compact status snapshot for the current tenant-and-agent scope's non-terminal **Background SubAgent Runs** by default.
-_Avoid_: list agents, background queue browser, automatic completion callback
+A Main Agent tool that performs a bounded wait and returns basic run identity, status information, and terminal run results for the current tenant-and-agent scope's observable **Background SubAgent Runs**. It is not a diagnostic, routing-audit, worker-inspection, or historical run-browsing surface.
+_Avoid_: list agents, background queue browser, automatic completion callback, debug inspector, routing audit
 
 **SubAgent Run Cancellation**:
 The act of cancelling the execution handle that owns a **Background SubAgent Run** and marking that run as cancelled. It does not imply recursively terminating tool-owned subprocesses unless a later execution backend explicitly supports that behavior.
@@ -279,6 +279,10 @@ _Avoid_: system feature configuration, tenant config, user config
 **Runtime Request Identity**:
 The tenant and source context that determines which runtime configuration and model selection a request observes. One **Runtime Request Identity** resolves to one **Tenant Provider Configuration** view for provider and active-model reads.
 _Avoid_: cache key, auth header set, iframe context
+
+**Background SubAgent Launch Identity**:
+The **Runtime Request Identity** carried from the Main Agent runtime into a **Background SubAgent Run** so the worker observes the same source-scoped runtime configuration and model selection as its parent run.
+_Avoid_: effective tenant only, provider cache key, worker tenant
 
 **Mandatory Console Channel**:
 The built-in **Console Channel** is a runtime invariant that is always treated as enabled for every agent and tenant, including when no explicit channel entry has been saved yet. Users may configure its other fields, but persisted, imported, or interactive configuration must not disable it.

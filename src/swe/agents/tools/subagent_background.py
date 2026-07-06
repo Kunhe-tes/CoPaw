@@ -186,35 +186,46 @@ def create_background_subagent_tools(
                     "message": str(exc),
                 },
             )
-        match = definition_service.match_start_request(start_request)
-        if match is None:
-            definition_match = DefinitionMatchMetadata(matched=False)
-            definition = definition_service.build_run_scoped_definition(
-                start_request,
-                owner_scope=f"run:{tool_scope.tenant_id}:{tool_scope.agent_id}",
+        try:
+            match = definition_service.match_start_request(start_request)
+            if match is None:
+                definition_match = DefinitionMatchMetadata(matched=False)
+                definition = definition_service.build_run_scoped_definition(
+                    start_request,
+                    owner_scope=(
+                        f"run:{tool_scope.tenant_id}:{tool_scope.agent_id}"
+                    ),
+                )
+            else:
+                definition_match = match.metadata
+                definition = match.definition
+            spec = DelegationSpec(
+                parent_thread_id=str(request_context.get("session_id") or ""),
+                name=start_request.name,
+                objective=start_request.objective,
+                background=start_request.background,
             )
-        else:
-            definition_match = match.metadata
-            definition = match.definition
-        spec = DelegationSpec(
-            parent_thread_id=str(request_context.get("session_id") or ""),
-            name=start_request.name,
-            objective=start_request.objective,
-            background=start_request.background,
-        )
-        result = await supervisor.start(
-            scope=tool_scope,
-            spec=spec,
-            parent_agent_config=parent_agent_config,
-            workspace_dir=workspace_dir,
-            parent_policy=_parent_policy_from_config(
-                parent_agent_config,
-            ),
-            request_context=request_context,
-            definition=definition,
-            start_request=start_request,
-            definition_match=definition_match,
-        )
+            result = await supervisor.start(
+                scope=tool_scope,
+                spec=spec,
+                parent_agent_config=parent_agent_config,
+                workspace_dir=workspace_dir,
+                parent_policy=_parent_policy_from_config(
+                    parent_agent_config,
+                ),
+                request_context=request_context,
+                definition=definition,
+                start_request=start_request,
+                definition_match=definition_match,
+            )
+        except Exception as exc:
+            return _json_response(
+                {
+                    "status": "failed",
+                    "reason": "invalid_request",
+                    "message": str(exc),
+                },
+            )
         return _json_response(_serialize_start_result(result))
 
     async def register_subagent_definition(
@@ -355,13 +366,13 @@ def _serialize_start_result(
     result: Any,
 ) -> dict[str, Any]:
     if isinstance(result, BackgroundSubAgentStartBlocked):
-        return result.model_dump(mode="json")
-    return _compact_record(
-        result,
-        include_details=False,
-        manageable=False,
-        run_store_dir=None,
-    )
+        payload = result.model_dump(mode="json")
+        payload["accepted"] = False
+        return payload
+    return {
+        **_parent_facing_record(result, include_result=False),
+        "accepted": True,
+    }
 
 
 def _serialize_wait_snapshot(
@@ -370,13 +381,52 @@ def _serialize_wait_snapshot(
     return {
         "timed_out": snapshot.timed_out,
         "active_runs": [
-            _compact_record(record, include_details=False)
+            _parent_facing_record(record, include_result=False)
             for record in snapshot.active_runs
         ],
         "terminal_runs": [
-            _compact_record(record, include_details=False)
+            _parent_facing_record(record, include_result=True)
             for record in snapshot.terminal_runs
         ],
+    }
+
+
+def _parent_facing_record(
+    record: Any,
+    *,
+    include_result: bool,
+) -> dict[str, Any]:
+    payload = {
+        "run_id": record.run_id,
+        "status": record.status,
+        "agent_name": record.spec.name,
+        "nickname": getattr(record, "nickname", None),
+        "objective": record.spec.objective,
+    }
+    result = getattr(record, "result", None)
+    if include_result and result is not None:
+        payload["result"] = _compact_agent_result(result)
+    return payload
+
+
+def _compact_agent_result(result: Any) -> dict[str, Any]:
+    return {
+        "status": result.status,
+        "summary": result.summary,
+        "findings": _dump_json_value(getattr(result, "findings", [])),
+        "relevant_files": _dump_json_value(
+            getattr(result, "relevant_files", []),
+        ),
+        "risks": _dump_json_value(getattr(result, "risks", [])),
+        "recommendations": _dump_json_value(
+            getattr(result, "recommendations", []),
+        ),
+        "open_questions": _dump_json_value(
+            getattr(result, "open_questions", []),
+        ),
+        "suggested_next_steps": _dump_json_value(
+            getattr(result, "suggested_next_steps", []),
+        ),
     }
 
 
@@ -386,32 +436,48 @@ def _compact_record(
     manageable: bool = False,
     run_store_dir: Path | None = None,
 ) -> dict[str, Any]:
-    payload = {
-        "run_id": record.run_id,
-        "status": record.status,
-        "agent_name": record.spec.name,
-        "nickname": getattr(record, "nickname", None),
-        "objective": record.spec.objective,
-        "definition_match": _dump_json_value(
-            getattr(record, "definition_match", None),
-        ),
-        "created_at": _dump_json_value(getattr(record, "created_at", None)),
-        "started_at": _dump_json_value(getattr(record, "started_at", None)),
-        "finished_at": _dump_json_value(getattr(record, "finished_at", None)),
-        "result": _dump_json_value(getattr(record, "result", None)),
-        "errors": _dump_json_value(getattr(record, "errors", [])),
-        "worker": _dump_json_value(getattr(record, "worker", None)),
-        "manageable": manageable,
-    }
+    payload = _parent_facing_record(record, include_result=True)
     stderr_tail = _stderr_tail(record, run_store_dir)
-    if stderr_tail is not None:
-        payload["stderr_tail"] = stderr_tail
     if include_details:
+        payload.update(
+            {
+                "definition_match": _dump_json_value(
+                    getattr(record, "definition_match", None),
+                ),
+                "created_at": _dump_json_value(
+                    getattr(record, "created_at", None),
+                ),
+                "started_at": _dump_json_value(
+                    getattr(record, "started_at", None),
+                ),
+                "finished_at": _dump_json_value(
+                    getattr(record, "finished_at", None),
+                ),
+                "errors": _dump_json_value(getattr(record, "errors", [])),
+                "worker": _compact_worker(
+                    getattr(record, "worker", None),
+                ),
+                "manageable": manageable,
+            },
+        )
+        if stderr_tail is not None:
+            payload["stderr_tail"] = stderr_tail
         payload["delegation_spec"] = record.spec.model_dump(mode="json")
         payload["effective_policy"] = record.effective_policy.model_dump(
             mode="json",
         )
     return payload
+
+
+def _compact_worker(worker: Any) -> dict[str, Any] | None:
+    if worker is None:
+        return None
+    return {
+        "pid": getattr(worker, "pid", None),
+        "started_at": _dump_json_value(getattr(worker, "started_at", None)),
+        "exit_code": getattr(worker, "exit_code", None),
+        "exited_at": _dump_json_value(getattr(worker, "exited_at", None)),
+    }
 
 
 def _parent_policy_from_config(parent_agent_config: Any) -> PermissionPolicy:

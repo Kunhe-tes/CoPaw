@@ -14,6 +14,7 @@ from swe.agents.tools.subagent_background import (
 )
 from swe.app.subagents import BackgroundSubAgentStartBlocked
 from swe.app.subagents import (
+    AgentResult,
     AgentRegistry,
     DelegationSpec,
     BackgroundSubAgentNotManageable,
@@ -108,6 +109,76 @@ async def test_wait_subagent_returns_compact_snapshot(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_wait_subagent_returns_parent_facing_terminal_result(tmp_path):
+    supervisor = SimpleNamespace()
+    supervisor.wait = _AsyncReturn(
+        SimpleNamespace(
+            active_runs=[],
+            terminal_runs=[
+                SimpleNamespace(
+                    run_id="subagent-done",
+                    status="completed",
+                    spec=SimpleNamespace(
+                        name="plan-researcher",
+                        objective="Inspect",
+                    ),
+                    nickname="研究员",
+                    result=AgentResult(
+                        task_id="task-1",
+                        agent_run_id="subagent-done",
+                        agent_name="plan-researcher",
+                        status="completed",
+                        summary="done",
+                    ),
+                    errors=[],
+                    worker=SimpleNamespace(
+                        pid=123,
+                        stderr_log_path="/tmp/secret.stderr.log",
+                    ),
+                    definition_match=DefinitionMatchMetadata(
+                        matched=True,
+                        definition_name="plan-researcher",
+                    ),
+                ),
+            ],
+            timed_out=False,
+        ),
+    )
+    tools = create_background_subagent_tools(
+        supervisor=supervisor,
+        parent_agent_config=_agent_config(tmp_path),
+        workspace_dir=tmp_path,
+        request_context={
+            "tenant_id": "tenant-1",
+            "agent_id": "agent-1",
+            "_subagent_definition_store_dir": str(tmp_path / "definitions"),
+        },
+    )
+
+    response = await tools["wait_subagent"](timeout_ms=1)
+    payload = json.loads(response.content[0]["text"])
+    terminal = payload["terminal_runs"][0]
+
+    assert terminal == {
+        "run_id": "subagent-done",
+        "status": "completed",
+        "agent_name": "plan-researcher",
+        "nickname": "研究员",
+        "objective": "Inspect",
+        "result": {
+            "status": "completed",
+            "summary": "done",
+            "findings": [],
+            "relevant_files": [],
+            "risks": [],
+            "recommendations": [],
+            "open_questions": [],
+            "suggested_next_steps": [],
+        },
+    }
+
+
+@pytest.mark.asyncio
 async def test_start_subagent_serializes_real_run_record(tmp_path):
     definition = AgentRegistry([builtin_definition_provider()]).resolve(
         "plan-researcher",
@@ -155,11 +226,10 @@ async def test_start_subagent_serializes_real_run_record(tmp_path):
     payload = json.loads(response.content[0]["text"])
 
     assert payload["run_id"] == record.run_id
-    assert payload["created_at"]
-    assert payload["manageable"] is False
+    assert payload["accepted"] is True
     assert payload["nickname"] == "研究员"
-    assert payload["definition_match"]["matched"] is True
-    assert payload["definition_match"]["definition_name"] == "plan-researcher"
+    assert "definition_match" not in payload
+    assert "worker" not in payload
 
 
 @pytest.mark.asyncio
@@ -430,11 +500,59 @@ async def test_get_subagent_includes_manageable_and_stderr_tail(tmp_path):
         },
     )
 
-    response = await tools["get_subagent"](record.run_id)
+    response = await tools["get_subagent"](
+        record.run_id,
+        include_details=True,
+    )
     payload = json.loads(response.content[0]["text"])
 
     assert payload["manageable"] is True
     assert payload["stderr_tail"] == "x" * 4096
+    assert "stderr_log_path" not in json.dumps(payload)
+
+
+@pytest.mark.asyncio
+async def test_get_subagent_defaults_to_parent_facing_projection(tmp_path):
+    definition = AgentRegistry([builtin_definition_provider()]).resolve(
+        "plan-researcher",
+    )
+    store = PerRunSubAgentRunStore(tmp_path / "runs")
+    record = await store.create(
+        DelegationSpec(name="plan-researcher", objective="Inspect"),
+        definition,
+        PermissionPolicy.readonly(),
+    )
+    completed = await store.finish(
+        record.run_id,
+        AgentResult(
+            task_id="task-1",
+            agent_run_id=record.run_id,
+            agent_name="plan-researcher",
+            status="completed",
+            summary="done",
+        ),
+    )
+    supervisor = SimpleNamespace()
+    supervisor.get = _AsyncReturn(completed)
+    supervisor.is_manageable = lambda _scope, _run_id: False
+    tools = create_background_subagent_tools(
+        supervisor=supervisor,
+        parent_agent_config=_agent_config(tmp_path),
+        workspace_dir=tmp_path,
+        request_context={
+            "tenant_id": "tenant-1",
+            "agent_id": "agent-1",
+            "_subagent_run_store_dir": str(tmp_path / "runs"),
+        },
+    )
+
+    response = await tools["get_subagent"](record.run_id)
+    payload = json.loads(response.content[0]["text"])
+
+    assert payload["result"]["summary"] == "done"
+    assert "definition_match" not in payload
+    assert "worker" not in payload
+    assert "errors" not in payload
 
 
 class _AsyncReturn:
