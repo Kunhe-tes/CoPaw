@@ -1739,7 +1739,8 @@ class TestSkillInvocationDetector:
         steps_dir = skill_dir / "steps"
         steps_dir.mkdir(parents=True)
         (skill_dir / "SKILL.md").write_text(
-            "# Fill Metadata\n", encoding="utf-8"
+            "# Fill Metadata\n",
+            encoding="utf-8",
         )
         (steps_dir / "step1.md").write_text("# step1", encoding="utf-8")
 
@@ -1776,7 +1777,8 @@ class TestSkillInvocationDetector:
         steps_dir = skill_dir / "steps"
         steps_dir.mkdir(parents=True)
         (skill_dir / "SKILL.md").write_text(
-            "# Fill Metadata\n", encoding="utf-8"
+            "# Fill Metadata\n",
+            encoding="utf-8",
         )
         (steps_dir / "step1.md").write_text("# step1", encoding="utf-8")
 
@@ -2394,6 +2396,45 @@ class TestMcpServerInference:
         skill, weights = await detector.on_tool_call(
             "mcp_read_file",
             {"path": "/some/path"},
+            mcp_server="filesystem",
+        )
+
+        assert skill == "filesystem_skill"
+        assert weights.get("filesystem_skill", 0) >= 0.85
+
+    @pytest.mark.asyncio
+    async def test_mcp_server_evidence_keeps_higher_priority_than_tool_input(
+        self,
+    ):
+        """多层同时命中时，MCP server 证据优先级应高于 tool input。"""
+        inferencer = SkillFeatureInferencer(
+            builtin_features={
+                "filesystem_skill": SkillFeature(
+                    skill_name="filesystem_skill",
+                    mcp_servers=["filesystem"],
+                    trigger_keywords=["filesystem_skill"],
+                ),
+                "xlsx": SkillFeature(
+                    skill_name="xlsx",
+                    file_extensions=[".xlsx"],
+                ),
+            },
+        )
+
+        detector = SkillInvocationDetector(inferencer=inferencer)
+        detector.set_enabled_skills(["filesystem_skill", "xlsx"])
+
+        detected_skill, detected_confidence = (
+            detector.detect_from_user_message(
+                "请使用 filesystem_skill 读取文件",
+            )
+        )
+        assert detected_skill == "filesystem_skill"
+        assert detected_confidence >= 0.7
+
+        skill, weights = await detector.on_tool_call(
+            "mcp_read_file",
+            {"path": "/some/path/report.xlsx"},
             mcp_server="filesystem",
         )
 
