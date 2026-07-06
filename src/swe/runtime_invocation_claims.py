@@ -6,7 +6,7 @@ from __future__ import annotations
 from contextlib import contextmanager
 from contextvars import ContextVar, Token
 from dataclasses import dataclass
-from typing import Iterator, Mapping, MutableMapping
+from typing import Callable, Iterator, Mapping, MutableMapping
 
 from swe.config.context import (
     get_current_scope_id,
@@ -84,6 +84,23 @@ def _coerce(value: object | None) -> str | None:
     return text or None
 
 
+def _resolve_claim_value(
+    explicit_value: object | None,
+    current: RuntimeInvocationClaims | None,
+    claim_name: str,
+    default: Callable[[], object | None] | None = None,
+) -> str | None:
+    if explicit_value is not None:
+        return _coerce(explicit_value)
+    if current is not None:
+        current_value = getattr(current, claim_name)
+        if current_value is not None:
+            return _coerce(current_value)
+    if default is None:
+        return None
+    return _coerce(default())
+
+
 def build_runtime_invocation_claims(
     *,
     tenant_id: str | None = None,
@@ -94,66 +111,37 @@ def build_runtime_invocation_claims(
 ) -> RuntimeInvocationClaims:
     """Build invocation claims from explicit values, context, and tenant scope."""
     current = _RUNTIME_CLAIMS_CONTEXT.get()
-    effective_tenant_id = _coerce(
-        (
-            tenant_id
-            if tenant_id is not None
-            else (
-                current.tenant_id
-                if current is not None and current.tenant_id is not None
-                else get_current_tenant_id()
-            )
+    effective_tenant_id = _resolve_claim_value(
+        tenant_id,
+        current,
+        "tenant_id",
+        get_current_tenant_id,
+    )
+    effective_source_id = _resolve_claim_value(
+        source_id,
+        current,
+        "source_id",
+        get_current_source_id,
+    )
+    effective_runtime_scope_id = _resolve_claim_value(
+        runtime_scope_id,
+        current,
+        "runtime_scope_id",
+        lambda: get_current_scope_id()
+        or resolve_runtime_tenant_id(
+            effective_tenant_id,
+            effective_source_id,
         ),
     )
-    effective_source_id = _coerce(
-        (
-            source_id
-            if source_id is not None
-            else (
-                current.source_id
-                if current is not None and current.source_id is not None
-                else get_current_source_id()
-            )
-        ),
+    effective_session_id = _resolve_claim_value(
+        session_id,
+        current,
+        "session_id",
     )
-    effective_runtime_scope_id = _coerce(
-        (
-            runtime_scope_id
-            if runtime_scope_id is not None
-            else (
-                current.runtime_scope_id
-                if current is not None and current.runtime_scope_id is not None
-                else (
-                    get_current_scope_id()
-                    or resolve_runtime_tenant_id(
-                        effective_tenant_id,
-                        effective_source_id,
-                    )
-                )
-            )
-        ),
-    )
-    effective_session_id = _coerce(
-        (
-            session_id
-            if session_id is not None
-            else (
-                current.session_id
-                if current is not None and current.session_id is not None
-                else None
-            )
-        ),
-    )
-    effective_trace_id = _coerce(
-        (
-            trace_id
-            if trace_id is not None
-            else (
-                current.trace_id
-                if current is not None and current.trace_id is not None
-                else None
-            )
-        ),
+    effective_trace_id = _resolve_claim_value(
+        trace_id,
+        current,
+        "trace_id",
     )
     return RuntimeInvocationClaims(
         tenant_id=effective_tenant_id,
