@@ -211,24 +211,27 @@ class MultiAgentManager:
         finally:
             should_retry_capacity_eviction = False
             retry_protected_keys: set[str] = {cache_key}
+            should_release_start_eviction_protection = False
             async with self._lock:
                 waiters = self._agent_start_waiters.get(cache_key, 0)
                 if waiters <= 1:
                     self._agent_start_waiters.pop(cache_key, None)
-                    self._agent_start_eviction_protected_keys.discard(
-                        cache_key,
-                    )
+                    should_release_start_eviction_protection = True
                 else:
                     self._agent_start_waiters[cache_key] = waiters - 1
                 should_retry_capacity_eviction = (
                     len(self.agents) > self.workspace_cache_max_size
                 )
-                if not self._agent_start_waiters:
-                    self._agent_start_eviction_protected_keys.clear()
             if should_retry_capacity_eviction:
                 await self._evict_workspace_cache(
                     protected_keys=retry_protected_keys,
                 )
+            if should_release_start_eviction_protection:
+                async with self._lock:
+                    if self._agent_start_waiters.get(cache_key, 0) <= 0:
+                        self._agent_start_eviction_protected_keys.discard(
+                            cache_key,
+                        )
 
     async def _start_agent_for_cache_key(
         self,
