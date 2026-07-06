@@ -28,11 +28,13 @@ class FakeWorkspace:
         workspace_dir: str,
         tenant_id: str | None = None,
         source_system_config_service=None,
+        continuous_governance_service=None,
     ):
         self.agent_id = agent_id
         self.workspace_dir = workspace_dir
         self.tenant_id = tenant_id
         self.source_system_config_service = source_system_config_service
+        self.continuous_governance_service = continuous_governance_service
         self.manager = None
         self.started = False
 

@@ -557,6 +557,68 @@ async def test_workspace_cache_protects_completed_start_waiters(
 
 
 @pytest.mark.asyncio
+async def test_workspace_cache_keeps_returned_cold_start_protected_mid_burst(
+    monkeypatch,
+) -> None:
+    manager = MultiAgentManager(
+        workspace_cache_max_size=1,
+        workspace_idle_ttl_seconds=6 * 60 * 60,
+        workspace_start_max_concurrent=4,
+    )
+    tenant_b_start_blocked = asyncio.Event()
+    allow_tenant_b_start = asyncio.Event()
+    original_evict_workspace_cache = manager._evict_workspace_cache
+    tenant_b_normal_eviction_protected_snapshots: list[set[str]] = []
+
+    class ControlledWorkspace(_Workspace):
+        async def start(self) -> None:
+            if self.tenant_id == "tenant-b":
+                tenant_b_start_blocked.set()
+                await allow_tenant_b_start.wait()
+            await super().start()
+
+    async def controlled_evict_workspace_cache(
+        *,
+        protected_keys: set[str] | None = None,
+    ) -> None:
+        if protected_keys == {"tenant-b:default"}:
+            tenant_b_normal_eviction_protected_snapshots.append(
+                manager._workspace_eviction_protected_keys(protected_keys),
+            )
+        await original_evict_workspace_cache(protected_keys=protected_keys)
+
+    monkeypatch.setattr(manager_module, "Workspace", ControlledWorkspace)
+    monkeypatch.setattr(
+        manager,
+        "_evict_workspace_cache",
+        controlled_evict_workspace_cache,
+    )
+    monkeypatch.setattr(
+        manager,
+        "_load_agent_config_for_tenant",
+        lambda _tenant_id=None: _config("default"),
+    )
+
+    tenant_b_task = asyncio.create_task(
+        manager.get_agent("default", tenant_id="tenant-b"),
+    )
+    await tenant_b_start_blocked.wait()
+    workspace_a = await manager.get_agent("default", tenant_id="tenant-a")
+
+    assert workspace_a.stopped is False
+
+    allow_tenant_b_start.set()
+    workspace_b = await tenant_b_task
+
+    assert tenant_b_normal_eviction_protected_snapshots[0] == {
+        "tenant-a:default",
+        "tenant-b:default",
+    }
+    assert workspace_b.stopped is False
+    assert len(manager.agents) == manager.workspace_cache_max_size
+
+
+@pytest.mark.asyncio
 async def test_workspace_cache_retry_keeps_returned_workspace_alive(
     monkeypatch,
 ) -> None:
