@@ -431,6 +431,12 @@ class MultiAgentManager:
                     continue
                 if self.agents.get(cache_key) is not workspace:
                     continue
+                if max_removals is not None:
+                    current_overflow = (
+                        len(self.agents) - self.workspace_cache_max_size
+                    )
+                    if current_overflow <= 0:
+                        continue
                 if is_still_candidate is not None and not is_still_candidate(
                     entry,
                     last_accessed_at,

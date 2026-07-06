@@ -1466,6 +1466,67 @@ async def test_cancelled_waiters_evict_background_starts_over_capacity(
 
 
 @pytest.mark.asyncio
+async def test_concurrent_capacity_evictions_do_not_over_evict() -> None:
+    manager = MultiAgentManager(
+        workspace_cache_max_size=1,
+        workspace_idle_ttl_seconds=6 * 60 * 60,
+        workspace_start_max_concurrent=4,
+    )
+    first_stop_entered = asyncio.Event()
+    release_first_stop = asyncio.Event()
+    stop_calls = 0
+
+    class BlockingFirstStopWorkspace(_Workspace):
+        async def stop(self, *_args: Any, **_kwargs: Any) -> None:
+            nonlocal stop_calls
+            stop_calls += 1
+            if stop_calls == 1:
+                first_stop_entered.set()
+                await release_first_stop.wait()
+            await super().stop(*_args, **_kwargs)
+
+    workspace_a = BlockingFirstStopWorkspace(
+        agent_id="default",
+        workspace_dir="/tmp/default",
+        tenant_id="tenant-a",
+    )
+    workspace_b = BlockingFirstStopWorkspace(
+        agent_id="default",
+        workspace_dir="/tmp/default",
+        tenant_id="tenant-b",
+    )
+    manager.agents["tenant-a:default"] = workspace_a
+    manager._touch_cache_entry("tenant-a:default", workspace_a)
+    manager.agents["tenant-b:default"] = workspace_b
+    manager._touch_cache_entry("tenant-b:default", workspace_b)
+
+    eviction_a = asyncio.create_task(
+        manager._evict_workspace_candidates(
+            [("tenant-b:default", workspace_b, 1000.0, 2)],
+            protected_keys={"tenant-a:default"},
+            max_removals=1,
+        ),
+    )
+    await first_stop_entered.wait()
+    eviction_b = asyncio.create_task(
+        manager._evict_workspace_candidates(
+            [("tenant-a:default", workspace_a, 1000.0, 1)],
+            protected_keys={"tenant-b:default"},
+            max_removals=1,
+        ),
+    )
+    await asyncio.sleep(0)
+    release_first_stop.set()
+
+    await asyncio.gather(eviction_a, eviction_b)
+
+    assert len(manager.agents) == manager.workspace_cache_max_size
+    assert (
+        sum(workspace.stopped for workspace in (workspace_a, workspace_b)) == 1
+    )
+
+
+@pytest.mark.asyncio
 async def test_workspace_cache_retry_restores_capacity_after_cold_start_burst(
     monkeypatch,
 ) -> None:
