@@ -624,6 +624,9 @@ async def _start_lifespan_background_services(
     cron_notification_worker.start()
 
     try:
+        runtime_diagnostic_manager.set_workspace_metrics(
+            multi_agent_manager.workspace_cache_metrics,
+        )
         await runtime_diagnostic_manager.start()
     except Exception as e:
         logger.warning("Failed to start runtime diagnostic manager: %s", e)

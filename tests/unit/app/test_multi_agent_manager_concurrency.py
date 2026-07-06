@@ -222,3 +222,143 @@ async def test_duplicate_workspace_lost_race_is_stopped(monkeypatch) -> None:
     assert result is existing
     assert manager.agents["tenant-a:default"] is existing
     assert created[0].stopped is True
+
+
+def test_workspace_cache_defaults_are_bounded() -> None:
+    manager = MultiAgentManager()
+
+    assert manager.workspace_cache_max_size == 64
+    assert manager.workspace_start_max_concurrent == 4
+    assert manager.workspace_idle_ttl_seconds == 6 * 60 * 60
+
+
+def test_workspace_cache_settings_read_environment(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("SWE_WORKSPACE_CACHE_MAX_SIZE", "12")
+    monkeypatch.setenv("SWE_WORKSPACE_START_MAX_CONCURRENT", "3")
+    monkeypatch.setenv("SWE_WORKSPACE_IDLE_TTL_SECONDS", "90")
+
+    manager = MultiAgentManager()
+
+    assert manager.workspace_cache_max_size == 12
+    assert manager.workspace_start_max_concurrent == 3
+    assert manager.workspace_idle_ttl_seconds == 90
+
+
+@pytest.mark.asyncio
+async def test_workspace_cache_evicts_lru_after_capacity(
+    monkeypatch,
+) -> None:
+    clock = 1000.0
+    manager = MultiAgentManager(
+        workspace_cache_max_size=2,
+        workspace_idle_ttl_seconds=6 * 60 * 60,
+        workspace_start_max_concurrent=4,
+        monotonic_time=lambda: clock,
+    )
+    created: list[_Workspace] = []
+
+    def workspace_factory(**kwargs: Any) -> _Workspace:
+        workspace = _Workspace(**kwargs)
+        created.append(workspace)
+        return workspace
+
+    monkeypatch.setattr(manager_module, "Workspace", workspace_factory)
+    monkeypatch.setattr(
+        manager,
+        "_load_agent_config_for_tenant",
+        lambda _tenant_id=None: _config("default"),
+    )
+
+    workspace_a = await manager.get_agent("default", tenant_id="tenant-a")
+    clock += 1
+    workspace_b = await manager.get_agent("default", tenant_id="tenant-b")
+    clock += 1
+    assert await manager.get_agent("default", tenant_id="tenant-a") is (
+        workspace_a
+    )
+    clock += 1
+    workspace_c = await manager.get_agent("default", tenant_id="tenant-c")
+
+    assert manager.list_loaded_agents() == [
+        "tenant-a:default",
+        "tenant-c:default",
+    ]
+    assert workspace_b.stopped is True
+    assert workspace_a.stopped is False
+    assert workspace_c.stopped is False
+
+
+@pytest.mark.asyncio
+async def test_workspace_cache_evicts_idle_entries(monkeypatch) -> None:
+    clock = 1000.0
+    manager = MultiAgentManager(
+        workspace_cache_max_size=10,
+        workspace_idle_ttl_seconds=10,
+        workspace_start_max_concurrent=4,
+        monotonic_time=lambda: clock,
+    )
+    created: list[_Workspace] = []
+
+    def workspace_factory(**kwargs: Any) -> _Workspace:
+        workspace = _Workspace(**kwargs)
+        created.append(workspace)
+        return workspace
+
+    monkeypatch.setattr(manager_module, "Workspace", workspace_factory)
+    monkeypatch.setattr(
+        manager,
+        "_load_agent_config_for_tenant",
+        lambda _tenant_id=None: _config("default"),
+    )
+
+    workspace_a = await manager.get_agent("default", tenant_id="tenant-a")
+    clock += 5
+    workspace_b = await manager.get_agent("default", tenant_id="tenant-b")
+    clock += 6
+    workspace_c = await manager.get_agent("default", tenant_id="tenant-c")
+
+    assert manager.list_loaded_agents() == [
+        "tenant-b:default",
+        "tenant-c:default",
+    ]
+    assert workspace_a.stopped is True
+    assert workspace_b.stopped is False
+    assert workspace_c.stopped is False
+
+
+@pytest.mark.asyncio
+async def test_workspace_start_concurrency_is_limited(monkeypatch) -> None:
+    manager = MultiAgentManager(
+        workspace_cache_max_size=10,
+        workspace_idle_ttl_seconds=6 * 60 * 60,
+        workspace_start_max_concurrent=2,
+    )
+    in_flight = 0
+    max_in_flight = 0
+
+    class CountingWorkspace(_Workspace):
+        async def start(self) -> None:
+            nonlocal in_flight, max_in_flight
+            in_flight += 1
+            max_in_flight = max(max_in_flight, in_flight)
+            await asyncio.sleep(0.01)
+            in_flight -= 1
+            await super().start()
+
+    monkeypatch.setattr(manager_module, "Workspace", CountingWorkspace)
+    monkeypatch.setattr(
+        manager,
+        "_load_agent_config_for_tenant",
+        lambda _tenant_id=None: _config("default"),
+    )
+
+    await asyncio.gather(
+        *[
+            manager.get_agent("default", tenant_id=f"tenant-{index}")
+            for index in range(8)
+        ],
+    )
+
+    assert max_in_flight == 2
