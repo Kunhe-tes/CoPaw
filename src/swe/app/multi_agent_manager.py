@@ -222,16 +222,18 @@ class MultiAgentManager:
                 should_retry_capacity_eviction = (
                     len(self.agents) > self.workspace_cache_max_size
                 )
-            if should_retry_capacity_eviction:
-                await self._evict_workspace_cache(
-                    protected_keys=retry_protected_keys,
-                )
-            if should_release_start_eviction_protection:
-                async with self._lock:
-                    if self._agent_start_waiters.get(cache_key, 0) <= 0:
-                        self._agent_start_eviction_protected_keys.discard(
-                            cache_key,
-                        )
+            try:
+                if should_retry_capacity_eviction:
+                    await self._evict_workspace_cache(
+                        protected_keys=retry_protected_keys,
+                    )
+            finally:
+                if should_release_start_eviction_protection:
+                    async with self._lock:
+                        if self._agent_start_waiters.get(cache_key, 0) <= 0:
+                            self._agent_start_eviction_protected_keys.discard(
+                                cache_key,
+                            )
 
     async def _start_agent_for_cache_key(
         self,
@@ -241,6 +243,8 @@ class MultiAgentManager:
     ) -> Workspace:
         """在全局锁外启动 workspace，并在完成时原子写入缓存。"""
         current_task = asyncio.current_task()
+        instance: Workspace | None = None
+        instance_cached = False
         try:
             async with self._workspace_start_limiter:
                 config = self._load_agent_config_for_tenant(tenant_id)
@@ -273,6 +277,7 @@ class MultiAgentManager:
                 existing = self.agents.get(cache_key)
                 if existing is None:
                     self.agents[cache_key] = instance
+                    instance_cached = True
                     self._touch_cache_entry(cache_key, instance)
                     result = instance
                 else:
@@ -287,12 +292,51 @@ class MultiAgentManager:
 
             logger.info(f"Workspace created and started: {cache_key}")
             return result
+        except asyncio.CancelledError:
+            if instance is not None and not instance_cached:
+                await self._stop_uncached_workspace_start(
+                    cache_key,
+                    instance,
+                    "cancelled workspace start",
+                )
+            await self._remove_start_task_if_current(cache_key, current_task)
+            logger.info("Workspace start cancelled: %s", cache_key)
+            raise
         except Exception as e:
-            async with self._lock:
-                if self._agent_start_tasks.get(cache_key) is current_task:
-                    self._agent_start_tasks.pop(cache_key, None)
+            if instance is not None and not instance_cached:
+                await self._stop_uncached_workspace_start(
+                    cache_key,
+                    instance,
+                    "workspace after start failure",
+                )
+            await self._remove_start_task_if_current(cache_key, current_task)
             logger.error(f"Failed to start workspace {cache_key}: {e}")
             raise
+
+    async def _stop_uncached_workspace_start(
+        self,
+        cache_key: str,
+        instance: Workspace,
+        reason: str,
+    ) -> None:
+        try:
+            await instance.stop()
+        except Exception as e:  # pylint: disable=broad-except
+            logger.warning(
+                "Failed to stop %s %s: %s",
+                reason,
+                cache_key,
+                e,
+            )
+
+    async def _remove_start_task_if_current(
+        self,
+        cache_key: str,
+        current_task: asyncio.Task | None,
+    ) -> None:
+        async with self._lock:
+            if self._agent_start_tasks.get(cache_key) is current_task:
+                self._agent_start_tasks.pop(cache_key, None)
 
     def _touch_cache_entry(self, cache_key: str, workspace: Workspace) -> None:
         now = self._monotonic_time()
@@ -387,23 +431,31 @@ class MultiAgentManager:
                     access_sequence,
                 ):
                     continue
+                try:
+                    await workspace.stop()
+                except asyncio.CancelledError:
+                    self._workspace_eviction_stop_failures_total += 1
+                    logger.warning(
+                        "Cancelled while stopping evicted workspace %s",
+                        cache_key,
+                    )
+                    raise
+                except Exception as e:  # pylint: disable=broad-except
+                    self._workspace_eviction_stop_failures_total += 1
+                    logger.warning(
+                        "Failed to stop evicted workspace %s: %s",
+                        cache_key,
+                        e,
+                    )
+                    continue
+
                 self.agents.pop(cache_key, None)
                 self._agent_cache_entries.pop(cache_key, None)
                 removals += 1
-
-            try:
-                await workspace.stop()
                 self._workspace_evictions_total += 1
                 logger.info(
                     "Evicted idle workspace cache entry: %s",
                     cache_key,
-                )
-            except Exception as e:  # pylint: disable=broad-except
-                self._workspace_eviction_stop_failures_total += 1
-                logger.warning(
-                    "Failed to stop evicted workspace %s: %s",
-                    cache_key,
-                    e,
                 )
         return removals
 
@@ -544,6 +596,19 @@ class MultiAgentManager:
                         f"Old workspace instance stopped: {agent_id}. "
                         f"Delayed cleanup completed.",
                     )
+                except asyncio.CancelledError:
+                    logger.info(
+                        f"Delayed cleanup task for {agent_id} was cancelled. "
+                        "Stopping old instance before exit.",
+                    )
+                    try:
+                        await old_instance.stop(final=False)
+                    except Exception as e:  # pylint: disable=broad-except
+                        logger.warning(
+                            f"Failed to stop old workspace instance for "
+                            f"{agent_id} after cleanup cancellation: {e}.",
+                        )
+                    raise
                 except Exception as e:
                     logger.warning(
                         f"Error during delayed cleanup for {agent_id}: {e}. "
@@ -607,8 +672,15 @@ class MultiAgentManager:
             bool: True if agent was stopped, False if not running
         """
         cache_key = self._cache_key(agent_id, tenant_id)
+        cancelled_start = await self._cancel_start_tasks({cache_key})
         async with self._lock:
             if cache_key not in self.agents:
+                if cancelled_start:
+                    logger.info(
+                        "Agent start cancelled and removed: %s",
+                        cache_key,
+                    )
+                    return True
                 logger.warning(f"Agent not running: {cache_key}")
                 return False
 
@@ -743,6 +815,42 @@ class MultiAgentManager:
 
         return True
 
+    async def _cancel_start_tasks(
+        self,
+        cache_keys: set[str] | None = None,
+    ) -> int:
+        """Cancel workspace starts that have not reached the cache yet."""
+        async with self._lock:
+            tasks = [
+                (cache_key, task)
+                for cache_key, task in self._agent_start_tasks.items()
+                if cache_keys is None or cache_key in cache_keys
+            ]
+
+        if not tasks:
+            return 0
+
+        for _cache_key, task in tasks:
+            if not task.done():
+                task.cancel()
+
+        await asyncio.gather(
+            *(task for _cache_key, task in tasks),
+            return_exceptions=True,
+        )
+
+        async with self._lock:
+            for cache_key, task in tasks:
+                if self._agent_start_tasks.get(cache_key) is task:
+                    self._agent_start_tasks.pop(cache_key, None)
+                if self._agent_start_waiters.get(cache_key, 0) <= 0:
+                    self._agent_start_waiters.pop(cache_key, None)
+                    self._agent_start_eviction_protected_keys.discard(
+                        cache_key,
+                    )
+
+        return len(tasks)
+
     async def cancel_all_cleanup_tasks(self) -> None:
         """Cancel and await all pending delayed cleanup tasks.
 
@@ -776,7 +884,9 @@ class MultiAgentManager:
         """
         logger.info(f"Stopping all agents ({len(self.agents)} running)...")
 
-        # First, cancel pending cleanup tasks to avoid orphaned instances
+        await self._cancel_start_tasks()
+
+        # Then cancel pending cleanup tasks to avoid orphaned instances
         await self.cancel_all_cleanup_tasks()
 
         # Create list of agent IDs to avoid modifying dict during iteration

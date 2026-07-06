@@ -39,12 +39,14 @@ class _Workspace:
         self.tenant_id = tenant_id
         self.started = False
         self.stopped = False
+        self.stop_calls: list[dict[str, Any]] = []
         self.manager = None
 
     async def start(self) -> None:
         self.started = True
 
     async def stop(self, *_args: Any, **_kwargs: Any) -> None:
+        self.stop_calls.append({"args": _args, "kwargs": _kwargs})
         self.stopped = True
 
     def set_manager(self, manager: MultiAgentManager) -> None:
@@ -57,6 +59,12 @@ class _TaskTracker:
 
     async def has_active_tasks(self) -> bool:
         return self._has_active_tasks
+
+    async def list_active_tasks(self) -> list[str]:
+        return ["task-1"] if self._has_active_tasks else []
+
+    async def wait_all_done(self, *, timeout: float) -> bool:
+        return not self._has_active_tasks
 
 
 @pytest.mark.asyncio
@@ -808,6 +816,206 @@ async def test_workspace_cache_retry_keeps_returning_workspace_globally_protecte
     assert workspace_a.stopped is False
     assert manager.agents["tenant-a:default"] is workspace_a
     assert len(manager.agents) == manager.workspace_cache_max_size
+
+
+@pytest.mark.asyncio
+async def test_workspace_cache_retry_cancellation_releases_start_protection(
+    monkeypatch,
+) -> None:
+    manager = MultiAgentManager(
+        workspace_cache_max_size=1,
+        workspace_idle_ttl_seconds=6 * 60 * 60,
+        workspace_start_max_concurrent=4,
+    )
+    tenant_x = _Workspace(
+        agent_id="default",
+        workspace_dir="/tmp/default",
+        tenant_id="tenant-x",
+    )
+    manager.agents["tenant-x:default"] = tenant_x
+    manager._touch_cache_entry("tenant-x:default", tenant_x)
+    manager._agent_start_eviction_protected_keys.add("tenant-x:default")
+    original_evict_workspace_cache = manager._evict_workspace_cache
+    tenant_a_eviction_calls = 0
+    retry_eviction_started = asyncio.Event()
+    retry_eviction_may_cancel = asyncio.Event()
+
+    async def controlled_evict_workspace_cache(
+        *,
+        protected_keys: set[str] | None = None,
+    ) -> None:
+        nonlocal tenant_a_eviction_calls
+        if protected_keys == {"tenant-a:default"}:
+            tenant_a_eviction_calls += 1
+            if tenant_a_eviction_calls == 2:
+                retry_eviction_started.set()
+                await retry_eviction_may_cancel.wait()
+        await original_evict_workspace_cache(protected_keys=protected_keys)
+
+    monkeypatch.setattr(manager_module, "Workspace", _Workspace)
+    monkeypatch.setattr(
+        manager,
+        "_evict_workspace_cache",
+        controlled_evict_workspace_cache,
+    )
+    monkeypatch.setattr(
+        manager,
+        "_load_agent_config_for_tenant",
+        lambda _tenant_id=None: _config("default"),
+    )
+
+    tenant_a_task = asyncio.create_task(
+        manager.get_agent("default", tenant_id="tenant-a"),
+    )
+    await retry_eviction_started.wait()
+    tenant_a_task.cancel()
+    retry_eviction_may_cancel.set()
+
+    with pytest.raises(asyncio.CancelledError):
+        await tenant_a_task
+
+    assert "tenant-a:default" not in (
+        manager._agent_start_eviction_protected_keys
+    )
+
+
+@pytest.mark.asyncio
+async def test_eviction_stop_failure_keeps_workspace_managed() -> None:
+    manager = MultiAgentManager(
+        workspace_cache_max_size=1,
+        workspace_idle_ttl_seconds=6 * 60 * 60,
+        workspace_start_max_concurrent=4,
+    )
+
+    class StopFailingWorkspace(_Workspace):
+        async def stop(self, *_args: Any, **_kwargs: Any) -> None:
+            await super().stop(*_args, **_kwargs)
+            raise RuntimeError("stop failed")
+
+    workspace = StopFailingWorkspace(
+        agent_id="default",
+        workspace_dir="/tmp/default",
+        tenant_id="tenant-a",
+    )
+    manager.agents["tenant-a:default"] = workspace
+    manager._touch_cache_entry("tenant-a:default", workspace)
+
+    removals = await manager._evict_workspace_candidates(
+        [("tenant-a:default", workspace, 1000.0, 1)],
+        protected_keys=None,
+    )
+
+    assert removals == 0
+    assert manager.agents["tenant-a:default"] is workspace
+    assert manager._agent_cache_entries["tenant-a:default"].workspace is (
+        workspace
+    )
+    assert (
+        manager.workspace_cache_metrics()[
+            "workspace_eviction_stop_failures_total"
+        ]
+        == 1
+    )
+
+
+@pytest.mark.asyncio
+async def test_stop_all_cleans_up_reloaded_old_workspace_on_cancel() -> None:
+    manager = MultiAgentManager()
+    cleanup_started = asyncio.Event()
+    cleanup_may_cancel = asyncio.Event()
+    old_workspace = _Workspace(
+        agent_id="default",
+        workspace_dir="/tmp/default",
+        tenant_id="tenant-a",
+    )
+
+    class BlockingTaskTracker(_TaskTracker):
+        async def wait_all_done(self, *, timeout: float) -> bool:
+            cleanup_started.set()
+            await cleanup_may_cancel.wait()
+            return False
+
+    old_workspace.task_tracker = BlockingTaskTracker(has_active_tasks=True)
+
+    await manager._graceful_stop_old_instance(old_workspace, "default")
+    await cleanup_started.wait()
+
+    stop_all_task = asyncio.create_task(manager.stop_all())
+    cleanup_may_cancel.set()
+    await stop_all_task
+
+    assert old_workspace.stopped is True
+    assert old_workspace.stop_calls[-1]["kwargs"] == {"final": False}
+
+
+@pytest.mark.asyncio
+async def test_stop_agent_cancels_inflight_start_before_cache_insert(
+    monkeypatch,
+) -> None:
+    manager = MultiAgentManager()
+    start_entered = asyncio.Event()
+    created: list[_Workspace] = []
+
+    class BlockingWorkspace(_Workspace):
+        async def start(self) -> None:
+            created.append(self)
+            start_entered.set()
+            await asyncio.Event().wait()
+
+    monkeypatch.setattr(manager_module, "Workspace", BlockingWorkspace)
+    monkeypatch.setattr(
+        manager,
+        "_load_agent_config_for_tenant",
+        lambda _tenant_id=None: _config("default"),
+    )
+
+    get_task = asyncio.create_task(
+        manager.get_agent("default", tenant_id="tenant-a"),
+    )
+    await start_entered.wait()
+
+    assert await manager.stop_agent("default", tenant_id="tenant-a") is True
+    with pytest.raises(asyncio.CancelledError):
+        await get_task
+
+    assert manager.agents == {}
+    assert manager._agent_start_tasks == {}
+    assert created[0].stopped is True
+
+
+@pytest.mark.asyncio
+async def test_stop_all_cancels_inflight_starts_before_shutdown(
+    monkeypatch,
+) -> None:
+    manager = MultiAgentManager()
+    start_entered = asyncio.Event()
+    created: list[_Workspace] = []
+
+    class BlockingWorkspace(_Workspace):
+        async def start(self) -> None:
+            created.append(self)
+            start_entered.set()
+            await asyncio.Event().wait()
+
+    monkeypatch.setattr(manager_module, "Workspace", BlockingWorkspace)
+    monkeypatch.setattr(
+        manager,
+        "_load_agent_config_for_tenant",
+        lambda _tenant_id=None: _config("default"),
+    )
+
+    get_task = asyncio.create_task(
+        manager.get_agent("default", tenant_id="tenant-a"),
+    )
+    await start_entered.wait()
+
+    await manager.stop_all()
+    with pytest.raises(asyncio.CancelledError):
+        await get_task
+
+    assert manager.agents == {}
+    assert manager._agent_start_tasks == {}
+    assert created[0].stopped is True
 
 
 @pytest.mark.asyncio
