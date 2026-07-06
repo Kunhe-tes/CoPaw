@@ -30,6 +30,7 @@ from .models import (
     TERMINAL_BACKGROUND_RUN_STATUSES,
     WorkerLaunchSpec,
 )
+from .nicknames import assign_subagent_nickname
 from .permissions import compose_effective_policy
 from .registry import AgentRegistry
 from .run_store import PerRunSubAgentRunStore
@@ -131,7 +132,6 @@ class BackgroundSubAgentSupervisor:
         definition_match: DefinitionMatchMetadata | None = None,
     ) -> BackgroundSubAgentRunRecord | BackgroundSubAgentStartBlocked:
         """Create a run file and launch a worker unless the scope is full."""
-        _ = (start_request, definition_match)
         await self._reap_scope(scope)
         active = self._active_for_scope(scope)
         if len(active) >= self._max_running_per_scope:
@@ -148,11 +148,15 @@ class BackgroundSubAgentSupervisor:
         )
         store = PerRunSubAgentRunStore(scope.run_store_dir)
         effective_budget = _effective_budget(definition.budget, spec.budget)
+        nickname = assign_subagent_nickname(definition.nickname)
         record = await store.create(
             spec,
             definition,
             effective_policy,
             effective_budget=effective_budget,
+            start_request=start_request,
+            definition_match=definition_match,
+            nickname=nickname,
         )
         launch_path = scope.run_store_dir / f"{record.run_id}.launch.json"
         stderr_log_path = scope.run_store_dir / f"{record.run_id}.stderr.log"
@@ -164,6 +168,9 @@ class BackgroundSubAgentSupervisor:
             definition=definition,
             delegation_spec=spec,
             effective_policy=effective_policy,
+            start_request=record.start_request,
+            definition_match=record.definition_match,
+            nickname=record.nickname,
             request_context=request_context or {},
             stderr_log_path=str(stderr_log_path),
         )

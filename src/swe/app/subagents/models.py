@@ -728,6 +728,11 @@ class SubAgentRunRecord(BaseModel):
     definition_source: DefinitionSource
     owner_scope: str
     effective_policy: PermissionPolicy
+    nickname: str | None = None
+    start_request: SubAgentStartRequest | None = None
+    definition_match: DefinitionMatchMetadata = Field(
+        default_factory=DefinitionMatchMetadata,
+    )
     result: AgentResult | None = None
     errors: list[AgentError] = Field(default_factory=list)
     created_at: datetime = Field(default_factory=_now_utc)
@@ -757,6 +762,11 @@ class WorkerLaunchSpec(BaseModel):
     definition: SubAgentDefinition
     delegation_spec: DelegationSpec
     effective_policy: PermissionPolicy
+    start_request: SubAgentStartRequest | None = None
+    definition_match: DefinitionMatchMetadata = Field(
+        default_factory=DefinitionMatchMetadata,
+    )
+    nickname: str | None = None
     request_context: dict[str, Any] = Field(default_factory=dict)
     stderr_log_path: str | None = None
 
@@ -785,6 +795,11 @@ class BackgroundSubAgentRunRecord(BaseModel):
     owner_scope: str
     effective_policy: PermissionPolicy
     effective_budget: BudgetConfig = Field(default_factory=BudgetConfig)
+    nickname: str | None = None
+    start_request: SubAgentStartRequest | None = None
+    definition_match: DefinitionMatchMetadata = Field(
+        default_factory=DefinitionMatchMetadata,
+    )
     worker: WorkerProcessInfo | None = None
     result: AgentResult | None = None
     errors: list[AgentError] = Field(default_factory=list)

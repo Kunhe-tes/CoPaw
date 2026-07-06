@@ -14,9 +14,11 @@ from .models import (
     AgentResult,
     BackgroundSubAgentRunRecord,
     BudgetConfig,
+    DefinitionMatchMetadata,
     PermissionPolicy,
     SubAgentDefinition,
     SubAgentRunRecord,
+    SubAgentStartRequest,
     TERMINAL_BACKGROUND_RUN_STATUSES,
     WorkerProcessInfo,
     _now_utc,
@@ -32,6 +34,10 @@ class SubAgentRunStore(Protocol):
         spec: DelegationSpec,
         definition: SubAgentDefinition,
         effective_policy: PermissionPolicy,
+        *,
+        start_request: SubAgentStartRequest | None = None,
+        definition_match: DefinitionMatchMetadata | None = None,
+        nickname: str | None = None,
     ) -> SubAgentRunRecord:
         """Create a queued run record."""
 
@@ -72,6 +78,10 @@ class InMemorySubAgentRunStore:
         spec: DelegationSpec,
         definition: SubAgentDefinition,
         effective_policy: PermissionPolicy,
+        *,
+        start_request: SubAgentStartRequest | None = None,
+        definition_match: DefinitionMatchMetadata | None = None,
+        nickname: str | None = None,
     ) -> SubAgentRunRecord:
         """Create a queued run record."""
         record = SubAgentRunRecord(
@@ -81,6 +91,9 @@ class InMemorySubAgentRunStore:
             definition_source=definition.source,
             owner_scope=definition.owner_scope,
             effective_policy=effective_policy,
+            nickname=nickname,
+            start_request=start_request,
+            definition_match=definition_match or DefinitionMatchMetadata(),
         )
         self.records[record.run_id] = record
         return record
@@ -188,8 +201,19 @@ class LocalJsonSubAgentRunStore(InMemorySubAgentRunStore):
         spec: DelegationSpec,
         definition: SubAgentDefinition,
         effective_policy: PermissionPolicy,
+        *,
+        start_request: SubAgentStartRequest | None = None,
+        definition_match: DefinitionMatchMetadata | None = None,
+        nickname: str | None = None,
     ) -> SubAgentRunRecord:
-        record = await super().create(spec, definition, effective_policy)
+        record = await super().create(
+            spec,
+            definition,
+            effective_policy,
+            start_request=start_request,
+            definition_match=definition_match,
+            nickname=nickname,
+        )
         self._save()
         return record
 
@@ -236,6 +260,9 @@ class PerRunSubAgentRunStore:
         definition: SubAgentDefinition,
         effective_policy: PermissionPolicy,
         effective_budget: BudgetConfig | None = None,
+        start_request: SubAgentStartRequest | None = None,
+        definition_match: DefinitionMatchMetadata | None = None,
+        nickname: str | None = None,
     ) -> BackgroundSubAgentRunRecord:
         """Create a pending background run record."""
         record = BackgroundSubAgentRunRecord(
@@ -246,6 +273,9 @@ class PerRunSubAgentRunStore:
             owner_scope=definition.owner_scope,
             effective_policy=effective_policy,
             effective_budget=effective_budget or BudgetConfig(),
+            nickname=nickname,
+            start_request=start_request,
+            definition_match=definition_match or DefinitionMatchMetadata(),
         )
         self._write(record)
         return record

@@ -20,6 +20,7 @@ from swe.app.subagents import (
     InMemorySubAgentRunStore,
     LocalJsonSubAgentRunStore,
     PermissionPolicy,
+    SubAgentDefinition,
     SubAgentRuntime,
     builtin_definition_provider,
 )
@@ -245,6 +246,79 @@ async def test_runtime_applies_non_timeout_budgets_to_agent_context(
         "max_tool_calls": 3,
         "timeout_ms": 1000,
     }
+
+
+@pytest.mark.asyncio
+async def test_runtime_uses_definition_instruction_and_no_max_tokens(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    from swe.app.subagents import runtime as runtime_module
+
+    _FakeSWEAgent.instances = []
+    _FakeSWEAgent.replies = [
+        Msg(
+            "Friday",
+            json.dumps(
+                {
+                    "task_id": "task-1",
+                    "agent_run_id": "ignored",
+                    "agent_name": "custom-worker",
+                    "status": "completed",
+                    "summary": "done",
+                },
+            ),
+            "assistant",
+        ),
+    ]
+    monkeypatch.setattr(runtime_module, "SWEAgent", _FakeSWEAgent)
+    definition = SubAgentDefinition.model_validate(
+        {
+            "name": "custom-worker",
+            "nickname": "研究员",
+            "description": "Custom test worker.",
+            "instruction": "Use the canonical instruction field only.",
+            "output_contract": "Return AgentResult JSON.",
+            "owner_scope": "tenant/agent",
+            "source": "run_scoped",
+            "tools": {"allow": ["read_file"]},
+            "budget": {
+                "max_turns": 3,
+                "max_tool_calls": 4,
+                "timeout_ms": 5000,
+            },
+        },
+    )
+    spec = DelegationSpec(
+        task_id="task-1",
+        parent_thread_id="session-1",
+        name="custom-worker",
+        objective="Inspect runtime prompt",
+    )
+    store = InMemorySubAgentRunStore()
+    record = await store.create(
+        spec,
+        definition,
+        PermissionPolicy.readonly(),
+    )
+
+    result = await SubAgentRuntime(store=store).run(
+        run=record,
+        definition=definition,
+        spec=spec,
+        parent_agent_config=_agent_config(tmp_path),
+        workspace_dir=tmp_path,
+        effective_policy=PermissionPolicy.readonly(),
+    )
+
+    created = _FakeSWEAgent.instances[0]
+    prompt = created.kwargs["system_prompt_override"]
+    config_payload = created.kwargs["agent_config"].model_dump(mode="json")
+    assert result.status == "completed"
+    assert "Use the canonical instruction field only." in prompt
+    assert "Return AgentResult JSON." in prompt
+    assert "prompt.system" not in prompt
+    assert "max_tokens" not in json.dumps(config_payload)
 
 
 @pytest.mark.asyncio

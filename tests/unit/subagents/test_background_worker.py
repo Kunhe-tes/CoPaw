@@ -11,9 +11,11 @@ import pytest
 from swe.app.subagents import (
     AgentRegistry,
     AgentResult,
+    DefinitionMatchMetadata,
     DelegationSpec,
     PerRunSubAgentRunStore,
     PermissionPolicy,
+    SubAgentStartRequest,
     WorkerLaunchSpec,
     builtin_definition_provider,
 )
@@ -56,10 +58,26 @@ async def _write_launch_spec(tmp_path: Path) -> tuple[Path, str, Path]:
     run_store_dir = tmp_path / "subagent_runs"
     store = PerRunSubAgentRunStore(run_store_dir)
     definition = _definition()
+    start_request = SubAgentStartRequest.model_validate(
+        {
+            "name": "plan-researcher",
+            "instruction": "Research worker behavior.",
+            "objective": "Inspect worker behavior",
+        },
+    )
+    definition_match = DefinitionMatchMetadata(
+        matched=True,
+        definition_name="plan-researcher",
+        definition_source="builtin",
+        score=1.0,
+    )
     record = await store.create(
         _spec(),
         definition,
         PermissionPolicy.readonly(),
+        start_request=start_request,
+        definition_match=definition_match,
+        nickname="研究员",
     )
     launch = WorkerLaunchSpec(
         run_id=record.run_id,
@@ -69,6 +87,9 @@ async def _write_launch_spec(tmp_path: Path) -> tuple[Path, str, Path]:
         definition=definition,
         delegation_spec=record.spec,
         effective_policy=record.effective_policy,
+        start_request=record.start_request,
+        definition_match=record.definition_match,
+        nickname=record.nickname,
         request_context={
             "session_id": "session-1",
             "OPENAI_API_KEY": "must-not-persist",
@@ -131,6 +152,9 @@ async def test_worker_writes_terminal_result_from_runtime(
 
         async def run(self, **kwargs):
             assert kwargs["run"].run_id == run_id
+            assert kwargs["run"].nickname == "研究员"
+            assert kwargs["run"].start_request.name == "plan-researcher"
+            assert kwargs["run"].definition_match.matched is True
             assert kwargs["request_context"] == {"session_id": "session-1"}
             assert isinstance(
                 kwargs["parent_agent_config"],

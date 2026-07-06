@@ -8,9 +8,11 @@ import pytest
 from swe.app.subagents import (
     AgentRegistry,
     AgentResult,
+    DefinitionMatchMetadata,
     DelegationSpec,
     PerRunSubAgentRunStore,
     PermissionPolicy,
+    SubAgentStartRequest,
     builtin_definition_provider,
 )
 
@@ -105,3 +107,35 @@ async def test_per_run_store_loads_record_from_individual_file(tmp_path):
     assert reloaded.status == "completed"
     assert reloaded.result is not None
     assert reloaded.result.status == "partial"
+
+
+@pytest.mark.asyncio
+async def test_background_run_record_persists_start_request_match_and_nickname(
+    tmp_path,
+):
+    store = PerRunSubAgentRunStore(tmp_path)
+    start_request = SubAgentStartRequest.model_validate(
+        {
+            "name": "aum-customer-analyst",
+            "instruction": "Analyze AUM customer maintenance.",
+            "objective": "Summarize customer maintenance strategy.",
+        },
+    )
+    definition_match = DefinitionMatchMetadata(matched=False)
+
+    record = await store.create(
+        _spec(),
+        _definition(),
+        PermissionPolicy.readonly(),
+        start_request=start_request,
+        definition_match=definition_match,
+        nickname="研究员",
+    )
+
+    reloaded = await PerRunSubAgentRunStore(tmp_path).get(record.run_id)
+
+    assert reloaded is not None
+    assert reloaded.nickname == "研究员"
+    assert reloaded.start_request is not None
+    assert reloaded.start_request.name == "aum-customer-analyst"
+    assert reloaded.definition_match.matched is False

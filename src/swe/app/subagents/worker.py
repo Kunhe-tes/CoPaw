@@ -44,6 +44,9 @@ async def run_worker(launch_spec_path: Path) -> int:
         definition_source=launch_spec.definition.source,
         owner_scope=launch_spec.definition.owner_scope,
         effective_policy=launch_spec.effective_policy,
+        nickname=record.nickname,
+        start_request=record.start_request,
+        definition_match=record.definition_match,
         created_at=record.created_at,
         started_at=record.started_at,
     )

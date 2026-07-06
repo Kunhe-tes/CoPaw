@@ -13,9 +13,11 @@ from swe.app.subagents import (
     BackgroundSubAgentScope,
     BackgroundSubAgentStartBlocked,
     BackgroundSubAgentSupervisor,
+    DefinitionMatchMetadata,
     DelegationSpec,
     PerRunSubAgentRunStore,
     PermissionPolicy,
+    SubAgentStartRequest,
     builtin_definition_provider,
 )
 from swe.config.config import AgentProfileConfig
@@ -139,6 +141,54 @@ async def test_wait_lazy_reaps_worker_without_result(tmp_path):
     assert record.worker is not None
     assert record.worker.exit_code == 1
     assert record.errors[-1].code == "worker_exited_without_result"
+
+
+@pytest.mark.asyncio
+async def test_start_persists_start_request_match_and_runtime_nickname(
+    tmp_path,
+):
+    popen_factory = _FakePopenFactory()
+    registry = AgentRegistry([builtin_definition_provider()])
+    supervisor = BackgroundSubAgentSupervisor(
+        max_running_per_scope=1,
+        popen_factory=popen_factory,
+        registry=registry,
+    )
+    scope = _scope(tmp_path)
+    definition = registry.resolve("plan-researcher")
+    start_request = SubAgentStartRequest.model_validate(
+        {
+            "name": "plan-researcher",
+            "instruction": "Research a plan.",
+            "objective": "Find evidence.",
+        },
+    )
+    definition_match = DefinitionMatchMetadata(
+        matched=True,
+        definition_name="plan-researcher",
+        definition_source="builtin",
+        score=1.0,
+    )
+
+    started = await supervisor.start(
+        scope=scope,
+        spec=_spec(),
+        parent_agent_config=_agent_config(tmp_path),
+        workspace_dir=tmp_path,
+        definition=definition,
+        start_request=start_request,
+        definition_match=definition_match,
+    )
+    record = await PerRunSubAgentRunStore(scope.run_store_dir).get(
+        started.run_id,
+    )
+
+    assert record is not None
+    assert record.nickname
+    assert record.start_request is not None
+    assert record.start_request.name == "plan-researcher"
+    assert record.definition_match.matched is True
+    assert record.definition_match.definition_name == "plan-researcher"
 
 
 @pytest.mark.asyncio
