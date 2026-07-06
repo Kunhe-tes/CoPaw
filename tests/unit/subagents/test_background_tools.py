@@ -16,6 +16,8 @@ from swe.app.subagents import BackgroundSubAgentStartBlocked
 from swe.app.subagents import (
     AgentResult,
     AgentRegistry,
+    BackgroundSubAgentScope,
+    BackgroundSubAgentSupervisor,
     DelegationSpec,
     BackgroundSubAgentNotManageable,
     DefinitionMatchMetadata,
@@ -33,6 +35,25 @@ def _agent_config(tmp_path: Path) -> AgentProfileConfig:
         name="Agent",
         workspace_dir=str(tmp_path),
     )
+
+
+class _FakeProcess:
+    def __init__(self, pid: int = 4321):
+        self.pid = pid
+        self.returncode: int | None = None
+
+    def poll(self):
+        return self.returncode
+
+
+class _FakePopenFactory:
+    def __init__(self):
+        self.processes: list[_FakeProcess] = []
+
+    def __call__(self, _command, **_kwargs):
+        process = _FakeProcess(pid=4321 + len(self.processes))
+        self.processes.append(process)
+        return process
 
 
 @pytest.mark.asyncio
@@ -228,6 +249,52 @@ async def test_wait_subagent_returns_error_summary_for_failed_no_result_run(
             "worker_exited_without_result: "
             "Worker exited without producing a result."
         ),
+    }
+    assert "errors" not in terminal
+
+
+@pytest.mark.asyncio
+async def test_wait_subagent_does_not_duplicate_error_code_in_summary(
+    tmp_path,
+):
+    popen_factory = _FakePopenFactory()
+    supervisor = BackgroundSubAgentSupervisor(
+        max_running_per_scope=1,
+        popen_factory=popen_factory,
+    )
+    run_store_dir = tmp_path / "subagent_runs"
+    scope = BackgroundSubAgentScope(
+        tenant_id="tenant-1",
+        agent_id="agent-1",
+        run_store_dir=run_store_dir,
+    )
+    started = await supervisor.start(
+        scope=scope,
+        spec=DelegationSpec(name="plan-researcher", objective="Inspect"),
+        parent_agent_config=_agent_config(tmp_path),
+        workspace_dir=tmp_path,
+    )
+    assert started.status == "running"
+    popen_factory.processes[0].returncode = 1
+
+    tools = create_background_subagent_tools(
+        supervisor=supervisor,
+        parent_agent_config=_agent_config(tmp_path),
+        workspace_dir=tmp_path,
+        request_context={
+            "tenant_id": "tenant-1",
+            "agent_id": "agent-1",
+            "_subagent_run_store_dir": str(run_store_dir),
+        },
+    )
+
+    response = await tools["wait_subagent"](timeout_ms=1)
+    payload = json.loads(response.content[0]["text"])
+    terminal = payload["terminal_runs"][0]
+
+    assert terminal["result"] == {
+        "status": "failed",
+        "summary": "worker_exited_without_result: exit_code=1",
     }
     assert "errors" not in terminal
 

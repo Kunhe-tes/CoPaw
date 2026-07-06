@@ -423,7 +423,10 @@ def _compact_failure_without_result(record: Any) -> dict[str, str] | None:
     error = errors[-1]
     code = str(getattr(error, "code", "") or "").strip()
     message = str(getattr(error, "message", "") or "").strip()
-    summary = ": ".join(part for part in (code, message) if part)
+    if code and message.startswith(f"{code}:"):
+        summary = message
+    else:
+        summary = ": ".join(part for part in (code, message) if part)
     if not summary:
         return None
     return {
