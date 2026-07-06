@@ -110,11 +110,35 @@ _Avoid_: output_len=0, blank reply, empty cron output
 
 **Source System Configuration**:
 A source-scoped runtime configuration surface for behavior shared by requests from the same external source. It is not a tenant configuration and does not describe user, organization, or workspace identity.
-_Avoid_: system feature configuration, tenant config, user config
+_Avoid_: system feature configuration, system feature config, 系统特性配置, tenant config, user config
+
+**Source System Configuration Override**:
+A value explicitly saved in **Source System Configuration** that replaces the corresponding broader runtime setting for requests from that source. Missing values are inheritance, not implicit overrides.
+_Avoid_: source default, tenant override, page default
 
 **Runtime Request Identity**:
 The tenant and source context that determines which runtime configuration and model selection a request observes. One **Runtime Request Identity** resolves to one **Tenant Provider Configuration** view for provider and active-model reads.
 _Avoid_: cache key, auth header set, iframe context
+
+**Runtime Invocation Claims**:
+Session, trace, tenant, and source claims that Swe passes across a runtime invocation boundary for a receiving tool or integration to interpret inside an already trusted channel. **Runtime Invocation Claims** are distinct from **Runtime Request Identity**, which is internal request context, and are not independently verifiable credentials.
+_Avoid_: runtime metadata, env/header info, credential, signed token
+
+**Canonical Runtime Claim Name**:
+The preferred external name for one **Runtime Invocation Claim** at a specific transport boundary. Canonical names are stable and transport-appropriate; compatibility aliases may exist only for boundaries that already require them.
+_Avoid_: env/header info, arbitrary key, passthrough name
+
+**Runtime Scope Claim**:
+The **Runtime Invocation Claim** that names the resolved runtime isolation scope for a call, derived from the current tenant and source context when such a scope exists. A **Runtime Scope Claim** complements the logical tenant and source claims; it does not replace either one.
+_Avoid_: tenant id, source id, effective tenant
+
+**Runtime-Owned Claim Name**:
+A claim name reserved for Swe-issued **Runtime Invocation Claims** at an invocation boundary. A **Runtime-Owned Claim Name** cannot be supplied or overridden by tenant env, tool config, passthrough headers, or handler config.
+_Avoid_: user env key, custom header, configurable claim
+
+**Runtime Invocation Claims Context**:
+The backend-local execution context that carries the current **Runtime Invocation Claims** to nested tool and integration launch points during one agent run. A **Runtime Invocation Claims Context** is not itself transmitted outside Swe.
+_Avoid_: global env, request identity, credential store
 
 **System Configuration Environment Key**:
 A backend-owned configuration key used by Swe itself. A **System Configuration Environment Key** is not part of user-controlled runtime env and must not be exposed through user-invoked tool subprocesses.
@@ -369,7 +393,7 @@ A Runtime Instance signal that only proves the backend request-serving process c
 _Avoid_: readiness check, system self-check, health diagnostic
 
 **Request Execution Load**:
-The current load and responsiveness of the backend request-serving runtime within one Runtime Instance, distinct from tenant or business-runtime usage.
+The current load and responsiveness of the backend request-serving runtime within one Runtime Instance. It prioritizes timely request handling, streaming progress, cancellation, timeout, and scheduled-run coordination over raw throughput, and is distinct from tenant or business-runtime usage.
 _Avoid_: Flask worker usage, ordinary HTTP throughput, request latency, tenant usage statistics, Agent Run count, LLM load
 
 **Runtime Instance**:
@@ -584,7 +608,7 @@ Resolved as a single **Aggregated Skill Freshness Notice** that lists each affec
 Resolved as exposing absence for **File Read Truncation** as inheriting the historical recent tool-result limit until independently configured.
 
 **"Tool Output Controls Scope"**:
-Resolved as limited to the Source System Configuration page and runtime resolution for this change. The Agent configuration page keeps the existing historical tool-result compaction controls for now.
+Resolved as limited to the Source System Configuration page and runtime resolution for current user-facing controls. The Agent configuration page no longer exposes historical tool-result compaction controls, while existing Agent runtime configuration remains available as inherited baseline behavior.
 
 **"System Self-Check"**:
 Resolved as **System Runtime Diagnostic**. The existing lightweight health endpoint remains a liveness probe, while the scheduled `HEARTBEAT.md` run remains an Agent Heartbeat.

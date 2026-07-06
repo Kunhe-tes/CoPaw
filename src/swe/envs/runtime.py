@@ -20,6 +20,7 @@ from swe.env_defaults import (
     get_backend_owned_secret_env_keys,
     get_system_configuration_env_keys,
 )
+from swe.runtime_invocation_claims import RUNTIME_CLAIM_ENV_KEYS
 from swe.tracing.sanitizer import register_sensitive_values
 
 from .store import load_envs
@@ -43,6 +44,7 @@ PROTECTED_RUNTIME_ENV_KEYS = frozenset(
         "LD_LIBRARY_PATH",
         "DYLD_LIBRARY_PATH",
         "SWE_STDIO_LAUNCHER_DROP_ENV_KEYS",
+        *RUNTIME_CLAIM_ENV_KEYS,
     },
 )
 

@@ -1,8 +1,10 @@
 # -*- coding: utf-8 -*-
 from __future__ import annotations
 
+import importlib.util
 import logging
 import os
+import sys
 
 import click
 import uvicorn
@@ -10,6 +12,15 @@ import uvicorn
 from ..constant import LOG_LEVEL_ENV
 from ..config.utils import write_last_api
 from ..utils.my_logging import setup_logger, SuppressPathAccessLogFilter
+
+
+def _select_uvicorn_loop() -> str:
+    """Prefer uvloop for the service process when the platform supports it."""
+    if sys.platform == "win32":
+        return "auto"
+    if importlib.util.find_spec("uvloop") is None:
+        return "auto"
+    return "uvloop"
 
 
 @click.command("app")
@@ -105,6 +116,7 @@ def app_cmd(
         "swe.app._app:app",
         host=host,
         port=port,
+        loop=_select_uvicorn_loop(),
         reload=reload,
         workers=1,
         log_level=log_level,

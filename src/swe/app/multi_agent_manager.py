@@ -38,6 +38,7 @@ class MultiAgentManager:
         """Initialize multi-agent manager."""
         self.agents: Dict[str, Workspace] = {}
         self._lock = asyncio.Lock()
+        self._agent_start_tasks: Dict[str, asyncio.Task[Workspace]] = {}
         self._cleanup_tasks: Set[asyncio.Task] = set()
         self._source_system_config_service = source_system_config_service
         self._continuous_governance_service = continuous_governance_service
@@ -94,28 +95,57 @@ class MultiAgentManager:
         started_at = time.perf_counter()
         cache_key = self._cache_key(agent_id, tenant_id)
         async with self._lock:
-            # Return existing agent if already loaded
-            if cache_key in self.agents:
+            instance = self.agents.get(cache_key)
+            if instance is not None:
                 duration_ms = int((time.perf_counter() - started_at) * 1000)
                 logger.debug(
                     "workspace_cache_hit cache_key=%s duration_ms=%d",
                     cache_key,
                     duration_ms,
                 )
-                return self.agents[cache_key]
+                return instance
 
-            # Load configuration to get agent reference
+            start_task = self._agent_start_tasks.get(cache_key)
+            if start_task is None:
+                start_task = asyncio.create_task(
+                    self._start_agent_for_cache_key(
+                        cache_key,
+                        agent_id,
+                        tenant_id,
+                    ),
+                    name=f"workspace-start-{cache_key}",
+                )
+                self._agent_start_tasks[cache_key] = start_task
+
+        instance = await asyncio.shield(start_task)
+        duration_ms = int((time.perf_counter() - started_at) * 1000)
+        logger.debug(
+            "workspace_cache_miss cache_key=%s duration_ms=%d",
+            cache_key,
+            duration_ms,
+        )
+        return instance
+
+    async def _start_agent_for_cache_key(
+        self,
+        cache_key: str,
+        agent_id: str,
+        tenant_id: Optional[str],
+    ) -> Workspace:
+        """在全局锁外启动 workspace，并在完成时原子写入缓存。"""
+        current_task = asyncio.current_task()
+        try:
             config = self._load_agent_config_for_tenant(tenant_id)
 
             if agent_id not in config.agents.profiles:
                 raise ValueError(
                     f"Agent '{agent_id}' not found in configuration. "
-                    f"Available agents: {list(config.agents.profiles.keys())}",
+                    "Available agents: "
+                    f"{list(config.agents.profiles.keys())}",
                 )
 
             agent_ref = config.agents.profiles[agent_id]
 
-            # Create and start new workspace
             logger.info(f"Creating new workspace: {cache_key}")
             instance = Workspace(
                 agent_id=agent_id,
@@ -128,22 +158,31 @@ class MultiAgentManager:
                     self._continuous_governance_service
                 ),
             )
+            await instance.start()
+            instance.set_manager(self)
+            duplicate_to_stop: Workspace | None = None
+            async with self._lock:
+                existing = self.agents.get(cache_key)
+                if existing is None:
+                    self.agents[cache_key] = instance
+                    result = instance
+                else:
+                    duplicate_to_stop = instance
+                    result = existing
+                if self._agent_start_tasks.get(cache_key) is current_task:
+                    self._agent_start_tasks.pop(cache_key, None)
 
-            try:
-                await instance.start()
-                instance.set_manager(self)  # Set manager reference
-                self.agents[cache_key] = instance
-                logger.info(f"Workspace created and started: {cache_key}")
-                duration_ms = int((time.perf_counter() - started_at) * 1000)
-                logger.debug(
-                    "workspace_cache_miss cache_key=%s duration_ms=%d",
-                    cache_key,
-                    duration_ms,
-                )
-                return instance
-            except Exception as e:
-                logger.error(f"Failed to start workspace {cache_key}: {e}")
-                raise
+            if duplicate_to_stop is not None:
+                await duplicate_to_stop.stop()
+
+            logger.info(f"Workspace created and started: {cache_key}")
+            return result
+        except Exception as e:
+            async with self._lock:
+                if self._agent_start_tasks.get(cache_key) is current_task:
+                    self._agent_start_tasks.pop(cache_key, None)
+            logger.error(f"Failed to start workspace {cache_key}: {e}")
+            raise
 
     async def _graceful_stop_old_instance(
         self,

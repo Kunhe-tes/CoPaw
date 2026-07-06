@@ -16,7 +16,6 @@ from .model_slot_context import bind_model_slot_override
 from .models import CronJobSpec
 from ..tenant_context import bind_tenant_context
 from ..console_push_store import append as push_store_append
-from ..identity_resolver import resolve_user_identity
 from ...config.llm_workload import LLM_WORKLOAD_CRON, bind_llm_workload
 from ...config.context import (
     canonicalize_scope_id,
@@ -37,6 +36,28 @@ BROADCAST_MODEL_SLOT_FALLBACK_REASON_META_KEY = (
     "broadcast_model_slot_fallback_reason"
 )
 CRON_TRACE_SUCCESS_CLEANUP_TIMEOUT_SECONDS = 5.0
+
+
+async def resolve_user_identity(
+    *,
+    tenant_id: str | None,
+    source_id: str | None,
+    user_name: str | None,
+    bbk_id: str | None,
+    headers: Optional[dict[str, str]] = None,
+    allow_remote_lookup: bool = True,
+):
+    """延迟加载身份解析器，避免 cron manager 导入时拉起 workspace 模块。"""
+    from ..identity_resolver import resolve_user_identity as _resolve
+
+    return await _resolve(
+        tenant_id=tenant_id,
+        source_id=source_id,
+        user_name=user_name,
+        bbk_id=bbk_id,
+        headers=headers,
+        allow_remote_lookup=allow_remote_lookup,
+    )
 
 
 @dataclass

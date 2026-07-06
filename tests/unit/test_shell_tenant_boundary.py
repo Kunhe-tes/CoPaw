@@ -1275,6 +1275,48 @@ class TestExecuteShellCommand:
         assert "API_TOKEN" not in os.environ
 
     @pytest.mark.asyncio
+    async def test_shell_command_receives_runtime_claim_env(
+        self,
+        mock_working_dir: Path,
+    ):
+        """shell 子进程应接收运行时调用 claims env。"""
+        from swe.runtime_invocation_claims import (
+            runtime_invocation_claims_context,
+        )
+
+        command = (
+            'python -c "import json, os; '
+            "print(json.dumps({"
+            "'tenant': os.environ.get('SWE_TENANT_ID'), "
+            "'source': os.environ.get('SWE_SOURCE_ID'), "
+            "'scope': os.environ.get('SWE_RUNTIME_SCOPE_ID'), "
+            "'session': os.environ.get('SWE_SESSION_ID'), "
+            "'trace': os.environ.get('SWE_TRACE_ID')}))\""
+        )
+        (mock_working_dir / encode_scope_id("test_tenant", "source-a")).mkdir(
+            parents=True,
+            exist_ok=True,
+        )
+
+        with (
+            tenant_context(tenant_id="test_tenant", source_id="source-a"),
+            runtime_invocation_claims_context(
+                session_id="session-1",
+                trace_id="trace-1",
+            ),
+        ):
+            result = await execute_shell_command(command)
+
+        text = result.content[0]["text"]
+        assert '"tenant": "test_tenant"' in text
+        assert '"source": "source-a"' in text
+        assert (
+            '"scope": "' + encode_scope_id("test_tenant", "source-a") in text
+        )
+        assert '"session": "session-1"' in text
+        assert '"trace": "trace-1"' in text
+
+    @pytest.mark.asyncio
     async def test_shell_rejects_boundary_escape_before_runtime_env_build(
         self,
         mock_working_dir: Path,

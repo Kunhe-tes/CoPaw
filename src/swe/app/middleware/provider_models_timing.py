@@ -159,12 +159,18 @@ class ProviderModelsTimingMiddleware(BaseHTTPMiddleware):
             logger.exception(
                 "provider_models_request_error path=%s duration_ms=%d "
                 "dependency_ms=%s handler_ms=%s after_handler_ms=%s "
+                "dependency_threadpool_wait_ms=%s "
                 "tenant_id=%s source_id=%s scope_id=%s",
                 request.url.path,
                 duration_ms,
                 getattr(request.state, "provider_manager_dependency_ms", None),
                 getattr(request.state, "provider_models_handler_ms", None),
                 _elapsed_after_handler_ms(request, duration_ms),
+                getattr(
+                    request.state,
+                    "provider_manager_dependency_threadpool_wait_ms",
+                    None,
+                ),
                 getattr(request.state, "tenant_id", None),
                 getattr(request.state, "source_id", None),
                 getattr(request.state, "scope_id", None),
@@ -177,7 +183,8 @@ class ProviderModelsTimingMiddleware(BaseHTTPMiddleware):
             "duration_ms=%d tenant_id=%s source_id=%s scope_id=%s "
             "dependency_ms=%s dependency_ensure_ms=%s "
             "dependency_get_instance_ms=%s dependency_cache_hit_before=%s "
-            "handler_ms=%s after_handler_ms=%s content_length=%s",
+            "dependency_threadpool_wait_ms=%s handler_ms=%s "
+            "after_handler_ms=%s content_length=%s",
             request.url.path,
             response.status_code,
             duration_ms,
@@ -198,6 +205,11 @@ class ProviderModelsTimingMiddleware(BaseHTTPMiddleware):
             getattr(
                 request.state,
                 "provider_manager_dependency_cache_hit_before",
+                None,
+            ),
+            getattr(
+                request.state,
+                "provider_manager_dependency_threadpool_wait_ms",
                 None,
             ),
             getattr(request.state, "provider_models_handler_ms", None),
