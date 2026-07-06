@@ -1240,6 +1240,75 @@ async def test_reload_cancellation_preserves_old_reused_services(
 
 
 @pytest.mark.asyncio
+async def test_reload_cancellation_after_new_start_stops_uncached_workspace(
+    monkeypatch,
+) -> None:
+    manager = MultiAgentManager()
+    cache_key = "tenant-a:default"
+    new_set_manager_called = asyncio.Event()
+    release_swap_lock = asyncio.Event()
+    old_workspace = _Workspace(
+        agent_id="default",
+        workspace_dir="/tmp/default",
+        tenant_id="tenant-a",
+    )
+    created: list[_Workspace] = []
+
+    old_workspace._service_manager = SimpleNamespace(
+        get_reusable_services=lambda: {},
+    )
+
+    class ReloadWorkspace(_Workspace):
+        def set_manager(self, manager: MultiAgentManager) -> None:
+            super().set_manager(manager)
+            new_set_manager_called.set()
+
+    def workspace_factory(**kwargs: Any) -> ReloadWorkspace:
+        workspace = ReloadWorkspace(**kwargs)
+        created.append(workspace)
+        return workspace
+
+    original_lock = manager._lock
+    lock_entries = 0
+
+    class DelayedLock:
+        async def __aenter__(self):
+            nonlocal lock_entries
+            lock_entries += 1
+            if lock_entries >= 3:
+                await release_swap_lock.wait()
+            return await original_lock.__aenter__()
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return await original_lock.__aexit__(exc_type, exc, tb)
+
+    manager.agents[cache_key] = old_workspace
+    manager._touch_cache_entry(cache_key, old_workspace)
+    monkeypatch.setattr(manager_module, "Workspace", workspace_factory)
+    monkeypatch.setattr(manager, "_lock", DelayedLock())
+    monkeypatch.setattr(
+        manager,
+        "_load_agent_config_for_tenant",
+        lambda _tenant_id=None: _config("default"),
+    )
+
+    reload_task = asyncio.create_task(
+        manager.reload_agent("default", tenant_id="tenant-a"),
+    )
+    await new_set_manager_called.wait()
+    reload_task.cancel()
+    release_swap_lock.set()
+
+    with pytest.raises(asyncio.CancelledError):
+        await reload_task
+
+    new_workspace = created[0]
+    assert new_workspace.started is True
+    assert new_workspace.stopped is True
+    assert manager.agents[cache_key] is old_workspace
+
+
+@pytest.mark.asyncio
 async def test_stop_all_cleans_up_reloaded_old_workspace_on_cancel() -> None:
     manager = MultiAgentManager()
     cleanup_started = asyncio.Event()
@@ -1337,6 +1406,63 @@ async def test_stop_all_cancels_inflight_starts_before_shutdown(
     assert manager.agents == {}
     assert manager._agent_start_tasks == {}
     assert created[0].stopped is True
+
+
+@pytest.mark.asyncio
+async def test_cancelled_waiters_evict_background_starts_over_capacity(
+    monkeypatch,
+) -> None:
+    manager = MultiAgentManager(
+        workspace_cache_max_size=1,
+        workspace_idle_ttl_seconds=6 * 60 * 60,
+        workspace_start_max_concurrent=4,
+    )
+    started_tenants: set[str] = set()
+    all_starts_entered = asyncio.Event()
+    allow_starts_to_finish = asyncio.Event()
+    created: dict[str, _Workspace] = {}
+
+    class ControlledWorkspace(_Workspace):
+        async def start(self) -> None:
+            assert self.tenant_id is not None
+            created[self.tenant_id] = self
+            started_tenants.add(self.tenant_id)
+            if started_tenants == {"tenant-a", "tenant-b"}:
+                all_starts_entered.set()
+            await allow_starts_to_finish.wait()
+            await super().start()
+
+    monkeypatch.setattr(manager_module, "Workspace", ControlledWorkspace)
+    monkeypatch.setattr(
+        manager,
+        "_load_agent_config_for_tenant",
+        lambda _tenant_id=None: _config("default"),
+    )
+
+    task_a = asyncio.create_task(
+        manager.get_agent("default", tenant_id="tenant-a"),
+    )
+    task_b = asyncio.create_task(
+        manager.get_agent("default", tenant_id="tenant-b"),
+    )
+    await all_starts_entered.wait()
+
+    task_a.cancel()
+    task_b.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task_a
+    with pytest.raises(asyncio.CancelledError):
+        await task_b
+
+    start_tasks = list(manager._agent_start_tasks.values())
+    allow_starts_to_finish.set()
+    await asyncio.gather(
+        *start_tasks,
+        return_exceptions=True,
+    )
+
+    assert len(manager.agents) == manager.workspace_cache_max_size
+    assert sum(workspace.stopped for workspace in created.values()) == 1
 
 
 @pytest.mark.asyncio

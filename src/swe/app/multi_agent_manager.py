@@ -290,6 +290,9 @@ class MultiAgentManager:
             if duplicate_to_stop is not None:
                 await duplicate_to_stop.stop()
 
+            if instance_cached:
+                await self._evict_workspace_cache(protected_keys={cache_key})
+
             logger.info(f"Workspace created and started: {cache_key}")
             return result
         except asyncio.CancelledError:
@@ -318,9 +321,11 @@ class MultiAgentManager:
         cache_key: str,
         instance: Workspace,
         reason: str,
+        *,
+        stop_reused: bool = True,
     ) -> None:
         try:
-            await instance.stop()
+            await instance.stop(stop_reused=stop_reused)
         except Exception as e:  # pylint: disable=broad-except
             logger.warning(
                 "Failed to stop %s %s: %s",
@@ -803,39 +808,63 @@ class MultiAgentManager:
                     f"{list(reusable.keys())}",
                 )
 
+        new_instance_started = False
+        new_instance_swapped = False
         try:
             await new_instance.start()
+            new_instance_started = True
             new_instance.set_manager(self)  # Set manager reference
             logger.info(f"New workspace instance started: {cache_key}")
+        except asyncio.CancelledError:
+            await self._stop_uncached_workspace_start(
+                cache_key,
+                new_instance,
+                "cancelled reload workspace",
+                stop_reused=False,
+            )
+            raise
         except Exception as e:
             logger.exception(
                 f"Failed to start new workspace instance for {cache_key}: {e}",
             )
             # Try to clean up the failed new instance
-            try:
-                await new_instance.stop()
-            except Exception:
-                pass  # Best effort cleanup
+            await self._stop_uncached_workspace_start(
+                cache_key,
+                new_instance,
+                "failed reload workspace",
+                stop_reused=False,
+            )
             # Old instance is still running and serving requests
             return False
 
         # Step 4: Atomic swap (minimal lock time)
         # From this point, reload is considered successful
-        async with self._lock:
-            # Double-check agent still exists
-            if cache_key not in self.agents:
-                logger.warning(
-                    f"Agent {cache_key} was removed during reload, "
-                    f"stopping new instance",
-                )
-                await new_instance.stop()
-                return False
+        try:
+            async with self._lock:
+                # Double-check agent still exists
+                if cache_key not in self.agents:
+                    logger.warning(
+                        f"Agent {cache_key} was removed during reload, "
+                        f"stopping new instance",
+                    )
+                    await new_instance.stop(stop_reused=False)
+                    return False
 
-            # Swap instances atomically
-            old_instance = self.agents[cache_key]
-            self.agents[cache_key] = new_instance
-            self._touch_cache_entry(cache_key, new_instance)
-            logger.info(f"Workspace instance replaced: {cache_key}")
+                # Swap instances atomically
+                old_instance = self.agents[cache_key]
+                self.agents[cache_key] = new_instance
+                new_instance_swapped = True
+                self._touch_cache_entry(cache_key, new_instance)
+                logger.info(f"Workspace instance replaced: {cache_key}")
+        except asyncio.CancelledError:
+            if new_instance_started and not new_instance_swapped:
+                await self._stop_uncached_workspace_start(
+                    cache_key,
+                    new_instance,
+                    "cancelled reload workspace before swap",
+                    stop_reused=False,
+                )
+            raise
 
         # Step 5: Gracefully stop old instance (outside lock)
         # Delegates to helper method to avoid too-many-statements
