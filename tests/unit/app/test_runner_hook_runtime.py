@@ -1126,6 +1126,112 @@ async def test_prepare_query_runtime_logs_agent_build_duration(
 
 
 @pytest.mark.asyncio
+async def test_prepare_query_runtime_restores_confirmed_skill_from_session_snapshot(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    runner = AgentRunner(agent_id="test-agent", workspace_dir=tmp_path)
+    runner.session = SafeJSONSession(save_dir=str(tmp_path))
+    chat = SimpleNamespace(id="chat-1")
+    setattr(
+        runner,
+        "_chat_manager",
+        SimpleNamespace(
+            get_or_create_chat=AsyncMock(return_value=chat),
+        ),
+    )
+    _patch_normal_agent_path(monkeypatch)
+    monkeypatch.setattr(
+        _FakeAgent,
+        "get_effective_skills",
+        lambda self: ["fill-metadata", "xlsx"],
+        raising=False,
+    )
+    monkeypatch.setattr(
+        _FakeAgent,
+        "get_runtime_skills",
+        lambda self: ["fill-metadata", "xlsx"],
+        raising=False,
+    )
+    monkeypatch.setattr(
+        "swe.app.runner.runner.load_agent_config",
+        lambda *args, **kwargs: _agent_config(),
+    )
+    monkeypatch.setattr(
+        "swe.app.runner.runner._load_tenant_hook_config",
+        lambda *args, **kwargs: HookConfig(),
+    )
+    monkeypatch.setattr(
+        "swe.app.runner.runner._resolve_active_model_label",
+        lambda *args, **kwargs: "openai/gpt-test",
+    )
+    monkeypatch.setattr(
+        "swe.app.runner.runner._emit_runner_hook",
+        AsyncMock(return_value=MergedHookResult()),
+    )
+
+    await runner.session.save_session_skill_snapshot(
+        session_id="session-1",
+        user_id="user-1",
+        snapshot={
+            "fill-metadata": {
+                "skill_name": "fill-metadata",
+                "resolved_skill_dir": str(
+                    tmp_path / "skills" / "fill-metadata"
+                ),
+                "freshness_token": "v1",
+                "confirmed_at": 2.0,
+            },
+            "xlsx": {
+                "skill_name": "xlsx",
+                "resolved_skill_dir": str(tmp_path / "skills" / "xlsx"),
+                "freshness_token": "v1",
+                "confirmed_at": 1.0,
+            },
+        },
+    )
+
+    restored: list[tuple[str, bool]] = []
+
+    class FakeDetector:
+        def set_tracing_context(self, *args, **kwargs):
+            return None
+
+        def detect_from_user_message(self, _message):
+            return None, 0.0
+
+        def restore_confirmed_skill(
+            self,
+            skill_name: str,
+            allow_one_shot_continuation: bool = True,
+        ):
+            restored.append((skill_name, allow_one_shot_continuation))
+
+    monkeypatch.setattr(
+        "swe.app.runner.runner._create_session_skill_detector",
+        lambda **kwargs: FakeDetector(),
+    )
+
+    request = SimpleNamespace(
+        session_id="session-1",
+        user_id="user-1",
+        channel="console",
+        channel_meta={},
+    )
+    msgs = [Msg(name="user", role="user", content="继续处理")]
+
+    result = await runner._prepare_query_runtime(
+        request=request,
+        msgs=msgs,
+        query="继续处理",
+        preflight=_QueryPreflight(),
+    )
+
+    assert result.runtime is not None
+    assert restored == [("fill-metadata", True)]
+
+
+@pytest.mark.asyncio
 async def test_query_handler_before_stop_allow_emits_stop_and_completes(
     monkeypatch,
     tmp_path,

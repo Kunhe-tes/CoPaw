@@ -20,7 +20,10 @@ from swe.agents.hook_runtime.models import (
     HookSessionOverlay,
     LoadedSkillHookSource,
 )
-from swe.agents.skills_manager import get_skill_freshness_token
+from swe.agents.skills_manager import (
+    get_builtin_skills_dir,
+    get_skill_freshness_token,
+)
 from swe.app.runner.runner import AgentRunner
 from swe.app.runner.session import SafeJSONSession
 from swe.config.config import SuggestionMode
@@ -280,6 +283,53 @@ async def test_safe_json_session_persists_skill_snapshot_at_top_level(
 
 
 @pytest.mark.asyncio
+async def test_refresh_session_skill_freshness_preserves_builtin_skill_snapshot(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    runner = _patch_runner(monkeypatch, tmp_path)
+    builtin_skill_dir = get_builtin_skills_dir() / "xlsx"
+    if not builtin_skill_dir.exists():
+        pytest.skip("xlsx builtin skill is not available")
+
+    _FakeAgent.effective_skills = ["xlsx"]
+    await runner.session.save_session_skill_snapshot(
+        session_id="session-1",
+        user_id="user-1",
+        snapshot={
+            "xlsx": {
+                "skill_name": "xlsx",
+                "resolved_skill_dir": str(builtin_skill_dir),
+                "freshness_token": get_skill_freshness_token(
+                    builtin_skill_dir,
+                ),
+                "confirmed_at": 1.0,
+            },
+        },
+    )
+
+    outputs = [
+        item
+        async for item in runner.query_handler(
+            [Msg(name="user", role="user", content="continue")],
+            request=_request(),
+        )
+    ]
+
+    assert outputs[-1][0].get_text_content() == "agent reply"
+    assert _streamed_notice_messages(outputs) == []
+    state = await runner.session.get_session_state_dict(
+        "session-1",
+        user_id="user-1",
+    )
+    assert state["session_skill_snapshot"]["xlsx"][
+        "resolved_skill_dir"
+    ] == str(
+        builtin_skill_dir,
+    )
+
+
+@pytest.mark.asyncio
 async def test_declared_skill_start_persists_snapshot_in_same_turn(
     monkeypatch,
     tmp_path: Path,
@@ -291,6 +341,29 @@ async def test_declared_skill_start_persists_snapshot_in_same_turn(
     monkeypatch.setattr(
         "swe.app.runner.runner.get_skill_freshness_token",
         lambda path: 55.0 if Path(path) == skill_dir else 0.0,
+    )
+    original_stream_completion_lifecycle = runner._stream_completion_lifecycle
+
+    async def confirm_skill_during_completion(*args, **kwargs):
+        runtime = kwargs["runtime"]
+        await runtime.session_skill_detector.start_skill(
+            "xlsx",
+            trigger_tool="read_file",
+            trigger_reason="skill_md",
+            confidence=1.0,
+        )
+        async for item in original_stream_completion_lifecycle(
+            request=kwargs["request"],
+            runtime=runtime,
+            plan=kwargs["plan"],
+            outcome=kwargs["outcome"],
+        ):
+            yield item
+
+    monkeypatch.setattr(
+        runner,
+        "_stream_completion_lifecycle",
+        confirm_skill_during_completion,
     )
 
     outputs = [
@@ -306,11 +379,11 @@ async def test_declared_skill_start_persists_snapshot_in_same_turn(
         "session-1",
         user_id="user-1",
     )
-    assert state["session_skill_snapshot"]["xlsx"] == {
-        "skill_name": "xlsx",
-        "resolved_skill_dir": str(skill_dir),
-        "freshness_token": 55.0,
-    }
+    snapshot = state["session_skill_snapshot"]["xlsx"]
+    assert snapshot["skill_name"] == "xlsx"
+    assert snapshot["resolved_skill_dir"] == str(skill_dir)
+    assert snapshot["freshness_token"] == 55.0
+    assert isinstance(snapshot["confirmed_at"], float)
 
 
 @pytest.mark.asyncio
@@ -327,6 +400,13 @@ async def test_declared_skill_start_persists_confirmation_time_token(
 
     async def mutate_skill_dir_during_completion(*args, **kwargs):
         del args
+        runtime = kwargs["runtime"]
+        await runtime.session_skill_detector.start_skill(
+            "xlsx",
+            trigger_tool="read_file",
+            trigger_reason="skill_md",
+            confidence=1.0,
+        )
         skill_file = skill_dir / "SKILL.md"
         skill_file.write_text(
             (
@@ -366,11 +446,11 @@ async def test_declared_skill_start_persists_confirmation_time_token(
         "session-1",
         user_id="user-1",
     )
-    assert state["session_skill_snapshot"]["xlsx"] == {
-        "skill_name": "xlsx",
-        "resolved_skill_dir": str(skill_dir),
-        "freshness_token": initial_token,
-    }
+    snapshot = state["session_skill_snapshot"]["xlsx"]
+    assert snapshot["skill_name"] == "xlsx"
+    assert snapshot["resolved_skill_dir"] == str(skill_dir)
+    assert snapshot["freshness_token"] == initial_token
+    assert isinstance(snapshot["confirmed_at"], float)
 
 
 @pytest.mark.asyncio
@@ -388,6 +468,13 @@ async def test_blocked_turn_persists_confirmed_skill_snapshot(
     )
 
     async def blocked_stream_completion_lifecycle(*args, **kwargs):
+        runtime = kwargs["runtime"]
+        await runtime.session_skill_detector.start_skill(
+            "xlsx",
+            trigger_tool="read_file",
+            trigger_reason="skill_md",
+            confidence=1.0,
+        )
         outcome = kwargs["outcome"]
         outcome.task_completed = False
         outcome.completion_blocked = True
@@ -417,11 +504,11 @@ async def test_blocked_turn_persists_confirmed_skill_snapshot(
         "session-1",
         user_id="user-1",
     )
-    assert state["session_skill_snapshot"]["xlsx"] == {
-        "skill_name": "xlsx",
-        "resolved_skill_dir": str(skill_dir),
-        "freshness_token": 55.0,
-    }
+    snapshot = state["session_skill_snapshot"]["xlsx"]
+    assert snapshot["skill_name"] == "xlsx"
+    assert snapshot["resolved_skill_dir"] == str(skill_dir)
+    assert snapshot["freshness_token"] == 55.0
+    assert isinstance(snapshot["confirmed_at"], float)
 
 
 @pytest.mark.asyncio

@@ -52,6 +52,7 @@ from ...agents.skill_invocation_detector import SkillInvocationDetector
 from ...agents.skills_manager import (
     get_skill_freshness_token,
     get_workspace_skills_dir,
+    resolve_effective_skill_dir,
 )
 from ...agents.hook_runtime import HookRuntime
 from ...agents.hook_runtime.conversation_snapshot import (
@@ -687,6 +688,7 @@ def _create_session_skill_detector(
     channel: str,
     source_id: str,
     enabled_skills: list[str],
+    skill_runtime_profiles: dict[str, Any] | None = None,
     get_hook_state: Callable[[], HookSessionState],
     set_hook_state: Callable[[HookSessionState], None],
     approved_http_urls: Collection[str] | None = None,
@@ -700,7 +702,9 @@ def _create_session_skill_detector(
     )
 
     async def _load_skill_hooks(skill_name: str) -> None:
-        skill_root = get_workspace_skills_dir(workspace) / skill_name
+        skill_root = resolve_effective_skill_dir(workspace, skill_name)
+        if skill_root is None:
+            return
         try:
             next_state = load_skill_hooks_for_session(
                 skill_name=skill_name,
@@ -728,6 +732,8 @@ def _create_session_skill_detector(
         confirmed_skill_callback=confirmed_skill_callback,
     )
     detector.set_enabled_skills(enabled_skills)
+    if skill_runtime_profiles:
+        detector.set_skill_runtime_profiles(skill_runtime_profiles)
     return detector
 
 
@@ -1181,12 +1187,16 @@ def _build_session_skill_snapshot_entry(
     skill_name: str,
     resolved_skill_dir: Path,
     freshness_token: Any,
+    confirmed_at: Any | None = None,
 ) -> dict[str, Any]:
-    return {
+    entry = {
         "skill_name": skill_name,
         "resolved_skill_dir": str(resolved_skill_dir),
         "freshness_token": freshness_token,
     }
+    if confirmed_at is not None:
+        entry["confirmed_at"] = confirmed_at
+    return entry
 
 
 def _upsert_session_skill_snapshot_entry(
@@ -1195,11 +1205,13 @@ def _upsert_session_skill_snapshot_entry(
     skill_name: str,
     resolved_skill_dir: Path,
     freshness_token: Any,
+    confirmed_at: Any | None = None,
 ) -> None:
     snapshot[skill_name] = _build_session_skill_snapshot_entry(
         skill_name=skill_name,
         resolved_skill_dir=resolved_skill_dir,
         freshness_token=freshness_token,
+        confirmed_at=confirmed_at,
     )
 
 
@@ -1237,6 +1249,37 @@ class _SkillFreshnessRefreshResult:
     refreshed_snapshot: dict[str, dict[str, Any]] | None = None
 
 
+def _select_restorable_session_skill(
+    snapshot: dict[str, dict[str, Any]] | None,
+    *,
+    enabled_skills: Collection[str],
+) -> str | None:
+    """从已持久化 snapshot 中选出可恢复的最近确认 skill。"""
+    normalized = _normalize_session_skill_snapshot(snapshot)
+    candidates = [
+        entry
+        for skill_name, entry in normalized.items()
+        if skill_name in enabled_skills
+    ]
+    if not candidates:
+        return None
+
+    with_confirmed_at = [
+        entry for entry in candidates if entry.get("confirmed_at") is not None
+    ]
+    if with_confirmed_at:
+        chosen = max(
+            with_confirmed_at,
+            key=lambda item: float(item.get("confirmed_at") or 0.0),
+        )
+        return str(chosen.get("skill_name") or "") or None
+
+    if len(candidates) == 1:
+        return str(candidates[0].get("skill_name") or "") or None
+
+    return None
+
+
 def _supports_session_skill_freshness_refresh(
     *,
     session: Any,
@@ -1261,6 +1304,7 @@ def _refresh_switched_session_skill_snapshot_entry(
     skill_name: str,
     stored_dir: Path,
     current_dir: Path | None,
+    confirmed_at: Any | None = None,
 ) -> str | None:
     if (
         current_dir is None
@@ -1275,6 +1319,7 @@ def _refresh_switched_session_skill_snapshot_entry(
         skill_name=skill_name,
         resolved_skill_dir=current_dir,
         freshness_token=current_token,
+        confirmed_at=confirmed_at,
     )
     return (
         f"{skill_name}: detected skill-directory switch "
@@ -1319,6 +1364,7 @@ def _refresh_changed_session_skill_snapshot_entry(
         skill_name=skill_name,
         resolved_skill_dir=current_dir,
         freshness_token=current_token,
+        confirmed_at=entry.get("confirmed_at"),
     )
     return (
         f"{skill_name}: detected skill-directory change at "
@@ -1343,6 +1389,7 @@ def _refresh_session_skill_snapshot_entry(
         skill_name=skill_name,
         stored_dir=stored_dir,
         current_dir=current_dir,
+        confirmed_at=entry.get("confirmed_at"),
     )
     if switch_notice is not None:
         return switch_notice
@@ -2542,13 +2589,11 @@ class AgentRunner(Runner):
             ):
                 return
 
-            skill_dir = (
-                get_workspace_skills_dir(
-                    Path(self.workspace_dir or WORKING_DIR),
-                )
-                / skill_name
+            skill_dir = resolve_effective_skill_dir(
+                Path(self.workspace_dir or WORKING_DIR),
+                skill_name,
             )
-            if not skill_dir.exists():
+            if skill_dir is None or not skill_dir.exists():
                 return
 
             runtime.pending_confirmed_skill_snapshots[skill_name] = (
@@ -2556,6 +2601,7 @@ class AgentRunner(Runner):
                     skill_name=skill_name,
                     resolved_skill_dir=skill_dir,
                     freshness_token=get_skill_freshness_token(skill_dir),
+                    confirmed_at=time.time(),
                 )
             )
 
@@ -2568,9 +2614,14 @@ class AgentRunner(Runner):
             channel=runtime.channel,
             source_id=source_id_for_hooks,
             enabled_skills=(
-                runtime.agent.get_effective_skills()
-                if hasattr(runtime.agent, "get_effective_skills")
+                runtime.agent.get_runtime_skills()
+                if hasattr(runtime.agent, "get_runtime_skills")
                 else []
+            ),
+            skill_runtime_profiles=(
+                runtime.agent.get_skill_runtime_profiles()
+                if hasattr(runtime.agent, "get_skill_runtime_profiles")
+                else {}
             ),
             get_hook_state=_get_session_hook_state,
             set_hook_state=_set_session_hook_state,
@@ -2581,7 +2632,6 @@ class AgentRunner(Runner):
         runtime.agent._request_context["_skill_invocation_detector"] = (
             runtime.session_skill_detector
         )
-
         trace_id = getattr(request, "trace_id", None)
         if trace_id and has_trace_manager():
             try:
@@ -2601,9 +2651,16 @@ class AgentRunner(Runner):
                     trace_ctx.set_skill_detector(
                         runtime.session_skill_detector,
                         (
-                            runtime.agent.get_effective_skills()
-                            if hasattr(runtime.agent, "get_effective_skills")
-                            else []
+                            runtime.agent.get_runtime_skills()
+                            if hasattr(runtime.agent, "get_runtime_skills")
+                            else (
+                                runtime.agent.get_effective_skills()
+                                if hasattr(
+                                    runtime.agent,
+                                    "get_effective_skills",
+                                )
+                                else []
+                            )
                         ),
                     )
             except Exception:
@@ -2630,10 +2687,15 @@ class AgentRunner(Runner):
         if trace_ctx.skill_detector is runtime.session_skill_detector:
             return
 
+        previous_detector = trace_ctx.skill_detector
         enabled_skills = (
-            runtime.agent.get_effective_skills()
-            if hasattr(runtime.agent, "get_effective_skills")
-            else []
+            runtime.agent.get_runtime_skills()
+            if hasattr(runtime.agent, "get_runtime_skills")
+            else (
+                runtime.agent.get_effective_skills()
+                if hasattr(runtime.agent, "get_effective_skills")
+                else []
+            )
         )
         trace_ctx.set_skill_detector(
             runtime.session_skill_detector,
@@ -2664,12 +2726,17 @@ class AgentRunner(Runner):
                 refreshed_snapshot={},
             )
 
-        workspace_skills_dir = get_workspace_skills_dir(
-            Path(self.workspace_dir or WORKING_DIR),
-        )
+        workspace_dir = Path(self.workspace_dir or WORKING_DIR)
         effective_skill_dirs = {
-            skill_name: workspace_skills_dir / skill_name
+            skill_name: resolved_effective_skill_dir
             for skill_name in runtime.agent.get_effective_skills()
+            if (
+                resolved_effective_skill_dir := resolve_effective_skill_dir(
+                    workspace_dir,
+                    skill_name,
+                )
+            )
+            is not None
         }
 
         next_snapshot = _normalize_session_skill_snapshot(stored_snapshot)
@@ -2716,6 +2783,50 @@ class AgentRunner(Runner):
         if next_snapshot != refresh_result.stored_snapshot:
             return next_snapshot
         return None
+
+    async def _restore_confirmed_session_skill_context(
+        self,
+        *,
+        runtime: _QueryRuntime,
+    ) -> None:
+        """从持久化的 session snapshot 恢复一次性 skill 续接候选。"""
+        detector = getattr(runtime, "session_skill_detector", None)
+        if (
+            runtime.skip_history
+            or self.session is None
+            or not runtime.session_id
+            or detector is None
+            or not hasattr(detector, "restore_confirmed_skill")
+            or not hasattr(self.session, "get_session_skill_snapshot")
+        ):
+            return
+
+        stored_snapshot = _normalize_session_skill_snapshot(
+            await self.session.get_session_skill_snapshot(
+                session_id=runtime.session_id,
+                user_id=runtime.user_id,
+                allow_not_exist=True,
+            ),
+        )
+        skill_name = _select_restorable_session_skill(
+            stored_snapshot,
+            enabled_skills=(
+                runtime.agent.get_runtime_skills()
+                if hasattr(runtime.agent, "get_runtime_skills")
+                else (
+                    runtime.agent.get_effective_skills()
+                    if hasattr(runtime.agent, "get_effective_skills")
+                    else []
+                )
+            ),
+        )
+        if not skill_name:
+            return
+
+        restored = detector.restore_confirmed_skill(
+            skill_name,
+            allow_one_shot_continuation=True,
+        )
 
     async def _start_declared_session_skill(
         self,
@@ -2896,6 +3007,9 @@ class AgentRunner(Runner):
             self._attach_session_skill_detector(
                 runtime=runtime,
                 request=request,
+            )
+            await self._restore_confirmed_session_skill_context(
+                runtime=runtime,
             )
             await self._start_declared_session_skill(
                 runtime=runtime,
