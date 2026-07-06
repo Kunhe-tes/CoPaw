@@ -557,7 +557,7 @@ async def test_workspace_cache_protects_completed_start_waiters(
 
 
 @pytest.mark.asyncio
-async def test_workspace_cache_retry_does_not_stop_returned_sibling(
+async def test_workspace_cache_retry_keeps_returned_workspace_alive(
     monkeypatch,
 ) -> None:
     manager = MultiAgentManager(
@@ -620,8 +620,74 @@ async def test_workspace_cache_retry_does_not_stop_returned_sibling(
     assert workspace_a.started is True
     assert workspace_a.stopped is False
     assert workspace_b.started is True
-    assert workspace_b.stopped is False
-    assert manager.agents["tenant-b:default"] is workspace_b
+    assert len(manager.agents) == manager.workspace_cache_max_size
+    assert manager.agents["tenant-a:default"] is workspace_a
+
+
+@pytest.mark.asyncio
+async def test_workspace_cache_retry_restores_capacity_after_cold_start_burst(
+    monkeypatch,
+) -> None:
+    manager = MultiAgentManager(
+        workspace_cache_max_size=1,
+        workspace_idle_ttl_seconds=6 * 60 * 60,
+        workspace_start_max_concurrent=4,
+    )
+    tenant_a_eviction_started = asyncio.Event()
+    allow_tenant_a_eviction = asyncio.Event()
+    original_evict_workspace_cache = manager._evict_workspace_cache
+    start_eviction_calls = 0
+
+    async def controlled_evict_workspace_cache(
+        *,
+        protected_keys: set[str] | None = None,
+    ) -> None:
+        nonlocal start_eviction_calls
+        if protected_keys in (
+            {"tenant-a:default"},
+            {"tenant-b:default"},
+        ):
+            start_eviction_calls += 1
+            if (
+                protected_keys == {"tenant-a:default"}
+                and start_eviction_calls == 1
+            ):
+                tenant_a_eviction_started.set()
+                await allow_tenant_a_eviction.wait()
+            if start_eviction_calls <= 2:
+                protected_keys = {
+                    "tenant-a:default",
+                    "tenant-b:default",
+                }
+        await original_evict_workspace_cache(protected_keys=protected_keys)
+
+    monkeypatch.setattr(manager_module, "Workspace", _Workspace)
+    monkeypatch.setattr(
+        manager,
+        "_evict_workspace_cache",
+        controlled_evict_workspace_cache,
+    )
+    monkeypatch.setattr(
+        manager,
+        "_load_agent_config_for_tenant",
+        lambda _tenant_id=None: _config("default"),
+    )
+
+    tenant_a_task = asyncio.create_task(
+        manager.get_agent("default", tenant_id="tenant-a"),
+    )
+    await tenant_a_eviction_started.wait()
+    workspace_b = await manager.get_agent(
+        "default",
+        tenant_id="tenant-b",
+    )
+    allow_tenant_a_eviction.set()
+    workspace_a = await tenant_a_task
+
+    assert workspace_a.started is True
+    assert workspace_b.started is True
+    assert len(manager.agents) == manager.workspace_cache_max_size
+    assert manager.workspace_cache_metrics()["workspace_evictions_total"] == 1
 
 
 @pytest.mark.asyncio
