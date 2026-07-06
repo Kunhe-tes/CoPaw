@@ -557,7 +557,7 @@ async def test_workspace_cache_protects_completed_start_waiters(
 
 
 @pytest.mark.asyncio
-async def test_workspace_cache_retries_capacity_eviction_after_waiters_clear(
+async def test_workspace_cache_retry_does_not_stop_returned_sibling(
     monkeypatch,
 ) -> None:
     manager = MultiAgentManager(
@@ -620,9 +620,8 @@ async def test_workspace_cache_retries_capacity_eviction_after_waiters_clear(
     assert workspace_a.started is True
     assert workspace_a.stopped is False
     assert workspace_b.started is True
-    assert workspace_b.stopped is True
-    assert manager.list_loaded_agents() == ["tenant-a:default"]
-    assert manager.agents["tenant-a:default"] is workspace_a
+    assert workspace_b.stopped is False
+    assert manager.agents["tenant-b:default"] is workspace_b
 
 
 @pytest.mark.asyncio

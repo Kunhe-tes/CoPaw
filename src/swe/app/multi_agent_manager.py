@@ -83,6 +83,7 @@ class MultiAgentManager:
         self._lock = asyncio.Lock()
         self._agent_start_tasks: Dict[str, asyncio.Task[Workspace]] = {}
         self._agent_start_waiters: Dict[str, int] = {}
+        self._agent_start_eviction_protected_keys: set[str] = set()
         self.workspace_cache_max_size = (
             workspace_cache_max_size
             if workspace_cache_max_size is not None
@@ -195,6 +196,7 @@ class MultiAgentManager:
             self._agent_start_waiters[cache_key] = (
                 self._agent_start_waiters.get(cache_key, 0) + 1
             )
+            self._agent_start_eviction_protected_keys.add(cache_key)
 
         try:
             instance = await asyncio.shield(start_task)
@@ -208,6 +210,7 @@ class MultiAgentManager:
             return instance
         finally:
             should_retry_capacity_eviction = False
+            retry_protected_keys: set[str] = {cache_key}
             async with self._lock:
                 waiters = self._agent_start_waiters.get(cache_key, 0)
                 if waiters <= 1:
@@ -218,9 +221,14 @@ class MultiAgentManager:
                     not self._agent_start_waiters
                     and len(self.agents) > self.workspace_cache_max_size
                 )
+                if not self._agent_start_waiters:
+                    retry_protected_keys = set(
+                        self._agent_start_eviction_protected_keys,
+                    )
+                    self._agent_start_eviction_protected_keys.clear()
             if should_retry_capacity_eviction:
                 await self._evict_workspace_cache(
-                    protected_keys={cache_key},
+                    protected_keys=retry_protected_keys,
                 )
 
     async def _start_agent_for_cache_key(
@@ -306,6 +314,7 @@ class MultiAgentManager:
     ) -> set[str]:
         protected = set(protected_keys or set())
         protected.update(self._agent_start_tasks.keys())
+        protected.update(self._agent_start_eviction_protected_keys)
         protected.update(
             cache_key
             for cache_key, waiters in self._agent_start_waiters.items()
