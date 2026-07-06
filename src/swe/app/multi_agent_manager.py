@@ -205,12 +205,19 @@ class MultiAgentManager:
             )
             return instance
         finally:
+            should_retry_capacity_eviction = False
             async with self._lock:
                 waiters = self._agent_start_waiters.get(cache_key, 0)
                 if waiters <= 1:
                     self._agent_start_waiters.pop(cache_key, None)
                 else:
                     self._agent_start_waiters[cache_key] = waiters - 1
+                should_retry_capacity_eviction = (
+                    not self._agent_start_waiters
+                    and len(self.agents) > self.workspace_cache_max_size
+                )
+            if should_retry_capacity_eviction:
+                await self._evict_workspace_cache()
 
     async def _start_agent_for_cache_key(
         self,
@@ -325,11 +332,11 @@ class MultiAgentManager:
         protected_keys: set[str] | None,
         max_removals: int | None = None,
         is_still_candidate: (
-            Callable[[_WorkspaceCacheEntry], bool] | None
+            Callable[[_WorkspaceCacheEntry, float], bool] | None
         ) = None,
     ) -> int:
         removals = 0
-        for cache_key, workspace, _last_accessed_at in candidates:
+        for cache_key, workspace, last_accessed_at in candidates:
             if max_removals is not None and removals >= max_removals:
                 break
             if await self._workspace_has_active_tasks(cache_key, workspace):
@@ -352,6 +359,7 @@ class MultiAgentManager:
                     continue
                 if is_still_candidate is not None and not is_still_candidate(
                     entry,
+                    last_accessed_at,
                 ):
                     continue
                 self.agents.pop(cache_key, None)
@@ -399,7 +407,7 @@ class MultiAgentManager:
         await self._evict_workspace_candidates(
             expired_candidates,
             protected_keys=protected_keys,
-            is_still_candidate=lambda entry: (
+            is_still_candidate=lambda entry, _snapshot_last_accessed_at: (
                 self._monotonic_time() - entry.last_accessed_at
                 > self.workspace_idle_ttl_seconds
             ),
@@ -431,6 +439,9 @@ class MultiAgentManager:
                 overflow_candidates,
                 protected_keys=protected_keys,
                 max_removals=overflow,
+                is_still_candidate=lambda entry, snapshot_last_accessed_at: (
+                    entry.last_accessed_at == snapshot_last_accessed_at
+                ),
             )
             if removals == 0:
                 return

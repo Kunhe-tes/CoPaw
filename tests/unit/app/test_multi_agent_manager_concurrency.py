@@ -373,6 +373,67 @@ async def test_workspace_cache_defers_idle_eviction_with_active_tasks(
 
 
 @pytest.mark.asyncio
+async def test_workspace_cache_overflow_revalidates_recently_reused_lru(
+    monkeypatch,
+) -> None:
+    clock = 1000.0
+    manager = MultiAgentManager(
+        workspace_cache_max_size=2,
+        workspace_idle_ttl_seconds=6 * 60 * 60,
+        workspace_start_max_concurrent=4,
+        monotonic_time=lambda: clock,
+    )
+    eviction_check_started = asyncio.Event()
+    allow_eviction_check = asyncio.Event()
+
+    class CoordinatedWorkspace(_Workspace):
+        def __init__(self, **kwargs: Any) -> None:
+            super().__init__(**kwargs)
+            if self.tenant_id == "tenant-a":
+                self.task_tracker = SimpleNamespace(
+                    has_active_tasks=self._has_active_tasks,
+                )
+
+        async def _has_active_tasks(self) -> bool:
+            eviction_check_started.set()
+            await allow_eviction_check.wait()
+            return False
+
+    monkeypatch.setattr(manager_module, "Workspace", CoordinatedWorkspace)
+    monkeypatch.setattr(
+        manager,
+        "_load_agent_config_for_tenant",
+        lambda _tenant_id=None: _config("default"),
+    )
+
+    workspace_a = await manager.get_agent("default", tenant_id="tenant-a")
+    clock += 1
+    workspace_b = await manager.get_agent("default", tenant_id="tenant-b")
+    clock += 1
+
+    workspace_c_task = asyncio.create_task(
+        manager.get_agent("default", tenant_id="tenant-c"),
+    )
+    await eviction_check_started.wait()
+
+    clock += 1
+    assert await manager.get_agent("default", tenant_id="tenant-a") is (
+        workspace_a
+    )
+
+    allow_eviction_check.set()
+    workspace_c = await workspace_c_task
+
+    assert manager.list_loaded_agents() == [
+        "tenant-a:default",
+        "tenant-c:default",
+    ]
+    assert workspace_a.stopped is False
+    assert workspace_b.stopped is True
+    assert workspace_c.stopped is False
+
+
+@pytest.mark.asyncio
 async def test_workspace_cache_protects_completed_start_waiters(
     monkeypatch,
 ) -> None:
@@ -435,6 +496,77 @@ async def test_workspace_cache_protects_completed_start_waiters(
     assert await tenant_b_task is workspace_b
     assert workspace_b.stopped is False
     assert manager.agents["tenant-b:default"] is workspace_b
+
+
+@pytest.mark.asyncio
+async def test_workspace_cache_retries_capacity_eviction_after_waiters_clear(
+    monkeypatch,
+) -> None:
+    manager = MultiAgentManager(
+        workspace_cache_max_size=1,
+        workspace_idle_ttl_seconds=6 * 60 * 60,
+        workspace_start_max_concurrent=4,
+    )
+    tenant_a_started = asyncio.Event()
+    tenant_a_may_finish_start = asyncio.Event()
+    original_workspace_eviction_protected_keys = (
+        manager._workspace_eviction_protected_keys
+    )
+
+    class ControlledWorkspace(_Workspace):
+        async def start(self) -> None:
+            await super().start()
+            if self.tenant_id == "tenant-a":
+                tenant_a_started.set()
+                await tenant_a_may_finish_start.wait()
+
+    def controlled_workspace_eviction_protected_keys(
+        protected_keys: set[str] | None,
+    ) -> set[str]:
+        protected = original_workspace_eviction_protected_keys(
+            protected_keys,
+        )
+        if protected_keys in (
+            {"tenant-a:default"},
+            {"tenant-b:default"},
+        ):
+            protected.update(
+                {"tenant-a:default", "tenant-b:default"},
+            )
+        return protected
+
+    monkeypatch.setattr(manager_module, "Workspace", ControlledWorkspace)
+    monkeypatch.setattr(
+        manager,
+        "_workspace_eviction_protected_keys",
+        controlled_workspace_eviction_protected_keys,
+    )
+    monkeypatch.setattr(
+        manager,
+        "_load_agent_config_for_tenant",
+        lambda _tenant_id=None: _config("default"),
+    )
+
+    tenant_a_task = asyncio.create_task(
+        manager.get_agent("default", tenant_id="tenant-a"),
+    )
+    await tenant_a_started.wait()
+    tenant_b_task = asyncio.create_task(
+        manager.get_agent("default", tenant_id="tenant-b"),
+    )
+    tenant_a_may_finish_start.set()
+    workspace_a, workspace_b = await asyncio.gather(
+        tenant_a_task,
+        tenant_b_task,
+    )
+
+    assert workspace_a.started is True
+    assert workspace_b.started is True
+    assert len(manager.list_loaded_agents()) == 1
+    assert sorted([workspace_a.stopped, workspace_b.stopped]) == [
+        False,
+        True,
+    ]
 
 
 @pytest.mark.asyncio
