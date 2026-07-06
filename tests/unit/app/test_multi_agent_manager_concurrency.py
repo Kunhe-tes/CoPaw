@@ -1527,6 +1527,62 @@ async def test_concurrent_capacity_evictions_do_not_over_evict() -> None:
 
 
 @pytest.mark.asyncio
+async def test_capacity_eviction_rechecks_after_failed_inflight_restore() -> (
+    None
+):
+    manager = MultiAgentManager(
+        workspace_cache_max_size=1,
+        workspace_idle_ttl_seconds=6 * 60 * 60,
+        workspace_start_max_concurrent=4,
+    )
+    first_stop_entered = asyncio.Event()
+    release_first_stop = asyncio.Event()
+
+    class StopFailingWorkspace(_Workspace):
+        async def stop(self, *_args: Any, **_kwargs: Any) -> None:
+            if self.tenant_id == "tenant-b":
+                first_stop_entered.set()
+                await release_first_stop.wait()
+                raise RuntimeError("stop failed")
+            await super().stop(*_args, **_kwargs)
+
+    workspace_a = StopFailingWorkspace(
+        agent_id="default",
+        workspace_dir="/tmp/default",
+        tenant_id="tenant-a",
+    )
+    workspace_b = StopFailingWorkspace(
+        agent_id="default",
+        workspace_dir="/tmp/default",
+        tenant_id="tenant-b",
+    )
+    manager.agents["tenant-a:default"] = workspace_a
+    manager._touch_cache_entry("tenant-a:default", workspace_a)
+    manager.agents["tenant-b:default"] = workspace_b
+    manager._touch_cache_entry("tenant-b:default", workspace_b)
+
+    eviction_a = asyncio.create_task(
+        manager._evict_workspace_cache(
+            protected_keys={"tenant-a:default"},
+        ),
+    )
+    await first_stop_entered.wait()
+    eviction_b = asyncio.create_task(
+        manager._evict_workspace_cache(
+            protected_keys={"tenant-b:default"},
+        ),
+    )
+    await asyncio.sleep(0)
+    release_first_stop.set()
+
+    await asyncio.gather(eviction_a, eviction_b)
+
+    assert manager.agents == {"tenant-b:default": workspace_b}
+    assert workspace_a.stopped is True
+    assert workspace_b.stopped is False
+
+
+@pytest.mark.asyncio
 async def test_workspace_cache_retry_restores_capacity_after_cold_start_burst(
     monkeypatch,
 ) -> None:

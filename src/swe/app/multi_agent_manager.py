@@ -81,6 +81,7 @@ class MultiAgentManager:
         self.agents: Dict[str, Workspace] = {}
         self._agent_cache_entries: Dict[str, _WorkspaceCacheEntry] = {}
         self._lock = asyncio.Lock()
+        self._workspace_cache_eviction_lock = asyncio.Lock()
         self._agent_start_tasks: Dict[str, asyncio.Task[Workspace]] = {}
         self._agent_start_waiters: Dict[str, int] = {}
         self._agent_start_eviction_protected_keys: set[str] = set()
@@ -503,46 +504,13 @@ class MultiAgentManager:
         *,
         protected_keys: set[str] | None = None,
     ) -> None:
-        now = self._monotonic_time()
-        async with self._lock:
-            protected = self._workspace_eviction_protected_keys(
-                protected_keys,
-            )
-            expired_candidates = sorted(
-                (
-                    (
-                        cache_key,
-                        entry.workspace,
-                        entry.last_accessed_at,
-                        entry.access_sequence,
-                    )
-                    for cache_key, entry in self._agent_cache_entries.items()
-                    if cache_key not in protected
-                    and self.agents.get(cache_key) is entry.workspace
-                    and now - entry.last_accessed_at
-                    > self.workspace_idle_ttl_seconds
-                ),
-                key=lambda item: (item[2], item[3]),
-            )
-
-        await self._evict_workspace_candidates(
-            expired_candidates,
-            protected_keys=protected_keys,
-            is_still_candidate=lambda entry, _snapshot_last_accessed_at, _snapshot_access_sequence: (
-                self._monotonic_time() - entry.last_accessed_at
-                > self.workspace_idle_ttl_seconds
-            ),
-        )
-
-        while True:
+        async with self._workspace_cache_eviction_lock:
+            now = self._monotonic_time()
             async with self._lock:
                 protected = self._workspace_eviction_protected_keys(
                     protected_keys,
                 )
-                overflow = len(self.agents) - self.workspace_cache_max_size
-                if overflow <= 0:
-                    return
-                overflow_candidates = sorted(
+                expired_candidates = sorted(
                     (
                         (
                             cache_key,
@@ -555,22 +523,60 @@ class MultiAgentManager:
                         )
                         if cache_key not in protected
                         and self.agents.get(cache_key) is entry.workspace
+                        and now - entry.last_accessed_at
+                        > self.workspace_idle_ttl_seconds
                     ),
                     key=lambda item: (item[2], item[3]),
                 )
 
-            if not overflow_candidates:
-                return
-            removals = await self._evict_workspace_candidates(
-                overflow_candidates,
+            await self._evict_workspace_candidates(
+                expired_candidates,
                 protected_keys=protected_keys,
-                max_removals=overflow,
-                is_still_candidate=lambda entry, _snapshot_last_accessed_at, snapshot_access_sequence: (
-                    entry.access_sequence == snapshot_access_sequence
+                is_still_candidate=lambda entry, _snapshot_last_accessed_at, _snapshot_access_sequence: (
+                    self._monotonic_time() - entry.last_accessed_at
+                    > self.workspace_idle_ttl_seconds
                 ),
             )
-            if removals == 0:
-                return
+
+            while True:
+                async with self._lock:
+                    protected = self._workspace_eviction_protected_keys(
+                        protected_keys,
+                    )
+                    overflow = len(self.agents) - (
+                        self.workspace_cache_max_size
+                    )
+                    if overflow <= 0:
+                        return
+                    overflow_candidates = sorted(
+                        (
+                            (
+                                cache_key,
+                                entry.workspace,
+                                entry.last_accessed_at,
+                                entry.access_sequence,
+                            )
+                            for cache_key, entry in (
+                                self._agent_cache_entries.items()
+                            )
+                            if cache_key not in protected
+                            and self.agents.get(cache_key) is entry.workspace
+                        ),
+                        key=lambda item: (item[2], item[3]),
+                    )
+
+                if not overflow_candidates:
+                    return
+                removals = await self._evict_workspace_candidates(
+                    overflow_candidates,
+                    protected_keys=protected_keys,
+                    max_removals=overflow,
+                    is_still_candidate=lambda entry, _snapshot_last_accessed_at, snapshot_access_sequence: (
+                        entry.access_sequence == snapshot_access_sequence
+                    ),
+                )
+                if removals == 0:
+                    return
 
     def workspace_cache_metrics(self) -> dict[str, int]:
         """Return process-local workspace cache diagnostics."""
