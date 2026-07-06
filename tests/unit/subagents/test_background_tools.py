@@ -179,6 +179,60 @@ async def test_wait_subagent_returns_parent_facing_terminal_result(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_wait_subagent_returns_error_summary_for_failed_no_result_run(
+    tmp_path,
+):
+    supervisor = SimpleNamespace()
+    supervisor.wait = _AsyncReturn(
+        SimpleNamespace(
+            active_runs=[],
+            terminal_runs=[
+                SimpleNamespace(
+                    run_id="subagent-failed",
+                    status="failed",
+                    spec=SimpleNamespace(
+                        name="plan-researcher",
+                        objective="Inspect",
+                    ),
+                    nickname=None,
+                    result=None,
+                    errors=[
+                        SimpleNamespace(
+                            code="worker_exited_without_result",
+                            message="Worker exited without producing a result.",
+                        ),
+                    ],
+                ),
+            ],
+            timed_out=False,
+        ),
+    )
+    tools = create_background_subagent_tools(
+        supervisor=supervisor,
+        parent_agent_config=_agent_config(tmp_path),
+        workspace_dir=tmp_path,
+        request_context={
+            "tenant_id": "tenant-1",
+            "agent_id": "agent-1",
+            "_subagent_definition_store_dir": str(tmp_path / "definitions"),
+        },
+    )
+
+    response = await tools["wait_subagent"](timeout_ms=1)
+    payload = json.loads(response.content[0]["text"])
+    terminal = payload["terminal_runs"][0]
+
+    assert terminal["result"] == {
+        "status": "failed",
+        "summary": (
+            "worker_exited_without_result: "
+            "Worker exited without producing a result."
+        ),
+    }
+    assert "errors" not in terminal
+
+
+@pytest.mark.asyncio
 async def test_start_subagent_serializes_real_run_record(tmp_path):
     definition = AgentRegistry([builtin_definition_provider()]).resolve(
         "plan-researcher",
@@ -552,6 +606,44 @@ async def test_get_subagent_defaults_to_parent_facing_projection(tmp_path):
     assert payload["result"]["summary"] == "done"
     assert "definition_match" not in payload
     assert "worker" not in payload
+    assert "errors" not in payload
+
+
+@pytest.mark.asyncio
+async def test_get_subagent_returns_error_summary_for_failed_no_result_run(
+    tmp_path,
+):
+    definition = AgentRegistry([builtin_definition_provider()]).resolve(
+        "plan-researcher",
+    )
+    store = PerRunSubAgentRunStore(tmp_path / "runs")
+    record = await store.create(
+        DelegationSpec(name="plan-researcher", objective="Inspect"),
+        definition,
+        PermissionPolicy.readonly(),
+    )
+    failed = await store.fail(record.run_id, "worker failed to start")
+    supervisor = SimpleNamespace()
+    supervisor.get = _AsyncReturn(failed)
+    supervisor.is_manageable = lambda _scope, _run_id: False
+    tools = create_background_subagent_tools(
+        supervisor=supervisor,
+        parent_agent_config=_agent_config(tmp_path),
+        workspace_dir=tmp_path,
+        request_context={
+            "tenant_id": "tenant-1",
+            "agent_id": "agent-1",
+            "_subagent_run_store_dir": str(tmp_path / "runs"),
+        },
+    )
+
+    response = await tools["get_subagent"](record.run_id)
+    payload = json.loads(response.content[0]["text"])
+
+    assert payload["result"] == {
+        "status": "failed",
+        "summary": "runtime_error: worker failed to start",
+    }
     assert "errors" not in payload
 
 

@@ -70,6 +70,7 @@ _RUN_ID_CONTEXT_KEYS = (
     "subagent_run_id",
     "requested_subagent_run_id",
 )
+_FAILURE_SUMMARY_MAX_CHARS = 1024
 _DEFAULT_SUPERVISOR = BackgroundSubAgentSupervisor()
 
 
@@ -406,7 +407,29 @@ def _parent_facing_record(
     result = getattr(record, "result", None)
     if include_result and result is not None:
         payload["result"] = _compact_agent_result(result)
+    elif include_result:
+        failure_result = _compact_failure_without_result(record)
+        if failure_result is not None:
+            payload["result"] = failure_result
     return payload
+
+
+def _compact_failure_without_result(record: Any) -> dict[str, str] | None:
+    if getattr(record, "status", None) != "failed":
+        return None
+    errors = getattr(record, "errors", []) or []
+    if not errors:
+        return None
+    error = errors[-1]
+    code = str(getattr(error, "code", "") or "").strip()
+    message = str(getattr(error, "message", "") or "").strip()
+    summary = ": ".join(part for part in (code, message) if part)
+    if not summary:
+        return None
+    return {
+        "status": "failed",
+        "summary": summary[:_FAILURE_SUMMARY_MAX_CHARS],
+    }
 
 
 def _compact_agent_result(result: Any) -> dict[str, Any]:
