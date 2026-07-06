@@ -6,18 +6,13 @@ from __future__ import annotations
 import os
 from typing import Mapping
 
-from swe.config.context import get_current_source_id, get_current_tenant_id
 from swe.envs.runtime import resolve_tenant_env_references_mapping
-
-_RESERVED_SWE_HEADER_KEYS = frozenset(
-    {
-        "x-swe-tenant-id",
-        "x-swe-source-id",
-        "x-swe-session-id",
-        "x-swe-trace-id",
-        "traceid",
-    },
+from swe.runtime_invocation_claims import (
+    RUNTIME_CLAIM_HEADER_KEYS,
+    build_runtime_claim_headers,
 )
+
+_RESERVED_SWE_HEADER_KEYS = RUNTIME_CLAIM_HEADER_KEYS
 
 
 def resolve_mcp_http_headers(
@@ -45,22 +40,11 @@ def build_mcp_http_headers(
     if passthrough_headers:
         merged_headers.update(passthrough_headers)
 
-    merged_headers = {
-        key: value
-        for key, value in merged_headers.items()
-        if key.lower() not in _RESERVED_SWE_HEADER_KEYS
-    }
-
-    tenant_id = get_current_tenant_id()
-    source_id = get_current_source_id()
-    if tenant_id:
-        merged_headers["x-swe-tenant-id"] = tenant_id
-    if source_id:
-        merged_headers["x-swe-source-id"] = source_id
-    if session_id:
-        merged_headers["x-swe-session-id"] = session_id
-    if trace_id:
-        merged_headers["x-swe-trace-id"] = trace_id
-        merged_headers["traceid"] = trace_id
+    merged_headers = build_runtime_claim_headers(
+        merged_headers,
+        include_aliases=True,
+        session_id=session_id,
+        trace_id=trace_id,
+    )
 
     return merged_headers or None

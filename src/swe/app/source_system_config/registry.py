@@ -7,6 +7,16 @@ from copy import deepcopy
 from dataclasses import dataclass
 from typing import Any, Literal
 
+from ...constant import (
+    DEFAULT_LLM_CHAT_MAX_CONCURRENT,
+    DEFAULT_LLM_CRON_MAX_CONCURRENT,
+    LLM_ACQUIRE_TIMEOUT,
+    LLM_MAX_CONCURRENT,
+    LLM_MAX_QPM,
+    LLM_RATE_LIMIT_JITTER,
+    LLM_RATE_LIMIT_PAUSE,
+)
+
 
 @dataclass(frozen=True)
 class SourceSystemConfigSetting:
@@ -15,9 +25,16 @@ class SourceSystemConfigSetting:
     key: str
     path: tuple[str, ...]
     default_value: Any
-    value_type: Literal["bool", "int", "str"]
-    ge: int | None = None
-    le: int | None = None
+    value_type: Literal[
+        "bool",
+        "int",
+        "float",
+        "str",
+        "optional_int",
+        "optional_float",
+    ]
+    ge: float | None = None
+    le: float | None = None
 
 
 SourceSystemConfigSwitch = SourceSystemConfigSetting
@@ -106,20 +123,108 @@ CRON_TASK_SESSION_CLEANUP_ENABLED_SETTING = SourceSystemConfigSetting(
     default_value=False,
     value_type="bool",
 )
-CRON_TASK_SESSION_CLEANUP_RETENTION_DAYS_SETTING = (
-    SourceSystemConfigSetting(
-        key="cron_task_session_cleanup.retention_days",
-        path=("cron_task_session_cleanup", "retention_days"),
-        default_value=30,
-        value_type="int",
-        ge=1,
-    )
+CRON_TASK_SESSION_CLEANUP_RETENTION_DAYS_SETTING = SourceSystemConfigSetting(
+    key="cron_task_session_cleanup.retention_days",
+    path=("cron_task_session_cleanup", "retention_days"),
+    default_value=30,
+    value_type="int",
+    ge=1,
 )
 CRON_TASK_SESSION_CLEANUP_CRON_SETTING = SourceSystemConfigSetting(
     key="cron_task_session_cleanup.cron",
     path=("cron_task_session_cleanup", "cron"),
     default_value="0 1 * * *",
     value_type="str",
+)
+QUERY_RETRY_ENABLED_SETTING = SourceSystemConfigSetting(
+    key="query_retry.enabled",
+    path=("query_retry", "enabled"),
+    default_value=False,
+    value_type="bool",
+)
+QUERY_RETRY_MAX_RETRIES_SETTING = SourceSystemConfigSetting(
+    key="query_retry.max_retries",
+    path=("query_retry", "max_retries"),
+    default_value=3,
+    value_type="int",
+    ge=1,
+)
+QUERY_RETRY_BACKOFF_BASE_SETTING = SourceSystemConfigSetting(
+    key="query_retry.backoff_base",
+    path=("query_retry", "backoff_base"),
+    default_value=2.0,
+    value_type="float",
+    ge=0.5,
+)
+QUERY_RETRY_BACKOFF_CAP_SETTING = SourceSystemConfigSetting(
+    key="query_retry.backoff_cap",
+    path=("query_retry", "backoff_cap"),
+    default_value=30.0,
+    value_type="float",
+    ge=1.0,
+)
+LLM_MAX_CONCURRENT_SETTING = SourceSystemConfigSetting(
+    key="llm_rate_limiter.llm_max_concurrent",
+    path=("llm_rate_limiter", "llm_max_concurrent"),
+    default_value=LLM_MAX_CONCURRENT,
+    value_type="int",
+    ge=1,
+)
+LLM_CHAT_MAX_CONCURRENT_SETTING = SourceSystemConfigSetting(
+    key="llm_rate_limiter.llm_chat_max_concurrent",
+    path=("llm_rate_limiter", "llm_chat_max_concurrent"),
+    default_value=DEFAULT_LLM_CHAT_MAX_CONCURRENT,
+    value_type="optional_int",
+    ge=1,
+)
+LLM_CRON_MAX_CONCURRENT_SETTING = SourceSystemConfigSetting(
+    key="llm_rate_limiter.llm_cron_max_concurrent",
+    path=("llm_rate_limiter", "llm_cron_max_concurrent"),
+    default_value=DEFAULT_LLM_CRON_MAX_CONCURRENT,
+    value_type="optional_int",
+    ge=1,
+)
+LLM_MAX_QPM_SETTING = SourceSystemConfigSetting(
+    key="llm_rate_limiter.llm_max_qpm",
+    path=("llm_rate_limiter", "llm_max_qpm"),
+    default_value=LLM_MAX_QPM,
+    value_type="int",
+    ge=0,
+)
+LLM_RATE_LIMIT_PAUSE_SETTING = SourceSystemConfigSetting(
+    key="llm_rate_limiter.llm_rate_limit_pause",
+    path=("llm_rate_limiter", "llm_rate_limit_pause"),
+    default_value=LLM_RATE_LIMIT_PAUSE,
+    value_type="float",
+    ge=1.0,
+)
+LLM_RATE_LIMIT_JITTER_SETTING = SourceSystemConfigSetting(
+    key="llm_rate_limiter.llm_rate_limit_jitter",
+    path=("llm_rate_limiter", "llm_rate_limit_jitter"),
+    default_value=LLM_RATE_LIMIT_JITTER,
+    value_type="float",
+    ge=0.0,
+)
+LLM_ACQUIRE_TIMEOUT_SETTING = SourceSystemConfigSetting(
+    key="llm_rate_limiter.llm_acquire_timeout",
+    path=("llm_rate_limiter", "llm_acquire_timeout"),
+    default_value=LLM_ACQUIRE_TIMEOUT,
+    value_type="float",
+    ge=10.0,
+)
+LLM_CHAT_ACQUIRE_TIMEOUT_SETTING = SourceSystemConfigSetting(
+    key="llm_rate_limiter.llm_chat_acquire_timeout",
+    path=("llm_rate_limiter", "llm_chat_acquire_timeout"),
+    default_value=None,
+    value_type="optional_float",
+    ge=10.0,
+)
+LLM_CRON_ACQUIRE_TIMEOUT_SETTING = SourceSystemConfigSetting(
+    key="llm_rate_limiter.llm_cron_acquire_timeout",
+    path=("llm_rate_limiter", "llm_cron_acquire_timeout"),
+    default_value=None,
+    value_type="optional_float",
+    ge=10.0,
 )
 SYSTEM_PROMPT_INJECTIONS_PATH = ("system_prompt_injections",)
 SYSTEM_PROMPT_INJECTIONS_DEFAULT: list[str] = []
@@ -146,6 +251,19 @@ CURRENT_SOURCE_SYSTEM_CONFIG_SETTINGS: tuple[
     CRON_TASK_SESSION_CLEANUP_ENABLED_SETTING,
     CRON_TASK_SESSION_CLEANUP_RETENTION_DAYS_SETTING,
     CRON_TASK_SESSION_CLEANUP_CRON_SETTING,
+    QUERY_RETRY_ENABLED_SETTING,
+    QUERY_RETRY_MAX_RETRIES_SETTING,
+    QUERY_RETRY_BACKOFF_BASE_SETTING,
+    QUERY_RETRY_BACKOFF_CAP_SETTING,
+    LLM_MAX_CONCURRENT_SETTING,
+    LLM_CHAT_MAX_CONCURRENT_SETTING,
+    LLM_CRON_MAX_CONCURRENT_SETTING,
+    LLM_MAX_QPM_SETTING,
+    LLM_RATE_LIMIT_PAUSE_SETTING,
+    LLM_RATE_LIMIT_JITTER_SETTING,
+    LLM_ACQUIRE_TIMEOUT_SETTING,
+    LLM_CHAT_ACQUIRE_TIMEOUT_SETTING,
+    LLM_CRON_ACQUIRE_TIMEOUT_SETTING,
 )
 
 _MISSING = object()
@@ -154,6 +272,21 @@ _FALSE_STRINGS = frozenset({"false", "0", "no", "off"})
 _IMMEDIATE_TRUNCATION_ENABLED_SETTINGS = (
     FILE_READ_TRUNCATION_ENABLED_SETTING,
 )
+_MODEL_CALL_POLICY_SETTINGS = (
+    QUERY_RETRY_ENABLED_SETTING,
+    QUERY_RETRY_MAX_RETRIES_SETTING,
+    QUERY_RETRY_BACKOFF_BASE_SETTING,
+    QUERY_RETRY_BACKOFF_CAP_SETTING,
+    LLM_MAX_CONCURRENT_SETTING,
+    LLM_CHAT_MAX_CONCURRENT_SETTING,
+    LLM_CRON_MAX_CONCURRENT_SETTING,
+    LLM_MAX_QPM_SETTING,
+    LLM_RATE_LIMIT_PAUSE_SETTING,
+    LLM_RATE_LIMIT_JITTER_SETTING,
+    LLM_ACQUIRE_TIMEOUT_SETTING,
+    LLM_CHAT_ACQUIRE_TIMEOUT_SETTING,
+    LLM_CRON_ACQUIRE_TIMEOUT_SETTING,
+)
 _DEPRECATED_SYSTEM_SECTION_KEYS = frozenset(
     {
         "external_tool_output_truncation",
@@ -161,7 +294,7 @@ _DEPRECATED_SYSTEM_SECTION_KEYS = frozenset(
 )
 _PRESERVED_DEFAULT_SETTING_PATHS = frozenset(
     setting.path for setting in _IMMEDIATE_TRUNCATION_ENABLED_SETTINGS
-)
+).union(setting.path for setting in _MODEL_CALL_POLICY_SETTINGS)
 
 
 def build_default_source_system_config_payload() -> dict[str, Any]:
@@ -308,13 +441,30 @@ def normalize_registered_setting_values(
             coerced = _coerce_registered_int_value(setting, value)
             _set_nested_value(normalized, setting.path, coerced)
             continue
-        if setting.value_type == "str":
-            coerced = _coerce_registered_string_value(setting, value)
-            if setting is CRON_TASK_SESSION_CLEANUP_CRON_SETTING:
-                coerced = _normalize_daily_cron_value(setting, coerced)
+        if setting.value_type == "optional_int":
+            coerced = _coerce_registered_optional_int_value(setting, value)
             _set_nested_value(normalized, setting.path, coerced)
+            continue
+        if setting.value_type == "float":
+            coerced = _coerce_registered_float_value(setting, value)
+            _set_nested_value(normalized, setting.path, coerced)
+            continue
+        if setting.value_type == "optional_float":
+            coerced = _coerce_registered_optional_float_value(setting, value)
+            _set_nested_value(normalized, setting.path, coerced)
+            continue
+        if setting.value_type == "str":
+            string_value = _coerce_registered_string_value(setting, value)
+            if setting is CRON_TASK_SESSION_CLEANUP_CRON_SETTING:
+                string_value = _normalize_daily_cron_value(
+                    setting,
+                    string_value,
+                )
+            _set_nested_value(normalized, setting.path, string_value)
     if validate_cross_ranges:
         _validate_explicit_tool_result_compact_ranges(raw_config, normalized)
+        _validate_explicit_query_retry_ranges(raw_config, normalized)
+        _validate_explicit_llm_rate_limiter_ranges(raw_config, normalized)
     return normalized
 
 
@@ -461,6 +611,45 @@ def _coerce_registered_int_value(
     return value
 
 
+def _coerce_registered_optional_int_value(
+    setting: SourceSystemConfigSetting,
+    value: Any,
+) -> int | None:
+    """将注册可空整数配置收敛并校验取值范围。"""
+    if value is None:
+        return None
+    return _coerce_registered_int_value(setting, value)
+
+
+def _coerce_registered_float_value(
+    setting: SourceSystemConfigSetting,
+    value: Any,
+) -> float:
+    """将注册浮点配置收敛并校验取值范围。"""
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise ValueError(f"{setting.key} must be a number, got {value!r}")
+    coerced = float(value)
+    if setting.ge is not None and coerced < setting.ge:
+        raise ValueError(
+            f"{setting.key} must be greater than or equal to {setting.ge}",
+        )
+    if setting.le is not None and coerced > setting.le:
+        raise ValueError(
+            f"{setting.key} must be less than or equal to {setting.le}",
+        )
+    return coerced
+
+
+def _coerce_registered_optional_float_value(
+    setting: SourceSystemConfigSetting,
+    value: Any,
+) -> float | None:
+    """将注册可空浮点配置收敛并校验取值范围。"""
+    if value is None:
+        return None
+    return _coerce_registered_float_value(setting, value)
+
+
 def _coerce_registered_string_value(
     setting: SourceSystemConfigSetting,
     value: Any,
@@ -544,6 +733,66 @@ def _validate_explicit_tool_result_compact_ranges(
         )
 
 
+def _validate_explicit_query_retry_ranges(
+    raw_config: dict[str, Any],
+    payload: dict[str, Any],
+) -> None:
+    """只校验 source 原始输入中同时显式出现的 Query 重试退避关系。"""
+    raw_query_retry = raw_config.get("query_retry")
+    if not isinstance(raw_query_retry, dict):
+        return
+    if (
+        "backoff_base" not in raw_query_retry
+        or "backoff_cap" not in raw_query_retry
+    ):
+        return
+    backoff_base = _get_nested_value(
+        payload,
+        QUERY_RETRY_BACKOFF_BASE_SETTING.path,
+    )
+    backoff_cap = _get_nested_value(
+        payload,
+        QUERY_RETRY_BACKOFF_CAP_SETTING.path,
+    )
+    if backoff_cap < backoff_base:
+        raise ValueError(
+            "query_retry.backoff_cap must be greater than or equal to "
+            "query_retry.backoff_base",
+        )
+
+
+def _validate_explicit_llm_rate_limiter_ranges(
+    raw_config: dict[str, Any],
+    payload: dict[str, Any],
+) -> None:
+    """只校验 source 原始输入中显式出现的 LLM 限流等待关系。"""
+    raw_rate_limiter = raw_config.get("llm_rate_limiter")
+    if not isinstance(raw_rate_limiter, dict):
+        return
+    pause = _get_nested_value(payload, LLM_RATE_LIMIT_PAUSE_SETTING.path)
+    jitter = _get_nested_value(payload, LLM_RATE_LIMIT_JITTER_SETTING.path)
+    if pause is _MISSING or jitter is _MISSING:
+        return
+    cooldown = float(pause) + float(jitter)
+    timeout_settings = (
+        LLM_ACQUIRE_TIMEOUT_SETTING,
+        LLM_CHAT_ACQUIRE_TIMEOUT_SETTING,
+        LLM_CRON_ACQUIRE_TIMEOUT_SETTING,
+    )
+    for setting in timeout_settings:
+        if setting.path[-1] not in raw_rate_limiter:
+            continue
+        value = _get_nested_value(payload, setting.path)
+        if value is None:
+            continue
+        if value <= cooldown:
+            raise ValueError(
+                f"{setting.key} must be greater than "
+                "llm_rate_limiter.llm_rate_limit_pause + "
+                "llm_rate_limiter.llm_rate_limit_jitter",
+            )
+
+
 __all__ = [
     "CHAT_TASK_PROGRESS_ENABLED_SWITCH",
     "CRON_TASK_SESSION_CLEANUP_CRON_SETTING",
@@ -556,6 +805,19 @@ __all__ = [
     "DATABASE_ACCESS_GUARD_ENABLED_SWITCH",
     "FILE_READ_TRUNCATION_ENABLED_SETTING",
     "FILE_READ_TRUNCATION_MAX_BYTES_SETTING",
+    "LLM_ACQUIRE_TIMEOUT_SETTING",
+    "LLM_CHAT_ACQUIRE_TIMEOUT_SETTING",
+    "LLM_CHAT_MAX_CONCURRENT_SETTING",
+    "LLM_CRON_ACQUIRE_TIMEOUT_SETTING",
+    "LLM_CRON_MAX_CONCURRENT_SETTING",
+    "LLM_MAX_CONCURRENT_SETTING",
+    "LLM_MAX_QPM_SETTING",
+    "LLM_RATE_LIMIT_JITTER_SETTING",
+    "LLM_RATE_LIMIT_PAUSE_SETTING",
+    "QUERY_RETRY_BACKOFF_BASE_SETTING",
+    "QUERY_RETRY_BACKOFF_CAP_SETTING",
+    "QUERY_RETRY_ENABLED_SETTING",
+    "QUERY_RETRY_MAX_RETRIES_SETTING",
     "SourceSystemConfigSwitch",
     "SourceSystemConfigSetting",
     "SYSTEM_PROMPT_INJECTIONS_DEFAULT",
