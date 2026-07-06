@@ -81,6 +81,7 @@ class MultiAgentManager:
         self._agent_cache_entries: Dict[str, _WorkspaceCacheEntry] = {}
         self._lock = asyncio.Lock()
         self._agent_start_tasks: Dict[str, asyncio.Task[Workspace]] = {}
+        self._agent_start_waiters: Dict[str, int] = {}
         self.workspace_cache_max_size = (
             workspace_cache_max_size
             if workspace_cache_max_size is not None
@@ -189,16 +190,27 @@ class MultiAgentManager:
                     name=f"workspace-start-{cache_key}",
                 )
                 self._agent_start_tasks[cache_key] = start_task
+            self._agent_start_waiters[cache_key] = (
+                self._agent_start_waiters.get(cache_key, 0) + 1
+            )
 
-        instance = await asyncio.shield(start_task)
-        await self._evict_workspace_cache(protected_keys={cache_key})
-        duration_ms = int((time.perf_counter() - started_at) * 1000)
-        logger.debug(
-            "workspace_cache_miss cache_key=%s duration_ms=%d",
-            cache_key,
-            duration_ms,
-        )
-        return instance
+        try:
+            instance = await asyncio.shield(start_task)
+            await self._evict_workspace_cache(protected_keys={cache_key})
+            duration_ms = int((time.perf_counter() - started_at) * 1000)
+            logger.debug(
+                "workspace_cache_miss cache_key=%s duration_ms=%d",
+                cache_key,
+                duration_ms,
+            )
+            return instance
+        finally:
+            async with self._lock:
+                waiters = self._agent_start_waiters.get(cache_key, 0)
+                if waiters <= 1:
+                    self._agent_start_waiters.pop(cache_key, None)
+                else:
+                    self._agent_start_waiters[cache_key] = waiters - 1
 
     async def _start_agent_for_cache_key(
         self,
@@ -273,45 +285,79 @@ class MultiAgentManager:
             return
         entry.last_accessed_at = now
 
-    async def _evict_workspace_cache(
+    def _workspace_eviction_protected_keys(
         self,
+        protected_keys: set[str] | None,
+    ) -> set[str]:
+        protected = set(protected_keys or set())
+        protected.update(self._agent_start_tasks.keys())
+        protected.update(
+            cache_key
+            for cache_key, waiters in self._agent_start_waiters.items()
+            if waiters > 0
+        )
+        return protected
+
+    async def _workspace_has_active_tasks(
+        self,
+        cache_key: str,
+        workspace: Workspace,
+    ) -> bool:
+        task_tracker = getattr(workspace, "task_tracker", None)
+        has_active_tasks = getattr(task_tracker, "has_active_tasks", None)
+        if has_active_tasks is None:
+            return False
+        try:
+            return bool(await has_active_tasks())
+        except Exception as e:  # pylint: disable=broad-except
+            logger.warning(
+                "Failed to check active tasks for workspace %s; "
+                "skipping eviction: %s",
+                cache_key,
+                e,
+            )
+            return True
+
+    async def _evict_workspace_candidates(
+        self,
+        candidates: list[tuple[str, Workspace, float]],
         *,
-        protected_keys: set[str] | None = None,
-    ) -> None:
-        protected = protected_keys or set()
-        to_stop: list[tuple[str, Workspace]] = []
-        now = self._monotonic_time()
-        async with self._lock:
-            for cache_key, entry in list(self._agent_cache_entries.items()):
-                if cache_key in protected:
+        protected_keys: set[str] | None,
+        max_removals: int | None = None,
+        is_still_candidate: (
+            Callable[[_WorkspaceCacheEntry], bool] | None
+        ) = None,
+    ) -> int:
+        removals = 0
+        for cache_key, workspace, _last_accessed_at in candidates:
+            if max_removals is not None and removals >= max_removals:
+                break
+            if await self._workspace_has_active_tasks(cache_key, workspace):
+                logger.debug(
+                    "Skipping workspace cache eviction with active tasks: %s",
+                    cache_key,
+                )
+                continue
+
+            async with self._lock:
+                protected = self._workspace_eviction_protected_keys(
+                    protected_keys,
+                )
+                entry = self._agent_cache_entries.get(cache_key)
+                if cache_key in protected or entry is None:
                     continue
-                if (
-                    now - entry.last_accessed_at
-                    <= self.workspace_idle_ttl_seconds
+                if entry.workspace is not workspace:
+                    continue
+                if self.agents.get(cache_key) is not workspace:
+                    continue
+                if is_still_candidate is not None and not is_still_candidate(
+                    entry,
                 ):
                     continue
-                if self.agents.get(cache_key) is entry.workspace:
-                    self.agents.pop(cache_key, None)
-                    to_stop.append((cache_key, entry.workspace))
+                self.agents.pop(cache_key, None)
                 self._agent_cache_entries.pop(cache_key, None)
+                removals += 1
 
-            overflow = len(self.agents) - self.workspace_cache_max_size
-            if overflow > 0:
-                candidates = sorted(
-                    (
-                        (cache_key, entry)
-                        for cache_key, entry in self._agent_cache_entries.items()
-                        if cache_key not in protected
-                        and self.agents.get(cache_key) is entry.workspace
-                    ),
-                    key=lambda item: item[1].last_accessed_at,
-                )
-                for cache_key, entry in candidates[:overflow]:
-                    self.agents.pop(cache_key, None)
-                    self._agent_cache_entries.pop(cache_key, None)
-                    to_stop.append((cache_key, entry.workspace))
-
-        for cache_key, workspace in to_stop:
             try:
                 await workspace.stop()
                 self._workspace_evictions_total += 1
@@ -326,6 +372,68 @@ class MultiAgentManager:
                     cache_key,
                     e,
                 )
+        return removals
+
+    async def _evict_workspace_cache(
+        self,
+        *,
+        protected_keys: set[str] | None = None,
+    ) -> None:
+        now = self._monotonic_time()
+        async with self._lock:
+            protected = self._workspace_eviction_protected_keys(
+                protected_keys,
+            )
+            expired_candidates = sorted(
+                (
+                    (cache_key, entry.workspace, entry.last_accessed_at)
+                    for cache_key, entry in self._agent_cache_entries.items()
+                    if cache_key not in protected
+                    and self.agents.get(cache_key) is entry.workspace
+                    and now - entry.last_accessed_at
+                    > self.workspace_idle_ttl_seconds
+                ),
+                key=lambda item: item[2],
+            )
+
+        await self._evict_workspace_candidates(
+            expired_candidates,
+            protected_keys=protected_keys,
+            is_still_candidate=lambda entry: (
+                self._monotonic_time() - entry.last_accessed_at
+                > self.workspace_idle_ttl_seconds
+            ),
+        )
+
+        while True:
+            async with self._lock:
+                protected = self._workspace_eviction_protected_keys(
+                    protected_keys,
+                )
+                overflow = len(self.agents) - self.workspace_cache_max_size
+                if overflow <= 0:
+                    return
+                overflow_candidates = sorted(
+                    (
+                        (cache_key, entry.workspace, entry.last_accessed_at)
+                        for cache_key, entry in (
+                            self._agent_cache_entries.items()
+                        )
+                        if cache_key not in protected
+                        and self.agents.get(cache_key) is entry.workspace
+                    ),
+                    key=lambda item: item[2],
+                )
+
+            if not overflow_candidates:
+                return
+            removals = await self._evict_workspace_candidates(
+                overflow_candidates,
+                protected_keys=protected_keys,
+                max_removals=overflow,
+            )
+            if removals == 0:
+                return
 
     def workspace_cache_metrics(self) -> dict[str, int]:
         """Return process-local workspace cache diagnostics."""

@@ -51,6 +51,14 @@ class _Workspace:
         self.manager = manager
 
 
+class _TaskTracker:
+    def __init__(self, *, has_active_tasks: bool = False) -> None:
+        self._has_active_tasks = has_active_tasks
+
+    async def has_active_tasks(self) -> bool:
+        return self._has_active_tasks
+
+
 @pytest.mark.asyncio
 async def test_same_cache_key_concurrent_get_agent_starts_once(
     monkeypatch,
@@ -326,6 +334,107 @@ async def test_workspace_cache_evicts_idle_entries(monkeypatch) -> None:
     assert workspace_a.stopped is True
     assert workspace_b.stopped is False
     assert workspace_c.stopped is False
+
+
+@pytest.mark.asyncio
+async def test_workspace_cache_defers_idle_eviction_with_active_tasks(
+    monkeypatch,
+) -> None:
+    clock = 1000.0
+    manager = MultiAgentManager(
+        workspace_cache_max_size=10,
+        workspace_idle_ttl_seconds=10,
+        workspace_start_max_concurrent=4,
+        monotonic_time=lambda: clock,
+    )
+
+    class ActiveWorkspace(_Workspace):
+        def __init__(self, **kwargs: Any) -> None:
+            super().__init__(**kwargs)
+            self.task_tracker = _TaskTracker(has_active_tasks=True)
+
+    monkeypatch.setattr(manager_module, "Workspace", ActiveWorkspace)
+    monkeypatch.setattr(
+        manager,
+        "_load_agent_config_for_tenant",
+        lambda _tenant_id=None: _config("default"),
+    )
+
+    workspace_a = await manager.get_agent("default", tenant_id="tenant-a")
+    clock += 11
+    workspace_b = await manager.get_agent("default", tenant_id="tenant-b")
+
+    assert manager.list_loaded_agents() == [
+        "tenant-a:default",
+        "tenant-b:default",
+    ]
+    assert workspace_a.stopped is False
+    assert workspace_b.stopped is False
+
+
+@pytest.mark.asyncio
+async def test_workspace_cache_protects_completed_start_waiters(
+    monkeypatch,
+) -> None:
+    manager = MultiAgentManager(
+        workspace_cache_max_size=1,
+        workspace_idle_ttl_seconds=6 * 60 * 60,
+        workspace_start_max_concurrent=4,
+    )
+    tenant_a_started = asyncio.Event()
+    tenant_a_may_return = asyncio.Event()
+    tenant_b_waiting_after_start = asyncio.Event()
+    tenant_b_may_return = asyncio.Event()
+    original_evict_workspace_cache = manager._evict_workspace_cache
+
+    class ControlledWorkspace(_Workspace):
+        async def start(self) -> None:
+            await super().start()
+            if self.tenant_id == "tenant-a":
+                tenant_a_started.set()
+                await tenant_a_may_return.wait()
+
+    async def controlled_evict_workspace_cache(
+        *,
+        protected_keys: set[str] | None = None,
+    ) -> None:
+        if protected_keys == {"tenant-b:default"}:
+            tenant_b_waiting_after_start.set()
+            await tenant_b_may_return.wait()
+        await original_evict_workspace_cache(protected_keys=protected_keys)
+
+    monkeypatch.setattr(manager_module, "Workspace", ControlledWorkspace)
+    monkeypatch.setattr(
+        manager,
+        "_evict_workspace_cache",
+        controlled_evict_workspace_cache,
+    )
+    monkeypatch.setattr(
+        manager,
+        "_load_agent_config_for_tenant",
+        lambda _tenant_id=None: _config("default"),
+    )
+
+    tenant_a_task = asyncio.create_task(
+        manager.get_agent("default", tenant_id="tenant-a"),
+    )
+    await tenant_a_started.wait()
+    tenant_b_task = asyncio.create_task(
+        manager.get_agent("default", tenant_id="tenant-b"),
+    )
+    await tenant_b_waiting_after_start.wait()
+    tenant_a_may_return.set()
+    workspace_a = await tenant_a_task
+    workspace_b = manager.agents["tenant-b:default"]
+
+    assert workspace_a.started is True
+    assert workspace_a.stopped is False
+    assert workspace_b.stopped is False
+
+    tenant_b_may_return.set()
+    assert await tenant_b_task is workspace_b
+    assert workspace_b.stopped is False
+    assert manager.agents["tenant-b:default"] is workspace_b
 
 
 @pytest.mark.asyncio
