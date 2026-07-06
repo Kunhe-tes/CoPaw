@@ -414,6 +414,7 @@ class MultiAgentManager:
                 )
                 continue
 
+            reserved_entry: _WorkspaceCacheEntry | None = None
             async with self._lock:
                 protected = self._workspace_eviction_protected_keys(
                     protected_keys,
@@ -431,33 +432,60 @@ class MultiAgentManager:
                     access_sequence,
                 ):
                     continue
-                try:
-                    await workspace.stop()
-                except asyncio.CancelledError:
-                    self._workspace_eviction_stop_failures_total += 1
-                    logger.warning(
-                        "Cancelled while stopping evicted workspace %s",
-                        cache_key,
-                    )
-                    raise
-                except Exception as e:  # pylint: disable=broad-except
-                    self._workspace_eviction_stop_failures_total += 1
-                    logger.warning(
-                        "Failed to stop evicted workspace %s: %s",
-                        cache_key,
-                        e,
-                    )
-                    continue
-
+                reserved_entry = entry
                 self.agents.pop(cache_key, None)
                 self._agent_cache_entries.pop(cache_key, None)
-                removals += 1
-                self._workspace_evictions_total += 1
-                logger.info(
-                    "Evicted idle workspace cache entry: %s",
+
+            try:
+                await workspace.stop()
+            except asyncio.CancelledError:
+                await self._restore_failed_eviction(
+                    cache_key,
+                    workspace,
+                    reserved_entry,
+                )
+                self._workspace_eviction_stop_failures_total += 1
+                logger.warning(
+                    "Cancelled while stopping evicted workspace %s",
                     cache_key,
                 )
+                raise
+            except Exception as e:  # pylint: disable=broad-except
+                await self._restore_failed_eviction(
+                    cache_key,
+                    workspace,
+                    reserved_entry,
+                )
+                self._workspace_eviction_stop_failures_total += 1
+                logger.warning(
+                    "Failed to stop evicted workspace %s: %s",
+                    cache_key,
+                    e,
+                )
+                continue
+
+            removals += 1
+            self._workspace_evictions_total += 1
+            logger.info(
+                "Evicted idle workspace cache entry: %s",
+                cache_key,
+            )
         return removals
+
+    async def _restore_failed_eviction(
+        self,
+        cache_key: str,
+        workspace: Workspace,
+        entry: _WorkspaceCacheEntry | None,
+    ) -> None:
+        async with self._lock:
+            if self.agents.get(cache_key) is None:
+                self.agents[cache_key] = workspace
+            if (
+                entry is not None
+                and cache_key not in self._agent_cache_entries
+            ):
+                self._agent_cache_entries[cache_key] = entry
 
     async def _evict_workspace_cache(
         self,

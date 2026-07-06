@@ -12,6 +12,7 @@ import pytest
 
 import swe.app.multi_agent_manager as manager_module
 from swe.app.multi_agent_manager import MultiAgentManager
+from swe.app.workspace.workspace import Workspace
 
 
 def _config(*agent_ids: str) -> SimpleNamespace:
@@ -916,6 +917,182 @@ async def test_eviction_stop_failure_keeps_workspace_managed() -> None:
         ]
         == 1
     )
+
+
+@pytest.mark.asyncio
+async def test_eviction_stop_runs_outside_manager_lock() -> None:
+    manager = MultiAgentManager(
+        workspace_cache_max_size=1,
+        workspace_idle_ttl_seconds=6 * 60 * 60,
+        workspace_start_max_concurrent=4,
+    )
+    stop_entered = asyncio.Event()
+    release_stop = asyncio.Event()
+
+    class SlowStoppingWorkspace(_Workspace):
+        async def stop(self, *_args: Any, **_kwargs: Any) -> None:
+            stop_entered.set()
+            await release_stop.wait()
+            await super().stop(*_args, **_kwargs)
+
+    evicted = SlowStoppingWorkspace(
+        agent_id="default",
+        workspace_dir="/tmp/default",
+        tenant_id="tenant-a",
+    )
+    cached = _Workspace(
+        agent_id="default",
+        workspace_dir="/tmp/default",
+        tenant_id="tenant-b",
+    )
+    manager.agents["tenant-a:default"] = evicted
+    manager._touch_cache_entry("tenant-a:default", evicted)
+    manager.agents["tenant-b:default"] = cached
+    manager._touch_cache_entry("tenant-b:default", cached)
+
+    eviction_task = asyncio.create_task(
+        manager._evict_workspace_candidates(
+            [("tenant-a:default", evicted, 1000.0, 1)],
+            protected_keys=None,
+        ),
+    )
+    await stop_entered.wait()
+
+    try:
+        result = await asyncio.wait_for(
+            manager.get_agent("default", tenant_id="tenant-b"),
+            timeout=0.05,
+        )
+    finally:
+        release_stop.set()
+
+    removals = await eviction_task
+
+    assert result is cached
+    assert removals == 1
+    assert "tenant-a:default" not in manager.agents
+    assert cached.stopped is False
+
+
+@pytest.mark.asyncio
+async def test_eviction_stop_failure_does_not_restore_over_replacement(
+    monkeypatch,
+) -> None:
+    manager = MultiAgentManager(
+        workspace_cache_max_size=10,
+        workspace_idle_ttl_seconds=6 * 60 * 60,
+        workspace_start_max_concurrent=4,
+    )
+    stop_entered = asyncio.Event()
+    release_stop = asyncio.Event()
+
+    class StopFailingWorkspace(_Workspace):
+        async def stop(self, *_args: Any, **_kwargs: Any) -> None:
+            stop_entered.set()
+            await release_stop.wait()
+            raise RuntimeError("stop failed")
+
+    replacement = _Workspace(
+        agent_id="default",
+        workspace_dir="/tmp/default",
+        tenant_id="tenant-a",
+    )
+
+    def workspace_factory(**_kwargs: Any) -> _Workspace:
+        return replacement
+
+    evicted = StopFailingWorkspace(
+        agent_id="default",
+        workspace_dir="/tmp/default",
+        tenant_id="tenant-a",
+    )
+    manager.agents["tenant-a:default"] = evicted
+    manager._touch_cache_entry("tenant-a:default", evicted)
+    monkeypatch.setattr(manager_module, "Workspace", workspace_factory)
+    monkeypatch.setattr(
+        manager,
+        "_load_agent_config_for_tenant",
+        lambda _tenant_id=None: _config("default"),
+    )
+
+    eviction_task = asyncio.create_task(
+        manager._evict_workspace_candidates(
+            [("tenant-a:default", evicted, 1000.0, 1)],
+            protected_keys=None,
+        ),
+    )
+    await stop_entered.wait()
+
+    assert await manager.get_agent("default", tenant_id="tenant-a") is (
+        replacement
+    )
+    release_stop.set()
+    removals = await eviction_task
+
+    assert removals == 0
+    assert manager.agents["tenant-a:default"] is replacement
+    assert manager._agent_cache_entries["tenant-a:default"].workspace is (
+        replacement
+    )
+
+
+@pytest.mark.asyncio
+async def test_workspace_stop_cleans_starting_services_before_started(
+    tmp_path,
+) -> None:
+    workspace = Workspace("default", tmp_path)
+    stop_calls: list[dict[str, Any]] = []
+
+    class FakeServiceManager:
+        services = {"runner": object()}
+
+        async def stop_all(self, *, final: bool = False) -> None:
+            stop_calls.append({"final": final})
+
+    workspace._service_manager = FakeServiceManager()
+    workspace._starting = True
+    workspace._started = False
+
+    await workspace.stop()
+
+    assert stop_calls == [{"final": True}]
+    assert workspace._started is False
+    assert workspace._starting is False
+
+
+@pytest.mark.asyncio
+async def test_workspace_start_cancellation_stops_partially_started_services(
+    tmp_path,
+) -> None:
+    workspace = Workspace("default", tmp_path)
+    start_entered = asyncio.Event()
+    cancel_may_finish = asyncio.Event()
+    stop_calls: list[dict[str, Any]] = []
+
+    class FakeServiceManager:
+        services = {"runner": object()}
+
+        async def start_all(self) -> None:
+            start_entered.set()
+            await cancel_may_finish.wait()
+
+        async def stop_all(self, *, final: bool = False) -> None:
+            stop_calls.append({"final": final})
+
+    workspace._service_manager = FakeServiceManager()
+    workspace._config = object()
+
+    start_task = asyncio.create_task(workspace.start())
+    await start_entered.wait()
+    start_task.cancel()
+    cancel_may_finish.set()
+
+    with pytest.raises(asyncio.CancelledError):
+        await start_task
+
+    assert stop_calls == [{"final": True}]
+    assert workspace._started is False
+    assert workspace._starting is False
 
 
 @pytest.mark.asyncio
