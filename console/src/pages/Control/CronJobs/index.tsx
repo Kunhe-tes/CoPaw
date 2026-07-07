@@ -55,6 +55,7 @@ function CronJobsPage() {
     updateJob,
     deleteJob,
     toggleEnabled,
+    toggleBatchDispatch,
     executeNow,
   } = useCronJobs();
   const [drawerOpen, setDrawerOpen] = useState(false);
@@ -122,6 +123,7 @@ function CronJobsPage() {
 
   const handleEdit = (job: CronJob) => {
     setEditingJob(job);
+    form.resetFields();
     form.setFieldsValue(buildCronJobFormValues(job) as any);
     setDrawerOpen(true);
   };
@@ -141,6 +143,10 @@ function CronJobsPage() {
 
   const handleToggleEnabled = async (job: CronJob) => {
     await toggleEnabled(job);
+  };
+
+  const handleToggleBatchDispatch = async (job: CronJob) => {
+    await toggleBatchDispatch(job);
   };
 
   const handleExecuteNow = async (job: CronJob) => {
@@ -330,6 +336,7 @@ function CronJobsPage() {
 
   const columns = createColumns({
     onToggleEnabled: handleToggleEnabled,
+    onToggleBatchDispatch: handleToggleBatchDispatch,
     onExecuteNow: handleExecuteNow,
     onBroadcast: handleBroadcast,
     onManageChildren: handleManageChildren,

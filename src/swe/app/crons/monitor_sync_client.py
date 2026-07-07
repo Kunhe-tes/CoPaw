@@ -27,9 +27,11 @@ _BEIJING_TZ = ZoneInfo("Asia/Shanghai")
 
 # Default Monitor API URL
 DEFAULT_MONITOR_API_URL = "http://localhost:9090/api"
+DEFAULT_SCHEDULER_API_URL = "http://localhost:9100/api"
 
 # Environment variable for Monitor API URL
 MONITOR_API_URL_ENV = "SWE_MONITOR_API_URL"
+SCHEDULER_API_URL_ENV = "SWE_SCHEDULER_API_URL"
 
 
 def get_monitor_api_url() -> str:
@@ -44,6 +46,25 @@ def get_monitor_api_url() -> str:
     return DEFAULT_MONITOR_API_URL
 
 
+def get_scheduler_api_url() -> str:
+    """Get Scheduler API URL from environment or default."""
+    url = os.environ.get(SCHEDULER_API_URL_ENV)
+    if url:
+        return url.rstrip("/")
+    return DEFAULT_SCHEDULER_API_URL
+
+
+def _has_dispatch_execution_meta(exec_data: Dict[str, Any]) -> bool:
+    raw_meta = exec_data.get("meta")
+    if not raw_meta:
+        return False
+    try:
+        meta = json.loads(raw_meta)
+    except (TypeError, json.JSONDecodeError):
+        return False
+    return isinstance(meta, dict) and isinstance(meta.get("cron_dispatch"), dict)
+
+
 class MonitorSyncClient:
     """HTTP client for syncing cron data to Monitor service.
 
@@ -51,18 +72,32 @@ class MonitorSyncClient:
     Failures are logged but do not raise exceptions.
     """
 
-    def __init__(self, base_url: Optional[str] = None) -> None:
+    def __init__(
+        self,
+        base_url: Optional[str] = None,
+        *,
+        scheduler_base_url: Optional[str] = None,
+    ) -> None:
         """Initialize sync client.
 
         Args:
             base_url: Monitor API base URL. If None, uses get_monitor_api_url().
         """
         self._base_url = get_monitor_api_url() if base_url is None else base_url
+        self._scheduler_base_url = (
+            get_scheduler_api_url()
+            if scheduler_base_url is None
+            else scheduler_base_url
+        )
         self._client: Optional[httpx.AsyncClient] = None
+        self._scheduler_client: Optional[httpx.AsyncClient] = None
         self._enabled = bool(self._base_url)
+        self._scheduler_enabled = bool(self._scheduler_base_url)
 
         if not self._enabled:
             logger.info("Monitor sync disabled: no API URL configured")
+        if not self._scheduler_enabled:
+            logger.info("Scheduler sync disabled: no API URL configured")
 
     async def _get_client(self) -> httpx.AsyncClient:
         """Get or create HTTP client.
@@ -77,11 +112,23 @@ class MonitorSyncClient:
             )
         return self._client
 
+    async def _get_scheduler_client(self) -> httpx.AsyncClient:
+        """Get or create Scheduler HTTP client."""
+        if self._scheduler_client is None:
+            self._scheduler_client = httpx.AsyncClient(
+                base_url=self._scheduler_base_url,
+                timeout=5.0,
+            )
+        return self._scheduler_client
+
     async def close(self) -> None:
         """Close HTTP client."""
         if self._client is not None:
             await self._client.aclose()
             self._client = None
+        if self._scheduler_client is not None:
+            await self._scheduler_client.aclose()
+            self._scheduler_client = None
 
     def schedule_swe_cron_warmup(
         self,
@@ -141,7 +188,12 @@ class MonitorSyncClient:
             # No event loop running - this shouldn't happen in normal async operation
             logger.warning("Cannot schedule monitor sync: no event loop")
 
-    async def sync_job(self, job: CronJobSpec) -> None:
+    async def sync_job(
+        self,
+        job: CronJobSpec,
+        *,
+        agent_id: str | None = None,
+    ) -> None:
         """Sync a cron job definition to Monitor.
 
         This is called after creating or updating a job in SWE.
@@ -152,7 +204,7 @@ class MonitorSyncClient:
         if not self._enabled:
             return
 
-        sync_data = self._build_job_sync_data(job)
+        sync_data = self._build_job_sync_data(job, agent_id=agent_id)
 
         # Fire and forget
         self._sync_fire_and_forget(self._do_sync_job(sync_data))
@@ -247,6 +299,8 @@ class MonitorSyncClient:
     def _extract_meta_fields(
         self,
         spec_dict: Dict[str, Any],
+        *,
+        agent_id: str | None = None,
     ) -> Dict[str, Any]:
         """Extract meta-related fields.
 
@@ -256,7 +310,11 @@ class MonitorSyncClient:
         Returns:
             Dict with meta fields and computed status
         """
-        meta = spec_dict.get("meta", {})
+        meta = dict(spec_dict.get("meta", {}) or {})
+        if spec_dict.get("model_slot") and "model_slot" not in meta:
+            meta["model_slot"] = spec_dict.get("model_slot")
+        if agent_id:
+            meta["agent_id"] = agent_id
         pause_reason = meta.get("pause_reason") or ""
         subscription_key = meta.get("subscription_key") or ""
         job_origin = (
@@ -288,7 +346,12 @@ class MonitorSyncClient:
         request = spec_dict.get("request", {})
         return json.dumps(request, ensure_ascii=False) if request else ""
 
-    def _build_job_sync_data(self, job: CronJobSpec) -> Dict[str, Any]:
+    def _build_job_sync_data(
+        self,
+        job: CronJobSpec,
+        *,
+        agent_id: str | None = None,
+    ) -> Dict[str, Any]:
         """Build sync data dict from CronJobSpec.
 
         Args:
@@ -318,7 +381,7 @@ class MonitorSyncClient:
             **self._extract_schedule_fields(spec_dict),
             **self._extract_dispatch_fields(spec_dict),
             **self._extract_runtime_fields(spec_dict),
-            **self._extract_meta_fields(spec_dict),
+            **self._extract_meta_fields(spec_dict, agent_id=agent_id),
         }
 
     async def _do_sync_job(self, sync_data: Dict[str, Any]) -> None:
@@ -457,9 +520,6 @@ class MonitorSyncClient:
             scheduled_time: Scheduled execution time
             meta: 执行模型等扩展元数据
         """
-        if not self._enabled:
-            return
-
         exec_data = self._build_execution_sync_data(
             job=job,
             status=status,
@@ -479,6 +539,13 @@ class MonitorSyncClient:
             notification_timezone=notification_timezone,
             meta=meta,
         )
+
+        if _has_dispatch_execution_meta(exec_data):
+            await self._record_dispatch_execution_with_retry(exec_data)
+            return
+
+        if not self._enabled:
+            return
 
         # Fire and forget
         self._sync_fire_and_forget(self._do_record_execution(exec_data))
@@ -536,10 +603,13 @@ class MonitorSyncClient:
         if needs_notification:
             notification_due_time = notification_due_at or end_time or actual_time
 
+        source_id = getattr(job, "source_id", "")
+        source_id = source_id if isinstance(source_id, str) else ""
         return {
             "job_id": job.id,
             "job_name": job.name,
             "tenant_id": job.tenant_id or "",
+            "source_id": source_id,
             "scheduled_time": self._format_optional_time(scheduled_time),
             "actual_time": self._format_actual_time(actual_time),
             "end_time": self._format_optional_time(end_time),
@@ -593,7 +663,67 @@ class MonitorSyncClient:
         beijing_time = time.astimezone(_BEIJING_TZ)
         return beijing_time.isoformat()
 
-    async def _do_record_execution(self, exec_data: Dict[str, Any]) -> None:
+    async def _record_dispatch_execution_with_retry(
+        self,
+        exec_data: Dict[str, Any],
+    ) -> None:
+        """Record dispatch-managed execution with bounded retry."""
+        last_error: Exception | None = None
+        for attempt in range(1, 4):
+            try:
+                await self._do_record_scheduler_execution(
+                    exec_data,
+                    raise_on_failure=True,
+                )
+                return
+            except Exception as exc:  # pylint: disable=broad-except
+                last_error = exc
+                if attempt >= 3:
+                    break
+                await asyncio.sleep(0.2 * attempt)
+        raise RuntimeError(
+            "failed to record dispatch-managed execution to scheduler",
+        ) from last_error
+
+    async def _do_record_scheduler_execution(
+        self,
+        exec_data: Dict[str, Any],
+        *,
+        raise_on_failure: bool = False,
+    ) -> None:
+        """Send dispatch-managed execution feedback to Scheduler."""
+        if not self._scheduler_enabled:
+            raise RuntimeError("scheduler execution sync is disabled")
+        client = await self._get_scheduler_client()
+        response = await client.post(
+            "/scheduler/cron/execution",
+            json=exec_data,
+        )
+        if response.status_code == 200:
+            logger.debug(
+                "Recorded dispatch execution to scheduler: job_id=%s status=%s",
+                exec_data.get("job_id"),
+                exec_data.get("status"),
+            )
+            return
+        logger.warning(
+            "Failed to record dispatch execution to scheduler: job_id=%s status=%d",
+            exec_data.get("job_id"),
+            response.status_code,
+        )
+        if raise_on_failure:
+            raise RuntimeError(
+                "scheduler execution sync failed: "
+                f"job_id={exec_data.get('job_id')} "
+                f"status={response.status_code}",
+            )
+
+    async def _do_record_execution(
+        self,
+        exec_data: Dict[str, Any],
+        *,
+        raise_on_failure: bool = False,
+    ) -> None:
         """Actually perform the record execution HTTP call.
 
         Args:
@@ -614,6 +744,12 @@ class MonitorSyncClient:
                 exec_data.get("job_id"),
                 response.status_code,
             )
+            if raise_on_failure:
+                raise RuntimeError(
+                    "monitor execution sync failed: "
+                    f"job_id={exec_data.get('job_id')} "
+                    f"status={response.status_code}",
+                )
 
     async def claim_due_notifications(
         self,

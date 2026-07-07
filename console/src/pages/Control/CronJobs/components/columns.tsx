@@ -24,6 +24,7 @@ export interface BroadcastParentInfo {
 
 interface ColumnHandlers {
   onToggleEnabled: (job: CronJob) => void;
+  onToggleBatchDispatch: (job: CronJob) => void;
   onExecuteNow: (job: CronJob) => void;
   onBroadcast: (job: CronJob) => void;
   onManageChildren: (job: CronJob) => void;
@@ -421,6 +422,8 @@ export const createColumns = (
       fixed: "right",
       render: (_: unknown, record: CronJob) => {
         const broadcastChild = isBroadcastChildJob(record);
+        const batchDispatchEnabled =
+          record.meta?.broadcast_dispatch_intents_enabled === true;
         const menuItems: MenuProps["items"] = [
           {
             key: "broadcast",
@@ -441,6 +444,20 @@ export const createColumns = (
             onClick: () => {
               if (!broadcastChild) {
                 handlers.onManageChildren(record);
+              }
+            },
+          },
+          {
+            key: "batch_dispatch",
+            label: broadcastChild
+              ? "批调度（子任务不支持）"
+              : batchDispatchEnabled
+                ? "关闭批调度"
+                : "启动批调度",
+            disabled: broadcastChild,
+            onClick: () => {
+              if (!broadcastChild) {
+                handlers.onToggleBatchDispatch(record);
               }
             },
           },

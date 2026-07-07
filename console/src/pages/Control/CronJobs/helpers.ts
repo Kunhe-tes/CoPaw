@@ -68,8 +68,12 @@ export function buildCronJobFormValues(
   const notificationDelay = getNotificationDelayFormValue(
     job.meta?.notification_delay_minutes,
   );
+  const meta = {
+    ...(job.meta || {}),
+  };
   const formValues: CronJobFormValues = {
     ...job,
+    meta,
     request: {
       ...job.request,
       input: job.request?.input
@@ -132,6 +136,17 @@ export function buildCronJobSubmitPayload(
     notificationDelayValue,
     notificationDelayUnit || "minutes",
   );
+  const meta = {
+    ...(values.meta || {}),
+    notification_delay_minutes: notificationDelayMinutes,
+  };
+  if (meta.broadcast_dispatch_intents_enabled !== true) {
+    delete meta.broadcast_dispatch_intents_enabled;
+  }
+  delete meta.dispatch_intents_enabled;
+  if (meta.broadcast_source_job_id) {
+    delete meta.broadcast_dispatch_intents_enabled;
+  }
   let processedValues: Record<string, any> = {
     ...rawValues,
     schedule: {
@@ -139,10 +154,7 @@ export function buildCronJobSubmitPayload(
       cron: cronExpression,
     },
     skill_ids: normalizedSkillIds,
-    meta: {
-      ...(values.meta || {}),
-      notification_delay_minutes: notificationDelayMinutes,
-    },
+    meta,
     model_slot:
       values.task_type === "agent"
         ? parseExecutionModelKey(executionModelKey)

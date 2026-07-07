@@ -78,6 +78,18 @@ describe("CronJobs helpers", () => {
     expect(result.notificationDelayUnit).toBe("hours");
   });
 
+  it("does not hydrate legacy dispatch intent meta into the broadcast switch", () => {
+    const result = buildCronJobFormValues(
+      buildCronJob({
+        meta: {
+          dispatch_intents_enabled: true,
+        },
+      }),
+    );
+
+    expect(result.meta?.broadcast_dispatch_intents_enabled).toBeUndefined();
+  });
+
   it("builds submit payload with explicit model_slot for agent jobs", () => {
     const result = buildCronJobSubmitPayload({
       ...buildCronJob(),
@@ -99,6 +111,71 @@ describe("CronJobs helpers", () => {
     });
     expect(result.meta?.notification_delay_minutes).toBe(120);
     expect(result.request?.input).toEqual([{ role: "user", content: [] }]);
+  });
+
+  it("persists the broadcast dispatch intent switch only when enabled", () => {
+    const result = buildCronJobSubmitPayload({
+      ...buildCronJob({
+        meta: {
+          existing_meta: "kept",
+          broadcast_dispatch_intents_enabled: true,
+        },
+      }),
+    });
+
+    expect(result.meta).toMatchObject({
+      existing_meta: "kept",
+      broadcast_dispatch_intents_enabled: true,
+      notification_delay_minutes: 0,
+    });
+  });
+
+  it("removes disabled broadcast dispatch intent flag on submit", () => {
+    const result = buildCronJobSubmitPayload({
+      ...buildCronJob({
+        meta: {
+          existing_meta: "kept",
+          broadcast_dispatch_intents_enabled: false,
+        },
+      }),
+    });
+
+    expect(result.meta?.existing_meta).toBe("kept");
+    expect(result.meta).not.toHaveProperty(
+      "broadcast_dispatch_intents_enabled",
+    );
+  });
+
+  it("removes legacy dispatch intent flag on submit", () => {
+    const result = buildCronJobSubmitPayload({
+      ...buildCronJob({
+        meta: {
+          dispatch_intents_enabled: true,
+          broadcast_dispatch_intents_enabled: false,
+        },
+      }),
+    });
+
+    expect(result.meta).not.toHaveProperty("dispatch_intents_enabled");
+    expect(result.meta).not.toHaveProperty(
+      "broadcast_dispatch_intents_enabled",
+    );
+  });
+
+  it("does not persist hidden broadcast dispatch switch on child jobs", () => {
+    const result = buildCronJobSubmitPayload({
+      ...buildCronJob({
+        meta: {
+          broadcast_source_job_id: "parent-job",
+          broadcast_dispatch_intents_enabled: true,
+        },
+      }),
+    });
+
+    expect(result.meta?.broadcast_source_job_id).toBe("parent-job");
+    expect(result.meta).not.toHaveProperty(
+      "broadcast_dispatch_intents_enabled",
+    );
   });
 
   it("normalizes manually entered skill ids before submit", () => {

@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import os
 import uuid
 from dataclasses import dataclass
@@ -18,7 +19,12 @@ from ...config.context import (
     resolve_scope_preferred_tenant_id,
     resolve_storage_tenant_id,
 )
-from ...config.utils import list_logical_tenant_ids
+from ...config.utils import (
+    get_tenant_storage_config_path,
+    list_all_tenant_ids,
+    list_logical_tenant_ids,
+    load_config,
+)
 from ...providers.provider_manager import ProviderManager
 from ..b3_headers import build_b3_dispatch_meta
 from ..identity_resolver import resolve_user_identity
@@ -43,10 +49,26 @@ from .manager import CronManager
 from .models import CronJobListItem, CronJobSpec, CronJobView
 
 router = APIRouter(prefix="/cron", tags=["cron"])
+logger = logging.getLogger(__name__)
 
 BROADCAST_MODEL_SLOT_WARNING = (
     "model_slot not copied: provider/model unavailable in target tenant"
 )
+BROADCAST_DISPATCH_INTENTS_ENABLED_META_KEY = (
+    "broadcast_dispatch_intents_enabled"
+)
+STALE_DISPATCH_INTENTS_ENABLED_META_KEY = "dispatch_intents_enabled"
+BROADCAST_SOURCE_JOB_ID_META_KEY = "broadcast_source_job_id"
+BATCH_DISPATCH_EXTERNAL_JOB_ID_META_KEY = "batch_dispatch_external_job_id"
+BATCH_DISPATCH_OFFSET_WINDOW_HOURS_META_KEY = (
+    "batch_dispatch_offset_window_hours"
+)
+BATCH_DISPATCH_OFFSET_MINUTES_META_KEY = "batch_dispatch_offset_minutes"
+BATCH_DISPATCH_CRON_META_KEY = "batch_dispatch_cron"
+BATCH_DISPATCH_CRON_WARNING_META_KEY = "batch_dispatch_cron_warning"
+BATCH_DISPATCH_PARENT_CRON_META_KEY = "batch_dispatch_parent_cron"
+DISPATCH_INTENTS_ENABLED_ENV = "SWE_CRON_DISPATCH_INTENTS_ENABLED"
+_TRUE_ENV_VALUES = {"1", "true", "yes", "on"}
 BROADCAST_CRON_FALLBACK_WARNING = (
     "cron offset not applied: unsupported cron, using original schedule"
 )
@@ -69,6 +91,16 @@ PRESERVED_CHILD_META_KEYS = (
     "pause_reason",
     "auto_paused_at",
     "unread_count_at_pause",
+    "external_job_id",
+)
+BATCH_DISPATCH_META_KEYS = (
+    BROADCAST_DISPATCH_INTENTS_ENABLED_META_KEY,
+    BATCH_DISPATCH_EXTERNAL_JOB_ID_META_KEY,
+    BATCH_DISPATCH_OFFSET_WINDOW_HOURS_META_KEY,
+    BATCH_DISPATCH_OFFSET_MINUTES_META_KEY,
+    BATCH_DISPATCH_CRON_META_KEY,
+    BATCH_DISPATCH_CRON_WARNING_META_KEY,
+    BATCH_DISPATCH_PARENT_CRON_META_KEY,
 )
 
 
@@ -78,6 +110,37 @@ def _positive_int_or_default(value: str | None, default: int) -> int:
     except ValueError:
         return default
     return parsed if parsed > 0 else default
+
+
+def _broadcast_dispatch_intents_enabled(job: Any | None) -> bool:
+    meta = getattr(job, "meta", {}) or {}
+    if not isinstance(meta, dict):
+        return False
+    return bool(meta.get(BROADCAST_DISPATCH_INTENTS_ENABLED_META_KEY))
+
+
+def _is_batch_dispatch_managed_broadcast_child(job: Any | None) -> bool:
+    if not _dispatch_intents_runtime_enabled():
+        return False
+    meta = getattr(job, "meta", {}) or {}
+    if not isinstance(meta, dict):
+        return False
+    return bool(
+        meta.get(BROADCAST_SOURCE_JOB_ID_META_KEY)
+        and _broadcast_dispatch_intents_enabled(job)
+    )
+
+
+def _is_broadcast_child(job: Any | None) -> bool:
+    meta = getattr(job, "meta", {}) or {}
+    if not isinstance(meta, dict):
+        return False
+    return bool(meta.get(BROADCAST_SOURCE_JOB_ID_META_KEY))
+
+
+def _dispatch_intents_runtime_enabled() -> bool:
+    raw_value = os.environ.get(DISPATCH_INTENTS_ENABLED_ENV, "")
+    return raw_value.strip().lower() in _TRUE_ENV_VALUES
 
 
 def _get_cron_broadcast_concurrency() -> int:
@@ -101,6 +164,14 @@ class CronBroadcastRequest(BaseModel):
     target_tenant_ids: list[str] = Field(default_factory=list)
     targets: list[CronBroadcastTarget] = Field(default_factory=list)
     enable_offset: bool = True
+    offset_window_hours: int = Field(
+        default=DEFAULT_BROADCAST_OFFSET_WINDOW_HOURS,
+        ge=MIN_BROADCAST_OFFSET_WINDOW_HOURS,
+        le=MAX_BROADCAST_OFFSET_WINDOW_HOURS,
+    )
+
+
+class CronBatchDispatchToggleRequest(BaseModel):
     offset_window_hours: int = Field(
         default=DEFAULT_BROADCAST_OFFSET_WINDOW_HOURS,
         ge=MIN_BROADCAST_OFFSET_WINDOW_HOURS,
@@ -203,6 +274,7 @@ class _BroadcastContext:
     source_id: str | None
     timezone_name: str
     target_identity_by_tenant: dict[str, dict[str, str | None]]
+    enable_batch_dispatch: bool = False
 
 
 @dataclass(frozen=True)
@@ -288,6 +360,29 @@ def _inject_creator_user(
     )
     if creator_user_id:
         meta["creator_user_id"] = creator_user_id
+    return spec.model_copy(update={"meta": meta})
+
+
+def _preserve_batch_dispatch_meta_on_save(
+    spec: CronJobSpec,
+    existing: CronJobSpec | None,
+) -> CronJobSpec:
+    meta = dict(spec.meta or {})
+    existing_meta = dict(existing.meta or {}) if existing is not None else {}
+    for key in BATCH_DISPATCH_META_KEYS:
+        meta.pop(key, None)
+
+    existing_batch_ext_id = existing_meta.get(
+        BATCH_DISPATCH_EXTERNAL_JOB_ID_META_KEY,
+    )
+    if existing_batch_ext_id:
+        meta[BATCH_DISPATCH_EXTERNAL_JOB_ID_META_KEY] = existing_batch_ext_id
+
+    if existing_meta.get(BROADCAST_DISPATCH_INTENTS_ENABLED_META_KEY):
+        for key in BATCH_DISPATCH_META_KEYS:
+            if key in existing_meta:
+                meta[key] = existing_meta[key]
+
     return spec.model_copy(update={"meta": meta})
 
 
@@ -440,6 +535,409 @@ def _get_broadcast_children_tasks(
         tasks = {}
         request.app.state.cron_broadcast_children_tasks = tasks
     return tasks
+
+
+def _get_dispatch_broadcast_children_tasks(app: Any) -> dict[str, asyncio.Task]:
+    tasks = getattr(
+        app.state,
+        "cron_dispatch_broadcast_children_tasks",
+        None,
+    )
+    if tasks is None:
+        tasks = {}
+        app.state.cron_dispatch_broadcast_children_tasks = tasks
+    return tasks
+
+
+def _dispatch_broadcast_children_task_key(
+    *,
+    agent_id: str,
+    source_id: str | None,
+    tenant_id: str | None,
+    job_id: str,
+) -> str:
+    return "|".join(
+        [
+            agent_id or "default",
+            source_id or "",
+            tenant_id or "",
+            job_id,
+        ],
+    )
+
+
+def _dispatch_broadcast_children_snapshot_parts(
+    *,
+    agent_id: str,
+    source_id: str | None,
+    source_job: CronJobSpec,
+) -> dict[str, str]:
+    return {
+        "agent_id": agent_id or "default",
+        "source_id": source_id or source_job.source_id or "",
+        "tenant_id": source_job.tenant_id or source_job.scope_id or "",
+        "job_id": source_job.id,
+    }
+
+
+def _should_process_dispatch_broadcast_children(
+    source_job: CronJobSpec,
+    *,
+    existing: CronJobSpec | None,
+) -> bool:
+    if not _dispatch_intents_runtime_enabled():
+        return False
+    if not _broadcast_dispatch_intents_enabled(source_job):
+        return False
+    if _is_batch_dispatch_managed_broadcast_child(source_job):
+        return False
+    return existing is None or not _broadcast_dispatch_intents_enabled(existing)
+
+
+def _should_rollback_dispatch_broadcast_children(
+    source_job: CronJobSpec,
+    *,
+    existing: CronJobSpec | None,
+) -> bool:
+    if not _dispatch_intents_runtime_enabled():
+        return False
+    if existing is None:
+        return False
+    if _is_batch_dispatch_managed_broadcast_child(source_job):
+        return False
+    return (
+        _broadcast_dispatch_intents_enabled(existing)
+        and not _broadcast_dispatch_intents_enabled(source_job)
+    )
+
+
+async def _schedule_dispatch_broadcast_children_processing_after_save(
+    request: Request,
+    source_job: CronJobSpec,
+    *,
+    existing: CronJobSpec | None,
+    reason: str,
+) -> None:
+    if _should_process_dispatch_broadcast_children(
+        source_job,
+        existing=existing,
+    ):
+        _schedule_dispatch_broadcast_children_processing(
+            request.app,
+            source_job,
+            agent_id=_request_agent_id(request),
+            source_id=_request_source_id(request) or source_job.source_id,
+            reason=reason,
+            enable=True,
+        )
+        return
+    if _should_rollback_dispatch_broadcast_children(
+        source_job,
+        existing=existing,
+    ):
+        _schedule_dispatch_broadcast_children_processing(
+            request.app,
+            source_job,
+            agent_id=_request_agent_id(request),
+            source_id=_request_source_id(request) or source_job.source_id,
+            reason="rollback_batch_parent",
+            enable=False,
+        )
+
+
+def _schedule_dispatch_broadcast_children_processing(
+    app: Any,
+    source_job: CronJobSpec,
+    *,
+    agent_id: str,
+    source_id: str | None,
+    reason: str,
+    enable: bool = True,
+) -> bool:
+    tasks = _get_dispatch_broadcast_children_tasks(app)
+    key = _dispatch_broadcast_children_task_key(
+        agent_id=agent_id,
+        source_id=source_id or source_job.source_id,
+        tenant_id=source_job.tenant_id or source_job.scope_id,
+        job_id=source_job.id,
+    )
+    current = tasks.get(key)
+    if current is not None and not current.done():
+        return False
+    task = asyncio.create_task(
+        _process_dispatch_broadcast_children(
+            app,
+            source_job,
+            agent_id=agent_id,
+            source_id=source_id or source_job.source_id,
+            reason=reason,
+            enable=enable,
+        ),
+        name=f"cron-dispatch-broadcast-children-{source_job.id}",
+    )
+    tasks[key] = task
+    task.add_done_callback(lambda _task: tasks.pop(key, None))
+    return True
+
+
+async def _process_dispatch_broadcast_children(
+    app: Any,
+    source_job: CronJobSpec,
+    *,
+    agent_id: str,
+    source_id: str | None,
+    reason: str,
+    enable: bool = True,
+) -> None:
+    del reason
+    resolved_source_id = source_id or source_job.source_id
+    parts = _dispatch_broadcast_children_snapshot_parts(
+        agent_id=agent_id,
+        source_id=resolved_source_id,
+        source_job=source_job,
+    )
+    store = getattr(app.state, "cron_broadcast_children_store", None)
+    try:
+        tenant_ids = await list_logical_tenant_ids(
+            resolved_source_id,
+            source_filter=True,
+        )
+    except Exception as exc:  # pylint: disable=broad-except
+        logger.warning(
+            "Failed to list tenants for dispatch broadcast children: job=%s",
+            source_job.id,
+            exc_info=True,
+        )
+        if store is not None:
+            await store.record_failed(
+                **parts,
+                tenant_count=0,
+                failure_summary=str(exc),
+            )
+        return
+    if store is not None:
+        await store.mark_running(
+            **parts,
+            tenant_count=len(tenant_ids),
+        )
+    context = _BroadcastContext(
+        source_job=source_job,
+        offsets=[],
+        multi_agent_manager=getattr(app.state, "multi_agent_manager", None),
+        tenant_workspace_pool=getattr(app.state, "tenant_workspace_pool", None),
+        agent_id=agent_id or "default",
+        source_id=resolved_source_id,
+        timezone_name=source_job.schedule.timezone or "UTC",
+        target_identity_by_tenant={},
+    )
+    try:
+        items, failed_tenants = await _process_dispatch_broadcast_children_for_tenants(
+            context,
+            tenant_ids,
+            enable=enable,
+        )
+        if failed_tenants:
+            if store is not None:
+                await store.record_failed(
+                    **parts,
+                    tenant_count=len(tenant_ids),
+                    failure_summary=(
+                        "some broadcast children failed to process"
+                    ),
+                )
+            return
+        if store is not None:
+            await store.record_completed(
+                **parts,
+                items=[item.model_dump(mode="json") for item in items],
+                tenant_count=len(tenant_ids),
+                failed_tenants=0,
+                failure_summary=None,
+            )
+    except Exception as exc:  # pylint: disable=broad-except
+        logger.warning(
+            "Failed to process dispatch broadcast children: job=%s",
+            source_job.id,
+            exc_info=True,
+        )
+        if store is not None:
+            await store.record_failed(
+                **parts,
+                tenant_count=len(tenant_ids),
+                failure_summary=str(exc),
+            )
+
+
+async def _process_dispatch_broadcast_children_for_tenant(
+    context: _BroadcastContext,
+    tenant_id: str,
+    *,
+    enable: bool,
+) -> tuple[list[CronBroadcastChildItem], int]:
+    try:
+        target_cron_manager, _ = await _get_target_cron_manager(
+            context,
+            tenant_id,
+            bootstrap=False,
+        )
+    except Exception:
+        logger.warning(
+            "Failed to resolve broadcast child cron manager: parent=%s tenant=%s",
+            context.source_job.id,
+            tenant_id,
+            exc_info=True,
+        )
+        return [], 1
+
+    items: list[CronBroadcastChildItem] = []
+    failed = 0
+    try:
+        jobs = await target_cron_manager.list_jobs()
+    except Exception:
+        logger.warning(
+            "Failed to list broadcast children: parent=%s tenant=%s",
+            context.source_job.id,
+            tenant_id,
+            exc_info=True,
+        )
+        return [], 1
+
+    for job in jobs:
+        if not _is_broadcast_child_of(job, context.source_job.id):
+            continue
+        try:
+            meta = dict(job.meta or {})
+            if enable:
+                meta[BROADCAST_DISPATCH_INTENTS_ENABLED_META_KEY] = True
+            else:
+                meta.pop(BROADCAST_DISPATCH_INTENTS_ENABLED_META_KEY, None)
+                meta.pop(STALE_DISPATCH_INTENTS_ENABLED_META_KEY, None)
+            updated = job.model_copy(update={"meta": meta})
+            await target_cron_manager.create_or_replace_job(updated)
+            saved = await target_cron_manager.get_job(updated.id)
+            current = saved or updated
+            items.append(
+                _build_broadcast_child_item(
+                    tenant_id=tenant_id,
+                    job=current,
+                    state=target_cron_manager.get_state(current.id),
+                ),
+            )
+        except Exception:
+            failed += 1
+            logger.warning(
+                "Failed to process batch dispatch broadcast child: parent=%s child=%s tenant=%s",
+                context.source_job.id,
+                getattr(job, "id", ""),
+                tenant_id,
+                exc_info=True,
+            )
+    return items, failed
+
+
+async def _process_dispatch_broadcast_children_for_tenants(
+    context: _BroadcastContext,
+    tenant_ids: list[str],
+    *,
+    enable: bool,
+) -> tuple[list[CronBroadcastChildItem], int]:
+    semaphore = asyncio.Semaphore(_get_cron_broadcast_concurrency())
+
+    async def _run(tenant_id: str) -> tuple[list[CronBroadcastChildItem], int]:
+        async with semaphore:
+            return await _process_dispatch_broadcast_children_for_tenant(
+                context,
+                tenant_id,
+                enable=enable,
+            )
+
+    batches = await asyncio.gather(*[_run(tenant_id) for tenant_id in tenant_ids])
+    items: list[CronBroadcastChildItem] = []
+    failed = 0
+    for batch_items, batch_failed in batches:
+        items.extend(batch_items)
+        failed += batch_failed
+    return items, failed
+
+
+def _list_dispatch_startup_tenant_ids() -> list[str]:
+    tenant_ids = ["default", *list_all_tenant_ids()]
+    seen: set[str] = set()
+    result: list[str] = []
+    for tenant_id in tenant_ids:
+        if not tenant_id or tenant_id in seen:
+            continue
+        if tenant_id != "default" and tenant_id.startswith("default_"):
+            continue
+        seen.add(tenant_id)
+        result.append(tenant_id)
+    return result
+
+
+def _configured_agent_ids_for_tenant(tenant_id: str) -> list[str]:
+    try:
+        config = load_config(get_tenant_storage_config_path(tenant_id))
+    except Exception:
+        logger.warning(
+            "Failed to load tenant config for batch dispatch startup scan: tenant=%s",
+            tenant_id,
+            exc_info=True,
+        )
+        return ["default"]
+    return sorted(config.agents.profiles.keys()) or ["default"]
+
+
+def schedule_startup_dispatch_broadcast_children_processing(
+    app: Any,
+    multi_agent_manager: Any,
+) -> asyncio.Task:
+    task = asyncio.create_task(
+        _startup_dispatch_broadcast_children_processing(
+            app,
+            multi_agent_manager,
+        ),
+        name="cron-startup-dispatch-broadcast-children",
+    )
+    app.state.cron_startup_dispatch_broadcast_children_task = task
+    return task
+
+
+async def _startup_dispatch_broadcast_children_processing(
+    app: Any,
+    multi_agent_manager: Any,
+) -> None:
+    if not _dispatch_intents_runtime_enabled():
+        return
+    for tenant_id in _list_dispatch_startup_tenant_ids():
+        for agent_id in _configured_agent_ids_for_tenant(tenant_id):
+            try:
+                workspace = await multi_agent_manager.get_agent(
+                    agent_id,
+                    tenant_id=tenant_id,
+                )
+                cron_manager = getattr(workspace, "cron_manager", None)
+                if cron_manager is None:
+                    continue
+                for job in await cron_manager.list_jobs():
+                    if not _should_process_dispatch_broadcast_children(
+                        job,
+                        existing=None,
+                    ):
+                        continue
+                    _schedule_dispatch_broadcast_children_processing(
+                        app,
+                        job,
+                        agent_id=agent_id,
+                        source_id=job.source_id,
+                        reason="startup",
+                    )
+            except Exception:
+                logger.warning(
+                    "Failed startup batch dispatch child processing scan: tenant=%s agent=%s",
+                    tenant_id,
+                    agent_id,
+                    exc_info=True,
+                )
 
 
 def _get_broadcast_task_store(request: Request) -> CronBroadcastTaskStore:
@@ -718,6 +1216,7 @@ def _build_broadcast_job(
     offset_minutes: int,
     model_slot,
     model_slot_fallback_reason: str,
+    enable_batch_dispatch: bool = False,
     tenant_name: str | None = None,
     bbk_id: str | None = None,
 ) -> CronJobSpec:
@@ -730,6 +1229,8 @@ def _build_broadcast_job(
         "external_job_id",
         BROADCAST_ORIGINAL_MODEL_SLOT_META_KEY,
         BROADCAST_MODEL_SLOT_FALLBACK_REASON_META_KEY,
+        BROADCAST_DISPATCH_INTENTS_ENABLED_META_KEY,
+        STALE_DISPATCH_INTENTS_ENABLED_META_KEY,
     ):
         meta.pop(key, None)
     meta.update(
@@ -753,6 +1254,8 @@ def _build_broadcast_job(
         meta[BROADCAST_MODEL_SLOT_FALLBACK_REASON_META_KEY] = (
             model_slot_fallback_reason
         )
+    if enable_batch_dispatch:
+        meta[BROADCAST_DISPATCH_INTENTS_ENABLED_META_KEY] = True
 
     request_spec = source_job.request
     if request_spec is not None:
@@ -858,6 +1361,7 @@ def _build_broadcast_context(
     target_identity_by_tenant: dict[str, dict[str, str | None]],
     *,
     enable_offset: bool = True,
+    enable_batch_dispatch: bool = False,
     offset_window_hours: int = DEFAULT_BROADCAST_OFFSET_WINDOW_HOURS,
 ) -> _BroadcastContext:
     source_id = _request_source_id(request)
@@ -882,6 +1386,7 @@ def _build_broadcast_context(
         source_id=source_id,
         timezone_name=source_job.schedule.timezone or "UTC",
         target_identity_by_tenant=target_identity_by_tenant,
+        enable_batch_dispatch=enable_batch_dispatch,
     )
 
 
@@ -1033,6 +1538,7 @@ async def _create_broadcast_child_job(
         offset_minutes=schedule.offset_minutes,
         model_slot=model_slot,
         model_slot_fallback_reason=model_slot_fallback_reason,
+        enable_batch_dispatch=context.enable_batch_dispatch,
         tenant_name=target_tenant_name,
         bbk_id=target_bbk_id,
     )
@@ -1080,6 +1586,7 @@ async def _refresh_existing_broadcast_child_job(
         offset_minutes=schedule.offset_minutes,
         model_slot=model_slot,
         model_slot_fallback_reason=model_slot_fallback_reason,
+        enable_batch_dispatch=context.enable_batch_dispatch,
         tenant_name=existing_child_job.tenant_name,
         bbk_id=existing_child_job.bbk_id,
     )
@@ -1397,7 +1904,6 @@ async def broadcast_job(
             status_code=400,
             detail="No target tenant IDs provided",
         )
-
     normalized_tenants, target_identity_by_tenant = (
         _normalize_broadcast_targets(
             body,
@@ -1409,6 +1915,7 @@ async def broadcast_job(
         normalized_tenants,
         target_identity_by_tenant,
         enable_offset=body.enable_offset,
+        enable_batch_dispatch=_broadcast_dispatch_intents_enabled(source_job),
         offset_window_hours=body.offset_window_hours,
     )
     snapshot, reused = await _schedule_broadcast_task(
@@ -1583,6 +2090,86 @@ async def run_broadcast_children(
     return CronBroadcastChildrenBatchResponse(results=results)
 
 
+@router.post(
+    "/jobs/{job_id}/batch-dispatch/enable",
+    response_model=CronJobSpec,
+)
+async def enable_batch_dispatch(
+    request: Request,
+    job_id: str,
+    body: CronBatchDispatchToggleRequest | None = None,
+    mgr: CronManager = Depends(get_cron_manager),
+) -> CronJobSpec:
+    source_job = await _get_source_job_or_404(mgr, job_id)
+    if _is_broadcast_child(source_job):
+        raise HTTPException(
+            status_code=400,
+            detail="batch dispatch cannot be enabled from a broadcast child",
+        )
+    if not _dispatch_intents_runtime_enabled():
+        raise HTTPException(
+            status_code=400,
+            detail="batch dispatch runtime is disabled",
+        )
+    offset_window_hours = (
+        body.offset_window_hours
+        if body is not None
+        else DEFAULT_BROADCAST_OFFSET_WINDOW_HOURS
+    )
+    try:
+        updated = await mgr.enable_batch_dispatch_for_parent(
+            job_id,
+            offset_window_hours=offset_window_hours,
+        )
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail="job not found") from exc
+    except RuntimeError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    _schedule_dispatch_broadcast_children_processing(
+        request.app,
+        updated,
+        agent_id=_request_agent_id(request),
+        source_id=_request_source_id(request) or updated.source_id,
+        reason="enable_batch_dispatch",
+        enable=True,
+    )
+    return updated
+
+
+@router.post(
+    "/jobs/{job_id}/batch-dispatch/disable",
+    response_model=CronJobSpec,
+)
+async def disable_batch_dispatch(
+    request: Request,
+    job_id: str,
+    mgr: CronManager = Depends(get_cron_manager),
+) -> CronJobSpec:
+    source_job = await _get_source_job_or_404(mgr, job_id)
+    if _is_broadcast_child(source_job):
+        raise HTTPException(
+            status_code=400,
+            detail="batch dispatch cannot be disabled from a broadcast child",
+        )
+    try:
+        updated = await mgr.disable_batch_dispatch_for_parent(job_id)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail="job not found") from exc
+    except RuntimeError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    _schedule_dispatch_broadcast_children_processing(
+        request.app,
+        updated,
+        agent_id=_request_agent_id(request),
+        source_id=_request_source_id(request) or updated.source_id,
+        reason="disable_batch_dispatch",
+        enable=False,
+    )
+    return updated
+
+
 @router.get("/jobs/{job_id}", response_model=CronJobView)
 async def get_job(
     request: Request,
@@ -1612,10 +2199,12 @@ async def create_job(
     created = spec.model_copy(update={"id": job_id})
     created = _inject_request_tenant(created, request)
     created = _inject_creator_user(created, request)
+    created = _preserve_batch_dispatch_meta_on_save(created, existing=None)
     _validate_cron_job_model_slot(request, created)
     await mgr.create_or_replace_job(created)
     saved = await mgr.get_job(job_id)
-    return saved or created
+    result = saved or created
+    return result
 
 
 @router.put("/jobs/{job_id}", response_model=CronJobSpec)
@@ -1630,10 +2219,12 @@ async def replace_job(
     existing = await mgr.get_job(job_id)
     spec = _inject_request_tenant(spec, request)
     spec = _inject_creator_user(spec, request, existing=existing)
+    spec = _preserve_batch_dispatch_meta_on_save(spec, existing)
     _validate_cron_job_model_slot(request, spec)
     await mgr.create_or_replace_job(spec)
     saved = await mgr.get_job(job_id)
-    return saved or spec
+    result = saved or spec
+    return result
 
 
 @router.delete("/jobs/{job_id}")

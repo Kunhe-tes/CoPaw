@@ -1,0 +1,645 @@
+# -*- coding: utf-8 -*-
+"""Scheduler cron dispatch intent service tests."""
+
+import inspect
+import json
+from datetime import datetime
+
+import pytest
+from fastapi import HTTPException
+from unittest.mock import AsyncMock, MagicMock
+
+from scheduler.app.services.cron import dispatch_intent_service as service_module
+from scheduler.app.routers import cron as scheduler_cron
+from scheduler.app.services.cron.dispatch_intent_service import (
+    CronDispatchIntentService,
+    compute_batch_dispatch_order,
+)
+from scheduler.app.models.cron import ExecutionSyncRequest
+from scheduler.app.services.cron import execution_sync_service as sync_module
+from scheduler.app.services.cron.execution_sync_service import ExecutionSyncService
+
+
+def test_claim_due_intents_uses_skip_locked_and_stable_order() -> None:
+    """Claiming due dispatch intents must be atomic and stable."""
+    source = inspect.getsource(
+        CronDispatchIntentService._claim_due_intent_ids,
+    )
+
+    assert "FOR UPDATE SKIP LOCKED" in source
+    assert "ORDER BY due_at, dispatch_order, id" in source
+    assert "status = 'pending'" in source
+    assert "status IN ('claimed', 'acknowledged')" in source
+    assert "attempt_count < max_attempts" in source
+    assert "child_execution_missing_failed" in source
+
+
+def test_record_execution_uses_insert_cursor_lastrowid() -> None:
+    source = inspect.getsource(ExecutionSyncService.record_execution)
+
+    assert "lastrowid" in source
+    assert "LAST_INSERT_ID" not in source
+
+
+def test_record_execution_persists_dispatch_identity_columns() -> None:
+    source = inspect.getsource(ExecutionSyncService.record_execution)
+
+    assert "dispatch_intent_id" in source
+    assert "dispatch_batch_id" in source
+    assert "dispatch_attempt" in source
+
+
+def test_find_execution_by_dispatch_identity_uses_indexed_columns() -> None:
+    source = inspect.getsource(
+        ExecutionSyncService.find_execution_by_dispatch_identity,
+    )
+
+    assert "dispatch_intent_id = %s" in source
+    assert "dispatch_batch_id = %s" in source
+    assert "dispatch_attempt = %s" in source
+    assert "JSON_EXTRACT" not in source
+
+
+@pytest.mark.asyncio
+async def test_record_execution_writes_dispatch_identity_values(
+    monkeypatch,
+) -> None:
+    captured: dict[str, object] = {}
+
+    class _Cursor:
+        lastrowid = 42
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return False
+
+        async def execute(self, sql, params):
+            captured["sql"] = sql
+            captured["params"] = params
+
+    class _Connection:
+        def cursor(self):
+            return _Cursor()
+
+    class _Acquire:
+        async def __aenter__(self):
+            return _Connection()
+
+        async def __aexit__(self, *_args):
+            return False
+
+    class _Db:
+        def acquire(self):
+            return _Acquire()
+
+    monkeypatch.setattr(
+        sync_module,
+        "get_db_connection",
+        lambda: _Db(),
+    )
+
+    request = ExecutionSyncRequest(
+        job_id="child-1",
+        job_name="Child",
+        tenant_id="tenant-a",
+        actual_time=datetime(2026, 7, 1, 10, 0),
+        status="success",
+        meta=json.dumps(
+            {
+                "cron_dispatch": {
+                    "intent_id": 7,
+                    "batch_id": "batch-1",
+                    "dispatch_attempt": 2,
+                },
+            },
+        ),
+    )
+
+    execution_id = await ExecutionSyncService().record_execution(request)
+
+    assert execution_id == 42
+    assert "dispatch_intent_id" in str(captured["sql"])
+    assert "dispatch_batch_id" in str(captured["sql"])
+    assert "dispatch_attempt" in str(captured["sql"])
+    assert captured["params"][17:20] == (7, "batch-1", 2)
+
+
+@pytest.mark.asyncio
+async def test_find_execution_by_dispatch_identity_queries_indexed_columns(
+    monkeypatch,
+) -> None:
+    db = MagicMock()
+    db.fetch_one = AsyncMock(return_value={"id": "42"})
+    monkeypatch.setattr(
+        sync_module,
+        "get_db_connection",
+        lambda: db,
+    )
+
+    execution_id = await ExecutionSyncService().find_execution_by_dispatch_identity(
+        intent_id=7,
+        batch_id="batch-1",
+        dispatch_attempt=2,
+    )
+
+    sql, params = db.fetch_one.await_args.args
+    assert execution_id == 42
+    assert "JSON_EXTRACT" not in sql
+    assert "dispatch_intent_id = %s" in sql
+    assert params == (7, "batch-1", 2)
+
+
+def test_enqueue_child_intents_reads_viewer_heat_from_execution_reads() -> None:
+    """Child priority should be derived from existing read execution signals."""
+    source = inspect.getsource(
+        CronDispatchIntentService.enqueue_child_intents,
+    )
+
+    assert "swe_cron_executions" in source
+    assert "is_read = TRUE" in source
+    assert "read_at" in source
+    assert "broadcast_source_job_id" in source
+
+
+def test_batch_dispatch_order_has_no_waiting_aging() -> None:
+    """Waiting longer must not reshuffle an already ordered batch."""
+    rows = [
+        {
+            "job_id": "job-c",
+            "tenant_id": "tenant-c",
+            "viewer_heat_score": 1.0,
+        },
+        {
+            "job_id": "job-a",
+            "tenant_id": "tenant-a",
+            "viewer_heat_score": 4.0,
+        },
+        {
+            "job_id": "job-b",
+            "tenant_id": "tenant-b",
+            "viewer_heat_score": 4.0,
+        },
+    ]
+
+    ordered = compute_batch_dispatch_order(rows)
+
+    assert [item["job_id"] for item in ordered] == [
+        "job-a",
+        "job-b",
+        "job-c",
+    ]
+    assert [item["dispatch_order"] for item in ordered] == [0, 1, 2]
+
+
+def test_scheduler_router_exposes_dispatch_execution_endpoint() -> None:
+    """Dispatch intent feedback APIs belong to Scheduler."""
+    source = inspect.getsource(scheduler_cron)
+
+    assert '"/execution"' in source
+    assert "record_dispatch_execution" in source
+
+
+def test_enqueue_intents_preserves_handed_off_rows() -> None:
+    """Duplicate enqueue must not reset callback-dispatched rows to pending."""
+    parent_source = inspect.getsource(
+        CronDispatchIntentService.enqueue_parent_intent,
+    )
+    child_source = inspect.getsource(
+        CronDispatchIntentService.enqueue_child_intents,
+    )
+
+    expected = "status IN ('claimed', 'acknowledged', 'dispatched', 'completed')"
+    assert expected in parent_source
+    assert expected in child_source
+
+
+def test_batch_enqueue_preserves_terminal_intents() -> None:
+    """Duplicate parent callbacks must not reopen terminal intents."""
+    source = inspect.getsource(
+        CronDispatchIntentService.enqueue_batch_execution_intents,
+    )
+
+    assert (
+        "status IN ('claimed', 'acknowledged', 'dispatched', 'completed', "
+        "'failed', 'cancelled')"
+    ) in source
+    assert "(status = 'pending' AND attempt_count < max_attempts)" in (
+        inspect.getsource(CronDispatchIntentService._claim_due_intent_ids)
+    )
+
+
+@pytest.mark.asyncio
+async def test_enqueue_child_intents_uses_json_safe_default_payload(
+    monkeypatch,
+) -> None:
+    """Default child payload must not include datetime or Decimal values."""
+    db = MagicMock()
+    db.fetch_all = AsyncMock(
+        return_value=[{"job_id": "child-a", "read_count": 3}],
+    )
+    monkeypatch.setattr(
+        service_module,
+        "get_db_connection",
+        lambda: db,
+    )
+    captured_payloads: list[dict] = []
+
+    async def _fake_execute_write_return_last_id(_sql, params):
+        captured_payloads.append(json.loads(params[-1]))
+        return len(captured_payloads)
+
+    monkeypatch.setattr(
+        service_module,
+        "_execute_write_return_last_id",
+        _fake_execute_write_return_last_id,
+    )
+    service = CronDispatchIntentService()
+    service._record_event = AsyncMock()
+
+    intent_ids = await service.enqueue_child_intents(
+        parent_intent_id=1,
+        batch_id="batch-1",
+        parent_job_id="parent-job",
+        source_id="source-a",
+        child_jobs=[
+            {
+                "tenant_id": "tenant-a",
+                "job_id": "child-a",
+                "due_at": datetime(2026, 6, 30, 10, 0),
+            },
+        ],
+    )
+
+    assert intent_ids == [1]
+    assert captured_payloads == [
+        {
+            "tenant_id": "tenant-a",
+            "job_id": "child-a",
+            "source_id": "",
+            "agent_id": "default",
+        },
+    ]
+
+
+@pytest.mark.asyncio
+async def test_enqueue_child_intents_prefers_child_source_id(monkeypatch) -> None:
+    """Child intents must keep their own source id for runtime routing."""
+    db = MagicMock()
+    db.fetch_all = AsyncMock(return_value=[])
+    monkeypatch.setattr(
+        service_module,
+        "get_db_connection",
+        lambda: db,
+    )
+    captured_source_ids: list[str] = []
+
+    async def _fake_execute_write_return_last_id(_sql, params):
+        captured_source_ids.append(params[1])
+        return len(captured_source_ids)
+
+    monkeypatch.setattr(
+        service_module,
+        "_execute_write_return_last_id",
+        _fake_execute_write_return_last_id,
+    )
+    service = CronDispatchIntentService()
+    service._record_event = AsyncMock()
+
+    await service.enqueue_child_intents(
+        parent_intent_id=1,
+        batch_id="batch-1",
+        parent_job_id="parent-job",
+        source_id="parent-source",
+        child_jobs=[
+            {
+                "tenant_id": "tenant-a",
+                "job_id": "child-a",
+                "source_id": "child-source",
+            },
+        ],
+    )
+
+    assert captured_source_ids == ["child-source"]
+
+
+@pytest.mark.asyncio
+async def test_transition_conflict_does_not_record_event(monkeypatch) -> None:
+    """A stale worker must not emit success events after losing the lock."""
+    db = MagicMock()
+    db.fetch_one = AsyncMock(
+        return_value={
+            "batch_id": "batch-1",
+            "job_id": "job-1",
+            "tenant_id": "tenant-a",
+            "source_id": "source-a",
+        },
+    )
+    db.execute = AsyncMock(return_value=MagicMock(rowcount=0))
+    monkeypatch.setattr(
+        service_module,
+        "get_db_connection",
+        lambda: db,
+    )
+    service = CronDispatchIntentService()
+    service._record_event = AsyncMock()
+
+    await service.complete_intent(
+        intent_id=1,
+        worker_id="stale-worker",
+        completed_at=datetime(2026, 6, 30, 10, 0),
+    )
+
+    assert service._record_event.await_count == 0
+    sql, params = db.execute.await_args.args
+    assert "lock_owner = %s" in sql
+    assert "stale-worker" in params
+
+
+@pytest.mark.asyncio
+async def test_complete_from_execution_updates_matching_intent(monkeypatch) -> None:
+    """Execution feedback must complete only the matching dispatch intent."""
+    db = MagicMock()
+    db.fetch_one = AsyncMock(
+        return_value={
+            "batch_id": "batch-1",
+            "job_id": "child-1",
+            "tenant_id": "tenant-b",
+            "source_id": "source-a",
+            "attempt_count": 1,
+            "max_attempts": 3,
+            "current_status": "dispatched",
+        },
+    )
+    db.execute = AsyncMock(return_value=MagicMock(rowcount=1))
+    monkeypatch.setattr(
+        service_module,
+        "get_db_connection",
+        lambda: db,
+    )
+    service = CronDispatchIntentService()
+    service._record_event = AsyncMock()
+
+    updated = await service.complete_from_execution(
+        intent_id=7,
+        execution_id=42,
+        status="success",
+        completed_at=datetime(2026, 7, 1, 10, 0),
+        expected_batch_id="batch-1",
+        expected_job_id="child-1",
+        expected_tenant_id="tenant-b",
+        expected_source_id="source-a",
+        expected_attempt_count=1,
+    )
+
+    assert updated is True
+    db.execute.assert_awaited_once()
+    assert "AND attempt_count = %s" in db.execute.await_args.args[0]
+    assert db.execute.await_args.args[1][-1] == 1
+    service._record_event.assert_awaited_once()
+    assert service._record_event.await_args.kwargs["event_type"] == (
+        "child_execution_completed"
+    )
+
+
+@pytest.mark.asyncio
+async def test_complete_from_execution_rejects_mismatched_intent(
+    monkeypatch,
+) -> None:
+    """A stale or wrong intent id must not update another job's row."""
+    db = MagicMock()
+    db.fetch_one = AsyncMock(
+        return_value={
+            "batch_id": "batch-1",
+            "job_id": "child-1",
+            "tenant_id": "tenant-b",
+            "source_id": "source-a",
+            "attempt_count": 1,
+            "max_attempts": 3,
+            "current_status": "dispatched",
+        },
+    )
+    db.execute = AsyncMock()
+    monkeypatch.setattr(
+        service_module,
+        "get_db_connection",
+        lambda: db,
+    )
+    service = CronDispatchIntentService()
+    service._record_event = AsyncMock()
+
+    updated = await service.complete_from_execution(
+        intent_id=7,
+        execution_id=42,
+        status="success",
+        completed_at=datetime(2026, 7, 1, 10, 0),
+        expected_batch_id="batch-1",
+        expected_job_id="other-child",
+        expected_tenant_id="tenant-b",
+        expected_source_id="source-a",
+    )
+
+    assert updated is False
+    db.execute.assert_not_awaited()
+    service._record_event.assert_awaited_once()
+    assert service._record_event.await_args.kwargs["event_type"] == (
+        "execution_intent_mismatch"
+    )
+
+
+@pytest.mark.asyncio
+async def test_complete_from_execution_rejects_stale_attempt_feedback(
+    monkeypatch,
+) -> None:
+    """Late execution feedback from a stale attempt must not finish a retry."""
+    db = MagicMock()
+    db.fetch_one = AsyncMock(
+        return_value={
+            "batch_id": "batch-1",
+            "job_id": "child-1",
+            "tenant_id": "tenant-b",
+            "source_id": "source-a",
+            "attempt_count": 2,
+            "max_attempts": 3,
+            "current_status": "dispatched",
+        },
+    )
+    db.execute = AsyncMock()
+    monkeypatch.setattr(
+        service_module,
+        "get_db_connection",
+        lambda: db,
+    )
+    service = CronDispatchIntentService()
+    service._record_event = AsyncMock()
+
+    updated = await service.complete_from_execution(
+        intent_id=7,
+        execution_id=42,
+        status="success",
+        completed_at=datetime(2026, 7, 1, 10, 0),
+        expected_batch_id="batch-1",
+        expected_job_id="child-1",
+        expected_tenant_id="tenant-b",
+        expected_source_id="source-a",
+        expected_attempt_count=1,
+    )
+
+    assert updated is False
+    db.execute.assert_not_awaited()
+    service._record_event.assert_awaited_once()
+    assert service._record_event.await_args.kwargs["event_type"] == (
+        "execution_attempt_mismatch"
+    )
+
+
+@pytest.mark.asyncio
+async def test_sync_execution_with_dispatch_meta_is_durable() -> None:
+    """Scheduler dispatch execution sync should await DB write and intent update."""
+    sync_service = MagicMock()
+    sync_service.find_execution_by_dispatch_identity = AsyncMock(return_value=None)
+    sync_service.record_execution = AsyncMock(return_value=42)
+    scheduling_service = MagicMock()
+    scheduling_service.handle_execution_recorded = AsyncMock(return_value=True)
+    request = ExecutionSyncRequest(
+        job_id="child-1",
+        job_name="Child",
+        tenant_id="tenant-b",
+        source_id="source-a",
+        actual_time=datetime(2026, 7, 1, 10, 0),
+        status="success",
+        meta=json.dumps(
+            {
+                "cron_dispatch": {
+                    "intent_id": 7,
+                    "batch_id": "batch-1",
+                    "dispatch_attempt": 1,
+                },
+            },
+        ),
+    )
+
+    assert request.source_id == "source-a"
+
+    response = await scheduler_cron.record_dispatch_execution(
+        request,
+        sync_service=sync_service,
+        scheduling_service=scheduling_service,
+    )
+
+    assert response.recorded is True
+    assert response.execution_id == 42
+    sync_service.find_execution_by_dispatch_identity.assert_awaited_once_with(
+        intent_id=7,
+        batch_id="batch-1",
+        dispatch_attempt=1,
+    )
+    sync_service.record_execution.assert_awaited_once_with(request)
+    scheduling_service.handle_execution_recorded.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_sync_execution_without_dispatch_meta_is_ignored_not_400() -> None:
+    """Scheduler execution endpoint is open to non-dispatch calls but ignores them."""
+    sync_service = MagicMock()
+    sync_service.find_execution_by_dispatch_identity = AsyncMock()
+    sync_service.record_execution = AsyncMock()
+    scheduling_service = MagicMock()
+    scheduling_service.handle_execution_recorded = AsyncMock()
+    request = ExecutionSyncRequest(
+        job_id="child-1",
+        job_name="Child",
+        tenant_id="tenant-b",
+        source_id="source-a",
+        actual_time=datetime(2026, 7, 1, 10, 0),
+        status="success",
+        meta="",
+    )
+
+    response = await scheduler_cron.record_dispatch_execution(
+        request,
+        sync_service=sync_service,
+        scheduling_service=scheduling_service,
+    )
+
+    assert response.recorded is False
+    assert response.execution_id is None
+    sync_service.find_execution_by_dispatch_identity.assert_not_awaited()
+    sync_service.record_execution.assert_not_awaited()
+    scheduling_service.handle_execution_recorded.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_sync_execution_with_dispatch_meta_reuses_existing_execution(
+) -> None:
+    """Scheduler feedback retry must not duplicate execution rows."""
+    sync_service = MagicMock()
+    sync_service.find_execution_by_dispatch_identity = AsyncMock(return_value=42)
+    sync_service.record_execution = AsyncMock()
+    scheduling_service = MagicMock()
+    scheduling_service.handle_execution_recorded = AsyncMock(return_value=True)
+    request = ExecutionSyncRequest(
+        job_id="child-1",
+        job_name="Child",
+        tenant_id="tenant-b",
+        source_id="source-a",
+        actual_time=datetime(2026, 7, 1, 10, 0),
+        status="success",
+        meta=json.dumps(
+            {
+                "cron_dispatch": {
+                    "intent_id": 7,
+                    "batch_id": "batch-1",
+                    "dispatch_attempt": 1,
+                },
+            },
+        ),
+    )
+
+    response = await scheduler_cron.record_dispatch_execution(
+        request,
+        sync_service=sync_service,
+        scheduling_service=scheduling_service,
+    )
+
+    assert response.recorded is True
+    assert response.execution_id == 42
+    sync_service.record_execution.assert_not_awaited()
+    scheduling_service.handle_execution_recorded.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_dispatch_execution_sync_fails_when_intent_update_fails(
+) -> None:
+    """Dispatch-meta execution sync success requires the intent update too."""
+    sync_service = MagicMock()
+    sync_service.find_execution_by_dispatch_identity = AsyncMock(return_value=None)
+    sync_service.record_execution = AsyncMock(return_value=42)
+    scheduling_service = MagicMock()
+    scheduling_service.handle_execution_recorded = AsyncMock(return_value=False)
+    request = ExecutionSyncRequest(
+        job_id="child-1",
+        job_name="Child",
+        tenant_id="tenant-b",
+        source_id="source-a",
+        actual_time=datetime(2026, 7, 1, 10, 0),
+        status="success",
+        meta=json.dumps(
+            {
+                "cron_dispatch": {
+                    "intent_id": 7,
+                    "batch_id": "batch-1",
+                },
+            },
+        ),
+    )
+
+    with pytest.raises(HTTPException) as exc_info:
+        await scheduler_cron.record_dispatch_execution(
+            request,
+            sync_service=sync_service,
+            scheduling_service=scheduling_service,
+        )
+    assert exc_info.value.status_code == 500
+    assert "dispatch intent was not updated" in str(exc_info.value.detail)

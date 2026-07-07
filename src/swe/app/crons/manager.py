@@ -43,6 +43,12 @@ from .models import CronJobSpec, CronJobState, CronTaskView, JobsFile
 from .repo.base import BaseJobRepository
 from .scheduler_adapter import SchedulerAdapter, NoopSchedulerAdapter
 from .monitor_sync_client import get_monitor_sync_client, MonitorSyncClient
+from .broadcast import (
+    DEFAULT_BROADCAST_OFFSET_WINDOW_HOURS,
+    MAX_BROADCAST_OFFSET_WINDOW_HOURS,
+    MIN_BROADCAST_OFFSET_WINDOW_HOURS,
+    shift_cron_expression,
+)
 
 HEARTBEAT_JOB_ID = "_heartbeat"
 DREAM_JOB_ID = "_dream"
@@ -52,6 +58,25 @@ MANUAL_PAUSE_REASON = "manual"
 TASK_MESSAGES_STATE_KEY = "task_messages"
 _SYSTEM_JOB_IDS_FILE = "system_jobs.json"
 MAX_NOTIFICATION_DELAY_MINUTES = 7 * 24 * 60
+BROADCAST_SOURCE_JOB_ID_META_KEY = "broadcast_source_job_id"
+BROADCAST_DISPATCH_INTENTS_ENABLED_META_KEY = (
+    "broadcast_dispatch_intents_enabled"
+)
+BATCH_DISPATCH_EXTERNAL_JOB_ID_META_KEY = "batch_dispatch_external_job_id"
+BATCH_DISPATCH_OFFSET_WINDOW_HOURS_META_KEY = (
+    "batch_dispatch_offset_window_hours"
+)
+BATCH_DISPATCH_OFFSET_MINUTES_META_KEY = "batch_dispatch_offset_minutes"
+BATCH_DISPATCH_CRON_META_KEY = "batch_dispatch_cron"
+BATCH_DISPATCH_CRON_WARNING_META_KEY = "batch_dispatch_cron_warning"
+BATCH_DISPATCH_PARENT_CRON_META_KEY = "batch_dispatch_parent_cron"
+BATCH_DISPATCH_JOB_NAME_PREFIX = "[\u6279\u8c03\u5ea6]"
+BATCH_DISPATCH_CRON_FALLBACK_WARNING = (
+    "cron offset not applied: unsupported cron, using original schedule"
+)
+DISPATCH_INTENTS_ENABLED_ENV = "SWE_CRON_DISPATCH_INTENTS_ENABLED"
+SCHEDULER_API_URL_ENV = "SWE_SCHEDULER_API_URL"
+_TRUE_ENV_VALUES = {"1", "true", "yes", "on"}
 
 # 心跳 every 字段解析正则（如 "30m"、"6h"）
 _EVERY_PATTERN = re.compile(
@@ -72,6 +97,79 @@ def _notification_delay_minutes(job: CronJobSpec) -> int:
     if delay_minutes < 0:
         return 0
     return min(delay_minutes, MAX_NOTIFICATION_DELAY_MINUTES)
+
+
+def _dispatch_parent_scheduled_fire_at(
+    execution_meta: Optional[Dict[str, Any]],
+) -> datetime | None:
+    if not isinstance(execution_meta, dict):
+        return None
+    dispatch_meta = execution_meta.get("cron_dispatch")
+    if not isinstance(dispatch_meta, dict):
+        return None
+    value = dispatch_meta.get("parent_scheduled_fire_at")
+    if isinstance(value, datetime):
+        parsed = value
+    elif isinstance(value, str) and value.strip():
+        text = value.strip()
+        if text.endswith("Z"):
+            text = f"{text[:-1]}+00:00"
+        try:
+            parsed = datetime.fromisoformat(text)
+        except ValueError:
+            return None
+    else:
+        return None
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+def broadcast_dispatch_intents_enabled(job: Any | None) -> bool:
+    meta = getattr(job, "meta", {}) or {}
+    if not isinstance(meta, dict):
+        return False
+    return bool(meta.get(BROADCAST_DISPATCH_INTENTS_ENABLED_META_KEY))
+
+
+def dispatch_intents_runtime_enabled() -> bool:
+    raw_value = os.environ.get(DISPATCH_INTENTS_ENABLED_ENV, "")
+    return raw_value.strip().lower() in _TRUE_ENV_VALUES
+
+
+def is_batch_dispatch_managed_broadcast_child(job: Any | None) -> bool:
+    if not dispatch_intents_runtime_enabled():
+        return False
+    meta = getattr(job, "meta", {}) or {}
+    if not isinstance(meta, dict):
+        return False
+    return bool(
+        meta.get(BROADCAST_SOURCE_JOB_ID_META_KEY)
+        and broadcast_dispatch_intents_enabled(job)
+    )
+
+
+def is_batch_dispatch_parent(job: Any | None) -> bool:
+    if not dispatch_intents_runtime_enabled():
+        return False
+    meta = getattr(job, "meta", {}) or {}
+    if not isinstance(meta, dict):
+        return False
+    return bool(
+        broadcast_dispatch_intents_enabled(job)
+        and not meta.get(BROADCAST_SOURCE_JOB_ID_META_KEY)
+    )
+
+
+def _merge_cron_dispatch_meta(
+    execution_meta: Optional[Dict[str, Any]],
+    dispatch_meta: Optional[Dict[str, Any]],
+) -> Optional[Dict[str, Any]]:
+    if not dispatch_meta:
+        return execution_meta
+    merged = dict(execution_meta or {})
+    merged["cron_dispatch"] = dict(dispatch_meta)
+    return merged
 
 
 def _parse_cleanup_datetime(value: Any) -> datetime | None:
@@ -729,6 +827,9 @@ class CronManager:  # pylint: disable=too-many-public-methods
         spec = await self._ensure_task_binding(spec)
         existing = await self._repo.get_job(spec.id)
         spec = await self._sync_job_to_external_scheduler(spec, existing)
+        await self._persist_job_definition(spec)
+
+    async def _persist_job_definition(self, spec: CronJobSpec) -> CronJobSpec:
         async with self._lock:
             changed, _, _ = await self._mutate_jobs_file_locked(
                 lambda jobs_file: self._upsert_job_in_jobs_file(
@@ -746,7 +847,224 @@ class CronManager:  # pylint: disable=too-many-public-methods
 
         # Sync to Monitor (async, non-blocking)
         if self._monitor_sync_client is not None:
-            await self._monitor_sync_client.sync_job(spec)
+            await self._monitor_sync_client.sync_job(
+                spec,
+                agent_id=self._agent_id or "default",
+            )
+        return spec
+
+    @staticmethod
+    def _normalize_batch_dispatch_offset_window_hours(value: int) -> int:
+        try:
+            parsed = int(value)
+        except (TypeError, ValueError):
+            parsed = DEFAULT_BROADCAST_OFFSET_WINDOW_HOURS
+        return min(
+            MAX_BROADCAST_OFFSET_WINDOW_HOURS,
+            max(MIN_BROADCAST_OFFSET_WINDOW_HOURS, parsed),
+        )
+
+    def _resolve_batch_dispatch_schedule(
+        self,
+        spec: CronJobSpec,
+        *,
+        offset_window_hours: int,
+    ) -> tuple[str, int, str]:
+        cron = spec.schedule.cron if spec.schedule else ""
+        timezone_name = (
+            spec.schedule.timezone
+            if spec.schedule and spec.schedule.timezone
+            else self._timezone
+            or "UTC"
+        )
+        offset_minutes = offset_window_hours * 60
+        shifted = shift_cron_expression(
+            cron,
+            timezone_name,
+            offset_minutes=offset_minutes,
+        )
+        if shifted.error:
+            return cron, 0, BATCH_DISPATCH_CRON_FALLBACK_WARNING
+        return shifted.cron, shifted.offset_minutes, ""
+
+    def _get_batch_dispatch_external_job_id(self, spec: CronJobSpec) -> str:
+        meta = spec.meta or {}
+        return str(meta.get(BATCH_DISPATCH_EXTERNAL_JOB_ID_META_KEY) or "")
+
+    def _get_batch_dispatch_offset_window_hours(self, spec: CronJobSpec) -> int:
+        meta = spec.meta or {}
+        return self._normalize_batch_dispatch_offset_window_hours(
+            meta.get(
+                BATCH_DISPATCH_OFFSET_WINDOW_HOURS_META_KEY,
+                DEFAULT_BROADCAST_OFFSET_WINDOW_HOURS,
+            ),
+        )
+
+    async def _sync_batch_dispatch_scheduler_job(
+        self,
+        spec: CronJobSpec,
+        *,
+        offset_window_hours: int,
+    ) -> CronJobSpec:
+        if isinstance(self._scheduler_adapter, NoopSchedulerAdapter):
+            raise RuntimeError("External scheduler is not configured")
+
+        offset_window_hours = (
+            self._normalize_batch_dispatch_offset_window_hours(
+                offset_window_hours,
+            )
+        )
+        batch_cron, offset_minutes, warning = (
+            self._resolve_batch_dispatch_schedule(
+                spec,
+                offset_window_hours=offset_window_hours,
+            )
+        )
+        meta = dict(spec.meta or {})
+        batch_ext_id = str(meta.get(BATCH_DISPATCH_EXTERNAL_JOB_ID_META_KEY) or "")
+        tenant_id, source_id = self._get_external_scheduler_business_identity(
+            spec,
+        )
+        extra_job_params = {
+            BATCH_DISPATCH_OFFSET_MINUTES_META_KEY: offset_minutes,
+            BATCH_DISPATCH_PARENT_CRON_META_KEY: (
+                spec.schedule.cron if spec.schedule else ""
+            ),
+            "batch_dispatch_original_timezone": (
+                spec.schedule.timezone if spec.schedule else ""
+            ),
+        }
+        callback_url = self._build_scheduler_callback_url()
+        job_name = f"{BATCH_DISPATCH_JOB_NAME_PREFIX}{spec.name}"
+        if batch_ext_id:
+            await self._scheduler_adapter.update_job(
+                external_id=batch_ext_id,
+                tenant_id=tenant_id,
+                source_id=source_id,
+                agent_id=self._agent_id or "",
+                task_type="job",
+                job_id=spec.id,
+                job_name=job_name,
+                cron=batch_cron,
+                callback_url=callback_url,
+                extra_job_params=extra_job_params,
+            )
+        else:
+            batch_ext_id = await self._scheduler_adapter.register_job(
+                tenant_id=tenant_id,
+                source_id=source_id,
+                agent_id=self._agent_id or "",
+                task_type="job",
+                job_id=spec.id,
+                job_name=job_name,
+                cron=batch_cron,
+                callback_url=callback_url,
+                extra_job_params=extra_job_params,
+            )
+            if not batch_ext_id:
+                raise RuntimeError(
+                    "External scheduler did not return batch job id "
+                    f"for {spec.id}",
+                )
+
+        if spec.enabled:
+            await self._scheduler_adapter.resume_job(batch_ext_id)
+        else:
+            await self._scheduler_adapter.pause_job(batch_ext_id)
+
+        meta[BROADCAST_DISPATCH_INTENTS_ENABLED_META_KEY] = True
+        meta[BATCH_DISPATCH_EXTERNAL_JOB_ID_META_KEY] = batch_ext_id
+        meta[BATCH_DISPATCH_OFFSET_WINDOW_HOURS_META_KEY] = offset_window_hours
+        meta[BATCH_DISPATCH_OFFSET_MINUTES_META_KEY] = offset_minutes
+        meta[BATCH_DISPATCH_CRON_META_KEY] = batch_cron
+        meta[BATCH_DISPATCH_PARENT_CRON_META_KEY] = (
+            spec.schedule.cron if spec.schedule else ""
+        )
+        if warning:
+            meta[BATCH_DISPATCH_CRON_WARNING_META_KEY] = warning
+        else:
+            meta.pop(BATCH_DISPATCH_CRON_WARNING_META_KEY, None)
+        return spec.model_copy(update={"meta": meta})
+
+    async def enable_batch_dispatch_for_parent(
+        self,
+        job_id: str,
+        *,
+        offset_window_hours: int = DEFAULT_BROADCAST_OFFSET_WINDOW_HOURS,
+    ) -> CronJobSpec:
+        if not dispatch_intents_runtime_enabled():
+            raise RuntimeError("batch dispatch runtime is disabled")
+        job = await self.get_job(job_id)
+        if job is None:
+            raise KeyError(job_id)
+        if (job.meta or {}).get(BROADCAST_SOURCE_JOB_ID_META_KEY):
+            raise RuntimeError("batch dispatch cannot be enabled from a broadcast child")
+
+        meta = dict(job.meta or {})
+        meta[BROADCAST_DISPATCH_INTENTS_ENABLED_META_KEY] = True
+        meta[BATCH_DISPATCH_OFFSET_WINDOW_HOURS_META_KEY] = (
+            self._normalize_batch_dispatch_offset_window_hours(
+                offset_window_hours,
+            )
+        )
+        updated = job.model_copy(update={"meta": meta})
+        updated = await self._sync_job_to_external_scheduler(
+            updated,
+            existing=job,
+        )
+        normal_ext_id = self._get_existing_external_job_id(updated, job)
+        if normal_ext_id:
+            await self._scheduler_adapter.pause_job(normal_ext_id)
+        updated = await self._sync_batch_dispatch_scheduler_job(
+            updated,
+            offset_window_hours=meta[BATCH_DISPATCH_OFFSET_WINDOW_HOURS_META_KEY],
+        )
+        logger.info(
+            "Enabled batch dispatch for cron parent: job=%s normal_ext_id=%s batch_ext_id=%s offset_minutes=%s",
+            updated.id,
+            normal_ext_id,
+            (updated.meta or {}).get(BATCH_DISPATCH_EXTERNAL_JOB_ID_META_KEY, ""),
+            (updated.meta or {}).get(BATCH_DISPATCH_OFFSET_MINUTES_META_KEY, 0),
+        )
+        return await self._persist_job_definition(updated)
+
+    async def disable_batch_dispatch_for_parent(
+        self,
+        job_id: str,
+    ) -> CronJobSpec:
+        job = await self.get_job(job_id)
+        if job is None:
+            raise KeyError(job_id)
+        if (job.meta or {}).get(BROADCAST_SOURCE_JOB_ID_META_KEY):
+            raise RuntimeError("batch dispatch cannot be disabled from a broadcast child")
+
+        meta = dict(job.meta or {})
+        batch_ext_id = str(meta.get(BATCH_DISPATCH_EXTERNAL_JOB_ID_META_KEY) or "")
+        for key in (
+            BROADCAST_DISPATCH_INTENTS_ENABLED_META_KEY,
+            BATCH_DISPATCH_OFFSET_WINDOW_HOURS_META_KEY,
+            BATCH_DISPATCH_OFFSET_MINUTES_META_KEY,
+            BATCH_DISPATCH_CRON_META_KEY,
+            BATCH_DISPATCH_CRON_WARNING_META_KEY,
+            BATCH_DISPATCH_PARENT_CRON_META_KEY,
+        ):
+            meta.pop(key, None)
+        updated = job.model_copy(update={"meta": meta})
+        updated = await self._sync_job_to_external_scheduler(
+            updated,
+            existing=job,
+        )
+        if batch_ext_id and not isinstance(
+            self._scheduler_adapter,
+            NoopSchedulerAdapter,
+        ):
+            await self._scheduler_adapter.pause_job(batch_ext_id)
+        logger.info(
+            "Disabled batch dispatch for cron parent: job=%s batch_ext_id=%s",
+            updated.id,
+            batch_ext_id,
+        )
+        return await self._persist_job_definition(updated)
 
     def _get_existing_external_job_id(
         self,
@@ -788,6 +1106,32 @@ class CronManager:  # pylint: disable=too-many-public-methods
                 return tenant_id or spec.tenant_id or "", source_id or ""
         tenant_id, source_id, _ = resolve_runtime_identity(self._tenant_id)
         return tenant_id or self._tenant_id or "", source_id or ""
+
+    async def _suppress_external_scheduler_for_batch_child(
+        self,
+        spec: CronJobSpec,
+        existing: Optional[CronJobSpec] = None,
+    ) -> CronJobSpec:
+        ext_id = self._get_existing_external_job_id(spec, existing)
+        meta = dict(spec.meta or {})
+        if not ext_id:
+            meta.pop("external_job_id", None)
+            logger.info(
+                "Skip external scheduler registration for batch dispatch child: job=%s parent=%s",
+                spec.id,
+                meta.get(BROADCAST_SOURCE_JOB_ID_META_KEY),
+            )
+            return spec.model_copy(update={"meta": meta})
+
+        await self._scheduler_adapter.pause_job(ext_id)
+        meta["external_job_id"] = ext_id
+        logger.info(
+            "Paused external scheduler for batch dispatch child: job=%s ext_id=%s parent=%s",
+            spec.id,
+            ext_id,
+            meta.get(BROADCAST_SOURCE_JOB_ID_META_KEY),
+        )
+        return spec.model_copy(update={"meta": meta})
 
     @staticmethod
     def _get_job_runtime_tenant_id(spec: CronJobSpec) -> str | None:
@@ -910,6 +1254,12 @@ class CronManager:  # pylint: disable=too-many-public-methods
         if isinstance(self._scheduler_adapter, NoopSchedulerAdapter):
             return spec
 
+        if is_batch_dispatch_managed_broadcast_child(spec):
+            return await self._suppress_external_scheduler_for_batch_child(
+                spec,
+                existing,
+            )
+
         callback_url = self._build_callback_url("job", spec.id)
         ext_id = self._get_existing_external_job_id(spec, existing)
         tenant_id, source_id = self._get_external_scheduler_business_identity(
@@ -969,10 +1319,29 @@ class CronManager:  # pylint: disable=too-many-public-methods
         }
         for job in await self._repo.list_jobs():
             result["total"] += 1
-            if self._get_existing_external_job_id(job):
+            had_external_id = bool(self._get_existing_external_job_id(job))
+            if had_external_id and not is_batch_dispatch_managed_broadcast_child(
+                job,
+            ):
                 result["skipped"] += 1
                 continue
             try:
+                if is_batch_dispatch_managed_broadcast_child(job):
+                    synced = await self._sync_job_to_external_scheduler(
+                        job,
+                        existing=job,
+                    )
+                    ext_id = (synced.meta or {}).get("external_job_id", "")
+                    if not ext_id:
+                        result["skipped"] += 1
+                        continue
+                    await self._persist_external_job_binding(job.id, ext_id)
+                    st = self._states.get(job.id, CronJobState())
+                    st.external_job_id = ext_id
+                    self._states[job.id] = st
+                    result["updated"] += 1
+                    continue
+
                 synced = await self._sync_job_to_external_scheduler(job)
                 ext_id = (synced.meta or {}).get("external_job_id", "")
                 await self._persist_external_job_binding(
@@ -1179,7 +1548,10 @@ class CronManager:  # pylint: disable=too-many-public-methods
 
             # Sync to Monitor (async, non-blocking)
             if self._monitor_sync_client is not None:
-                await self._monitor_sync_client.sync_job(job)
+                await self._monitor_sync_client.sync_job(
+                    job,
+                    agent_id=self._agent_id or "default",
+                )
 
             return True
 
@@ -1217,7 +1589,10 @@ class CronManager:  # pylint: disable=too-many-public-methods
 
             # Sync to Monitor (async, non-blocking)
             if self._monitor_sync_client is not None:
-                await self._monitor_sync_client.sync_job(job)
+                await self._monitor_sync_client.sync_job(
+                    job,
+                    agent_id=self._agent_id or "default",
+                )
                 # 恢复任务时同时标记历史未读记录为已读
                 await self._monitor_sync_client.mark_job_as_read(job_id)
 
@@ -1745,7 +2120,10 @@ class CronManager:  # pylint: disable=too-many-public-methods
                 # 概览页面从 Monitor 读取任务状态，需要同步更新
                 updated_job = await self._repo.get_job(job.id)
                 if updated_job and self._monitor_sync_client is not None:
-                    await self._monitor_sync_client.sync_job(updated_job)
+                    await self._monitor_sync_client.sync_job(
+                        updated_job,
+                        agent_id=self._agent_id or "default",
+                    )
 
     @asynccontextmanager
     async def _task_session_write_lock(
@@ -2256,15 +2634,25 @@ class CronManager:  # pylint: disable=too-many-public-methods
         )
         if exec_status == "success" and not is_manual:
             delay_minutes = _notification_delay_minutes(job)
-            try:
-                offset = int(
-                    (job.meta or {}).get("broadcast_offset_minutes", 0) or 0,
+            parent_scheduled_fire_at = _dispatch_parent_scheduled_fire_at(
+                execution_meta,
+            )
+            if parent_scheduled_fire_at is not None:
+                notification_due_at = parent_scheduled_fire_at + timedelta(
+                    minutes=delay_minutes,
                 )
-            except (TypeError, ValueError):
-                offset = 0
-            if (job.meta or {}).get(
+                notification_timezone = (job.meta or {}).get(
+                    "broadcast_original_timezone",
+                ) or notification_timezone
+            elif (job.meta or {}).get(
                 "broadcast_notification_policy",
             ) == "original_schedule":
+                try:
+                    offset = int(
+                        (job.meta or {}).get("broadcast_offset_minutes", 0) or 0,
+                    )
+                except (TypeError, ValueError):
+                    offset = 0
                 total_delay = max(offset, 0) + delay_minutes
                 notification_due_at = actual_time + timedelta(
                     minutes=total_delay,
@@ -2470,8 +2858,8 @@ class CronManager:  # pylint: disable=too-many-public-methods
         self,
         job: CronJobSpec,
         is_manual: bool = False,
-        dispatch_meta: Optional[Dict[str, Any]] = None,
         source_id: str | None = None,
+        dispatch_meta: Optional[Dict[str, Any]] = None,
     ) -> None:
         job = await self._ensure_persisted_task_binding(job)
         job = self._with_execution_source_identity(job, source_id)
@@ -2581,6 +2969,10 @@ class CronManager:  # pylint: disable=too-many-public-methods
                 with self._bind_scheduled_run_source_system_config(
                     source_system_config,
                 ):
+                    execution_meta = _merge_cron_dispatch_meta(
+                        execution_meta,
+                        dispatch_meta,
+                    )
                     await self._finalize_execution_state(
                         job=job,
                         st=st,
@@ -2820,10 +3212,50 @@ class CronManager:  # pylint: disable=too-many-public-methods
         try:
             for job in await self._repo.list_jobs():
                 ext_id = (job.meta or {}).get("external_job_id", "")
+                if is_batch_dispatch_managed_broadcast_child(job):
+                    if ext_id:
+                        st = self._states.get(job.id, CronJobState())
+                        st.external_job_id = str(ext_id)
+                        self._states[job.id] = st
+                        await self._scheduler_adapter.pause_job(str(ext_id))
+                    logger.info(
+                        "Skipped external scheduler restore for batch dispatch child: job=%s ext_id=%s",
+                        job.id,
+                        ext_id or "",
+                    )
+                    continue
                 if ext_id:
-                    st = self._states.get(job.id, CronJobState())
-                    st.external_job_id = ext_id
-                    self._states[job.id] = st
+                    try:
+                        synced = await self._sync_job_to_external_scheduler(
+                            job,
+                            existing=job,
+                        )
+                        synced_ext_id = (
+                            (synced.meta or {}).get("external_job_id", "")
+                            or ext_id
+                        )
+                        st = self._states.get(job.id, CronJobState())
+                        st.external_job_id = str(synced_ext_id)
+                        self._states[job.id] = st
+                        if is_batch_dispatch_parent(synced):
+                            synced = await self._sync_batch_dispatch_scheduler_job(
+                                synced,
+                                offset_window_hours=(
+                                    self._get_batch_dispatch_offset_window_hours(
+                                        synced,
+                                    )
+                                ),
+                            )
+                            await self._scheduler_adapter.pause_job(
+                                str(synced_ext_id),
+                            )
+                            await self._persist_job_definition(synced)
+                    except Exception:
+                        logger.warning(
+                            "Failed to refresh external scheduler binding for job %s",
+                            job.id,
+                            exc_info=True,
+                        )
                     continue
                 # 老任务尚未注册到外部平台，补注册
                 callback_url = self._build_callback_url("job", job.id)
@@ -2860,6 +3292,28 @@ class CronManager:  # pylint: disable=too-many-public-methods
                             await self._scheduler_adapter.pause_job(
                                 ext_id,
                             )
+                        saved_job = await self._repo.get_job(job.id)
+                        batch_source = saved_job or job.model_copy(
+                            update={
+                                "meta": {
+                                    **dict(job.meta or {}),
+                                    "external_job_id": ext_id,
+                                },
+                            },
+                        )
+                        if is_batch_dispatch_parent(batch_source):
+                            batch_synced = (
+                                await self._sync_batch_dispatch_scheduler_job(
+                                    batch_source,
+                                    offset_window_hours=(
+                                        self._get_batch_dispatch_offset_window_hours(
+                                            batch_source,
+                                        )
+                                    ),
+                                )
+                            )
+                            await self._scheduler_adapter.pause_job(ext_id)
+                            await self._persist_job_definition(batch_synced)
                         logger.info(
                             "Migrated job %s to external scheduler: ext_id=%s",
                             job.id,
@@ -3117,6 +3571,14 @@ class CronManager:  # pylint: disable=too-many-public-methods
             or "http://localhost:8000"
         )
         return f"{base}/api/internal/cron/callback"
+
+    def _build_scheduler_callback_url(self) -> str:
+        """Build Scheduler callback URL for batch parent physical timers."""
+        base = (
+            os.environ.get(SCHEDULER_API_URL_ENV, "").strip()
+            or "http://localhost:9100/api"
+        )
+        return f"{base.rstrip('/')}/scheduler/cron/callback"
 
     async def refresh_next_run_at(self, job: CronJobSpec) -> None:
         """实时计算 next_run_at（直接从 job 对象，无需查 repo）。"""

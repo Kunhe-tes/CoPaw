@@ -104,6 +104,8 @@ class _Manager:
         self.deleted = []
         self.ran = []
         self.run_kwargs = []
+        self.batch_enabled = []
+        self.batch_disabled = []
 
     async def create_or_replace_job(self, spec):
         self.created.append(spec)
@@ -127,6 +129,35 @@ class _Manager:
             raise KeyError(job_id)
         self.ran.append(job_id)
         self.run_kwargs.append(kwargs)
+
+    async def enable_batch_dispatch_for_parent(
+        self,
+        job_id,
+        *,
+        offset_window_hours=4,
+    ):
+        job = self.jobs_by_id[job_id]
+        meta = dict(job.meta or {})
+        meta["broadcast_dispatch_intents_enabled"] = True
+        meta["batch_dispatch_offset_window_hours"] = offset_window_hours
+        updated = job.model_copy(update={"meta": meta})
+        self.jobs_by_id[job_id] = updated
+        self.batch_enabled.append(
+            {
+                "job_id": job_id,
+                "offset_window_hours": offset_window_hours,
+            },
+        )
+        return updated
+
+    async def disable_batch_dispatch_for_parent(self, job_id):
+        job = self.jobs_by_id[job_id]
+        meta = dict(job.meta or {})
+        meta.pop("broadcast_dispatch_intents_enabled", None)
+        updated = job.model_copy(update={"meta": meta})
+        self.jobs_by_id[job_id] = updated
+        self.batch_disabled.append({"job_id": job_id})
+        return updated
 
     def get_state(self, job_id):
         return types.SimpleNamespace(model_dump=lambda mode=None: {})
@@ -306,6 +337,43 @@ def test_create_job_injects_request_tenant_id():
     assert response.json().get("model_slot") is None
 
 
+def test_create_job_does_not_start_batch_dispatch_from_meta(monkeypatch):
+    monkeypatch.setenv("SWE_CRON_DISPATCH_INTENTS_ENABLED", "1")
+    manager = _Manager()
+    client = _build_client(manager)
+    scheduled = []
+
+    async def _schedule(request, source_job, *, existing, reason):
+        del request
+        scheduled.append(
+            {
+                "job_id": source_job.id,
+                "existing": existing,
+                "reason": reason,
+            },
+        )
+
+    monkeypatch.setattr(
+        api_module,
+        "_schedule_dispatch_broadcast_children_processing_after_save",
+        _schedule,
+        raising=False,
+    )
+
+    response = client.post(
+        "/cron/jobs",
+        json={
+            **_job_spec(),
+            "meta": {"broadcast_dispatch_intents_enabled": True},
+        },
+    )
+
+    assert response.status_code == 200
+    assert scheduled == []
+    assert "broadcast_dispatch_intents_enabled" not in manager.created[0].meta
+    assert "broadcast_dispatch_intents_enabled" not in response.json()["meta"]
+
+
 def test_replace_job_overrides_payload_tenant_with_request_tenant():
     manager = _Manager()
     client = _build_client(manager)
@@ -322,6 +390,253 @@ def test_replace_job_overrides_payload_tenant_with_request_tenant():
         "tenant-a",
         "source-a",
     )
+
+
+def test_replace_job_does_not_start_batch_dispatch_from_meta(
+    monkeypatch,
+):
+    monkeypatch.setenv("SWE_CRON_DISPATCH_INTENTS_ENABLED", "1")
+    existing_job = CronJobSpec.model_validate(
+        {
+            **_job_spec("job-1"),
+            "meta": {},
+        },
+    )
+    manager = _Manager({"job-1": existing_job})
+    client = _build_client(manager)
+    scheduled = []
+
+    async def _schedule(request, source_job, *, existing, reason):
+        del request
+        scheduled.append(
+            {
+                "job_id": source_job.id,
+                "existing_id": existing.id if existing else None,
+                "reason": reason,
+            },
+        )
+
+    monkeypatch.setattr(
+        api_module,
+        "_schedule_dispatch_broadcast_children_processing_after_save",
+        _schedule,
+        raising=False,
+    )
+
+    response = client.put(
+        "/cron/jobs/job-1",
+        json={
+            **_job_spec("job-1"),
+            "meta": {"broadcast_dispatch_intents_enabled": True},
+        },
+    )
+
+    assert response.status_code == 200
+    assert scheduled == []
+    assert "broadcast_dispatch_intents_enabled" not in manager.created[0].meta
+    assert "broadcast_dispatch_intents_enabled" not in response.json()["meta"]
+
+
+def test_replace_job_does_not_reschedule_already_enabled_batch_dispatch(
+    monkeypatch,
+):
+    monkeypatch.setenv("SWE_CRON_DISPATCH_INTENTS_ENABLED", "1")
+    existing_job = CronJobSpec.model_validate(
+        {
+            **_job_spec("job-1"),
+            "meta": {"broadcast_dispatch_intents_enabled": True},
+        },
+    )
+    manager = _Manager({"job-1": existing_job})
+    client = _build_client(manager)
+    scheduled = []
+
+    monkeypatch.setattr(
+        api_module,
+        "_schedule_dispatch_broadcast_children_processing",
+        lambda *args, **kwargs: scheduled.append((args, kwargs)),
+        raising=False,
+    )
+
+    response = client.put(
+        "/cron/jobs/job-1",
+        json={
+            **_job_spec("job-1"),
+            "meta": {"broadcast_dispatch_intents_enabled": True},
+        },
+    )
+
+    assert response.status_code == 200
+    assert scheduled == []
+    assert response.json()["meta"]["broadcast_dispatch_intents_enabled"] is True
+
+
+def test_replace_job_does_not_rollback_batch_dispatch_from_meta(
+    monkeypatch,
+):
+    monkeypatch.setenv("SWE_CRON_DISPATCH_INTENTS_ENABLED", "1")
+    existing_job = CronJobSpec.model_validate(
+        {
+            **_job_spec("job-1"),
+            "meta": {"broadcast_dispatch_intents_enabled": True},
+        },
+    )
+    manager = _Manager({"job-1": existing_job})
+    client = _build_client(manager)
+    scheduled = []
+
+    def _schedule(_app, source_job, **kwargs):
+        scheduled.append(
+            {
+                "job_id": source_job.id,
+                "reason": kwargs.get("reason"),
+                "enable": kwargs.get("enable"),
+            },
+        )
+        return True
+
+    monkeypatch.setattr(
+        api_module,
+        "_schedule_dispatch_broadcast_children_processing",
+        _schedule,
+        raising=False,
+    )
+
+    response = client.put(
+        "/cron/jobs/job-1",
+        json={
+            **_job_spec("job-1"),
+            "meta": {},
+        },
+    )
+
+    assert response.status_code == 200
+    assert scheduled == []
+    assert response.json()["meta"]["broadcast_dispatch_intents_enabled"] is True
+
+
+def test_enable_batch_dispatch_endpoint_schedules_children(monkeypatch):
+    monkeypatch.setenv("SWE_CRON_DISPATCH_INTENTS_ENABLED", "1")
+    source_job = CronJobSpec.model_validate(
+        {
+            **_job_spec("job-source"),
+            "tenant_id": "tenant-a",
+            "source_id": "source-a",
+            "scope_id": encode_scope_id("tenant-a", "source-a"),
+        },
+    )
+    manager = _Manager({"job-source": source_job})
+    client = _build_client(manager)
+    scheduled = []
+
+    def _schedule(_app, source_job, **kwargs):
+        scheduled.append(
+            {
+                "job_id": source_job.id,
+                "reason": kwargs.get("reason"),
+                "enable": kwargs.get("enable"),
+                "agent_id": kwargs.get("agent_id"),
+                "source_id": kwargs.get("source_id"),
+            },
+        )
+        return True
+
+    monkeypatch.setattr(
+        api_module,
+        "_schedule_dispatch_broadcast_children_processing",
+        _schedule,
+        raising=False,
+    )
+
+    response = client.post(
+        "/cron/jobs/job-source/batch-dispatch/enable",
+        json={"offset_window_hours": 4},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["meta"]["broadcast_dispatch_intents_enabled"] is True
+    assert manager.batch_enabled == [
+        {
+            "job_id": "job-source",
+            "offset_window_hours": 4,
+        },
+    ]
+    assert scheduled == [
+        {
+            "job_id": "job-source",
+            "reason": "enable_batch_dispatch",
+            "enable": True,
+            "agent_id": "default",
+            "source_id": "source-a",
+        },
+    ]
+
+
+def test_disable_batch_dispatch_endpoint_schedules_rollback(monkeypatch):
+    monkeypatch.setenv("SWE_CRON_DISPATCH_INTENTS_ENABLED", "1")
+    source_job = CronJobSpec.model_validate(
+        {
+            **_job_spec("job-source"),
+            "tenant_id": "tenant-a",
+            "source_id": "source-a",
+            "scope_id": encode_scope_id("tenant-a", "source-a"),
+            "meta": {"broadcast_dispatch_intents_enabled": True},
+        },
+    )
+    manager = _Manager({"job-source": source_job})
+    client = _build_client(manager)
+    scheduled = []
+
+    def _schedule(_app, source_job, **kwargs):
+        scheduled.append(
+            {
+                "job_id": source_job.id,
+                "reason": kwargs.get("reason"),
+                "enable": kwargs.get("enable"),
+            },
+        )
+        return True
+
+    monkeypatch.setattr(
+        api_module,
+        "_schedule_dispatch_broadcast_children_processing",
+        _schedule,
+        raising=False,
+    )
+
+    response = client.post("/cron/jobs/job-source/batch-dispatch/disable")
+
+    assert response.status_code == 200
+    assert "broadcast_dispatch_intents_enabled" not in response.json()["meta"]
+    assert manager.batch_disabled == [{"job_id": "job-source"}]
+    assert scheduled == [
+        {
+            "job_id": "job-source",
+            "reason": "disable_batch_dispatch",
+            "enable": False,
+        },
+    ]
+
+
+def test_enable_batch_dispatch_rejects_broadcast_child(monkeypatch):
+    monkeypatch.setenv("SWE_CRON_DISPATCH_INTENTS_ENABLED", "1")
+    child_job = CronJobSpec.model_validate(
+        {
+            **_job_spec("child-job"),
+            "tenant_id": "tenant-b",
+            "source_id": "source-a",
+            "scope_id": encode_scope_id("tenant-b", "source-a"),
+            "meta": {"broadcast_source_job_id": "job-source"},
+        },
+    )
+    manager = _Manager({"child-job": child_job})
+    client = _build_client(manager)
+
+    response = client.post("/cron/jobs/child-job/batch-dispatch/enable")
+
+    assert response.status_code == 400
+    assert "broadcast child" in response.json()["detail"]
+    assert manager.batch_enabled == []
 
 
 def test_create_job_persists_model_slot():
@@ -446,6 +761,7 @@ def test_run_job_forwards_b3_headers():
         },
     ]
 
+
 def test_cron_broadcast_concurrency_uses_env_with_default(monkeypatch):
     monkeypatch.delenv(
         api_module.CRON_BROADCAST_CONCURRENCY_ENV,
@@ -559,6 +875,71 @@ def test_broadcast_job_returns_running_task_and_polling_result(monkeypatch):
             "tenant-b",
             "tenant-c",
         ]
+
+
+def test_broadcast_enable_batch_dispatch_field_does_not_update_parent(
+    monkeypatch,
+):
+    monkeypatch.setenv("SWE_CRON_DISPATCH_INTENTS_ENABLED", "1")
+    observed_parent_flags = []
+    observed_context_flags = []
+
+    async def _fake_broadcast_to_tenant(context, tenant_id, offset):
+        del offset
+        observed_parent_flags.append(
+            bool(
+                (context.source_job.meta or {}).get(
+                    "broadcast_dispatch_intents_enabled",
+                ),
+            ),
+        )
+        observed_context_flags.append(bool(context.enable_batch_dispatch))
+        return api_module.CronBroadcastTenantResult(
+            tenant_id=tenant_id,
+            success=True,
+            job_id=f"job-{tenant_id}",
+        )
+
+    monkeypatch.setattr(
+        api_module,
+        "_broadcast_to_tenant",
+        _fake_broadcast_to_tenant,
+    )
+    source_job = CronJobSpec.model_validate(
+        {
+            **_job_spec("job-source"),
+            "tenant_id": "tenant-a",
+            "source_id": "source-a",
+            "scope_id": encode_scope_id("tenant-a", "source-a"),
+            "meta": {},
+        },
+    )
+    manager = _Manager({"job-source": source_job})
+    with _build_client(
+        manager,
+        multi_agent_manager=_MultiAgentManager({}),
+    ) as client:
+        response = client.post(
+            "/cron/jobs/job-source/broadcast",
+            json={
+                "target_tenant_ids": ["tenant-b"],
+                "enable_batch_dispatch": True,
+            },
+        )
+
+        assert response.status_code == 200
+        finished = _wait_for_broadcast_task(
+            client,
+            "job-source",
+            response.json()["task_id"],
+        )
+
+    assert finished["status"] == "completed"
+    assert "broadcast_dispatch_intents_enabled" not in manager.jobs_by_id[
+        "job-source"
+    ].meta
+    assert observed_parent_flags == [False]
+    assert observed_context_flags == [False]
 
 
 def test_broadcast_job_polling_reports_failed_targets(monkeypatch):
@@ -1690,6 +2071,187 @@ def test_schedule_broadcast_children_refresh_reuses_running_task(monkeypatch):
     assert first[1] is False
     assert second[1] is True
     assert calls == ["job-source"]
+
+
+def test_dispatch_child_processing_records_failed_snapshot_on_target_error(
+    monkeypatch,
+):
+    async def _list_tenants(_source_id, source_filter=True):
+        del source_filter
+        return ["tenant-b"]
+
+    class _Store:
+        def __init__(self):
+            self.failed = []
+            self.completed = []
+
+        async def mark_running(self, **kwargs):
+            del kwargs
+            return True
+
+        async def record_failed(self, **kwargs):
+            self.failed.append(kwargs)
+
+        async def record_completed(self, **kwargs):
+            self.completed.append(kwargs)
+
+    class _FailingMultiAgentManager:
+        async def get_agent(self, *args, **kwargs):
+            del args, kwargs
+            raise RuntimeError("workspace unavailable")
+
+    monkeypatch.setenv("SWE_CRON_DISPATCH_INTENTS_ENABLED", "1")
+    monkeypatch.setattr(api_module, "list_logical_tenant_ids", _list_tenants)
+    source_job = CronJobSpec.model_validate(
+        {
+            **_job_spec("job-source"),
+            "tenant_id": "tenant-a",
+            "source_id": "source-a",
+            "scope_id": encode_scope_id("tenant-a", "source-a"),
+            "meta": {"broadcast_dispatch_intents_enabled": True},
+        },
+    )
+    store = _Store()
+    app = types.SimpleNamespace(
+        state=types.SimpleNamespace(
+            cron_broadcast_children_store=store,
+            multi_agent_manager=_FailingMultiAgentManager(),
+            tenant_workspace_pool=None,
+        ),
+    )
+
+    asyncio.run(
+        api_module._process_dispatch_broadcast_children(
+            app,
+            source_job,
+            agent_id="default",
+            source_id="source-a",
+            reason="test",
+        ),
+    )
+
+    assert store.completed == []
+    assert store.failed
+    assert store.failed[0]["tenant_count"] == 1
+
+
+def test_dispatch_child_processing_records_failed_snapshot_on_tenant_list_error(
+    monkeypatch,
+):
+    async def _list_tenants(_source_id, source_filter=True):
+        del source_filter
+        raise RuntimeError("tenant list unavailable")
+
+    class _Store:
+        def __init__(self):
+            self.running = []
+            self.failed = []
+            self.completed = []
+
+        async def mark_running(self, **kwargs):
+            self.running.append(kwargs)
+            return True
+
+        async def record_failed(self, **kwargs):
+            self.failed.append(kwargs)
+
+        async def record_completed(self, **kwargs):
+            self.completed.append(kwargs)
+
+    monkeypatch.setenv("SWE_CRON_DISPATCH_INTENTS_ENABLED", "1")
+    monkeypatch.setattr(api_module, "list_logical_tenant_ids", _list_tenants)
+    source_job = CronJobSpec.model_validate(
+        {
+            **_job_spec("job-source"),
+            "tenant_id": "tenant-a",
+            "source_id": "source-a",
+            "scope_id": encode_scope_id("tenant-a", "source-a"),
+            "meta": {"broadcast_dispatch_intents_enabled": True},
+        },
+    )
+    store = _Store()
+    app = types.SimpleNamespace(
+        state=types.SimpleNamespace(
+            cron_broadcast_children_store=store,
+            multi_agent_manager=object(),
+            tenant_workspace_pool=None,
+        ),
+    )
+
+    asyncio.run(
+        api_module._process_dispatch_broadcast_children(
+            app,
+            source_job,
+            agent_id="default",
+            source_id="source-a",
+            reason="test",
+        ),
+    )
+
+    assert store.running == []
+    assert store.completed == []
+    assert store.failed
+    assert store.failed[0]["tenant_count"] == 0
+    assert "tenant list unavailable" in store.failed[0]["failure_summary"]
+
+
+def test_dispatch_child_processing_can_rollback_batch_flag(monkeypatch):
+    async def _list_tenants(_source_id, source_filter=True):
+        del source_filter
+        return ["tenant-b"]
+
+    monkeypatch.setenv("SWE_CRON_DISPATCH_INTENTS_ENABLED", "1")
+    monkeypatch.setattr(api_module, "list_logical_tenant_ids", _list_tenants)
+    source_job = CronJobSpec.model_validate(
+        {
+            **_job_spec("job-source"),
+            "tenant_id": "tenant-a",
+            "source_id": "source-a",
+            "scope_id": encode_scope_id("tenant-a", "source-a"),
+            "meta": {},
+        },
+    )
+    child = CronJobSpec.model_validate(
+        {
+            **_job_spec("child-job"),
+            "tenant_id": "tenant-b",
+            "source_id": "source-a",
+            "scope_id": encode_scope_id("tenant-b", "source-a"),
+            "meta": {
+                "broadcast_source_job_id": "job-source",
+                "broadcast_dispatch_intents_enabled": True,
+            },
+        },
+    )
+    child_manager = _Manager({"child-job": child})
+    app = types.SimpleNamespace(
+        state=types.SimpleNamespace(
+            cron_broadcast_children_store=None,
+            multi_agent_manager=_MultiAgentManager(
+                {
+                    encode_scope_id("tenant-b", "source-a"): _Workspace(
+                        child_manager,
+                    ),
+                },
+            ),
+            tenant_workspace_pool=None,
+        ),
+    )
+
+    asyncio.run(
+        api_module._process_dispatch_broadcast_children(
+            app,
+            source_job,
+            agent_id="default",
+            source_id="source-a",
+            reason="rollback",
+            enable=False,
+        ),
+    )
+
+    saved = child_manager.created[-1]
+    assert saved.meta["broadcast_source_job_id"] == "job-source"
+    assert "broadcast_dispatch_intents_enabled" not in saved.meta
 
 
 def test_batch_delete_broadcast_children_validates_source(monkeypatch):

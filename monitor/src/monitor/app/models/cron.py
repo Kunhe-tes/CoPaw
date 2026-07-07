@@ -204,6 +204,15 @@ class ExecutionModel(BaseModel):
 
     # 执行元数据
     meta: str = Field(default="", description="执行元数据 (JSON字符串)")
+    dispatch_intent_id: Optional[int] = Field(
+        default=None,
+        description="批调度派发意图ID",
+    )
+    dispatch_batch_id: str = Field(default="", description="批调度批次ID")
+    dispatch_attempt: Optional[int] = Field(
+        default=None,
+        description="批调度派发尝试次数",
+    )
 
     # 已读状态
     notification_status: str = Field(
@@ -338,6 +347,7 @@ class ExecutionSyncRequest(BaseModel):
     job_id: str = Field(..., description="任务ID")
     job_name: str = Field(default="", description="任务名称")
     tenant_id: str = Field(default="", description="租户ID")
+    source_id: str = Field(default="", description="source ID")
 
     # 执行时间
     scheduled_time: Optional[datetime] = Field(
@@ -370,6 +380,15 @@ class ExecutionSyncRequest(BaseModel):
 
     # 执行元数据
     meta: str = Field(default="", description="执行元数据 (JSON字符串)")
+    dispatch_intent_id: Optional[int] = Field(
+        default=None,
+        description="批调度派发意图ID",
+    )
+    dispatch_batch_id: str = Field(default="", description="批调度批次ID")
+    dispatch_attempt: Optional[int] = Field(
+        default=None,
+        description="批调度派发尝试次数",
+    )
 
     # 已读状态（手动执行且成功的任务默认已读）
     notification_status: str = Field(

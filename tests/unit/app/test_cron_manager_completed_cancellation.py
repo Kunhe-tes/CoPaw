@@ -811,3 +811,56 @@ def test_automatic_broadcast_execution_stacks_notification_delay():
         minutes=140,
     )
     assert record["notification_timezone"] == "Asia/Shanghai"
+
+
+def test_dispatch_managed_broadcast_notification_uses_parent_fire_time():
+    """Dispatch-managed batch children ignore broadcast offset for notification."""
+
+    async def _run():
+        job = _build_broadcast_agent_job().model_copy(
+            update={
+                "meta": {
+                    **_build_broadcast_agent_job().meta,
+                    "notification_delay_minutes": 120,
+                    "broadcast_dispatch_intents_enabled": True,
+                },
+            },
+        )
+        monitor = _MonitorSyncClient()
+        manager = CronManager(
+            repo=_Repo(job),
+            runner=_Runner(),
+            channel_manager=_ChannelManager(),
+        )
+        manager._monitor_sync_client = (
+            monitor  # pylint: disable=protected-access
+        )
+        actual_time = datetime(2026, 6, 4, 10, 20, tzinfo=timezone.utc)
+        parent_fire_at = datetime(2026, 6, 4, 10, 0, tzinfo=timezone.utc)
+
+        await manager._sync_execution_to_monitor(  # pylint: disable=protected-access
+            job=job,
+            exec_status="success",
+            actual_time=actual_time,
+            end_time=actual_time,
+            duration_ms=100,
+            error_message="",
+            output_preview="done",
+            is_manual=False,
+            execution_meta={
+                "cron_dispatch": {
+                    "intent_id": 7,
+                    "batch_id": "batch-1",
+                    "parent_scheduled_fire_at": parent_fire_at.isoformat(),
+                },
+            },
+        )
+
+        return monitor.records[-1], parent_fire_at
+
+    record, parent_fire_at = asyncio.run(_run())
+
+    assert record["notification_due_at"] == parent_fire_at + timedelta(
+        minutes=120,
+    )
+    assert record["notification_timezone"] == "Asia/Shanghai"

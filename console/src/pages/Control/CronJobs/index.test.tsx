@@ -119,6 +119,7 @@ vi.mock("./components", () => ({
     updateJob: vi.fn(),
     deleteJob: vi.fn(),
     toggleEnabled: vi.fn(),
+    toggleBatchDispatch: vi.fn(),
     executeNow: vi.fn(),
   }),
   createColumns: (handlers: {

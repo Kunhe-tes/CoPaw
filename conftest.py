@@ -9,6 +9,7 @@ from pathlib import Path
 _ROOT = Path(__file__).resolve().parent
 _SOURCE_DIRS = [
     _ROOT / "src",
+    _ROOT / "scheduler" / "src",
     _ROOT / "market" / "src",
     _ROOT / "monitor" / "src",
 ]
@@ -21,7 +22,7 @@ for source_dir in reversed(_SOURCE_DIRS):
 
 # 测试进程可能已经从安装包或主仓库缓存过同名模块；这里统一清理，
 # 确保后续导入命中当前 worktree 下的源码。
-_STALE_PREFIXES = ("swe", "market", "monitor")
+_STALE_PREFIXES = ("swe", "scheduler", "market", "monitor")
 _stale_modules = [
     name
     for name in sys.modules

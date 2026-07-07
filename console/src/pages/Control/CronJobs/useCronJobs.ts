@@ -115,6 +115,24 @@ export function useCronJobs() {
     }
   };
 
+  const toggleBatchDispatch = async (job: CronJob) => {
+    const batchEnabled = job.meta?.broadcast_dispatch_intents_enabled === true;
+    try {
+      const returned = batchEnabled
+        ? await api.disableCronBatchDispatch(job.id)
+        : await api.enableCronBatchDispatch(job.id);
+      setJobs((prev) =>
+        prev.map((j) => (j.id === job.id ? (returned as CronJob) : j)),
+      );
+      message.success(batchEnabled ? "批调度已关闭" : "批调度已启动");
+      return true;
+    } catch (error) {
+      console.error("Failed to toggle cron batch dispatch", error);
+      message.error("批调度操作失败");
+      return false;
+    }
+  };
+
   const executeNow = async (jobId: string) => {
     const original = jobs.find((j) => j.id === jobId);
     setJobs((prev) =>
@@ -159,6 +177,7 @@ export function useCronJobs() {
     updateJob,
     deleteJob,
     toggleEnabled,
+    toggleBatchDispatch,
     executeNow,
   };
 }

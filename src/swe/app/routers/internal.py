@@ -14,8 +14,8 @@ from fastapi import APIRouter, Body, File, Form, Header, HTTPException, Request
 from fastapi import UploadFile
 from pydantic import BaseModel, Field
 
-from ..identity_resolver import resolve_user_identity
 from ..b3_headers import build_b3_dispatch_meta
+from ..identity_resolver import resolve_user_identity
 from ...config.context import (
     is_valid_identity_value,
     resolve_runtime_tenant_id,
@@ -28,6 +28,11 @@ from ...config.scope_conversion import (
 )
 from ...config.utils import list_all_tenant_ids
 from ...constant import WORKING_DIR
+from ..crons.manager import (
+    broadcast_dispatch_intents_enabled,
+    dispatch_intents_runtime_enabled,
+    is_batch_dispatch_managed_broadcast_child,
+)
 from ..workspace.tenant_initializer import TenantInitializer
 
 router = APIRouter(prefix="/internal", tags=["internal"])
@@ -44,6 +49,7 @@ _ASSET_NOT_FOUND_DETAIL = "Asset file not found"
 _ASSET_INVALID_UTF8_DETAIL = "Asset file is not valid UTF-8"
 _CONTENT_INVALID_UTF8_DETAIL = "Content is not valid UTF-8"
 _INVALID_PREVIEW_TARGET_DETAIL = "Invalid preview target"
+_DISPATCH_CALLBACK_SOURCE = "dispatch_service"
 _PREVIEW_PLACEHOLDER_HTML = """<!doctype html>
 <html lang="zh-CN">
 <head>
@@ -135,6 +141,70 @@ def _list_runtime_tenant_ids() -> list[str]:
         for tenant_id in tenant_ids
         if tenant_id == "default" or not tenant_id.startswith("default_")
     ]
+
+
+async def _get_cron_job_for_dispatch(mgr: Any, job_id: str) -> Any | None:
+    getter = getattr(mgr, "get_job", None)
+    if getter is None:
+        return None
+    return await getter(job_id)
+
+
+def _job_dispatch_intents_enabled(job: Any | None) -> bool:
+    if not dispatch_intents_runtime_enabled():
+        return False
+    if is_batch_dispatch_managed_broadcast_child(job):
+        return False
+    return broadcast_dispatch_intents_enabled(job)
+
+
+def _is_dispatch_service_callback(params: dict[str, Any]) -> bool:
+    return str(params.get("callback_source") or "").strip() == (
+        _DISPATCH_CALLBACK_SOURCE
+    )
+
+
+def _build_dispatch_callback_meta(
+    params: dict[str, Any],
+) -> dict[str, Any] | None:
+    if not _is_dispatch_service_callback(params):
+        return None
+    intent_id = params.get("dispatch_intent_id") or params.get("intent_id")
+    batch_id = params.get("dispatch_batch_id") or params.get("batch_id") or ""
+    raw_attempt = params.get("dispatch_attempt", 1)
+    try:
+        normalized_intent_id: int | str = int(intent_id)
+    except (TypeError, ValueError):
+        normalized_intent_id = 0
+    try:
+        normalized_attempt = int(raw_attempt)
+    except (TypeError, ValueError):
+        normalized_attempt = 0
+    if not normalized_intent_id or not str(batch_id).strip():
+        raise HTTPException(
+            status_code=400,
+            detail="dispatch_service callback requires dispatch_intent_id and dispatch_batch_id",
+        )
+    if normalized_attempt <= 0:
+        raise HTTPException(
+            status_code=400,
+            detail="dispatch_service callback requires positive dispatch_attempt",
+        )
+    return {
+        "source": _DISPATCH_CALLBACK_SOURCE,
+        "intent_id": normalized_intent_id,
+        "batch_id": str(batch_id),
+        "dispatch_attempt": normalized_attempt,
+        "tenant_id": str(params.get("tenant_id") or ""),
+        "source_id": str(params.get("source_id") or ""),
+        "agent_id": str(params.get("agent_id") or _STATIC_AGENT_ID),
+        "job_id": str(params.get("job_id") or ""),
+        "parent_scheduled_fire_at": str(
+            params.get("parent_scheduled_fire_at") or "",
+        ),
+        "provider_id": str(params.get("provider_id") or "default"),
+        "model_id": str(params.get("model_id") or "default"),
+    }
 
 
 class InternalErrorResponse(BaseModel):
@@ -1195,8 +1265,43 @@ async def internal_cron_callback(
                         detail="job_id required for task_type=job",
                     )
                 # 调度回调触发的是自动执行，不应走手动执行分支。
-                dispatch_meta = build_b3_dispatch_meta(
-                    getattr(request, "headers", {}),
+                job = await _get_cron_job_for_dispatch(mgr, job_id)
+                is_dispatch_service_callback = _is_dispatch_service_callback(
+                    params,
+                )
+                if (
+                    is_batch_dispatch_managed_broadcast_child(job)
+                    and not is_dispatch_service_callback
+                ):
+                    logger.info(
+                        "Callback skipped for batch-managed broadcast child: tenant=%s agent=%s job=%s",
+                        tenant_id,
+                        agent_id,
+                        job_id,
+                    )
+                    return {
+                        "status": "ok",
+                        "task_type": task_type,
+                        "skipped": "batch_managed_child",
+                    }
+                if (
+                    _job_dispatch_intents_enabled(job)
+                    and not is_dispatch_service_callback
+                ):
+                    logger.info(
+                        "Callback skipped for batch-managed broadcast parent: tenant=%s agent=%s job=%s",
+                        tenant_id,
+                        agent_id,
+                        job_id,
+                    )
+                    return {
+                        "status": "ok",
+                        "task_type": task_type,
+                        "skipped": "batch_managed_external_callback",
+                    }
+                dispatch_meta = _build_dispatch_callback_meta(params) or {}
+                dispatch_meta.update(
+                    build_b3_dispatch_meta(getattr(request, "headers", {})),
                 )
                 run_kwargs = {
                     "is_manual": False,
