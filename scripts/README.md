@@ -78,3 +78,11 @@ opt-in `watchfiles.watch`/`awatch` creation stacks, and a
 samples, and representative owner stack frames. Linux fdinfo does not include
 path names directly; use the inode/device samples together with the runtime
 stack summary and matrix deltas to attribute owners.
+
+When multiple `--label` values are provided in one invocation, the labels are
+sampled consecutively without pausing for external matrix actions. The top-level
+`summary.steps` section reports per-label totals and `consecutive_delta` values
+for inotify fd count, inotify watch count, and native `notify-rs*` thread count.
+For true matrix attribution, run a labeled snapshot after each external step
+(empty runtime, load workspaces, start MCP clients, run queries) and compare the
+reported totals/deltas across those captures.

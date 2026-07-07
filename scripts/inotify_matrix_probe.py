@@ -229,6 +229,71 @@ def collect_snapshot(
     return snapshot
 
 
+def _notify_thread_count(snapshot: dict[str, Any]) -> int:
+    thread_counts = snapshot.get("proc", {}).get("thread_name_counts", {})
+    if not isinstance(thread_counts, dict):
+        return 0
+    total = 0
+    for name, count in thread_counts.items():
+        if not str(name).startswith("notify-rs"):
+            continue
+        try:
+            total += int(count)
+        except (TypeError, ValueError):
+            continue
+    return total
+
+
+def _metric(snapshot: dict[str, Any], key: str) -> int:
+    value = snapshot.get("proc", {}).get(key, 0)
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return 0
+
+
+def summarize_matrix(snapshots: list[dict[str, Any]]) -> dict[str, Any]:
+    """Summarize per-label inotify totals and deltas for matrix runs."""
+    steps: list[dict[str, Any]] = []
+    previous: dict[str, Any] | None = None
+    for snapshot in snapshots:
+        totals = {
+            "inotify_fd_count": _metric(snapshot, "inotify_fd_count"),
+            "inotify_watch_count": _metric(snapshot, "inotify_watch_count"),
+            "notify_thread_count": _notify_thread_count(snapshot),
+        }
+        previous_totals = (
+            {
+                "inotify_fd_count": _metric(previous, "inotify_fd_count"),
+                "inotify_watch_count": _metric(
+                    previous,
+                    "inotify_watch_count",
+                ),
+                "notify_thread_count": _notify_thread_count(previous),
+            }
+            if previous is not None
+            else None
+        )
+        deltas = (
+            {
+                key: value - previous_totals[key]
+                for key, value in totals.items()
+            }
+            if previous_totals is not None
+            else None
+        )
+        steps.append(
+            {
+                "label": snapshot.get("label"),
+                "totals": totals,
+                "has_previous_snapshot": previous_totals is not None,
+                "consecutive_delta": deltas,
+            },
+        )
+        previous = snapshot
+    return {"steps": steps}
+
+
 def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
@@ -273,7 +338,16 @@ def main() -> int:
         )
         for label in args.label
     ]
-    print(json.dumps({"snapshots": snapshots}, ensure_ascii=False, indent=2))
+    print(
+        json.dumps(
+            {
+                "snapshots": snapshots,
+                "summary": summarize_matrix(snapshots),
+            },
+            ensure_ascii=False,
+            indent=2,
+        ),
+    )
     return 0
 
 

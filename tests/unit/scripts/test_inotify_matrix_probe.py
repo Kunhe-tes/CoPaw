@@ -277,3 +277,65 @@ def test_collect_runtime_snapshot_ignores_malformed_stack_events(
 
     assert payload["watchfiles_stack_event_count"] == 1
     assert payload["watchfiles_stack_summary"]["event_count"] == 1
+
+
+def test_summarize_matrix_reports_consecutive_deltas() -> None:
+    probe = _load_probe_module()
+
+    summary = probe.summarize_matrix(
+        [
+            {
+                "label": "empty",
+                "proc": {
+                    "inotify_fd_count": 1,
+                    "inotify_watch_count": 2,
+                    "thread_name_counts": {
+                        "notify-rs": 1,
+                        "notify-rs broken": "bad",
+                        "swe": 3,
+                    },
+                },
+            },
+            {
+                "label": "workspaces",
+                "proc": {
+                    "inotify_fd_count": 4,
+                    "inotify_watch_count": 8,
+                    "thread_name_counts": {
+                        "notify-rs": 2,
+                        "notify-rs inoti": 2,
+                        "swe": 5,
+                    },
+                },
+            },
+        ],
+    )
+
+    assert summary == {
+        "steps": [
+            {
+                "label": "empty",
+                "totals": {
+                    "inotify_fd_count": 1,
+                    "inotify_watch_count": 2,
+                    "notify_thread_count": 1,
+                },
+                "has_previous_snapshot": False,
+                "consecutive_delta": None,
+            },
+            {
+                "label": "workspaces",
+                "totals": {
+                    "inotify_fd_count": 4,
+                    "inotify_watch_count": 8,
+                    "notify_thread_count": 4,
+                },
+                "has_previous_snapshot": True,
+                "consecutive_delta": {
+                    "inotify_fd_count": 3,
+                    "inotify_watch_count": 6,
+                    "notify_thread_count": 3,
+                },
+            },
+        ],
+    }
