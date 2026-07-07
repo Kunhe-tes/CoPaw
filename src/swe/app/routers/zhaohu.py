@@ -340,6 +340,8 @@ async def zhaohu_callback(
         source_id,
         body.msg_type,
     )
+    if not source_id:
+        return _json_response("error", "source_id not found", status_code=401)
 
     # 通用前置：获取 channel 并检查可用性
     zhaohu_ch = await _get_zhaohu_channel(request)
@@ -358,4 +360,6 @@ async def zhaohu_callback(
     if body.msg_type == "CustomCard":
         return await _handle_custom_card(request, body)
     # text
-    return await _handle_text_message(zhaohu_ch, body, background_tasks)
+    if body.msg_type == "text":
+        return await _handle_text_message(zhaohu_ch, body, background_tasks)
+    return _json_response("error", "type not allowed", status_code=401)
