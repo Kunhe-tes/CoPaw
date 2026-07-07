@@ -68,8 +68,7 @@ capture a labeled snapshot:
 python scripts/inotify_matrix_probe.py \
   --pid 1 \
   --label empty \
-  --runtime-url 'http://127.0.0.1:8080/api/runtime/inotify-diagnostic?include_fdinfo=true' \
-  --token "$SWE_RUNTIME_DIAGNOSTIC_TOKEN"
+  --runtime-url 'http://127.0.0.1:8080/api/runtime/inotify-diagnostic?include_fdinfo=true'
 ```
 
 The output includes `/proc/<pid>/fdinfo` inotify counts, native thread name

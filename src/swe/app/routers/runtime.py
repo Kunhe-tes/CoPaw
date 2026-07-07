@@ -82,10 +82,10 @@ def get_inotify_diagnostic(
 ) -> dict[str, object]:
     """Return inotify fd/watch diagnostics for the current process."""
     include_sensitive_details = _has_runtime_diagnostic_token(request)
-    if include_fdinfo and not include_sensitive_details:
+    if not include_sensitive_details:
         raise HTTPException(
             status_code=403,
-            detail="Raw inotify fdinfo requires a runtime diagnostic token",
+            detail="Inotify diagnostics require a runtime diagnostic token",
         )
     manager = getattr(
         request.app.state,

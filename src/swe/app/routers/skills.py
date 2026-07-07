@@ -63,7 +63,7 @@ from ..utils import schedule_agent_reload
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/skills", tags=["skills"])
-_POOL_SKILL_DOWNLOAD_LOCK = threading.Lock()
+_POOL_SKILL_DOWNLOAD_LOCK = asyncio.Lock()
 
 
 def _scan_error_payload(exc: SkillScanError) -> dict[str, Any]:
@@ -1235,67 +1235,66 @@ def _download_pool_skill_transaction(
     tenant_id: str | None,
     working_dir: Path,
 ) -> dict[str, Any]:
-    with _POOL_SKILL_DOWNLOAD_LOCK:
-        targets, hub_service = _resolve_and_preflight(
-            body,
-            tenant_id=tenant_id,
-            working_dir=working_dir,
-        )
+    targets, hub_service = _resolve_and_preflight(
+        body,
+        tenant_id=tenant_id,
+        working_dir=working_dir,
+    )
 
-        execution_plan = _build_download_plan(
-            targets,
-            body.skill_name,
-            tenant_id=tenant_id,
-        )
+    execution_plan = _build_download_plan(
+        targets,
+        body.skill_name,
+        tenant_id=tenant_id,
+    )
 
-        downloaded: list[dict[str, str]] = []
-        try:
-            for plan in execution_plan:
-                result = hub_service.download_to_workspace(
-                    skill_name=body.skill_name,
-                    workspace_dir=plan["workspace_dir"],
-                    target_name=plan["target_name"],
-                    overwrite=body.overwrite,
-                )
-                if not result.get("success"):
-                    for rollback in reversed(execution_plan):
-                        _restore_workspace_skill(rollback["snapshot"])
-                    raise HTTPException(
-                        status_code=409,
-                        detail={
-                            "downloaded": [],
-                            "conflicts": [result],
-                        },
-                    )
-                downloaded.append(
-                    {
-                        "workspace_id": str(plan["workspace_id"]),
-                        "workspace_name": str(
-                            result.get("workspace_name", "") or "",
-                        ),
-                        "name": str(result.get("name", "")),
+    downloaded: list[dict[str, str]] = []
+    try:
+        for plan in execution_plan:
+            result = hub_service.download_to_workspace(
+                skill_name=body.skill_name,
+                workspace_dir=plan["workspace_dir"],
+                target_name=plan["target_name"],
+                overwrite=body.overwrite,
+            )
+            if not result.get("success"):
+                for rollback in reversed(execution_plan):
+                    _restore_workspace_skill(rollback["snapshot"])
+                raise HTTPException(
+                    status_code=409,
+                    detail={
+                        "downloaded": [],
+                        "conflicts": [result],
                     },
                 )
-        except HTTPException:
-            raise
-        except SkillScanError as exc:
-            for rollback in reversed(execution_plan):
-                _restore_workspace_skill(rollback["snapshot"])
-            return _scan_error_response(exc)
-        except Exception:
-            for rollback in reversed(execution_plan):
-                _restore_workspace_skill(rollback["snapshot"])
-            raise
-        finally:
-            for plan in execution_plan:
-                backup_dir = plan["snapshot"].get("backup_dir")
-                if backup_dir is not None:
-                    shutil.rmtree(
-                        Path(backup_dir).parent,
-                        ignore_errors=True,
-                    )
+            downloaded.append(
+                {
+                    "workspace_id": str(plan["workspace_id"]),
+                    "workspace_name": str(
+                        result.get("workspace_name", "") or "",
+                    ),
+                    "name": str(result.get("name", "")),
+                },
+            )
+    except HTTPException:
+        raise
+    except SkillScanError as exc:
+        for rollback in reversed(execution_plan):
+            _restore_workspace_skill(rollback["snapshot"])
+        return _scan_error_response(exc)
+    except Exception:
+        for rollback in reversed(execution_plan):
+            _restore_workspace_skill(rollback["snapshot"])
+        raise
+    finally:
+        for plan in execution_plan:
+            backup_dir = plan["snapshot"].get("backup_dir")
+            if backup_dir is not None:
+                shutil.rmtree(
+                    Path(backup_dir).parent,
+                    ignore_errors=True,
+                )
 
-        return {"downloaded": downloaded}
+    return {"downloaded": downloaded}
 
 
 @router.post("/pool/download")
@@ -1309,12 +1308,13 @@ async def download_pool_skill_to_workspaces(
     """
     tenant_id = _request_effective_tenant_id(request)
     working_dir = _request_tenant_working_dir(request)
-    return await asyncio.to_thread(
-        _download_pool_skill_transaction,
-        body,
-        tenant_id=tenant_id,
-        working_dir=working_dir,
-    )
+    async with _POOL_SKILL_DOWNLOAD_LOCK:
+        return await asyncio.to_thread(
+            _download_pool_skill_transaction,
+            body,
+            tenant_id=tenant_id,
+            working_dir=working_dir,
+        )
 
 
 @router.post("/pool/import-builtin")

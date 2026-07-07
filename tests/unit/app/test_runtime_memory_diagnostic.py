@@ -570,6 +570,7 @@ def test_inotify_diagnostic_route_bypasses_auth_and_tenant_middleware(
 
     monkeypatch.setattr("swe.app.auth.is_auth_enabled", lambda: True)
     monkeypatch.setattr("swe.app.auth.has_registered_users", lambda: True)
+    monkeypatch.setenv("SWE_RUNTIME_DIAGNOSTIC_TOKEN", "secret-token")
 
     app = FastAPI()
     app.state.runtime_diagnostic_manager = FakeManager()
@@ -579,13 +580,16 @@ def test_inotify_diagnostic_route_bypasses_auth_and_tenant_middleware(
     app.add_middleware(TenantIdentityMiddleware, default_tenant_id=None)
     client = TestClient(app, raise_server_exceptions=False)
 
-    response = client.get("/api/runtime/inotify-diagnostic")
+    response = client.get(
+        "/api/runtime/inotify-diagnostic",
+        headers={"X-Runtime-Diagnostic-Token": "secret-token"},
+    )
 
     assert response.status_code == 200
     assert response.json() == {"ok": True}
 
 
-def test_inotify_diagnostic_route_rejects_raw_fdinfo_without_token() -> None:
+def test_inotify_diagnostic_route_rejects_requests_without_token() -> None:
     class FakeManager(RuntimeDiagnosticManager):
         def __init__(self) -> None:
             pass
@@ -604,17 +608,17 @@ def test_inotify_diagnostic_route_rejects_raw_fdinfo_without_token() -> None:
     app.include_router(router, prefix="/api")
     client = TestClient(app, client=("203.0.113.10", 12345))
 
-    response = client.get(
-        "/api/runtime/inotify-diagnostic?include_fdinfo=true",
-    )
+    response = client.get("/api/runtime/inotify-diagnostic")
 
     assert response.status_code == 403
     assert response.json()["detail"] == (
-        "Raw inotify fdinfo requires a runtime diagnostic token"
+        "Inotify diagnostics require a runtime diagnostic token"
     )
 
 
-def test_inotify_diagnostic_route_redacts_remote_details() -> None:
+def test_inotify_diagnostic_route_allows_details_with_token(
+    monkeypatch,
+) -> None:
     class FakeManager(RuntimeDiagnosticManager):
         def __init__(self) -> None:
             pass
@@ -631,21 +635,26 @@ def test_inotify_diagnostic_route_redacts_remote_details() -> None:
                 "include_details": include_details,
             }
 
+    monkeypatch.setenv("SWE_RUNTIME_DIAGNOSTIC_TOKEN", "secret-token")
+
     app = FastAPI()
     app.state.runtime_diagnostic_manager = FakeManager()
     app.include_router(router, prefix="/api")
     client = TestClient(app, client=("203.0.113.10", 12345))
 
-    response = client.get("/api/runtime/inotify-diagnostic")
+    response = client.get(
+        "/api/runtime/inotify-diagnostic?include_fdinfo=true",
+        headers={"X-Runtime-Diagnostic-Token": "secret-token"},
+    )
 
     assert response.status_code == 200
     assert response.json() == {
-        "include_fdinfo": False,
-        "include_details": False,
+        "include_fdinfo": True,
+        "include_details": True,
     }
 
 
-def test_inotify_diagnostic_route_redacts_localhost_without_token() -> None:
+def test_inotify_diagnostic_route_rejects_localhost_without_token() -> None:
     class FakeManager(RuntimeDiagnosticManager):
         def __init__(self) -> None:
             pass
@@ -669,11 +678,10 @@ def test_inotify_diagnostic_route_redacts_localhost_without_token() -> None:
 
     response = client.get("/api/runtime/inotify-diagnostic")
 
-    assert response.status_code == 200
-    assert response.json() == {
-        "include_fdinfo": False,
-        "include_details": False,
-    }
+    assert response.status_code == 403
+    assert response.json()["detail"] == (
+        "Inotify diagnostics require a runtime diagnostic token"
+    )
 
 
 def test_memory_type_holders_route_bypasses_auth_and_tenant_middleware(
