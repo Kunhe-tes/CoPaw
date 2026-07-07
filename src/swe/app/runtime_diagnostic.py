@@ -11,6 +11,7 @@ import logging
 import math
 import os
 import random
+import traceback
 import time
 from collections.abc import Callable
 from importlib import import_module
@@ -37,7 +38,10 @@ _FIRST_DIAGNOSTIC_JITTER_SECONDS = 10.0
 _DIAGNOSTIC_INTERVAL_SECONDS = 1800.0
 _MEMORY_DIFF_PROBE_INTERVAL_SECONDS = 300.0
 _MEMORY_DIFF_PROBE_LIMIT = 20
+_WATCHFILES_STACK_PROBE_LIMIT = 50
 _TRUTHY_ENV_VALUES = {"1", "true", "yes", "on"}
+_WATCHFILES_STACK_EVENTS: list[dict[str, object]] = []
+_WATCHFILES_STACK_PROBE_INSTALLED = False
 
 
 def _percentile(values: list[float], percentile: float) -> float | None:
@@ -123,6 +127,55 @@ def _parse_inotify_watch_line(line: str) -> dict[str, str]:
     return fields
 
 
+def _record_watchfiles_stack_event(function_name: str, args: tuple) -> None:
+    paths = [str(arg) for arg in args if isinstance(arg, (str, os.PathLike))][
+        :10
+    ]
+    event: dict[str, object] = {
+        "function": function_name,
+        "paths": paths,
+        "stack": traceback.format_stack(limit=16)[:-2],
+    }
+    _WATCHFILES_STACK_EVENTS.append(event)
+    del _WATCHFILES_STACK_EVENTS[:-_WATCHFILES_STACK_PROBE_LIMIT]
+
+
+def install_watchfiles_stack_probe() -> bool:
+    """Patch watchfiles watch APIs to record creation call stacks.
+
+    The probe is opt-in because it monkeypatches a third-party module for
+    diagnostics. It should be enabled before code creates file watchers.
+    """
+    global _WATCHFILES_STACK_PROBE_INSTALLED  # pylint: disable=global-statement
+    if _WATCHFILES_STACK_PROBE_INSTALLED:
+        return True
+    if not _env_flag_enabled("SWE_WATCHFILES_STACK_PROBE_ENABLED"):
+        return False
+
+    try:
+        watchfiles = import_module("watchfiles")
+    except Exception as exc:  # pylint: disable=broad-except
+        logger.warning("Unable to install watchfiles stack probe: %s", exc)
+        return False
+
+    for name in ("watch", "awatch"):
+        original = getattr(watchfiles, name, None)
+        if original is None or getattr(original, "_swe_stack_probe", False):
+            continue
+
+        def _wrapped(*args, __original=original, __name=name, **kwargs):
+            _record_watchfiles_stack_event(__name, args)
+            return __original(*args, **kwargs)
+
+        _wrapped._swe_stack_probe = True  # type: ignore[attr-defined]
+        _wrapped._swe_original = original  # type: ignore[attr-defined]
+        setattr(watchfiles, name, _wrapped)
+
+    _WATCHFILES_STACK_PROBE_INSTALLED = True
+    logger.info("Installed watchfiles stack probe")
+    return True
+
+
 class RuntimeDiagnosticManager:
     """Collect and emit Runtime Instance diagnostic metrics."""
 
@@ -191,6 +244,7 @@ class RuntimeDiagnosticManager:
             minimum=1.0,
         )
         self._last_memory_diff_snapshot: dict[str, object] | None = None
+        self._watchfiles_stack_probe_enabled = install_watchfiles_stack_probe()
 
     def set_workspace_metrics(
         self,
@@ -644,6 +698,7 @@ class RuntimeDiagnosticManager:
         proc_root: str | Path = "/proc",
         max_fdinfo_bytes: int = 65536,
         include_fdinfo: bool = False,
+        include_details: bool = True,
     ) -> dict[str, object]:
         """Collect process inotify fd and watch diagnostics from procfs."""
         errors: list[dict[str, str]] = []
@@ -715,8 +770,9 @@ class RuntimeDiagnosticManager:
                 ),
                 "target": target,
                 "watch_count": len(watches),
-                "watches": watches,
             }
+            if include_details:
+                item["watches"] = watches
             if include_fdinfo:
                 fdinfo_limit = max(0, int(max_fdinfo_bytes))
                 item["fdinfo"] = fdinfo_text[:fdinfo_limit]
@@ -731,6 +787,12 @@ class RuntimeDiagnosticManager:
                 "inotify_fd_count": len(inotify_fds),
                 "inotify_watch_count": inotify_watch_count,
                 "inotify_fds": inotify_fds,
+                "watchfiles_stack_probe_enabled": (
+                    self._watchfiles_stack_probe_enabled
+                ),
+                "watchfiles_stack_events": (
+                    list(_WATCHFILES_STACK_EVENTS) if include_details else []
+                ),
                 "errors": errors,
             },
         )

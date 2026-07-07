@@ -5,6 +5,8 @@ from __future__ import annotations
 
 import asyncio
 import json
+import sys
+import types
 
 import pytest
 from swe.app import runtime_diagnostic
@@ -308,6 +310,109 @@ def test_collect_inotify_diagnostic_counts_before_fdinfo_truncation(
     assert payload["inotify_fds"][0]["watch_count"] == 2
     assert payload["inotify_fds"][0]["fdinfo"] == ""
     assert payload["inotify_fds"][0]["fdinfo_truncated"] is True
+
+
+def test_collect_inotify_diagnostic_can_redact_details(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    proc_dir = tmp_path / "proc" / "123"
+    fd_dir = proc_dir / "fd"
+    fdinfo_dir = proc_dir / "fdinfo"
+    fd_dir.mkdir(parents=True)
+    fdinfo_dir.mkdir()
+    (fd_dir / "3").symlink_to("anon_inode:inotify")
+    (fdinfo_dir / "3").write_text(
+        "pos:\t0\n"
+        "inotify wd:1 ino:abc sdev:01 mask:00000800 ignored_mask:0\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        runtime_diagnostic,
+        "_WATCHFILES_STACK_EVENTS",
+        [{"function": "watch", "paths": ["/secret"], "stack": ["frame"]}],
+    )
+
+    process = _Process()
+    process.pid = 123
+    manager = _manager(process=process)
+
+    payload = manager.collect_inotify_diagnostic(
+        proc_root=tmp_path / "proc",
+        include_details=False,
+    )
+
+    assert payload["inotify_fd_count"] == 1
+    assert payload["inotify_watch_count"] == 1
+    assert payload["inotify_fds"] == [
+        {
+            "fd": 3,
+            "target": "anon_inode:inotify",
+            "watch_count": 1,
+        },
+    ]
+    assert payload["watchfiles_stack_events"] == []
+
+
+def test_watchfiles_stack_probe_is_disabled_by_default(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("SWE_WATCHFILES_STACK_PROBE_ENABLED", raising=False)
+    monkeypatch.setattr(
+        runtime_diagnostic,
+        "_WATCHFILES_STACK_PROBE_INSTALLED",
+        False,
+    )
+    monkeypatch.setattr(runtime_diagnostic, "_WATCHFILES_STACK_EVENTS", [])
+
+    manager = _manager()
+
+    assert manager._watchfiles_stack_probe_enabled is False
+
+
+def test_watchfiles_stack_probe_records_watch_calls(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    fake_watchfiles = types.ModuleType("watchfiles")
+
+    def watch(*_args, **_kwargs):
+        return iter(())
+
+    class _EmptyAsyncIterator:
+        def __aiter__(self):
+            return self
+
+        async def __anext__(self):
+            raise StopAsyncIteration
+
+    def awatch(*_args, **_kwargs):
+        return _EmptyAsyncIterator()
+
+    fake_watchfiles.watch = watch
+    fake_watchfiles.awatch = awatch
+    monkeypatch.setitem(sys.modules, "watchfiles", fake_watchfiles)
+    monkeypatch.setenv("SWE_WATCHFILES_STACK_PROBE_ENABLED", "1")
+    monkeypatch.setattr(
+        runtime_diagnostic,
+        "_WATCHFILES_STACK_PROBE_INSTALLED",
+        False,
+    )
+    monkeypatch.setattr(runtime_diagnostic, "_WATCHFILES_STACK_EVENTS", [])
+
+    manager = _manager()
+    fake_watchfiles.watch(tmp_path)
+    fake_watchfiles.awatch(tmp_path / "async")
+
+    payload = manager.collect_inotify_diagnostic(proc_root=tmp_path / "proc")
+
+    assert manager._watchfiles_stack_probe_enabled is True
+    assert payload["watchfiles_stack_probe_enabled"] is True
+    assert [
+        event["function"] for event in payload["watchfiles_stack_events"]
+    ] == ["watch", "awatch"]
+    assert payload["watchfiles_stack_events"][0]["paths"] == [str(tmp_path)]
+    assert payload["watchfiles_stack_events"][0]["stack"]
 
 
 def test_failed_process_fields_do_not_suppress_other_process_fields() -> None:

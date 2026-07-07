@@ -3,16 +3,23 @@
 
 from __future__ import annotations
 
+import hmac
+import os
+
 from fastapi import APIRouter, HTTPException, Query, Request
 
 from swe.app.runtime_diagnostic import RuntimeDiagnosticManager
 
 router = APIRouter(prefix="/runtime", tags=["runtime"])
+_RUNTIME_DIAGNOSTIC_TOKEN_HEADER = "X-Runtime-Diagnostic-Token"
 
 
-def _is_local_client(request: Request) -> bool:
-    host = getattr(request.client, "host", None)
-    return host in {"127.0.0.1", "::1", "localhost", "testclient"}
+def _has_runtime_diagnostic_token(request: Request) -> bool:
+    expected = os.environ.get("SWE_RUNTIME_DIAGNOSTIC_TOKEN", "")
+    if not expected:
+        return False
+    supplied = request.headers.get(_RUNTIME_DIAGNOSTIC_TOKEN_HEADER, "")
+    return hmac.compare_digest(supplied, expected)
 
 
 @router.get("/memory-diagnostic")
@@ -74,10 +81,11 @@ def get_inotify_diagnostic(
     include_fdinfo: bool = Query(False),
 ) -> dict[str, object]:
     """Return inotify fd/watch diagnostics for the current process."""
-    if include_fdinfo and not _is_local_client(request):
+    include_sensitive_details = _has_runtime_diagnostic_token(request)
+    if include_fdinfo and not include_sensitive_details:
         raise HTTPException(
             status_code=403,
-            detail="Raw inotify fdinfo is only available to local clients",
+            detail="Raw inotify fdinfo requires a runtime diagnostic token",
         )
     manager = getattr(
         request.app.state,
@@ -92,4 +100,5 @@ def get_inotify_diagnostic(
     return manager.collect_inotify_diagnostic(
         max_fdinfo_bytes=max_fdinfo_bytes,
         include_fdinfo=include_fdinfo,
+        include_details=include_sensitive_details,
     )

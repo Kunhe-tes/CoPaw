@@ -471,7 +471,9 @@ def test_memory_type_holders_route_calls_runtime_manager() -> None:
     }
 
 
-def test_inotify_diagnostic_route_calls_runtime_manager() -> None:
+def test_inotify_diagnostic_route_passes_details_with_runtime_token(
+    monkeypatch,
+) -> None:
     class FakeManager(RuntimeDiagnosticManager):
         def __init__(self) -> None:
             pass
@@ -481,10 +483,12 @@ def test_inotify_diagnostic_route_calls_runtime_manager() -> None:
             *,
             max_fdinfo_bytes: int = 65536,
             include_fdinfo: bool = False,
+            include_details: bool = True,
         ) -> dict[str, object]:
             return {
                 "max_fdinfo_bytes": max_fdinfo_bytes,
                 "include_fdinfo": include_fdinfo,
+                "include_details": include_details,
                 "ok": True,
             }
 
@@ -492,17 +496,20 @@ def test_inotify_diagnostic_route_calls_runtime_manager() -> None:
     app.state.runtime_diagnostic_manager = FakeManager()
     app.include_router(router, prefix="/api")
     client = TestClient(app)
+    monkeypatch.setenv("SWE_RUNTIME_DIAGNOSTIC_TOKEN", "secret-token")
 
     response = client.get(
         "/api/runtime/inotify-diagnostic"
         "?max_fdinfo_bytes=128"
         "&include_fdinfo=true",
+        headers={"X-Runtime-Diagnostic-Token": "secret-token"},
     )
 
     assert response.status_code == 200
     assert response.json() == {
         "max_fdinfo_bytes": 128,
         "include_fdinfo": True,
+        "include_details": True,
         "ok": True,
     }
 
@@ -557,6 +564,7 @@ def test_inotify_diagnostic_route_bypasses_auth_and_tenant_middleware(
             *,
             max_fdinfo_bytes: int = 65536,
             include_fdinfo: bool = False,
+            include_details: bool = True,
         ) -> dict[str, object]:
             return {"ok": True}
 
@@ -577,7 +585,7 @@ def test_inotify_diagnostic_route_bypasses_auth_and_tenant_middleware(
     assert response.json() == {"ok": True}
 
 
-def test_inotify_diagnostic_route_rejects_remote_raw_fdinfo() -> None:
+def test_inotify_diagnostic_route_rejects_raw_fdinfo_without_token() -> None:
     class FakeManager(RuntimeDiagnosticManager):
         def __init__(self) -> None:
             pass
@@ -587,6 +595,7 @@ def test_inotify_diagnostic_route_rejects_remote_raw_fdinfo() -> None:
             *,
             max_fdinfo_bytes: int = 65536,
             include_fdinfo: bool = False,
+            include_details: bool = True,
         ) -> dict[str, object]:
             return {"ok": True}
 
@@ -601,8 +610,70 @@ def test_inotify_diagnostic_route_rejects_remote_raw_fdinfo() -> None:
 
     assert response.status_code == 403
     assert response.json()["detail"] == (
-        "Raw inotify fdinfo is only available to local clients"
+        "Raw inotify fdinfo requires a runtime diagnostic token"
     )
+
+
+def test_inotify_diagnostic_route_redacts_remote_details() -> None:
+    class FakeManager(RuntimeDiagnosticManager):
+        def __init__(self) -> None:
+            pass
+
+        def collect_inotify_diagnostic(
+            self,
+            *,
+            max_fdinfo_bytes: int = 65536,
+            include_fdinfo: bool = False,
+            include_details: bool = True,
+        ) -> dict[str, object]:
+            return {
+                "include_fdinfo": include_fdinfo,
+                "include_details": include_details,
+            }
+
+    app = FastAPI()
+    app.state.runtime_diagnostic_manager = FakeManager()
+    app.include_router(router, prefix="/api")
+    client = TestClient(app, client=("203.0.113.10", 12345))
+
+    response = client.get("/api/runtime/inotify-diagnostic")
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "include_fdinfo": False,
+        "include_details": False,
+    }
+
+
+def test_inotify_diagnostic_route_redacts_localhost_without_token() -> None:
+    class FakeManager(RuntimeDiagnosticManager):
+        def __init__(self) -> None:
+            pass
+
+        def collect_inotify_diagnostic(
+            self,
+            *,
+            max_fdinfo_bytes: int = 65536,
+            include_fdinfo: bool = False,
+            include_details: bool = True,
+        ) -> dict[str, object]:
+            return {
+                "include_fdinfo": include_fdinfo,
+                "include_details": include_details,
+            }
+
+    app = FastAPI()
+    app.state.runtime_diagnostic_manager = FakeManager()
+    app.include_router(router, prefix="/api")
+    client = TestClient(app, client=("127.0.0.1", 12345))
+
+    response = client.get("/api/runtime/inotify-diagnostic")
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "include_fdinfo": False,
+        "include_details": False,
+    }
 
 
 def test_memory_type_holders_route_bypasses_auth_and_tenant_middleware(
