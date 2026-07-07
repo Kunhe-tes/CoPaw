@@ -13,6 +13,7 @@ from copy import deepcopy
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from uuid import uuid4
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from pathlib import Path
 from typing import Any, Callable, Dict, Optional, TypeVar, cast
@@ -31,6 +32,7 @@ from ..source_system_config.runtime import (
     bind_source_system_config,
     get_current_source_system_config,
     reset_current_source_system_config,
+    resolve_cron_notification_config,
     resolve_cron_task_session_cleanup_config,
     resolve_cron_unread_auto_pause_config,
     set_current_source_system_config,
@@ -170,6 +172,23 @@ def _merge_cron_dispatch_meta(
     merged = dict(execution_meta or {})
     merged["cron_dispatch"] = dict(dispatch_meta)
     return merged
+
+
+def _is_weekend_notification_time(
+    due_at: datetime,
+    timezone_name: str,
+) -> bool:
+    if due_at.tzinfo is None:
+        due_at = due_at.replace(tzinfo=timezone.utc)
+    try:
+        tz = ZoneInfo(timezone_name or "UTC")
+    except (ZoneInfoNotFoundError, ValueError):
+        logger.warning(
+            "Invalid cron notification timezone %s; fallback to UTC",
+            timezone_name,
+        )
+        tz = timezone.utc
+    return due_at.astimezone(tz).weekday() >= 5
 
 
 def _parse_cleanup_datetime(value: Any) -> datetime | None:
@@ -2632,6 +2651,7 @@ class CronManager:  # pylint: disable=too-many-public-methods
         notification_timezone = (
             job.schedule.timezone or self._timezone or "UTC"
         )
+        suppress_notification = False
         if exec_status == "success" and not is_manual:
             delay_minutes = _notification_delay_minutes(job)
             parent_scheduled_fire_at = _dispatch_parent_scheduled_fire_at(
@@ -2664,6 +2684,29 @@ class CronManager:  # pylint: disable=too-many-public-methods
                 notification_due_at = (end_time or actual_time) + timedelta(
                     minutes=delay_minutes,
                 )
+            original_notification_time = (
+                notification_due_at or end_time or actual_time
+            )
+            notification_config = resolve_cron_notification_config(
+                get_current_source_system_config(),
+            )
+            if (
+                notification_config.skip_weekend_zhaohu_enabled
+                and _is_weekend_notification_time(
+                    original_notification_time,
+                    notification_timezone,
+                )
+            ):
+                suppress_notification = True
+                notification_due_at = None
+                notification_timezone = ""
+                logger.info(
+                    "Suppress cron weekend zhaohu notification: "
+                    "job_id=%s job_name=%s original_notification_time=%s",
+                    job.id,
+                    job.name,
+                    original_notification_time.isoformat(),
+                )
 
         await self._monitor_sync_client.record_execution(
             job=job,
@@ -2680,6 +2723,7 @@ class CronManager:  # pylint: disable=too-many-public-methods
             executor_leader=executor_leader,
             notification_due_at=notification_due_at,
             notification_timezone=notification_timezone,
+            suppress_notification=suppress_notification,
             meta=execution_meta,
         )
 

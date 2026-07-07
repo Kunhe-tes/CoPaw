@@ -497,6 +497,7 @@ class MonitorSyncClient:
         scheduled_time: Optional[datetime] = None,
         notification_due_at: Optional[datetime] = None,
         notification_timezone: str = "",
+        suppress_notification: bool = False,
         meta: Optional[Dict[str, Any]] = None,
     ) -> None:
         """Record an execution to Monitor.
@@ -537,6 +538,7 @@ class MonitorSyncClient:
             scheduled_time=scheduled_time,
             notification_due_at=notification_due_at,
             notification_timezone=notification_timezone,
+            suppress_notification=suppress_notification,
             meta=meta,
         )
 
@@ -568,6 +570,7 @@ class MonitorSyncClient:
         scheduled_time: Optional[datetime],
         notification_due_at: Optional[datetime] = None,
         notification_timezone: str = "",
+        suppress_notification: bool = False,
         meta: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         """Build execution sync data dict.
@@ -593,7 +596,10 @@ class MonitorSyncClient:
             Dict with execution sync fields
         """
         # 手动执行且成功的任务默认标记为已读
-        needs_notification = self._execution_needs_notification(job, status)
+        needs_notification = (
+            self._execution_needs_notification(job, status)
+            and not suppress_notification
+        )
         is_read = is_manual and status == "success"
         read_at = None
         if is_read and end_time:

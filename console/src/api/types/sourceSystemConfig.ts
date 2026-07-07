@@ -14,6 +14,10 @@ export interface SourceSystemConfig extends Record<string, unknown> {
     timeout_seconds?: number;
     [key: string]: unknown;
   };
+  cron_notifications?: {
+    skip_weekend_zhaohu_enabled?: boolean;
+    [key: string]: unknown;
+  };
 }
 
 export interface EffectiveSourceSystemConfig {

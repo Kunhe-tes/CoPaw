@@ -39,6 +39,7 @@ import {
   formatSystemPromptInjectionText,
   parseSystemPromptInjectionText,
   readArchiveMaintenanceConfig,
+  readCronNotificationConfig,
   readCronTaskSessionCleanupConfig,
   readCronUnreadAutoPauseConfig,
   readLlmRateLimiterConfigState,
@@ -49,6 +50,7 @@ import {
   readToolResultCompactConfig,
   validateSourceSystemConfig,
   writeArchiveMaintenanceValue,
+  writeCronNotificationValue,
   writeCronTaskSessionCleanupValue,
   writeCronUnreadAutoPauseValue,
   writeLlmRateLimiterValue,
@@ -247,6 +249,20 @@ export default function SystemConfigPage() {
     setValidationError(null);
     setDraftConfig((previous) =>
       writeCronUnreadAutoPauseValue(previous, "threshold", value),
+    );
+  };
+
+  const handleCronSkipWeekendZhaohuEnabledChange = (checked: boolean) => {
+    if (formDisabled) {
+      return;
+    }
+    setValidationError(null);
+    setDraftConfig((previous) =>
+      writeCronNotificationValue(
+        previous,
+        "skip_weekend_zhaohu_enabled",
+        checked,
+      ),
     );
   };
 
@@ -492,6 +508,7 @@ export default function SystemConfigPage() {
   };
 
   const cronUnreadAutoPauseConfig = readCronUnreadAutoPauseConfig(draftConfig);
+  const cronNotificationConfig = readCronNotificationConfig(draftConfig);
   const cronTaskSessionCleanupConfig =
     readCronTaskSessionCleanupConfig(draftConfig);
   const archiveMaintenanceConfig = readArchiveMaintenanceConfig(draftConfig);
@@ -972,6 +989,36 @@ export default function SystemConfigPage() {
                         onChange={handleCronUnreadAutoPauseThresholdChange}
                       />
                     </label>
+                  </div>
+                </section>
+                <section className={styles.scheduledTaskSection}>
+                  <div className={styles.switchRow}>
+                    <div className={styles.switchCopy}>
+                      <span className={styles.switchTitle}>
+                        {t(
+                          "sourceSystemConfigPage.cronSkipWeekendZhaohuTitle",
+                          {
+                            defaultValue: "周末不发招呼完成通知",
+                          },
+                        )}
+                      </span>
+                      <span className={styles.switchDescription}>
+                        {t(
+                          "sourceSystemConfigPage.cronSkipWeekendZhaohuDescription",
+                          {
+                            defaultValue:
+                              "开启后，按任务时区判断原始通知时间，落在周六或周日的定时任务运行结果不发送招呼完成通知。",
+                          },
+                        )}
+                      </span>
+                    </div>
+                    <Switch
+                      checked={
+                        cronNotificationConfig.skip_weekend_zhaohu_enabled
+                      }
+                      disabled={formDisabled}
+                      onChange={handleCronSkipWeekendZhaohuEnabledChange}
+                    />
                   </div>
                 </section>
                 <section className={styles.scheduledTaskSection}>

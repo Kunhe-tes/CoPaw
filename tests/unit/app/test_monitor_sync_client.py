@@ -386,6 +386,76 @@ class TestExecutionRecordFormat:
         assert result["notification_status"] == "pending"
         assert result["notification_due_at"] == "2026-05-19T18:05:00+08:00"
 
+    def test_suppressed_agent_success_does_not_require_notification(self):
+        """Suppressed successful agent runs must not enter notification queue."""
+        client = MonitorSyncClient("http://test:8080/api")
+        job = MagicMock()
+        job.id = "job-001"
+        job.name = "Test Job"
+        job.tenant_id = "tenant-001"
+        job.task_type = "agent"
+        job.meta = {}
+
+        actual_time = datetime(2026, 6, 5, 15, 30, 0, tzinfo=timezone.utc)
+        due_at = datetime(2026, 6, 5, 16, 30, 0, tzinfo=timezone.utc)
+        result = client._build_execution_sync_data(
+            job=job,
+            status="success",
+            actual_time=actual_time,
+            end_time=actual_time,
+            duration_ms=100,
+            error_message="",
+            is_manual=False,
+            trace_id="",
+            session_id="",
+            input_snapshot=None,
+            output_preview="",
+            instance_id="",
+            executor_leader="",
+            scheduled_time=None,
+            notification_due_at=due_at,
+            notification_timezone="Asia/Shanghai",
+            suppress_notification=True,
+        )
+
+        assert result["notification_status"] == "not_required"
+        assert result["notification_due_at"] is None
+        assert result["notification_timezone"] == ""
+
+    def test_background_cron_success_does_not_require_notification(self):
+        """Non-agent background cron jobs never create zhaohu completion notices."""
+        client = MonitorSyncClient("http://test:8080/api")
+        job = MagicMock()
+        job.id = "dream-001"
+        job.name = "Dream Job"
+        job.tenant_id = "tenant-001"
+        job.task_type = "dream"
+        job.meta = {}
+
+        actual_time = datetime(2026, 6, 5, 10, 0, 0, tzinfo=timezone.utc)
+        result = client._build_execution_sync_data(
+            job=job,
+            status="success",
+            actual_time=actual_time,
+            end_time=actual_time,
+            duration_ms=100,
+            error_message="",
+            is_manual=False,
+            trace_id="",
+            session_id="",
+            input_snapshot=None,
+            output_preview="",
+            instance_id="",
+            executor_leader="",
+            scheduled_time=None,
+            notification_due_at=actual_time,
+            notification_timezone="Asia/Shanghai",
+        )
+
+        assert result["notification_status"] == "not_required"
+        assert result["notification_due_at"] is None
+        assert result["notification_timezone"] == ""
+
     def test_build_execution_sync_data_includes_model_meta(self):
         from swe.app.crons.models import (
             CronJobRequest,

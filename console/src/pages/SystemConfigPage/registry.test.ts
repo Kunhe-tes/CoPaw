@@ -2,12 +2,14 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 
 import {
   ARCHIVE_MAINTENANCE_RUN_TIME_OPTIONS,
+  CRON_NOTIFICATION_DEFAULTS,
   CRON_TASK_SESSION_CLEANUP_RUN_TIME_OPTIONS,
   CURRENT_SOURCE_SYSTEM_CONFIG_SWITCHES,
   clearModelCallPolicyConfig,
   enableModelCallPolicyConfig,
   normalizeSystemPromptInjections,
   readArchiveMaintenanceConfig,
+  readCronNotificationConfig,
   readCronTaskSessionCleanupConfig,
   readCronUnreadAutoPauseConfig,
   readLlmRateLimiterConfigState,
@@ -15,6 +17,7 @@ import {
   readSystemPromptInjections,
   validateSourceSystemConfig,
   writeArchiveMaintenanceValue,
+  writeCronNotificationValue,
   writeCronTaskSessionCleanupValue,
   writeCronUnreadAutoPauseValue,
   writeLlmRateLimiterValue,
@@ -103,6 +106,39 @@ describe("SystemConfigPage registry compatibility", () => {
     expect(readCronUnreadAutoPauseConfig({})).toEqual({
       enabled: true,
       threshold: 10,
+    });
+  });
+
+  it("reads default cron notification settings", () => {
+    expect(readCronNotificationConfig({})).toEqual(
+      CRON_NOTIFICATION_DEFAULTS,
+    );
+  });
+
+  it("writes cron notification settings without mutating source", () => {
+    vi.stubGlobal("structuredClone", undefined);
+    const source = {
+      provider_policy: { default_model: "qwen-max" },
+      cron_notifications: {
+        unknown_retained: "yes",
+      },
+    };
+
+    const next = writeCronNotificationValue(
+      source,
+      "skip_weekend_zhaohu_enabled",
+      true,
+    );
+
+    expect(next).toEqual({
+      provider_policy: { default_model: "qwen-max" },
+      cron_notifications: {
+        skip_weekend_zhaohu_enabled: true,
+        unknown_retained: "yes",
+      },
+    });
+    expect(source.cron_notifications).toEqual({
+      unknown_retained: "yes",
     });
   });
 

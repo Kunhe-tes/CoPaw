@@ -19,6 +19,7 @@ from .registry import (
     ARCHIVE_MAINTENANCE_OLD_ORPHAN_DAYS_SETTING,
     ARCHIVE_MAINTENANCE_TIMEOUT_SECONDS_SETTING,
     APPROVAL_NOTIFICATIONS_ZHAOHU_TOOL_GUARD_ENABLED_SETTING,
+    CRON_NOTIFICATIONS_SKIP_WEEKEND_ZHAOHU_ENABLED_SETTING,
     CRON_TASK_SESSION_CLEANUP_CRON_SETTING,
     CRON_TASK_SESSION_CLEANUP_ENABLED_SETTING,
     CRON_TASK_SESSION_CLEANUP_RETENTION_DAYS_SETTING,
@@ -101,6 +102,13 @@ _RATE_LIMIT_SOURCE_TO_RUNTIME_FIELDS = {
     "llm_chat_acquire_timeout": "chat_acquire_timeout",
     "llm_cron_acquire_timeout": "cron_acquire_timeout",
 }
+
+
+@dataclass(frozen=True)
+class CronNotificationConfig:
+    """Runtime config for scheduled-task completion notifications."""
+
+    skip_weekend_zhaohu_enabled: bool
 
 
 @contextmanager
@@ -380,6 +388,33 @@ def resolve_archive_maintenance_config(
             normalized_section.get(
                 "timeout_seconds",
                 ARCHIVE_MAINTENANCE_TIMEOUT_SECONDS_SETTING.default_value,
+            ),
+        ),
+    )
+
+
+def resolve_cron_notification_config(
+    source_config: Any | None = None,
+) -> CronNotificationConfig:
+    """Resolve scheduled-task completion notification runtime config."""
+    raw_config = _extract_config_payload(source_config)
+    merged = merge_source_system_config_with_defaults(raw_config)
+    raw_section = merged.get("cron_notifications")
+    section = raw_section if isinstance(raw_section, dict) else {}
+    normalized = normalize_registered_setting_values(
+        {"cron_notifications": section},
+    )
+    normalized_section = normalized.get("cron_notifications")
+    if not isinstance(normalized_section, dict):
+        normalized_section = {}
+    return CronNotificationConfig(
+        skip_weekend_zhaohu_enabled=bool(
+            normalized_section.get(
+                "skip_weekend_zhaohu_enabled",
+                (
+                    CRON_NOTIFICATIONS_SKIP_WEEKEND_ZHAOHU_ENABLED_SETTING
+                    .default_value
+                ),
             ),
         ),
     )

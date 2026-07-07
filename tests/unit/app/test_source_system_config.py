@@ -32,6 +32,7 @@ from swe.app.source_system_config.runtime import (
     get_system_prompt_injections,
     is_zhaohu_tool_guard_notification_enabled,
     resolve_archive_maintenance_config,
+    resolve_cron_notification_config,
     resolve_cron_task_session_cleanup_config,
     resolve_cron_unread_auto_pause_config,
     resolve_file_read_truncation_config,
@@ -83,6 +84,9 @@ DEFAULT_EXPECTED_SOURCE_CONFIG = {
         "max_files_per_workspace": 100,
         "max_files_per_run": 5000,
         "timeout_seconds": 900,
+    },
+    "cron_notifications": {
+        "skip_weekend_zhaohu_enabled": False,
     },
     "approval_notifications": {
         "zhaohu_tool_guard_enabled": False,
@@ -1814,6 +1818,36 @@ class TestSourceSystemConfigRuntime:
         assert result.max_files_per_workspace == 25
         assert result.max_files_per_run == 1000
         assert result.timeout_seconds == 120
+
+    def test_cron_notification_runtime_uses_defaults(self):
+        result = resolve_cron_notification_config(None)
+
+        assert result.skip_weekend_zhaohu_enabled is False
+
+    def test_cron_notification_runtime_uses_bound_weekend_switch(self):
+        effective = EffectiveSourceSystemConfig(
+            source_id="portal",
+            config=SourceSystemConfig.model_validate(
+                {
+                    "cron_notifications": {
+                        "skip_weekend_zhaohu_enabled": True,
+                    },
+                },
+            ).merged_with_defaults(),
+            raw_config=SourceSystemConfig.model_validate(
+                {
+                    "cron_notifications": {
+                        "skip_weekend_zhaohu_enabled": True,
+                    },
+                },
+            ),
+            version=3,
+        )
+
+        with bind_source_system_config(effective):
+            result = resolve_cron_notification_config()
+
+        assert result.skip_weekend_zhaohu_enabled is True
 
     def test_zhaohu_tool_guard_notification_runtime_uses_defaults(self):
         assert is_zhaohu_tool_guard_notification_enabled(None) is False

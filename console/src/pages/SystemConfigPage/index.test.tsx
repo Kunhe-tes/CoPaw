@@ -60,12 +60,16 @@ describe("SystemConfigPage", () => {
     return screen.getAllByRole("switch")[3];
   }
 
+  function getCronSkipWeekendZhaohuSwitch() {
+    return screen.getAllByRole("switch")[4];
+  }
+
   function getArchiveMaintenanceSwitch() {
-    return screen.getAllByRole("switch")[5];
+    return screen.getAllByRole("switch")[6];
   }
 
   function getToolResultCompactSwitch() {
-    return screen.getAllByRole("switch")[6];
+    return screen.getAllByRole("switch")[7];
   }
 
   function seedEffectiveConfig(config: Record<string, unknown> = {}) {
@@ -244,6 +248,46 @@ describe("SystemConfigPage", () => {
         },
       });
     });
+  });
+
+  it("saves cron weekend zhaohu suppression setting", async () => {
+    mocks.sourceSystemConfigApi.updateCurrent.mockResolvedValue({
+      source_id: "portal",
+      config: {
+        cron_notifications: {
+          skip_weekend_zhaohu_enabled: true,
+        },
+      },
+      version: 1,
+      is_default: false,
+      updated_by: "alice",
+      updated_at: "2026-05-20 22:00:00",
+    });
+
+    render(<SystemConfigPage />);
+
+    const scheduledTaskCardTitle = await screen.findByText(
+      "定时任务设置",
+    );
+    const scheduledTaskCard = scheduledTaskCardTitle.closest(".ant-card");
+    const switchTitle = await screen.findByText(
+      "周末不发招呼完成通知",
+    );
+    expect(switchTitle.closest(".ant-card")).toBe(scheduledTaskCard);
+
+    fireEvent.click(getCronSkipWeekendZhaohuSwitch());
+    fireEvent.click(screen.getByRole("button", { name: "common.save" }));
+
+    await waitFor(() => {
+      expect(mocks.sourceSystemConfigApi.updateCurrent).toHaveBeenCalledWith({
+        config: {
+          cron_notifications: {
+            skip_weekend_zhaohu_enabled: true,
+          },
+        },
+      });
+    });
+    expect(loadEffectiveConfig).toHaveBeenCalledWith("portal");
   });
 
   it("saves cron task session cleanup settings", async () => {

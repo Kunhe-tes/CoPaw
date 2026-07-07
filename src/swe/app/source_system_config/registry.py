@@ -285,6 +285,14 @@ LLM_CRON_ACQUIRE_TIMEOUT_SETTING = SourceSystemConfigSetting(
     value_type="optional_float",
     ge=10.0,
 )
+CRON_NOTIFICATIONS_SKIP_WEEKEND_ZHAOHU_ENABLED_SETTING = (
+    SourceSystemConfigSetting(
+        key="cron_notifications.skip_weekend_zhaohu_enabled",
+        path=("cron_notifications", "skip_weekend_zhaohu_enabled"),
+        default_value=False,
+        value_type="bool",
+    )
+)
 SYSTEM_PROMPT_INJECTIONS_PATH = ("system_prompt_injections",)
 SYSTEM_PROMPT_INJECTIONS_DEFAULT: list[str] = []
 
@@ -331,6 +339,7 @@ CURRENT_SOURCE_SYSTEM_CONFIG_SETTINGS: tuple[
     LLM_ACQUIRE_TIMEOUT_SETTING,
     LLM_CHAT_ACQUIRE_TIMEOUT_SETTING,
     LLM_CRON_ACQUIRE_TIMEOUT_SETTING,
+    CRON_NOTIFICATIONS_SKIP_WEEKEND_ZHAOHU_ENABLED_SETTING,
 )
 
 _MISSING = object()
@@ -876,6 +885,7 @@ __all__ = [
     "CRON_TASK_SESSION_CLEANUP_CRON_SETTING",
     "CRON_TASK_SESSION_CLEANUP_ENABLED_SETTING",
     "CRON_TASK_SESSION_CLEANUP_RETENTION_DAYS_SETTING",
+    "CRON_NOTIFICATIONS_SKIP_WEEKEND_ZHAOHU_ENABLED_SETTING",
     "CRON_UNREAD_AUTO_PAUSE_ENABLED_SETTING",
     "CRON_UNREAD_AUTO_PAUSE_THRESHOLD_SETTING",
     "CURRENT_SOURCE_SYSTEM_CONFIG_SETTINGS",

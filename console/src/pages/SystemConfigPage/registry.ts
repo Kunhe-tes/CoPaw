@@ -27,6 +27,10 @@ export interface CronUnreadAutoPauseConfig {
   threshold: number;
 }
 
+export interface CronNotificationConfig {
+  skip_weekend_zhaohu_enabled: boolean;
+}
+
 export interface CronTaskSessionCleanupConfig {
   enabled: boolean;
   retention_days: number;
@@ -138,6 +142,10 @@ export const FILE_READ_TRUNCATION_DEFAULTS: ImmediateTruncationConfig = {
 export const CRON_UNREAD_AUTO_PAUSE_DEFAULTS: CronUnreadAutoPauseConfig = {
   enabled: true,
   threshold: 10,
+};
+
+export const CRON_NOTIFICATION_DEFAULTS: CronNotificationConfig = {
+  skip_weekend_zhaohu_enabled: false,
 };
 
 export const CRON_TASK_SESSION_CLEANUP_DEFAULTS: CronTaskSessionCleanupConfig =
@@ -438,6 +446,37 @@ export function writeCronUnreadAutoPauseValue<
     nextConfig.cron_unread_auto_pause = {};
   }
   (nextConfig.cron_unread_auto_pause as Record<string, unknown>)[key] = value;
+  return nextConfig;
+}
+
+export function readCronNotificationConfig(
+  config: SourceSystemConfig,
+): CronNotificationConfig {
+  const rawValue = config.cron_notifications;
+  if (!isPlainObject(rawValue)) {
+    return { ...CRON_NOTIFICATION_DEFAULTS };
+  }
+  return {
+    skip_weekend_zhaohu_enabled:
+      typeof rawValue.skip_weekend_zhaohu_enabled === "boolean"
+        ? rawValue.skip_weekend_zhaohu_enabled
+        : CRON_NOTIFICATION_DEFAULTS.skip_weekend_zhaohu_enabled,
+  };
+}
+
+export function writeCronNotificationValue<
+  K extends keyof CronNotificationConfig,
+>(
+  config: SourceSystemConfig,
+  key: K,
+  value: CronNotificationConfig[K],
+): SourceSystemConfig {
+  const nextConfig = clonePlainConfig(config);
+  const rawValue = nextConfig.cron_notifications;
+  if (!isPlainObject(rawValue)) {
+    nextConfig.cron_notifications = {};
+  }
+  (nextConfig.cron_notifications as Record<string, unknown>)[key] = value;
   return nextConfig;
 }
 
