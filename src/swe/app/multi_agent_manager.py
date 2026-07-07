@@ -593,14 +593,12 @@ class MultiAgentManager:
             return
 
         async def _cleanup_loop() -> None:
-            try:
-                while True:
-                    await asyncio.sleep(interval_seconds)
+            while True:
+                await asyncio.sleep(interval_seconds)
+                try:
                     await self._evict_workspace_cache()
-            except asyncio.CancelledError:
-                raise
-            except Exception:  # pylint: disable=broad-except
-                logger.exception("Workspace cleanup loop failed")
+                except Exception:  # pylint: disable=broad-except
+                    logger.exception("Workspace cleanup iteration failed")
 
         self._workspace_cleanup_task = asyncio.create_task(
             _cleanup_loop(),

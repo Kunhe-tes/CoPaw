@@ -272,8 +272,42 @@ def test_collect_inotify_diagnostic_summarizes_proc_fdinfo(tmp_path) -> None:
                 "ignored_mask:0 fhandle-bytes:8 fhandle-type:1 "
                 "f_handle:01020304\n"
             ),
+            "fdinfo_truncated": False,
         },
     ]
+
+
+def test_collect_inotify_diagnostic_counts_before_fdinfo_truncation(
+    tmp_path,
+) -> None:
+    proc_dir = tmp_path / "proc" / "123"
+    fd_dir = proc_dir / "fd"
+    fdinfo_dir = proc_dir / "fdinfo"
+    fd_dir.mkdir(parents=True)
+    fdinfo_dir.mkdir()
+    (fd_dir / "3").symlink_to("anon_inode:inotify")
+    (fdinfo_dir / "3").write_text(
+        "pos:\t0\n"
+        "inotify wd:1 ino:abc sdev:01 mask:00000800 ignored_mask:0\n"
+        "inotify wd:2 ino:def sdev:01 mask:00000800 ignored_mask:0\n",
+        encoding="utf-8",
+    )
+
+    process = _Process()
+    process.pid = 123
+    manager = _manager(process=process)
+
+    payload = manager.collect_inotify_diagnostic(
+        proc_root=tmp_path / "proc",
+        max_fdinfo_bytes=0,
+        include_fdinfo=True,
+    )
+
+    assert payload["inotify_fd_count"] == 1
+    assert payload["inotify_watch_count"] == 2
+    assert payload["inotify_fds"][0]["watch_count"] == 2
+    assert payload["inotify_fds"][0]["fdinfo"] == ""
+    assert payload["inotify_fds"][0]["fdinfo_truncated"] is True
 
 
 def test_failed_process_fields_do_not_suppress_other_process_fields() -> None:

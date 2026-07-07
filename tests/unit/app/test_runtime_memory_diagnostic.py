@@ -577,6 +577,34 @@ def test_inotify_diagnostic_route_bypasses_auth_and_tenant_middleware(
     assert response.json() == {"ok": True}
 
 
+def test_inotify_diagnostic_route_rejects_remote_raw_fdinfo() -> None:
+    class FakeManager(RuntimeDiagnosticManager):
+        def __init__(self) -> None:
+            pass
+
+        def collect_inotify_diagnostic(
+            self,
+            *,
+            max_fdinfo_bytes: int = 65536,
+            include_fdinfo: bool = False,
+        ) -> dict[str, object]:
+            return {"ok": True}
+
+    app = FastAPI()
+    app.state.runtime_diagnostic_manager = FakeManager()
+    app.include_router(router, prefix="/api")
+    client = TestClient(app, client=("203.0.113.10", 12345))
+
+    response = client.get(
+        "/api/runtime/inotify-diagnostic?include_fdinfo=true",
+    )
+
+    assert response.status_code == 403
+    assert response.json()["detail"] == (
+        "Raw inotify fdinfo is only available to local clients"
+    )
+
+
 def test_memory_type_holders_route_bypasses_auth_and_tenant_middleware(
     monkeypatch,
 ) -> None:

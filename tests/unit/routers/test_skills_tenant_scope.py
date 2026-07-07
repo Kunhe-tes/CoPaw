@@ -655,6 +655,83 @@ def test_download_pool_skill_to_workspaces_runs_transaction_off_loop(
     }
 
 
+def test_download_pool_skill_transaction_runs_under_process_lock(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    observed: list[str] = []
+
+    class FakeLock:
+        def __enter__(self):
+            observed.append("enter")
+
+        def __exit__(self, exc_type, exc, tb):
+            observed.append("exit")
+
+    def fake_resolve_and_preflight(
+        body,
+        *,
+        tenant_id: str | None,
+        working_dir: Path,
+    ):
+        observed.append("preflight")
+
+        class FakeHubService:
+            def download_to_workspace(self, **_kwargs):
+                observed.append("download")
+                return {
+                    "success": True,
+                    "workspace_name": "Default",
+                    "name": body.skill_name,
+                }
+
+        return list(body.targets), FakeHubService()
+
+    monkeypatch.setattr(
+        skills_router,
+        "_POOL_SKILL_DOWNLOAD_LOCK",
+        FakeLock(),
+    )
+    monkeypatch.setattr(
+        skills_router,
+        "_resolve_and_preflight",
+        fake_resolve_and_preflight,
+    )
+    monkeypatch.setattr(
+        skills_router,
+        "_build_download_plan",
+        lambda targets, skill_name, tenant_id=None: [
+            {
+                "workspace_id": "default",
+                "workspace_dir": tmp_path / "workspace",
+                "target_name": None,
+                "snapshot": {"backup_dir": None},
+            },
+        ],
+    )
+
+    result = skills_router._download_pool_skill_transaction(
+        skills_router.DownloadFromPoolRequest(
+            skill_name="guidance",
+            targets=[skills_router.PoolDownloadTarget(workspace_id="default")],
+            overwrite=True,
+        ),
+        tenant_id="default_ruice",
+        working_dir=tmp_path / "default_ruice",
+    )
+
+    assert result == {
+        "downloaded": [
+            {
+                "workspace_id": "default",
+                "workspace_name": "Default",
+                "name": "guidance",
+            },
+        ],
+    }
+    assert observed == ["enter", "preflight", "download", "exit"]
+
+
 def test_broadcast_pool_skills_to_bootstrapped_tenant(
     monkeypatch,
     tmp_path: Path,

@@ -198,6 +198,36 @@ async def test_stop_all_cancels_workspace_ttl_cleanup_loop() -> None:
 
 
 @pytest.mark.asyncio
+async def test_workspace_ttl_cleanup_loop_continues_after_eviction_error(
+    monkeypatch,
+) -> None:
+    manager = MultiAgentManager()
+    calls = 0
+    second_call = asyncio.Event()
+
+    async def fake_evict_workspace_cache() -> None:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise RuntimeError("transient eviction failure")
+        second_call.set()
+
+    monkeypatch.setattr(
+        manager,
+        "_evict_workspace_cache",
+        fake_evict_workspace_cache,
+    )
+
+    await manager.start_workspace_cleanup_loop(interval_seconds=0.01)
+    try:
+        await asyncio.wait_for(second_call.wait(), timeout=1.0)
+    finally:
+        await manager.stop_workspace_cleanup_loop()
+
+    assert calls >= 2
+
+
+@pytest.mark.asyncio
 async def test_same_cache_key_concurrent_get_agent_starts_once(
     monkeypatch,
 ) -> None:

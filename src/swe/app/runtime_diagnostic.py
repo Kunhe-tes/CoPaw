@@ -689,7 +689,7 @@ class RuntimeDiagnosticManager:
                 fdinfo_text = (fdinfo_dir / fd_path.name).read_text(
                     encoding="utf-8",
                     errors="replace",
-                )[: max(0, int(max_fdinfo_bytes))]
+                )
             except Exception as exc:  # pylint: disable=broad-except
                 errors.append(
                     {
@@ -718,7 +718,9 @@ class RuntimeDiagnosticManager:
                 "watches": watches,
             }
             if include_fdinfo:
-                item["fdinfo"] = fdinfo_text
+                fdinfo_limit = max(0, int(max_fdinfo_bytes))
+                item["fdinfo"] = fdinfo_text[:fdinfo_limit]
+                item["fdinfo_truncated"] = len(fdinfo_text) > fdinfo_limit
             inotify_fds.append(item)
             inotify_watch_count += len(watches)
 

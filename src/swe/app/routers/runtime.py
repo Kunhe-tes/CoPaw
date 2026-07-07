@@ -10,6 +10,11 @@ from swe.app.runtime_diagnostic import RuntimeDiagnosticManager
 router = APIRouter(prefix="/runtime", tags=["runtime"])
 
 
+def _is_local_client(request: Request) -> bool:
+    host = getattr(request.client, "host", None)
+    return host in {"127.0.0.1", "::1", "localhost", "testclient"}
+
+
 @router.get("/memory-diagnostic")
 def get_memory_diagnostic(
     request: Request,
@@ -69,6 +74,11 @@ def get_inotify_diagnostic(
     include_fdinfo: bool = Query(False),
 ) -> dict[str, object]:
     """Return inotify fd/watch diagnostics for the current process."""
+    if include_fdinfo and not _is_local_client(request):
+        raise HTTPException(
+            status_code=403,
+            detail="Raw inotify fdinfo is only available to local clients",
+        )
     manager = getattr(
         request.app.state,
         "runtime_diagnostic_manager",
