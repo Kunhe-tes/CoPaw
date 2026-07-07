@@ -145,11 +145,39 @@ def test_diagnostic_payload_contains_confirmed_metrics() -> None:
         "pod_disk_read_bytes_per_second_peak": None,
         "pod_disk_write_bytes_per_second": None,
         "pod_disk_write_bytes_per_second_peak": None,
+        "workspace_cache_size": None,
+        "workspace_start_tasks": None,
+        "workspace_cache_max_size": None,
+        "workspace_start_max_concurrent": None,
+        "workspace_evictions_total": None,
+        "workspace_eviction_stop_failures_total": None,
         "storage_total_bytes": 1000,
         "storage_used_bytes": 600,
         "storage_free_bytes": 400,
         "storage_used_percent": 60.0,
     }
+
+
+def test_diagnostic_payload_includes_workspace_cache_metrics() -> None:
+    manager = _manager(
+        workspace_metrics=lambda: {
+            "workspace_cache_size": 32,
+            "workspace_start_tasks": 3,
+            "workspace_cache_max_size": 64,
+            "workspace_start_max_concurrent": 4,
+            "workspace_evictions_total": 12,
+            "workspace_eviction_stop_failures_total": 1,
+        },
+    )
+
+    payload = manager.build_diagnostic_payload()
+
+    assert payload["workspace_cache_size"] == 32
+    assert payload["workspace_start_tasks"] == 3
+    assert payload["workspace_cache_max_size"] == 64
+    assert payload["workspace_start_max_concurrent"] == 4
+    assert payload["workspace_evictions_total"] == 12
+    assert payload["workspace_eviction_stop_failures_total"] == 1
 
 
 def test_failed_metric_group_emits_null_fields_without_suppressing_payload() -> (

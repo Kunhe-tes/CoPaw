@@ -56,6 +56,7 @@ interface SkillDetailPanelProps {
   draftContent: string;
   draftCnName: string;  // 编辑中的中文名
   isSaving: boolean;
+  isDownloading: boolean;
   togglingSkill: string | null;
   isManager: boolean;
   onEditStart: () => void;
@@ -65,6 +66,7 @@ interface SkillDetailPanelProps {
   onCnNameChange: (cnName: string) => void;  // 中文名修改
   onToggleEnabled: (skill: MySkill) => void;
   onDelete: (skill: MySkill) => void;
+  onDownload: (skill: MySkill) => void;
   onSyncToMarket: (skill: MySkill) => void;
   onExport: (skill: MySkill) => void;
 }
@@ -78,6 +80,7 @@ const SkillDetailPanel = memo(function SkillDetailPanel({
   draftContent,
   draftCnName,
   isSaving,
+  isDownloading,
   togglingSkill,
   isManager,
   onEditStart,
@@ -87,6 +90,7 @@ const SkillDetailPanel = memo(function SkillDetailPanel({
   onCnNameChange,
   onToggleEnabled,
   onDelete,
+  onDownload,
   onSyncToMarket,
   onExport,
 }: SkillDetailPanelProps) {
@@ -290,6 +294,16 @@ const SkillDetailPanel = memo(function SkillDetailPanel({
               onClick={onEditStart}
             >
               编辑
+            </Button>
+          )}
+          {canEdit && (
+            <Button
+              size="small"
+              style={{ height: 28, fontSize: 12, borderRadius: 8 }}
+              onClick={() => onDownload(skill)}
+              loading={isDownloading}
+            >
+              下载 ZIP
             </Button>
           )}
           <Button

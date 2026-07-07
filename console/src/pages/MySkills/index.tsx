@@ -68,6 +68,7 @@ export default function MySkillsPage() {
   const [draftContent, setDraftContent] = useState("");
   const [draftCnName, setDraftCnName] = useState("");  // 编辑中的中文名
   const [isSaving, setIsSaving] = useState(false);
+  const [isDownloading, setIsDownloading] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   // Batch operation state
@@ -334,6 +335,17 @@ export default function MySkillsPage() {
 
   const [togglingSkill, setTogglingSkill] = useState<string | null>(null);
 
+  const triggerBrowserDownload = useCallback((blob: Blob, filename: string) => {
+    const url = URL.createObjectURL(blob);
+    const anchor = document.createElement("a");
+    anchor.href = url;
+    anchor.download = filename;
+    document.body.appendChild(anchor);
+    anchor.click();
+    anchor.remove();
+    window.setTimeout(() => URL.revokeObjectURL(url), 0);
+  }, []);
+
   const handleToggleEnabled = useCallback(async (skill: MySkill) => {
     if (togglingSkill) return;
     const action = skill.enabled ? "disable" : "enable";
@@ -376,6 +388,22 @@ export default function MySkillsPage() {
       message.error("删除失败");
     }
   }, [refresh]);
+
+  const handleDownload = useCallback(async (skill: MySkill) => {
+    setIsDownloading(true);
+    try {
+      const { blob, filename } = await mySkillsApi.downloadCreatedSkill(
+        skill.skill_name,
+      );
+      triggerBrowserDownload(blob, filename || `${skill.skill_name}.zip`);
+      message.success("已开始下载技能包");
+    } catch (err) {
+      const errorMsg = err instanceof Error ? err.message : "下载失败";
+      message.error(errorMsg);
+    } finally {
+      setIsDownloading(false);
+    }
+  }, [triggerBrowserDownload]);
 
   const handleBatchDelete = useCallback(async () => {
     if (selectedForBatch.size === 0) return;
@@ -933,6 +961,7 @@ export default function MySkillsPage() {
           draftContent={draftContent}
           draftCnName={draftCnName}
           isSaving={isSaving}
+          isDownloading={isDownloading}
           togglingSkill={togglingSkill}
           isManager={isManager}
           onEditStart={handleEditStart}
@@ -942,6 +971,7 @@ export default function MySkillsPage() {
           onCnNameChange={setDraftCnName}
           onToggleEnabled={handleToggleEnabled}
           onDelete={handleDelete}
+          onDownload={handleDownload}
           onSyncToMarket={handleSyncToMarket}
           onExport={handleExport}
         />
