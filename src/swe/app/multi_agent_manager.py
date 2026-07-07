@@ -22,6 +22,7 @@ logger = logging.getLogger(__name__)
 DEFAULT_WORKSPACE_CACHE_MAX_SIZE = 16
 DEFAULT_WORKSPACE_START_MAX_CONCURRENT = 4
 DEFAULT_WORKSPACE_IDLE_TTL_SECONDS = 60 * 60
+DEFAULT_WORKSPACE_CLEANUP_INTERVAL_SECONDS = 30 * 60
 
 
 @dataclass
@@ -117,6 +118,7 @@ class MultiAgentManager:
         self._workspace_evictions_total = 0
         self._workspace_eviction_stop_failures_total = 0
         self._cleanup_tasks: Set[asyncio.Task] = set()
+        self._workspace_cleanup_task: asyncio.Task | None = None
         self._source_system_config_service = source_system_config_service
         self._continuous_governance_service = continuous_governance_service
         logger.debug("MultiAgentManager initialized")
@@ -578,6 +580,46 @@ class MultiAgentManager:
                 if removals == 0:
                     return
 
+    async def start_workspace_cleanup_loop(
+        self,
+        *,
+        interval_seconds: float = DEFAULT_WORKSPACE_CLEANUP_INTERVAL_SECONDS,
+    ) -> None:
+        """Start a periodic idle workspace eviction loop."""
+        if (
+            self._workspace_cleanup_task is not None
+            and not self._workspace_cleanup_task.done()
+        ):
+            return
+
+        async def _cleanup_loop() -> None:
+            try:
+                while True:
+                    await asyncio.sleep(interval_seconds)
+                    await self._evict_workspace_cache()
+            except asyncio.CancelledError:
+                raise
+            except Exception:  # pylint: disable=broad-except
+                logger.exception("Workspace cleanup loop failed")
+
+        self._workspace_cleanup_task = asyncio.create_task(
+            _cleanup_loop(),
+            name="workspace-cache-cleanup",
+        )
+
+    async def stop_workspace_cleanup_loop(self) -> None:
+        """Stop the periodic idle workspace eviction loop."""
+        task = self._workspace_cleanup_task
+        if task is None:
+            return
+        self._workspace_cleanup_task = None
+        if not task.done():
+            task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+
     def workspace_cache_metrics(self) -> dict[str, int]:
         """Return process-local workspace cache diagnostics."""
         return {
@@ -953,6 +995,7 @@ class MultiAgentManager:
         """
         logger.info(f"Stopping all agents ({len(self.agents)} running)...")
 
+        await self.stop_workspace_cleanup_loop()
         await self._cancel_start_tasks()
 
         # Then cancel pending cleanup tasks to avoid orphaned instances

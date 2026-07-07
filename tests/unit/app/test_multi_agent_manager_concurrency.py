@@ -154,6 +154,50 @@ async def test_service_manager_reload_stop_keeps_reusable_service_reference(
 
 
 @pytest.mark.asyncio
+async def test_workspace_ttl_cleanup_loop_evicts_idle_workspaces() -> None:
+    manager = MultiAgentManager(
+        workspace_cache_max_size=10,
+        workspace_idle_ttl_seconds=10,
+        monotonic_time=lambda: 100.0,
+    )
+    workspace = _Workspace(
+        agent_id="default",
+        workspace_dir="/tmp/default",
+        tenant_id="tenant-a",
+    )
+    workspace.task_tracker = _TaskTracker(has_active_tasks=False)
+    manager.agents["tenant-a:default"] = workspace
+    manager._touch_cache_entry("tenant-a:default", workspace)
+    manager._monotonic_time = lambda: 111.0
+
+    await manager.start_workspace_cleanup_loop(interval_seconds=0.01)
+    try:
+        for _ in range(50):
+            if workspace.stopped:
+                break
+            await asyncio.sleep(0.01)
+    finally:
+        await manager.stop_workspace_cleanup_loop()
+
+    assert workspace.stopped is True
+    assert "tenant-a:default" not in manager.agents
+
+
+@pytest.mark.asyncio
+async def test_stop_all_cancels_workspace_ttl_cleanup_loop() -> None:
+    manager = MultiAgentManager()
+
+    await manager.start_workspace_cleanup_loop(interval_seconds=60.0)
+    cleanup_task = manager._workspace_cleanup_task
+    assert cleanup_task is not None
+
+    await manager.stop_all()
+
+    assert cleanup_task.cancelled() is True
+    assert manager._workspace_cleanup_task is None
+
+
+@pytest.mark.asyncio
 async def test_same_cache_key_concurrent_get_agent_starts_once(
     monkeypatch,
 ) -> None:

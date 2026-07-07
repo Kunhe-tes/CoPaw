@@ -622,6 +622,7 @@ async def _start_lifespan_background_services(
     )
     app.state.cron_notification_worker = cron_notification_worker
     cron_notification_worker.start()
+    await multi_agent_manager.start_workspace_cleanup_loop()
 
     try:
         runtime_diagnostic_manager.set_workspace_metrics(
