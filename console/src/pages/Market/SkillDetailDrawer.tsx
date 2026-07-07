@@ -5,6 +5,7 @@ import {
   HistoryOutlined,
   MoreOutlined,
   UserOutlined,
+  DownloadOutlined,
 } from "@ant-design/icons";
 import { Button, Checkbox, Collapse, Dropdown, Input, message, Modal, Spin, Table, Tag, Tooltip, Typography, type MenuProps } from "antd";
 import ReactMarkdown from "react-markdown";
@@ -425,6 +426,16 @@ export function SkillDetailDrawer(
     handleSave(syncToUsers, syncToUsers ? selectedUserIds : []);
   }, [handleSave, syncToUsers, selectedUserIds]);
 
+  const handleExport = useCallback(async () => {
+    if (!skill || !sourceId) return;
+    try {
+      await marketApi.exportSkill(sourceId, 'market', skill.name, skill.item_id);
+      message.success('导出成功');
+    } catch (err) {
+      message.error('导出失败');
+    }
+  }, [skill, sourceId]);
+
   const moreMenuItems: MenuProps["items"] = useMemo(() => {
     const items: MenuProps["items"] = [];
     if (onRecall) {
@@ -665,6 +676,15 @@ export function SkillDetailDrawer(
               <HistoryOutlined style={{ fontSize: 12 }} />
               版本历史
             </Button>
+            {isManager && (
+              <Button
+                onClick={handleExport}
+                style={SECONDARY_BUTTON_STYLE}
+              >
+                <DownloadOutlined style={{ fontSize: 12 }} />
+                导出
+              </Button>
+            )}
             {isManager && onDistribute && (
               <Button
                 type="primary"

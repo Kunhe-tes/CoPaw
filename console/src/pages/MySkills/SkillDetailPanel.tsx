@@ -1,6 +1,6 @@
 import { memo, useState, useRef, useLayoutEffect } from "react";
 import { Typography, Button, Spin, Tag, Popconfirm, Tooltip, Input } from "antd";
-import { StarOutlined, RocketOutlined, UserOutlined, ClockCircleOutlined, CalendarOutlined, TagOutlined, DownOutlined, UpOutlined } from "@ant-design/icons";
+import { StarOutlined, RocketOutlined, UserOutlined, ClockCircleOutlined, CalendarOutlined, TagOutlined, DownOutlined, UpOutlined, DownloadOutlined } from "@ant-design/icons";
 import { Power, Trash2, Pencil, PencilLine } from "lucide-react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
@@ -66,6 +66,7 @@ interface SkillDetailPanelProps {
   onToggleEnabled: (skill: MySkill) => void;
   onDelete: (skill: MySkill) => void;
   onSyncToMarket: (skill: MySkill) => void;
+  onExport: (skill: MySkill) => void;
 }
 
 const SkillDetailPanel = memo(function SkillDetailPanel({
@@ -87,6 +88,7 @@ const SkillDetailPanel = memo(function SkillDetailPanel({
   onToggleEnabled,
   onDelete,
   onSyncToMarket,
+  onExport,
 }: SkillDetailPanelProps) {
   // 描述区展开状态
   const [descExpanded, setDescExpanded] = useState(false);
@@ -256,6 +258,14 @@ const SkillDetailPanel = memo(function SkillDetailPanel({
           )}
         </div>
         <div style={{ display: "flex", gap: 8, flexShrink: 0 }}>
+          <Button
+            size="small"
+            icon={<DownloadOutlined style={{ fontSize: 12 }} />}
+            style={{ height: 28, fontSize: 12, borderRadius: 8 }}
+            onClick={() => onExport(skill)}
+          >
+            导出
+          </Button>
           <Popconfirm
             title="删除技能"
             description={`确定删除技能「${skill.display_name || skill.skill_name}」？删除后不可恢复。`}

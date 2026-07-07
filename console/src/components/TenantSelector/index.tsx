@@ -8,6 +8,7 @@ import {
   fetchTenantsBySource,
   type TenantSourceInfo,
 } from "@/api/modules/userInfo";
+import type { UserSkillStatus } from "@/api/modules/market";
 import { BBK_ID_MAP, BBK_ID_TO_NAME_MAP } from "@/constants/bbk";
 import { DEFAULT_SOURCE_ID } from "@/constants/identity";
 import type { TenantSelectorProps } from "./types";
@@ -62,6 +63,8 @@ export function TenantSelector({
   hint,
   excludeTenantId,
   onLoadError,
+  userSkillStatusMap,
+  skillVersion,
 }: TenantSelectorProps) {
   const { t } = useTranslation();
   const sourceId = useIframeStore((state) => state.source) || DEFAULT_SOURCE_ID;
@@ -403,19 +406,43 @@ export function TenantSelector({
                         <span className={styles.collapseCount}>
                           {t("tenantSelector.userCount", { count: group.users.length })}
                         </span>
+                        {/* 机构统计 */}
+                        <span className={styles.collapseStats}>
+                          覆盖: {group.users.filter(u => userSkillStatusMap?.get(u.tenant_id)?.status === "update").length} |
+                          首次: {group.users.filter(u => userSkillStatusMap?.get(u.tenant_id)?.status === "first_time").length}
+                        </span>
                       </span>
                     ),
                     children: (
                       <div className={styles.userDetailGrid}>
-                        {group.users.map((user) => (
-                          <div
-                            key={user.tenant_id}
-                            className={styles.userDetailItem}
-                            title={renderTenantName(user.tenant_id)}
-                          >
-                            {renderTenantName(user.tenant_id)}
-                          </div>
-                        ))}
+                        {group.users.map((user) => {
+                          const status = userSkillStatusMap?.get(user.tenant_id);
+                          return (
+                            <div
+                              key={user.tenant_id}
+                              className={styles.userDetailItem}
+                              title={renderTenantName(user.tenant_id)}
+                            >
+                              <div className={styles.userDetailName}>
+                                {renderTenantName(user.tenant_id)}
+                              </div>
+                              {/* 按机构模式下，机构已选中，显示用户状态 */}
+                              {status && (
+                                <div className={styles.userDetailStatus}>
+                                  {status.status === "update" && status.current_version && (
+                                    <span style={{ color: "#1890ff" }}>{status.current_version}→v{skillVersion || "新"}</span>
+                                  )}
+                                  {status.status === "first_time" && (
+                                    <span style={{ color: "#52c41a" }}>首次</span>
+                                  )}
+                                  {status.status === "conflict" && (
+                                    <span style={{ color: "#f5222d" }}>⚠ 自建冲突</span>
+                                  )}
+                                </div>
+                              )}
+                            </div>
+                          );
+                        })}
                       </div>
                     ),
                   }))}
@@ -499,6 +526,7 @@ export function TenantSelector({
               <div className={styles.userGrid}>
                 {displayedTenantIds.map((tenantId) => {
                   const selected = effectiveInListTenantIds.includes(tenantId);
+                  const status = userSkillStatusMap?.get(tenantId);
                   return (
                     <button
                       key={tenantId}
@@ -512,8 +540,26 @@ export function TenantSelector({
                         <span className={styles.checkIcon}>
                           <CheckOutlined />
                         </span>
-                      ) : null}
-                      <span>{renderTenantName(tenantId)}</span>
+                      ) : (
+                        <span className={styles.emptyIcon}>○</span>
+                      )}
+                      <span className={styles.userName}>{renderTenantName(tenantId)}</span>
+                      {/* 只有选中后才显示状态文字 */}
+                      {status && selected && (
+                        <span className={styles.userStatus}>
+                          {status.status === "update" && status.current_version && (
+                            <span className={styles.versionChange}>
+                              {status.current_version}→v{skillVersion || "新"}
+                            </span>
+                          )}
+                          {status.status === "first_time" && (
+                            <span className={styles.firstTimeLabel}>首次</span>
+                          )}
+                          {status.status === "conflict" && (
+                            <span className={styles.conflictLabel}>⚠ 自建冲突</span>
+                          )}
+                        </span>
+                      )}
                     </button>
                   );
                 })}

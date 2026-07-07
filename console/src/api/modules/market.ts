@@ -36,6 +36,22 @@ export interface MarketSkillDetail extends MarketSkill {
   }>;
 }
 
+// 用户技能状态
+export interface UserSkillStatus {
+  tenant_id: string;
+  tenant_name: string | null;
+  bbk_id: string | null;
+  status: 'first_time' | 'update' | 'conflict';
+  current_version?: string;
+}
+
+// 分发预览响应
+export interface DistributionPreviewResponse {
+  skill_version: string;
+  users: UserSkillStatus[];
+  distributed_user_ids: string[];
+}
+
 export interface Category {
   id: number;
   source_id: string;
@@ -500,5 +516,68 @@ export const marketApi = {
       }
     }
     return Array.from(byName.values());
+  },
+
+  // 获取分发预览
+  getDistributionPreview: async (
+    sourceId: string,
+    itemId: string,
+    tenantIds: string[]
+  ): Promise<DistributionPreviewResponse> => {
+    const opts: RequestInit = {
+      method: "POST",
+      ...(mergeHeaders({
+        "Content-Type": "application/json",
+        "X-Source-Id": sourceId,
+        "X-Manager": "true",
+      })),
+      body: JSON.stringify({
+        source_id: sourceId,
+        tenant_ids: tenantIds,
+      }),
+    };
+    return request<DistributionPreviewResponse>(
+      `/market/skills/${itemId}/distribution-preview`,
+      opts
+    );
+  },
+
+  exportSkill: async (
+    sourceId: string,
+    sourceType: 'market' | 'my',
+    skillName: string,
+    itemId?: string
+  ): Promise<void> => {
+    const params = new URLSearchParams();
+    params.set('source_type', sourceType);
+    if (sourceType === 'my') {
+      params.set('skill_name', skillName);
+    } else {
+      params.set('item_id', itemId || '');
+    }
+
+    const headers = Object.fromEntries(
+      (mergeHeaders({
+        'X-Source-Id': sourceId,
+        ...(sourceType === 'market' ? { 'X-Manager': 'true' } : {}),
+      }).headers as Headers).entries(),
+    );
+
+    const url = getApiUrl(`/market/skills/export?${params.toString()}`);
+    const response = await fetch(url, { headers });
+
+    if (!response.ok) {
+      throw new Error('导出失败');
+    }
+
+    // 触发浏览器下载
+    const blob = await response.blob();
+    const filename = `${skillName}.zip`;
+    const downloadUrl = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = downloadUrl;
+    a.download = filename;
+    a.click();
+    URL.revokeObjectURL(downloadUrl);
   },
 };

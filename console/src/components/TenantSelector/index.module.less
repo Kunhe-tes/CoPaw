@@ -75,7 +75,7 @@
 }
 
 .userCardSelected {
-  border-color: #1677ff;
+  border: 2px solid #1677ff;
   background: #eff6ff;
 }
 
@@ -102,6 +102,9 @@
   display: flex;
   flex-wrap: wrap;
   gap: 8px;
+  max-height: 120px;
+  overflow-y: auto;
+  padding: 4px 0;
 }
 
 .selectedTag {
@@ -168,4 +171,62 @@
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+// 用户状态标记样式（选中后通过文字颜色区分，不使用边框）
+.emptyIcon {
+  color: #999;
+  margin-right: 4px;
+}
+
+.warnIcon {
+  color: #faad14;
+  margin-right: 4px;
+}
+
+.userName {
+  color: #333;
+}
+
+.userStatus {
+  display: block;
+  font-size: 11px;
+  margin-top: 4px;
+}
+
+// 状态文字颜色区分
+.versionChange {
+  color: #1890ff;  // 更新：蓝色
+}
+
+.firstTimeLabel {
+  color: #52c41a;  // 首次：绿色
+}
+
+.conflictLabel {
+  color: #f5222d;  // 冲突：红色
+}
+
+.userDetailUpdate {
+  // 按机构模式下的样式保持简洁
+}
+
+.userDetailConflict {
+  // 按机构模式下的样式保持简洁
+}
+
+.userDetailName {
+  color: #333;
+  font-size: 12px;
+}
+
+.userDetailStatus {
+  font-size: 10px;
+  margin-top: 2px;
+}
+
+.collapseStats {
+  color: #1890ff;
+  font-size: 12px;
+  margin-left: 8px;
 }

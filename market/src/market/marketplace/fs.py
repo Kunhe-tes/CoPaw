@@ -492,6 +492,47 @@ def read_user_skill_manifest(
         }
 
 
+def check_skill_status_in_manifest(
+    swe_root: Path,
+    user_id: str,
+    skill_name: str,
+    source_id: str,
+    agent_id: str = DEFAULT_AGENT_ID,
+) -> tuple[str, str | None]:
+    """检查用户工作区 manifest 文件判断技能状态.
+
+    Args:
+        swe_root: SWE 根目录
+        user_id: 用户 ID
+        skill_name: 技能名（规范化后的目录名）
+        source_id: 来源 ID
+        agent_id: Agent ID
+
+    Returns:
+        元组 (状态, 版本号)：状态为 first_time / conflict / update，版本号仅在 update 时返回
+    """
+    manifest = read_user_skill_manifest(swe_root, user_id, agent_id, source_id)
+    skills_dict = manifest.get("skills", {})
+    existing_entry = skills_dict.get(skill_name)
+
+    if existing_entry is None:
+        # manifest 中没有该技能，首次分发
+        return ("first_time", None)
+
+    existing_source = existing_entry.get("source", "")
+    if existing_source == "customized":
+        # 自建技能，冲突
+        return ("conflict", None)
+    elif existing_source.startswith("marketplace:"):
+        # 已分发技能，返回状态和版本号
+        metadata = existing_entry.get("metadata", {})
+        version = metadata.get("version_text")
+        return ("update", version)
+    else:
+        # 其他来源
+        return ("first_time", None)
+
+
 def mutate_user_skill_manifest(
     swe_root: Path,
     user_id: str,

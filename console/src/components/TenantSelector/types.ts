@@ -1,5 +1,6 @@
 import type { ReactNode } from "react";
 import type { TenantSourceInfo } from "@/api/modules/userInfo";
+import type { UserSkillStatus } from "@/api/modules/market";
 
 export interface TenantSelectorProps {
   /** 已选中的租户 ID 列表 */
@@ -19,4 +20,10 @@ export interface TenantSelectorProps {
 
   /** 加载失败回调 */
   onLoadError?: (error: Error) => void;
+
+  /** 用户技能状态映射（用于显示分发状态标记） */
+  userSkillStatusMap?: Map<string, UserSkillStatus>;
+
+  /** 当前技能版本（用于显示更新后的目标版本） */
+  skillVersion?: string;
 }
