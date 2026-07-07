@@ -5,11 +5,14 @@ from __future__ import annotations
 
 import inspect
 from datetime import datetime, timedelta, timezone
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
 
 from scheduler.app import _app as scheduler_app
+from scheduler.app.routers import cron as scheduler_cron
+from scheduler.app.services.cron import scheduling_service as service_module
 from scheduler.app.services.cron.scheduling_service import (
     CronSchedulingService,
     SweCronCallbackClient,
@@ -150,6 +153,58 @@ def test_swe_callback_client_prefers_swe_internal_token(
     assert client._internal_token == "swe-token"
 
 
+@pytest.mark.asyncio
+async def test_swe_callback_client_forwards_passthrough_headers(
+    monkeypatch,
+) -> None:
+    requests: list[dict[str, Any]] = []
+
+    class _Response:
+        status_code = 200
+        text = ""
+
+    class _AsyncClient:
+        def __init__(self, **_kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return False
+
+        async def post(self, url, *, json, headers):
+            requests.append({"url": url, "json": json, "headers": headers})
+            return _Response()
+
+    monkeypatch.setattr(service_module.httpx, "AsyncClient", _AsyncClient)
+    client = SweCronCallbackClient(
+        base_url="http://swe.local/api",
+        internal_token="scheduler-token",
+    )
+
+    await client.dispatch_job(
+        tenant_id="tenant-a",
+        source_id="source-a",
+        agent_id="default",
+        job_id="child-1",
+        dispatch_intent_id=7,
+        dispatch_batch_id="batch-1",
+        dispatch_attempt=2,
+        passthrough_headers={
+            "X-B3-Traceid": "8267fd70bacf497704fec30eaa353979",
+            "X-B3-Spanid": "32befd146889a61a",
+            "X-Internal-Token": "attacker-token",
+        },
+    )
+
+    assert requests[0]["headers"] == {
+        "X-B3-Traceid": "8267fd70bacf497704fec30eaa353979",
+        "X-B3-Spanid": "32befd146889a61a",
+        "X-Internal-Token": "Bearer scheduler-token",
+    }
+
+
 def test_scheduler_app_lifespan_wires_scheduler_loop() -> None:
     source = inspect.getsource(scheduler_app.lifespan)
 
@@ -247,6 +302,50 @@ async def test_child_dispatch_passes_attempt_count_to_swe_callback() -> None:
 
     assert callback.requests[0]["dispatch_attempt"] == 2
     assert store.dispatched[0]["details"]["dispatch_attempt"] == 2
+
+
+@pytest.mark.asyncio
+async def test_child_dispatch_forwards_passthrough_headers_to_swe_callback() -> None:
+    store = _DispatchStore(
+        [
+            {
+                "id": 1,
+                "batch_id": "batch-1",
+                "intent_role": "child",
+                "tenant_id": "tenant-a",
+                "source_id": "source-a",
+                "agent_id": "default",
+                "job_id": "child-1",
+                "attempt_count": 1,
+                "provider_id": "openai",
+                "model_id": "gpt-5",
+                "payload": {
+                    "parent_scheduled_fire_at": "2026-07-01T01:00:00+00:00",
+                    "passthrough_headers": {
+                        "X-B3-Traceid": "8267fd70bacf497704fec30eaa353979",
+                        "X-B3-Spanid": "32befd146889a61a",
+                    },
+                },
+            },
+        ],
+    )
+    callback = _CallbackClient()
+    service = CronSchedulingService(
+        dispatch_store=store,
+        callback_client=callback,
+        worker_id="scheduler-1",
+        effective_workers=1,
+    )
+
+    dispatched = await service.dispatch_ready_once(
+        now_utc=datetime(2026, 7, 1, tzinfo=timezone.utc),
+    )
+
+    assert dispatched == 1
+    assert callback.requests[0]["passthrough_headers"] == {
+        "X-B3-Traceid": "8267fd70bacf497704fec30eaa353979",
+        "X-B3-Spanid": "32befd146889a61a",
+    }
 
 
 @pytest.mark.asyncio
@@ -698,6 +797,113 @@ async def test_parent_callback_creates_batch_and_execution_intents(
         for job in jobs
     )
     assert store.claims, "parent callback should immediately try to dispatch"
+
+
+@pytest.mark.asyncio
+async def test_parent_callback_adds_b3_headers_to_execution_intents(
+    monkeypatch,
+) -> None:
+    from scheduler.app.services.cron import scheduling_service as module
+
+    store = _DispatchStore([])
+    service = CronSchedulingService(
+        dispatch_store=store,
+        callback_client=_CallbackClient(),
+        worker_id="scheduler-1",
+        effective_workers=2,
+    )
+    fire_at = datetime(2026, 7, 1, 1, 0, tzinfo=timezone.utc)
+
+    async def _fake_fetch_parent_job_for_callback(**_kwargs):
+        return {
+            "id": "parent-1",
+            "tenant_id": "tenant-a",
+            "source_id": "source-a",
+            "agent_id": "default",
+            "meta": '{"broadcast_dispatch_intents_enabled": true}',
+        }
+
+    async def _fake_fetch_batch_child_jobs(_parent):
+        return [
+            {
+                "tenant_id": "tenant-b",
+                "source_id": "source-a",
+                "agent_id": "default",
+                "job_id": "child-1",
+            },
+        ]
+
+    monkeypatch.setattr(
+        module,
+        "_fetch_parent_job_for_callback",
+        _fake_fetch_parent_job_for_callback,
+    )
+    monkeypatch.setattr(
+        module,
+        "_fetch_batch_child_jobs",
+        _fake_fetch_batch_child_jobs,
+    )
+
+    await service.handle_parent_callback(
+        params={
+            "tenant_id": "tenant-a",
+            "source_id": "source-a",
+            "agent_id": "default",
+            "job_id": "parent-1",
+            "scheduled_fire_at": fire_at.isoformat(),
+        },
+        headers={
+            "X-B3-Traceid": "8267fd70bacf497704fec30eaa353979",
+            "X-B3-Spanid": "32befd146889a61a",
+            "X-B3-BusinessId": "LQ1303LMES-WEB",
+        },
+        now_utc=fire_at,
+    )
+
+    jobs = store.execution_batches[0]["jobs"]
+    assert all(
+        job["payload"]["passthrough_headers"]
+        == {
+            "X-B3-Traceid": "8267fd70bacf497704fec30eaa353979",
+            "X-B3-Spanid": "32befd146889a61a",
+            "X-B3-BusinessId": "LQ1303LMES-WEB",
+        }
+        for job in jobs
+    )
+
+
+@pytest.mark.asyncio
+async def test_scheduler_parent_callback_passes_headers_to_service() -> None:
+    captured: dict[str, Any] = {}
+
+    class _Service:
+        async def handle_parent_callback(self, **kwargs):
+            captured.update(kwargs)
+            return {
+                "batch_id": "batch-1",
+                "parent_job_id": "parent-1",
+                "child_count": 0,
+                "enqueued_intents": 0,
+                "dispatched_intents": 0,
+            }
+
+    response = await scheduler_cron.scheduler_parent_callback(
+        request=SimpleNamespace(
+            headers={
+                "X-B3-Traceid": "8267fd70bacf497704fec30eaa353979",
+                "X-B3-Spanid": "32befd146889a61a",
+            },
+        ),
+        body={"job_id": "parent-1"},
+        scheduling_service=_Service(),
+    )
+
+    assert response.batch_id == "batch-1"
+    assert captured["params"] == {"job_id": "parent-1"}
+    assert captured["headers"] == {
+        "X-B3-Traceid": "8267fd70bacf497704fec30eaa353979",
+        "X-B3-Spanid": "32befd146889a61a",
+    }
 
 
 @pytest.mark.asyncio

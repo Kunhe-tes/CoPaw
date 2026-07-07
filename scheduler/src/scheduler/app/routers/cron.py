@@ -7,7 +7,7 @@ import json
 import logging
 from typing import Any
 
-from fastapi import APIRouter, Body, Depends, HTTPException
+from fastapi import APIRouter, Body, Depends, HTTPException, Request
 from pydantic import BaseModel
 
 from ..models.cron import ExecutionSyncRequest, RecordExecutionResponse
@@ -35,6 +35,7 @@ class SchedulerCronCallbackResponse(BaseModel):
 
 @router.post("/callback", response_model=SchedulerCronCallbackResponse)
 async def scheduler_parent_callback(
+    request: Request,
     body: dict[str, Any] = Body(...),
     scheduling_service: CronSchedulingService = Depends(
         get_cron_scheduling_service,
@@ -42,7 +43,10 @@ async def scheduler_parent_callback(
 ) -> SchedulerCronCallbackResponse:
     """External scheduler callback for a batch parent cron job."""
     try:
-        result = await scheduling_service.handle_parent_callback(params=body)
+        result = await scheduling_service.handle_parent_callback(
+            params=body,
+            headers=request.headers,
+        )
         return SchedulerCronCallbackResponse.model_validate(result)
     except Exception as exc:  # pylint: disable=broad-except
         logger.error(

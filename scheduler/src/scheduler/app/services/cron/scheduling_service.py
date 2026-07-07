@@ -43,6 +43,17 @@ DEFAULT_RETRY_DELAY_SECONDS = 300
 DEFAULT_CALLBACK_TIMEOUT_SECONDS = 30.0
 DEFAULT_PROVIDER_ID = "default"
 DEFAULT_MODEL_ID = "default"
+HEADER_PREFIX = "x-header-"
+B3_HEADER_NAMES = {
+    "x-b3-businessid": "X-B3-BusinessId",
+    "x-b3-debug": "X-B3-Debug",
+    "x-b3-parentspanid": "X-B3-Parentspanid",
+    "x-b3-sampled": "X-B3-Sampled",
+    "x-b3-spanid": "X-B3-Spanid",
+    "x-b3-timestamp": "X-B3-Timestamp",
+    "x-b3-traceid": "X-B3-Traceid",
+}
+PASSTHROUGH_HEADERS_PAYLOAD_KEY = "passthrough_headers"
 _TRUE_ENV_VALUES = {"1", "true", "yes", "on"}
 BROADCAST_DISPATCH_INTENTS_ENABLED_META_KEY = (
     "broadcast_dispatch_intents_enabled"
@@ -130,10 +141,11 @@ class SweCronCallbackClient:
         parent_scheduled_fire_at: str = "",
         provider_id: str = DEFAULT_PROVIDER_ID,
         model_id: str = DEFAULT_MODEL_ID,
+        passthrough_headers: Mapping[str, Any] | None = None,
     ) -> None:
         if not self._base_url:
             raise RuntimeError("SWE callback base URL is not configured")
-        headers = {}
+        headers = _extract_b3_passthrough_headers(passthrough_headers)
         if self._internal_token:
             headers["X-Internal-Token"] = f"Bearer {self._internal_token}"
         payload = {
@@ -234,11 +246,13 @@ class CronSchedulingService:
         self,
         *,
         params: Mapping[str, Any],
+        headers: Mapping[str, Any] | None = None,
         now_utc: datetime | None = None,
     ) -> dict[str, Any]:
         """Handle an external scheduler callback for a batch parent."""
         now = _ensure_aware_utc(now_utc or datetime.now(timezone.utc))
         callback_params = _decode_callback_params(params)
+        passthrough_headers = _extract_b3_passthrough_headers(headers)
         job_id = str(callback_params.get("job_id") or "").strip()
         if not job_id:
             raise RuntimeError("scheduler callback requires job_id")
@@ -282,11 +296,12 @@ class CronSchedulingService:
         )
         logger.info(
             "scheduler_parent_callback_received job_id=%s tenant_id=%s "
-            "source_id=%s scheduled_fire_at=%s",
+            "source_id=%s scheduled_fire_at=%s passthrough_headers=%s",
             job_id,
             tenant_id,
             source_id,
             scheduled_fire_at.isoformat(),
+            sorted(passthrough_headers),
         )
         parent_meta = _parse_meta(parent.get("meta"))
         if not _meta_dispatch_intents_enabled(parent_meta):
@@ -302,6 +317,11 @@ class CronSchedulingService:
             len(children),
         )
         batch_id = _build_dispatch_batch_id(parent, scheduled_fire_at)
+        callback_metadata = dict(callback_params)
+        if passthrough_headers:
+            callback_metadata[PASSTHROUGH_HEADERS_PAYLOAD_KEY] = dict(
+                passthrough_headers,
+            )
         await self._dispatch_store.upsert_dispatch_batch(
             batch_id=batch_id,
             parent_job_id=job_id,
@@ -311,9 +331,14 @@ class CronSchedulingService:
             agent_id=str(parent.get("agent_id") or "default"),
             scheduled_fire_at=scheduled_fire_at,
             callback_received_at=now,
-            callback_metadata=dict(callback_params),
+            callback_metadata=callback_metadata,
         )
-        jobs = _build_execution_intent_jobs(parent, children, scheduled_fire_at)
+        jobs = _build_execution_intent_jobs(
+            parent,
+            children,
+            scheduled_fire_at,
+            passthrough_headers=passthrough_headers,
+        )
         intent_ids = await self._dispatch_store.enqueue_batch_execution_intents(
             batch_id=batch_id,
             parent_job_id=job_id,
@@ -484,18 +509,24 @@ class CronSchedulingService:
             or payload.get("model_id")
             or DEFAULT_MODEL_ID,
         )
-        await self._callback_client.dispatch_job(
-            tenant_id=str(_row_get(row, "tenant_id") or ""),
-            source_id=str(_row_get(row, "source_id") or ""),
-            agent_id=str(_row_get(row, "agent_id") or "default"),
-            job_id=str(_row_get(row, "job_id") or ""),
-            dispatch_intent_id=intent_id,
-            dispatch_batch_id=batch_id,
-            dispatch_attempt=dispatch_attempt,
-            parent_scheduled_fire_at=parent_scheduled_fire_at,
-            provider_id=provider_id,
-            model_id=model_id,
+        callback_kwargs = {
+            "tenant_id": str(_row_get(row, "tenant_id") or ""),
+            "source_id": str(_row_get(row, "source_id") or ""),
+            "agent_id": str(_row_get(row, "agent_id") or "default"),
+            "job_id": str(_row_get(row, "job_id") or ""),
+            "dispatch_intent_id": intent_id,
+            "dispatch_batch_id": batch_id,
+            "dispatch_attempt": dispatch_attempt,
+            "parent_scheduled_fire_at": parent_scheduled_fire_at,
+            "provider_id": provider_id,
+            "model_id": model_id,
+        }
+        passthrough_headers = _extract_b3_passthrough_headers(
+            payload.get(PASSTHROUGH_HEADERS_PAYLOAD_KEY),
         )
+        if passthrough_headers:
+            callback_kwargs["passthrough_headers"] = passthrough_headers
+        await self._callback_client.dispatch_job(**callback_kwargs)
         await self._dispatch_store.mark_intent_dispatched(
             intent_id=intent_id,
             worker_id=self._worker_id,
@@ -866,10 +897,27 @@ def _build_execution_intent_jobs(
     parent: Mapping[str, Any],
     children: list[dict[str, Any]],
     scheduled_fire_at: datetime,
+    passthrough_headers: Mapping[str, Any] | None = None,
 ) -> list[dict[str, Any]]:
     parent_provider_id, parent_model_id = _extract_model_identity(parent)
     scheduled = scheduled_fire_at.isoformat()
     parent_job_id = str(parent.get("id") or "")
+    normalized_passthrough_headers = _extract_b3_passthrough_headers(
+        passthrough_headers,
+    )
+    parent_payload = {
+        "tenant_id": str(parent.get("tenant_id") or ""),
+        "job_id": parent_job_id,
+        "source_id": str(parent.get("source_id") or ""),
+        "agent_id": str(parent.get("agent_id") or "default"),
+        "provider_id": parent_provider_id,
+        "model_id": parent_model_id,
+        "parent_scheduled_fire_at": scheduled,
+    }
+    if normalized_passthrough_headers:
+        parent_payload[PASSTHROUGH_HEADERS_PAYLOAD_KEY] = dict(
+            normalized_passthrough_headers,
+        )
     jobs: list[dict[str, Any]] = [
         {
             "intent_role": "parent",
@@ -880,15 +928,7 @@ def _build_execution_intent_jobs(
             "agent_id": str(parent.get("agent_id") or "default"),
             "provider_id": parent_provider_id,
             "model_id": parent_model_id,
-            "payload": {
-                "tenant_id": str(parent.get("tenant_id") or ""),
-                "job_id": parent_job_id,
-                "source_id": str(parent.get("source_id") or ""),
-                "agent_id": str(parent.get("agent_id") or "default"),
-                "provider_id": parent_provider_id,
-                "model_id": parent_model_id,
-                "parent_scheduled_fire_at": scheduled,
-            },
+            "payload": parent_payload,
         },
     ]
     for child in children:
@@ -906,6 +946,10 @@ def _build_execution_intent_jobs(
                 "parent_scheduled_fire_at": scheduled,
             },
         )
+        if normalized_passthrough_headers:
+            payload[PASSTHROUGH_HEADERS_PAYLOAD_KEY] = dict(
+                normalized_passthrough_headers,
+            )
         jobs.append(
             {
                 **child,
@@ -1053,6 +1097,31 @@ def _row_payload(row: Any) -> dict[str, Any]:
             return {}
         return parsed if isinstance(parsed, dict) else {}
     return {}
+
+
+def _extract_b3_passthrough_headers(
+    headers: Mapping[str, Any] | None,
+) -> dict[str, str]:
+    if not headers:
+        return {}
+    items = getattr(headers, "items", None)
+    if not callable(items):
+        return {}
+    extracted: dict[str, str] = {}
+    for name, value in items():
+        name_lower = str(name).strip().lower()
+        header_name = (
+            name_lower[len(HEADER_PREFIX) :]
+            if name_lower.startswith(HEADER_PREFIX)
+            else name_lower
+        )
+        canonical_name = B3_HEADER_NAMES.get(header_name)
+        if canonical_name is None:
+            continue
+        header_value = str(value).strip()
+        if header_value:
+            extracted[canonical_name] = header_value
+    return extracted
 
 
 def _positive_int(value: Any) -> int | None:
