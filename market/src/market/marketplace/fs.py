@@ -509,7 +509,7 @@ def check_skill_status_in_manifest(
         agent_id: Agent ID
 
     Returns:
-        元组 (状态, 版本号)：状态为 first_time / conflict / update，版本号仅在 update 时返回
+        元组 (状态, 版本号)：状态为 first_time / update / conflict，版本号仅在 update 时返回
     """
     manifest = read_user_skill_manifest(swe_root, user_id, agent_id, source_id)
     skills_dict = manifest.get("skills", {})
@@ -520,8 +520,12 @@ def check_skill_status_in_manifest(
         return ("first_time", None)
 
     existing_source = existing_entry.get("source", "")
-    if existing_source == "customized":
-        # 自建技能，冲突
+
+    # 冲突判断逻辑与 copy_skill_to_user 保持一致：
+    # 仅当自建技能明确绑定 creator_id 时才保护，兼容历史脏数据覆盖
+    if existing_source == "customized" and _has_existing_creator_id(
+        existing_entry,
+    ):
         return ("conflict", None)
     elif existing_source.startswith("marketplace:"):
         # 已分发技能，返回状态和版本号
@@ -529,7 +533,7 @@ def check_skill_status_in_manifest(
         version = metadata.get("version_text")
         return ("update", version)
     else:
-        # 其他来源
+        # 其他来源（包括无 creator_id 的 customized），视为可覆盖
         return ("first_time", None)
 
 

@@ -68,7 +68,6 @@ interface SkillDetailPanelProps {
   onDelete: (skill: MySkill) => void;
   onDownload: (skill: MySkill) => void;
   onSyncToMarket: (skill: MySkill) => void;
-  onExport: (skill: MySkill) => void;
 }
 
 const SkillDetailPanel = memo(function SkillDetailPanel({
@@ -92,7 +91,6 @@ const SkillDetailPanel = memo(function SkillDetailPanel({
   onDelete,
   onDownload,
   onSyncToMarket,
-  onExport,
 }: SkillDetailPanelProps) {
   // 描述区展开状态
   const [descExpanded, setDescExpanded] = useState(false);
@@ -262,14 +260,6 @@ const SkillDetailPanel = memo(function SkillDetailPanel({
           )}
         </div>
         <div style={{ display: "flex", gap: 8, flexShrink: 0 }}>
-          <Button
-            size="small"
-            icon={<DownloadOutlined style={{ fontSize: 12 }} />}
-            style={{ height: 28, fontSize: 12, borderRadius: 8 }}
-            onClick={() => onExport(skill)}
-          >
-            导出
-          </Button>
           <Popconfirm
             title="删除技能"
             description={`确定删除技能「${skill.display_name || skill.skill_name}」？删除后不可恢复。`}
@@ -299,6 +289,7 @@ const SkillDetailPanel = memo(function SkillDetailPanel({
           {canEdit && (
             <Button
               size="small"
+              icon={<DownloadOutlined style={{ fontSize: 12 }} />}
               style={{ height: 28, fontSize: 12, borderRadius: 8 }}
               onClick={() => onDownload(skill)}
               loading={isDownloading}

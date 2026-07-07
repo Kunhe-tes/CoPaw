@@ -1791,7 +1791,7 @@
   },
   "distributionPreview": {
     "title": "分发预览",
-    "selectDistributed": "默认选中已分发用户",
+    "selectDistributed": "选中已分发用户",
     "firstTime": "首次分发",
     "update": "覆盖更新",
     "conflict": "跳过(冲突)",

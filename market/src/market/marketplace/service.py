@@ -1745,24 +1745,49 @@ class MarketplaceService:
                     if source.startswith("marketplace:"):
                         # 已分发技能，可覆盖更新
                         status = "update"
+                        users_status.append(
+                            {
+                                "tenant_id": tenant_id,
+                                "tenant_name": user_info.get("tenant_name"),
+                                "bbk_id": user_info.get("bbk_id"),
+                                "status": status,
+                                "current_version": current_version,
+                            },
+                        )
                     elif source == "customized":
-                        # 自建技能，冲突
-                        status = "conflict"
+                        # 自建技能：需要进一步检查 manifest 确认是否有 creator_id
+                        # 与 copy_skill_to_user 的逻辑保持一致
+                        from .fs import check_skill_status_in_manifest
+
+                        manifest_status, manifest_version = (
+                            check_skill_status_in_manifest(
+                                self.swe_root,
+                                tenant_id,
+                                skill_name,
+                                source_id,
+                            )
+                        )
+                        users_status.append(
+                            {
+                                "tenant_id": tenant_id,
+                                "tenant_name": user_info.get("tenant_name"),
+                                "bbk_id": user_info.get("bbk_id"),
+                                "status": manifest_status,
+                                "current_version": manifest_version,
+                            },
+                        )
                     else:
                         # 其他来源，视为首次
                         status = "first_time"
-
-                    users_status.append(
-                        {
-                            "tenant_id": tenant_id,
-                            "tenant_name": user_info.get("tenant_name"),
-                            "bbk_id": user_info.get("bbk_id"),
-                            "status": status,
-                            "current_version": (
-                                current_version if status == "update" else None
-                            ),
-                        },
-                    )
+                        users_status.append(
+                            {
+                                "tenant_id": tenant_id,
+                                "tenant_name": user_info.get("tenant_name"),
+                                "bbk_id": user_info.get("bbk_id"),
+                                "status": status,
+                                "current_version": None,
+                            },
+                        )
                 else:
                     # 数据库中没有记录，检查用户工作区 manifest 文件
                     from .fs import check_skill_status_in_manifest

@@ -569,16 +569,6 @@ export default function MySkillsPage() {
     }
   }, []);
 
-  const handleExport = useCallback(async (skill: MySkill) => {
-    if (!skill) return;
-    try {
-      await marketApi.exportSkill(sourceId, 'my', skill.skill_name);
-      message.success('导出成功');
-    } catch (err) {
-      message.error('导出失败');
-    }
-  }, [sourceId]);
-
   // File tree component
   const FileTree = ({ nodes, level, skill }: { nodes: FileTreeNode[]; level: number; skill: MySkill }) => (
     <div>
@@ -973,7 +963,6 @@ export default function MySkillsPage() {
           onDelete={handleDelete}
           onDownload={handleDownload}
           onSyncToMarket={handleSyncToMarket}
-          onExport={handleExport}
         />
       </div>
 

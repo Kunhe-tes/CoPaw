@@ -604,43 +604,4 @@ export const marketApi = {
       opts
     );
   },
-
-  exportSkill: async (
-    sourceId: string,
-    sourceType: 'market' | 'my',
-    skillName: string,
-    itemId?: string
-  ): Promise<void> => {
-    const params = new URLSearchParams();
-    params.set('source_type', sourceType);
-    if (sourceType === 'my') {
-      params.set('skill_name', skillName);
-    } else {
-      params.set('item_id', itemId || '');
-    }
-
-    const headers = Object.fromEntries(
-      (mergeHeaders({
-        'X-Source-Id': sourceId,
-        ...(sourceType === 'market' ? { 'X-Manager': 'true' } : {}),
-      }).headers as Headers).entries(),
-    );
-
-    const url = getApiUrl(`/market/skills/export?${params.toString()}`);
-    const response = await fetch(url, { headers });
-
-    if (!response.ok) {
-      throw new Error('导出失败');
-    }
-
-    // 触发浏览器下载
-    const blob = await response.blob();
-    const filename = `${skillName}.zip`;
-    const downloadUrl = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = downloadUrl;
-    a.download = filename;
-    a.click();
-    URL.revokeObjectURL(downloadUrl);
-  },
 };
