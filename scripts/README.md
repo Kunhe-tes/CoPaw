@@ -51,3 +51,26 @@ python scripts/run_tests.py -p
 # Show help
 python scripts/run_tests.py -h
 ```
+
+## Probe inotify watcher ownership
+
+Enable the runtime watchfiles stack probe before starting the backend:
+
+```bash
+export SWE_WATCHFILES_STACK_PROBE_ENABLED=1
+export SWE_RUNTIME_DIAGNOSTIC_TOKEN='<secret>'
+```
+
+After each matrix step (empty runtime, N workspaces, N MCP clients, N queries),
+capture a labeled snapshot:
+
+```bash
+python scripts/inotify_matrix_probe.py \
+  --pid 1 \
+  --label empty \
+  --runtime-url 'http://127.0.0.1:8080/api/runtime/inotify-diagnostic?include_fdinfo=true' \
+  --token "$SWE_RUNTIME_DIAGNOSTIC_TOKEN"
+```
+
+The output includes `/proc/<pid>/fdinfo` inotify counts, native thread name
+counts, and opt-in `watchfiles.watch`/`awatch` creation stacks.
