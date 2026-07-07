@@ -54,6 +54,7 @@ _PUBLIC_PATHS: frozenset[str] = frozenset(
         "/api/auth/register",
         "/api/version",
         "/api/runtime/memory-diagnostic",
+        "/api/runtime/memory-type-holders",
         "/api/assets/upload",
         "/api/template/search",
         "/api/settings/language",

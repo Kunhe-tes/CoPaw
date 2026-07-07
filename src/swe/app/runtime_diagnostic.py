@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import asyncio
 import gc
+import inspect
 import json
 import logging
 import math
@@ -33,6 +34,9 @@ _SAMPLE_INTERVAL_SECONDS = 10.0
 _FIRST_DIAGNOSTIC_DELAY_SECONDS = 120.0
 _FIRST_DIAGNOSTIC_JITTER_SECONDS = 10.0
 _DIAGNOSTIC_INTERVAL_SECONDS = 1800.0
+_MEMORY_DIFF_PROBE_INTERVAL_SECONDS = 300.0
+_MEMORY_DIFF_PROBE_LIMIT = 20
+_TRUTHY_ENV_VALUES = {"1", "true", "yes", "on"}
 
 
 def _percentile(values: list[float], percentile: float) -> float | None:
@@ -48,6 +52,27 @@ def _normalize_limit(limit: int) -> int:
     return min(100, max(1, int(limit)))
 
 
+def _env_flag_enabled(name: str) -> bool:
+    value = os.environ.get(name, "")
+    return value.strip().lower() in _TRUTHY_ENV_VALUES
+
+
+def _env_float(name: str, default: float, *, minimum: float) -> float:
+    value = os.environ.get(name)
+    if value is None:
+        return default
+    try:
+        return max(minimum, float(value))
+    except ValueError:
+        logger.warning(
+            "Invalid %s=%r; using %.1f",
+            name,
+            value,
+            default,
+        )
+        return default
+
+
 def _diagnostic_import(
     module_name: str,
     errors: list[dict[str, str]],
@@ -61,6 +86,28 @@ def _diagnostic_import(
                 "message": str(exc),
             },
         )
+        return None
+
+
+def _safe_repr(value: object, *, limit: int = 300) -> str:
+    try:
+        text = repr(value)
+    except Exception as exc:  # pylint: disable=broad-except
+        text = f"<repr failed: {exc!r}>"
+    return text[:limit]
+
+
+def _qualified_type_name(value: object) -> str:
+    value_type = type(value)
+    return f"{value_type.__module__}.{value_type.__qualname__}"
+
+
+def _int_or_none(value: Any) -> int | None:
+    if value is None:
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
         return None
 
 
@@ -123,6 +170,15 @@ class RuntimeDiagnosticManager:
         self._pod_disk_write_bytes_per_second_peak: float | None = None
         self._tasks: list[asyncio.Task] = []
         self._running = False
+        self._memory_diff_probe_enabled = _env_flag_enabled(
+            "SWE_MEMORY_DIFF_PROBE_ENABLED",
+        )
+        self._memory_diff_interval_seconds = _env_float(
+            "SWE_MEMORY_DIFF_PROBE_INTERVAL_SECONDS",
+            _MEMORY_DIFF_PROBE_INTERVAL_SECONDS,
+            minimum=1.0,
+        )
+        self._last_memory_diff_snapshot: dict[str, object] | None = None
 
     def set_workspace_metrics(
         self,
@@ -281,6 +337,18 @@ class RuntimeDiagnosticManager:
                 logger.exception("Runtime diagnostic emission failed")
             await self._sleep(_DIAGNOSTIC_INTERVAL_SECONDS)
 
+    async def run_memory_diff_probe_loop(self) -> None:
+        """Emit opt-in memory diff snapshots at a fixed interval."""
+        self.emit_memory_diff_probe(tag="baseline")
+        while True:
+            await self._sleep(self._memory_diff_interval_seconds)
+            try:
+                self.emit_memory_diff_probe(tag="periodic")
+            except asyncio.CancelledError:
+                raise
+            except Exception:  # pylint: disable=broad-except
+                logger.exception("Runtime memory diff probe failed")
+
     async def start(self) -> None:
         """Emit registration and start background diagnostic tasks."""
         if self._running:
@@ -301,6 +369,13 @@ class RuntimeDiagnosticManager:
                 name="runtime-diagnostic-emitter",
             ),
         ]
+        if self._memory_diff_probe_enabled:
+            self._tasks.append(
+                asyncio.create_task(
+                    self.run_memory_diff_probe_loop(),
+                    name="runtime-memory-diff-probe",
+                ),
+            )
 
     async def stop(self) -> None:
         """Stop background tasks and emit graceful deregistration."""
@@ -426,6 +501,316 @@ class RuntimeDiagnosticManager:
             ),
         )
         return payload
+
+    def collect_memory_type_holders(
+        self,
+        *,
+        type_name: str,
+        target_index: int = 0,
+        holder_type_filter: str | None = None,
+        max_samples_per_type: int = 5,
+        collect_gc: bool = True,
+    ) -> dict[str, object]:
+        """Report direct referrer types for one live object of a type."""
+        normalized_samples = _normalize_limit(max_samples_per_type)
+        errors: list[dict[str, str]] = []
+        payload = self._base_payload("memory_type_holders")
+        payload.update(
+            {
+                "type_name": type_name,
+                "target_index": target_index,
+                "holder_type_filter": holder_type_filter,
+                "max_samples_per_type": normalized_samples,
+                "gc_collected": None,
+                "objgraph_available": False,
+                "target_count": 0,
+                "target_repr": None,
+                "holder_type_counts": [],
+                "samples": [],
+                "errors": errors,
+            },
+        )
+        payload.update(self._process_metrics())
+
+        if collect_gc:
+            try:
+                payload["gc_collected"] = int(gc.collect())
+            except Exception as exc:  # pylint: disable=broad-except
+                errors.append(
+                    {
+                        "collector": "gc.collect",
+                        "message": str(exc),
+                    },
+                )
+
+        objgraph = _diagnostic_import("objgraph", errors)
+        if objgraph is None:
+            return payload
+        payload["objgraph_available"] = True
+
+        try:
+            targets = objgraph.by_type(type_name)
+        except Exception as exc:  # pylint: disable=broad-except
+            errors.append(
+                {
+                    "collector": "objgraph.by_type",
+                    "message": str(exc),
+                },
+            )
+            return payload
+
+        payload["target_count"] = len(targets)
+        if not targets:
+            return payload
+
+        if target_index < 0 or target_index >= len(targets):
+            errors.append(
+                {
+                    "collector": "target_index",
+                    "message": (
+                        f"target_index {target_index} out of range for "
+                        f"{len(targets)} {type_name} objects"
+                    ),
+                },
+            )
+            return payload
+
+        target = targets[target_index]
+        payload["target_repr"] = _safe_repr(target)
+
+        try:
+            referrers = gc.get_referrers(target)
+        except Exception as exc:  # pylint: disable=broad-except
+            errors.append(
+                {
+                    "collector": "gc.get_referrers",
+                    "message": str(exc),
+                },
+            )
+            return payload
+
+        holder_counts: dict[str, int] = {}
+        samples: list[dict[str, object]] = []
+        for referrer in referrers:
+            if inspect.isframe(referrer):
+                continue
+
+            holder_type = _qualified_type_name(referrer)
+            if holder_type_filter and holder_type_filter not in holder_type:
+                continue
+
+            holder_counts[holder_type] = holder_counts.get(holder_type, 0) + 1
+            if holder_counts[holder_type] > normalized_samples:
+                continue
+
+            samples.append(
+                {
+                    "holder_type": holder_type,
+                    "holder_py_type": type(referrer).__name__,
+                    "holder_repr": _safe_repr(referrer),
+                    "owner_hint": self._memory_referrer_owner_hint(referrer),
+                },
+            )
+
+        payload["holder_type_counts"] = [
+            {
+                "type": holder_type,
+                "count": count,
+            }
+            for holder_type, count in sorted(
+                holder_counts.items(),
+                key=lambda item: item[1],
+                reverse=True,
+            )
+        ]
+        payload["samples"] = samples
+        return payload
+
+    def _memory_referrer_owner_hint(
+        self,
+        referrer: object,
+    ) -> dict[str, object] | None:
+        if not isinstance(referrer, dict):
+            return None
+
+        try:
+            owners = gc.get_referrers(referrer)
+        except Exception:  # pylint: disable=broad-except
+            return None
+
+        for owner in owners:
+            if inspect.isframe(owner) or isinstance(
+                owner,
+                (dict, list, tuple, set),
+            ):
+                continue
+            return {
+                "owner_type": _qualified_type_name(owner),
+                "owner_py_type": type(owner).__name__,
+                "owner_repr": _safe_repr(owner),
+            }
+        return None
+
+    def collect_memory_diff_snapshot(self, *, tag: str) -> dict[str, object]:
+        """Collect a memory diagnostic snapshot and compare it to the last one."""
+        current = self.collect_memory_diagnostic(
+            limit=_MEMORY_DIFF_PROBE_LIMIT,
+            collect_gc=True,
+        )
+        current["tag"] = tag
+        previous = self._last_memory_diff_snapshot
+        self._last_memory_diff_snapshot = current
+
+        payload = self._base_payload("memory_diff_probe")
+        payload.update(
+            {
+                "tag": tag,
+                "has_previous_snapshot": previous is not None,
+                "from_tag": (
+                    previous.get("tag") if isinstance(previous, dict) else None
+                ),
+                "to_tag": tag,
+                "elapsed_ms": self._memory_snapshot_delta(
+                    previous,
+                    current,
+                    "event_at_ms",
+                ),
+                "rss_delta_bytes": self._memory_snapshot_delta(
+                    previous,
+                    current,
+                    "process_rss_bytes",
+                ),
+                "vms_delta_bytes": self._memory_snapshot_delta(
+                    previous,
+                    current,
+                    "process_vms_bytes",
+                ),
+                "thread_delta": self._memory_snapshot_delta(
+                    previous,
+                    current,
+                    "process_thread_count",
+                ),
+                "open_fd_delta": self._memory_snapshot_delta(
+                    previous,
+                    current,
+                    "process_open_fd_count",
+                ),
+                "gc_object_delta": self._memory_snapshot_delta(
+                    previous,
+                    current,
+                    "gc_object_count",
+                ),
+                "objgraph_type_count_delta": self._memory_snapshot_delta(
+                    previous,
+                    current,
+                    "objgraph_type_count",
+                ),
+                "pympler_object_count_delta": self._memory_snapshot_delta(
+                    previous,
+                    current,
+                    "pympler_object_count",
+                ),
+                "latest_process_rss_bytes": current.get("process_rss_bytes"),
+                "latest_process_vms_bytes": current.get("process_vms_bytes"),
+                "latest_process_thread_count": current.get(
+                    "process_thread_count",
+                ),
+                "latest_process_open_fd_count": current.get(
+                    "process_open_fd_count",
+                ),
+                "latest_gc_object_count": current.get("gc_object_count"),
+                "top_object_type_deltas": self._top_type_deltas(
+                    previous,
+                    current,
+                    "top_object_types",
+                    ("count",),
+                ),
+                "top_memory_type_deltas": self._top_type_deltas(
+                    previous,
+                    current,
+                    "top_memory_types",
+                    ("count", "size_bytes"),
+                ),
+                "latest_top_object_types": current.get(
+                    "top_object_types",
+                    [],
+                ),
+                "latest_top_memory_types": current.get(
+                    "top_memory_types",
+                    [],
+                ),
+                "errors": current.get("errors", []),
+            },
+        )
+        return payload
+
+    def _memory_snapshot_delta(
+        self,
+        previous: dict[str, object] | None,
+        current: dict[str, object],
+        key: str,
+    ) -> int | None:
+        if previous is None:
+            return None
+        previous_value = _int_or_none(previous.get(key))
+        current_value = _int_or_none(current.get(key))
+        if previous_value is None or current_value is None:
+            return None
+        return current_value - previous_value
+
+    def _top_type_deltas(
+        self,
+        previous: dict[str, object] | None,
+        current: dict[str, object],
+        key: str,
+        fields: tuple[str, ...],
+    ) -> list[dict[str, object]]:
+        if previous is None:
+            return []
+
+        previous_rows = self._rows_by_type(previous.get(key))
+        current_rows = self._rows_by_type(current.get(key))
+        rows: list[dict[str, object]] = []
+        for type_name in sorted(set(previous_rows) | set(current_rows)):
+            row: dict[str, object] = {"type": type_name}
+            has_delta = False
+            for field in fields:
+                delta = int(
+                    current_rows.get(type_name, {}).get(field, 0),
+                ) - int(previous_rows.get(type_name, {}).get(field, 0))
+                row[f"{field}_delta"] = delta
+                has_delta = has_delta or delta != 0
+            if has_delta:
+                rows.append(row)
+
+        primary_field = f"{fields[-1]}_delta"
+        return sorted(
+            rows,
+            key=lambda item: abs(_int_or_none(item.get(primary_field)) or 0),
+            reverse=True,
+        )[:_MEMORY_DIFF_PROBE_LIMIT]
+
+    def _rows_by_type(self, rows: object) -> dict[str, dict[str, int]]:
+        result: dict[str, dict[str, int]] = {}
+        if not isinstance(rows, list):
+            return result
+        for row in rows:
+            if not isinstance(row, dict) or "type" not in row:
+                continue
+            type_name = str(row["type"])
+            result[type_name] = {}
+            for key, value in row.items():
+                if key == "type":
+                    continue
+                try:
+                    result[type_name][key] = int(value)
+                except (TypeError, ValueError):
+                    result[type_name][key] = 0
+        return result
+
+    def emit_memory_diff_probe(self, *, tag: str) -> None:
+        """Emit one memory diff probe event."""
+        self._emit(self.collect_memory_diff_snapshot(tag=tag))
 
     def _collect_objgraph_diagnostic(
         self,
