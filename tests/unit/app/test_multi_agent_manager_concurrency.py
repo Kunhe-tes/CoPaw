@@ -13,6 +13,7 @@ import pytest
 import swe.app.multi_agent_manager as manager_module
 import swe.app.workspace.workspace as workspace_module
 from swe.app.multi_agent_manager import MultiAgentManager
+from swe.app.workspace.service_manager import ServiceDescriptor, ServiceManager
 from swe.app.workspace.workspace import Workspace
 
 
@@ -67,6 +68,89 @@ class _TaskTracker:
 
     async def wait_all_done(self, *, timeout: float) -> bool:
         return not self._has_active_tasks
+
+
+@pytest.mark.asyncio
+async def test_service_manager_final_stop_clears_stopped_service_references(
+    tmp_path,
+) -> None:
+    workspace = SimpleNamespace(agent_id="default")
+    service_manager = ServiceManager(workspace)
+    stopped: list[str] = []
+
+    class Service:
+        def __init__(self, name: str) -> None:
+            self.name = name
+
+        async def stop(self) -> None:
+            stopped.append(self.name)
+
+    service_manager.register(
+        ServiceDescriptor(
+            name="runner",
+            service_class=None,
+            stop_method="stop",
+            priority=10,
+        ),
+    )
+    service_manager.register(
+        ServiceDescriptor(
+            name="memory_manager",
+            service_class=None,
+            stop_method="stop",
+            reusable=True,
+            priority=20,
+        ),
+    )
+    service_manager.services["runner"] = Service("runner")
+    service_manager.services["memory_manager"] = Service("memory_manager")
+
+    await service_manager.stop_all(final=True)
+
+    assert stopped == ["memory_manager", "runner"]
+    assert service_manager.services == {}
+    assert service_manager.reused_services == set()
+
+
+@pytest.mark.asyncio
+async def test_service_manager_reload_stop_keeps_reusable_service_reference(
+    tmp_path,
+) -> None:
+    workspace = SimpleNamespace(agent_id="default")
+    service_manager = ServiceManager(workspace)
+    stopped: list[str] = []
+
+    class Service:
+        def __init__(self, name: str) -> None:
+            self.name = name
+
+        async def stop(self) -> None:
+            stopped.append(self.name)
+
+    service_manager.register(
+        ServiceDescriptor(
+            name="runner",
+            service_class=None,
+            stop_method="stop",
+            priority=10,
+        ),
+    )
+    service_manager.register(
+        ServiceDescriptor(
+            name="memory_manager",
+            service_class=None,
+            stop_method="stop",
+            reusable=True,
+            priority=20,
+        ),
+    )
+    service_manager.services["runner"] = Service("runner")
+    service_manager.services["memory_manager"] = Service("memory_manager")
+
+    await service_manager.stop_all(final=False)
+
+    assert stopped == ["runner"]
+    assert set(service_manager.services) == {"memory_manager"}
 
 
 @pytest.mark.asyncio

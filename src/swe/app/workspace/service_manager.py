@@ -376,6 +376,10 @@ class ServiceManager:
                     logger.warning(
                         f"Error stopping service '{desc.name}': {result}",
                     )
+                    continue
+                if result is True:
+                    self.services.pop(desc.name, None)
+                    self.reused_services.discard(desc.name)
 
     async def _stop_service(
         self,
@@ -383,7 +387,7 @@ class ServiceManager:
         final: bool = False,
         *,
         stop_reused: bool = True,
-    ) -> None:
+    ) -> bool:
         """Stop a single service.
 
         Args:
@@ -402,7 +406,7 @@ class ServiceManager:
                 f"Skipped stopping reusable service '{name}' "
                 f"for {self.workspace.agent_id} (will be reused)",
             )
-            return
+            return False
 
         # Skip services that were reused from previous instance UNLESS final
         # (they don't belong to this instance, but must be stopped on final)
@@ -411,11 +415,11 @@ class ServiceManager:
                 f"Skipped stopping reused service '{name}' "
                 f"(from previous instance) for {self.workspace.agent_id}",
             )
-            return
+            return False
 
         service = self.services.get(name)
         if not service:
-            return
+            return False
 
         try:
             if descriptor.stop_method:
@@ -429,6 +433,7 @@ class ServiceManager:
                         f"Service '{name}' stopped "
                         f"for {self.workspace.agent_id}",
                     )
+            return True
         except Exception as e:
             logger.warning(
                 f"Error stopping service '{name}' "
