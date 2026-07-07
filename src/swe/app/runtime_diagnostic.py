@@ -57,6 +57,7 @@ class RuntimeDiagnosticManager:
             [],
             tuple[int, int],
         ] = collect_pod_disk_io_bytes,
+        workspace_metrics: Callable[[], dict[str, int]] | None = None,
         thread_limiter: Callable[[], Any] = (
             anyio.to_thread.current_default_thread_limiter
         ),
@@ -78,6 +79,7 @@ class RuntimeDiagnosticManager:
         self._disk_usage = disk_usage
         self._pod_open_fd_count = pod_open_fd_count
         self._pod_disk_io_bytes = pod_disk_io_bytes
+        self._workspace_metrics = workspace_metrics
         self._thread_limiter = thread_limiter
         self._log_sink = log_sink or logger.info
         self._monotonic_time = monotonic_time
@@ -99,6 +101,13 @@ class RuntimeDiagnosticManager:
         self._pod_disk_write_bytes_per_second_peak: float | None = None
         self._tasks: list[asyncio.Task] = []
         self._running = False
+
+    def set_workspace_metrics(
+        self,
+        workspace_metrics: Callable[[], dict[str, int]] | None,
+    ) -> None:
+        """Set the workspace cache metric collector."""
+        self._workspace_metrics = workspace_metrics
 
     def record_sse_opened(self) -> None:
         """Record one newly active SSE connection."""
@@ -391,6 +400,26 @@ class RuntimeDiagnosticManager:
             )
         return {"pod_open_fd_count": pod_open_fd_count, **disk_metrics}
 
+    def _workspace_cache_metrics(self) -> dict[str, object]:
+        empty: dict[str, object] = {
+            "workspace_cache_size": None,
+            "workspace_start_tasks": None,
+            "workspace_cache_max_size": None,
+            "workspace_start_max_concurrent": None,
+            "workspace_evictions_total": None,
+            "workspace_eviction_stop_failures_total": None,
+        }
+        if self._workspace_metrics is None:
+            return empty
+        try:
+            metrics = self._workspace_metrics()
+        except Exception:  # pylint: disable=broad-except
+            logger.exception(
+                "Failed to collect runtime diagnostic workspace metrics",
+            )
+            return empty
+        return {**empty, **metrics}
+
     def _threadpool_metrics(self) -> dict[str, object]:
         empty: dict[str, object] = {
             "anyio_threadpool_total_tokens": None,
@@ -446,6 +475,7 @@ class RuntimeDiagnosticManager:
         payload.update(self._threadpool_metrics())
         payload.update(self._process_metrics())
         payload.update(self._pod_metrics())
+        payload.update(self._workspace_cache_metrics())
         payload.update(self._storage_metrics())
         return payload
 
