@@ -224,10 +224,10 @@ def _get_positive_int_env(name: str, default: int) -> int:
 
 
 def _configure_async_thread_pools() -> None:
-    anyio_thread_tokens = _get_positive_int_env("ANYIO_THREAD_TOKENS", 64)
+    anyio_thread_tokens = _get_positive_int_env("ANYIO_THREAD_TOKENS", 16)
     asyncio_executor_workers = _get_positive_int_env(
         "ASYNCIO_EXECUTOR_WORKERS",
-        64,
+        16,
     )
 
     anyio_limiter = anyio.to_thread.current_default_thread_limiter()

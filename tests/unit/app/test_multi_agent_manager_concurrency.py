@@ -245,9 +245,9 @@ async def test_duplicate_workspace_lost_race_is_stopped(monkeypatch) -> None:
 def test_workspace_cache_defaults_are_bounded() -> None:
     manager = MultiAgentManager()
 
-    assert manager.workspace_cache_max_size == 64
+    assert manager.workspace_cache_max_size == 16
     assert manager.workspace_start_max_concurrent == 4
-    assert manager.workspace_idle_ttl_seconds == 6 * 60 * 60
+    assert manager.workspace_idle_ttl_seconds == 60 * 60
 
 
 def test_workspace_cache_settings_read_environment(
