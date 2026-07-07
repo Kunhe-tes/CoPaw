@@ -10,6 +10,7 @@ import sys
 from typing import Sequence
 
 from swe.envs.runtime import build_runtime_env
+from swe.runtime_invocation_claims import apply_runtime_claim_env
 from swe.security.process_limits import resolve_current_process_limit_policy
 
 try:
@@ -71,6 +72,7 @@ def build_tenant_aware_stdio_launch_config(
             else frozenset()
         ),
     )
+    runtime_env = apply_runtime_claim_env(runtime_env)
     if policy.should_enforce:
         runtime_env[_WRAPPER_ONLY_DROP_ENV_KEYS] = os.pathsep.join(
             sorted(_WRAPPER_PRESERVED_BOUNDARY_KEYS),

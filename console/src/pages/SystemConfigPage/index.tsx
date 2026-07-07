@@ -29,14 +29,20 @@ import {
   ARCHIVE_MAINTENANCE_RUN_TIME_OPTIONS,
   CURRENT_SOURCE_SYSTEM_CONFIG_SWITCHES,
   CRON_TASK_SESSION_CLEANUP_RUN_TIME_OPTIONS,
+  LLM_RATE_LIMITER_NUMBER_FIELDS,
+  QUERY_RETRY_NUMBER_FIELDS,
   TOOL_RESULT_COMPACT_NUMBER_FIELDS,
+  clearModelCallPolicyConfig,
   clearImmediateTruncationConfig,
+  enableModelCallPolicyConfig,
   enableImmediateTruncationConfig,
   formatSystemPromptInjectionText,
   parseSystemPromptInjectionText,
   readArchiveMaintenanceConfig,
   readCronTaskSessionCleanupConfig,
   readCronUnreadAutoPauseConfig,
+  readLlmRateLimiterConfigState,
+  readQueryRetryConfigState,
   readRegisteredSwitchValue,
   readImmediateTruncationConfig,
   readSystemPromptInjections,
@@ -45,12 +51,18 @@ import {
   writeArchiveMaintenanceValue,
   writeCronTaskSessionCleanupValue,
   writeCronUnreadAutoPauseValue,
+  writeLlmRateLimiterValue,
+  writeQueryRetryValue,
   writeRegisteredSwitchValue,
   writeSystemPromptInjections,
   writeImmediateTruncationValue,
   writeToolResultCompactValue,
 } from "./registry";
-import type { ImmediateTruncationConfigKey } from "./registry";
+import type {
+  ImmediateTruncationConfigKey,
+  LlmRateLimiterConfig,
+  ModelCallPolicyConfigKey,
+} from "./registry";
 import styles from "./index.module.less";
 
 function formatUpdatedAt(value?: string | null): string {
@@ -69,6 +81,12 @@ export default function SystemConfigPage() {
     useIframeStore((state) => state.source) || DEFAULT_SOURCE_ID;
   const loadEffectiveConfig = useSourceSystemConfigStore(
     (state) => state.loadEffectiveConfig,
+  );
+  const effectiveSourceConfig = useSourceSystemConfigStore(
+    (state) => state.config,
+  );
+  const effectiveSourceId = useSourceSystemConfigStore(
+    (state) => state.sourceId,
   );
   const canManage = isSuperManager || manager;
   const [loading, setLoading] = useState(true);
@@ -106,6 +124,13 @@ export default function SystemConfigPage() {
   const isLoadedSourceCurrent =
     record !== null && record.source_id === activeSourceId;
   const formDisabled = loading || saving || !isLoadedSourceCurrent;
+  const isEffectiveConfigCurrent =
+    effectiveSourceId === activeSourceId &&
+    effectiveSourceConfig?.source_id === activeSourceId;
+  const effectiveConfigPayload = isEffectiveConfigCurrent
+    ? effectiveSourceConfig.config
+    : null;
+  const modelCallPolicyDisabled = formDisabled || !isEffectiveConfigCurrent;
 
   useEffect(() => {
     if (!canManage) {
@@ -126,6 +151,7 @@ export default function SystemConfigPage() {
     setValidationError(null);
     setRecord(null);
     setDraftConfig({});
+    void loadEffectiveConfig(activeSourceId);
 
     sourceSystemConfigApi
       .getCurrent()
@@ -154,7 +180,7 @@ export default function SystemConfigPage() {
           setLoading(false);
         }
       });
-  }, [activeSourceId, canManage]);
+  }, [activeSourceId, canManage, loadEffectiveConfig]);
 
   if (!canManage) {
     return (
@@ -289,6 +315,64 @@ export default function SystemConfigPage() {
     );
   };
 
+  const handleEnableModelCallPolicy = (configKey: ModelCallPolicyConfigKey) => {
+    if (modelCallPolicyDisabled) {
+      return;
+    }
+    setValidationError(null);
+    setDraftConfig((previous) =>
+      enableModelCallPolicyConfig(previous, configKey, effectiveConfigPayload),
+    );
+  };
+
+  const handleRestoreModelCallPolicyInheritance = (
+    configKey: ModelCallPolicyConfigKey,
+  ) => {
+    if (modelCallPolicyDisabled) {
+      return;
+    }
+    setValidationError(null);
+    setDraftConfig((previous) =>
+      clearModelCallPolicyConfig(previous, configKey),
+    );
+  };
+
+  const handleQueryRetryEnabledChange = (checked: boolean) => {
+    if (modelCallPolicyDisabled) {
+      return;
+    }
+    setValidationError(null);
+    setDraftConfig((previous) =>
+      writeQueryRetryValue(previous, "enabled", checked),
+    );
+  };
+
+  const handleQueryRetryNumberChange = (
+    key: (typeof QUERY_RETRY_NUMBER_FIELDS)[number]["key"],
+    value: number | null,
+  ) => {
+    if (modelCallPolicyDisabled || typeof value !== "number") {
+      return;
+    }
+    setValidationError(null);
+    setDraftConfig((previous) => writeQueryRetryValue(previous, key, value));
+  };
+
+  const handleLlmRateLimiterNumberChange = <
+    K extends keyof LlmRateLimiterConfig,
+  >(
+    key: K,
+    value: LlmRateLimiterConfig[K],
+  ) => {
+    if (modelCallPolicyDisabled) {
+      return;
+    }
+    setValidationError(null);
+    setDraftConfig((previous) =>
+      writeLlmRateLimiterValue(previous, key, value),
+    );
+  };
+
   const handleToolResultNumberChange = (
     key: (typeof TOOL_RESULT_COMPACT_NUMBER_FIELDS)[number]["key"],
     value: number | null,
@@ -356,7 +440,10 @@ export default function SystemConfigPage() {
     if (formDisabled) {
       return;
     }
-    const validationError = validateSourceSystemConfig(draftConfig);
+    const validationError = validateSourceSystemConfig(
+      draftConfig,
+      effectiveConfigPayload,
+    );
     if (validationError) {
       setValidationError(validationError);
       message.error(validationError);
@@ -410,6 +497,14 @@ export default function SystemConfigPage() {
   const archiveMaintenanceConfig = readArchiveMaintenanceConfig(draftConfig);
   const systemPromptInjectionText = formatSystemPromptInjectionText(
     readSystemPromptInjections(draftConfig),
+  );
+  const queryRetryState = readQueryRetryConfigState(
+    draftConfig,
+    effectiveConfigPayload,
+  );
+  const llmRateLimiterState = readLlmRateLimiterConfigState(
+    draftConfig,
+    effectiveConfigPayload,
   );
   const toolResultCompactConfig = readToolResultCompactConfig(draftConfig);
   const fileReadTruncationState = readImmediateTruncationConfig(
@@ -628,6 +723,205 @@ export default function SystemConfigPage() {
                   }
                 />
               </label>
+            </Card>
+
+            <Card
+              className={styles.switchCard}
+              title={t("sourceSystemConfigPage.modelCallPolicyTitle", {
+                defaultValue: "模型调用策略",
+              })}
+            >
+              <div className={styles.toolResultIntro}>
+                {t("sourceSystemConfigPage.modelCallPolicyIntro", {
+                  defaultValue:
+                    "当前系统下 Query 重试与 LLM 并发限流的显式覆盖。未启用覆盖时继承 Agent 运行配置。",
+                })}
+              </div>
+
+              <section className={styles.toolOutputSection}>
+                <div className={styles.toolOutputSectionHeader}>
+                  <div className={styles.switchCopy}>
+                    <span className={styles.switchTitle}>
+                      {t("sourceSystemConfigPage.queryRetryTitle", {
+                        defaultValue: "查询重试",
+                      })}
+                    </span>
+                    <span className={styles.switchDescription}>
+                      {t("sourceSystemConfigPage.queryRetryDescription", {
+                        defaultValue:
+                          "控制当前系统请求遇到瞬时错误时是否按退避策略重试整轮 Query。",
+                      })}
+                    </span>
+                  </div>
+                  <Tag color={queryRetryState.explicit ? "green" : "blue"}>
+                    {queryRetryState.explicit
+                      ? t("sourceSystemConfigPage.explicitOverrideState", {
+                          defaultValue: "当前系统显式覆盖",
+                        })
+                      : t("sourceSystemConfigPage.inheritedAgentState", {
+                          defaultValue: "继承 Agent 运行配置",
+                        })}
+                  </Tag>
+                </div>
+                {queryRetryState.explicit ? (
+                  <>
+                    <div className={styles.switchRow}>
+                      <div className={styles.switchCopy}>
+                        <span className={styles.switchTitle}>
+                          {t("sourceSystemConfigPage.queryRetryEnabled", {
+                            defaultValue: "启用查询重试",
+                          })}
+                        </span>
+                        <span className={styles.switchDescription}>
+                          {t(
+                            "sourceSystemConfigPage.queryRetryEnabledDescription",
+                            {
+                              defaultValue:
+                                "关闭后当前系统的 Query 失败不会由 Runner 自动重试。",
+                            },
+                          )}
+                        </span>
+                      </div>
+                      <Switch
+                        checked={queryRetryState.config.enabled}
+                        disabled={modelCallPolicyDisabled}
+                        onChange={handleQueryRetryEnabledChange}
+                      />
+                    </div>
+                    <div className={styles.numberGrid}>
+                      {QUERY_RETRY_NUMBER_FIELDS.map((definition) => (
+                        <label
+                          key={definition.key}
+                          className={styles.numberField}
+                        >
+                          <span className={styles.numberLabel}>
+                            {definition.title}
+                          </span>
+                          <InputNumber
+                            min={definition.min}
+                            step={definition.step}
+                            value={queryRetryState.config[definition.key]}
+                            disabled={
+                              modelCallPolicyDisabled ||
+                              !queryRetryState.config.enabled
+                            }
+                            onChange={(value) =>
+                              handleQueryRetryNumberChange(
+                                definition.key,
+                                value,
+                              )
+                            }
+                          />
+                        </label>
+                      ))}
+                    </div>
+                    <Button
+                      disabled={modelCallPolicyDisabled}
+                      onClick={() =>
+                        handleRestoreModelCallPolicyInheritance("query_retry")
+                      }
+                    >
+                      {t("sourceSystemConfigPage.restoreInheritance", {
+                        defaultValue: "恢复继承",
+                      })}
+                    </Button>
+                  </>
+                ) : (
+                  <Button
+                    disabled={modelCallPolicyDisabled}
+                    onClick={() => handleEnableModelCallPolicy("query_retry")}
+                  >
+                    {t("sourceSystemConfigPage.enableOverride", {
+                      defaultValue: "启用覆盖",
+                    })}
+                  </Button>
+                )}
+              </section>
+
+              <section className={styles.toolOutputSection}>
+                <div className={styles.toolOutputSectionHeader}>
+                  <div className={styles.switchCopy}>
+                    <span className={styles.switchTitle}>
+                      {t("sourceSystemConfigPage.llmRateLimiterTitle", {
+                        defaultValue: "LLM 并发限流",
+                      })}
+                    </span>
+                    <span className={styles.switchDescription}>
+                      {t("sourceSystemConfigPage.llmRateLimiterDescription", {
+                        defaultValue:
+                          "控制当前系统请求使用的 LLM 并发、QPM、限流暂停和等待超时策略。",
+                      })}
+                    </span>
+                  </div>
+                  <Tag color={llmRateLimiterState.explicit ? "green" : "blue"}>
+                    {llmRateLimiterState.explicit
+                      ? t("sourceSystemConfigPage.explicitOverrideState", {
+                          defaultValue: "当前系统显式覆盖",
+                        })
+                      : t("sourceSystemConfigPage.inheritedAgentState", {
+                          defaultValue: "继承 Agent 运行配置",
+                        })}
+                  </Tag>
+                </div>
+                {llmRateLimiterState.explicit ? (
+                  <>
+                    <div className={styles.numberGrid}>
+                      {LLM_RATE_LIMITER_NUMBER_FIELDS.map((definition) => (
+                        <label
+                          key={definition.key}
+                          className={styles.numberField}
+                        >
+                          <span className={styles.numberLabel}>
+                            {definition.title}
+                          </span>
+                          <InputNumber
+                            min={definition.min}
+                            step={definition.step}
+                            value={
+                              llmRateLimiterState.config[definition.key] ??
+                              undefined
+                            }
+                            disabled={modelCallPolicyDisabled}
+                            onChange={(value) => {
+                              if (value === null && !definition.nullable) {
+                                return;
+                              }
+                              handleLlmRateLimiterNumberChange(
+                                definition.key,
+                                (value ??
+                                  null) as LlmRateLimiterConfig[typeof definition.key],
+                              );
+                            }}
+                          />
+                        </label>
+                      ))}
+                    </div>
+                    <Button
+                      disabled={modelCallPolicyDisabled}
+                      onClick={() =>
+                        handleRestoreModelCallPolicyInheritance(
+                          "llm_rate_limiter",
+                        )
+                      }
+                    >
+                      {t("sourceSystemConfigPage.restoreInheritance", {
+                        defaultValue: "恢复继承",
+                      })}
+                    </Button>
+                  </>
+                ) : (
+                  <Button
+                    disabled={modelCallPolicyDisabled}
+                    onClick={() =>
+                      handleEnableModelCallPolicy("llm_rate_limiter")
+                    }
+                  >
+                    {t("sourceSystemConfigPage.enableOverride", {
+                      defaultValue: "启用覆盖",
+                    })}
+                  </Button>
+                )}
+              </section>
             </Card>
 
             <Card

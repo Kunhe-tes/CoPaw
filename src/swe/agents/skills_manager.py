@@ -187,6 +187,26 @@ def get_workspace_skills_dir(workspace_dir: Path) -> Path:
     return preferred
 
 
+def resolve_effective_skill_dir(
+    workspace_dir: Path,
+    skill_name: str,
+) -> Path | None:
+    """Resolve the actual directory of an enabled skill.
+
+    Prefer the workspace override when it exists, otherwise fall back to the
+    packaged builtin skill directory.
+    """
+    workspace_skill_dir = get_workspace_skills_dir(workspace_dir) / skill_name
+    if workspace_skill_dir.exists():
+        return workspace_skill_dir
+
+    builtin_skill_dir = get_builtin_skills_dir() / skill_name
+    if builtin_skill_dir.exists():
+        return builtin_skill_dir
+
+    return None
+
+
 def get_workspace_skill_manifest_path(workspace_dir: Path) -> Path:
     """Return the workspace skill manifest path."""
     return workspace_dir / "skill.json"

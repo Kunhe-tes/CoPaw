@@ -68,6 +68,21 @@ describe("SystemConfigPage", () => {
     return screen.getAllByRole("switch")[6];
   }
 
+  function seedEffectiveConfig(config: Record<string, unknown> = {}) {
+    useSourceSystemConfigStore.setState({
+      config: {
+        source_id: "portal",
+        config,
+        version: 1,
+        is_default: false,
+        stale: false,
+        updated_by: "alice",
+        updated_at: "2026-05-21 10:00:00",
+      },
+      sourceId: "portal",
+    });
+  }
+
   afterEach(() => {
     cleanup();
   });
@@ -456,6 +471,228 @@ describe("SystemConfigPage", () => {
     });
   });
 
+  it("saves model call policy overrides and restores inheritance", async () => {
+    seedEffectiveConfig();
+    mocks.sourceSystemConfigApi.getCurrent.mockResolvedValueOnce({
+      source_id: "portal",
+      config: {
+        provider_policy: { default_model: "qwen-max" },
+        query_retry: {
+          enabled: true,
+          max_retries: 2,
+        },
+        llm_rate_limiter: {
+          llm_chat_max_concurrent: 1,
+        },
+      },
+      version: 1,
+      is_default: false,
+      updated_by: "alice",
+      updated_at: "2026-05-21 10:00:00",
+    });
+    mocks.sourceSystemConfigApi.updateCurrent.mockResolvedValue({
+      source_id: "portal",
+      config: {
+        provider_policy: { default_model: "qwen-max" },
+        llm_rate_limiter: {
+          llm_chat_max_concurrent: 1,
+          llm_max_qpm: 12,
+        },
+      },
+      version: 2,
+      is_default: false,
+      updated_by: "alice",
+      updated_at: "2026-05-21 11:00:00",
+    });
+
+    render(<SystemConfigPage />);
+
+    expect(await screen.findByText("模型调用策略")).toBeTruthy();
+    expect(screen.getByText("查询重试")).toBeTruthy();
+    expect(screen.getByText("LLM 并发限流")).toBeTruthy();
+
+    fireEvent.click(screen.getAllByRole("button", { name: "恢复继承" })[0]);
+    fireEvent.change(screen.getByDisplayValue("100"), {
+      target: { value: "12" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "common.save" }));
+
+    await waitFor(() => {
+      expect(mocks.sourceSystemConfigApi.updateCurrent).toHaveBeenCalledWith({
+        config: {
+          provider_policy: { default_model: "qwen-max" },
+          llm_rate_limiter: {
+            llm_chat_max_concurrent: 1,
+            llm_max_qpm: 12,
+          },
+        },
+      });
+    });
+  });
+
+  it("enables model call policy override without saving page defaults implicitly", async () => {
+    seedEffectiveConfig();
+    mocks.sourceSystemConfigApi.updateCurrent.mockResolvedValue({
+      source_id: "portal",
+      config: {
+        query_retry: {
+          enabled: false,
+          max_retries: 3,
+          backoff_base: 2,
+          backoff_cap: 30,
+        },
+      },
+      version: 1,
+      is_default: false,
+      updated_by: "alice",
+      updated_at: "2026-05-21 11:00:00",
+    });
+
+    render(<SystemConfigPage />);
+
+    expect(await screen.findByText("模型调用策略")).toBeTruthy();
+    expect(screen.getAllByText("继承 Agent 运行配置").length).toBeGreaterThan(
+      0,
+    );
+
+    fireEvent.click(screen.getAllByRole("button", { name: "启用覆盖" })[0]);
+    fireEvent.click(screen.getByRole("button", { name: "common.save" }));
+
+    await waitFor(() => {
+      expect(mocks.sourceSystemConfigApi.updateCurrent).toHaveBeenCalledWith({
+        config: {
+          query_retry: {
+            enabled: false,
+            max_retries: 3,
+            backoff_base: 2,
+            backoff_cap: 30,
+          },
+        },
+      });
+    });
+  });
+
+  it("copies effective model call policy values when enabling override", async () => {
+    seedEffectiveConfig({
+      query_retry: {
+        enabled: true,
+        max_retries: 5,
+        backoff_base: 1.5,
+        backoff_cap: 60,
+      },
+    });
+    mocks.sourceSystemConfigApi.updateCurrent.mockResolvedValue({
+      source_id: "portal",
+      config: {
+        query_retry: {
+          enabled: true,
+          max_retries: 5,
+          backoff_base: 1.5,
+          backoff_cap: 60,
+        },
+      },
+      version: 1,
+      is_default: false,
+      updated_by: "alice",
+      updated_at: "2026-05-21 11:00:00",
+    });
+
+    render(<SystemConfigPage />);
+
+    expect(await screen.findByText("模型调用策略")).toBeTruthy();
+
+    fireEvent.click(screen.getAllByRole("button", { name: "启用覆盖" })[0]);
+    fireEvent.click(screen.getByRole("button", { name: "common.save" }));
+
+    await waitFor(() => {
+      expect(mocks.sourceSystemConfigApi.updateCurrent).toHaveBeenCalledWith({
+        config: {
+          query_retry: {
+            enabled: true,
+            max_retries: 5,
+            backoff_base: 1.5,
+            backoff_cap: 60,
+          },
+        },
+      });
+    });
+  });
+
+  it("waits for effective config before enabling model call policy override", async () => {
+    const effectiveDeferred = createDeferred<void>();
+    loadEffectiveConfig.mockReturnValueOnce(effectiveDeferred.promise);
+    mocks.sourceSystemConfigApi.updateCurrent.mockResolvedValue({
+      source_id: "portal",
+      config: {
+        query_retry: {
+          enabled: true,
+          max_retries: 5,
+          backoff_base: 1.5,
+          backoff_cap: 60,
+        },
+      },
+      version: 1,
+      is_default: false,
+      updated_by: "alice",
+      updated_at: "2026-05-21 11:00:00",
+    });
+
+    render(<SystemConfigPage />);
+
+    expect(await screen.findByText("模型调用策略")).toBeTruthy();
+    expect(
+      screen.getAllByRole("button", { name: "启用覆盖" })[0],
+    ).toBeDisabled();
+
+    act(() => {
+      useSourceSystemConfigStore.setState({
+        config: {
+          source_id: "portal",
+          config: {
+            query_retry: {
+              enabled: true,
+              max_retries: 5,
+              backoff_base: 1.5,
+              backoff_cap: 60,
+            },
+          },
+          version: 1,
+          is_default: false,
+          stale: false,
+          updated_by: "alice",
+          updated_at: "2026-05-21 10:00:00",
+        },
+        sourceId: "portal",
+      });
+    });
+    await act(async () => {
+      effectiveDeferred.resolve(undefined);
+      await effectiveDeferred.promise;
+    });
+
+    await waitFor(() => {
+      expect(
+        screen.getAllByRole("button", { name: "启用覆盖" })[0],
+      ).toBeEnabled();
+    });
+
+    fireEvent.click(screen.getAllByRole("button", { name: "启用覆盖" })[0]);
+    fireEvent.click(screen.getByRole("button", { name: "common.save" }));
+
+    await waitFor(() => {
+      expect(mocks.sourceSystemConfigApi.updateCurrent).toHaveBeenCalledWith({
+        config: {
+          query_retry: {
+            enabled: true,
+            max_retries: 5,
+            backoff_base: 1.5,
+            backoff_cap: 60,
+          },
+        },
+      });
+    });
+  });
+
   it("saves explicit immediate truncation configs", async () => {
     mocks.sourceSystemConfigApi.updateCurrent.mockResolvedValue({
       source_id: "portal",
@@ -728,6 +965,7 @@ describe("SystemConfigPage", () => {
     await waitFor(() => {
       expect(getTaskProgressSwitch()).toHaveAttribute("aria-checked", "false");
     });
+    loadEffectiveConfig.mockClear();
 
     fireEvent.click(screen.getByRole("button", { name: "common.save" }));
 

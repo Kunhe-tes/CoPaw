@@ -107,6 +107,51 @@ def test_stream_query_after_preflight_control_nesting_stays_within_limit():
     )
 
 
+def test_load_query_retry_settings_applies_current_source_override(
+    monkeypatch,
+):
+    from src.swe.app.source_system_config.models import (
+        EffectiveSourceSystemConfig,
+        SourceSystemConfig,
+    )
+    from src.swe.app.source_system_config.runtime import (
+        bind_source_system_config,
+    )
+
+    runner = AgentRunner(agent_id="test-agent")
+    runner.tenant_id = "tenant-a"
+    agent_config = SimpleNamespace(
+        running=SimpleNamespace(
+            query_retry=SimpleNamespace(
+                enabled=False,
+                max_retries=5,
+                backoff_base=1.5,
+                backoff_cap=12.0,
+            ),
+        ),
+    )
+    monkeypatch.setattr(
+        "src.swe.app.runner.runner.load_agent_config",
+        lambda agent_id, tenant_id=None: agent_config,
+    )
+    effective = EffectiveSourceSystemConfig(
+        source_id="portal",
+        config=SourceSystemConfig.model_validate({}),
+        raw_config=SourceSystemConfig.model_validate(
+            {
+                "query_retry": {
+                    "enabled": True,
+                    "max_retries": 2,
+                },
+            },
+        ),
+        version=3,
+    )
+
+    with bind_source_system_config(effective):
+        assert runner._load_query_retry_settings() == (3, 2, 1.5, 12.0)
+
+
 async def _collect_until_exception(runner: AgentRunner, request):
     items = []
     with pytest.raises(AppBaseException) as exc_info:

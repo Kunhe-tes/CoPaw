@@ -66,7 +66,10 @@ def test_manager_build_client_keeps_tenant_secret_literal(
         "Authorization": "Bearer abc${HOME}xyz",
         "X-Home": "dir=/home/demo",
         "x-swe-tenant-id": "tenant-a",
+        "tenantid": "tenant-a",
         "x-swe-source-id": "source-a",
+        "sourceid": "source-a",
+        "x-swe-runtime-scope-id": encode_scope_id("tenant-a", "source-a"),
     }
 
 
@@ -115,7 +118,10 @@ async def test_runner_http_client_keeps_tenant_secret_literal(
         "Authorization": "Bearer abc${HOME}xyz",
         "X-Home": "dir=/home/demo",
         "x-swe-tenant-id": "tenant-a",
+        "tenantid": "tenant-a",
         "x-swe-source-id": "source-a",
+        "sourceid": "source-a",
+        "x-swe-runtime-scope-id": encode_scope_id("tenant-a", "source-a"),
     }
 
 
@@ -166,7 +172,10 @@ async def test_runner_http_client_injects_runtime_scope_headers_and_dedupes_rese
         "X-B3-Traceid": "8267fd70bacf497704fec30eaa353979",
         "X-B3-Spanid": "32befd146889a61a",
         "x-swe-tenant-id": "tenant-a",
+        "tenantid": "tenant-a",
         "x-swe-source-id": "source-a",
+        "sourceid": "source-a",
+        "x-swe-runtime-scope-id": encode_scope_id("tenant-a", "source-a"),
         "x-swe-trace-id": "trace-1",
         "traceid": "trace-1",
     }
@@ -237,8 +246,12 @@ async def test_rebuild_mcp_client_reresolves_scope_headers_on_reconnect(
         "X-Home": "dir=/home/demo",
         "Authorization-Extra": "extra",
         "x-swe-tenant-id": "tenant-a",
+        "tenantid": "tenant-a",
         "x-swe-source-id": "source-a",
+        "sourceid": "source-a",
+        "x-swe-runtime-scope-id": encode_scope_id("tenant-a", "source-a"),
         "x-swe-session-id": "session-1",
+        "sessionid": "session-1",
         "x-swe-trace-id": "trace-1",
         "traceid": "trace-1",
     }
@@ -252,8 +265,12 @@ async def test_rebuild_mcp_client_reresolves_scope_headers_on_reconnect(
         "X-Home": "dir=/home/demo",
         "Authorization-Extra": "extra",
         "x-swe-tenant-id": "tenant-a",
+        "tenantid": "tenant-a",
         "x-swe-source-id": "source-a",
+        "sourceid": "source-a",
+        "x-swe-runtime-scope-id": encode_scope_id("tenant-a", "source-a"),
         "x-swe-session-id": "session-1",
+        "sessionid": "session-1",
         "x-swe-trace-id": "trace-1",
         "traceid": "trace-1",
     }

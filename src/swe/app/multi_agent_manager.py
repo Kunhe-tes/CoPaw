@@ -7,8 +7,10 @@ including lazy loading, lifecycle management, and hot reloading.
 
 import asyncio
 import logging
+import os
 import time
-from typing import Dict, Set, Optional
+from dataclasses import dataclass
+from typing import Callable, Dict, Set, Optional
 
 from .workspace import Workspace
 from ..config.utils import (
@@ -17,6 +19,42 @@ from ..config.utils import (
 )
 
 logger = logging.getLogger(__name__)
+DEFAULT_WORKSPACE_CACHE_MAX_SIZE = 64
+DEFAULT_WORKSPACE_START_MAX_CONCURRENT = 4
+DEFAULT_WORKSPACE_IDLE_TTL_SECONDS = 6 * 60 * 60
+
+
+@dataclass
+class _WorkspaceCacheEntry:
+    workspace: Workspace
+    created_at: float
+    last_accessed_at: float
+    access_sequence: int
+
+
+def _get_positive_int_env(name: str, default: int) -> int:
+    raw_value = os.environ.get(name)
+    if raw_value is None:
+        return default
+    try:
+        value = int(raw_value)
+    except (TypeError, ValueError):
+        logger.warning(
+            "Invalid %s=%r; using default %s",
+            name,
+            raw_value,
+            default,
+        )
+        return default
+    if value <= 0:
+        logger.warning(
+            "Invalid %s=%r; using default %s",
+            name,
+            raw_value,
+            default,
+        )
+        return default
+    return value
 
 
 class MultiAgentManager:
@@ -34,10 +72,50 @@ class MultiAgentManager:
         *,
         source_system_config_service: object | None = None,
         continuous_governance_service: object | None = None,
+        workspace_cache_max_size: int | None = None,
+        workspace_start_max_concurrent: int | None = None,
+        workspace_idle_ttl_seconds: int | None = None,
+        monotonic_time: Callable[[], float] = time.monotonic,
     ):
         """Initialize multi-agent manager."""
         self.agents: Dict[str, Workspace] = {}
+        self._agent_cache_entries: Dict[str, _WorkspaceCacheEntry] = {}
         self._lock = asyncio.Lock()
+        self._workspace_cache_eviction_lock = asyncio.Lock()
+        self._agent_start_tasks: Dict[str, asyncio.Task[Workspace]] = {}
+        self._agent_start_waiters: Dict[str, int] = {}
+        self._agent_start_eviction_protected_keys: set[str] = set()
+        self.workspace_cache_max_size = (
+            workspace_cache_max_size
+            if workspace_cache_max_size is not None
+            else _get_positive_int_env(
+                "SWE_WORKSPACE_CACHE_MAX_SIZE",
+                DEFAULT_WORKSPACE_CACHE_MAX_SIZE,
+            )
+        )
+        self.workspace_start_max_concurrent = (
+            workspace_start_max_concurrent
+            if workspace_start_max_concurrent is not None
+            else _get_positive_int_env(
+                "SWE_WORKSPACE_START_MAX_CONCURRENT",
+                DEFAULT_WORKSPACE_START_MAX_CONCURRENT,
+            )
+        )
+        self.workspace_idle_ttl_seconds = (
+            workspace_idle_ttl_seconds
+            if workspace_idle_ttl_seconds is not None
+            else _get_positive_int_env(
+                "SWE_WORKSPACE_IDLE_TTL_SECONDS",
+                DEFAULT_WORKSPACE_IDLE_TTL_SECONDS,
+            )
+        )
+        self._workspace_start_limiter = asyncio.Semaphore(
+            self.workspace_start_max_concurrent,
+        )
+        self._monotonic_time = monotonic_time
+        self._workspace_access_sequence = 0
+        self._workspace_evictions_total = 0
+        self._workspace_eviction_stop_failures_total = 0
         self._cleanup_tasks: Set[asyncio.Task] = set()
         self._source_system_config_service = source_system_config_service
         self._continuous_governance_service = continuous_governance_service
@@ -94,56 +172,426 @@ class MultiAgentManager:
         started_at = time.perf_counter()
         cache_key = self._cache_key(agent_id, tenant_id)
         async with self._lock:
-            # Return existing agent if already loaded
-            if cache_key in self.agents:
+            instance = self.agents.get(cache_key)
+            if instance is not None:
+                self._touch_cache_entry(cache_key, instance)
                 duration_ms = int((time.perf_counter() - started_at) * 1000)
                 logger.debug(
                     "workspace_cache_hit cache_key=%s duration_ms=%d",
                     cache_key,
                     duration_ms,
                 )
-                return self.agents[cache_key]
+                return instance
 
-            # Load configuration to get agent reference
-            config = self._load_agent_config_for_tenant(tenant_id)
+            start_task = self._agent_start_tasks.get(cache_key)
+            if start_task is None:
+                start_task = asyncio.create_task(
+                    self._start_agent_for_cache_key(
+                        cache_key,
+                        agent_id,
+                        tenant_id,
+                    ),
+                    name=f"workspace-start-{cache_key}",
+                )
+                self._agent_start_tasks[cache_key] = start_task
+            self._agent_start_waiters[cache_key] = (
+                self._agent_start_waiters.get(cache_key, 0) + 1
+            )
+            self._agent_start_eviction_protected_keys.add(cache_key)
 
-            if agent_id not in config.agents.profiles:
-                raise ValueError(
-                    f"Agent '{agent_id}' not found in configuration. "
-                    f"Available agents: {list(config.agents.profiles.keys())}",
+        try:
+            instance = await asyncio.shield(start_task)
+            await self._evict_workspace_cache(protected_keys={cache_key})
+            duration_ms = int((time.perf_counter() - started_at) * 1000)
+            logger.debug(
+                "workspace_cache_miss cache_key=%s duration_ms=%d",
+                cache_key,
+                duration_ms,
+            )
+            return instance
+        finally:
+            should_retry_capacity_eviction = False
+            retry_protected_keys: set[str] = {cache_key}
+            should_release_start_eviction_protection = False
+            async with self._lock:
+                waiters = self._agent_start_waiters.get(cache_key, 0)
+                if waiters <= 1:
+                    self._agent_start_waiters.pop(cache_key, None)
+                    should_release_start_eviction_protection = True
+                else:
+                    self._agent_start_waiters[cache_key] = waiters - 1
+                should_retry_capacity_eviction = (
+                    len(self.agents) > self.workspace_cache_max_size
+                )
+            try:
+                if should_retry_capacity_eviction:
+                    await self._evict_workspace_cache(
+                        protected_keys=retry_protected_keys,
+                    )
+            finally:
+                if should_release_start_eviction_protection:
+                    async with self._lock:
+                        if self._agent_start_waiters.get(cache_key, 0) <= 0:
+                            self._agent_start_eviction_protected_keys.discard(
+                                cache_key,
+                            )
+
+    async def _start_agent_for_cache_key(
+        self,
+        cache_key: str,
+        agent_id: str,
+        tenant_id: Optional[str],
+    ) -> Workspace:
+        """在全局锁外启动 workspace，并在完成时原子写入缓存。"""
+        current_task = asyncio.current_task()
+        instance: Workspace | None = None
+        instance_cached = False
+        try:
+            async with self._workspace_start_limiter:
+                config = self._load_agent_config_for_tenant(tenant_id)
+
+                if agent_id not in config.agents.profiles:
+                    raise ValueError(
+                        f"Agent '{agent_id}' not found in configuration. "
+                        "Available agents: "
+                        f"{list(config.agents.profiles.keys())}",
+                    )
+
+                agent_ref = config.agents.profiles[agent_id]
+
+                logger.info(f"Creating new workspace: {cache_key}")
+                instance = Workspace(
+                    agent_id=agent_id,
+                    workspace_dir=agent_ref.workspace_dir,
+                    tenant_id=tenant_id,
+                    source_system_config_service=(
+                        self._source_system_config_service
+                    ),
+                    continuous_governance_service=(
+                        self._continuous_governance_service
+                    ),
+                )
+                await instance.start()
+                instance.set_manager(self)
+            duplicate_to_stop: Workspace | None = None
+            async with self._lock:
+                existing = self.agents.get(cache_key)
+                if existing is None:
+                    self.agents[cache_key] = instance
+                    instance_cached = True
+                    self._touch_cache_entry(cache_key, instance)
+                    result = instance
+                else:
+                    self._touch_cache_entry(cache_key, existing)
+                    duplicate_to_stop = instance
+                    result = existing
+                if self._agent_start_tasks.get(cache_key) is current_task:
+                    self._agent_start_tasks.pop(cache_key, None)
+
+            if duplicate_to_stop is not None:
+                await duplicate_to_stop.stop()
+
+            if instance_cached:
+                await self._evict_workspace_cache(protected_keys={cache_key})
+
+            logger.info(f"Workspace created and started: {cache_key}")
+            return result
+        except asyncio.CancelledError:
+            if instance is not None and not instance_cached:
+                await self._stop_uncached_workspace_start(
+                    cache_key,
+                    instance,
+                    "cancelled workspace start",
+                )
+            await self._remove_start_task_if_current(cache_key, current_task)
+            logger.info("Workspace start cancelled: %s", cache_key)
+            raise
+        except Exception as e:
+            if instance is not None and not instance_cached:
+                await self._stop_uncached_workspace_start(
+                    cache_key,
+                    instance,
+                    "workspace after start failure",
+                )
+            await self._remove_start_task_if_current(cache_key, current_task)
+            logger.error(f"Failed to start workspace {cache_key}: {e}")
+            raise
+
+    async def _stop_uncached_workspace_start(
+        self,
+        cache_key: str,
+        instance: Workspace,
+        reason: str,
+        *,
+        stop_reused: bool = True,
+    ) -> None:
+        try:
+            await instance.stop(stop_reused=stop_reused)
+        except Exception as e:  # pylint: disable=broad-except
+            logger.warning(
+                "Failed to stop %s %s: %s",
+                reason,
+                cache_key,
+                e,
+            )
+
+    async def _remove_start_task_if_current(
+        self,
+        cache_key: str,
+        current_task: asyncio.Task | None,
+    ) -> None:
+        async with self._lock:
+            if self._agent_start_tasks.get(cache_key) is current_task:
+                self._agent_start_tasks.pop(cache_key, None)
+
+    def _touch_cache_entry(self, cache_key: str, workspace: Workspace) -> None:
+        now = self._monotonic_time()
+        self._workspace_access_sequence += 1
+        access_sequence = self._workspace_access_sequence
+        entry = self._agent_cache_entries.get(cache_key)
+        if entry is None or entry.workspace is not workspace:
+            self._agent_cache_entries[cache_key] = _WorkspaceCacheEntry(
+                workspace=workspace,
+                created_at=now,
+                last_accessed_at=now,
+                access_sequence=access_sequence,
+            )
+            return
+        entry.last_accessed_at = now
+        entry.access_sequence = access_sequence
+
+    def _workspace_eviction_protected_keys(
+        self,
+        protected_keys: set[str] | None,
+    ) -> set[str]:
+        protected = set(protected_keys or set())
+        protected.update(self._agent_start_tasks.keys())
+        protected.update(self._agent_start_eviction_protected_keys)
+        protected.update(
+            cache_key
+            for cache_key, waiters in self._agent_start_waiters.items()
+            if waiters > 0
+        )
+        return protected
+
+    async def _workspace_has_active_tasks(
+        self,
+        cache_key: str,
+        workspace: Workspace,
+    ) -> bool:
+        task_tracker = getattr(workspace, "task_tracker", None)
+        has_active_tasks = getattr(task_tracker, "has_active_tasks", None)
+        if has_active_tasks is None:
+            return False
+        try:
+            return bool(await has_active_tasks())
+        except Exception as e:  # pylint: disable=broad-except
+            logger.warning(
+                "Failed to check active tasks for workspace %s; "
+                "skipping eviction: %s",
+                cache_key,
+                e,
+            )
+            return True
+
+    async def _evict_workspace_candidates(
+        self,
+        candidates: list[tuple[str, Workspace, float, int]],
+        *,
+        protected_keys: set[str] | None,
+        max_removals: int | None = None,
+        is_still_candidate: (
+            Callable[[_WorkspaceCacheEntry, float, int], bool] | None
+        ) = None,
+    ) -> int:
+        removals = 0
+        for (
+            cache_key,
+            workspace,
+            last_accessed_at,
+            access_sequence,
+        ) in candidates:
+            if max_removals is not None and removals >= max_removals:
+                break
+            if await self._workspace_has_active_tasks(cache_key, workspace):
+                logger.debug(
+                    "Skipping workspace cache eviction with active tasks: %s",
+                    cache_key,
+                )
+                continue
+
+            reserved_entry: _WorkspaceCacheEntry | None = None
+            async with self._lock:
+                protected = self._workspace_eviction_protected_keys(
+                    protected_keys,
+                )
+                entry = self._agent_cache_entries.get(cache_key)
+                if cache_key in protected or entry is None:
+                    continue
+                if entry.workspace is not workspace:
+                    continue
+                if self.agents.get(cache_key) is not workspace:
+                    continue
+                if max_removals is not None:
+                    current_overflow = (
+                        len(self.agents) - self.workspace_cache_max_size
+                    )
+                    if current_overflow <= 0:
+                        continue
+                if is_still_candidate is not None and not is_still_candidate(
+                    entry,
+                    last_accessed_at,
+                    access_sequence,
+                ):
+                    continue
+                reserved_entry = entry
+                self.agents.pop(cache_key, None)
+                self._agent_cache_entries.pop(cache_key, None)
+
+            try:
+                await workspace.stop()
+            except asyncio.CancelledError:
+                await self._restore_failed_eviction(
+                    cache_key,
+                    workspace,
+                    reserved_entry,
+                )
+                self._workspace_eviction_stop_failures_total += 1
+                logger.warning(
+                    "Cancelled while stopping evicted workspace %s",
+                    cache_key,
+                )
+                raise
+            except Exception as e:  # pylint: disable=broad-except
+                await self._restore_failed_eviction(
+                    cache_key,
+                    workspace,
+                    reserved_entry,
+                )
+                self._workspace_eviction_stop_failures_total += 1
+                logger.warning(
+                    "Failed to stop evicted workspace %s: %s",
+                    cache_key,
+                    e,
+                )
+                continue
+
+            removals += 1
+            self._workspace_evictions_total += 1
+            logger.info(
+                "Evicted idle workspace cache entry: %s",
+                cache_key,
+            )
+        return removals
+
+    async def _restore_failed_eviction(
+        self,
+        cache_key: str,
+        workspace: Workspace,
+        entry: _WorkspaceCacheEntry | None,
+    ) -> None:
+        async with self._lock:
+            if self.agents.get(cache_key) is None:
+                self.agents[cache_key] = workspace
+            if (
+                entry is not None
+                and cache_key not in self._agent_cache_entries
+            ):
+                self._agent_cache_entries[cache_key] = entry
+
+    async def _evict_workspace_cache(
+        self,
+        *,
+        protected_keys: set[str] | None = None,
+    ) -> None:
+        async with self._workspace_cache_eviction_lock:
+            now = self._monotonic_time()
+            async with self._lock:
+                protected = self._workspace_eviction_protected_keys(
+                    protected_keys,
+                )
+                expired_candidates = sorted(
+                    (
+                        (
+                            cache_key,
+                            entry.workspace,
+                            entry.last_accessed_at,
+                            entry.access_sequence,
+                        )
+                        for cache_key, entry in (
+                            self._agent_cache_entries.items()
+                        )
+                        if cache_key not in protected
+                        and self.agents.get(cache_key) is entry.workspace
+                        and now - entry.last_accessed_at
+                        > self.workspace_idle_ttl_seconds
+                    ),
+                    key=lambda item: (item[2], item[3]),
                 )
 
-            agent_ref = config.agents.profiles[agent_id]
-
-            # Create and start new workspace
-            logger.info(f"Creating new workspace: {cache_key}")
-            instance = Workspace(
-                agent_id=agent_id,
-                workspace_dir=agent_ref.workspace_dir,
-                tenant_id=tenant_id,
-                source_system_config_service=(
-                    self._source_system_config_service
-                ),
-                continuous_governance_service=(
-                    self._continuous_governance_service
+            await self._evict_workspace_candidates(
+                expired_candidates,
+                protected_keys=protected_keys,
+                is_still_candidate=lambda entry, _snapshot_last_accessed_at, _snapshot_access_sequence: (
+                    self._monotonic_time() - entry.last_accessed_at
+                    > self.workspace_idle_ttl_seconds
                 ),
             )
 
-            try:
-                await instance.start()
-                instance.set_manager(self)  # Set manager reference
-                self.agents[cache_key] = instance
-                logger.info(f"Workspace created and started: {cache_key}")
-                duration_ms = int((time.perf_counter() - started_at) * 1000)
-                logger.debug(
-                    "workspace_cache_miss cache_key=%s duration_ms=%d",
-                    cache_key,
-                    duration_ms,
+            while True:
+                async with self._lock:
+                    protected = self._workspace_eviction_protected_keys(
+                        protected_keys,
+                    )
+                    overflow = len(self.agents) - (
+                        self.workspace_cache_max_size
+                    )
+                    if overflow <= 0:
+                        return
+                    overflow_candidates = sorted(
+                        (
+                            (
+                                cache_key,
+                                entry.workspace,
+                                entry.last_accessed_at,
+                                entry.access_sequence,
+                            )
+                            for cache_key, entry in (
+                                self._agent_cache_entries.items()
+                            )
+                            if cache_key not in protected
+                            and self.agents.get(cache_key) is entry.workspace
+                        ),
+                        key=lambda item: (item[2], item[3]),
+                    )
+
+                if not overflow_candidates:
+                    return
+                removals = await self._evict_workspace_candidates(
+                    overflow_candidates,
+                    protected_keys=protected_keys,
+                    max_removals=overflow,
+                    is_still_candidate=lambda entry, _snapshot_last_accessed_at, snapshot_access_sequence: (
+                        entry.access_sequence == snapshot_access_sequence
+                    ),
                 )
-                return instance
-            except Exception as e:
-                logger.error(f"Failed to start workspace {cache_key}: {e}")
-                raise
+                if removals == 0:
+                    return
+
+    def workspace_cache_metrics(self) -> dict[str, int]:
+        """Return process-local workspace cache diagnostics."""
+        return {
+            "workspace_cache_size": len(self.agents),
+            "workspace_start_tasks": len(self._agent_start_tasks),
+            "workspace_cache_max_size": self.workspace_cache_max_size,
+            "workspace_start_max_concurrent": (
+                self.workspace_start_max_concurrent
+            ),
+            "workspace_evictions_total": self._workspace_evictions_total,
+            "workspace_eviction_stop_failures_total": (
+                self._workspace_eviction_stop_failures_total
+            ),
+        }
 
     async def _graceful_stop_old_instance(
         self,
@@ -193,6 +641,19 @@ class MultiAgentManager:
                         f"Old workspace instance stopped: {agent_id}. "
                         f"Delayed cleanup completed.",
                     )
+                except asyncio.CancelledError:
+                    logger.info(
+                        f"Delayed cleanup task for {agent_id} was cancelled. "
+                        "Stopping old instance before exit.",
+                    )
+                    try:
+                        await old_instance.stop(final=False)
+                    except Exception as e:  # pylint: disable=broad-except
+                        logger.warning(
+                            f"Failed to stop old workspace instance for "
+                            f"{agent_id} after cleanup cancellation: {e}.",
+                        )
+                    raise
                 except Exception as e:
                     logger.warning(
                         f"Error during delayed cleanup for {agent_id}: {e}. "
@@ -256,14 +717,22 @@ class MultiAgentManager:
             bool: True if agent was stopped, False if not running
         """
         cache_key = self._cache_key(agent_id, tenant_id)
+        cancelled_start = await self._cancel_start_tasks({cache_key})
         async with self._lock:
             if cache_key not in self.agents:
+                if cancelled_start:
+                    logger.info(
+                        "Agent start cancelled and removed: %s",
+                        cache_key,
+                    )
+                    return True
                 logger.warning(f"Agent not running: {cache_key}")
                 return False
 
             instance = self.agents[cache_key]
             await instance.stop()
             del self.agents[cache_key]
+            self._agent_cache_entries.pop(cache_key, None)
             logger.info(f"Agent stopped and removed: {cache_key}")
             return True
 
@@ -351,44 +820,105 @@ class MultiAgentManager:
                     f"{list(reusable.keys())}",
                 )
 
+        new_instance_started = False
+        new_instance_swapped = False
         try:
             await new_instance.start()
+            new_instance_started = True
             new_instance.set_manager(self)  # Set manager reference
             logger.info(f"New workspace instance started: {cache_key}")
+        except asyncio.CancelledError:
+            await self._stop_uncached_workspace_start(
+                cache_key,
+                new_instance,
+                "cancelled reload workspace",
+                stop_reused=False,
+            )
+            raise
         except Exception as e:
             logger.exception(
                 f"Failed to start new workspace instance for {cache_key}: {e}",
             )
             # Try to clean up the failed new instance
-            try:
-                await new_instance.stop()
-            except Exception:
-                pass  # Best effort cleanup
+            await self._stop_uncached_workspace_start(
+                cache_key,
+                new_instance,
+                "failed reload workspace",
+                stop_reused=False,
+            )
             # Old instance is still running and serving requests
             return False
 
         # Step 4: Atomic swap (minimal lock time)
         # From this point, reload is considered successful
-        async with self._lock:
-            # Double-check agent still exists
-            if cache_key not in self.agents:
-                logger.warning(
-                    f"Agent {cache_key} was removed during reload, "
-                    f"stopping new instance",
-                )
-                await new_instance.stop()
-                return False
+        try:
+            async with self._lock:
+                # Double-check agent still exists
+                if cache_key not in self.agents:
+                    logger.warning(
+                        f"Agent {cache_key} was removed during reload, "
+                        f"stopping new instance",
+                    )
+                    await new_instance.stop(stop_reused=False)
+                    return False
 
-            # Swap instances atomically
-            old_instance = self.agents[cache_key]
-            self.agents[cache_key] = new_instance
-            logger.info(f"Workspace instance replaced: {cache_key}")
+                # Swap instances atomically
+                old_instance = self.agents[cache_key]
+                self.agents[cache_key] = new_instance
+                new_instance_swapped = True
+                self._touch_cache_entry(cache_key, new_instance)
+                logger.info(f"Workspace instance replaced: {cache_key}")
+        except asyncio.CancelledError:
+            if new_instance_started and not new_instance_swapped:
+                await self._stop_uncached_workspace_start(
+                    cache_key,
+                    new_instance,
+                    "cancelled reload workspace before swap",
+                    stop_reused=False,
+                )
+            raise
 
         # Step 5: Gracefully stop old instance (outside lock)
         # Delegates to helper method to avoid too-many-statements
         await self._graceful_stop_old_instance(old_instance, agent_id)
 
         return True
+
+    async def _cancel_start_tasks(
+        self,
+        cache_keys: set[str] | None = None,
+    ) -> int:
+        """Cancel workspace starts that have not reached the cache yet."""
+        async with self._lock:
+            tasks = [
+                (cache_key, task)
+                for cache_key, task in self._agent_start_tasks.items()
+                if cache_keys is None or cache_key in cache_keys
+            ]
+
+        if not tasks:
+            return 0
+
+        for _cache_key, task in tasks:
+            if not task.done():
+                task.cancel()
+
+        await asyncio.gather(
+            *(task for _cache_key, task in tasks),
+            return_exceptions=True,
+        )
+
+        async with self._lock:
+            for cache_key, task in tasks:
+                if self._agent_start_tasks.get(cache_key) is task:
+                    self._agent_start_tasks.pop(cache_key, None)
+                if self._agent_start_waiters.get(cache_key, 0) <= 0:
+                    self._agent_start_waiters.pop(cache_key, None)
+                    self._agent_start_eviction_protected_keys.discard(
+                        cache_key,
+                    )
+
+        return len(tasks)
 
     async def cancel_all_cleanup_tasks(self) -> None:
         """Cancel and await all pending delayed cleanup tasks.
@@ -423,7 +953,9 @@ class MultiAgentManager:
         """
         logger.info(f"Stopping all agents ({len(self.agents)} running)...")
 
-        # First, cancel pending cleanup tasks to avoid orphaned instances
+        await self._cancel_start_tasks()
+
+        # Then cancel pending cleanup tasks to avoid orphaned instances
         await self.cancel_all_cleanup_tasks()
 
         # Create list of agent IDs to avoid modifying dict during iteration
@@ -438,6 +970,7 @@ class MultiAgentManager:
                 logger.error(f"Error stopping agent {agent_id}: {e}")
 
         self.agents.clear()
+        self._agent_cache_entries.clear()
         logger.info("All agents stopped")
 
     def list_loaded_agents(self) -> list[str]:

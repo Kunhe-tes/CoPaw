@@ -11,6 +11,11 @@ from swe.app import runtime_diagnostic
 from swe.app.runtime_diagnostic import RuntimeDiagnosticManager
 
 
+class _ThreadLimiter:
+    total_tokens = 64
+    borrowed_tokens = 20
+
+
 class _Process:
     def __init__(self) -> None:
         self.cpu_values = iter([0.0, 25.0])
@@ -74,6 +79,7 @@ def _manager(**overrides) -> RuntimeDiagnosticManager:
         "disk_usage": _disk_usage,
         "pod_open_fd_count": lambda: 6,
         "pod_disk_io_bytes": lambda: (100, 200),
+        "thread_limiter": _ThreadLimiter,
         "log_sink": messages.append,
     }
     options.update(overrides)
@@ -126,6 +132,9 @@ def test_diagnostic_payload_contains_confirmed_metrics() -> None:
         "event_loop_blocked_count": 1,
         "process_cpu_avg_percent": 30.0,
         "process_cpu_max_percent": 40.0,
+        "anyio_threadpool_total_tokens": 64,
+        "anyio_threadpool_borrowed_tokens": 20,
+        "anyio_threadpool_available_tokens": 44,
         "process_rss_bytes": 100,
         "process_vms_bytes": 200,
         "process_thread_count": 3,
@@ -136,11 +145,39 @@ def test_diagnostic_payload_contains_confirmed_metrics() -> None:
         "pod_disk_read_bytes_per_second_peak": None,
         "pod_disk_write_bytes_per_second": None,
         "pod_disk_write_bytes_per_second_peak": None,
+        "workspace_cache_size": None,
+        "workspace_start_tasks": None,
+        "workspace_cache_max_size": None,
+        "workspace_start_max_concurrent": None,
+        "workspace_evictions_total": None,
+        "workspace_eviction_stop_failures_total": None,
         "storage_total_bytes": 1000,
         "storage_used_bytes": 600,
         "storage_free_bytes": 400,
         "storage_used_percent": 60.0,
     }
+
+
+def test_diagnostic_payload_includes_workspace_cache_metrics() -> None:
+    manager = _manager(
+        workspace_metrics=lambda: {
+            "workspace_cache_size": 32,
+            "workspace_start_tasks": 3,
+            "workspace_cache_max_size": 64,
+            "workspace_start_max_concurrent": 4,
+            "workspace_evictions_total": 12,
+            "workspace_eviction_stop_failures_total": 1,
+        },
+    )
+
+    payload = manager.build_diagnostic_payload()
+
+    assert payload["workspace_cache_size"] == 32
+    assert payload["workspace_start_tasks"] == 3
+    assert payload["workspace_cache_max_size"] == 64
+    assert payload["workspace_start_max_concurrent"] == 4
+    assert payload["workspace_evictions_total"] == 12
+    assert payload["workspace_eviction_stop_failures_total"] == 1
 
 
 def test_failed_metric_group_emits_null_fields_without_suppressing_payload() -> (
@@ -165,6 +202,23 @@ def test_failed_metric_group_emits_null_fields_without_suppressing_payload() -> 
     assert payload["storage_free_bytes"] is None
     assert payload["storage_used_percent"] is None
     assert payload["sse_active_connections"] == 0
+
+
+def test_failed_threadpool_metrics_emit_null_without_suppressing_payload() -> (
+    None
+):
+    manager = _manager(
+        thread_limiter=lambda: (_ for _ in ()).throw(
+            RuntimeError("limiter unavailable"),
+        ),
+    )
+
+    payload = manager.build_diagnostic_payload()
+
+    assert payload["anyio_threadpool_total_tokens"] is None
+    assert payload["anyio_threadpool_borrowed_tokens"] is None
+    assert payload["anyio_threadpool_available_tokens"] is None
+    assert payload["process_rss_bytes"] == 100
 
 
 def test_failed_process_fields_do_not_suppress_other_process_fields() -> None:

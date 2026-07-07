@@ -15,6 +15,8 @@ import aiofiles
 from agentscope.message import TextBlock
 from agentscope.tool import ToolResponse
 
+from swe.runtime_workers import run_runtime_state_work
+
 from ..tool_failure import ToolExecutionError
 from .utils import (
     truncate_text_output,
@@ -49,6 +51,10 @@ except (TypeError, ValueError):
 
 def _raise_file_error(error_type: str, detail: str) -> None:
     raise ToolExecutionError(error_type=error_type, detail=detail)
+
+
+class _TextToReplaceNotFoundError(ValueError):
+    """Raised when edit_file cannot find the requested replacement text."""
 
 
 def _resolve_file_path(file_path: str) -> str:
@@ -130,6 +136,83 @@ def _content_byte_length(content: str, encoding: str) -> int:
         return len(content.encode(encoding))
     except Exception:
         return len(content.encode("utf-8", errors="replace"))
+
+
+def _get_effective_file_read_max_bytes() -> int:
+    file_read_max_bytes = get_current_file_read_max_bytes()
+    if file_read_max_bytes is not None:
+        return file_read_max_bytes
+    return get_current_recent_max_bytes() or DEFAULT_MAX_BYTES
+
+
+def _read_file_selection_sync(
+    file_path: str,
+    *,
+    start_line: Optional[int],
+    end_line: Optional[int],
+    max_bytes: int,
+) -> str:
+    content = read_file_safe(file_path)
+    all_lines = content.split("\n")
+    total = len(all_lines)
+
+    # Determine read range
+    s = max(1, start_line if start_line is not None else 1)
+    e = min(total, end_line if end_line is not None else total)
+
+    if s > total:
+        _raise_file_error(
+            "invalid_arguments",
+            f"Error: start_line {s} exceeds file length ({total} lines).",
+        )
+
+    if s > e:
+        _raise_file_error(
+            "invalid_arguments",
+            f"Error: start_line ({s}) > end_line ({e}).",
+        )
+
+    # Extract selected lines
+    selected_content = "\n".join(all_lines[s - 1 : e])
+
+    # Apply smart truncation (consistent with shell output format)
+    text = truncate_text_output(
+        selected_content,
+        start_line=s,
+        total_lines=total,
+        file_path=file_path,
+        max_bytes=max_bytes,
+    )
+
+    # Add continuation hint if partial read without truncation.
+    # Use TRUNCATION_NOTICE_MARKER format so ToolResultCompactor can
+    # re-truncate with the correct start_line when compacting old messages.
+    if text == selected_content and e < total:
+        content_bytes = len(text.encode("utf-8"))
+        notice = (
+            TRUNCATION_NOTICE_MARKER + f"\nThe output above was truncated."
+            f"\nThe full content is saved to the file "
+            f"and contains {total} lines in total."
+            f"\nThis excerpt starts at line {s} and "
+            f"covers the next {content_bytes} bytes."
+            "\nIf the current content is not enough, "
+            f"call `read_file` with file_path={file_path} "
+            f"start_line={e + 1} to read more."
+        )
+        text = text + notice
+
+    return text
+
+
+def _replace_file_text_sync(
+    file_path: str,
+    old_text: str,
+    new_text: str,
+) -> str:
+    content = read_file_safe(file_path)
+    if old_text not in content:
+        raise _TextToReplaceNotFoundError
+    return content.replace(old_text, new_text)
 
 
 def _log_file_write_diagnostics(
@@ -377,60 +460,13 @@ async def read_file(  # pylint: disable=too-many-return-statements
         )
 
     try:
-        content = read_file_safe(file_path)
-        all_lines = content.split("\n")
-        total = len(all_lines)
-
-        # Determine read range
-        s = max(1, start_line if start_line is not None else 1)
-        e = min(total, end_line if end_line is not None else total)
-
-        if s > total:
-            _raise_file_error(
-                "invalid_arguments",
-                f"Error: start_line {s} exceeds file length ({total} lines).",
-            )
-
-        if s > e:
-            _raise_file_error(
-                "invalid_arguments",
-                f"Error: start_line ({s}) > end_line ({e}).",
-            )
-
-        # Extract selected lines
-        selected_content = "\n".join(all_lines[s - 1 : e])
-
-        # Apply smart truncation (consistent with shell output format)
-        file_read_max_bytes = get_current_file_read_max_bytes()
-        if file_read_max_bytes is not None:
-            max_bytes = file_read_max_bytes
-        else:
-            max_bytes = get_current_recent_max_bytes() or DEFAULT_MAX_BYTES
-        text = truncate_text_output(
-            selected_content,
-            start_line=s,
-            total_lines=total,
-            file_path=file_path,
-            max_bytes=max_bytes,
+        text = await run_runtime_state_work(
+            _read_file_selection_sync,
+            file_path,
+            start_line=start_line,
+            end_line=end_line,
+            max_bytes=_get_effective_file_read_max_bytes(),
         )
-
-        # Add continuation hint if partial read without truncation.
-        # Use TRUNCATION_NOTICE_MARKER format so ToolResultCompactor can
-        # re-truncate with the correct start_line when compacting old messages.
-        if text == selected_content and e < total:
-            content_bytes = len(text.encode("utf-8"))
-            notice = (
-                TRUNCATION_NOTICE_MARKER + f"\nThe output above was truncated."
-                f"\nThe full content is saved to the file "
-                f"and contains {total} lines in total."
-                f"\nThis excerpt starts at line {s} and "
-                f"covers the next {content_bytes} bytes."
-                "\nIf the current content is not enough, "
-                f"call `read_file` with file_path={file_path} "
-                f"start_line={e + 1} to read more."
-            )
-            text = text + notice
-
         return ToolResponse(
             content=[TextBlock(type="text", text=text)],
         )
@@ -548,20 +584,23 @@ async def edit_file(
         )
 
     try:
-        content = read_file_safe(resolved_path)
+        new_content = await run_runtime_state_work(
+            _replace_file_text_sync,
+            resolved_path,
+            old_text,
+            new_text,
+        )
+    except _TextToReplaceNotFoundError:
+        _raise_file_error(
+            "not_found",
+            f"Error: The text to replace was not found in {file_path}.",
+        )
     except Exception as e:
         _raise_file_error(
             "unexpected_tool_error",
             f"Error: Read file failed due to \n{e}",
         )
 
-    if old_text not in content:
-        _raise_file_error(
-            "not_found",
-            f"Error: The text to replace was not found in {file_path}.",
-        )
-
-    new_content = content.replace(old_text, new_text)
     await write_file(
         file_path=resolved_path,
         content=new_content,

@@ -3047,7 +3047,9 @@ class CronManager:  # pylint: disable=too-many-public-methods
                 source_system_config,
             ),
         ):
-            before_record_ids = self._load_dream_record_ids(workspace_dir)
+            before_record_ids = await self._load_dream_record_ids(
+                workspace_dir,
+            )
             await self._runner.memory_manager.dream_memory(
                 tenant_id=runtime_tenant_id,
                 trigger="cron",
@@ -3060,13 +3062,43 @@ class CronManager:  # pylint: disable=too-many-public-methods
                 agent_id=governance_agent_id,
                 before_record_ids=before_record_ids,
             )
+            if workspace_dir is not None:
+                from ..routers.dream_logs import (
+                    dual_write_dream_archive_maintenance_result,
+                    run_dream_archive_maintenance,
+                )
+
+                maintenance = await asyncio.to_thread(
+                    run_dream_archive_maintenance,
+                    workspace_dir,
+                    actor="dream_cron",
+                )
+                if (
+                    maintenance is not None
+                    and self._continuous_governance_service is not None
+                    and source_id
+                    and tenant_id
+                    and governance_agent_id
+                ):
+                    await dual_write_dream_archive_maintenance_result(
+                        service=self._continuous_governance_service,
+                        source_id=source_id,
+                        target_user_id=tenant_id,
+                        target_agent_id=governance_agent_id,
+                        maintenance=maintenance,
+                        actor="dream_cron",
+                        source_name=source_id,
+                    )
         logger.debug("Dream task executed successfully")
 
-    def _load_dream_record_ids(self, workspace_dir: Path | None) -> set[str]:
+    async def _load_dream_record_ids(
+        self,
+        workspace_dir: Path | None,
+    ) -> set[str]:
         """读取 dream 执行前已有记录 id。"""
         if workspace_dir is None:
             return set()
-        data = self._load_dream_logs(workspace_dir)
+        data = await self._load_dream_logs(workspace_dir)
         return {
             str(record.get("id") or "")
             for record in data.get("records", [])
@@ -3105,7 +3137,7 @@ class CronManager:  # pylint: disable=too-many-public-methods
             return
         if service is None:
             return
-        data = self._load_dream_logs(workspace_dir)
+        data = await self._load_dream_logs(workspace_dir)
         for record in data.get("records", []):
             if not isinstance(record, dict):
                 continue
@@ -3121,8 +3153,15 @@ class CronManager:  # pylint: disable=too-many-public-methods
                 record=record,
             )
 
-    def _load_dream_logs(self, workspace_dir: Path) -> dict[str, Any]:
-        """读取 workspace dream_logs.json。"""
+    async def _load_dream_logs(self, workspace_dir: Path) -> dict[str, Any]:
+        """在线程池中读取 workspace dream_logs.json。"""
+        return await asyncio.to_thread(
+            self._load_dream_logs_sync,
+            workspace_dir,
+        )
+
+    def _load_dream_logs_sync(self, workspace_dir: Path) -> dict[str, Any]:
+        """同步读取 workspace dream_logs.json，供线程池包装调用。"""
         path = workspace_dir / "dream_logs.json"
         if not path.exists():
             return {"records": []}

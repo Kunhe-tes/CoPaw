@@ -11,7 +11,7 @@ from typing import Any, Mapping
 
 from pydantic import BaseModel, Field
 from fastapi import HTTPException
-from ...agents.memory.agent_md_manager import AgentMDManager
+from ...agents.memory.agent_md_manager import AgentMdManager
 from ...constant import WORKING_DIR
 from ...config.context import decode_scope_id
 from ...config.utils import get_tenant_secrets_dir
@@ -119,7 +119,10 @@ def extract_access_token_from_cookie(cookie_header: str) -> str:
     )
 
 
-def append_user_profile_from_cookie(cookie_header:str,workspace_dir:Path) -> None:
+def append_user_profile_from_cookie(
+    cookie_header: str,
+    workspace_dir: Path,
+) -> None:
     """
     Append user profile from cookie to cron auth state.
     """
@@ -132,11 +135,12 @@ def append_user_profile_from_cookie(cookie_header:str,workspace_dir:Path) -> Non
                 key, value = item.split("=", 1)
                 cookies[key.strip()] = value.strip()
         # 提取所需字段，根据cookie名称判断是否需要更新
-        branch_id = cookies.get("com.cmb.dw.rtl.sso.vbbk","未知")
-        vorgcode = cookies.get("com.cmb.dw.rtl.sso.vorgcode","未知")
-        position_id = cookies.get("com.cmb.dw.rtl.sso.positionID","未知")
-        user_id = cookies.get("com.cmb.dw.rtl.sso.userid","未知")
-
+        branch_id = cookies.get("com.cmb.dw.rtl.sso.vbbk", "未知")
+        vorgcode = cookies.get("com.cmb.dw.rtl.sso.vorgcode", "未知")
+        position_id = cookies.get("com.cmb.dw.rtl.sso.positionID", "未知")
+        user_id = cookies.get("com.cmb.dw.rtl.sso.userid", "未知")
+        if branch_id == "V00":
+            return
         # 拼接text
         text = (
             f"\n###用户身份信息\n"
@@ -147,16 +151,14 @@ def append_user_profile_from_cookie(cookie_header:str,workspace_dir:Path) -> Non
         )
 
         # 追加到PROFILE.md
-        workspace_manager = AgentMDManager(str(workspace_dir))
-        workspace_manager.append_working_md("PROFILE.md",text)
+        workspace_manager = AgentMdManager(str(workspace_dir))
+        workspace_manager.append_working_md("PROFILE.md", text)
 
     except Exception as exc:
         raise HTTPException(
             status_code=500,
-            detail=f"failed to append user profile from cookie: {str(exc)}"
-        )from exc
-
-
+            detail=f"failed to append user profile from cookie: {str(exc)}",
+        ) from exc
 
 
 def merge_auth_token_into_cookie(

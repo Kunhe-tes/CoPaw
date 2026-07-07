@@ -5,14 +5,17 @@
 
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch, AsyncMock
 
+import anyio
 import pytest
 from fastapi.testclient import TestClient
 from fastapi import FastAPI, Request
 
 sys.path.insert(0, str(Path(__file__).parent.parent.parent.parent / "src"))
 
+from swe.app.routers import providers as providers_module
 from swe.app.routers.providers import router as providers_router
 from swe.app.routers.providers import tenant_providers_router
 from swe.providers.provider import ProviderInfo
@@ -39,6 +42,104 @@ def client():
 
 class TestProviderAPIGetProviders:
     """Tests for GET /models endpoint."""
+
+    @pytest.mark.asyncio
+    async def test_get_provider_manager_cache_hit_avoids_threadpool(
+        self,
+        monkeypatch,
+    ):
+        """Cached provider managers return on the async hot path."""
+        manager = SimpleNamespace(tenant_id="scope-a")
+        request = SimpleNamespace(
+            url=SimpleNamespace(path="/api/models"),
+            state=SimpleNamespace(source_id="source-a", scope_id="scope-a"),
+        )
+
+        provider_manager = MagicMock()
+        provider_manager._instances = {"scope-a": manager}
+        provider_manager._resolve_effective_provider_tenant_id.return_value = (
+            "scope-a"
+        )
+        provider_manager._get_tenant_root_path.return_value = Path(
+            "/tmp/scope-a/providers",
+        )
+        monkeypatch.setattr(
+            providers_module,
+            "ProviderManager",
+            provider_manager,
+        )
+        monkeypatch.setattr(
+            providers_module,
+            "_get_effective_tenant_id",
+            lambda _request: "scope-a",
+        )
+
+        async def fail_run_sync(*args, **kwargs):
+            raise AssertionError("cache hit should not enter threadpool")
+
+        monkeypatch.setattr(anyio.to_thread, "run_sync", fail_run_sync)
+
+        result = await providers_module.get_provider_manager(request)
+
+        assert result is manager
+        provider_manager.ensure_tenant_provider_storage.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_get_provider_manager_cache_miss_records_threadpool_wait(
+        self,
+        monkeypatch,
+    ):
+        """Cold provider managers run in threadpool and expose wait timing."""
+        logged_messages = []
+        manager = SimpleNamespace(tenant_id="scope-cold")
+        request = SimpleNamespace(
+            url=SimpleNamespace(path="/api/models"),
+            state=SimpleNamespace(
+                source_id="source-cold",
+                scope_id="scope-cold",
+            ),
+        )
+
+        provider_manager = MagicMock()
+        provider_manager._instances = {}
+        provider_manager._resolve_effective_provider_tenant_id.return_value = (
+            "scope-cold"
+        )
+        provider_manager._get_tenant_root_path.return_value = Path(
+            "/tmp/scope-cold/providers",
+        )
+        provider_manager.get_instance.return_value = manager
+        monkeypatch.setattr(
+            providers_module,
+            "ProviderManager",
+            provider_manager,
+        )
+        monkeypatch.setattr(
+            providers_module,
+            "_get_effective_tenant_id",
+            lambda _request: "scope-cold",
+        )
+        monkeypatch.setattr(
+            providers_module.logger,
+            "info",
+            lambda message, *args, **kwargs: logged_messages.append(message),
+        )
+
+        async def immediate_run_sync(func, *args, **kwargs):
+            return func(*args)
+
+        monkeypatch.setattr(anyio.to_thread, "run_sync", immediate_run_sync)
+
+        result = await providers_module.get_provider_manager(request)
+
+        assert result is manager
+        assert (
+            request.state.provider_manager_dependency_threadpool_wait_ms >= 0
+        )
+        assert any(
+            "provider_manager_dependency_threadpool_enter" in message
+            for message in logged_messages
+        )
 
     def test_get_providers_uses_tenant_from_header(self, client):
         """GET /models uses tenant ID from header."""

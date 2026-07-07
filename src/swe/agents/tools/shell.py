@@ -27,6 +27,7 @@ from ...app.runner.tool_output_frames import (
     emit_tool_output_text,
 )
 from ...envs.runtime import build_runtime_env
+from ...runtime_invocation_claims import apply_runtime_claim_env
 from ...security.tenant_path_boundary import (
     is_path_within_tenant_with_base,
     get_current_tenant_root,
@@ -920,6 +921,7 @@ def _prepare_subprocess_env() -> dict[str, str]:
     env = build_runtime_env(
         preserve_boundary_env_keys=_SHELL_PRESERVED_BOUNDARY_ENV_KEYS,
     )
+    env = apply_runtime_claim_env(env)
     python_bin_dir = str(Path(sys.executable).parent)
     existing_path = env.get("PATH", "")
     env["PATH"] = (

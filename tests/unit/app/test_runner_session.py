@@ -1,5 +1,6 @@
 # -*- coding: utf-8 -*-
 import asyncio
+import builtins
 import json
 import threading
 from pathlib import Path
@@ -12,6 +13,31 @@ from swe.app.runner.session import SafeJSONSession
 
 def _write_json_text(path: str, content: str) -> None:
     Path(path).write_text(content, encoding="utf-8")
+
+
+class _GuardedReadableFile:
+    def __init__(self, file, state: dict[str, bool], operations: list[str]):
+        self._file = file
+        self._state = state
+        self._operations = operations
+
+    def read(self, *args, **kwargs):
+        assert self._state["in_worker"], "session read ran outside worker"
+        self._operations.append("read")
+        return self._file.read(*args, **kwargs)
+
+    def __enter__(self):
+        self._file.__enter__()
+        return self
+
+    def __exit__(self, *args):
+        return self._file.__exit__(*args)
+
+    def __iter__(self):
+        return iter(self._file)
+
+    def __getattr__(self, name: str):
+        return getattr(self._file, name)
 
 
 def test_session_write_locks_are_scoped_to_event_loop_and_normalized_path(
@@ -31,6 +57,201 @@ def test_session_write_locks_are_scoped_to_event_loop_and_normalized_path(
     assert first_loop_locks[0] is first_loop_locks[1]
     assert second_loop_locks[0] is second_loop_locks[1]
     assert first_loop_locks[0] is not second_loop_locks[0]
+
+
+@pytest.mark.asyncio
+async def test_session_load_uses_runtime_state_worker(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "session-1.json"
+    path.write_text('{"message": "你好"}', encoding="utf-8")
+    calls: list[str] = []
+    operations: list[str] = []
+    state = {"in_worker": False}
+    original_open = builtins.open
+    original_loads = json.loads
+
+    async def fake_worker(func, /, *args, **kwargs):
+        calls.append(func.__name__)
+        assert not state["in_worker"]
+        state["in_worker"] = True
+        try:
+            return func(*args, **kwargs)
+        finally:
+            state["in_worker"] = False
+
+    def guarded_open(*args, **kwargs):
+        # pylint: disable=consider-using-with
+        file = original_open(*args, **kwargs)
+        if args and str(args[0]) == str(path):
+            return _GuardedReadableFile(file, state, operations)
+        return file
+
+    def guarded_loads(*args, **kwargs):
+        assert state["in_worker"], "json.loads ran outside worker"
+        operations.append("parse")
+        return original_loads(*args, **kwargs)
+
+    monkeypatch.setattr(
+        session_module,
+        "run_runtime_state_work",
+        fake_worker,
+        raising=False,
+    )
+    monkeypatch.setattr(builtins, "open", guarded_open)
+    monkeypatch.setattr(session_module.json, "loads", guarded_loads)
+
+    session = SafeJSONSession(save_dir=str(tmp_path))
+
+    assert await session.get_session_state_dict("session-1") == {
+        "message": "你好",
+    }
+    assert calls == ["_read_json_state_sync"]
+    assert operations == ["read", "parse"]
+
+
+@pytest.mark.asyncio
+async def test_session_save_serializes_inside_runtime_state_worker(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    class StateModule:
+        def state_dict(self) -> dict:
+            return {"value": "saved"}
+
+    (tmp_path / "session-2.json").write_text(
+        '{"existing": true}',
+        encoding="utf-8",
+    )
+    calls: list[str] = []
+    operations: list[str] = []
+    state = {"in_worker": False}
+    original_loads = json.loads
+    original_dumps = json.dumps
+
+    async def fake_worker(func, /, *args, **kwargs):
+        calls.append(func.__name__)
+        assert not state["in_worker"]
+        state["in_worker"] = True
+        try:
+            return func(*args, **kwargs)
+        finally:
+            state["in_worker"] = False
+
+    def guarded_loads(*args, **kwargs):
+        assert state["in_worker"], "json.loads ran outside worker"
+        operations.append("parse")
+        return original_loads(*args, **kwargs)
+
+    def guarded_dumps(*args, **kwargs):
+        assert state["in_worker"], "json.dumps ran outside worker"
+        operations.append("encode")
+        return original_dumps(*args, **kwargs)
+
+    def guarded_write(path: str, content: str) -> None:
+        assert state["in_worker"], "_write_json_text ran outside worker"
+        operations.append("write")
+        _write_json_text(path, content)
+
+    monkeypatch.setattr(
+        session_module,
+        "run_runtime_state_work",
+        fake_worker,
+        raising=False,
+    )
+    monkeypatch.setattr(session_module.json, "loads", guarded_loads)
+    monkeypatch.setattr(session_module.json, "dumps", guarded_dumps)
+    monkeypatch.setattr(session_module, "_write_json_text", guarded_write)
+
+    session = SafeJSONSession(save_dir=str(tmp_path))
+
+    await session.save_merged_state("session-1", state={"message": "你好"})
+    await session.save_session_state("session-2", agent=StateModule())
+
+    assert calls == [
+        "_write_json_state_sync",
+        "_read_existing_state_for_save_sync",
+        "_write_json_state_sync",
+    ]
+    assert operations == ["encode", "write", "parse", "encode", "write"]
+    assert original_loads((tmp_path / "session-1.json").read_text()) == {
+        "message": "你好",
+    }
+    assert original_loads((tmp_path / "session-2.json").read_text()) == {
+        "existing": True,
+        "agent": {"value": "saved"},
+    }
+
+
+@pytest.mark.asyncio
+async def test_mutate_session_state_uses_runtime_state_worker_for_json_io(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "session-1.json"
+    path.write_text('{"existing": true}', encoding="utf-8")
+    calls: list[str] = []
+    operations: list[str] = []
+    state = {"in_worker": False}
+    original_open = builtins.open
+    original_loads = json.loads
+    original_dumps = json.dumps
+
+    async def fake_worker(func, /, *args, **kwargs):
+        calls.append(func.__name__)
+        assert not state["in_worker"]
+        state["in_worker"] = True
+        try:
+            return func(*args, **kwargs)
+        finally:
+            state["in_worker"] = False
+
+    def guarded_open(*args, **kwargs):
+        # pylint: disable=consider-using-with
+        file = original_open(*args, **kwargs)
+        if args and str(args[0]) == str(path):
+            return _GuardedReadableFile(file, state, operations)
+        return file
+
+    def guarded_loads(*args, **kwargs):
+        assert state["in_worker"], "json.loads ran outside worker"
+        operations.append("parse")
+        return original_loads(*args, **kwargs)
+
+    def guarded_dumps(*args, **kwargs):
+        assert state["in_worker"], "json.dumps ran outside worker"
+        operations.append("encode")
+        return original_dumps(*args, **kwargs)
+
+    def guarded_write(write_path: str, content: str) -> None:
+        assert state["in_worker"], "_write_json_text ran outside worker"
+        operations.append("write")
+        _write_json_text(write_path, content)
+
+    def mutate(states: dict[str, object]) -> None:
+        assert not state["in_worker"], "mutator should stay on event loop"
+        states["mutated"] = True
+
+    monkeypatch.setattr(
+        session_module,
+        "run_runtime_state_work",
+        fake_worker,
+        raising=False,
+    )
+    monkeypatch.setattr(builtins, "open", guarded_open)
+    monkeypatch.setattr(session_module.json, "loads", guarded_loads)
+    monkeypatch.setattr(session_module.json, "dumps", guarded_dumps)
+    monkeypatch.setattr(session_module, "_write_json_text", guarded_write)
+
+    session = SafeJSONSession(save_dir=str(tmp_path))
+
+    assert await session.mutate_session_state("session-1", mutate) == {
+        "existing": True,
+        "mutated": True,
+    }
+    assert calls == ["_read_json_state_sync", "_write_json_state_sync"]
+    assert operations == ["read", "parse", "encode", "write"]
 
 
 @pytest.mark.asyncio

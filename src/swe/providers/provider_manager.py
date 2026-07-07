@@ -35,6 +35,7 @@ from swe.providers.provider import (
 from swe.providers.models import ModelSlotConfig
 from swe.constant import SECRET_DIR
 from swe.runtime_cache import reset_scope_bound_model_caches
+from swe.runtime_workers import run_runtime_state_work
 
 if TYPE_CHECKING:
     from agentscope.model import ChatModelBase
@@ -1166,7 +1167,7 @@ class ProviderManager:
         try:
             models = await provider.fetch_models()
             provider.extra_models = models
-            self._save_provider(
+            await self._save_provider_async(
                 provider,
                 is_builtin=provider_id in self.builtin_providers,
             )
@@ -1209,7 +1210,7 @@ class ProviderManager:
         # without model config, to avoid false negatives in the UI.
         provider.support_connection_check = False
         self.custom_providers[provider.id] = provider
-        self._save_provider(provider, is_builtin=False)
+        await self._save_provider_async(provider, is_builtin=False)
         reset_scope_bound_model_caches()
         return await provider.get_info()
 
@@ -1241,7 +1242,7 @@ class ProviderManager:
             provider_id=provider_id,
             model=model_id,
         )
-        self.save_active_model(self.active_model)
+        await self._save_active_model_async(self.active_model)
         reset_scope_bound_model_caches()
 
         self.maybe_probe_multimodal(provider_id, model_id)
@@ -1284,7 +1285,7 @@ class ProviderManager:
         if not provider:
             raise ValueError(f"Provider '{provider_id}' not found.")
         await provider.add_model(model_info)
-        self._save_provider(
+        await self._save_provider_async(
             provider,
             is_builtin=provider_id in self.builtin_providers,
         )
@@ -1300,7 +1301,7 @@ class ProviderManager:
         if not provider:
             raise ValueError(f"Provider '{provider_id}' not found.")
         await provider.delete_model(model_id=model_id)
-        self._save_provider(
+        await self._save_provider_async(
             provider,
             is_builtin=provider_id in self.builtin_providers,
         )
@@ -1354,7 +1355,7 @@ class ProviderManager:
                 )
 
         # Persist to disk
-        self._save_provider(
+        await self._save_provider_async(
             provider,
             is_builtin=provider_id in self.builtin_providers,
         )
@@ -1384,6 +1385,19 @@ class ProviderManager:
         except OSError:
             pass
         self._update_mtime(provider_path)
+
+    async def _save_provider_async(
+        self,
+        provider: Provider,
+        is_builtin: bool = False,
+        skip_if_exists: bool = False,
+    ) -> None:
+        await run_runtime_state_work(
+            self._save_provider,
+            provider,
+            is_builtin=is_builtin,
+            skip_if_exists=skip_if_exists,
+        )
 
     def overwrite_provider_payload(self, payload: Dict) -> Provider:
         """Replace a tenant provider with the supplied payload.
@@ -1456,6 +1470,12 @@ class ProviderManager:
         """Save the active provider/model configuration to disk."""
         self._save_active_model_to_root(self.root_path, active_model)
         self._update_mtime(self.root_path / "active_model.json")
+
+    async def _save_active_model_async(
+        self,
+        active_model: ModelSlotConfig,
+    ) -> None:
+        await run_runtime_state_work(self.save_active_model, active_model)
 
     @staticmethod
     def _save_active_model_to_root(
