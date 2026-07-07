@@ -68,7 +68,31 @@ def test_collect_snapshot_summarizes_proc_and_runtime_api(
                         "inotify_fd_count": 1,
                         "inotify_watch_count": 2,
                         "watchfiles_stack_events": [
-                            {"function": "watch", "paths": ["/workspace"]},
+                            {
+                                "function": "awatch",
+                                "paths": ["/workspace/memory"],
+                                "stack": [
+                                    '  File "/opt/python/asyncio/events.py", '
+                                    "line 80, in _run\n",
+                                    "  File "
+                                    '"/site-packages/reme/core/'
+                                    'file_watcher/base_file_watcher.py", '
+                                    "line 184, in _watch_loop\n",
+                                ],
+                            },
+                            {
+                                "function": "watch",
+                                "paths": ["/tmp/mcp.json"],
+                                "stack": [
+                                    {
+                                        "filename": (
+                                            "/site-packages/fastmcp/client.py"
+                                        ),
+                                        "lineno": 42,
+                                        "function": "start",
+                                    },
+                                ],
+                            },
                         ],
                     },
                 ).encode("utf-8")
@@ -96,4 +120,98 @@ def test_collect_snapshot_summarizes_proc_and_runtime_api(
         "swe": 1,
     }
     assert snapshot["runtime"]["inotify_fd_count"] == 1
-    assert snapshot["runtime"]["watchfiles_stack_event_count"] == 1
+    assert snapshot["runtime"]["watchfiles_stack_event_count"] == 2
+    assert snapshot["runtime"]["watchfiles_stack_summary"] == {
+        "event_count": 2,
+        "function_counts": {"awatch": 1, "watch": 1},
+        "owner_counts": {"fastmcp": 1, "reme": 1},
+        "path_samples": ["/workspace/memory", "/tmp/mcp.json"],
+        "owner_samples": {
+            "fastmcp": ["/site-packages/fastmcp/client.py:42::start"],
+            "reme": [
+                '  File "/site-packages/reme/core/'
+                'file_watcher/base_file_watcher.py", '
+                "line 184, in _watch_loop\n",
+            ],
+        },
+    }
+
+
+def test_summarize_watchfiles_stack_events_handles_missing_stack() -> None:
+    probe = _load_probe_module()
+
+    summary = probe.summarize_watchfiles_stack_events(
+        [
+            {"function": "awatch", "paths": ["/workspace"]},
+            {"function": "awatch", "paths": ["/workspace"]},
+        ],
+    )
+
+    assert summary == {
+        "event_count": 2,
+        "function_counts": {"awatch": 2},
+        "owner_counts": {"unknown": 2},
+        "path_samples": ["/workspace"],
+        "owner_samples": {},
+    }
+
+
+def test_summarize_watchfiles_stack_events_bounds_path_samples() -> None:
+    probe = _load_probe_module()
+
+    summary = probe.summarize_watchfiles_stack_events(
+        [
+            {
+                "function": "awatch",
+                "paths": [f"/workspace/{index}"],
+                "stack": [],
+            }
+            for index in range(10)
+        ],
+    )
+
+    assert summary["path_samples"] == [
+        "/workspace/0",
+        "/workspace/1",
+        "/workspace/2",
+        "/workspace/3",
+        "/workspace/4",
+    ]
+
+
+def test_collect_runtime_snapshot_ignores_malformed_stack_events(
+    monkeypatch,
+) -> None:
+    probe = _load_probe_module()
+
+    def fake_urlopen(request, timeout):  # pylint: disable=unused-argument
+        class _Response:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+            def read(self):
+                return json.dumps(
+                    {
+                        "watchfiles_stack_events": [
+                            {"function": "awatch", "stack": []},
+                            "malformed",
+                            None,
+                        ],
+                    },
+                ).encode("utf-8")
+
+        return _Response()
+
+    monkeypatch.setattr(probe.request, "urlopen", fake_urlopen)
+
+    payload = probe.collect_runtime_snapshot(
+        runtime_url="http://127.0.0.1:8080/api/runtime/inotify-diagnostic",
+        token=None,
+        timeout_seconds=1.0,
+    )
+
+    assert payload["watchfiles_stack_event_count"] == 1
+    assert payload["watchfiles_stack_summary"]["event_count"] == 1

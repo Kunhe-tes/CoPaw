@@ -72,4 +72,6 @@ python scripts/inotify_matrix_probe.py \
 ```
 
 The output includes `/proc/<pid>/fdinfo` inotify counts, native thread name
-counts, and opt-in `watchfiles.watch`/`awatch` creation stacks.
+counts, opt-in `watchfiles.watch`/`awatch` creation stacks, and a
+`watchfiles_stack_summary` with function counts, likely owner counts, path
+samples, and representative owner stack frames.

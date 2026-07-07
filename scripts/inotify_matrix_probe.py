@@ -12,6 +12,15 @@ from pathlib import Path
 from typing import Any
 from urllib import request
 
+_STACK_OWNER_MARKERS = (
+    ("reme", "reme"),
+    ("fastmcp", "fastmcp"),
+    ("mcp", "mcp"),
+    ("swe", "swe"),
+    ("watchfiles", "watchfiles"),
+)
+_MAX_SUMMARY_SAMPLES = 5
+
 
 def _parse_inotify_watch_count(fdinfo_text: str) -> int:
     return sum(
@@ -78,6 +87,89 @@ def collect_proc_snapshot(
     }
 
 
+def _normalize_stack_frame(frame: Any) -> str:
+    if isinstance(frame, dict):
+        filename = str(
+            frame.get("filename")
+            or frame.get("file")
+            or frame.get("path")
+            or "",
+        )
+        function = str(frame.get("name") or frame.get("function") or "")
+        lineno = frame.get("lineno") or frame.get("line")
+        location = filename
+        if lineno:
+            location = f"{location}:{lineno}" if location else str(lineno)
+        if function:
+            return f"{location}::{function}" if location else function
+        return location
+    return str(frame)
+
+
+def _stack_owner_and_sample(stack: Any) -> tuple[str, str | None]:
+    if not isinstance(stack, list):
+        return "unknown", None
+    normalized_frames = []
+    for frame in stack:
+        normalized = _normalize_stack_frame(frame)
+        if normalized:
+            normalized_frames.append(normalized)
+    for marker, owner in _STACK_OWNER_MARKERS:
+        for frame in normalized_frames:
+            if marker in frame.lower():
+                return owner, frame
+    for frame in normalized_frames:
+        lowered = frame.lower()
+        if (
+            "inotify_matrix_probe" not in lowered
+            and "runtime_diagnostic" not in lowered
+        ):
+            return frame, frame
+    return "unknown", None
+
+
+def summarize_watchfiles_stack_events(
+    events: list[dict[str, Any]],
+) -> dict[str, Any]:
+    function_counts: Counter[str] = Counter()
+    owner_counts: Counter[str] = Counter()
+    path_samples: list[str] = []
+    owner_samples: dict[str, list[str]] = {}
+
+    for event in events:
+        function = str(event.get("function") or "unknown")
+        owner, owner_sample = _stack_owner_and_sample(event.get("stack"))
+        function_counts[function] += 1
+        owner_counts[owner] += 1
+
+        for raw_path in event.get("paths") or []:
+            if len(path_samples) >= _MAX_SUMMARY_SAMPLES:
+                break
+            path = str(raw_path)
+            if path not in path_samples:
+                path_samples.append(path)
+
+        samples = owner_samples.setdefault(owner, [])
+        if (
+            owner_sample
+            and len(samples) < _MAX_SUMMARY_SAMPLES
+            and owner_sample not in samples
+        ):
+            samples.append(owner_sample)
+
+    return {
+        "event_count": len(events),
+        "function_counts": dict(sorted(function_counts.items())),
+        "owner_counts": dict(sorted(owner_counts.items())),
+        "path_samples": path_samples,
+        "owner_samples": {
+            owner: samples
+            for owner, samples in sorted(owner_samples.items())
+            if samples
+        },
+    }
+
+
 def collect_runtime_snapshot(
     *,
     runtime_url: str,
@@ -90,8 +182,11 @@ def collect_runtime_snapshot(
     runtime_request = request.Request(runtime_url, headers=headers)
     with request.urlopen(runtime_request, timeout=timeout_seconds) as response:
         payload = json.loads(response.read().decode("utf-8"))
-    payload["watchfiles_stack_event_count"] = len(
-        payload.get("watchfiles_stack_events") or [],
+    raw_events = payload.get("watchfiles_stack_events") or []
+    events = [event for event in raw_events if isinstance(event, dict)]
+    payload["watchfiles_stack_event_count"] = len(events)
+    payload["watchfiles_stack_summary"] = summarize_watchfiles_stack_events(
+        events,
     )
     return payload
 
