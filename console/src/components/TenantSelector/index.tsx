@@ -65,6 +65,9 @@ export function TenantSelector({
   onLoadError,
   userSkillStatusMap,
   skillVersion,
+  onTargetModeChange,
+  distributedUserIds,
+  distributedTriggerKey,
 }: TenantSelectorProps) {
   const { t } = useTranslation();
   const sourceId = useIframeStore((state) => state.source) || DEFAULT_SOURCE_ID;
@@ -126,6 +129,11 @@ export function TenantSelector({
   const tenantLookup = useMemo(() => {
     return new Map(tenantOptions.map((item) => [item.tenant_id, item]));
   }, [tenantOptions]);
+
+  // 模式变更时通知父组件
+  useEffect(() => {
+    onTargetModeChange?.(targetMode);
+  }, [targetMode, onTargetModeChange]);
 
   // 按机构过滤的用户 ID 列表
   const filteredTenantIds = useMemo(() => {
@@ -278,6 +286,50 @@ export function TenantSelector({
   useEffect(() => {
     onSelectionInfoChange?.(selectedTenantInfos);
   }, [onSelectionInfoChange, selectedTenantInfos]);
+
+  // 处理已分发用户选择（根据当前模式选择机构或用户）
+  // 使用 triggerKey 强制触发：每次勾选 checkbox 都会触发，不受 distributedIds 比较限制
+  const prevTriggerKeyRef = useRef<number>(0);
+  useEffect(() => {
+    const currentIds = distributedUserIds ?? [];
+    const triggerKey = distributedTriggerKey ?? 0;
+
+    // triggerKey 变化时强制触发设置
+    const shouldForceTrigger = triggerKey > 0 && triggerKey !== prevTriggerKeyRef.current;
+
+    // 空数组时清空选择
+    if (currentIds.length === 0 && triggerKey === 0) {
+      if (targetMode === "bbk_id") {
+        setSelectedBbkIds([]);
+      } else {
+        setSelectedInListTenantIds([]);
+        setExtraTenantIdsText("");
+        setIsEditingExtra(false);
+      }
+      prevTriggerKeyRef.current = 0;
+      return;
+    }
+
+    // 强制触发或有 distributedIds 时设置选择
+    if (shouldForceTrigger && currentIds.length > 0) {
+      prevTriggerKeyRef.current = triggerKey;
+
+      if (targetMode === "bbk_id") {
+        const bbkIdSet = new Set<string>();
+        currentIds.forEach((userId) => {
+          const tenant = tenantLookup.get(userId);
+          if (tenant?.bbk_id) {
+            bbkIdSet.add(tenant.bbk_id);
+          }
+        });
+        setSelectedBbkIds(Array.from(bbkIdSet));
+      } else {
+        setSelectedInListTenantIds(currentIds);
+        setExtraTenantIdsText("");
+        setIsEditingExtra(false);
+      }
+    }
+  }, [distributedUserIds, distributedTriggerKey, targetMode, tenantLookup]);
 
   // 切换模式时清空选择（先清空状态，再切换模式，避免同步 useEffect 触发）
   const handleModeChange = useCallback((mode: "bbk_id" | "user_id") => {

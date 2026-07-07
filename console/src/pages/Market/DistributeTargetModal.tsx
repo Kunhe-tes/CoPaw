@@ -12,6 +12,7 @@ import { TenantSelector } from "../../components/TenantSelector";
 import { DistributionPreview } from "../../components/DistributionPreview";
 import { fetchTenantsBySource } from "../../api/modules/userInfo";
 import type { MarketMCPItem } from "../../api/types";
+import type { TargetMode } from "../../components/TenantSelector/types";
 
 export type DistributeTargetType = "skill" | "mcp";
 
@@ -34,6 +35,12 @@ export function DistributeTargetModal({
 }: DistributeTargetModalProps) {
   const [submitting, setSubmitting] = useState(false);
   const [selectedTenantIds, setSelectedTenantIds] = useState<string[]>([]);
+  // 当前选择模式（从 TenantSelector 获取）
+  const [targetMode, setTargetMode] = useState<TargetMode>("bbk_id");
+  // 用于触发 TenantSelector 选择已分发用户/机构
+  const [distributedUserIdsToSelect, setDistributedUserIdsToSelect] = useState<string[]>([]);
+  // 触发计数器：每次勾选 checkbox 都增加，让 TenantSelector 能检测到变化
+  const [triggerCount, setTriggerCount] = useState(0);
 
   // 预览状态
   const [previewLoading, setPreviewLoading] = useState(false);
@@ -53,6 +60,8 @@ export function DistributeTargetModal({
     setSelectedTenantIds([]);
     setPreviewData(null);
     setHasFetchedPreview(false);
+    setDistributedUserIdsToSelect([]);
+    setTriggerCount(0);
   }, [open]);
 
   // 当弹窗打开且有 item 时，获取预览数据（仅请求一次）
@@ -67,7 +76,6 @@ export function DistributeTargetModal({
         // 获取租户列表
         const tenants = await fetchTenantsBySource(sourceId);
         const tenantIds = tenants.map((t) => t.tenant_id);
-        console.log("[DistributePreview] 获取到的租户数量:", tenantIds.length, tenantIds.slice(0, 10));
 
         // 获取预览数据
         const preview = await marketApi.getDistributionPreview(
@@ -86,13 +94,18 @@ export function DistributeTargetModal({
     fetchPreview();
   }, [open, item, sourceId, type, hasFetchedPreview]);
 
-  // 处理"默认选中已分发用户"
+  // 处理"选中已分发用户"（根据模式选择机构或用户）
   const handleSelectDistributed = (distributedIds: string[]) => {
-    if (distributedIds.length > 0) {
-      setSelectedTenantIds(distributedIds);
-    } else {
-      setSelectedTenantIds([]);
+    if (distributedIds.length === 0) {
+      // 取消勾选：清空选择和计数器
+      setDistributedUserIdsToSelect([]);
+      setTriggerCount(0);
+      return;
     }
+
+    // 勾选：设置 distributedIds 并增加计数器触发设置
+    setDistributedUserIdsToSelect(distributedIds);
+    setTriggerCount((c) => c + 1);
   };
 
   // 提交分发
@@ -245,6 +258,9 @@ export function DistributeTargetModal({
           onChange={setSelectedTenantIds}
           userSkillStatusMap={userSkillStatusMap}
           skillVersion={previewData?.skill_version}
+          onTargetModeChange={setTargetMode}
+          distributedUserIds={distributedUserIdsToSelect}
+          distributedTriggerKey={triggerCount}
         />
       </div>
     </Modal>
