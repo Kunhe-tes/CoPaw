@@ -1228,20 +1228,16 @@ def _build_download_plan(
     return plan
 
 
-@router.post("/pool/download")
-async def download_pool_skill_to_workspaces(
-    request: Request,
+def _download_pool_skill_transaction(
     body: DownloadFromPoolRequest,
+    *,
+    tenant_id: str | None,
+    working_dir: Path,
 ) -> dict[str, Any]:
-    """Download one pool skill into one or more workspaces.
-
-    All-or-nothing: if any target conflicts, reject everything.
-    """
-    tenant_id = _request_effective_tenant_id(request)
     targets, hub_service = _resolve_and_preflight(
         body,
         tenant_id=tenant_id,
-        working_dir=_request_tenant_working_dir(request),
+        working_dir=working_dir,
     )
 
     execution_plan = _build_download_plan(
@@ -1295,6 +1291,25 @@ async def download_pool_skill_to_workspaces(
                 shutil.rmtree(Path(backup_dir).parent, ignore_errors=True)
 
     return {"downloaded": downloaded}
+
+
+@router.post("/pool/download")
+async def download_pool_skill_to_workspaces(
+    request: Request,
+    body: DownloadFromPoolRequest,
+) -> dict[str, Any]:
+    """Download one pool skill into one or more workspaces.
+
+    All-or-nothing: if any target conflicts, reject everything.
+    """
+    tenant_id = _request_effective_tenant_id(request)
+    working_dir = _request_tenant_working_dir(request)
+    return await asyncio.to_thread(
+        _download_pool_skill_transaction,
+        body,
+        tenant_id=tenant_id,
+        working_dir=working_dir,
+    )
 
 
 @router.post("/pool/import-builtin")

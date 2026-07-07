@@ -607,6 +607,54 @@ def test_download_pool_skill_to_workspaces_uses_effective_tenant_id(
     }
 
 
+def test_download_pool_skill_to_workspaces_runs_transaction_off_loop(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    observed: dict[str, object] = {}
+
+    async def fake_to_thread(func, *args, **kwargs):
+        observed["func"] = func
+        observed["args"] = args
+        observed["kwargs"] = kwargs
+        return {"downloaded": [{"workspace_id": "default"}]}
+
+    def fake_tenant_working_dir(tenant_id=None):
+        return tmp_path / (
+            "default_ruice" if tenant_id == "default" else str(tenant_id)
+        )
+
+    monkeypatch.setattr(
+        skills_router,
+        "get_tenant_request_working_dir",
+        fake_tenant_working_dir,
+    )
+    monkeypatch.setattr(skills_router.asyncio, "to_thread", fake_to_thread)
+
+    result = asyncio.run(
+        skills_router.download_pool_skill_to_workspaces(
+            _request("default", "ruice"),
+            skills_router.DownloadFromPoolRequest(
+                skill_name="guidance",
+                targets=[
+                    skills_router.PoolDownloadTarget(workspace_id="default"),
+                ],
+                overwrite=True,
+            ),
+        ),
+    )
+
+    assert result == {"downloaded": [{"workspace_id": "default"}]}
+    assert observed["func"] is skills_router._download_pool_skill_transaction
+    args = observed["args"]
+    assert isinstance(args, tuple)
+    assert args[0].skill_name == "guidance"
+    assert observed["kwargs"] == {
+        "tenant_id": "default_ruice",
+        "working_dir": tmp_path / "default_ruice",
+    }
+
+
 def test_broadcast_pool_skills_to_bootstrapped_tenant(
     monkeypatch,
     tmp_path: Path,
