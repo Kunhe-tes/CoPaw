@@ -3288,128 +3288,161 @@ class CronManager:  # pylint: disable=too-many-public-methods
         except Exception:
             logger.warning("Failed to save system_job_ids", exc_info=True)
 
+    def _remember_external_job_id(
+        self,
+        job_id: str,
+        ext_id: str,
+    ) -> None:
+        st = self._states.get(job_id, CronJobState())
+        st.external_job_id = str(ext_id)
+        self._states[job_id] = st
+
     async def _restore_external_job_ids(self) -> None:
         """恢复 external_job_id，缺失的补注册到外部调度平台。"""
         if isinstance(self._scheduler_adapter, NoopSchedulerAdapter):
             return
         try:
             for job in await self._repo.list_jobs():
-                ext_id = (job.meta or {}).get("external_job_id", "")
-                if is_batch_dispatch_managed_broadcast_child(job):
-                    if ext_id:
-                        st = self._states.get(job.id, CronJobState())
-                        st.external_job_id = str(ext_id)
-                        self._states[job.id] = st
-                        await self._scheduler_adapter.pause_job(str(ext_id))
-                    logger.info(
-                        "Skipped external scheduler restore for batch dispatch child: job=%s ext_id=%s",
-                        job.id,
-                        ext_id or "",
-                    )
-                    continue
-                if ext_id:
-                    try:
-                        synced = await self._sync_job_to_external_scheduler(
-                            job,
-                            existing=job,
-                        )
-                        synced_ext_id = (
-                            (synced.meta or {}).get("external_job_id", "")
-                            or ext_id
-                        )
-                        st = self._states.get(job.id, CronJobState())
-                        st.external_job_id = str(synced_ext_id)
-                        self._states[job.id] = st
-                        if is_batch_dispatch_parent(synced):
-                            synced = await self._sync_batch_dispatch_scheduler_job(
-                                synced,
-                                offset_window_hours=(
-                                    self._get_batch_dispatch_offset_window_hours(
-                                        synced,
-                                    )
-                                ),
-                            )
-                            await self._scheduler_adapter.pause_job(
-                                str(synced_ext_id),
-                            )
-                            await self._persist_job_definition(synced)
-                    except Exception:
-                        logger.warning(
-                            "Failed to refresh external scheduler binding for job %s",
-                            job.id,
-                            exc_info=True,
-                        )
-                    continue
-                # 老任务尚未注册到外部平台，补注册
-                callback_url = self._build_callback_url("job", job.id)
-                cron = (
-                    job.schedule.cron
-                    if job.schedule and job.schedule.cron
-                    else "0 0 1 1 *"
-                )
-                tenant_id, source_id = (
-                    self._get_external_scheduler_business_identity(job)
-                )
-                runtime_tenant_id = self._get_external_scheduler_tenant_id(job)
-                try:
-                    ext_id = await self._scheduler_adapter.register_job(
-                        tenant_id=tenant_id,
-                        source_id=source_id,
-                        agent_id=self._agent_id or "",
-                        task_type="job",
-                        job_id=job.id,
-                        job_name=job.name,
-                        cron=cron,
-                        callback_url=callback_url,
-                    )
-                    if ext_id:
-                        st = self._states.get(job.id, CronJobState())
-                        st.external_job_id = ext_id
-                        self._states[job.id] = st
-                        await self._persist_external_job_id(
-                            job.id,
-                            ext_id,
-                            runtime_tenant_id,
-                        )
-                        if not job.enabled:
-                            await self._scheduler_adapter.pause_job(
-                                ext_id,
-                            )
-                        saved_job = await self._repo.get_job(job.id)
-                        batch_source = saved_job or job.model_copy(
-                            update={
-                                "meta": {
-                                    **dict(job.meta or {}),
-                                    "external_job_id": ext_id,
-                                },
-                            },
-                        )
-                        if is_batch_dispatch_parent(batch_source):
-                            batch_synced = (
-                                await self._sync_batch_dispatch_scheduler_job(
-                                    batch_source,
-                                    offset_window_hours=(
-                                        self._get_batch_dispatch_offset_window_hours(
-                                            batch_source,
-                                        )
-                                    ),
-                                )
-                            )
-                            await self._scheduler_adapter.pause_job(ext_id)
-                            await self._persist_job_definition(batch_synced)
-                        logger.info(
-                            "Migrated job %s to external scheduler: ext_id=%s",
-                            job.id,
-                            ext_id,
-                        )
-                except Exception:
-                    logger.warning(
-                        "Failed to migrate job %s to external scheduler",
-                        job.id,
-                        exc_info=True,
-                    )
+                await self._restore_external_job_id(job)
         except Exception:
             logger.debug("Failed to restore external_job_ids from jobs.json")
+
+    async def _restore_external_job_id(self, job: CronJobSpec) -> None:
+        ext_id = str((job.meta or {}).get("external_job_id", "") or "")
+        if is_batch_dispatch_managed_broadcast_child(job):
+            await self._restore_batch_dispatch_child_external_job(
+                job,
+                ext_id,
+            )
+            return
+        if ext_id:
+            await self._refresh_existing_external_job(job, ext_id)
+            return
+        await self._migrate_missing_external_job(job)
+
+    async def _restore_batch_dispatch_child_external_job(
+        self,
+        job: CronJobSpec,
+        ext_id: str,
+    ) -> None:
+        if ext_id:
+            self._remember_external_job_id(job.id, ext_id)
+            await self._scheduler_adapter.pause_job(ext_id)
+        logger.info(
+            "Skipped external scheduler restore for batch dispatch child: "
+            "job=%s ext_id=%s",
+            job.id,
+            ext_id or "",
+        )
+
+    async def _refresh_existing_external_job(
+        self,
+        job: CronJobSpec,
+        ext_id: str,
+    ) -> None:
+        try:
+            synced = await self._sync_job_to_external_scheduler(
+                job,
+                existing=job,
+            )
+            synced_ext_id = (
+                (synced.meta or {}).get("external_job_id", "") or ext_id
+            )
+            self._remember_external_job_id(job.id, synced_ext_id)
+            await self._restore_batch_dispatch_parent_external_job(
+                synced,
+                synced_ext_id,
+            )
+        except Exception:
+            logger.warning(
+                "Failed to refresh external scheduler binding for job %s",
+                job.id,
+                exc_info=True,
+            )
+
+    async def _migrate_missing_external_job(self, job: CronJobSpec) -> None:
+        try:
+            ext_id = await self._register_external_scheduler_job(job)
+            if not ext_id:
+                return
+            self._remember_external_job_id(job.id, ext_id)
+            await self._persist_external_job_id(
+                job.id,
+                ext_id,
+                self._get_external_scheduler_tenant_id(job),
+            )
+            if not job.enabled:
+                await self._scheduler_adapter.pause_job(ext_id)
+            await self._restore_registered_batch_dispatch_parent(job, ext_id)
+            logger.info(
+                "Migrated job %s to external scheduler: ext_id=%s",
+                job.id,
+                ext_id,
+            )
+        except Exception:
+            logger.warning(
+                "Failed to migrate job %s to external scheduler",
+                job.id,
+                exc_info=True,
+            )
+
+    async def _register_external_scheduler_job(
+        self,
+        job: CronJobSpec,
+    ) -> str:
+        tenant_id, source_id = self._get_external_scheduler_business_identity(
+            job,
+        )
+        cron = (
+            job.schedule.cron
+            if job.schedule and job.schedule.cron
+            else "0 0 1 1 *"
+        )
+        return await self._scheduler_adapter.register_job(
+            tenant_id=tenant_id,
+            source_id=source_id,
+            agent_id=self._agent_id or "",
+            task_type="job",
+            job_id=job.id,
+            job_name=job.name,
+            cron=cron,
+            callback_url=self._build_callback_url("job", job.id),
+        )
+
+    async def _restore_registered_batch_dispatch_parent(
+        self,
+        job: CronJobSpec,
+        ext_id: str,
+    ) -> None:
+        saved_job = await self._repo.get_job(job.id)
+        batch_source = saved_job or job.model_copy(
+            update={
+                "meta": {
+                    **dict(job.meta or {}),
+                    "external_job_id": ext_id,
+                },
+            },
+        )
+        await self._restore_batch_dispatch_parent_external_job(
+            batch_source,
+            ext_id,
+        )
+
+    async def _restore_batch_dispatch_parent_external_job(
+        self,
+        job: CronJobSpec,
+        ext_id: str,
+    ) -> None:
+        if not is_batch_dispatch_parent(job):
+            return
+        batch_synced = await self._sync_batch_dispatch_scheduler_job(
+            job,
+            offset_window_hours=(
+                self._get_batch_dispatch_offset_window_hours(job)
+            ),
+        )
+        await self._scheduler_adapter.pause_job(ext_id)
+        await self._persist_job_definition(batch_synced)
 
     async def _persist_external_job_id(
         self,
