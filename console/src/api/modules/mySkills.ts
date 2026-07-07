@@ -1,5 +1,6 @@
 import { request } from "../request";
 import { mergeHeaders } from "../mergeHeaders";
+import { getApiUrl } from "../config";
 
 export interface MySkill {
   skill_name: string;  // 目录名，用于 API 操作标识
@@ -36,6 +37,43 @@ export interface BatchOperationResponse {
   results: Record<string, { success: boolean; reason?: string }>;
   success_count: number;
   failed_count: number;
+}
+
+export interface SkillDownloadResponse {
+  blob: Blob;
+  filename: string | null;
+}
+
+function _extractFilenameFromDisposition(
+  disposition: string | null,
+): string | null {
+  if (!disposition) return null;
+  const utf8Match = disposition.match(/filename\*=UTF-8''([^;]+)/i);
+  if (utf8Match?.[1]) {
+    try {
+      return decodeURIComponent(utf8Match[1]);
+    } catch {
+      return utf8Match[1];
+    }
+  }
+  const plainMatch = disposition.match(/filename="?([^"]+)"?/i);
+  return plainMatch?.[1] ?? null;
+}
+
+async function _downloadBinary(
+  path: string,
+  options: RequestInit,
+): Promise<SkillDownloadResponse> {
+  const response = await fetch(getApiUrl(path), options);
+  if (!response.ok) {
+    throw new Error(await response.text());
+  }
+  return {
+    blob: await response.blob(),
+    filename: _extractFilenameFromDisposition(
+      response.headers.get("content-disposition"),
+    ),
+  };
 }
 
 export const mySkillsApi = {
@@ -161,5 +199,19 @@ export const mySkillsApi = {
       body: JSON.stringify({ skills: skillNames }),
     };
     return request<BatchOperationResponse>(`/market/skills/mine/batch-disable`, opts);
+  },
+
+  downloadCreatedSkill: async (
+    skillName: string,
+  ): Promise<SkillDownloadResponse> => {
+    const encodedName = encodeURIComponent(skillName);
+    const opts = mergeHeaders();
+    return _downloadBinary(
+      `/market/skills/mine/${encodedName}/download`,
+      {
+        method: "GET",
+        headers: opts.headers,
+      },
+    );
   },
 };

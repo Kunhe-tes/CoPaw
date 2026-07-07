@@ -147,5 +147,6 @@ repos:
           --disable=W1309,
           --disable=W1404,
           --disable=W1514,
+          --disable=R0904,  # Too many public methods (common in test classes)
         ]
   # prettier hook removed - console/ is excluded and it requires downloading Node.js

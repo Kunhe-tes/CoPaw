@@ -33,6 +33,7 @@ class SkillFeature:
 
     skill_name: str
     file_extensions: list[str] = field(default_factory=list)
+    observed_file_extensions: list[str] = field(default_factory=list)
     keywords: list[str] = field(default_factory=list)
     tools_hint: list[str] = field(default_factory=list)
     tool_patterns: list[list[str]] = field(default_factory=list)

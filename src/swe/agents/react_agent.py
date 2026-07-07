@@ -391,6 +391,12 @@ class SWEAgent(ToolGuardMixin, ReActAgent):
             workspace_dir,
             channel_name,
         )
+        from .skill_runtime_profile import build_skill_runtime_profiles
+
+        skill_runtime_profiles = build_skill_runtime_profiles(
+            Path(workspace_dir),
+            effective_skills,
+        )
 
         working_skills_dir = get_workspace_skills_dir(Path(workspace_dir))
 
@@ -410,10 +416,15 @@ class SWEAgent(ToolGuardMixin, ReActAgent):
         self._sanitize_registered_skill_dirs(toolkit)
 
         # Build skill-tool registry for multi-skill attribution
-        self._build_skill_tool_registry(Path(workspace_dir), effective_skills)
+        self._build_skill_tool_registry(
+            Path(workspace_dir),
+            effective_skills,
+        )
 
         # Store effective skills for later detector setup
+        self._runtime_skills = effective_skills
         self._effective_skills = effective_skills
+        self._skill_runtime_profiles = skill_runtime_profiles
 
     def get_effective_skills(self) -> list[str]:
         """Get the list of effective skills for this agent.
@@ -422,6 +433,14 @@ class SWEAgent(ToolGuardMixin, ReActAgent):
             List of enabled skill names
         """
         return self._effective_skills
+
+    def get_runtime_skills(self) -> list[str]:
+        """Get the list of runtime-enabled skills for this agent."""
+        return getattr(self, "_runtime_skills", self._effective_skills)
+
+    def get_skill_runtime_profiles(self) -> dict[str, object]:
+        """Get cached skill runtime profiles for this agent."""
+        return getattr(self, "_skill_runtime_profiles", {})
 
     def _build_skill_tool_registry(
         self,
@@ -473,7 +492,8 @@ class SWEAgent(ToolGuardMixin, ReActAgent):
             workspace_dir = Path(self._workspace_dir or WORKING_DIR)
             await trace_mgr.setup_skill_detector(
                 trace_id=trace_id,
-                enabled_skills=self._effective_skills,
+                enabled_skills=self.get_runtime_skills(),
+                skill_runtime_profiles=self.get_skill_runtime_profiles(),
                 workspace_dir=workspace_dir,
             )
         except Exception as e:

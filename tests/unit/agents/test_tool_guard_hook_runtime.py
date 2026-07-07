@@ -183,6 +183,121 @@ async def test_tool_trace_prefers_request_context_over_current_trace(
 
 
 @pytest.mark.asyncio
+async def test_tool_trace_start_consumes_precomputed_skill_attribution(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    agent = _FakeAgent(tmp_path)
+    agent._request_context.update(
+        {
+            "trace_id": "trace-request",
+            "source_id": "source-request",
+        },
+    )
+    agent._store_precomputed_tool_skill_attribution(
+        "tool-1",
+        {"primary_skill": "fill-metadata"},
+    )
+    emitted_events = []
+
+    class FakeTraceManager:
+        async def emit_tool_call_start(self, **kwargs):
+            emitted_events.append(kwargs)
+            return "span-1"
+
+    monkeypatch.setattr(
+        "swe.agents.tool_guard_mixin.has_trace_manager",
+        lambda: True,
+    )
+    monkeypatch.setattr(
+        "swe.agents.tool_guard_mixin.get_trace_manager",
+        FakeTraceManager,
+    )
+
+    span_id = await agent._emit_tool_trace_start(
+        "read_file",
+        {"path": "README.md"},
+        None,
+        "tool-1",
+    )
+
+    assert span_id == "span-1"
+    assert emitted_events[0]["use_precomputed_attribution"] is True
+    assert emitted_events[0]["precomputed_attribution"] == {
+        "primary_skill": "fill-metadata",
+    }
+    assert agent._consume_precomputed_tool_skill_attribution("tool-1") == (
+        False,
+        None,
+    )
+
+
+@pytest.mark.asyncio
+async def test_tool_trace_start_clears_precomputed_attribution_without_trace_manager(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    agent = _FakeAgent(tmp_path)
+    agent._store_precomputed_tool_skill_attribution(
+        "tool-1",
+        {"primary_skill": "fill-metadata"},
+    )
+
+    monkeypatch.setattr(
+        "swe.agents.tool_guard_mixin.has_trace_manager",
+        lambda: False,
+    )
+
+    span_id = await agent._emit_tool_trace_start(
+        "read_file",
+        {"path": "README.md"},
+        None,
+        "tool-1",
+    )
+
+    assert span_id == ""
+    assert agent._consume_precomputed_tool_skill_attribution("tool-1") == (
+        False,
+        None,
+    )
+
+
+@pytest.mark.asyncio
+async def test_tool_trace_start_clears_precomputed_attribution_without_trace_context(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    agent = _FakeAgent(tmp_path)
+    agent._store_precomputed_tool_skill_attribution(
+        "tool-1",
+        {"primary_skill": "fill-metadata"},
+    )
+
+    monkeypatch.setattr(
+        "swe.agents.tool_guard_mixin.has_trace_manager",
+        lambda: True,
+    )
+    monkeypatch.setattr(
+        agent,
+        "_resolve_trace_context_for_tracing",
+        lambda: None,
+    )
+
+    span_id = await agent._emit_tool_trace_start(
+        "read_file",
+        {"path": "README.md"},
+        None,
+        "tool-1",
+    )
+
+    assert span_id == ""
+    assert agent._consume_precomputed_tool_skill_attribution("tool-1") == (
+        False,
+        None,
+    )
+
+
+@pytest.mark.asyncio
 async def test_tool_guard_pending_extra_includes_request_scope_ids(
     tmp_path,
     monkeypatch,
