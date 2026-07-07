@@ -387,6 +387,7 @@ class TenantWorkspaceMiddleware(BaseHTTPMiddleware):
                 "/api/version",
                 "/api/runtime/memory-diagnostic",
                 "/api/runtime/memory-type-holders",
+                "/api/runtime/inotify-diagnostic",
                 "/docs",
                 "/redoc",
                 "/openapi.json",

@@ -124,3 +124,33 @@ def test_runtime_memory_diagnostic_skips_auth_for_remote_clients() -> None:
         AuthMiddleware._should_skip_auth.__globals__[
             "has_registered_users"
         ] = original_registered
+
+
+def test_runtime_inotify_diagnostic_skips_auth_for_remote_clients() -> None:
+    request = MagicMock()
+    request.method = "GET"
+    request.url.path = "/api/runtime/inotify-diagnostic"
+    request.client = MagicMock(host="203.0.113.10")
+
+    original_enabled = AuthMiddleware._should_skip_auth.__globals__[
+        "is_auth_enabled"
+    ]
+    original_registered = AuthMiddleware._should_skip_auth.__globals__[
+        "has_registered_users"
+    ]
+    try:
+        AuthMiddleware._should_skip_auth.__globals__["is_auth_enabled"] = (
+            lambda: True
+        )
+        AuthMiddleware._should_skip_auth.__globals__[
+            "has_registered_users"
+        ] = lambda: True
+
+        assert AuthMiddleware._should_skip_auth(request) is True
+    finally:
+        AuthMiddleware._should_skip_auth.__globals__["is_auth_enabled"] = (
+            original_enabled
+        )
+        AuthMiddleware._should_skip_auth.__globals__[
+            "has_registered_users"
+        ] = original_registered

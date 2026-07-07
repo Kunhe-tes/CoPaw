@@ -149,6 +149,17 @@ def test_runtime_memory_diagnostic_route_is_exempt() -> None:
     )
 
 
+def test_runtime_inotify_diagnostic_route_is_exempt() -> None:
+    assert (
+        tenant_identity.is_tenant_exempt("/api/runtime/inotify-diagnostic")
+        is True
+    )
+    assert (
+        tenant_identity.is_source_exempt("/api/runtime/inotify-diagnostic")
+        is True
+    )
+
+
 def test_invalid_tenant_id_returns_400():
     client = TestClient(build_test_app(), raise_server_exceptions=False)
     response = client.get(

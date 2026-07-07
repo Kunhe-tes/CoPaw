@@ -60,3 +60,26 @@ def get_memory_type_holders(
         max_samples_per_type=max_samples_per_type,
         collect_gc=collect_gc,
     )
+
+
+@router.get("/inotify-diagnostic")
+def get_inotify_diagnostic(
+    request: Request,
+    max_fdinfo_bytes: int = Query(65536, ge=0, le=1024 * 1024),
+    include_fdinfo: bool = Query(False),
+) -> dict[str, object]:
+    """Return inotify fd/watch diagnostics for the current process."""
+    manager = getattr(
+        request.app.state,
+        "runtime_diagnostic_manager",
+        None,
+    )
+    if not isinstance(manager, RuntimeDiagnosticManager):
+        raise HTTPException(
+            status_code=503,
+            detail="Runtime diagnostic manager is unavailable",
+        )
+    return manager.collect_inotify_diagnostic(
+        max_fdinfo_bytes=max_fdinfo_bytes,
+        include_fdinfo=include_fdinfo,
+    )

@@ -221,6 +221,61 @@ def test_failed_threadpool_metrics_emit_null_without_suppressing_payload() -> (
     assert payload["process_rss_bytes"] == 100
 
 
+def test_collect_inotify_diagnostic_summarizes_proc_fdinfo(tmp_path) -> None:
+    proc_dir = tmp_path / "proc" / "123"
+    fd_dir = proc_dir / "fd"
+    fdinfo_dir = proc_dir / "fdinfo"
+    fd_dir.mkdir(parents=True)
+    fdinfo_dir.mkdir()
+    (fd_dir / "3").symlink_to("anon_inode:inotify")
+    (fd_dir / "4").symlink_to("socket:[1]")
+    (fdinfo_dir / "3").write_text(
+        "pos:\t0\n"
+        "flags:\t02000000\n"
+        "inotify wd:1 ino:abc sdev:01 mask:00000800 ignored_mask:0 "
+        "fhandle-bytes:8 fhandle-type:1 f_handle:01020304\n",
+        encoding="utf-8",
+    )
+
+    process = _Process()
+    process.pid = 123
+    manager = _manager(process=process)
+
+    payload = manager.collect_inotify_diagnostic(
+        proc_root=tmp_path / "proc",
+        include_fdinfo=True,
+    )
+
+    assert payload["schema"] == "runtime_diagnostic.v1"
+    assert payload["event_type"] == "inotify_diagnostic"
+    assert payload["pid"] == 123
+    assert payload["inotify_fd_count"] == 1
+    assert payload["inotify_watch_count"] == 1
+    assert payload["errors"] == []
+    assert payload["inotify_fds"] == [
+        {
+            "fd": 3,
+            "target": "anon_inode:inotify",
+            "watch_count": 1,
+            "watches": [
+                {
+                    "wd": "1",
+                    "ino": "abc",
+                    "sdev": "01",
+                    "mask": "00000800",
+                },
+            ],
+            "fdinfo": (
+                "pos:\t0\n"
+                "flags:\t02000000\n"
+                "inotify wd:1 ino:abc sdev:01 mask:00000800 "
+                "ignored_mask:0 fhandle-bytes:8 fhandle-type:1 "
+                "f_handle:01020304\n"
+            ),
+        },
+    ]
+
+
 def test_failed_process_fields_do_not_suppress_other_process_fields() -> None:
     manager = _manager(process=_PartiallyBrokenProcess())
 

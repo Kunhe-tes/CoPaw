@@ -14,6 +14,7 @@ import random
 import time
 from collections.abc import Callable
 from importlib import import_module
+from pathlib import Path
 from typing import Any
 
 import anyio
@@ -109,6 +110,17 @@ def _int_or_none(value: Any) -> int | None:
         return int(value)
     except (TypeError, ValueError):
         return None
+
+
+def _parse_inotify_watch_line(line: str) -> dict[str, str]:
+    fields: dict[str, str] = {}
+    for token in line.split():
+        if ":" not in token:
+            continue
+        key, value = token.split(":", 1)
+        if key in {"wd", "ino", "sdev", "mask"}:
+            fields[key] = value
+    return fields
 
 
 class RuntimeDiagnosticManager:
@@ -624,6 +636,102 @@ class RuntimeDiagnosticManager:
             )
         ]
         payload["samples"] = samples
+        return payload
+
+    def collect_inotify_diagnostic(
+        self,
+        *,
+        proc_root: str | Path = "/proc",
+        max_fdinfo_bytes: int = 65536,
+        include_fdinfo: bool = False,
+    ) -> dict[str, object]:
+        """Collect process inotify fd and watch diagnostics from procfs."""
+        errors: list[dict[str, str]] = []
+        pid = int(getattr(self._process, "pid", os.getpid()))
+        proc_dir = Path(proc_root) / str(pid)
+        fd_dir = proc_dir / "fd"
+        fdinfo_dir = proc_dir / "fdinfo"
+        inotify_fds: list[dict[str, object]] = []
+        inotify_watch_count = 0
+
+        try:
+            fd_paths = sorted(
+                fd_dir.iterdir(),
+                key=lambda path: (
+                    int(path.name) if path.name.isdigit() else path.name
+                ),
+            )
+        except Exception as exc:  # pylint: disable=broad-except
+            errors.append(
+                {
+                    "collector": "proc.fd",
+                    "message": str(exc),
+                },
+            )
+            fd_paths = []
+
+        for fd_path in fd_paths:
+            try:
+                target = os.readlink(fd_path)
+            except Exception as exc:  # pylint: disable=broad-except
+                errors.append(
+                    {
+                        "collector": "proc.fd.readlink",
+                        "message": f"{fd_path.name}: {exc}",
+                    },
+                )
+                continue
+            if target != "anon_inode:inotify":
+                continue
+
+            fdinfo_text = ""
+            try:
+                fdinfo_text = (fdinfo_dir / fd_path.name).read_text(
+                    encoding="utf-8",
+                    errors="replace",
+                )[: max(0, int(max_fdinfo_bytes))]
+            except Exception as exc:  # pylint: disable=broad-except
+                errors.append(
+                    {
+                        "collector": "proc.fdinfo",
+                        "message": f"{fd_path.name}: {exc}",
+                    },
+                )
+
+            watches = [
+                parsed
+                for parsed in (
+                    _parse_inotify_watch_line(line)
+                    for line in fdinfo_text.splitlines()
+                    if line.startswith("inotify ")
+                )
+                if parsed
+            ]
+            item: dict[str, object] = {
+                "fd": (
+                    int(fd_path.name)
+                    if fd_path.name.isdigit()
+                    else fd_path.name
+                ),
+                "target": target,
+                "watch_count": len(watches),
+                "watches": watches,
+            }
+            if include_fdinfo:
+                item["fdinfo"] = fdinfo_text
+            inotify_fds.append(item)
+            inotify_watch_count += len(watches)
+
+        payload = self._base_payload("inotify_diagnostic")
+        payload.update(
+            {
+                "pid": pid,
+                "inotify_fd_count": len(inotify_fds),
+                "inotify_watch_count": inotify_watch_count,
+                "inotify_fds": inotify_fds,
+                "errors": errors,
+            },
+        )
         return payload
 
     def _memory_referrer_owner_hint(

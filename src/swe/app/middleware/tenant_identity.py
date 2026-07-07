@@ -53,6 +53,7 @@ TENANT_EXEMPT_ROUTES = frozenset(
         "/api/version",
         "/api/runtime/memory-diagnostic",
         "/api/runtime/memory-type-holders",
+        "/api/runtime/inotify-diagnostic",
         # OpenAPI docs (if enabled)
         "/docs",
         "/redoc",
@@ -87,6 +88,7 @@ SOURCE_EXEMPT_ROUTES = frozenset(
         "/api/version",
         "/api/runtime/memory-diagnostic",
         "/api/runtime/memory-type-holders",
+        "/api/runtime/inotify-diagnostic",
         "/docs",
         "/redoc",
         "/openapi.json",

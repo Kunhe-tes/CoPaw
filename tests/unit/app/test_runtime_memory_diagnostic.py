@@ -471,6 +471,42 @@ def test_memory_type_holders_route_calls_runtime_manager() -> None:
     }
 
 
+def test_inotify_diagnostic_route_calls_runtime_manager() -> None:
+    class FakeManager(RuntimeDiagnosticManager):
+        def __init__(self) -> None:
+            pass
+
+        def collect_inotify_diagnostic(
+            self,
+            *,
+            max_fdinfo_bytes: int = 65536,
+            include_fdinfo: bool = False,
+        ) -> dict[str, object]:
+            return {
+                "max_fdinfo_bytes": max_fdinfo_bytes,
+                "include_fdinfo": include_fdinfo,
+                "ok": True,
+            }
+
+    app = FastAPI()
+    app.state.runtime_diagnostic_manager = FakeManager()
+    app.include_router(router, prefix="/api")
+    client = TestClient(app)
+
+    response = client.get(
+        "/api/runtime/inotify-diagnostic"
+        "?max_fdinfo_bytes=128"
+        "&include_fdinfo=true",
+    )
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "max_fdinfo_bytes": 128,
+        "include_fdinfo": True,
+        "ok": True,
+    }
+
+
 def test_memory_diagnostic_route_bypasses_auth_and_tenant_middleware(
     monkeypatch,
 ) -> None:
@@ -507,6 +543,38 @@ def test_memory_diagnostic_route_bypasses_auth_and_tenant_middleware(
         "limit": 3,
         "collect_gc": False,
     }
+
+
+def test_inotify_diagnostic_route_bypasses_auth_and_tenant_middleware(
+    monkeypatch,
+) -> None:
+    class FakeManager(RuntimeDiagnosticManager):
+        def __init__(self) -> None:
+            pass
+
+        def collect_inotify_diagnostic(
+            self,
+            *,
+            max_fdinfo_bytes: int = 65536,
+            include_fdinfo: bool = False,
+        ) -> dict[str, object]:
+            return {"ok": True}
+
+    monkeypatch.setattr("swe.app.auth.is_auth_enabled", lambda: True)
+    monkeypatch.setattr("swe.app.auth.has_registered_users", lambda: True)
+
+    app = FastAPI()
+    app.state.runtime_diagnostic_manager = FakeManager()
+    app.include_router(router, prefix="/api")
+    app.add_middleware(AuthMiddleware)
+    app.add_middleware(TenantWorkspaceMiddleware)
+    app.add_middleware(TenantIdentityMiddleware, default_tenant_id=None)
+    client = TestClient(app, raise_server_exceptions=False)
+
+    response = client.get("/api/runtime/inotify-diagnostic")
+
+    assert response.status_code == 200
+    assert response.json() == {"ok": True}
 
 
 def test_memory_type_holders_route_bypasses_auth_and_tenant_middleware(
