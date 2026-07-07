@@ -114,6 +114,34 @@ def test_collect_snapshot_summarizes_proc_and_runtime_api(
     assert snapshot["pid"] == 42
     assert snapshot["proc"]["inotify_fd_count"] == 1
     assert snapshot["proc"]["inotify_watch_count"] == 2
+    assert snapshot["proc"]["inotify_fds"] == [
+        {
+            "fd": 3,
+            "watch_count": 2,
+            "watch_samples": [
+                {
+                    "raw": (
+                        "inotify wd:1 ino:abc sdev:01 "
+                        "mask:00000800 ignored_mask:0"
+                    ),
+                    "wd": "1",
+                    "ino": "abc",
+                    "sdev": "01",
+                    "mask": "00000800",
+                },
+                {
+                    "raw": (
+                        "inotify wd:2 ino:def sdev:01 "
+                        "mask:00000800 ignored_mask:0"
+                    ),
+                    "wd": "2",
+                    "ino": "def",
+                    "sdev": "01",
+                    "mask": "00000800",
+                },
+            ],
+        },
+    ]
     assert snapshot["proc"]["thread_count"] == 2
     assert snapshot["proc"]["thread_name_counts"] == {
         "notify-rs": 1,
@@ -154,6 +182,40 @@ def test_summarize_watchfiles_stack_events_handles_missing_stack() -> None:
         "path_samples": ["/workspace"],
         "owner_samples": {},
     }
+
+
+def test_collect_proc_snapshot_bounds_watch_samples(tmp_path) -> None:
+    probe = _load_probe_module()
+    proc_root = tmp_path / "proc"
+    proc_dir = proc_root / "42"
+    fd_dir = proc_dir / "fd"
+    fdinfo_dir = proc_dir / "fdinfo"
+    task_dir = proc_dir / "task"
+    fd_dir.mkdir(parents=True)
+    fdinfo_dir.mkdir()
+    task_dir.mkdir()
+    (fd_dir / "3").symlink_to("anon_inode:inotify")
+    (fdinfo_dir / "3").write_text(
+        "\n".join(
+            f"inotify wd:{index} ino:{index:x} sdev:01 mask:00000800"
+            for index in range(10)
+        ),
+        encoding="utf-8",
+    )
+
+    snapshot = probe.collect_proc_snapshot(pid=42, proc_root=proc_root)
+
+    assert snapshot["inotify_watch_count"] == 10
+    assert snapshot["inotify_fds"][0]["watch_count"] == 10
+    assert [
+        item["wd"] for item in snapshot["inotify_fds"][0]["watch_samples"]
+    ] == [
+        "0",
+        "1",
+        "2",
+        "3",
+        "4",
+    ]
 
 
 def test_summarize_watchfiles_stack_events_bounds_path_samples() -> None:

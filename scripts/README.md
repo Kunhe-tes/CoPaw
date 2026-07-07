@@ -71,7 +71,10 @@ python scripts/inotify_matrix_probe.py \
   --runtime-url 'http://127.0.0.1:8080/api/runtime/inotify-diagnostic?include_fdinfo=true'
 ```
 
-The output includes `/proc/<pid>/fdinfo` inotify counts, native thread name
-counts, opt-in `watchfiles.watch`/`awatch` creation stacks, and a
+The output includes `/proc/<pid>/fdinfo` inotify counts, bounded fdinfo watch
+samples (`wd`, `ino`, `sdev`, `mask`, raw line), native thread name counts,
+opt-in `watchfiles.watch`/`awatch` creation stacks, and a
 `watchfiles_stack_summary` with function counts, likely owner counts, path
-samples, and representative owner stack frames.
+samples, and representative owner stack frames. Linux fdinfo does not include
+path names directly; use the inode/device samples together with the runtime
+stack summary and matrix deltas to attribute owners.

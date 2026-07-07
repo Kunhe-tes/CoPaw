@@ -22,10 +22,15 @@ _STACK_OWNER_MARKERS = (
 _MAX_SUMMARY_SAMPLES = 5
 
 
-def _parse_inotify_watch_count(fdinfo_text: str) -> int:
-    return sum(
-        1 for line in fdinfo_text.splitlines() if line.startswith("inotify ")
-    )
+def _parse_inotify_watch_line(line: str) -> dict[str, str]:
+    fields: dict[str, str] = {"raw": line}
+    for token in line.split():
+        if ":" not in token:
+            continue
+        key, value = token.split(":", 1)
+        if key in {"wd", "ino", "sdev", "mask"}:
+            fields[key] = value
+    return fields
 
 
 def _thread_name(status_text: str) -> str:
@@ -60,10 +65,20 @@ def collect_proc_snapshot(
             )
         except OSError:
             fdinfo_text = ""
+        watch_lines = [
+            line
+            for line in fdinfo_text.splitlines()
+            if line.startswith("inotify ")
+        ]
+        watch_samples = [
+            _parse_inotify_watch_line(line)
+            for line in watch_lines[:_MAX_SUMMARY_SAMPLES]
+        ]
         inotify_fds.append(
             {
                 "fd": int(fd_path.name),
-                "watch_count": _parse_inotify_watch_count(fdinfo_text),
+                "watch_count": len(watch_lines),
+                "watch_samples": watch_samples,
             },
         )
 
