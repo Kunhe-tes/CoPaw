@@ -311,6 +311,7 @@ export function SkillDetailDrawer(
   const [fileLoading, setFileLoading] = useState(false);
   const [previewError, setPreviewError] = useState<string | null>(null);
   const [versionHistoryOpen, setVersionHistoryOpen] = useState(false);
+  const [downloadingCurrentVersion, setDownloadingCurrentVersion] = useState(false);
   const normalizedCategoryName = categoryName?.trim();
 
   // 编辑中文名相关状态
@@ -321,6 +322,17 @@ export function SkillDetailDrawer(
   const [distributions, setDistributions] = useState<DistributionRecord[]>([]);
   const [selectedUserIds, setSelectedUserIds] = useState<string[]>([]);
   const [syncToUsers, setSyncToUsers] = useState(true);
+
+  const triggerBrowserDownload = useCallback((blob: Blob, filename: string) => {
+    const url = URL.createObjectURL(blob);
+    const anchor = document.createElement("a");
+    anchor.href = url;
+    anchor.download = filename;
+    document.body.appendChild(anchor);
+    anchor.click();
+    anchor.remove();
+    window.setTimeout(() => URL.revokeObjectURL(url), 0);
+  }, []);
 
   // 分发记录去重（同一用户多次分发只保留最新记录）
   const uniqueDistributions = useMemo(() => {
@@ -354,6 +366,29 @@ export function SkillDetailDrawer(
       records,
     }));
   }, [uniqueDistributions]);
+
+  const handleDownloadCurrentVersion = useCallback(async () => {
+    if (!skill || !sourceId) return;
+    setDownloadingCurrentVersion(true);
+    try {
+      const { blob, filename } = await marketApi.downloadSkill(
+        sourceId,
+        skill.item_id,
+      );
+      triggerBrowserDownload(
+        blob,
+        filename || `${skill.name}-${skill.version}.zip`,
+      );
+      message.success(
+        "已开始下载当前版本。如需下载历史版本，请打开“版本历史”后按版本单独下载。",
+      );
+    } catch (err) {
+      const errorMsg = err instanceof Error ? err.message : "下载失败";
+      message.error(errorMsg);
+    } finally {
+      setDownloadingCurrentVersion(false);
+    }
+  }, [skill, sourceId, triggerBrowserDownload]);
 
   // 编辑开始
   const handleEditStart = useCallback(() => {
@@ -658,6 +693,13 @@ export function SkillDetailDrawer(
 
           {/* 右侧：操作按钮 */}
           <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+            <Button
+              onClick={handleDownloadCurrentVersion}
+              loading={downloadingCurrentVersion}
+              style={SECONDARY_BUTTON_STYLE}
+            >
+              下载 ZIP
+            </Button>
             <Button
               onClick={() => setVersionHistoryOpen(true)}
               style={SECONDARY_BUTTON_STYLE}

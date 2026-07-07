@@ -81,6 +81,43 @@ export interface DistributeResponse {
   item_id: string;
 }
 
+export interface DownloadBinaryResponse {
+  blob: Blob;
+  filename: string | null;
+}
+
+function _extractFilenameFromDisposition(
+  disposition: string | null,
+): string | null {
+  if (!disposition) return null;
+  const utf8Match = disposition.match(/filename\*=UTF-8''([^;]+)/i);
+  if (utf8Match?.[1]) {
+    try {
+      return decodeURIComponent(utf8Match[1]);
+    } catch {
+      return utf8Match[1];
+    }
+  }
+  const plainMatch = disposition.match(/filename="?([^"]+)"?/i);
+  return plainMatch?.[1] ?? null;
+}
+
+async function _downloadBinary(
+  path: string,
+  options: RequestInit,
+): Promise<DownloadBinaryResponse> {
+  const response = await fetch(getApiUrl(path), options);
+  if (!response.ok) {
+    throw new Error(await response.text());
+  }
+  return {
+    blob: await response.blob(),
+    filename: _extractFilenameFromDisposition(
+      response.headers.get("content-disposition"),
+    ),
+  };
+}
+
 /**
  * Upload a skill zip file to workspace (market service)
  */
@@ -189,6 +226,32 @@ export const marketApi = {
     return request<MarketSkillDetail | null>(
       `/market/skills/${itemId}`,
       opts
+    );
+  },
+
+  downloadSkill: async (
+    sourceId: string,
+    itemId: string,
+  ): Promise<DownloadBinaryResponse> => {
+    const opts = mergeHeaders({ "X-Source-Id": sourceId });
+    return _downloadBinary(`/market/skills/${itemId}/download`, {
+      method: "GET",
+      headers: opts.headers,
+    });
+  },
+
+  downloadSkillVersion: async (
+    sourceId: string,
+    itemId: string,
+    versionId: string,
+  ): Promise<DownloadBinaryResponse> => {
+    const opts = mergeHeaders({ "X-Source-Id": sourceId });
+    return _downloadBinary(
+      `/market/skills/${itemId}/versions/${encodeURIComponent(versionId)}/download`,
+      {
+        method: "GET",
+        headers: opts.headers,
+      },
     );
   },
 
