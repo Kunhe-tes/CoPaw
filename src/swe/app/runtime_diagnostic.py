@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import asyncio
+import gc
 import json
 import logging
 import math
@@ -11,6 +12,7 @@ import os
 import random
 import time
 from collections.abc import Callable
+from importlib import import_module
 from typing import Any
 
 import anyio
@@ -40,6 +42,26 @@ def _percentile(values: list[float], percentile: float) -> float | None:
     ordered = sorted(values)
     rank = max(1, math.ceil(percentile * len(ordered)))
     return ordered[rank - 1]
+
+
+def _normalize_limit(limit: int) -> int:
+    return min(100, max(1, int(limit)))
+
+
+def _diagnostic_import(
+    module_name: str,
+    errors: list[dict[str, str]],
+):
+    try:
+        return import_module(module_name)
+    except Exception as exc:  # pylint: disable=broad-except
+        errors.append(
+            {
+                "collector": module_name,
+                "message": str(exc),
+            },
+        )
+        return None
 
 
 class RuntimeDiagnosticManager:
@@ -344,6 +366,163 @@ class RuntimeDiagnosticManager:
                     field,
                 )
         return metrics
+
+    def collect_memory_diagnostic(
+        self,
+        *,
+        limit: int = 20,
+        collect_gc: bool = True,
+    ) -> dict[str, object]:
+        """Collect on-demand memory diagnostics for the current process."""
+        normalized_limit = _normalize_limit(limit)
+        errors: list[dict[str, str]] = []
+        payload = self._base_payload("memory_diagnostic")
+        payload.update(
+            {
+                "limit": normalized_limit,
+                "gc_collected": None,
+                "gc_object_count": None,
+                "objgraph_available": False,
+                "objgraph_type_count": None,
+                "top_object_types": [],
+                "pympler_available": False,
+                "pympler_object_count": None,
+                "top_memory_types": [],
+                "errors": errors,
+            },
+        )
+        payload.update(self._process_metrics())
+
+        if collect_gc:
+            try:
+                payload["gc_collected"] = int(gc.collect())
+            except Exception as exc:  # pylint: disable=broad-except
+                errors.append(
+                    {
+                        "collector": "gc.collect",
+                        "message": str(exc),
+                    },
+                )
+        try:
+            payload["gc_object_count"] = len(gc.get_objects())
+        except Exception as exc:  # pylint: disable=broad-except
+            errors.append(
+                {
+                    "collector": "gc.get_objects",
+                    "message": str(exc),
+                },
+            )
+
+        payload.update(
+            self._collect_objgraph_diagnostic(
+                normalized_limit,
+                errors,
+            ),
+        )
+        payload.update(
+            self._collect_pympler_diagnostic(
+                normalized_limit,
+                errors,
+            ),
+        )
+        return payload
+
+    def _collect_objgraph_diagnostic(
+        self,
+        limit: int,
+        errors: list[dict[str, str]],
+    ) -> dict[str, object]:
+        objgraph = _diagnostic_import("objgraph", errors)
+        if objgraph is None:
+            return {
+                "objgraph_available": False,
+                "objgraph_type_count": None,
+                "top_object_types": [],
+            }
+
+        try:
+            type_stats = objgraph.typestats()
+            top_object_types = [
+                {
+                    "type": str(type_name),
+                    "count": int(count),
+                }
+                for type_name, count in sorted(
+                    type_stats.items(),
+                    key=lambda item: item[1],
+                    reverse=True,
+                )[:limit]
+            ]
+        except Exception as exc:  # pylint: disable=broad-except
+            errors.append(
+                {
+                    "collector": "objgraph.typestats",
+                    "message": str(exc),
+                },
+            )
+            return {
+                "objgraph_available": True,
+                "objgraph_type_count": None,
+                "top_object_types": [],
+            }
+        return {
+            "objgraph_available": True,
+            "objgraph_type_count": len(type_stats),
+            "top_object_types": top_object_types,
+        }
+
+    def _collect_pympler_diagnostic(
+        self,
+        limit: int,
+        errors: list[dict[str, str]],
+    ) -> dict[str, object]:
+        muppy = _diagnostic_import("pympler.muppy", errors)
+        summary = _diagnostic_import("pympler.summary", errors)
+        if muppy is None or summary is None:
+            return {
+                "pympler_available": False,
+                "pympler_object_count": None,
+                "top_memory_types": [],
+            }
+
+        objects = None
+        object_count = None
+        try:
+            objects = muppy.get_objects()
+            object_count = len(objects)
+            rows = summary.summarize(objects)
+            top_memory_types = [
+                {
+                    "type": str(row[0]),
+                    "count": int(row[1]),
+                    "size_bytes": int(row[2]),
+                }
+                for row in sorted(
+                    rows,
+                    key=lambda item: item[2],
+                    reverse=True,
+                )[:limit]
+            ]
+        except Exception as exc:  # pylint: disable=broad-except
+            errors.append(
+                {
+                    "collector": "pympler.summary",
+                    "message": str(exc),
+                },
+            )
+            return {
+                "pympler_available": True,
+                "pympler_object_count": None,
+                "top_memory_types": [],
+            }
+        finally:
+            del objects
+
+        return {
+            "pympler_available": True,
+            "pympler_object_count": object_count,
+            "top_memory_types": top_memory_types,
+        }
 
     def _storage_metrics(self) -> dict[str, object]:
         empty: dict[str, object] = {

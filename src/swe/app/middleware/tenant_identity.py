@@ -51,6 +51,7 @@ TENANT_EXEMPT_ROUTES = frozenset(
         "/alive",
         # Version endpoint
         "/api/version",
+        "/api/runtime/memory-diagnostic",
         # OpenAPI docs (if enabled)
         "/docs",
         "/redoc",
@@ -83,6 +84,7 @@ SOURCE_EXEMPT_ROUTES = frozenset(
         "/readyz",
         "/alive",
         "/api/version",
+        "/api/runtime/memory-diagnostic",
         "/docs",
         "/redoc",
         "/openapi.json",

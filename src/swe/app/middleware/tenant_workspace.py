@@ -385,6 +385,7 @@ class TenantWorkspaceMiddleware(BaseHTTPMiddleware):
                 "/readyz",
                 "/alive",
                 "/api/version",
+                "/api/runtime/memory-diagnostic",
                 "/docs",
                 "/redoc",
                 "/openapi.json",
