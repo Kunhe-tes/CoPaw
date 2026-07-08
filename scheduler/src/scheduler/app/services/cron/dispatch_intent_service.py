@@ -89,6 +89,8 @@ class CronDispatchIntentService:
         tenant_id: str,
         source_id: str = "",
         agent_id: str = "default",
+        provider_id: str = DEFAULT_PROVIDER_ID,
+        model_id: str = DEFAULT_MODEL_ID,
         scheduled_fire_at: datetime,
         callback_received_at: datetime,
         callback_metadata: dict[str, Any] | None = None,
@@ -98,14 +100,18 @@ class CronDispatchIntentService:
             """
             INSERT INTO swe_cron_dispatch_batches (
                 batch_id, parent_job_id, parent_external_job_id, tenant_id,
-                source_id, agent_id, scheduled_fire_at, callback_received_at,
-                status, callback_metadata
+                source_id, provider_id, model_id, agent_id,
+                scheduled_fire_at, callback_received_at, status,
+                callback_metadata
             ) VALUES (
                 %s, %s, %s, %s,
                 %s, %s, %s, %s,
-                'received', %s
+                %s, %s, 'received',
+                %s
             )
             ON DUPLICATE KEY UPDATE
+                provider_id = VALUES(provider_id),
+                model_id = VALUES(model_id),
                 callback_received_at = VALUES(callback_received_at),
                 callback_metadata = VALUES(callback_metadata),
                 updated_at = CURRENT_TIMESTAMP
@@ -116,6 +122,8 @@ class CronDispatchIntentService:
                 parent_external_job_id or "",
                 tenant_id,
                 source_id or "",
+                _normalized_provider_id(provider_id),
+                _normalized_model_id(model_id),
                 agent_id or "default",
                 _to_beijing_naive(scheduled_fire_at),
                 _to_beijing_naive(callback_received_at),

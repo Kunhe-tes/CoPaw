@@ -28,6 +28,8 @@ from swe.app.source_system_config.models import (
     SourceSystemConfig,
 )
 from swe.config.context import encode_scope_id
+from swe.providers import provider_manager as provider_manager_module
+from swe.providers.models import ModelSlotConfig
 
 
 class CapturingSchedulerAdapter(RealSchedulerAdapter):
@@ -613,6 +615,26 @@ async def test_enable_batch_dispatch_registers_separate_scheduler_job(
     monkeypatch.setenv("SWE_CRON_DISPATCH_INTENTS_ENABLED", "1")
     monkeypatch.setenv("SWE_SCHEDULER_API_URL", "http://scheduler.local/api")
     monkeypatch.setenv("SWE_SERVER_DOMAIN", "http://swe.local")
+    monkeypatch.setattr(
+        provider_manager_module.ProviderManager,
+        "_resolve_effective_provider_tenant_id",
+        staticmethod(lambda tenant_id: tenant_id or "default"),
+    )
+    monkeypatch.setattr(
+        provider_manager_module.ProviderManager,
+        "_get_tenant_root_path",
+        staticmethod(lambda tenant_id: f"/unused/{tenant_id}/providers"),
+    )
+    monkeypatch.setattr(
+        provider_manager_module.ProviderManager,
+        "_read_active_model_from_root",
+        staticmethod(
+            lambda _root: ModelSlotConfig(
+                provider_id="dashscope",
+                model="qwen-max",
+            ),
+        ),
+    )
     adapter = CapturingSchedulerAdapter()
     parent = _sample_job(external_id="42")
     repo = _JobsRepo([parent])
@@ -657,6 +679,8 @@ async def test_enable_batch_dispatch_registers_separate_scheduler_job(
     assert job_param["job_id"] == "job-1"
     assert job_param["batch_dispatch_offset_minutes"] == 240
     assert job_param["batch_dispatch_parent_cron"] == "0 9 * * *"
+    assert job_param["provider_id"] == "dashscope"
+    assert job_param["model_id"] == "qwen-max"
 
     run_states = [
         payload
@@ -667,6 +691,83 @@ async def test_enable_batch_dispatch_registers_separate_scheduler_job(
     assert any(
         payload["id"] == 1001 and payload["runFlag"] == 1 for payload in run_states
     )
+
+
+@pytest.mark.asyncio
+async def test_update_enabled_batch_dispatch_parent_refreshes_batch_scheduler_job(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("SWE_CRON_DISPATCH_INTENTS_ENABLED", "1")
+    monkeypatch.setenv("SWE_SCHEDULER_API_URL", "http://scheduler.local/api")
+    monkeypatch.setenv("SWE_SERVER_DOMAIN", "http://swe.local")
+    adapter = CapturingSchedulerAdapter()
+    parent = _sample_job(external_id="42").model_copy(
+        update={
+            "meta": {
+                "external_job_id": "42",
+                "batch_dispatch_external_job_id": "1001",
+                "broadcast_dispatch_intents_enabled": True,
+                "batch_dispatch_offset_window_hours": 4,
+                "batch_dispatch_offset_minutes": 240,
+            },
+        },
+    )
+    updated_parent = parent.model_copy(
+        update={
+            "schedule": ScheduleSpec(
+                type="cron",
+                cron="30 10 * * *",
+                timezone="Asia/Shanghai",
+            ),
+        },
+    )
+    repo = _JobsRepo([parent])
+    manager = CronManager(
+        repo=repo,
+        runner=SimpleNamespace(workspace_dir=None, _workspace=None),
+        channel_manager=object(),
+        agent_id="default",
+        tenant_id=encode_scope_id("tenant-a", "source-a"),
+        scheduler_adapter=adapter,
+    )
+
+    await manager.create_or_replace_job(updated_parent)
+
+    normal_update = next(
+        payload
+        for path, payload in adapter.requests
+        if path == "/job-admin/v2/update-job" and payload.get("id") == 42
+    )
+    assert _decode_job_param(normal_update["jobParam"])["job_id"] == "job-1"
+
+    batch_update = next(
+        payload
+        for path, payload in adapter.requests
+        if path == "/job-admin/v2/update-job" and payload.get("id") == 1001
+    )
+    assert (
+        batch_update["jobAddress"]
+        == "http://scheduler.local/api/scheduler/cron/callback"
+    )
+    assert batch_update["jobCron"] == "0 30 6 * * ?"
+    batch_job_param = _decode_job_param(batch_update["jobParam"])
+    assert batch_job_param["job_id"] == "job-1"
+    assert batch_job_param["batch_dispatch_offset_minutes"] == 240
+    assert batch_job_param["batch_dispatch_parent_cron"] == "30 10 * * *"
+
+    run_states = [
+        payload
+        for path, payload in adapter.requests
+        if path == "/job-admin/v2/update-job-run-states"
+    ]
+    assert any(
+        payload["id"] == 42 and payload["runFlag"] == 0
+        for payload in run_states
+    )
+    assert any(
+        payload["id"] == 1001 and payload["runFlag"] == 1 for payload in run_states
+    )
+    assert repo.jobs[0].meta["batch_dispatch_cron"] == "30 6 * * *"
 
 
 @pytest.mark.asyncio

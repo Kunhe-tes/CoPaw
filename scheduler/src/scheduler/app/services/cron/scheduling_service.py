@@ -141,6 +141,8 @@ class SweCronCallbackClient:
         parent_scheduled_fire_at: str = "",
         provider_id: str = DEFAULT_PROVIDER_ID,
         model_id: str = DEFAULT_MODEL_ID,
+        scope_id: str = "",
+        from_id: str = "",
         passthrough_headers: Mapping[str, Any] | None = None,
     ) -> None:
         if not self._base_url:
@@ -160,6 +162,8 @@ class SweCronCallbackClient:
             "dispatch_attempt": dispatch_attempt,
             "provider_id": provider_id or DEFAULT_PROVIDER_ID,
             "model_id": model_id or DEFAULT_MODEL_ID,
+            "scopeId": scope_id or _default_scope_id(tenant_id, source_id),
+            "fromId": from_id or tenant_id,
         }
         if parent_scheduled_fire_at:
             payload["parent_scheduled_fire_at"] = parent_scheduled_fire_at
@@ -310,6 +314,12 @@ class CronSchedulingService:
             raise RuntimeError(f"batch callback received child job: {job_id}")
 
         parent["agent_id"] = agent_id or str(parent_meta.get("agent_id") or "default")
+        callback_provider_id = str(callback_params.get("provider_id") or "").strip()
+        callback_model_id = str(callback_params.get("model_id") or "").strip()
+        if callback_provider_id and callback_model_id:
+            parent["provider_id"] = callback_provider_id
+            parent["model_id"] = callback_model_id
+        parent_provider_id, parent_model_id = _extract_model_identity(parent)
         children = await _fetch_batch_child_jobs(parent)
         logger.info(
             "scheduler_parent_jobs_fetched parent_job_id=%s child_count=%s",
@@ -329,6 +339,8 @@ class CronSchedulingService:
             tenant_id=str(parent.get("tenant_id") or tenant_id or ""),
             source_id=str(parent.get("source_id") or source_id or ""),
             agent_id=str(parent.get("agent_id") or "default"),
+            provider_id=parent_provider_id,
+            model_id=parent_model_id,
             scheduled_fire_at=scheduled_fire_at,
             callback_received_at=now,
             callback_metadata=callback_metadata,
@@ -338,6 +350,11 @@ class CronSchedulingService:
             children,
             scheduled_fire_at,
             passthrough_headers=passthrough_headers,
+        )
+        dispatch_scopes = _build_worker_scopes_from_jobs(jobs)
+        dispatch_source_ids = _source_ids_from_jobs(
+            jobs,
+            fallback=str(parent.get("source_id") or source_id or ""),
         )
         intent_ids = await self._dispatch_store.enqueue_batch_execution_intents(
             batch_id=batch_id,
@@ -352,7 +369,8 @@ class CronSchedulingService:
         )
         dispatched = await self.dispatch_ready_once(
             now_utc=now,
-            source_ids=[str(parent.get("source_id") or source_id or "")],
+            source_ids=dispatch_source_ids,
+            scopes=dispatch_scopes,
         )
         return {
             "batch_id": batch_id,
@@ -367,17 +385,21 @@ class CronSchedulingService:
         *,
         now_utc: datetime | None = None,
         source_ids: list[str] | None = None,
+        scopes: list[WorkerScope | Mapping[str, Any]] | None = None,
     ) -> int:
         """Dispatch ready work without adjusting worker capacity."""
         now = _ensure_aware_utc(now_utc or datetime.now(timezone.utc))
         total_dispatched = 0
-        scopes = await self._list_dispatch_scopes(now, source_ids)
-        for scope in scopes:
+        dispatch_scopes = _normalize_worker_scopes(scopes)
+        if not dispatch_scopes:
+            dispatch_scopes = await self._list_dispatch_scopes(now, source_ids)
+        for scope in dispatch_scopes:
+            scope_source_ids = [scope.source_id] if scope.source_id else source_ids
             strategy = await self._resolve_worker_strategy(scope, now)
             await self._dispatch_store.recover_stale_dispatched_intents(
                 now_utc=now,
                 dispatched_stale_seconds=strategy.stale_execution_seconds,
-                source_ids=source_ids,
+                source_ids=scope_source_ids,
                 provider_id=scope.provider_id,
                 model_id=scope.model_id,
             )
@@ -402,7 +424,7 @@ class CronSchedulingService:
                 now_utc=now,
                 limit=available_slots,
                 dispatched_stale_seconds=strategy.stale_execution_seconds,
-                source_ids=source_ids,
+                source_ids=scope_source_ids,
                 provider_id=scope.provider_id,
                 model_id=scope.model_id,
             )
@@ -417,13 +439,16 @@ class CronSchedulingService:
         now_utc: datetime | None = None,
         source_ids: list[str] | None = None,
     ) -> dict[str, Any]:
-        """Run one maintenance tick without polling pending intents."""
-        del source_ids
+        """Run one maintenance tick for due retries and worker capacity."""
         now = _ensure_aware_utc(now_utc or datetime.now(timezone.utc))
+        dispatched = await self.dispatch_ready_once(
+            now_utc=now,
+            source_ids=source_ids,
+        )
         capacity_adjusted = await self.adjust_worker_capacity_if_due(now_utc=now)
         return {
             "queued_parent_intents": 0,
-            "dispatched_intents": 0,
+            "dispatched_intents": dispatched,
             "capacity_adjusted": capacity_adjusted,
         }
 
@@ -509,9 +534,25 @@ class CronSchedulingService:
             or payload.get("model_id")
             or DEFAULT_MODEL_ID,
         )
+        tenant_id = str(_row_get(row, "tenant_id") or "")
+        source_id = str(_row_get(row, "source_id") or "")
+        scope_id = str(
+            payload.get("scopeId")
+            or payload.get("scope_id")
+            or _row_get(row, "scope_id")
+            or "",
+        )
+        from_id = str(
+            payload.get("fromId")
+            or payload.get("from_id")
+            or _row_get(row, "from_id")
+            or "",
+        )
         callback_kwargs = {
-            "tenant_id": str(_row_get(row, "tenant_id") or ""),
-            "source_id": str(_row_get(row, "source_id") or ""),
+            "tenant_id": tenant_id,
+            "source_id": source_id,
+            "scope_id": scope_id or _default_scope_id(tenant_id, source_id),
+            "from_id": from_id or tenant_id,
             "agent_id": str(_row_get(row, "agent_id") or "default"),
             "job_id": str(_row_get(row, "job_id") or ""),
             "dispatch_intent_id": intent_id,
@@ -536,6 +577,8 @@ class CronSchedulingService:
                 "dispatch_attempt": dispatch_attempt,
                 "provider_id": provider_id,
                 "model_id": model_id,
+                "scope_id": callback_kwargs["scope_id"],
+                "from_id": callback_kwargs["from_id"],
             },
         )
 
@@ -932,8 +975,11 @@ def _build_execution_intent_jobs(
         },
     ]
     for child in children:
-        provider_id = str(child.get("provider_id") or DEFAULT_PROVIDER_ID)
-        model_id = str(child.get("model_id") or DEFAULT_MODEL_ID)
+        provider_id, model_id = _resolve_child_model_identity(
+            child,
+            parent_provider_id=parent_provider_id,
+            parent_model_id=parent_model_id,
+        )
         payload = dict(child.get("payload") or {})
         payload.update(
             {
@@ -961,6 +1007,77 @@ def _build_execution_intent_jobs(
             },
         )
     return jobs
+
+
+def _build_worker_scopes_from_jobs(
+    jobs: list[Mapping[str, Any]],
+) -> list[WorkerScope]:
+    scopes: list[WorkerScope] = []
+    seen: set[tuple[str, str, str]] = set()
+    for job in jobs:
+        scope = WorkerScope(
+            source_id=str(job.get("source_id") or "").strip(),
+            provider_id=str(job.get("provider_id") or DEFAULT_PROVIDER_ID),
+            model_id=str(job.get("model_id") or DEFAULT_MODEL_ID),
+        )
+        key = (scope.source_id, scope.provider_id, scope.model_id)
+        if key in seen:
+            continue
+        seen.add(key)
+        scopes.append(scope)
+    return scopes
+
+
+def _normalize_worker_scopes(
+    scopes: list[WorkerScope | Mapping[str, Any]] | None,
+) -> list[WorkerScope]:
+    normalized: list[WorkerScope] = []
+    seen: set[tuple[str, str, str]] = set()
+    for raw_scope in scopes or []:
+        scope = WorkerScope.model_validate(raw_scope)
+        key = (scope.source_id, scope.provider_id, scope.model_id)
+        if key in seen:
+            continue
+        seen.add(key)
+        normalized.append(scope)
+    return normalized
+
+
+def _source_ids_from_jobs(
+    jobs: list[Mapping[str, Any]],
+    *,
+    fallback: str = "",
+) -> list[str]:
+    source_ids: list[str] = []
+    for job in jobs:
+        source_id = str(job.get("source_id") or "").strip()
+        if source_id and source_id not in source_ids:
+            source_ids.append(source_id)
+    fallback_source_id = str(fallback or "").strip()
+    if fallback_source_id and fallback_source_id not in source_ids:
+        source_ids.append(fallback_source_id)
+    return source_ids
+
+
+def _resolve_child_model_identity(
+    child: Mapping[str, Any],
+    *,
+    parent_provider_id: str,
+    parent_model_id: str,
+) -> tuple[str, str]:
+    provider_id = str(child.get("provider_id") or "").strip()
+    model_id = str(
+        child.get("model_id") or child.get("model") or "",
+    ).strip()
+    if provider_id and model_id and (
+        provider_id,
+        model_id,
+    ) != (DEFAULT_PROVIDER_ID, DEFAULT_MODEL_ID):
+        return provider_id, model_id
+    return (
+        parent_provider_id or DEFAULT_PROVIDER_ID,
+        parent_model_id or DEFAULT_MODEL_ID,
+    )
 
 
 def _build_dispatch_batch_id(
@@ -1034,6 +1151,18 @@ def _meta_dispatch_intents_enabled(meta: Mapping[str, Any]) -> bool:
 
 def _extract_model_identity(row: Mapping[str, Any]) -> tuple[str, str]:
     meta = _parse_meta(row.get("meta"))
+    flat_provider_id = str(
+        row.get("provider_id") or meta.get("provider_id") or "",
+    ).strip()
+    flat_model_id = str(
+        row.get("model_id")
+        or row.get("model")
+        or meta.get("model_id")
+        or meta.get("model")
+        or "",
+    ).strip()
+    if flat_provider_id and flat_model_id:
+        return flat_provider_id, flat_model_id
     candidates = [
         row.get("model_slot"),
         meta.get("model_slot"),
@@ -1052,10 +1181,18 @@ def _extract_model_identity(row: Mapping[str, Any]) -> tuple[str, str]:
         if not isinstance(candidate, Mapping):
             continue
         provider_id = str(candidate.get("provider_id") or "").strip()
-        model_id = str(candidate.get("model") or candidate.get("model_id") or "").strip()
+        model_id = str(
+            candidate.get("model") or candidate.get("model_id") or "",
+        ).strip()
         if provider_id and model_id:
             return provider_id, model_id
     return DEFAULT_PROVIDER_ID, DEFAULT_MODEL_ID
+
+
+def _default_scope_id(tenant_id: str, source_id: str) -> str:
+    if tenant_id and source_id:
+        return f"{tenant_id}-{source_id}"
+    return tenant_id or source_id
 
 
 def _parse_datetime(value: Any) -> datetime | None:

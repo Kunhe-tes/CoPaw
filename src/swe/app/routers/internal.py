@@ -197,6 +197,8 @@ def _build_dispatch_callback_meta(
         "dispatch_attempt": normalized_attempt,
         "tenant_id": str(params.get("tenant_id") or ""),
         "source_id": str(params.get("source_id") or ""),
+        "scope_id": str(params.get("scope_id") or params.get("scopeId") or ""),
+        "from_id": str(params.get("from_id") or params.get("fromId") or ""),
         "agent_id": str(params.get("agent_id") or _STATIC_AGENT_ID),
         "job_id": str(params.get("job_id") or ""),
         "parent_scheduled_fire_at": str(

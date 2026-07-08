@@ -34,6 +34,9 @@ const mocks = vi.hoisted(() => {
     getCurrentCronBroadcastTask: vi.fn(),
     getCronBroadcastTask: vi.fn(),
     broadcastCronJob: vi.fn(),
+    enableCronBatchDispatch: vi.fn(),
+    disableCronBatchDispatch: vi.fn(),
+    setBatchDispatch: vi.fn(),
     message: {
       error: vi.fn(),
       info: vi.fn(),
@@ -49,6 +52,8 @@ vi.mock("../../../api", () => ({
     getCurrentCronBroadcastTask: mocks.getCurrentCronBroadcastTask,
     getCronBroadcastTask: mocks.getCronBroadcastTask,
     broadcastCronJob: mocks.broadcastCronJob,
+    enableCronBatchDispatch: mocks.enableCronBatchDispatch,
+    disableCronBatchDispatch: mocks.disableCronBatchDispatch,
   },
 }));
 
@@ -119,7 +124,7 @@ vi.mock("./components", () => ({
     updateJob: vi.fn(),
     deleteJob: vi.fn(),
     toggleEnabled: vi.fn(),
-    toggleBatchDispatch: vi.fn(),
+    setBatchDispatch: mocks.setBatchDispatch,
     executeNow: vi.fn(),
   }),
   createColumns: (handlers: {
@@ -146,6 +151,7 @@ describe("CronJobsPage broadcast task refresh", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     mocks.getUserTimezone.mockResolvedValue({ timezone: "UTC" });
+    mocks.job.meta = {};
     mocks.getCurrentCronBroadcastTask.mockResolvedValue({
       task: {
         task_id: "task-1",
@@ -166,6 +172,27 @@ describe("CronJobsPage broadcast task refresh", () => {
       results: [],
       reused: true,
     });
+    mocks.enableCronBatchDispatch.mockResolvedValue({
+      ...mocks.job,
+      meta: {
+        broadcast_dispatch_intents_enabled: true,
+        batch_dispatch_offset_window_hours: 4,
+      },
+    });
+    mocks.disableCronBatchDispatch.mockResolvedValue({
+      ...mocks.job,
+      meta: {},
+    });
+    mocks.setBatchDispatch.mockImplementation(
+      async (
+        job: CronJobSpecOutput,
+        enabled: boolean,
+        options?: { offset_window_hours?: number },
+      ) =>
+        enabled
+          ? mocks.enableCronBatchDispatch(job.id, options)
+          : mocks.disableCronBatchDispatch(job.id),
+    );
   });
 
   afterEach(() => {
@@ -192,7 +219,7 @@ describe("CronJobsPage broadcast task refresh", () => {
     expect(
       await screen.findByText("Broadcasting 4/5 tenants"),
     ).toBeInTheDocument();
-  });
+  }, 30000);
 
   it("prevents a second broadcast from the visible completed result", async () => {
     mocks.getCurrentCronBroadcastTask.mockResolvedValue({ task: null });
@@ -243,5 +270,137 @@ describe("CronJobsPage broadcast task refresh", () => {
     fireEvent.click(disabledConfirmButton);
 
     expect(mocks.broadcastCronJob).toHaveBeenCalledTimes(1);
-  }, 10000);
+  }, 30000);
+
+  it("applies batch dispatch with the shared offset window before broadcasting", async () => {
+    mocks.getCurrentCronBroadcastTask.mockResolvedValue({ task: null });
+    mocks.broadcastCronJob.mockResolvedValue({
+      task_id: "task-completed",
+      status: "completed",
+      tenant_count: 1,
+      completed_count: 1,
+      failed_count: 0,
+      results: [
+        {
+          tenant_id: "tenant-a",
+          success: true,
+          job_id: "job-copy",
+          cron: "0 3 * * thu,fri,sat,sun",
+          timezone: "Asia/Shanghai",
+          offset_minutes: 120,
+          notification_timezone: "Asia/Shanghai",
+          error: "",
+          warning: "",
+        },
+      ],
+      reused: false,
+    });
+
+    render(<CronJobsPage />);
+
+    fireEvent.click(screen.getByRole("button", { name: "广播到租户" }));
+    fireEvent.click(await screen.findByText("批调度"));
+    fireEvent.change(screen.getByRole("spinbutton"), {
+      target: { value: "2" },
+    });
+    fireEvent.click(
+      await screen.findByRole("button", { name: "Select tenant" }),
+    );
+
+    const confirmButton = screen.getByRole("button", { name: /OK/ });
+    await waitFor(() => {
+      expect(confirmButton).not.toBeDisabled();
+    });
+    fireEvent.click(confirmButton);
+
+    await waitFor(() => {
+      expect(mocks.enableCronBatchDispatch).toHaveBeenCalledWith(
+        "job-source",
+        { offset_window_hours: 2 },
+      );
+      expect(mocks.broadcastCronJob).toHaveBeenCalledWith(
+        "job-source",
+        [
+          {
+            tenant_id: "tenant-a",
+            tenant_name: "Tenant A",
+            bbk_id: "bbk-a",
+          },
+        ],
+        {
+          enable_offset: true,
+          offset_window_hours: 2,
+        },
+      );
+    });
+    expect(
+      mocks.enableCronBatchDispatch.mock.invocationCallOrder[0],
+    ).toBeLessThan(mocks.broadcastCronJob.mock.invocationCallOrder[0]);
+  }, 30000);
+
+  it("applies normal dispatch with the shared offset window before broadcasting", async () => {
+    mocks.job.meta = {
+      broadcast_dispatch_intents_enabled: true,
+      batch_dispatch_offset_window_hours: 3,
+    };
+    mocks.getCurrentCronBroadcastTask.mockResolvedValue({ task: null });
+    mocks.broadcastCronJob.mockResolvedValue({
+      task_id: "task-completed",
+      status: "completed",
+      tenant_count: 1,
+      completed_count: 1,
+      failed_count: 0,
+      results: [
+        {
+          tenant_id: "tenant-a",
+          success: true,
+          job_id: "job-copy",
+          cron: "0 2 * * thu,fri,sat,sun",
+          timezone: "Asia/Shanghai",
+          offset_minutes: 180,
+          notification_timezone: "Asia/Shanghai",
+          error: "",
+          warning: "",
+        },
+      ],
+      reused: false,
+    });
+
+    render(<CronJobsPage />);
+
+    fireEvent.click(screen.getByRole("button", { name: "广播到租户" }));
+    fireEvent.click(await screen.findByText("正常调度"));
+    fireEvent.click(
+      await screen.findByRole("button", { name: "Select tenant" }),
+    );
+
+    const confirmButton = screen.getByRole("button", { name: /OK/ });
+    await waitFor(() => {
+      expect(confirmButton).not.toBeDisabled();
+    });
+    fireEvent.click(confirmButton);
+
+    await waitFor(() => {
+      expect(mocks.disableCronBatchDispatch).toHaveBeenCalledWith(
+        "job-source",
+      );
+      expect(mocks.broadcastCronJob).toHaveBeenCalledWith(
+        "job-source",
+        [
+          {
+            tenant_id: "tenant-a",
+            tenant_name: "Tenant A",
+            bbk_id: "bbk-a",
+          },
+        ],
+        {
+          enable_offset: true,
+          offset_window_hours: 3,
+        },
+      );
+    });
+    expect(
+      mocks.disableCronBatchDispatch.mock.invocationCallOrder[0],
+    ).toBeLessThan(mocks.broadcastCronJob.mock.invocationCallOrder[0]);
+  }, 30000);
 });

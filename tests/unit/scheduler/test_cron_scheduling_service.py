@@ -188,6 +188,8 @@ async def test_swe_callback_client_forwards_passthrough_headers(
         source_id="source-a",
         agent_id="default",
         job_id="child-1",
+        scope_id="tenant-a-source-a",
+        from_id="tenant-a",
         dispatch_intent_id=7,
         dispatch_batch_id="batch-1",
         dispatch_attempt=2,
@@ -203,6 +205,8 @@ async def test_swe_callback_client_forwards_passthrough_headers(
         "X-B3-Spanid": "32befd146889a61a",
         "X-Internal-Token": "Bearer scheduler-token",
     }
+    assert requests[0]["json"]["scopeId"] == "tenant-a-source-a"
+    assert requests[0]["json"]["fromId"] == "tenant-a"
 
 
 def test_scheduler_app_lifespan_wires_scheduler_loop() -> None:
@@ -223,6 +227,24 @@ def test_scheduler_runtime_config_ignores_non_scheduler_stale_env(
     monkeypatch.setenv("OTHER_CRON_DISPATCHED_STALE_SECONDS", "9")
 
     assert module.configured_dispatched_stale_seconds() == 7800
+
+
+def test_extract_model_identity_accepts_flat_provider_model_fields() -> None:
+    assert service_module._extract_model_identity(
+        {
+            "provider_id": "dashscope",
+            "model_id": "qwen-max",
+            "meta": {},
+        },
+    ) == ("dashscope", "qwen-max")
+    assert service_module._extract_model_identity(
+        {
+            "meta": {
+                "provider_id": "openai",
+                "model_id": "gpt-5",
+            },
+        },
+    ) == ("openai", "gpt-5")
 
 
 @pytest.mark.asyncio
@@ -257,6 +279,8 @@ async def test_child_dispatch_calls_swe_callback_and_marks_dispatched() -> None:
         {
             "tenant_id": "tenant-b",
             "source_id": "source-a",
+            "scope_id": "tenant-b-source-a",
+            "from_id": "tenant-b",
             "agent_id": "default",
             "job_id": "child-1",
             "dispatch_attempt": 1,
@@ -382,6 +406,8 @@ async def test_parent_intent_dispatches_to_swe_callback_like_child() -> None:
         {
             "tenant_id": "tenant-a",
             "source_id": "source-a",
+            "scope_id": "tenant-a-source-a",
+            "from_id": "tenant-a",
             "agent_id": "default",
             "job_id": "parent-1",
             "dispatch_attempt": 1,
@@ -693,12 +719,12 @@ async def test_scheduler_tick_does_not_scan_due_parent_jobs(
     assert result["queued_parent_intents"] == 0
     assert result["dispatched_intents"] == 0
     assert store.parent_intents == []
-    assert store.claims == []
+    assert store.claims
     assert callback.requests == []
 
 
 @pytest.mark.asyncio
-async def test_scheduler_tick_does_not_dispatch_pending_intents() -> None:
+async def test_scheduler_tick_dispatches_due_pending_retry_intents() -> None:
     store = _DispatchStore(
         [
             {
@@ -724,9 +750,30 @@ async def test_scheduler_tick_does_not_dispatch_pending_intents() -> None:
         now_utc=datetime(2026, 7, 1, 1, 0, tzinfo=timezone.utc),
     )
 
-    assert result["dispatched_intents"] == 0
-    assert store.claims == []
-    assert callback.requests == []
+    assert result["dispatched_intents"] == 1
+    assert store.claims[0]["limit"] == 1
+    assert callback.requests[0]["job_id"] == "child-1"
+
+
+def test_dispatch_batch_id_is_stable_per_scheduled_fire() -> None:
+    parent = {"id": "parent-1"}
+    first_fire = datetime(2026, 7, 1, 1, 0, tzinfo=timezone.utc)
+    duplicate_first_fire = datetime(2026, 7, 1, 1, 0, tzinfo=timezone.utc)
+    next_day_fire = datetime(2026, 7, 2, 1, 0, tzinfo=timezone.utc)
+
+    first_batch_id = service_module._build_dispatch_batch_id(
+        parent,
+        first_fire,
+    )
+
+    assert (
+        service_module._build_dispatch_batch_id(parent, duplicate_first_fire)
+        == first_batch_id
+    )
+    assert (
+        service_module._build_dispatch_batch_id(parent, next_day_fire)
+        != first_batch_id
+    )
 
 
 @pytest.mark.asyncio
@@ -784,19 +831,152 @@ async def test_parent_callback_creates_batch_and_execution_intents(
             "agent_id": "default",
             "job_id": "parent-1",
             "scheduled_fire_at": fire_at.isoformat(),
+            "provider_id": "dashscope",
+            "model_id": "qwen-max",
         },
         now_utc=fire_at,
     )
 
     assert result["enqueued_intents"] == 2
     assert store.batch_upserts[0]["parent_job_id"] == "parent-1"
+    assert store.batch_upserts[0]["provider_id"] == "dashscope"
+    assert store.batch_upserts[0]["model_id"] == "qwen-max"
     jobs = store.execution_batches[0]["jobs"]
     assert {job["job_id"] for job in jobs} == {"parent-1", "child-1"}
+    jobs_by_id = {job["job_id"]: job for job in jobs}
+    assert jobs_by_id["parent-1"]["provider_id"] == "dashscope"
+    assert jobs_by_id["parent-1"]["model_id"] == "qwen-max"
+    assert jobs_by_id["child-1"]["provider_id"] == "openai"
+    assert jobs_by_id["child-1"]["model_id"] == "gpt-5"
     assert all(
         job["payload"]["parent_scheduled_fire_at"] == fire_at.isoformat()
         for job in jobs
     )
     assert store.claims, "parent callback should immediately try to dispatch"
+
+
+@pytest.mark.asyncio
+async def test_parent_callback_dispatches_using_current_batch_model_scope(
+    monkeypatch,
+) -> None:
+    from scheduler.app.services.cron import scheduling_service as module
+
+    store = _DispatchStore([])
+    store.latest_capacity = None
+    service = CronSchedulingService(
+        dispatch_store=store,
+        callback_client=_CallbackClient(),
+        worker_id="scheduler-1",
+        effective_workers=2,
+    )
+    fire_at = datetime(2026, 7, 1, 1, 0, tzinfo=timezone.utc)
+
+    async def _fake_fetch_parent_job_for_callback(**_kwargs):
+        return {
+            "id": "parent-1",
+            "tenant_id": "tenant-a",
+            "source_id": "source-a",
+            "agent_id": "default",
+            "meta": '{"broadcast_dispatch_intents_enabled": true}',
+        }
+
+    async def _fake_fetch_batch_child_jobs(_parent):
+        return []
+
+    monkeypatch.setattr(
+        module,
+        "_fetch_parent_job_for_callback",
+        _fake_fetch_parent_job_for_callback,
+    )
+    monkeypatch.setattr(
+        module,
+        "_fetch_batch_child_jobs",
+        _fake_fetch_batch_child_jobs,
+    )
+
+    await service.handle_parent_callback(
+        params={
+            "tenant_id": "tenant-a",
+            "source_id": "source-a",
+            "agent_id": "default",
+            "job_id": "parent-1",
+            "scheduled_fire_at": fire_at.isoformat(),
+            "provider_id": "dashscope",
+            "model_id": "qwen-max",
+        },
+        now_utc=fire_at,
+    )
+
+    assert store.capacity[0]["source_id"] == "source-a"
+    assert store.capacity[0]["provider_id"] == "dashscope"
+    assert store.capacity[0]["model_id"] == "qwen-max"
+    assert store.claims[0]["provider_id"] == "dashscope"
+    assert store.claims[0]["model_id"] == "qwen-max"
+
+
+@pytest.mark.asyncio
+async def test_parent_callback_child_model_identity_falls_back_to_parent(
+    monkeypatch,
+) -> None:
+    from scheduler.app.services.cron import scheduling_service as module
+
+    store = _DispatchStore([])
+    service = CronSchedulingService(
+        dispatch_store=store,
+        callback_client=_CallbackClient(),
+        worker_id="scheduler-1",
+        effective_workers=2,
+    )
+    fire_at = datetime(2026, 7, 1, 1, 0, tzinfo=timezone.utc)
+
+    async def _fake_fetch_parent_job_for_callback(**_kwargs):
+        return {
+            "id": "parent-1",
+            "tenant_id": "tenant-a",
+            "source_id": "source-a",
+            "agent_id": "default",
+            "meta": '{"broadcast_dispatch_intents_enabled": true}',
+        }
+
+    async def _fake_fetch_batch_child_jobs(_parent):
+        return [
+            {
+                "tenant_id": "tenant-b",
+                "source_id": "source-a",
+                "agent_id": "default",
+                "job_id": "child-1",
+            },
+        ]
+
+    monkeypatch.setattr(
+        module,
+        "_fetch_parent_job_for_callback",
+        _fake_fetch_parent_job_for_callback,
+    )
+    monkeypatch.setattr(
+        module,
+        "_fetch_batch_child_jobs",
+        _fake_fetch_batch_child_jobs,
+    )
+
+    await service.handle_parent_callback(
+        params={
+            "tenant_id": "tenant-a",
+            "source_id": "source-a",
+            "agent_id": "default",
+            "job_id": "parent-1",
+            "scheduled_fire_at": fire_at.isoformat(),
+            "provider_id": "dashscope",
+            "model_id": "qwen-max",
+        },
+        now_utc=fire_at,
+    )
+
+    jobs_by_id = {
+        job["job_id"]: job for job in store.execution_batches[0]["jobs"]
+    }
+    assert jobs_by_id["child-1"]["provider_id"] == "dashscope"
+    assert jobs_by_id["child-1"]["model_id"] == "qwen-max"
 
 
 @pytest.mark.asyncio

@@ -140,13 +140,8 @@ export function buildCronJobSubmitPayload(
     ...(values.meta || {}),
     notification_delay_minutes: notificationDelayMinutes,
   };
-  if (meta.broadcast_dispatch_intents_enabled !== true) {
-    delete meta.broadcast_dispatch_intents_enabled;
-  }
+  delete meta.broadcast_dispatch_intents_enabled;
   delete meta.dispatch_intents_enabled;
-  if (meta.broadcast_source_job_id) {
-    delete meta.broadcast_dispatch_intents_enabled;
-  }
   let processedValues: Record<string, any> = {
     ...rawValues,
     schedule: {

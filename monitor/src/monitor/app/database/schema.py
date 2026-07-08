@@ -351,6 +351,8 @@ CREATE TABLE IF NOT EXISTS swe_cron_dispatch_batches (
     parent_external_job_id VARCHAR(64) DEFAULT '' COMMENT 'external scheduler job id',
     tenant_id VARCHAR(64) NOT NULL COMMENT 'parent tenant id',
     source_id VARCHAR(64) DEFAULT '' COMMENT 'source id',
+    provider_id VARCHAR(128) NOT NULL DEFAULT 'default' COMMENT 'provider id',
+    model_id VARCHAR(128) NOT NULL DEFAULT 'default' COMMENT 'model id',
     agent_id VARCHAR(64) NOT NULL DEFAULT 'default' COMMENT 'agent id',
     scheduled_fire_at DATETIME NOT NULL COMMENT 'parent scheduled fire time',
     callback_received_at DATETIME NOT NULL COMMENT 'scheduler callback receive time',
@@ -528,6 +530,21 @@ ALTER_CRON_DISPATCH_INTENTS_INDEXES = [
         dispatch_order,
         id
     )
+    """,
+]
+
+ALTER_CRON_DISPATCH_BATCHES_MODEL_COLUMNS = [
+    """
+    ALTER TABLE swe_cron_dispatch_batches
+    ADD COLUMN provider_id VARCHAR(128) NOT NULL DEFAULT 'default'
+    COMMENT 'provider id'
+    AFTER source_id
+    """,
+    """
+    ALTER TABLE swe_cron_dispatch_batches
+    ADD COLUMN model_id VARCHAR(128) NOT NULL DEFAULT 'default'
+    COMMENT 'model id'
+    AFTER provider_id
     """,
 ]
 
@@ -710,6 +727,15 @@ async def init_database_tables() -> None:
 
         await db.execute(CREATE_CRON_DISPATCH_BATCHES_TABLE)
         logger.info("Created cron_dispatch_batches table (or already exists)")
+
+        for statement in ALTER_CRON_DISPATCH_BATCHES_MODEL_COLUMNS:
+            try:
+                await db.execute(statement)
+            except Exception as exc:  # pylint: disable=broad-except
+                message = str(exc).lower()
+                if "duplicate" not in message and "exists" not in message:
+                    raise
+        logger.info("Ensured cron dispatch batch model columns")
 
         await db.execute(CREATE_CRON_DISPATCH_INTENTS_TABLE)
         logger.info("Created cron_dispatch_intents table (or already exists)")

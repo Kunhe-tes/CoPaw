@@ -8,6 +8,7 @@ import {
   Switch,
   Table,
 } from "@agentscope-ai/design";
+import { Segmented } from "antd";
 import type {
   CronBroadcastTaskResponse,
   CronBroadcastTarget,
@@ -41,9 +42,22 @@ import {
 import styles from "./index.module.less";
 
 type CronJob = CronJobSpecOutput;
+type BroadcastDispatchMode = "normal" | "batch";
 const DEFAULT_BROADCAST_OFFSET_WINDOW_HOURS = 4;
 const DEFAULT_TABLE_PAGE_SIZE = 10;
 const TABLE_PAGE_SIZE_OPTIONS = ["10", "20", "50", "100"];
+
+function isBatchDispatchEnabled(job: CronJob): boolean {
+  return job.meta?.broadcast_dispatch_intents_enabled === true;
+}
+
+function getBatchDispatchOffsetWindowHours(job: CronJob): number {
+  const parsed = Number(job.meta?.batch_dispatch_offset_window_hours);
+  if (!Number.isFinite(parsed)) {
+    return DEFAULT_BROADCAST_OFFSET_WINDOW_HOURS;
+  }
+  return Math.min(24, Math.max(1, Math.round(parsed)));
+}
 
 function CronJobsPage() {
   const { t } = useTranslation();
@@ -55,7 +69,7 @@ function CronJobsPage() {
     updateJob,
     deleteJob,
     toggleEnabled,
-    toggleBatchDispatch,
+    setBatchDispatch,
     executeNow,
   } = useCronJobs();
   const [drawerOpen, setDrawerOpen] = useState(false);
@@ -76,6 +90,8 @@ function CronJobsPage() {
   const [broadcastOffsetWindowHours, setBroadcastOffsetWindowHours] = useState(
     DEFAULT_BROADCAST_OFFSET_WINDOW_HOURS,
   );
+  const [broadcastDispatchMode, setBroadcastDispatchMode] =
+    useState<BroadcastDispatchMode>("normal");
   const [childrenManagementJob, setChildrenManagementJob] =
     useState<CronJob | null>(null);
   const [broadcasting, setBroadcasting] = useState(false);
@@ -145,10 +161,6 @@ function CronJobsPage() {
     await toggleEnabled(job);
   };
 
-  const handleToggleBatchDispatch = async (job: CronJob) => {
-    await toggleBatchDispatch(job);
-  };
-
   const handleExecuteNow = async (job: CronJob) => {
     Modal.confirm({
       title: t("cronJobs.executeNowTitle"),
@@ -174,7 +186,8 @@ function CronJobsPage() {
     setBroadcastTask(null);
     setBroadcastRefreshing(false);
     setBroadcastOffsetEnabled(true);
-    setBroadcastOffsetWindowHours(DEFAULT_BROADCAST_OFFSET_WINDOW_HOURS);
+    setBroadcastOffsetWindowHours(getBatchDispatchOffsetWindowHours(job));
+    setBroadcastDispatchMode(isBatchDispatchEnabled(job) ? "batch" : "normal");
     setBroadcasting(true);
     try {
       const currentTask = await api.getCurrentCronBroadcastTask(job.id);
@@ -208,6 +221,7 @@ function CronJobsPage() {
     setBroadcastRefreshing(false);
     setBroadcastOffsetEnabled(true);
     setBroadcastOffsetWindowHours(DEFAULT_BROADCAST_OFFSET_WINDOW_HOURS);
+    setBroadcastDispatchMode("normal");
   };
 
   const handleBroadcastProgressRefresh = async () => {
@@ -272,7 +286,21 @@ function CronJobsPage() {
     setBroadcastTask(null);
     setBroadcastResults([]);
     try {
-      const res = await api.broadcastCronJob(broadcastingJob.id, targets, {
+      let dispatchJob = broadcastingJob;
+      const shouldUseBatchDispatch = broadcastDispatchMode === "batch";
+      if (shouldUseBatchDispatch || isBatchDispatchEnabled(dispatchJob)) {
+        const syncedJob = await setBatchDispatch(
+          dispatchJob,
+          shouldUseBatchDispatch,
+          { offset_window_hours: broadcastOffsetWindowHours },
+        );
+        if (!syncedJob) {
+          return;
+        }
+        dispatchJob = syncedJob;
+        setBroadcastingJob(syncedJob);
+      }
+      const res = await api.broadcastCronJob(dispatchJob.id, targets, {
         enable_offset: broadcastOffsetEnabled,
         offset_window_hours: broadcastOffsetWindowHours,
       });
@@ -336,7 +364,6 @@ function CronJobsPage() {
 
   const columns = createColumns({
     onToggleEnabled: handleToggleEnabled,
-    onToggleBatchDispatch: handleToggleBatchDispatch,
     onExecuteNow: handleExecuteNow,
     onBroadcast: handleBroadcast,
     onManageChildren: handleManageChildren,
@@ -418,13 +445,27 @@ function CronJobsPage() {
             <div>
               任务：{broadcastingJob.name}；时区：
               {broadcastingJob.schedule?.timezone || "UTC"}；
+              {broadcastDispatchMode === "batch" ? "批调度" : "正常调度"}；
               {broadcastOffsetEnabled
-                ? `优先在原执行时间前 ${broadcastOffsetWindowHours} 小时内均匀错峰，无法安全错峰的 cron 会按原表达式分发。`
-                : "按原执行时间分发，不做错峰。"}
+                ? `散列窗口 ${broadcastOffsetWindowHours} 小时`
+                : "不做散列"}
             </div>
             <div className={styles.broadcastOffsetControls}>
+              <div className={styles.broadcastDispatchMode}>
+                <span>调度方式</span>
+                <Segmented
+                  value={broadcastDispatchMode}
+                  options={[
+                    { label: "正常调度", value: "normal" },
+                    { label: "批调度", value: "batch" },
+                  ]}
+                  onChange={(value) =>
+                    setBroadcastDispatchMode(value as BroadcastDispatchMode)
+                  }
+                />
+              </div>
               <div className={styles.broadcastOffsetSwitch}>
-                <span>启用错峰</span>
+                <span>启用散列</span>
                 <Switch
                   checked={broadcastOffsetEnabled}
                   onChange={(checked) =>
@@ -433,7 +474,7 @@ function CronJobsPage() {
                 />
               </div>
               <div className={styles.broadcastOffsetWindow}>
-                <span>错峰窗口</span>
+                <span>散列窗口</span>
                 <InputNumber
                   min={1}
                   max={24}

@@ -846,6 +846,10 @@ class CronManager:  # pylint: disable=too-many-public-methods
         spec = await self._ensure_task_binding(spec)
         existing = await self._repo.get_job(spec.id)
         spec = await self._sync_job_to_external_scheduler(spec, existing)
+        spec = await self._sync_batch_dispatch_parent_after_normal_sync(
+            spec,
+            existing=existing,
+        )
         await self._persist_job_definition(spec)
 
     async def _persist_job_definition(self, spec: CronJobSpec) -> CronJobSpec:
@@ -919,6 +923,48 @@ class CronManager:  # pylint: disable=too-many-public-methods
             ),
         )
 
+    def _resolve_batch_dispatch_execution_model_params(
+        self,
+        spec: CronJobSpec,
+    ) -> dict[str, str]:
+        model_slot = spec.model_slot
+        provider_id = str(getattr(model_slot, "provider_id", "") or "").strip()
+        model_id = str(getattr(model_slot, "model", "") or "").strip()
+        if provider_id and model_id:
+            return {"provider_id": provider_id, "model_id": model_id}
+
+        runtime_tenant_id = (
+            self._get_job_runtime_tenant_id(spec)
+            or self._tenant_id
+            or spec.tenant_id
+            or "default"
+        )
+        try:
+            from ...providers.provider_manager import ProviderManager
+
+            provider_tenant_id = (
+                ProviderManager._resolve_effective_provider_tenant_id(
+                    runtime_tenant_id,
+                )
+            )
+            active_model = ProviderManager._read_active_model_from_root(
+                ProviderManager._get_tenant_root_path(provider_tenant_id),
+            )
+        except Exception:  # pylint: disable=broad-except
+            logger.debug(
+                "Failed to resolve batch dispatch execution model: job=%s tenant=%s",
+                spec.id,
+                runtime_tenant_id,
+                exc_info=True,
+            )
+            return {}
+
+        provider_id = str(getattr(active_model, "provider_id", "") or "").strip()
+        model_id = str(getattr(active_model, "model", "") or "").strip()
+        if provider_id and model_id:
+            return {"provider_id": provider_id, "model_id": model_id}
+        return {}
+
     async def _sync_batch_dispatch_scheduler_job(
         self,
         spec: CronJobSpec,
@@ -953,6 +999,9 @@ class CronManager:  # pylint: disable=too-many-public-methods
                 spec.schedule.timezone if spec.schedule else ""
             ),
         }
+        extra_job_params.update(
+            self._resolve_batch_dispatch_execution_model_params(spec),
+        )
         callback_url = self._build_scheduler_callback_url()
         job_name = f"{BATCH_DISPATCH_JOB_NAME_PREFIX}{spec.name}"
         if batch_ext_id:
@@ -1004,6 +1053,24 @@ class CronManager:  # pylint: disable=too-many-public-methods
         else:
             meta.pop(BATCH_DISPATCH_CRON_WARNING_META_KEY, None)
         return spec.model_copy(update={"meta": meta})
+
+    async def _sync_batch_dispatch_parent_after_normal_sync(
+        self,
+        spec: CronJobSpec,
+        *,
+        existing: Optional[CronJobSpec] = None,
+    ) -> CronJobSpec:
+        if not is_batch_dispatch_parent(spec):
+            return spec
+        normal_ext_id = self._get_existing_external_job_id(spec, existing)
+        if normal_ext_id:
+            await self._scheduler_adapter.pause_job(normal_ext_id)
+        return await self._sync_batch_dispatch_scheduler_job(
+            spec,
+            offset_window_hours=self._get_batch_dispatch_offset_window_hours(
+                spec,
+            ),
+        )
 
     async def enable_batch_dispatch_for_parent(
         self,
@@ -1410,8 +1477,14 @@ class CronManager:  # pylint: disable=too-many-public-methods
                     job,
                     existing=job,
                 )
+                synced = await self._sync_batch_dispatch_parent_after_normal_sync(
+                    synced,
+                    existing=job,
+                )
                 ext_id = (synced.meta or {}).get("external_job_id", "")
-                if ext_id:
+                if is_batch_dispatch_parent(synced):
+                    await self._persist_job_definition(synced)
+                elif ext_id:
                     await self._persist_external_job_binding(job.id, ext_id)
                     st = self._states.get(job.id, CronJobState())
                     st.external_job_id = ext_id

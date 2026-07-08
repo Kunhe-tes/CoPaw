@@ -46,7 +46,6 @@ function buildCronJob(
 function buildHandlers(overrides = {}) {
   return {
     onToggleEnabled: vi.fn(),
-    onToggleBatchDispatch: vi.fn(),
     onExecuteNow: vi.fn(),
     onBroadcast: vi.fn(),
     onManageChildren: vi.fn(),
@@ -119,61 +118,45 @@ describe("CronJobs columns", () => {
       },
     });
 
-    const actionNode = column?.render?.(
-      undefined,
-      job,
-      0,
-    ) as ReactElement<{ children: ReactElement[] }>;
+    const actionNode = column?.render?.(undefined, job, 0) as ReactElement<{
+      children: ReactElement[];
+    }>;
     const children = actionNode.props.children;
     const dropdown = children[2] as ReactElement<{
-      menu: { items: Array<{ disabled?: boolean }> };
+      menu: { items: Array<{ disabled?: boolean; key?: string }> };
     }>;
 
     expect(dropdown.props.menu.items[0].disabled).toBe(true);
     expect(dropdown.props.menu.items[1].disabled).toBe(true);
-    expect(dropdown.props.menu.items[2].disabled).toBe(true);
+    expect(
+      dropdown.props.menu.items.some((item) => item.key === "batch_dispatch"),
+    ).toBe(false);
   });
 
-  it("shows batch dispatch toggle action for parent tasks", () => {
-    const onToggleBatchDispatch = vi.fn();
-    const columns = createColumns(buildHandlers({ onToggleBatchDispatch }));
+  it("does not show batch dispatch toggle action for parent tasks", () => {
+    const columns = createColumns(buildHandlers());
     const column = columns.find((item) => item.key === "action");
     const job = buildCronJob();
 
-    const actionNode = column?.render?.(
-      undefined,
-      job,
-      0,
-    ) as ReactElement<{ children: ReactElement[] }>;
+    const actionNode = column?.render?.(undefined, job, 0) as ReactElement<{
+      children: ReactElement[];
+    }>;
     const children = actionNode.props.children;
     const dropdown = children[2] as ReactElement<{
-      menu: { items: Array<{ label?: string; onClick?: () => void }> };
+      menu: { items: Array<{ key?: string; label?: string }> };
     }>;
 
-    expect(dropdown.props.menu.items[2].label).toBe("启动批调度");
-    dropdown.props.menu.items[2].onClick?.();
-    expect(onToggleBatchDispatch).toHaveBeenCalledWith(job);
-  });
-
-  it("shows disable batch dispatch action for enabled parent tasks", () => {
-    const columns = createColumns(buildHandlers());
-    const column = columns.find((item) => item.key === "action");
-    const job = buildCronJob({
-      meta: {
-        broadcast_dispatch_intents_enabled: true,
-      },
-    });
-
-    const actionNode = column?.render?.(
-      undefined,
-      job,
-      0,
-    ) as ReactElement<{ children: ReactElement[] }>;
-    const children = actionNode.props.children;
-    const dropdown = children[2] as ReactElement<{
-      menu: { items: Array<{ label?: string }> };
-    }>;
-
-    expect(dropdown.props.menu.items[2].label).toBe("关闭批调度");
+    expect(dropdown.props.menu.items.map((item) => item.key)).toEqual([
+      "broadcast",
+      "broadcast_children",
+      "edit",
+      "delete",
+    ]);
+    expect(
+      dropdown.props.menu.items.map((item) => item.label),
+    ).not.toContain("启动批调度");
+    expect(
+      dropdown.props.menu.items.map((item) => item.label),
+    ).not.toContain("关闭批调度");
   });
 });

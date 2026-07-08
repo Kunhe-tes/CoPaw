@@ -113,7 +113,7 @@ describe("CronJobs helpers", () => {
     expect(result.request?.input).toEqual([{ role: "user", content: [] }]);
   });
 
-  it("persists the broadcast dispatch intent switch only when enabled", () => {
+  it("removes hidden broadcast dispatch intent flag on submit", () => {
     const result = buildCronJobSubmitPayload({
       ...buildCronJob({
         meta: {
@@ -125,9 +125,11 @@ describe("CronJobs helpers", () => {
 
     expect(result.meta).toMatchObject({
       existing_meta: "kept",
-      broadcast_dispatch_intents_enabled: true,
       notification_delay_minutes: 0,
     });
+    expect(result.meta).not.toHaveProperty(
+      "broadcast_dispatch_intents_enabled",
+    );
   });
 
   it("removes disabled broadcast dispatch intent flag on submit", () => {

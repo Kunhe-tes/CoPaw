@@ -491,8 +491,6 @@
     "id": "任务ID",
     "name": "任务名称",
     "enabled": "启用状态",
-    "broadcastDispatchIntents": "批调度",
-    "broadcastDispatchIntentsTooltip": "开启后，该父任务由批调度队列分发子任务；子任务保留任务定义，但不再独立触发外部调度。",
     "scheduleType": "调度类型",
     "scheduleCron": "执行时间（Cron）",
     "scheduleCronLabel": "执行时间（Cron）",

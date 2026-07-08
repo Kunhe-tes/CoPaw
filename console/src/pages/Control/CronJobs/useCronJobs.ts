@@ -1,7 +1,10 @@
 import { useState, useEffect } from "react";
 import { useAppMessage } from "../../../hooks/useAppMessage";
 import api from "../../../api";
-import type { CronJobSpecOutput } from "../../../api/types";
+import type {
+  CronBatchDispatchOptions,
+  CronJobSpecOutput,
+} from "../../../api/types";
 import { useAgentStore } from "../../../stores/agentStore";
 
 type CronJob = CronJobSpecOutput;
@@ -115,21 +118,28 @@ export function useCronJobs() {
     }
   };
 
-  const toggleBatchDispatch = async (job: CronJob) => {
+  const setBatchDispatch = async (
+    job: CronJob,
+    enabled: boolean,
+    options: CronBatchDispatchOptions = {},
+  ): Promise<CronJob | null> => {
     const batchEnabled = job.meta?.broadcast_dispatch_intents_enabled === true;
+    if (batchEnabled === enabled && !enabled) {
+      return job;
+    }
     try {
-      const returned = batchEnabled
-        ? await api.disableCronBatchDispatch(job.id)
-        : await api.enableCronBatchDispatch(job.id);
+      const returned = enabled
+        ? await api.enableCronBatchDispatch(job.id, options)
+        : await api.disableCronBatchDispatch(job.id);
       setJobs((prev) =>
         prev.map((j) => (j.id === job.id ? (returned as CronJob) : j)),
       );
-      message.success(batchEnabled ? "批调度已关闭" : "批调度已启动");
-      return true;
+      message.success(enabled ? "批调度已启动" : "批调度已关闭");
+      return returned as CronJob;
     } catch (error) {
       console.error("Failed to toggle cron batch dispatch", error);
       message.error("批调度操作失败");
-      return false;
+      return null;
     }
   };
 
@@ -177,7 +187,7 @@ export function useCronJobs() {
     updateJob,
     deleteJob,
     toggleEnabled,
-    toggleBatchDispatch,
+    setBatchDispatch,
     executeNow,
   };
 }

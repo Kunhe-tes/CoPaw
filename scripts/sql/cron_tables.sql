@@ -110,6 +110,8 @@ CREATE TABLE IF NOT EXISTS `swe_cron_dispatch_batches` (
     `parent_external_job_id` VARCHAR(64) DEFAULT '' COMMENT 'external scheduler job id',
     `tenant_id` VARCHAR(64) NOT NULL COMMENT 'parent tenant id',
     `source_id` VARCHAR(64) DEFAULT '' COMMENT 'source id',
+    `provider_id` VARCHAR(128) NOT NULL DEFAULT 'default' COMMENT 'provider id',
+    `model_id` VARCHAR(128) NOT NULL DEFAULT 'default' COMMENT 'model id',
     `agent_id` VARCHAR(64) NOT NULL DEFAULT 'default' COMMENT 'agent id',
     `scheduled_fire_at` DATETIME NOT NULL COMMENT 'parent scheduled fire time',
     `callback_received_at` DATETIME NOT NULL COMMENT 'scheduler callback receive time',

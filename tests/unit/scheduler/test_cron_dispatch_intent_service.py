@@ -231,6 +231,42 @@ def test_batch_enqueue_preserves_terminal_intents() -> None:
 
 
 @pytest.mark.asyncio
+async def test_upsert_dispatch_batch_writes_provider_model(monkeypatch) -> None:
+    captured: list[tuple[str, tuple]] = []
+
+    class _Db:
+        async def execute(self, sql, params):
+            captured.append((str(sql), tuple(params)))
+
+    monkeypatch.setattr(
+        service_module,
+        "get_db_connection",
+        lambda: _Db(),
+    )
+
+    await CronDispatchIntentService().upsert_dispatch_batch(
+        batch_id="batch-1",
+        parent_job_id="parent-1",
+        parent_external_job_id="external-1",
+        tenant_id="tenant-a",
+        source_id="source-a",
+        agent_id="default",
+        provider_id="dashscope",
+        model_id="qwen-max",
+        scheduled_fire_at=datetime(2026, 7, 1, 10, 0),
+        callback_received_at=datetime(2026, 7, 1, 10, 1),
+        callback_metadata={"job_id": "parent-1"},
+    )
+
+    sql, params = captured[0]
+    assert "provider_id" in sql
+    assert "model_id" in sql
+    assert "provider_id = VALUES(provider_id)" in sql
+    assert "model_id = VALUES(model_id)" in sql
+    assert params[5:7] == ("dashscope", "qwen-max")
+
+
+@pytest.mark.asyncio
 async def test_enqueue_child_intents_uses_json_safe_default_payload(
     monkeypatch,
 ) -> None:
