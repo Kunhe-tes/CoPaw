@@ -9,6 +9,7 @@ import json
 import os
 import sys
 from collections import Counter
+from collections.abc import Iterator
 from pathlib import Path
 from typing import Any, Callable
 from urllib import request
@@ -21,6 +22,7 @@ _STACK_OWNER_MARKERS = (
     ("watchfiles", "watchfiles"),
 )
 _MAX_SUMMARY_SAMPLES = 5
+_MAX_RESOLVED_PATHS_PER_WATCH = 5
 
 
 def _parse_inotify_watch_line(line: str) -> dict[str, str]:
@@ -34,6 +36,88 @@ def _parse_inotify_watch_line(line: str) -> dict[str, str]:
     return fields
 
 
+def _parse_hex_number(value: str) -> int | None:
+    try:
+        return int(value.strip().lower().removeprefix("0x"), 16)
+    except ValueError:
+        return None
+
+
+def _watch_identity(watch: dict[str, str]) -> tuple[int, int, int] | None:
+    ino = watch.get("ino")
+    sdev = watch.get("sdev")
+    if not ino or not sdev:
+        return None
+    inode = _parse_hex_number(ino)
+    device = _parse_hex_number(sdev)
+    if inode is None or device is None:
+        return None
+    return (device >> 20, device & ((1 << 20) - 1), inode)
+
+
+def _iter_watch_root_paths(root: Path) -> Iterator[Path]:
+    yield root
+    if root.is_dir():
+        try:
+            yield from root.rglob("*")
+        except OSError:
+            return
+
+
+def _build_watch_path_index(
+    watch_roots: list[str | Path] | None,
+    target_identities: set[tuple[int, int, int]],
+) -> tuple[dict[tuple[int, int, int], list[str]], dict[str, Any]]:
+    index: dict[tuple[int, int, int], list[str]] = {}
+    diagnostics: dict[str, Any] = {
+        "enabled": bool(watch_roots),
+        "roots": [str(root) for root in watch_roots or []],
+        "missing_roots": [],
+        "scanned_path_count": 0,
+        "scan_errors": [],
+    }
+    if not watch_roots or not target_identities:
+        return index, diagnostics
+
+    for raw_root in watch_roots:
+        root = Path(raw_root).expanduser()
+        try:
+            resolved_root = root.resolve()
+        except OSError:
+            resolved_root = root.absolute()
+        if not resolved_root.exists():
+            diagnostics["missing_roots"].append(str(root))
+            continue
+
+        for path in _iter_watch_root_paths(resolved_root):
+            try:
+                stat = path.stat()
+            except OSError as exc:
+                if len(diagnostics["scan_errors"]) < _MAX_SUMMARY_SAMPLES:
+                    diagnostics["scan_errors"].append(
+                        {
+                            "path": str(path),
+                            "error": str(exc),
+                        },
+                    )
+                continue
+            diagnostics["scanned_path_count"] += 1
+            key = (
+                os.major(stat.st_dev),
+                os.minor(stat.st_dev),
+                stat.st_ino,
+            )
+            if key not in target_identities:
+                continue
+            paths = index.setdefault(key, [])
+            if len(paths) >= _MAX_RESOLVED_PATHS_PER_WATCH:
+                continue
+            path_text = str(path)
+            if path_text not in paths:
+                paths.append(path_text)
+    return index, diagnostics
+
+
 def _thread_name(status_text: str) -> str:
     for line in status_text.splitlines():
         if line.startswith("Name:"):
@@ -45,6 +129,7 @@ def collect_proc_snapshot(
     *,
     pid: int,
     proc_root: str | Path = "/proc",
+    watch_roots: list[str | Path] | None = None,
 ) -> dict[str, Any]:
     proc_dir = Path(proc_root) / str(pid)
     fd_dir = proc_dir / "fd"
@@ -52,6 +137,9 @@ def collect_proc_snapshot(
     task_dir = proc_dir / "task"
 
     inotify_fds: list[dict[str, Any]] = []
+    watch_samples_by_fd: dict[int, list[dict[str, str]]] = {}
+    watch_identities: set[tuple[int, int, int]] = set()
+    candidate_watch_path_samples: list[str] = []
     for fd_path in sorted(fd_dir.iterdir(), key=lambda path: int(path.name)):
         try:
             target = os.readlink(fd_path)
@@ -75,6 +163,11 @@ def collect_proc_snapshot(
             _parse_inotify_watch_line(line)
             for line in watch_lines[:_MAX_SUMMARY_SAMPLES]
         ]
+        watch_samples_by_fd[int(fd_path.name)] = watch_samples
+        for watch_sample in watch_samples:
+            identity = _watch_identity(watch_sample)
+            if identity is not None:
+                watch_identities.add(identity)
         inotify_fds.append(
             {
                 "fd": int(fd_path.name),
@@ -82,6 +175,26 @@ def collect_proc_snapshot(
                 "watch_samples": watch_samples,
             },
         )
+
+    watch_path_index, watch_resolution_diagnostics = _build_watch_path_index(
+        watch_roots,
+        watch_identities,
+    )
+    for inotify_fd in inotify_fds:
+        watch_samples = watch_samples_by_fd.get(int(inotify_fd["fd"]), [])
+        for watch_sample in watch_samples:
+            identity = _watch_identity(watch_sample)
+            if identity is None:
+                continue
+            candidate_paths = watch_path_index.get(identity)
+            if not candidate_paths:
+                continue
+            watch_sample["candidate_paths"] = candidate_paths
+            for candidate_path in candidate_paths:
+                if len(candidate_watch_path_samples) >= _MAX_SUMMARY_SAMPLES:
+                    break
+                if candidate_path not in candidate_watch_path_samples:
+                    candidate_watch_path_samples.append(candidate_path)
 
     thread_names: Counter[str] = Counter()
     for status_path in sorted(task_dir.glob("*/status")):
@@ -98,6 +211,8 @@ def collect_proc_snapshot(
             item["watch_count"] for item in inotify_fds
         ),
         "inotify_fds": inotify_fds,
+        "candidate_watch_path_samples": candidate_watch_path_samples,
+        "watch_resolution_diagnostics": watch_resolution_diagnostics,
         "thread_count": sum(thread_names.values()),
         "thread_name_counts": dict(sorted(thread_names.items())),
     }
@@ -212,6 +327,7 @@ def collect_snapshot(
     label: str,
     pid: int,
     proc_root: str | Path = "/proc",
+    watch_roots: list[str | Path] | None = None,
     runtime_url: str | None = None,
     token: str | None = None,
     timeout_seconds: float = 5.0,
@@ -219,7 +335,11 @@ def collect_snapshot(
     snapshot: dict[str, Any] = {
         "label": label,
         "pid": pid,
-        "proc": collect_proc_snapshot(pid=pid, proc_root=proc_root),
+        "proc": collect_proc_snapshot(
+            pid=pid,
+            proc_root=proc_root,
+            watch_roots=watch_roots,
+        ),
     }
     if runtime_url:
         snapshot["runtime"] = collect_runtime_snapshot(
@@ -305,6 +425,7 @@ def collect_snapshots(
     labels: list[str],
     pid: int,
     proc_root: str | Path = "/proc",
+    watch_roots: list[str | Path] | None = None,
     runtime_url: str | None = None,
     token: str | None = None,
     timeout_seconds: float = 5.0,
@@ -323,6 +444,7 @@ def collect_snapshots(
                 label=label,
                 pid=pid,
                 proc_root=proc_root,
+                watch_roots=watch_roots,
                 runtime_url=runtime_url,
                 token=token,
                 timeout_seconds=timeout_seconds,
@@ -403,6 +525,16 @@ def _parse_args() -> argparse.Namespace:
             "matrix action before sampling."
         ),
     )
+    parser.add_argument(
+        "--resolve-watch-root",
+        action="append",
+        dest="watch_roots",
+        type=Path,
+        help=(
+            "Resolve fdinfo inotify sdev/ino samples to paths under this "
+            "root. Repeat for multiple workspace roots."
+        ),
+    )
     args = parser.parse_args()
     if args.from_json and args.label:
         parser.error("--from-json cannot be combined with --label")
@@ -410,6 +542,8 @@ def _parse_args() -> argparse.Namespace:
         parser.error("one of --label or --from-json is required")
     if args.from_json and args.prompt_between_labels:
         parser.error("--prompt-between-labels requires --label")
+    if args.from_json and args.watch_roots:
+        parser.error("--resolve-watch-root requires --label")
     return args
 
 
@@ -423,6 +557,7 @@ def main() -> int:
                 labels=args.label or [],
                 pid=args.pid,
                 proc_root=args.proc_root,
+                watch_roots=args.watch_roots,
                 runtime_url=args.runtime_url,
                 token=args.token,
                 timeout_seconds=args.timeout_seconds,

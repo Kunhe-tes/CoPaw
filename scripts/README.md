@@ -79,6 +79,7 @@ perform the corresponding external step:
 python scripts/inotify_matrix_probe.py \
   --pid 1 \
   --runtime-url 'http://127.0.0.1:8080/api/runtime/inotify-diagnostic?include_fdinfo=true' \
+  --resolve-watch-root /path/to/workspaces \
   --label empty \
   --label workspaces \
   --label mcp-clients \
@@ -102,8 +103,12 @@ samples (`wd`, `ino`, `sdev`, `mask`, raw line), native thread name counts,
 opt-in `watchfiles.watch`/`awatch` creation stacks, and a
 `watchfiles_stack_summary` with function counts, likely owner counts, path
 samples, and representative owner stack frames. Linux fdinfo does not include
-path names directly; use the inode/device samples together with the runtime
-stack summary and matrix deltas to attribute owners.
+path names directly; pass one or more `--resolve-watch-root` values to scan
+known workspace roots and report candidate paths for bounded fdinfo `sdev`/`ino`
+samples. Candidate paths can include symlink or hardlink aliases and may expose
+workspace file names, so point the resolver only at relevant roots. Large roots
+also add scan cost before each snapshot. Use the candidates together with the
+runtime stack summary and matrix deltas to attribute owners.
 
 When multiple `--label` values are provided without `--prompt-between-labels`,
 the labels are sampled consecutively without pausing for external matrix

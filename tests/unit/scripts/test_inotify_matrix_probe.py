@@ -166,6 +166,57 @@ def test_collect_snapshot_summarizes_proc_and_runtime_api(
     }
 
 
+def test_collect_snapshot_resolves_inotify_watch_paths(tmp_path) -> None:
+    probe = _load_probe_module()
+    proc_root = tmp_path / "proc"
+    proc_dir = proc_root / "42"
+    fd_dir = proc_dir / "fd"
+    fdinfo_dir = proc_dir / "fdinfo"
+    task_dir = proc_dir / "task"
+    fd_dir.mkdir(parents=True)
+    fdinfo_dir.mkdir()
+    task_dir.mkdir()
+    (fd_dir / "3").symlink_to("anon_inode:inotify")
+
+    workspace_dir = tmp_path / "workspace"
+    watched_path = workspace_dir / "memory" / "MEMORY.md"
+    watched_path.parent.mkdir(parents=True)
+    watched_path.write_text("memory", encoding="utf-8")
+    watched_stat = watched_path.stat()
+    sdev = (probe.os.major(watched_stat.st_dev) << 20) | probe.os.minor(
+        watched_stat.st_dev,
+    )
+
+    (fdinfo_dir / "3").write_text(
+        "pos:\t0\n"
+        "inotify wd:1 "
+        f"ino:{watched_stat.st_ino:x} "
+        f"sdev:{sdev:x} "
+        "mask:00000800 ignored_mask:0\n",
+        encoding="utf-8",
+    )
+
+    snapshot = probe.collect_snapshot(
+        label="workspaces",
+        pid=42,
+        proc_root=proc_root,
+        watch_roots=[workspace_dir],
+    )
+
+    watch_sample = snapshot["proc"]["inotify_fds"][0]["watch_samples"][0]
+    assert watch_sample["candidate_paths"] == [str(watched_path)]
+    assert snapshot["proc"]["candidate_watch_path_samples"] == [
+        str(watched_path),
+    ]
+    assert snapshot["proc"]["watch_resolution_diagnostics"] == {
+        "enabled": True,
+        "roots": [str(workspace_dir)],
+        "missing_roots": [],
+        "scanned_path_count": 3,
+        "scan_errors": [],
+    }
+
+
 def test_summarize_watchfiles_stack_events_handles_missing_stack() -> None:
     probe = _load_probe_module()
 
@@ -344,16 +395,20 @@ def test_summarize_matrix_reports_consecutive_deltas() -> None:
 
 def test_main_prompt_between_labels_waits_before_each_snapshot(
     monkeypatch,
+    tmp_path,
     capsys,
 ) -> None:
     probe = _load_probe_module()
     prompts: list[str] = []
+    calls: list[dict] = []
+    watch_root = tmp_path / "workspace"
 
     def fake_input(prompt: str) -> str:
         prompts.append(prompt)
         return ""
 
     def fake_collect_snapshot(**kwargs):
+        calls.append(kwargs)
         return {
             "label": kwargs["label"],
             "pid": kwargs["pid"],
@@ -378,6 +433,8 @@ def test_main_prompt_between_labels_waits_before_each_snapshot(
             "--label",
             "workspaces",
             "--prompt-between-labels",
+            "--resolve-watch-root",
+            str(watch_root),
         ],
     )
 
@@ -397,6 +454,10 @@ def test_main_prompt_between_labels_waits_before_each_snapshot(
             "Prepare matrix step for label 'workspaces', then press Enter "
             "to collect snapshot..."
         ),
+    ]
+    assert [call["watch_roots"] for call in calls] == [
+        [watch_root],
+        [watch_root],
     ]
 
 
@@ -572,3 +633,31 @@ def test_main_rejects_from_json_with_label(monkeypatch, capsys) -> None:
         )
     else:
         raise AssertionError("expected argparse to reject mixed modes")
+
+
+def test_main_rejects_from_json_with_watch_roots(
+    monkeypatch,
+    capsys,
+) -> None:
+    probe = _load_probe_module()
+    monkeypatch.setattr(
+        probe.sys,
+        "argv",
+        [
+            "inotify_matrix_probe.py",
+            "--from-json",
+            "capture.json",
+            "--resolve-watch-root",
+            "/workspaces",
+        ],
+    )
+
+    try:
+        probe.main()
+    except SystemExit as exc:
+        assert exc.code == 2
+        assert (
+            "--resolve-watch-root requires --label" in capsys.readouterr().err
+        )
+    else:
+        raise AssertionError("expected argparse to reject watch roots")
