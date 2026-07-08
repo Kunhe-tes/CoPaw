@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import builtins
 from pathlib import Path
 
 
@@ -339,3 +340,75 @@ def test_summarize_matrix_reports_consecutive_deltas() -> None:
             },
         ],
     }
+
+
+def test_main_prompt_between_labels_waits_before_each_snapshot(
+    monkeypatch,
+    capsys,
+) -> None:
+    probe = _load_probe_module()
+    prompts: list[str] = []
+
+    def fake_input(prompt: str) -> str:
+        prompts.append(prompt)
+        return ""
+
+    def fake_collect_snapshot(**kwargs):
+        return {
+            "label": kwargs["label"],
+            "pid": kwargs["pid"],
+            "proc": {
+                "inotify_fd_count": 0,
+                "inotify_watch_count": 0,
+                "thread_name_counts": {},
+            },
+        }
+
+    monkeypatch.setattr(probe, "_input_from_stderr", fake_input)
+    monkeypatch.setattr(probe, "collect_snapshot", fake_collect_snapshot)
+    monkeypatch.setattr(
+        probe.sys,
+        "argv",
+        [
+            "inotify_matrix_probe.py",
+            "--pid",
+            "42",
+            "--label",
+            "empty",
+            "--label",
+            "workspaces",
+            "--prompt-between-labels",
+        ],
+    )
+
+    assert probe.main() == 0
+
+    output = json.loads(capsys.readouterr().out)
+    assert [item["label"] for item in output["snapshots"]] == [
+        "empty",
+        "workspaces",
+    ]
+    assert prompts == [
+        (
+            "Prepare matrix step for label 'empty', then press Enter "
+            "to collect snapshot..."
+        ),
+        (
+            "Prepare matrix step for label 'workspaces', then press Enter "
+            "to collect snapshot..."
+        ),
+    ]
+
+
+def test_input_from_stderr_keeps_prompt_out_of_stdout(
+    monkeypatch,
+    capsys,
+) -> None:
+    probe = _load_probe_module()
+    monkeypatch.setattr(builtins, "input", lambda: "")
+
+    assert probe._input_from_stderr("continue?") == ""
+
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert captured.err == "continue?"

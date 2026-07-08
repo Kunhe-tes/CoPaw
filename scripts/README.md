@@ -71,6 +71,21 @@ python scripts/inotify_matrix_probe.py \
   --runtime-url 'http://127.0.0.1:8080/api/runtime/inotify-diagnostic?include_fdinfo=true'
 ```
 
+To drive an interactive matrix in one command, repeat `--label` and add
+`--prompt-between-labels`; the probe will pause before each snapshot so you can
+perform the corresponding external step:
+
+```bash
+python scripts/inotify_matrix_probe.py \
+  --pid 1 \
+  --runtime-url 'http://127.0.0.1:8080/api/runtime/inotify-diagnostic?include_fdinfo=true' \
+  --label empty \
+  --label workspaces \
+  --label mcp-clients \
+  --label queries \
+  --prompt-between-labels
+```
+
 The output includes `/proc/<pid>/fdinfo` inotify counts, bounded fdinfo watch
 samples (`wd`, `ino`, `sdev`, `mask`, raw line), native thread name counts,
 opt-in `watchfiles.watch`/`awatch` creation stacks, and a
@@ -79,10 +94,9 @@ samples, and representative owner stack frames. Linux fdinfo does not include
 path names directly; use the inode/device samples together with the runtime
 stack summary and matrix deltas to attribute owners.
 
-When multiple `--label` values are provided in one invocation, the labels are
-sampled consecutively without pausing for external matrix actions. The top-level
-`summary.steps` section reports per-label totals and `consecutive_delta` values
-for inotify fd count, inotify watch count, and native `notify-rs*` thread count.
-For true matrix attribution, run a labeled snapshot after each external step
-(empty runtime, load workspaces, start MCP clients, run queries) and compare the
-reported totals/deltas across those captures.
+When multiple `--label` values are provided without `--prompt-between-labels`,
+the labels are sampled consecutively without pausing for external matrix
+actions. With `--prompt-between-labels`, each label becomes an operator-gated
+matrix step. The top-level `summary.steps` section reports per-label totals and
+`consecutive_delta` values for inotify fd count, inotify watch count, and native
+`notify-rs*` thread count.

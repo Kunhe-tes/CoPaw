@@ -7,9 +7,10 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import sys
 from collections import Counter
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 from urllib import request
 
 _STACK_OWNER_MARKERS = (
@@ -294,6 +295,42 @@ def summarize_matrix(snapshots: list[dict[str, Any]]) -> dict[str, Any]:
     return {"steps": steps}
 
 
+def _input_from_stderr(prompt: str) -> str:
+    print(prompt, end="", file=sys.stderr, flush=True)
+    return input()
+
+
+def collect_snapshots(
+    *,
+    labels: list[str],
+    pid: int,
+    proc_root: str | Path = "/proc",
+    runtime_url: str | None = None,
+    token: str | None = None,
+    timeout_seconds: float = 5.0,
+    prompt_between_labels: bool = False,
+    input_func: Callable[[str], str] = _input_from_stderr,
+) -> list[dict[str, Any]]:
+    snapshots: list[dict[str, Any]] = []
+    for label in labels:
+        if prompt_between_labels:
+            input_func(
+                f"Prepare matrix step for label {label!r}, then press Enter "
+                "to collect snapshot...",
+            )
+        snapshots.append(
+            collect_snapshot(
+                label=label,
+                pid=pid,
+                proc_root=proc_root,
+                runtime_url=runtime_url,
+                token=token,
+                timeout_seconds=timeout_seconds,
+            ),
+        )
+    return snapshots
+
+
 def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
@@ -320,24 +357,34 @@ def _parse_args() -> argparse.Namespace:
         "--label",
         action="append",
         required=True,
-        help="Snapshot label. Repeat to collect multiple back-to-back labels.",
+        help=(
+            "Snapshot label. Repeat to collect multiple labels; by default "
+            "they are sampled back-to-back unless --prompt-between-labels is set."
+        ),
+    )
+    parser.add_argument(
+        "--prompt-between-labels",
+        action="store_true",
+        help=(
+            "Pause before each label so an operator can perform the next "
+            "matrix action before sampling."
+        ),
     )
     return parser.parse_args()
 
 
 def main() -> int:
     args = _parse_args()
-    snapshots = [
-        collect_snapshot(
-            label=label,
-            pid=args.pid,
-            proc_root=args.proc_root,
-            runtime_url=args.runtime_url,
-            token=args.token,
-            timeout_seconds=args.timeout_seconds,
-        )
-        for label in args.label
-    ]
+    snapshots = collect_snapshots(
+        labels=args.label,
+        pid=args.pid,
+        proc_root=args.proc_root,
+        runtime_url=args.runtime_url,
+        token=args.token,
+        timeout_seconds=args.timeout_seconds,
+        prompt_between_labels=args.prompt_between_labels,
+        input_func=_input_from_stderr,
+    )
     print(
         json.dumps(
             {
