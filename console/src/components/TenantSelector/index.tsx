@@ -288,14 +288,12 @@ export function TenantSelector({
   }, [onSelectionInfoChange, selectedTenantInfos]);
 
   // 处理已分发用户选择（根据当前模式选择机构或用户）
-  // 使用 triggerKey 强制触发：每次勾选 checkbox 都会触发，不受 distributedIds 比较限制
+  // 使用 ref 记录 tenantLookup 是否已处理，避免用户手动修改选择后被还原
   const prevTriggerKeyRef = useRef<number>(0);
+  const needsResetWhenTenantLookupReadyRef = useRef<boolean>(false);
   useEffect(() => {
     const currentIds = distributedUserIds ?? [];
     const triggerKey = distributedTriggerKey ?? 0;
-
-    // triggerKey 变化时强制触发设置
-    const shouldForceTrigger = triggerKey > 0 && triggerKey !== prevTriggerKeyRef.current;
 
     // 空数组时清空选择
     if (currentIds.length === 0 && triggerKey === 0) {
@@ -307,13 +305,21 @@ export function TenantSelector({
         setIsEditingExtra(false);
       }
       prevTriggerKeyRef.current = 0;
+      needsResetWhenTenantLookupReadyRef.current = false;
       return;
     }
 
-    // 强制触发或有 distributedIds 时设置选择
-    if (shouldForceTrigger && currentIds.length > 0) {
+    // triggerKey 变化：用户点击 checkbox
+    const triggerKeyChanged = triggerKey > 0 && triggerKey !== prevTriggerKeyRef.current;
+    if (triggerKeyChanged) {
       prevTriggerKeyRef.current = triggerKey;
+    }
 
+    // tenantLookup 有数据时才能正确设置
+    const canSetProperly = tenantLookup.size > 0 && currentIds.length > 0;
+
+    if (triggerKeyChanged && canSetProperly) {
+      // triggerKey 变化且 tenantLookup 有数据：直接设置
       if (targetMode === "bbk_id") {
         const bbkIdSet = new Set<string>();
         currentIds.forEach((userId) => {
@@ -328,6 +334,27 @@ export function TenantSelector({
         setExtraTenantIdsText("");
         setIsEditingExtra(false);
       }
+      needsResetWhenTenantLookupReadyRef.current = false;
+    } else if (triggerKeyChanged && !canSetProperly) {
+      // triggerKey 变化但 tenantLookup 暂无数据：标记需要后续设置
+      needsResetWhenTenantLookupReadyRef.current = true;
+    } else if (!triggerKeyChanged && needsResetWhenTenantLookupReadyRef.current && canSetProperly) {
+      // tenantLookup 加载完成且有待处理的设置请求：执行设置
+      if (targetMode === "bbk_id") {
+        const bbkIdSet = new Set<string>();
+        currentIds.forEach((userId) => {
+          const tenant = tenantLookup.get(userId);
+          if (tenant?.bbk_id) {
+            bbkIdSet.add(tenant.bbk_id);
+          }
+        });
+        setSelectedBbkIds(Array.from(bbkIdSet));
+      } else {
+        setSelectedInListTenantIds(currentIds);
+        setExtraTenantIdsText("");
+        setIsEditingExtra(false);
+      }
+      needsResetWhenTenantLookupReadyRef.current = false;
     }
   }, [distributedUserIds, distributedTriggerKey, targetMode, tenantLookup]);
 

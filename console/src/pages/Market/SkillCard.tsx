@@ -90,6 +90,8 @@ export function SkillCard({ skill, onClick, onDistribute, onLookupOwners, onUnpu
         backgroundColor: "#fff",
         cursor: "pointer",
         transition: "all 0.2s ease",
+        display: "flex",
+        flexDirection: "column",
       }}
       onClick={onClick}
       onMouseEnter={(e) => {
@@ -104,7 +106,7 @@ export function SkillCard({ skill, onClick, onDistribute, onLookupOwners, onUnpu
       }}
     >
       {/* Header: name + badges */}
-      <div style={{ marginBottom: 12 }}>
+      <div style={{ marginBottom: 12, flex: 1 }}>
         <div style={{ display: "flex", alignItems: "flex-start", justifyContent: "space-between", flexWrap: "wrap", gap: 8 }}>
           <div style={{ flex: 1, minWidth: 0 }}>
             <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap", marginBottom: 4 }}>
