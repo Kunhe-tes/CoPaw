@@ -245,7 +245,11 @@ class TenantInitializer:
         self.ensure_directory_structure()
         self.ensure_default_agent()
 
-    def ensure_seeded_bootstrap(self) -> dict[str, Any]:
+    def ensure_seeded_bootstrap(
+        self,
+        *,
+        enable_bootstrap_chat: bool = True,
+    ) -> dict[str, Any]:
         """Run seeded bootstrap sequence (idempotent, runtime-safe).
 
         This is called on first tenant access and ensures:
@@ -304,7 +308,9 @@ class TenantInitializer:
         )
 
         # Step 4: Ensure the default workspace scaffold is complete.
-        result["workspace_scaffold"] = self.ensure_default_workspace_scaffold()
+        result["workspace_scaffold"] = self.ensure_default_workspace_scaffold(
+            enable_bootstrap_chat=enable_bootstrap_chat,
+        )
 
         return result
 
@@ -644,7 +650,11 @@ class TenantInitializer:
                 f"created by concurrent request",
             )
 
-    def ensure_default_workspace_scaffold(self) -> dict[str, Any]:
+    def ensure_default_workspace_scaffold(
+        self,
+        *,
+        enable_bootstrap_chat: bool = True,
+    ) -> dict[str, Any]:
         """Ensure runtime-required workspace files exist for default agent."""
         from ...agents.utils.setup_utils import copy_md_files
         from ...config.config import (
@@ -739,6 +749,15 @@ class TenantInitializer:
                 workspace_dir=default_workspace,
             ),
         )
+        if not enable_bootstrap_chat:
+            bootstrap_path = default_workspace / "BOOTSTRAP.md"
+            if bootstrap_path.exists():
+                bootstrap_path.unlink()
+            copied_files = [
+                filename
+                for filename in copied_files
+                if filename != "BOOTSTRAP.md"
+            ]
 
         token_usage_path = default_workspace / "token_usage.json"
         if not token_usage_path.exists():

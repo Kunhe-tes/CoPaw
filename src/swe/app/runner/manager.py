@@ -155,6 +155,37 @@ class ChatManager:
         async with self._lock:
             return await self._repo.get_chat(chat_id)
 
+    async def get_chat_by_session(
+        self,
+        session_id: str,
+        channel: str = DEFAULT_CHANNEL,
+        user_id: Optional[str] = None,
+    ) -> Optional[ChatSpec]:
+        """Get the chat spec for a logical session.
+
+        The normal product invariant is unique by session, user, and channel.
+        If legacy data has duplicates, return the most recently updated match.
+        """
+        async with self._lock:
+            chats = await self._repo.filter_chats(
+                user_id=user_id,
+                channel=channel,
+            )
+            matching_chats = [
+                chat for chat in chats if chat.session_id == session_id
+            ]
+            if not matching_chats:
+                return None
+            if len(matching_chats) > 1:
+                logger.warning(
+                    "Multiple chat records for session_id=%s "
+                    "user_id=%s channel=%s; using most recently updated",
+                    session_id,
+                    user_id,
+                    channel,
+                )
+            return max(matching_chats, key=lambda c: c.updated_at)
+
     async def get_or_create_chat(
         self,
         session_id: str,

@@ -224,10 +224,10 @@ def _get_positive_int_env(name: str, default: int) -> int:
 
 
 def _configure_async_thread_pools() -> None:
-    anyio_thread_tokens = _get_positive_int_env("ANYIO_THREAD_TOKENS", 64)
+    anyio_thread_tokens = _get_positive_int_env("ANYIO_THREAD_TOKENS", 16)
     asyncio_executor_workers = _get_positive_int_env(
         "ASYNCIO_EXECUTOR_WORKERS",
-        64,
+        16,
     )
 
     anyio_limiter = anyio.to_thread.current_default_thread_limiter()
@@ -252,8 +252,11 @@ async def _reset_scope_sensitive_runtime_state(app: FastAPI) -> None:
         logger.info(
             "Resetting existing MultiAgentManager before scope cutover...",
         )
-        await existing_manager.stop_all()
-        app.state.multi_agent_manager = None
+        try:
+            await existing_manager.stop_all()
+            app.state.multi_agent_manager = None
+        finally:
+            runtime_diagnostic_manager.set_workspace_metrics(None)
 
     from ..providers.provider_manager import ProviderManager
     from ..providers.rate_limiter import reset_rate_limiter
@@ -622,6 +625,7 @@ async def _start_lifespan_background_services(
     )
     app.state.cron_notification_worker = cron_notification_worker
     cron_notification_worker.start()
+    await multi_agent_manager.start_workspace_cleanup_loop()
 
     try:
         runtime_diagnostic_manager.set_workspace_metrics(
@@ -650,6 +654,8 @@ async def _shutdown_lifespan_resources(
         await runtime_diagnostic_manager.stop()
     except Exception as e:
         logger.warning("Error stopping runtime diagnostic manager: %s", e)
+    finally:
+        runtime_diagnostic_manager.set_workspace_metrics(None)
 
     cron_notification_worker = getattr(
         app.state,
@@ -804,7 +810,11 @@ if CORS_ORIGINS:
         allow_credentials=True,
         allow_methods=["*"],
         allow_headers=["*"],
-        expose_headers=["Content-Disposition"],
+        expose_headers=[
+            "Content-Disposition",
+            "X-Swe-Msgid",
+            "X-Swe-Sessionid",
+        ],
     )
 
 app.add_middleware(AuthMiddleware)

@@ -118,6 +118,21 @@ class TestTenantWorkspaceExemptions:
             is True
         )
 
+    def test_runtime_memory_diagnostic_route_exempt(self):
+        """Runtime memory diagnostics should bypass workspace loading."""
+        from swe.app.middleware.tenant_workspace import (
+            TenantWorkspaceMiddleware,
+        )
+
+        middleware = TenantWorkspaceMiddleware(app=MagicMock())
+
+        assert (
+            middleware._is_workspace_exempt(
+                "/api/runtime/memory-diagnostic",
+            )
+            is True
+        )
+
 
 class TestTenantWorkspaceHelpers:
     """Tests for workspace helper functions."""

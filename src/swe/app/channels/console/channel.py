@@ -313,6 +313,7 @@ class ConsoleChannel(BaseChannel):
             session_id=session_id,
             content_parts=content_parts,
             channel_meta=meta,
+            message_id=meta.get("msgid"),
         )
         request.channel_meta = meta
 

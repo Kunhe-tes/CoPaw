@@ -577,6 +577,7 @@ class BaseChannel(ABC):
         session_id: str,
         content_parts: List[Any],
         channel_meta: Optional[Dict[str, Any]] = None,
+        message_id: str | None = None,
     ) -> "AgentRequest":
         """
         Build AgentRequest from runtime content parts (Message content list).
@@ -598,6 +599,8 @@ class BaseChannel(ABC):
             role=Role.USER,
             content=content_parts,
         )
+        if message_id:
+            msg.id = message_id
         return AgentRequest(
             session_id=session_id,
             user_id=sender_id,
