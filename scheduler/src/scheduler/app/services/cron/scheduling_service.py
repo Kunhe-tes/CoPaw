@@ -392,7 +392,11 @@ class CronSchedulingService:
         total_dispatched = 0
         dispatch_scopes = _normalize_worker_scopes(scopes)
         if not dispatch_scopes:
-            dispatch_scopes = await self._list_dispatch_scopes(now, source_ids)
+            dispatch_scopes = await self._list_dispatch_scopes(
+                now,
+                source_ids,
+                include_fallback=bool(source_ids),
+            )
         for scope in dispatch_scopes:
             scope_source_ids = [scope.source_id] if scope.source_id else source_ids
             strategy = await self._resolve_worker_strategy(scope, now)
@@ -656,7 +660,11 @@ class CronSchedulingService:
         """Adjust worker capacity when each scope's strategy interval elapsed."""
         now = _ensure_aware_utc(now_utc or datetime.now(timezone.utc))
         adjusted = False
-        scopes = await self._list_dispatch_scopes(now, None)
+        scopes = await self._list_dispatch_scopes(
+            now,
+            None,
+            include_fallback=False,
+        )
         for scope in scopes:
             strategy = await self._resolve_worker_strategy(scope, now)
             latest = await self._dispatch_store.get_latest_worker_capacity(
@@ -737,13 +745,15 @@ class CronSchedulingService:
         self,
         now_utc: datetime,
         source_ids: list[str] | None,
+        *,
+        include_fallback: bool = True,
     ) -> list[WorkerScope]:
         raw_scopes = await self._dispatch_store.list_dispatch_scopes(
             now_utc=now_utc,
             source_ids=source_ids,
         )
         scopes = [WorkerScope.model_validate(scope) for scope in raw_scopes]
-        if scopes:
+        if scopes or not include_fallback:
             return scopes
         if source_ids:
             return [

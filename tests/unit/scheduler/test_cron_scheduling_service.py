@@ -915,6 +915,27 @@ async def test_parent_callback_dispatches_using_current_batch_model_scope(
 
 
 @pytest.mark.asyncio
+async def test_dispatch_ready_without_real_scopes_does_not_register_default_capacity() -> None:
+    store = _DispatchStore([])
+    store.scopes = []
+    store.latest_capacity = None
+    service = CronSchedulingService(
+        dispatch_store=store,
+        callback_client=_CallbackClient(),
+        worker_id="scheduler-1",
+        effective_workers=1,
+    )
+
+    dispatched = await service.dispatch_ready_once(
+        now_utc=datetime(2026, 7, 1, 1, 0, tzinfo=timezone.utc),
+    )
+
+    assert dispatched == 0
+    assert store.capacity == []
+    assert store.claims == []
+
+
+@pytest.mark.asyncio
 async def test_parent_callback_child_model_identity_falls_back_to_parent(
     monkeypatch,
 ) -> None:

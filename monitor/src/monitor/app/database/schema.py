@@ -357,6 +357,8 @@ CREATE TABLE IF NOT EXISTS swe_cron_dispatch_batches (
     scheduled_fire_at DATETIME NOT NULL COMMENT 'parent scheduled fire time',
     callback_received_at DATETIME NOT NULL COMMENT 'scheduler callback receive time',
     status VARCHAR(16) NOT NULL DEFAULT 'received' COMMENT 'received/pending/running/completed/failed',
+    lock_owner VARCHAR(128) DEFAULT '' COMMENT '批次派发锁持有者',
+    locked_at DATETIME DEFAULT NULL COMMENT '批次派发锁时间',
     total_count INT NOT NULL DEFAULT 0 COMMENT 'total intents',
     completed_count INT NOT NULL DEFAULT 0 COMMENT 'completed intents',
     failed_count INT NOT NULL DEFAULT 0 COMMENT 'failed intents',
@@ -370,7 +372,8 @@ CREATE TABLE IF NOT EXISTS swe_cron_dispatch_batches (
     ),
     INDEX idx_dispatch_batch_parent (parent_job_id, created_at),
     INDEX idx_dispatch_batch_source (source_id, scheduled_fire_at),
-    INDEX idx_dispatch_batch_status (status, updated_at)
+    INDEX idx_dispatch_batch_status (status, updated_at),
+    INDEX idx_dispatch_batch_lock (lock_owner, locked_at)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='SWE cron dispatch batch runs';
 """
 
@@ -545,6 +548,22 @@ ALTER_CRON_DISPATCH_BATCHES_MODEL_COLUMNS = [
     ADD COLUMN model_id VARCHAR(128) NOT NULL DEFAULT 'default'
     COMMENT 'model id'
     AFTER provider_id
+    """,
+    """
+    ALTER TABLE swe_cron_dispatch_batches
+    ADD COLUMN lock_owner VARCHAR(128) DEFAULT ''
+    COMMENT '批次派发锁持有者'
+    AFTER status
+    """,
+    """
+    ALTER TABLE swe_cron_dispatch_batches
+    ADD COLUMN locked_at DATETIME DEFAULT NULL
+    COMMENT '批次派发锁时间'
+    AFTER lock_owner
+    """,
+    """
+    ALTER TABLE swe_cron_dispatch_batches
+    ADD INDEX idx_dispatch_batch_lock (lock_owner, locked_at)
     """,
 ]
 

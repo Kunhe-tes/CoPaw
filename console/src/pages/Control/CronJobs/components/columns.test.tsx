@@ -1,5 +1,5 @@
-import { describe, expect, it, vi } from "vitest";
-import { render, screen } from "@testing-library/react";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { cleanup, render, screen } from "@testing-library/react";
 import type { ReactElement } from "react";
 import type { CronJobSpecOutput } from "@/api/types";
 import {
@@ -61,6 +61,10 @@ function buildHandlers(overrides = {}) {
 }
 
 describe("CronJobs columns", () => {
+  afterEach(() => {
+    cleanup();
+  });
+
   it("displays notification delay", () => {
     const columns = createColumns(buildHandlers());
     const column = columns.find((item) => item.key === "notification_delay");
@@ -107,6 +111,64 @@ describe("CronJobs columns", () => {
 
     expect(screen.getByText("test job")).toBeTruthy();
     expect(screen.getByText("分发子任务")).toBeTruthy();
+  });
+
+  it("marks batch dispatch parent tasks and keeps their own cron text", () => {
+    const columns = createColumns(buildHandlers());
+    const column = columns.find((item) => item.key === "cron");
+    const job = buildCronJob({
+      meta: {
+        broadcast_dispatch_intents_enabled: true,
+        batch_dispatch_cron: "0 5 * * *",
+        batch_dispatch_offset_minutes: 240,
+      },
+    });
+
+    render(<>{column?.render?.(job.schedule.cron, job, 0)}</>);
+
+    expect(screen.getByText("批调度")).toBeTruthy();
+    expect(screen.getByText(/cronJobs\.cronTypeDaily/)).toBeTruthy();
+    expect(screen.getByText(/09:00/)).toBeTruthy();
+    expect(screen.queryByText(/05:00/)).toBeNull();
+  });
+
+  it("marks batch dispatch child tasks and keeps their own cron text", () => {
+    const columns = createColumns(buildHandlers());
+    const column = columns.find((item) => item.key === "cron");
+    const job = buildCronJob({
+      schedule: {
+        type: "cron",
+        cron: "30 10 * * *",
+        timezone: "UTC",
+      },
+      meta: {
+        broadcast_source_job_id: "parent-job",
+        broadcast_dispatch_intents_enabled: true,
+        batch_dispatch_cron: "0 5 * * *",
+        batch_dispatch_offset_minutes: 240,
+      },
+    });
+
+    render(<>{column?.render?.(job.schedule.cron, job, 0)}</>);
+
+    expect(screen.getByText("批调度")).toBeTruthy();
+    expect(screen.getByText(/cronJobs\.cronTypeDaily/)).toBeTruthy();
+    expect(screen.getByText(/10:30/)).toBeTruthy();
+    expect(screen.queryByText(/05:00/)).toBeNull();
+  });
+
+  it("restores the cron text when batch dispatch metadata is removed", () => {
+    const columns = createColumns(buildHandlers());
+    const column = columns.find((item) => item.key === "cron");
+    const job = buildCronJob({
+      meta: {},
+    });
+
+    render(<>{column?.render?.(job.schedule.cron, job, 0)}</>);
+
+    expect(screen.getByText(/cronJobs\.cronTypeDaily/)).toBeTruthy();
+    expect(screen.getByText(/09:00/)).toBeTruthy();
+    expect(screen.queryByText("批调度")).toBeNull();
   });
 
   it("disables broadcast actions for broadcast child tasks", () => {

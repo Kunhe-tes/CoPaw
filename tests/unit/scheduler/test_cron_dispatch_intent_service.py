@@ -18,6 +18,7 @@ from scheduler.app.services.cron.dispatch_intent_service import (
 from scheduler.app.models.cron import ExecutionSyncRequest
 from scheduler.app.services.cron import execution_sync_service as sync_module
 from scheduler.app.services.cron.execution_sync_service import ExecutionSyncService
+from scheduler.app.database import schema as scheduler_schema
 
 
 def test_claim_due_intents_uses_skip_locked_and_stable_order() -> None:
@@ -32,6 +33,27 @@ def test_claim_due_intents_uses_skip_locked_and_stable_order() -> None:
     assert "status IN ('claimed', 'acknowledged')" in source
     assert "attempt_count < max_attempts" in source
     assert "child_execution_missing_failed" in source
+
+
+def test_claim_due_intents_acquires_batch_owner_before_intent_claim() -> None:
+    """One scheduler worker must own a dispatch batch before claiming its intents."""
+    source = inspect.getsource(
+        CronDispatchIntentService._claim_due_intent_ids,
+    )
+
+    assert "UPDATE swe_cron_dispatch_batches" in source
+    assert "lock_owner = %s" in source
+    assert "locked_at = %s" in source
+    assert "AND batch_id = %s" in source
+
+
+def test_dispatch_batch_schema_tracks_batch_owner() -> None:
+    """Batch ownership needs durable columns so scheduler pods can coordinate."""
+    source = scheduler_schema.CREATE_CRON_DISPATCH_BATCHES_TABLE
+
+    assert "lock_owner VARCHAR(128)" in source
+    assert "locked_at DATETIME" in source
+    assert "idx_dispatch_batch_lock" in source
 
 
 def test_record_execution_uses_insert_cursor_lastrowid() -> None:

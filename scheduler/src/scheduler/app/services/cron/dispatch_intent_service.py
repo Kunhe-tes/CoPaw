@@ -392,6 +392,14 @@ class CronDispatchIntentService:
                 completed_count = %s,
                 failed_count = %s,
                 updated_at = %s,
+                lock_owner = CASE
+                    WHEN %s IN ('completed', 'failed') THEN ''
+                    ELSE lock_owner
+                END,
+                locked_at = CASE
+                    WHEN %s IN ('completed', 'failed') THEN NULL
+                    ELSE locked_at
+                END,
                 completed_at = CASE
                     WHEN %s IN ('completed', 'failed') THEN %s
                     ELSE completed_at
@@ -404,6 +412,8 @@ class CronDispatchIntentService:
                 completed,
                 failed,
                 _to_beijing_naive(updated_at),
+                status,
+                status,
                 status,
                 _to_beijing_naive(updated_at),
                 batch_id,
@@ -823,9 +833,14 @@ class CronDispatchIntentService:
                                 *exhausted_ids,
                             ),
                         )
+                    candidate_limit = max(limit * 4, limit, 1)
                     await cur.execute(
                         f"""
-                        SELECT id
+                        SELECT
+                            batch_id,
+                            MIN(due_at) AS next_due_at,
+                            MIN(dispatch_order) AS next_dispatch_order,
+                            MIN(id) AS next_id
                         FROM swe_cron_dispatch_intents
                         WHERE (
                             (status = 'pending' AND attempt_count < max_attempts)
@@ -843,20 +858,94 @@ class CronDispatchIntentService:
                         )
                           AND due_at <= %s
                           {scope_filter_clause}
-                        ORDER BY due_at, dispatch_order, id
+                        GROUP BY batch_id
+                        ORDER BY next_due_at, next_dispatch_order, next_id
                         LIMIT %s
-                        FOR UPDATE SKIP LOCKED
                         """,
                         (
                             stale_before,
                             dispatched_stale_before,
                             normalized_now,
                             *scope_filter_params,
-                            limit,
+                            candidate_limit,
                         ),
                     )
-                    rows = await cur.fetchall()
-                    ids = [int(row[0]) for row in rows]
+                    candidate_rows = await cur.fetchall()
+                    candidate_batch_ids: list[str] = []
+                    seen_batch_ids: set[str] = set()
+                    for row in candidate_rows:
+                        batch_id = str(
+                            _row_value(row, 0, "batch_id") or "",
+                        )
+                        if not batch_id or batch_id in seen_batch_ids:
+                            continue
+                        seen_batch_ids.add(batch_id)
+                        candidate_batch_ids.append(batch_id)
+
+                    ids: list[int] = []
+                    for candidate_batch_id in candidate_batch_ids:
+                        result = await cur.execute(
+                            """
+                            UPDATE swe_cron_dispatch_batches
+                            SET lock_owner = %s,
+                                locked_at = %s
+                            WHERE batch_id = %s
+                              AND (
+                                  lock_owner = ''
+                                  OR lock_owner = %s
+                                  OR locked_at IS NULL
+                                  OR locked_at < %s
+                              )
+                            """,
+                            (
+                                lock_owner,
+                                normalized_now,
+                                candidate_batch_id,
+                                lock_owner,
+                                stale_before,
+                            ),
+                        )
+                        if _rowcount(result) == 0:
+                            continue
+                        await cur.execute(
+                            f"""
+                            SELECT id
+                            FROM swe_cron_dispatch_intents
+                            WHERE (
+                                (status = 'pending' AND attempt_count < max_attempts)
+                                OR (
+                                    status IN ('claimed', 'acknowledged')
+                                    AND locked_at IS NOT NULL
+                                    AND locked_at < %s
+                                )
+                                OR (
+                                    status = 'dispatched'
+                                    AND locked_at IS NOT NULL
+                                    AND locked_at < %s
+                                    AND attempt_count < max_attempts
+                                )
+                            )
+                              AND due_at <= %s
+                              AND batch_id = %s
+                              {scope_filter_clause}
+                            ORDER BY due_at, dispatch_order, id
+                            LIMIT %s
+                            FOR UPDATE SKIP LOCKED
+                            """,
+                            (
+                                stale_before,
+                                dispatched_stale_before,
+                                normalized_now,
+                                candidate_batch_id,
+                                *scope_filter_params,
+                                limit,
+                            ),
+                        )
+                        rows = await cur.fetchall()
+                        ids = [int(_row_value(row, 0, "id") or 0) for row in rows]
+                        ids = [intent_id for intent_id in ids if intent_id > 0]
+                        if ids:
+                            break
                     if ids:
                         placeholders = ", ".join(["%s"] * len(ids))
                         await cur.execute(
