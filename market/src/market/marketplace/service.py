@@ -228,6 +228,13 @@ FROM swe_skills
 WHERE skill_name = %s AND source_id = %s AND tenant_id IN ({placeholders})
 """
 
+# 查询已分发用户（从技能表，只统计当前实际持有的）
+_QUERY_DISTRIBUTED_USERS_SQL = """
+SELECT tenant_id
+FROM swe_skills
+WHERE skill_name = %s AND source_id = %s AND source LIKE 'marketplace:%%'
+"""
+
 
 def _sort_items_by_updated_at_desc(
     items: list[MarketItem],
@@ -1702,16 +1709,16 @@ class MarketplaceService:
             # 构建状态映射
             user_skill_map = {row["tenant_id"]: row for row in rows}
 
-            # 查询已分发用户（从操作日志，去重）
+            # 查询已分发用户（从技能表，只统计当前实际持有的）
             dist_rows = await self.db.fetch_all(
-                _QUERY_DISTRIBUTIONS_SQL,
-                (source_id, item_id, "skill"),
+                _QUERY_DISTRIBUTED_USERS_SQL,
+                (skill_name, source_id),
             )
             distributed_user_ids = list(
                 {
-                    row["target_user_id"]
+                    row["tenant_id"]
                     for row in dist_rows
-                    if row["target_user_id"] in target_tenant_ids
+                    if row["tenant_id"] in target_tenant_ids
                 },
             )
 
@@ -3413,6 +3420,7 @@ class MarketplaceService:
         source_id: str,
         item_id: str,
         item_type: str,
+        skill_name: str | None = None,
     ) -> list[DistributionRecord]:
         """查询分发记录.
 
@@ -3420,6 +3428,7 @@ class MarketplaceService:
             source_id: 来源 ID.
             item_id: 条目 ID.
             item_type: 条目类型（skill 或 mcp）.
+            skill_name: 技能名称（可选，用于查询当前实际持有的用户）.
 
         Returns:
             分发记录列表.
@@ -3427,6 +3436,24 @@ class MarketplaceService:
         if not self.db.is_connected:
             return []
         try:
+            # 如果提供了 skill_name，查询 swe_skills 表获取当前实际持有技能的用户
+            if skill_name and item_type == "skill":
+                # 规范化 skill_name，与 swe_skills 表存储格式一致
+                normalized_skill_name = normalize_skill_name(skill_name)
+                rows = await self.db.fetch_all(
+                    _QUERY_DISTRIBUTED_USERS_SQL,
+                    (normalized_skill_name, source_id),
+                )
+                return [
+                    DistributionRecord(
+                        target_user_id=r["tenant_id"],
+                        target_user_name="",  # swe_skills 表暂无 tenant_name
+                        target_bbk_id="",  # swe_skills 表暂无 bbk_id
+                        distributed_at=None,
+                    )
+                    for r in rows
+                ]
+            # 否则查询操作日志表
             rows = await self.db.fetch_all(
                 _QUERY_DISTRIBUTIONS_SQL,
                 (source_id, item_id, item_type),
@@ -3706,6 +3733,12 @@ class MarketplaceService:
         )
         shutil.rmtree(skill_dir)
         self._remove_skill_manifest_entry(user_id, skill_name, source_id)
+        # 删除 swe_skills 数据库记录
+        await self.skill_registry.delete_skill(
+            user_id,
+            skill_name,
+            source_id or "",
+        )
         await self._trigger_agent_reload(
             user_id,
             "default",

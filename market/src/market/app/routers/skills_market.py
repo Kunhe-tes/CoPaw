@@ -1593,6 +1593,7 @@ def _extract_cn_name_from_md(md_content: str) -> str:
 async def get_skill_distributions(
     item_id: str,
     request: Request,
+    skill_name: Optional[str] = None,
     x_source_id: Optional[str] = Header(default=None, alias="X-Source-Id"),
     x_manager: Optional[str] = Header(default=None, alias="X-Manager"),
 ):
@@ -1600,7 +1601,12 @@ async def get_skill_distributions(
     source_id = require_source_id(x_source_id)
     _require_manager(x_manager)
     svc = request.app.state.marketplace
-    distributions = await svc.get_distributions(source_id, item_id, "skill")
+    distributions = await svc.get_distributions(
+        source_id,
+        item_id,
+        "skill",
+        skill_name=skill_name,
+    )
     return distributions
 
 

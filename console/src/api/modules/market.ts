@@ -497,14 +497,16 @@ export const marketApi = {
   // 查询技能分发记录
   getSkillDistributions: async (
     sourceId: string,
-    itemId: string
+    itemId: string,
+    skillName?: string
   ): Promise<DistributionRecord[]> => {
     const opts = mergeHeaders({
       "X-Source-Id": sourceId,
       "X-Manager": "true",
     });
+    const params = skillName ? `?skill_name=${encodeURIComponent(skillName)}` : "";
     return request<DistributionRecord[]>(
-      `/market/skills/${itemId}/distributions`,
+      `/market/skills/${itemId}/distributions${params}`,
       opts
     );
   },
