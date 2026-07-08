@@ -116,4 +116,10 @@ actions. With `--prompt-between-labels`, each label becomes an operator-gated
 matrix step. With `--from-json`, each loaded file contributes its captured
 snapshots in argument order. The top-level `summary.steps` section reports
 per-label totals and `consecutive_delta` values for inotify fd count, inotify
-watch count, and native `notify-rs*` thread count.
+watch count, and native `notify-rs*` thread count. When a snapshot includes
+runtime stack captures, its summary step also includes `runtime_watchfiles`
+counts. If two adjacent snapshots both include runtime stack captures, the
+step includes `function_delta` / `owner_delta` maps for the net change between
+their bounded, process-global watchfiles stack buffers. Treat those runtime
+deltas as attribution hints, not as exact watcher create/delete counts; negative
+values can mean older events were pushed out of the bounded buffer.

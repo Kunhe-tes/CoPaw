@@ -347,6 +347,19 @@ def test_summarize_matrix_reports_consecutive_deltas() -> None:
                         "swe": 3,
                     },
                 },
+                "runtime": {
+                    "watchfiles_stack_summary": {
+                        "event_count": 1,
+                        "function_counts": {
+                            "awatch": 1,
+                            "bad_bool": True,
+                            "bad_float": 1.9,
+                            "bad_negative": -1,
+                            "bad_string": "2",
+                        },
+                        "owner_counts": {"reme": 1},
+                    },
+                },
             },
             {
                 "label": "workspaces",
@@ -357,6 +370,13 @@ def test_summarize_matrix_reports_consecutive_deltas() -> None:
                         "notify-rs": 2,
                         "notify-rs inoti": 2,
                         "swe": 5,
+                    },
+                },
+                "runtime": {
+                    "watchfiles_stack_summary": {
+                        "event_count": 4,
+                        "function_counts": {"awatch": 3, "watch": 1},
+                        "owner_counts": {"fastmcp": 1, "reme": 3},
                     },
                 },
             },
@@ -374,6 +394,13 @@ def test_summarize_matrix_reports_consecutive_deltas() -> None:
                 },
                 "has_previous_snapshot": False,
                 "consecutive_delta": None,
+                "runtime_watchfiles": {
+                    "event_count": 1,
+                    "function_counts": {"awatch": 1},
+                    "owner_counts": {"reme": 1},
+                    "function_delta": None,
+                    "owner_delta": None,
+                },
             },
             {
                 "label": "workspaces",
@@ -388,8 +415,106 @@ def test_summarize_matrix_reports_consecutive_deltas() -> None:
                     "inotify_watch_count": 6,
                     "notify_thread_count": 3,
                 },
+                "runtime_watchfiles": {
+                    "event_count": 4,
+                    "function_counts": {"awatch": 3, "watch": 1},
+                    "owner_counts": {"fastmcp": 1, "reme": 3},
+                    "function_delta": {"awatch": 2, "watch": 1},
+                    "owner_delta": {"fastmcp": 1, "reme": 2},
+                },
             },
         ],
+    }
+
+
+def test_summarize_matrix_omits_runtime_delta_without_adjacent_summary() -> (
+    None
+):
+    probe = _load_probe_module()
+
+    summary = probe.summarize_matrix(
+        [
+            {
+                "label": "empty",
+                "proc": {
+                    "inotify_fd_count": 1,
+                    "inotify_watch_count": 2,
+                    "thread_name_counts": {},
+                },
+            },
+            {
+                "label": "workspaces",
+                "proc": {
+                    "inotify_fd_count": 2,
+                    "inotify_watch_count": 3,
+                    "thread_name_counts": {},
+                },
+                "runtime": {
+                    "watchfiles_stack_summary": {
+                        "event_count": 3,
+                        "function_counts": {"awatch": 3},
+                        "owner_counts": {"reme": 3},
+                    },
+                },
+            },
+        ],
+    )
+
+    assert summary["steps"][0]["runtime_watchfiles"] is None
+    assert summary["steps"][1]["runtime_watchfiles"] == {
+        "event_count": 3,
+        "function_counts": {"awatch": 3},
+        "owner_counts": {"reme": 3},
+        "function_delta": None,
+        "owner_delta": None,
+    }
+
+
+def test_summarize_matrix_omits_runtime_delta_for_malformed_count_maps() -> (
+    None
+):
+    probe = _load_probe_module()
+
+    summary = probe.summarize_matrix(
+        [
+            {
+                "label": "empty",
+                "proc": {},
+                "runtime": {
+                    "watchfiles_stack_summary": {
+                        "event_count": True,
+                        "function_counts": ["awatch"],
+                        "owner_counts": {"reme": 4},
+                    },
+                },
+            },
+            {
+                "label": "workspaces",
+                "proc": {},
+                "runtime": {
+                    "watchfiles_stack_summary": {
+                        "event_count": 3,
+                        "function_counts": {"awatch": 3},
+                        "owner_counts": "bad",
+                    },
+                },
+            },
+        ],
+    )
+
+    assert summary["steps"][0]["runtime_watchfiles"] == {
+        "event_count": 0,
+        "function_counts": {},
+        "owner_counts": {"reme": 4},
+        "function_delta": None,
+        "owner_delta": None,
+    }
+    assert summary["steps"][1]["runtime_watchfiles"] == {
+        "event_count": 3,
+        "function_counts": {"awatch": 3},
+        "owner_counts": {},
+        "function_delta": None,
+        "owner_delta": None,
     }
 
 

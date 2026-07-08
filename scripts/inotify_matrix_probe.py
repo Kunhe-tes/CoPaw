@@ -373,6 +373,67 @@ def _metric(snapshot: dict[str, Any], key: str) -> int:
         return 0
 
 
+def _int_counts(raw_counts: Any) -> dict[str, int]:
+    if not isinstance(raw_counts, dict):
+        return {}
+    counts: dict[str, int] = {}
+    for key, value in raw_counts.items():
+        if isinstance(value, bool):
+            continue
+        if not isinstance(value, int) or value < 0:
+            continue
+        counts[str(key)] = value
+    return dict(sorted(counts.items()))
+
+
+def _count_delta(
+    counts: dict[str, int],
+    previous_counts: dict[str, int],
+) -> dict[str, int]:
+    keys = set(counts)
+    keys.update(previous_counts)
+    return {
+        key: counts.get(key, 0) - previous_counts.get(key, 0)
+        for key in sorted(keys)
+        if counts.get(key, 0) - previous_counts.get(key, 0) != 0
+    }
+
+
+def _runtime_watchfiles_totals(
+    snapshot: dict[str, Any],
+) -> dict[str, Any] | None:
+    runtime = snapshot.get("runtime")
+    if not isinstance(runtime, dict):
+        return None
+    summary = runtime.get("watchfiles_stack_summary")
+    if not isinstance(summary, dict):
+        return None
+    raw_event_count = summary.get("event_count", 0)
+    if (
+        isinstance(raw_event_count, bool)
+        or not isinstance(raw_event_count, int)
+        or raw_event_count < 0
+    ):
+        event_count = 0
+    else:
+        event_count = raw_event_count
+    return {
+        "event_count": event_count,
+        "function_counts": _int_counts(summary.get("function_counts")),
+        "owner_counts": _int_counts(summary.get("owner_counts")),
+    }
+
+
+def _has_runtime_count_map(snapshot: dict[str, Any], key: str) -> bool:
+    runtime = snapshot.get("runtime")
+    if not isinstance(runtime, dict):
+        return False
+    summary = runtime.get("watchfiles_stack_summary")
+    if not isinstance(summary, dict):
+        return False
+    return isinstance(summary.get(key), dict)
+
+
 def summarize_matrix(snapshots: list[dict[str, Any]]) -> dict[str, Any]:
     """Summarize per-label inotify totals and deltas for matrix runs."""
     steps: list[dict[str, Any]] = []
@@ -403,12 +464,46 @@ def summarize_matrix(snapshots: list[dict[str, Any]]) -> dict[str, Any]:
             if previous_totals is not None
             else None
         )
+        runtime_watchfiles = _runtime_watchfiles_totals(snapshot)
+        previous_runtime_watchfiles = (
+            _runtime_watchfiles_totals(previous)
+            if previous is not None
+            else None
+        )
+        runtime_watchfiles_with_delta = None
+        if runtime_watchfiles is not None:
+            runtime_watchfiles_with_delta = {
+                **runtime_watchfiles,
+                "function_delta": (
+                    _count_delta(
+                        runtime_watchfiles["function_counts"],
+                        previous_runtime_watchfiles["function_counts"],
+                    )
+                    if previous is not None
+                    and previous_runtime_watchfiles is not None
+                    and _has_runtime_count_map(snapshot, "function_counts")
+                    and _has_runtime_count_map(previous, "function_counts")
+                    else None
+                ),
+                "owner_delta": (
+                    _count_delta(
+                        runtime_watchfiles["owner_counts"],
+                        previous_runtime_watchfiles["owner_counts"],
+                    )
+                    if previous is not None
+                    and previous_runtime_watchfiles is not None
+                    and _has_runtime_count_map(snapshot, "owner_counts")
+                    and _has_runtime_count_map(previous, "owner_counts")
+                    else None
+                ),
+            }
         steps.append(
             {
                 "label": snapshot.get("label"),
                 "totals": totals,
                 "has_previous_snapshot": previous_totals is not None,
                 "consecutive_delta": deltas,
+                "runtime_watchfiles": runtime_watchfiles_with_delta,
             },
         )
         previous = snapshot
