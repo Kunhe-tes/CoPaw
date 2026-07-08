@@ -184,6 +184,23 @@ async def _call_with_timeout_refresh(
         raise
 
 
+async def _wait_for_lifecycle_signal(
+    reload_event: asyncio.Event,
+    stop_event: asyncio.Event,
+) -> None:
+    """Wait until reload or stop is requested without idle polling."""
+    reload_task = asyncio.create_task(reload_event.wait())
+    stop_task = asyncio.create_task(stop_event.wait())
+    tasks = (reload_task, stop_task)
+    try:
+        await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
+    finally:
+        for task in tasks:
+            if not task.done():
+                task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+
+
 class StdIOStatefulClient(StatefulClientBase):
     """StdIO MCP client with proper cross-task lifecycle management.
 
@@ -299,12 +316,10 @@ class StdIOStatefulClient(StatefulClientBase):
                         self._startup_waiter.set_result(None)
                     logger.info(f"MCP client connected: {self.name}")
 
-                    # Wait for reload or stop signal
-                    while (
-                        not self._reload_event.is_set()
-                        and not self._stop_event.is_set()
-                    ):
-                        await asyncio.sleep(0.1)
+                    await _wait_for_lifecycle_signal(
+                        self._reload_event,
+                        self._stop_event,
+                    )
 
                     # Clear state before exiting context
                     self.session = None
@@ -445,6 +460,7 @@ class StdIOStatefulClient(StatefulClientBase):
             )
 
         logger.info(f"Triggering reload for MCP client: {self.name}")
+        self._ready_event.clear()
         self._reload_event.set()
 
         # Wait for new connection
@@ -710,12 +726,10 @@ class HttpStatefulClient(StatefulClientBase):
                         self._startup_waiter.set_result(None)
                     logger.info(f"MCP client connected: {self.name}")
 
-                    # Wait for reload or stop signal
-                    while (
-                        not self._reload_event.is_set()
-                        and not self._stop_event.is_set()
-                    ):
-                        await asyncio.sleep(0.1)
+                    await _wait_for_lifecycle_signal(
+                        self._reload_event,
+                        self._stop_event,
+                    )
 
                     # Clear state before exiting context
                     self.session = None
