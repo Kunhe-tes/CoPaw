@@ -64,6 +64,7 @@ export const KEY_TO_PATH: Record<string, string> = {
   "analytics-cron-job-overview": "/analytics/cron-job-overview",
   "analytics-continuous-governance": "/analytics/continuous-governance",
   "monitor-cron-overview": "/monitor/cron-overview",
+  "monitor-cron-batch-dispatch": "/monitor/cron-batch-dispatch",
   "instance-overview": "/instance/overview",
   "instance-instances": "/instance/instances",
   "instance-allocations": "/instance/allocations",
@@ -101,6 +102,7 @@ export const KEY_TO_LABEL: Record<string, string> = {
   "analytics-claw-data-overview": "nav.analyticsClawDataOverview",
   "analytics-cron-job-overview": "nav.analyticsCronJobOverview", //定时任务概览
   "analytics-continuous-governance": "nav.analyticsContinuousGovernance",
+  "monitor-cron-batch-dispatch": "nav.monitorCronBatchDispatch",
   "instance-overview": "nav.instanceOverview",
   "instance-instances": "nav.instanceInstances",
   "instance-allocations": "nav.instanceAllocations",

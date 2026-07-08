@@ -141,6 +141,147 @@ export interface CronOverviewResponse {
   branch_read: CronOverviewBranchReadItem[];
 }
 
+export interface CronDispatchBatchStats {
+  total_batches: number;
+  running_batches: number;
+  completed_batches: number;
+  failed_batches: number;
+  total_intents: number;
+  completed_intents: number;
+  failed_intents: number;
+  pending_intents: number;
+}
+
+export interface CronDispatchBatchItem {
+  batch_id: string;
+  parent_job_id: string;
+  parent_external_job_id: string;
+  tenant_id: string;
+  source_id: string;
+  provider_id: string;
+  model_id: string;
+  agent_id: string;
+  scheduled_fire_at: string | null;
+  callback_received_at: string | null;
+  status: string;
+  lock_owner: string;
+  locked_at: string | null;
+  total_count: number;
+  completed_count: number;
+  failed_count: number;
+  error_message: string;
+  completed_at: string | null;
+  created_at: string | null;
+  updated_at: string | null;
+}
+
+export interface CronDispatchIntentItem {
+  id: number;
+  batch_id: string;
+  intent_role: string;
+  status: string;
+  source_id: string;
+  provider_id: string;
+  model_id: string;
+  tenant_id: string;
+  agent_id: string;
+  job_id: string;
+  parent_job_id: string;
+  scheduled_fire_at: string | null;
+  due_at: string | null;
+  dispatch_order: number;
+  viewer_heat_score: number;
+  attempt_count: number;
+  max_attempts: number;
+  lock_owner: string;
+  locked_at: string | null;
+  acked_at: string | null;
+  completed_at: string | null;
+  error_message: string;
+  created_at: string | null;
+  updated_at: string | null;
+}
+
+export interface CronDispatchEventItem {
+  id: number;
+  batch_id: string;
+  intent_id: number | null;
+  event_type: string;
+  worker_id: string;
+  job_id: string;
+  tenant_id: string;
+  source_id: string;
+  details: Record<string, unknown> | null;
+  created_at: string | null;
+}
+
+export interface CronDispatchBatchesResponse {
+  source_id: string;
+  start_time: string | null;
+  end_time: string | null;
+  stats: CronDispatchBatchStats;
+  items: CronDispatchBatchItem[];
+  total: number;
+  page: number;
+  page_size: number;
+}
+
+export interface CronDispatchBatchDetailResponse {
+  batch: CronDispatchBatchItem;
+  intents: CronDispatchIntentItem[];
+  intent_total: number;
+  events: CronDispatchEventItem[];
+}
+
+export interface CronDispatchPolicyItem {
+  source_id: string;
+  provider_id: string;
+  model_id: string;
+  default_strategy_id: string;
+  strategy_schedule: Record<string, unknown> | null;
+  enabled: boolean;
+  strategy: Record<string, unknown> | null;
+  created_at: string | null;
+  updated_at: string | null;
+}
+
+export interface CronDispatchCapacityItem {
+  id: number;
+  worker_id: string;
+  source_id: string;
+  provider_id: string;
+  model_id: string;
+  strategy_id: string;
+  previous_workers: number;
+  baseline_workers: number;
+  min_workers: number;
+  max_workers: number;
+  effective_workers: number;
+  pending_count: number;
+  claimed_count: number;
+  running_count: number;
+  success_count: number;
+  failure_count: number;
+  error_rate: number;
+  matched_rule: Record<string, unknown> | null;
+  avg_latency_ms: number;
+  decision_reason: string;
+  created_at: string | null;
+}
+
+export interface CronDispatchWorkersResponse {
+  source_id: string;
+  policies: CronDispatchPolicyItem[];
+  current_capacity: CronDispatchCapacityItem[];
+  capacity_events: CronDispatchCapacityItem[];
+}
+
+export interface CronDispatchDateFilters {
+  start_time?: string;
+  end_time?: string;
+  status?: string;
+}
+
 export interface CronJobOverviewSummaryMetric {
   key: string;
   value: string;
@@ -562,6 +703,37 @@ export const monitorApi = {
     }
     const query = params.toString();
     return request(`/monitor/cron/overview${query ? `?${query}` : ""}`);
+  },
+
+  getCronDispatchBatches: async (
+    page = 1,
+    pageSize = 20,
+    filters?: CronDispatchDateFilters,
+  ): Promise<CronDispatchBatchesResponse> => {
+    const params = new URLSearchParams();
+    params.append("page", page.toString());
+    params.append("page_size", pageSize.toString());
+    appendDefinedParams(params, filters);
+    const query = params.toString();
+    return request(`/monitor/cron/dispatch/batches?${query}`);
+  },
+
+  getCronDispatchBatchDetail: async (
+    batchId: string,
+    filters?: {
+      intent_limit?: string;
+      event_limit?: string;
+    },
+  ): Promise<CronDispatchBatchDetailResponse> => {
+    return request(
+      `/monitor/cron/dispatch/batches/${encodeURIComponent(batchId)}${buildQuery(filters)}`,
+    );
+  },
+
+  getCronDispatchWorkers: async (
+    filters?: Omit<CronDispatchDateFilters, "status">,
+  ): Promise<CronDispatchWorkersResponse> => {
+    return request(`/monitor/cron/dispatch/workers${buildQuery(filters)}`);
   },
 
   getCronOverviewStats: async (

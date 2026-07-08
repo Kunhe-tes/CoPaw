@@ -20,6 +20,15 @@ from ...models.cron import (
     CronOverviewMetricItem,
     CronOverviewResponse,
     CronOverviewStatsResponse,
+    CronDispatchBatchDetailResponse,
+    CronDispatchBatchItem,
+    CronDispatchBatchStats,
+    CronDispatchBatchesResponse,
+    CronDispatchCapacityItem,
+    CronDispatchEventItem,
+    CronDispatchIntentItem,
+    CronDispatchPolicyItem,
+    CronDispatchWorkersResponse,
     CronBranchRankingResponse,
     CronBranchRankingItem,
     CronBranchErrorResponse,
@@ -73,6 +82,29 @@ EXECUTION_TIME_FIELDS = [
     "created_at",
 ]
 
+DISPATCH_BATCH_TIME_FIELDS = [
+    "scheduled_fire_at",
+    "callback_received_at",
+    "locked_at",
+    "completed_at",
+    "created_at",
+    "updated_at",
+]
+
+DISPATCH_INTENT_TIME_FIELDS = [
+    "scheduled_fire_at",
+    "due_at",
+    "locked_at",
+    "acked_at",
+    "completed_at",
+    "created_at",
+    "updated_at",
+]
+
+DISPATCH_EVENT_TIME_FIELDS = ["created_at"]
+DISPATCH_CAPACITY_TIME_FIELDS = ["created_at"]
+DISPATCH_POLICY_TIME_FIELDS = ["created_at", "updated_at"]
+
 
 def convert_row_times_direct(row: dict, time_fields: List[str]) -> dict:
     """直接读取时间字段，不做时区转换。
@@ -87,6 +119,30 @@ def convert_row_times_direct(row: dict, time_fields: List[str]) -> dict:
         原始行字典（时间字段不变）
     """
     return row
+
+
+def _parse_json_field(value: Any) -> Any:
+    if value is None or value == "":
+        return None
+    if isinstance(value, (dict, list)):
+        return value
+    if isinstance(value, (bytes, bytearray)):
+        value = value.decode("utf-8", errors="ignore")
+    if isinstance(value, str):
+        try:
+            return json.loads(value)
+        except json.JSONDecodeError:
+            return None
+    return value
+
+
+def _to_float(value: Any) -> float:
+    if value is None:
+        return 0.0
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return 0.0
 
 
 class QueryService:
@@ -247,6 +303,292 @@ class QueryService:
                     row.get("async_status"),
                 )
         return status_map
+
+    def _build_dispatch_batch_where_clause(
+        self,
+        source_id: str,
+        start_time: Optional[datetime] = None,
+        end_time: Optional[datetime] = None,
+        status: Optional[str] = None,
+    ) -> tuple[str, list[Any]]:
+        """构建批调度 batch 查询条件。"""
+        conditions = ["source_id = %s"]
+        sql_params: list[Any] = [source_id]
+
+        if start_time:
+            conditions.append("scheduled_fire_at >= %s")
+            sql_params.append(start_time)
+        if end_time:
+            conditions.append("scheduled_fire_at <= %s")
+            sql_params.append(end_time)
+        if status and status != "all":
+            conditions.append("status = %s")
+            sql_params.append(status)
+
+        return " AND ".join(conditions), sql_params
+
+    def _map_dispatch_batch(self, row: dict) -> CronDispatchBatchItem:
+        return CronDispatchBatchItem.model_validate(
+            convert_row_times_direct(row, DISPATCH_BATCH_TIME_FIELDS),
+        )
+
+    def _map_dispatch_intent(self, row: dict) -> CronDispatchIntentItem:
+        item = convert_row_times_direct(row, DISPATCH_INTENT_TIME_FIELDS)
+        item["viewer_heat_score"] = _to_float(item.get("viewer_heat_score"))
+        return CronDispatchIntentItem.model_validate(item)
+
+    def _map_dispatch_event(self, row: dict) -> CronDispatchEventItem:
+        item = convert_row_times_direct(row, DISPATCH_EVENT_TIME_FIELDS)
+        item["details"] = _parse_json_field(item.get("details"))
+        return CronDispatchEventItem.model_validate(item)
+
+    def _map_dispatch_capacity(self, row: dict) -> CronDispatchCapacityItem:
+        item = convert_row_times_direct(row, DISPATCH_CAPACITY_TIME_FIELDS)
+        item["error_rate"] = _to_float(item.get("error_rate"))
+        item["matched_rule"] = _parse_json_field(item.get("matched_rule"))
+        return CronDispatchCapacityItem.model_validate(item)
+
+    def _map_dispatch_policy(self, row: dict) -> CronDispatchPolicyItem:
+        item = convert_row_times_direct(row, DISPATCH_POLICY_TIME_FIELDS)
+        strategy = {
+            "strategy_id": item.get("strategy_id") or item.get("default_strategy_id"),
+            "min_workers": item.get("min_workers"),
+            "baseline_workers": item.get("baseline_workers"),
+            "max_workers": item.get("max_workers"),
+            "adjust_interval_seconds": item.get("adjust_interval_seconds"),
+            "feedback_window_seconds": item.get("feedback_window_seconds"),
+            "stale_execution_seconds": item.get("stale_execution_seconds"),
+            "error_rate_rules": _parse_json_field(item.get("error_rate_rules")),
+            "description": item.get("description") or "",
+            "enabled": bool(item.get("strategy_enabled", True)),
+        }
+        return CronDispatchPolicyItem(
+            source_id=str(item.get("source_id") or ""),
+            provider_id=str(item.get("provider_id") or ""),
+            model_id=str(item.get("model_id") or ""),
+            default_strategy_id=str(item.get("default_strategy_id") or ""),
+            strategy_schedule=_parse_json_field(item.get("strategy_schedule")),
+            enabled=bool(item.get("enabled", True)),
+            strategy=strategy,
+            created_at=item.get("created_at"),
+            updated_at=item.get("updated_at"),
+        )
+
+    async def get_dispatch_batches(
+        self,
+        *,
+        source_id: str,
+        start_time: Optional[datetime] = None,
+        end_time: Optional[datetime] = None,
+        status: Optional[str] = None,
+        page: int = 1,
+        page_size: int = 20,
+    ) -> CronDispatchBatchesResponse:
+        """查询当前渠道下批调度 batch 概览。"""
+        db = get_db_connection()
+        where_clause, sql_params = self._build_dispatch_batch_where_clause(
+            source_id=source_id,
+            start_time=start_time,
+            end_time=end_time,
+            status=status,
+        )
+        stats_sql = f"""
+            SELECT
+                COUNT(*) AS total_batches,
+                COALESCE(SUM(CASE WHEN status = 'running' THEN 1 ELSE 0 END), 0)
+                    AS running_batches,
+                COALESCE(SUM(CASE WHEN status = 'completed' THEN 1 ELSE 0 END), 0)
+                    AS completed_batches,
+                COALESCE(SUM(CASE WHEN status = 'failed' THEN 1 ELSE 0 END), 0)
+                    AS failed_batches,
+                COALESCE(SUM(total_count), 0) AS total_intents,
+                COALESCE(SUM(completed_count), 0) AS completed_intents,
+                COALESCE(SUM(failed_count), 0) AS failed_intents
+            FROM swe_cron_dispatch_batches
+            WHERE {where_clause}
+        """
+        stats_row = await db.fetch_one(stats_sql, tuple(sql_params)) or {}
+        total_intents = int(stats_row.get("total_intents") or 0)
+        completed_intents = int(stats_row.get("completed_intents") or 0)
+        failed_intents = int(stats_row.get("failed_intents") or 0)
+        stats = CronDispatchBatchStats(
+            total_batches=int(stats_row.get("total_batches") or 0),
+            running_batches=int(stats_row.get("running_batches") or 0),
+            completed_batches=int(stats_row.get("completed_batches") or 0),
+            failed_batches=int(stats_row.get("failed_batches") or 0),
+            total_intents=total_intents,
+            completed_intents=completed_intents,
+            failed_intents=failed_intents,
+            pending_intents=max(total_intents - completed_intents - failed_intents, 0),
+        )
+
+        total = stats.total_batches
+        offset = (page - 1) * page_size
+        rows = await db.fetch_all(
+            f"""
+            SELECT
+                batch_id, parent_job_id, parent_external_job_id, tenant_id,
+                source_id, provider_id, model_id, agent_id,
+                scheduled_fire_at, callback_received_at, status,
+                lock_owner, locked_at, total_count, completed_count,
+                failed_count, error_message, completed_at, created_at, updated_at
+            FROM swe_cron_dispatch_batches
+            WHERE {where_clause}
+            ORDER BY scheduled_fire_at DESC, created_at DESC
+            LIMIT %s OFFSET %s
+            """,
+            tuple(sql_params) + (page_size, offset),
+        )
+        return CronDispatchBatchesResponse(
+            source_id=source_id,
+            start_time=start_time,
+            end_time=end_time,
+            stats=stats,
+            items=[self._map_dispatch_batch(row) for row in rows],
+            total=total,
+            page=page,
+            page_size=page_size,
+        )
+
+    async def get_dispatch_batch_detail(
+        self,
+        *,
+        source_id: str,
+        batch_id: str,
+        intent_limit: int = 100,
+        event_limit: int = 100,
+    ) -> Optional[CronDispatchBatchDetailResponse]:
+        """查询单个批调度 batch 的 intent 和事件明细。"""
+        db = get_db_connection()
+        batch_row = await db.fetch_one(
+            """
+            SELECT
+                batch_id, parent_job_id, parent_external_job_id, tenant_id,
+                source_id, provider_id, model_id, agent_id,
+                scheduled_fire_at, callback_received_at, status,
+                lock_owner, locked_at, total_count, completed_count,
+                failed_count, error_message, completed_at, created_at, updated_at
+            FROM swe_cron_dispatch_batches
+            WHERE source_id = %s AND batch_id = %s
+            """,
+            (source_id, batch_id),
+        )
+        if not batch_row:
+            return None
+
+        count_row = await db.fetch_one(
+            """
+            SELECT COUNT(*) AS count
+            FROM swe_cron_dispatch_intents
+            WHERE source_id = %s AND batch_id = %s
+            """,
+            (source_id, batch_id),
+        )
+        intent_rows = await db.fetch_all(
+            """
+            SELECT
+                id, batch_id, intent_role, status, source_id, provider_id,
+                model_id, tenant_id, agent_id, job_id, parent_job_id,
+                scheduled_fire_at, due_at, dispatch_order, viewer_heat_score,
+                attempt_count, max_attempts, lock_owner, locked_at, acked_at,
+                completed_at, error_message, created_at, updated_at
+            FROM swe_cron_dispatch_intents
+            WHERE source_id = %s AND batch_id = %s
+            ORDER BY
+                CASE intent_role WHEN 'parent' THEN 0 ELSE 1 END,
+                dispatch_order,
+                id
+            LIMIT %s
+            """,
+            (source_id, batch_id, intent_limit),
+        )
+        event_rows = await db.fetch_all(
+            """
+            SELECT
+                id, batch_id, intent_id, event_type, worker_id, job_id,
+                tenant_id, source_id, details, created_at
+            FROM swe_cron_dispatch_events
+            WHERE source_id = %s AND batch_id = %s
+            ORDER BY created_at DESC, id DESC
+            LIMIT %s
+            """,
+            (source_id, batch_id, event_limit),
+        )
+        return CronDispatchBatchDetailResponse(
+            batch=self._map_dispatch_batch(batch_row),
+            intents=[self._map_dispatch_intent(row) for row in intent_rows],
+            intent_total=int((count_row or {}).get("count") or 0),
+            events=[self._map_dispatch_event(row) for row in event_rows],
+        )
+
+    async def get_dispatch_workers(
+        self,
+        *,
+        source_id: str,
+        start_time: Optional[datetime] = None,
+        end_time: Optional[datetime] = None,
+    ) -> CronDispatchWorkersResponse:
+        """查询当前渠道下模型策略和 worker capacity 变动。"""
+        db = get_db_connection()
+        policy_rows = await db.fetch_all(
+            """
+            SELECT
+                p.source_id, p.provider_id, p.model_id,
+                p.default_strategy_id, p.strategy_schedule, p.enabled,
+                p.created_at, p.updated_at,
+                s.strategy_id, s.min_workers, s.baseline_workers, s.max_workers,
+                s.adjust_interval_seconds, s.feedback_window_seconds,
+                s.stale_execution_seconds, s.error_rate_rules,
+                s.enabled AS strategy_enabled, s.description
+            FROM swe_cron_dispatch_model_worker_policy p
+            LEFT JOIN swe_cron_dispatch_worker_strategy s
+                ON p.default_strategy_id = s.strategy_id
+            WHERE p.source_id = %s
+            ORDER BY p.provider_id, p.model_id
+            """,
+            (source_id,),
+        )
+
+        capacity_conditions = ["source_id = %s"]
+        capacity_params: list[Any] = [source_id]
+        if start_time:
+            capacity_conditions.append("created_at >= %s")
+            capacity_params.append(start_time)
+        if end_time:
+            capacity_conditions.append("created_at <= %s")
+            capacity_params.append(end_time)
+        capacity_where = " AND ".join(capacity_conditions)
+
+        latest_rows = await db.fetch_all(
+            """
+            SELECT c.*
+            FROM swe_cron_dispatch_worker_capacity c
+            INNER JOIN (
+                SELECT source_id, provider_id, model_id, strategy_id, MAX(id) AS id
+                FROM swe_cron_dispatch_worker_capacity
+                WHERE source_id = %s
+                GROUP BY source_id, provider_id, model_id, strategy_id
+            ) latest ON c.id = latest.id
+            ORDER BY c.provider_id, c.model_id, c.strategy_id
+            """,
+            (source_id,),
+        )
+        event_rows = await db.fetch_all(
+            f"""
+            SELECT *
+            FROM swe_cron_dispatch_worker_capacity
+            WHERE {capacity_where}
+            ORDER BY created_at DESC, id DESC
+            LIMIT 100
+            """,
+            tuple(capacity_params),
+        )
+        return CronDispatchWorkersResponse(
+            source_id=source_id,
+            policies=[self._map_dispatch_policy(row) for row in policy_rows],
+            current_capacity=[self._map_dispatch_capacity(row) for row in latest_rows],
+            capacity_events=[self._map_dispatch_capacity(row) for row in event_rows],
+        )
 
     async def list_jobs(
         self,
