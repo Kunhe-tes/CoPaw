@@ -810,7 +810,11 @@ if CORS_ORIGINS:
         allow_credentials=True,
         allow_methods=["*"],
         allow_headers=["*"],
-        expose_headers=["Content-Disposition"],
+        expose_headers=[
+            "Content-Disposition",
+            "X-Swe-Msgid",
+            "X-Swe-Sessionid",
+        ],
     )
 
 app.add_middleware(AuthMiddleware)

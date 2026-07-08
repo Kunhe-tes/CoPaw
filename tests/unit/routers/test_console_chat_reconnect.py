@@ -156,6 +156,7 @@ def test_console_chat_reconnect_accepts_chat_id_without_creating_new_chat(
         },
     ) as response:
         assert response.status_code == 200
+        assert "X-Swe-Msgid" not in response.headers
         assert list(response.iter_lines()) == [
             ": keep-alive",
             "",
@@ -202,6 +203,7 @@ def test_console_chat_reconnect_accepts_logical_session_id(
         },
     ) as response:
         assert response.status_code == 200
+        assert "X-Swe-Msgid" not in response.headers
         assert list(response.iter_lines()) == [
             ": keep-alive",
             "",
