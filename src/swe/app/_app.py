@@ -252,8 +252,11 @@ async def _reset_scope_sensitive_runtime_state(app: FastAPI) -> None:
         logger.info(
             "Resetting existing MultiAgentManager before scope cutover...",
         )
-        await existing_manager.stop_all()
-        app.state.multi_agent_manager = None
+        try:
+            await existing_manager.stop_all()
+            app.state.multi_agent_manager = None
+        finally:
+            runtime_diagnostic_manager.set_workspace_metrics(None)
 
     from ..providers.provider_manager import ProviderManager
     from ..providers.rate_limiter import reset_rate_limiter
@@ -651,6 +654,8 @@ async def _shutdown_lifespan_resources(
         await runtime_diagnostic_manager.stop()
     except Exception as e:
         logger.warning("Error stopping runtime diagnostic manager: %s", e)
+    finally:
+        runtime_diagnostic_manager.set_workspace_metrics(None)
 
     cron_notification_worker = getattr(
         app.state,
