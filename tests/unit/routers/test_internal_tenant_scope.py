@@ -379,14 +379,55 @@ def test_internal_batch_initialize_tenants(monkeypatch) -> None:
             source_id="RMASSIST",
             tenant_name="name-111",
             bbk_id="bbk-111",
+            enable_bootstrap_chat=True,
         ),
         call(
             "222",
             source_id="RMASSIST",
             tenant_name="name-222",
             bbk_id="bbk-222",
+            enable_bootstrap_chat=True,
         ),
     ]
+
+
+def test_internal_batch_initialize_can_disable_bootstrap_chat(
+    monkeypatch,
+) -> None:
+    pool = SimpleNamespace(ensure_bootstrap=AsyncMock())
+    client = _build_client(SimpleNamespace())
+    client.app.state.tenant_workspace_pool = pool
+
+    async def fake_resolve_user_identity(**kwargs):
+        tenant_id = kwargs["tenant_id"]
+        return ResolvedIdentity(
+            user_name=f"name-{tenant_id}",
+            bbk_id=f"bbk-{tenant_id}",
+        )
+
+    monkeypatch.setattr(
+        internal_router,
+        "resolve_user_identity",
+        fake_resolve_user_identity,
+    )
+
+    response = client.post(
+        "/internal/tenants/batch-initialize",
+        json={
+            "tenant_ids": "111",
+            "source_id": "RMASSIST",
+            "enable_bootstrap_chat": False,
+        },
+    )
+
+    assert response.status_code == 200
+    pool.ensure_bootstrap.assert_awaited_once_with(
+        "111",
+        source_id="RMASSIST",
+        tenant_name="name-111",
+        bbk_id="bbk-111",
+        enable_bootstrap_chat=False,
+    )
 
 
 def test_internal_batch_initialize_requires_identity_resolution(
@@ -497,6 +538,7 @@ def test_internal_batch_initialize_marks_existing_tenant_as_skipped(
         source_id="RMASSIST",
         tenant_name="name-222",
         bbk_id="bbk-222",
+        enable_bootstrap_chat=True,
     )
 
 
