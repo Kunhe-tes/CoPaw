@@ -381,6 +381,11 @@ class ServiceManager:
                     self.services.pop(desc.name, None)
                     self.reused_services.discard(desc.name)
 
+        if final:
+            self.services.clear()
+            self.reused_services.clear()
+            self.workspace = None
+
     async def _stop_service(
         self,
         descriptor: ServiceDescriptor,

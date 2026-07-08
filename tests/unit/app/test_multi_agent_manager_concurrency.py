@@ -4,6 +4,8 @@
 from __future__ import annotations
 
 import asyncio
+import gc
+import weakref
 from contextlib import suppress
 from types import SimpleNamespace
 from typing import Any
@@ -110,6 +112,37 @@ async def test_service_manager_final_stop_clears_stopped_service_references(
     assert stopped == ["memory_manager", "runner"]
     assert service_manager.services == {}
     assert service_manager.reused_services == set()
+    assert service_manager.workspace is None
+
+
+@pytest.mark.asyncio
+async def test_service_manager_final_stop_clears_service_refs_on_stop_error(
+    tmp_path,
+) -> None:
+    workspace = SimpleNamespace(agent_id="default")
+    service_manager = ServiceManager(workspace)
+
+    class FailingService:
+        async def stop(self) -> None:
+            raise RuntimeError("stop failed")
+
+    service_manager.register(
+        ServiceDescriptor(
+            name="memory_manager",
+            service_class=None,
+            stop_method="stop",
+            reusable=True,
+            priority=20,
+        ),
+    )
+    service_manager.services["memory_manager"] = FailingService()
+    service_manager.reused_services.add("memory_manager")
+
+    await service_manager.stop_all(final=True)
+
+    assert service_manager.services == {}
+    assert service_manager.reused_services == set()
+    assert service_manager.workspace is None
 
 
 @pytest.mark.asyncio
@@ -151,6 +184,74 @@ async def test_service_manager_reload_stop_keeps_reusable_service_reference(
 
     assert stopped == ["runner"]
     assert set(service_manager.services) == {"memory_manager"}
+    assert service_manager.workspace is workspace
+
+
+@pytest.mark.asyncio
+async def test_workspace_final_stop_releases_reverse_service_references(
+    tmp_path,
+) -> None:
+    class Runner:
+        def __init__(self) -> None:
+            self._workspace = None
+            self._chat_manager = object()
+            self._manager = object()
+            self.memory_manager = object()
+
+        def set_workspace(self, workspace) -> None:
+            self._workspace = workspace
+
+        def set_chat_manager(self, chat_manager) -> None:
+            self._chat_manager = chat_manager
+
+    class ChannelManager:
+        def __init__(self) -> None:
+            self._workspace = None
+
+        def set_workspace(self, workspace) -> None:
+            self._workspace = workspace
+
+    class FakeServiceManager:
+        def __init__(self, services) -> None:
+            self.services = services
+
+        async def stop_all(self, *, final: bool, stop_reused: bool) -> None:
+            assert final is True
+            assert stop_reused is True
+
+    async def build_and_stop_workspace():
+        workspace = Workspace.__new__(Workspace)
+        workspace.agent_id = "default"
+        workspace.workspace_dir = tmp_path
+        workspace.tenant_id = "tenant-a"
+        workspace._config = object()
+        workspace._manager = object()
+        workspace._started = True
+        workspace._starting = False
+        runner = Runner()
+        channel_manager = ChannelManager()
+        runner.set_workspace(workspace)
+        channel_manager.set_workspace(workspace)
+        workspace._service_manager = FakeServiceManager(
+            {
+                "runner": runner,
+                "channel_manager": channel_manager,
+            },
+        )
+
+        workspace_ref = weakref.ref(workspace)
+        await Workspace.stop(workspace, final=True)
+        return workspace_ref, runner, channel_manager
+
+    workspace_ref, runner, channel_manager = await build_and_stop_workspace()
+    gc.collect()
+
+    assert workspace_ref() is None
+    assert runner._workspace is None
+    assert runner._chat_manager is None
+    assert runner._manager is None
+    assert runner.memory_manager is None
+    assert channel_manager._workspace is None
 
 
 @pytest.mark.asyncio
