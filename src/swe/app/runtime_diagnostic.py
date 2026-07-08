@@ -11,6 +11,7 @@ import logging
 import math
 import os
 import random
+import sys
 import traceback
 import time
 from collections.abc import Callable
@@ -158,6 +159,7 @@ def install_watchfiles_stack_probe() -> bool:
         logger.warning("Unable to install watchfiles stack probe: %s", exc)
         return False
 
+    original_to_wrapped: dict[object, object] = {}
     for name in ("watch", "awatch"):
         original = getattr(watchfiles, name, None)
         if original is None or getattr(original, "_swe_stack_probe", False):
@@ -170,6 +172,20 @@ def install_watchfiles_stack_probe() -> bool:
         _wrapped._swe_stack_probe = True  # type: ignore[attr-defined]
         _wrapped._swe_original = original  # type: ignore[attr-defined]
         setattr(watchfiles, name, _wrapped)
+        original_to_wrapped[original] = _wrapped
+
+    if original_to_wrapped:
+        for module in tuple(sys.modules.values()):
+            if module is None or module is watchfiles:
+                continue
+            module_globals = getattr(module, "__dict__", None)
+            if not isinstance(module_globals, dict):
+                continue
+            for name in ("watch", "awatch"):
+                current = module_globals.get(name)
+                wrapped = original_to_wrapped.get(current)
+                if wrapped is not None:
+                    module_globals[name] = wrapped
 
     _WATCHFILES_STACK_PROBE_INSTALLED = True
     logger.info("Installed watchfiles stack probe")
