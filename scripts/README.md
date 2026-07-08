@@ -86,6 +86,17 @@ python scripts/inotify_matrix_probe.py \
   --prompt-between-labels
 ```
 
+If each matrix step is captured as a separate JSON file, merge them later and
+recompute cross-step deltas:
+
+```bash
+python scripts/inotify_matrix_probe.py \
+  --from-json /tmp/inotify-empty.json \
+  --from-json /tmp/inotify-workspaces.json \
+  --from-json /tmp/inotify-mcp-clients.json \
+  --from-json /tmp/inotify-queries.json
+```
+
 The output includes `/proc/<pid>/fdinfo` inotify counts, bounded fdinfo watch
 samples (`wd`, `ino`, `sdev`, `mask`, raw line), native thread name counts,
 opt-in `watchfiles.watch`/`awatch` creation stacks, and a
@@ -97,6 +108,7 @@ stack summary and matrix deltas to attribute owners.
 When multiple `--label` values are provided without `--prompt-between-labels`,
 the labels are sampled consecutively without pausing for external matrix
 actions. With `--prompt-between-labels`, each label becomes an operator-gated
-matrix step. The top-level `summary.steps` section reports per-label totals and
-`consecutive_delta` values for inotify fd count, inotify watch count, and native
-`notify-rs*` thread count.
+matrix step. With `--from-json`, each loaded file contributes its captured
+snapshots in argument order. The top-level `summary.steps` section reports
+per-label totals and `consecutive_delta` values for inotify fd count, inotify
+watch count, and native `notify-rs*` thread count.

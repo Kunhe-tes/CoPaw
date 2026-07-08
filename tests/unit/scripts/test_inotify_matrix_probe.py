@@ -412,3 +412,163 @@ def test_input_from_stderr_keeps_prompt_out_of_stdout(
     captured = capsys.readouterr()
     assert captured.out == ""
     assert captured.err == "continue?"
+
+
+def test_load_snapshots_from_files_merges_probe_outputs(tmp_path) -> None:
+    probe = _load_probe_module()
+    first = tmp_path / "empty.json"
+    second = tmp_path / "workspaces.json"
+    first.write_text(
+        json.dumps(
+            {
+                "snapshots": [
+                    {
+                        "label": "empty",
+                        "proc": {"inotify_fd_count": 1},
+                    },
+                ],
+            },
+        ),
+        encoding="utf-8",
+    )
+    second.write_text(
+        json.dumps(
+            {
+                "label": "workspaces",
+                "proc": {"inotify_fd_count": 4},
+            },
+        ),
+        encoding="utf-8",
+    )
+
+    snapshots = probe.load_snapshots_from_files([first, second])
+
+    assert [snapshot["label"] for snapshot in snapshots] == [
+        "empty",
+        "workspaces",
+    ]
+
+
+def test_load_snapshots_from_files_rejects_malformed_snapshot_item(
+    tmp_path,
+) -> None:
+    probe = _load_probe_module()
+    capture = tmp_path / "bad.json"
+    capture.write_text(
+        json.dumps({"snapshots": [{"label": "empty", "proc": {}}, None]}),
+        encoding="utf-8",
+    )
+
+    try:
+        probe.load_snapshots_from_files([capture])
+    except ValueError as exc:
+        assert f"{capture} snapshots[1] is not an object" in str(exc)
+    else:
+        raise AssertionError("expected malformed snapshot item to fail")
+
+
+def test_main_from_json_recomputes_summary(
+    tmp_path,
+    monkeypatch,
+    capsys,
+) -> None:
+    probe = _load_probe_module()
+    capture = tmp_path / "capture.json"
+    capture.write_text(
+        json.dumps(
+            {
+                "snapshots": [
+                    {
+                        "label": "empty",
+                        "proc": {
+                            "inotify_fd_count": 1,
+                            "inotify_watch_count": 2,
+                            "thread_name_counts": {"notify-rs": 1},
+                        },
+                    },
+                    {
+                        "label": "workspaces",
+                        "proc": {
+                            "inotify_fd_count": 3,
+                            "inotify_watch_count": 6,
+                            "thread_name_counts": {"notify-rs inoti": 3},
+                        },
+                    },
+                ],
+            },
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        probe.sys,
+        "argv",
+        [
+            "inotify_matrix_probe.py",
+            "--from-json",
+            str(capture),
+        ],
+    )
+
+    assert probe.main() == 0
+
+    output = json.loads(capsys.readouterr().out)
+    assert [snapshot["label"] for snapshot in output["snapshots"]] == [
+        "empty",
+        "workspaces",
+    ]
+    assert output["summary"]["steps"][1]["consecutive_delta"] == {
+        "inotify_fd_count": 2,
+        "inotify_watch_count": 4,
+        "notify_thread_count": 2,
+    }
+
+
+def test_main_from_json_reports_file_errors(
+    tmp_path,
+    monkeypatch,
+    capsys,
+) -> None:
+    probe = _load_probe_module()
+    capture = tmp_path / "bad.json"
+    capture.write_text("{", encoding="utf-8")
+    monkeypatch.setattr(
+        probe.sys,
+        "argv",
+        [
+            "inotify_matrix_probe.py",
+            "--from-json",
+            str(capture),
+        ],
+    )
+
+    assert probe.main() == 2
+
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert f"inotify_matrix_probe: {capture}:" in captured.err
+
+
+def test_main_rejects_from_json_with_label(monkeypatch, capsys) -> None:
+    probe = _load_probe_module()
+    monkeypatch.setattr(
+        probe.sys,
+        "argv",
+        [
+            "inotify_matrix_probe.py",
+            "--from-json",
+            "capture.json",
+            "--label",
+            "empty",
+        ],
+    )
+
+    try:
+        probe.main()
+    except SystemExit as exc:
+        assert exc.code == 2
+        assert (
+            "--from-json cannot be combined with --label"
+            in capsys.readouterr().err
+        )
+    else:
+        raise AssertionError("expected argparse to reject mixed modes")

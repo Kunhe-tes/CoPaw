@@ -331,6 +331,31 @@ def collect_snapshots(
     return snapshots
 
 
+def load_snapshots_from_files(paths: list[Path]) -> list[dict[str, Any]]:
+    snapshots: list[dict[str, Any]] = []
+    for path in paths:
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            raise ValueError(f"{path}: {exc}") from exc
+        if isinstance(payload, dict) and isinstance(
+            payload.get("snapshots"),
+            list,
+        ):
+            for index, item in enumerate(payload["snapshots"]):
+                if not isinstance(item, dict):
+                    raise ValueError(
+                        f"{path} snapshots[{index}] is not an object",
+                    )
+                snapshots.append(item)
+            continue
+        if isinstance(payload, dict) and "proc" in payload:
+            snapshots.append(payload)
+            continue
+        raise ValueError(f"{path} does not contain probe snapshots")
+    return snapshots
+
+
 def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
@@ -356,10 +381,18 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--label",
         action="append",
-        required=True,
         help=(
             "Snapshot label. Repeat to collect multiple labels; by default "
             "they are sampled back-to-back unless --prompt-between-labels is set."
+        ),
+    )
+    parser.add_argument(
+        "--from-json",
+        action="append",
+        type=Path,
+        help=(
+            "Load snapshots from a previous probe JSON file. Repeat to merge "
+            "separate matrix captures and recompute the summary."
         ),
     )
     parser.add_argument(
@@ -370,21 +403,36 @@ def _parse_args() -> argparse.Namespace:
             "matrix action before sampling."
         ),
     )
-    return parser.parse_args()
+    args = parser.parse_args()
+    if args.from_json and args.label:
+        parser.error("--from-json cannot be combined with --label")
+    if not args.from_json and not args.label:
+        parser.error("one of --label or --from-json is required")
+    if args.from_json and args.prompt_between_labels:
+        parser.error("--prompt-between-labels requires --label")
+    return args
 
 
 def main() -> int:
     args = _parse_args()
-    snapshots = collect_snapshots(
-        labels=args.label,
-        pid=args.pid,
-        proc_root=args.proc_root,
-        runtime_url=args.runtime_url,
-        token=args.token,
-        timeout_seconds=args.timeout_seconds,
-        prompt_between_labels=args.prompt_between_labels,
-        input_func=_input_from_stderr,
-    )
+    try:
+        snapshots = (
+            load_snapshots_from_files(args.from_json or [])
+            if args.from_json
+            else collect_snapshots(
+                labels=args.label or [],
+                pid=args.pid,
+                proc_root=args.proc_root,
+                runtime_url=args.runtime_url,
+                token=args.token,
+                timeout_seconds=args.timeout_seconds,
+                prompt_between_labels=args.prompt_between_labels,
+                input_func=_input_from_stderr,
+            )
+        )
+    except ValueError as exc:
+        print(f"inotify_matrix_probe: {exc}", file=sys.stderr)
+        return 2
     print(
         json.dumps(
             {
