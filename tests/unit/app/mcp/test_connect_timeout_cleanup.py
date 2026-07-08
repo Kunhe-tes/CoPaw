@@ -248,6 +248,80 @@ async def test_stdio_connect_propagates_startup_errors_immediately(
 
 
 @pytest.mark.asyncio
+async def test_stdio_close_cleans_half_connected_lifecycle() -> None:
+    cancelled = asyncio.Event()
+
+    client = StdIOStatefulClient(
+        name="demo",
+        command="python",
+        args=["-c", "print('ready')"],
+        env=None,
+        cwd=None,
+    )
+
+    async def wait_for_stop() -> None:
+        try:
+            await asyncio.Event().wait()
+        finally:
+            cancelled.set()
+
+    client._lifecycle_task = asyncio.create_task(wait_for_stop())
+    client.session = object()
+    client._cached_tools = ["tool"]
+    client._ready_event.set()
+    client._startup_waiter = asyncio.get_running_loop().create_future()
+    client.is_connected = False
+    await asyncio.sleep(0)
+
+    await asyncio.wait_for(client.close(), timeout=0.2)
+
+    assert cancelled.is_set()
+    assert client._stop_event.is_set()
+    assert client._lifecycle_task is None
+    assert client.session is None
+    assert client.is_connected is False
+    assert client._cached_tools is None
+    assert client._ready_event.is_set() is False
+    assert client._startup_waiter is None
+
+
+@pytest.mark.asyncio
+async def test_stdio_close_resets_state_when_half_connected_cleanup_fails() -> (
+    None
+):
+    client = StdIOStatefulClient(
+        name="demo",
+        command="python",
+        args=["-c", "print('ready')"],
+        env=None,
+        cwd=None,
+    )
+
+    async def failing_lifecycle() -> None:
+        try:
+            await asyncio.Event().wait()
+        finally:
+            raise RuntimeError("cleanup failed")
+
+    client._lifecycle_task = asyncio.create_task(failing_lifecycle())
+    client.session = object()
+    client._cached_tools = ["tool"]
+    client._ready_event.set()
+    client._startup_waiter = asyncio.get_running_loop().create_future()
+    client.is_connected = False
+    await asyncio.sleep(0)
+
+    await client.close(ignore_errors=True)
+
+    assert client._lifecycle_task is None
+    assert client.session is None
+    assert client.is_connected is False
+    assert client._cached_tools is None
+    assert client._ready_event.is_set() is False
+    assert client._startup_waiter is None
+
+
+@pytest.mark.asyncio
 async def test_stdio_reload_waits_for_reconnected_session(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -357,6 +431,78 @@ async def test_http_client_idle_wait_is_event_driven(
     )
 
     await _assert_client_idle_does_not_poll_sleep(monkeypatch, client)
+
+
+@pytest.mark.asyncio
+async def test_http_close_cleans_half_connected_lifecycle() -> None:
+    cancelled = asyncio.Event()
+
+    client = HttpStatefulClient(
+        name="demo",
+        transport="streamable_http",
+        url="https://mcp.example.test/stream",
+        headers=None,
+    )
+
+    async def wait_for_stop() -> None:
+        try:
+            await asyncio.Event().wait()
+        finally:
+            cancelled.set()
+
+    client._lifecycle_task = asyncio.create_task(wait_for_stop())
+    client.session = object()
+    client._cached_tools = ["tool"]
+    client._ready_event.set()
+    client._startup_waiter = asyncio.get_running_loop().create_future()
+    client.is_connected = False
+    await asyncio.sleep(0)
+
+    await asyncio.wait_for(client.close(), timeout=0.2)
+
+    assert cancelled.is_set()
+    assert client._stop_event.is_set()
+    assert client._lifecycle_task is None
+    assert client.session is None
+    assert client.is_connected is False
+    assert client._cached_tools is None
+    assert client._ready_event.is_set() is False
+    assert client._startup_waiter is None
+
+
+@pytest.mark.asyncio
+async def test_http_close_resets_state_when_half_connected_cleanup_fails() -> (
+    None
+):
+    client = HttpStatefulClient(
+        name="demo",
+        transport="streamable_http",
+        url="https://mcp.example.test/stream",
+        headers=None,
+    )
+
+    async def failing_lifecycle() -> None:
+        try:
+            await asyncio.Event().wait()
+        finally:
+            raise RuntimeError("cleanup failed")
+
+    client._lifecycle_task = asyncio.create_task(failing_lifecycle())
+    client.session = object()
+    client._cached_tools = ["tool"]
+    client._ready_event.set()
+    client._startup_waiter = asyncio.get_running_loop().create_future()
+    client.is_connected = False
+    await asyncio.sleep(0)
+
+    await client.close(ignore_errors=True)
+
+    assert client._lifecycle_task is None
+    assert client.session is None
+    assert client.is_connected is False
+    assert client._cached_tools is None
+    assert client._ready_event.is_set() is False
+    assert client._startup_waiter is None
 
 
 @pytest.mark.asyncio

@@ -69,6 +69,17 @@ async def _finalize_lifecycle_task(
     await _cancel_lifecycle_task(lifecycle_task)
 
 
+def _reset_client_state(client: Any) -> None:
+    client._lifecycle_task = None
+    client.session = None
+    client.is_connected = False
+    client._cached_tools = None
+    client._ready_event.clear()
+    if client._startup_waiter and not client._startup_waiter.done():
+        client._startup_waiter.cancel()
+    client._startup_waiter = None
+
+
 async def _call_with_timeout(
     coro,
     timeout: float,
@@ -422,7 +433,7 @@ class StdIOStatefulClient(StatefulClientBase):
         Raises:
             RuntimeError: If not connected (unless ignore_errors=True)
         """
-        if not self.is_connected:
+        if not self.is_connected and self._lifecycle_task is None:
             if not ignore_errors:
                 raise RuntimeError(
                     f"MCP client '{self.name}' is not connected. "
@@ -434,14 +445,18 @@ class StdIOStatefulClient(StatefulClientBase):
             # Signal stop and wait for lifecycle task to finish
             self._stop_event.set()
             if self._lifecycle_task:
-                await self._lifecycle_task
-                self._lifecycle_task = None
+                if self.is_connected:
+                    await self._lifecycle_task
+                else:
+                    await _finalize_lifecycle_task(self._lifecycle_task)
         except Exception as e:
             if not ignore_errors:
                 raise
             logger.warning(
                 f"Error closing MCP client '{self.name}': {e}",
             )
+        finally:
+            _reset_client_state(self)
 
     async def reload(self, timeout: float = 30.0) -> None:
         """Reload the MCP client (reconnect).
@@ -828,7 +843,7 @@ class HttpStatefulClient(StatefulClientBase):
         Raises:
             RuntimeError: If not connected (unless ignore_errors=True)
         """
-        if not self.is_connected:
+        if not self.is_connected and self._lifecycle_task is None:
             if not ignore_errors:
                 raise RuntimeError(
                     f"MCP client '{self.name}' is not connected. "
@@ -839,14 +854,18 @@ class HttpStatefulClient(StatefulClientBase):
         try:
             self._stop_event.set()
             if self._lifecycle_task:
-                await self._lifecycle_task
-                self._lifecycle_task = None
+                if self.is_connected:
+                    await self._lifecycle_task
+                else:
+                    await _finalize_lifecycle_task(self._lifecycle_task)
         except Exception as e:
             if not ignore_errors:
                 raise
             logger.warning(
                 f"Error closing MCP client '{self.name}': {e}",
             )
+        finally:
+            _reset_client_state(self)
 
     async def list_tools(self, timeout: float = MCP_CALL_TIMEOUT):
         """Get all available tools from the server.
