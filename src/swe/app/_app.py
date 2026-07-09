@@ -224,10 +224,10 @@ def _get_positive_int_env(name: str, default: int) -> int:
 
 
 def _configure_async_thread_pools() -> None:
-    anyio_thread_tokens = _get_positive_int_env("ANYIO_THREAD_TOKENS", 16)
+    anyio_thread_tokens = _get_positive_int_env("ANYIO_THREAD_TOKENS", 32)
     asyncio_executor_workers = _get_positive_int_env(
         "ASYNCIO_EXECUTOR_WORKERS",
-        16,
+        32,
     )
 
     anyio_limiter = anyio.to_thread.current_default_thread_limiter()
@@ -617,9 +617,9 @@ async def _start_lifespan_background_services(
 ) -> None:
     """启动生命周期内常驻的后台服务。"""
     await start_service_heartbeat()
-    get_monitor_sync_client().schedule_swe_cron_warmup(
-        start_delay_seconds=5.0,
-    )
+    # get_monitor_sync_client().schedule_swe_cron_warmup(
+    #     start_delay_seconds=5.0,
+    # )
     cron_notification_worker = CronNotificationWorker(
         multi_agent_manager=multi_agent_manager,
     )
