@@ -3318,6 +3318,8 @@ class AgentRunner(Runner):
         outcome: _QueryTurnOutcome,
     ) -> Msg | None:
         """执行 STOP hook，必要时把附加上下文写入 agent memory。"""
+        if outcome.plan_interaction_turn_boundary:
+            return None
         if not _hook_config_enabled(
             runtime.tenant_hooks,
             runtime.agent_config,

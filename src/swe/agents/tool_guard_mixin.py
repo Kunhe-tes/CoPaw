@@ -1941,6 +1941,13 @@ class ToolGuardMixin:
     # _reasoning override (guard-aware)
     # ------------------------------------------------------------------
 
+    def _consume_plan_interaction_turn_boundary(self) -> bool:
+        """Consume the plan interaction turn-boundary marker once."""
+        if not getattr(self, _PLAN_INTERACTION_TURN_BOUNDARY_ATTR, False):
+            return False
+        setattr(self, _PLAN_INTERACTION_TURN_BOUNDARY_ATTR, False)
+        return True
+
     async def _reasoning(
         self,
         tool_choice: Literal["auto", "none", "required"] | None = None,
@@ -1953,8 +1960,7 @@ class ToolGuardMixin:
         completion message so the ``ReActAgent.reply`` loop exits
         naturally.
         """
-        if getattr(self, _PLAN_INTERACTION_TURN_BOUNDARY_ATTR, False):
-            setattr(self, _PLAN_INTERACTION_TURN_BOUNDARY_ATTR, False)
+        if self._consume_plan_interaction_turn_boundary():
             return Msg(self.name, [], "assistant")
 
         with self._agent_phase_context(
@@ -1989,6 +1995,12 @@ class ToolGuardMixin:
         return await super()._reasoning(  # type: ignore[misc]
             tool_choice=tool_choice,
         )
+
+    async def _summarizing(self) -> Msg:
+        """Short-circuit max-iteration summarizing after a plan card."""
+        if self._consume_plan_interaction_turn_boundary():
+            return Msg(self.name, [], "assistant")
+        return await super()._summarizing()  # type: ignore[misc]
 
     async def _reason_about_replay_done(self) -> Msg | None:
         """Emit replay continuation or completion message.

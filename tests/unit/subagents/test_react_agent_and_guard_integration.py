@@ -8,6 +8,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from agentscope.message import Msg
 from agentscope.tool import ToolResponse
 
 from swe.agents import react_agent as react_agent_module
@@ -39,6 +40,15 @@ class _ReasoningBaseAgent(_BaseAgent):
         del tool_choice
         self.reasoning_called = True
         raise AssertionError("Plan interaction boundary must stop reasoning")
+
+
+class _SummarizingBaseAgent(_BaseAgent):
+    def __init__(self) -> None:
+        self.summarizing_called = False
+
+    async def _summarizing(self):
+        self.summarizing_called = True
+        return Msg("Friday", "unexpected summary", "assistant")
 
 
 class _PlanningToolkit:
@@ -165,6 +175,36 @@ class _FakePlanInteractionReasoningAgent(
 
     def __init__(self, tmp_path: Path):
         _ReasoningBaseAgent.__init__(self)
+        self._request_context = {
+            "session_id": "session-1",
+            "agent_role": "main",
+            "plan_mode_enabled": False,
+        }
+        self._agent_config = SimpleNamespace()
+        self._workspace_dir = tmp_path
+        self.memory = _Memory()
+        self.printed = []
+        self._tool_guard_lock = asyncio.Lock()
+        self.toolkit = _PlanningToolkit()
+
+    def _ensure_tool_guard(self) -> None:
+        self._tool_guard_engine = SimpleNamespace(enabled=False)
+
+    async def _emit_tool_hook(self, *args, **kwargs):
+        return MergedHookResult()
+
+    async def print(self, msg, *args, **kwargs):
+        self.printed.append(msg)
+
+
+class _FakePlanInteractionSummarizingAgent(
+    ToolGuardMixin,
+    _SummarizingBaseAgent,
+):
+    name = "Friday"
+
+    def __init__(self, tmp_path: Path):
+        _SummarizingBaseAgent.__init__(self)
         self._request_context = {
             "session_id": "session-1",
             "agent_role": "main",
@@ -608,6 +648,31 @@ async def test_plan_interaction_card_stops_next_reasoning_turn(
     msg = await agent._reasoning()
 
     assert agent.reasoning_called is False
+    assert msg.role == "assistant"
+    assert msg.content == []
+
+
+@pytest.mark.asyncio
+async def test_plan_interaction_card_stops_max_iter_summarizing(
+    tmp_path: Path,
+) -> None:
+    """最后一次 ReAct iteration 发出卡片后不能再生成总结。"""
+    agent = _FakePlanInteractionSummarizingAgent(tmp_path)
+
+    await agent._acting(
+        {
+            "id": "tool-plan-1",
+            "name": "ask_plan_clarification",
+            "input": {
+                "prompt": "请选择范围",
+                "kind": "customer_operation_plan",
+            },
+        },
+    )
+
+    msg = await agent._summarizing()
+
+    assert agent.summarizing_called is False
     assert msg.role == "assistant"
     assert msg.content == []
 
