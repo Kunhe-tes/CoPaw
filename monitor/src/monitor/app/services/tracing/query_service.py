@@ -46,6 +46,7 @@ logger = logging.getLogger(__name__)
 
 # 需要从统计中排除的 source_id（测试平台等）
 EXCLUDED_SOURCE_IDS = ["default"]
+EXTENDED_TREND_SOURCE_ID = "RMASSIST"
 
 LATEST_FEEDBACK_JOIN_SQL = """
     LEFT JOIN (
@@ -179,19 +180,35 @@ def build_cron_bbk_in_filter(bbk_ids: Optional[str]) -> tuple[str, list[str]]:
     return f" AND j.bbk_id IN ({placeholders})", ids
 
 
-def _summarize_task_status_rows(rows: list[dict]) -> tuple[int, int, int, int]:
-    """汇总定时任务状态及已读数量."""
+def _summarize_task_status_rows(
+    rows: list[dict],
+) -> tuple[int, int, int, int, int]:
+    """汇总定时任务状态及已读数量.
+
+    返回: (success, running, failed, cancelled, read_count)
+    """
     success = 0
+    running = 0
     failed = 0
     cancelled = 0
     read_count = 0
 
     for row in rows:
         status = row["status"]
+        async_status = row.get("async_status")
         count = row["count"]
 
+        # 综合状态判断
         if status == "success":
-            success += count
+            if async_status == "success":
+                success += count
+            elif async_status is None or async_status == "":
+                running += count
+            elif async_status == "error":
+                failed += count
+            else:
+                # 其他 async_status 值视为运行中
+                running += count
         elif status in ("error", "timeout"):
             failed += count
         elif status in ("cancelled", "skipped"):
@@ -200,7 +217,7 @@ def _summarize_task_status_rows(rows: list[dict]) -> tuple[int, int, int, int]:
         if row["is_read"]:
             read_count += count
 
-    return success, failed, cancelled, read_count
+    return success, running, failed, cancelled, read_count
 
 
 class TracingQueryService:  # pylint: disable=too-many-public-methods
@@ -246,6 +263,7 @@ class TracingQueryService:  # pylint: disable=too-many-public-methods
             (top_mcp_tools, mcp_servers),
             branch_breakdown,
             total_skill_calls,
+            customer_click_stats,
         ) = await self._fetch_overview_data(
             source_id,
             start_date,
@@ -267,6 +285,7 @@ class TracingQueryService:  # pylint: disable=too-many-public-methods
             mcp_servers=mcp_servers,
             branch_breakdown=branch_breakdown,
             total_skill_calls=total_skill_calls,
+            customer_click_stats=customer_click_stats,
         )
 
     async def _fetch_overview_data(
@@ -302,6 +321,12 @@ class TracingQueryService:  # pylint: disable=too-many-public-methods
                 end_date,
                 bbk_ids,
             ),
+            self._get_customer_click_stats(
+                source_id,
+                start_date,
+                end_date,
+                bbk_ids,
+            ),
         )
 
     def _build_overview_stats(
@@ -319,8 +344,11 @@ class TracingQueryService:  # pylint: disable=too-many-public-methods
         mcp_servers: list,
         branch_breakdown: Any,
         total_skill_calls: int = 0,
+        customer_click_stats: Optional[dict[str, int]] = None,
     ) -> OverviewStats:
         """构建运营概览统计对象."""
+        if customer_click_stats is None:
+            customer_click_stats = {}
         return OverviewStats(
             online_users=online_users,
             online_user_ids=online_user_ids,
@@ -338,6 +366,9 @@ class TracingQueryService:  # pylint: disable=too-many-public-methods
                 token_row["total_traces"] or 0 if token_row else 0
             ),
             total_skill_calls=total_skill_calls,
+            plan_customers=customer_click_stats.get("plan_customers", 0),
+            insight_customers=customer_click_stats.get("insight_customers", 0),
+            phone_customers=customer_click_stats.get("phone_customers", 0),
             avg_duration_ms=self._extract_avg_duration(token_row),
             top_tools=top_tools,
             top_skills=top_skills,
@@ -457,6 +488,55 @@ class TracingQueryService:  # pylint: disable=too-many-public-methods
             ORDER BY value DESC
             LIMIT 5
         """
+        if source_id == "all":
+            customer_query = f"""
+                SELECT CASE WHEN bbk_id = 'V00' THEN '100' ELSE bbk_id END AS bbk_id,
+                       COUNT(
+                           DISTINCT CONCAT(
+                               COALESCE(cron_task_id, ''),
+                               '|',
+                               COALESCE(customer_id, '')
+                           )
+                       ) AS value
+                FROM swe_html_preview_click_events
+                WHERE clicked_at >= %s AND clicked_at < %s
+                  AND source_id NOT IN ({exclude_placeholders})
+                  AND bbk_id IS NOT NULL AND bbk_id != ''{bbk_filter_sql}
+                  AND button_type = 'plan'
+                  AND cron_task_id IS NOT NULL
+                  AND customer_id IS NOT NULL
+                GROUP BY CASE WHEN bbk_id = 'V00' THEN '100' ELSE bbk_id END
+                ORDER BY value DESC
+                LIMIT 5
+            """
+            customer_params = (
+                start_date,
+                end_date,
+                *EXCLUDED_SOURCE_IDS,
+                *bbk_params,
+            )
+        else:
+            customer_query = f"""
+                SELECT CASE WHEN bbk_id = 'V00' THEN '100' ELSE bbk_id END AS bbk_id,
+                       COUNT(
+                           DISTINCT CONCAT(
+                               COALESCE(cron_task_id, ''),
+                               '|',
+                               COALESCE(customer_id, '')
+                           )
+                       ) AS value
+                FROM swe_html_preview_click_events
+                WHERE source_id = %s
+                  AND clicked_at >= %s AND clicked_at < %s
+                  AND bbk_id IS NOT NULL AND bbk_id != ''{bbk_filter_sql}
+                  AND button_type = 'plan'
+                  AND cron_task_id IS NOT NULL
+                  AND customer_id IS NOT NULL
+                GROUP BY CASE WHEN bbk_id = 'V00' THEN '100' ELSE bbk_id END
+                ORDER BY value DESC
+                LIMIT 5
+            """
+            customer_params = (source_id, start_date, end_date, *bbk_params)
 
         # 定时任务分行统计查询
         cron_bbk_filter_sql, cron_bbk_params = build_cron_bbk_in_filter(
@@ -516,6 +596,10 @@ class TracingQueryService:  # pylint: disable=too-many-public-methods
         sessions_rows = await self._db.fetch_all(sessions_query, trace_params)
         tokens_rows = await self._db.fetch_all(tokens_query, trace_params)
         skills_rows = await self._db.fetch_all(skills_query, span_params)
+        customer_rows = await self._db.fetch_all(
+            customer_query,
+            customer_params,
+        )
         cron_rows = await self._db.fetch_all(cron_query, cron_params)
 
         def build_branch_items(rows: list) -> list[BranchMetricItem]:
@@ -542,6 +626,7 @@ class TracingQueryService:  # pylint: disable=too-many-public-methods
             tokens=build_branch_items(tokens_rows),
             skills=build_branch_items(skills_rows),
             cron_tasks=build_branch_items(cron_rows),
+            customers=build_branch_items(customer_rows),
         )
 
     async def get_growth_stats(
@@ -557,8 +642,6 @@ class TracingQueryService:  # pylint: disable=too-many-public-methods
         统计范围：
         - 主事实表为 `swe_tracing_traces`，用于调用量、Token、会话数、
           活跃用户数等核心规模指标。
-        - 技能调用量来自 `swe_tracing_spans`，仅统计
-          `event_type='skill_invocation'` 且 `skill_name` 非空的记录。
         - 定时任务执行量来自 `swe_cron_executions` 与 `swe_cron_jobs` 的
           关联结果，口径为有效任务的执行记录数。
         - `source_id='all'` 时汇总全部正式平台，并排除
@@ -577,7 +660,6 @@ class TracingQueryService:  # pylint: disable=too-many-public-methods
         - `tokensGrowth`：资源消耗环比，口径为 `total_tokens` 汇总值。
         - `sessionGrowth`：会话数环比，口径为 `session_id` 去重数。
         - `userGrowth`：活跃用户数环比，口径为 `user_id` 去重数。
-        - `skillGrowth`：技能调用次数环比，口径为技能调用 span 数。
         - `cronGrowth`：定时任务执行次数环比，口径为 cron 执行记录数。
         - `avgRoundsGrowth`：单次会话平均轮数环比，口径为 `calls/sessions`。
         - `multiRoundRatioGrowth`：多轮会话占比环比，口径为大于 3 轮
@@ -659,40 +741,6 @@ class TracingQueryService:  # pylint: disable=too-many-public-methods
                 "users": row["users"] or 0,
             }
 
-        async def get_skill_calls(
-            s: datetime,
-            e: datetime,
-            is_prev: bool = False,
-        ) -> int:
-            # 技能调用量单独取 span 表口径，避免把普通 trace 误计为技能调用。
-            # 使用 DISTINCT trace_id 去重，与排行榜口径一致。
-            time_compare = "<" if is_prev else "<="
-            if source_id == "all":
-                exclude_placeholders = ", ".join(
-                    ["%s"] * len(EXCLUDED_SOURCE_IDS),
-                )
-                query = f"""
-                    SELECT COUNT(DISTINCT trace_id) as total
-                    FROM swe_tracing_spans
-                    WHERE start_time >= %s AND start_time {time_compare} %s
-                      AND source_id NOT IN ({exclude_placeholders})
-                      AND user_id != 'default'
-                      AND skill_name IS NOT NULL{bbk_filter_sql}
-                """
-                params = (s, e, *EXCLUDED_SOURCE_IDS, *bbk_filter_params)
-                row = await self._db.fetch_one(query, params)
-            else:
-                query = f"""
-                    SELECT COUNT(DISTINCT trace_id) as total
-                    FROM swe_tracing_spans
-                    WHERE source_id = %s AND start_time >= %s AND start_time {time_compare} %s
-                      AND user_id != 'default'
-                      AND skill_name IS NOT NULL{bbk_filter_sql}
-                """
-                params = (source_id, s, e, *bbk_filter_params)
-                row = await self._db.fetch_one(query, params)
-            return int((row or {}).get("total") or 0)
-
         async def get_cron_tasks_count(
             s: datetime,
             e: datetime,
@@ -744,18 +792,55 @@ class TracingQueryService:  # pylint: disable=too-many-public-methods
             row = await self._db.fetch_one(query, query_params)
             return int((row or {}).get("total") or 0)
 
+        async def get_customer_click_stats_for_growth(
+            s: datetime,
+            e: datetime,
+            is_prev: bool = False,
+        ) -> dict[str, int]:
+            """获取客户点击统计（用于增长率计算）."""
+            time_compare = "<" if is_prev else "<="
+            if source_id == "all":
+                exclude_placeholders = ", ".join(
+                    ["%s"] * len(EXCLUDED_SOURCE_IDS),
+                )
+                query = f"""
+                    SELECT
+                        button_type,
+                        COUNT(DISTINCT CONCAT(COALESCE(cron_task_id, ''), '|', COALESCE(customer_id, ''))) as customer_count
+                    FROM swe_html_preview_click_events
+                    WHERE clicked_at >= %s AND clicked_at {time_compare} %s
+                      AND source_id NOT IN ({exclude_placeholders})
+                      AND button_type IN ('plan', 'insight', 'phone')
+                      AND cron_task_id IS NOT NULL
+                      AND customer_id IS NOT NULL{bbk_filter_sql}
+                    GROUP BY button_type
+                """
+                params = (s, e, *EXCLUDED_SOURCE_IDS, *bbk_filter_params)
+                rows = await self._db.fetch_all(query, params)
+            else:
+                query = f"""
+                    SELECT
+                        button_type,
+                        COUNT(DISTINCT CONCAT(COALESCE(cron_task_id, ''), '|', COALESCE(customer_id, ''))) as customer_count
+                    FROM swe_html_preview_click_events
+                    WHERE source_id = %s AND clicked_at >= %s AND clicked_at {time_compare} %s
+                      AND button_type IN ('plan', 'insight', 'phone')
+                      AND cron_task_id IS NOT NULL
+                      AND customer_id IS NOT NULL{bbk_filter_sql}
+                    GROUP BY button_type
+                """
+                params = (source_id, s, e, *bbk_filter_params)
+                rows = await self._db.fetch_all(query, params)
+
+            result = {"plan": 0, "insight": 0, "phone": 0}
+            for row in rows:
+                btn = row["button_type"]
+                if btn in result:
+                    result[btn] = row["customer_count"] or 0
+            return result
+
         curr = await get_stats(start_date, end_date, is_prev=False)
         prev = await get_stats(prev_start, prev_end, is_prev=True)
-        curr_skill_calls = await get_skill_calls(
-            start_date,
-            end_date,
-            is_prev=False,
-        )
-        prev_skill_calls = await get_skill_calls(
-            prev_start,
-            prev_end,
-            is_prev=True,
-        )
         curr_cron_tasks = await get_cron_tasks_count(
             start_date,
             end_date,
@@ -767,7 +852,19 @@ class TracingQueryService:  # pylint: disable=too-many-public-methods
             is_prev=True,
         )
 
-        # 深度指标与看板“使用深度”卡片口径保持一致：占比类指标和时长类
+        # 获取当前和上一周期的客户点击统计
+        curr_click_stats = await get_customer_click_stats_for_growth(
+            start_date,
+            end_date,
+            is_prev=False,
+        )
+        prev_click_stats = await get_customer_click_stats_for_growth(
+            prev_start,
+            prev_end,
+            is_prev=True,
+        )
+
+        # 深度指标与看板”使用深度”卡片口径保持一致：占比类指标和时长类
         # 指标都通过专用聚合函数获取，不与基础规模指标混算。
         curr_multi_round_ratio = await self._get_multi_round_ratio(
             source_id,
@@ -846,10 +943,6 @@ class TracingQueryService:  # pylint: disable=too-many-public-methods
                 curr["users"],
                 prev["users"],
             ),  # user_id 去重口径
-            "skillGrowth": calc_growth(
-                curr_skill_calls,
-                prev_skill_calls,
-            ),  # skill_invocation span 数口径
             "cronGrowth": calc_growth(
                 curr_cron_tasks,
                 prev_cron_tasks,
@@ -858,6 +951,10 @@ class TracingQueryService:  # pylint: disable=too-many-public-methods
             "multiRoundRatioGrowth": multi_round_ratio_growth,  # >3 轮会话占比口径
             "avgDurationGrowth": avg_duration_growth,  # 平均对话时长（秒）口径
             "avgSessionsPerUserGrowth": avg_sessions_per_user_growth,  # 人均会话数口径
+            "planCustomersGrowth": calc_growth(
+                curr_click_stats.get("plan", 0),
+                prev_click_stats.get("plan", 0),
+            ),
         }
 
     async def get_daily_trend(
@@ -874,6 +971,60 @@ class TracingQueryService:  # pylint: disable=too-many-public-methods
             end_date = datetime.now() + timedelta(days=1)
 
         bbk_filter_sql, bbk_filter_params = build_bbk_in_filter(bbk_ids)
+        query, params = self._build_daily_trend_trace_query(
+            source_id=source_id,
+            start_date=start_date,
+            end_date=end_date,
+            bbk_filter_sql=bbk_filter_sql,
+            bbk_filter_params=bbk_filter_params,
+        )
+        rows = await self._db.fetch_all(query, params)
+
+        # 查询已读任务数
+        read_tasks_query, read_tasks_params = (
+            self._build_daily_trend_read_tasks_query(
+                source_id=source_id,
+                start_date=start_date,
+                end_date=end_date,
+                bbk_filter_sql=bbk_filter_sql,
+                bbk_filter_params=bbk_filter_params,
+            )
+        )
+        read_tasks_rows = await self._db.fetch_all(
+            read_tasks_query,
+            read_tasks_params,
+        )
+        read_tasks_map = self._build_daily_trend_read_tasks_map(
+            read_tasks_rows,
+        )
+
+        click_map: dict[str, dict[str, int]] = {}
+        if self._should_query_extended_trend_metrics(source_id):
+            click_query, click_params = self._build_daily_trend_click_query(
+                source_id=source_id,
+                start_date=start_date,
+                end_date=end_date,
+                bbk_filter_sql=bbk_filter_sql,
+                bbk_filter_params=bbk_filter_params,
+            )
+            click_rows = await self._db.fetch_all(click_query, click_params)
+            click_map = self._build_daily_trend_click_map(click_rows)
+
+        return self._build_daily_trend_response(
+            rows=rows,
+            read_tasks_map=read_tasks_map,
+            click_map=click_map,
+        )
+
+    def _build_daily_trend_trace_query(
+        self,
+        source_id: str,
+        start_date: datetime,
+        end_date: datetime,
+        bbk_filter_sql: str,
+        bbk_filter_params: list[str],
+    ) -> tuple[str, tuple[Any, ...]]:
+        """构建日趋势主查询 SQL。"""
         if source_id == "all":
             exclude_placeholders = ", ".join(["%s"] * len(EXCLUDED_SOURCE_IDS))
             query = f"""
@@ -895,34 +1046,165 @@ class TracingQueryService:  # pylint: disable=too-many-public-methods
                 *EXCLUDED_SOURCE_IDS,
                 *bbk_filter_params,
             )
-            rows = await self._db.fetch_all(query, params)
-        else:
-            query = f"""
-                SELECT
-                    DATE(start_time) as date,
-                    COUNT(*) as calls,
-                    COALESCE(SUM(total_tokens), 0) as tokens,
-                    COUNT(DISTINCT user_id) as users
-                FROM swe_tracing_traces
-                WHERE source_id = %s AND start_time >= %s AND start_time <= %s
-                  AND user_id != 'default'{bbk_filter_sql}
-                GROUP BY DATE(start_time)
-                ORDER BY date
-            """
-            params = (source_id, start_date, end_date, *bbk_filter_params)
-            rows = await self._db.fetch_all(query, params)
+            return query, params
 
-        return [
-            {
-                "date": (
-                    row["date"].strftime("%Y-%m-%d") if row["date"] else ""
-                ),
-                "calls": row["calls"] or 0,
-                "tokens": row["tokens"] or 0,
-                "users": row["users"] or 0,
-            }
-            for row in rows
-        ]
+        query = f"""
+            SELECT
+                DATE(start_time) as date,
+                COUNT(*) as calls,
+                COALESCE(SUM(total_tokens), 0) as tokens,
+                COUNT(DISTINCT user_id) as users
+            FROM swe_tracing_traces
+            WHERE source_id = %s AND start_time >= %s AND start_time <= %s
+              AND user_id != 'default'{bbk_filter_sql}
+            GROUP BY DATE(start_time)
+            ORDER BY date
+        """
+        params = (source_id, start_date, end_date, *bbk_filter_params)
+        return query, params
+
+    def _build_daily_trend_read_tasks_query(
+        self,
+        source_id: str,
+        start_date: datetime,
+        end_date: datetime,
+        bbk_filter_sql: str,
+        bbk_filter_params: list[str],
+    ) -> tuple[str, tuple[Any, ...]]:
+        """构建日趋势已读任务查询 SQL。"""
+        source_filter_sql, source_filter_params = (
+            self._build_trend_source_filter(
+                source_id=source_id,
+                column_name="j.source_id",
+            )
+        )
+        read_tasks_query = f"""
+            SELECT
+                DATE(e.read_at) as date,
+                COUNT(*) as read_tasks
+            FROM swe_cron_executions e
+            INNER JOIN swe_cron_jobs j ON e.job_id = j.id
+            WHERE e.read_at >= %s AND e.read_at <= %s
+              AND j.status != 'deleted'
+              AND j.deleted_at IS NULL
+              AND e.read_at IS NOT NULL
+              {source_filter_sql}
+              {bbk_filter_sql.replace('bbk_id', 'j.bbk_id')}
+            GROUP BY DATE(e.read_at)
+        """
+        return read_tasks_query, (
+            start_date,
+            end_date,
+            *source_filter_params,
+            *bbk_filter_params,
+        )
+
+    def _build_daily_trend_click_query(
+        self,
+        source_id: str,
+        start_date: datetime,
+        end_date: datetime,
+        bbk_filter_sql: str,
+        bbk_filter_params: list[str],
+    ) -> tuple[str, tuple[Any, ...]]:
+        """构建日趋势客户点击查询 SQL。"""
+        source_filter_sql, source_filter_params = (
+            self._build_trend_source_filter(
+                source_id=source_id,
+                column_name="source_id",
+            )
+        )
+        click_query = f"""
+            SELECT
+                DATE(clicked_at) as date,
+                button_type,
+                COUNT(DISTINCT CONCAT(COALESCE(cron_task_id, ''), '|', COALESCE(customer_id, ''))) as customer_count
+            FROM swe_html_preview_click_events
+            WHERE clicked_at >= %s AND clicked_at <= %s
+              AND button_type IN ('plan', 'insight', 'phone')
+              AND cron_task_id IS NOT NULL
+              AND customer_id IS NOT NULL
+              {source_filter_sql}{bbk_filter_sql}
+            GROUP BY DATE(clicked_at), button_type
+        """
+        return click_query, (
+            start_date,
+            end_date,
+            *source_filter_params,
+            *bbk_filter_params,
+        )
+
+    def _build_trend_source_filter(
+        self,
+        source_id: str,
+        column_name: str,
+    ) -> tuple[str, list[str]]:
+        """构建趋势附属查询的 source_id 过滤片段。"""
+        if source_id == "all":
+            exclude_placeholders = ", ".join(["%s"] * len(EXCLUDED_SOURCE_IDS))
+            return (
+                f"AND {column_name} NOT IN ({exclude_placeholders})",
+                [*EXCLUDED_SOURCE_IDS],
+            )
+        return (f"AND {column_name} = %s", [source_id])
+
+    def _should_query_extended_trend_metrics(self, source_id: str) -> bool:
+        """仅对特定来源查询客户点击类趋势指标。"""
+        return source_id in {"all", EXTENDED_TREND_SOURCE_ID}
+
+    def _build_daily_trend_read_tasks_map(
+        self,
+        read_tasks_rows: list[dict[str, Any]],
+    ) -> dict[str, int]:
+        """构建日期到已读任务数的映射。"""
+        return {
+            self._format_daily_trend_date(row["date"]): row["read_tasks"] or 0
+            for row in read_tasks_rows
+        }
+
+    def _build_daily_trend_click_map(
+        self,
+        click_rows: list[dict[str, Any]],
+    ) -> dict[str, dict[str, int]]:
+        """按日期与按钮类型聚合客户点击数据。"""
+        click_map: dict[str, dict[str, int]] = {}
+        for row in click_rows:
+            date_key = self._format_daily_trend_date(row["date"])
+            if date_key not in click_map:
+                click_map[date_key] = {"plan": 0, "insight": 0, "phone": 0}
+            btn_type = row["button_type"]
+            if btn_type in click_map[date_key]:
+                click_map[date_key][btn_type] = row["customer_count"] or 0
+        return click_map
+
+    def _build_daily_trend_response(
+        self,
+        rows: list[dict[str, Any]],
+        read_tasks_map: dict[str, int],
+        click_map: dict[str, dict[str, int]],
+    ) -> list[dict[str, Any]]:
+        """组装日趋势返回结果。"""
+        result: list[dict[str, Any]] = []
+        for row in rows:
+            date_key = self._format_daily_trend_date(row["date"])
+            click_stats = click_map.get(date_key, {})
+            result.append(
+                {
+                    "date": date_key,
+                    "calls": row["calls"] or 0,
+                    "tokens": row["tokens"] or 0,
+                    "users": row["users"] or 0,
+                    "read_tasks": read_tasks_map.get(date_key, 0),
+                    "plan_customers": click_stats.get("plan", 0),
+                    "insight_customers": click_stats.get("insight", 0),
+                    "phone_customers": click_stats.get("phone", 0),
+                },
+            )
+        return result
+
+    def _format_daily_trend_date(self, value: Any) -> str:
+        """格式化日趋势中的日期字段。"""
+        return value.strftime("%Y-%m-%d") if value else ""
 
     async def get_hourly_trend(
         self,
@@ -989,6 +1271,86 @@ class TracingQueryService:  # pylint: disable=too-many-public-methods
             }
             for row in rows
         }
+
+        # 查询已读任务数（按小时）
+        read_source_filter_sql, read_source_filter_params = (
+            self._build_trend_source_filter(
+                source_id=source_id,
+                column_name="j.source_id",
+            )
+        )
+        read_tasks_query = f"""
+            SELECT
+                HOUR(e.read_at) as hour_bucket,
+                COUNT(*) as read_tasks
+            FROM swe_cron_executions e
+            INNER JOIN swe_cron_jobs j ON e.job_id = j.id
+            WHERE e.read_at >= %s AND e.read_at <= %s
+              AND j.status != 'deleted'
+              AND j.deleted_at IS NULL
+              AND e.read_at IS NOT NULL
+              {read_source_filter_sql}{bbk_filter_sql.replace('bbk_id', 'j.bbk_id')}
+            GROUP BY HOUR(e.read_at)
+        """
+        read_tasks_params = (
+            start_date,
+            end_date,
+            *read_source_filter_params,
+            *bbk_filter_params,
+        )
+        read_tasks_rows = await self._db.fetch_all(
+            read_tasks_query,
+            read_tasks_params,
+        )
+        read_tasks_hour_map = {
+            int(row["hour_bucket"]): row["read_tasks"] or 0
+            for row in read_tasks_rows
+        }
+
+        click_hour_map: dict[int, dict[str, int]] = {}
+        if self._should_query_extended_trend_metrics(source_id):
+            click_source_filter_sql, click_source_filter_params = (
+                self._build_trend_source_filter(
+                    source_id=source_id,
+                    column_name="source_id",
+                )
+            )
+            click_query = f"""
+                SELECT
+                    HOUR(clicked_at) as hour_bucket,
+                    button_type,
+                    COUNT(DISTINCT CONCAT(COALESCE(cron_task_id, ''), '|', COALESCE(customer_id, ''))) as customer_count
+                FROM swe_html_preview_click_events
+                WHERE clicked_at >= %s AND clicked_at <= %s
+                  AND button_type IN ('plan', 'insight', 'phone')
+                  AND cron_task_id IS NOT NULL
+                  AND customer_id IS NOT NULL
+                  {click_source_filter_sql}{bbk_filter_sql}
+                GROUP BY HOUR(clicked_at), button_type
+            """
+            click_params = (
+                start_date,
+                end_date,
+                *click_source_filter_params,
+                *bbk_filter_params,
+            )
+            click_rows = await self._db.fetch_all(click_query, click_params)
+
+            # 按小时和类型组织数据
+            for row in click_rows:
+                hour_key = int(row["hour_bucket"])
+                if hour_key not in click_hour_map:
+                    click_hour_map[hour_key] = {
+                        "plan": 0,
+                        "insight": 0,
+                        "phone": 0,
+                    }
+                btn_type = row["button_type"]
+                if btn_type in click_hour_map[hour_key]:
+                    click_hour_map[hour_key][btn_type] = (
+                        row["customer_count"] or 0
+                    )
+
         day_prefix = start_date.strftime("%Y-%m-%d")
         # 判断是否是今天：如果是今天，只返回到当前小时，避免显示未来无意义的时间点
         now = datetime.now()
@@ -1000,6 +1362,16 @@ class TracingQueryService:  # pylint: disable=too-many-public-methods
                 "calls": hour_map.get(hour, {}).get("calls", 0),
                 "tokens": hour_map.get(hour, {}).get("tokens", 0),
                 "users": hour_map.get(hour, {}).get("users", 0),
+                "read_tasks": read_tasks_hour_map.get(hour, 0),
+                "plan_customers": click_hour_map.get(hour, {}).get("plan", 0),
+                "insight_customers": click_hour_map.get(hour, {}).get(
+                    "insight",
+                    0,
+                ),
+                "phone_customers": click_hour_map.get(hour, {}).get(
+                    "phone",
+                    0,
+                ),
             }
             for hour in range(max_hour + 1)
         ]
@@ -1973,6 +2345,75 @@ class TracingQueryService:  # pylint: disable=too-many-public-methods
             row = await self._db.fetch_one(query, params)
         return int((row or {}).get("total") or 0)
 
+    async def _get_customer_click_stats(
+        self,
+        source_id: str,
+        start_date: datetime,
+        end_date: datetime,
+        bbk_ids: Optional[str] = None,
+    ) -> dict[str, int]:
+        """获取客户点击行为统计.
+
+        从 swe_html_preview_click_events 表按 button_type 分组，
+        统计 cron_task_id + customer_id 去重计数.
+
+        Returns:
+            dict with keys: plan_customers, insight_customers, phone_customers
+        """
+        db = self._db
+
+        # 构建 WHERE 条件
+        conditions = ["clicked_at >= %s", "clicked_at < %s"]
+        params: list = [start_date, end_date]
+
+        if source_id != "all":
+            conditions.append("source_id = %s")
+            params.append(source_id)
+        else:
+            # 排除测试平台
+            exclude_placeholders = ", ".join(["%s"] * len(EXCLUDED_SOURCE_IDS))
+            conditions.append(f"source_id NOT IN ({exclude_placeholders})")
+            params.extend(EXCLUDED_SOURCE_IDS)
+
+        bbk_filter_sql, bbk_filter_params = build_bbk_in_filter(bbk_ids)
+        if bbk_filter_sql:
+            conditions.append(bbk_filter_sql[4:])  # 移除 "AND " 前缀
+            params.extend(bbk_filter_params)
+
+        where_clause = " AND ".join(conditions)
+
+        # 查询各 button_type 的去重客户数
+        query = f"""
+            SELECT
+                button_type,
+                COUNT(DISTINCT CONCAT(COALESCE(cron_task_id, ''), '|', COALESCE(customer_id, ''))) as customer_count
+            FROM swe_html_preview_click_events
+            WHERE {where_clause}
+                AND button_type IN ('plan', 'insight', 'phone')
+                AND cron_task_id IS NOT NULL
+                AND customer_id IS NOT NULL
+            GROUP BY button_type
+        """
+
+        rows = await db.fetch_all(query, tuple(params))
+
+        result = {
+            "plan_customers": 0,
+            "insight_customers": 0,
+            "phone_customers": 0,
+        }
+
+        for row in rows:
+            button_type = row["button_type"]
+            if button_type == "plan":
+                result["plan_customers"] = row["customer_count"] or 0
+            elif button_type == "insight":
+                result["insight_customers"] = row["customer_count"] or 0
+            elif button_type == "phone":
+                result["phone_customers"] = row["customer_count"] or 0
+
+        return result
+
     async def _get_multi_round_ratio(
         self,
         source_id: str,
@@ -2295,7 +2736,7 @@ class TracingQueryService:  # pylint: disable=too-many-public-methods
 
         if source_id == "all":
             query = f"""
-                SELECT e.status, e.is_read, COUNT(*) AS count
+                SELECT e.status, e.async_status, e.is_read, COUNT(*) AS count
                 FROM swe_cron_executions e
                 INNER JOIN swe_cron_jobs j ON e.job_id = j.id
                 WHERE e.actual_time >= %s AND e.actual_time < %s
@@ -2304,7 +2745,7 @@ class TracingQueryService:  # pylint: disable=too-many-public-methods
                   AND j.source_id NOT IN ({exclude_placeholders})
                   AND j.tenant_id != 'default'
                   {bbk_filter_sql}
-                GROUP BY e.status, e.is_read
+                GROUP BY e.status, e.async_status, e.is_read
             """
             params = (
                 start_date,
@@ -2314,7 +2755,7 @@ class TracingQueryService:  # pylint: disable=too-many-public-methods
             )
         else:
             query = f"""
-                SELECT e.status, e.is_read, COUNT(*) AS count
+                SELECT e.status, e.async_status, e.is_read, COUNT(*) AS count
                 FROM swe_cron_executions e
                 INNER JOIN swe_cron_jobs j ON e.job_id = j.id
                 WHERE e.actual_time >= %s AND e.actual_time < %s
@@ -2323,66 +2764,26 @@ class TracingQueryService:  # pylint: disable=too-many-public-methods
                   AND j.tenant_id != 'default'
                   AND j.source_id = %s
                   {bbk_filter_sql}
-                GROUP BY e.status, e.is_read
+                GROUP BY e.status, e.async_status, e.is_read
             """
             params = (start_date, end_date, source_id, *bbk_filter_params)
 
         rows = await self._db.fetch_all(query, params)
 
-        success, failed, cancelled, read_count = _summarize_task_status_rows(
-            rows,
-        )
-        total_tasks = success + failed + cancelled
-
-        # 查询本时间段内新增的定时任务数（按 created_at 过滤）
-        if source_id == "all":
-            new_cron_query = f"""
-                SELECT COUNT(*) AS count
-                FROM swe_cron_jobs j
-                WHERE j.created_at >= %s AND j.created_at < %s
-                  AND j.status != 'deleted'
-                  AND j.deleted_at IS NULL
-                  AND j.source_id NOT IN ({exclude_placeholders})
-                  AND j.tenant_id != 'default'
-                  {bbk_filter_sql}
-            """
-            new_cron_params = (
-                start_date,
-                end_date,
-                *EXCLUDED_SOURCE_IDS,
-                *bbk_filter_params,
+        success, running, failed, cancelled, read_count = (
+            _summarize_task_status_rows(
+                rows,
             )
-        else:
-            new_cron_query = f"""
-                SELECT COUNT(*) AS count
-                FROM swe_cron_jobs j
-                WHERE j.created_at >= %s AND j.created_at < %s
-                  AND j.status != 'deleted'
-                  AND j.deleted_at IS NULL
-                  AND j.tenant_id != 'default'
-                  AND j.source_id = %s
-                  {bbk_filter_sql}
-            """
-            new_cron_params = (
-                start_date,
-                end_date,
-                source_id,
-                *bbk_filter_params,
-            )
-
-        new_cron_result = await self._db.fetch_one(
-            new_cron_query,
-            new_cron_params,
         )
-        new_cron_tasks = new_cron_result["count"] if new_cron_result else 0
+        total_tasks = success + running + failed + cancelled
 
         return TaskStatusSummary(
             total_tasks=total_tasks,
             success=success,
+            running=running,
             failed=failed,
             cancelled=cancelled,
             read_count=read_count,
-            new_cron_tasks=new_cron_tasks,
         )
 
     async def get_error_summary(
@@ -2905,7 +3306,7 @@ class TracingQueryService:  # pylint: disable=too-many-public-methods
                 FROM swe_tracing_spans s
                 JOIN swe_tracing_traces t ON s.trace_id = t.trace_id
                 WHERE {base_where}
-                ORDER BY t.start_time ASC
+                ORDER BY t.start_time DESC
                 LIMIT %s OFFSET %s
             """
             params = list(count_params) + [page_size, offset]
@@ -2926,7 +3327,7 @@ class TracingQueryService:  # pylint: disable=too-many-public-methods
                 FROM swe_tracing_spans s
                 JOIN swe_tracing_traces t ON s.trace_id = t.trace_id
                 WHERE {base_where}
-                ORDER BY t.start_time ASC
+                ORDER BY t.start_time DESC
                 LIMIT %s OFFSET %s
             """
             params = (
@@ -3452,9 +3853,7 @@ class TracingQueryService:  # pylint: disable=too-many-public-methods
         end_date: Optional[datetime],
     ) -> None:
         """添加基础参数过滤条件."""
-        if user_id:
-            where_clauses.append("t.user_id = %s")
-            params.append(user_id)
+        self._append_filter(where_clauses, params, "t.user_id = %s", user_id)
         if session_id:
             where_clauses.append("t.session_id LIKE %s")
             params.append(f"%{session_id}%")
@@ -3464,12 +3863,30 @@ class TracingQueryService:  # pylint: disable=too-many-public-methods
                 f"t.bbk_id IN ({', '.join(['%s'] * len(bbk_params))})",
             )
             params.extend(bbk_params)
-        if start_date:
-            where_clauses.append("t.start_time >= %s")
-            params.append(start_date)
-        if end_date:
-            where_clauses.append("t.start_time <= %s")
-            params.append(end_date)
+        self._append_filter(
+            where_clauses,
+            params,
+            "t.start_time >= %s",
+            start_date,
+        )
+        self._append_filter(
+            where_clauses,
+            params,
+            "t.start_time <= %s",
+            end_date,
+        )
+
+    def _append_filter(
+        self,
+        where_clauses: list[str],
+        params: list[Any],
+        clause: str,
+        value: Optional[Any],
+    ) -> None:
+        """添加单个过滤条件."""
+        if value:
+            where_clauses.append(clause)
+            params.append(value)
 
     def _build_resource_date_sql(
         self,
@@ -3503,39 +3920,88 @@ class TracingQueryService:  # pylint: disable=too-many-public-methods
         resource_date_params: list[Any],
     ) -> None:
         """添加资源类型过滤条件."""
-        if resource_type == "model" and resource_name:
-            where_clauses.append(
-                "EXISTS (SELECT 1 FROM swe_tracing_traces resource "
-                "WHERE resource.source_id = t.source_id "
-                "AND resource.session_id = t.session_id "
-                "AND resource.model_name = %s"
-                f"{resource_date_sql})",
+        if not resource_type or not resource_name:
+            return
+        handlers = {
+            "model": self._add_model_filter,
+            "skill": self._add_skill_filter,
+            "mcp_tool": self._add_mcp_tool_filter,
+        }
+        handler = handlers.get(resource_type)
+        if handler:
+            handler(
+                where_clauses,
+                params,
+                resource_name,
+                mcp_server,
+                resource_date_sql,
+                resource_date_params,
             )
-            params.append(resource_name)
-            params.extend(resource_date_params)
-        elif resource_type == "skill" and resource_name:
-            where_clauses.append(
-                "EXISTS (SELECT 1 FROM swe_tracing_spans resource "
-                "WHERE resource.source_id = t.source_id "
-                "AND resource.session_id = t.session_id "
-                "AND resource.event_type = 'skill_invocation' "
-                "AND resource.skill_name = %s"
-                f"{resource_date_sql})",
-            )
-            params.append(resource_name)
-            params.extend(resource_date_params)
-        elif resource_type == "mcp_tool" and resource_name and mcp_server:
-            where_clauses.append(
-                "EXISTS (SELECT 1 FROM swe_tracing_spans resource "
-                "WHERE resource.source_id = t.source_id "
-                "AND resource.session_id = t.session_id "
-                "AND resource.event_type = 'tool_call_end' "
-                "AND resource.tool_name = %s "
-                "AND resource.mcp_server = %s"
-                f"{resource_date_sql})",
-            )
-            params.extend([resource_name, mcp_server])
-            params.extend(resource_date_params)
+
+    def _add_model_filter(
+        self,
+        where_clauses: list[str],
+        params: list[Any],
+        resource_name: str,
+        mcp_server: Optional[str],
+        resource_date_sql: str,
+        resource_date_params: list[Any],
+    ) -> None:
+        """添加模型资源过滤."""
+        where_clauses.append(
+            "EXISTS (SELECT 1 FROM swe_tracing_traces resource "
+            "WHERE resource.source_id = t.source_id "
+            "AND resource.session_id = t.session_id "
+            "AND resource.model_name = %s"
+            f"{resource_date_sql})",
+        )
+        params.append(resource_name)
+        params.extend(resource_date_params)
+
+    def _add_skill_filter(
+        self,
+        where_clauses: list[str],
+        params: list[Any],
+        resource_name: str,
+        mcp_server: Optional[str],
+        resource_date_sql: str,
+        resource_date_params: list[Any],
+    ) -> None:
+        """添加技能资源过滤."""
+        where_clauses.append(
+            "EXISTS (SELECT 1 FROM swe_tracing_spans resource "
+            "WHERE resource.source_id = t.source_id "
+            "AND resource.session_id = t.session_id "
+            "AND resource.event_type = 'skill_invocation' "
+            "AND resource.skill_name = %s"
+            f"{resource_date_sql})",
+        )
+        params.append(resource_name)
+        params.extend(resource_date_params)
+
+    def _add_mcp_tool_filter(
+        self,
+        where_clauses: list[str],
+        params: list[Any],
+        resource_name: str,
+        mcp_server: Optional[str],
+        resource_date_sql: str,
+        resource_date_params: list[Any],
+    ) -> None:
+        """添加 MCP 工具资源过滤."""
+        if not mcp_server:
+            return
+        where_clauses.append(
+            "EXISTS (SELECT 1 FROM swe_tracing_spans resource "
+            "WHERE resource.source_id = t.source_id "
+            "AND resource.session_id = t.session_id "
+            "AND resource.event_type = 'tool_call_end' "
+            "AND resource.tool_name = %s "
+            "AND resource.mcp_server = %s"
+            f"{resource_date_sql})",
+        )
+        params.extend([resource_name, mcp_server])
+        params.extend(resource_date_params)
 
     def _add_error_filter(
         self,
@@ -4394,7 +4860,7 @@ class TracingQueryService:  # pylint: disable=too-many-public-methods
         user_id = first_row.get("user_id", "")
         user_name = first_row.get("user_name")
 
-        # 从 ES 获取每个 trace 的 model_output
+        # 仅在 completed 状态下从 ES 获取 model_output
         from ...database.elasticsearch import get_es_client
 
         es_client = get_es_client()
@@ -4406,8 +4872,12 @@ class TracingQueryService:  # pylint: disable=too-many-public-methods
             trace_id = row["trace_id"]
             model_output = None
 
-            # 从 ES 获取 model_output
-            if es_client and es_client.is_connected:
+            # 仅在 completed 状态下从 ES 获取 model_output
+            if (
+                row.get("status") == TraceStatus.COMPLETED
+                and es_client
+                and es_client.is_connected
+            ):
                 model_output = await es_client.get_message(trace_id)
 
             # 解析 tools_used
@@ -4463,12 +4933,13 @@ class TracingQueryService:  # pylint: disable=too-many-public-methods
 
         spans = await self.get_spans(trace_id)
 
-        # 从 ES 获取 model_output
-        from ...database.elasticsearch import get_es_client
+        # 仅在 completed 状态下从 ES 获取 model_output
+        if trace.status == TraceStatus.COMPLETED:
+            from ...database.elasticsearch import get_es_client
 
-        es_client = get_es_client()
-        if es_client and es_client.is_connected:
-            trace.model_output = await es_client.get_message(trace_id)
+            es_client = get_es_client()
+            if es_client and es_client.is_connected:
+                trace.model_output = await es_client.get_message(trace_id)
 
         feedback = await self.get_trace_feedback(trace_id, trace.source_id)
 
@@ -4520,12 +4991,13 @@ class TracingQueryService:  # pylint: disable=too-many-public-methods
 
         spans = await self.get_spans(trace_id)
 
-        # 从 ES 获取 model_output
-        from ...database.elasticsearch import get_es_client
+        # 仅在 completed 状态下从 ES 获取 model_output
+        if trace.status == TraceStatus.COMPLETED:
+            from ...database.elasticsearch import get_es_client
 
-        es_client = get_es_client()
-        if es_client and es_client.is_connected:
-            trace.model_output = await es_client.get_message(trace_id)
+            es_client = get_es_client()
+            if es_client and es_client.is_connected:
+                trace.model_output = await es_client.get_message(trace_id)
 
         feedback = await self.get_trace_feedback(trace_id, trace.source_id)
         timeline = self._build_timeline(spans)

@@ -8,9 +8,7 @@ import {
   QueryRetryCard,
   LlmRateLimiterCard,
   ContextCompactCard,
-  ToolResultCompactCard,
   MemorySummaryCard,
-  EmbeddingConfigCard,
   DistributeModal,
 } from "./components";
 import { PageHeader } from "@/components/PageHeader";
@@ -23,9 +21,7 @@ const CONFIG_GROUP_LABELS: Record<string, string> = {
   query_retry: "Query 重试配置",
   llm_rate_limiter: "LLM 限流配置",
   context_compact: "上下文压缩配置",
-  tool_result_compact: "工具结果压缩配置",
   memory_summary: "记忆摘要配置",
-  embedding_config: "Embedding 配置",
 };
 
 function AgentConfigPage() {
@@ -81,7 +77,10 @@ function AgentConfigPage() {
 
   return (
     <div className={styles.configPage}>
-      <PageHeader parent={t("nav.runCenter")} current={t("agentConfig.title")} />
+      <PageHeader
+        parent={t("nav.runCenter")}
+        current={t("agentConfig.title")}
+      />
       <div className={styles.pageContent}>
         <div className={styles.formContainer}>
           <Form form={form} layout="vertical" className={styles.form}>
@@ -194,26 +193,6 @@ function AgentConfigPage() {
               }
             />
 
-            <ToolResultCompactCard
-              extra={
-                canDistribute ? (
-                  <Tooltip title={t("agentConfig.distributeTooltip")}>
-                    <Button
-                      type="text"
-                      size="small"
-                      icon={<SendOutlined />}
-                      onClick={() =>
-                        openDistributeModal(
-                          "tool_result_compact",
-                          CONFIG_GROUP_LABELS.tool_result_compact,
-                        )
-                      }
-                    />
-                  </Tooltip>
-                ) : null
-              }
-            />
-
             <MemorySummaryCard
               extra={
                 canDistribute ? (
@@ -226,26 +205,6 @@ function AgentConfigPage() {
                         openDistributeModal(
                           "memory_summary",
                           CONFIG_GROUP_LABELS.memory_summary,
-                        )
-                      }
-                    />
-                  </Tooltip>
-                ) : null
-              }
-            />
-
-            <EmbeddingConfigCard
-              extra={
-                canDistribute ? (
-                  <Tooltip title={t("agentConfig.distributeTooltip")}>
-                    <Button
-                      type="text"
-                      size="small"
-                      icon={<SendOutlined />}
-                      onClick={() =>
-                        openDistributeModal(
-                          "embedding_config",
-                          CONFIG_GROUP_LABELS.embedding_config,
                         )
                       }
                     />

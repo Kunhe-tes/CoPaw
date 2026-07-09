@@ -470,6 +470,202 @@ def test_broadcast_to_tenants_limits_concurrency(monkeypatch):
     assert [item.offset_minutes for item in results] == [0, 1, 2, 3, 4]
 
 
+def test_broadcast_job_returns_running_task_and_polling_result(monkeypatch):
+    async def _fake_broadcast_to_tenant(_context, tenant_id, offset):
+        await asyncio.sleep(0.02)
+        return api_module.CronBroadcastTenantResult(
+            tenant_id=tenant_id,
+            success=True,
+            job_id=f"job-{tenant_id}",
+            cron="0 9 * * *",
+            timezone="UTC",
+            offset_minutes=offset,
+            notification_timezone="UTC",
+        )
+
+    monkeypatch.setattr(
+        api_module,
+        "_broadcast_to_tenant",
+        _fake_broadcast_to_tenant,
+    )
+    source_job = CronJobSpec.model_validate(
+        {
+            **_job_spec("job-source"),
+            "tenant_id": "tenant-a",
+            "source_id": "source-a",
+            "scope_id": encode_scope_id("tenant-a", "source-a"),
+        },
+    )
+    with _build_client(
+        _Manager({"job-source": source_job}),
+        multi_agent_manager=_MultiAgentManager({}),
+    ) as client:
+        response = client.post(
+            "/cron/jobs/job-source/broadcast",
+            json={"target_tenant_ids": ["tenant-b", "tenant-c"]},
+        )
+
+        assert response.status_code == 200
+        payload = response.json()
+        assert payload["task_id"]
+        assert payload["status"] == "running"
+        assert payload["tenant_count"] == 2
+        assert payload["completed_count"] == 0
+        assert payload["failed_count"] == 0
+        assert payload["results"] == []
+        assert payload["reused"] is False
+
+        finished = _wait_for_broadcast_task(
+            client,
+            "job-source",
+            payload["task_id"],
+        )
+        assert finished["status"] == "completed"
+        assert finished["completed_count"] == 2
+        assert finished["failed_count"] == 0
+        assert [item["tenant_id"] for item in finished["results"]] == [
+            "tenant-b",
+            "tenant-c",
+        ]
+
+
+def test_broadcast_job_polling_reports_failed_targets(monkeypatch):
+    async def _fake_broadcast_to_tenant(_context, tenant_id, offset):
+        del offset
+        return api_module.CronBroadcastTenantResult(
+            tenant_id=tenant_id,
+            success=False,
+            error="boom",
+        )
+
+    monkeypatch.setattr(
+        api_module,
+        "_broadcast_to_tenant",
+        _fake_broadcast_to_tenant,
+    )
+    source_job = CronJobSpec.model_validate(
+        {
+            **_job_spec("job-source"),
+            "tenant_id": "tenant-a",
+            "source_id": "source-a",
+            "scope_id": encode_scope_id("tenant-a", "source-a"),
+        },
+    )
+    with _build_client(
+        _Manager({"job-source": source_job}),
+        multi_agent_manager=_MultiAgentManager({}),
+    ) as client:
+        response = client.post(
+            "/cron/jobs/job-source/broadcast",
+            json={"target_tenant_ids": ["tenant-b"]},
+        )
+
+        assert response.status_code == 200
+        finished = _wait_for_broadcast_task(
+            client,
+            "job-source",
+            response.json()["task_id"],
+        )
+        assert finished["status"] == "failed"
+        assert finished["completed_count"] == 1
+        assert finished["failed_count"] == 1
+        assert finished["results"][0]["error"] == "boom"
+
+
+def test_broadcast_job_reuses_running_task(monkeypatch):
+    async def _fake_broadcast_to_tenant(_context, tenant_id, offset):
+        await asyncio.sleep(0.05)
+        return api_module.CronBroadcastTenantResult(
+            tenant_id=tenant_id,
+            success=True,
+            offset_minutes=offset,
+        )
+
+    monkeypatch.setattr(
+        api_module,
+        "_broadcast_to_tenant",
+        _fake_broadcast_to_tenant,
+    )
+    source_job = CronJobSpec.model_validate(
+        {
+            **_job_spec("job-source"),
+            "tenant_id": "tenant-a",
+            "source_id": "source-a",
+            "scope_id": encode_scope_id("tenant-a", "source-a"),
+        },
+    )
+    with _build_client(
+        _Manager({"job-source": source_job}),
+        multi_agent_manager=_MultiAgentManager({}),
+    ) as client:
+        first = client.post(
+            "/cron/jobs/job-source/broadcast",
+            json={"target_tenant_ids": ["tenant-b"]},
+        )
+        second = client.post(
+            "/cron/jobs/job-source/broadcast",
+            json={"target_tenant_ids": ["tenant-c"]},
+        )
+
+        assert first.status_code == 200
+        assert second.status_code == 200
+        assert second.json()["task_id"] == first.json()["task_id"]
+        assert second.json()["reused"] is True
+
+        finished = _wait_for_broadcast_task(
+            client,
+            "job-source",
+            first.json()["task_id"],
+        )
+        assert finished["status"] == "completed"
+
+
+def test_current_broadcast_task_returns_running_task(monkeypatch):
+    async def _fake_broadcast_to_tenant(_context, tenant_id, offset):
+        await asyncio.sleep(0.05)
+        return api_module.CronBroadcastTenantResult(
+            tenant_id=tenant_id,
+            success=True,
+            offset_minutes=offset,
+        )
+
+    monkeypatch.setattr(
+        api_module,
+        "_broadcast_to_tenant",
+        _fake_broadcast_to_tenant,
+    )
+    source_job = CronJobSpec.model_validate(
+        {
+            **_job_spec("job-source"),
+            "tenant_id": "tenant-a",
+            "source_id": "source-a",
+            "scope_id": encode_scope_id("tenant-a", "source-a"),
+        },
+    )
+    with _build_client(
+        _Manager({"job-source": source_job}),
+        multi_agent_manager=_MultiAgentManager({}),
+    ) as client:
+        empty = client.get("/cron/jobs/job-source/broadcast/tasks/current")
+        response = client.post(
+            "/cron/jobs/job-source/broadcast",
+            json={"target_tenant_ids": ["tenant-b"]},
+        )
+        current = client.get("/cron/jobs/job-source/broadcast/tasks/current")
+
+        assert empty.status_code == 200
+        assert empty.json() == {"task": None}
+        assert response.status_code == 200
+        assert current.status_code == 200
+        assert current.json()["task"]["task_id"] == response.json()["task_id"]
+
+        _wait_for_broadcast_task(
+            client,
+            "job-source",
+            response.json()["task_id"],
+        )
+
+
 def test_list_broadcast_children_for_tenants_limits_concurrency(monkeypatch):
     monkeypatch.setenv(api_module.CRON_BROADCAST_CONCURRENCY_ENV, "2")
     active = 0
@@ -569,7 +765,12 @@ def test_broadcast_clears_model_slot_and_returns_warning_for_unsupported_tenant(
         target_missing.created[0].meta["broadcast_model_slot_fallback_reason"]
         == "provider_not_found"
     )
-    assert response.json()["results"] == [
+    payload = _wait_for_broadcast_task(
+        client,
+        "job-source",
+        response.json()["task_id"],
+    )
+    assert payload["results"] == [
         {
             "tenant_id": "tenant-b",
             "success": True,
@@ -650,7 +851,12 @@ def test_broadcast_uses_configured_offset_window_hours():
     )
 
     assert response.status_code == 200
-    assert [item["offset_minutes"] for item in response.json()["results"]] == [
+    payload = _wait_for_broadcast_task(
+        client,
+        "job-source",
+        response.json()["task_id"],
+    )
+    assert [item["offset_minutes"] for item in payload["results"]] == [
         0,
         30,
         60,
@@ -708,11 +914,16 @@ def test_broadcast_can_disable_offset_shift():
     )
 
     assert response.status_code == 200
-    assert [item["offset_minutes"] for item in response.json()["results"]] == [
+    payload = _wait_for_broadcast_task(
+        client,
+        "job-source",
+        response.json()["task_id"],
+    )
+    assert [item["offset_minutes"] for item in payload["results"]] == [
         0,
         0,
     ]
-    assert [item["warning"] for item in response.json()["results"]] == [
+    assert [item["warning"] for item in payload["results"]] == [
         "",
         "",
     ]
@@ -851,7 +1062,12 @@ def test_broadcast_uses_original_cron_when_offset_shift_is_unsupported():
     assert target_first.created[0].meta["broadcast_offset_minutes"] == 0
     assert target_fallback.created[0].schedule.cron == "30 1 1 * *"
     assert target_fallback.created[0].meta["broadcast_offset_minutes"] == 0
-    fallback_result = response.json()["results"][1]
+    payload = _wait_for_broadcast_task(
+        client,
+        "job-source",
+        response.json()["task_id"],
+    )
+    fallback_result = payload["results"][1]
     assert fallback_result["success"] is True
     assert fallback_result["cron"] == "30 1 1 * *"
     assert fallback_result["offset_minutes"] == 0
@@ -1207,7 +1423,12 @@ def test_broadcast_updates_existing_child_job_definition():
     assert updated.meta["task_chat_id"] == "chat-child"
     assert updated.meta["task_session_id"] == "session-child"
     assert updated.meta["pause_reason"] == "manual"
-    assert response.json()["results"] == [
+    payload = _wait_for_broadcast_task(
+        client,
+        "job-source",
+        response.json()["task_id"],
+    )
+    assert payload["results"] == [
         {
             "tenant_id": "tenant-b",
             "success": True,
@@ -1360,6 +1581,22 @@ def test_list_broadcast_children_returns_matching_target_jobs(monkeypatch):
 def _wait_for_broadcast_children_refresh(client: TestClient, job_id: str):
     for _ in range(50):
         response = client.get(f"/cron/jobs/{job_id}/broadcast/children")
+        payload = response.json()
+        if payload["status"] != "running":
+            return payload
+        time.sleep(0.01)
+    return payload
+
+
+def _wait_for_broadcast_task(
+    client: TestClient,
+    job_id: str,
+    task_id: str,
+):
+    for _ in range(50):
+        response = client.get(
+            f"/cron/jobs/{job_id}/broadcast/tasks/{task_id}",
+        )
         payload = response.json()
         if payload["status"] != "running":
             return payload

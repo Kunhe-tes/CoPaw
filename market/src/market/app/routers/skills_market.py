@@ -16,8 +16,10 @@ from typing import Optional, TypedDict
 from fastapi import (
     APIRouter,
     File,
+    Form,
     Header,
     HTTPException,
+    Query,
     Request,
     UploadFile,
     status,
@@ -227,6 +229,8 @@ def _create_market_item(
     user_id: str,
     user_name: str,
     category_id: Optional[int],
+    skill_id: Optional[str] = None,
+    bbk_ids: Optional[list[str]] = None,
 ) -> MarketItem:
     """创建市场条目."""
     now = datetime.now(timezone.utc).isoformat()
@@ -234,45 +238,41 @@ def _create_market_item(
         item_id=str(uuid.uuid4()),
         item_type="skill",
         name=name,
+        skill_id=skill_id or "",
         chinese_name=chinese_name,
         description=description,
         version=version or "1.0.0",
         creator_id=user_id,
         creator_name=user_name,
         category_id=category_id,
-        bbk_ids=[],
+        bbk_ids=bbk_ids or [],
         status="active",
         created_at=now,
         updated_at=now,
     )
 
 
-def _process_skill_upload_single(
-    skill_dir: Path,
-    skill_name: str,
-    svc,
-    source_id: str,
+def _resolve_skill_cn_name_and_id(
+    skill_md: str,
+    name: str,
+    cn_name: str,
     user_id: str,
-    user_name: str,
-    category_id: Optional[int],
-    overwrite: bool = False,
-    cn_name: str = "",
-) -> tuple[Optional[str], Optional[dict], Optional[str], str, bool]:
-    """处理单个技能的上架逻辑.
+) -> tuple[str, str]:
+    """解析技能的 cn_name 和 skill_id.
 
     Args:
-        overwrite: 是否覆盖同名技能，默认 False（返回冲突）
+        skill_md: SKILL.md 内容
+        name: 技能名称
         cn_name: 用户输入的中文展示名
+        user_id: 用户 ID
 
     Returns:
-        (imported_name, conflict_info, parsed_name_for_first, resolved_cn_name, version_unchanged)
+        (resolved_cn_name, resolved_skill_id)
     """
-    from ...marketplace.service import _bump_patch
-    from ...utils.skill_md import extract_cn_name_from_title, parse_frontmatter
-
-    skill_json, skill_md, name, description, version = _parse_skill_metadata(
-        skill_dir,
-        skill_name,
+    from ...utils.skill_md import (
+        extract_cn_name_from_title,
+        extract_skill_id,
+        parse_frontmatter,
     )
 
     # 解析 chinese_name：优先用户输入，其次 metadata.cn_name，再次一级标题
@@ -286,6 +286,147 @@ def _process_skill_upload_single(
         resolved_cn_name = extract_cn_name_from_title(skill_md)
     if not resolved_cn_name:
         resolved_cn_name = name  # fallback 到技能名
+
+    # 提取 skill_id（从 SKILL.md metadata.skill_id）
+    resolved_skill_id = ""
+    if skill_md:
+        resolved_skill_id = extract_skill_id(
+            skill_md,
+            source="",  # 市场上传时 item_id 未生成，使用空 source
+            skill_name=name,
+            creator_id=user_id,
+        )
+
+    return resolved_cn_name, resolved_skill_id
+
+
+def _update_existing_market_item(
+    existing: MarketItem,
+    description: str,
+    cn_name: str,
+    skill_id: str,
+    user_id: str,
+    user_name: str,
+    category_id: Optional[int],
+    bbk_ids: Optional[list[str]] = None,
+) -> bool:
+    """更新已有的市场条目.
+
+    Returns:
+        cn_name 是否发生变化
+    """
+    from ...marketplace.service import _bump_patch
+
+    now = datetime.now(timezone.utc).isoformat()
+    cn_name_changed = existing.chinese_name != cn_name
+    existing.created_at = now
+    existing.status = "active"
+    existing.chinese_name = cn_name
+    existing.description = description
+    existing.version = _bump_patch(existing.version)
+    existing.creator_id = user_id
+    existing.creator_name = user_name
+    existing.category_id = category_id
+    existing.bbk_ids = bbk_ids or []
+    existing.updated_at = now
+    # 同名技能覆盖时，复用已有 skill_id（若已有）
+    if existing.skill_id:
+        skill_id = existing.skill_id
+    elif not existing.skill_id and skill_id:
+        existing.skill_id = skill_id
+    return cn_name_changed
+
+
+def _create_market_version_snapshot(
+    svc,
+    source_id: str,
+    item: MarketItem,
+    market_skill_dir: Path,
+    user_id: str,
+    user_name: str,
+    cn_name_changed: bool,
+) -> bool:
+    """创建市场版本快照.
+
+    Args:
+        cn_name_changed: cn_name 是否发生变化
+
+    Returns:
+        version_unchanged 标志
+    """
+    version_svc = SkillVersionService(svc.marketplace_root)
+    version_unchanged = False
+    try:
+        snapshot = version_svc.create_version_snapshot(
+            source_id=source_id,
+            item_id=item.item_id,
+            skill_dir=market_skill_dir,
+            description="",  # 去掉重复的版本号信息
+            creator=user_id,
+            creator_name=user_name,
+            current_market_version=item.version,
+            source_user_id="",
+            source_user_name="",
+            source_user_version="v0.0.0",
+        )
+        # F2：让 MarketItem.version 严格跟随快照的 version_id
+        # F3：cn_name 变化时不应返回 version_unchanged，即使文件内容未变
+        if snapshot.version_id and snapshot.version_id != item.version:
+            version_unchanged = not cn_name_changed
+            item.version = snapshot.version_id
+        elif cn_name_changed:
+            version_unchanged = False
+    except Exception as e:
+        logger.warning("Failed to create version snapshot: %s", e)
+    return version_unchanged
+
+
+def _process_skill_upload_single(
+    skill_dir: Path,
+    skill_name: str,
+    svc,
+    source_id: str,
+    user_id: str,
+    user_name: str,
+    category_id: Optional[int],
+    overwrite: bool = False,
+    cn_name: Optional[str] = None,
+    skill_id: Optional[str] = None,
+    bbk_ids: Optional[list[str]] = None,
+) -> tuple[Optional[str], Optional[dict], Optional[str], str, bool]:
+    """处理单个技能的上架逻辑.
+
+    Args:
+        overwrite: 是否覆盖同名技能，默认 False（返回冲突）
+        cn_name: 用户输入的中文展示名
+        skill_id: parse-zip 生成的 skill_id，前端传入确保一致性
+        bbk_ids: 所属分行 ID 列表
+
+    Returns:
+        (imported_name, conflict_info, parsed_name_for_first, resolved_cn_name, version_unchanged)
+    """
+    skill_json, skill_md, name, description, version = _parse_skill_metadata(
+        skill_dir,
+        skill_name,
+    )
+
+    # 直接使用前端传入的 cn_name 和 skill_id（parse-zip 已解析）
+    # 如果前端未传（向后兼容），则从 SKILL.md 解析
+    resolved_cn_name = cn_name.strip() if cn_name else ""
+    final_skill_id = skill_id.strip() if skill_id else ""
+
+    # 向后兼容：前端未传时，从 SKILL.md 解析
+    if not resolved_cn_name or not final_skill_id:
+        parsed_cn_name, parsed_skill_id = _resolve_skill_cn_name_and_id(
+            skill_md,
+            name,
+            resolved_cn_name,
+            user_id,
+        )
+        if not resolved_cn_name:
+            resolved_cn_name = parsed_cn_name
+        if not final_skill_id:
+            final_skill_id = parsed_skill_id
 
     # 检查市场是否已存在同名技能
     items = load_index(svc.marketplace_root, source_id)
@@ -303,27 +444,23 @@ def _process_skill_upload_single(
         return None, conflict_info, name, resolved_cn_name, False
 
     version_unchanged = False
-    cn_name_changed = False  # 记录中文名是否变化
+    cn_name_changed = False
 
     if existing:
-        # R4: 同名（已确认覆盖） → 续接到现有条目（无论 creator 是否相同）
-        # F1 修复：市场版本号独立于 SKILL.md，始终走 _bump_patch（spec R3）。
-        # SKILL.md 中的 version 仅作为 source_user_version 写入快照元数据。
-        now = datetime.now(timezone.utc).isoformat()
-        # 检查中文名是否变化（existing 存在时才需要检查）
-        cn_name_changed = existing.chinese_name != resolved_cn_name
-        existing.created_at = now
-        existing.status = "active"
-        existing.chinese_name = resolved_cn_name
-        existing.description = description
-        existing.version = _bump_patch(existing.version)
-        existing.creator_id = user_id
-        existing.creator_name = user_name
-        existing.category_id = category_id
-        existing.updated_at = now
+        # R4: 同名（已确认覆盖） → 续接到现有条目
+        cn_name_changed = _update_existing_market_item(
+            existing,
+            description,
+            resolved_cn_name,
+            final_skill_id,
+            user_id,
+            user_name,
+            category_id,
+            bbk_ids,
+        )
         item = existing
     else:
-        # 创建新市场条目，市场首发版本固定为 1.0.0（不再继承 SKILL.md version）
+        # 创建新市场条目，市场首发版本固定为 1.0.0
         item = _create_market_item(
             name,
             resolved_cn_name,
@@ -332,6 +469,8 @@ def _process_skill_upload_single(
             user_id,
             user_name,
             category_id,
+            skill_id=final_skill_id,
+            bbk_ids=bbk_ids or [],
         )
         items.append(item)
 
@@ -344,37 +483,71 @@ def _process_skill_upload_single(
     _copy_skill_to_market(skill_dir, market_skill_dir, skill_json, skill_md)
 
     # 创建版本快照
-    # admin zip 路径：source_user_id="" 表示无来源；source_user_version="v0.0.0"（spec R6）
-    version_svc = SkillVersionService(svc.marketplace_root)
-    try:
-        snapshot = version_svc.create_version_snapshot(
-            source_id=source_id,
-            item_id=item.item_id,
-            skill_dir=market_skill_dir,
-            description="",  # 去掉重复的版本号信息
-            creator=user_id,
-            creator_name=user_name,
-            current_market_version=item.version,
-            source_user_id="",
-            source_user_name="",
-            source_user_version="v0.0.0",
-        )
-        # F2：让 MarketItem.version 严格跟随快照的 version_id（处理 R7 复用历史 id 场景）
-        # F3：cn_name 变化时不应返回 version_unchanged，即使文件内容未变
-        if snapshot.version_id and snapshot.version_id != item.version:
-            # 版本被回滚 = R7 no-op（内容未变）
-            # 但如果 cn_name 变化了，仍然算作有变更
-            version_unchanged = not cn_name_changed
-            item.version = snapshot.version_id
-        elif cn_name_changed:
-            # 即使版本号相同，cn_name 变化也算有变更
-            version_unchanged = False
-    except Exception as e:
-        logger.warning("Failed to create version snapshot: %s", e)
+    version_unchanged = _create_market_version_snapshot(
+        svc,
+        source_id,
+        item,
+        market_skill_dir,
+        user_id,
+        user_name,
+        cn_name_changed,
+    )
 
     save_index(svc.marketplace_root, source_id, items)
 
     return name, None, name, resolved_cn_name, version_unchanged
+
+
+async def _process_published_skill_record(
+    skill_dir: Path,
+    skill_name: str,
+    imported_name: str,
+    resolved_cn_name: str,
+    svc,
+    source_id: str,
+    x_user_id: str,
+    user_name: str,
+    parsed_name: Optional[str],
+    parsed_description: Optional[str],
+    parsed_cn_name: Optional[str],
+) -> tuple[Optional[str], Optional[str], Optional[str]]:
+    """处理已发布技能的记录逻辑.
+
+    Returns:
+        (parsed_name, parsed_description, parsed_cn_name) 更新后的值
+    """
+    # 记录首次解析的名称和描述
+    if parsed_name is None and imported_name:
+        skill_json, skill_md, _, desc, _ = _parse_skill_metadata(
+            skill_dir,
+            skill_name,
+        )
+        parsed_name = imported_name
+        parsed_description = desc
+
+    # 记录首次解析的中文名
+    if parsed_cn_name is None:
+        parsed_cn_name = resolved_cn_name
+
+    # 异步记录操作日志
+    item = next(
+        (
+            i
+            for i in load_index(svc.marketplace_root, source_id)
+            if i.name == imported_name
+        ),
+        None,
+    )
+    if item:
+        await _log_publish_operation(
+            svc,
+            source_id,
+            x_user_id,
+            user_name,
+            item,
+        )
+
+    return parsed_name, parsed_description, parsed_cn_name
 
 
 @router.post(
@@ -385,9 +558,11 @@ def _process_skill_upload_single(
 async def publish_skill_upload(
     request: Request,
     file: UploadFile = File(..., description="Skill zip file to publish"),
-    category_id: Optional[int] = None,
-    overwrite: bool = False,
-    cn_name: str = "",
+    category_id: Optional[int] = Query(default=None),
+    overwrite: bool = Query(default=False),
+    cn_name: str = Query(default=""),
+    skill_id: str = Query(default=""),
+    bbk_ids: str = Query(default=""),
     x_source_id: Optional[str] = Header(default=None, alias="X-Source-Id"),
     x_manager: Optional[str] = Header(default=None, alias="X-Manager"),
     x_user_id: Optional[str] = Header(default=None, alias="X-User-Id"),
@@ -397,6 +572,8 @@ async def publish_skill_upload(
 
     Args:
         overwrite: 是否覆盖同名技能，默认 False（返回冲突提示）
+        skill_id: parse-zip 生成的 skill_id，前端传入确保一致性
+        bbk_ids: 所属分行 ID，逗号分隔，如 "100,200"
     """
     source_id = require_source_id(x_source_id)
     _require_manager(x_manager)
@@ -408,6 +585,11 @@ async def publish_skill_upload(
 
     svc = request.app.state.marketplace
     user_name = decode_user_name(x_user_name) or x_user_id
+
+    # 解析 bbk_ids（逗号分隔）
+    parsed_bbk_ids = []
+    if bbk_ids.strip():
+        parsed_bbk_ids = [b.strip() for b in bbk_ids.split(",") if b.strip()]
 
     # 读取并验证 zip 文件
     data = await _read_validated_zip_upload(file)
@@ -447,8 +629,10 @@ async def publish_skill_upload(
                 x_user_id,
                 user_name,
                 category_id,
-                overwrite,  # 传递 overwrite 参数
-                cn_name,  # 传递中文展示名
+                overwrite,
+                cn_name,
+                skill_id,  # 传递 parse-zip 生成的 skill_id
+                parsed_bbk_ids,  # 传递所属分行
             )
 
             if conflict:
@@ -460,37 +644,21 @@ async def publish_skill_upload(
 
             if imported_name:
                 imported.append(imported_name)
-
-                # 记录首次解析的名称和描述
-                if parsed_name is None and first_name:
-                    skill_json, skill_md, _, desc, _ = _parse_skill_metadata(
+                parsed_name, parsed_description, parsed_cn_name = (
+                    await _process_published_skill_record(
                         skill_dir,
                         skill_name,
-                    )
-                    parsed_name = first_name
-                    parsed_description = desc
-
-                # 记录首次解析的中文名
-                if parsed_cn_name is None:
-                    parsed_cn_name = resolved_cn_name
-
-                # 异步记录操作日志
-                item = next(
-                    (
-                        i
-                        for i in load_index(svc.marketplace_root, source_id)
-                        if i.name == imported_name
-                    ),
-                    None,
-                )
-                if item:
-                    await _log_publish_operation(
+                        imported_name,
+                        resolved_cn_name,
                         svc,
                         source_id,
                         x_user_id,
                         user_name,
-                        item,
+                        parsed_name,
+                        parsed_description,
+                        parsed_cn_name,
                     )
+                )
     finally:
         if tmp_dir.exists():
             shutil.rmtree(tmp_dir, ignore_errors=True)
@@ -839,6 +1007,16 @@ async def init_user_skills(
     return results
 
 
+class _ListSkillsRequest(BaseModel):
+    """查询技能列表请求参数."""
+
+    source_id: str = Field(..., description="来源ID")
+
+    # 预留未来扩展参数
+    # user_ids: list[str] | None = Field(default=None, description="用户ID列表")
+    # skill_types: list[str] | None = Field(default=None, description="技能类型过滤")
+
+
 class _InitSweSkillsRequest(BaseModel):
     """初始化 swe_skills 表请求参数."""
 
@@ -875,28 +1053,32 @@ class _InitSweSkillsResult(TypedDict):
     details: list[dict]
 
 
-@router.get(
-    "/market/admin/skills/list-unique-by-source",
+@router.post(
+    "/market/skills/list",
 )
-async def list_unique_skills_by_source(
+async def list_skills(
     request: Request,
-    source_id: str,
+    body: _ListSkillsRequest,
 ):
-    """查询某个 source_id 的所有技能，按 skill_id 去重.
+    """查询技能列表.
 
     Args:
-        source_id: 来源ID
+        body: 请求参数，包含 source_id 等
 
     Returns:
-        技能列表，包含 skill_id、skill_name、cn_name
+        技能列表，每个 skill_id 只返回一条记录，包含 skill_id、skill_name、cn_name
     """
     from ...marketplace.skill_registry import SkillRegistry
 
     svc = request.app.state.marketplace
     registry = SkillRegistry(svc.db)
 
-    skills = await registry.list_unique_skills_by_source_id(source_id)
-    return {"source_id": source_id, "count": len(skills), "skills": skills}
+    skills = await registry.list_unique_skills_by_source_id(body.source_id)
+    return {
+        "source_id": body.source_id,
+        "count": len(skills),
+        "skills": skills,
+    }
 
 
 def _find_tenant_dirs_for_source_id(
@@ -1064,7 +1246,9 @@ async def _upsert_skill_to_db(
             source_id=source_id,
             enabled=entry.get("enabled", False),
             description=metadata.get("description", ""),
-            version_text=metadata.get("version_text", "1.0.0"),
+            version_text=metadata.get("version_text")
+            or metadata.get("received_version")
+            or "1.0.0",
         )
         return None
     except Exception as e:
@@ -1417,6 +1601,60 @@ async def get_skill_distributions(
     return distributions
 
 
+class _UpdateSkillRequest(BaseModel):
+    """更新技能中文名请求体."""
+
+    skill_id: str
+    chinese_name: str
+    sync_to_users: bool = False
+    target_user_ids: list[str] = Field(default_factory=list)
+
+
+class _UpdateSkillResponse(BaseModel):
+    """更新技能中文名响应体."""
+
+    success: bool
+    market_updated: bool
+    synced_users: int
+    skipped_users: int
+    errors: list[dict]
+
+
+@router.patch("/market/skills/{item_id}")
+async def update_skill_cn_name(
+    item_id: str,
+    req: _UpdateSkillRequest,
+    request: Request,
+    x_source_id: Optional[str] = Header(default=None, alias="X-Source-Id"),
+    x_manager: Optional[str] = Header(default=None, alias="X-Manager"),
+):
+    """更新市场技能中文名，可选同步用户空间."""
+    source_id = require_source_id(x_source_id)
+    _require_manager(x_manager)
+    svc = request.app.state.marketplace
+
+    # 从 MarketItem 获取 skill_name
+    items = load_index(svc.marketplace_root, source_id)
+    item = next(
+        (i for i in items if i.item_id == item_id and i.item_type == "skill"),
+        None,
+    )
+    if item is None:
+        raise HTTPException(status_code=404, detail="Skill not found")
+
+    result = await svc.update_skill_cn_name(
+        source_id=source_id,
+        item_id=item_id,
+        skill_id=req.skill_id,
+        skill_name=item.name,
+        chinese_name=req.chinese_name,
+        sync_to_users=req.sync_to_users,
+        target_user_ids=req.target_user_ids,
+    )
+
+    return _UpdateSkillResponse(**result)
+
+
 @router.post(
     "/market/skills/recall",
 )
@@ -1494,3 +1732,302 @@ async def recall_skill(
     except ValueError as e:
         raise HTTPException(status_code=404, detail=str(e))
     return result.model_dump()
+
+
+class _InitMarketSkillsRequest(BaseModel):
+    """初始化市场技能请求参数."""
+
+    source_ids: list[str] = Field(
+        default_factory=list,
+        description="来源ID列表，不传或为空时初始化所有来源",
+    )
+    dry_run: bool = Field(
+        default=False,
+        description="试运行模式，仅统计不实际写入",
+    )
+
+
+class _InitMarketSkillsResult(TypedDict):
+    """初始化市场技能返回结果."""
+
+    dry_run: bool
+    source_ids: list[str]
+    total_items: int
+    processed: int
+    updated: int
+    skipped: int
+    errors: list[dict]
+    details: list[dict]
+
+
+def _truncate_chinese_name(cn_name: str, max_length: int = 50) -> str:
+    """截断中文名，防止过长."""
+    if len(cn_name) > max_length:
+        return cn_name[:max_length]
+    return cn_name
+
+
+def _extract_skill_metadata_from_md(
+    skill_md_path: Path,
+    item_id: str,
+    item_name: str,
+) -> tuple[str, str]:
+    """从 SKILL.md 提取 skill_id 和 chinese_name.
+
+    Args:
+        skill_md_path: SKILL.md 文件路径
+        item_id: 市场条目 ID
+        item_name: 技能名称
+
+    Returns:
+        (skill_id, chinese_name)
+    """
+    from ...utils.skill_md import (
+        extract_skill_id,
+        extract_cn_name_from_title,
+        parse_frontmatter,
+    )
+
+    skill_id = ""
+    chinese_name = ""
+
+    if not skill_md_path.exists():
+        return skill_id, chinese_name
+
+    try:
+        md_content = skill_md_path.read_text(encoding="utf-8")
+
+        # 提取 skill_id（市场技能 source 为 marketplace:{item_id}）
+        skill_id = extract_skill_id(
+            md_content,
+            f"marketplace:{item_id}",
+            item_name,
+            creator_id="",
+        )
+
+        # 提取 chinese_name：优先 frontmatter，其次一级标题
+        fm = parse_frontmatter(md_content)
+        metadata = fm.get("metadata", {})
+        if isinstance(metadata, dict):
+            chinese_name = metadata.get("cn_name", "") or metadata.get(
+                "chinese_name",
+                "",
+            )
+        if not chinese_name:
+            chinese_name = extract_cn_name_from_title(md_content)
+    except OSError as e:
+        logger.warning(
+            "读取 SKILL.md 失败: item_id=%s, error=%s",
+            item_id,
+            e,
+        )
+
+    return skill_id, chinese_name
+
+
+def _process_single_skill_item(
+    item: MarketItem,
+    marketplace_root: Path,
+    source_id: str,
+) -> tuple[str, str, bool]:
+    """处理单个技能条目，提取 skill_id 和 chinese_name.
+
+    Args:
+        item: 市场条目
+        marketplace_root: 市场根目录
+        source_id: 来源 ID
+
+    Returns:
+        (skill_id, chinese_name, needs_update)
+    """
+    skill_dir = get_skill_dir(marketplace_root, source_id, item.item_id)
+    skill_md_path = skill_dir / "SKILL.md"
+
+    # 提取 skill_id 和 chinese_name
+    skill_id, chinese_name = _extract_skill_metadata_from_md(
+        skill_md_path,
+        item.item_id,
+        item.name,
+    )
+
+    # fallback: skill_id 使用 item_id
+    if not skill_id:
+        skill_id = item.item_id
+
+    # fallback: chinese_name 使用 MarketItem.chinese_name 或 name
+    if not chinese_name:
+        chinese_name = item.chinese_name or item.name
+
+    # 截断 chinese_name（最多50字）
+    chinese_name = _truncate_chinese_name(chinese_name, 50)
+
+    # 检查是否需要更新
+    needs_update = False
+    if not item.skill_id and skill_id:
+        item.skill_id = skill_id
+        needs_update = True
+    if not item.chinese_name and chinese_name:
+        item.chinese_name = chinese_name
+        needs_update = True
+
+    return skill_id, chinese_name, needs_update
+
+
+def _process_source_id_skills(
+    source_id: str,
+    marketplace_root: Path,
+    dry_run: bool,
+    results: _InitMarketSkillsResult,
+) -> None:
+    """处理单个 source_id 下的所有技能.
+
+    Args:
+        source_id: 来源 ID
+        marketplace_root: 市场根目录
+        dry_run: 试运行模式
+        results: 结果统计
+    """
+    logger.info("处理 source_id=%s", source_id)
+
+    # 加载 index.json
+    items = load_index(marketplace_root, source_id)
+    logger.debug(
+        "加载 index.json: source_id=%s, items=%d",
+        source_id,
+        len(items),
+    )
+
+    # 过滤 skill 类型
+    skill_items = [item for item in items if item.item_type == "skill"]
+    results["total_items"] += len(skill_items)
+    logger.debug(
+        "过滤 skill 类型: source_id=%s, skill_items=%d",
+        source_id,
+        len(skill_items),
+    )
+
+    updated_items = []
+    for item in skill_items:
+        skill_id, chinese_name, needs_update = _process_single_skill_item(
+            item,
+            marketplace_root,
+            source_id,
+        )
+
+        results["processed"] += 1
+
+        if needs_update:
+            updated_items.append(item)
+            results["updated"] += 1
+            results["details"].append(
+                {
+                    "source_id": source_id,
+                    "item_id": item.item_id,
+                    "name": item.name,
+                    "skill_id": skill_id,
+                    "chinese_name": chinese_name,
+                },
+            )
+            logger.info(
+                "更新条目: source_id=%s, item_id=%s, name=%s, skill_id=%s, chinese_name=%s",
+                source_id,
+                item.item_id,
+                item.name,
+                skill_id,
+                chinese_name,
+            )
+        else:
+            results["skipped"] += 1
+            logger.info(
+                "跳过条目（无需更新）: source_id=%s, item_id=%s, name=%s",
+                source_id,
+                item.item_id,
+                item.name,
+            )
+
+    # 保存更新后的 index.json（非 dry_run 模式）
+    if updated_items and not dry_run:
+        save_index(marketplace_root, source_id, items)
+        logger.info(
+            "保存 index.json: source_id=%s, updated=%d",
+            source_id,
+            len(updated_items),
+        )
+    elif updated_items and dry_run:
+        logger.info(
+            "试运行模式，不保存: source_id=%s, would_update=%d",
+            source_id,
+            len(updated_items),
+        )
+
+
+@router.post(
+    "/market/admin/skills/init-market-skills",
+)
+async def init_market_skills(
+    request: Request,
+    payload: _InitMarketSkillsRequest,
+):
+    """初始化市场技能的 skill_id 和 chinese_name.
+
+    遍历 index.json 中 item_type == "skill" 的条目，
+    从 SKILL.md 提取 skill_id 和 chinese_name，
+    补充缺失的字段并保存。
+
+    Args:
+        payload.source_ids: 来源ID列表，不传或为空时初始化所有来源
+        payload.dry_run: 试运行模式，仅统计不实际写入
+    """
+    svc = request.app.state.marketplace
+    marketplace_root = svc.marketplace_root
+
+    results: _InitMarketSkillsResult = {
+        "dry_run": payload.dry_run,
+        "source_ids": [],
+        "total_items": 0,
+        "processed": 0,
+        "updated": 0,
+        "skipped": 0,
+        "errors": [],
+        "details": [],
+    }
+
+    # 确定 source_ids 列表
+    if payload.source_ids:
+        source_ids = payload.source_ids
+    else:
+        # 遍历 marketplace_root 下所有目录作为 source_ids
+        source_ids = []
+        for dir_path in marketplace_root.iterdir():
+            if dir_path.is_dir():
+                index_path = dir_path / "index.json"
+                if index_path.exists():
+                    source_ids.append(dir_path.name)
+
+    results["source_ids"] = source_ids
+
+    logger.info(
+        "开始初始化市场技能: dry_run=%s, source_ids=%s",
+        payload.dry_run,
+        source_ids,
+    )
+
+    for source_id in source_ids:
+        _process_source_id_skills(
+            source_id,
+            marketplace_root,
+            payload.dry_run,
+            results,
+        )
+
+    logger.info(
+        "初始化完成: dry_run=%s, total_items=%d, processed=%d, updated=%d, skipped=%d, errors=%d",
+        payload.dry_run,
+        results["total_items"],
+        results["processed"],
+        results["updated"],
+        results["skipped"],
+        len(results["errors"]),
+    )
+
+    return results

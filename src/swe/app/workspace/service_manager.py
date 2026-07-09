@@ -328,19 +328,27 @@ class ServiceManager:
             f"{self.workspace.agent_id}",
         )
 
-    async def stop_all(self, final: bool = False) -> None:
+    async def stop_all(
+        self,
+        final: bool = False,
+        *,
+        stop_reused: bool = True,
+    ) -> None:
         """Stop all services in reverse priority order.
 
         Args:
             final: If True, stop ALL services including reusable ones.
                    If False (default), skip reusable services (for reload).
+            stop_reused: If False, skip services borrowed from another
+                workspace even during final cleanup.
 
         Reused services are skipped. Errors are logged but don't stop
         the shutdown process.
         """
         logger.debug(
             f"Stopping {len(self.services)} services "
-            f"({len(self.reused_services)} reused, final={final})",
+            f"({len(self.reused_services)} reused, "
+            f"final={final}, stop_reused={stop_reused})",
         )
 
         priority_groups = self._group_by_priority()
@@ -352,7 +360,11 @@ class ServiceManager:
             # Stop all services in this priority group concurrently
             results = await asyncio.gather(
                 *[
-                    self._stop_service(desc, final=final)
+                    self._stop_service(
+                        desc,
+                        final=final,
+                        stop_reused=stop_reused,
+                    )
                     for desc in descriptors
                 ],
                 return_exceptions=True,
@@ -364,18 +376,31 @@ class ServiceManager:
                     logger.warning(
                         f"Error stopping service '{desc.name}': {result}",
                     )
+                    continue
+                if result is True:
+                    self.services.pop(desc.name, None)
+                    self.reused_services.discard(desc.name)
+
+        if final:
+            self.services.clear()
+            self.reused_services.clear()
+            self.workspace = None
 
     async def _stop_service(
         self,
         descriptor: ServiceDescriptor,
         final: bool = False,
-    ) -> None:
+        *,
+        stop_reused: bool = True,
+    ) -> bool:
         """Stop a single service.
 
         Args:
             descriptor: Service descriptor
             final: If True, stop service even if reusable.
                    If False, skip reusable services (for reload).
+            stop_reused: If False, skip services borrowed from another
+                workspace even when final is True.
         """
         name = descriptor.name
 
@@ -386,20 +411,20 @@ class ServiceManager:
                 f"Skipped stopping reusable service '{name}' "
                 f"for {self.workspace.agent_id} (will be reused)",
             )
-            return
+            return False
 
         # Skip services that were reused from previous instance UNLESS final
         # (they don't belong to this instance, but must be stopped on final)
-        if name in self.reused_services and not final:
+        if name in self.reused_services and (not final or not stop_reused):
             logger.debug(
                 f"Skipped stopping reused service '{name}' "
                 f"(from previous instance) for {self.workspace.agent_id}",
             )
-            return
+            return False
 
         service = self.services.get(name)
         if not service:
-            return
+            return False
 
         try:
             if descriptor.stop_method:
@@ -413,6 +438,7 @@ class ServiceManager:
                         f"Service '{name}' stopped "
                         f"for {self.workspace.agent_id}",
                     )
+            return True
         except Exception as e:
             logger.warning(
                 f"Error stopping service '{name}' "

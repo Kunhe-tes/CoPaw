@@ -15,11 +15,13 @@ import { isHistorySessionActive } from "./historySessions";
 import sendIcon from "../../../../assets/icons/new_chat.svg";
 import operateIcon from "../../../../assets/icons/operate.svg";
 import guideImage from "@/assets/others/note.png";
+import shGuideImage from "@/assets/others/sh_note.png";
 import {
   ChatAnywhereSessionsContext,
   type IAgentScopeRuntimeWebUISession,
 } from "@/components/agentscope-chat";
 import { useAgentStore } from "@/stores/agentStore";
+import { useIframeStore } from "@/stores/iframeStore";
 import sessionApi from "../../sessionApi";
 import { getSessionAgentId } from "../../sessionApi/sessionAgent";
 import { resolveRequestedSessionId } from "../../sessionApi/resolvedSessionMapping";
@@ -137,6 +139,8 @@ export default function ChatSidebar(props: ChatSidebarProps) {
     (value) => value.isSessionsListLoading,
   );
   const { selectedAgent, setSelectedAgent } = useAgentStore();
+  const bbk = useIframeStore((state) => state.bbk);
+  const currentGuideImage = bbk === "121" ? shGuideImage : guideImage;
 
   const currentChatId = location.pathname.match(/^\/chat\/(.+)$/)?.[1] || null;
   const currentChatIdRef = useRef<string | null>(currentChatId);
@@ -217,7 +221,10 @@ export default function ChatSidebar(props: ChatSidebarProps) {
   }, [sharedSessions]);
   const sessionsRef = useRef(sessions);
   sessionsRef.current = sessions;
-  const historyTotal = Math.max(sessionApi.getSessionTotal(), sessions.length);
+  const historyTotal = Math.max(
+    sessionApi.getSessionTotal() - tasks.length,
+    sessions.length,
+  );
 
   const handleToggleHistory = useCallback(() => {
     setHistoryCollapsed((prev) => !prev);
@@ -518,10 +525,11 @@ export default function ChatSidebar(props: ChatSidebarProps) {
         <Image.PreviewGroup
           preview={{
             visible: guidePreviewVisible,
+            rootClassName: "chat-sidebar-guide-preview",
             onVisibleChange: (vis) => setGuidePreviewVisible(vis),
           }}
         >
-          <Image src={guideImage} />
+          <Image src={currentGuideImage} />
         </Image.PreviewGroup>
       </div>
     </>

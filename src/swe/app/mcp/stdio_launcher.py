@@ -10,12 +10,17 @@ import sys
 from typing import Sequence
 
 from swe.envs.runtime import build_runtime_env
+from swe.runtime_invocation_claims import apply_runtime_claim_env
 from swe.security.process_limits import resolve_current_process_limit_policy
 
 try:
     import resource
 except ImportError:  # pragma: no cover - non-Unix import guard
     resource = None  # type: ignore[assignment]
+
+
+_WRAPPER_ONLY_DROP_ENV_KEYS = "SWE_STDIO_LAUNCHER_DROP_ENV_KEYS"
+_WRAPPER_PRESERVED_BOUNDARY_KEYS = frozenset({"PYTHONPATH"})
 
 
 @dataclass(frozen=True)
@@ -59,10 +64,24 @@ def build_tenant_aware_stdio_launch_config(
             )
         launch_args.extend(["--", command, *original_args])
 
+    runtime_env = build_runtime_env(
+        call_env=env or {},
+        preserve_boundary_env_keys=(
+            _WRAPPER_PRESERVED_BOUNDARY_KEYS
+            if policy.should_enforce
+            else frozenset()
+        ),
+    )
+    runtime_env = apply_runtime_claim_env(runtime_env)
+    if policy.should_enforce:
+        runtime_env[_WRAPPER_ONLY_DROP_ENV_KEYS] = os.pathsep.join(
+            sorted(_WRAPPER_PRESERVED_BOUNDARY_KEYS),
+        )
+
     return TenantAwareStdioLaunchConfig(
         command=command,
         args=original_args,
-        env=build_runtime_env(call_env=env or {}),
+        env=runtime_env,
         cwd=cwd,
         launch_command=launch_command,
         launch_args=launch_args,
@@ -105,7 +124,12 @@ def main(argv: Sequence[str] | None = None) -> None:
             )
 
     command = command_parts[0]
-    os.execvpe(command, command_parts, os.environ.copy())
+    exec_env = os.environ.copy()
+    drop_keys = exec_env.pop(_WRAPPER_ONLY_DROP_ENV_KEYS, "")
+    for key in drop_keys.split(os.pathsep):
+        if key:
+            exec_env.pop(key, None)
+    os.execvpe(command, command_parts, exec_env)
 
 
 if __name__ == "__main__":  # pragma: no cover

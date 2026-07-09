@@ -7,7 +7,8 @@ from contextvars import ContextVar, Token
 from dataclasses import dataclass
 from typing import Any, Generator
 
-from swe.config.config import ToolResultCompactConfig
+from swe.config.config import QueryRetryConfig, ToolResultCompactConfig
+from swe.providers.retry_chat_model import RateLimitConfig
 
 from .registry import (
     CRON_TASK_SESSION_CLEANUP_CRON_SETTING,
@@ -17,6 +18,19 @@ from .registry import (
     CRON_UNREAD_AUTO_PAUSE_THRESHOLD_SETTING,
     FILE_READ_TRUNCATION_ENABLED_SETTING,
     FILE_READ_TRUNCATION_MAX_BYTES_SETTING,
+    LLM_ACQUIRE_TIMEOUT_SETTING,
+    LLM_CHAT_ACQUIRE_TIMEOUT_SETTING,
+    LLM_CHAT_MAX_CONCURRENT_SETTING,
+    LLM_CRON_ACQUIRE_TIMEOUT_SETTING,
+    LLM_CRON_MAX_CONCURRENT_SETTING,
+    LLM_MAX_CONCURRENT_SETTING,
+    LLM_MAX_QPM_SETTING,
+    LLM_RATE_LIMIT_JITTER_SETTING,
+    LLM_RATE_LIMIT_PAUSE_SETTING,
+    QUERY_RETRY_BACKOFF_BASE_SETTING,
+    QUERY_RETRY_BACKOFF_CAP_SETTING,
+    QUERY_RETRY_ENABLED_SETTING,
+    QUERY_RETRY_MAX_RETRIES_SETTING,
     SourceSystemConfigSetting,
     get_system_prompt_injections as _get_system_prompt_injections,
     merge_source_system_config_with_defaults,
@@ -54,6 +68,19 @@ class CronTaskSessionCleanupConfig:
     enabled: bool
     retention_days: int
     cron: str
+
+
+_RATE_LIMIT_SOURCE_TO_RUNTIME_FIELDS = {
+    "llm_max_concurrent": "max_concurrent",
+    "llm_chat_max_concurrent": "chat_max_concurrent",
+    "llm_cron_max_concurrent": "cron_max_concurrent",
+    "llm_max_qpm": "max_qpm",
+    "llm_rate_limit_pause": "pause_seconds",
+    "llm_rate_limit_jitter": "jitter_range",
+    "llm_acquire_timeout": "acquire_timeout",
+    "llm_chat_acquire_timeout": "chat_acquire_timeout",
+    "llm_cron_acquire_timeout": "cron_acquire_timeout",
+}
 
 
 @contextmanager
@@ -109,6 +136,75 @@ def resolve_tool_result_compact_config(
         )
         payload["recent_max_bytes"] = payload["old_max_bytes"]
     return ToolResultCompactConfig.model_validate(payload)
+
+
+def resolve_query_retry_config(
+    base_config: QueryRetryConfig | Any,
+    source_config: Any | None = None,
+) -> QueryRetryConfig:
+    """合成 Agent 运行配置和当前 source 的显式 Query 重试覆盖。"""
+    base = _normalize_query_retry_config(base_config)
+    source_payload = _extract_registered_section_override(
+        "query_retry",
+        source_config,
+    )
+    if not source_payload:
+        return base.model_copy(deep=True)
+
+    payload = base.model_dump(mode="python")
+    payload.update(source_payload)
+    if payload["backoff_cap"] < payload["backoff_base"]:
+        logger.warning(
+            "Invalid source query_retry backoff resolved for source %s: "
+            "backoff_cap=%s, backoff_base=%s; adjusted backoff_cap to "
+            "backoff_base",
+            _get_source_config_id(source_config),
+            payload["backoff_cap"],
+            payload["backoff_base"],
+        )
+        payload["backoff_cap"] = payload["backoff_base"]
+    return QueryRetryConfig.model_validate(payload)
+
+
+def resolve_llm_rate_limiter_config(
+    base_config: RateLimitConfig,
+    source_config: Any | None = None,
+) -> RateLimitConfig:
+    """合成 Agent 运行配置和当前 source 的显式 LLM 限流覆盖。"""
+    source_payload = _extract_registered_section_override(
+        "llm_rate_limiter",
+        source_config,
+    )
+    if not source_payload:
+        return RateLimitConfig(
+            max_concurrent=base_config.max_concurrent,
+            chat_max_concurrent=base_config.chat_max_concurrent,
+            cron_max_concurrent=base_config.cron_max_concurrent,
+            max_qpm=base_config.max_qpm,
+            pause_seconds=base_config.pause_seconds,
+            jitter_range=base_config.jitter_range,
+            acquire_timeout=base_config.acquire_timeout,
+            chat_acquire_timeout=base_config.chat_acquire_timeout,
+            cron_acquire_timeout=base_config.cron_acquire_timeout,
+        )
+
+    payload = {
+        "max_concurrent": base_config.max_concurrent,
+        "chat_max_concurrent": base_config.chat_max_concurrent,
+        "cron_max_concurrent": base_config.cron_max_concurrent,
+        "max_qpm": base_config.max_qpm,
+        "pause_seconds": base_config.pause_seconds,
+        "jitter_range": base_config.jitter_range,
+        "acquire_timeout": base_config.acquire_timeout,
+        "chat_acquire_timeout": base_config.chat_acquire_timeout,
+        "cron_acquire_timeout": base_config.cron_acquire_timeout,
+    }
+    for source_key, value in source_payload.items():
+        runtime_key = _RATE_LIMIT_SOURCE_TO_RUNTIME_FIELDS.get(source_key)
+        if runtime_key is not None:
+            payload[runtime_key] = value
+    _adjust_rate_limiter_timeouts(payload, source_config)
+    return RateLimitConfig(**payload)
 
 
 def resolve_file_read_truncation_config(
@@ -209,7 +305,9 @@ def resolve_cron_task_session_cleanup_config(
     )
 
 
-def get_system_prompt_injections(source_config: Any | None = None) -> list[str]:
+def get_system_prompt_injections(
+    source_config: Any | None = None,
+) -> list[str]:
     """读取当前 source 的系统提示词注入配置。"""
     config = (
         get_current_source_system_config()
@@ -250,6 +348,68 @@ def _extract_tool_result_compact_override(
     if not isinstance(normalized_tool_result, dict):
         return {}
     return normalized_tool_result
+
+
+def _extract_registered_section_override(
+    section: str,
+    source_config: Any | None,
+) -> dict[str, Any]:
+    """只读取 raw source 配置中的注册 section 覆盖。"""
+    payload = _extract_raw_config_payload(source_config)
+    if not payload:
+        return {}
+    raw_section = payload.get(section)
+    if not isinstance(raw_section, dict):
+        return {}
+    normalized = normalize_registered_setting_values({section: raw_section})
+    normalized_section = normalized.get(section)
+    if not isinstance(normalized_section, dict):
+        return {}
+    return normalized_section
+
+
+def _normalize_query_retry_config(
+    base_config: QueryRetryConfig | Any,
+) -> QueryRetryConfig:
+    """兼容模型对象、dict 和测试替身，统一为 QueryRetryConfig。"""
+    if isinstance(base_config, QueryRetryConfig):
+        return base_config
+    if isinstance(base_config, dict):
+        return QueryRetryConfig.model_validate(base_config)
+    return QueryRetryConfig(
+        enabled=bool(getattr(base_config, "enabled", False)),
+        max_retries=int(getattr(base_config, "max_retries", 0)),
+        backoff_base=float(getattr(base_config, "backoff_base", 2.0)),
+        backoff_cap=float(getattr(base_config, "backoff_cap", 30.0)),
+    )
+
+
+def _adjust_rate_limiter_timeouts(
+    payload: dict[str, Any],
+    source_config: Any | None,
+) -> None:
+    """Keep inherited/acquired timeout values above the resolved cooldown."""
+    cooldown = float(payload["pause_seconds"]) + float(payload["jitter_range"])
+    for key in (
+        "acquire_timeout",
+        "chat_acquire_timeout",
+        "cron_acquire_timeout",
+    ):
+        value = payload.get(key)
+        if value is None or value > cooldown:
+            continue
+        adjusted = cooldown + 1.0
+        logger.warning(
+            "Invalid source llm_rate_limiter timeout resolved for source %s: "
+            "%s=%s, cooldown=%s; adjusted %s to %s",
+            _get_source_config_id(source_config),
+            key,
+            value,
+            cooldown,
+            key,
+            adjusted,
+        )
+        payload[key] = adjusted
 
 
 def _extract_immediate_truncation_override(

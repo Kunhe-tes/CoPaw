@@ -191,6 +191,9 @@ def _validate_plan_mode_readonly_shell(command: str) -> str | None:
     return "shell command is not in the Plan Mode readonly allowlist"
 
 
+_PENDING_TOOL_SKILL_ATTRIBUTIONS_KEY = "_pending_tool_skill_attributions"
+
+
 class _GuardAction:
     """Lightweight container for a guard decision made under lock."""
 
@@ -709,12 +712,14 @@ class ToolGuardMixin:
         tool_name: str,
         tool_input: dict[str, Any],
         mcp_server: str | None,
+        tool_call_id: str | None = None,
     ) -> str:
         """Emit tool call start trace event.
 
         Returns span_id or empty string.
         """
         if not has_trace_manager():
+            self._discard_precomputed_tool_skill_attribution(tool_call_id)
             return ""
         try:
             trace_ctx = self._resolve_trace_context_for_tracing()
@@ -731,6 +736,12 @@ class ToolGuardMixin:
                     _current_task_label(),
                 )
                 trace_mgr = get_trace_manager()
+                (
+                    has_precomputed_attribution,
+                    precomputed_attribution,
+                ) = self._consume_precomputed_tool_skill_attribution(
+                    tool_call_id,
+                )
                 return await trace_mgr.emit_tool_call_start(
                     trace_id=_trace_field(trace_ctx, "trace_id", ""),
                     tool_name=tool_name,
@@ -742,7 +753,10 @@ class ToolGuardMixin:
                     mcp_server=mcp_server,
                     user_name=_trace_field(trace_ctx, "user_name", None),
                     bbk_id=_trace_field(trace_ctx, "bbk_id", None),
+                    use_precomputed_attribution=(has_precomputed_attribution),
+                    precomputed_attribution=precomputed_attribution,
                 )
+            self._discard_precomputed_tool_skill_attribution(tool_call_id)
         except Exception as e:
             logger.debug("Failed to emit tool start event: %s", e)
         return ""
@@ -1055,18 +1069,60 @@ class ToolGuardMixin:
         tool_name: str,
         tool_input: dict[str, Any],
         mcp_server: str | None,
+        tool_call_id: str | None = None,
     ) -> None:
         detector = self._request_context.get("_skill_invocation_detector")
         if detector is None or not hasattr(detector, "on_tool_call"):
             return
         try:
-            await detector.on_tool_call(
+            primary_skill, _ = await detector.on_tool_call(
                 tool_name=tool_name,
                 tool_input=tool_input,
                 mcp_server=mcp_server,
             )
+            self._store_precomputed_tool_skill_attribution(
+                tool_call_id,
+                {"primary_skill": primary_skill},
+            )
         except Exception as exc:
             logger.debug("Skill detector tool notification failed: %s", exc)
+
+    def _store_precomputed_tool_skill_attribution(
+        self,
+        tool_call_id: str | None,
+        attribution: dict[str, Any],
+    ) -> None:
+        """缓存单次 tool call 的 skill attribution，供 tracing 复用。"""
+        if not tool_call_id:
+            return
+        request_context = getattr(self, "_request_context", {}) or {}
+        pending = request_context.get(_PENDING_TOOL_SKILL_ATTRIBUTIONS_KEY)
+        if not isinstance(pending, dict):
+            pending = {}
+            request_context[_PENDING_TOOL_SKILL_ATTRIBUTIONS_KEY] = pending
+        pending[tool_call_id] = dict(attribution)
+
+    def _consume_precomputed_tool_skill_attribution(
+        self,
+        tool_call_id: str | None,
+    ) -> tuple[bool, dict[str, Any] | None]:
+        """取出并消费预先计算的 tool attribution。"""
+        if not tool_call_id:
+            return False, None
+        request_context = getattr(self, "_request_context", {}) or {}
+        pending = request_context.get(_PENDING_TOOL_SKILL_ATTRIBUTIONS_KEY)
+        if not isinstance(pending, dict):
+            return False, None
+        if tool_call_id not in pending:
+            return False, None
+        return True, pending.pop(tool_call_id)
+
+    def _discard_precomputed_tool_skill_attribution(
+        self,
+        tool_call_id: str | None,
+    ) -> None:
+        """丢弃未被 tracing 消费的单次 tool attribution。"""
+        self._consume_precomputed_tool_skill_attribution(tool_call_id)
 
     @staticmethod
     def _hook_ask_handler_ids(result: MergedHookResult) -> list[str]:
@@ -1442,12 +1498,14 @@ class ToolGuardMixin:
             tool_name,
             tool_input,
             mcp_server,
+            str(tool_call.get("id") or ""),
         )
 
         span_id = await self._emit_tool_trace_start(
             tool_name,
             tool_input,
             mcp_server,
+            str(tool_call.get("id") or ""),
         )
 
         action: _GuardAction | None = None
@@ -1579,6 +1637,13 @@ class ToolGuardMixin:
             if self._should_require_approval():
                 return _GuardAction(
                     "needs_approval",
+                    tool_name,
+                    tool_input,
+                    guard_result=guard_result,
+                )
+            if not getattr(guard_result, "is_safe", True):
+                return _GuardAction(
+                    "auto_denied",
                     tool_name,
                     tool_input,
                     guard_result=guard_result,
@@ -1745,6 +1810,9 @@ class ToolGuardMixin:
             "approval_kind": approval_kind,
             "tool_call": tool_call,
         }
+        extra["agent_id"] = self._request_context.get("agent_id")
+        extra["tenant_id"] = self._request_context.get("tenant_id")
+        extra["source_id"] = self._request_context.get("source_id")
         if hook_ask_handler_ids:
             extra["hook_ask_handler_ids"] = list(hook_ask_handler_ids)
 
@@ -1796,6 +1864,17 @@ class ToolGuardMixin:
             result=guard_result,
             extra=extra,
         )
+        try:
+            from swe.app.approvals import notify_cron_approval_pending
+
+            await notify_cron_approval_pending(
+                pending_request,
+                channel_manager=self._request_context.get("channel_manager"),
+            )
+        except Exception:
+            logger.exception(
+                "Tool guard: failed to notify cron approval request",
+            )
 
         guardians = list(
             {f.guardian for f in guard_result.findings if f.guardian},

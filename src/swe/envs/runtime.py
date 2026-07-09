@@ -16,6 +16,11 @@ from swe.config.context import (
     resolve_scope_id,
 )
 from swe.config.utils import get_tenant_secrets_dir
+from swe.env_defaults import (
+    get_backend_owned_secret_env_keys,
+    get_system_configuration_env_keys,
+)
+from swe.runtime_invocation_claims import RUNTIME_CLAIM_ENV_KEYS
 from swe.tracing.sanitizer import register_sensitive_values
 
 from .store import load_envs
@@ -38,7 +43,22 @@ PROTECTED_RUNTIME_ENV_KEYS = frozenset(
         "PYTHONHOME",
         "LD_LIBRARY_PATH",
         "DYLD_LIBRARY_PATH",
+        "SWE_STDIO_LAUNCHER_DROP_ENV_KEYS",
+        *RUNTIME_CLAIM_ENV_KEYS,
     },
+)
+
+_USER_TOOL_SUBPROCESS_ALLOWED_PROTECTED_ENV_KEYS = frozenset(
+    {
+        "PATH",
+        "HOME",
+        "SHELL",
+    },
+)
+
+_USER_TOOL_SUBPROCESS_BOUNDARY_ENV_KEYS = (
+    PROTECTED_RUNTIME_ENV_KEYS
+    - _USER_TOOL_SUBPROCESS_ALLOWED_PROTECTED_ENV_KEYS
 )
 
 MASKED_ENV_VALUE = "********"
@@ -111,6 +131,27 @@ def _filter_runtime_env(envs: Mapping[str, str]) -> dict[str, str]:
     }
 
 
+def _scrub_user_tool_subprocess_env(
+    envs: Mapping[str, str],
+    *,
+    preserve_boundary_keys: frozenset[str] = frozenset(),
+) -> dict[str, str]:
+    """删除不应继承到用户工具子进程的后端环境变量。"""
+    preserved_boundary_keys = (
+        preserve_boundary_keys & _USER_TOOL_SUBPROCESS_BOUNDARY_ENV_KEYS
+    )
+    blocked_keys = (
+        get_system_configuration_env_keys()
+        | get_backend_owned_secret_env_keys()
+        | _USER_TOOL_SUBPROCESS_BOUNDARY_ENV_KEYS
+    ) - preserved_boundary_keys
+    return {
+        key: str(value)
+        for key, value in envs.items()
+        if key not in blocked_keys
+    }
+
+
 def load_tenant_runtime_env(
     *,
     runtime_scope_id: str | None = None,
@@ -142,6 +183,7 @@ def build_runtime_env(
     source_id: str | None = None,
     allow_missing_context: bool = True,
     allow_protected_call_env: bool = False,
+    preserve_boundary_env_keys: frozenset[str] = frozenset(),
 ) -> dict[str, str]:
     """按 process < tenant < call-specific 的优先级构造子进程 env。"""
     env = dict(os.environ if base_env is None else base_env)
@@ -160,7 +202,10 @@ def build_runtime_env(
         env.update({key: str(value) for key, value in call_mapping.items()})
 
     register_sensitive_values(tenant_env.values())
-    return env
+    return _scrub_user_tool_subprocess_env(
+        env,
+        preserve_boundary_keys=preserve_boundary_env_keys,
+    )
 
 
 def get_tenant_runtime_env_value(

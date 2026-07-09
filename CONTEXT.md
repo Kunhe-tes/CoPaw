@@ -252,6 +252,10 @@ _Avoid_: cron call, job instance
 A runtime boundary that starts scheduled work outside an incoming user HTTP request. It includes **Scheduled Job**, heartbeat, and dream execution, but not cron management API requests.
 _Avoid_: cron entry, cron API, scheduler callback
 
+**Managed Background Process**:
+An OS child process explicitly started by the **Main Agent** through built-in background-process tools. It can continue after the starting tool call returns, and the same owner scope can later list it, stop it, or read its captured output. A **Managed Background Process** is owned by source, tenant, user, chat session, agent, and workspace context. It is not an async tool task, scheduled job, scheduled run, or agent execution run.
+_Avoid_: async task, scheduled job, cron run, background hot patch
+
 **Execution Model Slot**:
 An optional model selection pinned to a **Scheduled Job**. If absent, each **Scheduled Run** uses the **Tenant Default Model** at execution time.
 _Avoid_: model params, cron model
@@ -274,7 +278,11 @@ _Avoid_: output_len=0, blank reply, empty cron output
 
 **Source System Configuration**:
 A source-scoped runtime configuration surface for behavior shared by requests from the same external source. It is not a tenant configuration and does not describe user, organization, or workspace identity.
-_Avoid_: system feature configuration, tenant config, user config
+_Avoid_: system feature configuration, system feature config, 系统特性配置, tenant config, user config
+
+**Source System Configuration Override**:
+A value explicitly saved in **Source System Configuration** that replaces the corresponding broader runtime setting for requests from that source. Missing values are inheritance, not implicit overrides.
+_Avoid_: source default, tenant override, page default
 
 **Runtime Request Identity**:
 The tenant and source context that determines which runtime configuration and model selection a request observes. One **Runtime Request Identity** resolves to one **Tenant Provider Configuration** view for provider and active-model reads.
@@ -283,6 +291,62 @@ _Avoid_: cache key, auth header set, iframe context
 **Background SubAgent Launch Identity**:
 The **Runtime Request Identity** carried from the Main Agent runtime into a **Background SubAgent Run** so the worker observes the same source-scoped runtime configuration and model selection as its parent run.
 _Avoid_: effective tenant only, provider cache key, worker tenant
+
+**Tenant Scaffold Bootstrap**:
+The tenant setup state in which a runtime scope has the required tenant-local workspace structure and baseline files. A **Tenant Scaffold Bootstrap** does not imply that the first-run conversational onboarding has happened.
+_Avoid_: chat bootstrap, BOOTSTRAP.md flow, onboarding chat
+
+**Bootstrap Chat Flow**:
+The first-run conversational onboarding in which an Agent learns and records identity, style, and user preferences. A **Bootstrap Chat Flow** is separate from **Tenant Scaffold Bootstrap** and may be skipped for a tenant that still has a valid scaffold.
+_Avoid_: tenant bootstrap, scaffold bootstrap, workspace initialization
+
+**Runtime Invocation Claims**:
+Session, trace, tenant, and source claims that Swe passes across a runtime invocation boundary for a receiving tool or integration to interpret inside an already trusted channel. **Runtime Invocation Claims** are distinct from **Runtime Request Identity**, which is internal request context, and are not independently verifiable credentials.
+_Avoid_: runtime metadata, env/header info, credential, signed token
+
+**Canonical Runtime Claim Name**:
+The preferred external name for one **Runtime Invocation Claim** at a specific transport boundary. Canonical names are stable and transport-appropriate; compatibility aliases may exist only for boundaries that already require them.
+_Avoid_: env/header info, arbitrary key, passthrough name
+
+**Runtime Scope Claim**:
+The **Runtime Invocation Claim** that names the resolved runtime isolation scope for a call, derived from the current tenant and source context when such a scope exists. A **Runtime Scope Claim** complements the logical tenant and source claims; it does not replace either one.
+_Avoid_: tenant id, source id, effective tenant
+
+**Runtime-Owned Claim Name**:
+A claim name reserved for Swe-issued **Runtime Invocation Claims** at an invocation boundary. A **Runtime-Owned Claim Name** cannot be supplied or overridden by tenant env, tool config, passthrough headers, or handler config.
+_Avoid_: user env key, custom header, configurable claim
+
+**Runtime Invocation Claims Context**:
+The backend-local execution context that carries the current **Runtime Invocation Claims** to nested tool and integration launch points during one agent run. A **Runtime Invocation Claims Context** is not itself transmitted outside Swe.
+_Avoid_: global env, request identity, credential store
+
+**System Configuration Environment Key**:
+A backend-owned configuration key used by Swe itself. A **System Configuration Environment Key** is not part of user-controlled runtime env and must not be exposed through user-invoked tool subprocesses.
+_Avoid_: user env, tenant env, ordinary shell env
+
+**User Tool Subprocess Environment**:
+The environment visible to a subprocess started by a user-invoked tool such as shell execution. A **User Tool Subprocess Environment** may include safe process basics and scoped runtime env, but excludes **System Configuration Environment Keys** and runtime boundary keys that expose or alter isolation internals.
+_Avoid_: process env, backend env, system environment
+
+**Built-in Shell Execution**:
+The user-invoked shell command execution path owned by Swe for a tenant-scoped request. **Built-in Shell Execution** is distinct from MCP `stdio` server launches and platform maintenance subprocesses.
+_Avoid_: arbitrary subprocess, MCP stdio launch, maintenance worker
+
+**Tenant Process Resource Limits**:
+A tenant-scoped policy that caps per-process CPU time and memory consumption for in-scope tenant subprocess launches. **Tenant Process Resource Limits** reduce host resource exhaustion risk; they are not a command intent classifier, command blacklist, or process-group aggregate resource budget.
+_Avoid_: command blacklist, shell denylist, resource timeout, process group quota
+
+**Process Limit Exceeded**:
+A tool failure outcome where a subprocess is terminated or fails because **Tenant Process Resource Limits** were applied. **Process Limit Exceeded** is distinct from a wall-clock timeout and from an ordinary shell command failure.
+_Avoid_: timeout, shell failed, command denied
+
+**Tenant Shell Execution Slot**:
+A per-tenant concurrency allowance for one in-flight **Built-in Shell Execution**. A **Tenant Shell Execution Slot** is held until the shell tool returns and its Unix process group cleanup has completed; it is not a count of every OS process forked by a script.
+_Avoid_: process count, PID quota, subprocess total
+
+**Shell Concurrency Limit Exceeded**:
+A tool failure outcome where **Built-in Shell Execution** cannot start because the tenant has no available **Tenant Shell Execution Slot** within the configured wait period. **Shell Concurrency Limit Exceeded** is distinct from **Process Limit Exceeded**, because no shell subprocess has been launched yet.
+_Avoid_: process limit exceeded, timeout, queue full
 
 **Mandatory Console Channel**:
 The built-in **Console Channel** is a runtime invariant that is always treated as enabled for every agent and tenant, including when no explicit channel entry has been saved yet. Users may configure its other fields, but persisted, imported, or interactive configuration must not disable it.
@@ -517,7 +581,7 @@ A Runtime Instance signal that only proves the backend request-serving process c
 _Avoid_: readiness check, system self-check, health diagnostic
 
 **Request Execution Load**:
-The current load and responsiveness of the backend request-serving runtime within one Runtime Instance, distinct from tenant or business-runtime usage.
+The current load and responsiveness of the backend request-serving runtime within one Runtime Instance. It prioritizes timely request handling, streaming progress, cancellation, timeout, and scheduled-run coordination over raw throughput, and is distinct from tenant or business-runtime usage.
 _Avoid_: Flask worker usage, ordinary HTTP throughput, request latency, tenant usage statistics, Agent Run count, LLM load
 
 **Runtime Instance**:
@@ -539,6 +603,18 @@ _Avoid_: direct diagnostic database write, free-form diagnostic message, Kafka i
 **Diagnostic Lease**:
 A renewable period during which a Runtime Instance is considered present. Graceful deregistration ends it immediately; expiry makes an abnormally terminated Runtime Instance ineffective.
 _Avoid_: permanent active flag, shutdown-only invalidation
+
+**User Question Message ID**:
+The stable message identifier for one user-authored question inside a Logical Chat Session. One **User Question Message ID** anchors the answer turn that responds to that question.
+_Avoid_: external channel message id, generated UI message id, response id
+
+**Answer Turn**:
+The ordered message group anchored by one **User Question Message ID**, including that user question and the messages that follow it until the next user-authored question in the same Logical Chat Session. An **Answer Turn** uses the same chat-history message shape as the full conversation view.
+_Avoid_: final answer text, assistant-only bubble, latest response, answer-only slice
+
+**Logical Chat Session**:
+The stable conversation identity used to continue chat context across turns. A **Logical Chat Session** is distinct from the persisted chat record used to load or display the conversation.
+_Avoid_: chat UUID, UI session row, temporary frontend id
 
 ## Flagged Ambiguities
 
@@ -568,6 +644,51 @@ Resolved as a reduced-permission Main Agent mode. SubAgent runtime rules remain 
 
 **"Plan Approval"**:
 Resolved as the `execute` **Plan Review Decision** on a **Proposed Plan**. `execute` accepts the persisted plan and can transition the chat out of Plan Mode into normal execution.
+
+**"sessionid for Answer Turn lookup"**:
+Resolved as the **Logical Chat Session** identifier known to the caller, not the persisted chat record identifier used by the chat history detail endpoint.
+
+**"Answer Turn lookup scope"**:
+Resolved as request-identity scoped. A **User Question Message ID** plus **Logical Chat Session** identifies an **Answer Turn** only within the caller's resolved tenant, source, and workspace context.
+
+**"User Question Message ID stream delivery"**:
+Resolved as a non-rendering stream notification. Delivering a **User Question Message ID** during chat streaming must not create, mutate, or fail any visible chat response card.
+
+**"User Question Message ID delivery surface"**:
+Resolved as an HTTP response header on the chat streaming response, not a renderable stream event.
+
+**"External Answer Turn field names"**:
+Resolved as using `msgid` and `sessionid` at the external API boundary while keeping **User Question Message ID** and **Logical Chat Session** as the internal domain terms.
+
+**"User Question Message ID assignment"**:
+Resolved as assigning the **User Question Message ID** before chat streaming begins and preserving that same identifier when the user question is stored in conversation memory.
+
+**"Reconnect User Question Message ID"**:
+Resolved as no new **User Question Message ID**. A reconnect attaches to an existing stream and must not be treated as a new user question.
+
+**"Answer Turn lookup channel scope"**:
+Resolved as Console-only for the current stage. Non-Console channel message identifiers and delivery rules are outside the **Answer Turn** lookup contract.
+
+**"Answer Turn lookup response shape"**:
+Resolved as a chat-history response whose `messages` contain the requested **Answer Turn**, including the anchor user question, while `chat` and `status` describe the corresponding chat record.
+
+**"Chat detail User Question Message ID exposure"**:
+Resolved as unchanged for the current stage. The full chat detail payload does not gain an additional `msgid` field solely for **Answer Turn** lookup.
+
+**"Answer Turn anchor message shape"**:
+Resolved as the same chat-history message shape used by the full conversation view, not a simplified question object.
+
+**"Answer Turn chat record resolution"**:
+Resolved as unique under the caller's request identity for **Logical Chat Session**, user, and channel. Any multiple-record handling is legacy-data compatibility, not product semantics.
+
+**"Missing Answer Turn lookup"**:
+Resolved as a not-found outcome when the requested **Logical Chat Session** and **User Question Message ID** do not identify a user question in the caller's request-identity scope.
+
+**"Pending Answer Turn lookup"**:
+Resolved as a found **Answer Turn** with no non-user messages yet. It returns the anchor user question with the chat's current status instead of a not-found outcome.
+
+**"Non-user Answer Turn anchor"**:
+Resolved as not found. An **Answer Turn** lookup only accepts a **User Question Message ID** as its anchor.
 
 **"Execute Mode Transition"**:
 Resolved to automatically close the current chat session's **Plan Mode State** before normal execution continues with the persisted Proposed Plan as accepted plan context.
@@ -771,7 +892,7 @@ Resolved as a single **Aggregated Skill Freshness Notice** that lists each affec
 Resolved as exposing absence for **File Read Truncation** as inheriting the historical recent tool-result limit until independently configured.
 
 **"Tool Output Controls Scope"**:
-Resolved as limited to the Source System Configuration page and runtime resolution for this change. The Agent configuration page keeps the existing historical tool-result compaction controls for now.
+Resolved as limited to the Source System Configuration page and runtime resolution for current user-facing controls. The Agent configuration page no longer exposes historical tool-result compaction controls, while existing Agent runtime configuration remains available as inherited baseline behavior.
 
 **"Current Session Context Usage"**:
 Resolved as **Persisted Context Occupancy**, meaning the estimated persisted session context divided by the configured **Context Window**. It excludes the current unsent composer text and does not mean cumulative token usage across completed calls.

@@ -1,6 +1,6 @@
-import { memo } from "react";
+import { memo, useState, useRef, useLayoutEffect } from "react";
 import { Typography, Button, Spin, Tag, Popconfirm, Tooltip, Input } from "antd";
-import { StarOutlined, RocketOutlined, UserOutlined, ClockCircleOutlined, CalendarOutlined, TagOutlined } from "@ant-design/icons";
+import { StarOutlined, RocketOutlined, UserOutlined, ClockCircleOutlined, CalendarOutlined, TagOutlined, DownOutlined, UpOutlined } from "@ant-design/icons";
 import { Power, Trash2, Pencil, PencilLine } from "lucide-react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
@@ -56,6 +56,7 @@ interface SkillDetailPanelProps {
   draftContent: string;
   draftCnName: string;  // 编辑中的中文名
   isSaving: boolean;
+  isDownloading: boolean;
   togglingSkill: string | null;
   isManager: boolean;
   onEditStart: () => void;
@@ -65,6 +66,7 @@ interface SkillDetailPanelProps {
   onCnNameChange: (cnName: string) => void;  // 中文名修改
   onToggleEnabled: (skill: MySkill) => void;
   onDelete: (skill: MySkill) => void;
+  onDownload: (skill: MySkill) => void;
   onSyncToMarket: (skill: MySkill) => void;
 }
 
@@ -77,6 +79,7 @@ const SkillDetailPanel = memo(function SkillDetailPanel({
   draftContent,
   draftCnName,
   isSaving,
+  isDownloading,
   togglingSkill,
   isManager,
   onEditStart,
@@ -86,8 +89,30 @@ const SkillDetailPanel = memo(function SkillDetailPanel({
   onCnNameChange,
   onToggleEnabled,
   onDelete,
+  onDownload,
   onSyncToMarket,
 }: SkillDetailPanelProps) {
+  // 描述区展开状态
+  const [descExpanded, setDescExpanded] = useState(false);
+  // 描述区是否需要折叠（内容实际溢出）
+  const [needsCollapse, setNeedsCollapse] = useState(false);
+  // 描述区内容 ref
+  const descContentRef = useRef<HTMLDivElement>(null);
+  // 描述区最大高度（收起态）
+  const DESC_MAX_HEIGHT = 80;
+
+  // 检测内容是否实际溢出（渲染后测量）
+  useLayoutEffect(() => {
+    if (descContentRef.current && skill?.description) {
+      // scrollHeight 是内容的完整高度，不受 maxHeight 影响
+      const contentHeight = descContentRef.current.scrollHeight;
+      // 内容高度超过限制时需要折叠
+      setNeedsCollapse(contentHeight > DESC_MAX_HEIGHT);
+    } else {
+      setNeedsCollapse(false);
+    }
+  }, [skill?.description]);
+
   if (!skill) {
     return (
       <div style={{ display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", height: "100%", padding: 32, textAlign: "center" }}>
@@ -261,6 +286,16 @@ const SkillDetailPanel = memo(function SkillDetailPanel({
               编辑
             </Button>
           )}
+          {canEdit && (
+            <Button
+              size="small"
+              style={{ height: 28, fontSize: 12, borderRadius: 8 }}
+              onClick={() => onDownload(skill)}
+              loading={isDownloading}
+            >
+              下载 ZIP
+            </Button>
+          )}
           <Button
             size="small"
             type={skill.enabled ? "primary" : "default"}
@@ -312,11 +347,50 @@ const SkillDetailPanel = memo(function SkillDetailPanel({
         </div>
       </div>
 
-      {/* Description */}
-      <div style={{ padding: "12px 16px", borderBottom: "1px solid #f0f0f0" }}>
-        <Text type="secondary" style={{ fontSize: 14, whiteSpace: "pre-wrap" }}>
-          {skill.description || "暂无描述"}
-        </Text>
+      {/* Description - 可折叠 */}
+      <div
+        style={{
+          borderBottom: "1px solid #f0f0f0",
+        }}
+      >
+        {/* 外层容器：控制显示高度 */}
+        <div
+          style={{
+            maxHeight: descExpanded ? undefined : DESC_MAX_HEIGHT,
+            overflow: "hidden",
+            transition: "max-height 0.2s ease-out",
+          }}
+        >
+          {/* 内容区域：ref 测量真实高度，不受 maxHeight 影响 */}
+          <div
+            ref={descContentRef}
+            style={{
+              padding: "12px 16px",
+            }}
+          >
+            <Text type="secondary" style={{ fontSize: 14, whiteSpace: "pre-wrap" }}>
+              {skill.description || "暂无描述"}
+            </Text>
+          </div>
+        </div>
+        {/* 展开/收起按钮：在 maxHeight 容器外，始终可见 */}
+        {needsCollapse && (
+          <div style={{ padding: "0 16px 8px 16px" }}>
+            <Button
+              type="link"
+              size="small"
+              icon={descExpanded ? <UpOutlined /> : <DownOutlined />}
+              onClick={() => setDescExpanded(!descExpanded)}
+              style={{
+                padding: 0,
+                height: 20,
+                fontSize: 12,
+              }}
+            >
+              {descExpanded ? "收起" : "展开全部"}
+            </Button>
+          </div>
+        )}
       </div>
 
       {/* Content */}

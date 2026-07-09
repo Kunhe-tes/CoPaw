@@ -35,11 +35,15 @@ from swe.providers.provider import (
 from swe.providers.models import ModelSlotConfig
 from swe.constant import SECRET_DIR
 from swe.runtime_cache import reset_scope_bound_model_caches
+from swe.runtime_workers import run_runtime_state_work
 
 if TYPE_CHECKING:
     from agentscope.model import ChatModelBase
 
 logger = logging.getLogger(__name__)
+
+_PROVIDER_MANAGER_SLOW_LOG_MS = 500
+_PROVIDER_INFO_SLOW_LOG_MS = 100
 
 if fcntl is None and msvcrt is None:  # pragma: no cover
     raise ImportError(
@@ -247,9 +251,17 @@ class ProviderManager:
         """
         from ..config.context import get_current_source_id
 
+        started_at = time.perf_counter()
         source_id = get_current_source_id()
         source_dir = None
         template_name = "default"
+        logger.info(
+            "provider_storage_init_prepare_start tenant_id=%s source_id=%s "
+            "target_dir=%s",
+            tenant_id,
+            source_id,
+            tenant_providers_dir,
+        )
 
         # Try source-specific template first
         if source_id:
@@ -259,9 +271,20 @@ class ProviderManager:
                 template_name = f"default_{source_id}"
             else:
                 # Dynamic creation: create source template from default
+                template_started_at = time.perf_counter()
                 ProviderManager._ensure_source_template_providers(
                     SECRET_DIR,
                     source_id,
+                )
+                logger.info(
+                    "provider_storage_source_template_ensure_done "
+                    "tenant_id=%s source_id=%s duration_ms=%d "
+                    "candidate=%s exists_after=%s",
+                    tenant_id,
+                    source_id,
+                    int((time.perf_counter() - template_started_at) * 1000),
+                    candidate,
+                    candidate.exists(),
                 )
                 # Re-check after creation
                 if candidate.exists() and any(candidate.iterdir()):
@@ -272,8 +295,11 @@ class ProviderManager:
         # (when effective_tenant_id matches template_name, e.g., default + ruice)
         if tenant_providers_dir.exists():
             logger.info(
-                "Provider config for tenant %s already exists, skipping copy",
+                "provider_storage_init_skip_existing tenant_id=%s "
+                "duration_ms=%d target_dir=%s",
                 tenant_id,
+                int((time.perf_counter() - started_at) * 1000),
+                tenant_providers_dir,
             )
             return
 
@@ -285,20 +311,53 @@ class ProviderManager:
 
         if source_dir is not None:
             logger.info(
-                "Initializing provider config for tenant %s from %s",
+                "provider_storage_copy_start tenant_id=%s template=%s "
+                "source_dir=%s target_dir=%s",
                 tenant_id,
                 template_name,
+                source_dir,
+                tenant_providers_dir,
             )
+            copy_started_at = time.perf_counter()
             shutil.copytree(source_dir, tenant_providers_dir)
-            logger.info("Provider config initialized for tenant %s", tenant_id)
+            logger.info(
+                "provider_storage_copy_done tenant_id=%s template=%s "
+                "duration_ms=%d source_dir=%s target_dir=%s",
+                tenant_id,
+                template_name,
+                int((time.perf_counter() - copy_started_at) * 1000),
+                source_dir,
+                tenant_providers_dir,
+            )
         else:
             logger.info(
-                "Creating empty provider config structure for tenant %s",
+                "provider_storage_empty_create_start tenant_id=%s "
+                "target_dir=%s",
                 tenant_id,
+                tenant_providers_dir,
             )
+            mkdir_started_at = time.perf_counter()
             tenant_providers_dir.mkdir(parents=True, exist_ok=True)
             (tenant_providers_dir / "builtin").mkdir(exist_ok=True)
             (tenant_providers_dir / "custom").mkdir(exist_ok=True)
+            logger.info(
+                "provider_storage_empty_create_done tenant_id=%s "
+                "duration_ms=%d target_dir=%s",
+                tenant_id,
+                int((time.perf_counter() - mkdir_started_at) * 1000),
+                tenant_providers_dir,
+            )
+
+        logger.info(
+            "provider_storage_init_prepare_done tenant_id=%s source_id=%s "
+            "template=%s source_dir=%s duration_ms=%d target_dir=%s",
+            tenant_id,
+            source_id,
+            template_name,
+            source_dir,
+            int((time.perf_counter() - started_at) * 1000),
+            tenant_providers_dir,
+        )
 
     @staticmethod
     def _ensure_source_template_providers(
@@ -314,10 +373,18 @@ class ProviderManager:
             secret_dir: Base secret directory (e.g., ~/.swe.secret).
             source_id: Source identifier (e.g., "ruice").
         """
+        started_at = time.perf_counter()
         default_providers = secret_dir / "default" / "providers"
         target_providers = secret_dir / f"default_{source_id}" / "providers"
 
         if not default_providers.exists():
+            logger.info(
+                "provider_storage_source_template_skip_no_default "
+                "source_id=%s duration_ms=%d default_providers=%s",
+                source_id,
+                int((time.perf_counter() - started_at) * 1000),
+                default_providers,
+            )
             return
 
         target_parent = target_providers.parent
@@ -338,12 +405,27 @@ class ProviderManager:
                     "Created source template providers: %s",
                     target_providers,
                 )
+            logger.info(
+                "provider_storage_source_template_done source_id=%s "
+                "duration_ms=%d target_providers=%s target_exists=%s",
+                source_id,
+                int((time.perf_counter() - started_at) * 1000),
+                target_providers,
+                target_providers.exists(),
+            )
         except OSError:
             # Handle race condition - created by concurrent request
             if not target_providers.exists():
                 raise
             logger.debug(
                 "Source template providers %s created by concurrent request",
+                target_providers,
+            )
+            logger.info(
+                "provider_storage_source_template_race_done source_id=%s "
+                "duration_ms=%d target_providers=%s",
+                source_id,
+                int((time.perf_counter() - started_at) * 1000),
                 target_providers,
             )
 
@@ -418,12 +500,31 @@ class ProviderManager:
             return
 
         lock_file = tenant_providers_dir.parent / ".provider_init.lock"
+        started_at = time.perf_counter()
+        logger.info(
+            "provider_storage_ensure_slow_path_start route_tenant_id=%s "
+            "provider_tenant_id=%s target_dir=%s lock_file=%s",
+            tenant_id,
+            effective_tenant_id,
+            tenant_providers_dir,
+            lock_file,
+        )
         try:
             tenant_providers_dir.parent.mkdir(parents=True, exist_ok=True)
             ProviderManager._initialize_with_lock(
                 lock_file,
                 effective_tenant_id,
                 tenant_providers_dir,
+            )
+            logger.info(
+                "provider_storage_ensure_slow_path_done "
+                "route_tenant_id=%s provider_tenant_id=%s duration_ms=%d "
+                "target_dir=%s exists_after=%s",
+                tenant_id,
+                effective_tenant_id,
+                int((time.perf_counter() - started_at) * 1000),
+                tenant_providers_dir,
+                tenant_providers_dir.exists(),
             )
         except Exception as e:
             logger.error(
@@ -448,28 +549,65 @@ class ProviderManager:
         """
         max_wait_seconds = 30.0
         deadline = time.monotonic() + max_wait_seconds
+        started_at = time.perf_counter()
+        logger.info(
+            "provider_storage_init_lock_start tenant_id=%s lock_file=%s "
+            "target_dir=%s",
+            tenant_id,
+            lock_file,
+            tenant_providers_dir,
+        )
 
         with open(lock_file, "w", encoding="utf-8") as f:
             # Acquire lock
+            wait_started_at = time.perf_counter()
             ProviderManager._wait_for_lock(
                 f,
                 deadline,
                 tenant_id,
                 tenant_providers_dir,
             )
+            wait_ms = int((time.perf_counter() - wait_started_at) * 1000)
+            logger.info(
+                "provider_storage_init_lock_ready tenant_id=%s wait_ms=%d "
+                "target_dir=%s exists_after_wait=%s",
+                tenant_id,
+                wait_ms,
+                tenant_providers_dir,
+                tenant_providers_dir.exists(),
+            )
 
             # Double-check after acquiring lock
             if tenant_providers_dir.exists():
+                logger.info(
+                    "provider_storage_init_skip_after_lock tenant_id=%s "
+                    "duration_ms=%d wait_ms=%d target_dir=%s",
+                    tenant_id,
+                    int((time.perf_counter() - started_at) * 1000),
+                    wait_ms,
+                    tenant_providers_dir,
+                )
                 return
 
             # Initialize storage
+            init_started_at = time.perf_counter()
             ProviderManager._do_initialize_provider_storage(
                 tenant_id,
                 tenant_providers_dir,
             )
+            init_ms = int((time.perf_counter() - init_started_at) * 1000)
 
             # Release lock
             ProviderManager._release_lock(f)
+            logger.info(
+                "provider_storage_init_lock_done tenant_id=%s "
+                "duration_ms=%d wait_ms=%d init_ms=%d target_dir=%s",
+                tenant_id,
+                int((time.perf_counter() - started_at) * 1000),
+                wait_ms,
+                init_ms,
+                tenant_providers_dir,
+            )
 
     @staticmethod
     def _wait_for_lock(
@@ -670,13 +808,26 @@ class ProviderManager:
 
     def _refresh_if_stale(self):
         """Reload providers whose files changed on disk since last snapshot."""
+        started_at = time.perf_counter()
+        detect_builtin_started_at = time.perf_counter()
         changed_builtin = self._detect_changed_builtins()
+        detect_builtin_ms = int(
+            (time.perf_counter() - detect_builtin_started_at) * 1000,
+        )
+        detect_custom_started_at = time.perf_counter()
         (
             changed_custom,
             new_custom,
             removed_custom,
         ) = self._detect_custom_changes()
+        detect_custom_ms = int(
+            (time.perf_counter() - detect_custom_started_at) * 1000,
+        )
+        detect_active_started_at = time.perf_counter()
         active_changed = self._detect_active_model_change()
+        detect_active_ms = int(
+            (time.perf_counter() - detect_active_started_at) * 1000,
+        )
 
         if not any(
             [
@@ -687,14 +838,82 @@ class ProviderManager:
                 active_changed,
             ],
         ):
+            total_ms = int((time.perf_counter() - started_at) * 1000)
+            if total_ms >= _PROVIDER_MANAGER_SLOW_LOG_MS:
+                logger.info(
+                    "provider_refresh_noop_slow tenant_id=%s "
+                    "duration_ms=%d detect_builtin_ms=%d "
+                    "detect_custom_ms=%d detect_active_ms=%d "
+                    "builtin_count=%d custom_count=%d freshness_token_count=%d",
+                    self.tenant_id,
+                    total_ms,
+                    detect_builtin_ms,
+                    detect_custom_ms,
+                    detect_active_ms,
+                    len(self.builtin_providers),
+                    len(self.custom_providers),
+                    len(self._file_freshness_tokens),
+                )
             return
 
+        logger.info(
+            "provider_refresh_start tenant_id=%s changed_builtin=%d "
+            "changed_custom=%d new_custom=%d removed_custom=%d "
+            "active_changed=%s detect_builtin_ms=%d detect_custom_ms=%d "
+            "detect_active_ms=%d root_path=%s",
+            self.tenant_id,
+            len(changed_builtin),
+            len(changed_custom),
+            len(new_custom),
+            len(removed_custom),
+            active_changed,
+            detect_builtin_ms,
+            detect_custom_ms,
+            detect_active_ms,
+            self.root_path,
+        )
+        apply_builtin_started_at = time.perf_counter()
         self._apply_builtin_refresh(changed_builtin)
+        apply_builtin_ms = int(
+            (time.perf_counter() - apply_builtin_started_at) * 1000,
+        )
+        apply_custom_started_at = time.perf_counter()
         self._apply_custom_refresh(changed_custom, new_custom, removed_custom)
+        apply_custom_ms = int(
+            (time.perf_counter() - apply_custom_started_at) * 1000,
+        )
+        apply_active_ms = 0
         if active_changed:
+            apply_active_started_at = time.perf_counter()
             self._apply_active_model_refresh()
+            apply_active_ms = int(
+                (time.perf_counter() - apply_active_started_at) * 1000,
+            )
+        reset_cache_started_at = time.perf_counter()
         reset_scope_bound_model_caches()
+        reset_cache_ms = int(
+            (time.perf_counter() - reset_cache_started_at) * 1000,
+        )
+        record_started_at = time.perf_counter()
         self._record_mtimes()
+        record_ms = int((time.perf_counter() - record_started_at) * 1000)
+        logger.info(
+            "provider_refresh_done tenant_id=%s duration_ms=%d "
+            "apply_builtin_ms=%d apply_custom_ms=%d apply_active_ms=%d "
+            "reset_cache_ms=%d record_mtimes_ms=%d builtin_count=%d "
+            "custom_count=%d freshness_token_count=%d root_path=%s",
+            self.tenant_id,
+            int((time.perf_counter() - started_at) * 1000),
+            apply_builtin_ms,
+            apply_custom_ms,
+            apply_active_ms,
+            reset_cache_ms,
+            record_ms,
+            len(self.builtin_providers),
+            len(self.custom_providers),
+            len(self._file_freshness_tokens),
+            self.root_path,
+        )
 
     def _detect_changed_builtins(self) -> list[str]:
         """Detect builtin providers whose files have changed."""
@@ -803,15 +1022,105 @@ class ProviderManager:
         self.active_model = self.load_active_model()
 
     async def list_provider_info(self) -> List[ProviderInfo]:
+        started_at = time.perf_counter()
+        refresh_started_at = time.perf_counter()
         self._refresh_if_stale()
-        tasks = [
-            provider.get_info() for provider in self.builtin_providers.values()
+        refresh_ms = int((time.perf_counter() - refresh_started_at) * 1000)
+        providers: list[tuple[str, Provider]] = [
+            ("builtin", provider)
+            for provider in self.builtin_providers.values()
         ]
-        tasks += [
-            provider.get_info() for provider in self.custom_providers.values()
+        providers += [
+            ("custom", provider) for provider in self.custom_providers.values()
         ]
-        provider_infos = await asyncio.gather(*tasks)
+        gather_started_at = time.perf_counter()
+        provider_results = await asyncio.gather(
+            *[
+                self._get_provider_info_with_timing(provider, provider_kind)
+                for provider_kind, provider in providers
+            ],
+        )
+        gather_ms = int((time.perf_counter() - gather_started_at) * 1000)
+        provider_infos = [info for info, _ in provider_results]
+        timings = [
+            (provider.id, provider_kind, duration_ms)
+            for (provider_kind, provider), (_, duration_ms) in zip(
+                providers,
+                provider_results,
+            )
+        ]
+        max_provider_id = ""
+        max_provider_kind = ""
+        max_provider_ms = 0
+        if timings:
+            max_provider_id, max_provider_kind, max_provider_ms = max(
+                timings,
+                key=lambda item: item[2],
+            )
+        total_ms = int((time.perf_counter() - started_at) * 1000)
+        model_count = sum(len(provider.models) for provider in provider_infos)
+        extra_model_count = sum(
+            len(provider.extra_models) for provider in provider_infos
+        )
+        logger.info(
+            "provider_list_provider_info_done tenant_id=%s total_ms=%d "
+            "refresh_ms=%d gather_ms=%d provider_count=%d builtin_count=%d "
+            "custom_count=%d model_count=%d extra_model_count=%d "
+            "max_provider_id=%s max_provider_kind=%s max_provider_ms=%d "
+            "freshness_token_count=%d root_path=%s",
+            self.tenant_id,
+            total_ms,
+            refresh_ms,
+            gather_ms,
+            len(provider_infos),
+            len(self.builtin_providers),
+            len(self.custom_providers),
+            model_count,
+            extra_model_count,
+            max_provider_id,
+            max_provider_kind,
+            max_provider_ms,
+            len(self._file_freshness_tokens),
+            self.root_path,
+        )
         return list(provider_infos)
+
+    async def _get_provider_info_with_timing(
+        self,
+        provider: Provider,
+        provider_kind: str,
+    ) -> tuple[ProviderInfo, int]:
+        """记录单个 provider 生成 ProviderInfo 的耗时。"""
+        started_at = time.perf_counter()
+        try:
+            provider_info = await provider.get_info()
+        except Exception:
+            logger.exception(
+                "provider_get_info_error tenant_id=%s provider_id=%s "
+                "provider_kind=%s duration_ms=%d",
+                self.tenant_id,
+                provider.id,
+                provider_kind,
+                int((time.perf_counter() - started_at) * 1000),
+            )
+            raise
+
+        duration_ms = int((time.perf_counter() - started_at) * 1000)
+        if duration_ms >= _PROVIDER_INFO_SLOW_LOG_MS:
+            logger.info(
+                "provider_get_info_slow tenant_id=%s provider_id=%s "
+                "provider_kind=%s duration_ms=%d model_count=%d "
+                "extra_model_count=%d is_custom=%s is_local=%s",
+                self.tenant_id,
+                provider.id,
+                provider_kind,
+                duration_ms,
+                len(provider_info.models),
+                len(provider_info.extra_models),
+                provider_info.is_custom,
+                provider_info.is_local,
+            )
+        return provider_info, duration_ms
 
     def get_provider(self, provider_id: str) -> Provider | None:
         # Return a provider instance by its ID. This will be used to create
@@ -858,7 +1167,7 @@ class ProviderManager:
         try:
             models = await provider.fetch_models()
             provider.extra_models = models
-            self._save_provider(
+            await self._save_provider_async(
                 provider,
                 is_builtin=provider_id in self.builtin_providers,
             )
@@ -901,7 +1210,7 @@ class ProviderManager:
         # without model config, to avoid false negatives in the UI.
         provider.support_connection_check = False
         self.custom_providers[provider.id] = provider
-        self._save_provider(provider, is_builtin=False)
+        await self._save_provider_async(provider, is_builtin=False)
         reset_scope_bound_model_caches()
         return await provider.get_info()
 
@@ -933,7 +1242,7 @@ class ProviderManager:
             provider_id=provider_id,
             model=model_id,
         )
-        self.save_active_model(self.active_model)
+        await self._save_active_model_async(self.active_model)
         reset_scope_bound_model_caches()
 
         self.maybe_probe_multimodal(provider_id, model_id)
@@ -976,7 +1285,7 @@ class ProviderManager:
         if not provider:
             raise ValueError(f"Provider '{provider_id}' not found.")
         await provider.add_model(model_info)
-        self._save_provider(
+        await self._save_provider_async(
             provider,
             is_builtin=provider_id in self.builtin_providers,
         )
@@ -992,7 +1301,7 @@ class ProviderManager:
         if not provider:
             raise ValueError(f"Provider '{provider_id}' not found.")
         await provider.delete_model(model_id=model_id)
-        self._save_provider(
+        await self._save_provider_async(
             provider,
             is_builtin=provider_id in self.builtin_providers,
         )
@@ -1046,7 +1355,7 @@ class ProviderManager:
                 )
 
         # Persist to disk
-        self._save_provider(
+        await self._save_provider_async(
             provider,
             is_builtin=provider_id in self.builtin_providers,
         )
@@ -1076,6 +1385,19 @@ class ProviderManager:
         except OSError:
             pass
         self._update_mtime(provider_path)
+
+    async def _save_provider_async(
+        self,
+        provider: Provider,
+        is_builtin: bool = False,
+        skip_if_exists: bool = False,
+    ) -> None:
+        await run_runtime_state_work(
+            self._save_provider,
+            provider,
+            is_builtin=is_builtin,
+            skip_if_exists=skip_if_exists,
+        )
 
     def overwrite_provider_payload(self, payload: Dict) -> Provider:
         """Replace a tenant provider with the supplied payload.
@@ -1148,6 +1470,12 @@ class ProviderManager:
         """Save the active provider/model configuration to disk."""
         self._save_active_model_to_root(self.root_path, active_model)
         self._update_mtime(self.root_path / "active_model.json")
+
+    async def _save_active_model_async(
+        self,
+        active_model: ModelSlotConfig,
+    ) -> None:
+        await run_runtime_state_work(self.save_active_model, active_model)
 
     @staticmethod
     def _save_active_model_to_root(

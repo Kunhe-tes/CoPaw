@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Any, Dict, Optional
 from urllib.parse import unquote, urlsplit
 
-from fastapi import APIRouter, Body, File, Header, HTTPException, Request
+from fastapi import APIRouter, Body, File, Form, Header, HTTPException, Request
 from fastapi import UploadFile
 from pydantic import BaseModel, Field
 
@@ -212,6 +212,10 @@ class InternalBatchInitializeTenantsRequest(BaseModel):
 
     tenant_ids: str = Field(..., description="逗号分隔的租户 ID 字符串")
     source_id: str = Field(..., min_length=1, description="来源标识")
+    enable_bootstrap_chat: bool = Field(
+        default=True,
+        description="是否为新租户保留 BOOTSTRAP.md 初始化聊天",
+    )
     fail_fast: bool = Field(
         default=False,
         description="单个租户失败时是否立即终止后续处理",
@@ -533,6 +537,8 @@ def _read_text_asset(file_name: str) -> InternalTextAssetReadResponse:
 
 async def _save_uploaded_asset_file(
     file: UploadFile,
+    *,
+    template_flag: Optional[str] = None,
 ) -> InternalAssetUploadResponse:
     safe_file_name = _validate_asset_file_name(file.filename or "")
     content = await file.read()
@@ -552,6 +558,7 @@ async def _save_uploaded_asset_file(
             file_name=safe_file_name,
             file_size=file_size,
             asset_path=asset_path,
+            template_flag=template_flag,
         )
     except Exception:
         logger.warning(
@@ -774,6 +781,7 @@ async def internal_batch_initialize_tenants(
                 source_id=payload.source_id,
                 tenant_name=resolved_identity.user_name,
                 bbk_id=resolved_identity.bbk_id,
+                enable_bootstrap_chat=payload.enable_bootstrap_chat,
             )
         except Exception as exc:
             fail_count += 1
@@ -819,9 +827,10 @@ async def internal_batch_initialize_tenants(
 )
 async def upload_asset(
     file: UploadFile = File(...),
+    template_flag: Optional[str] = Form(None),
 ) -> InternalAssetUploadResponse:
     """公开上传 asset 文件，不校验内部服务 Token。"""
-    return await _save_uploaded_asset_file(file)
+    return await _save_uploaded_asset_file(file, template_flag=template_flag)
 
 
 @public_router.get(
@@ -1134,6 +1143,8 @@ async def _dispatch_cron_task(
 
 
 @router.post("/cron/callback")
+# Existing endpoint handles legacy and jobParam callback shapes in one handler.
+# pylint: disable=too-many-statements
 async def internal_cron_callback(
     request: Request,
     x_internal_token: Optional[str] = Header(

@@ -14,6 +14,7 @@ import {
   ClockCircleOutlined,
   ExclamationCircleOutlined,
 } from "@ant-design/icons";
+import { marketApi } from "../../../api/modules/market";
 import { skillVersionApi, SkillVersion, VersionsManifest } from "../../../api/modules/skillVersion";
 import { VersionCompareDrawer } from "./VersionCompareDrawer";
 
@@ -83,8 +84,20 @@ export function VersionHistoryModal(props: VersionHistoryModalProps) {
   const [skillNameFromManifest, setSkillNameFromManifest] = useState("");
   const [switching, setSwitching] = useState(false);
   const [deleting, setDeleting] = useState(false);
+  const [downloadingVersionId, setDownloadingVersionId] = useState<string>("");
   const [compareDrawerOpen, setCompareDrawerOpen] = useState(false);
   const [compareTargetVersion, setCompareTargetVersion] = useState<string>("");
+
+  const triggerBrowserDownload = (blob: Blob, filename: string) => {
+    const url = URL.createObjectURL(blob);
+    const anchor = document.createElement("a");
+    anchor.href = url;
+    anchor.download = filename;
+    document.body.appendChild(anchor);
+    anchor.click();
+    anchor.remove();
+    window.setTimeout(() => URL.revokeObjectURL(url), 0);
+  };
 
   useEffect(() => {
     if (!open || !itemId || !sourceId) {
@@ -171,6 +184,27 @@ export function VersionHistoryModal(props: VersionHistoryModalProps) {
     }
     setCompareTargetVersion(versionId);
     setCompareDrawerOpen(true);
+  };
+
+  const handleDownloadVersion = async (versionId: string) => {
+    setDownloadingVersionId(versionId);
+    try {
+      const { blob, filename } = await marketApi.downloadSkillVersion(
+        sourceId,
+        itemId,
+        versionId,
+      );
+      triggerBrowserDownload(
+        blob,
+        filename || `${skillName}-${versionId}.zip`,
+      );
+      message.success(`已开始下载版本 ${displayVersion(versionId)}`);
+    } catch (err) {
+      console.error("Failed to download skill version:", err);
+      message.error("下载版本失败");
+    } finally {
+      setDownloadingVersionId("");
+    }
   };
 
   // 关闭比对抽屉
@@ -267,6 +301,14 @@ export function VersionHistoryModal(props: VersionHistoryModalProps) {
                       </Text>
                     </div>
                     <div style={{ display: "flex", gap: 6 }}>
+                      <Button
+                        size="small"
+                        onClick={() => handleDownloadVersion(version.version_id)}
+                        loading={downloadingVersionId === version.version_id}
+                        style={{ fontSize: 11 }}
+                      >
+                        下载
+                      </Button>
                       {canSwitch && (
                         <Popconfirm
                           title="确定切换到此版本？"

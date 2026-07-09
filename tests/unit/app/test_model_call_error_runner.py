@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import ast
 import asyncio
+import inspect
+import textwrap
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
@@ -23,6 +26,34 @@ from src.swe.app.runner.model_call_error_detail import (
     build_empty_model_output_detail,
 )
 from src.swe.app.runner.runner import AgentRunner, _QueryPreflight
+
+_CONTROL_NESTING_NODES = (
+    ast.If,
+    ast.For,
+    ast.AsyncFor,
+    ast.While,
+    ast.Try,
+    ast.With,
+    ast.AsyncWith,
+)
+
+
+def _max_control_nesting_by_line(callable_obj) -> dict[int, int]:
+    source_lines, start_line = inspect.getsourcelines(callable_obj)
+    tree = ast.parse(textwrap.dedent("".join(source_lines)))
+    max_by_line: dict[int, int] = {}
+
+    def _visit(node: ast.AST, depth: int) -> None:
+        if isinstance(node, _CONTROL_NESTING_NODES):
+            depth += 1
+            lineno = start_line + node.lineno - 1
+            max_by_line[lineno] = max(depth, max_by_line.get(lineno, 0))
+
+        for child in ast.iter_child_nodes(node):
+            _visit(child, depth)
+
+    _visit(tree, 0)
+    return max_by_line
 
 
 def _request(**overrides):
@@ -59,6 +90,66 @@ def _setup_runner(monkeypatch) -> AgentRunner:
     runner._cleanup_blocked_runtime_start = AsyncMock()
     runner._store_qa_content_if_needed = AsyncMock()
     return runner
+
+
+def test_stream_query_after_preflight_control_nesting_stays_within_limit():
+    nesting_by_line = _max_control_nesting_by_line(
+        AgentRunner._stream_query_after_preflight,
+    )
+    deepest_line, deepest_depth = max(
+        nesting_by_line.items(),
+        key=lambda item: item[1],
+    )
+
+    assert deepest_depth <= 5, (
+        "_stream_query_after_preflight nests control flow deeper than 5 "
+        f"levels at runner.py:{deepest_line}"
+    )
+
+
+def test_load_query_retry_settings_applies_current_source_override(
+    monkeypatch,
+):
+    from src.swe.app.source_system_config.models import (
+        EffectiveSourceSystemConfig,
+        SourceSystemConfig,
+    )
+    from src.swe.app.source_system_config.runtime import (
+        bind_source_system_config,
+    )
+
+    runner = AgentRunner(agent_id="test-agent")
+    runner.tenant_id = "tenant-a"
+    agent_config = SimpleNamespace(
+        running=SimpleNamespace(
+            query_retry=SimpleNamespace(
+                enabled=False,
+                max_retries=5,
+                backoff_base=1.5,
+                backoff_cap=12.0,
+            ),
+        ),
+    )
+    monkeypatch.setattr(
+        "src.swe.app.runner.runner.load_agent_config",
+        lambda agent_id, tenant_id=None: agent_config,
+    )
+    effective = EffectiveSourceSystemConfig(
+        source_id="portal",
+        config=SourceSystemConfig.model_validate({}),
+        raw_config=SourceSystemConfig.model_validate(
+            {
+                "query_retry": {
+                    "enabled": True,
+                    "max_retries": 2,
+                },
+            },
+        ),
+        version=3,
+    )
+
+    with bind_source_system_config(effective):
+        assert runner._load_query_retry_settings() == (3, 2, 1.5, 12.0)
 
 
 async def _collect_until_exception(runner: AgentRunner, request):

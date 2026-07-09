@@ -7,6 +7,7 @@ context for the duration of the request.
 """
 
 import logging
+import time
 from typing import Callable, Awaitable
 from urllib.parse import unquote
 
@@ -28,6 +29,12 @@ from swe.config.context import (
     reset_current_source_id,
     reset_current_scope_id,
 )
+from swe.app.middleware.provider_models_timing import (
+    is_provider_models_list_request,
+    log_provider_models_middleware_before_next,
+    log_provider_models_middleware_done,
+    log_provider_models_middleware_error,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -44,6 +51,9 @@ TENANT_EXEMPT_ROUTES = frozenset(
         "/alive",
         # Version endpoint
         "/api/version",
+        "/api/runtime/memory-diagnostic",
+        "/api/runtime/memory-type-holders",
+        "/api/runtime/inotify-diagnostic",
         # OpenAPI docs (if enabled)
         "/docs",
         "/redoc",
@@ -76,6 +86,9 @@ SOURCE_EXEMPT_ROUTES = frozenset(
         "/readyz",
         "/alive",
         "/api/version",
+        "/api/runtime/memory-diagnostic",
+        "/api/runtime/memory-type-holders",
+        "/api/runtime/inotify-diagnostic",
         "/docs",
         "/redoc",
         "/openapi.json",
@@ -341,8 +354,15 @@ class TenantIdentityMiddleware(BaseHTTPMiddleware):
             HTTPException: If tenant ID is required but missing/invalid.
         """
         tokens = []
+        is_timing = is_provider_models_list_request(request)
+        started_at = time.perf_counter()
+        resolve_ms = 0
+        store_ms = 0
+        bind_ms = 0
+        before_next_at = None
 
         try:
+            resolve_started_at = time.perf_counter()
             (
                 tenant_id,
                 user_id,
@@ -352,7 +372,11 @@ class TenantIdentityMiddleware(BaseHTTPMiddleware):
                 bbk_id,
                 is_exempt,
             ) = self._resolve_request_identity(request)
+            resolve_ms = int(
+                (time.perf_counter() - resolve_started_at) * 1000,
+            )
 
+            store_started_at = time.perf_counter()
             self._store_request_state(
                 request,
                 tenant_id,
@@ -362,12 +386,15 @@ class TenantIdentityMiddleware(BaseHTTPMiddleware):
                 user_name,
                 bbk_id,
             )
+            store_ms = int((time.perf_counter() - store_started_at) * 1000)
+            bind_started_at = time.perf_counter()
             tokens = self._bind_context(
                 tenant_id,
                 user_id,
                 source_id,
                 scope_id,
             )
+            bind_ms = int((time.perf_counter() - bind_started_at) * 1000)
 
             logger.debug(
                 f"TenantIdentityMiddleware: tenant_id={tenant_id}, "
@@ -375,6 +402,17 @@ class TenantIdentityMiddleware(BaseHTTPMiddleware):
                 f"path={request.url.path}, exempt={is_exempt}",
             )
 
+            if is_timing:
+                before_next_at = log_provider_models_middleware_before_next(
+                    logger,
+                    "TenantIdentityMiddleware",
+                    request,
+                    started_at,
+                    resolve_ms=resolve_ms,
+                    store_ms=store_ms,
+                    bind_ms=bind_ms,
+                    is_exempt=is_exempt,
+                )
             response = await call_next(request)
 
             if tenant_id:
@@ -382,12 +420,50 @@ class TenantIdentityMiddleware(BaseHTTPMiddleware):
             if scope_id:
                 response.headers["X-Scope-Id-Resolved"] = scope_id
 
+            if is_timing and before_next_at is not None:
+                log_provider_models_middleware_done(
+                    logger,
+                    "TenantIdentityMiddleware",
+                    request,
+                    started_at,
+                    before_next_at,
+                    response,
+                    resolve_ms=resolve_ms,
+                    store_ms=store_ms,
+                    bind_ms=bind_ms,
+                    is_exempt=is_exempt,
+                )
             return response
         except HTTPException as exc:
+            if is_timing:
+                logger.info(
+                    "provider_models_middleware_http_error "
+                    "name=TenantIdentityMiddleware path=%s total_ms=%d "
+                    "resolve_ms=%d store_ms=%d bind_ms=%d status_code=%d",
+                    request.url.path,
+                    int((time.perf_counter() - started_at) * 1000),
+                    resolve_ms,
+                    store_ms,
+                    bind_ms,
+                    exc.status_code,
+                )
             return JSONResponse(
                 status_code=exc.status_code,
                 content={"detail": exc.detail},
             )
+        except Exception:
+            if is_timing:
+                log_provider_models_middleware_error(
+                    logger,
+                    "TenantIdentityMiddleware",
+                    request,
+                    started_at,
+                    before_next_at,
+                    resolve_ms=resolve_ms,
+                    store_ms=store_ms,
+                    bind_ms=bind_ms,
+                )
+            raise
         finally:
             self._reset_context(tokens)
 

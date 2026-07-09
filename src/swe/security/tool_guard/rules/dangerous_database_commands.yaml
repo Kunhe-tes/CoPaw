@@ -11,7 +11,7 @@
 
 ## ── Python 数据库模块 import ──────────────────────────────────────────
 - id: DB_PYTHON_MODULE_IMPORT
-  tools: [execute_shell_command]
+  tools: [execute_shell_command, start_background_process]
   params: [command]
   category: data_exfiltration
   severity: CRITICAL
@@ -49,7 +49,7 @@
 
 ## ── DB CLI 工具 ──────────────────────────────────────────────────────
 - id: DB_CLI_TOOL
-  tools: [execute_shell_command]
+  tools: [execute_shell_command, start_background_process]
   params: [command]
   category: data_exfiltration
   severity: CRITICAL
@@ -82,7 +82,7 @@
 
 ## ── 数据库连接串与端口 ────────────────────────────────────────────────
 - id: DB_CONNECTION_STRING
-  tools: [execute_shell_command]
+  tools: [execute_shell_command, start_background_process]
   params: [command]
   category: data_exfiltration
   severity: CRITICAL

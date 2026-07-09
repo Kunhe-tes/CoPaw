@@ -52,6 +52,7 @@ from ...agents.skill_invocation_detector import SkillInvocationDetector
 from ...agents.skills_manager import (
     get_skill_freshness_token,
     get_workspace_skills_dir,
+    resolve_effective_skill_dir,
 )
 from ...agents.hook_runtime import HookRuntime
 from ...agents.hook_runtime.conversation_snapshot import (
@@ -96,6 +97,7 @@ from ...tracing.models import TraceStatus
 from ...config.context import (
     get_current_passthrough_headers,
 )
+from ...runtime_invocation_claims import runtime_invocation_claims_context
 from ..source_system_config import is_chat_task_progress_enabled
 from ..source_system_config.runtime import get_current_source_system_config
 
@@ -112,6 +114,9 @@ _ACCEPTED_PLAN_META_KEY = "accepted_plan"
 _ACCEPTED_PLAN_SOURCE_META_KEY = "accepted_plan_source"
 _ACCEPTED_PLAN_SERVER_SOURCE = "server_plan_store"
 _SKILL_FRESHNESS_NOTICE_METADATA_KEY = "swe_skill_freshness_notice"
+_EXTERNAL_APPROVAL_MESSAGE_META_KEY = "external_approval_message"
+_APPROVAL_REQUEST_ID_META_KEY = "approval_request_id"
+_APPROVAL_DECISION_META_KEY = "approval_decision"
 _SESSION_TITLE_GENERATED_META_KEY = "session_title_generated"
 _TASK_SESSION_KIND = "task"
 _BEFORE_STOP_FOLLOW_UP_REASON_TEMPLATE = (
@@ -352,6 +357,101 @@ def _extract_text_from_message_content(content: Any) -> str:
     return "\n".join(texts).strip()
 
 
+def _approval_message_key_from_text(text: str) -> tuple[str, str] | None:
+    normalized = " ".join(text.split())
+    request_id = _approval_request_id(normalized)
+    if request_id:
+        return ("approve", request_id)
+
+    request_id = _denial_request_id(normalized)
+    if request_id:
+        return ("deny", request_id)
+
+    return None
+
+
+def _external_approval_message_key(
+    message: dict[str, Any],
+) -> tuple[str, str] | None:
+    if message.get("role") != "user":
+        return None
+
+    text_key = _approval_message_key_from_text(
+        _extract_text_from_message_content(message.get("content")),
+    )
+    metadata = message.get("metadata")
+    if not isinstance(metadata, dict):
+        return text_key
+
+    meta_decision = metadata.get(_APPROVAL_DECISION_META_KEY)
+    if isinstance(meta_decision, str):
+        meta_decision = meta_decision.strip().lower()
+    if meta_decision not in {"approve", "deny"}:
+        meta_decision = text_key[0] if text_key else None
+
+    meta_request_id = metadata.get(_APPROVAL_REQUEST_ID_META_KEY)
+    if isinstance(meta_request_id, str) and meta_request_id.strip():
+        request_id = meta_request_id.strip().lower()
+    else:
+        request_id = text_key[1] if text_key else None
+
+    if meta_decision and request_id:
+        return (meta_decision, request_id)
+    return text_key
+
+
+def _dedupe_external_approval_messages_from_state(
+    agent_state: dict[str, Any],
+) -> int:
+    memory_state = agent_state.get("memory")
+    if not isinstance(memory_state, dict):
+        return 0
+
+    content = memory_state.get("content")
+    if not isinstance(content, list):
+        return 0
+
+    external_keys: set[tuple[str, str]] = set()
+    for entry in content:
+        message = _extract_memory_entry_payload(entry)
+        if not isinstance(message, dict):
+            continue
+        metadata = message.get("metadata")
+        if not isinstance(metadata, dict):
+            continue
+        if not metadata.get(_EXTERNAL_APPROVAL_MESSAGE_META_KEY):
+            continue
+        key = _external_approval_message_key(message)
+        if key is not None:
+            external_keys.add(key)
+
+    if not external_keys:
+        return 0
+
+    kept_entries: list[Any] = []
+    removed = 0
+    for entry in content:
+        message = _extract_memory_entry_payload(entry)
+        if not isinstance(message, dict):
+            kept_entries.append(entry)
+            continue
+
+        metadata = message.get("metadata")
+        is_external_entry = isinstance(metadata, dict) and bool(
+            metadata.get(_EXTERNAL_APPROVAL_MESSAGE_META_KEY),
+        )
+        key = _external_approval_message_key(message)
+        if key in external_keys and not is_external_entry:
+            removed += 1
+            continue
+        kept_entries.append(entry)
+
+    if removed:
+        memory_state["content"] = kept_entries
+
+    return removed
+
+
 def _build_task_run_record(
     memory_entries: list[Any],
     *,
@@ -449,6 +549,51 @@ def _approval_replay_metadata(record) -> dict[str, Any] | None:
             record.extra.get("hook_ask_handler_ids") or [],
         ),
     }
+
+
+def _approved_tool_call_from_record(record) -> dict[str, Any] | None:
+    """从审批记录恢复需要重放的工具调用和队列上下文。"""
+    if not isinstance(record.extra, dict):
+        return None
+    candidate = record.extra.get("tool_call")
+    if not isinstance(candidate, dict):
+        return None
+
+    approved_tool_call = dict(candidate)
+    _copy_list_extra(
+        approved_tool_call,
+        record.extra,
+        source_key="sibling_tool_calls",
+        target_key="_sibling_tool_calls",
+    )
+    _copy_list_extra(
+        approved_tool_call,
+        record.extra,
+        source_key="remaining_queue",
+        target_key="_remaining_queue",
+    )
+    _copy_list_extra(
+        approved_tool_call,
+        record.extra,
+        source_key="thinking_blocks",
+        target_key="_thinking_blocks",
+    )
+    replay_metadata = _approval_replay_metadata(record)
+    if replay_metadata is not None:
+        approved_tool_call["_approval_replay"] = replay_metadata
+    return approved_tool_call
+
+
+def _copy_list_extra(
+    target: dict[str, Any],
+    extra: dict[str, Any],
+    *,
+    source_key: str,
+    target_key: str,
+) -> None:
+    value = extra.get(source_key)
+    if isinstance(value, list):
+        target[target_key] = value
 
 
 async def _select_pending_approval(
@@ -553,6 +698,7 @@ def _create_session_skill_detector(
     channel: str,
     source_id: str,
     enabled_skills: list[str],
+    skill_runtime_profiles: dict[str, Any] | None = None,
     get_hook_state: Callable[[], HookSessionState],
     set_hook_state: Callable[[HookSessionState], None],
     approved_http_urls: Collection[str] | None = None,
@@ -566,7 +712,9 @@ def _create_session_skill_detector(
     )
 
     async def _load_skill_hooks(skill_name: str) -> None:
-        skill_root = get_workspace_skills_dir(workspace) / skill_name
+        skill_root = resolve_effective_skill_dir(workspace, skill_name)
+        if skill_root is None:
+            return
         try:
             next_state = load_skill_hooks_for_session(
                 skill_name=skill_name,
@@ -594,6 +742,8 @@ def _create_session_skill_detector(
         confirmed_skill_callback=confirmed_skill_callback,
     )
     detector.set_enabled_skills(enabled_skills)
+    if skill_runtime_profiles:
+        detector.set_skill_runtime_profiles(skill_runtime_profiles)
     return detector
 
 
@@ -1090,12 +1240,16 @@ def _build_session_skill_snapshot_entry(
     skill_name: str,
     resolved_skill_dir: Path,
     freshness_token: Any,
+    confirmed_at: Any | None = None,
 ) -> dict[str, Any]:
-    return {
+    entry = {
         "skill_name": skill_name,
         "resolved_skill_dir": str(resolved_skill_dir),
         "freshness_token": freshness_token,
     }
+    if confirmed_at is not None:
+        entry["confirmed_at"] = confirmed_at
+    return entry
 
 
 def _upsert_session_skill_snapshot_entry(
@@ -1104,11 +1258,13 @@ def _upsert_session_skill_snapshot_entry(
     skill_name: str,
     resolved_skill_dir: Path,
     freshness_token: Any,
+    confirmed_at: Any | None = None,
 ) -> None:
     snapshot[skill_name] = _build_session_skill_snapshot_entry(
         skill_name=skill_name,
         resolved_skill_dir=resolved_skill_dir,
         freshness_token=freshness_token,
+        confirmed_at=confirmed_at,
     )
 
 
@@ -1146,6 +1302,37 @@ class _SkillFreshnessRefreshResult:
     refreshed_snapshot: dict[str, dict[str, Any]] | None = None
 
 
+def _select_restorable_session_skill(
+    snapshot: dict[str, dict[str, Any]] | None,
+    *,
+    enabled_skills: Collection[str],
+) -> str | None:
+    """从已持久化 snapshot 中选出可恢复的最近确认 skill。"""
+    normalized = _normalize_session_skill_snapshot(snapshot)
+    candidates = [
+        entry
+        for skill_name, entry in normalized.items()
+        if skill_name in enabled_skills
+    ]
+    if not candidates:
+        return None
+
+    with_confirmed_at = [
+        entry for entry in candidates if entry.get("confirmed_at") is not None
+    ]
+    if with_confirmed_at:
+        chosen = max(
+            with_confirmed_at,
+            key=lambda item: float(item.get("confirmed_at") or 0.0),
+        )
+        return str(chosen.get("skill_name") or "") or None
+
+    if len(candidates) == 1:
+        return str(candidates[0].get("skill_name") or "") or None
+
+    return None
+
+
 def _supports_session_skill_freshness_refresh(
     *,
     session: Any,
@@ -1170,6 +1357,7 @@ def _refresh_switched_session_skill_snapshot_entry(
     skill_name: str,
     stored_dir: Path,
     current_dir: Path | None,
+    confirmed_at: Any | None = None,
 ) -> str | None:
     if (
         current_dir is None
@@ -1184,6 +1372,7 @@ def _refresh_switched_session_skill_snapshot_entry(
         skill_name=skill_name,
         resolved_skill_dir=current_dir,
         freshness_token=current_token,
+        confirmed_at=confirmed_at,
     )
     return (
         f"{skill_name}: detected skill-directory switch "
@@ -1228,6 +1417,7 @@ def _refresh_changed_session_skill_snapshot_entry(
         skill_name=skill_name,
         resolved_skill_dir=current_dir,
         freshness_token=current_token,
+        confirmed_at=entry.get("confirmed_at"),
     )
     return (
         f"{skill_name}: detected skill-directory change at "
@@ -1252,6 +1442,7 @@ def _refresh_session_skill_snapshot_entry(
         skill_name=skill_name,
         stored_dir=stored_dir,
         current_dir=current_dir,
+        confirmed_at=entry.get("confirmed_at"),
     )
     if switch_notice is not None:
         return switch_notice
@@ -1563,6 +1754,39 @@ def _request_source_id(request: AgentRequest) -> str:
     )
 
 
+def _request_approval_source_channel(
+    request: Any | None,
+) -> str | None:
+    channel_meta = getattr(request, "channel_meta", None) or {}
+    if not isinstance(channel_meta, dict):
+        return None
+    source_channel = channel_meta.get("approval_source_channel")
+    if isinstance(source_channel, str) and source_channel.strip():
+        return source_channel.strip()
+    return None
+
+
+def _external_approval_submission(record: Any) -> dict[str, Any] | None:
+    extra = getattr(record, "extra", None)
+    if not isinstance(extra, dict):
+        return None
+    submission = extra.get("external_submission")
+    if not isinstance(submission, dict):
+        return None
+    return submission
+
+
+def _request_matches_external_approval_submission(
+    request: Any | None,
+    submission: dict[str, Any],
+) -> bool:
+    submitted_channel = submission.get("source_channel")
+    if not isinstance(submitted_channel, str) or not submitted_channel.strip():
+        return False
+    request_channel = _request_approval_source_channel(request)
+    return request_channel == submitted_channel.strip()
+
+
 def _request_user_name(request: AgentRequest) -> str | None:
     """按兼容顺序读取通道注入的用户名称。"""
     channel_meta = getattr(request, "channel_meta", None) or {}
@@ -1747,6 +1971,7 @@ class AgentRunner(Runner):
         self,
         session_id: str,
         query: str | None,
+        request: Any | None = None,
     ) -> tuple[Msg | None, bool, dict[str, Any] | None]:
         """Check for a pending tool-guard approval for *session_id*.
 
@@ -1802,33 +2027,48 @@ class AgentRunner(Runner):
                 None,
             )
 
+        external_submission = _external_approval_submission(pending)
+        if external_submission is not None and (
+            not _request_matches_external_approval_submission(
+                request,
+                external_submission,
+            )
+        ):
+            source_channel = external_submission.get("source_channel")
+            if not isinstance(source_channel, str) or not source_channel:
+                source_channel = "external"
+            return (
+                Msg(
+                    name="Friday",
+                    role="assistant",
+                    content=[
+                        TextBlock(
+                            type="text",
+                            text=(
+                                f"Approval request `{pending.request_id}` "
+                                f"has already been submitted from "
+                                f"`{source_channel}`. Refresh the session "
+                                "to see the latest approval state."
+                            ),
+                        ),
+                    ],
+                ),
+                True,
+                None,
+            )
+
         if _is_approval(normalized):
             resolved = await svc.resolve_request(
                 pending.request_id,
                 ApprovalDecision.APPROVED,
             )
-            approved_tool_call: dict[str, Any] | None = None
             record = resolved or pending
-            if isinstance(record.extra, dict):
-                candidate = record.extra.get("tool_call")
-                if isinstance(candidate, dict):
-                    approved_tool_call = dict(candidate)
-                    siblings = record.extra.get("sibling_tool_calls")
-                    if isinstance(siblings, list):
-                        approved_tool_call["_sibling_tool_calls"] = siblings
-                    remaining = record.extra.get("remaining_queue")
-                    if isinstance(remaining, list):
-                        approved_tool_call["_remaining_queue"] = remaining
-                    thinking_blocks = record.extra.get("thinking_blocks")
-                    if isinstance(thinking_blocks, list):
-                        approved_tool_call["_thinking_blocks"] = (
-                            thinking_blocks
-                        )
-                    replay_metadata = _approval_replay_metadata(record)
-                    if replay_metadata is not None:
-                        approved_tool_call["_approval_replay"] = (
-                            replay_metadata
-                        )
+            approved_tool_call = _approved_tool_call_from_record(record)
+            await self._notify_console_approval_result(
+                record,
+                ApprovalDecision.APPROVED,
+                request,
+            )
             return None, True, approved_tool_call
 
         explicit_deny = _is_denial(normalized)
@@ -1837,9 +2077,14 @@ class AgentRunner(Runner):
             if explicit_deny
             else ApprovalDecision.DENIED
         )
-        await svc.resolve_request(
+        resolved = await svc.resolve_request(
             pending.request_id,
             denial_decision,
+        )
+        await self._notify_console_approval_result(
+            resolved or pending,
+            denial_decision,
+            request,
         )
         return (
             Msg(
@@ -1859,6 +2104,45 @@ class AgentRunner(Runner):
             None,
         )
 
+    async def _notify_console_approval_result(
+        self,
+        pending: Any,
+        decision: ApprovalDecision,
+        request: Any | None,
+    ) -> None:
+        from ..approvals.external import (
+            CONSOLE_CHANNEL,
+            ExternalApprovalDecision,
+            notify_cron_approval_result,
+        )
+
+        source_channel = _request_approval_source_channel(request)
+        if source_channel and source_channel != CONSOLE_CHANNEL:
+            return
+
+        workspace = getattr(self, "_workspace", None)
+        if workspace is None:
+            return
+
+        external_decision = (
+            ExternalApprovalDecision.APPROVE
+            if decision == ApprovalDecision.APPROVED
+            else ExternalApprovalDecision.DENY
+        )
+        try:
+            await notify_cron_approval_result(
+                workspace,
+                pending,
+                decision=external_decision,
+                source_channel=source_channel or CONSOLE_CHANNEL,
+            )
+        except Exception:
+            logger.exception(
+                "zhaohu console approval result notification failed: "
+                "request_id=%s",
+                getattr(pending, "request_id", None),
+            )
+
     async def _prepare_query_preflight(
         self,
         *,
@@ -1872,7 +2156,11 @@ class AgentRunner(Runner):
             approval_response,
             approval_consumed,
             approved_tool_call,
-        ) = await self._resolve_pending_approval(session_id, query)
+        ) = await self._resolve_pending_approval(
+            session_id,
+            query,
+            request=request,
+        )
         if approval_response is not None:
             return _QueryPreflight(
                 response=approval_response,
@@ -2310,6 +2598,11 @@ class AgentRunner(Runner):
             "bbk_id": _request_bbk_id(request),
             "trace_id": getattr(request, "trace_id", None),
             "current_user_text": current_user_text,
+            "channel_manager": getattr(
+                getattr(self, "_workspace", None),
+                "channel_manager",
+                None,
+            ),
             "transcript_path": (
                 self.session._get_save_path(session_id, user_id)
                 if hasattr(self.session, "_get_save_path")
@@ -2394,13 +2687,11 @@ class AgentRunner(Runner):
             ):
                 return
 
-            skill_dir = (
-                get_workspace_skills_dir(
-                    Path(self.workspace_dir or WORKING_DIR),
-                )
-                / skill_name
+            skill_dir = resolve_effective_skill_dir(
+                Path(self.workspace_dir or WORKING_DIR),
+                skill_name,
             )
-            if not skill_dir.exists():
+            if skill_dir is None or not skill_dir.exists():
                 return
 
             runtime.pending_confirmed_skill_snapshots[skill_name] = (
@@ -2408,6 +2699,7 @@ class AgentRunner(Runner):
                     skill_name=skill_name,
                     resolved_skill_dir=skill_dir,
                     freshness_token=get_skill_freshness_token(skill_dir),
+                    confirmed_at=time.time(),
                 )
             )
 
@@ -2420,9 +2712,14 @@ class AgentRunner(Runner):
             channel=runtime.channel,
             source_id=source_id_for_hooks,
             enabled_skills=(
-                runtime.agent.get_effective_skills()
-                if hasattr(runtime.agent, "get_effective_skills")
+                runtime.agent.get_runtime_skills()
+                if hasattr(runtime.agent, "get_runtime_skills")
                 else []
+            ),
+            skill_runtime_profiles=(
+                runtime.agent.get_skill_runtime_profiles()
+                if hasattr(runtime.agent, "get_skill_runtime_profiles")
+                else {}
             ),
             get_hook_state=_get_session_hook_state,
             set_hook_state=_set_session_hook_state,
@@ -2433,7 +2730,6 @@ class AgentRunner(Runner):
         runtime.agent._request_context["_skill_invocation_detector"] = (
             runtime.session_skill_detector
         )
-
         trace_id = getattr(request, "trace_id", None)
         if trace_id and has_trace_manager():
             try:
@@ -2453,9 +2749,16 @@ class AgentRunner(Runner):
                     trace_ctx.set_skill_detector(
                         runtime.session_skill_detector,
                         (
-                            runtime.agent.get_effective_skills()
-                            if hasattr(runtime.agent, "get_effective_skills")
-                            else []
+                            runtime.agent.get_runtime_skills()
+                            if hasattr(runtime.agent, "get_runtime_skills")
+                            else (
+                                runtime.agent.get_effective_skills()
+                                if hasattr(
+                                    runtime.agent,
+                                    "get_effective_skills",
+                                )
+                                else []
+                            )
                         ),
                     )
             except Exception:
@@ -2482,10 +2785,15 @@ class AgentRunner(Runner):
         if trace_ctx.skill_detector is runtime.session_skill_detector:
             return
 
+        previous_detector = trace_ctx.skill_detector
         enabled_skills = (
-            runtime.agent.get_effective_skills()
-            if hasattr(runtime.agent, "get_effective_skills")
-            else []
+            runtime.agent.get_runtime_skills()
+            if hasattr(runtime.agent, "get_runtime_skills")
+            else (
+                runtime.agent.get_effective_skills()
+                if hasattr(runtime.agent, "get_effective_skills")
+                else []
+            )
         )
         trace_ctx.set_skill_detector(
             runtime.session_skill_detector,
@@ -2516,12 +2824,17 @@ class AgentRunner(Runner):
                 refreshed_snapshot={},
             )
 
-        workspace_skills_dir = get_workspace_skills_dir(
-            Path(self.workspace_dir or WORKING_DIR),
-        )
+        workspace_dir = Path(self.workspace_dir or WORKING_DIR)
         effective_skill_dirs = {
-            skill_name: workspace_skills_dir / skill_name
+            skill_name: resolved_effective_skill_dir
             for skill_name in runtime.agent.get_effective_skills()
+            if (
+                resolved_effective_skill_dir := resolve_effective_skill_dir(
+                    workspace_dir,
+                    skill_name,
+                )
+            )
+            is not None
         }
 
         next_snapshot = _normalize_session_skill_snapshot(stored_snapshot)
@@ -2569,28 +2882,71 @@ class AgentRunner(Runner):
             return next_snapshot
         return None
 
+    async def _restore_confirmed_session_skill_context(
+        self,
+        *,
+        runtime: _QueryRuntime,
+    ) -> None:
+        """从持久化的 session snapshot 恢复一次性 skill 续接候选。"""
+        detector = getattr(runtime, "session_skill_detector", None)
+        session = self.session
+        detector_can_restore = detector is not None and hasattr(
+            detector,
+            "restore_confirmed_skill",
+        )
+        session_can_load_snapshot = session is not None and hasattr(
+            session,
+            "get_session_skill_snapshot",
+        )
+        if (
+            runtime.skip_history
+            or not runtime.session_id
+            or not detector_can_restore
+            or not session_can_load_snapshot
+        ):
+            return
+
+        assert session is not None
+        stored_snapshot = _normalize_session_skill_snapshot(
+            await session.get_session_skill_snapshot(
+                session_id=runtime.session_id,
+                user_id=runtime.user_id,
+                allow_not_exist=True,
+            ),
+        )
+        skill_name = _select_restorable_session_skill(
+            stored_snapshot,
+            enabled_skills=(
+                runtime.agent.get_runtime_skills()
+                if hasattr(runtime.agent, "get_runtime_skills")
+                else (
+                    runtime.agent.get_effective_skills()
+                    if hasattr(runtime.agent, "get_effective_skills")
+                    else []
+                )
+            ),
+        )
+        if not skill_name:
+            return
+
+        restored = detector.restore_confirmed_skill(
+            skill_name,
+            allow_one_shot_continuation=True,
+        )
+
     async def _start_declared_session_skill(
         self,
         *,
         runtime: _QueryRuntime,
         user_message: str,
     ) -> None:
-        """当用户消息显式声明技能时，启动本轮技能状态记录。"""
+        """预热消息级技能候选缓存，不在开局直接启动技能。"""
         if not user_message:
             return
 
-        skill, confidence = (
-            runtime.session_skill_detector.detect_from_user_message(
-                user_message,
-            )
+        runtime.session_skill_detector.detect_from_user_message(
+            user_message,
         )
-        if skill and confidence >= 0.7:
-            await runtime.session_skill_detector.start_skill(
-                skill_name=skill,
-                trigger_tool="user_message",
-                trigger_reason="declared",
-                confidence=confidence,
-            )
 
     async def _prepare_query_runtime(
         self,
@@ -2758,6 +3114,9 @@ class AgentRunner(Runner):
             self._attach_session_skill_detector(
                 runtime=runtime,
                 request=request,
+            )
+            await self._restore_confirmed_session_skill_context(
+                runtime=runtime,
             )
             await self._start_declared_session_skill(
                 runtime=runtime,
@@ -3114,6 +3473,57 @@ class AgentRunner(Runner):
         exc.args = (
             (f"{exc.args[0]}{suffix}" if exc.args else suffix.strip()),
         ) + exc.args[1:]
+
+    async def _persist_model_call_failed_detail_safely(
+        self,
+        *,
+        request: AgentRequest,
+        detail: ModelCallFailureDetail,
+    ) -> None:
+        """保存模型调用失败详情，持久化异常不应覆盖原始失败信息。"""
+        try:
+            await self._persist_model_call_failed_detail(
+                request=request,
+                detail=detail,
+            )
+        except Exception:
+            logger.warning(
+                "Failed to persist model-call failure detail for history",
+                exc_info=True,
+            )
+
+    async def _raise_console_model_call_failed_if_needed(
+        self,
+        *,
+        request: AgentRequest,
+        exc: Exception,
+        trace_id: str | None,
+    ) -> None:
+        """在 Console 模型调用失败时抛出用户可见的结构化异常。"""
+        if getattr(request, "channel", DEFAULT_CHANNEL) != DEFAULT_CHANNEL:
+            return
+
+        detail = extract_model_call_failure_detail(exc)
+        if detail is None:
+            return
+
+        logger.warning(
+            "Console model call failed after final attempt: "
+            "kind=%s status=%s truncated=%s",
+            detail.kind.value,
+            detail.provider_status,
+            detail.truncated,
+        )
+        await self._end_trace_if_needed(
+            trace_id,
+            TraceStatus.ERROR,
+            error=detail.message,
+        )
+        await self._persist_model_call_failed_detail_safely(
+            request=request,
+            detail=detail,
+        )
+        raise ModelCallFailedException(detail) from exc
 
     async def _persist_model_call_failed_detail(
         self,
@@ -3557,10 +3967,42 @@ class AgentRunner(Runner):
             pass
 
         retry_enabled, max_retries, backoff_base, backoff_cap = (
-            self._extract_retry_config(agent_config_for_retry)
+            self._extract_retry_config(
+                self._resolve_source_query_retry_config(
+                    agent_config_for_retry,
+                ),
+            )
         )
         max_retry_attempts = max_retries + 1 if retry_enabled else 1
         return max_retry_attempts, max_retries, backoff_base, backoff_cap
+
+    @staticmethod
+    def _resolve_source_query_retry_config(agent_config):
+        """应用当前 source 的显式 Query 重试覆盖。"""
+        if agent_config is None:
+            return None
+        try:
+            from ..source_system_config import resolve_query_retry_config
+
+            running = getattr(agent_config, "running", None)
+            if running is None:
+                return agent_config
+            query_retry = getattr(running, "query_retry", None)
+            if query_retry is None:
+                return agent_config
+            resolved = resolve_query_retry_config(query_retry)
+            if hasattr(agent_config, "model_copy"):
+                return agent_config.model_copy(
+                    update={
+                        "running": running.model_copy(
+                            update={"query_retry": resolved},
+                        ),
+                    },
+                )
+            setattr(running, "query_retry", resolved)
+        except Exception:
+            return agent_config
+        return agent_config
 
     async def _add_retry_notice_to_memory(
         self,
@@ -3845,6 +4287,11 @@ class AgentRunner(Runner):
         )
 
         trace_id = await self._start_query_trace(request, msgs)
+        runtime_claims_context = runtime_invocation_claims_context(
+            session_id=session_id,
+            trace_id=trace_id,
+        )
+        runtime_claims_context.__enter__()
         outcome = _QueryTurnOutcome()
 
         # ── Query 级别重试循环 ──
@@ -3913,36 +4360,11 @@ class AgentRunner(Runner):
                         max_retry_attempts,
                         e,
                     ):
-                        if getattr(request, "channel", DEFAULT_CHANNEL) == (
-                            DEFAULT_CHANNEL
-                        ):
-                            detail = extract_model_call_failure_detail(e)
-                            if detail is not None:
-                                logger.warning(
-                                    "Console model call failed after final "
-                                    "attempt: kind=%s status=%s truncated=%s",
-                                    detail.kind.value,
-                                    detail.provider_status,
-                                    detail.truncated,
-                                )
-                                await self._end_trace_if_needed(
-                                    trace_id,
-                                    TraceStatus.ERROR,
-                                    error=detail.message,
-                                )
-                                try:
-                                    await self._persist_model_call_failed_detail(
-                                        request=request,
-                                        detail=detail,
-                                    )
-                                except Exception:
-                                    logger.warning(
-                                        "Failed to persist model-call "
-                                        "failure detail for history",
-                                        exc_info=True,
-                                    )
-                                raise ModelCallFailedException(detail) from e
-
+                        await self._raise_console_model_call_failed_if_needed(
+                            request=request,
+                            exc=e,
+                            trace_id=trace_id,
+                        )
                         await self._handle_query_error(
                             request=request,
                             exc=e,
@@ -3962,6 +4384,14 @@ class AgentRunner(Runner):
                     ):
                         yield msg, last
         finally:
+            try:
+                runtime_claims_context.__exit__(None, None, None)
+            except ValueError:
+                logger.debug(
+                    "Skipped runtime invocation claims context reset from a "
+                    "different async context",
+                    exc_info=True,
+                )
             try:
                 reset_current_file_url_network(file_url_network_token)
             except ValueError:
@@ -4185,9 +4615,10 @@ class AgentRunner(Runner):
 
         current_agent_state = agent.state_dict()
         stripped_count = 0
+        deduped_external_approvals = 0
 
         def _merge(existing_state: dict[str, Any]) -> dict[str, Any]:
-            nonlocal stripped_count
+            nonlocal stripped_count, deduped_external_approvals
             state_modules: dict[str, Any] = (
                 dict(existing_state)
                 if isinstance(existing_state, dict)
@@ -4212,6 +4643,11 @@ class AgentRunner(Runner):
             stripped_count = _strip_internal_follow_up_messages_from_state(
                 state_modules["agent"],
             )
+            deduped_external_approvals = (
+                _dedupe_external_approval_messages_from_state(
+                    state_modules["agent"],
+                )
+            )
             return state_modules
 
         await self.session.mutate_session_state(
@@ -4222,8 +4658,10 @@ class AgentRunner(Runner):
         )
         logger.info(
             "Saved session state with stripped_internal_follow_ups=%s "
+            "deduped_external_approvals=%s "
             "(session_id=%s)",
             stripped_count,
+            deduped_external_approvals,
             session_id,
         )
 

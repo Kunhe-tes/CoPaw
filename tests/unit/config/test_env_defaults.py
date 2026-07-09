@@ -13,6 +13,7 @@ from swe.config.envs import (
     get_current_env,
     load_env_defaults,
 )
+from swe.env_defaults import get_system_configuration_env_keys
 
 
 @pytest.fixture(autouse=True)
@@ -109,3 +110,11 @@ class TestEnvDefaultsLoader:
         result = load_env_defaults("dev")
 
         assert result == {}
+
+    def test_system_configuration_env_keys_include_packaged_defaults(self):
+        """System configuration keys should cover packaged env JSON keys."""
+        keys = get_system_configuration_env_keys()
+
+        assert "SWE_DB_ACCESS" in keys
+        assert "SWE_ZHAOHU_CLIENT_SECRET_POSEIDON" in keys
+        assert "SWE_WORKING_DIR" not in keys

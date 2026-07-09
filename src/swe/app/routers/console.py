@@ -34,6 +34,48 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/console", tags=["console"])
 
 MAX_UPLOAD_BYTES = 10 * 1024 * 1024
+DENIED_CHAT_ATTACHMENT_EXECUTABLE_EXTENSIONS = frozenset(
+    {
+        ".py",
+        ".pyw",
+        ".java",
+        ".class",
+        ".jar",
+        ".js",
+        ".mjs",
+        ".cjs",
+        ".jsx",
+        ".ts",
+        ".tsx",
+        ".sh",
+        ".bash",
+        ".zsh",
+        ".fish",
+        ".ps1",
+        ".bat",
+        ".cmd",
+        ".php",
+        ".rb",
+        ".pl",
+        ".lua",
+        ".go",
+        ".rs",
+        ".c",
+        ".cc",
+        ".cpp",
+        ".cxx",
+        ".h",
+        ".hpp",
+        ".cs",
+        ".kt",
+        ".kts",
+        ".swift",
+        ".exe",
+        ".dll",
+        ".so",
+        ".dylib",
+    },
+)
 _RECONNECT_ATTACH_ATTEMPTS = 10
 _RECONNECT_ATTACH_RETRY_DELAY_SECONDS = 0.1
 _CONSOLE_SSE_HEARTBEAT_SECONDS = 15
@@ -371,6 +413,12 @@ def _safe_filename(name: str) -> str:
     """Safe basename, alphanumeric/./-/_, max 200 chars."""
     base = Path(name).name if name else "file"
     return re.sub(r"[^\w.\-]", "_", base)[:200] or "file"
+
+
+def _has_denied_chat_attachment_extension(filename: str | None) -> bool:
+    """Return True when the outer filename extension is denied."""
+    suffix = Path(filename or "").suffix.lower()
+    return suffix in DENIED_CHAT_ATTACHMENT_EXECUTABLE_EXTENSIONS
 
 
 def _extract_content_parts_from_mapping(request_data: dict) -> list[Any]:
@@ -822,6 +870,22 @@ async def _prepare_console_chat_queue(
     return queue, chat.id, None
 
 
+def _console_chat_stream_headers(
+    *,
+    session_id: str,
+    msgid: str | None,
+) -> dict[str, str]:
+    headers = {
+        "Cache-Control": "no-cache",
+        "Connection": "keep-alive",
+        "X-Accel-Buffering": "no",
+    }
+    if msgid:
+        headers["X-Swe-Msgid"] = msgid
+        headers["X-Swe-Sessionid"] = session_id
+    return headers
+
+
 @router.post(
     "/chat",
     status_code=200,
@@ -869,18 +933,29 @@ async def post_console_chat(
     )
     tracker = workspace.task_tracker
 
+    is_reconnect = (
+        isinstance(raw_request_data, dict)
+        and raw_request_data.get("reconnect") is True
+    )
+    msgid: str | None = None
+    if not is_reconnect:
+        msgid = str(uuid.uuid4())
+        native_payload["meta"]["msgid"] = msgid
+
     queue, run_key, short_circuit = await _prepare_console_chat_queue(
         workspace=workspace,
         tracker=tracker,
         console_channel=console_channel,
         native_payload=native_payload,
         session_id=session_id,
-        is_reconnect=(
-            isinstance(request_data, dict)
-            and request_data.get("reconnect") is True
-        ),
+        is_reconnect=is_reconnect,
     )
     if short_circuit is not None:
+        for key, value in _console_chat_stream_headers(
+            session_id=session_id,
+            msgid=msgid,
+        ).items():
+            short_circuit.headers[key] = value
         return short_circuit
     if queue is None:
         raise HTTPException(
@@ -906,11 +981,10 @@ async def post_console_chat(
     return StreamingResponse(
         _stream_with_keepalive(event_generator()),
         media_type="text/event-stream",
-        headers={
-            "Cache-Control": "no-cache",
-            "Connection": "keep-alive",
-            "X-Accel-Buffering": "no",
-        },
+        headers=_console_chat_stream_headers(
+            session_id=session_id,
+            msgid=msgid,
+        ),
     )
 
 
@@ -935,6 +1009,12 @@ async def post_console_upload(
     file: UploadFile = File(..., description="File to attach"),
 ) -> dict:
     """Save to console channel media_dir."""
+
+    if _has_denied_chat_attachment_extension(file.filename):
+        raise HTTPException(
+            status_code=400,
+            detail="Unsupported file type for chat attachment upload",
+        )
 
     workspace = await get_agent_for_request(request)
     console_channel = await workspace.channel_manager.get_channel("console")

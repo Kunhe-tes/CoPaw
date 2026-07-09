@@ -27,7 +27,7 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 # How often to poll (seconds)
-DEFAULT_POLL_INTERVAL = 2.0
+DEFAULT_POLL_INTERVAL = 10.0
 
 
 def _heartbeat_hash(hb: Optional[HeartbeatConfig]) -> int:

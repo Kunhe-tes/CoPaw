@@ -56,6 +56,7 @@ class ExtractedSkillFeatures:
     trigger_keywords: list[str] = field(default_factory=list)
     description_keywords: list[str] = field(default_factory=list)
     file_extensions: list[str] = field(default_factory=list)
+    observed_file_extensions: list[str] = field(default_factory=list)
     mcp_servers: list[str] = field(default_factory=list)
     uses_tools: list[str] = field(default_factory=list)
     is_conversational: bool = False
@@ -241,6 +242,112 @@ class SkillFeatureExtractor:
         },
     )
 
+    _IMPLEMENTATION_EXTENSIONS = frozenset(
+        {
+            ".py",
+            ".md",
+            ".json",
+            ".yaml",
+            ".yml",
+            ".txt",
+            ".sh",
+            ".bat",
+            ".ps1",
+        },
+    )
+
+    _IMPLEMENTATION_SECTION_KEYWORDS = (
+        "目录结构",
+        "directory structure",
+        "脚本说明",
+        "script",
+        "scripts",
+        "steps",
+        "步骤",
+    )
+
+    _INPUT_CONTEXT_PATTERNS = (
+        r"\binput\b",
+        r"\binputs\b",
+        r"\bupload(?:ed)?\b",
+        r"\bsource\b",
+        r"\bsources\b",
+        r"\bformat(?:s)?\b",
+        r"\bsupport(?:s|ed|ing)?\b",
+        r"\baccept(?:s|ed|ing)?\b",
+        r"\bhandle(?:s|d|ing)?\b",
+        r"\bprocess(?:es|ed|ing)?\b",
+        r"\bparse(?:s|d|ing)?\b",
+        r"\bread(?:s|ing)?\b",
+        r"\bimport(?:s|ed|ing)?\b",
+        "输入",
+        "上传",
+        "源文件",
+        "原始文件",
+        "待处理",
+        "格式",
+        "支持",
+        "处理",
+        "解析",
+        "读取",
+        "导入",
+    )
+
+    _IMPLEMENTATION_REFERENCE_KEYWORDS = (
+        "运行",
+        "执行",
+        "使用",
+        "阅读",
+        "run",
+        "python ",
+        "script",
+        "脚本",
+    )
+
+    _NON_INPUT_SECTION_KEYWORDS = (
+        "installation",
+        "setup",
+        "workspace structure",
+        "directory structure",
+        "目录结构",
+        "脚本说明",
+        "script",
+        "scripts",
+        "step",
+        "steps",
+        "metadata",
+        "reference",
+        "references",
+        "example",
+        "examples",
+        "template",
+        "templates",
+        "workflow",
+        "integration",
+        "promotion",
+        "resolution",
+        "manual",
+        "hook",
+        "gitignore",
+    )
+
+    _NON_INPUT_LINE_KEYWORDS = (
+        "http://",
+        "https://",
+        "git clone",
+        "path/to/",
+        "related files",
+        "lock file",
+        "specification",
+        "workspace",
+        "metadata",
+        "reference",
+        "template",
+        "example",
+        "e.g.",
+        "readme",
+    )
+
     def __init__(
         self,
         min_keyword_length: int = 2,
@@ -331,8 +438,12 @@ class SkillFeatureExtractor:
             body_content,
         )
 
-        # Extract file extensions from body
-        features.file_extensions = self._extract_file_extensions(body_content)
+        # Extract input-like file extensions while separating implementation
+        # artifacts such as script names, step docs, and config files.
+        (
+            features.file_extensions,
+            features.observed_file_extensions,
+        ) = self._extract_file_extensions(body_content)
 
         # Extract MCP server references
         features.mcp_servers = self._extract_mcp_servers(body_content)
@@ -342,11 +453,12 @@ class SkillFeatureExtractor:
 
         logger.debug(
             "Extracted features for '%s': %d trigger_kw, %d desc_kw, "
-            "%d ext, %d mcp, conversational=%s",
+            "%d ext, %d observed_ext, %d mcp, conversational=%s",
             skill_name,
             len(features.trigger_keywords),
             len(features.description_keywords),
             len(features.file_extensions),
+            len(features.observed_file_extensions),
             len(features.mcp_servers),
             features.is_conversational,
         )
@@ -499,26 +611,159 @@ class SkillFeatureExtractor:
     def _extract_file_extensions(
         self,
         body_content: str,
-    ) -> list[str]:
+    ) -> tuple[list[str], list[str]]:
         """Extract file extensions from content patterns.
 
         Args:
             body_content: Body content after frontmatter
 
         Returns:
-            List of file extensions (with dot)
+            Tuple of (input_file_extensions, observed_file_extensions)
         """
-        extensions: set[str] = set()
+        input_extensions: set[str] = set()
+        observed_extensions: set[str] = set()
 
-        matches = _FILE_EXTENSION_PATTERN.findall(body_content)
-        for ext_part in matches:
-            # ext_part is the extension part without the dot
-            ext = "." + ext_part.lower()
-            # Filter valid extensions (typically 1-4 chars)
-            if 1 <= len(ext) <= 5:
-                extensions.add(ext)
+        for match in _FILE_EXTENSION_PATTERN.finditer(body_content):
+            ext = "." + match.group(1).lower()
+            if not (1 <= len(ext) <= 5):
+                continue
 
-        return sorted(extensions)
+            token = match.group(0).strip()
+            if self._should_ignore_extension_token(token):
+                continue
+            line = self._extract_line_for_position(body_content, match.start())
+            section_header = self._find_nearest_section_header(
+                body_content,
+                match.start(),
+            )
+            is_input_like = self._is_input_like_extension_reference(
+                ext,
+                token,
+                line,
+                section_header,
+            )
+
+            if is_input_like:
+                input_extensions.add(ext)
+            else:
+                observed_extensions.add(ext)
+
+        return sorted(input_extensions), sorted(observed_extensions)
+
+    def _should_ignore_extension_token(self, token: str) -> bool:
+        """过滤 IP 地址/纯数字片段等伪扩展名匹配。"""
+        base_name, _, _ = token.partition(".")
+        return bool(base_name) and base_name.isdigit()
+
+    def _extract_line_for_position(
+        self,
+        text: str,
+        position: int,
+    ) -> str:
+        """Return the logical line containing the given character position."""
+        line_start = text.rfind("\n", 0, position) + 1
+        line_end = text.find("\n", position)
+        if line_end == -1:
+            line_end = len(text)
+        return text[line_start:line_end].strip()
+
+    def _find_nearest_section_header(
+        self,
+        text: str,
+        position: int,
+    ) -> str:
+        """Find the nearest markdown section header before the position."""
+        prefix = text[:position]
+        headers = re.findall(r"^#{2,6}\s+(.+)$", prefix, re.MULTILINE)
+        if not headers:
+            return ""
+        return headers[-1].strip().lower()
+
+    def _is_input_like_extension_reference(
+        self,
+        ext: str,
+        token: str,
+        line: str,
+        section_header: str,
+    ) -> bool:
+        """Judge whether an extension reference describes input artifacts."""
+        token_lower = token.lower()
+        line_lower = line.lower()
+        has_path_hint = any(
+            marker in token_lower or marker in line_lower
+            for marker in (
+                "/",
+                "\\",
+                "scripts/",
+                "steps/",
+                "scripts\\",
+                "steps\\",
+                "├──",
+                "└──",
+            )
+        )
+        in_impl_section = any(
+            keyword in section_header
+            for keyword in self._IMPLEMENTATION_SECTION_KEYWORDS
+        )
+        is_impl_reference = any(
+            keyword in line_lower or keyword in section_header
+            for keyword in self._IMPLEMENTATION_REFERENCE_KEYWORDS
+        )
+        in_non_input_section = any(
+            keyword in section_header
+            for keyword in self._NON_INPUT_SECTION_KEYWORDS
+        )
+        has_non_input_line_signal = any(
+            keyword in line_lower for keyword in self._NON_INPUT_LINE_KEYWORDS
+        )
+        has_input_context = self._has_input_context(
+            line_lower=line_lower,
+            section_header=section_header,
+        )
+        has_cli_input_flag = any(
+            marker in line_lower
+            for marker in (
+                "--input",
+                "--source",
+                "--file",
+                "--files",
+            )
+        )
+
+        if has_cli_input_flag:
+            return ext not in self._IMPLEMENTATION_EXTENSIONS
+
+        if is_impl_reference:
+            return False
+
+        if in_impl_section or in_non_input_section:
+            return False
+
+        if has_non_input_line_signal:
+            return False
+
+        if has_input_context and not has_path_hint:
+            return True
+
+        return False
+
+    def _has_input_context(
+        self,
+        *,
+        line_lower: str,
+        section_header: str,
+    ) -> bool:
+        """判断行文是否在描述用户输入或待处理文件。"""
+        searchable = f"{section_header}\n{line_lower}"
+        return any(
+            (
+                pattern in searchable
+                if "\\" not in pattern and not pattern.startswith(r"\b")
+                else re.search(pattern, searchable) is not None
+            )
+            for pattern in self._INPUT_CONTEXT_PATTERNS
+        )
 
     def _extract_mcp_servers(
         self,
@@ -609,6 +854,17 @@ class SkillFeatureExtractor:
                 set(getattr(existing_feature, "file_extensions", []) or [])
                 | set(extracted.file_extensions),
             )
+            merged_observed_extensions = list(
+                set(
+                    getattr(
+                        existing_feature,
+                        "observed_file_extensions",
+                        [],
+                    )
+                    or [],
+                )
+                | set(extracted.observed_file_extensions),
+            )
             merged_keywords = list(
                 set(getattr(existing_feature, "keywords", []) or [])
                 | set(keywords),
@@ -627,6 +883,7 @@ class SkillFeatureExtractor:
             return SkillFeature(
                 skill_name=skill_name,
                 file_extensions=merged_extensions,
+                observed_file_extensions=merged_observed_extensions,
                 keywords=merged_keywords,
                 tools_hint=merged_tools_hint,
                 tool_patterns=getattr(existing_feature, "tool_patterns", [])
@@ -640,6 +897,7 @@ class SkillFeatureExtractor:
         return SkillFeature(
             skill_name=skill_name,
             file_extensions=extracted.file_extensions,
+            observed_file_extensions=extracted.observed_file_extensions,
             keywords=keywords,
             tools_hint=extracted.uses_tools,
             tool_patterns=[],

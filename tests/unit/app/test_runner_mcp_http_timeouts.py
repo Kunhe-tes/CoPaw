@@ -113,7 +113,13 @@ async def test_http_mcp_connect_uses_merged_headers(
             "X-Static": "static",
             "Authorization": "Bearer test-token",
             "x-swe-tenant-id": "tenant-a",
+            "tenantid": "tenant-a",
             "x-swe-source-id": "source-a",
+            "sourceid": "source-a",
+            "x-swe-runtime-scope-id": encode_scope_id(
+                "tenant-a",
+                "source-a",
+            ),
         }
         if transport == "streamable_http":
             assert captured["http_client_kwargs"]["headers"] == (
@@ -166,8 +172,15 @@ async def test_create_streamable_http_mcp_client_uses_explicit_httpx_timeouts(
             "X-Static": "static",
             "Authorization": "Bearer test-token",
             "x-swe-tenant-id": "tenant-a",
+            "tenantid": "tenant-a",
             "x-swe-source-id": "source-a",
+            "sourceid": "source-a",
+            "x-swe-runtime-scope-id": encode_scope_id(
+                "tenant-a",
+                "source-a",
+            ),
             "x-swe-session-id": "session-1",
+            "sessionid": "session-1",
         },
         "timeout": runner_module._MCP_HTTP_TIMEOUT_SECONDS,
         "sse_read_timeout": runner_module._MCP_HTTP_SSE_READ_TIMEOUT_SECONDS,
@@ -226,8 +239,12 @@ async def test_create_streamable_http_mcp_client_injects_trace_id_header(
     assert captured["stateful_client_kwargs"]["headers"] == {
         "X-Static": "static",
         "x-swe-tenant-id": "tenant-a",
+        "tenantid": "tenant-a",
         "x-swe-source-id": "source-a",
+        "sourceid": "source-a",
+        "x-swe-runtime-scope-id": encode_scope_id("tenant-a", "source-a"),
         "x-swe-session-id": "session-1",
+        "sessionid": "session-1",
         "x-swe-trace-id": "trace-1",
         "traceid": "trace-1",
     }
@@ -318,7 +335,10 @@ async def test_http_mcp_headers_resolve_explicit_tenant_env_references(
         "Authorization": "Bearer tenant-secret",
         "X-Literal": "${MCP_TOKEN}",
         "x-swe-tenant-id": "tenant-a",
+        "tenantid": "tenant-a",
         "x-swe-source-id": "source-a",
+        "sourceid": "source-a",
+        "x-swe-runtime-scope-id": encode_scope_id("tenant-a", "source-a"),
     }
     assert "MCP_TOKEN" not in os.environ
 
@@ -368,5 +388,8 @@ async def test_http_mcp_env_reference_resolution_is_source_scoped(
     assert captured["stateful_client_kwargs"]["headers"] == {
         "Authorization": "Bearer source-b",
         "x-swe-tenant-id": "tenant-a",
+        "tenantid": "tenant-a",
         "x-swe-source-id": "source-b",
+        "sourceid": "source-b",
+        "x-swe-runtime-scope-id": encode_scope_id("tenant-a", "source-b"),
     }

@@ -1,7 +1,9 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import {
   Button,
+  Input,
   Modal,
+  Select,
   Space,
   Table,
   Tag,
@@ -20,6 +22,38 @@ import {
 import type { MySkill } from "../../api/modules/mySkills";
 
 const { Text } = Typography;
+const DEFAULT_OWNER_LOOKUP_PAGE_SIZE = 8;
+const OWNER_LOOKUP_PAGE_SIZE_OPTIONS = [8, 20, 50, 100];
+
+function normalizeSearchKeyword(value: string): string {
+  return value.trim().toLowerCase();
+}
+
+function normalizeBbkId(value?: string | null): string {
+  return String(value || "").trim();
+}
+
+function buildBbkIdOptions<T extends { bbk_id?: string | null }>(
+  items: T[],
+): { label: string; value: string }[] {
+  return Array.from(
+    new Set(items.map((item) => normalizeBbkId(item.bbk_id)).filter(Boolean)),
+  )
+    .sort((a, b) => a.localeCompare(b, "zh-CN", { numeric: true }))
+    .map((value) => ({ label: value, value }));
+}
+
+function matchesOwnerSearch(row: SkillOwnerRow, keyword: string): boolean {
+  if (!keyword) return true;
+  return [row.tenant_name, row.tenant_id].some((value) =>
+    String(value || "").toLowerCase().includes(keyword),
+  );
+}
+
+function matchesBbkId(row: SkillOwnerRow, selectedBbkId: string): boolean {
+  if (!selectedBbkId) return true;
+  return normalizeBbkId(row.bbk_id) === selectedBbkId;
+}
 
 interface SkillOwnerLookupModalProps {
   open: boolean;
@@ -64,6 +98,21 @@ export function SkillOwnerLookupModal({
   const [tenantCount, setTenantCount] = useState(0);
   const [failedCount, setFailedCount] = useState(0);
   const [rows, setRows] = useState<SkillOwnerRow[]>([]);
+  const [tablePage, setTablePage] = useState(1);
+  const [tablePageSize, setTablePageSize] = useState(
+    DEFAULT_OWNER_LOOKUP_PAGE_SIZE,
+  );
+  const [searchInputText, setSearchInputText] = useState("");
+  const [appliedSearchText, setAppliedSearchText] = useState("");
+  const [selectedBbkId, setSelectedBbkId] = useState("");
+  const filteredRows = useMemo(() => {
+    const keyword = normalizeSearchKeyword(appliedSearchText);
+    return rows.filter(
+      (row) =>
+        matchesOwnerSearch(row, keyword) && matchesBbkId(row, selectedBbkId),
+    );
+  }, [rows, appliedSearchText, selectedBbkId]);
+  const bbkIdOptions = useMemo(() => buildBbkIdOptions(rows), [rows]);
 
   const loadOwners = useCallback(async () => {
     if (!open || !skill || !sourceId) {
@@ -94,10 +143,24 @@ export function SkillOwnerLookupModal({
       setRows([]);
       setTenantCount(0);
       setFailedCount(0);
+      setTablePage(1);
+      setTablePageSize(DEFAULT_OWNER_LOOKUP_PAGE_SIZE);
+      setSearchInputText("");
+      setAppliedSearchText("");
+      setSelectedBbkId("");
       return;
     }
+    setTablePage(1);
+    setSearchInputText("");
+    setAppliedSearchText("");
+    setSelectedBbkId("");
     void loadOwners();
   }, [open, loadOwners]);
+
+  useEffect(() => {
+    const maxPage = Math.max(1, Math.ceil(filteredRows.length / tablePageSize));
+    setTablePage((current) => Math.min(current, maxPage));
+  }, [filteredRows.length, tablePageSize]);
 
   return (
     <Modal
@@ -122,12 +185,54 @@ export function SkillOwnerLookupModal({
             <Text type="warning">读取失败：{failedCount}</Text>
           )}
         </div>
+        <Space wrap>
+          <Input.Search
+            allowClear
+            enterButton="搜索"
+            placeholder="搜索用户姓名或 ID"
+            value={searchInputText}
+            onChange={(event) => {
+              setSearchInputText(event.target.value);
+            }}
+            onSearch={(value) => {
+              setAppliedSearchText(value);
+              setTablePage(1);
+            }}
+            style={{ width: 320, maxWidth: "100%" }}
+          />
+          <Select
+            allowClear
+            placeholder="筛选机构"
+            options={bbkIdOptions}
+            value={selectedBbkId || undefined}
+            onChange={(value) => {
+              setSelectedBbkId(value || "");
+              setTablePage(1);
+            }}
+            showSearch
+            optionFilterProp="label"
+            style={{ width: 180, maxWidth: "100%" }}
+          />
+        </Space>
         <Table
           rowKey="tenant_id"
           loading={loading}
           size="small"
-          dataSource={rows}
-          pagination={{ pageSize: 8, hideOnSinglePage: true }}
+          dataSource={filteredRows}
+          pagination={{
+            current: tablePage,
+            pageSize: tablePageSize,
+            hideOnSinglePage: true,
+            showSizeChanger: true,
+            pageSizeOptions: OWNER_LOOKUP_PAGE_SIZE_OPTIONS,
+            showTotal: (total) => `共 ${total} 个用户`,
+            onChange: (nextPage, nextPageSize) => {
+              setTablePage(nextPage);
+              setTablePageSize(
+                nextPageSize || DEFAULT_OWNER_LOOKUP_PAGE_SIZE,
+              );
+            },
+          }}
           locale={{ emptyText: "当前没有用户拥有同名技能" }}
           columns={[
             {

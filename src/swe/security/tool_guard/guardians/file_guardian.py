@@ -28,6 +28,13 @@ _TOOL_FILE_PARAMS: dict[str, tuple[str, ...]] = {
     "write_text_file": ("file_path", "path"),
 }
 
+_SHELL_COMMAND_TOOLS = frozenset(
+    {
+        "execute_shell_command",
+        "start_background_process",
+    },
+)
+
 _DEFAULT_DENY_DIRS: list[str] = [str(SECRET_DIR) + "/"]
 
 _SHELL_REDIRECT_OPERATORS = frozenset(
@@ -307,7 +314,7 @@ class FilePathToolGuardian(BaseToolGuardian):
         findings: list[GuardFinding] = []
 
         # Shell commands: extract paths from the command string.
-        if tool_name == "execute_shell_command":
+        if tool_name in _SHELL_COMMAND_TOOLS:
             command = params.get("command")
             if not isinstance(command, str) or not command.strip():
                 return findings

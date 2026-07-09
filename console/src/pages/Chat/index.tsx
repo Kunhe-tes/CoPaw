@@ -5,6 +5,7 @@ import {
   IAgentScopeRuntimeWebUIOptions,
   type IAgentScopeRuntimeWebUISenderOptions,
   type IAgentScopeRuntimeWebUIRef,
+  useChatAnywhereSessions,
   useChatAnywhereSessionsState,
 } from "@/components/agentscope-chat";
 import AgentScopeRuntimeRequestCard from "@/components/agentscope-chat/AgentScopeRuntimeWebUI/core/AgentScopeRuntime/Request/Card";
@@ -23,7 +24,7 @@ import { flushSync } from "react-dom";
 import { Button, Modal, Result, Tooltip } from "antd";
 import { useAppMessage } from "../../hooks/useAppMessage";
 import { ExclamationCircleOutlined, SettingOutlined } from "@ant-design/icons";
-import { SparkCopyLine } from "@agentscope-ai/icons";
+import { SparkAttachmentLine, SparkCopyLine } from "@agentscope-ai/icons";
 import { useTranslation } from "react-i18next";
 import { useLocation, useNavigate } from "react-router-dom";
 import sessionApi from "./sessionApi";
@@ -88,20 +89,22 @@ import {
   shouldMarkTaskReadOnOpen,
 } from "./taskJobs";
 import {
-  CronJobFormBody,
   DEFAULT_FORM_VALUES,
 } from "../Control/CronJobs/components";
+import { buildCronJobFormValues } from "../Control/CronJobs/helpers";
 import {
-  buildCronJobFormValues,
-} from "../Control/CronJobs/helpers";
-import { useExecutionModelOptions } from "@/hooks/useExecutionModelOptions";
-import {
+  extractTaskContentText,
   submitCronTaskEdit,
   type CronTaskEditFormValues,
 } from "./taskEditSubmit";
+import ChatTaskEditFormBody from "./components/ChatTaskEditFormBody";
 import { shouldRefreshCurrentTaskMessages } from "./taskMessageRefresh";
 import { resolveCurrentFileUrlNetwork } from "./fileUrlNetwork";
 import { matchesResolvedChatId } from "./sessionApi/resolvedSessionMapping";
+import {
+  CHAT_ATTACHMENT_ACCEPT_HINT,
+  uploadChatAttachment,
+} from "./attachmentUploadPolicy";
 
 import RuntimeRequestCard from "./components/RuntimeRequestCard";
 import { FOLLOW_UP_SUBMIT_FAILED_EVENT } from "@/components/agentscope-chat/AgentScopeRuntimeWebUI/core/Chat/hooks/followUpSubmit";
@@ -163,6 +166,13 @@ import { isChatTaskProgressEnabled } from "./taskProgressConfig";
 const CHAT_ATTACHMENT_MAX_MB = 10;
 const TASK_RUNNING_POLL_MS = 30_000;
 
+function useExternalApprovalResolvedRefresh() {
+  const { refreshSession } = useChatAnywhereSessions();
+  return useCallback(() => {
+    void refreshSession();
+  }, [refreshSession]);
+}
+
 const chatCardRenderers = {
   AgentScopeRuntimeRequestCard: (props: {
     data: ChatRuntimeRequestCardData;
@@ -188,12 +198,19 @@ const chatCardRenderers = {
       />
     );
   },
-  ApprovalAction: (props: { data: ChatApprovalActionCardData }) => (
-    <ApprovalActionCard {...props} />
-  ),
+  ApprovalAction: (props: { data: ChatApprovalActionCardData }) => {
+    const onExternalApprovalResolved = useExternalApprovalResolvedRefresh();
+    return (
+      <ApprovalActionCard
+        {...props}
+        onExternalApprovalResolved={onExternalApprovalResolved}
+      />
+    );
+  },
   PlanInteraction: () => null,
   TaskRunGroupCard: (props: { data: ChatTaskRunGroupCardData }) => {
     const feedback = useChatFeedbackRenderContext();
+    const onExternalApprovalResolved = useExternalApprovalResolvedRefresh();
     return (
       <TaskRunGroupCard
         {...props}
@@ -201,6 +218,7 @@ const chatCardRenderers = {
         feedbackLookup={feedback.feedbackLookup}
         loadingFeedback={feedback.feedbackLookupPending}
         onFeedbackSaved={feedback.onFeedbackSaved}
+        onExternalApprovalResolved={onExternalApprovalResolved}
         sessionId={feedback.feedbackSessionId}
         task={feedback.feedbackTask}
       />
@@ -532,6 +550,10 @@ function ActivePlanModeControl({
   );
 }
 
+type AttachmentTriggerProps = {
+  disabled?: boolean;
+};
+
 export default function ChatPage() {
   const { t } = useTranslation();
   const navigate = useNavigate();
@@ -568,11 +590,6 @@ export default function ChatPage() {
     null,
   );
   const [taskEditSaving, setTaskEditSaving] = useState(false);
-  const {
-    loading: executionModelLoading,
-    options: executionModelOptions,
-    tenantDefaultLabel,
-  } = useExecutionModelOptions(true);
   const {
     sessions,
     setSessions,
@@ -873,6 +890,9 @@ export default function ChatPage() {
   const [feedbackItems, setFeedbackItems] = useState<FeedbackRecord[]>([]);
   const [feedbackLoading, setFeedbackLoading] = useState(false);
   const feedbackUserId = useIframeStore((state) => state.userId);
+  const skipPreviewTracking = useIframeStore(
+    (state) => state.skipPreviewTracking,
+  );
   const feedbackAllowed = useMemo(
     () => isResponseFeedbackUserAllowed(feedbackUserId),
     [feedbackUserId],
@@ -1397,9 +1417,16 @@ export default function ChatPage() {
 
   const handleTaskEdit = useCallback(
     (task: CronJobSpecOutput) => {
+      const formValues = buildCronJobFormValues(task);
       setEditingTask(task);
       taskEditForm.setFieldsValue(
-        buildCronJobFormValues(task) as Parameters<
+        {
+          ...formValues,
+          taskContentText:
+            task.task_type === "text"
+              ? formValues.text || ""
+              : extractTaskContentText(formValues.request?.input),
+        } as Parameters<
           typeof taskEditForm.setFieldsValue
         >[0],
       );
@@ -1430,7 +1457,9 @@ export default function ChatPage() {
         void refreshJobs();
       } catch (error) {
         console.error("Failed to update cron task from chat sidebar:", error);
-        message.error(error instanceof SyntaxError ? "任务配置格式不正确" : "保存失败");
+        message.error(
+          error instanceof SyntaxError ? "任务配置格式不正确" : "保存失败",
+        );
       } finally {
         setTaskEditSaving(false);
       }
@@ -1654,41 +1683,17 @@ export default function ChatPage() {
       onError?: (e: Error) => void;
       onProgress?: (e: { percent?: number }) => void;
     }) => {
-      const { file, onSuccess, onError, onProgress } = options;
-      try {
-        // Warn when model has no multimodal support
-        if (!multimodalCaps.supportsMultimodal) {
-          message.warning(t("chat.attachments.multimodalWarning"));
-        } else if (
-          multimodalCaps.supportsImage &&
-          !multimodalCaps.supportsVideo &&
-          !file.type.startsWith("image/")
-        ) {
-          // Warn (not block) when only image is supported
-          message.warning(t("chat.attachments.imageOnlyWarning"));
-        }
-        const sizeMb = file.size / 1024 / 1024;
-        const isWithinLimit = sizeMb < CHAT_ATTACHMENT_MAX_MB;
-
-        if (!isWithinLimit) {
-          message.error(
-            t("chat.attachments.fileSizeExceeded", {
-              limit: CHAT_ATTACHMENT_MAX_MB,
-              size: sizeMb.toFixed(2),
-            }),
-          );
-          onError?.(new Error(`File size exceeds ${CHAT_ATTACHMENT_MAX_MB}MB`));
-          return;
-        }
-
-        const res = await chatApi.uploadFile(file);
-        onProgress?.({ percent: 100 });
-        onSuccess({ url: chatApi.filePreviewUrl(res.url) });
-      } catch (e) {
-        onError?.(e instanceof Error ? e : new Error(String(e)));
-      }
+      await uploadChatAttachment({
+        ...options,
+        message,
+        t,
+        multimodalCaps,
+        maxUploadMb: CHAT_ATTACHMENT_MAX_MB,
+        uploadFile: chatApi.uploadFile,
+        filePreviewUrl: chatApi.filePreviewUrl,
+      });
     },
-    [multimodalCaps, t],
+    [message, multimodalCaps, t],
   );
 
   // ==================== Drag & drop file upload (Kun He) ====================
@@ -1761,8 +1766,9 @@ export default function ChatPage() {
     () => ({
       cronTaskId: feedbackTask?.cronTaskId || null,
       cronTaskName: feedbackTask?.cronTaskName || null,
+      disableEventRecording: skipPreviewTracking,
     }),
-    [feedbackTask],
+    [feedbackTask, skipPreviewTracking],
   );
 
   const options = useMemo(() => {
@@ -1937,7 +1943,23 @@ export default function ChatPage() {
           senderPrefixNodes.length > 0 ? <>{senderPrefixNodes}</> : undefined,
         allowSpeech: false,
         attachments: {
-          accept: "*/*",
+          trigger: function AttachmentTrigger(props: AttachmentTriggerProps) {
+            const tooltipKey = multimodalCaps.supportsMultimodal
+              ? multimodalCaps.supportsImage && !multimodalCaps.supportsVideo
+                ? "chat.attachments.tooltipImageOnly"
+                : "chat.attachments.tooltip"
+              : "chat.attachments.tooltipNoMultimodal";
+            return (
+              <Tooltip title={t(tooltipKey, { limit: CHAT_ATTACHMENT_MAX_MB })}>
+                <IconButton
+                  disabled={props?.disabled}
+                  icon={<SparkAttachmentLine />}
+                  bordered={false}
+                />
+              </Tooltip>
+            );
+          },
+          accept: CHAT_ATTACHMENT_ACCEPT_HINT,
           customRequest: handleFileUpload,
         },
         placeholder: t("chat.inputPlaceholder"),
@@ -2158,16 +2180,15 @@ export default function ChatPage() {
         <Form
           form={taskEditForm}
           layout="vertical"
-          onFinish={handleTaskEditSubmit}
+          onFinish={() =>
+            handleTaskEditSubmit(
+              taskEditForm.getFieldsValue(true) as CronTaskEditFormValues,
+            )
+          }
           initialValues={DEFAULT_FORM_VALUES}
           className={styles.taskEditForm}
         >
-          <CronJobFormBody
-            form={taskEditForm}
-            executionModelOptions={executionModelOptions}
-            executionModelLoading={executionModelLoading}
-            tenantDefaultModelLabel={tenantDefaultLabel}
-          />
+          <ChatTaskEditFormBody />
         </Form>
       </Modal>
 

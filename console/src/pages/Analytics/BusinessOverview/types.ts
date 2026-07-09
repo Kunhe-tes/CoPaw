@@ -63,6 +63,10 @@ export interface TrendDatum {
   date: string;
   calls: number;
   users: number;
+  read_tasks: number;        // 新增：已读任务数
+  plan_customers: number;    // 新增：查看方案客户数
+  insight_customers: number; // 新增：去洞察客户数
+  phone_customers: number;   // 新增：去电访客户数
 }
 
 export type TimeRange = "day" | "week" | "month" | "custom";

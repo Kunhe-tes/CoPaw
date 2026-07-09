@@ -8,6 +8,7 @@ from urllib.parse import unquote
 
 from fastapi import APIRouter, HTTPException, Query, Request
 
+from ..workspace.tenant_init_source_store import get_tenant_init_source_store
 from .models import (
     HtmlPreviewClickCreateResponse,
     HtmlPreviewClickEventCreate,
@@ -108,6 +109,45 @@ def _get_request_bbk_id(request: Request) -> Optional[str]:
     )
 
 
+async def _resolve_bbk_id_by_user_and_source(
+    user_id: Optional[str],
+    source_id: Optional[str],
+    fallback_bbk_id: Optional[str],
+) -> Optional[str]:
+    """按 user_id 和 source_id 回查 bbk_id，查不到时回退原值。
+
+    这里保持写接口兼容性，避免映射表缺失时直接影响埋点写入。
+    """
+    normalized_user_id = _first_text(user_id)
+    normalized_source_id = _first_text(source_id)
+    normalized_fallback_bbk_id = _first_text(fallback_bbk_id)
+    if not normalized_user_id or not normalized_source_id:
+        return normalized_fallback_bbk_id
+
+    store = get_tenant_init_source_store()
+    if store is None:
+        return normalized_fallback_bbk_id
+
+    try:
+        source_info = await store.get_tenant_source_info(
+            normalized_user_id,
+            normalized_source_id,
+        )
+    except Exception as exc:
+        logger.warning(
+            "回查 HTML 预览埋点 bbk_id 失败: user_id=%s, source_id=%s, error=%s",
+            normalized_user_id,
+            normalized_source_id,
+            exc,
+        )
+        return normalized_fallback_bbk_id
+
+    return _first_text(
+        source_info.get("bbk_id") if isinstance(source_info, dict) else None,
+        normalized_fallback_bbk_id,
+    )
+
+
 @router.post("/events", response_model=HtmlPreviewClickCreateResponse)
 async def create_html_preview_click_event(
     request: Request,
@@ -119,21 +159,29 @@ async def create_html_preview_click_event(
     except RuntimeError as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
 
+    source_id = _first_text(
+        _get_request_source_id(request),
+        event.source_id,
+    )
+    user_id = _first_text(
+        _get_request_user_id(request),
+        event.user_id,
+    )
+    bbk_id = await _resolve_bbk_id_by_user_and_source(
+        user_id,
+        source_id,
+        _first_text(_get_request_bbk_id(request), event.bbk_id),
+    )
+
     enriched = event.model_copy(
         update={
-            "source_id": _first_text(
-                _get_request_source_id(request),
-                event.source_id,
-            ),
-            "user_id": _first_text(
-                _get_request_user_id(request),
-                event.user_id,
-            ),
+            "source_id": source_id,
+            "user_id": user_id,
             "user_name": _first_text(
                 _get_request_user_name(request),
                 event.user_name,
             ),
-            "bbk_id": _first_text(_get_request_bbk_id(request), event.bbk_id),
+            "bbk_id": bbk_id,
             "clicked_at": event.clicked_at or datetime.now(),
         },
     )
@@ -163,16 +211,21 @@ async def create_html_preview_list_snapshot(
     except RuntimeError as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
 
+    source_id = _first_text(
+        _get_request_source_id(request),
+        snapshot.source_id,
+    )
+    user_id = _get_request_user_id(request)
+    bbk_id = await _resolve_bbk_id_by_user_and_source(
+        user_id,
+        source_id,
+        _first_text(_get_request_bbk_id(request), snapshot.bbk_id),
+    )
+
     enriched = snapshot.model_copy(
         update={
-            "source_id": _first_text(
-                _get_request_source_id(request),
-                snapshot.source_id,
-            ),
-            "bbk_id": _first_text(
-                _get_request_bbk_id(request),
-                snapshot.bbk_id,
-            ),
+            "source_id": source_id,
+            "bbk_id": bbk_id,
             "snapshot_at": snapshot.snapshot_at or datetime.now(),
         },
     )

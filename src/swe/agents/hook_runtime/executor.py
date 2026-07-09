@@ -28,6 +28,10 @@ from swe.envs.runtime import (
     build_runtime_env,
     get_tenant_runtime_env_value,
 )
+from swe.runtime_invocation_claims import (
+    apply_runtime_claim_env,
+    build_runtime_claim_headers,
+)
 from swe.agents.model_factory import create_model_and_formatter
 from swe.config.context import tenant_context
 
@@ -159,7 +163,7 @@ async def _execute_http_handler(
     handler: HttpHookHandlerConfig,
     context: HookContext,
 ) -> HookHandlerResult:
-    headers = _build_http_headers(handler, context.effective_tenant_id)
+    headers = _build_http_headers(handler, context)
     try:
         async with httpx.AsyncClient(timeout=handler.timeout) as client:
             response = await client.post(
@@ -458,16 +462,24 @@ def _build_command_handler_env(
     context: HookContext,
 ) -> dict[str, str]:
     """按当前 hook 上下文构造 command handler 子进程 env。"""
-    return build_runtime_env(
+    env = build_runtime_env(
         call_env=handler.env,
         tenant_id=context.effective_tenant_id,
         source_id=context.source_id,
+    )
+    return apply_runtime_claim_env(
+        env,
+        tenant_id=context.tenant_id,
+        source_id=context.source_id,
+        runtime_scope_id=context.effective_tenant_id,
+        session_id=context.session_id,
+        trace_id=context.trace_id,
     )
 
 
 def _build_http_headers(
     handler: HttpHookHandlerConfig,
-    tenant_id: str | None,
+    context: HookContext,
 ) -> dict[str, str]:
     headers = dict(handler.headers)
     if handler.header_secret_refs:
@@ -479,19 +491,33 @@ def _build_http_headers(
             for header_name, secret_name in handler.header_secret_refs.items():
                 value = get_tenant_runtime_env_value(
                     secret_name,
-                    tenant_id=tenant_id,
+                    tenant_id=context.effective_tenant_id,
                 )
                 if value is None:
-                    value = get_tenant_env(secret_name, tenant_id=tenant_id)
+                    value = get_tenant_env(
+                        secret_name,
+                        tenant_id=context.effective_tenant_id,
+                    )
                 if value is not None:
                     headers[header_name] = value
     for env_name in handler.allowed_env_vars:
-        value = get_tenant_runtime_env_value(env_name, tenant_id=tenant_id)
+        value = get_tenant_runtime_env_value(
+            env_name,
+            tenant_id=context.effective_tenant_id,
+        )
         if value is None and env_name in os.environ:
             value = os.environ[env_name]
         if value is not None:
             headers[env_name] = value
-    return headers
+    return build_runtime_claim_headers(
+        headers,
+        include_aliases=False,
+        tenant_id=context.tenant_id,
+        source_id=context.source_id,
+        runtime_scope_id=context.effective_tenant_id,
+        session_id=context.session_id,
+        trace_id=context.trace_id,
+    )
 
 
 def _failure(

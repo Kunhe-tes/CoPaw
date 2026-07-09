@@ -6,7 +6,7 @@ Provides methods for creating and querying subtask records.
 
 import logging
 from datetime import datetime
-from typing import Optional
+from typing import Optional, Tuple
 
 from ...database.connection import get_db_connection
 from ...models.subtask import SubtaskModel, SubtaskCreateResponse
@@ -371,7 +371,7 @@ class QueryService:
             SELECT id, trace_id
             FROM swe_cron_executions
             WHERE async_status IS NULL OR async_status = ''
-            ORDER BY created_at DESC
+            ORDER BY created_at ASC
             LIMIT %s
         """
         rows = await self.db.fetch_all(query, (limit,))
@@ -413,6 +413,68 @@ class QueryService:
             async_status,
         )
         return True
+
+    async def batch_update_execution_async_status(self) -> Tuple[int, int]:
+        """Batch update execution async_status using JOIN with subtasks.
+
+        使用 SQL JOIN 批量更新，高效处理大量数据。
+
+        Returns:
+            Tuple of (success_count, error_count)
+        """
+        if not self.db:
+            return 0, 0
+
+        # 更新 success：没有 pending 子任务且没有 error 子任务
+        success_query = """
+            UPDATE swe_cron_executions e
+            SET async_status = 'success'
+            WHERE (e.async_status IS NULL OR e.async_status = '')
+            AND NOT EXISTS (
+                SELECT 1 FROM swe_cron_subtasks s
+                WHERE s.trace_id = e.trace_id
+                AND (s.status IS NULL OR s.status = '')
+            )
+            AND NOT EXISTS (
+                SELECT 1 FROM swe_cron_subtasks s
+                WHERE s.trace_id = e.trace_id
+                AND s.status IN ('FAIL', 'PART_SUC', 'TIMEOUT')
+            )
+        """
+        await self.db.execute(success_query)
+        success_row = await self.db.fetch_one(
+            "SELECT ROW_COUNT() AS count",
+        )
+        success_count = success_row.get("count", 0) if success_row else 0
+
+        # 更新 error：有 error 子任务且没有 pending 子任务
+        error_query = """
+            UPDATE swe_cron_executions e
+            SET async_status = 'error'
+            WHERE (e.async_status IS NULL OR e.async_status = '')
+            AND EXISTS (
+                SELECT 1 FROM swe_cron_subtasks s
+                WHERE s.trace_id = e.trace_id
+                AND s.status IN ('FAIL', 'PART_SUC', 'TIMEOUT')
+            )
+            AND NOT EXISTS (
+                SELECT 1 FROM swe_cron_subtasks s
+                WHERE s.trace_id = e.trace_id
+                AND (s.status IS NULL OR s.status = '')
+            )
+        """
+        await self.db.execute(error_query)
+        error_row = await self.db.fetch_one(
+            "SELECT ROW_COUNT() AS count",
+        )
+        error_count = error_row.get("count", 0) if error_row else 0
+
+        logger.info(
+            "Batch updated execution async_status: success=%d error=%d",
+            success_count,
+            error_count,
+        )
+        return success_count, error_count
 
 
 # Global service instance

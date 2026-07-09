@@ -10,6 +10,7 @@ from pathlib import Path as PathlibPath
 from typing import List, Literal, Optional
 from copy import deepcopy
 
+import anyio
 from fastapi import (
     APIRouter,
     Body,
@@ -56,11 +57,13 @@ ActiveModelReadScope = Literal["effective", "global", "agent"]
 ActiveModelWriteScope = Literal["global", "agent"]
 
 
-def get_provider_manager(request: Request) -> ProviderManager:
+async def get_provider_manager(request: Request) -> ProviderManager:
     """Get the tenant-specific provider manager.
 
     Ensures tenant provider storage is initialized before returning the manager.
-    This lazy-initializes provider storage on first provider API use.
+    This lazy-initializes provider storage on first provider API use. Cached
+    managers stay on the async hot path so quick model-list requests do not
+    queue behind unrelated sync work in AnyIO's threadpool.
 
     Args:
         request: FastAPI request object
@@ -84,8 +87,14 @@ def get_provider_manager(request: Request) -> ProviderManager:
     provider_tenant_id = ProviderManager._resolve_effective_provider_tenant_id(
         tenant_id,
     )
-    cache_hit_before = provider_tenant_id in ProviderManager._instances
+    cached_instances = (
+        ProviderManager._instances
+        if isinstance(ProviderManager._instances, dict)
+        else {}
+    )
+    cache_hit_before = provider_tenant_id in cached_instances
     root_path = ProviderManager._get_tenant_root_path(provider_tenant_id)
+    request.state.provider_manager_dependency_threadpool_wait_ms = 0
     logger.info(
         "provider_manager_dependency_start path=%s route_tenant_id=%s "
         "provider_tenant_id=%s source_id=%s scope_id=%s cache_hit_before=%s "
@@ -99,7 +108,63 @@ def get_provider_manager(request: Request) -> ProviderManager:
         root_path,
     )
 
-    # Ensure tenant provider storage exists before accessing ProviderManager
+    cached_manager = cached_instances.get(provider_tenant_id)
+    if cached_manager is not None:
+        return _record_provider_manager_dependency_done(
+            request=request,
+            started_at=started_at,
+            resolve_ms=resolve_ms,
+            ensure_ms=0,
+            get_instance_ms=0,
+            threadpool_wait_ms=0,
+            tenant_id=tenant_id,
+            provider_tenant_id=provider_tenant_id,
+            manager=cached_manager,
+            cache_hit_before=cache_hit_before,
+            root_path=root_path,
+            storage_ensure_skipped=True,
+        )
+
+    queued_at = time.perf_counter()
+    return await anyio.to_thread.run_sync(
+        _get_provider_manager_cold_sync,
+        request,
+        started_at,
+        resolve_ms,
+        tenant_id,
+        provider_tenant_id,
+        cache_hit_before,
+        root_path,
+        queued_at,
+    )
+
+
+def _get_provider_manager_cold_sync(
+    request: Request,
+    started_at: float,
+    resolve_ms: int,
+    tenant_id: str,
+    provider_tenant_id: str,
+    cache_hit_before: bool,
+    root_path: PathlibPath,
+    queued_at: float,
+) -> ProviderManager:
+    threadpool_wait_ms = int((time.perf_counter() - queued_at) * 1000)
+    request.state.provider_manager_dependency_threadpool_wait_ms = (
+        threadpool_wait_ms
+    )
+    logger.info(
+        "provider_manager_dependency_threadpool_enter path=%s "
+        "route_tenant_id=%s provider_tenant_id=%s wait_ms=%d "
+        "cache_hit_before=%s root_path=%s",
+        request.url.path,
+        tenant_id,
+        provider_tenant_id,
+        threadpool_wait_ms,
+        cache_hit_before,
+        root_path,
+    )
+
     ensure_started_at = time.perf_counter()
     logger.info(
         "provider_storage_ensure_start path=%s route_tenant_id=%s "
@@ -148,12 +213,77 @@ def get_provider_manager(request: Request) -> ProviderManager:
         manager.tenant_id in ProviderManager._instances,
         root_path,
     )
+    return _record_provider_manager_dependency_done(
+        request=request,
+        started_at=started_at,
+        resolve_ms=resolve_ms,
+        ensure_ms=ensure_ms,
+        get_instance_ms=get_instance_ms,
+        threadpool_wait_ms=threadpool_wait_ms,
+        tenant_id=tenant_id,
+        provider_tenant_id=provider_tenant_id,
+        manager=manager,
+        cache_hit_before=cache_hit_before,
+        root_path=root_path,
+        storage_ensure_skipped=False,
+    )
+
+
+def _record_provider_manager_dependency_done(
+    *,
+    request: Request,
+    started_at: float,
+    resolve_ms: int,
+    ensure_ms: int,
+    get_instance_ms: int,
+    threadpool_wait_ms: int,
+    tenant_id: str,
+    provider_tenant_id: str,
+    manager: ProviderManager,
+    cache_hit_before: bool,
+    root_path: PathlibPath,
+    storage_ensure_skipped: bool,
+) -> ProviderManager:
+    if storage_ensure_skipped:
+        logger.info(
+            "provider_storage_ensure_done path=%s route_tenant_id=%s "
+            "provider_tenant_id=%s duration_ms=0 root_path=%s skipped=True "
+            "reason=provider_manager_cache_hit",
+            request.url.path,
+            tenant_id,
+            provider_tenant_id,
+            root_path,
+        )
+        logger.info(
+            "provider_manager_get_instance_done path=%s route_tenant_id=%s "
+            "provider_tenant_id=%s manager_tenant_id=%s duration_ms=0 "
+            "cache_hit_after=%s root_path=%s skipped=True "
+            "reason=provider_manager_cache_hit",
+            request.url.path,
+            tenant_id,
+            provider_tenant_id,
+            manager.tenant_id,
+            manager.tenant_id in ProviderManager._instances,
+            root_path,
+        )
+
     total_ms = int((time.perf_counter() - started_at) * 1000)
+    request.state.provider_manager_dependency_ms = total_ms
+    request.state.provider_manager_dependency_done_at = time.perf_counter()
+    request.state.provider_manager_dependency_ensure_ms = ensure_ms
+    request.state.provider_manager_dependency_get_instance_ms = get_instance_ms
+    request.state.provider_manager_dependency_threadpool_wait_ms = (
+        threadpool_wait_ms
+    )
+    request.state.provider_manager_dependency_cache_hit_before = (
+        cache_hit_before
+    )
 
     if total_ms >= _PROVIDER_API_SLOW_LOG_MS:
         logger.info(
             "provider_manager_dependency_slow path=%s total_ms=%d "
             "resolve_ms=%d ensure_ms=%d get_instance_ms=%d "
+            "threadpool_wait_ms=%d "
             "route_tenant_id=%s provider_tenant_id=%s manager_tenant_id=%s "
             "source_id=%s scope_id=%s cache_hit_before=%s "
             "cache_hit_after=%s root_path=%s root_exists=%s",
@@ -162,6 +292,7 @@ def get_provider_manager(request: Request) -> ProviderManager:
             resolve_ms,
             ensure_ms,
             get_instance_ms,
+            threadpool_wait_ms,
             tenant_id,
             provider_tenant_id,
             manager.tenant_id,
@@ -407,19 +538,58 @@ async def _distribute_active_model_to_tenant(
     summary="List all providers",
 )
 async def list_all_providers(
+    request: Request,
     manager: ProviderManager = Depends(get_provider_manager),
 ) -> List[ProviderInfo]:
     started_at = time.perf_counter()
+    logger.info(
+        "provider_models_handler_start path=%s tenant_id=%s "
+        "manager_tenant_id=%s source_id=%s scope_id=%s builtin_count=%d "
+        "custom_count=%d root_path=%s",
+        request.url.path,
+        getattr(request.state, "tenant_id", None),
+        manager.tenant_id,
+        _request_source_id(request),
+        getattr(request.state, "scope_id", None),
+        len(manager.builtin_providers),
+        len(manager.custom_providers),
+        manager.root_path,
+    )
     providers = await manager.list_provider_info()
     duration_ms = int((time.perf_counter() - started_at) * 1000)
+    request.state.provider_models_handler_ms = duration_ms
+    request.state.provider_models_handler_done_at = time.perf_counter()
+    model_count = sum(len(provider.models) for provider in providers)
+    extra_model_count = sum(
+        len(provider.extra_models) for provider in providers
+    )
+    logger.info(
+        "provider_models_handler_done path=%s tenant_id=%s "
+        "manager_tenant_id=%s duration_ms=%d provider_count=%d "
+        "builtin_count=%d custom_count=%d model_count=%d "
+        "extra_model_count=%d root_path=%s",
+        request.url.path,
+        getattr(request.state, "tenant_id", None),
+        manager.tenant_id,
+        duration_ms,
+        len(providers),
+        len(manager.builtin_providers),
+        len(manager.custom_providers),
+        model_count,
+        extra_model_count,
+        manager.root_path,
+    )
     if duration_ms >= _PROVIDER_API_SLOW_LOG_MS:
         logger.info(
             "provider_list_info_slow tenant_id=%s duration_ms=%d "
-            "provider_count=%d custom_count=%d root_path=%s",
+            "provider_count=%d custom_count=%d model_count=%d "
+            "extra_model_count=%d root_path=%s",
             manager.tenant_id,
             duration_ms,
             len(providers),
             len(manager.custom_providers),
+            model_count,
+            extra_model_count,
             manager.root_path,
         )
     return providers

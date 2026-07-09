@@ -310,8 +310,8 @@ export default function SkillDetailModal({
                 </div>
               )}
 
-              {/* 模型输出 */}
-              {traceDetail.trace.model_output && (
+              {/* 模型输出 - 仅在 completed 状态下展示 */}
+              {traceDetail.trace.model_output && traceDetail.trace.status === "completed" && (
                 <div className={styles.modelOutput}>
                   <div className={styles.messageLabel}>
                     <Bot size={14} style={{ marginRight: 4 }} />

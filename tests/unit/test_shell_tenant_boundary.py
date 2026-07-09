@@ -11,8 +11,10 @@ Tests cover:
 
 from __future__ import annotations
 
+import asyncio
 import shlex
 import os
+import signal
 import sys
 from pathlib import Path
 from typing import Generator
@@ -27,7 +29,9 @@ from swe.envs.store import save_envs
 from swe.agents.tool_failure import ToolExecutionError
 from swe.agents.tools.shell import (
     execute_shell_command,
+    _classify_shell_failure,
     _extract_path_tokens,
+    _prepare_subprocess_env,
     _validate_shell_paths,
     _resolve_cwd,
 )
@@ -91,21 +95,28 @@ def _write_process_limit_config(
     shell: bool = True,
     cpu_time_limit_seconds: int | None = None,
     memory_max_mb: int | None = None,
+    shell_max_concurrent: int | None = None,
+    shell_acquire_timeout_seconds: float | None = None,
 ) -> None:
+    process_limits = {
+        "enabled": enabled,
+        "shell": shell,
+        "mcp_stdio": True,
+        "cpu_time_limit_seconds": cpu_time_limit_seconds,
+        "memory_max_mb": memory_max_mb,
+    }
+    if shell_max_concurrent is not None:
+        process_limits["shell_max_concurrent"] = shell_max_concurrent
+    if shell_acquire_timeout_seconds is not None:
+        process_limits["shell_acquire_timeout_seconds"] = (
+            shell_acquire_timeout_seconds
+        )
     tenant_dir = base_dir / tenant_id
     tenant_dir.mkdir(parents=True, exist_ok=True)
     save_config(
         Config.model_validate(
             {
-                "security": {
-                    "process_limits": {
-                        "enabled": enabled,
-                        "shell": shell,
-                        "mcp_stdio": True,
-                        "cpu_time_limit_seconds": cpu_time_limit_seconds,
-                        "memory_max_mb": memory_max_mb,
-                    },
-                },
+                "security": {"process_limits": process_limits},
             },
         ),
         tenant_dir / "config.json",
@@ -130,6 +141,77 @@ def _assert_tool_error(
 ) -> None:
     assert exc_info.value.error_type == error_type
     assert detail_contains in exc_info.value.detail
+
+
+def test_shell_subprocess_env_preserves_backend_storage_roots(
+    mock_working_dir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Shell 子进程应继承后端确定的 SWE 存储根路径。"""
+    backend_working_dir = mock_working_dir / "backend-working"
+    backend_secret_dir = mock_working_dir / "backend-working.secret"
+    monkeypatch.setenv("SWE_WORKING_DIR", str(backend_working_dir))
+    monkeypatch.setenv("SWE_SECRET_DIR", str(backend_secret_dir))
+
+    _write_scope_env(
+        mock_working_dir,
+        "test_tenant",
+        "source-a",
+        {
+            "SWE_WORKING_DIR": "/tmp/tenant-overrides-working",
+            "SWE_SECRET_DIR": "/tmp/tenant-overrides-secret",
+            "PYTHONPATH": "/tmp/tenant-pythonpath",
+            "APP_TOKEN": "tenant-secret",
+        },
+    )
+
+    with tenant_context(tenant_id="test_tenant", source_id="source-a"):
+        env = _prepare_subprocess_env()
+
+    assert env["SWE_WORKING_DIR"] == str(backend_working_dir)
+    assert env["SWE_SECRET_DIR"] == str(backend_secret_dir)
+    assert env["APP_TOKEN"] == "tenant-secret"
+    assert "PYTHONPATH" not in env
+
+
+def test_shell_subprocess_env_defaults_blas_thread_limits(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Shell 子进程默认限制常见 BLAS/OpenMP 运行时线程数。"""
+    thread_limit_keys = {
+        "OPENBLAS_NUM_THREADS",
+        "OMP_NUM_THREADS",
+        "MKL_NUM_THREADS",
+        "NUMEXPR_NUM_THREADS",
+        "VECLIB_MAXIMUM_THREADS",
+    }
+    for key in thread_limit_keys:
+        monkeypatch.delenv(key, raising=False)
+
+    env = _prepare_subprocess_env()
+
+    assert {key: env[key] for key in thread_limit_keys} == {
+        key: "1" for key in thread_limit_keys
+    }
+
+
+def test_shell_subprocess_env_preserves_explicit_blas_thread_limits(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Shell 子进程不覆盖调用方已经指定的线程限制。"""
+    explicit_limits = {
+        "OPENBLAS_NUM_THREADS": "2",
+        "OMP_NUM_THREADS": "3",
+        "MKL_NUM_THREADS": "4",
+        "NUMEXPR_NUM_THREADS": "5",
+        "VECLIB_MAXIMUM_THREADS": "6",
+    }
+    for key, value in explicit_limits.items():
+        monkeypatch.setenv(key, value)
+
+    env = _prepare_subprocess_env()
+
+    assert {key: env[key] for key in explicit_limits} == explicit_limits
 
 
 # =============================================================================
@@ -411,6 +493,30 @@ class TestValidateShellPaths:
             )
             assert result is None
 
+    def test_python_script_system_path_string_denied(
+        self,
+        mock_working_dir: Path,
+    ):
+        """ctypes/syscall scripts should not hide system path strings."""
+        tenant_dir = mock_working_dir / "test_tenant"
+        script = tenant_dir / "copy_opt.py"
+        script.write_text(
+            "import ctypes\n"
+            "ctypes.CDLL(None)\n"
+            "source = '/opt/python/bin/jp.py'\n"
+            "print(source)\n",
+        )
+
+        with tenant_context(tenant_id="test_tenant"):
+            result = _validate_shell_paths(
+                "python copy_opt.py",
+                base_dir=tenant_dir,
+            )
+
+        assert result is not None
+        assert "system path string" in result
+        assert "/opt/python/bin/jp.py" in result
+
     def test_python_script_symlink_outside_tenant_denied(
         self,
         mock_working_dir: Path,
@@ -483,6 +589,32 @@ class TestValidateShellPaths:
             )
             assert result is not None
             assert "outside the allowed workspace" in result
+
+    def test_home_env_path_denied(self, mock_working_dir: Path):
+        """Shell path variables should not bypass tenant path checks."""
+        tenant_dir = mock_working_dir / "test_tenant"
+        with tenant_context(tenant_id="test_tenant"):
+            result = _validate_shell_paths(
+                "cat $HOME/.ssh/id_rsa",
+                base_dir=tenant_dir,
+            )
+
+        assert result is not None
+        assert "environment path variable" in result
+        assert "$HOME" in result
+
+    def test_braced_home_env_path_denied(self, mock_working_dir: Path):
+        """Braced shell path variables should be rejected too."""
+        tenant_dir = mock_working_dir / "test_tenant"
+        with tenant_context(tenant_id="test_tenant"):
+            result = _validate_shell_paths(
+                "ls ${HOME}/.config",
+                base_dir=tenant_dir,
+            )
+
+        assert result is not None
+        assert "environment path variable" in result
+        assert "${HOME}" in result
 
     def test_relative_path_against_cwd_within_tenant_allowed(
         self,
@@ -669,6 +801,30 @@ class TestResolveCwd:
 
 class TestExecuteShellCommand:
     """Integration tests for execute_shell_command with tenant boundary."""
+
+    def test_prepare_shell_command_reuses_shell_boundary_context(
+        self,
+        mock_working_dir: Path,
+    ):
+        """共享 Shell 准备逻辑应统一解析 cwd 和租户环境。"""
+        from swe.agents.tools.shell import prepare_shell_command
+
+        tenant_dir = mock_working_dir / "test_tenant"
+
+        with tenant_context(
+            tenant_id="test_tenant",
+            user_id="user_a",
+            workspace_dir=tenant_dir,
+        ):
+            prepared = prepare_shell_command(
+                "echo ok",
+                cwd=str(tenant_dir),
+            )
+
+        assert prepared.command == "echo ok"
+        assert prepared.working_dir == tenant_dir.resolve()
+        assert "PATH" in prepared.env
+        assert prepared.python_runtime_guard is not None
 
     @pytest.mark.asyncio
     async def test_accepts_string_cwd_within_tenant(
@@ -900,7 +1056,7 @@ class TestExecuteShellCommand:
         self,
         mock_working_dir: Path,
     ):
-        """当前 shell 启动不会注入租户级 preexec_fn。"""
+        """Shell launch injects the current tenant's process-limit preexec_fn."""
         from swe.agents.tools.shell import execute_shell_command
 
         _write_process_limit_config(
@@ -936,7 +1092,7 @@ class TestExecuteShellCommand:
         ):
             with tenant_context(tenant_id="tenant-a"):
                 await execute_shell_command("echo tenant")
-            assert captured["preexec_fn"] is None
+            assert captured["preexec_fn"] is not None
 
             with tenant_context(tenant_id="tenant-b"):
                 await execute_shell_command("echo tenant")
@@ -948,7 +1104,7 @@ class TestExecuteShellCommand:
         self,
         mock_working_dir: Path,
     ):
-        """当前 shell 在 macOS 分支也不会构造 preexec_fn。"""
+        """macOS shell launch still injects a CPU-only preexec_fn."""
         from swe.agents.tools.shell import execute_shell_command
 
         _write_process_limit_config(
@@ -987,7 +1143,7 @@ class TestExecuteShellCommand:
                 result = await execute_shell_command("echo ok")
 
         assert result.content[0]["text"].startswith("ok")
-        assert captured["preexec_fn"] is None
+        assert captured["preexec_fn"] is not None
 
     @pytest.mark.asyncio
     @pytest.mark.skipif(
@@ -998,7 +1154,7 @@ class TestExecuteShellCommand:
         self,
         mock_working_dir: Path,
     ):
-        """当前 shell CPU 忙循环仍以通用超时文案返回。"""
+        """CPU rlimit termination is reported as process-limit failure."""
         from swe.agents.tools.shell import execute_shell_command
 
         _write_process_limit_config(
@@ -1018,8 +1174,8 @@ class TestExecuteShellCommand:
 
         _assert_tool_error(
             exc_info,
-            error_type="tool_timeout",
-            detail_contains="TimeoutError",
+            error_type="process_limit_exceeded",
+            detail_contains="exit code",
         )
 
     @pytest.mark.asyncio
@@ -1031,7 +1187,7 @@ class TestExecuteShellCommand:
         self,
         mock_working_dir: Path,
     ):
-        """当前 shell 保留子进程 stderr，不再包装为 process-limit 文案。"""
+        """Memory-limit style failures are classified separately."""
         from swe.agents.tools.shell import execute_shell_command
 
         _write_process_limit_config(
@@ -1051,9 +1207,12 @@ class TestExecuteShellCommand:
         async def _fake_create_subprocess_shell(*args, **kwargs):
             return _FakeProcess()
 
-        with patch(
-            "swe.agents.tools.shell.asyncio.create_subprocess_shell",
-            side_effect=_fake_create_subprocess_shell,
+        with (
+            patch(
+                "swe.agents.tools.shell.asyncio.create_subprocess_shell",
+                side_effect=_fake_create_subprocess_shell,
+            ),
+            patch("swe.security.process_limits.sys.platform", "linux"),
         ):
             with tenant_context(tenant_id="test_tenant"):
                 with pytest.raises(ToolExecutionError) as exc_info:
@@ -1061,7 +1220,7 @@ class TestExecuteShellCommand:
 
         _assert_tool_error(
             exc_info,
-            error_type="shell_command_failed",
+            error_type="process_limit_exceeded",
             detail_contains="MemoryError",
         )
 
@@ -1070,7 +1229,7 @@ class TestExecuteShellCommand:
         self,
         mock_working_dir: Path,
     ):
-        """当前 shell 不会把 process-limit 平台诊断拼入正常输出。"""
+        """Unsupported platform diagnostics are visible in shell output."""
         from swe.agents.tools.shell import execute_shell_command
 
         _write_process_limit_config(
@@ -1089,6 +1248,45 @@ class TestExecuteShellCommand:
                 result = await execute_shell_command("echo hello")
 
         assert "hello" in result.content[0]["text"]
+        assert "not enforced on this platform" in result.content[0]["text"]
+
+    @pytest.mark.asyncio
+    async def test_shell_concurrency_limit_fails_when_slot_is_unavailable(
+        self,
+        mock_working_dir: Path,
+    ):
+        """A tenant cannot exceed its configured shell execution slots."""
+        from swe.agents.tools.shell import execute_shell_command
+
+        _write_process_limit_config(
+            mock_working_dir,
+            "test_tenant",
+            enabled=True,
+            shell=True,
+            shell_max_concurrent=1,
+            shell_acquire_timeout_seconds=0.01,
+        )
+
+        async def _blocking_execute_platform_subprocess(*args, **kwargs):
+            await asyncio.sleep(0.2)
+            return 0, "held", ""
+
+        with patch(
+            "swe.agents.tools.shell._execute_platform_subprocess",
+            side_effect=_blocking_execute_platform_subprocess,
+        ):
+            with tenant_context(tenant_id="test_tenant"):
+                first = asyncio.create_task(execute_shell_command("echo one"))
+                await asyncio.sleep(0.02)
+                with pytest.raises(ToolExecutionError) as exc_info:
+                    await execute_shell_command("echo two")
+                await first
+
+        _assert_tool_error(
+            exc_info,
+            error_type="shell_concurrency_limit_exceeded",
+            detail_contains="shell execution slots",
+        )
 
     @pytest.mark.asyncio
     async def test_shell_command_receives_source_scoped_tenant_env(
@@ -1114,6 +1312,48 @@ class TestExecuteShellCommand:
         assert "API_TOKEN" not in os.environ
 
     @pytest.mark.asyncio
+    async def test_shell_command_receives_runtime_claim_env(
+        self,
+        mock_working_dir: Path,
+    ):
+        """shell 子进程应接收运行时调用 claims env。"""
+        from swe.runtime_invocation_claims import (
+            runtime_invocation_claims_context,
+        )
+
+        command = (
+            'python -c "import json, os; '
+            "print(json.dumps({"
+            "'tenant': os.environ.get('SWE_TENANT_ID'), "
+            "'source': os.environ.get('SWE_SOURCE_ID'), "
+            "'scope': os.environ.get('SWE_RUNTIME_SCOPE_ID'), "
+            "'session': os.environ.get('SWE_SESSION_ID'), "
+            "'trace': os.environ.get('SWE_TRACE_ID')}))\""
+        )
+        (mock_working_dir / encode_scope_id("test_tenant", "source-a")).mkdir(
+            parents=True,
+            exist_ok=True,
+        )
+
+        with (
+            tenant_context(tenant_id="test_tenant", source_id="source-a"),
+            runtime_invocation_claims_context(
+                session_id="session-1",
+                trace_id="trace-1",
+            ),
+        ):
+            result = await execute_shell_command(command)
+
+        text = result.content[0]["text"]
+        assert '"tenant": "test_tenant"' in text
+        assert '"source": "source-a"' in text
+        assert (
+            '"scope": "' + encode_scope_id("test_tenant", "source-a") in text
+        )
+        assert '"session": "session-1"' in text
+        assert '"trace": "trace-1"' in text
+
+    @pytest.mark.asyncio
     async def test_shell_rejects_boundary_escape_before_runtime_env_build(
         self,
         mock_working_dir: Path,
@@ -1132,3 +1372,50 @@ class TestExecuteShellCommand:
             error_type="permission_denied",
             detail_contains="outside the allowed workspace",
         )
+
+
+def test_shell_sigkill_failure_is_not_process_limit_without_enforcement():
+    assert (
+        _classify_shell_failure(
+            -signal.SIGKILL,
+            "",
+            process_limits_enforced=False,
+        )
+        == "shell_command_failed"
+    )
+
+
+def test_shell_sigkill_failure_is_process_limit_when_enforced():
+    assert (
+        _classify_shell_failure(
+            -signal.SIGKILL,
+            "",
+            process_limits_enforced=True,
+            memory_limit_enforced=False,
+        )
+        == "process_limit_exceeded"
+    )
+
+
+def test_shell_memory_error_is_not_process_limit_without_memory_enforcement():
+    assert (
+        _classify_shell_failure(
+            1,
+            "MemoryError",
+            process_limits_enforced=True,
+            memory_limit_enforced=False,
+        )
+        == "shell_command_failed"
+    )
+
+
+def test_shell_memory_error_is_process_limit_with_memory_enforcement():
+    assert (
+        _classify_shell_failure(
+            1,
+            "MemoryError",
+            process_limits_enforced=True,
+            memory_limit_enforced=True,
+        )
+        == "process_limit_exceeded"
+    )

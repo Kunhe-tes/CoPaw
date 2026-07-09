@@ -1,5 +1,6 @@
 import dayjs from "dayjs";
 import type {
+  CronBroadcastTaskResponse,
   CronBroadcastTenantResult,
   CronJobSpecInput,
   CronJobSpecOutput,
@@ -184,4 +185,22 @@ export function getBroadcastResultMessage(
     tone: "success",
     text: `Broadcasted ${successCount} tenants`,
   };
+}
+
+export function getBroadcastTaskProgressText(
+  task: CronBroadcastTaskResponse,
+): string {
+  const completedCount = Math.min(task.completed_count, task.tenant_count);
+  const failedSuffix =
+    task.failed_count > 0 ? `, failed ${task.failed_count}` : "";
+  if (task.status === "running") {
+    return `Broadcasting ${completedCount}/${task.tenant_count} tenants${failedSuffix}`;
+  }
+  if (task.status === "failed") {
+    if (task.failure_summary) {
+      return `Broadcast failed: ${task.failure_summary}`;
+    }
+    return `Broadcast finished with ${task.failed_count} failed of ${task.tenant_count} tenants`;
+  }
+  return `Broadcast completed ${completedCount}/${task.tenant_count} tenants${failedSuffix}`;
 }

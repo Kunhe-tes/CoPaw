@@ -266,6 +266,10 @@ class OverviewStats(BaseModel):
     total_sessions: int = 0
     total_conversations: int = 0
     total_skill_calls: int = 0  # 技能调用总次数
+    # 客户点击统计
+    plan_customers: int = 0  # 查看方案客户数
+    insight_customers: int = 0  # 去洞察客户数
+    phone_customers: int = 0  # 去电访客户数
     avg_duration_ms: int = 0
     top_tools: list[ToolUsage] = Field(default_factory=list)
     top_skills: list[SkillUsage] = Field(default_factory=list)
@@ -295,6 +299,7 @@ class OverviewBranchBreakdown(BaseModel):
     tokens: list[BranchMetricItem] = Field(default_factory=list)
     skills: list[BranchMetricItem] = Field(default_factory=list)
     cron_tasks: list[BranchMetricItem] = Field(default_factory=list)
+    customers: list[BranchMetricItem] = Field(default_factory=list)
 
 
 class TaskStatusBreakdown(BaseModel):
@@ -309,11 +314,11 @@ class TaskStatusSummary(BaseModel):
     """定时任务执行汇总统计."""
 
     total_tasks: int = 0  # 总执行次数
-    success: int = 0  # 成功次数
-    failed: int = 0  # 失败次数
+    success: int = 0  # 成功次数（status='success' AND async_status='success'）
+    running: int = 0  # 运行中次数（status='success' AND async_status IS NULL）
+    failed: int = 0  # 失败次数（综合判断）
     cancelled: int = 0  # 已取消/跳过次数
     read_count: int = 0  # 已读次数
-    new_cron_tasks: int = 0  # 新增定时任务数（本时间段内创建的）
 
 
 class ErrorSummary(BaseModel):

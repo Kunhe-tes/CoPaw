@@ -1,7 +1,7 @@
 import { useEffect, useState, useRef, useCallback, useMemo } from "react";
 import { useNavigate } from "react-router-dom";
-import { Typography, Card, Spin, Button, Space, Input, message, Tag, Empty, Checkbox, Modal, Popconfirm, Tooltip, Alert } from "antd";
-import { PlusOutlined, UploadOutlined, ShopOutlined, RightOutlined, DownOutlined, FolderOutlined, FileOutlined, StarOutlined, SearchOutlined, InfoCircleOutlined, ExclamationCircleOutlined } from "@ant-design/icons";
+import { Typography, Card, Spin, Button, Space, Input, message, Tag, Empty, Checkbox, Modal, Popconfirm, Tooltip, Alert, Popover } from "antd";
+import { PlusOutlined, UploadOutlined, ShopOutlined, RightOutlined, DownOutlined, FolderOutlined, FileOutlined, StarOutlined, SearchOutlined, InfoCircleOutlined, ExclamationCircleOutlined, QuestionCircleOutlined } from "@ant-design/icons";
 import { CheckCircle } from "lucide-react";
 import dayjs from "dayjs";
 import relativeTime from "dayjs/plugin/relativeTime";
@@ -68,6 +68,7 @@ export default function MySkillsPage() {
   const [draftContent, setDraftContent] = useState("");
   const [draftCnName, setDraftCnName] = useState("");  // 编辑中的中文名
   const [isSaving, setIsSaving] = useState(false);
+  const [isDownloading, setIsDownloading] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   // Batch operation state
@@ -94,6 +95,8 @@ export default function MySkillsPage() {
     skillMd: string;
     skillDirName?: string; // 技能目录名，用于同步整个目录
     version?: string; // 用户工作区版本号，用于版本快照的 source_user_version
+    skillId?: string; // 技能唯一标识符，直接从用户数据取
+    cnName?: string; // 中文展示名，直接从用户数据取
   } | null>(null);
 
   // Debounce search
@@ -332,6 +335,17 @@ export default function MySkillsPage() {
 
   const [togglingSkill, setTogglingSkill] = useState<string | null>(null);
 
+  const triggerBrowserDownload = useCallback((blob: Blob, filename: string) => {
+    const url = URL.createObjectURL(blob);
+    const anchor = document.createElement("a");
+    anchor.href = url;
+    anchor.download = filename;
+    document.body.appendChild(anchor);
+    anchor.click();
+    anchor.remove();
+    window.setTimeout(() => URL.revokeObjectURL(url), 0);
+  }, []);
+
   const handleToggleEnabled = useCallback(async (skill: MySkill) => {
     if (togglingSkill) return;
     const action = skill.enabled ? "disable" : "enable";
@@ -374,6 +388,22 @@ export default function MySkillsPage() {
       message.error("删除失败");
     }
   }, [refresh]);
+
+  const handleDownload = useCallback(async (skill: MySkill) => {
+    setIsDownloading(true);
+    try {
+      const { blob, filename } = await mySkillsApi.downloadCreatedSkill(
+        skill.skill_name,
+      );
+      triggerBrowserDownload(blob, filename || `${skill.skill_name}.zip`);
+      message.success("已开始下载技能包");
+    } catch (err) {
+      const errorMsg = err instanceof Error ? err.message : "下载失败";
+      message.error(errorMsg);
+    } finally {
+      setIsDownloading(false);
+    }
+  }, [triggerBrowserDownload]);
 
   const handleBatchDelete = useCallback(async () => {
     if (selectedForBatch.size === 0) return;
@@ -530,6 +560,8 @@ export default function MySkillsPage() {
         skillMd,
         skillDirName: skill.skill_name, // 传递目录名，用于同步整个目录
         version: skill.version, // 传递用户工作区版本号
+        skillId: skill.skill_id, // 传递 skill_id，直接从用户数据取
+        cnName: skill.cn_name, // 传递 cn_name，直接从用户数据取
       });
       setPublishModalOpen(true);
     } catch (err) {
@@ -919,6 +951,7 @@ export default function MySkillsPage() {
           draftContent={draftContent}
           draftCnName={draftCnName}
           isSaving={isSaving}
+          isDownloading={isDownloading}
           togglingSkill={togglingSkill}
           isManager={isManager}
           onEditStart={handleEditStart}
@@ -928,6 +961,7 @@ export default function MySkillsPage() {
           onCnNameChange={setDraftCnName}
           onToggleEnabled={handleToggleEnabled}
           onDelete={handleDelete}
+          onDownload={handleDownload}
           onSyncToMarket={handleSyncToMarket}
         />
       </div>
@@ -1035,6 +1069,47 @@ export default function MySkillsPage() {
             showCount
             autoFocus
           />
+        </div>
+
+        <div style={{ color: "#8c8c8c", fontSize: 12, display: "flex", alignItems: "center", gap: 4 }}>
+          <Popover
+            trigger="click"
+            placement="top"
+            content={
+              <div style={{ maxWidth: 320 }}>
+                <div style={{ fontWeight: 500, marginBottom: 8 }}>SKILL.md Frontmatter 示例：</div>
+                <pre style={{
+                  background: "#f5f5f5",
+                  padding: 8,
+                  borderRadius: 4,
+                  fontSize: 12,
+                  overflow: "auto",
+                  whiteSpace: "pre-wrap",
+                  margin: 0,
+                }}>
+{`---
+name: "my_skill"
+description: "技能功能简述"
+metadata:
+  skill_id: "skill_abc"  # 可选，自动生成
+  cn_name: "我的技能"    # 可选，≤50字
+---
+
+# 技能说明
+...`}
+                </pre>
+                <div style={{ marginTop: 8, fontSize: 12 }}>
+                  <div><b>name</b>: 技能英文名（必填）</div>
+                  <div><b>description</b>: 功能描述（必填）</div>
+                  <div><b>metadata.skill_id</b>: 唯一标识，跨租户共享，同名技能自动复用（可选）</div>
+                  <div><b>metadata.cn_name</b>: 中文展示名，不超过50字（可选）</div>
+                </div>
+              </div>
+            }
+          >
+            <QuestionCircleOutlined style={{ cursor: "pointer", color: "#1890ff" }} />
+          </Popover>
+          <span>技能名称、描述和唯一标识从 SKILL.md frontmatter 自动解析，同名技能复用已有标识</span>
         </div>
       </Modal>
 

@@ -5,10 +5,17 @@ from __future__ import annotations
 
 import asyncio
 import json
+import sys
+import types
 
 import pytest
 from swe.app import runtime_diagnostic
 from swe.app.runtime_diagnostic import RuntimeDiagnosticManager
+
+
+class _ThreadLimiter:
+    total_tokens = 64
+    borrowed_tokens = 20
 
 
 class _Process:
@@ -74,6 +81,7 @@ def _manager(**overrides) -> RuntimeDiagnosticManager:
         "disk_usage": _disk_usage,
         "pod_open_fd_count": lambda: 6,
         "pod_disk_io_bytes": lambda: (100, 200),
+        "thread_limiter": _ThreadLimiter,
         "log_sink": messages.append,
     }
     options.update(overrides)
@@ -126,6 +134,9 @@ def test_diagnostic_payload_contains_confirmed_metrics() -> None:
         "event_loop_blocked_count": 1,
         "process_cpu_avg_percent": 30.0,
         "process_cpu_max_percent": 40.0,
+        "anyio_threadpool_total_tokens": 64,
+        "anyio_threadpool_borrowed_tokens": 20,
+        "anyio_threadpool_available_tokens": 44,
         "process_rss_bytes": 100,
         "process_vms_bytes": 200,
         "process_thread_count": 3,
@@ -136,11 +147,39 @@ def test_diagnostic_payload_contains_confirmed_metrics() -> None:
         "pod_disk_read_bytes_per_second_peak": None,
         "pod_disk_write_bytes_per_second": None,
         "pod_disk_write_bytes_per_second_peak": None,
+        "workspace_cache_size": None,
+        "workspace_start_tasks": None,
+        "workspace_cache_max_size": None,
+        "workspace_start_max_concurrent": None,
+        "workspace_evictions_total": None,
+        "workspace_eviction_stop_failures_total": None,
         "storage_total_bytes": 1000,
         "storage_used_bytes": 600,
         "storage_free_bytes": 400,
         "storage_used_percent": 60.0,
     }
+
+
+def test_diagnostic_payload_includes_workspace_cache_metrics() -> None:
+    manager = _manager(
+        workspace_metrics=lambda: {
+            "workspace_cache_size": 32,
+            "workspace_start_tasks": 3,
+            "workspace_cache_max_size": 64,
+            "workspace_start_max_concurrent": 4,
+            "workspace_evictions_total": 12,
+            "workspace_eviction_stop_failures_total": 1,
+        },
+    )
+
+    payload = manager.build_diagnostic_payload()
+
+    assert payload["workspace_cache_size"] == 32
+    assert payload["workspace_start_tasks"] == 3
+    assert payload["workspace_cache_max_size"] == 64
+    assert payload["workspace_start_max_concurrent"] == 4
+    assert payload["workspace_evictions_total"] == 12
+    assert payload["workspace_eviction_stop_failures_total"] == 1
 
 
 def test_failed_metric_group_emits_null_fields_without_suppressing_payload() -> (
@@ -165,6 +204,305 @@ def test_failed_metric_group_emits_null_fields_without_suppressing_payload() -> 
     assert payload["storage_free_bytes"] is None
     assert payload["storage_used_percent"] is None
     assert payload["sse_active_connections"] == 0
+
+
+def test_failed_threadpool_metrics_emit_null_without_suppressing_payload() -> (
+    None
+):
+    manager = _manager(
+        thread_limiter=lambda: (_ for _ in ()).throw(
+            RuntimeError("limiter unavailable"),
+        ),
+    )
+
+    payload = manager.build_diagnostic_payload()
+
+    assert payload["anyio_threadpool_total_tokens"] is None
+    assert payload["anyio_threadpool_borrowed_tokens"] is None
+    assert payload["anyio_threadpool_available_tokens"] is None
+    assert payload["process_rss_bytes"] == 100
+
+
+def test_collect_inotify_diagnostic_summarizes_proc_fdinfo(tmp_path) -> None:
+    proc_dir = tmp_path / "proc" / "123"
+    fd_dir = proc_dir / "fd"
+    fdinfo_dir = proc_dir / "fdinfo"
+    fd_dir.mkdir(parents=True)
+    fdinfo_dir.mkdir()
+    (fd_dir / "3").symlink_to("anon_inode:inotify")
+    (fd_dir / "4").symlink_to("socket:[1]")
+    (fdinfo_dir / "3").write_text(
+        "pos:\t0\n"
+        "flags:\t02000000\n"
+        "inotify wd:1 ino:abc sdev:01 mask:00000800 ignored_mask:0 "
+        "fhandle-bytes:8 fhandle-type:1 f_handle:01020304\n",
+        encoding="utf-8",
+    )
+
+    process = _Process()
+    process.pid = 123
+    manager = _manager(process=process)
+
+    payload = manager.collect_inotify_diagnostic(
+        proc_root=tmp_path / "proc",
+        include_fdinfo=True,
+    )
+
+    assert payload["schema"] == "runtime_diagnostic.v1"
+    assert payload["event_type"] == "inotify_diagnostic"
+    assert payload["pid"] == 123
+    assert payload["inotify_fd_count"] == 1
+    assert payload["inotify_watch_count"] == 1
+    assert payload["errors"] == []
+    assert payload["inotify_fds"] == [
+        {
+            "fd": 3,
+            "target": "anon_inode:inotify",
+            "watch_count": 1,
+            "watches": [
+                {
+                    "wd": "1",
+                    "ino": "abc",
+                    "sdev": "01",
+                    "mask": "00000800",
+                },
+            ],
+            "fdinfo": (
+                "pos:\t0\n"
+                "flags:\t02000000\n"
+                "inotify wd:1 ino:abc sdev:01 mask:00000800 "
+                "ignored_mask:0 fhandle-bytes:8 fhandle-type:1 "
+                "f_handle:01020304\n"
+            ),
+            "fdinfo_truncated": False,
+        },
+    ]
+
+
+def test_collect_inotify_diagnostic_counts_before_fdinfo_truncation(
+    tmp_path,
+) -> None:
+    proc_dir = tmp_path / "proc" / "123"
+    fd_dir = proc_dir / "fd"
+    fdinfo_dir = proc_dir / "fdinfo"
+    fd_dir.mkdir(parents=True)
+    fdinfo_dir.mkdir()
+    (fd_dir / "3").symlink_to("anon_inode:inotify")
+    (fdinfo_dir / "3").write_text(
+        "pos:\t0\n"
+        "inotify wd:1 ino:abc sdev:01 mask:00000800 ignored_mask:0\n"
+        "inotify wd:2 ino:def sdev:01 mask:00000800 ignored_mask:0\n",
+        encoding="utf-8",
+    )
+
+    process = _Process()
+    process.pid = 123
+    manager = _manager(process=process)
+
+    payload = manager.collect_inotify_diagnostic(
+        proc_root=tmp_path / "proc",
+        max_fdinfo_bytes=0,
+        include_fdinfo=True,
+    )
+
+    assert payload["inotify_fd_count"] == 1
+    assert payload["inotify_watch_count"] == 2
+    assert payload["inotify_fds"][0]["watch_count"] == 2
+    assert payload["inotify_fds"][0]["fdinfo"] == ""
+    assert payload["inotify_fds"][0]["fdinfo_truncated"] is True
+
+
+def test_collect_inotify_diagnostic_can_redact_details(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    proc_dir = tmp_path / "proc" / "123"
+    fd_dir = proc_dir / "fd"
+    fdinfo_dir = proc_dir / "fdinfo"
+    fd_dir.mkdir(parents=True)
+    fdinfo_dir.mkdir()
+    (fd_dir / "3").symlink_to("anon_inode:inotify")
+    (fdinfo_dir / "3").write_text(
+        "pos:\t0\n"
+        "inotify wd:1 ino:abc sdev:01 mask:00000800 ignored_mask:0\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        runtime_diagnostic,
+        "_WATCHFILES_STACK_EVENTS",
+        [{"function": "watch", "paths": ["/secret"], "stack": ["frame"]}],
+    )
+
+    process = _Process()
+    process.pid = 123
+    manager = _manager(process=process)
+
+    payload = manager.collect_inotify_diagnostic(
+        proc_root=tmp_path / "proc",
+        include_details=False,
+    )
+
+    assert payload["inotify_fd_count"] == 1
+    assert payload["inotify_watch_count"] == 1
+    assert payload["inotify_fds"] == [
+        {
+            "fd": 3,
+            "target": "anon_inode:inotify",
+            "watch_count": 1,
+        },
+    ]
+    assert payload["watchfiles_stack_events"] == []
+
+
+def test_watchfiles_stack_probe_is_disabled_by_default(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("SWE_WATCHFILES_STACK_PROBE_ENABLED", raising=False)
+    monkeypatch.setattr(
+        runtime_diagnostic,
+        "_WATCHFILES_STACK_PROBE_INSTALLED",
+        False,
+    )
+    monkeypatch.setattr(runtime_diagnostic, "_WATCHFILES_STACK_EVENTS", [])
+
+    manager = _manager()
+
+    assert manager._watchfiles_stack_probe_enabled is False
+
+
+def test_watchfiles_stack_probe_records_watch_calls(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    fake_watchfiles = types.ModuleType("watchfiles")
+
+    def watch(*_args, **_kwargs):
+        return iter(())
+
+    class _EmptyAsyncIterator:
+        def __aiter__(self):
+            return self
+
+        async def __anext__(self):
+            raise StopAsyncIteration
+
+    def awatch(*_args, **_kwargs):
+        return _EmptyAsyncIterator()
+
+    fake_watchfiles.watch = watch
+    fake_watchfiles.awatch = awatch
+    monkeypatch.setitem(sys.modules, "watchfiles", fake_watchfiles)
+    monkeypatch.setenv("SWE_WATCHFILES_STACK_PROBE_ENABLED", "1")
+    monkeypatch.setattr(
+        runtime_diagnostic,
+        "_WATCHFILES_STACK_PROBE_INSTALLED",
+        False,
+    )
+    monkeypatch.setattr(runtime_diagnostic, "_WATCHFILES_STACK_EVENTS", [])
+
+    manager = _manager()
+    fake_watchfiles.watch(tmp_path)
+    fake_watchfiles.awatch(tmp_path / "async")
+
+    payload = manager.collect_inotify_diagnostic(proc_root=tmp_path / "proc")
+
+    assert manager._watchfiles_stack_probe_enabled is True
+    assert payload["watchfiles_stack_probe_enabled"] is True
+    assert [
+        event["function"] for event in payload["watchfiles_stack_events"]
+    ] == ["watch", "awatch"]
+    assert payload["watchfiles_stack_events"][0]["paths"] == [str(tmp_path)]
+    assert payload["watchfiles_stack_events"][0]["stack"]
+
+
+def test_watchfiles_stack_probe_patches_existing_awatch_alias(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    fake_watchfiles = types.ModuleType("watchfiles")
+
+    class _EmptyAsyncIterator:
+        def __aiter__(self):
+            return self
+
+        async def __anext__(self):
+            raise StopAsyncIteration
+
+    def awatch(*_args, **_kwargs):
+        return _EmptyAsyncIterator()
+
+    fake_watchfiles.awatch = awatch
+    fake_watchfiles.watch = lambda *_args, **_kwargs: iter(())
+    fake_reme_watcher = types.ModuleType(
+        "reme.core.file_watcher.base_file_watcher",
+    )
+    fake_reme_watcher.awatch = awatch
+    monkeypatch.setitem(sys.modules, "watchfiles", fake_watchfiles)
+    monkeypatch.setitem(
+        sys.modules,
+        "reme.core.file_watcher.base_file_watcher",
+        fake_reme_watcher,
+    )
+    monkeypatch.setenv("SWE_WATCHFILES_STACK_PROBE_ENABLED", "1")
+    monkeypatch.setattr(
+        runtime_diagnostic,
+        "_WATCHFILES_STACK_PROBE_INSTALLED",
+        False,
+    )
+    monkeypatch.setattr(runtime_diagnostic, "_WATCHFILES_STACK_EVENTS", [])
+
+    manager = _manager()
+    fake_reme_watcher.awatch(tmp_path / "memory")
+
+    payload = manager.collect_inotify_diagnostic(proc_root=tmp_path / "proc")
+    assert payload["watchfiles_stack_probe_enabled"] is True
+    assert [
+        event["function"] for event in payload["watchfiles_stack_events"]
+    ] == ["awatch"]
+    assert payload["watchfiles_stack_events"][0]["paths"] == [
+        str(tmp_path / "memory"),
+    ]
+
+
+def test_watchfiles_stack_probe_does_not_trigger_module_getattr(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    fake_watchfiles = types.ModuleType("watchfiles")
+    triggered = False
+
+    def watch(*_args, **_kwargs):
+        return iter(())
+
+    fake_watchfiles.watch = watch
+    fake_watchfiles.awatch = lambda *_args, **_kwargs: iter(())
+
+    class LazyModule(types.ModuleType):
+        def __getattr__(self, _name):
+            nonlocal triggered
+            triggered = True
+            raise RuntimeError("lazy import should not run")
+
+    lazy_module = LazyModule("lazy_watch_module")
+    lazy_module.__dict__["watch"] = watch
+    monkeypatch.setitem(sys.modules, "watchfiles", fake_watchfiles)
+    monkeypatch.setitem(sys.modules, "lazy_watch_module", lazy_module)
+    monkeypatch.setenv("SWE_WATCHFILES_STACK_PROBE_ENABLED", "1")
+    monkeypatch.setattr(
+        runtime_diagnostic,
+        "_WATCHFILES_STACK_PROBE_INSTALLED",
+        False,
+    )
+    monkeypatch.setattr(runtime_diagnostic, "_WATCHFILES_STACK_EVENTS", [])
+
+    manager = _manager()
+    lazy_module.watch(tmp_path / "memory")
+
+    payload = manager.collect_inotify_diagnostic(proc_root=tmp_path / "proc")
+    assert triggered is False
+    assert [
+        event["function"] for event in payload["watchfiles_stack_events"]
+    ] == ["watch"]
 
 
 def test_failed_process_fields_do_not_suppress_other_process_fields() -> None:

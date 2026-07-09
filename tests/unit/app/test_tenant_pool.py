@@ -641,7 +641,7 @@ class TestTenantBootstrapInitSourceMapping:
         monkeypatch.setattr(
             "swe.app.workspace.tenant_pool.TenantInitializer"
             ".ensure_seeded_bootstrap",
-            lambda self: {"pool_seed": {}, "workspace_seed": {}},
+            lambda self, **kwargs: {"pool_seed": {}, "workspace_seed": {}},
         )
 
         pool = TenantWorkspacePool(tmp_path)

@@ -23,6 +23,7 @@ interface CronJobFormBodyProps {
   executionModelOptions: ExecutionModelOption[];
   executionModelLoading: boolean;
   tenantDefaultModelLabel: string;
+  idDisabled?: boolean;
 }
 
 export function CronJobFormBody({
@@ -30,6 +31,7 @@ export function CronJobFormBody({
   executionModelOptions,
   executionModelLoading,
   tenantDefaultModelLabel,
+  idDisabled = false,
 }: CronJobFormBodyProps) {
   const { t } = useTranslation();
   const validateSkillIds = (_: unknown, value: string) => {
@@ -51,7 +53,10 @@ export function CronJobFormBody({
         rules={[{ required: true, message: t("cronJobs.pleaseInputId") }]}
         tooltip={t("cronJobs.idTooltip")}
       >
-        <Input placeholder={t("cronJobs.jobIdPlaceholder")} />
+        <Input
+          disabled={idDisabled}
+          placeholder={t("cronJobs.jobIdPlaceholder")}
+        />
       </Form.Item>
 
       <Form.Item
@@ -177,7 +182,7 @@ export function CronJobFormBody({
                     <div style={{ marginBottom: 4 }}>
                       {t("cronJobs.cronExample")}
                     </div>
-                    <div>
+                    {/* <div>
                       {t("cronJobs.cronHelper")}{" "}
                       <a
                         href="https://crontab.guru/"
@@ -187,7 +192,7 @@ export function CronJobFormBody({
                       >
                         {t("cronJobs.cronHelperLink")} →
                       </a>
-                    </div>
+                    </div> */}
                   </div>
                 }
               >

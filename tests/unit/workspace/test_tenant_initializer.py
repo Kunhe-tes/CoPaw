@@ -309,6 +309,70 @@ class TestEnsureSeededBootstrap:
 
         assert initializer.has_seeded_bootstrap() is True
 
+    def test_ensure_seeded_bootstrap_can_skip_bootstrap_md(
+        self,
+        tmp_path,
+    ):
+        """Runtime bootstrap can suppress the first-chat bootstrap file."""
+        default_tenant = tmp_path / "default"
+        default_workspace = default_tenant / "workspaces" / "default"
+        default_workspace.mkdir(parents=True)
+
+        save_config(
+            Config(
+                agents=AgentsConfig(
+                    active_agent="default",
+                    profiles={
+                        "default": AgentProfileRef(
+                            id="default",
+                            workspace_dir=str(default_workspace),
+                        ),
+                    },
+                    language="en",
+                ),
+            ),
+            default_tenant / "config.json",
+        )
+        (default_workspace / "agent.json").write_text(
+            json.dumps(
+                {
+                    "id": "default",
+                    "name": "Default Template Agent",
+                    "workspace_dir": str(default_workspace),
+                    "language": "en",
+                },
+            ),
+            encoding="utf-8",
+        )
+        for filename in (
+            "AGENTS.md",
+            "BOOTSTRAP.md",
+            "HEARTBEAT.md",
+            "MEMORY.md",
+            "PROFILE.md",
+            "SOUL.md",
+        ):
+            (default_workspace / filename).write_text(
+                "# template\n",
+                encoding="utf-8",
+            )
+
+        initializer = TenantInitializer(tmp_path, "tenant-no-bootstrap")
+        initializer.ensure_seeded_bootstrap(enable_bootstrap_chat=False)
+
+        workspace_dir = (
+            tmp_path / "tenant-no-bootstrap" / "workspaces" / "default"
+        )
+        assert not (workspace_dir / "BOOTSTRAP.md").exists()
+        for filename in (
+            "AGENTS.md",
+            "HEARTBEAT.md",
+            "MEMORY.md",
+            "PROFILE.md",
+            "SOUL.md",
+        ):
+            assert (workspace_dir / filename).exists()
+
     def test_ensure_seeded_bootstrap_is_idempotent(self, tmp_path):
         """Runtime bootstrap is idempotent - second call does not re-seed."""
         from swe.agents.skills_manager import (

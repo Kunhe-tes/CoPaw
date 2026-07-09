@@ -947,7 +947,12 @@ def _get_rate_limit_config(
             agent_config = load_agent_config(agent_id, tenant_id=tenant_id)
         else:
             agent_config = load_agent_config(agent_id)
-        return _build_rate_limit_config(agent_config.running)
+        rate_limit_config = _build_rate_limit_config(agent_config.running)
+        from ..app.source_system_config import (
+            resolve_llm_rate_limiter_config,
+        )
+
+        return resolve_llm_rate_limiter_config(rate_limit_config)
     except Exception:
         return None
 
@@ -966,6 +971,11 @@ def _get_model_runtime_configs(
             agent_config = load_agent_config(agent_id, tenant_id=tenant_id)
         else:
             agent_config = load_agent_config(agent_id)
+        rate_limit_config = _build_rate_limit_config(agent_config.running)
+        from ..app.source_system_config import (
+            resolve_llm_rate_limiter_config,
+        )
+
         return (
             RetryConfig(
                 enabled=agent_config.running.llm_retry_enabled,
@@ -973,7 +983,7 @@ def _get_model_runtime_configs(
                 backoff_base=agent_config.running.llm_backoff_base,
                 backoff_cap=agent_config.running.llm_backoff_cap,
             ),
-            _build_rate_limit_config(agent_config.running),
+            resolve_llm_rate_limiter_config(rate_limit_config),
         )
     except Exception:
         return None, None

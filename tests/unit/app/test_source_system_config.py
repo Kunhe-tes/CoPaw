@@ -11,7 +11,8 @@ import pytest
 from fastapi import FastAPI, Request
 from fastapi.testclient import TestClient
 
-from swe.config.config import ToolResultCompactConfig
+from swe.config.config import QueryRetryConfig, ToolResultCompactConfig
+from swe.providers.retry_chat_model import RateLimitConfig
 from swe.app.middleware.tenant_identity import TenantIdentityMiddleware
 from swe.app.source_system_config import router as source_config_router
 from swe.app.source_system_config.middleware import (
@@ -32,6 +33,8 @@ from swe.app.source_system_config.runtime import (
     resolve_cron_task_session_cleanup_config,
     resolve_cron_unread_auto_pause_config,
     resolve_file_read_truncation_config,
+    resolve_llm_rate_limiter_config,
+    resolve_query_retry_config,
     resolve_tool_result_compact_config,
 )
 from swe.app.source_system_config.service import (
@@ -69,6 +72,23 @@ DEFAULT_EXPECTED_SOURCE_CONFIG = {
         "enabled": False,
         "retention_days": 30,
         "cron": "0 1 * * *",
+    },
+    "query_retry": {
+        "enabled": False,
+        "max_retries": 3,
+        "backoff_base": 2.0,
+        "backoff_cap": 30.0,
+    },
+    "llm_rate_limiter": {
+        "llm_max_concurrent": 5,
+        "llm_chat_max_concurrent": 2,
+        "llm_cron_max_concurrent": 3,
+        "llm_max_qpm": 100,
+        "llm_rate_limit_pause": 5.0,
+        "llm_rate_limit_jitter": 1.0,
+        "llm_acquire_timeout": 300.0,
+        "llm_chat_acquire_timeout": None,
+        "llm_cron_acquire_timeout": None,
     },
 }
 
@@ -851,6 +871,68 @@ class TestSourceSystemConfigService:
         }
 
     @pytest.mark.asyncio
+    async def test_upsert_current_source_config_keeps_model_call_policy_defaults(
+        self,
+    ):
+        """模型调用策略默认等值配置仍代表显式 source 覆盖。"""
+        store = _FakeManagementStore()
+        service = SourceSystemConfigService(
+            store,
+            ttl_seconds=30,
+            time_fn=lambda: 100,
+        )
+
+        result = await service.upsert_current_source_config(
+            "portal",
+            SourceSystemConfig.model_validate(
+                {
+                    "query_retry": {
+                        "enabled": False,
+                        "max_retries": 3,
+                        "backoff_base": 2.0,
+                        "backoff_cap": 30.0,
+                    },
+                    "llm_rate_limiter": {
+                        "llm_max_concurrent": 5,
+                        "llm_chat_max_concurrent": 2,
+                        "llm_cron_max_concurrent": 3,
+                        "llm_max_qpm": 100,
+                        "llm_rate_limit_pause": 5.0,
+                        "llm_rate_limit_jitter": 1.0,
+                        "llm_acquire_timeout": 300.0,
+                        "llm_chat_acquire_timeout": None,
+                        "llm_cron_acquire_timeout": None,
+                    },
+                },
+            ),
+            updated_by="alice",
+        )
+
+        assert result.is_default is False
+        assert result.config.as_dict() == {
+            "query_retry": {
+                "enabled": False,
+                "max_retries": 3,
+                "backoff_base": 2.0,
+                "backoff_cap": 30.0,
+            },
+            "llm_rate_limiter": {
+                "llm_max_concurrent": 5,
+                "llm_chat_max_concurrent": 2,
+                "llm_cron_max_concurrent": 3,
+                "llm_max_qpm": 100,
+                "llm_rate_limit_pause": 5.0,
+                "llm_rate_limit_jitter": 1.0,
+                "llm_acquire_timeout": 300.0,
+                "llm_chat_acquire_timeout": None,
+                "llm_cron_acquire_timeout": None,
+            },
+        }
+        assert (
+            store.records["portal"].config.as_dict() == result.config.as_dict()
+        )
+
+    @pytest.mark.asyncio
     async def test_upsert_current_source_config_prunes_empty_immediate_sections(
         self,
     ):
@@ -1259,6 +1341,137 @@ class TestSourceSystemConfigRuntime:
             retention_days=8,
         )
 
+    def test_query_retry_ignores_effective_defaults_without_raw(self):
+        """effective 默认值不能被误判为 source 显式 Query 重试覆盖。"""
+        base = QueryRetryConfig(
+            enabled=True,
+            max_retries=5,
+            backoff_base=1.5,
+            backoff_cap=12.0,
+        )
+        effective = EffectiveSourceSystemConfig(
+            source_id="portal",
+            config=SourceSystemConfig.model_validate(
+                DEFAULT_EXPECTED_SOURCE_CONFIG,
+            ),
+            raw_config=None,
+            version=0,
+            is_default=True,
+        )
+
+        assert resolve_query_retry_config(base, effective) == base
+
+    def test_query_retry_merges_partial_source_override(self):
+        """source Query 重试局部覆盖只替换显式字段。"""
+        base = QueryRetryConfig(
+            enabled=False,
+            max_retries=5,
+            backoff_base=1.5,
+            backoff_cap=12.0,
+        )
+        effective = EffectiveSourceSystemConfig(
+            source_id="portal",
+            config=SourceSystemConfig.model_validate(
+                DEFAULT_EXPECTED_SOURCE_CONFIG,
+            ),
+            raw_config=SourceSystemConfig.model_validate(
+                {
+                    "query_retry": {
+                        "enabled": True,
+                        "max_retries": 2,
+                    },
+                },
+            ),
+            version=3,
+        )
+
+        assert resolve_query_retry_config(base, effective) == QueryRetryConfig(
+            enabled=True,
+            max_retries=2,
+            backoff_base=1.5,
+            backoff_cap=12.0,
+        )
+
+    def test_llm_rate_limiter_merges_partial_source_override(self):
+        """source LLM 限流局部覆盖只替换显式字段。"""
+        base = RateLimitConfig(
+            max_concurrent=7,
+            chat_max_concurrent=4,
+            cron_max_concurrent=6,
+            max_qpm=70,
+            pause_seconds=4.0,
+            jitter_range=0.5,
+            acquire_timeout=30.0,
+            chat_acquire_timeout=None,
+            cron_acquire_timeout=45.0,
+        )
+        effective = EffectiveSourceSystemConfig(
+            source_id="portal",
+            config=SourceSystemConfig.model_validate(
+                DEFAULT_EXPECTED_SOURCE_CONFIG,
+            ),
+            raw_config=SourceSystemConfig.model_validate(
+                {
+                    "llm_rate_limiter": {
+                        "llm_chat_max_concurrent": 1,
+                        "llm_max_qpm": 12,
+                    },
+                },
+            ),
+            version=3,
+        )
+
+        result = resolve_llm_rate_limiter_config(base, effective)
+
+        assert result.max_concurrent == 7
+        assert result.max_concurrent_for("chat") == 1
+        assert result.max_concurrent_for("cron") == 6
+        assert result.max_qpm == 12
+        assert result.pause_seconds == 4.0
+        assert result.jitter_range == 0.5
+        assert result.acquire_timeout_for("chat") == 30.0
+        assert result.acquire_timeout_for("cron") == 45.0
+
+    def test_llm_rate_limiter_recovers_resolved_invalid_timeouts(
+        self,
+        monkeypatch,
+    ):
+        """局部覆盖与 Agent 等待时间冲突时应修正，避免快速超时。"""
+        from swe.app.source_system_config import runtime
+
+        warning = MagicMock()
+        monkeypatch.setattr(runtime.logger, "warning", warning)
+        base = RateLimitConfig(
+            max_concurrent=7,
+            max_qpm=70,
+            pause_seconds=4.0,
+            jitter_range=0.5,
+            acquire_timeout=30.0,
+        )
+        effective = EffectiveSourceSystemConfig(
+            source_id="portal",
+            config=SourceSystemConfig.model_validate(
+                DEFAULT_EXPECTED_SOURCE_CONFIG,
+            ),
+            raw_config=SourceSystemConfig.model_validate(
+                {
+                    "llm_rate_limiter": {
+                        "llm_rate_limit_pause": 40,
+                        "llm_rate_limit_jitter": 5,
+                    },
+                },
+            ),
+            version=3,
+        )
+
+        result = resolve_llm_rate_limiter_config(base, effective)
+
+        assert result.pause_seconds == 40.0
+        assert result.jitter_range == 5.0
+        assert result.acquire_timeout == 46.0
+        warning.assert_called_once()
+        assert warning.call_args.args[1] == "portal"
+
     def test_tool_result_config_accepts_full_source_override(self):
         """source 完整覆盖应成为本请求最终工具结果压缩配置。"""
         base = ToolResultCompactConfig(
@@ -1419,7 +1632,6 @@ class TestSourceSystemConfigRuntime:
         assert result.max_bytes == 24000
         assert result.explicit is False
 
-
     def test_cron_unread_auto_pause_runtime_uses_source_config(self):
         """运行时应读取当前 source 的未读自动暂停开关和条数。"""
         effective = EffectiveSourceSystemConfig(
@@ -1564,6 +1776,35 @@ class TestSourceSystemConfigMiddleware:
         assert response.json() == {
             "detail": "Source system config data is invalid",
         }
+
+    def test_middleware_skips_public_static_routes_with_source_header(self):
+        """静态文件请求不应因 X-Source-Id 触发 source 配置解析。"""
+        service = SimpleNamespace(
+            resolve_config=AsyncMock(
+                side_effect=AssertionError("source config resolved"),
+            ),
+        )
+        app = FastAPI()
+
+        @app.get("/static/{scope_id}/{agent_id}/{file_name:path}")
+        async def static_file():
+            assert get_current_source_system_config() is None
+            return {"ok": True}
+
+        app.add_middleware(SourceSystemConfigMiddleware, service=service)
+        app.add_middleware(TenantIdentityMiddleware, default_tenant_id=None)
+
+        response = TestClient(app, raise_server_exceptions=False).get(
+            "/static/default/default/report.html",
+            headers={
+                "X-Tenant-Id": "default",
+                "X-Source-Id": "RMASSIST",
+            },
+        )
+
+        assert response.status_code == 200
+        assert response.json() == {"ok": True}
+        service.resolve_config.assert_not_awaited()
 
 
 class TestSourceSystemConfigApi:

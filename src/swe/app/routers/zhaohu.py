@@ -7,6 +7,7 @@ Exports ``zhaohu_router`` with Zhaohu callback endpoint:
 
 from __future__ import annotations
 
+import json
 import logging
 import ssl
 from typing import Any, Optional, Dict
@@ -30,7 +31,7 @@ zhaohu_router = APIRouter(tags=["zhaohu"])
 class ZhaohuCallbackRequest(BaseModel):
     """Zhaohu message callback request body."""
 
-    msg_id: str = Field(default="", alias="msgId")
+    msg_id: Optional[str] = Field(default=None, alias="msgId")
     source_id: str = Field(default="", alias="sourceId")
     from_id: str = Field(default="", alias="fromId")
     to_id: str = Field(default="", alias="toId")
@@ -41,11 +42,23 @@ class ZhaohuCallbackRequest(BaseModel):
     timestamp: int = Field(default=0)
     custom_info: Optional[Any] = Field(default=None, alias="customInfo")
 
-    model_config = {"populate_by_name": True}
+    model_config = {"populate_by_name": True, "extra": "ignore"}
 
 
 # Default timeout for user query requests
 _DEFAULT_TIMEOUT = 30.0
+
+
+def _json_response(
+    code: str,
+    message: str,
+    status_code: int = 200,
+) -> Response:
+    return Response(
+        content=json.dumps({"code": code, "message": message}),
+        status_code=status_code,
+        media_type="application/json",
+    )
 
 
 async def _query_user_info(open_id: str) -> Optional[Dict[str, Any]]:
@@ -119,6 +132,42 @@ async def _query_user_info(open_id: str) -> Optional[Dict[str, Any]]:
         return None
 
 
+async def _resolve_user_scope(
+    request: Request,
+    from_id: str,
+    to_id: str,
+) -> str:
+    """Query user info, set request.state for tenant/scope resolution.
+
+    Returns sap_id (empty string if lookup failed).
+    """
+    user_info = await _query_user_info(from_id)
+    sap_id = (user_info or {}).get("sapId") or ""
+    if sap_id:
+        request.state.tenant_id = sap_id
+        request.state.user_id = sap_id
+
+    source_id = None
+    if sap_id and to_id:
+        from ..channels.zhaohu.binding_store import get_zhaohu_binding_store
+
+        binding_store = get_zhaohu_binding_store()
+        if binding_store:
+            source_id = await binding_store.get_source_id_by_robot(
+                sap_id,
+                to_id,
+            )
+    if source_id:
+        request.state.source_id = source_id
+    if sap_id and source_id:
+        from ...config.context import encode_scope_id
+
+        request.state.scope_id = encode_scope_id(sap_id, source_id)
+        request.state.effective_tenant_id = request.state.scope_id
+
+    return sap_id
+
+
 async def _get_zhaohu_channel(request: Request):
     """Retrieve the ZhaohuChannel from workspace, or None."""
     from ..agent_context import get_agent_for_request
@@ -161,90 +210,156 @@ async def _process_callback_background(
         )
 
 
-@zhaohu_router.post("/zhaohu/callback")
-async def zhaohu_callback(
+async def _handle_custom_card(
     request: Request,
+    body: ZhaohuCallbackRequest,
+) -> Response:
+    """Handle CustomCard callback: parse addition and submit approval decision."""
+    try:
+        msg_data = json.loads(body.msg_content)
+    except (json.JSONDecodeError, TypeError):
+        logger.warning("zhaohu CustomCard: invalid msgContent")
+        return _json_response("ok", "received")
+
+    addition = msg_data.get("addition") or {}
+    request_id = addition.get("request_id", "")
+    action_type = addition.get("type", "")
+
+    if not request_id or action_type not in ("approve", "reject"):
+        logger.warning(
+            "zhaohu CustomCard: missing request_id or invalid type, addition=%s",
+            addition,
+        )
+        return _json_response("ok", "received")
+
+    agent_id = addition.get("agent_id") or addition.get("agentId", "")
+    if agent_id:
+        request.state.agent_id = agent_id
+
+    tenant_id = addition.get("tenant_id", "")
+    if tenant_id and not getattr(request.state, "tenant_id", None):
+        request.state.tenant_id = tenant_id
+        request.state.user_id = tenant_id
+
+    source_id = addition.get("source_id", "")
+    if source_id and not getattr(request.state, "source_id", None):
+        request.state.source_id = source_id
+
+    state_tenant_id = getattr(request.state, "tenant_id", None)
+    state_source_id = getattr(request.state, "source_id", None)
+    if (
+        state_tenant_id
+        and state_source_id
+        and not getattr(request.state, "scope_id", None)
+    ):
+        from ...config.context import encode_scope_id
+
+        request.state.scope_id = encode_scope_id(
+            state_tenant_id,
+            state_source_id,
+        )
+        request.state.effective_tenant_id = request.state.scope_id
+
+    user_id = getattr(request.state, "user_id", "")
+    state_scope_id = getattr(request.state, "scope_id", None)
+
+    from ..tenant_context import bind_tenant_context
+    from ..routers.approvals import ExternalApprovalRequest, _submit_decision
+    from ..approvals.external import ExternalApprovalDecision
+
+    decision = (
+        ExternalApprovalDecision.APPROVE
+        if action_type == "approve"
+        else ExternalApprovalDecision.DENY
+    )
+    approval_body = ExternalApprovalRequest(
+        source_channel="zhaohu",
+        source_user_id=user_id,
+        source_message_id=request_id,
+    )
+    try:
+        with bind_tenant_context(
+            tenant_id=state_tenant_id,
+            user_id=user_id,
+            source_id=state_source_id,
+            scope_id=state_scope_id,
+        ):
+            result = await _submit_decision(
+                request_id,
+                decision,
+                approval_body,
+                request,
+            )
+        return Response(
+            content=result.model_dump_json(),
+            media_type="application/json",
+        )
+    except Exception:
+        logger.exception(
+            "zhaohu CustomCard approval failed: request_id=%s type=%s",
+            request_id,
+            action_type,
+        )
+        return _json_response("error", "approval failed", status_code=500)
+
+
+async def _handle_text_message(
+    zhaohu_ch,
     body: ZhaohuCallbackRequest,
     background_tasks: BackgroundTasks,
 ) -> Response:
-    """Zhaohu message callback: receive inbound messages.
-
-    Returns immediately with 'received' status, then processes the message
-    in the background (query user info, call LLM, send response via push_url).
-    """
-    user_info = await _query_user_info(body.from_id)
-    sap_id = (user_info or {}).get("sapId") or ""
-
-    # Set request state so get_agent_for_request can resolve tenant/user
-    if sap_id:
-        request.state.tenant_id = sap_id
-        request.state.user_id = sap_id
-
-    # 从 binding 表查询 source_id
-    source_id = None
-    if sap_id and body.to_id:
-        from ..channels.zhaohu.binding_store import get_zhaohu_binding_store
-
-        binding_store = get_zhaohu_binding_store()
-        if binding_store:
-            source_id = await binding_store.get_source_id_by_robot(
-                sap_id,
-                body.to_id,
-            )
-    logger.info("request zhaohu callback: source_id=%s", source_id)
-
-    if source_id:
-        body.source_id = source_id
-        request.state.source_id = source_id
-    if sap_id and source_id:
-        from ...config.context import encode_scope_id
-
-        request.state.scope_id = encode_scope_id(sap_id, source_id)
-        request.state.effective_tenant_id = request.state.scope_id
-
-    logger.info("zhaohu callback received: %s", user_info)
-    zhaohu_ch = await _get_zhaohu_channel(request)
-    if not zhaohu_ch:
-        logger.warning("zhaohu callback received but channel not available")
-        return Response(
-            content='{"code": "error", "message": "channel not available"}',
-            status_code=503,
-            media_type="application/json",
-        )
-
-    if not zhaohu_ch.enabled:
-        logger.debug("zhaohu callback received but channel disabled")
-        return Response(
-            content='{"code": "error", "message": "channel disabled"}',
-            status_code=503,
-            media_type="application/json",
-        )
-
-    # Log the incoming callback
-    logger.info(
-        "zhaohu callback: msgId=%s fromId=%s msgType=%s",
-        body.msg_id,
-        body.from_id,
-        body.msg_type,
-    )
-
-    # Check for duplicate messages
+    """Handle text callback: dedup check, then process in background."""
     if not zhaohu_ch.try_accept_message(body.msg_id):
         logger.info(
             "zhaohu duplicate ignored: msgId=%s from=%s",
             body.msg_id,
             body.from_id,
         )
-        return Response(
-            content='{"code": "ok", "message": "duplicate ignored"}',
-            media_type="application/json",
-        )
+        return _json_response("ok", "duplicate ignored")
 
-    # Schedule background processing and return immediately
-    # FastAPI will properly await the async function
     background_tasks.add_task(_process_callback_background, zhaohu_ch, body)
+    return _json_response("ok", "received")
 
-    return Response(
-        content='{"code": "ok", "message": "received"}',
-        media_type="application/json",
+
+@zhaohu_router.post("/zhaohu/callback")
+async def zhaohu_callback(
+    request: Request,
+    body: ZhaohuCallbackRequest,
+    background_tasks: BackgroundTasks,
+) -> Response:
+    """Zhaohu message callback: receive inbound messages."""
+    # 通用前置：解析用户身份
+    user_id = await _resolve_user_scope(request, body.from_id, body.to_id)
+    source_id = getattr(request.state, "source_id", None)
+    if source_id:
+        body.source_id = source_id
+    logger.info(
+        "zhaohu callback: fromId=%s userId=%s sourceId=%s msgType=%s",
+        body.from_id,
+        user_id,
+        source_id,
+        body.msg_type,
     )
+    if not source_id:
+        return _json_response("error", "source_id not found", status_code=401)
+
+    # 通用前置：获取 channel 并检查可用性
+    zhaohu_ch = await _get_zhaohu_channel(request)
+    if not zhaohu_ch:
+        logger.warning("zhaohu callback received but channel not available")
+        return _json_response(
+            "error",
+            "channel not available",
+            status_code=503,
+        )
+    if not zhaohu_ch.enabled:
+        logger.debug("zhaohu callback received but channel disabled")
+        return _json_response("error", "channel disabled", status_code=503)
+
+    # 按类型分发 回执处理
+    if body.msg_type == "CustomCard":
+        return await _handle_custom_card(request, body)
+    # text
+    if body.msg_type == "text":
+        return await _handle_text_message(zhaohu_ch, body, background_tasks)
+    return _json_response("error", "type not allowed", status_code=401)

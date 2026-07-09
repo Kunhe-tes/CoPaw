@@ -10,6 +10,7 @@ Each Workspace represents a standalone agent workspace with its own:
 All existing single-agent components are reused without modification.
 """
 
+import asyncio
 import logging
 import os
 from pathlib import Path
@@ -109,6 +110,7 @@ class Workspace:
         # Non-service state
         self._config = None  # Loaded before start()
         self._started = False
+        self._starting = False
         self._manager = None  # Reference to MultiAgentManager
         self._task_tracker = TaskTracker()
 
@@ -364,6 +366,7 @@ class Workspace:
         logger.info(f"Starting workspace: {self.agent_id}")
 
         try:
+            self._starting = True
             # 1. Load agent configuration
             self._config = load_agent_config(
                 self.agent_id,
@@ -375,36 +378,80 @@ class Workspace:
             await self._service_manager.start_all()
 
             self._started = True
+            self._starting = False
             logger.info(f"Workspace started successfully: {self.agent_id}")
 
+        except asyncio.CancelledError:
+            logger.info(f"Workspace start cancelled: {self.agent_id}")
+            await self.stop(final=True, stop_reused=False)
+            raise
         except Exception as e:
             logger.error(
                 f"Failed to start agent instance {self.agent_id}: {e}",
             )
             # Clean up partially started components
-            await self.stop()
+            await self.stop(final=True, stop_reused=False)
             raise
 
-    async def stop(self, final: bool = True):
+    async def stop(self, final: bool = True, *, stop_reused: bool = True):
         """Stop agent instance and clean up all resources.
 
         Args:
             final: If True (default), stop ALL services including reusable.
                    If False, skip reusable services (for reload scenario).
+            stop_reused: If False, skip services borrowed from another
+                workspace even during final cleanup.
         """
-        if not self._started:
+        if not self._started and not self._starting:
             logger.debug(f"Workspace not started: {self.agent_id}")
             return
 
         logger.info(
-            f"Stopping agent instance: {self.agent_id} (final={final})",
+            f"Stopping agent instance: {self.agent_id} "
+            f"(final={final}, stop_reused={stop_reused})",
+        )
+
+        service_refs = (
+            dict(getattr(self._service_manager, "services", {}))
+            if final
+            else {}
         )
 
         # Stop all services via ServiceManager (handles reuse automatically)
-        await self._service_manager.stop_all(final=final)
+        await self._service_manager.stop_all(
+            final=final,
+            stop_reused=stop_reused,
+        )
+
+        if final:
+            self._release_final_service_references(service_refs)
 
         self._started = False
+        self._starting = False
         logger.info(f"Workspace stopped: {self.agent_id}")
+
+    def _release_final_service_references(self, services: dict) -> None:
+        """Drop reverse references held by services after final shutdown."""
+        runner = services.get("runner")
+        if runner is not None:
+            if hasattr(runner, "set_workspace"):
+                runner.set_workspace(None)
+            if hasattr(runner, "set_chat_manager"):
+                runner.set_chat_manager(None)
+            if hasattr(runner, "memory_manager"):
+                runner.memory_manager = None
+            if hasattr(runner, "_manager"):
+                runner._manager = None  # pylint: disable=protected-access
+
+        channel_manager = services.get("channel_manager")
+        if channel_manager is not None and hasattr(
+            channel_manager,
+            "set_workspace",
+        ):
+            channel_manager.set_workspace(None)
+
+        self._manager = None
+        self._config = None
 
     def __repr__(self) -> str:
         """String representation of workspace."""

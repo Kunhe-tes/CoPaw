@@ -24,6 +24,12 @@ from swe.agents.hook_runtime.models import (
 from swe.agents.skill_invocation_detector import SkillInvocationDetector
 from swe.agents.skill_tool_registry import SkillToolRegistry
 from swe.agents.tool_guard_mixin import ToolGuardMixin
+from swe.security.tool_guard.models import (
+    GuardFinding,
+    GuardSeverity,
+    GuardThreatCategory,
+    ToolGuardResult,
+)
 
 
 class _Memory:
@@ -110,6 +116,18 @@ class _AgentScopeLikeFakeAgent(ToolGuardMixin, _AgentScopeLikeBaseAgent):
         self.printed.append(msg)
 
 
+class _RecordingApprovalService:
+    def __init__(self) -> None:
+        self.create_pending_kwargs = None
+
+    async def cancel_stale_pending_for_tool_call(self, *args, **kwargs):
+        return 0
+
+    async def create_pending(self, **kwargs):
+        self.create_pending_kwargs = kwargs
+        return SimpleNamespace(request_id="approval-1", **kwargs)
+
+
 @pytest.mark.asyncio
 async def test_tool_trace_prefers_request_context_over_current_trace(
     tmp_path,
@@ -162,6 +180,162 @@ async def test_tool_trace_prefers_request_context_over_current_trace(
     assert emitted_events[0]["user_id"] == "user-1"
     assert emitted_events[0]["session_id"] == "session-1"
     assert emitted_events[0]["source_id"] == "source-request"
+
+
+@pytest.mark.asyncio
+async def test_tool_trace_start_consumes_precomputed_skill_attribution(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    agent = _FakeAgent(tmp_path)
+    agent._request_context.update(
+        {
+            "trace_id": "trace-request",
+            "source_id": "source-request",
+        },
+    )
+    agent._store_precomputed_tool_skill_attribution(
+        "tool-1",
+        {"primary_skill": "fill-metadata"},
+    )
+    emitted_events = []
+
+    class FakeTraceManager:
+        async def emit_tool_call_start(self, **kwargs):
+            emitted_events.append(kwargs)
+            return "span-1"
+
+    monkeypatch.setattr(
+        "swe.agents.tool_guard_mixin.has_trace_manager",
+        lambda: True,
+    )
+    monkeypatch.setattr(
+        "swe.agents.tool_guard_mixin.get_trace_manager",
+        FakeTraceManager,
+    )
+
+    span_id = await agent._emit_tool_trace_start(
+        "read_file",
+        {"path": "README.md"},
+        None,
+        "tool-1",
+    )
+
+    assert span_id == "span-1"
+    assert emitted_events[0]["use_precomputed_attribution"] is True
+    assert emitted_events[0]["precomputed_attribution"] == {
+        "primary_skill": "fill-metadata",
+    }
+    assert agent._consume_precomputed_tool_skill_attribution("tool-1") == (
+        False,
+        None,
+    )
+
+
+@pytest.mark.asyncio
+async def test_tool_trace_start_clears_precomputed_attribution_without_trace_manager(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    agent = _FakeAgent(tmp_path)
+    agent._store_precomputed_tool_skill_attribution(
+        "tool-1",
+        {"primary_skill": "fill-metadata"},
+    )
+
+    monkeypatch.setattr(
+        "swe.agents.tool_guard_mixin.has_trace_manager",
+        lambda: False,
+    )
+
+    span_id = await agent._emit_tool_trace_start(
+        "read_file",
+        {"path": "README.md"},
+        None,
+        "tool-1",
+    )
+
+    assert span_id == ""
+    assert agent._consume_precomputed_tool_skill_attribution("tool-1") == (
+        False,
+        None,
+    )
+
+
+@pytest.mark.asyncio
+async def test_tool_trace_start_clears_precomputed_attribution_without_trace_context(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    agent = _FakeAgent(tmp_path)
+    agent._store_precomputed_tool_skill_attribution(
+        "tool-1",
+        {"primary_skill": "fill-metadata"},
+    )
+
+    monkeypatch.setattr(
+        "swe.agents.tool_guard_mixin.has_trace_manager",
+        lambda: True,
+    )
+    monkeypatch.setattr(
+        agent,
+        "_resolve_trace_context_for_tracing",
+        lambda: None,
+    )
+
+    span_id = await agent._emit_tool_trace_start(
+        "read_file",
+        {"path": "README.md"},
+        None,
+        "tool-1",
+    )
+
+    assert span_id == ""
+    assert agent._consume_precomputed_tool_skill_attribution("tool-1") == (
+        False,
+        None,
+    )
+
+
+@pytest.mark.asyncio
+async def test_tool_guard_pending_extra_includes_request_scope_ids(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    agent = _FakeAgent(tmp_path)
+    agent._request_context.update(
+        {
+            "agent_id": "agent-a",
+            "tenant_id": "tenant-a",
+            "source_id": "source-a",
+        },
+    )
+    approval_service = _RecordingApprovalService()
+    agent._tool_guard_approval_service = approval_service
+    notify = AsyncMock()
+    monkeypatch.setattr(
+        "swe.app.approvals.notify_cron_approval_pending",
+        notify,
+    )
+
+    await agent._acting_with_approval(
+        {
+            "id": "tool-1",
+            "name": "execute_shell_command",
+            "input": {"cmd": "echo hi"},
+        },
+        "execute_shell_command",
+        ToolGuardResult(
+            tool_name="execute_shell_command",
+            params={"cmd": "echo hi"},
+        ),
+    )
+
+    assert approval_service.create_pending_kwargs is not None
+    extra = approval_service.create_pending_kwargs["extra"]
+    assert extra["agent_id"] == "agent-a"
+    assert extra["tenant_id"] == "tenant-a"
+    assert extra["source_id"] == "source-a"
 
 
 @pytest.mark.asyncio
@@ -762,6 +936,56 @@ async def test_pre_tool_prompt_allow_does_not_bypass_tool_guard(
 
     assert result is None
     agent._acting_with_approval.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_unsafe_guard_finding_auto_denies_without_approval_context(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    """后台或无会话场景不能只记录高危发现后继续执行。"""
+    agent = _FakeAgent(tmp_path)
+    agent._request_context.pop("session_id")
+    agent._emit_tool_hook = AsyncMock(return_value=MergedHookResult())
+    agent._run_tool_call_with_hard_timeout = AsyncMock()
+    finding = GuardFinding(
+        id="finding-1",
+        rule_id="TOOL_CMD_NETWORK_TRANSFER",
+        category=GuardThreatCategory.DATA_EXFILTRATION,
+        severity=GuardSeverity.HIGH,
+        title="[HIGH] network transfer",
+        description="network transfer",
+        tool_name="execute_shell_command",
+        param_name="command",
+    )
+    guard_result = ToolGuardResult(
+        tool_name="execute_shell_command",
+        params={"command": "curl https://example.test"},
+        findings=[finding],
+    )
+    agent._tool_guard_engine = SimpleNamespace(
+        enabled=True,
+        is_denied=lambda _tool_name: False,
+        is_guarded=lambda _tool_name: False,
+        guard=lambda *_args, **_kwargs: guard_result,
+    )
+    agent._ensure_tool_guard = lambda: None
+    monkeypatch.setattr(
+        "swe.security.tool_guard.utils.log_findings",
+        lambda *_args, **_kwargs: None,
+    )
+
+    result = await agent._acting(
+        {
+            "id": "tool-1",
+            "name": "execute_shell_command",
+            "input": {"command": "curl https://example.test"},
+        },
+    )
+
+    assert result is None
+    agent._run_tool_call_with_hard_timeout.assert_not_awaited()
+    assert "tool_guard_denied" in str(agent.printed[0].content)
 
 
 @pytest.mark.asyncio

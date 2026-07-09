@@ -6,7 +6,6 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { UIEvent } from "react";
 import { useNavigate } from "react-router-dom";
 import {
-  ArrowUp,
   ArrowUpRight,
   CalendarDays,
   CheckSquare,
@@ -21,13 +20,14 @@ import {
   TrendingUp,
   UserRound,
   Users,
-  Zap,
 } from "lucide-react";
 import { DatePicker, Select, Tooltip, message } from "antd";
 import ReactECharts from "echarts-for-react";
 import type { Dayjs } from "dayjs";
 import dayjs from "dayjs";
 import styles from "./index.module.less";
+import { useIframeStore } from "../../../stores/iframeStore";
+import { DEFAULT_SOURCE_ID } from "../../../constants/identity";
 import {
   tracingApi,
   type BranchMetricItem,
@@ -40,7 +40,6 @@ import {
 import UserDetailModal from "./components/UserDetailModal";
 import SkillDetailModal from "./components/SkillDetailModal";
 import ErrorDetailModal from "./components/ErrorDetailModal";
-import HtmlPreviewClickAnalysis from "./components/HtmlPreviewClickAnalysis";
 import { BBK_ID_MAP, BBK_ID_TO_NAME_MAP, getBbkDisplayName } from "../../../constants/bbk";
 import {
   formatChange,
@@ -68,7 +67,7 @@ const METRIC_ACCENT_COLORS = [
   "#7c3aed",
 ];
 
-const DONUT_COLORS = ["#18b368", "#ef4444", "#94a3b8"];
+const DONUT_COLORS = ["#18b368", "#f97316", "#ef4444", "#94a3b8"]; // 成功、运行中、失败、取消
 const safeNumber = (value: unknown): number =>
   typeof value === "number" && !Number.isNaN(value) ? value : 0;
 
@@ -77,7 +76,7 @@ const iconMap = {
   conversations: MessageCircleMore,
   sessions: CheckSquare,
   tokens: Coins,
-  skills: Zap,
+  customers: Users,
 };
 
 function mapBreakdown(
@@ -108,8 +107,8 @@ function buildMetricCards(
     tokensGrowth: number | null;
     sessionGrowth: number | null;
     userGrowth: number | null;
-    skillGrowth: number | null;
     cronGrowth: number | null;
+    planCustomersGrowth: number | null;
   },
 ): OverviewMetricCard[] {
   return [
@@ -147,14 +146,19 @@ function buildMetricCards(
     },
     {
       key: "cron_tasks",
-      title: "定时任务数",
+      title: "定时任务执行数",
       valueText: (
-        <>
-          {formatNumber(taskStatusSummary?.total_tasks ?? 0)}
-          <span className={styles.newCronHint}>
-            <ArrowUp size={10} className={styles.newCronIcon} />新增：{formatNumber(taskStatusSummary?.new_cron_tasks ?? 0)}个
+        <span className={styles.userValueWrap}>
+          <span className={styles.userTotal}>
+            {formatNumber(taskStatusSummary?.total_tasks ?? 0)}
           </span>
-        </>
+          <span className={styles.userAnnotation}>
+            <span className={styles.annotationRow}>
+              <span className={styles.annotationDot} style={{ background: "#22c55e" }} />
+              已读 {formatNumber(taskStatusSummary?.read_count ?? 0)}
+            </span>
+          </span>
+        </span>
       ),
       changeText: formatChange(growthStats.cronGrowth),
       changeDirection: toChangeDirection(growthStats.cronGrowth),
@@ -171,13 +175,29 @@ function buildMetricCards(
       breakdown: mapBreakdown(overviewStats?.branch_breakdown?.tokens),
     },
     {
-      key: "skills",
-      title: "技能调用次数",
-      valueText: formatNumber(overviewStats?.total_skill_calls ?? 0),
-      changeText: formatChange(growthStats.skillGrowth),
-      changeDirection: toChangeDirection(growthStats.skillGrowth),
+      key: "customers",
+      title: "查看报告客户数",
+      valueText: (
+        <span className={styles.userValueWrap}>
+          <span className={styles.userTotal}>
+            {formatNumber(overviewStats?.plan_customers ?? 0)}
+          </span>
+          <span className={styles.userAnnotation}>
+            <span className={styles.annotationRow}>
+              <span className={styles.annotationDot} style={{ background: "#3b82f6" }} />
+              去洞察客户数 {formatNumber(overviewStats?.insight_customers ?? 0)}
+            </span>
+            <span className={styles.annotationRow}>
+              <span className={styles.annotationDot} style={{ background: "#f97316" }} />
+              去电访客户数 {formatNumber(overviewStats?.phone_customers ?? 0)}
+            </span>
+          </span>
+        </span>
+      ),
+      changeText: formatChange(growthStats.planCustomersGrowth),
+      changeDirection: toChangeDirection(growthStats.planCustomersGrowth),
       accentColor: METRIC_ACCENT_COLORS[4],
-      breakdown: mapBreakdown(overviewStats?.branch_breakdown?.skills),
+      breakdown: mapBreakdown(overviewStats?.branch_breakdown?.customers),
     },
   ];
 }
@@ -234,16 +254,22 @@ function buildExecutionSummary(
       color: DONUT_COLORS[0],
     },
     {
+      key: "running",
+      label: "运行中",
+      value: safeNumber(summary?.running),
+      color: DONUT_COLORS[1],
+    },
+    {
       key: "failed",
       label: "失败",
       value: safeNumber(summary?.failed),
-      color: DONUT_COLORS[1],
+      color: DONUT_COLORS[2],
     },
     {
       key: "cancelled",
       label: "已取消/跳过",
       value: safeNumber(summary?.cancelled),
-      color: DONUT_COLORS[2],
+      color: DONUT_COLORS[3],
     },
   ];
 }
@@ -455,182 +481,223 @@ function TaskFunnel({ taskStatusSummary }: { taskStatusSummary: TaskStatusSummar
   );
 }
 
-function getLabelInterval(dataLength: number): number {
-  if (dataLength <= 7) return 1;
-  if (dataLength <= 14) return 2;
-  if (dataLength <= 24) return 3;
-  return 4;
-}
-
-function getBarWidth(dataLength: number, step: number): number {
-  const maxWidth = Math.floor(step * 0.6);
-  if (dataLength <= 7) return Math.min(20, maxWidth);
-  if (dataLength <= 14) return Math.min(12, maxWidth);
-  if (dataLength <= 24) return Math.min(8, maxWidth);
-  return Math.max(4, Math.min(5, maxWidth));
-}
-
-interface TrendAxisTick {
-  value: number;
-  label: string;
-}
-
-interface TrendHoverZone {
-  key: string;
-  label: string;
-  users: number;
-  calls: number;
-  x: number;
-  y: number;
-  width: number;
-  height: number;
-  pointX: number;
-  pointY: number;
-}
-
-function getNiceAxisMax(value: number): number {
-  if (value <= 0) {
-    return 0;
-  }
-  const magnitude = 10 ** Math.floor(Math.log10(value));
-  const normalized = value / magnitude;
-  const candidates = [1, 1.5, 2, 2.5, 5, 10];
-  const candidate = candidates.find((item) => normalized <= item) ?? 10;
-  return candidate * magnitude;
-}
-
-function formatTrendAxisLabel(value: number, axisMax: number): string {
-  if (value === 0) {
-    return "0";
-  }
-  if (axisMax >= 10000) {
-    const scaled = value / 10000;
-    return `${scaled.toFixed(Number.isInteger(scaled) ? 0 : 1)}W`;
-  }
-  if (axisMax >= 1000) {
-    const scaled = value / 1000;
-    return `${scaled.toFixed(Number.isInteger(scaled) ? 0 : 1)}K`;
-  }
-  return formatNumber(value);
-}
-
-function buildTrendAxisTicks(axisMax: number): TrendAxisTick[] {
-  if (axisMax <= 0) {
-    return Array.from({ length: 6 }, () => ({
-      value: 0,
-      label: "0",
-    }));
-  }
-  const step = axisMax / 5;
-  return Array.from({ length: 6 }, (_, index) => {
-    const value = step * (5 - index);
-    return {
-      value,
-      label: formatTrendAxisLabel(value, axisMax),
-    };
-  });
-}
-
-export function buildTrendSvgData(trendData: TrendDatum[]) {
-  const width = 580;
-  const height = 244;
-  const chartLeft = 18;
-  const chartRight = 18;
-  const chartTop = 10;
-  const chartBottom = 36;
-  const chartWidth = width - chartLeft - chartRight;
-  const chartHeight = height - chartTop - chartBottom;
-  const rawMaxCalls = Math.max(
-    ...trendData.map((item) => safeNumber(item.calls)),
-    0,
-  );
-  const rawMaxUsers = Math.max(
-    ...trendData.map((item) => safeNumber(item.users)),
-    0,
-  );
-  const leftAxisMax = getNiceAxisMax(rawMaxUsers);
-  const rightAxisMax = getNiceAxisMax(rawMaxCalls);
-  const userScaleMax = Math.max(leftAxisMax, 1);
-  const callScaleMax = Math.max(rightAxisMax, 1);
-  const step = trendData.length > 1 ? chartWidth / (trendData.length - 1) : 0;
-  const labelInterval = getLabelInterval(trendData.length);
-  const barWidth = getBarWidth(trendData.length, step);
-
-  const bars = trendData.map((item, index) => {
-    const barHeight = (safeNumber(item.users) / userScaleMax) * chartHeight;
-    const x = chartLeft + index * step - barWidth / 2;
-    const label = item.date.includes(":")
+function buildTrendChartOption(
+  trendData: TrendDatum[],
+  showExtendedTrendMetrics: boolean,
+) {
+  const dates = trendData.map((item) =>
+    item.date.includes(":")
       ? dayjs(item.date).format("HH:mm")
-      : dayjs(item.date).format("MM-DD");
-    return {
-      key: item.date,
-      x,
-      y: chartTop + chartHeight - barHeight,
-      height: barHeight,
-      width: barWidth,
-      label,
-      showLabel: index % labelInterval === 0,
-    };
-  });
-
-  const points = trendData.map((item, index) => {
-    const x = chartLeft + index * step;
-    const y =
-      chartTop +
-      chartHeight -
-      (safeNumber(item.calls) / callScaleMax) * chartHeight;
-    return { x, y };
-  });
-
-  const hoverZones: TrendHoverZone[] = trendData.map((item, index) => {
-    const pointX = points[index]?.x ?? chartLeft;
-    const pointY = points[index]?.y ?? chartTop + chartHeight;
-    const zoneStart =
-      trendData.length === 1
-        ? chartLeft
-        : index === 0
-        ? chartLeft
-        : pointX - step / 2;
-    const zoneEnd =
-      trendData.length === 1
-        ? width - chartRight
-        : index === trendData.length - 1
-        ? width - chartRight
-        : pointX + step / 2;
-
-    return {
-      key: item.date,
-      label: bars[index]?.label ?? item.date,
-      users: safeNumber(item.users),
-      calls: safeNumber(item.calls),
-      x: zoneStart,
-      y: chartTop,
-      width: Math.max(zoneEnd - zoneStart, barWidth),
-      height: chartHeight,
-      pointX,
-      pointY,
-    };
-  });
+      : dayjs(item.date).format("MM-DD"),
+  );
+  const extendedLegend = [
+    "查看方案客户数",
+    "去洞察客户数",
+    "去电访客户数",
+  ];
+  const series = [
+    {
+      name: "调用量",
+      type: "bar" as const,
+      yAxisIndex: 0,
+      data: trendData.map((i) => i.calls),
+      barWidth: 16,
+      itemStyle: {
+        color: "#4f7cff",
+        borderRadius: [8, 8, 0, 0],
+      },
+      emphasis: {
+        itemStyle: {
+          color: "#2f5ff0",
+        },
+      },
+      z: 1,
+    },
+    {
+      name: "调用用户",
+      type: "line" as const,
+      yAxisIndex: 0,
+      data: trendData.map((i) => i.users),
+      smooth: true,
+      lineStyle: {
+        color: "#94a3b8",
+        width: 2,
+        opacity: 0.75,
+      },
+      symbol: "none" as const,
+      z: 2,
+    },
+    {
+      name: "已读任务数",
+      type: "line" as const,
+      yAxisIndex: 1,
+      data: trendData.map((i) => i.read_tasks),
+      smooth: true,
+      symbol: "none" as const,
+      lineStyle: {
+        color: "#c084fc",
+        width: 2,
+        opacity: 0.78,
+      },
+      z: 2,
+    },
+    ...(showExtendedTrendMetrics
+      ? [
+          {
+            name: "查看方案客户数",
+            type: "line" as const,
+            yAxisIndex: 1,
+            data: trendData.map((i) => i.plan_customers),
+            smooth: true,
+            symbol: "circle" as const,
+            symbolSize: 8,
+            lineStyle: {
+              color: "#f97316",
+              width: 3,
+            },
+            itemStyle: {
+              color: "#f97316",
+              borderColor: "#ffffff",
+              borderWidth: 2,
+            },
+            z: 4,
+          },
+          {
+            name: "去洞察客户数",
+            type: "line" as const,
+            yAxisIndex: 1,
+            data: trendData.map((i) => i.insight_customers),
+            smooth: true,
+            symbol: "none" as const,
+            lineStyle: {
+              color: "#fb7185",
+              width: 2,
+              opacity: 0.72,
+            },
+            z: 2,
+          },
+          {
+            name: "去电访客户数",
+            type: "line" as const,
+            yAxisIndex: 1,
+            data: trendData.map((i) => i.phone_customers),
+            smooth: true,
+            symbol: "circle" as const,
+            symbolSize: 8,
+            lineStyle: {
+              color: "#10b981",
+              width: 3,
+            },
+            itemStyle: {
+              color: "#10b981",
+              borderColor: "#ffffff",
+              borderWidth: 2,
+            },
+            z: 4,
+          },
+        ]
+      : []),
+  ];
 
   return {
-    width,
-    height,
-    chartLeft,
-    chartRight,
-    chartTop,
-    chartBottom,
-    chartHeight,
-    leftAxisTicks: buildTrendAxisTicks(leftAxisMax),
-    rightAxisTicks: buildTrendAxisTicks(rightAxisMax),
-    bars,
-    points,
-    hoverZones,
-    polyline: points.map((point) => `${point.x},${point.y}`).join(" "),
+    tooltip: {
+      trigger: "axis" as const,
+      axisPointer: {
+        type: "cross" as const,
+        crossStyle: {
+          color: "#94a3b8",
+        },
+      },
+      backgroundColor: "rgba(15, 23, 42, 0.94)",
+      borderColor: "rgba(148, 163, 184, 0.18)",
+      textStyle: {
+        color: "#f8fafc",
+      },
+    },
+    legend: {
+      show: true,
+      type: "scroll" as const,
+      data: [
+        "调用量",
+        "调用用户",
+        "已读任务数",
+        ...extendedLegend.filter(() => showExtendedTrendMetrics),
+      ],
+      bottom: 0,
+      left: "center" as const,
+      itemWidth: 12,
+      itemHeight: 8,
+      itemGap: 14,
+      textStyle: {
+        color: "#64748b",
+        fontSize: 12,
+        fontWeight: 600,
+      },
+      pageIconColor: "#2563eb",
+      pageIconInactiveColor: "#cbd5e1",
+      pageTextStyle: {
+        color: "#94a3b8",
+      },
+    },
+    grid: {
+      left: 60,
+      right: 60,
+      top: 28,
+      bottom: 52,
+    },
+    xAxis: {
+      type: "category" as const,
+      data: dates,
+      axisTick: { show: false },
+      axisLine: {
+        lineStyle: {
+          color: "#dbe3ef",
+        },
+      },
+      axisLabel: {
+        interval: "auto" as const,
+        color: "#64748b",
+      },
+    },
+    yAxis: [
+      {
+        type: "value" as const,
+        name: "调用量 / 用户",
+        position: "left" as const,
+        nameTextStyle: {
+          color: "#64748b",
+        },
+        splitLine: {
+          lineStyle: {
+            color: "#e9eff7",
+          },
+        },
+        axisLabel: {
+          color: "#94a3b8",
+        },
+      },
+      {
+        type: "value" as const,
+        name: showExtendedTrendMetrics ? "客户数/任务数" : "任务数",
+        position: "right" as const,
+        nameTextStyle: {
+          color: "#64748b",
+        },
+        splitLine: {
+          show: false,
+        },
+        axisLabel: {
+          color: "#94a3b8",
+        },
+      },
+    ],
+    series,
   };
 }
 
 export default function BusinessOverviewPage() {
   const navigate = useNavigate();
+  const sourceId = useIframeStore((state) => state.source) || DEFAULT_SOURCE_ID;
 
   const [timeRange, setTimeRange] = useState<TimeRange>("day");
   const [dateRange, setDateRange] = useState<[Dayjs, Dayjs]>([dayjs(), dayjs()]);
@@ -645,23 +712,23 @@ export default function BusinessOverviewPage() {
     tokensGrowth: number | null;
     sessionGrowth: number | null;
     userGrowth: number | null;
-    skillGrowth: number | null;
     cronGrowth: number | null;
     avgRoundsGrowth: number | null;
     multiRoundRatioGrowth: number | null;
     avgDurationGrowth: number | null;
     avgSessionsPerUserGrowth: number | null;
+    planCustomersGrowth: number | null;
   }>({
     callsGrowth: null,
     tokensGrowth: null,
     sessionGrowth: null,
     userGrowth: null,
-    skillGrowth: null,
     cronGrowth: null,
     avgRoundsGrowth: null,
     multiRoundRatioGrowth: null,
     avgDurationGrowth: null,
     avgSessionsPerUserGrowth: null,
+    planCustomersGrowth: null,
   });
   const [trendData, setTrendData] = useState<TrendDatum[]>([]);
   const [activeUsers, setActiveUsers] = useState<UserRow[]>([]);
@@ -693,7 +760,6 @@ export default function BusinessOverviewPage() {
   const [skillModalOpen, setSkillModalOpen] = useState(false);
   const [selectedSkillName, setSelectedSkillName] = useState("");
   const [errorModalOpen, setErrorModalOpen] = useState(false);
-  const [activeTrendIndex, setActiveTrendIndex] = useState<number | null>(null);
 
   const startDateText = useMemo(
     () => dateRange[0].format("YYYY-MM-DD"),
@@ -716,6 +782,7 @@ export default function BusinessOverviewPage() {
     }
     return `/analytics/cron-job-overview?${params.toString()}`;
   }, [effectiveBbkIds, endDateText, startDateText]);
+  const showExtendedTrendMetrics = sourceId === "RMASSIST";
 
   const transformUserData = useCallback(
     (items: Record<string, unknown>[]): UserRow[] =>
@@ -952,10 +1019,6 @@ export default function BusinessOverviewPage() {
     fetchActiveUsers,
   ]);
 
-  useEffect(() => {
-    setActiveTrendIndex(null);
-  }, [trendData]);
-
   const handleModeChange = (nextRange: TimeRange) => {
     setTimeRange(nextRange);
     const today = dayjs();
@@ -1082,15 +1145,6 @@ export default function BusinessOverviewPage() {
     () => buildErrorSummary(errorSummaryData),
     [errorSummaryData],
   );
-  const trendSvg = useMemo(() => buildTrendSvgData(trendData), [trendData]);
-  const activeTrendZone =
-    activeTrendIndex === null ? null : trendSvg.hoverZones[activeTrendIndex] ?? null;
-  const trendTooltipStyle = activeTrendZone
-    ? {
-        left: `${Math.min(92, Math.max(8, (activeTrendZone.pointX / trendSvg.width) * 100))}%`,
-        top: `${Math.min(78, Math.max(10, (activeTrendZone.pointY / trendSvg.height) * 100))}%`,
-      }
-    : undefined;
   return (
     <div className={styles.businessOverviewPage}>
       <header className={styles.pageHeader}>
@@ -1288,155 +1342,12 @@ export default function BusinessOverviewPage() {
           <div className={styles.panelHeader}>
             <h3 className={styles.panelTitle}>调用量趋势</h3>
           </div>
-          <div className={styles.trendLegend}>
-            <span className={styles.legendItem}>
-              <i className={styles.legendBarMark} />
-              调用用户
-            </span>
-            <span className={styles.legendItem}>
-              <i className={styles.legendLineMark} />
-              调用次数
-            </span>
-          </div>
           <div className={styles.trendChart}>
-            <div className={styles.axisLeft}>
-              {trendSvg.leftAxisTicks.map((tick, index) => (
-                <span key={`left-${tick.value}-${index}`}>{tick.label}</span>
-              ))}
-            </div>
-            <div
-              className={styles.trendPlotArea}
-              onMouseLeave={() => {
-                setActiveTrendIndex(null);
-              }}
-            >
-              <svg
-                viewBox={`0 0 ${trendSvg.width} ${trendSvg.height}`}
-                className={styles.trendSvg}
-                preserveAspectRatio="xMidYMid meet"
-              >
-                <defs>
-                  <linearGradient
-                    id="overviewBarGradient"
-                    x1="0%"
-                    y1="0%"
-                    x2="0%"
-                    y2="100%"
-                  >
-                    <stop offset="0%" stopColor="#4f7fff" />
-                    <stop offset="100%" stopColor="#2563eb" />
-                  </linearGradient>
-                </defs>
-
-                {[0, 1, 2, 3, 4, 5].map((row) => {
-                  const y = trendSvg.chartTop + (trendSvg.chartHeight / 5) * row;
-                  return (
-                    <line
-                      key={`grid-${row}`}
-                      x1={trendSvg.chartLeft}
-                      y1={y}
-                      x2={trendSvg.width - trendSvg.chartRight}
-                      y2={y}
-                      className={styles.gridLine}
-                    />
-                  );
-                })}
-
-                {activeTrendZone && (
-                  <line
-                    x1={activeTrendZone.pointX}
-                    y1={trendSvg.chartTop}
-                    x2={activeTrendZone.pointX}
-                    y2={trendSvg.chartTop + trendSvg.chartHeight}
-                    className={styles.trendGuideLine}
-                  />
-                )}
-
-                {trendSvg.bars.map((bar, index) => (
-                  <g key={bar.key}>
-                    <rect
-                      x={bar.x}
-                      y={bar.y}
-                      width={bar.width}
-                      height={bar.height}
-                      rx="4"
-                      fill="url(#overviewBarGradient)"
-                      className={
-                        activeTrendIndex === index
-                          ? styles.trendBarActive
-                          : styles.trendBar
-                      }
-                    />
-                    {bar.showLabel && (
-                      <text x={bar.x + bar.width / 2} y={trendSvg.height - trendSvg.chartBottom + 22} className={styles.axisLabel}>
-                        {bar.label}
-                      </text>
-                    )}
-                  </g>
-                ))}
-
-                <polyline
-                  points={trendSvg.polyline}
-                  className={styles.trendLine}
-                />
-
-                {trendSvg.points.map((point, index) => (
-                  <circle
-                    key={`${point.x}-${point.y}`}
-                    cx={point.x}
-                    cy={point.y}
-                    r={activeTrendIndex === index ? "5.5" : "4.5"}
-                    className={
-                      activeTrendIndex === index
-                        ? styles.trendPointActive
-                        : styles.trendPoint
-                    }
-                  />
-                ))}
-
-                {trendSvg.hoverZones.map((zone, index) => (
-                  <rect
-                    key={`hover-${zone.key}`}
-                    data-testid={`trend-hover-zone-${index}`}
-                    x={zone.x}
-                    y={zone.y}
-                    width={zone.width}
-                    height={zone.height}
-                    className={styles.trendHoverZone}
-                    onMouseEnter={() => {
-                      setActiveTrendIndex(index);
-                    }}
-                  />
-                ))}
-              </svg>
-
-              {activeTrendZone && (
-                <div
-                  data-testid="trend-tooltip"
-                  className={styles.trendTooltip}
-                  style={trendTooltipStyle}
-                >
-                  <div className={styles.trendTooltipDate}>{activeTrendZone.label}</div>
-                  <div className={styles.trendTooltipRow}>
-                    <span className={styles.trendTooltipLabel}>调用用户</span>
-                    <strong className={styles.trendTooltipValue}>
-                      {formatNumber(activeTrendZone.users)}
-                    </strong>
-                  </div>
-                  <div className={styles.trendTooltipRow}>
-                    <span className={styles.trendTooltipLabel}>调用次数</span>
-                    <strong className={styles.trendTooltipValue}>
-                      {formatNumber(activeTrendZone.calls)}
-                    </strong>
-                  </div>
-                </div>
-              )}
-            </div>
-            <div className={styles.axisRight}>
-              {trendSvg.rightAxisTicks.map((tick, index) => (
-                <span key={`right-${tick.value}-${index}`}>{tick.label}</span>
-              ))}
-            </div>
+            <ReactECharts
+              className={styles.trendChartCanvas}
+              option={buildTrendChartOption(trendData, showExtendedTrendMetrics)}
+              style={{ height: 280, width: "100%", gridColumn: "1 / -1" }}
+            />
           </div>
         </article>
 
@@ -1803,12 +1714,6 @@ export default function BusinessOverviewPage() {
           </div>
         </article>
       </section>
-
-      <HtmlPreviewClickAnalysis
-        dateRange={dateRange}
-        effectiveBbkIds={effectiveBbkIds}
-        refreshKey={htmlPreviewRefreshKey}
-      />
 
       <UserDetailModal
         open={modalOpen}

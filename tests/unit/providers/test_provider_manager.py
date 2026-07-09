@@ -207,6 +207,41 @@ async def test_add_custom_provider_and_reload_from_storage(
     assert isinstance(loaded_duplicate, OpenAIProvider)
 
 
+async def test_add_custom_provider_uses_runtime_state_worker_for_local_save(
+    isolated_secret_dir,
+    monkeypatch,
+) -> None:
+    manager = ProviderManager()
+    worker_calls = []
+
+    async def fake_run_runtime_state_work(func, /, *args, **kwargs):
+        worker_calls.append((func.__name__, args, kwargs))
+        return func(*args, **kwargs)
+
+    monkeypatch.setattr(
+        provider_manager_module,
+        "run_runtime_state_work",
+        fake_run_runtime_state_work,
+        raising=False,
+    )
+    custom = OpenAIProvider(
+        id="worker-provider",
+        name="Worker Provider",
+        base_url="https://worker.example/v1",
+        api_key="sk-worker",
+        models=[ModelInfo(id="worker-model", name="Worker Model")],
+    )
+
+    created = await manager.add_custom_provider(custom)
+
+    assert created.id == "worker-provider"
+    assert len(worker_calls) == 1
+    func_name, args, kwargs = worker_calls[0]
+    assert func_name == "_save_provider"
+    assert args[0].id == "worker-provider"
+    assert kwargs == {"is_builtin": False, "skip_if_exists": False}
+
+
 async def test_activate_provider_persists_active_model(
     isolated_secret_dir,
     monkeypatch,
@@ -238,6 +273,39 @@ async def test_activate_provider_persists_active_model(
     assert reloaded.active_model is not None
     assert reloaded.active_model.provider_id == "openai"
     assert reloaded.active_model.model == "gpt-5"
+
+
+async def test_activate_model_uses_runtime_state_worker_for_active_model_save(
+    isolated_secret_dir,
+    monkeypatch,
+) -> None:
+    manager = ProviderManager()
+    _seed_builtins(manager, _openai_provider())
+    worker_calls = []
+
+    async def fake_run_runtime_state_work(func, /, *args, **kwargs):
+        worker_calls.append((func.__name__, args, kwargs))
+        return func(*args, **kwargs)
+
+    monkeypatch.setattr(
+        provider_manager_module,
+        "run_runtime_state_work",
+        fake_run_runtime_state_work,
+        raising=False,
+    )
+    monkeypatch.setattr(manager, "maybe_probe_multimodal", lambda *_: None)
+
+    await manager.activate_model("openai", "gpt-5")
+
+    assert manager.active_model == ModelSlotConfig(
+        provider_id="openai",
+        model="gpt-5",
+    )
+    assert len(worker_calls) == 1
+    func_name, args, kwargs = worker_calls[0]
+    assert func_name == "save_active_model"
+    assert args == (manager.active_model,)
+    assert kwargs == {}
 
 
 def test_provider_manager_no_longer_exposes_local_model_restore() -> None:

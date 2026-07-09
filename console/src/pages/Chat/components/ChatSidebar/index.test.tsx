@@ -36,6 +36,9 @@ const mocks = vi.hoisted(() => ({
     getSessions: vi.fn(),
     isSessionsListLoading: false,
   },
+  iframeState: {
+    bbk: null as string | null,
+  },
 }));
 
 vi.mock("react-router-dom", () => ({
@@ -44,9 +47,15 @@ vi.mock("react-router-dom", () => ({
 }));
 
 vi.mock("antd", () => ({
-  Image: Object.assign(() => null, {
-    PreviewGroup: ({ children }: { children: React.ReactNode }) => children,
-  }),
+  Image: Object.assign(
+    ({ src }: { src?: string }) =>
+      src ? (
+        <img alt="guide-preview" data-testid="guide-image" src={src} />
+      ) : null,
+    {
+      PreviewGroup: ({ children }: { children: React.ReactNode }) => children,
+    },
+  ),
   Modal: { confirm: vi.fn() },
 }));
 
@@ -104,6 +113,16 @@ vi.mock("@/stores/agentStore", () => ({
   }),
 }));
 
+vi.mock("@/stores/iframeStore", () => ({
+  useIframeStore: (selector: (state: { bbk: string | null }) => unknown) =>
+    selector(mocks.iframeState),
+}));
+
+vi.mock("@/assets/others/note.png", () => ({ default: "guide-image.png" }));
+vi.mock("@/assets/others/sh_note.png", () => ({
+  default: "sh-guide-image.png",
+}));
+
 vi.mock("../../sessionApi", () => ({
   default: {
     getSessionList: vi.fn(),
@@ -130,6 +149,7 @@ describe("ChatSidebar infinite history scrolling", () => {
     mocks.context.setSessions = mocks.setSessions;
     mocks.context.setSessionLoading = mocks.setSessionLoading;
     mocks.context.getSessions = mocks.getSessions;
+    mocks.iframeState.bbk = null;
     mocks.hasMoreSessions.mockReturnValue(true);
     mocks.getSessionTotal.mockReturnValue(120);
     mocks.getSessions.mockImplementation(() => mocks.context.sessions);
@@ -169,6 +189,17 @@ describe("ChatSidebar infinite history scrolling", () => {
     const { getAllByText } = render(<ChatSidebar tasks={[]} />);
 
     expect(getAllByText("历史记录(120)").length).toBeGreaterThan(0);
+  });
+
+  it("subtracts visible task count from the history total", () => {
+    const tasks = [
+      { id: "task-1", task: { unread_execution_count: 0 } },
+      { id: "task-2", task: { unread_execution_count: 0 } },
+    ];
+
+    const { getAllByText } = render(<ChatSidebar tasks={tasks as never} />);
+
+    expect(getAllByText("历史记录(118)").length).toBeGreaterThan(0);
   });
 
   it("excludes the deleted session when refreshing after delete", async () => {
@@ -254,5 +285,27 @@ describe("ChatSidebar infinite history scrolling", () => {
         ]),
       );
     });
+  });
+
+  it("uses the Shanghai guide image when bbk is 121", () => {
+    mocks.iframeState.bbk = "121";
+
+    const { container } = render(<ChatSidebar tasks={[]} />);
+    const guide = container.querySelector(
+      '[data-testid="guide-image"]',
+    ) as HTMLImageElement;
+
+    expect(guide).toHaveAttribute("src", "sh-guide-image.png");
+  });
+
+  it("uses the default guide image when bbk is not 121", () => {
+    mocks.iframeState.bbk = "100";
+
+    const { container } = render(<ChatSidebar tasks={[]} />);
+    const guide = container.querySelector(
+      '[data-testid="guide-image"]',
+    ) as HTMLImageElement;
+
+    expect(guide).toHaveAttribute("src", "guide-image.png");
   });
 });

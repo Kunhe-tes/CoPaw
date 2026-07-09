@@ -22,39 +22,18 @@ export default function useAttachments(
 
   const getFileList = useCallback(() => fileListRef.current, []);
 
-  const { trigger, ...rest } = attachments || {};
+  const { trigger, customRequest, maxCount, ...rest } = attachments || {};
   const uidCounter = useRef(0);
 
   const handlePasteFile = useCallback(
     (file: File) => {
       if (options?.disabled) return;
-      if (!rest?.customRequest) return;
+      if (!customRequest) return;
 
       const fileType = file.type || "";
       const fileName = file.name || "";
 
-      if (rest.accept) {
-        const matched = rest.accept.split(",").some((pattern) => {
-          const trimmed = pattern.trim();
-          if (!trimmed) return false;
-          if (trimmed.startsWith("."))
-            return fileName.toLowerCase().endsWith(trimmed.toLowerCase());
-          if (trimmed === "*/*") return true;
-          if (trimmed.includes("*")) {
-            const [acceptMain] = trimmed.split("/");
-            const [fileMain] = fileType.split("/");
-            return acceptMain === fileMain;
-          }
-          return fileType === trimmed;
-        });
-        if (!matched) return;
-      }
-
-      if (
-        (rest as any).maxCount &&
-        fileListRef.current.length >= (rest as any).maxCount
-      )
-        return;
+      if (maxCount && fileListRef.current.length >= maxCount) return;
 
       const getExtension = () => {
         const nameMatch = fileName.match(/\.([^.]+)$/);
@@ -71,7 +50,7 @@ export default function useAttachments(
         type: fileType,
         status: "uploading",
         percent: 0,
-        originFileObj: file as any,
+        originFileObj: file as UploadFile["originFileObj"],
       };
 
       setFileList((prev) => [...prev, uploadFile]);
@@ -91,13 +70,13 @@ export default function useAttachments(
         reader.readAsDataURL(file);
       }
 
-      rest.customRequest(
+      customRequest(
         {
           file,
           filename: "file",
           action: "",
           method: "POST",
-          onSuccess: (response: any) => {
+          onSuccess: (response) => {
             setFileList((prev) =>
               prev.map((f) =>
                 f.uid === uid
@@ -106,14 +85,14 @@ export default function useAttachments(
               ),
             );
           },
-          onError: (error: any) => {
+          onError: (error) => {
             setFileList((prev) =>
               prev.map((f) =>
                 f.uid === uid ? { ...f, status: "error" as const, error } : f,
               ),
             );
           },
-          onProgress: (event: any) => {
+          onProgress: (event) => {
             setFileList((prev) =>
               prev.map((f) =>
                 f.uid === uid ? { ...f, percent: event?.percent } : f,
@@ -124,10 +103,10 @@ export default function useAttachments(
         { defaultRequest: () => undefined },
       );
     },
-    [options?.disabled, rest?.customRequest, rest?.accept],
+    [customRequest, maxCount, options?.disabled],
   );
 
-  if (rest?.customRequest) {
+  if (customRequest) {
     const uploadQuickMenuItem = (
       <Upload
         fileList={fileList}
@@ -136,6 +115,8 @@ export default function useAttachments(
           setFileList(info.fileList);
         }}
         {...rest}
+        customRequest={customRequest}
+        maxCount={maxCount}
         disabled={options?.disabled}
       >
         {trigger ? React.createElement(trigger, { disabled: options?.disabled }) : (

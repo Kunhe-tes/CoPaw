@@ -9,6 +9,7 @@ import {
   Table,
 } from "@agentscope-ai/design";
 import type {
+  CronBroadcastTaskResponse,
   CronBroadcastTarget,
   CronBroadcastTenantResult,
   CronJobSpecOutput,
@@ -35,11 +36,14 @@ import {
   buildCronJobFormValues,
   buildCronJobSubmitPayload,
   getBroadcastResultMessage,
+  getBroadcastTaskProgressText,
 } from "./helpers";
 import styles from "./index.module.less";
 
 type CronJob = CronJobSpecOutput;
 const DEFAULT_BROADCAST_OFFSET_WINDOW_HOURS = 4;
+const DEFAULT_TABLE_PAGE_SIZE = 10;
+const TABLE_PAGE_SIZE_OPTIONS = ["10", "20", "50", "100"];
 
 function CronJobsPage() {
   const { t } = useTranslation();
@@ -65,6 +69,8 @@ function CronJobsPage() {
   const [broadcastResults, setBroadcastResults] = useState<
     CronBroadcastTenantResult[]
   >([]);
+  const [broadcastTask, setBroadcastTask] =
+    useState<CronBroadcastTaskResponse | null>(null);
   const [broadcastOffsetEnabled, setBroadcastOffsetEnabled] = useState(true);
   const [broadcastOffsetWindowHours, setBroadcastOffsetWindowHours] = useState(
     DEFAULT_BROADCAST_OFFSET_WINDOW_HOURS,
@@ -72,7 +78,10 @@ function CronJobsPage() {
   const [childrenManagementJob, setChildrenManagementJob] =
     useState<CronJob | null>(null);
   const [broadcasting, setBroadcasting] = useState(false);
+  const [broadcastRefreshing, setBroadcastRefreshing] = useState(false);
   const [saving, setSaving] = useState(false);
+  const [tablePage, setTablePage] = useState(1);
+  const [tablePageSize, setTablePageSize] = useState(DEFAULT_TABLE_PAGE_SIZE);
   const [form] = Form.useForm<CronJob>();
   const userTimezoneRef = useRef("UTC");
   const currentTenantId = getUserId();
@@ -81,6 +90,7 @@ function CronJobsPage() {
     options: executionModelOptions,
     tenantDefaultLabel,
   } = useExecutionModelOptions(true);
+  const hasVisibleBroadcastTask = Boolean(broadcastTask);
 
   useEffect(() => {
     api
@@ -90,6 +100,11 @@ function CronJobsPage() {
       })
       .catch((err) => console.error("Failed to fetch user timezone:", err));
   }, []);
+
+  useEffect(() => {
+    const maxPage = Math.max(1, Math.ceil(jobs.length / tablePageSize));
+    setTablePage((current) => Math.min(current, maxPage));
+  }, [jobs.length, tablePageSize]);
 
   const handleCreate = () => {
     setEditingJob(null);
@@ -141,7 +156,7 @@ function CronJobsPage() {
     });
   };
 
-  const handleBroadcast = (job: CronJob) => {
+  const handleBroadcast = async (job: CronJob) => {
     if (isBroadcastChildJob(job)) {
       message.warning("分发子任务不支持广播到租户");
       return;
@@ -150,8 +165,23 @@ function CronJobsPage() {
     setSelectedBroadcastTenantIds([]);
     setSelectedBroadcastTargets([]);
     setBroadcastResults([]);
+    setBroadcastTask(null);
+    setBroadcastRefreshing(false);
     setBroadcastOffsetEnabled(true);
     setBroadcastOffsetWindowHours(DEFAULT_BROADCAST_OFFSET_WINDOW_HOURS);
+    setBroadcasting(true);
+    try {
+      const currentTask = await api.getCurrentCronBroadcastTask(job.id);
+      if (currentTask.task) {
+        setBroadcastTask(currentTask.task);
+        setBroadcastResults(currentTask.task.results);
+      }
+    } catch (error) {
+      console.error("Failed to fetch current cron broadcast task", error);
+      message.error("Broadcast status refresh failed");
+    } finally {
+      setBroadcasting(false);
+    }
   };
 
   const handleManageChildren = (job: CronJob) => {
@@ -167,13 +197,38 @@ function CronJobsPage() {
     setSelectedBroadcastTenantIds([]);
     setSelectedBroadcastTargets([]);
     setBroadcastResults([]);
+    setBroadcastTask(null);
+    setBroadcasting(false);
+    setBroadcastRefreshing(false);
     setBroadcastOffsetEnabled(true);
     setBroadcastOffsetWindowHours(DEFAULT_BROADCAST_OFFSET_WINDOW_HOURS);
   };
 
-  const handleBroadcastOffsetWindowChange = (
-    value: number | string | null,
-  ) => {
+  const handleBroadcastProgressRefresh = async () => {
+    if (
+      !broadcastingJob ||
+      !broadcastTask ||
+      broadcastTask.status !== "running"
+    ) {
+      return;
+    }
+    setBroadcastRefreshing(true);
+    try {
+      const refreshedTask = await api.getCronBroadcastTask(
+        broadcastingJob.id,
+        broadcastTask.task_id,
+      );
+      setBroadcastTask(refreshedTask);
+      setBroadcastResults(refreshedTask.results);
+    } catch (error) {
+      console.error("Failed to refresh cron broadcast task", error);
+      message.error("刷新分发进度失败");
+    } finally {
+      setBroadcastRefreshing(false);
+    }
+  };
+
+  const handleBroadcastOffsetWindowChange = (value: number | string | null) => {
     const numericValue = Number(value);
     if (!Number.isFinite(numericValue)) {
       setBroadcastOffsetWindowHours(DEFAULT_BROADCAST_OFFSET_WINDOW_HOURS);
@@ -186,6 +241,14 @@ function CronJobsPage() {
 
   const handleBroadcastConfirm = async () => {
     if (!broadcastingJob) return;
+    if (hasVisibleBroadcastTask) {
+      if (broadcastTask?.status === "running") {
+        message.info("Broadcast task is already running");
+      } else {
+        message.info("Close and reopen this dialog to start another broadcast");
+      }
+      return;
+    }
     const targetTenantIds = Array.from(new Set(selectedBroadcastTenantIds));
     const targetByTenantId = new Map(
       selectedBroadcastTargets.map((target) => [target.tenant_id, target]),
@@ -199,22 +262,34 @@ function CronJobsPage() {
       };
     });
     setBroadcasting(true);
+    setBroadcastRefreshing(false);
+    setBroadcastTask(null);
+    setBroadcastResults([]);
     try {
-      const res = await api.broadcastCronJob(
-        broadcastingJob.id,
-        targets,
-        {
-          enable_offset: broadcastOffsetEnabled,
-          offset_window_hours: broadcastOffsetWindowHours,
-        },
-      );
-      const resultMessage = getBroadcastResultMessage(res.results);
-      if (resultMessage.tone === "warning") {
-        message.warning(resultMessage.text);
-      } else {
-        message.success(resultMessage.text);
-      }
+      const res = await api.broadcastCronJob(broadcastingJob.id, targets, {
+        enable_offset: broadcastOffsetEnabled,
+        offset_window_hours: broadcastOffsetWindowHours,
+      });
+      setBroadcastTask(res);
       setBroadcastResults(res.results);
+      if (res.status === "running") {
+        if (res.reused) {
+          message.info("Broadcast task is already running");
+        } else {
+          message.info("Broadcast started");
+        }
+        return;
+      }
+      if (res.status === "failed" && res.failure_summary) {
+        message.warning(getBroadcastTaskProgressText(res));
+      } else {
+        const resultMessage = getBroadcastResultMessage(res.results);
+        if (resultMessage.tone === "warning") {
+          message.warning(resultMessage.text);
+        } else {
+          message.success(resultMessage.text);
+        }
+      }
     } catch (error) {
       console.error("Failed to broadcast cron job", error);
       message.error("Broadcast failed");
@@ -286,7 +361,15 @@ function CronJobsPage() {
           rowKey="id"
           scroll={{ x: 3010 }}
           pagination={{
-            pageSize: 10,
+            current: tablePage,
+            pageSize: tablePageSize,
+            showSizeChanger: true,
+            pageSizeOptions: TABLE_PAGE_SIZE_OPTIONS,
+            showTotal: (total) => `共 ${total} 条`,
+            onChange: (nextPage, nextPageSize) => {
+              setTablePage(nextPage);
+              setTablePageSize(nextPageSize || DEFAULT_TABLE_PAGE_SIZE);
+            },
           }}
         />
       </Card>
@@ -316,7 +399,10 @@ function CronJobsPage() {
         onOk={handleBroadcastConfirm}
         confirmLoading={broadcasting}
         okButtonProps={{
-          disabled: selectedBroadcastTenantIds.length === 0,
+          disabled:
+            selectedBroadcastTenantIds.length === 0 ||
+            broadcasting ||
+            hasVisibleBroadcastTask,
         }}
         width={640}
       >
@@ -359,6 +445,28 @@ function CronJobsPage() {
               hint="选择需要接收该定时任务的租户"
               excludeTenantId={currentTenantId}
             />
+            {broadcastTask && (
+              <div className={styles.broadcastTaskProgress}>
+                <span className={styles.broadcastTaskProgressText}>
+                  {getBroadcastTaskProgressText(broadcastTask)}
+                  {broadcastTask.status !== "running" ? (
+                    <span className={styles.broadcastTaskProgressHint}>
+                      Close and reopen this dialog to start another broadcast.
+                    </span>
+                  ) : null}
+                </span>
+                {broadcastTask.status === "running" ? (
+                  <Button
+                    size="small"
+                    loading={broadcastRefreshing}
+                    disabled={broadcastRefreshing}
+                    onClick={handleBroadcastProgressRefresh}
+                  >
+                    刷新进度
+                  </Button>
+                ) : null}
+              </div>
+            )}
             {broadcastResults.length > 0 && (
               <div style={{ display: "grid", gap: 6 }}>
                 {broadcastResults.map((item) => (

@@ -235,7 +235,7 @@ class TestTenantInitializerSourceId:
         monkeypatch.setattr(
             TenantInitializer,
             "ensure_default_workspace_scaffold",
-            lambda self: {
+            lambda self, *, enable_bootstrap_chat=True: {
                 "agent_json": True,
                 "copied_files": [],
                 "token_usage": True,
@@ -326,7 +326,7 @@ class TestTenantInitializerSourceId:
         monkeypatch.setattr(
             TenantInitializer,
             "ensure_default_workspace_scaffold",
-            lambda self: {
+            lambda self, *, enable_bootstrap_chat=True: {
                 "agent_json": True,
                 "copied_files": [],
                 "token_usage": True,
@@ -410,7 +410,7 @@ class TestTenantInitializerSourceId:
         monkeypatch.setattr(
             TenantInitializer,
             "ensure_default_workspace_scaffold",
-            lambda self: {
+            lambda self, *, enable_bootstrap_chat=True: {
                 "agent_json": True,
                 "copied_files": [],
                 "token_usage": True,

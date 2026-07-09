@@ -14,6 +14,22 @@ from swe.config.config import ChannelConfig, ConsoleConfig
 from swe.app.workspace.service_factories import create_agent_config_watcher
 
 
+def test_agent_config_watcher_default_poll_interval_is_conservative(
+    tmp_path,
+):
+    workspace_dir = tmp_path / "tenant-a" / "workspaces" / "default"
+    workspace_dir.mkdir(parents=True)
+
+    watcher = AgentConfigWatcher(
+        agent_id="default",
+        workspace_dir=workspace_dir,
+        channel_manager=None,
+        tenant_id="tenant-a",
+    )
+
+    assert watcher._poll_interval == 10.0
+
+
 class TestAgentConfigWatcherTenantScope:
     """AgentConfigWatcher must load config from the owning tenant scope."""
 

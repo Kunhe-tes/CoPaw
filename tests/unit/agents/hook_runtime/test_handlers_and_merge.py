@@ -358,6 +358,105 @@ async def test_command_handler_env_overrides_tenant_runtime_env(
 
 
 @pytest.mark.asyncio
+async def test_command_handler_env_excludes_system_configuration_keys(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setenv("SWE_DB_ACCESS", "backend-secret")
+    monkeypatch.setenv("SWE_SECRET_DIR", str(tmp_path / ".secret"))
+    observed = {}
+
+    class FakeProcess:
+        returncode = 0
+
+        async def communicate(self, payload):
+            del payload
+            return b"{}", b""
+
+    async def fake_create_subprocess_exec(*args, **kwargs):
+        observed.update(kwargs.get("env") or {})
+        return FakeProcess()
+
+    monkeypatch.setattr(
+        "swe.agents.hook_runtime.executor.asyncio.create_subprocess_exec",
+        fake_create_subprocess_exec,
+    )
+    handler = CommandHookHandlerConfig(
+        id="env",
+        argv=["python", str(tmp_path / "noop.py")],
+        env={
+            "SWE_ZHAOHU_CLIENT_SECRET_POSEIDON": "handler-secret",
+            "HOOK_TOKEN": "handler-token",
+        },
+    )
+    (tmp_path / "noop.py").write_text("print('{}')\n", encoding="utf-8")
+
+    result = await execute_handler(
+        handler,
+        _context(),
+        workspace_dir=tmp_path,
+    )
+
+    assert result.failed is False
+    assert observed["HOOK_TOKEN"] == "handler-token"
+    assert "SWE_DB_ACCESS" not in observed
+    assert "SWE_SECRET_DIR" not in observed
+    assert "SWE_ZHAOHU_CLIENT_SECRET_POSEIDON" not in observed
+
+
+@pytest.mark.asyncio
+async def test_command_handler_env_injects_runtime_claims(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    observed = {}
+
+    class FakeProcess:
+        returncode = 0
+
+        async def communicate(self, payload):
+            del payload
+            return b"{}", b""
+
+    async def fake_create_subprocess_exec(*args, **kwargs):
+        observed.update(kwargs.get("env") or {})
+        return FakeProcess()
+
+    monkeypatch.setattr(
+        "swe.agents.hook_runtime.executor.asyncio.create_subprocess_exec",
+        fake_create_subprocess_exec,
+    )
+    handler = CommandHookHandlerConfig(
+        id="env",
+        argv=["python", str(tmp_path / "noop.py")],
+        env={"SWE_TENANT_ID": "fake-tenant"},
+    )
+    (tmp_path / "noop.py").write_text("print('{}')\n", encoding="utf-8")
+    context = _context().model_copy(
+        update={
+            "effective_tenant_id": encode_scope_id("tenant-a", "source-a"),
+            "trace_id": "trace-1",
+        },
+    )
+
+    result = await execute_handler(
+        handler,
+        context,
+        workspace_dir=tmp_path,
+    )
+
+    assert result.failed is False
+    assert observed["SWE_TENANT_ID"] == "tenant-a"
+    assert observed["SWE_SOURCE_ID"] == "source-a"
+    assert observed["SWE_RUNTIME_SCOPE_ID"] == encode_scope_id(
+        "tenant-a",
+        "source-a",
+    )
+    assert observed["SWE_SESSION_ID"] == "session-1"
+    assert observed["SWE_TRACE_ID"] == "trace-1"
+
+
+@pytest.mark.asyncio
 async def test_http_handler_maps_2xx_json_and_409_block(monkeypatch) -> None:
     responses = [
         httpx.Response(
@@ -455,6 +554,62 @@ async def test_http_handler_resolves_header_secret_from_effective_tenant(
     assert result.failed is False
     assert observed["Authorization"] == "tenant-secret"
     assert tenant_calls == [("HOOK_TOKEN", "tenant-a")]
+
+
+@pytest.mark.asyncio
+async def test_http_handler_injects_canonical_runtime_claim_headers(
+    monkeypatch,
+) -> None:
+    observed = {}
+
+    class FakeClient:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            return None
+
+        async def post(self, *args, **kwargs):
+            observed.update(kwargs.get("headers") or {})
+            return httpx.Response(200, json={})
+
+    monkeypatch.setattr(
+        "swe.agents.hook_runtime.executor.httpx.AsyncClient",
+        FakeClient,
+    )
+    context = _context().model_copy(
+        update={
+            "effective_tenant_id": encode_scope_id("tenant-a", "source-a"),
+            "trace_id": "trace-1",
+        },
+    )
+
+    result = await execute_handler(
+        HttpHookHandlerConfig(
+            id="http-claims",
+            url="https://hooks.example/claims",
+            headers={
+                "X-Swe-Tenant-Id": "fake-tenant",
+                "tenantid": "fake-tenant",
+                "X-Static": "static",
+            },
+        ),
+        context,
+        workspace_dir=Path("/tmp/tenant-a/workspaces/default"),
+    )
+
+    assert result.failed is False
+    assert observed == {
+        "X-Static": "static",
+        "x-swe-tenant-id": "tenant-a",
+        "x-swe-source-id": "source-a",
+        "x-swe-runtime-scope-id": encode_scope_id("tenant-a", "source-a"),
+        "x-swe-session-id": "session-1",
+        "x-swe-trace-id": "trace-1",
+    }
 
 
 @pytest.mark.parametrize(

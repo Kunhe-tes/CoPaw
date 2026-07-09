@@ -36,6 +36,7 @@ import json
 import logging
 import os
 import threading
+import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -309,6 +310,10 @@ def remove_blocked_entry(index: int) -> bool:
 
 _scanner_instance: SkillScanner | None = None
 _scanner_lock = threading.Lock()
+_scan_executor: futures.ThreadPoolExecutor | None = None
+_scan_executor_workers: int | None = None
+_scan_executor_slots: threading.BoundedSemaphore | None = None
+_scan_executor_lock = threading.Lock()
 
 
 def _get_scanner() -> SkillScanner:
@@ -319,6 +324,57 @@ def _get_scanner() -> SkillScanner:
             if _scanner_instance is None:
                 _scanner_instance = SkillScanner()
     return _scanner_instance
+
+
+def _configured_scan_executor_workers() -> int:
+    raw_value = os.environ.get("SWE_SKILL_SCAN_EXECUTOR_WORKERS")
+    if raw_value:
+        try:
+            return max(1, int(raw_value))
+        except ValueError:
+            logger.warning(
+                "Invalid SWE_SKILL_SCAN_EXECUTOR_WORKERS=%r; using 4",
+                raw_value,
+            )
+    return 4
+
+
+def _get_scan_executor() -> tuple[
+    futures.ThreadPoolExecutor,
+    threading.BoundedSemaphore,
+]:
+    """Return a shared, bounded executor for blocking scan work."""
+    global _scan_executor, _scan_executor_workers, _scan_executor_slots
+    workers = _configured_scan_executor_workers()
+    if _scan_executor is None or _scan_executor_workers != workers:
+        with _scan_executor_lock:
+            if _scan_executor is None or _scan_executor_workers != workers:
+                if _scan_executor is not None:
+                    _scan_executor.shutdown(
+                        wait=False,
+                        cancel_futures=True,
+                    )
+                _scan_executor = futures.ThreadPoolExecutor(  # pylint: disable=consider-using-with
+                    max_workers=workers,
+                )
+                _scan_executor_workers = workers
+                _scan_executor_slots = threading.BoundedSemaphore(workers)
+    assert _scan_executor is not None
+    assert _scan_executor_slots is not None
+    return _scan_executor, _scan_executor_slots
+
+
+def _scan_with_slot_release(
+    scanner: SkillScanner,
+    resolved: Path,
+    *,
+    skill_name: str | None,
+    slot: threading.BoundedSemaphore,
+) -> ScanResult:
+    try:
+        return scanner.scan_skill(resolved, skill_name=skill_name)
+    finally:
+        slot.release()
 
 
 # ---------------------------------------------------------------------------
@@ -468,23 +524,46 @@ def scan_skill_directory(
         result = cached
     else:
         scanner = _get_scanner()
-
-        with futures.ThreadPoolExecutor(max_workers=1) as executor:
+        deadline = time.monotonic() + effective_timeout
+        executor, slot = _get_scan_executor()
+        # Slot acquisition is released by _scan_with_slot_release.
+        # pylint: disable-next=consider-using-with
+        if not slot.acquire(timeout=effective_timeout):
+            logger.warning(
+                "Security scan of skill '%s' timed out after %.0fs "
+                "(waiting for scan executor)",
+                effective_name,
+                effective_timeout,
+            )
+            return None
+        try:
             future = executor.submit(
-                scanner.scan_skill,
+                _scan_with_slot_release,
+                scanner,
                 resolved,
                 skill_name=skill_name,
+                slot=slot,
             )
-            try:
-                result = future.result(timeout=effective_timeout)
-            except futures.TimeoutError:
-                logger.warning(
-                    "Security scan of skill '%s' timed out after %.0fs",
-                    effective_name,
-                    effective_timeout,
-                )
-                future.cancel()
-                return None
+        except Exception:
+            slot.release()
+            raise
+
+        future.add_done_callback(
+            lambda completed: (
+                slot.release() if completed.cancelled() else None
+            ),
+        )
+        remaining_timeout = max(0.0, deadline - time.monotonic())
+        try:
+            result = future.result(timeout=remaining_timeout)
+        except futures.TimeoutError:
+            logger.warning(
+                "Security scan of skill '%s' timed out after %.0fs",
+                effective_name,
+                effective_timeout,
+            )
+            future.cancel()
+            return None
 
         _store_cached_result(resolved, result)
 

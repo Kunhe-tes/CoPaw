@@ -4,16 +4,20 @@ import {
   render,
   screen,
   waitFor,
-  within,
 } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { MemoryRouter } from "react-router-dom";
-import BusinessOverviewPage, { buildTrendSvgData } from "./index";
+import BusinessOverviewPage from "./index";
+
+const echartsRenderMock = vi.hoisted(() => ({
+  lastProps: null as null | { style?: Record<string, unknown>; option?: Record<string, unknown> },
+}));
 
 vi.mock("echarts-for-react", () => ({
-  default: (props: { style?: Record<string, unknown> }) => (
-    <div data-testid="echarts" style={props.style} />
-  ),
+  default: (props: { style?: Record<string, unknown>; option?: Record<string, unknown> }) => {
+    echartsRenderMock.lastProps = props;
+    return <div data-testid="echarts" style={props.style} />;
+  },
 }));
 
 const tracingApiMock = vi.hoisted(() => ({
@@ -36,6 +40,9 @@ const htmlPreviewEventsApiMock = vi.hoisted(() => ({
   getLists: vi.fn(),
   getCustomerClicks: vi.fn(),
 }));
+const iframeStoreMock = vi.hoisted(() => ({
+  source: "CMSJY",
+}));
 
 vi.mock("../../../api/modules/tracing", () => ({
   tracingApi: tracingApiMock,
@@ -49,7 +56,7 @@ vi.mock("../../../stores/iframeStore", () => ({
   useIframeStore: (selector: (state: unknown) => unknown) =>
     selector({
       isSuperManager: true,
-      source: "CMSJY",
+      source: iframeStoreMock.source,
       bbk: undefined,
     }),
 }));
@@ -69,18 +76,25 @@ describe("BusinessOverview trend chart", () => {
 
   beforeEach(() => {
     vi.clearAllMocks();
+    iframeStoreMock.source = "CMSJY";
     tracingApiMock.getOverview.mockResolvedValue({
+      it_users: 20,
+      business_users: 100,
       total_users: 120,
       total_sessions: 80,
       total_tokens: 56000,
       total_skill_calls: 40,
       total_conversations: 160,
+      plan_customers: 30,
+      insight_customers: 20,
+      phone_customers: 10,
       branch_breakdown: {
         users: [],
         sessions: [],
         tokens: [],
         skills: [],
         cron_tasks: [],
+        customers: [{ bbk_id: "100", bbk_name: "总行", value: 30, percent: 100 }],
       },
     });
     tracingApiMock.getGrowthStats.mockResolvedValue({
@@ -88,17 +102,35 @@ describe("BusinessOverview trend chart", () => {
       tokensGrowth: 12,
       sessionGrowth: 8,
       userGrowth: 5,
-      skillGrowth: 3,
       cronGrowth: 2,
       avgRoundsGrowth: 4,
       multiRoundRatioGrowth: 1,
       avgDurationGrowth: 6,
       avgSessionsPerUserGrowth: 7,
+      planCustomersGrowth: 6,
     });
     tracingApiMock.getHourlyTrend.mockResolvedValue({
       trendData: [
-        { date: "2026-05-19 09:00:00", users: 3200, calls: 15800, tokens: 0 },
-        { date: "2026-05-19 10:00:00", users: 2100, calls: 9200, tokens: 0 },
+        {
+          date: "2026-05-19 09:00:00",
+          users: 3200,
+          calls: 15800,
+          tokens: 0,
+          read_tasks: 3,
+          plan_customers: 6,
+          insight_customers: 4,
+          phone_customers: 2,
+        },
+        {
+          date: "2026-05-19 10:00:00",
+          users: 2100,
+          calls: 9200,
+          tokens: 0,
+          read_tasks: 2,
+          plan_customers: 3,
+          insight_customers: 2,
+          phone_customers: 1,
+        },
       ],
     });
     tracingApiMock.getDailyTrend.mockResolvedValue({ trendData: [] });
@@ -112,8 +144,10 @@ describe("BusinessOverview trend chart", () => {
     tracingApiMock.getTaskStatusSummary.mockResolvedValue({
       total_tasks: 0,
       success: 0,
+      running: 0,
       failed: 0,
       cancelled: 0,
+      read_count: 0,
     });
     tracingApiMock.getDepthSummary.mockResolvedValue({
       avg_rounds: 2,
@@ -245,210 +279,136 @@ describe("BusinessOverview trend chart", () => {
     );
   }
 
-  it("builds dynamic y-axis ticks from actual trend maxima", () => {
-    const trendSvg = buildTrendSvgData([
-      { date: "2026-05-19", users: 3200, calls: 15800 },
-      { date: "2026-05-20", users: 2100, calls: 9200 },
-    ]);
+  it("makes the trend chart span the full panel width", async () => {
+    renderBusinessOverview();
 
-    expect(trendSvg.leftAxisTicks.map((tick) => tick.label)).toEqual([
-      "5K",
-      "4K",
-      "3K",
-      "2K",
-      "1K",
-      "0",
-    ]);
-    expect(trendSvg.rightAxisTicks.map((tick) => tick.label)).toEqual([
-      "2W",
-      "1.6W",
-      "1.2W",
-      "0.8W",
-      "0.4W",
-      "0",
-    ]);
+    const chart = await screen.findByTestId("echarts");
+    expect(chart).toHaveStyle({
+      height: "280px",
+      width: "100%",
+      gridColumn: "1 / -1",
+    });
   });
 
-  it("scales bars and line points against nice axis maxima instead of raw maxima", () => {
-    const trendSvg = buildTrendSvgData([
-      { date: "2026-05-19", users: 5, calls: 5 },
-      { date: "2026-05-20", users: 6, calls: 6 },
-    ]);
-
-    expect(trendSvg.leftAxisTicks.map((tick) => tick.label)).toEqual([
-      "10",
-      "8",
-      "6",
-      "4",
-      "2",
-      "0",
-    ]);
-    expect(trendSvg.rightAxisTicks.map((tick) => tick.label)).toEqual([
-      "10",
-      "8",
-      "6",
-      "4",
-      "2",
-      "0",
-    ]);
-    expect(trendSvg.bars[0]?.y).toBeCloseTo(109, 3);
-    expect(trendSvg.points[0]?.y).toBeCloseTo(109, 3);
-  });
-
-  it("uses a tighter nice axis for low-hundreds trend values", () => {
-    const trendSvg = buildTrendSvgData([
-      { date: "2026-05-19", users: 12, calls: 202 },
-      { date: "2026-05-20", users: 10, calls: 180 },
-    ]);
-
-    expect(trendSvg.rightAxisTicks.map((tick) => tick.label)).toEqual([
-      "250",
-      "200",
-      "150",
-      "100",
-      "50",
-      "0",
-    ]);
-  });
-
-  it("shows the real values when hovering a trend column", async () => {
+  it("renders the trend chart with current hourly trend data", async () => {
     renderBusinessOverview();
 
     await waitFor(() => {
-      expect(screen.getByTestId("trend-hover-zone-0")).toBeInTheDocument();
+      expect(tracingApiMock.getHourlyTrend).toHaveBeenCalledTimes(1);
     });
-
-    fireEvent.mouseEnter(screen.getByTestId("trend-hover-zone-0"));
-
-    const tooltip = await screen.findByTestId("trend-tooltip");
-    expect(within(tooltip).getByText("09:00")).toBeInTheDocument();
-    expect(within(tooltip).getByText("3,200")).toBeInTheDocument();
-    expect(within(tooltip).getByText("15,800")).toBeInTheDocument();
+    expect(screen.getByText("调用量趋势")).toBeInTheDocument();
+    expect(screen.getByTestId("echarts")).toBeInTheDocument();
   });
 
-  it("maps avgDurationGrowth into the average duration growth card", async () => {
+  it("renders only three trend metrics for non-RMASSIST source", async () => {
     renderBusinessOverview();
 
-    expect(await screen.findByText("30s")).toBeInTheDocument();
+    await waitFor(() => {
+      expect(echartsRenderMock.lastProps?.option).toBeTruthy();
+    });
+
+    const option = echartsRenderMock.lastProps?.option as {
+      legend?: { data?: string[] };
+      yAxis?: Array<{ name?: string }>;
+      series?: Array<{ name?: string; type?: string; yAxisIndex?: number; z?: number }>;
+    };
+
+    expect(option.legend?.data).toEqual([
+      "调用量",
+      "调用用户",
+      "已读任务数",
+    ]);
+    expect(option.yAxis?.[1]?.name).toBe("任务数");
+    expect(option.series?.map((item) => item.name)).toEqual([
+      "调用量",
+      "调用用户",
+      "已读任务数",
+    ]);
+    expect(option.series?.[0]).toMatchObject({
+      name: "调用量",
+      type: "bar",
+      yAxisIndex: 0,
+    });
+    expect(option.series?.[1]).toMatchObject({
+      name: "调用用户",
+      type: "line",
+      yAxisIndex: 0,
+    });
+    expect(option.series?.[2]).toMatchObject({
+      name: "已读任务数",
+      type: "line",
+      yAxisIndex: 1,
+    });
+    expect(option.series?.some((item) => item.name === "查看方案客户数")).toBe(false);
+    expect(option.series?.some((item) => item.name === "去洞察客户数")).toBe(false);
+    expect(option.series?.some((item) => item.name === "去电访客户数")).toBe(false);
+  });
+
+  it("renders six trend metrics for RMASSIST source", async () => {
+    iframeStoreMock.source = "RMASSIST";
+    renderBusinessOverview();
+
+    await waitFor(() => {
+      expect(echartsRenderMock.lastProps?.option).toBeTruthy();
+    });
+
+    const option = echartsRenderMock.lastProps?.option as {
+      legend?: { data?: string[] };
+      yAxis?: Array<{ name?: string }>;
+      series?: Array<{ name?: string; type?: string; yAxisIndex?: number; z?: number }>;
+    };
+
+    expect(option.legend?.data).toEqual([
+      "调用量",
+      "调用用户",
+      "已读任务数",
+      "查看方案客户数",
+      "去洞察客户数",
+      "去电访客户数",
+    ]);
+    expect(option.yAxis?.[1]?.name).toBe("客户数/任务数");
+    expect(option.series?.map((item) => item.name)).toEqual([
+      "调用量",
+      "调用用户",
+      "已读任务数",
+      "查看方案客户数",
+      "去洞察客户数",
+      "去电访客户数",
+    ]);
+    expect(option.series?.[3]).toMatchObject({
+      name: "查看方案客户数",
+      type: "line",
+      yAxisIndex: 1,
+    });
+    expect(option.series?.[4]).toMatchObject({
+      name: "去洞察客户数",
+      type: "line",
+      yAxisIndex: 1,
+    });
+    expect(option.series?.[5]).toMatchObject({
+      name: "去电访客户数",
+      type: "line",
+      yAxisIndex: 1,
+    });
+    expect(option.series?.some((item) => item.name === "已读任务数")).toBe(true);
+  });
+
+
+  it("renders the report-view customer card with current annotations and growth", async () => {
+    renderBusinessOverview();
+
+    expect(await screen.findByText("查看报告客户数")).toBeInTheDocument();
+    expect(screen.getByText("30")).toBeInTheDocument();
+    expect(screen.getByText("去洞察客户数 20")).toBeInTheDocument();
+    expect(screen.getByText("去电访客户数 10")).toBeInTheDocument();
     expect(
-      await screen.findByText(
+      screen.getByText(
         (_, element) =>
           typeof element?.className === "string" &&
           element.className.includes("metricChangeUp") &&
           (element.textContent || "").includes("环比+6.0%"),
       ),
     ).toBeInTheDocument();
-  });
-
-  it("renders customer insight and phone click statistics inside business overview", async () => {
-    renderBusinessOverview();
-
-    expect(await screen.findByText("客户经营点击分析")).toBeInTheDocument();
-    expect(await screen.findByText("点击总数")).toBeInTheDocument();
-    expect(await screen.findByText("名单总客户数")).toBeInTheDocument();
-    expect(await screen.findByText("被点击名单数")).toBeInTheDocument();
-    expect(await screen.findByText("名单点击率")).toBeInTheDocument();
-    expect(await screen.findByText("被点击客户数")).toBeInTheDocument();
-    expect(await screen.findByText("客户点击覆盖率")).toBeInTheDocument();
-    expect(await screen.findByText("328")).toBeInTheDocument();
-    expect((await screen.findAllByText("25.0%")).length).toBeGreaterThan(0);
-    expect(
-      await screen.findByText("到期客户名单[auto-preview].html"),
-    ).toBeInTheDocument();
-    expect(await screen.findByText("祝话")).toBeInTheDocument();
-    expect(await screen.findByText("CUST-001")).toBeInTheDocument();
-    expect(await screen.findByText("张经理")).toBeInTheDocument();
-    expect((await screen.findAllByText("洞察")).length).toBeGreaterThan(0);
-    expect((await screen.findAllByText("电访")).length).toBeGreaterThan(0);
-    expect((await screen.findAllByText("查看方案")).length).toBeGreaterThan(0);
-    fireEvent.click(await screen.findByText("详情"));
-    expect(
-      await screen.findByText("祝话 客户经理点击详情"),
-    ).toBeInTheDocument();
-    expect(await screen.findByText("李经理")).toBeInTheDocument();
-    expect(htmlPreviewEventsApiMock.getSummary).toHaveBeenCalled();
-    expect(htmlPreviewEventsApiMock.getLists).toHaveBeenCalledWith(
-      expect.objectContaining({ page: 1, pageSize: 20 }),
-    );
-    expect(htmlPreviewEventsApiMock.getCustomerClicks).toHaveBeenCalled();
-  });
-
-  it("falls back to list items when paged list summary fields are absent", async () => {
-    htmlPreviewEventsApiMock.getLists.mockResolvedValueOnce({
-      items: [
-        {
-          list_key: "https://example.com/a.html",
-          list_name: "到期客户名单[auto-preview].html",
-          file_url: "https://example.com/a.html",
-          file_name: "到期客户名单[auto-preview].html",
-          customer_count: 16,
-          clicked_customer_count: 1,
-          insight_count: 2,
-          phone_count: 1,
-          plan_count: 1,
-          total_click_count: 4,
-          last_clicked_at: "2026-05-19T10:35:00",
-        },
-      ],
-    });
-
-    renderBusinessOverview();
-
-    expect(await screen.findByText("名单总客户数")).toBeInTheDocument();
-    expect(await screen.findByText("6.3%")).toBeInTheDocument();
-    expect(htmlPreviewEventsApiMock.getLists).toHaveBeenCalledWith(
-      expect.objectContaining({ page: 1, pageSize: 20 }),
-    );
-  });
-
-  it("does not reload paged list data when toggling unclicked customers", async () => {
-    renderBusinessOverview();
-
-    await waitFor(() => {
-      expect(htmlPreviewEventsApiMock.getLists).toHaveBeenCalledTimes(1);
-    });
-    const includeUnclickedLabel = (
-      await screen.findByText("显示未点击客户")
-    ).closest("label");
-    expect(includeUnclickedLabel).not.toBeNull();
-
-    fireEvent.click(
-      within(includeUnclickedLabel as HTMLElement).getByRole("switch"),
-    );
-
-    await waitFor(() => {
-      expect(htmlPreviewEventsApiMock.getCustomerClicks).toHaveBeenCalledTimes(
-        2,
-      );
-    });
-    expect(htmlPreviewEventsApiMock.getSummary).toHaveBeenCalledTimes(2);
-    expect(htmlPreviewEventsApiMock.getLists).toHaveBeenCalledTimes(1);
-  });
-
-  it("resets list paging before reloading after date range changes", async () => {
-    renderBusinessOverview();
-
-    await waitFor(() => {
-      expect(htmlPreviewEventsApiMock.getLists).toHaveBeenCalledTimes(1);
-    });
-
-    fireEvent.click(await screen.findByTitle("2"));
-
-    await waitFor(() => {
-      expect(htmlPreviewEventsApiMock.getLists).toHaveBeenCalledTimes(2);
-    });
-    expect(htmlPreviewEventsApiMock.getLists).toHaveBeenLastCalledWith(
-      expect.objectContaining({ page: 2, pageSize: 20 }),
-    );
-
-    fireEvent.click(screen.getByRole("button", { name: "近7天" }));
-
-    await waitFor(() => {
-      expect(htmlPreviewEventsApiMock.getLists).toHaveBeenCalledTimes(3);
-    });
-    expect(htmlPreviewEventsApiMock.getLists).toHaveBeenLastCalledWith(
-      expect.objectContaining({ page: 1, pageSize: 20 }),
-    );
   });
 
   it("auto-loads more skills when the first page does not fill a scrollable viewport", async () => {

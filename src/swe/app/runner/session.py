@@ -18,8 +18,9 @@ import tempfile
 from contextlib import asynccontextmanager
 from typing import Any, AsyncIterator, Callable, Sequence, Union
 
-import aiofiles
 from agentscope.session import SessionBase
+
+from swe.runtime_workers import run_runtime_state_work
 
 logger = logging.getLogger(__name__)
 SESSION_SKILL_SNAPSHOT_STATE_KEY = "session_skill_snapshot"
@@ -105,6 +106,83 @@ def _write_json_text(file_path: str, content: str) -> None:
         raise
 
 
+def _read_json_state_sync(
+    session_save_path: str,
+    *,
+    allow_not_exist: bool,
+    allow_empty: bool = False,
+) -> tuple[bool, dict[str, Any]]:
+    if not os.path.exists(session_save_path):
+        if allow_not_exist:
+            return False, {}
+        raise ValueError(
+            "Failed to load session state for file "
+            f"{session_save_path} because it does not exist.",
+        )
+
+    with open(
+        session_save_path,
+        "r",
+        encoding="utf-8",
+        errors="surrogatepass",
+    ) as file:
+        content = file.read()
+
+    if allow_empty and not content.strip():
+        return True, {}
+
+    states = json.loads(content)
+    if not isinstance(states, dict):
+        raise ValueError(
+            f"Session file {session_save_path} does not contain "
+            "a JSON object.",
+        )
+    return True, states
+
+
+def _read_existing_state_for_save_sync(
+    session_save_path: str,
+) -> dict[str, Any]:
+    """保存前读取已有状态，旧文件异常时沿用覆盖写入策略。"""
+    if not os.path.exists(session_save_path):
+        return {}
+
+    with open(
+        session_save_path,
+        "r",
+        encoding="utf-8",
+        errors="surrogatepass",
+    ) as file:
+        content = file.read()
+
+    if not content.strip():
+        return {}
+
+    try:
+        loaded_state = json.loads(content)
+    except json.JSONDecodeError:
+        logger.warning(
+            "Failed to parse existing session state at %s; "
+            "overwriting with current state.",
+            session_save_path,
+        )
+        return {}
+
+    if isinstance(loaded_state, dict):
+        return loaded_state
+    return {}
+
+
+def _write_json_state_sync(
+    session_save_path: str,
+    state: dict[str, Any],
+) -> None:
+    _write_json_text(
+        session_save_path,
+        json.dumps(state, ensure_ascii=False),
+    )
+
+
 class SafeJSONSession(SessionBase):
     """SessionBase subclass with filename sanitization and async file I/O.
 
@@ -165,62 +243,21 @@ class SafeJSONSession(SessionBase):
         allow_not_exist: bool,
     ) -> tuple[bool, dict[str, Any]]:
         async with _get_session_write_lock(session_save_path):
-            if not os.path.exists(session_save_path):
-                if allow_not_exist:
-                    return False, {}
-                raise ValueError(
-                    "Failed to load session state for file "
-                    f"{session_save_path} because it does not exist.",
-                )
-
-            async with aiofiles.open(
+            return await run_runtime_state_work(
+                _read_json_state_sync,
                 session_save_path,
-                "r",
-                encoding="utf-8",
-                errors="surrogatepass",
-            ) as file:
-                content = await file.read()
-
-        states = json.loads(content)
-        if not isinstance(states, dict):
-            raise ValueError(
-                f"Session file {session_save_path} does not contain "
-                "a JSON object.",
+                allow_not_exist=allow_not_exist,
             )
-        return True, states
 
     async def _read_existing_state_for_save(
         self,
         session_save_path: str,
     ) -> dict[str, Any]:
         """保存前读取已有状态，旧文件异常时沿用覆盖写入策略。"""
-        if not os.path.exists(session_save_path):
-            return {}
-
-        async with aiofiles.open(
+        return await run_runtime_state_work(
+            _read_existing_state_for_save_sync,
             session_save_path,
-            "r",
-            encoding="utf-8",
-            errors="surrogatepass",
-        ) as file:
-            content = await file.read()
-
-        if not content.strip():
-            return {}
-
-        try:
-            loaded_state = json.loads(content)
-        except json.JSONDecodeError:
-            logger.warning(
-                "Failed to parse existing session state at %s; "
-                "overwriting with current state.",
-                session_save_path,
-            )
-            return {}
-
-        if isinstance(loaded_state, dict):
-            return loaded_state
-        return {}
+        )
 
     async def save_session_state(
         self,
@@ -239,10 +276,10 @@ class SafeJSONSession(SessionBase):
                 for name, state_module in state_modules_mapping.items()
             }
             state_dicts = {**existing_state, **state_dicts}
-            await asyncio.to_thread(
-                _write_json_text,
+            await run_runtime_state_work(
+                _write_json_state_sync,
                 session_save_path,
-                json.dumps(state_dicts, ensure_ascii=False),
+                state_dicts,
             )
 
         logger.info(
@@ -415,10 +452,10 @@ class SafeJSONSession(SessionBase):
             state = {}
         session_save_path = self._get_save_path(session_id, user_id=user_id)
         async with _get_session_write_lock(session_save_path):
-            await asyncio.to_thread(
-                _write_json_text,
+            await run_runtime_state_work(
+                _write_json_state_sync,
                 session_save_path,
-                json.dumps(state, ensure_ascii=False),
+                state,
             )
         logger.info(
             "Saved merged session state to %s (keys=%d)",
@@ -442,26 +479,15 @@ class SafeJSONSession(SessionBase):
         else:
             await asyncio.wait_for(lock.acquire(), timeout=timeout_seconds)
         try:
-            if os.path.exists(session_save_path):
-                async with aiofiles.open(
-                    session_save_path,
-                    "r",
-                    encoding="utf-8",
-                    errors="surrogatepass",
-                ) as file:
-                    content = await file.read()
-                    states = json.loads(content) if content.strip() else {}
-            else:
-                if not create_if_not_exist:
-                    raise ValueError(
-                        f"Session file {session_save_path} does not exist.",
-                    )
-                states = {}
-
-            if not isinstance(states, dict):
+            exists, states = await run_runtime_state_work(
+                _read_json_state_sync,
+                session_save_path,
+                allow_not_exist=True,
+                allow_empty=True,
+            )
+            if not exists and not create_if_not_exist:
                 raise ValueError(
-                    f"Session file {session_save_path} does not contain "
-                    "a JSON object.",
+                    f"Session file {session_save_path} does not exist.",
                 )
 
             updated_state = mutator(states)
@@ -470,10 +496,10 @@ class SafeJSONSession(SessionBase):
             if not isinstance(updated_state, dict):
                 raise ValueError("mutator must return a dict or None")
 
-            await asyncio.to_thread(
-                _write_json_text,
+            await run_runtime_state_work(
+                _write_json_state_sync,
                 session_save_path,
-                json.dumps(updated_state, ensure_ascii=False),
+                updated_state,
             )
         finally:
             lock.release()

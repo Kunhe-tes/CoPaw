@@ -4,8 +4,9 @@ import type {
   CronBroadcastChildrenBatchResponse,
   CronBroadcastChildrenRefreshResponse,
   CronBroadcastChildrenResponse,
+  CronBroadcastCurrentTaskResponse,
   CronBroadcastOptions,
-  CronBroadcastResponse,
+  CronBroadcastTaskResponse,
   CronBroadcastTarget,
   CronJobSpecInput,
   CronJobSpecOutput,
@@ -74,7 +75,7 @@ export const cronJobApi = {
     targets: CronBroadcastTarget[],
     options: CronBroadcastOptions = {},
   ) =>
-    request<CronBroadcastResponse>(
+    request<CronBroadcastTaskResponse>(
       `/cron/jobs/${encodeURIComponent(jobId)}/broadcast`,
       {
         method: "POST",
@@ -85,6 +86,18 @@ export const cronJobApi = {
           offset_window_hours: options.offset_window_hours ?? 4,
         }),
       },
+    ),
+
+  getCronBroadcastTask: (jobId: string, taskId: string) =>
+    request<CronBroadcastTaskResponse>(
+      `/cron/jobs/${encodeURIComponent(
+        jobId,
+      )}/broadcast/tasks/${encodeURIComponent(taskId)}`,
+    ),
+
+  getCurrentCronBroadcastTask: (jobId: string) =>
+    request<CronBroadcastCurrentTaskResponse>(
+      `/cron/jobs/${encodeURIComponent(jobId)}/broadcast/tasks/current`,
     ),
 
   listCronBroadcastChildren: (jobId: string) =>

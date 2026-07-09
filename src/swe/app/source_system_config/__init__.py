@@ -20,6 +20,8 @@ from .runtime import (
     get_system_prompt_injections,
     resolve_cron_task_session_cleanup_config,
     resolve_file_read_truncation_config,
+    resolve_llm_rate_limiter_config,
+    resolve_query_retry_config,
     resolve_tool_result_compact_config,
 )
 from .store import SourceSystemConfigStore
@@ -41,6 +43,8 @@ __all__ = [
     "is_database_access_guard_enabled",
     "resolve_cron_task_session_cleanup_config",
     "resolve_file_read_truncation_config",
+    "resolve_llm_rate_limiter_config",
+    "resolve_query_retry_config",
     "resolve_tool_result_compact_config",
     "router",
 ]

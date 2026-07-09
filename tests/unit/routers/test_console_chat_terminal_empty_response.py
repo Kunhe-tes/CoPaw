@@ -47,7 +47,11 @@ class _FakeChatManager:
 
 
 class _FakeTaskTracker:
+    def __init__(self) -> None:
+        self.payload = None
+
     async def attach_or_start(self, _run_key, payload, _stream_fn):
+        self.payload = payload
         return payload, True
 
     async def stream_from_queue(self, queue, _run_key):
@@ -107,3 +111,51 @@ def test_console_chat_allows_terminal_response_frame_without_output(
         "completed",
     ]
     assert parsed[-1]["output"] == []
+
+
+def test_console_chat_returns_user_question_msgid_header(
+    monkeypatch,
+) -> None:
+    app = FastAPI()
+    app.include_router(console_router.router)
+
+    task_tracker = _FakeTaskTracker()
+    workspace = SimpleNamespace(
+        channel_manager=_FakeChannelManager(),
+        chat_manager=_FakeChatManager(),
+        task_tracker=task_tracker,
+    )
+
+    async def _fake_get_agent_for_request(_request):
+        return workspace
+
+    monkeypatch.setattr(
+        console_router,
+        "get_agent_for_request",
+        _fake_get_agent_for_request,
+    )
+
+    client = TestClient(app)
+    payload = {
+        "input": [
+            {"role": "user", "content": [{"type": "text", "text": "hi"}]},
+        ],
+        "session_id": "session-1",
+        "user_id": "user-1",
+        "channel": "console",
+    }
+
+    with client.stream(
+        "POST",
+        "/console/chat",
+        headers={"X-Source-Id": "src-a"},
+        json=payload,
+    ) as response:
+        assert response.status_code == 200
+        msgid = response.headers.get("X-Swe-Msgid")
+        assert msgid
+        assert response.headers["X-Swe-Sessionid"] == "session-1"
+        list(response.iter_lines())
+
+    assert task_tracker.payload is not None
+    assert task_tracker.payload["meta"]["msgid"] == msgid

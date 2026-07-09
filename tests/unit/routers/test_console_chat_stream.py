@@ -6,6 +6,7 @@ import json
 import os
 from types import SimpleNamespace
 
+import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
@@ -100,6 +101,83 @@ class _AttachOnlyTaskTracker(_NoStartTaskTracker):
     async def attach(self, run_key):
         self.attached_run_keys.append(run_key)
         return object()
+
+
+def _build_upload_client(monkeypatch, media_dir):
+    app = FastAPI()
+    app.include_router(console_router.router)
+
+    class _FakeUploadChannelManager:
+        async def get_channel(self, name: str):
+            assert name == "console"
+            return SimpleNamespace(media_dir=media_dir)
+
+    workspace = SimpleNamespace(
+        channel_manager=_FakeUploadChannelManager(),
+    )
+
+    async def _fake_get_agent_for_request(_request):
+        return workspace
+
+    monkeypatch.setattr(
+        console_router,
+        "get_agent_for_request",
+        _fake_get_agent_for_request,
+    )
+    return TestClient(app)
+
+
+@pytest.mark.parametrize(
+    "file_name",
+    ["script.py", "Example.JAVA", "app.min.js", "Program.cs"],
+)
+def test_console_upload_rejects_executable_code_extensions_without_writing(
+    tmp_path,
+    monkeypatch,
+    file_name,
+) -> None:
+    media_dir = tmp_path / "media"
+    media_dir.mkdir()
+    client = _build_upload_client(monkeypatch, media_dir)
+
+    response = client.post(
+        "/console/upload",
+        files={"file": (file_name, b"code", "application/octet-stream")},
+    )
+
+    assert response.status_code == 400
+    assert response.json() == {
+        "detail": "Unsupported file type for chat attachment upload",
+    }
+    assert list(media_dir.iterdir()) == []
+
+
+@pytest.mark.parametrize(
+    "file_name",
+    ["archive.zip", "script.py.zip", "report.pdf"],
+)
+def test_console_upload_allows_archive_and_document_extensions(
+    tmp_path,
+    monkeypatch,
+    file_name,
+) -> None:
+    media_dir = tmp_path / "media"
+    client = _build_upload_client(monkeypatch, media_dir)
+
+    response = client.post(
+        "/console/upload",
+        files={"file": (file_name, b"content", "application/octet-stream")},
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["file_name"] == file_name
+    assert body["size"] == len(b"content")
+
+    stored_files = list(media_dir.iterdir())
+    assert len(stored_files) == 1
+    assert stored_files[0].name.endswith(f"_{file_name}")
+    assert stored_files[0].read_bytes() == b"content"
 
 
 def test_console_chat_stream_emits_keepalive_and_disables_proxy_buffering(

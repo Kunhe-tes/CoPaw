@@ -253,6 +253,46 @@ describe("BroadcastChildrenModal", () => {
     expect(mocks.listCronBroadcastChildren).toHaveBeenCalledTimes(1);
   });
 
+  it("clears selected rows when applying filters", async () => {
+    const bob = buildChild("child-1");
+    const alice = {
+      ...buildChild("child-2"),
+      tenant_id: "tenant-a",
+      tenant_name: "Alice",
+      bbk_id: "200",
+    };
+    const snapshot = {
+      items: [bob, alice],
+      status: "completed",
+      tenant_count: 2,
+      failed_tenants: 0,
+      failure_summary: null,
+      updated_at: "2026-06-24T08:00:00Z",
+    };
+    mocks.listCronBroadcastChildren.mockResolvedValue(snapshot);
+    mocks.refreshCronBroadcastChildren.mockResolvedValue({
+      ...snapshot,
+      status: "running",
+      reused: false,
+    });
+
+    render(<BroadcastChildrenModal open job={buildJob()} onClose={vi.fn()} />);
+
+    expect(await screen.findByText("child-1")).toBeInTheDocument();
+    const rowCheckboxes = screen.getAllByRole("checkbox");
+    fireEvent.click(rowCheckboxes[1]);
+    expect(screen.getByRole("button", { name: "批量重跑" })).toBeEnabled();
+
+    fireEvent.change(screen.getByPlaceholderText("搜索用户姓名或 UID"), {
+      target: { value: "Alice" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: /搜\s*索/ }));
+
+    expect(screen.getByText("child-2")).toBeInTheDocument();
+    expect(screen.queryByText("child-1")).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "批量重跑" })).toBeDisabled();
+  });
+
   it("hides deleted child rows and triggers a live lookup after delete", async () => {
     const child = buildChild();
     const snapshot = {
