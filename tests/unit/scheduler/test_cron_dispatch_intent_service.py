@@ -4,6 +4,7 @@
 import inspect
 import json
 from datetime import datetime
+from decimal import Decimal
 
 import pytest
 from fastapi import HTTPException
@@ -203,14 +204,40 @@ async def test_find_execution_by_dispatch_identity_queries_indexed_columns(
 
 def test_enqueue_child_intents_reads_viewer_heat_from_execution_reads() -> None:
     """Child priority should be derived from existing read execution signals."""
-    source = inspect.getsource(
-        CronDispatchIntentService.enqueue_child_intents,
+    source = "\n".join(
+        inspect.getsource(fn)
+        for fn in (
+            service_module._fetch_viewer_heat_scores,
+            service_module._viewer_heat_parent_filter,
+        )
     )
+    fast_read_clause = service_module._viewer_fast_read_select_clause()
 
     assert "swe_cron_executions" in source
     assert "is_read = TRUE" in source
     assert "read_at" in source
+    assert "TIMESTAMPDIFF(" in fast_read_clause
+    assert "SECOND" in fast_read_clause
+    assert "fast_read_2_hour_count" in fast_read_clause
+    assert "fast_read_3_hour_count" in fast_read_clause
+    assert "fast_read_4_hour_count" in fast_read_clause
+    assert "fast_read_5_hour_count" in fast_read_clause
     assert "broadcast_source_job_id" in source
+
+
+def test_viewer_heat_score_includes_fast_read_bonus() -> None:
+    """Fast reads should increase dispatch priority without adding columns."""
+    score = service_module._viewer_heat_score_from_row(
+        {
+            "read_count": 3,
+            "fast_read_2_hour_count": 2,
+            "fast_read_3_hour_count": 3,
+            "fast_read_4_hour_count": 4,
+            "fast_read_5_hour_count": 5,
+        },
+    )
+
+    assert score == Decimal("17")
 
 
 def test_batch_dispatch_order_has_no_waiting_aging() -> None:

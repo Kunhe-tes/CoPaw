@@ -19,6 +19,12 @@ DEFAULT_MAX_ATTEMPTS = 3
 DEFAULT_RETRY_DELAY_SECONDS = 300
 DEFAULT_DISPATCHED_STALE_SECONDS = 7800
 VIEWER_HEAT_LOOKBACK_DAYS = 30
+VIEWER_FAST_READ_BUCKET_SECONDS = (
+    2 * 60 * 60,
+    3 * 60 * 60,
+    4 * 60 * 60,
+    5 * 60 * 60,
+)
 MAX_VIEWER_HEAT_SCORE = Decimal("9999.0000")
 DEFAULT_PROVIDER_ID = "default"
 DEFAULT_MODEL_ID = "default"
@@ -75,6 +81,106 @@ def compute_batch_dispatch_order(
     for index, row in enumerate(ordered):
         row["dispatch_order"] = index
     return ordered
+
+
+async def _fetch_viewer_heat_scores(
+    *,
+    job_ids: Iterable[str],
+    parent_job_id: str,
+    now: datetime,
+    include_parent_job: bool,
+) -> dict[str, Decimal]:
+    normalized_job_ids = _unique_texts(job_ids)
+    if not normalized_job_ids:
+        return {}
+    placeholders = ", ".join(["%s"] * len(normalized_job_ids))
+    parent_filter = _viewer_heat_parent_filter(include_parent_job)
+    join_type = "LEFT JOIN" if include_parent_job else "JOIN"
+    rows = await get_db_connection().fetch_all(
+        f"""
+        SELECT
+            e.job_id,
+            COUNT(*) AS read_count,
+            {_viewer_fast_read_select_clause()}
+        FROM swe_cron_executions e
+        {join_type} swe_cron_jobs j ON e.job_id = j.id
+        WHERE e.job_id IN ({placeholders})
+          AND e.status = 'success'
+          AND e.async_status = 'success'
+          AND e.is_read = TRUE
+          AND e.read_at IS NOT NULL
+          AND e.read_at >= DATE_SUB(%s, INTERVAL %s DAY)
+          AND {parent_filter}
+        GROUP BY e.job_id
+        """,
+        (
+            *VIEWER_FAST_READ_BUCKET_SECONDS,
+            *normalized_job_ids,
+            now,
+            VIEWER_HEAT_LOOKBACK_DAYS,
+            *_viewer_heat_parent_params(parent_job_id, include_parent_job),
+        ),
+    )
+    return {
+        str(row.get("job_id")): _viewer_heat_score_from_row(row)
+        for row in rows
+    }
+
+
+def _viewer_fast_read_select_clause() -> str:
+    return ",\n            ".join(
+        [
+            (
+                "SUM(\n"
+                "                CASE\n"
+                "                    WHEN TIMESTAMPDIFF(\n"
+                "                        SECOND,\n"
+                "                        COALESCE(e.end_time, e.actual_time, e.created_at),\n"
+                "                        e.read_at\n"
+                "                    ) BETWEEN 0 AND %s\n"
+                "                    THEN 1 ELSE 0\n"
+                "                END\n"
+                f"            ) AS fast_read_{hour}_hour_count"
+            )
+            for hour in (2, 3, 4, 5)
+        ],
+    )
+
+
+def _viewer_heat_parent_filter(include_parent_job: bool) -> str:
+    child_filter = """
+    CASE
+        WHEN JSON_VALID(j.meta)
+        THEN JSON_UNQUOTE(
+            JSON_EXTRACT(
+                j.meta,
+                '$.broadcast_source_job_id'
+            )
+        )
+        ELSE ''
+    END = %s
+    """
+    if include_parent_job:
+        return f"(e.job_id = %s OR {child_filter})"
+    return child_filter
+
+
+def _viewer_heat_parent_params(
+    parent_job_id: str,
+    include_parent_job: bool,
+) -> tuple[str, ...]:
+    if include_parent_job:
+        return (parent_job_id, parent_job_id)
+    return (parent_job_id,)
+
+
+def _viewer_heat_score_from_row(row: Mapping[str, Any]) -> Decimal:
+    read_count = Decimal(str(row.get("read_count") or 0))
+    fast_read_count = sum(
+        Decimal(str(row.get(f"fast_read_{hour}_hour_count") or 0))
+        for hour in (2, 3, 4, 5)
+    )
+    return min(read_count + fast_read_count, MAX_VIEWER_HEAT_SCORE)
 
 
 class CronDispatchIntentService:
@@ -264,56 +370,18 @@ class CronDispatchIntentService:
         jobs: list[dict[str, Any]],
         due_at: datetime,
     ) -> list[dict[str, Any]]:
-        db = get_db_connection()
         now = _to_beijing_naive(due_at)
         job_ids = [
             str(job.get("job_id") or "").strip()
             for job in jobs
             if str(job.get("job_id") or "").strip()
         ]
-        heat_by_job_id: dict[str, Decimal] = {}
-        if job_ids:
-            placeholders = ", ".join(["%s"] * len(job_ids))
-            rows = await db.fetch_all(
-                f"""
-                SELECT e.job_id, COUNT(*) AS read_count
-                FROM swe_cron_executions e
-                LEFT JOIN swe_cron_jobs j ON e.job_id = j.id
-                WHERE e.job_id IN ({placeholders})
-                  AND e.status = 'success'
-                  AND e.async_status = 'success'
-                  AND e.is_read = TRUE
-                  AND e.read_at IS NOT NULL
-                  AND e.read_at >= DATE_SUB(%s, INTERVAL %s DAY)
-                  AND (
-                      e.job_id = %s
-                      OR CASE
-                          WHEN JSON_VALID(j.meta)
-                          THEN JSON_UNQUOTE(
-                              JSON_EXTRACT(
-                                  j.meta,
-                                  '$.broadcast_source_job_id'
-                              )
-                          )
-                          ELSE ''
-                      END = %s
-                  )
-                GROUP BY e.job_id
-                """,
-                (
-                    *job_ids,
-                    now,
-                    VIEWER_HEAT_LOOKBACK_DAYS,
-                    parent_job_id,
-                    parent_job_id,
-                ),
-            )
-            for row in rows:
-                read_count = Decimal(str(row.get("read_count") or 0))
-                heat_by_job_id[str(row.get("job_id"))] = min(
-                    read_count,
-                    MAX_VIEWER_HEAT_SCORE,
-                )
+        heat_by_job_id = await _fetch_viewer_heat_scores(
+            job_ids=job_ids,
+            parent_job_id=parent_job_id,
+            now=now,
+            include_parent_job=True,
+        )
 
         ordered_rows: list[dict[str, Any]] = []
         for job in jobs:
@@ -507,47 +575,18 @@ class CronDispatchIntentService:
         due_at: datetime | None = None,
         max_attempts: int = DEFAULT_MAX_ATTEMPTS,
     ) -> list[int]:
-        db = get_db_connection()
         now = _to_beijing_naive(due_at or datetime.now(timezone.utc))
         job_ids = [
             str(child.get("job_id") or "").strip()
             for child in child_jobs
             if str(child.get("job_id") or "").strip()
         ]
-        heat_by_job_id: dict[str, Decimal] = {}
-        if job_ids:
-            placeholders = ", ".join(["%s"] * len(job_ids))
-            rows = await db.fetch_all(
-                f"""
-                SELECT e.job_id, COUNT(*) AS read_count
-                FROM swe_cron_executions e
-                JOIN swe_cron_jobs j ON e.job_id = j.id
-                WHERE e.job_id IN ({placeholders})
-                  AND e.status = 'success'
-                  AND e.async_status = 'success'
-                  AND e.is_read = TRUE
-                  AND e.read_at IS NOT NULL
-                  AND e.read_at >= DATE_SUB(%s, INTERVAL %s DAY)
-                  AND CASE
-                      WHEN JSON_VALID(j.meta)
-                      THEN JSON_UNQUOTE(
-                          JSON_EXTRACT(
-                              j.meta,
-                              '$.broadcast_source_job_id'
-                          )
-                      )
-                      ELSE ''
-                  END = %s
-                GROUP BY e.job_id
-                """,
-                (*job_ids, now, VIEWER_HEAT_LOOKBACK_DAYS, parent_job_id),
-            )
-            for row in rows:
-                read_count = Decimal(str(row.get("read_count") or 0))
-                heat_by_job_id[str(row.get("job_id"))] = min(
-                    read_count,
-                    MAX_VIEWER_HEAT_SCORE,
-                )
+        heat_by_job_id = await _fetch_viewer_heat_scores(
+            job_ids=job_ids,
+            parent_job_id=parent_job_id,
+            now=now,
+            include_parent_job=False,
+        )
 
         ordered_rows = []
         for child in child_jobs:
@@ -1978,6 +2017,15 @@ def _unique_batch_ids(rows: Iterable[Any]) -> list[str]:
         seen.add(batch_id)
         batch_ids.append(batch_id)
     return batch_ids
+
+
+def _unique_texts(values: Iterable[Any]) -> list[str]:
+    normalized: list[str] = []
+    for value in values:
+        text = str(value or "").strip()
+        if text and text not in normalized:
+            normalized.append(text)
+    return normalized
 
 
 def _build_child_payload(
