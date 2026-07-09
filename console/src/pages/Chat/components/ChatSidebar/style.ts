@@ -290,4 +290,16 @@ export default createGlobalStyle`
   color: ${DESIGN_TOKENS.colorTextMuted};
   font-size: 14px;
 }
+
+.chat-sidebar-guide-preview {
+  .swe-image-preview-img-wrapper {
+    align-items: flex-start;
+    padding-top: 32px;
+  }
+
+  .swe-image-preview-img {
+    max-width: none;
+    max-height: none;
+  }
+}
 `;
