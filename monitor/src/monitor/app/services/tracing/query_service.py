@@ -686,6 +686,10 @@ class TracingQueryService:  # pylint: disable=too-many-public-methods
 
         # 分行筛选口径在所有子指标上保持一致，避免不同卡片的环比基线不一致。
         bbk_filter_sql, bbk_filter_params = build_bbk_in_filter(bbk_ids)
+        joined_bbk_filter_sql = bbk_filter_sql.replace(
+            " AND bbk_id IN",
+            " AND s.bbk_id IN",
+        )
 
         async def get_stats(
             s: datetime,
@@ -2804,6 +2808,10 @@ class TracingQueryService:  # pylint: disable=too-many-public-methods
             end_date = datetime.now() + timedelta(days=1)
 
         bbk_filter_sql, bbk_filter_params = build_bbk_in_filter(bbk_ids)
+        joined_bbk_filter_sql = bbk_filter_sql.replace(
+            " AND bbk_id IN",
+            " AND s.bbk_id IN",
+        )
         exclude_placeholders = ", ".join(["%s"] * len(EXCLUDED_SOURCE_IDS))
 
         if source_id == "all":
@@ -2975,6 +2983,10 @@ class TracingQueryService:  # pylint: disable=too-many-public-methods
             end_date = datetime.now() + timedelta(days=1)
 
         bbk_filter_sql, bbk_filter_params = build_bbk_in_filter(bbk_ids)
+        joined_bbk_filter_sql = bbk_filter_sql.replace(
+            " AND bbk_id IN",
+            " AND s.bbk_id IN",
+        )
         exclude_placeholders = ", ".join(["%s"] * len(EXCLUDED_SOURCE_IDS))
 
         # 构建错误类型过滤
@@ -3021,7 +3033,7 @@ class TracingQueryService:  # pylint: disable=too-many-public-methods
               AND s.error IS NOT NULL AND s.error != ''
               AND {source_condition}
               AND s.event_type IN ('llm_input', 'tool_call_end')
-              {bbk_filter_sql}
+              {joined_bbk_filter_sql}
               {error_type_filter}
               {search_filter}
             ORDER BY s.start_time DESC
