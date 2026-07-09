@@ -564,6 +564,26 @@ def test_main_app_static_html_returns_text_html_content_type(
     assert "text/html" in response.headers["content-type"].lower()
 
 
+def test_main_app_runtime_static_rejects_path_traversal(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    _set_app_working_dir(monkeypatch, tmp_path)
+    escaped_file = (
+        tmp_path / "scope-a" / "workspaces" / "default" / "secret.txt"
+    )
+    escaped_file.parent.mkdir(parents=True, exist_ok=True)
+    escaped_file.write_text("secret", encoding="utf-8")
+
+    with TestClient(
+        app_module.app,
+        raise_server_exceptions=False,
+    ) as client:
+        response = client.get("/static/scope-a/default/%2E%2E/secret.txt")
+
+    assert response.status_code == 400
+
+
 def test_main_app_runtime_static_html_skips_gzip_when_requested(
     monkeypatch,
     tmp_path: Path,
