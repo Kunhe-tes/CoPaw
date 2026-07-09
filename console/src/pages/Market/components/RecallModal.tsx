@@ -223,6 +223,12 @@ export function RecallModal({
           当前条目：{itemName}（已分发 {uniqueDistributions.length} 个用户）
         </div>
 
+        <Alert
+          type="info"
+          showIcon
+          message="以下为当前实际持有该技能的用户列表，包含部分已不在当前系统中的用户"
+        />
+
         {loading ? (
           <Spin size="small" style={{ marginLeft: 16 }} />
         ) : (

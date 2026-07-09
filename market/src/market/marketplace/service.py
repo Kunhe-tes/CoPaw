@@ -230,7 +230,7 @@ WHERE skill_name = %s AND source_id = %s AND tenant_id IN ({placeholders})
 
 # 查询已分发用户（从技能表，只统计当前实际持有的）
 _QUERY_DISTRIBUTED_USERS_SQL = """
-SELECT tenant_id
+SELECT tenant_id, tenant_name, bbk_id
 FROM swe_skills
 WHERE skill_name = %s AND source_id = %s AND source LIKE 'marketplace:%%'
 """
@@ -3447,8 +3447,8 @@ class MarketplaceService:
                 return [
                     DistributionRecord(
                         target_user_id=r["tenant_id"],
-                        target_user_name="",  # swe_skills 表暂无 tenant_name
-                        target_bbk_id="",  # swe_skills 表暂无 bbk_id
+                        target_user_name=r.get("tenant_name") or "",
+                        target_bbk_id=r.get("bbk_id") or "",
                         distributed_at=None,
                     )
                     for r in rows

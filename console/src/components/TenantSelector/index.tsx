@@ -606,6 +606,10 @@ export function TenantSelector({
                 {displayedTenantIds.map((tenantId) => {
                   const selected = effectiveInListTenantIds.includes(tenantId);
                   const status = userSkillStatusMap?.get(tenantId);
+                  const tenant = tenantLookup.get(tenantId);
+                  const branchName = tenant?.bbk_id
+                    ? (BBK_ID_TO_NAME_MAP[tenant.bbk_id] || tenant.bbk_id)
+                    : "";
                   return (
                     <button
                       key={tenantId}
@@ -615,6 +619,9 @@ export function TenantSelector({
                         selected ? styles.userCardSelected : ""
                       }`}
                     >
+                      {branchName && (
+                        <span className={styles.branchBadge}>{branchName}</span>
+                      )}
                       {selected ? (
                         <span className={styles.checkIcon}>
                           <CheckOutlined />
