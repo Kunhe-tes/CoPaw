@@ -708,8 +708,17 @@ export default function ChatPage() {
   // Register session API event callbacks for URL synchronization
 
   useEffect(() => {
-    sessionApi.onSessionIdResolved = (_tempId, realId) => {
+    sessionApi.onSessionIdResolved = (tempId, realId) => {
       if (!isChatActiveRef.current) return;
+      if (pendingPlanModePersistScopesRef.current.delete(tempId)) {
+        pendingPlanModePersistScopesRef.current.add(realId);
+        resolvedPlanModePersistScopesRef.current.set(tempId, realId);
+      }
+      setPlanModeLocalState((current) =>
+        current.scopeKey === tempId
+          ? { scopeKey: realId, enabled: current.enabled }
+          : current,
+      );
       // Update URL when realId is resolved, regardless of current chatId
       // (chatId may be undefined if URL was cleared in onSessionCreated)
       lastSessionIdRef.current = realId;
@@ -977,13 +986,23 @@ export default function ChatPage() {
     useState<PendingPlanRevision | null>(null);
   const activePlanModeSessionRef = useRef<PlanModeSession | null>(null);
   const activePlanModeScopeKeyRef = useRef(activePlanModeScopeKey);
+  const pendingPlanModePersistScopesRef = useRef(new Set<string>());
+  const resolvedPlanModePersistScopesRef = useRef(new Map<string, string>());
   activePlanModeSessionRef.current = activePlanModeSession;
   activePlanModeScopeKeyRef.current = activePlanModeScopeKey;
 
   useEffect(() => {
-    setPlanModeLocalState({
-      scopeKey: activePlanModeScopeKey,
-      enabled: activePlanModeMetadataEnabled,
+    setPlanModeLocalState((current) => {
+      if (
+        current.scopeKey === activePlanModeScopeKey &&
+        pendingPlanModePersistScopesRef.current.has(activePlanModeScopeKey)
+      ) {
+        return current;
+      }
+      return {
+        scopeKey: activePlanModeScopeKey,
+        enabled: activePlanModeMetadataEnabled,
+      };
     });
   }, [activePlanModeMetadataEnabled, activePlanModeScopeKey]);
 
@@ -1061,27 +1080,40 @@ export default function ChatPage() {
   const persistPlanMode = useCallback(
     async (enabled: boolean) => {
       const scopeKey = activePlanModeScopeKeyRef.current;
-      await persistPlanModeState({
-        enabled,
-        session: activePlanModeSessionRef.current,
-        ensureChatId: ensurePlanModeChatId,
-        updateChat: chatApi.updateChat,
-        updateSession: async (session) => {
-          const nextSessions = await sessionApi.updateSession(
-            session as Parameters<typeof sessionApi.updateSession>[0] & {
-              meta: Record<string, unknown>;
-            },
-            { refreshList: false },
-          );
-          setSessions(nextSessions);
-        },
-        setPlanModeEnabled: (nextEnabled) => {
-          setPlanModeEnabledForScope(scopeKey, nextEnabled);
-        },
-        onPersistError: () => {
-          message.error(t("chat.planMode.persistFailed", "Plan Mode 保存失败"));
-        },
-      });
+      pendingPlanModePersistScopesRef.current.add(scopeKey);
+      try {
+        await persistPlanModeState({
+          enabled,
+          session: activePlanModeSessionRef.current,
+          ensureChatId: ensurePlanModeChatId,
+          updateChat: chatApi.updateChat,
+          updateSession: async (session) => {
+            const nextSessions = await sessionApi.updateSession(
+              session as Parameters<typeof sessionApi.updateSession>[0] & {
+                meta: Record<string, unknown>;
+              },
+              { refreshList: false },
+            );
+            setSessions(nextSessions);
+          },
+          setPlanModeEnabled: (nextEnabled) => {
+            setPlanModeEnabledForScope(scopeKey, nextEnabled);
+          },
+          onPersistError: () => {
+            message.error(
+              t("chat.planMode.persistFailed", "Plan Mode 保存失败"),
+            );
+          },
+        });
+      } finally {
+        const resolvedScopeKey =
+          resolvedPlanModePersistScopesRef.current.get(scopeKey);
+        pendingPlanModePersistScopesRef.current.delete(scopeKey);
+        if (resolvedScopeKey) {
+          pendingPlanModePersistScopesRef.current.delete(resolvedScopeKey);
+          resolvedPlanModePersistScopesRef.current.delete(scopeKey);
+        }
+      }
     },
     [
       ensurePlanModeChatId,

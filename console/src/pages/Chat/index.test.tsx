@@ -10,6 +10,22 @@ import {
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import ChatPage from "./index";
 
+type MockSessionApi = {
+  preferredChatId: string;
+  onSessionCreated: ((sessionId: string) => void) | null;
+  onSessionIdResolved: ((tempId: string, realId: string) => void) | null;
+  onSessionRemoved: ((removedId: string) => void) | null;
+  onSessionSelected:
+    | ((sessionId: string | null | undefined, realId: string | null) => void)
+    | null;
+  getChatIdForSession: (sessionId: string) => string | null;
+  getLogicalSessionId: (sessionId: string) => string;
+  getRealIdForSession: (sessionId: string) => string | null;
+  getSessionList: ReturnType<typeof vi.fn>;
+  setLastUserMessage: ReturnType<typeof vi.fn>;
+  updateSession: (session: unknown, options?: unknown) => Promise<unknown>;
+};
+
 const mocks = vi.hoisted(() => {
   const setSessionLoading = vi.fn();
   const setSessions = vi.fn();
@@ -32,6 +48,7 @@ const mocks = vi.hoisted(() => {
     navigationSessionId: null as string | null,
     navigationTaskId: null as string | null,
     navigate: vi.fn(),
+    sessionApi: null as MockSessionApi | null,
     sessions: [
       {
         id: "chat-1",
@@ -297,9 +314,8 @@ vi.mock("./OptionsPanel/defaultConfig", () => ({
   }),
 }));
 
-vi.mock("./sessionApi", () => ({
-  __esModule: true,
-  default: {
+vi.mock("./sessionApi", () => {
+  const sessionApiMock = {
     preferredChatId: "",
     onSessionCreated: null,
     onSessionIdResolved: null,
@@ -314,8 +330,13 @@ vi.mock("./sessionApi", () => ({
     getSessionList: vi.fn(async () => []),
     setLastUserMessage: vi.fn(),
     updateSession: mocks.updateSession,
-  },
-}));
+  };
+  mocks.sessionApi = sessionApiMock;
+  return {
+    __esModule: true,
+    default: sessionApiMock,
+  };
+});
 
 vi.mock("./components/ChatSidebar", () => {
   function ChatSidebar(props: {
@@ -548,6 +569,14 @@ describe("ChatPage plan mode wiring", () => {
     mocks.updateChat.mockClear();
     mocks.updateSession.mockClear();
     mocks.clearNavigationParams.mockReset();
+    if (mocks.sessionApi) {
+      mocks.sessionApi.preferredChatId = "";
+      mocks.sessionApi.onSessionCreated = null;
+      mocks.sessionApi.onSessionIdResolved = null;
+      mocks.sessionApi.onSessionRemoved = null;
+      mocks.sessionApi.onSessionSelected = null;
+      mocks.sessionApi.getSessionList.mockClear();
+    }
   });
 
   afterEach(() => {
@@ -612,6 +641,77 @@ describe("ChatPage plan mode wiring", () => {
     );
     expect(mocks.updateChat).toHaveBeenCalledWith("chat-real-created", {
       meta: { plan_mode_enabled: true },
+    });
+  });
+
+  it("keeps Plan Mode active when a pending local session resolves to a backend chat", async () => {
+    mocks.inputDisabled = false;
+    mocks.pathname = "/chat/1780458341751000";
+    mocks.currentSessionId = "1780458341751000";
+    mocks.getChatIdForSession.mockImplementation((sessionId: string) =>
+      sessionId === "chat-real-created" ? sessionId : null,
+    );
+    mocks.getRealIdForSession.mockImplementation(() => null);
+    mocks.sessions = [
+      {
+        id: "1780458341751000",
+        realId: "",
+        sessionId: "1780458341751000",
+        name: "新会话",
+        messages: [],
+        meta: { plan_mode_enabled: false },
+      },
+    ];
+    let resolveUpdateChat: (value: {
+      meta: { plan_mode_enabled: boolean };
+    }) => void = () => undefined;
+    mocks.updateChat.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          resolveUpdateChat = resolve;
+        }),
+    );
+
+    const { rerender } = render(<ChatPage />);
+
+    await waitFor(() => {
+      expect(mocks.sessionApi?.onSessionIdResolved).toEqual(
+        expect.any(Function),
+      );
+    });
+
+    fireEvent.click(screen.getByRole("switch", { name: "计划模式" }));
+
+    await waitFor(() => {
+      expect(screen.getByRole("switch", { name: "计划模式" })).toHaveAttribute(
+        "aria-checked",
+        "true",
+      );
+    });
+
+    await act(async () => {
+      mocks.sessionApi?.onSessionIdResolved?.(
+        "1780458341751000",
+        "chat-real-created",
+      );
+    });
+    mocks.pathname = "/chat/chat-real-created";
+    rerender(<ChatPage />);
+
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 220));
+    });
+
+    expect(screen.getByRole("switch", { name: "计划模式" })).toHaveAttribute(
+      "aria-checked",
+      "true",
+    );
+    expect(
+      screen.getAllByRole("button", { name: "计划模式" }).length,
+    ).toBeGreaterThan(0);
+
+    await act(async () => {
+      resolveUpdateChat({ meta: { plan_mode_enabled: true } });
     });
   });
 
