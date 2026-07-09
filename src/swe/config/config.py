@@ -1609,7 +1609,7 @@ class ServiceHeartbeatConfig(BaseModel):
         """从环境变量获取心跳间隔秒数。"""
         return EnvVarLoader.get_int(
             "SWE_SERVICE_HEARTBEAT_INTERVAL",
-            default=30,
+            default=20,
             min_value=5,
             max_value=300,
         )
