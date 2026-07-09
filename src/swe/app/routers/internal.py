@@ -169,32 +169,58 @@ def _build_dispatch_callback_meta(
 ) -> dict[str, Any] | None:
     if not _is_dispatch_service_callback(params):
         return None
-    intent_id = params.get("dispatch_intent_id") or params.get("intent_id")
-    batch_id = params.get("dispatch_batch_id") or params.get("batch_id") or ""
-    raw_attempt = params.get("dispatch_attempt", 1)
+    intent_id, batch_id, dispatch_attempt = _require_dispatch_callback_ids(
+        params,
+    )
+    return {
+        "source": _DISPATCH_CALLBACK_SOURCE,
+        "intent_id": intent_id,
+        "batch_id": batch_id,
+        "dispatch_attempt": dispatch_attempt,
+        **_dispatch_callback_context(params),
+    }
+
+
+def _require_dispatch_callback_ids(
+    params: dict[str, Any],
+) -> tuple[int, str, int]:
+    intent_id = _safe_int(
+        params.get("dispatch_intent_id") or params.get("intent_id"),
+    )
+    batch_id = str(
+        params.get("dispatch_batch_id") or params.get("batch_id") or "",
+    )
+    dispatch_attempt = _safe_int(params.get("dispatch_attempt", 1))
+    _validate_dispatch_callback_ids(intent_id, batch_id, dispatch_attempt)
+    return intent_id, batch_id, dispatch_attempt
+
+
+def _safe_int(value: Any) -> int:
     try:
-        normalized_intent_id: int | str = int(intent_id)
+        return int(value)
     except (TypeError, ValueError):
-        normalized_intent_id = 0
-    try:
-        normalized_attempt = int(raw_attempt)
-    except (TypeError, ValueError):
-        normalized_attempt = 0
-    if not normalized_intent_id or not str(batch_id).strip():
+        return 0
+
+
+def _validate_dispatch_callback_ids(
+    intent_id: int,
+    batch_id: str,
+    dispatch_attempt: int,
+) -> None:
+    if not intent_id or not batch_id.strip():
         raise HTTPException(
             status_code=400,
             detail="dispatch_service callback requires dispatch_intent_id and dispatch_batch_id",
         )
-    if normalized_attempt <= 0:
+    if dispatch_attempt <= 0:
         raise HTTPException(
             status_code=400,
             detail="dispatch_service callback requires positive dispatch_attempt",
         )
+
+
+def _dispatch_callback_context(params: dict[str, Any]) -> dict[str, Any]:
     return {
-        "source": _DISPATCH_CALLBACK_SOURCE,
-        "intent_id": normalized_intent_id,
-        "batch_id": str(batch_id),
-        "dispatch_attempt": normalized_attempt,
         "tenant_id": str(params.get("tenant_id") or ""),
         "source_id": str(params.get("source_id") or ""),
         "scope_id": str(params.get("scope_id") or params.get("scopeId") or ""),

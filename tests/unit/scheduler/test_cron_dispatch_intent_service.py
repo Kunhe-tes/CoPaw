@@ -23,8 +23,13 @@ from scheduler.app.database import schema as scheduler_schema
 
 def test_claim_due_intents_uses_skip_locked_and_stable_order() -> None:
     """Claiming due dispatch intents must be atomic and stable."""
-    source = inspect.getsource(
-        CronDispatchIntentService._claim_due_intent_ids,
+    source = "\n".join(
+        inspect.getsource(method)
+        for method in (
+            CronDispatchIntentService._fetch_candidate_batch_ids,
+            CronDispatchIntentService._claimable_intent_ids_for_batch,
+            CronDispatchIntentService._record_exhausted_dispatched_events,
+        )
     )
 
     assert "FOR UPDATE SKIP LOCKED" in source
@@ -38,13 +43,13 @@ def test_claim_due_intents_uses_skip_locked_and_stable_order() -> None:
 def test_claim_due_intents_acquires_batch_owner_before_intent_claim() -> None:
     """One scheduler worker must own a dispatch batch before claiming its intents."""
     source = inspect.getsource(
-        CronDispatchIntentService._claim_due_intent_ids,
+        CronDispatchIntentService._lock_candidate_batch,
     )
 
     assert "UPDATE swe_cron_dispatch_batches" in source
     assert "lock_owner = %s" in source
     assert "locked_at = %s" in source
-    assert "AND batch_id = %s" in source
+    assert "WHERE batch_id = %s" in source
 
 
 def test_dispatch_batch_schema_tracks_batch_owner() -> None:
@@ -270,8 +275,11 @@ def test_batch_enqueue_preserves_terminal_intents() -> None:
         "status IN ('claimed', 'acknowledged', 'dispatched', 'completed', "
         "'failed', 'cancelled')"
     ) in source
+    claim_source = inspect.getsource(
+        CronDispatchIntentService._claimable_intent_ids_for_batch,
+    )
     assert "(status = 'pending' AND attempt_count < max_attempts)" in (
-        inspect.getsource(CronDispatchIntentService._claim_due_intent_ids)
+        claim_source
     )
 
 

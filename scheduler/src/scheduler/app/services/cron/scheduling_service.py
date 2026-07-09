@@ -521,53 +521,8 @@ class CronSchedulingService:
         row: Any,
         now_utc: datetime,
     ) -> None:
-        intent_id = int(_row_get(row, "id") or 0)
-        batch_id = str(_row_get(row, "batch_id") or "")
-        dispatch_attempt = _positive_int(_row_get(row, "attempt_count")) or 1
         payload = _row_payload(row)
-        parent_scheduled_fire_at = str(
-            payload.get("parent_scheduled_fire_at")
-            or payload.get("scheduled_fire_at")
-            or "",
-        )
-        provider_id = str(
-            _row_get(row, "provider_id")
-            or payload.get("provider_id")
-            or DEFAULT_PROVIDER_ID,
-        )
-        model_id = str(
-            _row_get(row, "model_id")
-            or payload.get("model_id")
-            or DEFAULT_MODEL_ID,
-        )
-        tenant_id = str(_row_get(row, "tenant_id") or "")
-        source_id = str(_row_get(row, "source_id") or "")
-        scope_id = str(
-            payload.get("scopeId")
-            or payload.get("scope_id")
-            or _row_get(row, "scope_id")
-            or "",
-        )
-        from_id = str(
-            payload.get("fromId")
-            or payload.get("from_id")
-            or _row_get(row, "from_id")
-            or "",
-        )
-        callback_kwargs = {
-            "tenant_id": tenant_id,
-            "source_id": source_id,
-            "scope_id": scope_id or _default_scope_id(tenant_id, source_id),
-            "from_id": from_id or tenant_id,
-            "agent_id": str(_row_get(row, "agent_id") or "default"),
-            "job_id": str(_row_get(row, "job_id") or ""),
-            "dispatch_intent_id": intent_id,
-            "dispatch_batch_id": batch_id,
-            "dispatch_attempt": dispatch_attempt,
-            "parent_scheduled_fire_at": parent_scheduled_fire_at,
-            "provider_id": provider_id,
-            "model_id": model_id,
-        }
+        callback_kwargs = _build_execution_callback_kwargs(row, payload)
         passthrough_headers = _extract_b3_passthrough_headers(
             payload.get(PASSTHROUGH_HEADERS_PAYLOAD_KEY),
         )
@@ -575,17 +530,10 @@ class CronSchedulingService:
             callback_kwargs["passthrough_headers"] = passthrough_headers
         await self._callback_client.dispatch_job(**callback_kwargs)
         await self._dispatch_store.mark_intent_dispatched(
-            intent_id=intent_id,
+            intent_id=int(callback_kwargs["dispatch_intent_id"]),
             worker_id=self._worker_id,
             dispatched_at=now_utc,
-            details={
-                "callback_source": DISPATCH_CALLBACK_SOURCE,
-                "dispatch_attempt": dispatch_attempt,
-                "provider_id": provider_id,
-                "model_id": model_id,
-                "scope_id": callback_kwargs["scope_id"],
-                "from_id": callback_kwargs["from_id"],
-            },
+            details=_dispatch_mark_details(callback_kwargs),
         )
 
     async def handle_execution_recorded(
@@ -1169,6 +1117,62 @@ def _decode_callback_params(params: Mapping[str, Any]) -> dict[str, Any]:
     return merged
 
 
+def _build_execution_callback_kwargs(
+    row: Any,
+    payload: Mapping[str, Any],
+) -> dict[str, Any]:
+    tenant_id = _row_text(row, "tenant_id")
+    source_id = _row_text(row, "source_id")
+    scope_id = _first_truthy_text(
+        payload.get("scopeId"),
+        payload.get("scope_id"),
+        _row_get(row, "scope_id"),
+    )
+    from_id = _first_truthy_text(
+        payload.get("fromId"),
+        payload.get("from_id"),
+        _row_get(row, "from_id"),
+    )
+    return {
+        "tenant_id": tenant_id,
+        "source_id": source_id,
+        "scope_id": scope_id or _default_scope_id(tenant_id, source_id),
+        "from_id": from_id or tenant_id,
+        "agent_id": _row_text(row, "agent_id", default="default"),
+        "job_id": _row_text(row, "job_id"),
+        "dispatch_intent_id": int(_row_get(row, "id") or 0),
+        "dispatch_batch_id": _row_text(row, "batch_id"),
+        "dispatch_attempt": _positive_int(_row_get(row, "attempt_count")) or 1,
+        "parent_scheduled_fire_at": _first_truthy_text(
+            payload.get("parent_scheduled_fire_at"),
+            payload.get("scheduled_fire_at"),
+        ),
+        "provider_id": _first_truthy_text(
+            _row_get(row, "provider_id"),
+            payload.get("provider_id"),
+            default=DEFAULT_PROVIDER_ID,
+        ),
+        "model_id": _first_truthy_text(
+            _row_get(row, "model_id"),
+            payload.get("model_id"),
+            default=DEFAULT_MODEL_ID,
+        ),
+    }
+
+
+def _dispatch_mark_details(
+    callback_kwargs: Mapping[str, Any],
+) -> dict[str, Any]:
+    return {
+        "callback_source": DISPATCH_CALLBACK_SOURCE,
+        "dispatch_attempt": callback_kwargs["dispatch_attempt"],
+        "provider_id": callback_kwargs["provider_id"],
+        "model_id": callback_kwargs["model_id"],
+        "scope_id": callback_kwargs["scope_id"],
+        "from_id": callback_kwargs["from_id"],
+    }
+
+
 def _parse_meta(value: Any) -> dict[str, Any]:
     if isinstance(value, Mapping):
         return dict(value)
@@ -1187,42 +1191,76 @@ def _meta_dispatch_intents_enabled(meta: Mapping[str, Any]) -> bool:
 
 def _extract_model_identity(row: Mapping[str, Any]) -> tuple[str, str]:
     meta = _parse_meta(row.get("meta"))
-    flat_provider_id = str(
-        row.get("provider_id") or meta.get("provider_id") or "",
+    flat_identity = _extract_flat_model_identity(row, meta)
+    if flat_identity is not None:
+        return flat_identity
+    slot_identity = _extract_slot_model_identity(row, meta)
+    return slot_identity or (DEFAULT_PROVIDER_ID, DEFAULT_MODEL_ID)
+
+
+def _extract_flat_model_identity(
+    row: Mapping[str, Any],
+    meta: Mapping[str, Any],
+) -> tuple[str, str] | None:
+    provider_id = _first_truthy_text(
+        row.get("provider_id"),
+        meta.get("provider_id"),
     ).strip()
-    flat_model_id = str(
-        row.get("model_id")
-        or row.get("model")
-        or meta.get("model_id")
-        or meta.get("model")
-        or "",
+    model_id = _first_truthy_text(
+        row.get("model_id"),
+        row.get("model"),
+        meta.get("model_id"),
+        meta.get("model"),
     ).strip()
-    if flat_provider_id and flat_model_id:
-        return flat_provider_id, flat_model_id
-    candidates = [
+    if provider_id and model_id:
+        return provider_id, model_id
+    return None
+
+
+def _extract_slot_model_identity(
+    row: Mapping[str, Any],
+    meta: Mapping[str, Any],
+) -> tuple[str, str] | None:
+    for candidate in _model_slot_candidates(row, meta):
+        identity = _model_identity_from_slot(candidate)
+        if identity is not None:
+            return identity
+    return None
+
+
+def _model_slot_candidates(
+    row: Mapping[str, Any],
+    meta: Mapping[str, Any],
+) -> list[Any]:
+    return [
         row.get("model_slot"),
         meta.get("model_slot"),
         meta.get("broadcast_original_model_slot"),
         meta.get("original_model_slot"),
         meta.get("effective_model_slot"),
     ]
-    for candidate in candidates:
-        if not candidate:
-            continue
-        if isinstance(candidate, str):
-            try:
-                candidate = json.loads(candidate)
-            except json.JSONDecodeError:
-                continue
-        if not isinstance(candidate, Mapping):
-            continue
-        provider_id = str(candidate.get("provider_id") or "").strip()
-        model_id = str(
-            candidate.get("model") or candidate.get("model_id") or "",
-        ).strip()
-        if provider_id and model_id:
-            return provider_id, model_id
-    return DEFAULT_PROVIDER_ID, DEFAULT_MODEL_ID
+
+
+def _model_identity_from_slot(candidate: Any) -> tuple[str, str] | None:
+    slot = _decode_model_slot(candidate)
+    if slot is None:
+        return None
+    provider_id = _first_truthy_text(slot.get("provider_id")).strip()
+    model_id = _first_truthy_text(slot.get("model"), slot.get("model_id")).strip()
+    if provider_id and model_id:
+        return provider_id, model_id
+    return None
+
+
+def _decode_model_slot(candidate: Any) -> Mapping[str, Any] | None:
+    if not candidate:
+        return None
+    if isinstance(candidate, str):
+        try:
+            candidate = json.loads(candidate)
+        except json.JSONDecodeError:
+            return None
+    return candidate if isinstance(candidate, Mapping) else None
 
 
 def _default_scope_id(tenant_id: str, source_id: str) -> str:
@@ -1257,6 +1295,17 @@ def _row_get(row: Any, key: str) -> Any:
     if isinstance(row, Mapping):
         return row.get(key)
     return getattr(row, key, None)
+
+
+def _row_text(row: Any, key: str, *, default: str = "") -> str:
+    return str(_row_get(row, key) or default)
+
+
+def _first_truthy_text(*values: Any, default: str = "") -> str:
+    for value in values:
+        if value:
+            return str(value)
+    return default
 
 
 def _row_payload(row: Any) -> dict[str, Any]:

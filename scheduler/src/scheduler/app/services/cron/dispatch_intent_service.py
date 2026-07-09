@@ -792,190 +792,45 @@ class CronDispatchIntentService:
             exhausted_rows: list[Any] = []
             try:
                 async with conn.cursor() as cur:
-                    await cur.execute(
-                        f"""
-                        SELECT id, batch_id, job_id, tenant_id, source_id
-                        FROM swe_cron_dispatch_intents
-                        WHERE status = 'dispatched'
-                          AND locked_at IS NOT NULL
-                          AND locked_at < %s
-                          AND attempt_count >= max_attempts
-                          {scope_filter_clause}
-                        FOR UPDATE
-                        """,
-                        (
-                            dispatched_stale_before,
-                            *scope_filter_params,
-                        ),
+                    exhausted_rows = await self._fetch_exhausted_dispatched_rows(
+                        cur,
+                        dispatched_stale_before=dispatched_stale_before,
+                        scope_filter_clause=scope_filter_clause,
+                        scope_filter_params=scope_filter_params,
                     )
-                    exhausted_rows = list(await cur.fetchall())
-                    if exhausted_rows:
-                        exhausted_ids = [
-                            _row_value(row, 0, "id")
-                            for row in exhausted_rows
-                        ]
-                        placeholders = ", ".join(["%s"] * len(exhausted_ids))
-                        await cur.execute(
-                            f"""
-                            UPDATE swe_cron_dispatch_intents
-                            SET status = 'failed',
-                                due_at = %s,
-                                lock_owner = '',
-                                locked_at = NULL,
-                                completed_at = %s,
-                                error_message = %s
-                            WHERE id IN ({placeholders})
-                            """,
-                            (
-                                normalized_now,
-                                normalized_now,
-                                "dispatch accepted but no execution record before stale timeout",
-                                *exhausted_ids,
-                            ),
-                        )
-                    candidate_limit = max(limit * 4, limit, 1)
-                    await cur.execute(
-                        f"""
-                        SELECT
-                            batch_id,
-                            MIN(due_at) AS next_due_at,
-                            MIN(dispatch_order) AS next_dispatch_order,
-                            MIN(id) AS next_id
-                        FROM swe_cron_dispatch_intents
-                        WHERE (
-                            (status = 'pending' AND attempt_count < max_attempts)
-                            OR (
-                                status IN ('claimed', 'acknowledged')
-                                AND locked_at IS NOT NULL
-                                AND locked_at < %s
-                            )
-                            OR (
-                                status = 'dispatched'
-                                AND locked_at IS NOT NULL
-                                AND locked_at < %s
-                                AND attempt_count < max_attempts
-                            )
-                        )
-                          AND due_at <= %s
-                          {scope_filter_clause}
-                        GROUP BY batch_id
-                        ORDER BY next_due_at, next_dispatch_order, next_id
-                        LIMIT %s
-                        """,
-                        (
-                            stale_before,
-                            dispatched_stale_before,
-                            normalized_now,
-                            *scope_filter_params,
-                            candidate_limit,
-                        ),
+                    await self._mark_exhausted_dispatched_rows_failed(
+                        cur,
+                        exhausted_rows=exhausted_rows,
+                        normalized_now=normalized_now,
                     )
-                    candidate_rows = await cur.fetchall()
-                    candidate_batch_ids: list[str] = []
-                    seen_batch_ids: set[str] = set()
-                    for row in candidate_rows:
-                        batch_id = str(
-                            _row_value(row, 0, "batch_id") or "",
-                        )
-                        if not batch_id or batch_id in seen_batch_ids:
-                            continue
-                        seen_batch_ids.add(batch_id)
-                        candidate_batch_ids.append(batch_id)
-
-                    ids: list[int] = []
-                    for candidate_batch_id in candidate_batch_ids:
-                        result = await cur.execute(
-                            """
-                            UPDATE swe_cron_dispatch_batches
-                            SET lock_owner = %s,
-                                locked_at = %s
-                            WHERE batch_id = %s
-                              AND (
-                                  lock_owner = ''
-                                  OR lock_owner = %s
-                                  OR locked_at IS NULL
-                                  OR locked_at < %s
-                              )
-                            """,
-                            (
-                                lock_owner,
-                                normalized_now,
-                                candidate_batch_id,
-                                lock_owner,
-                                stale_before,
-                            ),
-                        )
-                        if _rowcount(result) == 0:
-                            continue
-                        await cur.execute(
-                            f"""
-                            SELECT id
-                            FROM swe_cron_dispatch_intents
-                            WHERE (
-                                (status = 'pending' AND attempt_count < max_attempts)
-                                OR (
-                                    status IN ('claimed', 'acknowledged')
-                                    AND locked_at IS NOT NULL
-                                    AND locked_at < %s
-                                )
-                                OR (
-                                    status = 'dispatched'
-                                    AND locked_at IS NOT NULL
-                                    AND locked_at < %s
-                                    AND attempt_count < max_attempts
-                                )
-                            )
-                              AND due_at <= %s
-                              AND batch_id = %s
-                              {scope_filter_clause}
-                            ORDER BY due_at, dispatch_order, id
-                            LIMIT %s
-                            FOR UPDATE SKIP LOCKED
-                            """,
-                            (
-                                stale_before,
-                                dispatched_stale_before,
-                                normalized_now,
-                                candidate_batch_id,
-                                *scope_filter_params,
-                                limit,
-                            ),
-                        )
-                        rows = await cur.fetchall()
-                        ids = [int(_row_value(row, 0, "id") or 0) for row in rows]
-                        ids = [intent_id for intent_id in ids if intent_id > 0]
-                        if ids:
-                            break
-                    if ids:
-                        placeholders = ", ".join(["%s"] * len(ids))
-                        await cur.execute(
-                            f"""
-                            UPDATE swe_cron_dispatch_intents
-                            SET status = 'claimed',
-                                lock_owner = %s,
-                                locked_at = %s,
-                                attempt_count = attempt_count + 1,
-                                error_message = ''
-                            WHERE id IN ({placeholders})
-                            """,
-                            (lock_owner, normalized_now, *ids),
-                        )
+                    candidate_batch_ids = await self._fetch_candidate_batch_ids(
+                        cur,
+                        limit=limit,
+                        stale_before=stale_before,
+                        dispatched_stale_before=dispatched_stale_before,
+                        normalized_now=normalized_now,
+                        scope_filter_clause=scope_filter_clause,
+                        scope_filter_params=scope_filter_params,
+                    )
+                    ids = await self._first_claimable_intent_ids(
+                        cur,
+                        candidate_batch_ids=candidate_batch_ids,
+                        lock_owner=lock_owner,
+                        limit=limit,
+                        normalized_now=normalized_now,
+                        stale_before=stale_before,
+                        dispatched_stale_before=dispatched_stale_before,
+                        scope_filter_clause=scope_filter_clause,
+                        scope_filter_params=scope_filter_params,
+                    )
+                    await self._mark_intent_ids_claimed(
+                        cur,
+                        ids=ids,
+                        lock_owner=lock_owner,
+                        normalized_now=normalized_now,
+                    )
                 await conn.commit()
-                for row in exhausted_rows:
-                    await self._record_event_best_effort(
-                        batch_id=str(_row_value(row, 1, "batch_id") or ""),
-                        intent_id=int(_row_value(row, 0, "id") or 0),
-                        event_type="child_execution_missing_failed",
-                        job_id=str(_row_value(row, 2, "job_id") or ""),
-                        tenant_id=str(_row_value(row, 3, "tenant_id") or ""),
-                        source_id=str(_row_value(row, 4, "source_id") or ""),
-                        details={
-                            "error": (
-                                "dispatch accepted but no execution record "
-                                "before stale timeout"
-                            ),
-                            },
-                        )
+                await self._record_exhausted_dispatched_events(exhausted_rows)
                 await self._refresh_batch_counts_for_rows(
                     exhausted_rows,
                     updated_at=now_utc,
@@ -984,6 +839,272 @@ class CronDispatchIntentService:
             except Exception:
                 await conn.rollback()
                 raise
+
+    async def _fetch_exhausted_dispatched_rows(
+        self,
+        cur: Any,
+        *,
+        dispatched_stale_before: datetime,
+        scope_filter_clause: str,
+        scope_filter_params: tuple[Any, ...],
+    ) -> list[Any]:
+        await cur.execute(
+            f"""
+            SELECT id, batch_id, job_id, tenant_id, source_id
+            FROM swe_cron_dispatch_intents
+            WHERE status = 'dispatched'
+              AND locked_at IS NOT NULL
+              AND locked_at < %s
+              AND attempt_count >= max_attempts
+              {scope_filter_clause}
+            FOR UPDATE
+            """,
+            (dispatched_stale_before, *scope_filter_params),
+        )
+        return list(await cur.fetchall())
+
+    async def _mark_exhausted_dispatched_rows_failed(
+        self,
+        cur: Any,
+        *,
+        exhausted_rows: list[Any],
+        normalized_now: datetime,
+    ) -> None:
+        exhausted_ids = _positive_int_ids_from_rows(exhausted_rows)
+        if not exhausted_ids:
+            return
+        placeholders = ", ".join(["%s"] * len(exhausted_ids))
+        await cur.execute(
+            f"""
+            UPDATE swe_cron_dispatch_intents
+            SET status = 'failed',
+                due_at = %s,
+                lock_owner = '',
+                locked_at = NULL,
+                completed_at = %s,
+                error_message = %s
+            WHERE id IN ({placeholders})
+            """,
+            (
+                normalized_now,
+                normalized_now,
+                "dispatch accepted but no execution record before stale timeout",
+                *exhausted_ids,
+            ),
+        )
+
+    async def _fetch_candidate_batch_ids(
+        self,
+        cur: Any,
+        *,
+        limit: int,
+        stale_before: datetime,
+        dispatched_stale_before: datetime,
+        normalized_now: datetime,
+        scope_filter_clause: str,
+        scope_filter_params: tuple[Any, ...],
+    ) -> list[str]:
+        candidate_limit = max(limit * 4, limit, 1)
+        await cur.execute(
+            f"""
+            SELECT
+                batch_id,
+                MIN(due_at) AS next_due_at,
+                MIN(dispatch_order) AS next_dispatch_order,
+                MIN(id) AS next_id
+            FROM swe_cron_dispatch_intents
+            WHERE (
+                (status = 'pending' AND attempt_count < max_attempts)
+                OR (
+                    status IN ('claimed', 'acknowledged')
+                    AND locked_at IS NOT NULL
+                    AND locked_at < %s
+                )
+                OR (
+                    status = 'dispatched'
+                    AND locked_at IS NOT NULL
+                    AND locked_at < %s
+                    AND attempt_count < max_attempts
+                )
+            )
+              AND due_at <= %s
+              {scope_filter_clause}
+            GROUP BY batch_id
+            ORDER BY next_due_at, next_dispatch_order, next_id
+            LIMIT %s
+            """,
+            (
+                stale_before,
+                dispatched_stale_before,
+                normalized_now,
+                *scope_filter_params,
+                candidate_limit,
+            ),
+        )
+        return _unique_batch_ids(await cur.fetchall())
+
+    async def _first_claimable_intent_ids(
+        self,
+        cur: Any,
+        *,
+        candidate_batch_ids: list[str],
+        lock_owner: str,
+        limit: int,
+        normalized_now: datetime,
+        stale_before: datetime,
+        dispatched_stale_before: datetime,
+        scope_filter_clause: str,
+        scope_filter_params: tuple[Any, ...],
+    ) -> list[int]:
+        for candidate_batch_id in candidate_batch_ids:
+            ids = await self._claimable_intent_ids_for_batch(
+                cur,
+                candidate_batch_id=candidate_batch_id,
+                lock_owner=lock_owner,
+                limit=limit,
+                normalized_now=normalized_now,
+                stale_before=stale_before,
+                dispatched_stale_before=dispatched_stale_before,
+                scope_filter_clause=scope_filter_clause,
+                scope_filter_params=scope_filter_params,
+            )
+            if ids:
+                return ids
+        return []
+
+    async def _claimable_intent_ids_for_batch(
+        self,
+        cur: Any,
+        *,
+        candidate_batch_id: str,
+        lock_owner: str,
+        limit: int,
+        normalized_now: datetime,
+        stale_before: datetime,
+        dispatched_stale_before: datetime,
+        scope_filter_clause: str,
+        scope_filter_params: tuple[Any, ...],
+    ) -> list[int]:
+        locked = await self._lock_candidate_batch(
+            cur,
+            batch_id=candidate_batch_id,
+            lock_owner=lock_owner,
+            normalized_now=normalized_now,
+            stale_before=stale_before,
+        )
+        if not locked:
+            return []
+        await cur.execute(
+            f"""
+            SELECT id
+            FROM swe_cron_dispatch_intents
+            WHERE (
+                (status = 'pending' AND attempt_count < max_attempts)
+                OR (
+                    status IN ('claimed', 'acknowledged')
+                    AND locked_at IS NOT NULL
+                    AND locked_at < %s
+                )
+                OR (
+                    status = 'dispatched'
+                    AND locked_at IS NOT NULL
+                    AND locked_at < %s
+                    AND attempt_count < max_attempts
+                )
+            )
+              AND due_at <= %s
+              AND batch_id = %s
+              {scope_filter_clause}
+            ORDER BY due_at, dispatch_order, id
+            LIMIT %s
+            FOR UPDATE SKIP LOCKED
+            """,
+            (
+                stale_before,
+                dispatched_stale_before,
+                normalized_now,
+                candidate_batch_id,
+                *scope_filter_params,
+                limit,
+            ),
+        )
+        return _positive_int_ids_from_rows(await cur.fetchall())
+
+    async def _lock_candidate_batch(
+        self,
+        cur: Any,
+        *,
+        batch_id: str,
+        lock_owner: str,
+        normalized_now: datetime,
+        stale_before: datetime,
+    ) -> bool:
+        result = await cur.execute(
+            """
+            UPDATE swe_cron_dispatch_batches
+            SET lock_owner = %s,
+                locked_at = %s
+            WHERE batch_id = %s
+              AND (
+                  lock_owner = ''
+                  OR lock_owner = %s
+                  OR locked_at IS NULL
+                  OR locked_at < %s
+              )
+            """,
+            (
+                lock_owner,
+                normalized_now,
+                batch_id,
+                lock_owner,
+                stale_before,
+            ),
+        )
+        return _rowcount(result) > 0
+
+    async def _mark_intent_ids_claimed(
+        self,
+        cur: Any,
+        *,
+        ids: list[int],
+        lock_owner: str,
+        normalized_now: datetime,
+    ) -> None:
+        if not ids:
+            return
+        placeholders = ", ".join(["%s"] * len(ids))
+        await cur.execute(
+            f"""
+            UPDATE swe_cron_dispatch_intents
+            SET status = 'claimed',
+                lock_owner = %s,
+                locked_at = %s,
+                attempt_count = attempt_count + 1,
+                error_message = ''
+            WHERE id IN ({placeholders})
+            """,
+            (lock_owner, normalized_now, *ids),
+        )
+
+    async def _record_exhausted_dispatched_events(
+        self,
+        exhausted_rows: list[Any],
+    ) -> None:
+        for row in exhausted_rows:
+            await self._record_event_best_effort(
+                batch_id=str(_row_value(row, 1, "batch_id") or ""),
+                intent_id=int(_row_value(row, 0, "id") or 0),
+                event_type="child_execution_missing_failed",
+                job_id=str(_row_value(row, 2, "job_id") or ""),
+                tenant_id=str(_row_value(row, 3, "tenant_id") or ""),
+                source_id=str(_row_value(row, 4, "source_id") or ""),
+                details={
+                    "error": (
+                        "dispatch accepted but no execution record "
+                        "before stale timeout"
+                    ),
+                },
+            )
 
     async def _fetch_claimed_intents(
         self,
@@ -1836,6 +1957,27 @@ def _row_value(row: Any, index: int, key: str) -> Any:
         return row[index]
     except (IndexError, TypeError):
         return None
+
+
+def _positive_int_ids_from_rows(rows: Iterable[Any]) -> list[int]:
+    ids: list[int] = []
+    for row in rows:
+        intent_id = int(_row_value(row, 0, "id") or 0)
+        if intent_id > 0:
+            ids.append(intent_id)
+    return ids
+
+
+def _unique_batch_ids(rows: Iterable[Any]) -> list[str]:
+    batch_ids: list[str] = []
+    seen: set[str] = set()
+    for row in rows:
+        batch_id = str(_row_value(row, 0, "batch_id") or "")
+        if not batch_id or batch_id in seen:
+            continue
+        seen.add(batch_id)
+        batch_ids.append(batch_id)
+    return batch_ids
 
 
 def _build_child_payload(
