@@ -400,6 +400,8 @@ class CronSchedulingService:
         for scope in dispatch_scopes:
             scope_source_ids = [scope.source_id] if scope.source_id else source_ids
             strategy = await self._resolve_worker_strategy(scope, now)
+            if not await self._acquire_scope_lease(scope, strategy, now):
+                continue
             await self._dispatch_store.recover_stale_dispatched_intents(
                 now_utc=now,
                 dispatched_stale_seconds=strategy.stale_execution_seconds,
@@ -667,10 +669,11 @@ class CronSchedulingService:
         )
         for scope in scopes:
             strategy = await self._resolve_worker_strategy(scope, now)
+            if not await self._acquire_scope_lease(scope, strategy, now):
+                continue
             latest = await self._dispatch_store.get_latest_worker_capacity(
                 scope=scope.model_dump(),
                 strategy_id=strategy.strategy_id,
-                worker_id=self._worker_id,
             )
             previous = _capacity_effective_workers(latest, strategy)
             latest_at = _capacity_created_at(latest)
@@ -803,7 +806,6 @@ class CronSchedulingService:
         latest = await self._dispatch_store.get_latest_worker_capacity(
             scope=scope.model_dump(),
             strategy_id=strategy.strategy_id,
-            worker_id=self._worker_id,
         )
         if latest:
             effective = _capacity_effective_workers(latest, strategy)
@@ -843,6 +845,30 @@ class CronSchedulingService:
         )
         self._last_effective_workers = effective
         return effective
+
+    async def _acquire_scope_lease(
+        self,
+        scope: WorkerScope,
+        strategy: WorkerStrategy,
+        now_utc: datetime,
+    ) -> bool:
+        if not hasattr(self._dispatch_store, "acquire_scope_lease"):
+            return True
+        lease_seconds = max(
+            strategy.adjust_interval_seconds,
+            min(strategy.stale_execution_seconds, 300),
+            60,
+        )
+        return bool(
+            await self._dispatch_store.acquire_scope_lease(
+                source_id=scope.source_id,
+                provider_id=scope.provider_id,
+                model_id=scope.model_id,
+                worker_id=self._worker_id,
+                now_utc=now_utc,
+                lease_seconds=lease_seconds,
+            ),
+        )
 
 
 def _extract_dispatch_meta(

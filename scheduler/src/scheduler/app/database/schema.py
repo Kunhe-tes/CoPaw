@@ -193,6 +193,24 @@ CREATE TABLE IF NOT EXISTS swe_cron_dispatch_worker_capacity (
   COMMENT='SWE cron dispatch worker capacity snapshots'
 """
 
+CREATE_CRON_DISPATCH_SCOPE_LEASES_TABLE = """
+CREATE TABLE IF NOT EXISTS swe_cron_dispatch_scope_leases (
+    source_id VARCHAR(64) NOT NULL DEFAULT '' COMMENT 'source id',
+    provider_id VARCHAR(128) NOT NULL DEFAULT 'default' COMMENT 'provider id',
+    model_id VARCHAR(128) NOT NULL DEFAULT 'default' COMMENT 'model id',
+    lock_owner VARCHAR(128) NOT NULL DEFAULT '' COMMENT 'scope lease owner',
+    locked_at DATETIME DEFAULT NULL COMMENT 'scope lock time',
+    lease_expires_at DATETIME DEFAULT NULL COMMENT 'scope lease expiry time',
+    heartbeat_at DATETIME DEFAULT NULL COMMENT 'scope owner heartbeat time',
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP COMMENT 'created time',
+    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+        COMMENT 'updated time',
+    PRIMARY KEY (source_id, provider_id, model_id),
+    INDEX idx_scope_lease_owner (lock_owner, lease_expires_at),
+    INDEX idx_scope_lease_expiry (lease_expires_at)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='Cron dispatch model scope leases'
+"""
+
 CREATE_CRON_DISPATCH_MODEL_WORKER_POLICY_TABLE = """
 CREATE TABLE IF NOT EXISTS swe_cron_dispatch_model_worker_policy (
     source_id VARCHAR(64) NOT NULL DEFAULT 'default' COMMENT 'source id',
@@ -346,6 +364,7 @@ CREATE_TABLE_STATEMENTS = [
     CREATE_CRON_DISPATCH_INTENTS_TABLE,
     CREATE_CRON_DISPATCH_EVENTS_TABLE,
     CREATE_CRON_DISPATCH_WORKER_CAPACITY_TABLE,
+    CREATE_CRON_DISPATCH_SCOPE_LEASES_TABLE,
     CREATE_CRON_DISPATCH_MODEL_WORKER_POLICY_TABLE,
     CREATE_CRON_DISPATCH_WORKER_STRATEGY_TABLE,
 ]

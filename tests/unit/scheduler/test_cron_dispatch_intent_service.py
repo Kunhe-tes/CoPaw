@@ -56,6 +56,29 @@ def test_dispatch_batch_schema_tracks_batch_owner() -> None:
     assert "idx_dispatch_batch_lock" in source
 
 
+def test_scope_lease_schema_tracks_model_owner() -> None:
+    """Model scope ownership needs a durable lease shared by scheduler pods."""
+    source = scheduler_schema.CREATE_CRON_DISPATCH_SCOPE_LEASES_TABLE
+
+    assert "swe_cron_dispatch_scope_leases" in source
+    assert "PRIMARY KEY (source_id, provider_id, model_id)" in source
+    assert "lock_owner VARCHAR(128)" in source
+    assert "lease_expires_at DATETIME" in source
+    assert "idx_scope_lease_owner" in source
+
+
+def test_latest_capacity_is_scope_level_not_worker_level() -> None:
+    """Capacity is shared per model scope; worker_id is only writer metadata."""
+    source = inspect.getsource(
+        CronDispatchIntentService.get_latest_worker_capacity,
+    )
+
+    assert "worker_id = %s" not in source
+    assert "source_id = %s" in source
+    assert "provider_id = %s" in source
+    assert "model_id = %s" in source
+
+
 def test_record_execution_uses_insert_cursor_lastrowid() -> None:
     source = inspect.getsource(ExecutionSyncService.record_execution)
 

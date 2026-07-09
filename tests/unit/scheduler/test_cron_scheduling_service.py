@@ -35,6 +35,8 @@ class _DispatchStore:
         self.parent_intents: list[dict[str, Any]] = []
         self.capacity: list[dict[str, Any]] = []
         self.stale_recoveries: list[dict[str, Any]] = []
+        self.scope_leases: list[dict[str, Any]] = []
+        self.scope_lease_allowed = True
         self.recovered_running_count: int | None = None
         self.scopes: list[WorkerScope] = [
             WorkerScope(
@@ -112,6 +114,10 @@ class _DispatchStore:
 
     async def get_latest_worker_capacity(self, **kwargs):
         return self.latest_capacity
+
+    async def acquire_scope_lease(self, **kwargs):
+        self.scope_leases.append(kwargs)
+        return self.scope_lease_allowed
 
     async def summarize_recent_completion_feedback(self, **kwargs):
         return dict(self.feedback)
@@ -508,11 +514,40 @@ async def test_capacity_adjustment_is_interval_gated_and_separate() -> None:
 
     assert adjusted is True
     assert skipped is False
+    assert store.scope_leases[0]["worker_id"] == "scheduler-1"
     assert service.effective_workers == 2
     assert store.capacity[0]["effective_workers"] == 2
     assert store.capacity[0]["decision_reason"] == "stable_success"
     assert callback.requests == []
     assert store.claims == []
+
+
+@pytest.mark.asyncio
+async def test_capacity_adjustment_skips_scope_without_lease() -> None:
+    store = _DispatchStore([])
+    store.scope_lease_allowed = False
+    store.latest_capacity = None
+    store.feedback = {
+        **store.feedback,
+        "pending_count": 3,
+        "success_count": 2,
+        "failure_count": 0,
+    }
+    service = CronSchedulingService(
+        dispatch_store=store,
+        callback_client=_CallbackClient(),
+        worker_id="scheduler-2",
+        baseline_workers=1,
+        max_workers=4,
+    )
+
+    adjusted = await service.adjust_worker_capacity_if_due(
+        now_utc=datetime(2026, 7, 1, 1, 0, tzinfo=timezone.utc),
+    )
+
+    assert adjusted is False
+    assert store.scope_leases
+    assert store.capacity == []
 
 
 @pytest.mark.asyncio
@@ -572,8 +607,47 @@ async def test_dispatch_ready_only_claims_available_worker_slots() -> None:
     )
 
     assert dispatched == 1
+    assert store.scope_leases[0]["source_id"] == "source-a"
+    assert store.scope_leases[0]["provider_id"] == "default"
+    assert store.scope_leases[0]["model_id"] == "default"
     assert store.claims[0]["limit"] == 1
     assert len(callback.requests) == 1
+
+
+@pytest.mark.asyncio
+async def test_dispatch_ready_skips_scope_without_lease() -> None:
+    store = _DispatchStore(
+        [
+            {
+                "id": 6,
+                "batch_id": "batch-1",
+                "intent_role": "child",
+                "tenant_id": "tenant-b",
+                "source_id": "source-a",
+                "agent_id": "default",
+                "job_id": "child-1",
+            },
+        ],
+    )
+    store.latest_capacity = None
+    store.scope_lease_allowed = False
+    callback = _CallbackClient()
+    service = CronSchedulingService(
+        dispatch_store=store,
+        callback_client=callback,
+        worker_id="scheduler-1",
+        effective_workers=1,
+    )
+
+    dispatched = await service.dispatch_ready_once(
+        now_utc=datetime(2026, 7, 1, 1, 0, tzinfo=timezone.utc),
+    )
+
+    assert dispatched == 0
+    assert store.scope_leases
+    assert store.capacity == []
+    assert store.claims == []
+    assert callback.requests == []
 
 
 @pytest.mark.asyncio

@@ -1385,6 +1385,73 @@ class CronDispatchIntentService:
             for row in rows
         ]
 
+    async def acquire_scope_lease(
+        self,
+        *,
+        source_id: str,
+        provider_id: str,
+        model_id: str,
+        worker_id: str,
+        now_utc: datetime,
+        lease_seconds: int,
+    ) -> bool:
+        db = get_db_connection()
+        normalized_source_id = str(source_id or "")
+        normalized_provider_id = _normalized_provider_id(provider_id)
+        normalized_model_id = _normalized_model_id(model_id)
+        normalized_worker_id = str(worker_id or "")
+        normalized_now = _to_beijing_naive(now_utc)
+        lease_expires_at = normalized_now + timedelta(
+            seconds=max(1, int(lease_seconds or 1)),
+        )
+        await db.execute(
+            """
+            INSERT IGNORE INTO swe_cron_dispatch_scope_leases (
+                source_id, provider_id, model_id, lock_owner,
+                locked_at, lease_expires_at, heartbeat_at
+            )
+            VALUES (%s, %s, %s, '', NULL, NULL, NULL)
+            """,
+            (
+                normalized_source_id,
+                normalized_provider_id,
+                normalized_model_id,
+            ),
+        )
+        result = await db.execute(
+            """
+            UPDATE swe_cron_dispatch_scope_leases
+            SET lock_owner = %s,
+                locked_at = CASE
+                    WHEN lock_owner = %s THEN locked_at ELSE %s
+                END,
+                lease_expires_at = %s,
+                heartbeat_at = %s
+            WHERE source_id = %s
+              AND provider_id = %s
+              AND model_id = %s
+              AND (
+                  lock_owner = ''
+                  OR lock_owner = %s
+                  OR lease_expires_at IS NULL
+                  OR lease_expires_at < %s
+              )
+            """,
+            (
+                normalized_worker_id,
+                normalized_worker_id,
+                normalized_now,
+                lease_expires_at,
+                normalized_now,
+                normalized_source_id,
+                normalized_provider_id,
+                normalized_model_id,
+                normalized_worker_id,
+                normalized_now,
+            ),
+        )
+        return _rowcount(result) > 0
+
     async def resolve_worker_strategy(
         self,
         *,
@@ -1511,7 +1578,6 @@ class CronDispatchIntentService:
               AND provider_id = %s
               AND model_id = %s
               AND (%s = '' OR strategy_id = %s)
-              AND (%s = '' OR worker_id = %s)
             ORDER BY created_at DESC, id DESC
             LIMIT 1
             """,
@@ -1521,8 +1587,6 @@ class CronDispatchIntentService:
                 model_id,
                 normalized_strategy_id,
                 normalized_strategy_id,
-                worker_id or "",
-                worker_id or "",
             ),
         )
         return dict(row) if row else None
