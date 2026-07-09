@@ -1807,6 +1807,65 @@ async def test_emit_before_stop_hook_respects_active_guard(
 
 
 @pytest.mark.asyncio
+async def test_emit_before_stop_hook_skips_plan_interaction_boundary(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    runner = AgentRunner(agent_id="test-agent", workspace_dir=tmp_path)
+    runtime = _QueryRuntime(
+        agent=_FakeAgent(),
+        agent_config=_agent_config(
+            HookConfig(
+                enabled=True,
+                events={
+                    HookEventName.BEFORE_STOP: [
+                        HookMatcherGroupConfig(
+                            hooks=[
+                                CommandHookHandlerConfig(
+                                    id="policy",
+                                    command="unused",
+                                ),
+                            ],
+                        ),
+                    ],
+                },
+            ),
+        ),
+        tenant_hooks=HookConfig(enabled=True),
+        hook_overlay=HookSessionOverlay(),
+        chat=SimpleNamespace(id="chat-1"),
+        session_skill_detector=None,
+        mcp_clients=[],
+        session_id="session-1",
+        user_id="user-1",
+        channel="console",
+        skip_history=False,
+        pending_confirmed_skill_snapshots={},
+    )
+    outcome = _QueryTurnOutcome(
+        assistant_response="agent reply",
+        plan_interaction_turn_boundary=True,
+    )
+    emit_hook = AsyncMock()
+    monkeypatch.setattr("swe.app.runner.runner._emit_runner_hook", emit_hook)
+
+    result = await runner._emit_before_stop_hook_if_needed(
+        request=SimpleNamespace(
+            session_id="session-1",
+            user_id="user-1",
+            channel="console",
+            channel_meta={},
+        ),
+        runtime=runtime,
+        plan=_TurnPlan(original_user_message="hello", turn_msgs=[]),
+        outcome=outcome,
+    )
+
+    assert result is None
+    emit_hook.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_before_stop_hook_conversation_snapshot_uses_live_memory(
     monkeypatch,
     tmp_path,

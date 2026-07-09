@@ -96,6 +96,10 @@ _PLAN_INTERACTION_TOOL_NAMES = frozenset(
         "cancel_subagent",
     },
 )
+_PLAN_INTERACTION_CARD_METADATA_KEY = "plan_interaction_card"
+_PLAN_INTERACTION_TURN_BOUNDARY_ATTR = (
+    "_plan_interaction_turn_boundary_reached"
+)
 _APPROVAL_KIND_TOOL_GUARD = "tool_guard"
 _APPROVAL_KIND_HOOK_PRE_TOOL_USE = "hook_pre_tool_use"
 _PLAN_MODE_ALLOWED_TOOLS = frozenset(
@@ -290,6 +294,17 @@ class ToolGuardMixin:
                 tool_res_msg.content[0]["output"] = chunk.content
                 if chunk.metadata:
                     tool_res_msg.metadata.update(chunk.metadata)
+                    if isinstance(
+                        chunk.metadata.get(
+                            _PLAN_INTERACTION_CARD_METADATA_KEY,
+                        ),
+                        dict,
+                    ):
+                        setattr(
+                            self,
+                            _PLAN_INTERACTION_TURN_BOUNDARY_ATTR,
+                            True,
+                        )
                 await self.print(tool_res_msg, chunk.is_last)
                 if chunk.is_interrupted:
                     raise asyncio.CancelledError()
@@ -1938,6 +1953,10 @@ class ToolGuardMixin:
         completion message so the ``ReActAgent.reply`` loop exits
         naturally.
         """
+        if getattr(self, _PLAN_INTERACTION_TURN_BOUNDARY_ATTR, False):
+            setattr(self, _PLAN_INTERACTION_TURN_BOUNDARY_ATTR, False)
+            return Msg(self.name, [], "assistant")
+
         with self._agent_phase_context(
             "approval_replay",
             reason="approval_replay_done",

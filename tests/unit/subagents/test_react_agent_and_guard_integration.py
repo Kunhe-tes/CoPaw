@@ -31,6 +31,16 @@ class _BaseAgent:
         return {"content": tool_call["input"]}
 
 
+class _ReasoningBaseAgent(_BaseAgent):
+    def __init__(self) -> None:
+        self.reasoning_called = False
+
+    async def _reasoning(self, tool_choice=None):
+        del tool_choice
+        self.reasoning_called = True
+        raise AssertionError("Plan interaction boundary must stop reasoning")
+
+
 class _PlanningToolkit:
     async def call_tool_function(self, tool_call):
         async def _chunks():
@@ -145,6 +155,36 @@ class _FakePlanInteractionAgent(_FakePlanGuardAgent):
     def __init__(self, tmp_path: Path):
         super().__init__(tmp_path)
         self.toolkit = _PlanningToolkit()
+
+
+class _FakePlanInteractionReasoningAgent(
+    ToolGuardMixin,
+    _ReasoningBaseAgent,
+):
+    name = "Friday"
+
+    def __init__(self, tmp_path: Path):
+        _ReasoningBaseAgent.__init__(self)
+        self._request_context = {
+            "session_id": "session-1",
+            "agent_role": "main",
+            "plan_mode_enabled": False,
+        }
+        self._agent_config = SimpleNamespace()
+        self._workspace_dir = tmp_path
+        self.memory = _Memory()
+        self.printed = []
+        self._tool_guard_lock = asyncio.Lock()
+        self.toolkit = _PlanningToolkit()
+
+    def _ensure_tool_guard(self) -> None:
+        self._tool_guard_engine = SimpleNamespace(enabled=False)
+
+    async def _emit_tool_hook(self, *args, **kwargs):
+        return MergedHookResult()
+
+    async def print(self, msg, *args, **kwargs):
+        self.printed.append(msg)
 
 
 class _FakeNormalMainGuardAgent(ToolGuardMixin, _BaseAgent):
@@ -545,6 +585,31 @@ async def test_plan_interaction_tool_metadata_is_printed_and_persisted(
         ]
         == "customer_operation_plan"
     )
+
+
+@pytest.mark.asyncio
+async def test_plan_interaction_card_stops_next_reasoning_turn(
+    tmp_path: Path,
+) -> None:
+    """成功发出计划交互卡片后，本轮不再进入下一次模型 reasoning。"""
+    agent = _FakePlanInteractionReasoningAgent(tmp_path)
+
+    await agent._acting(
+        {
+            "id": "tool-plan-1",
+            "name": "ask_plan_clarification",
+            "input": {
+                "prompt": "请选择范围",
+                "kind": "customer_operation_plan",
+            },
+        },
+    )
+
+    msg = await agent._reasoning()
+
+    assert agent.reasoning_called is False
+    assert msg.role == "assistant"
+    assert msg.content == []
 
 
 def test_plan_mode_toolkit_excludes_synchronous_delegation(

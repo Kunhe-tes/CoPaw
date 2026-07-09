@@ -110,6 +110,7 @@ _INTERNAL_FOLLOW_UP_METADATA_KEY = "swe_internal_follow_up"
 _PLAN_MODE_META_KEY = "plan_mode_enabled"
 _PLAN_REQUEST_MODE_KEY = "mode"
 _PLAN_INTERACTION_RESPONSE_KEY = "plan_interaction_response"
+_PLAN_INTERACTION_CARD_METADATA_KEY = "plan_interaction_card"
 _ACCEPTED_PLAN_META_KEY = "accepted_plan"
 _ACCEPTED_PLAN_SOURCE_META_KEY = "accepted_plan_source"
 _ACCEPTED_PLAN_SERVER_SOURCE = "server_plan_store"
@@ -213,6 +214,7 @@ class _QueryTurnOutcome:
     max_before_stop_turns: int = 0
     automatic_follow_up_turns: int = 0
     max_automatic_follow_up_turns: int = 0
+    plan_interaction_turn_boundary: bool = False
     stop_hook_active: bool = False
     completion_blocked: bool = False
     completion_block_reason: str = ""
@@ -3172,6 +3174,12 @@ class AgentRunner(Runner):
             agent=runtime.agent,
             run_key=(runtime.chat.id if runtime.chat is not None else None),
         ):
+            metadata = getattr(msg, "metadata", None)
+            if isinstance(metadata, dict) and isinstance(
+                metadata.get(_PLAN_INTERACTION_CARD_METADATA_KEY),
+                dict,
+            ):
+                outcome.plan_interaction_turn_boundary = True
             yield msg, last
 
         outcome.assistant_response = _extract_assistant_response(
@@ -3189,6 +3197,8 @@ class AgentRunner(Runner):
     ) -> MergedHookResult | None:
         """执行 BeforeStop gate，active guard 已设置时跳过递归触发。"""
         if outcome.stop_hook_active:
+            return None
+        if outcome.plan_interaction_turn_boundary:
             return None
         if not outcome.assistant_response:
             return None

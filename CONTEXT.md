@@ -216,6 +216,10 @@ _Avoid_: content fingerprint, semantic duplicate, shared clarification prompt
 A built-in Main Agent tool that emits Plan Interaction Cards through validated structured metadata.
 _Avoid_: markdown JSON card, frontend text parser
 
+**Plan Interaction Turn Boundary**:
+The conversation boundary created when the Main Agent emits a Plan Interaction Card through a Plan Interaction Tool. The current Main Agent turn finishes the already-started tool-call batch, then ends without another reasoning step and waits for a user Plan Interaction Response, regardless of the current Plan Mode State.
+_Avoid_: optional pause, prompt-only guideline, Plan Mode-only stop, sibling tool cancellation
+
 **Plan Clarification Tool**:
 The Plan Interaction Tool used by the Main Agent to ask the user a single planning clarification question.
 _Avoid_: generic question tool, subagent prompt
