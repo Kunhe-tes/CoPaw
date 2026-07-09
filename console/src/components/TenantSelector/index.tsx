@@ -72,6 +72,9 @@ export function TenantSelector({
   const { t } = useTranslation();
   const sourceId = useIframeStore((state) => state.source) || DEFAULT_SOURCE_ID;
 
+  // 是否为技能分发场景（只有技能分发才会传入有数据的 userSkillStatusMap）
+  const isSkillDistribution = !!userSkillStatusMap && userSkillStatusMap.size > 0;
+
   // 加载状态
   const [loading, setLoading] = useState(false);
   // 错误状态
@@ -485,11 +488,13 @@ export function TenantSelector({
                         <span className={styles.collapseCount}>
                           {t("tenantSelector.userCount", { count: group.users.length })}
                         </span>
-                        {/* 机构统计 */}
-                        <span className={styles.collapseStats}>
-                          覆盖: {group.users.filter(u => userSkillStatusMap?.get(u.tenant_id)?.status === "update").length} |
-                          首次: {group.users.filter(u => userSkillStatusMap?.get(u.tenant_id)?.status === "first_time").length}
-                        </span>
+                        {/* 机构统计 - 仅技能分发场景显示 */}
+                        {isSkillDistribution && (
+                          <span className={styles.collapseStats}>
+                            覆盖: {group.users.filter(u => userSkillStatusMap?.get(u.tenant_id)?.status === "update").length} |
+                            首次: {group.users.filter(u => userSkillStatusMap?.get(u.tenant_id)?.status === "first_time").length}
+                          </span>
+                        )}
                       </span>
                     ),
                     children: (
@@ -505,8 +510,8 @@ export function TenantSelector({
                               <div className={styles.userDetailName}>
                                 {renderTenantName(user.tenant_id)}
                               </div>
-                              {/* 按机构模式下，机构已选中，显示用户状态 */}
-                              {status && (
+                              {/* 用户状态 - 仅技能分发场景显示 */}
+                              {status && isSkillDistribution && (
                                 <div className={styles.userDetailStatus}>
                                   {status.status === "update" && status.current_version && (
                                     <span style={{ color: "#1890ff" }}>{status.current_version}→v{skillVersion || "新"}</span>
@@ -607,7 +612,8 @@ export function TenantSelector({
                   const selected = effectiveInListTenantIds.includes(tenantId);
                   const status = userSkillStatusMap?.get(tenantId);
                   const tenant = tenantLookup.get(tenantId);
-                  const branchName = tenant?.bbk_id
+                  // 分行名称 - 仅技能分发场景显示
+                  const branchName = isSkillDistribution && tenant?.bbk_id
                     ? (BBK_ID_TO_NAME_MAP[tenant.bbk_id] || tenant.bbk_id)
                     : "";
                   return (
@@ -616,6 +622,8 @@ export function TenantSelector({
                       type="button"
                       onClick={() => handleUserCardClick(tenantId, selected)}
                       className={`${styles.userCard} ${
+                        branchName ? styles.userCardWithBranch : ""
+                      } ${
                         selected ? styles.userCardSelected : ""
                       }`}
                     >
