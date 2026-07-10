@@ -43,7 +43,10 @@ from .skills_manager import (
     resolve_effective_skills,
 )
 from .tool_failure import normalize_tool_function_errors
-from .tool_guard_mixin import ToolGuardMixin
+from .tool_guard_mixin import (
+    PLAN_INTERACTION_SUMMARIZING_SHORT_CIRCUIT_METADATA_KEY,
+    ToolGuardMixin,
+)
 from .tools import (
     edit_file,
     execute_shell_command,
@@ -91,11 +94,27 @@ _INTERNAL_ACCEPTED_PLAN_TOOL_NAME = "accepted_plan_context"
 _INTERNAL_ACCEPTED_PLAN_TOOL_ID_KEY = "_accepted_plan_tool_call_id"
 _PLAN_MODE_CLARIFICATION_INSTRUCTION = (
     "[Plan Mode Clarification Requirement]\n"
-    "use ask_plan_clarification tool，Interview "
-    "me relentlessly about every aspect of this "
-    "plan until we reach a shared understanding. "
-    "Walk down each branch of the design tree, "
-    "resolving dependencies between decisions one-by-one."
+    "You are now in Plan Mode. Your job is to clarify and organize the "
+    "plan before execution begins.\n\n"
+    "before calling submit_proposed_plan, you MUST use "
+    "ask_plan_clarification tool for any unresolved planning decision, dependency, "
+    "scope boundary, risk, verification requirement, or implementation "
+    "constraint.\n\n"
+    "Clarification protocol:\n"
+    "- Ask a question series when several related decisions belong to the "
+    "same branch of the design tree.\n"
+    "- Prefer the form clarification kind for a question series that collects "
+    "multiple related answers in one turn.\n"
+    "- single_choice and multi_choice clarifications must not include "
+    "recommended answers; text clarifications may include a recommended answer "
+    "only when it helps the user evaluate a concrete default.\n"
+    "- After the user answers one question series, review the remaining "
+    "dependencies and continue with the next question series when needed.\n"
+    "- Continue until you judge that all decision-tree branches relevant to "
+    "the requested plan have been clarified well enough to produce a concrete, "
+    "reviewable plan.\n\n"
+    "Only call submit_proposed_plan after the clarification loop is complete.\n"
+    "Now, Please start Plan.\n"
 )
 _PLAN_MODE_ALLOWED_TOOLS = frozenset(
     {
@@ -459,21 +478,21 @@ class SWEAgent(ToolGuardMixin, ReActAgent):
             enabled_tools = {
                 name: name in allowed
                 for name in (
-                    enabled_tools.keys()
-                    if enabled_tools
-                    else (
-                        "execute_shell_command",
-                        "read_file",
-                        "write_file",
-                        "edit_file",
-                        "grep_search",
-                        "glob_search",
-                        "get_current_time",
-                        "set_user_timezone",
-                        "get_token_usage",
-                        "copy_file_to_static",
-                        "update_task_progress",
-                    )
+                    "execute_shell_command",
+                    "start_background_process",
+                    "list_background_processes",
+                    "get_process_output",
+                    "stop_background_process",
+                    "read_file",
+                    "write_file",
+                    "edit_file",
+                    "grep_search",
+                    "glob_search",
+                    "get_current_time",
+                    "set_user_timezone",
+                    "get_token_usage",
+                    "copy_file_to_static",
+                    "update_task_progress",
                 )
             }
         elif plan_mode_enabled:
@@ -1571,6 +1590,12 @@ class SWEAgent(ToolGuardMixin, ReActAgent):
             finally:
                 self._in_summarizing = False
 
+            metadata = getattr(msg, "metadata", None)
+            if isinstance(metadata, dict) and metadata.pop(
+                PLAN_INTERACTION_SUMMARIZING_SHORT_CIRCUIT_METADATA_KEY,
+                False,
+            ):
+                return msg
             return self._strip_tool_use_from_msg(msg)
 
     async def print(

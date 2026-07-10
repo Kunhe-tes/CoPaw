@@ -137,7 +137,7 @@ class TestReactAgentTaskProgressPrompt:
         self,
         monkeypatch,
     ):
-        """Plan Mode 应默认要求用澄清工具深挖计划细节。"""
+        """Plan Mode 应要求分组澄清完整决策树后再提交计划。"""
         monkeypatch.setattr(
             react_agent_module,
             "build_system_prompt_from_working_dir",
@@ -154,8 +154,15 @@ class TestReactAgentTaskProgressPrompt:
         with bind_source_system_config(_build_effective_config(False)):
             prompt = SWEAgent._build_sys_prompt(agent)
 
-        assert "use ask_plan_clarification tool" in prompt
-        assert "Walk down each branch of the design tree" in prompt
+        assert "You are now in Plan Mode" in prompt
+        assert "MUST use ask_plan_clarification" in prompt
+        assert "before calling submit_proposed_plan" in prompt
+        assert "question series" in prompt
+        assert "single_choice and multi_choice clarifications" in prompt
+        assert "must not include recommended answers" in prompt
+        assert "text clarifications may include a recommended answer" in prompt
+        assert "After the user answers one question series" in prompt
+        assert "all decision-tree branches" in prompt
 
     def test_build_sys_prompt_omits_plan_mode_instruction_in_normal_mode(
         self,

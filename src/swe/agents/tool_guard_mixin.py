@@ -97,6 +97,9 @@ _PLAN_INTERACTION_TOOL_NAMES = frozenset(
     },
 )
 _PLAN_INTERACTION_CARD_METADATA_KEY = "plan_interaction_card"
+PLAN_INTERACTION_SUMMARIZING_SHORT_CIRCUIT_METADATA_KEY = (
+    "_plan_interaction_summarizing_short_circuit"
+)
 _PLAN_INTERACTION_TURN_BOUNDARY_ATTR = (
     "_plan_interaction_turn_boundary_reached"
 )
@@ -1999,7 +2002,14 @@ class ToolGuardMixin:
     async def _summarizing(self) -> Msg:
         """Short-circuit max-iteration summarizing after a plan card."""
         if self._consume_plan_interaction_turn_boundary():
-            return Msg(self.name, [], "assistant")
+            return Msg(
+                self.name,
+                [],
+                "assistant",
+                metadata={
+                    PLAN_INTERACTION_SUMMARIZING_SHORT_CIRCUIT_METADATA_KEY: True,
+                },
+            )
         return await super()._summarizing()  # type: ignore[misc]
 
     async def _reason_about_replay_done(self) -> Msg | None:

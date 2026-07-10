@@ -152,69 +152,11 @@ Provider 配置按租户独立存放：
 - 新租户首次访问时可继承默认租户配置
 - CLI 支持 `--tenant-id` 进行多租户管理
 
-### Subagent 工作方式
-
-- subagent 的模型只能选择 `gpt-5.3-codex` 和 `gpt-5.4`
-- 开发内容只能在 worktree 上进行，待你确认后才能合并到其他分支
-
-### 代码风格
-
-- Python 使用 4 空格缩进、`snake_case` 模块名、Black 79 列
-- 目录与文件命名遵循现有模式，例如 `channel.py`、`registry.py`、`test_*.py`
-
 ### Sonar 规范
 
 - 控制函数圈复杂度，普通函数建议不超过 `15`
 - 控制函数参数数量，普通函数建议不超过 `7`
 - 对重复出现的错误文案、状态文案、字段描述文案，优先提取为模块级常量或小型 helper，避免散落的重复字面量
-
-### 代码注释规范
-
-#### 基本要求
-
-- **语言要求**：所有注释必须使用简体中文，包括 docstring、行内注释、TODO/FIXME 标记
-
-#### 注释时机（以下情况必须添加注释）
-
-- **模块级**：每个 Python 模块文件开头应有简短说明，描述模块职责和主要功能
-- **类级**：类定义应有 docstring，说明类的用途、关键属性、使用示例（如适用）
-- **函数/方法级**：公共函数和类方法必须有 docstring，说明功能、参数含义、返回值、可能的异常
-- **行内注释**：
-  - 复杂算法或非直观逻辑的实现步骤
-  - 业务规则或业务逻辑的决策依据
-  - 边界条件处理、异常捕获的原因
-  - 性能优化相关的技术决策
-  - 临时方案或已知限制（配合 TODO/FIXME）
-  - 正则表达式、复杂公式等难以直接理解的代码片段
-
-#### 注释内容要求
-
-- 注释应解释 **WHY（为什么这样做）**，而非简单重复 **WHAT（代码做什么）**
-- 注释应提供代码本身无法表达的信息：设计意图、约束原因、相关背景
-- 避免无意义注释（如 `# 循环遍历列表` 对应 `for item in list`）
-
-#### 注释维护
-
-- **同步更新原则**：修改代码时，相关注释必须同步更新，确保注释与代码一致
-- 删除代码时，相关注释一并删除，不要保留过时的注释
-- 发现注释与代码不一致时，优先检查代码正确性，然后修正注释
-
-#### 禁止事项
-
-- 不要保留注释掉的代码块，使用版本控制管理历史代码
-- 不要添加已废弃或不再生效的注释
-- 不要在注释中包含敏感信息（密码、密钥、内部 IP 等）
-- 不要用注释掩盖代码质量问题（应直接修复代码）
-- **不要在注释中出现"中文注释"、"以下是注释"等无意义的标签式文字**，注释应直接表达实质内容
-- 不要添加显而易见的注释（如 `# 定义变量 x` 对应 `x = 1`）
-- 不要在注释中重复函数名或变量名（如 `# 调用 get_user_info 获取用户信息`）
-
-#### 特殊标记
-
-- **TODO**：标记待完成的功能或优化项，格式：`# TODO: 简要描述待完成内容`
-- **FIXME**：标记已知问题或待修复的 bug，格式：`# FIXME: 简要描述问题及影响`
-- **HACK**：标记临时方案或 workaround，格式：`# HACK: 简要描述临时方案及后续计划`
-- 以上标记应在后续迭代中及时处理和清理
 
 ## 测试要求
 
@@ -245,15 +187,67 @@ venv/bin/python -m pytest -m "not slow"
 
 - 提交前建议执行 `pre-commit run --all-files` 与必要范围的 `pytest`
 
-### Commit 与 PR
+# coding guidelines
 
-- 提交信息使用 Conventional Commits：`feat(scope): summary`、`fix(scope): summary`、`docs(scope): summary`
+## 1. Think Before Coding
 
-### 开发规范（按照难易程度选择开发范式）
+**Don't assume. Don't hide confusion. Surface tradeoffs.**
 
-- 对简单问题或者 bugfix，直接进行开发和修复
-- 对于较复杂的问题，使用 brainstorm 和 superpowers 工具进行规划和开发
-- 对于横跨多个模块的特性开发和问题处理，请先使用 openspec 工具进行深入分析和指定计划，再使用 TDD 的范式进行开发和实现
+Before implementing:
+- State your assumptions explicitly. If uncertain, ask.
+- If multiple interpretations exist, present them - don't pick silently.
+- If a simpler approach exists, say so. Push back when warranted.
+- If something is unclear, stop. Name what's confusing. Ask.
+
+## 2. Simplicity First
+
+**Minimum code that solves the problem. Nothing speculative.**
+
+- No features beyond what was asked.
+- No abstractions for single-use code.
+- No "flexibility" or "configurability" that wasn't requested.
+- No error handling for impossible scenarios.
+- If you write 200 lines and it could be 50, rewrite it.
+
+Ask yourself: "Would a senior engineer say this is overcomplicated?" If yes, simplify.
+
+## 3. Surgical Changes
+
+**Touch only what you must. Clean up only your own mess.**
+
+When editing existing code:
+- Don't "improve" adjacent code, comments, or formatting.
+- Don't refactor things that aren't broken.
+- Match existing style, even if you'd do it differently.
+- If you notice unrelated dead code, mention it - don't delete it.
+
+When your changes create orphans:
+- Remove imports/variables/functions that YOUR changes made unused.
+- Don't remove pre-existing dead code unless asked.
+
+The test: Every changed line should trace directly to the user's request.
+
+## 4. Goal-Driven Execution
+
+**Define success criteria. Loop until verified.**
+
+Transform tasks into verifiable goals:
+- "Add validation" → "Write tests for invalid inputs, then make them pass"
+- "Fix the bug" → "Write a test that reproduces it, then make it pass"
+- "Refactor X" → "Ensure tests pass before and after"
+
+For multi-step tasks, state a brief plan:
+```
+1. [Step] → verify: [check]
+2. [Step] → verify: [check]
+3. [Step] → verify: [check]
+```
+
+Strong success criteria let you loop independently. Weak criteria ("make it work") require constant clarification.
+
+---
+
+**These guidelines are working if:** fewer unnecessary changes in diffs, fewer rewrites due to overcomplication, and clarifying questions come before implementation rather than after mistakes.
 
 <!-- gitnexus:start -->
 # GitNexus — Code Intelligence
