@@ -25,6 +25,7 @@ from swe.app.middleware.provider_models_timing import (
     log_provider_models_middleware_done,
     log_provider_models_middleware_error,
 )
+from swe.app.middleware.tenant_identity import is_source_exempt
 
 logger = logging.getLogger(__name__)
 
@@ -41,6 +42,58 @@ class SourceSystemConfigMiddleware(BaseHTTPMiddleware):
         super().__init__(app)
         self.service = service
 
+    async def _call_next_without_config(
+        self,
+        request: Request,
+        call_next: Callable[[Request], Awaitable[Response]],
+        source_id: str | None,
+        service: SourceSystemConfigService | None,
+    ) -> Response:
+        """继续处理无需绑定 source 系统配置的请求。"""
+        is_timing = is_provider_models_list_request(request)
+        started_at = time.perf_counter()
+        before_next_at = None
+        has_service = service is not None
+
+        try:
+            if is_timing:
+                before_next_at = log_provider_models_middleware_before_next(
+                    logger,
+                    "SourceSystemConfigMiddleware",
+                    request,
+                    started_at,
+                    source_id=source_id,
+                    has_service=has_service,
+                    resolve_config_ms=None,
+                )
+            response = await call_next(request)
+            if is_timing and before_next_at is not None:
+                log_provider_models_middleware_done(
+                    logger,
+                    "SourceSystemConfigMiddleware",
+                    request,
+                    started_at,
+                    before_next_at,
+                    response,
+                    source_id=source_id,
+                    has_service=has_service,
+                    resolve_config_ms=None,
+                )
+            return response
+        except Exception:
+            if is_timing:
+                log_provider_models_middleware_error(
+                    logger,
+                    "SourceSystemConfigMiddleware",
+                    request,
+                    started_at,
+                    before_next_at,
+                    source_id=source_id,
+                    has_service=has_service,
+                    resolve_config_ms=None,
+                )
+            raise
+
     async def dispatch(
         self,
         request: Request,
@@ -56,47 +109,21 @@ class SourceSystemConfigMiddleware(BaseHTTPMiddleware):
             None,
         )
         before_next_at = None
+        if request.method == "OPTIONS" or is_source_exempt(request.url.path):
+            return await self._call_next_without_config(
+                request,
+                call_next,
+                source_id,
+                service,
+            )
+
         if source_id is None or service is None:
-            try:
-                if is_timing:
-                    before_next_at = (
-                        log_provider_models_middleware_before_next(
-                            logger,
-                            "SourceSystemConfigMiddleware",
-                            request,
-                            started_at,
-                            source_id=source_id,
-                            has_service=service is not None,
-                            resolve_config_ms=None,
-                        )
-                    )
-                response = await call_next(request)
-                if is_timing and before_next_at is not None:
-                    log_provider_models_middleware_done(
-                        logger,
-                        "SourceSystemConfigMiddleware",
-                        request,
-                        started_at,
-                        before_next_at,
-                        response,
-                        source_id=source_id,
-                        has_service=service is not None,
-                        resolve_config_ms=None,
-                    )
-                return response
-            except Exception:
-                if is_timing:
-                    log_provider_models_middleware_error(
-                        logger,
-                        "SourceSystemConfigMiddleware",
-                        request,
-                        started_at,
-                        before_next_at,
-                        source_id=source_id,
-                        has_service=service is not None,
-                        resolve_config_ms=None,
-                    )
-                raise
+            return await self._call_next_without_config(
+                request,
+                call_next,
+                source_id,
+                service,
+            )
 
         token = None
         resolve_config_ms = 0

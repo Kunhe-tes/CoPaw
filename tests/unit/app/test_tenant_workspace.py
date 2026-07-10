@@ -241,6 +241,48 @@ class TestTenantWorkspaceHelpers:
         assert response.status_code == 200
 
     @pytest.mark.asyncio
+    async def test_dispatch_skips_public_static_even_with_tenant_context(self):
+        """Public static routes must not bootstrap workspace from headers."""
+        from swe.app.middleware import tenant_workspace as workspace_module
+        from swe.app.middleware.tenant_workspace import (
+            TenantWorkspaceMiddleware,
+        )
+
+        scope_id = encode_scope_id("default", "RMASSIST")
+        mock_req = MagicMock(spec=Request)
+        mock_req.method = "GET"
+        mock_req.state = MagicMock()
+        mock_req.state.tenant_id = "default"
+        mock_req.state.effective_tenant_id = scope_id
+        mock_req.state.scope_id = scope_id
+        mock_req.state.source_id = "RMASSIST"
+        mock_req.url = MagicMock()
+        mock_req.url.path = f"/static/{scope_id}/default/report.html"
+        mock_req.app = MagicMock()
+        mock_req.app.state = MagicMock()
+
+        pool = MagicMock()
+        pool.ensure_bootstrap = AsyncMock()
+        pool.get_tenant_workspace_dir = MagicMock()
+        mock_req.app.state.tenant_workspace_pool = pool
+
+        middleware = TenantWorkspaceMiddleware(app=MagicMock())
+
+        async def call_next(_request):
+            return Response(content=b"OK", status_code=200)
+
+        with patch.object(
+            workspace_module,
+            "resolve_user_identity",
+            new=AsyncMock(side_effect=AssertionError("remote lookup called")),
+        ):
+            response = await middleware.dispatch(mock_req, call_next)
+
+        assert response.status_code == 200
+        pool.ensure_bootstrap.assert_not_awaited()
+        pool.get_tenant_workspace_dir.assert_not_called()
+
+    @pytest.mark.asyncio
     async def test_get_workspace_logs_bootstrap_duration(self):
         """Workspace bootstrap path emits timing diagnostics."""
         from swe.app.middleware import tenant_workspace as workspace_module

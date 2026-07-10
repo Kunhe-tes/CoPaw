@@ -962,7 +962,7 @@ async def serve_user_static(
     """
     from ..constant import WORKING_DIR
 
-    logger.info(f"Serving static files from scope {scope_id}")
+    logger.debug(f"Serving static files from scope {scope_id}")
 
     static_dir = (
         WORKING_DIR / scope_id / "workspaces" / agent_id / "static"
@@ -971,6 +971,7 @@ async def serve_user_static(
     # 防止通过 file_name 逃逸出当前 scope 的静态目录。
     try:
         target = (static_dir / file_name).resolve()
+        target.relative_to(static_dir)
     except ValueError as exc:
         # Path traversal attempt detected
         raise HTTPException(
