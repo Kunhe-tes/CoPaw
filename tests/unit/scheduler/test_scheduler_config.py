@@ -61,9 +61,9 @@ def test_scheduler_config_prefers_scheduler_namespace(monkeypatch) -> None:
         SCHEDULER_DB_MIN_CONN="3",
         SCHEDULER_DB_MAX_CONN="9",
         SCHEDULER_DB_INIT_TABLES="false",
-        SCHEDULER_SWE_API_BASE_URL="http://scheduler-swe/api",
+        SCHEDULER_SWE_API_BASE_URL="http://scheduler-swe",
         OTHER_DB_HOST="other-db",
-        OTHER_SWE_API_BASE_URL="http://other-swe/api",
+        OTHER_SWE_API_BASE_URL="http://other-swe",
     )
 
     assert config.ENV_NAME == "dev"
@@ -78,7 +78,7 @@ def test_scheduler_config_prefers_scheduler_namespace(monkeypatch) -> None:
     assert config.DB_MIN_CONN == 3
     assert config.DB_MAX_CONN == 9
     assert config.DB_INIT_TABLES is False
-    assert config.SWE_API_BASE_URL == "http://scheduler-swe/api"
+    assert config.SWE_API_BASE_URL == "http://scheduler-swe"
 
     db_config = config.get_scheduler_database_config()
     assert db_config.host == "scheduler-db"
@@ -102,7 +102,7 @@ def test_scheduler_config_ignores_non_scheduler_namespace(
         OTHER_DB_MIN_CONN="4",
         OTHER_DB_MAX_CONN="12",
         OTHER_DB_INIT_TABLES="true",
-        OTHER_SWE_API_BASE_URL="http://other-swe/api",
+        OTHER_SWE_API_BASE_URL="http://other-swe",
     )
 
     assert config.ENV_NAME == "prd"

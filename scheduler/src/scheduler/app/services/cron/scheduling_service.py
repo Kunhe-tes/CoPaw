@@ -54,6 +54,7 @@ B3_HEADER_NAMES = {
     "x-b3-traceid": "X-B3-Traceid",
 }
 PASSTHROUGH_HEADERS_PAYLOAD_KEY = "passthrough_headers"
+SWE_SERVER_DOMAIN_PAYLOAD_KEY = "swe_server_domain"
 _TRUE_ENV_VALUES = {"1", "true", "yes", "on"}
 BROADCAST_DISPATCH_INTENTS_ENABLED_META_KEY = (
     "broadcast_dispatch_intents_enabled"
@@ -143,9 +144,11 @@ class SweCronCallbackClient:
         model_id: str = DEFAULT_MODEL_ID,
         scope_id: str = "",
         from_id: str = "",
+        swe_server_domain: str = "",
         passthrough_headers: Mapping[str, Any] | None = None,
     ) -> None:
-        if not self._base_url:
+        base_url = (swe_server_domain or self._base_url).rstrip("/")
+        if not base_url:
             raise RuntimeError("SWE callback base URL is not configured")
         headers = _extract_b3_passthrough_headers(passthrough_headers)
         if self._internal_token:
@@ -179,7 +182,7 @@ class SweCronCallbackClient:
         )
         async with httpx.AsyncClient(timeout=self._timeout_seconds) as client:
             response = await client.post(
-                f"{self._base_url}/internal/cron/callback",
+                f"{base_url}/api/internal/cron/callback",
                 json=payload,
                 headers=headers,
             )
@@ -345,6 +348,10 @@ class CronSchedulingService:
             callback_received_at=now,
             callback_metadata=callback_metadata,
         )
+        if callback_params.get(SWE_SERVER_DOMAIN_PAYLOAD_KEY):
+            parent[SWE_SERVER_DOMAIN_PAYLOAD_KEY] = str(
+                callback_params.get(SWE_SERVER_DOMAIN_PAYLOAD_KEY) or "",
+            ).strip()
         jobs = _build_execution_intent_jobs(
             parent,
             children,
@@ -927,6 +934,9 @@ def _build_execution_intent_jobs(
     passthrough_headers: Mapping[str, Any] | None = None,
 ) -> list[dict[str, Any]]:
     parent_provider_id, parent_model_id = _extract_model_identity(parent)
+    swe_server_domain = str(
+        parent.get(SWE_SERVER_DOMAIN_PAYLOAD_KEY) or "",
+    ).strip()
     scheduled = scheduled_fire_at.isoformat()
     parent_job_id = str(parent.get("id") or "")
     normalized_passthrough_headers = _extract_b3_passthrough_headers(
@@ -945,6 +955,8 @@ def _build_execution_intent_jobs(
         parent_payload[PASSTHROUGH_HEADERS_PAYLOAD_KEY] = dict(
             normalized_passthrough_headers,
         )
+    if swe_server_domain:
+        parent_payload[SWE_SERVER_DOMAIN_PAYLOAD_KEY] = swe_server_domain
     jobs: list[dict[str, Any]] = [
         {
             "intent_role": "parent",
@@ -980,6 +992,8 @@ def _build_execution_intent_jobs(
             payload[PASSTHROUGH_HEADERS_PAYLOAD_KEY] = dict(
                 normalized_passthrough_headers,
             )
+        if swe_server_domain:
+            payload[SWE_SERVER_DOMAIN_PAYLOAD_KEY] = swe_server_domain
         jobs.append(
             {
                 **child,
@@ -1133,7 +1147,7 @@ def _build_execution_callback_kwargs(
         payload.get("from_id"),
         _row_get(row, "from_id"),
     )
-    return {
+    callback_kwargs = {
         "tenant_id": tenant_id,
         "source_id": source_id,
         "scope_id": scope_id or _default_scope_id(tenant_id, source_id),
@@ -1158,6 +1172,12 @@ def _build_execution_callback_kwargs(
             default=DEFAULT_MODEL_ID,
         ),
     }
+    swe_server_domain = _first_truthy_text(
+        payload.get(SWE_SERVER_DOMAIN_PAYLOAD_KEY),
+    )
+    if swe_server_domain:
+        callback_kwargs["swe_server_domain"] = swe_server_domain
+    return callback_kwargs
 
 
 def _dispatch_mark_details(

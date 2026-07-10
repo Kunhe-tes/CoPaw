@@ -185,7 +185,7 @@ async def test_swe_callback_client_forwards_passthrough_headers(
 
     monkeypatch.setattr(service_module.httpx, "AsyncClient", _AsyncClient)
     client = SweCronCallbackClient(
-        base_url="http://swe.local/api",
+        base_url="http://fallback-swe.local",
         internal_token="scheduler-token",
     )
 
@@ -199,6 +199,7 @@ async def test_swe_callback_client_forwards_passthrough_headers(
         dispatch_intent_id=7,
         dispatch_batch_id="batch-1",
         dispatch_attempt=2,
+        swe_server_domain="http://swe.local",
         passthrough_headers={
             "X-B3-Traceid": "8267fd70bacf497704fec30eaa353979",
             "X-B3-Spanid": "32befd146889a61a",
@@ -211,6 +212,7 @@ async def test_swe_callback_client_forwards_passthrough_headers(
         "X-B3-Spanid": "32befd146889a61a",
         "X-Internal-Token": "Bearer scheduler-token",
     }
+    assert requests[0]["url"] == "http://swe.local/api/internal/cron/callback"
     assert requests[0]["json"]["scopeId"] == "tenant-a-source-a"
     assert requests[0]["json"]["fromId"] == "tenant-a"
 
@@ -1228,6 +1230,7 @@ async def test_parent_callback_adds_batch_offset_to_trigger_time(
             "job_id": "parent-1",
             "trigger_time": trigger_at.isoformat(),
             "batch_dispatch_offset_minutes": 240,
+            "swe_server_domain": "http://tenant-swe.local",
         },
         now_utc=trigger_at,
     )
@@ -1239,6 +1242,7 @@ async def test_parent_callback_adds_batch_offset_to_trigger_time(
         jobs[0]["payload"]["parent_scheduled_fire_at"]
         == expected_fire_at.isoformat()
     )
+    assert jobs[0]["payload"]["swe_server_domain"] == "http://tenant-swe.local"
 
 
 @pytest.mark.asyncio

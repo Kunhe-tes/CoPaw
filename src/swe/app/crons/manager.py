@@ -72,6 +72,7 @@ BATCH_DISPATCH_OFFSET_MINUTES_META_KEY = "batch_dispatch_offset_minutes"
 BATCH_DISPATCH_CRON_META_KEY = "batch_dispatch_cron"
 BATCH_DISPATCH_CRON_WARNING_META_KEY = "batch_dispatch_cron_warning"
 BATCH_DISPATCH_PARENT_CRON_META_KEY = "batch_dispatch_parent_cron"
+BATCH_DISPATCH_SWE_SERVER_DOMAIN_PARAM = "swe_server_domain"
 BATCH_DISPATCH_JOB_NAME_PREFIX = "[\u6279\u8c03\u5ea6]"
 BATCH_DISPATCH_CRON_FALLBACK_WARNING = (
     "cron offset not applied: unsupported cron, using original schedule"
@@ -999,6 +1000,11 @@ class CronManager:  # pylint: disable=too-many-public-methods
                 spec.schedule.timezone if spec.schedule else ""
             ),
         }
+        swe_server_domain = os.environ.get("SWE_SERVER_DOMAIN", "").strip()
+        if swe_server_domain:
+            extra_job_params[BATCH_DISPATCH_SWE_SERVER_DOMAIN_PARAM] = (
+                swe_server_domain
+            )
         extra_job_params.update(
             self._resolve_batch_dispatch_execution_model_params(spec),
         )

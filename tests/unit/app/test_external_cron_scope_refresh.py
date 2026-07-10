@@ -679,6 +679,7 @@ async def test_enable_batch_dispatch_registers_separate_scheduler_job(
     assert job_param["job_id"] == "job-1"
     assert job_param["batch_dispatch_offset_minutes"] == 240
     assert job_param["batch_dispatch_parent_cron"] == "0 9 * * *"
+    assert job_param["swe_server_domain"] == "http://swe.local"
     assert job_param["provider_id"] == "dashscope"
     assert job_param["model_id"] == "qwen-max"
 
