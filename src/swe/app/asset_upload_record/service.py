@@ -184,8 +184,9 @@ class AssetUploadRecordService:
                 data=None,
             )
 
-        result_id = body.get("idKey", "")
-        file_name = body.get("fileName", "")
+        data = body.get("data") or {}
+        result_id = data.get("idKey", "")
+        file_name = data.get("fileName", "")
 
         template_id = await self._store.get_template_id_by_name(template_name)
         if template_id is None:
