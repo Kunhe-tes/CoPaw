@@ -11,6 +11,8 @@ from .models import (
     AssetUploadRecord,
     AssetUploadFileNameList,
     PaginatedAssetUploadRecords,
+    QueryIdKeyData,
+    QueryIdKeyResponse,
     TemplateItem,
     TemplateResultRequest,
     TemplateResultResponse,
@@ -144,3 +146,59 @@ class AssetUploadRecordService:
                 result=False,
                 data=None,
             )
+
+    async def query_id_key(
+        self,
+        *,
+        template_name: str,
+        user_id: str,
+        bbk_org_id: str,
+        id_key: str,
+    ) -> QueryIdKeyResponse:
+        """调用第三方接口查询ID Key，并查库获取templateId。"""
+        base_url = os.environ.get(
+            "SWE_LLM_EVALUATE_API_URL",
+            _LLM_EVALUATE_API_URL,
+        )
+        url = f"{base_url.rstrip('/')}/answer/query-id-key"
+        payload = {
+            "userId": user_id,
+            "idKey": id_key,
+            "bbkOrgId": bbk_org_id,
+            "days": 31,
+        }
+        try:
+            async with httpx.AsyncClient(timeout=30.0) as client:
+                resp = await client.post(url, json=payload)
+                resp.raise_for_status()
+                body: dict[str, Any] = resp.json()
+        except httpx.HTTPError as exc:
+            logger.warning(
+                "Failed to query id-key: %s",
+                exc,
+                exc_info=True,
+            )
+            return QueryIdKeyResponse(
+                code=500,
+                error=f"External API error: {exc}",
+                data=None,
+            )
+
+        result_id = body.get("idKey", "")
+        file_name = body.get("fileName", "")
+
+        template_id = await self._store.get_template_id_by_name(template_name)
+        if template_id is None:
+            return QueryIdKeyResponse(
+                code=404,
+                error="Template not found",
+                data=None,
+            )
+
+        return QueryIdKeyResponse(
+            data=QueryIdKeyData(
+                templateId=template_id,
+                resultId=result_id,
+                fileName=file_name,
+            ),
+        )

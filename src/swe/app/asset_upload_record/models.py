@@ -77,3 +77,28 @@ class TemplateResultResponse(BaseModel):
     message: str = Field(default="OK")
     result: bool = True
     data: Optional[dict] = None
+
+
+class QueryIdKeyRequest(BaseModel):
+    """查询ID Key的请求体。"""
+
+    templateName: str = Field(..., min_length=1, max_length=512)
+    userId: str = Field(..., min_length=1, max_length=128)
+    bbkOrgId: str = Field(..., min_length=1, max_length=64)
+    idKey: str = Field(..., min_length=1, max_length=128)
+
+
+class QueryIdKeyData(BaseModel):
+    """查询ID Key返回的数据。"""
+
+    templateId: int
+    resultId: str
+    fileName: str
+
+
+class QueryIdKeyResponse(BaseModel):
+    """查询ID Key的响应。"""
+
+    code: int = Field(default=200)
+    error: Optional[str] = Field(default=None)
+    data: Optional[QueryIdKeyData] = None
