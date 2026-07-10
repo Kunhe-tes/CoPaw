@@ -238,7 +238,7 @@ export interface CronDispatchPolicyItem {
   provider_id: string;
   model_id: string;
   default_strategy_id: string;
-  strategy_schedule: Record<string, unknown> | null;
+  strategy_schedule: Array<Record<string, unknown>> | null;
   enabled: boolean;
   strategy: Record<string, unknown> | null;
   created_at: string | null;

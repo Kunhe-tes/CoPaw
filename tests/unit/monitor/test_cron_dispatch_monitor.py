@@ -189,7 +189,10 @@ async def test_get_dispatch_workers_parses_policy_and_capacity(monkeypatch):
                     "provider_id": "provider-a",
                     "model_id": "model-a",
                     "default_strategy_id": "strategy-a",
-                    "strategy_schedule": '{"windows": []}',
+                    "strategy_schedule": (
+                        '[{"start_time":"16:00","end_time":"21:00",'
+                        '"strategy_id":"peak_1"}]'
+                    ),
                     "enabled": 1,
                     "created_at": datetime(2026, 7, 8, 4, 0, 0),
                     "updated_at": datetime(2026, 7, 8, 4, 0, 0),
@@ -241,7 +244,13 @@ async def test_get_dispatch_workers_parses_policy_and_capacity(monkeypatch):
 
     result = await QueryService().get_dispatch_workers(source_id="RMASSIST")
 
-    assert result.policies[0].strategy_schedule == {"windows": []}
+    assert result.policies[0].strategy_schedule == [
+        {
+            "start_time": "16:00",
+            "end_time": "21:00",
+            "strategy_id": "peak_1",
+        }
+    ]
     assert result.policies[0].strategy["error_rate_rules"] == {
         "success_100": "double",
     }

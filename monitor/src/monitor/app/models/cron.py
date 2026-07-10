@@ -724,7 +724,7 @@ class CronDispatchPolicyItem(BaseModel):
     provider_id: str = Field(default="", description="Provider ID")
     model_id: str = Field(default="", description="模型 ID")
     default_strategy_id: str = Field(default="", description="默认策略 ID")
-    strategy_schedule: Optional[Dict[str, Any]] = Field(default=None)
+    strategy_schedule: Optional[List[Dict[str, Any]]] = Field(default=None)
     enabled: bool = Field(default=True, description="是否启用")
     strategy: Optional[Dict[str, Any]] = Field(default=None, description="策略详情")
     created_at: Optional[datetime] = Field(default=None)
