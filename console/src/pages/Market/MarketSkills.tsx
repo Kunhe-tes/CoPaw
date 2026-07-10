@@ -82,6 +82,7 @@ export function MarketSkills({ sourceId, isManager }: MarketSkillsProps) {
   const [recallType, setRecallType] = useState<RecallTargetType>("skill");
   const [recallItemId, setRecallItemId] = useState<string>("");
   const [recallItemName, setRecallItemName] = useState<string>("");
+  const [recallSkillName, setRecallSkillName] = useState<string>("");
   const [readinessSkill, setReadinessSkill] = useState<MarketSkill | MarketSkillDetail | null>(null);
 
   const [searchQuery, setSearchQuery] = useState("");
@@ -208,6 +209,7 @@ export function MarketSkills({ sourceId, isManager }: MarketSkillsProps) {
     setRecallType("skill");
     setRecallItemId(skill.item_id);
     setRecallItemName(skill.name);
+    setRecallSkillName(skill.skill_name || skill.name);
     setRecallModalOpen(true);
   }, []);
 
@@ -838,16 +840,19 @@ export function MarketSkills({ sourceId, isManager }: MarketSkillsProps) {
           type={recallType}
           itemId={recallItemId}
           itemName={recallItemName}
+          skillName={recallSkillName}
           sourceId={sourceId}
           onClose={() => {
             setRecallModalOpen(false);
             setRecallItemId("");
             setRecallItemName("");
+            setRecallSkillName("");
           }}
           onSuccess={() => {
             setRecallModalOpen(false);
             setRecallItemId("");
             setRecallItemName("");
+            setRecallSkillName("");
             if (recallType === "skill") {
               refreshSkills();
             } else {

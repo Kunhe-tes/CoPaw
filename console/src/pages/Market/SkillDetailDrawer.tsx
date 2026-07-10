@@ -5,6 +5,7 @@ import {
   HistoryOutlined,
   MoreOutlined,
   UserOutlined,
+  DownloadOutlined,
 } from "@ant-design/icons";
 import { Button, Checkbox, Collapse, Dropdown, Input, message, Modal, Spin, Table, Tag, Tooltip, Typography, type MenuProps } from "antd";
 import ReactMarkdown from "react-markdown";
@@ -71,64 +72,79 @@ const SKILL_NAME_STYLE = {
   color: "#8c8c8c",
 } as const;
 
-// 操作按钮样式 - 次要按钮（版本历史）
-const SECONDARY_BUTTON_STYLE = {
-  height: 28,
-  padding: "0 10px",
-  borderRadius: 6,
-  fontSize: 12,
-  fontWeight: 500,
-  display: "inline-flex",
-  alignItems: "center",
-  gap: 4,
-  border: "1px solid #d9d9d9",
-  backgroundColor: "#fafafa",
-  color: "#595959",
-} as const;
-
-// 主要按钮样式（分发）
-const PRIMARY_BUTTON_STYLE = {
-  height: 28,
+// 下载按钮样式 - 深灰蓝（柔和色调）
+const DOWNLOAD_BUTTON_STYLE = {
+  height: 32,
   padding: "0 12px",
   borderRadius: 6,
-  fontSize: 12,
+  fontSize: 13,
   fontWeight: 500,
   display: "inline-flex",
   alignItems: "center",
-  gap: 4,
-  backgroundColor: "#3769fc",
+  gap: 6,
+  border: "1px solid #8b9caa",
+  backgroundColor: "#f4f6f8",
+  color: "#5b6b7c",
+} as const;
+
+// 版本历史按钮样式 - 深灰紫（柔和色调）
+const HISTORY_BUTTON_STYLE = {
+  height: 32,
+  padding: "0 12px",
+  borderRadius: 6,
+  fontSize: 13,
+  fontWeight: 500,
+  display: "inline-flex",
+  alignItems: "center",
+  gap: 6,
+  border: "1px solid #9b8baa",
+  backgroundColor: "#f6f4f8",
+  color: "#6b5b7a",
+} as const;
+
+// 主要按钮样式（分发）- 蓝色实心（保持突出）
+const PRIMARY_BUTTON_STYLE = {
+  height: 32,
+  padding: "0 14px",
+  borderRadius: 6,
+  fontSize: 13,
+  fontWeight: 600,
+  display: "inline-flex",
+  alignItems: "center",
+  gap: 6,
+  backgroundColor: "#1890ff",
   color: "#fff",
   border: "none",
 } as const;
 
-// 信息按钮样式（用户可执行性）
-const INFO_BUTTON_STYLE = {
-  height: 28,
-  padding: "0 10px",
+// 用户查询按钮样式 - 深灰绿（柔和色调）
+const USER_BUTTON_STYLE = {
+  height: 32,
+  padding: "0 12px",
   borderRadius: 6,
-  fontSize: 12,
+  fontSize: 13,
   fontWeight: 500,
   display: "inline-flex",
   alignItems: "center",
-  gap: 4,
-  border: "1px solid #3769fc",
-  backgroundColor: "#fff",
-  color: "#3769fc",
+  gap: 6,
+  border: "1px solid #8a9b8a",
+  backgroundColor: "#f4f8f5",
+  color: "#4a7c59",
 } as const;
 
-// 更多按钮样式（下拉）
+// 更多按钮样式（下拉）- 灰色图标
 const MORE_BUTTON_STYLE = {
-  height: 28,
-  padding: "0 8px",
+  height: 32,
+  width: 32,
+  padding: 0,
   borderRadius: 6,
-  fontSize: 12,
-  fontWeight: 500,
+  fontSize: 14,
   display: "inline-flex",
   alignItems: "center",
-  gap: 4,
+  justifyContent: "center",
   border: "1px solid #d9d9d9",
   backgroundColor: "#fff",
-  color: "#595959",
+  color: "#8c8c8c",
 } as const;
 
 // 统计徽章样式
@@ -696,13 +712,14 @@ export function SkillDetailDrawer(
             <Button
               onClick={handleDownloadCurrentVersion}
               loading={downloadingCurrentVersion}
-              style={SECONDARY_BUTTON_STYLE}
+              style={DOWNLOAD_BUTTON_STYLE}
             >
+              <DownloadOutlined style={{ fontSize: 12 }} />
               下载 ZIP
             </Button>
             <Button
               onClick={() => setVersionHistoryOpen(true)}
-              style={SECONDARY_BUTTON_STYLE}
+              style={HISTORY_BUTTON_STYLE}
             >
               <HistoryOutlined style={{ fontSize: 12 }} />
               版本历史
@@ -720,7 +737,7 @@ export function SkillDetailDrawer(
             {isManager && onLookupOwners && (
               <Button
                 onClick={onLookupOwners}
-                style={INFO_BUTTON_STYLE}
+                style={USER_BUTTON_STYLE}
               >
                 <UserOutlined style={{ fontSize: 12 }} />
                 用户可执行性

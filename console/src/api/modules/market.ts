@@ -36,6 +36,22 @@ export interface MarketSkillDetail extends MarketSkill {
   }>;
 }
 
+// 用户技能状态
+export interface UserSkillStatus {
+  tenant_id: string;
+  tenant_name: string | null;
+  bbk_id: string | null;
+  status: 'first_time' | 'update' | 'conflict';
+  current_version?: string;
+}
+
+// 分发预览响应
+export interface DistributionPreviewResponse {
+  skill_version: string;
+  users: UserSkillStatus[];
+  distributed_user_ids: string[];
+}
+
 export interface Category {
   id: number;
   source_id: string;
@@ -481,14 +497,16 @@ export const marketApi = {
   // 查询技能分发记录
   getSkillDistributions: async (
     sourceId: string,
-    itemId: string
+    itemId: string,
+    skillName?: string
   ): Promise<DistributionRecord[]> => {
     const opts = mergeHeaders({
       "X-Source-Id": sourceId,
       "X-Manager": "true",
     });
+    const params = skillName ? `?skill_name=${encodeURIComponent(skillName)}` : "";
     return request<DistributionRecord[]>(
-      `/market/skills/${itemId}/distributions`,
+      `/market/skills/${itemId}/distributions${params}`,
       opts
     );
   },
@@ -563,5 +581,29 @@ export const marketApi = {
       }
     }
     return Array.from(byName.values());
+  },
+
+  // 获取分发预览
+  getDistributionPreview: async (
+    sourceId: string,
+    itemId: string,
+    tenantIds: string[]
+  ): Promise<DistributionPreviewResponse> => {
+    const opts: RequestInit = {
+      method: "POST",
+      ...(mergeHeaders({
+        "Content-Type": "application/json",
+        "X-Source-Id": sourceId,
+        "X-Manager": "true",
+      })),
+      body: JSON.stringify({
+        source_id: sourceId,
+        tenant_ids: tenantIds,
+      }),
+    };
+    return request<DistributionPreviewResponse>(
+      `/market/skills/${itemId}/distribution-preview`,
+      opts
+    );
   },
 };

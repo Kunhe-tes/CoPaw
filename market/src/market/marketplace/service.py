@@ -221,6 +221,20 @@ _QUERY_DISTRIBUTIONS_SQL = """
     ORDER BY created_at DESC
 """
 
+# 查询用户技能持有状态
+_QUERY_USER_SKILL_STATUS_SQL = """
+SELECT tenant_id, tenant_name, bbk_id, source, version_text
+FROM swe_skills
+WHERE skill_name = %s AND source_id = %s AND tenant_id IN ({placeholders})
+"""
+
+# 查询已分发用户（从技能表，只统计当前实际持有的）
+_QUERY_DISTRIBUTED_USERS_SQL = """
+SELECT tenant_id, tenant_name, bbk_id
+FROM swe_skills
+WHERE skill_name = %s AND source_id = %s AND source LIKE 'marketplace:%%'
+"""
+
 
 def _sort_items_by_updated_at_desc(
     items: list[MarketItem],
@@ -1295,7 +1309,7 @@ class MarketplaceService:
                 )
 
                 # 写入 swe_skills 表（分发时记录用户持有状态）
-                await self.skill_registry.insert_skill(
+                inserted = await self.skill_registry.insert_skill(
                     skill_id=skill_id,
                     skill_name=safe_skill_name,
                     cn_name=cn_name,
@@ -1308,6 +1322,12 @@ class MarketplaceService:
                     description=item.description,
                     version_text=item.version,
                 )
+                if not inserted:
+                    logger.warning(
+                        "分发成功但 swe_skills 写入失败: user=%s, skill=%s",
+                        user["tenant_id"],
+                        safe_skill_name,
+                    )
                 count += 1
             except Exception as e:
                 logger.warning(
@@ -1639,6 +1659,245 @@ class MarketplaceService:
                     for uid in req.target_values
                 ]
         return []
+
+    def _build_user_status_list(
+        self,
+        target_tenant_ids: list[str],
+        user_skill_map: dict,
+        user_info_map: dict,
+        skill_name: str,
+        source_id: str,
+    ) -> tuple[list[dict], int, int, int]:
+        """构建用户状态列表，返回 (状态列表, 文件I/O次数, customized数, 无记录数)."""
+        from .fs import check_skill_status_in_manifest
+
+        users_status: list[dict] = []
+        file_io_count = 0
+        customized_count = 0
+        no_record_count = 0
+
+        for tenant_id in target_tenant_ids:
+            user_info = user_info_map.get(
+                tenant_id,
+                {"tenant_id": tenant_id, "tenant_name": None, "bbk_id": None},
+            )
+            skill_info = user_skill_map.get(tenant_id)
+
+            if skill_info:
+                source = skill_info.get("source", "")
+                current_version = skill_info.get("version_text", "")
+
+                if source.startswith("marketplace:"):
+                    users_status.append(
+                        {
+                            "tenant_id": tenant_id,
+                            "tenant_name": user_info.get("tenant_name"),
+                            "bbk_id": user_info.get("bbk_id"),
+                            "status": "update",
+                            "current_version": current_version,
+                        },
+                    )
+                elif source == "customized":
+                    customized_count += 1
+                    file_io_count += 1
+                    manifest_status, manifest_version = (
+                        check_skill_status_in_manifest(
+                            self.swe_root,
+                            tenant_id,
+                            skill_name,
+                            source_id,
+                        )
+                    )
+                    users_status.append(
+                        {
+                            "tenant_id": tenant_id,
+                            "tenant_name": user_info.get("tenant_name"),
+                            "bbk_id": user_info.get("bbk_id"),
+                            "status": manifest_status,
+                            "current_version": manifest_version,
+                        },
+                    )
+                else:
+                    users_status.append(
+                        {
+                            "tenant_id": tenant_id,
+                            "tenant_name": user_info.get("tenant_name"),
+                            "bbk_id": user_info.get("bbk_id"),
+                            "status": "first_time",
+                            "current_version": None,
+                        },
+                    )
+            else:
+                no_record_count += 1
+                file_io_count += 1
+                manifest_status, manifest_version = (
+                    check_skill_status_in_manifest(
+                        self.swe_root,
+                        tenant_id,
+                        skill_name,
+                        source_id,
+                    )
+                )
+                users_status.append(
+                    {
+                        "tenant_id": tenant_id,
+                        "tenant_name": user_info.get("tenant_name"),
+                        "bbk_id": user_info.get("bbk_id"),
+                        "status": manifest_status,
+                        "current_version": manifest_version,
+                    },
+                )
+
+        return users_status, file_io_count, customized_count, no_record_count
+
+    async def get_distribution_preview(
+        self,
+        source_id: str,
+        item_id: str,
+        target_tenant_ids: list[str],
+    ) -> dict:
+        """获取技能分发预览，返回每个用户的技能持有状态.
+
+        Args:
+            source_id: 来源 ID
+            item_id: 市场条目 ID
+            target_tenant_ids: 目标用户 ID 列表
+
+        Returns:
+            包含 skill_version、users、distributed_user_ids 的字典
+        """
+        import time
+
+        t_start = time.time()
+
+        # 加载市场条目
+        t0 = time.time()
+        items = load_index(self.marketplace_root, source_id)
+        item = next(
+            (
+                i
+                for i in items
+                if i.item_id == item_id and i.item_type == "skill"
+            ),
+            None,
+        )
+        if item is None:
+            raise ValueError(f"Item {item_id} not found in source {source_id}")
+        logger.info(
+            "[PERF] 加载市场条目: %.2fs, item_id=%s",
+            time.time() - t0,
+            item_id,
+        )
+
+        skill_version = item.version
+        skill_name = normalize_skill_name(item.name)
+
+        # 查询用户技能状态
+        users_status: list[dict] = []
+        distributed_user_ids: list[str] = []
+
+        if self.db.is_connected and target_tenant_ids:
+            # 第1次数据库查询：用户技能状态
+            t1 = time.time()
+            placeholders = ",".join(["%s"] * len(target_tenant_ids))
+            sql = _QUERY_USER_SKILL_STATUS_SQL.format(
+                placeholders=placeholders,
+            )
+            rows = await self.db.fetch_all(
+                sql,
+                (skill_name, source_id, *target_tenant_ids),
+            )
+            logger.info(
+                "[PERF] 查询用户技能状态: %.2fs, 用户数=%d, 返回=%d",
+                time.time() - t1,
+                len(target_tenant_ids),
+                len(rows),
+            )
+
+            # 构建状态映射
+            user_skill_map = {row["tenant_id"]: row for row in rows}
+
+            # 第2次数据库查询：已分发用户
+            t2 = time.time()
+            dist_rows = await self.db.fetch_all(
+                _QUERY_DISTRIBUTED_USERS_SQL,
+                (skill_name, source_id),
+            )
+            distributed_user_ids = list(
+                {
+                    row["tenant_id"]
+                    for row in dist_rows
+                    if row["tenant_id"] in target_tenant_ids
+                },
+            )
+            logger.info(
+                "[PERF] 查询已分发用户: %.2fs, 返回=%d, 在目标中=%d",
+                time.time() - t2,
+                len(dist_rows),
+                len(distributed_user_ids),
+            )
+
+            # 第3次数据库查询：用户基本信息
+            t3 = time.time()
+            user_sql = _QUERY_USERS_BY_TENANT_IDS_SQL.format(
+                placeholders=placeholders,
+            )
+            user_rows = await self.db.fetch_all(
+                user_sql,
+                (source_id, *target_tenant_ids),
+            )
+            user_info_map = {row["tenant_id"]: row for row in user_rows}
+            logger.info(
+                "[PERF] 查询用户基本信息: %.2fs, 返回=%d",
+                time.time() - t3,
+                len(user_rows),
+            )
+
+            # 构建每个用户的状态（含文件I/O统计）
+            t4 = time.time()
+            (
+                users_status,
+                file_io_count,
+                customized_count,
+                no_record_count,
+            ) = self._build_user_status_list(
+                target_tenant_ids,
+                user_skill_map,
+                user_info_map,
+                skill_name,
+                source_id,
+            )
+            logger.info(
+                "[PERF] 循环处理用户状态: %.2fs, 文件I/O=%d (customized=%d, 无记录=%d)",
+                time.time() - t4,
+                file_io_count,
+                customized_count,
+                no_record_count,
+            )
+        else:
+            # 数据库未连接或无目标用户，返回基本信息
+            for tenant_id in target_tenant_ids:
+                users_status.append(
+                    {
+                        "tenant_id": tenant_id,
+                        "tenant_name": None,
+                        "bbk_id": None,
+                        "status": "first_time",
+                        "current_version": None,
+                    },
+                )
+
+        logger.info(
+            "[PERF] get_distribution_preview 总耗时: %.2fs, 用户数=%d",
+            time.time() - t_start,
+            len(target_tenant_ids),
+        )
+
+        return {
+            "skill_version": skill_version,
+            "users": users_status,
+            "distributed_user_ids": distributed_user_ids,
+        }
 
     def list_skill_files(
         self,
@@ -3225,6 +3484,7 @@ class MarketplaceService:
         source_id: str,
         item_id: str,
         item_type: str,
+        skill_name: str | None = None,
     ) -> list[DistributionRecord]:
         """查询分发记录.
 
@@ -3232,6 +3492,7 @@ class MarketplaceService:
             source_id: 来源 ID.
             item_id: 条目 ID.
             item_type: 条目类型（skill 或 mcp）.
+            skill_name: 技能名称（可选，用于查询当前实际持有的用户）.
 
         Returns:
             分发记录列表.
@@ -3239,6 +3500,24 @@ class MarketplaceService:
         if not self.db.is_connected:
             return []
         try:
+            # 如果提供了 skill_name，查询 swe_skills 表获取当前实际持有技能的用户
+            if skill_name and item_type == "skill":
+                # 规范化 skill_name，与 swe_skills 表存储格式一致
+                normalized_skill_name = normalize_skill_name(skill_name)
+                rows = await self.db.fetch_all(
+                    _QUERY_DISTRIBUTED_USERS_SQL,
+                    (normalized_skill_name, source_id),
+                )
+                return [
+                    DistributionRecord(
+                        target_user_id=r["tenant_id"],
+                        target_user_name=r.get("tenant_name") or "",
+                        target_bbk_id=r.get("bbk_id") or "",
+                        distributed_at=None,
+                    )
+                    for r in rows
+                ]
+            # 否则查询操作日志表
             rows = await self.db.fetch_all(
                 _QUERY_DISTRIBUTIONS_SQL,
                 (source_id, item_id, item_type),
@@ -3518,6 +3797,12 @@ class MarketplaceService:
         )
         shutil.rmtree(skill_dir)
         self._remove_skill_manifest_entry(user_id, skill_name, source_id)
+        # 删除 swe_skills 数据库记录
+        await self.skill_registry.delete_skill(
+            user_id,
+            skill_name,
+            source_id or "",
+        )
         await self._trigger_agent_reload(
             user_id,
             "default",

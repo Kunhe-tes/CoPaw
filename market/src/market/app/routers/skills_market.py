@@ -30,9 +30,12 @@ from ...marketplace.fs import get_skill_dir, _atomic_write_json
 from ...marketplace.schemas import (
     DistributeRequest,
     DistributeResponse,
+    DistributionPreviewRequest,
+    DistributionPreviewResponse,
     MarketSkillResponse,
     PublishSkillRequest,
     UploadSkillResponse,
+    UserSkillStatus,
 )
 from ...marketplace.service import (
     MarketItem,
@@ -1590,6 +1593,7 @@ def _extract_cn_name_from_md(md_content: str) -> str:
 async def get_skill_distributions(
     item_id: str,
     request: Request,
+    skill_name: Optional[str] = None,
     x_source_id: Optional[str] = Header(default=None, alias="X-Source-Id"),
     x_manager: Optional[str] = Header(default=None, alias="X-Manager"),
 ):
@@ -1597,7 +1601,12 @@ async def get_skill_distributions(
     source_id = require_source_id(x_source_id)
     _require_manager(x_manager)
     svc = request.app.state.marketplace
-    distributions = await svc.get_distributions(source_id, item_id, "skill")
+    distributions = await svc.get_distributions(
+        source_id,
+        item_id,
+        "skill",
+        skill_name=skill_name,
+    )
     return distributions
 
 
@@ -2031,3 +2040,60 @@ async def init_market_skills(
     )
 
     return results
+
+
+@router.post(
+    "/market/skills/{item_id}/distribution-preview",
+    response_model=DistributionPreviewResponse,
+)
+async def get_distribution_preview(
+    item_id: str,
+    request: Request,
+    body: DistributionPreviewRequest,
+    x_manager: Optional[str] = Header(default=None, alias="X-Manager"),
+):
+    """获取技能分发预览（管理员）.
+
+    返回每个用户的技能持有状态：
+    - first_time: 首次分发
+    - update: 覆盖更新（显示当前版本）
+    - conflict: 自建冲突（不可覆盖）
+    """
+    _require_manager(x_manager)
+    svc = request.app.state.marketplace
+    source_id = body.source_id
+    target_tenant_ids = body.tenant_ids
+
+    if not target_tenant_ids:
+        # 无目标用户时返回空预览
+        items = load_index(svc.marketplace_root, source_id)
+        item = next(
+            (
+                i
+                for i in items
+                if i.item_id == item_id and i.item_type == "skill"
+            ),
+            None,
+        )
+        if item is None:
+            raise HTTPException(status_code=404, detail="Skill not found")
+        return DistributionPreviewResponse(
+            skill_version=item.version,
+            users=[],
+            distributed_user_ids=[],
+        )
+
+    try:
+        result = await svc.get_distribution_preview(
+            source_id,
+            item_id,
+            target_tenant_ids,
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+
+    return DistributionPreviewResponse(
+        skill_version=result["skill_version"],
+        users=[UserSkillStatus(**u) for u in result["users"]],
+        distributed_user_ids=result["distributed_user_ids"],
+    )

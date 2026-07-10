@@ -3303,50 +3303,19 @@ class TracingQueryService:  # pylint: disable=too-many-public-methods
 
         # 分页查询对话列表
         offset = (page - 1) * page_size
-        if source_id == "all":
-            data_query = f"""
-                SELECT DISTINCT t.trace_id, t.source_id, t.user_id, t.session_id,
-                       t.channel, t.start_time, t.duration_ms, t.total_tokens,
-                       t.total_input_tokens, t.total_output_tokens, t.model_name,
-                       t.status, JSON_LENGTH(t.skills_used) as skills_count,
-                       (SELECT t2.user_name FROM swe_tracing_traces t2
-                        WHERE t2.user_id = t.user_id AND t2.user_name IS NOT NULL
-                        ORDER BY t2.start_time DESC LIMIT 1) as user_name,
-                       (SELECT t3.bbk_id FROM swe_tracing_traces t3
-                        WHERE t3.user_id = t.user_id AND t3.bbk_id IS NOT NULL
-                        ORDER BY t3.start_time DESC LIMIT 1) as bbk_id
-                FROM swe_tracing_spans s
-                JOIN swe_tracing_traces t ON s.trace_id = t.trace_id
-                WHERE {base_where}
-                ORDER BY t.start_time DESC
-                LIMIT %s OFFSET %s
-            """
-            params = list(count_params) + [page_size, offset]
-        else:
-            data_query = f"""
-                SELECT DISTINCT t.trace_id, t.source_id, t.user_id, t.session_id,
-                       t.channel, t.start_time, t.duration_ms, t.total_tokens,
-                       t.total_input_tokens, t.total_output_tokens, t.model_name,
-                       t.status, JSON_LENGTH(t.skills_used) as skills_count,
-                       (SELECT t2.user_name FROM swe_tracing_traces t2
-                        WHERE t2.user_id = t.user_id AND t2.source_id = %s
-                          AND t2.user_name IS NOT NULL
-                        ORDER BY t2.start_time DESC LIMIT 1) as user_name,
-                       (SELECT t3.bbk_id FROM swe_tracing_traces t3
-                        WHERE t3.user_id = t.user_id AND t3.source_id = %s
-                          AND t3.bbk_id IS NOT NULL
-                        ORDER BY t3.start_time DESC LIMIT 1) as bbk_id
-                FROM swe_tracing_spans s
-                JOIN swe_tracing_traces t ON s.trace_id = t.trace_id
-                WHERE {base_where}
-                ORDER BY t.start_time DESC
-                LIMIT %s OFFSET %s
-            """
-            params = (
-                [source_id, source_id]
-                + list(count_params)
-                + [page_size, offset]
-            )
+        data_query = f"""
+            SELECT DISTINCT t.trace_id, t.source_id, t.user_id, t.session_id,
+                   t.channel, t.start_time, t.duration_ms, t.total_tokens,
+                   t.total_input_tokens, t.total_output_tokens, t.model_name,
+                   t.status, JSON_LENGTH(t.skills_used) as skills_count,
+                   t.user_name, t.bbk_id
+            FROM swe_tracing_spans s
+            JOIN swe_tracing_traces t ON s.trace_id = t.trace_id
+            WHERE {base_where}
+            ORDER BY t.start_time DESC
+            LIMIT %s OFFSET %s
+        """
+        params = list(count_params) + [page_size, offset]
 
         rows = await self._db.fetch_all(data_query, tuple(params))
 
