@@ -543,6 +543,22 @@ async def _attach_reconnect_queue(
     )
 
 
+def _console_chat_stream_headers(
+    *,
+    session_id: str,
+    msgid: str | None,
+) -> dict[str, str]:
+    headers = {
+        "Cache-Control": "no-cache",
+        "Connection": "keep-alive",
+        "X-Accel-Buffering": "no",
+    }
+    if msgid:
+        headers["X-Swe-Msgid"] = msgid
+        headers["X-Swe-Sessionid"] = session_id
+    return headers
+
+
 @router.post(
     "/chat",
     status_code=200,
@@ -617,6 +633,7 @@ async def post_console_chat(
     if isinstance(request_data, dict):
         is_reconnect = request_data.get("reconnect") is True
 
+    msgid: str | None = None
     if is_reconnect:
         queue, run_key = await _attach_reconnect_queue(
             workspace,
@@ -630,6 +647,8 @@ async def post_console_chat(
                 detail="No running chat for this session",
             )
     else:
+        msgid = str(uuid.uuid4())
+        native_payload["meta"]["msgid"] = msgid
         chat = await workspace.chat_manager.get_or_create_chat(
             session_id,
             native_payload["sender_id"],
@@ -668,11 +687,10 @@ async def post_console_chat(
     return StreamingResponse(
         _stream_with_keepalive(event_generator()),
         media_type="text/event-stream",
-        headers={
-            "Cache-Control": "no-cache",
-            "Connection": "keep-alive",
-            "X-Accel-Buffering": "no",
-        },
+        headers=_console_chat_stream_headers(
+            session_id=session_id,
+            msgid=msgid,
+        ),
     )
 
 

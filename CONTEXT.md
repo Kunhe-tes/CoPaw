@@ -180,6 +180,14 @@ _Avoid_: source default, tenant override, page default
 The tenant and source context that determines which runtime configuration and model selection a request observes. One **Runtime Request Identity** resolves to one **Tenant Provider Configuration** view for provider and active-model reads.
 _Avoid_: cache key, auth header set, iframe context
 
+**Tenant Scaffold Bootstrap**:
+The tenant setup state in which a runtime scope has the required tenant-local workspace structure and baseline files. A **Tenant Scaffold Bootstrap** does not imply that the first-run conversational onboarding has happened.
+_Avoid_: chat bootstrap, BOOTSTRAP.md flow, onboarding chat
+
+**Bootstrap Chat Flow**:
+The first-run conversational onboarding in which an Agent learns and records identity, style, and user preferences. A **Bootstrap Chat Flow** is separate from **Tenant Scaffold Bootstrap** and may be skipped for a tenant that still has a valid scaffold.
+_Avoid_: tenant bootstrap, scaffold bootstrap, workspace initialization
+
 **Runtime Invocation Claims**:
 Session, trace, tenant, and source claims that Swe passes across a runtime invocation boundary for a receiving tool or integration to interpret inside an already trusted channel. **Runtime Invocation Claims** are distinct from **Runtime Request Identity**, which is internal request context, and are not independently verifiable credentials.
 _Avoid_: runtime metadata, env/header info, credential, signed token
@@ -476,6 +484,18 @@ _Avoid_: direct diagnostic database write, free-form diagnostic message, Kafka i
 A renewable period during which a Runtime Instance is considered present. Graceful deregistration ends it immediately; expiry makes an abnormally terminated Runtime Instance ineffective.
 _Avoid_: permanent active flag, shutdown-only invalidation
 
+**User Question Message ID**:
+The stable message identifier for one user-authored question inside a Logical Chat Session. One **User Question Message ID** anchors the answer turn that responds to that question.
+_Avoid_: external channel message id, generated UI message id, response id
+
+**Answer Turn**:
+The ordered message group anchored by one **User Question Message ID**, including that user question and the messages that follow it until the next user-authored question in the same Logical Chat Session. An **Answer Turn** uses the same chat-history message shape as the full conversation view.
+_Avoid_: final answer text, assistant-only bubble, latest response, answer-only slice
+
+**Logical Chat Session**:
+The stable conversation identity used to continue chat context across turns. A **Logical Chat Session** is distinct from the persisted chat record used to load or display the conversation.
+_Avoid_: chat UUID, UI session row, temporary frontend id
+
 ## Flagged Ambiguities
 
 **"Create SubAgent"**:
@@ -492,6 +512,51 @@ Resolved as a reduced-permission Main Agent mode. SubAgent runtime rules remain 
 
 **"Plan Approval"**:
 Resolved as the `execute` **Plan Review Decision** on a **Proposed Plan**. `execute` accepts the persisted plan and can transition the chat out of Plan Mode into normal execution.
+
+**"sessionid for Answer Turn lookup"**:
+Resolved as the **Logical Chat Session** identifier known to the caller, not the persisted chat record identifier used by the chat history detail endpoint.
+
+**"Answer Turn lookup scope"**:
+Resolved as request-identity scoped. A **User Question Message ID** plus **Logical Chat Session** identifies an **Answer Turn** only within the caller's resolved tenant, source, and workspace context.
+
+**"User Question Message ID stream delivery"**:
+Resolved as a non-rendering stream notification. Delivering a **User Question Message ID** during chat streaming must not create, mutate, or fail any visible chat response card.
+
+**"User Question Message ID delivery surface"**:
+Resolved as an HTTP response header on the chat streaming response, not a renderable stream event.
+
+**"External Answer Turn field names"**:
+Resolved as using `msgid` and `sessionid` at the external API boundary while keeping **User Question Message ID** and **Logical Chat Session** as the internal domain terms.
+
+**"User Question Message ID assignment"**:
+Resolved as assigning the **User Question Message ID** before chat streaming begins and preserving that same identifier when the user question is stored in conversation memory.
+
+**"Reconnect User Question Message ID"**:
+Resolved as no new **User Question Message ID**. A reconnect attaches to an existing stream and must not be treated as a new user question.
+
+**"Answer Turn lookup channel scope"**:
+Resolved as Console-only for the current stage. Non-Console channel message identifiers and delivery rules are outside the **Answer Turn** lookup contract.
+
+**"Answer Turn lookup response shape"**:
+Resolved as a chat-history response whose `messages` contain the requested **Answer Turn**, including the anchor user question, while `chat` and `status` describe the corresponding chat record.
+
+**"Chat detail User Question Message ID exposure"**:
+Resolved as unchanged for the current stage. The full chat detail payload does not gain an additional `msgid` field solely for **Answer Turn** lookup.
+
+**"Answer Turn anchor message shape"**:
+Resolved as the same chat-history message shape used by the full conversation view, not a simplified question object.
+
+**"Answer Turn chat record resolution"**:
+Resolved as unique under the caller's request identity for **Logical Chat Session**, user, and channel. Any multiple-record handling is legacy-data compatibility, not product semantics.
+
+**"Missing Answer Turn lookup"**:
+Resolved as a not-found outcome when the requested **Logical Chat Session** and **User Question Message ID** do not identify a user question in the caller's request-identity scope.
+
+**"Pending Answer Turn lookup"**:
+Resolved as a found **Answer Turn** with no non-user messages yet. It returns the anchor user question with the chat's current status instead of a not-found outcome.
+
+**"Non-user Answer Turn anchor"**:
+Resolved as not found. An **Answer Turn** lookup only accepts a **User Question Message ID** as its anchor.
 
 **"Execute Mode Transition"**:
 Resolved to automatically close the current chat session's **Plan Mode State** before normal execution continues with the persisted Proposed Plan as accepted plan context.

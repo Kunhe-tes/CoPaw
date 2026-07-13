@@ -311,6 +311,10 @@ class InternalBatchInitializeTenantsRequest(BaseModel):
 
     tenant_ids: str = Field(..., description="逗号分隔的租户 ID 字符串")
     source_id: str = Field(..., min_length=1, description="来源标识")
+    enable_bootstrap_chat: bool = Field(
+        default=True,
+        description="是否为新租户保留 BOOTSTRAP.md 初始化聊天",
+    )
     fail_fast: bool = Field(
         default=False,
         description="单个租户失败时是否立即终止后续处理",
@@ -876,6 +880,7 @@ async def internal_batch_initialize_tenants(
                 source_id=payload.source_id,
                 tenant_name=resolved_identity.user_name,
                 bbk_id=resolved_identity.bbk_id,
+                enable_bootstrap_chat=payload.enable_bootstrap_chat,
             )
         except Exception as exc:
             fail_count += 1
@@ -1170,6 +1175,8 @@ async def refresh_external_cron_jobs(request: Request):
 
 
 @router.post("/cron/callback")
+# Existing endpoint handles legacy and jobParam callback shapes in one handler.
+# pylint: disable=too-many-statements
 async def internal_cron_callback(
     request: Request,
     x_internal_token: Optional[str] = Header(

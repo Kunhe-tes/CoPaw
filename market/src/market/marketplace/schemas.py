@@ -334,3 +334,28 @@ class RecallResponse(BaseModel):
     failed_count: int = 0
     results: list[RecallResultItem] = Field(default_factory=list)
     item_id: str
+
+
+class DistributionPreviewRequest(BaseModel):
+    """分发预览请求体."""
+
+    source_id: str
+    tenant_ids: list[str] = Field(default_factory=list)
+
+
+class UserSkillStatus(BaseModel):
+    """用户技能状态."""
+
+    tenant_id: str
+    tenant_name: str | None = None
+    bbk_id: str | None = None
+    status: str  # first_time / update / conflict
+    current_version: str | None = None  # update 时显示当前版本
+
+
+class DistributionPreviewResponse(BaseModel):
+    """分发预览响应."""
+
+    skill_version: str
+    users: list[UserSkillStatus] = Field(default_factory=list)
+    distributed_user_ids: list[str] = Field(default_factory=list)

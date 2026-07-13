@@ -22,6 +22,7 @@ from fastapi import (
     Request,
     UploadFile,
 )
+from fastapi.responses import Response
 from pydantic import BaseModel, Field
 
 from ...marketplace.fs import (
@@ -30,6 +31,7 @@ from ...marketplace.fs import (
     _validate_skill_name_segment,
 )
 from ...marketplace.service import load_index
+from ...marketplace.zip_download import build_skill_zip
 from ...marketplace.schemas import (
     BatchOperationRequest,
     BatchOperationResponse,
@@ -1381,6 +1383,114 @@ async def list_skill_files(
         )
     svc = request.app.state.marketplace
     return svc.list_skill_files(x_user_id, skill_name, agent_id, source_id)
+
+
+@router.get("/market/skills/mine/{skill_name}/download")
+async def download_my_skill(
+    skill_name: str,
+    request: Request,
+    x_source_id: Optional[str] = Header(default=None, alias="X-Source-Id"),
+    x_user_id: Optional[str] = Header(default=None, alias="X-User-Id"),
+    agent_id: str = "default",
+):
+    """下载我创建的技能 ZIP。"""
+    source_id = require_source_id(x_source_id)
+    if not x_user_id:
+        raise HTTPException(
+            status_code=400,
+            detail="X-User-Id header is required",
+        )
+
+    svc = request.app.state.marketplace
+    skills = await svc.get_my_skills(source_id, x_user_id, agent_id)
+    skill = next(
+        (
+            item
+            for item in skills
+            if item.skill_name == skill_name and not item.is_received
+        ),
+        None,
+    )
+    if skill is None:
+        raise HTTPException(status_code=404, detail="Skill not found")
+
+    skill_dir = (
+        get_user_skills_dir(svc.swe_root, x_user_id, agent_id, source_id)
+        / skill_name
+    )
+    if not skill_dir.is_dir():
+        raise HTTPException(status_code=404, detail="Skill not found")
+
+    with tempfile.TemporaryDirectory(
+        prefix="copaw_skill_download_",
+    ) as temp_dir:
+        zip_path = await asyncio.to_thread(
+            build_skill_zip,
+            skill_dir,
+            f"{skill_name}.zip",
+            Path(temp_dir),
+        )
+        zip_bytes = await asyncio.to_thread(zip_path.read_bytes)
+
+    # RFC 6266: 使用 filename* 参数支持 UTF-8 中文文件名
+    from urllib.parse import quote
+
+    encoded_filename = quote(zip_path.name, safe="")
+    content_disposition = f"attachment; filename=\"skill.zip\"; filename*=UTF-8''{encoded_filename}"
+
+    return Response(
+        content=zip_bytes,
+        media_type="application/zip",
+        headers={
+            "Content-Disposition": content_disposition,
+        },
+    )
+
+
+@router.get("/market/skills/{item_id}/download")
+async def download_market_skill(
+    item_id: str,
+    request: Request,
+    x_source_id: Optional[str] = Header(default=None, alias="X-Source-Id"),
+    x_bbk_id: Optional[str] = Header(default=None, alias="X-Bbk-Id"),
+):
+    """下载市场当前版本技能 ZIP。"""
+    source_id = require_source_id(x_source_id)
+    user_bbk_id = x_bbk_id or "100"
+    svc = request.app.state.marketplace
+
+    detail = await svc.get_skill_detail(source_id, item_id, user_bbk_id)
+    if detail is None:
+        raise HTTPException(status_code=404, detail="Skill not found")
+
+    skill_dir = svc.marketplace_root / source_id / "skills" / item_id
+    if not skill_dir.is_dir():
+        raise HTTPException(status_code=404, detail="Skill not found")
+
+    with tempfile.TemporaryDirectory(
+        prefix="copaw_market_skill_download_",
+    ) as temp_dir:
+        zip_path = await asyncio.to_thread(
+            build_skill_zip,
+            skill_dir,
+            f"{detail.name}-{detail.version}.zip",
+            Path(temp_dir),
+        )
+        zip_bytes = await asyncio.to_thread(zip_path.read_bytes)
+
+    # RFC 6266: 使用 filename* 参数支持 UTF-8 中文文件名
+    from urllib.parse import quote
+
+    encoded_filename = quote(zip_path.name, safe="")
+    content_disposition = f"attachment; filename=\"skill.zip\"; filename*=UTF-8''{encoded_filename}"
+
+    return Response(
+        content=zip_bytes,
+        media_type="application/zip",
+        headers={
+            "Content-Disposition": content_disposition,
+        },
+    )
 
 
 @router.get(

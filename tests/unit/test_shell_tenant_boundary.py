@@ -174,6 +174,46 @@ def test_shell_subprocess_env_preserves_backend_storage_roots(
     assert "PYTHONPATH" not in env
 
 
+def test_shell_subprocess_env_defaults_blas_thread_limits(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Shell 子进程默认限制常见 BLAS/OpenMP 运行时线程数。"""
+    thread_limit_keys = {
+        "OPENBLAS_NUM_THREADS",
+        "OMP_NUM_THREADS",
+        "MKL_NUM_THREADS",
+        "NUMEXPR_NUM_THREADS",
+        "VECLIB_MAXIMUM_THREADS",
+    }
+    for key in thread_limit_keys:
+        monkeypatch.delenv(key, raising=False)
+
+    env = _prepare_subprocess_env()
+
+    assert {key: env[key] for key in thread_limit_keys} == {
+        key: "1" for key in thread_limit_keys
+    }
+
+
+def test_shell_subprocess_env_preserves_explicit_blas_thread_limits(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Shell 子进程不覆盖调用方已经指定的线程限制。"""
+    explicit_limits = {
+        "OPENBLAS_NUM_THREADS": "2",
+        "OMP_NUM_THREADS": "3",
+        "MKL_NUM_THREADS": "4",
+        "NUMEXPR_NUM_THREADS": "5",
+        "VECLIB_MAXIMUM_THREADS": "6",
+    }
+    for key, value in explicit_limits.items():
+        monkeypatch.setenv(key, value)
+
+    env = _prepare_subprocess_env()
+
+    assert {key: env[key] for key in explicit_limits} == explicit_limits
+
+
 # =============================================================================
 # Tests for _extract_path_tokens
 # =============================================================================

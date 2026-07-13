@@ -405,7 +405,7 @@ async def test_get_my_skills_reads_frontmatter_and_market_metadata(tmp_path):
 
 @pytest.mark.asyncio
 async def test_recall_skill_by_name_removes_skill_dir_and_manifest(tmp_path):
-    """按名称撤回技能时，应删除目录并移除 manifest 记录."""
+    """按名称撤回技能时，应删除目录、移除 manifest 记录并删除数据库记录."""
     from market.marketplace.fs import (
         get_user_skill_manifest_path,
         get_user_skills_dir,
@@ -417,6 +417,7 @@ async def test_recall_skill_by_name_removes_skill_dir_and_manifest(tmp_path):
     svc = _make_service(tmp_path, mock_db=mock_db)
     svc.disable_skill = AsyncMock(return_value={"success": True})
     svc._trigger_agent_reload = AsyncMock()
+    svc.skill_registry.delete_skill = AsyncMock(return_value=False)
 
     user_id = "user-1"
     source_id = "source-1"
@@ -470,6 +471,12 @@ async def test_recall_skill_by_name_removes_skill_dir_and_manifest(tmp_path):
     assert result.results[0].success is True
     assert not skill_dir.exists()
     assert skill_name not in manifest_data["skills"]
+    # 验证删除数据库记录被调用
+    svc.skill_registry.delete_skill.assert_called_once_with(
+        user_id,
+        skill_name,
+        source_id,
+    )
 
 
 @pytest.mark.asyncio

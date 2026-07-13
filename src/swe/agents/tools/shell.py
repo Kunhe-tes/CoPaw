@@ -110,6 +110,14 @@ _PYTHON_COMMAND_BASENAMES = frozenset(
 
 _PYTHON_OPTIONS_WITH_VALUE = frozenset({"-W", "-X"})
 
+_SUBPROCESS_THREAD_LIMIT_DEFAULTS = {
+    "OPENBLAS_NUM_THREADS": "1",
+    "OMP_NUM_THREADS": "1",
+    "MKL_NUM_THREADS": "1",
+    "NUMEXPR_NUM_THREADS": "1",
+    "VECLIB_MAXIMUM_THREADS": "1",
+}
+
 _PYTHON_PATH_CALL_ARG_INDICES = {
     "open": (0,),
     "io.open": (0,),
@@ -929,6 +937,8 @@ def _prepare_subprocess_env() -> dict[str, str]:
         if existing_path
         else python_bin_dir
     )
+    for key, value in _SUBPROCESS_THREAD_LIMIT_DEFAULTS.items():
+        env.setdefault(key, value)
     return env
 
 

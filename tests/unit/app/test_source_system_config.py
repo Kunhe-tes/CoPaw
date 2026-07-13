@@ -1980,6 +1980,35 @@ class TestSourceSystemConfigMiddleware:
             "detail": "Source system config data is invalid",
         }
 
+    def test_middleware_skips_public_static_routes_with_source_header(self):
+        """静态文件请求不应因 X-Source-Id 触发 source 配置解析。"""
+        service = SimpleNamespace(
+            resolve_config=AsyncMock(
+                side_effect=AssertionError("source config resolved"),
+            ),
+        )
+        app = FastAPI()
+
+        @app.get("/static/{scope_id}/{agent_id}/{file_name:path}")
+        async def static_file():
+            assert get_current_source_system_config() is None
+            return {"ok": True}
+
+        app.add_middleware(SourceSystemConfigMiddleware, service=service)
+        app.add_middleware(TenantIdentityMiddleware, default_tenant_id=None)
+
+        response = TestClient(app, raise_server_exceptions=False).get(
+            "/static/default/default/report.html",
+            headers={
+                "X-Tenant-Id": "default",
+                "X-Source-Id": "RMASSIST",
+            },
+        )
+
+        assert response.status_code == 200
+        assert response.json() == {"ok": True}
+        service.resolve_config.assert_not_awaited()
+
 
 class TestSourceSystemConfigApi:
     """验证 source 系统配置 API。"""

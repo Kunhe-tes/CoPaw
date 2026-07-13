@@ -1786,6 +1786,16 @@
     "noMatchHint": "未找到匹配的租户",
     "noSourceId": "无法加载租户列表",
     "noSourceIdDescription": "未获取到有效的来源标识，请刷新页面重试",
-    "loadError": "加载租户列表失败"
+    "loadError": "加载租户列表失败",
+    "orgStats": "覆盖: {{update}} | 首次: {{firstTime}}"
+  },
+  "distributionPreview": {
+    "title": "分发预览",
+    "selectDistributed": "选中已分发用户",
+    "firstTime": "首次分发",
+    "update": "覆盖更新",
+    "conflict": "跳过(冲突)",
+    "currentVersion": "当前技能版本",
+    "distributedCount": "已分发用户数"
   }
 }

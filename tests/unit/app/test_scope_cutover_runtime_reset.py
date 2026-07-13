@@ -54,3 +54,70 @@ async def test_reset_scope_sensitive_runtime_state_clears_stale_caches() -> (
     assert TenantModelManager._cache == {}
     assert rate_limiter_module._limiter_registry == {}
     assert app_module.runner._multi_agent_manager is None
+
+
+@pytest.mark.asyncio
+async def test_reset_scope_sensitive_runtime_state_releases_workspace_metrics(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """cutover 停旧 manager 后不应继续通过诊断回调强引用它。"""
+
+    class FakeManager:
+        async def stop_all(self) -> None:
+            return None
+
+    class FakeRuntimeDiagnosticManager:
+        def __init__(self) -> None:
+            self.workspace_metric_callbacks: list[object] = []
+
+        def set_workspace_metrics(self, callback) -> None:
+            self.workspace_metric_callbacks.append(callback)
+
+    fake_runtime_diagnostic_manager = FakeRuntimeDiagnosticManager()
+    monkeypatch.setattr(
+        app_module,
+        "runtime_diagnostic_manager",
+        fake_runtime_diagnostic_manager,
+    )
+    app = SimpleNamespace(
+        state=SimpleNamespace(multi_agent_manager=FakeManager()),
+    )
+
+    await app_module._reset_scope_sensitive_runtime_state(app)
+
+    assert fake_runtime_diagnostic_manager.workspace_metric_callbacks == [
+        None,
+    ]
+
+
+@pytest.mark.asyncio
+async def test_reset_scope_sensitive_runtime_state_releases_metrics_on_stop_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class BrokenManager:
+        async def stop_all(self) -> None:
+            raise RuntimeError("stop failed")
+
+    class FakeRuntimeDiagnosticManager:
+        def __init__(self) -> None:
+            self.workspace_metric_callbacks: list[object] = []
+
+        def set_workspace_metrics(self, callback) -> None:
+            self.workspace_metric_callbacks.append(callback)
+
+    fake_runtime_diagnostic_manager = FakeRuntimeDiagnosticManager()
+    monkeypatch.setattr(
+        app_module,
+        "runtime_diagnostic_manager",
+        fake_runtime_diagnostic_manager,
+    )
+    app = SimpleNamespace(
+        state=SimpleNamespace(multi_agent_manager=BrokenManager()),
+    )
+
+    with pytest.raises(RuntimeError, match="stop failed"):
+        await app_module._reset_scope_sensitive_runtime_state(app)
+
+    assert fake_runtime_diagnostic_manager.workspace_metric_callbacks == [
+        None,
+    ]

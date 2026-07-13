@@ -130,7 +130,9 @@ class TenantWorkspaceMiddleware(BaseHTTPMiddleware):
         before_next_at = None
 
         try:
-            if request.method == "OPTIONS":
+            if request.method == "OPTIONS" or self._is_workspace_exempt(
+                request.url.path,
+            ):
                 return await call_next(request)
 
             # Load workspace if tenant_id is available
@@ -385,6 +387,9 @@ class TenantWorkspaceMiddleware(BaseHTTPMiddleware):
                 "/readyz",
                 "/alive",
                 "/api/version",
+                "/api/runtime/memory-diagnostic",
+                "/api/runtime/memory-type-holders",
+                "/api/runtime/inotify-diagnostic",
                 "/docs",
                 "/redoc",
                 "/openapi.json",

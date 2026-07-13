@@ -4,7 +4,9 @@
 from __future__ import annotations
 
 import inspect
+from types import SimpleNamespace
 
+import pytest
 from swe.app.middleware.sse_diagnostic import SSEDiagnosticMiddleware
 from swe.app.middleware.liveness_probe import LivenessProbeMiddleware
 from swe.app.runtime_diagnostic import RuntimeDiagnosticManager
@@ -54,3 +56,129 @@ def test_shutdown_stops_managed_background_processes() -> None:
     source = inspect.getsource(_shutdown_lifespan_resources)
 
     assert "managed_background_process_manager.stop_all()" in source
+
+
+@pytest.mark.asyncio
+async def test_shutdown_releases_workspace_metrics_callback(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from swe.agents.tools import background_process
+    from swe.app import _app as app_module
+
+    class FakeRuntimeDiagnosticManager:
+        def __init__(self) -> None:
+            self.stop_calls = 0
+            self.workspace_metric_callbacks: list[object] = []
+
+        async def stop(self) -> None:
+            self.stop_calls += 1
+
+        def set_workspace_metrics(self, callback) -> None:
+            self.workspace_metric_callbacks.append(callback)
+
+    fake_runtime_diagnostic_manager = FakeRuntimeDiagnosticManager()
+    monkeypatch.setattr(
+        app_module,
+        "runtime_diagnostic_manager",
+        fake_runtime_diagnostic_manager,
+    )
+    monkeypatch.setattr(
+        background_process.managed_background_process_manager,
+        "stop_all",
+        lambda: None,
+    )
+    monkeypatch.setattr(
+        app_module,
+        "close_trace_manager",
+        _async_noop,
+    )
+    monkeypatch.setattr(
+        app_module,
+        "stop_service_heartbeat",
+        _async_noop,
+    )
+    monkeypatch.setattr(
+        app_module,
+        "_stop_multi_agent_manager",
+        lambda _app: _async_noop(),
+    )
+    monkeypatch.setattr(
+        app_module,
+        "_stop_tenant_workspace_pool",
+        lambda _app: _async_noop(),
+    )
+    monkeypatch.setattr(app_module, "shutdown_logger", lambda: None)
+
+    await app_module._shutdown_lifespan_resources(
+        SimpleNamespace(state=SimpleNamespace(cron_notification_worker=None)),
+        db_connection=None,
+    )
+
+    assert fake_runtime_diagnostic_manager.stop_calls == 1
+    assert fake_runtime_diagnostic_manager.workspace_metric_callbacks == [
+        None,
+    ]
+
+
+@pytest.mark.asyncio
+async def test_shutdown_releases_workspace_metrics_when_diagnostic_stop_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from swe.agents.tools import background_process
+    from swe.app import _app as app_module
+
+    class BrokenRuntimeDiagnosticManager:
+        def __init__(self) -> None:
+            self.workspace_metric_callbacks: list[object] = []
+
+        async def stop(self) -> None:
+            raise RuntimeError("diagnostic stop failed")
+
+        def set_workspace_metrics(self, callback) -> None:
+            self.workspace_metric_callbacks.append(callback)
+
+    broken_runtime_diagnostic_manager = BrokenRuntimeDiagnosticManager()
+    monkeypatch.setattr(
+        app_module,
+        "runtime_diagnostic_manager",
+        broken_runtime_diagnostic_manager,
+    )
+    monkeypatch.setattr(
+        background_process.managed_background_process_manager,
+        "stop_all",
+        lambda: None,
+    )
+    monkeypatch.setattr(
+        app_module,
+        "close_trace_manager",
+        _async_noop,
+    )
+    monkeypatch.setattr(
+        app_module,
+        "stop_service_heartbeat",
+        _async_noop,
+    )
+    monkeypatch.setattr(
+        app_module,
+        "_stop_multi_agent_manager",
+        lambda _app: _async_noop(),
+    )
+    monkeypatch.setattr(
+        app_module,
+        "_stop_tenant_workspace_pool",
+        lambda _app: _async_noop(),
+    )
+    monkeypatch.setattr(app_module, "shutdown_logger", lambda: None)
+
+    await app_module._shutdown_lifespan_resources(
+        SimpleNamespace(state=SimpleNamespace(cron_notification_worker=None)),
+        db_connection=None,
+    )
+
+    assert broken_runtime_diagnostic_manager.workspace_metric_callbacks == [
+        None,
+    ]
+
+
+async def _async_noop() -> None:
+    return None

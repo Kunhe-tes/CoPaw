@@ -36,6 +36,22 @@ export interface MarketSkillDetail extends MarketSkill {
   }>;
 }
 
+// 用户技能状态
+export interface UserSkillStatus {
+  tenant_id: string;
+  tenant_name: string | null;
+  bbk_id: string | null;
+  status: 'first_time' | 'update' | 'conflict';
+  current_version?: string;
+}
+
+// 分发预览响应
+export interface DistributionPreviewResponse {
+  skill_version: string;
+  users: UserSkillStatus[];
+  distributed_user_ids: string[];
+}
+
 export interface Category {
   id: number;
   source_id: string;
@@ -79,6 +95,43 @@ export interface DistributeResponse {
   conflict_count: number;
   conflicts: DistributeConflictItem[];
   item_id: string;
+}
+
+export interface DownloadBinaryResponse {
+  blob: Blob;
+  filename: string | null;
+}
+
+function _extractFilenameFromDisposition(
+  disposition: string | null,
+): string | null {
+  if (!disposition) return null;
+  const utf8Match = disposition.match(/filename\*=UTF-8''([^;]+)/i);
+  if (utf8Match?.[1]) {
+    try {
+      return decodeURIComponent(utf8Match[1]);
+    } catch {
+      return utf8Match[1];
+    }
+  }
+  const plainMatch = disposition.match(/filename="?([^"]+)"?/i);
+  return plainMatch?.[1] ?? null;
+}
+
+async function _downloadBinary(
+  path: string,
+  options: RequestInit,
+): Promise<DownloadBinaryResponse> {
+  const response = await fetch(getApiUrl(path), options);
+  if (!response.ok) {
+    throw new Error(await response.text());
+  }
+  return {
+    blob: await response.blob(),
+    filename: _extractFilenameFromDisposition(
+      response.headers.get("content-disposition"),
+    ),
+  };
 }
 
 /**
@@ -189,6 +242,32 @@ export const marketApi = {
     return request<MarketSkillDetail | null>(
       `/market/skills/${itemId}`,
       opts
+    );
+  },
+
+  downloadSkill: async (
+    sourceId: string,
+    itemId: string,
+  ): Promise<DownloadBinaryResponse> => {
+    const opts = mergeHeaders({ "X-Source-Id": sourceId });
+    return _downloadBinary(`/market/skills/${itemId}/download`, {
+      method: "GET",
+      headers: opts.headers,
+    });
+  },
+
+  downloadSkillVersion: async (
+    sourceId: string,
+    itemId: string,
+    versionId: string,
+  ): Promise<DownloadBinaryResponse> => {
+    const opts = mergeHeaders({ "X-Source-Id": sourceId });
+    return _downloadBinary(
+      `/market/skills/${itemId}/versions/${encodeURIComponent(versionId)}/download`,
+      {
+        method: "GET",
+        headers: opts.headers,
+      },
     );
   },
 
@@ -418,14 +497,16 @@ export const marketApi = {
   // 查询技能分发记录
   getSkillDistributions: async (
     sourceId: string,
-    itemId: string
+    itemId: string,
+    skillName?: string
   ): Promise<DistributionRecord[]> => {
     const opts = mergeHeaders({
       "X-Source-Id": sourceId,
       "X-Manager": "true",
     });
+    const params = skillName ? `?skill_name=${encodeURIComponent(skillName)}` : "";
     return request<DistributionRecord[]>(
-      `/market/skills/${itemId}/distributions`,
+      `/market/skills/${itemId}/distributions${params}`,
       opts
     );
   },
@@ -500,5 +581,29 @@ export const marketApi = {
       }
     }
     return Array.from(byName.values());
+  },
+
+  // 获取分发预览
+  getDistributionPreview: async (
+    sourceId: string,
+    itemId: string,
+    tenantIds: string[]
+  ): Promise<DistributionPreviewResponse> => {
+    const opts: RequestInit = {
+      method: "POST",
+      ...(mergeHeaders({
+        "Content-Type": "application/json",
+        "X-Source-Id": sourceId,
+        "X-Manager": "true",
+      })),
+      body: JSON.stringify({
+        source_id: sourceId,
+        tenant_ids: tenantIds,
+      }),
+    };
+    return request<DistributionPreviewResponse>(
+      `/market/skills/${itemId}/distribution-preview`,
+      opts
+    );
   },
 };
