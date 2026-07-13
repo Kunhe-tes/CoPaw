@@ -32,6 +32,8 @@ from swe.agents.tools.shell import (
     _classify_shell_failure,
     _extract_path_tokens,
     _prepare_subprocess_env,
+    prepare_shell_command,
+    _scan_python_source_for_outside_path,
     _validate_shell_paths,
     _resolve_cwd,
 )
@@ -455,6 +457,27 @@ class TestValidateShellPaths:
             assert "Python code contains path outside" in result
             assert "/etc/passwd" in result
 
+    def test_python_code_string_tenant_absolute_opt_path_allowed(
+        self,
+        mock_working_dir: Path,
+    ):
+        """Tenant-local absolute paths under /opt should not be rejected as system paths."""
+        tenant_dir = mock_working_dir / "test_tenant"
+        code = (
+            "path = "
+            "'/opt/deployments/app/working/test_tenant/workspaces/default/"
+            "tool_result/result.txt'\n"
+            "print(open(path).read())"
+        )
+
+        with patch(
+            "swe.agents.tools.shell.is_path_within_tenant_with_base",
+            return_value=True,
+        ):
+            result = _scan_python_source_for_outside_path(code, tenant_dir)
+
+        assert result is None
+
     def test_python_directory_content_outside_path_denied(
         self,
         mock_working_dir: Path,
@@ -567,6 +590,17 @@ class TestValidateShellPaths:
             )
             assert result is not None
             assert "outside the allowed workspace" in result
+
+    def test_dev_null_output_sink_allowed(self, mock_working_dir: Path):
+        """Common output probes may write to /dev/null without escaping tenant data."""
+        tenant_dir = mock_working_dir / "test_tenant"
+        with tenant_context(tenant_id="test_tenant"):
+            result = _validate_shell_paths(
+                'curl -s -o /dev/null -w "%{http_code}" http://127.0.0.1',
+                base_dir=tenant_dir,
+            )
+
+        assert result is None
 
     def test_relative_traversal_denied(self, mock_working_dir: Path):
         """Should reject relative paths that traverse outside tenant."""
@@ -828,6 +862,62 @@ class TestExecuteShellCommand:
         assert prepared.working_dir == tenant_dir.resolve()
         assert "PATH" in prepared.env
         assert prepared.python_runtime_guard is not None
+
+    def test_prepare_shell_command_preserves_unix_multiline_python(
+        self,
+        mock_working_dir: Path,
+    ):
+        """Unix shell commands must keep newlines for python -c and heredocs."""
+        tenant_dir = mock_working_dir / "test_tenant"
+        command = (
+            'python3 -c "\n'
+            "import json\n"
+            "print(json.dumps({'ok': True}))\n"
+            '"'
+        )
+
+        with (
+            patch("swe.agents.tools.shell.sys.platform", "linux"),
+            tenant_context(tenant_id="test_tenant", workspace_dir=tenant_dir),
+        ):
+            prepared = prepare_shell_command(command, cwd=str(tenant_dir))
+
+        assert "\nimport json\n" in prepared.command
+        assert "import json print" not in prepared.command
+
+    def test_prepare_shell_command_preserves_unix_heredoc(
+        self,
+        mock_working_dir: Path,
+    ):
+        """Here-doc bodies are executable shell syntax and must not be flattened."""
+        tenant_dir = mock_working_dir / "test_tenant"
+        command = "python3 << 'PYEOF'\nprint('ok')\nPYEOF"
+
+        with (
+            patch("swe.agents.tools.shell.sys.platform", "linux"),
+            tenant_context(tenant_id="test_tenant", workspace_dir=tenant_dir),
+        ):
+            prepared = prepare_shell_command(command, cwd=str(tenant_dir))
+
+        assert prepared.command == command
+
+    def test_prepare_shell_command_collapses_windows_newlines(
+        self,
+        mock_working_dir: Path,
+    ):
+        """Windows cmd still receives single-line commands to avoid truncation."""
+        tenant_dir = mock_working_dir / "test_tenant"
+
+        with (
+            patch("swe.agents.tools.shell.sys.platform", "win32"),
+            tenant_context(tenant_id="test_tenant", workspace_dir=tenant_dir),
+        ):
+            prepared = prepare_shell_command(
+                "echo hello\nworld",
+                cwd=str(tenant_dir),
+            )
+
+        assert prepared.command == "echo hello world"
 
     @pytest.mark.asyncio
     async def test_accepts_string_cwd_within_tenant(
@@ -1422,3 +1512,16 @@ def test_shell_memory_error_is_process_limit_with_memory_enforcement():
         )
         == "process_limit_exceeded"
     )
+
+
+def test_shell_curl_exit_28_is_tool_timeout():
+    assert _classify_shell_failure(28, "") == "tool_timeout"
+
+
+def test_shell_network_timeout_traceback_is_tool_timeout():
+    stderr = (
+        "Traceback (most recent call last):\n"
+        "urllib3.exceptions.ConnectTimeoutError: Connection timed out"
+    )
+
+    assert _classify_shell_failure(1, stderr) == "tool_timeout"
