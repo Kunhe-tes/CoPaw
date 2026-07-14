@@ -852,6 +852,46 @@ def _raise_shell_error(error_type: str, detail: str) -> None:
     raise ToolExecutionError(error_type=error_type, detail=detail)
 
 
+def _is_shell_timeout_failure(returncode: int, stderr_lower: str) -> bool:
+    timeout_markers = (
+        "timeouterror",
+        "connecttimeout",
+        "read timed out",
+        "connection timed out",
+    )
+    return returncode in {-1, 28} or any(
+        marker in stderr_lower for marker in timeout_markers
+    )
+
+
+def _is_process_limit_signal(
+    returncode: int,
+    process_limits_enforced: bool,
+) -> bool:
+    if not process_limits_enforced or returncode >= 0:
+        return False
+    process_limit_signals = {
+        getattr(signal, signal_name)
+        for signal_name in ("SIGKILL", "SIGXCPU")
+        if hasattr(signal, signal_name)
+    }
+    return abs(returncode) in process_limit_signals
+
+
+def _is_memory_limit_failure(
+    stderr_str: str,
+    memory_limit_enforced: bool,
+) -> bool:
+    memory_limit_markers = (
+        "MemoryError",
+        "Cannot allocate memory",
+        "Killed",
+    )
+    return memory_limit_enforced and any(
+        marker in stderr_str for marker in memory_limit_markers
+    )
+
+
 def _classify_shell_failure(
     returncode: int,
     stderr_str: str,
@@ -860,32 +900,13 @@ def _classify_shell_failure(
     memory_limit_enforced: bool = False,
 ) -> str:
     stderr_lower = stderr_str.lower()
-    if (
-        returncode in {-1, 28}
-        or "timeouterror" in stderr_lower
-        or "connecttimeout" in stderr_lower
-        or "read timed out" in stderr_lower
-        or "connection timed out" in stderr_lower
-    ):
+    if _is_shell_timeout_failure(returncode, stderr_lower):
         return "tool_timeout"
     if "outside the allowed workspace" in stderr_str:
         return "permission_denied"
-    process_limit_signals: set[int] = set()
-    if hasattr(signal, "SIGKILL"):
-        process_limit_signals.add(signal.SIGKILL)
-    if hasattr(signal, "SIGXCPU"):
-        process_limit_signals.add(signal.SIGXCPU)
-    if (
-        process_limits_enforced
-        and returncode < 0
-        and abs(returncode) in process_limit_signals
-    ):
+    if _is_process_limit_signal(returncode, process_limits_enforced):
         return "process_limit_exceeded"
-    if memory_limit_enforced and (
-        "MemoryError" in stderr_str
-        or "Cannot allocate memory" in stderr_str
-        or "Killed" in stderr_str
-    ):
+    if _is_memory_limit_failure(stderr_str, memory_limit_enforced):
         return "process_limit_exceeded"
     return "shell_command_failed"
 
