@@ -1,11 +1,8 @@
 import { Layout } from "antd";
 import { Routes, Route, useLocation, Navigate } from "react-router-dom";
 import { useEffect } from "react";
-
-// ==================== iframe 集成 (Kun He) ====================
 // useIframeStore: 获取父窗口传递的 hideMenu 参数
 import { useIframeStore } from "../../stores/iframeStore";
-// ==================== iframe 集成结束 ====================
 import { useSourceSystemConfigStore } from "../../stores/sourceSystemConfigStore";
 import { DEFAULT_SOURCE_ID } from "../../constants/identity";
 
@@ -41,6 +38,7 @@ import ContinuousIterationPage from "../../pages/Harness/ContinuousIteration";
 // ==================== 测试页面 (用于验证新功能) ====================
 import TestDownloadCardPage from "../../pages/TestDownloadCard";
 import TestUserDetailModalPage from "../../pages/TestUserDetailModal";
+import ReportViewPage from "../../pages/ReportView";
 // ==================== 测试页面结束 ====================
 import MarketPage from "../../pages/Market";
 import MySkillsPage from "../../pages/MySkills";
@@ -99,7 +97,9 @@ export default function MainLayout() {
   // 动态渲染模版上下文
   const dynamicRender = useDynamicRender(); // 使用 useDynamicRender 钩子
 
-  // ==================== iframe 集成 (Kun He) ====================
+  // 检测是否为 reportView 页面，如果是则跳过预加载所有模块
+  const isReportViewPage = currentPath === "/reportView";
+
   // Sidebar 显示控制：
   // iframe 传递的 hideMenu === true 时隐藏 Sidebar
   // URL 参数 origin=Y 会自动设置 hideMenu=true（见 iframeMessage.ts）
@@ -107,10 +107,9 @@ export default function MainLayout() {
   const activeSourceId =
     useIframeStore((state) => state.source) || DEFAULT_SOURCE_ID;
   const loadEffectiveConfig = useSourceSystemConfigStore(
-    (state) => state.loadEffectiveConfig,
+    (state) => state.loadEffectiveConfig
   );
   const shouldHideSidebar = hideMenu;
-  // ==================== iframe 集成结束 ====================
 
   useEffect(() => {
     loadEffectiveConfig(activeSourceId);
@@ -118,27 +117,23 @@ export default function MainLayout() {
 
   // 初始化动态渲染模版（应用启动时预加载）
   useEffect(() => {
-    dynamicRender.initialize();
-  }, [dynamicRender]);
+    dynamicRender.initialize({ skipPreload: isReportViewPage });
+  }, [dynamicRender, isReportViewPage]);
 
   return (
     <Layout className={styles.mainLayout}>
-      {/* ==================== 首页改版 (Kun He) ==================== */}
       {/* Header 和 Sidebar 一起根据 hideMenu 控制显隐 */}
       {!shouldHideSidebar && <Header />}
-      {/* ==================== 首页改版结束 ==================== */}
       <Layout>
-        {/* ==================== iframe 集成 (Kun He) ==================== */}
         {/* 条件渲染 Sidebar：根据 origin 参数或 hideMenu 决定是否显示 */}
         {!shouldHideSidebar && <Sidebar selectedKey={selectedKey} />}
-        {/* ==================== iframe 集成结束 ==================== */}
         <Content
           className={`page-container${
             shouldHideSidebar ? "" : " page-container--with-sidebar"
-          }`}
+          }${isReportViewPage ? " page-container--no-rightPadding" : ""}`}
         >
           <ConsoleCronBubble />
-          <div className="page-content">
+          <div className={`page-content${isReportViewPage ? " single-page-content" : ""}`}>
             <Routes>
               <Route path="/" element={<Navigate to="/chat" replace />} />
               <Route path="/chat/*" element={<Chat />} />
@@ -185,6 +180,7 @@ export default function MainLayout() {
                 element={<TestUserDetailModalPage />}
               />
               {/* ==================== 测试路由结束 ==================== */}
+              <Route path="/reportView" element={<ReportViewPage />} />
               <Route path="/market" element={<MarketPage />} />
               <Route path="/my-skills" element={<MySkillsPage />} />
               <Route path="/my-mcp" element={<MyMCPPage />} />

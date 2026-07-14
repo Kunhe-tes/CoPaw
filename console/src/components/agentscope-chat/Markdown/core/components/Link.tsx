@@ -1,3 +1,4 @@
+// 该文件有差异，合并需注意
 import { useProviderContext } from "@/components/agentscope-chat";
 import DownloadFileCard from "../../../DownloadFileCard";
 import {
@@ -56,6 +57,7 @@ export default function Link(props) {
         url={href}
         fileName={fileName}
         enableClickTracking={isAutoPreviewHtmlLink(href, fileName)}
+        hideLoadBtn={true}
       />
     );
   }
