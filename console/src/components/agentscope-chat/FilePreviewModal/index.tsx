@@ -75,8 +75,13 @@ function FilePreviewModal(props: FilePreviewModalProps) {
   const cleanupClickTrackingRef = useRef<(() => void) | null>(null);
   const cleanupCaptureClickRef = useRef<(() => void) | null>(null);
   const trackingContext = useHtmlPreviewTracking();
-  const { renderTemplate, templateList, isTemplateListLoaded } =
-    useDynamicRender();
+  const {
+    renderTemplate,
+    renderStaticTemplate,
+    isStaticTemplate,
+    templateList,
+    isTemplateListLoaded,
+  } = useDynamicRender();
   const fileType = useMemo(() => getFileType(fileName), [fileName]);
   const isMarkdownFile = useMemo(() => /\.mdx?$/i.test(fileName), [fileName]);
   const { icon, color } = useMemo(() => getFileIcon(fileName, 48), [fileName]);
@@ -92,9 +97,25 @@ function FilePreviewModal(props: FilePreviewModalProps) {
   );
 
   // 获取动态渲染数据的函数（带轮询逻辑）
+  // 对于静态模板（templateFlag === 'no_query'），跳过数据获取，直接渲染模板内容
   const fetchDynamicRenderData = useCallback(
     async (resultId: string, templateId: string) => {
       try {
+        const templateIdNum = parseInt(templateId, 10);
+
+        // 静态模板（templateFlag === 'no_query'）：无需调用 /api/template/result 获取数据
+        // 直接渲染模板内容，模板内容加载不受数据获取逻辑阻塞
+        if (isStaticTemplate(templateIdNum)) {
+          const renderedHtml = await renderStaticTemplate(templateIdNum);
+          if (renderedHtml) {
+            setRenderedHtmlContent(renderedHtml);
+          } else {
+            setError("静态模板渲染失败");
+          }
+          return;
+        }
+
+        // 非静态模板：需要先获取数据再渲染
         const res = await dynamicRenderApi.getRecordData(resultId, templateId);
         // 如果返回码不是 200，说明文件正在生成中
         if (res.code !== "200") {
@@ -118,7 +139,6 @@ function FilePreviewModal(props: FilePreviewModalProps) {
           clearTimeout(pollingTimerRef.current);
           pollingTimerRef.current = null;
         }
-        const templateIdNum = parseInt(templateId, 10);
         const renderedHtml = await renderTemplate(templateIdNum, res.data);
         if (renderedHtml) {
           setRenderedHtmlContent(renderedHtml);
@@ -134,7 +154,7 @@ function FilePreviewModal(props: FilePreviewModalProps) {
         setDynamicRenderLoading(false);
       }
     },
-    [renderTemplate, isTemplateListLoaded],
+    [renderTemplate, renderStaticTemplate, isStaticTemplate, isTemplateListLoaded],
   );
 
   // fetch 文件数据并创建 Blob URL 或动态渲染
@@ -286,18 +306,35 @@ function FilePreviewModal(props: FilePreviewModalProps) {
           downloadFunc(renderedHtmlContent);
           return;
         }
-        const resultId = extractResultIdFromUrl(fileUrl);
         const templateId = extractTemplateIdFromUrl(fileUrl);
 
-        if (!resultId || !templateId) {
-          console.error("动态渲染链接缺少必要的参数");
+        if (!templateId) {
+          console.error("动态渲染链接缺少必要的参数: templateId");
+          return;
+        }
+
+        const templateIdNum = parseInt(templateId, 10);
+
+        // 静态模板：直接渲染模板内容，无需获取数据
+        if (isStaticTemplate(templateIdNum)) {
+          const renderedHtml = await renderStaticTemplate(templateIdNum);
+          if (renderedHtml) {
+            downloadFunc(renderedHtml);
+          } else {
+            console.error("静态模板渲染失败");
+          }
+          return;
+        }
+
+        const resultId = extractResultIdFromUrl(fileUrl);
+        if (!resultId) {
+          console.error("动态渲染链接缺少必要的参数: resultId");
           return;
         }
         // 优先使用缓存数据，避免重复请求接口
         const renderData = (
           await dynamicRenderApi.getRecordData(resultId, templateId)
         ).data;
-        const templateIdNum = parseInt(templateId, 10);
         const renderedHtml = await renderTemplate(templateIdNum, renderData);
 
         if (renderedHtml) {
@@ -319,7 +356,15 @@ function FilePreviewModal(props: FilePreviewModalProps) {
       link.click();
       document.body.removeChild(link);
     }
-  }, [fileUrl, fileName, isDynamicRender, renderTemplate, renderedHtmlContent]);
+  }, [
+    fileUrl,
+    fileName,
+    isDynamicRender,
+    renderTemplate,
+    renderStaticTemplate,
+    isStaticTemplate,
+    renderedHtmlContent,
+  ]);
 
   const handleFullscreen = useCallback(() => {
     setFullscreen((prev) => !prev);
@@ -389,8 +434,8 @@ function FilePreviewModal(props: FilePreviewModalProps) {
         const tip = isFileGenerating
           ? "文件正在生成中，内容准备完成后，页面会自动展示最新预览"
           : dynamicRenderLoading
-          ? "正在渲染报告..."
-          : "加载中...";
+            ? "正在渲染报告..."
+            : "加载中...";
         return <Spin tip={tip} />;
       }
       if (error) {
@@ -517,12 +562,12 @@ function FilePreviewModal(props: FilePreviewModalProps) {
   const headerActions = useMemo(() => {
     const actions = [
       // <Tooltip key="copy" title="复制链接">
-      //   <IconButton
-      //     size="small"
-      //     icon={copied ? <SparkTrueLine style={{ color: "#52c41a" }} /> : <SparkCopyLine />}
-      //     onClick={handleCopy}
-      //     bordered={false}
-      //   />
+      //   <IconButton
+      //     size="small"
+      //     icon={copied ? <SparkTrueLine style={{ color: "#52c41a" }} /> : <SparkCopyLine />}
+      //     onClick={handleCopy}
+      //     bordered={false}
+      //   />
       // </Tooltip>,
       <Tooltip key="download" title="下载文件">
         <IconButton
