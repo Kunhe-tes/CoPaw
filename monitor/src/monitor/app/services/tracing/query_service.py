@@ -1646,6 +1646,7 @@ class TracingQueryService:  # pylint: disable=too-many-public-methods
     ) -> tuple[str, list[Any]]:
         """构建用户查询 SQL."""
         if source_id == "all":
+            # source_id == "all": total_skills 子查询不加 source_id 过滤
             query = f"""
                 SELECT t.user_id,
                        COUNT(DISTINCT t.session_id) as total_sessions,
@@ -1655,9 +1656,7 @@ class TracingQueryService:  # pylint: disable=too-many-public-methods
                        COUNT(CASE WHEN t.session_id NOT LIKE 'cron-task:%%' THEN 1 END) as manual_calls,
                        COALESCE(MAX(ce.cron_executions), 0) as cron_executions,
                        COALESCE(MAX(ce.cron_success), 0) as cron_success,
-                       (SELECT COUNT(*) FROM swe_tracing_spans s
-                        WHERE s.trace_id IN (SELECT trace_id FROM swe_tracing_traces WHERE user_id = t.user_id)
-                        AND s.skill_name IS NOT NULL) as total_skills,
+                       COALESCE(MAX(sk.skill_count), 0) as total_skills,
                        MAX(t.user_name) as user_name,
                        MAX(t.bbk_id) as bbk_id,
                        COALESCE(MAX(ce.cron_reads), 0) as cron_reads
@@ -1672,6 +1671,13 @@ class TracingQueryService:  # pylint: disable=too-many-public-methods
                     WHERE {cron_subquery_sql}
                     GROUP BY j.tenant_id
                 ) ce ON ce.user_id = t.user_id
+                LEFT JOIN (
+                    SELECT tr.user_id, COUNT(*) as skill_count
+                    FROM swe_tracing_spans s
+                    INNER JOIN swe_tracing_traces tr ON s.trace_id = tr.trace_id
+                    WHERE s.skill_name IS NOT NULL
+                    GROUP BY tr.user_id
+                ) sk ON sk.user_id = t.user_id
                 WHERE {where_sql}
                 GROUP BY t.user_id
                 ORDER BY {order_by}
@@ -1679,6 +1685,7 @@ class TracingQueryService:  # pylint: disable=too-many-public-methods
             """
             final_params = cron_params + params + [page_size, offset]
         else:
+            # source_id != "all": total_skills 子查询加 source_id 过滤
             query = f"""
                 SELECT t.user_id,
                        COUNT(DISTINCT t.session_id) as total_sessions,
@@ -1688,10 +1695,7 @@ class TracingQueryService:  # pylint: disable=too-many-public-methods
                        COUNT(CASE WHEN t.session_id NOT LIKE 'cron-task:%%' THEN 1 END) as manual_calls,
                        COALESCE(MAX(ce.cron_executions), 0) as cron_executions,
                        COALESCE(MAX(ce.cron_success), 0) as cron_success,
-                       (SELECT COUNT(*) FROM swe_tracing_spans s
-                        WHERE s.source_id = %s
-                        AND s.trace_id IN (SELECT trace_id FROM swe_tracing_traces WHERE user_id = t.user_id AND source_id = %s)
-                        AND s.skill_name IS NOT NULL) as total_skills,
+                       COALESCE(MAX(sk.skill_count), 0) as total_skills,
                        MAX(t.user_name) as user_name,
                        MAX(t.bbk_id) as bbk_id,
                        COALESCE(MAX(ce.cron_reads), 0) as cron_reads
@@ -1706,6 +1710,15 @@ class TracingQueryService:  # pylint: disable=too-many-public-methods
                     WHERE {cron_subquery_sql}
                     GROUP BY j.tenant_id
                 ) ce ON ce.user_id = t.user_id
+                LEFT JOIN (
+                    SELECT tr.user_id, COUNT(*) as skill_count
+                    FROM swe_tracing_spans s
+                    INNER JOIN swe_tracing_traces tr ON s.trace_id = tr.trace_id
+                    WHERE s.skill_name IS NOT NULL
+                      AND tr.source_id = %s
+                      AND s.source_id = %s
+                    GROUP BY tr.user_id
+                ) sk ON sk.user_id = t.user_id
                 WHERE {where_sql}
                 GROUP BY t.user_id
                 ORDER BY {order_by}
