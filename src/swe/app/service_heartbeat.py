@@ -33,13 +33,16 @@
 
 import asyncio
 import atexit
+import contextlib
 import logging
 import os
 import signal
 import socket
 import sys
+import threading
+import time
 from types import FrameType
-from typing import Callable, Optional
+from typing import Awaitable, Callable, Optional
 
 import httpx
 
@@ -161,13 +164,19 @@ class ServiceHeartbeatManager:
     """服务心跳管理器：管理心跳任务的启动、停止和心跳发送。
 
     设计要点：
-    1. 心跳循环在独立 asyncio.Task 中运行，完全不影响主服务
+    1. 心跳循环在独立线程事件循环中运行，隔离主服务事件循环卡顿
     2. 所有异常被捕获并记录，不会传播到外部
     3. HTTP 请求有独立的超时控制（10秒），不会阻塞
     4. 支持信号处理（SIGTERM/SIGINT）实现优雅关闭
     """
 
-    def __init__(self, config: Optional[ServiceHeartbeatConfig] = None):
+    def __init__(
+        self,
+        config: Optional[ServiceHeartbeatConfig] = None,
+        *,
+        monotonic_time: Optional[Callable[[], float]] = None,
+        sleep: Optional[Callable[[float], Awaitable[None]]] = None,
+    ):
         """初始化心跳管理器。
 
         Args:
@@ -182,6 +191,11 @@ class ServiceHeartbeatManager:
         self._client: Optional[httpx.AsyncClient] = None
         self._shutdown_callback: Optional[Callable] = None
         self._loop: Optional[asyncio.AbstractEventLoop] = None
+        self._worker_loop: Optional[asyncio.AbstractEventLoop] = None
+        self._worker_thread: Optional[threading.Thread] = None
+        self._worker_started = threading.Event()
+        self._monotonic_time = monotonic_time or time.monotonic
+        self._sleep = sleep or asyncio.sleep
 
     def _load_config(self) -> ServiceHeartbeatConfig:
         """加载心跳配置。"""
@@ -282,23 +296,89 @@ class ServiceHeartbeatManager:
 
         logger.info("心跳循环启动: interval=%ds, url=%s", interval, cfg.url)
 
+        next_due = self._monotonic_time()
+
         while self._running and not _shutdown_requested:
+            scheduled_at = next_due
+            delay = max(0.0, scheduled_at - self._monotonic_time())
+            if delay > 0:
+                try:
+                    await self._sleep(delay)
+                except asyncio.CancelledError:
+                    logger.info("心跳循环被取消")
+                    break
+
+            if not self._running or _shutdown_requested:
+                break
+
             # 发送心跳，失败不影响循环继续
             await self._send_heartbeat(enabled=True)
 
-            # 等待下一次心跳
-            try:
-                await asyncio.sleep(interval)
-            except asyncio.CancelledError:
-                logger.info("心跳循环被取消")
-                break
+            # 按固定节拍安排下一次心跳，避免请求耗时叠加到周期。
+            next_due = scheduled_at + interval
+            now = self._monotonic_time()
+            if interval > 0 and next_due <= now:
+                skipped_intervals = int((now - next_due) // interval) + 1
+                next_due += skipped_intervals * interval
 
         logger.info("心跳循环结束")
+
+    def _run_worker_loop(self) -> None:
+        """在线程内运行独立事件循环，隔离主应用事件循环卡顿。"""
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        self._worker_loop = loop
+        self._task = loop.create_task(
+            self._heartbeat_loop(),
+            name="service-heartbeat",
+        )
+        self._worker_started.set()
+
+        try:
+            loop.run_forever()
+        finally:
+            pending = [
+                task for task in asyncio.all_tasks(loop) if not task.done()
+            ]
+            for task in pending:
+                task.cancel()
+            if pending:
+                loop.run_until_complete(
+                    asyncio.gather(*pending, return_exceptions=True),
+                )
+            if self._client is not None:
+                loop.run_until_complete(self._client.aclose())
+                self._client = None
+            self._task = None
+            self._worker_loop = None
+            loop.close()
+            asyncio.set_event_loop(None)
+
+    async def _stop_worker(self, *, send_shutdown: bool) -> None:
+        """在 worker loop 内停止心跳任务并清理异步资源。"""
+        self._running = False
+
+        current_task = asyncio.current_task()
+        if self._task is not None and self._task is not current_task:
+            self._task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await self._task
+            self._task = None
+
+        if send_shutdown:
+            logger.info("发送服务关闭心跳信号...")
+            await self._send_heartbeat(enabled=False)
+
+        if self._client is not None:
+            await self._client.aclose()
+            self._client = None
+
+        asyncio.get_running_loop().call_soon(asyncio.get_running_loop().stop)
 
     async def start(self) -> None:
         """启动心跳任务。
 
-        心跳任务在独立的 asyncio.Task 中运行，不影响主服务。
+        心跳任务在独立线程事件循环中运行，不影响主服务事件循环调度。
         """
         cfg = self._load_config()
 
@@ -321,10 +401,18 @@ class ServiceHeartbeatManager:
             self._loop = None
 
         self._running = True
-        self._task = asyncio.create_task(
-            self._heartbeat_loop(),
+        self._worker_started.clear()
+        self._worker_thread = threading.Thread(
+            target=self._run_worker_loop,
             name="service-heartbeat",
+            daemon=True,
         )
+        self._worker_thread.start()
+        started = await asyncio.to_thread(self._worker_started.wait, 5.0)
+        if not started:
+            self._running = False
+            logger.error("服务心跳 worker 线程启动超时")
+            return
         logger.info("服务心跳任务已启动")
 
         # 注册信号处理器和atexit回调
@@ -395,20 +483,7 @@ class ServiceHeartbeatManager:
 
     async def _async_stop(self) -> None:
         """异步停止心跳任务。"""
-        self._running = False
-
-        if self._task is not None:
-            self._task.cancel()
-            try:
-                await self._task
-            except asyncio.CancelledError:
-                pass
-            self._task = None
-
-        if self._client is not None:
-            await self._client.aclose()
-            self._client = None
-
+        await self.stop()
         logger.info("服务心跳异步停止完成")
 
     async def stop(self) -> None:
@@ -421,27 +496,29 @@ class ServiceHeartbeatManager:
         if not self._running:
             return
 
+        send_shutdown = not _shutdown_requested
         self._running = False
 
-        # 取消心跳循环任务
-        if self._task is not None:
-            self._task.cancel()
-            try:
-                await self._task
-            except asyncio.CancelledError:
-                pass
-            self._task = None
+        worker_loop = self._worker_loop
+        worker_thread = self._worker_thread
+        if worker_loop is not None and not worker_loop.is_closed():
+            future = asyncio.run_coroutine_threadsafe(
+                self._stop_worker(send_shutdown=send_shutdown),
+                worker_loop,
+            )
+            await asyncio.wrap_future(future)
+        else:
+            if send_shutdown:
+                logger.info("发送服务关闭心跳信号...")
+                await self._send_heartbeat(enabled=False)
+            if self._client is not None:
+                await self._client.aclose()
+                self._client = None
 
-        # 发送关闭信号（enabled=false）
-        # 如果还没有发送过（信号处理器可能已经发送）
-        if not _shutdown_requested:
-            logger.info("发送服务关闭心跳信号...")
-            await self._send_heartbeat(enabled=False)
-
-        # 关闭HTTP客户端
-        if self._client is not None:
-            await self._client.aclose()
-            self._client = None
+        if worker_thread is not None and worker_thread.is_alive():
+            await asyncio.to_thread(worker_thread.join, 5.0)
+        self._worker_thread = None
+        self._worker_started.clear()
 
         logger.info("服务心跳已停止")
 
