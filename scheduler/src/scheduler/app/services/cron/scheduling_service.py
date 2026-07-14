@@ -11,7 +11,7 @@ import logging
 import os
 import socket
 from datetime import datetime, timedelta, timezone
-from typing import Any, Mapping, Optional
+from typing import Any, Mapping, NamedTuple, Optional
 from uuid import uuid4
 
 import httpx
@@ -61,6 +61,32 @@ BROADCAST_DISPATCH_INTENTS_ENABLED_META_KEY = (
 )
 BROADCAST_SOURCE_JOB_ID_META_KEY = "broadcast_source_job_id"
 _BEIJING_TZ = timezone(timedelta(hours=8))
+
+
+class _ParentCallbackContext(NamedTuple):
+    now: datetime
+    params: dict[str, Any]
+    passthrough_headers: dict[str, str]
+    job_id: str
+    tenant_id: str
+    source_id: str
+    parent: dict[str, Any]
+    parent_meta: dict[str, Any]
+    provider_id: str
+    model_id: str
+    scheduled_fire_at: datetime
+    children: list[dict[str, Any]]
+
+
+class _ExecutionFeedbackContext(NamedTuple):
+    intent_id: int
+    dispatch_attempt: int | None
+    completed_at: datetime
+    batch_id: str
+    job_id: str
+    tenant_id: str
+    source_id: str | None
+    error: str
 
 
 class WorkerScope(BaseModel):
@@ -211,14 +237,16 @@ class CronSchedulingService:
             DEFAULT_CAPACITY_ADJUST_INTERVAL_SECONDS
         ),
     ) -> None:
-        self._dispatch_store = dispatch_store or get_cron_dispatch_intent_service()
+        self._dispatch_store = (
+            dispatch_store or get_cron_dispatch_intent_service()
+        )
         self._callback_client = callback_client or SweCronCallbackClient()
         self._worker_id = worker_id or _default_worker_id()
         self._fallback_strategy = WorkerStrategy(
             strategy_id="default",
             min_workers=1,
             baseline_workers=max(1, baseline_workers),
-            max_workers=max(max(1, baseline_workers), max_workers),
+            max_workers=max(1, baseline_workers, max_workers),
             adjust_interval_seconds=max(1, capacity_adjust_interval_seconds),
             feedback_window_seconds=max(1, capacity_adjust_interval_seconds),
             stale_execution_seconds=max(60, dispatched_stale_seconds),
@@ -257,132 +285,78 @@ class CronSchedulingService:
         now_utc: datetime | None = None,
     ) -> dict[str, Any]:
         """Handle an external scheduler callback for a batch parent."""
-        now = _ensure_aware_utc(now_utc or datetime.now(timezone.utc))
-        callback_params = _decode_callback_params(params)
-        passthrough_headers = _extract_b3_passthrough_headers(headers)
-        job_id = str(callback_params.get("job_id") or "").strip()
-        if not job_id:
-            raise RuntimeError("scheduler callback requires job_id")
-        explicit_scheduled_fire_at = _parse_datetime(
-            callback_params.get("scheduled_fire_at"),
+        context = await _prepare_parent_callback_context(
+            params=params,
+            headers=headers,
+            now_utc=now_utc,
         )
-        trigger_fire_at = _parse_datetime(
-            callback_params.get("fire_time")
-            or callback_params.get("trigger_time"),
+        batch_id = _build_dispatch_batch_id(
+            context.parent,
+            context.scheduled_fire_at,
         )
-        batch_offset_minutes = (
-            _positive_int(callback_params.get("batch_dispatch_offset_minutes"))
-            or 0
+        callback_metadata = _build_callback_metadata(
+            context.params,
+            context.passthrough_headers,
         )
-        requested_fire_at = explicit_scheduled_fire_at
-        if requested_fire_at is None and trigger_fire_at is not None:
-            requested_fire_at = (
-                trigger_fire_at + timedelta(minutes=batch_offset_minutes)
-                if batch_offset_minutes > 0
-                else trigger_fire_at
-            )
-        tenant_id = str(callback_params.get("tenant_id") or "").strip()
-        source_id = str(callback_params.get("source_id") or "").strip()
-        agent_id = str(callback_params.get("agent_id") or "default").strip()
-
-        parent = await _fetch_parent_job_for_callback(
-            job_id=job_id,
-            tenant_id=tenant_id,
-            source_id=source_id,
-        )
-        if not parent:
-            raise RuntimeError(f"batch parent job not found: {job_id}")
-        scheduled_fire_at = _ensure_aware_utc(
-            requested_fire_at
-            or _previous_due_fire_at(
-                cron_expr=str(parent.get("cron_expr") or ""),
-                timezone_name=str(parent.get("timezone") or "UTC"),
-                now_utc=now,
-            )
-            or now,
-        )
-        logger.info(
-            "scheduler_parent_callback_received job_id=%s tenant_id=%s "
-            "source_id=%s scheduled_fire_at=%s passthrough_headers=%s",
-            job_id,
-            tenant_id,
-            source_id,
-            scheduled_fire_at.isoformat(),
-            sorted(passthrough_headers),
-        )
-        parent_meta = _parse_meta(parent.get("meta"))
-        if not _meta_dispatch_intents_enabled(parent_meta):
-            raise RuntimeError(f"batch parent dispatch disabled: {job_id}")
-        if str(parent_meta.get(BROADCAST_SOURCE_JOB_ID_META_KEY) or ""):
-            raise RuntimeError(f"batch callback received child job: {job_id}")
-
-        parent["agent_id"] = agent_id or str(parent_meta.get("agent_id") or "default")
-        callback_provider_id = str(callback_params.get("provider_id") or "").strip()
-        callback_model_id = str(callback_params.get("model_id") or "").strip()
-        if callback_provider_id and callback_model_id:
-            parent["provider_id"] = callback_provider_id
-            parent["model_id"] = callback_model_id
-        parent_provider_id, parent_model_id = _extract_model_identity(parent)
-        children = await _fetch_batch_child_jobs(parent)
-        logger.info(
-            "scheduler_parent_jobs_fetched parent_job_id=%s child_count=%s",
-            job_id,
-            len(children),
-        )
-        batch_id = _build_dispatch_batch_id(parent, scheduled_fire_at)
-        callback_metadata = dict(callback_params)
-        if passthrough_headers:
-            callback_metadata[PASSTHROUGH_HEADERS_PAYLOAD_KEY] = dict(
-                passthrough_headers,
-            )
         await self._dispatch_store.upsert_dispatch_batch(
             batch_id=batch_id,
-            parent_job_id=job_id,
-            parent_external_job_id=str(parent_meta.get("external_job_id") or ""),
-            tenant_id=str(parent.get("tenant_id") or tenant_id or ""),
-            source_id=str(parent.get("source_id") or source_id or ""),
-            agent_id=str(parent.get("agent_id") or "default"),
-            provider_id=parent_provider_id,
-            model_id=parent_model_id,
-            scheduled_fire_at=scheduled_fire_at,
-            callback_received_at=now,
+            parent_job_id=context.job_id,
+            parent_external_job_id=str(
+                context.parent_meta.get("external_job_id") or "",
+            ),
+            tenant_id=str(
+                context.parent.get("tenant_id") or context.tenant_id or "",
+            ),
+            source_id=str(
+                context.parent.get("source_id") or context.source_id or "",
+            ),
+            agent_id=str(context.parent.get("agent_id") or "default"),
+            provider_id=context.provider_id,
+            model_id=context.model_id,
+            scheduled_fire_at=context.scheduled_fire_at,
+            callback_received_at=context.now,
             callback_metadata=callback_metadata,
         )
-        if callback_params.get(SWE_SERVER_DOMAIN_PAYLOAD_KEY):
-            parent[SWE_SERVER_DOMAIN_PAYLOAD_KEY] = str(
-                callback_params.get(SWE_SERVER_DOMAIN_PAYLOAD_KEY) or "",
-            ).strip()
+        _apply_swe_server_domain(context.parent, context.params)
         jobs = _build_execution_intent_jobs(
-            parent,
-            children,
-            scheduled_fire_at,
-            passthrough_headers=passthrough_headers,
+            context.parent,
+            context.children,
+            context.scheduled_fire_at,
+            passthrough_headers=context.passthrough_headers,
         )
-        dispatch_scopes = _build_worker_scopes_from_jobs(jobs)
+        job_mappings: list[Mapping[str, Any]] = []
+        job_mappings.extend(jobs)
+        dispatch_scopes = _build_worker_scopes_from_jobs(job_mappings)
         dispatch_source_ids = _source_ids_from_jobs(
-            jobs,
-            fallback=str(parent.get("source_id") or source_id or ""),
+            job_mappings,
+            fallback=str(
+                context.parent.get("source_id") or context.source_id or "",
+            ),
         )
-        intent_ids = await self._dispatch_store.enqueue_batch_execution_intents(
-            batch_id=batch_id,
-            parent_job_id=job_id,
-            jobs=jobs,
-            due_at=now,
-            scheduled_fire_at=scheduled_fire_at,
+        intent_ids = (
+            await self._dispatch_store.enqueue_batch_execution_intents(
+                batch_id=batch_id,
+                parent_job_id=context.job_id,
+                jobs=jobs,
+                due_at=context.now,
+                scheduled_fire_at=context.scheduled_fire_at,
+            )
         )
         await self._dispatch_store.update_batch_counts(
             batch_id=batch_id,
-            updated_at=now,
+            updated_at=context.now,
         )
+        claim_scopes: list[WorkerScope | Mapping[str, Any]] = []
+        claim_scopes.extend(dispatch_scopes)
         dispatched = await self.dispatch_ready_once(
-            now_utc=now,
+            now_utc=context.now,
             source_ids=dispatch_source_ids,
-            scopes=dispatch_scopes,
+            scopes=claim_scopes,
         )
         return {
             "batch_id": batch_id,
-            "parent_job_id": job_id,
-            "child_count": len(children),
+            "parent_job_id": context.job_id,
+            "child_count": len(context.children),
             "enqueued_intents": len(intent_ids),
             "dispatched_intents": dispatched,
         }
@@ -405,7 +379,9 @@ class CronSchedulingService:
                 include_fallback=bool(source_ids),
             )
         for scope in dispatch_scopes:
-            scope_source_ids = [scope.source_id] if scope.source_id else source_ids
+            scope_source_ids = (
+                [scope.source_id] if scope.source_id else source_ids
+            )
             strategy = await self._resolve_worker_strategy(scope, now)
             if not await self._acquire_scope_lease(scope, strategy, now):
                 continue
@@ -458,7 +434,9 @@ class CronSchedulingService:
             now_utc=now,
             source_ids=source_ids,
         )
-        capacity_adjusted = await self.adjust_worker_capacity_if_due(now_utc=now)
+        capacity_adjusted = await self.adjust_worker_capacity_if_due(
+            now_utc=now,
+        )
         return {
             "queued_parent_intents": 0,
             "dispatched_intents": dispatched,
@@ -482,7 +460,10 @@ class CronSchedulingService:
             except asyncio.CancelledError:
                 raise
             except Exception:
-                logger.warning("Cron scheduling loop tick failed", exc_info=True)
+                logger.warning(
+                    "Cron scheduling loop tick failed",
+                    exc_info=True,
+                )
             try:
                 await asyncio.wait_for(stop_event.wait(), timeout=interval)
             except asyncio.TimeoutError:
@@ -556,58 +537,67 @@ class CronSchedulingService:
         completed_at: datetime | None = None,
     ) -> bool:
         """Mark an intent from SWE execution meta and immediately refill."""
-        dispatch_meta = _extract_dispatch_meta(meta)
-        if not dispatch_meta:
+        feedback = _build_execution_feedback_context(
+            meta=meta,
+            job_id=job_id,
+            tenant_id=tenant_id,
+            source_id=source_id,
+            error_message=error_message,
+            completed_at=completed_at,
+        )
+        if feedback is None:
             return False
-        intent_id = _positive_int(dispatch_meta.get("intent_id"))
-        if intent_id is None:
-            return False
-        dispatch_attempt = _positive_int(dispatch_meta.get("dispatch_attempt"))
-        at = _ensure_aware_utc(completed_at or datetime.now(timezone.utc))
         logger.info(
             "scheduler_execution_feedback intent_id=%s batch_id=%s "
             "job_id=%s status=%s",
-            intent_id,
-            dispatch_meta.get("batch_id"),
-            dispatch_meta.get("job_id") or job_id,
+            feedback.intent_id,
+            feedback.batch_id,
+            feedback.job_id,
             status,
         )
         updated = await self._dispatch_store.complete_from_execution(
-            intent_id=intent_id,
+            intent_id=feedback.intent_id,
             execution_id=execution_id,
             status=status,
-            completed_at=at,
-            error=error_message or str(dispatch_meta.get("error") or ""),
+            completed_at=feedback.completed_at,
+            error=feedback.error,
             retry_delay_seconds=self._retry_delay_seconds,
-            expected_batch_id=str(dispatch_meta.get("batch_id") or ""),
-            expected_job_id=str(dispatch_meta.get("job_id") or job_id or ""),
-            expected_tenant_id=str(
-                dispatch_meta.get("tenant_id") or tenant_id or "",
-            ),
-            expected_source_id=(
-                str(dispatch_meta["source_id"])
-                if "source_id" in dispatch_meta
-                else source_id
-            ),
-            expected_attempt_count=dispatch_attempt,
+            expected_batch_id=feedback.batch_id,
+            expected_job_id=feedback.job_id,
+            expected_tenant_id=feedback.tenant_id,
+            expected_source_id=feedback.source_id,
+            expected_attempt_count=feedback.dispatch_attempt,
         )
-        if updated:
-            batch_id = str(dispatch_meta.get("batch_id") or "")
-            logger.info(
-                "scheduler_dispatch_task_finished intent_id=%s batch_id=%s "
-                "job_id=%s status=%s",
-                intent_id,
-                batch_id,
-                dispatch_meta.get("job_id") or job_id,
-                status,
+        return await self._finalize_execution_feedback(
+            feedback=feedback,
+            status=status,
+            updated=updated,
+        )
+
+    async def _finalize_execution_feedback(
+        self,
+        *,
+        feedback: _ExecutionFeedbackContext,
+        status: str,
+        updated: bool,
+    ) -> bool:
+        if not updated:
+            return False
+        logger.info(
+            "scheduler_dispatch_task_finished intent_id=%s batch_id=%s "
+            "job_id=%s status=%s",
+            feedback.intent_id,
+            feedback.batch_id,
+            feedback.job_id,
+            status,
+        )
+        if feedback.batch_id:
+            await self._dispatch_store.update_batch_counts(
+                batch_id=feedback.batch_id,
+                updated_at=feedback.completed_at,
             )
-            if batch_id:
-                await self._dispatch_store.update_batch_counts(
-                    batch_id=batch_id,
-                    updated_at=at,
-                )
-            await self.dispatch_ready_once(now_utc=at)
-        return updated
+        await self.dispatch_ready_once(now_utc=feedback.completed_at)
+        return True
 
     async def adjust_worker_capacity_if_due(
         self,
@@ -632,9 +622,11 @@ class CronSchedulingService:
             )
             previous = _capacity_effective_workers(latest, strategy)
             latest_at = _capacity_created_at(latest)
-            if latest_at is not None and (
-                now - latest_at
-            ).total_seconds() < strategy.adjust_interval_seconds:
+            if (
+                latest_at is not None
+                and (now - latest_at).total_seconds()
+                < strategy.adjust_interval_seconds
+            ):
                 continue
             since = now - timedelta(seconds=strategy.feedback_window_seconds)
             feedback = await self._dispatch_store.summarize_recent_completion_feedback(
@@ -742,14 +734,19 @@ class CronSchedulingService:
             now_utc=now_utc,
             fallback=self._fallback_strategy.model_dump(),
         )
-        strategy = WorkerStrategy.model_validate(raw or self._fallback_strategy)
+        strategy = WorkerStrategy.model_validate(
+            raw or self._fallback_strategy,
+        )
         strategy.min_workers = max(1, strategy.min_workers)
         strategy.baseline_workers = _clamp(
             strategy.baseline_workers,
             strategy.min_workers,
             max(strategy.min_workers, strategy.max_workers),
         )
-        strategy.max_workers = max(strategy.baseline_workers, strategy.max_workers)
+        strategy.max_workers = max(
+            strategy.baseline_workers,
+            strategy.max_workers,
+        )
         return strategy
 
     async def _effective_workers_for_scope(
@@ -843,6 +840,211 @@ def _extract_dispatch_meta(
     return dict(value) if isinstance(value, Mapping) else {}
 
 
+def _requested_callback_fire_at(
+    callback_params: Mapping[str, Any],
+) -> datetime | None:
+    explicit_fire_at = _parse_datetime(
+        callback_params.get("scheduled_fire_at"),
+    )
+    trigger_fire_at = _parse_datetime(
+        callback_params.get("fire_time")
+        or callback_params.get("trigger_time"),
+    )
+    if explicit_fire_at is not None or trigger_fire_at is None:
+        return explicit_fire_at
+    offset_minutes = (
+        _positive_int(callback_params.get("batch_dispatch_offset_minutes"))
+        or 0
+    )
+    if offset_minutes <= 0:
+        return trigger_fire_at
+    return trigger_fire_at + timedelta(minutes=offset_minutes)
+
+
+async def _prepare_parent_callback_context(
+    *,
+    params: Mapping[str, Any],
+    headers: Mapping[str, Any] | None,
+    now_utc: datetime | None,
+) -> _ParentCallbackContext:
+    now = _ensure_aware_utc(now_utc or datetime.now(timezone.utc))
+    callback_params = _decode_callback_params(params)
+    passthrough_headers = _extract_b3_passthrough_headers(headers)
+    job_id, tenant_id, source_id = _callback_job_identity(callback_params)
+    parent = await _load_parent_callback_job(
+        job_id=job_id,
+        tenant_id=tenant_id,
+        source_id=source_id,
+    )
+    scheduled_fire_at = _callback_scheduled_fire_at(
+        callback_params,
+        parent,
+        now,
+    )
+    logger.info(
+        "scheduler_parent_callback_received job_id=%s tenant_id=%s "
+        "source_id=%s scheduled_fire_at=%s passthrough_headers=%s",
+        job_id,
+        tenant_id,
+        source_id,
+        scheduled_fire_at.isoformat(),
+        sorted(passthrough_headers),
+    )
+    parent_meta = _validated_parent_callback_meta(parent, job_id)
+    provider_id, model_id = _apply_callback_parent_identity(
+        parent,
+        parent_meta,
+        callback_params,
+    )
+    children = await _fetch_batch_child_jobs(parent)
+    logger.info(
+        "scheduler_parent_jobs_fetched parent_job_id=%s child_count=%s",
+        job_id,
+        len(children),
+    )
+    return _ParentCallbackContext(
+        now=now,
+        params=callback_params,
+        passthrough_headers=passthrough_headers,
+        job_id=job_id,
+        tenant_id=tenant_id,
+        source_id=source_id,
+        parent=parent,
+        parent_meta=parent_meta,
+        provider_id=provider_id,
+        model_id=model_id,
+        scheduled_fire_at=scheduled_fire_at,
+        children=children,
+    )
+
+
+def _callback_job_identity(
+    callback_params: Mapping[str, Any],
+) -> tuple[str, str, str]:
+    job_id = str(callback_params.get("job_id") or "").strip()
+    if not job_id:
+        raise RuntimeError("scheduler callback requires job_id")
+    tenant_id = str(callback_params.get("tenant_id") or "").strip()
+    source_id = str(callback_params.get("source_id") or "").strip()
+    return job_id, tenant_id, source_id
+
+
+async def _load_parent_callback_job(
+    *,
+    job_id: str,
+    tenant_id: str,
+    source_id: str,
+) -> dict[str, Any]:
+    parent = await _fetch_parent_job_for_callback(
+        job_id=job_id,
+        tenant_id=tenant_id,
+        source_id=source_id,
+    )
+    if not parent:
+        raise RuntimeError(f"batch parent job not found: {job_id}")
+    return parent
+
+
+def _callback_scheduled_fire_at(
+    callback_params: Mapping[str, Any],
+    parent: Mapping[str, Any],
+    now: datetime,
+) -> datetime:
+    return _ensure_aware_utc(
+        _requested_callback_fire_at(callback_params)
+        or _previous_due_fire_at(
+            cron_expr=str(parent.get("cron_expr") or ""),
+            timezone_name=str(parent.get("timezone") or "UTC"),
+            now_utc=now,
+        )
+        or now,
+    )
+
+
+def _validated_parent_callback_meta(
+    parent: Mapping[str, Any],
+    job_id: str,
+) -> dict[str, Any]:
+    parent_meta = _parse_meta(parent.get("meta"))
+    if not _meta_dispatch_intents_enabled(parent_meta):
+        raise RuntimeError(f"batch parent dispatch disabled: {job_id}")
+    if str(parent_meta.get(BROADCAST_SOURCE_JOB_ID_META_KEY) or ""):
+        raise RuntimeError(f"batch callback received child job: {job_id}")
+    return parent_meta
+
+
+def _apply_callback_parent_identity(
+    parent: dict[str, Any],
+    parent_meta: Mapping[str, Any],
+    callback_params: Mapping[str, Any],
+) -> tuple[str, str]:
+    agent_id = str(callback_params.get("agent_id") or "default").strip()
+    parent["agent_id"] = agent_id or str(
+        parent_meta.get("agent_id") or "default",
+    )
+    provider_id = str(callback_params.get("provider_id") or "").strip()
+    model_id = str(callback_params.get("model_id") or "").strip()
+    if provider_id and model_id:
+        parent["provider_id"] = provider_id
+        parent["model_id"] = model_id
+    return _extract_model_identity(parent)
+
+
+def _build_callback_metadata(
+    callback_params: Mapping[str, Any],
+    passthrough_headers: Mapping[str, str],
+) -> dict[str, Any]:
+    metadata = dict(callback_params)
+    if passthrough_headers:
+        metadata[PASSTHROUGH_HEADERS_PAYLOAD_KEY] = dict(passthrough_headers)
+    return metadata
+
+
+def _apply_swe_server_domain(
+    parent: dict[str, Any],
+    callback_params: Mapping[str, Any],
+) -> None:
+    swe_server_domain = str(
+        callback_params.get(SWE_SERVER_DOMAIN_PAYLOAD_KEY) or "",
+    ).strip()
+    if swe_server_domain:
+        parent[SWE_SERVER_DOMAIN_PAYLOAD_KEY] = swe_server_domain
+
+
+def _build_execution_feedback_context(
+    *,
+    meta: Mapping[str, Any] | str | None,
+    job_id: str,
+    tenant_id: str,
+    source_id: str | None,
+    error_message: str,
+    completed_at: datetime | None,
+) -> _ExecutionFeedbackContext | None:
+    dispatch_meta = _extract_dispatch_meta(meta)
+    if not dispatch_meta:
+        return None
+    intent_id = _positive_int(dispatch_meta.get("intent_id"))
+    if intent_id is None:
+        return None
+    expected_source_id = (
+        str(dispatch_meta["source_id"])
+        if "source_id" in dispatch_meta
+        else source_id
+    )
+    return _ExecutionFeedbackContext(
+        intent_id=intent_id,
+        dispatch_attempt=_positive_int(dispatch_meta.get("dispatch_attempt")),
+        completed_at=_ensure_aware_utc(
+            completed_at or datetime.now(timezone.utc),
+        ),
+        batch_id=str(dispatch_meta.get("batch_id") or ""),
+        job_id=str(dispatch_meta.get("job_id") or job_id or ""),
+        tenant_id=str(dispatch_meta.get("tenant_id") or tenant_id or ""),
+        source_id=expected_source_id,
+        error=error_message or str(dispatch_meta.get("error") or ""),
+    )
+
+
 async def _fetch_parent_job_for_callback(
     *,
     job_id: str,
@@ -875,7 +1077,9 @@ async def _fetch_parent_job_for_callback(
     return dict(row) if row else None
 
 
-async def _fetch_batch_child_jobs(parent: Mapping[str, Any]) -> list[dict[str, Any]]:
+async def _fetch_batch_child_jobs(
+    parent: Mapping[str, Any],
+) -> list[dict[str, Any]]:
     db = get_db_connection()
     parent_id = str(parent.get("id") or "")
     rows = await db.fetch_all(
@@ -906,7 +1110,9 @@ async def _fetch_batch_child_jobs(parent: Mapping[str, Any]) -> list[dict[str, A
                     item.get("source_id") or parent.get("source_id") or "",
                 ),
                 "agent_id": str(
-                    meta.get("agent_id") or parent.get("agent_id") or "default",
+                    meta.get("agent_id")
+                    or parent.get("agent_id")
+                    or "default",
                 ),
                 "provider_id": provider_id,
                 "model_id": model_id,
@@ -934,77 +1140,135 @@ def _build_execution_intent_jobs(
     passthrough_headers: Mapping[str, Any] | None = None,
 ) -> list[dict[str, Any]]:
     parent_provider_id, parent_model_id = _extract_model_identity(parent)
-    swe_server_domain = str(
-        parent.get(SWE_SERVER_DOMAIN_PAYLOAD_KEY) or "",
-    ).strip()
     scheduled = scheduled_fire_at.isoformat()
     parent_job_id = str(parent.get("id") or "")
-    normalized_passthrough_headers = _extract_b3_passthrough_headers(
-        passthrough_headers,
-    )
-    parent_payload = {
-        "tenant_id": str(parent.get("tenant_id") or ""),
-        "job_id": parent_job_id,
-        "source_id": str(parent.get("source_id") or ""),
-        "agent_id": str(parent.get("agent_id") or "default"),
-        "provider_id": parent_provider_id,
-        "model_id": parent_model_id,
-        "parent_scheduled_fire_at": scheduled,
-    }
-    if normalized_passthrough_headers:
-        parent_payload[PASSTHROUGH_HEADERS_PAYLOAD_KEY] = dict(
-            normalized_passthrough_headers,
-        )
-    if swe_server_domain:
-        parent_payload[SWE_SERVER_DOMAIN_PAYLOAD_KEY] = swe_server_domain
+    transport = _execution_transport_context(parent, passthrough_headers)
     jobs: list[dict[str, Any]] = [
-        {
-            "intent_role": "parent",
-            "tenant_id": str(parent.get("tenant_id") or ""),
-            "job_id": parent_job_id,
-            "parent_job_id": "",
-            "source_id": str(parent.get("source_id") or ""),
-            "agent_id": str(parent.get("agent_id") or "default"),
-            "provider_id": parent_provider_id,
-            "model_id": parent_model_id,
-            "payload": parent_payload,
-        },
+        _build_parent_execution_intent(
+            parent,
+            parent_job_id=parent_job_id,
+            provider_id=parent_provider_id,
+            model_id=parent_model_id,
+            scheduled=scheduled,
+            transport=transport,
+        ),
     ]
-    for child in children:
-        provider_id, model_id = _resolve_child_model_identity(
+    jobs.extend(
+        _build_child_execution_intent(
             child,
+            parent_job_id=parent_job_id,
             parent_provider_id=parent_provider_id,
             parent_model_id=parent_model_id,
+            scheduled=scheduled,
+            transport=transport,
         )
-        payload = dict(child.get("payload") or {})
-        payload.update(
-            {
-                "tenant_id": str(child.get("tenant_id") or ""),
-                "job_id": str(child.get("job_id") or ""),
-                "source_id": str(child.get("source_id") or ""),
-                "agent_id": str(child.get("agent_id") or "default"),
-                "provider_id": provider_id,
-                "model_id": model_id,
-                "parent_scheduled_fire_at": scheduled,
-            },
-        )
-        if normalized_passthrough_headers:
-            payload[PASSTHROUGH_HEADERS_PAYLOAD_KEY] = dict(
-                normalized_passthrough_headers,
-            )
-        if swe_server_domain:
-            payload[SWE_SERVER_DOMAIN_PAYLOAD_KEY] = swe_server_domain
-        jobs.append(
-            {
-                **child,
-                "intent_role": "child",
-                "parent_job_id": parent_job_id,
-                "provider_id": provider_id,
-                "model_id": model_id,
-                "payload": payload,
-            },
-        )
+        for child in children
+    )
     return jobs
+
+
+def _execution_transport_context(
+    parent: Mapping[str, Any],
+    passthrough_headers: Mapping[str, Any] | None,
+) -> tuple[dict[str, str], str]:
+    return (
+        _extract_b3_passthrough_headers(passthrough_headers),
+        str(parent.get(SWE_SERVER_DOMAIN_PAYLOAD_KEY) or "").strip(),
+    )
+
+
+def _base_execution_payload(
+    job: Mapping[str, Any],
+    *,
+    job_id: str,
+    provider_id: str,
+    model_id: str,
+    scheduled: str,
+) -> dict[str, Any]:
+    return {
+        "tenant_id": str(job.get("tenant_id") or ""),
+        "job_id": job_id,
+        "source_id": str(job.get("source_id") or ""),
+        "agent_id": str(job.get("agent_id") or "default"),
+        "provider_id": provider_id,
+        "model_id": model_id,
+        "parent_scheduled_fire_at": scheduled,
+    }
+
+
+def _apply_execution_transport(
+    payload: dict[str, Any],
+    transport: tuple[dict[str, str], str],
+) -> dict[str, Any]:
+    passthrough_headers, swe_server_domain = transport
+    if passthrough_headers:
+        payload[PASSTHROUGH_HEADERS_PAYLOAD_KEY] = dict(passthrough_headers)
+    if swe_server_domain:
+        payload[SWE_SERVER_DOMAIN_PAYLOAD_KEY] = swe_server_domain
+    return payload
+
+
+def _build_parent_execution_intent(
+    parent: Mapping[str, Any],
+    *,
+    parent_job_id: str,
+    provider_id: str,
+    model_id: str,
+    scheduled: str,
+    transport: tuple[dict[str, str], str],
+) -> dict[str, Any]:
+    payload = _base_execution_payload(
+        parent,
+        job_id=parent_job_id,
+        provider_id=provider_id,
+        model_id=model_id,
+        scheduled=scheduled,
+    )
+    return {
+        "intent_role": "parent",
+        "tenant_id": str(parent.get("tenant_id") or ""),
+        "job_id": parent_job_id,
+        "parent_job_id": "",
+        "source_id": str(parent.get("source_id") or ""),
+        "agent_id": str(parent.get("agent_id") or "default"),
+        "provider_id": provider_id,
+        "model_id": model_id,
+        "payload": _apply_execution_transport(payload, transport),
+    }
+
+
+def _build_child_execution_intent(
+    child: Mapping[str, Any],
+    *,
+    parent_job_id: str,
+    parent_provider_id: str,
+    parent_model_id: str,
+    scheduled: str,
+    transport: tuple[dict[str, str], str],
+) -> dict[str, Any]:
+    provider_id, model_id = _resolve_child_model_identity(
+        child,
+        parent_provider_id=parent_provider_id,
+        parent_model_id=parent_model_id,
+    )
+    payload = dict(child.get("payload") or {})
+    payload.update(
+        _base_execution_payload(
+            child,
+            job_id=str(child.get("job_id") or ""),
+            provider_id=provider_id,
+            model_id=model_id,
+            scheduled=scheduled,
+        ),
+    )
+    return {
+        **child,
+        "intent_role": "child",
+        "parent_job_id": parent_job_id,
+        "provider_id": provider_id,
+        "model_id": model_id,
+        "payload": _apply_execution_transport(payload, transport),
+    }
 
 
 def _build_worker_scopes_from_jobs(
@@ -1067,10 +1331,15 @@ def _resolve_child_model_identity(
     model_id = str(
         child.get("model_id") or child.get("model") or "",
     ).strip()
-    if provider_id and model_id and (
-        provider_id,
-        model_id,
-    ) != (DEFAULT_PROVIDER_ID, DEFAULT_MODEL_ID):
+    if (
+        provider_id
+        and model_id
+        and (
+            provider_id,
+            model_id,
+        )
+        != (DEFAULT_PROVIDER_ID, DEFAULT_MODEL_ID)
+    ):
         return provider_id, model_id
     return (
         parent_provider_id or DEFAULT_PROVIDER_ID,
@@ -1266,7 +1535,10 @@ def _model_identity_from_slot(candidate: Any) -> tuple[str, str] | None:
     if slot is None:
         return None
     provider_id = _first_truthy_text(slot.get("provider_id")).strip()
-    model_id = _first_truthy_text(slot.get("model"), slot.get("model_id")).strip()
+    model_id = _first_truthy_text(
+        slot.get("model"),
+        slot.get("model_id"),
+    ).strip()
     if provider_id and model_id:
         return provider_id, model_id
     return None
@@ -1382,7 +1654,7 @@ def _capacity_effective_workers(
     latest: Mapping[str, Any] | None,
     strategy: WorkerStrategy,
 ) -> int:
-    value = (
+    value: Any = (
         latest.get("effective_workers")
         if isinstance(latest, Mapping)
         else strategy.baseline_workers
@@ -1441,7 +1713,10 @@ def _apply_worker_rule(
     else:
         next_value = previous
     reason = str(rule.get("reason") or operation or "hold")
-    return _clamp(next_value, strategy.min_workers, strategy.max_workers), reason
+    return (
+        _clamp(next_value, strategy.min_workers, strategy.max_workers),
+        reason,
+    )
 
 
 def _default_worker_id() -> str:

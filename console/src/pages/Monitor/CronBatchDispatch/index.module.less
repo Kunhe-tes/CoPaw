@@ -551,7 +551,7 @@
 
 .strategyGrid {
   display: grid;
-  grid-template-columns: minmax(0, 1.1fr) minmax(420px, 0.9fr);
+  grid-template-columns: minmax(420px, 0.9fr) minmax(560px, 1.1fr);
   gap: 12px;
   align-items: start;
 }
@@ -576,6 +576,10 @@
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 10px;
+}
+
+.policyGridList > :only-child {
+  grid-column: 1 / -1;
 }
 
 .policyCard {
@@ -634,6 +638,17 @@
   line-height: 1.55;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.jsonTooltip {
+  max-height: 320px;
+  margin: 0;
+  overflow: auto;
+  font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+  font-size: 11px;
+  line-height: 1.55;
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
 }
 
 .capacityList {
@@ -709,18 +724,29 @@
 }
 
 .workerEvent {
-  display: grid;
-  grid-template-columns: minmax(100px, 0.4fr) minmax(0, 1fr) 136px;
-  gap: 8px;
-  align-items: center;
-  padding: 8px 9px;
+  overflow: hidden;
+  background: #fff;
   border: 1px solid #eaecf0;
   border-radius: 6px;
 }
 
-.workerEvent strong,
-.workerEvent span,
-.workerEvent em {
+.workerEventSummary {
+  display: grid;
+  grid-template-columns: minmax(100px, 0.4fr) minmax(0, 1fr) 136px 16px;
+  gap: 8px;
+  align-items: center;
+  padding: 8px 9px;
+  list-style: none;
+  cursor: pointer;
+}
+
+.workerEventSummary::-webkit-details-marker {
+  display: none;
+}
+
+.workerEventSummary strong,
+.workerEventSummary span,
+.workerEventSummary em {
   min-width: 0;
   overflow: hidden;
   font-size: 11px;
@@ -728,18 +754,81 @@
   white-space: nowrap;
 }
 
-.workerEvent strong {
+.workerEventSummary strong {
   color: #175cd3;
 }
 
-.workerEvent span,
-.workerEvent em {
+.workerEventSummary span,
+.workerEventSummary em {
   color: #667085;
 }
 
-.workerEvent em {
+.workerEventSummary em {
   font-style: normal;
   text-align: right;
+}
+
+.workerEventChevron {
+  color: #667085;
+  transition: transform 160ms ease;
+}
+
+.workerEvent[open] .workerEventChevron {
+  transform: rotate(180deg);
+}
+
+.workerEventDetails {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 10px 14px;
+  margin: 0;
+  padding: 11px 10px 12px;
+  background: #f8f9fb;
+  border-top: 1px solid #eaecf0;
+}
+
+.workerEventDetails > div {
+  min-width: 0;
+}
+
+.workerEventDetails dt {
+  margin-bottom: 3px;
+  color: #667085;
+  font-size: 10px;
+}
+
+.workerEventDetails dd {
+  min-width: 0;
+  margin: 0;
+  overflow-wrap: anywhere;
+  color: #344054;
+  font-size: 11px;
+  font-weight: 600;
+  line-height: 1.45;
+}
+
+.workerEventIdentity {
+  grid-column: span 2;
+}
+
+.workerEventIdentity dd {
+  font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+  font-size: 10px;
+}
+
+.workerEventRule {
+  grid-column: 1 / -1;
+}
+
+.workerEventRule pre {
+  max-height: 120px;
+  margin: 0;
+  overflow: auto;
+  font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+  font-size: 10px;
+  font-weight: 400;
+  line-height: 1.5;
+  white-space: pre-wrap;
 }
 
 @media (max-width: 1360px) {
@@ -877,7 +966,7 @@
 
   .eventItem,
   .capacityRow,
-  .workerEvent {
+  .workerEventSummary {
     grid-template-columns: 1fr;
   }
 
@@ -886,7 +975,19 @@
   }
 
   .capacityValue,
-  .workerEvent em {
+  .workerEventSummary em {
     text-align: left;
+  }
+
+  .workerEventDetails {
+    grid-template-columns: 1fr;
+  }
+
+  .workerEventRule {
+    grid-column: auto;
+  }
+
+  .workerEventIdentity {
+    grid-column: auto;
   }
 }

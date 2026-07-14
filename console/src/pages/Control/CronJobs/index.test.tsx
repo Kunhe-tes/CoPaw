@@ -314,10 +314,9 @@ describe("CronJobsPage broadcast task refresh", () => {
     fireEvent.click(confirmButton);
 
     await waitFor(() => {
-      expect(mocks.enableCronBatchDispatch).toHaveBeenCalledWith(
-        "job-source",
-        { offset_window_hours: 2 },
-      );
+      expect(mocks.enableCronBatchDispatch).toHaveBeenCalledWith("job-source", {
+        offset_window_hours: 2,
+      });
       expect(mocks.broadcastCronJob).toHaveBeenCalledWith(
         "job-source",
         [
@@ -381,9 +380,7 @@ describe("CronJobsPage broadcast task refresh", () => {
     fireEvent.click(confirmButton);
 
     await waitFor(() => {
-      expect(mocks.disableCronBatchDispatch).toHaveBeenCalledWith(
-        "job-source",
-      );
+      expect(mocks.disableCronBatchDispatch).toHaveBeenCalledWith("job-source");
       expect(mocks.broadcastCronJob).toHaveBeenCalledWith(
         "job-source",
         [
@@ -402,5 +399,55 @@ describe("CronJobsPage broadcast task refresh", () => {
     expect(
       mocks.disableCronBatchDispatch.mock.invocationCallOrder[0],
     ).toBeLessThan(mocks.broadcastCronJob.mock.invocationCallOrder[0]);
+  }, 30000);
+
+  it("enables batch dispatch without broadcasting when no tenant is selected", async () => {
+    mocks.getCurrentCronBroadcastTask.mockResolvedValue({ task: null });
+
+    render(<CronJobsPage />);
+
+    fireEvent.click(screen.getByRole("button", { name: "广播到租户" }));
+    const confirmButton = screen.getByRole("button", { name: /OK/ });
+    expect(confirmButton).toBeDisabled();
+
+    fireEvent.click(await screen.findByText("批调度"));
+
+    await waitFor(() => {
+      expect(confirmButton).not.toBeDisabled();
+    });
+    fireEvent.click(confirmButton);
+
+    await waitFor(() => {
+      expect(mocks.enableCronBatchDispatch).toHaveBeenCalledWith("job-source", {
+        offset_window_hours: 4,
+      });
+    });
+    expect(mocks.broadcastCronJob).not.toHaveBeenCalled();
+  }, 30000);
+
+  it("disables batch dispatch without broadcasting when no tenant is selected", async () => {
+    mocks.job.meta = {
+      broadcast_dispatch_intents_enabled: true,
+      batch_dispatch_offset_window_hours: 3,
+    };
+    mocks.getCurrentCronBroadcastTask.mockResolvedValue({ task: null });
+
+    render(<CronJobsPage />);
+
+    fireEvent.click(screen.getByRole("button", { name: "广播到租户" }));
+    const confirmButton = screen.getByRole("button", { name: /OK/ });
+    expect(confirmButton).toBeDisabled();
+
+    fireEvent.click(await screen.findByText("正常调度"));
+
+    await waitFor(() => {
+      expect(confirmButton).not.toBeDisabled();
+    });
+    fireEvent.click(confirmButton);
+
+    await waitFor(() => {
+      expect(mocks.disableCronBatchDispatch).toHaveBeenCalledWith("job-source");
+    });
+    expect(mocks.broadcastCronJob).not.toHaveBeenCalled();
   }, 30000);
 });

@@ -265,9 +265,9 @@ class TestBuildUsersQuerySubqueries:
         )
 
         # 简化后使用 MAX(t.user_name) 而不是子查询
-        assert "MAX(t.user_name)" in query, (
-            "user_name should use MAX aggregation after data is complete"
-        )
+        assert (
+            "MAX(t.user_name)" in query
+        ), "user_name should use MAX aggregation after data is complete"
 
     def test_bbk_id_subquery_filters_bbk(self, service):
         """bbk_id should use MAX aggregation instead of subquery."""
@@ -298,9 +298,9 @@ class TestBuildUsersQuerySubqueries:
         )
 
         # 简化后使用 MAX(t.bbk_id) 而不是子查询
-        assert "MAX(t.bbk_id)" in query, (
-            "bbk_id should use MAX aggregation after data is complete"
-        )
+        assert (
+            "MAX(t.bbk_id)" in query
+        ), "bbk_id should use MAX aggregation after data is complete"
 
     def test_total_skills_subquery_filters_bbk(self, service):
         """total_skills subquery should filter by bbk_id."""
@@ -405,3 +405,50 @@ class TestBuildUsersQuerySignature:
             "_build_users_query must accept bbk_ids parameter to pass "
             "to subqueries for bbk filtering"
         )
+
+
+def test_users_query_binds_datetime_values_to_cron_time_placeholders():
+    """Source IDs must not shift into cron DATETIME placeholders."""
+    from unittest.mock import MagicMock
+
+    service = TracingQueryService(MagicMock())
+    start_date = datetime(2026, 7, 14)
+    end_date = datetime(2026, 7, 15)
+    where_sql, params = service._build_traces_where_clause(
+        source_id="RMASSIST",
+        filter_user_type="filtered",
+        user_id=None,
+        bbk_ids="201",
+        start_date=start_date,
+        end_date=end_date,
+    )
+    cron_sql, cron_params = service._build_cron_subquery(
+        source_id="RMASSIST",
+        start_date=start_date,
+        end_date=end_date,
+        bbk_ids="201",
+    )
+    query, final_params = service._build_users_query(
+        source_id="RMASSIST",
+        where_sql=where_sql,
+        cron_subquery_sql=cron_sql,
+        order_by="manual_calls DESC, user_id ASC",
+        params=params,
+        cron_params=cron_params,
+        page_size=20,
+        offset=0,
+        bbk_ids="201",
+    )
+
+    actual_time_start_index = query[
+        : query.index("e.actual_time >= %s")
+    ].count(
+        "%s",
+    )
+    actual_time_end_index = query[: query.index("e.actual_time < %s")].count(
+        "%s",
+    )
+
+    assert query.count("%s") == len(final_params)
+    assert final_params[actual_time_start_index] == start_date
+    assert final_params[actual_time_end_index] == end_date

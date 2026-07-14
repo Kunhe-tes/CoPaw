@@ -108,6 +108,10 @@ function CronJobsPage() {
     tenantDefaultLabel,
   } = useExecutionModelOptions(true);
   const hasVisibleBroadcastTask = Boolean(broadcastTask);
+  const hasBroadcastDispatchModeChange = broadcastingJob
+    ? isBatchDispatchEnabled(broadcastingJob) !==
+      (broadcastDispatchMode === "batch")
+    : false;
 
   useEffect(() => {
     api
@@ -281,14 +285,22 @@ function CronJobsPage() {
         bbk_id: target?.bbk_id ?? null,
       };
     });
+    const hasBroadcastTargets = targets.length > 0;
+    const shouldUseBatchDispatch = broadcastDispatchMode === "batch";
+    const dispatchModeChanged =
+      isBatchDispatchEnabled(broadcastingJob) !== shouldUseBatchDispatch;
+    if (!hasBroadcastTargets && !dispatchModeChanged) return;
+
     setBroadcasting(true);
     setBroadcastRefreshing(false);
     setBroadcastTask(null);
     setBroadcastResults([]);
     try {
       let dispatchJob = broadcastingJob;
-      const shouldUseBatchDispatch = broadcastDispatchMode === "batch";
-      if (shouldUseBatchDispatch || isBatchDispatchEnabled(dispatchJob)) {
+      if (
+        dispatchModeChanged ||
+        (hasBroadcastTargets && shouldUseBatchDispatch)
+      ) {
         const syncedJob = await setBatchDispatch(
           dispatchJob,
           shouldUseBatchDispatch,
@@ -299,6 +311,10 @@ function CronJobsPage() {
         }
         dispatchJob = syncedJob;
         setBroadcastingJob(syncedJob);
+      }
+      if (!hasBroadcastTargets) {
+        handleBroadcastCancel();
+        return;
       }
       const res = await api.broadcastCronJob(dispatchJob.id, targets, {
         enable_offset: broadcastOffsetEnabled,
@@ -434,7 +450,8 @@ function CronJobsPage() {
         confirmLoading={broadcasting}
         okButtonProps={{
           disabled:
-            selectedBroadcastTenantIds.length === 0 ||
+            (selectedBroadcastTenantIds.length === 0 &&
+              !hasBroadcastDispatchModeChange) ||
             broadcasting ||
             hasVisibleBroadcastTask,
         }}

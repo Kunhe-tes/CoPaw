@@ -104,6 +104,7 @@ DISPATCH_INTENT_TIME_FIELDS = [
 DISPATCH_EVENT_TIME_FIELDS = ["created_at"]
 DISPATCH_CAPACITY_TIME_FIELDS = ["created_at"]
 DISPATCH_POLICY_TIME_FIELDS = ["created_at", "updated_at"]
+DISPATCH_CAPACITY_EVENT_LIMIT = 100
 
 
 def convert_row_times_direct(row: dict, time_fields: List[str]) -> dict:
@@ -350,15 +351,25 @@ class QueryService:
 
     def _map_dispatch_policy(self, row: dict) -> CronDispatchPolicyItem:
         item = convert_row_times_direct(row, DISPATCH_POLICY_TIME_FIELDS)
+        strategy_schedule = _parse_json_field(item.get("strategy_schedule"))
+        if isinstance(strategy_schedule, list):
+            strategy_schedule = [
+                entry for entry in strategy_schedule if isinstance(entry, dict)
+            ]
+        else:
+            strategy_schedule = None
         strategy = {
-            "strategy_id": item.get("strategy_id") or item.get("default_strategy_id"),
+            "strategy_id": item.get("strategy_id")
+            or item.get("default_strategy_id"),
             "min_workers": item.get("min_workers"),
             "baseline_workers": item.get("baseline_workers"),
             "max_workers": item.get("max_workers"),
             "adjust_interval_seconds": item.get("adjust_interval_seconds"),
             "feedback_window_seconds": item.get("feedback_window_seconds"),
             "stale_execution_seconds": item.get("stale_execution_seconds"),
-            "error_rate_rules": _parse_json_field(item.get("error_rate_rules")),
+            "error_rate_rules": _parse_json_field(
+                item.get("error_rate_rules"),
+            ),
             "description": item.get("description") or "",
             "enabled": bool(item.get("strategy_enabled", True)),
         }
@@ -367,11 +378,102 @@ class QueryService:
             provider_id=str(item.get("provider_id") or ""),
             model_id=str(item.get("model_id") or ""),
             default_strategy_id=str(item.get("default_strategy_id") or ""),
-            strategy_schedule=_parse_json_field(item.get("strategy_schedule")),
+            strategy_schedule=strategy_schedule,
             enabled=bool(item.get("enabled", True)),
             strategy=strategy,
             created_at=item.get("created_at"),
             updated_at=item.get("updated_at"),
+        )
+
+    async def _fetch_dispatch_worker_policy_rows(
+        self,
+        db: DatabaseConnection,
+        source_id: str,
+    ) -> List[dict]:
+        return await db.fetch_all(
+            """
+            SELECT
+                p.source_id, p.provider_id, p.model_id,
+                p.default_strategy_id, p.strategy_schedule, p.enabled,
+                p.created_at, p.updated_at,
+                s.strategy_id, s.min_workers, s.baseline_workers, s.max_workers,
+                s.adjust_interval_seconds, s.feedback_window_seconds,
+                s.stale_execution_seconds, s.error_rate_rules,
+                s.enabled AS strategy_enabled, s.description
+            FROM swe_cron_dispatch_model_worker_policy p
+            LEFT JOIN swe_cron_dispatch_worker_strategy s
+                ON p.default_strategy_id = s.strategy_id
+            WHERE p.source_id = %s
+            ORDER BY p.provider_id, p.model_id
+            """,
+            (source_id,),
+        )
+
+    async def _fetch_current_dispatch_capacity_rows(
+        self,
+        db: DatabaseConnection,
+        source_id: str,
+    ) -> List[dict]:
+        return await db.fetch_all(
+            """
+            SELECT
+                c.id,
+                COALESCE(NULLIF(scope_lease.lock_owner, ''), c.worker_id)
+                    AS worker_id,
+                c.source_id, c.provider_id, c.model_id, c.strategy_id,
+                c.previous_workers, c.baseline_workers, c.min_workers,
+                c.max_workers, c.effective_workers, c.pending_count,
+                c.claimed_count, c.running_count, c.success_count,
+                c.failure_count, c.error_rate, c.matched_rule,
+                c.avg_latency_ms, c.decision_reason, c.created_at
+            FROM swe_cron_dispatch_worker_capacity c
+            INNER JOIN (
+                SELECT source_id, provider_id, model_id, MAX(id) AS id
+                FROM swe_cron_dispatch_worker_capacity
+                WHERE source_id = %s
+                GROUP BY source_id, provider_id, model_id
+            ) latest ON c.id = latest.id
+            LEFT JOIN swe_cron_dispatch_scope_leases scope_lease
+                ON scope_lease.source_id = c.source_id
+                AND scope_lease.provider_id = c.provider_id
+                AND scope_lease.model_id = c.model_id
+                AND scope_lease.lease_expires_at >= NOW()
+            ORDER BY c.provider_id, c.model_id
+            """,
+            (source_id,),
+        )
+
+    async def _fetch_dispatch_capacity_event_rows(
+        self,
+        db: DatabaseConnection,
+        *,
+        source_id: str,
+        start_time: Optional[datetime],
+        end_time: Optional[datetime],
+    ) -> List[dict]:
+        conditions = ["source_id = %s"]
+        params: List[Any] = [source_id]
+        if start_time:
+            conditions.append("created_at >= %s")
+            params.append(start_time)
+        if end_time:
+            conditions.append("created_at <= %s")
+            params.append(end_time)
+
+        return await db.fetch_all(
+            f"""
+            SELECT
+                id, worker_id, source_id, provider_id, model_id, strategy_id,
+                previous_workers, baseline_workers, min_workers, max_workers,
+                effective_workers, pending_count, claimed_count, running_count,
+                success_count, failure_count, error_rate, matched_rule,
+                avg_latency_ms, decision_reason, created_at
+            FROM swe_cron_dispatch_worker_capacity
+            WHERE {" AND ".join(conditions)}
+            ORDER BY created_at DESC, id DESC
+            LIMIT {DISPATCH_CAPACITY_EVENT_LIMIT}
+            """,
+            tuple(params),
         )
 
     async def get_dispatch_batches(
@@ -419,7 +521,10 @@ class QueryService:
             total_intents=total_intents,
             completed_intents=completed_intents,
             failed_intents=failed_intents,
-            pending_intents=max(total_intents - completed_intents - failed_intents, 0),
+            pending_intents=max(
+                total_intents - completed_intents - failed_intents,
+                0,
+            ),
         )
 
         total = stats.total_batches
@@ -530,64 +635,29 @@ class QueryService:
     ) -> CronDispatchWorkersResponse:
         """查询当前渠道下模型策略和 worker capacity 变动。"""
         db = get_db_connection()
-        policy_rows = await db.fetch_all(
-            """
-            SELECT
-                p.source_id, p.provider_id, p.model_id,
-                p.default_strategy_id, p.strategy_schedule, p.enabled,
-                p.created_at, p.updated_at,
-                s.strategy_id, s.min_workers, s.baseline_workers, s.max_workers,
-                s.adjust_interval_seconds, s.feedback_window_seconds,
-                s.stale_execution_seconds, s.error_rate_rules,
-                s.enabled AS strategy_enabled, s.description
-            FROM swe_cron_dispatch_model_worker_policy p
-            LEFT JOIN swe_cron_dispatch_worker_strategy s
-                ON p.default_strategy_id = s.strategy_id
-            WHERE p.source_id = %s
-            ORDER BY p.provider_id, p.model_id
-            """,
-            (source_id,),
+        policy_rows = await self._fetch_dispatch_worker_policy_rows(
+            db,
+            source_id,
         )
-
-        capacity_conditions = ["source_id = %s"]
-        capacity_params: list[Any] = [source_id]
-        if start_time:
-            capacity_conditions.append("created_at >= %s")
-            capacity_params.append(start_time)
-        if end_time:
-            capacity_conditions.append("created_at <= %s")
-            capacity_params.append(end_time)
-        capacity_where = " AND ".join(capacity_conditions)
-
-        latest_rows = await db.fetch_all(
-            """
-            SELECT c.*
-            FROM swe_cron_dispatch_worker_capacity c
-            INNER JOIN (
-                SELECT source_id, provider_id, model_id, strategy_id, MAX(id) AS id
-                FROM swe_cron_dispatch_worker_capacity
-                WHERE source_id = %s
-                GROUP BY source_id, provider_id, model_id, strategy_id
-            ) latest ON c.id = latest.id
-            ORDER BY c.provider_id, c.model_id, c.strategy_id
-            """,
-            (source_id,),
+        latest_rows = await self._fetch_current_dispatch_capacity_rows(
+            db,
+            source_id,
         )
-        event_rows = await db.fetch_all(
-            f"""
-            SELECT *
-            FROM swe_cron_dispatch_worker_capacity
-            WHERE {capacity_where}
-            ORDER BY created_at DESC, id DESC
-            LIMIT 100
-            """,
-            tuple(capacity_params),
+        event_rows = await self._fetch_dispatch_capacity_event_rows(
+            db,
+            source_id=source_id,
+            start_time=start_time,
+            end_time=end_time,
         )
         return CronDispatchWorkersResponse(
             source_id=source_id,
             policies=[self._map_dispatch_policy(row) for row in policy_rows],
-            current_capacity=[self._map_dispatch_capacity(row) for row in latest_rows],
-            capacity_events=[self._map_dispatch_capacity(row) for row in event_rows],
+            current_capacity=[
+                self._map_dispatch_capacity(row) for row in latest_rows
+            ],
+            capacity_events=[
+                self._map_dispatch_capacity(row) for row in event_rows
+            ],
         )
 
     async def list_jobs(

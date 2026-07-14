@@ -297,7 +297,31 @@ describe("CronBatchDispatchPage", () => {
           created_at: "2026-07-08T08:10:00",
         },
       ],
-      capacity_events: [],
+      capacity_events: [
+        {
+          id: 11,
+          worker_id: "worker-history",
+          source_id: "CMB-MALL",
+          provider_id: "aaa",
+          model_id: "bbb",
+          strategy_id: "strategy-a",
+          previous_workers: 10,
+          baseline_workers: 5,
+          min_workers: 5,
+          max_workers: 999,
+          effective_workers: 5,
+          pending_count: 3,
+          claimed_count: 1,
+          running_count: 1,
+          success_count: 3,
+          failure_count: 7,
+          error_rate: 0.7,
+          matched_rule: { reason: "success_below_30_halve" },
+          avg_latency_ms: 1600,
+          decision_reason: "success_below_30_halve",
+          created_at: "2026-07-08T08:20:00",
+        },
+      ],
     });
   });
 
@@ -327,6 +351,26 @@ describe("CronBatchDispatchPage", () => {
     expect(screen.getAllByText("aaa").length).toBeGreaterThan(0);
     expect(screen.getAllByText("bbb").length).toBeGreaterThan(0);
     expect(screen.getByText("success_70_90_add_1")).toBeInTheDocument();
+  });
+
+  it("shows full policy JSON and expands worker adjustment details", async () => {
+    render(<CronBatchDispatchPage />);
+
+    const scheduleSummary = await screen.findByText(/^schedule=/);
+    fireEvent.mouseEnter(scheduleSummary);
+    expect(
+      await screen.findByText(/"start_time": "16:00"/),
+    ).toBeInTheDocument();
+
+    const toggle = screen.getByLabelText("查看调整记录 11");
+    const details = toggle.closest("details");
+    expect(details).not.toHaveAttribute("open");
+
+    fireEvent.click(toggle);
+    expect(details).toHaveAttribute("open");
+    expect(screen.getByText("Worker ID")).toBeInTheDocument();
+    expect(screen.getByText("worker-history")).toBeInTheDocument();
+    expect(screen.getByText("70.00%")).toBeInTheDocument();
   });
 
   it("filters the current Batch page and selects the first matching detail", async () => {

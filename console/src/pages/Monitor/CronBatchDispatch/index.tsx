@@ -20,7 +20,13 @@ import {
 import type { ColumnsType } from "antd/es/table";
 import type { Dayjs } from "dayjs";
 import dayjs from "dayjs";
-import { Clock3, RefreshCw, ShieldCheck, TimerReset } from "lucide-react";
+import {
+  ChevronDown,
+  Clock3,
+  RefreshCw,
+  ShieldCheck,
+  TimerReset,
+} from "lucide-react";
 import {
   monitorApi,
   type CronDispatchBatchDetailResponse,
@@ -155,11 +161,17 @@ function buildDateFilters(
   };
 }
 
-function jsonSummary(
-  value: Record<string, unknown> | Array<Record<string, unknown>> | null,
-) {
-  if (!value) return "-";
-  const text = JSON.stringify(value);
+function jsonText(value: unknown, pretty = false) {
+  if (value === null || value === undefined) return "-";
+  try {
+    return JSON.stringify(value, null, pretty ? 2 : undefined) || "-";
+  } catch {
+    return String(value);
+  }
+}
+
+function jsonSummary(value: unknown) {
+  const text = jsonText(value);
   return text.length > 96 ? `${text.slice(0, 96)}...` : text;
 }
 
@@ -187,6 +199,7 @@ function SummaryMetric({
 
 function PolicyCard({ policy }: { policy: CronDispatchPolicyItem }) {
   const strategy = policy.strategy || {};
+  const rules = strategy.error_rate_rules ?? null;
   return (
     <article className={styles.policyCard}>
       <div className={styles.policyHead}>
@@ -213,25 +226,26 @@ function PolicyCard({ policy }: { policy: CronDispatchPolicyItem }) {
         <strong>{String(strategy.feedback_window_seconds ?? "-")}s</strong>
       </div>
       <Tooltip
-        title={jsonSummary(policy.strategy_schedule)}
+        title={
+          <pre className={styles.jsonTooltip}>
+            {jsonText(policy.strategy_schedule, true)}
+          </pre>
+        }
         placement="topLeft"
+        overlayStyle={{ maxWidth: 560 }}
       >
         <div className={styles.policyJson}>
           schedule={jsonSummary(policy.strategy_schedule)}
         </div>
       </Tooltip>
       <Tooltip
-        title={jsonSummary(
-          (strategy.error_rate_rules as Record<string, unknown>) || null,
-        )}
+        title={
+          <pre className={styles.jsonTooltip}>{jsonText(rules, true)}</pre>
+        }
         placement="topLeft"
+        overlayStyle={{ maxWidth: 560 }}
       >
-        <div className={styles.policyJson}>
-          rules=
-          {jsonSummary(
-            (strategy.error_rate_rules as Record<string, unknown>) || null,
-          )}
-        </div>
+        <div className={styles.policyJson}>rules={jsonSummary(rules)}</div>
       </Tooltip>
     </article>
   );
@@ -258,6 +272,89 @@ function CapacityRow({ item }: { item: CronDispatchCapacityItem }) {
         <span>{item.decision_reason || "-"}</span>
       </div>
     </div>
+  );
+}
+
+function CapacityEventRow({ item }: { item: CronDispatchCapacityItem }) {
+  return (
+    <details className={styles.workerEvent}>
+      <summary
+        className={styles.workerEventSummary}
+        aria-label={`查看调整记录 ${item.id}`}
+      >
+        <strong>{item.decision_reason || "-"}</strong>
+        <span>
+          {item.provider_id}/{item.model_id} · {item.previous_workers} →{" "}
+          {item.effective_workers}
+        </span>
+        <em>{formatDateTime(item.created_at)}</em>
+        <ChevronDown
+          size={15}
+          className={styles.workerEventChevron}
+          aria-hidden="true"
+        />
+      </summary>
+      <dl className={styles.workerEventDetails}>
+        <div>
+          <dt>记录 ID</dt>
+          <dd>{item.id}</dd>
+        </div>
+        <div className={styles.workerEventIdentity}>
+          <dt>Worker ID</dt>
+          <dd>{item.worker_id || "-"}</dd>
+        </div>
+        <div>
+          <dt>Source</dt>
+          <dd>{item.source_id || "-"}</dd>
+        </div>
+        <div>
+          <dt>策略</dt>
+          <dd>{item.strategy_id || "-"}</dd>
+        </div>
+        <div>
+          <dt>最小 / 基线 / 最大</dt>
+          <dd>
+            {item.min_workers} / {item.baseline_workers} / {item.max_workers}
+          </dd>
+        </div>
+        <div>
+          <dt>调整前 / 调整后</dt>
+          <dd>
+            {item.previous_workers} / {item.effective_workers}
+          </dd>
+        </div>
+        <div>
+          <dt>等待 / 已领取 / 运行</dt>
+          <dd>
+            {item.pending_count} / {item.claimed_count} / {item.running_count}
+          </dd>
+        </div>
+        <div>
+          <dt>成功 / 失败</dt>
+          <dd>
+            {item.success_count} / {item.failure_count}
+          </dd>
+        </div>
+        <div>
+          <dt>失败率</dt>
+          <dd>{(item.error_rate * 100).toFixed(2)}%</dd>
+        </div>
+        <div>
+          <dt>平均耗时</dt>
+          <dd>{item.avg_latency_ms} ms</dd>
+        </div>
+        <div>
+          <dt>记录时间</dt>
+          <dd>{formatDateTime(item.created_at)}</dd>
+        </div>
+        <div className={styles.workerEventRule}>
+          <dt>命中规则</dt>
+          <dd>
+            <pre>{jsonText(item.matched_rule, true)}</pre>
+          </dd>
+        </div>
+      </dl>
+    </details>
   );
 }
 
@@ -924,14 +1021,7 @@ export default function CronBatchDispatchPage() {
             </div>
             <div className={styles.workerEventList}>
               {capacityEvents.slice(0, 8).map((item) => (
-                <div key={item.id} className={styles.workerEvent}>
-                  <strong>{item.decision_reason || "-"}</strong>
-                  <span>
-                    {item.provider_id}/{item.model_id} · {item.previous_workers}{" "}
-                    → {item.effective_workers}
-                  </span>
-                  <em>{formatDateTime(item.created_at)}</em>
-                </div>
+                <CapacityEventRow key={item.id} item={item} />
               ))}
               {!capacityEvents.length ? (
                 <Empty
