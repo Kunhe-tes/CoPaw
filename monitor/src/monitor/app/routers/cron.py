@@ -17,6 +17,9 @@ from ..models.cron import (
     CronJobQueryParams,
     CronOverviewResponse,
     CronOverviewStatsResponse,
+    CronDispatchBatchDetailResponse,
+    CronDispatchBatchesResponse,
+    CronDispatchWorkersResponse,
     CronBranchRankingResponse,
     CronBranchTaskRankingResponse,
     CronBranchErrorResponse,
@@ -85,6 +88,68 @@ async def get_overview(
     return await service.get_overview(
         tenant_id=tenant_id,
         bbk_id=bbk_id,
+        source_id=actual_source_id,
+        start_time=start_time,
+        end_time=end_time,
+    )
+
+
+@router.get("/dispatch/batches", response_model=CronDispatchBatchesResponse)
+async def list_dispatch_batches(
+    request: Request,
+    start_time: datetime | None = Query(default=None, description="开始时间"),
+    end_time: datetime | None = Query(default=None, description="结束时间"),
+    status: str | None = Query(default=None, description="批次状态"),
+    page: int = Query(default=1, ge=1, description="页码"),
+    page_size: int = Query(default=20, ge=1, le=100, description="每页数量"),
+    service: QueryService = Depends(get_query_service),
+) -> CronDispatchBatchesResponse:
+    """查询当前渠道的批调度 batch 概览。"""
+    actual_source_id = _get_source_id_from_header(request)
+    return await service.get_dispatch_batches(
+        source_id=actual_source_id,
+        start_time=start_time,
+        end_time=end_time,
+        status=status,
+        page=page,
+        page_size=page_size,
+    )
+
+
+@router.get(
+    "/dispatch/batches/{batch_id}",
+    response_model=CronDispatchBatchDetailResponse,
+)
+async def get_dispatch_batch_detail(
+    request: Request,
+    batch_id: str,
+    intent_limit: int = Query(default=100, ge=1, le=500, description="Intent 数量"),
+    event_limit: int = Query(default=100, ge=1, le=500, description="事件数量"),
+    service: QueryService = Depends(get_query_service),
+) -> CronDispatchBatchDetailResponse:
+    """查询单个批调度 batch 的 intent 和事件明细。"""
+    actual_source_id = _get_source_id_from_header(request)
+    detail = await service.get_dispatch_batch_detail(
+        source_id=actual_source_id,
+        batch_id=batch_id,
+        intent_limit=intent_limit,
+        event_limit=event_limit,
+    )
+    if not detail:
+        raise HTTPException(status_code=404, detail="Batch not found")
+    return detail
+
+
+@router.get("/dispatch/workers", response_model=CronDispatchWorkersResponse)
+async def get_dispatch_workers(
+    request: Request,
+    start_time: datetime | None = Query(default=None, description="开始时间"),
+    end_time: datetime | None = Query(default=None, description="结束时间"),
+    service: QueryService = Depends(get_query_service),
+) -> CronDispatchWorkersResponse:
+    """查询当前渠道下模型策略和 worker capacity 变动。"""
+    actual_source_id = _get_source_id_from_header(request)
+    return await service.get_dispatch_workers(
         source_id=actual_source_id,
         start_time=start_time,
         end_time=end_time,

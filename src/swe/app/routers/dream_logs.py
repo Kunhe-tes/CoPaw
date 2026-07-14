@@ -2188,36 +2188,6 @@ async def trigger_dream_optimization(request: Request) -> TriggerResponse:
                     target_agent_id=agent_id,
                     before_record_ids=before_record_ids,
                 )
-                if maintenance_workspace_value:
-                    maintenance = run_dream_archive_maintenance(
-                        Path(maintenance_workspace_value),
-                        actor=str(
-                            request.headers.get("X-User-Id")
-                            or tenant_id
-                            or "dream",
-                        ),
-                    )
-                    source_id = _get_optional_source_id(request)
-                    service = _get_optional_continuous_governance_service(
-                        request,
-                    )
-                    if source_id and service is not None:
-                        await dual_write_dream_archive_maintenance_result(
-                            service=service,
-                            source_id=source_id,
-                            target_user_id=_get_logical_tenant_id(request),
-                            target_agent_id=agent_id,
-                            maintenance=maintenance,
-                            actor=str(
-                                request.headers.get("X-User-Id")
-                                or tenant_id
-                                or "dream",
-                            ),
-                            source_name=(
-                                request.headers.get("X-Source-Name")
-                                or source_id
-                            ),
-                        )
             finally:
                 _clear_running()
 
@@ -2603,26 +2573,12 @@ def run_dream_archive_maintenance(
         actor=actor,
         reason="dream_auto_mtime_3_days",
     )
-    expired_ids = _expired_archive_item_ids(workspace_dir)
-    purged_archive_item_ids: list[str] = []
-    deleted_paths: list[str] = []
-    deleted_size = 0
-    if expired_ids:
-        deleted_paths, deleted_size = _purge_archive_items(
-            workspace_dir,
-            expired_ids,
-        )
-        purged_archive_item_ids = sorted(expired_ids)
     logger.info(
-        "Dream archive maintenance completed: archived=%d purged=%d",
+        "Dream archive maintenance completed: archived=%d purged=0",
         len(archived_items),
-        len(deleted_paths),
     )
     return DreamArchiveMaintenanceResult(
         archived_items=archived_items,
-        purged_archive_item_ids=purged_archive_item_ids,
-        purged_paths=deleted_paths,
-        purged_size_bytes=deleted_size,
     )
 
 

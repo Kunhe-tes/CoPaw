@@ -49,7 +49,6 @@ from .channels.registry import register_custom_channel_routes
 from ..tracing import init_trace_manager, close_trace_manager
 from ..database import get_database_config
 from .service_heartbeat import start_service_heartbeat, stop_service_heartbeat
-from .crons.monitor_sync_client import get_monitor_sync_client
 from .crons.notification_worker import CronNotificationWorker
 from .runtime_diagnostic import RuntimeDiagnosticManager
 
@@ -421,6 +420,22 @@ def _initialize_source_system_config(
                     lambda: tenant_workspace_pool.init_source_store
                 ),
                 multi_agent_manager=multi_agent_manager,
+                tenant_dir_resolver=(
+                    tenant_workspace_pool.get_tenant_workspace_dir
+                ),
+                continuous_governance_service_factory=(
+                    lambda: getattr(
+                        app.state,
+                        "continuous_governance_service",
+                        None,
+                    )
+                ),
+                source_config_resolver=(
+                    lambda source_id: source_config_service.resolve_config(
+                        source_id,
+                        force_refresh=True,
+                    )
+                ),
                 agent_id="default",
             )
         else:
@@ -616,10 +631,16 @@ async def _start_lifespan_background_services(
     multi_agent_manager: MultiAgentManager,
 ) -> None:
     """启动生命周期内常驻的后台服务。"""
+    from .crons.api import schedule_startup_dispatch_broadcast_children_processing
+
     await start_service_heartbeat()
     # get_monitor_sync_client().schedule_swe_cron_warmup(
     #     start_delay_seconds=5.0,
     # )
+    schedule_startup_dispatch_broadcast_children_processing(
+        app,
+        multi_agent_manager,
+    )
     cron_notification_worker = CronNotificationWorker(
         multi_agent_manager=multi_agent_manager,
     )
@@ -656,6 +677,23 @@ async def _shutdown_lifespan_resources(
         logger.warning("Error stopping runtime diagnostic manager: %s", e)
     finally:
         runtime_diagnostic_manager.set_workspace_metrics(None)
+
+    startup_dispatch_task = getattr(
+        app.state,
+        "cron_startup_dispatch_broadcast_children_task",
+        None,
+    )
+    if startup_dispatch_task is not None and not startup_dispatch_task.done():
+        startup_dispatch_task.cancel()
+        try:
+            await startup_dispatch_task
+        except asyncio.CancelledError:
+            pass
+        except Exception as e:
+            logger.warning(
+                "Error stopping startup dispatch child task: %s",
+                e,
+            )
 
     cron_notification_worker = getattr(
         app.state,

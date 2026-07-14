@@ -162,7 +162,7 @@ async def test_execute_once_binds_source_config_across_job_boundary(
     )
     observed: dict[str, str | None] = {}
 
-    async def fake_execute(_job):
+    async def fake_execute(_job, **_kwargs):
         current = get_current_source_system_config()
         observed["execute"] = None if current is None else current.source_id
         return SimpleNamespace(
@@ -203,6 +203,55 @@ async def test_execute_once_binds_source_config_across_job_boundary(
 
 
 @pytest.mark.asyncio
+async def test_execute_once_passes_dispatch_meta_to_executor(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    manager = CronManager(
+        repo=object(),
+        runner=object(),
+        channel_manager=object(),
+    )
+    observed: dict[str, object | None] = {}
+
+    async def fake_execute(_job, **kwargs):
+        observed["dispatch_meta"] = kwargs.get("dispatch_meta")
+        return SimpleNamespace(
+            trace_id="trace-1",
+            output_preview="",
+            input_snapshot=None,
+            executor_leader="",
+            execution_meta=None,
+        )
+
+    async def fake_success(_job):
+        return None
+
+    async def fake_finalize(**_kwargs):
+        return None
+
+    dispatch_meta = {
+        "passthrough_headers": {
+            "X-B3-Traceid": "8267fd70bacf497704fec30eaa353979",
+        },
+        "b3_trace_id": "8267fd70bacf497704fec30eaa353979",
+    }
+    monkeypatch.setattr(
+        manager,
+        "_executor",
+        SimpleNamespace(execute=fake_execute),
+    )
+    monkeypatch.setattr(manager, "_handle_success_notifications", fake_success)
+    monkeypatch.setattr(manager, "_finalize_execution_state", fake_finalize)
+
+    await manager._execute_once(  # pylint: disable=protected-access
+        _build_agent_job(),
+        dispatch_meta=dispatch_meta,
+    )
+
+    assert observed["dispatch_meta"] == dispatch_meta
+
+
+@pytest.mark.asyncio
 async def test_execute_once_falls_back_to_scope_source(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -218,7 +267,7 @@ async def test_execute_once_falls_back_to_scope_source(
     )
     observed: dict[str, str | None] = {}
 
-    async def fake_execute(_job):
+    async def fake_execute(_job, **_kwargs):
         current = get_current_source_system_config()
         observed["execute"] = None if current is None else current.source_id
         return SimpleNamespace(
@@ -265,7 +314,7 @@ async def test_execute_once_keeps_legacy_source_less_run_unbound(
     )
     observed: dict[str, str | None] = {}
 
-    async def fake_execute(_job):
+    async def fake_execute(_job, **_kwargs):
         current = get_current_source_system_config()
         observed["execute"] = None if current is None else current.source_id
         return SimpleNamespace(
@@ -312,7 +361,7 @@ async def test_execute_once_clears_inherited_request_source_when_unbound(
     )
     observed: dict[str, str | None] = {}
 
-    async def fake_execute(_job):
+    async def fake_execute(_job, **_kwargs):
         current = get_current_source_system_config()
         observed["execute"] = None if current is None else current.source_id
         return SimpleNamespace(
@@ -364,7 +413,7 @@ async def test_execute_once_keeps_sourced_run_unbound_when_service_missing(
     )
     observed: dict[str, str | None] = {}
 
-    async def fake_execute(_job):
+    async def fake_execute(_job, **_kwargs):
         current = get_current_source_system_config()
         observed["execute"] = None if current is None else current.source_id
         return SimpleNamespace(
@@ -411,7 +460,7 @@ async def test_run_job_manual_clears_request_source_for_legacy_unbound_job(
     created_tasks: list[asyncio.Task[None]] = []
     original_create_task = asyncio.create_task
 
-    async def fake_execute(_job):
+    async def fake_execute(_job, **_kwargs):
         current = get_current_source_system_config()
         observed["execute"] = None if current is None else current.source_id
         return SimpleNamespace(
@@ -481,7 +530,7 @@ async def test_run_job_uses_callback_source_for_legacy_unbound_job(
     created_tasks: list[asyncio.Task[None]] = []
     original_create_task = asyncio.create_task
 
-    async def fake_execute(_job):
+    async def fake_execute(_job, **_kwargs):
         current = get_current_source_system_config()
         observed["execute"] = None if current is None else current.source_id
         resolved = resolve_tool_result_compact_config(
@@ -664,7 +713,7 @@ async def test_run_dream_binds_source_config_from_runtime_scope() -> None:
 
 
 @pytest.mark.asyncio
-async def test_run_dream_dual_writes_new_records_from_workspace(
+async def test_run_dream_dual_writes_new_records_without_archive_maintenance(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -690,26 +739,16 @@ async def test_run_dream_dual_writes_new_records_from_workspace(
             encoding="utf-8",
         )
 
-    maintenance = DreamArchiveMaintenanceResult(
-        archived_items=[
-            ArchiveItem(
-                id="archive-1",
-                original_path="old.md",
-                archive_path="governance/archive/files/archive-1",
-                size_bytes=7,
-                mtime="2026-05-24T09:00:00Z",
-                archived_at="2026-05-25T09:00:00Z",
-                archived_by="dream_cron",
-                archive_reason="dream_auto_mtime_3_days",
-            ),
-        ],
-        purged_archive_item_ids=["archive-expired"],
-        purged_paths=["expired.md"],
-        purged_size_bytes=5,
-    )
+    archive_maintenance_called = False
+
+    def fail_if_archive_maintenance_runs(*_args, **_kwargs):
+        nonlocal archive_maintenance_called
+        archive_maintenance_called = True
+        raise AssertionError("dream must not trigger archive maintenance")
+
     monkeypatch.setattr(
         "swe.app.routers.dream_logs.run_dream_archive_maintenance",
-        lambda *_args, **_kwargs: maintenance,
+        fail_if_archive_maintenance_runs,
     )
     runner = SimpleNamespace(
         workspace_dir=workspace_dir,
@@ -733,20 +772,10 @@ async def test_run_dream_dual_writes_new_records_from_workspace(
     assert call["target_user_id"] == "tenant-a"
     assert call["target_agent_id"] == "default"
     assert call["record"]["id"] == "new-record"
-    archive_call = cast(dict[str, Any], governance_service.archive_calls[0])
-    archive_items = cast(list[dict[str, Any]], archive_call["items"])
-    assert archive_call["source_id"] == "source-a"
-    assert archive_items[0]["original_path"] == "old.md"
-    delete_archive_call = cast(
-        dict[str, Any],
-        governance_service.delete_archive_calls[0],
-    )
-    assert delete_archive_call["archive_item_ids"] == [
-        "archive-expired",
-    ]
-    audit_call = cast(dict[str, Any], governance_service.audit_calls[0])
-    assert audit_call["operation"] == "purge_expired_archive"
-    assert audit_call["target_user_id"] == "tenant-a"
+    assert archive_maintenance_called is False
+    assert governance_service.archive_calls == []
+    assert governance_service.delete_archive_calls == []
+    assert governance_service.audit_calls == []
 
 
 @pytest.mark.asyncio

@@ -27,9 +27,19 @@ export interface CronUnreadAutoPauseConfig {
   threshold: number;
 }
 
+export interface CronNotificationConfig {
+  skip_weekend_zhaohu_enabled: boolean;
+}
+
 export interface CronTaskSessionCleanupConfig {
   enabled: boolean;
   retention_days: number;
+  cron: string;
+  run_time: string;
+}
+
+export interface ArchiveMaintenanceConfig {
+  enabled: boolean;
   cron: string;
   run_time: string;
 }
@@ -106,6 +116,14 @@ export const CURRENT_SOURCE_SYSTEM_CONFIG_SWITCHES: CurrentSourceConfigSwitchDef
       title: "数据库访问拦截",
       description: "关闭后模型可通过 Python/命令行直连数据库，不再拦截。",
     },
+    {
+      key: "approval_notifications.zhaohu_tool_guard_enabled",
+      path: ["approval_notifications", "zhaohu_tool_guard_enabled"],
+      defaultValue: false,
+      title: "Tool Guard 审批招乎通知",
+      description:
+        "开启后，当前系统的 Tool Guard 审批会发送招乎待审批和审批结果通知。",
+    },
   ];
 
 export const TOOL_RESULT_COMPACT_DEFAULTS: ToolResultCompactConfig = {
@@ -126,6 +144,10 @@ export const CRON_UNREAD_AUTO_PAUSE_DEFAULTS: CronUnreadAutoPauseConfig = {
   threshold: 10,
 };
 
+export const CRON_NOTIFICATION_DEFAULTS: CronNotificationConfig = {
+  skip_weekend_zhaohu_enabled: false,
+};
+
 export const CRON_TASK_SESSION_CLEANUP_DEFAULTS: CronTaskSessionCleanupConfig =
   {
     enabled: false,
@@ -133,6 +155,12 @@ export const CRON_TASK_SESSION_CLEANUP_DEFAULTS: CronTaskSessionCleanupConfig =
     cron: "0 1 * * *",
     run_time: "01:00",
   };
+
+export const ARCHIVE_MAINTENANCE_DEFAULTS: ArchiveMaintenanceConfig = {
+  enabled: true,
+  cron: "0 3 * * *",
+  run_time: "03:00",
+};
 
 export const QUERY_RETRY_DEFAULTS: QueryRetryConfig = {
   enabled: false,
@@ -165,6 +193,10 @@ export const CRON_TASK_SESSION_CLEANUP_RUN_TIME_OPTIONS = Array.from(
     )}`;
   },
 );
+
+export const ARCHIVE_MAINTENANCE_RUN_TIME_OPTIONS = [
+  ...CRON_TASK_SESSION_CLEANUP_RUN_TIME_OPTIONS,
+];
 
 export const CRON_UNREAD_AUTO_PAUSE_MIN_THRESHOLD = 1;
 
@@ -417,6 +449,37 @@ export function writeCronUnreadAutoPauseValue<
   return nextConfig;
 }
 
+export function readCronNotificationConfig(
+  config: SourceSystemConfig,
+): CronNotificationConfig {
+  const rawValue = config.cron_notifications;
+  if (!isPlainObject(rawValue)) {
+    return { ...CRON_NOTIFICATION_DEFAULTS };
+  }
+  return {
+    skip_weekend_zhaohu_enabled:
+      typeof rawValue.skip_weekend_zhaohu_enabled === "boolean"
+        ? rawValue.skip_weekend_zhaohu_enabled
+        : CRON_NOTIFICATION_DEFAULTS.skip_weekend_zhaohu_enabled,
+  };
+}
+
+export function writeCronNotificationValue<
+  K extends keyof CronNotificationConfig,
+>(
+  config: SourceSystemConfig,
+  key: K,
+  value: CronNotificationConfig[K],
+): SourceSystemConfig {
+  const nextConfig = clonePlainConfig(config);
+  const rawValue = nextConfig.cron_notifications;
+  if (!isPlainObject(rawValue)) {
+    nextConfig.cron_notifications = {};
+  }
+  (nextConfig.cron_notifications as Record<string, unknown>)[key] = value;
+  return nextConfig;
+}
+
 export function dailyRunTimeToCron(value: string): string | null {
   const match = /^(\d{1,2}):(\d{2})$/.exec(value.trim());
   if (!match) {
@@ -503,6 +566,49 @@ export function writeCronTaskSessionCleanupValue(
     string,
     unknown
   >;
+  if (key === "run_time") {
+    const cron = dailyRunTimeToCron(String(value));
+    if (cron !== null) {
+      section.cron = cron;
+    }
+    return nextConfig;
+  }
+  section[key] = value;
+  return nextConfig;
+}
+
+export function readArchiveMaintenanceConfig(
+  config: SourceSystemConfig,
+): ArchiveMaintenanceConfig {
+  const rawValue = config.archive_maintenance;
+  if (!isPlainObject(rawValue)) {
+    return { ...ARCHIVE_MAINTENANCE_DEFAULTS };
+  }
+  const cron =
+    typeof rawValue.cron === "string"
+      ? rawValue.cron
+      : ARCHIVE_MAINTENANCE_DEFAULTS.cron;
+  return {
+    enabled:
+      typeof rawValue.enabled === "boolean"
+        ? rawValue.enabled
+        : ARCHIVE_MAINTENANCE_DEFAULTS.enabled,
+    cron,
+    run_time: cronToDailyRunTime(cron) ?? ARCHIVE_MAINTENANCE_DEFAULTS.run_time,
+  };
+}
+
+export function writeArchiveMaintenanceValue(
+  config: SourceSystemConfig,
+  key: "enabled" | "cron" | "run_time",
+  value: boolean | string,
+): SourceSystemConfig {
+  const nextConfig = clonePlainConfig(config);
+  const rawValue = nextConfig.archive_maintenance;
+  if (!isPlainObject(rawValue)) {
+    nextConfig.archive_maintenance = {};
+  }
+  const section = nextConfig.archive_maintenance as Record<string, unknown>;
   if (key === "run_time") {
     const cron = dailyRunTimeToCron(String(value));
     if (cron !== null) {
@@ -931,10 +1037,19 @@ export function validateCronTaskSessionCleanupConfig(
     !Number.isInteger(config.retention_days) ||
     config.retention_days < CRON_TASK_SESSION_CLEANUP_MIN_RETENTION_DAYS
   ) {
-    return `浠诲姟浼氳瘽鍘嗗彶淇濈暀澶╂暟涓嶈兘灏忎簬 ${CRON_TASK_SESSION_CLEANUP_MIN_RETENTION_DAYS}`;
+    return `任务会话历史保留天数不能小于 ${CRON_TASK_SESSION_CLEANUP_MIN_RETENTION_DAYS}`;
   }
   if (cronToDailyRunTime(config.cron) === null) {
     return "cron_task_session_cleanup.cron must be daily cron";
+  }
+  return null;
+}
+
+export function validateArchiveMaintenanceConfig(
+  config: ArchiveMaintenanceConfig,
+): string | null {
+  if (cronToDailyRunTime(config.cron) === null) {
+    return "archive_maintenance.cron must be daily cron";
   }
   return null;
 }
@@ -944,6 +1059,7 @@ export function validateSourceSystemConfig(
   effectiveConfig?: SourceSystemConfig | null,
 ): string | null {
   return (
+    validateArchiveMaintenanceConfig(readArchiveMaintenanceConfig(config)) ||
     validateCronTaskSessionCleanupConfig(
       readCronTaskSessionCleanupConfig(config),
     ) ||

@@ -194,8 +194,8 @@ class MessageRenderer:
                             ContentType.VIDEO,
                             ContentType.FILE,
                         )
-                        # Internal tools (e.g. view_image/view_video) produce
-                        # media for the LLM, not the user — skip.
+                        # Internal tools can produce media for the LLM, not
+                        # the user, so skip those media blocks.
                         media_parts = (
                             []
                             if name in s.internal_tools

@@ -7,23 +7,34 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable
+import time
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Protocol
 
 from swe.app.crons.manager import TASK_SESSION_CLEANUP_TASK_TYPE
 from swe.app.crons.scheduler_adapter import SchedulerAdapter
-from swe.config.context import encode_scope_id
+from swe.app.file_governance.archive_maintenance import (
+    archive_old_orphans_for_workspace,
+)
+from swe.config.context import encode_scope_id, is_valid_identity_value
 
 from .task_binding_store import (
     SourceSystemTaskBinding,
     SourceSystemTaskBindingStore,
 )
 
-from .runtime import resolve_cron_task_session_cleanup_config
+from .runtime import (
+    resolve_archive_maintenance_config,
+    resolve_cron_task_session_cleanup_config,
+)
 
 SOURCE_TASK_SESSION_CLEANUP_JOB_ID = "_source_task_session_cleanup"
 SOURCE_TASK_SESSION_CLEANUP_NAME = "task_session_cleanup"
+SOURCE_ARCHIVE_MAINTENANCE_JOB_ID = "_source_archive_maintenance"
+SOURCE_ARCHIVE_MAINTENANCE_NAME = "archive_maintenance"
+SOURCE_ARCHIVE_MAINTENANCE_TASK_TYPE = "archive_maintenance"
 
 
 @dataclass(frozen=True, slots=True)
@@ -41,6 +52,9 @@ class SourceTaskSessionCleanupRefreshResult:
 
     action: str
     binding: SourceSystemTaskBinding | None = None
+
+
+SourceArchiveMaintenanceRefreshResult = SourceTaskSessionCleanupRefreshResult
 
 
 class SourceTaskBindingStoreLike(Protocol):
@@ -104,6 +118,13 @@ class SourceSystemTaskScheduler:
             Callable[[], SourceTenantScopeStoreLike | None] | None
         ) = None,
         multi_agent_manager: SourceWorkspaceManagerLike | None = None,
+        tenant_dir_resolver: Callable[[str], Path] | None = None,
+        continuous_governance_service_factory: (
+            Callable[[], object | None] | None
+        ) = None,
+        source_config_resolver: (
+            Callable[[str], Awaitable[object]] | None
+        ) = None,
         agent_id: str = "default",
     ) -> None:
         """初始化调度器依赖。"""
@@ -113,6 +134,11 @@ class SourceSystemTaskScheduler:
         self._tenant_scope_store = tenant_scope_store
         self._tenant_scope_store_factory = tenant_scope_store_factory
         self._multi_agent_manager = multi_agent_manager
+        self._tenant_dir_resolver = tenant_dir_resolver
+        self._continuous_governance_service_factory = (
+            continuous_governance_service_factory
+        )
+        self._source_config_resolver = source_config_resolver
         self._agent_id = agent_id
 
     async def refresh_task_session_cleanup(
@@ -175,7 +201,11 @@ class SourceSystemTaskScheduler:
             external_job_id = await self._scheduler_adapter.register_job(
                 **scheduler_kwargs,
             )
-            self._require_external_job_id(source_id, external_job_id)
+            self._require_external_job_id(
+                source_id,
+                external_job_id,
+                task_name="source cleanup task",
+            )
 
         persisted_binding = await self._binding_store.upsert_binding(
             source_id=source_id,
@@ -192,17 +222,99 @@ class SourceSystemTaskScheduler:
             binding=persisted_binding,
         )
 
+    async def refresh_archive_maintenance(
+        self,
+        source_id: str,
+        config: object,
+        identity: SourceSchedulerIdentity,
+    ) -> SourceArchiveMaintenanceRefreshResult:
+        archive_config = resolve_archive_maintenance_config(config)
+        binding = await self._binding_store.get_binding(
+            source_id,
+            SOURCE_ARCHIVE_MAINTENANCE_NAME,
+        )
+        external_job_id = binding.external_job_id if binding else ""
+
+        if not archive_config.enabled:
+            if not external_job_id:
+                return SourceArchiveMaintenanceRefreshResult(
+                    action="disabled",
+                )
+            await self._scheduler_adapter.pause_job(external_job_id)
+            persisted_binding = await self._binding_store.upsert_binding(
+                source_id=source_id,
+                task_type=SOURCE_ARCHIVE_MAINTENANCE_NAME,
+                external_job_id=external_job_id,
+                cron=archive_config.cron,
+                enabled=False,
+                scheduler_tenant_id=identity.tenant_id,
+                scheduler_from_id=identity.from_id,
+                updated_by=identity.updated_by,
+            )
+            return SourceArchiveMaintenanceRefreshResult(
+                action="paused",
+                binding=persisted_binding,
+            )
+
+        scheduler_kwargs = {
+            "tenant_id": identity.tenant_id,
+            "source_id": source_id,
+            "agent_id": "",
+            "task_type": SOURCE_ARCHIVE_MAINTENANCE_TASK_TYPE,
+            "job_id": SOURCE_ARCHIVE_MAINTENANCE_JOB_ID,
+            "job_name": SOURCE_ARCHIVE_MAINTENANCE_NAME,
+            "cron": archive_config.cron,
+            "callback_url": self._callback_url,
+            "source_level": True,
+            "from_id": identity.from_id,
+        }
+
+        action = "registered"
+        if external_job_id:
+            await self._scheduler_adapter.update_job(
+                external_id=external_job_id,
+                **scheduler_kwargs,
+            )
+            await self._scheduler_adapter.resume_job(external_job_id)
+            action = "updated"
+        else:
+            external_job_id = await self._scheduler_adapter.register_job(
+                **scheduler_kwargs,
+            )
+            self._require_external_job_id(
+                source_id,
+                external_job_id,
+                task_name="source archive maintenance task",
+            )
+
+        persisted_binding = await self._binding_store.upsert_binding(
+            source_id=source_id,
+            task_type=SOURCE_ARCHIVE_MAINTENANCE_NAME,
+            external_job_id=external_job_id,
+            cron=archive_config.cron,
+            enabled=True,
+            scheduler_tenant_id=identity.tenant_id,
+            scheduler_from_id=identity.from_id,
+            updated_by=identity.updated_by,
+        )
+        return SourceArchiveMaintenanceRefreshResult(
+            action=action,
+            binding=persisted_binding,
+        )
+
     def _require_external_job_id(
         self,
         source_id: str,
         external_job_id: str,
+        *,
+        task_name: str,
     ) -> None:
         """校验外部调度返回了可持久化的 job id。"""
         if external_job_id:
             return
         raise RuntimeError(
             "external scheduler did not return job id "
-            f"for source cleanup task: {source_id}",
+            f"for {task_name}: {source_id}",
         )
 
     async def run_task_session_cleanup(
@@ -308,3 +420,240 @@ class SourceSystemTaskScheduler:
             "messages_removed",
         ):
             summary[key] += int(result.get(key, 0) or 0)
+
+    async def run_archive_maintenance(
+        self,
+        *,
+        source_id: str,
+        config: object | None = None,
+    ) -> dict[str, Any]:
+        archive_config = await self._resolve_archive_maintenance_config(
+            source_id,
+            config,
+        )
+        result: dict[str, Any] = {
+            "source_id": source_id,
+            "enabled": archive_config.enabled,
+            "tenants_seen": 0,
+            "workspaces_seen": 0,
+            "workspaces_processed": 0,
+            "workspaces_failed": 0,
+            "files_archived": 0,
+            "archived_size_bytes": 0,
+            "candidates_seen": 0,
+            "files_skipped_limit": 0,
+            "results": [],
+            "errors": [],
+            "timed_out": False,
+        }
+        if not archive_config.enabled:
+            return result
+
+        tenant_scope_store = self._get_tenant_scope_store()
+        if tenant_scope_store is None or self._tenant_dir_resolver is None:
+            result["errors"].append("source archive dependencies unavailable")
+            return result
+
+        rows = await tenant_scope_store.get_by_source(
+            source_id,
+            include_templates=False,
+        )
+        result["tenants_seen"] = len(rows)
+        started_at = time.monotonic()
+        for row in rows:
+            if self._archive_run_timed_out(started_at, archive_config):
+                result["timed_out"] = True
+                break
+            if result["files_archived"] >= archive_config.max_files_per_run:
+                break
+            await self._run_scope_archive_maintenance(
+                source_id,
+                row,
+                archive_config,
+                result,
+                started_at,
+            )
+            if (
+                result["workspaces_processed"]
+                >= archive_config.max_workspaces_per_run
+            ):
+                break
+        return result
+
+    async def _resolve_archive_maintenance_config(
+        self,
+        source_id: str,
+        config: object | None,
+    ):
+        if config is not None:
+            return resolve_archive_maintenance_config(config)
+        if self._source_config_resolver is None:
+            return resolve_archive_maintenance_config(None)
+        resolved = await self._source_config_resolver(source_id)
+        return resolve_archive_maintenance_config(resolved)
+
+    @staticmethod
+    def _archive_run_timed_out(
+        started_at: float,
+        archive_config: object,
+    ) -> bool:
+        timeout_seconds = int(getattr(archive_config, "timeout_seconds", 0))
+        return timeout_seconds > 0 and (
+            time.monotonic() - started_at
+        ) >= timeout_seconds
+
+    async def _run_scope_archive_maintenance(
+        self,
+        source_id: str,
+        row: dict[str, Any],
+        archive_config: object,
+        summary: dict[str, Any],
+        started_at: float,
+    ) -> None:
+        tenant_id = str(row.get("tenant_id") or "")
+        row_source_id = str(row.get("source_id") or source_id)
+        runtime_tenant_id = ""
+        try:
+            if not tenant_id:
+                raise RuntimeError("tenant_id missing")
+            runtime_tenant_id = encode_scope_id(tenant_id, row_source_id)
+            assert self._tenant_dir_resolver is not None
+            tenant_dir = self._tenant_dir_resolver(runtime_tenant_id)
+            for agent_id, workspace_dir in self._iter_agent_workspace_dirs(
+                tenant_dir,
+            ):
+                if self._archive_run_timed_out(started_at, archive_config):
+                    summary["timed_out"] = True
+                    return
+                if (
+                    summary["workspaces_processed"]
+                    >= getattr(archive_config, "max_workspaces_per_run")
+                ):
+                    return
+                if (
+                    summary["files_archived"]
+                    >= getattr(archive_config, "max_files_per_run")
+                ):
+                    return
+                await self._run_workspace_archive_maintenance(
+                    source_id,
+                    tenant_id,
+                    runtime_tenant_id,
+                    agent_id,
+                    workspace_dir,
+                    archive_config,
+                    summary,
+                )
+        except Exception as exc:  # noqa: BLE001
+            summary["workspaces_failed"] += 1
+            summary["errors"].append(
+                {
+                    "tenant_id": tenant_id,
+                    "runtime_tenant_id": runtime_tenant_id,
+                    "error": str(exc),
+                },
+            )
+
+    async def _run_workspace_archive_maintenance(
+        self,
+        source_id: str,
+        tenant_id: str,
+        runtime_tenant_id: str,
+        agent_id: str,
+        workspace_dir: Path,
+        archive_config: object,
+        summary: dict[str, Any],
+    ) -> None:
+        summary["workspaces_seen"] += 1
+        try:
+            remaining_files = int(
+                getattr(archive_config, "max_files_per_run"),
+            ) - int(summary["files_archived"])
+            workspace_result = archive_old_orphans_for_workspace(
+                workspace_dir,
+                old_orphan_days=int(
+                    getattr(archive_config, "old_orphan_days"),
+                ),
+                max_files=int(
+                    getattr(archive_config, "max_files_per_workspace"),
+                ),
+                remaining_files=remaining_files,
+                actor="source_archive_maintenance",
+            )
+            summary["workspaces_processed"] += 1
+            summary["files_archived"] += len(workspace_result.archived_items)
+            summary["archived_size_bytes"] += (
+                workspace_result.archived_size_bytes
+            )
+            summary["candidates_seen"] += workspace_result.candidates_count
+            summary["files_skipped_limit"] += workspace_result.skipped_files
+            summary["results"].append(
+                {
+                    "tenant_id": tenant_id,
+                    "runtime_tenant_id": runtime_tenant_id,
+                    "agent_id": agent_id,
+                    "workspace_dir": str(workspace_dir),
+                    "files_archived": len(workspace_result.archived_items),
+                    "archived_paths": workspace_result.archived_paths,
+                    "archived_size_bytes": (
+                        workspace_result.archived_size_bytes
+                    ),
+                    "candidates_seen": workspace_result.candidates_count,
+                    "files_skipped_limit": workspace_result.skipped_files,
+                    "errors": workspace_result.errors,
+                },
+            )
+            await self._upsert_archive_read_model(
+                source_id,
+                tenant_id,
+                agent_id,
+                workspace_result.archived_items,
+            )
+        except Exception as exc:  # noqa: BLE001
+            summary["workspaces_failed"] += 1
+            summary["errors"].append(
+                {
+                    "tenant_id": tenant_id,
+                    "runtime_tenant_id": runtime_tenant_id,
+                    "agent_id": agent_id,
+                    "workspace_dir": str(workspace_dir),
+                    "error": str(exc),
+                },
+            )
+
+    async def _upsert_archive_read_model(
+        self,
+        source_id: str,
+        tenant_id: str,
+        agent_id: str,
+        items: list[dict[str, Any]],
+    ) -> None:
+        if not items or self._continuous_governance_service_factory is None:
+            return
+        service = self._continuous_governance_service_factory()
+        if service is None:
+            return
+        upsert_archive_items = getattr(service, "upsert_archive_items", None)
+        if upsert_archive_items is None:
+            return
+        await upsert_archive_items(
+            source_id=source_id,
+            target_user_id=tenant_id,
+            target_agent_id=agent_id,
+            items=items,
+        )
+
+    @staticmethod
+    def _iter_agent_workspace_dirs(tenant_dir: Path):
+        workspaces_dir = tenant_dir / "workspaces"
+        if not workspaces_dir.exists():
+            return
+        for workspace_dir in sorted(
+            workspaces_dir.iterdir(),
+            key=lambda item: item.name,
+        ):
+            if not workspace_dir.is_dir() or workspace_dir.name.startswith("."):
+                continue
+            if not is_valid_identity_value(workspace_dir.name):
+                continue
+            yield workspace_dir.name, workspace_dir

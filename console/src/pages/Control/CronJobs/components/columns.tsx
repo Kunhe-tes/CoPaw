@@ -61,6 +61,10 @@ export function isBroadcastChildJob(job: CronJob): boolean {
   return Boolean(getBroadcastParentInfo(job).sourceJobId);
 }
 
+export function isBatchDispatchJob(job: CronJob): boolean {
+  return job.meta?.broadcast_dispatch_intents_enabled === true;
+}
+
 function formatParentUser(info: BroadcastParentInfo): string {
   if (!info.sourceTenantId && !info.sourceTenantName) {
     return "未记录";
@@ -159,15 +163,17 @@ export const createColumns = (
       width: 120,
       render: (_: unknown, record: CronJob) => {
         const isRunning = record.task?.is_running;
-        const status = isRunning ? "running" : record.state?.last_status || "idle";
+        const status = isRunning
+          ? "running"
+          : record.state?.last_status || "idle";
         const toneClass =
           status === "running"
             ? styles.statusDotRunning
             : status === "success"
-              ? styles.statusDotSuccess
-              : status === "error" || status === "cancelled"
-                ? styles.statusDotError
-                : styles.statusDotIdle;
+            ? styles.statusDotSuccess
+            : status === "error" || status === "cancelled"
+            ? styles.statusDotError
+            : styles.statusDotIdle;
 
         return (
           <span className={styles.statusIndicator}>
@@ -189,7 +195,9 @@ export const createColumns = (
       dataIndex: ["schedule", "cron"],
       key: "cron",
       width: 180,
-      render: (cron: string) => {
+      render: (cron: string, record: CronJob) => {
+        const batchDispatch = isBatchDispatchJob(record);
+
         // Parse cron to friendly text
         const cronParts = parseCron(cron || "0 9 * * *");
         let displayText = "";
@@ -244,7 +252,10 @@ export const createColumns = (
               </div>
             }
           >
-            <span className={styles.cronText}>{displayText}</span>
+            <span className={styles.cronText}>
+              {batchDispatch && <Tag color="processing">批调度</Tag>}
+              <span>{displayText}</span>
+            </span>
           </Tooltip>
         );
       },

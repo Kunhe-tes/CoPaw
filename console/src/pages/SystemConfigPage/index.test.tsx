@@ -52,12 +52,24 @@ describe("SystemConfigPage", () => {
     return screen.getAllByRole("switch")[0];
   }
 
-  function getCronUnreadAutoPauseSwitch() {
+  function getZhaohuToolGuardNotificationSwitch() {
     return screen.getAllByRole("switch")[2];
   }
 
-  function getToolResultCompactSwitch() {
+  function getCronUnreadAutoPauseSwitch() {
+    return screen.getAllByRole("switch")[3];
+  }
+
+  function getCronSkipWeekendZhaohuSwitch() {
     return screen.getAllByRole("switch")[4];
+  }
+
+  function getArchiveMaintenanceSwitch() {
+    return screen.getAllByRole("switch")[6];
+  }
+
+  function getToolResultCompactSwitch() {
+    return screen.getAllByRole("switch")[7];
   }
 
   function seedEffectiveConfig(config: Record<string, unknown> = {}) {
@@ -168,6 +180,39 @@ describe("SystemConfigPage", () => {
     expect(mocks.messageApi.success).toHaveBeenCalled();
   });
 
+  it("saves zhaohu Tool Guard approval notification switch changes", async () => {
+    mocks.sourceSystemConfigApi.updateCurrent.mockResolvedValue({
+      source_id: "portal",
+      config: {
+        approval_notifications: {
+          zhaohu_tool_guard_enabled: true,
+        },
+      },
+      version: 1,
+      is_default: false,
+      updated_by: "alice",
+      updated_at: "2026-05-20 22:00:00",
+    });
+
+    render(<SystemConfigPage />);
+
+    expect(await screen.findByText("Tool Guard 审批招乎通知")).toBeTruthy();
+
+    fireEvent.click(getZhaohuToolGuardNotificationSwitch());
+    fireEvent.click(screen.getByRole("button", { name: "common.save" }));
+
+    await waitFor(() => {
+      expect(mocks.sourceSystemConfigApi.updateCurrent).toHaveBeenCalledWith({
+        config: {
+          approval_notifications: {
+            zhaohu_tool_guard_enabled: true,
+          },
+        },
+      });
+    });
+    expect(loadEffectiveConfig).toHaveBeenCalledWith("portal");
+  });
+
   it("saves cron unread auto pause settings", async () => {
     mocks.sourceSystemConfigApi.updateCurrent.mockResolvedValue({
       source_id: "portal",
@@ -203,6 +248,46 @@ describe("SystemConfigPage", () => {
         },
       });
     });
+  });
+
+  it("saves cron weekend zhaohu suppression setting", async () => {
+    mocks.sourceSystemConfigApi.updateCurrent.mockResolvedValue({
+      source_id: "portal",
+      config: {
+        cron_notifications: {
+          skip_weekend_zhaohu_enabled: true,
+        },
+      },
+      version: 1,
+      is_default: false,
+      updated_by: "alice",
+      updated_at: "2026-05-20 22:00:00",
+    });
+
+    render(<SystemConfigPage />);
+
+    const scheduledTaskCardTitle = await screen.findByText(
+      "定时任务设置",
+    );
+    const scheduledTaskCard = scheduledTaskCardTitle.closest(".ant-card");
+    const switchTitle = await screen.findByText(
+      "周末不发招呼完成通知",
+    );
+    expect(switchTitle.closest(".ant-card")).toBe(scheduledTaskCard);
+
+    fireEvent.click(getCronSkipWeekendZhaohuSwitch());
+    fireEvent.click(screen.getByRole("button", { name: "common.save" }));
+
+    await waitFor(() => {
+      expect(mocks.sourceSystemConfigApi.updateCurrent).toHaveBeenCalledWith({
+        config: {
+          cron_notifications: {
+            skip_weekend_zhaohu_enabled: true,
+          },
+        },
+      });
+    });
+    expect(loadEffectiveConfig).toHaveBeenCalledWith("portal");
   });
 
   it("saves cron task session cleanup settings", async () => {
@@ -266,6 +351,64 @@ describe("SystemConfigPage", () => {
             enabled: true,
             retention_days: 45,
             cron: "30 2 * * *",
+            unknown_retained: "yes",
+          },
+        },
+      });
+    });
+  });
+
+  it("saves archive maintenance settings", async () => {
+    mocks.sourceSystemConfigApi.getCurrent.mockResolvedValueOnce({
+      source_id: "portal",
+      config: {
+        provider_policy: { default_model: "qwen-max" },
+        archive_maintenance: {
+          enabled: true,
+          cron: "0 3 * * *",
+          unknown_retained: "yes",
+        },
+      },
+      version: 1,
+      is_default: false,
+      updated_by: "alice",
+      updated_at: "2026-05-20 22:00:00",
+    });
+    mocks.sourceSystemConfigApi.updateCurrent.mockResolvedValue({
+      source_id: "portal",
+      config: {
+        provider_policy: { default_model: "qwen-max" },
+        archive_maintenance: {
+          enabled: false,
+          cron: "30 3 * * *",
+          unknown_retained: "yes",
+        },
+      },
+      version: 2,
+      is_default: false,
+      updated_by: "alice",
+      updated_at: "2026-05-21 10:00:00",
+    });
+
+    render(<SystemConfigPage />);
+
+    expect(await screen.findByText("文件归档维护")).toBeTruthy();
+    expect(screen.getByText("03:00")).toBeTruthy();
+
+    fireEvent.mouseDown(
+      screen.getByRole("combobox", { name: "归档维护每日运行时间" }),
+    );
+    fireEvent.click(await screen.findByText("03:30"));
+    fireEvent.click(getArchiveMaintenanceSwitch());
+    fireEvent.click(screen.getByRole("button", { name: "common.save" }));
+
+    await waitFor(() => {
+      expect(mocks.sourceSystemConfigApi.updateCurrent).toHaveBeenCalledWith({
+        config: {
+          provider_policy: { default_model: "qwen-max" },
+          archive_maintenance: {
+            enabled: false,
+            cron: "30 3 * * *",
             unknown_retained: "yes",
           },
         },
