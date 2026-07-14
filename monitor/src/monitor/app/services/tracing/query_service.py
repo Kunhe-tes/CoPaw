@@ -1725,8 +1725,8 @@ class TracingQueryService:  # pylint: disable=too-many-public-methods
                 LIMIT %s OFFSET %s
             """
             final_params = (
-                [source_id, source_id]
-                + cron_params
+                cron_params
+                + [source_id, source_id]
                 + params
                 + [page_size, offset]
             )
