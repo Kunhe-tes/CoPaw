@@ -167,6 +167,32 @@ class TestUpdateTaskProgressSwitch:
             '{"ok":true,"skipped":true,"reason":"task progress disabled"}'
         )
 
+    @pytest.mark.asyncio
+    async def test_update_task_progress_accepts_missing_title(self):
+        """The tool schema says title is optional, so items-only calls should work."""
+        tracker = AsyncMock()
+        tracker.get_task_progress = AsyncMock(return_value=None)
+        tracker.update_task_progress = AsyncMock()
+        tracker_token = set_current_task_progress_tracker(tracker)
+        chat_token = set_current_task_progress_chat_id("chat-1")
+        turn_token = set_current_task_progress_turn_id("turn-1")
+
+        try:
+            with bind_source_system_config(_build_effective_config(True)):
+                response = await update_task_progress(
+                    items=[{"label": "分析", "status": "running"}],
+                )
+        finally:
+            reset_current_task_progress_tracker(tracker_token)
+            reset_current_task_progress_chat_id(chat_token)
+            reset_current_task_progress_turn_id(turn_token)
+
+        tracker.update_task_progress.assert_awaited_once()
+        _chat_id, payload = tracker.update_task_progress.await_args.args
+        assert response.content[0]["text"] == '{"ok":true}'
+        assert payload.title is None
+        assert payload.items[0].label == "分析"
+
     def test_attach_task_progress_skips_payload_when_disabled(self):
         """runner 附加阶段在开关关闭时不应把 task_progress 带给前端。"""
         event = {"type": "delta"}

@@ -47,12 +47,10 @@ from .tools import (
     execute_shell_command,
     # get_process_output,
     get_current_time,
-    get_token_usage,
     glob_search,
     grep_search,
     # list_background_processes,
     read_file,
-    set_user_timezone,
     # start_background_process,
     # stop_background_process,
     write_file,
@@ -256,31 +254,38 @@ class SWEAgent(ToolGuardMixin, ReActAgent):
         toolkit = Toolkit()
 
         # Check which tools are enabled from agent config
-        enabled_tools = {}
-        async_execution_tools = {}
+        from ..config.config import _default_builtin_tools
+
+        builtin_tool_defaults = _default_builtin_tools()
+        enabled_tools = {
+            name: tool.enabled for name, tool in builtin_tool_defaults.items()
+        }
+        async_execution_tools = {
+            "execute_shell_command": builtin_tool_defaults[
+                "execute_shell_command"
+            ].async_execution,
+        }
         try:
             if hasattr(self._agent_config, "tools") and hasattr(
                 self._agent_config.tools,
                 "builtin_tools",
             ):
                 builtin_tools = self._agent_config.tools.builtin_tools
-                enabled_tools = {
-                    name: tool.enabled for name, tool in builtin_tools.items()
-                }
+                enabled_tools.update(
+                    {
+                        name: tool.enabled
+                        for name, tool in builtin_tools.items()
+                    },
+                )
                 # Only execute_shell_command supports async_execution
-                async_execution_tools = {
-                    "execute_shell_command": (
-                        builtin_tools.get(
-                            "execute_shell_command",
-                        ).async_execution
-                        if "execute_shell_command" in builtin_tools
-                        else False
-                    ),
-                }
+                if "execute_shell_command" in builtin_tools:
+                    async_execution_tools["execute_shell_command"] = (
+                        builtin_tools["execute_shell_command"].async_execution
+                    )
         except Exception as e:
             logger.warning(
                 f"Failed to load agent tools config: {e}, "
-                "all tools will be disabled",
+                "canonical tool defaults will be used",
             )
 
         # Map of tool functions
@@ -296,15 +301,13 @@ class SWEAgent(ToolGuardMixin, ReActAgent):
             "grep_search": grep_search,
             "glob_search": glob_search,
             "get_current_time": get_current_time,
-            "set_user_timezone": set_user_timezone,
-            "get_token_usage": get_token_usage,
             "copy_file_to_static": copy_file_to_static,
             "update_task_progress": update_task_progress,
         }
 
         # Register only enabled tools
         for tool_name, tool_func in tool_functions.items():
-            # If tool not in config, enable by default (backward compatibility)
+            # Use the canonical default unless the agent config overrides it.
             if not enabled_tools.get(tool_name, True):
                 logger.debug("Skipped disabled tool: %s", tool_name)
                 continue

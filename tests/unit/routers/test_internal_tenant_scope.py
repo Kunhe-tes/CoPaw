@@ -107,6 +107,321 @@ def test_internal_cron_callback_dispatches_job_param_tenant() -> None:
     )
 
 
+def test_internal_cron_callback_forwards_b3_headers_to_run_job() -> None:
+    cron_manager = SimpleNamespace(run_job=AsyncMock())
+    manager = SimpleNamespace(
+        get_agent=AsyncMock(
+            return_value=SimpleNamespace(cron_manager=cron_manager),
+        ),
+    )
+    client = _build_client(manager)
+
+    response = client.post(
+        "/internal/cron/callback",
+        json={
+            "tenant_id": "tenant-a",
+            "source_id": "source-a",
+            "agent_id": "default",
+            "task_type": "job",
+            "job_id": "job-1",
+        },
+        headers={
+            "X-B3-Traceid": "8267fd70bacf497704fec30eaa353979",
+            "X-B3-Spanid": "32befd146889a61a",
+            "X-B3-Parentspanid": "5be42cd2b570b6da",
+            "X-B3-Sampled": "1",
+            "X-B3-Debug": "0",
+            "X-B3-BusinessId": "LQ1303LMES-WEB",
+            "X-B3-Timestamp": "1782962021603",
+        },
+    )
+
+    assert response.status_code == 200
+    cron_manager.run_job.assert_awaited_once_with(
+        "job-1",
+        is_manual=False,
+        source_id="source-a",
+        dispatch_meta={
+            "passthrough_headers": {
+                "X-B3-Traceid": "8267fd70bacf497704fec30eaa353979",
+                "X-B3-Spanid": "32befd146889a61a",
+                "X-B3-Parentspanid": "5be42cd2b570b6da",
+                "X-B3-Sampled": "1",
+                "X-B3-Debug": "0",
+                "X-B3-BusinessId": "LQ1303LMES-WEB",
+                "X-B3-Timestamp": "1782962021603",
+            },
+            "b3_trace_id": "8267fd70bacf497704fec30eaa353979",
+        },
+    )
+
+
+def test_internal_cron_callback_skips_batch_parent_external_callback(
+    monkeypatch,
+) -> None:
+    source_job = SimpleNamespace(
+        meta={"broadcast_dispatch_intents_enabled": True},
+    )
+    cron_manager = SimpleNamespace(
+        run_job=AsyncMock(),
+        get_job=AsyncMock(return_value=source_job),
+    )
+    manager = SimpleNamespace(
+        get_agent=AsyncMock(
+            return_value=SimpleNamespace(cron_manager=cron_manager),
+        ),
+    )
+
+    monkeypatch.setenv("SWE_CRON_DISPATCH_INTENTS_ENABLED", "1")
+    client = _build_client(manager)
+    payload = {
+        "tenant_id": "tenant-a",
+        "source_id": "source-a",
+        "agent_id": "default",
+        "task_type": "job",
+        "job_id": "job-1",
+    }
+    job_param = base64.urlsafe_b64encode(
+        json.dumps(payload).encode(),
+    ).decode()
+
+    response = client.post(
+        "/internal/cron/callback",
+        json={"jobParam": job_param},
+    )
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "status": "ok",
+        "task_type": "job",
+        "skipped": "batch_managed_external_callback",
+    }
+    cron_manager.run_job.assert_not_awaited()
+
+
+def test_internal_cron_callback_skips_batch_parent_direct_external_body(
+    monkeypatch,
+) -> None:
+    source_job = SimpleNamespace(
+        meta={"broadcast_dispatch_intents_enabled": True},
+        id="job-1",
+        schedule=SimpleNamespace(cron="0 9 * * *", timezone="UTC"),
+    )
+    cron_manager = SimpleNamespace(
+        run_job=AsyncMock(),
+        get_job=AsyncMock(return_value=source_job),
+    )
+    manager = SimpleNamespace(
+        get_agent=AsyncMock(
+            return_value=SimpleNamespace(cron_manager=cron_manager),
+        ),
+    )
+
+    monkeypatch.setenv("SWE_CRON_DISPATCH_INTENTS_ENABLED", "1")
+    client = _build_client(manager)
+    body = {
+        "tenant_id": "tenant-a",
+        "source_id": "source-a",
+        "agent_id": "default",
+        "task_type": "job",
+        "job_id": "job-1",
+        "logId": "scheduler-log-1",
+    }
+
+    response = client.post("/internal/cron/callback", json=body)
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "status": "ok",
+        "task_type": "job",
+        "skipped": "batch_managed_external_callback",
+    }
+    cron_manager.run_job.assert_not_awaited()
+
+
+def test_internal_cron_callback_runs_flagged_parent_when_runtime_flag_off(
+    monkeypatch,
+) -> None:
+    monkeypatch.delenv("SWE_CRON_DISPATCH_INTENTS_ENABLED", raising=False)
+    source_job = SimpleNamespace(
+        meta={"broadcast_dispatch_intents_enabled": True},
+    )
+    cron_manager = SimpleNamespace(
+        run_job=AsyncMock(),
+        get_job=AsyncMock(return_value=source_job),
+    )
+    manager = SimpleNamespace(
+        get_agent=AsyncMock(
+            return_value=SimpleNamespace(cron_manager=cron_manager),
+        ),
+    )
+    client = _build_client(manager)
+
+    response = client.post(
+        "/internal/cron/callback",
+        json={
+            "tenant_id": "tenant-a",
+            "source_id": "source-a",
+            "agent_id": "default",
+            "task_type": "job",
+            "job_id": "job-1",
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json() == {"status": "ok", "task_type": "job"}
+    cron_manager.run_job.assert_awaited_once_with(
+        "job-1",
+        is_manual=False,
+        source_id="source-a",
+    )
+
+
+def test_internal_cron_callback_skips_batch_managed_child_callback(
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv("SWE_CRON_DISPATCH_INTENTS_ENABLED", "1")
+    child_job = SimpleNamespace(
+        meta={
+            "broadcast_source_job_id": "parent-job",
+            "broadcast_dispatch_intents_enabled": True,
+        },
+    )
+    cron_manager = SimpleNamespace(
+        run_job=AsyncMock(),
+        get_job=AsyncMock(return_value=child_job),
+    )
+    manager = SimpleNamespace(
+        get_agent=AsyncMock(
+            return_value=SimpleNamespace(cron_manager=cron_manager),
+        ),
+    )
+    client = _build_client(manager)
+    payload = {
+        "tenant_id": "tenant-b",
+        "source_id": "source-a",
+        "agent_id": "default",
+        "task_type": "job",
+        "job_id": "child-1",
+    }
+    job_param = base64.urlsafe_b64encode(
+        json.dumps(payload).encode(),
+    ).decode()
+
+    response = client.post(
+        "/internal/cron/callback",
+        json={"jobParam": job_param},
+    )
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "status": "ok",
+        "task_type": "job",
+        "skipped": "batch_managed_child",
+    }
+    cron_manager.run_job.assert_not_awaited()
+
+
+def test_dispatch_service_callback_runs_batch_managed_child(
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv("SWE_CRON_DISPATCH_INTENTS_ENABLED", "1")
+    child_job = SimpleNamespace(
+        meta={
+            "broadcast_source_job_id": "parent-job",
+            "broadcast_dispatch_intents_enabled": True,
+        },
+    )
+    cron_manager = SimpleNamespace(
+        run_job=AsyncMock(),
+        get_job=AsyncMock(return_value=child_job),
+    )
+    manager = SimpleNamespace(
+        get_agent=AsyncMock(
+            return_value=SimpleNamespace(cron_manager=cron_manager),
+        ),
+    )
+    client = _build_client(manager)
+
+    response = client.post(
+        "/internal/cron/callback",
+        json={
+            "tenant_id": "tenant-b",
+            "source_id": "source-a",
+            "agent_id": "default",
+            "task_type": "job",
+            "job_id": "child-1",
+            "scopeId": "tenant-b-source-a",
+            "fromId": "tenant-b",
+            "callback_source": "dispatch_service",
+            "dispatch_intent_id": 7,
+            "dispatch_batch_id": "batch-1",
+            "dispatch_attempt": 2,
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json() == {"status": "ok", "task_type": "job"}
+    cron_manager.run_job.assert_awaited_once_with(
+        "child-1",
+        is_manual=False,
+        source_id="source-a",
+        dispatch_meta={
+            "source": "dispatch_service",
+            "intent_id": 7,
+            "batch_id": "batch-1",
+            "dispatch_attempt": 2,
+            "tenant_id": "tenant-b",
+            "source_id": "source-a",
+            "scope_id": "tenant-b-source-a",
+            "from_id": "tenant-b",
+            "agent_id": "default",
+            "job_id": "child-1",
+            "parent_scheduled_fire_at": "",
+            "provider_id": "default",
+            "model_id": "default",
+        },
+    )
+
+
+def test_dispatch_service_callback_rejects_missing_dispatch_identity(
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv("SWE_CRON_DISPATCH_INTENTS_ENABLED", "1")
+    child_job = SimpleNamespace(
+        meta={
+            "broadcast_source_job_id": "parent-job",
+            "broadcast_dispatch_intents_enabled": True,
+        },
+    )
+    cron_manager = SimpleNamespace(
+        run_job=AsyncMock(),
+        get_job=AsyncMock(return_value=child_job),
+    )
+    manager = SimpleNamespace(
+        get_agent=AsyncMock(
+            return_value=SimpleNamespace(cron_manager=cron_manager),
+        ),
+    )
+    client = _build_client(manager)
+
+    response = client.post(
+        "/internal/cron/callback",
+        json={
+            "tenant_id": "tenant-b",
+            "source_id": "source-a",
+            "agent_id": "default",
+            "task_type": "job",
+            "job_id": "child-1",
+            "callback_source": "dispatch_service",
+        },
+    )
+
+    assert response.status_code == 400
+    assert "dispatch_service callback requires" in response.json()["detail"]
+    cron_manager.run_job.assert_not_awaited()
+
+
 def test_internal_scope_encode_single_item() -> None:
     client = _build_client(SimpleNamespace())
 

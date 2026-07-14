@@ -264,21 +264,25 @@ def _owner_with_skill(
     received_version = _text_or_none(skill.get("received_version"))
     installed_version = (
         _text_or_none(skill.get("installed_version"))
-        or received_version
         or skill_version
+        or received_version
     )
     market_version = (
         _text_or_none(skill.get("market_version"))
         or _text_or_none(skill.get("latest_version"))
+        or received_version
         or skill_version
+    )
+    version_mismatch = bool(
+        market_version
+        and installed_version
+        and market_version != installed_version,
     )
     has_update = _bool_or_none(skill.get("has_update"))
     if has_update is None:
-        has_update = bool(
-            market_version
-            and installed_version
-            and market_version != installed_version,
-        )
+        has_update = version_mismatch
+    else:
+        has_update = has_update or version_mismatch
     return user.model_copy(
         update={
             "skill_name": _text_or_none(

@@ -38,9 +38,6 @@ TOOL_DISPLAY_NAMES = {
     "browser_use": "网页操作",
     "desktop_screenshot": "截取屏幕",
     "get_current_time": "获取时间",
-    "set_user_timezone": "设置时区",
-    "view_image": "查看图片",
-    "view_video": "查看视频",
     "send_file_to_user": "发送文件",
 }
 

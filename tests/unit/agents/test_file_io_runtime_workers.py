@@ -152,6 +152,26 @@ async def test_read_file_invalid_line_arguments_do_not_use_runtime_worker(
 
 
 @pytest.mark.asyncio
+async def test_read_file_start_line_beyond_eof_returns_guidance(
+    tmp_path: Path,
+    monkeypatch,
+):
+    target = tmp_path / "note.md"
+    target.write_text("alpha\nbeta", encoding="utf-8")
+    state: dict[str, object] = {}
+    _install_fake_runtime_worker(monkeypatch, state)
+    monkeypatch.setattr(file_io, "_resolve_file_path", lambda _: str(target))
+
+    result = await file_io.read_file("logical/path.md", start_line=200)
+
+    text = result.content[0]["text"]
+    assert "Requested start_line 200 exceeds file length (2 lines)." in text
+    assert "No content was returned." in text
+    assert "start_line=2" in text
+    assert state["worker_calls"] == ["_read_file_selection_sync"]
+
+
+@pytest.mark.asyncio
 async def test_edit_file_old_text_not_found_maps_worker_error_to_not_found(
     tmp_path: Path,
     monkeypatch,

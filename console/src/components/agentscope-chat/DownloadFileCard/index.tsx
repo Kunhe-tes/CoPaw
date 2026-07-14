@@ -23,6 +23,7 @@ export interface DownloadFileCardProps {
   enableClickTracking?: boolean;
   className?: string;
   style?: React.CSSProperties;
+  hideLoadBtn?: boolean;
 }
 
 const EMPTY = "\u00A0";
@@ -96,6 +97,7 @@ function DownloadFileCard(props: DownloadFileCardProps) {
     enableClickTracking = false,
     className,
     style,
+    hideLoadBtn,
   } = props;
   const [previewOpen, setPreviewOpen] = useState(false);
   const autoPreviewOpenedRef = useRef(false);
@@ -323,13 +325,15 @@ function DownloadFileCard(props: DownloadFileCardProps) {
           </div>
         </div>
         {/* 直接下载按钮 */}
-        <div
-          style={downloadBtnStyle}
-          onClick={handleDownload}
-          title="下载"
-        >
-          <SparkDownloadLine style={{ fontSize: "14px" }} />
-        </div>
+        {!hideLoadBtn && (
+          <div
+            style={downloadBtnStyle}
+            onClick={handleDownload}
+            title="下载"
+          >
+            <SparkDownloadLine style={{ fontSize: "14px" }} />
+          </div>
+        )}
       </div>
       <FilePreviewModal
         open={previewOpen}

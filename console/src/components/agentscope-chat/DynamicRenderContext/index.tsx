@@ -24,14 +24,20 @@ interface DynamicRenderContextValue {
   /** 加载错误信息 */
   error: string | null;
   /** 初始化模板列表和内容（应用启动时调用） */
-  initialize: () => Promise<void>;
+  initialize: (options?: { skipPreload?: boolean }) => Promise<void>;
   /** 获取模板内容（从缓存或重新获取） */
   getTemplateContent: (templateId: number) => Promise<string | null>;
+  /** 根据模版名称获取模版ID */
+  getTemplateIdByName: (templateName: string) => number | null;
+  /** 判断模版是否为静态模版（templateFlag === 'no_query'） */
+  isStaticTemplate: (templateId: number) => boolean;
   /** 渲染模板数据 */
   renderTemplate: (
     templateId: number,
     data: Record<string, any>
   ) => Promise<string | null>;
+  /** 渲染静态模版（无需数据获取，直接渲染模版内容） */
+  renderStaticTemplate: (templateId: number) => Promise<string | null>;
   templateList
 }
 
@@ -40,7 +46,10 @@ const DynamicRenderContext = createContext<DynamicRenderContextValue>({
   error: null,
   initialize: async () => { },
   getTemplateContent: async () => null,
+  getTemplateIdByName: () => null,
+  isStaticTemplate: () => false,
   renderTemplate: async () => null,
+  renderStaticTemplate: async () => null,
   templateList: [],
 });
 
@@ -126,8 +135,9 @@ export function DynamicRenderProvider(props: DynamicRenderProviderProps) {
   /**
    * 初始化模板列表和内容
    * 使用 requestIdleCallback 在页面空闲时加载，避免阻塞渲染
+   * @param options.skipPreload - 是否跳过预加载所有模板（用于按需加载场景）
    */
-  const initialize = useCallback(async () => {
+  const initialize = useCallback(async (options?: { skipPreload?: boolean }) => {
     if (initializedRef.current) return;
     initializedRef.current = true;
 
@@ -136,7 +146,13 @@ export function DynamicRenderProvider(props: DynamicRenderProviderProps) {
       const templateList = await dynamicRenderApi.getTemplateList();
       templateListRef.current = templateList.data || [];
 
-      // 2. 在页面空闲时预加载模板内容
+      // 2. 如果 skipPreload 为 true，则不预加载模版内容（按需加载模式）
+      if (options?.skipPreload) {
+        setIsTemplateListLoaded(true);
+        return;
+      }
+
+      // 3. 在页面空闲时预加载模板内容
       const loadTemplatesWhenIdle = () => {
         if (unmountedRef.current) return;
 
@@ -150,7 +166,7 @@ export function DynamicRenderProvider(props: DynamicRenderProviderProps) {
           );
         } else {
           // 降级方案：使用 setTimeout
-          const timeoutId = setTimeout(() => {
+          setTimeout(() => {
             preloadTemplates(templateList.data || []);
           }, 100);
           // 保存 timeout ID 以便清理（如果需要的话）
@@ -165,6 +181,16 @@ export function DynamicRenderProvider(props: DynamicRenderProviderProps) {
       setIsTemplateListLoaded(true); // 即使失败也标记为已尝试
     }
   }, [preloadTemplates]);
+
+  /**
+   * 根据模板名称获取模板 ID
+   */
+  const getTemplateIdByName = useCallback((templateName: string): number | null => {
+    const template = templateListRef.current.find(
+      (t) => t.templateName === templateName
+    );
+    return template ? template.templateId : null;
+  }, []);
 
   /**
    * 获取模板内容（按需加载）
@@ -254,6 +280,42 @@ export function DynamicRenderProvider(props: DynamicRenderProviderProps) {
     [getTemplateContent]
   );
 
+  /**
+   * 判断模板是否为静态模板（templateFlag === 'no_query'）
+   * 静态模板无需调用 /api/template/result 获取数据，直接渲染模板内容即可
+   */
+  const isStaticTemplate = useCallback((templateId: number): boolean => {
+    const template = templateListRef.current.find(
+      (t) => t.templateId === templateId
+    );
+    return template?.templateFlag === "no_query";
+  }, []);
+
+  /**
+   * 渲染静态模板（无需数据获取，直接渲染模板内容）
+   */
+  const renderStaticTemplate = useCallback(
+    async (templateId: number): Promise<string | null> => {
+      try {
+        let cache = templateCacheRef.current.get(templateId);
+        if (!cache) {
+          const content = await getTemplateContent(templateId);
+          if (!content) {
+            throw new Error(`静态模板 ${templateId} 加载失败`);
+          }
+          cache = templateCacheRef.current.get(templateId)!;
+        }
+        // 静态模板直接使用空对象渲染
+        const rendered = cache.compiled({});
+        return rendered;
+      } catch (err) {
+        console.error(`渲染静态模板 ${templateId} 失败:`, err);
+        return null;
+      }
+    },
+    [getTemplateContent]
+  );
+
   // 使用 useMemo 优化 Context value，避免不必要的重渲染
   const value = useMemo(
     () => ({
@@ -261,7 +323,10 @@ export function DynamicRenderProvider(props: DynamicRenderProviderProps) {
       error,
       initialize,
       getTemplateContent,
+      getTemplateIdByName,
+      isStaticTemplate,
       renderTemplate,
+      renderStaticTemplate,
       templateList: templateListRef,
     }),
     [
@@ -269,7 +334,10 @@ export function DynamicRenderProvider(props: DynamicRenderProviderProps) {
       error,
       initialize,
       getTemplateContent,
+      getTemplateIdByName,
+      isStaticTemplate,
       renderTemplate,
+      renderStaticTemplate,
     ]
   );
 

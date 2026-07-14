@@ -44,6 +44,21 @@ def test_react_toolkit_excludes_background_process_tools() -> None:
         assert tool_name not in toolkit.tools
 
 
+def test_react_toolkit_skips_retired_builtin_tools() -> None:
+    agent = object.__new__(SWEAgent)
+    agent._agent_config = SimpleNamespace()
+
+    toolkit = agent._create_toolkit()
+
+    for tool_name in (
+        "get_token_usage",
+        "set_user_timezone",
+        "view_image",
+        "view_video",
+    ):
+        assert tool_name not in toolkit.tools
+
+
 @pytest.mark.asyncio
 async def test_normalize_tool_function_errors_converts_tool_execution_error():
     async def failing_tool() -> ToolResponse:
@@ -112,9 +127,12 @@ async def test_react_toolkit_normalizes_builtin_tool_execution_errors(
 
 
 @pytest.mark.asyncio
-async def test_copy_file_to_static_raises_tool_execution_error_for_missing_file():
-    with pytest.raises(ToolExecutionError) as exc_info:
-        await copy_file_to_static("missing-file.txt")
+async def test_copy_file_to_static_raises_tool_execution_error_for_missing_file(
+    tmp_path,
+):
+    with tenant_context(tenant_id="tenant_a", workspace_dir=tmp_path):
+        with pytest.raises(ToolExecutionError) as exc_info:
+            await copy_file_to_static("missing-file.txt")
 
     assert exc_info.value.error_type == "not_found"
     assert "File not found" in exc_info.value.detail

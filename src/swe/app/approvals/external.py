@@ -27,6 +27,7 @@ logger = logging.getLogger(__name__)
 
 CONSOLE_CHANNEL = "console"
 ZHAOHU_CHANNEL = "zhaohu"
+TOOL_GUARD_APPROVAL_KIND = "tool_guard"
 APPROVAL_SOURCE_CHANNEL_META_KEY = "approval_source_channel"
 APPROVAL_REQUEST_ID_META_KEY = "approval_request_id"
 APPROVAL_DECISION_META_KEY = "approval_decision"
@@ -240,6 +241,80 @@ async def _get_channel(channel_manager: Any, name: str) -> Any | None:
     return await _maybe_await(get_channel(name))
 
 
+def _is_tool_guard_approval(pending: PendingApproval) -> bool:
+    extra = pending.extra if isinstance(pending.extra, dict) else {}
+    return (
+        extra.get("approval_kind") or TOOL_GUARD_APPROVAL_KIND
+    ) == TOOL_GUARD_APPROVAL_KIND
+
+
+def _approval_source_id(pending: PendingApproval) -> str | None:
+    extra = pending.extra if isinstance(pending.extra, dict) else {}
+    source_id = extra.get("source_id")
+    return source_id if isinstance(source_id, str) and source_id else None
+
+
+def _source_system_config_service_from_workspace(workspace: Any | None) -> Any:
+    if workspace is None:
+        return None
+    return getattr(
+        workspace,
+        "_source_system_config_service",
+        None,
+    ) or getattr(workspace, "source_system_config_service", None)
+
+
+async def _resolve_source_config_for_notification(
+    pending: PendingApproval,
+    *,
+    workspace: Any | None = None,
+) -> Any | None:
+    from ..source_system_config.runtime import get_current_source_system_config
+
+    current_config = get_current_source_system_config()
+    if current_config is not None:
+        return current_config
+
+    source_id = _approval_source_id(pending)
+    if not source_id:
+        return None
+
+    service = _source_system_config_service_from_workspace(workspace)
+    resolve_config = getattr(service, "resolve_config", None)
+    if not callable(resolve_config):
+        return None
+
+    try:
+        return await _maybe_await(resolve_config(source_id))
+    except Exception:
+        logger.warning(
+            "zhaohu approval notification source config resolve failed: "
+            "request_id=%s source_id=%s",
+            pending.request_id,
+            source_id,
+            exc_info=True,
+        )
+        return None
+
+
+async def _should_notify_zhaohu_for_approval(
+    pending: PendingApproval,
+    *,
+    workspace: Any | None = None,
+) -> bool:
+    if not _is_tool_guard_approval(pending):
+        return True
+    from ..source_system_config.runtime import (
+        is_zhaohu_tool_guard_notification_enabled,
+    )
+
+    source_config = await _resolve_source_config_for_notification(
+        pending,
+        workspace=workspace,
+    )
+    return is_zhaohu_tool_guard_notification_enabled(source_config)
+
+
 async def _wait_until_run_idle(task_tracker: Any, run_key: str) -> None:
     get_status = getattr(task_tracker, "get_status", None)
     if get_status is None:
@@ -307,6 +382,8 @@ async def notify_cron_approval_pending(
     workflow boundary in place so the real rich card implementation can fill
     it later.
     """
+    if not await _should_notify_zhaohu_for_approval(pending):
+        return
     zhaohu = await _get_channel(channel_manager, ZHAOHU_CHANNEL)
     if zhaohu is None:
         return
@@ -359,6 +436,11 @@ async def notify_cron_approval_result(
     source_channel: str,
 ) -> None:
     """Notify zhaohu about the submitted approval result."""
+    if not await _should_notify_zhaohu_for_approval(
+        pending,
+        workspace=workspace,
+    ):
+        return
     channel_manager = getattr(workspace, "channel_manager", None)
     zhaohu = await _get_channel(channel_manager, ZHAOHU_CHANNEL)
     if zhaohu is None:

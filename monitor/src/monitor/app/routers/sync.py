@@ -126,7 +126,6 @@ async def record_execution(
     Returns:
         立即返回成功响应，execution_id 为 None（实际 ID 在后台写入后生成）
     """
-    # 创建后台任务异步处理数据库写入
     asyncio.create_task(_background_record_execution(service, request))
 
     # 立即返回成功响应

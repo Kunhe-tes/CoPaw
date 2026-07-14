@@ -90,6 +90,14 @@ DATABASE_ACCESS_GUARD_ENABLED_SWITCH = SourceSystemConfigSwitch(
     default_value=True,
     value_type="bool",
 )
+APPROVAL_NOTIFICATIONS_ZHAOHU_TOOL_GUARD_ENABLED_SETTING = (
+    SourceSystemConfigSetting(
+        key="approval_notifications.zhaohu_tool_guard_enabled",
+        path=("approval_notifications", "zhaohu_tool_guard_enabled"),
+        default_value=False,
+        value_type="bool",
+    )
+)
 FILE_READ_TRUNCATION_ENABLED_SETTING = SourceSystemConfigSetting(
     key="file_read_truncation.enabled",
     path=("file_read_truncation", "enabled"),
@@ -135,6 +143,57 @@ CRON_TASK_SESSION_CLEANUP_CRON_SETTING = SourceSystemConfigSetting(
     path=("cron_task_session_cleanup", "cron"),
     default_value="0 1 * * *",
     value_type="str",
+)
+ARCHIVE_MAINTENANCE_ENABLED_SETTING = SourceSystemConfigSetting(
+    key="archive_maintenance.enabled",
+    path=("archive_maintenance", "enabled"),
+    default_value=True,
+    value_type="bool",
+)
+ARCHIVE_MAINTENANCE_CRON_SETTING = SourceSystemConfigSetting(
+    key="archive_maintenance.cron",
+    path=("archive_maintenance", "cron"),
+    default_value="0 3 * * *",
+    value_type="str",
+)
+ARCHIVE_MAINTENANCE_OLD_ORPHAN_DAYS_SETTING = SourceSystemConfigSetting(
+    key="archive_maintenance.old_orphan_days",
+    path=("archive_maintenance", "old_orphan_days"),
+    default_value=3,
+    value_type="int",
+    ge=1,
+)
+ARCHIVE_MAINTENANCE_MAX_WORKSPACES_PER_RUN_SETTING = (
+    SourceSystemConfigSetting(
+        key="archive_maintenance.max_workspaces_per_run",
+        path=("archive_maintenance", "max_workspaces_per_run"),
+        default_value=200,
+        value_type="int",
+        ge=1,
+    )
+)
+ARCHIVE_MAINTENANCE_MAX_FILES_PER_WORKSPACE_SETTING = (
+    SourceSystemConfigSetting(
+        key="archive_maintenance.max_files_per_workspace",
+        path=("archive_maintenance", "max_files_per_workspace"),
+        default_value=100,
+        value_type="int",
+        ge=1,
+    )
+)
+ARCHIVE_MAINTENANCE_MAX_FILES_PER_RUN_SETTING = SourceSystemConfigSetting(
+    key="archive_maintenance.max_files_per_run",
+    path=("archive_maintenance", "max_files_per_run"),
+    default_value=5000,
+    value_type="int",
+    ge=1,
+)
+ARCHIVE_MAINTENANCE_TIMEOUT_SECONDS_SETTING = SourceSystemConfigSetting(
+    key="archive_maintenance.timeout_seconds",
+    path=("archive_maintenance", "timeout_seconds"),
+    default_value=900,
+    value_type="int",
+    ge=1,
 )
 QUERY_RETRY_ENABLED_SETTING = SourceSystemConfigSetting(
     key="query_retry.enabled",
@@ -226,6 +285,14 @@ LLM_CRON_ACQUIRE_TIMEOUT_SETTING = SourceSystemConfigSetting(
     value_type="optional_float",
     ge=10.0,
 )
+CRON_NOTIFICATIONS_SKIP_WEEKEND_ZHAOHU_ENABLED_SETTING = (
+    SourceSystemConfigSetting(
+        key="cron_notifications.skip_weekend_zhaohu_enabled",
+        path=("cron_notifications", "skip_weekend_zhaohu_enabled"),
+        default_value=False,
+        value_type="bool",
+    )
+)
 SYSTEM_PROMPT_INJECTIONS_PATH = ("system_prompt_injections",)
 SYSTEM_PROMPT_INJECTIONS_DEFAULT: list[str] = []
 
@@ -244,6 +311,7 @@ CURRENT_SOURCE_SYSTEM_CONFIG_SETTINGS: tuple[
     TOOL_RESULT_COMPACT_OLD_MAX_BYTES_SETTING,
     TOOL_RESULT_COMPACT_RECENT_MAX_BYTES_SETTING,
     TOOL_RESULT_COMPACT_RETENTION_DAYS_SETTING,
+    APPROVAL_NOTIFICATIONS_ZHAOHU_TOOL_GUARD_ENABLED_SETTING,
     FILE_READ_TRUNCATION_ENABLED_SETTING,
     FILE_READ_TRUNCATION_MAX_BYTES_SETTING,
     CRON_UNREAD_AUTO_PAUSE_ENABLED_SETTING,
@@ -251,6 +319,13 @@ CURRENT_SOURCE_SYSTEM_CONFIG_SETTINGS: tuple[
     CRON_TASK_SESSION_CLEANUP_ENABLED_SETTING,
     CRON_TASK_SESSION_CLEANUP_RETENTION_DAYS_SETTING,
     CRON_TASK_SESSION_CLEANUP_CRON_SETTING,
+    ARCHIVE_MAINTENANCE_ENABLED_SETTING,
+    ARCHIVE_MAINTENANCE_CRON_SETTING,
+    ARCHIVE_MAINTENANCE_OLD_ORPHAN_DAYS_SETTING,
+    ARCHIVE_MAINTENANCE_MAX_WORKSPACES_PER_RUN_SETTING,
+    ARCHIVE_MAINTENANCE_MAX_FILES_PER_WORKSPACE_SETTING,
+    ARCHIVE_MAINTENANCE_MAX_FILES_PER_RUN_SETTING,
+    ARCHIVE_MAINTENANCE_TIMEOUT_SECONDS_SETTING,
     QUERY_RETRY_ENABLED_SETTING,
     QUERY_RETRY_MAX_RETRIES_SETTING,
     QUERY_RETRY_BACKOFF_BASE_SETTING,
@@ -264,6 +339,7 @@ CURRENT_SOURCE_SYSTEM_CONFIG_SETTINGS: tuple[
     LLM_ACQUIRE_TIMEOUT_SETTING,
     LLM_CHAT_ACQUIRE_TIMEOUT_SETTING,
     LLM_CRON_ACQUIRE_TIMEOUT_SETTING,
+    CRON_NOTIFICATIONS_SKIP_WEEKEND_ZHAOHU_ENABLED_SETTING,
 )
 
 _MISSING = object()
@@ -455,7 +531,10 @@ def normalize_registered_setting_values(
             continue
         if setting.value_type == "str":
             string_value = _coerce_registered_string_value(setting, value)
-            if setting is CRON_TASK_SESSION_CLEANUP_CRON_SETTING:
+            if setting in (
+                CRON_TASK_SESSION_CLEANUP_CRON_SETTING,
+                ARCHIVE_MAINTENANCE_CRON_SETTING,
+            ):
                 string_value = _normalize_daily_cron_value(
                     setting,
                     string_value,
@@ -794,10 +873,19 @@ def _validate_explicit_llm_rate_limiter_ranges(
 
 
 __all__ = [
+    "ARCHIVE_MAINTENANCE_CRON_SETTING",
+    "ARCHIVE_MAINTENANCE_ENABLED_SETTING",
+    "ARCHIVE_MAINTENANCE_MAX_FILES_PER_RUN_SETTING",
+    "ARCHIVE_MAINTENANCE_MAX_FILES_PER_WORKSPACE_SETTING",
+    "ARCHIVE_MAINTENANCE_MAX_WORKSPACES_PER_RUN_SETTING",
+    "ARCHIVE_MAINTENANCE_OLD_ORPHAN_DAYS_SETTING",
+    "ARCHIVE_MAINTENANCE_TIMEOUT_SECONDS_SETTING",
+    "APPROVAL_NOTIFICATIONS_ZHAOHU_TOOL_GUARD_ENABLED_SETTING",
     "CHAT_TASK_PROGRESS_ENABLED_SWITCH",
     "CRON_TASK_SESSION_CLEANUP_CRON_SETTING",
     "CRON_TASK_SESSION_CLEANUP_ENABLED_SETTING",
     "CRON_TASK_SESSION_CLEANUP_RETENTION_DAYS_SETTING",
+    "CRON_NOTIFICATIONS_SKIP_WEEKEND_ZHAOHU_ENABLED_SETTING",
     "CRON_UNREAD_AUTO_PAUSE_ENABLED_SETTING",
     "CRON_UNREAD_AUTO_PAUSE_THRESHOLD_SETTING",
     "CURRENT_SOURCE_SYSTEM_CONFIG_SETTINGS",

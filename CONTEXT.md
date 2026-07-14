@@ -80,6 +80,66 @@ _Avoid_: cron config, timer task
 A single execution of a **Scheduled Job**, whether triggered by schedule or manually.
 _Avoid_: cron call, job instance
 
+**Scheduled Run Intent**:
+A queued, claimable work item representing a due **Scheduled Run** before execution starts. Resource-aware dispatch orders **Scheduled Run Intents**; it does not rewrite the owning **Scheduled Job** definition. A **Scheduled Run Intent** may represent the parent broadcast dispatch run or a child run in the same **Dispatch Batch**. A **Scheduled Run Intent** does not create user notification state; notification remains tied to the eventual execution record.
+_Avoid_: cron offset, child job priority, job rewrite
+
+**Dispatch Batch**:
+The set of **Scheduled Run Intents** for one planned firing of the same parent **Scheduled Job** for the same source. In the first rollout, the batch contains a parent dispatch intent plus its broadcast child intents; the parent intent expands or verifies the child intent set, and child intents then execute in the stable **Batch Dispatch Order**.
+_Avoid_: time bucket, queue shard, child job group
+
+**Dispatch Intent Role**:
+The role of a **Scheduled Run Intent** inside a **Dispatch Batch**. A parent intent represents the batch dispatch step for the broadcast source job, while child intents represent target scheduled runs that execute existing child **Scheduled Jobs**.
+_Avoid_: task type, notification type, model pool
+
+**Dispatch Intent Queue**:
+The Scheduler-owned durable queue of **Scheduled Run Intents**. The **Cron Scheduling Service** claims due intents from this queue and calls the SWE internal callback to start the referenced **Scheduled Job**; Scheduler owns ordering, locking, retry visibility, and dispatch telemetry before execution starts. Monitor may persist and display the queue records, but it does not host the dispatch loop. The first rollout scope is broadcast parent and child **Scheduled Run Intents**.
+_Avoid_: local SWE queue, external scheduler callback, notification queue
+
+**Cron Scheduling Service**:
+An independent Scheduler service hosted outside both the SWE execution runtime and the Monitor observability runtime. It owns due-intent dispatch, callback handoff to SWE, immediate refill after completed scheduled work, periodic worker-capacity adjustment, and dispatch telemetry. It does not execute agent work itself; SWE remains the execution owner, and Monitor remains the observability and persistence surface.
+_Avoid_: SWE dispatch worker, external scheduler job, notification worker
+
+**Intent Dispatch Handoff**:
+The transition that records a claimed **Scheduled Run Intent** as handed off to SWE through the internal cron callback. Before handoff, stale locks and callback retry backoff belong to the **Dispatch Intent Queue**. After handoff, success, failure, and notification belong to the normal **Scheduled Run** execution record; dispatch-managed completion feedback returns to Scheduler so it can update the intent and immediately make the next dispatch decision.
+_Avoid_: execution completion, notification status, run result
+
+**Broadcast Child Trigger Compatibility**:
+The first dispatch-queue rollout keeps broadcast child **Scheduled Jobs** and their offset metadata for display, audit, and rollback, but child jobs are not externally scheduled. The parent broadcast dispatch step writes or verifies the child **Scheduled Run Intents** that control real execution order.
+_Avoid_: child cron execution, offset-driven dispatch
+
+**Dispatch Capacity Profile**:
+A source-level runtime configuration that declares baseline worker capacity for **Scheduled Run Intents**, optionally by recurring local time window and **Dispatch Model Pool**. Its time windows are interpreted in the source's dispatch timezone, not in an individual **Scheduled Job** timezone. It seeds dispatch capacity but does not guarantee that many workers will run when runtime feedback reports pressure.
+_Avoid_: fixed cron scatter, hard-coded time node, job concurrency
+
+**Dispatch Model Pool**:
+A dispatch-only resource bucket used to group **Scheduled Run Intents** that compete for the same model capacity. Its key is the resolved `provider_id/model` pair from the run's effective model. It does not change **Execution Model Slot** resolution; a run still executes with its resolved provider and model.
+_Avoid_: tenant model, active model, model override
+
+**Effective Dispatch Capacity**:
+The worker capacity currently allowed by the dispatcher after combining the **Dispatch Capacity Profile** with runtime feedback such as rate limits, timeouts, latency, backlog, and success rate. It follows an additive-increase, multiplicative-decrease rule: pressure lowers capacity quickly, while stable success raises it gradually up to the active profile window's cap.
+_Avoid_: configured worker count, static quota
+
+**Worker Capacity Snapshot**:
+A monitorable record of a dispatch worker capacity decision for a source and **Dispatch Model Pool**, including configured profile values, effective capacity, feedback signals, and the reason for any increase or decrease.
+_Avoid_: log-only worker count, static config
+
+**Dispatch Callback Source**:
+The explicit callback-origin marker that distinguishes a SWE internal callback request from the **Cron Scheduling Service** from a legacy external scheduler callback. Batch-managed scheduled work only starts when the source is the scheduling service.
+_Avoid_: inferring origin from request shape, jobParam means external, direct body means internal
+
+**Dispatch Telemetry Record**:
+A monitorable record written for dispatch-intent lifecycle events such as queued, claimed, callback-dispatched, retry-scheduled, stale-lock recovered, and linked execution completion. It supports child-task execution monitoring without replacing the normal execution record.
+_Avoid_: notification record, execution replacement, debug log
+
+**Viewer Heat Score**:
+A bounded priority signal for a user or tenant, derived from recent **Scheduled Run** result reads. It combines read rate and read recency over a configured lookback window, and is used only to determine the initial **Batch Dispatch Order** within a batch.
+_Avoid_: total read count, user importance, notification priority
+
+**Batch Dispatch Order**:
+The stable child-intent order computed for a **Dispatch Batch** after viewer heat, due time, retry penalty, and deterministic tie-breakers are applied. Waiting does not reshuffle the order; later claims continue from this ordered queue.
+_Avoid_: fairness aging, dynamic reprioritization, starvation compensation
+
 **Scheduled Run Boundary**:
 A runtime boundary that starts scheduled work outside an incoming user HTTP request. It includes **Scheduled Job**, heartbeat, and dream execution, but not cron management API requests.
 _Avoid_: cron entry, cron API, scheduler callback

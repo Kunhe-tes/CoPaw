@@ -1,6 +1,6 @@
 import { memo, useState, useRef, useLayoutEffect } from "react";
 import { Typography, Button, Spin, Tag, Popconfirm, Tooltip, Input } from "antd";
-import { StarOutlined, RocketOutlined, UserOutlined, ClockCircleOutlined, CalendarOutlined, TagOutlined, DownOutlined, UpOutlined } from "@ant-design/icons";
+import { StarOutlined, RocketOutlined, UserOutlined, ClockCircleOutlined, CalendarOutlined, TagOutlined, DownOutlined, UpOutlined, DownloadOutlined } from "@ant-design/icons";
 import { Power, Trash2, Pencil, PencilLine } from "lucide-react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
@@ -289,6 +289,7 @@ const SkillDetailPanel = memo(function SkillDetailPanel({
           {canEdit && (
             <Button
               size="small"
+              icon={<DownloadOutlined style={{ fontSize: 12 }} />}
               style={{ height: 28, fontSize: 12, borderRadius: 8 }}
               onClick={() => onDownload(skill)}
               loading={isDownloading}

@@ -1313,22 +1313,22 @@ def _default_builtin_tools() -> Dict[str, BuiltinToolConfig]:
         ),
         "start_background_process": BuiltinToolConfig(
             name="start_background_process",
-            enabled=True,
+            enabled=False,
             description="Start a managed background shell process",
         ),
         "list_background_processes": BuiltinToolConfig(
             name="list_background_processes",
-            enabled=True,
+            enabled=False,
             description="List managed background shell processes",
         ),
         "get_process_output": BuiltinToolConfig(
             name="get_process_output",
-            enabled=True,
+            enabled=False,
             description="Read managed background process output",
         ),
         "stop_background_process": BuiltinToolConfig(
             name="stop_background_process",
-            enabled=True,
+            enabled=False,
             description="Stop a managed background shell process",
         ),
         "read_file": BuiltinToolConfig(
@@ -1361,16 +1361,6 @@ def _default_builtin_tools() -> Dict[str, BuiltinToolConfig]:
             enabled=True,
             description="Get current date and time",
         ),
-        "set_user_timezone": BuiltinToolConfig(
-            name="set_user_timezone",
-            enabled=True,
-            description="Set user timezone",
-        ),
-        "get_token_usage": BuiltinToolConfig(
-            name="get_token_usage",
-            enabled=True,
-            description="Get llm token usage",
-        ),
         "copy_file_to_static": BuiltinToolConfig(
             name="copy_file_to_static",
             enabled=True,
@@ -1385,6 +1375,16 @@ def _default_builtin_tools() -> Dict[str, BuiltinToolConfig]:
     }
 
 
+RETIRED_BUILTIN_TOOL_NAMES = frozenset(
+    {
+        "get_token_usage",
+        "view_image",
+        "view_video",
+        "set_user_timezone",
+    },
+)
+
+
 class ToolsConfig(BaseModel):
     """Built-in tools management configuration."""
 
@@ -1395,6 +1395,8 @@ class ToolsConfig(BaseModel):
     @model_validator(mode="after")
     def _merge_default_tools(self):
         """Ensure new code-defined tools are present in saved configs."""
+        for name in RETIRED_BUILTIN_TOOL_NAMES:
+            self.builtin_tools.pop(name, None)
         for name, tc in _default_builtin_tools().items():
             if name not in self.builtin_tools:
                 self.builtin_tools[name] = tc

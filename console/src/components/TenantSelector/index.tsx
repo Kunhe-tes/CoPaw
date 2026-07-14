@@ -8,6 +8,7 @@ import {
   fetchTenantsBySource,
   type TenantSourceInfo,
 } from "@/api/modules/userInfo";
+import type { UserSkillStatus } from "@/api/modules/market";
 import { BBK_ID_MAP, BBK_ID_TO_NAME_MAP } from "@/constants/bbk";
 import { DEFAULT_SOURCE_ID } from "@/constants/identity";
 import type { TenantSelectorProps } from "./types";
@@ -62,9 +63,17 @@ export function TenantSelector({
   hint,
   excludeTenantId,
   onLoadError,
+  userSkillStatusMap,
+  skillVersion,
+  onTargetModeChange,
+  distributedUserIds,
+  distributedTriggerKey,
 }: TenantSelectorProps) {
   const { t } = useTranslation();
   const sourceId = useIframeStore((state) => state.source) || DEFAULT_SOURCE_ID;
+
+  // 是否为技能分发场景（只有技能分发才会传入有数据的 userSkillStatusMap）
+  const isSkillDistribution = !!userSkillStatusMap && userSkillStatusMap.size > 0;
 
   // 加载状态
   const [loading, setLoading] = useState(false);
@@ -91,6 +100,9 @@ export function TenantSelector({
 
   // 用户是否正在编辑额外输入框（避免输入时被外部状态覆盖）
   const [isEditingExtra, setIsEditingExtra] = useState(false);
+
+  // 模式切换标记（防止切换过程中的状态同步导致闪烁）
+  const isModeSwitchingRef = useRef(false);
 
   // 打开时自动加载租户信息
   useEffect(() => {
@@ -121,10 +133,17 @@ export function TenantSelector({
     return new Map(tenantOptions.map((item) => [item.tenant_id, item]));
   }, [tenantOptions]);
 
+  // 模式变更时通知父组件
+  useEffect(() => {
+    onTargetModeChange?.(targetMode);
+  }, [targetMode, onTargetModeChange]);
+
   // 按机构过滤的用户 ID 列表
   const filteredTenantIds = useMemo(() => {
     if (targetMode !== "bbk_id") {
-      return availableTenantIds;
+      // user_id 模式下，filteredTenantIds 不再用于机构筛选
+      // 返回空数组，避免状态更新顺序问题导致显示混乱
+      return [];
     }
     if (selectedBbkIds.length === 0) {
       return [];
@@ -209,9 +228,11 @@ export function TenantSelector({
       .filter((group) => group.users.length > 0);
   }, [availableTenantIds, selectedBbkIds, targetMode, tenantLookup]);
 
-  // 同步外部选中状态到内部（仅在 user_id 模式下）
+  // 同步外部选中状态到内部（仅在 user_id 模式下且不在模式切换过程中）
   useEffect(() => {
     if (targetMode === "bbk_id") return;
+    // 模式切换过程中跳过同步，防止闪烁
+    if (isModeSwitchingRef.current) return;
 
     // 如果外部状态为空，清空内部状态（避免循环）
     if (selectedTenantIds.length === 0) {
@@ -244,38 +265,118 @@ export function TenantSelector({
   }, [availableTenantIds, selectedTenantIds, targetMode, isEditingExtra]);
 
   // 内部状态变更通知外部
-  // 注意：只在 user_id 模式下，且 mergedTenantIds 真正变化时才通知
+  // 注意：分成两个独立的 useEffect，避免依赖互相影响导致闪烁
   const prevMergedTenantIdsRef = useRef<string[]>([]);
 
+  // bbk_id 模式：监听 filteredTenantIds 变化
   useEffect(() => {
-    // bbk_id 模式下，直接使用 filteredTenantIds
-    if (targetMode === "bbk_id") {
-      if (!haveSameTenantIds(prevMergedTenantIdsRef.current, filteredTenantIds)) {
-        prevMergedTenantIdsRef.current = filteredTenantIds;
-        onChange(filteredTenantIds);
-      }
-      return;
+    if (targetMode !== "bbk_id") return;
+    if (!haveSameTenantIds(prevMergedTenantIdsRef.current, filteredTenantIds)) {
+      prevMergedTenantIdsRef.current = filteredTenantIds;
+      onChange(filteredTenantIds);
     }
+  }, [targetMode, filteredTenantIds, onChange]);
 
-    // user_id 模式下，检查 mergedTenantIds 是否变化
+  // user_id 模式：监听 mergedTenantIds 变化
+  useEffect(() => {
+    if (targetMode !== "user_id") return;
     if (!haveSameTenantIds(prevMergedTenantIdsRef.current, mergedTenantIds)) {
       prevMergedTenantIdsRef.current = mergedTenantIds;
       onChange(mergedTenantIds);
     }
-  }, [targetMode, filteredTenantIds, mergedTenantIds, onChange]);
+  }, [targetMode, mergedTenantIds, onChange]);
 
   useEffect(() => {
     onSelectionInfoChange?.(selectedTenantInfos);
   }, [onSelectionInfoChange, selectedTenantInfos]);
 
-  // 切换模式时清空选择
+  // 处理已分发用户选择（根据当前模式选择机构或用户）
+  // 使用 ref 记录 tenantLookup 是否已处理，避免用户手动修改选择后被还原
+  const prevTriggerKeyRef = useRef<number>(0);
+  const needsResetWhenTenantLookupReadyRef = useRef<boolean>(false);
+  useEffect(() => {
+    const currentIds = distributedUserIds ?? [];
+    const triggerKey = distributedTriggerKey ?? 0;
+
+    // 空数组时清空选择
+    if (currentIds.length === 0 && triggerKey === 0) {
+      if (targetMode === "bbk_id") {
+        setSelectedBbkIds([]);
+      } else {
+        setSelectedInListTenantIds([]);
+        setExtraTenantIdsText("");
+        setIsEditingExtra(false);
+      }
+      prevTriggerKeyRef.current = 0;
+      needsResetWhenTenantLookupReadyRef.current = false;
+      return;
+    }
+
+    // triggerKey 变化：用户点击 checkbox
+    const triggerKeyChanged = triggerKey > 0 && triggerKey !== prevTriggerKeyRef.current;
+    if (triggerKeyChanged) {
+      prevTriggerKeyRef.current = triggerKey;
+    }
+
+    // tenantLookup 有数据时才能正确设置
+    const canSetProperly = tenantLookup.size > 0 && currentIds.length > 0;
+
+    if (triggerKeyChanged && canSetProperly) {
+      // triggerKey 变化且 tenantLookup 有数据：直接设置
+      if (targetMode === "bbk_id") {
+        const bbkIdSet = new Set<string>();
+        currentIds.forEach((userId) => {
+          const tenant = tenantLookup.get(userId);
+          if (tenant?.bbk_id) {
+            bbkIdSet.add(tenant.bbk_id);
+          }
+        });
+        setSelectedBbkIds(Array.from(bbkIdSet));
+      } else {
+        setSelectedInListTenantIds(currentIds);
+        setExtraTenantIdsText("");
+        setIsEditingExtra(false);
+      }
+      needsResetWhenTenantLookupReadyRef.current = false;
+    } else if (triggerKeyChanged && !canSetProperly) {
+      // triggerKey 变化但 tenantLookup 暂无数据：标记需要后续设置
+      needsResetWhenTenantLookupReadyRef.current = true;
+    } else if (!triggerKeyChanged && needsResetWhenTenantLookupReadyRef.current && canSetProperly) {
+      // tenantLookup 加载完成且有待处理的设置请求：执行设置
+      if (targetMode === "bbk_id") {
+        const bbkIdSet = new Set<string>();
+        currentIds.forEach((userId) => {
+          const tenant = tenantLookup.get(userId);
+          if (tenant?.bbk_id) {
+            bbkIdSet.add(tenant.bbk_id);
+          }
+        });
+        setSelectedBbkIds(Array.from(bbkIdSet));
+      } else {
+        setSelectedInListTenantIds(currentIds);
+        setExtraTenantIdsText("");
+        setIsEditingExtra(false);
+      }
+      needsResetWhenTenantLookupReadyRef.current = false;
+    }
+  }, [distributedUserIds, distributedTriggerKey, targetMode, tenantLookup]);
+
+  // 切换模式时清空选择（先清空状态，再切换模式，避免同步 useEffect 触发）
   const handleModeChange = useCallback((mode: "bbk_id" | "user_id") => {
-    setTargetMode(mode);
+    // 先清空所有状态
     setSelectedBbkIds([]);
     setFilterText("");
     setSelectedInListTenantIds([]);
     setExtraTenantIdsText("");
     setIsEditingExtra(false);
+    // 设置模式切换标记，防止同步 useEffect 在切换过程中触发
+    isModeSwitchingRef.current = true;
+    // 最后切换模式
+    setTargetMode(mode);
+    // 在下一个渲染周期清除标记
+    requestAnimationFrame(() => {
+      isModeSwitchingRef.current = false;
+    });
   }, []);
 
   // 全选/清空按钮（使用函数式更新避免依赖）
@@ -387,19 +488,45 @@ export function TenantSelector({
                         <span className={styles.collapseCount}>
                           {t("tenantSelector.userCount", { count: group.users.length })}
                         </span>
+                        {/* 机构统计 - 仅技能分发场景显示 */}
+                        {isSkillDistribution && (
+                          <span className={styles.collapseStats}>
+                            覆盖: {group.users.filter(u => userSkillStatusMap?.get(u.tenant_id)?.status === "update").length} |
+                            首次: {group.users.filter(u => userSkillStatusMap?.get(u.tenant_id)?.status === "first_time").length}
+                          </span>
+                        )}
                       </span>
                     ),
                     children: (
                       <div className={styles.userDetailGrid}>
-                        {group.users.map((user) => (
-                          <div
-                            key={user.tenant_id}
-                            className={styles.userDetailItem}
-                            title={renderTenantName(user.tenant_id)}
-                          >
-                            {renderTenantName(user.tenant_id)}
-                          </div>
-                        ))}
+                        {group.users.map((user) => {
+                          const status = userSkillStatusMap?.get(user.tenant_id);
+                          return (
+                            <div
+                              key={user.tenant_id}
+                              className={styles.userDetailItem}
+                              title={renderTenantName(user.tenant_id)}
+                            >
+                              <div className={styles.userDetailName}>
+                                {renderTenantName(user.tenant_id)}
+                              </div>
+                              {/* 用户状态 - 仅技能分发场景显示 */}
+                              {status && isSkillDistribution && (
+                                <div className={styles.userDetailStatus}>
+                                  {status.status === "update" && status.current_version && (
+                                    <span style={{ color: "#1890ff" }}>{status.current_version}→v{skillVersion || "新"}</span>
+                                  )}
+                                  {status.status === "first_time" && (
+                                    <span style={{ color: "#52c41a" }}>首次</span>
+                                  )}
+                                  {status.status === "conflict" && (
+                                    <span style={{ color: "#f5222d" }}>⚠ 自建冲突</span>
+                                  )}
+                                </div>
+                              )}
+                            </div>
+                          );
+                        })}
                       </div>
                     ),
                   }))}
@@ -483,21 +610,50 @@ export function TenantSelector({
               <div className={styles.userGrid}>
                 {displayedTenantIds.map((tenantId) => {
                   const selected = effectiveInListTenantIds.includes(tenantId);
+                  const status = userSkillStatusMap?.get(tenantId);
+                  const tenant = tenantLookup.get(tenantId);
+                  // 分行名称 - 仅技能分发场景显示
+                  const branchName = isSkillDistribution && tenant?.bbk_id
+                    ? (BBK_ID_TO_NAME_MAP[tenant.bbk_id] || tenant.bbk_id)
+                    : "";
                   return (
                     <button
                       key={tenantId}
                       type="button"
                       onClick={() => handleUserCardClick(tenantId, selected)}
                       className={`${styles.userCard} ${
+                        branchName ? styles.userCardWithBranch : ""
+                      } ${
                         selected ? styles.userCardSelected : ""
                       }`}
                     >
+                      {branchName && (
+                        <span className={styles.branchBadge}>{branchName}</span>
+                      )}
                       {selected ? (
                         <span className={styles.checkIcon}>
                           <CheckOutlined />
                         </span>
-                      ) : null}
-                      <span>{renderTenantName(tenantId)}</span>
+                      ) : (
+                        <span className={styles.emptyIcon}>○</span>
+                      )}
+                      <span className={styles.userName}>{renderTenantName(tenantId)}</span>
+                      {/* 只有选中后才显示状态文字 */}
+                      {status && selected && (
+                        <span className={styles.userStatus}>
+                          {status.status === "update" && status.current_version && (
+                            <span className={styles.versionChange}>
+                              {status.current_version}→v{skillVersion || "新"}
+                            </span>
+                          )}
+                          {status.status === "first_time" && (
+                            <span className={styles.firstTimeLabel}>首次</span>
+                          )}
+                          {status.status === "conflict" && (
+                            <span className={styles.conflictLabel}>⚠ 自建冲突</span>
+                          )}
+                        </span>
+                      )}
                     </button>
                   );
                 })}

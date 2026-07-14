@@ -167,16 +167,17 @@ class TestTenantWorkspaceHelpers:
                 raise RuntimeError("Workspace not set")
 
     @pytest.mark.asyncio
-    async def test_dispatch_uses_effective_tenant_id_for_source_scoped_default(
+    async def test_dispatch_uses_storage_tenant_id_for_source_scoped_default(
         self,
     ):
-        """Workspace loading should use effective_tenant_id when present."""
+        """Workspace loading should use the storage tenant for default source."""
         from swe.app.middleware.tenant_workspace import (
             TenantWorkspaceMiddleware,
         )
 
         scope_id = encode_scope_id("default", "RMASSIST")
-        effective_root = Path(f"/tmp/{scope_id}")
+        storage_tenant_id = "default_RMASSIST"
+        effective_root = Path(f"/tmp/{storage_tenant_id}")
 
         mock_req = MagicMock(spec=Request)
         mock_req.method = "GET"
@@ -211,7 +212,7 @@ class TestTenantWorkspaceHelpers:
             bbk_id=mock_req.state.bbk_id,
         )
         pool.get_tenant_workspace_dir.assert_called_once_with(
-            scope_id,
+            storage_tenant_id,
         )
 
     @pytest.mark.asyncio

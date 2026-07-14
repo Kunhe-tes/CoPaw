@@ -9,6 +9,8 @@ from fastapi import APIRouter, HTTPException, Request
 from .models import (
     AssetUploadFileNameList,
     PaginatedAssetUploadRecords,
+    QueryIdKeyRequest,
+    QueryIdKeyResponse,
     TemplateResultRequest,
     TemplateResultResponse,
     TemplateSearchResponse,
@@ -110,4 +112,22 @@ async def query_template_result(
     return await service.query_template_result(
         result_id=payload.resultId,
         template_id=payload.templateId,
+    )
+
+
+@router.post("/query-id-key", response_model=QueryIdKeyResponse)
+async def query_id_key(
+    payload: QueryIdKeyRequest,
+) -> QueryIdKeyResponse:
+    """根据ID Key查询模板信息。"""
+    try:
+        service = get_service()
+    except RuntimeError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+
+    return await service.query_id_key(
+        template_name=payload.templateName,
+        user_id=payload.userId,
+        bbk_org_id=payload.bbkOrgId,
+        id_key=payload.idKey,
     )

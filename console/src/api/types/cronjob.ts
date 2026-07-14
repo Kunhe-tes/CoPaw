@@ -103,6 +103,10 @@ export interface CronBroadcastOptions {
   offset_window_hours?: number;
 }
 
+export interface CronBatchDispatchOptions {
+  offset_window_hours?: number;
+}
+
 export interface CronBroadcastResponse {
   results: CronBroadcastTenantResult[];
 }

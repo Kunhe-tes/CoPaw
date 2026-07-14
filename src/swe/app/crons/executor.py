@@ -14,6 +14,10 @@ import httpx
 from .auth_state import resolve_auth_token_for_execution
 from .model_slot_context import bind_model_slot_override
 from .models import CronJobSpec
+from ..b3_headers import (
+    B3_TRACE_ID_META_KEY,
+    PASSTHROUGH_HEADERS_META_KEY,
+)
 from ..tenant_context import bind_tenant_context
 from ..console_push_store import append as push_store_append
 from ...config.llm_workload import LLM_WORKLOAD_CRON, bind_llm_workload
@@ -108,6 +112,43 @@ class _ExecutionContext:
     scope_id: str | None
 
 
+def _dispatch_b3_trace_id(dispatch_meta: Dict[str, Any]) -> str | None:
+    trace_id = dispatch_meta.get(B3_TRACE_ID_META_KEY)
+    if trace_id is None:
+        return None
+    trace_id = str(trace_id).strip()
+    return trace_id or None
+
+
+def _dispatch_passthrough_headers(
+    dispatch_meta: Dict[str, Any],
+) -> dict[str, str]:
+    raw_headers = dispatch_meta.get(PASSTHROUGH_HEADERS_META_KEY)
+    if not isinstance(raw_headers, dict):
+        return {}
+    headers: dict[str, str] = {}
+    for name, value in raw_headers.items():
+        if value is None:
+            continue
+        header_name = str(name).strip()
+        header_value = str(value).strip()
+        if header_name and header_value:
+            headers[header_name] = header_value
+    return headers
+
+
+def _apply_dispatch_passthrough_headers(
+    req: Dict[str, Any],
+    dispatch_meta: Dict[str, Any],
+) -> None:
+    headers = _dispatch_passthrough_headers(dispatch_meta)
+    if headers:
+        req[PASSTHROUGH_HEADERS_META_KEY] = headers
+    trace_id = _dispatch_b3_trace_id(dispatch_meta)
+    if trace_id:
+        req[B3_TRACE_ID_META_KEY] = trace_id
+
+
 @dataclass
 class AgentStreamState:
     """记录 Agent 流式执行边界，用于区分真实取消和完成后取消。"""
@@ -183,7 +224,11 @@ class CronExecutor:
         self._runner = runner
         self._channel_manager = channel_manager
 
-    async def execute(self, job: CronJobSpec) -> ExecutionResult:
+    async def execute(
+        self,
+        job: CronJobSpec,
+        dispatch_meta: Optional[Dict[str, Any]] = None,
+    ) -> ExecutionResult:
         """Execute one job once with tenant context.
 
         - task_type text: send fixed text to channel
@@ -195,7 +240,7 @@ class CronExecutor:
         Returns:
             ExecutionResult containing trace_id and output_preview
         """
-        context = self._prepare_execution_context(job)
+        context = self._prepare_execution_context(job, dispatch_meta)
         resolved_model = self._resolve_execution_model(job, context.scope_id)
 
         logger.info(
@@ -235,8 +280,10 @@ class CronExecutor:
     def _prepare_execution_context(
         self,
         job: CronJobSpec,
+        execution_dispatch_meta: Optional[Dict[str, Any]] = None,
     ) -> _ExecutionContext:
         dispatch_meta: Dict[str, Any] = dict(job.dispatch.meta or {})
+        dispatch_meta.update(execution_dispatch_meta or {})
         workspace_dir_value = dispatch_meta.get("workspace_dir")
         workspace_dir = (
             Path(workspace_dir_value) if workspace_dir_value else None
@@ -525,6 +572,7 @@ class CronExecutor:
             job,
             target_user_id,
             target_session_id,
+            trace_id=_dispatch_b3_trace_id(dispatch_meta),
         )
 
         try:
@@ -555,6 +603,7 @@ class CronExecutor:
         job: CronJobSpec,
         target_user_id: str,
         target_session_id: str,
+        trace_id: str | None = None,
     ) -> Optional[str]:
         """为 text 类型任务创建 trace 记录。
 
@@ -591,6 +640,7 @@ class CronExecutor:
                 user_name=resolved_identity.user_name,
                 bbk_id=resolved_identity.bbk_id,
                 session_name=job.name,
+                trace_id=trace_id,
             )
             # 写入 model_output 到 ES
             if trace_id and job.text:
@@ -655,6 +705,7 @@ class CronExecutor:
         job: CronJobSpec,
         target_user_id: str,
         target_session_id: str,
+        trace_id: str | None = None,
     ) -> Optional[str]:
         """为 agent 任务创建 trace 记录。
 
@@ -691,6 +742,7 @@ class CronExecutor:
                 user_name=resolved_identity.user_name,
                 bbk_id=resolved_identity.bbk_id,
                 session_name=job.name,
+                trace_id=trace_id,
             )
             logger.info(
                 "cron agent: created trace_id=%s for job_id=%s",
@@ -958,10 +1010,12 @@ class CronExecutor:
         )
         assert job.request is not None
         req = self._build_agent_request(job, target_user_id, target_session_id)
+        _apply_dispatch_passthrough_headers(req, dispatch_meta)
         trace_id = await self._create_trace_for_agent_job(
             job,
             target_user_id,
             target_session_id,
+            trace_id=_dispatch_b3_trace_id(dispatch_meta),
         )
 
         try:

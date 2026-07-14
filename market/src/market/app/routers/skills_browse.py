@@ -1432,11 +1432,17 @@ async def download_my_skill(
         )
         zip_bytes = await asyncio.to_thread(zip_path.read_bytes)
 
+    # RFC 6266: 使用 filename* 参数支持 UTF-8 中文文件名
+    from urllib.parse import quote
+
+    encoded_filename = quote(zip_path.name, safe="")
+    content_disposition = f"attachment; filename=\"skill.zip\"; filename*=UTF-8''{encoded_filename}"
+
     return Response(
         content=zip_bytes,
         media_type="application/zip",
         headers={
-            "Content-Disposition": f'attachment; filename="{zip_path.name}"',
+            "Content-Disposition": content_disposition,
         },
     )
 
@@ -1472,11 +1478,17 @@ async def download_market_skill(
         )
         zip_bytes = await asyncio.to_thread(zip_path.read_bytes)
 
+    # RFC 6266: 使用 filename* 参数支持 UTF-8 中文文件名
+    from urllib.parse import quote
+
+    encoded_filename = quote(zip_path.name, safe="")
+    content_disposition = f"attachment; filename=\"skill.zip\"; filename*=UTF-8''{encoded_filename}"
+
     return Response(
         content=zip_bytes,
         media_type="application/zip",
         headers={
-            "Content-Disposition": f'attachment; filename="{zip_path.name}"',
+            "Content-Disposition": content_disposition,
         },
     )
 

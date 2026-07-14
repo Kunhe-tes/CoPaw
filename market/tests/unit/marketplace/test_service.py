@@ -33,7 +33,7 @@ async def test_publish_skill_creates_index_entry(tmp_path):
         skill_json={"name": "skill_a"},
         skill_md="# Skill A",
     )
-    item = await svc.publish_skill("src_a", req)
+    item, _ = await svc.publish_skill("src_a", req)
     assert item.name == "skill_a"
     assert item.version == "1.0.0"
     assert item.status == "active"
@@ -58,11 +58,14 @@ async def test_publish_skill_increments_version_on_republish(tmp_path):
         skill_json={},
         skill_md="# v1",
     )
-    item1 = await svc.publish_skill("src_a", req1)
+    item1, _ = await svc.publish_skill("src_a", req1)
     assert item1.version == "1.0.0"
 
     # 同样内容再 publish 一次 → R7 no-op，版本不动
-    item_same = await svc.publish_skill("src_a", req1)
+    item_same, _ = await svc.publish_skill(
+        "src_a",
+        req1.model_copy(update={"overwrite": True}),
+    )
     assert (
         item_same.version == "1.0.0"
     ), "内容未变化时市场版本不应 bump（R7 no-op）"
@@ -75,8 +78,9 @@ async def test_publish_skill_increments_version_on_republish(tmp_path):
         creator_name="",
         skill_json={},
         skill_md="# v2 changed",
+        overwrite=True,
     )
-    item2 = await svc.publish_skill("src_a", req2)
+    item2, _ = await svc.publish_skill("src_a", req2)
     assert item2.version == "1.0.1", "内容变化时市场版本应自动 bump"
 
 
@@ -93,7 +97,7 @@ async def test_unpublish_skill_sets_inactive(tmp_path):
         skill_json={},
         skill_md="",
     )
-    item = await svc.publish_skill("src_a", req)
+    item, _ = await svc.publish_skill("src_a", req)
     await svc.unpublish_skill("src_a", item.item_id, "u1", "User One")
     items = await svc.list_skills("src_a", user_bbk_id="100")
     assert all(
@@ -102,7 +106,7 @@ async def test_unpublish_skill_sets_inactive(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_list_skills_filters_by_bbk_id(tmp_path):
+async def test_list_skills_filters_by_explicit_bbk_ids(tmp_path):
     from market.marketplace.schemas import PublishSkillRequest
 
     svc = _make_service(tmp_path)
@@ -128,13 +132,16 @@ async def test_list_skills_filters_by_bbk_id(tmp_path):
     )
     await svc.publish_skill("src_a", req_all)
     await svc.publish_skill("src_a", req_200)
-    # bbk_id=100 (总行) sees all
-    items_100 = await svc.list_skills("src_a", user_bbk_id="100")
-    assert len(items_100) == 2
-    # bbk_id=300 sees only skill_all (bbk_ids=[])
-    items_300 = await svc.list_skills("src_a", user_bbk_id="300")
-    assert len(items_300) == 1
-    assert items_300[0].name == "skill_all"
+    # user_bbk_id is compatibility metadata; explicit bbk_ids controls filtering.
+    items_all = await svc.list_skills("src_a", user_bbk_id="100")
+    assert len(items_all) == 2
+    items_200 = await svc.list_skills(
+        "src_a",
+        user_bbk_id="300",
+        bbk_ids=["200"],
+    )
+    assert len(items_200) == 1
+    assert items_200[0].name == "skill_200"
 
 
 @pytest.mark.asyncio
@@ -150,7 +157,7 @@ async def test_get_skill_detail_returns_item(tmp_path):
         skill_json={},
         skill_md="",
     )
-    item = await svc.publish_skill("src_a", req)
+    item, _ = await svc.publish_skill("src_a", req)
     detail = await svc.get_skill_detail(
         "src_a",
         item.item_id,
@@ -301,7 +308,7 @@ async def test_get_my_skills_reads_frontmatter_and_market_metadata(tmp_path):
     source_id = "test_source"
     agent_id = "default"
 
-    published = await svc.publish_skill(
+    published, _ = await svc.publish_skill(
         source_id,
         PublishSkillRequest(
             name="Market Skill",
@@ -312,6 +319,21 @@ async def test_get_my_skills_reads_frontmatter_and_market_metadata(tmp_path):
             skill_md="",
         ),
     )
+    published_item_id = published.item_id
+    latest, _ = await svc.publish_skill(
+        source_id,
+        PublishSkillRequest(
+            name="Market Skill",
+            description="market desc updated",
+            creator_id="creator-1",
+            creator_name="寮犱笁",
+            skill_json={},
+            skill_md="# updated market skill",
+            overwrite=True,
+        ),
+    )
+    assert latest.item_id == published_item_id
+    assert latest.version == "1.0.1"
 
     skills_dir = get_user_skills_dir(
         tmp_path / "swe",
@@ -323,7 +345,8 @@ async def test_get_my_skills_reads_frontmatter_and_market_metadata(tmp_path):
     skill_dir.mkdir(parents=True)
     (skill_dir / "SKILL.md").write_text(
         "---\n"
-        "name: Market Skill\n"
+        "name: Installed Alias\n"
+        "version: 1.0.0\n"
         "description: 从前言读取\n"
         "---\n"
         "# Market Skill\n",
@@ -344,12 +367,12 @@ async def test_get_my_skills_reads_frontmatter_and_market_metadata(tmp_path):
                 "version": 1,
                 "skills": {
                     "market_skill_copy": {
-                        "source": f"marketplace:{published.item_id}",
+                        "source": f"marketplace:{published_item_id}",
                         "enabled": False,
                         "created_at": "2025-05-14T10:00:00+00:00",
                         "updated_at": "2025-05-14T12:00:00+00:00",
                         "metadata": {
-                            "received_version": "0.9.0",
+                            "received_version": "1.0.0",
                             "distributed_by": "admin1",
                             "creator_name": "%E5%BC%A0%E4%B8%89",
                             "category_id": 9,
@@ -365,8 +388,11 @@ async def test_get_my_skills_reads_frontmatter_and_market_metadata(tmp_path):
     result = await svc.get_my_skills(source_id, user_id, agent_id)
 
     assert len(result) == 1
-    assert result[0].display_name == "Market Skill"
+    assert result[0].display_name == "Installed Alias"
     assert result[0].description == "从前言读取"
+    assert result[0].version == "1.0.0"
+    assert result[0].received_version == "1.0.0"
+    assert result[0].market_version == "1.0.1"
     assert result[0].is_received is True
     assert result[0].has_update is True
     assert result[0].enabled is False
@@ -379,7 +405,7 @@ async def test_get_my_skills_reads_frontmatter_and_market_metadata(tmp_path):
 
 @pytest.mark.asyncio
 async def test_recall_skill_by_name_removes_skill_dir_and_manifest(tmp_path):
-    """按名称撤回技能时，应删除目录并移除 manifest 记录."""
+    """按名称撤回技能时，应删除目录、移除 manifest 记录并删除数据库记录."""
     from market.marketplace.fs import (
         get_user_skill_manifest_path,
         get_user_skills_dir,
@@ -391,6 +417,7 @@ async def test_recall_skill_by_name_removes_skill_dir_and_manifest(tmp_path):
     svc = _make_service(tmp_path, mock_db=mock_db)
     svc.disable_skill = AsyncMock(return_value={"success": True})
     svc._trigger_agent_reload = AsyncMock()
+    svc.skill_registry.delete_skill = AsyncMock(return_value=False)
 
     user_id = "user-1"
     source_id = "source-1"
@@ -444,6 +471,12 @@ async def test_recall_skill_by_name_removes_skill_dir_and_manifest(tmp_path):
     assert result.results[0].success is True
     assert not skill_dir.exists()
     assert skill_name not in manifest_data["skills"]
+    # 验证删除数据库记录被调用
+    svc.skill_registry.delete_skill.assert_called_once_with(
+        user_id,
+        skill_name,
+        source_id,
+    )
 
 
 @pytest.mark.asyncio
@@ -527,9 +560,9 @@ async def test_publish_skill_appends_version_for_different_user(tmp_path):
         skill_json={"name": "demo"},
         skill_md='---\nname: demo\nversion: "1.0.0"\n---\n',
     )
-    item_a = await svc.publish_skill("src_a", req_a)
+    item_a, _ = await svc.publish_skill("src_a", req_a)
 
-    # 用户 B 同名同步（不同 creator_id），不传 overwrite
+    # 用户 B 同名同步（不同 creator_id），显式确认 overwrite
     req_b = PublishSkillRequest(
         name="demo",
         description="b",
@@ -537,8 +570,9 @@ async def test_publish_skill_appends_version_for_different_user(tmp_path):
         creator_name="Bob",
         skill_json={"name": "demo"},
         skill_md='---\nname: demo\nversion: "2.0.0"\n---\n',
+        overwrite=True,
     )
-    item_b = await svc.publish_skill("src_a", req_b)
+    item_b, _ = await svc.publish_skill("src_a", req_b)
 
     # 续接到同一个 item_id
     assert item_b.item_id == item_a.item_id
@@ -568,7 +602,7 @@ async def test_publish_skill_records_source_user_from_creator(tmp_path):
         skill_json={"name": "demo"},
         skill_md='---\nname: demo\nversion: "1.5.2"\n---\nbody',
     )
-    item = await svc.publish_skill(
+    item, _ = await svc.publish_skill(
         "src_a",
         req,
         operator_id="admin_id",
@@ -595,7 +629,7 @@ async def test_publish_mcp_appends_for_different_user(tmp_path):
     svc = _make_service(tmp_path)
 
     # alice 首发（本地版本 1.0.0 → 市场首版 1.0.0）
-    item_a = await svc.publish_mcp(
+    item_a, _ = await svc.publish_mcp(
         "src_a",
         PublishMCPRequest(
             client_key="m1",
@@ -609,7 +643,7 @@ async def test_publish_mcp_appends_for_different_user(tmp_path):
     )
 
     # bob 同名同步（本地版本 2.0.0，但市场版本独立 _bump_patch 到 1.0.1）
-    item_b = await svc.publish_mcp(
+    item_b, _ = await svc.publish_mcp(
         "src_a",
         PublishMCPRequest(
             client_key="m1",
@@ -619,6 +653,7 @@ async def test_publish_mcp_appends_for_different_user(tmp_path):
             creator_name="Bob",
             config={"name": "demo_mcp", "transport": "stdio", "command": "/b"},
             version="2.0.0",
+            overwrite=True,
         ),
     )
 
@@ -650,7 +685,7 @@ async def test_publish_mcp_admin_zip_source_user_empty(tmp_path):
 
     svc = _make_service(tmp_path)
 
-    item = await svc.publish_mcp(
+    item, _ = await svc.publish_mcp(
         "src_a",
         PublishMCPRequest(
             client_key="m2",

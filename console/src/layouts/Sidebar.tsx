@@ -281,6 +281,12 @@ export default function Sidebar({ selectedKey }: SidebarProps) {
             path: "/analytics/continuous-governance",
             label: t("nav.analyticsContinuousGovernance", "质量工程看板"),
           },
+          {
+            key: "monitor-cron-batch-dispatch",
+            icon: <SparkRefreshLine size={18} />,
+            path: "/monitor/cron-batch-dispatch",
+            label: t("nav.monitorCronBatchDispatch", "批调度监控"),
+          },
         ]
       : []),
     ...(isRMassistSource
@@ -470,6 +476,13 @@ export default function Sidebar({ selectedKey }: SidebarProps) {
                 label: collapsed
                   ? null
                   : t("nav.analyticsContinuousGovernance", "质量工程看板"),
+                icon: <SparkRefreshLine size={16} />,
+              },
+              {
+                key: "monitor-cron-batch-dispatch",
+                label: collapsed
+                  ? null
+                  : t("nav.monitorCronBatchDispatch", "批调度监控"),
                 icon: <SparkRefreshLine size={16} />,
               },
             ]
