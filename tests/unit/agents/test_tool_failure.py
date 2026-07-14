@@ -29,7 +29,7 @@ def test_build_structured_failure_output_uses_canonical_shape() -> None:
     }
 
 
-def test_react_toolkit_registers_background_process_tools_by_default() -> None:
+def test_react_toolkit_excludes_background_process_tools() -> None:
     agent = object.__new__(SWEAgent)
     agent._agent_config = SimpleNamespace()
 
@@ -41,7 +41,7 @@ def test_react_toolkit_registers_background_process_tools_by_default() -> None:
         "get_process_output",
         "stop_background_process",
     ):
-        assert tool_name in toolkit.tools
+        assert tool_name not in toolkit.tools
 
 
 @pytest.mark.asyncio
