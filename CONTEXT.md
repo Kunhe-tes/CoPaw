@@ -188,6 +188,42 @@ _Avoid_: chat bootstrap, BOOTSTRAP.md flow, onboarding chat
 The first-run conversational onboarding in which an Agent learns and records identity, style, and user preferences. A **Bootstrap Chat Flow** is separate from **Tenant Scaffold Bootstrap** and may be skipped for a tenant that still has a valid scaffold.
 _Avoid_: tenant bootstrap, scaffold bootstrap, workspace initialization
 
+**Disabled Skill**:
+A managed skill package retained by the control plane but excluded from the **Skill Runtime View** and ordinary Agent skill discovery for later runs. Disabled status alone is not a filesystem security boundary.
+_Avoid_: hidden skill, unregistered skill, inactive skill
+
+**Disabled Skill Store**:
+A Workspace-scoped retention area for **Disabled Skill** packages outside the conventional runtime skill path. It is managed through skill-management surfaces but remains ordinary filesystem content that generic file or shell searches may discover.
+_Avoid_: skill sandbox, secure skill store, deleted skills
+
+**Skill Management State**:
+The authoritative backend-managed record of installed skills, enablement, channel availability, and configuration for one Workspace. It is accessed through skill-management surfaces rather than ordinary Workspace browsing, search, or editing.
+_Avoid_: workspace skill file, user-editable skill manifest, runtime skill list
+
+**Canonical Skill Package**:
+The authoritative package content when the same skill exists in both the **Skill Runtime View** and **Disabled Skill Store**. The runtime-view copy wins for content, while enablement remains governed by **Skill Management State**.
+_Avoid_: newest skill copy, enabled skill state, manifest-selected content
+
+**Skill State Conflict**:
+A disagreement between **Skill Management State** and the retained location of a skill package. A skill in conflict is unavailable to Agent Runs until the disagreement is reconciled.
+_Avoid_: partially enabled skill, best-effort skill state, usable mismatch
+
+**Unmanaged Skill Content**:
+Workspace content that resembles a skill package but has no entry in **Skill Management State**. It is neither registered nor governed by disabled-skill discovery guarantees, even when it remains visible to model-initiated file or shell tools.
+_Avoid_: disabled skill, automatically installed skill, runtime skill
+
+**Skill Runtime View**:
+The current set of registered and enabled skill packages selected from a Workspace's ordinary skill directory. It excludes **Unmanaged Skill Content**, changes immediately when skill enablement changes, and gives existing Agent Runs no guarantee that earlier skill files remain available.
+_Avoid_: skill snapshot, immutable skill view, complete skill directory
+
+**Skill Isolation Guarantee**:
+The stronger platform-independent boundary under which disabled skill content is inaccessible to model-initiated tools on every supported operating system. **Skill Isolation Guarantee** is distinct from **Skill Discovery Suppression**.
+_Avoid_: best-effort skill hiding, platform-specific skill safety, shell path filter
+
+**Skill Discovery Suppression**:
+The default disabled-skill behavior that removes a package from Agent registration, prompting, and conventional skill-directory discovery. It reduces accidental reuse but does not deny generic file searches or deliberately crafted shell access.
+_Avoid_: skill isolation, filesystem sandbox, disabled-skill authorization
+
 **Runtime Invocation Claims**:
 Session, trace, tenant, and source claims that Swe passes across a runtime invocation boundary for a receiving tool or integration to interpret inside an already trusted channel. **Runtime Invocation Claims** are distinct from **Runtime Request Identity**, which is internal request context, and are not independently verifiable credentials.
 _Avoid_: runtime metadata, env/header info, credential, signed token
