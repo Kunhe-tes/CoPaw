@@ -443,13 +443,18 @@ def copy_skill_to_user(
     return {"status": "distributed", "metadata": metadata}
 
 
+def get_workspace_skill_manifest_path(workspace_dir: Path) -> Path:
+    """Return the Workspace v2 skill management manifest path."""
+    return Path(workspace_dir) / ".skill_state" / "manifest.json"
+
+
 def get_user_skill_manifest_path(
     swe_root: Path,
     user_id: str,
     agent_id: str = DEFAULT_AGENT_ID,
     source_id: str | None = None,
 ) -> Path:
-    """获取用户 workspace 的运行时 manifest 路径（skill.json）.
+    """获取用户 workspace 的运行时 manifest 路径（.skill_state/manifest.json）.
 
     该文件存储技能的运行时状态（enabled、channels、config 等），
     与技能目录内的 skill.json（存储展示元数据）职责不同。
@@ -459,7 +464,8 @@ def get_user_skill_manifest_path(
     _validate_path_segment(effective_user_id, "user_id")
     _validate_path_segment(agent_id, "agent_id")
     user_root = migrate_legacy_scope_dir_if_needed(swe_root, effective_user_id)
-    return user_root / "workspaces" / agent_id / "skill.json"
+    workspace_dir = user_root / "workspaces" / agent_id
+    return get_workspace_skill_manifest_path(workspace_dir)
 
 
 def read_user_skill_manifest(
@@ -478,6 +484,7 @@ def read_user_skill_manifest(
     if not manifest_path.exists():
         return {
             "schema_version": "workspace-skill-manifest.v1",
+            "layout_version": 2,
             "version": 0,
             "skills": {},
         }
@@ -487,6 +494,7 @@ def read_user_skill_manifest(
         logger.warning("Failed to read manifest %s: %s", manifest_path, e)
         return {
             "schema_version": "workspace-skill-manifest.v1",
+            "layout_version": 2,
             "version": 0,
             "skills": {},
         }

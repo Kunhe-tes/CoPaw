@@ -68,6 +68,54 @@ def test_get_user_skills_dir(tmp_path):
     )
 
 
+def test_user_manifest_path_matches_swe_workspace_contract(tmp_path):
+    from market.marketplace.fs import (
+        get_user_skill_manifest_path,
+        get_user_skills_dir,
+    )
+    from swe.agents.skills_manager import get_workspace_skill_manifest_path
+
+    swe_root = tmp_path / "swe"
+    workspace_dir = get_user_skills_dir(
+        swe_root,
+        "user1",
+        "agent1",
+        "source_a",
+    ).parent
+
+    market_manifest_path = get_user_skill_manifest_path(
+        swe_root,
+        "user1",
+        "agent1",
+        "source_a",
+    )
+
+    assert market_manifest_path == get_workspace_skill_manifest_path(
+        workspace_dir,
+    )
+    assert market_manifest_path.relative_to(workspace_dir) == (
+        Path(".skill_state") / "manifest.json"
+    )
+
+
+def test_read_user_skill_manifest_missing_file_returns_layout_v2(tmp_path):
+    from market.marketplace.fs import read_user_skill_manifest
+
+    manifest = read_user_skill_manifest(
+        tmp_path / "swe",
+        "user1",
+        "agent1",
+        "source_a",
+    )
+
+    assert manifest == {
+        "schema_version": "workspace-skill-manifest.v1",
+        "layout_version": 2,
+        "version": 0,
+        "skills": {},
+    }
+
+
 def test_get_user_skills_dir_allows_main_service_identity_values(tmp_path):
     from market.marketplace.fs import get_user_skills_dir
     from market.runtime.context import encode_scope_id

@@ -1265,7 +1265,7 @@ def reconcile_workspace_manifest(workspace_dir: Path) -> dict[str, Any]:
     """Reconcile one workspace manifest with the filesystem.
 
     This is the bridge between editable files under ``<workspace>/skills`` and
-    runtime-facing state in ``skill.json``.
+    runtime-facing state in ``<workspace>/.skill_state/manifest.json``.
 
     Behavior summary:
     - Discover every on-disk skill directory with ``SKILL.md``.
@@ -1276,7 +1276,7 @@ def reconcile_workspace_manifest(workspace_dir: Path) -> dict[str, Any]:
     Example:
         if a user deletes ``workspaces/a1/skills/demo_skill`` by hand, the
         next reconcile removes ``demo_skill`` from
-        ``workspaces/a1/skill.json``.
+        ``workspaces/a1/.skill_state/manifest.json``.
     """
     workspace_dir.mkdir(parents=True, exist_ok=True)
     workspace_skills_dir = get_workspace_skills_dir(workspace_dir)
@@ -1726,13 +1726,13 @@ class SkillService:
     This service owns editable skills inside one workspace, including create,
     zip import, enable/disable, channel routing, config persistence, and file
     access. It treats ``<workspace>/skills`` as the source of truth for skill
-    content and ``<workspace>/skill.json`` as the source of truth for runtime
-    state such as ``enabled`` and ``channels``.
+    content and ``<workspace>/.skill_state/manifest.json`` as the source of
+    truth for runtime state such as ``enabled`` and ``channels``.
 
     Example:
         a user creates ``demo_skill`` in workspace ``a1`` -> files are written
         under ``workspaces/a1/skills/demo_skill`` and metadata/state are
-        reconciled into ``workspaces/a1/skill.json``.
+        reconciled into ``workspaces/a1/.skill_state/manifest.json``.
 
         a user enables ``docx`` for the ``discord`` channel only -> the skill
         files stay the same, but the workspace manifest updates ``enabled`` and

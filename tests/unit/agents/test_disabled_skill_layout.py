@@ -5,6 +5,7 @@ from pathlib import Path
 
 from swe.agents.skills_manager import (
     _default_workspace_manifest,
+    get_legacy_workspace_skill_manifest_path,
     get_workspace_disabled_skills_dir,
     get_workspace_skill_manifest_path,
     get_workspace_skill_state_dir,
@@ -25,6 +26,9 @@ def test_workspace_skill_layout_paths(tmp_path: Path) -> None:
     )
     assert get_workspace_skill_manifest_path(workspace_dir) == (
         workspace_dir / ".skill_state" / "manifest.json"
+    )
+    assert get_legacy_workspace_skill_manifest_path(workspace_dir) == (
+        workspace_dir / "skill.json"
     )
 
 

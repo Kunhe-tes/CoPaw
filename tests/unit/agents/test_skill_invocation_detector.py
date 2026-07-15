@@ -613,6 +613,9 @@ class TestSkillInvocationDetector:
         manifest_path.write_text(
             json.dumps(
                 {
+                    "schema_version": "workspace-skill-manifest.v1",
+                    "layout_version": 2,
+                    "version": 0,
                     "skills": {
                         "demo": {
                             "enabled": True,
@@ -620,6 +623,22 @@ class TestSkillInvocationDetector:
                                 "description": "v2 description",
                                 "skill_id": "skill-1",
                                 "cn_name": "演示技能",
+                            },
+                        },
+                    },
+                },
+            ),
+            encoding="utf-8",
+        )
+        (workspace_dir / "skill.json").write_text(
+            json.dumps(
+                {
+                    "skills": {
+                        "demo": {
+                            "metadata": {
+                                "description": "legacy description",
+                                "skill_id": "legacy-skill",
+                                "cn_name": "旧版技能",
                             },
                         },
                     },

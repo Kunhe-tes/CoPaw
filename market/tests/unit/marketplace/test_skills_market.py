@@ -29,6 +29,61 @@ def _make_app(tmp_path):
     return app
 
 
+@pytest.mark.asyncio
+async def test_process_workspace_skills_writes_v2_manifest_path(
+    tmp_path,
+    monkeypatch,
+):
+    from market.app.routers import skills_market
+    from market.marketplace.fs import get_workspace_skill_manifest_path
+
+    workspace_dir = tmp_path / "workspace"
+    (workspace_dir / "skills" / "demo").mkdir(parents=True)
+
+    async def _record_skill(
+        skill_dir,
+        user_id,
+        source_id,
+        skills_dict,
+        registry,
+        force,
+        dry_run,
+        results,
+    ):
+        del (
+            skill_dir,
+            user_id,
+            source_id,
+            registry,
+            force,
+            dry_run,
+            results,
+        )
+        skills_dict["demo"] = {"enabled": True}
+
+    monkeypatch.setattr(
+        skills_market,
+        "_process_single_skill",
+        _record_skill,
+    )
+
+    await skills_market._process_workspace_skills_async(
+        workspace_dir,
+        "user1",
+        "source_a",
+        object(),
+        False,
+        False,
+        {"errors": []},
+    )
+
+    manifest_path = get_workspace_skill_manifest_path(workspace_dir)
+    assert json.loads(manifest_path.read_text(encoding="utf-8")) == {
+        "skills": {"demo": {"enabled": True}},
+    }
+    assert not (workspace_dir / "skill.json").exists()
+
+
 def test_publish_skill_returns_201(tmp_path):
     app = _make_app(tmp_path)
     client = TestClient(app)

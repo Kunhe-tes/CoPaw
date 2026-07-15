@@ -300,13 +300,13 @@ class SkillInvocationDetector:
 
         # Pre-cache descriptions from workspace manifest
         if self._workspace_dir:
-            skill_json_path = get_workspace_skill_manifest_path(
+            manifest_path = get_workspace_skill_manifest_path(
                 self._workspace_dir,
             )
 
-            if skill_json_path.exists():
+            if manifest_path.exists():
                 try:
-                    with open(skill_json_path, "r", encoding="utf-8") as f:
+                    with open(manifest_path, "r", encoding="utf-8") as f:
                         manifest = json.load(f)
 
                     for skill_name in skills:

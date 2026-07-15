@@ -26,7 +26,11 @@ from fastapi import (
 )
 from pydantic import BaseModel, Field
 
-from ...marketplace.fs import get_skill_dir, _atomic_write_json
+from ...marketplace.fs import (
+    _atomic_write_json,
+    get_skill_dir,
+    get_workspace_skill_manifest_path,
+)
 from ...marketplace.schemas import (
     DistributeRequest,
     DistributeResponse,
@@ -1409,7 +1413,7 @@ async def _process_workspace_skills_async(
 ) -> None:
     """处理单个 workspace 下的所有技能."""
     skills_dir = workspace_dir / "skills"
-    manifest_path = workspace_dir / "skill.json"
+    manifest_path = get_workspace_skill_manifest_path(workspace_dir)
     agent_id = workspace_dir.name
 
     if not skills_dir.exists():
@@ -1427,7 +1431,7 @@ async def _process_workspace_skills_async(
         results["errors"].append(
             {
                 "tenant_id": user_id,
-                "error": f"skill.json 解析失败: {error}",
+                "error": f"workspace manifest 解析失败: {error}",
             },
         )
         return
@@ -1451,6 +1455,7 @@ async def _process_workspace_skills_async(
     # 保存 manifest
     if not dry_run and skills_dict:
         manifest["skills"] = skills_dict
+        manifest_path.parent.mkdir(parents=True, exist_ok=True)
         manifest_path.write_text(
             json.dumps(manifest, ensure_ascii=False, indent=2),
             encoding="utf-8",
