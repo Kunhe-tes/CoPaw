@@ -62,6 +62,7 @@ ALL_SKILL_ROUTING_CHANNELS = [
 _RegistryResult = TypeVar("_RegistryResult")
 _MAX_ZIP_BYTES = 200 * 1024 * 1024
 _ZIP_UTF8_FLAG = 0x800
+WORKSPACE_SKILL_LAYOUT_VERSION = 2
 
 
 def _has_cjk_text(text: str) -> bool:
@@ -209,7 +210,37 @@ def resolve_effective_skill_dir(
 
 def get_workspace_skill_manifest_path(workspace_dir: Path) -> Path:
     """Return the workspace skill manifest path."""
-    return workspace_dir / "skill.json"
+    return get_workspace_skill_state_dir(workspace_dir) / "manifest.json"
+
+
+def get_workspace_disabled_skills_dir(workspace_dir: Path) -> Path:
+    """Return the workspace disabled skill directory."""
+    return Path(workspace_dir) / ".disabled_skills"
+
+
+def get_workspace_skill_state_dir(workspace_dir: Path) -> Path:
+    """Return the workspace skill management state directory."""
+    return Path(workspace_dir) / ".skill_state"
+
+
+def get_legacy_workspace_skill_manifest_path(workspace_dir: Path) -> Path:
+    """Return the legacy workspace skill manifest path."""
+    return Path(workspace_dir) / "skill.json"
+
+
+def resolve_workspace_managed_skill_dir(
+    workspace_dir: Path,
+    skill_name: str,
+    *,
+    enabled: bool,
+) -> Path:
+    """Resolve a managed skill directory from its enablement state."""
+    root = (
+        get_workspace_skills_dir(workspace_dir)
+        if enabled
+        else get_workspace_disabled_skills_dir(workspace_dir)
+    )
+    return root / skill_name
 
 
 def get_workspace_identity(workspace_dir: Path) -> dict[str, str]:
@@ -628,6 +659,7 @@ def _mutate_json(
 def _default_workspace_manifest() -> dict[str, Any]:
     return {
         "schema_version": "workspace-skill-manifest.v1",
+        "layout_version": WORKSPACE_SKILL_LAYOUT_VERSION,
         "version": 0,
         "skills": {},
     }

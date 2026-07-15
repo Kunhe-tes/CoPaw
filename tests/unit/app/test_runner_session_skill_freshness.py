@@ -23,6 +23,7 @@ from swe.agents.hook_runtime.models import (
 from swe.agents.skills_manager import (
     get_builtin_skills_dir,
     get_skill_freshness_token,
+    get_workspace_skill_manifest_path,
 )
 from swe.app.runner.runner import AgentRunner
 from swe.app.runner.session import SafeJSONSession
@@ -167,6 +168,8 @@ def _write_skill_manifest(
     *,
     skills: list[str],
 ) -> None:
+    manifest_path = get_workspace_skill_manifest_path(workspace_dir)
+    manifest_path.parent.mkdir(parents=True, exist_ok=True)
     payload = {
         "skills": {
             skill_name: {
@@ -177,7 +180,7 @@ def _write_skill_manifest(
             for skill_name in skills
         },
     }
-    (workspace_dir / "skill.json").write_text(
+    manifest_path.write_text(
         json.dumps(payload),
         encoding="utf-8",
     )

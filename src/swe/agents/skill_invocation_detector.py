@@ -28,6 +28,7 @@ from .skill_feature_inferencer import (
 )
 from .skill_runtime_profile import SkillRuntimeProfile
 from .skill_tool_registry import SkillToolRegistry, get_skill_tool_registry
+from .skills_manager import get_workspace_skill_manifest_path
 
 if TYPE_CHECKING:
     from ..tracing.manager import TraceManager
@@ -256,8 +257,9 @@ class SkillInvocationDetector:
     def set_enabled_skills(self, skills: list[str]) -> None:
         """Set the list of enabled skills and cache their descriptions.
 
-        Reads skill descriptions from workspace skill.json manifest at
-        setup time, so they're ready when start_skill is called.
+        Reads skill descriptions from the workspace management manifest at
+        ``.skill_state/manifest.json`` during setup time, so they're ready
+        when start_skill is called.
 
         Args:
             skills: List of skill names that are currently enabled
@@ -298,7 +300,9 @@ class SkillInvocationDetector:
 
         # Pre-cache descriptions from workspace manifest
         if self._workspace_dir:
-            skill_json_path = self._workspace_dir / "skill.json"
+            skill_json_path = get_workspace_skill_manifest_path(
+                self._workspace_dir,
+            )
 
             if skill_json_path.exists():
                 try:
