@@ -52,6 +52,7 @@ from ...models.cron import (
     CronJobQueryParams,
     ExecutionModel,
     ExecutionQueryParams,
+    LatestExecutionSubtaskCountResponse,
     PaginatedResponse,
     SubscriptionDetailItem,
     SubscriptionOverviewItem,
@@ -749,6 +750,69 @@ class QueryService:
         # 直接读取，不做时区转换（数据库已是东八区时间）
         return CronJobModel.model_validate(
             convert_row_times_direct(row, JOB_TIME_FIELDS),
+        )
+
+    async def get_latest_execution_subtask_count(
+        self,
+        job_id: str,
+        source_id: str,
+    ) -> Optional[LatestExecutionSubtaskCountResponse]:
+        """Return the latest execution identity and its subtask count.
+
+        The job lookup is source-scoped. The execution lookup also uses the
+        job's stored tenant ID so a caller cannot cross tenant boundaries by
+        providing a job ID alone.
+        """
+        db = get_db_connection()
+        job_row = await db.fetch_one(
+            """
+            SELECT id, tenant_id
+            FROM swe_cron_jobs
+            WHERE id = %s
+              AND source_id = %s
+              AND deleted_at IS NULL
+            LIMIT 1
+            """,
+            (job_id, source_id),
+        )
+        if not job_row:
+            return None
+
+        tenant_id = str(job_row.get("tenant_id") or "")
+        execution_row = await db.fetch_one(
+            """
+            SELECT
+                e.id AS execution_id,
+                e.trace_id,
+                CASE
+                    WHEN e.trace_id IS NULL OR e.trace_id = '' THEN 0
+                    ELSE (
+                        SELECT COUNT(*)
+                        FROM swe_cron_subtasks s
+                        WHERE s.trace_id = e.trace_id
+                    )
+                END AS subtask_count
+            FROM swe_cron_executions e
+            WHERE e.job_id = %s
+              AND e.tenant_id = %s
+            ORDER BY e.actual_time DESC, e.id DESC
+            LIMIT 1
+            """,
+            (job_id, tenant_id),
+        )
+        if not execution_row:
+            return LatestExecutionSubtaskCountResponse(job_id=job_id)
+
+        trace_id = str(execution_row.get("trace_id") or "").strip() or None
+        return LatestExecutionSubtaskCountResponse(
+            job_id=job_id,
+            execution_id=execution_row.get("execution_id"),
+            trace_id=trace_id,
+            subtask_count=(
+                int(execution_row.get("subtask_count") or 0)
+                if trace_id
+                else 0
+            ),
         )
 
     async def list_executions(

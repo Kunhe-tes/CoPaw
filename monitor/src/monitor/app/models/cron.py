@@ -275,6 +275,25 @@ class ExecutionModel(BaseModel):
 # ============================================================
 
 
+class LatestExecutionSubtaskCountResponse(BaseModel):
+    """Latest execution identity and its subtask count for a cron job."""
+
+    job_id: str = Field(..., description="Cron job ID")
+    execution_id: Optional[int] = Field(
+        default=None,
+        description="Latest execution record ID",
+    )
+    trace_id: Optional[str] = Field(
+        default=None,
+        description="Latest execution trace ID",
+    )
+    subtask_count: int = Field(
+        default=0,
+        ge=0,
+        description="Number of subtasks associated with the latest trace",
+    )
+
+
 class CronJobSyncRequest(BaseModel):
     """Request body for syncing a cron job from SWE.
 
