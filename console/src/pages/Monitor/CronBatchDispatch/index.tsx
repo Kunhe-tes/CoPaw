@@ -22,6 +22,8 @@ import type { Dayjs } from "dayjs";
 import dayjs from "dayjs";
 import {
   ChevronDown,
+  ChevronLeft,
+  ChevronRight,
   Clock3,
   RefreshCw,
   ShieldCheck,
@@ -355,6 +357,82 @@ function CapacityEventRow({ item }: { item: CronDispatchCapacityItem }) {
         </div>
       </dl>
     </details>
+  );
+}
+
+function CapacityEventHistory({
+  items,
+}: {
+  items: CronDispatchCapacityItem[];
+}) {
+  const visibleItems = items.slice(0, 8);
+  const eventKey = visibleItems.map((item) => item.id).join(":");
+  const [navigation, setNavigation] = useState({ eventKey: "", index: 0 });
+
+  const safeActiveIndex =
+    navigation.eventKey === eventKey
+      ? Math.min(navigation.index, Math.max(visibleItems.length - 1, 0))
+      : 0;
+  const activeItem = visibleItems[safeActiveIndex];
+
+  return (
+    <>
+      <div className={styles.subSectionTitle}>
+        <div className={styles.subSectionTitleLabel}>
+          <TimerReset size={16} />
+          <span>最近调整记录</span>
+        </div>
+        {activeItem ? (
+          <div
+            className={styles.workerEventNavigation}
+            role="group"
+            aria-label="调整记录翻页"
+          >
+            <span className={styles.workerEventPosition} aria-live="polite">
+              {safeActiveIndex + 1} / {visibleItems.length}
+            </span>
+            <Button
+              type="text"
+              size="small"
+              className={styles.workerEventNavButton}
+              aria-label="上一条调整记录"
+              icon={<ChevronLeft size={15} />}
+              disabled={safeActiveIndex === 0}
+              onClick={() =>
+                setNavigation({
+                  eventKey,
+                  index: Math.max(safeActiveIndex - 1, 0),
+                })
+              }
+            />
+            <Button
+              type="text"
+              size="small"
+              className={styles.workerEventNavButton}
+              aria-label="下一条调整记录"
+              icon={<ChevronRight size={15} />}
+              disabled={safeActiveIndex === visibleItems.length - 1}
+              onClick={() =>
+                setNavigation({
+                  eventKey,
+                  index: Math.min(safeActiveIndex + 1, visibleItems.length - 1),
+                })
+              }
+            />
+          </div>
+        ) : null}
+      </div>
+      <div className={styles.workerEventList}>
+        {activeItem ? (
+          <CapacityEventRow key={activeItem.id} item={activeItem} />
+        ) : (
+          <Empty
+            image={Empty.PRESENTED_IMAGE_SIMPLE}
+            description="暂无调整记录"
+          />
+        )}
+      </div>
+    </>
   );
 }
 
@@ -767,7 +845,12 @@ export default function CronBatchDispatchPage() {
             <span>状态 / 进度</span>
           </div>
           <Spin spinning={batchLoading} wrapperClassName={styles.batchListSpin}>
-            <div className={styles.batchList}>
+            <div
+              className={styles.batchList}
+              role="region"
+              aria-label="Batch 列表"
+              tabIndex={0}
+            >
               {filteredBatches.map((batch) => {
                 const total = Math.max(batch.total_count, 1);
                 const finished = batch.completed_count + batch.failed_count;
@@ -1015,21 +1098,7 @@ export default function CronBatchDispatchPage() {
                 description="暂无 capacity"
               />
             )}
-            <div className={styles.subSectionTitle}>
-              <TimerReset size={16} />
-              <span>最近调整记录</span>
-            </div>
-            <div className={styles.workerEventList}>
-              {capacityEvents.slice(0, 8).map((item) => (
-                <CapacityEventRow key={item.id} item={item} />
-              ))}
-              {!capacityEvents.length ? (
-                <Empty
-                  image={Empty.PRESENTED_IMAGE_SIMPLE}
-                  description="暂无调整记录"
-                />
-              ) : null}
-            </div>
+            <CapacityEventHistory items={capacityEvents} />
           </Spin>
         </article>
       </section>
