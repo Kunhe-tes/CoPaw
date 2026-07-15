@@ -910,6 +910,10 @@ def test_broadcast_applies_batch_dispatch_after_distribution(
     observed_parent_flags = []
     observed_context_flags = []
 
+    async def _list_tenants(_source_id, source_filter=True):
+        del source_filter
+        return ["tenant-b", "tenant-c", "tenant-unrelated"]
+
     async def _fake_broadcast_to_tenant(context, tenant_id, offset):
         del offset
         observed_parent_flags.append(
@@ -931,6 +935,7 @@ def test_broadcast_applies_batch_dispatch_after_distribution(
         "_broadcast_to_tenant",
         _fake_broadcast_to_tenant,
     )
+    monkeypatch.setattr(api_module, "list_logical_tenant_ids", _list_tenants)
     source_job = CronJobSpec.model_validate(
         {
             **_job_spec("job-source"),
@@ -941,9 +946,29 @@ def test_broadcast_applies_batch_dispatch_after_distribution(
         },
     )
     manager = _Manager({"job-source": source_job})
+    target_manager = _Manager()
+    existing_child = CronJobSpec.model_validate(
+        {
+            **_job_spec("child-job-c"),
+            "tenant_id": "tenant-c",
+            "source_id": "source-a",
+            "scope_id": encode_scope_id("tenant-c", "source-a"),
+            "meta": {"broadcast_source_job_id": "job-source"},
+        },
+    )
+    existing_child_manager = _Manager({"child-job-c": existing_child})
     with _build_client(
         manager,
-        multi_agent_manager=_MultiAgentManager({}),
+        multi_agent_manager=_MultiAgentManager(
+            {
+                encode_scope_id("tenant-b", "source-a"): _Workspace(
+                    target_manager,
+                ),
+                encode_scope_id("tenant-c", "source-a"): _Workspace(
+                    existing_child_manager,
+                ),
+            },
+        ),
     ) as client:
         response = client.post(
             "/cron/jobs/job-source/broadcast",
@@ -975,6 +1000,12 @@ def test_broadcast_applies_batch_dispatch_after_distribution(
     ]
     assert observed_parent_flags == [False]
     assert observed_context_flags == [False]
+    assert (
+        existing_child_manager.jobs_by_id["child-job-c"].meta[
+            "broadcast_dispatch_intents_enabled"
+        ]
+        is True
+    )
 
 
 def test_broadcast_applies_normal_dispatch_after_distribution(monkeypatch):
@@ -1013,9 +1044,16 @@ def test_broadcast_applies_normal_dispatch_after_distribution(monkeypatch):
         },
     )
     manager = _Manager({"job-source": source_job})
+    target_manager = _Manager()
     with _build_client(
         manager,
-        multi_agent_manager=_MultiAgentManager({}),
+        multi_agent_manager=_MultiAgentManager(
+            {
+                encode_scope_id("tenant-b", "source-a"): _Workspace(
+                    target_manager,
+                ),
+            },
+        ),
     ) as client:
         response = client.post(
             "/cron/jobs/job-source/broadcast",
@@ -2220,7 +2258,82 @@ def test_dispatch_child_processing_records_failed_snapshot_on_target_error(
         ),
     )
 
-    asyncio.run(
+    synchronized = asyncio.run(
+        api_module._process_dispatch_broadcast_children(
+            app,
+            source_job,
+            agent_id="default",
+            source_id="source-a",
+            reason="test",
+            tenant_ids=["tenant-b"],
+        ),
+    )
+
+    assert synchronized is False
+    assert store.completed == []
+    assert store.failed
+    assert store.failed[0]["tenant_count"] == 1
+
+
+def test_dispatch_child_processing_skips_unavailable_discovery_tenant(
+    monkeypatch,
+):
+    async def _list_tenants(_source_id, source_filter=True):
+        del source_filter
+        return ["tenant-b", "tenant-unrelated"]
+
+    class _Store:
+        def __init__(self):
+            self.failed = []
+            self.completed = []
+
+        async def mark_running(self, **kwargs):
+            del kwargs
+            return True
+
+        async def record_failed(self, **kwargs):
+            self.failed.append(kwargs)
+
+        async def record_completed(self, **kwargs):
+            self.completed.append(kwargs)
+
+    monkeypatch.setenv("SWE_CRON_DISPATCH_INTENTS_ENABLED", "1")
+    monkeypatch.setattr(api_module, "list_logical_tenant_ids", _list_tenants)
+    source_job = CronJobSpec.model_validate(
+        {
+            **_job_spec("job-source"),
+            "tenant_id": "tenant-a",
+            "source_id": "source-a",
+            "scope_id": encode_scope_id("tenant-a", "source-a"),
+            "meta": {"broadcast_dispatch_intents_enabled": True},
+        },
+    )
+    child = CronJobSpec.model_validate(
+        {
+            **_job_spec("child-job"),
+            "tenant_id": "tenant-b",
+            "source_id": "source-a",
+            "scope_id": encode_scope_id("tenant-b", "source-a"),
+            "meta": {"broadcast_source_job_id": "job-source"},
+        },
+    )
+    child_manager = _Manager({"child-job": child})
+    store = _Store()
+    app = types.SimpleNamespace(
+        state=types.SimpleNamespace(
+            cron_broadcast_children_store=store,
+            multi_agent_manager=_MultiAgentManager(
+                {
+                    encode_scope_id("tenant-b", "source-a"): _Workspace(
+                        child_manager,
+                    ),
+                },
+            ),
+            tenant_workspace_pool=None,
+        ),
+    )
+
+    synchronized = asyncio.run(
         api_module._process_dispatch_broadcast_children(
             app,
             source_job,
@@ -2230,8 +2343,81 @@ def test_dispatch_child_processing_records_failed_snapshot_on_target_error(
         ),
     )
 
+    assert synchronized is True
+    assert store.failed == []
+    assert store.completed[0]["failed_tenants"] == 1
+    assert "unavailable" in store.completed[0]["failure_summary"]
+    assert (
+        child_manager.jobs_by_id["child-job"].meta[
+            "broadcast_dispatch_intents_enabled"
+        ]
+        is True
+    )
+
+
+def test_dispatch_child_processing_fails_for_unavailable_known_child(
+    monkeypatch,
+):
+    async def _list_tenants(_source_id, source_filter=True):
+        del source_filter
+        return []
+
+    class _Store:
+        def __init__(self):
+            self.failed = []
+            self.completed = []
+
+        async def get_snapshot(self, **kwargs):
+            del kwargs
+            return types.SimpleNamespace(items=[{"tenant_id": "tenant-b"}])
+
+        async def mark_running(self, **kwargs):
+            del kwargs
+            return True
+
+        async def record_failed(self, **kwargs):
+            self.failed.append(kwargs)
+
+        async def record_completed(self, **kwargs):
+            self.completed.append(kwargs)
+
+    class _FailingMultiAgentManager:
+        async def get_agent(self, *args, **kwargs):
+            del args, kwargs
+            raise RuntimeError("workspace unavailable")
+
+    monkeypatch.setenv("SWE_CRON_DISPATCH_INTENTS_ENABLED", "1")
+    monkeypatch.setattr(api_module, "list_logical_tenant_ids", _list_tenants)
+    source_job = CronJobSpec.model_validate(
+        {
+            **_job_spec("job-source"),
+            "tenant_id": "tenant-a",
+            "source_id": "source-a",
+            "scope_id": encode_scope_id("tenant-a", "source-a"),
+            "meta": {"broadcast_dispatch_intents_enabled": True},
+        },
+    )
+    store = _Store()
+    app = types.SimpleNamespace(
+        state=types.SimpleNamespace(
+            cron_broadcast_children_store=store,
+            multi_agent_manager=_FailingMultiAgentManager(),
+            tenant_workspace_pool=None,
+        ),
+    )
+
+    synchronized = asyncio.run(
+        api_module._process_dispatch_broadcast_children(
+            app,
+            source_job,
+            agent_id="default",
+            source_id="source-a",
+            reason="test",
+        ),
+    )
+
+    assert synchronized is False
     assert store.completed == []
-    assert store.failed
     assert store.failed[0]["tenant_count"] == 1
 
 
@@ -2293,6 +2479,61 @@ def test_dispatch_child_processing_records_failed_snapshot_on_tenant_list_error(
     assert store.failed
     assert store.failed[0]["tenant_count"] == 0
     assert "tenant list unavailable" in store.failed[0]["failure_summary"]
+
+
+def test_dispatch_child_processing_records_failed_when_completion_store_errors(
+    monkeypatch,
+):
+    async def _list_tenants(_source_id, source_filter=True):
+        del source_filter
+        return []
+
+    class _Store:
+        def __init__(self):
+            self.failed = []
+
+        async def mark_running(self, **kwargs):
+            del kwargs
+            return True
+
+        async def record_failed(self, **kwargs):
+            self.failed.append(kwargs)
+
+        async def record_completed(self, **kwargs):
+            del kwargs
+            raise RuntimeError("completion store unavailable")
+
+    monkeypatch.setattr(api_module, "list_logical_tenant_ids", _list_tenants)
+    source_job = CronJobSpec.model_validate(
+        {
+            **_job_spec("job-source"),
+            "tenant_id": "tenant-a",
+            "source_id": "source-a",
+            "scope_id": encode_scope_id("tenant-a", "source-a"),
+        },
+    )
+    store = _Store()
+    app = types.SimpleNamespace(
+        state=types.SimpleNamespace(
+            cron_broadcast_children_store=store,
+            multi_agent_manager=_MultiAgentManager({}),
+            tenant_workspace_pool=None,
+        ),
+    )
+
+    synchronized = asyncio.run(
+        api_module._process_dispatch_broadcast_children(
+            app,
+            source_job,
+            agent_id="default",
+            source_id="source-a",
+            reason="test",
+        ),
+    )
+
+    assert synchronized is False
+    assert store.failed[0]["tenant_count"] == 0
+    assert "completion store unavailable" in store.failed[0]["failure_summary"]
 
 
 def test_dispatch_child_processing_can_rollback_batch_flag(monkeypatch):

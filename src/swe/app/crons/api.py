@@ -687,6 +687,174 @@ def _schedule_dispatch_broadcast_children_processing(
     return True
 
 
+async def _load_known_dispatch_broadcast_child_tenant_ids(
+    store: Any,
+    *,
+    snapshot_parts: dict[str, str],
+    job_id: str,
+) -> list[str]:
+    if store is None:
+        return []
+    get_snapshot = getattr(store, "get_snapshot", None)
+    if not callable(get_snapshot):
+        return []
+    try:
+        snapshot = await get_snapshot(**snapshot_parts)
+    except Exception:  # pylint: disable=broad-except
+        logger.warning(
+            "Failed to read known broadcast children: job=%s",
+            job_id,
+            exc_info=True,
+        )
+        return []
+    if snapshot is None:
+        return []
+    return [
+        str(item.get("tenant_id") or "").strip()
+        for item in snapshot.items
+        if str(item.get("tenant_id") or "").strip()
+    ]
+
+
+async def _discover_dispatch_broadcast_child_tenant_ids(
+    source_id: str | None,
+    *,
+    job_id: str,
+) -> tuple[list[str], str | None]:
+    try:
+        tenant_ids = await list_logical_tenant_ids(
+            source_id,
+            source_filter=True,
+        )
+        return tenant_ids, None
+    except Exception as exc:  # pylint: disable=broad-except
+        logger.warning(
+            "Failed to list tenants for dispatch broadcast children: job=%s",
+            job_id,
+            exc_info=True,
+        )
+        return [], str(exc)
+
+
+async def _resolve_dispatch_broadcast_child_tenant_ids(
+    store: Any,
+    source_job: CronJobSpec,
+    *,
+    source_id: str | None,
+    snapshot_parts: dict[str, str],
+    tenant_ids: list[str] | None,
+) -> tuple[list[str], set[str], str | None]:
+    requested_tenant_ids = list(dict.fromkeys(tenant_ids or []))
+    known_child_tenant_ids = (
+        await _load_known_dispatch_broadcast_child_tenant_ids(
+            store,
+            snapshot_parts=snapshot_parts,
+            job_id=source_job.id,
+        )
+    )
+    strict_tenant_ids = set(
+        [*requested_tenant_ids, *known_child_tenant_ids],
+    )
+    discovered_tenant_ids, discovery_error = (
+        await _discover_dispatch_broadcast_child_tenant_ids(
+            source_id,
+            job_id=source_job.id,
+        )
+    )
+    resolved_tenant_ids = list(
+        dict.fromkeys(
+            [
+                *requested_tenant_ids,
+                *known_child_tenant_ids,
+                *discovered_tenant_ids,
+            ],
+        ),
+    )
+    return resolved_tenant_ids, strict_tenant_ids, discovery_error
+
+
+async def _synchronize_resolved_dispatch_broadcast_children_once(
+    context: _BroadcastContext,
+    tenant_ids: list[str],
+    strict_tenant_ids: set[str],
+    *,
+    enable: bool,
+    store: Any,
+    snapshot_parts: dict[str, str],
+    tenant_discovery_error: str | None,
+) -> bool:
+    items, failed_tenants, unavailable_tenants = (
+        await _process_dispatch_broadcast_children_for_tenants(
+            context,
+            tenant_ids,
+            enable=enable,
+            strict_tenant_ids=strict_tenant_ids,
+        )
+    )
+    if failed_tenants:
+        if store is not None:
+            await store.record_failed(
+                **snapshot_parts,
+                tenant_count=len(tenant_ids),
+                failure_summary="some broadcast children failed to process",
+            )
+        return False
+    if store is not None:
+        partial_failure_summaries: list[str] = []
+        if unavailable_tenants:
+            partial_failure_summaries.append(
+                f"{unavailable_tenants} tenants unavailable during "
+                "broadcast child discovery",
+            )
+        if tenant_discovery_error:
+            partial_failure_summaries.append(
+                f"tenant discovery unavailable: {tenant_discovery_error}",
+            )
+        await store.record_completed(
+            **snapshot_parts,
+            items=[item.model_dump(mode="json") for item in items],
+            tenant_count=len(tenant_ids),
+            failed_tenants=unavailable_tenants,
+            failure_summary="; ".join(partial_failure_summaries) or None,
+        )
+    return True
+
+
+async def _synchronize_resolved_dispatch_broadcast_children(
+    context: _BroadcastContext,
+    tenant_ids: list[str],
+    strict_tenant_ids: set[str],
+    *,
+    enable: bool,
+    store: Any,
+    snapshot_parts: dict[str, str],
+    tenant_discovery_error: str | None,
+) -> bool:
+    try:
+        return await _synchronize_resolved_dispatch_broadcast_children_once(
+            context,
+            tenant_ids,
+            strict_tenant_ids,
+            enable=enable,
+            store=store,
+            snapshot_parts=snapshot_parts,
+            tenant_discovery_error=tenant_discovery_error,
+        )
+    except Exception as exc:  # pylint: disable=broad-except
+        logger.warning(
+            "Failed to process dispatch broadcast children: job=%s",
+            context.source_job.id,
+            exc_info=True,
+        )
+        if store is not None:
+            await store.record_failed(
+                **snapshot_parts,
+                tenant_count=len(tenant_ids),
+                failure_summary=str(exc),
+            )
+        return False
+
+
 async def _process_dispatch_broadcast_children(
     app: Any,
     source_job: CronJobSpec,
@@ -695,6 +863,7 @@ async def _process_dispatch_broadcast_children(
     source_id: str | None,
     reason: str,
     enable: bool = True,
+    tenant_ids: list[str] | None = None,
 ) -> bool:
     del reason
     resolved_source_id = source_id or source_job.source_id
@@ -704,28 +873,29 @@ async def _process_dispatch_broadcast_children(
         source_job=source_job,
     )
     store = getattr(app.state, "cron_broadcast_children_store", None)
-    try:
-        tenant_ids = await list_logical_tenant_ids(
-            resolved_source_id,
-            source_filter=True,
-        )
-    except Exception as exc:  # pylint: disable=broad-except
-        logger.warning(
-            "Failed to list tenants for dispatch broadcast children: job=%s",
-            source_job.id,
-            exc_info=True,
-        )
+    (
+        resolved_tenant_ids,
+        strict_tenant_ids,
+        tenant_discovery_error,
+    ) = await _resolve_dispatch_broadcast_child_tenant_ids(
+        store,
+        source_job,
+        source_id=resolved_source_id,
+        snapshot_parts=parts,
+        tenant_ids=tenant_ids,
+    )
+    if tenant_discovery_error and not resolved_tenant_ids:
         if store is not None:
             await store.record_failed(
                 **parts,
                 tenant_count=0,
-                failure_summary=str(exc),
+                failure_summary=tenant_discovery_error,
             )
         return False
     if store is not None:
         await store.mark_running(
             **parts,
-            tenant_count=len(tenant_ids),
+            tenant_count=len(resolved_tenant_ids),
         )
     context = _BroadcastContext(
         source_job=source_job,
@@ -741,46 +911,15 @@ async def _process_dispatch_broadcast_children(
         timezone_name=source_job.schedule.timezone or "UTC",
         target_identity_by_tenant={},
     )
-    try:
-        items, failed_tenants = (
-            await _process_dispatch_broadcast_children_for_tenants(
-                context,
-                tenant_ids,
-                enable=enable,
-            )
-        )
-        if failed_tenants:
-            if store is not None:
-                await store.record_failed(
-                    **parts,
-                    tenant_count=len(tenant_ids),
-                    failure_summary=(
-                        "some broadcast children failed to process"
-                    ),
-                )
-            return False
-        if store is not None:
-            await store.record_completed(
-                **parts,
-                items=[item.model_dump(mode="json") for item in items],
-                tenant_count=len(tenant_ids),
-                failed_tenants=0,
-                failure_summary=None,
-            )
-        return True
-    except Exception as exc:  # pylint: disable=broad-except
-        logger.warning(
-            "Failed to process dispatch broadcast children: job=%s",
-            source_job.id,
-            exc_info=True,
-        )
-        if store is not None:
-            await store.record_failed(
-                **parts,
-                tenant_count=len(tenant_ids),
-                failure_summary=str(exc),
-            )
-        return False
+    return await _synchronize_resolved_dispatch_broadcast_children(
+        context,
+        resolved_tenant_ids,
+        strict_tenant_ids,
+        enable=enable,
+        store=store,
+        snapshot_parts=parts,
+        tenant_discovery_error=tenant_discovery_error,
+    )
 
 
 async def _process_dispatch_broadcast_children_for_tenant(
@@ -788,7 +927,8 @@ async def _process_dispatch_broadcast_children_for_tenant(
     tenant_id: str,
     *,
     enable: bool,
-) -> tuple[list[CronBroadcastChildItem], int]:
+    strict_tenant_resolution: bool,
+) -> tuple[list[CronBroadcastChildItem], int, int]:
     try:
         target_cron_manager, _ = await _get_target_cron_manager(
             context,
@@ -802,7 +942,11 @@ async def _process_dispatch_broadcast_children_for_tenant(
             tenant_id,
             exc_info=True,
         )
-        return [], 1
+        return (
+            [],
+            1 if strict_tenant_resolution else 0,
+            0 if strict_tenant_resolution else 1,
+        )
 
     items: list[CronBroadcastChildItem] = []
     failed = 0
@@ -815,7 +959,11 @@ async def _process_dispatch_broadcast_children_for_tenant(
             tenant_id,
             exc_info=True,
         )
-        return [], 1
+        return (
+            [],
+            1 if strict_tenant_resolution else 0,
+            0 if strict_tenant_resolution else 1,
+        )
 
     for job in jobs:
         if not _is_broadcast_child_of(job, context.source_job.id):
@@ -847,7 +995,7 @@ async def _process_dispatch_broadcast_children_for_tenant(
                 tenant_id,
                 exc_info=True,
             )
-    return items, failed
+    return items, failed, 0
 
 
 async def _process_dispatch_broadcast_children_for_tenants(
@@ -855,15 +1003,19 @@ async def _process_dispatch_broadcast_children_for_tenants(
     tenant_ids: list[str],
     *,
     enable: bool,
-) -> tuple[list[CronBroadcastChildItem], int]:
+    strict_tenant_ids: set[str],
+) -> tuple[list[CronBroadcastChildItem], int, int]:
     semaphore = asyncio.Semaphore(_get_cron_broadcast_concurrency())
 
-    async def _run(tenant_id: str) -> tuple[list[CronBroadcastChildItem], int]:
+    async def _run(
+        tenant_id: str,
+    ) -> tuple[list[CronBroadcastChildItem], int, int]:
         async with semaphore:
             return await _process_dispatch_broadcast_children_for_tenant(
                 context,
                 tenant_id,
                 enable=enable,
+                strict_tenant_resolution=tenant_id in strict_tenant_ids,
             )
 
     batches = await asyncio.gather(
@@ -871,10 +1023,12 @@ async def _process_dispatch_broadcast_children_for_tenants(
     )
     items: list[CronBroadcastChildItem] = []
     failed = 0
-    for batch_items, batch_failed in batches:
+    unavailable = 0
+    for batch_items, batch_failed, batch_unavailable in batches:
         items.extend(batch_items)
         failed += batch_failed
-    return items, failed
+        unavailable += batch_unavailable
+    return items, failed, unavailable
 
 
 def _list_dispatch_startup_tenant_ids() -> list[str]:
@@ -1220,6 +1374,7 @@ async def _synchronize_dispatch_broadcast_children(
     source_id: str | None,
     reason: str,
     enable: bool,
+    tenant_ids: list[str] | None = None,
 ) -> None:
     synchronized = await _process_dispatch_broadcast_children(
         app,
@@ -1228,6 +1383,7 @@ async def _synchronize_dispatch_broadcast_children(
         source_id=source_id,
         reason=reason,
         enable=enable,
+        tenant_ids=tenant_ids,
     )
     if not synchronized:
         raise RuntimeError(
@@ -1244,6 +1400,7 @@ async def _apply_batch_dispatch_after_broadcast(
     source_id: str | None,
     enable: bool,
     offset_window_hours: int,
+    tenant_ids: list[str],
 ) -> None:
     current = await mgr.get_job(source_job.id) or source_job
     if enable:
@@ -1262,6 +1419,7 @@ async def _apply_batch_dispatch_after_broadcast(
         source_id=source_id or updated.source_id,
         reason="broadcast_then_update_dispatch_mode",
         enable=enable,
+        tenant_ids=tenant_ids,
     )
 
 
@@ -2085,6 +2243,7 @@ async def broadcast_job(
                 source_id=_request_source_id(request) or source_job.source_id,
                 enable=body.enable_batch_dispatch is True,
                 offset_window_hours=body.offset_window_hours,
+                tenant_ids=normalized_tenants,
             )
 
         post_broadcast = _apply_requested_dispatch_mode
