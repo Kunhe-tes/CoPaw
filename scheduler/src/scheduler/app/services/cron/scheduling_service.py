@@ -950,11 +950,36 @@ def _callback_scheduled_fire_at(
     parent: Mapping[str, Any],
     now: datetime,
 ) -> datetime:
+    requested_fire_at = _requested_callback_fire_at(callback_params)
+    if requested_fire_at is not None:
+        return _ensure_aware_utc(requested_fire_at)
+
+    cron_expr = str(parent.get("cron_expr") or "")
+    timezone_name = str(parent.get("timezone") or "UTC")
+    offset_minutes = (
+        _positive_int(callback_params.get("batch_dispatch_offset_minutes"))
+        or 0
+    )
+    if offset_minutes > 0:
+        # The batch timer fires before the parent cron. When the external
+        # callback omits its trigger time, receipt time can identify the next
+        # parent occurrence only while it remains inside that pre-fire window.
+        upcoming_fire_at = _next_due_fire_at(
+            cron_expr=cron_expr,
+            timezone_name=timezone_name,
+            now_utc=now,
+        )
+        if upcoming_fire_at is not None:
+            until_upcoming = upcoming_fire_at - _ensure_aware_utc(now)
+            if timedelta(0) <= until_upcoming <= timedelta(
+                minutes=offset_minutes,
+            ):
+                return upcoming_fire_at
+
     return _ensure_aware_utc(
-        _requested_callback_fire_at(callback_params)
-        or _previous_due_fire_at(
-            cron_expr=str(parent.get("cron_expr") or ""),
-            timezone_name=str(parent.get("timezone") or "UTC"),
+        _previous_due_fire_at(
+            cron_expr=cron_expr,
+            timezone_name=timezone_name,
             now_utc=now,
         )
         or now,
@@ -1385,6 +1410,33 @@ def _previous_due_fire_at(
     if previous.tzinfo is None:
         previous = previous.replace(tzinfo=tz)
     return previous.astimezone(timezone.utc)
+
+
+def _next_due_fire_at(
+    *,
+    cron_expr: str,
+    timezone_name: str,
+    now_utc: datetime,
+) -> datetime | None:
+    if not cron_expr.strip():
+        return None
+    try:
+        tz = ZoneInfo(timezone_name or "UTC")
+    except Exception:
+        tz = timezone.utc
+    now = _ensure_aware_utc(now_utc)
+    local_now = now.astimezone(tz)
+    try:
+        upcoming = croniter(
+            cron_expr,
+            local_now - timedelta(seconds=1),
+        ).get_next(datetime)
+    except Exception:
+        logger.warning("Invalid cron expression for dispatch: %s", cron_expr)
+        return None
+    if upcoming.tzinfo is None:
+        upcoming = upcoming.replace(tzinfo=tz)
+    return upcoming.astimezone(timezone.utc)
 
 
 def _decode_callback_params(params: Mapping[str, Any]) -> dict[str, Any]:
