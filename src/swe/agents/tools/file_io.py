@@ -161,9 +161,13 @@ def _read_file_selection_sync(
     e = min(total, end_line if end_line is not None else total)
 
     if s > total:
-        _raise_file_error(
-            "invalid_arguments",
-            f"Error: start_line {s} exceeds file length ({total} lines).",
+        last_start_line = max(total, 1)
+        return (
+            f"Requested start_line {s} exceeds file length ({total} lines). "
+            "No content was returned.\n"
+            f"Call `read_file` with file_path={file_path} "
+            f"start_line={last_start_line} to read the last available line, "
+            "or omit start_line to read from the beginning."
         )
 
     if s > e:

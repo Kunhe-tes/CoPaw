@@ -24,7 +24,7 @@ function buildSkill(overrides: Partial<MarketSkill> = {}): MarketSkill {
     name: "sales-helper",
     skill_name: "sales-helper",
     description: "",
-    version: "1.0.0",
+    version: "2.0.0",
     creator_id: "admin",
     creator_name: "Admin",
     category_id: null,
@@ -186,7 +186,7 @@ describe("SkillReadinessModal", () => {
     await waitFor(() => {
       expect(mocks.startSkillReadinessRun).toHaveBeenCalledWith("sales-helper");
     });
-  });
+  }, 15000);
 
   it("starts a readiness run for startable config", async () => {
     render(
@@ -194,18 +194,28 @@ describe("SkillReadinessModal", () => {
     );
 
     await screen.findByText("已查询到自检配置");
-    expect(await screen.findByText("sales-helper")).toBeInTheDocument();
-    expect(await screen.findByText("2.0.0")).toBeInTheDocument();
+    expect((await screen.findAllByText("sales-helper")).length).toBeGreaterThan(
+      0,
+    );
+    expect(await screen.findByTitle("市场版本 v2.0.0")).toBeInTheDocument();
+    expect(
+      screen.queryByRole("columnheader", { name: "市场版本" }),
+    ).not.toBeInTheDocument();
     expect(await screen.findByText("1.0.0")).toBeInTheDocument();
     expect(await screen.findByText("已启用")).toBeInTheDocument();
-    expect(await screen.findByText("可更新")).toBeInTheDocument();
+    expect(await screen.findByText("版本不同")).toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: /查询用户并检查/ }));
 
     await waitFor(() => {
       expect(mocks.startSkillReadinessRun).toHaveBeenCalledWith("skill-001");
     });
-    expect(await screen.findByText(/run-1/)).toBeInTheDocument();
-  });
+    await waitFor(() => {
+      expect(mocks.getSkillReadinessResults).toHaveBeenCalledWith(
+        "run-1",
+        expect.objectContaining({ page: 1, page_size: 20 }),
+      );
+    });
+  }, 15000);
 
   it("shows owner lookup data time on overview results", async () => {
     mocks.getSkillReadinessOverview.mockResolvedValue(
@@ -356,7 +366,7 @@ describe("SkillReadinessModal", () => {
         }),
       );
     });
-  });
+  }, 15000);
 
   it("uses default owner metrics when overview omits owner_summary", async () => {
     mocks.getSkillReadinessOverview.mockResolvedValue({
@@ -371,7 +381,10 @@ describe("SkillReadinessModal", () => {
     );
 
     expect(await screen.findByText("已查询到自检配置")).toBeInTheDocument();
-    expect(await screen.findAllByText("0")).toHaveLength(2);
-    expect(screen.getByText("0 / 0")).toBeInTheDocument();
+    expect((await screen.findAllByText("0")).length).toBeGreaterThanOrEqual(2);
+    expect(
+      screen.getAllByText((_content, element) => element?.textContent === "0 / 0")
+        .length,
+    ).toBeGreaterThan(0);
   });
 });

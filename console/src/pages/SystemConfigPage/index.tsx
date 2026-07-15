@@ -26,6 +26,7 @@ import { useSourceSystemConfigStore } from "@/stores/sourceSystemConfigStore";
 import { DEFAULT_SOURCE_ID } from "@/constants/identity";
 
 import {
+  ARCHIVE_MAINTENANCE_RUN_TIME_OPTIONS,
   CURRENT_SOURCE_SYSTEM_CONFIG_SWITCHES,
   CRON_TASK_SESSION_CLEANUP_RUN_TIME_OPTIONS,
   LLM_RATE_LIMITER_NUMBER_FIELDS,
@@ -37,6 +38,8 @@ import {
   enableImmediateTruncationConfig,
   formatSystemPromptInjectionText,
   parseSystemPromptInjectionText,
+  readArchiveMaintenanceConfig,
+  readCronNotificationConfig,
   readCronTaskSessionCleanupConfig,
   readCronUnreadAutoPauseConfig,
   readLlmRateLimiterConfigState,
@@ -46,6 +49,8 @@ import {
   readSystemPromptInjections,
   readToolResultCompactConfig,
   validateSourceSystemConfig,
+  writeArchiveMaintenanceValue,
+  writeCronNotificationValue,
   writeCronTaskSessionCleanupValue,
   writeCronUnreadAutoPauseValue,
   writeLlmRateLimiterValue,
@@ -247,6 +252,20 @@ export default function SystemConfigPage() {
     );
   };
 
+  const handleCronSkipWeekendZhaohuEnabledChange = (checked: boolean) => {
+    if (formDisabled) {
+      return;
+    }
+    setValidationError(null);
+    setDraftConfig((previous) =>
+      writeCronNotificationValue(
+        previous,
+        "skip_weekend_zhaohu_enabled",
+        checked,
+      ),
+    );
+  };
+
   const handleCronTaskSessionCleanupEnabledChange = (checked: boolean) => {
     if (formDisabled) {
       return;
@@ -276,6 +295,26 @@ export default function SystemConfigPage() {
     setValidationError(null);
     setDraftConfig((previous) =>
       writeCronTaskSessionCleanupValue(previous, "run_time", value),
+    );
+  };
+
+  const handleArchiveMaintenanceEnabledChange = (checked: boolean) => {
+    if (formDisabled) {
+      return;
+    }
+    setValidationError(null);
+    setDraftConfig((previous) =>
+      writeArchiveMaintenanceValue(previous, "enabled", checked),
+    );
+  };
+
+  const handleArchiveMaintenanceRunTimeChange = (value: string) => {
+    if (formDisabled) {
+      return;
+    }
+    setValidationError(null);
+    setDraftConfig((previous) =>
+      writeArchiveMaintenanceValue(previous, "run_time", value),
     );
   };
 
@@ -469,8 +508,10 @@ export default function SystemConfigPage() {
   };
 
   const cronUnreadAutoPauseConfig = readCronUnreadAutoPauseConfig(draftConfig);
+  const cronNotificationConfig = readCronNotificationConfig(draftConfig);
   const cronTaskSessionCleanupConfig =
     readCronTaskSessionCleanupConfig(draftConfig);
+  const archiveMaintenanceConfig = readArchiveMaintenanceConfig(draftConfig);
   const systemPromptInjectionText = formatSystemPromptInjectionText(
     readSystemPromptInjections(draftConfig),
   );
@@ -955,6 +996,36 @@ export default function SystemConfigPage() {
                     <div className={styles.switchCopy}>
                       <span className={styles.switchTitle}>
                         {t(
+                          "sourceSystemConfigPage.cronSkipWeekendZhaohuTitle",
+                          {
+                            defaultValue: "周末不发招呼完成通知",
+                          },
+                        )}
+                      </span>
+                      <span className={styles.switchDescription}>
+                        {t(
+                          "sourceSystemConfigPage.cronSkipWeekendZhaohuDescription",
+                          {
+                            defaultValue:
+                              "开启后，按任务时区判断原始通知时间，落在周六或周日的定时任务运行结果不发送招呼完成通知。",
+                          },
+                        )}
+                      </span>
+                    </div>
+                    <Switch
+                      checked={
+                        cronNotificationConfig.skip_weekend_zhaohu_enabled
+                      }
+                      disabled={formDisabled}
+                      onChange={handleCronSkipWeekendZhaohuEnabledChange}
+                    />
+                  </div>
+                </section>
+                <section className={styles.scheduledTaskSection}>
+                  <div className={styles.switchRow}>
+                    <div className={styles.switchCopy}>
+                      <span className={styles.switchTitle}>
+                        {t(
                           "sourceSystemConfigPage.cronTaskSessionCleanupTitle",
                           {
                             defaultValue: "定时任务会话历史清理",
@@ -1024,6 +1095,59 @@ export default function SystemConfigPage() {
                           }),
                         )}
                         onChange={handleCronTaskSessionCleanupRunTimeChange}
+                      />
+                    </label>
+                  </div>
+                </section>
+                <section className={styles.scheduledTaskSection}>
+                  <div className={styles.switchRow}>
+                    <div className={styles.switchCopy}>
+                      <span className={styles.switchTitle}>
+                        {t("sourceSystemConfigPage.archiveMaintenanceTitle", {
+                          defaultValue: "文件归档维护",
+                        })}
+                      </span>
+                      <span className={styles.switchDescription}>
+                        {t(
+                          "sourceSystemConfigPage.archiveMaintenanceDescription",
+                          {
+                            defaultValue:
+                              "每天按 source 维度归档旧孤儿文件，不会自动删除归档文件。",
+                          },
+                        )}
+                      </span>
+                    </div>
+                    <Switch
+                      checked={archiveMaintenanceConfig.enabled}
+                      disabled={formDisabled}
+                      onChange={handleArchiveMaintenanceEnabledChange}
+                    />
+                  </div>
+                  <div className={styles.numberGrid}>
+                    <label className={styles.numberField}>
+                      <span className={styles.numberLabel}>
+                        {t("sourceSystemConfigPage.archiveMaintenanceRunTime", {
+                          defaultValue: "归档维护每日运行时间",
+                        })}
+                      </span>
+                      <Select
+                        aria-label={t(
+                          "sourceSystemConfigPage.archiveMaintenanceRunTime",
+                          {
+                            defaultValue: "归档维护每日运行时间",
+                          },
+                        )}
+                        value={archiveMaintenanceConfig.run_time}
+                        disabled={
+                          formDisabled || !archiveMaintenanceConfig.enabled
+                        }
+                        options={ARCHIVE_MAINTENANCE_RUN_TIME_OPTIONS.map(
+                          (runTime) => ({
+                            label: runTime,
+                            value: runTime,
+                          }),
+                        )}
+                        onChange={handleArchiveMaintenanceRunTimeChange}
                       />
                     </label>
                   </div>

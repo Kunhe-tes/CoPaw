@@ -310,6 +310,7 @@ class TenantWorkspacePool:
         scope_id: str | None,
         tenant_name: str | None,
         bbk_id: str | None,
+        enable_bootstrap_chat: bool = True,
     ) -> None:
         """Perform the actual bootstrap process.
 
@@ -320,6 +321,7 @@ class TenantWorkspacePool:
             scope_id: Optional explicit runtime scope.
             tenant_name: Optional tenant name for DB record.
             bbk_id: Optional BBK identifier for DB record.
+            enable_bootstrap_chat: Whether to keep BOOTSTRAP.md for first chat.
 
         Raises:
             RuntimeError: If bootstrap fails.
@@ -339,7 +341,9 @@ class TenantWorkspacePool:
         )
 
         try:
-            bootstrap_result = initializer.ensure_seeded_bootstrap()
+            bootstrap_result = initializer.ensure_seeded_bootstrap(
+                enable_bootstrap_chat=enable_bootstrap_chat,
+            )
 
             # Log seeding results
             self._log_seeding_results(tenant_id, bootstrap_result)
@@ -390,6 +394,7 @@ class TenantWorkspacePool:
         scope_id: str | None = None,
         tenant_name: str | None = None,
         bbk_id: str | None = None,
+        enable_bootstrap_chat: bool = True,
     ) -> None:
         """Ensure tenant directory is bootstrapped (minimal).
 
@@ -403,6 +408,7 @@ class TenantWorkspacePool:
                 state is keyed by this scope instead of re-deriving it.
             tenant_name: Optional tenant/user name for database record.
             bbk_id: Optional BBK identifier for database record.
+            enable_bootstrap_chat: Whether to keep BOOTSTRAP.md for first chat.
 
         Raises:
             RuntimeError: If bootstrap fails.
@@ -459,6 +465,7 @@ class TenantWorkspacePool:
                 scope_id,
                 tenant_name,
                 bbk_id,
+                enable_bootstrap_chat,
             )
             duration_ms = int((time.perf_counter() - started_at) * 1000)
             logger.debug(

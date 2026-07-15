@@ -28,6 +28,8 @@ from swe.app.source_system_config.models import (
     SourceSystemConfig,
 )
 from swe.config.context import encode_scope_id
+from swe.providers import provider_manager as provider_manager_module
+from swe.providers.models import ModelSlotConfig
 
 
 class CapturingSchedulerAdapter(RealSchedulerAdapter):
@@ -84,6 +86,52 @@ def _sample_job(*, external_id: str | None = None) -> CronJobSpec:
     )
 
 
+def _batch_dispatch_child_job(
+    *,
+    external_id: str | None = None,
+    dispatch_enabled: bool = True,
+) -> CronJobSpec:
+    job = _sample_job(external_id=external_id)
+    meta = dict(job.meta or {})
+    meta.update(
+        {
+            "broadcast_source_job_id": "parent-job",
+            "broadcast_dispatch_intents_enabled": dispatch_enabled,
+        },
+    )
+    return job.model_copy(
+        update={
+            "id": "child-job",
+            "tenant_id": "tenant-b",
+            "source_id": "source-a",
+            "scope_id": encode_scope_id("tenant-b", "source-a"),
+            "meta": meta,
+        },
+    )
+
+
+class _JobsRepo:
+    _path = "jobs.json"
+
+    def __init__(self, jobs: list[CronJobSpec] | None = None) -> None:
+        self.jobs = list(jobs or [])
+
+    async def list_jobs(self) -> list[CronJobSpec]:
+        return list(self.jobs)
+
+    async def load(self) -> JobsFile:
+        return JobsFile(jobs=list(self.jobs))
+
+    async def save(self, jobs_file: JobsFile) -> None:
+        self.jobs = list(jobs_file.jobs)
+
+    async def get_job(self, job_id: str) -> CronJobSpec | None:
+        for job in self.jobs:
+            if job.id == job_id:
+                return job
+        return None
+
+
 class _StaticSourceSystemConfigService:
     def __init__(self, raw_config: dict[str, Any] | None = None) -> None:
         self.raw_config = SourceSystemConfig.model_validate(raw_config or {})
@@ -123,6 +171,50 @@ def test_build_broadcast_job_uses_target_tenant_and_current_source() -> None:
     assert target_job.dispatch.target.user_id == "tenant-b"
     assert target_job.request is not None
     assert target_job.request.user_id == "tenant-b"
+
+
+def test_build_broadcast_job_can_enable_batch_dispatch() -> None:
+    source_job = _sample_job()
+
+    target_job = _build_broadcast_job(
+        source_job,
+        job_id="job-broadcast",
+        target_tenant_id="tenant-b",
+        target_tenant_name=None,
+        target_bbk_id=None,
+        source_id="source-a",
+        cron="0 8 * * *",
+        timezone_name="Asia/Shanghai",
+        offset_minutes=0,
+        model_slot=source_job.model_slot,
+        model_slot_fallback_reason="",
+        enable_batch_dispatch=True,
+    )
+
+    assert target_job.meta["broadcast_dispatch_intents_enabled"] is True
+
+
+def test_build_broadcast_job_strips_parent_batch_flag_when_disabled() -> None:
+    source_job = _sample_job().model_copy(
+        update={"meta": {"broadcast_dispatch_intents_enabled": True}},
+    )
+
+    target_job = _build_broadcast_job(
+        source_job,
+        job_id="job-broadcast",
+        target_tenant_id="tenant-b",
+        target_tenant_name=None,
+        target_bbk_id=None,
+        source_id="source-a",
+        cron="0 8 * * *",
+        timezone_name="Asia/Shanghai",
+        offset_minutes=0,
+        model_slot=source_job.model_slot,
+        model_slot_fallback_reason="",
+        enable_batch_dispatch=False,
+    )
+
+    assert "broadcast_dispatch_intents_enabled" not in target_job.meta
 
 
 @pytest.mark.asyncio
@@ -381,6 +473,48 @@ async def test_callback_runs_source_cleanup_without_using_tenant_scope() -> None
 
 
 @pytest.mark.asyncio
+async def test_callback_runs_source_archive_maintenance_without_tenant_scope() -> None:
+    observed: dict[str, Any] = {}
+
+    class FakeSourceScheduler:
+        async def run_archive_maintenance(self, *, source_id: str):
+            observed["source_id"] = source_id
+            return {"enabled": True, "source_id": source_id}
+
+    params = {
+        "tenant_id": "tenant-a",
+        "source_id": "source-a",
+        "agent_id": "",
+        "task_type": "archive_maintenance",
+        "job_id": "_source_archive_maintenance",
+        "scopeId": "tenant-a-source-a",
+        "fromId": "tenant-a",
+    }
+    request = SimpleNamespace(
+        app=SimpleNamespace(
+            state=SimpleNamespace(
+                source_system_task_scheduler=FakeSourceScheduler(),
+            ),
+        ),
+    )
+
+    response = await internal_router.internal_cron_callback(
+        request=request,
+        body={
+            "jobParam": base64.urlsafe_b64encode(
+                json.dumps(params).encode(),
+            ).decode(),
+        },
+    )
+
+    assert response == {
+        "status": "ok",
+        "task_type": "archive_maintenance",
+    }
+    assert observed == {"source_id": "source-a"}
+
+
+@pytest.mark.asyncio
 async def test_refresh_external_jobs_updates_existing_external_binding(
     tmp_path,
 ) -> None:
@@ -411,6 +545,486 @@ async def test_refresh_external_jobs_updates_existing_external_binding(
     assert payload["id"] == 42
     assert payload["jobDesc"].startswith("[SWE] tenant-a/source-a/default/job")
     assert _decode_job_param(payload["jobParam"])["source_id"] == "source-a"
+
+
+@pytest.mark.asyncio
+async def test_batch_dispatch_child_does_not_register_external_job(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("SWE_CRON_DISPATCH_INTENTS_ENABLED", "1")
+    adapter = CapturingSchedulerAdapter()
+    repo = _JobsRepo()
+    manager = CronManager(
+        repo=repo,
+        runner=SimpleNamespace(workspace_dir=None, _workspace=None),
+        channel_manager=object(),
+        agent_id="default",
+        tenant_id=encode_scope_id("tenant-b", "source-a"),
+        scheduler_adapter=adapter,
+    )
+
+    await manager.create_or_replace_job(_batch_dispatch_child_job())
+
+    assert repo.jobs[0].meta.get("external_job_id") in (None, "")
+    assert [path for path, _ in adapter.requests] == []
+
+
+@pytest.mark.asyncio
+async def test_batch_dispatch_parent_registers_normal_swe_callback(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("SWE_CRON_DISPATCH_INTENTS_ENABLED", "1")
+    monkeypatch.setenv("SWE_SCHEDULER_API_URL", "http://scheduler.local/api")
+    monkeypatch.setenv("SWE_SERVER_DOMAIN", "http://swe.local")
+    adapter = CapturingSchedulerAdapter()
+    repo = _JobsRepo()
+    parent = _sample_job().model_copy(
+        update={
+            "meta": {
+                "broadcast_dispatch_intents_enabled": True,
+            },
+        },
+    )
+    manager = CronManager(
+        repo=repo,
+        runner=SimpleNamespace(workspace_dir=None, _workspace=None),
+        channel_manager=object(),
+        agent_id="default",
+        tenant_id=encode_scope_id("tenant-a", "source-a"),
+        scheduler_adapter=adapter,
+    )
+
+    await manager.create_or_replace_job(parent)
+
+    assert repo.jobs[0].meta["external_job_id"] == "1001"
+    add_path, payload = adapter.requests[0]
+    assert add_path == "/job-admin/v2/add-job"
+    assert (
+        payload["jobAddress"]
+        == "http://swe.local/api/internal/cron/callback"
+    )
+    job_param = _decode_job_param(payload["jobParam"])
+    assert job_param["job_id"] == "job-1"
+    assert "callback_token" not in job_param
+
+
+@pytest.mark.asyncio
+async def test_enable_batch_dispatch_registers_separate_scheduler_job(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("SWE_CRON_DISPATCH_INTENTS_ENABLED", "1")
+    monkeypatch.setenv("SWE_SCHEDULER_API_URL", "http://scheduler.local/api")
+    monkeypatch.setenv("SWE_SERVER_DOMAIN", "http://swe.local")
+    monkeypatch.setattr(
+        provider_manager_module.ProviderManager,
+        "_resolve_effective_provider_tenant_id",
+        staticmethod(lambda tenant_id: tenant_id or "default"),
+    )
+    monkeypatch.setattr(
+        provider_manager_module.ProviderManager,
+        "_get_tenant_root_path",
+        staticmethod(lambda tenant_id: f"/unused/{tenant_id}/providers"),
+    )
+    monkeypatch.setattr(
+        provider_manager_module.ProviderManager,
+        "_read_active_model_from_root",
+        staticmethod(
+            lambda _root: ModelSlotConfig(
+                provider_id="dashscope",
+                model="qwen-max",
+            ),
+        ),
+    )
+    adapter = CapturingSchedulerAdapter()
+    parent = _sample_job(external_id="42")
+    repo = _JobsRepo([parent])
+    manager = CronManager(
+        repo=repo,
+        runner=SimpleNamespace(workspace_dir=None, _workspace=None),
+        channel_manager=object(),
+        agent_id="default",
+        tenant_id=encode_scope_id("tenant-a", "source-a"),
+        scheduler_adapter=adapter,
+    )
+
+    saved = await manager.enable_batch_dispatch_for_parent(
+        "job-1",
+        offset_window_hours=4,
+    )
+
+    meta = saved.meta or {}
+    assert meta["external_job_id"] == "42"
+    assert meta["batch_dispatch_external_job_id"] == "1001"
+    assert meta["broadcast_dispatch_intents_enabled"] is True
+    assert meta["batch_dispatch_offset_minutes"] == 240
+    assert (repo.jobs[0].meta or {}) == meta
+
+    normal_update = next(
+        payload
+        for path, payload in adapter.requests
+        if path == "/job-admin/v2/update-job" and payload.get("id") == 42
+    )
+    assert normal_update["jobAddress"] == "http://swe.local/api/internal/cron/callback"
+
+    batch_add = next(
+        payload
+        for path, payload in adapter.requests
+        if path == "/job-admin/v2/add-job"
+        and payload["jobAddress"]
+        == "http://scheduler.local/api/scheduler/cron/callback"
+    )
+    assert "[批调度]" in batch_add["jobDesc"]
+    assert batch_add["jobCron"] == "0 0 5 * * ?"
+    job_param = _decode_job_param(batch_add["jobParam"])
+    assert job_param["job_id"] == "job-1"
+    assert job_param["batch_dispatch_offset_minutes"] == 240
+    assert job_param["batch_dispatch_parent_cron"] == "0 9 * * *"
+    assert job_param["swe_server_domain"] == "http://swe.local"
+    assert job_param["provider_id"] == "dashscope"
+    assert job_param["model_id"] == "qwen-max"
+
+    run_states = [
+        payload
+        for path, payload in adapter.requests
+        if path == "/job-admin/v2/update-job-run-states"
+    ]
+    assert any(payload["id"] == 42 and payload["runFlag"] == 0 for payload in run_states)
+    assert any(
+        payload["id"] == 1001 and payload["runFlag"] == 1 for payload in run_states
+    )
+
+
+@pytest.mark.asyncio
+async def test_update_enabled_batch_dispatch_parent_refreshes_batch_scheduler_job(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("SWE_CRON_DISPATCH_INTENTS_ENABLED", "1")
+    monkeypatch.setenv("SWE_SCHEDULER_API_URL", "http://scheduler.local/api")
+    monkeypatch.setenv("SWE_SERVER_DOMAIN", "http://swe.local")
+    adapter = CapturingSchedulerAdapter()
+    parent = _sample_job(external_id="42").model_copy(
+        update={
+            "meta": {
+                "external_job_id": "42",
+                "batch_dispatch_external_job_id": "1001",
+                "broadcast_dispatch_intents_enabled": True,
+                "batch_dispatch_offset_window_hours": 4,
+                "batch_dispatch_offset_minutes": 240,
+            },
+        },
+    )
+    updated_parent = parent.model_copy(
+        update={
+            "schedule": ScheduleSpec(
+                type="cron",
+                cron="30 10 * * *",
+                timezone="Asia/Shanghai",
+            ),
+        },
+    )
+    repo = _JobsRepo([parent])
+    manager = CronManager(
+        repo=repo,
+        runner=SimpleNamespace(workspace_dir=None, _workspace=None),
+        channel_manager=object(),
+        agent_id="default",
+        tenant_id=encode_scope_id("tenant-a", "source-a"),
+        scheduler_adapter=adapter,
+    )
+
+    await manager.create_or_replace_job(updated_parent)
+
+    normal_update = next(
+        payload
+        for path, payload in adapter.requests
+        if path == "/job-admin/v2/update-job" and payload.get("id") == 42
+    )
+    assert _decode_job_param(normal_update["jobParam"])["job_id"] == "job-1"
+
+    batch_update = next(
+        payload
+        for path, payload in adapter.requests
+        if path == "/job-admin/v2/update-job" and payload.get("id") == 1001
+    )
+    assert (
+        batch_update["jobAddress"]
+        == "http://scheduler.local/api/scheduler/cron/callback"
+    )
+    assert batch_update["jobCron"] == "0 30 6 * * ?"
+    batch_job_param = _decode_job_param(batch_update["jobParam"])
+    assert batch_job_param["job_id"] == "job-1"
+    assert batch_job_param["batch_dispatch_offset_minutes"] == 240
+    assert batch_job_param["batch_dispatch_parent_cron"] == "30 10 * * *"
+
+    run_states = [
+        payload
+        for path, payload in adapter.requests
+        if path == "/job-admin/v2/update-job-run-states"
+    ]
+    assert any(
+        payload["id"] == 42 and payload["runFlag"] == 0
+        for payload in run_states
+    )
+    assert any(
+        payload["id"] == 1001 and payload["runFlag"] == 1 for payload in run_states
+    )
+    assert repo.jobs[0].meta["batch_dispatch_cron"] == "30 6 * * *"
+
+
+@pytest.mark.asyncio
+async def test_disable_batch_dispatch_resumes_normal_and_pauses_batch_job(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("SWE_CRON_DISPATCH_INTENTS_ENABLED", "1")
+    monkeypatch.setenv("SWE_SCHEDULER_API_URL", "http://scheduler.local/api")
+    monkeypatch.setenv("SWE_SERVER_DOMAIN", "http://swe.local")
+    adapter = CapturingSchedulerAdapter()
+    parent = _sample_job(external_id="42").model_copy(
+        update={
+            "meta": {
+                "external_job_id": "42",
+                "batch_dispatch_external_job_id": "1001",
+                "broadcast_dispatch_intents_enabled": True,
+                "batch_dispatch_offset_minutes": 240,
+            },
+        },
+    )
+    repo = _JobsRepo([parent])
+    manager = CronManager(
+        repo=repo,
+        runner=SimpleNamespace(workspace_dir=None, _workspace=None),
+        channel_manager=object(),
+        agent_id="default",
+        tenant_id=encode_scope_id("tenant-a", "source-a"),
+        scheduler_adapter=adapter,
+    )
+
+    saved = await manager.disable_batch_dispatch_for_parent("job-1")
+
+    meta = saved.meta or {}
+    assert meta["external_job_id"] == "42"
+    assert meta["batch_dispatch_external_job_id"] == "1001"
+    assert "broadcast_dispatch_intents_enabled" not in meta
+    assert "batch_dispatch_offset_minutes" not in meta
+    assert (repo.jobs[0].meta or {}) == meta
+
+    normal_update = next(
+        payload
+        for path, payload in adapter.requests
+        if path == "/job-admin/v2/update-job" and payload.get("id") == 42
+    )
+    assert normal_update["jobAddress"] == "http://swe.local/api/internal/cron/callback"
+
+    run_states = [
+        payload
+        for path, payload in adapter.requests
+        if path == "/job-admin/v2/update-job-run-states"
+    ]
+    assert any(payload["id"] == 42 and payload["runFlag"] == 1 for payload in run_states)
+    assert any(
+        payload["id"] == 1001 and payload["runFlag"] == 0 for payload in run_states
+    )
+
+
+@pytest.mark.asyncio
+async def test_restore_external_ids_updates_batch_disabled_parent_to_swe_callback(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("SWE_CRON_DISPATCH_INTENTS_ENABLED", "1")
+    monkeypatch.setenv("SWE_SERVER_DOMAIN", "http://swe.local")
+    adapter = CapturingSchedulerAdapter()
+    parent = _sample_job(external_id="42")
+    repo = _JobsRepo([parent])
+    manager = CronManager(
+        repo=repo,
+        runner=SimpleNamespace(workspace_dir=None, _workspace=None),
+        channel_manager=object(),
+        agent_id="default",
+        tenant_id=encode_scope_id("tenant-a", "source-a"),
+        scheduler_adapter=adapter,
+    )
+
+    await manager._restore_external_job_ids()
+
+    update_path, payload = adapter.requests[0]
+    assert update_path == "/job-admin/v2/update-job"
+    assert payload["id"] == 42
+    assert payload["jobAddress"] == "http://swe.local/api/internal/cron/callback"
+
+
+@pytest.mark.asyncio
+async def test_restore_external_ids_updates_rolled_back_child_to_swe_callback(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("SWE_CRON_DISPATCH_INTENTS_ENABLED", "1")
+    monkeypatch.setenv("SWE_SERVER_DOMAIN", "http://swe.local")
+    adapter = CapturingSchedulerAdapter()
+    child = _sample_job(external_id="42").model_copy(
+        update={
+            "id": "child-job",
+            "tenant_id": "tenant-b",
+            "source_id": "source-a",
+            "scope_id": encode_scope_id("tenant-b", "source-a"),
+            "meta": {
+                "external_job_id": "42",
+                "broadcast_source_job_id": "parent-job",
+            },
+        },
+    )
+    repo = _JobsRepo([child])
+    manager = CronManager(
+        repo=repo,
+        runner=SimpleNamespace(workspace_dir=None, _workspace=None),
+        channel_manager=object(),
+        agent_id="default",
+        tenant_id=encode_scope_id("tenant-b", "source-a"),
+        scheduler_adapter=adapter,
+    )
+
+    await manager._restore_external_job_ids()
+
+    update_path, payload = adapter.requests[0]
+    assert update_path == "/job-admin/v2/update-job"
+    assert payload["id"] == 42
+    assert payload["jobAddress"] == "http://swe.local/api/internal/cron/callback"
+
+
+@pytest.mark.asyncio
+async def test_batch_dispatch_child_uses_normal_scheduler_when_feature_off(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("SWE_CRON_DISPATCH_INTENTS_ENABLED", raising=False)
+    adapter = CapturingSchedulerAdapter()
+    repo = _JobsRepo()
+    manager = CronManager(
+        repo=repo,
+        runner=SimpleNamespace(workspace_dir=None, _workspace=None),
+        channel_manager=object(),
+        agent_id="default",
+        tenant_id=encode_scope_id("tenant-b", "source-a"),
+        scheduler_adapter=adapter,
+    )
+
+    await manager.create_or_replace_job(_batch_dispatch_child_job())
+
+    assert repo.jobs[0].meta["external_job_id"] == "1001"
+    paths = [path for path, _ in adapter.requests]
+    assert paths[0] == "/job-admin/v2/add-job"
+    assert "/job-admin/v2/add-job" in paths
+    assert any(
+        path == "/job-admin/v2/update-job-run-states"
+        and payload["runFlag"] == 1
+        for path, payload in adapter.requests
+    )
+
+
+@pytest.mark.asyncio
+async def test_batch_dispatch_child_pauses_existing_external_job(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("SWE_CRON_DISPATCH_INTENTS_ENABLED", "1")
+    adapter = CapturingSchedulerAdapter()
+    existing = _batch_dispatch_child_job(
+        external_id="42",
+        dispatch_enabled=False,
+    )
+    repo = _JobsRepo([existing])
+    manager = CronManager(
+        repo=repo,
+        runner=SimpleNamespace(workspace_dir=None, _workspace=None),
+        channel_manager=object(),
+        agent_id="default",
+        tenant_id=encode_scope_id("tenant-b", "source-a"),
+        scheduler_adapter=adapter,
+    )
+
+    updated = existing.model_copy(
+        update={
+            "meta": {
+                "broadcast_source_job_id": "parent-job",
+                "broadcast_dispatch_intents_enabled": True,
+            },
+        },
+    )
+    await manager.create_or_replace_job(updated)
+
+    assert repo.jobs[0].meta["external_job_id"] == "42"
+    assert [path for path, _ in adapter.requests] == [
+        "/job-admin/v2/update-job-run-states",
+    ]
+    assert adapter.requests[0][1]["id"] == 42
+    assert adapter.requests[0][1]["runFlag"] == 0
+
+
+@pytest.mark.asyncio
+async def test_register_missing_pauses_existing_batch_dispatch_child(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("SWE_CRON_DISPATCH_INTENTS_ENABLED", "1")
+    adapter = CapturingSchedulerAdapter()
+    repo = _JobsRepo([_batch_dispatch_child_job(external_id="42")])
+    manager = CronManager(
+        repo=repo,
+        runner=SimpleNamespace(workspace_dir=None, _workspace=None),
+        channel_manager=object(),
+        agent_id="default",
+        tenant_id=encode_scope_id("tenant-b", "source-a"),
+        scheduler_adapter=adapter,
+    )
+
+    result = await manager.register_missing_external_jobs()
+
+    assert result["updated"] == 1
+    assert [path for path, _ in adapter.requests] == [
+        "/job-admin/v2/update-job-run-states",
+    ]
+    assert adapter.requests[0][1]["id"] == 42
+    assert adapter.requests[0][1]["runFlag"] == 0
+
+
+async def test_restore_external_ids_skips_batch_dispatch_child_registration(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("SWE_CRON_DISPATCH_INTENTS_ENABLED", "1")
+    adapter = CapturingSchedulerAdapter()
+    repo = _JobsRepo([_batch_dispatch_child_job()])
+    manager = CronManager(
+        repo=repo,
+        runner=SimpleNamespace(workspace_dir=None, _workspace=None),
+        channel_manager=object(),
+        agent_id="default",
+        tenant_id=encode_scope_id("tenant-b", "source-a"),
+        scheduler_adapter=adapter,
+    )
+
+    await manager._restore_external_job_ids()
+
+    assert adapter.requests == []
+
+
+@pytest.mark.asyncio
+async def test_restore_external_ids_pauses_batch_dispatch_child_binding(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("SWE_CRON_DISPATCH_INTENTS_ENABLED", "1")
+    adapter = CapturingSchedulerAdapter()
+    repo = _JobsRepo([_batch_dispatch_child_job(external_id="42")])
+    manager = CronManager(
+        repo=repo,
+        runner=SimpleNamespace(workspace_dir=None, _workspace=None),
+        channel_manager=object(),
+        agent_id="default",
+        tenant_id=encode_scope_id("tenant-b", "source-a"),
+        scheduler_adapter=adapter,
+    )
+
+    await manager._restore_external_job_ids()
+
+    assert [path for path, _ in adapter.requests] == [
+        "/job-admin/v2/update-job-run-states",
+    ]
+    assert adapter.requests[0][1]["id"] == 42
+    assert adapter.requests[0][1]["runFlag"] == 0
 
 
 @pytest.mark.asyncio

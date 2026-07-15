@@ -4,6 +4,8 @@
 from __future__ import annotations
 
 import asyncio
+import gc
+import weakref
 from contextlib import suppress
 from types import SimpleNamespace
 from typing import Any
@@ -13,6 +15,7 @@ import pytest
 import swe.app.multi_agent_manager as manager_module
 import swe.app.workspace.workspace as workspace_module
 from swe.app.multi_agent_manager import MultiAgentManager
+from swe.app.workspace.service_manager import ServiceDescriptor, ServiceManager
 from swe.app.workspace.workspace import Workspace
 
 
@@ -67,6 +70,262 @@ class _TaskTracker:
 
     async def wait_all_done(self, *, timeout: float) -> bool:
         return not self._has_active_tasks
+
+
+@pytest.mark.asyncio
+async def test_service_manager_final_stop_clears_stopped_service_references(
+    tmp_path,
+) -> None:
+    workspace = SimpleNamespace(agent_id="default")
+    service_manager = ServiceManager(workspace)
+    stopped: list[str] = []
+
+    class Service:
+        def __init__(self, name: str) -> None:
+            self.name = name
+
+        async def stop(self) -> None:
+            stopped.append(self.name)
+
+    service_manager.register(
+        ServiceDescriptor(
+            name="runner",
+            service_class=None,
+            stop_method="stop",
+            priority=10,
+        ),
+    )
+    service_manager.register(
+        ServiceDescriptor(
+            name="memory_manager",
+            service_class=None,
+            stop_method="stop",
+            reusable=True,
+            priority=20,
+        ),
+    )
+    service_manager.services["runner"] = Service("runner")
+    service_manager.services["memory_manager"] = Service("memory_manager")
+
+    await service_manager.stop_all(final=True)
+
+    assert stopped == ["memory_manager", "runner"]
+    assert service_manager.services == {}
+    assert service_manager.reused_services == set()
+    assert service_manager.workspace is None
+
+
+@pytest.mark.asyncio
+async def test_service_manager_final_stop_clears_service_refs_on_stop_error(
+    tmp_path,
+) -> None:
+    workspace = SimpleNamespace(agent_id="default")
+    service_manager = ServiceManager(workspace)
+
+    class FailingService:
+        async def stop(self) -> None:
+            raise RuntimeError("stop failed")
+
+    service_manager.register(
+        ServiceDescriptor(
+            name="memory_manager",
+            service_class=None,
+            stop_method="stop",
+            reusable=True,
+            priority=20,
+        ),
+    )
+    service_manager.services["memory_manager"] = FailingService()
+    service_manager.reused_services.add("memory_manager")
+
+    await service_manager.stop_all(final=True)
+
+    assert service_manager.services == {}
+    assert service_manager.reused_services == set()
+    assert service_manager.workspace is None
+
+
+@pytest.mark.asyncio
+async def test_service_manager_reload_stop_keeps_reusable_service_reference(
+    tmp_path,
+) -> None:
+    workspace = SimpleNamespace(agent_id="default")
+    service_manager = ServiceManager(workspace)
+    stopped: list[str] = []
+
+    class Service:
+        def __init__(self, name: str) -> None:
+            self.name = name
+
+        async def stop(self) -> None:
+            stopped.append(self.name)
+
+    service_manager.register(
+        ServiceDescriptor(
+            name="runner",
+            service_class=None,
+            stop_method="stop",
+            priority=10,
+        ),
+    )
+    service_manager.register(
+        ServiceDescriptor(
+            name="memory_manager",
+            service_class=None,
+            stop_method="stop",
+            reusable=True,
+            priority=20,
+        ),
+    )
+    service_manager.services["runner"] = Service("runner")
+    service_manager.services["memory_manager"] = Service("memory_manager")
+
+    await service_manager.stop_all(final=False)
+
+    assert stopped == ["runner"]
+    assert set(service_manager.services) == {"memory_manager"}
+    assert service_manager.workspace is workspace
+
+
+@pytest.mark.asyncio
+async def test_workspace_final_stop_releases_reverse_service_references(
+    tmp_path,
+) -> None:
+    class Runner:
+        def __init__(self) -> None:
+            self._workspace = None
+            self._chat_manager = object()
+            self._manager = object()
+            self.memory_manager = object()
+
+        def set_workspace(self, workspace) -> None:
+            self._workspace = workspace
+
+        def set_chat_manager(self, chat_manager) -> None:
+            self._chat_manager = chat_manager
+
+    class ChannelManager:
+        def __init__(self) -> None:
+            self._workspace = None
+
+        def set_workspace(self, workspace) -> None:
+            self._workspace = workspace
+
+    class FakeServiceManager:
+        def __init__(self, services) -> None:
+            self.services = services
+
+        async def stop_all(self, *, final: bool, stop_reused: bool) -> None:
+            assert final is True
+            assert stop_reused is True
+
+    async def build_and_stop_workspace():
+        workspace = Workspace.__new__(Workspace)
+        workspace.agent_id = "default"
+        workspace.workspace_dir = tmp_path
+        workspace.tenant_id = "tenant-a"
+        workspace._config = object()
+        workspace._manager = object()
+        workspace._started = True
+        workspace._starting = False
+        runner = Runner()
+        channel_manager = ChannelManager()
+        runner.set_workspace(workspace)
+        channel_manager.set_workspace(workspace)
+        workspace._service_manager = FakeServiceManager(
+            {
+                "runner": runner,
+                "channel_manager": channel_manager,
+            },
+        )
+
+        workspace_ref = weakref.ref(workspace)
+        await Workspace.stop(workspace, final=True)
+        return workspace_ref, runner, channel_manager
+
+    workspace_ref, runner, channel_manager = await build_and_stop_workspace()
+    gc.collect()
+
+    assert workspace_ref() is None
+    assert runner._workspace is None
+    assert runner._chat_manager is None
+    assert runner._manager is None
+    assert runner.memory_manager is None
+    assert channel_manager._workspace is None
+
+
+@pytest.mark.asyncio
+async def test_workspace_ttl_cleanup_loop_evicts_idle_workspaces() -> None:
+    manager = MultiAgentManager(
+        workspace_cache_max_size=10,
+        workspace_idle_ttl_seconds=10,
+        monotonic_time=lambda: 100.0,
+    )
+    workspace = _Workspace(
+        agent_id="default",
+        workspace_dir="/tmp/default",
+        tenant_id="tenant-a",
+    )
+    workspace.task_tracker = _TaskTracker(has_active_tasks=False)
+    manager.agents["tenant-a:default"] = workspace
+    manager._touch_cache_entry("tenant-a:default", workspace)
+    manager._monotonic_time = lambda: 111.0
+
+    await manager.start_workspace_cleanup_loop(interval_seconds=0.01)
+    try:
+        for _ in range(50):
+            if workspace.stopped:
+                break
+            await asyncio.sleep(0.01)
+    finally:
+        await manager.stop_workspace_cleanup_loop()
+
+    assert workspace.stopped is True
+    assert "tenant-a:default" not in manager.agents
+
+
+@pytest.mark.asyncio
+async def test_stop_all_cancels_workspace_ttl_cleanup_loop() -> None:
+    manager = MultiAgentManager()
+
+    await manager.start_workspace_cleanup_loop(interval_seconds=60.0)
+    cleanup_task = manager._workspace_cleanup_task
+    assert cleanup_task is not None
+
+    await manager.stop_all()
+
+    assert cleanup_task.cancelled() is True
+    assert manager._workspace_cleanup_task is None
+
+
+@pytest.mark.asyncio
+async def test_workspace_ttl_cleanup_loop_continues_after_eviction_error(
+    monkeypatch,
+) -> None:
+    manager = MultiAgentManager()
+    calls = 0
+    second_call = asyncio.Event()
+
+    async def fake_evict_workspace_cache() -> None:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise RuntimeError("transient eviction failure")
+        second_call.set()
+
+    monkeypatch.setattr(
+        manager,
+        "_evict_workspace_cache",
+        fake_evict_workspace_cache,
+    )
+
+    await manager.start_workspace_cleanup_loop(interval_seconds=0.01)
+    try:
+        await asyncio.wait_for(second_call.wait(), timeout=1.0)
+    finally:
+        await manager.stop_workspace_cleanup_loop()
+
+    assert calls >= 2
 
 
 @pytest.mark.asyncio
@@ -245,9 +504,9 @@ async def test_duplicate_workspace_lost_race_is_stopped(monkeypatch) -> None:
 def test_workspace_cache_defaults_are_bounded() -> None:
     manager = MultiAgentManager()
 
-    assert manager.workspace_cache_max_size == 64
+    assert manager.workspace_cache_max_size == 16
     assert manager.workspace_start_max_concurrent == 4
-    assert manager.workspace_idle_ttl_seconds == 6 * 60 * 60
+    assert manager.workspace_idle_ttl_seconds == 60 * 60
 
 
 def test_workspace_cache_settings_read_environment(

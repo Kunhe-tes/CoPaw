@@ -118,4 +118,41 @@ describe("skillOwnerLookup", () => {
     expect(rows[0].installed_version).toBe("2.0.0");
     expect(rows[0].enabled).toBe(false);
   });
+
+  it("uses the current user version instead of the received version", () => {
+    const rows = buildSkillOwnerRows({
+      marketSkill: {
+        item_id: "market-1",
+        name: "local-edited-helper",
+        version: "2.0.0",
+      },
+      tenants: [
+        {
+          tenant_id: "user-a",
+          tenant_name: "Alice",
+          bbk_id: "1001",
+        },
+      ],
+      skillsByTenant: {
+        "user-a": [
+          {
+            skill_name: "local-edited-helper",
+            display_name: "Local Edited Helper",
+            source: "market",
+            description: "",
+            version: "2.0.1",
+            received_version: "2.0.0",
+            distributed_by: "admin",
+            is_received: true,
+            has_update: false,
+            enabled: true,
+          },
+        ],
+      },
+    });
+
+    expect(rows[0].installed_version).toBe("2.0.1");
+    expect(rows[0].received_version).toBe("2.0.0");
+    expect(rows[0].has_update).toBe(true);
+  });
 });

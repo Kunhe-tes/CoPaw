@@ -2,7 +2,6 @@
 """市场技能详情文件预览测试."""
 
 import asyncio
-import json
 from unittest.mock import AsyncMock
 
 from fastapi import FastAPI
@@ -45,10 +44,11 @@ def _publish_skill(svc, source_id: str, name: str):
         },
         skill_md="# 使用说明\n\n这是技能说明。",
     )
-    return asyncio.run(svc.publish_skill(source_id, req))
+    item, _ = asyncio.run(svc.publish_skill(source_id, req))
+    return item
 
 
-def test_list_market_skill_files_contains_skill_json_and_nested_files(
+def test_list_market_skill_files_hides_skill_json_and_contains_nested_files(
     tmp_path,
 ):
     from market.marketplace.fs import get_skill_dir
@@ -66,7 +66,7 @@ def test_list_market_skill_files_contains_skill_json_and_nested_files(
 
     names = [node["name"] for node in files]
     assert "SKILL.md" in names
-    assert "skill.json" in names
+    assert "skill.json" not in names
     docs_node = next(node for node in files if node["name"] == "docs")
     assert docs_node["type"] == "directory"
     assert docs_node["children"][0]["name"] == "guide.md"
@@ -91,7 +91,7 @@ def test_market_skill_preview_routes_return_tree_and_content(tmp_path):
     assert tree_resp.status_code == 200
     tree_names = [node["name"] for node in tree_resp.json()]
     assert "SKILL.md" in tree_names
-    assert "skill.json" in tree_names
+    assert "skill.json" not in tree_names
 
     read_md_resp = client.get(
         f"/api/market/skills/{item.item_id}/files/SKILL.md",
@@ -102,16 +102,6 @@ def test_market_skill_preview_routes_return_tree_and_content(tmp_path):
         "content": "# 使用说明\n\n这是技能说明。",
         "file_type": "markdown",
     }
-
-    read_json_resp = client.get(
-        f"/api/market/skills/{item.item_id}/files/skill.json",
-        headers=headers,
-    )
-    assert read_json_resp.status_code == 200
-    assert (
-        json.loads(read_json_resp.json()["content"])["name"] == "preview_skill"
-    )
-    assert read_json_resp.json()["file_type"] == "json"
 
     read_binary_resp = client.get(
         f"/api/market/skills/{item.item_id}/files/assets/logo.png",

@@ -12,7 +12,8 @@ import base64
 import json
 import logging
 from abc import ABC, abstractmethod
-from typing import Optional
+from collections.abc import Mapping
+from typing import Any, Optional
 
 import httpx
 
@@ -140,6 +141,7 @@ class SchedulerAdapter(ABC):
         scope_id: str = "",
         from_id: str = "",
         source_level: bool = False,
+        extra_job_params: Mapping[str, Any] | None = None,
     ) -> str:
         """向外部调度平台注册一个定时任务。
 
@@ -173,6 +175,7 @@ class SchedulerAdapter(ABC):
         scope_id: str = "",
         from_id: str = "",
         source_level: bool = False,
+        extra_job_params: Mapping[str, Any] | None = None,
     ) -> None:
         """更新外部平台上已注册的任务。
 
@@ -235,6 +238,7 @@ class NoopSchedulerAdapter(SchedulerAdapter):
         scope_id: str = "",
         from_id: str = "",
         source_level: bool = False,
+        extra_job_params: Mapping[str, Any] | None = None,
     ) -> str:
         logger.debug(
             "NoopAdapter.register_job: tenant=%s agent=%s type=%s name=%s job=%s cron=%s url=%s",
@@ -262,6 +266,7 @@ class NoopSchedulerAdapter(SchedulerAdapter):
         scope_id: str = "",
         from_id: str = "",
         source_level: bool = False,
+        extra_job_params: Mapping[str, Any] | None = None,
     ) -> None:
         logger.debug(
             "NoopAdapter.update_job: ext_id=%s tenant=%s agent=%s type=%s name=%s job=%s cron=%s",
@@ -347,6 +352,7 @@ class RealSchedulerAdapter(SchedulerAdapter):
         scope_id: str = "",
         from_id: str = "",
         source_level: bool = False,
+        extra_job_params: Mapping[str, Any] | None = None,
     ) -> str:
         payload = self._build_add_payload(
             tenant_id,
@@ -360,6 +366,7 @@ class RealSchedulerAdapter(SchedulerAdapter):
             scope_id=scope_id,
             from_id=from_id,
             source_level=source_level,
+            extra_job_params=extra_job_params,
         )
         resp_data = await self._post("/job-admin/v2/add-job", payload)
         ext_id = str(resp_data.get("content", ""))
@@ -389,6 +396,7 @@ class RealSchedulerAdapter(SchedulerAdapter):
         scope_id: str = "",
         from_id: str = "",
         source_level: bool = False,
+        extra_job_params: Mapping[str, Any] | None = None,
     ) -> None:
         payload = self._build_add_payload(
             tenant_id,
@@ -402,6 +410,7 @@ class RealSchedulerAdapter(SchedulerAdapter):
             scope_id=scope_id,
             from_id=from_id,
             source_level=source_level,
+            extra_job_params=extra_job_params,
         )
         payload["id"] = int(external_id)
         await self._post("/job-admin/v2/update-job", payload)
@@ -499,23 +508,27 @@ class RealSchedulerAdapter(SchedulerAdapter):
         *,
         scope_id: str = "",
         from_id: str = "",
+        extra_params: Mapping[str, Any] | None = None,
     ) -> str:
         """将回调上下文参数编码为 base64 JSON，放入 jobParam。
 
         外部平台回调时会将 jobParam 原样传回，用于在统一的
         /api/internal/cron/callback 端点中确定租户、Agent、任务类型。
         """
-        payload = json.dumps(
-            {
-                "tenant_id": tenant_id,
-                "source_id": source_id,
-                "scopeId": scope_id or f"{tenant_id}-{source_id}",
-                "agent_id": agent_id,
-                "task_type": task_type,
-                "job_id": job_id,
-                "fromId": from_id or tenant_id,
-            },
-        )
+        payload_dict = {
+            "tenant_id": tenant_id,
+            "source_id": source_id,
+            "scopeId": scope_id or f"{tenant_id}-{source_id}",
+            "agent_id": agent_id,
+            "task_type": task_type,
+            "job_id": job_id,
+            "fromId": from_id or tenant_id,
+        }
+        if extra_params:
+            for key, value in extra_params.items():
+                if value is not None and key not in payload_dict:
+                    payload_dict[str(key)] = value
+        payload = json.dumps(payload_dict)
         return base64.urlsafe_b64encode(payload.encode()).decode()
 
     def _build_add_payload(
@@ -532,6 +545,7 @@ class RealSchedulerAdapter(SchedulerAdapter):
         scope_id: str = "",
         from_id: str = "",
         source_level: bool = False,
+        extra_job_params: Mapping[str, Any] | None = None,
     ) -> dict:
         """构建 add-job / update-job 的请求体。"""
         if source_level:
@@ -568,6 +582,7 @@ class RealSchedulerAdapter(SchedulerAdapter):
                 job_id,
                 scope_id=scope_id,
                 from_id=from_id,
+                extra_params=extra_job_params,
             ),
         }
         if self._mis_fire_strategy is not None:

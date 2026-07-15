@@ -11,6 +11,15 @@ from swe.config.config import QueryRetryConfig, ToolResultCompactConfig
 from swe.providers.retry_chat_model import RateLimitConfig
 
 from .registry import (
+    ARCHIVE_MAINTENANCE_CRON_SETTING,
+    ARCHIVE_MAINTENANCE_ENABLED_SETTING,
+    ARCHIVE_MAINTENANCE_MAX_FILES_PER_RUN_SETTING,
+    ARCHIVE_MAINTENANCE_MAX_FILES_PER_WORKSPACE_SETTING,
+    ARCHIVE_MAINTENANCE_MAX_WORKSPACES_PER_RUN_SETTING,
+    ARCHIVE_MAINTENANCE_OLD_ORPHAN_DAYS_SETTING,
+    ARCHIVE_MAINTENANCE_TIMEOUT_SECONDS_SETTING,
+    APPROVAL_NOTIFICATIONS_ZHAOHU_TOOL_GUARD_ENABLED_SETTING,
+    CRON_NOTIFICATIONS_SKIP_WEEKEND_ZHAOHU_ENABLED_SETTING,
     CRON_TASK_SESSION_CLEANUP_CRON_SETTING,
     CRON_TASK_SESSION_CLEANUP_ENABLED_SETTING,
     CRON_TASK_SESSION_CLEANUP_RETENTION_DAYS_SETTING,
@@ -70,6 +79,18 @@ class CronTaskSessionCleanupConfig:
     cron: str
 
 
+@dataclass(frozen=True)
+class ArchiveMaintenanceConfig:
+    """source 绾ф枃浠跺綊妗ｇ淮鎶ょ殑杩愯鏃堕厤缃€?"""
+
+    enabled: bool
+    cron: str
+    old_orphan_days: int
+    max_workspaces_per_run: int
+    max_files_per_workspace: int
+    max_files_per_run: int
+    timeout_seconds: int
+
 _RATE_LIMIT_SOURCE_TO_RUNTIME_FIELDS = {
     "llm_max_concurrent": "max_concurrent",
     "llm_chat_max_concurrent": "chat_max_concurrent",
@@ -81,6 +102,13 @@ _RATE_LIMIT_SOURCE_TO_RUNTIME_FIELDS = {
     "llm_chat_acquire_timeout": "chat_acquire_timeout",
     "llm_cron_acquire_timeout": "cron_acquire_timeout",
 }
+
+
+@dataclass(frozen=True)
+class CronNotificationConfig:
+    """Runtime config for scheduled-task completion notifications."""
+
+    skip_weekend_zhaohu_enabled: bool
 
 
 @contextmanager
@@ -304,6 +332,117 @@ def resolve_cron_task_session_cleanup_config(
         ),
     )
 
+
+def resolve_archive_maintenance_config(
+    source_config: Any | None = None,
+) -> ArchiveMaintenanceConfig:
+    """瑙ｆ瀽褰撳墠 source 鐨勬枃浠跺綊妗ｇ淮鎶ら厤缃€?"""
+    raw_config = _extract_config_payload(source_config)
+    merged = merge_source_system_config_with_defaults(raw_config)
+    raw_section = merged.get("archive_maintenance")
+    section = raw_section if isinstance(raw_section, dict) else {}
+    normalized = normalize_registered_setting_values(
+        {"archive_maintenance": section},
+    )
+    normalized_section = normalized.get("archive_maintenance")
+    if not isinstance(normalized_section, dict):
+        normalized_section = {}
+    return ArchiveMaintenanceConfig(
+        enabled=bool(
+            normalized_section.get(
+                "enabled",
+                ARCHIVE_MAINTENANCE_ENABLED_SETTING.default_value,
+            ),
+        ),
+        cron=str(
+            normalized_section.get(
+                "cron",
+                ARCHIVE_MAINTENANCE_CRON_SETTING.default_value,
+            ),
+        ),
+        old_orphan_days=int(
+            normalized_section.get(
+                "old_orphan_days",
+                ARCHIVE_MAINTENANCE_OLD_ORPHAN_DAYS_SETTING.default_value,
+            ),
+        ),
+        max_workspaces_per_run=int(
+            normalized_section.get(
+                "max_workspaces_per_run",
+                ARCHIVE_MAINTENANCE_MAX_WORKSPACES_PER_RUN_SETTING.default_value,
+            ),
+        ),
+        max_files_per_workspace=int(
+            normalized_section.get(
+                "max_files_per_workspace",
+                ARCHIVE_MAINTENANCE_MAX_FILES_PER_WORKSPACE_SETTING.default_value,
+            ),
+        ),
+        max_files_per_run=int(
+            normalized_section.get(
+                "max_files_per_run",
+                ARCHIVE_MAINTENANCE_MAX_FILES_PER_RUN_SETTING.default_value,
+            ),
+        ),
+        timeout_seconds=int(
+            normalized_section.get(
+                "timeout_seconds",
+                ARCHIVE_MAINTENANCE_TIMEOUT_SECONDS_SETTING.default_value,
+            ),
+        ),
+    )
+
+
+def resolve_cron_notification_config(
+    source_config: Any | None = None,
+) -> CronNotificationConfig:
+    """Resolve scheduled-task completion notification runtime config."""
+    raw_config = _extract_config_payload(source_config)
+    merged = merge_source_system_config_with_defaults(raw_config)
+    raw_section = merged.get("cron_notifications")
+    section = raw_section if isinstance(raw_section, dict) else {}
+    normalized = normalize_registered_setting_values(
+        {"cron_notifications": section},
+    )
+    normalized_section = normalized.get("cron_notifications")
+    if not isinstance(normalized_section, dict):
+        normalized_section = {}
+    return CronNotificationConfig(
+        skip_weekend_zhaohu_enabled=bool(
+            normalized_section.get(
+                "skip_weekend_zhaohu_enabled",
+                (
+                    CRON_NOTIFICATIONS_SKIP_WEEKEND_ZHAOHU_ENABLED_SETTING
+                    .default_value
+                ),
+            ),
+        ),
+    )
+
+
+def is_zhaohu_tool_guard_notification_enabled(
+    source_config: Any | None = None,
+) -> bool:
+    """Return whether Tool Guard approvals should notify zhaohu."""
+    raw_config = _extract_config_payload(source_config)
+    merged = merge_source_system_config_with_defaults(raw_config)
+    raw_section = merged.get("approval_notifications")
+    section = raw_section if isinstance(raw_section, dict) else {}
+    normalized = normalize_registered_setting_values(
+        {"approval_notifications": section},
+    )
+    normalized_section = normalized.get("approval_notifications")
+    default_value = (
+        APPROVAL_NOTIFICATIONS_ZHAOHU_TOOL_GUARD_ENABLED_SETTING.default_value
+    )
+    if not isinstance(normalized_section, dict):
+        return bool(default_value)
+    return bool(
+        normalized_section.get(
+            "zhaohu_tool_guard_enabled",
+            default_value,
+        ),
+    )
 
 def get_system_prompt_injections(
     source_config: Any | None = None,

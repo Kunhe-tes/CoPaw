@@ -3,6 +3,8 @@ import { request } from "../request";
 export interface TemplateInfo {
   templateName: string;
   templateId: number;
+  /** 模板标志: 'main'为普通模版，'no_query'为静态模版（无需获取数据，直接渲染） */
+  templateFlag?: string;
 }
 
 export interface TemplateListResponse {

@@ -30,6 +30,9 @@ from swe.app.source_system_config.runtime import (
     bind_source_system_config,
     get_current_source_system_config,
     get_system_prompt_injections,
+    is_zhaohu_tool_guard_notification_enabled,
+    resolve_archive_maintenance_config,
+    resolve_cron_notification_config,
     resolve_cron_task_session_cleanup_config,
     resolve_cron_unread_auto_pause_config,
     resolve_file_read_truncation_config,
@@ -72,6 +75,21 @@ DEFAULT_EXPECTED_SOURCE_CONFIG = {
         "enabled": False,
         "retention_days": 30,
         "cron": "0 1 * * *",
+    },
+    "archive_maintenance": {
+        "enabled": True,
+        "cron": "0 3 * * *",
+        "old_orphan_days": 3,
+        "max_workspaces_per_run": 200,
+        "max_files_per_workspace": 100,
+        "max_files_per_run": 5000,
+        "timeout_seconds": 900,
+    },
+    "cron_notifications": {
+        "skip_weekend_zhaohu_enabled": False,
+    },
+    "approval_notifications": {
+        "zhaohu_tool_guard_enabled": False,
     },
     "query_retry": {
         "enabled": False,
@@ -237,6 +255,33 @@ class TestSourceSystemConfigModels:
             },
         }
 
+    def test_archive_maintenance_config_is_accepted(self):
+        config = SourceSystemConfig.model_validate(
+            {
+                "archive_maintenance": {
+                    "enabled": False,
+                    "cron": "30 3 * * *",
+                    "old_orphan_days": 5,
+                    "max_workspaces_per_run": 50,
+                    "max_files_per_workspace": 25,
+                    "max_files_per_run": 1000,
+                    "timeout_seconds": 120,
+                },
+            },
+        )
+
+        assert config.as_dict() == {
+            "archive_maintenance": {
+                "enabled": False,
+                "cron": "30 3 * * *",
+                "old_orphan_days": 5,
+                "max_workspaces_per_run": 50,
+                "max_files_per_workspace": 25,
+                "max_files_per_run": 1000,
+                "timeout_seconds": 120,
+            },
+        }
+
     def test_system_prompt_injections_are_normalized(self):
         config = SourceSystemConfig.model_validate(
             {
@@ -316,6 +361,30 @@ class TestSourceSystemConfigModels:
         with pytest.raises(ValueError, match=match):
             SourceSystemConfig.model_validate(
                 {"cron_task_session_cleanup": payload},
+            )
+
+    @pytest.mark.parametrize(
+        ("payload", "match"),
+        [
+            ({"enabled": "disabled"}, "enabled"),
+            ({"cron": "*/5 * * * *"}, "cron"),
+            ({"cron": "0 3 * * 1"}, "cron"),
+            ({"cron": "0 24 * * *"}, "cron"),
+            ({"old_orphan_days": 0}, "old_orphan_days"),
+            ({"max_workspaces_per_run": 0}, "max_workspaces_per_run"),
+            ({"max_files_per_workspace": 0}, "max_files_per_workspace"),
+            ({"max_files_per_run": 0}, "max_files_per_run"),
+            ({"timeout_seconds": 0}, "timeout_seconds"),
+        ],
+    )
+    def test_invalid_archive_maintenance_config_is_rejected(
+        self,
+        payload,
+        match,
+    ):
+        with pytest.raises(ValueError, match=match):
+            SourceSystemConfig.model_validate(
+                {"archive_maintenance": payload},
             )
 
     @pytest.mark.parametrize(
@@ -1697,6 +1766,140 @@ class TestSourceSystemConfigRuntime:
         assert result.retention_days == 45
         assert result.cron == "30 2 * * *"
 
+    def test_archive_maintenance_runtime_uses_defaults(self):
+        result = resolve_archive_maintenance_config(None)
+
+        assert result.enabled is True
+        assert result.cron == "0 3 * * *"
+        assert result.old_orphan_days == 3
+        assert result.max_workspaces_per_run == 200
+        assert result.max_files_per_workspace == 100
+        assert result.max_files_per_run == 5000
+        assert result.timeout_seconds == 900
+
+    def test_archive_maintenance_runtime_uses_source_config(self):
+        effective = EffectiveSourceSystemConfig(
+            source_id="portal",
+            config=SourceSystemConfig.model_validate(
+                {
+                    "archive_maintenance": {
+                        "enabled": False,
+                        "cron": "30 3 * * *",
+                        "old_orphan_days": 5,
+                        "max_workspaces_per_run": 50,
+                        "max_files_per_workspace": 25,
+                        "max_files_per_run": 1000,
+                        "timeout_seconds": 120,
+                    },
+                },
+            ).merged_with_defaults(),
+            raw_config=SourceSystemConfig.model_validate(
+                {
+                    "archive_maintenance": {
+                        "enabled": False,
+                        "cron": "30 3 * * *",
+                        "old_orphan_days": 5,
+                        "max_workspaces_per_run": 50,
+                        "max_files_per_workspace": 25,
+                        "max_files_per_run": 1000,
+                        "timeout_seconds": 120,
+                    },
+                },
+            ),
+            version=3,
+        )
+
+        result = resolve_archive_maintenance_config(effective)
+
+        assert result.enabled is False
+        assert result.cron == "30 3 * * *"
+        assert result.old_orphan_days == 5
+        assert result.max_workspaces_per_run == 50
+        assert result.max_files_per_workspace == 25
+        assert result.max_files_per_run == 1000
+        assert result.timeout_seconds == 120
+
+    def test_cron_notification_runtime_uses_defaults(self):
+        result = resolve_cron_notification_config(None)
+
+        assert result.skip_weekend_zhaohu_enabled is False
+
+    def test_cron_notification_runtime_uses_bound_weekend_switch(self):
+        effective = EffectiveSourceSystemConfig(
+            source_id="portal",
+            config=SourceSystemConfig.model_validate(
+                {
+                    "cron_notifications": {
+                        "skip_weekend_zhaohu_enabled": True,
+                    },
+                },
+            ).merged_with_defaults(),
+            raw_config=SourceSystemConfig.model_validate(
+                {
+                    "cron_notifications": {
+                        "skip_weekend_zhaohu_enabled": True,
+                    },
+                },
+            ),
+            version=3,
+        )
+
+        with bind_source_system_config(effective):
+            result = resolve_cron_notification_config()
+
+        assert result.skip_weekend_zhaohu_enabled is True
+
+    def test_zhaohu_tool_guard_notification_runtime_uses_defaults(self):
+        assert is_zhaohu_tool_guard_notification_enabled(None) is False
+
+    def test_zhaohu_tool_guard_notification_runtime_uses_enabled_source_config(self):
+        effective = EffectiveSourceSystemConfig(
+            source_id="portal",
+            config=SourceSystemConfig.model_validate(
+                {
+                    "approval_notifications": {
+                        "zhaohu_tool_guard_enabled": True,
+                    },
+                },
+            ).merged_with_defaults(),
+            raw_config=SourceSystemConfig.model_validate(
+                {
+                    "approval_notifications": {
+                        "zhaohu_tool_guard_enabled": True,
+                    },
+                },
+            ),
+            version=3,
+        )
+
+        result = is_zhaohu_tool_guard_notification_enabled(effective)
+
+        assert result is True
+
+    def test_zhaohu_tool_guard_notification_runtime_uses_disabled_source_config(self):
+        effective = EffectiveSourceSystemConfig(
+            source_id="portal",
+            config=SourceSystemConfig.model_validate(
+                {
+                    "approval_notifications": {
+                        "zhaohu_tool_guard_enabled": False,
+                    },
+                },
+            ).merged_with_defaults(),
+            raw_config=SourceSystemConfig.model_validate(
+                {
+                    "approval_notifications": {
+                        "zhaohu_tool_guard_enabled": False,
+                    },
+                },
+            ),
+            version=3,
+        )
+
+        result = is_zhaohu_tool_guard_notification_enabled(effective)
+
+        assert result is False
+
 
 class TestSourceSystemConfigMiddleware:
     """验证 HTTP 请求级配置绑定。"""
@@ -1776,6 +1979,35 @@ class TestSourceSystemConfigMiddleware:
         assert response.json() == {
             "detail": "Source system config data is invalid",
         }
+
+    def test_middleware_skips_public_static_routes_with_source_header(self):
+        """静态文件请求不应因 X-Source-Id 触发 source 配置解析。"""
+        service = SimpleNamespace(
+            resolve_config=AsyncMock(
+                side_effect=AssertionError("source config resolved"),
+            ),
+        )
+        app = FastAPI()
+
+        @app.get("/static/{scope_id}/{agent_id}/{file_name:path}")
+        async def static_file():
+            assert get_current_source_system_config() is None
+            return {"ok": True}
+
+        app.add_middleware(SourceSystemConfigMiddleware, service=service)
+        app.add_middleware(TenantIdentityMiddleware, default_tenant_id=None)
+
+        response = TestClient(app, raise_server_exceptions=False).get(
+            "/static/default/default/report.html",
+            headers={
+                "X-Tenant-Id": "default",
+                "X-Source-Id": "RMASSIST",
+            },
+        )
+
+        assert response.status_code == 200
+        assert response.json() == {"ok": True}
+        service.resolve_config.assert_not_awaited()
 
 
 class TestSourceSystemConfigApi:
@@ -1921,6 +2153,7 @@ class TestSourceSystemConfigApi:
         store = _FakeManagementStore()
         source_scheduler = SimpleNamespace(
             refresh_task_session_cleanup=AsyncMock(),
+            refresh_archive_maintenance=AsyncMock(),
         )
         client = self._build_client(
             store,
@@ -1956,12 +2189,22 @@ class TestSourceSystemConfigApi:
         assert identity.tenant_id == "tenant-a"
         assert identity.from_id == "tenant-a"
         assert identity.updated_by == "alice"
+        archive_refresh = source_scheduler.refresh_archive_maintenance
+        archive_refresh.assert_awaited_once()
+        archive_kwargs = archive_refresh.await_args.kwargs
+        archive_identity = archive_kwargs["identity"]
+        assert archive_kwargs["source_id"] == "portal"
+        assert archive_kwargs["config"].source_id == "portal"
+        assert archive_identity.tenant_id == "tenant-a"
+        assert archive_identity.from_id == "tenant-a"
+        assert archive_identity.updated_by == "alice"
 
     def test_named_source_update_refreshes_cleanup_source_task(self):
         """管理指定 source 时，刷新目标应来自路径参数而不是请求上下文。"""
         store = _FakeManagementStore()
         source_scheduler = SimpleNamespace(
             refresh_task_session_cleanup=AsyncMock(),
+            refresh_archive_maintenance=AsyncMock(),
         )
         client = self._build_management_client(
             store,
@@ -1996,6 +2239,50 @@ class TestSourceSystemConfigApi:
         assert identity.tenant_id == "tenant-a"
         assert identity.from_id == "tenant-a"
         assert identity.updated_by == "alice"
+        archive_refresh = source_scheduler.refresh_archive_maintenance
+        archive_refresh.assert_awaited_once()
+        archive_kwargs = archive_refresh.await_args.kwargs
+        archive_identity = archive_kwargs["identity"]
+        assert archive_kwargs["source_id"] == "target-source"
+        assert archive_kwargs["config"].source_id == "target-source"
+        assert archive_identity.tenant_id == "tenant-a"
+        assert archive_identity.from_id == "tenant-a"
+        assert archive_identity.updated_by == "alice"
+
+    def test_source_task_refreshes_are_failure_isolated(self):
+        store = _FakeManagementStore()
+        source_scheduler = SimpleNamespace(
+            refresh_task_session_cleanup=AsyncMock(
+                side_effect=RuntimeError("cleanup scheduler down"),
+            ),
+            refresh_archive_maintenance=AsyncMock(),
+        )
+        client = self._build_client(
+            store,
+            source_scheduler=source_scheduler,
+        )
+
+        response = client.put(
+            "/api/source-system-config/current",
+            headers={
+                "X-Tenant-Id": "tenant-a",
+                "X-Source-Id": "portal",
+                "X-User-Id": "alice",
+                "X-User-Role": "manager",
+            },
+            json={
+                "config": {
+                    "archive_maintenance": {
+                        "enabled": True,
+                        "cron": "0 3 * * *",
+                    },
+                },
+            },
+        )
+
+        assert response.status_code == 200
+        source_scheduler.refresh_task_session_cleanup.assert_awaited_once()
+        source_scheduler.refresh_archive_maintenance.assert_awaited_once()
 
     def test_current_source_update_rejects_body_source_override(self):
         """current-source 接口不允许请求体携带 source_id 覆盖目标 source。"""
@@ -2076,6 +2363,7 @@ class TestSourceSystemConfigApi:
         )
         source_scheduler = SimpleNamespace(
             refresh_task_session_cleanup=AsyncMock(),
+            refresh_archive_maintenance=AsyncMock(),
         )
         client = self._build_management_client(
             store,
@@ -2102,6 +2390,16 @@ class TestSourceSystemConfigApi:
         assert identity.tenant_id == "tenant-a"
         assert identity.from_id == "tenant-a"
         assert identity.updated_by == "bob"
+        archive_refresh = source_scheduler.refresh_archive_maintenance
+        archive_refresh.assert_awaited_once()
+        archive_kwargs = archive_refresh.await_args.kwargs
+        archive_identity = archive_kwargs["identity"]
+        assert archive_kwargs["source_id"] == "target-source"
+        assert archive_kwargs["config"].source_id == "target-source"
+        assert archive_kwargs["config"].is_default is True
+        assert archive_identity.tenant_id == "tenant-a"
+        assert archive_identity.from_id == "tenant-a"
+        assert archive_identity.updated_by == "bob"
 
     def test_effective_config_returns_500_when_persisted_data_is_invalid(
         self,

@@ -1,0 +1,564 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>批调度监控草图</title>
+  <style>
+    :root {
+      --bg: #f6f8fb;
+      --panel: #ffffff;
+      --line: #d9e0ea;
+      --text: #172033;
+      --muted: #667085;
+      --blue: #246bfe;
+      --green: #16a34a;
+      --amber: #d97706;
+      --red: #dc2626;
+      --slate: #334155;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    }
+
+    * { box-sizing: border-box; }
+
+    body {
+      margin: 0;
+      background: var(--bg);
+      color: var(--text);
+      font-size: 14px;
+      letter-spacing: 0;
+    }
+
+    .page {
+      min-height: 100vh;
+      display: grid;
+      grid-template-columns: 72px minmax(0, 1fr);
+    }
+
+    .rail {
+      background: #111827;
+      color: #cbd5e1;
+      padding: 16px 10px;
+      display: flex;
+      flex-direction: column;
+      gap: 12px;
+      align-items: center;
+    }
+
+    .rail .mark {
+      width: 36px;
+      height: 36px;
+      border-radius: 8px;
+      display: grid;
+      place-items: center;
+      background: #246bfe;
+      color: white;
+      font-weight: 700;
+    }
+
+    .rail .icon {
+      width: 40px;
+      height: 40px;
+      border-radius: 8px;
+      display: grid;
+      place-items: center;
+      background: rgba(255, 255, 255, 0.08);
+      font-size: 12px;
+    }
+
+    .main {
+      padding: 20px 24px 28px;
+      display: flex;
+      flex-direction: column;
+      gap: 16px;
+    }
+
+    .topbar {
+      display: flex;
+      justify-content: space-between;
+      align-items: flex-start;
+      gap: 16px;
+    }
+
+    h1 {
+      margin: 0;
+      font-size: 22px;
+      line-height: 1.2;
+    }
+
+    .hint {
+      margin-top: 6px;
+      color: var(--muted);
+      font-size: 13px;
+    }
+
+    .actions {
+      display: flex;
+      gap: 8px;
+      align-items: center;
+    }
+
+    .button, .select {
+      height: 34px;
+      border: 1px solid var(--line);
+      background: white;
+      border-radius: 6px;
+      padding: 0 12px;
+      color: var(--slate);
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      white-space: nowrap;
+    }
+
+    .button.primary {
+      background: var(--blue);
+      border-color: var(--blue);
+      color: white;
+    }
+
+    .summary {
+      display: grid;
+      grid-template-columns: repeat(6, minmax(120px, 1fr));
+      gap: 10px;
+    }
+
+    .metric {
+      background: var(--panel);
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      padding: 12px;
+      min-height: 82px;
+    }
+
+    .metric .label {
+      color: var(--muted);
+      font-size: 12px;
+    }
+
+    .metric .value {
+      margin-top: 8px;
+      font-size: 24px;
+      font-weight: 700;
+    }
+
+    .metric .sub {
+      margin-top: 4px;
+      color: var(--muted);
+      font-size: 12px;
+    }
+
+    .grid {
+      display: grid;
+      grid-template-columns: minmax(0, 1.6fr) 420px;
+      gap: 14px;
+      align-items: start;
+    }
+
+    .panel {
+      background: var(--panel);
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      overflow: hidden;
+    }
+
+    .panel-head {
+      padding: 12px 14px;
+      border-bottom: 1px solid var(--line);
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      gap: 12px;
+    }
+
+    .panel-title {
+      font-weight: 700;
+    }
+
+    .tabs {
+      display: inline-flex;
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      overflow: hidden;
+      background: #f8fafc;
+    }
+
+    .tab {
+      padding: 6px 10px;
+      color: var(--muted);
+      border-right: 1px solid var(--line);
+    }
+
+    .tab:last-child { border-right: 0; }
+    .tab.active { background: white; color: var(--blue); font-weight: 600; }
+
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      table-layout: fixed;
+    }
+
+    th, td {
+      padding: 11px 12px;
+      border-bottom: 1px solid #edf1f6;
+      text-align: left;
+      vertical-align: middle;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    th {
+      color: var(--muted);
+      font-size: 12px;
+      background: #fbfcfe;
+      font-weight: 600;
+    }
+
+    tr:last-child td { border-bottom: 0; }
+
+    .tag {
+      display: inline-flex;
+      height: 22px;
+      align-items: center;
+      padding: 0 8px;
+      border-radius: 999px;
+      font-size: 12px;
+      font-weight: 600;
+    }
+
+    .tag.pending { background: #fff7ed; color: var(--amber); }
+    .tag.running { background: #eff6ff; color: var(--blue); }
+    .tag.done { background: #ecfdf5; color: var(--green); }
+    .tag.fail { background: #fef2f2; color: var(--red); }
+
+    .progress {
+      height: 8px;
+      border-radius: 999px;
+      background: #e5e7eb;
+      overflow: hidden;
+    }
+
+    .bar {
+      height: 100%;
+      background: linear-gradient(90deg, var(--blue), #16a34a);
+    }
+
+    .stack {
+      display: flex;
+      flex-direction: column;
+      gap: 14px;
+    }
+
+    .diagnosis {
+      padding: 14px;
+      display: grid;
+      gap: 10px;
+    }
+
+    .check {
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      padding: 10px;
+      display: grid;
+      gap: 6px;
+    }
+
+    .check .name {
+      display: flex;
+      justify-content: space-between;
+      gap: 8px;
+      font-weight: 700;
+    }
+
+    .check .desc {
+      color: var(--muted);
+      font-size: 12px;
+      line-height: 1.5;
+    }
+
+    .timeline {
+      padding: 4px 14px 14px;
+    }
+
+    .event {
+      display: grid;
+      grid-template-columns: 74px 1fr;
+      gap: 10px;
+      padding: 10px 0;
+      border-bottom: 1px solid #edf1f6;
+    }
+
+    .event:last-child { border-bottom: 0; }
+
+    .time {
+      color: var(--muted);
+      font-size: 12px;
+    }
+
+    .event-title {
+      font-weight: 700;
+      font-size: 13px;
+    }
+
+    .event-body {
+      margin-top: 4px;
+      color: var(--muted);
+      font-size: 12px;
+      line-height: 1.5;
+    }
+
+    .queue {
+      display: grid;
+      grid-template-columns: repeat(5, 1fr);
+      gap: 8px;
+      padding: 14px;
+    }
+
+    .queue-cell {
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      padding: 10px;
+      min-height: 70px;
+      background: #fbfcfe;
+    }
+
+    .queue-cell strong {
+      display: block;
+      font-size: 20px;
+      margin-bottom: 4px;
+    }
+
+    .queue-cell span {
+      color: var(--muted);
+      font-size: 12px;
+    }
+
+    .footnote {
+      color: var(--muted);
+      font-size: 12px;
+      padding: 0 14px 14px;
+    }
+
+    @media (max-width: 1100px) {
+      .summary { grid-template-columns: repeat(3, 1fr); }
+      .grid { grid-template-columns: 1fr; }
+    }
+
+    @media (max-width: 720px) {
+      .page { grid-template-columns: 1fr; }
+      .rail { display: none; }
+      .main { padding: 16px; }
+      .topbar { flex-direction: column; }
+      .summary { grid-template-columns: repeat(2, 1fr); }
+      .queue { grid-template-columns: repeat(2, 1fr); }
+      th:nth-child(3), td:nth-child(3),
+      th:nth-child(5), td:nth-child(5) { display: none; }
+    }
+  </style>
+</head>
+<body>
+  <div class="page">
+    <aside class="rail" aria-label="导航">
+      <div class="mark">C</div>
+      <div class="icon">聊</div>
+      <div class="icon">任</div>
+      <div class="icon">调</div>
+      <div class="icon">监</div>
+    </aside>
+
+    <main class="main">
+      <header class="topbar">
+        <div>
+          <h1>批调度监控</h1>
+          <div class="hint">面向排障：一屏看清批次、队列、worker capacity、回调事件和未派发原因。</div>
+        </div>
+        <div class="actions">
+          <div class="select">近 24 小时</div>
+          <div class="select">source: RMASSIST</div>
+          <button class="button">刷新</button>
+          <button class="button primary">查看阻塞任务</button>
+        </div>
+      </header>
+
+      <section class="summary" aria-label="核心指标">
+        <div class="metric">
+          <div class="label">今日批次</div>
+          <div class="value">18</div>
+          <div class="sub">2 个运行中</div>
+        </div>
+        <div class="metric">
+          <div class="label">待派发 intents</div>
+          <div class="value">46</div>
+          <div class="sub">最久等待 12m</div>
+        </div>
+        <div class="metric">
+          <div class="label">执行中</div>
+          <div class="value">7</div>
+          <div class="sub">claimed 2 / dispatched 5</div>
+        </div>
+        <div class="metric">
+          <div class="label">重试队列</div>
+          <div class="value">3</div>
+          <div class="sub">下一次 14:25</div>
+        </div>
+        <div class="metric">
+          <div class="label">失败率</div>
+          <div class="value">4.8%</div>
+          <div class="sub">近 1 小时</div>
+        </div>
+        <div class="metric">
+          <div class="label">worker capacity</div>
+          <div class="value">4</div>
+          <div class="sub">dashscope / qwen-max</div>
+        </div>
+      </section>
+
+      <section class="grid">
+        <div class="stack">
+          <section class="panel">
+            <div class="panel-head">
+              <div class="panel-title">批次运行列表</div>
+              <div class="tabs">
+                <div class="tab active">全部</div>
+                <div class="tab">运行中</div>
+                <div class="tab">异常</div>
+              </div>
+            </div>
+            <table>
+              <thead>
+                <tr>
+                  <th style="width: 210px;">batch_id</th>
+                  <th style="width: 120px;">父任务</th>
+                  <th>模型</th>
+                  <th style="width: 90px;">状态</th>
+                  <th style="width: 120px;">进度</th>
+                  <th style="width: 110px;">最近事件</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr>
+                  <td>cron:b552c86c5a4d...</td>
+                  <td>daily-report-job</td>
+                  <td>dashscope / qwen-max</td>
+                  <td><span class="tag pending">pending</span></td>
+                  <td><div class="progress"><div class="bar" style="width: 18%;"></div></div></td>
+                  <td>12 秒前</td>
+                </tr>
+                <tr>
+                  <td>cron:91ff2a04b11e...</td>
+                  <td>risk-scan-job</td>
+                  <td>openai / gpt-5</td>
+                  <td><span class="tag running">running</span></td>
+                  <td><div class="progress"><div class="bar" style="width: 64%;"></div></div></td>
+                  <td>1 分钟前</td>
+                </tr>
+                <tr>
+                  <td>cron:0ad87fc9b304...</td>
+                  <td>customer-touch</td>
+                  <td>dashscope / qwen-max</td>
+                  <td><span class="tag fail">blocked</span></td>
+                  <td><div class="progress"><div class="bar" style="width: 5%;"></div></div></td>
+                  <td>6 分钟前</td>
+                </tr>
+                <tr>
+                  <td>cron:ac68c3351f77...</td>
+                  <td>weekly-summary</td>
+                  <td>azure / gpt-4.1</td>
+                  <td><span class="tag done">done</span></td>
+                  <td><div class="progress"><div class="bar" style="width: 100%;"></div></div></td>
+                  <td>19 分钟前</td>
+                </tr>
+              </tbody>
+            </table>
+          </section>
+
+          <section class="panel">
+            <div class="panel-head">
+              <div class="panel-title">当前批次队列分布</div>
+              <div class="hint">cron:b552c86c5a4d...</div>
+            </div>
+            <div class="queue">
+              <div class="queue-cell"><strong>23</strong><span>pending</span></div>
+              <div class="queue-cell"><strong>0</strong><span>claimed</span></div>
+              <div class="queue-cell"><strong>0</strong><span>dispatched</span></div>
+              <div class="queue-cell"><strong>0</strong><span>completed</span></div>
+              <div class="queue-cell"><strong>0</strong><span>failed</span></div>
+            </div>
+            <div class="footnote">这里建议点击某个数字后下钻到 intent 明细，直接看到 due_at、attempt_count、lock_owner、error_message。</div>
+          </section>
+        </div>
+
+        <aside class="stack">
+          <section class="panel">
+            <div class="panel-head">
+              <div class="panel-title">派发诊断</div>
+              <span class="tag pending">需要关注</span>
+            </div>
+            <div class="diagnosis">
+              <div class="check">
+                <div class="name">
+                  <span>scheduler loop</span>
+                  <span class="tag done">enabled</span>
+                </div>
+                <div class="desc">SWE_CRON_DISPATCH_INTENTS_ENABLED=true，最近 tick：14:18:22。</div>
+              </div>
+              <div class="check">
+                <div class="name">
+                  <span>capacity scope</span>
+                  <span class="tag done">matched</span>
+                </div>
+                <div class="desc">source=RMASSIST，provider=dashscope，model=qwen-max。</div>
+              </div>
+              <div class="check">
+                <div class="name">
+                  <span>可用 worker</span>
+                  <span class="tag fail">0</span>
+                </div>
+                <div class="desc">effective=1，claimed=1，running=0。疑似旧 claimed 锁未释放。</div>
+              </div>
+              <div class="check">
+                <div class="name">
+                  <span>claim 条件</span>
+                  <span class="tag pending">未执行</span>
+                </div>
+                <div class="desc">capacity gate 已挡住，没有进入 claim_due_intents，所以不会产生 retry_scheduled。</div>
+              </div>
+            </div>
+          </section>
+
+          <section class="panel">
+            <div class="panel-head">
+              <div class="panel-title">事件流</div>
+              <button class="button">只看异常</button>
+            </div>
+            <div class="timeline">
+              <div class="event">
+                <div class="time">14:18:20</div>
+                <div>
+                  <div class="event-title">batch_callback_received</div>
+                  <div class="event-body">调度平台触发父任务，创建 batch。</div>
+                </div>
+              </div>
+              <div class="event">
+                <div class="time">14:18:20</div>
+                <div>
+                  <div class="event-title">parent_execution_intent_queued</div>
+                  <div class="event-body">parent intent 入队，provider/model 正确。</div>
+                </div>
+              </div>
+              <div class="event">
+                <div class="time">14:18:21</div>
+                <div>
+                  <div class="event-title">dispatch_blocked_capacity</div>
+                  <div class="event-body">建议新增事件：记录 pending 但 available_slots=0 的原因。</div>
+                </div>
+              </div>
+            </div>
+          </section>
+        </aside>
+      </section>
+    </main>
+  </div>
+</body>
+</html>

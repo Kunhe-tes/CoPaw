@@ -12,6 +12,11 @@ from swe.app.approvals.external import (
     submit_external_approval_decision,
 )
 from swe.app.approvals.service import ApprovalService
+from swe.app.source_system_config.models import (
+    EffectiveSourceSystemConfig,
+    SourceSystemConfig,
+)
+from swe.app.source_system_config.runtime import bind_source_system_config
 from swe.config.context import tenant_context
 from swe.security.tool_guard.approval import ApprovalDecision
 
@@ -108,6 +113,16 @@ class _TaskTracker:
         return asyncio.Queue(), True
 
 
+class _SourceSystemConfigService:
+    def __init__(self, config: EffectiveSourceSystemConfig) -> None:
+        self.config = config
+        self.calls: list[str] = []
+
+    async def resolve_config(self, source_id: str) -> EffectiveSourceSystemConfig:
+        self.calls.append(source_id)
+        return self.config
+
+
 class _Session:
     def __init__(self) -> None:
         self.state: dict[str, Any] = {}
@@ -135,7 +150,10 @@ class _Session:
         return self.state
 
 
-def _workspace(task_tracker: _TaskTracker | None = None) -> SimpleNamespace:
+def _workspace(
+    task_tracker: _TaskTracker | None = None,
+    source_system_config_service: _SourceSystemConfigService | None = None,
+) -> SimpleNamespace:
     session = _Session()
     return SimpleNamespace(
         agent_id="agent-a",
@@ -144,6 +162,39 @@ def _workspace(task_tracker: _TaskTracker | None = None) -> SimpleNamespace:
         task_tracker=task_tracker or _TaskTracker(),
         runner=SimpleNamespace(session=session),
         session=session,
+        _source_system_config_service=source_system_config_service,
+    )
+
+
+def _source_config_without_zhaohu_tool_guard_notifications():
+    raw_config = SourceSystemConfig.model_validate(
+        {
+            "approval_notifications": {
+                "zhaohu_tool_guard_enabled": False,
+            },
+        },
+    )
+    return EffectiveSourceSystemConfig(
+        source_id="source-a",
+        config=raw_config.merged_with_defaults(),
+        raw_config=raw_config,
+        version=1,
+    )
+
+
+def _source_config_with_zhaohu_tool_guard_notifications():
+    raw_config = SourceSystemConfig.model_validate(
+        {
+            "approval_notifications": {
+                "zhaohu_tool_guard_enabled": True,
+            },
+        },
+    )
+    return EffectiveSourceSystemConfig(
+        source_id="source-a",
+        config=raw_config.merged_with_defaults(),
+        raw_config=raw_config,
+        version=1,
     )
 
 
@@ -169,14 +220,17 @@ async def test_external_approve_submits_console_approve_message() -> None:
             },
         )
 
-        result = await submit_external_approval_decision(
-            workspace=workspace,
-            pending=pending,
-            decision=ExternalApprovalDecision.APPROVE,
-            source_channel="zhaohu",
-            source_user_id="zhaohu-user",
-            source_id="source-a",
-        )
+        with bind_source_system_config(
+            _source_config_with_zhaohu_tool_guard_notifications(),
+        ):
+            result = await submit_external_approval_decision(
+                workspace=workspace,
+                pending=pending,
+                decision=ExternalApprovalDecision.APPROVE,
+                source_channel="zhaohu",
+                source_user_id="zhaohu-user",
+                source_id="source-a",
+            )
 
     assert result.submitted is True
     assert result.reconnect is True
@@ -243,6 +297,78 @@ async def test_external_decision_does_not_resubmit_completed_approval() -> None:
 
 
 @pytest.mark.asyncio
+async def test_external_decision_skips_zhaohu_result_when_source_disables_it() -> None:
+    service = ApprovalService()
+    workspace = _workspace()
+
+    with tenant_context(tenant_id="tenant-a", source_id="source-a"):
+        pending = await service.create_pending(
+            session_id="session-1",
+            user_id="user-1",
+            channel="console",
+            tool_name="execute_shell_command",
+            result=_Result(),
+            extra={
+                "approval_kind": "tool_guard",
+                "source_id": "source-a",
+            },
+        )
+
+        with bind_source_system_config(
+            _source_config_without_zhaohu_tool_guard_notifications(),
+        ):
+            result = await submit_external_approval_decision(
+                workspace=workspace,
+                pending=pending,
+                decision=ExternalApprovalDecision.APPROVE,
+                source_channel="zhaohu",
+                source_user_id="zhaohu-user",
+                source_id="source-a",
+            )
+
+    assert result.submitted is True
+    assert workspace.task_tracker.attach_calls
+    assert workspace.channel_manager.zhaohu.result_calls == []
+
+
+@pytest.mark.asyncio
+async def test_external_decision_resolves_source_config_from_workspace_service() -> None:
+    service = ApprovalService()
+    source_config_service = _SourceSystemConfigService(
+        _source_config_without_zhaohu_tool_guard_notifications(),
+    )
+    workspace = _workspace(
+        source_system_config_service=source_config_service,
+    )
+
+    with tenant_context(tenant_id="tenant-a", source_id="source-a"):
+        pending = await service.create_pending(
+            session_id="session-1",
+            user_id="user-1",
+            channel="console",
+            tool_name="execute_shell_command",
+            result=_Result(),
+            extra={
+                "approval_kind": "tool_guard",
+                "source_id": "source-a",
+            },
+        )
+
+        result = await submit_external_approval_decision(
+            workspace=workspace,
+            pending=pending,
+            decision=ExternalApprovalDecision.APPROVE,
+            source_channel="zhaohu",
+            source_user_id="zhaohu-user",
+            source_id="source-a",
+        )
+
+    assert result.submitted is True
+    assert source_config_service.calls == ["source-a"]
+    assert workspace.channel_manager.zhaohu.result_calls == []
+
+
+@pytest.mark.asyncio
 async def test_pending_notification_applies_to_all_sessions() -> None:
     service = ApprovalService()
     workspace = _workspace()
@@ -263,19 +389,51 @@ async def test_pending_notification_applies_to_all_sessions() -> None:
             result=_Result(),
         )
 
-        await notify_cron_approval_pending(
-            cron_pending,
-            channel_manager=workspace.channel_manager,
-        )
-        await notify_cron_approval_pending(
-            normal_pending,
-            channel_manager=workspace.channel_manager,
-        )
+        with bind_source_system_config(
+            _source_config_with_zhaohu_tool_guard_notifications(),
+        ):
+            await notify_cron_approval_pending(
+                cron_pending,
+                channel_manager=workspace.channel_manager,
+            )
+            await notify_cron_approval_pending(
+                normal_pending,
+                channel_manager=workspace.channel_manager,
+            )
 
     zhaohu = workspace.channel_manager.zhaohu
     assert len(zhaohu.pending_calls) == 2
     assert zhaohu.pending_calls[0]["request_id"] == cron_pending.request_id
     assert zhaohu.pending_calls[1]["request_id"] == normal_pending.request_id
+
+
+@pytest.mark.asyncio
+async def test_pending_notification_skips_zhaohu_when_source_disables_it() -> None:
+    service = ApprovalService()
+    workspace = _workspace()
+
+    with tenant_context(tenant_id="tenant-a", source_id="source-a"):
+        pending = await service.create_pending(
+            session_id="session-1",
+            user_id="user-1",
+            channel="console",
+            tool_name="execute_shell_command",
+            result=_Result(),
+            extra={
+                "approval_kind": "tool_guard",
+                "source_id": "source-a",
+            },
+        )
+
+        with bind_source_system_config(
+            _source_config_without_zhaohu_tool_guard_notifications(),
+        ):
+            await notify_cron_approval_pending(
+                pending,
+                channel_manager=workspace.channel_manager,
+            )
+
+    assert workspace.channel_manager.zhaohu.pending_calls == []
 
 
 @pytest.mark.asyncio
@@ -297,10 +455,13 @@ async def test_pending_notification_forwards_scope_metadata_from_extra() -> None
             },
         )
 
-        await notify_cron_approval_pending(
-            pending,
-            channel_manager=workspace.channel_manager,
-        )
+        with bind_source_system_config(
+            _source_config_with_zhaohu_tool_guard_notifications(),
+        ):
+            await notify_cron_approval_pending(
+                pending,
+                channel_manager=workspace.channel_manager,
+            )
 
     zhaohu = workspace.channel_manager.zhaohu
     assert zhaohu.pending_calls[0]["agent_id"] == "agent-a"

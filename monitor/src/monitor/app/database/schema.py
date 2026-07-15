@@ -150,6 +150,9 @@ CREATE TABLE IF NOT EXISTS swe_cron_executions (
 
     -- 执行元数据
     meta            VARCHAR(2048) DEFAULT '' COMMENT '执行元数据',
+    dispatch_intent_id BIGINT DEFAULT NULL COMMENT '批调度派发意图ID',
+    dispatch_batch_id VARCHAR(64) DEFAULT '' COMMENT '批调度批次ID',
+    dispatch_attempt INT DEFAULT NULL COMMENT '批调度派发尝试次数',
 
     -- 通知状态
     notification_status VARCHAR(16) DEFAULT 'not_required' COMMENT '通知状态',
@@ -164,6 +167,9 @@ CREATE TABLE IF NOT EXISTS swe_cron_executions (
     -- 时间戳
     created_at      DATETIME DEFAULT CURRENT_TIMESTAMP COMMENT '记录创建时间',
 
+    is_read        TINYINT(1) DEFAULT 0 COMMENT 'whether execution result was read',
+    read_at        DATETIME DEFAULT NULL COMMENT 'read time',
+
     INDEX idx_job_id (job_id),
     INDEX idx_tenant_id (tenant_id),
     INDEX idx_status (status),
@@ -173,6 +179,10 @@ CREATE TABLE IF NOT EXISTS swe_cron_executions (
     INDEX idx_trace_id (trace_id),
     INDEX idx_notification_scan (notification_status, notification_due_at),
     INDEX idx_notification_lock (notification_lock_owner, notification_locked_at),
+    INDEX idx_execution_read (is_read, read_at),
+    INDEX idx_cron_execution_dispatch (
+        dispatch_intent_id, dispatch_batch_id, dispatch_attempt
+    ),
     INDEX idx_tenant_actual (tenant_id, actual_time),
     INDEX idx_created_at (created_at)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='定时任务执行历史表';
@@ -241,6 +251,52 @@ ALTER_CRON_EXECUTIONS_NOTIFICATION_COLUMNS = [
     """,
 ]
 
+ALTER_CRON_EXECUTIONS_READ_COLUMNS = [
+    """
+    ALTER TABLE swe_cron_executions
+    ADD COLUMN is_read TINYINT(1) DEFAULT 0
+    COMMENT 'whether execution result was read'
+    AFTER notification_locked_at
+    """,
+    """
+    ALTER TABLE swe_cron_executions
+    ADD COLUMN read_at DATETIME DEFAULT NULL
+    COMMENT 'read time'
+    AFTER is_read
+    """,
+    """
+    ALTER TABLE swe_cron_executions
+    ADD INDEX idx_execution_read (is_read, read_at)
+    """,
+]
+
+ALTER_CRON_EXECUTIONS_DISPATCH_COLUMNS = [
+    """
+    ALTER TABLE swe_cron_executions
+    ADD COLUMN dispatch_intent_id BIGINT DEFAULT NULL
+    COMMENT '批调度派发意图ID'
+    AFTER meta
+    """,
+    """
+    ALTER TABLE swe_cron_executions
+    ADD COLUMN dispatch_batch_id VARCHAR(64) DEFAULT ''
+    COMMENT '批调度批次ID'
+    AFTER dispatch_intent_id
+    """,
+    """
+    ALTER TABLE swe_cron_executions
+    ADD COLUMN dispatch_attempt INT DEFAULT NULL
+    COMMENT '批调度派发尝试次数'
+    AFTER dispatch_batch_id
+    """,
+    """
+    ALTER TABLE swe_cron_executions
+    ADD INDEX idx_cron_execution_dispatch (
+        dispatch_intent_id, dispatch_batch_id, dispatch_attempt
+    )
+    """,
+]
+
 # SQL for creating extracted customer names table
 CREATE_EXTRACTED_CUSTOMER_NAMES_TABLE = """
 CREATE TABLE IF NOT EXISTS swe_extracted_customer_names (
@@ -287,6 +343,309 @@ CREATE TABLE IF NOT EXISTS swe_cron_subtasks (
     INDEX idx_created_at (created_at)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='定时任务子任务表';
 """
+
+CREATE_CRON_DISPATCH_BATCHES_TABLE = """
+CREATE TABLE IF NOT EXISTS swe_cron_dispatch_batches (
+    batch_id VARCHAR(64) PRIMARY KEY COMMENT 'dispatch batch id',
+    parent_job_id VARCHAR(64) NOT NULL COMMENT 'batch parent cron job id',
+    parent_external_job_id VARCHAR(64) DEFAULT '' COMMENT 'external scheduler job id',
+    tenant_id VARCHAR(64) NOT NULL COMMENT 'parent tenant id',
+    source_id VARCHAR(64) DEFAULT '' COMMENT 'source id',
+    provider_id VARCHAR(128) NOT NULL DEFAULT 'default' COMMENT 'provider id',
+    model_id VARCHAR(128) NOT NULL DEFAULT 'default' COMMENT 'model id',
+    agent_id VARCHAR(64) NOT NULL DEFAULT 'default' COMMENT 'agent id',
+    scheduled_fire_at DATETIME NOT NULL COMMENT 'parent scheduled fire time',
+    callback_received_at DATETIME NOT NULL COMMENT 'scheduler callback receive time',
+    status VARCHAR(16) NOT NULL DEFAULT 'received' COMMENT 'received/pending/running/completed/failed',
+    lock_owner VARCHAR(128) DEFAULT '' COMMENT '批次派发锁持有者',
+    locked_at DATETIME DEFAULT NULL COMMENT '批次派发锁时间',
+    total_count INT NOT NULL DEFAULT 0 COMMENT 'total intents',
+    completed_count INT NOT NULL DEFAULT 0 COMMENT 'completed intents',
+    failed_count INT NOT NULL DEFAULT 0 COMMENT 'failed intents',
+    callback_metadata JSON DEFAULT NULL COMMENT 'raw callback metadata',
+    error_message VARCHAR(2048) DEFAULT '' COMMENT 'batch error summary',
+    completed_at DATETIME DEFAULT NULL COMMENT 'batch completed time',
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP COMMENT 'created time',
+    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT 'updated time',
+    UNIQUE INDEX uk_dispatch_batch_parent_fire (
+        parent_job_id, scheduled_fire_at
+    ),
+    INDEX idx_dispatch_batch_parent (parent_job_id, created_at),
+    INDEX idx_dispatch_batch_source (source_id, scheduled_fire_at),
+    INDEX idx_dispatch_batch_status (status, updated_at),
+    INDEX idx_dispatch_batch_lock (lock_owner, locked_at)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='SWE cron dispatch batch runs';
+"""
+
+CREATE_CRON_DISPATCH_INTENTS_TABLE = """
+CREATE TABLE IF NOT EXISTS swe_cron_dispatch_intents (
+    id BIGINT AUTO_INCREMENT PRIMARY KEY COMMENT 'dispatch intent id',
+    batch_id VARCHAR(64) NOT NULL COMMENT 'dispatch batch id',
+    intent_role VARCHAR(16) NOT NULL COMMENT 'parent/child',
+    status VARCHAR(16) NOT NULL DEFAULT 'pending' COMMENT 'pending/claimed/dispatched/completed/failed/cancelled',
+    source_id VARCHAR(64) DEFAULT '' COMMENT 'source id',
+    provider_id VARCHAR(128) NOT NULL DEFAULT 'default' COMMENT 'provider id',
+    model_id VARCHAR(128) NOT NULL DEFAULT 'default' COMMENT 'model id',
+    tenant_id VARCHAR(64) NOT NULL COMMENT 'runtime tenant id',
+    agent_id VARCHAR(64) NOT NULL DEFAULT 'default' COMMENT 'agent id',
+    job_id VARCHAR(64) NOT NULL COMMENT 'cron job id',
+    parent_job_id VARCHAR(64) DEFAULT '' COMMENT 'parent broadcast job id',
+    scheduled_fire_at DATETIME DEFAULT NULL COMMENT 'parent scheduled fire time',
+    due_at DATETIME NOT NULL COMMENT 'earliest claim time',
+    dispatch_order INT NOT NULL DEFAULT 0 COMMENT 'stable order inside batch',
+    viewer_heat_score DECIMAL(12,4) NOT NULL DEFAULT 0 COMMENT 'bounded read heat score',
+    attempt_count INT NOT NULL DEFAULT 0 COMMENT 'attempt count',
+    max_attempts INT NOT NULL DEFAULT 3 COMMENT 'max attempts',
+    lock_owner VARCHAR(128) DEFAULT '' COMMENT 'worker lock owner',
+    locked_at DATETIME DEFAULT NULL COMMENT 'lock time',
+    acked_at DATETIME DEFAULT NULL COMMENT 'worker acknowledged time',
+    completed_at DATETIME DEFAULT NULL COMMENT 'completion time',
+    error_message VARCHAR(2048) DEFAULT '' COMMENT 'last error',
+    payload JSON DEFAULT NULL COMMENT 'intent payload',
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP COMMENT 'created time',
+    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT 'updated time',
+    UNIQUE INDEX uk_dispatch_batch_role_job (batch_id, intent_role, tenant_id, job_id),
+    INDEX idx_dispatch_claim (status, due_at, dispatch_order, id),
+    INDEX idx_dispatch_batch (batch_id, dispatch_order),
+    INDEX idx_dispatch_lock (lock_owner, locked_at),
+    INDEX idx_dispatch_job (job_id),
+    INDEX idx_dispatch_source (source_id),
+    INDEX idx_dispatch_scope_claim (
+        source_id,
+        provider_id,
+        model_id,
+        status,
+        due_at,
+        dispatch_order,
+        id
+    )
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='SWE cron dispatch intent queue';
+"""
+
+CREATE_CRON_DISPATCH_EVENTS_TABLE = """
+CREATE TABLE IF NOT EXISTS swe_cron_dispatch_events (
+    id BIGINT AUTO_INCREMENT PRIMARY KEY COMMENT 'dispatch event id',
+    batch_id VARCHAR(64) NOT NULL COMMENT 'dispatch batch id',
+    intent_id BIGINT DEFAULT NULL COMMENT 'dispatch intent id',
+    event_type VARCHAR(64) NOT NULL COMMENT 'event type',
+    worker_id VARCHAR(128) DEFAULT '' COMMENT 'worker id',
+    job_id VARCHAR(64) DEFAULT '' COMMENT 'job id',
+    tenant_id VARCHAR(64) DEFAULT '' COMMENT 'tenant id',
+    source_id VARCHAR(64) DEFAULT '' COMMENT 'source id',
+    details JSON DEFAULT NULL COMMENT 'event details',
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP COMMENT 'created time',
+    INDEX idx_dispatch_events_batch (batch_id, created_at),
+    INDEX idx_dispatch_events_intent (intent_id),
+    INDEX idx_dispatch_events_type (event_type, created_at)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='SWE cron dispatch telemetry events';
+"""
+
+CREATE_CRON_DISPATCH_WORKER_CAPACITY_TABLE = """
+CREATE TABLE IF NOT EXISTS swe_cron_dispatch_worker_capacity (
+    id BIGINT AUTO_INCREMENT PRIMARY KEY COMMENT 'capacity snapshot id',
+    worker_id VARCHAR(128) NOT NULL COMMENT 'worker id',
+    source_id VARCHAR(64) DEFAULT '' COMMENT 'source id',
+    provider_id VARCHAR(128) NOT NULL DEFAULT 'default' COMMENT 'provider id',
+    model_id VARCHAR(128) NOT NULL DEFAULT 'default' COMMENT 'model id',
+    strategy_id VARCHAR(64) DEFAULT '' COMMENT 'worker strategy id',
+    previous_workers INT NOT NULL DEFAULT 0 COMMENT 'previous effective workers',
+    baseline_workers INT NOT NULL DEFAULT 1 COMMENT 'baseline workers',
+    min_workers INT NOT NULL DEFAULT 1 COMMENT 'minimum workers',
+    max_workers INT NOT NULL DEFAULT 1 COMMENT 'max workers',
+    effective_workers INT NOT NULL DEFAULT 1 COMMENT 'effective workers',
+    pending_count INT NOT NULL DEFAULT 0 COMMENT 'pending intents',
+    claimed_count INT NOT NULL DEFAULT 0 COMMENT 'claimed intents',
+    running_count INT NOT NULL DEFAULT 0 COMMENT 'running intents',
+    success_count INT NOT NULL DEFAULT 0 COMMENT 'recent success count',
+    failure_count INT NOT NULL DEFAULT 0 COMMENT 'recent terminal failure count',
+    error_rate DECIMAL(8,6) NOT NULL DEFAULT 0 COMMENT 'terminal failure rate',
+    matched_rule JSON DEFAULT NULL COMMENT 'matched adjustment rule',
+    avg_latency_ms INT NOT NULL DEFAULT 0 COMMENT 'recent average latency',
+    decision_reason VARCHAR(255) DEFAULT '' COMMENT 'capacity decision reason',
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP COMMENT 'created time',
+    INDEX idx_dispatch_capacity_worker (worker_id, created_at),
+    INDEX idx_dispatch_capacity_source (source_id, created_at),
+    INDEX idx_dispatch_capacity_scope (
+        source_id, provider_id, model_id, strategy_id, created_at
+    )
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='SWE cron dispatch worker capacity snapshots';
+"""
+
+CREATE_CRON_DISPATCH_SCOPE_LEASES_TABLE = """
+CREATE TABLE IF NOT EXISTS swe_cron_dispatch_scope_leases (
+    source_id VARCHAR(64) NOT NULL DEFAULT '' COMMENT 'source id',
+    provider_id VARCHAR(128) NOT NULL DEFAULT 'default' COMMENT 'provider id',
+    model_id VARCHAR(128) NOT NULL DEFAULT 'default' COMMENT 'model id',
+    lock_owner VARCHAR(128) NOT NULL DEFAULT '' COMMENT 'scope lease owner',
+    locked_at DATETIME DEFAULT NULL COMMENT 'scope lock time',
+    lease_expires_at DATETIME DEFAULT NULL COMMENT 'scope lease expiry time',
+    heartbeat_at DATETIME DEFAULT NULL COMMENT 'scope owner heartbeat time',
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP COMMENT 'created time',
+    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT 'updated time',
+    PRIMARY KEY (source_id, provider_id, model_id),
+    INDEX idx_scope_lease_owner (lock_owner, lease_expires_at),
+    INDEX idx_scope_lease_expiry (lease_expires_at)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='Cron dispatch model scope leases';
+"""
+
+CREATE_CRON_DISPATCH_MODEL_WORKER_POLICY_TABLE = """
+CREATE TABLE IF NOT EXISTS swe_cron_dispatch_model_worker_policy (
+    source_id VARCHAR(64) NOT NULL DEFAULT 'default' COMMENT 'source id',
+    provider_id VARCHAR(128) NOT NULL DEFAULT 'default' COMMENT 'provider id',
+    model_id VARCHAR(128) NOT NULL DEFAULT 'default' COMMENT 'model id',
+    default_strategy_id VARCHAR(64) NOT NULL COMMENT 'default strategy id',
+    strategy_schedule JSON DEFAULT NULL COMMENT 'time-window strategy schedule',
+    enabled TINYINT(1) NOT NULL DEFAULT 1 COMMENT 'enabled',
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP COMMENT 'created time',
+    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT 'updated time',
+    PRIMARY KEY (source_id, provider_id, model_id),
+    INDEX idx_dispatch_worker_policy_strategy (default_strategy_id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='Cron dispatch model worker policy';
+"""
+
+CREATE_CRON_DISPATCH_WORKER_STRATEGY_TABLE = """
+CREATE TABLE IF NOT EXISTS swe_cron_dispatch_worker_strategy (
+    strategy_id VARCHAR(64) PRIMARY KEY COMMENT 'strategy id',
+    min_workers INT NOT NULL DEFAULT 1 COMMENT 'minimum workers',
+    baseline_workers INT NOT NULL DEFAULT 1 COMMENT 'baseline workers',
+    max_workers INT NOT NULL DEFAULT 1 COMMENT 'maximum workers',
+    adjust_interval_seconds INT NOT NULL DEFAULT 300 COMMENT 'adjust interval',
+    feedback_window_seconds INT NOT NULL DEFAULT 300 COMMENT 'feedback window',
+    stale_execution_seconds INT NOT NULL DEFAULT 7800 COMMENT 'stale dispatch timeout',
+    error_rate_rules JSON DEFAULT NULL COMMENT 'error-rate adjustment rules',
+    enabled TINYINT(1) NOT NULL DEFAULT 1 COMMENT 'enabled',
+    description VARCHAR(255) DEFAULT '' COMMENT 'strategy description',
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP COMMENT 'created time',
+    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT 'updated time'
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='Cron dispatch worker strategy';
+"""
+
+ALTER_CRON_DISPATCH_INTENTS_INDEXES = [
+    """
+    ALTER TABLE swe_cron_dispatch_intents
+    ADD COLUMN provider_id VARCHAR(128) NOT NULL DEFAULT 'default'
+    COMMENT 'provider id'
+    AFTER source_id
+    """,
+    """
+    ALTER TABLE swe_cron_dispatch_intents
+    ADD COLUMN model_id VARCHAR(128) NOT NULL DEFAULT 'default'
+    COMMENT 'model id'
+    AFTER provider_id
+    """,
+    """
+    ALTER TABLE swe_cron_dispatch_intents
+    ADD COLUMN scheduled_fire_at DATETIME DEFAULT NULL
+    COMMENT 'parent scheduled fire time'
+    AFTER parent_job_id
+    """,
+    """
+    ALTER TABLE swe_cron_dispatch_intents
+    ADD INDEX idx_dispatch_scope_claim (
+        source_id,
+        provider_id,
+        model_id,
+        status,
+        due_at,
+        dispatch_order,
+        id
+    )
+    """,
+]
+
+ALTER_CRON_DISPATCH_BATCHES_MODEL_COLUMNS = [
+    """
+    ALTER TABLE swe_cron_dispatch_batches
+    ADD COLUMN provider_id VARCHAR(128) NOT NULL DEFAULT 'default'
+    COMMENT 'provider id'
+    AFTER source_id
+    """,
+    """
+    ALTER TABLE swe_cron_dispatch_batches
+    ADD COLUMN model_id VARCHAR(128) NOT NULL DEFAULT 'default'
+    COMMENT 'model id'
+    AFTER provider_id
+    """,
+    """
+    ALTER TABLE swe_cron_dispatch_batches
+    ADD COLUMN lock_owner VARCHAR(128) DEFAULT ''
+    COMMENT '批次派发锁持有者'
+    AFTER status
+    """,
+    """
+    ALTER TABLE swe_cron_dispatch_batches
+    ADD COLUMN locked_at DATETIME DEFAULT NULL
+    COMMENT '批次派发锁时间'
+    AFTER lock_owner
+    """,
+    """
+    ALTER TABLE swe_cron_dispatch_batches
+    ADD INDEX idx_dispatch_batch_lock (lock_owner, locked_at)
+    """,
+]
+
+ALTER_CRON_DISPATCH_WORKER_CAPACITY_COLUMNS = [
+    """
+    ALTER TABLE swe_cron_dispatch_worker_capacity
+    ADD COLUMN provider_id VARCHAR(128) NOT NULL DEFAULT 'default'
+    COMMENT 'provider id'
+    AFTER source_id
+    """,
+    """
+    ALTER TABLE swe_cron_dispatch_worker_capacity
+    ADD COLUMN model_id VARCHAR(128) NOT NULL DEFAULT 'default'
+    COMMENT 'model id'
+    AFTER provider_id
+    """,
+    """
+    ALTER TABLE swe_cron_dispatch_worker_capacity
+    ADD COLUMN strategy_id VARCHAR(64) DEFAULT ''
+    COMMENT 'worker strategy id'
+    AFTER model_id
+    """,
+    """
+    ALTER TABLE swe_cron_dispatch_worker_capacity
+    ADD COLUMN previous_workers INT NOT NULL DEFAULT 0
+    COMMENT 'previous effective workers'
+    AFTER strategy_id
+    """,
+    """
+    ALTER TABLE swe_cron_dispatch_worker_capacity
+    ADD COLUMN min_workers INT NOT NULL DEFAULT 1
+    COMMENT 'minimum workers'
+    AFTER baseline_workers
+    """,
+    """
+    ALTER TABLE swe_cron_dispatch_worker_capacity
+    ADD COLUMN success_count INT NOT NULL DEFAULT 0
+    COMMENT 'recent success count'
+    AFTER running_count
+    """,
+    """
+    ALTER TABLE swe_cron_dispatch_worker_capacity
+    ADD COLUMN failure_count INT NOT NULL DEFAULT 0
+    COMMENT 'recent terminal failure count'
+    AFTER success_count
+    """,
+    """
+    ALTER TABLE swe_cron_dispatch_worker_capacity
+    ADD COLUMN error_rate DECIMAL(8,6) NOT NULL DEFAULT 0
+    COMMENT 'terminal failure rate'
+    AFTER failure_count
+    """,
+    """
+    ALTER TABLE swe_cron_dispatch_worker_capacity
+    ADD COLUMN matched_rule JSON DEFAULT NULL
+    COMMENT 'matched adjustment rule'
+    AFTER error_rate
+    """,
+    """
+    ALTER TABLE swe_cron_dispatch_worker_capacity
+    ADD INDEX idx_dispatch_capacity_scope (
+        source_id, provider_id, model_id, strategy_id, created_at
+    )
+    """,
+]
 
 # SQL for adding async_status column to cron_executions table
 ALTER_CRON_EXECUTIONS_ASYNC_STATUS = [
@@ -376,6 +735,24 @@ async def init_database_tables() -> None:
                     raise
         logger.info("Ensured cron execution notification columns")
 
+        for statement in ALTER_CRON_EXECUTIONS_READ_COLUMNS:
+            try:
+                await db.execute(statement)
+            except Exception as exc:  # pylint: disable=broad-except
+                message = str(exc).lower()
+                if "duplicate" not in message and "exists" not in message:
+                    raise
+        logger.info("Ensured cron execution read marker columns")
+
+        for statement in ALTER_CRON_EXECUTIONS_DISPATCH_COLUMNS:
+            try:
+                await db.execute(statement)
+            except Exception as exc:  # pylint: disable=broad-except
+                message = str(exc).lower()
+                if "duplicate" not in message and "exists" not in message:
+                    raise
+        logger.info("Ensured cron execution dispatch identity columns")
+
         await db.execute(CREATE_EXTRACTED_CUSTOMER_NAMES_TABLE)
         logger.info(
             "Created extracted_customer_names table (or already exists)",
@@ -383,6 +760,62 @@ async def init_database_tables() -> None:
 
         await db.execute(CREATE_CRON_SUBTASKS_TABLE)
         logger.info("Created cron_subtasks table (or already exists)")
+
+        await db.execute(CREATE_CRON_DISPATCH_BATCHES_TABLE)
+        logger.info("Created cron_dispatch_batches table (or already exists)")
+
+        for statement in ALTER_CRON_DISPATCH_BATCHES_MODEL_COLUMNS:
+            try:
+                await db.execute(statement)
+            except Exception as exc:  # pylint: disable=broad-except
+                message = str(exc).lower()
+                if "duplicate" not in message and "exists" not in message:
+                    raise
+        logger.info("Ensured cron dispatch batch model columns")
+
+        await db.execute(CREATE_CRON_DISPATCH_INTENTS_TABLE)
+        logger.info("Created cron_dispatch_intents table (or already exists)")
+
+        for statement in ALTER_CRON_DISPATCH_INTENTS_INDEXES:
+            try:
+                await db.execute(statement)
+            except Exception as exc:  # pylint: disable=broad-except
+                message = str(exc).lower()
+                if "duplicate" not in message and "exists" not in message:
+                    raise
+        logger.info("Ensured cron dispatch intent indexes")
+
+        await db.execute(CREATE_CRON_DISPATCH_EVENTS_TABLE)
+        logger.info("Created cron_dispatch_events table (or already exists)")
+
+        await db.execute(CREATE_CRON_DISPATCH_WORKER_CAPACITY_TABLE)
+        logger.info(
+            "Created cron_dispatch_worker_capacity table (or already exists)",
+        )
+
+        for statement in ALTER_CRON_DISPATCH_WORKER_CAPACITY_COLUMNS:
+            try:
+                await db.execute(statement)
+            except Exception as exc:  # pylint: disable=broad-except
+                message = str(exc).lower()
+                if "duplicate" not in message and "exists" not in message:
+                    raise
+        logger.info("Ensured cron dispatch worker capacity columns")
+
+        await db.execute(CREATE_CRON_DISPATCH_SCOPE_LEASES_TABLE)
+        logger.info(
+            "Created cron_dispatch_scope_leases table (or already exists)",
+        )
+
+        await db.execute(CREATE_CRON_DISPATCH_MODEL_WORKER_POLICY_TABLE)
+        logger.info(
+            "Created cron_dispatch_model_worker_policy table (or already exists)",
+        )
+
+        await db.execute(CREATE_CRON_DISPATCH_WORKER_STRATEGY_TABLE)
+        logger.info(
+            "Created cron_dispatch_worker_strategy table (or already exists)",
+        )
 
         for statement in ALTER_CRON_EXECUTIONS_ASYNC_STATUS:
             try:

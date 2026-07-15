@@ -21,7 +21,7 @@ import {
   UserRound,
   Users,
 } from "lucide-react";
-import { DatePicker, Select, Tooltip, message } from "antd";
+import { DatePicker, Select, Spin, Tooltip, message } from "antd";
 import ReactECharts from "echarts-for-react";
 import type { Dayjs } from "dayjs";
 import dayjs from "dayjs";
@@ -707,6 +707,7 @@ export default function BusinessOverviewPage() {
   const [overviewStats, setOverviewStats] = useState<OverviewStats | null>(
     null,
   );
+  const [dashboardLoading, setDashboardLoading] = useState(false);
   const [growthStats, setGrowthStats] = useState<{
     callsGrowth: number | null;
     tokensGrowth: number | null;
@@ -750,7 +751,9 @@ export default function BusinessOverviewPage() {
   const [errorSummaryData, setErrorSummaryData] = useState<ErrorSummary | null>(null);
   const [taskStatusSummary, setTaskStatusSummary] =
     useState<TaskStatusSummary | null>(null);
+  const [taskStatusLoading, setTaskStatusLoading] = useState(false);
   const [depthSummary, setDepthSummary] = useState<DepthSummary | null>(null);
+  const [depthLoading, setDepthLoading] = useState(false);
   const [htmlPreviewRefreshKey, setHtmlPreviewRefreshKey] = useState(0);
   const [errorLoading, setErrorLoading] = useState(false);
   const errorLoadingRef = useRef(false);
@@ -808,6 +811,7 @@ export default function BusinessOverviewPage() {
   const fetchDashboard = useCallback(async () => {
     const isSingleDay = dateRange[0].isSame(dateRange[1], "day");
 
+    setDashboardLoading(true);
     try {
       const [overviewRes, growthRes, trendRes] = await Promise.allSettled([
         tracingApi.getOverview(
@@ -846,6 +850,8 @@ export default function BusinessOverviewPage() {
     } catch (error) {
       console.error("Failed to fetch dashboard:", error);
       message.error("获取总览数据失败");
+    } finally {
+      setDashboardLoading(false);
     }
   }, [
     dateRange,
@@ -966,6 +972,7 @@ export default function BusinessOverviewPage() {
   );
 
   const fetchTaskStatusSummary = useCallback(async () => {
+    setTaskStatusLoading(true);
     try {
       const result = await tracingApi.getTaskStatusSummary({
         start_date: startDateText,
@@ -975,10 +982,13 @@ export default function BusinessOverviewPage() {
       setTaskStatusSummary(result);
     } catch (error) {
       console.error("Failed to fetch task status summary:", error);
+    } finally {
+      setTaskStatusLoading(false);
     }
   }, [effectiveBbkIds, endDateText, startDateText]);
 
   const fetchDepthSummary = useCallback(async () => {
+    setDepthLoading(true);
     try {
       const result = await tracingApi.getDepthSummary({
         start_date: startDateText,
@@ -988,6 +998,8 @@ export default function BusinessOverviewPage() {
       setDepthSummary(result);
     } catch (error) {
       console.error("Failed to fetch depth summary:", error);
+    } finally {
+      setDepthLoading(false);
     }
   }, [effectiveBbkIds, endDateText, startDateText]);
 
@@ -1145,6 +1157,11 @@ export default function BusinessOverviewPage() {
     () => buildErrorSummary(errorSummaryData),
     [errorSummaryData],
   );
+  const renderCardLoading = () => (
+    <div className={styles.listFootnote} data-testid="overview-panel-loading">
+      加载中...
+    </div>
+  );
   return (
     <div className={styles.businessOverviewPage}>
       <header className={styles.pageHeader}>
@@ -1269,65 +1286,71 @@ export default function BusinessOverviewPage() {
               className={styles.metricPanel}
               data-testid="overview-metric-card"
             >
-              <div className={styles.metricHeader}>
-                <span
-                  className={styles.metricIcon}
-                  style={{
-                    background: `linear-gradient(180deg, ${card.accentColor} 0%, ${card.accentColor}dd 100%)`,
-                  }}
-                >
-                  <MetricIcon size={20} strokeWidth={2.2} />
-                </span>
-                <div className={styles.metricText}>
-                  <div className={styles.metricTitle}>{card.title}</div>
-                  <div className={styles.metricValue}>{card.valueText}</div>
-                  <div
-                    className={
-                      card.changeDirection === "up"
-                        ? styles.metricChangeUp
-                        : card.changeDirection === "down"
-                        ? styles.metricChangeDown
-                        : styles.metricChangeFlat
-                    }
-                  >
-                    环比
-                    {card.changeDirection === "up" && <TrendingUp size={14} />}
-                    {card.changeDirection === "down" && <TrendingDown size={14} />}
-                    {card.changeText}
-                  </div>
-                </div>
-              </div>
-              <div className={styles.breakdownTitle}>Top5分行</div>
-              {card.breakdown && card.breakdown.length > 0 ? (
-                <div className={styles.breakdownList}>
-                  {card.breakdown.map((item) => (
-                    <div
-                      key={`${card.key}-${item.name}`}
-                      className={styles.breakdownRow}
-                    >
-                      <span className={styles.breakdownName}>
-                        {truncateName(item.name, 6)}
-                      </span>
-                      <div className={styles.breakdownTrack}>
-                        <div
-                          className={styles.breakdownBar}
-                          style={{
-                            width: `${Math.max(item.value, 10)}%`,
-                            background: card.accentColor,
-                          }}
-                        />
-                      </div>
-                      <span className={styles.breakdownValue}>
-                        {item.valueText}
-                      </span>
-                    </div>
-                  ))}
-                </div>
+              {dashboardLoading ? (
+                renderCardLoading()
               ) : (
-                <div className={styles.emptyBreakdown}>
-                  <Database className={styles.emptyBreakdownIcon} />
-                  <span className={styles.emptyBreakdownText}>暂无分行数据</span>
-                </div>
+                <>
+                  <div className={styles.metricHeader}>
+                    <span
+                      className={styles.metricIcon}
+                      style={{
+                        background: `linear-gradient(180deg, ${card.accentColor} 0%, ${card.accentColor}dd 100%)`,
+                      }}
+                    >
+                      <MetricIcon size={20} strokeWidth={2.2} />
+                    </span>
+                    <div className={styles.metricText}>
+                      <div className={styles.metricTitle}>{card.title}</div>
+                      <div className={styles.metricValue}>{card.valueText}</div>
+                      <div
+                        className={
+                          card.changeDirection === "up"
+                            ? styles.metricChangeUp
+                            : card.changeDirection === "down"
+                            ? styles.metricChangeDown
+                            : styles.metricChangeFlat
+                        }
+                      >
+                        环比
+                        {card.changeDirection === "up" && <TrendingUp size={14} />}
+                        {card.changeDirection === "down" && <TrendingDown size={14} />}
+                        {card.changeText}
+                      </div>
+                    </div>
+                  </div>
+                  <div className={styles.breakdownTitle}>Top5分行</div>
+                  {card.breakdown && card.breakdown.length > 0 ? (
+                    <div className={styles.breakdownList}>
+                      {card.breakdown.map((item) => (
+                        <div
+                          key={`${card.key}-${item.name}`}
+                          className={styles.breakdownRow}
+                        >
+                          <span className={styles.breakdownName}>
+                            {truncateName(item.name, 6)}
+                          </span>
+                          <div className={styles.breakdownTrack}>
+                            <div
+                              className={styles.breakdownBar}
+                              style={{
+                                width: `${Math.max(item.value, 10)}%`,
+                                background: card.accentColor,
+                              }}
+                            />
+                          </div>
+                          <span className={styles.breakdownValue}>
+                            {item.valueText}
+                          </span>
+                        </div>
+                      ))}
+                    </div>
+                  ) : (
+                    <div className={styles.emptyBreakdown}>
+                      <Database className={styles.emptyBreakdownIcon} />
+                      <span className={styles.emptyBreakdownText}>暂无分行数据</span>
+                    </div>
+                  )}
+                </>
               )}
             </article>
           );
@@ -1342,13 +1365,17 @@ export default function BusinessOverviewPage() {
           <div className={styles.panelHeader}>
             <h3 className={styles.panelTitle}>调用量趋势</h3>
           </div>
-          <div className={styles.trendChart}>
-            <ReactECharts
-              className={styles.trendChartCanvas}
-              option={buildTrendChartOption(trendData, showExtendedTrendMetrics)}
-              style={{ height: 280, width: "100%", gridColumn: "1 / -1" }}
-            />
-          </div>
+          {dashboardLoading ? (
+            renderCardLoading()
+          ) : (
+            <div className={styles.trendChart}>
+              <ReactECharts
+                className={styles.trendChartCanvas}
+                option={buildTrendChartOption(trendData, showExtendedTrendMetrics)}
+                style={{ height: 280, width: "100%", gridColumn: "1 / -1" }}
+              />
+            </div>
+          )}
         </article>
 
         <article className={styles.panelMedium}>
@@ -1468,38 +1495,42 @@ export default function BusinessOverviewPage() {
             <div className={styles.panelHeader}>
               <h3 className={styles.panelTitle}>使用深度</h3>
             </div>
-            <div className={styles.depthGrid}>
-              {depthCards.map((card) => (
-                <div key={card.key} className={styles.depthCard}>
-                  <div className={styles.depthIconWrap}>
-                    {card.key === "avg-rounds" && <MessageCircleMore size={15} />}
-                    {card.key === "multi-round" && <Users size={15} />}
-                    {card.key === "avg-duration" && <Clock3 size={15} />}
-                    {card.key === "avg-sessions" && <ArrowUpRight size={15} />}
+            {depthLoading ? (
+              renderCardLoading()
+            ) : (
+              <div className={styles.depthGrid}>
+                {depthCards.map((card) => (
+                  <div key={card.key} className={styles.depthCard}>
+                    <div className={styles.depthIconWrap}>
+                      {card.key === "avg-rounds" && <MessageCircleMore size={15} />}
+                      {card.key === "multi-round" && <Users size={15} />}
+                      {card.key === "avg-duration" && <Clock3 size={15} />}
+                      {card.key === "avg-sessions" && <ArrowUpRight size={15} />}
+                    </div>
+                    <div className={styles.depthValue}>{card.valueText}</div>
+                    <Tooltip title={card.title} placement="top">
+                      <div className={styles.depthTitle}>{card.title}</div>
+                    </Tooltip>
+                    <div
+                      className={
+                        card.changeDirection === "up"
+                          ? styles.metricChangeUp
+                          : card.changeDirection === "down"
+                          ? styles.metricChangeDown
+                          : styles.metricChangeFlat
+                      }
+                    >
+                      环比
+                      {card.changeDirection === "up" && <TrendingUp size={12} />}
+                      {card.changeDirection === "down" && (
+                        <TrendingDown size={12} />
+                      )}
+                      {card.changeText}
+                    </div>
                   </div>
-                  <div className={styles.depthValue}>{card.valueText}</div>
-                  <Tooltip title={card.title} placement="top">
-                    <div className={styles.depthTitle}>{card.title}</div>
-                  </Tooltip>
-                  <div
-                    className={
-                      card.changeDirection === "up"
-                        ? styles.metricChangeUp
-                        : card.changeDirection === "down"
-                        ? styles.metricChangeDown
-                        : styles.metricChangeFlat
-                    }
-                  >
-                    环比
-                    {card.changeDirection === "up" && <TrendingUp size={12} />}
-                    {card.changeDirection === "down" && (
-                      <TrendingDown size={12} />
-                    )}
-                    {card.changeText}
-                  </div>
-                </div>
-              ))}
-            </div>
+                ))}
+              </div>
+            )}
           </article>
         )}
       </section>
@@ -1520,54 +1551,58 @@ export default function BusinessOverviewPage() {
               <ChevronRight size={14} />
             </button>
           </div>
-          <div className={styles.donutLayout}>
-            <div className={styles.donutColumn}>
-              <div className={styles.donutWrap}>
-                <svg viewBox="0 0 120 120" className={styles.donutSvg}>
-                  <circle cx="60" cy="60" r="45" className={styles.donutTrack} />
-                  {buildDonutSegments(executionSummary).map((item) => (
-                    <circle
-                      key={item.key}
-                      cx="60"
-                      cy="60"
-                      r="45"
-                      className={styles.donutSegment}
-                      style={{
-                        stroke: item.color,
-                        strokeDasharray: item.dasharray,
-                        strokeDashoffset: item.dashoffset,
-                      }}
-                    />
-                  ))}
-                </svg>
-                <div className={styles.donutCenter}>
-                  <strong>
-                    {formatNumber(taskStatusSummary?.total_tasks ?? 0)}
-                  </strong>
-                  <span>总任务数</span>
+          {taskStatusLoading ? (
+            renderCardLoading()
+          ) : (
+            <div className={styles.donutLayout}>
+              <div className={styles.donutColumn}>
+                <div className={styles.donutWrap}>
+                  <svg viewBox="0 0 120 120" className={styles.donutSvg}>
+                    <circle cx="60" cy="60" r="45" className={styles.donutTrack} />
+                    {buildDonutSegments(executionSummary).map((item) => (
+                      <circle
+                        key={item.key}
+                        cx="60"
+                        cy="60"
+                        r="45"
+                        className={styles.donutSegment}
+                        style={{
+                          stroke: item.color,
+                          strokeDasharray: item.dasharray,
+                          strokeDashoffset: item.dashoffset,
+                        }}
+                      />
+                    ))}
+                  </svg>
+                  <div className={styles.donutCenter}>
+                    <strong>
+                      {formatNumber(taskStatusSummary?.total_tasks ?? 0)}
+                    </strong>
+                    <span>总任务数</span>
+                  </div>
+                </div>
+                <div className={styles.donutLegend}>
+                  {executionSummary.map((item) => {
+                    const total = Math.max(
+                      executionSummary.reduce((sum, row) => sum + row.value, 0),
+                      1,
+                    );
+
+                    return (
+                      <div key={item.key} className={styles.donutLegendItem}>
+                        <span className={styles.donutLegendDot} style={{ background: item.color }} />
+                        <span>{item.label}</span>
+                        <span className={styles.donutLegendValue}>
+                          {formatNumber(item.value)}&nbsp;({formatPercent((item.value / total) * 100)})
+                        </span>
+                      </div>
+                    );
+                  })}
                 </div>
               </div>
-              <div className={styles.donutLegend}>
-                {executionSummary.map((item) => {
-                  const total = Math.max(
-                    executionSummary.reduce((sum, row) => sum + row.value, 0),
-                    1,
-                  );
-
-                  return (
-                    <div key={item.key} className={styles.donutLegendItem}>
-                      <span className={styles.donutLegendDot} style={{ background: item.color }} />
-                      <span>{item.label}</span>
-                      <span className={styles.donutLegendValue}>
-                        {formatNumber(item.value)}&nbsp;({formatPercent((item.value / total) * 100)})
-                      </span>
-                    </div>
-                  );
-                })}
-              </div>
+              <TaskFunnel taskStatusSummary={taskStatusSummary} />
             </div>
-            <TaskFunnel taskStatusSummary={taskStatusSummary} />
-          </div>
+          )}
         </article>
 
         <article className={styles.panelMedium}>
@@ -1659,59 +1694,60 @@ export default function BusinessOverviewPage() {
               <ChevronRight size={14} />
             </button>
           </div>
-          <div className={styles.donutLayoutCompact}>
-            <div className={styles.donutCompact}>
-              <svg viewBox="0 0 120 120" className={styles.donutCompactSvg}>
-                <circle cx="60" cy="60" r="45" className={styles.donutTrack} />
-                {buildDonutSegments(errorSummaryItems).map((item) => (
-                  <circle
-                    key={item.key}
-                    cx="60"
-                    cy="60"
-                    r="45"
-                    className={styles.donutSegment}
-                    style={{
-                      stroke: item.color,
-                      strokeDasharray: item.dasharray,
-                      strokeDashoffset: item.dashoffset,
-                    }}
-                  />
-                ))}
-              </svg>
-              <div className={styles.donutCenter}>
-                <strong>
-                  {formatNumber(safeNumber(errorSummaryData?.total_errors))}
-                </strong>
-                <span>报错总数</span>
+          {errorLoading ? (
+            renderCardLoading()
+          ) : (
+            <div className={styles.donutLayoutCompact}>
+              <div className={styles.donutCompact}>
+                <svg viewBox="0 0 120 120" className={styles.donutCompactSvg}>
+                  <circle cx="60" cy="60" r="45" className={styles.donutTrack} />
+                  {buildDonutSegments(errorSummaryItems).map((item) => (
+                    <circle
+                      key={item.key}
+                      cx="60"
+                      cy="60"
+                      r="45"
+                      className={styles.donutSegment}
+                      style={{
+                        stroke: item.color,
+                        strokeDasharray: item.dasharray,
+                        strokeDashoffset: item.dashoffset,
+                      }}
+                    />
+                  ))}
+                </svg>
+                <div className={styles.donutCenter}>
+                  <strong>
+                    {formatNumber(safeNumber(errorSummaryData?.total_errors))}
+                  </strong>
+                  <span>报错总数</span>
+                </div>
               </div>
-            </div>
-            <div className={styles.legendHorizontal}>
-              <div className={styles.legendGroup}>
-                {errorSummaryItems.map((item) => {
-                  const total = Math.max(
-                    errorSummaryItems.reduce((sum, row) => sum + row.value, 0),
-                    1,
-                  );
+              <div className={styles.legendHorizontal}>
+                <div className={styles.legendGroup}>
+                  {errorSummaryItems.map((item) => {
+                    const total = Math.max(
+                      errorSummaryItems.reduce((sum, row) => sum + row.value, 0),
+                      1,
+                    );
 
-                  return (
-                    <div key={item.key} className={styles.legendRow}>
-                      <span className={styles.legendLabel}>
-                        <i style={{ background: item.color }} />
-                        {item.label}
-                      </span>
-                      <span className={styles.legendValue}>
-                        {formatNumber(item.value)} (
-                        {formatPercent((item.value / total) * 100)})
-                      </span>
-                    </div>
-                  );
-                })}
+                    return (
+                      <div key={item.key} className={styles.legendRow}>
+                        <span className={styles.legendLabel}>
+                          <i style={{ background: item.color }} />
+                          {item.label}
+                        </span>
+                        <span className={styles.legendValue}>
+                          {formatNumber(item.value)} (
+                          {formatPercent((item.value / total) * 100)})
+                        </span>
+                      </div>
+                    );
+                  })}
+                </div>
               </div>
-              {errorLoading && (
-                <div className={styles.listFootnote}>加载中...</div>
-              )}
             </div>
-          </div>
+          )}
         </article>
       </section>
 

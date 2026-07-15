@@ -1,0 +1,17 @@
+# Independent Cron Scheduling Service Owns Batch Dispatch
+
+Batch-managed scheduled work must be dispatched by an independent scheduling service, not by a SWE background dispatch worker and not by the legacy external scheduler callback. The scheduling service owns durable intent claiming, retry, dispatch telemetry, immediate refill after completed work, and periodic worker-capacity decisions. SWE remains the execution owner and is invoked only through the existing internal cron callback.
+
+The callback contract now has an explicit **Dispatch Callback Source**. Batch-managed parent or child jobs skip legacy external scheduler callbacks when the source marker is absent. A scheduling-service request carries `callback_source=dispatch_service`, `dispatch_intent_id`, `dispatch_batch_id`, and `dispatch_attempt`; SWE then starts the job with `CronManager.run_job(..., is_manual=False)` and writes those identifiers into execution metadata. SWE sends dispatch-managed completion feedback to the Scheduler service, which persists the execution record through Monitor storage, marks the dispatch intent as completed or failed, and immediately tries to refill available capacity.
+
+Dispatching and worker-capacity adjustment are separate loops. `dispatch_ready_once()` claims and hands off due work without changing capacity. `adjust_worker_capacity_if_due()` runs only after the configured interval and uses recently completed intent outcomes to increase, decrease, or hold effective workers. This avoids coupling every dispatch with a capacity recalculation while still allowing a completed task to trigger the next dispatch immediately.
+
+The first implementation keeps the existing cron definition and external scheduler infrastructure for non-batch jobs. Future work should move all due-time calculation, ordinary scheduled-job dispatch, and external scheduler replacement into the scheduling service, but that migration is intentionally out of scope for this change.
+
+## Implementation Notes
+
+The top-level `scheduler` service starts the scheduling loop from its own FastAPI lifespan when `SWE_CRON_DISPATCH_INTENTS_ENABLED` is enabled and the database is configured. Monitor no longer hosts this loop. The loop is intentionally small: scan due batch-managed parent jobs from Monitor's synced cron table, enqueue parent intents, dispatch available work, and run interval-gated capacity adjustment. External scheduler callbacks for batch-managed jobs still return a skipped response; they are compatibility noise, not the production trigger.
+
+`dispatched` is a handoff state, not a terminal state. The scheduling service keeps a reclaimable lock timestamp on dispatched intents and lets stale dispatched rows be claimed again after `SCHEDULER_CRON_DISPATCHED_STALE_SECONDS`, so an accepted SWE callback that never produces an execution record does not stall the batch forever.
+
+Dispatch-service callbacks must carry a valid positive `dispatch_intent_id`, a non-empty `dispatch_batch_id`, and a positive `dispatch_attempt`. Scheduler validates execution feedback against intent id, batch id, attempt count, job id, tenant id, and source id before updating the durable intent row. Scheduler also checks for an existing execution row by `(dispatch_intent_id, dispatch_batch_id, dispatch_attempt)` before inserting, so SWE retrying the feedback request does not duplicate execution history.

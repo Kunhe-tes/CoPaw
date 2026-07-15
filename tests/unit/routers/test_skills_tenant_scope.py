@@ -72,6 +72,14 @@ def _request(
     )
 
 
+class _NoopAsyncLock:
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, exc_type, exc, tb):
+        return None
+
+
 def _write_skill(skill_dir: Path, description: str) -> None:
     skill_dir.mkdir(parents=True, exist_ok=True)
     (skill_dir / "SKILL.md").write_text(
@@ -605,6 +613,170 @@ def test_download_pool_skill_to_workspaces_uses_effective_tenant_id(
             },
         ],
     }
+
+
+def test_download_pool_skill_to_workspaces_runs_transaction_off_loop(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    observed: dict[str, object] = {}
+
+    async def fake_to_thread(func, *args, **kwargs):
+        observed["func"] = func
+        observed["args"] = args
+        observed["kwargs"] = kwargs
+        return {"downloaded": [{"workspace_id": "default"}]}
+
+    def fake_tenant_working_dir(tenant_id=None):
+        return tmp_path / (
+            "default_ruice" if tenant_id == "default" else str(tenant_id)
+        )
+
+    monkeypatch.setattr(
+        skills_router,
+        "get_tenant_request_working_dir",
+        fake_tenant_working_dir,
+    )
+    monkeypatch.setattr(skills_router.asyncio, "to_thread", fake_to_thread)
+    monkeypatch.setattr(
+        skills_router,
+        "_POOL_SKILL_DOWNLOAD_LOCK",
+        _NoopAsyncLock(),
+    )
+
+    result = asyncio.run(
+        skills_router.download_pool_skill_to_workspaces(
+            _request("default", "ruice"),
+            skills_router.DownloadFromPoolRequest(
+                skill_name="guidance",
+                targets=[
+                    skills_router.PoolDownloadTarget(workspace_id="default"),
+                ],
+                overwrite=True,
+            ),
+        ),
+    )
+
+    assert result == {"downloaded": [{"workspace_id": "default"}]}
+    assert observed["func"] is skills_router._download_pool_skill_transaction
+    args = observed["args"]
+    assert isinstance(args, tuple)
+    assert args[0].skill_name == "guidance"
+    assert observed["kwargs"] == {
+        "tenant_id": "default_ruice",
+        "working_dir": tmp_path / "default_ruice",
+    }
+
+
+def test_download_pool_skill_to_workspaces_acquires_async_lock_before_thread(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    observed: list[str] = []
+
+    class FakeAsyncLock:
+        async def __aenter__(self):
+            observed.append("enter")
+
+        async def __aexit__(self, exc_type, exc, tb):
+            observed.append("exit")
+
+    async def fake_to_thread(func, *args, **kwargs):
+        observed.append("to_thread")
+        return {"downloaded": [{"workspace_id": "default"}]}
+
+    monkeypatch.setattr(
+        skills_router,
+        "get_tenant_request_working_dir",
+        lambda tenant_id=None: tmp_path / str(tenant_id),
+    )
+    monkeypatch.setattr(skills_router.asyncio, "to_thread", fake_to_thread)
+    monkeypatch.setattr(
+        skills_router,
+        "_POOL_SKILL_DOWNLOAD_LOCK",
+        FakeAsyncLock(),
+    )
+
+    result = asyncio.run(
+        skills_router.download_pool_skill_to_workspaces(
+            _request("default"),
+            skills_router.DownloadFromPoolRequest(
+                skill_name="guidance",
+                targets=[
+                    skills_router.PoolDownloadTarget(workspace_id="default"),
+                ],
+                overwrite=True,
+            ),
+        ),
+    )
+
+    assert result == {"downloaded": [{"workspace_id": "default"}]}
+    assert observed == ["enter", "to_thread", "exit"]
+
+
+def test_download_pool_skill_transaction_runs_synchronously(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    observed: list[str] = []
+
+    def fake_resolve_and_preflight(
+        body,
+        *,
+        tenant_id: str | None,
+        working_dir: Path,
+    ):
+        observed.append("preflight")
+
+        class FakeHubService:
+            def download_to_workspace(self, **_kwargs):
+                observed.append("download")
+                return {
+                    "success": True,
+                    "workspace_name": "Default",
+                    "name": body.skill_name,
+                }
+
+        return list(body.targets), FakeHubService()
+
+    monkeypatch.setattr(
+        skills_router,
+        "_resolve_and_preflight",
+        fake_resolve_and_preflight,
+    )
+    monkeypatch.setattr(
+        skills_router,
+        "_build_download_plan",
+        lambda targets, skill_name, tenant_id=None: [
+            {
+                "workspace_id": "default",
+                "workspace_dir": tmp_path / "workspace",
+                "target_name": None,
+                "snapshot": {"backup_dir": None},
+            },
+        ],
+    )
+
+    result = skills_router._download_pool_skill_transaction(
+        skills_router.DownloadFromPoolRequest(
+            skill_name="guidance",
+            targets=[skills_router.PoolDownloadTarget(workspace_id="default")],
+            overwrite=True,
+        ),
+        tenant_id="default_ruice",
+        working_dir=tmp_path / "default_ruice",
+    )
+
+    assert result == {
+        "downloaded": [
+            {
+                "workspace_id": "default",
+                "workspace_name": "Default",
+                "name": "guidance",
+            },
+        ],
+    }
+    assert observed == ["preflight", "download"]
 
 
 def test_broadcast_pool_skills_to_bootstrapped_tenant(

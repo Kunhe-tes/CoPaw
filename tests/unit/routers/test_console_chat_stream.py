@@ -199,6 +199,64 @@ def test_console_chat_stream_emits_keepalive_and_disables_proxy_buffering(
             )
 
 
+def test_console_chat_copies_b3_trace_id_to_native_meta(monkeypatch) -> None:
+    app = FastAPI()
+    app.include_router(console_router.router)
+
+    class _CapturingTaskTracker:
+        def __init__(self) -> None:
+            self.payload = None
+
+        async def attach_or_start(self, _run_key, payload, _stream_fn):
+            self.payload = payload
+            return object(), True
+
+        async def stream_from_queue(self, _queue, _run_key):
+            yield 'data: {"done": true}\n\n'
+
+    tracker = _CapturingTaskTracker()
+    workspace = SimpleNamespace(
+        channel_manager=_FakeChannelManager(),
+        chat_manager=_FakeChatManager(),
+        task_tracker=tracker,
+    )
+
+    async def _fake_get_agent_for_request(_request):
+        return workspace
+
+    monkeypatch.setattr(
+        console_router,
+        "get_agent_for_request",
+        _fake_get_agent_for_request,
+    )
+
+    client = TestClient(app)
+    payload = {
+        "input": [
+            {"role": "user", "content": [{"type": "text", "text": "hi"}]},
+        ],
+        "session_id": "session-1",
+        "user_id": "user-1",
+        "channel": "console",
+    }
+
+    with client.stream(
+        "POST",
+        "/console/chat",
+        headers={
+            "X-Source-Id": "src-a",
+            "X-B3-Traceid": "8267fd70bacf497704fec30eaa353979",
+        },
+        json=payload,
+    ) as response:
+        assert response.status_code == 200
+        next(response.iter_lines())
+
+    assert tracker.payload["meta"]["b3_trace_id"] == (
+        "8267fd70bacf497704fec30eaa353979"
+    )
+
+
 def test_generated_files_returns_chat_files_sorted_by_time(
     tmp_path,
     monkeypatch,

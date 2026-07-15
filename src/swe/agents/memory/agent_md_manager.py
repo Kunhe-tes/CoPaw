@@ -168,3 +168,6 @@ class AgentMdManager:
         file_path = self._resolve_md_path(self.memory_dir, md_name)
         with open(file_path, "a", encoding="utf-8") as f:
             f.write(content)
+
+
+AgentMDManager = AgentMdManager

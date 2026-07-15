@@ -855,10 +855,19 @@ html.dark-mode .swe-sender-content {
   /* #EAE9E7 */
 }
 
+.single-page-content.page-content {
+  height: 100vh;
+  overflow: hidden;
+}
+
 .page-container--with-sidebar > .page-content {
   border-left: 0;
   border-top-left-radius: 0;
   border-bottom-left-radius: 0;
+}
+
+.page-container--no-rightPadding{
+  padding-right: 0;
 }
 
 .table-container {

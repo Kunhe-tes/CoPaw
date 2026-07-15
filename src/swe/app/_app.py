@@ -49,7 +49,6 @@ from .channels.registry import register_custom_channel_routes
 from ..tracing import init_trace_manager, close_trace_manager
 from ..database import get_database_config
 from .service_heartbeat import start_service_heartbeat, stop_service_heartbeat
-from .crons.monitor_sync_client import get_monitor_sync_client
 from .crons.notification_worker import CronNotificationWorker
 from .runtime_diagnostic import RuntimeDiagnosticManager
 
@@ -224,10 +223,10 @@ def _get_positive_int_env(name: str, default: int) -> int:
 
 
 def _configure_async_thread_pools() -> None:
-    anyio_thread_tokens = _get_positive_int_env("ANYIO_THREAD_TOKENS", 64)
+    anyio_thread_tokens = _get_positive_int_env("ANYIO_THREAD_TOKENS", 32)
     asyncio_executor_workers = _get_positive_int_env(
         "ASYNCIO_EXECUTOR_WORKERS",
-        64,
+        32,
     )
 
     anyio_limiter = anyio.to_thread.current_default_thread_limiter()
@@ -252,8 +251,11 @@ async def _reset_scope_sensitive_runtime_state(app: FastAPI) -> None:
         logger.info(
             "Resetting existing MultiAgentManager before scope cutover...",
         )
-        await existing_manager.stop_all()
-        app.state.multi_agent_manager = None
+        try:
+            await existing_manager.stop_all()
+            app.state.multi_agent_manager = None
+        finally:
+            runtime_diagnostic_manager.set_workspace_metrics(None)
 
     from ..providers.provider_manager import ProviderManager
     from ..providers.rate_limiter import reset_rate_limiter
@@ -418,6 +420,22 @@ def _initialize_source_system_config(
                     lambda: tenant_workspace_pool.init_source_store
                 ),
                 multi_agent_manager=multi_agent_manager,
+                tenant_dir_resolver=(
+                    tenant_workspace_pool.get_tenant_workspace_dir
+                ),
+                continuous_governance_service_factory=(
+                    lambda: getattr(
+                        app.state,
+                        "continuous_governance_service",
+                        None,
+                    )
+                ),
+                source_config_resolver=(
+                    lambda source_id: source_config_service.resolve_config(
+                        source_id,
+                        force_refresh=True,
+                    )
+                ),
                 agent_id="default",
             )
         else:
@@ -613,15 +631,22 @@ async def _start_lifespan_background_services(
     multi_agent_manager: MultiAgentManager,
 ) -> None:
     """启动生命周期内常驻的后台服务。"""
+    from .crons.api import schedule_startup_dispatch_broadcast_children_processing
+
     await start_service_heartbeat()
-    get_monitor_sync_client().schedule_swe_cron_warmup(
-        start_delay_seconds=5.0,
+    # get_monitor_sync_client().schedule_swe_cron_warmup(
+    #     start_delay_seconds=5.0,
+    # )
+    schedule_startup_dispatch_broadcast_children_processing(
+        app,
+        multi_agent_manager,
     )
     cron_notification_worker = CronNotificationWorker(
         multi_agent_manager=multi_agent_manager,
     )
     app.state.cron_notification_worker = cron_notification_worker
     cron_notification_worker.start()
+    await multi_agent_manager.start_workspace_cleanup_loop()
 
     try:
         runtime_diagnostic_manager.set_workspace_metrics(
@@ -650,6 +675,25 @@ async def _shutdown_lifespan_resources(
         await runtime_diagnostic_manager.stop()
     except Exception as e:
         logger.warning("Error stopping runtime diagnostic manager: %s", e)
+    finally:
+        runtime_diagnostic_manager.set_workspace_metrics(None)
+
+    startup_dispatch_task = getattr(
+        app.state,
+        "cron_startup_dispatch_broadcast_children_task",
+        None,
+    )
+    if startup_dispatch_task is not None and not startup_dispatch_task.done():
+        startup_dispatch_task.cancel()
+        try:
+            await startup_dispatch_task
+        except asyncio.CancelledError:
+            pass
+        except Exception as e:
+            logger.warning(
+                "Error stopping startup dispatch child task: %s",
+                e,
+            )
 
     cron_notification_worker = getattr(
         app.state,
@@ -804,7 +848,11 @@ if CORS_ORIGINS:
         allow_credentials=True,
         allow_methods=["*"],
         allow_headers=["*"],
-        expose_headers=["Content-Disposition"],
+        expose_headers=[
+            "Content-Disposition",
+            "X-Swe-Msgid",
+            "X-Swe-Sessionid",
+        ],
     )
 
 app.add_middleware(AuthMiddleware)
@@ -952,7 +1000,7 @@ async def serve_user_static(
     """
     from ..constant import WORKING_DIR
 
-    logger.info(f"Serving static files from scope {scope_id}")
+    logger.debug(f"Serving static files from scope {scope_id}")
 
     static_dir = (
         WORKING_DIR / scope_id / "workspaces" / agent_id / "static"
@@ -961,6 +1009,7 @@ async def serve_user_static(
     # 防止通过 file_name 逃逸出当前 scope 的静态目录。
     try:
         target = (static_dir / file_name).resolve()
+        target.relative_to(static_dir)
     except ValueError as exc:
         # Path traversal attempt detected
         raise HTTPException(

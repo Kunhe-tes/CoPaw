@@ -5,6 +5,7 @@ Provides methods to sync job definitions and execution records
 from SWE to Monitor database.
 """
 
+import json
 import logging
 import os
 from datetime import datetime
@@ -81,6 +82,37 @@ def _to_beijing_naive(value: Optional[datetime]) -> Optional[datetime]:
     if value.tzinfo is None:
         return value
     return value.astimezone(_BEIJING_TZ).replace(tzinfo=None)
+
+
+def _positive_int(value: object, default: Optional[int] = None) -> Optional[int]:
+    try:
+        parsed = int(value)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return default
+    return parsed if parsed > 0 else default
+
+
+def _extract_dispatch_identity_columns(
+    raw_meta: Optional[str],
+) -> Tuple[Optional[int], str, Optional[int]]:
+    if not raw_meta:
+        return None, "", None
+    try:
+        meta = json.loads(raw_meta)
+    except json.JSONDecodeError:
+        return None, "", None
+    if not isinstance(meta, dict):
+        return None, "", None
+    dispatch_meta = meta.get("cron_dispatch")
+    if not isinstance(dispatch_meta, dict):
+        return None, "", None
+    intent_id = _positive_int(dispatch_meta.get("intent_id"))
+    batch_id = str(dispatch_meta.get("batch_id") or "").strip()
+    dispatch_attempt = _positive_int(
+        dispatch_meta.get("dispatch_attempt"),
+        1,
+    )
+    return intent_id, batch_id, dispatch_attempt
 
 
 def _extract_bbk_id_from_path_name(path_name: Optional[str]) -> Optional[str]:
@@ -476,54 +508,65 @@ class SyncService:
             request.output_preview,
             OUTPUT_PREVIEW_MAX_LENGTH,
         )
+        (
+            dispatch_intent_id,
+            dispatch_batch_id,
+            dispatch_attempt,
+        ) = _extract_dispatch_identity_columns(request.meta)
         meta = _truncate_string(request.meta, META_MAX_LENGTH)
 
-        await db.execute(
-            """
-            INSERT INTO swe_cron_executions (
-                job_id, job_name, tenant_id,
-                scheduled_time, actual_time, end_time, duration_ms,
-                status, error_message,
-                instance_id, executor_leader, is_manual,
-                trace_id, session_id,
-                input_snapshot, output_preview, meta,
-                notification_status, notification_due_at, notification_timezone,
-                is_read, read_at,
-                created_at
-            ) VALUES (
-                %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s
-            )
-            """,
-            (
-                request.job_id,
-                request.job_name,
-                request.tenant_id,
-                request.scheduled_time,
-                request.actual_time,
-                request.end_time,
-                request.duration_ms,
-                request.status,
-                error_message,
-                request.instance_id,
-                request.executor_leader,
-                request.is_manual,
-                request.trace_id,
-                request.session_id,
-                input_snapshot,
-                output_preview,
-                meta,
-                request.notification_status,
-                _to_beijing_naive(request.notification_due_at),
-                request.notification_timezone,
-                request.is_read,
-                request.read_at,
-                now,
-            ),
-        )
-
-        # Get the inserted ID
-        result = await db.fetch_one("SELECT LAST_INSERT_ID() as id")
-        execution_id = result.get("id") if result else None
+        async with db.acquire() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute(
+                    """
+                    INSERT INTO swe_cron_executions (
+                        job_id, job_name, tenant_id,
+                        scheduled_time, actual_time, end_time, duration_ms,
+                        status, error_message,
+                        instance_id, executor_leader, is_manual,
+                        trace_id, session_id,
+                        input_snapshot, output_preview, meta,
+                        dispatch_intent_id, dispatch_batch_id,
+                        dispatch_attempt,
+                        notification_status, notification_due_at, notification_timezone,
+                        is_read, read_at,
+                        created_at
+                    ) VALUES (
+                        %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
+                        %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
+                        %s, %s
+                    )
+                    """,
+                    (
+                        request.job_id,
+                        request.job_name,
+                        request.tenant_id,
+                        request.scheduled_time,
+                        request.actual_time,
+                        request.end_time,
+                        request.duration_ms,
+                        request.status,
+                        error_message,
+                        request.instance_id,
+                        request.executor_leader,
+                        request.is_manual,
+                        request.trace_id,
+                        request.session_id,
+                        input_snapshot,
+                        output_preview,
+                        meta,
+                        dispatch_intent_id,
+                        dispatch_batch_id,
+                        dispatch_attempt,
+                        request.notification_status,
+                        _to_beijing_naive(request.notification_due_at),
+                        request.notification_timezone,
+                        request.is_read,
+                        _to_beijing_naive(request.read_at),
+                        now,
+                    ),
+                )
+                execution_id = getattr(cur, "lastrowid", None)
 
         logger.info(
             "Recorded execution: job_id=%s execution_id=%s status=%s",
@@ -531,8 +574,41 @@ class SyncService:
             execution_id,
             request.status,
         )
-
         return execution_id
+
+    async def find_execution_by_dispatch_identity(
+        self,
+        *,
+        intent_id: int,
+        batch_id: str,
+        dispatch_attempt: int,
+    ) -> Optional[int]:
+        """Find an existing execution row for a scheduler dispatch callback."""
+        if intent_id <= 0 or not batch_id or dispatch_attempt <= 0:
+            return None
+        db = get_db_connection()
+        row = await db.fetch_one(
+            """
+            SELECT id
+            FROM swe_cron_executions
+            WHERE dispatch_intent_id = %s
+              AND dispatch_batch_id = %s
+              AND dispatch_attempt = %s
+            ORDER BY id DESC
+            LIMIT 1
+            """,
+            (intent_id, batch_id, dispatch_attempt),
+        )
+        if not row:
+            return None
+        if isinstance(row, dict):
+            raw_id = row.get("id")
+        else:
+            raw_id = row[0]
+        try:
+            return int(raw_id)
+        except (TypeError, ValueError):
+            return None
 
 
 # Global sync service instance

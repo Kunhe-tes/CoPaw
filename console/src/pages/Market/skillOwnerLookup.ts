@@ -38,7 +38,7 @@ function normalizeSkillName(value: string | null | undefined): string {
 }
 
 function resolveInstalledVersion(skill: MySkill): string | null {
-  return skill.received_version || skill.version || null;
+  return skill.version || skill.received_version || null;
 }
 
 function needsUpdate(

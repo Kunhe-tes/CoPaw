@@ -411,15 +411,47 @@ class Workspace:
             f"(final={final}, stop_reused={stop_reused})",
         )
 
+        service_refs = (
+            dict(getattr(self._service_manager, "services", {}))
+            if final
+            else {}
+        )
+
         # Stop all services via ServiceManager (handles reuse automatically)
         await self._service_manager.stop_all(
             final=final,
             stop_reused=stop_reused,
         )
 
+        if final:
+            self._release_final_service_references(service_refs)
+
         self._started = False
         self._starting = False
         logger.info(f"Workspace stopped: {self.agent_id}")
+
+    def _release_final_service_references(self, services: dict) -> None:
+        """Drop reverse references held by services after final shutdown."""
+        runner = services.get("runner")
+        if runner is not None:
+            if hasattr(runner, "set_workspace"):
+                runner.set_workspace(None)
+            if hasattr(runner, "set_chat_manager"):
+                runner.set_chat_manager(None)
+            if hasattr(runner, "memory_manager"):
+                runner.memory_manager = None
+            if hasattr(runner, "_manager"):
+                runner._manager = None  # pylint: disable=protected-access
+
+        channel_manager = services.get("channel_manager")
+        if channel_manager is not None and hasattr(
+            channel_manager,
+            "set_workspace",
+        ):
+            channel_manager.set_workspace(None)
+
+        self._manager = None
+        self._config = None
 
     def __repr__(self) -> str:
         """String representation of workspace."""

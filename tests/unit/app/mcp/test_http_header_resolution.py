@@ -160,6 +160,8 @@ async def test_runner_http_client_injects_runtime_scope_headers_and_dedupes_rese
                 "X-Swe-Trace-Id": "passthrough-trace",
                 "TraceId": "passthrough-compact-trace",
                 "Authorization": "Bearer test-token",
+                "X-B3-Traceid": "8267fd70bacf497704fec30eaa353979",
+                "X-B3-Spanid": "32befd146889a61a",
             },
             trace_id="trace-1",
         )
@@ -167,6 +169,8 @@ async def test_runner_http_client_injects_runtime_scope_headers_and_dedupes_rese
     assert captured["stateful_client_kwargs"]["headers"] == {
         "X-Static": "static",
         "Authorization": "Bearer test-token",
+        "X-B3-Traceid": "8267fd70bacf497704fec30eaa353979",
+        "X-B3-Spanid": "32befd146889a61a",
         "x-swe-tenant-id": "tenant-a",
         "tenantid": "tenant-a",
         "x-swe-source-id": "source-a",

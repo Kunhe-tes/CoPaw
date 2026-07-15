@@ -63,11 +63,11 @@ class TestMinimalStartup:
 
         assert hasattr(app_module, "ensure_default_agent_exists")
 
-    def test_async_thread_pool_config_defaults_to_64(
+    def test_async_thread_pool_config_defaults_to_32(
         self,
         monkeypatch,
     ):
-        """Startup thread pool tuning uses 64 workers by default."""
+        """Startup thread pool tuning uses conservative workers by default."""
         import swe.app._app as app_module
 
         assert hasattr(app_module, "_configure_async_thread_pools")
@@ -101,8 +101,8 @@ class TestMinimalStartup:
 
         app_module._configure_async_thread_pools()
 
-        assert limiter.total_tokens == 64
-        assert executor_workers == [64]
+        assert limiter.total_tokens == 32
+        assert executor_workers == [32]
         fake_loop.set_default_executor.assert_called_once()
 
     def test_async_thread_pool_config_uses_env_overrides(

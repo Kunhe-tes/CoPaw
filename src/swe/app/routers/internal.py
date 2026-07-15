@@ -14,6 +14,7 @@ from fastapi import APIRouter, Body, File, Form, Header, HTTPException, Request
 from fastapi import UploadFile
 from pydantic import BaseModel, Field
 
+from ..b3_headers import build_b3_dispatch_meta
 from ..identity_resolver import resolve_user_identity
 from ...config.context import (
     is_valid_identity_value,
@@ -27,6 +28,11 @@ from ...config.scope_conversion import (
 )
 from ...config.utils import list_all_tenant_ids
 from ...constant import WORKING_DIR
+from ..crons.manager import (
+    broadcast_dispatch_intents_enabled,
+    dispatch_intents_runtime_enabled,
+    is_batch_dispatch_managed_broadcast_child,
+)
 from ..workspace.tenant_initializer import TenantInitializer
 
 router = APIRouter(prefix="/internal", tags=["internal"])
@@ -43,6 +49,7 @@ _ASSET_NOT_FOUND_DETAIL = "Asset file not found"
 _ASSET_INVALID_UTF8_DETAIL = "Asset file is not valid UTF-8"
 _CONTENT_INVALID_UTF8_DETAIL = "Content is not valid UTF-8"
 _INVALID_PREVIEW_TARGET_DETAIL = "Invalid preview target"
+_DISPATCH_CALLBACK_SOURCE = "dispatch_service"
 _PREVIEW_PLACEHOLDER_HTML = """<!doctype html>
 <html lang="zh-CN">
 <head>
@@ -136,6 +143,98 @@ def _list_runtime_tenant_ids() -> list[str]:
     ]
 
 
+async def _get_cron_job_for_dispatch(mgr: Any, job_id: str) -> Any | None:
+    getter = getattr(mgr, "get_job", None)
+    if getter is None:
+        return None
+    return await getter(job_id)
+
+
+def _job_dispatch_intents_enabled(job: Any | None) -> bool:
+    if not dispatch_intents_runtime_enabled():
+        return False
+    if is_batch_dispatch_managed_broadcast_child(job):
+        return False
+    return broadcast_dispatch_intents_enabled(job)
+
+
+def _is_dispatch_service_callback(params: dict[str, Any]) -> bool:
+    return str(params.get("callback_source") or "").strip() == (
+        _DISPATCH_CALLBACK_SOURCE
+    )
+
+
+def _build_dispatch_callback_meta(
+    params: dict[str, Any],
+) -> dict[str, Any] | None:
+    if not _is_dispatch_service_callback(params):
+        return None
+    intent_id, batch_id, dispatch_attempt = _require_dispatch_callback_ids(
+        params,
+    )
+    return {
+        "source": _DISPATCH_CALLBACK_SOURCE,
+        "intent_id": intent_id,
+        "batch_id": batch_id,
+        "dispatch_attempt": dispatch_attempt,
+        **_dispatch_callback_context(params),
+    }
+
+
+def _require_dispatch_callback_ids(
+    params: dict[str, Any],
+) -> tuple[int, str, int]:
+    intent_id = _safe_int(
+        params.get("dispatch_intent_id") or params.get("intent_id"),
+    )
+    batch_id = str(
+        params.get("dispatch_batch_id") or params.get("batch_id") or "",
+    )
+    dispatch_attempt = _safe_int(params.get("dispatch_attempt", 1))
+    _validate_dispatch_callback_ids(intent_id, batch_id, dispatch_attempt)
+    return intent_id, batch_id, dispatch_attempt
+
+
+def _safe_int(value: Any) -> int:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return 0
+
+
+def _validate_dispatch_callback_ids(
+    intent_id: int,
+    batch_id: str,
+    dispatch_attempt: int,
+) -> None:
+    if not intent_id or not batch_id.strip():
+        raise HTTPException(
+            status_code=400,
+            detail="dispatch_service callback requires dispatch_intent_id and dispatch_batch_id",
+        )
+    if dispatch_attempt <= 0:
+        raise HTTPException(
+            status_code=400,
+            detail="dispatch_service callback requires positive dispatch_attempt",
+        )
+
+
+def _dispatch_callback_context(params: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "tenant_id": str(params.get("tenant_id") or ""),
+        "source_id": str(params.get("source_id") or ""),
+        "scope_id": str(params.get("scope_id") or params.get("scopeId") or ""),
+        "from_id": str(params.get("from_id") or params.get("fromId") or ""),
+        "agent_id": str(params.get("agent_id") or _STATIC_AGENT_ID),
+        "job_id": str(params.get("job_id") or ""),
+        "parent_scheduled_fire_at": str(
+            params.get("parent_scheduled_fire_at") or "",
+        ),
+        "provider_id": str(params.get("provider_id") or "default"),
+        "model_id": str(params.get("model_id") or "default"),
+    }
+
+
 class InternalErrorResponse(BaseModel):
     detail: str = Field(..., description="Error detail message.")
 
@@ -212,6 +311,10 @@ class InternalBatchInitializeTenantsRequest(BaseModel):
 
     tenant_ids: str = Field(..., description="逗号分隔的租户 ID 字符串")
     source_id: str = Field(..., min_length=1, description="来源标识")
+    enable_bootstrap_chat: bool = Field(
+        default=True,
+        description="是否为新租户保留 BOOTSTRAP.md 初始化聊天",
+    )
     fail_fast: bool = Field(
         default=False,
         description="单个租户失败时是否立即终止后续处理",
@@ -777,6 +880,7 @@ async def internal_batch_initialize_tenants(
                 source_id=payload.source_id,
                 tenant_name=resolved_identity.user_name,
                 bbk_id=resolved_identity.bbk_id,
+                enable_bootstrap_chat=payload.enable_bootstrap_chat,
             )
         except Exception as exc:
             fail_count += 1
@@ -1071,6 +1175,8 @@ async def refresh_external_cron_jobs(request: Request):
 
 
 @router.post("/cron/callback")
+# Existing endpoint handles legacy and jobParam callback shapes in one handler.
+# pylint: disable=too-many-statements
 async def internal_cron_callback(
     request: Request,
     x_internal_token: Optional[str] = Header(
@@ -1140,6 +1246,32 @@ async def internal_cron_callback(
                 "Source task session cleanup result: %s",
                 cleanup_result,
             )
+        elif task_type == "archive_maintenance":
+            if not source_id:
+                raise HTTPException(
+                    status_code=400,
+                    detail=(
+                        "source_id required for "
+                        "task_type=archive_maintenance"
+                    ),
+                )
+            source_scheduler = getattr(
+                request.app.state,
+                "source_system_task_scheduler",
+                None,
+            )
+            if source_scheduler is None:
+                raise HTTPException(
+                    status_code=503,
+                    detail="Source system task scheduler not available",
+                )
+            archive_result = await source_scheduler.run_archive_maintenance(
+                source_id=source_id,
+            )
+            logger.info(
+                "Source archive maintenance result: %s",
+                archive_result,
+            )
         else:
             manager = getattr(request.app.state, "multi_agent_manager", None)
             if manager is None:
@@ -1168,11 +1300,51 @@ async def internal_cron_callback(
                         detail="job_id required for task_type=job",
                     )
                 # 调度回调触发的是自动执行，不应走手动执行分支。
-                await mgr.run_job(
-                    job_id,
-                    is_manual=False,
-                    source_id=source_id,
+                job = await _get_cron_job_for_dispatch(mgr, job_id)
+                is_dispatch_service_callback = _is_dispatch_service_callback(
+                    params,
                 )
+                if (
+                    is_batch_dispatch_managed_broadcast_child(job)
+                    and not is_dispatch_service_callback
+                ):
+                    logger.info(
+                        "Callback skipped for batch-managed broadcast child: tenant=%s agent=%s job=%s",
+                        tenant_id,
+                        agent_id,
+                        job_id,
+                    )
+                    return {
+                        "status": "ok",
+                        "task_type": task_type,
+                        "skipped": "batch_managed_child",
+                    }
+                if (
+                    _job_dispatch_intents_enabled(job)
+                    and not is_dispatch_service_callback
+                ):
+                    logger.info(
+                        "Callback skipped for batch-managed broadcast parent: tenant=%s agent=%s job=%s",
+                        tenant_id,
+                        agent_id,
+                        job_id,
+                    )
+                    return {
+                        "status": "ok",
+                        "task_type": task_type,
+                        "skipped": "batch_managed_external_callback",
+                    }
+                dispatch_meta = _build_dispatch_callback_meta(params) or {}
+                dispatch_meta.update(
+                    build_b3_dispatch_meta(getattr(request, "headers", {})),
+                )
+                run_kwargs = {
+                    "is_manual": False,
+                    "source_id": source_id,
+                }
+                if dispatch_meta:
+                    run_kwargs["dispatch_meta"] = dispatch_meta
+                await mgr.run_job(job_id, **run_kwargs)
         logger.info(
             "Callback dispatched: type=%s tenant=%s agent=%s job=%s",
             task_type,

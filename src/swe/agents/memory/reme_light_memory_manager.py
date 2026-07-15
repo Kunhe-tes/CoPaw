@@ -99,10 +99,49 @@ def _install_chromadb_compat_shim() -> None:
     sys.modules["chromadb.config"] = chromadb_config_module
 
 
+def _install_reme_file_logging_suppression() -> None:
+    """Prevent ReMe from creating cwd/logs/<timestamp>.log files."""
+    try:
+        from loguru import logger as reme_logger
+    except Exception as exc:
+        logger.debug("Unable to patch ReMe file logging: %s", exc)
+        return
+
+    reme_application = sys.modules.get("reme.core.application")
+    reme_utils = sys.modules.get("reme.core.utils")
+    reme_logger_utils = sys.modules.get("reme.core.utils.logger_utils")
+    if not reme_application or not reme_utils or not reme_logger_utils:
+        logger.debug("ReMe logger modules are not loaded; skip file log patch")
+        return
+
+    def init_logger_without_file_logging(
+        log_dir: str = "logs",  # pylint: disable=unused-argument
+        level: str = "INFO",
+        log_to_console: bool = True,
+    ) -> None:
+        reme_logger.remove()
+        if log_to_console:
+            reme_logger.add(
+                sink=sys.stdout,
+                level=level,
+                format=(
+                    "{time:YYYY-MM-DD HH:mm:ss} | {level} | "
+                    "{file}:{line} | {function} | {message}"
+                ),
+                colorize=True,
+            )
+
+    reme_logger_utils.init_logger = init_logger_without_file_logging
+    reme_utils.init_logger = init_logger_without_file_logging
+    reme_application.init_logger = init_logger_without_file_logging
+
+
 def _import_reme_light(memory_backend: str):
     """Import ReMeLight with a local-backend retry for chromadb failures."""
     try:
-        return importlib.import_module("reme.reme_light").ReMeLight
+        reme_light = importlib.import_module("reme.reme_light").ReMeLight
+        _install_reme_file_logging_suppression()
+        return reme_light
     except Exception as exc:
         if (
             memory_backend == "chroma"
@@ -119,7 +158,9 @@ def _import_reme_light(memory_backend: str):
         )
         _clear_cached_reme_modules()
         _install_chromadb_compat_shim()
-        return importlib.import_module("reme.reme_light").ReMeLight
+        reme_light = importlib.import_module("reme.reme_light").ReMeLight
+        _install_reme_file_logging_suppression()
+        return reme_light
 
 
 class ReMeLightMemoryManager(BaseMemoryManager):
