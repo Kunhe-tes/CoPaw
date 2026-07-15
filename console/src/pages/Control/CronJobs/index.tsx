@@ -65,6 +65,7 @@ function CronJobsPage() {
   const {
     jobs,
     loading,
+    fetchJobs,
     createJob,
     updateJob,
     deleteJob,
@@ -244,6 +245,14 @@ function CronJobsPage() {
       );
       setBroadcastTask(refreshedTask);
       setBroadcastResults(refreshedTask.results);
+      if (refreshedTask.status !== "running") {
+        await fetchJobs();
+        const refreshedJob = await api.getCronJob(broadcastingJob.id);
+        setBroadcastingJob(refreshedJob.spec);
+        setBroadcastDispatchMode(
+          isBatchDispatchEnabled(refreshedJob.spec) ? "batch" : "normal",
+        );
+      }
     } catch (error) {
       console.error("Failed to refresh cron broadcast task", error);
       message.error("刷新分发进度失败");
@@ -296,28 +305,22 @@ function CronJobsPage() {
     setBroadcastTask(null);
     setBroadcastResults([]);
     try {
-      let dispatchJob = broadcastingJob;
-      if (
-        dispatchModeChanged ||
-        (hasBroadcastTargets && shouldUseBatchDispatch)
-      ) {
+      if (!hasBroadcastTargets) {
         const syncedJob = await setBatchDispatch(
-          dispatchJob,
+          broadcastingJob,
           shouldUseBatchDispatch,
           { offset_window_hours: broadcastOffsetWindowHours },
         );
         if (!syncedJob) {
           return;
         }
-        dispatchJob = syncedJob;
         setBroadcastingJob(syncedJob);
-      }
-      if (!hasBroadcastTargets) {
         handleBroadcastCancel();
         return;
       }
-      const res = await api.broadcastCronJob(dispatchJob.id, targets, {
+      const res = await api.broadcastCronJob(broadcastingJob.id, targets, {
         enable_offset: broadcastOffsetEnabled,
+        enable_batch_dispatch: shouldUseBatchDispatch,
         offset_window_hours: broadcastOffsetWindowHours,
       });
       setBroadcastTask(res);

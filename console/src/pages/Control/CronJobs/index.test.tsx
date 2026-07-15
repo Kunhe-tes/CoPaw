@@ -33,10 +33,12 @@ const mocks = vi.hoisted(() => {
     getUserTimezone: vi.fn(),
     getCurrentCronBroadcastTask: vi.fn(),
     getCronBroadcastTask: vi.fn(),
+    getCronJob: vi.fn(),
     broadcastCronJob: vi.fn(),
     enableCronBatchDispatch: vi.fn(),
     disableCronBatchDispatch: vi.fn(),
     setBatchDispatch: vi.fn(),
+    fetchJobs: vi.fn(),
     message: {
       error: vi.fn(),
       info: vi.fn(),
@@ -51,6 +53,7 @@ vi.mock("../../../api", () => ({
     getUserTimezone: mocks.getUserTimezone,
     getCurrentCronBroadcastTask: mocks.getCurrentCronBroadcastTask,
     getCronBroadcastTask: mocks.getCronBroadcastTask,
+    getCronJob: mocks.getCronJob,
     broadcastCronJob: mocks.broadcastCronJob,
     enableCronBatchDispatch: mocks.enableCronBatchDispatch,
     disableCronBatchDispatch: mocks.disableCronBatchDispatch,
@@ -120,6 +123,7 @@ vi.mock("./components", () => ({
   useCronJobs: () => ({
     jobs: [mocks.job],
     loading: false,
+    fetchJobs: mocks.fetchJobs,
     createJob: vi.fn(),
     updateJob: vi.fn(),
     deleteJob: vi.fn(),
@@ -151,6 +155,7 @@ describe("CronJobsPage broadcast task refresh", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     mocks.getUserTimezone.mockResolvedValue({ timezone: "UTC" });
+    mocks.getCronJob.mockResolvedValue({ spec: mocks.job });
     mocks.job.meta = {};
     mocks.getCurrentCronBroadcastTask.mockResolvedValue({
       task: {
@@ -272,7 +277,7 @@ describe("CronJobsPage broadcast task refresh", () => {
     expect(mocks.broadcastCronJob).toHaveBeenCalledTimes(1);
   }, 30000);
 
-  it("applies batch dispatch with the shared offset window before broadcasting", async () => {
+  it("requests batch dispatch after broadcasting with the shared offset window", async () => {
     mocks.getCurrentCronBroadcastTask.mockResolvedValue({ task: null });
     mocks.broadcastCronJob.mockResolvedValue({
       task_id: "task-completed",
@@ -314,9 +319,6 @@ describe("CronJobsPage broadcast task refresh", () => {
     fireEvent.click(confirmButton);
 
     await waitFor(() => {
-      expect(mocks.enableCronBatchDispatch).toHaveBeenCalledWith("job-source", {
-        offset_window_hours: 2,
-      });
       expect(mocks.broadcastCronJob).toHaveBeenCalledWith(
         "job-source",
         [
@@ -328,16 +330,15 @@ describe("CronJobsPage broadcast task refresh", () => {
         ],
         {
           enable_offset: true,
+          enable_batch_dispatch: true,
           offset_window_hours: 2,
         },
       );
     });
-    expect(
-      mocks.enableCronBatchDispatch.mock.invocationCallOrder[0],
-    ).toBeLessThan(mocks.broadcastCronJob.mock.invocationCallOrder[0]);
+    expect(mocks.enableCronBatchDispatch).not.toHaveBeenCalled();
   }, 30000);
 
-  it("applies normal dispatch with the shared offset window before broadcasting", async () => {
+  it("requests normal dispatch after broadcasting with the shared offset window", async () => {
     mocks.job.meta = {
       broadcast_dispatch_intents_enabled: true,
       batch_dispatch_offset_window_hours: 3,
@@ -380,7 +381,6 @@ describe("CronJobsPage broadcast task refresh", () => {
     fireEvent.click(confirmButton);
 
     await waitFor(() => {
-      expect(mocks.disableCronBatchDispatch).toHaveBeenCalledWith("job-source");
       expect(mocks.broadcastCronJob).toHaveBeenCalledWith(
         "job-source",
         [
@@ -392,13 +392,12 @@ describe("CronJobsPage broadcast task refresh", () => {
         ],
         {
           enable_offset: true,
+          enable_batch_dispatch: false,
           offset_window_hours: 3,
         },
       );
     });
-    expect(
-      mocks.disableCronBatchDispatch.mock.invocationCallOrder[0],
-    ).toBeLessThan(mocks.broadcastCronJob.mock.invocationCallOrder[0]);
+    expect(mocks.disableCronBatchDispatch).not.toHaveBeenCalled();
   }, 30000);
 
   it("enables batch dispatch without broadcasting when no tenant is selected", async () => {

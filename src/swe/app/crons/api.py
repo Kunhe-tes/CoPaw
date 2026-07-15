@@ -5,6 +5,7 @@ import asyncio
 import logging
 import os
 import uuid
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
@@ -127,7 +128,7 @@ def _is_batch_dispatch_managed_broadcast_child(job: Any | None) -> bool:
         return False
     return bool(
         meta.get(BROADCAST_SOURCE_JOB_ID_META_KEY)
-        and _broadcast_dispatch_intents_enabled(job)
+        and _broadcast_dispatch_intents_enabled(job),
     )
 
 
@@ -164,6 +165,7 @@ class CronBroadcastRequest(BaseModel):
     target_tenant_ids: list[str] = Field(default_factory=list)
     targets: list[CronBroadcastTarget] = Field(default_factory=list)
     enable_offset: bool = True
+    enable_batch_dispatch: bool | None = None
     offset_window_hours: int = Field(
         default=DEFAULT_BROADCAST_OFFSET_WINDOW_HOURS,
         ge=MIN_BROADCAST_OFFSET_WINDOW_HOURS,
@@ -511,7 +513,9 @@ def _broadcast_children_task_key(parts: dict[str, str]) -> str:
     )
 
 
-def _get_broadcast_children_store(request: Request) -> CronBroadcastChildrenStore:
+def _get_broadcast_children_store(
+    request: Request,
+) -> CronBroadcastChildrenStore:
     store = getattr(
         request.app.state,
         "cron_broadcast_children_store",
@@ -537,7 +541,9 @@ def _get_broadcast_children_tasks(
     return tasks
 
 
-def _get_dispatch_broadcast_children_tasks(app: Any) -> dict[str, asyncio.Task]:
+def _get_dispatch_broadcast_children_tasks(
+    app: Any,
+) -> dict[str, asyncio.Task]:
     tasks = getattr(
         app.state,
         "cron_dispatch_broadcast_children_tasks",
@@ -591,7 +597,9 @@ def _should_process_dispatch_broadcast_children(
         return False
     if _is_batch_dispatch_managed_broadcast_child(source_job):
         return False
-    return existing is None or not _broadcast_dispatch_intents_enabled(existing)
+    return existing is None or not _broadcast_dispatch_intents_enabled(
+        existing,
+    )
 
 
 def _should_rollback_dispatch_broadcast_children(
@@ -605,10 +613,9 @@ def _should_rollback_dispatch_broadcast_children(
         return False
     if _is_batch_dispatch_managed_broadcast_child(source_job):
         return False
-    return (
-        _broadcast_dispatch_intents_enabled(existing)
-        and not _broadcast_dispatch_intents_enabled(source_job)
-    )
+    return _broadcast_dispatch_intents_enabled(
+        existing,
+    ) and not _broadcast_dispatch_intents_enabled(source_job)
 
 
 async def _schedule_dispatch_broadcast_children_processing_after_save(
@@ -688,7 +695,7 @@ async def _process_dispatch_broadcast_children(
     source_id: str | None,
     reason: str,
     enable: bool = True,
-) -> None:
+) -> bool:
     del reason
     resolved_source_id = source_id or source_job.source_id
     parts = _dispatch_broadcast_children_snapshot_parts(
@@ -714,7 +721,7 @@ async def _process_dispatch_broadcast_children(
                 tenant_count=0,
                 failure_summary=str(exc),
             )
-        return
+        return False
     if store is not None:
         await store.mark_running(
             **parts,
@@ -724,17 +731,23 @@ async def _process_dispatch_broadcast_children(
         source_job=source_job,
         offsets=[],
         multi_agent_manager=getattr(app.state, "multi_agent_manager", None),
-        tenant_workspace_pool=getattr(app.state, "tenant_workspace_pool", None),
+        tenant_workspace_pool=getattr(
+            app.state,
+            "tenant_workspace_pool",
+            None,
+        ),
         agent_id=agent_id or "default",
         source_id=resolved_source_id,
         timezone_name=source_job.schedule.timezone or "UTC",
         target_identity_by_tenant={},
     )
     try:
-        items, failed_tenants = await _process_dispatch_broadcast_children_for_tenants(
-            context,
-            tenant_ids,
-            enable=enable,
+        items, failed_tenants = (
+            await _process_dispatch_broadcast_children_for_tenants(
+                context,
+                tenant_ids,
+                enable=enable,
+            )
         )
         if failed_tenants:
             if store is not None:
@@ -745,7 +758,7 @@ async def _process_dispatch_broadcast_children(
                         "some broadcast children failed to process"
                     ),
                 )
-            return
+            return False
         if store is not None:
             await store.record_completed(
                 **parts,
@@ -754,6 +767,7 @@ async def _process_dispatch_broadcast_children(
                 failed_tenants=0,
                 failure_summary=None,
             )
+        return True
     except Exception as exc:  # pylint: disable=broad-except
         logger.warning(
             "Failed to process dispatch broadcast children: job=%s",
@@ -766,6 +780,7 @@ async def _process_dispatch_broadcast_children(
                 tenant_count=len(tenant_ids),
                 failure_summary=str(exc),
             )
+        return False
 
 
 async def _process_dispatch_broadcast_children_for_tenant(
@@ -851,7 +866,9 @@ async def _process_dispatch_broadcast_children_for_tenants(
                 enable=enable,
             )
 
-    batches = await asyncio.gather(*[_run(tenant_id) for tenant_id in tenant_ids])
+    batches = await asyncio.gather(
+        *[_run(tenant_id) for tenant_id in tenant_ids],
+    )
     items: list[CronBroadcastChildItem] = []
     failed = 0
     for batch_items, batch_failed in batches:
@@ -999,10 +1016,14 @@ async def _schedule_broadcast_children_refresh(
         tenant_count=len(tenant_ids),
     )
     snapshot = await store.get_snapshot(**parts)
-    response = _snapshot_to_response(snapshot) if snapshot else (
-        CronBroadcastChildrenResponse(
-            status="running",
-            tenant_count=len(tenant_ids),
+    response = (
+        _snapshot_to_response(snapshot)
+        if snapshot
+        else (
+            CronBroadcastChildrenResponse(
+                status="running",
+                tenant_count=len(tenant_ids),
+            )
         )
     )
     if not claimed:
@@ -1036,10 +1057,7 @@ async def _refresh_broadcast_children_snapshot(
         )
         await store.record_completed(
             **parts,
-            items=[
-                item.model_dump(mode="json")
-                for item in items
-            ],
+            items=[item.model_dump(mode="json") for item in items],
             tenant_count=len(tenant_ids),
             failed_tenants=0,
         )
@@ -1131,6 +1149,7 @@ async def _schedule_broadcast_task(
     source_job: CronJobSpec,
     context: _BroadcastContext,
     tenant_ids: list[str],
+    post_broadcast: Callable[[], Awaitable[None]] | None = None,
 ) -> tuple[CronBroadcastTaskSnapshot, bool]:
     store = _get_broadcast_task_store(request)
     tasks = _get_broadcast_tasks(request)
@@ -1146,7 +1165,13 @@ async def _schedule_broadcast_task(
         return snapshot, True
 
     task = asyncio.create_task(
-        _run_broadcast_task(store, snapshot.task_id, context, tenant_ids),
+        _run_broadcast_task(
+            store,
+            snapshot.task_id,
+            context,
+            tenant_ids,
+            post_broadcast=post_broadcast,
+        ),
         name=f"cron-broadcast-{source_job.id}",
     )
     tasks[snapshot.task_id] = task
@@ -1159,6 +1184,8 @@ async def _run_broadcast_task(
     task_id: str,
     context: _BroadcastContext,
     tenant_ids: list[str],
+    *,
+    post_broadcast: Callable[[], Awaitable[None]] | None = None,
 ) -> None:
     semaphore = asyncio.Semaphore(_get_cron_broadcast_concurrency())
 
@@ -1178,9 +1205,137 @@ async def _run_broadcast_task(
                 for tenant_id, offset in zip(tenant_ids, context.offsets)
             ],
         )
+        if post_broadcast is not None:
+            await post_broadcast()
         await store.finish_task(task_id)
     except Exception as exc:  # pylint: disable=broad-except
         await store.record_task_failed(task_id, str(exc))
+
+
+async def _synchronize_dispatch_broadcast_children(
+    app: Any,
+    source_job: CronJobSpec,
+    *,
+    agent_id: str,
+    source_id: str | None,
+    reason: str,
+    enable: bool,
+) -> None:
+    synchronized = await _process_dispatch_broadcast_children(
+        app,
+        source_job,
+        agent_id=agent_id,
+        source_id=source_id,
+        reason=reason,
+        enable=enable,
+    )
+    if not synchronized:
+        raise RuntimeError(
+            "failed to synchronize broadcast child dispatch mode",
+        )
+
+
+async def _apply_batch_dispatch_after_broadcast(
+    app: Any,
+    source_job: CronJobSpec,
+    mgr: CronManager,
+    *,
+    agent_id: str,
+    source_id: str | None,
+    enable: bool,
+    offset_window_hours: int,
+) -> None:
+    current = await mgr.get_job(source_job.id) or source_job
+    if enable:
+        updated = await mgr.enable_batch_dispatch_for_parent(
+            current.id,
+            offset_window_hours=offset_window_hours,
+        )
+    elif _broadcast_dispatch_intents_enabled(current):
+        updated = await mgr.disable_batch_dispatch_for_parent(current.id)
+    else:
+        updated = current
+    await _synchronize_dispatch_broadcast_children(
+        app,
+        updated,
+        agent_id=agent_id,
+        source_id=source_id or updated.source_id,
+        reason="broadcast_then_update_dispatch_mode",
+        enable=enable,
+    )
+
+
+async def _claim_dispatch_mode_operation(
+    request: Request,
+    source_job: CronJobSpec,
+) -> tuple[CronBroadcastTaskStore, CronBroadcastTaskSnapshot]:
+    store = _get_broadcast_task_store(request)
+    parts = _broadcast_task_parts(request, source_job)
+    snapshot, reused = await store.start_task(
+        agent_id=parts["agent_id"],
+        source_id=parts["source_id"],
+        tenant_id=parts["tenant_id"],
+        job_id=parts["job_id"],
+        target_tenant_ids=[],
+    )
+    if reused:
+        raise HTTPException(
+            status_code=409,
+            detail="broadcast or dispatch mode update is already running",
+        )
+    return store, snapshot
+
+
+async def _run_dispatch_mode_children_sync(
+    store: CronBroadcastTaskStore,
+    task_id: str,
+    app: Any,
+    source_job: CronJobSpec,
+    *,
+    agent_id: str,
+    source_id: str | None,
+    reason: str,
+    enable: bool,
+) -> None:
+    try:
+        await _synchronize_dispatch_broadcast_children(
+            app,
+            source_job,
+            agent_id=agent_id,
+            source_id=source_id,
+            reason=reason,
+            enable=enable,
+        )
+        await store.finish_task(task_id)
+    except Exception as exc:  # pylint: disable=broad-except
+        await store.record_task_failed(task_id, str(exc))
+
+
+def _schedule_dispatch_mode_children_sync(
+    request: Request,
+    store: CronBroadcastTaskStore,
+    snapshot: CronBroadcastTaskSnapshot,
+    source_job: CronJobSpec,
+    *,
+    reason: str,
+    enable: bool,
+) -> None:
+    tasks = _get_broadcast_tasks(request)
+    task = asyncio.create_task(
+        _run_dispatch_mode_children_sync(
+            store,
+            snapshot.task_id,
+            request.app,
+            source_job,
+            agent_id=_request_agent_id(request),
+            source_id=_request_source_id(request) or source_job.source_id,
+            reason=reason,
+            enable=enable,
+        ),
+        name=f"cron-dispatch-mode-{source_job.id}",
+    )
+    tasks[snapshot.task_id] = task
+    task.add_done_callback(lambda _task: tasks.pop(snapshot.task_id, None))
 
 
 def _validate_target_tenant_id(tenant_id: str) -> str:
@@ -1918,11 +2073,27 @@ async def broadcast_job(
         enable_batch_dispatch=_broadcast_dispatch_intents_enabled(source_job),
         offset_window_hours=body.offset_window_hours,
     )
+    post_broadcast: Callable[[], Awaitable[None]] | None = None
+    if body.enable_batch_dispatch is not None:
+
+        async def _apply_requested_dispatch_mode() -> None:
+            await _apply_batch_dispatch_after_broadcast(
+                request.app,
+                source_job,
+                mgr,
+                agent_id=_request_agent_id(request),
+                source_id=_request_source_id(request) or source_job.source_id,
+                enable=body.enable_batch_dispatch is True,
+                offset_window_hours=body.offset_window_hours,
+            )
+
+        post_broadcast = _apply_requested_dispatch_mode
     snapshot, reused = await _schedule_broadcast_task(
         request,
         source_job,
         context,
         normalized_tenants,
+        post_broadcast=post_broadcast,
     )
     return _broadcast_task_snapshot_to_response(snapshot, reused=reused)
 
@@ -2116,21 +2287,27 @@ async def enable_batch_dispatch(
         if body is not None
         else DEFAULT_BROADCAST_OFFSET_WINDOW_HOURS
     )
+    store, snapshot = await _claim_dispatch_mode_operation(request, source_job)
     try:
         updated = await mgr.enable_batch_dispatch_for_parent(
             job_id,
             offset_window_hours=offset_window_hours,
         )
     except KeyError as exc:
+        await store.record_task_failed(snapshot.task_id, str(exc))
         raise HTTPException(status_code=404, detail="job not found") from exc
     except RuntimeError as exc:
+        await store.record_task_failed(snapshot.task_id, str(exc))
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:
+        await store.record_task_failed(snapshot.task_id, str(exc))
+        raise
 
-    _schedule_dispatch_broadcast_children_processing(
-        request.app,
+    _schedule_dispatch_mode_children_sync(
+        request,
+        store,
+        snapshot,
         updated,
-        agent_id=_request_agent_id(request),
-        source_id=_request_source_id(request) or updated.source_id,
         reason="enable_batch_dispatch",
         enable=True,
     )
@@ -2152,18 +2329,24 @@ async def disable_batch_dispatch(
             status_code=400,
             detail="batch dispatch cannot be disabled from a broadcast child",
         )
+    store, snapshot = await _claim_dispatch_mode_operation(request, source_job)
     try:
         updated = await mgr.disable_batch_dispatch_for_parent(job_id)
     except KeyError as exc:
+        await store.record_task_failed(snapshot.task_id, str(exc))
         raise HTTPException(status_code=404, detail="job not found") from exc
     except RuntimeError as exc:
+        await store.record_task_failed(snapshot.task_id, str(exc))
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:
+        await store.record_task_failed(snapshot.task_id, str(exc))
+        raise
 
-    _schedule_dispatch_broadcast_children_processing(
-        request.app,
+    _schedule_dispatch_mode_children_sync(
+        request,
+        store,
+        snapshot,
         updated,
-        agent_id=_request_agent_id(request),
-        source_id=_request_source_id(request) or updated.source_id,
         reason="disable_batch_dispatch",
         enable=False,
     )
