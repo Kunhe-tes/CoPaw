@@ -9,6 +9,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type {
   CronDispatchBatchDetailResponse,
   CronDispatchBatchesResponse,
+  CronDispatchWorkersResponse,
 } from "../../../api/modules/monitor";
 import CronBatchDispatchPage from "./index";
 
@@ -297,7 +298,54 @@ describe("CronBatchDispatchPage", () => {
           created_at: "2026-07-08T08:10:00",
         },
       ],
-      capacity_events: [],
+      capacity_events: [
+        {
+          id: 11,
+          worker_id: "worker-history",
+          source_id: "CMB-MALL",
+          provider_id: "aaa",
+          model_id: "bbb",
+          strategy_id: "strategy-a",
+          previous_workers: 10,
+          baseline_workers: 5,
+          min_workers: 5,
+          max_workers: 999,
+          effective_workers: 5,
+          pending_count: 3,
+          claimed_count: 1,
+          running_count: 1,
+          success_count: 3,
+          failure_count: 7,
+          error_rate: 0.7,
+          matched_rule: { reason: "success_below_30_halve" },
+          avg_latency_ms: 1600,
+          decision_reason: "success_below_30_halve",
+          created_at: "2026-07-08T08:20:00",
+        },
+        {
+          id: 12,
+          worker_id: "worker-older",
+          source_id: "CMB-MALL",
+          provider_id: "aaa",
+          model_id: "bbb",
+          strategy_id: "strategy-a",
+          previous_workers: 11,
+          baseline_workers: 5,
+          min_workers: 5,
+          max_workers: 999,
+          effective_workers: 10,
+          pending_count: 2,
+          claimed_count: 1,
+          running_count: 1,
+          success_count: 5,
+          failure_count: 5,
+          error_rate: 0.5,
+          matched_rule: { reason: "success_50_70_sub_1" },
+          avg_latency_ms: 1400,
+          decision_reason: "success_50_70_sub_1",
+          created_at: "2026-07-08T08:15:00",
+        },
+      ],
     });
   });
 
@@ -328,6 +376,76 @@ describe("CronBatchDispatchPage", () => {
     expect(screen.getAllByText("bbb").length).toBeGreaterThan(0);
     expect(screen.getByText("success_70_90_add_1")).toBeInTheDocument();
   });
+
+  it("exposes the Batch list as a focusable scrolling region", async () => {
+    render(<CronBatchDispatchPage />);
+
+    const batchList = await screen.findByRole("region", {
+      name: "Batch 列表",
+    });
+
+    expect(batchList).toHaveAttribute("tabindex", "0");
+  });
+
+  it("shows one worker adjustment at a time, navigates and expands details", async () => {
+    const workersResponse = (await monitorApiMock.getCronDispatchWorkers()) as
+      | CronDispatchWorkersResponse
+      | undefined;
+    expect(workersResponse).toBeDefined();
+    monitorApiMock.getCronDispatchWorkers.mockClear();
+
+    render(<CronBatchDispatchPage />);
+
+    const scheduleSummary = await screen.findByText(/^schedule=/);
+    fireEvent.mouseEnter(scheduleSummary);
+    expect(
+      await screen.findByText(/"start_time": "16:00"/),
+    ).toBeInTheDocument();
+
+    const previous = screen.getByRole("button", { name: "上一条调整记录" });
+    const next = screen.getByRole("button", { name: "下一条调整记录" });
+    expect(previous).toBeDisabled();
+    expect(next).toBeEnabled();
+    expect(screen.getByText("1 / 2")).toBeInTheDocument();
+    expect(screen.getByLabelText("查看调整记录 11")).toBeInTheDocument();
+    expect(screen.queryByLabelText("查看调整记录 12")).not.toBeInTheDocument();
+
+    fireEvent.click(next);
+
+    expect(previous).toBeEnabled();
+    expect(next).toBeDisabled();
+    expect(screen.getByText("2 / 2")).toBeInTheDocument();
+    expect(screen.queryByLabelText("查看调整记录 11")).not.toBeInTheDocument();
+    const toggle = screen.getByLabelText("查看调整记录 12");
+    const details = toggle.closest("details");
+    expect(details).not.toHaveAttribute("open");
+
+    fireEvent.click(toggle);
+    expect(details).toHaveAttribute("open");
+    expect(screen.getByText("Worker ID")).toBeInTheDocument();
+    expect(screen.getByText("worker-older")).toBeInTheDocument();
+    expect(screen.getByText("50.00%")).toBeInTheDocument();
+
+    monitorApiMock.getCronDispatchWorkers.mockResolvedValue({
+      ...workersResponse!,
+      capacity_events: [
+        {
+          ...workersResponse!.capacity_events[0],
+          id: 13,
+          worker_id: "worker-latest",
+          created_at: "2026-07-08T08:25:00",
+        },
+        ...workersResponse!.capacity_events,
+      ],
+    });
+    fireEvent.click(screen.getByRole("button", { name: "刷新" }));
+
+    expect(await screen.findByLabelText("查看调整记录 13")).toBeInTheDocument();
+    expect(screen.getByText("1 / 3")).toBeInTheDocument();
+    expect(previous).toBeDisabled();
+    expect(next).toBeEnabled();
+    expect(screen.queryByText("worker-older")).not.toBeInTheDocument();
+  }, 30_000);
 
   it("filters the current Batch page and selects the first matching detail", async () => {
     render(<CronBatchDispatchPage />);

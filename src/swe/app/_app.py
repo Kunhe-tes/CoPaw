@@ -631,16 +631,10 @@ async def _start_lifespan_background_services(
     multi_agent_manager: MultiAgentManager,
 ) -> None:
     """启动生命周期内常驻的后台服务。"""
-    from .crons.api import schedule_startup_dispatch_broadcast_children_processing
-
     await start_service_heartbeat()
     # get_monitor_sync_client().schedule_swe_cron_warmup(
     #     start_delay_seconds=5.0,
     # )
-    schedule_startup_dispatch_broadcast_children_processing(
-        app,
-        multi_agent_manager,
-    )
     cron_notification_worker = CronNotificationWorker(
         multi_agent_manager=multi_agent_manager,
     )
