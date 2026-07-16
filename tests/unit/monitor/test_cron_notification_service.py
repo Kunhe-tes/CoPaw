@@ -23,6 +23,7 @@ def test_claim_due_notifications_requires_status_and_async_success() -> None:
 
     assert "e.status = 'success'" in source
     assert "e.async_status = 'success'" in source
+    assert "e.need_notification = 1" in source
 
 
 def test_fetch_claimed_notifications_rechecks_success_statuses() -> None:
@@ -33,6 +34,7 @@ def test_fetch_claimed_notifications_rechecks_success_statuses() -> None:
 
     assert "e.status = 'success'" in source
     assert "e.async_status = 'success'" in source
+    assert "e.need_notification = 1" in source
 
 
 def test_claim_due_notifications_filters_allowed_source_ids() -> None:
