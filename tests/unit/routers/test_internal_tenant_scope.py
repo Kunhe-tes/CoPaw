@@ -239,6 +239,44 @@ def test_internal_cron_callback_skips_batch_parent_direct_external_body(
     cron_manager.run_job.assert_not_awaited()
 
 
+def test_internal_cron_callback_preserves_task_type_when_skipping_batch_parent(
+    monkeypatch,
+) -> None:
+    source_job = SimpleNamespace(
+        meta={"broadcast_dispatch_intents_enabled": True},
+    )
+    cron_manager = SimpleNamespace(
+        run_job=AsyncMock(),
+        get_job=AsyncMock(return_value=source_job),
+    )
+    manager = SimpleNamespace(
+        get_agent=AsyncMock(
+            return_value=SimpleNamespace(cron_manager=cron_manager),
+        ),
+    )
+
+    monkeypatch.setenv("SWE_CRON_DISPATCH_INTENTS_ENABLED", "1")
+    client = _build_client(manager)
+    response = client.post(
+        "/internal/cron/callback",
+        json={
+            "tenant_id": "tenant-a",
+            "source_id": "source-a",
+            "agent_id": "default",
+            "task_type": "legacy_job",
+            "job_id": "job-1",
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "status": "ok",
+        "task_type": "legacy_job",
+        "skipped": "batch_managed_external_callback",
+    }
+    cron_manager.run_job.assert_not_awaited()
+
+
 def test_internal_cron_callback_runs_flagged_parent_when_runtime_flag_off(
     monkeypatch,
 ) -> None:

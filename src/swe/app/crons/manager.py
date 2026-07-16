@@ -148,7 +148,7 @@ def is_batch_dispatch_managed_broadcast_child(job: Any | None) -> bool:
         return False
     return bool(
         meta.get(BROADCAST_SOURCE_JOB_ID_META_KEY)
-        and broadcast_dispatch_intents_enabled(job)
+        and broadcast_dispatch_intents_enabled(job),
     )
 
 
@@ -160,7 +160,7 @@ def is_batch_dispatch_parent(job: Any | None) -> bool:
         return False
     return bool(
         broadcast_dispatch_intents_enabled(job)
-        and not meta.get(BROADCAST_SOURCE_JOB_ID_META_KEY)
+        and not meta.get(BROADCAST_SOURCE_JOB_ID_META_KEY),
     )
 
 
@@ -190,6 +190,92 @@ def _is_weekend_notification_time(
         )
         tz = timezone.utc
     return due_at.astimezone(tz).weekday() >= 5
+
+
+@dataclass(frozen=True)
+class _MonitorNotificationSchedule:
+    due_at: datetime | None
+    timezone: str
+    suppress: bool = False
+
+
+def _broadcast_offset_minutes(job: CronJobSpec) -> int:
+    try:
+        offset = int((job.meta or {}).get("broadcast_offset_minutes", 0) or 0)
+    except (TypeError, ValueError):
+        return 0
+    return max(offset, 0)
+
+
+def _scheduled_notification_due_at(
+    job: CronJobSpec,
+    actual_time: datetime,
+    end_time: datetime | None,
+    execution_meta: Optional[Dict[str, Any]],
+    timezone_name: str,
+) -> tuple[datetime | None, str]:
+    delay_minutes = _notification_delay_minutes(job)
+    parent_scheduled_fire_at = _dispatch_parent_scheduled_fire_at(
+        execution_meta,
+    )
+    original_timezone = (job.meta or {}).get(
+        "broadcast_original_timezone",
+    ) or timezone_name
+    if parent_scheduled_fire_at is not None:
+        return (
+            parent_scheduled_fire_at + timedelta(minutes=delay_minutes),
+            original_timezone,
+        )
+    if (job.meta or {}).get(
+        "broadcast_notification_policy",
+    ) == "original_schedule":
+        total_delay = _broadcast_offset_minutes(job) + delay_minutes
+        return actual_time + timedelta(minutes=total_delay), original_timezone
+    if delay_minutes > 0:
+        return (
+            (end_time or actual_time) + timedelta(minutes=delay_minutes),
+            timezone_name,
+        )
+    return None, timezone_name
+
+
+def _monitor_notification_schedule(
+    job: CronJobSpec,
+    exec_status: str,
+    actual_time: datetime,
+    end_time: datetime | None,
+    is_manual: bool,
+    execution_meta: Optional[Dict[str, Any]],
+    default_timezone: str,
+) -> _MonitorNotificationSchedule:
+    timezone_name = job.schedule.timezone or default_timezone or "UTC"
+    if exec_status != "success" or is_manual:
+        return _MonitorNotificationSchedule(None, timezone_name)
+
+    due_at, timezone_name = _scheduled_notification_due_at(
+        job,
+        actual_time,
+        end_time,
+        execution_meta,
+        timezone_name,
+    )
+    notification_time = due_at or end_time or actual_time
+    notification_config = resolve_cron_notification_config(
+        get_current_source_system_config(),
+    )
+    if not notification_config.skip_weekend_zhaohu_enabled:
+        return _MonitorNotificationSchedule(due_at, timezone_name)
+    if not _is_weekend_notification_time(notification_time, timezone_name):
+        return _MonitorNotificationSchedule(due_at, timezone_name)
+
+    logger.info(
+        "Suppress cron weekend zhaohu notification: "
+        "job_id=%s job_name=%s original_notification_time=%s",
+        job.id,
+        job.name,
+        notification_time.isoformat(),
+    )
+    return _MonitorNotificationSchedule(None, "", suppress=True)
 
 
 def _parse_cleanup_datetime(value: Any) -> datetime | None:
@@ -898,8 +984,7 @@ class CronManager:  # pylint: disable=too-many-public-methods
         timezone_name = (
             spec.schedule.timezone
             if spec.schedule and spec.schedule.timezone
-            else self._timezone
-            or "UTC"
+            else self._timezone or "UTC"
         )
         offset_minutes = offset_window_hours * 60
         shifted = shift_cron_expression(
@@ -915,7 +1000,10 @@ class CronManager:  # pylint: disable=too-many-public-methods
         meta = spec.meta or {}
         return str(meta.get(BATCH_DISPATCH_EXTERNAL_JOB_ID_META_KEY) or "")
 
-    def _get_batch_dispatch_offset_window_hours(self, spec: CronJobSpec) -> int:
+    def _get_batch_dispatch_offset_window_hours(
+        self,
+        spec: CronJobSpec,
+    ) -> int:
         meta = spec.meta or {}
         return self._normalize_batch_dispatch_offset_window_hours(
             meta.get(
@@ -960,7 +1048,9 @@ class CronManager:  # pylint: disable=too-many-public-methods
             )
             return {}
 
-        provider_id = str(getattr(active_model, "provider_id", "") or "").strip()
+        provider_id = str(
+            getattr(active_model, "provider_id", "") or "",
+        ).strip()
         model_id = str(getattr(active_model, "model", "") or "").strip()
         if provider_id and model_id:
             return {"provider_id": provider_id, "model_id": model_id}
@@ -987,7 +1077,9 @@ class CronManager:  # pylint: disable=too-many-public-methods
             )
         )
         meta = dict(spec.meta or {})
-        batch_ext_id = str(meta.get(BATCH_DISPATCH_EXTERNAL_JOB_ID_META_KEY) or "")
+        batch_ext_id = str(
+            meta.get(BATCH_DISPATCH_EXTERNAL_JOB_ID_META_KEY) or "",
+        )
         tenant_id, source_id = self._get_external_scheduler_business_identity(
             spec,
         )
@@ -1090,7 +1182,9 @@ class CronManager:  # pylint: disable=too-many-public-methods
         if job is None:
             raise KeyError(job_id)
         if (job.meta or {}).get(BROADCAST_SOURCE_JOB_ID_META_KEY):
-            raise RuntimeError("batch dispatch cannot be enabled from a broadcast child")
+            raise RuntimeError(
+                "batch dispatch cannot be enabled from a broadcast child",
+            )
 
         meta = dict(job.meta or {})
         meta[BROADCAST_DISPATCH_INTENTS_ENABLED_META_KEY] = True
@@ -1109,14 +1203,22 @@ class CronManager:  # pylint: disable=too-many-public-methods
             await self._scheduler_adapter.pause_job(normal_ext_id)
         updated = await self._sync_batch_dispatch_scheduler_job(
             updated,
-            offset_window_hours=meta[BATCH_DISPATCH_OFFSET_WINDOW_HOURS_META_KEY],
+            offset_window_hours=meta[
+                BATCH_DISPATCH_OFFSET_WINDOW_HOURS_META_KEY
+            ],
         )
         logger.info(
             "Enabled batch dispatch for cron parent: job=%s normal_ext_id=%s batch_ext_id=%s offset_minutes=%s",
             updated.id,
             normal_ext_id,
-            (updated.meta or {}).get(BATCH_DISPATCH_EXTERNAL_JOB_ID_META_KEY, ""),
-            (updated.meta or {}).get(BATCH_DISPATCH_OFFSET_MINUTES_META_KEY, 0),
+            (updated.meta or {}).get(
+                BATCH_DISPATCH_EXTERNAL_JOB_ID_META_KEY,
+                "",
+            ),
+            (updated.meta or {}).get(
+                BATCH_DISPATCH_OFFSET_MINUTES_META_KEY,
+                0,
+            ),
         )
         return await self._persist_job_definition(updated)
 
@@ -1128,10 +1230,14 @@ class CronManager:  # pylint: disable=too-many-public-methods
         if job is None:
             raise KeyError(job_id)
         if (job.meta or {}).get(BROADCAST_SOURCE_JOB_ID_META_KEY):
-            raise RuntimeError("batch dispatch cannot be disabled from a broadcast child")
+            raise RuntimeError(
+                "batch dispatch cannot be disabled from a broadcast child",
+            )
 
         meta = dict(job.meta or {})
-        batch_ext_id = str(meta.get(BATCH_DISPATCH_EXTERNAL_JOB_ID_META_KEY) or "")
+        batch_ext_id = str(
+            meta.get(BATCH_DISPATCH_EXTERNAL_JOB_ID_META_KEY) or "",
+        )
         for key in (
             BROADCAST_DISPATCH_INTENTS_ENABLED_META_KEY,
             BATCH_DISPATCH_OFFSET_WINDOW_HOURS_META_KEY,
@@ -1412,8 +1518,11 @@ class CronManager:  # pylint: disable=too-many-public-methods
         for job in await self._repo.list_jobs():
             result["total"] += 1
             had_external_id = bool(self._get_existing_external_job_id(job))
-            if had_external_id and not is_batch_dispatch_managed_broadcast_child(
-                job,
+            if (
+                had_external_id
+                and not is_batch_dispatch_managed_broadcast_child(
+                    job,
+                )
             ):
                 result["skipped"] += 1
                 continue
@@ -1483,9 +1592,11 @@ class CronManager:  # pylint: disable=too-many-public-methods
                     job,
                     existing=job,
                 )
-                synced = await self._sync_batch_dispatch_parent_after_normal_sync(
-                    synced,
-                    existing=job,
+                synced = (
+                    await self._sync_batch_dispatch_parent_after_normal_sync(
+                        synced,
+                        existing=job,
+                    )
                 )
                 ext_id = (synced.meta or {}).get("external_job_id", "")
                 if is_batch_dispatch_parent(synced):
@@ -2726,66 +2837,15 @@ class CronManager:  # pylint: disable=too-many-public-methods
             return
 
         session_id = str((job.meta or {}).get("task_session_id", "") or "")
-        notification_due_at = None
-        notification_timezone = (
-            job.schedule.timezone or self._timezone or "UTC"
+        notification = _monitor_notification_schedule(
+            job,
+            exec_status,
+            actual_time,
+            end_time,
+            is_manual,
+            execution_meta,
+            self._timezone,
         )
-        suppress_notification = False
-        if exec_status == "success" and not is_manual:
-            delay_minutes = _notification_delay_minutes(job)
-            parent_scheduled_fire_at = _dispatch_parent_scheduled_fire_at(
-                execution_meta,
-            )
-            if parent_scheduled_fire_at is not None:
-                notification_due_at = parent_scheduled_fire_at + timedelta(
-                    minutes=delay_minutes,
-                )
-                notification_timezone = (job.meta or {}).get(
-                    "broadcast_original_timezone",
-                ) or notification_timezone
-            elif (job.meta or {}).get(
-                "broadcast_notification_policy",
-            ) == "original_schedule":
-                try:
-                    offset = int(
-                        (job.meta or {}).get("broadcast_offset_minutes", 0) or 0,
-                    )
-                except (TypeError, ValueError):
-                    offset = 0
-                total_delay = max(offset, 0) + delay_minutes
-                notification_due_at = actual_time + timedelta(
-                    minutes=total_delay,
-                )
-                notification_timezone = (job.meta or {}).get(
-                    "broadcast_original_timezone",
-                ) or notification_timezone
-            elif delay_minutes > 0:
-                notification_due_at = (end_time or actual_time) + timedelta(
-                    minutes=delay_minutes,
-                )
-            original_notification_time = (
-                notification_due_at or end_time or actual_time
-            )
-            notification_config = resolve_cron_notification_config(
-                get_current_source_system_config(),
-            )
-            if (
-                notification_config.skip_weekend_zhaohu_enabled
-                and _is_weekend_notification_time(
-                    original_notification_time,
-                    notification_timezone,
-                )
-            ):
-                suppress_notification = True
-                notification_due_at = None
-                notification_timezone = ""
-                logger.info(
-                    "Suppress cron weekend zhaohu notification: "
-                    "job_id=%s job_name=%s original_notification_time=%s",
-                    job.id,
-                    job.name,
-                    original_notification_time.isoformat(),
-                )
 
         await self._monitor_sync_client.record_execution(
             job=job,
@@ -2800,9 +2860,9 @@ class CronManager:  # pylint: disable=too-many-public-methods
             output_preview=output_preview,
             input_snapshot=input_snapshot,
             executor_leader=executor_leader,
-            notification_due_at=notification_due_at,
-            notification_timezone=notification_timezone,
-            suppress_notification=suppress_notification,
+            notification_due_at=notification.due_at,
+            notification_timezone=notification.timezone,
+            suppress_notification=notification.suppress,
             meta=execution_meta,
         )
 
@@ -3424,9 +3484,10 @@ class CronManager:  # pylint: disable=too-many-public-methods
                 job,
                 existing=job,
             )
-            synced_ext_id = (
-                (synced.meta or {}).get("external_job_id", "") or ext_id
-            )
+            synced_ext_id = (synced.meta or {}).get(
+                "external_job_id",
+                "",
+            ) or ext_id
             self._remember_external_job_id(job.id, synced_ext_id)
             await self._restore_batch_dispatch_parent_external_job(
                 synced,

@@ -65,6 +65,7 @@ function CronJobsPage() {
   const {
     jobs,
     loading,
+    fetchJobs,
     createJob,
     updateJob,
     deleteJob,
@@ -108,6 +109,10 @@ function CronJobsPage() {
     tenantDefaultLabel,
   } = useExecutionModelOptions(true);
   const hasVisibleBroadcastTask = Boolean(broadcastTask);
+  const hasBroadcastDispatchModeChange = broadcastingJob
+    ? isBatchDispatchEnabled(broadcastingJob) !==
+      (broadcastDispatchMode === "batch")
+    : false;
 
   useEffect(() => {
     api
@@ -240,6 +245,14 @@ function CronJobsPage() {
       );
       setBroadcastTask(refreshedTask);
       setBroadcastResults(refreshedTask.results);
+      if (refreshedTask.status !== "running") {
+        await fetchJobs();
+        const refreshedJob = await api.getCronJob(broadcastingJob.id);
+        setBroadcastingJob(refreshedJob.spec);
+        setBroadcastDispatchMode(
+          isBatchDispatchEnabled(refreshedJob.spec) ? "batch" : "normal",
+        );
+      }
     } catch (error) {
       console.error("Failed to refresh cron broadcast task", error);
       message.error("刷新分发进度失败");
@@ -281,27 +294,33 @@ function CronJobsPage() {
         bbk_id: target?.bbk_id ?? null,
       };
     });
+    const hasBroadcastTargets = targets.length > 0;
+    const shouldUseBatchDispatch = broadcastDispatchMode === "batch";
+    const dispatchModeChanged =
+      isBatchDispatchEnabled(broadcastingJob) !== shouldUseBatchDispatch;
+    if (!hasBroadcastTargets && !dispatchModeChanged) return;
+
     setBroadcasting(true);
     setBroadcastRefreshing(false);
     setBroadcastTask(null);
     setBroadcastResults([]);
     try {
-      let dispatchJob = broadcastingJob;
-      const shouldUseBatchDispatch = broadcastDispatchMode === "batch";
-      if (shouldUseBatchDispatch || isBatchDispatchEnabled(dispatchJob)) {
+      if (!hasBroadcastTargets) {
         const syncedJob = await setBatchDispatch(
-          dispatchJob,
+          broadcastingJob,
           shouldUseBatchDispatch,
           { offset_window_hours: broadcastOffsetWindowHours },
         );
         if (!syncedJob) {
           return;
         }
-        dispatchJob = syncedJob;
         setBroadcastingJob(syncedJob);
+        handleBroadcastCancel();
+        return;
       }
-      const res = await api.broadcastCronJob(dispatchJob.id, targets, {
+      const res = await api.broadcastCronJob(broadcastingJob.id, targets, {
         enable_offset: broadcastOffsetEnabled,
+        enable_batch_dispatch: shouldUseBatchDispatch,
         offset_window_hours: broadcastOffsetWindowHours,
       });
       setBroadcastTask(res);
@@ -434,7 +453,8 @@ function CronJobsPage() {
         confirmLoading={broadcasting}
         okButtonProps={{
           disabled:
-            selectedBroadcastTenantIds.length === 0 ||
+            (selectedBroadcastTenantIds.length === 0 &&
+              !hasBroadcastDispatchModeChange) ||
             broadcasting ||
             hasVisibleBroadcastTask,
         }}

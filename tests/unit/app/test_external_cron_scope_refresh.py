@@ -136,7 +136,10 @@ class _StaticSourceSystemConfigService:
     def __init__(self, raw_config: dict[str, Any] | None = None) -> None:
         self.raw_config = SourceSystemConfig.model_validate(raw_config or {})
 
-    async def resolve_config(self, source_id: str) -> EffectiveSourceSystemConfig:
+    async def resolve_config(
+        self,
+        source_id: str,
+    ) -> EffectiveSourceSystemConfig:
         return EffectiveSourceSystemConfig(
             source_id=source_id,
             config=self.raw_config.merged_with_defaults(),
@@ -430,7 +433,9 @@ async def test_callback_resolves_runtime_scope_from_tenant_and_source(
 
 
 @pytest.mark.asyncio
-async def test_callback_runs_source_cleanup_without_using_tenant_scope() -> None:
+async def test_callback_runs_source_cleanup_without_using_tenant_scope() -> (
+    None
+):
     """清理回调只按 source_id 定位清理范围。"""
     observed: dict[str, Any] = {}
 
@@ -473,7 +478,9 @@ async def test_callback_runs_source_cleanup_without_using_tenant_scope() -> None
 
 
 @pytest.mark.asyncio
-async def test_callback_runs_source_archive_maintenance_without_tenant_scope() -> None:
+async def test_callback_runs_source_archive_maintenance_without_tenant_scope() -> (
+    None
+):
     observed: dict[str, Any] = {}
 
     class FakeSourceScheduler:
@@ -600,8 +607,7 @@ async def test_batch_dispatch_parent_registers_normal_swe_callback(
     add_path, payload = adapter.requests[0]
     assert add_path == "/job-admin/v2/add-job"
     assert (
-        payload["jobAddress"]
-        == "http://swe.local/api/internal/cron/callback"
+        payload["jobAddress"] == "http://swe.local/api/internal/cron/callback"
     )
     job_param = _decode_job_param(payload["jobParam"])
     assert job_param["job_id"] == "job-1"
@@ -664,7 +670,10 @@ async def test_enable_batch_dispatch_registers_separate_scheduler_job(
         for path, payload in adapter.requests
         if path == "/job-admin/v2/update-job" and payload.get("id") == 42
     )
-    assert normal_update["jobAddress"] == "http://swe.local/api/internal/cron/callback"
+    assert (
+        normal_update["jobAddress"]
+        == "http://swe.local/api/internal/cron/callback"
+    )
 
     batch_add = next(
         payload
@@ -688,9 +697,13 @@ async def test_enable_batch_dispatch_registers_separate_scheduler_job(
         for path, payload in adapter.requests
         if path == "/job-admin/v2/update-job-run-states"
     ]
-    assert any(payload["id"] == 42 and payload["runFlag"] == 0 for payload in run_states)
     assert any(
-        payload["id"] == 1001 and payload["runFlag"] == 1 for payload in run_states
+        payload["id"] == 42 and payload["runFlag"] == 0
+        for payload in run_states
+    )
+    assert any(
+        payload["id"] == 1001 and payload["runFlag"] == 1
+        for payload in run_states
     )
 
 
@@ -766,7 +779,8 @@ async def test_update_enabled_batch_dispatch_parent_refreshes_batch_scheduler_jo
         for payload in run_states
     )
     assert any(
-        payload["id"] == 1001 and payload["runFlag"] == 1 for payload in run_states
+        payload["id"] == 1001 and payload["runFlag"] == 1
+        for payload in run_states
     )
     assert repo.jobs[0].meta["batch_dispatch_cron"] == "30 6 * * *"
 
@@ -813,16 +827,23 @@ async def test_disable_batch_dispatch_resumes_normal_and_pauses_batch_job(
         for path, payload in adapter.requests
         if path == "/job-admin/v2/update-job" and payload.get("id") == 42
     )
-    assert normal_update["jobAddress"] == "http://swe.local/api/internal/cron/callback"
+    assert (
+        normal_update["jobAddress"]
+        == "http://swe.local/api/internal/cron/callback"
+    )
 
     run_states = [
         payload
         for path, payload in adapter.requests
         if path == "/job-admin/v2/update-job-run-states"
     ]
-    assert any(payload["id"] == 42 and payload["runFlag"] == 1 for payload in run_states)
     assert any(
-        payload["id"] == 1001 and payload["runFlag"] == 0 for payload in run_states
+        payload["id"] == 42 and payload["runFlag"] == 1
+        for payload in run_states
+    )
+    assert any(
+        payload["id"] == 1001 and payload["runFlag"] == 0
+        for payload in run_states
     )
 
 
@@ -849,7 +870,9 @@ async def test_restore_external_ids_updates_batch_disabled_parent_to_swe_callbac
     update_path, payload = adapter.requests[0]
     assert update_path == "/job-admin/v2/update-job"
     assert payload["id"] == 42
-    assert payload["jobAddress"] == "http://swe.local/api/internal/cron/callback"
+    assert (
+        payload["jobAddress"] == "http://swe.local/api/internal/cron/callback"
+    )
 
 
 @pytest.mark.asyncio
@@ -886,7 +909,9 @@ async def test_restore_external_ids_updates_rolled_back_child_to_swe_callback(
     update_path, payload = adapter.requests[0]
     assert update_path == "/job-admin/v2/update-job"
     assert payload["id"] == 42
-    assert payload["jobAddress"] == "http://swe.local/api/internal/cron/callback"
+    assert (
+        payload["jobAddress"] == "http://swe.local/api/internal/cron/callback"
+    )
 
 
 @pytest.mark.asyncio
@@ -911,6 +936,38 @@ async def test_batch_dispatch_child_uses_normal_scheduler_when_feature_off(
     paths = [path for path, _ in adapter.requests]
     assert paths[0] == "/job-admin/v2/add-job"
     assert "/job-admin/v2/add-job" in paths
+    assert any(
+        path == "/job-admin/v2/update-job-run-states"
+        and payload["runFlag"] == 1
+        for path, payload in adapter.requests
+    )
+
+
+@pytest.mark.asyncio
+async def test_batch_dispatch_child_registers_scheduler_after_mode_rollback(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("SWE_CRON_DISPATCH_INTENTS_ENABLED", "1")
+    monkeypatch.setenv("SWE_SERVER_DOMAIN", "http://swe.local")
+    adapter = CapturingSchedulerAdapter()
+    existing = _batch_dispatch_child_job()
+    repo = _JobsRepo([existing])
+    manager = CronManager(
+        repo=repo,
+        runner=SimpleNamespace(workspace_dir=None, _workspace=None),
+        channel_manager=object(),
+        agent_id="default",
+        tenant_id=encode_scope_id("tenant-b", "source-a"),
+        scheduler_adapter=adapter,
+    )
+    updated = existing.model_copy(
+        update={"meta": {"broadcast_source_job_id": "parent-job"}},
+    )
+
+    await manager.create_or_replace_job(updated)
+
+    assert repo.jobs[0].meta["external_job_id"] == "1001"
+    assert adapter.requests[0][0] == "/job-admin/v2/add-job"
     assert any(
         path == "/job-admin/v2/update-job-run-states"
         and payload["runFlag"] == 1
