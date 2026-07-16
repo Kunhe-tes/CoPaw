@@ -285,6 +285,60 @@ class ContinuousGovernanceStore:
         )
         return [_row_to_archive_item(row) for row in rows]
 
+    async def list_archive_items_page(
+        self,
+        source_id: str,
+        *,
+        target_user_ids: Optional[Iterable[str]] = None,
+        target_agent_id: Optional[str] = None,
+        expired: Optional[bool] = None,
+        limit: int,
+        offset: int,
+    ) -> tuple[list[ArchiveItemRecord], int]:
+        """在数据库内分页读取归档文件状态及匹配总数。"""
+        db = self._require_db()
+        where, params = _build_file_state_where(
+            source_id,
+            target_user_ids=target_user_ids,
+            target_agent_id=target_agent_id,
+        )
+        if expired is not None:
+            where += " AND expired = %s"
+            params.append(int(expired))
+
+        count_row = await self._call_db(
+            "count archive items",
+            db.fetch_one,
+            f"""
+                SELECT COUNT(*) AS total
+                FROM swe_file_governance_archive_items
+                WHERE {where}
+            """,
+            tuple(params),
+        )
+        total = int((count_row or {}).get("total") or 0)
+        if total == 0:
+            return [], 0
+
+        safe_limit = max(int(limit), 1)
+        safe_offset = max(int(offset), 0)
+        rows = await self._call_db(
+            "list archive items page",
+            db.fetch_all,
+            f"""
+                SELECT source_id, target_user_id, target_agent_id,
+                    archive_item_id, original_path, archive_path, size_bytes,
+                    mtime, archived_at, archived_by, archive_reason, expired,
+                    raw_item_json
+                FROM swe_file_governance_archive_items
+                WHERE {where}
+                ORDER BY archived_at DESC, archive_item_id DESC
+                LIMIT %s OFFSET %s
+            """,
+            (*params, safe_limit, safe_offset),
+        )
+        return [_row_to_archive_item(row) for row in rows], total
+
     async def delete_archive_item(
         self,
         *,

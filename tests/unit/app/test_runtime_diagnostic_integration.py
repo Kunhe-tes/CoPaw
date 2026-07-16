@@ -50,6 +50,17 @@ def test_lifespan_starts_and_stops_runtime_diagnostic_manager() -> None:
     assert "await runtime_diagnostic_manager.stop()" in stop_source
 
 
+def test_lifespan_does_not_schedule_batch_dispatch_startup_scan() -> None:
+    from swe.app._app import _start_lifespan_background_services
+
+    start_source = inspect.getsource(_start_lifespan_background_services)
+
+    assert (
+        "schedule_startup_dispatch_broadcast_children_processing"
+        not in start_source
+    )
+
+
 def test_shutdown_stops_managed_background_processes() -> None:
     from swe.app._app import _shutdown_lifespan_resources
 

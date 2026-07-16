@@ -62,7 +62,24 @@ def _has_dispatch_execution_meta(exec_data: Dict[str, Any]) -> bool:
         meta = json.loads(raw_meta)
     except (TypeError, json.JSONDecodeError):
         return False
-    return isinstance(meta, dict) and isinstance(meta.get("cron_dispatch"), dict)
+    if not isinstance(meta, dict):
+        return False
+    dispatch_meta = meta.get("cron_dispatch")
+    if not isinstance(dispatch_meta, dict):
+        return False
+    intent_id = dispatch_meta.get("intent_id")
+    batch_id = dispatch_meta.get("batch_id")
+    dispatch_attempt = dispatch_meta.get("dispatch_attempt")
+    return (
+        isinstance(intent_id, int)
+        and not isinstance(intent_id, bool)
+        and intent_id > 0
+        and isinstance(batch_id, str)
+        and bool(batch_id.strip())
+        and isinstance(dispatch_attempt, int)
+        and not isinstance(dispatch_attempt, bool)
+        and dispatch_attempt > 0
+    )
 
 
 class MonitorSyncClient:

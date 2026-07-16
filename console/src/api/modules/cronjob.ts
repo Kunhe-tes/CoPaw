@@ -84,6 +84,7 @@ export const cronJobApi = {
           target_tenant_ids: targets.map((target) => target.tenant_id),
           targets,
           enable_offset: options.enable_offset ?? true,
+          enable_batch_dispatch: options.enable_batch_dispatch,
           offset_window_hours: options.offset_window_hours ?? 4,
         }),
       },

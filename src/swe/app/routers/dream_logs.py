@@ -3207,20 +3207,18 @@ async def list_archive_items(
         bbk_id=bbk_id,
         user_search=user_search,
     )
-    rows = await service.store.list_archive_items(
+    rows, total = await service.store.list_archive_items_page(
         source_id,
         target_user_ids=target_user_ids,
         target_agent_id=safe_agent_id,
+        expired=expired,
+        limit=safe_page_size,
+        offset=(safe_page - 1) * safe_page_size,
     )
     items = [_archive_db_row_to_response(row) for row in rows]
-    if expired is not None:
-        items = [item for item in items if item.expired == expired]
-    items.sort(key=lambda item: item.archived_at, reverse=True)
-    start = (safe_page - 1) * safe_page_size
-    end = start + safe_page_size
     return ArchiveItemsResponse(
-        items=items[start:end],
-        total=len(items),
+        items=items,
+        total=total,
         page=safe_page,
         page_size=safe_page_size,
     )

@@ -235,6 +235,211 @@ def _dispatch_callback_context(params: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _decode_cron_callback_params(body: Dict[str, Any]) -> dict[str, Any]:
+    job_param = body.get("jobParam") or body.get("job_param") or ""
+    if not job_param:
+        return body
+    try:
+        return json.loads(base64.urlsafe_b64decode(job_param))
+    except Exception as exc:
+        logger.warning("Failed to decode jobParam: %s", exc)
+        raise HTTPException(
+            status_code=400,
+            detail=f"Invalid jobParam: {exc}",
+        )
+
+
+def _require_cron_callback_params(
+    params: dict[str, Any],
+) -> tuple[str, Any, str, str, str]:
+    try:
+        return (
+            params["tenant_id"],
+            params.get("source_id"),
+            params["agent_id"],
+            params["task_type"],
+            params.get("job_id", ""),
+        )
+    except KeyError as exc:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Missing required param in callback body: {exc}",
+        )
+
+
+def _require_source_scheduler(
+    request: Request,
+    task_type: str,
+    source_id: Any,
+) -> Any:
+    if not source_id:
+        raise HTTPException(
+            status_code=400,
+            detail=f"source_id required for task_type={task_type}",
+        )
+    source_scheduler = getattr(
+        request.app.state,
+        "source_system_task_scheduler",
+        None,
+    )
+    if source_scheduler is None:
+        raise HTTPException(
+            status_code=503,
+            detail="Source system task scheduler not available",
+        )
+    return source_scheduler
+
+
+async def _run_source_callback(
+    request: Request,
+    task_type: str,
+    source_id: Any,
+) -> bool:
+    if task_type not in {"cleanup", "archive_maintenance"}:
+        return False
+    source_scheduler = _require_source_scheduler(request, task_type, source_id)
+    if task_type == "cleanup":
+        result = await source_scheduler.run_task_session_cleanup(
+            source_id=source_id,
+        )
+        logger.info("Source task session cleanup result: %s", result)
+    else:
+        result = await source_scheduler.run_archive_maintenance(
+            source_id=source_id,
+        )
+        logger.info("Source archive maintenance result: %s", result)
+    return True
+
+
+async def _require_callback_cron_manager(
+    request: Request,
+    tenant_id: str,
+    source_id: Any,
+    agent_id: str,
+) -> Any:
+    manager = getattr(request.app.state, "multi_agent_manager", None)
+    if manager is None:
+        logger.warning("MultiAgentManager not initialized")
+        raise HTTPException(status_code=503, detail="Manager not available")
+    runtime_tenant_id = (
+        resolve_runtime_tenant_id(tenant_id, source_id) or tenant_id
+    )
+    mgr = await _get_cron_manager(manager, runtime_tenant_id, agent_id)
+    if mgr is None:
+        raise HTTPException(status_code=404, detail="CronManager not found")
+    return mgr
+
+
+def _batch_callback_skip_response(
+    job: Any | None,
+    params: dict[str, Any],
+    tenant_id: str,
+    agent_id: str,
+    task_type: str,
+    job_id: str,
+) -> dict[str, str] | None:
+    if _is_dispatch_service_callback(params):
+        return None
+    if is_batch_dispatch_managed_broadcast_child(job):
+        logger.info(
+            "Callback skipped for batch-managed broadcast child: "
+            "tenant=%s agent=%s job=%s",
+            tenant_id,
+            agent_id,
+            job_id,
+        )
+        return {
+            "status": "ok",
+            "task_type": task_type,
+            "skipped": "batch_managed_child",
+        }
+    if _job_dispatch_intents_enabled(job):
+        logger.info(
+            "Callback skipped for batch-managed broadcast parent: "
+            "tenant=%s agent=%s job=%s",
+            tenant_id,
+            agent_id,
+            job_id,
+        )
+        return {
+            "status": "ok",
+            "task_type": task_type,
+            "skipped": "batch_managed_external_callback",
+        }
+    return None
+
+
+async def _run_job_callback(
+    request: Request,
+    mgr: Any,
+    params: dict[str, Any],
+    tenant_id: str,
+    source_id: Any,
+    agent_id: str,
+    task_type: str,
+    job_id: str,
+) -> dict[str, str] | None:
+    if not job_id:
+        raise HTTPException(
+            status_code=400,
+            detail="job_id required for task_type=job",
+        )
+    job = await _get_cron_job_for_dispatch(mgr, job_id)
+    skip_response = _batch_callback_skip_response(
+        job,
+        params,
+        tenant_id,
+        agent_id,
+        task_type,
+        job_id,
+    )
+    if skip_response is not None:
+        return skip_response
+
+    dispatch_meta = _build_dispatch_callback_meta(params) or {}
+    dispatch_meta.update(
+        build_b3_dispatch_meta(getattr(request, "headers", {})),
+    )
+    run_kwargs = {"is_manual": False, "source_id": source_id}
+    if dispatch_meta:
+        run_kwargs["dispatch_meta"] = dispatch_meta
+    await mgr.run_job(job_id, **run_kwargs)
+    return None
+
+
+async def _run_agent_callback(
+    request: Request,
+    params: dict[str, Any],
+    tenant_id: str,
+    source_id: Any,
+    agent_id: str,
+    task_type: str,
+    job_id: str,
+) -> dict[str, str] | None:
+    mgr = await _require_callback_cron_manager(
+        request,
+        tenant_id,
+        source_id,
+        agent_id,
+    )
+    if task_type == "heartbeat":
+        await mgr.run_heartbeat()
+        return None
+    if task_type == "dream":
+        await mgr.run_dream()
+        return None
+    return await _run_job_callback(
+        request,
+        mgr,
+        params,
+        tenant_id,
+        source_id,
+        agent_id,
+        task_type,
+        job_id,
+    )
+
+
 class InternalErrorResponse(BaseModel):
     detail: str = Field(..., description="Error detail message.")
 
@@ -1194,157 +1399,29 @@ async def internal_cron_callback(
     根据 task_type 分发到对应的 CronManager 方法。
     """
     _verify_internal_token(x_internal_token)
-
-    job_param = body.get("jobParam") or body.get("job_param") or ""
-    if job_param:
-        # base64 JSON 包裹格式：jobParam 编码后下发，回调时原样传回
-        try:
-            params = json.loads(base64.urlsafe_b64decode(job_param))
-        except Exception as e:
-            logger.warning("Failed to decode jobParam: %s", e)
-            raise HTTPException(
-                status_code=400,
-                detail=f"Invalid jobParam: {e}",
-            )
-    else:
-        # 直接参数格式：外部平台直接将参数字段展开在 body 中
-        params = body
+    params = _decode_cron_callback_params(body)
+    tenant_id, source_id, agent_id, task_type, job_id = (
+        _require_cron_callback_params(params)
+    )
 
     try:
-        tenant_id = params["tenant_id"]
-        source_id = params.get("source_id")
-        agent_id = params["agent_id"]
-        task_type = params["task_type"]
-        job_id = params.get("job_id", "")
-    except KeyError as e:
-        raise HTTPException(
-            status_code=400,
-            detail=f"Missing required param in callback body: {e}",
+        source_callback_handled = await _run_source_callback(
+            request,
+            task_type,
+            source_id,
         )
-
-    try:
-        if task_type == "cleanup":
-            if not source_id:
-                raise HTTPException(
-                    status_code=400,
-                    detail="source_id required for task_type=cleanup",
-                )
-            source_scheduler = getattr(
-                request.app.state,
-                "source_system_task_scheduler",
-                None,
+        if not source_callback_handled:
+            skip_response = await _run_agent_callback(
+                request,
+                params,
+                tenant_id,
+                source_id,
+                agent_id,
+                task_type,
+                job_id,
             )
-            if source_scheduler is None:
-                raise HTTPException(
-                    status_code=503,
-                    detail="Source system task scheduler not available",
-                )
-            cleanup_result = await source_scheduler.run_task_session_cleanup(
-                source_id=source_id,
-            )
-            logger.info(
-                "Source task session cleanup result: %s",
-                cleanup_result,
-            )
-        elif task_type == "archive_maintenance":
-            if not source_id:
-                raise HTTPException(
-                    status_code=400,
-                    detail=(
-                        "source_id required for "
-                        "task_type=archive_maintenance"
-                    ),
-                )
-            source_scheduler = getattr(
-                request.app.state,
-                "source_system_task_scheduler",
-                None,
-            )
-            if source_scheduler is None:
-                raise HTTPException(
-                    status_code=503,
-                    detail="Source system task scheduler not available",
-                )
-            archive_result = await source_scheduler.run_archive_maintenance(
-                source_id=source_id,
-            )
-            logger.info(
-                "Source archive maintenance result: %s",
-                archive_result,
-            )
-        else:
-            manager = getattr(request.app.state, "multi_agent_manager", None)
-            if manager is None:
-                logger.warning("MultiAgentManager not initialized")
-                raise HTTPException(
-                    status_code=503,
-                    detail="Manager not available",
-                )
-            runtime_tenant_id = (
-                resolve_runtime_tenant_id(tenant_id, source_id) or tenant_id
-            )
-            mgr = await _get_cron_manager(manager, runtime_tenant_id, agent_id)
-            if mgr is None:
-                raise HTTPException(
-                    status_code=404,
-                    detail="CronManager not found",
-                )
-            if task_type == "heartbeat":
-                await mgr.run_heartbeat()
-            elif task_type == "dream":
-                await mgr.run_dream()
-            else:
-                if not job_id:
-                    raise HTTPException(
-                        status_code=400,
-                        detail="job_id required for task_type=job",
-                    )
-                # 调度回调触发的是自动执行，不应走手动执行分支。
-                job = await _get_cron_job_for_dispatch(mgr, job_id)
-                is_dispatch_service_callback = _is_dispatch_service_callback(
-                    params,
-                )
-                if (
-                    is_batch_dispatch_managed_broadcast_child(job)
-                    and not is_dispatch_service_callback
-                ):
-                    logger.info(
-                        "Callback skipped for batch-managed broadcast child: tenant=%s agent=%s job=%s",
-                        tenant_id,
-                        agent_id,
-                        job_id,
-                    )
-                    return {
-                        "status": "ok",
-                        "task_type": task_type,
-                        "skipped": "batch_managed_child",
-                    }
-                if (
-                    _job_dispatch_intents_enabled(job)
-                    and not is_dispatch_service_callback
-                ):
-                    logger.info(
-                        "Callback skipped for batch-managed broadcast parent: tenant=%s agent=%s job=%s",
-                        tenant_id,
-                        agent_id,
-                        job_id,
-                    )
-                    return {
-                        "status": "ok",
-                        "task_type": task_type,
-                        "skipped": "batch_managed_external_callback",
-                    }
-                dispatch_meta = _build_dispatch_callback_meta(params) or {}
-                dispatch_meta.update(
-                    build_b3_dispatch_meta(getattr(request, "headers", {})),
-                )
-                run_kwargs = {
-                    "is_manual": False,
-                    "source_id": source_id,
-                }
-                if dispatch_meta:
-                    run_kwargs["dispatch_meta"] = dispatch_meta
-                await mgr.run_job(job_id, **run_kwargs)
+            if skip_response is not None:
+                return skip_response
         logger.info(
             "Callback dispatched: type=%s tenant=%s agent=%s job=%s",
             task_type,

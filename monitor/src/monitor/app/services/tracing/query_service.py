@@ -1533,22 +1533,24 @@ class TracingQueryService:  # pylint: disable=too-many-public-methods
 
         # 构建 cron 子查询
         cron_subquery_sql, cron_params = self._build_cron_subquery(
-            source_id,
-            start_date,
-            end_date,
+            source_id=source_id,
+            start_date=start_date,
+            end_date=end_date,
+            bbk_ids=bbk_ids,
         )
 
         # 构建主查询
         offset = (page - 1) * page_size
         query, final_params = self._build_users_query(
-            source_id,
-            where_sql,
-            cron_subquery_sql,
-            order_by,
-            params,
-            cron_params,
-            page_size,
-            offset,
+            source_id=source_id,
+            where_sql=where_sql,
+            cron_subquery_sql=cron_subquery_sql,
+            order_by=order_by,
+            params=params,
+            cron_params=cron_params,
+            page_size=page_size,
+            offset=offset,
+            bbk_ids=bbk_ids,
         )
 
         rows = await self._db.fetch_all(query, tuple(final_params))
@@ -1614,6 +1616,7 @@ class TracingQueryService:  # pylint: disable=too-many-public-methods
         source_id: str,
         start_date: Optional[datetime],
         end_date: Optional[datetime],
+        bbk_ids: Optional[str] = None,
     ) -> tuple[str, list[Any]]:
         """构建 cron 执行统计子查询的 WHERE 条件."""
         cron_where: list[str] = ["j.status != %s", "j.deleted_at IS NULL"]
@@ -1635,6 +1638,12 @@ class TracingQueryService:  # pylint: disable=too-many-public-methods
             cron_where.append("j.source_id = %s")
             cron_params.append(source_id)
 
+        if bbk_ids:
+            _, bbk_params = build_cron_bbk_in_filter(bbk_ids)
+            placeholders = ", ".join(["%s"] * len(bbk_params))
+            cron_where.append(f"j.bbk_id IN ({placeholders})")
+            cron_params.extend(bbk_params)
+
         return " AND ".join(cron_where), cron_params
 
     def _build_users_query(
@@ -1647,8 +1656,15 @@ class TracingQueryService:  # pylint: disable=too-many-public-methods
         cron_params: list[Any],
         page_size: int,
         offset: int,
+        bbk_ids: Optional[str] = None,
     ) -> tuple[str, list[Any]]:
-        """构建用户查询 SQL."""
+        """Build the user list query and its ordered parameters."""
+        _, bbk_subquery_params = build_bbk_in_filter(bbk_ids)
+        bbk_in_clause = ""
+        if bbk_subquery_params:
+            placeholders = ", ".join(["%s"] * len(bbk_subquery_params))
+            bbk_in_clause = f" AND bbk_id IN ({placeholders})"
+
         if source_id == "all":
             query = f"""
                 SELECT t.user_id,
@@ -1660,7 +1676,10 @@ class TracingQueryService:  # pylint: disable=too-many-public-methods
                        COALESCE(MAX(ce.cron_executions), 0) as cron_executions,
                        COALESCE(MAX(ce.cron_success), 0) as cron_success,
                        (SELECT COUNT(*) FROM swe_tracing_spans s
-                        WHERE s.trace_id IN (SELECT trace_id FROM swe_tracing_traces WHERE user_id = t.user_id)
+                        WHERE s.trace_id IN (
+                            SELECT trace_id FROM swe_tracing_traces
+                            WHERE user_id = t.user_id{bbk_in_clause}
+                        )
                         AND s.skill_name IS NOT NULL) as total_skills,
                        MAX(t.user_name) as user_name,
                        MAX(t.bbk_id) as bbk_id,
@@ -1681,7 +1700,12 @@ class TracingQueryService:  # pylint: disable=too-many-public-methods
                 ORDER BY {order_by}
                 LIMIT %s OFFSET %s
             """
-            final_params = cron_params + params + [page_size, offset]
+            final_params = (
+                bbk_subquery_params
+                + cron_params
+                + params
+                + [page_size, offset]
+            )
         else:
             query = f"""
                 SELECT t.user_id,
@@ -1694,7 +1718,11 @@ class TracingQueryService:  # pylint: disable=too-many-public-methods
                        COALESCE(MAX(ce.cron_success), 0) as cron_success,
                        (SELECT COUNT(*) FROM swe_tracing_spans s
                         WHERE s.source_id = %s
-                        AND s.trace_id IN (SELECT trace_id FROM swe_tracing_traces WHERE user_id = t.user_id AND source_id = %s)
+                        AND s.trace_id IN (
+                            SELECT trace_id FROM swe_tracing_traces
+                            WHERE user_id = t.user_id
+                              AND source_id = %s{bbk_in_clause}
+                        )
                         AND s.skill_name IS NOT NULL) as total_skills,
                        MAX(t.user_name) as user_name,
                        MAX(t.bbk_id) as bbk_id,
@@ -1717,6 +1745,7 @@ class TracingQueryService:  # pylint: disable=too-many-public-methods
             """
             final_params = (
                 [source_id, source_id]
+                + bbk_subquery_params
                 + cron_params
                 + params
                 + [page_size, offset]
