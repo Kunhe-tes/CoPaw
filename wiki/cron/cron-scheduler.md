@@ -1,6 +1,6 @@
 # Cron 存储、调度与入口
 
-本文说明 cron 任务如何落盘、如何同步外部调度平台、创建更新时写入哪些派生字段，以及 Console、CLI、外部回调分别如何进入同一套生命周期。
+本文说明 cron 任务如何落盘、普通/批调度物理 timer 如何同步外部调度平台、创建更新时写入哪些派生字段，以及 Console、CLI、外部回调分别如何进入同一套生命周期。
 
 返回 [Cron 定时任务模块索引](README.md)。
 
@@ -45,6 +45,8 @@
 | `SWE_CRON_SCHEDULER_CLIENT_REMARK` | 外部平台 clientRemark |
 | `SWE_SERVER_DOMAIN` | 拼接回调地址，默认 `http://localhost:8000` |
 | `SWE_INTERNAL_TOKEN` | `/api/internal/*` 可选内部调用 token |
+| `SWE_CRON_DISPATCH_INTENTS_ENABLED` | 是否允许广播源任务切换到独立 Scheduler 批调度 |
+| `SWE_SCHEDULER_API_URL` | 批调度 Scheduler API 基址，默认 `http://localhost:9100/api` |
 
 外部平台注册时，`RealSchedulerAdapter` 会调用：
 
@@ -68,7 +70,9 @@
 }
 ```
 
-外部平台到点后把 `jobParam` 原样带回 `/api/internal/cron/callback`。SWE 用它恢复租户、来源、Agent 和任务类型。
+普通任务到点后，外部平台把 `jobParam` 原样带回 `/api/internal/cron/callback`。SWE 用它恢复租户、来源、Agent 和任务类型。
+
+批调度是另一条物理 timer 合同：源任务切换后，普通 timer 暂停，外部平台改为回调 `/api/scheduler/cron/callback`。独立 Scheduler 创建父任务与广播子任务 intents，再回调各自所属 SWE。详见 [Cron 批调度与独立 Scheduler](cron-batch-dispatch.md)。
 
 ## 创建与更新流程
 
@@ -109,6 +113,11 @@ PUT /api/cron/jobs/{job_id}
 | `pause_reason` | `manual` 或 `auto_unread_threshold` |
 | `auto_paused_at` | 自动暂停时间 |
 | `external_job_id` | 外部调度平台任务 ID |
+| `broadcast_dispatch_intents_enabled` | 是否由独立 Scheduler intents 管理自动执行 |
+| `batch_dispatch_external_job_id` | 批调度物理 timer ID，关闭模式后保留以便复用 |
+| `batch_dispatch_cron` | 提前触发后注册给物理 timer 的 cron |
+| `batch_dispatch_offset_minutes` | 相对父任务原 cron 的提前分钟数 |
+| `batch_dispatch_cron_warning` | 无法安全平移 cron 时的 fallback 原因 |
 
 ## Console 与 CLI
 
@@ -125,6 +134,10 @@ Console 前端接口集中在 `console/src/api/modules/cronjob.ts`：
 | `runCronJob()` | `POST /api/cron/jobs/{job_id}/run` |
 | `markTaskRead()` | `POST /api/cron/jobs/{job_id}/task/mark-read` |
 | `broadcastCronJob()` | `POST /api/cron/jobs/{job_id}/broadcast` |
+| `getCurrentBroadcastTask()` | `GET /api/cron/jobs/{job_id}/broadcast/tasks/current` |
+| `getBroadcastTask()` | `GET /api/cron/jobs/{job_id}/broadcast/tasks/{task_id}` |
+| `enableBatchDispatch()` | `POST /api/cron/jobs/{job_id}/batch-dispatch/enable` |
+| `disableBatchDispatch()` | `POST /api/cron/jobs/{job_id}/batch-dispatch/disable` |
 
 `console/src/pages/Control/CronJobs/helpers.ts` 负责把表单上的 daily / weekly / custom cron、执行模型选择项和 `CronJobSpec` 互相转换。
 
@@ -147,7 +160,7 @@ CLI 支持通过：
 
 生成和 Console 一致的 `model_slot`。
 
-## 外部回调与自动执行
+## 普通外部回调与自动执行
 
 外部调度平台统一回调：
 
@@ -169,3 +182,18 @@ POST /api/internal/cron/callback
    - 其他 -> `CronManager.run_job(job_id, is_manual=False, source_id=source_id)`
 
 这里的 `source_id` 很重要。旧任务可能没有持久化 source，`CronManager._with_execution_source_identity()` 会在执行前用回调里的 source 补齐 legacy job 的执行身份。
+
+## 批调度回调边界
+
+批调度源任务和子任务的自动执行必须来自 Scheduler dispatch callback。`internal_cron_callback()` 会校验 dispatch 身份，并把 `dispatch_intent_id`、`dispatch_batch_id`、`dispatch_attempt`、模型作用域和父计划时间传给 `CronManager.run_job()`。
+
+如果一个已经由批调度管理的父任务或子任务收到没有 dispatch 身份的旧普通 timer 回调，SWE 会跳过执行，避免模式切换期间重复触发。手动运行仍直接走 `run_job(is_manual=True)`，不经过 Scheduler intent。
+
+模式切换规则：
+
+- 启用批调度：暂停源任务普通 timer，创建或更新 `[批调度]` 物理 timer；广播子任务的普通 timer 随后台同步暂停。
+- 关闭批调度：暂停批调度物理 timer，恢复源任务普通 timer，并后台恢复广播子任务 timer。
+- 物理 timer 提前 1-24 小时触发；不支持平移的 cron 原样注册并记录 warning。
+- `batch_dispatch_external_job_id` 关闭后不删除，以便下一次开启时更新并复用同一外部任务。
+
+独立 Scheduler 自己不会扫描 `swe_cron_jobs` 判断哪些父任务到点；`enqueue_due_parent_intents_once()` 是兼容保留的 no-op，批次唯一触发源是外部物理 timer callback。

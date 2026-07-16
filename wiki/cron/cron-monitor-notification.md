@@ -39,8 +39,8 @@ resolve_cron_unread_auto_pause_config(get_current_source_system_config())
 
 第一阶段，执行结束时写 Monitor：
 
-- `MonitorSyncClient.record_execution()` 同步 execution。
-- 只有 `agent` 且 status 为 `success` 的任务需要通知。
+- 普通执行由 `MonitorSyncClient.record_execution()` 同步 execution；带完整 dispatch 身份的批调度执行先同步独立 Scheduler，再由共享 execution 数据进入 Monitor 查询面。
+- 只有调用方明确写入 `need_notification=1` 的成功异步 execution 才需要通知。
 - 手动执行成功默认 `is_read = true`。
 - 自动执行成功默认产生 `notification_status = "pending"`。
 - 广播任务如果 `broadcast_notification_policy == "original_schedule"`，会按原始任务时间计算通知 due time；手动运行不会套这个延迟。
@@ -65,6 +65,18 @@ resolve_cron_unread_auto_pause_config(get_current_source_system_config())
 
 多实例部署时，如果不同 SWE 实例负责不同 source，必须配置 `SWE_CRON_NOTIFICATION_SOURCE_IDS`。Monitor 领取 SQL 会只领取这些 source 的记录，同时允许 `source_id` 为空的 legacy 记录被任意实例竞争。
 
+当前领取硬条件是：
+
+```text
+status = success
+async_status = success
+need_notification = 1
+notification_status = pending
+notification_due_at 已到期
+```
+
+因此仅看到 `notification_status=pending` 还不够。`need_notification=0`、同步执行未完成或 execution 失败都不会被领取。
+
 ## Monitor 同步与查询
 
 SWE 侧 `MonitorSyncClient` 默认 base URL 是：
@@ -82,6 +94,7 @@ SWE 会调用 Monitor：
 | `sync_job()` | `POST /monitor/sync/job` | upsert 定时任务定义 |
 | `delete_job()` | `DELETE /monitor/sync/job/{job_id}` | 标记删除 |
 | `record_execution()` | `POST /monitor/sync/execution` | 写执行记录 |
+| `record_execution()`（完整 dispatch 身份） | `POST /scheduler/cron/execution` | 向独立 Scheduler 回传完成/失败，驱动重试与补位 |
 | `claim_due_notifications()` | `POST /monitor/sync/notifications/claim` | 领取待通知记录 |
 | `mark_notification_sent()` | `POST /monitor/sync/notifications/{id}/sent` | 标记通知成功 |
 | `mark_notification_failed()` | `POST /monitor/sync/notifications/{id}/failed` | 标记通知失败或重试 |
@@ -95,3 +108,45 @@ Monitor 数据表主要是：
 Monitor 写入时间统一处理为北京时间 naive datetime，SWE 侧也会把 UTC 时间转换为 Asia/Shanghai 后再同步，避免表格里出现时区不一致。
 
 Monitor 查询入口在 `monitor/src/monitor/app/routers/cron.py`，提供任务列表、执行历史、概览、订阅概览、导出、已读和未读数查询。
+
+## 批调度批次与 worker 查询
+
+Monitor 直接读取 Scheduler 写入的批调度表，提供：
+
+| 接口 | 主要参数 | 用途 |
+| --- | --- | --- |
+| `GET /api/monitor/cron/dispatch/batches` | `start_time`、`end_time`、`status`、`page`、`page_size` | 分页查询当前 source 的批次 |
+| `GET /api/monitor/cron/dispatch/batches/{batch_id}` | `intent_limit`、`event_limit` | 查询批次统计、intents 和 events |
+| `GET /api/monitor/cron/dispatch/workers` | - | 查询模型作用域 worker 策略和当前容量 |
+
+这些接口沿用 `X-Source-Id` 隔离。批次状态只能说明 Scheduler 编排状态；要定位单个任务为什么没有执行，还需要结合 intent event、SWE execution 和 trace。
+
+详细派发合同见 [Cron 批调度与独立 Scheduler](cron-batch-dispatch.md)。
+
+## 网关侧最新 execution 子任务数
+
+Monitor 还提供一个面向网关的外部接口：
+
+```http
+GET /api/monitor/external/cron/jobs/{job_id}/latest-execution/subtask-count
+X-Source-Id: <source_id>
+```
+
+返回：
+
+```json
+{
+  "job_id": "<job-id>",
+  "execution_id": 123,
+  "trace_id": "<trace-id>",
+  "subtask_count": 8
+}
+```
+
+边界规则：
+
+- 必须提供非空 `X-Source-Id`；Monitor 即使假设网关已完成外部鉴权，也仍按 source 过滤 job。
+- job 不存在返回 404。
+- job 存在但没有 execution 时返回 200，`execution_id`、`trace_id` 为 null，`subtask_count=0`。
+- 最新 execution 按 `actual_time DESC, id DESC` 选择；没有 trace 时计数为 0。
+- 子任务数来自 `swe_cron_subtasks` 中该最新 trace 的记录数，而不是广播子任务数量。
