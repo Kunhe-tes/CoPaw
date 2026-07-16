@@ -18,6 +18,6 @@ AFTER notification_content_zhaohu;
 -- 表: swe_cron_executions 添加 need_notification 字段
 -- -----------------------------------------------------------
 ALTER TABLE swe_cron_executions
-ADD COLUMN IF NOT EXISTS need_notification TINYINT(1) DEFAULT 1
+ADD COLUMN IF NOT EXISTS need_notification TINYINT(1) DEFAULT 0
 COMMENT '是否需要通知: 0-否, 1-是'
 AFTER async_status;
