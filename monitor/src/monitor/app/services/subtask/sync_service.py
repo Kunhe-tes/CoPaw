@@ -190,6 +190,20 @@ class SyncService:
             old_status=subtask.status,
         )
 
+        # 固定 task_id="default" 的子任务直接标记成功
+        if subtask.task_id == "default":
+            await self.query_service.update_subtask_status(
+                subtask.task_id,
+                subtask.trace_id,
+                "SUC",
+            )
+            detail.new_status = "SUC"
+            logger.info(
+                "Auto-marked default subtask as SUC: trace_id=%s",
+                subtask.trace_id[:20],
+            )
+            return detail
+
         # 兜底检查：超过24小时的pending子任务标记TIMEOUT
         if self._check_pending_timeout(subtask, now):
             hours_pending = int(
