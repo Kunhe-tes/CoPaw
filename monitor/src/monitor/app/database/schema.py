@@ -331,7 +331,7 @@ CREATE TABLE IF NOT EXISTS swe_cron_subtasks (
     cust_nm      VARCHAR(255) DEFAULT NULL COMMENT '任务中客户名称',
     notification_content_wplus VARCHAR(5000) DEFAULT NULL COMMENT 'W+渠道通知消息内容',
     notification_content_zhaohu VARCHAR(5000) DEFAULT NULL COMMENT '招乎渠道通知消息内容',
-    need_notification TINYINT(1) DEFAULT 0 COMMENT '是否需要通知: 0-否, 1-是',
+    need_notification TINYINT(1) DEFAULT 1 COMMENT '是否需要通知: 0-否, 1-是',
     status       VARCHAR(16) DEFAULT NULL COMMENT '子任务状态: SUC/FAIL/PART_SUC/TIMEOUT',
     info         VARCHAR(2048) DEFAULT '' COMMENT '预留扩展信息',
     created_at   DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
