@@ -579,6 +579,45 @@ def _copy_skill_dir(source: Path, target: Path) -> None:
     )
 
 
+def _move_skill_dir(source: Path, target: Path) -> None:
+    """Move one managed skill directory into its authoritative root."""
+    target.parent.mkdir(parents=True, exist_ok=True)
+    source.replace(target)
+
+
+def _reconcile_registered_skill_location(
+    workspace_dir: Path,
+    skill_name: str,
+    entry: dict[str, Any],
+) -> Path | None:
+    """Place a registered skill in the root selected by its manifest state."""
+    active = resolve_workspace_managed_skill_dir(
+        workspace_dir,
+        skill_name,
+        enabled=True,
+    )
+    disabled = resolve_workspace_managed_skill_dir(
+        workspace_dir,
+        skill_name,
+        enabled=False,
+    )
+
+    if active.exists() and disabled.exists():
+        shutil.rmtree(disabled)
+
+    desired = resolve_workspace_managed_skill_dir(
+        workspace_dir,
+        skill_name,
+        enabled=bool(entry.get("enabled", False)),
+    )
+    current = active if active.exists() else disabled
+    if not current.exists():
+        return None
+    if current != desired:
+        _move_skill_dir(current, desired)
+    return desired
+
+
 def _lock_path_for(json_path: Path) -> Path:
     return json_path.with_name(f".{json_path.name}.lock")
 
@@ -1264,19 +1303,21 @@ def reconcile_pool_manifest(
 def reconcile_workspace_manifest(workspace_dir: Path) -> dict[str, Any]:
     """Reconcile one workspace manifest with the filesystem.
 
-    This is the bridge between editable files under ``<workspace>/skills`` and
-    runtime-facing state in ``<workspace>/.skill_state/manifest.json``.
+    The v2 manifest is authoritative for which workspace packages are managed.
+    Registered enabled packages live under ``<workspace>/skills``; registered
+    disabled packages live under ``<workspace>/.disabled_skills``.
 
     Behavior summary:
-    - Discover every on-disk skill directory with ``SKILL.md``.
+    - Reconcile only registered manifest entries; ignore unmanaged directories.
+    - Move each registered package into the root selected by ``enabled``.
+    - Prefer the runtime copy if a registered package exists in both roots.
     - Preserve user state such as ``enabled``, ``channels``, and ``config``.
-    - Refresh metadata and sync status from the real files.
-    - Remove manifest entries whose directories no longer exist.
+    - Sanitize registered names and refresh metadata from the resolved package.
+    - Remove registered entries whose package is missing from both roots.
 
     Example:
-        if a user deletes ``workspaces/a1/skills/demo_skill`` by hand, the
-        next reconcile removes ``demo_skill`` from
-        ``workspaces/a1/.skill_state/manifest.json``.
+        if registered ``demo_skill`` is disabled, the next reconcile moves it
+        from ``skills/demo_skill`` to ``.disabled_skills/demo_skill``.
     """
     workspace_dir.mkdir(parents=True, exist_ok=True)
     workspace_skills_dir = get_workspace_skills_dir(workspace_dir)
@@ -1284,40 +1325,57 @@ def reconcile_workspace_manifest(workspace_dir: Path) -> dict[str, Any]:
     manifest_path = get_workspace_skill_manifest_path(workspace_dir)
     if not manifest_path.exists():
         _write_json_atomic(manifest_path, _default_workspace_manifest())
-    _rename_skill_dirs_to_utf8_safe(
-        workspace_skills_dir,
-        manifest_path,
-        _default_workspace_manifest(),
-    )
-    builtin_sigs = _get_builtin_signatures()
 
     def _update(payload: dict[str, Any]) -> dict[str, Any]:
         payload.setdefault("skills", {})
         skills = payload["skills"]
-
-        discovered = {
-            path.name: path
-            for path in workspace_skills_dir.iterdir()
-            if path.is_dir() and (path / "SKILL.md").exists()
-        }
-
-        for skill_name, skill_dir in sorted(discovered.items()):
-            existing = skills.get(skill_name) or {}
-            enabled = bool(existing.get("enabled", False))
-            channels = existing.get("channels") or ["all"]
-
-            # Inherit source from manifest when the entry already exists.
-            # For new skills, default to "builtin" if name matches a
-            # packaged builtin, otherwise "customized".
-            if existing:
-                source = existing.get("source", "customized")
-            else:
-                source = (
-                    "builtin" if skill_name in builtin_sigs else "customized"
+        registered = dict(skills)
+        reconciled: dict[str, Any] = {}
+        disabled_skills_dir = get_workspace_disabled_skills_dir(workspace_dir)
+        occupied_names = set(registered)
+        for root in (workspace_skills_dir, disabled_skills_dir):
+            if root.exists():
+                occupied_names.update(
+                    path.name for path in root.iterdir() if path.is_dir()
                 )
 
-            metadata = _build_skill_metadata(
+        for raw_skill_name, raw_entry in sorted(registered.items()):
+            skill_name = _normalize_skill_dir_name(raw_skill_name)
+            existing = raw_entry or {}
+            sanitized = sanitize_fs_text(skill_name)
+            log_sanitized_fs_text(
+                logger,
+                source="skills.reconcile_workspace_manifest",
+                original=skill_name,
+                sanitized=sanitized,
+            )
+            resolved_name = sanitized.value or skill_name
+            occupied_names.discard(skill_name)
+            if resolved_name in occupied_names:
+                resolved_name = suggest_conflict_name(
+                    resolved_name,
+                    occupied_names,
+                )
+
+            skill_dir = _reconcile_registered_skill_location(
+                workspace_dir,
                 skill_name,
+                existing,
+            )
+            if skill_dir is None:
+                continue
+            if resolved_name != skill_name:
+                renamed_dir = skill_dir.with_name(resolved_name)
+                _move_skill_dir(skill_dir, renamed_dir)
+                skill_dir = renamed_dir
+            occupied_names.add(resolved_name)
+
+            enabled = bool(existing.get("enabled", False))
+            channels = existing.get("channels") or ["all"]
+            source = existing.get("source", "customized")
+
+            metadata = _build_skill_metadata(
+                resolved_name,
                 skill_dir,
                 source=source,
                 protected=False,
@@ -1338,13 +1396,11 @@ def reconcile_workspace_manifest(workspace_dir: Path) -> dict[str, Any]:
             }
             if "config" in existing:
                 next_entry["config"] = existing.get("config")
-            skills[skill_name] = next_entry
-            skills[skill_name].pop("sync_to_hub", None)
-            skills[skill_name].pop("sync_to_pool", None)
+            reconciled[resolved_name] = next_entry
+            reconciled[resolved_name].pop("sync_to_hub", None)
+            reconciled[resolved_name].pop("sync_to_pool", None)
 
-        for skill_name in list(skills):
-            if skill_name not in discovered:
-                skills.pop(skill_name, None)
+        payload["skills"] = reconciled
 
         return payload
 
@@ -1457,7 +1513,11 @@ def resolve_effective_skills(
             continue
         channels = entry.get("channels") or ["all"]
         if "all" in channels or channel_name in channels:
-            skill_dir = get_workspace_skills_dir(workspace_dir) / skill_name
+            skill_dir = resolve_workspace_managed_skill_dir(
+                workspace_dir,
+                skill_name,
+                enabled=True,
+            )
             if skill_dir.exists():
                 resolved.append(skill_name)
     return resolved
