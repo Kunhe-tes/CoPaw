@@ -6,6 +6,7 @@ from pathlib import Path
 
 import pytest
 
+from swe.agents import skills_manager
 from swe.agents.skills_manager import (
     _default_workspace_manifest,
     get_legacy_workspace_skill_manifest_path,
@@ -17,6 +18,7 @@ from swe.agents.skills_manager import (
     resolve_effective_skills,
     resolve_workspace_managed_skill_dir,
 )
+from swe.utils.fs_text import SanitizedFsText
 
 
 def _write_skill(path: Path, marker: str) -> None:
@@ -202,3 +204,70 @@ def test_effective_skill_resolution_fails_closed_when_move_fails(
     with pytest.raises(OSError, match="cannot move registered skill"):
         resolve_effective_skills(workspace, "console")
     assert not active.exists()
+
+
+def test_reconcile_rolls_back_sanitized_rename_when_manifest_write_fails(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace = tmp_path / "workspace"
+    original_dir = workspace / "skills" / "bad-skill"
+    sanitized_dir = workspace / "skills" / "safe-skill"
+    _write_skill(original_dir, "registered-copy")
+    _write_manifest(workspace, {"bad-skill": _entry(enabled=True)})
+    manifest_path = get_workspace_skill_manifest_path(workspace)
+
+    original_sanitize = skills_manager.sanitize_fs_text
+
+    def sanitize_bad_skill(text: str) -> SanitizedFsText:
+        if text == "bad-skill":
+            return SanitizedFsText(
+                value="safe-skill",
+                changed=True,
+                strategy="replace",
+            )
+        return original_sanitize(text)
+
+    def fail_manifest_write(_path: Path, _payload: dict) -> None:
+        raise OSError("manifest write failed")
+
+    monkeypatch.setattr(
+        skills_manager,
+        "sanitize_fs_text",
+        sanitize_bad_skill,
+    )
+    monkeypatch.setattr(
+        skills_manager,
+        "_write_json_atomic",
+        fail_manifest_write,
+    )
+
+    with pytest.raises(OSError, match="manifest write failed"):
+        reconcile_workspace_manifest(workspace)
+
+    assert original_dir.exists()
+    assert not sanitized_dir.exists()
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    assert "bad-skill" in manifest["skills"]
+    assert "safe-skill" not in manifest["skills"]
+
+
+def test_reconcile_rejects_malformed_workspace_manifest_without_mutation(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "workspace"
+    active = workspace / "skills" / "demo"
+    disabled = workspace / ".disabled_skills" / "demo"
+    _write_skill(active, "active-copy")
+    _write_skill(disabled, "disabled-copy")
+    manifest_path = get_workspace_skill_manifest_path(workspace)
+    manifest_path.parent.mkdir(parents=True, exist_ok=True)
+    malformed = "{not valid json"
+    manifest_path.write_text(malformed, encoding="utf-8")
+
+    with pytest.raises(json.JSONDecodeError):
+        reconcile_workspace_manifest(workspace)
+
+    assert manifest_path.read_text(encoding="utf-8") == malformed
+    assert active.exists()
+    assert disabled.exists()

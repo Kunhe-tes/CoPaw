@@ -1300,6 +1300,40 @@ def reconcile_pool_manifest(
     )
 
 
+def _mutate_workspace_manifest_strict(
+    manifest_path: Path,
+    mutator: Callable[[dict[str, Any]], _RegistryResult],
+    sanitized_rename_moves: list[tuple[Path, Path]],
+) -> _RegistryResult:
+    """Strictly mutate a workspace manifest and roll back key renames."""
+    with _file_write_lock(_lock_path_for(manifest_path)):
+        if manifest_path.exists():
+            payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+        else:
+            payload = _default_workspace_manifest()
+
+        try:
+            result = mutator(payload)
+            _write_json_atomic(manifest_path, payload)
+            return result
+        except Exception as reconcile_error:
+            rollback_errors: list[Exception] = []
+            for original_path, renamed_path in reversed(
+                sanitized_rename_moves,
+            ):
+                try:
+                    _move_skill_dir(renamed_path, original_path)
+                except Exception as rollback_error:
+                    rollback_errors.append(rollback_error)
+            if rollback_errors:
+                raise ExceptionGroup(
+                    "Workspace manifest reconciliation and sanitized rename "
+                    "rollback both failed",
+                    [reconcile_error, *rollback_errors],
+                )
+            raise
+
+
 def reconcile_workspace_manifest(workspace_dir: Path) -> dict[str, Any]:
     """Reconcile one workspace manifest with the filesystem.
 
@@ -1319,14 +1353,13 @@ def reconcile_workspace_manifest(workspace_dir: Path) -> dict[str, Any]:
         if registered ``demo_skill`` is disabled, the next reconcile moves it
         from ``skills/demo_skill`` to ``.disabled_skills/demo_skill``.
     """
-    workspace_dir.mkdir(parents=True, exist_ok=True)
-    workspace_skills_dir = get_workspace_skills_dir(workspace_dir)
-    workspace_skills_dir.mkdir(parents=True, exist_ok=True)
     manifest_path = get_workspace_skill_manifest_path(workspace_dir)
-    if not manifest_path.exists():
-        _write_json_atomic(manifest_path, _default_workspace_manifest())
+    sanitized_rename_moves: list[tuple[Path, Path]] = []
 
     def _update(payload: dict[str, Any]) -> dict[str, Any]:
+        workspace_dir.mkdir(parents=True, exist_ok=True)
+        workspace_skills_dir = get_workspace_skills_dir(workspace_dir)
+        workspace_skills_dir.mkdir(parents=True, exist_ok=True)
         payload.setdefault("skills", {})
         skills = payload["skills"]
         registered = dict(skills)
@@ -1367,6 +1400,7 @@ def reconcile_workspace_manifest(workspace_dir: Path) -> dict[str, Any]:
             if resolved_name != skill_name:
                 renamed_dir = skill_dir.with_name(resolved_name)
                 _move_skill_dir(skill_dir, renamed_dir)
+                sanitized_rename_moves.append((skill_dir, renamed_dir))
                 skill_dir = renamed_dir
             occupied_names.add(resolved_name)
 
@@ -1404,10 +1438,10 @@ def reconcile_workspace_manifest(workspace_dir: Path) -> dict[str, Any]:
 
         return payload
 
-    return _mutate_json(
+    return _mutate_workspace_manifest_strict(
         manifest_path,
-        _default_workspace_manifest(),
         _update,
+        sanitized_rename_moves,
     )
 
 
