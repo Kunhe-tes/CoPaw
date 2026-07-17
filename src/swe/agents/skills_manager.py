@@ -1300,6 +1300,22 @@ def reconcile_pool_manifest(
     )
 
 
+class WorkspaceManifestReconciliationError(RuntimeError):
+    """Report a reconciliation failure whose rename rollback also failed."""
+
+    def __init__(
+        self,
+        reconciliation_error: Exception,
+        rollback_errors: tuple[Exception, ...],
+    ) -> None:
+        super().__init__(
+            "Workspace manifest reconciliation and sanitized rename "
+            "rollback both failed",
+        )
+        self.reconciliation_error = reconciliation_error
+        self.rollback_errors = rollback_errors
+
+
 def _mutate_workspace_manifest_strict(
     manifest_path: Path,
     mutator: Callable[[dict[str, Any]], _RegistryResult],
@@ -1326,11 +1342,10 @@ def _mutate_workspace_manifest_strict(
                 except Exception as rollback_error:
                     rollback_errors.append(rollback_error)
             if rollback_errors:
-                raise ExceptionGroup(
-                    "Workspace manifest reconciliation and sanitized rename "
-                    "rollback both failed",
-                    [reconcile_error, *rollback_errors],
-                )
+                raise WorkspaceManifestReconciliationError(
+                    reconcile_error,
+                    tuple(rollback_errors),
+                ) from reconcile_error
             raise
 
 

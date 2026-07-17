@@ -252,6 +252,67 @@ def test_reconcile_rolls_back_sanitized_rename_when_manifest_write_fails(
     assert "safe-skill" not in manifest["skills"]
 
 
+def test_reconcile_preserves_publication_and_rollback_failures(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace = tmp_path / "workspace"
+    original_dir = workspace / "skills" / "bad-skill"
+    sanitized_dir = workspace / "skills" / "safe-skill"
+    _write_skill(original_dir, "registered-copy")
+    _write_manifest(workspace, {"bad-skill": _entry(enabled=True)})
+
+    original_sanitize = skills_manager.sanitize_fs_text
+    original_move = skills_manager._move_skill_dir
+    publication_error = OSError("manifest write failed")
+    rollback_error = OSError("rollback failed")
+
+    def sanitize_bad_skill(text: str) -> SanitizedFsText:
+        if text == "bad-skill":
+            return SanitizedFsText(
+                value="safe-skill",
+                changed=True,
+                strategy="replace",
+            )
+        return original_sanitize(text)
+
+    def fail_manifest_write(_path: Path, _payload: dict) -> None:
+        raise publication_error
+
+    def fail_rollback(source: Path, target: Path) -> None:
+        if source == sanitized_dir and target == original_dir:
+            raise rollback_error
+        original_move(source, target)
+
+    monkeypatch.setattr(
+        skills_manager,
+        "sanitize_fs_text",
+        sanitize_bad_skill,
+    )
+    monkeypatch.setattr(
+        skills_manager,
+        "_write_json_atomic",
+        fail_manifest_write,
+    )
+    monkeypatch.setattr(
+        skills_manager,
+        "_move_skill_dir",
+        fail_rollback,
+    )
+
+    with pytest.raises(RuntimeError) as exc_info:
+        reconcile_workspace_manifest(workspace)
+
+    error = exc_info.value
+    assert isinstance(
+        error,
+        skills_manager.WorkspaceManifestReconciliationError,
+    )
+    assert error.reconciliation_error is publication_error
+    assert error.rollback_errors == (rollback_error,)
+    assert error.__cause__ is publication_error
+
+
 def test_reconcile_rejects_malformed_workspace_manifest_without_mutation(
     tmp_path: Path,
 ) -> None:
