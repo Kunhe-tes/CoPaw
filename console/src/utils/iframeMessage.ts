@@ -189,6 +189,7 @@ async function handleUserDataMessage(
     authHeaders,
     parentOrigin: origin,
     bbk: message.data.bbkId ?? null,
+    hideChat: toBoolean(message.data.hideChat),
   });
 
   // 等待 userName 获取完成后再标记初始化完成

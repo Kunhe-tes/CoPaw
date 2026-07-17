@@ -104,6 +104,7 @@ export default function MainLayout() {
   // iframe 传递的 hideMenu === true 时隐藏 Sidebar
   // URL 参数 origin=Y 会自动设置 hideMenu=true（见 iframeMessage.ts）
   const hideMenu = useIframeStore((state) => state.hideMenu);
+  const hideChat = useIframeStore((state) => state.hideChat);
   const activeSourceId =
     useIframeStore((state) => state.source) || DEFAULT_SOURCE_ID;
   const loadEffectiveConfig = useSourceSystemConfigStore(
@@ -135,7 +136,7 @@ export default function MainLayout() {
           <ConsoleCronBubble />
           <div className={`page-content${isReportViewPage ? " single-page-content" : ""}`}>
             <Routes>
-              <Route path="/" element={<Navigate to="/chat" replace />} />
+              {hideChat ? <Route path="/" element={<Navigate to="/market" replace />} /> : <Route path="/" element={<Navigate to="/chat" replace />} />}
               <Route path="/chat/*" element={<Chat />} />
               <Route path="/channels" element={<ChannelsPage />} />
               <Route path="/sessions" element={<SessionsPage />} />
