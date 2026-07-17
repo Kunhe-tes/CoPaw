@@ -79,6 +79,9 @@ async def test_process_workspace_skills_writes_v2_manifest_path(
 
     manifest_path = get_workspace_skill_manifest_path(workspace_dir)
     assert json.loads(manifest_path.read_text(encoding="utf-8")) == {
+        "schema_version": "workspace-skill-manifest.v1",
+        "layout_version": 2,
+        "version": 0,
         "skills": {"demo": {"enabled": True}},
     }
     assert not (workspace_dir / "skill.json").exists()

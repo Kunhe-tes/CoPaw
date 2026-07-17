@@ -28,6 +28,7 @@ from pydantic import BaseModel, Field
 
 from ...marketplace.fs import (
     _atomic_write_json,
+    default_workspace_skill_manifest,
     get_skill_dir,
     get_workspace_skill_manifest_path,
 )
@@ -1155,7 +1156,7 @@ def _find_tenant_dirs_for_source_id(
 def _read_workspace_manifest(manifest_path: Path) -> tuple[dict, str | None]:
     """读取 workspace manifest，返回 (manifest, error)."""
     if not manifest_path.exists():
-        return {"skills": {}}, None
+        return default_workspace_skill_manifest(), None
     try:
         return json.loads(manifest_path.read_text(encoding="utf-8")), None
     except json.JSONDecodeError as e:
@@ -1174,7 +1175,7 @@ def _extract_skill_fields(
 
     Args:
         skill_dir: 技能目录
-        entry: skill.json 中的 entry 数据
+        entry: Workspace manifest entry dict
         skill_name: 技能名
         user_id: 用户ID（数据库 tenant_id）
         source_id: 租户 source_id
@@ -1478,7 +1479,7 @@ async def _process_single_skill(
         skill_dir: 技能目录
         user_id: 用户ID（数据库 tenant_id）
         source_id: 租户 source_id
-        skills_dict: skill.json 中的 skills dict
+        skills_dict: Workspace manifest skills dict
         registry: SkillRegistry
         force: 是否强制重新生成
         dry_run: 试运行模式

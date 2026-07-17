@@ -2407,7 +2407,8 @@ class MarketplaceService:
     ) -> dict[str, Any]:
         """迁移技能目录内 skill.json 字段到 workspace manifest.
 
-        将以下字段从 skills/<技能名>/skill.json 合并到 workspaces/<agent_id>/skill.json:
+        将以下字段从 skills/<技能名>/skill.json 合并到
+        workspaces/<agent_id>/.skill_state/manifest.json:
         - creator_id
         - creator_name
         - bbk_id

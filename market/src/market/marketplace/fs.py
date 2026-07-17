@@ -448,6 +448,16 @@ def get_workspace_skill_manifest_path(workspace_dir: Path) -> Path:
     return Path(workspace_dir) / ".skill_state" / "manifest.json"
 
 
+def default_workspace_skill_manifest() -> dict:
+    """Return a fresh Workspace v2 skill manifest payload."""
+    return {
+        "schema_version": "workspace-skill-manifest.v1",
+        "layout_version": 2,
+        "version": 0,
+        "skills": {},
+    }
+
+
 def get_user_skill_manifest_path(
     swe_root: Path,
     user_id: str,
@@ -482,22 +492,12 @@ def read_user_skill_manifest(
         source_id,
     )
     if not manifest_path.exists():
-        return {
-            "schema_version": "workspace-skill-manifest.v1",
-            "layout_version": 2,
-            "version": 0,
-            "skills": {},
-        }
+        return default_workspace_skill_manifest()
     try:
         return json.loads(manifest_path.read_text(encoding="utf-8"))
     except (json.JSONDecodeError, OSError) as e:
         logger.warning("Failed to read manifest %s: %s", manifest_path, e)
-        return {
-            "schema_version": "workspace-skill-manifest.v1",
-            "layout_version": 2,
-            "version": 0,
-            "skills": {},
-        }
+        return default_workspace_skill_manifest()
 
 
 def check_skill_status_in_manifest(
