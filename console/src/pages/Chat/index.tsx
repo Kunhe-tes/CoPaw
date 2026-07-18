@@ -86,9 +86,7 @@ import {
   getTaskOpenTarget,
   shouldMarkTaskReadOnOpen,
 } from "./taskJobs";
-import {
-  DEFAULT_FORM_VALUES,
-} from "../Control/CronJobs/components";
+import { DEFAULT_FORM_VALUES } from "../Control/CronJobs/components";
 import { buildCronJobFormValues } from "../Control/CronJobs/helpers";
 import {
   extractTaskContentText,
@@ -118,6 +116,8 @@ import TaskProgressFloatingCard from "./components/TaskProgressFloatingCard";
 import GeneratedFilesDrawer from "./components/GeneratedFilesDrawer";
 import { AutoPreviewHtmlProvider } from "@/components/agentscope-chat/AutoPreviewHtmlContext";
 import { HtmlPreviewTrackingProvider } from "@/components/agentscope-chat/HtmlPreviewTrackingContext";
+import { ChatContentOnlyProvider } from "@/components/agentscope-chat/ChatContentOnlyContext";
+import { resolveChatContentOnlyRoute } from "./contentOnlyMode";
 import type {
   ChatApprovalActionCardData,
   ChatRuntimeRequestCardData,
@@ -502,6 +502,11 @@ export default function ChatPage() {
   // 获取动态品牌配置，用于 welcome avatar
   const { theme: brandTheme } = useBrandTheme();
   // ==================== 品牌主题结束 ====================
+  const contentOnlyRoute = useMemo(
+    () => resolveChatContentOnlyRoute(location.pathname, location.search),
+    [location.pathname, location.search],
+  );
+  const isContentOnly = contentOnlyRoute.enabled;
   const chatId = useMemo(() => {
     const match = location.pathname.match(/^\/chat\/(.+)$/);
     return match?.[1];
@@ -1173,17 +1178,13 @@ export default function ChatPage() {
     (task: CronJobSpecOutput) => {
       const formValues = buildCronJobFormValues(task);
       setEditingTask(task);
-      taskEditForm.setFieldsValue(
-        {
-          ...formValues,
-          taskContentText:
-            task.task_type === "text"
-              ? formValues.text || ""
-              : extractTaskContentText(formValues.request?.input),
-        } as Parameters<
-          typeof taskEditForm.setFieldsValue
-        >[0],
-      );
+      taskEditForm.setFieldsValue({
+        ...formValues,
+        taskContentText:
+          task.task_type === "text"
+            ? formValues.text || ""
+            : extractTaskContentText(formValues.request?.input),
+      } as Parameters<typeof taskEditForm.setFieldsValue>[0]);
     },
     [taskEditForm],
   );
@@ -1567,8 +1568,8 @@ export default function ChatPage() {
             <RuntimeLoadingBridge bridgeRef={runtimeLoadingBridgeRef} />
             <ChatHeaderTitle />
             <span style={{ flex: 1 }} />
-            <GeneratedFilesDrawer />
-            <ModelSelector />
+            {!isContentOnly && <GeneratedFilesDrawer />}
+            {!isContentOnly && <ModelSelector />}
             {/* <ChatActionGroup /> */}
           </>
         ),
@@ -1720,6 +1721,7 @@ export default function ChatPage() {
     activeSessionId,
     handleFileUpload,
     isComposingRef,
+    isContentOnly,
     isDark,
     multimodalCaps,
     resolveLogicalRequestSessionId,
@@ -1767,31 +1769,37 @@ export default function ChatPage() {
             >
               {/* ==================== 首页改版 (Kun He) ==================== */}
               {/* 聊天专用侧栏：支持折叠为64px工具条 */}
-              <ChatSidebar
-                tasks={tasks}
-                selectedTaskId={currentTask?.id}
-                onCreateSession={handleCreateSessionFromSidebar}
-                onTaskClick={handleTaskOpen}
-                onTaskPause={handleTaskPause}
-                onTaskRun={handleTaskRun}
-                onTaskResume={handleTaskResume}
-                onTaskDelete={handleTaskDelete}
-                onTaskEdit={handleTaskEdit}
-              />
+              {!isContentOnly && (
+                <ChatSidebar
+                  tasks={tasks}
+                  selectedTaskId={currentTask?.id}
+                  onCreateSession={handleCreateSessionFromSidebar}
+                  onTaskClick={handleTaskOpen}
+                  onTaskPause={handleTaskPause}
+                  onTaskRun={handleTaskRun}
+                  onTaskResume={handleTaskResume}
+                  onTaskDelete={handleTaskDelete}
+                  onTaskEdit={handleTaskEdit}
+                />
+              )}
               {/* ==================== 首页改版结束 ==================== */}
               <div
                 className={styles.chatMessagesArea}
                 style={{ flex: 1, minWidth: 0, position: "relative" }}
-                onDragEnter={handleDragEnter}
-                onDragLeave={handleDragLeave}
-                onDragOver={handleDragOver}
-                onDrop={handleDrop}
+                onDragEnter={isContentOnly ? undefined : handleDragEnter}
+                onDragLeave={isContentOnly ? undefined : handleDragLeave}
+                onDragOver={isContentOnly ? undefined : handleDragOver}
+                onDrop={isContentOnly ? undefined : handleDrop}
               >
-                <AgentScopeRuntimeWebUILayout ref={chatRef} />
-                <DragUploadOverlay
-                  visible={isDragging}
-                  onClose={handleDragOverlayClose}
-                />
+                <ChatContentOnlyProvider enabled={isContentOnly}>
+                  <AgentScopeRuntimeWebUILayout ref={chatRef} />
+                </ChatContentOnlyProvider>
+                {!isContentOnly && (
+                  <DragUploadOverlay
+                    visible={isDragging}
+                    onClose={handleDragOverlayClose}
+                  />
+                )}
                 <ConversationQuickNav />
               </div>
             </div>
