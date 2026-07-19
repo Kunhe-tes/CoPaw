@@ -90,8 +90,8 @@ The global Header and navigation use the Management Console theme even when disp
 The current baseline uses platform fonts so it works without downloading font assets or depending on a runtime font CDN.
 
 ```css
---console-font-ui: "Microsoft YaHei", "PingFang SC",
-  "Helvetica Neue", sans-serif;
+--console-font-ui: "Microsoft YaHei", "PingFang SC", "Helvetica Neue",
+  sans-serif;
 
 --console-font-editorial: Georgia, "Songti SC", "SimSun", serif;
 
@@ -201,6 +201,28 @@ Visual priority for future chat work remains:
 - Preserve its collapse behavior.
 - Future chat redesigns may reuse base accessibility and spacing roles while evolving its visual theme independently from management pages.
 - Future chat redesigns must work both with and without the global navigation.
+
+### Content-Only Conversation Workspace
+
+`/chat/{chat.id}?showContentOnly=true` activates a reusable, source-independent content-only Conversation Workspace presentation. The same variant applies in a top-level browser and in an iframe. It is a URL-derived composition rule, not a read-only, permission, identity, session, or request policy. It does not persist over the normal Conversation Workspace and does not change the existing `hideMenu` contract.
+
+The content hierarchy is:
+
+1. The existing conversation title with its normal behavior.
+2. The complete routed conversation content, including existing live stream output.
+3. The message actions and content utilities that normal chat exposes for the same messages and state.
+
+The variant omits the global Header and Sidebar, the complete conversation task/history sidebar and collapsed toolbar, model selection, the independent generated-files entry and list, the question composer, attachments, speech input, and drag/paste upload surfaces. Suppressed surfaces reserve no width, padding, border, or shell-colored gap and are absent from the accessibility tree and keyboard order rather than visually concealed.
+
+- Keep Conversation Workspace typography, title resolution, message/card presentation, and `#3769FC` emphasis unchanged.
+- Keep approval/deny, feedback, retry/regenerate, suggestions, copy, message-file download/preview, disclosure, scrolling, and Conversation Quick Navigation governed by their existing normal-chat visibility, permission, state, and handler rules.
+- Hiding the generated-files entry and list does not hide file controls embedded in conversation messages.
+- Keep identity initialization, session restoration, loading/empty/error selection, background requests, request ownership, cancellation, SSE/reconnect, and HTML-preview recording behavior unchanged. Content-only presentation adds no special state or controller policy.
+- Running chats use the same existing stream presentation and controls that normal `/chat/{chat.id}` would expose for the same state.
+- Retained buttons and links require their existing accessible names, visible keyboard focus, and target sizes. Hidden composition surfaces must not remain focusable.
+- Long mixed-language titles, URLs, files, and message content must wrap or truncate intentionally without introducing page-level horizontal overflow.
+
+Verify the variant at `1280x720`, `1440x900`, and `1920x1080` in both top-level and embedded presentation. Cover completed, long mixed-language, message-action, message-file preview, and actively streaming states. At every size, check title and message continuity, focus order, clipping, overlap, shell gaps, layout shift, and horizontal overflow. Also verify that removing or changing the exact lower-case `showContentOnly=true` value restores the normal Conversation Workspace and that `hideMenu`/`origin=Y` remain unchanged.
 
 ## Management Console
 
