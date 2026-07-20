@@ -747,6 +747,34 @@ def _require_workspace_layout_v2(
             "skill operations.",
         )
 
+    skills = payload["skills"]
+    for skill_name, entry in skills.items():
+        if not isinstance(skill_name, str) or not skill_name:
+            raise ValueError(
+                f"Workspace manifest {manifest_path} skill name "
+                f"{skill_name!r} must be a non-empty string.",
+            )
+        if (
+            Path(skill_name).name != skill_name
+            or skill_name in {".", ".."}
+            or "/" in skill_name
+            or "\\" in skill_name
+        ):
+            raise ValueError(
+                f"Workspace manifest {manifest_path} skill name "
+                f"{skill_name!r} must be a safe single path segment.",
+            )
+        if not isinstance(entry, dict):
+            raise ValueError(
+                f"Workspace manifest {manifest_path} skill "
+                f"{skill_name!r} entry must be a JSON object.",
+            )
+        if "enabled" in entry and not isinstance(entry["enabled"], bool):
+            raise ValueError(
+                f"Workspace manifest {manifest_path} skill "
+                f"{skill_name!r} field 'enabled' must be a JSON boolean.",
+            )
+
 
 def _read_workspace_manifest_strict_unlocked(
     manifest_path: Path,

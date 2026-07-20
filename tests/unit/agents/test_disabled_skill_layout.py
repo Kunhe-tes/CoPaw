@@ -661,6 +661,145 @@ def test_runtime_skill_operations_reject_invalid_manifest_structure(
     )
 
 
+def test_reconcile_rejects_string_enabled_before_activating_disabled_skill(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "workspace"
+    active = workspace / "skills" / "demo"
+    disabled = workspace / ".disabled_skills" / "demo"
+    _write_skill(disabled, "disabled-copy")
+    manifest_path = get_workspace_skill_manifest_path(workspace)
+    payload = {
+        "layout_version": 2,
+        "skills": {"demo": {"enabled": "false"}},
+    }
+    manifest_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+    original_manifest = manifest_path.read_bytes()
+    original_business_state = _snapshot_workspace_skill_roots(workspace)
+
+    with pytest.raises(
+        ValueError,
+        match=(
+            r"Workspace manifest .*skill\.json.*skill 'demo'.*"
+            r"field 'enabled'.*boolean"
+        ),
+    ):
+        reconcile_workspace_manifest(workspace)
+
+    assert manifest_path.read_bytes() == original_manifest
+    assert (
+        _snapshot_workspace_skill_roots(workspace) == original_business_state
+    )
+    assert not active.exists()
+    assert (
+        (disabled / "SKILL.md")
+        .read_text(encoding="utf-8")
+        .endswith(
+            "disabled-copy\n",
+        )
+    )
+
+
+@pytest.mark.parametrize(
+    ("payload", "offending_field", "requirement"),
+    [
+        pytest.param(
+            {"layout_version": 2, "skills": {"demo": []}},
+            "skill 'demo' entry",
+            "JSON object",
+            id="entry-list",
+        ),
+        pytest.param(
+            {"layout_version": 2, "skills": {"demo": None}},
+            "skill 'demo' entry",
+            "JSON object",
+            id="entry-null",
+        ),
+        pytest.param(
+            {"layout_version": 2, "skills": {"demo": "invalid"}},
+            "skill 'demo' entry",
+            "JSON object",
+            id="entry-string",
+        ),
+        pytest.param(
+            {"layout_version": 2, "skills": {"demo": 7}},
+            "skill 'demo' entry",
+            "JSON object",
+            id="entry-number",
+        ),
+        *[
+            pytest.param(
+                {
+                    "layout_version": 2,
+                    "skills": {"demo": {"enabled": enabled}},
+                },
+                "skill 'demo' field 'enabled'",
+                "JSON boolean",
+                id=f"enabled-{label}",
+            )
+            for label, enabled in (
+                ("string", "false"),
+                ("zero", 0),
+                ("one", 1),
+                ("null", None),
+                ("list", []),
+                ("object", {}),
+            )
+        ],
+        *[
+            pytest.param(
+                {"layout_version": 2, "skills": {skill_name: {}}},
+                f"skill name {skill_name!r}",
+                requirement,
+                id=f"name-{label}",
+            )
+            for label, skill_name, requirement in (
+                ("empty", "", "non-empty string"),
+                ("dot", ".", "safe single path segment"),
+                ("dot-dot", "..", "safe single path segment"),
+                ("forward-slash", "nested/demo", "safe single path segment"),
+                (
+                    "backslash",
+                    "nested\\demo",
+                    "safe single path segment",
+                ),
+            )
+        ],
+    ],
+)
+@pytest.mark.parametrize("operation", ["reconcile", "enable", "disable"])
+def test_runtime_skill_operations_reject_invalid_manifest_entries(
+    tmp_path: Path,
+    payload: object,
+    offending_field: str,
+    requirement: str,
+    operation: str,
+) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir(parents=True)
+    manifest_path = get_workspace_skill_manifest_path(workspace)
+    manifest_path.write_text(json.dumps(payload), encoding="utf-8")
+    original_manifest = manifest_path.read_bytes()
+    original_business_state = _snapshot_workspace_skill_roots(workspace)
+
+    with pytest.raises(ValueError) as exc_info:
+        if operation == "reconcile":
+            reconcile_workspace_manifest(workspace)
+        elif operation == "enable":
+            skills_manager.SkillService(workspace).enable_skill("target")
+        else:
+            skills_manager.SkillService(workspace).disable_skill("target")
+
+    error_message = str(exc_info.value)
+    assert str(manifest_path) in error_message
+    assert offending_field in error_message
+    assert requirement in error_message
+    assert manifest_path.read_bytes() == original_manifest
+    assert (
+        _snapshot_workspace_skill_roots(workspace) == original_business_state
+    )
+
+
 def test_reconcile_new_workspace_uses_default_layout_v2(
     tmp_path: Path,
 ) -> None:
