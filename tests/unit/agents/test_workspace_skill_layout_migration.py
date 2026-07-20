@@ -783,9 +783,26 @@ def test_check_rejects_backup_tree_identity_non_root_cannot_restore(
 
     monkeypatch.setattr(Path, "lstat", simulated_lstat)
     monkeypatch.setattr(Path, "stat", simulated_stat)
-    monkeypatch.setattr(migration.os, "geteuid", lambda: effective_uid)
-    monkeypatch.setattr(migration.os, "getegid", lambda: effective_gid)
-    monkeypatch.setattr(migration.os, "getgroups", lambda: [1203])
+    for attribute in ("geteuid", "getegid", "getgroups"):
+        monkeypatch.delattr(migration.os, attribute, raising=False)
+    monkeypatch.setattr(
+        migration.os,
+        "geteuid",
+        lambda: effective_uid,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        migration.os,
+        "getegid",
+        lambda: effective_gid,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        migration.os,
+        "getgroups",
+        lambda: [1203],
+        raising=False,
+    )
 
     with pytest.raises(
         SkillLayoutMigrationError,
@@ -814,7 +831,26 @@ def test_check_allows_backup_tree_identity_for_root(
         return os.stat_result(values)
 
     monkeypatch.setattr(Path, "lstat", simulated_lstat)
-    monkeypatch.setattr(migration.os, "geteuid", lambda: 0)
+    for attribute in ("geteuid", "getegid", "getgroups"):
+        monkeypatch.delattr(migration.os, attribute, raising=False)
+    monkeypatch.setattr(
+        migration.os,
+        "geteuid",
+        lambda: 0,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        migration.os,
+        "getegid",
+        lambda: 0,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        migration.os,
+        "getgroups",
+        lambda: [],
+        raising=False,
+    )
 
     report = check_workspace_skill_layout_migration(tmp_path)
 
