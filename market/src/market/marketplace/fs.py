@@ -500,6 +500,20 @@ def read_user_skill_manifest(
         return default_workspace_skill_manifest()
 
 
+def _read_user_skill_manifest_for_mutation(manifest_path: Path) -> dict:
+    """Strictly read a shared manifest before mutating it.
+
+    Only a missing manifest starts from the Workspace v2 default. Existing
+    manifests must be readable UTF-8 containing valid JSON; failures propagate
+    so callers cannot overwrite data they failed to read.
+    """
+    try:
+        manifest_text = manifest_path.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return default_workspace_skill_manifest()
+    return json.loads(manifest_text)
+
+
 def check_skill_status_in_manifest(
     swe_root: Path,
     user_id: str,
@@ -565,7 +579,7 @@ def mutate_user_skill_manifest(
     )
     manifest_path.parent.mkdir(parents=True, exist_ok=True)
 
-    current = read_user_skill_manifest(swe_root, user_id, agent_id, source_id)
+    current = _read_user_skill_manifest_for_mutation(manifest_path)
     if not mutation_fn(current):
         return False
 

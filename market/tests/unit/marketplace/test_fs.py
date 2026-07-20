@@ -113,6 +113,256 @@ def test_read_user_skill_manifest_missing_file_returns_layout_v2(tmp_path):
     }
 
 
+def test_mutate_user_skill_manifest_rejects_malformed_json(tmp_path):
+    from market.marketplace.fs import (
+        get_user_skill_manifest_path,
+        mutate_user_skill_manifest,
+    )
+
+    swe_root = tmp_path / "swe"
+    manifest_path = get_user_skill_manifest_path(
+        swe_root,
+        "user1",
+        "agent1",
+        "source_a",
+    )
+    manifest_path.parent.mkdir(parents=True)
+    original = b'{"layout_version": 2, "skills": {'
+    manifest_path.write_bytes(original)
+    mutation_called = False
+
+    def mutation_fn(_manifest):
+        nonlocal mutation_called
+        mutation_called = True
+        return True
+
+    with pytest.raises(json.JSONDecodeError):
+        mutate_user_skill_manifest(
+            swe_root,
+            "user1",
+            "agent1",
+            mutation_fn,
+            "source_a",
+        )
+
+    assert mutation_called is False
+    assert manifest_path.read_bytes() == original
+
+
+def test_mutate_user_skill_manifest_rejects_invalid_utf8(tmp_path):
+    from market.marketplace.fs import (
+        get_user_skill_manifest_path,
+        mutate_user_skill_manifest,
+    )
+
+    swe_root = tmp_path / "swe"
+    manifest_path = get_user_skill_manifest_path(
+        swe_root,
+        "user1",
+        "agent1",
+        "source_a",
+    )
+    manifest_path.parent.mkdir(parents=True)
+    original = b'{"skills": {"broken": "\xff"}}'
+    manifest_path.write_bytes(original)
+    mutation_called = False
+
+    def mutation_fn(_manifest):
+        nonlocal mutation_called
+        mutation_called = True
+        return True
+
+    with pytest.raises(UnicodeDecodeError):
+        mutate_user_skill_manifest(
+            swe_root,
+            "user1",
+            "agent1",
+            mutation_fn,
+            "source_a",
+        )
+
+    assert mutation_called is False
+    assert manifest_path.read_bytes() == original
+
+
+def test_mutate_user_skill_manifest_propagates_read_oserror(
+    tmp_path,
+    monkeypatch,
+):
+    from pathlib import Path
+
+    from market.marketplace.fs import (
+        get_user_skill_manifest_path,
+        mutate_user_skill_manifest,
+    )
+
+    swe_root = tmp_path / "swe"
+    manifest_path = get_user_skill_manifest_path(
+        swe_root,
+        "user1",
+        "agent1",
+        "source_a",
+    )
+    manifest_path.parent.mkdir(parents=True)
+    original = b'{"layout_version": 2, "skills": {}}'
+    manifest_path.write_bytes(original)
+    mutation_called = False
+    original_read_text = Path.read_text
+
+    def fail_manifest_read(path, *args, **kwargs):
+        if path == manifest_path:
+            raise OSError("shared manifest is temporarily unreadable")
+        return original_read_text(path, *args, **kwargs)
+
+    def mutation_fn(_manifest):
+        nonlocal mutation_called
+        mutation_called = True
+        return True
+
+    monkeypatch.setattr(Path, "read_text", fail_manifest_read)
+    with pytest.raises(
+        OSError,
+        match="shared manifest is temporarily unreadable",
+    ):
+        mutate_user_skill_manifest(
+            swe_root,
+            "user1",
+            "agent1",
+            mutation_fn,
+            "source_a",
+        )
+
+    assert mutation_called is False
+    assert manifest_path.read_bytes() == original
+
+
+def test_read_user_skill_manifest_malformed_json_still_returns_default(
+    tmp_path,
+):
+    from market.marketplace.fs import (
+        default_workspace_skill_manifest,
+        get_user_skill_manifest_path,
+        read_user_skill_manifest,
+    )
+
+    swe_root = tmp_path / "swe"
+    manifest_path = get_user_skill_manifest_path(
+        swe_root,
+        "user1",
+        "agent1",
+        "source_a",
+    )
+    manifest_path.parent.mkdir(parents=True)
+    manifest_path.write_text('{"skills": {', encoding="utf-8")
+
+    assert (
+        read_user_skill_manifest(
+            swe_root,
+            "user1",
+            "agent1",
+            "source_a",
+        )
+        == default_workspace_skill_manifest()
+    )
+
+
+def test_mutate_user_skill_manifest_missing_file_starts_from_layout_v2(
+    tmp_path,
+):
+    from market.marketplace.fs import (
+        get_user_skill_manifest_path,
+        mutate_user_skill_manifest,
+    )
+
+    swe_root = tmp_path / "swe"
+
+    def add_skill(manifest):
+        manifest["skills"]["demo"] = {"enabled": True}
+        return True
+
+    assert mutate_user_skill_manifest(
+        swe_root,
+        "user1",
+        "agent1",
+        add_skill,
+        "source_a",
+    )
+
+    manifest_path = get_user_skill_manifest_path(
+        swe_root,
+        "user1",
+        "agent1",
+        "source_a",
+    )
+    assert json.loads(manifest_path.read_text(encoding="utf-8")) == {
+        "schema_version": "workspace-skill-manifest.v1",
+        "layout_version": 2,
+        "version": 0,
+        "skills": {"demo": {"enabled": True}},
+    }
+
+
+def test_mutate_user_skill_manifest_preserves_external_fields(tmp_path):
+    from market.marketplace.fs import (
+        get_user_skill_manifest_path,
+        mutate_user_skill_manifest,
+    )
+
+    swe_root = tmp_path / "swe"
+    manifest_path = get_user_skill_manifest_path(
+        swe_root,
+        "user1",
+        "agent1",
+        "source_a",
+    )
+    manifest_path.parent.mkdir(parents=True)
+    manifest_path.write_text(
+        json.dumps(
+            {
+                "schema_version": "workspace-skill-manifest.v1",
+                "layout_version": 2,
+                "version": 7,
+                "external_top_level": {"writer": "swe"},
+                "skills": {
+                    "demo": {
+                        "enabled": True,
+                        "config": {"api_key_ref": "secret/demo"},
+                        "metadata": {
+                            "name": "Demo",
+                            "external_metadata": {"owner": "swe"},
+                        },
+                        "external_entry_field": ["keep"],
+                    },
+                },
+            },
+        ),
+        encoding="utf-8",
+    )
+
+    def disable_skill(manifest):
+        manifest["skills"]["demo"]["enabled"] = False
+        return True
+
+    assert mutate_user_skill_manifest(
+        swe_root,
+        "user1",
+        "agent1",
+        disable_skill,
+        "source_a",
+    )
+
+    saved = json.loads(manifest_path.read_text(encoding="utf-8"))
+    assert saved["skills"]["demo"]["enabled"] is False
+    assert saved["external_top_level"] == {"writer": "swe"}
+    assert saved["skills"]["demo"]["config"] == {
+        "api_key_ref": "secret/demo",
+    }
+    assert saved["skills"]["demo"]["metadata"]["external_metadata"] == {
+        "owner": "swe",
+    }
+    assert saved["skills"]["demo"]["external_entry_field"] == ["keep"]
+
+
 def test_get_user_skills_dir_allows_main_service_identity_values(tmp_path):
     from market.marketplace.fs import get_user_skills_dir
     from market.runtime.context import encode_scope_id

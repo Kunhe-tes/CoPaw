@@ -1,8 +1,7 @@
 # -*- coding: utf-8 -*-
 import json
 import pytest
-from pathlib import Path
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock
 
 
 def _make_service(tmp_path, mock_db=None):
@@ -18,6 +17,33 @@ def _make_service(tmp_path, mock_db=None):
         marketplace_root=tmp_path / "market",
         swe_root=tmp_path / "swe",
     )
+
+
+def test_register_skill_in_manifest_rejects_malformed_shared_manifest(
+    tmp_path,
+):
+    from market.marketplace.fs import get_user_skill_manifest_path
+
+    svc = _make_service(tmp_path)
+    manifest_path = get_user_skill_manifest_path(
+        tmp_path / "swe",
+        "user1",
+        "agent1",
+        "source_a",
+    )
+    manifest_path.parent.mkdir(parents=True)
+    original = b'{"layout_version": 2, "skills": {'
+    manifest_path.write_bytes(original)
+
+    with pytest.raises(json.JSONDecodeError):
+        svc.register_skill_in_manifest(
+            "user1",
+            "demo",
+            "agent1",
+            "source_a",
+        )
+
+    assert manifest_path.read_bytes() == original
 
 
 @pytest.mark.asyncio
