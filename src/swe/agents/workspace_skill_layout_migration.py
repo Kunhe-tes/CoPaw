@@ -561,6 +561,54 @@ def _remove_path(path: Path) -> None:
         shutil.rmtree(path)
 
 
+def _restore_symlink_mode(path: Path, mode: int) -> None:
+    desired_mode = stat.S_IMODE(mode)
+    errors: list[Exception] = []
+
+    lchmod = getattr(os, "lchmod", None)
+    if lchmod is not None:
+        try:
+            lchmod(path, desired_mode)
+            if stat.S_IMODE(path.lstat().st_mode) == desired_mode:
+                return
+            raise SkillLayoutMigrationError(
+                f"lchmod did not restore symbolic link mode for {path}",
+            )
+        except (
+            OSError,
+            NotImplementedError,
+            TypeError,
+            SkillLayoutMigrationError,
+        ) as exc:
+            errors.append(exc)
+
+    chmod = getattr(os, "chmod", None)
+    if chmod is not None:
+        try:
+            chmod(path, desired_mode, follow_symlinks=False)
+            if stat.S_IMODE(path.lstat().st_mode) == desired_mode:
+                return
+            raise SkillLayoutMigrationError(
+                f"nofollow chmod did not restore symbolic link mode for "
+                f"{path}",
+            )
+        except (
+            OSError,
+            NotImplementedError,
+            TypeError,
+            SkillLayoutMigrationError,
+        ) as exc:
+            errors.append(exc)
+
+    if errors:
+        detail = "; ".join(str(error) for error in errors)
+    else:
+        detail = "no non-following symlink mode API is available"
+    raise SkillLayoutMigrationError(
+        f"Unable to restore symlink mode for {path}: {detail}",
+    ) from (errors[-1] if errors else None)
+
+
 def _restore_path_identity(path: Path, identity: _PathIdentity) -> None:
     restored_stat = path.lstat()
     if stat.S_IFMT(restored_stat.st_mode) != stat.S_IFMT(identity.mode):
@@ -571,17 +619,18 @@ def _restore_path_identity(path: Path, identity: _PathIdentity) -> None:
     if stat.S_ISLNK(identity.mode):
         if hasattr(os, "lchown"):
             os.lchown(path, identity.uid, identity.gid)
-            return
-        if not hasattr(os, "chown"):
-            raise SkillLayoutMigrationError(
-                f"Unable to restore symbolic link ownership: {path}",
+        else:
+            if not hasattr(os, "chown"):
+                raise SkillLayoutMigrationError(
+                    f"Unable to restore symbolic link ownership: {path}",
+                )
+            os.chown(
+                path,
+                identity.uid,
+                identity.gid,
+                follow_symlinks=False,
             )
-        os.chown(
-            path,
-            identity.uid,
-            identity.gid,
-            follow_symlinks=False,
-        )
+        _restore_symlink_mode(path, identity.mode)
         return
 
     if not hasattr(os, "chown"):

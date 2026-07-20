@@ -795,8 +795,8 @@ def test_rollback_restores_captured_ownership_for_nested_paths_and_symlink(
     symlink = workspace / "skills" / "demo" / "skill-link"
     try:
         symlink.symlink_to("SKILL.md")
-    except (NotImplementedError, OSError) as exc:
-        pytest.skip(f"symbolic links are unavailable: {exc}")
+    except (NotImplementedError, OSError) as symlink_error:
+        pytest.skip(f"symbolic links are unavailable: {symlink_error}")
 
     expected_paths = [
         workspace / "skill.json",
@@ -865,6 +865,138 @@ def test_rollback_restores_captured_ownership_for_nested_paths_and_symlink(
         else:
             assert normal_calls[relative] == (uid, gid, False)
     assert symlink.is_symlink()
+
+
+def test_restore_symlink_identity_restores_lstat_mode_with_lchmod(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    target = tmp_path / "target"
+    target.write_text("target", encoding="utf-8")
+    symlink = tmp_path / "link"
+    try:
+        symlink.symlink_to(target)
+    except (NotImplementedError, OSError) as exc:
+        pytest.skip(f"symbolic links are unavailable: {exc}")
+
+    original_lstat = Path.lstat
+    original_stat = original_lstat(symlink)
+    simulated_mode = stat.S_IMODE(original_stat.st_mode)
+    desired_mode = 0o700 if simulated_mode != 0o700 else 0o711
+    lchmod_calls: list[tuple[Path, int]] = []
+
+    def simulated_lstat(path: Path) -> os.stat_result:
+        result = original_lstat(path)
+        if path != symlink:
+            return result
+        values = list(result)
+        values[0] = stat.S_IFLNK | simulated_mode
+        return os.stat_result(values)
+
+    def simulated_lchmod(
+        path: os.PathLike[str] | str,
+        mode: int,
+    ) -> None:
+        nonlocal simulated_mode
+        lchmod_calls.append((Path(path), mode))
+        simulated_mode = mode
+
+    monkeypatch.setattr(Path, "lstat", simulated_lstat)
+    monkeypatch.setattr(
+        migration.os,
+        "lchown",
+        lambda path, uid, gid: None,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        migration.os,
+        "lchmod",
+        simulated_lchmod,
+        raising=False,
+    )
+    identity = migration._PathIdentity(
+        relative_path=Path("link"),
+        uid=original_stat.st_uid,
+        gid=original_stat.st_gid,
+        mode=stat.S_IFLNK | desired_mode,
+    )
+
+    migration._restore_path_identity(symlink, identity)
+
+    assert lchmod_calls == [(symlink, desired_mode)]
+    assert stat.S_IMODE(symlink.lstat().st_mode) == desired_mode
+
+
+@pytest.mark.skipif(
+    not hasattr(os, "chown"),
+    reason="numeric ownership restoration is unavailable",
+)
+def test_rollback_reports_symlink_mode_when_all_apis_fail(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace = _legacy_workspace(tmp_path, "tenant-a")
+    symlink = workspace / "skills" / "demo" / "skill-link"
+    try:
+        symlink.symlink_to("SKILL.md")
+    except (NotImplementedError, OSError) as symlink_error:
+        pytest.skip(f"symbolic links are unavailable: {symlink_error}")
+
+    original_chmod = migration.os.chmod
+    mode_attempts: list[str] = []
+
+    def fail_lchmod(
+        path: os.PathLike[str] | str,
+        mode: int,
+    ) -> None:
+        del path, mode
+        mode_attempts.append("lchmod")
+        raise OSError("lchmod failed")
+
+    def fail_nofollow_chmod(
+        path: os.PathLike[str] | str,
+        mode: int,
+        *args: object,
+        **kwargs: object,
+    ) -> None:
+        if kwargs.get("follow_symlinks") is False:
+            mode_attempts.append("chmod")
+            raise NotImplementedError("nofollow chmod unavailable")
+        original_chmod(path, mode, *args, **kwargs)
+
+    monkeypatch.setattr(
+        migration.os,
+        "lchown",
+        lambda path, uid, gid: None,
+        raising=False,
+    )
+
+    def fail_after_backup(workspace: Path, payload: dict[str, Any]) -> None:
+        del workspace, payload
+        monkeypatch.setattr(
+            migration.os,
+            "lchmod",
+            fail_lchmod,
+            raising=False,
+        )
+        monkeypatch.setattr(migration.os, "chmod", fail_nofollow_chmod)
+        raise OSError("migration failed")
+
+    monkeypatch.setattr(
+        migration,
+        "_apply_workspace_migration",
+        fail_after_backup,
+    )
+
+    with pytest.raises(
+        migration.SkillLayoutMigrationRollbackError,
+    ) as exc_info:
+        apply_workspace_skill_layout_migration(tmp_path)
+
+    assert mode_attempts == ["lchmod", "chmod"]
+    assert "symlink mode" in str(exc_info.value)
+    assert "lchmod failed" in str(exc_info.value)
+    assert "nofollow chmod unavailable" in str(exc_info.value)
 
 
 @pytest.mark.skipif(
