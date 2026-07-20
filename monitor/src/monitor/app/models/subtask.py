@@ -42,6 +42,12 @@ class SubtaskModel(BaseModel):
         default=None,
         description="招乎渠道通知消息内容",
     )
+    need_notification: int = Field(
+        default=1,
+        ge=0,
+        le=1,
+        description="是否需要通知: 0-否, 1-是",
+    )
     status: Optional[str] = Field(
         default=None,
         description="子任务状态: SUC/FAIL/PART_SUC/TIMEOUT",
@@ -107,6 +113,12 @@ class SubtaskCreateRequest(BaseModel):
         default=None,
         max_length=5000,
         description="招乎渠道通知消息内容",
+    )
+    need_notification: int = Field(
+        default=1,
+        ge=0,
+        le=1,
+        description="是否需要通知: 0-否, 1-是",
     )
 
 
