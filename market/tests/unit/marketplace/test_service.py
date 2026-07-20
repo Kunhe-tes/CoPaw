@@ -46,6 +46,101 @@ def test_register_skill_in_manifest_rejects_malformed_shared_manifest(
     assert manifest_path.read_bytes() == original
 
 
+def test_register_skill_in_manifest_preserves_external_fields_on_success(
+    tmp_path,
+):
+    from market.marketplace.fs import get_user_skill_manifest_path
+
+    svc = _make_service(tmp_path)
+    manifest_path = get_user_skill_manifest_path(
+        tmp_path / "swe",
+        "user1",
+        "agent1",
+        "source_a",
+    )
+    manifest_path.parent.mkdir(parents=True)
+    manifest_path.write_text(
+        json.dumps(
+            {
+                "schema_version": "workspace-skill-manifest.v1",
+                "layout_version": 2,
+                "version": 7,
+                "external_top_level": {"writer": "swe"},
+                "skills": {
+                    "demo": {
+                        "enabled": True,
+                        "channels": ["slack"],
+                        "source": "external",
+                        "config": {},
+                        "metadata": {
+                            "name": "Old Demo",
+                            "description": "old description",
+                            "version_text": "0.1.0",
+                            "source": "external",
+                            "protected": True,
+                            "requirements": {"old": True},
+                            "external_metadata": {
+                                "owner": "swe",
+                                "nested": {"keep": True},
+                            },
+                        },
+                        "requirements": {"old": True},
+                        "created_at": "2025-01-01T00:00:00+00:00",
+                        "updated_at": "2025-01-01T00:00:00+00:00",
+                        "external_entry_field": {"keep": [1, 2]},
+                    },
+                },
+            },
+        ),
+        encoding="utf-8",
+    )
+
+    assert svc.register_skill_in_manifest(
+        "user1",
+        "demo",
+        "agent1",
+        "source_a",
+        enabled=False,
+        source="marketplace:item-1",
+        extra_metadata={
+            "name": "Renamed Demo",
+            "creator_id": "user2",
+            "received_version": "2.3.4",
+        },
+    )
+
+    saved = json.loads(manifest_path.read_text(encoding="utf-8"))
+    entry = saved["skills"]["demo"]
+    metadata = entry["metadata"]
+
+    assert saved["external_top_level"] == {"writer": "swe"}
+    assert entry["config"] == {}
+    assert entry["external_entry_field"] == {"keep": [1, 2]}
+    assert metadata["external_metadata"] == {
+        "owner": "swe",
+        "nested": {"keep": True},
+    }
+    assert entry["enabled"] is False
+    assert entry["channels"] == ["slack"]
+    assert entry["source"] == "marketplace:item-1"
+    assert entry["created_at"] == "2025-01-01T00:00:00+00:00"
+    assert entry["requirements"] == {
+        "require_bins": [],
+        "require_envs": [],
+    }
+    assert entry["updated_at"] != "2025-01-01T00:00:00+00:00"
+    assert metadata["name"] == "Renamed Demo"
+    assert metadata["description"] == ""
+    assert metadata["version_text"] == "2.3.4"
+    assert metadata["source"] == "marketplace:item-1"
+    assert metadata["protected"] is False
+    assert metadata["requirements"] == {
+        "require_bins": [],
+        "require_envs": [],
+    }
+    assert metadata["creator_id"] == "user2"
+
+
 @pytest.mark.asyncio
 async def test_publish_skill_creates_index_entry(tmp_path):
     from market.marketplace.schemas import PublishSkillRequest

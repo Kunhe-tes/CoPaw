@@ -624,10 +624,18 @@ class MarketplaceService:
             existing = skills_dict.get(skill_name) or {}
 
             # 构建 metadata（从 SKILL.md 和 skill.json 读取）
-            metadata = _build_skill_metadata_for_manifest(
-                skill_dir,
-                skill_name,
-                source=source,
+            existing_metadata = existing.get("metadata")
+            metadata = (
+                dict(existing_metadata)
+                if isinstance(existing_metadata, dict)
+                else {}
+            )
+            metadata.update(
+                _build_skill_metadata_for_manifest(
+                    skill_dir,
+                    skill_name,
+                    source=source,
+                ),
             )
 
             # 合并额外的 metadata（上传时传入的 creator_id、name 等）
@@ -647,24 +655,26 @@ class MarketplaceService:
             ):
                 metadata["version_text"] = extra_metadata["received_version"]
 
-            # 保留已有的 config 和 channels
-            existing_config = existing.get("config")
+            # 保留已有的 channels
             existing_channels = existing.get("channels") or ["all"]
 
             now = datetime.now(timezone.utc).isoformat()
 
-            entry = {
-                "enabled": enabled,
-                "channels": existing_channels,
-                "source": source,
-                "metadata": metadata,
-                "requirements": metadata["requirements"],
-                "updated_at": now,
-            }
+            entry = dict(existing)
+            entry.update(
+                {
+                    "enabled": enabled,
+                    "channels": existing_channels,
+                    "source": source,
+                    "metadata": metadata,
+                    "requirements": metadata["requirements"],
+                    "updated_at": now,
+                },
+            )
 
-            # 保留已有的 config
-            if existing_config:
-                entry["config"] = existing_config
+            # 按原值保留已有 config，包括空字典或 None
+            if "config" in existing:
+                entry["config"] = existing["config"]
 
             # 保留已有的 created_at（首次注册时写入）
             entry["created_at"] = existing.get("created_at") or now
