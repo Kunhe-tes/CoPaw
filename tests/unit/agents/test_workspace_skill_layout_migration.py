@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import stat
 import tempfile
 from pathlib import Path
 from typing import Any
@@ -61,6 +62,26 @@ def _legacy_workspace(
 def _write_v2_manifest(
     workspace: Path,
     skills: dict[str, dict[str, Any]],
+    *,
+    layout_version: object = 2,
+) -> None:
+    workspace.mkdir(parents=True, exist_ok=True)
+    (workspace / "skill.json").write_text(
+        json.dumps(
+            {
+                "schema_version": "workspace-skill-manifest.v1",
+                "layout_version": layout_version,
+                "version": 8,
+                "skills": skills,
+            },
+        ),
+        encoding="utf-8",
+    )
+
+
+def _write_obsolete_v2_manifest(
+    workspace: Path,
+    skills: dict[str, dict[str, Any]],
 ) -> None:
     state = workspace / ".skill_state"
     state.mkdir(parents=True, exist_ok=True)
@@ -100,6 +121,12 @@ def _snapshot_paths(workspace: Path) -> dict[str, tuple[str, bytes | None]]:
                 None if child.is_dir() else child.read_bytes(),
             )
     return snapshot
+
+
+def _remove_directory_permissions(path: Path, permissions: int) -> int:
+    original_mode = stat.S_IMODE(path.stat().st_mode)
+    path.chmod(original_mode & ~permissions)
+    return original_mode
 
 
 def test_check_builds_complete_read_only_plan(tmp_path: Path) -> None:
@@ -168,6 +195,16 @@ def test_missing_release_root_returns_empty_success_report(
 
     assert report.success is True
     assert report.workspaces == ()
+
+
+def test_discovery_rejects_dangling_symlink_release_root(
+    tmp_path: Path,
+) -> None:
+    release_root = tmp_path / "release"
+    release_root.symlink_to(tmp_path / "missing", target_is_directory=True)
+
+    with pytest.raises(SkillLayoutMigrationError, match="symbolic link"):
+        check_workspace_skill_layout_migration(release_root)
 
 
 @pytest.mark.parametrize(
@@ -253,7 +290,7 @@ def test_preflight_rejects_symlinked_v2_manifest(tmp_path: Path) -> None:
     release_root = tmp_path / "release"
     workspace = release_root / "tenant-a" / "workspaces" / "default"
     _write_skill(workspace / "skills" / "demo")
-    _write_v2_manifest(workspace, {"demo": {"enabled": True}})
+    _write_obsolete_v2_manifest(workspace, {"demo": {"enabled": True}})
     manifest = workspace / ".skill_state" / "manifest.json"
     outside = tmp_path / "outside" / "manifest.json"
     outside.parent.mkdir(parents=True)
@@ -265,6 +302,29 @@ def test_preflight_rejects_symlinked_v2_manifest(tmp_path: Path) -> None:
 
     assert manifest.is_symlink()
     assert outside.exists()
+
+
+@pytest.mark.parametrize(
+    ("root_name", "skills"),
+    [
+        ("skills", {}),
+        (".disabled_skills", {"demo": {"enabled": True}}),
+        (".skill_state", {}),
+    ],
+)
+def test_preflight_rejects_file_shaped_managed_roots(
+    tmp_path: Path,
+    root_name: str,
+    skills: dict[str, dict[str, Any]],
+) -> None:
+    workspace = tmp_path / "tenant-a" / "workspaces" / "default"
+    if skills:
+        _write_skill(workspace / "skills" / "demo")
+    _write_v2_manifest(workspace, skills)
+    (workspace / root_name).write_text("not a directory", encoding="utf-8")
+
+    with pytest.raises(SkillLayoutMigrationError, match="must be a directory"):
+        check_workspace_skill_layout_migration(tmp_path)
 
 
 def test_empty_and_unrelated_workspaces_are_not_applicable(
@@ -283,6 +343,20 @@ def test_empty_and_unrelated_workspaces_are_not_applicable(
     ]
 
 
+def test_normal_skill_state_directory_is_untouched_and_not_applicable(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "tenant-a" / "workspaces" / "default"
+    state_file = workspace / ".skill_state" / "notes.txt"
+    state_file.parent.mkdir(parents=True)
+    state_file.write_text("keep me", encoding="utf-8")
+
+    report = apply_workspace_skill_layout_migration(tmp_path)
+
+    assert report.workspaces[0].status == "not_applicable"
+    assert state_file.read_text(encoding="utf-8") == "keep me"
+
+
 def test_apply_moves_disabled_and_preserves_manifest_payload(
     tmp_path: Path,
 ) -> None:
@@ -291,11 +365,8 @@ def test_apply_moves_disabled_and_preserves_manifest_payload(
     report = apply_workspace_skill_layout_migration(tmp_path)
 
     assert report.workspaces[0].status == "migrated"
-    assert not (workspace / "skill.json").exists()
     manifest = json.loads(
-        (workspace / ".skill_state" / "manifest.json").read_text(
-            encoding="utf-8",
-        ),
+        (workspace / "skill.json").read_text(encoding="utf-8"),
     )
     assert manifest["layout_version"] == 2
     assert manifest["version"] == 7
@@ -307,6 +378,21 @@ def test_apply_moves_disabled_and_preserves_manifest_payload(
     }
     assert (workspace / ".disabled_skills" / "demo" / "SKILL.md").exists()
     assert not (workspace / "skills" / "demo").exists()
+    assert not (workspace / ".skill_state").exists()
+
+
+def test_apply_preserves_manifest_mode_owner_and_group(tmp_path: Path) -> None:
+    workspace = _legacy_workspace(tmp_path, "tenant-a")
+    manifest_path = workspace / "skill.json"
+    manifest_path.chmod(0o664)
+    before = manifest_path.stat()
+
+    apply_workspace_skill_layout_migration(tmp_path)
+
+    after = manifest_path.stat()
+    assert stat.S_IMODE(after.st_mode) == stat.S_IMODE(before.st_mode)
+    assert after.st_uid == before.st_uid
+    assert after.st_gid == before.st_gid
 
 
 def test_apply_keeps_enabled_packages_active(tmp_path: Path) -> None:
@@ -322,44 +408,143 @@ def test_apply_keeps_enabled_packages_active(tmp_path: Path) -> None:
     assert not (workspace / ".disabled_skills" / "demo").exists()
 
 
-def test_ready_workspace_preserves_unrelated_skill_state_files(
+def test_ready_workspace_preserves_and_does_not_back_up_skill_state_files(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     workspace = _legacy_workspace(tmp_path, "tenant-a")
     state_file = workspace / ".skill_state" / "notes.txt"
     state_file.parent.mkdir(parents=True)
     state_file.write_text("keep me", encoding="utf-8")
+    copied_sources: list[Path] = []
+    original_copy = migration._copy_backup_path
+
+    def record_copy(source: Path, target: Path) -> None:
+        copied_sources.append(source)
+        original_copy(source, target)
+
+    monkeypatch.setattr(migration, "_copy_backup_path", record_copy)
 
     report = apply_workspace_skill_layout_migration(tmp_path)
 
     assert report.workspaces[0].status == "migrated"
     assert state_file.read_text(encoding="utf-8") == "keep me"
-    assert (workspace / ".skill_state" / "manifest.json").exists()
+    assert not (workspace / ".skill_state" / "manifest.json").exists()
+    assert workspace / ".skill_state" not in copied_sources
 
 
 def test_apply_is_idempotent(tmp_path: Path) -> None:
     workspace = _legacy_workspace(tmp_path, "tenant-a")
+    manifest_path = workspace / "skill.json"
+    manifest_path.chmod(0o664)
     first = apply_workspace_skill_layout_migration(tmp_path)
+    before_second_layout = _snapshot_paths(workspace)
+    before_second_bytes = manifest_path.read_bytes()
+    before_second_mode = stat.S_IMODE(manifest_path.stat().st_mode)
 
     second = apply_workspace_skill_layout_migration(tmp_path)
 
     assert first.workspaces[0].status == "migrated"
     assert second.workspaces[0].status == "already_migrated"
     assert second.workspaces[0].workspace == workspace
+    assert _snapshot_paths(workspace) == before_second_layout
+    assert manifest_path.read_bytes() == before_second_bytes
+    assert stat.S_IMODE(manifest_path.stat().st_mode) == before_second_mode
 
 
-def test_check_rejects_mixed_layout_before_writing_any_workspace(
+def test_check_rejects_obsolete_manifest_before_writing_any_workspace(
     tmp_path: Path,
 ) -> None:
     valid = _legacy_workspace(tmp_path, "tenant-a")
     mixed = _legacy_workspace(tmp_path, "tenant-b")
-    _write_v2_manifest(mixed, {"demo": {"enabled": True}})
+    _write_obsolete_v2_manifest(mixed, {"demo": {"enabled": True}})
     before = _snapshot_paths(valid)
 
     with pytest.raises(SkillLayoutMigrationError, match="mixed layout"):
         check_workspace_skill_layout_migration(tmp_path)
 
     assert _snapshot_paths(valid) == before
+
+
+def test_check_rejects_obsolete_manifest_without_root_manifest(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "tenant-a" / "workspaces" / "default"
+    _write_skill(workspace / ".disabled_skills" / "demo")
+    _write_obsolete_v2_manifest(workspace, {"demo": {"enabled": False}})
+
+    with pytest.raises(SkillLayoutMigrationError, match="mixed layout"):
+        check_workspace_skill_layout_migration(tmp_path)
+
+
+def test_missing_layout_version_is_treated_as_legacy(tmp_path: Path) -> None:
+    workspace = _legacy_workspace(tmp_path, "tenant-a")
+
+    report = check_workspace_skill_layout_migration(tmp_path)
+
+    assert report.workspaces[0].workspace == workspace
+    assert report.workspaces[0].status == "ready"
+
+
+def test_null_layout_version_is_unsupported(tmp_path: Path) -> None:
+    workspace = tmp_path / "tenant-a" / "workspaces" / "default"
+    _write_skill(workspace / "skills" / "demo")
+    _write_v2_manifest(
+        workspace,
+        {"demo": {"enabled": False}},
+        layout_version=None,
+    )
+
+    with pytest.raises(
+        SkillLayoutMigrationError,
+        match="unsupported layout_version None",
+    ):
+        check_workspace_skill_layout_migration(tmp_path)
+
+
+@pytest.mark.parametrize("layout_version", [1, 3, 2.0, "2", False, True])
+def test_check_rejects_unsupported_non_null_layout_version(
+    tmp_path: Path,
+    layout_version: object,
+) -> None:
+    workspace = tmp_path / "tenant-a" / "workspaces" / "default"
+    _write_skill(workspace / "skills" / "demo")
+    _write_v2_manifest(
+        workspace,
+        {"demo": {"enabled": True}},
+        layout_version=layout_version,
+    )
+
+    with pytest.raises(
+        SkillLayoutMigrationError,
+        match="unsupported layout_version",
+    ):
+        check_workspace_skill_layout_migration(tmp_path)
+
+
+@pytest.mark.parametrize("enabled", ["false", 0, 1, None, [], {}])
+def test_check_rejects_non_boolean_enabled_values(
+    tmp_path: Path,
+    enabled: object,
+) -> None:
+    workspace = tmp_path / "tenant-a" / "workspaces" / "default"
+    _write_skill(workspace / "skills" / "demo")
+    skills: dict[str, dict[str, Any]] = {"demo": {"enabled": enabled}}
+    _write_v2_manifest(workspace, skills)
+
+    with pytest.raises(
+        SkillLayoutMigrationError,
+        match="enabled.*JSON boolean",
+    ):
+        check_workspace_skill_layout_migration(tmp_path)
+
+
+def test_check_rejects_disabled_root_without_manifest(tmp_path: Path) -> None:
+    workspace = tmp_path / "tenant-a" / "workspaces" / "default"
+    _write_skill(workspace / ".disabled_skills" / "demo")
+
+    with pytest.raises(SkillLayoutMigrationError, match="invalid partial"):
+        check_workspace_skill_layout_migration(tmp_path)
 
 
 @pytest.mark.parametrize(
@@ -384,6 +569,15 @@ def test_check_rejects_invalid_legacy_manifest(
     (workspace / "skill.json").write_text(content, encoding="utf-8")
 
     with pytest.raises(SkillLayoutMigrationError, match=message):
+        check_workspace_skill_layout_migration(tmp_path)
+
+
+def test_check_rejects_manifest_with_invalid_utf8(tmp_path: Path) -> None:
+    workspace = tmp_path / "tenant-a" / "workspaces" / "default"
+    workspace.mkdir(parents=True)
+    (workspace / "skill.json").write_bytes(b'{"skills": {"demo": "\xff"}}')
+
+    with pytest.raises(SkillLayoutMigrationError, match="invalid UTF-8"):
         check_workspace_skill_layout_migration(tmp_path)
 
 
@@ -475,6 +669,38 @@ def test_apply_preflights_all_workspaces_before_creating_backups(
 
     assert temporary_directory_called is False
     assert _snapshot_paths(valid) == before
+
+
+@pytest.mark.parametrize(
+    ("target_name", "permissions"),
+    [
+        ("workspace", stat.S_IWUSR | stat.S_IWGRP | stat.S_IWOTH),
+        ("workspace", stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH),
+        ("skills", stat.S_IWUSR | stat.S_IWGRP | stat.S_IWOTH),
+        ("skills", stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH),
+    ],
+)
+def test_check_rejects_ready_workspace_without_required_directory_access(
+    tmp_path: Path,
+    target_name: str,
+    permissions: int,
+) -> None:
+    workspace = _legacy_workspace(tmp_path, "tenant-a")
+    target = workspace if target_name == "workspace" else workspace / "skills"
+    before = _snapshot_paths(workspace)
+    original_mode = _remove_directory_permissions(target, permissions)
+    restricted_mode = stat.S_IMODE(target.stat().st_mode)
+    try:
+        with pytest.raises(
+            SkillLayoutMigrationError,
+            match="write and execute access",
+        ):
+            check_workspace_skill_layout_migration(tmp_path)
+
+        assert stat.S_IMODE(target.stat().st_mode) == restricted_mode
+    finally:
+        target.chmod(original_mode)
+    assert _snapshot_paths(workspace) == before
 
 
 def test_apply_rolls_back_all_attempted_workspaces_exactly(
