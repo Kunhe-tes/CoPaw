@@ -8,6 +8,17 @@
   // inherits from .page-container global class; add local overrides here if needed
 }
 
+.contentOnlyContainer.contentOnlyContainer {
+  padding: 0;
+  background: var(--console-management-canvas);
+}
+
+.contentOnlyContent.contentOnlyContent {
+  overflow: hidden;
+  border: 0;
+  border-radius: 0;
+}
+
 // ─── Header ───────────────────────────────────────────────────────────────────
 .header {
   height: 56px;
@@ -266,7 +277,7 @@
 
     .swe-menu-root > .swe-menu-item-selected {
       background: var(--console-management-primary-soft) !important;
-      color: var(--console-management-text) !important;
+      color: var(--console-management-primary) !important;
 
       .swe-menu-item-icon {
         color: var(--console-management-primary) !important;
@@ -291,7 +302,7 @@
 
     .swe-menu-item-selected {
       background: var(--console-management-primary-soft) !important;
-      color: var(--console-management-text) !important;
+      color: var(--console-management-primary) !important;
       display: flex !important;
       align-items: center !important;
       justify-content: flex-start !important;
@@ -307,7 +318,7 @@
     }
 
     .swe-menu-submenu .swe-menu-item-selected {
-      color: var(--console-management-text) !important;
+      color: var(--console-management-primary) !important;
       font-weight: 600 !important;
 
       .swe-menu-item-icon {
@@ -317,12 +328,12 @@
 
     .swe-menu-submenu-selected > .swe-menu-submenu-title {
       background: transparent !important;
-      color: var(--console-management-text) !important;
+      color: var(--console-management-primary) !important;
       box-shadow: none;
 
       .swe-menu-item-icon,
       .swe-menu-submenu-arrow {
-        color: var(--console-management-text-secondary) !important;
+        color: var(--console-management-primary) !important;
       }
     }
   }

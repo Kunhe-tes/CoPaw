@@ -11,6 +11,7 @@ import Header from "../Header";
 import ConsoleCronBubble from "../../components/ConsoleCronBubble";
 import styles from "../index.module.less";
 import Chat from "../../pages/Chat";
+import { resolveMainLayoutPresentation } from "./presentation";
 import ChannelsPage from "../../pages/Control/Channels";
 import SessionsPage from "../../pages/Control/Sessions";
 import CronJobsPage from "../../pages/Control/CronJobs";
@@ -101,9 +102,10 @@ export default function MainLayout() {
   // 检测是否为 reportView 页面，如果是则跳过预加载所有模块
   const isReportViewPage = currentPath === "/reportView";
 
-  // Sidebar 显示控制：
-  // iframe 传递的 hideMenu === true 时隐藏 Sidebar
-  // URL 参数 origin=Y 会自动设置 hideMenu=true（见 iframeMessage.ts）
+  // Global shell display control:
+  // - iframe hideMenu === true hides Header and Sidebar
+  // - origin=Y maps to hideMenu=true (see iframeMessage.ts)
+  // - content-only Chat routes hide the same shell directly from the URL
   const hideMenu = useIframeStore((state) => state.hideMenu);
   const hideChat = useIframeStore((state) => state.hideChat);
   const activeSourceId =
@@ -111,7 +113,11 @@ export default function MainLayout() {
   const loadEffectiveConfig = useSourceSystemConfigStore(
     (state) => state.loadEffectiveConfig,
   );
-  const shouldHideSidebar = hideMenu;
+  const { contentOnlyRoute, hideGlobalShell } = resolveMainLayoutPresentation({
+    hideMenu,
+    pathname: location.pathname,
+    search: location.search,
+  });
 
   useEffect(() => {
     loadEffectiveConfig(activeSourceId);
@@ -124,20 +130,22 @@ export default function MainLayout() {
 
   return (
     <Layout className={styles.mainLayout}>
-      {/* Header 和 Sidebar 一起根据 hideMenu 控制显隐 */}
-      {!shouldHideSidebar && <Header />}
+      {!hideGlobalShell && <Header />}
       <Layout>
-        {/* 条件渲染 Sidebar：根据 origin 参数或 hideMenu 决定是否显示 */}
-        {!shouldHideSidebar && <Sidebar selectedKey={selectedKey} />}
+        {!hideGlobalShell && <Sidebar selectedKey={selectedKey} />}
         <Content
           className={`page-container${
-            shouldHideSidebar ? "" : " page-container--with-sidebar"
-          }${isReportViewPage ? " page-container--no-rightPadding" : ""}`}
+            hideGlobalShell ? "" : " page-container--with-sidebar"
+          }${isReportViewPage ? " page-container--no-rightPadding" : ""}${
+            contentOnlyRoute.enabled ? ` ${styles.contentOnlyContainer}` : ""
+          }`}
         >
-          <ConsoleCronBubble />
+          {!contentOnlyRoute.enabled && <ConsoleCronBubble />}
           <div
             className={`page-content${
               isReportViewPage ? " single-page-content" : ""
+            }${
+              contentOnlyRoute.enabled ? ` ${styles.contentOnlyContent}` : ""
             }`}
           >
             <Routes>
