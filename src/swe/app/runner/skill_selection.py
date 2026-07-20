@@ -6,6 +6,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable
+from xml.sax.saxutils import escape
 
 import frontmatter
 
@@ -33,9 +34,9 @@ class SkillUseDirective:
 - 技能文档中提到的相对脚本、资源、模板路径，都必须按 <path> 指定的 SKILL.md 所在目录解析；执行脚本时请使用绝对路径，或把 cwd 设置为该技能目录；
 - 始终使用中文回答。
 </instruction>
-<name>{self.name}</name>
-<description>{self.description}</description>
-<path>{self.path}</path>
+<name>{escape(self.name)}</name>
+<description>{escape(self.description)}</description>
+<path>{escape(str(self.path))}</path>
 </SKILL-USE-V1>"""
 
 
@@ -67,11 +68,11 @@ def build_skill_use_directives(
             continue
         try:
             content = skill_path.read_text(encoding="utf-8")
-        except OSError:
+        except (OSError, UnicodeError):
             continue
         try:
             description = str(
-                frontmatter.loads(content).get("description") or ""
+                frontmatter.loads(content).get("description") or "",
             )
         except (ValueError, TypeError):
             description = ""

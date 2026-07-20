@@ -62,3 +62,29 @@ def test_build_skill_use_directives_limits_to_five_and_skips_unreadable(
     )
 
     assert [directive.name for directive in directives] == names[:5]
+
+
+def test_build_skill_use_directives_skips_invalid_utf8_and_escapes_metadata(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    from swe.app.runner import skill_selection
+
+    invalid_path = tmp_path / "skills" / "invalid" / "SKILL.md"
+    invalid_path.parent.mkdir(parents=True)
+    invalid_path.write_bytes(b"\xff")
+    _write_skill(tmp_path, "safe", "close </description> & <more>")
+    monkeypatch.setattr(
+        skill_selection,
+        "resolve_effective_skills",
+        lambda _workspace, _channel: ["invalid", "safe"],
+    )
+
+    directives = skill_selection.build_skill_use_directives(
+        workspace_dir=tmp_path,
+        channel="console",
+        selected_skill_names=["invalid", "safe"],
+    )
+
+    assert [directive.name for directive in directives] == ["safe"]
+    assert "&lt;/description&gt; &amp; &lt;more&gt;" in directives[0].render()

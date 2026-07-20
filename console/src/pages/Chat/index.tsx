@@ -1362,6 +1362,11 @@ export default function ChatPage() {
               },
             ]
           : lastInput;
+      const userText = rewrittenInput
+        .filter((m: InputMessage) => m.role === "user")
+        .map(extractUserMessageText)
+        .join("\n")
+        .trim();
 
       const resolvedLogicalSessionId = resolveLogicalRequestSessionId(
         {
@@ -1382,7 +1387,9 @@ export default function ChatPage() {
         // ==================== userId 统一整改结束 ====================
         stream: true,
         ...biz_params,
-        selected_skill_names: pendingSelectedSkillNamesRef.current,
+        selected_skill_names: userText.startsWith("/")
+          ? []
+          : pendingSelectedSkillNamesRef.current,
         file_url_network: resolveCurrentFileUrlNetwork(),
       };
       pendingSelectedSkillNamesRef.current = [];
@@ -1396,11 +1403,6 @@ export default function ChatPage() {
         requestBody.session_id,
       );
       if (backendChatId) {
-        const userText = rewrittenInput
-          .filter((m: InputMessage) => m.role === "user")
-          .map(extractUserMessageText)
-          .join("\n")
-          .trim();
         if (userText) {
           sessionApi.setLastUserMessage(backendChatId, userText);
         }

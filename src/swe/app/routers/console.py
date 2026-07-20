@@ -403,9 +403,16 @@ def _extract_content_parts_from_mapping(request_data: dict) -> list[Any]:
 
 def _extract_payload_fields_from_request(
     request_data: AgentRequest,
-) -> tuple[str, str, str, Any, Any, Any, Any, list[Any]]:
+) -> tuple[str, str, str, Any, Any, Any, Any, Any, list[Any]]:
     """提取 AgentRequest 形态请求的核心字段。"""
     channel_meta = getattr(request_data, "channel_meta", None) or {}
+    selected_skill_names = getattr(
+        request_data,
+        "selected_skill_names",
+        None,
+    )
+    if selected_skill_names is None:
+        selected_skill_names = channel_meta.get("selected_skill_names")
     return (
         getattr(request_data, "channel", None) or "console",
         request_data.user_id or "default",
@@ -415,13 +422,14 @@ def _extract_payload_fields_from_request(
         getattr(request_data, "bbk_id", None) or channel_meta.get("bbk_id"),
         getattr(request_data, "system_prompt_injections", None),
         getattr(request_data, "file_url_network", None),
+        selected_skill_names,
         list(request_data.input[0].content) if request_data.input else [],
     )
 
 
 def _extract_payload_fields_from_mapping(
     request_data: dict,
-) -> tuple[str, str, str, Any, Any, Any, Any, list[Any]]:
+) -> tuple[str, str, str, Any, Any, Any, Any, Any, list[Any]]:
     """提取 dict 形态请求的核心字段。"""
     return (
         request_data.get("channel", "console"),
@@ -431,6 +439,7 @@ def _extract_payload_fields_from_mapping(
         request_data.get("bbk_id"),
         request_data.get("system_prompt_injections"),
         request_data.get("file_url_network"),
+        request_data.get("selected_skill_names"),
         _extract_content_parts_from_mapping(request_data),
     )
 
@@ -445,29 +454,33 @@ def _extract_session_and_payload(request_data: Union[AgentRequest, dict]):
     """
     if isinstance(request_data, AgentRequest):
         (
-            channel_id,
+            _channel_id,
             sender_id,
             session_id,
             user_name,
             bbk_id,
             system_prompt_injections,
             file_url_network,
+            selected_skill_names,
             content_parts,
         ) = _extract_payload_fields_from_request(request_data)
     else:
         (
-            channel_id,
+            _channel_id,
             sender_id,
             session_id,
             user_name,
             bbk_id,
             system_prompt_injections,
             file_url_network,
+            selected_skill_names,
             content_parts,
         ) = _extract_payload_fields_from_mapping(request_data)
 
     native_payload: dict[str, Any] = {
-        "channel_id": channel_id,
+        # /console/chat always executes through the Console runtime.  Do not
+        # trust the client-provided channel when resolving effective skills.
+        "channel_id": "console",
         "sender_id": sender_id,
         "content_parts": content_parts,
         "meta": {
@@ -481,6 +494,8 @@ def _extract_session_and_payload(request_data: Union[AgentRequest, dict]):
         ] = system_prompt_injections
     if file_url_network is not None:
         native_payload["meta"]["file_url_network"] = file_url_network
+    if selected_skill_names is not None:
+        native_payload["meta"]["selected_skill_names"] = selected_skill_names
     if user_name:
         native_payload["meta"]["user_name"] = user_name
     if bbk_id:
