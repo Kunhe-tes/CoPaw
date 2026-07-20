@@ -1,6 +1,6 @@
 # 广播任务到多个租户
 
-这个示例演示把一个源租户的 cron 任务广播到多个目标租户。广播会在目标租户下创建子任务，并按目标数量计算错峰 offset。
+这个示例演示把一个源租户的 cron 任务异步广播到多个目标租户。POST 只创建或复用后台任务；调用方需要轮询任务状态，完成后才能把 `results` 当成最终结果。
 
 返回 [Cron 示例索引](../README.md)。
 
@@ -56,10 +56,49 @@ curl.exe -X POST "$baseUrl/api/cron/jobs/$jobId/broadcast" `
 
 `targets` 是推荐字段，能让后端把目标租户展示身份持久化到子任务；`target_tenant_ids` 仍保留兼容旧调用方。`enable_offset` 默认开启，设为 `$false` 时所有目标沿用原 cron；`offset_window_hours` 默认 4，取值 1-24。
 
-返回示例：
+首次返回示例：
 
 ```json
 {
+  "task_id": "broadcast-task-id",
+  "status": "running",
+  "tenant_count": 2,
+  "completed_count": 0,
+  "failed_count": 0,
+  "results": [],
+  "reused": false
+}
+```
+
+轮询指定任务：
+
+```powershell
+$taskId = "broadcast-task-id"
+
+curl.exe "$baseUrl/api/cron/jobs/$jobId/broadcast/tasks/$taskId" `
+  -H "X-Tenant-Id: tenant-a" `
+  -H "X-Source-Id: RMASSIST" `
+  -H "X-Agent-Id: default"
+```
+
+也可以查询该源任务当前运行中或最近一次广播任务：
+
+```powershell
+curl.exe "$baseUrl/api/cron/jobs/$jobId/broadcast/tasks/current" `
+  -H "X-Tenant-Id: tenant-a" `
+  -H "X-Source-Id: RMASSIST" `
+  -H "X-Agent-Id: default"
+```
+
+完成后的响应才会包含最终结果，例如：
+
+```json
+{
+  "task_id": "broadcast-task-id",
+  "status": "completed",
+  "tenant_count": 2,
+  "completed_count": 2,
+  "failed_count": 0,
   "results": [
     {
       "tenant_id": "tenant-b",
@@ -83,7 +122,8 @@ curl.exe -X POST "$baseUrl/api/cron/jobs/$jobId/broadcast" `
       "error": "",
       "warning": ""
     }
-  ]
+  ],
+  "reused": false
 }
 ```
 
@@ -118,5 +158,7 @@ curl.exe -X POST "$baseUrl/api/cron/jobs/$jobId/broadcast" `
 ## 排查重点
 
 - 如果目标租户已经有同源子任务，API 会刷新已有子任务，不重复创建。
+- 如果首次 POST 的 `results` 为空，这是异步任务正常状态；先按 `task_id` 轮询，不要立即判断广播失败。
+- 如果已有广播或模式同步任务运行，响应可能带 `reused=true`；不要并发重复提交。
 - 如果错峰时间看起来不对，先看返回的 `offset_minutes` 和子任务 `meta.broadcast_original_cron`。
 - 如果子任务展示身份缺失，先确认请求体是否传了 `targets[].tenant_name` 和 `targets[].bbk_id`，再看 `src/swe/app/crons/api.py` 的 `_normalize_broadcast_targets()` 与 `_build_broadcast_job()`。

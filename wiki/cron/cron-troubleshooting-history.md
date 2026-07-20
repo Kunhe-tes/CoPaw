@@ -16,6 +16,26 @@
 4. `SWE_SERVER_DOMAIN` 拼出的回调地址是否外部平台可访问。
 5. `/api/internal/cron/callback` 是否通过 `SWE_INTERNAL_TOKEN` 校验。
 
+如果任务已经切到批调度，不要继续按普通 timer 排查：
+
+1. SWE 与 Scheduler 的 `SWE_CRON_DISPATCH_INTENTS_ENABLED` 是否都为 true。
+2. 父任务是否有 `batch_dispatch_external_job_id`，外部平台回调是否指向 `/api/scheduler/cron/callback`。
+3. Scheduler 是否创建 batch/intents，模型作用域是否有 capacity。
+4. 父/子任务的旧普通 timer 是否已暂停；SWE 会跳过批调度任务的非 dispatch 自动回调。
+
+### 批调度 batch 已创建但 intent 不执行
+
+优先检查：
+
+1. `swe_cron_dispatch_intents` 的 status、attempt、due_at 和最近 event。
+2. source/provider/model 是否组成了预期作用域，`swe_cron_dispatch_worker_capacity.effective_workers` 是否大于 0。
+3. `swe_cron_dispatch_scope_leases` 是否存在未过期 lease；`effective_workers` 是容量槽位，不是进程数。
+4. Scheduler 回调的任务级 SWE domain 是否可达，`SCHEDULER_SWE_INTERNAL_TOKEN` 是否匹配。
+5. SWE execution meta 是否带完整 intent/batch/attempt，`/api/scheduler/cron/execution` 回执是否成功。
+6. intent 是否超过 `SCHEDULER_CRON_DISPATCHED_STALE_SECONDS`，或已达到默认 3 次尝试上限。
+
+不要等待 Scheduler 后台扫描父任务：批次只能由外部批调度物理 timer callback 创建。
+
 ### 回调到了但找不到任务
 
 优先检查：
@@ -38,12 +58,27 @@
 
 优先检查：
 
-1. Monitor 的 `swe_cron_executions.notification_status` 是否是 `pending`。
-2. `notification_due_at` 是否已经到期。
+1. execution 是否同时满足 `status=success`、`async_status=success`、`need_notification=1`、`notification_status=pending`。
+2. `notification_due_at` 是否已经到期；批调度执行要核对 `cron_dispatch.parent_scheduled_fire_at`。
 3. SWE 进程的 `CronNotificationWorker` 是否启动。
 4. `SWE_CRON_NOTIFICATION_SOURCE_IDS` 是否过滤掉了该 job 的 `source_id`。
 5. `monitor/src/monitor/app/services/cron/notification_service.py` 领取 SQL 是否能查到这条 execution。
 6. `CronManager.send_task_success_notification()` 是否能找到 job、task chat 和 zhaohu 通道。
+
+### 广播 POST 成功但结果为空
+
+广播现在是异步任务。首次 POST 返回的 `task_id/status/progress/results/reused` 只代表任务已创建或复用，不代表所有目标租户已完成。
+
+优先轮询：
+
+- `GET /api/cron/jobs/{job_id}/broadcast/tasks/current`
+- `GET /api/cron/jobs/{job_id}/broadcast/tasks/{task_id}`
+
+如果部分租户缺失，再看分发快照的 `failed_tenants/failure_summary`，必要时调用 `POST /api/cron/jobs/{job_id}/broadcast/children/refresh`。请求和历史快照里的已知租户失败属于严格失败；额外发现租户失败只形成 warning。
+
+### Source 归档维护没有执行
+
+优先检查 source 系统配置里的 `archive_maintenance.enabled/cron`、`swe_source_system_task_binding` 中 `task_type=archive_maintenance` 的外部任务 ID，以及 callback 是否由 `SourceSystemTaskScheduler` 处理。单次执行还可能因为 workspace/file 限额或 `timeout_seconds` 正常提前结束，要看汇总里的 `timed_out` 和 errors。
 
 ### 手动运行后通知时间不对
 
@@ -112,6 +147,15 @@ Agent 通过 shell 工具执行 `echo ready && swe cron list` 或 `swe cron list
 | `0732cdea` | 2026-06-09 | 降低广播 API 复杂度 |
 | `51febe0a` | 2026-06-10 | 广播时持久化目标租户 `tenant_name`、`bbk_id` 等展示身份 |
 | `f0ed1c9e` | 2026-06-10 | shell 拦截器支持链式 `swe cron` 命令，只对命中段注入租户参数 |
+| `67748c7e` | 2026-06-16 | 广播改为异步后台任务并提供任务状态查询 |
+| `dbdc146f` | 2026-06-27 | 增加独立 Scheduler 管理的批调度与 dispatch intents |
+| `0cc7d0f7` | 2026-07-01 | 按 source/provider/model 作用域协调派发 |
+| `d5db8d7f` | 2026-07-02 | 阅读速度纳入批调度优先级 |
+| `7428ed11` | 2026-07-03 | 增加 source 级 archive maintenance 调度 |
+| `063f8a7c` | 2026-07-07 | 增加网关侧最新 cron execution 子任务数 API |
+| `4136114b` | 2026-07-13 | 稳定广播子任务发现和同步 |
+| `38544f7f` | 2026-07-14 | 只有完整 dispatch 身份的 execution 才路由 Scheduler |
+| `7a9aac4f` | 2026-07-16 | 通知领取增加 `need_notification` 业务门控 |
 
 ## 维护建议
 
@@ -123,17 +167,24 @@ Agent 通过 shell 工具执行 `echo ready && swe cron list` 或 `swe cron list
 4. 如果改动影响模型选择，必须保持 `model_slot` 只通过上下文覆盖，不修改租户默认模型。
 5. 如果改动影响成功/取消状态，必须同时检查 trace 结束、Monitor execution status 和任务卡片 meta。
 6. 如果改动影响通知，必须同时检查 SWE `MonitorSyncClient`、SWE `CronNotificationWorker` 和 Monitor `CronNotificationService`。
-7. 如果改动影响广播，必须验证 cron 平移失败 fallback、模型 fallback、重复 child job 和通知 due time。
-8. 如果改动影响 Agent shell 中的 `swe cron` 命令，必须验证单条命令和 `&&` 链式命令的参数注入位置。
+7. 如果改动影响广播，必须验证异步任务 claim、快照刷新、cron 平移 fallback、模型 fallback、已有 child 刷新和模式同步。
+8. 如果改动影响批调度，必须验证父 timer 唯一触发、作用域 lease/capacity、HTTP 失败、execution 回执、重试上限、stale 回收和补位。
+9. 如果改动影响 source 系统任务，必须区分 task session cleanup 与 archive maintenance 的 binding、配置和执行范围。
+10. 如果改动影响 Agent shell 中的 `swe cron` 命令，必须验证单条命令和 `&&` 链式命令的参数注入位置。
 
 推荐测试入口：
 
 ```bash
-venv/bin/python -m pytest tests/unit/app/test_tenant_cron_api.py
-venv/bin/python -m pytest tests/unit/app/test_tenant_cron_execution.py
-venv/bin/python -m pytest tests/unit/app/test_cron_notification_worker.py
-venv/bin/python -m pytest tests/unit/app/test_scheduler_cron_normalization.py
-venv/bin/python -m pytest tests/unit/cli/test_cli_cron_tenant.py
-venv/bin/python -m pytest tests/unit/monitor/test_cron_notification_service.py
-venv/bin/python -m pytest tests/unit/agents/tools/test_shell_interceptor.py
+& .\.venv\Scripts\python.exe -m pytest tests/unit/app/test_tenant_cron_api.py
+& .\.venv\Scripts\python.exe -m pytest tests/unit/app/test_tenant_cron_execution.py
+& .\.venv\Scripts\python.exe -m pytest tests/unit/app/test_cron_notification_worker.py
+& .\.venv\Scripts\python.exe -m pytest tests/unit/app/test_scheduler_cron_normalization.py
+& .\.venv\Scripts\python.exe -m pytest tests/unit/scheduler/test_cron_scheduling_service.py
+& .\.venv\Scripts\python.exe -m pytest tests/unit/scheduler/test_cron_dispatch_intent_service.py
+& .\.venv\Scripts\python.exe -m pytest tests/unit/monitor/test_cron_dispatch_monitor.py
+& .\.venv\Scripts\python.exe -m pytest tests/unit/monitor/test_cron_latest_subtask_count.py
+& .\.venv\Scripts\python.exe -m pytest tests/unit/app/test_source_system_task_scheduler.py
+& .\.venv\Scripts\python.exe -m pytest tests/unit/cli/test_cli_cron_tenant.py
+& .\.venv\Scripts\python.exe -m pytest tests/unit/monitor/test_cron_notification_service.py
+& .\.venv\Scripts\python.exe -m pytest tests/unit/agents/tools/test_shell_interceptor.py
 ```

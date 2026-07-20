@@ -184,6 +184,12 @@ class ExecutionModel(BaseModel):
         default=None,
         description="异步任务执行状态: success/error",
     )
+    need_notification: int = Field(
+        default=0,
+        ge=0,
+        le=1,
+        description="是否需要通知: 0-否, 1-是",
+    )
     error_message: str = Field(default="", description="错误信息")
 
     # 执行上下文

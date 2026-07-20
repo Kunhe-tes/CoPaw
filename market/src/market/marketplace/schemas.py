@@ -367,3 +367,58 @@ class DistributionPreviewResponse(BaseModel):
     skill_version: str
     users: list[UserSkillStatus] = Field(default_factory=list)
     distributed_user_ids: list[str] = Field(default_factory=list)
+
+
+# ============================================================
+# RPC 接口模型
+# ============================================================
+
+
+class SkillQueryRequest(BaseModel):
+    """技能查询请求体."""
+
+    skill_names: list[str] = Field(
+        ...,
+        description="技能名称列表，最多 100 个",
+        max_length=100,
+    )
+    source_types: Optional[list[str]] = Field(
+        default=None,
+        description="来源类型过滤：builtin/customized/marketplace",
+    )
+    enabled_only: bool = Field(
+        default=False,
+        description="是否只返回已启用技能，默认查询所有",
+    )
+
+
+class SkillInfo(BaseModel):
+    """技能基本信息（纯技能属性）."""
+
+    skill_id: str = Field(description="技能唯一标识符")
+    skill_name: str = Field(description="技能名称（目录名）")
+    cn_name: str = Field(default="", description="中文展示名")
+    source: str = Field(description="来源类型：builtin/customized/marketplace")
+    enabled: bool = Field(description="是否启用")
+    version_text: str = Field(default="1.0.0", description="版本号")
+
+
+class SkillQueryResult(BaseModel):
+    """单个技能查询结果."""
+
+    skill_name: str = Field(description="查询的技能名称")
+    found: bool = Field(description="是否找到")
+    skill: Optional[SkillInfo] = Field(
+        default=None,
+        description="技能信息，未找到时为 null",
+    )
+
+
+class SkillQueryResponse(BaseModel):
+    """技能查询响应."""
+
+    results: list[SkillQueryResult] = Field(
+        description="查询结果列表，按请求顺序"
+    )
+    total_requested: int = Field(description="请求查询的技能数量")
+    total_found: int = Field(description="找到的技能数量")
