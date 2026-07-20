@@ -150,6 +150,42 @@ def test_reconcile_moves_registered_enabled_skill_into_runtime_root(
     assert resolve_effective_skills(workspace, "console") == ["demo"]
 
 
+def test_reconcile_preserves_external_manifest_edits_and_moves_package(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "workspace"
+    disabled = workspace / ".disabled_skills" / "demo"
+    active = workspace / "skills" / "demo"
+    _write_skill(disabled, "disabled-copy")
+    _write_manifest(workspace, {"demo": _entry(enabled=False)})
+
+    manifest_path = workspace / "skill.json"
+    external_payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+    external_payload["external_manifest_field"] = {"kept": True}
+    external_payload["skills"]["demo"]["enabled"] = True
+    external_payload["skills"]["demo"]["config"] = {"token": "external"}
+    external_payload["skills"]["demo"].setdefault("metadata", {})[
+        "external_note"
+    ] = "preserved"
+    manifest_path.write_text(
+        json.dumps(external_payload, indent=2),
+        encoding="utf-8",
+    )
+
+    reconciled = reconcile_workspace_manifest(workspace)
+
+    assert active.exists()
+    assert not disabled.exists()
+    assert reconciled["external_manifest_field"] == {"kept": True}
+    assert reconciled["skills"]["demo"]["enabled"] is True
+    assert reconciled["skills"]["demo"]["config"] == {
+        "token": "external",
+    }
+    assert reconciled["skills"]["demo"]["metadata"]["external_note"] == (
+        "preserved"
+    )
+
+
 def test_reconcile_prefers_runtime_copy_when_both_registered_copies_exist(
     tmp_path: Path,
 ) -> None:
