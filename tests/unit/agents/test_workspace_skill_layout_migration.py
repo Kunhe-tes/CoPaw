@@ -741,6 +741,110 @@ def test_check_rejects_unreadable_backup_tree_before_mutation(
     assert _snapshot_paths(workspace) == before
 
 
+@pytest.mark.parametrize("mismatch", ["owner", "group"])
+def test_check_rejects_backup_tree_identity_non_root_cannot_restore(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    mismatch: str,
+) -> None:
+    workspace = _legacy_workspace(tmp_path, "tenant-a")
+    target = workspace / "skills" / "demo" / "SKILL.md"
+    before = _snapshot_paths(workspace)
+    original_lstat = Path.lstat
+    original_stat = Path.stat
+    effective_uid = 1201
+    effective_gid = 1202
+
+    def simulated_lstat(path: Path) -> os.stat_result:
+        result = original_lstat(path)
+        values = list(result)
+        values[4] = (
+            2201 if path == target and mismatch == "owner" else effective_uid
+        )
+        values[5] = (
+            2202 if path == target and mismatch == "group" else effective_gid
+        )
+        return os.stat_result(values)
+
+    def simulated_stat(
+        path: Path,
+        *,
+        follow_symlinks: bool = True,
+    ) -> os.stat_result:
+        result = original_stat(path, follow_symlinks=follow_symlinks)
+        values = list(result)
+        values[4] = (
+            2201 if path == target and mismatch == "owner" else effective_uid
+        )
+        values[5] = (
+            2202 if path == target and mismatch == "group" else effective_gid
+        )
+        return os.stat_result(values)
+
+    monkeypatch.setattr(Path, "lstat", simulated_lstat)
+    monkeypatch.setattr(Path, "stat", simulated_stat)
+    monkeypatch.setattr(migration.os, "geteuid", lambda: effective_uid)
+    monkeypatch.setattr(migration.os, "getegid", lambda: effective_gid)
+    monkeypatch.setattr(migration.os, "getgroups", lambda: [1203])
+
+    with pytest.raises(
+        SkillLayoutMigrationError,
+        match=f"cannot restore backup {mismatch}",
+    ):
+        check_workspace_skill_layout_migration(tmp_path)
+
+    assert _snapshot_paths(workspace) == before
+
+
+def test_check_allows_backup_tree_identity_for_root(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace = _legacy_workspace(tmp_path, "tenant-a")
+    target = workspace / "skills" / "demo" / "SKILL.md"
+    original_lstat = Path.lstat
+
+    def simulated_lstat(path: Path) -> os.stat_result:
+        result = original_lstat(path)
+        if path != target:
+            return result
+        values = list(result)
+        values[4] = result.st_uid + 1000
+        values[5] = result.st_gid + 1000
+        return os.stat_result(values)
+
+    monkeypatch.setattr(Path, "lstat", simulated_lstat)
+    monkeypatch.setattr(migration.os, "geteuid", lambda: 0)
+
+    report = check_workspace_skill_layout_migration(tmp_path)
+
+    assert report.workspaces[0].status == "ready"
+
+
+@pytest.mark.skipif(
+    not hasattr(os, "mkfifo"),
+    reason="FIFO creation is unavailable",
+)
+def test_check_rejects_special_file_in_backup_tree_without_mutation(
+    tmp_path: Path,
+) -> None:
+    workspace = _legacy_workspace(tmp_path, "tenant-a")
+    fifo = workspace / "skills" / "demo" / "unsupported.fifo"
+    os.mkfifo(fifo)
+    manifest = workspace / "skill.json"
+    manifest_before = manifest.read_bytes()
+
+    with pytest.raises(
+        SkillLayoutMigrationError,
+        match="unsupported special file",
+    ):
+        check_workspace_skill_layout_migration(tmp_path)
+
+    assert stat.S_ISFIFO(fifo.lstat().st_mode)
+    assert manifest.read_bytes() == manifest_before
+    assert not (workspace / ".disabled_skills").exists()
+
+
 def test_apply_rolls_back_all_attempted_workspaces_exactly(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -815,6 +919,7 @@ def test_rollback_restores_captured_ownership_for_nested_paths_and_symlink(
     }
     chown_calls: list[tuple[Path, int, int, bool]] = []
     lchown_calls: list[tuple[Path, int, int]] = []
+    original_lstat = Path.lstat
 
     def record_chown(
         path: os.PathLike[str] | str,
@@ -844,6 +949,20 @@ def test_rollback_restores_captured_ownership_for_nested_paths_and_symlink(
         del payload
         migration._remove_path(target_workspace / "skill.json")
         migration._remove_path(target_workspace / "skills")
+
+        def mismatched_restored_lstat(path: Path) -> os.stat_result:
+            result = original_lstat(path)
+            try:
+                relative = path.relative_to(target_workspace)
+            except ValueError:
+                return result
+            if relative.parts and relative.parts[0] in migration._BACKUP_PATHS:
+                values = list(result)
+                values[4] = result.st_uid + 1
+                return os.stat_result(values)
+            return result
+
+        monkeypatch.setattr(Path, "lstat", mismatched_restored_lstat)
         raise OSError("force rollback")
 
     monkeypatch.setattr(
@@ -927,6 +1046,64 @@ def test_restore_symlink_identity_restores_lstat_mode_with_lchmod(
     assert stat.S_IMODE(symlink.lstat().st_mode) == desired_mode
 
 
+def test_restore_symlink_mode_succeeds_without_apis_when_already_equal(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    target = tmp_path / "target"
+    target.write_text("target", encoding="utf-8")
+    symlink = tmp_path / "link"
+    try:
+        symlink.symlink_to(target)
+    except (NotImplementedError, OSError) as symlink_error:
+        pytest.skip(f"symbolic links are unavailable: {symlink_error}")
+
+    monkeypatch.delattr(migration.os, "lchmod", raising=False)
+    monkeypatch.delattr(migration.os, "chmod", raising=False)
+
+    migration._restore_symlink_mode(symlink, symlink.lstat().st_mode)
+
+
+def test_restore_regular_identity_without_chown_when_owner_group_equal(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    path = tmp_path / "restored"
+    path.write_text("restored", encoding="utf-8")
+    path_stat = path.lstat()
+    desired_mode = 0o640
+    monkeypatch.delattr(migration.os, "chown", raising=False)
+    identity = migration._PathIdentity(
+        relative_path=Path("restored"),
+        uid=path_stat.st_uid,
+        gid=path_stat.st_gid,
+        mode=stat.S_IFREG | desired_mode,
+    )
+
+    migration._restore_path_identity(path, identity)
+
+    assert stat.S_IMODE(path.lstat().st_mode) == desired_mode
+
+
+def test_restore_regular_identity_without_chown_rejects_different_owner(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    path = tmp_path / "restored"
+    path.write_text("restored", encoding="utf-8")
+    path_stat = path.lstat()
+    monkeypatch.delattr(migration.os, "chown", raising=False)
+    identity = migration._PathIdentity(
+        relative_path=Path("restored"),
+        uid=path_stat.st_uid + 1,
+        gid=path_stat.st_gid,
+        mode=path_stat.st_mode,
+    )
+
+    with pytest.raises(SkillLayoutMigrationError, match="path ownership"):
+        migration._restore_path_identity(path, identity)
+
+
 @pytest.mark.skipif(
     not hasattr(os, "chown"),
     reason="numeric ownership restoration is unavailable",
@@ -943,7 +1120,27 @@ def test_rollback_reports_symlink_mode_when_all_apis_fail(
         pytest.skip(f"symbolic links are unavailable: {symlink_error}")
 
     original_chmod = migration.os.chmod
+    original_backup = migration._backup_workspace
     mode_attempts: list[str] = []
+
+    def backup_with_different_symlink_mode(
+        target_workspace: Path,
+        backup_path: Path,
+    ) -> migration._WorkspaceBackup:
+        backup = original_backup(target_workspace, backup_path)
+        identities: list[migration._PathIdentity] = []
+        for identity in backup.identities:
+            if identity.relative_path == Path("skills/demo/skill-link"):
+                current_mode = stat.S_IMODE(identity.mode)
+                desired_mode = 0o700 if current_mode != 0o700 else 0o711
+                identity = migration._PathIdentity(
+                    relative_path=identity.relative_path,
+                    uid=identity.uid,
+                    gid=identity.gid,
+                    mode=stat.S_IFLNK | desired_mode,
+                )
+            identities.append(identity)
+        return migration._WorkspaceBackup(backup.path, tuple(identities))
 
     def fail_lchmod(
         path: os.PathLike[str] | str,
@@ -969,6 +1166,11 @@ def test_rollback_reports_symlink_mode_when_all_apis_fail(
         "lchown",
         lambda path, uid, gid: None,
         raising=False,
+    )
+    monkeypatch.setattr(
+        migration,
+        "_backup_workspace",
+        backup_with_different_symlink_mode,
     )
 
     def fail_after_backup(workspace: Path, payload: dict[str, Any]) -> None:
@@ -1007,8 +1209,9 @@ def test_rollback_reports_all_ownership_restoration_failures(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    _legacy_workspace(tmp_path, "tenant-a")
+    workspace = _legacy_workspace(tmp_path, "tenant-a")
     attempted_chowns: list[Path] = []
+    original_lstat = Path.lstat
 
     def fail_chown(
         path: os.PathLike[str] | str,
@@ -1022,12 +1225,33 @@ def test_rollback_reports_all_ownership_restoration_failures(
         raise PermissionError("cannot restore ownership")
 
     monkeypatch.setattr(migration.os, "chown", fail_chown)
+
+    def fail_with_mismatched_restored_ownership(
+        target_workspace: Path,
+        payload: dict[str, Any],
+    ) -> None:
+        del payload
+        assert target_workspace == workspace
+
+        def mismatched_restored_lstat(path: Path) -> os.stat_result:
+            result = original_lstat(path)
+            try:
+                relative = path.relative_to(target_workspace)
+            except ValueError:
+                return result
+            if relative.parts and relative.parts[0] in migration._BACKUP_PATHS:
+                values = list(result)
+                values[4] = result.st_uid + 1
+                return os.stat_result(values)
+            return result
+
+        monkeypatch.setattr(Path, "lstat", mismatched_restored_lstat)
+        raise OSError("migration failed")
+
     monkeypatch.setattr(
         migration,
         "_apply_workspace_migration",
-        lambda workspace, payload: (_ for _ in ()).throw(
-            OSError("migration failed"),
-        ),
+        fail_with_mismatched_restored_ownership,
     )
 
     with pytest.raises(migration.SkillLayoutMigrationRollbackError) as exc:

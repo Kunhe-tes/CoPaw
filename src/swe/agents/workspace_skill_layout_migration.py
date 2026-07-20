@@ -197,11 +197,33 @@ def _require_file_read_access(path: Path, description: str) -> None:
         )
 
 
+def _validate_backup_identity_restorable(
+    path: Path,
+    path_stat: os.stat_result,
+) -> None:
+    if not hasattr(os, "geteuid"):
+        return
+    effective_uid = os.geteuid()
+    if effective_uid == 0:
+        return
+    if path_stat.st_uid != effective_uid:
+        raise SkillLayoutMigrationError(
+            f"Workspace migration cannot restore backup owner: {path}",
+        )
+    effective_groups = {os.getegid(), *os.getgroups()}
+    if path_stat.st_gid not in effective_groups:
+        raise SkillLayoutMigrationError(
+            f"Workspace migration cannot restore backup group: {path}",
+        )
+
+
 def _validate_backup_path_readability(
     path: Path,
     description: str,
 ) -> None:
-    if path.is_symlink():
+    path_stat = path.lstat()
+    _validate_backup_identity_restorable(path, path_stat)
+    if stat.S_ISLNK(path_stat.st_mode):
         try:
             path.readlink()
         except OSError as exc:
@@ -211,7 +233,6 @@ def _validate_backup_path_readability(
             ) from exc
         return
 
-    path_stat = path.lstat()
     if stat.S_ISDIR(path_stat.st_mode):
         _require_directory_access(
             path,
@@ -230,6 +251,11 @@ def _validate_backup_path_readability(
             _validate_backup_path_readability(child, description)
         return
 
+    if not stat.S_ISREG(path_stat.st_mode):
+        raise SkillLayoutMigrationError(
+            f"Workspace migration cannot back up unsupported special file: "
+            f"{path}",
+        )
     _require_file_read_access(path, description)
 
 
@@ -431,6 +457,12 @@ def _preflight_workspace(workspace: Path) -> _WorkspaceMigrationPlan:
             )
         return _WorkspaceMigrationPlan(workspace, "not_applicable")
 
+    if not stat.S_ISREG(manifest.lstat().st_mode):
+        raise SkillLayoutMigrationError(
+            f"Workspace migration cannot back up unsupported special file: "
+            f"{manifest}",
+        )
+
     payload = _read_manifest(manifest)
     layout_version = payload.get("layout_version")
     if "layout_version" not in payload:
@@ -563,6 +595,8 @@ def _remove_path(path: Path) -> None:
 
 def _restore_symlink_mode(path: Path, mode: int) -> None:
     desired_mode = stat.S_IMODE(mode)
+    if stat.S_IMODE(path.lstat().st_mode) == desired_mode:
+        return
     errors: list[Exception] = []
 
     lchmod = getattr(os, "lchmod", None)
@@ -615,37 +649,43 @@ def _restore_path_identity(path: Path, identity: _PathIdentity) -> None:
         raise SkillLayoutMigrationError(
             f"Rollback restored the wrong path type: {path}",
         )
+    ownership_matches = (
+        restored_stat.st_uid == identity.uid
+        and restored_stat.st_gid == identity.gid
+    )
 
     if stat.S_ISLNK(identity.mode):
-        if hasattr(os, "lchown"):
-            os.lchown(path, identity.uid, identity.gid)
-        else:
-            if not hasattr(os, "chown"):
-                raise SkillLayoutMigrationError(
-                    f"Unable to restore symbolic link ownership: {path}",
+        if not ownership_matches:
+            if hasattr(os, "lchown"):
+                os.lchown(path, identity.uid, identity.gid)
+            else:
+                if not hasattr(os, "chown"):
+                    raise SkillLayoutMigrationError(
+                        f"Unable to restore symbolic link ownership: {path}",
+                    )
+                os.chown(
+                    path,
+                    identity.uid,
+                    identity.gid,
+                    follow_symlinks=False,
                 )
+        _restore_symlink_mode(path, identity.mode)
+        return
+
+    if not ownership_matches:
+        if not hasattr(os, "chown"):
+            raise SkillLayoutMigrationError(
+                f"Unable to restore path ownership: {path}",
+            )
+        try:
             os.chown(
                 path,
                 identity.uid,
                 identity.gid,
                 follow_symlinks=False,
             )
-        _restore_symlink_mode(path, identity.mode)
-        return
-
-    if not hasattr(os, "chown"):
-        raise SkillLayoutMigrationError(
-            f"Unable to restore path ownership: {path}",
-        )
-    try:
-        os.chown(
-            path,
-            identity.uid,
-            identity.gid,
-            follow_symlinks=False,
-        )
-    except (NotImplementedError, TypeError):
-        os.chown(path, identity.uid, identity.gid)
+        except (NotImplementedError, TypeError):
+            os.chown(path, identity.uid, identity.gid)
     path.chmod(stat.S_IMODE(identity.mode))
 
 
