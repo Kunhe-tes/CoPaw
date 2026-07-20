@@ -42,6 +42,7 @@ from ...agents.skills_manager import (
     get_skill_pool_dir,
     get_workspace_skill_manifest_path,
     get_workspace_skills_dir,
+    resolve_workspace_managed_skill_dir,
     import_builtin_skills,
     list_builtin_import_candidates,
     list_workspaces,
@@ -679,11 +680,14 @@ def _mtime_to_iso(mtime: float) -> str:
 def _build_workspace_skill_specs(workspace_dir: Path) -> list[SkillSpec]:
     manifest = read_skill_manifest(workspace_dir, reconcile=False)
     entries = manifest.get("skills", {})
-    skill_root = get_workspace_skills_dir(workspace_dir)
     specs: list[SkillSpec] = []
     for skill_name, entry in sorted(entries.items()):
         source = entry.get("source", "customized")
-        skill_dir = skill_root / skill_name
+        skill_dir = resolve_workspace_managed_skill_dir(
+            workspace_dir,
+            skill_name,
+            enabled=bool(entry.get("enabled", False)),
+        )
         skill = _read_skill_from_dir(skill_dir, source)
         if skill is None:
             continue

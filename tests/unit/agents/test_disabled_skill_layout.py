@@ -1,7 +1,9 @@
 # -*- coding: utf-8 -*-
 from __future__ import annotations
 
+import io
 import json
+import zipfile
 from pathlib import Path
 
 import pytest
@@ -57,6 +59,22 @@ def _entry(enabled: bool) -> dict[str, object]:
         "config": {},
         "metadata": {},
     }
+
+
+def _skill_content(name: str, marker: str) -> str:
+    return (
+        f"---\nname: {name}\ndescription: {name} skill\n---\n" f"\n{marker}\n"
+    )
+
+
+def _skill_zip(name: str, marker: str) -> bytes:
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w") as archive:
+        archive.writestr(
+            f"{name}/SKILL.md",
+            _skill_content(name, marker),
+        )
+    return buffer.getvalue()
 
 
 def test_workspace_skill_layout_paths(tmp_path: Path) -> None:
@@ -332,3 +350,423 @@ def test_reconcile_rejects_malformed_workspace_manifest_without_mutation(
     assert manifest_path.read_text(encoding="utf-8") == malformed
     assert active.exists()
     assert disabled.exists()
+
+
+def test_disable_moves_package_before_committing_disabled_state(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace = tmp_path / "workspace"
+    service = skills_manager.SkillService(workspace)
+    assert (
+        service.create_skill(
+            "demo",
+            _skill_content("demo", "active-copy"),
+            enable=True,
+        )
+        == "demo"
+    )
+    active = workspace / "skills" / "demo"
+    disabled = workspace / ".disabled_skills" / "demo"
+    _write_skill(disabled, "stale-hidden-copy")
+    manifest_path = get_workspace_skill_manifest_path(workspace)
+    original_mutate = skills_manager._mutate_json
+
+    def assert_move_precedes_manifest(
+        path: Path,
+        default: dict,
+        mutator,
+    ):
+        assert path == manifest_path
+        current = json.loads(path.read_text(encoding="utf-8"))
+        assert current["skills"]["demo"]["enabled"] is True
+        assert not active.exists()
+        assert disabled.exists()
+        assert "active-copy" in (disabled / "SKILL.md").read_text(
+            encoding="utf-8",
+        )
+        return original_mutate(path, default, mutator)
+
+    monkeypatch.setattr(
+        skills_manager,
+        "_mutate_json",
+        assert_move_precedes_manifest,
+    )
+
+    result = service.disable_skill("demo")
+
+    assert result["success"] is True
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    assert manifest["skills"]["demo"]["enabled"] is False
+
+
+def test_enable_scans_then_commits_state_then_moves_package(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace = tmp_path / "workspace"
+    active = workspace / "skills" / "demo"
+    disabled = workspace / ".disabled_skills" / "demo"
+    _write_skill(disabled, "disabled-copy")
+    _write_manifest(workspace, {"demo": _entry(enabled=False)})
+    manifest_path = get_workspace_skill_manifest_path(workspace)
+    service = skills_manager.SkillService(workspace)
+    observed: list[str] = []
+    original_mutate = skills_manager._mutate_json
+    original_move = skills_manager._move_skill_dir
+
+    def record_scan(skill_dir: Path, skill_name: str) -> None:
+        assert skill_dir == disabled
+        assert skill_name == "demo"
+        assert not active.exists()
+        assert (
+            json.loads(manifest_path.read_text(encoding="utf-8"))["skills"][
+                "demo"
+            ]["enabled"]
+            is False
+        )
+        observed.append("scan")
+
+    def record_manifest(
+        path: Path,
+        default: dict,
+        mutator,
+    ):
+        assert observed == ["scan"]
+        assert disabled.exists()
+        result = original_mutate(path, default, mutator)
+        observed.append("manifest")
+        return result
+
+    def record_move(source: Path, target: Path) -> None:
+        assert observed == ["scan", "manifest"]
+        assert source == disabled
+        assert target == active
+        assert (
+            json.loads(manifest_path.read_text(encoding="utf-8"))["skills"][
+                "demo"
+            ]["enabled"]
+            is True
+        )
+        original_move(source, target)
+        observed.append("move")
+
+    monkeypatch.setattr(
+        skills_manager,
+        "_scan_skill_dir_or_raise",
+        record_scan,
+    )
+    monkeypatch.setattr(skills_manager, "_mutate_json", record_manifest)
+    monkeypatch.setattr(skills_manager, "_move_skill_dir", record_move)
+
+    result = service.enable_skill("demo")
+
+    assert result["success"] is True
+    assert observed == ["scan", "manifest", "move"]
+    assert active.exists()
+    assert not disabled.exists()
+
+
+def test_enable_does_not_report_success_when_move_fails(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace = tmp_path / "workspace"
+    active = workspace / "skills" / "demo"
+    disabled = workspace / ".disabled_skills" / "demo"
+    _write_skill(disabled, "disabled-copy")
+    _write_manifest(workspace, {"demo": _entry(enabled=False)})
+
+    def fail_move(_source: Path, _target: Path) -> None:
+        raise OSError("cannot move enabled package")
+
+    monkeypatch.setattr(skills_manager, "_move_skill_dir", fail_move)
+
+    result = skills_manager.SkillService(workspace).enable_skill("demo")
+
+    assert result["success"] is False
+    assert result["reason"] == "move_failed"
+    assert (
+        json.loads(
+            get_workspace_skill_manifest_path(workspace).read_text(
+                encoding="utf-8",
+            ),
+        )["skills"]["demo"]["enabled"]
+        is True
+    )
+    assert disabled.exists()
+    assert not active.exists()
+
+
+def test_create_and_list_disabled_skill_use_hidden_root(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "workspace"
+    service = skills_manager.SkillService(workspace)
+
+    created = service.create_skill(
+        "demo",
+        _skill_content("demo", "disabled-copy"),
+        enable=False,
+    )
+
+    assert created == "demo"
+    assert not (workspace / "skills" / "demo").exists()
+    assert (workspace / ".disabled_skills" / "demo").exists()
+    assert [skill.name for skill in service.list_all_skills()] == ["demo"]
+
+
+def test_create_overwrite_preserves_disabled_state_and_config(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "workspace"
+    service = skills_manager.SkillService(workspace)
+    service.create_skill(
+        "demo",
+        _skill_content("demo", "original"),
+        config={"token": "keep"},
+        enable=False,
+    )
+    reconcile_workspace_manifest(workspace)
+    service.set_skill_channels("demo", ["discord"])
+
+    created = service.create_skill(
+        "demo",
+        _skill_content("demo", "updated"),
+        overwrite=True,
+        config=None,
+        enable=True,
+    )
+
+    assert created == "demo"
+    hidden = workspace / ".disabled_skills" / "demo" / "SKILL.md"
+    assert "updated" in hidden.read_text(encoding="utf-8")
+    assert not (workspace / "skills" / "demo").exists()
+    entry = json.loads(
+        get_workspace_skill_manifest_path(workspace).read_text(
+            encoding="utf-8",
+        ),
+    )["skills"]["demo"]
+    assert entry["enabled"] is False
+    assert entry["channels"] == ["discord"]
+    assert entry["config"] == {"token": "keep"}
+
+
+def test_edit_and_load_disabled_skill_use_hidden_root(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    service = skills_manager.SkillService(workspace)
+    service.create_skill(
+        "demo",
+        _skill_content("demo", "original"),
+        enable=False,
+    )
+    reconcile_workspace_manifest(workspace)
+
+    result = service.save_skill(
+        skill_name="demo",
+        content=_skill_content("demo", "updated"),
+        references={"notes.md": "hidden reference"},
+    )
+
+    assert result["success"] is True
+    assert not (workspace / "skills" / "demo").exists()
+    hidden = workspace / ".disabled_skills" / "demo"
+    assert "updated" in (hidden / "SKILL.md").read_text(encoding="utf-8")
+    assert (
+        service.load_skill_file(
+            "demo",
+            "references/notes.md",
+            "customized",
+        )
+        == "hidden reference"
+    )
+
+
+def test_rename_disabled_skill_stays_hidden_and_preserves_state(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "workspace"
+    service = skills_manager.SkillService(workspace)
+    service.create_skill(
+        "demo",
+        _skill_content("demo", "original"),
+        config={"token": "keep"},
+        enable=False,
+    )
+    reconcile_workspace_manifest(workspace)
+    service.set_skill_channels("demo", ["discord"])
+
+    result = service.save_skill(
+        skill_name="demo",
+        target_name="renamed",
+        content=_skill_content("renamed", "updated"),
+    )
+
+    assert result == {"success": True, "mode": "rename", "name": "renamed"}
+    assert not (workspace / "skills" / "renamed").exists()
+    assert not (workspace / ".disabled_skills" / "demo").exists()
+    assert (workspace / ".disabled_skills" / "renamed").exists()
+    entry = json.loads(
+        get_workspace_skill_manifest_path(workspace).read_text(
+            encoding="utf-8",
+        ),
+    )["skills"]["renamed"]
+    assert entry["enabled"] is False
+    assert entry["channels"] == ["discord"]
+    assert entry["config"] == {"token": "keep"}
+
+
+def test_rename_conflict_checks_hidden_root(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    service = skills_manager.SkillService(workspace)
+    service.create_skill(
+        "demo",
+        _skill_content("demo", "original"),
+        enable=False,
+    )
+    reconcile_workspace_manifest(workspace)
+    _write_skill(workspace / ".disabled_skills" / "taken", "occupied")
+
+    result = service.save_skill(
+        skill_name="demo",
+        target_name="taken",
+        content=_skill_content("taken", "updated"),
+    )
+
+    assert result["success"] is False
+    assert result["reason"] == "conflict"
+    assert (workspace / ".disabled_skills" / "demo").exists()
+
+
+def test_delete_disabled_skill_removes_hidden_package_and_registration(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "workspace"
+    service = skills_manager.SkillService(workspace)
+    service.create_skill(
+        "demo",
+        _skill_content("demo", "disabled-copy"),
+        enable=False,
+    )
+    reconcile_workspace_manifest(workspace)
+
+    deleted = service.delete_skill("demo")
+
+    assert deleted is True
+    assert not (workspace / ".disabled_skills" / "demo").exists()
+    manifest = json.loads(
+        get_workspace_skill_manifest_path(workspace).read_text(
+            encoding="utf-8",
+        ),
+    )
+    assert "demo" not in manifest["skills"]
+
+
+def test_replace_existing_disabled_skill_uses_hidden_root_and_state(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "workspace"
+    service = skills_manager.SkillService(workspace)
+    service.create_skill(
+        "demo",
+        _skill_content("demo", "original"),
+        config={"token": "keep"},
+        enable=False,
+    )
+    reconcile_workspace_manifest(workspace)
+    service.set_skill_channels("demo", ["discord"])
+    source_dir = tmp_path / "replacement"
+    _write_skill(source_dir, "replacement")
+
+    result = service.replace_workspace_skill_from_dir(
+        skill_name="demo",
+        source_dir=source_dir,
+    )
+
+    assert result == {"success": True, "name": "demo"}
+    assert not (workspace / "skills" / "demo").exists()
+    hidden = workspace / ".disabled_skills" / "demo" / "SKILL.md"
+    assert "replacement" in hidden.read_text(encoding="utf-8")
+    entry = json.loads(
+        get_workspace_skill_manifest_path(workspace).read_text(
+            encoding="utf-8",
+        ),
+    )["skills"]["demo"]
+    assert entry["enabled"] is False
+    assert entry["channels"] == ["discord"]
+    assert entry["config"] == {"token": "keep"}
+
+
+def test_import_new_disabled_skill_registers_hidden_package_directly(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace = tmp_path / "workspace"
+
+    def forbid_discovery(_workspace: Path) -> dict:
+        raise AssertionError("import must register without reconciliation")
+
+    monkeypatch.setattr(
+        skills_manager,
+        "reconcile_workspace_manifest",
+        forbid_discovery,
+    )
+
+    result = skills_manager.SkillService(workspace).import_from_zip(
+        _skill_zip("demo", "imported"),
+        enable=False,
+    )
+
+    assert result["imported"] == ["demo"]
+    assert not (workspace / "skills" / "demo").exists()
+    assert (workspace / ".disabled_skills" / "demo").exists()
+    entry = json.loads(
+        get_workspace_skill_manifest_path(workspace).read_text(
+            encoding="utf-8",
+        ),
+    )["skills"]["demo"]
+    assert entry["enabled"] is False
+
+
+def test_import_overwrite_preserves_existing_disabled_state(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace = tmp_path / "workspace"
+    service = skills_manager.SkillService(workspace)
+    service.create_skill(
+        "demo",
+        _skill_content("demo", "original"),
+        config={"token": "keep"},
+        enable=False,
+    )
+    reconcile_workspace_manifest(workspace)
+    service.set_skill_channels("demo", ["discord"])
+
+    def forbid_discovery(_workspace: Path) -> dict:
+        raise AssertionError("import must refresh without reconciliation")
+
+    monkeypatch.setattr(
+        skills_manager,
+        "reconcile_workspace_manifest",
+        forbid_discovery,
+    )
+
+    result = service.import_from_zip(
+        _skill_zip("demo", "updated"),
+        overwrite=True,
+        enable=True,
+    )
+
+    assert result["imported"] == ["demo"]
+    assert not (workspace / "skills" / "demo").exists()
+    hidden = workspace / ".disabled_skills" / "demo" / "SKILL.md"
+    assert "updated" in hidden.read_text(encoding="utf-8")
+    entry = json.loads(
+        get_workspace_skill_manifest_path(workspace).read_text(
+            encoding="utf-8",
+        ),
+    )["skills"]["demo"]
+    assert entry["enabled"] is False
+    assert entry["channels"] == ["discord"]
+    assert entry["config"] == {"token": "keep"}

@@ -53,6 +53,9 @@ get_workspace_skill_manifest_path = (
     skills_manager.get_workspace_skill_manifest_path
 )
 get_workspace_skills_dir = skills_manager.get_workspace_skills_dir
+get_workspace_disabled_skills_dir = (
+    skills_manager.get_workspace_disabled_skills_dir
+)
 reconcile_pool_manifest = skills_manager.reconcile_pool_manifest
 reconcile_workspace_manifest = skills_manager.reconcile_workspace_manifest
 
@@ -115,19 +118,14 @@ def _set_workspace_skill_state(
     description: str,
 ) -> None:
     _write_workspace_scaffold(workspace_dir)
-    _write_skill(
-        get_workspace_skills_dir(workspace_dir) / skill_name,
-        description,
+    created = skills_manager.SkillService(workspace_dir).create_skill(
+        name=skill_name,
+        content=(
+            f"---\nname: {skill_name}\n" f"description: {description}\n---\n"
+        ),
+        enable=enabled,
     )
-    reconcile_workspace_manifest(workspace_dir)
-
-    manifest_path = get_workspace_skill_manifest_path(workspace_dir)
-    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-    manifest["skills"][skill_name]["enabled"] = enabled
-    manifest_path.write_text(
-        json.dumps(manifest, ensure_ascii=False, indent=2),
-        encoding="utf-8",
-    )
+    assert created == skill_name
 
 
 def _workspace_skill_enabled(workspace_dir: Path, skill_name: str) -> bool:
@@ -137,6 +135,25 @@ def _workspace_skill_enabled(workspace_dir: Path, skill_name: str) -> bool:
         ),
     )
     return bool(manifest["skills"][skill_name]["enabled"])
+
+
+def test_management_specs_include_registered_disabled_skill(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "workspace"
+    _set_workspace_skill_state(
+        workspace,
+        "demo",
+        enabled=False,
+        description="disabled demo",
+    )
+
+    specs = skills_router._build_workspace_skill_specs(workspace)
+
+    assert not (get_workspace_skills_dir(workspace) / "demo").exists()
+    assert (get_workspace_disabled_skills_dir(workspace) / "demo").exists()
+    assert [spec.name for spec in specs] == ["demo"]
+    assert specs[0].enabled is False
 
 
 def _stub_agent_request(
@@ -935,10 +952,18 @@ def test_broadcast_pool_skills_bootstraps_missing_tenant(
                 ),
                 encoding="utf-8",
             )
-            get_workspace_skill_manifest_path(default_workspace).write_text(
+            workspace_manifest_path = get_workspace_skill_manifest_path(
+                default_workspace,
+            )
+            workspace_manifest_path.parent.mkdir(
+                parents=True,
+                exist_ok=True,
+            )
+            workspace_manifest_path.write_text(
                 json.dumps(
                     {
                         "schema_version": "workspace-skill-manifest.v1",
+                        "layout_version": 2,
                         "version": 1,
                         "skills": {},
                     },
