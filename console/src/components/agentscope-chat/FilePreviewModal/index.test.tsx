@@ -15,6 +15,9 @@ const recordClickMock = vi.hoisted(() => vi.fn());
 const recordListSnapshotMock = vi.hoisted(() => vi.fn());
 const getRecordDataMock = vi.hoisted(() => vi.fn());
 const renderTemplateMock = vi.hoisted(() => vi.fn());
+const renderStaticTemplateMock = vi.hoisted(() => vi.fn());
+const isStaticTemplateMock = vi.hoisted(() => vi.fn(() => false));
+const templateListMock = vi.hoisted(() => ({ current: [] }));
 
 vi.mock("@/api/modules/htmlPreviewEvents", () => ({
   htmlPreviewEventsApi: {
@@ -42,7 +45,9 @@ vi.mock("./htmlPreviewClickTracking", async (importOriginal) => {
 vi.mock("../DynamicRenderContext", () => ({
   useDynamicRender: () => ({
     renderTemplate: renderTemplateMock,
-    templateList: { current: [] },
+    renderStaticTemplate: renderStaticTemplateMock,
+    isStaticTemplate: isStaticTemplateMock,
+    templateList: templateListMock,
     isTemplateListLoaded: true,
   }),
 }));
@@ -96,8 +101,14 @@ beforeEach(() => {
   recordListSnapshotMock.mockClear();
   getRecordDataMock.mockReset();
   renderTemplateMock.mockReset();
+  renderStaticTemplateMock.mockReset();
+  isStaticTemplateMock.mockReset();
   getRecordDataMock.mockResolvedValue({ code: "200", data: { ok: true } });
   renderTemplateMock.mockResolvedValue("<html><body>preview</body></html>");
+  renderStaticTemplateMock.mockResolvedValue(
+    "<html><body>static preview</body></html>",
+  );
+  isStaticTemplateMock.mockReturnValue(false);
 });
 
 afterEach(() => {
