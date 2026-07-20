@@ -11,10 +11,8 @@ import pytest
 from swe.agents import skills_manager
 from swe.agents.skills_manager import (
     _default_workspace_manifest,
-    get_legacy_workspace_skill_manifest_path,
     get_workspace_disabled_skills_dir,
     get_workspace_skill_manifest_path,
-    get_workspace_skill_state_dir,
     get_workspace_skills_dir,
     reconcile_workspace_manifest,
     resolve_effective_skills,
@@ -84,15 +82,10 @@ def test_workspace_skill_layout_paths(tmp_path: Path) -> None:
     assert get_workspace_disabled_skills_dir(workspace_dir) == (
         workspace_dir / ".disabled_skills"
     )
-    assert get_workspace_skill_state_dir(workspace_dir) == (
-        workspace_dir / ".skill_state"
-    )
     assert get_workspace_skill_manifest_path(workspace_dir) == (
-        workspace_dir / ".skill_state" / "manifest.json"
-    )
-    assert get_legacy_workspace_skill_manifest_path(workspace_dir) == (
         workspace_dir / "skill.json"
     )
+    assert not (workspace_dir / ".skill_state").exists()
 
 
 def test_default_workspace_manifest_declares_layout_v2() -> None:

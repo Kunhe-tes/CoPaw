@@ -445,7 +445,7 @@ def copy_skill_to_user(
 
 def get_workspace_skill_manifest_path(workspace_dir: Path) -> Path:
     """Return the Workspace v2 skill management manifest path."""
-    return Path(workspace_dir) / ".skill_state" / "manifest.json"
+    return Path(workspace_dir) / "skill.json"
 
 
 def default_workspace_skill_manifest() -> dict:
@@ -464,10 +464,10 @@ def get_user_skill_manifest_path(
     agent_id: str = DEFAULT_AGENT_ID,
     source_id: str | None = None,
 ) -> Path:
-    """获取用户 workspace 的运行时 manifest 路径（.skill_state/manifest.json）.
+    """获取用户 workspace 的运行时 manifest 路径（skill.json）.
 
     该文件存储技能的运行时状态（enabled、channels、config 等），
-    与技能目录内的 skill.json（存储展示元数据）职责不同。
+    与技能目录内的 skills/<技能名>/skill.json 职责不同。
     路径与 src/swe 的 get_workspace_skill_manifest_path 保持一致。
     """
     effective_user_id = resolve_effective_user_id(user_id, source_id)

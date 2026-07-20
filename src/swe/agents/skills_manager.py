@@ -210,22 +210,12 @@ def resolve_effective_skill_dir(
 
 def get_workspace_skill_manifest_path(workspace_dir: Path) -> Path:
     """Return the workspace skill manifest path."""
-    return get_workspace_skill_state_dir(workspace_dir) / "manifest.json"
+    return Path(workspace_dir) / "skill.json"
 
 
 def get_workspace_disabled_skills_dir(workspace_dir: Path) -> Path:
     """Return the workspace disabled skill directory."""
     return Path(workspace_dir) / ".disabled_skills"
-
-
-def get_workspace_skill_state_dir(workspace_dir: Path) -> Path:
-    """Return the workspace skill management state directory."""
-    return Path(workspace_dir) / ".skill_state"
-
-
-def get_legacy_workspace_skill_manifest_path(workspace_dir: Path) -> Path:
-    """Return the legacy workspace skill manifest path."""
-    return Path(workspace_dir) / "skill.json"
 
 
 def resolve_workspace_managed_skill_dir(
@@ -1853,13 +1843,13 @@ class SkillService:
     This service owns editable skills inside one workspace, including create,
     zip import, enable/disable, channel routing, config persistence, and file
     access. It treats ``<workspace>/skills`` as the source of truth for skill
-    content and ``<workspace>/.skill_state/manifest.json`` as the source of
-    truth for runtime state such as ``enabled`` and ``channels``.
+    content and ``<workspace>/skill.json`` as the source of truth for runtime
+    state such as ``enabled`` and ``channels``.
 
     Example:
         a user creates ``demo_skill`` in workspace ``a1`` -> files are written
         under ``workspaces/a1/skills/demo_skill`` and metadata/state are
-        reconciled into ``workspaces/a1/.skill_state/manifest.json``.
+        reconciled into ``workspaces/a1/skill.json``.
 
         a user enables ``docx`` for the ``discord`` channel only -> the skill
         files stay the same, but the workspace manifest updates ``enabled`` and

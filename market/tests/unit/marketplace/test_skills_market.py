@@ -30,7 +30,7 @@ def _make_app(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_process_workspace_skills_writes_v2_manifest_path(
+async def test_process_workspace_skills_writes_workspace_manifest_path(
     tmp_path,
     monkeypatch,
 ):
@@ -84,7 +84,8 @@ async def test_process_workspace_skills_writes_v2_manifest_path(
         "version": 0,
         "skills": {"demo": {"enabled": True}},
     }
-    assert not (workspace_dir / "skill.json").exists()
+    assert manifest_path == workspace_dir / "skill.json"
+    assert not (workspace_dir / ".skill_state" / "manifest.json").exists()
 
 
 def test_publish_skill_returns_201(tmp_path):
@@ -171,6 +172,7 @@ def test_unpublish_skill_not_found_returns_404(tmp_path):
 
 
 def test_distribute_skill_returns_200(tmp_path):
+    from market.marketplace.fs import get_user_skills_dir
     from market.marketplace.schemas import PublishSkillRequest
 
     app = _make_app(tmp_path)
@@ -204,6 +206,22 @@ def test_distribute_skill_returns_200(tmp_path):
     data = resp.json()
     assert data["distributed_count"] == 1
     assert data["conflict_count"] == 0
+
+    workspace_dir = get_user_skills_dir(
+        tmp_path / "swe",
+        "user1",
+        "default",
+        "src_a",
+    ).parent
+    manifest_path = workspace_dir / "skill.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    assert manifest["skills"]["skill_z"]["source"] == (
+        f"marketplace:{item.item_id}"
+    )
+    assert manifest["skills"]["skill_z"]["metadata"]["distributed_by"] == (
+        "u1"
+    )
+    assert not (workspace_dir / ".skill_state" / "manifest.json").exists()
 
 
 def test_publish_skill_missing_source_id_returns_400(tmp_path):

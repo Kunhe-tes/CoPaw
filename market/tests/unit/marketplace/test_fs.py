@@ -1,7 +1,6 @@
 # -*- coding: utf-8 -*-
 import json
 import pytest
-from pathlib import Path
 
 
 def test_get_marketplace_dir(tmp_path):
@@ -93,9 +92,7 @@ def test_user_manifest_path_matches_swe_workspace_contract(tmp_path):
     assert market_manifest_path == get_workspace_skill_manifest_path(
         workspace_dir,
     )
-    assert market_manifest_path.relative_to(workspace_dir) == (
-        Path(".skill_state") / "manifest.json"
-    )
+    assert market_manifest_path == workspace_dir / "skill.json"
 
 
 def test_read_user_skill_manifest_missing_file_returns_layout_v2(tmp_path):

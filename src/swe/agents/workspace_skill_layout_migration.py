@@ -11,10 +11,8 @@ from typing import Any
 
 from .skills_manager import (
     WORKSPACE_SKILL_LAYOUT_VERSION,
-    get_legacy_workspace_skill_manifest_path,
     get_workspace_disabled_skills_dir,
     get_workspace_skill_manifest_path,
-    get_workspace_skill_state_dir,
 )
 
 
@@ -64,6 +62,7 @@ _BACKUP_PATHS = (
     ".disabled_skills",
     ".skill_state",
 )
+_OBSOLETE_V2_MANIFEST_PATH = Path(".skill_state") / "manifest.json"
 
 
 def _reject_symbolic_link(path: Path, description: str) -> None:
@@ -209,9 +208,9 @@ def _validate_migrated_workspace(
 
 def _preflight_workspace(workspace: Path) -> _WorkspaceMigrationPlan:
     _reject_symbolic_link(workspace, "Workspace")
-    legacy_manifest = get_legacy_workspace_skill_manifest_path(workspace)
-    v2_manifest = get_workspace_skill_manifest_path(workspace)
-    state_root = get_workspace_skill_state_dir(workspace)
+    legacy_manifest = get_workspace_skill_manifest_path(workspace)
+    v2_manifest = workspace / _OBSOLETE_V2_MANIFEST_PATH
+    state_root = v2_manifest.parent
     disabled_root = get_workspace_disabled_skills_dir(workspace)
     active_root = workspace / "skills"
     _reject_symbolic_link(active_root, "active skills root")
@@ -356,10 +355,10 @@ def _apply_workspace_migration(
         source.replace(target)
 
     _write_manifest_atomic(
-        get_workspace_skill_manifest_path(workspace),
+        workspace / _OBSOLETE_V2_MANIFEST_PATH,
         migrated_payload,
     )
-    get_legacy_workspace_skill_manifest_path(workspace).unlink()
+    get_workspace_skill_manifest_path(workspace).unlink()
 
 
 def apply_workspace_skill_layout_migration(
