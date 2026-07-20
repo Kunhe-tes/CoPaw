@@ -216,6 +216,30 @@ _Avoid_: disabled skill, automatically installed skill, runtime skill
 The current set of registered and enabled skill packages selected from a Workspace's ordinary skill directory. It excludes **Unmanaged Skill Content**, changes immediately when skill enablement changes, and gives existing Agent Runs no guarantee that earlier skill files remain available.
 _Avoid_: skill snapshot, immutable skill view, complete skill directory
 
+**User-Selected Skill**:
+A **Skill Runtime View** member that a user explicitly selects for a single chat turn and remains available when that turn starts. A turn may contain up to five selections, including repeated **User-Selected Skills**; their **Skill Use Directives** are injected in selection order after duplicate runtime identifiers are removed. Each selection records user intent as structured turn context with a readable message marker, but is not evidence that the skill actually executed.
+_Avoid_: skill mention, forced tool call, permanently active skill, single selected skill
+
+**Skill Runtime Identifier**:
+The stable `name` of a skill package in one Workspace: its managed skill-directory name and **Skill Management State** key. It is the identity used for runtime selection, channel availability, and injection de-duplication; a frontmatter or market `skill_id` is not a substitute.
+_Avoid_: display name, frontmatter name, market skill id
+
+**Skill Use Directive**:
+A trusted instruction block for one **User-Selected Skill** whose server-resolved `SKILL.md` exists and is readable. It names the skill, describes it, and supplies that path; it requires the Agent to read the document before acting, but does not include the document's full content. With multiple directives, every document is read in directive order before task execution begins.
+_Avoid_: skill prompt copy, user-supplied file path, complete skill document
+
+**Skill-Use Enforcement**:
+The runtime policy that verifies an Agent followed a **Skill Use Directive** before it acts. The first rollout has no Skill-Use Enforcement; the directive is a trusted model instruction rather than a runtime gate.
+_Avoid_: prompt injection, tool attribution, guaranteed skill execution
+
+**Actual Skill Use**:
+The runtime-detected participation of a skill in a turn, established by tool or asset evidence. It is distinct from **User-Selected Skill** and is the only basis for tool-call skill attribution.
+_Avoid_: selected skill, requested skill, assumed skill invocation
+
+**Unavailable Skill Selection**:
+A user-requested skill choice that is no longer in the **Skill Runtime View** when its chat turn starts. The choice is discarded without skill guidance or selection-based attribution, while other **User-Selected Skills** in the same turn may still apply; the turn is ordinary chat only when none remain.
+_Avoid_: failed chat turn, disabled skill invocation, deferred selection, auditable selection
+
 **Skill Isolation Guarantee**:
 The stronger platform-independent boundary under which disabled skill content is inaccessible to model-initiated tools on every supported operating system. **Skill Isolation Guarantee** is distinct from **Skill Discovery Suppression**.
 _Avoid_: best-effort skill hiding, platform-specific skill safety, shell path filter

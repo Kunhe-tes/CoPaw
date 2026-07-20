@@ -53,6 +53,7 @@ export default function Input({ onCancel, onSubmit }: InputProps) {
     prefix,
     allowSpeech,
     suggestions,
+    skillMentions,
   } = senderOptions || {};
 
   const {
@@ -166,6 +167,7 @@ export default function Input({ onCancel, onSubmit }: InputProps) {
           allowSpeech={allowSpeech}
           onPasteFile={handlePasteFile}
           suggestions={suggestions}
+          skillMentions={skillMentions}
         />
         {afterUI}
       </div>

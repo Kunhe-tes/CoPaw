@@ -1597,6 +1597,14 @@ def _request_system_prompt_injections(request: AgentRequest) -> list[str]:
     return _normalize_system_prompt_injections(value)
 
 
+def _request_selected_skill_names(request: AgentRequest) -> list[object]:
+    channel_meta = getattr(request, "channel_meta", None) or {}
+    value = getattr(request, "selected_skill_names", None)
+    if value is None and isinstance(channel_meta, dict):
+        value = channel_meta.get("selected_skill_names")
+    return list(value) if isinstance(value, list) else []
+
+
 def _request_file_url_network(request: AgentRequest) -> str:
     """从请求属性和 channel_meta 中读取静态文件访问网络。"""
     from ...config.context import normalize_file_url_network
@@ -2921,12 +2929,23 @@ class AgentRunner(Runner):
         from ..source_system_config.runtime import (
             get_system_prompt_injections,
         )
+        from .skill_selection import build_skill_use_directives
+
+        selected_skill_directives = build_skill_use_directives(
+            workspace_dir=Path(self.workspace_dir or WORKING_DIR),
+            channel=channel,
+            selected_skill_names=_request_selected_skill_names(request),
+        )
 
         env_context = _with_system_prompt_injections(
             env_context,
             _merge_system_prompt_injections(
                 get_system_prompt_injections(),
                 _request_system_prompt_injections(request),
+                [
+                    directive.render()
+                    for directive in selected_skill_directives
+                ],
             ),
         )
 

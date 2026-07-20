@@ -31,6 +31,7 @@ import defaultConfig, { getDefaultConfig } from "./OptionsPanel/defaultConfig";
 import { chatApi } from "../../api/modules/chat";
 import { cronJobApi } from "../../api/modules/cronjob";
 import { feedbackApi } from "../../api/modules/feedback";
+import { skillApi } from "../../api/modules/skill";
 import { getApiUrl } from "../../api/config";
 import { buildAuthHeaders } from "../../api/authHeaders";
 import type {
@@ -516,6 +517,12 @@ export default function ChatPage() {
   const [feedbackRefreshKey, setFeedbackRefreshKey] = useState(0);
   const [autoPreviewTriggerKey, setAutoPreviewTriggerKey] = useState(0);
   const [isDragging, setIsDragging] = useState(false);
+  const [selectedSkillNames, setSelectedSkillNames] = useState<string[]>([]);
+  const [effectiveSkills, setEffectiveSkills] = useState<
+    { name: string; description: string }[]
+  >([]);
+  const [effectiveSkillsLoading, setEffectiveSkillsLoading] = useState(false);
+  const pendingSelectedSkillNamesRef = useRef<string[]>([]);
   const dragCounterRef = useRef(0);
   const runtimeLoadingBridgeRef = useRef<RuntimeLoadingBridgeApi | null>(null);
   const { message } = useAppMessage();
@@ -536,6 +543,15 @@ export default function ChatPage() {
     (state) => state.loadActiveModelData,
   );
   const taskProgressEnabled = isChatTaskProgressEnabled(sourceSystemConfig);
+
+  const loadEffectiveSkills = useCallback(() => {
+    setEffectiveSkillsLoading(true);
+    void skillApi
+      .listEffectiveSkills()
+      .then(setEffectiveSkills)
+      .catch(() => setEffectiveSkills([]))
+      .finally(() => setEffectiveSkillsLoading(false));
+  }, []);
 
   // useTransition for non-urgent state updates (badge clearing)
   const [, startTransition] = useTransition();
@@ -1366,8 +1382,10 @@ export default function ChatPage() {
         // ==================== userId 统一整改结束 ====================
         stream: true,
         ...biz_params,
+        selected_skill_names: pendingSelectedSkillNamesRef.current,
         file_url_network: resolveCurrentFileUrlNetwork(),
       };
+      pendingSelectedSkillNamesRef.current = [];
 
       const backendChatId = resolveRequestChatId(
         {
@@ -1550,6 +1568,8 @@ export default function ChatPage() {
 
     const handleBeforeSubmit = async () => {
       if (isComposingRef.current) return false;
+      pendingSelectedSkillNamesRef.current = selectedSkillNames;
+      setSelectedSkillNames([]);
       return true;
     };
 
@@ -1626,6 +1646,14 @@ export default function ChatPage() {
           label: renderSuggestionLabel(item.command, item.description),
           value: item.value,
         })),
+        skillMentions: {
+          items: effectiveSkills,
+          selected: selectedSkillNames,
+          loading: effectiveSkillsLoading,
+          onOpen: loadEffectiveSkills,
+          onChange: (names: string[]) =>
+            setSelectedSkillNames(names.slice(0, 5)),
+        },
       },
       session: {
         multiple: true,

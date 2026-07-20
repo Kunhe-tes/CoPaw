@@ -228,6 +228,13 @@ export interface IAgentScopeRuntimeWebUIWelcomeOptions {
  * @descriptionEn Sender configuration options
  */
 export interface IAgentScopeRuntimeWebUISenderOptions {
+  skillMentions?: {
+    items: { name: string; description: string }[];
+    selected: string[];
+    loading?: boolean;
+    onOpen: () => void;
+    onChange: (names: string[]) => void;
+  };
   /**
    * @description 输入框占位符
    * @descriptionEn Input placeholder
