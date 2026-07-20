@@ -1,6 +1,6 @@
 # Disabled skills move outside the runtime skill path
 
-Workspace skill enablement is represented by both authoritative **Skill Management State** and package placement. Registered enabled packages live under `skills/`, registered disabled packages live under the sibling `.disabled_skills/`, and the manifest moves from `skill.json` to `.skill_state/manifest.json` with an explicit `layout_version`. This separates disabled packages from conventional skill registration and `skills/**/SKILL.md` discovery without introducing a platform filesystem sandbox.
+Workspace skill enablement is represented by both authoritative **Skill Management State** and package placement. Registered enabled packages live under `skills/`, and registered disabled packages live under the sibling `.disabled_skills/`. The existing Workspace `skill.json` remains the single authoritative manifest because external services also read and write its enablement, configuration, and metadata fields. It gains an explicit `layout_version`, but it is not moved or mirrored to `.skill_state/manifest.json`. This separates disabled packages from conventional skill registration and `skills/**/SKILL.md` discovery without splitting mutable state across competing manifests or introducing a platform filesystem sandbox.
 
 **State transitions and reconciliation**
 
@@ -8,10 +8,11 @@ Workspace skill enablement is represented by both authoritative **Skill Manageme
 - If both locations contain the same registered skill, the `skills/` copy is the canonical content. It directly replaces the disabled copy, while the manifest remains authoritative for whether the canonical package ultimately belongs in `skills/` or `.disabled_skills/`.
 - Editing, Pool replacement, built-in updates, or re-importing an existing disabled skill updates the disabled copy without enabling it. Deletion remains limited to disabled skills.
 - Content placed manually under `skills/` without a manifest entry is unmanaged: reconciliation leaves it untouched and does not register or enable it.
+- External services may update registered entries in `skill.json` while preserving unknown fields. Reconciliation preserves those updates and materializes directory placement from `enabled`. Cross-service concurrent-write coordination is intentionally deferred.
 
 **Migration**
 
-The layout change is performed before upgrading by a deployment-side CLI, not by permanent compatibility logic or a runtime management API. The CLI provides separate `--check` and `--apply` modes, is idempotent, rejects ambiguous mixed layouts, and applies across the release scope with all-or-nothing rollback. Rollback copies exist only for the duration of `--apply` and are deleted after success. Runtime freezing and concurrent skill-write coordination during migration are outside this decision.
+The layout change is performed before upgrading by a deployment-side CLI, not by permanent compatibility logic or a runtime management API. The CLI provides separate `--check` and `--apply` modes, is idempotent, rejects ambiguous mixed layouts, and applies across the release scope with all-or-nothing rollback. `--apply` moves registered disabled packages, updates `layout_version` in the existing `skill.json`, and never creates `.skill_state/manifest.json`. Rollback copies exist only for the duration of `--apply` and are deleted after success. Runtime freezing and concurrent skill-write coordination during migration are outside this decision.
 
 **Consequences**
 

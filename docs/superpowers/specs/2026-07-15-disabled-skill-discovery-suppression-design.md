@@ -14,11 +14,10 @@
 workspace/
 ├── skills/                    # 已登记且启用的技能包
 ├── .disabled_skills/          # 已登记且禁用的技能包
-└── .skill_state/
-    └── manifest.json          # Skill Management State
+└── skill.json                 # Skill Management State
 ```
 
-新清单保留现有技能条目、渠道、配置、来源、元数据和内容修订号，并增加独立的 `layout_version: 2`。现有随写入递增的 `version` 继续表示内容修订，不能用于推断布局版本。
+Workspace 继续以现有 `skill.json` 作为唯一权威清单。该文件由 CoPaw 和外部服务共同读写；外部服务会保留不识别的字段，因此清单可增加独立的 `layout_version: 2`。现有随写入递增的 `version` 继续表示内容修订，不能用于推断布局版本。不创建 `.skill_state/manifest.json`，也不在两个清单之间双写。
 
 Skill Pool 的目录和清单布局不在本次变更范围内；只有 Workspace 技能布局变化。
 
@@ -64,18 +63,20 @@ Skill Pool 的目录和清单布局不在本次变更范围内；只有 Workspac
 
 协调期间的不一致技能不可加入 Agent 的有效技能集合。目录移动和清单写入继续复用现有跨进程文件锁及原子 JSON 替换能力；本次不引入 Agent Run 技能快照。
 
+外部服务直接修改 `skill.json` 的 `enabled`、`config` 或元数据后，CoPaw 在下一次协调时保留这些修改，并根据 `enabled` 物化目录位置。CoPaw 内部继续使用 `.skill.json.lock` 与原子替换；跨服务并发写入协调暂不处理。
+
 ## 一次性迁移 CLI
 
-发布流程在切换到新版本前运行部署侧 CLI；不提供运行时管理 API，也不在主流程长期兼容旧 `skill.json`。
+发布流程在切换到新版本前运行部署侧 CLI；不提供运行时管理 API，也不在主流程运行迁移逻辑。
 
 ```text
 swe skills migrate-layout --check
 swe skills migrate-layout --apply
 ```
 
-`--check` 只读检查发布范围内所有 Workspace：旧清单可解析、技能路径合法、目标目录没有无法解释的混合状态、目录可写且迁移计划完整。任一检查失败时返回非零状态，不修改文件。
+`--check` 只读检查发布范围内所有 Workspace：`skill.json` 可解析、技能路径合法、目标目录没有无法解释的混合状态、目录可写且迁移计划完整。如果意外存在 `.skill_state/manifest.json`，按混合布局直接拒绝。任一检查失败时返回非零状态，不修改文件。
 
-`--apply` 必须幂等：已带 `layout_version: 2` 且布局一致的 Workspace 报告 `already migrated`；失败并成功回滚的 Workspace 可安全重试；无法判断的新旧混合布局直接失败。执行前创建仅供本次命令使用的临时回滚副本，任一 Workspace 失败则恢复全部已修改 Workspace，全部成功则立即删除副本。
+`--apply` 在原路径就地升级 `skill.json`：只移动清单中 `enabled=false` 的已登记技能，保留全部清单字段，并写入 `layout_version: 2`。命令不改名、删除或复制 `skill.json`，也不创建 `.skill_state`。已带 `layout_version: 2` 且布局一致的 Workspace 报告 `already_migrated`；失败并成功回滚的 Workspace 可安全重试。执行前创建仅供本次命令使用的临时回滚副本，任一 Workspace 失败则恢复全部已修改 Workspace 的目录与原始 `skill.json`，全部成功则立即删除副本。
 
 迁移期间的运行时冻结和并发技能写入协调不在本次范围内，由部署操作规程规避。
 
@@ -93,20 +94,24 @@ swe skills migrate-layout --apply
 ## 错误处理
 
 - 启停源目录缺失、移动失败或清单写入失败时返回失败，不报告部分成功。
+- `skill.json` 无法解析时失败关闭：不注册相关技能，不移动目录，也不覆盖外部服务写入的损坏文件。
 - 清单与目录不一致时，技能保持不可用，协调逻辑按清单恢复。
 - 管理面不得因禁用包位于隐藏目录而返回“技能不存在”。
 - 迁移 CLI 输出每个 Workspace 的检查、迁移、回滚或跳过结果，并以非零退出码表示任何未恢复错误。
 
 ## 测试策略
 
-- 路径与清单单元测试覆盖新布局、`layout_version` 和启用/禁用位置解析。
+- 路径与清单单元测试确认 Workspace 始终使用 `skill.json`，不创建 `.skill_state/manifest.json`，并覆盖 `layout_version` 与启用/禁用位置解析。
 - TDD 行为测试覆盖禁用、启用、重复副本覆盖、失败关闭协调、未知目录忽略、禁用技能编辑、删除和 Pool 更新保持禁用。
-- CLI 测试覆盖 `--check` 无写入、成功迁移、已迁移幂等、混合状态拒绝、中途失败全量回滚和临时副本清理。
+- 外部服务兼容测试模拟读取原 JSON、保留未知字段并修改 `enabled`、`config` 或元数据，然后验证 CoPaw 协调目录且保留这些修改。
+- CLI 测试覆盖 `--check` 无写入、`skill.json` 就地升级、已迁移幂等、混合状态拒绝、中途失败全量回滚和临时副本清理。
 - 回归测试确认有效技能解析、Agent 注册、hook 加载和 Workspace 重载继续只处理启用技能。
+- Market、Pool、Agent 创建、租户种子和技能管理路由回归确认共享 `skill.json` 合同不变；`skill_pool/skill.json` 行为保持不变。
 
 ## 不在范围内
 
 - 平台级文件系统沙箱、容器挂载隔离或按 Agent 创建独立安全视图。
-- 对 shell、glob、grep、文件树或显式文件读取增加 `.disabled_skills` / `.skill_state` 拒绝规则。
+- 对 shell、glob、grep、文件树或显式文件读取增加 `.disabled_skills` 拒绝规则。
 - 运行时旧布局兼容、后台迁移、懒迁移、迁移管理 API 或技能写入冻结。
+- CoPaw 与外部服务的跨进程锁协议、并发写入冲突检测或字段级合并。
 - 长期迁移备份、冲突副本归档或 Agent Run 级不可变技能快照。
