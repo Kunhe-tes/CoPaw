@@ -1342,6 +1342,7 @@ async def _run_broadcast_task(
     post_broadcast: Callable[[], Awaitable[None]] | None = None,
 ) -> None:
     semaphore = asyncio.Semaphore(_get_cron_broadcast_concurrency())
+    await store.mark_running(task_id)
 
     async def _run_target(tenant_id: str, offset: int) -> None:
         async with semaphore:
@@ -1456,6 +1457,7 @@ async def _run_dispatch_mode_children_sync(
     enable: bool,
 ) -> None:
     try:
+        await store.mark_running(task_id)
         await _synchronize_dispatch_broadcast_children(
             app,
             source_job,

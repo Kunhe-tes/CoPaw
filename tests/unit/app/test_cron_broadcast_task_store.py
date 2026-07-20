@@ -138,6 +138,29 @@ def test_memory_store_finishes_failed_when_any_target_failed():
     assert snapshot.failed_count == 1
 
 
+def test_async_task_mirror_marks_all_failed_as_failed():
+    """统一任务镜像应将全部目标失败标记为 failed。"""
+    db = _Db()
+    store = CronBroadcastTaskStore(db)
+
+    asyncio.run(
+        store._mirror_async_task_finished(  # noqa: SLF001
+            task_id="task-1",
+            done_count=2,
+            failed_count=2,
+            results=[],
+            failure_summary="all failed",
+        ),
+    )
+
+    finish_calls = [
+        params
+        for query, params in db.executed
+        if "UPDATE swe_async_tasks" in query
+    ]
+    assert finish_calls[-1][0] == "failed"
+
+
 def test_initialize_creates_task_and_item_tables():
     db = _Db()
     store = CronBroadcastTaskStore(db)
@@ -165,7 +188,7 @@ def test_db_store_reuses_running_task_when_claim_insert_is_ignored():
                 "source_id": "source-a",
                 "tenant_id": "tenant-a",
                 "job_id": "job-source",
-                "target_key": "[\"tenant-a\",\"tenant-b\"]",
+                "target_key": '["tenant-a","tenant-b"]',
                 "status": "running",
                 "tenant_count": 2,
                 "completed_count": 0,

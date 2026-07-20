@@ -458,3 +458,73 @@ def test_distribute_providers_bootstraps_tenant(
 
     assert bootstrap_calls == ["tenant-new"]
     assert result.results[0].bootstrapped is True
+
+
+def test_distribute_providers_returns_async_task_submission(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """提交 providers 分发后应返回受理中的任务信息。"""
+    secret_dir = tmp_path / "secret"
+    _setup_source_providers(secret_dir, "tenant-source")
+    submitted: dict[str, Any] = {}
+    task_ids: list[str] = []
+
+    monkeypatch.setattr(providers_router, "SECRET_DIR", secret_dir)
+    monkeypatch.setattr(
+        providers_router,
+        "get_tenant_working_dir_strict",
+        lambda tenant_id: tmp_path / str(tenant_id),
+    )
+
+    class FakeStore:
+        def __init__(self, db) -> None:  # noqa: ANN001
+            submitted["db"] = db
+
+        async def start_task(self, **kwargs) -> None:  # noqa: ANN003
+            submitted["start_task"] = kwargs
+
+    async def fake_task_runner(*args, **kwargs):  # noqa: ANN001, ANN003
+        submitted["runner"] = (args, kwargs)
+
+    def fake_create_task(coro):  # noqa: ANN001
+        task_ids.append("scheduled")
+        submitted["coroutine"] = coro
+        coro.close()
+        return object()
+
+    monkeypatch.setattr(
+        providers_router,
+        "AsyncTaskStore",
+        FakeStore,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        providers_router.asyncio,
+        "create_task",
+        fake_create_task,
+    )
+    monkeypatch.setattr(
+        providers_router,
+        "_run_providers_distribution_task",
+        fake_task_runner,
+        raising=False,
+    )
+
+    result = asyncio.run(
+        providers_router.distribute_providers(
+            _request(),
+            providers_router.ProvidersDistributionRequest(
+                target_tenant_ids=["tenant-a"],
+                overwrite=True,
+            ),
+        ),
+    )
+
+    assert result.status == "queued"
+    assert result.reused is False
+    assert result.task_id
+    assert task_ids == ["scheduled"]
+    assert (
+        submitted["start_task"]["task_type"] == "provider.providers.distribute"
+    )

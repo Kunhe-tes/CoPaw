@@ -744,6 +744,47 @@ def test_internal_batch_initialize_tenants(monkeypatch) -> None:
     ]
 
 
+def test_internal_batch_initialize_returns_async_task_when_db_available(
+    monkeypatch,
+) -> None:
+    pool = SimpleNamespace(ensure_bootstrap=AsyncMock())
+    client = _build_client(SimpleNamespace())
+    client.app.state.tenant_workspace_pool = pool
+
+    class FakeDb:
+        is_connected = True
+
+        async def execute(self, _sql, _params=None):
+            return 1
+
+        async def execute_many(self, _sql, params_list):
+            return len(params_list)
+
+    client.app.state.db_connection = FakeDb()
+    monkeypatch.setattr(
+        internal_router.asyncio,
+        "create_task",
+        lambda coro: coro.close() or object(),
+    )
+
+    response = client.post(
+        "/internal/tenants/batch-initialize",
+        json={
+            "tenant_ids": "111,222",
+            "source_id": "RMASSIST",
+        },
+    )
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["status"] == "queued"
+    assert data["task_id"]
+    assert data["total"] == 2
+    assert data["success_count"] == 0
+    assert data["fail_count"] == 0
+    pool.ensure_bootstrap.assert_not_awaited()
+
+
 def test_internal_batch_initialize_can_disable_bootstrap_chat(
     monkeypatch,
 ) -> None:

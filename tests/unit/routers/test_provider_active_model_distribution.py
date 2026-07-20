@@ -707,3 +707,118 @@ def test_distribute_active_model_rejects_missing_overwrite() -> None:
 
     assert exc_info.value.status_code == 400
     assert "overwrite=true" in str(exc_info.value.detail)
+
+
+def test_distribute_active_model_returns_async_task_submission(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """提交活跃模型分发后应返回受理中的任务信息。"""
+    source_manager = FakeManager(
+        active_model=ModelSlotConfig(provider_id="openai", model="gpt-5.4"),
+        providers={
+            "openai": FakeProvider(
+                id="openai",
+                models=[{"id": "gpt-5.4", "name": "GPT-5.4"}],
+            ),
+        },
+    )
+    submitted: dict[str, Any] = {}
+    task_ids: list[str] = []
+
+    class FakeStore:
+        def __init__(self, db) -> None:  # noqa: ANN001
+            submitted["db"] = db
+
+        async def start_task(self, **kwargs) -> None:  # noqa: ANN003
+            submitted["start_task"] = kwargs
+
+    async def fake_task_runner(*args, **kwargs):  # noqa: ANN001, ANN003
+        submitted["runner"] = (args, kwargs)
+
+    def fake_create_task(coro):  # noqa: ANN001
+        task_ids.append("scheduled")
+        submitted["coroutine"] = coro
+        coro.close()
+        return object()
+
+    monkeypatch.setattr(
+        providers_router,
+        "AsyncTaskStore",
+        FakeStore,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        providers_router.asyncio,
+        "create_task",
+        fake_create_task,
+    )
+    monkeypatch.setattr(
+        providers_router,
+        "_run_active_model_distribution_task",
+        fake_task_runner,
+        raising=False,
+    )
+
+    result = asyncio.run(
+        providers_router.distribute_active_model(
+            _request(),
+            providers_router.ActiveModelDistributionRequest(
+                target_tenant_ids=["tenant-a"],
+                overwrite=True,
+            ),
+            manager=source_manager,
+        ),
+    )
+
+    assert result.status == "queued"
+    assert result.reused is False
+    assert result.task_id
+    assert task_ids == ["scheduled"]
+    assert submitted["start_task"]["task_id"] == result.task_id
+    assert (
+        submitted["start_task"]["task_type"]
+        == "provider.active_model.distribute"
+    )
+
+
+def test_active_model_distribution_marks_failed_when_mark_running_fails() -> (
+    None
+):
+    """后台任务启动阶段异常不应泄漏到事件循环外，并应尽力落失败状态。"""
+
+    class FailingStore:
+        def __init__(self) -> None:
+            self.item_results: list[dict] = []
+            self.finished: dict | None = None
+
+        async def mark_running(self, task_id: str) -> None:
+            raise RuntimeError("db down")
+
+        async def record_item_result(self, **kwargs) -> None:  # noqa: ANN003
+            self.item_results.append(kwargs)
+
+        async def finish_task(self, **kwargs) -> None:  # noqa: ANN003
+            self.finished = kwargs
+
+    store = FailingStore()
+
+    asyncio.run(
+        providers_router._run_active_model_distribution_task(  # noqa: SLF001
+            task_id="task-1",
+            store=store,
+            source_working_dir=Path("/unused"),
+            target_tenant_ids=["tenant-a", "tenant-b"],
+            provider_payload={},
+            source_active_model=ModelSlotConfig(
+                provider_id="openai",
+                model="gpt-5.4",
+            ),
+            source_id="src1",
+        ),
+    )
+
+    assert len(store.item_results) == 2
+    assert store.finished is not None
+    assert store.finished["status"] == "failed"
+    assert store.finished["failed_count"] == 2

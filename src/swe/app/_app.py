@@ -626,6 +626,18 @@ def _initialize_database_backed_modules(db_connection: Any | None) -> None:
         )
 
 
+async def _initialize_async_task_tables(db_connection: Any | None) -> None:
+    """初始化统一异步任务表，保证 SWE 提交入口可独立启动。"""
+    if db_connection is None:
+        return
+    try:
+        from .async_tasks import init_async_task_tables
+
+        await init_async_task_tables(db_connection)
+    except Exception as e:
+        logger.warning("Failed to initialize async task tables: %s", e)
+
+
 async def _start_lifespan_background_services(
     app: FastAPI,
     multi_agent_manager: MultiAgentManager,
@@ -772,6 +784,8 @@ async def lifespan(
 
     # --- Initialize database connection (required for tracing and instance modules) ---
     db_connection = await _initialize_database_connection()
+    app.state.db_connection = db_connection
+    await _initialize_async_task_tables(db_connection)
 
     await _initialize_tracing_manager(db_connection)
     logger.info("Instance module initialized")

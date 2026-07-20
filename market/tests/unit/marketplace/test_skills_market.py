@@ -5,6 +5,8 @@ import pytest
 from unittest.mock import AsyncMock
 from fastapi.testclient import TestClient
 
+from market.app.routers import skills_market as skills_router
+
 
 def _make_app(tmp_path):
     from fastapi import FastAPI
@@ -112,7 +114,7 @@ def test_unpublish_skill_not_found_returns_404(tmp_path):
     assert resp.status_code == 404
 
 
-def test_distribute_skill_returns_200(tmp_path):
+def test_distribute_skill_returns_200(tmp_path, monkeypatch):
     from market.marketplace.schemas import PublishSkillRequest
 
     app = _make_app(tmp_path)
@@ -131,6 +133,12 @@ def test_distribute_skill_returns_200(tmp_path):
             {"tenant_id": "user1", "tenant_name": "User One", "bbk_id": "200"},
         ],
     )
+
+    monkeypatch.setattr(
+        skills_router.asyncio,
+        "create_task",
+        lambda coro: coro.close() or object(),
+    )
     client = TestClient(app)
     resp = client.post(
         f"/api/market/skills/{item.item_id}/distribute",
@@ -144,8 +152,8 @@ def test_distribute_skill_returns_200(tmp_path):
     )
     assert resp.status_code == 200
     data = resp.json()
-    assert data["distributed_count"] == 1
-    assert data["conflict_count"] == 0
+    assert data["status"] == "queued"
+    assert data["task_id"]
 
 
 def test_publish_skill_missing_source_id_returns_400(tmp_path):

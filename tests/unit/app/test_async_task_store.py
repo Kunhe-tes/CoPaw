@@ -1,0 +1,121 @@
+# -*- coding: utf-8 -*-
+"""异步任务写入器测试。"""
+
+from __future__ import annotations
+
+from datetime import datetime
+
+import pytest
+
+from swe.app.async_tasks import AsyncTaskStore
+from swe.app.async_tasks.schema import init_async_task_tables
+
+
+class FakeDb:
+    """记录执行 SQL 的轻量数据库替身。"""
+
+    def __init__(self) -> None:
+        self.executed: list[tuple[str, tuple | None]] = []
+        self.executed_many: list[tuple[str, list[tuple]]] = []
+
+    async def execute(self, sql: str, params: tuple | None = None) -> int:
+        self.executed.append((sql, params))
+        return 1
+
+    async def execute_many(self, sql: str, params_list: list[tuple]) -> int:
+        self.executed_many.append((sql, params_list))
+        return len(params_list)
+
+    async def fetch_one(
+        self,
+        sql: str,
+        params: tuple | None = None,
+    ) -> dict | None:
+        self.executed.append((sql, params))
+        return {"total": 1}
+
+
+@pytest.mark.asyncio
+async def test_start_task_inserts_master_and_items() -> None:
+    """开始任务时应同时写入主任务和批量明细。"""
+    db = FakeDb()
+    store = AsyncTaskStore(db)
+
+    await store.start_task(
+        task_id="task-1",
+        service="swe",
+        task_type="provider.providers.distribute",
+        title="分发供应商配置",
+        target_ids=["tenant-a", "tenant-b"],
+    )
+
+    assert len(db.executed) == 1
+    assert len(db.executed_many) == 1
+    assert "INSERT INTO swe_async_tasks" in db.executed[0][0]
+    assert "INSERT INTO swe_async_task_items" in db.executed_many[0][0]
+    assert db.executed_many[0][1] == [
+        ("task-1", "tenant-a", None, "queued", None, None),
+        ("task-1", "tenant-b", None, "queued", None, None),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_record_item_result_updates_single_item() -> None:
+    """单个目标完成时应只更新对应明细。"""
+    db = FakeDb()
+    store = AsyncTaskStore(db)
+
+    await store.record_item_result(
+        task_id="task-1",
+        target_id="tenant-a",
+        success=True,
+        result={"ok": True},
+        error_message=None,
+    )
+
+    assert len(db.executed) == 1
+    sql, params = db.executed[0]
+    assert "UPDATE swe_async_task_items" in sql
+    assert params is not None
+    assert params[0] == "succeeded"
+    assert params[1] == '{"ok": true}'
+    assert params[-2:] == ("task-1", "tenant-a")
+
+
+@pytest.mark.asyncio
+async def test_finish_task_updates_summary() -> None:
+    """完成任务时应汇总更新主任务状态。"""
+    db = FakeDb()
+    store = AsyncTaskStore(db)
+
+    await store.finish_task(
+        task_id="task-1",
+        status="partial_failed",
+        done_count=1,
+        failed_count=1,
+        error_message="部分目标失败",
+        result={"done": 1, "failed": 1},
+        finished_at=datetime(2026, 7, 17, 9, 30, 0),
+    )
+
+    assert len(db.executed) == 1
+    sql, params = db.executed[0]
+    assert "UPDATE swe_async_tasks" in sql
+    assert params is not None
+    assert params[0] == "partial_failed"
+    assert params[1] == 1
+    assert params[2] == 1
+    assert params[3] == "部分目标失败"
+    assert params[4] == '{"done": 1, "failed": 1}'
+
+
+@pytest.mark.asyncio
+async def test_init_async_task_tables_creates_master_and_items() -> None:
+    """SWE 启动初始化应创建统一异步任务主表和明细表。"""
+    db = FakeDb()
+
+    await init_async_task_tables(db)
+
+    sql = "\n".join(query for query, _params in db.executed)
+    assert "CREATE TABLE IF NOT EXISTS swe_async_tasks" in sql
+    assert "CREATE TABLE IF NOT EXISTS swe_async_task_items" in sql

@@ -78,6 +78,7 @@ const pathToKey: Record<string, string> = {
   "/analytics/claw-data-overview": "analytics-claw-data-overview",
   "/analytics/cron-job-overview": "analytics-cron-job-overview",
   "/analytics/continuous-governance": "analytics-continuous-governance",
+  "/monitor/tasks": "monitor-task-center",
   "/monitor/cron-batch-dispatch": "monitor-cron-batch-dispatch",
   "/instance/overview": "instance-overview",
   "/instance/instances": "instance-instances",
@@ -108,7 +109,7 @@ export default function MainLayout() {
   const activeSourceId =
     useIframeStore((state) => state.source) || DEFAULT_SOURCE_ID;
   const loadEffectiveConfig = useSourceSystemConfigStore(
-    (state) => state.loadEffectiveConfig
+    (state) => state.loadEffectiveConfig,
   );
   const shouldHideSidebar = hideMenu;
 
@@ -134,9 +135,17 @@ export default function MainLayout() {
           }${isReportViewPage ? " page-container--no-rightPadding" : ""}`}
         >
           <ConsoleCronBubble />
-          <div className={`page-content${isReportViewPage ? " single-page-content" : ""}`}>
+          <div
+            className={`page-content${
+              isReportViewPage ? " single-page-content" : ""
+            }`}
+          >
             <Routes>
-              {hideChat ? <Route path="/" element={<Navigate to="/market" replace />} /> : <Route path="/" element={<Navigate to="/chat" replace />} />}
+              {hideChat ? (
+                <Route path="/" element={<Navigate to="/market" replace />} />
+              ) : (
+                <Route path="/" element={<Navigate to="/chat" replace />} />
+              )}
               <Route path="/chat/*" element={<Chat />} />
               <Route path="/channels" element={<ChannelsPage />} />
               <Route path="/sessions" element={<SessionsPage />} />
@@ -156,7 +165,10 @@ export default function MainLayout() {
               <Route path="/models" element={<ModelsPage />} />
               <Route path="/environments" element={<EnvironmentsPage />} />
               <Route path="/agent-config" element={<AgentConfigPage />} />
-              <Route path="/system-config-page" element={<SystemConfigPage />} />
+              <Route
+                path="/system-config-page"
+                element={<SystemConfigPage />}
+              />
               <Route path="/system-check" element={<SystemCheckPage />} />
               <Route path="/security" element={<SecurityPage />} />
               <Route path="/token-usage" element={<TokenUsagePage />} />

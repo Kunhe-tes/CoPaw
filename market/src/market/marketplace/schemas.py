@@ -134,6 +134,14 @@ class DistributeResponse(BaseModel):
     item_id: str
 
 
+class AsyncTaskSubmitResponse(BaseModel):
+    """异步任务提交响应。"""
+
+    task_id: str
+    status: str = "queued"
+    reused: bool = False
+
+
 class FileTreeNode(BaseModel):
     """文件树节点."""
 

@@ -1,0 +1,188 @@
+.page {
+  min-height: 100%;
+  padding: 18px 20px 28px;
+  overflow-x: hidden;
+  background: #f4f6f8;
+  color: #182230;
+}
+
+.header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+  margin-bottom: 14px;
+}
+
+.header h1 {
+  margin: 0;
+  color: #101828;
+  font-size: 24px;
+  line-height: 1.25;
+  font-weight: 700;
+}
+
+.header p {
+  margin: 5px 0 0;
+  color: #667085;
+  font-size: 13px;
+}
+
+.toolbar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  padding: 10px 12px;
+  margin-bottom: 12px;
+  background: #ffffff;
+  border: 1px solid #e4e7ec;
+  border-radius: 8px;
+}
+
+.select {
+  width: 132px;
+}
+
+.taskTypeInput {
+  width: 220px;
+}
+
+.searchInput {
+  width: min(360px, 100%);
+}
+
+.tableSection {
+  overflow: hidden;
+  background: #ffffff;
+  border: 1px solid #e4e7ec;
+  border-radius: 8px;
+}
+
+.footer {
+  display: flex;
+  justify-content: flex-end;
+  padding-top: 12px;
+}
+
+.linkButton {
+  width: 100%;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: #175cd3;
+  text-align: left;
+  cursor: pointer;
+}
+
+.linkButton span,
+.linkButton small,
+.metaCell strong,
+.metaCell span {
+  display: block;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.linkButton span {
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.linkButton small,
+.metaCell span {
+  margin-top: 3px;
+  color: #667085;
+  font-size: 12px;
+}
+
+.metaCell {
+  min-width: 0;
+}
+
+.metaCell strong {
+  color: #101828;
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.detail {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.detailGrid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.detailGrid div,
+.detailBlock {
+  min-width: 0;
+  padding: 12px;
+  background: #f8fafc;
+  border: 1px solid #e4e7ec;
+  border-radius: 8px;
+}
+
+.detailGrid span {
+  display: block;
+  color: #667085;
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.detailGrid strong {
+  display: block;
+  margin-top: 6px;
+  overflow-wrap: anywhere;
+  color: #101828;
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.detailBlock h3 {
+  margin: 0 0 8px;
+  color: #101828;
+  font-size: 14px;
+  font-weight: 700;
+}
+
+.detailBlock p {
+  margin: 0;
+  color: #475467;
+  font-size: 13px;
+  line-height: 1.6;
+  overflow-wrap: anywhere;
+}
+
+.jsonBox {
+  max-height: 220px;
+  margin: 0;
+  overflow: auto;
+  color: #344054;
+  white-space: pre-wrap;
+  word-break: break-word;
+  font-size: 12px;
+  line-height: 1.6;
+}
+
+@media (max-width: 900px) {
+  .header {
+    flex-direction: column;
+  }
+
+  .select,
+  .taskTypeInput,
+  .searchInput {
+    width: 100%;
+  }
+
+  .detailGrid {
+    grid-template-columns: 1fr;
+  }
+}

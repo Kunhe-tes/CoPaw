@@ -11,6 +11,7 @@ from ..__version__ import __version__
 from ..config.constant import DOCS_ENABLED, CORS_ORIGINS
 from ..database.config import get_database_config
 from ..database.connection import DatabaseConnection
+from ..database.schema import init_database_tables
 from .routers import api_router
 
 logger = logging.getLogger(__name__)
@@ -44,6 +45,7 @@ async def lifespan(fastapi_app: FastAPI):
                 raise RuntimeError(
                     "Database connection failed after connect(). Check DB config.",
                 )
+            await init_database_tables(db)
             logger.info("Database connection established: %s", db_config.host)
         except RuntimeError:
             raise
