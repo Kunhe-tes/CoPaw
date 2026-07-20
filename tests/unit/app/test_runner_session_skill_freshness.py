@@ -171,6 +171,7 @@ def _write_skill_manifest(
     manifest_path = get_workspace_skill_manifest_path(workspace_dir)
     manifest_path.parent.mkdir(parents=True, exist_ok=True)
     payload = {
+        "layout_version": 2,
         "skills": {
             skill_name: {
                 "enabled": True,
