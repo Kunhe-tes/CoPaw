@@ -58,6 +58,20 @@ class _WorkspaceMigrationPlan:
     payload: dict[str, Any] | None = None
 
 
+@dataclass(frozen=True)
+class _PathIdentity:
+    relative_path: Path
+    uid: int
+    gid: int
+    mode: int
+
+
+@dataclass(frozen=True)
+class _WorkspaceBackup:
+    path: Path
+    identities: tuple[_PathIdentity, ...]
+
+
 _BACKUP_PATHS = (
     "skill.json",
     "skills",
@@ -81,7 +95,9 @@ def _validate_managed_root(path: Path, description: str) -> None:
         )
 
 
-def _permission_bits_for_effective_user(path: Path) -> tuple[int, int]:
+def _permission_bits_for_effective_user(
+    path: Path,
+) -> tuple[int, int, int]:
     try:
         file_stat = path.stat()
     except OSError as exc:
@@ -91,6 +107,7 @@ def _permission_bits_for_effective_user(path: Path) -> tuple[int, int]:
 
     if not hasattr(os, "geteuid"):
         return (
+            stat.S_IRUSR | stat.S_IRGRP | stat.S_IROTH,
             stat.S_IWUSR | stat.S_IWGRP | stat.S_IWOTH,
             stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH,
         )
@@ -98,26 +115,34 @@ def _permission_bits_for_effective_user(path: Path) -> tuple[int, int]:
     effective_uid = os.geteuid()
     if effective_uid == 0:
         return (
+            stat.S_IRUSR | stat.S_IRGRP | stat.S_IROTH,
             stat.S_IWUSR | stat.S_IWGRP | stat.S_IWOTH,
             stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH,
         )
     if effective_uid == file_stat.st_uid:
-        return stat.S_IWUSR, stat.S_IXUSR
+        return stat.S_IRUSR, stat.S_IWUSR, stat.S_IXUSR
 
     effective_groups = {os.getegid(), *os.getgroups()}
     if file_stat.st_gid in effective_groups:
-        return stat.S_IWGRP, stat.S_IXGRP
-    return stat.S_IWOTH, stat.S_IXOTH
+        return stat.S_IRGRP, stat.S_IWGRP, stat.S_IXGRP
+    return stat.S_IROTH, stat.S_IWOTH, stat.S_IXOTH
 
 
 def _has_directory_access(
     path: Path,
     *,
+    require_read: bool,
     require_write: bool,
 ) -> bool:
-    write_bit, execute_bit = _permission_bits_for_effective_user(path)
+    read_bit, write_bit, execute_bit = _permission_bits_for_effective_user(
+        path,
+    )
     mode = path.stat().st_mode
-    required_access = os.X_OK | (os.W_OK if require_write else 0)
+    required_access = (
+        os.X_OK
+        | (os.R_OK if require_read else 0)
+        | (os.W_OK if require_write else 0)
+    )
     try:
         allowed_by_system = os.access(
             path,
@@ -126,8 +151,10 @@ def _has_directory_access(
         )
     except (NotImplementedError, TypeError):
         allowed_by_system = os.access(path, required_access)
-    has_required_bits = bool(mode & execute_bit) and (
-        not require_write or bool(mode & write_bit)
+    has_required_bits = (
+        bool(mode & execute_bit)
+        and (not require_read or bool(mode & read_bit))
+        and (not require_write or bool(mode & write_bit))
     )
     return allowed_by_system and has_required_bits
 
@@ -136,13 +163,74 @@ def _require_directory_access(
     path: Path,
     description: str,
     *,
+    require_read: bool = False,
     require_write: bool,
 ) -> None:
-    if not _has_directory_access(path, require_write=require_write):
+    if not _has_directory_access(
+        path,
+        require_read=require_read,
+        require_write=require_write,
+    ):
+        if require_read and require_write:
+            access = "read, write, and execute"
+        elif require_read:
+            access = "read and execute"
+        else:
+            access = "write and execute"
         raise SkillLayoutMigrationError(
-            f"Workspace migration requires write and execute access for "
+            f"Workspace migration requires {access} access for "
             f"{description}: {path}",
         )
+
+
+def _require_file_read_access(path: Path, description: str) -> None:
+    read_bit, _, _ = _permission_bits_for_effective_user(path)
+    mode = path.stat().st_mode
+    try:
+        allowed_by_system = os.access(path, os.R_OK, effective_ids=True)
+    except (NotImplementedError, TypeError):
+        allowed_by_system = os.access(path, os.R_OK)
+    if not allowed_by_system or not bool(mode & read_bit):
+        raise SkillLayoutMigrationError(
+            f"Workspace migration requires read access for {description}: "
+            f"{path}",
+        )
+
+
+def _validate_backup_path_readability(
+    path: Path,
+    description: str,
+) -> None:
+    if path.is_symlink():
+        try:
+            path.readlink()
+        except OSError as exc:
+            raise SkillLayoutMigrationError(
+                f"Unable to read symbolic link for {description}: {path}: "
+                f"{exc}",
+            ) from exc
+        return
+
+    path_stat = path.lstat()
+    if stat.S_ISDIR(path_stat.st_mode):
+        _require_directory_access(
+            path,
+            description,
+            require_read=True,
+            require_write=False,
+        )
+        try:
+            children = sorted(path.iterdir())
+        except OSError as exc:
+            raise SkillLayoutMigrationError(
+                f"Unable to enumerate backup path for {description}: "
+                f"{path}: {exc}",
+            ) from exc
+        for child in children:
+            _validate_backup_path_readability(child, description)
+        return
+
+    _require_file_read_access(path, description)
 
 
 def _validate_manifest_metadata_preservation(path: Path) -> None:
@@ -365,6 +453,13 @@ def _preflight_workspace(workspace: Path) -> _WorkspaceMigrationPlan:
                     for entry in payload["skills"].values()
                 ),
             )
+        for relative in _BACKUP_PATHS:
+            backup_source = workspace / relative
+            if backup_source.exists() or backup_source.is_symlink():
+                _validate_backup_path_readability(
+                    backup_source,
+                    f"backup path {relative}",
+                )
         _validate_manifest_metadata_preservation(manifest)
         _validate_ready_workspace(workspace, payload)
         return _WorkspaceMigrationPlan(workspace, "ready", payload)
@@ -425,12 +520,38 @@ def _copy_backup_path(source: Path, target: Path) -> None:
     shutil.copy2(source, target, follow_symlinks=False)
 
 
-def _backup_workspace(workspace: Path, backup: Path) -> None:
+def _capture_path_identities(
+    workspace: Path,
+    path: Path,
+) -> list[_PathIdentity]:
+    path_stat = path.lstat()
+    identities = [
+        _PathIdentity(
+            relative_path=path.relative_to(workspace),
+            uid=path_stat.st_uid,
+            gid=path_stat.st_gid,
+            mode=path_stat.st_mode,
+        ),
+    ]
+    if stat.S_ISDIR(path_stat.st_mode):
+        for child in sorted(path.iterdir()):
+            identities.extend(_capture_path_identities(workspace, child))
+    return identities
+
+
+def _backup_workspace(workspace: Path, backup: Path) -> _WorkspaceBackup:
+    identities: list[_PathIdentity] = []
+    for relative in _BACKUP_PATHS:
+        source = workspace / relative
+        if source.exists() or source.is_symlink():
+            identities.extend(_capture_path_identities(workspace, source))
+
     backup.mkdir(parents=True, exist_ok=True)
     for relative in _BACKUP_PATHS:
         source = workspace / relative
         if source.exists() or source.is_symlink():
             _copy_backup_path(source, backup / relative)
+    return _WorkspaceBackup(backup, tuple(identities))
 
 
 def _remove_path(path: Path) -> None:
@@ -440,13 +561,77 @@ def _remove_path(path: Path) -> None:
         shutil.rmtree(path)
 
 
-def _restore_workspace_backup(workspace: Path, backup: Path) -> None:
+def _restore_path_identity(path: Path, identity: _PathIdentity) -> None:
+    restored_stat = path.lstat()
+    if stat.S_IFMT(restored_stat.st_mode) != stat.S_IFMT(identity.mode):
+        raise SkillLayoutMigrationError(
+            f"Rollback restored the wrong path type: {path}",
+        )
+
+    if stat.S_ISLNK(identity.mode):
+        if hasattr(os, "lchown"):
+            os.lchown(path, identity.uid, identity.gid)
+            return
+        if not hasattr(os, "chown"):
+            raise SkillLayoutMigrationError(
+                f"Unable to restore symbolic link ownership: {path}",
+            )
+        os.chown(
+            path,
+            identity.uid,
+            identity.gid,
+            follow_symlinks=False,
+        )
+        return
+
+    if not hasattr(os, "chown"):
+        raise SkillLayoutMigrationError(
+            f"Unable to restore path ownership: {path}",
+        )
+    try:
+        os.chown(
+            path,
+            identity.uid,
+            identity.gid,
+            follow_symlinks=False,
+        )
+    except (NotImplementedError, TypeError):
+        os.chown(path, identity.uid, identity.gid)
+    path.chmod(stat.S_IMODE(identity.mode))
+
+
+def _restore_workspace_backup(
+    workspace: Path,
+    backup: _WorkspaceBackup,
+) -> None:
     for relative in _BACKUP_PATHS:
         _remove_path(workspace / relative)
     for relative in _BACKUP_PATHS:
-        source = backup / relative
+        source = backup.path / relative
         if source.exists() or source.is_symlink():
             _copy_backup_path(source, workspace / relative)
+
+    restore_errors: list[Exception] = []
+    for identity in sorted(
+        backup.identities,
+        key=lambda item: len(item.relative_path.parts),
+        reverse=True,
+    ):
+        path = workspace / identity.relative_path
+        try:
+            _restore_path_identity(path, identity)
+        except Exception as exc:
+            restore_errors.append(
+                SkillLayoutMigrationError(
+                    f"Unable to restore rollback ownership/mode for "
+                    f"{path}: {exc}",
+                ),
+            )
+    if restore_errors:
+        raise SkillLayoutMigrationError(
+            "Workspace rollback metadata restoration failed: "
+            + "; ".join(str(error) for error in restore_errors),
+        ) from restore_errors[0]
 
 
 def _write_manifest_atomic(path: Path, payload: dict[str, Any]) -> None:
@@ -541,11 +726,13 @@ def apply_workspace_skill_layout_migration(
             prefix="workspace-skill-layout-migration-",
         ) as temporary_directory:
             backup_root = Path(temporary_directory)
-            backups: dict[Path, Path] = {}
+            backups: dict[Path, _WorkspaceBackup] = {}
             for index, plan in enumerate(ready):
                 backup = backup_root / str(index)
-                _backup_workspace(plan.workspace, backup)
-                backups[plan.workspace] = backup
+                backups[plan.workspace] = _backup_workspace(
+                    plan.workspace,
+                    backup,
+                )
 
             attempted: list[_WorkspaceMigrationPlan] = []
             try:

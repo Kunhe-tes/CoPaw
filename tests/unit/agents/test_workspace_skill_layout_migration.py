@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import os
 import stat
 import tempfile
 from pathlib import Path
@@ -703,6 +704,43 @@ def test_check_rejects_ready_workspace_without_required_directory_access(
     assert _snapshot_paths(workspace) == before
 
 
+@pytest.mark.parametrize(
+    ("relative_path", "permissions", "message"),
+    [
+        (
+            Path("skills/demo"),
+            stat.S_IRUSR | stat.S_IRGRP | stat.S_IROTH,
+            "read and execute access",
+        ),
+        (
+            Path("skills/demo/SKILL.md"),
+            stat.S_IRUSR | stat.S_IRGRP | stat.S_IROTH,
+            "read access",
+        ),
+    ],
+)
+def test_check_rejects_unreadable_backup_tree_before_mutation(
+    tmp_path: Path,
+    relative_path: Path,
+    permissions: int,
+    message: str,
+) -> None:
+    workspace = _legacy_workspace(tmp_path, "tenant-a")
+    target = workspace / relative_path
+    before = _snapshot_paths(workspace)
+    original_mode = stat.S_IMODE(target.lstat().st_mode)
+    target.chmod(original_mode & ~permissions)
+    restricted_mode = stat.S_IMODE(target.lstat().st_mode)
+    try:
+        with pytest.raises(SkillLayoutMigrationError, match=message):
+            check_workspace_skill_layout_migration(tmp_path)
+
+        assert stat.S_IMODE(target.lstat().st_mode) == restricted_mode
+    finally:
+        target.chmod(original_mode)
+    assert _snapshot_paths(workspace) == before
+
+
 def test_apply_rolls_back_all_attempted_workspaces_exactly(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -743,6 +781,128 @@ def test_apply_rolls_back_all_attempted_workspaces_exactly(
     assert {
         workspace: _snapshot_paths(workspace) for workspace in workspaces
     } == (before)
+
+
+@pytest.mark.skipif(
+    not hasattr(os, "chown"),
+    reason="numeric ownership restoration is unavailable",
+)
+def test_rollback_restores_captured_ownership_for_nested_paths_and_symlink(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace = _legacy_workspace(tmp_path, "tenant-a")
+    symlink = workspace / "skills" / "demo" / "skill-link"
+    try:
+        symlink.symlink_to("SKILL.md")
+    except (NotImplementedError, OSError) as exc:
+        pytest.skip(f"symbolic links are unavailable: {exc}")
+
+    expected_paths = [
+        workspace / "skill.json",
+        workspace / "skills",
+        workspace / "skills" / "demo",
+        workspace / "skills" / "demo" / "SKILL.md",
+        symlink,
+    ]
+    expected = {
+        path.relative_to(workspace): (
+            path.lstat().st_uid,
+            path.lstat().st_gid,
+            path.is_symlink(),
+        )
+        for path in expected_paths
+    }
+    chown_calls: list[tuple[Path, int, int, bool]] = []
+    lchown_calls: list[tuple[Path, int, int]] = []
+
+    def record_chown(
+        path: os.PathLike[str] | str,
+        uid: int,
+        gid: int,
+        *,
+        follow_symlinks: bool = True,
+    ) -> None:
+        chown_calls.append((Path(path), uid, gid, follow_symlinks))
+
+    monkeypatch.setattr(migration.os, "chown", record_chown)
+    if hasattr(migration.os, "lchown"):
+
+        def record_lchown(
+            path: os.PathLike[str] | str,
+            uid: int,
+            gid: int,
+        ) -> None:
+            lchown_calls.append((Path(path), uid, gid))
+
+        monkeypatch.setattr(migration.os, "lchown", record_lchown)
+
+    def fail_after_removing_managed_paths(
+        target_workspace: Path,
+        payload: dict[str, Any],
+    ) -> None:
+        del payload
+        migration._remove_path(target_workspace / "skill.json")
+        migration._remove_path(target_workspace / "skills")
+        raise OSError("force rollback")
+
+    monkeypatch.setattr(
+        migration,
+        "_apply_workspace_migration",
+        fail_after_removing_managed_paths,
+    )
+
+    with pytest.raises(SkillLayoutMigrationError, match="force rollback"):
+        apply_workspace_skill_layout_migration(tmp_path)
+
+    normal_calls = {
+        path.relative_to(workspace): (uid, gid, follow_symlinks)
+        for path, uid, gid, follow_symlinks in chown_calls
+    }
+    for relative, (uid, gid, is_symlink) in expected.items():
+        if is_symlink and hasattr(migration.os, "lchown"):
+            assert (workspace / relative, uid, gid) in lchown_calls
+        else:
+            assert normal_calls[relative] == (uid, gid, False)
+    assert symlink.is_symlink()
+
+
+@pytest.mark.skipif(
+    not hasattr(os, "chown"),
+    reason="numeric ownership restoration is unavailable",
+)
+def test_rollback_reports_all_ownership_restoration_failures(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _legacy_workspace(tmp_path, "tenant-a")
+    attempted_chowns: list[Path] = []
+
+    def fail_chown(
+        path: os.PathLike[str] | str,
+        uid: int,
+        gid: int,
+        *,
+        follow_symlinks: bool = True,
+    ) -> None:
+        del uid, gid, follow_symlinks
+        attempted_chowns.append(Path(path))
+        raise PermissionError("cannot restore ownership")
+
+    monkeypatch.setattr(migration.os, "chown", fail_chown)
+    monkeypatch.setattr(
+        migration,
+        "_apply_workspace_migration",
+        lambda workspace, payload: (_ for _ in ()).throw(
+            OSError("migration failed"),
+        ),
+    )
+
+    with pytest.raises(migration.SkillLayoutMigrationRollbackError) as exc:
+        apply_workspace_skill_layout_migration(tmp_path)
+
+    assert len(attempted_chowns) > 1
+    assert "cannot restore ownership" in str(exc.value)
 
 
 def test_atomic_manifest_failure_rolls_back_partially_moved_later_workspace(
