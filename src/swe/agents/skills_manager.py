@@ -713,10 +713,22 @@ def _default_workspace_manifest() -> dict[str, Any]:
 
 
 def _require_workspace_layout_v2(
-    payload: dict[str, Any],
+    payload: object,
     workspace_dir: Path,
 ) -> None:
-    """Reject existing workspace manifests not explicitly using layout v2."""
+    """Reject malformed or non-v2 existing workspace manifests."""
+    manifest_path = get_workspace_skill_manifest_path(workspace_dir)
+    if not isinstance(payload, dict):
+        raise ValueError(
+            f"Workspace manifest {manifest_path} must contain a JSON object "
+            "at the top level.",
+        )
+    if not isinstance(payload.get("skills"), dict):
+        raise ValueError(
+            f"Workspace manifest {manifest_path} field 'skills' must be a "
+            "JSON object.",
+        )
+
     layout_version = payload.get("layout_version")
     if (
         not isinstance(layout_version, int)
