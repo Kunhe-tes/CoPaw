@@ -32,16 +32,17 @@ from ...agents.skills_manager import (
     SkillPoolService,
     SkillInfo,
     SkillService,
+    _has_unmanaged_workspace_skill_conflict,
     _default_pool_manifest,
     _default_workspace_manifest,
     _get_skill_mtime,
     _mutate_json,
+    _normalize_skill_dir_name,
     _read_skill_from_dir,
     get_pool_builtin_sync_status,
     get_pool_skill_manifest_path,
     get_skill_pool_dir,
     get_workspace_skill_manifest_path,
-    get_workspace_skills_dir,
     resolve_workspace_managed_skill_dir,
     import_builtin_skills,
     list_builtin_import_candidates,
@@ -50,6 +51,7 @@ from ...agents.skills_manager import (
     read_skill_manifest,
     reconcile_pool_manifest,
     reconcile_workspace_manifest,
+    resolve_effective_skills,
     suggest_conflict_name,
     update_single_builtin,
 )
@@ -115,6 +117,13 @@ class SkillSpec(SkillInfo):
     channels: list[str] = Field(default_factory=lambda: ["all"])
     config: dict[str, Any] = Field(default_factory=dict)
     last_updated: str = ""
+
+
+class EffectiveSkillSpec(BaseModel):
+    """Safe skill metadata used by the Console chat composer."""
+
+    name: str
+    description: str = ""
 
 
 class PoolSkillSpec(SkillInfo):
@@ -306,9 +315,16 @@ def _snapshot_workspace_skill(
 ) -> dict[str, Any]:
     manifest = read_skill_manifest(workspace_dir)
     entry = manifest.get("skills", {}).get(skill_name)
-    skill_dir = workspace_dir / "skills" / skill_name
     backup_dir: Path | None = None
-    if skill_dir.exists():
+    if entry is not None:
+        skill_dir = resolve_workspace_managed_skill_dir(
+            workspace_dir,
+            skill_name,
+            enabled=bool(entry.get("enabled", False)),
+        )
+    else:
+        skill_dir = None
+    if skill_dir is not None and skill_dir.exists():
         backup_root = Path(
             tempfile.mkdtemp(prefix=f"swe_skill_rollback_{skill_name}_"),
         )
@@ -325,14 +341,34 @@ def _snapshot_workspace_skill(
 def _restore_workspace_skill(snapshot: dict[str, Any]) -> None:
     workspace_dir = Path(snapshot["workspace_dir"])
     skill_name = str(snapshot["skill_name"])
-    skill_dir = workspace_dir / "skills" / skill_name
     backup_dir = snapshot.get("backup_dir")
     entry = snapshot.get("entry")
+    active_dir = resolve_workspace_managed_skill_dir(
+        workspace_dir,
+        skill_name,
+        enabled=True,
+    )
+    hidden_dir = resolve_workspace_managed_skill_dir(
+        workspace_dir,
+        skill_name,
+        enabled=False,
+    )
 
-    if skill_dir.exists():
-        shutil.rmtree(skill_dir)
-    if backup_dir is not None and Path(backup_dir).exists():
-        shutil.copytree(Path(backup_dir), skill_dir)
+    for skill_dir in (active_dir, hidden_dir):
+        if skill_dir.exists():
+            shutil.rmtree(skill_dir)
+    if (
+        entry is not None
+        and backup_dir is not None
+        and Path(backup_dir).exists()
+    ):
+        restore_dir = resolve_workspace_managed_skill_dir(
+            workspace_dir,
+            skill_name,
+            enabled=bool(entry.get("enabled", False)),
+        )
+        restore_dir.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copytree(Path(backup_dir), restore_dir)
 
     def _restore(payload: dict[str, Any]) -> None:
         payload.setdefault("skills", {})
@@ -397,15 +433,29 @@ def _broadcast_skills_to_tenant(
         source_id=source_id,
     )
     target_working_dir = initializer.tenant_dir
+    workspace_dir = target_working_dir / "workspaces" / "default"
+    workspace_service = SkillService(workspace_dir)
+    workspace_manifest = read_skill_manifest(
+        workspace_dir,
+        reconcile=False,
+    )
+    for skill_name in skill_names:
+        final_name = _normalize_skill_dir_name(skill_name)
+        if _has_unmanaged_workspace_skill_conflict(
+            workspace_dir,
+            final_name,
+            workspace_manifest,
+        ):
+            raise ValueError(
+                f"Workspace skill '{final_name}' conflicts with "
+                "unmanaged content",
+            )
+
     was_bootstrapped = initializer.has_seeded_bootstrap()
     if not was_bootstrapped:
         initializer.ensure_seeded_bootstrap()
 
     pool_service = SkillPoolService(working_dir=target_working_dir)
-    workspace_service = SkillService(
-        target_working_dir / "workspaces" / "default",
-    )
-
     pool_updated: list[str] = []
     default_updated: list[str] = []
     for skill_name in skill_names:
@@ -745,6 +795,20 @@ def _build_pool_skill_specs(
 async def list_skills(request: Request) -> list[SkillSpec]:
     workspace_dir = await _request_workspace_dir(request)
     return _build_workspace_skill_specs(workspace_dir)
+
+
+@router.get("/effective")
+async def list_effective_skills(
+    request: Request,
+) -> list[EffectiveSkillSpec]:
+    """Return only skills currently available to the Console runtime."""
+    workspace_dir = await _request_workspace_dir(request)
+    effective_names = set(resolve_effective_skills(workspace_dir, "console"))
+    return [
+        EffectiveSkillSpec(name=skill.name, description=skill.description)
+        for skill in _build_workspace_skill_specs(workspace_dir)
+        if skill.name in effective_names
+    ]
 
 
 @router.post("/refresh")

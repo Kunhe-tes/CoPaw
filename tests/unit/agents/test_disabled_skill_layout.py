@@ -681,6 +681,7 @@ def test_replace_existing_disabled_skill_uses_hidden_root_and_state(
     result = service.replace_workspace_skill_from_dir(
         skill_name="demo",
         source_dir=source_dir,
+        config={"replacement": "ignore"},
     )
 
     assert result == {"success": True, "name": "demo"}
@@ -695,6 +696,43 @@ def test_replace_existing_disabled_skill_uses_hidden_root_and_state(
     assert entry["enabled"] is False
     assert entry["channels"] == ["discord"]
     assert entry["config"] == {"token": "keep"}
+
+
+@pytest.mark.parametrize("enabled_root", [True, False])
+def test_replace_workspace_skill_rejects_unmanaged_same_name_in_either_root(
+    tmp_path: Path,
+    enabled_root: bool,
+) -> None:
+    workspace = tmp_path / "workspace"
+    unmanaged_dir = resolve_workspace_managed_skill_dir(
+        workspace,
+        "demo",
+        enabled=enabled_root,
+    )
+    _write_skill(unmanaged_dir, "unmanaged original")
+    original_bytes = (unmanaged_dir / "SKILL.md").read_bytes()
+    source_dir = tmp_path / "replacement"
+    _write_skill(source_dir, "replacement")
+    manifest_path = get_workspace_skill_manifest_path(workspace)
+    assert not manifest_path.exists()
+
+    result = skills_manager.SkillService(
+        workspace,
+    ).replace_workspace_skill_from_dir(
+        skill_name="demo",
+        source_dir=source_dir,
+    )
+
+    assert result["success"] is False
+    assert result["reason"] == "conflict"
+    assert (unmanaged_dir / "SKILL.md").read_bytes() == original_bytes
+    opposite_dir = resolve_workspace_managed_skill_dir(
+        workspace,
+        "demo",
+        enabled=not enabled_root,
+    )
+    assert not opposite_dir.exists()
+    assert not manifest_path.exists()
 
 
 def test_import_new_disabled_skill_registers_hidden_package_directly(
@@ -770,3 +808,109 @@ def test_import_overwrite_preserves_existing_disabled_state(
     assert entry["enabled"] is False
     assert entry["channels"] == ["discord"]
     assert entry["config"] == {"token": "keep"}
+
+
+def test_pool_download_overwrite_preserves_existing_disabled_state(
+    tmp_path: Path,
+) -> None:
+    working_dir = tmp_path / "tenant"
+    workspace = working_dir / "workspaces" / "default"
+    pool = skills_manager.SkillPoolService(working_dir=working_dir)
+    pool.create_skill(
+        "demo",
+        _skill_content("demo", "pool replacement"),
+        config={"pool": "ignore"},
+    )
+    workspace_service = skills_manager.SkillService(workspace)
+    workspace_service.create_skill(
+        "demo",
+        _skill_content("demo", "workspace original"),
+        config={"workspace": "keep"},
+        enable=False,
+    )
+    workspace_service.set_skill_channels("demo", ["discord"])
+
+    result = pool.download_to_workspace(
+        "demo",
+        workspace,
+        overwrite=True,
+    )
+
+    assert result["success"] is True
+    assert not (workspace / "skills" / "demo").exists()
+    hidden = workspace / ".disabled_skills" / "demo" / "SKILL.md"
+    assert "pool replacement" in hidden.read_text(encoding="utf-8")
+    entry = json.loads(
+        get_workspace_skill_manifest_path(workspace).read_text(
+            encoding="utf-8",
+        ),
+    )["skills"]["demo"]
+    assert entry["enabled"] is False
+    assert entry["channels"] == ["discord"]
+    assert entry["config"] == {"workspace": "keep"}
+
+
+def test_new_pool_download_defaults_enabled_and_uses_pool_config(
+    tmp_path: Path,
+) -> None:
+    working_dir = tmp_path / "tenant"
+    workspace = working_dir / "workspaces" / "default"
+    pool = skills_manager.SkillPoolService(working_dir=working_dir)
+    pool.create_skill(
+        "demo",
+        _skill_content("demo", "pool content"),
+        config={"pool": "use"},
+    )
+
+    result = pool.download_to_workspace("demo", workspace)
+
+    assert result["success"] is True
+    assert (workspace / "skills" / "demo" / "SKILL.md").exists()
+    assert not (workspace / ".disabled_skills" / "demo").exists()
+    entry = json.loads(
+        get_workspace_skill_manifest_path(workspace).read_text(
+            encoding="utf-8",
+        ),
+    )["skills"]["demo"]
+    assert entry["enabled"] is True
+    assert entry["channels"] == ["all"]
+    assert entry["config"] == {"pool": "use"}
+
+
+@pytest.mark.parametrize("enabled_root", [True, False])
+@pytest.mark.parametrize(
+    "operation",
+    ["download_to_workspace", "preflight_download_to_workspace"],
+)
+def test_pool_download_rejects_unmanaged_same_name_in_either_root(
+    tmp_path: Path,
+    enabled_root: bool,
+    operation: str,
+) -> None:
+    working_dir = tmp_path / "tenant"
+    workspace = working_dir / "workspaces" / "default"
+    pool = skills_manager.SkillPoolService(working_dir=working_dir)
+    pool.create_skill(
+        "demo",
+        _skill_content("demo", "pool content"),
+    )
+    unmanaged_dir = resolve_workspace_managed_skill_dir(
+        workspace,
+        "demo",
+        enabled=enabled_root,
+    )
+    _write_skill(unmanaged_dir, "unmanaged content")
+    original_bytes = (unmanaged_dir / "SKILL.md").read_bytes()
+    manifest_path = get_workspace_skill_manifest_path(workspace)
+    assert not manifest_path.exists()
+
+    result = getattr(pool, operation)(
+        "demo",
+        workspace,
+        overwrite=True,
+    )
+
+    assert result["success"] is False
+    assert result["reason"] == "conflict"
+    assert (unmanaged_dir / "SKILL.md").read_bytes() == original_bytes
+    assert not manifest_path.exists()

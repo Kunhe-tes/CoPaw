@@ -9,6 +9,8 @@ import json
 import sys
 from pathlib import Path
 
+import pytest
+
 sys.path.insert(
     0,
     str(Path(__file__).parent.parent.parent.parent / "src"),
@@ -18,15 +20,31 @@ sys.path.insert(
 from swe.app.workspace.tenant_initializer import (  # noqa: E402
     TenantInitializer,
 )
+from swe.app.workspace import (
+    tenant_initializer as tenant_initializer_module,
+)  # noqa: E402
 from swe.agents.skills_manager import (  # noqa: E402
+    _default_workspace_manifest,
     get_skill_pool_dir,
     get_pool_skill_manifest_path,
+    get_workspace_disabled_skills_dir,
     get_workspace_skills_dir,
     get_workspace_skill_manifest_path,
     reconcile_pool_manifest,
     read_skill_pool_manifest,
     _write_json_atomic,
 )
+
+
+def _write_workspace_skill(skill_dir: Path, description: str) -> None:
+    skill_dir.mkdir(parents=True, exist_ok=True)
+    (skill_dir / "SKILL.md").write_text(
+        (
+            f"---\nname: {skill_dir.name}\n"
+            f"description: {description}\n---\n"
+        ),
+        encoding="utf-8",
+    )
 
 
 class TestTenantAwarePoolHelpers:
@@ -455,8 +473,11 @@ class TestDefaultWorkspaceSkillSeeding:
         assert result["seeded"] is False
         assert not result["skills"]
 
-    def test_seed_workspace_without_source_manifest(self, tmp_path):
-        """Workspace seeding works when source has skills but no manifest."""
+    def test_seed_workspace_ignores_unregistered_source_without_manifest(
+        self,
+        tmp_path,
+    ):
+        """Workspace seeding ignores source directories absent from manifest."""
         # Setup default tenant with workspace skills but NO manifest
         default_init = TenantInitializer(tmp_path, "default")
         default_init.ensure_directory_structure()
@@ -476,22 +497,391 @@ class TestDefaultWorkspaceSkillSeeding:
         manifest_path = get_workspace_skill_manifest_path(default_workspace)
         assert not manifest_path.exists()
 
-        # Create new tenant and seed workspace skills
+        # Create new tenant and attempt to seed workspace skills
         new_init = TenantInitializer(tmp_path, "new-tenant")
         new_init.ensure_directory_structure()
 
         result = new_init.seed_default_workspace_skills_from_default()
 
-        # Should still seed from disk content
-        assert result["seeded"] is True
-        assert "manifestless-ws-skill" in result["skills"]
+        assert result["seeded"] is False
+        assert result["skills"] == []
 
-        # Verify skill was copied and manifest was created
+        # Unregistered source content remains unmanaged and is not copied.
         new_workspace = new_init.tenant_dir / "workspaces" / "default"
         new_skills = get_workspace_skills_dir(new_workspace)
-        assert (new_skills / "manifestless-ws-skill" / "SKILL.md").exists()
+        assert not (new_skills / "manifestless-ws-skill").exists()
         new_manifest = get_workspace_skill_manifest_path(new_workspace)
-        assert new_manifest.exists()
+        assert not new_manifest.exists()
+
+
+def test_seed_workspace_uses_registered_enabled_and_disabled_packages_only(
+    tmp_path: Path,
+) -> None:
+    default_init = TenantInitializer(tmp_path, "default")
+    default_init.ensure_directory_structure()
+    source_workspace = default_init.tenant_dir / "workspaces" / "default"
+    source_active = get_workspace_skills_dir(source_workspace)
+    source_hidden = get_workspace_disabled_skills_dir(source_workspace)
+    _write_workspace_skill(source_active / "enabled-skill", "enabled")
+    _write_workspace_skill(source_hidden / "disabled-skill", "disabled")
+    _write_workspace_skill(source_active / "unmanaged-active", "ignore")
+    _write_workspace_skill(source_hidden / "unmanaged-hidden", "ignore")
+
+    source_manifest = _default_workspace_manifest()
+    source_manifest["skills"] = {
+        "enabled-skill": {
+            "enabled": True,
+            "channels": ["console", "discord"],
+            "config": {"enabled": "config"},
+            "source": "customized",
+            "metadata": {"description": "stale enabled"},
+            "created_at": "2024-01-01T00:00:00Z",
+            "updated_at": "2024-01-02T00:00:00Z",
+        },
+        "disabled-skill": {
+            "enabled": False,
+            "channels": ["discord"],
+            "config": {"disabled": "config"},
+            "source": "builtin",
+            "metadata": {"description": "stale disabled"},
+            "created_at": "2024-02-01T00:00:00Z",
+            "updated_at": "2024-02-02T00:00:00Z",
+        },
+    }
+    _write_json_atomic(
+        get_workspace_skill_manifest_path(source_workspace),
+        source_manifest,
+    )
+
+    tenant_init = TenantInitializer(tmp_path, "tenant-a")
+    tenant_init.ensure_directory_structure()
+
+    result = tenant_init.seed_default_workspace_skills_from_default()
+
+    assert result == {
+        "seeded": True,
+        "skills": ["disabled-skill", "enabled-skill"],
+    }
+    target_workspace = tenant_init.tenant_dir / "workspaces" / "default"
+    target_active = get_workspace_skills_dir(target_workspace)
+    target_hidden = get_workspace_disabled_skills_dir(target_workspace)
+    assert (target_active / "enabled-skill" / "SKILL.md").exists()
+    assert (target_hidden / "disabled-skill" / "SKILL.md").exists()
+    assert not (target_active / "disabled-skill").exists()
+    assert not (target_hidden / "enabled-skill").exists()
+    assert not (target_active / "unmanaged-active").exists()
+    assert not (target_hidden / "unmanaged-hidden").exists()
+
+    source_entries = json.loads(
+        get_workspace_skill_manifest_path(source_workspace).read_text(
+            encoding="utf-8",
+        ),
+    )["skills"]
+    target_manifest = json.loads(
+        get_workspace_skill_manifest_path(target_workspace).read_text(
+            encoding="utf-8",
+        ),
+    )
+    assert target_manifest["version"] > 0
+    assert set(target_manifest["skills"]) == {
+        "enabled-skill",
+        "disabled-skill",
+    }
+    for skill_name in target_manifest["skills"]:
+        for field in (
+            "enabled",
+            "channels",
+            "config",
+            "source",
+            "created_at",
+            "updated_at",
+        ):
+            assert target_manifest["skills"][skill_name][field] == (
+                source_entries[skill_name][field]
+            )
+
+
+def test_unmanaged_hidden_package_does_not_mark_workspace_initialized(
+    tmp_path: Path,
+) -> None:
+    default_init = TenantInitializer(tmp_path, "default")
+    default_init.ensure_directory_structure()
+    source_workspace = default_init.tenant_dir / "workspaces" / "default"
+    _write_workspace_skill(
+        get_workspace_skills_dir(source_workspace) / "registered",
+        "source",
+    )
+    source_manifest = _default_workspace_manifest()
+    source_manifest["skills"] = {
+        "registered": {
+            "enabled": True,
+            "channels": ["all"],
+            "source": "customized",
+            "config": {},
+            "metadata": {},
+        },
+    }
+    _write_json_atomic(
+        get_workspace_skill_manifest_path(source_workspace),
+        source_manifest,
+    )
+
+    tenant_init = TenantInitializer(tmp_path, "tenant-a")
+    tenant_init.ensure_directory_structure()
+    target_workspace = tenant_init.tenant_dir / "workspaces" / "default"
+    _write_workspace_skill(
+        get_workspace_disabled_skills_dir(target_workspace) / "unmanaged",
+        "ignore",
+    )
+
+    result = tenant_init.seed_default_workspace_skills_from_default()
+
+    assert result["seeded"] is True
+    assert result["skills"] == ["registered"]
+
+
+def test_seed_skips_registered_source_with_unmanaged_target_counterpart(
+    tmp_path: Path,
+) -> None:
+    default_init = TenantInitializer(tmp_path, "default")
+    default_init.ensure_directory_structure()
+    source_workspace = default_init.tenant_dir / "workspaces" / "default"
+    _write_workspace_skill(
+        get_workspace_disabled_skills_dir(source_workspace) / "demo",
+        "source-disabled",
+    )
+    _write_workspace_skill(
+        get_workspace_skills_dir(source_workspace) / "safe",
+        "source-safe",
+    )
+    source_manifest = _default_workspace_manifest()
+    source_manifest["skills"] = {
+        "demo": {
+            "enabled": False,
+            "channels": ["all"],
+            "source": "customized",
+            "config": {},
+            "metadata": {},
+        },
+        "safe": {
+            "enabled": True,
+            "channels": ["all"],
+            "source": "customized",
+            "config": {},
+            "metadata": {},
+        },
+    }
+    _write_json_atomic(
+        get_workspace_skill_manifest_path(source_workspace),
+        source_manifest,
+    )
+
+    tenant_init = TenantInitializer(tmp_path, "tenant-a")
+    tenant_init.ensure_directory_structure()
+    target_workspace = tenant_init.tenant_dir / "workspaces" / "default"
+    target_active = get_workspace_skills_dir(target_workspace) / "demo"
+    _write_workspace_skill(target_active, "stale-target-active")
+
+    result = tenant_init.seed_default_workspace_skills_from_default()
+
+    target_hidden = (
+        get_workspace_disabled_skills_dir(target_workspace) / "demo"
+    )
+    assert result == {"seeded": True, "skills": ["safe"]}
+    assert "stale-target-active" in (target_active / "SKILL.md").read_text(
+        encoding="utf-8",
+    )
+    assert not target_hidden.exists()
+    assert "source-safe" in (
+        get_workspace_skills_dir(target_workspace) / "safe" / "SKILL.md"
+    ).read_text(encoding="utf-8")
+    target_manifest = json.loads(
+        get_workspace_skill_manifest_path(target_workspace).read_text(
+            encoding="utf-8",
+        ),
+    )
+    assert set(target_manifest["skills"]) == {"safe"}
+
+
+def test_seed_workspace_fails_closed_on_malformed_target_manifest(
+    tmp_path: Path,
+) -> None:
+    default_init = TenantInitializer(tmp_path, "default")
+    default_init.ensure_directory_structure()
+    source_workspace = default_init.tenant_dir / "workspaces" / "default"
+    _write_workspace_skill(
+        get_workspace_skills_dir(source_workspace) / "safe",
+        "source-safe",
+    )
+    source_manifest = _default_workspace_manifest()
+    source_manifest["skills"] = {
+        "safe": {
+            "enabled": True,
+            "channels": ["all"],
+            "source": "customized",
+            "config": {},
+            "metadata": {},
+        },
+    }
+    _write_json_atomic(
+        get_workspace_skill_manifest_path(source_workspace),
+        source_manifest,
+    )
+
+    tenant_init = TenantInitializer(tmp_path, "tenant-a")
+    tenant_init.ensure_directory_structure()
+    target_workspace = tenant_init.tenant_dir / "workspaces" / "default"
+    target_manifest_path = get_workspace_skill_manifest_path(target_workspace)
+    malformed = b'{"skills": '
+    target_manifest_path.parent.mkdir(parents=True, exist_ok=True)
+    target_manifest_path.write_bytes(malformed)
+
+    with pytest.raises(json.JSONDecodeError):
+        tenant_init.seed_default_workspace_skills_from_default()
+
+    assert target_manifest_path.read_bytes() == malformed
+    assert not (get_workspace_skills_dir(target_workspace) / "safe").exists()
+
+
+def test_seed_workspace_rolls_back_partial_copy_and_allows_retry(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    default_init = TenantInitializer(tmp_path, "default")
+    default_init.ensure_directory_structure()
+    source_workspace = default_init.tenant_dir / "workspaces" / "default"
+    source_manifest = _default_workspace_manifest()
+    source_manifest["skills"] = {}
+    for name in ("alpha", "beta"):
+        _write_workspace_skill(
+            get_workspace_skills_dir(source_workspace) / name,
+            f"source-{name}",
+        )
+        source_manifest["skills"][name] = {
+            "enabled": True,
+            "channels": ["all"],
+            "source": "customized",
+            "config": {},
+            "metadata": {},
+        }
+    _write_json_atomic(
+        get_workspace_skill_manifest_path(source_workspace),
+        source_manifest,
+    )
+
+    tenant_init = TenantInitializer(tmp_path, "tenant-a")
+    tenant_init.ensure_directory_structure()
+    target_workspace = tenant_init.tenant_dir / "workspaces" / "default"
+    target_manifest_path = get_workspace_skill_manifest_path(target_workspace)
+    original_manifest = json.dumps(
+        _default_workspace_manifest(),
+        indent=2,
+    ).encode()
+    target_manifest_path.parent.mkdir(parents=True, exist_ok=True)
+    target_manifest_path.write_bytes(original_manifest)
+
+    real_copytree = tenant_initializer_module.shutil.copytree
+    copy_count = 0
+
+    def fail_second_copy(source: Path, target: Path):
+        nonlocal copy_count
+        copy_count += 1
+        if copy_count == 2:
+            target.mkdir(parents=True, exist_ok=True)
+            (target / "partial").write_text("partial", encoding="utf-8")
+            raise OSError("injected copy failure")
+        return real_copytree(source, target)
+
+    monkeypatch.setattr(
+        tenant_initializer_module.shutil,
+        "copytree",
+        fail_second_copy,
+    )
+
+    with pytest.raises(RuntimeError, match="injected copy failure"):
+        tenant_init.seed_default_workspace_skills_from_default()
+
+    assert target_manifest_path.read_bytes() == original_manifest
+    assert not (get_workspace_skills_dir(target_workspace) / "alpha").exists()
+    assert not (get_workspace_skills_dir(target_workspace) / "beta").exists()
+
+    monkeypatch.setattr(
+        tenant_initializer_module.shutil,
+        "copytree",
+        real_copytree,
+    )
+    retry = tenant_init.seed_default_workspace_skills_from_default()
+    assert retry == {"seeded": True, "skills": ["alpha", "beta"]}
+
+
+def test_seed_workspace_rolls_back_final_manifest_write_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    default_init = TenantInitializer(tmp_path, "default")
+    default_init.ensure_directory_structure()
+    source_workspace = default_init.tenant_dir / "workspaces" / "default"
+    _write_workspace_skill(
+        get_workspace_skills_dir(source_workspace) / "safe",
+        "source-safe",
+    )
+    source_manifest = _default_workspace_manifest()
+    source_manifest["skills"] = {
+        "safe": {
+            "enabled": True,
+            "channels": ["all"],
+            "source": "customized",
+            "config": {},
+            "metadata": {},
+        },
+    }
+    _write_json_atomic(
+        get_workspace_skill_manifest_path(source_workspace),
+        source_manifest,
+    )
+
+    tenant_init = TenantInitializer(tmp_path, "tenant-a")
+    tenant_init.ensure_directory_structure()
+    target_workspace = tenant_init.tenant_dir / "workspaces" / "default"
+    target_manifest_path = get_workspace_skill_manifest_path(target_workspace)
+    original_manifest = json.dumps(
+        _default_workspace_manifest(),
+        indent=2,
+    ).encode()
+    target_manifest_path.parent.mkdir(parents=True, exist_ok=True)
+    target_manifest_path.write_bytes(original_manifest)
+
+    runtime_skills_manager = sys.modules["swe.agents.skills_manager"]
+    real_write = runtime_skills_manager._write_json_atomic
+    target_write_count = 0
+
+    def fail_final_write(path: Path, payload: dict) -> None:
+        nonlocal target_write_count
+        if Path(path) == target_manifest_path:
+            target_write_count += 1
+            if target_write_count == 3:
+                raise OSError("injected final publication failure")
+        real_write(path, payload)
+
+    monkeypatch.setattr(
+        runtime_skills_manager,
+        "_write_json_atomic",
+        fail_final_write,
+    )
+
+    with pytest.raises(RuntimeError, match="final publication failure"):
+        tenant_init.seed_default_workspace_skills_from_default()
+
+    assert target_manifest_path.read_bytes() == original_manifest
+    assert not (get_workspace_skills_dir(target_workspace) / "safe").exists()
+
+    monkeypatch.setattr(
+        runtime_skills_manager,
+        "_write_json_atomic",
+        real_write,
+    )
+    retry = tenant_init.seed_default_workspace_skills_from_default()
+    assert retry == {"seeded": True, "skills": ["safe"]}
 
 
 class TestFullInitialization:

@@ -243,6 +243,24 @@ def resolve_workspace_managed_skill_dir(
     return root / skill_name
 
 
+def _has_unmanaged_workspace_skill_conflict(
+    workspace_dir: Path,
+    skill_name: str,
+    workspace_manifest: dict[str, Any],
+) -> bool:
+    """Return whether an unregistered package occupies either managed root."""
+    if skill_name in workspace_manifest.get("skills", {}):
+        return False
+    return any(
+        resolve_workspace_managed_skill_dir(
+            workspace_dir,
+            skill_name,
+            enabled=enabled,
+        ).exists()
+        for enabled in (True, False)
+    )
+
+
 def get_workspace_identity(workspace_dir: Path) -> dict[str, str]:
     """Resolve the workspace id together with its display name."""
     workspace_id = workspace_dir.name
@@ -2009,8 +2027,22 @@ class SkillService:
     ) -> dict[str, Any]:
         final_name = _normalize_skill_dir_name(skill_name)
         manifest = self._read_manifest()
-        existing = manifest.get("skills", {}).get(final_name) or {}
-        enabled = bool(existing.get("enabled", True))
+        if _has_unmanaged_workspace_skill_conflict(
+            self.workspace_dir,
+            final_name,
+            manifest,
+        ):
+            return {
+                "success": False,
+                "reason": "conflict",
+                "suggested_name": suggest_conflict_name(final_name),
+            }
+        existing = manifest.get("skills", {}).get(final_name)
+        enabled = (
+            bool(existing.get("enabled", True))
+            if existing is not None
+            else True
+        )
         target_dir = resolve_workspace_managed_skill_dir(
             self.workspace_dir,
             final_name,
@@ -2043,9 +2075,9 @@ class SkillService:
                 "channels": entry.get("channels") or ["all"],
                 "source": metadata["source"],
                 "config": (
-                    dict(config)
-                    if config is not None
-                    else dict(entry.get("config") or {})
+                    dict(entry.get("config") or {})
+                    if existing is not None
+                    else dict(config or {})
                 ),
                 "metadata": metadata,
                 "requirements": metadata["requirements"],
@@ -3060,7 +3092,7 @@ class SkillPoolService:
             working_dir=self.working_dir,
         )
         existing = manifest.get("skills", {}).get(final_name)
-        if existing and not overwrite:
+        if existing is not None and not overwrite:
             return {
                 "success": False,
                 "reason": "conflict",
@@ -3169,14 +3201,25 @@ class SkillPoolService:
             get_skill_pool_dir(working_dir=self.working_dir) / skill_name
         )
         final_name = _normalize_skill_dir_name(target_name or skill_name)
-        target_dir = get_workspace_skills_dir(workspace_dir) / final_name
         workspace_manifest = read_skill_manifest(
             workspace_dir,
             reconcile=False,
         )
         existing = workspace_manifest.get("skills", {}).get(final_name)
         workspace_identity = get_workspace_identity(workspace_dir)
-        if existing and not overwrite:
+        if _has_unmanaged_workspace_skill_conflict(
+            workspace_dir,
+            final_name,
+            workspace_manifest,
+        ):
+            return {
+                "success": False,
+                "reason": "conflict",
+                "workspace_id": workspace_identity["workspace_id"],
+                "workspace_name": workspace_identity["workspace_name"],
+                "suggested_name": suggest_conflict_name(final_name),
+            }
+        if existing is not None and not overwrite:
             # Both builtin: compare version to decide action.
             if (
                 entry.get("source") == "builtin"
@@ -3212,13 +3255,38 @@ class SkillPoolService:
                 ),
             }
 
+        enabled = (
+            bool(existing.get("enabled", True))
+            if existing is not None
+            else True
+        )
+        target_dir = resolve_workspace_managed_skill_dir(
+            workspace_dir,
+            final_name,
+            enabled=enabled,
+        )
+        other_dir = resolve_workspace_managed_skill_dir(
+            workspace_dir,
+            final_name,
+            enabled=not enabled,
+        )
         target_dir.parent.mkdir(parents=True, exist_ok=True)
         with _staged_skill_dir(final_name) as staged_dir:
             _copy_skill_dir(source_dir, staged_dir)
             _scan_skill_dir_or_raise(staged_dir, final_name)
             _copy_skill_dir(staged_dir, target_dir)
+        if other_dir.exists():
+            shutil.rmtree(other_dir)
 
         pool_config = entry.get("config") or {}
+        if existing is not None:
+            workspace_channels = existing.get("channels") or ["all"]
+            workspace_config = dict(existing.get("config") or {})
+            created_at = existing.get("created_at") or _timestamp()
+        else:
+            workspace_channels = ["all"]
+            workspace_config = dict(pool_config)
+            created_at = _timestamp()
 
         def _update(payload: dict[str, Any]) -> None:
             payload.setdefault("skills", {})
@@ -3233,12 +3301,13 @@ class SkillPoolService:
                 protected=False,
             )
             payload["skills"][final_name] = {
-                "enabled": True,
-                "channels": ["all"],
+                "enabled": enabled,
+                "channels": workspace_channels,
                 "source": metadata["source"],
-                "config": pool_config,
+                "config": workspace_config,
                 "metadata": metadata,
                 "requirements": metadata["requirements"],
+                "created_at": created_at,
                 "updated_at": _timestamp(),
             }
 
@@ -3277,7 +3346,19 @@ class SkillPoolService:
         )
         existing = workspace_manifest.get("skills", {}).get(final_name)
         workspace_identity = get_workspace_identity(workspace_dir)
-        if existing and not overwrite:
+        if _has_unmanaged_workspace_skill_conflict(
+            workspace_dir,
+            final_name,
+            workspace_manifest,
+        ):
+            return {
+                "success": False,
+                "reason": "conflict",
+                "workspace_id": workspace_identity["workspace_id"],
+                "workspace_name": workspace_identity["workspace_name"],
+                "suggested_name": suggest_conflict_name(final_name),
+            }
+        if existing is not None and not overwrite:
             if (
                 entry.get("source") == "builtin"
                 and existing.get("source") == "builtin"
