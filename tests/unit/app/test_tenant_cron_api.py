@@ -955,6 +955,7 @@ def test_broadcast_job_uses_db_store_when_state_store_missing(monkeypatch):
         },
     )
     db = _AsyncTaskDb()
+    db.is_connected = False
     with _build_client(
         _Manager({"job-source": source_job}),
         multi_agent_manager=_MultiAgentManager({}),

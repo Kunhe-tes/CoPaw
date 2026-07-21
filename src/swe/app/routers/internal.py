@@ -622,11 +622,7 @@ def _request_actor(request: Request) -> tuple[str, str]:
 def _make_async_task_store(request: Request) -> AsyncTaskStore:
     """创建统一异步任务写入器。"""
     db_connection = _request_db_connection(request)
-    if db_connection is None or not getattr(
-        db_connection,
-        "is_connected",
-        True,
-    ):
+    if db_connection is None:
         raise HTTPException(
             status_code=503,
             detail="Async task database connection is not available",

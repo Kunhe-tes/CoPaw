@@ -242,6 +242,32 @@ def _get_async_task_store(request: Request) -> AsyncTaskStore:
     return AsyncTaskStore(db)
 
 
+def _distribution_summary(kind: str, name: str, target_count: int) -> str:
+    """构造包含分发对象的任务摘要。"""
+    object_name = str(name or "").strip() or "-"
+    return f"分发{kind}「{object_name}」，目标 {target_count} 个用户"
+
+
+def _find_market_skill_name(svc, source_id: str, item_id: str) -> str:
+    """从市场索引中查找技能展示名称，查不到时回退到请求标识。"""
+    items = load_index(svc.marketplace_root, source_id)
+    item = next(
+        (
+            candidate
+            for candidate in items
+            if candidate.item_type == "skill"
+            and item_id
+            in {
+                candidate.item_id,
+                candidate.skill_id,
+                candidate.name,
+            }
+        ),
+        None,
+    )
+    return item.name if item is not None else item_id
+
+
 def _skill_task_result_payload(
     result: DistributeResponse,
 ) -> dict[str, object]:
@@ -956,6 +982,7 @@ async def distribute_skill(
         )
         for user in target_users
     }
+    skill_name = _find_market_skill_name(svc, source_id, item_id)
     store = _get_async_task_store(request)
     await store.start_task(
         task_id=task_id,
@@ -966,6 +993,11 @@ async def distribute_skill(
         actor_user_name=decode_user_name(x_user_name) or "",
         target_ids=target_user_ids,
         target_names=target_user_names,
+        summary=_distribution_summary(
+            "技能",
+            skill_name,
+            len(target_user_ids),
+        ),
     )
     asyncio.create_task(
         _run_skill_distribution_task(

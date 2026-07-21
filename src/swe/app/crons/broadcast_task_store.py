@@ -65,10 +65,8 @@ class CronBroadcastTaskStore:
 
     @property
     def is_available(self) -> bool:
-        """返回当前数据库连接是否可用。"""
-        return self.db is not None and bool(
-            getattr(self.db, "is_connected", False),
-        )
+        """返回当前是否配置了数据库存储对象。"""
+        return self.db is not None
 
     async def initialize(self) -> None:
         """幂等初始化广播任务进度表。"""

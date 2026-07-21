@@ -1129,11 +1129,7 @@ def _get_broadcast_task_store(request: Request) -> CronBroadcastTaskStore:
         return store
 
     db_connection = getattr(request.app.state, "db_connection", None)
-    if db_connection is not None and getattr(
-        db_connection,
-        "is_connected",
-        True,
-    ):
+    if db_connection is not None:
         store = CronBroadcastTaskStore(db_connection)
     else:
         store = CronBroadcastTaskStore()

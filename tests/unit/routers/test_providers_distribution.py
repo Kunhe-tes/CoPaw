@@ -40,6 +40,12 @@ class FakeAsyncTaskDb:
     is_connected = True
 
 
+class DisconnectedAsyncTaskDb(FakeAsyncTaskDb):
+    """模拟连接状态标记为断开但仍可执行写入的任务库。"""
+
+    is_connected = False
+
+
 def _setup_source_providers(
     secret_dir: Path,
     tenant_id: str,
@@ -551,7 +557,9 @@ def test_distribute_providers_returns_async_task_submission(
                     "X-User-Name": "%E5%BC%A0%E4%B8%89",
                 },
                 app=SimpleNamespace(
-                    state=SimpleNamespace(db_connection=FakeAsyncTaskDb()),
+                    state=SimpleNamespace(
+                        db_connection=DisconnectedAsyncTaskDb(),
+                    ),
                 ),
             ),
             providers_router.ProvidersDistributionRequest(
@@ -565,8 +573,13 @@ def test_distribute_providers_returns_async_task_submission(
     assert result.reused is False
     assert result.task_id
     assert task_ids == ["scheduled"]
+    assert isinstance(submitted["db"], DisconnectedAsyncTaskDb)
     assert (
         submitted["start_task"]["task_type"] == "provider.providers.distribute"
+    )
+    assert (
+        submitted["start_task"]["summary"]
+        == "分发供应商配置「openai, custom-llm」，目标 1 个用户"
     )
     assert submitted["start_task"]["actor_user_id"] == "operator-1"
     assert submitted["start_task"]["actor_user_name"] == "张三"

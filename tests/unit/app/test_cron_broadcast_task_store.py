@@ -176,6 +176,21 @@ def test_initialize_creates_task_and_item_tables():
     assert "PRIMARY KEY (task_id, tenant_id)" in sql
 
 
+def test_db_store_uses_db_without_connection_status_check():
+    """有数据库对象时广播任务不预校验连接状态。"""
+    db = _Db()
+    db.is_connected = False
+    store = CronBroadcastTaskStore(db)
+
+    task, reused = _start_task(store)
+
+    sql = "\n".join(query for query, _params in db.executed)
+    assert reused is False
+    assert task.tenant_count == 2
+    assert "INSERT IGNORE INTO swe_cron_broadcast_tasks" in sql
+    assert "INSERT INTO swe_async_tasks" in sql
+
+
 def test_db_store_reuses_running_task_when_claim_insert_is_ignored():
     db = _Db(
         execute_results=[0],

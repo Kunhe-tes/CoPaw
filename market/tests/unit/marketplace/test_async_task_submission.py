@@ -96,6 +96,12 @@ async def test_distribute_skill_returns_task_submission(tmp_path, monkeypatch):
     assert resp.json()["status"] == "queued"
     task_id = resp.json()["task_id"]
     assert task_id
+    task_insert_call = next(
+        call
+        for call in app.state.db.execute.await_args_list
+        if "INSERT INTO swe_async_tasks" in call.args[0]
+    )
+    assert task_insert_call.args[1][5] == "分发技能「skill-a」，目标 1 个用户"
     item_insert_call = next(
         call
         for call in app.state.db.execute_many.await_args_list
@@ -145,6 +151,12 @@ async def test_distribute_mcp_returns_task_submission(tmp_path, monkeypatch):
     assert resp.status_code == 200
     assert resp.json()["status"] == "queued"
     assert resp.json()["task_id"]
+    task_insert_call = next(
+        call
+        for call in app.state.db.execute.await_args_list
+        if "INSERT INTO swe_async_tasks" in call.args[0]
+    )
+    assert task_insert_call.args[1][5] == "分发 MCP「demo」，目标 1 个用户"
 
 
 @pytest.mark.asyncio

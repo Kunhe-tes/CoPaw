@@ -813,14 +813,29 @@ def test_internal_batch_initialize_requires_async_task_db() -> None:
     pool.ensure_bootstrap.assert_not_awaited()
 
 
-def test_internal_batch_initialize_rejects_disconnected_async_task_db() -> (
-    None
-):
-    """任务库未连接时不应退回同步初始化。"""
+def test_internal_batch_initialize_uses_async_task_db_without_connection_check(
+    monkeypatch,
+) -> None:
+    """批量初始化提交任务时不预校验数据库连接状态。"""
     pool = SimpleNamespace(ensure_bootstrap=AsyncMock())
     client = _build_client(SimpleNamespace())
     client.app.state.tenant_workspace_pool = pool
-    client.app.state.db_connection = SimpleNamespace(is_connected=False)
+
+    class FakeDb:
+        is_connected = False
+
+        async def execute(self, _sql, _params=None):
+            return 1
+
+        async def execute_many(self, _sql, params_list):
+            return len(params_list)
+
+    client.app.state.db_connection = FakeDb()
+    monkeypatch.setattr(
+        internal_router.asyncio,
+        "create_task",
+        lambda coro: coro.close() or object(),
+    )
 
     response = client.post(
         "/internal/tenants/batch-initialize",
@@ -830,11 +845,8 @@ def test_internal_batch_initialize_rejects_disconnected_async_task_db() -> (
         },
     )
 
-    assert response.status_code == 503
-    assert (
-        response.json()["detail"]
-        == "Async task database connection is not available"
-    )
+    assert response.status_code == 200
+    assert response.json()["status"] == "queued"
     pool.ensure_bootstrap.assert_not_awaited()
 
 

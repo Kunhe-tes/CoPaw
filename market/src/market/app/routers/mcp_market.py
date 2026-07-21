@@ -102,6 +102,12 @@ def _get_async_task_store(request: Request):
     return AsyncTaskStore(db)
 
 
+def _distribution_summary(kind: str, name: str, target_count: int) -> str:
+    """构造包含分发对象的任务摘要。"""
+    object_name = str(name or "").strip() or "-"
+    return f"分发 {kind}「{object_name}」，目标 {target_count} 个用户"
+
+
 async def _run_mcp_distribution_task(
     *,
     task_id: str,
@@ -540,6 +546,11 @@ async def distribute_mcp(
         actor_user_id=x_user_id or "",
         actor_user_name=unquote(x_user_name or ""),
         target_ids=req.target_tenant_ids,
+        summary=_distribution_summary(
+            "MCP",
+            item.name or item.client_key or item_id,
+            len(req.target_tenant_ids),
+        ),
     )
     asyncio.create_task(
         _run_mcp_distribution_task(

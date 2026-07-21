@@ -449,11 +449,7 @@ def _get_target_storage_providers_dir(tenant_id: str) -> PathlibPath:
 def _make_async_task_store(request: Request) -> AsyncTaskStore:
     """创建异步任务写入器。"""
     db_connection = _request_db_connection(request)
-    if db_connection is None or not getattr(
-        db_connection,
-        "is_connected",
-        True,
-    ):
+    if db_connection is None:
         raise HTTPException(
             status_code=503,
             detail="Async task database connection is not available",
@@ -464,6 +460,34 @@ def _make_async_task_store(request: Request) -> AsyncTaskStore:
 def _new_async_task_id() -> str:
     """生成统一异步任务 ID。"""
     return str(uuid.uuid4())
+
+
+def _distribution_summary(kind: str, name: str, target_count: int) -> str:
+    """构造包含分发对象的任务摘要。"""
+    object_name = str(name or "").strip() or "-"
+    return f"分发{kind}「{object_name}」，目标 {target_count} 个用户"
+
+
+def _active_model_distribution_name(active_model: ModelSlotConfig) -> str:
+    """生成活跃模型分发的对象名称。"""
+    return f"{active_model.provider_id}/{active_model.model}"
+
+
+def _providers_distribution_name(source_providers_dir: PathlibPath) -> str:
+    """从源 providers 目录提取本次分发的供应商标识。"""
+    provider_ids: list[str] = []
+    for subdir_name in ("builtin", "custom"):
+        provider_dir = source_providers_dir / subdir_name
+        if not provider_dir.exists():
+            continue
+        provider_ids.extend(
+            sorted(
+                provider_file.stem
+                for provider_file in provider_dir.glob("*.json")
+                if provider_file.is_file()
+            ),
+        )
+    return ", ".join(provider_ids) or "全部供应商"
 
 
 def _distribute_providers_to_tenant(
@@ -1467,6 +1491,11 @@ async def distribute_active_model(
             actor_user_id=actor_user_id,
             actor_user_name=actor_user_name,
             target_ids=body.target_tenant_ids,
+            summary=_distribution_summary(
+                "模型",
+                _active_model_distribution_name(source_active_model),
+                len(body.target_tenant_ids),
+            ),
         )
         asyncio.create_task(
             _run_active_model_distribution_task(
@@ -1586,6 +1615,11 @@ async def distribute_providers(
             actor_user_id=actor_user_id,
             actor_user_name=actor_user_name,
             target_ids=body.target_tenant_ids,
+            summary=_distribution_summary(
+                "供应商配置",
+                _providers_distribution_name(source_providers_dir),
+                len(body.target_tenant_ids),
+            ),
         )
         asyncio.create_task(
             _run_providers_distribution_task(
