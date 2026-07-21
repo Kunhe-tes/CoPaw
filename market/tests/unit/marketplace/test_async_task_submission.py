@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import asyncio
+from typing import Any
 from unittest.mock import AsyncMock
 
 import pytest
@@ -13,7 +14,12 @@ from fastapi.testclient import TestClient
 from market.app.routers import mcp_market as mcp_router
 from market.app.routers import skills_market as skills_router
 from market.database.connection import DatabaseConnection
-from market.marketplace.schemas import PublishMCPRequest
+from market.marketplace.schemas import (
+    MCPDistributionRequest,
+    MCPDistributionResponse,
+    MCPDistributionTenantResult,
+    PublishMCPRequest,
+)
 from market.marketplace.service import MarketplaceService
 
 
@@ -47,6 +53,15 @@ async def test_distribute_skill_returns_task_submission(tmp_path, monkeypatch):
 
     app = _make_app(tmp_path)
     svc = app.state.marketplace
+    svc._resolve_target_users = AsyncMock(  # noqa: SLF001
+        return_value=[
+            {
+                "tenant_id": "tenant-a",
+                "tenant_name": "用户A",
+                "bbk_id": "100",
+            },
+        ],
+    )
     await svc.publish_skill(
         "src1",
         PublishSkillRequest(
@@ -79,7 +94,16 @@ async def test_distribute_skill_returns_task_submission(tmp_path, monkeypatch):
 
     assert resp.status_code == 200
     assert resp.json()["status"] == "queued"
-    assert resp.json()["task_id"]
+    task_id = resp.json()["task_id"]
+    assert task_id
+    item_insert_call = next(
+        call
+        for call in app.state.db.execute_many.await_args_list
+        if "INSERT INTO swe_async_task_items" in call.args[0]
+    )
+    assert item_insert_call.args[1] == [
+        (task_id, "tenant-a", "用户A", "queued", None, None),
+    ]
 
 
 @pytest.mark.asyncio
@@ -121,3 +145,60 @@ async def test_distribute_mcp_returns_task_submission(tmp_path, monkeypatch):
     assert resp.status_code == 200
     assert resp.json()["status"] == "queued"
     assert resp.json()["task_id"]
+
+
+@pytest.mark.asyncio
+async def test_mcp_distribution_records_failed_item_target_name() -> None:
+    """MCP 失败明细也应保留可回填目标名称的结果。"""
+
+    class FakeStore:
+        """记录后台任务写入参数的任务表替身。"""
+
+        def __init__(self) -> None:
+            self.items: list[dict[str, Any]] = []
+
+        async def mark_running(self, task_id: str) -> None:
+            assert task_id == "task-1"
+
+        async def record_item_result(self, **kwargs: Any) -> None:
+            self.items.append(kwargs)
+
+        async def finish_task(self, **kwargs: Any) -> None:
+            assert kwargs["status"] == "failed"
+
+    class FakeService:
+        """返回带用户名称的 MCP 分发结果。"""
+
+        async def distribute_mcp(
+            self,
+            *args: Any,
+            **kwargs: Any,
+        ) -> MCPDistributionResponse:
+            del args, kwargs
+            return MCPDistributionResponse(
+                source_agent_id="mcp-a",
+                results=[
+                    MCPDistributionTenantResult(
+                        tenant_id="tenant-a",
+                        tenant_name="用户A",
+                        success=False,
+                        error="failed",
+                    ),
+                ],
+            )
+
+    store = FakeStore()
+
+    await mcp_router._run_mcp_distribution_task(  # noqa: SLF001
+        task_id="task-1",
+        store=store,
+        svc=FakeService(),
+        source_id="src1",
+        item_id="mcp-a",
+        operator_id="admin",
+        operator_name="admin",
+        req=MCPDistributionRequest(target_tenant_ids=["tenant-a"]),
+    )
+
+    assert store.items[0]["result"]["tenant_name"] == "用户A"
+    assert store.items[0]["error_message"] == "failed"

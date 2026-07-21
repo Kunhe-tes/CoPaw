@@ -449,7 +449,11 @@ def _get_target_storage_providers_dir(tenant_id: str) -> PathlibPath:
 def _make_async_task_store(request: Request) -> AsyncTaskStore:
     """创建异步任务写入器。"""
     db_connection = _request_db_connection(request)
-    if db_connection is None and getattr(request, "app", None) is not None:
+    if db_connection is None or not getattr(
+        db_connection,
+        "is_connected",
+        True,
+    ):
         raise HTTPException(
             status_code=503,
             detail="Async task database connection is not available",
@@ -1445,12 +1449,12 @@ async def distribute_active_model(
         manager,
     )
     task_id = _new_async_task_id()
-    db_connection = _request_db_connection(request)
-    use_async_dispatch = (
-        db_connection is not None
-        or not AsyncTaskStore.__module__.endswith(
-            "swe.app.async_tasks.store",
-        )
+    use_async_dispatch = getattr(
+        request,
+        "app",
+        None,
+    ) is not None or not AsyncTaskStore.__module__.endswith(
+        "swe.app.async_tasks.store",
     )
     if use_async_dispatch:
         store = _make_async_task_store(request)
@@ -1564,12 +1568,12 @@ async def distribute_providers(
         )
 
     task_id = _new_async_task_id()
-    db_connection = _request_db_connection(request)
-    use_async_dispatch = (
-        db_connection is not None
-        or not AsyncTaskStore.__module__.endswith(
-            "swe.app.async_tasks.store",
-        )
+    use_async_dispatch = getattr(
+        request,
+        "app",
+        None,
+    ) is not None or not AsyncTaskStore.__module__.endswith(
+        "swe.app.async_tasks.store",
     )
     if use_async_dispatch:
         store = _make_async_task_store(request)

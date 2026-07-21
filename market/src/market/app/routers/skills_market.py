@@ -948,6 +948,14 @@ async def distribute_skill(
         req,
     )  # noqa: SLF001
     target_user_ids = [user["tenant_id"] for user in target_users]
+    target_user_names = {
+        user["tenant_id"]: (
+            user.get("tenant_name")
+            or user.get("user_name")
+            or user.get("name")
+        )
+        for user in target_users
+    }
     store = _get_async_task_store(request)
     await store.start_task(
         task_id=task_id,
@@ -957,6 +965,7 @@ async def distribute_skill(
         actor_user_id=x_user_id or "",
         actor_user_name=decode_user_name(x_user_name) or "",
         target_ids=target_user_ids,
+        target_names=target_user_names,
     )
     asyncio.create_task(
         _run_skill_distribution_task(

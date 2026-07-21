@@ -14,7 +14,6 @@ from urllib.parse import unquote, urlsplit
 
 from fastapi import APIRouter, Body, File, Form, Header, HTTPException, Request
 from fastapi import UploadFile
-from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
 from ..b3_headers import build_b3_dispatch_meta
@@ -623,7 +622,11 @@ def _request_actor(request: Request) -> tuple[str, str]:
 def _make_async_task_store(request: Request) -> AsyncTaskStore:
     """创建统一异步任务写入器。"""
     db_connection = _request_db_connection(request)
-    if db_connection is None:
+    if db_connection is None or not getattr(
+        db_connection,
+        "is_connected",
+        True,
+    ):
         raise HTTPException(
             status_code=503,
             detail="Async task database connection is not available",
@@ -1207,143 +1210,43 @@ async def internal_batch_initialize_tenants(
             detail="Tenant pool not available",
         )
 
-    db_connection = _request_db_connection(request)
-    if db_connection is not None:
-        task_id = str(uuid.uuid4())
-        store = _make_async_task_store(request)
-        actor_user_id, actor_user_name = _request_actor(request)
-        await store.start_task(
+    task_id = str(uuid.uuid4())
+    store = _make_async_task_store(request)
+    actor_user_id, actor_user_name = _request_actor(request)
+    await store.start_task(
+        task_id=task_id,
+        service="swe",
+        task_type="tenant.bootstrap",
+        source_id=payload.source_id,
+        actor_user_id=actor_user_id,
+        actor_user_name=actor_user_name,
+        target_ids=tenant_ids,
+    )
+    asyncio.create_task(
+        _run_internal_batch_initialize_task(
             task_id=task_id,
-            service="swe",
-            task_type="tenant.bootstrap",
-            source_id=payload.source_id,
-            actor_user_id=actor_user_id,
-            actor_user_name=actor_user_name,
-            target_ids=tenant_ids,
-        )
-        asyncio.create_task(
-            _run_internal_batch_initialize_task(
-                task_id=task_id,
-                store=store,
-                pool=pool,
-                payload=payload,
-                tenant_ids=tenant_ids,
-                headers={
-                    key: value
-                    for key, value in {
-                        "Content-Type": "application/json",
-                        "Authorization": request.headers.get("Authorization"),
-                    }.items()
-                    if value
-                },
-            ),
-        )
-        return InternalBatchInitializeTenantsResponse(
-            success=True,
-            task_id=task_id,
-            status="queued",
-            total=len(tenant_ids),
-            success_count=0,
-            fail_count=0,
-            results=[],
-        )
-
-    auth_header = request.headers.get("Authorization")
-    headers = {
-        key: value
-        for key, value in {
-            "Content-Type": "application/json",
-            "Authorization": auth_header,
-        }.items()
-        if value
-    }
-    results: list[InternalBatchInitializeTenantResult] = []
-    success_count = 0
-    fail_count = 0
-
-    for tenant_id in tenant_ids:
-        resolved_identity = await resolve_user_identity(
-            tenant_id=tenant_id,
-            source_id=payload.source_id,
-            user_name=None,
-            bbk_id=None,
-            headers=headers,
-            allow_remote_lookup=True,
-        )
-        if not resolved_identity.user_name or not resolved_identity.bbk_id:
-            fail_count += 1
-            results.append(
-                InternalBatchInitializeTenantResult(
-                    tenant_id=tenant_id,
-                    tenant_name=resolved_identity.user_name,
-                    bbk_id=resolved_identity.bbk_id,
-                    status="failed",
-                    message="user identity not resolved",
-                ),
-            )
-            if payload.fail_fast:
-                break
-            continue
-
-        if await _is_tenant_already_bootstrapped(
-            pool,
-            tenant_id,
-            payload.source_id,
-        ):
-            success_count += 1
-            results.append(
-                InternalBatchInitializeTenantResult(
-                    tenant_id=tenant_id,
-                    tenant_name=resolved_identity.user_name,
-                    bbk_id=resolved_identity.bbk_id,
-                    status="success",
-                    message="skipped",
-                ),
-            )
-            continue
-
-        try:
-            await pool.ensure_bootstrap(
-                tenant_id,
-                source_id=payload.source_id,
-                tenant_name=resolved_identity.user_name,
-                bbk_id=resolved_identity.bbk_id,
-                enable_bootstrap_chat=payload.enable_bootstrap_chat,
-            )
-        except Exception as exc:
-            fail_count += 1
-            results.append(
-                InternalBatchInitializeTenantResult(
-                    tenant_id=tenant_id,
-                    tenant_name=resolved_identity.user_name,
-                    bbk_id=resolved_identity.bbk_id,
-                    status="failed",
-                    message=str(exc),
-                ),
-            )
-            if payload.fail_fast:
-                break
-            continue
-
-        success_count += 1
-        results.append(
-            InternalBatchInitializeTenantResult(
-                tenant_id=tenant_id,
-                tenant_name=resolved_identity.user_name,
-                bbk_id=resolved_identity.bbk_id,
-                status="success",
-                message="initialized",
-            ),
-        )
-
-    return JSONResponse(
-        content={
-            "success": fail_count == 0 and success_count == len(tenant_ids),
-            "total": len(tenant_ids),
-            "success_count": success_count,
-            "fail_count": fail_count,
-            "results": [result.model_dump(mode="json") for result in results],
-        },
+            store=store,
+            pool=pool,
+            payload=payload,
+            tenant_ids=tenant_ids,
+            headers={
+                key: value
+                for key, value in {
+                    "Content-Type": "application/json",
+                    "Authorization": request.headers.get("Authorization"),
+                }.items()
+                if value
+            },
+        ),
+    )
+    return InternalBatchInitializeTenantsResponse(
+        success=True,
+        task_id=task_id,
+        status="queued",
+        total=len(tenant_ids),
+        success_count=0,
+        fail_count=0,
+        results=[],
     )
 
 

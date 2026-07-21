@@ -130,7 +130,7 @@ async def _run_mcp_distribution_task(
                 task_id=task_id,
                 target_id=item.tenant_id,
                 success=item.success,
-                result=item.model_dump() if item.success else None,
+                result=item.model_dump(),
                 error_message=item.error,
             )
             if item.success:

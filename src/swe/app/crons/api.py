@@ -1125,9 +1125,19 @@ def _get_broadcast_task_store(request: Request) -> CronBroadcastTaskStore:
         "cron_broadcast_task_store",
         None,
     )
-    if store is None:
+    if store is not None:
+        return store
+
+    db_connection = getattr(request.app.state, "db_connection", None)
+    if db_connection is not None and getattr(
+        db_connection,
+        "is_connected",
+        True,
+    ):
+        store = CronBroadcastTaskStore(db_connection)
+    else:
         store = CronBroadcastTaskStore()
-        request.app.state.cron_broadcast_task_store = store
+    request.app.state.cron_broadcast_task_store = store
     return store
 
 
@@ -1323,6 +1333,9 @@ async def _schedule_broadcast_task(
         tenant_id=parts["tenant_id"],
         job_id=parts["job_id"],
         target_tenant_ids=tenant_ids,
+        target_names=_target_names_from_identity(
+            context.target_identity_by_tenant,
+        ),
         actor_user_id=actor_user_id,
         actor_user_name=actor_user_name,
     )
@@ -1667,6 +1680,16 @@ def _normalize_broadcast_targets(
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     return normalized_tenants, identity_by_tenant
+
+
+def _target_names_from_identity(
+    identity_by_tenant: dict[str, dict[str, str | None]],
+) -> dict[str, str | None]:
+    """从广播目标身份中提取统一任务明细展示名称。"""
+    return {
+        tenant_id: identity.get("tenant_name")
+        for tenant_id, identity in identity_by_tenant.items()
+    }
 
 
 def _get_broadcast_multi_agent_manager(request: Request):

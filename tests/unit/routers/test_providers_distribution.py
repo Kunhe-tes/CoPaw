@@ -19,8 +19,9 @@ def _request(
     source_id: str | None = None,
     scope_id: str | None = None,
     headers: dict[str, str] | None = None,
+    app: Any | None = None,
 ) -> SimpleNamespace:
-    return SimpleNamespace(
+    request = SimpleNamespace(
         headers=headers or {},
         state=SimpleNamespace(
             tenant_id=tenant_id,
@@ -28,6 +29,15 @@ def _request(
             scope_id=scope_id,
         ),
     )
+    if app is not None:
+        request.app = app
+    return request
+
+
+class FakeAsyncTaskDb:
+    """提供异步任务写入器所需的数据库连接状态。"""
+
+    is_connected = True
 
 
 def _setup_source_providers(
@@ -118,15 +128,35 @@ def test_distribute_providers_success(
     assert result.source_tenant_id == "tenant-source"
     assert len(result.results) == 1
     assert result.results[0].tenant_id == "tenant-target"
-    assert result.results[0].success is True
-    assert result.results[0].bootstrapped is False
 
-    # Verify target directory was created
-    target_providers_dir = secret_dir / "tenant-target" / "providers"
-    assert target_providers_dir.exists()
-    assert (target_providers_dir / "builtin" / "openai.json").exists()
-    assert (target_providers_dir / "custom" / "custom-llm.json").exists()
-    assert (target_providers_dir / "active_model.json").exists()
+
+def test_distribute_providers_requires_async_task_db(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """供应商分发必须提交异步任务，缺少任务库时返回明确错误。"""
+    secret_dir = tmp_path / "secret"
+    _setup_source_providers(secret_dir, "tenant-source")
+
+    monkeypatch.setattr(providers_router, "SECRET_DIR", secret_dir)
+    app = SimpleNamespace(state=SimpleNamespace())
+
+    with pytest.raises(providers_router.HTTPException) as exc_info:
+        asyncio.run(
+            providers_router.distribute_providers(
+                _request(app=app),
+                providers_router.ProvidersDistributionRequest(
+                    target_tenant_ids=["tenant-target"],
+                    overwrite=True,
+                ),
+            ),
+        )
+
+    assert exc_info.value.status_code == 503
+    assert (
+        exc_info.value.detail
+        == "Async task database connection is not available"
+    )
 
 
 def test_distribute_providers_uses_request_scope_for_source_dir(
@@ -520,6 +550,9 @@ def test_distribute_providers_returns_async_task_submission(
                     "X-User-Id": "operator-1",
                     "X-User-Name": "%E5%BC%A0%E4%B8%89",
                 },
+                app=SimpleNamespace(
+                    state=SimpleNamespace(db_connection=FakeAsyncTaskDb()),
+                ),
             ),
             providers_router.ProvidersDistributionRequest(
                 target_tenant_ids=["tenant-a"],

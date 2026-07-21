@@ -163,6 +163,29 @@ class _Manager:
         return types.SimpleNamespace(model_dump=lambda mode=None: {})
 
 
+class _AsyncTaskDb:
+    def __init__(self):
+        self.is_connected = True
+        self.executed = []
+        self.executed_many = []
+
+    async def execute(self, query, params=None):
+        self.executed.append((query, params))
+        return 1
+
+    async def execute_many(self, query, params_list):
+        self.executed_many.append((query, params_list))
+        return len(params_list)
+
+    async def fetch_one(self, query, params=None):
+        self.executed.append((query, params))
+        return None
+
+    async def fetch_all(self, query, params=None):
+        self.executed.append((query, params))
+        return []
+
+
 class _Provider:
     def __init__(self, models: list[str]):
         self._models = set(models)
@@ -901,6 +924,56 @@ def test_broadcast_job_returns_running_task_and_polling_result(monkeypatch):
             "tenant-b",
             "tenant-c",
         ]
+
+
+def test_broadcast_job_uses_db_store_when_state_store_missing(monkeypatch):
+    """广播任务缺少预置 store 时也应使用 app 上的数据库连接落任务表。"""
+
+    async def _fake_broadcast_to_tenant(_context, tenant_id, offset):
+        await asyncio.sleep(0.01)
+        return api_module.CronBroadcastTenantResult(
+            tenant_id=tenant_id,
+            success=True,
+            job_id=f"job-{tenant_id}",
+            cron="0 9 * * *",
+            timezone="UTC",
+            offset_minutes=offset,
+            notification_timezone="UTC",
+        )
+
+    monkeypatch.setattr(
+        api_module,
+        "_broadcast_to_tenant",
+        _fake_broadcast_to_tenant,
+    )
+    source_job = CronJobSpec.model_validate(
+        {
+            **_job_spec("job-source"),
+            "tenant_id": "tenant-a",
+            "source_id": "source-a",
+            "scope_id": encode_scope_id("tenant-a", "source-a"),
+        },
+    )
+    db = _AsyncTaskDb()
+    with _build_client(
+        _Manager({"job-source": source_job}),
+        multi_agent_manager=_MultiAgentManager({}),
+    ) as client:
+        client.app.state.db_connection = db
+        response = client.post(
+            "/cron/jobs/job-source/broadcast",
+            json={"target_tenant_ids": ["tenant-b"]},
+        )
+
+        assert response.status_code == 200
+        assert any(
+            "INSERT INTO swe_async_tasks" in query
+            for query, _params in db.executed
+        )
+        assert any(
+            "INSERT INTO swe_async_task_items" in query
+            for query, _params in db.executed_many
+        )
 
 
 def test_broadcast_applies_batch_dispatch_after_distribution(

@@ -88,6 +88,26 @@ async def test_start_task_generates_summary_from_task_type() -> None:
 
 
 @pytest.mark.asyncio
+async def test_start_task_writes_target_names() -> None:
+    """开始任务时应将目标名称写入明细表。"""
+    db = FakeDb()
+    store = AsyncTaskStore(db)
+
+    await store.start_task(
+        task_id="task-1",
+        service="market",
+        task_type="market.skill.distribute",
+        target_ids=["u1", "u2"],
+        target_names={"u1": "用户一"},
+    )
+
+    assert db.executed_many[0][1] == [
+        ("task-1", "u1", "用户一", "queued", None, None),
+        ("task-1", "u2", None, "queued", None, None),
+    ]
+
+
+@pytest.mark.asyncio
 async def test_start_task_keeps_explicit_summary() -> None:
     """显式传摘要时，应保留调用方提供的业务上下文。"""
     db = FakeDb()
@@ -144,4 +164,24 @@ async def test_record_item_result_updates_item() -> None:
     assert "UPDATE swe_async_task_items" in sql
     assert params is not None
     assert params[0] == "failed"
+    assert params[1] is None
     assert params[-2:] == ("task-1", "u1")
+
+
+@pytest.mark.asyncio
+async def test_record_item_result_backfills_target_name() -> None:
+    """记录目标结果时应从结果中反填目标名称。"""
+    db = FakeDb()
+    store = AsyncTaskStore(db)
+
+    await store.record_item_result(
+        task_id="task-1",
+        target_id="u1",
+        success=True,
+        result={"user_name": "用户一"},
+    )
+
+    sql, params = db.executed[0]
+    assert "target_name = COALESCE(%s, target_name)" in sql
+    assert params is not None
+    assert params[1] == "用户一"

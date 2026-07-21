@@ -57,6 +57,33 @@ def _resolve_task_summary(
     )
 
 
+def _resolve_target_name(
+    target_id: str,
+    target_names: dict[str, str | None] | None,
+) -> str | None:
+    """从目标名称映射中读取可展示名称。"""
+    if not target_names:
+        return None
+    name = target_names.get(target_id)
+    if name is None:
+        return None
+    stripped_name = str(name).strip()
+    return stripped_name or None
+
+
+def _extract_target_name(result: Any) -> str | None:
+    """从执行结果中提取可回填到明细表的目标名称。"""
+    if not isinstance(result, dict):
+        return None
+    for key in ("target_name", "user_name", "tenant_name"):
+        value = result.get(key)
+        if value:
+            stripped_value = str(value).strip()
+            if stripped_value:
+                return stripped_value
+    return None
+
+
 class AsyncTaskStore:
     """SWE 服务内的异步任务写入器。
 
@@ -78,6 +105,7 @@ class AsyncTaskStore:
         service: str,
         task_type: str,
         target_ids: list[str],
+        target_names: dict[str, str | None] | None = None,
         title: str | None = None,
         summary: str | None = None,
         source_id: str | None = None,
@@ -122,7 +150,14 @@ class AsyncTaskStore:
         await self.db.execute_many(
             insert_items_sql,
             [
-                (task_id, target_id, None, "queued", None, None)
+                (
+                    task_id,
+                    target_id,
+                    _resolve_target_name(target_id, target_names),
+                    "queued",
+                    None,
+                    None,
+                )
                 for target_id in target_ids
             ],
         )
@@ -165,16 +200,19 @@ class AsyncTaskStore:
     ) -> None:
         """记录单个目标的执行结果。"""
         status = "succeeded" if success else "failed"
+        target_name = _extract_target_name(result)
         await self.db.execute(
             """
             UPDATE swe_async_task_items
             SET status = %s,
+                target_name = COALESCE(%s, target_name),
                 result_json = %s,
                 error_message = %s
             WHERE task_id = %s AND target_id = %s
             """,
             (
                 status,
+                target_name,
                 _json_dumps(result),
                 error_message,
                 task_id,

@@ -93,6 +93,7 @@ class CronBroadcastTaskStore:
         tenant_id: str,
         job_id: str,
         target_tenant_ids: list[str],
+        target_names: dict[str, str | None] | None = None,
         actor_user_id: str | None = None,
         actor_user_name: str | None = None,
     ) -> tuple[CronBroadcastTaskSnapshot, bool]:
@@ -115,6 +116,7 @@ class CronBroadcastTaskStore:
             job_id=job_id,
             target_key=target_key,
             targets=targets,
+            target_names=target_names,
             actor_user_id=actor_user_id,
             actor_user_name=actor_user_name,
         )
@@ -350,6 +352,7 @@ class CronBroadcastTaskStore:
         job_id: str,
         target_key: str,
         targets: list[str],
+        target_names: dict[str, str | None] | None,
         actor_user_id: str | None,
         actor_user_name: str | None,
     ) -> tuple[CronBroadcastTaskSnapshot, bool]:
@@ -382,6 +385,7 @@ class CronBroadcastTaskStore:
                     tenant_id=tenant_id,
                     job_id=job_id,
                     target_ids=targets,
+                    target_names=target_names,
                     actor_user_id=actor_user_id,
                     actor_user_name=actor_user_name,
                 )
@@ -579,6 +583,7 @@ class CronBroadcastTaskStore:
         tenant_id: str,
         job_id: str,
         target_ids: list[str],
+        target_names: dict[str, str | None] | None = None,
         actor_user_id: str | None = None,
         actor_user_name: str | None = None,
     ) -> None:
@@ -594,6 +599,7 @@ class CronBroadcastTaskStore:
                 actor_user_id=actor_user_id,
                 actor_user_name=actor_user_name,
                 target_ids=target_ids,
+                target_names=target_names,
             )
         except Exception:
             logger.warning(

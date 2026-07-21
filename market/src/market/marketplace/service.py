@@ -3058,6 +3058,8 @@ class MarketplaceService:
         results: list[MCPDistributionTenantResult] = []
 
         for tenant_id in req.target_tenant_ids:
+            user_info = user_info_map.get(tenant_id, {})
+            tenant_name = user_info.get("tenant_name", "")
             try:
                 effective_user_id = resolve_effective_user_id(
                     tenant_id,
@@ -3083,6 +3085,7 @@ class MarketplaceService:
                     results.append(
                         MCPDistributionTenantResult(
                             tenant_id=tenant_id,
+                            tenant_name=tenant_name,
                             success=False,
                             error=(f"用户已有同名 MCP " f'"{item.name}"'),
                         ),
@@ -3104,8 +3107,6 @@ class MarketplaceService:
                 )
 
                 # 获取用户信息（如果查询不到则为空）
-                user_info = user_info_map.get(tenant_id, {})
-                tenant_name = user_info.get("tenant_name", "")
                 bbk_id = user_info.get("bbk_id", "")
 
                 # 记录分发日志
@@ -3134,6 +3135,7 @@ class MarketplaceService:
                 results.append(
                     MCPDistributionTenantResult(
                         tenant_id=tenant_id,
+                        tenant_name=tenant_name,
                         success=True,
                         bootstrapped=bootstrapped,
                         default_agent_updated=[effective_client_key],
@@ -3148,6 +3150,7 @@ class MarketplaceService:
                 results.append(
                     MCPDistributionTenantResult(
                         tenant_id=tenant_id,
+                        tenant_name=tenant_name,
                         success=False,
                         error=str(e),
                     ),

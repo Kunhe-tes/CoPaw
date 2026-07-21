@@ -197,16 +197,17 @@ class ParseZipResponse(BaseModel):
 
 
 class MCPDistributionRequest(BaseModel):
-    """MCP 分发请求体，语义与现有 MCP 菜单分发到租户保持一致。"""
+    """MCP 分发请求体，语义与现有 MCP 菜单分发到用户保持一致。"""
 
     target_tenant_ids: list[str] = Field(default_factory=list)
     overwrite: bool = True
 
 
 class MCPDistributionTenantResult(BaseModel):
-    """单个租户的 MCP 分发结果。"""
+    """单个用户的 MCP 分发结果。"""
 
     tenant_id: str
+    tenant_name: str | None = None
     success: bool
     bootstrapped: bool = False
     default_agent_updated: list[str] = Field(default_factory=list)
@@ -418,7 +419,7 @@ class SkillQueryResponse(BaseModel):
     """技能查询响应."""
 
     results: list[SkillQueryResult] = Field(
-        description="查询结果列表，按请求顺序"
+        description="查询结果列表，按请求顺序",
     )
     total_requested: int = Field(description="请求查询的技能数量")
     total_found: int = Field(description="找到的技能数量")

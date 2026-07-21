@@ -22,8 +22,9 @@ def _request(
     source_id: str | None = None,
     scope_id: str | None = None,
     headers: dict[str, str] | None = None,
+    app: Any | None = None,
 ) -> SimpleNamespace:
-    return SimpleNamespace(
+    request = SimpleNamespace(
         headers=headers or {},
         state=SimpleNamespace(
             tenant_id=tenant_id,
@@ -31,6 +32,15 @@ def _request(
             scope_id=scope_id,
         ),
     )
+    if app is not None:
+        request.app = app
+    return request
+
+
+class FakeAsyncTaskDb:
+    """提供异步任务写入器所需的数据库连接状态。"""
+
+    is_connected = True
 
 
 @dataclass
@@ -769,6 +779,9 @@ def test_distribute_active_model_returns_async_task_submission(
                     "X-User-Id": "operator-1",
                     "X-User-Name": "%E5%BC%A0%E4%B8%89",
                 },
+                app=SimpleNamespace(
+                    state=SimpleNamespace(db_connection=FakeAsyncTaskDb()),
+                ),
             ),
             providers_router.ActiveModelDistributionRequest(
                 target_tenant_ids=["tenant-a"],
@@ -789,6 +802,37 @@ def test_distribute_active_model_returns_async_task_submission(
     )
     assert submitted["start_task"]["actor_user_id"] == "operator-1"
     assert submitted["start_task"]["actor_user_name"] == "张三"
+
+
+def test_active_model_distribution_requires_async_task_db() -> None:
+    """模型分发必须提交异步任务，缺少任务库时返回明确错误。"""
+    source_manager = FakeManager(
+        active_model=ModelSlotConfig(provider_id="openai", model="gpt-5.4"),
+        providers={
+            "openai": FakeProvider(
+                id="openai",
+                models=[{"id": "gpt-5.4", "name": "GPT-5.4"}],
+            ),
+        },
+    )
+
+    with pytest.raises(providers_router.HTTPException) as exc_info:
+        asyncio.run(
+            providers_router.distribute_active_model(
+                _request(app=SimpleNamespace(state=SimpleNamespace())),
+                providers_router.ActiveModelDistributionRequest(
+                    target_tenant_ids=["tenant-a"],
+                    overwrite=True,
+                ),
+                manager=source_manager,
+            ),
+        )
+
+    assert exc_info.value.status_code == 503
+    assert (
+        exc_info.value.detail
+        == "Async task database connection is not available"
+    )
 
 
 def test_active_model_distribution_marks_failed_when_mark_running_fails() -> (
