@@ -6,8 +6,8 @@
 
 ## 2. URL mode and shell presentation
 
-- [x] 2.1 Keep a pure URL resolver for exact `/chat/{chat.id}?showContentOnly=true`, independent of iframe presence and `source`.
-- [x] 2.2 Hide the global Header, global Sidebar, and unrelated shell chrome only for the active content-only chat route.
+- [x] 2.1 Initialize a runtime-only presentation flag from exact `/chat/{chat.id}?showContentOnly=true` at full-page startup, independent of iframe presence and `source`, and keep it stable through internal chat URL replacement.
+- [x] 2.2 Let `MainLayout` and `ChatPage` consume the initialized global flag directly, without a current-route or `chat.id` guard, and hide their requested shell surfaces while it is active.
 - [x] 2.3 Hide the whole `ChatSidebar`, including expanded task/history sections, collapsed toolbar, and panels, without changing sidebar state or data logic.
 - [x] 2.4 Hide generated-files entry/list, model selection, question composer, and drag/paste/upload surfaces while retaining the existing title and full conversation.
 
@@ -22,7 +22,7 @@
 ## 4. Documentation and verification
 
 - [x] 4.1 Update `console/DESIGN.md` to define content-only as a presentation variant rather than a read-only policy.
-- [x] 4.2 Keep or add focused tests for URL activation, global/chat shell suppression, hidden composer/upload surfaces, retained title, and normal message actions.
+- [x] 4.2 Keep or add focused tests for startup URL initialization, stable global runtime state, hidden composer/upload surfaces, retained title, and normal message actions.
 - [x] 4.3 Remove strict-read-only, identity-gate, special-session, controller-no-op, and preview-suppression tests that no longer describe the requirement.
 - [x] 4.4 Run focused Vitest suites plus representative normal Chat, `hideMenu`/`origin=Y`, approval, feedback, retry, preview, and running-reconnect regressions.
 - [x] 4.5 Run frontend lint/type/build checks in proportion to the change and report unrelated baseline failures separately.

@@ -24,11 +24,11 @@ The requested mode is only a focused composition of that existing page. It hides
 
 ## Decisions
 
-### 1. Resolve presentation mode from the URL only
+### 1. Initialize presentation mode from the startup URL
 
-A shared pure resolver activates content-only presentation only for a concrete `/chat/{chat.id}` route whose parsed query contains the exact lower-case value `showContentOnly=true`. It does not inspect `source` or iframe presence and does not persist the flag into `USER_DATA`, Zustand, session storage, or another store.
+A startup URL parser accepts content-only presentation only for a concrete `/chat/{chat.id}` route whose parsed query contains the exact lower-case value `showContentOnly=true`. Before React renders, it writes that result to a dedicated Zustand presentation store. The store is runtime-only: it is not persisted to `sessionStorage`, is not part of `USER_DATA`, and does not inspect `source` or iframe presence.
 
-This makes the first render deterministic, supports direct local testing, and lets future sources reuse the same presentation.
+Layout consumers read the runtime flag directly without re-parsing the current URL, checking the current `chat.id`, or adding another route guard. This makes the first render deterministic, keeps presentation stable for the whole page runtime when internal navigation normalizes or replaces the URL without the query string, supports direct local testing, and lets future sources reuse the same presentation. A new full-page startup recomputes the flag from its own URL, so starting without the opt-in restores normal presentation.
 
 ### 2. Limit the mode to component composition
 
@@ -52,7 +52,7 @@ Content-only presentation neither adds nor removes requests. If the existing rou
 
 `MainLayout` owns the global Header and Sidebar. `ChatPage` independently owns `ChatSidebar`, including the expanded task/history sections, collapsed toolbar, and expandable panels. Both layers must omit their respective surfaces so the conversation uses the available width without an empty rail.
 
-This is independent of the existing `hideMenu` contract. `hideMenu` and `origin=Y` retain their current behavior; content-only presentation simply contributes another URL-derived reason to hide the global shell on the target chat route.
+This is independent of the existing `hideMenu` contract. `hideMenu` and `origin=Y` retain their current behavior; the initialized content-only runtime flag directly contributes another reason to hide the global shell for the current page runtime.
 
 ## Risks / Trade-offs
 
@@ -64,7 +64,7 @@ This is independent of the existing `hideMenu` contract. `hideMenu` and `origin=
 
 ## Migration Plan
 
-1. Keep the shared URL resolver and two-layer layout suppression.
+1. Keep the startup URL initializer, runtime-only presentation store, direct global-state consumers, and two-layer layout suppression.
 2. Remove the previously introduced identity, session, controller, response-action, approval, feedback, reconnect, and preview-tracking policies.
 3. Retain only conditional rendering for the requested hidden surfaces.
 4. Update focused tests and run normal chat, embedded, and streaming regressions.

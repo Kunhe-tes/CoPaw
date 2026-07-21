@@ -1,8 +1,8 @@
 ## ADDED Requirements
 
-### Requirement: Chat content-only presentation is URL driven
+### Requirement: Chat content-only presentation is initialized from the startup URL
 
-The Console SHALL activate chat content-only presentation only for a concrete `/chat/{chat.id}` route whose parsed `showContentOnly` query value is exactly the lower-case string `true`. Activation SHALL NOT depend on iframe presence or request `source`, SHALL NOT require a new `USER_DATA` field, and SHALL NOT persist presentation state outside the URL.
+The Console SHALL initialize chat content-only presentation only when a full page starts on a concrete `/chat/{chat.id}` route whose parsed `showContentOnly` query value is exactly the lower-case string `true`. Activation SHALL NOT depend on iframe presence or request `source` and SHALL NOT require a new `USER_DATA` field. Layout consumers SHALL read the initialized global flag directly without re-evaluating the current URL or `chat.id`. The flag SHALL remain active for the whole current page runtime, SHALL NOT be written to persistent browser storage, and SHALL be reset from the current URL on the next full-page startup.
 
 #### Scenario: Embedded host opens a content-only chat
 
@@ -14,9 +14,19 @@ The Console SHALL activate chat content-only presentation only for a concrete `/
 - **WHEN** a user opens `/chat/{chat.id}?showContentOnly=true` in a top-level browser
 - **THEN** the Console applies the same presentation using the normal authenticated chat route
 
+#### Scenario: Internal chat navigation replaces the query string
+
+- **WHEN** an initialized content-only chat resolves or replaces its routed chat ID and the resulting internal URL no longer contains `showContentOnly`
+- **THEN** content-only presentation remains active for the rest of the current page runtime
+
+#### Scenario: A new startup does not opt in
+
+- **WHEN** a new full-page startup opens a URL without the exact lower-case `showContentOnly=true` value
+- **THEN** the runtime presentation flag is initialized as inactive even if a previous page runtime used content-only presentation
+
 #### Scenario: Parameter is absent, invalid, or lacks a target
 
-- **WHEN** `showContentOnly` is absent, has any value other than the exact lower-case string `true`, appears on a non-chat route, or appears on `/chat` without a concrete target ID
+- **WHEN** a full page starts with `showContentOnly` absent, with any value other than the exact lower-case string `true`, on a non-chat route, or on `/chat` without a concrete target ID
 - **THEN** the parameter does not change that route's normal layout or behavior
 
 ### Requirement: Content-only presentation hides only the requested workspace surfaces

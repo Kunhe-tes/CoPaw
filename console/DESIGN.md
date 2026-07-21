@@ -204,25 +204,7 @@ Visual priority for future chat work remains:
 
 ### Content-Only Conversation Workspace
 
-`/chat/{chat.id}?showContentOnly=true` activates a reusable, source-independent content-only Conversation Workspace presentation. The same variant applies in a top-level browser and in an iframe. The exact URL value initializes a runtime-only presentation flag before React renders; that flag remains stable while the router normalizes or replaces the concrete chat URL, but it is not written to session storage or `USER_DATA` and a new full-page startup without the opt-in restores normal presentation. This is not a read-only, permission, identity, session, or request policy and does not change the existing `hideMenu` contract.
-
-The content hierarchy is:
-
-1. The existing conversation title with its normal behavior.
-2. The complete routed conversation content, including existing live stream output.
-3. The message actions and content utilities that normal chat exposes for the same messages and state.
-
-The variant omits the global Header and Sidebar, the complete conversation task/history sidebar and collapsed toolbar, model selection, the independent generated-files entry and list, the question composer, attachments, speech input, and drag/paste upload surfaces. Suppressed surfaces reserve no width, padding, border, or shell-colored gap and are absent from the accessibility tree and keyboard order rather than visually concealed.
-
-- Keep Conversation Workspace typography, title resolution, message/card presentation, and `#3769FC` emphasis unchanged.
-- Keep approval/deny, feedback, retry/regenerate, suggestions, copy, message-file download/preview, disclosure, scrolling, and Conversation Quick Navigation governed by their existing normal-chat visibility, permission, state, and handler rules.
-- Hiding the generated-files entry and list does not hide file controls embedded in conversation messages.
-- Keep identity initialization, session restoration, loading/empty/error selection, background requests, request ownership, cancellation, SSE/reconnect, and HTML-preview recording behavior unchanged. The runtime presentation flag must remain outside those chat data and controller policies.
-- Running chats use the same existing stream presentation and controls that normal `/chat/{chat.id}` would expose for the same state.
-- Retained buttons and links require their existing accessible names, visible keyboard focus, and target sizes. Hidden composition surfaces must not remain focusable.
-- Long mixed-language titles, URLs, files, and message content must wrap or truncate intentionally without introducing page-level horizontal overflow.
-
-Verify the variant at `1280x720`, `1440x900`, and `1920x1080` in both top-level and embedded presentation. Cover completed, long mixed-language, message-action, message-file preview, and actively streaming states. At every size, check title and message continuity, focus order, clipping, overlap, shell gaps, layout shift, and horizontal overflow. Also verify that a new full-page startup with the parameter absent or changed from the exact lower-case `showContentOnly=true` value restores the normal Conversation Workspace, internal chat URL replacement keeps an initialized content-only presentation stable, and `hideMenu`/`origin=Y` remain unchanged.
+A content-only Conversation Workspace keeps the existing conversation title, routed message content, message-level actions, typography, and `#3769FC` emphasis. It omits global navigation, the conversation task/history sidebar and collapsed toolbar, model selection, the independent generated-files entry/list, and composer/upload surfaces. Omitted surfaces are not focusable and reserve no width, padding, border, or shell-colored gap; message-level file controls remain part of the conversation content.
 
 ## Management Console
 
