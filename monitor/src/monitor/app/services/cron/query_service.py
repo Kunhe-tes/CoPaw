@@ -169,6 +169,8 @@ class QueryService:
         "黄金持仓客户陪伴技能",
         "query-fund-plus-cust",
         "固收+基金营销技能",
+        "query-insu-expand-cust",
+        "分行保险潜客技能",
     }
 
     def __init__(self) -> None:
@@ -809,9 +811,7 @@ class QueryService:
             execution_id=execution_row.get("execution_id"),
             trace_id=trace_id,
             subtask_count=(
-                int(execution_row.get("subtask_count") or 0)
-                if trace_id
-                else 0
+                int(execution_row.get("subtask_count") or 0) if trace_id else 0
             ),
         )
 
