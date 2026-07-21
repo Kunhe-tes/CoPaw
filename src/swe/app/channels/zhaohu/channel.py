@@ -16,6 +16,7 @@ import time
 from typing import Any, Dict, Optional, Union
 from urllib.parse import quote as url_quote
 
+import asyncio
 import ssl
 
 import httpx
@@ -194,6 +195,10 @@ class ZhaohuChannel(BaseChannel):
         self._processed_message_ids: Dict[str, float] = {}
         self._dedup_lock = threading.Lock()
 
+        # Per-user route lock for /new session switching
+        self._user_route_locks: Dict[str, asyncio.Lock] = {}
+        self._route_lock_guard = asyncio.Lock()
+
         # OAuth token cache: token string and creation timestamp
         self._oauth_token: Optional[str] = None
         self._oauth_token_created_at: Optional[float] = None
@@ -314,6 +319,121 @@ class ZhaohuChannel(BaseChannel):
         """
         return f"zhaohu:callback:{sender_id}"
 
+    async def _get_user_route_lock(self, sap_id: str) -> asyncio.Lock:
+        """Get per-user route lock for serializing /new pointer switches."""
+        async with self._route_lock_guard:
+            lock = self._user_route_locks.get(sap_id)
+            if lock is None:
+                lock = asyncio.Lock()
+                self._user_route_locks[sap_id] = lock
+            return lock
+
+    async def _get_active_session_id(self, sap_id: str) -> str:
+        """Get the user's current active session_id.
+
+        Returns the active pointer if set and the corresponding ChatSpec
+        still exists.  If the ChatSpec was deleted, clears the stale
+        pointer and falls back to the legacy format.
+        """
+        if (
+            self._workspace is None
+            or self._workspace.runner is None
+            or self._workspace.runner.session is None
+        ):
+            return self.resolve_session_id(sap_id)
+
+        meta_session_id = f"zhaohu:active:{sap_id}"
+        try:
+            state = (
+                await self._workspace.runner.session.get_session_state_dict(
+                    session_id=meta_session_id,
+                    user_id=sap_id,
+                    allow_not_exist=True,
+                )
+            )
+            active_sid = state.get("active_session_id")
+            if active_sid:
+                # Verify the ChatSpec still exists
+                if self._workspace.chat_manager is not None:
+                    existing = (
+                        await self._workspace.chat_manager.get_chat_by_session(
+                            active_sid,
+                            self.channel,
+                            sap_id,
+                        )
+                    )
+                    if existing is not None:
+                        logger.info(
+                            "zhaohu active session: sapId=%s -> session_id=%s",
+                            sap_id,
+                            active_sid,
+                        )
+                        return active_sid
+
+                    # ChatSpec deleted — clear stale pointer
+                    logger.warning(
+                        "zhaohu active session not found in chat_manager, "
+                        "clearing pointer: sapId=%s session_id=%s "
+                        "channel=%s user_id=%s",
+                        sap_id,
+                        active_sid,
+                        self.channel,
+                        sap_id,
+                    )
+                    await self._set_active_session_id(sap_id, "")
+                else:
+                    return active_sid
+        except Exception:
+            logger.warning(
+                "zhaohu _get_active_session_id: failed for sapId=%s",
+                sap_id,
+                exc_info=True,
+            )
+
+        default_sid = self.resolve_session_id(sap_id)
+        logger.info(
+            "zhaohu no active pointer, using default: sapId=%s -> session_id=%s",
+            sap_id,
+            default_sid,
+        )
+        return default_sid
+
+    async def _set_active_session_id(
+        self,
+        sap_id: str,
+        session_id: str,
+    ) -> None:
+        """Set the user's current active session_id pointer."""
+        if (
+            self._workspace is None
+            or self._workspace.runner is None
+            or self._workspace.runner.session is None
+        ):
+            logger.warning(
+                "zhaohu _set_active_session_id: workspace/session not available",
+            )
+            return
+
+        meta_session_id = f"zhaohu:active:{sap_id}"
+        try:
+            await self._workspace.runner.session.update_session_state(
+                session_id=meta_session_id,
+                key="active_session_id",
+                value=session_id,
+                user_id=sap_id,
+            )
+            logger.info(
+                "zhaohu set active session: sapId=%s -> session_id=%s",
+                sap_id,
+                session_id,
+            )
+        except Exception:
+            logger.warning(
+                "zhaohu _set_active_session_id: failed for sapId=%s",
+                sap_id,
+                exc_info=True,
+            )
+
     def get_to_handle_from_request(self, request: Any) -> str:
         """Get the send target from AgentRequest.
 
@@ -353,7 +473,10 @@ class ZhaohuChannel(BaseChannel):
         channel_id = payload.get("channel_id") or self.channel
         sender_id = payload.get("sender_id") or ""
         meta = payload.get("meta") or {}
-        session_id = self.resolve_session_id(sender_id, meta)
+        session_id = payload.get("session_id") or self.resolve_session_id(
+            sender_id,
+            meta,
+        )
         content_parts = payload.get("content_parts") or []
 
         if not content_parts:
@@ -1793,6 +1916,66 @@ class ZhaohuChannel(BaseChannel):
             )
             return False
 
+    async def _handle_new_session(
+        self,
+        sap_id: str,
+        from_id: str,
+        first_message: str,
+        meta: Dict[str, Any],
+        yst_id: str,
+    ) -> None:
+        """Handle /new command: create a new session and switch active pointer."""
+        seq = format(int(time.time()), "x")[-8:]
+        new_session_id = f"zhaohu:callback:{sap_id}:{seq}"
+
+        await self._set_active_session_id(sap_id, new_session_id)
+
+        if not first_message:
+            await self.send(yst_id, "已开启新会话，请发送消息开始对话。", meta)
+            return
+
+        content_parts = [
+            TextContent(type=ContentType.TEXT, text=first_message),
+        ]
+        native_payload = {
+            "channel_id": self.channel,
+            "sender_id": sap_id,
+            "session_id": new_session_id,
+            "content_parts": content_parts,
+            "meta": meta,
+        }
+
+        if self._workspace is not None:
+            request = self.build_agent_request_from_user_content(
+                channel_id=self.channel,
+                sender_id=sap_id,
+                session_id=new_session_id,
+                content_parts=content_parts,
+                channel_meta=meta,
+            )
+            request.channel_meta = meta
+            await self._consume_with_tracker(request, native_payload)
+        else:
+            logger.warning(
+                "zhaohu _handle_new_session: workspace not set, "
+                "using direct processing",
+            )
+            request = self.build_agent_request_from_user_content(
+                channel_id=self.channel,
+                sender_id=sap_id,
+                session_id=new_session_id,
+                content_parts=content_parts,
+                channel_meta=meta,
+            )
+            request.channel_meta = meta
+            await self._get_llm_response_direct(
+                meta,
+                "",
+                request,
+                "",
+                yst_id,
+            )
+
     async def _route_message(
         self,
         msg_id: str,
@@ -1803,8 +1986,51 @@ class ZhaohuChannel(BaseChannel):
         meta: Dict[str, Any],
     ) -> None:
         """Route message by content type."""
+        route_lock = await self._get_user_route_lock(sap_id)
+        async with route_lock:
+            await self._route_message_inner(
+                msg_id,
+                from_id,
+                sap_id,
+                yst_id,
+                msg_content,
+                meta,
+            )
+
+    async def _route_message_inner(
+        self,
+        msg_id: str,
+        from_id: str,
+        sap_id: str,
+        yst_id: str,
+        msg_content: str,
+        meta: Dict[str, Any],
+    ) -> None:
+        """Inner routing logic, called under per-user lock."""
         msg_content_stripped = msg_content.strip()
         msg_content_len = len(msg_content_stripped)
+
+        # Case 0: /new prefix - create new session
+        if msg_content_stripped.startswith("/new"):
+            after_new = (
+                msg_content_stripped[4:]
+                if len(msg_content_stripped) > 4
+                else ""
+            )
+            if after_new == "" or after_new[0] == " ":
+                remaining = after_new.strip()
+                logger.info(
+                    "zhaohu message type: new_session, content=%s",
+                    msg_content_stripped[:50],
+                )
+                await self._handle_new_session(
+                    sap_id,
+                    from_id,
+                    remaining,
+                    meta,
+                    yst_id,
+                )
+                return
 
         # Case 1: Task progress query
         if msg_content_stripped in self._TASK_PROGRESS_KEYWORDS:
@@ -1872,8 +2098,8 @@ class ZhaohuChannel(BaseChannel):
         """
         from ....config.context import get_current_workspace_dir
 
-        # Use same session_id as casual chat (callback session)
-        session_id = self.resolve_session_id(sap_id, meta)
+        # Use active session (or fallback to legacy format)
+        session_id = await self._get_active_session_id(sap_id)
         logger.info(
             "zhaohu task assignment: sessionId=%s userId=%s working_dir=%s",
             session_id,
@@ -1974,8 +2200,8 @@ class ZhaohuChannel(BaseChannel):
         # Build content parts
         content_parts = [TextContent(type=ContentType.TEXT, text=msg_content)]
 
-        # Build session_id
-        session_id = self.resolve_session_id(sap_id, meta)
+        # Build session_id (active session or fallback to legacy format)
+        session_id = await self._get_active_session_id(sap_id)
         logger.info(
             "zhaohu session: sessionId=%s userId=%s working_dir=%s",
             session_id,

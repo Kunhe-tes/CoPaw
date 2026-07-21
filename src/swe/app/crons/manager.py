@@ -8,6 +8,7 @@ import logging
 import os
 import random
 import re
+import httpx
 from contextlib import asynccontextmanager, contextmanager
 from copy import deepcopy
 from dataclasses import dataclass
@@ -1001,8 +1002,8 @@ class CronManager:  # pylint: disable=too-many-public-methods
         return str(meta.get(BATCH_DISPATCH_EXTERNAL_JOB_ID_META_KEY) or "")
 
     def _get_batch_dispatch_offset_window_hours(
-        self,
-        spec: CronJobSpec,
+        self, spec: CronJobSpec
+    ,
     ) -> int:
         meta = spec.meta or {}
         return self._normalize_batch_dispatch_offset_window_hours(
@@ -1049,7 +1050,8 @@ class CronManager:  # pylint: disable=too-many-public-methods
             return {}
 
         provider_id = str(
-            getattr(active_model, "provider_id", "") or "",
+            getattr(active_model, "provider_id", "") or ""
+        ,
         ).strip()
         model_id = str(getattr(active_model, "model", "") or "").strip()
         if provider_id and model_id:
@@ -1078,7 +1080,8 @@ class CronManager:  # pylint: disable=too-many-public-methods
         )
         meta = dict(spec.meta or {})
         batch_ext_id = str(
-            meta.get(BATCH_DISPATCH_EXTERNAL_JOB_ID_META_KEY) or "",
+            meta.get(BATCH_DISPATCH_EXTERNAL_JOB_ID_META_KEY) or ""
+        ,
         )
         tenant_id, source_id = self._get_external_scheduler_business_identity(
             spec,
@@ -1183,7 +1186,8 @@ class CronManager:  # pylint: disable=too-many-public-methods
             raise KeyError(job_id)
         if (job.meta or {}).get(BROADCAST_SOURCE_JOB_ID_META_KEY):
             raise RuntimeError(
-                "batch dispatch cannot be enabled from a broadcast child",
+                "batch dispatch cannot be enabled from a broadcast child"
+            ,
             )
 
         meta = dict(job.meta or {})
@@ -1212,12 +1216,11 @@ class CronManager:  # pylint: disable=too-many-public-methods
             updated.id,
             normal_ext_id,
             (updated.meta or {}).get(
-                BATCH_DISPATCH_EXTERNAL_JOB_ID_META_KEY,
-                "",
+                BATCH_DISPATCH_EXTERNAL_JOB_ID_META_KEY, "",
             ),
             (updated.meta or {}).get(
-                BATCH_DISPATCH_OFFSET_MINUTES_META_KEY,
-                0,
+                BATCH_DISPATCH_OFFSET_MINUTES_META_KEY, 0
+            ,
             ),
         )
         return await self._persist_job_definition(updated)
@@ -1231,12 +1234,14 @@ class CronManager:  # pylint: disable=too-many-public-methods
             raise KeyError(job_id)
         if (job.meta or {}).get(BROADCAST_SOURCE_JOB_ID_META_KEY):
             raise RuntimeError(
-                "batch dispatch cannot be disabled from a broadcast child",
+                "batch dispatch cannot be disabled from a broadcast child"
+            ,
             )
 
         meta = dict(job.meta or {})
         batch_ext_id = str(
-            meta.get(BATCH_DISPATCH_EXTERNAL_JOB_ID_META_KEY) or "",
+            meta.get(BATCH_DISPATCH_EXTERNAL_JOB_ID_META_KEY) or ""
+        ,
         )
         for key in (
             BROADCAST_DISPATCH_INTENTS_ENABLED_META_KEY,
@@ -2523,6 +2528,150 @@ class CronManager:  # pylint: disable=too-many-public-methods
 
         return urllib.parse.quote(text, safe="")
 
+    def _build_wplus_pc_link(self, session_id: str) -> str:
+        """Build W+ PC menu HTTPS link for notification jump.
+
+        格式: {domain}/gate/wpluspcmenuui/pcmenu?isSafeUrl=Y&sysid=retailbanking&pcParams=xxx
+        用于在 W+ 消息推送中跳转到小助 claw 版指定会话。
+        """
+        from ...constant import CRON_WPLUS_PC_MENU_DOMAIN
+
+        domain = CRON_WPLUS_PC_MENU_DOMAIN.rstrip("/")
+        if not domain:
+            return ""
+
+        param = {
+            "type": "toMenu",
+            "to": "cmbclaw",
+            "queryParam": {
+                "sessionId": session_id,
+                "origin": "Y",
+            },
+        }
+        pc_params = base64.b64encode(
+            json.dumps(param, ensure_ascii=False).encode("utf-8"),
+        ).decode("utf-8")
+        pc_params = self._url_encode(pc_params)
+
+        return (
+            f"{domain}/gate/wpluspcmenuui/pcmenu"
+            f"?isSafeUrl=Y&sysid=retailbanking&pcParams={pc_params}"
+        )
+
+    async def _push_wplus_notification(
+        self,
+        job: CronJobSpec,
+        *,
+        raise_on_error: bool = False,
+    ) -> None:
+        """Push W+ message notification when a cron task completes."""
+
+        from ...constant import (
+            CRON_WPLUS_MSG_APP_ID,
+            CRON_WPLUS_MSG_HEADER_KEY,
+            CRON_WPLUS_MSG_HEADER_VALUE,
+            CRON_WPLUS_MSG_NOTICE_ID,
+            CRON_WPLUS_MSG_URL,
+        )
+
+        msg_url = CRON_WPLUS_MSG_URL
+        notice_id = CRON_WPLUS_MSG_NOTICE_ID
+        app_id = CRON_WPLUS_MSG_APP_ID
+        header_key = CRON_WPLUS_MSG_HEADER_KEY
+        header_value = CRON_WPLUS_MSG_HEADER_VALUE
+        if (
+            not msg_url
+            or not notice_id
+            or not app_id
+            or not header_key
+            or not header_value
+        ):
+            logger.debug(
+                "Skip W+ push: config incomplete "
+                "(msg_url=%s, notice_id=%s, app_id=%s, header_key=%s, header_value=%s)",
+                bool(msg_url),
+                bool(notice_id),
+                bool(app_id),
+                bool(header_key),
+                bool(header_value),
+            )
+            return
+
+        session_id = job.meta.get("task_chat_id")
+        creator_id = job.meta.get("creator_user_id")
+        if not creator_id:
+            logger.info("Skip W+ push: job %s has no creator_user_id", job.id)
+            return
+
+        now = datetime.now()
+        wplus_pc_link = (
+            self._build_wplus_pc_link(session_id) if session_id else ""
+        )
+
+        payload = {
+            "appId": app_id,
+            "msgUrl": wplus_pc_link,
+            "msgText": (
+                f"你发起的定时任务【{job.name}】已完成，"
+                f"请进入小助claw版查看，完成时间:"
+                f"{now.strftime('%Y-%m-%d %H:%M:%S')}"
+            ),
+            "msgTime": now.strftime("%Y-%m-%d %H:%M:%S.")
+            + f"{now.microsecond // 1000:03d}",
+            "msgStyle": "TEXT",
+            "msgTitle": f"{job.name}完成啦~",
+            "noticeId": notice_id,
+            "msgExpand": "",
+            "msgSubTitle": "",
+            "pushChannel": "HELP_CAT",
+            "targetSapId": str(creator_id),
+            "externalMsgId": str(uuid4()),
+            "msgPictureUrl": "",
+            "targetSapIdList": [],
+        }
+
+        headers = {
+            header_key: header_value,
+        }
+
+        try:
+            async with httpx.AsyncClient(timeout=10) as client:
+                resp = await client.post(
+                    msg_url,
+                    json=payload,
+                    headers=headers,
+                )
+                result = resp.json()
+                if result.get("code") != "success":
+                    logger.warning(
+                        "W+ push returned non-success: job_id=%s result=%s",
+                        job.id,
+                        result,
+                    )
+                else:
+                    logger.info(
+                        "W+ push sent: job_id=%s job_name=%s target=%s",
+                        job.id,
+                        job.name,
+                        creator_id,
+                    )
+        except asyncio.CancelledError:
+            logger.warning(
+                "W+ push cancelled: job_id=%s job_name=%s",
+                job.id,
+                job.name,
+            )
+            raise
+        except Exception as exc:
+            logger.warning(
+                "W+ push failed: job_id=%s job_name=%s error=%s",
+                job.id,
+                job.name,
+                repr(exc),
+            )
+            if raise_on_error:
+                raise
+
     async def _push_task_success_notification(
         self,
         job: CronJobSpec,
@@ -2558,7 +2707,11 @@ class CronManager:  # pylint: disable=too-many-public-methods
         # 仅 RMASSIST 来源的租户包含跳转链接
         from ..workspace.tenant_init_source_store import is_tenant_source
 
-        if creator_id and await is_tenant_source(str(creator_id), "RMASSIST"):
+        is_rmassist = creator_id and await is_tenant_source(
+            str(creator_id),
+            "RMASSIST",
+        )
+        if is_rmassist:
             meta["link_url"] = wplus_link
             meta["link_text"] = "点击跳转小助claw版查看"
         meta["notification_summary"] = "小助claw定时任务完成提醒"
@@ -2570,6 +2723,15 @@ class CronManager:  # pylint: disable=too-many-public-methods
             meta,
             raise_on_error=raise_on_error,
         )
+
+        # W+ 消息推送: 仅 RMASSIST 来源且 zhaohu 渠道启用时触发
+        if is_rmassist and self._channel_manager is not None:
+            zhaohu_ch = await self._channel_manager.get_channel("zhaohu")
+            if zhaohu_ch is not None:
+                await self._push_wplus_notification(
+                    job,
+                    raise_on_error=raise_on_error,
+                )
 
     async def push_message(
         self,
@@ -3485,8 +3647,7 @@ class CronManager:  # pylint: disable=too-many-public-methods
                 existing=job,
             )
             synced_ext_id = (synced.meta or {}).get(
-                "external_job_id",
-                "",
+                "external_job_id", "",
             ) or ext_id
             self._remember_external_job_id(job.id, synced_ext_id)
             await self._restore_batch_dispatch_parent_external_job(

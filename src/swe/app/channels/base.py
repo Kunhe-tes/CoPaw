@@ -401,10 +401,28 @@ class BaseChannel(ABC):
             name=self._extract_chat_name(payload),
         )
 
+        # Inject session channel into channel_meta for downstream use
+        # (e.g. session-end push needs to know the session's original channel)
+        channel_meta = getattr(request, "channel_meta", None)
+        if channel_meta is None:
+            channel_meta = {}
+            request.channel_meta = channel_meta
+        if "session_channel" not in channel_meta:
+            channel_meta["session_channel"] = chat.channel
+
         logger.info(
             f"_consume_with_tracker: chat_id={chat.id} "
             f"session={session_id[:30]}",
         )
+
+        # Debug: verify runner.session is available for state persistence
+        if self._workspace is not None and self._workspace.runner is not None:
+            _sess = getattr(self._workspace.runner, "session", None)
+            logger.info(
+                "_consume_with_tracker: runner.session=%s save_dir=%s",
+                type(_sess).__name__ if _sess else None,
+                getattr(_sess, "save_dir", None) if _sess else None,
+            )
 
         queue, is_new = await self._workspace.task_tracker.attach_or_start(
             chat.id,
@@ -1009,8 +1027,14 @@ class BaseChannel(ABC):
         """
         await self._try_session_end_push(request, to_handle)
 
-    def _should_session_end_push(self) -> bool:
-        """Check if zhaohu session-end push is enabled via config."""
+    def _should_session_end_push(self, request=None) -> bool:
+        """Check if zhaohu session-end push is enabled.
+
+        Push is skipped when the message originates from the zhaohu channel
+        itself (upstream callback) because the reply is already sent there.
+        When the message comes from another channel (e.g. console) targeting
+        a zhaohu session, push is enabled if the config flag is on.
+        """
         if self.channel == "zhaohu":
             return False
         if self._workspace is None:
@@ -1030,8 +1054,14 @@ class BaseChannel(ABC):
         to_handle: str,
         reply_text: str = "",
     ) -> None:
-        """If session-end push is enabled, send notification via zhaohu."""
-        if not self._should_session_end_push():
+        """If session-end push is enabled, send notification via zhaohu.
+
+        For zhaohu sessions: notification is always sent (with or without
+        file links).
+        For other sessions: notification is only sent when file links are
+        present (legacy behavior).
+        """
+        if not self._should_session_end_push(request):
             return
         try:
             cm = self._workspace.channel_manager
@@ -1040,6 +1070,10 @@ class BaseChannel(ABC):
             zhaohu_ch = await cm.get_channel("zhaohu")
             if zhaohu_ch is None:
                 return
+
+            session_channel = self._get_session_channel(request)
+            is_zhaohu_session = session_channel == "zhaohu"
+
             query = self._extract_user_query(request)
             if len(query) > 30:
                 prefix = query[:30]
@@ -1056,10 +1090,18 @@ class BaseChannel(ABC):
                 meta["link_items"] = [
                     {"url": url, "text": name} for name, url in links
                 ]
-                await zhaohu_ch.send(to_handle, text, meta or None)
+            # Zhaohu sessions: always push; other sessions: only with links
+            if not is_zhaohu_session and not links:
+                return
+            await zhaohu_ch.send(to_handle, text, meta or None)
             logger.info("session-end push sent via zhaohu to %s", to_handle)
         except Exception:
             logger.exception("session-end push failed for %s", to_handle)
+
+    def _get_session_channel(self, request: "AgentRequest") -> str:
+        """Get the session's original channel from channel_meta."""
+        channel_meta = getattr(request, "channel_meta", None) or {}
+        return channel_meta.get("session_channel", "")
 
     def _extract_file_links(self, text: str) -> list[tuple[str, str]]:
         """Extract file links and names from reply text by matching FILE_URL prefix.
