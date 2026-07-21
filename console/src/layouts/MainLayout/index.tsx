@@ -3,6 +3,7 @@ import { Routes, Route, useLocation, Navigate } from "react-router-dom";
 import { useEffect } from "react";
 // useIframeStore: 获取父窗口传递的 hideMenu 参数
 import { useIframeStore } from "../../stores/iframeStore";
+import { useChatPresentationStore } from "../../stores/chatPresentationStore";
 import { useSourceSystemConfigStore } from "../../stores/sourceSystemConfigStore";
 import { DEFAULT_SOURCE_ID } from "../../constants/identity";
 
@@ -104,9 +105,12 @@ export default function MainLayout() {
   // Global shell display control:
   // - iframe hideMenu === true hides Header and Sidebar
   // - origin=Y maps to hideMenu=true (see iframeMessage.ts)
-  // - content-only Chat routes hide the same shell directly from the URL
+  // - showContentOnly initializes a runtime presentation flag before React renders
   const hideMenu = useIframeStore((state) => state.hideMenu);
   const hideChat = useIframeStore((state) => state.hideChat);
+  const showContentOnly = useChatPresentationStore(
+    (state) => state.showContentOnly,
+  );
   const activeSourceId =
     useIframeStore((state) => state.source) || DEFAULT_SOURCE_ID;
   const loadEffectiveConfig = useSourceSystemConfigStore(
@@ -115,7 +119,7 @@ export default function MainLayout() {
   const { contentOnlyRoute, hideGlobalShell } = resolveMainLayoutPresentation({
     hideMenu,
     pathname: location.pathname,
-    search: location.search,
+    showContentOnly,
   });
 
   useEffect(() => {

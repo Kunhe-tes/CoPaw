@@ -11,11 +11,11 @@ export interface MainLayoutPresentation {
 export function resolveMainLayoutPresentation(input: {
   hideMenu: boolean;
   pathname: string;
-  search: string;
+  showContentOnly: boolean;
 }): MainLayoutPresentation {
   const contentOnlyRoute = resolveChatContentOnlyRoute(
     input.pathname,
-    input.search,
+    input.showContentOnly,
   );
 
   return {

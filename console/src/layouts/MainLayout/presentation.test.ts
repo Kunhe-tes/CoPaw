@@ -6,7 +6,7 @@ describe("resolveMainLayoutPresentation", () => {
     const presentation = resolveMainLayoutPresentation({
       hideMenu: false,
       pathname: "/chat/chat-1",
-      search: "?showContentOnly=true",
+      showContentOnly: true,
     });
 
     expect(presentation.hideGlobalShell).toBe(true);
@@ -16,11 +16,11 @@ describe("resolveMainLayoutPresentation", () => {
     });
   });
 
-  it("ignores showContentOnly on non-chat routes", () => {
+  it("ignores content-only presentation on non-chat routes", () => {
     const presentation = resolveMainLayoutPresentation({
       hideMenu: false,
       pathname: "/models",
-      search: "?showContentOnly=true",
+      showContentOnly: true,
     });
 
     expect(presentation.hideGlobalShell).toBe(false);
@@ -32,30 +32,24 @@ describe("resolveMainLayoutPresentation", () => {
       resolveMainLayoutPresentation({
         hideMenu: true,
         pathname: "/chat/chat-1",
-        search: "?origin=Y",
+        showContentOnly: false,
       }).hideGlobalShell,
     ).toBe(true);
   });
 
-  it("restores the normal shell as soon as the opt-in value is removed or changed", () => {
+  it("preserves normal shell behavior when content-only was not requested", () => {
     const enabled = resolveMainLayoutPresentation({
       hideMenu: false,
       pathname: "/chat/chat-1",
-      search: "?showContentOnly=true",
+      showContentOnly: true,
     });
-    const removed = resolveMainLayoutPresentation({
+    const normal = resolveMainLayoutPresentation({
       hideMenu: false,
       pathname: "/chat/chat-1",
-      search: "",
-    });
-    const changed = resolveMainLayoutPresentation({
-      hideMenu: false,
-      pathname: "/chat/chat-1",
-      search: "?showContentOnly=True",
+      showContentOnly: false,
     });
 
     expect(enabled.hideGlobalShell).toBe(true);
-    expect(removed.hideGlobalShell).toBe(false);
-    expect(changed.hideGlobalShell).toBe(false);
+    expect(normal.hideGlobalShell).toBe(false);
   });
 });
