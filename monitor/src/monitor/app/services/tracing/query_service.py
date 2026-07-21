@@ -1533,22 +1533,24 @@ class TracingQueryService:  # pylint: disable=too-many-public-methods
 
         # 构建 cron 子查询
         cron_subquery_sql, cron_params = self._build_cron_subquery(
-            source_id,
-            start_date,
-            end_date,
+            source_id=source_id,
+            start_date=start_date,
+            end_date=end_date,
+            bbk_ids=bbk_ids,
         )
 
         # 构建主查询
         offset = (page - 1) * page_size
         query, final_params = self._build_users_query(
-            source_id,
-            where_sql,
-            cron_subquery_sql,
-            order_by,
-            params,
-            cron_params,
-            page_size,
-            offset,
+            source_id=source_id,
+            where_sql=where_sql,
+            cron_subquery_sql=cron_subquery_sql,
+            order_by=order_by,
+            params=params,
+            cron_params=cron_params,
+            page_size=page_size,
+            offset=offset,
+            bbk_ids=bbk_ids,
         )
 
         rows = await self._db.fetch_all(query, tuple(final_params))
@@ -1614,6 +1616,7 @@ class TracingQueryService:  # pylint: disable=too-many-public-methods
         source_id: str,
         start_date: Optional[datetime],
         end_date: Optional[datetime],
+        bbk_ids: Optional[str] = None,
     ) -> tuple[str, list[Any]]:
         """构建 cron 执行统计子查询的 WHERE 条件."""
         cron_where: list[str] = ["j.status != %s", "j.deleted_at IS NULL"]
@@ -1635,6 +1638,12 @@ class TracingQueryService:  # pylint: disable=too-many-public-methods
             cron_where.append("j.source_id = %s")
             cron_params.append(source_id)
 
+        if bbk_ids:
+            _, bbk_params = build_cron_bbk_in_filter(bbk_ids)
+            placeholders = ", ".join(["%s"] * len(bbk_params))
+            cron_where.append(f"j.bbk_id IN ({placeholders})")
+            cron_params.extend(bbk_params)
+
         return " AND ".join(cron_where), cron_params
 
     def _build_users_query(
@@ -1647,9 +1656,17 @@ class TracingQueryService:  # pylint: disable=too-many-public-methods
         cron_params: list[Any],
         page_size: int,
         offset: int,
+        bbk_ids: Optional[str] = None,
     ) -> tuple[str, list[Any]]:
-        """构建用户查询 SQL."""
+        """Build the user list query and its ordered parameters."""
+        _, bbk_subquery_params = build_bbk_in_filter(bbk_ids)
+        bbk_in_clause = ""
+        if bbk_subquery_params:
+            placeholders = ", ".join(["%s"] * len(bbk_subquery_params))
+            bbk_in_clause = f" AND bbk_id IN ({placeholders})"
+
         if source_id == "all":
+            # source_id == "all": total_skills 子查询不加 source_id 过滤
             query = f"""
                 SELECT t.user_id,
                        COUNT(DISTINCT t.session_id) as total_sessions,
@@ -1659,9 +1676,7 @@ class TracingQueryService:  # pylint: disable=too-many-public-methods
                        COUNT(CASE WHEN t.session_id NOT LIKE 'cron-task:%%' THEN 1 END) as manual_calls,
                        COALESCE(MAX(ce.cron_executions), 0) as cron_executions,
                        COALESCE(MAX(ce.cron_success), 0) as cron_success,
-                       (SELECT COUNT(*) FROM swe_tracing_spans s
-                        WHERE s.trace_id IN (SELECT trace_id FROM swe_tracing_traces WHERE user_id = t.user_id)
-                        AND s.skill_name IS NOT NULL) as total_skills,
+                       COALESCE(MAX(sk.skill_count), 0) as total_skills,
                        MAX(t.user_name) as user_name,
                        MAX(t.bbk_id) as bbk_id,
                        COALESCE(MAX(ce.cron_reads), 0) as cron_reads
@@ -1676,13 +1691,26 @@ class TracingQueryService:  # pylint: disable=too-many-public-methods
                     WHERE {cron_subquery_sql}
                     GROUP BY j.tenant_id
                 ) ce ON ce.user_id = t.user_id
+                LEFT JOIN (
+                    SELECT tr.user_id, COUNT(*) as skill_count
+                    FROM swe_tracing_spans s
+                    INNER JOIN swe_tracing_traces tr ON s.trace_id = tr.trace_id
+                    WHERE s.skill_name IS NOT NULL{bbk_in_clause}
+                    GROUP BY tr.user_id
+                ) sk ON sk.user_id = t.user_id
                 WHERE {where_sql}
                 GROUP BY t.user_id
                 ORDER BY {order_by}
                 LIMIT %s OFFSET %s
             """
-            final_params = cron_params + params + [page_size, offset]
+            final_params = (
+                bbk_subquery_params
+                + cron_params
+                + params
+                + [page_size, offset]
+            )
         else:
+            # source_id != "all": total_skills 子查询加 source_id 过滤
             query = f"""
                 SELECT t.user_id,
                        COUNT(DISTINCT t.session_id) as total_sessions,
@@ -1692,10 +1720,7 @@ class TracingQueryService:  # pylint: disable=too-many-public-methods
                        COUNT(CASE WHEN t.session_id NOT LIKE 'cron-task:%%' THEN 1 END) as manual_calls,
                        COALESCE(MAX(ce.cron_executions), 0) as cron_executions,
                        COALESCE(MAX(ce.cron_success), 0) as cron_success,
-                       (SELECT COUNT(*) FROM swe_tracing_spans s
-                        WHERE s.source_id = %s
-                        AND s.trace_id IN (SELECT trace_id FROM swe_tracing_traces WHERE user_id = t.user_id AND source_id = %s)
-                        AND s.skill_name IS NOT NULL) as total_skills,
+                       COALESCE(MAX(sk.skill_count), 0) as total_skills,
                        MAX(t.user_name) as user_name,
                        MAX(t.bbk_id) as bbk_id,
                        COALESCE(MAX(ce.cron_reads), 0) as cron_reads
@@ -1710,6 +1735,15 @@ class TracingQueryService:  # pylint: disable=too-many-public-methods
                     WHERE {cron_subquery_sql}
                     GROUP BY j.tenant_id
                 ) ce ON ce.user_id = t.user_id
+                LEFT JOIN (
+                    SELECT tr.user_id, COUNT(*) as skill_count
+                    FROM swe_tracing_spans s
+                    INNER JOIN swe_tracing_traces tr ON s.trace_id = tr.trace_id
+                    WHERE s.skill_name IS NOT NULL
+                      AND tr.source_id = %s
+                      AND s.source_id = %s{bbk_in_clause}
+                    GROUP BY tr.user_id
+                ) sk ON sk.user_id = t.user_id
                 WHERE {where_sql}
                 GROUP BY t.user_id
                 ORDER BY {order_by}
@@ -1717,6 +1751,7 @@ class TracingQueryService:  # pylint: disable=too-many-public-methods
             """
             final_params = (
                 [source_id, source_id]
+                + bbk_subquery_params
                 + cron_params
                 + params
                 + [page_size, offset]
@@ -2308,22 +2343,18 @@ class TracingQueryService:  # pylint: disable=too-many-public-methods
         end_date: datetime,
         bbk_ids: Optional[str] = None,
     ) -> int:
-        """获取技能调用总次数（按技能分组后累加，和排行榜口径一致）."""
+        """获取技能调用总次数（统计去重的技能+trace组合数）."""
         bbk_filter_sql, bbk_filter_params = build_bbk_in_filter(bbk_ids)
         if source_id == "all":
             exclude_placeholders = ", ".join(["%s"] * len(EXCLUDED_SOURCE_IDS))
             query = f"""
-                SELECT COALESCE(SUM(skill_count), 0) as total
-                FROM (
-                    SELECT skill_name, COUNT(DISTINCT trace_id) as skill_count
-                    FROM swe_tracing_spans
-                    WHERE start_time >= %s AND start_time <= %s
-                      AND skill_name IS NOT NULL
-                      AND bbk_id IS NOT NULL AND bbk_id != ''
-                      AND source_id NOT IN ({exclude_placeholders})
-                      AND user_id != 'default'{bbk_filter_sql}
-                    GROUP BY skill_name
-                ) skill_totals
+                SELECT COUNT(DISTINCT CONCAT(skill_name, '|', trace_id)) as total
+                FROM swe_tracing_spans
+                WHERE start_time >= %s AND start_time <= %s
+                  AND skill_name IS NOT NULL
+                  AND bbk_id IS NOT NULL AND bbk_id != ''
+                  AND source_id NOT IN ({exclude_placeholders})
+                  AND user_id != 'default'{bbk_filter_sql}
             """
             params = (
                 start_date,
@@ -2334,16 +2365,12 @@ class TracingQueryService:  # pylint: disable=too-many-public-methods
             row = await self._db.fetch_one(query, params)
         else:
             query = f"""
-                SELECT COALESCE(SUM(skill_count), 0) as total
-                FROM (
-                    SELECT skill_name, COUNT(DISTINCT trace_id) as skill_count
-                    FROM swe_tracing_spans
-                    WHERE source_id = %s AND start_time >= %s AND start_time <= %s
-                      AND skill_name IS NOT NULL
-                      AND bbk_id IS NOT NULL AND bbk_id != ''
-                      AND user_id != 'default'{bbk_filter_sql}
-                    GROUP BY skill_name
-                ) skill_totals
+                SELECT COUNT(DISTINCT CONCAT(skill_name, '|', trace_id)) as total
+                FROM swe_tracing_spans
+                WHERE source_id = %s AND start_time >= %s AND start_time <= %s
+                  AND skill_name IS NOT NULL
+                  AND bbk_id IS NOT NULL AND bbk_id != ''
+                  AND user_id != 'default'{bbk_filter_sql}
             """
             params = (source_id, start_date, end_date, *bbk_filter_params)
             row = await self._db.fetch_one(query, params)
@@ -4084,7 +4111,14 @@ class TracingQueryService:  # pylint: disable=too-many-public-methods
         resource_name: Optional[str] = None,
         mcp_server: Optional[str] = None,
     ) -> tuple[list[SessionListItem], int]:
-        """获取会话列表."""
+        """获取会话列表.
+
+        使用拆分查询优化性能：
+        1. 主查询获取 session 列表
+        2. 批量查询技能统计
+        3. 批量查询用户名、bbk_id、session_name
+        4. 应用层组装结果
+        """
         # 构建 WHERE 条件
         where_clauses, params = self._build_sessions_where_clauses(
             source_id,
@@ -4100,81 +4134,264 @@ class TracingQueryService:  # pylint: disable=too-many-public-methods
         )
         where_sql = " AND ".join(where_clauses) if where_clauses else "1=1"
 
-        # 构建技能统计子查询的日期筛选条件
-        skill_date_conditions, skill_params = (
-            self._build_skill_date_conditions(
-                start_date,
-                end_date,
-            )
-        )
-
         # 获取总数
         count_query = f"SELECT COUNT(DISTINCT t.session_id) as total FROM swe_tracing_traces t WHERE {where_sql}"
         count_row = await self._db.fetch_one(count_query, tuple(params))
         total = count_row["total"] if count_row else 0
 
+        if total == 0:
+            return [], 0
+
         # 计算分页偏移
         offset = (page - 1) * page_size
-        exclude_placeholders = ", ".join(["%s"] * len(EXCLUDED_SOURCE_IDS))
 
-        # 构建 source_id 条件模板
-        if source_id == "all":
-            source_condition = f"source_id NOT IN ({exclude_placeholders})"
-            subquery_source_cond = f"source_id NOT IN ({exclude_placeholders})"
-        else:
-            source_condition = "source_id = %s"
-            subquery_source_cond = "source_id = %s"
-
-        # 统一的查询模板
-        query = f"""
+        # 1. 主查询：获取 session 列表（不含子查询）
+        main_query = f"""
             SELECT t.session_id, t.user_id, t.channel,
                    COUNT(*) as total_traces,
                    SUM(t.total_tokens) as total_tokens,
                    MIN(t.start_time) as first_active,
-                   MAX(t.start_time) as last_active,
-                   (SELECT COUNT(*) FROM swe_tracing_spans s
-                    WHERE s.session_id = t.session_id
-                    AND s.{subquery_source_cond}
-                    AND {skill_date_conditions}) as total_skills,
-                   (SELECT t2.user_name FROM swe_tracing_traces t2
-                    WHERE t2.user_id = t.user_id AND t2.user_name IS NOT NULL
-                    AND t2.{subquery_source_cond}
-                    ORDER BY t2.start_time DESC LIMIT 1) as user_name,
-                   (SELECT t3.bbk_id FROM swe_tracing_traces t3
-                    WHERE t3.user_id = t.user_id AND t3.bbk_id IS NOT NULL
-                    AND t3.{subquery_source_cond}
-                    ORDER BY t3.start_time DESC LIMIT 1) as bbk_id,
-                   COALESCE(
-                       (SELECT t4.session_name FROM swe_tracing_traces t4
-                        WHERE t4.session_id = t.session_id AND t4.session_name IS NOT NULL
-                        AND t4.{subquery_source_cond}
-                        ORDER BY t4.start_time ASC LIMIT 1),
-                       SUBSTRING(
-                           (SELECT t5.user_message FROM swe_tracing_traces t5
-                            WHERE t5.session_id = t.session_id AND t5.user_message IS NOT NULL
-                            AND t5.{subquery_source_cond}
-                            ORDER BY t5.start_time ASC LIMIT 1),
-                           1, 10
-                       )
-                   ) as session_name
+                   MAX(t.start_time) as last_active
             FROM swe_tracing_traces t
             WHERE {where_sql}
             GROUP BY t.session_id, t.user_id, t.channel
             ORDER BY last_active DESC, session_id ASC
             LIMIT %s OFFSET %s
         """
+        main_params = params + [page_size, offset]
+        main_rows = await self._db.fetch_all(main_query, tuple(main_params))
 
-        query_params = self._build_sessions_query_params(
+        if not main_rows:
+            return [], total
+
+        # 提取 session_ids 和 user_ids
+        session_ids = [row["session_id"] for row in main_rows]
+        user_ids = list(set(row["user_id"] for row in main_rows))
+
+        # 2. 批量查询：技能统计
+        skill_stats = await self._batch_query_session_skills(
+            session_ids,
             source_id,
-            skill_params,
-            params,
-            page_size,
-            offset,
+            start_date,
+            end_date,
         )
 
-        rows = await self._db.fetch_all(query, tuple(query_params))
-        sessions = [self._row_to_session_item(row) for row in rows]
+        # 3. 批量查询：用户名和 bbk_id
+        user_info = await self._batch_query_user_info(
+            user_ids,
+            source_id,
+            start_date,
+            end_date,
+        )
+
+        # 4. 批量查询：session_name
+        session_names = await self._batch_query_session_names(
+            session_ids,
+            source_id,
+        )
+
+        # 5. 组装结果
+        sessions = []
+        for row in main_rows:
+            sid = row["session_id"]
+            uid = row["user_id"]
+            info = user_info.get(uid, {})
+            sessions.append(
+                SessionListItem(
+                    session_id=sid,
+                    session_name=session_names.get(sid),
+                    user_id=uid,
+                    user_name=info.get("user_name"),
+                    bbk_id=info.get("bbk_id"),
+                    channel=row["channel"],
+                    total_traces=row["total_traces"] or 0,
+                    total_tokens=row["total_tokens"] or 0,
+                    total_skills=skill_stats.get(sid, 0),
+                    first_active=row["first_active"],
+                    last_active=row["last_active"],
+                ),
+            )
+
         return sessions, total
+
+    async def _batch_query_session_skills(
+        self,
+        session_ids: list[str],
+        source_id: str,
+        start_date: Optional[datetime],
+        end_date: Optional[datetime],
+    ) -> dict[str, int]:
+        """批量查询 session 的技能统计."""
+        if not session_ids:
+            return {}
+
+        placeholders = ", ".join(["%s"] * len(session_ids))
+        source_condition, source_params = self._build_source_condition(
+            source_id,
+        )
+
+        # 构建时间条件
+        time_conditions = []
+        time_params = []
+        if start_date:
+            time_conditions.append("start_time >= %s")
+            time_params.append(start_date)
+        if end_date:
+            time_conditions.append("start_time <= %s")
+            time_params.append(end_date)
+        time_sql = " AND ".join(time_conditions) if time_conditions else "1=1"
+
+        query = f"""
+            SELECT session_id, COUNT(*) as skill_count
+            FROM swe_tracing_spans
+            WHERE session_id IN ({placeholders})
+              AND {source_condition}
+              AND {time_sql}
+              AND skill_name IS NOT NULL
+            GROUP BY session_id
+        """
+        params = session_ids + source_params + time_params
+        rows = await self._db.fetch_all(query, tuple(params))
+        return {row["session_id"]: row["skill_count"] for row in rows}
+
+    async def _batch_query_user_info(
+        self,
+        user_ids: list[str],
+        source_id: str,
+        start_date: Optional[datetime],
+        end_date: Optional[datetime],
+    ) -> dict[str, dict[str, str | None]]:
+        """批量查询用户信息（user_name, bbk_id）."""
+        if not user_ids:
+            return {}
+
+        placeholders = ", ".join(["%s"] * len(user_ids))
+        source_condition, source_params = self._build_source_condition(
+            source_id,
+        )
+
+        # 用户名查询
+        name_query = f"""
+            SELECT user_id, user_name
+            FROM (
+                SELECT user_id, user_name,
+                       ROW_NUMBER() OVER (PARTITION BY user_id ORDER BY start_time DESC) as rn
+                FROM swe_tracing_traces
+                WHERE user_id IN ({placeholders})
+                  AND {source_condition}
+                  AND user_name IS NOT NULL
+            ) t
+            WHERE rn = 1
+        """
+        name_rows = await self._db.fetch_all(
+            name_query,
+            tuple(user_ids + source_params),
+        )
+        name_map = {row["user_id"]: row["user_name"] for row in name_rows}
+
+        # bbk_id 查询
+        bbk_query = f"""
+            SELECT user_id, bbk_id
+            FROM (
+                SELECT user_id, bbk_id,
+                       ROW_NUMBER() OVER (PARTITION BY user_id ORDER BY start_time DESC) as rn
+                FROM swe_tracing_traces
+                WHERE user_id IN ({placeholders})
+                  AND {source_condition}
+                  AND bbk_id IS NOT NULL
+            ) t
+            WHERE rn = 1
+        """
+        bbk_rows = await self._db.fetch_all(
+            bbk_query,
+            tuple(user_ids + source_params),
+        )
+        bbk_map = {row["user_id"]: row["bbk_id"] for row in bbk_rows}
+
+        # 合并结果
+        result = {}
+        for uid in user_ids:
+            result[uid] = {
+                "user_name": name_map.get(uid),
+                "bbk_id": bbk_map.get(uid),
+            }
+        return result
+
+    async def _batch_query_session_names(
+        self,
+        session_ids: list[str],
+        source_id: str,
+    ) -> dict[str, str]:
+        """批量查询 session 名称."""
+        if not session_ids:
+            return {}
+
+        placeholders = ", ".join(["%s"] * len(session_ids))
+        source_condition, source_params = self._build_source_condition(
+            source_id,
+        )
+
+        # session_name 查询
+        name_query = f"""
+            SELECT session_id, session_name
+            FROM (
+                SELECT session_id, session_name,
+                       ROW_NUMBER() OVER (PARTITION BY session_id ORDER BY start_time ASC) as rn
+                FROM swe_tracing_traces
+                WHERE session_id IN ({placeholders})
+                  AND {source_condition}
+                  AND session_name IS NOT NULL
+            ) t
+            WHERE rn = 1
+        """
+        name_rows = await self._db.fetch_all(
+            name_query,
+            tuple(session_ids + source_params),
+        )
+
+        # user_message 查询（作为 fallback）
+        msg_query = f"""
+            SELECT session_id, user_message
+            FROM (
+                SELECT session_id, user_message,
+                       ROW_NUMBER() OVER (PARTITION BY session_id ORDER BY start_time ASC) as rn
+                FROM swe_tracing_traces
+                WHERE session_id IN ({placeholders})
+                  AND {source_condition}
+                  AND user_message IS NOT NULL
+            ) t
+            WHERE rn = 1
+        """
+        msg_rows = await self._db.fetch_all(
+            msg_query,
+            tuple(session_ids + source_params),
+        )
+
+        # 合并结果：优先使用 session_name，否则截取 user_message 前 10 字符
+        name_map = {
+            row["session_id"]: row["session_name"] for row in name_rows
+        }
+        msg_map = {row["session_id"]: row["user_message"] for row in msg_rows}
+
+        result = {}
+        for sid in session_ids:
+            if sid in name_map:
+                result[sid] = name_map[sid]
+            elif sid in msg_map and msg_map[sid]:
+                result[sid] = msg_map[sid][:10]
+        return result
+
+    def _build_source_condition(
+        self,
+        source_id: str,
+    ) -> tuple[str, list[str]]:
+        """构建 source_id 过滤条件."""
+        if source_id == "all":
+            exclude_placeholders = ", ".join(["%s"] * len(EXCLUDED_SOURCE_IDS))
+            return f"source_id NOT IN ({exclude_placeholders})", list(
+                EXCLUDED_SOURCE_IDS,
+            )
+        return "source_id = %s", [source_id]
 
     async def get_session_stats(
         self,

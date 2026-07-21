@@ -7,7 +7,7 @@ import json
 import logging
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
-from typing import Any, Iterable, Mapping, Optional
+from typing import Any, Iterable, Mapping, NamedTuple, Optional
 
 from pydantic import BaseModel, Field, field_validator
 
@@ -28,6 +28,16 @@ VIEWER_FAST_READ_BUCKET_SECONDS = (
 MAX_VIEWER_HEAT_SCORE = Decimal("9999.0000")
 DEFAULT_PROVIDER_ID = "default"
 DEFAULT_MODEL_ID = "default"
+
+
+class _ExecutionCompletionTransition(NamedTuple):
+    success: bool
+    terminal_failure: bool
+    next_status: str
+    next_due_at: datetime
+    event_type: str
+    retry: bool
+    error_message: str
 
 
 class ClaimedDispatchIntent(BaseModel):
@@ -576,39 +586,17 @@ class CronDispatchIntentService:
         max_attempts: int = DEFAULT_MAX_ATTEMPTS,
     ) -> list[int]:
         now = _to_beijing_naive(due_at or datetime.now(timezone.utc))
-        job_ids = [
-            str(child.get("job_id") or "").strip()
-            for child in child_jobs
-            if str(child.get("job_id") or "").strip()
-        ]
         heat_by_job_id = await _fetch_viewer_heat_scores(
-            job_ids=job_ids,
+            job_ids=_child_job_ids(child_jobs),
             parent_job_id=parent_job_id,
             now=now,
             include_parent_job=False,
         )
-
-        ordered_rows = []
-        for child in child_jobs:
-            job_id = str(child.get("job_id") or "").strip()
-            tenant_id = str(child.get("tenant_id") or "").strip()
-            if not job_id or not tenant_id:
-                continue
-            child_due_at = _to_beijing_naive(child.get("due_at") or now)
-            ordered_rows.append(
-                {
-                    **child,
-                    "job_id": job_id,
-                    "tenant_id": tenant_id,
-                    "due_at": child_due_at,
-                    "viewer_heat_score": heat_by_job_id.get(
-                        job_id,
-                        Decimal("0"),
-                    ),
-                },
-            )
-
-        ordered_rows = compute_batch_dispatch_order(ordered_rows)
+        ordered_rows = _ordered_child_intent_rows(
+            child_jobs,
+            heat_by_job_id=heat_by_job_id,
+            default_due_at=now,
+        )
         ids: list[int] = []
         for child in ordered_rows:
             child_source_id = str(child.get("source_id") or source_id or "")
@@ -683,6 +671,63 @@ class CronDispatchIntentService:
             )
         return ids
 
+    async def _execution_feedback_matches(
+        self,
+        *,
+        row: Mapping[str, Any],
+        intent_id: int,
+        execution_id: int | None,
+        expected_batch_id: str,
+        expected_job_id: str,
+        expected_tenant_id: str,
+        expected_source_id: str | None,
+        expected_attempt_count: int | None,
+    ) -> bool:
+        if not _matches_expected_dispatch_row(
+            row,
+            expected_batch_id=expected_batch_id,
+            expected_job_id=expected_job_id,
+            expected_tenant_id=expected_tenant_id,
+            expected_source_id=expected_source_id,
+        ):
+            await self._record_event_best_effort(
+                batch_id=expected_batch_id or str(row.get("batch_id") or ""),
+                intent_id=intent_id,
+                event_type="execution_intent_mismatch",
+                job_id=expected_job_id,
+                tenant_id=expected_tenant_id,
+                source_id=expected_source_id or "",
+                details=_execution_identity_mismatch_details(
+                    row,
+                    execution_id=execution_id,
+                    expected_batch_id=expected_batch_id,
+                    expected_job_id=expected_job_id,
+                    expected_tenant_id=expected_tenant_id,
+                    expected_source_id=expected_source_id,
+                ),
+            )
+            return False
+        actual_attempt_count = int(row.get("attempt_count") or 0)
+        if (
+            expected_attempt_count is not None
+            and actual_attempt_count != expected_attempt_count
+        ):
+            await self._record_event_best_effort(
+                batch_id=expected_batch_id or str(row.get("batch_id") or ""),
+                intent_id=intent_id,
+                event_type="execution_attempt_mismatch",
+                job_id=expected_job_id,
+                tenant_id=expected_tenant_id,
+                source_id=expected_source_id or "",
+                details={
+                    "execution_id": execution_id,
+                    "expected_attempt_count": expected_attempt_count,
+                    "actual_attempt_count": actual_attempt_count,
+                },
+            )
+            return False
+        return True
+
     async def claim_due_intents(
         self,
         *,
@@ -754,8 +799,7 @@ class CronDispatchIntentService:
                     exhausted_rows = list(await cur.fetchall())
                     if exhausted_rows:
                         exhausted_ids = [
-                            _row_value(row, 0, "id")
-                            for row in exhausted_rows
+                            _row_value(row, 0, "id") for row in exhausted_rows
                         ]
                         placeholders = ", ".join(["%s"] * len(exhausted_ids))
                         await cur.execute(
@@ -831,25 +875,29 @@ class CronDispatchIntentService:
             exhausted_rows: list[Any] = []
             try:
                 async with conn.cursor() as cur:
-                    exhausted_rows = await self._fetch_exhausted_dispatched_rows(
-                        cur,
-                        dispatched_stale_before=dispatched_stale_before,
-                        scope_filter_clause=scope_filter_clause,
-                        scope_filter_params=scope_filter_params,
+                    exhausted_rows = (
+                        await self._fetch_exhausted_dispatched_rows(
+                            cur,
+                            dispatched_stale_before=dispatched_stale_before,
+                            scope_filter_clause=scope_filter_clause,
+                            scope_filter_params=scope_filter_params,
+                        )
                     )
                     await self._mark_exhausted_dispatched_rows_failed(
                         cur,
                         exhausted_rows=exhausted_rows,
                         normalized_now=normalized_now,
                     )
-                    candidate_batch_ids = await self._fetch_candidate_batch_ids(
-                        cur,
-                        limit=limit,
-                        stale_before=stale_before,
-                        dispatched_stale_before=dispatched_stale_before,
-                        normalized_now=normalized_now,
-                        scope_filter_clause=scope_filter_clause,
-                        scope_filter_params=scope_filter_params,
+                    candidate_batch_ids = (
+                        await self._fetch_candidate_batch_ids(
+                            cur,
+                            limit=limit,
+                            stale_before=stale_before,
+                            dispatched_stale_before=dispatched_stale_before,
+                            normalized_now=normalized_now,
+                            scope_filter_clause=scope_filter_clause,
+                            scope_filter_params=scope_filter_params,
+                        )
                     )
                     ids = await self._first_claimable_intent_ids(
                         cur,
@@ -1311,118 +1359,45 @@ class CronDispatchIntentService:
         )
         if not row:
             return False
-        if not _matches_expected_dispatch_row(
-            row,
+        feedback_matches = await self._execution_feedback_matches(
+            row=row,
+            intent_id=intent_id,
+            execution_id=execution_id,
             expected_batch_id=expected_batch_id,
             expected_job_id=expected_job_id,
             expected_tenant_id=expected_tenant_id,
             expected_source_id=expected_source_id,
-        ):
-            await self._record_event_best_effort(
-                batch_id=expected_batch_id or str(row.get("batch_id") or ""),
-                intent_id=intent_id,
-                event_type="execution_intent_mismatch",
-                job_id=expected_job_id,
-                tenant_id=expected_tenant_id,
-                source_id=expected_source_id or "",
-                details={
-                    "execution_id": execution_id,
-                    "expected_batch_id": expected_batch_id,
-                    "expected_job_id": expected_job_id,
-                    "expected_tenant_id": expected_tenant_id,
-                    "expected_source_id": expected_source_id,
-                    "actual_batch_id": str(row.get("batch_id") or ""),
-                    "actual_job_id": str(row.get("job_id") or ""),
-                    "actual_tenant_id": str(row.get("tenant_id") or ""),
-                    "actual_source_id": str(row.get("source_id") or ""),
-                },
-            )
+            expected_attempt_count=expected_attempt_count,
+        )
+        if not feedback_matches:
             return False
-        actual_attempt_count = int(row.get("attempt_count") or 0)
-        if (
-            expected_attempt_count is not None
-            and actual_attempt_count != expected_attempt_count
-        ):
-            await self._record_event_best_effort(
-                batch_id=expected_batch_id or str(row.get("batch_id") or ""),
-                intent_id=intent_id,
-                event_type="execution_attempt_mismatch",
-                job_id=expected_job_id,
-                tenant_id=expected_tenant_id,
-                source_id=expected_source_id or "",
-                details={
-                    "execution_id": execution_id,
-                    "expected_attempt_count": expected_attempt_count,
-                    "actual_attempt_count": actual_attempt_count,
-                },
-            )
-            return False
-        normalized_status = str(status or "").lower()
-        success = normalized_status == "success"
-        terminal_failure = int(row.get("attempt_count") or 0) >= int(
-            row.get("max_attempts") or DEFAULT_MAX_ATTEMPTS,
+        transition = _build_execution_completion_transition(
+            row,
+            status=status,
+            completed_at=completed_at_value,
+            error=error,
+            retry_delay_seconds=retry_delay_seconds,
         )
-        next_status = (
-            "completed"
-            if success
-            else "failed" if terminal_failure else "pending"
+        updated = await _update_execution_intent_row(
+            db,
+            intent_id=intent_id,
+            completed_at=completed_at_value,
+            transition=transition,
+            expected_attempt_count=expected_attempt_count,
         )
-        next_due_at = (
-            completed_at_value
-            if success or terminal_failure
-            else completed_at_value + timedelta(seconds=retry_delay_seconds)
-        )
-        attempt_guard = ""
-        params = [
-            next_status,
-            next_due_at,
-            next_status,
-            completed_at_value,
-            (error or normalized_status or "")[:2048],
-            intent_id,
-        ]
-        if expected_attempt_count is not None:
-            attempt_guard = "AND attempt_count = %s"
-            params.append(expected_attempt_count)
-        result = await db.execute(
-            f"""
-            UPDATE swe_cron_dispatch_intents
-            SET status = %s,
-                due_at = %s,
-                completed_at = CASE
-                    WHEN %s IN ('completed', 'failed') THEN %s
-                    ELSE completed_at
-                END,
-                lock_owner = '',
-                locked_at = NULL,
-                error_message = %s
-            WHERE id = %s
-              {attempt_guard}
-              AND status IN ('dispatched', 'claimed', 'acknowledged')
-            """,
-            tuple(params),
-        )
-        if _rowcount(result) == 0:
+        if not updated:
             return False
         await self._record_event_best_effort(
             batch_id=str(row.get("batch_id") or ""),
             intent_id=intent_id,
-            event_type=(
-                "child_execution_completed"
-                if success
-                else (
-                    "child_execution_failed"
-                    if terminal_failure
-                    else "retry_scheduled"
-                )
-            ),
+            event_type=transition.event_type,
             job_id=str(row.get("job_id") or ""),
             tenant_id=str(row.get("tenant_id") or ""),
             source_id=str(row.get("source_id") or ""),
             details={
                 "execution_id": execution_id,
                 "execution_status": status,
-                "retry": (not success and not terminal_failure),
+                "retry": transition.retry,
             },
         )
         return True
@@ -1639,53 +1614,10 @@ class CronDispatchIntentService:
             )
               AND enabled = 1
             """,
-            (
-                source_id,
-                provider_id,
-                model_id,
-                source_id,
-                DEFAULT_PROVIDER_ID,
-                model_id,
-                source_id,
-                provider_id,
-                DEFAULT_MODEL_ID,
-                provider_id,
-                model_id,
-                model_id,
-                provider_id,
-            ),
+            _worker_policy_query_params(source_id, provider_id, model_id),
         )
-        policy_by_key = {
-            (
-                str(row.get("source_id") or ""),
-                _normalized_provider_id(row.get("provider_id")),
-                _normalized_model_id(row.get("model_id")),
-            ): row
-            for row in rows
-        }
-        policy = None
-        for key in (
-            (source_id, provider_id, model_id),
-            (source_id, DEFAULT_PROVIDER_ID, model_id),
-            (source_id, provider_id, DEFAULT_MODEL_ID),
-            ("default", provider_id, model_id),
-            ("default", DEFAULT_PROVIDER_ID, model_id),
-            ("default", provider_id, DEFAULT_MODEL_ID),
-            ("default", DEFAULT_PROVIDER_ID, DEFAULT_MODEL_ID),
-        ):
-            if key in policy_by_key:
-                policy = policy_by_key[key]
-                break
-        strategy_id = str((fallback or {}).get("strategy_id") or "default")
-        if policy:
-            schedule = _parse_json(policy.get("strategy_schedule"))
-            scheduled_strategy = _select_scheduled_strategy_id(
-                schedule,
-                now_utc,
-            )
-            strategy_id = scheduled_strategy or str(
-                policy.get("default_strategy_id") or strategy_id,
-            )
+        policy = _select_worker_policy(rows, source_id, provider_id, model_id)
+        strategy_id = _worker_strategy_id(policy, fallback, now_utc)
         row = await db.fetch_one(
             """
             SELECT strategy_id, min_workers, baseline_workers, max_workers,
@@ -1698,25 +1630,7 @@ class CronDispatchIntentService:
             """,
             (strategy_id,),
         )
-        if not row:
-            return dict(fallback)
-        return {
-            "strategy_id": str(row.get("strategy_id") or strategy_id),
-            "min_workers": int(row.get("min_workers") or 1),
-            "baseline_workers": int(row.get("baseline_workers") or 1),
-            "max_workers": int(row.get("max_workers") or 1),
-            "adjust_interval_seconds": int(
-                row.get("adjust_interval_seconds") or 300,
-            ),
-            "feedback_window_seconds": int(
-                row.get("feedback_window_seconds") or 300,
-            ),
-            "stale_execution_seconds": int(
-                row.get("stale_execution_seconds")
-                or DEFAULT_DISPATCHED_STALE_SECONDS,
-            ),
-            "error_rate_rules": _parse_json(row.get("error_rate_rules")) or [],
-        }
+        return _resolved_worker_strategy(row, strategy_id, fallback)
 
     async def get_latest_worker_capacity(
         self,
@@ -1894,9 +1808,12 @@ class CronDispatchIntentService:
         **kwargs: Any,
     ) -> None:
         try:
-            await self._record_event(**kwargs)
+            await self._record_event(**kwargs)  # pylint: disable=missing-kwoa
         except Exception:
-            logger.warning("Failed to record cron dispatch event", exc_info=True)
+            logger.warning(
+                "Failed to record cron dispatch event",
+                exc_info=True,
+            )
 
     async def _refresh_batch_counts_for_rows(
         self,
@@ -2028,6 +1945,254 @@ def _unique_texts(values: Iterable[Any]) -> list[str]:
     return normalized
 
 
+def _child_job_ids(child_jobs: Iterable[Mapping[str, Any]]) -> list[str]:
+    return _unique_texts(child.get("job_id") for child in child_jobs)
+
+
+def _ordered_child_intent_rows(
+    child_jobs: Iterable[Mapping[str, Any]],
+    *,
+    heat_by_job_id: Mapping[str, Decimal],
+    default_due_at: datetime,
+) -> list[dict[str, Any]]:
+    rows = []
+    for child in child_jobs:
+        row = _normalize_child_intent_row(
+            child,
+            heat_by_job_id=heat_by_job_id,
+            default_due_at=default_due_at,
+        )
+        if row is not None:
+            rows.append(row)
+    return compute_batch_dispatch_order(rows)
+
+
+def _normalize_child_intent_row(
+    child: Mapping[str, Any],
+    *,
+    heat_by_job_id: Mapping[str, Decimal],
+    default_due_at: datetime,
+) -> dict[str, Any] | None:
+    job_id = str(child.get("job_id") or "").strip()
+    tenant_id = str(child.get("tenant_id") or "").strip()
+    if not job_id or not tenant_id:
+        return None
+    return {
+        **child,
+        "job_id": job_id,
+        "tenant_id": tenant_id,
+        "due_at": _to_beijing_naive(child.get("due_at") or default_due_at),
+        "viewer_heat_score": heat_by_job_id.get(job_id, Decimal("0")),
+    }
+
+
+def _execution_identity_mismatch_details(
+    row: Mapping[str, Any],
+    *,
+    execution_id: int | None,
+    expected_batch_id: str,
+    expected_job_id: str,
+    expected_tenant_id: str,
+    expected_source_id: str | None,
+) -> dict[str, Any]:
+    return {
+        "execution_id": execution_id,
+        "expected_batch_id": expected_batch_id,
+        "expected_job_id": expected_job_id,
+        "expected_tenant_id": expected_tenant_id,
+        "expected_source_id": expected_source_id,
+        "actual_batch_id": str(row.get("batch_id") or ""),
+        "actual_job_id": str(row.get("job_id") or ""),
+        "actual_tenant_id": str(row.get("tenant_id") or ""),
+        "actual_source_id": str(row.get("source_id") or ""),
+    }
+
+
+def _build_execution_completion_transition(
+    row: Mapping[str, Any],
+    *,
+    status: str,
+    completed_at: datetime,
+    error: str,
+    retry_delay_seconds: int,
+) -> _ExecutionCompletionTransition:
+    normalized_status = str(status or "").lower()
+    success = normalized_status == "success"
+    terminal_failure = int(row.get("attempt_count") or 0) >= int(
+        row.get("max_attempts") or DEFAULT_MAX_ATTEMPTS,
+    )
+    if success:
+        next_status = "completed"
+        event_type = "child_execution_completed"
+    elif terminal_failure:
+        next_status = "failed"
+        event_type = "child_execution_failed"
+    else:
+        next_status = "pending"
+        event_type = "retry_scheduled"
+    retry = not success and not terminal_failure
+    next_due_at = (
+        completed_at + timedelta(seconds=retry_delay_seconds)
+        if retry
+        else completed_at
+    )
+    return _ExecutionCompletionTransition(
+        success=success,
+        terminal_failure=terminal_failure,
+        next_status=next_status,
+        next_due_at=next_due_at,
+        event_type=event_type,
+        retry=retry,
+        error_message=(error or normalized_status or "")[:2048],
+    )
+
+
+async def _update_execution_intent_row(
+    db: Any,
+    *,
+    intent_id: int,
+    completed_at: datetime,
+    transition: _ExecutionCompletionTransition,
+    expected_attempt_count: int | None,
+) -> bool:
+    attempt_guard = ""
+    params: list[Any] = [
+        transition.next_status,
+        transition.next_due_at,
+        transition.next_status,
+        completed_at,
+        transition.error_message,
+        intent_id,
+    ]
+    if expected_attempt_count is not None:
+        attempt_guard = "AND attempt_count = %s"
+        params.append(expected_attempt_count)
+    result = await db.execute(
+        f"""
+        UPDATE swe_cron_dispatch_intents
+        SET status = %s,
+            due_at = %s,
+            completed_at = CASE
+                WHEN %s IN ('completed', 'failed') THEN %s
+                ELSE completed_at
+            END,
+            lock_owner = '',
+            locked_at = NULL,
+            error_message = %s
+        WHERE id = %s
+          {attempt_guard}
+          AND status IN ('dispatched', 'claimed', 'acknowledged')
+        """,
+        tuple(params),
+    )
+    return _rowcount(result) > 0
+
+
+def _worker_policy_query_params(
+    source_id: str,
+    provider_id: str,
+    model_id: str,
+) -> tuple[str, ...]:
+    return (
+        source_id,
+        provider_id,
+        model_id,
+        source_id,
+        DEFAULT_PROVIDER_ID,
+        model_id,
+        source_id,
+        provider_id,
+        DEFAULT_MODEL_ID,
+        provider_id,
+        model_id,
+        model_id,
+        provider_id,
+    )
+
+
+def _worker_policy_keys(
+    source_id: str,
+    provider_id: str,
+    model_id: str,
+) -> tuple[tuple[str, str, str], ...]:
+    return (
+        (source_id, provider_id, model_id),
+        (source_id, DEFAULT_PROVIDER_ID, model_id),
+        (source_id, provider_id, DEFAULT_MODEL_ID),
+        ("default", provider_id, model_id),
+        ("default", DEFAULT_PROVIDER_ID, model_id),
+        ("default", provider_id, DEFAULT_MODEL_ID),
+        ("default", DEFAULT_PROVIDER_ID, DEFAULT_MODEL_ID),
+    )
+
+
+def _select_worker_policy(
+    rows: Iterable[Mapping[str, Any]],
+    source_id: str,
+    provider_id: str,
+    model_id: str,
+) -> Mapping[str, Any] | None:
+    policy_by_key = {
+        (
+            str(row.get("source_id") or ""),
+            _normalized_provider_id(row.get("provider_id")),
+            _normalized_model_id(row.get("model_id")),
+        ): row
+        for row in rows
+    }
+    return next(
+        (
+            policy_by_key[key]
+            for key in _worker_policy_keys(source_id, provider_id, model_id)
+            if key in policy_by_key
+        ),
+        None,
+    )
+
+
+def _worker_strategy_id(
+    policy: Mapping[str, Any] | None,
+    fallback: Mapping[str, Any],
+    now_utc: datetime,
+) -> str:
+    fallback_id = str((fallback or {}).get("strategy_id") or "default")
+    if not policy:
+        return fallback_id
+    scheduled_strategy = _select_scheduled_strategy_id(
+        _parse_json(policy.get("strategy_schedule")),
+        now_utc,
+    )
+    return scheduled_strategy or str(
+        policy.get("default_strategy_id") or fallback_id,
+    )
+
+
+def _resolved_worker_strategy(
+    row: Mapping[str, Any] | None,
+    strategy_id: str,
+    fallback: Mapping[str, Any],
+) -> dict[str, Any]:
+    if not row:
+        return dict(fallback)
+    return {
+        "strategy_id": str(row.get("strategy_id") or strategy_id),
+        "min_workers": int(row.get("min_workers") or 1),
+        "baseline_workers": int(row.get("baseline_workers") or 1),
+        "max_workers": int(row.get("max_workers") or 1),
+        "adjust_interval_seconds": int(
+            row.get("adjust_interval_seconds") or 300,
+        ),
+        "feedback_window_seconds": int(
+            row.get("feedback_window_seconds") or 300,
+        ),
+        "stale_execution_seconds": int(
+            row.get("stale_execution_seconds")
+            or DEFAULT_DISPATCHED_STALE_SECONDS,
+        ),
+        "error_rate_rules": _parse_json(row.get("error_rate_rules")) or [],
+    }
+
+
 def _build_child_payload(
     child: Mapping[str, Any],
     default_agent_id: str,
@@ -2039,7 +2204,9 @@ def _build_child_payload(
         "tenant_id": str(child.get("tenant_id") or ""),
         "job_id": str(child.get("job_id") or ""),
         "source_id": str(child.get("source_id") or ""),
-        "agent_id": str(child.get("agent_id") or default_agent_id or "default"),
+        "agent_id": str(
+            child.get("agent_id") or default_agent_id or "default",
+        ),
     }
 
 
@@ -2191,7 +2358,10 @@ def _clock_minutes(value: Any) -> int | None:
     return hour * 60 + minute
 
 
-async def _execute_write_return_last_id(sql: str, params: tuple[Any, ...]) -> int:
+async def _execute_write_return_last_id(
+    sql: str,
+    params: tuple[Any, ...],
+) -> int:
     db = get_db_connection()
     async with db.acquire() as conn:
         await conn.begin()

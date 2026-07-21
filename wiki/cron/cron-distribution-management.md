@@ -1,20 +1,33 @@
 # Cron 分发子任务管理
 
-本文说明定时任务菜单里的分发子任务反查、批量删除、批量重跑，以及重新分发覆盖配置的边界。
+本文说明定时任务菜单里的分发快照、后台刷新、子任务反查、批量删除/重跑，以及重新分发和批调度模式同步的边界。
 
 返回 [Cron 定时任务模块索引](README.md)。
 
 ## 一句话理解
 
-任意定时任务都可以打开“查看分发用户”。后端按 `meta.broadcast_source_job_id` 反查当前 source job 派生出的子任务；没有分发过时返回空列表，不报错。
+任意定时任务都可以打开“查看分发用户”。读取接口优先返回当前源任务的分发快照；需要重新跨租户发现子任务时显式启动后台刷新。没有分发过时返回空列表，不报错。
 
 ## API
 
 | 接口 | 用途 |
 | --- | --- |
 | `GET /api/cron/jobs/{job_id}/broadcast/children` | 列出当前 source job 的分发子任务 |
+| `POST /api/cron/jobs/{job_id}/broadcast/children/refresh` | 启动或复用分发快照后台刷新 |
 | `POST /api/cron/jobs/{job_id}/broadcast/children/delete` | 批量删除选中的子任务 |
 | `POST /api/cron/jobs/{job_id}/broadcast/children/run` | 批量重跑选中的子任务 |
+
+子任务列表响应除 items 外还包含快照状态：
+
+| 字段 | 含义 |
+| --- | --- |
+| `status` | 当前快照/刷新状态 |
+| `tenant_count` | 快照覆盖的租户数 |
+| `failed_tenants` | 最近刷新失败的租户数量 |
+| `failure_summary` | 部分失败摘要 |
+| `updated_at` | 快照更新时间 |
+
+`refresh` 是后台任务入口；调用后应轮询 children 列表，不要假设 POST 返回时已经完成跨租户扫描。重复刷新会返回当前快照并带 `reused=true`。
 
 批量请求体使用子任务所属租户和子任务 ID：
 
@@ -37,6 +50,7 @@
 
 - 没有分发过的任务也能打开反查弹窗，显示“当前任务尚未分发给任何用户”。
 - 已分发的子任务展示目标用户、机构、子任务 ID、cron、时区、启停状态、错峰分钟和通知延迟。
+- 打开弹窗先展示已有快照；用户触发刷新后显示进行中、部分失败或完成状态。
 - 批量删除只删除选中的子任务，不删除源任务。
 - 批量重跑逐条返回结果；如果子任务已暂停或禁用，结果展示为“已暂停，未执行”。
 
@@ -70,6 +84,17 @@
 
 因此管理员可以用重新分发修正任务内容和时间配置，同时不会把目标用户身份、当前暂停状态或任务卡片关联覆盖掉。
 
+## 批调度模式同步
+
+源任务启用或关闭批调度时，后端会通过广播后台任务把 `broadcast_dispatch_intents_enabled` 和外部 timer 状态同步到子任务：
+
+- 批调度开启：子任务普通 timer 暂停，自动执行由 Scheduler intents 接管。
+- 批调度关闭：子任务普通 timer 恢复，回到各自直接回调 SWE。
+- 请求中和历史快照已知租户属于严格同步范围；额外发现的租户失败只形成 warning。
+- 当前不依赖应用启动时的全量扫描修复模式，所以切换任务的完成状态和 `failed_tenants` 需要被调用方认真处理。
+
+模式切换本身也会占用同一源任务的广播任务 claim，避免广播、刷新和调度所有权变更并发覆盖。
+
 ## 后端入口
 
 核心实现位于 `src/swe/app/crons/api.py`：
@@ -79,6 +104,7 @@
 | `_build_broadcast_job()` | 从源任务构造目标子任务定义 |
 | `_refresh_existing_broadcast_child_job()` | 重新分发时刷新已有子任务 |
 | `list_broadcast_children()` | 反查 source job 的当前子任务 |
+| `refresh_broadcast_children()` | 启动或复用跨租户快照刷新任务 |
 | `delete_broadcast_children()` | 批量删除子任务 |
 | `run_broadcast_children()` | 批量重跑子任务并跳过暂停项 |
 

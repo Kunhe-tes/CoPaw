@@ -12,6 +12,7 @@ import {
 } from "./utils/iframeMessage";
 import { isExternalTokenEnabled, ensureValidToken } from "./api/externalToken";
 import { applyConsoleDesignTokens } from "./config/consoleDesignTokens";
+import { initializeChatPresentationFromUrl } from "./stores/chatPresentationStore";
 
 applyConsoleDesignTokens();
 
@@ -25,6 +26,13 @@ applyConsoleDesignTokens();
  * 6. 渲染 React 应用
  */
 async function initializeApp(): Promise<void> {
+  // URL presentation flags initialize once per full page load and remain stable
+  // while the router normalizes or replaces chat URLs.
+  initializeChatPresentationFromUrl(
+    window.location.pathname,
+    window.location.search,
+  );
+
   // 初始化 iframe 消息监听器（在 React 渲染之前）
   // 确保不遗漏父窗口发送的任何消息
   initIframeMessageListener();

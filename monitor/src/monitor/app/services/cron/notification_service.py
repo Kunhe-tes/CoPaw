@@ -91,6 +91,7 @@ class CronNotificationService:
                         {source_filter_join}
                         WHERE e.status = 'success'
                           AND e.async_status = 'success'
+                          AND e.need_notification = 1
                           AND e.notification_status = 'pending'
                           AND e.notification_due_at <= %s
                           AND (
@@ -159,6 +160,7 @@ class CronNotificationService:
               AND e.notification_lock_owner = %s
               AND e.status = 'success'
               AND e.async_status = 'success'
+              AND e.need_notification = 1
               AND e.notification_status = 'pending'
             ORDER BY e.notification_due_at, e.id
             """,

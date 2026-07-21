@@ -38,6 +38,7 @@ class QueryService:
         cust_nm: Optional[str] = None,
         notification_content_wplus: Optional[str] = None,
         notification_content_zhaohu: Optional[str] = None,
+        need_notification: int = 1,
     ) -> SubtaskCreateResponse:
         """Create a subtask record.
 
@@ -50,6 +51,7 @@ class QueryService:
             cust_nm: Customer name
             notification_content_wplus: W+ channel notification content
             notification_content_zhaohu: Zhaohu channel notification content
+            need_notification: Whether notification is needed (0 or 1)
 
         Returns:
             SubtaskCreateResponse with creation result
@@ -86,12 +88,13 @@ class QueryService:
                 cust_nm,
                 notification_content_wplus,
                 notification_content_zhaohu,
+                need_notification,
                 status,
                 info,
                 created_at,
                 updated_at
             )
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, NULL, '', %s, NULL)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, NULL, '', %s, NULL)
         """
         now = datetime.now()
         await self.db.execute(
@@ -105,6 +108,7 @@ class QueryService:
                 cust_nm,
                 notification_content_wplus,
                 notification_content_zhaohu,
+                need_notification,
                 now,
             ),
         )
@@ -148,7 +152,7 @@ class QueryService:
         query = """
             SELECT id, trace_id, task_id, filename, task_type, custuid, cust_nm,
                    notification_content_wplus, notification_content_zhaohu,
-                   status, info, created_at, updated_at
+                   need_notification, status, info, created_at, updated_at
             FROM swe_cron_subtasks
             WHERE trace_id = %s AND task_id = %s
         """
@@ -166,6 +170,7 @@ class QueryService:
             cust_nm=row.get("cust_nm"),
             notification_content_wplus=row.get("notification_content_wplus"),
             notification_content_zhaohu=row.get("notification_content_zhaohu"),
+            need_notification=row.get("need_notification", 1),
             status=row.get("status"),
             info=row.get("info") or "",
             created_at=row.get("created_at"),
@@ -190,7 +195,7 @@ class QueryService:
         query = """
             SELECT id, trace_id, task_id, filename, task_type, custuid, cust_nm,
                    notification_content_wplus, notification_content_zhaohu,
-                   status, info, created_at, updated_at
+                   need_notification, status, info, created_at, updated_at
             FROM swe_cron_subtasks
             WHERE status IS NULL OR status = ''
             ORDER BY created_at ASC
@@ -212,6 +217,7 @@ class QueryService:
                 notification_content_zhaohu=row.get(
                     "notification_content_zhaohu",
                 ),
+                need_notification=row.get("need_notification", 1),
                 status=row.get("status"),
                 info=row.get("info") or "",
                 created_at=row.get("created_at"),
@@ -241,7 +247,7 @@ class QueryService:
         query = """
             SELECT id, trace_id, task_id, filename, task_type, custuid, cust_nm,
                    notification_content_wplus, notification_content_zhaohu,
-                   status, info, created_at, updated_at
+                   need_notification, status, info, created_at, updated_at
             FROM swe_cron_subtasks
             WHERE status IS NULL OR status = ''
             ORDER BY created_at ASC
@@ -263,6 +269,7 @@ class QueryService:
                 notification_content_zhaohu=row.get(
                     "notification_content_zhaohu",
                 ),
+                need_notification=row.get("need_notification", 1),
                 status=row.get("status"),
                 info=row.get("info") or "",
                 created_at=row.get("created_at"),
@@ -289,7 +296,7 @@ class QueryService:
         query = """
             SELECT id, trace_id, task_id, filename, task_type, custuid, cust_nm,
                    notification_content_wplus, notification_content_zhaohu,
-                   status, info, created_at, updated_at
+                   need_notification, status, info, created_at, updated_at
             FROM swe_cron_subtasks
             WHERE trace_id = %s
         """
@@ -309,6 +316,7 @@ class QueryService:
                 notification_content_zhaohu=row.get(
                     "notification_content_zhaohu",
                 ),
+                need_notification=row.get("need_notification", 1),
                 status=row.get("status"),
                 info=row.get("info") or "",
                 created_at=row.get("created_at"),
@@ -418,6 +426,9 @@ class QueryService:
         """Batch update execution async_status using JOIN with subtasks.
 
         使用 SQL JOIN 批量更新，高效处理大量数据。
+        同时更新 need_notification 字段：
+        - 若不存在子任务则 need_notification = 1
+        - 若存在子任务则按照 task_type='list' 的 need_notification 字段更新
 
         Returns:
             Tuple of (success_count, error_count)
@@ -426,9 +437,23 @@ class QueryService:
             return 0, 0
 
         # 更新 success：没有 pending 子任务且没有 error 子任务
+        # 同时设置 need_notification：
+        # - 无子任务时设为 1
+        # - 有子任务时取 task_type='list' 的 need_notification 值
         success_query = """
             UPDATE swe_cron_executions e
-            SET async_status = 'success'
+            SET
+                async_status = 'success',
+                need_notification = COALESCE(
+                    (
+                        SELECT s.need_notification
+                        FROM swe_cron_subtasks s
+                        WHERE s.trace_id = e.trace_id
+                        AND s.task_type = 'list'
+                        LIMIT 1
+                    ),
+                    1
+                )
             WHERE (e.async_status IS NULL OR e.async_status = '')
             AND NOT EXISTS (
                 SELECT 1 FROM swe_cron_subtasks s
@@ -448,9 +473,21 @@ class QueryService:
         success_count = success_row.get("count", 0) if success_row else 0
 
         # 更新 error：有 error 子任务且没有 pending 子任务
+        # 同时设置 need_notification 同上逻辑
         error_query = """
             UPDATE swe_cron_executions e
-            SET async_status = 'error'
+            SET
+                async_status = 'error',
+                need_notification = COALESCE(
+                    (
+                        SELECT s.need_notification
+                        FROM swe_cron_subtasks s
+                        WHERE s.trace_id = e.trace_id
+                        AND s.task_type = 'list'
+                        LIMIT 1
+                    ),
+                    1
+                )
             WHERE (e.async_status IS NULL OR e.async_status = '')
             AND EXISTS (
                 SELECT 1 FROM swe_cron_subtasks s
@@ -470,7 +507,7 @@ class QueryService:
         error_count = error_row.get("count", 0) if error_row else 0
 
         logger.info(
-            "Batch updated execution async_status: success=%d error=%d",
+            "Batch updated execution async_status and need_notification: success=%d error=%d",
             success_count,
             error_count,
         )

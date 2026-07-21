@@ -2243,7 +2243,9 @@ class AgentRunner(Runner):
                 user_name=resolved_identity.user_name,
                 bbk_id=resolved_identity.bbk_id,
                 session_name=_session_name_from_messages(msgs),
-                trace_id=existing_trace_id if attach_existing else new_trace_id,
+                trace_id=(
+                    existing_trace_id if attach_existing else new_trace_id
+                ),
                 attach_existing=attach_existing,
             )
             if trace_id:
@@ -3532,6 +3534,11 @@ class AgentRunner(Runner):
         session_state_loaded: bool,
     ) -> None:
         """在 finally 阶段保存 session state，并限制单步耗时。"""
+        logger.info(
+            "_save_state_during_cleanup: runtime=%s session_state_loaded=%s",
+            runtime is not None,
+            session_state_loaded,
+        )
         if runtime is None or not session_state_loaded:
             return
 

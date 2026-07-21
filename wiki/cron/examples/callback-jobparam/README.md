@@ -1,6 +1,6 @@
 # 外部调度回调示例
 
-外部调度平台到点后只回调 SWE，不直接执行 Agent。SWE 的统一回调入口是 `POST /api/internal/cron/callback`。
+普通模式下，外部调度平台到点后回调 SWE，不直接执行 Agent，入口是 `POST /api/internal/cron/callback`。批调度模式下，父任务物理 timer 改为回调独立 Scheduler；不要把两种 callback 合同混在一起。
 
 返回 [Cron 示例索引](../README.md)。
 
@@ -88,3 +88,14 @@ curl.exe -X POST "$baseUrl/api/internal/cron/callback" `
 - 不要把外部平台的 `tenant_id` 当成运行时 workspace ID；当前代码会用 `tenant_id + source_id` 解析运行时租户。
 - 不要用手动运行接口代替调度回调排查；`/api/cron/jobs/{job_id}/run` 是 `is_manual=True`，回调是 `is_manual=False`。
 - 如果返回 404 `CronManager not found`，优先检查 `tenant_id`、`source_id`、`agent_id` 是否和任务创建时一致。
+- 已启用批调度的父任务或子任务收到这种不带 dispatch 身份的普通自动回调时会被跳过，以免旧 timer 重复执行。
+
+## 批调度父 timer 回调
+
+批调度物理 timer 的入口是：
+
+```http
+POST http://127.0.0.1:9100/api/scheduler/cron/callback
+```
+
+它只负责创建 batch/intents，不直接运行 Agent。Scheduler 随后用带 `callback_source=dispatch_service`、intent/batch/attempt 的 payload 回调 SWE `/api/internal/cron/callback`。完整示例见 [批调度模式](../batch-dispatch/README.md)。

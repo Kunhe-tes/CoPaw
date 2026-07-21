@@ -3,7 +3,9 @@
 
 from __future__ import annotations
 
+import base64
 import inspect
+import json
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from typing import Any
@@ -1243,6 +1245,166 @@ async def test_parent_callback_adds_batch_offset_to_trigger_time(
         == expected_fire_at.isoformat()
     )
     assert jobs[0]["payload"]["swe_server_domain"] == "http://tenant-swe.local"
+
+
+def test_parent_callback_uses_upcoming_fire_inside_batch_prefire_window() -> None:
+    callback_received_at = datetime(
+        2026,
+        7,
+        15,
+        8,
+        0,
+        1,
+        tzinfo=timezone.utc,
+    )
+
+    scheduled_fire_at = service_module._callback_scheduled_fire_at(
+        {"batch_dispatch_offset_minutes": 240},
+        {"cron_expr": "0 20 * * *", "timezone": "Asia/Shanghai"},
+        callback_received_at,
+    )
+
+    assert scheduled_fire_at == datetime(
+        2026,
+        7,
+        15,
+        12,
+        0,
+        tzinfo=timezone.utc,
+    )
+
+
+@pytest.mark.asyncio
+async def test_parent_callback_job_param_prefire_uses_upcoming_fire(
+    monkeypatch,
+) -> None:
+    from scheduler.app.services.cron import scheduling_service as module
+
+    store = _DispatchStore([])
+    service = CronSchedulingService(
+        dispatch_store=store,
+        callback_client=_CallbackClient(),
+        worker_id="scheduler-1",
+        effective_workers=1,
+    )
+    callback_received_at = datetime(
+        2026,
+        7,
+        15,
+        8,
+        0,
+        1,
+        tzinfo=timezone.utc,
+    )
+    expected_fire_at = datetime(
+        2026,
+        7,
+        15,
+        12,
+        0,
+        tzinfo=timezone.utc,
+    )
+
+    async def _fake_fetch_parent_job_for_callback(**_kwargs):
+        return {
+            "id": "parent-1",
+            "tenant_id": "tenant-a",
+            "source_id": "source-a",
+            "agent_id": "default",
+            "cron_expr": "0 20 * * *",
+            "timezone": "Asia/Shanghai",
+            "meta": '{"broadcast_dispatch_intents_enabled": true}',
+        }
+
+    async def _fake_fetch_batch_child_jobs(_parent):
+        return []
+
+    monkeypatch.setattr(
+        module,
+        "_fetch_parent_job_for_callback",
+        _fake_fetch_parent_job_for_callback,
+    )
+    monkeypatch.setattr(
+        module,
+        "_fetch_batch_child_jobs",
+        _fake_fetch_batch_child_jobs,
+    )
+    job_param = base64.urlsafe_b64encode(
+        json.dumps(
+            {
+                "tenant_id": "tenant-a",
+                "source_id": "source-a",
+                "agent_id": "default",
+                "job_id": "parent-1",
+                "batch_dispatch_offset_minutes": 240,
+            },
+        ).encode("utf-8"),
+    ).decode("ascii")
+
+    await service.handle_parent_callback(
+        params={"jobParam": job_param},
+        now_utc=callback_received_at,
+    )
+
+    assert store.batch_upserts[0]["scheduled_fire_at"] == expected_fire_at
+    parent_intent = store.execution_batches[0]["jobs"][0]
+    assert (
+        parent_intent["payload"]["parent_scheduled_fire_at"]
+        == expected_fire_at.isoformat()
+    )
+
+
+def test_parent_callback_uses_upcoming_fire_across_midnight() -> None:
+    callback_received_at = datetime(
+        2026,
+        7,
+        15,
+        13,
+        0,
+        1,
+        tzinfo=timezone.utc,
+    )
+
+    scheduled_fire_at = service_module._callback_scheduled_fire_at(
+        {"batch_dispatch_offset_minutes": 240},
+        {"cron_expr": "0 1 * * *", "timezone": "Asia/Shanghai"},
+        callback_received_at,
+    )
+
+    assert scheduled_fire_at == datetime(
+        2026,
+        7,
+        15,
+        17,
+        0,
+        tzinfo=timezone.utc,
+    )
+
+
+def test_parent_callback_keeps_previous_fire_after_prefire_window() -> None:
+    callback_received_at = datetime(
+        2026,
+        7,
+        15,
+        12,
+        5,
+        tzinfo=timezone.utc,
+    )
+
+    scheduled_fire_at = service_module._callback_scheduled_fire_at(
+        {"batch_dispatch_offset_minutes": 240},
+        {"cron_expr": "0 20 * * *", "timezone": "Asia/Shanghai"},
+        callback_received_at,
+    )
+
+    assert scheduled_fire_at == datetime(
+        2026,
+        7,
+        15,
+        12,
+        0,
+        tzinfo=timezone.utc,
+    )
 
 
 @pytest.mark.asyncio

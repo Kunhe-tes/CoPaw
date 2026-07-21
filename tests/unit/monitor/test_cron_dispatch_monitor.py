@@ -1,7 +1,9 @@
+# -*- coding: utf-8 -*-
 from datetime import datetime
 
 import pytest
 
+from monitor.app.models.cron import CronDispatchPolicyItem
 from monitor.app.services.cron import query_service as query_service_module
 from monitor.app.services.cron.query_service import QueryService
 
@@ -249,7 +251,7 @@ async def test_get_dispatch_workers_parses_policy_and_capacity(monkeypatch):
             "start_time": "16:00",
             "end_time": "21:00",
             "strategy_id": "peak_1",
-        }
+        },
     ]
     assert result.policies[0].strategy["error_rate_rules"] == {
         "success_100": "double",
@@ -257,3 +259,98 @@ async def test_get_dispatch_workers_parses_policy_and_capacity(monkeypatch):
     assert result.current_capacity[0].matched_rule == {
         "reason": "success_100_double",
     }
+
+
+def test_map_dispatch_policy_ignores_non_list_strategy_schedule():
+    policy = QueryService()._map_dispatch_policy(
+        {
+            "source_id": "RMASSIST",
+            "provider_id": "provider-a",
+            "model_id": "model-a",
+            "default_strategy_id": "strategy-a",
+            "strategy_schedule": (
+                '{"start_time":"16:00","end_time":"21:00",'
+                '"strategy_id":"peak_1"}'
+            ),
+            "enabled": 1,
+        },
+    )
+
+    assert policy.strategy_schedule is None
+
+
+def test_map_dispatch_policy_filters_invalid_schedule_items():
+    policy = QueryService()._map_dispatch_policy(
+        {
+            "source_id": "RMASSIST",
+            "provider_id": "provider-a",
+            "model_id": "model-a",
+            "default_strategy_id": "strategy-a",
+            "strategy_schedule": '[{"strategy_id":"peak_1"}, "invalid"]',
+            "enabled": 1,
+        },
+    )
+
+    assert policy.strategy_schedule == [{"strategy_id": "peak_1"}]
+
+
+def test_dispatch_policy_item_accepts_strategy_schedule_without_validation():
+    strategy_schedule = {"strategy_id": "peak_1"}
+    policy = CronDispatchPolicyItem(
+        source_id="RMASSIST",
+        provider_id="provider-a",
+        model_id="model-a",
+        default_strategy_id="strategy-a",
+        strategy_schedule=strategy_schedule,
+    )
+
+    assert policy.strategy_schedule == strategy_schedule
+
+
+@pytest.mark.asyncio
+async def test_get_dispatch_workers_queries_one_current_row_per_model_scope(
+    monkeypatch,
+):
+    fake_db = FakeDb(all_results=[[], [], []])
+    monkeypatch.setattr(
+        query_service_module,
+        "get_db_connection",
+        lambda: fake_db,
+    )
+
+    await QueryService().get_dispatch_workers(source_id="RMASSIST")
+
+    current_sql, current_params = fake_db.fetch_all_calls[1]
+    normalized_sql = " ".join(current_sql.split())
+    assert current_params == ("RMASSIST",)
+    assert "GROUP BY source_id, provider_id, model_id" in normalized_sql
+    assert "model_id, strategy_id" not in normalized_sql
+    assert "LEFT JOIN swe_cron_dispatch_scope_leases" in normalized_sql
+    assert "lease_expires_at >= NOW()" in normalized_sql
+
+
+@pytest.mark.asyncio
+async def test_get_dispatch_workers_filters_explicit_capacity_event_query(
+    monkeypatch,
+):
+    fake_db = FakeDb(all_results=[[], [], []])
+    monkeypatch.setattr(
+        query_service_module,
+        "get_db_connection",
+        lambda: fake_db,
+    )
+    start_time = datetime(2026, 7, 14, 0, 0, 0)
+    end_time = datetime(2026, 7, 14, 23, 59, 59)
+
+    await QueryService().get_dispatch_workers(
+        source_id="RMASSIST",
+        start_time=start_time,
+        end_time=end_time,
+    )
+
+    event_sql, event_params = fake_db.fetch_all_calls[2]
+    normalized_sql = " ".join(event_sql.split())
+    assert event_params == ("RMASSIST", start_time, end_time)
+    assert "SELECT *" not in normalized_sql.upper()
+    assert "created_at >= %s" in normalized_sql
+    assert "created_at <= %s" in normalized_sql

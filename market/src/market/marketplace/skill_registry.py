@@ -523,3 +523,85 @@ class SkillRegistry:
         except Exception as e:
             logger.warning("Failed to list unique skills: %s", e)
             return []
+
+    async def query_skills_by_names(
+        self,
+        skill_names: list[str],
+        source_id: str,
+        source_types: list[str] | None = None,
+        enabled_only: bool = False,
+    ) -> dict[str, dict]:
+        """根据技能名称列表查询技能信息.
+
+        Args:
+            skill_names: 技能名称列表
+            source_id: 来源ID（租户隔离）
+            source_types: 来源类型过滤
+            enabled_only: 是否只返回已启用技能
+
+        Returns:
+            skill_name -> 技能信息的映射
+        """
+        if not self.is_connected():
+            logger.warning(
+                "Database not connected, skip query_skills_by_names"
+            )
+            return {}
+
+        if not skill_names:
+            return {}
+
+        try:
+            # 构建 WHERE 条件
+            conditions = ["source_id = %s"]
+            params: list[Any] = [source_id]
+
+            # 技能名称 IN 条件
+            placeholders = ", ".join(["%s"] * len(skill_names))
+            conditions.append(f"skill_name IN ({placeholders})")
+            params.extend(skill_names)
+
+            # 来源类型过滤
+            if source_types:
+                type_placeholders = ", ".join(["%s"] * len(source_types))
+                conditions.append(f"source IN ({type_placeholders})")
+                params.extend(source_types)
+
+            # 启用状态过滤
+            if enabled_only:
+                conditions.append("enabled = 1")
+
+            sql = f"""
+                SELECT
+                    skill_id, skill_name, cn_name,
+                    source, enabled, version_text
+                FROM swe_skills
+                WHERE {" AND ".join(conditions)}
+            """
+
+            rows = await self.db.fetch_all(sql, params)
+
+            # 构建 skill_name -> 技能信息的映射
+            result: dict[str, dict] = {}
+            for row in rows:
+                name = row.get("skill_name", "")
+                if name:
+                    result[name] = {
+                        "skill_id": row.get("skill_id", ""),
+                        "skill_name": name,
+                        "cn_name": row.get("cn_name", ""),
+                        "source": row.get("source", ""),
+                        "enabled": bool(row.get("enabled", 0)),
+                        "version_text": row.get("version_text", "1.0.0"),
+                    }
+
+            logger.info(
+                "Queried skills by names: source_id=%s, requested=%d, found=%d",
+                source_id,
+                len(skill_names),
+                len(result),
+            )
+            return result
+        except Exception as e:
+            logger.warning("Failed to query skills by names: %s", e)
+            return {}

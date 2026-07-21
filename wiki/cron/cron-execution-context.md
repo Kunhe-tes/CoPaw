@@ -23,7 +23,7 @@
 4. 通过 `_bind_scheduled_run_source_system_config()` 绑定 source 配置；没有 source 时显式清掉继承上下文。
 5. 调用 `CronExecutor.execute(job)`。
 6. 成功后更新任务卡片、未读计数和自动暂停状态。
-7. 无论成功、失败还是取消，finally 中都会调用 `_finalize_execution_state()` 同步 Monitor execution。
+7. 无论成功、失败还是取消，finally 中都会调用 `_finalize_execution_state()`；普通 execution 同步 Monitor，带完整 dispatch 身份的 execution 同步独立 Scheduler。
 
 `CronExecutor.execute()` 会：
 
@@ -45,6 +45,25 @@ Agent 任务会额外做这些事：
 - 每个流式 event 都发送到目标 channel。
 - 收集文本输出，生成最多 100 字符的 `output_preview` 给 Monitor。
 - 成功、错误、超时、取消都会尽量结束 trace。
+
+## 批调度执行身份
+
+Scheduler 回调 SWE 时会携带完整 dispatch 身份：
+
+| 字段 | 含义 |
+| --- | --- |
+| `callback_source=dispatch_service` | 表明本次自动执行来自独立 Scheduler |
+| `dispatch_intent_id` | 本次待派发记录 ID |
+| `dispatch_batch_id` | 父任务计划触发对应的批次 ID |
+| `dispatch_attempt` | 当前尝试次数 |
+| `provider_id` / `model_id` | Scheduler 使用的模型作用域 |
+| `parent_scheduled_fire_at` | 父任务原计划触发时间，用于通知时间对齐 |
+
+`internal_cron_callback()` 把这些字段整理为 `dispatch_meta` 传给 `CronManager.run_job()`，execution meta 中以 `cron_dispatch` 保存。只有 intent ID、batch ID 和 attempt 都有效时，`MonitorSyncClient.record_execution()` 才把结果同步到 `/api/scheduler/cron/execution`；否则仍走原来的 Monitor `/monitor/sync/execution`。
+
+这一判断刻意不使用 B3 trace header。普通外部回调即使带 B3 也不是 Scheduler dispatch；批调度回调会转发 B3 headers，仅用于链路追踪。
+
+Scheduler 回执路径会同步重试最多 3 次。成功或最终失败回执用于释放模型作用域容量并立即补位，因此不能把它当成普通的异步 Monitor 写入。
 
 ## 取消与成功状态
 
@@ -89,12 +108,19 @@ Cron 任务有三层身份：
 - 执行时优先使用 job 的 `model_slot`。
 - 如果 provider 或 model 不存在，回退到当前租户默认模型，并把 fallback 原因记录进 execution meta。
 - 广播任务如果目标租户没有源任务使用的模型，也会回退到目标租户默认模型，并在 meta 中保存原始模型和 fallback 原因。
+- 批调度会把最终 provider/model 纳入 `source_id + provider_id + model_id` 派发作用域；这里的 worker capacity 是并行槽位，不会改变租户默认模型。
 
 设计依据在 `docs/adr/0001-cron-model-overrides-use-request-context.md`：
 
 - 模型覆盖通过请求作用域上下文传递。
 - 不修改 `ProviderManager.active_model`。
 - 并发 cron 和普通 chat 请求之间不会互相污染模型选择。
+
+## 任务关联技能 skill_ids
+
+`CronJobSpec.skill_ids` 用于把 cron job 和技能就绪度治理关联起来。服务端会按逗号或空白拆分、去重，只允许字母数字及 `_ . : -`，归一化后的总长度最多 200 字符。
+
+这个字段供技能绑定和治理查询使用，不是执行器的技能加载指令：`CronExecutor` 不会因为 job 带 `skill_ids` 就自动注入或加载对应技能。排查“任务关联了技能但执行时没有自动使用”时，先确认调用方是否误解了字段责任边界。
 
 ## Cron 授权状态
 

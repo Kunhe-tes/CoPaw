@@ -125,6 +125,7 @@ async def create_channel_service(ws: "Workspace", service):
                         tenant_id=effective_tenant_id,
                         source_id=effective_source_id,
                         robot_id=robot_id,
+                        priority=30,
                     )
                 except Exception:
                     logger.warning(

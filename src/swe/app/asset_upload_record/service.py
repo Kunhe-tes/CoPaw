@@ -108,6 +108,12 @@ class AssetUploadRecordService:
             )
         return TemplateSearchResponse(data=template_id)
 
+    async def delete_record(self, record_id: int) -> None:
+        """根据ID删除上传记录，不存在时抛出 ValueError。"""
+        deleted = await self._store.delete_record(record_id)
+        if not deleted:
+            raise ValueError("记录不存在")
+
     async def query_template_result(
         self,
         result_id: str,
