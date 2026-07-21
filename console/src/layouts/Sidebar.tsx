@@ -274,6 +274,12 @@ export default function Sidebar({ selectedKey }: SidebarProps) {
       path: "/analytics/business-overview",
       label: t("nav.analyticsBusinessOverview", "运营看板"),
     },
+    {
+      key: "monitor-task-center",
+      icon: <SparkSearchLine size={18} />,
+      path: "/monitor/tasks",
+      label: t("nav.monitorTaskCenter", "异步任务中心"),
+    },
     ...(canManageCurrentSourceConfig
       ? [
           {
@@ -287,12 +293,6 @@ export default function Sidebar({ selectedKey }: SidebarProps) {
             icon: <SparkRefreshLine size={18} />,
             path: "/monitor/cron-batch-dispatch",
             label: t("nav.monitorCronBatchDispatch", "批调度监控"),
-          },
-          {
-            key: "monitor-task-center",
-            icon: <SparkSearchLine size={18} />,
-            path: "/monitor/tasks",
-            label: t("nav.monitorTaskCenter", "任务中心"),
           },
         ]
       : []),
@@ -478,6 +478,11 @@ export default function Sidebar({ selectedKey }: SidebarProps) {
             : t("nav.analyticsBusinessOverview", "运营看板"),
           icon: <SparkBarChartLine size={16} />,
         },
+        {
+          key: "monitor-task-center",
+          label: collapsed ? null : t("nav.monitorTaskCenter", "异步任务中心"),
+          icon: <SparkSearchLine size={16} />,
+        },
         ...(canManageCurrentSourceConfig
           ? [
               {
@@ -493,13 +498,6 @@ export default function Sidebar({ selectedKey }: SidebarProps) {
                   ? null
                   : t("nav.monitorCronBatchDispatch", "批调度监控"),
                 icon: <SparkRefreshLine size={16} />,
-              },
-              {
-                key: "monitor-task-center",
-                label: collapsed
-                  ? null
-                  : t("nav.monitorTaskCenter", "任务中心"),
-                icon: <SparkSearchLine size={16} />,
               },
             ]
           : []),

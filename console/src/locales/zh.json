@@ -64,7 +64,7 @@
     "analyticsTraces": "对话分析",
     "monitorCronOverview": "定时任务概览",
     "monitorCronBatchDispatch": "批调度监控",
-    "monitorTaskCenter": "任务中心",
+    "monitorTaskCenter": "异步任务中心",
     "monitor": "监控",
     "analyticsBusinessOverview": "运营看板",
     "analyticsClawDataOverview": "claw数据看板",

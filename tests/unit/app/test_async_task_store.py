@@ -8,7 +8,6 @@ from datetime import datetime
 import pytest
 
 from swe.app.async_tasks import AsyncTaskStore
-from swe.app.async_tasks.schema import init_async_task_tables
 
 
 class FakeDb:
@@ -107,15 +106,3 @@ async def test_finish_task_updates_summary() -> None:
     assert params[2] == 1
     assert params[3] == "部分目标失败"
     assert params[4] == '{"done": 1, "failed": 1}'
-
-
-@pytest.mark.asyncio
-async def test_init_async_task_tables_creates_master_and_items() -> None:
-    """SWE 启动初始化应创建统一异步任务主表和明细表。"""
-    db = FakeDb()
-
-    await init_async_task_tables(db)
-
-    sql = "\n".join(query for query, _params in db.executed)
-    assert "CREATE TABLE IF NOT EXISTS swe_async_tasks" in sql
-    assert "CREATE TABLE IF NOT EXISTS swe_async_task_items" in sql

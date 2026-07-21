@@ -1,13 +1,6 @@
-# -*- coding: utf-8 -*-
-"""Market 服务数据库表初始化。"""
+-- 统一异步任务表结构。
+-- 由部署或迁移流程执行，应用启动阶段不执行该 DDL。
 
-from __future__ import annotations
-
-import logging
-
-logger = logging.getLogger(__name__)
-
-CREATE_ASYNC_TASKS_TABLE = """
 CREATE TABLE IF NOT EXISTS swe_async_tasks (
     task_id VARCHAR(64) PRIMARY KEY COMMENT '异步任务ID',
     service VARCHAR(32) NOT NULL COMMENT '写入服务: swe/market',
@@ -33,9 +26,7 @@ CREATE TABLE IF NOT EXISTS swe_async_tasks (
     INDEX idx_async_tasks_source (source_id),
     INDEX idx_async_tasks_created (created_at)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='统一异步任务主表';
-"""
 
-CREATE_ASYNC_TASK_ITEMS_TABLE = """
 CREATE TABLE IF NOT EXISTS swe_async_task_items (
     task_id VARCHAR(64) NOT NULL COMMENT '异步任务ID',
     target_id VARCHAR(255) NOT NULL COMMENT '目标ID',
@@ -49,11 +40,3 @@ CREATE TABLE IF NOT EXISTS swe_async_task_items (
     PRIMARY KEY (task_id, target_id),
     INDEX idx_async_task_items_status (status)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='统一异步任务明细表';
-"""
-
-
-async def init_database_tables(db) -> None:
-    """初始化 Market 需要的数据库表。"""
-    await db.execute(CREATE_ASYNC_TASKS_TABLE)
-    await db.execute(CREATE_ASYNC_TASK_ITEMS_TABLE)
-    logger.info("Market async task tables initialized")
