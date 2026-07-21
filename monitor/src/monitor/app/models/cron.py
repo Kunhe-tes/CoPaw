@@ -913,6 +913,8 @@ class CronBranchRankingItem(BaseModel):
         default=0,
         description="被客户经理查看的客户数",
     )
+    contacted_customers: int = Field(default=0, description="接触客户数")
+    contact_rate: float = Field(default=0.0, description="客户接触率")
     insight_customers: int = Field(default=0, description="去洞察客户数")
     phone_customers: int = Field(default=0, description="去电访客户数")
 
@@ -1043,6 +1045,8 @@ class BranchManagerSummaryItem(BaseModel):
         default=0,
         description="被客户经理查看的客户数",
     )
+    contacted_customers: int = Field(default=0, description="接触客户数")
+    contact_rate: float = Field(default=0.0, description="客户接触率")
     insight_customers: int = Field(default=0, description="去洞察客户数")
     phone_customers: int = Field(default=0, description="去电访客户数")
 
