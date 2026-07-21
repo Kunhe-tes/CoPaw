@@ -1,62 +1,45 @@
 .page {
   min-height: 100%;
-  padding: 18px 20px 28px;
   overflow-x: hidden;
-  background: #f4f6f8;
+  background: #ffffff;
   color: #182230;
 }
 
-.header {
-  display: flex;
-  align-items: flex-start;
-  justify-content: space-between;
-  gap: 16px;
-  margin-bottom: 14px;
-}
-
-.header h1 {
-  margin: 0;
-  color: #101828;
-  font-size: 24px;
-  line-height: 1.25;
-  font-weight: 700;
-}
-
-.header p {
-  margin: 5px 0 0;
-  color: #667085;
-  font-size: 13px;
+.content {
+  padding: 24px;
 }
 
 .toolbar {
   display: flex;
-  align-items: center;
-  gap: 10px;
+  gap: 12px;
   flex-wrap: wrap;
-  padding: 10px 12px;
-  margin-bottom: 12px;
-  background: #ffffff;
-  border: 1px solid #e4e7ec;
-  border-radius: 8px;
+  margin-bottom: 16px;
+}
+
+.searchBox {
+  display: flex;
+  gap: 8px;
+  flex: 1;
+  max-width: 500px;
+}
+
+.filters {
+  display: flex;
+  gap: 12px;
+  flex-wrap: wrap;
 }
 
 .select {
   width: 132px;
 }
 
-.taskTypeInput {
-  width: 220px;
+.taskTypeSelect {
+  width: 180px;
 }
 
 .searchInput {
-  width: min(360px, 100%);
-}
-
-.tableSection {
-  overflow: hidden;
-  background: #ffffff;
-  border: 1px solid #e4e7ec;
-  border-radius: 8px;
+  flex: 1;
+  min-width: 240px;
 }
 
 .footer {
@@ -77,6 +60,7 @@
 
 .linkButton span,
 .linkButton small,
+.idCell,
 .metaCell strong,
 .metaCell span {
   display: block;
@@ -108,25 +92,30 @@
   font-weight: 600;
 }
 
+.statusTag {
+  display: inline-flex;
+  align-items: center;
+  width: fit-content;
+  min-width: 0;
+  padding-inline: 6px;
+  margin-inline-end: 0;
+  line-height: 20px;
+}
+
 .detail {
   display: flex;
   flex-direction: column;
-  gap: 14px;
+  gap: 16px;
 }
 
 .detailGrid {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 10px;
+  gap: 12px 16px;
 }
 
-.detailGrid div,
-.detailBlock {
+.detailGrid div {
   min-width: 0;
-  padding: 12px;
-  background: #f8fafc;
-  border: 1px solid #e4e7ec;
-  border-radius: 8px;
 }
 
 .detailGrid span {
@@ -145,11 +134,15 @@
   font-weight: 600;
 }
 
+.detailBlock {
+  min-width: 0;
+}
+
 .detailBlock h3 {
-  margin: 0 0 8px;
+  margin: 0 0 10px;
   color: #101828;
   font-size: 14px;
-  font-weight: 700;
+  font-weight: 600;
 }
 
 .detailBlock p {
@@ -160,24 +153,14 @@
   overflow-wrap: anywhere;
 }
 
-.jsonBox {
-  max-height: 220px;
-  margin: 0;
-  overflow: auto;
-  color: #344054;
-  white-space: pre-wrap;
-  word-break: break-word;
-  font-size: 12px;
-  line-height: 1.6;
-}
-
 @media (max-width: 900px) {
-  .header {
-    flex-direction: column;
+  .searchBox {
+    width: 100%;
+    max-width: none;
   }
 
   .select,
-  .taskTypeInput,
+  .taskTypeSelect,
   .searchInput {
     width: 100%;
   }

@@ -613,6 +613,13 @@ def _request_db_connection(request: Request):
     return getattr(state, "db_connection", None)
 
 
+def _request_actor(request: Request) -> tuple[str, str]:
+    """从请求头解析操作人信息，缺省保持为空。"""
+    actor_id = (request.headers.get("X-User-Id") or "").strip()
+    actor_name = unquote(request.headers.get("X-User-Name") or "").strip()
+    return actor_id, actor_name
+
+
 def _make_async_task_store(request: Request) -> AsyncTaskStore:
     """创建统一异步任务写入器。"""
     db_connection = _request_db_connection(request)
@@ -1204,14 +1211,14 @@ async def internal_batch_initialize_tenants(
     if db_connection is not None:
         task_id = str(uuid.uuid4())
         store = _make_async_task_store(request)
+        actor_user_id, actor_user_name = _request_actor(request)
         await store.start_task(
             task_id=task_id,
             service="swe",
             task_type="tenant.bootstrap",
-            title="批量初始化租户",
-            summary=f"批量初始化 {len(tenant_ids)} 个租户",
             source_id=payload.source_id,
-            tenant_id=None,
+            actor_user_id=actor_user_id,
+            actor_user_name=actor_user_name,
             target_ids=tenant_ids,
         )
         asyncio.create_task(

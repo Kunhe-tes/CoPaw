@@ -11,6 +11,7 @@ import uuid
 from pathlib import Path as PathlibPath
 from typing import List, Literal, Optional
 from copy import deepcopy
+from urllib.parse import unquote
 
 import anyio
 from fastapi import (
@@ -394,6 +395,13 @@ def _request_tenant_storage_working_dir(request: Request):
 
 def _request_source_id(request: Request) -> str | None:
     return getattr(request.state, "source_id", None)
+
+
+def _request_actor(request: Request) -> tuple[str, str]:
+    """从请求头解析操作人信息，缺省保持为空。"""
+    actor_id = (request.headers.get("X-User-Id") or "").strip()
+    actor_name = unquote(request.headers.get("X-User-Name") or "").strip()
+    return actor_id, actor_name
 
 
 def _get_effective_tenant_id(request: Request) -> str | None:
@@ -1446,16 +1454,14 @@ async def distribute_active_model(
     )
     if use_async_dispatch:
         store = _make_async_task_store(request)
+        actor_user_id, actor_user_name = _request_actor(request)
         await store.start_task(
             task_id=task_id,
             service="swe",
             task_type="provider.active_model.distribute",
-            title="分发当前活跃模型",
-            summary=(
-                f"向 {len(body.target_tenant_ids)} 个租户分发当前活跃模型"
-            ),
             source_id=_request_source_id(request),
-            tenant_id=_get_effective_tenant_id(request),
+            actor_user_id=actor_user_id,
+            actor_user_name=actor_user_name,
             target_ids=body.target_tenant_ids,
         )
         asyncio.create_task(
@@ -1567,16 +1573,14 @@ async def distribute_providers(
     )
     if use_async_dispatch:
         store = _make_async_task_store(request)
+        actor_user_id, actor_user_name = _request_actor(request)
         await store.start_task(
             task_id=task_id,
             service="swe",
             task_type="provider.providers.distribute",
-            title="分发供应商配置",
-            summary=(
-                f"从 {effective_tenant_id} 向 {len(body.target_tenant_ids)} 个租户复制 providers 目录"
-            ),
             source_id=_request_source_id(request),
-            tenant_id=effective_tenant_id,
+            actor_user_id=actor_user_id,
+            actor_user_name=actor_user_name,
             target_ids=body.target_tenant_ids,
         )
         asyncio.create_task(

@@ -295,7 +295,6 @@ export interface AsyncTaskRecord {
   title: string;
   summary?: string | null;
   source_id?: string | null;
-  tenant_id?: string | null;
   actor_user_id?: string | null;
   actor_user_name?: string | null;
   target_count: number;
@@ -320,7 +319,7 @@ export interface AsyncTaskListResponse<T> {
 }
 
 export interface AsyncTaskQueryFilters {
-  service?: string;
+  source_id?: string;
   task_type?: string;
   status?: string;
   keyword?: string;
@@ -1116,7 +1115,13 @@ export const monitorApi = {
 
   getAsyncTaskDetail: async (
     taskId: string,
+    sourceId?: string,
   ): Promise<AsyncTaskDetailRecord> => {
-    return request(`/monitor/tasks/${encodeURIComponent(taskId)}`);
+    const params = new URLSearchParams();
+    if (sourceId) {
+      params.append("source_id", sourceId);
+    }
+    const query = params.toString() ? `?${params.toString()}` : "";
+    return request(`/monitor/tasks/${encodeURIComponent(taskId)}${query}`);
   },
 };

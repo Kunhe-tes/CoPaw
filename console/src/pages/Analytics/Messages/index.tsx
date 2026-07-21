@@ -13,6 +13,7 @@ import {
 import { Download } from "lucide-react";
 import type { ColumnsType } from "antd/es/table";
 import dayjs from "dayjs";
+import { PageHeader } from "@/components/PageHeader";
 import { tracingApi, UserMessageItem } from "../../../api/modules/tracing";
 import { getBbkDisplayName, BBK_ID_MAP } from "../../../constants/bbk";
 import styles from "./index.module.less";
@@ -41,7 +42,9 @@ export default function MessagesPage() {
     userIdFilter: "",
     sessionIdFilter: "",
     bbkIdFilter: undefined as string | undefined,
-    dateRange: [dayjs().subtract(7, "day"), dayjs()] as [dayjs.Dayjs, dayjs.Dayjs] | null,
+    dateRange: [dayjs().subtract(7, "day"), dayjs()] as
+      | [dayjs.Dayjs, dayjs.Dayjs]
+      | null,
   });
 
   useEffect(() => {
@@ -149,9 +152,7 @@ export default function MessagesPage() {
       ellipsis: true,
       render: (v) => (
         <Tooltip title={v}>
-          <span style={{ fontFamily: "monospace", fontSize: 12 }}>
-            {v}
-          </span>
+          <span style={{ fontFamily: "monospace", fontSize: 12 }}>{v}</span>
         </Tooltip>
       ),
     },
@@ -230,90 +231,97 @@ export default function MessagesPage() {
 
   return (
     <div className={styles.messagesPage}>
-      <div className={styles.header}>
-        <h2>{t("analytics.userMessages", "User Messages")}</h2>
-        <RangePicker
-          value={dateRange}
-          onChange={(dates) =>
-            setDateRange(dates as [dayjs.Dayjs, dayjs.Dayjs] | null)
-          }
-          allowClear
-        />
-      </div>
-
-      <div className={styles.toolbar}>
-        <div className={styles.searchBox}>
-          <Input
-            placeholder={t("analytics.searchMessage", "Search messages...")}
-            value={searchQuery}
-            onChange={(e) => setSearchQuery(e.target.value)}
-            onPressEnter={handleSearch}
+      <PageHeader
+        items={[
+          { title: t("nav.insightCenter", "洞察中心") },
+          { title: t("nav.analyticsMessages", "用户消息") },
+        ]}
+        extra={
+          <RangePicker
+            value={dateRange}
+            onChange={(dates) =>
+              setDateRange(dates as [dayjs.Dayjs, dayjs.Dayjs] | null)
+            }
             allowClear
           />
+        }
+      />
+
+      <div className={styles.content}>
+        <div className={styles.toolbar}>
+          <div className={styles.searchBox}>
+            <Input
+              placeholder={t("analytics.searchMessage", "Search messages...")}
+              value={searchQuery}
+              onChange={(e) => setSearchQuery(e.target.value)}
+              onPressEnter={handleSearch}
+              allowClear
+            />
+          </div>
+          <div className={styles.filters}>
+            <Select
+              placeholder={t("analytics.filterBbk")}
+              value={bbkIdFilter}
+              onChange={(v) => {
+                setBbkIdFilter(v);
+                setPage(1);
+              }}
+              allowClear
+              style={{ width: 150 }}
+              options={BBK_ID_MAP}
+            />
+            <Input
+              placeholder={t("analytics.filterUser", "User ID")}
+              value={userIdFilter}
+              onChange={(e) => setUserIdFilter(e.target.value)}
+              onPressEnter={handleSearch}
+              style={{ width: 150 }}
+              allowClear
+            />
+            <Input
+              placeholder={t("analytics.filterSession", "Session ID")}
+              value={sessionIdFilter}
+              onChange={(e) => setSessionIdFilter(e.target.value)}
+              onPressEnter={handleSearch}
+              style={{ width: 200 }}
+              allowClear
+            />
+            <Button type="primary" onClick={handleSearch}>
+              {t("common.search", "Search")}
+            </Button>
+            <Button
+              icon={<Download size={16} />}
+              onClick={handleExport}
+              loading={exporting}
+              style={{ minWidth: 120 }}
+            >
+              {t("analytics.exportExcel", "Export Excel")}
+            </Button>
+          </div>
         </div>
-        <div className={styles.filters}>
-          <Select
-            placeholder={t("analytics.filterBbk")}
-            value={bbkIdFilter}
-            onChange={(v) => {
-              setBbkIdFilter(v);
-              setPage(1);
+
+        <Card>
+          <Table
+            dataSource={messages}
+            columns={columns}
+            rowKey="trace_id"
+            loading={loading}
+            scroll={{ x: 1200 }}
+            pagination={{
+              current: page,
+              pageSize,
+              total,
+              showSizeChanger: true,
+              showQuickJumper: true,
+              showTotal: (total) => t("analytics.totalItems", { total }),
+              onChange: (p, ps) => {
+                setPage(p);
+                setPageSize(ps);
+              },
             }}
-            allowClear
-            style={{ width: 150 }}
-            options={BBK_ID_MAP}
           />
-          <Input
-            placeholder={t("analytics.filterUser", "User ID")}
-            value={userIdFilter}
-            onChange={(e) => setUserIdFilter(e.target.value)}
-            onPressEnter={handleSearch}
-            style={{ width: 150 }}
-            allowClear
-          />
-          <Input
-            placeholder={t("analytics.filterSession", "Session ID")}
-            value={sessionIdFilter}
-            onChange={(e) => setSessionIdFilter(e.target.value)}
-            onPressEnter={handleSearch}
-            style={{ width: 200 }}
-            allowClear
-          />
-          <Button type="primary" onClick={handleSearch}>
-            {t("common.search", "Search")}
-          </Button>
-          <Button
-            icon={<Download size={16} />}
-            onClick={handleExport}
-            loading={exporting}
-            style={{ minWidth: 120 }}
-          >
-            {t("analytics.exportExcel", "Export Excel")}
-          </Button>
-        </div>
+        </Card>
       </div>
-
-      <Card>
-        <Table
-          dataSource={messages}
-          columns={columns}
-          rowKey="trace_id"
-          loading={loading}
-          scroll={{ x: 1200 }}
-          pagination={{
-            current: page,
-            pageSize,
-            total,
-            showSizeChanger: true,
-            showQuickJumper: true,
-            showTotal: (total) => t("analytics.totalItems", { total }),
-            onChange: (p, ps) => {
-              setPage(p);
-              setPageSize(ps);
-            },
-          }}
-        />
-      </Card>
     </div>
   );
 }

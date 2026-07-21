@@ -2,8 +2,24 @@
 """异步任务查询接口的服务层测试。"""
 
 from datetime import datetime
+import sys
+from types import ModuleType
 
 import pytest
+from fastapi import FastAPI
+from fastapi.testclient import TestClient
+
+openpyxl_stub = ModuleType("openpyxl")
+openpyxl_stub.Workbook = object
+openpyxl_styles_stub = ModuleType("openpyxl.styles")
+openpyxl_styles_stub.Font = object
+openpyxl_styles_stub.Alignment = object
+openpyxl_styles_stub.PatternFill = object
+openpyxl_utils_stub = ModuleType("openpyxl.utils")
+openpyxl_utils_stub.get_column_letter = str
+sys.modules.setdefault("openpyxl", openpyxl_stub)
+sys.modules.setdefault("openpyxl.styles", openpyxl_styles_stub)
+sys.modules.setdefault("openpyxl.utils", openpyxl_utils_stub)
 
 from monitor.app.services.async_task import AsyncTaskQueryService
 
@@ -21,7 +37,6 @@ class FakeDb:
                 "title": "分发供应商配置",
                 "summary": "已完成",
                 "source_id": "src1",
-                "tenant_id": "tenant-root",
                 "actor_user_id": "u1",
                 "actor_user_name": "Alice",
                 "target_count": 2,
@@ -38,7 +53,7 @@ class FakeDb:
             {
                 "task_id": "task-1",
                 "target_id": "tenant-a",
-                "target_name": "租户A",
+                "target_name": "用户A",
                 "status": "succeeded",
                 "error_message": None,
                 "result_json": '{"tenant": "tenant-a"}',
@@ -92,6 +107,7 @@ async def test_list_async_tasks_returns_paginated_rows() -> None:
     assert result.page == 1
     assert result.page_size == 20
     assert result.items[0].task_id == "task-1"
+    assert result.items[0].title == "分发供应商配置"
     assert result.items[0].result_json == {"ok": True}
 
 
@@ -112,6 +128,7 @@ async def test_list_async_tasks_applies_keyword_filter() -> None:
     list_sql, list_params = db.fetch_all_calls[0]
     assert "LIKE %s" in count_sql
     assert "LIKE %s" in list_sql
+    assert "tenant_id LIKE" not in count_sql
     assert "%task-1%" in count_params
     assert "%task-1%" in list_params
 
@@ -125,6 +142,7 @@ async def test_get_async_task_returns_items() -> None:
 
     assert result is not None
     assert result.task_id == "task-1"
+    assert result.title == "分发供应商配置"
     assert result.items[0].target_id == "tenant-a"
     assert result.items[0].result_json == {"tenant": "tenant-a"}
 
@@ -147,3 +165,55 @@ async def test_get_async_task_filters_by_source_id() -> None:
     result = await service.get_task("task-1", source_id="src-other")
 
     assert result is None
+
+
+def test_async_task_router_uses_monitor_prefix() -> None:
+    """任务中心接口应挂在 /api/monitor/tasks，匹配 Console 调用路径。"""
+    from monitor.app.routers.async_tasks import (  # pylint: disable=import-outside-toplevel
+        get_async_task_query_service,
+        router as async_tasks_router,
+    )
+
+    app = FastAPI()
+    service = AsyncTaskQueryService(FakeDb())
+    app.dependency_overrides[get_async_task_query_service] = lambda: service
+    app.include_router(async_tasks_router, prefix="/api")
+
+    try:
+        client = TestClient(app)
+        response = client.get(
+            "/api/monitor/tasks?page=1&page_size=20",
+            headers={"X-Source-Id": "src1"},
+        )
+    finally:
+        app.dependency_overrides.clear()
+
+    assert response.status_code == 200
+    assert response.json()["items"][0]["task_id"] == "task-1"
+
+
+def test_async_task_router_accepts_source_id_query() -> None:
+    """列表查询应允许页面显式传 source_id 查询参数。"""
+    from monitor.app.routers.async_tasks import (  # pylint: disable=import-outside-toplevel
+        get_async_task_query_service,
+        router as async_tasks_router,
+    )
+
+    app = FastAPI()
+    service = AsyncTaskQueryService(FakeDb())
+    app.dependency_overrides[get_async_task_query_service] = lambda: service
+    app.include_router(async_tasks_router, prefix="/api")
+
+    try:
+        client = TestClient(app)
+        response = client.get(
+            "/api/monitor/tasks?page=1&page_size=20&source_id=src1",
+            headers={"X-Source-Id": "src-other"},
+        )
+    finally:
+        app.dependency_overrides.clear()
+
+    assert response.status_code == 200
+    count_sql, count_params = service.db.fetch_one_calls[0]
+    assert "source_id = %s" in count_sql
+    assert count_params[0] == "src1"

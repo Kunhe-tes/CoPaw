@@ -230,6 +230,34 @@ def test_db_store_start_task_does_not_preinsert_target_items():
     assert "INSERT INTO swe_cron_broadcast_task_items" not in sql
 
 
+def test_db_store_mirrors_actor_fields_to_async_task():
+    """定时任务分发镜像到统一任务表时应保留操作人。"""
+    db = _Db()
+    store = CronBroadcastTaskStore(db)
+
+    asyncio.run(
+        store.start_task(
+            agent_id="default",
+            source_id="source-a",
+            tenant_id="tenant-a",
+            job_id="job-source",
+            target_tenant_ids=["tenant-a", "tenant-b"],
+            actor_user_id="operator-1",
+            actor_user_name="张三",
+        ),
+    )
+
+    async_task_calls = [
+        params
+        for query, params in db.executed
+        if "INSERT INTO swe_async_tasks" in query
+    ]
+    assert async_task_calls
+    assert async_task_calls[-1][5] == "向 2 个用户分发定时任务"
+    assert async_task_calls[-1][7] == "operator-1"
+    assert async_task_calls[-1][8] == "张三"
+
+
 def test_db_store_target_item_status_is_upserted_lazily():
     db = _Db()
     store = CronBroadcastTaskStore(db)

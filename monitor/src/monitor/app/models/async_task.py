@@ -30,7 +30,6 @@ class AsyncTaskModel(BaseModel):
     title: str = Field(..., description="任务标题")
     summary: str | None = Field(default=None, description="任务摘要")
     source_id: str | None = Field(default=None, description="来源标识")
-    tenant_id: str | None = Field(default=None, description="租户ID")
     actor_user_id: str | None = Field(default=None, description="操作人ID")
     actor_user_name: str | None = Field(default=None, description="操作人名称")
     target_count: int = Field(default=0, description="目标总数")

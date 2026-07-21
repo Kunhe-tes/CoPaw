@@ -12,9 +12,6 @@ from ...models.async_task import (
     PaginatedResponse,
 )
 
-TASK_TIME_FIELDS = ["created_at", "updated_at", "finished_at"]
-ITEM_TIME_FIELDS = ["created_at", "updated_at"]
-
 
 def _parse_json_field(value: Any) -> Any:
     """解析数据库 JSON 字段，解析失败时返回 None。"""
@@ -61,7 +58,6 @@ class AsyncTaskQueryService:
         self,
         *,
         source_id: str | None = None,
-        service: str | None = None,
         task_type: str | None = None,
         status: str | None = None,
         keyword: str | None = None,
@@ -71,7 +67,6 @@ class AsyncTaskQueryService:
         """分页查询异步任务列表。"""
         where_clause, params = self._build_where_clause(
             source_id=source_id,
-            service=service,
             task_type=task_type,
             status=status,
             keyword=keyword,
@@ -87,7 +82,7 @@ class AsyncTaskQueryService:
         offset = (page - 1) * page_size
         list_sql = f"""
             SELECT task_id, service, task_type, status, title, summary,
-                   source_id, tenant_id, actor_user_id, actor_user_name,
+                   source_id, actor_user_id, actor_user_name,
                    target_count, done_count, failed_count, error_message,
                    result_json, created_at, updated_at, finished_at
             FROM swe_async_tasks
@@ -120,7 +115,7 @@ class AsyncTaskQueryService:
             params.append(source_id)
         task_sql = f"""
             SELECT task_id, service, task_type, status, title, summary,
-                   source_id, tenant_id, actor_user_id, actor_user_name,
+                   source_id, actor_user_id, actor_user_name,
                    target_count, done_count, failed_count, error_message,
                    result_json, created_at, updated_at, finished_at
             FROM swe_async_tasks
@@ -148,7 +143,6 @@ class AsyncTaskQueryService:
         self,
         *,
         source_id: str | None,
-        service: str | None,
         task_type: str | None,
         status: str | None,
         keyword: str | None = None,
@@ -159,9 +153,6 @@ class AsyncTaskQueryService:
         if source_id:
             conditions.append("source_id = %s")
             params.append(source_id)
-        if service:
-            conditions.append("service = %s")
-            params.append(service)
         if task_type:
             conditions.append("task_type = %s")
             params.append(task_type)
@@ -174,7 +165,8 @@ class AsyncTaskQueryService:
             conditions.append(
                 "("
                 "title LIKE %s OR summary LIKE %s OR task_id LIKE %s OR "
-                "source_id LIKE %s OR tenant_id LIKE %s OR actor_user_name LIKE %s"
+                "source_id LIKE %s OR actor_user_id LIKE %s OR "
+                "actor_user_name LIKE %s"
                 ")",
             )
             params.extend([like_keyword] * 6)

@@ -9,7 +9,6 @@ CREATE TABLE IF NOT EXISTS swe_async_tasks (
     title VARCHAR(255) NOT NULL COMMENT '任务标题',
     summary VARCHAR(1024) DEFAULT NULL COMMENT '任务摘要',
     source_id VARCHAR(128) DEFAULT NULL COMMENT '来源标识',
-    tenant_id VARCHAR(255) DEFAULT NULL COMMENT '租户ID',
     actor_user_id VARCHAR(255) DEFAULT NULL COMMENT '操作人ID',
     actor_user_name VARCHAR(255) DEFAULT NULL COMMENT '操作人名称',
     target_count INT NOT NULL DEFAULT 0 COMMENT '目标总数',

@@ -1,9 +1,9 @@
 import { useCallback, useEffect, useState } from "react";
 import {
   Button,
-  Drawer,
   Empty,
   Input,
+  Modal,
   Pagination,
   Select,
   Spin,
@@ -12,19 +12,17 @@ import {
 } from "antd";
 import type { ColumnsType } from "antd/es/table";
 import dayjs from "dayjs";
+import { useTranslation } from "react-i18next";
 import { RefreshCw, Search } from "lucide-react";
+import { PageHeader } from "@/components/PageHeader";
 import {
   monitorApi,
   type AsyncTaskDetailRecord,
   type AsyncTaskRecord,
 } from "../../../api/modules/monitor";
+import { DEFAULT_SOURCE_ID } from "../../../constants/identity";
+import { useIframeStore } from "../../../stores/iframeStore";
 import styles from "./index.module.less";
-
-const SERVICE_OPTIONS = [
-  { label: "全部服务", value: "" },
-  { label: "SWE", value: "swe" },
-  { label: "Market", value: "market" },
-];
 
 const STATUS_OPTIONS = [
   { label: "全部状态", value: "" },
@@ -43,6 +41,32 @@ const STATUS_COLOR: Record<string, string> = {
   failed: "error",
 };
 
+const STATUS_LABEL: Record<string, string> = {
+  queued: "排队",
+  running: "运行",
+  succeeded: "成功",
+  partial_failed: "部分失败",
+  failed: "失败",
+};
+
+const TASK_TYPE_TITLE_MAP: Record<string, string> = {
+  "cron.broadcast.distribute": "定时任务分发",
+  "market.mcp.distribute": "MCP 分发",
+  "market.skill.distribute": "技能分发",
+  "provider.active_model.distribute": "模型分发",
+  "provider.providers.distribute": "供应商分发",
+  "tenant.bootstrap": "用户初始化",
+};
+
+const TASK_TYPE_OPTIONS = [
+  { label: "全部类型", value: "" },
+  ...Object.entries(TASK_TYPE_TITLE_MAP).map(([value, label]) => ({
+    label,
+    value,
+  })),
+];
+const PAGE_SIZE_OPTIONS = ["10", "20", "50", "100"];
+
 function formatDateTime(value?: string | null) {
   return value ? dayjs(value).format("YYYY-MM-DD HH:mm:ss") : "-";
 }
@@ -51,29 +75,21 @@ function formatCount(done: number, total: number, failed: number) {
   return `${done}/${total} · 失败 ${failed}`;
 }
 
-function jsonSummary(value: unknown) {
-  if (value === null || value === undefined) {
-    return "-";
-  }
-  try {
-    const text = JSON.stringify(value, null, 2);
-    return text.length > 240 ? `${text.slice(0, 240)}...` : text;
-  } catch {
-    const text = String(value);
-    return text.length > 240 ? `${text.slice(0, 240)}...` : text;
-  }
-}
-
 function StatusTag({ status }: { status: string }) {
-  return <Tag color={STATUS_COLOR[status] || "default"}>{status}</Tag>;
+  return (
+    <Tag className={styles.statusTag} color={STATUS_COLOR[status] || "default"}>
+      {STATUS_LABEL[status] || status || "-"}
+    </Tag>
+  );
 }
 
 export default function TaskCenterPage() {
+  const { t } = useTranslation();
+  const sourceId = useIframeStore((state) => state.source) || DEFAULT_SOURCE_ID;
   const [items, setItems] = useState<AsyncTaskRecord[]>([]);
   const [total, setTotal] = useState(0);
   const [page, setPage] = useState(1);
   const [pageSize, setPageSize] = useState(20);
-  const [service, setService] = useState("");
   const [status, setStatus] = useState("");
   const [taskType, setTaskType] = useState("");
   const [searchText, setSearchText] = useState("");
@@ -88,9 +104,9 @@ export default function TaskCenterPage() {
       setLoading(true);
       try {
         const response = await monitorApi.getAsyncTasks({
-          service: service || undefined,
+          source_id: sourceId,
           status: status || undefined,
-          task_type: taskType.trim() || undefined,
+          task_type: taskType || undefined,
           keyword: submittedKeyword || undefined,
           page: nextPage,
           page_size: nextPageSize,
@@ -103,7 +119,7 @@ export default function TaskCenterPage() {
         setLoading(false);
       }
     },
-    [service, status, taskType, submittedKeyword],
+    [sourceId, status, taskType, submittedKeyword],
   );
 
   useEffect(() => {
@@ -113,7 +129,7 @@ export default function TaskCenterPage() {
   const openTaskDetail = async (taskId: string) => {
     setDetailLoading(true);
     try {
-      setSelectedTask(await monitorApi.getAsyncTaskDetail(taskId));
+      setSelectedTask(await monitorApi.getAsyncTaskDetail(taskId, sourceId));
     } finally {
       setDetailLoading(false);
     }
@@ -124,6 +140,7 @@ export default function TaskCenterPage() {
       title: "任务标题",
       dataIndex: "title",
       key: "title",
+      width: 220,
       render: (_value, record) => (
         <button
           type="button"
@@ -138,27 +155,23 @@ export default function TaskCenterPage() {
       ),
     },
     {
+      title: "任务ID",
+      dataIndex: "task_id",
+      key: "task_id",
+      width: 260,
+      render: (value) => <span className={styles.idCell}>{value || "-"}</span>,
+    },
+    {
       title: "状态",
       dataIndex: "status",
       key: "status",
-      width: 120,
+      width: 96,
       render: (value) => <StatusTag status={String(value)} />,
-    },
-    {
-      title: "服务 / 类型",
-      key: "service",
-      width: 220,
-      render: (_, record) => (
-        <div className={styles.metaCell}>
-          <strong>{record.service}</strong>
-          <span>{record.task_type}</span>
-        </div>
-      ),
     },
     {
       title: "进度",
       key: "progress",
-      width: 150,
+      width: 130,
       render: (_, record) => (
         <span>
           {formatCount(
@@ -170,18 +183,16 @@ export default function TaskCenterPage() {
       ),
     },
     {
-      title: "来源",
-      dataIndex: "source_id",
-      key: "source_id",
-      width: 120,
-      render: (value) => value || "-",
-    },
-    {
-      title: "租户",
-      dataIndex: "tenant_id",
-      key: "tenant_id",
-      width: 160,
-      render: (value) => value || "-",
+      title: "操作人",
+      key: "actor",
+      width: 180,
+      render: (_, record) => (
+        <span className={styles.idCell}>
+          {record.actor_user_id || record.actor_user_name
+            ? `${record.actor_user_id || "-"}/${record.actor_user_name || "-"}`
+            : "-"}
+        </span>
+      ),
     },
     {
       title: "创建时间",
@@ -201,66 +212,65 @@ export default function TaskCenterPage() {
 
   return (
     <div className={styles.page}>
-      <header className={styles.header}>
-        <div>
-          <h1>异步任务中心</h1>
-          <p>SWE、Market 与内部初始化任务的运行记录。</p>
-        </div>
-        <Button
-          icon={<RefreshCw size={16} />}
-          onClick={() => {
-            void fetchTasks(page, pageSize);
-          }}
-        >
-          刷新
-        </Button>
-      </header>
+      <PageHeader
+        items={[
+          { title: t("nav.insightCenter", "洞察中心") },
+          { title: t("nav.monitorTaskCenter", "异步任务中心") },
+        ]}
+        extra={
+          <Button
+            icon={<RefreshCw size={16} />}
+            onClick={() => {
+              void fetchTasks(page, pageSize);
+            }}
+          >
+            刷新
+          </Button>
+        }
+      />
 
-      <section className={styles.toolbar}>
-        <Select
-          className={styles.select}
-          options={SERVICE_OPTIONS}
-          value={service}
-          onChange={setService}
-        />
-        <Select
-          className={styles.select}
-          options={STATUS_OPTIONS}
-          value={status}
-          onChange={setStatus}
-        />
-        <Input
-          className={styles.taskTypeInput}
-          placeholder="任务类型"
-          value={taskType}
-          onChange={(event) => setTaskType(event.target.value)}
-          allowClear
-        />
-        <Input
-          className={styles.searchInput}
-          prefix={<Search size={14} />}
-          placeholder="按标题、摘要、任务ID搜索"
-          value={searchText}
-          onChange={(event) => setSearchText(event.target.value)}
-          allowClear
-        />
-        <Button
-          type="primary"
-          icon={<Search size={16} />}
-          onClick={() => {
-            const nextKeyword = searchText.trim();
-            if (nextKeyword === submittedKeyword) {
-              void fetchTasks(1, pageSize);
-              return;
-            }
-            setSubmittedKeyword(nextKeyword);
-          }}
-        >
-          查询
-        </Button>
-      </section>
+      <div className={styles.content}>
+        <section className={styles.toolbar}>
+          <div className={styles.filters}>
+            <Select
+              className={styles.select}
+              options={STATUS_OPTIONS}
+              value={status}
+              onChange={setStatus}
+            />
+            <Select
+              className={styles.taskTypeSelect}
+              options={TASK_TYPE_OPTIONS}
+              value={taskType}
+              onChange={setTaskType}
+            />
+          </div>
+          <div className={styles.searchBox}>
+            <Input
+              className={styles.searchInput}
+              prefix={<Search size={14} />}
+              placeholder="按标题、摘要、任务ID搜索"
+              value={searchText}
+              onChange={(event) => setSearchText(event.target.value)}
+              allowClear
+            />
+            <Button
+              type="primary"
+              icon={<Search size={16} />}
+              onClick={() => {
+                const nextKeyword = searchText.trim();
+                if (nextKeyword === submittedKeyword) {
+                  void fetchTasks(1, pageSize);
+                  return;
+                }
+                setSubmittedKeyword(nextKeyword);
+              }}
+            >
+              查询
+            </Button>
+          </div>
+        </section>
 
-      <section className={styles.tableSection}>
         <Spin spinning={loading}>
           <Table<AsyncTaskRecord>
             rowKey="task_id"
@@ -273,26 +283,28 @@ export default function TaskCenterPage() {
             size="middle"
           />
         </Spin>
-      </section>
 
-      <div className={styles.footer}>
-        <Pagination
-          current={page}
-          pageSize={pageSize}
-          total={total}
-          showSizeChanger
-          showTotal={(count) => `共 ${count} 条`}
-          onChange={(nextPage, nextPageSize) => {
-            void fetchTasks(nextPage, nextPageSize);
-          }}
-        />
+        <div className={styles.footer}>
+          <Pagination
+            current={page}
+            pageSize={pageSize}
+            total={total}
+            showSizeChanger
+            pageSizeOptions={PAGE_SIZE_OPTIONS}
+            showTotal={(count) => `共 ${count} 条`}
+            onChange={(nextPage, nextPageSize) => {
+              void fetchTasks(nextPage, nextPageSize);
+            }}
+          />
+        </div>
       </div>
 
-      <Drawer
+      <Modal
         title={selectedTask?.title || "任务详情"}
         open={selectedTask !== null}
-        onClose={() => setSelectedTask(null)}
-        width={720}
+        onCancel={() => setSelectedTask(null)}
+        footer={null}
+        width={760}
         destroyOnClose
       >
         <Spin spinning={detailLoading}>
@@ -310,14 +322,6 @@ export default function TaskCenterPage() {
                   </strong>
                 </div>
                 <div>
-                  <span>服务</span>
-                  <strong>{selectedTask.service}</strong>
-                </div>
-                <div>
-                  <span>类型</span>
-                  <strong>{selectedTask.task_type}</strong>
-                </div>
-                <div>
                   <span>进度</span>
                   <strong>
                     {formatCount(
@@ -328,9 +332,15 @@ export default function TaskCenterPage() {
                   </strong>
                 </div>
                 <div>
-                  <span>时间</span>
+                  <span>创建时间</span>
                   <strong>{formatDateTime(selectedTask.created_at)}</strong>
                 </div>
+                {selectedTask.status === "succeeded" ? (
+                  <div>
+                    <span>完成时间</span>
+                    <strong>{formatDateTime(selectedTask.finished_at)}</strong>
+                  </div>
+                ) : null}
               </section>
 
               <section className={styles.detailBlock}>
@@ -339,18 +349,16 @@ export default function TaskCenterPage() {
               </section>
 
               <section className={styles.detailBlock}>
-                <h3>结果</h3>
-                <pre className={styles.jsonBox}>
-                  {jsonSummary(selectedTask.result_json)}
-                </pre>
-              </section>
-
-              <section className={styles.detailBlock}>
-                <h3>目标明细</h3>
+                <h3>分发明细</h3>
                 <Table
                   rowKey="target_id"
                   size="small"
-                  pagination={false}
+                  pagination={{
+                    defaultPageSize: 10,
+                    showSizeChanger: true,
+                    pageSizeOptions: PAGE_SIZE_OPTIONS,
+                    showTotal: (count) => `共 ${count} 条`,
+                  }}
                   dataSource={selectedTask.items}
                   columns={[
                     {
@@ -383,7 +391,7 @@ export default function TaskCenterPage() {
             </div>
           ) : null}
         </Spin>
-      </Drawer>
+      </Modal>
     </div>
   );
 }

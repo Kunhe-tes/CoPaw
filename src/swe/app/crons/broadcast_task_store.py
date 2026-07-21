@@ -93,6 +93,8 @@ class CronBroadcastTaskStore:
         tenant_id: str,
         job_id: str,
         target_tenant_ids: list[str],
+        actor_user_id: str | None = None,
+        actor_user_name: str | None = None,
     ) -> tuple[CronBroadcastTaskSnapshot, bool]:
         """创建或复用同一源任务和目标集合下仍在运行的广播任务。"""
         targets = _normalize_targets(target_tenant_ids)
@@ -113,6 +115,8 @@ class CronBroadcastTaskStore:
             job_id=job_id,
             target_key=target_key,
             targets=targets,
+            actor_user_id=actor_user_id,
+            actor_user_name=actor_user_name,
         )
 
     async def get_task(
@@ -305,6 +309,8 @@ class CronBroadcastTaskStore:
         job_id: str,
         target_key: str,
         targets: list[str],
+        actor_user_id: str | None = None,
+        actor_user_name: str | None = None,
     ) -> tuple[CronBroadcastTaskSnapshot, bool]:
         for task in self._tasks.values():
             if (
@@ -344,6 +350,8 @@ class CronBroadcastTaskStore:
         job_id: str,
         target_key: str,
         targets: list[str],
+        actor_user_id: str | None,
+        actor_user_name: str | None,
     ) -> tuple[CronBroadcastTaskSnapshot, bool]:
         claim_key = _claim_key(
             agent_id,
@@ -374,6 +382,8 @@ class CronBroadcastTaskStore:
                     tenant_id=tenant_id,
                     job_id=job_id,
                     target_ids=targets,
+                    actor_user_id=actor_user_id,
+                    actor_user_name=actor_user_name,
                 )
                 return (
                     CronBroadcastTaskSnapshot(
@@ -569,6 +579,8 @@ class CronBroadcastTaskStore:
         tenant_id: str,
         job_id: str,
         target_ids: list[str],
+        actor_user_id: str | None = None,
+        actor_user_name: str | None = None,
     ) -> None:
         """同步统一异步任务主记录。"""
         if self._async_task_store is None:
@@ -578,10 +590,9 @@ class CronBroadcastTaskStore:
                 task_id=task_id,
                 service="swe",
                 task_type="cron.broadcast.distribute",
-                title="定时任务广播分发",
-                summary=f"将任务 {job_id} 广播到 {len(target_ids)} 个租户",
                 source_id=source_id,
-                tenant_id=tenant_id,
+                actor_user_id=actor_user_id,
+                actor_user_name=actor_user_name,
                 target_ids=target_ids,
             )
         except Exception:

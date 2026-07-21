@@ -9,6 +9,7 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
+from urllib.parse import unquote
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, Field
@@ -342,6 +343,13 @@ def _get_request_user_id(request: Request) -> str | None:
     if state_user_id:
         return state_user_id
     return request.headers.get("X-User-Id")
+
+
+def _request_actor(request: Request) -> tuple[str, str]:
+    """从请求头解析操作人信息，缺省保持为空。"""
+    actor_id = (_get_request_user_id(request) or "").strip()
+    actor_name = unquote(request.headers.get("X-User-Name") or "").strip()
+    return actor_id, actor_name
 
 
 def _inject_creator_user(
@@ -1308,12 +1316,15 @@ async def _schedule_broadcast_task(
     store = _get_broadcast_task_store(request)
     tasks = _get_broadcast_tasks(request)
     parts = _broadcast_task_parts(request, source_job)
+    actor_user_id, actor_user_name = _request_actor(request)
     snapshot, reused = await store.start_task(
         agent_id=parts["agent_id"],
         source_id=parts["source_id"],
         tenant_id=parts["tenant_id"],
         job_id=parts["job_id"],
         target_tenant_ids=tenant_ids,
+        actor_user_id=actor_user_id,
+        actor_user_name=actor_user_name,
     )
     if reused:
         return snapshot, True
@@ -1430,12 +1441,15 @@ async def _claim_dispatch_mode_operation(
 ) -> tuple[CronBroadcastTaskStore, CronBroadcastTaskSnapshot]:
     store = _get_broadcast_task_store(request)
     parts = _broadcast_task_parts(request, source_job)
+    actor_user_id, actor_user_name = _request_actor(request)
     snapshot, reused = await store.start_task(
         agent_id=parts["agent_id"],
         source_id=parts["source_id"],
         tenant_id=parts["tenant_id"],
         job_id=parts["job_id"],
         target_tenant_ids=[],
+        actor_user_id=actor_user_id,
+        actor_user_name=actor_user_name,
     )
     if reused:
         raise HTTPException(

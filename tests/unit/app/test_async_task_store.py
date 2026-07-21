@@ -51,11 +51,92 @@ async def test_start_task_inserts_master_and_items() -> None:
     assert len(db.executed) == 1
     assert len(db.executed_many) == 1
     assert "INSERT INTO swe_async_tasks" in db.executed[0][0]
+    assert "tenant_id" not in db.executed[0][0]
+    assert db.executed[0][1] is not None
+    assert len(db.executed[0][1]) == 10
+    assert db.executed[0][1][7] is None
+    assert db.executed[0][1][8] is None
     assert "INSERT INTO swe_async_task_items" in db.executed_many[0][0]
     assert db.executed_many[0][1] == [
         ("task-1", "tenant-a", None, "queued", None, None),
         ("task-1", "tenant-b", None, "queued", None, None),
     ]
+
+
+@pytest.mark.asyncio
+async def test_start_task_generates_title_from_task_type() -> None:
+    """未显式传标题时，应按任务类型生成主任务标题。"""
+    db = FakeDb()
+    store = AsyncTaskStore(db)
+
+    await store.start_task(
+        task_id="task-1",
+        service="swe",
+        task_type="provider.active_model.distribute",
+        target_ids=["tenant-a"],
+    )
+
+    params = db.executed[0][1]
+    assert params is not None
+    assert params[4] == "模型分发"
+
+
+@pytest.mark.asyncio
+async def test_start_task_generates_summary_from_task_type() -> None:
+    """未显式传摘要时，应按任务类型生成默认摘要。"""
+    db = FakeDb()
+    store = AsyncTaskStore(db)
+
+    await store.start_task(
+        task_id="task-1",
+        service="swe",
+        task_type="provider.providers.distribute",
+        target_ids=["tenant-a", "tenant-b"],
+    )
+
+    params = db.executed[0][1]
+    assert params is not None
+    assert params[5] == "向 2 个用户分发供应商配置"
+
+
+@pytest.mark.asyncio
+async def test_start_task_keeps_explicit_summary() -> None:
+    """显式传摘要时，应保留调用方提供的业务上下文。"""
+    db = FakeDb()
+    store = AsyncTaskStore(db)
+
+    await store.start_task(
+        task_id="task-1",
+        service="swe",
+        task_type="cron.broadcast.distribute",
+        summary="将任务 job-1 广播到 2 个用户",
+        target_ids=["tenant-a", "tenant-b"],
+    )
+
+    params = db.executed[0][1]
+    assert params is not None
+    assert params[5] == "将任务 job-1 广播到 2 个用户"
+
+
+@pytest.mark.asyncio
+async def test_start_task_keeps_empty_actor_fields() -> None:
+    """操作人为空时应保持空值，由页面展示为占位符。"""
+    db = FakeDb()
+    store = AsyncTaskStore(db)
+
+    await store.start_task(
+        task_id="task-1",
+        service="swe",
+        task_type="tenant.bootstrap",
+        actor_user_id="",
+        actor_user_name="",
+        target_ids=["tenant-a"],
+    )
+
+    params = db.executed[0][1]
+    assert params is not None
+    assert params[7] == ""
+    assert params[8] == ""
 
 
 @pytest.mark.asyncio

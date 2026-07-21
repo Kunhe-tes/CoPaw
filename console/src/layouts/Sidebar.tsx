@@ -274,12 +274,6 @@ export default function Sidebar({ selectedKey }: SidebarProps) {
       path: "/analytics/business-overview",
       label: t("nav.analyticsBusinessOverview", "运营看板"),
     },
-    {
-      key: "monitor-task-center",
-      icon: <SparkSearchLine size={18} />,
-      path: "/monitor/tasks",
-      label: t("nav.monitorTaskCenter", "异步任务中心"),
-    },
     ...(canManageCurrentSourceConfig
       ? [
           {
@@ -311,6 +305,12 @@ export default function Sidebar({ selectedKey }: SidebarProps) {
       icon: <SparkSearchLine size={18} />,
       path: "/analytics/messages",
       label: t("nav.analyticsMessages", "Messages"),
+    },
+    {
+      key: "monitor-task-center",
+      icon: <SparkSearchLine size={18} />,
+      path: "/monitor/tasks",
+      label: t("nav.monitorTaskCenter", "异步任务中心"),
     },
     // {
     //   key: "analytics-users",
@@ -478,11 +478,6 @@ export default function Sidebar({ selectedKey }: SidebarProps) {
             : t("nav.analyticsBusinessOverview", "运营看板"),
           icon: <SparkBarChartLine size={16} />,
         },
-        {
-          key: "monitor-task-center",
-          label: collapsed ? null : t("nav.monitorTaskCenter", "异步任务中心"),
-          icon: <SparkSearchLine size={16} />,
-        },
         ...(canManageCurrentSourceConfig
           ? [
               {
@@ -515,6 +510,11 @@ export default function Sidebar({ selectedKey }: SidebarProps) {
         {
           key: "analytics-messages",
           label: collapsed ? null : t("nav.analyticsMessages", "Messages"),
+          icon: <SparkSearchLine size={16} />,
+        },
+        {
+          key: "monitor-task-center",
+          label: collapsed ? null : t("nav.monitorTaskCenter", "异步任务中心"),
           icon: <SparkSearchLine size={16} />,
         },
         // {

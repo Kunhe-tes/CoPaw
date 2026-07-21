@@ -21,8 +21,10 @@ def _request(
     tenant_id: str = "tenant-source",
     source_id: str | None = None,
     scope_id: str | None = None,
+    headers: dict[str, str] | None = None,
 ) -> SimpleNamespace:
     return SimpleNamespace(
+        headers=headers or {},
         state=SimpleNamespace(
             tenant_id=tenant_id,
             source_id=source_id,
@@ -762,7 +764,12 @@ def test_distribute_active_model_returns_async_task_submission(
 
     result = asyncio.run(
         providers_router.distribute_active_model(
-            _request(),
+            _request(
+                headers={
+                    "X-User-Id": "operator-1",
+                    "X-User-Name": "%E5%BC%A0%E4%B8%89",
+                },
+            ),
             providers_router.ActiveModelDistributionRequest(
                 target_tenant_ids=["tenant-a"],
                 overwrite=True,
@@ -780,6 +787,8 @@ def test_distribute_active_model_returns_async_task_submission(
         submitted["start_task"]["task_type"]
         == "provider.active_model.distribute"
     )
+    assert submitted["start_task"]["actor_user_id"] == "operator-1"
+    assert submitted["start_task"]["actor_user_name"] == "张三"
 
 
 def test_active_model_distribution_marks_failed_when_mark_running_fails() -> (

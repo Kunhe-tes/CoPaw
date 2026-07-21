@@ -9,12 +9,52 @@ from typing import Any
 
 from ...database.connection import DatabaseConnection
 
+TASK_TYPE_TITLE_MAP = {
+    "cron.broadcast.distribute": "定时任务分发",
+    "market.mcp.distribute": "MCP 分发",
+    "market.skill.distribute": "技能分发",
+    "provider.active_model.distribute": "模型分发",
+    "provider.providers.distribute": "供应商分发",
+    "tenant.bootstrap": "用户初始化",
+}
+TASK_TYPE_SUMMARY_TEMPLATE_MAP = {
+    "cron.broadcast.distribute": "向 {target_count} 个用户分发定时任务",
+    "market.mcp.distribute": "向 {target_count} 个用户分发 MCP",
+    "market.skill.distribute": "向 {target_count} 个用户分发技能",
+    "provider.active_model.distribute": (
+        "向 {target_count} 个用户分发当前活跃模型"
+    ),
+    "provider.providers.distribute": "向 {target_count} 个用户分发供应商配置",
+    "tenant.bootstrap": "批量初始化 {target_count} 个用户",
+}
+
 
 def _json_dumps(value: Any) -> str | None:
     """将对象序列化为 JSON 文本。"""
     if value is None:
         return None
     return json.dumps(value, ensure_ascii=False)
+
+
+def _resolve_task_title(task_type: str, title: str | None = None) -> str:
+    """按任务类型生成展示标题，未知类型保留调用方标题兜底。"""
+    return TASK_TYPE_TITLE_MAP.get(task_type, title or task_type or "-")
+
+
+def _resolve_task_summary(
+    task_type: str,
+    target_count: int,
+    summary: str | None = None,
+) -> str | None:
+    """按任务类型生成默认摘要，显式摘要优先保留。"""
+    if summary:
+        return summary
+    template = TASK_TYPE_SUMMARY_TEMPLATE_MAP.get(task_type)
+    if template is None:
+        return None
+    return template.format(
+        target_count=target_count,
+    )
 
 
 class AsyncTaskStore:
@@ -30,11 +70,10 @@ class AsyncTaskStore:
         task_id: str,
         service: str,
         task_type: str,
-        title: str,
         target_ids: list[str],
+        title: str | None = None,
         summary: str | None = None,
         source_id: str | None = None,
-        tenant_id: str | None = None,
         actor_user_id: str | None = None,
         actor_user_name: str | None = None,
     ) -> None:
@@ -43,20 +82,23 @@ class AsyncTaskStore:
             """
             INSERT INTO swe_async_tasks (
                 task_id, service, task_type, status, title, summary,
-                source_id, tenant_id, actor_user_id, actor_user_name,
+                source_id, actor_user_id, actor_user_name,
                 target_count, done_count, failed_count
             )
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, 0, 0)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, 0, 0)
             """,
             (
                 task_id,
                 service,
                 task_type,
                 "queued",
-                title,
-                summary,
+                _resolve_task_title(task_type, title),
+                _resolve_task_summary(
+                    task_type,
+                    len(target_ids),
+                    summary,
+                ),
                 source_id,
-                tenant_id,
                 actor_user_id,
                 actor_user_name,
                 len(target_ids),
