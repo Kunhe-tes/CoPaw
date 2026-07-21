@@ -763,6 +763,7 @@ def test_reconcile_rejects_string_enabled_before_activating_disabled_skill(
                     "nested\\demo",
                     "safe single path segment",
                 ),
+                ("nul", "bad\x00name", "safe single path segment"),
             )
         ],
     ],

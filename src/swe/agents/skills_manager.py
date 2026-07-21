@@ -759,6 +759,7 @@ def _require_workspace_layout_v2(
             or skill_name in {".", ".."}
             or "/" in skill_name
             or "\\" in skill_name
+            or "\x00" in skill_name
         ):
             raise ValueError(
                 f"Workspace manifest {manifest_path} skill name "
