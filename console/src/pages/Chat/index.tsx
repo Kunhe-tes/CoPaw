@@ -57,6 +57,7 @@ import { useBrandTheme } from "../../contexts/BrandThemeContext";
 // ==================== 品牌主题结束 ====================
 // ==================== URL 导航参数 (Kun He, 2026-04-15) ====================
 import { useIframeStore } from "../../stores/iframeStore";
+import { useChatPresentationStore } from "../../stores/chatPresentationStore";
 // ==================== URL 导航参数结束 ====================
 import styles from "./index.module.less";
 import { Form, IconButton } from "@agentscope-ai/design";
@@ -117,7 +118,6 @@ import GeneratedFilesDrawer from "./components/GeneratedFilesDrawer";
 import { AutoPreviewHtmlProvider } from "@/components/agentscope-chat/AutoPreviewHtmlContext";
 import { HtmlPreviewTrackingProvider } from "@/components/agentscope-chat/HtmlPreviewTrackingContext";
 import { ChatContentOnlyProvider } from "@/components/agentscope-chat/ChatContentOnlyContext";
-import { resolveChatContentOnlyRoute } from "./contentOnlyMode";
 import type {
   ChatApprovalActionCardData,
   ChatRuntimeRequestCardData,
@@ -498,15 +498,14 @@ export default function ChatPage() {
   const navigate = useNavigate();
   const location = useLocation();
   const { isDark } = useTheme();
+  const showContentOnly = useChatPresentationStore(
+    (state) => state.showContentOnly,
+  );
   // ==================== 品牌主题 (Kun He) ====================
   // 获取动态品牌配置，用于 welcome avatar
   const { theme: brandTheme } = useBrandTheme();
   // ==================== 品牌主题结束 ====================
-  const contentOnlyRoute = useMemo(
-    () => resolveChatContentOnlyRoute(location.pathname, location.search),
-    [location.pathname, location.search],
-  );
-  const isContentOnly = contentOnlyRoute.enabled;
+  const isContentOnly = showContentOnly;
   const chatId = useMemo(() => {
     const match = location.pathname.match(/^\/chat\/(.+)$/);
     return match?.[1];

@@ -477,6 +477,7 @@ async def put_channel(
         agent.tenant_id,
         channel_config,
         source_id=_request_source_id(request),
+        priority=10,
     )
 
     return _channel_to_management_payload(
@@ -498,6 +499,7 @@ async def _persist_zhaohu_binding(
     tenant_id: str,
     channel_config: Any,
     source_id: str | None = None,
+    priority: int = 30,
 ) -> None:
     """当 zhaohu 渠道配置更新时，将绑定信息持久化到数据库供其他模块使用。"""
     from ..channels.zhaohu.binding_store import get_zhaohu_binding_store
@@ -530,6 +532,7 @@ async def _persist_zhaohu_binding(
             tenant_id=effective_tenant_id,
             source_id=effective_source_id,
             robot_id=robot_id,
+            priority=priority,
         )
     except Exception:
         import logging
@@ -837,6 +840,7 @@ async def distribute_channel_config(
                         effective_target_tenant_id,
                         distributed_zhaohu,
                         source_id=_request_source_id(request),
+                        priority=20,
                     )
 
             results.append(

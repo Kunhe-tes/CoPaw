@@ -3,6 +3,7 @@ import { Routes, Route, useLocation, Navigate } from "react-router-dom";
 import { useEffect } from "react";
 // useIframeStore: 获取父窗口传递的 hideMenu 参数
 import { useIframeStore } from "../../stores/iframeStore";
+import { useChatPresentationStore } from "../../stores/chatPresentationStore";
 import { useSourceSystemConfigStore } from "../../stores/sourceSystemConfigStore";
 import { DEFAULT_SOURCE_ID } from "../../constants/identity";
 
@@ -11,7 +12,6 @@ import Header from "../Header";
 import ConsoleCronBubble from "../../components/ConsoleCronBubble";
 import styles from "../index.module.less";
 import Chat from "../../pages/Chat";
-import { resolveMainLayoutPresentation } from "./presentation";
 import ChannelsPage from "../../pages/Control/Channels";
 import SessionsPage from "../../pages/Control/Sessions";
 import CronJobsPage from "../../pages/Control/CronJobs";
@@ -105,19 +105,18 @@ export default function MainLayout() {
   // Global shell display control:
   // - iframe hideMenu === true hides Header and Sidebar
   // - origin=Y maps to hideMenu=true (see iframeMessage.ts)
-  // - content-only Chat routes hide the same shell directly from the URL
+  // - showContentOnly initializes a runtime presentation flag before React renders
   const hideMenu = useIframeStore((state) => state.hideMenu);
   const hideChat = useIframeStore((state) => state.hideChat);
+  const showContentOnly = useChatPresentationStore(
+    (state) => state.showContentOnly,
+  );
   const activeSourceId =
     useIframeStore((state) => state.source) || DEFAULT_SOURCE_ID;
   const loadEffectiveConfig = useSourceSystemConfigStore(
     (state) => state.loadEffectiveConfig,
   );
-  const { contentOnlyRoute, hideGlobalShell } = resolveMainLayoutPresentation({
-    hideMenu,
-    pathname: location.pathname,
-    search: location.search,
-  });
+  const hideGlobalShell = hideMenu || showContentOnly;
 
   useEffect(() => {
     loadEffectiveConfig(activeSourceId);
@@ -137,16 +136,14 @@ export default function MainLayout() {
           className={`page-container${
             hideGlobalShell ? "" : " page-container--with-sidebar"
           }${isReportViewPage ? " page-container--no-rightPadding" : ""}${
-            contentOnlyRoute.enabled ? ` ${styles.contentOnlyContainer}` : ""
+            showContentOnly ? ` ${styles.contentOnlyContainer}` : ""
           }`}
         >
-          {!contentOnlyRoute.enabled && <ConsoleCronBubble />}
+          {!showContentOnly && <ConsoleCronBubble />}
           <div
             className={`page-content${
               isReportViewPage ? " single-page-content" : ""
-            }${
-              contentOnlyRoute.enabled ? ` ${styles.contentOnlyContent}` : ""
-            }`}
+            }${showContentOnly ? ` ${styles.contentOnlyContent}` : ""}`}
           >
             <Routes>
               {hideChat ? (

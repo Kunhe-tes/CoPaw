@@ -99,6 +99,21 @@ async def search_template_by_name(
     return await service.search_template_id(templateName)
 
 
+@router.delete("/records/{record_id}", summary="删除上传记录")
+async def delete_asset_upload_record(record_id: int) -> dict:
+    """根据ID删除资产上传记录。"""
+    try:
+        service = get_service()
+    except RuntimeError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+
+    try:
+        await service.delete_record(record_id)
+        return {"success": True}
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+
+
 @router.post("/result", response_model=TemplateResultResponse)
 async def query_template_result(
     payload: TemplateResultRequest,

@@ -540,6 +540,32 @@ CRON_WPLUS_PRIVATE_KEY = EnvVarLoader.get_str(
     "",
 )
 
+# W+ message push configuration
+CRON_WPLUS_MSG_NOTICE_ID = EnvVarLoader.get_str(
+    "SWE_CRON_WPLUS_MSG_NOTICE_ID",
+    "",
+)
+CRON_WPLUS_MSG_APP_ID = EnvVarLoader.get_str(
+    "SWE_CRON_WPLUS_MSG_APP_ID",
+    "",
+)
+CRON_WPLUS_MSG_URL = EnvVarLoader.get_str(
+    "SWE_CRON_WPLUS_MSG_URL",
+    "",
+)
+CRON_WPLUS_PC_MENU_DOMAIN = EnvVarLoader.get_str(
+    "SWE_CRON_WPLUS_PC_MENU_DOMAIN",
+    "",
+)
+CRON_WPLUS_MSG_HEADER_KEY = EnvVarLoader.get_str(
+    "SWE_CRON_WPLUS_MSG_HEADER_KEY",
+    "",
+)
+CRON_WPLUS_MSG_HEADER_VALUE = EnvVarLoader.get_str(
+    "SWE_CRON_WPLUS_MSG_HEADER_VALUE",
+    "",
+)
+
 # User Info API URL (区分环境的用户信息查询接口地址)
 USER_INFO_API_URL = EnvVarLoader.get_str(
     "SWE_USER_INFO_API_URL",

@@ -10,6 +10,7 @@ CREATE TABLE IF NOT EXISTS swe_zhaohu_channel_binding (
     source_id VARCHAR(64) NOT NULL DEFAULT 'zhaohu' COMMENT '来源标识（招乎渠道为zhaohu）',
     robot_id VARCHAR(128) NOT NULL COMMENT '机器人openId（用于推送消息）',
     open_id VARCHAR(128) DEFAULT NULL COMMENT '用户招乎openId（来自回调消息，可能为空）',
+    priority INT NOT NULL DEFAULT 30 COMMENT '优先级，值越小优先级越高（10=用户更新 20=渠道分发 30=初始化）',
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
 

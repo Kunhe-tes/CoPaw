@@ -146,3 +146,11 @@ class AssetUploadRecordStore:
         query = "SELECT id FROM swe_asset_upload_record WHERE file_name = %s LIMIT 1"
         row = await self.db.fetch_one(query, (file_name,))
         return int(row["id"]) if row else None
+
+    async def delete_record(self, record_id: int) -> bool:
+        """根据ID删除上传记录。"""
+        if not self._use_db:
+            return False
+        query = "DELETE FROM swe_asset_upload_record WHERE id = %s"
+        result = await self.db.execute(query, (record_id,))
+        return result > 0
