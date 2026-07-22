@@ -19,7 +19,7 @@ workspace/
 
 Workspace 继续以现有 `skill.json` 作为唯一权威清单。该文件由 CoPaw 和外部服务共同读写；外部服务会保留不识别的字段，因此清单可增加独立的 `layout_version: 2`。现有随写入递增的 `version` 继续表示内容修订，不能用于推断布局版本。不创建 `.skill_state/manifest.json`，也不在两个清单之间双写。
 
-Market 仅对完整的 v2 Workspace 清单执行有副作用操作。既有清单缺失 `layout_version`、版本不支持或结构错误时，Market 必须失败并提示先运行 CLI；不得隐式升级布局或复制、覆盖、删除技能目录。
+当 `skill.json` 不存在时，Market 的首次分发或显式 claim 可通过既有共享写入器创建默认 v2 Workspace 清单。对于预先存在的清单，Market 仅在其布局为完整且受支持的 v2、结构正确时执行有副作用操作；仅预先存在且不可读或结构错误、缺失 `layout_version`、或版本不支持的清单必须失败并提示先运行 CLI，不得隐式升级该清单，也不得复制、覆盖或删除技能目录。
 
 Skill Pool 的目录和清单布局不在本次变更范围内；只有 Workspace 技能布局变化。
 

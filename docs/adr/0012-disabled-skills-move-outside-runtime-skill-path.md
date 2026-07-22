@@ -17,7 +17,7 @@ Workspace skill enablement is represented by both authoritative **Skill Manageme
 
 The layout change is performed before upgrading by a deployment-side CLI, not by permanent compatibility logic or a runtime management API. The CLI provides separate `--check` and `--apply` modes, is idempotent, rejects ambiguous mixed layouts, and applies across the release scope with all-or-nothing rollback. `--apply` moves registered disabled packages, updates `layout_version` in the existing `skill.json`, and never creates `.skill_state/manifest.json`. Rollback copies exist only for the duration of `--apply` and are deleted after success. Runtime freezing and concurrent skill-write coordination during migration are outside this decision.
 
-Market treats a pre-existing Workspace manifest as writable only when it has the supported v2 layout and required structure. A missing, legacy, unknown-version, or malformed manifest fails closed and requires the deployment-side CLI; Market never performs an implicit layout upgrade.
+When `skill.json` is absent, Market's first distribution or explicit claim may create the default v2 Workspace manifest through its existing shared writer. For a pre-existing manifest, Market permits mutation only when the manifest has the supported v2 layout and required structure. Only a pre-existing manifest that is unreadable or malformed, missing `layout_version`, or has an unsupported layout version fails closed and requires the deployment-side CLI; Market neither upgrades that manifest implicitly nor touches skill directories.
 
 **Consequences**
 
