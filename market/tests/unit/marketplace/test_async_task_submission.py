@@ -113,6 +113,72 @@ async def test_distribute_skill_returns_task_submission(tmp_path, monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_distribute_skill_accepts_skill_id_reference(
+    tmp_path,
+    monkeypatch,
+):
+    """技能分发路径传 skill_id 时仍应归一化到市场 item_id。"""
+    from market.marketplace.schemas import PublishSkillRequest
+
+    app = _make_app(tmp_path)
+    svc = app.state.marketplace
+    svc._resolve_target_users = AsyncMock(  # noqa: SLF001
+        return_value=[
+            {
+                "tenant_id": "tenant-a",
+                "tenant_name": "用户A",
+                "bbk_id": "100",
+            },
+        ],
+    )
+    skill_id = "de587f2c-c44c-4e5a-84b6-7a7278bda901"
+    item, _ = await svc.publish_skill(
+        "src1",
+        PublishSkillRequest(
+            name="skill-a",
+            description="",
+            creator_id="alice",
+            creator_name="Alice",
+            skill_id=skill_id,
+            skill_json={},
+            skill_md="",
+        ),
+    )
+
+    scheduled: dict[str, Any] = {}
+
+    def capture_task(coro):
+        """记录后台协程参数并关闭协程，避免测试真实分发。"""
+        scheduled["item_id"] = coro.cr_frame.f_locals["item_id"]
+        coro.close()
+        return object()
+
+    monkeypatch.setattr(skills_router.asyncio, "create_task", capture_task)
+
+    client = TestClient(app)
+    resp = client.post(
+        f"/api/market/skills/{skill_id}/distribute",
+        json={"target_type": "all", "target_values": []},
+        headers={
+            "X-Source-Id": "src1",
+            "X-Manager": "true",
+            "X-User-Id": "admin",
+            "X-User-Name": "admin",
+        },
+    )
+
+    assert resp.status_code == 200
+    assert resp.json()["status"] == "queued"
+    assert scheduled["item_id"] == item.item_id
+    task_insert_call = next(
+        call
+        for call in app.state.db.execute.await_args_list
+        if "INSERT INTO swe_async_tasks" in call.args[0]
+    )
+    assert task_insert_call.args[1][5] == "分发技能「skill-a」，目标 1 个用户"
+
+
+@pytest.mark.asyncio
 async def test_distribute_mcp_returns_task_submission(tmp_path, monkeypatch):
     """MCP 分发应返回受理中的任务。"""
     app = _make_app(tmp_path)
@@ -151,6 +217,60 @@ async def test_distribute_mcp_returns_task_submission(tmp_path, monkeypatch):
     assert resp.status_code == 200
     assert resp.json()["status"] == "queued"
     assert resp.json()["task_id"]
+    task_insert_call = next(
+        call
+        for call in app.state.db.execute.await_args_list
+        if "INSERT INTO swe_async_tasks" in call.args[0]
+    )
+    assert task_insert_call.args[1][5] == "分发 MCP「demo」，目标 1 个用户"
+
+
+@pytest.mark.asyncio
+async def test_distribute_mcp_accepts_client_key_reference(
+    tmp_path,
+    monkeypatch,
+):
+    """MCP 分发路径传 client_key 时仍应归一化到市场 item_id。"""
+    app = _make_app(tmp_path)
+    svc = app.state.marketplace
+    item, _ = await svc.publish_mcp(
+        "src1",
+        PublishMCPRequest(
+            client_key="mcp-a",
+            name="demo",
+            description="demo",
+            creator_id="alice",
+            creator_name="Alice",
+            config={"name": "demo", "transport": "stdio", "command": "/a"},
+            version="1.0.0",
+        ),
+    )
+
+    scheduled: dict[str, Any] = {}
+
+    def capture_task(coro):
+        """记录后台协程参数并关闭协程，避免测试真实分发。"""
+        scheduled["item_id"] = coro.cr_frame.f_locals["item_id"]
+        coro.close()
+        return object()
+
+    monkeypatch.setattr(mcp_router.asyncio, "create_task", capture_task)
+
+    client = TestClient(app)
+    resp = client.post(
+        "/api/market/mcp/mcp-a/distribute",
+        json={"target_tenant_ids": ["tenant-a"], "overwrite": True},
+        headers={
+            "X-Source-Id": "src1",
+            "X-Manager": "true",
+            "X-User-Id": "admin",
+            "X-User-Name": "admin",
+        },
+    )
+
+    assert resp.status_code == 200
+    assert resp.json()["status"] == "queued"
+    assert scheduled["item_id"] == item.item_id
     task_insert_call = next(
         call
         for call in app.state.db.execute.await_args_list

@@ -19,6 +19,10 @@ class _Db:
             return self.execute_results.pop(0)
         return 1
 
+    async def execute_many(self, query, params_list):
+        self.executed.append((query, params_list))
+        return len(params_list)
+
     async def fetch_one(self, query, params=None):
         self.executed.append((query, params))
         if self.fetch_one_results:

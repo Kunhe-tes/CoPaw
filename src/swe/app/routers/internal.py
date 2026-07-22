@@ -17,6 +17,7 @@ from fastapi import UploadFile
 from pydantic import BaseModel, Field
 
 from ..b3_headers import build_b3_dispatch_meta
+from ..async_tasks.db import get_or_create_async_task_db
 from ..async_tasks.store import AsyncTaskStore
 from ..identity_resolver import resolve_user_identity
 from ...config.context import (
@@ -604,12 +605,9 @@ async def _is_tenant_already_bootstrapped(
         return False
 
 
-def _request_db_connection(request: Request):
-    """读取当前请求绑定的数据库连接。"""
-    state = getattr(request.app, "state", None)
-    if state is None:
-        return None
-    return getattr(state, "db_connection", None)
+async def _request_db_connection(request: Request):
+    """读取或懒加载当前请求绑定的数据库连接。"""
+    return await get_or_create_async_task_db(request)
 
 
 def _request_actor(request: Request) -> tuple[str, str]:
@@ -619,9 +617,9 @@ def _request_actor(request: Request) -> tuple[str, str]:
     return actor_id, actor_name
 
 
-def _make_async_task_store(request: Request) -> AsyncTaskStore:
+async def _make_async_task_store(request: Request) -> AsyncTaskStore:
     """创建统一异步任务写入器。"""
-    db_connection = _request_db_connection(request)
+    db_connection = await _request_db_connection(request)
     if db_connection is None:
         raise HTTPException(
             status_code=503,
@@ -730,6 +728,7 @@ async def _run_internal_batch_initialize_task(
                     task_id=task_id,
                     target_id=tenant_id,
                     success=False,
+                    item_status="failed",
                     error_message=error_message,
                 )
             except Exception:
@@ -772,6 +771,7 @@ async def _run_internal_batch_initialize_task(
                     task_id=task_id,
                     target_id=tenant_id,
                     success=False,
+                    item_status="failed",
                     result={
                         "tenant_id": tenant_id,
                         "tenant_name": resolved_identity.user_name,
@@ -795,11 +795,12 @@ async def _run_internal_batch_initialize_task(
                     task_id=task_id,
                     target_id=tenant_id,
                     success=True,
+                    item_status="skipped",
                     result={
                         "tenant_id": tenant_id,
                         "tenant_name": resolved_identity.user_name,
                         "bbk_id": resolved_identity.bbk_id,
-                        "status": "success",
+                        "status": "skipped",
                         "message": "skipped",
                     },
                 )
@@ -817,12 +818,13 @@ async def _run_internal_batch_initialize_task(
                 task_id=task_id,
                 target_id=tenant_id,
                 success=True,
+                item_status="created",
                 result={
                     "tenant_id": tenant_id,
                     "tenant_name": resolved_identity.user_name,
                     "bbk_id": resolved_identity.bbk_id,
-                    "status": "success",
-                    "message": "bootstrapped",
+                    "status": "created",
+                    "message": "created",
                 },
             )
         except Exception as exc:  # pylint: disable=broad-except
@@ -831,6 +833,7 @@ async def _run_internal_batch_initialize_task(
                 task_id=task_id,
                 target_id=tenant_id,
                 success=False,
+                item_status="failed",
                 result={
                     "tenant_id": tenant_id,
                     "status": "failed",
@@ -1207,7 +1210,7 @@ async def internal_batch_initialize_tenants(
         )
 
     task_id = str(uuid.uuid4())
-    store = _make_async_task_store(request)
+    store = await _make_async_task_store(request)
     actor_user_id, actor_user_name = _request_actor(request)
     await store.start_task(
         task_id=task_id,

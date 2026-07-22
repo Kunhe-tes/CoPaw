@@ -49,6 +49,15 @@ class DisconnectedAsyncTaskDb(FakeAsyncTaskDb):
     is_connected = False
 
 
+class LazyAsyncTaskDb(FakeAsyncTaskDb):
+    """模拟从配置懒加载出来的任务库连接。"""
+
+    connected = False
+
+    async def connect(self) -> None:
+        self.connected = True
+
+
 @dataclass
 class FakeProvider:
     id: str
@@ -815,6 +824,84 @@ def test_distribute_active_model_returns_async_task_submission(
     )
     assert submitted["start_task"]["actor_user_id"] == "operator-1"
     assert submitted["start_task"]["actor_user_name"] == "张三"
+
+
+def test_active_model_distribution_lazy_loads_missing_app_db(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """app state 缺少数据库对象时应按配置懒加载任务库。"""
+    source_manager = FakeManager(
+        active_model=ModelSlotConfig(provider_id="openai", model="gpt-5.4"),
+        providers={
+            "openai": FakeProvider(
+                id="openai",
+                models=[{"id": "gpt-5.4", "name": "GPT-5.4"}],
+            ),
+        },
+    )
+    submitted: dict[str, Any] = {}
+
+    class FakeStore:
+        def __init__(self, db) -> None:  # noqa: ANN001
+            submitted["db"] = db
+
+        async def start_task(self, **kwargs) -> None:  # noqa: ANN003
+            submitted["start_task"] = kwargs
+
+    async def fake_task_runner(*args, **kwargs):  # noqa: ANN001, ANN003
+        submitted["runner"] = (args, kwargs)
+
+    def fake_create_task(coro):  # noqa: ANN001
+        submitted["coroutine"] = coro
+        coro.close()
+        return object()
+
+    async def fake_get_db(request):  # noqa: ANN001
+        db = LazyAsyncTaskDb()
+        await db.connect()
+        request.app.state.db_connection = db
+        return db
+
+    monkeypatch.setattr(
+        providers_router,
+        "get_or_create_async_task_db",
+        fake_get_db,
+    )
+    monkeypatch.setattr(
+        providers_router,
+        "AsyncTaskStore",
+        FakeStore,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        providers_router.asyncio,
+        "create_task",
+        fake_create_task,
+    )
+    monkeypatch.setattr(
+        providers_router,
+        "_run_active_model_distribution_task",
+        fake_task_runner,
+        raising=False,
+    )
+
+    app = SimpleNamespace(state=SimpleNamespace())
+    result = asyncio.run(
+        providers_router.distribute_active_model(
+            _request(app=app),
+            providers_router.ActiveModelDistributionRequest(
+                target_tenant_ids=["tenant-a"],
+                overwrite=True,
+            ),
+            manager=source_manager,
+        ),
+    )
+
+    assert result.status == "queued"
+    assert result.task_id
+    assert submitted["db"].connected is True
+    assert app.state.db_connection is submitted["db"]
+    assert submitted["start_task"]["task_id"] == result.task_id
 
 
 def test_active_model_distribution_requires_async_task_db() -> None:

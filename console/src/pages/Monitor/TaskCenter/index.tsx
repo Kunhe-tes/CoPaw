@@ -37,6 +37,8 @@ const STATUS_COLOR: Record<string, string> = {
   queued: "default",
   running: "processing",
   succeeded: "success",
+  created: "success",
+  skipped: "default",
   partial_failed: "warning",
   failed: "error",
 };
@@ -45,6 +47,8 @@ const STATUS_LABEL: Record<string, string> = {
   queued: "排队",
   running: "运行",
   succeeded: "成功",
+  created: "创建",
+  skipped: "跳过",
   partial_failed: "部分失败",
   failed: "失败",
 };

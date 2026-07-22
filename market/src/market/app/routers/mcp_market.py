@@ -108,6 +108,25 @@ def _distribution_summary(kind: str, name: str, target_count: int) -> str:
     return f"分发 {kind}「{object_name}」，目标 {target_count} 个用户"
 
 
+def _find_market_mcp_item(svc, source_id: str, item_ref: str):
+    """按 item_id、client_key 或名称解析市场 MCP 条目。"""
+    items = load_index(svc.marketplace_root, source_id)
+    return next(
+        (
+            candidate
+            for candidate in items
+            if candidate.item_type == "mcp"
+            and item_ref
+            in {
+                candidate.item_id,
+                candidate.client_key,
+                candidate.name,
+            }
+        ),
+        None,
+    )
+
+
 async def _run_mcp_distribution_task(
     *,
     task_id: str,
@@ -518,12 +537,8 @@ async def distribute_mcp(
     _require_manager(x_manager)
     svc = request.app.state.marketplace
 
-    # 检查条目是否存在
-    items = load_index(svc.marketplace_root, source_id)
-    item = next(
-        (i for i in items if i.item_id == item_id and i.item_type == "mcp"),
-        None,
-    )
+    # 前端可能传市场 item_id，也可能传业务侧 client_key 或名称。
+    item = _find_market_mcp_item(svc, source_id, item_id)
     if item is None:
         raise HTTPException(
             status_code=404,
@@ -558,7 +573,7 @@ async def distribute_mcp(
             store=store,
             svc=svc,
             source_id=source_id,
-            item_id=item_id,
+            item_id=item.item_id,
             operator_id=x_user_id or "",
             operator_name=unquote(x_user_name or ""),
             req=req,

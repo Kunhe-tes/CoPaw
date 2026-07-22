@@ -956,17 +956,27 @@ def test_broadcast_job_uses_db_store_when_state_store_missing(monkeypatch):
     )
     db = _AsyncTaskDb()
     db.is_connected = False
+
+    async def _fake_get_async_task_db(request):
+        request.app.state.db_connection = db
+        return db
+
+    monkeypatch.setattr(
+        api_module,
+        "get_or_create_async_task_db",
+        _fake_get_async_task_db,
+    )
     with _build_client(
         _Manager({"job-source": source_job}),
         multi_agent_manager=_MultiAgentManager({}),
     ) as client:
-        client.app.state.db_connection = db
         response = client.post(
             "/cron/jobs/job-source/broadcast",
             json={"target_tenant_ids": ["tenant-b"]},
         )
 
         assert response.status_code == 200
+        assert client.app.state.db_connection is db
         assert any(
             "INSERT INTO swe_async_tasks" in query
             for query, _params in db.executed

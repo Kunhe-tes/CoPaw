@@ -42,6 +42,7 @@ from ...providers.models import ModelSlotConfig
 from ...providers.provider import ProviderInfo, ModelInfo
 from ...providers.provider_manager import ActiveModelsInfo, ProviderManager
 from ..async_tasks import AsyncTaskStore
+from ..async_tasks.db import get_or_create_async_task_db
 from ..workspace.tenant_initializer import TenantInitializer
 
 logger = logging.getLogger(__name__)
@@ -413,11 +414,9 @@ def _get_effective_tenant_id(request: Request) -> str | None:
     )
 
 
-def _request_db_connection(request: Request):
-    """从 FastAPI app state 读取数据库连接。"""
-    app = getattr(request, "app", None)
-    state = getattr(app, "state", None)
-    return getattr(state, "db_connection", None)
+async def _request_db_connection(request: Request):
+    """读取或懒加载异步任务数据库连接。"""
+    return await get_or_create_async_task_db(request)
 
 
 def _get_tenant_storage_providers_dir(tenant_id: str | None = None):
@@ -446,9 +445,9 @@ def _get_target_storage_providers_dir(tenant_id: str) -> PathlibPath:
     return _get_tenant_storage_providers_dir(tenant_id)
 
 
-def _make_async_task_store(request: Request) -> AsyncTaskStore:
+async def _make_async_task_store(request: Request) -> AsyncTaskStore:
     """创建异步任务写入器。"""
-    db_connection = _request_db_connection(request)
+    db_connection = await _request_db_connection(request)
     if db_connection is None:
         raise HTTPException(
             status_code=503,
@@ -1481,7 +1480,7 @@ async def distribute_active_model(
         "swe.app.async_tasks.store",
     )
     if use_async_dispatch:
-        store = _make_async_task_store(request)
+        store = await _make_async_task_store(request)
         actor_user_id, actor_user_name = _request_actor(request)
         await store.start_task(
             task_id=task_id,
@@ -1605,7 +1604,7 @@ async def distribute_providers(
         "swe.app.async_tasks.store",
     )
     if use_async_dispatch:
-        store = _make_async_task_store(request)
+        store = await _make_async_task_store(request)
         actor_user_id, actor_user_name = _request_actor(request)
         await store.start_task(
             task_id=task_id,

@@ -28,6 +28,7 @@ from ...config.utils import (
     load_config,
 )
 from ...providers.provider_manager import ProviderManager
+from ..async_tasks.db import get_or_create_async_task_db
 from ..b3_headers import build_b3_dispatch_meta
 from ..identity_resolver import resolve_user_identity
 from .broadcast import (
@@ -1119,7 +1120,9 @@ async def _startup_dispatch_broadcast_children_processing(
                 )
 
 
-def _get_broadcast_task_store(request: Request) -> CronBroadcastTaskStore:
+async def _get_broadcast_task_store(
+    request: Request,
+) -> CronBroadcastTaskStore:
     store = getattr(
         request.app.state,
         "cron_broadcast_task_store",
@@ -1128,7 +1131,7 @@ def _get_broadcast_task_store(request: Request) -> CronBroadcastTaskStore:
     if store is not None:
         return store
 
-    db_connection = getattr(request.app.state, "db_connection", None)
+    db_connection = await get_or_create_async_task_db(request)
     if db_connection is not None:
         store = CronBroadcastTaskStore(db_connection)
     else:
@@ -1299,7 +1302,8 @@ async def _get_current_broadcast_task_response(
     source_job: CronJobSpec,
 ) -> CronBroadcastCurrentTaskResponse:
     parts = _broadcast_task_parts(request, source_job)
-    snapshot = await _get_broadcast_task_store(request).get_running_task(
+    store = await _get_broadcast_task_store(request)
+    snapshot = await store.get_running_task(
         agent_id=parts["agent_id"],
         source_id=parts["source_id"],
         tenant_id=parts["tenant_id"],
@@ -1319,7 +1323,7 @@ async def _schedule_broadcast_task(
     tenant_ids: list[str],
     post_broadcast: Callable[[], Awaitable[None]] | None = None,
 ) -> tuple[CronBroadcastTaskSnapshot, bool]:
-    store = _get_broadcast_task_store(request)
+    store = await _get_broadcast_task_store(request)
     tasks = _get_broadcast_tasks(request)
     parts = _broadcast_task_parts(request, source_job)
     actor_user_id, actor_user_name = _request_actor(request)
@@ -1448,7 +1452,7 @@ async def _claim_dispatch_mode_operation(
     request: Request,
     source_job: CronJobSpec,
 ) -> tuple[CronBroadcastTaskStore, CronBroadcastTaskSnapshot]:
-    store = _get_broadcast_task_store(request)
+    store = await _get_broadcast_task_store(request)
     parts = _broadcast_task_parts(request, source_job)
     actor_user_id, actor_user_name = _request_actor(request)
     snapshot, reused = await store.start_task(
@@ -2316,7 +2320,8 @@ async def get_broadcast_task(
     mgr: CronManager = Depends(get_cron_manager),
 ) -> CronBroadcastTaskResponse:
     source_job = await _get_source_job_or_404(mgr, job_id)
-    snapshot = await _get_broadcast_task_store(request).get_task(task_id)
+    store = await _get_broadcast_task_store(request)
+    snapshot = await store.get_task(task_id)
     if snapshot is None or not _broadcast_task_belongs_to_source(
         request,
         source_job,

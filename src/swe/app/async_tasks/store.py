@@ -195,11 +195,12 @@ class AsyncTaskStore:
         task_id: str,
         target_id: str,
         success: bool,
+        item_status: str | None = None,
         result: Any = None,
         error_message: str | None = None,
     ) -> None:
         """记录单个目标的执行结果。"""
-        status = "succeeded" if success else "failed"
+        status = item_status or ("succeeded" if success else "failed")
         target_name = _extract_target_name(result)
         await self.db.execute(
             """

@@ -248,15 +248,19 @@ def _distribution_summary(kind: str, name: str, target_count: int) -> str:
     return f"分发{kind}「{object_name}」，目标 {target_count} 个用户"
 
 
-def _find_market_skill_name(svc, source_id: str, item_id: str) -> str:
-    """从市场索引中查找技能展示名称，查不到时回退到请求标识。"""
+def _find_market_skill_item(
+    svc,
+    source_id: str,
+    item_ref: str,
+) -> MarketItem | None:
+    """按 item_id、skill_id 或名称解析市场技能条目。"""
     items = load_index(svc.marketplace_root, source_id)
-    item = next(
+    return next(
         (
             candidate
             for candidate in items
             if candidate.item_type == "skill"
-            and item_id
+            and item_ref
             in {
                 candidate.item_id,
                 candidate.skill_id,
@@ -265,7 +269,6 @@ def _find_market_skill_name(svc, source_id: str, item_id: str) -> str:
         ),
         None,
     )
-    return item.name if item is not None else item_id
 
 
 def _skill_task_result_payload(
@@ -982,7 +985,10 @@ async def distribute_skill(
         )
         for user in target_users
     }
-    skill_name = _find_market_skill_name(svc, source_id, item_id)
+    skill_item = _find_market_skill_item(svc, source_id, item_id)
+    if skill_item is None:
+        raise HTTPException(status_code=404, detail="Skill not found")
+
     store = _get_async_task_store(request)
     await store.start_task(
         task_id=task_id,
@@ -995,7 +1001,7 @@ async def distribute_skill(
         target_names=target_user_names,
         summary=_distribution_summary(
             "技能",
-            skill_name,
+            skill_item.name,
             len(target_user_ids),
         ),
     )
@@ -1005,7 +1011,7 @@ async def distribute_skill(
             store=store,
             svc=svc,
             source_id=source_id,
-            item_id=item_id,
+            item_id=skill_item.item_id,
             operator_id=x_user_id or "",
             operator_name=decode_user_name(x_user_name) or "",
             req=req,

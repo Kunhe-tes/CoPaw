@@ -184,6 +184,26 @@ async def test_record_item_result_updates_single_item() -> None:
 
 
 @pytest.mark.asyncio
+async def test_record_item_result_accepts_custom_item_status() -> None:
+    """特殊分发明细可写入比成功失败更细的状态。"""
+    db = FakeDb()
+    store = AsyncTaskStore(db)
+
+    await store.record_item_result(
+        task_id="task-1",
+        target_id="tenant-a",
+        success=True,
+        item_status="skipped",
+        result={"status": "skipped"},
+    )
+
+    _sql, params = db.executed[0]
+    assert params is not None
+    assert params[0] == "skipped"
+    assert params[2] == '{"status": "skipped"}'
+
+
+@pytest.mark.asyncio
 async def test_record_item_result_backfills_target_name() -> None:
     """记录目标结果时应从结果中反填目标名称。"""
     db = FakeDb()

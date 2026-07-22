@@ -2,6 +2,7 @@
 """Internal reload API source-scope regression tests."""
 
 import base64
+import asyncio
 import json
 from types import SimpleNamespace
 from typing import Any
@@ -813,6 +814,43 @@ def test_internal_batch_initialize_requires_async_task_db() -> None:
     pool.ensure_bootstrap.assert_not_awaited()
 
 
+def test_internal_batch_initialize_lazy_loads_missing_app_db(monkeypatch):
+    """app state 缺少数据库对象时应懒加载异步任务库。"""
+    pool = SimpleNamespace(ensure_bootstrap=AsyncMock())
+    client = _build_client(SimpleNamespace())
+    client.app.state.tenant_workspace_pool = pool
+    db = FakeAsyncTaskDb()
+
+    async def fake_get_db(request):  # noqa: ANN001
+        request.app.state.db_connection = db
+        return db
+
+    monkeypatch.setattr(
+        internal_router,
+        "get_or_create_async_task_db",
+        fake_get_db,
+    )
+    monkeypatch.setattr(
+        internal_router.asyncio,
+        "create_task",
+        lambda coro: coro.close() or object(),
+    )
+
+    response = client.post(
+        "/internal/tenants/batch-initialize",
+        json={
+            "tenant_ids": "111",
+            "source_id": "RMASSIST",
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json()["task_id"]
+    assert client.app.state.db_connection is db
+    assert "INSERT INTO swe_async_tasks" in db.executed[0][0]
+    pool.ensure_bootstrap.assert_not_awaited()
+
+
 def test_internal_batch_initialize_uses_async_task_db_without_connection_check(
     monkeypatch,
 ) -> None:
@@ -956,6 +994,78 @@ def test_internal_batch_initialize_marks_existing_tenant_as_skipped(
     assert response.status_code == 200
     assert response.json()["status"] == "queued"
     pool.ensure_bootstrap.assert_not_awaited()
+
+
+def test_internal_batch_initialize_task_marks_item_detail_statuses(
+    monkeypatch,
+) -> None:
+    """后台初始化明细应区分已跳过和新创建状态。"""
+
+    class FakeStore:
+        def __init__(self) -> None:
+            self.item_results: list[dict[str, Any]] = []
+            self.finished: dict[str, Any] | None = None
+
+        async def mark_running(self, _task_id: str) -> None:
+            return None
+
+        async def record_item_result(self, **kwargs) -> None:
+            self.item_results.append(kwargs)
+
+        async def finish_task(self, **kwargs) -> None:
+            self.finished = kwargs
+
+    async def fake_resolve_user_identity(**kwargs):
+        tenant_id = kwargs["tenant_id"]
+        return ResolvedIdentity(
+            user_name=f"name-{tenant_id}",
+            bbk_id=f"bbk-{tenant_id}",
+        )
+
+    async def fake_existing_check(_pool, tenant_id, _source_id):
+        return tenant_id == "111"
+
+    monkeypatch.setattr(
+        internal_router,
+        "resolve_user_identity",
+        fake_resolve_user_identity,
+    )
+    monkeypatch.setattr(
+        internal_router,
+        "_is_tenant_already_bootstrapped",
+        fake_existing_check,
+    )
+
+    store = FakeStore()
+    pool = SimpleNamespace(ensure_bootstrap=AsyncMock())
+    payload = internal_router.InternalBatchInitializeTenantsRequest(
+        tenant_ids="111,222",
+        source_id="RMASSIST",
+    )
+
+    asyncio.run(
+        internal_router._run_internal_batch_initialize_task(  # noqa: SLF001
+            task_id="task-1",
+            store=store,
+            pool=pool,
+            payload=payload,
+            tenant_ids=["111", "222"],
+            headers={},
+        ),
+    )
+
+    assert [item["item_status"] for item in store.item_results] == [
+        "skipped",
+        "created",
+    ]
+    assert [item["result"]["status"] for item in store.item_results] == [
+        "skipped",
+        "created",
+    ]
+    pool.ensure_bootstrap.assert_awaited_once()
+    assert store.finished is not None
+    assert store.finished["status"] == "succeeded"
+    assert store.finished["done_count"] == 2
 
 
 def test_internal_batch_initialize_marks_existing_tenant_as_skipped_from_fs(
