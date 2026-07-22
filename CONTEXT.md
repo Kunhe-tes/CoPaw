@@ -205,7 +205,7 @@ A user-visible service or API that performs a managed skill lifecycle operation,
 _Avoid_: skill-directory browser, active-directory-only management surface
 
 **Managed Skill Package Resolution**:
-The management-surface rule for locating a registered package from its **Skill Management State**. It prefers the root selected by enablement and falls back to the other managed root during a **Skill State Conflict**. An **Active Collision Promotion** takes precedence when both copies exist. It does not resolve **Unmanaged Skill Content** that has no registered-name collision.
+The management-surface rule for locating a registered package from its **Skill Management State**. It prefers the root selected by enablement and falls back to the other managed root during a **Skill State Conflict**. An **Active Collision Promotion** takes precedence when both copies exist. A Market mutation receives both the resolved package and an explicit promotion result, so it can request the one required Agent reload only when the collision changed runtime state. It does not resolve **Unmanaged Skill Content** that has no registered-name collision.
 _Avoid_: enumerate every skill-looking directory, manifest-only package lookup
 
 **Active Collision Promotion**:
