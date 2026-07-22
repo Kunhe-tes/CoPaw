@@ -102,7 +102,7 @@ Expected: the new disabled-entry collision assertion fails because the old code 
 
 - [ ] **Step 4: Implement the promotion at the reconciliation boundary**
 
-Change `_reconcile_registered_skill_location()` so its both-root branch reports promotion, rather than treating it as an ordinary location mismatch. Keep the active copy and remove the disabled copy:
+Change `_reconcile_registered_skill_location()` so its both-root branch applies the false-to-true collision promotion, rather than treating it as an ordinary location mismatch. Keep the active copy and remove the disabled copy:
 
 ```python
 if active.exists() and disabled.exists():
@@ -111,7 +111,7 @@ if active.exists() and disabled.exists():
     return active
 ```
 
-The caller must derive `enabled` only after this helper runs, so `next_entry["enabled"]` becomes `True` and the package remains in `skills/`. Do not promote a package that exists in only one root.
+The caller must derive `enabled` only after this helper runs, so `next_entry["enabled"]` becomes `True` and the package remains in `skills/`. This SWE helper returns its resolved `Path` as before; the separate `promoted` result and reload decision are Market-only management contracts in Tasks 3–4. Do not promote a package that exists in only one root.
 
 - [ ] **Step 5: Verify SWE behavior and formatting**
 
