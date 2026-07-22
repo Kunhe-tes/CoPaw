@@ -1717,7 +1717,7 @@ class TracingQueryService:  # pylint: disable=too-many-public-methods
         bbk_in_clause = ""
         if bbk_subquery_params:
             placeholders = ", ".join(["%s"] * len(bbk_subquery_params))
-            bbk_in_clause = f" AND bbk_id IN ({placeholders})"
+            bbk_in_clause = f" AND tr.bbk_id IN ({placeholders})"
 
         if source_id == "all":
             # source_id == "all": total_skills 子查询不加 source_id 过滤
@@ -1758,8 +1758,8 @@ class TracingQueryService:  # pylint: disable=too-many-public-methods
                 LIMIT %s OFFSET %s
             """
             final_params = (
-                bbk_subquery_params
-                + cron_params
+                cron_params
+                + bbk_subquery_params
                 + params
                 + [page_size, offset]
             )
@@ -1804,9 +1804,9 @@ class TracingQueryService:  # pylint: disable=too-many-public-methods
                 LIMIT %s OFFSET %s
             """
             final_params = (
-                [source_id, source_id]
+                cron_params
+                + [source_id, source_id]
                 + bbk_subquery_params
-                + cron_params
                 + params
                 + [page_size, offset]
             )
