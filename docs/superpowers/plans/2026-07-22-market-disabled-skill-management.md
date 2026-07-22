@@ -288,7 +288,15 @@ after_claim = json.loads(
 assert after_claim["skills"]["manual"]["enabled"] is True
 ```
 
-Also test active collision promotion on a mutating Market operation: delete the hidden copy, retain the active content, and persist `enabled=True`. Test list/read/save/publish/Chinese-name sync against a disabled package, asserting edits stay hidden and `enabled` remains false. Test `migrate_skill_json_to_manifest()` across both roots but only for registered entries. Router tests in Task 5 cover download behavior.
+Also test active collision promotion on a mutating Market operation: delete the hidden copy, retain the active content, persist `enabled=True`, and request Agent reload because promotion changes the Skill Runtime View. Replace `svc._trigger_agent_reload` with an `AsyncMock` before the operation and assert:
+
+```python
+svc._trigger_agent_reload.assert_awaited_once_with(
+    user, "default", source
+)
+```
+
+Test list/read/save/publish/Chinese-name sync against a disabled package, asserting edits stay hidden and `enabled` remains false. Test `migrate_skill_json_to_manifest()` across both roots but only for registered entries. Router tests in Task 5 cover download behavior.
 
 - [ ] **Step 3: Verify the tests fail**
 
@@ -331,7 +339,7 @@ Replace direct `get_user_skills_dir(swe_root, user_id, agent_id, source_id) / sk
 
 - [ ] **Step 6: Preserve enablement during distribution and schedule reloads**
 
-Before copying a market package, strictly load the destination manifest. For an existing entry, resolve and overwrite its actual package directory while retaining its `enabled` value; for an absent entry, copy to `skills/` and register enabled. After a new distribution, enabled-package update, or any deletion, call `_trigger_agent_reload`; do not call it for disabled-package maintenance. Keep reload errors as warnings and do not roll back completed writes.
+Before copying a market package, strictly load the destination manifest. For an existing entry, resolve and overwrite its actual package directory while retaining its `enabled` value; for an absent entry, copy to `skills/` and register enabled. After a new distribution, enabled-package update, any deletion, or a successful active collision promotion, call `_trigger_agent_reload`; do not call it for disabled-package maintenance. Keep reload errors as warnings and do not roll back completed writes.
 
 - [ ] **Step 7: Verify and commit**
 

@@ -29,7 +29,7 @@ Skill Pool 的目录和清单布局不在本次变更范围内；只有 Workspac
 - 技能管理 API/UI 对已登记技能根据清单状态解析技能包位置，因此仍可查看和编辑禁用技能的 `SKILL.md`、`references/`、`scripts/` 和配置。
 - 已登记技能的删除仍只允许作用于禁用技能，并同时删除其解析到的包目录与清单条目；Market 保留对未登记普通目录的既有直接删除，且不创建清单条目。
 - Pool 替换、内置技能更新、重新导入或管理面编辑同名禁用技能时，只更新 `.disabled_skills/<name>`，不得隐式启用。
-- Market 在首次分发、更新启用技能或删除技能后触发现有 Agent reload；仅维护禁用技能时不触发 reload。
+- Market 在首次分发、更新启用技能、删除技能或成功执行 active collision promotion 后触发现有 Agent reload；仅维护禁用技能时不触发 reload。active collision promotion 会将登记技能置为启用，因此会改变 Skill Runtime View。
 - 清单中没有条目的 `skills/<name>` 属于 Unmanaged Skill Content。协调逻辑不移动、不登记、不启用也不删除它；但若它与已登记禁用技能同名，则适用 active collision promotion。
 - Market 可继续展示和维护普通 `skills/` 中的 Unmanaged Skill Content；仅当用户显式执行启用且通过既有安全扫描时，Market 才将其登记为启用技能。例外是与已登记禁用技能同名时，SWE 协调和 Market 管理操作均删除旧 `.disabled_skills/<name>` 并将登记技能置为启用。`.disabled_skills/` 不接纳未登记内容。
 
