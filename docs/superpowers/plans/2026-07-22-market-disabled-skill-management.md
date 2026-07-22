@@ -239,7 +239,7 @@ Add focused tests for the following observable behavior:
 # registered disabled package is listed with enabled=False and can be read/edited
 items = await svc.get_my_skills(source, user)
 assert [item.skill_name for item in items] == [
-    "disabled", "deletable_disabled", "manual"
+    "disabled", "deletable_disabled", "enabled", "manual"
 ]
 assert next(item for item in items if item.skill_name == "disabled").enabled is False
 assert (
