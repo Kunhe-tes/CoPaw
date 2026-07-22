@@ -256,7 +256,12 @@ assert await svc.delete_skill(user, "enabled", "default", source) is False
 assert await svc.delete_skill(user, "disabled", "default", source) is True
 
 # manual active package remains listed and only enable claims it
-assert "manual" not in manifest["skills"]
+before_claim = json.loads(
+    get_user_skill_manifest_path(swe_root, user, "default", source).read_text(
+        encoding="utf-8"
+    )
+)
+assert "manual" not in before_claim["skills"]
 await svc.enable_skill(user, "manual", "default", source)
 after_claim = json.loads(
     get_user_skill_manifest_path(swe_root, user, "default", source).read_text(
