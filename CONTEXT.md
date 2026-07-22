@@ -200,8 +200,28 @@ _Avoid_: skill sandbox, secure skill store, deleted skills
 The authoritative backend-managed record of installed skills, enablement, channel availability, and configuration for one Workspace. It is accessed through skill-management surfaces rather than ordinary Workspace browsing, search, or editing.
 _Avoid_: workspace skill file, user-editable skill manifest, runtime skill list
 
+**Skill Management Surface**:
+A user-visible service or API that performs a managed skill lifecycle operation, including enablement, disablement, deletion, re-import, distribution, or editing. It resolves a registered package from **Skill Management State** to either the **Skill Runtime View** or **Disabled Skill Store**; a surface may write enablement state and rely on later reconciliation for package placement when that is its established service boundary. Market may also perform an **Explicit Skill Claim**.
+_Avoid_: skill-directory browser, active-directory-only management surface
+
+**Managed Skill Package Resolution**:
+The management-surface rule for locating a registered package from its **Skill Management State**. It prefers the root selected by enablement and falls back to the other managed root during a **Skill State Conflict**. An **Active Collision Promotion** takes precedence when both copies exist. It does not resolve **Unmanaged Skill Content** that has no registered-name collision.
+_Avoid_: enumerate every skill-looking directory, manifest-only package lookup
+
+**Active Collision Promotion**:
+The default resolution of a same-name active and disabled package: the `skills/` package is retained as the **Canonical Skill Package**, the `.disabled_skills/` package is deleted, and the registered skill becomes enabled. SWE reconciliation and Market explicit management both apply this rule.
+_Avoid_: preserve disabled state on active collision, ambiguous duplicate skill
+
+**State-Preserving Distribution**:
+Market distribution that installs an unregistered skill as enabled, but updates an already registered package at its managed location without changing its enablement. In particular, updating a **Disabled Skill** does not make it part of the **Skill Runtime View**.
+_Avoid_: update means enable, replace-active-directory-only
+
+**Disabled Skill Maintenance**:
+Management-surface viewing, downloading, editing, and publishing of a **Disabled Skill** at its resolved package location. Maintenance changes package content or related metadata but does not change enablement.
+_Avoid_: disabled means immutable, maintenance means enable
+
 **Canonical Skill Package**:
-The authoritative package content when the same skill exists in both the **Skill Runtime View** and **Disabled Skill Store**. The runtime-view copy wins for content, while enablement remains governed by **Skill Management State**.
+The authoritative package content when the same skill exists in both the **Skill Runtime View** and **Disabled Skill Store**. The runtime-view copy wins for content; **Active Collision Promotion** is the exception to ordinary **Skill Management State**-driven placement and changes the registered skill to enabled.
 _Avoid_: newest skill copy, enabled skill state, manifest-selected content
 
 **Skill State Conflict**:
@@ -209,8 +229,12 @@ A disagreement between **Skill Management State** and the retained location of a
 _Avoid_: partially enabled skill, best-effort skill state, usable mismatch
 
 **Unmanaged Skill Content**:
-Workspace content that resembles a skill package but has no entry in **Skill Management State**. It is neither registered nor governed by disabled-skill discovery guarantees, even when it remains visible to model-initiated file or shell tools.
+Workspace content that resembles a skill package but has no entry in **Skill Management State**. It is neither registered nor governed by disabled-skill discovery guarantees, even when it remains visible to model-initiated file or shell tools. Market may retain its legacy list, viewing, download, editing, publishing, and direct-delete behavior for this ordinary content; only an **Explicit Skill Claim** creates managed state, except that a same-name registered disabled package triggers **Active Collision Promotion**.
 _Avoid_: disabled skill, automatically installed skill, runtime skill
+
+**Explicit Skill Claim**:
+A user-initiated Market enablement of **Unmanaged Skill Content** in the ordinary skill directory. After the established security scan, it creates the corresponding **Skill Management State** entry as enabled. Except for **Active Collision Promotion**, SWE never claims unmanaged content automatically, and the **Disabled Skill Store** contains only registered packages.
+_Avoid_: automatic skill discovery, reconciliation registration, disabled-skill import
 
 **Skill Runtime View**:
 The current set of registered and enabled skill packages selected from a Workspace's ordinary skill directory. It excludes **Unmanaged Skill Content**, changes immediately when skill enablement changes, and gives existing Agent Runs no guarantee that earlier skill files remain available.

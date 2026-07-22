@@ -19,15 +19,19 @@ workspace/
 
 Workspace 继续以现有 `skill.json` 作为唯一权威清单。该文件由 CoPaw 和外部服务共同读写；外部服务会保留不识别的字段，因此清单可增加独立的 `layout_version: 2`。现有随写入递增的 `version` 继续表示内容修订，不能用于推断布局版本。不创建 `.skill_state/manifest.json`，也不在两个清单之间双写。
 
+Market 仅对完整的 v2 Workspace 清单执行有副作用操作。既有清单缺失 `layout_version`、版本不支持或结构错误时，Market 必须失败并提示先运行 CLI；不得隐式升级布局或复制、覆盖、删除技能目录。
+
 Skill Pool 的目录和清单布局不在本次变更范围内；只有 Workspace 技能布局变化。
 
 ## 运行时与管理边界
 
 - Agent 注册、提示注入、有效技能解析和 hook 加载只接受清单中 `enabled=true` 且实际位于 `skills/<name>` 的技能。
-- 技能管理 API/UI 根据清单状态解析技能包位置，因此仍可查看和编辑禁用技能的 `SKILL.md`、`references/`、`scripts/` 和配置。
-- 删除仍只允许作用于禁用技能，并同时删除 `.disabled_skills/<name>` 与清单条目。
+- 技能管理 API/UI 对已登记技能根据清单状态解析技能包位置，因此仍可查看和编辑禁用技能的 `SKILL.md`、`references/`、`scripts/` 和配置。
+- 已登记技能的删除仍只允许作用于禁用技能，并同时删除其解析到的包目录与清单条目；Market 保留对未登记普通目录的既有直接删除，且不创建清单条目。
 - Pool 替换、内置技能更新、重新导入或管理面编辑同名禁用技能时，只更新 `.disabled_skills/<name>`，不得隐式启用。
-- 清单中没有条目的 `skills/<name>` 属于 Unmanaged Skill Content。协调逻辑不移动、不登记、不启用也不删除它。
+- Market 在首次分发、更新启用技能或删除技能后触发现有 Agent reload；仅维护禁用技能时不触发 reload。
+- 清单中没有条目的 `skills/<name>` 属于 Unmanaged Skill Content。协调逻辑不移动、不登记、不启用也不删除它；但若它与已登记禁用技能同名，则适用 active collision promotion。
+- Market 可继续展示和维护普通 `skills/` 中的 Unmanaged Skill Content；仅当用户显式执行启用且通过既有安全扫描时，Market 才将其登记为启用技能。例外是与已登记禁用技能同名时，SWE 协调和 Market 管理操作均删除旧 `.disabled_skills/<name>` 并将登记技能置为启用。`.disabled_skills/` 不接纳未登记内容。
 
 ## 启停状态转换
 
@@ -58,7 +62,7 @@ Skill Pool 的目录和清单布局不在本次变更范围内；只有 Workspac
 | enabled | 无 | 有 | 移至 `skills/` |
 | disabled | 无 | 有 | 保持 |
 | disabled | 有 | 无 | 移至 `.disabled_skills/` |
-| 任意 | 有 | 有 | 以 `skills/` 内容为准，删除禁用副本后按清单状态放置 |
+| 任意 | 有 | 有 | 以 `skills/` 内容为准，删除禁用副本并将登记技能置为 enabled，保留在 `skills/` |
 | 任意 | 无 | 无 | 删除陈旧清单条目，沿用现有语义 |
 
 协调期间的不一致技能不可加入 Agent 的有效技能集合。目录移动和清单写入继续复用现有跨进程文件锁及原子 JSON 替换能力；本次不引入 Agent Run 技能快照。
@@ -95,8 +99,9 @@ swe skills migrate-layout --apply
 
 - 启停源目录缺失、移动失败或清单写入失败时返回失败，不报告部分成功。
 - `skill.json` 无法解析时失败关闭：不注册相关技能，不移动目录，也不覆盖外部服务写入的损坏文件。
-- 清单与目录不一致时，技能保持不可用，协调逻辑按清单恢复。
+- 清单与目录不一致时，技能保持不可用，协调逻辑按清单恢复；同名 active/disabled 双副本是例外，适用 active collision promotion。
 - 管理面不得因禁用包位于隐藏目录而返回“技能不存在”。
+- Market 的 reload 通知失败不回滚已经完成的业务写入；记录可观察告警，后续 SWE 协调或启动收敛运行视图。
 - 迁移 CLI 输出每个 Workspace 的检查、迁移、回滚或跳过结果，并以非零退出码表示任何未恢复错误。
 
 ## 测试策略

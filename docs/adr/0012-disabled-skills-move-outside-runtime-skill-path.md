@@ -5,14 +5,19 @@ Workspace skill enablement is represented by both authoritative **Skill Manageme
 **State transitions and reconciliation**
 
 - Disabling moves the package to `.disabled_skills/` before committing `enabled=false`; enabling commits `enabled=true` before moving the package to `skills/`. A mismatch is unavailable to Agent Runs until reconciliation restores the manifest-declared state.
-- If both locations contain the same registered skill, the `skills/` copy is the canonical content. It directly replaces the disabled copy, while the manifest remains authoritative for whether the canonical package ultimately belongs in `skills/` or `.disabled_skills/`.
-- Editing, Pool replacement, built-in updates, or re-importing an existing disabled skill updates the disabled copy without enabling it. Deletion remains limited to disabled skills.
-- Content placed manually under `skills/` without a manifest entry is unmanaged: reconciliation leaves it untouched and does not register or enable it.
-- External services may update registered entries in `skill.json` while preserving unknown fields. Reconciliation preserves those updates and materializes directory placement from `enabled`. Cross-service concurrent-write coordination is intentionally deferred.
+- If both locations contain the same registered skill, the `skills/` copy is the canonical content. It directly replaces the disabled copy and promotes the registered skill to enabled, so the retained package remains under `skills/`. This is the default for SWE reconciliation and Market management operations.
+- Editing, Pool replacement, built-in updates, or re-importing an existing disabled skill updates the disabled copy without enabling it. Deletion of a registered package remains limited to disabled skills; Market retains its legacy direct deletion of ordinary unmanaged content without creating a manifest entry.
+- Market requests the existing Agent reload after new distribution, an update to an enabled package, or deletion. Maintenance of a disabled package does not request reload because it cannot affect the Skill Runtime View.
+- Market treats reload as a best-effort notification after a completed business write. Notification failure is observable but does not roll back package or manifest changes; later SWE reconciliation converges the runtime view.
+- Content placed manually under `skills/` without a manifest entry is unmanaged: reconciliation leaves it untouched and does not register or enable it, unless it has the same name as a registered disabled package. That collision promotes the active package and enables the registered skill.
+- Market may continue to list and maintain ordinary unmanaged content, and explicitly claim it through a user-initiated enable operation after its established security scan. This is not automatic SWE registration; `.disabled_skills/` contains only registered packages.
+- External services may update registered entries in `skill.json` while preserving unknown fields. Reconciliation preserves those updates and materializes directory placement from `enabled`, except that an active-and-disabled same-name collision follows active collision promotion. Cross-service concurrent-write coordination is intentionally deferred.
 
 **Migration**
 
 The layout change is performed before upgrading by a deployment-side CLI, not by permanent compatibility logic or a runtime management API. The CLI provides separate `--check` and `--apply` modes, is idempotent, rejects ambiguous mixed layouts, and applies across the release scope with all-or-nothing rollback. `--apply` moves registered disabled packages, updates `layout_version` in the existing `skill.json`, and never creates `.skill_state/manifest.json`. Rollback copies exist only for the duration of `--apply` and are deleted after success. Runtime freezing and concurrent skill-write coordination during migration are outside this decision.
+
+Market treats a pre-existing Workspace manifest as writable only when it has the supported v2 layout and required structure. A missing, legacy, unknown-version, or malformed manifest fails closed and requires the deployment-side CLI; Market never performs an implicit layout upgrade.
 
 **Consequences**
 
