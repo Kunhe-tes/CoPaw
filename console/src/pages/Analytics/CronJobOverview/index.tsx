@@ -1485,7 +1485,7 @@ export default function CronJobOverviewPage() {
               className={styles.refreshButton}
               onClick={handleRefresh}
             >
-              <RefreshCw size={16} />
+              <RefreshCw size={14} />
               刷新
             </button>
           </div>
