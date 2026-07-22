@@ -159,7 +159,7 @@ assert get_user_disabled_skills_dir(root, "tenant", "default", "source") == (
 )
 ```
 
-Add parameterized invalid manifests: invalid UTF-8/JSON, missing `layout_version`, `layout_version != 2`, non-dict `skills`, non-dict entry, and non-bool `enabled`. Assert every mutation/preflight helper raises a `WorkspaceSkillManifestError` before any destination directory is created or removed. Add resolution tests for enabled target, disabled target, target-missing fallback, and both-root active preference.
+Add parameterized invalid manifests: invalid UTF-8/JSON, missing `layout_version`, `layout_version != 2`, non-dict `skills`, non-dict entry, missing `enabled`, and non-bool `enabled`. Assert every mutation/preflight helper raises a `WorkspaceSkillManifestError` before any destination directory is created or removed. Add resolution tests for enabled target, disabled target, target-missing fallback, and both-root active preference.
 
 - [ ] **Step 3: Verify the tests fail**
 
@@ -192,7 +192,7 @@ def validate_workspace_skill_manifest_v2(payload: object) -> dict:
     for name, entry in skills.items():
         if not isinstance(name, str) or not isinstance(entry, dict):
             raise WorkspaceSkillManifestError("invalid skill entry")
-        if "enabled" in entry and not isinstance(entry["enabled"], bool):
+        if "enabled" not in entry or not isinstance(entry["enabled"], bool):
             raise WorkspaceSkillManifestError("enabled must be a boolean")
     return payload
 ```
@@ -222,7 +222,7 @@ git commit --only market/src/market/marketplace/fs.py \
 
 - [ ] **Step 1: Run upstream impact checks before editing service methods**
 
-Run GitNexus upstream impact for `enable_skill`, `disable_skill`, `batch_delete_skills`, `get_my_skills`, `save_skill_file`, `delete_skill`, `migrate_skill_json_to_manifest`, and `_recall_skill_from_user`. Report any HIGH/CRITICAL result before editing.
+Run GitNexus upstream impact for `_scan_skill_or_raise`, `register_skill_in_manifest`, `enable_skill`, `disable_skill`, `batch_delete_skills`, `batch_enable_skills`, `batch_disable_skills`, `get_my_skills`, `list_skill_files`, `read_skill_file`, `save_skill_file`, `delete_skill`, `migrate_skill_json_to_manifest`, `_sync_cn_name_to_user_workspace`, `update_skill_cn_name`, `_recall_skill_from_user`, `publish_skill`, and `distribute_skill`. Report any HIGH/CRITICAL result before editing.
 
 - [ ] **Step 2: Write failing service tests for dual-root behavior**
 
@@ -230,7 +230,8 @@ Add focused tests for the following observable behavior:
 
 ```python
 # registered disabled package is listed with enabled=False and can be read/edited
-assert [item.skill_name for item in await svc.get_my_skills(source, user)] == ["disabled", "manual"]
+items = await svc.get_my_skills(source, user)
+assert [item.skill_name for item in items] == ["disabled", "manual"]
 assert next(item for item in items if item.skill_name == "disabled").enabled is False
 
 # registered hidden package can be enabled; Market writes true then requests reload
@@ -306,7 +307,7 @@ git commit --only market/src/market/marketplace/service.py \
 
 - [ ] **Step 1: Run upstream impact checks before editing router helpers**
 
-Run GitNexus upstream impact for `_check_skill_name_exists_user`, the upload route, and `download_my_skill`. Report any HIGH/CRITICAL result before editing.
+Run GitNexus upstream impact for `_check_skill_name_exists_user`, `upload_skill_to_workspace`, and `download_my_skill`. Report any HIGH/CRITICAL result before editing.
 
 - [ ] **Step 2: Write failing route tests**
 
