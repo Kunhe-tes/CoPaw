@@ -180,8 +180,15 @@ Add a Market-local exception and helpers; do not import SWE private helpers:
 class WorkspaceSkillManifestError(ValueError):
     pass
 
-def get_user_disabled_skills_dir(...):
-    return get_user_skill_manifest_path(...).parent / ".disabled_skills"
+def get_user_disabled_skills_dir(
+    swe_root: Path,
+    user_id: str,
+    agent_id: str = DEFAULT_AGENT_ID,
+    source_id: str | None = None,
+) -> Path:
+    return get_user_skill_manifest_path(
+        swe_root, user_id, agent_id, source_id
+    ).parent / ".disabled_skills"
 
 def validate_workspace_skill_manifest_v2(payload: object) -> dict:
     if not isinstance(payload, dict) or payload.get("layout_version") != 2:
@@ -237,7 +244,12 @@ assert next(item for item in items if item.skill_name == "disabled").enabled is 
 # registered hidden package can be enabled; Market writes true then requests reload
 result = await svc.enable_skill(user, "disabled", "default", source)
 assert result == {"success": True}
-assert manifest_entry["enabled"] is True
+after_enable = json.loads(
+    get_user_skill_manifest_path(swe_root, user, "default", source).read_text(
+        encoding="utf-8"
+    )
+)
+assert after_enable["skills"]["disabled"]["enabled"] is True
 
 # registered enabled package cannot be deleted; registered disabled package is deleted from hidden root
 assert await svc.delete_skill(user, "enabled", "default", source) is False
@@ -246,10 +258,15 @@ assert await svc.delete_skill(user, "disabled", "default", source) is True
 # manual active package remains listed and only enable claims it
 assert "manual" not in manifest["skills"]
 await svc.enable_skill(user, "manual", "default", source)
-assert manifest["skills"]["manual"]["enabled"] is True
+after_claim = json.loads(
+    get_user_skill_manifest_path(swe_root, user, "default", source).read_text(
+        encoding="utf-8"
+    )
+)
+assert after_claim["skills"]["manual"]["enabled"] is True
 ```
 
-Also test active collision promotion on a mutating Market operation: delete the hidden copy, retain the active content, and persist `enabled=True`. Test list/read/download/save/publish/Chinese-name sync against a disabled package, asserting edits stay hidden and `enabled` remains false. Test `migrate_skill_json_to_manifest()` across both roots but only for registered entries.
+Also test active collision promotion on a mutating Market operation: delete the hidden copy, retain the active content, and persist `enabled=True`. Test list/read/save/publish/Chinese-name sync against a disabled package, asserting edits stay hidden and `enabled` remains false. Test `migrate_skill_json_to_manifest()` across both roots but only for registered entries. Router tests in Task 5 cover download behavior.
 
 - [ ] **Step 3: Verify the tests fail**
 
@@ -270,7 +287,13 @@ Implement one private service helper for mutating registered operations. It must
 registered_items = [
     resolved_path
     for name, entry in manifest["skills"].items()
-    if (resolved_path := resolve_registered_skill_path(..., name, entry))
+    if (
+        resolved_path := resolve_registered_skill_path(
+            workspace_dir=workspace_dir,
+            skill_name=name,
+            entry=entry,
+        )
+    )
 ]
 unmanaged_active = [
     path for path in skills_dir.iterdir()
@@ -282,7 +305,7 @@ Deduplicate by directory name. Do not enumerate `.disabled_skills/` entries that
 
 - [ ] **Step 5: Route all existing service paths through the resolver**
 
-Replace direct `get_user_skills_dir(...) / skill_name` use in: security scan for a registered package, enable/disable, single and batch delete, list/read/save files, per-package `skill.json` migration, cn-name sync, market recall, and publish-source copying. Preserve legacy active-root operations for an unmanaged package; only explicit enable scans and claims it. For a registered deletion, reject `enabled=True` without changing files or state; for a registered disabled deletion, remove the resolved path, manifest entry, and DB row.
+Replace direct `get_user_skills_dir(swe_root, user_id, agent_id, source_id) / skill_name` use in: security scan for a registered package, enable/disable, single and batch delete, list/read/save files, per-package `skill.json` migration, cn-name sync, market recall, and publish-source copying. Preserve legacy active-root operations for an unmanaged package; only explicit enable scans and claims it. For a registered deletion, reject `enabled=True` without changing files or state; for a registered disabled deletion, remove the resolved path, manifest entry, and DB row.
 
 - [ ] **Step 6: Preserve enablement during distribution and schedule reloads**
 
