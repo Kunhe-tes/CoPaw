@@ -1,4 +1,8 @@
-import { Bubble, useProviderContext, IAgentScopeRuntimeWebUIInputData } from "@/components/agentscope-chat";
+import {
+  Bubble,
+  useProviderContext,
+  IAgentScopeRuntimeWebUIInputData,
+} from "@/components/agentscope-chat";
 import { ChatAnywhereMessagesContext } from "../../Context/ChatAnywhereMessagesContext";
 import { useContextSelector } from "use-context-selector";
 import { ChatAnywhereSessionsContext } from "../../Context/ChatAnywhereSessionsContext";
@@ -7,10 +11,12 @@ import Welcome from "../Welcome";
 import { useChatAnywhereOptions } from "../../Context/ChatAnywhereOptionsContext";
 import React from "react";
 import { Spin } from "antd";
+import { useChatContentOnly } from "@/components/agentscope-chat/ChatContentOnlyContext";
 
 export default function MessageList(props: {
   onSubmit: (data: IAgentScopeRuntimeWebUIInputData) => void;
 }) {
+  const isContentOnly = useChatContentOnly();
   const messages = useContextSelector(
     ChatAnywhereMessagesContext,
     (v) => v.messages,
@@ -54,7 +60,7 @@ export default function MessageList(props: {
   if (safeMessages.length === 0)
     return (
       <div className={cls(prefixCls, `${prefixCls}-welcome`)}>
-        <Welcome onSubmit={props.onSubmit} />
+        {!isContentOnly && <Welcome onSubmit={props.onSubmit} />}
       </div>
     );
 

@@ -75,6 +75,7 @@ export default function Sidebar({ selectedKey }: SidebarProps) {
   const { isDark } = useTheme();
   const isSuperManager = useIframeStore((state) => state.isSuperManager);
   const manager = useIframeStore((state) => state.manager);
+  const hideChat = useIframeStore((state) => state.hideChat);
   const [authEnabled, setAuthEnabled] = useState(false);
   const [accountModalOpen, setAccountModalOpen] = useState(false);
   const [accountLoading, setAccountLoading] = useState(false);
@@ -335,7 +336,7 @@ export default function Sidebar({ selectedKey }: SidebarProps) {
 
   const menuItems: MenuProps["items"] = [
     // 1. 聊天（单独一级）
-    {
+    !hideChat && {
       key: "chat",
       label: collapsed ? null : t("nav.chat"),
       icon: <SparkChatTabFill size={16} />,

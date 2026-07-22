@@ -42,6 +42,7 @@ _notification_delay_minutes(job)
 | 自动普通任务成功 | `notification_due_at = end_time + notification_delay_minutes`；如果没有 `end_time`，使用 `actual_time` |
 | 手动运行普通任务成功 | 不设置自定义 delayed due time，沿用手动执行的即时/已读语义 |
 | 自动广播子任务成功 | 沿用广播原始时间对齐，`notification_due_at = actual_time + broadcast_offset_minutes + notification_delay_minutes` |
+| 自动批调度任务成功 | 如果 execution 带 `cron_dispatch.parent_scheduled_fire_at`，优先按父任务原计划时间加 `notification_delay_minutes` 计算 |
 | 手动广播子任务成功 | 不叠加广播 offset，也不叠加通知延迟 |
 
 核心边界在：
@@ -76,6 +77,20 @@ broadcast_offset_minutes + notification_delay_minutes
 - 子任务自动成功执行后，通知 due time 是 `actual_time + 140 minutes`
 
 广播构造入口是 `src/swe/app/crons/api.py` 的 `_build_broadcast_job()`。它会复制源任务 meta 后覆盖广播相关字段，因此 `notification_delay_minutes` 会随源任务继承到子任务。
+
+## 批调度时间对齐
+
+批调度的物理 timer 会提前触发，Scheduler 也可能因为容量和重试让实际执行时间晚于父任务原计划时间。因此批调度 execution 不能再用“实际时间 + 广播 offset”反推通知基准。
+
+Scheduler callback 会传：
+
+```text
+cron_dispatch.parent_scheduled_fire_at
+```
+
+当它存在时，SWE 优先按父任务原计划触发时间和原时区计算通知 due time，再叠加 `notification_delay_minutes`。这能避免“物理 timer 提前 4 小时，完成通知也提前 4 小时”，也不会因 intent 排队时间改变通知基准。
+
+没有完整 dispatch meta 的普通广播执行继续沿用 `actual_time + broadcast_offset_minutes` 规则；手动运行不使用两种自动调度延迟。
 
 ## CLI 创建
 
@@ -141,7 +156,8 @@ Console 提供两种单位：
 3. execution status 是否是 `success`；失败或取消不会进入成功通知延迟逻辑。
 4. 广播子任务是否带 `broadcast_notification_policy = "original_schedule"` 和 `broadcast_offset_minutes`。
 5. `MonitorSyncClient.record_execution()` 收到的 `notification_due_at` 是否符合预期。
-6. Monitor claim 侧是否已经到 due time；claim 条件仍是 pending + due time 到期 + 锁可领取。
+6. 批调度 execution 是否带正确的 `cron_dispatch.parent_scheduled_fire_at` 和时区。
+7. Monitor claim 侧是否已经到 due time，并同时满足 `status=success`、`async_status=success`、`need_notification=1`、`notification_status=pending`。
 
 ## 覆盖测试
 
