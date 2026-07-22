@@ -10,6 +10,8 @@ from types import SimpleNamespace
 from typing import Any
 
 import pytest
+from fastapi import FastAPI
+from fastapi.testclient import TestClient
 
 from swe.app.routers import providers as providers_router
 from swe.config.context import encode_scope_id, tenant_context
@@ -56,6 +58,27 @@ class LazyAsyncTaskDb(FakeAsyncTaskDb):
 
     async def connect(self) -> None:
         self.connected = True
+
+
+def _patch_resolve_identity(
+    monkeypatch: pytest.MonkeyPatch,
+    names: dict[str, str] | None = None,
+) -> None:
+    """替换分发目标身份解析，避免单测触发远端查询。"""
+    name_map = names or {"tenant-a": "用户A"}
+
+    async def fake_resolve_user_identity(**kwargs):  # noqa: ANN003
+        tenant_id = kwargs["tenant_id"]
+        return SimpleNamespace(
+            user_name=name_map.get(tenant_id),
+            bbk_id=None,
+        )
+
+    monkeypatch.setattr(
+        providers_router,
+        "resolve_user_identity",
+        fake_resolve_user_identity,
+    )
 
 
 @dataclass
@@ -752,6 +775,7 @@ def test_distribute_active_model_returns_async_task_submission(
     )
     submitted: dict[str, Any] = {}
     task_ids: list[str] = []
+    _patch_resolve_identity(monkeypatch)
 
     class FakeStore:
         def __init__(self, db) -> None:  # noqa: ANN001
@@ -824,6 +848,67 @@ def test_distribute_active_model_returns_async_task_submission(
     )
     assert submitted["start_task"]["actor_user_id"] == "operator-1"
     assert submitted["start_task"]["actor_user_name"] == "张三"
+    assert submitted["start_task"]["target_names"] == {
+        "tenant-a": "用户A",
+    }
+
+
+def test_distribute_active_model_http_response_includes_task_id(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """活跃模型分发的 HTTP 响应必须显式返回任务 ID。"""
+    source_manager = FakeManager(
+        active_model=ModelSlotConfig(provider_id="openai", model="gpt-5.4"),
+        providers={
+            "openai": FakeProvider(
+                id="openai",
+                models=[{"id": "gpt-5.4", "name": "GPT-5.4"}],
+            ),
+        },
+    )
+    _patch_resolve_identity(monkeypatch)
+
+    class FakeStore:
+        def __init__(self, _db) -> None:  # noqa: ANN001
+            pass
+
+        async def start_task(self, **_kwargs) -> None:  # noqa: ANN003
+            return None
+
+    async def fake_manager():
+        return source_manager
+
+    async def fake_task_runner(*_args, **_kwargs):  # noqa: ANN002, ANN003
+        return None
+
+    app = FastAPI()
+    app.state.db_connection = DisconnectedAsyncTaskDb()
+    app.include_router(providers_router.router)
+    app.dependency_overrides[providers_router.get_provider_manager] = (
+        fake_manager
+    )
+    monkeypatch.setattr(
+        providers_router,
+        "AsyncTaskStore",
+        FakeStore,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        providers_router,
+        "_run_active_model_distribution_task",
+        fake_task_runner,
+        raising=False,
+    )
+
+    response = TestClient(app).post(
+        "/models/distribution/active-llm",
+        json={"target_tenant_ids": ["tenant-a"], "overwrite": True},
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["task_id"]
+    assert payload["taskId"] == payload["task_id"]
 
 
 def test_active_model_distribution_lazy_loads_missing_app_db(
@@ -840,6 +925,7 @@ def test_active_model_distribution_lazy_loads_missing_app_db(
         },
     )
     submitted: dict[str, Any] = {}
+    _patch_resolve_identity(monkeypatch)
 
     class FakeStore:
         def __init__(self, db) -> None:  # noqa: ANN001
@@ -902,6 +988,9 @@ def test_active_model_distribution_lazy_loads_missing_app_db(
     assert submitted["db"].connected is True
     assert app.state.db_connection is submitted["db"]
     assert submitted["start_task"]["task_id"] == result.task_id
+    assert submitted["start_task"]["target_names"] == {
+        "tenant-a": "用户A",
+    }
 
 
 def test_active_model_distribution_requires_async_task_db() -> None:

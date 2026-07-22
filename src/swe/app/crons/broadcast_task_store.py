@@ -53,6 +53,17 @@ class CronBroadcastTaskStoreUnavailable(RuntimeError):
     """定时任务广播分发进度存储不可用。"""
 
 
+def _cron_broadcast_async_summary(
+    job_name: str | None,
+    target_count: int,
+) -> str:
+    """生成定时任务广播对应的统一异步任务摘要。"""
+    name = str(job_name or "").strip()
+    if not name:
+        return f"向 {target_count} 个用户分发定时任务"
+    return f"分发定时任务「{name}」，目标 {target_count} 个用户"
+
+
 class CronBroadcastTaskStore:
     """读写定时任务广播分发进度。"""
 
@@ -90,6 +101,7 @@ class CronBroadcastTaskStore:
         source_id: str,
         tenant_id: str,
         job_id: str,
+        job_name: str | None = None,
         target_tenant_ids: list[str],
         target_names: dict[str, str | None] | None = None,
         actor_user_id: str | None = None,
@@ -112,6 +124,7 @@ class CronBroadcastTaskStore:
             source_id=source_id,
             tenant_id=tenant_id,
             job_id=job_id,
+            job_name=job_name,
             target_key=target_key,
             targets=targets,
             target_names=target_names,
@@ -348,6 +361,7 @@ class CronBroadcastTaskStore:
         source_id: str,
         tenant_id: str,
         job_id: str,
+        job_name: str | None,
         target_key: str,
         targets: list[str],
         target_names: dict[str, str | None] | None,
@@ -382,6 +396,7 @@ class CronBroadcastTaskStore:
                     source_id=source_id,
                     tenant_id=tenant_id,
                     job_id=job_id,
+                    job_name=job_name,
                     target_ids=targets,
                     target_names=target_names,
                     actor_user_id=actor_user_id,
@@ -580,6 +595,7 @@ class CronBroadcastTaskStore:
         source_id: str,
         tenant_id: str,
         job_id: str,
+        job_name: str | None,
         target_ids: list[str],
         target_names: dict[str, str | None] | None = None,
         actor_user_id: str | None = None,
@@ -598,6 +614,10 @@ class CronBroadcastTaskStore:
                 actor_user_name=actor_user_name,
                 target_ids=target_ids,
                 target_names=target_names,
+                summary=_cron_broadcast_async_summary(
+                    job_name,
+                    len(target_ids),
+                ),
             )
         except Exception:
             logger.warning(

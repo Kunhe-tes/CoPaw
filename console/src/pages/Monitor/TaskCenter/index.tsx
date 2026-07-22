@@ -144,7 +144,6 @@ export default function TaskCenterPage() {
       title: "任务标题",
       dataIndex: "title",
       key: "title",
-      width: 220,
       render: (_value, record) => (
         <button
           type="button"
@@ -162,20 +161,20 @@ export default function TaskCenterPage() {
       title: "任务ID",
       dataIndex: "task_id",
       key: "task_id",
-      width: 260,
+      width: 300,
       render: (value) => <span className={styles.idCell}>{value || "-"}</span>,
     },
     {
       title: "状态",
       dataIndex: "status",
       key: "status",
-      width: 96,
+      width: 60,
       render: (value) => <StatusTag status={String(value)} />,
     },
     {
       title: "进度",
       key: "progress",
-      width: 130,
+      width: 120,
       render: (_, record) => (
         <span>
           {formatCount(
@@ -189,7 +188,7 @@ export default function TaskCenterPage() {
     {
       title: "操作人",
       key: "actor",
-      width: 180,
+      width: 130,
       render: (_, record) => (
         <span className={styles.idCell}>
           {record.actor_user_id || record.actor_user_name
@@ -202,14 +201,14 @@ export default function TaskCenterPage() {
       title: "创建时间",
       dataIndex: "created_at",
       key: "created_at",
-      width: 180,
+      width: 150,
       render: (value) => formatDateTime(value),
     },
     {
       title: "完成时间",
       dataIndex: "finished_at",
       key: "finished_at",
-      width: 180,
+      width: 150,
       render: (value) => formatDateTime(value),
     },
   ];

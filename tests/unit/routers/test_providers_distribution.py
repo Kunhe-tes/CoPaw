@@ -10,6 +10,8 @@ from types import SimpleNamespace
 from typing import Any
 
 import pytest
+from fastapi import FastAPI
+from fastapi.testclient import TestClient
 
 from swe.app.routers import providers as providers_router
 
@@ -44,6 +46,27 @@ class DisconnectedAsyncTaskDb(FakeAsyncTaskDb):
     """模拟连接状态标记为断开但仍可执行写入的任务库。"""
 
     is_connected = False
+
+
+def _patch_resolve_identity(
+    monkeypatch: pytest.MonkeyPatch,
+    names: dict[str, str] | None = None,
+) -> None:
+    """替换分发目标身份解析，避免单测触发远端查询。"""
+    name_map = names or {"tenant-a": "用户A"}
+
+    async def fake_resolve_user_identity(**kwargs):  # noqa: ANN003
+        tenant_id = kwargs["tenant_id"]
+        return SimpleNamespace(
+            user_name=name_map.get(tenant_id),
+            bbk_id=None,
+        )
+
+    monkeypatch.setattr(
+        providers_router,
+        "resolve_user_identity",
+        fake_resolve_user_identity,
+    )
 
 
 def _setup_source_providers(
@@ -507,6 +530,7 @@ def test_distribute_providers_returns_async_task_submission(
     _setup_source_providers(secret_dir, "tenant-source")
     submitted: dict[str, Any] = {}
     task_ids: list[str] = []
+    _patch_resolve_identity(monkeypatch)
 
     monkeypatch.setattr(providers_router, "SECRET_DIR", secret_dir)
     monkeypatch.setattr(
@@ -583,3 +607,67 @@ def test_distribute_providers_returns_async_task_submission(
     )
     assert submitted["start_task"]["actor_user_id"] == "operator-1"
     assert submitted["start_task"]["actor_user_name"] == "张三"
+    assert submitted["start_task"]["target_names"] == {
+        "tenant-a": "用户A",
+    }
+
+
+def test_distribute_providers_http_response_includes_task_id(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """供应商分发的 HTTP 响应必须显式返回任务 ID。"""
+    secret_dir = tmp_path / "secret"
+    _setup_source_providers(secret_dir, "tenant-source")
+    _patch_resolve_identity(monkeypatch)
+
+    monkeypatch.setattr(providers_router, "SECRET_DIR", secret_dir)
+    monkeypatch.setattr(
+        providers_router,
+        "get_tenant_working_dir_strict",
+        lambda tenant_id: tmp_path / str(tenant_id),
+    )
+
+    class FakeStore:
+        def __init__(self, _db) -> None:  # noqa: ANN001
+            pass
+
+        async def start_task(self, **_kwargs) -> None:  # noqa: ANN003
+            return None
+
+    async def fake_task_runner(*_args, **_kwargs):  # noqa: ANN002, ANN003
+        return None
+
+    app = FastAPI()
+    app.state.db_connection = DisconnectedAsyncTaskDb()
+
+    @app.middleware("http")
+    async def add_tenant_state(request, call_next):  # noqa: ANN001
+        request.state.tenant_id = "tenant-source"
+        request.state.source_id = None
+        request.state.scope_id = None
+        return await call_next(request)
+
+    app.include_router(providers_router.router)
+    monkeypatch.setattr(
+        providers_router,
+        "AsyncTaskStore",
+        FakeStore,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        providers_router,
+        "_run_providers_distribution_task",
+        fake_task_runner,
+        raising=False,
+    )
+
+    response = TestClient(app).post(
+        "/models/distribution/providers",
+        json={"target_tenant_ids": ["tenant-a"], "overwrite": True},
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["task_id"]
+    assert payload["taskId"] == payload["task_id"]

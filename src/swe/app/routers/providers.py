@@ -9,7 +9,7 @@ import shutil
 import time
 import uuid
 from pathlib import Path as PathlibPath
-from typing import List, Literal, Optional
+from typing import Any, List, Literal, Optional, Sequence
 from copy import deepcopy
 from urllib.parse import unquote
 
@@ -23,7 +23,7 @@ from fastapi import (
     Query,
     Request,
 )
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 from ...config.context import (
     get_current_effective_tenant_id,
@@ -43,6 +43,7 @@ from ...providers.provider import ProviderInfo, ModelInfo
 from ...providers.provider_manager import ActiveModelsInfo, ProviderManager
 from ..async_tasks import AsyncTaskStore
 from ..async_tasks.db import get_or_create_async_task_db
+from ..identity_resolver import resolve_user_identity
 from ..workspace.tenant_initializer import TenantInitializer
 
 logger = logging.getLogger(__name__)
@@ -489,6 +490,47 @@ def _providers_distribution_name(source_providers_dir: PathlibPath) -> str:
     return ", ".join(provider_ids) or "全部供应商"
 
 
+async def _resolve_distribution_target_names(
+    request: Request,
+    target_tenant_ids: list[str],
+) -> dict[str, str | None]:
+    """解析分发目标的展示名称，失败时回退到目标 ID。"""
+    source_id = _request_source_id(request)
+    headers = dict(request.headers)
+
+    async def resolve_one(tenant_id: str) -> tuple[str, str | None] | None:
+        target_id = str(tenant_id or "").strip()
+        if not target_id:
+            return None
+        try:
+            resolved_identity = await resolve_user_identity(
+                tenant_id=target_id,
+                source_id=source_id,
+                user_name=None,
+                bbk_id=None,
+                headers=headers,
+                allow_remote_lookup=True,
+            )
+            return target_id, resolved_identity.user_name or target_id
+        except Exception:  # pylint: disable=broad-except
+            logger.warning(
+                "Failed to resolve provider distribution target name: tenant_id=%s",
+                target_id,
+                exc_info=True,
+            )
+            return target_id, target_id
+
+    resolved_items = await asyncio.gather(
+        *(resolve_one(tenant_id) for tenant_id in target_tenant_ids),
+    )
+    return {
+        target_id: target_name
+        for item in resolved_items
+        if item is not None
+        for target_id, target_name in (item,)
+    }
+
+
 def _distribute_providers_to_tenant(
     *,
     source_providers_dir: PathlibPath,
@@ -624,6 +666,7 @@ async def _distribute_active_model_to_tenant(
 
 def _active_model_result_payload(
     result: ActiveModelDistributionTenantResult,
+    target_name: str | None = None,
 ) -> dict:
     """将活跃模型分发结果转为可落库的 JSON 结构。"""
     active_llm = (
@@ -633,6 +676,7 @@ def _active_model_result_payload(
     )
     return {
         "tenant_id": result.tenant_id,
+        "tenant_name": target_name,
         "bootstrapped": result.bootstrapped,
         "provider_updated": result.provider_updated,
         "active_llm_updated": active_llm,
@@ -641,10 +685,12 @@ def _active_model_result_payload(
 
 def _providers_result_payload(
     result: ProvidersDistributionTenantResult,
+    target_name: str | None = None,
 ) -> dict:
     """将 providers 分发结果转为可落库的 JSON 结构。"""
     return {
         "tenant_id": result.tenant_id,
+        "tenant_name": target_name,
         "bootstrapped": result.bootstrapped,
     }
 
@@ -727,6 +773,7 @@ async def _run_active_model_distribution_task(
     provider_payload: dict,
     source_active_model: ModelSlotConfig,
     source_id: str | None,
+    target_names: dict[str, str | None] | None = None,
 ) -> None:
     """后台执行活跃模型分发并回写统一任务表。"""
     try:
@@ -764,7 +811,10 @@ async def _run_active_model_distribution_task(
                 task_id=task_id,
                 target_id=tenant_id,
                 success=True,
-                result=_active_model_result_payload(result),
+                result=_active_model_result_payload(
+                    result,
+                    target_names.get(tenant_id) if target_names else None,
+                ),
             )
         except Exception as exc:  # pylint: disable=broad-except
             failed_count += 1
@@ -806,6 +856,7 @@ async def _run_providers_distribution_task(
     source_working_dir: PathlibPath,
     target_tenant_ids: list[str],
     source_id: str | None,
+    target_names: dict[str, str | None] | None = None,
 ) -> None:
     """后台执行 providers 全量分发并回写统一任务表。"""
     try:
@@ -841,7 +892,10 @@ async def _run_providers_distribution_task(
                 task_id=task_id,
                 target_id=tenant_id,
                 success=True,
-                result=_providers_result_payload(result),
+                result=_providers_result_payload(
+                    result,
+                    target_names.get(tenant_id) if target_names else None,
+                ),
             )
         except Exception as exc:  # pylint: disable=broad-except
             failed_count += 1
@@ -1125,7 +1179,14 @@ class ProvidersDistributionResponse(BaseModel):
 class AsyncTaskSubmitResponse(BaseModel):
     """异步任务提交响应。"""
 
+    model_config = ConfigDict(populate_by_name=True)
+
     task_id: str = Field(..., description="任务ID")
+    task_id_alias: str | None = Field(
+        default=None,
+        alias="taskId",
+        description="任务ID兼容字段",
+    )
     status: str = Field(default="queued", description="任务状态")
     reused: bool = Field(default=False, description="是否复用已有任务")
     source_active_llm: ModelSlotConfig | None = Field(
@@ -1139,6 +1200,27 @@ class AsyncTaskSubmitResponse(BaseModel):
     results: list[object] = Field(
         default_factory=list,
         description="同步回退时返回的分发结果",
+    )
+
+
+def _async_task_submit_response(
+    *,
+    task_id: str,
+    status: str = "queued",
+    reused: bool = False,
+    source_active_llm: ModelSlotConfig | None = None,
+    source_tenant_id: str | None = None,
+    results: Sequence[Any] | None = None,
+) -> AsyncTaskSubmitResponse:
+    """构造同时包含 snake_case 与 camelCase 任务 ID 的提交响应。"""
+    return AsyncTaskSubmitResponse(
+        task_id=task_id,
+        taskId=task_id,
+        status=status,
+        reused=reused,
+        source_active_llm=source_active_llm,
+        source_tenant_id=source_tenant_id,
+        results=list(results) if results is not None else [],
     )
 
 
@@ -1482,6 +1564,10 @@ async def distribute_active_model(
     if use_async_dispatch:
         store = await _make_async_task_store(request)
         actor_user_id, actor_user_name = _request_actor(request)
+        target_names = await _resolve_distribution_target_names(
+            request,
+            body.target_tenant_ids,
+        )
         await store.start_task(
             task_id=task_id,
             service="swe",
@@ -1490,6 +1576,7 @@ async def distribute_active_model(
             actor_user_id=actor_user_id,
             actor_user_name=actor_user_name,
             target_ids=body.target_tenant_ids,
+            target_names=target_names,
             summary=_distribution_summary(
                 "模型",
                 _active_model_distribution_name(source_active_model),
@@ -1507,9 +1594,10 @@ async def distribute_active_model(
                 provider_payload=provider_payload,
                 source_active_model=source_active_model,
                 source_id=_request_source_id(request),
+                target_names=target_names,
             ),
         )
-        return AsyncTaskSubmitResponse(task_id=task_id)
+        return _async_task_submit_response(task_id=task_id)
 
     source_working_dir = _request_tenant_storage_working_dir(request)
     source_id = _request_source_id(request)
@@ -1534,7 +1622,7 @@ async def distribute_active_model(
                 ),
             )
 
-    return AsyncTaskSubmitResponse(
+    return _async_task_submit_response(
         task_id=task_id,
         status="succeeded",
         source_active_llm=source_active_model,
@@ -1606,6 +1694,10 @@ async def distribute_providers(
     if use_async_dispatch:
         store = await _make_async_task_store(request)
         actor_user_id, actor_user_name = _request_actor(request)
+        target_names = await _resolve_distribution_target_names(
+            request,
+            body.target_tenant_ids,
+        )
         await store.start_task(
             task_id=task_id,
             service="swe",
@@ -1614,6 +1706,7 @@ async def distribute_providers(
             actor_user_id=actor_user_id,
             actor_user_name=actor_user_name,
             target_ids=body.target_tenant_ids,
+            target_names=target_names,
             summary=_distribution_summary(
                 "供应商配置",
                 _providers_distribution_name(source_providers_dir),
@@ -1628,9 +1721,10 @@ async def distribute_providers(
                 source_working_dir=_request_tenant_working_dir(request),
                 target_tenant_ids=body.target_tenant_ids,
                 source_id=_request_source_id(request),
+                target_names=target_names,
             ),
         )
-        return AsyncTaskSubmitResponse(task_id=task_id)
+        return _async_task_submit_response(task_id=task_id)
 
     source_working_dir = _request_tenant_working_dir(request)
     source_id = _request_source_id(request)
@@ -1653,7 +1747,7 @@ async def distribute_providers(
                 ),
             )
 
-    return AsyncTaskSubmitResponse(
+    return _async_task_submit_response(
         task_id=task_id,
         status="succeeded",
         source_tenant_id=effective_tenant_id,

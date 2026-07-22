@@ -1332,6 +1332,7 @@ async def _schedule_broadcast_task(
         source_id=parts["source_id"],
         tenant_id=parts["tenant_id"],
         job_id=parts["job_id"],
+        job_name=source_job.name,
         target_tenant_ids=tenant_ids,
         target_names=_target_names_from_identity(
             context.target_identity_by_tenant,

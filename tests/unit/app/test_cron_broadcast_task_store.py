@@ -277,6 +277,30 @@ def test_db_store_mirrors_actor_fields_to_async_task():
     assert async_task_calls[-1][8] == "张三"
 
 
+def test_db_store_mirrors_job_name_to_async_task_summary():
+    """定时任务分发镜像到统一任务表时摘要应包含任务名称。"""
+    db = _Db()
+    store = CronBroadcastTaskStore(db)
+
+    asyncio.run(
+        store.start_task(
+            agent_id="default",
+            source_id="source-a",
+            tenant_id="tenant-a",
+            job_id="job-source",
+            job_name="ark",
+            target_tenant_ids=["tenant-a", "tenant-b"],
+        ),
+    )
+
+    async_task_calls = [
+        params
+        for query, params in db.executed
+        if "INSERT INTO swe_async_tasks" in query
+    ]
+    assert async_task_calls[-1][5] == "分发定时任务「ark」，目标 2 个用户"
+
+
 def test_db_store_target_item_status_is_upserted_lazily():
     db = _Db()
     store = CronBroadcastTaskStore(db)

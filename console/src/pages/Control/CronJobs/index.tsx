@@ -329,7 +329,7 @@ function CronJobsPage() {
         if (res.reused) {
           message.info("Broadcast task is already running");
         } else {
-          message.info("Broadcast started");
+          message.info(`定时任务分发任务已提交：${res.task_id}`);
         }
         return;
       }
