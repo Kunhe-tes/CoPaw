@@ -159,7 +159,7 @@ assert get_user_disabled_skills_dir(root, "tenant", "default", "source") == (
 )
 ```
 
-Add parameterized invalid manifests: invalid UTF-8/JSON, missing `layout_version`, `layout_version != 2`, non-dict `skills`, non-dict entry, missing `enabled`, and non-bool `enabled`. Assert every mutation/preflight helper raises a `WorkspaceSkillManifestError` before any destination directory is created or removed. Add resolution tests for enabled target, disabled target, target-missing fallback, and both-root active preference. The both-root result must explicitly report `promoted=True`; every ordinary target or fallback result must report `promoted=False`.
+Add parameterized invalid manifests: invalid UTF-8/JSON, missing `layout_version`, `layout_version != 2`, non-dict `skills`, non-dict entry, missing `enabled`, and non-bool `enabled`. Assert every mutation/preflight helper raises a `WorkspaceSkillManifestError` before any destination directory is created or removed. Add resolution tests for enabled target, disabled target, target-missing fallback, and both-root active preference. A both-root result for an `enabled=false` entry must explicitly report `promoted=True`; the same cleanup for an already-enabled entry, every ordinary target, and every fallback result must report `promoted=False`.
 
 - [ ] **Step 3: Verify the tests fail**
 
@@ -204,7 +204,7 @@ def validate_workspace_skill_manifest_v2(payload: object) -> dict:
     return payload
 ```
 
-Use the default v2 payload only when `skill.json` is absent. Make mutation/preflight reads call this validator. Add a pure resolver that accepts a validated manifest and registered name, prefers the root selected by `enabled`, and falls back to the other root. It returns an explicit result such as `ResolvedRegisteredSkill(path, promoted)`: a both-root collision returns the active path with `promoted=True`, while every non-collision result has `promoted=False`. The resolver itself does not delete files or write the manifest.
+Use the default v2 payload only when `skill.json` is absent. Make mutation/preflight reads call this validator. Add a pure resolver that accepts a validated manifest and registered name, prefers the root selected by `enabled`, and falls back to the other root. It returns an explicit result such as `ResolvedRegisteredSkill(path, promoted)`: a both-root collision returns the active path; `promoted=True` only when that collision changes the entry from `enabled=false` to enabled, and it is `False` for an already-enabled cleanup and every non-collision result. The resolver itself does not delete files or write the manifest.
 
 - [ ] **Step 5: Make distribution preflight strict before copying**
 
@@ -311,7 +311,7 @@ Expected: disabled packages are absent from `get_my_skills`, enable/delete/file 
 
 - [ ] **Step 4: Add service-level registered and unmanaged resolvers**
 
-Implement one private service helper for mutating registered operations. It must strict-read/validate the manifest, consume the resolver's explicit `(path, promoted)` result, and apply active collision promotion atomically with its manifest mutation: retain the active path, delete the hidden path, and persist `enabled=True`. Return the resolved package plus `promoted` (or an equivalent result) to its caller; do not reduce the result to a bare `Path`. Each successful mutating caller must fold `promoted` into a single `reload_required` decision and await `_trigger_agent_reload(user, agent_id, source_id)` exactly once when it is true, even if the underlying operation would otherwise be disabled-package maintenance. Read-only resolution never promotes or reloads. Use a separate read-only helper for listing that merges:
+Implement one private service helper for mutating registered operations. It must strict-read/validate the manifest, consume the resolver's explicit `(path, promoted)` result, and apply active collision promotion atomically with its manifest mutation: retain the active path, delete the hidden path, and persist `enabled=True` only when `promoted=True`. Return the resolved package plus `promoted` (or an equivalent result) to its caller; do not reduce the result to a bare `Path`. Each successful mutating caller must fold `promoted` into a single `reload_required` decision and await `_trigger_agent_reload(user, agent_id, source_id)` exactly once when it is true, even if the underlying operation would otherwise be disabled-package maintenance. The already-enabled both-root cleanup has `promoted=False` and does not itself request reload. Read-only resolution never promotes or reloads. Use a separate read-only helper for listing that merges:
 
 ```python
 registered_items = [
@@ -335,7 +335,7 @@ Deduplicate by directory name. Do not enumerate `.disabled_skills/` entries that
 
 - [ ] **Step 5: Route all existing service paths through the resolver**
 
-Replace direct `get_user_skills_dir(swe_root, user_id, agent_id, source_id) / skill_name` use in: security scan for a registered package, enable/disable, single and batch delete, list/read/save files, per-package `skill.json` migration, cn-name sync, market recall, and publish-source copying. Every mutating registered path must preserve and act on the resolver's promotion flag; a promotion schedules exactly one reload after the completed write, while disabled-only maintenance schedules none. Preserve legacy active-root operations for an unmanaged package; only explicit enable scans and claims it. For a registered deletion, reject `enabled=True` without changing files or state; for a registered disabled deletion, remove the resolved path, manifest entry, and DB row.
+Replace direct `get_user_skills_dir(swe_root, user_id, agent_id, source_id) / skill_name` use in: security scan for a registered package, enable/disable, single and batch delete, list/read/save files, per-package `skill.json` migration, cn-name sync, market recall, and publish-source copying. Every mutating registered path must preserve and act on the resolver's promotion flag; only a false-to-true promotion schedules exactly one reload after the completed write, while disabled-only maintenance and already-enabled both-root cleanup schedule none by themselves. Preserve legacy active-root operations for an unmanaged package; only explicit enable scans and claims it. For a registered deletion, reject `enabled=True` without changing files or state; for a registered disabled deletion, remove the resolved path, manifest entry, and DB row.
 
 - [ ] **Step 6: Preserve enablement during distribution and schedule reloads**
 
