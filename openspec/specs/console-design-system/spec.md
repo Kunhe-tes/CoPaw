@@ -175,7 +175,7 @@ The Console design authority SHALL define a focused content-only Conversation Wo
 #### Scenario: Content-only variant is documented
 
 - **WHEN** chat content-only presentation is introduced
-- **THEN** `console/DESIGN.md` documents its URL activation, retained title/content/actions, hidden surfaces, compatibility boundary, and viewport verification
+- **THEN** `console/DESIGN.md` documents the durable visual contract for retained title/content/actions, omitted surrounding surfaces, and layout continuity without implementation-specific activation or test details
 
 #### Scenario: Focused content hierarchy renders
 
