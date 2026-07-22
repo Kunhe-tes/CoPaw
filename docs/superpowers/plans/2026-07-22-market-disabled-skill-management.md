@@ -238,22 +238,39 @@ Add focused tests for the following observable behavior:
 ```python
 # registered disabled package is listed with enabled=False and can be read/edited
 items = await svc.get_my_skills(source, user)
-assert [item.skill_name for item in items] == ["disabled", "manual"]
+assert [item.skill_name for item in items] == [
+    "disabled", "deletable_disabled", "manual"
+]
 assert next(item for item in items if item.skill_name == "disabled").enabled is False
+assert (
+    next(
+        item for item in items if item.skill_name == "deletable_disabled"
+    ).enabled
+    is False
+)
 
 # registered hidden package can be enabled; Market writes true then requests reload
 result = await svc.enable_skill(user, "disabled", "default", source)
 assert result == {"success": True}
-after_enable = json.loads(
+manifest_after_enable = json.loads(
     get_user_skill_manifest_path(swe_root, user, "default", source).read_text(
         encoding="utf-8"
     )
 )
-assert after_enable["skills"]["disabled"]["enabled"] is True
+assert manifest_after_enable["skills"]["disabled"]["enabled"] is True
+assert (
+    manifest_after_enable["skills"]["deletable_disabled"]["enabled"]
+    is False
+)
 
-# registered enabled package cannot be deleted; registered disabled package is deleted from hidden root
+# Use a separate fixture that remains disabled after the enable path above.
+# Registered enabled package cannot be deleted; the disabled fixture is deleted
+# from the hidden root.
 assert await svc.delete_skill(user, "enabled", "default", source) is False
-assert await svc.delete_skill(user, "disabled", "default", source) is True
+assert (
+    await svc.delete_skill(user, "deletable_disabled", "default", source)
+    is True
+)
 
 # manual active package remains listed and only enable claims it
 before_claim = json.loads(
