@@ -83,6 +83,7 @@ const SKILL_NAME_MAP: Record<string, string> = {
   智能推荐保险计划书: "智能推荐保险计划书",
   黄金持仓客户陪伴技能: "黄金持仓客户陪伴技能",
   "query-fund-plus-cust": "固收+基金营销技能",
+  "query-insu-expand-cust":"分行保险潜客技能",
 };
 
 const ALLOWED_SKILLS = new Set([
