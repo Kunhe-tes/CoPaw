@@ -559,6 +559,41 @@ def _console_chat_stream_headers(
     return headers
 
 
+async def _start_new_chat(
+    workspace,
+    tracker,
+    console_channel,
+    session_id,
+    native_payload,
+):
+    """创建新会话并启动 stream，返回 (queue, run_key, msgid)。"""
+    msgid = str(uuid.uuid4())
+    native_payload["meta"]["msgid"] = msgid
+    chat = await workspace.chat_manager.get_or_create_chat(
+        session_id,
+        native_payload["sender_id"],
+        native_payload["channel_id"],
+        name=_derive_chat_name(native_payload),
+        meta=(
+            {
+                "agent_id": workspace.agent_id,
+            }
+            if getattr(workspace, "agent_id", None)
+            else None
+        ),
+    )
+    # Inject session_channel from chat record so downstream (e.g. session-end
+    # push) can identify the session's original channel (e.g. zhaohu).
+    if chat.channel and chat.channel != "console":
+        native_payload["meta"]["session_channel"] = chat.channel
+    queue, _ = await tracker.attach_or_start(
+        chat.id,
+        native_payload,
+        console_channel.stream_one,
+    )
+    return queue, chat.id, msgid
+
+
 @router.post(
     "/chat",
     status_code=200,
@@ -647,27 +682,13 @@ async def post_console_chat(
                 detail="No running chat for this session",
             )
     else:
-        msgid = str(uuid.uuid4())
-        native_payload["meta"]["msgid"] = msgid
-        chat = await workspace.chat_manager.get_or_create_chat(
+        queue, run_key, msgid = await _start_new_chat(
+            workspace,
+            tracker,
+            console_channel,
             session_id,
-            native_payload["sender_id"],
-            native_payload["channel_id"],
-            name=_derive_chat_name(native_payload),
-            meta=(
-                {
-                    "agent_id": workspace.agent_id,
-                }
-                if getattr(workspace, "agent_id", None)
-                else None
-            ),
-        )
-        queue, _ = await tracker.attach_or_start(
-            chat.id,
             native_payload,
-            console_channel.stream_one,
         )
-        run_key = chat.id
 
     async def event_generator() -> AsyncGenerator[str, None]:
         # Hold iterator so finally can aclose(); guarantees stream_from_queue's

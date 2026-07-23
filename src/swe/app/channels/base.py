@@ -1036,8 +1036,10 @@ class BaseChannel(ABC):
         a zhaohu session, push is enabled if the config flag is on.
         """
         if self.channel == "zhaohu":
+            logger.info("session-end push skipped: self.channel is zhaohu")
             return False
         if self._workspace is None:
+            logger.info("session-end push skipped: no workspace")
             return False
         zhaohu_cfg = getattr(
             self._workspace._config.channels,
@@ -1045,8 +1047,14 @@ class BaseChannel(ABC):
             None,
         )
         if zhaohu_cfg is None:
+            logger.info("session-end push skipped: no zhaohu config")
             return False
-        return bool(getattr(zhaohu_cfg, "session_end_push_enabled", False))
+        enabled = bool(getattr(zhaohu_cfg, "session_end_push_enabled", False))
+        if not enabled:
+            logger.info(
+                "session-end push skipped: session_end_push_enabled=False",
+            )
+        return enabled
 
     async def _try_session_end_push(
         self,
@@ -1069,10 +1077,19 @@ class BaseChannel(ABC):
                 return
             zhaohu_ch = await cm.get_channel("zhaohu")
             if zhaohu_ch is None:
+                logger.info(
+                    "session-end push skipped: zhaohu channel not found",
+                )
                 return
 
             session_channel = self._get_session_channel(request)
             is_zhaohu_session = session_channel == "zhaohu"
+            logger.info(
+                "session-end push check: channel=%s session_channel=%s is_zhaohu=%s",
+                self.channel,
+                session_channel,
+                is_zhaohu_session,
+            )
 
             query = self._extract_user_query(request)
             if len(query) > 30:
@@ -1092,6 +1109,9 @@ class BaseChannel(ABC):
                 ]
             # Zhaohu sessions: always push; other sessions: only with links
             if not is_zhaohu_session and not links:
+                logger.info(
+                    "session-end push skipped: not zhaohu session and no file links",
+                )
                 return
             await zhaohu_ch.send(to_handle, text, meta or None)
             logger.info("session-end push sent via zhaohu to %s", to_handle)
