@@ -189,6 +189,31 @@ def test_resolve_registered_skill_path_prefers_manifest_target_then_fallback(
     assert result.promoted is False
 
 
+@pytest.mark.parametrize(
+    ("enabled", "root_name"),
+    [(True, "skills"), (False, ".disabled_skills")],
+)
+def test_resolve_registered_skill_path_uses_manifest_selected_root(
+    tmp_path,
+    enabled,
+    root_name,
+):
+    from market.marketplace.fs import resolve_registered_skill_path
+
+    workspace = tmp_path / "workspace"
+    selected = workspace / root_name / "demo"
+    selected.mkdir(parents=True)
+
+    result = resolve_registered_skill_path(
+        workspace,
+        "demo",
+        {"enabled": enabled},
+    )
+
+    assert result.path == selected
+    assert result.promoted is False
+
+
 def test_resolve_registered_skill_path_reports_disabled_collision_promotion(
     tmp_path,
 ):
@@ -208,6 +233,27 @@ def test_resolve_registered_skill_path_reports_disabled_collision_promotion(
 
     assert result.path == active
     assert result.promoted is True
+
+
+def test_resolve_registered_skill_path_cleans_enabled_collision_without_promotion(
+    tmp_path,
+):
+    from market.marketplace.fs import resolve_registered_skill_path
+
+    workspace = tmp_path / "workspace"
+    active = workspace / "skills" / "demo"
+    disabled = workspace / ".disabled_skills" / "demo"
+    active.mkdir(parents=True)
+    disabled.mkdir(parents=True)
+
+    result = resolve_registered_skill_path(
+        workspace,
+        "demo",
+        {"enabled": True},
+    )
+
+    assert result.path == active
+    assert result.promoted is False
 
 
 def test_copy_skill_to_user_rejects_invalid_manifest_before_replacing_package(
