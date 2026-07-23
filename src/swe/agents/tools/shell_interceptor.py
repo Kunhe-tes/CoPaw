@@ -9,13 +9,22 @@ from __future__ import annotations
 
 import logging
 import shlex
+import subprocess
+import sys
 from dataclasses import dataclass
 from typing import List, Tuple
 
+from ..tool_failure import ToolExecutionError
+from ...app.crons.auth_state import (
+    ResolvedAuthToken,
+    resolve_auth_token_for_execution,
+)
 from ...config.context import (
+    get_current_effective_tenant_id,
     get_current_source_id,
     get_current_tenant_id,
     get_current_user_id,
+    get_current_workspace_dir,
 )
 
 logger = logging.getLogger(__name__)
@@ -70,6 +79,85 @@ def _is_swe_cron_group_help(tokens: List[str]) -> bool:
         and tokens[1] == "cron"
         and tokens[2] in {"-h", "--help"}
     )
+
+
+def _resolve_opencli_credentials() -> ResolvedAuthToken:
+    """Resolve the current tenant's execution credentials for OpenCLI."""
+
+    try:
+        return resolve_auth_token_for_execution(
+            tenant_id=get_current_effective_tenant_id(),
+            workspace_dir=get_current_workspace_dir(),
+        )
+    except ValueError as exc:
+        raise ToolExecutionError(
+            error_type="permission_denied",
+            detail=(
+                "OpenCLI authentication has expired; "
+                "please refresh the cron authentication configuration."
+            ),
+        ) from exc
+
+
+def _require_opencli_credential(
+    value: str | None,
+    *,
+    field_name: str,
+) -> str:
+    """Return one resolved credential or raise a canonical tool failure."""
+
+    if not value or not value.strip():
+        raise ToolExecutionError(
+            error_type="permission_denied",
+            detail=(
+                f"OpenCLI {field_name} is not configured; "
+                "please configure cron authentication first."
+            ),
+        )
+    return value
+
+
+def _quote_shell_argument(value: str) -> str:
+    """Quote one argument for the shell used by the shell tool."""
+
+    if sys.platform == "win32":
+        return subprocess.list2cmdline([value])
+    return shlex.quote(value)
+
+
+def _intercept_opencli_command(
+    command_body: str,
+    tokens: List[str],
+) -> str | None:
+    """Inject missing runtime credentials into a direct OpenCLI command."""
+
+    if tokens[0] != "opencli":
+        return None
+
+    has_authorization = _has_param(tokens, "--authorization")
+    has_cookie = _has_param(tokens, "--cookie")
+    if has_authorization and has_cookie:
+        return None
+
+    resolved = _resolve_opencli_credentials()
+    inject_parts: List[str] = []
+    if not has_authorization:
+        authorization = _require_opencli_credential(
+            resolved.token,
+            field_name="authorization",
+        )
+        inject_parts.extend(
+            ["--authorization", _quote_shell_argument(authorization)],
+        )
+    if not has_cookie:
+        cookie = _require_opencli_credential(
+            resolved.cookie_header,
+            field_name="cookie",
+        )
+        inject_parts.extend(["--cookie", _quote_shell_argument(cookie)])
+
+    command_suffix = command_body[len(tokens[0]) :]
+    return f"{tokens[0]} {' '.join(inject_parts)}{command_suffix}"
 
 
 def _split_by_shell_and(command: str) -> List[str]:
@@ -168,6 +256,10 @@ def _intercept_command_segment(
     if not tokens or _is_swe_cron_group_help(tokens):
         return command, False
 
+    opencli_command = _intercept_opencli_command(command_body, tokens)
+    if opencli_command is not None:
+        return leading + opencli_command + trailing, True
+
     for rule in INTERCEPT_RULES:
         prefix_tokens = rule.command_prefix.split()
         if tokens[: len(prefix_tokens)] != prefix_tokens:
@@ -229,9 +321,5 @@ def intercept_command(command: str) -> Tuple[str, bool]:
         return command, False
 
     modified_command = "".join(modified_parts)
-    logger.info(
-        "Shell command intercepted: %s -> %s",
-        command,
-        modified_command,
-    )
+    logger.info("Shell command intercepted")
     return modified_command, True
