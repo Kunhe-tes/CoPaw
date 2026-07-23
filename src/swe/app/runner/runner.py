@@ -49,6 +49,7 @@ from ..identity_resolver import resolve_user_identity
 from ..channels.schema import DEFAULT_CHANNEL
 from ...agents.react_agent import SWEAgent
 from ...agents.skill_invocation_detector import SkillInvocationDetector
+from ...agents.tool_guard_mixin import PreToolUseTerminalStop
 from ...agents.skills_manager import (
     get_skill_freshness_token,
     get_workspace_skills_dir,
@@ -207,6 +208,7 @@ class _QueryTurnOutcome:
     completion_blocked: bool = False
     completion_block_reason: str = ""
     completion_marked_incomplete: bool = False
+    pre_tool_terminal_stop: bool = False
 
 
 def _match_command_with_optional_id(
@@ -1278,6 +1280,23 @@ def _select_restorable_session_skill(
         return str(candidates[0].get("skill_name") or "") or None
 
     return None
+
+
+def _can_restore_confirmed_session_skill_context(
+    *,
+    session_id: str | None,
+    session_skill_detector: Any,
+    session: Any,
+) -> bool:
+    """Return whether persisted skill context has the required capabilities."""
+    return all(
+        (
+            session_id,
+            session_skill_detector is not None,
+            hasattr(session_skill_detector, "restore_confirmed_skill"),
+            hasattr(session, "get_session_skill_snapshot"),
+        ),
+    )
 
 
 def _supports_session_skill_freshness_refresh(
@@ -2833,13 +2852,12 @@ class AgentRunner(Runner):
     ) -> None:
         """从持久化的 session snapshot 恢复一次性 skill 续接候选。"""
         detector = getattr(runtime, "session_skill_detector", None)
-        if (
-            runtime.skip_history
-            or self.session is None
-            or not runtime.session_id
-            or detector is None
-            or not hasattr(detector, "restore_confirmed_skill")
-            or not hasattr(self.session, "get_session_skill_snapshot")
+        if runtime.skip_history or self.session is None:
+            return
+        if not _can_restore_confirmed_session_skill_context(
+            session_id=runtime.session_id,
+            session_skill_detector=detector,
+            session=self.session,
         ):
             return
 
@@ -3110,16 +3128,51 @@ class AgentRunner(Runner):
                 before_stop_turns,
             )
         )
-        async for msg, last in self._enforce_query_timeout(
-            stream_printing_messages(
-                agents=[runtime.agent],
-                coroutine_task=runtime.agent(turn_msgs),
-            ),
-            session_id=runtime.session_id,
-            agent=runtime.agent,
-            run_key=(runtime.chat.id if runtime.chat is not None else None),
-        ):
-            yield msg, last
+        reset_terminal_stop = getattr(
+            runtime.agent,
+            "reset_pre_tool_terminal_stop",
+            None,
+        )
+        if callable(reset_terminal_stop):
+            reset_terminal_stop()
+
+        try:
+            async for msg, last in self._enforce_query_timeout(
+                stream_printing_messages(
+                    agents=[runtime.agent],
+                    coroutine_task=runtime.agent(turn_msgs),
+                ),
+                session_id=runtime.session_id,
+                agent=runtime.agent,
+                run_key=(
+                    runtime.chat.id if runtime.chat is not None else None
+                ),
+            ):
+                yield msg, last
+        except PreToolUseTerminalStop as exc:
+            consume_terminal_stop = getattr(
+                runtime.agent,
+                "consume_pre_tool_terminal_stop",
+                None,
+            )
+            reason = (
+                consume_terminal_stop()
+                if callable(consume_terminal_stop)
+                else None
+            )
+            reason = (reason or exc.reason or "Hook requested stop").strip()
+            outcome.task_completed = False
+            outcome.completion_blocked = True
+            outcome.completion_block_reason = reason
+            outcome.pre_tool_terminal_stop = True
+            terminal_msg = Msg(
+                name="Friday",
+                role="assistant",
+                content=reason,
+            )
+            await runtime.agent.memory.add(terminal_msg)
+            yield terminal_msg, True
+            return
 
         outcome.assistant_response = _extract_assistant_response(
             runtime.agent,
@@ -3176,6 +3229,9 @@ class AgentRunner(Runner):
                 outcome=outcome,
             ):
                 yield msg, last
+
+            if outcome.pre_tool_terminal_stop:
+                return
 
             before_stop_result = await self._emit_before_stop_hook_if_needed(
                 request=request,
@@ -4096,7 +4152,12 @@ class AgentRunner(Runner):
         skill_snapshot_to_persist: dict[str, dict[str, Any]] | None = None,
     ) -> None:
         """BeforeStop 耗尽预算时仍需写入最终输出并结束 trace。"""
-        if outcome.completion_marked_incomplete:
+        if outcome.pre_tool_terminal_stop:
+            await self._end_trace_if_needed(
+                trace_id,
+                TraceStatus.COMPLETED,
+            )
+        elif outcome.completion_marked_incomplete:
             await self._index_model_output_if_needed(
                 trace_id=trace_id,
                 agent=runtime.agent,
