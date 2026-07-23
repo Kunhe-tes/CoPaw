@@ -71,6 +71,9 @@ const DRILL_DOWN_TABLE_SCROLL = {
   y: 300,
 } as const;
 
+const formatRatioPercent = (value?: number | null) =>
+  `${((value ?? 0) * 100).toFixed(2)}%`;
+
 const SKILL_NAME_MAP: Record<string, string> = {
   insurance_mkt: "保险营销客户分析技能",
   deposit_scale_growth_skill: "存款规模增长与产品配置技能",
@@ -455,6 +458,8 @@ function RankingTable({
             <col style={{ width: 80 }} />
             <col style={{ width: 55 }} />
             <col style={{ width: 55 }} />
+            <col style={{ width: 70 }} />
+            <col style={{ width: 80 }} />
           </colgroup>
           <thead>
             <tr>
@@ -473,6 +478,8 @@ function RankingTable({
               <th>被客户经理查看的客户数</th>
               <th>去洞察客户数</th>
               <th>去电访客户数</th>
+              <th>接触客户数</th>
+              <th>客户接触率</th>
             </tr>
           </thead>
           <tbody>
@@ -516,6 +523,8 @@ function RankingTable({
                   <td>{row.viewedCustomers}</td>
                   <td>{row.insightCustomers}</td>
                   <td>{row.phoneCustomers}</td>
+                  <td>{row.contactedCustomers}</td>
+                  <td>{row.contactRate}</td>
                 </tr>
               );
             })}
@@ -2054,6 +2063,22 @@ export default function CronJobOverviewPage() {
                   key: "phone_customers",
                   width: 80,
                   align: "center",
+                },
+                {
+                  title: "接触客户数",
+                  dataIndex: "contacted_customers",
+                  key: "contacted_customers",
+                  width: 80,
+                  align: "center",
+                },
+                {
+                  title: "客户接触率",
+                  dataIndex: "contact_rate",
+                  key: "contact_rate",
+                  width: 90,
+                  align: "center",
+                  render: (v: number | null | undefined) =>
+                    formatRatioPercent(v),
                 },
               ]}
             />
