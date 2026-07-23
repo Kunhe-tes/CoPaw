@@ -1128,6 +1128,7 @@ class ToolGuardMixin:
     async def _stop_post_tool_hook(self, reason: str) -> NoReturn:
         """End the turn after a post-tool hook without altering its result."""
         reason = reason or "Hook requested stop"
+        self._discard_forced_tool_replay()
         self._request_pre_tool_terminal_stop(reason)
         raise PreToolUseTerminalStop(reason)
 
@@ -1363,21 +1364,7 @@ class ToolGuardMixin:
                 trace_tool_output=trace_tool_output,
             )
 
-            if action is None and getattr(
-                self,
-                "_tool_guard_forced_replay_active",
-                False,
-            ):
-                self._tool_guard_forced_replay_active = False
-                self._tool_guard_replay_done = {
-                    "tool_name": tool_name,
-                    "tool_input": tool_input,
-                    "remaining_queue": getattr(
-                        self,
-                        "_tool_guard_replay_queue",
-                        [],
-                    ),
-                }
+            self._complete_forced_tool_replay(tool_name, tool_input)
             return result
 
         except PreToolUseTerminalStop:
@@ -1535,24 +1522,33 @@ class ToolGuardMixin:
         tool_name: str,
         tool_input: dict[str, Any],
     ) -> dict | None:
-        """Execute approved call and persist replay state."""
-        result = await self._run_tool_call_with_hard_timeout(
+        """Execute an approved call without advancing a replay queue."""
+        return await self._run_tool_call_with_hard_timeout(
             tool_call,
             tool_name,
             tool_input,
         )
-        if getattr(self, "_tool_guard_forced_replay_active", False):
-            self._tool_guard_forced_replay_active = False
-            self._tool_guard_replay_done = {
-                "tool_name": tool_name,
-                "tool_input": tool_input,
-                "remaining_queue": getattr(
-                    self,
-                    "_tool_guard_replay_queue",
-                    [],
-                ),
-            }
-        return result
+
+    def _complete_forced_tool_replay(
+        self,
+        tool_name: str,
+        tool_input: dict[str, Any],
+    ) -> None:
+        """Record a replay result only after its post-tool hooks finish."""
+        if not getattr(self, "_tool_guard_forced_replay_active", False):
+            return
+        self._tool_guard_forced_replay_active = False
+        self._tool_guard_replay_done = {
+            "tool_name": tool_name,
+            "tool_input": tool_input,
+            "remaining_queue": getattr(self, "_tool_guard_replay_queue", []),
+        }
+
+    def _discard_forced_tool_replay(self) -> None:
+        """Prevent a terminal hook decision from resuming queued replays."""
+        self._tool_guard_forced_replay_active = False
+        self._tool_guard_replay_done = None
+        self._tool_guard_replay_queue = []
 
     # ------------------------------------------------------------------
     # Denied / Approval responses

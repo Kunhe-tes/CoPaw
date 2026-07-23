@@ -1571,6 +1571,52 @@ async def test_preapproved_guarded_tool_runs_failure_hook_and_honors_stop(
 
 
 @pytest.mark.asyncio
+async def test_post_tool_stop_discards_queued_forced_replay(tmp_path) -> None:
+    agent = _FakeAgent(tmp_path)
+    agent._tool_guard_engine = SimpleNamespace(
+        enabled=True,
+        is_denied=lambda _tool_name: False,
+        is_guarded=lambda _tool_name: True,
+        guard=lambda *_args, **_kwargs: None,
+    )
+    agent._ensure_tool_guard = lambda: None
+    agent._tool_guard_approval_service = SimpleNamespace(
+        consume_approval=AsyncMock(return_value=True),
+    )
+    agent._tool_guard_forced_replay_active = True
+    agent._tool_guard_replay_queue = [
+        {
+            "id": "tool-queued",
+            "name": "execute_shell_command",
+            "input": {"cmd": "echo queued"},
+        },
+    ]
+    agent._tool_result_exists_in_memory = lambda _tool_use_id: False
+    agent._emit_tool_hook = AsyncMock(
+        side_effect=[
+            MergedHookResult(),
+            MergedHookResult(
+                decision=HookDecision.STOP,
+                reason="terminal replay stop",
+            ),
+        ],
+    )
+
+    with pytest.raises(PreToolUseTerminalStop, match="terminal replay stop"):
+        await agent._acting(
+            {
+                "id": "tool-approved",
+                "name": "execute_shell_command",
+                "input": {"cmd": "echo approved"},
+            },
+        )
+
+    assert await agent._reason_about_replay_done() is None
+    assert agent._tool_guard_replay_queue == []
+    assert agent._tool_guard_forced_replay_active is False
+
+
+@pytest.mark.asyncio
 async def test_post_tool_failure_hook_stop_replaces_original_error(
     tmp_path,
 ) -> None:
