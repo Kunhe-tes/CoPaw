@@ -1,12 +1,14 @@
 # -*- coding: utf-8 -*-
 from __future__ import annotations
 
+from contextlib import nullcontext
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 import asyncio
 
 import pytest
+from agentscope.agent import ReActAgent
 from agentscope.message import Msg
 
 from swe.agents.hook_runtime.models import (
@@ -23,7 +25,10 @@ from swe.agents.hook_runtime.models import (
 )
 from swe.agents.skill_invocation_detector import SkillInvocationDetector
 from swe.agents.skill_tool_registry import SkillToolRegistry
-from swe.agents.tool_guard_mixin import ToolGuardMixin
+from swe.agents.tool_guard_mixin import (
+    PreToolUseTerminalStop,
+    ToolGuardMixin,
+)
 from swe.security.tool_guard.models import (
     GuardFinding,
     GuardSeverity,
@@ -114,6 +119,56 @@ class _AgentScopeLikeFakeAgent(ToolGuardMixin, _AgentScopeLikeBaseAgent):
 
     async def print(self, msg, *args, **kwargs):
         self.printed.append(msg)
+
+
+class _TerminalStopReplyLoopAgent(ToolGuardMixin, ReActAgent):
+    """In-process agent that exercises AgentScope's real reply loop."""
+
+    def __init__(self, tmp_path: Path):
+        ReActAgent.__init__(
+            self,
+            name="Friday",
+            sys_prompt="",
+            model=SimpleNamespace(stream=False),
+            formatter=SimpleNamespace(),
+            enable_rewrite_query=False,
+            max_iters=2,
+        )
+        self._request_context = {}
+        self._agent_config = SimpleNamespace()
+        self._workspace_dir = tmp_path
+        self._tool_guard_lock = asyncio.Lock()
+        self.reasoning_count = 0
+        self.printed = []
+
+    def _ensure_tool_guard(self) -> None:
+        self._tool_guard_engine = SimpleNamespace(enabled=False)
+
+    async def _reasoning(self, tool_choice=None):
+        self.reasoning_count += 1
+        return Msg(
+            self.name,
+            [
+                {
+                    "type": "tool_use",
+                    "id": "tool-stop",
+                    "name": "read_file",
+                    "input": {"path": "README.md"},
+                },
+            ],
+            "assistant",
+        )
+
+    async def _emit_tool_hook(self, event_name, **_kwargs):
+        if event_name == HookEventName.PRE_TOOL_USE:
+            return MergedHookResult(
+                decision=HookDecision.STOP,
+                reason="stop reply loop",
+            )
+        return MergedHookResult()
+
+    async def print(self, *args, **kwargs):
+        self.printed.append(args[0] if args else kwargs["msg"])
 
 
 class _RecordingApprovalService:
@@ -863,16 +918,188 @@ async def test_pre_tool_hook_denial_returns_tool_result(tmp_path) -> None:
         ),
     )
 
+    with nullcontext():
+        result = await agent._acting(
+            {
+                "id": "tool-1",
+                "name": "execute_shell_command",
+                "input": {"cmd": "echo original"},
+            },
+        )
+
+    assert result is None
+    assert "no shell" in str(agent.printed[0].content)
+    assert "hook_denied" in str(agent.printed[0].content)
+
+
+@pytest.mark.asyncio
+async def test_pre_tool_hook_block_returns_failed_tool_result_without_stopping(
+    tmp_path,
+) -> None:
+    agent = _AgentScopeLikeFakeAgent(tmp_path)
+    agent._emit_tool_hook = AsyncMock(
+        return_value=MergedHookResult(
+            decision=HookDecision.BLOCK,
+            reason="blocked by policy",
+        ),
+    )
+
     result = await agent._acting(
         {
-            "id": "tool-1",
+            "id": "tool-block",
             "name": "execute_shell_command",
             "input": {"cmd": "echo original"},
         },
     )
 
     assert result is None
-    assert "no shell" in str(agent.printed[0].content)
+    assert "hook_denied" in str(agent.printed[0].content)
+    assert "hook_denied" in str(agent.memory.content[0][0].content)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("reason", "expected_reason"),
+    [
+        ("stop the agent", "stop the agent"),
+        ("", "Hook requested stop"),
+    ],
+)
+async def test_pre_tool_hook_stop_records_terminal_result_and_raises(
+    tmp_path,
+    reason: str,
+    expected_reason: str,
+) -> None:
+    agent = _FakeAgent(tmp_path)
+    agent._emit_tool_hook = AsyncMock(
+        return_value=MergedHookResult(
+            decision=HookDecision.STOP,
+            reason=reason,
+        ),
+    )
+
+    with pytest.raises(PreToolUseTerminalStop) as exc_info:
+        await agent._acting(
+            {
+                "id": "tool-stop",
+                "name": "execute_shell_command",
+                "input": {"cmd": "echo original"},
+            },
+        )
+
+    assert exc_info.value.reason == expected_reason
+    assert "hook_stopped" in str(agent.printed[0].content)
+    assert "hook_stopped" in str(agent.memory.content[0][0].content)
+
+
+@pytest.mark.asyncio
+async def test_pre_tool_hook_stop_aborts_real_agentscope_reply_loop(
+    tmp_path,
+) -> None:
+    agent = _TerminalStopReplyLoopAgent(tmp_path)
+
+    with pytest.raises(PreToolUseTerminalStop, match="stop reply loop"):
+        await agent.reply(Msg("user", "run a tool", "user"))
+
+    assert agent.reasoning_count == 1
+
+
+@pytest.mark.asyncio
+async def test_consuming_pre_tool_hook_stop_allows_a_later_turn(
+    tmp_path,
+) -> None:
+    agent = _FakeAgent(tmp_path)
+    agent._emit_tool_hook = AsyncMock(
+        return_value=MergedHookResult(
+            decision=HookDecision.STOP,
+            reason="stop this turn",
+        ),
+    )
+
+    with pytest.raises(PreToolUseTerminalStop):
+        await agent._acting(
+            {"id": "tool-stop", "name": "execute_shell_command", "input": {}},
+        )
+
+    assert agent.consume_pre_tool_terminal_stop() == "stop this turn"
+    agent._emit_tool_hook = AsyncMock(
+        side_effect=[MergedHookResult(), MergedHookResult()],
+    )
+
+    result = await agent._acting(
+        {"id": "tool-next", "name": "execute_shell_command", "input": {}},
+    )
+
+    assert result == {"content": {}}
+
+
+@pytest.mark.asyncio
+async def test_pre_tool_hook_stop_cancels_registered_peer_before_execution(
+    tmp_path,
+) -> None:
+    agent = _FakeAgent(tmp_path)
+    peer_hook_started = asyncio.Event()
+    peer_hook_blocker = asyncio.Event()
+    run_tool_call = AsyncMock()
+
+    async def emit_hook(event_name, *, tool_name, **_kwargs):
+        if event_name != HookEventName.PRE_TOOL_USE:
+            return MergedHookResult()
+        if tool_name == "peer":
+            peer_hook_started.set()
+            await peer_hook_blocker.wait()
+        elif tool_name == "stop":
+            await peer_hook_started.wait()
+            return MergedHookResult(
+                decision=HookDecision.STOP,
+                reason="stop parallel tools",
+            )
+        return MergedHookResult()
+
+    agent._emit_tool_hook = emit_hook
+    agent._run_tool_call_with_hard_timeout = run_tool_call
+    peer_task = asyncio.create_task(
+        agent._acting({"id": "tool-peer", "name": "peer", "input": {}}),
+    )
+    stop_task = asyncio.create_task(
+        agent._acting({"id": "tool-stop", "name": "stop", "input": {}}),
+    )
+
+    with pytest.raises(PreToolUseTerminalStop):
+        await stop_task
+    with pytest.raises(asyncio.CancelledError):
+        await peer_task
+
+    run_tool_call.assert_not_awaited()
+    assert agent._active_tool_guard_acting_tasks == set()
+
+
+@pytest.mark.asyncio
+async def test_pre_tool_hook_stop_gates_peer_started_after_terminal_state(
+    tmp_path,
+) -> None:
+    agent = _FakeAgent(tmp_path)
+    agent._emit_tool_hook = AsyncMock(
+        return_value=MergedHookResult(
+            decision=HookDecision.STOP,
+            reason="stop later peer",
+        ),
+    )
+    run_tool_call = AsyncMock()
+    agent._run_tool_call_with_hard_timeout = run_tool_call
+
+    with pytest.raises(PreToolUseTerminalStop):
+        await agent._acting(
+            {"id": "tool-stop", "name": "stop", "input": {}},
+        )
+
+    peer_task = asyncio.create_task(
+        agent._acting({"id": "tool-peer", "name": "peer", "input": {}}),
+    )
+    with pytest.raises(PreToolUseTerminalStop, match="stop later peer"):
+        await peer_task
+
+    run_tool_call.assert_not_awaited()
 
 
 @pytest.mark.asyncio

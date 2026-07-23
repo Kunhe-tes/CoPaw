@@ -19,7 +19,7 @@ import os
 from pathlib import Path
 import time
 import uuid as _uuid
-from typing import Any, Literal
+from typing import Any, Literal, NoReturn
 
 from agentscope.message import Msg, ToolResultBlock
 
@@ -86,6 +86,14 @@ _APPROVAL_KIND_HOOK_PRE_TOOL_USE = "hook_pre_tool_use"
 _PENDING_TOOL_SKILL_ATTRIBUTIONS_KEY = "_pending_tool_skill_attributions"
 
 
+class PreToolUseTerminalStop(Exception):
+    """Signal that a PreToolUse hook terminated the current agent turn."""
+
+    def __init__(self, reason: str | None = None) -> None:
+        self.reason = reason or "Hook requested stop"
+        super().__init__(self.reason)
+
+
 class _GuardAction:
     """Lightweight container for a guard decision made under lock."""
 
@@ -126,10 +134,42 @@ class ToolGuardMixin:
         self._tool_guard_approval_service = get_approval_service()
         self._tool_guard_pending_info: dict | None = None
         self._tool_guard_lock = asyncio.Lock()
+        self._pre_tool_terminal_stop_reason: str | None = None
+        self._active_tool_guard_acting_tasks: set[asyncio.Task[Any]] = set()
 
     def _ensure_tool_guard(self) -> None:
         if not hasattr(self, "_tool_guard_engine"):
             self._init_tool_guard()
+
+    def _ensure_pre_tool_terminal_stop_tracking(self) -> None:
+        if not hasattr(self, "_pre_tool_terminal_stop_reason"):
+            self._pre_tool_terminal_stop_reason = None
+        if not hasattr(self, "_active_tool_guard_acting_tasks"):
+            self._active_tool_guard_acting_tasks = set()
+
+    def consume_pre_tool_terminal_stop(self) -> str | None:
+        """Return and clear the terminal stop state for the completed turn."""
+        self._ensure_pre_tool_terminal_stop_tracking()
+        reason = self._pre_tool_terminal_stop_reason
+        self._pre_tool_terminal_stop_reason = None
+        return reason
+
+    def reset_pre_tool_terminal_stop(self) -> None:
+        """Clear terminal stop state before beginning a new agent turn."""
+        self.consume_pre_tool_terminal_stop()
+
+    def _raise_if_pre_tool_terminal_stop_requested(self) -> None:
+        self._ensure_pre_tool_terminal_stop_tracking()
+        if self._pre_tool_terminal_stop_reason is not None:
+            raise PreToolUseTerminalStop(self._pre_tool_terminal_stop_reason)
+
+    def _request_pre_tool_terminal_stop(self, reason: str) -> None:
+        self._ensure_pre_tool_terminal_stop_tracking()
+        self._pre_tool_terminal_stop_reason = reason
+        stopping_task = asyncio.current_task()
+        for task in tuple(self._active_tool_guard_acting_tasks):
+            if task is not stopping_task and not task.done():
+                task.cancel()
 
     # ------------------------------------------------------------------
     # Helpers
@@ -1048,6 +1088,43 @@ class ToolGuardMixin:
         await self.memory.add(tool_res_msg)
         return None
 
+    async def _acting_hook_stopped(
+        self,
+        tool_call: dict[str, Any],
+        tool_name: str,
+        reason: str,
+    ) -> None:
+        stopped_text = (
+            f"Tool `{tool_name}` stopped by hook runtime.\n" f"{reason}"
+        )
+        tool_res_msg = Msg(
+            "system",
+            [
+                ToolResultBlock(
+                    **build_failed_tool_result_block(
+                        tool_call_id=tool_call["id"],
+                        tool_name=tool_name,
+                        error_type="hook_stopped",
+                        detail=stopped_text,
+                    ),
+                ),
+            ],
+            "system",
+        )
+        await self.print(tool_res_msg, True)
+        await self.memory.add(tool_res_msg)
+
+    async def _stop_pre_tool_hook(
+        self,
+        tool_call: dict[str, Any],
+        tool_name: str,
+        reason: str,
+    ) -> NoReturn:
+        """Record a terminal pre-tool stop and cancel peer tool calls."""
+        await self._acting_hook_stopped(tool_call, tool_name, reason)
+        self._request_pre_tool_terminal_stop(reason)
+        raise PreToolUseTerminalStop(reason)
+
     async def _record_tool_hook_result(
         self,
         result: MergedHookResult,
@@ -1099,7 +1176,20 @@ class ToolGuardMixin:
             guardians_used=["unified_hook_runtime"],
         )
 
-    async def _acting(self, tool_call) -> dict | None:  # noqa: C901
+    async def _acting(self, tool_call) -> dict | None:
+        """Track an active tool call and stop peers after a terminal hook."""
+        self._ensure_pre_tool_terminal_stop_tracking()
+        self._raise_if_pre_tool_terminal_stop_requested()
+        task = asyncio.current_task()
+        if task is None:
+            return await self._acting_impl(tool_call)
+        self._active_tool_guard_acting_tasks.add(task)
+        try:
+            return await self._acting_impl(tool_call)
+        finally:
+            self._active_tool_guard_acting_tasks.discard(task)
+
+    async def _acting_impl(self, tool_call) -> dict | None:  # noqa: C901
         """Intercept sensitive tool calls before execution.
 
         1. If tool is in *denied_tools*, auto-deny unconditionally.
@@ -1135,10 +1225,15 @@ class ToolGuardMixin:
             tool_call = dict(tool_call)
             tool_call["input"] = pre_hook_result.updated_input
             tool_input = pre_hook_result.updated_input
+        if pre_hook_result.decision == HookDecision.STOP:
+            await self._stop_pre_tool_hook(
+                tool_call,
+                tool_name,
+                pre_hook_result.reason or "Hook requested stop",
+            )
         if pre_hook_result.decision in {
             HookDecision.BLOCK,
             HookDecision.DENY,
-            HookDecision.STOP,
         }:
             return await self._acting_hook_denied(
                 tool_call,
@@ -1208,6 +1303,7 @@ class ToolGuardMixin:
             return result
 
         try:
+            self._raise_if_pre_tool_terminal_stop_requested()
             result = await self._run_tool_call_with_hard_timeout(
                 tool_call,
                 tool_name,
