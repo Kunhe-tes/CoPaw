@@ -389,6 +389,24 @@ def copy_skill_to_user(
     manifest_data = _read_user_skill_manifest_for_mutation(manifest_path)
     existing_entry = manifest_data["skills"].get(skill_name)
     promoted = False
+    active_dir = (
+        get_user_skills_dir(
+            swe_root,
+            user_id,
+            agent_id,
+            source_id,
+        )
+        / skill_name
+    )
+    hidden_dir = (
+        get_user_disabled_skills_dir(
+            swe_root,
+            user_id,
+            agent_id,
+            source_id,
+        )
+        / skill_name
+    )
     if existing_entry is not None:
         resolved = resolve_registered_skill_path(
             manifest_path.parent,
@@ -397,60 +415,10 @@ def copy_skill_to_user(
         )
         promoted = resolved.promoted
         final_enabled = existing_entry["enabled"] or promoted
-        if promoted:
-            hidden_dir = (
-                get_user_disabled_skills_dir(
-                    swe_root,
-                    user_id,
-                    agent_id,
-                    source_id,
-                )
-                / skill_name
-            )
-            if hidden_dir.exists():
-                shutil.rmtree(hidden_dir)
-            dst_dir = (
-                get_user_skills_dir(
-                    swe_root,
-                    user_id,
-                    agent_id,
-                    source_id,
-                )
-                / skill_name
-            )
-        elif resolved.path is not None:
-            dst_dir = resolved.path
-        elif final_enabled:
-            dst_dir = (
-                get_user_skills_dir(
-                    swe_root,
-                    user_id,
-                    agent_id,
-                    source_id,
-                )
-                / skill_name
-            )
-        else:
-            dst_dir = (
-                get_user_disabled_skills_dir(
-                    swe_root,
-                    user_id,
-                    agent_id,
-                    source_id,
-                )
-                / skill_name
-            )
     else:
         final_enabled = True
-        dst_dir = (
-            get_user_skills_dir(
-                swe_root,
-                user_id,
-                agent_id,
-                source_id,
-            )
-            / skill_name
-        )
+    dst_dir = active_dir if final_enabled else hidden_dir
+    stale_dir = hidden_dir if final_enabled else active_dir
 
     # 检查目标目录是否已有同名技能（通过 workspace manifest 判断）
     existing_created_at = None
@@ -465,6 +433,8 @@ def copy_skill_to_user(
             return {"status": "conflict", "reason": "customized"}
 
     # 先删除旧目录，再整体复制（确保与市场源一致）
+    if stale_dir.exists():
+        shutil.rmtree(stale_dir)
     if dst_dir.exists():
         shutil.rmtree(dst_dir)
     shutil.copytree(src_dir, dst_dir)
