@@ -355,6 +355,8 @@ export interface CronJobOverviewBranchRankingRow {
   phoneManagers: string;
   recommendedCustomers: string;
   viewedCustomers: string;
+  contactedCustomers: string;
+  contactRate: string;
   insightCustomers: string;
   phoneCustomers: string;
 }
@@ -454,6 +456,8 @@ export interface CronBranchRankingItem {
   phone_managers: number;
   recommended_customers: number;
   viewed_customers: number;
+  contacted_customers: number;
+  contact_rate: number;
   insight_customers: number;
   phone_customers: number;
 }
@@ -514,6 +518,8 @@ export interface BranchManagerSummaryItem {
   read_tasks: number;
   recommended_customers: number;
   viewed_customers: number;
+  contacted_customers: number;
+  contact_rate: number;
   insight_customers: number;
   phone_customers: number;
 }
@@ -659,6 +665,10 @@ function formatPercentText(value: number | null | undefined) {
   return `${formatPercentValue(value)}%`;
 }
 
+function formatRatioPercentText(value: number | null | undefined) {
+  return `${(Number(value ?? 0) * 100).toFixed(2)}%`;
+}
+
 export function mapCronJobOverviewPageData(
   stats: CronOverviewStatsResponse,
   behavior: CronBranchRankingResponse,
@@ -709,6 +719,8 @@ export function mapCronJobOverviewPageData(
       phoneManagers: formatInteger(item.phone_managers),
       recommendedCustomers: formatInteger(item.recommended_customers),
       viewedCustomers: formatInteger(item.viewed_customers),
+      contactedCustomers: formatInteger(item.contacted_customers ?? 0),
+      contactRate: formatRatioPercentText(item.contact_rate ?? 0),
       insightCustomers: formatInteger(item.insight_customers),
       phoneCustomers: formatInteger(item.phone_customers),
     })),

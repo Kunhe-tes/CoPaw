@@ -4,6 +4,7 @@
 import asyncio
 import json
 import logging
+import time
 from datetime import datetime, timedelta
 from typing import Any, Optional
 
@@ -1515,6 +1516,17 @@ class TracingQueryService:  # pylint: disable=too-many-public-methods
             filter_user_type: 'filtered' 过滤80/IT开头用户，'all' 仅过滤default用户
             metric_type: 口径类型（仅影响默认排序，不影响返回字段）
         """
+        method_start = time.time()
+        logger.info(
+            "[get_users] 开始处理请求: source_id=%s, bbk_ids=%s, start_date=%s, end_date=%s, filter_user_type=%s, sort_by=%s",
+            source_id,
+            bbk_ids,
+            start_date,
+            end_date,
+            filter_user_type,
+            sort_by,
+        )
+
         # 排序映射表（按四列依次降序：任务执行数、任务成功数、结果查看数、主动调用数）
         order_by_map = {
             "manual": "cron_executions DESC, cron_success DESC, cron_reads DESC, manual_calls DESC, user_id ASC",
@@ -1535,6 +1547,7 @@ class TracingQueryService:  # pylint: disable=too-many-public-methods
             order_by = order_by_map["manual"]
 
         # 构建 WHERE 条件和参数
+        step1_start = time.time()
         where_sql, params = self._build_traces_where_clause(
             source_id,
             filter_user_type,
@@ -1543,21 +1556,37 @@ class TracingQueryService:  # pylint: disable=too-many-public-methods
             start_date,
             end_date,
         )
+        logger.info(
+            "[get_users] 构建 WHERE 条件耗时: %.3fms",
+            (time.time() - step1_start) * 1000,
+        )
 
         # 查询总数
+        step2_start = time.time()
         count_query = f"SELECT COUNT(DISTINCT user_id) as total FROM swe_tracing_traces t WHERE {where_sql}"
         count_row = await self._db.fetch_one(count_query, tuple(params))
         total = count_row["total"] if count_row else 0
+        logger.info(
+            "[get_users] 查询总数耗时: %.3fms, total=%d",
+            (time.time() - step2_start) * 1000,
+            total,
+        )
 
         # 构建 cron 子查询
+        step3_start = time.time()
         cron_subquery_sql, cron_params = self._build_cron_subquery(
             source_id=source_id,
             start_date=start_date,
             end_date=end_date,
             bbk_ids=bbk_ids,
         )
+        logger.info(
+            "[get_users] 构建 cron 子查询耗时: %.3fms",
+            (time.time() - step3_start) * 1000,
+        )
 
         # 构建主查询
+        step4_start = time.time()
         offset = (page - 1) * page_size
         query, final_params = self._build_users_query(
             source_id=source_id,
@@ -1570,9 +1599,34 @@ class TracingQueryService:  # pylint: disable=too-many-public-methods
             offset=offset,
             bbk_ids=bbk_ids,
         )
+        logger.info(
+            "[get_users] 构建主查询耗时: %.3fms",
+            (time.time() - step4_start) * 1000,
+        )
 
+        # 执行主查询
+        step5_start = time.time()
         rows = await self._db.fetch_all(query, tuple(final_params))
+        logger.info(
+            "[get_users] 执行主查询耗时: %.3fms, 返回%d行",
+            (time.time() - step5_start) * 1000,
+            len(rows),
+        )
+
+        # 构建返回结果
+        step6_start = time.time()
         users = [self._build_user_list_item(row) for row in rows]
+        logger.info(
+            "[get_users] 构建结果耗时: %.3fms",
+            (time.time() - step6_start) * 1000,
+        )
+
+        logger.info(
+            "[get_users] 方法总耗时: %.3fms, source_id=%s, bbk_ids=%s",
+            (time.time() - method_start) * 1000,
+            source_id,
+            bbk_ids,
+        )
         return users, total
 
     def _build_traces_where_clause(
@@ -1681,7 +1735,7 @@ class TracingQueryService:  # pylint: disable=too-many-public-methods
         bbk_in_clause = ""
         if bbk_subquery_params:
             placeholders = ", ".join(["%s"] * len(bbk_subquery_params))
-            bbk_in_clause = f" AND bbk_id IN ({placeholders})"
+            bbk_in_clause = f" AND tr.bbk_id IN ({placeholders})"
 
         if source_id == "all":
             # source_id == "all": total_skills 子查询不加 source_id 过滤
@@ -1722,8 +1776,8 @@ class TracingQueryService:  # pylint: disable=too-many-public-methods
                 LIMIT %s OFFSET %s
             """
             final_params = (
-                bbk_subquery_params
-                + cron_params
+                cron_params
+                + bbk_subquery_params
                 + params
                 + [page_size, offset]
             )
@@ -1768,9 +1822,9 @@ class TracingQueryService:  # pylint: disable=too-many-public-methods
                 LIMIT %s OFFSET %s
             """
             final_params = (
-                [source_id, source_id]
+                cron_params
+                + [source_id, source_id]
                 + bbk_subquery_params
-                + cron_params
                 + params
                 + [page_size, offset]
             )
