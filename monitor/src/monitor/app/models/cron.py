@@ -650,6 +650,7 @@ class CronDispatchBatchItem(BaseModel):
 
     batch_id: str = Field(..., description="批调度批次 ID")
     parent_job_id: str = Field(default="", description="父任务 ID")
+    parent_job_name: str = Field(default="", description="定时任务名称")
     parent_external_job_id: str = Field(
         default="",
         description="调度平台任务 ID",
