@@ -47,6 +47,16 @@ logger = logging.getLogger(__name__)
 # 需要从统计中排除的 source_id（测试平台等）
 EXCLUDED_SOURCE_IDS = ["default"]
 EXTENDED_TREND_SOURCE_ID = "RMASSIST"
+EXCLUDED_SKILL_NAMES = (
+    "cron",
+    "search_customs_by_labels",
+    "cust_insight_url_generator",
+    "immortal-skill",
+    "batch_task_executor",
+    "skill_creator",
+    "docx",
+    "himalaya",
+)
 
 LATEST_FEEDBACK_JOIN_SQL = """
     LEFT JOIN (
@@ -178,6 +188,14 @@ def build_cron_bbk_in_filter(bbk_ids: Optional[str]) -> tuple[str, list[str]]:
         ids.append("V00")
     placeholders = ", ".join(["%s"] * len(ids))
     return f" AND j.bbk_id IN ({placeholders})", ids
+
+
+def build_excluded_skill_filter() -> tuple[str, list[str]]:
+    """构建需要从排行榜中屏蔽的技能过滤条件。"""
+    placeholders = ", ".join(["%s"] * len(EXCLUDED_SKILL_NAMES))
+    return f" AND skill_name NOT IN ({placeholders})", list(
+        EXCLUDED_SKILL_NAMES,
+    )
 
 
 def _summarize_task_status_rows(
@@ -2287,6 +2305,7 @@ class TracingQueryService:  # pylint: disable=too-many-public-methods
     ) -> list[SkillUsage]:
         """获取热门技能."""
         bbk_filter_sql, bbk_filter_params = build_bbk_in_filter(bbk_ids)
+        skill_filter_sql, skill_filter_params = build_excluded_skill_filter()
         if source_id == "all":
             exclude_placeholders = ", ".join(["%s"] * len(EXCLUDED_SOURCE_IDS))
             query = f"""
@@ -2296,6 +2315,7 @@ class TracingQueryService:  # pylint: disable=too-many-public-methods
                 FROM swe_tracing_spans
                 WHERE start_time >= %s AND start_time <= %s
                   AND skill_name IS NOT NULL
+                  {skill_filter_sql}
                   AND bbk_id IS NOT NULL AND bbk_id != ''
                   AND source_id NOT IN ({exclude_placeholders})
                   AND user_id != 'default'{bbk_filter_sql}
@@ -2306,6 +2326,7 @@ class TracingQueryService:  # pylint: disable=too-many-public-methods
             params = (
                 start_date,
                 end_date,
+                *skill_filter_params,
                 *EXCLUDED_SOURCE_IDS,
                 *bbk_filter_params,
             )
@@ -2318,13 +2339,20 @@ class TracingQueryService:  # pylint: disable=too-many-public-methods
                 FROM swe_tracing_spans
                 WHERE source_id = %s AND start_time >= %s AND start_time <= %s
                   AND skill_name IS NOT NULL
+                  {skill_filter_sql}
                   AND bbk_id IS NOT NULL AND bbk_id != ''
                   AND user_id != 'default'{bbk_filter_sql}
                 GROUP BY skill_name
                 ORDER BY count DESC
                 LIMIT 10
             """
-            params = (source_id, start_date, end_date, *bbk_filter_params)
+            params = (
+                source_id,
+                start_date,
+                end_date,
+                *skill_filter_params,
+                *bbk_filter_params,
+            )
             rows = await self._db.fetch_all(query, params)
         return [
             SkillUsage(
@@ -2625,12 +2653,14 @@ class TracingQueryService:  # pylint: disable=too-many-public-methods
             end_date = datetime.now() + timedelta(days=1)
 
         bbk_filter_sql, bbk_filter_params = build_bbk_in_filter(bbk_ids)
+        skill_filter_sql, skill_filter_params = build_excluded_skill_filter()
         # 构建基础查询条件
         if source_id == "all":
             exclude_placeholders = ", ".join(["%s"] * len(EXCLUDED_SOURCE_IDS))
             base_where = f"""
                 start_time >= %s AND start_time <= %s
                 AND skill_name IS NOT NULL
+                {skill_filter_sql}
                 AND bbk_id IS NOT NULL AND bbk_id != ''
                 AND source_id NOT IN ({exclude_placeholders})
                 AND user_id != 'default'{bbk_filter_sql}
@@ -2638,6 +2668,7 @@ class TracingQueryService:  # pylint: disable=too-many-public-methods
             count_params = [
                 start_date,
                 end_date,
+                *skill_filter_params,
                 *EXCLUDED_SOURCE_IDS,
                 *bbk_filter_params,
             ]
@@ -2645,6 +2676,7 @@ class TracingQueryService:  # pylint: disable=too-many-public-methods
             base_where = f"""
                 source_id = %s AND start_time >= %s AND start_time <= %s
                 AND skill_name IS NOT NULL
+                {skill_filter_sql}
                 AND bbk_id IS NOT NULL AND bbk_id != ''
                 AND user_id != 'default'{bbk_filter_sql}
             """
@@ -2652,6 +2684,7 @@ class TracingQueryService:  # pylint: disable=too-many-public-methods
                 source_id,
                 start_date,
                 end_date,
+                *skill_filter_params,
                 *bbk_filter_params,
             ]
 

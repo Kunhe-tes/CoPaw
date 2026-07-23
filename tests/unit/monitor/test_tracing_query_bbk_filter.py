@@ -9,6 +9,7 @@ Tests for:
 
 import pytest
 from datetime import datetime, timezone
+from unittest.mock import AsyncMock, MagicMock
 
 from monitor.app.services.tracing.query_service import (
     build_bbk_in_filter,
@@ -452,3 +453,55 @@ def test_users_query_binds_datetime_values_to_cron_time_placeholders():
     assert query.count("%s") == len(final_params)
     assert final_params[actual_time_start_index] == start_date
     assert final_params[actual_time_end_index] == end_date
+
+
+@pytest.mark.asyncio
+async def test_get_skills_paginated_excludes_internal_skills():
+    """技能排行榜 SQL 应屏蔽内部技能，避免运营看板被系统能力刷榜。"""
+    db = MagicMock()
+    db.fetch_one = AsyncMock(return_value={"total": 0})
+    db.fetch_all = AsyncMock(return_value=[])
+    service = TracingQueryService(db)
+
+    await service.get_skills_paginated(
+        source_id="RMASSIST",
+        page=2,
+        page_size=20,
+        start_date=datetime(2026, 7, 1),
+        end_date=datetime(2026, 7, 9),
+        bbk_ids="201",
+    )
+
+    count_query, count_params = db.fetch_one.await_args.args
+    data_query, data_params = db.fetch_all.await_args.args
+
+    assert "skill_name NOT IN (%s, %s)" in count_query
+    assert "skill_name NOT IN (%s, %s)" in data_query
+    assert "cron" in count_params
+    assert "skill-creator" in count_params
+    assert "cron" in data_params
+    assert "skill-creator" in data_params
+    assert data_params[-2:] == (20, 20)
+    assert data_query.count("%s") == len(data_params)
+
+
+@pytest.mark.asyncio
+async def test_get_top_skills_excludes_internal_skills():
+    """首页热门技能 SQL 应与分页排行榜保持同一屏蔽口径。"""
+    db = MagicMock()
+    db.fetch_all = AsyncMock(return_value=[])
+    service = TracingQueryService(db)
+
+    await service._get_top_skills(
+        source_id="all",
+        start_date=datetime(2026, 7, 1),
+        end_date=datetime(2026, 7, 9),
+        bbk_ids="201",
+    )
+
+    query, params = db.fetch_all.await_args.args
+
+    assert "skill_name NOT IN (%s, %s)" in query
+    assert "cron" in params
+    assert "skill-creator" in params
+    assert query.count("%s") == len(params)
