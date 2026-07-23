@@ -5517,6 +5517,7 @@ class TracingQueryService:  # pylint: disable=too-many-public-methods
         """转换数据库行为 Trace 模型."""
         return Trace(
             trace_id=row["trace_id"],
+            b3_trace_id=row.get("b3_trace_id"),
             source_id=row["source_id"],
             user_id=row["user_id"],
             user_name=row.get("user_name"),

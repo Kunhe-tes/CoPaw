@@ -14,6 +14,7 @@ SET FOREIGN_KEY_CHECKS = 0;
 CREATE TABLE IF NOT EXISTS `swe_tracing_traces` (
     `id` BIGINT AUTO_INCREMENT COMMENT '自增主键',
     `trace_id` VARCHAR(36) NOT NULL COMMENT '追踪唯一标识，UUID格式',
+    `b3_trace_id` VARCHAR(64) DEFAULT NULL COMMENT 'Upstream B3 trace identifier',
     `source_id` VARCHAR(64) NOT NULL COMMENT '数据源标识，用于多租户数据隔离',
     `user_id` VARCHAR(128) DEFAULT NULL COMMENT '用户标识，发起请求的用户ID',
     `user_name` VARCHAR(256) DEFAULT NULL COMMENT '用户名称',
@@ -36,6 +37,7 @@ CREATE TABLE IF NOT EXISTS `swe_tracing_traces` (
     PRIMARY KEY (`id`),
     UNIQUE KEY `uk_trace_id` (`trace_id`),
     INDEX `idx_source_id` (`source_id`),
+    INDEX `idx_source_b3_trace` (`source_id`, `b3_trace_id`),
     INDEX `idx_source_start_time` (`source_id`, `start_time`),
     INDEX `idx_source_user` (`source_id`, `user_id`),
     INDEX `idx_source_session` (`source_id`, `session_id`),

@@ -111,6 +111,10 @@ class Trace(BaseModel):
     model_config = ConfigDict(use_enum_values=True)
 
     trace_id: str = Field(description="Unique trace identifier")
+    b3_trace_id: Optional[str] = Field(
+        default=None,
+        description="External B3 trace identifier for distributed correlation",
+    )
     source_id: str = Field(description="Source identifier for data isolation")
     user_id: str = Field(description="User identifier")
     user_name: Optional[str] = Field(default=None, description="User name")
