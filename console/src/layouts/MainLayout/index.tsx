@@ -79,6 +79,7 @@ const pathToKey: Record<string, string> = {
   "/analytics/claw-data-overview": "analytics-claw-data-overview",
   "/analytics/cron-job-overview": "analytics-cron-job-overview",
   "/analytics/continuous-governance": "analytics-continuous-governance",
+  "/monitor/tasks": "monitor-task-center",
   "/monitor/cron-batch-dispatch": "monitor-cron-batch-dispatch",
   "/instance/overview": "instance-overview",
   "/instance/instances": "instance-instances",

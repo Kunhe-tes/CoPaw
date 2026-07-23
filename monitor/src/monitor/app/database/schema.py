@@ -728,6 +728,7 @@ AFTER async_status
 """
 
 
+# pylint: disable=too-many-statements
 async def init_database_tables() -> None:
     """Initialize database tables for cron monitoring.
 
