@@ -1125,6 +1125,38 @@ class ToolGuardMixin:
         self._request_pre_tool_terminal_stop(reason)
         raise PreToolUseTerminalStop(reason)
 
+    async def _stop_post_tool_hook(self, reason: str) -> NoReturn:
+        """End the turn after a post-tool hook without altering its result."""
+        reason = reason or "Hook requested stop"
+        self._request_pre_tool_terminal_stop(reason)
+        raise PreToolUseTerminalStop(reason)
+
+    async def _handle_post_tool_use(
+        self,
+        *,
+        span_id: str,
+        tool_name: str,
+        tool_input: dict[str, Any],
+        tool_use_id: str,
+        tool_response: dict | str | None,
+        trace_tool_output: dict | str | None,
+    ) -> None:
+        """Record the post-tool hook, trace its outcome, then stop if asked."""
+        post_hook_result = await self._emit_tool_hook(
+            HookEventName.POST_TOOL_USE,
+            tool_name=tool_name,
+            tool_input=tool_input,
+            tool_use_id=tool_use_id,
+            tool_response=tool_response,
+        )
+        await self._record_tool_hook_result(
+            post_hook_result,
+            event_name=HookEventName.POST_TOOL_USE,
+        )
+        await self._emit_tool_trace_end(span_id, trace_tool_output)
+        if post_hook_result.decision == HookDecision.STOP:
+            await self._stop_post_tool_hook(post_hook_result.reason)
+
     async def _record_tool_hook_result(
         self,
         result: MergedHookResult,
@@ -1311,26 +1343,24 @@ class ToolGuardMixin:
             )
             tool_use_id = str(tool_call.get("id") or "")
             tool_response = self._extract_current_tool_response(tool_use_id)
-            trace_tool_output = result
-            if trace_tool_output is None:
-                # post hook 不应把结构化失败当作正常结果继续消费，
-                # 但 tracing 仍需要读取原始失败 payload 来提取 error。
-                trace_tool_output = self._extract_current_tool_response(
+            # post hook 不应把结构化失败当作正常结果继续消费，
+            # 但 tracing 仍需要读取原始失败 payload 来提取 error。
+            trace_tool_output = (
+                result
+                if result is not None
+                else self._extract_current_tool_response(
                     tool_use_id,
                     include_structured_failure=True,
                 )
-            post_hook_result = await self._emit_tool_hook(
-                HookEventName.POST_TOOL_USE,
+            )
+            await self._handle_post_tool_use(
+                span_id=span_id,
                 tool_name=tool_name,
                 tool_input=tool_input,
                 tool_use_id=tool_use_id,
                 tool_response=tool_response,
+                trace_tool_output=trace_tool_output,
             )
-            await self._record_tool_hook_result(
-                post_hook_result,
-                event_name=HookEventName.POST_TOOL_USE,
-            )
-            await self._emit_tool_trace_end(span_id, trace_tool_output)
 
             if getattr(self, "_tool_guard_forced_replay_active", False):
                 self._tool_guard_forced_replay_active = False
@@ -1345,6 +1375,8 @@ class ToolGuardMixin:
                 }
             return result
 
+        except PreToolUseTerminalStop:
+            raise
         except Exception as e:
             failure_hook_result = await self._emit_tool_hook(
                 HookEventName.POST_TOOL_USE_FAILURE,
@@ -1358,6 +1390,8 @@ class ToolGuardMixin:
                 event_name=HookEventName.POST_TOOL_USE_FAILURE,
             )
             await self._emit_tool_trace_end(span_id, None, error=str(e))
+            if failure_hook_result.decision == HookDecision.STOP:
+                await self._stop_post_tool_hook(failure_hook_result.reason)
             raise
 
     async def _decide_guard_action(

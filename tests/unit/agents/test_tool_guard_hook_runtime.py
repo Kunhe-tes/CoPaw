@@ -1444,6 +1444,196 @@ async def test_post_tool_hook_additional_context_is_added_to_memory(
 
 
 @pytest.mark.asyncio
+async def test_post_tool_hook_stop_preserves_success_then_raises(
+    tmp_path,
+) -> None:
+    agent = _AgentScopeLikeFakeAgent(tmp_path)
+    agent._emit_tool_hook = AsyncMock(
+        side_effect=[
+            MergedHookResult(),
+            MergedHookResult(
+                decision=HookDecision.STOP,
+                reason="policy completed the task",
+                additional_context=[
+                    AdditionalContext(
+                        handler_id="post",
+                        context="successful result was reviewed",
+                    ),
+                ],
+            ),
+        ],
+    )
+
+    with pytest.raises(PreToolUseTerminalStop, match="policy completed"):
+        await agent._acting(
+            {
+                "id": "tool-1",
+                "name": "read_file",
+                "input": {"path": "README.md"},
+            },
+        )
+
+    assert agent.memory.content[0][0].get_content_blocks("tool_result")
+    assert (
+        "successful result was reviewed" in agent.memory.content[-1][0].content
+    )
+    assert agent.printed == []
+    assert [
+        call.args[0] for call in agent._emit_tool_hook.await_args_list
+    ] == [HookEventName.PRE_TOOL_USE, HookEventName.POST_TOOL_USE]
+
+
+@pytest.mark.asyncio
+async def test_post_tool_failure_hook_stop_replaces_original_error(
+    tmp_path,
+) -> None:
+    agent = _FakeAgent(tmp_path)
+    original_failure = Msg(
+        "system",
+        [
+            {
+                "type": "tool_result",
+                "id": "tool-1",
+                "name": "read_file",
+                "output": "tool failed",
+            },
+        ],
+        "system",
+    )
+
+    async def fail_tool_call(*_args):
+        await agent.memory.add(original_failure)
+        raise RuntimeError("tool failed")
+
+    agent._run_tool_call_with_hard_timeout = fail_tool_call
+    agent._emit_tool_trace_end = AsyncMock()
+    agent._emit_tool_hook = AsyncMock(
+        side_effect=[
+            MergedHookResult(),
+            MergedHookResult(
+                decision=HookDecision.STOP,
+                additional_context=[
+                    AdditionalContext(
+                        handler_id="failure",
+                        context="failure was recorded",
+                    ),
+                ],
+            ),
+        ],
+    )
+
+    with pytest.raises(PreToolUseTerminalStop, match="Hook requested stop"):
+        await agent._acting(
+            {
+                "id": "tool-1",
+                "name": "read_file",
+                "input": {"path": "README.md"},
+            },
+        )
+
+    assert "failure was recorded" in agent.memory.content[-1][0].content
+    assert agent.memory.content[0][0].get_content_blocks("tool_result")
+    assert (
+        agent._emit_tool_trace_end.await_args.kwargs["error"] == "tool failed"
+    )
+    assert [
+        call.args[0] for call in agent._emit_tool_hook.await_args_list
+    ] == [HookEventName.PRE_TOOL_USE, HookEventName.POST_TOOL_USE_FAILURE]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("decision", [HookDecision.BLOCK, HookDecision.DENY])
+async def test_post_tool_success_non_stop_decision_remains_non_terminal(
+    tmp_path,
+    decision: HookDecision,
+) -> None:
+    agent = _FakeAgent(tmp_path)
+    agent._emit_tool_hook = AsyncMock(
+        side_effect=[MergedHookResult(), MergedHookResult(decision=decision)],
+    )
+
+    result = await agent._acting(
+        {
+            "id": "tool-1",
+            "name": "read_file",
+            "input": {"path": "README.md"},
+        },
+    )
+
+    assert result == {"content": {"path": "README.md"}}
+    assert agent.consume_pre_tool_terminal_stop() is None
+
+
+@pytest.mark.asyncio
+async def test_post_tool_failure_deny_remains_non_terminal(tmp_path) -> None:
+    agent = _FakeAgent(tmp_path)
+    agent._run_tool_call_with_hard_timeout = AsyncMock(
+        side_effect=RuntimeError("tool failed"),
+    )
+    agent._emit_tool_hook = AsyncMock(
+        side_effect=[
+            MergedHookResult(),
+            MergedHookResult(decision=HookDecision.DENY, reason="no retry"),
+        ],
+    )
+
+    with pytest.raises(RuntimeError, match="tool failed"):
+        await agent._acting(
+            {
+                "id": "tool-1",
+                "name": "read_file",
+                "input": {"path": "README.md"},
+            },
+        )
+
+    assert agent.consume_pre_tool_terminal_stop() is None
+
+
+@pytest.mark.asyncio
+async def test_post_tool_stop_cancels_registered_peer(tmp_path) -> None:
+    agent = _FakeAgent(tmp_path)
+    peer_started = asyncio.Event()
+    peer_blocker = asyncio.Event()
+
+    async def emit_hook(event_name, **kwargs):
+        if (
+            event_name == HookEventName.POST_TOOL_USE
+            and kwargs["tool_name"] == "stop"
+        ):
+            return MergedHookResult(
+                decision=HookDecision.STOP,
+                reason="stop parallel tools",
+            )
+        return MergedHookResult()
+
+    async def run_tool_call(tool_call, tool_name, _tool_input):
+        if tool_name == "peer":
+            peer_started.set()
+            await peer_blocker.wait()
+        return {"content": tool_call["input"]}
+
+    agent._emit_tool_hook = emit_hook
+    agent._run_tool_call_with_hard_timeout = run_tool_call
+    peer_task = asyncio.create_task(
+        agent._acting({"id": "tool-peer", "name": "peer", "input": {}}),
+    )
+    await peer_started.wait()
+    stop_task = asyncio.create_task(
+        agent._acting({"id": "tool-stop", "name": "stop", "input": {}}),
+    )
+
+    with pytest.raises(PreToolUseTerminalStop, match="stop parallel tools"):
+        await stop_task
+    with pytest.raises(asyncio.CancelledError):
+        await peer_task
+
+    with pytest.raises(PreToolUseTerminalStop, match="stop parallel tools"):
+        await agent._acting({"id": "tool-late", "name": "late", "input": {}})
+
+    assert agent._active_tool_guard_acting_tasks == set()
+
+
+@pytest.mark.asyncio
 async def test_tool_failure_hook_block_reason_is_added_to_memory(
     tmp_path,
 ) -> None:
