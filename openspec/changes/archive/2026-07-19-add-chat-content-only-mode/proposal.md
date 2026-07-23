@@ -6,12 +6,13 @@ This is a presentation requirement, not a read-only or authorization mode. The s
 
 ## What Changes
 
-- Add `showContentOnly=true` as an opt-in query parameter for `/chat/{chat.id}`. Activation is independent of iframe presence and `source`, so the same URL works in embedded hosts and direct local testing.
+- Add `showContentOnly=true` as an opt-in query parameter for `/chat/{chat.id}`. A full-page startup initializes a runtime-only presentation flag from the exact value; activation is independent of iframe presence and `source`, so the same URL works in embedded hosts and direct local testing.
+- Let layout and chat presentation consume that global flag directly without re-checking the current URL or `chat.id`; keep it stable for the whole page runtime when internal navigation replaces the URL without the query string, while a new full-page startup without the opt-in restores normal presentation.
 - Hide the global Header and Sidebar, the entire chat sidebar (including tasks, history, and its collapsed toolbar), the generated-files entry/list, the model selector, the question composer, and upload surfaces.
 - Keep the existing chat title and complete conversation content.
 - Keep all message-level interactions governed by their existing normal-chat rules, including approval/deny, feedback, retry/regenerate, suggestions, copy, download, preview, and disclosure controls.
 - Reuse the normal `/chat/{chat.id}` identity initialization, session restoration, loading/empty/error behavior, request ownership, SSE reconnect, stream rendering, background effects, and HTML-preview tracking without adding content-only branches.
-- Preserve all existing Conversation Workspace behavior when the query parameter is absent or not exactly `true`.
+- Preserve all existing Conversation Workspace behavior when a new full-page startup does not initialize content-only presentation.
 
 ## Capabilities
 
@@ -27,7 +28,7 @@ This is a presentation requirement, not a read-only or authorization mode. The s
 
 ## Impact
 
-- Console URL-mode resolution and global layout under `console/src/layouts/MainLayout/`.
+- Console startup URL initialization, runtime-only presentation state, and global layout under `console/src/main.tsx`, `console/src/stores/`, and `console/src/layouts/MainLayout/`.
 - Conditional composition under `console/src/pages/Chat/` and the shared Chat surface for hiding the composer.
 - Focused layout, normal-mode regression, message-action compatibility, and running-stream presentation tests.
 - `console/DESIGN.md` and affected OpenSpec capabilities.

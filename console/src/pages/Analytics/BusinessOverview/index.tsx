@@ -1268,7 +1268,7 @@ export default function BusinessOverviewPage() {
                 setHtmlPreviewRefreshKey((value) => value + 1);
               }}
             >
-              <RotateCw size={16} />
+              <RotateCw size={14} />
               刷新
             </button>
           </div>
