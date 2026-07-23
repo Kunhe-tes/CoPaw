@@ -311,6 +311,123 @@ def test_copy_skill_to_user_rejects_invalid_manifest_before_replacing_package(
     assert (destination / "SKILL.md").read_text(encoding="utf-8") == "old"
 
 
+def test_copy_skill_to_user_preserves_disabled_distribution_state(tmp_path):
+    from market.marketplace.fs import (
+        copy_skill_to_user,
+        get_skill_dir,
+        get_user_disabled_skills_dir,
+        get_user_skill_manifest_path,
+    )
+
+    marketplace = tmp_path / "market"
+    swe_root = tmp_path / "swe"
+    source_id = "source"
+    source_dir = get_skill_dir(marketplace, source_id, "item")
+    source_dir.mkdir(parents=True)
+    (source_dir / "SKILL.md").write_text("new-hidden", encoding="utf-8")
+    hidden = (
+        get_user_disabled_skills_dir(swe_root, "user", source_id=source_id)
+        / "demo"
+    )
+    hidden.mkdir(parents=True)
+    (hidden / "SKILL.md").write_text("old-hidden", encoding="utf-8")
+    manifest_path = get_user_skill_manifest_path(
+        swe_root,
+        "user",
+        source_id=source_id,
+    )
+    manifest_path.write_text(
+        json.dumps(
+            {
+                "layout_version": 2,
+                "skills": {"demo": {"enabled": False}},
+            },
+        ),
+        encoding="utf-8",
+    )
+
+    result = copy_skill_to_user(
+        marketplace,
+        source_id,
+        "item",
+        swe_root,
+        "user",
+        "demo",
+        "Demo",
+        "",
+        "",
+        "1",
+    )
+
+    assert (hidden / "SKILL.md").read_text(encoding="utf-8") == "new-hidden"
+    assert result["final_enabled"] is False
+    assert result["promoted"] is False
+    assert result["package_path"] == hidden
+
+
+def test_copy_skill_to_user_promotes_disabled_collision_before_distribution(
+    tmp_path,
+):
+    from market.marketplace.fs import (
+        copy_skill_to_user,
+        get_skill_dir,
+        get_user_disabled_skills_dir,
+        get_user_skill_manifest_path,
+        get_user_skills_dir,
+    )
+
+    marketplace = tmp_path / "market"
+    swe_root = tmp_path / "swe"
+    source_id = "source"
+    source_dir = get_skill_dir(marketplace, source_id, "item")
+    source_dir.mkdir(parents=True)
+    (source_dir / "SKILL.md").write_text("new-active", encoding="utf-8")
+    active = (
+        get_user_skills_dir(swe_root, "user", source_id=source_id) / "demo"
+    )
+    hidden = (
+        get_user_disabled_skills_dir(swe_root, "user", source_id=source_id)
+        / "demo"
+    )
+    active.mkdir(parents=True)
+    hidden.mkdir(parents=True)
+    (active / "SKILL.md").write_text("stale-active", encoding="utf-8")
+    (hidden / "SKILL.md").write_text("stale-hidden", encoding="utf-8")
+    manifest_path = get_user_skill_manifest_path(
+        swe_root,
+        "user",
+        source_id=source_id,
+    )
+    manifest_path.write_text(
+        json.dumps(
+            {
+                "layout_version": 2,
+                "skills": {"demo": {"enabled": False}},
+            },
+        ),
+        encoding="utf-8",
+    )
+
+    result = copy_skill_to_user(
+        marketplace,
+        source_id,
+        "item",
+        swe_root,
+        "user",
+        "demo",
+        "Demo",
+        "",
+        "",
+        "1",
+    )
+
+    assert (active / "SKILL.md").read_text(encoding="utf-8") == "new-active"
+    assert not hidden.exists()
+    assert result["final_enabled"] is True
+    assert result["promoted"] is True
+    assert result["package_path"] == active
+
+
 def test_read_user_skill_manifest_missing_file_returns_layout_v2(tmp_path):
     from market.marketplace.fs import read_user_skill_manifest
 

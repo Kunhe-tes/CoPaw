@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 import json
 import pytest
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, Mock
 
 
 def _make_service(tmp_path, mock_db=None):
@@ -199,6 +199,62 @@ async def test_enable_registered_hidden_skill_updates_manifest_and_reloads(
         "default",
         source_id,
     )
+
+
+@pytest.mark.asyncio
+async def test_distribution_preserves_disabled_result_without_reload(
+    tmp_path,
+    monkeypatch,
+):
+    from market.marketplace.fs import save_index
+    from market.marketplace.models import MarketItem
+    from market.marketplace.schemas import DistributeRequest
+    from market.marketplace import service as service_module
+
+    svc = _make_service(tmp_path)
+    svc._resolve_target_users = AsyncMock(
+        return_value=[{"tenant_id": "user1", "tenant_name": "User"}],
+    )
+    svc._trigger_agent_reload = AsyncMock()
+    svc.skill_registry.insert_skill = AsyncMock(return_value=True)
+    svc.register_skill_in_manifest = Mock(return_value=True)
+    save_index(
+        tmp_path / "market",
+        "source",
+        [
+            MarketItem(
+                item_id="item",
+                name="demo",
+                description="new description",
+                version="1.0.0",
+                creator_id="owner",
+            ),
+        ],
+    )
+    monkeypatch.setattr(
+        service_module,
+        "copy_skill_to_user",
+        lambda **_kwargs: {
+            "status": "distributed",
+            "metadata": {},
+            "package_path": tmp_path / "hidden" / "demo",
+            "final_enabled": False,
+            "promoted": False,
+        },
+    )
+
+    result = await svc.distribute_skill(
+        "source",
+        "item",
+        "operator",
+        "Operator",
+        DistributeRequest(target_type="user_id", target_values=["user1"]),
+    )
+
+    assert result.distributed_count == 1
+    assert svc.register_skill_in_manifest.call_args.kwargs["enabled"] is False
+    assert svc.skill_registry.insert_skill.call_args.kwargs["enabled"] is False
+    svc._trigger_agent_reload.assert_not_awaited()
 
 
 @pytest.mark.asyncio

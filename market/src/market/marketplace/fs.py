@@ -388,21 +388,69 @@ def copy_skill_to_user(
     )
     manifest_data = _read_user_skill_manifest_for_mutation(manifest_path)
     existing_entry = manifest_data["skills"].get(skill_name)
-    if existing_entry is not None and not existing_entry["enabled"]:
-        destination_root = get_user_disabled_skills_dir(
-            swe_root,
-            user_id,
-            agent_id,
-            source_id,
+    promoted = False
+    if existing_entry is not None:
+        resolved = resolve_registered_skill_path(
+            manifest_path.parent,
+            skill_name,
+            existing_entry,
         )
+        promoted = resolved.promoted
+        final_enabled = existing_entry["enabled"] or promoted
+        if promoted:
+            hidden_dir = (
+                get_user_disabled_skills_dir(
+                    swe_root,
+                    user_id,
+                    agent_id,
+                    source_id,
+                )
+                / skill_name
+            )
+            if hidden_dir.exists():
+                shutil.rmtree(hidden_dir)
+            dst_dir = (
+                get_user_skills_dir(
+                    swe_root,
+                    user_id,
+                    agent_id,
+                    source_id,
+                )
+                / skill_name
+            )
+        elif resolved.path is not None:
+            dst_dir = resolved.path
+        elif final_enabled:
+            dst_dir = (
+                get_user_skills_dir(
+                    swe_root,
+                    user_id,
+                    agent_id,
+                    source_id,
+                )
+                / skill_name
+            )
+        else:
+            dst_dir = (
+                get_user_disabled_skills_dir(
+                    swe_root,
+                    user_id,
+                    agent_id,
+                    source_id,
+                )
+                / skill_name
+            )
     else:
-        destination_root = get_user_skills_dir(
-            swe_root,
-            user_id,
-            agent_id,
-            source_id,
+        final_enabled = True
+        dst_dir = (
+            get_user_skills_dir(
+                swe_root,
+                user_id,
+                agent_id,
+                source_id,
+            )
+            / skill_name
         )
-    dst_dir = destination_root / skill_name
 
     # 检查目标目录是否已有同名技能（通过 workspace manifest 判断）
     existing_created_at = None
@@ -447,7 +495,13 @@ def copy_skill_to_user(
     if existing_created_at:
         metadata["created_at"] = existing_created_at
 
-    return {"status": "distributed", "metadata": metadata}
+    return {
+        "status": "distributed",
+        "metadata": metadata,
+        "package_path": dst_dir,
+        "final_enabled": final_enabled,
+        "promoted": promoted,
+    }
 
 
 def get_workspace_skill_manifest_path(workspace_dir: Path) -> Path:

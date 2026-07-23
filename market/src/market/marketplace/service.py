@@ -595,6 +595,7 @@ class MarketplaceService:
         enabled: bool = True,
         source: str = "customized",
         extra_metadata: dict | None = None,
+        package_path: Path | None = None,
     ) -> bool:
         """注册技能到 manifest（用于上传/分发时记录）。
 
@@ -618,7 +619,7 @@ class MarketplaceService:
             agent_id,
             source_id,
         )
-        skill_dir = skills_dir / skill_name
+        skill_dir = package_path or skills_dir / skill_name
 
         def _update(payload: dict) -> bool:
             skills_dict = payload.setdefault("skills", {})
@@ -1318,14 +1319,16 @@ class MarketplaceService:
 
                 # 注册技能到 manifest（使用返回的 metadata）
                 metadata = result.get("metadata") or {}
+                final_enabled = bool(result["final_enabled"])
                 self.register_skill_in_manifest(
                     user["tenant_id"],
                     safe_skill_name,
                     "default",
                     source_id,
-                    enabled=True,
+                    enabled=final_enabled,
                     source=f"marketplace:{item_id}",
                     extra_metadata=metadata,
+                    package_path=result.get("package_path"),
                 )
 
                 # 写入 swe_skills 表（分发时记录用户持有状态）
@@ -1338,7 +1341,7 @@ class MarketplaceService:
                     bbk_id=user.get("bbk_id", ""),
                     source=f"marketplace:{item_id}",
                     source_id=source_id,
-                    enabled=True,
+                    enabled=final_enabled,
                     description=item.description,
                     version_text=item.version,
                 )
@@ -1347,6 +1350,12 @@ class MarketplaceService:
                         "分发成功但 swe_skills 写入失败: user=%s, skill=%s",
                         user["tenant_id"],
                         safe_skill_name,
+                    )
+                if final_enabled:
+                    await self._trigger_agent_reload(
+                        user["tenant_id"],
+                        "default",
+                        source_id,
                     )
                 count += 1
             except Exception as e:
