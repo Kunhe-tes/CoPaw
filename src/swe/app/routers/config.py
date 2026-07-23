@@ -513,10 +513,10 @@ async def _persist_zhaohu_binding(
         return
 
     robot_id = getattr(channel_config, "robot_open_id", "") or ""
-    # source_id 优先使用传入值（来自请求头 X-Source-Id），否则 fallback 到渠道配置
-    effective_source_id = (
-        source_id or getattr(channel_config, "channel", None) or "zhaohu"
-    )
+    # source_id 来自请求头 X-Source-Id，获取不到则不处理
+    if not source_id:
+        return
+    effective_source_id = source_id
     if not tenant_id or not robot_id:
         return
 
