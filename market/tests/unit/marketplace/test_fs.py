@@ -285,6 +285,7 @@ def test_read_user_skill_manifest_missing_file_returns_layout_v2(tmp_path):
 
 def test_mutate_user_skill_manifest_rejects_malformed_json(tmp_path):
     from market.marketplace.fs import (
+        WorkspaceSkillManifestError,
         get_user_skill_manifest_path,
         mutate_user_skill_manifest,
     )
@@ -306,7 +307,10 @@ def test_mutate_user_skill_manifest_rejects_malformed_json(tmp_path):
         mutation_called = True
         return True
 
-    with pytest.raises(json.JSONDecodeError):
+    with pytest.raises(
+        WorkspaceSkillManifestError,
+        match="skills migrate-layout --apply",
+    ):
         mutate_user_skill_manifest(
             swe_root,
             "user1",
@@ -321,6 +325,7 @@ def test_mutate_user_skill_manifest_rejects_malformed_json(tmp_path):
 
 def test_mutate_user_skill_manifest_rejects_invalid_utf8(tmp_path):
     from market.marketplace.fs import (
+        WorkspaceSkillManifestError,
         get_user_skill_manifest_path,
         mutate_user_skill_manifest,
     )
@@ -342,7 +347,10 @@ def test_mutate_user_skill_manifest_rejects_invalid_utf8(tmp_path):
         mutation_called = True
         return True
 
-    with pytest.raises(UnicodeDecodeError):
+    with pytest.raises(
+        WorkspaceSkillManifestError,
+        match="skills migrate-layout --apply",
+    ):
         mutate_user_skill_manifest(
             swe_root,
             "user1",

@@ -579,7 +579,17 @@ def _read_user_skill_manifest_for_mutation(manifest_path: Path) -> dict:
         manifest_text = manifest_path.read_text(encoding="utf-8")
     except FileNotFoundError:
         return default_workspace_skill_manifest()
-    return validate_workspace_skill_manifest_v2(json.loads(manifest_text))
+    except UnicodeDecodeError as exc:
+        raise WorkspaceSkillManifestError(
+            "Run skills migrate-layout --apply before mutating skills",
+        ) from exc
+    try:
+        payload = json.loads(manifest_text)
+    except json.JSONDecodeError as exc:
+        raise WorkspaceSkillManifestError(
+            "Run skills migrate-layout --apply before mutating skills",
+        ) from exc
+    return validate_workspace_skill_manifest_v2(payload)
 
 
 def check_skill_status_in_manifest(
