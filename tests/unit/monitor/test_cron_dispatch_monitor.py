@@ -6,6 +6,7 @@ import pytest
 from monitor.app.models.cron import CronDispatchPolicyItem
 from monitor.app.services.cron import query_service as query_service_module
 from monitor.app.services.cron.query_service import QueryService
+from monitor.app.routers.cron import list_dispatch_batches
 
 
 class FakeDb:
@@ -43,6 +44,7 @@ async def test_get_dispatch_batches_filters_by_current_source(monkeypatch):
                 {
                     "batch_id": "cron:batch-a",
                     "parent_job_id": "parent-a",
+                    "parent_job_name": "展示定时任务名",
                     "parent_external_job_id": "external-a",
                     "tenant_id": "tenant-a",
                     "source_id": "RMASSIST",
@@ -83,6 +85,18 @@ async def test_get_dispatch_batches_filters_by_current_source(monkeypatch):
     assert result.source_id == "RMASSIST"
     assert result.stats.pending_intents == 3
     assert result.items[0].batch_id == "cron:batch-a"
+    assert result.items[0].parent_job_name == "展示定时任务名"
+    normalized_stats_sql = " ".join(fake_db.fetch_one_calls[0][0].split())
+    normalized_page_sql = " ".join(fake_db.fetch_all_calls[0][0].split())
+    source_scoped_job_join = (
+        "LEFT JOIN swe_cron_jobs j ON b.parent_job_id = j.id "
+        "AND b.source_id = j.source_id"
+    )
+    assert source_scoped_job_join in normalized_stats_sql
+    assert source_scoped_job_join in normalized_page_sql
+    assert "j.deleted_at" not in normalized_stats_sql
+    assert "j.deleted_at" not in normalized_page_sql
+    assert "COALESCE(j.name, '') AS parent_job_name" in normalized_page_sql
     assert fake_db.fetch_one_calls[0][1] == (
         "RMASSIST",
         datetime(2026, 7, 8, 0, 0, 0),
@@ -92,12 +106,119 @@ async def test_get_dispatch_batches_filters_by_current_source(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_get_dispatch_batches_applies_global_query_to_stats_and_page(monkeypatch):
+    fake_db = FakeDb(
+        one_results=[
+            {
+                "total_batches": 0,
+                "running_batches": 0,
+                "completed_batches": 0,
+                "failed_batches": 0,
+                "total_intents": 0,
+                "completed_intents": 0,
+                "failed_intents": 0,
+            },
+        ],
+        all_results=[[]],
+    )
+    monkeypatch.setattr(query_service_module, "get_db_connection", lambda: fake_db)
+
+    await QueryService().get_dispatch_batches(
+        source_id="RMASSIST",
+        status="failed",
+        query="  Agent\\_%  ",
+        page=2,
+        page_size=4,
+    )
+
+    stats_sql, stats_params = fake_db.fetch_one_calls[0]
+    page_sql, page_params = fake_db.fetch_all_calls[0]
+    normalized_stats_sql = " ".join(stats_sql.split())
+    normalized_page_sql = " ".join(page_sql.split())
+    source_scoped_job_join = (
+        "LEFT JOIN swe_cron_jobs j ON b.parent_job_id = j.id "
+        "AND b.source_id = j.source_id"
+    )
+    searchable_fields = (
+        "b.batch_id",
+        "b.parent_job_id",
+        "b.parent_external_job_id",
+        "b.tenant_id",
+        "b.provider_id",
+        "b.model_id",
+        "b.agent_id",
+        "j.name",
+    )
+
+    assert stats_params == (
+        "RMASSIST",
+        "failed",
+        "%agent\\\\\\_\\%%",
+        "%agent\\\\\\_\\%%",
+        "%agent\\\\\\_\\%%",
+        "%agent\\\\\\_\\%%",
+        "%agent\\\\\\_\\%%",
+        "%agent\\\\\\_\\%%",
+        "%agent\\\\\\_\\%%",
+        "%agent\\\\\\_\\%%",
+    )
+    assert page_params == stats_params + (4, 4)
+    assert source_scoped_job_join in normalized_stats_sql
+    assert source_scoped_job_join in normalized_page_sql
+    assert "j.deleted_at" not in normalized_stats_sql
+    assert "j.deleted_at" not in normalized_page_sql
+    for field in searchable_fields:
+        predicate = f"LOWER(COALESCE({field}, '')) LIKE %s ESCAPE '\\\\'"
+        assert predicate in normalized_stats_sql
+        assert predicate in normalized_page_sql
+
+
+def test_build_dispatch_batch_where_clause_ignores_blank_query():
+    where_clause, params = QueryService()._build_dispatch_batch_where_clause(
+        source_id="RMASSIST",
+        query="   ",
+    )
+
+    assert where_clause == "b.source_id = %s"
+    assert params == ["RMASSIST"]
+
+
+@pytest.mark.asyncio
+async def test_list_dispatch_batches_forwards_query():
+    class FakeRequest:
+        headers = {"X-Source-Id": "RMASSIST"}
+
+    class FakeService:
+        def __init__(self):
+            self.kwargs = None
+
+        async def get_dispatch_batches(self, **kwargs):
+            self.kwargs = kwargs
+            return object()
+
+    service = FakeService()
+    await list_dispatch_batches(
+        request=FakeRequest(),
+        start_time=None,
+        end_time=None,
+        status=None,
+        query="tenant-a",
+        page=1,
+        page_size=4,
+        service=service,
+    )
+
+    assert service.kwargs["query"] == "tenant-a"
+
+
+@pytest.mark.asyncio
 async def test_get_dispatch_batch_detail_parses_events(monkeypatch):
     fake_db = FakeDb(
         one_results=[
             {
                 "batch_id": "cron:batch-a",
                 "parent_job_id": "parent-a",
+                "parent_job_name": "展示定时任务名",
                 "parent_external_job_id": "",
                 "tenant_id": "tenant-a",
                 "source_id": "RMASSIST",
@@ -176,9 +297,18 @@ async def test_get_dispatch_batch_detail_parses_events(monkeypatch):
     )
 
     assert result is not None
+    assert result.batch.parent_job_name == "展示定时任务名"
     assert result.intent_total == 1
     assert result.intents[0].viewer_heat_score == 1.25
     assert result.events[0].details == {"error": "timeout"}
+    normalized_batch_sql = " ".join(fake_db.fetch_one_calls[0][0].split())
+    assert (
+        "LEFT JOIN swe_cron_jobs j ON b.parent_job_id = j.id "
+        "AND b.source_id = j.source_id"
+        in normalized_batch_sql
+    )
+    assert "j.deleted_at" not in normalized_batch_sql
+    assert "COALESCE(j.name, '') AS parent_job_name" in normalized_batch_sql
 
 
 @pytest.mark.asyncio

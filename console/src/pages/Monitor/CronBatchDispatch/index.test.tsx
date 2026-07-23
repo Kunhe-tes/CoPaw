@@ -1,4 +1,5 @@
 import {
+  act,
   cleanup,
   fireEvent,
   render,
@@ -82,6 +83,7 @@ describe("CronBatchDispatchPage", () => {
         {
           batch_id: "cron:batch-a",
           parent_job_id: "parent-a",
+          parent_job_name: "展示定时任务名",
           parent_external_job_id: "external-a",
           tenant_id: "tenant-a",
           source_id: "CMB-MALL",
@@ -104,6 +106,7 @@ describe("CronBatchDispatchPage", () => {
         {
           batch_id: "cron:batch-b",
           parent_job_id: "parent-b",
+          parent_job_name: "另一个定时任务",
           parent_external_job_id: "external-b",
           tenant_id: "tenant-b",
           source_id: "CMB-MALL",
@@ -133,6 +136,7 @@ describe("CronBatchDispatchPage", () => {
       batch: {
         batch_id: "cron:batch-a",
         parent_job_id: "parent-a",
+        parent_job_name: "展示定时任务名",
         parent_external_job_id: "external-a",
         tenant_id: "tenant-a",
         source_id: "CMB-MALL",
@@ -350,6 +354,7 @@ describe("CronBatchDispatchPage", () => {
   });
 
   afterEach(() => {
+    vi.useRealTimers();
     cleanup();
   });
 
@@ -372,19 +377,119 @@ describe("CronBatchDispatchPage", () => {
     });
 
     expect(screen.getAllByText("parent-a").length).toBeGreaterThan(0);
+    expect(screen.getAllByText("展示定时任务名").length).toBeGreaterThanOrEqual(2);
+    expect(
+      screen.getByRole("heading", { name: "展示定时任务名" }),
+    ).toBeInTheDocument();
     expect(screen.getAllByText("aaa").length).toBeGreaterThan(0);
     expect(screen.getAllByText("bbb").length).toBeGreaterThan(0);
     expect(screen.getByText("success_70_90_add_1")).toBeInTheDocument();
   });
 
-  it("exposes the Batch list as a focusable scrolling region", async () => {
+  it("uses a fixed four-row page without an inner scrolling region", async () => {
     render(<CronBatchDispatchPage />);
 
-    const batchList = await screen.findByRole("region", {
-      name: "Batch 列表",
+    await waitFor(() => {
+      expect(monitorApiMock.getCronDispatchBatches).toHaveBeenCalledWith(
+        1,
+        4,
+        expect.any(Object),
+      );
+    });
+    expect(screen.queryByRole("region", { name: "Batch 列表" })).toBeNull();
+    expect(screen.queryByText(/条\/页/)).toBeNull();
+  });
+
+  it("uses the unnamed label instead of IDs when the cron job name is unavailable", async () => {
+    const response =
+      (await monitorApiMock.getCronDispatchBatches()) as CronDispatchBatchesResponse;
+    const detail =
+      (await monitorApiMock.getCronDispatchBatchDetail()) as CronDispatchBatchDetailResponse;
+    const unnamedBatch = {
+      ...response.items[0],
+      parent_job_name: "",
+    };
+    monitorApiMock.getCronDispatchBatches.mockResolvedValue({
+      ...response,
+      items: [unnamedBatch],
+      total: 1,
+    });
+    monitorApiMock.getCronDispatchBatchDetail.mockResolvedValue({
+      ...detail,
+      batch: unnamedBatch,
+      intents: [],
+      intent_total: 0,
+      events: [],
     });
 
-    expect(batchList).toHaveAttribute("tabindex", "0");
+    render(<CronBatchDispatchPage />);
+
+    const unnamedLabels = await screen.findAllByText("未命名定时任务");
+    fireEvent.click(unnamedLabels[0].closest("button")!);
+    expect(
+      await screen.findByRole("heading", { name: "未命名定时任务" }),
+    ).toBeInTheDocument();
+    expect(screen.getAllByText("未命名定时任务").length).toBeGreaterThanOrEqual(2);
+    expect(
+      screen.queryByRole("heading", { name: "external-a" }),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("heading", { name: "parent-a" }),
+    ).not.toBeInTheDocument();
+    expect(screen.getAllByText("parent-a").length).toBeGreaterThan(0);
+  });
+
+  it("refetches the last valid page when the current page becomes out of range", async () => {
+    const baseResponse =
+      (await monitorApiMock.getCronDispatchBatches()) as CronDispatchBatchesResponse;
+    monitorApiMock.getCronDispatchBatches.mockClear();
+    const firstBatch = baseResponse.items[0];
+    const returnedBatch = baseResponse.items[1];
+    expect(firstBatch).toBeDefined();
+    expect(returnedBatch).toBeDefined();
+
+    const validPageRequest = deferred<CronDispatchBatchesResponse>();
+    monitorApiMock.getCronDispatchBatches
+      .mockResolvedValueOnce({
+        ...baseResponse,
+        items: [firstBatch!],
+        total: 8,
+        page: 1,
+        page_size: 4,
+      })
+      .mockResolvedValueOnce({
+        ...baseResponse,
+        items: [],
+        total: 4,
+        page: 2,
+        page_size: 4,
+      })
+      .mockReturnValueOnce(validPageRequest.promise);
+
+    render(<CronBatchDispatchPage />);
+    expect(await screen.findByText("展示定时任务名")).toBeInTheDocument();
+
+    fireEvent.click(screen.getByTitle("2"));
+    await waitFor(() => {
+      expect(monitorApiMock.getCronDispatchBatches).toHaveBeenLastCalledWith(
+        1,
+        4,
+        expect.any(Object),
+      );
+      expect(monitorApiMock.getCronDispatchBatches).toHaveBeenCalledTimes(3);
+    });
+
+    expect(screen.getAllByText("展示定时任务名").length).toBeGreaterThan(0);
+    expect(screen.queryByText("当前范围内暂无 Batch")).not.toBeInTheDocument();
+
+    validPageRequest.resolve({
+      ...baseResponse,
+      items: [returnedBatch!],
+      total: 4,
+      page: 1,
+      page_size: 4,
+    });
+    expect(await screen.findByText("另一个定时任务")).toBeInTheDocument();
   });
 
   it("shows one worker adjustment at a time, navigates and expands details", async () => {
@@ -447,7 +552,14 @@ describe("CronBatchDispatchPage", () => {
     expect(screen.queryByText("worker-older")).not.toBeInTheDocument();
   }, 30_000);
 
-  it("filters the current Batch page and selects the first matching detail", async () => {
+  it("sends a global Batch query, resets to page one, and does not filter locally", async () => {
+    const response =
+      (await monitorApiMock.getCronDispatchBatches()) as CronDispatchBatchesResponse;
+    monitorApiMock.getCronDispatchBatches.mockClear();
+    monitorApiMock.getCronDispatchBatches.mockResolvedValue({
+      ...response,
+      total: 8,
+    });
     render(<CronBatchDispatchPage />);
 
     await waitFor(() => {
@@ -457,19 +569,113 @@ describe("CronBatchDispatchPage", () => {
       );
     });
 
-    fireEvent.change(screen.getByLabelText("筛选当前页 Batch"), {
+    fireEvent.click(screen.getByTitle("2"));
+    await waitFor(() => {
+      expect(monitorApiMock.getCronDispatchBatches).toHaveBeenLastCalledWith(
+        2,
+        4,
+        expect.any(Object),
+      );
+    });
+
+    vi.useFakeTimers();
+    const requestCountBeforeSearch =
+      monitorApiMock.getCronDispatchBatches.mock.calls.length;
+    fireEvent.change(screen.getByLabelText("全局筛选 Batch"), {
+      target: { value: "m" },
+    });
+    fireEvent.change(screen.getByLabelText("全局筛选 Batch"), {
+      target: { value: "model" },
+    });
+    fireEvent.change(screen.getByLabelText("全局筛选 Batch"), {
       target: { value: "model-z" },
     });
 
-    expect(screen.getByText("1 / 2 当前页")).toBeInTheDocument();
-    expect(screen.queryByText("external-a")).not.toBeInTheDocument();
-    expect(screen.getByText("external-b")).toBeInTheDocument();
-    await waitFor(() => {
-      expect(monitorApiMock.getCronDispatchBatchDetail).toHaveBeenCalledWith(
-        "cron:batch-b",
-        { intent_limit: "500", event_limit: "500" },
-      );
+    expect(screen.getAllByText("展示定时任务名").length).toBeGreaterThan(0);
+    expect(screen.getAllByText("另一个定时任务").length).toBeGreaterThan(0);
+    expect(monitorApiMock.getCronDispatchBatches).toHaveBeenCalledTimes(
+      requestCountBeforeSearch,
+    );
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(299);
     });
+    expect(monitorApiMock.getCronDispatchBatches).toHaveBeenCalledTimes(
+      requestCountBeforeSearch,
+    );
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1);
+    });
+    expect(monitorApiMock.getCronDispatchBatches).toHaveBeenLastCalledWith(
+      1,
+      4,
+      expect.objectContaining({ query: "model-z" }),
+    );
+    expect(screen.getAllByText("共 8 个全局结果").length).toBeGreaterThan(0);
+  });
+
+  it("ignores the pending Batch response while a global query is debouncing", async () => {
+    const baseResponse =
+      (await monitorApiMock.getCronDispatchBatches()) as CronDispatchBatchesResponse;
+    monitorApiMock.getCronDispatchBatches.mockClear();
+    const oldBatch = baseResponse.items[0];
+    const filteredBatch = baseResponse.items[1];
+    expect(oldBatch).toBeDefined();
+    expect(filteredBatch).toBeDefined();
+
+    const initialRequest = deferred<CronDispatchBatchesResponse>();
+    const filteredRequest = deferred<CronDispatchBatchesResponse>();
+    monitorApiMock.getCronDispatchBatches
+      .mockReturnValueOnce(initialRequest.promise)
+      .mockReturnValueOnce(filteredRequest.promise);
+    vi.useFakeTimers();
+
+    render(<CronBatchDispatchPage />);
+    expect(monitorApiMock.getCronDispatchBatches).toHaveBeenCalledTimes(1);
+
+    fireEvent.change(screen.getByLabelText("全局筛选 Batch"), {
+      target: { value: "model-z" },
+    });
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(250);
+      initialRequest.resolve({
+        ...baseResponse,
+        items: [oldBatch!],
+        total: 37,
+      });
+      await Promise.resolve();
+    });
+
+    expect(monitorApiMock.getCronDispatchBatches).toHaveBeenCalledTimes(1);
+    expect(screen.queryByText("展示定时任务名")).not.toBeInTheDocument();
+    expect(screen.queryByText("共 37 个全局结果")).not.toBeInTheDocument();
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(49);
+    });
+    expect(monitorApiMock.getCronDispatchBatches).toHaveBeenCalledTimes(1);
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1);
+    });
+    expect(monitorApiMock.getCronDispatchBatches).toHaveBeenCalledTimes(2);
+    expect(monitorApiMock.getCronDispatchBatches).toHaveBeenLastCalledWith(
+      1,
+      4,
+      expect.objectContaining({ query: "model-z" }),
+    );
+
+    await act(async () => {
+      filteredRequest.resolve({
+        ...baseResponse,
+        items: [filteredBatch!],
+        total: 1,
+      });
+      await Promise.resolve();
+    });
+
+    expect(screen.getByText("另一个定时任务")).toBeInTheDocument();
+    expect(screen.queryByText("展示定时任务名")).not.toBeInTheDocument();
+    expect(screen.getAllByText("共 1 个全局结果").length).toBeGreaterThan(0);
   });
 
   it("combines Intent text, role and status filters", async () => {
@@ -523,16 +729,27 @@ describe("CronBatchDispatchPage", () => {
       items: [secondBatch!],
       total: 1,
     });
-    expect(await screen.findByText("external-b")).toBeInTheDocument();
+    expect(await screen.findByText("另一个定时任务")).toBeInTheDocument();
 
     firstRequest.resolve(initialResponse);
     await waitFor(() => {
-      expect(screen.getByText("external-b")).toBeInTheDocument();
-      expect(screen.queryByText("external-a")).not.toBeInTheDocument();
+      expect(screen.getByText("另一个定时任务")).toBeInTheDocument();
+      expect(screen.queryByText("展示定时任务名")).not.toBeInTheDocument();
     });
   });
 
   it("ignores stale detail responses after switching Batch", async () => {
+    const batchesResponse =
+      (await monitorApiMock.getCronDispatchBatches()) as CronDispatchBatchesResponse;
+    monitorApiMock.getCronDispatchBatches.mockClear();
+    monitorApiMock.getCronDispatchBatches.mockImplementation(
+      (_page: number, _pageSize: number, filters?: { query?: string }) =>
+        Promise.resolve(
+          filters?.query
+            ? { ...batchesResponse, items: [batchesResponse.items[1]], total: 1 }
+            : batchesResponse,
+        ),
+    );
     const batchADetail = (await monitorApiMock.getCronDispatchBatchDetail(
       "cron:batch-a",
     )) as CronDispatchBatchDetailResponse;
@@ -546,6 +763,7 @@ describe("CronBatchDispatchPage", () => {
         ...batchADetail.batch,
         batch_id: "cron:batch-b",
         parent_job_id: "parent-b",
+        parent_job_name: "另一个定时任务",
         parent_external_job_id: "external-b",
         provider_id: "provider-z",
         model_id: "model-z",
@@ -569,9 +787,10 @@ describe("CronBatchDispatchPage", () => {
       );
     });
 
-    fireEvent.change(screen.getByLabelText("筛选当前页 Batch"), {
+    fireEvent.change(screen.getByLabelText("全局筛选 Batch"), {
       target: { value: "model-z" },
     });
+    await new Promise((resolve) => window.setTimeout(resolve, 350));
     await waitFor(() => {
       expect(monitorApiMock.getCronDispatchBatchDetail).toHaveBeenCalledWith(
         "cron:batch-b",
@@ -581,16 +800,16 @@ describe("CronBatchDispatchPage", () => {
 
     batchBRequest.resolve(batchBDetail);
     expect(
-      await screen.findByRole("heading", { name: "external-b" }),
+      await screen.findByRole("heading", { name: "另一个定时任务" }),
     ).toBeInTheDocument();
 
     batchARequest.resolve(batchADetail);
     await waitFor(() => {
       expect(
-        screen.getByRole("heading", { name: "external-b" }),
+        screen.getByRole("heading", { name: "另一个定时任务" }),
       ).toBeInTheDocument();
       expect(
-        screen.queryByRole("heading", { name: "external-a" }),
+        screen.queryByRole("heading", { name: "展示定时任务名" }),
       ).not.toBeInTheDocument();
     });
   }, 10_000);

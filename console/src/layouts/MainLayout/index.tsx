@@ -12,7 +12,6 @@ import Header from "../Header";
 import ConsoleCronBubble from "../../components/ConsoleCronBubble";
 import styles from "../index.module.less";
 import Chat from "../../pages/Chat";
-import { resolveMainLayoutPresentation } from "./presentation";
 import ChannelsPage from "../../pages/Control/Channels";
 import SessionsPage from "../../pages/Control/Sessions";
 import CronJobsPage from "../../pages/Control/CronJobs";
@@ -80,6 +79,7 @@ const pathToKey: Record<string, string> = {
   "/analytics/claw-data-overview": "analytics-claw-data-overview",
   "/analytics/cron-job-overview": "analytics-cron-job-overview",
   "/analytics/continuous-governance": "analytics-continuous-governance",
+  "/monitor/tasks": "monitor-task-center",
   "/monitor/cron-batch-dispatch": "monitor-cron-batch-dispatch",
   "/instance/overview": "instance-overview",
   "/instance/instances": "instance-instances",
@@ -116,11 +116,7 @@ export default function MainLayout() {
   const loadEffectiveConfig = useSourceSystemConfigStore(
     (state) => state.loadEffectiveConfig,
   );
-  const { contentOnlyRoute, hideGlobalShell } = resolveMainLayoutPresentation({
-    hideMenu,
-    pathname: location.pathname,
-    showContentOnly,
-  });
+  const hideGlobalShell = hideMenu || showContentOnly;
 
   useEffect(() => {
     loadEffectiveConfig(activeSourceId);
@@ -140,16 +136,14 @@ export default function MainLayout() {
           className={`page-container${
             hideGlobalShell ? "" : " page-container--with-sidebar"
           }${isReportViewPage ? " page-container--no-rightPadding" : ""}${
-            contentOnlyRoute.enabled ? ` ${styles.contentOnlyContainer}` : ""
+            showContentOnly ? ` ${styles.contentOnlyContainer}` : ""
           }`}
         >
-          {!contentOnlyRoute.enabled && <ConsoleCronBubble />}
+          {!showContentOnly && <ConsoleCronBubble />}
           <div
             className={`page-content${
               isReportViewPage ? " single-page-content" : ""
-            }${
-              contentOnlyRoute.enabled ? ` ${styles.contentOnlyContent}` : ""
-            }`}
+            }${showContentOnly ? ` ${styles.contentOnlyContent}` : ""}`}
           >
             <Routes>
               {hideChat ? (

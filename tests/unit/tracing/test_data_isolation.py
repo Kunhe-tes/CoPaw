@@ -51,6 +51,14 @@ def _make_span(source_id: str, span_id: str = "s-1", **kw) -> Span:
     return Span(**defaults)
 
 
+def _insert_values_by_column(execute_mock: MagicMock) -> dict[str, object]:
+    """Map an INSERT's explicit column list to its bound parameters."""
+    query, params = execute_mock.call_args.args
+    column_list = query.split("(", maxsplit=1)[1].split(")", maxsplit=1)[0]
+    columns = [column.strip().strip("`") for column in column_list.split(",")]
+    return dict(zip(columns, params, strict=True))
+
+
 # ---------------------------------------------------------------------------
 # Fixtures
 # ---------------------------------------------------------------------------
@@ -124,10 +132,9 @@ class TestStoreSourceIdIsolation:
         trace = _make_trace("tenant-A")
         await store.create_trace(trace)
 
-        call_args = mock_db.execute.call_args
-        params = call_args[0][1]
-        # source_id is the 2nd positional parameter
-        assert params[1] == "tenant-A"
+        inserted = _insert_values_by_column(mock_db.execute)
+        assert inserted["source_id"] == "tenant-A"
+        assert inserted["b3_trace_id"] is None
 
     @pytest.mark.asyncio
     async def test_create_span_carries_source_id(self, config, mock_db):
@@ -375,9 +382,9 @@ class TestManagerSourceIdPropagation:
         assert trace.source_id == "tenant-A"
 
         # Also verify it was passed to the DB INSERT
-        call_args = mock_db.execute.call_args
-        params = call_args[0][1]
-        assert params[1] == "tenant-A"  # 2nd param is source_id
+        inserted = _insert_values_by_column(mock_db.execute)
+        assert inserted["source_id"] == "tenant-A"
+        assert inserted["b3_trace_id"] is None
 
         await manager.close()
 

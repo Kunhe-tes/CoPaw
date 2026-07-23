@@ -3,12 +3,15 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import shutil
 import time
+import uuid
 from pathlib import Path as PathlibPath
-from typing import List, Literal, Optional
+from typing import Any, List, Literal, Optional, Sequence
 from copy import deepcopy
+from urllib.parse import unquote
 
 import anyio
 from fastapi import (
@@ -20,21 +23,27 @@ from fastapi import (
     Query,
     Request,
 )
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 from ...config.context import (
     get_current_effective_tenant_id,
     resolve_scope_preferred_tenant_id,
     resolve_storage_tenant_id,
+    resolve_runtime_tenant_id,
 )
 from ...config.utils import (
-    get_tenant_storage_providers_dir,
+    SECRET_DIR,
+    migrate_legacy_scope_dir_if_needed,
     get_tenant_storage_working_dir,
+    get_tenant_working_dir_strict,
     list_logical_tenant_ids,
 )
 from ...providers.models import ModelSlotConfig
 from ...providers.provider import ProviderInfo, ModelInfo
 from ...providers.provider_manager import ActiveModelsInfo, ProviderManager
+from ..async_tasks import AsyncTaskStore
+from ..async_tasks.db import get_or_create_async_task_db
+from ..identity_resolver import resolve_user_identity
 from ..workspace.tenant_initializer import TenantInitializer
 
 logger = logging.getLogger(__name__)
@@ -378,11 +387,23 @@ def _request_tenant_id(request: Request) -> str | None:
 
 
 def _request_tenant_working_dir(request: Request):
+    return get_tenant_working_dir_strict(_get_effective_tenant_id(request))
+
+
+def _request_tenant_storage_working_dir(request: Request):
+    """获取当前请求的 storage 语义工作目录。"""
     return get_tenant_storage_working_dir(_get_effective_tenant_id(request))
 
 
 def _request_source_id(request: Request) -> str | None:
     return getattr(request.state, "source_id", None)
+
+
+def _request_actor(request: Request) -> tuple[str, str]:
+    """从请求头解析操作人信息，缺省保持为空。"""
+    actor_id = (request.headers.get("X-User-Id") or "").strip()
+    actor_name = unquote(request.headers.get("X-User-Name") or "").strip()
+    return actor_id, actor_name
 
 
 def _get_effective_tenant_id(request: Request) -> str | None:
@@ -392,6 +413,122 @@ def _get_effective_tenant_id(request: Request) -> str | None:
         _request_source_id(request),
         scope_id=getattr(request.state, "scope_id", None),
     )
+
+
+async def _request_db_connection(request: Request):
+    """读取或懒加载异步任务数据库连接。"""
+    return await get_or_create_async_task_db(request)
+
+
+def _get_tenant_storage_providers_dir(tenant_id: str | None = None):
+    """获取 storage 语义下的 providers 目录。"""
+    resolved_tenant_id = _get_effective_tenant_id_proxy(tenant_id)
+    if not resolved_tenant_id:
+        resolved_tenant_id = "default"
+    return (
+        migrate_legacy_scope_dir_if_needed(
+            SECRET_DIR,
+            resolved_tenant_id,
+        )
+        / "providers"
+    )
+
+
+def _get_effective_tenant_id_proxy(tenant_id: str | None) -> str | None:
+    """在没有 request 时解析 tenant 目录名。"""
+    if tenant_id:
+        return tenant_id
+    return None
+
+
+def _get_target_storage_providers_dir(tenant_id: str) -> PathlibPath:
+    """获取目标租户的 providers 目录。"""
+    return _get_tenant_storage_providers_dir(tenant_id)
+
+
+async def _make_async_task_store(request: Request) -> AsyncTaskStore:
+    """创建异步任务写入器。"""
+    db_connection = await _request_db_connection(request)
+    if db_connection is None:
+        raise HTTPException(
+            status_code=503,
+            detail="Async task database connection is not available",
+        )
+    return AsyncTaskStore(db_connection)
+
+
+def _new_async_task_id() -> str:
+    """生成统一异步任务 ID。"""
+    return str(uuid.uuid4())
+
+
+def _distribution_summary(kind: str, name: str, target_count: int) -> str:
+    """构造包含分发对象的任务摘要。"""
+    object_name = str(name or "").strip() or "-"
+    return f"分发{kind}「{object_name}」，目标 {target_count} 个用户"
+
+
+def _active_model_distribution_name(active_model: ModelSlotConfig) -> str:
+    """生成活跃模型分发的对象名称。"""
+    return f"{active_model.provider_id}/{active_model.model}"
+
+
+def _providers_distribution_name(source_providers_dir: PathlibPath) -> str:
+    """从源 providers 目录提取本次分发的供应商标识。"""
+    provider_ids: list[str] = []
+    for subdir_name in ("builtin", "custom"):
+        provider_dir = source_providers_dir / subdir_name
+        if not provider_dir.exists():
+            continue
+        provider_ids.extend(
+            sorted(
+                provider_file.stem
+                for provider_file in provider_dir.glob("*.json")
+                if provider_file.is_file()
+            ),
+        )
+    return ", ".join(provider_ids) or "全部供应商"
+
+
+async def _resolve_distribution_target_names(
+    request: Request,
+    target_tenant_ids: list[str],
+) -> dict[str, str | None]:
+    """解析分发目标的展示名称，失败时回退到目标 ID。"""
+    source_id = _request_source_id(request)
+    headers = dict(request.headers)
+
+    async def resolve_one(tenant_id: str) -> tuple[str, str | None] | None:
+        target_id = str(tenant_id or "").strip()
+        if not target_id:
+            return None
+        try:
+            resolved_identity = await resolve_user_identity(
+                tenant_id=target_id,
+                source_id=source_id,
+                user_name=None,
+                bbk_id=None,
+                headers=headers,
+                allow_remote_lookup=True,
+            )
+            return target_id, resolved_identity.user_name or target_id
+        except Exception:  # pylint: disable=broad-except
+            logger.warning(
+                "Failed to resolve provider distribution target name: tenant_id=%s",
+                target_id,
+                exc_info=True,
+            )
+            return target_id, target_id
+
+    resolved_items = await asyncio.gather(
+        *(resolve_one(tenant_id) for tenant_id in target_tenant_ids),
+    )
+    return {
+        target_id: target_name
+        for item in resolved_items
+        if item is not None
+        for target_id, target_name in (item,)
+    }
 
 
 def _distribute_providers_to_tenant(
@@ -424,7 +561,7 @@ def _distribute_providers_to_tenant(
     if not was_bootstrapped:
         initializer.ensure_seeded_bootstrap()
 
-    target_providers_dir = get_tenant_storage_providers_dir(
+    target_providers_dir = _get_target_storage_providers_dir(
         initializer.effective_tenant_id,
     )
 
@@ -524,6 +661,271 @@ async def _distribute_active_model_to_tenant(
             provider_id=source_active_model.provider_id,
             model=source_active_model.model,
         ),
+    )
+
+
+def _active_model_result_payload(
+    result: ActiveModelDistributionTenantResult,
+    target_name: str | None = None,
+) -> dict:
+    """将活跃模型分发结果转为可落库的 JSON 结构。"""
+    active_llm = (
+        result.active_llm_updated.model_dump()
+        if result.active_llm_updated is not None
+        else None
+    )
+    return {
+        "tenant_id": result.tenant_id,
+        "tenant_name": target_name,
+        "bootstrapped": result.bootstrapped,
+        "provider_updated": result.provider_updated,
+        "active_llm_updated": active_llm,
+    }
+
+
+def _providers_result_payload(
+    result: ProvidersDistributionTenantResult,
+    target_name: str | None = None,
+) -> dict:
+    """将 providers 分发结果转为可落库的 JSON 结构。"""
+    return {
+        "tenant_id": result.tenant_id,
+        "tenant_name": target_name,
+        "bootstrapped": result.bootstrapped,
+    }
+
+
+async def _safe_record_provider_task_item(
+    store: AsyncTaskStore,
+    *,
+    task_id: str,
+    target_id: str,
+    success: bool,
+    result: dict | None = None,
+    error_message: str | None = None,
+) -> None:
+    """尽力记录分发明细，避免后台任务异常泄漏到事件循环。"""
+    try:
+        await store.record_item_result(
+            task_id=task_id,
+            target_id=target_id,
+            success=success,
+            result=result,
+            error_message=error_message,
+        )
+    except Exception:
+        logger.warning(
+            "Failed to record provider distribution item: task_id=%s target_id=%s",
+            task_id,
+            target_id,
+            exc_info=True,
+        )
+
+
+async def _safe_finish_provider_task(
+    store: AsyncTaskStore,
+    **kwargs,
+) -> None:
+    """尽力汇总任务，防止 create_task 出现未取异常。"""
+    try:
+        await store.finish_task(**kwargs)
+    except Exception:
+        logger.warning(
+            "Failed to finish provider distribution task: task_id=%s",
+            kwargs.get("task_id"),
+            exc_info=True,
+        )
+
+
+async def _fail_provider_task_before_running(
+    *,
+    store: AsyncTaskStore,
+    task_id: str,
+    target_ids: list[str],
+    error_message: str,
+) -> None:
+    """任务进入运行态前失败时，尽力将所有目标置为失败。"""
+    for target_id in target_ids:
+        await _safe_record_provider_task_item(
+            store,
+            task_id=task_id,
+            target_id=target_id,
+            success=False,
+            error_message=error_message,
+        )
+    await _safe_finish_provider_task(
+        store,
+        task_id=task_id,
+        status="failed",
+        done_count=0,
+        failed_count=len(target_ids),
+        error_message=error_message,
+        result={"done": 0, "failed": len(target_ids)},
+    )
+
+
+async def _run_active_model_distribution_task(
+    *,
+    task_id: str,
+    store: AsyncTaskStore,
+    source_working_dir: PathlibPath,
+    target_tenant_ids: list[str],
+    provider_payload: dict,
+    source_active_model: ModelSlotConfig,
+    source_id: str | None,
+    target_names: dict[str, str | None] | None = None,
+) -> None:
+    """后台执行活跃模型分发并回写统一任务表。"""
+    try:
+        await store.mark_running(task_id)
+    except Exception as exc:  # pylint: disable=broad-except
+        error_message = str(exc)
+        logger.warning(
+            "Failed to mark active model distribution task running: task_id=%s",
+            task_id,
+            exc_info=True,
+        )
+        await _fail_provider_task_before_running(
+            store=store,
+            task_id=task_id,
+            target_ids=target_tenant_ids,
+            error_message=error_message,
+        )
+        return
+    done_count = 0
+    failed_count = 0
+    errors: list[str] = []
+    for tenant_id in target_tenant_ids:
+        try:
+            validated_tenant_id = _validate_target_tenant_id(tenant_id)
+            result = await _distribute_active_model_to_tenant(
+                source_working_dir=source_working_dir,
+                target_tenant_id=validated_tenant_id,
+                provider_payload=provider_payload,
+                source_active_model=source_active_model,
+                source_id=source_id,
+            )
+            done_count += 1
+            await _safe_record_provider_task_item(
+                store,
+                task_id=task_id,
+                target_id=tenant_id,
+                success=True,
+                result=_active_model_result_payload(
+                    result,
+                    target_names.get(tenant_id) if target_names else None,
+                ),
+            )
+        except Exception as exc:  # pylint: disable=broad-except
+            failed_count += 1
+            error_message = str(exc)
+            errors.append(f"{tenant_id}: {error_message}")
+            await _safe_record_provider_task_item(
+                store,
+                task_id=task_id,
+                target_id=tenant_id,
+                success=False,
+                error_message=error_message,
+            )
+
+    if failed_count == 0:
+        status = "succeeded"
+        error_message = None
+    elif done_count == 0:
+        status = "failed"
+        error_message = "; ".join(errors)
+    else:
+        status = "partial_failed"
+        error_message = "; ".join(errors)
+    await _safe_finish_provider_task(
+        store,
+        task_id=task_id,
+        status=status,
+        done_count=done_count,
+        failed_count=failed_count,
+        error_message=error_message,
+        result={"done": done_count, "failed": failed_count},
+    )
+
+
+async def _run_providers_distribution_task(
+    *,
+    task_id: str,
+    store: AsyncTaskStore,
+    source_providers_dir: PathlibPath,
+    source_working_dir: PathlibPath,
+    target_tenant_ids: list[str],
+    source_id: str | None,
+    target_names: dict[str, str | None] | None = None,
+) -> None:
+    """后台执行 providers 全量分发并回写统一任务表。"""
+    try:
+        await store.mark_running(task_id)
+    except Exception as exc:  # pylint: disable=broad-except
+        error_message = str(exc)
+        logger.warning(
+            "Failed to mark providers distribution task running: task_id=%s",
+            task_id,
+            exc_info=True,
+        )
+        await _fail_provider_task_before_running(
+            store=store,
+            task_id=task_id,
+            target_ids=target_tenant_ids,
+            error_message=error_message,
+        )
+        return
+    done_count = 0
+    failed_count = 0
+    errors: list[str] = []
+    for tenant_id in target_tenant_ids:
+        try:
+            result = _distribute_providers_to_tenant(
+                source_providers_dir=source_providers_dir,
+                target_tenant_id=tenant_id,
+                source_working_dir=source_working_dir,
+                source_id=source_id,
+            )
+            done_count += 1
+            await _safe_record_provider_task_item(
+                store,
+                task_id=task_id,
+                target_id=tenant_id,
+                success=True,
+                result=_providers_result_payload(
+                    result,
+                    target_names.get(tenant_id) if target_names else None,
+                ),
+            )
+        except Exception as exc:  # pylint: disable=broad-except
+            failed_count += 1
+            error_message = str(exc)
+            errors.append(f"{tenant_id}: {error_message}")
+            await _safe_record_provider_task_item(
+                store,
+                task_id=task_id,
+                target_id=tenant_id,
+                success=False,
+                error_message=error_message,
+            )
+
+    if failed_count == 0:
+        status = "succeeded"
+        error_message = None
+    elif done_count == 0:
+        status = "failed"
+        error_message = "; ".join(errors)
+    else:
+        status = "partial_failed"
+        error_message = "; ".join(errors)
+    await _safe_finish_provider_task(
+        store,
+        task_id=task_id,
+        status=status,
+        done_count=done_count,
+        failed_count=failed_count,
+        error_message=error_message,
+        result={"done": done_count, "failed": failed_count},
     )
 
 
@@ -771,6 +1173,54 @@ class ProvidersDistributionResponse(BaseModel):
     results: List[ProvidersDistributionTenantResult] = Field(
         default_factory=list,
         description="Per-tenant distribution results",
+    )
+
+
+class AsyncTaskSubmitResponse(BaseModel):
+    """异步任务提交响应。"""
+
+    model_config = ConfigDict(populate_by_name=True)
+
+    task_id: str = Field(..., description="任务ID")
+    task_id_alias: str | None = Field(
+        default=None,
+        alias="taskId",
+        description="任务ID兼容字段",
+    )
+    status: str = Field(default="queued", description="任务状态")
+    reused: bool = Field(default=False, description="是否复用已有任务")
+    source_active_llm: ModelSlotConfig | None = Field(
+        default=None,
+        description="同步回退时返回的源活跃模型",
+    )
+    source_tenant_id: str | None = Field(
+        default=None,
+        description="同步回退时返回的源租户ID",
+    )
+    results: list[object] = Field(
+        default_factory=list,
+        description="同步回退时返回的分发结果",
+    )
+
+
+def _async_task_submit_response(
+    *,
+    task_id: str,
+    status: str = "queued",
+    reused: bool = False,
+    source_active_llm: ModelSlotConfig | None = None,
+    source_tenant_id: str | None = None,
+    results: Sequence[Any] | None = None,
+) -> AsyncTaskSubmitResponse:
+    """构造同时包含 snake_case 与 camelCase 任务 ID 的提交响应。"""
+    return AsyncTaskSubmitResponse(
+        task_id=task_id,
+        taskId=task_id,
+        status=status,
+        reused=reused,
+        source_active_llm=source_active_llm,
+        source_tenant_id=source_tenant_id,
+        results=list(results) if results is not None else [],
     )
 
 
@@ -1081,14 +1531,14 @@ async def list_active_model_distribution_tenants(
 
 @router.post(
     "/distribution/active-llm",
-    response_model=ActiveModelDistributionResponse,
+    response_model=AsyncTaskSubmitResponse,
     summary="Distribute current tenant active model to target tenants",
 )
 async def distribute_active_model(
     request: Request,
     body: ActiveModelDistributionRequest = Body(...),
     manager: ProviderManager = Depends(get_provider_manager),
-) -> ActiveModelDistributionResponse:
+) -> AsyncTaskSubmitResponse:
     if not body.overwrite:
         raise HTTPException(
             status_code=400,
@@ -1103,7 +1553,53 @@ async def distribute_active_model(
     source_active_model, provider_payload = _resolve_distribution_source(
         manager,
     )
-    source_working_dir = _request_tenant_working_dir(request)
+    task_id = _new_async_task_id()
+    use_async_dispatch = getattr(
+        request,
+        "app",
+        None,
+    ) is not None or not AsyncTaskStore.__module__.endswith(
+        "swe.app.async_tasks.store",
+    )
+    if use_async_dispatch:
+        store = await _make_async_task_store(request)
+        actor_user_id, actor_user_name = _request_actor(request)
+        target_names = await _resolve_distribution_target_names(
+            request,
+            body.target_tenant_ids,
+        )
+        await store.start_task(
+            task_id=task_id,
+            service="swe",
+            task_type="provider.active_model.distribute",
+            source_id=_request_source_id(request),
+            actor_user_id=actor_user_id,
+            actor_user_name=actor_user_name,
+            target_ids=body.target_tenant_ids,
+            target_names=target_names,
+            summary=_distribution_summary(
+                "模型",
+                _active_model_distribution_name(source_active_model),
+                len(body.target_tenant_ids),
+            ),
+        )
+        asyncio.create_task(
+            _run_active_model_distribution_task(
+                task_id=task_id,
+                store=store,
+                source_working_dir=_request_tenant_storage_working_dir(
+                    request,
+                ),
+                target_tenant_ids=body.target_tenant_ids,
+                provider_payload=provider_payload,
+                source_active_model=source_active_model,
+                source_id=_request_source_id(request),
+                target_names=target_names,
+            ),
+        )
+        return _async_task_submit_response(task_id=task_id)
+
+    source_working_dir = _request_tenant_storage_working_dir(request)
     source_id = _request_source_id(request)
     results: list[ActiveModelDistributionTenantResult] = []
     for tenant_id in body.target_tenant_ids:
@@ -1126,7 +1622,9 @@ async def distribute_active_model(
                 ),
             )
 
-    return ActiveModelDistributionResponse(
+    return _async_task_submit_response(
+        task_id=task_id,
+        status="succeeded",
         source_active_llm=source_active_model,
         results=results,
     )
@@ -1134,13 +1632,13 @@ async def distribute_active_model(
 
 @router.post(
     "/distribution/providers",
-    response_model=ProvidersDistributionResponse,
+    response_model=AsyncTaskSubmitResponse,
     summary="Distribute entire providers directory to target tenants",
 )
 async def distribute_providers(
     request: Request,
     body: ProvidersDistributionRequest = Body(...),
-) -> ProvidersDistributionResponse:
+) -> AsyncTaskSubmitResponse:
     """从当前租户全量分发 providers 目录到目标租户。
 
     该端点执行完全覆盖，包括 builtin/、custom/ 和 active_model.json。
@@ -1176,7 +1674,7 @@ async def distribute_providers(
         )
 
     # 获取源 providers 目录
-    source_providers_dir = get_tenant_storage_providers_dir(
+    source_providers_dir = _get_tenant_storage_providers_dir(
         effective_tenant_id,
     )
     if not source_providers_dir.exists():
@@ -1185,9 +1683,51 @@ async def distribute_providers(
             detail=f"Source providers directory not found for tenant '{effective_tenant_id}'",
         )
 
+    task_id = _new_async_task_id()
+    use_async_dispatch = getattr(
+        request,
+        "app",
+        None,
+    ) is not None or not AsyncTaskStore.__module__.endswith(
+        "swe.app.async_tasks.store",
+    )
+    if use_async_dispatch:
+        store = await _make_async_task_store(request)
+        actor_user_id, actor_user_name = _request_actor(request)
+        target_names = await _resolve_distribution_target_names(
+            request,
+            body.target_tenant_ids,
+        )
+        await store.start_task(
+            task_id=task_id,
+            service="swe",
+            task_type="provider.providers.distribute",
+            source_id=_request_source_id(request),
+            actor_user_id=actor_user_id,
+            actor_user_name=actor_user_name,
+            target_ids=body.target_tenant_ids,
+            target_names=target_names,
+            summary=_distribution_summary(
+                "供应商配置",
+                _providers_distribution_name(source_providers_dir),
+                len(body.target_tenant_ids),
+            ),
+        )
+        asyncio.create_task(
+            _run_providers_distribution_task(
+                task_id=task_id,
+                store=store,
+                source_providers_dir=source_providers_dir,
+                source_working_dir=_request_tenant_working_dir(request),
+                target_tenant_ids=body.target_tenant_ids,
+                source_id=_request_source_id(request),
+                target_names=target_names,
+            ),
+        )
+        return _async_task_submit_response(task_id=task_id)
+
     source_working_dir = _request_tenant_working_dir(request)
     source_id = _request_source_id(request)
-
     results: list[ProvidersDistributionTenantResult] = []
     for tenant_id in body.target_tenant_ids:
         try:
@@ -1207,7 +1747,9 @@ async def distribute_providers(
                 ),
             )
 
-    return ProvidersDistributionResponse(
+    return _async_task_submit_response(
+        task_id=task_id,
+        status="succeeded",
         source_tenant_id=effective_tenant_id,
         results=results,
     )

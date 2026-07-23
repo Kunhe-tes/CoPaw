@@ -286,6 +286,7 @@ class TraceManager:
         session_name: Optional[str] = None,
         model_output: Optional[str] = None,
         attach_existing: bool = False,
+        b3_trace_id: Optional[str] = None,
     ) -> str:
         """Start a new trace or attach to an existing one.
 
@@ -302,6 +303,7 @@ class TraceManager:
             model_output: Optional model output (for text-type cron jobs)
             attach_existing: If True and trace_id exists in DB, only set context
                 without creating new database record
+            b3_trace_id: Optional upstream B3 trace identifier
 
         Returns:
             Trace ID
@@ -344,6 +346,7 @@ class TraceManager:
         # 创建 trace 并保存
         trace = Trace(
             trace_id=trace_id,
+            b3_trace_id=b3_trace_id,
             source_id=source_id,
             user_id=user_id,
             user_name=user_name,

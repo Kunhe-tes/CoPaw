@@ -44,11 +44,11 @@ describe("chatPresentationStore", () => {
     );
   });
 
-  it("keeps the startup preference after the URL query is no longer present", () => {
+  it("keeps the startup preference as global runtime state", () => {
     initializeChatPresentationFromUrl("/chat/chat-1", "?showContentOnly=true");
 
     expect(useChatPresentationStore.getState().showContentOnly).toBe(true);
-    expect(isChatContentOnlyRequested("/chat/chat-1", "")).toBe(false);
+    expect(isChatContentOnlyRequested("/chat/chat-2", "")).toBe(false);
     expect(useChatPresentationStore.getState().showContentOnly).toBe(true);
   });
 

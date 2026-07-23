@@ -277,6 +277,38 @@ describe("CronJobsPage broadcast task refresh", () => {
     expect(mocks.broadcastCronJob).toHaveBeenCalledTimes(1);
   }, 30000);
 
+  it("shows cron broadcast task id after submitting async distribution", async () => {
+    mocks.getCurrentCronBroadcastTask.mockResolvedValue({ task: null });
+    mocks.broadcastCronJob.mockResolvedValue({
+      task_id: "task-running",
+      status: "running",
+      tenant_count: 1,
+      completed_count: 0,
+      failed_count: 0,
+      results: [],
+      reused: false,
+    });
+
+    render(<CronJobsPage />);
+
+    fireEvent.click(screen.getByRole("button", { name: "广播到租户" }));
+    fireEvent.click(
+      await screen.findByRole("button", { name: "Select tenant" }),
+    );
+
+    const confirmButton = screen.getByRole("button", { name: /OK/ });
+    await waitFor(() => {
+      expect(confirmButton).not.toBeDisabled();
+    });
+    fireEvent.click(confirmButton);
+
+    await waitFor(() => {
+      expect(mocks.message.info).toHaveBeenCalledWith(
+        "定时任务分发任务已提交：task-running",
+      );
+    });
+  }, 30000);
+
   it("requests batch dispatch after broadcasting with the shared offset window", async () => {
     mocks.getCurrentCronBroadcastTask.mockResolvedValue({ task: null });
     mocks.broadcastCronJob.mockResolvedValue({

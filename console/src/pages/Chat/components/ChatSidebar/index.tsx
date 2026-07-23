@@ -140,7 +140,9 @@ export default function ChatSidebar(props: ChatSidebarProps) {
   );
   const { selectedAgent, setSelectedAgent } = useAgentStore();
   const bbk = useIframeStore((state) => state.bbk);
-  const currentGuideImage = bbk === "121" ? shGuideImage : guideImage;
+  const source = useIframeStore((state) => state.source);
+  const currentGuideImage =
+    bbk === "121" && source === "RMASSIST" ? shGuideImage : guideImage;
 
   const currentChatId = location.pathname.match(/^\/chat\/(.+)$/)?.[1] || null;
   const currentChatIdRef = useRef<string | null>(currentChatId);

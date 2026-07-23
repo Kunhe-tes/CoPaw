@@ -5,6 +5,8 @@ import pytest
 from unittest.mock import AsyncMock
 from fastapi.testclient import TestClient
 
+from market.app.routers import skills_market as skills_router
+
 
 def _make_app(tmp_path):
     from fastapi import FastAPI
@@ -171,8 +173,7 @@ def test_unpublish_skill_not_found_returns_404(tmp_path):
     assert resp.status_code == 404
 
 
-def test_distribute_skill_returns_200(tmp_path):
-    from market.marketplace.fs import get_user_skills_dir
+def test_distribute_skill_returns_200(tmp_path, monkeypatch):
     from market.marketplace.schemas import PublishSkillRequest
 
     app = _make_app(tmp_path)
@@ -191,6 +192,12 @@ def test_distribute_skill_returns_200(tmp_path):
             {"tenant_id": "user1", "tenant_name": "User One", "bbk_id": "200"},
         ],
     )
+
+    monkeypatch.setattr(
+        skills_router.asyncio,
+        "create_task",
+        lambda coro: coro.close() or object(),
+    )
     client = TestClient(app)
     resp = client.post(
         f"/api/market/skills/{item.item_id}/distribute",
@@ -204,8 +211,48 @@ def test_distribute_skill_returns_200(tmp_path):
     )
     assert resp.status_code == 200
     data = resp.json()
-    assert data["distributed_count"] == 1
-    assert data["conflict_count"] == 0
+    assert data["status"] == "queued"
+    assert data["task_id"]
+
+
+def test_distribute_skill_writes_workspace_manifest(tmp_path):
+    from market.marketplace.fs import get_user_skills_dir
+    from market.marketplace.schemas import (
+        DistributeRequest,
+        PublishSkillRequest,
+    )
+
+    app = _make_app(tmp_path)
+    svc = app.state.marketplace
+    item, _ = asyncio.run(
+        svc.publish_skill(
+            "src_a",
+            PublishSkillRequest(
+                name="skill_z",
+                description="",
+                creator_id="u1",
+                creator_name="",
+                skill_json={},
+                skill_md="",
+            ),
+        ),
+    )
+    svc.db.fetch_all = AsyncMock(
+        return_value=[
+            {"tenant_id": "user1", "tenant_name": "User One", "bbk_id": "200"},
+        ],
+    )
+    result = asyncio.run(
+        svc.distribute_skill(
+            "src_a",
+            item.item_id,
+            operator_id="u1",
+            operator_name="User",
+            req=DistributeRequest(target_type="all"),
+        ),
+    )
+    assert result.distributed_count == 1
+    assert result.conflict_count == 0
 
     workspace_dir = get_user_skills_dir(
         tmp_path / "swe",

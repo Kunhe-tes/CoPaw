@@ -4,6 +4,7 @@
 import asyncio
 import json
 import logging
+import time
 from datetime import datetime, timedelta
 from typing import Any, Optional
 
@@ -47,6 +48,16 @@ logger = logging.getLogger(__name__)
 # 需要从统计中排除的 source_id（测试平台等）
 EXCLUDED_SOURCE_IDS = ["default"]
 EXTENDED_TREND_SOURCE_ID = "RMASSIST"
+EXCLUDED_SKILL_NAMES = (
+    "cron",
+    "search_customs_by_labels",
+    "cust_insight_url_generator",
+    "immortal-skill",
+    "batch_task_executor",
+    "skill_creator",
+    "docx",
+    "himalaya",
+)
 
 LATEST_FEEDBACK_JOIN_SQL = """
     LEFT JOIN (
@@ -178,6 +189,14 @@ def build_cron_bbk_in_filter(bbk_ids: Optional[str]) -> tuple[str, list[str]]:
         ids.append("V00")
     placeholders = ", ".join(["%s"] * len(ids))
     return f" AND j.bbk_id IN ({placeholders})", ids
+
+
+def build_excluded_skill_filter() -> tuple[str, list[str]]:
+    """构建需要从排行榜中屏蔽的技能过滤条件。"""
+    placeholders = ", ".join(["%s"] * len(EXCLUDED_SKILL_NAMES))
+    return f" AND skill_name NOT IN ({placeholders})", list(
+        EXCLUDED_SKILL_NAMES,
+    )
 
 
 def _summarize_task_status_rows(
@@ -1497,6 +1516,17 @@ class TracingQueryService:  # pylint: disable=too-many-public-methods
             filter_user_type: 'filtered' 过滤80/IT开头用户，'all' 仅过滤default用户
             metric_type: 口径类型（仅影响默认排序，不影响返回字段）
         """
+        method_start = time.time()
+        logger.info(
+            "[get_users] 开始处理请求: source_id=%s, bbk_ids=%s, start_date=%s, end_date=%s, filter_user_type=%s, sort_by=%s",
+            source_id,
+            bbk_ids,
+            start_date,
+            end_date,
+            filter_user_type,
+            sort_by,
+        )
+
         # 排序映射表（按四列依次降序：任务执行数、任务成功数、结果查看数、主动调用数）
         order_by_map = {
             "manual": "cron_executions DESC, cron_success DESC, cron_reads DESC, manual_calls DESC, user_id ASC",
@@ -1517,6 +1547,7 @@ class TracingQueryService:  # pylint: disable=too-many-public-methods
             order_by = order_by_map["manual"]
 
         # 构建 WHERE 条件和参数
+        step1_start = time.time()
         where_sql, params = self._build_traces_where_clause(
             source_id,
             filter_user_type,
@@ -1525,21 +1556,37 @@ class TracingQueryService:  # pylint: disable=too-many-public-methods
             start_date,
             end_date,
         )
+        logger.info(
+            "[get_users] 构建 WHERE 条件耗时: %.3fms",
+            (time.time() - step1_start) * 1000,
+        )
 
         # 查询总数
+        step2_start = time.time()
         count_query = f"SELECT COUNT(DISTINCT user_id) as total FROM swe_tracing_traces t WHERE {where_sql}"
         count_row = await self._db.fetch_one(count_query, tuple(params))
         total = count_row["total"] if count_row else 0
+        logger.info(
+            "[get_users] 查询总数耗时: %.3fms, total=%d",
+            (time.time() - step2_start) * 1000,
+            total,
+        )
 
         # 构建 cron 子查询
+        step3_start = time.time()
         cron_subquery_sql, cron_params = self._build_cron_subquery(
             source_id=source_id,
             start_date=start_date,
             end_date=end_date,
             bbk_ids=bbk_ids,
         )
+        logger.info(
+            "[get_users] 构建 cron 子查询耗时: %.3fms",
+            (time.time() - step3_start) * 1000,
+        )
 
         # 构建主查询
+        step4_start = time.time()
         offset = (page - 1) * page_size
         query, final_params = self._build_users_query(
             source_id=source_id,
@@ -1552,9 +1599,34 @@ class TracingQueryService:  # pylint: disable=too-many-public-methods
             offset=offset,
             bbk_ids=bbk_ids,
         )
+        logger.info(
+            "[get_users] 构建主查询耗时: %.3fms",
+            (time.time() - step4_start) * 1000,
+        )
 
+        # 执行主查询
+        step5_start = time.time()
         rows = await self._db.fetch_all(query, tuple(final_params))
+        logger.info(
+            "[get_users] 执行主查询耗时: %.3fms, 返回%d行",
+            (time.time() - step5_start) * 1000,
+            len(rows),
+        )
+
+        # 构建返回结果
+        step6_start = time.time()
         users = [self._build_user_list_item(row) for row in rows]
+        logger.info(
+            "[get_users] 构建结果耗时: %.3fms",
+            (time.time() - step6_start) * 1000,
+        )
+
+        logger.info(
+            "[get_users] 方法总耗时: %.3fms, source_id=%s, bbk_ids=%s",
+            (time.time() - method_start) * 1000,
+            source_id,
+            bbk_ids,
+        )
         return users, total
 
     def _build_traces_where_clause(
@@ -1663,7 +1735,7 @@ class TracingQueryService:  # pylint: disable=too-many-public-methods
         bbk_in_clause = ""
         if bbk_subquery_params:
             placeholders = ", ".join(["%s"] * len(bbk_subquery_params))
-            bbk_in_clause = f" AND bbk_id IN ({placeholders})"
+            bbk_in_clause = f" AND tr.bbk_id IN ({placeholders})"
 
         if source_id == "all":
             # source_id == "all": total_skills 子查询不加 source_id 过滤
@@ -1704,8 +1776,8 @@ class TracingQueryService:  # pylint: disable=too-many-public-methods
                 LIMIT %s OFFSET %s
             """
             final_params = (
-                bbk_subquery_params
-                + cron_params
+                cron_params
+                + bbk_subquery_params
                 + params
                 + [page_size, offset]
             )
@@ -1750,9 +1822,9 @@ class TracingQueryService:  # pylint: disable=too-many-public-methods
                 LIMIT %s OFFSET %s
             """
             final_params = (
-                [source_id, source_id]
+                cron_params
+                + [source_id, source_id]
                 + bbk_subquery_params
-                + cron_params
                 + params
                 + [page_size, offset]
             )
@@ -2287,6 +2359,7 @@ class TracingQueryService:  # pylint: disable=too-many-public-methods
     ) -> list[SkillUsage]:
         """获取热门技能."""
         bbk_filter_sql, bbk_filter_params = build_bbk_in_filter(bbk_ids)
+        skill_filter_sql, skill_filter_params = build_excluded_skill_filter()
         if source_id == "all":
             exclude_placeholders = ", ".join(["%s"] * len(EXCLUDED_SOURCE_IDS))
             query = f"""
@@ -2296,6 +2369,7 @@ class TracingQueryService:  # pylint: disable=too-many-public-methods
                 FROM swe_tracing_spans
                 WHERE start_time >= %s AND start_time <= %s
                   AND skill_name IS NOT NULL
+                  {skill_filter_sql}
                   AND bbk_id IS NOT NULL AND bbk_id != ''
                   AND source_id NOT IN ({exclude_placeholders})
                   AND user_id != 'default'{bbk_filter_sql}
@@ -2306,6 +2380,7 @@ class TracingQueryService:  # pylint: disable=too-many-public-methods
             params = (
                 start_date,
                 end_date,
+                *skill_filter_params,
                 *EXCLUDED_SOURCE_IDS,
                 *bbk_filter_params,
             )
@@ -2318,13 +2393,20 @@ class TracingQueryService:  # pylint: disable=too-many-public-methods
                 FROM swe_tracing_spans
                 WHERE source_id = %s AND start_time >= %s AND start_time <= %s
                   AND skill_name IS NOT NULL
+                  {skill_filter_sql}
                   AND bbk_id IS NOT NULL AND bbk_id != ''
                   AND user_id != 'default'{bbk_filter_sql}
                 GROUP BY skill_name
                 ORDER BY count DESC
                 LIMIT 10
             """
-            params = (source_id, start_date, end_date, *bbk_filter_params)
+            params = (
+                source_id,
+                start_date,
+                end_date,
+                *skill_filter_params,
+                *bbk_filter_params,
+            )
             rows = await self._db.fetch_all(query, params)
         return [
             SkillUsage(
@@ -2625,12 +2707,14 @@ class TracingQueryService:  # pylint: disable=too-many-public-methods
             end_date = datetime.now() + timedelta(days=1)
 
         bbk_filter_sql, bbk_filter_params = build_bbk_in_filter(bbk_ids)
+        skill_filter_sql, skill_filter_params = build_excluded_skill_filter()
         # 构建基础查询条件
         if source_id == "all":
             exclude_placeholders = ", ".join(["%s"] * len(EXCLUDED_SOURCE_IDS))
             base_where = f"""
                 start_time >= %s AND start_time <= %s
                 AND skill_name IS NOT NULL
+                {skill_filter_sql}
                 AND bbk_id IS NOT NULL AND bbk_id != ''
                 AND source_id NOT IN ({exclude_placeholders})
                 AND user_id != 'default'{bbk_filter_sql}
@@ -2638,6 +2722,7 @@ class TracingQueryService:  # pylint: disable=too-many-public-methods
             count_params = [
                 start_date,
                 end_date,
+                *skill_filter_params,
                 *EXCLUDED_SOURCE_IDS,
                 *bbk_filter_params,
             ]
@@ -2645,6 +2730,7 @@ class TracingQueryService:  # pylint: disable=too-many-public-methods
             base_where = f"""
                 source_id = %s AND start_time >= %s AND start_time <= %s
                 AND skill_name IS NOT NULL
+                {skill_filter_sql}
                 AND bbk_id IS NOT NULL AND bbk_id != ''
                 AND user_id != 'default'{bbk_filter_sql}
             """
@@ -2652,6 +2738,7 @@ class TracingQueryService:  # pylint: disable=too-many-public-methods
                 source_id,
                 start_date,
                 end_date,
+                *skill_filter_params,
                 *bbk_filter_params,
             ]
 
@@ -5463,6 +5550,7 @@ class TracingQueryService:  # pylint: disable=too-many-public-methods
         """转换数据库行为 Trace 模型."""
         return Trace(
             trace_id=row["trace_id"],
+            b3_trace_id=row.get("b3_trace_id"),
             source_id=row["source_id"],
             user_id=row["user_id"],
             user_name=row.get("user_name"),

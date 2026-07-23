@@ -65,7 +65,10 @@ export interface ActiveModelDistributionTenantResult {
 }
 
 export interface ActiveModelDistributionResponse {
-  source_active_llm: ModelSlotConfig;
+  task_id: string;
+  status: string;
+  reused?: boolean;
+  source_active_llm?: ModelSlotConfig;
   results: ActiveModelDistributionTenantResult[];
 }
 
@@ -84,7 +87,10 @@ export interface ProvidersDistributionTenantResult {
 }
 
 export interface ProvidersDistributionResponse {
-  source_tenant_id: string;
+  task_id: string;
+  status: string;
+  reused?: boolean;
+  source_tenant_id?: string;
   results: ProvidersDistributionTenantResult[];
 }
 
