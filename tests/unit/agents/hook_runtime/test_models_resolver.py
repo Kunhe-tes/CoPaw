@@ -237,6 +237,35 @@ def test_before_stop_is_blockable_and_accepts_prompt_handlers() -> None:
     )
 
 
+@pytest.mark.parametrize(
+    "event_name",
+    [HookEventName.POST_TOOL_USE, HookEventName.POST_TOOL_USE_FAILURE],
+)
+def test_post_tool_events_accept_prompt_handlers(
+    event_name: HookEventName,
+) -> None:
+    assert event_name in PROMPT_HANDLER_BLOCKABLE_EVENTS
+
+    config = HookConfig(
+        enabled=True,
+        events={
+            event_name: [
+                HookMatcherGroupConfig(
+                    id="post-tool-policy",
+                    hooks=[
+                        _prompt_handler(
+                            "policy",
+                            "Stop after the tool event.",
+                        ),
+                    ],
+                ),
+            ],
+        },
+    )
+
+    assert config.events[event_name][0].hooks[0].type == "prompt"
+
+
 def test_resolver_loads_before_stop_prompt_handlers_from_all_levels() -> None:
     tenant = HookConfig(
         enabled=True,

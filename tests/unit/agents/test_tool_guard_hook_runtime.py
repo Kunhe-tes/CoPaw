@@ -1484,6 +1484,93 @@ async def test_post_tool_hook_stop_preserves_success_then_raises(
 
 
 @pytest.mark.asyncio
+async def test_preapproved_guarded_tool_runs_post_hook_and_honors_stop(
+    tmp_path,
+) -> None:
+    agent = _FakeAgent(tmp_path)
+    agent._tool_guard_engine = SimpleNamespace(
+        enabled=True,
+        is_denied=lambda _tool_name: False,
+        is_guarded=lambda _tool_name: True,
+        guard=lambda *_args, **_kwargs: None,
+    )
+    agent._ensure_tool_guard = lambda: None
+    agent._tool_guard_approval_service = SimpleNamespace(
+        consume_approval=AsyncMock(return_value=True),
+    )
+    agent._emit_tool_hook = AsyncMock(
+        side_effect=[
+            MergedHookResult(),
+            MergedHookResult(
+                decision=HookDecision.STOP,
+                reason="approved call completed",
+            ),
+        ],
+    )
+
+    with pytest.raises(
+        PreToolUseTerminalStop,
+        match="approved call completed",
+    ):
+        await agent._acting(
+            {
+                "id": "tool-approved",
+                "name": "execute_shell_command",
+                "input": {"cmd": "echo approved"},
+            },
+        )
+
+    assert [
+        call.args[0] for call in agent._emit_tool_hook.await_args_list
+    ] == [HookEventName.PRE_TOOL_USE, HookEventName.POST_TOOL_USE]
+
+
+@pytest.mark.asyncio
+async def test_preapproved_guarded_tool_runs_failure_hook_and_honors_stop(
+    tmp_path,
+) -> None:
+    agent = _FakeAgent(tmp_path)
+    agent._tool_guard_engine = SimpleNamespace(
+        enabled=True,
+        is_denied=lambda _tool_name: False,
+        is_guarded=lambda _tool_name: True,
+        guard=lambda *_args, **_kwargs: None,
+    )
+    agent._ensure_tool_guard = lambda: None
+    agent._tool_guard_approval_service = SimpleNamespace(
+        consume_approval=AsyncMock(return_value=True),
+    )
+    agent._run_tool_call_with_hard_timeout = AsyncMock(
+        side_effect=RuntimeError("approved tool failed"),
+    )
+    agent._emit_tool_hook = AsyncMock(
+        side_effect=[
+            MergedHookResult(),
+            MergedHookResult(
+                decision=HookDecision.STOP,
+                reason="approved failure reviewed",
+            ),
+        ],
+    )
+
+    with pytest.raises(
+        PreToolUseTerminalStop,
+        match="approved failure reviewed",
+    ):
+        await agent._acting(
+            {
+                "id": "tool-approved-failure",
+                "name": "execute_shell_command",
+                "input": {"cmd": "exit 1"},
+            },
+        )
+
+    assert [
+        call.args[0] for call in agent._emit_tool_hook.await_args_list
+    ] == [HookEventName.PRE_TOOL_USE, HookEventName.POST_TOOL_USE_FAILURE]
+
+
+@pytest.mark.asyncio
 async def test_post_tool_failure_hook_stop_replaces_original_error(
     tmp_path,
 ) -> None:

@@ -1329,14 +1329,15 @@ class ToolGuardMixin:
                         exc_info=True,
                     )
 
-        if action is not None:
+        if action is not None and action.kind != "preapproved":
             result = await self._execute_guard_action(action, tool_call)
             await self._emit_tool_trace_end(span_id, result)
             return result
 
         try:
             self._raise_if_pre_tool_terminal_stop_requested()
-            result = await self._run_tool_call_with_hard_timeout(
+            result = await self._execute_guard_action_or_tool_call(
+                action,
                 tool_call,
                 tool_name,
                 tool_input,
@@ -1362,7 +1363,11 @@ class ToolGuardMixin:
                 trace_tool_output=trace_tool_output,
             )
 
-            if getattr(self, "_tool_guard_forced_replay_active", False):
+            if action is None and getattr(
+                self,
+                "_tool_guard_forced_replay_active",
+                False,
+            ):
                 self._tool_guard_forced_replay_active = False
                 self._tool_guard_replay_done = {
                     "tool_name": tool_name,
@@ -1482,6 +1487,22 @@ class ToolGuardMixin:
                 action.guard_result,
             )
         return None
+
+    async def _execute_guard_action_or_tool_call(
+        self,
+        action: "_GuardAction | None",
+        tool_call: dict[str, Any],
+        tool_name: str,
+        tool_input: dict[str, Any],
+    ) -> dict | None:
+        """Execute a preapproved action or the ordinary tool-call path."""
+        if action is not None:
+            return await self._execute_guard_action(action, tool_call)
+        return await self._run_tool_call_with_hard_timeout(
+            tool_call,
+            tool_name,
+            tool_input,
+        )
 
     async def _consume_preapproval(
         self,
