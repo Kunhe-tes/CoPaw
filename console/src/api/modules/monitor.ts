@@ -155,6 +155,7 @@ export interface CronDispatchBatchStats {
 export interface CronDispatchBatchItem {
   batch_id: string;
   parent_job_id: string;
+  parent_job_name: string;
   parent_external_job_id: string;
   tenant_id: string;
   source_id: string;
@@ -331,6 +332,7 @@ export interface CronDispatchDateFilters {
   start_time?: string;
   end_time?: string;
   status?: string;
+  query?: string;
 }
 
 export interface CronJobOverviewSummaryMetric {

@@ -100,6 +100,7 @@ async def list_dispatch_batches(
     start_time: datetime | None = Query(default=None, description="开始时间"),
     end_time: datetime | None = Query(default=None, description="结束时间"),
     status: str | None = Query(default=None, description="批次状态"),
+    query: str | None = Query(default=None, description="全局筛选词"),
     page: int = Query(default=1, ge=1, description="页码"),
     page_size: int = Query(default=20, ge=1, le=100, description="每页数量"),
     service: QueryService = Depends(get_query_service),
@@ -111,6 +112,7 @@ async def list_dispatch_batches(
         start_time=start_time,
         end_time=end_time,
         status=status,
+        query=query,
         page=page,
         page_size=page_size,
     )

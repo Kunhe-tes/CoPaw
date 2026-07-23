@@ -314,20 +314,49 @@ class QueryService:
         start_time: Optional[datetime] = None,
         end_time: Optional[datetime] = None,
         status: Optional[str] = None,
+        query: Optional[str] = None,
     ) -> tuple[str, list[Any]]:
         """构建批调度 batch 查询条件。"""
-        conditions = ["source_id = %s"]
+        conditions = ["b.source_id = %s"]
         sql_params: list[Any] = [source_id]
 
         if start_time:
-            conditions.append("scheduled_fire_at >= %s")
+            conditions.append("b.scheduled_fire_at >= %s")
             sql_params.append(start_time)
         if end_time:
-            conditions.append("scheduled_fire_at <= %s")
+            conditions.append("b.scheduled_fire_at <= %s")
             sql_params.append(end_time)
         if status and status != "all":
-            conditions.append("status = %s")
+            conditions.append("b.status = %s")
             sql_params.append(status)
+        normalized_query = (query or "").strip().lower()
+        if normalized_query:
+            escaped_query = (
+                normalized_query.replace("\\", "\\\\")
+                .replace("%", "\\%")
+                .replace("_", "\\_")
+            )
+            searchable_fields = (
+                "b.batch_id",
+                "b.parent_job_id",
+                "b.parent_external_job_id",
+                "b.tenant_id",
+                "b.provider_id",
+                "b.model_id",
+                "b.agent_id",
+                "j.name",
+            )
+            conditions.append(
+                "("
+                + " OR ".join(
+                    f"LOWER(COALESCE({field}, '')) LIKE %s ESCAPE '\\\\'"
+                    for field in searchable_fields
+                )
+                + ")"
+            )
+            sql_params.extend(
+                [f"%{escaped_query}%"] * len(searchable_fields),
+            )
 
         return " AND ".join(conditions), sql_params
 
@@ -486,6 +515,7 @@ class QueryService:
         start_time: Optional[datetime] = None,
         end_time: Optional[datetime] = None,
         status: Optional[str] = None,
+        query: Optional[str] = None,
         page: int = 1,
         page_size: int = 20,
     ) -> CronDispatchBatchesResponse:
@@ -496,20 +526,24 @@ class QueryService:
             start_time=start_time,
             end_time=end_time,
             status=status,
+            query=query,
         )
         stats_sql = f"""
             SELECT
                 COUNT(*) AS total_batches,
-                COALESCE(SUM(CASE WHEN status = 'running' THEN 1 ELSE 0 END), 0)
+                COALESCE(SUM(CASE WHEN b.status = 'running' THEN 1 ELSE 0 END), 0)
                     AS running_batches,
-                COALESCE(SUM(CASE WHEN status = 'completed' THEN 1 ELSE 0 END), 0)
+                COALESCE(SUM(CASE WHEN b.status = 'completed' THEN 1 ELSE 0 END), 0)
                     AS completed_batches,
-                COALESCE(SUM(CASE WHEN status = 'failed' THEN 1 ELSE 0 END), 0)
+                COALESCE(SUM(CASE WHEN b.status = 'failed' THEN 1 ELSE 0 END), 0)
                     AS failed_batches,
-                COALESCE(SUM(total_count), 0) AS total_intents,
-                COALESCE(SUM(completed_count), 0) AS completed_intents,
-                COALESCE(SUM(failed_count), 0) AS failed_intents
-            FROM swe_cron_dispatch_batches
+                COALESCE(SUM(b.total_count), 0) AS total_intents,
+                COALESCE(SUM(b.completed_count), 0) AS completed_intents,
+                COALESCE(SUM(b.failed_count), 0) AS failed_intents
+            FROM swe_cron_dispatch_batches b
+            LEFT JOIN swe_cron_jobs j
+                ON b.parent_job_id = j.id
+                AND b.source_id = j.source_id
             WHERE {where_clause}
         """
         stats_row = await db.fetch_one(stats_sql, tuple(sql_params)) or {}
@@ -535,14 +569,20 @@ class QueryService:
         rows = await db.fetch_all(
             f"""
             SELECT
-                batch_id, parent_job_id, parent_external_job_id, tenant_id,
-                source_id, provider_id, model_id, agent_id,
-                scheduled_fire_at, callback_received_at, status,
-                lock_owner, locked_at, total_count, completed_count,
-                failed_count, error_message, completed_at, created_at, updated_at
-            FROM swe_cron_dispatch_batches
+                b.batch_id, b.parent_job_id,
+                COALESCE(j.name, '') AS parent_job_name,
+                b.parent_external_job_id, b.tenant_id,
+                b.source_id, b.provider_id, b.model_id, b.agent_id,
+                b.scheduled_fire_at, b.callback_received_at, b.status,
+                b.lock_owner, b.locked_at, b.total_count, b.completed_count,
+                b.failed_count, b.error_message, b.completed_at,
+                b.created_at, b.updated_at
+            FROM swe_cron_dispatch_batches b
+            LEFT JOIN swe_cron_jobs j
+                ON b.parent_job_id = j.id
+                AND b.source_id = j.source_id
             WHERE {where_clause}
-            ORDER BY scheduled_fire_at DESC, created_at DESC
+            ORDER BY b.scheduled_fire_at DESC, b.created_at DESC
             LIMIT %s OFFSET %s
             """,
             tuple(sql_params) + (page_size, offset),
@@ -571,13 +611,19 @@ class QueryService:
         batch_row = await db.fetch_one(
             """
             SELECT
-                batch_id, parent_job_id, parent_external_job_id, tenant_id,
-                source_id, provider_id, model_id, agent_id,
-                scheduled_fire_at, callback_received_at, status,
-                lock_owner, locked_at, total_count, completed_count,
-                failed_count, error_message, completed_at, created_at, updated_at
-            FROM swe_cron_dispatch_batches
-            WHERE source_id = %s AND batch_id = %s
+                b.batch_id, b.parent_job_id,
+                COALESCE(j.name, '') AS parent_job_name,
+                b.parent_external_job_id, b.tenant_id,
+                b.source_id, b.provider_id, b.model_id, b.agent_id,
+                b.scheduled_fire_at, b.callback_received_at, b.status,
+                b.lock_owner, b.locked_at, b.total_count, b.completed_count,
+                b.failed_count, b.error_message, b.completed_at,
+                b.created_at, b.updated_at
+            FROM swe_cron_dispatch_batches b
+            LEFT JOIN swe_cron_jobs j
+                ON b.parent_job_id = j.id
+                AND b.source_id = j.source_id
+            WHERE b.source_id = %s AND b.batch_id = %s
             """,
             (source_id, batch_id),
         )

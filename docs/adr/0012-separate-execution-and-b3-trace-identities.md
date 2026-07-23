@@ -1,0 +1,5 @@
+# Separate execution and B3 trace identities
+
+Swe stores a unique **Execution Trace ID** in `swe_tracing_traces.trace_id` and uses it for spans, Subtasks, execution records, feedback, and runtime invocation claims. The incoming **B3 Trace ID** is stored separately in nullable, non-unique `b3_trace_id`: ordinary requests with B3 reuse it as both identifiers for compatibility, while dispatch-service batch executions generate a new Execution Trace ID for every attempt and retain the shared B3 value only for distributed correlation. Original `X-B3-*` transport headers remain unchanged because rewriting them would break upstream trace continuity; historical rows are not backfilled because existing UUID-shaped values cannot reliably be classified as external B3 IDs.
+
+**Deployment consequence:** this change is migration-first. `scripts/sql/tracing_b3_trace_id_migration.sql` must complete, and operators must verify the nullable column plus the `(source_id, b3_trace_id)` index, before deploying any SWE writer that inserts `b3_trace_id`; Monitor readers may be deployed after the schema is verified.

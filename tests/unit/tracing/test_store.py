@@ -101,6 +101,85 @@ class TestTraceOperations:
         mock_db.execute.assert_called_once()
 
     @pytest.mark.asyncio
+    async def test_create_trace_inserts_b3_trace_id(self, config, mock_db):
+        """The trace INSERT stores execution and upstream B3 identities."""
+        store = TraceStore(config, mock_db)
+        trace = Trace(
+            trace_id="execution-trace-id",
+            b3_trace_id="upstream-b3-trace-id",
+            source_id="test-source",
+            user_id="user-1",
+            session_id="session-1",
+            channel="console",
+            start_time=datetime.now(),
+        )
+
+        await store.create_trace(trace)
+
+        query, params = mock_db.execute.call_args.args
+        normalized_query = " ".join(query.split())
+        assert "trace_id, b3_trace_id, source_id" in normalized_query
+        assert params[:2] == (
+            "execution-trace-id",
+            "upstream-b3-trace-id",
+        )
+
+    def test_row_to_trace_maps_b3_trace_id(self, config, mock_db):
+        """A populated B3 database field is exposed on the trace model."""
+        store = TraceStore(config, mock_db)
+        row = {
+            "trace_id": "execution-trace-id",
+            "b3_trace_id": "upstream-b3-trace-id",
+            "source_id": "test-source",
+            "user_id": "user-1",
+            "session_id": "session-1",
+            "channel": "console",
+            "start_time": datetime.now(),
+            "end_time": None,
+            "duration_ms": None,
+            "model_name": None,
+            "total_input_tokens": 0,
+            "total_output_tokens": 0,
+            "tools_used": "[]",
+            "skills_used": "[]",
+            "status": "running",
+            "error": None,
+        }
+
+        trace = store._row_to_trace(row)
+
+        assert trace.b3_trace_id == "upstream-b3-trace-id"
+
+    def test_row_to_trace_allows_missing_legacy_b3_trace_id(
+        self,
+        config,
+        mock_db,
+    ):
+        """Rows written before the B3 column was added remain readable."""
+        store = TraceStore(config, mock_db)
+        legacy_row = {
+            "trace_id": "execution-trace-id",
+            "source_id": "test-source",
+            "user_id": "user-1",
+            "session_id": "session-1",
+            "channel": "console",
+            "start_time": datetime.now(),
+            "end_time": None,
+            "duration_ms": None,
+            "model_name": None,
+            "total_input_tokens": 0,
+            "total_output_tokens": 0,
+            "tools_used": "[]",
+            "skills_used": "[]",
+            "status": "running",
+            "error": None,
+        }
+
+        trace = store._row_to_trace(legacy_row)
+
+        assert trace.b3_trace_id is None
+
+    @pytest.mark.asyncio
     async def test_update_trace(self, config, mock_db):
         """Test updating a trace."""
         store = TraceStore(config, mock_db)

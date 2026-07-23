@@ -2218,7 +2218,7 @@ class AgentRunner(Runner):
                 return None
             existing_trace_id = getattr(request, "trace_id", None)
             attach_existing = self._should_attach_existing_trace(request)
-            new_trace_id = _request_b3_trace_id(request)
+            b3_trace_id = _request_b3_trace_id(request)
             resolved_identity = await resolve_user_identity(
                 tenant_id=getattr(request, "user_id", None),
                 source_id=_request_source_id(request),
@@ -2236,9 +2236,10 @@ class AgentRunner(Runner):
                 bbk_id=resolved_identity.bbk_id,
                 session_name=_session_name_from_messages(msgs),
                 trace_id=(
-                    existing_trace_id if attach_existing else new_trace_id
+                    existing_trace_id if attach_existing else b3_trace_id
                 ),
                 attach_existing=attach_existing,
+                b3_trace_id=b3_trace_id,
             )
             if trace_id:
                 # 通道层负责把事件发给前端，这里写回 request 让 SSE 能透传 trace_id。

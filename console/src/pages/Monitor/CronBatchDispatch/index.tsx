@@ -484,7 +484,6 @@ export default function CronBatchDispatchPage() {
   );
   const [status, setStatus] = useState("all");
   const [page, setPage] = useState(1);
-  const [pageSize, setPageSize] = useState(20);
   const [batches, setBatches] = useState<CronDispatchBatchItem[]>([]);
   const [batchTotal, setBatchTotal] = useState(0);
   const [stats, setStats] = useState({
@@ -508,6 +507,7 @@ export default function CronBatchDispatchPage() {
   const [detailLoading, setDetailLoading] = useState(false);
   const [workerLoading, setWorkerLoading] = useState(false);
   const [batchQuery, setBatchQuery] = useState("");
+  const [debouncedBatchQuery, setDebouncedBatchQuery] = useState("");
   const [intentQuery, setIntentQuery] = useState("");
   const [intentRole, setIntentRole] = useState("all");
   const [intentStatus, setIntentStatus] = useState("all");
@@ -517,24 +517,11 @@ export default function CronBatchDispatchPage() {
   const workerRequestId = useRef(0);
 
   const filters = useMemo(
-    () => buildDateFilters(dateRange, status),
-    [dateRange, status],
-  );
-
-  const filteredBatches = useMemo(
-    () =>
-      batches.filter((batch) =>
-        matchesQuery(batchQuery, [
-          batch.batch_id,
-          batch.parent_job_id,
-          batch.parent_external_job_id,
-          batch.tenant_id,
-          batch.provider_id,
-          batch.model_id,
-          batch.agent_id,
-        ]),
-      ),
-    [batchQuery, batches],
+    () => ({
+      ...buildDateFilters(dateRange, status),
+      query: debouncedBatchQuery.trim() || undefined,
+    }),
+    [debouncedBatchQuery, dateRange, status],
   );
 
   const selectedDetail =
@@ -561,15 +548,23 @@ export default function CronBatchDispatchPage() {
 
   const fetchBatches = useCallback(async () => {
     const requestId = ++batchRequestId.current;
-    if (!canView) return;
+    if (!canView || batchQuery !== debouncedBatchQuery) return;
     setBatchLoading(true);
     try {
       const response = await monitorApi.getCronDispatchBatches(
         page,
-        pageSize,
+        4,
         filters,
       );
       if (requestId === batchRequestId.current) {
+        const lastPage =
+          response.total === 0 ? 1 : Math.ceil(response.total / 4);
+        if (page > lastPage) {
+          setBatchTotal(response.total);
+          setStats(response.stats);
+          setPage(lastPage);
+          return;
+        }
         setBatches(response.items);
         setBatchTotal(response.total);
         setStats(response.stats);
@@ -591,7 +586,7 @@ export default function CronBatchDispatchPage() {
         setBatchLoading(false);
       }
     }
-  }, [canView, filters, page, pageSize]);
+  }, [batchQuery, canView, debouncedBatchQuery, filters, page]);
 
   const fetchWorkers = useCallback(async () => {
     const requestId = ++workerRequestId.current;
@@ -650,6 +645,13 @@ export default function CronBatchDispatchPage() {
   }, [fetchBatches]);
 
   useEffect(() => {
+    const timer = window.setTimeout(() => {
+      setDebouncedBatchQuery(batchQuery);
+    }, 300);
+    return () => window.clearTimeout(timer);
+  }, [batchQuery]);
+
+  useEffect(() => {
     fetchWorkers();
   }, [fetchWorkers]);
 
@@ -658,14 +660,14 @@ export default function CronBatchDispatchPage() {
   }, [fetchDetail]);
 
   useEffect(() => {
-    if (!filteredBatches.length) {
+    if (!batches.length) {
       setSelectedBatchId("");
       return;
     }
-    if (!filteredBatches.some((batch) => batch.batch_id === selectedBatchId)) {
-      setSelectedBatchId(filteredBatches[0].batch_id);
+    if (!batches.some((batch) => batch.batch_id === selectedBatchId)) {
+      setSelectedBatchId(batches[0].batch_id);
     }
-  }, [filteredBatches, selectedBatchId]);
+  }, [batches, selectedBatchId]);
 
   const handleShortcutChange = (value: DateShortcutKey) => {
     setShortcut(value);
@@ -829,15 +831,20 @@ export default function CronBatchDispatchPage() {
               <span>按计划执行时间倒序展示</span>
             </div>
             <strong>
-              {filteredBatches.length} / {batches.length} 当前页
+              共 {batchTotal} 个全局结果
             </strong>
           </div>
           <Input
             allowClear
-            aria-label="筛选当前页 Batch"
-            placeholder="筛选当前页任务、Batch ID、父任务或模型"
+            aria-label="全局筛选 Batch"
+            placeholder="全局筛选 Batch ID、父任务、租户、provider、model 或 agent"
             value={batchQuery}
-            onChange={(event) => setBatchQuery(event.target.value)}
+            onChange={(event) => {
+              batchRequestId.current += 1;
+              setBatchLoading(false);
+              setBatchQuery(event.target.value);
+              setPage(1);
+            }}
           />
           <div className={styles.batchListHeader} aria-hidden="true">
             <span>任务 / Batch</span>
@@ -845,13 +852,8 @@ export default function CronBatchDispatchPage() {
             <span>状态 / 进度</span>
           </div>
           <Spin spinning={batchLoading} wrapperClassName={styles.batchListSpin}>
-            <div
-              className={styles.batchList}
-              role="region"
-              aria-label="Batch 列表"
-              tabIndex={0}
-            >
-              {filteredBatches.map((batch) => {
+            <div className={styles.batchList}>
+              {batches.map((batch) => {
                 const total = Math.max(batch.total_count, 1);
                 const finished = batch.completed_count + batch.failed_count;
                 return (
@@ -867,7 +869,7 @@ export default function CronBatchDispatchPage() {
                   >
                     <span className={styles.batchIdentity}>
                       <strong>
-                        {batch.parent_external_job_id || batch.parent_job_id}
+                        {batch.parent_job_name || "未命名定时任务"}
                       </strong>
                       <Tooltip title={batch.batch_id} placement="topLeft">
                         <em>{shortBatchId(batch.batch_id)}</em>
@@ -899,10 +901,14 @@ export default function CronBatchDispatchPage() {
                   </button>
                 );
               })}
-              {!batchLoading && !filteredBatches.length ? (
+              {!batchLoading && !batches.length ? (
                 <Empty
                   image={Empty.PRESENTED_IMAGE_SIMPLE}
-                  description="当前页无匹配 Batch"
+                  description={
+                    batchQuery.trim()
+                      ? "全局筛选无匹配 Batch"
+                      : "当前范围内暂无 Batch"
+                  }
                 />
               ) : null}
             </div>
@@ -910,16 +916,13 @@ export default function CronBatchDispatchPage() {
           <div className={styles.batchPagination}>
             <Pagination
               current={page}
-              pageSize={pageSize}
+              pageSize={4}
               total={batchTotal}
-              showSizeChanger
+              showSizeChanger={false}
               showLessItems
               size="small"
-              onChange={(nextPage, nextPageSize) => {
-                setPage(nextPage);
-                setPageSize(nextPageSize);
-              }}
-              showTotal={(total) => `共 ${total} 个`}
+              onChange={setPage}
+              showTotal={(total) => `共 ${total} 个全局结果`}
             />
           </div>
         </article>
@@ -931,8 +934,8 @@ export default function CronBatchDispatchPage() {
                 <div className={styles.detailHead}>
                   <div>
                     <h2>
-                      {selectedDetail.batch.parent_external_job_id ||
-                        selectedDetail.batch.parent_job_id}
+                      {selectedDetail.batch.parent_job_name ||
+                        "未命名定时任务"}
                     </h2>
                     <p>
                       <Tooltip
