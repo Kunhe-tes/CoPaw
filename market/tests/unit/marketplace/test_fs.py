@@ -95,6 +95,176 @@ def test_user_manifest_path_matches_swe_workspace_contract(tmp_path):
     assert market_manifest_path == workspace_dir / "skill.json"
 
 
+def test_user_disabled_skills_dir_is_sibling_of_active_skills_dir(tmp_path):
+    from market.marketplace.fs import (
+        get_user_disabled_skills_dir,
+        get_user_skills_dir,
+    )
+
+    active_root = get_user_skills_dir(
+        tmp_path / "swe",
+        "user1",
+        "agent1",
+        "source_a",
+    )
+
+    assert (
+        get_user_disabled_skills_dir(
+            tmp_path / "swe",
+            "user1",
+            "agent1",
+            "source_a",
+        )
+        == active_root.parent / ".disabled_skills"
+    )
+
+
+@pytest.mark.parametrize(
+    "manifest",
+    [
+        {},
+        {"layout_version": 1, "skills": {}},
+        {"layout_version": 2, "skills": []},
+        {"layout_version": 2, "skills": {"demo": {}}},
+        {"layout_version": 2, "skills": {"demo": {"enabled": "false"}}},
+    ],
+)
+def test_mutate_user_skill_manifest_rejects_non_v2_layout_before_mutation(
+    tmp_path,
+    manifest,
+):
+    from market.marketplace.fs import (
+        WorkspaceSkillManifestError,
+        get_user_skill_manifest_path,
+        mutate_user_skill_manifest,
+    )
+
+    swe_root = tmp_path / "swe"
+    manifest_path = get_user_skill_manifest_path(
+        swe_root,
+        "user1",
+        "agent1",
+        "source_a",
+    )
+    manifest_path.parent.mkdir(parents=True)
+    original = json.dumps(manifest).encode("utf-8")
+    manifest_path.write_bytes(original)
+    mutation_called = False
+
+    def mutation_fn(_manifest):
+        nonlocal mutation_called
+        mutation_called = True
+        return True
+
+    with pytest.raises(WorkspaceSkillManifestError):
+        mutate_user_skill_manifest(
+            swe_root,
+            "user1",
+            "agent1",
+            mutation_fn,
+            "source_a",
+        )
+
+    assert mutation_called is False
+    assert manifest_path.read_bytes() == original
+
+
+def test_resolve_registered_skill_path_prefers_manifest_target_then_fallback(
+    tmp_path,
+):
+    from market.marketplace.fs import resolve_registered_skill_path
+
+    workspace = tmp_path / "workspace"
+    active = workspace / "skills" / "demo"
+    disabled = workspace / ".disabled_skills" / "demo"
+    disabled.mkdir(parents=True)
+
+    result = resolve_registered_skill_path(
+        workspace,
+        "demo",
+        {"enabled": True},
+    )
+
+    assert result.path == disabled
+    assert result.promoted is False
+
+
+def test_resolve_registered_skill_path_reports_disabled_collision_promotion(
+    tmp_path,
+):
+    from market.marketplace.fs import resolve_registered_skill_path
+
+    workspace = tmp_path / "workspace"
+    active = workspace / "skills" / "demo"
+    disabled = workspace / ".disabled_skills" / "demo"
+    active.mkdir(parents=True)
+    disabled.mkdir(parents=True)
+
+    result = resolve_registered_skill_path(
+        workspace,
+        "demo",
+        {"enabled": False},
+    )
+
+    assert result.path == active
+    assert result.promoted is True
+
+
+def test_copy_skill_to_user_rejects_invalid_manifest_before_replacing_package(
+    tmp_path,
+):
+    from market.marketplace.fs import (
+        WorkspaceSkillManifestError,
+        copy_skill_to_user,
+        get_skill_dir,
+        get_user_skill_manifest_path,
+        get_user_skills_dir,
+    )
+
+    marketplace_root = tmp_path / "market"
+    swe_root = tmp_path / "swe"
+    source = "src_a"
+    source_dir = get_skill_dir(marketplace_root, source, "item")
+    source_dir.mkdir(parents=True)
+    (source_dir / "SKILL.md").write_text("new", encoding="utf-8")
+    destination = (
+        get_user_skills_dir(
+            swe_root,
+            "user1",
+            source_id=source,
+        )
+        / "demo"
+    )
+    destination.mkdir(parents=True)
+    (destination / "SKILL.md").write_text("old", encoding="utf-8")
+    manifest_path = get_user_skill_manifest_path(
+        swe_root,
+        "user1",
+        source_id=source,
+    )
+    manifest_path.parent.mkdir(parents=True, exist_ok=True)
+    manifest_path.write_text(
+        json.dumps({"layout_version": 1, "skills": {}}),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(WorkspaceSkillManifestError):
+        copy_skill_to_user(
+            marketplace_root,
+            source,
+            "item",
+            swe_root,
+            "user1",
+            "demo",
+            "Demo",
+            "description",
+            "owner",
+            "1.0.0",
+        )
+
+    assert (destination / "SKILL.md").read_text(encoding="utf-8") == "old"
+
+
 def test_read_user_skill_manifest_missing_file_returns_layout_v2(tmp_path):
     from market.marketplace.fs import read_user_skill_manifest
 
@@ -740,9 +910,11 @@ def test_copy_skill_to_user_preserves_created_at_on_redistribute(tmp_path):
         json.dumps(
             {
                 "schema_version": "workspace-skill-manifest.v1",
+                "layout_version": 2,
                 "version": 1,
                 "skills": {
                     "test_skill": {
+                        "enabled": True,
                         "source": "marketplace:test_item",
                         "created_at": first_created_at,
                     },
@@ -869,9 +1041,11 @@ def test_copy_skill_to_user_skips_customized_skill(tmp_path):
         json.dumps(
             {
                 "schema_version": "workspace-skill-manifest.v1",
+                "layout_version": 2,
                 "version": 1,
                 "skills": {
                     "my_skill": {
+                        "enabled": True,
                         "source": "customized",
                         "metadata": {
                             "name": "my_skill",
@@ -948,9 +1122,11 @@ def test_copy_skill_to_user_overwrites_customized_skill_without_creator_id(
         json.dumps(
             {
                 "schema_version": "workspace-skill-manifest.v1",
+                "layout_version": 2,
                 "version": 1,
                 "skills": {
                     "my_skill": {
+                        "enabled": True,
                         "source": "customized",
                         "metadata": {
                             "name": "my_skill",
@@ -1026,9 +1202,11 @@ def test_copy_skill_to_user_overwrites_marketplace_skill(tmp_path):
         json.dumps(
             {
                 "schema_version": "workspace-skill-manifest.v1",
+                "layout_version": 2,
                 "version": 1,
                 "skills": {
                     "my_skill": {
+                        "enabled": True,
                         "source": "marketplace:old-item",
                         "created_at": "2025-05-14T10:00:00+00:00",
                     },
