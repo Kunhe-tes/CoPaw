@@ -22,7 +22,10 @@ def _make_service(tmp_path, mock_db=None):
 def test_register_skill_in_manifest_rejects_malformed_shared_manifest(
     tmp_path,
 ):
-    from market.marketplace.fs import get_user_skill_manifest_path
+    from market.marketplace.fs import (
+        WorkspaceSkillManifestError,
+        get_user_skill_manifest_path,
+    )
 
     svc = _make_service(tmp_path)
     manifest_path = get_user_skill_manifest_path(
@@ -35,7 +38,7 @@ def test_register_skill_in_manifest_rejects_malformed_shared_manifest(
     original = b'{"layout_version": 2, "skills": {'
     manifest_path.write_bytes(original)
 
-    with pytest.raises(json.JSONDecodeError):
+    with pytest.raises(WorkspaceSkillManifestError):
         svc.register_skill_in_manifest(
             "user1",
             "demo",
@@ -139,6 +142,63 @@ def test_register_skill_in_manifest_preserves_external_fields_on_success(
         "require_envs": [],
     }
     assert metadata["creator_id"] == "user2"
+
+
+@pytest.mark.asyncio
+async def test_enable_registered_hidden_skill_updates_manifest_and_reloads(
+    tmp_path,
+):
+    from market.marketplace.fs import (
+        get_user_disabled_skills_dir,
+        get_user_skill_manifest_path,
+    )
+
+    svc = _make_service(tmp_path)
+    svc._trigger_agent_reload = AsyncMock()
+    svc.skill_registry.update_skill = AsyncMock()
+    user_id = "user1"
+    source_id = "source_a"
+    hidden = (
+        get_user_disabled_skills_dir(
+            tmp_path / "swe",
+            user_id,
+            source_id=source_id,
+        )
+        / "demo"
+    )
+    hidden.mkdir(parents=True)
+    (hidden / "SKILL.md").write_text("# Demo", encoding="utf-8")
+    manifest_path = get_user_skill_manifest_path(
+        tmp_path / "swe",
+        user_id,
+        source_id=source_id,
+    )
+    manifest_path.write_text(
+        json.dumps(
+            {
+                "schema_version": "workspace-skill-manifest.v1",
+                "layout_version": 2,
+                "version": 0,
+                "skills": {"demo": {"enabled": False}},
+            },
+        ),
+        encoding="utf-8",
+    )
+
+    result = await svc.enable_skill(user_id, "demo", source_id=source_id)
+
+    assert result == {"success": True}
+    assert (
+        json.loads(manifest_path.read_text(encoding="utf-8"))["skills"][
+            "demo"
+        ]["enabled"]
+        is True
+    )
+    svc._trigger_agent_reload.assert_awaited_once_with(
+        user_id,
+        "default",
+        source_id,
+    )
 
 
 @pytest.mark.asyncio
@@ -565,9 +625,11 @@ async def test_recall_skill_by_name_removes_skill_dir_and_manifest(tmp_path):
         json.dumps(
             {
                 "schema_version": "workspace-skill-manifest.v1",
+                "layout_version": 2,
                 "version": 1,
                 "skills": {
                     skill_name: {
+                        "enabled": True,
                         "source": "customized",
                         "metadata": {"name": skill_name},
                     },

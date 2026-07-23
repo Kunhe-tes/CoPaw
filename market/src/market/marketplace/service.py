@@ -31,6 +31,7 @@ from .fs import (
     copy_skill_to_user,
     get_mcp_dir,
     get_skill_dir,
+    get_user_disabled_skills_dir,
     get_user_skills_dir,
     load_index,
     migrate_legacy_scope_dir_if_needed,
@@ -712,16 +713,6 @@ class MarketplaceService:
           因为内容已受信任。禁用再启用是用户的常规操作，不应被扫描阻断。
         - 如果技能未在 manifest 中注册（首次启用），则执行安全扫描。
         """
-        skills_dir = get_user_skills_dir(
-            self.swe_root,
-            user_id,
-            agent_id,
-            source_id,
-        )
-        skill_dir = skills_dir / skill_name
-        if not skill_dir.exists():
-            return {"success": False, "reason": "not_found"}
-
         # 检查技能是否已在 manifest 中注册（之前已启用过）
         manifest = read_user_skill_manifest(
             self.swe_root,
@@ -730,6 +721,25 @@ class MarketplaceService:
             source_id,
         )
         already_registered = skill_name in manifest.get("skills", {})
+        skills_dir = get_user_skills_dir(
+            self.swe_root,
+            user_id,
+            agent_id,
+            source_id,
+        )
+        skill_dir = skills_dir / skill_name
+        if not skill_dir.exists() and already_registered:
+            skill_dir = (
+                get_user_disabled_skills_dir(
+                    self.swe_root,
+                    user_id,
+                    agent_id,
+                    source_id,
+                )
+                / skill_name
+            )
+        if not skill_dir.exists():
+            return {"success": False, "reason": "not_found"}
 
         # 仅对首次启用的技能执行安全扫描（已注册的技能重新启用时跳过）
         if not already_registered:
