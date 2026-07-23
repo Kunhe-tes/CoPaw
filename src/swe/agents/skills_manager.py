@@ -612,6 +612,7 @@ def _reconcile_registered_skill_location(
 
     if active.exists() and disabled.exists():
         shutil.rmtree(disabled)
+        entry["enabled"] = True
 
     desired = resolve_workspace_managed_skill_dir(
         workspace_dir,

@@ -353,13 +353,38 @@ def test_reconcile_prefers_runtime_copy_when_both_registered_copies_exist(
 
     reconcile_workspace_manifest(workspace)
 
-    assert not active.exists()
-    assert "runtime-wins" in (disabled / "SKILL.md").read_text(
+    manifest = json.loads(
+        (workspace / "skill.json").read_text(encoding="utf-8"),
+    )
+    assert active.exists()
+    assert "runtime-wins" in (active / "SKILL.md").read_text(
         encoding="utf-8",
     )
-    assert "discard-me" not in (disabled / "SKILL.md").read_text(
-        encoding="utf-8",
+    assert not disabled.exists()
+    assert manifest["skills"]["demo"]["enabled"] is True
+
+
+def test_reconcile_keeps_runtime_copy_when_enabled_skill_has_both_copies(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "workspace"
+    active = workspace / "skills" / "demo"
+    disabled = workspace / ".disabled_skills" / "demo"
+    _write_skill(active, "runtime-wins")
+    _write_skill(disabled, "discard-me")
+    _write_manifest(workspace, {"demo": _entry(enabled=True)})
+
+    reconciled = reconcile_workspace_manifest(workspace)
+
+    assert (
+        (active / "SKILL.md")
+        .read_text(encoding="utf-8")
+        .endswith(
+            "runtime-wins\n",
+        )
     )
+    assert not disabled.exists()
+    assert reconciled["skills"]["demo"]["enabled"] is True
 
 
 def test_reconcile_ignores_unmanaged_runtime_content(tmp_path: Path) -> None:
