@@ -26,7 +26,12 @@ from fastapi import (
 )
 from pydantic import BaseModel, Field
 
-from ...marketplace.fs import get_skill_dir, _atomic_write_json
+from ...marketplace.fs import (
+    _atomic_write_json,
+    default_workspace_skill_manifest,
+    get_skill_dir,
+    get_workspace_skill_manifest_path,
+)
 from ...marketplace.schemas import (
     AsyncTaskSubmitResponse,
     DistributeRequest,
@@ -1339,7 +1344,7 @@ def _find_tenant_dirs_for_source_id(
 def _read_workspace_manifest(manifest_path: Path) -> tuple[dict, str | None]:
     """读取 workspace manifest，返回 (manifest, error)."""
     if not manifest_path.exists():
-        return {"skills": {}}, None
+        return default_workspace_skill_manifest(), None
     try:
         return json.loads(manifest_path.read_text(encoding="utf-8")), None
     except json.JSONDecodeError as e:
@@ -1358,7 +1363,7 @@ def _extract_skill_fields(
 
     Args:
         skill_dir: 技能目录
-        entry: skill.json 中的 entry 数据
+        entry: Workspace manifest entry dict
         skill_name: 技能名
         user_id: 用户ID（数据库 tenant_id）
         source_id: 租户 source_id
@@ -1597,7 +1602,7 @@ async def _process_workspace_skills_async(
 ) -> None:
     """处理单个 workspace 下的所有技能."""
     skills_dir = workspace_dir / "skills"
-    manifest_path = workspace_dir / "skill.json"
+    manifest_path = get_workspace_skill_manifest_path(workspace_dir)
     agent_id = workspace_dir.name
 
     if not skills_dir.exists():
@@ -1615,7 +1620,7 @@ async def _process_workspace_skills_async(
         results["errors"].append(
             {
                 "tenant_id": user_id,
-                "error": f"skill.json 解析失败: {error}",
+                "error": f"workspace manifest 解析失败: {error}",
             },
         )
         return
@@ -1639,6 +1644,7 @@ async def _process_workspace_skills_async(
     # 保存 manifest
     if not dry_run and skills_dict:
         manifest["skills"] = skills_dict
+        manifest_path.parent.mkdir(parents=True, exist_ok=True)
         manifest_path.write_text(
             json.dumps(manifest, ensure_ascii=False, indent=2),
             encoding="utf-8",
@@ -1661,7 +1667,7 @@ async def _process_single_skill(
         skill_dir: 技能目录
         user_id: 用户ID（数据库 tenant_id）
         source_id: 租户 source_id
-        skills_dict: skill.json 中的 skills dict
+        skills_dict: Workspace manifest skills dict
         registry: SkillRegistry
         force: 是否强制重新生成
         dry_run: 试运行模式

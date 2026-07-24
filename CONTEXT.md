@@ -188,6 +188,90 @@ _Avoid_: chat bootstrap, BOOTSTRAP.md flow, onboarding chat
 The first-run conversational onboarding in which an Agent learns and records identity, style, and user preferences. A **Bootstrap Chat Flow** is separate from **Tenant Scaffold Bootstrap** and may be skipped for a tenant that still has a valid scaffold.
 _Avoid_: tenant bootstrap, scaffold bootstrap, workspace initialization
 
+**Disabled Skill**:
+A managed skill package retained by the control plane but excluded from the **Skill Runtime View** and ordinary Agent skill discovery for later runs. Disabled status alone is not a filesystem security boundary.
+_Avoid_: hidden skill, unregistered skill, inactive skill
+
+**Disabled Skill Store**:
+A Workspace-scoped retention area for **Disabled Skill** packages outside the conventional runtime skill path. It is managed through skill-management surfaces but remains ordinary filesystem content that generic file or shell searches may discover.
+_Avoid_: skill sandbox, secure skill store, deleted skills
+
+**Skill Management State**:
+The authoritative backend-managed record of installed skills, enablement, channel availability, and configuration for one Workspace. It is accessed through skill-management surfaces rather than ordinary Workspace browsing, search, or editing.
+_Avoid_: workspace skill file, user-editable skill manifest, runtime skill list
+
+**Skill Management Surface**:
+A user-visible service or API that performs a managed skill lifecycle operation, including enablement, disablement, deletion, re-import, distribution, or editing. It resolves a registered package from **Skill Management State** to either the **Skill Runtime View** or **Disabled Skill Store**; a surface may write enablement state and rely on later reconciliation for package placement when that is its established service boundary. Market may also perform an **Explicit Skill Claim**.
+_Avoid_: skill-directory browser, active-directory-only management surface
+
+**Managed Skill Package Resolution**:
+The management-surface rule for locating a registered package from its **Skill Management State**. It prefers the root selected by enablement and falls back to the other managed root during a **Skill State Conflict**. An **Active Collision Promotion** takes precedence when both copies exist. A Market mutation receives both the resolved package and an explicit promotion result: it is true only when the collision changes a registered skill from disabled to enabled, so only that case requires the one Agent reload. It does not resolve **Unmanaged Skill Content** that has no registered-name collision.
+_Avoid_: enumerate every skill-looking directory, manifest-only package lookup
+
+**Active Collision Promotion**:
+The default resolution of a same-name active and disabled package: the `skills/` package is retained as the **Canonical Skill Package**, the `.disabled_skills/` package is deleted, and the registered skill becomes enabled. SWE reconciliation and Market explicit management both apply this rule.
+_Avoid_: preserve disabled state on active collision, ambiguous duplicate skill
+
+**State-Preserving Distribution**:
+Market distribution that installs an unregistered skill as enabled, but updates an already registered package at its managed location without changing its enablement. In particular, updating a **Disabled Skill** does not make it part of the **Skill Runtime View**.
+_Avoid_: update means enable, replace-active-directory-only
+
+**Disabled Skill Maintenance**:
+Management-surface viewing, downloading, editing, and publishing of a **Disabled Skill** at its resolved package location. Maintenance changes package content or related metadata but does not change enablement.
+_Avoid_: disabled means immutable, maintenance means enable
+
+**Canonical Skill Package**:
+The authoritative package content when the same skill exists in both the **Skill Runtime View** and **Disabled Skill Store**. The runtime-view copy wins for content; **Active Collision Promotion** is the exception to ordinary **Skill Management State**-driven placement and changes the registered skill to enabled.
+_Avoid_: newest skill copy, enabled skill state, manifest-selected content
+
+**Skill State Conflict**:
+A disagreement between **Skill Management State** and the retained location of a skill package. A skill in conflict is unavailable to Agent Runs until the disagreement is reconciled.
+_Avoid_: partially enabled skill, best-effort skill state, usable mismatch
+
+**Unmanaged Skill Content**:
+Workspace content that resembles a skill package but has no entry in **Skill Management State**. It is neither registered nor governed by disabled-skill discovery guarantees, even when it remains visible to model-initiated file or shell tools. Market may retain its legacy list, viewing, download, editing, publishing, and direct-delete behavior for this ordinary content; only an **Explicit Skill Claim** creates managed state, except that a same-name registered disabled package triggers **Active Collision Promotion**.
+_Avoid_: disabled skill, automatically installed skill, runtime skill
+
+**Explicit Skill Claim**:
+A user-initiated Market enablement of **Unmanaged Skill Content** in the ordinary skill directory. After the established security scan, it creates the corresponding **Skill Management State** entry as enabled. Except for **Active Collision Promotion**, SWE never claims unmanaged content automatically, and the **Disabled Skill Store** contains only registered packages.
+_Avoid_: automatic skill discovery, reconciliation registration, disabled-skill import
+
+**Skill Runtime View**:
+The current set of registered and enabled skill packages selected from a Workspace's ordinary skill directory. It excludes **Unmanaged Skill Content**, changes immediately when skill enablement changes, and gives existing Agent Runs no guarantee that earlier skill files remain available.
+_Avoid_: skill snapshot, immutable skill view, complete skill directory
+
+**User-Selected Skill**:
+A **Skill Runtime View** member that a user explicitly selects for a single chat turn and remains available when that turn starts. A turn may contain up to five selections, including repeated **User-Selected Skills**; their **Skill Use Directives** are injected in selection order after duplicate runtime identifiers are removed. Each selection records user intent as structured turn context with a readable message marker, but is not evidence that the skill actually executed.
+_Avoid_: skill mention, forced tool call, permanently active skill, single selected skill
+
+**Skill Runtime Identifier**:
+The stable `name` of a skill package in one Workspace: its managed skill-directory name and **Skill Management State** key. It is the identity used for runtime selection, channel availability, and injection de-duplication; a frontmatter or market `skill_id` is not a substitute.
+_Avoid_: display name, frontmatter name, market skill id
+
+**Skill Use Directive**:
+A trusted instruction block for one **User-Selected Skill** whose server-resolved `SKILL.md` exists and is readable. It names the skill, describes it, and supplies that path; it requires the Agent to read the document before acting, but does not include the document's full content. With multiple directives, every document is read in directive order before task execution begins.
+_Avoid_: skill prompt copy, user-supplied file path, complete skill document
+
+**Skill-Use Enforcement**:
+The runtime policy that verifies an Agent followed a **Skill Use Directive** before it acts. The first rollout has no Skill-Use Enforcement; the directive is a trusted model instruction rather than a runtime gate.
+_Avoid_: prompt injection, tool attribution, guaranteed skill execution
+
+**Actual Skill Use**:
+The runtime-detected participation of a skill in a turn, established by tool or asset evidence. It is distinct from **User-Selected Skill** and is the only basis for tool-call skill attribution.
+_Avoid_: selected skill, requested skill, assumed skill invocation
+
+**Unavailable Skill Selection**:
+A user-requested skill choice that is no longer in the **Skill Runtime View** when its chat turn starts. The choice is discarded without skill guidance or selection-based attribution, while other **User-Selected Skills** in the same turn may still apply; the turn is ordinary chat only when none remain.
+_Avoid_: failed chat turn, disabled skill invocation, deferred selection, auditable selection
+
+**Skill Isolation Guarantee**:
+The stronger platform-independent boundary under which disabled skill content is inaccessible to model-initiated tools on every supported operating system. **Skill Isolation Guarantee** is distinct from **Skill Discovery Suppression**.
+_Avoid_: best-effort skill hiding, platform-specific skill safety, shell path filter
+
+**Skill Discovery Suppression**:
+The default disabled-skill behavior that removes a package from Agent registration, prompting, and conventional skill-directory discovery. It reduces accidental reuse but does not deny generic file searches or deliberately crafted shell access.
+_Avoid_: skill isolation, filesystem sandbox, disabled-skill authorization
+
 **Runtime Invocation Claims**:
 Session, trace, tenant, and source claims that Swe passes across a runtime invocation boundary for a receiving tool or integration to interpret inside an already trusted channel. **Runtime Invocation Claims** are distinct from **Runtime Request Identity**, which is internal request context, and are not independently verifiable credentials.
 _Avoid_: runtime metadata, env/header info, credential, signed token
@@ -339,6 +423,14 @@ _Avoid_: raw prompt, raw tool input, raw tool output, full updated input
 **Current Tool Response**:
 The successful output produced by the current tool invocation for the active `PostToolUse` boundary. A **Current Tool Response** is the tool's business output, not the full persisted `tool_result` block and not a **Hook Conversation Snapshot**.
 _Avoid_: full tool result block, conversation snapshot, AgentScope acting return value
+
+**PreToolUse Terminal Stop**:
+A `PreToolUse` hook outcome with the explicitly returned `stop` decision, expressed as `{"decision":"stop","reason":"…"}` and available to every handler type, that rejects the pending tool invocation and ends the current Main Agent turn without another model call. The first `stop` in handler order is authoritative and cannot be replaced by another decision or input update; handler failures and `failPolicy:block` never imply it. Its reason, or the stable fallback `Hook requested stop`, is always emitted and persisted as the turn's final assistant message while the failed tool result remains available for tool presentation and audit as `hook_stopped`. It blocks unstarted peer calls and requests best-effort cancellation of already-started peer calls; it does not promise rollback of external side effects. It bypasses later `BeforeStop` and `Stop` hooks. It is distinct from `deny` and `block`, which reject the invocation but allow the Main Agent to choose a different next action.
+_Avoid_: terminal deny, blocked tool, cancelled session
+
+**PostTool Terminal Stop**:
+A `PostToolUse` or `PostToolUseFailure` hook outcome with the explicitly returned `stop` decision, expressed as `{"decision":"stop","reason":"…"}`, that ends the current Main Agent turn after the tool outcome is known. It requests best-effort cancellation of unfinished peer calls while retaining completed outcomes and without promising external rollback. It records the completed tool outcome and post-hook context before the final assistant reason, then bypasses `BeforeStop` and `Stop` hooks. It does not rewrite the completed tool outcome; for a failed tool, it replaces propagation of the original tool exception while retaining that failure for presentation and audit. Hook failure, `failPolicy:block`, `deny`, and `block` never imply it. It is distinct from `deny` and `block`, which remain non-terminal for post-tool events.
+_Avoid_: post-tool denial, tool rollback, completed session
 
 **Hook Conversation Snapshot**:
 A bounded hook-facing snapshot of the current session's message list at one Hook Runtime boundary, including normal user, assistant, tool-call, and tool-result messages while excluding reasoning content. A **Hook Conversation Snapshot** is not the saved transcript file and is not the full Agent state.

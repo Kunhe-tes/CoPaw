@@ -1193,3 +1193,101 @@ def test_create_agent_explicit_empty_skill_names_create_empty_workspace_skills(
         ),
     )
     assert manifest["skills"] == {}
+
+
+def test_initialize_agent_workspace_registers_requested_pool_skill(
+    tmp_path,
+    monkeypatch,
+):
+    tenant_dir = tmp_path / "tenant-a"
+    workspace_dir = tenant_dir / "workspaces" / "agent-a"
+    _write_skill(
+        get_skill_pool_dir(working_dir=tenant_dir) / "guidance",
+        "tenant guidance",
+    )
+    reconcile_pool_manifest(working_dir=tenant_dir)
+    monkeypatch.setattr(
+        agents_router,
+        "_ensure_default_heartbeat_md",
+        lambda *args, **kwargs: None,
+    )
+
+    agents_router._initialize_agent_workspace(
+        workspace_dir,
+        SimpleNamespace(language="en"),
+        skill_names=["guidance"],
+        working_dir=tenant_dir,
+    )
+
+    manifest = json.loads(
+        get_workspace_skill_manifest_path(workspace_dir).read_text(
+            encoding="utf-8",
+        ),
+    )
+    assert set(manifest["skills"]) == {"guidance"}
+    assert manifest["skills"]["guidance"]["enabled"] is True
+
+
+def test_initialize_agent_workspace_fails_when_requested_pool_skill_is_missing(
+    tmp_path,
+    monkeypatch,
+):
+    tenant_dir = tmp_path / "tenant-a"
+    workspace_dir = tenant_dir / "workspaces" / "agent-a"
+    reconcile_pool_manifest(working_dir=tenant_dir)
+    monkeypatch.setattr(
+        agents_router,
+        "_ensure_default_heartbeat_md",
+        lambda *args, **kwargs: None,
+    )
+
+    with pytest.raises(RuntimeError, match="missing"):
+        agents_router._initialize_agent_workspace(
+            workspace_dir,
+            SimpleNamespace(language="en"),
+            skill_names=["missing"],
+            working_dir=tenant_dir,
+        )
+
+
+def test_initialize_agent_workspace_deduplicates_requested_pool_skills(
+    tmp_path,
+    monkeypatch,
+):
+    calls: list[str] = []
+
+    class FakeSkillPoolService:
+        def __init__(self, *, working_dir):
+            assert working_dir == tmp_path / "tenant-a"
+
+        def download_to_workspace(
+            self,
+            name,
+            workspace_dir,
+            *,
+            overwrite,
+        ):
+            calls.append(name)
+            if calls.count(name) > 1:
+                return {"success": False, "reason": "conflict"}
+            return {"success": True, "name": name}
+
+    monkeypatch.setattr(
+        skills_manager,
+        "SkillPoolService",
+        FakeSkillPoolService,
+    )
+    monkeypatch.setattr(
+        agents_router,
+        "_ensure_default_heartbeat_md",
+        lambda *args, **kwargs: None,
+    )
+
+    agents_router._initialize_agent_workspace(
+        tmp_path / "tenant-a" / "workspaces" / "agent-a",
+        SimpleNamespace(language="en"),
+        skill_names=["guidance", "guidance"],
+        working_dir=tmp_path / "tenant-a",
+    )
+
+    assert calls == ["guidance"]

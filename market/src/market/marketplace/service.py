@@ -31,6 +31,7 @@ from .fs import (
     copy_skill_to_user,
     get_mcp_dir,
     get_skill_dir,
+    get_user_disabled_skills_dir,
     get_user_skills_dir,
     load_index,
     migrate_legacy_scope_dir_if_needed,
@@ -594,6 +595,7 @@ class MarketplaceService:
         enabled: bool = True,
         source: str = "customized",
         extra_metadata: dict | None = None,
+        package_path: Path | None = None,
     ) -> bool:
         """注册技能到 manifest（用于上传/分发时记录）。
 
@@ -617,17 +619,25 @@ class MarketplaceService:
             agent_id,
             source_id,
         )
-        skill_dir = skills_dir / skill_name
+        skill_dir = package_path or skills_dir / skill_name
 
         def _update(payload: dict) -> bool:
             skills_dict = payload.setdefault("skills", {})
             existing = skills_dict.get(skill_name) or {}
 
             # 构建 metadata（从 SKILL.md 和 skill.json 读取）
-            metadata = _build_skill_metadata_for_manifest(
-                skill_dir,
-                skill_name,
-                source=source,
+            existing_metadata = existing.get("metadata")
+            metadata = (
+                dict(existing_metadata)
+                if isinstance(existing_metadata, dict)
+                else {}
+            )
+            metadata.update(
+                _build_skill_metadata_for_manifest(
+                    skill_dir,
+                    skill_name,
+                    source=source,
+                ),
             )
 
             # 合并额外的 metadata（上传时传入的 creator_id、name 等）
@@ -647,24 +657,26 @@ class MarketplaceService:
             ):
                 metadata["version_text"] = extra_metadata["received_version"]
 
-            # 保留已有的 config 和 channels
-            existing_config = existing.get("config")
+            # 保留已有的 channels
             existing_channels = existing.get("channels") or ["all"]
 
             now = datetime.now(timezone.utc).isoformat()
 
-            entry = {
-                "enabled": enabled,
-                "channels": existing_channels,
-                "source": source,
-                "metadata": metadata,
-                "requirements": metadata["requirements"],
-                "updated_at": now,
-            }
+            entry = dict(existing)
+            entry.update(
+                {
+                    "enabled": enabled,
+                    "channels": existing_channels,
+                    "source": source,
+                    "metadata": metadata,
+                    "requirements": metadata["requirements"],
+                    "updated_at": now,
+                },
+            )
 
-            # 保留已有的 config
-            if existing_config:
-                entry["config"] = existing_config
+            # 按原值保留已有 config，包括空字典或 None
+            if "config" in existing:
+                entry["config"] = existing["config"]
 
             # 保留已有的 created_at（首次注册时写入）
             entry["created_at"] = existing.get("created_at") or now
@@ -702,16 +714,6 @@ class MarketplaceService:
           因为内容已受信任。禁用再启用是用户的常规操作，不应被扫描阻断。
         - 如果技能未在 manifest 中注册（首次启用），则执行安全扫描。
         """
-        skills_dir = get_user_skills_dir(
-            self.swe_root,
-            user_id,
-            agent_id,
-            source_id,
-        )
-        skill_dir = skills_dir / skill_name
-        if not skill_dir.exists():
-            return {"success": False, "reason": "not_found"}
-
         # 检查技能是否已在 manifest 中注册（之前已启用过）
         manifest = read_user_skill_manifest(
             self.swe_root,
@@ -720,6 +722,25 @@ class MarketplaceService:
             source_id,
         )
         already_registered = skill_name in manifest.get("skills", {})
+        skills_dir = get_user_skills_dir(
+            self.swe_root,
+            user_id,
+            agent_id,
+            source_id,
+        )
+        skill_dir = skills_dir / skill_name
+        if not skill_dir.exists() and already_registered:
+            skill_dir = (
+                get_user_disabled_skills_dir(
+                    self.swe_root,
+                    user_id,
+                    agent_id,
+                    source_id,
+                )
+                / skill_name
+            )
+        if not skill_dir.exists():
+            return {"success": False, "reason": "not_found"}
 
         # 仅对首次启用的技能执行安全扫描（已注册的技能重新启用时跳过）
         if not already_registered:
@@ -1298,14 +1319,16 @@ class MarketplaceService:
 
                 # 注册技能到 manifest（使用返回的 metadata）
                 metadata = result.get("metadata") or {}
+                final_enabled = bool(result["final_enabled"])
                 self.register_skill_in_manifest(
                     user["tenant_id"],
                     safe_skill_name,
                     "default",
                     source_id,
-                    enabled=True,
+                    enabled=final_enabled,
                     source=f"marketplace:{item_id}",
                     extra_metadata=metadata,
+                    package_path=result.get("package_path"),
                 )
 
                 # 写入 swe_skills 表（分发时记录用户持有状态）
@@ -1318,7 +1341,7 @@ class MarketplaceService:
                     bbk_id=user.get("bbk_id", ""),
                     source=f"marketplace:{item_id}",
                     source_id=source_id,
-                    enabled=True,
+                    enabled=final_enabled,
                     description=item.description,
                     version_text=item.version,
                 )
@@ -1327,6 +1350,12 @@ class MarketplaceService:
                         "分发成功但 swe_skills 写入失败: user=%s, skill=%s",
                         user["tenant_id"],
                         safe_skill_name,
+                    )
+                if final_enabled:
+                    await self._trigger_agent_reload(
+                        user["tenant_id"],
+                        "default",
+                        source_id,
                     )
                 count += 1
             except Exception as e:
@@ -2407,7 +2436,8 @@ class MarketplaceService:
     ) -> dict[str, Any]:
         """迁移技能目录内 skill.json 字段到 workspace manifest.
 
-        将以下字段从 skills/<技能名>/skill.json 合并到 workspaces/<agent_id>/skill.json:
+        将以下字段从 skills/<技能名>/skill.json 合并到
+        workspaces/<agent_id>/skill.json:
         - creator_id
         - creator_name
         - bbk_id

@@ -1,8 +1,7 @@
 # -*- coding: utf-8 -*-
 import json
 import pytest
-from pathlib import Path
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, Mock
 
 
 def _make_service(tmp_path, mock_db=None):
@@ -18,6 +17,244 @@ def _make_service(tmp_path, mock_db=None):
         marketplace_root=tmp_path / "market",
         swe_root=tmp_path / "swe",
     )
+
+
+def test_register_skill_in_manifest_rejects_malformed_shared_manifest(
+    tmp_path,
+):
+    from market.marketplace.fs import (
+        WorkspaceSkillManifestError,
+        get_user_skill_manifest_path,
+    )
+
+    svc = _make_service(tmp_path)
+    manifest_path = get_user_skill_manifest_path(
+        tmp_path / "swe",
+        "user1",
+        "agent1",
+        "source_a",
+    )
+    manifest_path.parent.mkdir(parents=True)
+    original = b'{"layout_version": 2, "skills": {'
+    manifest_path.write_bytes(original)
+
+    with pytest.raises(WorkspaceSkillManifestError):
+        svc.register_skill_in_manifest(
+            "user1",
+            "demo",
+            "agent1",
+            "source_a",
+        )
+
+    assert manifest_path.read_bytes() == original
+
+
+def test_register_skill_in_manifest_preserves_external_fields_on_success(
+    tmp_path,
+):
+    from market.marketplace.fs import get_user_skill_manifest_path
+
+    svc = _make_service(tmp_path)
+    manifest_path = get_user_skill_manifest_path(
+        tmp_path / "swe",
+        "user1",
+        "agent1",
+        "source_a",
+    )
+    manifest_path.parent.mkdir(parents=True)
+    manifest_path.write_text(
+        json.dumps(
+            {
+                "schema_version": "workspace-skill-manifest.v1",
+                "layout_version": 2,
+                "version": 7,
+                "external_top_level": {"writer": "swe"},
+                "skills": {
+                    "demo": {
+                        "enabled": True,
+                        "channels": ["slack"],
+                        "source": "external",
+                        "config": {},
+                        "metadata": {
+                            "name": "Old Demo",
+                            "description": "old description",
+                            "version_text": "0.1.0",
+                            "source": "external",
+                            "protected": True,
+                            "requirements": {"old": True},
+                            "external_metadata": {
+                                "owner": "swe",
+                                "nested": {"keep": True},
+                            },
+                        },
+                        "requirements": {"old": True},
+                        "created_at": "2025-01-01T00:00:00+00:00",
+                        "updated_at": "2025-01-01T00:00:00+00:00",
+                        "external_entry_field": {"keep": [1, 2]},
+                    },
+                },
+            },
+        ),
+        encoding="utf-8",
+    )
+
+    assert svc.register_skill_in_manifest(
+        "user1",
+        "demo",
+        "agent1",
+        "source_a",
+        enabled=False,
+        source="marketplace:item-1",
+        extra_metadata={
+            "name": "Renamed Demo",
+            "creator_id": "user2",
+            "received_version": "2.3.4",
+        },
+    )
+
+    saved = json.loads(manifest_path.read_text(encoding="utf-8"))
+    entry = saved["skills"]["demo"]
+    metadata = entry["metadata"]
+
+    assert saved["external_top_level"] == {"writer": "swe"}
+    assert entry["config"] == {}
+    assert entry["external_entry_field"] == {"keep": [1, 2]}
+    assert metadata["external_metadata"] == {
+        "owner": "swe",
+        "nested": {"keep": True},
+    }
+    assert entry["enabled"] is False
+    assert entry["channels"] == ["slack"]
+    assert entry["source"] == "marketplace:item-1"
+    assert entry["created_at"] == "2025-01-01T00:00:00+00:00"
+    assert entry["requirements"] == {
+        "require_bins": [],
+        "require_envs": [],
+    }
+    assert entry["updated_at"] != "2025-01-01T00:00:00+00:00"
+    assert metadata["name"] == "Renamed Demo"
+    assert metadata["description"] == ""
+    assert metadata["version_text"] == "2.3.4"
+    assert metadata["source"] == "marketplace:item-1"
+    assert metadata["protected"] is False
+    assert metadata["requirements"] == {
+        "require_bins": [],
+        "require_envs": [],
+    }
+    assert metadata["creator_id"] == "user2"
+
+
+@pytest.mark.asyncio
+async def test_enable_registered_hidden_skill_updates_manifest_and_reloads(
+    tmp_path,
+):
+    from market.marketplace.fs import (
+        get_user_disabled_skills_dir,
+        get_user_skill_manifest_path,
+    )
+
+    svc = _make_service(tmp_path)
+    svc._trigger_agent_reload = AsyncMock()
+    svc.skill_registry.update_skill = AsyncMock()
+    user_id = "user1"
+    source_id = "source_a"
+    hidden = (
+        get_user_disabled_skills_dir(
+            tmp_path / "swe",
+            user_id,
+            source_id=source_id,
+        )
+        / "demo"
+    )
+    hidden.mkdir(parents=True)
+    (hidden / "SKILL.md").write_text("# Demo", encoding="utf-8")
+    manifest_path = get_user_skill_manifest_path(
+        tmp_path / "swe",
+        user_id,
+        source_id=source_id,
+    )
+    manifest_path.write_text(
+        json.dumps(
+            {
+                "schema_version": "workspace-skill-manifest.v1",
+                "layout_version": 2,
+                "version": 0,
+                "skills": {"demo": {"enabled": False}},
+            },
+        ),
+        encoding="utf-8",
+    )
+
+    result = await svc.enable_skill(user_id, "demo", source_id=source_id)
+
+    assert result == {"success": True}
+    assert (
+        json.loads(manifest_path.read_text(encoding="utf-8"))["skills"][
+            "demo"
+        ]["enabled"]
+        is True
+    )
+    svc._trigger_agent_reload.assert_awaited_once_with(
+        user_id,
+        "default",
+        source_id,
+    )
+
+
+@pytest.mark.asyncio
+async def test_distribution_preserves_disabled_result_without_reload(
+    tmp_path,
+    monkeypatch,
+):
+    from market.marketplace.fs import save_index
+    from market.marketplace.models import MarketItem
+    from market.marketplace.schemas import DistributeRequest
+    from market.marketplace import service as service_module
+
+    svc = _make_service(tmp_path)
+    svc._resolve_target_users = AsyncMock(
+        return_value=[{"tenant_id": "user1", "tenant_name": "User"}],
+    )
+    svc._trigger_agent_reload = AsyncMock()
+    svc.skill_registry.insert_skill = AsyncMock(return_value=True)
+    svc.register_skill_in_manifest = Mock(return_value=True)
+    save_index(
+        tmp_path / "market",
+        "source",
+        [
+            MarketItem(
+                item_id="item",
+                name="demo",
+                description="new description",
+                version="1.0.0",
+                creator_id="owner",
+            ),
+        ],
+    )
+    monkeypatch.setattr(
+        service_module,
+        "copy_skill_to_user",
+        lambda **_kwargs: {
+            "status": "distributed",
+            "metadata": {},
+            "package_path": tmp_path / "hidden" / "demo",
+            "final_enabled": False,
+            "promoted": False,
+        },
+    )
+
+    result = await svc.distribute_skill(
+        "source",
+        "item",
+        "operator",
+        "Operator",
+        DistributeRequest(target_type="user_id", target_values=["user1"]),
+    )
+
+    assert result.distributed_count == 1
+    assert svc.register_skill_in_manifest.call_args.kwargs["enabled"] is False
+    assert svc.skill_registry.insert_skill.call_args.kwargs["enabled"] is False
+    svc._trigger_agent_reload.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -444,9 +681,11 @@ async def test_recall_skill_by_name_removes_skill_dir_and_manifest(tmp_path):
         json.dumps(
             {
                 "schema_version": "workspace-skill-manifest.v1",
+                "layout_version": 2,
                 "version": 1,
                 "skills": {
                     skill_name: {
+                        "enabled": True,
                         "source": "customized",
                         "metadata": {"name": skill_name},
                     },
