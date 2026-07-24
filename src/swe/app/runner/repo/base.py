@@ -160,13 +160,7 @@ class BaseChatRepository(ABC):
         """Return one filtered chat page in stable newest-first order."""
         chats = await self.filter_chats(user_id=user_id, channel=channel)
 
-        def _sort_key(chat: ChatSpec) -> tuple[float, str]:
-            updated_at = chat.updated_at
-            if updated_at.tzinfo is None:
-                updated_at = updated_at.replace(tzinfo=timezone.utc)
-            return updated_at.timestamp(), chat.id
-
-        ordered = sorted(chats, key=_sort_key, reverse=True)
+        ordered = self.sort_chats_by_recency(chats)
         total = len(ordered)
         offset = (page - 1) * page_size
         items = ordered[offset : offset + page_size]
@@ -179,17 +173,22 @@ class BaseChatRepository(ABC):
         )
 
     @staticmethod
-    def _cursor_sort_key(chat: ChatSpec) -> tuple[datetime, str]:
-        created_at = chat.created_at
-        if created_at.tzinfo is None:
-            created_at = created_at.replace(tzinfo=timezone.utc)
-        return created_at, chat.id
+    def _recency_sort_key(chat: ChatSpec) -> tuple[datetime, str]:
+        updated_at = chat.updated_at
+        if updated_at.tzinfo is None:
+            updated_at = updated_at.replace(tzinfo=timezone.utc)
+        return updated_at, chat.id
+
+    @classmethod
+    def sort_chats_by_recency(cls, chats: list[ChatSpec]) -> list[ChatSpec]:
+        """Return chats ordered by latest update, then identifier."""
+        return sorted(chats, key=cls._recency_sort_key, reverse=True)
 
     @staticmethod
     def _encode_cursor(key: tuple[datetime, str]) -> str:
-        created_at, chat_id = key
+        updated_at, chat_id = key
         payload = json.dumps(
-            [created_at.astimezone(timezone.utc).isoformat(), chat_id],
+            [updated_at.astimezone(timezone.utc).isoformat(), chat_id],
             separators=(",", ":"),
         ).encode("utf-8")
         return base64.urlsafe_b64encode(payload).decode("ascii")
@@ -197,15 +196,15 @@ class BaseChatRepository(ABC):
     @staticmethod
     def _decode_cursor(cursor: str) -> tuple[datetime, str]:
         try:
-            created_at_raw, chat_id = json.loads(
+            updated_at_raw, chat_id = json.loads(
                 base64.urlsafe_b64decode(cursor.encode("ascii")),
             )
-            created_at = datetime.fromisoformat(created_at_raw)
-            if created_at.tzinfo is None:
-                created_at = created_at.replace(tzinfo=timezone.utc)
+            updated_at = datetime.fromisoformat(updated_at_raw)
+            if updated_at.tzinfo is None:
+                updated_at = updated_at.replace(tzinfo=timezone.utc)
             if not isinstance(chat_id, str) or not chat_id:
                 raise ValueError
-            return created_at, chat_id
+            return updated_at, chat_id
         except (
             ValueError,
             TypeError,
@@ -223,22 +222,22 @@ class BaseChatRepository(ABC):
         user_id: Optional[str] = None,
         channel: Optional[str] = None,
     ) -> ChatPage:
-        """Return a stable page ordered by immutable creation identity."""
+        """Return a live page ordered by latest update."""
         chats = await self.filter_chats(user_id=user_id, channel=channel)
-        ordered = sorted(chats, key=self._cursor_sort_key, reverse=True)
+        ordered = self.sort_chats_by_recency(chats)
         if cursor:
             boundary = self._decode_cursor(cursor)
             ordered = [
                 chat
                 for chat in ordered
-                if self._cursor_sort_key(chat) < boundary
+                if self._recency_sort_key(chat) < boundary
             ]
 
         total = len(chats)
         items = ordered[:page_size]
         has_more = len(ordered) > len(items)
         next_cursor = (
-            self._encode_cursor(self._cursor_sort_key(items[-1]))
+            self._encode_cursor(self._recency_sort_key(items[-1]))
             if has_more and items
             else None
         )
