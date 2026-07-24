@@ -588,6 +588,14 @@ _Avoid_: final answer text, assistant-only bubble, latest response, answer-only 
 The stable conversation identity used to continue chat context across turns. A **Logical Chat Session** is distinct from the persisted chat record used to load or display the conversation.
 _Avoid_: chat UUID, UI session row, temporary frontend id
 
+**Chat Record**:
+The persisted, displayable record for one conversation, identified by a chat UUID and returned by chat-list APIs. A **Chat Record** is distinct from the **Logical Chat Session** that carries conversational continuity.
+_Avoid_: logical chat session, UI session, conversation identity
+
+**Chat Record Last Updated Time**:
+The timestamp of the most recent persisted change to a **Chat Record**. It establishes recency when Chat Records are listed.
+_Avoid_: Chat Record creation time, message timestamp, Logical Chat Session time
+
 ## Flagged Ambiguities
 
 **"Create SubAgent"**:
