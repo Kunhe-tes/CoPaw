@@ -171,6 +171,29 @@ async def test_repository_cursor_orders_by_last_update_not_creation() -> None:
     ]
 
 
+async def test_repository_cursor_uses_id_boundary_for_equal_update_times() -> (
+    None
+):
+    repo = _InMemoryChatRepository(
+        [
+            _chat("chat-a", "2026-06-03T00:00:00+00:00"),
+            _chat("chat-z", "2026-06-03T00:00:00+00:00"),
+        ],
+    )
+
+    first_page = await repo.paginate_chats_cursor(page_size=1)
+    assert [chat.id for chat in first_page.items] == ["chat-z"]
+    assert first_page.next_cursor is not None
+
+    second_page = await repo.paginate_chats_cursor(
+        page_size=1,
+        cursor=first_page.next_cursor,
+    )
+
+    assert [chat.id for chat in second_page.items] == ["chat-a"]
+    assert second_page.next_cursor is None
+
+
 async def test_manager_exposes_repository_pagination() -> None:
     manager = ChatManager(repo=_InMemoryChatRepository(_stored_chats()))
 
@@ -282,7 +305,7 @@ def test_chat_list_with_pagination_returns_metadata_and_page_statuses() -> (
     assert tracker.calls == ["chat-z", "chat-a"]
 
 
-def test_chat_list_supports_stable_cursor_pagination() -> None:
+def test_chat_list_supports_best_effort_cursor_pagination() -> None:
     client, tracker = _api_client()
 
     first_response = client.get(
