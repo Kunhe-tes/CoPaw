@@ -1,11 +1,14 @@
 # -*- coding: utf-8 -*-
 from __future__ import annotations
 
+import base64
 from datetime import datetime, timezone
+import json
 from types import SimpleNamespace
 
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
+import pytest
 
 from swe.app.runner.api import get_chat_manager, get_workspace, router
 from swe.app.runner.manager import ChatManager
@@ -192,6 +195,21 @@ async def test_repository_cursor_uses_id_boundary_for_equal_update_times() -> (
 
     assert [chat.id for chat in second_page.items] == ["chat-a"]
     assert second_page.next_cursor is None
+
+
+async def test_repository_cursor_rejects_legacy_creation_time_payload() -> (
+    None
+):
+    repo = _InMemoryChatRepository(_stored_chats())
+    legacy_cursor = base64.urlsafe_b64encode(
+        json.dumps(
+            ["2026-06-03T00:00:00+00:00", "chat-a"],
+            separators=(",", ":"),
+        ).encode("utf-8"),
+    ).decode("ascii")
+
+    with pytest.raises(ValueError, match="restart pagination"):
+        await repo.paginate_chats_cursor(page_size=2, cursor=legacy_cursor)
 
 
 async def test_manager_exposes_repository_pagination() -> None:

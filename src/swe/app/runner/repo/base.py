@@ -188,7 +188,7 @@ class BaseChatRepository(ABC):
     def _encode_cursor(key: tuple[datetime, str]) -> str:
         updated_at, chat_id = key
         payload = json.dumps(
-            [updated_at.astimezone(timezone.utc).isoformat(), chat_id],
+            ["v2", updated_at.astimezone(timezone.utc).isoformat(), chat_id],
             separators=(",", ":"),
         ).encode("utf-8")
         return base64.urlsafe_b64encode(payload).decode("ascii")
@@ -196,15 +196,9 @@ class BaseChatRepository(ABC):
     @staticmethod
     def _decode_cursor(cursor: str) -> tuple[datetime, str]:
         try:
-            updated_at_raw, chat_id = json.loads(
+            payload = json.loads(
                 base64.urlsafe_b64decode(cursor.encode("ascii")),
             )
-            updated_at = datetime.fromisoformat(updated_at_raw)
-            if updated_at.tzinfo is None:
-                updated_at = updated_at.replace(tzinfo=timezone.utc)
-            if not isinstance(chat_id, str) or not chat_id:
-                raise ValueError
-            return updated_at, chat_id
         except (
             ValueError,
             TypeError,
@@ -213,6 +207,29 @@ class BaseChatRepository(ABC):
             json.JSONDecodeError,
         ) as exc:
             raise ValueError("Invalid chat pagination cursor") from exc
+
+        if not isinstance(payload, list):
+            raise ValueError("Invalid chat pagination cursor")
+        if len(payload) == 2:
+            raise ValueError(
+                "Unsupported chat pagination cursor; restart pagination",
+            )
+        if len(payload) != 3:
+            raise ValueError("Invalid chat pagination cursor")
+
+        version, updated_at_raw, chat_id = payload
+        if version != "v2":
+            raise ValueError("Invalid chat pagination cursor")
+
+        try:
+            updated_at = datetime.fromisoformat(updated_at_raw)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("Invalid chat pagination cursor") from exc
+        if updated_at.tzinfo is None:
+            updated_at = updated_at.replace(tzinfo=timezone.utc)
+        if not isinstance(chat_id, str) or not chat_id:
+            raise ValueError("Invalid chat pagination cursor")
+        return updated_at, chat_id
 
     async def paginate_chats_cursor(
         self,
