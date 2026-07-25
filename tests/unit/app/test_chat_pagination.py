@@ -8,7 +8,6 @@ from types import SimpleNamespace
 
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
-import pytest
 
 from swe.app.runner.api import get_chat_manager, get_workspace, router
 from swe.app.runner.manager import ChatManager
@@ -197,19 +196,54 @@ async def test_repository_cursor_uses_id_boundary_for_equal_update_times() -> (
     assert second_page.next_cursor is None
 
 
-async def test_repository_cursor_rejects_legacy_creation_time_payload() -> (
+async def test_repository_cursor_continues_legacy_creation_time_payload() -> (
     None
 ):
-    repo = _InMemoryChatRepository(_stored_chats())
+    repo = _InMemoryChatRepository(
+        [
+            _chat(
+                "page-one",
+                "2026-06-01T00:00:00+00:00",
+                created_at="2026-06-03T00:00:00+00:00",
+            ),
+            _chat(
+                "omitted-by-recency",
+                "2026-06-10T00:00:00+00:00",
+                created_at="2026-06-02T00:00:00+00:00",
+            ),
+            _chat(
+                "page-two",
+                "2026-06-02T00:00:00+00:00",
+                created_at="2026-06-01T00:00:00+00:00",
+            ),
+        ],
+    )
     legacy_cursor = base64.urlsafe_b64encode(
         json.dumps(
-            ["2026-06-03T00:00:00+00:00", "chat-a"],
+            ["2026-06-03T00:00:00+00:00", "page-one"],
             separators=(",", ":"),
         ).encode("utf-8"),
     ).decode("ascii")
 
-    with pytest.raises(ValueError, match="restart pagination"):
-        await repo.paginate_chats_cursor(page_size=2, cursor=legacy_cursor)
+    first_legacy_page = await repo.paginate_chats_cursor(
+        page_size=1,
+        cursor=legacy_cursor,
+    )
+
+    assert [chat.id for chat in first_legacy_page.items] == [
+        "omitted-by-recency",
+    ]
+    assert first_legacy_page.next_cursor is not None
+    assert json.loads(
+        base64.urlsafe_b64decode(first_legacy_page.next_cursor),
+    ) == ["2026-06-02T00:00:00+00:00", "omitted-by-recency"]
+
+    second_legacy_page = await repo.paginate_chats_cursor(
+        page_size=1,
+        cursor=first_legacy_page.next_cursor,
+    )
+
+    assert [chat.id for chat in second_legacy_page.items] == ["page-two"]
 
 
 async def test_manager_exposes_repository_pagination() -> None:
