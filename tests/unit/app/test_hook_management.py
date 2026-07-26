@@ -172,6 +172,31 @@ def test_batch_keeps_valid_file_when_another_file_is_rejected(
     )
 
 
+def test_list_scripts_returns_controlled_library_metadata(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    workspace_dir = tmp_path / "workspaces" / "default"
+    _write_default_agent(workspace_dir)
+    monkeypatch.setattr(
+        hook_management,
+        "scan_skill_directory",
+        lambda *args, **kwargs: None,
+    )
+    service = HookManagementService(workspace_dir, tenant_id="tenant-a")
+    service.upload_scripts(
+        files=[UploadFilePayload("guard.py", b"print('ok')")],
+        overwrite_names=set(),
+        actor=_actor(),
+    )
+
+    scripts = service.list_scripts()
+
+    assert scripts[0]["filename"] == "guard.py"
+    assert scripts[0]["size"] == len(b"print('ok')")
+    assert len(scripts[0]["sha256"]) == 64
+
+
 @pytest.mark.asyncio
 async def test_manual_test_runs_one_draft_handler_without_persisting_config(
     monkeypatch: pytest.MonkeyPatch,

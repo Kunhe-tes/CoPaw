@@ -214,6 +214,21 @@ class HookManagementService:
             failed=tuple(failed),
         )
 
+    def list_scripts(self) -> list[dict[str, Any]]:
+        """List only controlled script-library metadata, never file bodies."""
+        if not self._script_root.is_dir():
+            return []
+        return [
+            {
+                "filename": path.name,
+                "size": path.stat().st_size,
+                "sha256": self._sha256_file(path),
+            }
+            for path in sorted(self._script_root.iterdir())
+            if path.is_file()
+            and path.suffix.lower() in ALLOWED_SCRIPT_SUFFIXES
+        ]
+
     async def manual_test(
         self,
         *,
