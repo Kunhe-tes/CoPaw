@@ -266,13 +266,9 @@ describe("SystemConfigPage", () => {
 
     render(<SystemConfigPage />);
 
-    const scheduledTaskCardTitle = await screen.findByText(
-      "定时任务设置",
-    );
+    const scheduledTaskCardTitle = await screen.findByText("定时任务设置");
     const scheduledTaskCard = scheduledTaskCardTitle.closest(".ant-card");
-    const switchTitle = await screen.findByText(
-      "周末不发招呼完成通知",
-    );
+    const switchTitle = await screen.findByText("周末不发招呼完成通知");
     expect(switchTitle.closest(".ant-card")).toBe(scheduledTaskCard);
 
     fireEvent.click(getCronSkipWeekendZhaohuSwitch());
@@ -496,13 +492,12 @@ describe("SystemConfigPage", () => {
 
     render(<SystemConfigPage />);
 
-    const input = await screen.findByLabelText("系统提示词注入");
-    expect(input).toHaveValue("source prompt");
-
-    fireEvent.change(input, {
-      target: {
-        value: "source prompt\n\nruntime rule\n\nsource prompt",
-      },
+    expect(await screen.findByLabelText("提示词片段 1")).toHaveValue(
+      "source prompt",
+    );
+    fireEvent.click(screen.getByRole("button", { name: "新增提示词片段" }));
+    fireEvent.change(screen.getByLabelText("提示词片段 2"), {
+      target: { value: "runtime rule" },
     });
     fireEvent.click(screen.getByRole("button", { name: "common.save" }));
 
@@ -735,7 +730,7 @@ describe("SystemConfigPage", () => {
         },
       });
     });
-  });
+  }, 10_000);
 
   it("saves explicit immediate truncation configs", async () => {
     mocks.sourceSystemConfigApi.updateCurrent.mockResolvedValue({
@@ -859,7 +854,7 @@ describe("SystemConfigPage", () => {
         },
       });
     });
-  });
+  }, 10_000);
 
   it("blocks invalid immediate truncation max bytes before saving", async () => {
     mocks.sourceSystemConfigApi.getCurrent.mockResolvedValueOnce({

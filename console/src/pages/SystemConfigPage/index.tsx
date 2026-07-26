@@ -3,8 +3,8 @@ import {
   Alert,
   Button,
   Card,
-  Input,
   InputNumber,
+  Modal,
   Result,
   Select,
   Space,
@@ -13,6 +13,7 @@ import {
   Tag,
 } from "antd";
 import { useTranslation } from "react-i18next";
+import isEqual from "lodash/isEqual";
 
 import { PageHeader } from "@/components/PageHeader";
 import { useAppMessage } from "@/hooks/useAppMessage";
@@ -36,8 +37,6 @@ import {
   clearImmediateTruncationConfig,
   enableModelCallPolicyConfig,
   enableImmediateTruncationConfig,
-  formatSystemPromptInjectionText,
-  parseSystemPromptInjectionText,
   readArchiveMaintenanceConfig,
   readCronNotificationConfig,
   readCronTaskSessionCleanupConfig,
@@ -65,6 +64,20 @@ import type {
   LlmRateLimiterConfig,
   ModelCallPolicyConfigKey,
 } from "./registry";
+import {
+  CapabilityGrid,
+  ConfigDetailDrawer,
+  SystemPromptSegments,
+} from "./components";
+import {
+  addPromptSegment,
+  buildCapabilitySummaries,
+  filterCapabilitySummaries,
+  movePromptSegment,
+  removePromptSegment,
+  type CapabilityFilter,
+  type CapabilityId,
+} from "./workbench";
 import styles from "./index.module.less";
 
 function formatUpdatedAt(value?: string | null): string {
@@ -98,6 +111,13 @@ export default function SystemConfigPage() {
   const [record, setRecord] =
     useState<CurrentSourceSystemConfigResponse | null>(null);
   const [draftConfig, setDraftConfig] = useState<SourceSystemConfig>({});
+  const [capabilityFilter, setCapabilityFilter] =
+    useState<CapabilityFilter>("all");
+  const [selectedCapabilityId, setSelectedCapabilityId] =
+    useState<CapabilityId | null>(null);
+  const [promptSegments, setPromptSegments] = useState<string[]>([]);
+  const [databaseGuardDisablePending, setDatabaseGuardDisablePending] =
+    useState(false);
   const requestSeqRef = useRef(0);
   const activeSourceRef = useRef(activeSourceId);
 
@@ -143,6 +163,7 @@ export default function SystemConfigPage() {
       setValidationError(null);
       setRecord(null);
       setDraftConfig({});
+      setPromptSegments([]);
       return;
     }
 
@@ -153,6 +174,7 @@ export default function SystemConfigPage() {
     setValidationError(null);
     setRecord(null);
     setDraftConfig({});
+    setPromptSegments([]);
     void loadEffectiveConfig(activeSourceId);
 
     sourceSystemConfigApi
@@ -166,6 +188,7 @@ export default function SystemConfigPage() {
         }
         setRecord(response);
         setDraftConfig(response.config);
+        setPromptSegments(readSystemPromptInjections(response.config));
       })
       .catch((requestError) => {
         if (!isCurrentRequest(request)) {
@@ -183,6 +206,20 @@ export default function SystemConfigPage() {
         }
       });
   }, [activeSourceId, canManage, loadEffectiveConfig]);
+
+  const isDirty = !isEqual(draftConfig, record?.config ?? {});
+
+  useEffect(() => {
+    const preventUnload = (event: BeforeUnloadEvent) => {
+      if (!isDirty) {
+        return;
+      }
+      event.preventDefault();
+      event.returnValue = "";
+    };
+    window.addEventListener("beforeunload", preventUnload);
+    return () => window.removeEventListener("beforeunload", preventUnload);
+  }, [isDirty]);
 
   if (!canManage) {
     return (
@@ -216,10 +253,28 @@ export default function SystemConfigPage() {
     if (!definition) {
       return;
     }
+    if (key === "feature_switches.database_access_guard_enabled" && !checked) {
+      setDatabaseGuardDisablePending(true);
+      return;
+    }
     setValidationError(null);
     setDraftConfig((previous) =>
       writeRegisteredSwitchValue(previous, definition, checked),
     );
+  };
+
+  const confirmDatabaseGuardDisable = () => {
+    const definition = CURRENT_SOURCE_SYSTEM_CONFIG_SWITCHES.find(
+      (item) => item.key === "feature_switches.database_access_guard_enabled",
+    );
+    if (!definition || formDisabled) {
+      return;
+    }
+    setValidationError(null);
+    setDraftConfig((previous) =>
+      writeRegisteredSwitchValue(previous, definition, false),
+    );
+    setDatabaseGuardDisablePending(false);
   };
 
   const handleToolResultEnabledChange = (checked: boolean) => {
@@ -318,17 +373,13 @@ export default function SystemConfigPage() {
     );
   };
 
-  const handleSystemPromptInjectionsChange = (value: string) => {
+  const handleSystemPromptInjectionsChange = (value: string[]) => {
     if (formDisabled) {
       return;
     }
     setValidationError(null);
-    setDraftConfig((previous) =>
-      writeSystemPromptInjections(
-        previous,
-        parseSystemPromptInjectionText(value),
-      ),
-    );
+    setPromptSegments(value);
+    setDraftConfig((previous) => writeSystemPromptInjections(previous, value));
   };
 
   const handleEnableModelCallPolicy = (configKey: ModelCallPolicyConfigKey) => {
@@ -481,6 +532,7 @@ export default function SystemConfigPage() {
       }
       setRecord(nextRecord);
       setDraftConfig(nextRecord.config);
+      setPromptSegments(readSystemPromptInjections(nextRecord.config));
       await loadEffectiveConfig(request.sourceId);
       if (!isCurrentRequest(request)) {
         return;
@@ -512,9 +564,7 @@ export default function SystemConfigPage() {
   const cronTaskSessionCleanupConfig =
     readCronTaskSessionCleanupConfig(draftConfig);
   const archiveMaintenanceConfig = readArchiveMaintenanceConfig(draftConfig);
-  const systemPromptInjectionText = formatSystemPromptInjectionText(
-    readSystemPromptInjections(draftConfig),
-  );
+  const systemPromptInjections = promptSegments;
   const queryRetryState = readQueryRetryConfigState(
     draftConfig,
     effectiveConfigPayload,
@@ -528,7 +578,29 @@ export default function SystemConfigPage() {
     draftConfig,
     "file_read_truncation",
   );
-
+  const capabilitySummaries = buildCapabilitySummaries({
+    savedConfig: record?.config ?? {},
+    draftConfig,
+    effectiveConfig: effectiveConfigPayload ?? {},
+  });
+  const visibleCapabilitySummaries = filterCapabilitySummaries(
+    capabilitySummaries,
+    capabilityFilter,
+  );
+  const selectedCapability =
+    capabilitySummaries.find(
+      (summary) => summary.id === selectedCapabilityId,
+    ) ?? null;
+  const selectedCapabilityEditorId =
+    selectedCapabilityId === "conversation"
+      ? "system-config-prompts"
+      : selectedCapabilityId === "safety"
+      ? "system-config-switches"
+      : selectedCapabilityId === "model"
+      ? "system-config-model"
+      : selectedCapabilityId === "cron"
+      ? "system-config-cron"
+      : "system-config-output";
   const handleDelete = async () => {
     if (formDisabled) {
       return;
@@ -551,6 +623,7 @@ export default function SystemConfigPage() {
       }
       setRecord(nextRecord);
       setDraftConfig(nextRecord.config);
+      setPromptSegments(readSystemPromptInjections(nextRecord.config));
       await loadEffectiveConfig(request.sourceId);
       if (!isCurrentRequest(request)) {
         return;
@@ -673,7 +746,34 @@ export default function SystemConfigPage() {
               </div>
             </Card>
 
+            <CapabilityGrid
+              summaries={visibleCapabilitySummaries}
+              filter={capabilityFilter}
+              onFilterChange={setCapabilityFilter}
+              onSelect={setSelectedCapabilityId}
+            />
+
+            <ConfigDetailDrawer
+              capability={selectedCapability}
+              open={selectedCapabilityId !== null}
+              onClose={() => setSelectedCapabilityId(null)}
+              onLocate={() => {
+                document
+                  .getElementById(selectedCapabilityEditorId)
+                  ?.scrollIntoView({ behavior: "smooth", block: "start" });
+                setSelectedCapabilityId(null);
+              }}
+            >
+              <div className={styles.drawerSummary}>
+                <span>{selectedCapability?.summary}</span>
+                <span>
+                  该能力的参数位于下方编辑区；所有修改仍会通过页面底部统一保存。
+                </span>
+              </div>
+            </ConfigDetailDrawer>
+
             <Card
+              id="system-config-switches"
               className={styles.switchCard}
               title={t("sourceSystemConfigPage.switchesTitle", {
                 defaultValue: "受控功能开关",
@@ -706,6 +806,7 @@ export default function SystemConfigPage() {
             </Card>
 
             <Card
+              id="system-config-prompts"
               className={styles.switchCard}
               title={t("sourceSystemConfigPage.systemPromptInjectionsTitle", {
                 defaultValue: "系统提示词注入",
@@ -717,32 +818,36 @@ export default function SystemConfigPage() {
                     "配置当前系统运行时固定追加到对话的系统提示词。多段提示词使用空行分隔，保存时会自动去除空段和重复段。",
                 })}
               </div>
-              <label className={styles.promptField}>
-                <Input.TextArea
-                  aria-label={t(
-                    "sourceSystemConfigPage.systemPromptInjectionsLabel",
-                    {
-                      defaultValue: "系统提示词注入",
-                    },
-                  )}
-                  autoSize={{ minRows: 5, maxRows: 12 }}
-                  className={styles.systemPromptTextArea}
-                  disabled={formDisabled}
-                  placeholder={t(
-                    "sourceSystemConfigPage.systemPromptInjectionsPlaceholder",
-                    {
-                      defaultValue: "每段提示词之间留一个空行",
-                    },
-                  )}
-                  value={systemPromptInjectionText}
-                  onChange={(event) =>
-                    handleSystemPromptInjectionsChange(event.target.value)
-                  }
-                />
-              </label>
+              <SystemPromptSegments
+                disabled={formDisabled}
+                prompts={systemPromptInjections}
+                onAdd={() =>
+                  handleSystemPromptInjectionsChange(
+                    addPromptSegment(systemPromptInjections),
+                  )
+                }
+                onChange={(index, value) =>
+                  handleSystemPromptInjectionsChange(
+                    systemPromptInjections.map((prompt, promptIndex) =>
+                      promptIndex === index ? value : prompt,
+                    ),
+                  )
+                }
+                onMove={(index, direction) =>
+                  handleSystemPromptInjectionsChange(
+                    movePromptSegment(systemPromptInjections, index, direction),
+                  )
+                }
+                onRemove={(index) =>
+                  handleSystemPromptInjectionsChange(
+                    removePromptSegment(systemPromptInjections, index),
+                  )
+                }
+              />
             </Card>
 
             <Card
+              id="system-config-model"
               className={styles.switchCard}
               title={t("sourceSystemConfigPage.modelCallPolicyTitle", {
                 defaultValue: "模型调用策略",
@@ -942,6 +1047,7 @@ export default function SystemConfigPage() {
             </Card>
 
             <Card
+              id="system-config-cron"
               className={styles.switchCard}
               title={t("sourceSystemConfigPage.cronTaskSettingsTitle", {
                 defaultValue: "定时任务设置",
@@ -1156,6 +1262,7 @@ export default function SystemConfigPage() {
             </Card>
 
             <Card
+              id="system-config-output"
               className={styles.switchCard}
               title={t("sourceSystemConfigPage.toolResultCompactTitle", {
                 defaultValue: "工具输出控制",
@@ -1352,7 +1459,35 @@ export default function SystemConfigPage() {
               </section>
             </Card>
 
+            <Modal
+              cancelText="保留防护"
+              okButtonProps={{ danger: true }}
+              okText="确认关闭"
+              open={databaseGuardDisablePending}
+              title="确认关闭数据库访问拦截"
+              onCancel={() => setDatabaseGuardDisablePending(false)}
+              onOk={confirmDatabaseGuardDisable}
+            >
+              关闭后，模型可通过 Python
+              或命令行直连数据库。此修改会在统一保存后生效。
+            </Modal>
+
             <div className={styles.actionRow}>
+              {isDirty ? (
+                <span className={styles.dirtySummary}>存在未保存修改</span>
+              ) : null}
+              {isDirty ? (
+                <Button
+                  onClick={() => {
+                    setDraftConfig(record?.config ?? {});
+                    setPromptSegments(
+                      readSystemPromptInjections(record?.config ?? {}),
+                    );
+                  }}
+                >
+                  放弃修改
+                </Button>
+              ) : null}
               <Button
                 danger
                 onClick={handleDelete}
@@ -1361,12 +1496,13 @@ export default function SystemConfigPage() {
                 {t("common.delete")}
               </Button>
               <Button
+                aria-label={t("common.save")}
                 type="primary"
                 loading={saving}
                 disabled={formDisabled}
                 onClick={handleSave}
               >
-                {t("common.save")}
+                保存全部修改
               </Button>
             </div>
           </>
