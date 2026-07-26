@@ -6,6 +6,7 @@ import {
   render,
   screen,
   waitFor,
+  within,
 } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -178,6 +179,40 @@ describe("SystemConfigPage", () => {
     });
     expect(loadEffectiveConfig).toHaveBeenCalledWith("portal");
     expect(mocks.messageApi.success).toHaveBeenCalled();
+  });
+
+  it("keeps a dirty draft until the manager confirms a source switch", async () => {
+    render(<SystemConfigPage />);
+
+    await screen.findByText("当前系统");
+    fireEvent.click(getTaskProgressSwitch());
+
+    act(() => {
+      useIframeStore.getState().setContext({ source: "workspace" });
+    });
+
+    expect(await screen.findByText("切换系统前保存修改？")).toBeTruthy();
+    expect(useIframeStore.getState().source).toBe("portal");
+
+    fireEvent.click(screen.getByRole("button", { name: "继续编辑" }));
+    expect(screen.getByText("存在未保存修改")).toBeTruthy();
+    expect(useIframeStore.getState().source).toBe("portal");
+  });
+
+  it("edits a capability from its detail drawer", async () => {
+    render(<SystemConfigPage />);
+
+    fireEvent.click(await screen.findByRole("button", { name: /对话与执行/ }));
+
+    const drawer = await screen.findByRole("dialog");
+    fireEvent.click(
+      within(drawer).getByRole("button", { name: "新增提示词片段" }),
+    );
+    const promptSegment = within(drawer).getByLabelText("提示词片段 1");
+    fireEvent.change(promptSegment, { target: { value: "保持简洁" } });
+    await waitFor(() => {
+      expect(screen.getByText("存在未保存修改")).toBeTruthy();
+    });
   });
 
   it("saves zhaohu Tool Guard approval notification switch changes", async () => {

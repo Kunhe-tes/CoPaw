@@ -32,7 +32,7 @@ interface CapabilityDefinition {
   id: CapabilityId;
   title: string;
   description: string;
-  keys: string[];
+  paths: readonly (readonly string[])[];
   summary: (config: SourceSystemConfig) => string;
   highImpact?: boolean;
   inheritsAgent?: boolean;
@@ -43,7 +43,10 @@ const CAPABILITIES: CapabilityDefinition[] = [
     id: "conversation",
     title: "对话与执行",
     description: "任务进度与系统提示词的可见体验。",
-    keys: ["feature_switches", "system_prompt_injections"],
+    paths: [
+      ["feature_switches", "chat_task_progress_enabled"],
+      ["system_prompt_injections"],
+    ],
     summary: (config) => {
       const prompts = Array.isArray(config.system_prompt_injections)
         ? config.system_prompt_injections.length
@@ -55,7 +58,10 @@ const CAPABILITIES: CapabilityDefinition[] = [
     id: "safety",
     title: "安全与审批",
     description: "数据库访问边界与审批通知。",
-    keys: ["feature_switches", "approval_notifications"],
+    paths: [
+      ["feature_switches", "database_access_guard_enabled"],
+      ["approval_notifications", "zhaohu_tool_guard_enabled"],
+    ],
     summary: () => "数据库防护已配置",
     highImpact: true,
   },
@@ -63,7 +69,7 @@ const CAPABILITIES: CapabilityDefinition[] = [
     id: "model",
     title: "模型调用",
     description: "重试策略、并发与限流等待。",
-    keys: ["query_retry", "llm_rate_limiter"],
+    paths: [["query_retry"], ["llm_rate_limiter"]],
     summary: (config) => {
       const limiter = config.llm_rate_limiter as
         | { llm_max_qpm?: number; llm_max_concurrent?: number }
@@ -80,11 +86,11 @@ const CAPABILITIES: CapabilityDefinition[] = [
     id: "cron",
     title: "定时任务",
     description: "通知、暂停、清理与归档节奏。",
-    keys: [
-      "cron_unread_auto_pause",
-      "cron_notifications",
-      "cron_task_session_cleanup",
-      "archive_maintenance",
+    paths: [
+      ["cron_unread_auto_pause"],
+      ["cron_notifications"],
+      ["cron_task_session_cleanup"],
+      ["archive_maintenance"],
     ],
     summary: () => "维护任务按计划运行",
   },
@@ -92,7 +98,7 @@ const CAPABILITIES: CapabilityDefinition[] = [
     id: "output",
     title: "工具输出",
     description: "历史压缩与文件读取输出边界。",
-    keys: ["tool_result_compact", "file_read_truncation"],
+    paths: [["tool_result_compact"], ["file_read_truncation"]],
     summary: () => "输出控制采用当前策略",
     inheritsAgent: true,
   },
@@ -102,10 +108,27 @@ function pickConfig(
   config: SourceSystemConfig,
   definition: CapabilityDefinition,
 ): SourceSystemConfig {
-  return definition.keys.reduce<SourceSystemConfig>((result, key) => {
-    if (key in config) {
-      result[key] = config[key];
+  return definition.paths.reduce<SourceSystemConfig>((result, path) => {
+    let source: unknown = config;
+    for (const key of path) {
+      if (!source || typeof source !== "object" || !(key in source)) {
+        return result;
+      }
+      source = (source as Record<string, unknown>)[key];
     }
+
+    let target: Record<string, unknown> = result;
+    path.forEach((key, index) => {
+      if (index === path.length - 1) {
+        target[key] = source;
+        return;
+      }
+      const nextTarget = target[key];
+      if (!nextTarget || typeof nextTarget !== "object") {
+        target[key] = {};
+      }
+      target = target[key] as Record<string, unknown>;
+    });
     return result;
   }, {});
 }
