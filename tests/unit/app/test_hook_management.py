@@ -222,6 +222,44 @@ def test_save_rejects_path_like_argv_zero_outside_script_library(
         )
 
 
+@pytest.mark.parametrize(
+    "argv",
+    [
+        ["echo", "hello"],
+        ["python", "-m", "package.module"],
+        ["curl", "https://hooks.example.test/policy"],
+    ],
+)
+def test_save_preserves_free_non_script_argv_arguments(
+    argv: list[str],
+    tmp_path: Path,
+) -> None:
+    workspace_dir = tmp_path / "workspaces" / "default"
+    _write_default_agent(workspace_dir)
+    service = HookManagementService(workspace_dir, tenant_id="tenant-a")
+    hooks = {
+        "enabled": True,
+        "events": {
+            "PreToolUse": [
+                {
+                    "id": "group",
+                    "hooks": [
+                        {"id": "command", "type": "command", "argv": argv},
+                    ],
+                },
+            ],
+        },
+    }
+
+    saved = service.save_configuration(
+        hooks=hooks,
+        expected_revision=service.get_configuration().revision,
+        actor=_actor(),
+    )
+
+    assert saved.hooks["events"]["PreToolUse"][0]["hooks"][0]["argv"] == argv
+
+
 def test_save_rejects_blank_group_or_handler_id(tmp_path: Path) -> None:
     workspace_dir = tmp_path / "workspaces" / "default"
     _write_default_agent(workspace_dir)

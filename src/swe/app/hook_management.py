@@ -443,12 +443,12 @@ class HookManagementService:
         candidate = Path(argument)
         is_script = candidate.suffix.lower() in ALLOWED_SCRIPT_SUFFIXES
         is_path_like = "/" in argument or "\\" in argument
-        if index == 0 and not is_script and not is_path_like:
-            return argument
         if not is_script:
-            raise HookManagementValidationError(
-                "argv executable paths must be a bare executable name",
-            )
+            if index == 0 and is_path_like:
+                raise HookManagementValidationError(
+                    "argv executable paths must be a bare executable name",
+                )
+            return argument
         if candidate.is_absolute() or ".." in candidate.parts:
             raise HookManagementValidationError(
                 "script arguments must stay inside hooks/scripts",
