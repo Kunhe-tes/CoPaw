@@ -3,14 +3,18 @@
 
 import json
 from pathlib import Path
+from unittest.mock import AsyncMock
 
 import pytest
 
+from swe.app import hook_management
+from swe.agents.hook_runtime.models import HookContext, HookHandlerResult
 from swe.app.hook_management import (
     HookAuditActor,
     HookManagementConflict,
     HookManagementService,
     HookManagementValidationError,
+    UploadFilePayload,
 )
 
 
@@ -137,3 +141,76 @@ def test_save_preserves_non_hook_agent_configuration(tmp_path: Path) -> None:
     saved = json.loads(agent_path.read_text(encoding="utf-8"))
     assert saved["language"] == "zh"
     assert saved["hooks"] == {"enabled": True, "events": {}}
+
+
+def test_batch_keeps_valid_file_when_another_file_is_rejected(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    workspace_dir = tmp_path / "workspaces" / "default"
+    _write_default_agent(workspace_dir)
+    monkeypatch.setattr(
+        hook_management,
+        "scan_skill_directory",
+        lambda *args, **kwargs: None,
+    )
+    service = HookManagementService(workspace_dir, tenant_id="tenant-a")
+
+    result = service.upload_scripts(
+        files=[
+            UploadFilePayload("guard.py", b"print('ok')"),
+            UploadFilePayload("bad.exe", b"MZ"),
+        ],
+        overwrite_names=set(),
+        actor=_actor(),
+    )
+
+    assert result.accepted_names == ["guard.py"]
+    assert result.failed[0].filename == "bad.exe"
+    assert (workspace_dir / "hooks" / "scripts" / "guard.py").read_bytes() == (
+        b"print('ok')"
+    )
+
+
+@pytest.mark.asyncio
+async def test_manual_test_runs_one_draft_handler_without_persisting_config(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    workspace_dir = tmp_path / "workspaces" / "default"
+    _write_default_agent(workspace_dir)
+    original_config = (workspace_dir / "agent.json").read_text(
+        encoding="utf-8",
+    )
+    execute = AsyncMock(
+        return_value=HookHandlerResult(
+            handler_id="check-command",
+            order=0,
+            reason="completed",
+        ),
+    )
+    monkeypatch.setattr(hook_management, "execute_handler", execute)
+    service = HookManagementService(workspace_dir, tenant_id="tenant-a")
+
+    result = await service.manual_test(
+        handler={"id": "check-command", "type": "command", "argv": ["echo"]},
+        context=HookContext(
+            session_id="test-session",
+            transcript_path="",
+            cwd=str(workspace_dir),
+            hook_event_name="PreToolUse",
+            tenant_id="tenant-a",
+            effective_tenant_id="tenant-a",
+            user_id="user-a",
+            agent_id="default",
+            channel="test",
+            workspace_dir=str(workspace_dir),
+        ),
+        actor=_actor(),
+    )
+
+    execute.assert_awaited_once()
+    assert result.redacted_summary["reason"] == "completed"
+    assert (workspace_dir / "agent.json").read_text(
+        encoding="utf-8",
+    ) == original_config
