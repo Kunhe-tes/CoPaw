@@ -3,7 +3,7 @@
 
 import json
 from pathlib import Path
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, Mock
 
 import pytest
 
@@ -141,6 +141,53 @@ def test_save_preserves_non_hook_agent_configuration(tmp_path: Path) -> None:
     saved = json.loads(agent_path.read_text(encoding="utf-8"))
     assert saved["language"] == "zh"
     assert saved["hooks"] == {"enabled": True, "events": {}}
+
+
+def test_save_audits_removed_matcher_group_and_handler(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    workspace_dir = tmp_path / "workspaces" / "default"
+    _write_default_agent(workspace_dir)
+    agent_path = workspace_dir / "agent.json"
+    agent_data = json.loads(agent_path.read_text(encoding="utf-8"))
+    agent_data["hooks"] = {
+        "enabled": True,
+        "events": {
+            "PreToolUse": [
+                {
+                    "id": "old-group",
+                    "hooks": [
+                        {
+                            "id": "old-handler",
+                            "type": "command",
+                            "argv": ["echo"],
+                        },
+                    ],
+                },
+            ],
+        },
+    }
+    agent_path.write_text(json.dumps(agent_data), encoding="utf-8")
+    service = HookManagementService(workspace_dir, tenant_id="tenant-a")
+    before = service.get_configuration().hooks
+    assert HookManagementService._removed_hook_ids(
+        before,
+        {"enabled": False, "events": {}},
+    ) == (["old-group"], ["old-handler"])
+    audit_log = Mock()
+    monkeypatch.setattr(hook_management.logger, "info", audit_log)
+
+    service.save_configuration(
+        hooks={"enabled": False, "events": {}},
+        expected_revision=service.get_configuration().revision,
+        actor=_actor(),
+    )
+
+    removal = audit_log.call_args_list[-1].kwargs["extra"]
+    assert removal["event"] == "configuration_removed"
+    assert removal["removed_group_ids"] == '["old-group"]'
+    assert removal["removed_handler_ids"] == '["old-handler"]'
 
 
 def test_save_rejects_path_like_argv_zero_outside_script_library(

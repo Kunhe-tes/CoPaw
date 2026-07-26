@@ -147,6 +147,20 @@ class HookManagementService:
             actor=actor,
             revision=snapshot.revision,
         )
+        removed_group_ids, removed_handler_ids = self._removed_hook_ids(
+            current.hooks,
+            normalized_hooks,
+        )
+        if removed_group_ids or removed_handler_ids:
+            self._emit_audit(
+                event="configuration_removed",
+                actor=actor,
+                revision=snapshot.revision,
+                details={
+                    "removed_group_ids": removed_group_ids,
+                    "removed_handler_ids": removed_handler_ids,
+                },
+            )
         return snapshot
 
     def upload_scripts(
@@ -577,6 +591,29 @@ class HookManagementService:
         )
         return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
+    @staticmethod
+    def _removed_hook_ids(
+        before: dict[str, Any],
+        after: dict[str, Any],
+    ) -> tuple[list[str], list[str]]:
+        def collect(hooks: dict[str, Any]) -> tuple[set[str], set[str]]:
+            group_ids: set[str] = set()
+            handler_ids: set[str] = set()
+            for groups in hooks.get("events", {}).values():
+                for group in groups:
+                    group_ids.add(group["id"])
+                    handler_ids.update(
+                        handler["id"] for handler in group["hooks"]
+                    )
+            return group_ids, handler_ids
+
+        before_groups, before_handlers = collect(before)
+        after_groups, after_handlers = collect(after)
+        return (
+            sorted(before_groups - after_groups),
+            sorted(before_handlers - after_handlers),
+        )
+
     def _emit_audit(
         self,
         *,
@@ -596,7 +633,20 @@ class HookManagementService:
                 "configuration_revision": revision,
             }
             if details:
-                extra.update(details)
+                extra.update(
+                    {
+                        key: (
+                            json.dumps(
+                                value,
+                                ensure_ascii=False,
+                                sort_keys=True,
+                            )
+                            if isinstance(value, (dict, list))
+                            else value
+                        )
+                        for key, value in details.items()
+                    },
+                )
             logger.info("agent_hook.audit", extra=extra)
         except (
             Exception
