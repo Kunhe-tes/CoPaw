@@ -24,6 +24,7 @@ class _FakeService:
         )
         self.saved: dict | None = None
         self.overwrite_names: set[str] | None = None
+        self.manual_test_source_id: str | None = None
 
     def get_configuration(self) -> HookConfigurationSnapshot:
         return self.snapshot
@@ -32,7 +33,8 @@ class _FakeService:
         self.overwrite_names = overwrite_names
         return HookScriptUploadResult(accepted=(files[0].filename,))
 
-    async def manual_test(self, *, handler, context, actor):
+    async def manual_test(self, *, handler, context, actor, source_id):
+        self.manual_test_source_id = source_id
         return SimpleNamespace(
             redacted_summary={"status": "completed", "failed": False},
         )
@@ -119,7 +121,7 @@ def test_manual_test_requires_real_execution_confirmation(monkeypatch) -> None:
 
 
 def test_manual_test_returns_only_redacted_summary(monkeypatch) -> None:
-    client, _, _ = _client(monkeypatch)
+    client, service, _ = _client(monkeypatch)
 
     response = client.post(
         "/hook-management/manual-test",
@@ -144,6 +146,7 @@ def test_manual_test_returns_only_redacted_summary(monkeypatch) -> None:
     assert response.json() == {
         "redacted_summary": {"status": "completed", "failed": False},
     }
+    assert service.manual_test_source_id == "source-a"
 
 
 def test_script_upload_reads_overwrite_names_from_multipart_form(

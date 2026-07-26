@@ -5,12 +5,13 @@ from __future__ import annotations
 
 from contextlib import contextmanager
 from dataclasses import dataclass
-import fcntl
 import hashlib
 import json
 import logging
+import os
 from pathlib import Path
 import tempfile
+import threading
 import time
 from typing import Any
 
@@ -25,6 +26,11 @@ from ..agents.hook_runtime.models import (
 )
 from ..security.skill_scanner import SkillScanError, scan_skill_directory
 
+try:
+    import fcntl
+except ImportError:  # pragma: no cover - Windows compatibility path
+    fcntl = None
+
 logger = logging.getLogger(__name__)
 
 ALLOWED_SCRIPT_SUFFIXES = {".py", ".sh", ".bash", ".zsh"}
@@ -32,6 +38,7 @@ MAX_SCRIPT_BYTES = 1 * 1024 * 1024
 MAX_UPLOAD_FILES = 20
 
 _HANDLER_ADAPTER = TypeAdapter(HookHandlerConfig)
+_CONFIGURATION_THREAD_LOCK = threading.RLock()
 
 
 class HookManagementConflict(Exception):
@@ -222,6 +229,7 @@ class HookManagementService:
             except (
                 HookManagementValidationError,
                 HookManagementConflict,
+                OSError,
             ) as exc:
                 failed.append(HookScriptFailure(file.filename, str(exc)))
             finally:
@@ -256,6 +264,7 @@ class HookManagementService:
         handler: dict[str, Any],
         context: HookContext,
         actor: HookAuditActor,
+        source_id: str | None = None,
     ) -> HookManualTestResult:
         """Run exactly one unsaved Handler with real external side effects."""
         revision = self.get_configuration().revision
@@ -275,6 +284,7 @@ class HookManagementService:
                     "user_id": actor.user_id or context.user_id,
                     "agent_id": "default",
                     "workspace_dir": str(self._workspace_dir),
+                    "source_id": source_id,
                 },
             )
             handler_result = await execute_handler(
@@ -411,8 +421,12 @@ class HookManagementService:
                         self._normalize_script_argument(item, index)
                         for index, item in enumerate(argv)
                     ]
+                    has_controlled_script = any(
+                        Path(value).parts[:2] == ("hooks", "scripts")
+                        for value in normalized_argv
+                    )
                     if (
-                        normalized_argv != argv
+                        has_controlled_script
                         and str(handler.get("cwd", "")).strip()
                     ):
                         raise HookManagementValidationError(
@@ -446,10 +460,21 @@ class HookManagementService:
                 "script arguments must use hooks/scripts/<filename>",
             )
         script_root = self._ensure_script_root()
-        if not (script_root / candidate.name).is_file():
+        script_path = script_root / candidate.name
+        if script_path.is_symlink():
+            raise HookManagementValidationError(
+                "script must not be a symbolic link",
+            )
+        if not script_path.is_file():
             raise HookManagementValidationError(
                 f"script is not in the controlled library: {candidate.name}",
             )
+        try:
+            script_path.resolve(strict=True).relative_to(script_root)
+        except ValueError as exc:
+            raise HookManagementValidationError(
+                "script is outside the controlled library",
+            ) from exc
         return canonical.as_posix()
 
     @staticmethod
@@ -545,6 +570,7 @@ class HookManagementService:
             staged.write(content)
             staged_path = Path(staged.name)
         staged_path.replace(target)
+        os.chmod(target, 0o700)
 
     def _ensure_script_root(self) -> Path:
         workspace_root = self._workspace_dir.resolve()
@@ -570,12 +596,15 @@ class HookManagementService:
     def _configuration_lock(self):
         self._workspace_dir.mkdir(parents=True, exist_ok=True)
         lock_path = self._workspace_dir / ".hook-management.lock"
-        with lock_path.open("a+", encoding="utf-8") as lock_file:
-            fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
-            try:
-                yield
-            finally:
-                fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+        with _CONFIGURATION_THREAD_LOCK:
+            with lock_path.open("a+", encoding="utf-8") as lock_file:
+                if fcntl is not None:
+                    fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+                try:
+                    yield
+                finally:
+                    if fcntl is not None:
+                        fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
 
     @staticmethod
     def _sha256_file(path: Path) -> str:

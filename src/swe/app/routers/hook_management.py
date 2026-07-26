@@ -28,6 +28,7 @@ from ..hook_management import (
     HookManagementConflict,
     HookManagementService,
     HookManagementValidationError,
+    MAX_UPLOAD_FILES,
     MAX_SCRIPT_BYTES,
     UploadFilePayload,
 )
@@ -138,6 +139,11 @@ async def upload_scripts(
     files: list[UploadFile] = File(...),
     overwrite: Annotated[str, Form()] = "[]",
 ) -> dict[str, Any]:
+    if len(files) > MAX_UPLOAD_FILES:
+        raise HTTPException(
+            status_code=422,
+            detail=f"a batch may contain at most {MAX_UPLOAD_FILES} files",
+        )
     try:
         parsed_overwrite = json.loads(overwrite)
         if not isinstance(parsed_overwrite, list) or not all(
@@ -188,6 +194,7 @@ async def manual_test(
             handler=payload.handler,
             context=payload.context,
             actor=_actor_for_request(request),
+            source_id=getattr(request.state, "source_id", None),
         )
     except HookManagementValidationError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc

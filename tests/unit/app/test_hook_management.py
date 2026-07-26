@@ -311,6 +311,77 @@ def test_upload_rejects_binary_script_and_symlinked_library(
         )
 
 
+def test_save_rejects_symlinked_referenced_script(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    workspace_dir = tmp_path / "workspaces" / "default"
+    _write_default_agent(workspace_dir)
+    monkeypatch.setattr(
+        hook_management,
+        "scan_skill_directory",
+        lambda *args, **kwargs: None,
+    )
+    service = HookManagementService(workspace_dir, tenant_id="tenant-a")
+    service.upload_scripts(
+        files=[UploadFilePayload("guard.py", b"print('ok')")],
+        overwrite_names=set(),
+        actor=_actor(),
+    )
+    script_path = workspace_dir / "hooks" / "scripts" / "guard.py"
+    external_script = tmp_path / "external.py"
+    external_script.write_text("print('outside')", encoding="utf-8")
+    script_path.unlink()
+    script_path.symlink_to(external_script)
+
+    hooks = {
+        "enabled": True,
+        "events": {
+            "PreToolUse": [
+                {
+                    "id": "group",
+                    "hooks": [
+                        {
+                            "id": "command",
+                            "type": "command",
+                            "argv": ["python", "hooks/scripts/guard.py"],
+                        },
+                    ],
+                },
+            ],
+        },
+    }
+    with pytest.raises(HookManagementValidationError, match="symbolic link"):
+        service.save_configuration(
+            hooks=hooks,
+            expected_revision=service.get_configuration().revision,
+            actor=_actor(),
+        )
+
+
+def test_uploaded_shell_script_is_executable(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    workspace_dir = tmp_path / "workspaces" / "default"
+    _write_default_agent(workspace_dir)
+    monkeypatch.setattr(
+        hook_management,
+        "scan_skill_directory",
+        lambda *args, **kwargs: None,
+    )
+    service = HookManagementService(workspace_dir, tenant_id="tenant-a")
+    service.upload_scripts(
+        files=[UploadFilePayload("direct.sh", b"#!/bin/sh\necho '{}'\n")],
+        overwrite_names=set(),
+        actor=_actor(),
+    )
+
+    assert (
+        workspace_dir / "hooks" / "scripts" / "direct.sh"
+    ).stat().st_mode & 0o100
+
+
 def test_list_scripts_returns_controlled_library_metadata(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -371,9 +442,11 @@ async def test_manual_test_runs_one_draft_handler_without_persisting_config(
             workspace_dir=str(workspace_dir),
         ),
         actor=_actor(),
+        source_id="source-a",
     )
 
     execute.assert_awaited_once()
+    assert execute.call_args.args[1].source_id == "source-a"
     assert result.redacted_summary["status"] == "completed"
     assert "reason" not in result.redacted_summary
     assert (workspace_dir / "agent.json").read_text(
