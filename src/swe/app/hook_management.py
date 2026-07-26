@@ -3,25 +3,26 @@
 
 from __future__ import annotations
 
+from contextlib import contextmanager
 from dataclasses import dataclass
+import fcntl
 import hashlib
 import json
 import logging
 from pathlib import Path
 import tempfile
+import time
 from typing import Any
 
 from pydantic import TypeAdapter, ValidationError
 
 from ..agents.hook_runtime.executor import execute_handler
 from ..agents.hook_runtime.models import (
-    CommandHookHandlerConfig,
     HookConfig,
     HookContext,
     HookHandlerConfig,
     HookHandlerResult,
 )
-from ..agents.hook_runtime.redaction import redact_hook_payload
 from ..security.skill_scanner import SkillScanError, scan_skill_directory
 
 logger = logging.getLogger(__name__)
@@ -29,7 +30,6 @@ logger = logging.getLogger(__name__)
 ALLOWED_SCRIPT_SUFFIXES = {".py", ".sh", ".bash", ".zsh"}
 MAX_SCRIPT_BYTES = 1 * 1024 * 1024
 MAX_UPLOAD_FILES = 20
-MAX_MANUAL_TEST_SUMMARY_LENGTH = 4096
 
 _HANDLER_ADAPTER = TypeAdapter(HookHandlerConfig)
 
@@ -126,16 +126,17 @@ class HookManagementService:
         actor: HookAuditActor,
     ) -> HookConfigurationSnapshot:
         """Validate and persist a Hook draft when its revision is current."""
-        current = self.get_configuration()
-        if expected_revision != current.revision:
-            raise HookManagementConflict(
-                "hook configuration revision is stale",
-            )
+        with self._configuration_lock():
+            current = self.get_configuration()
+            if expected_revision != current.revision:
+                raise HookManagementConflict(
+                    "hook configuration revision is stale",
+                )
 
-        normalized_hooks = self._validate_hooks(hooks)
-        agent_config = self._load_agent_config()
-        agent_config["hooks"] = normalized_hooks
-        self._write_agent_config(agent_config)
+            normalized_hooks = self._validate_hooks(hooks)
+            agent_config = self._load_agent_config()
+            agent_config["hooks"] = normalized_hooks
+            self._write_agent_config(agent_config)
 
         snapshot = HookConfigurationSnapshot(
             hooks=normalized_hooks,
@@ -161,7 +162,7 @@ class HookManagementService:
                 f"a batch may contain at most {MAX_UPLOAD_FILES} files",
             )
 
-        self._script_root.mkdir(parents=True, exist_ok=True)
+        script_root = self._ensure_script_root()
         accepted: list[str] = []
         warned: list[str] = []
         failed: list[HookScriptFailure] = []
@@ -170,7 +171,11 @@ class HookManagementService:
         for file in files:
             try:
                 self._validate_upload(file, seen_names)
-                target = self._script_root / file.filename
+                target = script_root / file.filename
+                if target.is_symlink():
+                    raise HookManagementValidationError(
+                        "script target must not be a symbolic link",
+                    )
                 if target.exists() and file.filename not in overwrite_names:
                     raise HookManagementConflict(
                         f"script already exists: {file.filename}",
@@ -216,16 +221,18 @@ class HookManagementService:
 
     def list_scripts(self) -> list[dict[str, Any]]:
         """List only controlled script-library metadata, never file bodies."""
-        if not self._script_root.is_dir():
+        if not self._script_root.exists():
             return []
+        script_root = self._ensure_script_root()
         return [
             {
                 "filename": path.name,
                 "size": path.stat().st_size,
                 "sha256": self._sha256_file(path),
             }
-            for path in sorted(self._script_root.iterdir())
+            for path in sorted(script_root.iterdir())
             if path.is_file()
+            and not path.is_symlink()
             and path.suffix.lower() in ALLOWED_SCRIPT_SUFFIXES
         ]
 
@@ -238,6 +245,7 @@ class HookManagementService:
     ) -> HookManualTestResult:
         """Run exactly one unsaved Handler with real external side effects."""
         revision = self.get_configuration().revision
+        started_at = time.monotonic()
         self._emit_audit(
             event="manual_test_requested",
             actor=actor,
@@ -273,9 +281,17 @@ class HookManagementService:
             redacted_summary=self._redacted_summary(handler_result),
         )
         self._emit_audit(
-            event="manual_test_completed",
+            event=(
+                "manual_test_failed"
+                if handler_result.failed
+                else "manual_test_completed"
+            ),
             actor=actor,
             revision=revision,
+            details={
+                "duration_ms": round((time.monotonic() - started_at) * 1000),
+                "result": result.redacted_summary,
+            },
         )
         return result
 
@@ -377,20 +393,34 @@ class HookManagementService:
                     argv = handler.get("argv", [])
                     if not isinstance(argv, list):
                         continue
-                    handler["argv"] = [
+                    normalized_argv = [
                         self._normalize_script_argument(item, index)
                         for index, item in enumerate(argv)
                     ]
+                    if (
+                        normalized_argv != argv
+                        and str(handler.get("cwd", "")).strip()
+                    ):
+                        raise HookManagementValidationError(
+                            "script handlers must not set cwd",
+                        )
+                    handler["argv"] = normalized_argv
 
     def _normalize_script_argument(self, argument: Any, index: int) -> str:
         if not isinstance(argument, str):
             raise HookManagementValidationError("argv entries must be strings")
-        if index == 0 or argument.startswith("-"):
+        if argument.startswith("-"):
             return argument
 
         candidate = Path(argument)
-        if candidate.suffix.lower() not in ALLOWED_SCRIPT_SUFFIXES:
+        is_script = candidate.suffix.lower() in ALLOWED_SCRIPT_SUFFIXES
+        is_path_like = "/" in argument or "\\" in argument
+        if index == 0 and not is_script and not is_path_like:
             return argument
+        if not is_script:
+            raise HookManagementValidationError(
+                "argv executable paths must be a bare executable name",
+            )
         if candidate.is_absolute() or ".." in candidate.parts:
             raise HookManagementValidationError(
                 "script arguments must stay inside hooks/scripts",
@@ -401,7 +431,8 @@ class HookManagementService:
             raise HookManagementValidationError(
                 "script arguments must use hooks/scripts/<filename>",
             )
-        if not (self._script_root / candidate.name).is_file():
+        script_root = self._ensure_script_root()
+        if not (script_root / candidate.name).is_file():
             raise HookManagementValidationError(
                 f"script is not in the controlled library: {candidate.name}",
             )
@@ -413,13 +444,20 @@ class HookManagementService:
         handler_ids: set[str] = set()
         for groups in config.events.values():
             for group in groups:
-                if group.id:
-                    if group.id in group_ids:
-                        raise HookManagementValidationError(
-                            f"duplicate matcher group id: {group.id}",
-                        )
-                    group_ids.add(group.id)
+                if not group.id.strip():
+                    raise HookManagementValidationError(
+                        "matcher group id must not be blank",
+                    )
+                if group.id in group_ids:
+                    raise HookManagementValidationError(
+                        f"duplicate matcher group id: {group.id}",
+                    )
+                group_ids.add(group.id)
                 for handler in group.hooks:
+                    if not handler.id.strip():
+                        raise HookManagementValidationError(
+                            "handler id must not be blank",
+                        )
                     if handler.id in handler_ids:
                         raise HookManagementValidationError(
                             f"duplicate handler id: {handler.id}",
@@ -427,9 +465,12 @@ class HookManagementService:
                     handler_ids.add(handler.id)
 
     def _write_agent_config(self, agent_config: dict[str, Any]) -> None:
-        with self._agent_config_path.open("w", encoding="utf-8") as file:
-            json.dump(agent_config, file, ensure_ascii=False, indent=2)
-            file.write("\n")
+        encoded = (
+            json.dumps(agent_config, ensure_ascii=False, indent=2) + "\n"
+        ).encode(
+            "utf-8",
+        )
+        self._atomic_write(self._agent_config_path, encoded)
 
     @staticmethod
     def _validate_upload(
@@ -451,10 +492,20 @@ class HookManagementService:
             raise HookManagementValidationError(
                 f"script exceeds {MAX_SCRIPT_BYTES} byte limit",
             )
+        if b"\x00" in file.content:
+            raise HookManagementValidationError(
+                "script content must be UTF-8 text",
+            )
+        try:
+            file.content.decode("utf-8")
+        except UnicodeDecodeError as exc:
+            raise HookManagementValidationError(
+                "script content must be UTF-8 text",
+            ) from exc
 
     def _scan_upload(self, file: UploadFilePayload) -> str:
         with tempfile.TemporaryDirectory(
-            dir=self._script_root.parent,
+            dir=self._ensure_script_root().parent,
         ) as stage:
             stage_dir = Path(stage)
             (stage_dir / file.filename).write_bytes(file.content)
@@ -480,6 +531,37 @@ class HookManagementService:
             staged.write(content)
             staged_path = Path(staged.name)
         staged_path.replace(target)
+
+    def _ensure_script_root(self) -> Path:
+        workspace_root = self._workspace_dir.resolve()
+        hooks_dir = self._script_root.parent
+        script_root = self._script_root
+        for path in (hooks_dir, script_root):
+            if path.is_symlink():
+                raise HookManagementValidationError(
+                    "script library must not be a symbolic link",
+                )
+        hooks_dir.mkdir(parents=True, exist_ok=True)
+        script_root.mkdir(exist_ok=True)
+        resolved_root = script_root.resolve()
+        try:
+            resolved_root.relative_to(workspace_root)
+        except ValueError as exc:
+            raise HookManagementValidationError(
+                "script library is outside the default workspace",
+            ) from exc
+        return resolved_root
+
+    @contextmanager
+    def _configuration_lock(self):
+        self._workspace_dir.mkdir(parents=True, exist_ok=True)
+        lock_path = self._workspace_dir / ".hook-management.lock"
+        with lock_path.open("a+", encoding="utf-8") as lock_file:
+            fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+            try:
+                yield
+            finally:
+                fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
 
     @staticmethod
     def _sha256_file(path: Path) -> str:
@@ -523,20 +605,10 @@ class HookManagementService:
 
     @staticmethod
     def _redacted_summary(result: HookHandlerResult) -> dict[str, Any]:
-        summary = redact_hook_payload(result.model_dump(mode="json"))
-        return HookManagementService._bound_summary(summary)
-
-    @staticmethod
-    def _bound_summary(value: Any) -> Any:
-        if isinstance(value, dict):
-            return {
-                key: HookManagementService._bound_summary(item)
-                for key, item in value.items()
-            }
-        if isinstance(value, list):
-            return [
-                HookManagementService._bound_summary(item) for item in value
-            ]
-        if isinstance(value, str):
-            return value[:MAX_MANUAL_TEST_SUMMARY_LENGTH]
-        return value
+        return {
+            "handler_id": result.handler_id,
+            "decision": str(result.decision.value),
+            "failed": result.failed,
+            "failure_type": result.failure_type,
+            "status": "failed" if result.failed else "completed",
+        }

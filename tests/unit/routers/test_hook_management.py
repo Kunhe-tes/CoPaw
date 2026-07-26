@@ -1,13 +1,17 @@
 # -*- coding: utf-8 -*-
 """HTTP contract tests for Default Agent Profile Hook management."""
 
+import json
 from types import SimpleNamespace
 from unittest.mock import Mock
 
 from fastapi import FastAPI, Request
 from fastapi.testclient import TestClient
 
-from swe.app.hook_management import HookConfigurationSnapshot
+from swe.app.hook_management import (
+    HookConfigurationSnapshot,
+    HookScriptUploadResult,
+)
 from swe.app.routers import hook_management
 from swe.config.context import encode_scope_id
 
@@ -19,9 +23,19 @@ class _FakeService:
             revision="revision-1",
         )
         self.saved: dict | None = None
+        self.overwrite_names: set[str] | None = None
 
     def get_configuration(self) -> HookConfigurationSnapshot:
         return self.snapshot
+
+    def upload_scripts(self, *, files, overwrite_names, actor):
+        self.overwrite_names = overwrite_names
+        return HookScriptUploadResult(accepted=(files[0].filename,))
+
+    async def manual_test(self, *, handler, context, actor):
+        return SimpleNamespace(
+            redacted_summary={"status": "completed", "failed": False},
+        )
 
     def save_configuration(self, *, hooks, expected_revision, actor):
         self.saved = {
@@ -102,3 +116,46 @@ def test_manual_test_requires_real_execution_confirmation(monkeypatch) -> None:
     )
 
     assert response.status_code == 400
+
+
+def test_manual_test_returns_only_redacted_summary(monkeypatch) -> None:
+    client, _, _ = _client(monkeypatch)
+
+    response = client.post(
+        "/hook-management/manual-test",
+        json={
+            "confirmRealExecution": True,
+            "handler": {"id": "command", "type": "command", "argv": ["echo"]},
+            "context": {
+                "session_id": "test",
+                "transcript_path": "",
+                "cwd": ".",
+                "hook_event_name": "PreToolUse",
+                "tenant_id": "tenant-a",
+                "effective_tenant_id": "tenant-a",
+                "user_id": "user-a",
+                "agent_id": "default",
+                "channel": "test",
+            },
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "redacted_summary": {"status": "completed", "failed": False},
+    }
+
+
+def test_script_upload_reads_overwrite_names_from_multipart_form(
+    monkeypatch,
+) -> None:
+    client, service, _ = _client(monkeypatch)
+
+    response = client.post(
+        "/hook-management/scripts",
+        data={"overwrite": json.dumps(["guard.py"])},
+        files=[("files", ("guard.py", b"print('ok')", "text/x-python"))],
+    )
+
+    assert response.status_code == 200
+    assert service.overwrite_names == {"guard.py"}

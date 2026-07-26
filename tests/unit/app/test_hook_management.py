@@ -143,6 +143,65 @@ def test_save_preserves_non_hook_agent_configuration(tmp_path: Path) -> None:
     assert saved["hooks"] == {"enabled": True, "events": {}}
 
 
+def test_save_rejects_path_like_argv_zero_outside_script_library(
+    tmp_path: Path,
+) -> None:
+    workspace_dir = tmp_path / "workspaces" / "default"
+    _write_default_agent(workspace_dir)
+    service = HookManagementService(workspace_dir, tenant_id="tenant-a")
+    hooks = {
+        "enabled": True,
+        "events": {
+            "PreToolUse": [
+                {
+                    "id": "group",
+                    "hooks": [
+                        {
+                            "id": "command",
+                            "type": "command",
+                            "argv": ["../../outside.sh"],
+                        },
+                    ],
+                },
+            ],
+        },
+    }
+
+    with pytest.raises(HookManagementValidationError, match="hooks/scripts"):
+        service.save_configuration(
+            hooks=hooks,
+            expected_revision=service.get_configuration().revision,
+            actor=_actor(),
+        )
+
+
+def test_save_rejects_blank_group_or_handler_id(tmp_path: Path) -> None:
+    workspace_dir = tmp_path / "workspaces" / "default"
+    _write_default_agent(workspace_dir)
+    service = HookManagementService(workspace_dir, tenant_id="tenant-a")
+    hooks = {
+        "enabled": True,
+        "events": {
+            "PreToolUse": [
+                {
+                    "id": "",
+                    "hooks": [{"id": "", "type": "command", "argv": ["echo"]}],
+                },
+            ],
+        },
+    }
+
+    with pytest.raises(
+        HookManagementValidationError,
+        match="must not be blank",
+    ):
+        service.save_configuration(
+            hooks=hooks,
+            expected_revision=service.get_configuration().revision,
+            actor=_actor(),
+        )
+
+
 def test_batch_keeps_valid_file_when_another_file_is_rejected(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -170,6 +229,39 @@ def test_batch_keeps_valid_file_when_another_file_is_rejected(
     assert (workspace_dir / "hooks" / "scripts" / "guard.py").read_bytes() == (
         b"print('ok')"
     )
+
+
+def test_upload_rejects_binary_script_and_symlinked_library(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    workspace_dir = tmp_path / "workspaces" / "default"
+    _write_default_agent(workspace_dir)
+    monkeypatch.setattr(
+        hook_management,
+        "scan_skill_directory",
+        lambda *args, **kwargs: None,
+    )
+    service = HookManagementService(workspace_dir, tenant_id="tenant-a")
+
+    binary = service.upload_scripts(
+        files=[UploadFilePayload("binary.py", b"\x00not-a-script")],
+        overwrite_names=set(),
+        actor=_actor(),
+    )
+    assert binary.failed[0].reason == "script content must be UTF-8 text"
+
+    external = tmp_path / "external"
+    external.mkdir()
+    hooks_dir = workspace_dir / "hooks"
+    (hooks_dir / "scripts").rmdir()
+    (hooks_dir / "scripts").symlink_to(external, target_is_directory=True)
+    with pytest.raises(HookManagementValidationError, match="symbolic link"):
+        service.upload_scripts(
+            files=[UploadFilePayload("guard.py", b"print('ok')")],
+            overwrite_names=set(),
+            actor=_actor(),
+        )
 
 
 def test_list_scripts_returns_controlled_library_metadata(
@@ -235,7 +327,8 @@ async def test_manual_test_runs_one_draft_handler_without_persisting_config(
     )
 
     execute.assert_awaited_once()
-    assert result.redacted_summary["reason"] == "completed"
+    assert result.redacted_summary["status"] == "completed"
+    assert "reason" not in result.redacted_summary
     assert (workspace_dir / "agent.json").read_text(
         encoding="utf-8",
     ) == original_config

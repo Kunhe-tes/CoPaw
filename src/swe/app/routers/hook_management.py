@@ -7,7 +7,15 @@ import json
 from pathlib import Path
 from typing import Any, Annotated
 
-from fastapi import APIRouter, File, Header, HTTPException, Request, UploadFile
+from fastapi import (
+    APIRouter,
+    File,
+    Form,
+    Header,
+    HTTPException,
+    Request,
+    UploadFile,
+)
 from pydantic import BaseModel, ConfigDict, Field
 
 from ...agents.hook_runtime.models import HookContext
@@ -20,6 +28,7 @@ from ..hook_management import (
     HookManagementConflict,
     HookManagementService,
     HookManagementValidationError,
+    MAX_SCRIPT_BYTES,
     UploadFilePayload,
 )
 from ..utils import schedule_agent_reload
@@ -127,27 +136,36 @@ async def list_scripts(request: Request) -> list[dict[str, Any]]:
 async def upload_scripts(
     request: Request,
     files: list[UploadFile] = File(...),
-    overwrite: str = "[]",
+    overwrite: Annotated[str, Form()] = "[]",
 ) -> dict[str, Any]:
     try:
-        overwrite_names = set(json.loads(overwrite))
-    except (TypeError, json.JSONDecodeError) as exc:
+        parsed_overwrite = json.loads(overwrite)
+        if not isinstance(parsed_overwrite, list) or not all(
+            isinstance(name, str) for name in parsed_overwrite
+        ):
+            raise ValueError("overwrite must be a string list")
+        overwrite_names = set(parsed_overwrite)
+    except (TypeError, ValueError, json.JSONDecodeError) as exc:
         raise HTTPException(
             status_code=400,
             detail="invalid overwrite list",
         ) from exc
-    if not all(isinstance(name, str) for name in overwrite_names):
-        raise HTTPException(status_code=400, detail="invalid overwrite list")
 
     payloads = [
-        UploadFilePayload(file.filename or "", await file.read())
+        UploadFilePayload(
+            file.filename or "",
+            await file.read(MAX_SCRIPT_BYTES + 1),
+        )
         for file in files
     ]
-    result = _service_for_request(request).upload_scripts(
-        files=payloads,
-        overwrite_names=overwrite_names,
-        actor=_actor_for_request(request),
-    )
+    try:
+        result = _service_for_request(request).upload_scripts(
+            files=payloads,
+            overwrite_names=overwrite_names,
+            actor=_actor_for_request(request),
+        )
+    except HookManagementValidationError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
     return {
         "accepted": result.accepted_names,
         "warned": list(result.warned),
@@ -174,6 +192,5 @@ async def manual_test(
     except HookManagementValidationError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     return {
-        "handler_result": result.handler_result.model_dump(mode="json"),
         "redacted_summary": result.redacted_summary,
     }
