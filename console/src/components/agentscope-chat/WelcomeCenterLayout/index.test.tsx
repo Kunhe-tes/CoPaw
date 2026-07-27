@@ -141,6 +141,31 @@ describe("WelcomeCenterLayout", () => {
     expect(input).toHaveValue(" ");
   });
 
+  it("does not submit while a loading skill menu is open", () => {
+    const onSubmit = vi.fn();
+
+    render(
+      <WelcomeCenterLayout
+        greeting="你好"
+        onSubmit={onSubmit}
+        skillMentions={{
+          items: [],
+          selected: [],
+          loading: true,
+          onOpen: vi.fn(),
+          onChange: vi.fn(),
+        }}
+      />,
+    );
+
+    const input = screen.getByRole("textbox");
+    fireEvent.change(input, { target: { value: "@missing" } });
+    fireEvent.keyDown(input, { key: "Enter" });
+
+    expect(onSubmit).not.toHaveBeenCalled();
+    expect(input).toHaveValue("@missing");
+  });
+
   it("removes selected skill tags through the shared tag control", () => {
     const onChange = vi.fn();
 

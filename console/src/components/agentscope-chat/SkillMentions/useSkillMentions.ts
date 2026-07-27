@@ -56,6 +56,7 @@ export function useSkillMentions({
       item.name.toLowerCase().includes(normalizedQuery),
     );
   }, [items, query]);
+  const blocksSubmit = open && (loading || filteredItems.length > 0);
 
   const close = useCallback(() => setMenuOpen(false), [setMenuOpen]);
 
@@ -116,6 +117,7 @@ export function useSkillMentions({
   );
 
   return {
+    blocksSubmit,
     close,
     filteredItems,
     handleInputValueChange,

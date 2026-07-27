@@ -115,7 +115,8 @@ export default function WelcomeCenterLayout(props: WelcomeCenterLayoutProps) {
     (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
       if (skillMentions) {
         skillMentionController.handleKeyDown(e);
-        if (e.defaultPrevented) {
+        if (e.defaultPrevented || skillMentionController.blocksSubmit) {
+          e.preventDefault();
           return;
         }
       }
