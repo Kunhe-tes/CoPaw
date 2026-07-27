@@ -183,6 +183,7 @@ export function useCronJobs() {
   return {
     jobs,
     loading,
+    fetchJobs,
     createJob,
     updateJob,
     deleteJob,

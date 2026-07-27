@@ -564,7 +564,7 @@ def _do_migrate_legacy_skills(
     # --- Phase 4: Reconcile workspace manifests ---
     for workspace_dir in workspace_dirs:
         # reconcile discovers on-disk skills and populates
-        # .skill_state/manifest.json with correct source, metadata, and signature.
+        # skill.json with correct source, metadata, and signature.
         reconcile_workspace_manifest(workspace_dir)
         active_names = workspace_active_names.get(workspace_dir, set())
 

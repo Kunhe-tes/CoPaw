@@ -5,6 +5,8 @@ import pytest
 from unittest.mock import AsyncMock
 from fastapi.testclient import TestClient
 
+from market.app.routers import skills_market as skills_router
+
 
 def _make_app(tmp_path):
     from fastapi import FastAPI
@@ -30,7 +32,7 @@ def _make_app(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_process_workspace_skills_writes_v2_manifest_path(
+async def test_process_workspace_skills_writes_workspace_manifest_path(
     tmp_path,
     monkeypatch,
 ):
@@ -84,7 +86,8 @@ async def test_process_workspace_skills_writes_v2_manifest_path(
         "version": 0,
         "skills": {"demo": {"enabled": True}},
     }
-    assert not (workspace_dir / "skill.json").exists()
+    assert manifest_path == workspace_dir / "skill.json"
+    assert not (workspace_dir / ".skill_state" / "manifest.json").exists()
 
 
 def test_publish_skill_returns_201(tmp_path):
@@ -170,7 +173,7 @@ def test_unpublish_skill_not_found_returns_404(tmp_path):
     assert resp.status_code == 404
 
 
-def test_distribute_skill_returns_200(tmp_path):
+def test_distribute_skill_returns_200(tmp_path, monkeypatch):
     from market.marketplace.schemas import PublishSkillRequest
 
     app = _make_app(tmp_path)
@@ -189,6 +192,12 @@ def test_distribute_skill_returns_200(tmp_path):
             {"tenant_id": "user1", "tenant_name": "User One", "bbk_id": "200"},
         ],
     )
+
+    monkeypatch.setattr(
+        skills_router.asyncio,
+        "create_task",
+        lambda coro: coro.close() or object(),
+    )
     client = TestClient(app)
     resp = client.post(
         f"/api/market/skills/{item.item_id}/distribute",
@@ -202,8 +211,64 @@ def test_distribute_skill_returns_200(tmp_path):
     )
     assert resp.status_code == 200
     data = resp.json()
-    assert data["distributed_count"] == 1
-    assert data["conflict_count"] == 0
+    assert data["status"] == "queued"
+    assert data["task_id"]
+
+
+def test_distribute_skill_writes_workspace_manifest(tmp_path):
+    from market.marketplace.fs import get_user_skills_dir
+    from market.marketplace.schemas import (
+        DistributeRequest,
+        PublishSkillRequest,
+    )
+
+    app = _make_app(tmp_path)
+    svc = app.state.marketplace
+    item, _ = asyncio.run(
+        svc.publish_skill(
+            "src_a",
+            PublishSkillRequest(
+                name="skill_z",
+                description="",
+                creator_id="u1",
+                creator_name="",
+                skill_json={},
+                skill_md="",
+            ),
+        ),
+    )
+    svc.db.fetch_all = AsyncMock(
+        return_value=[
+            {"tenant_id": "user1", "tenant_name": "User One", "bbk_id": "200"},
+        ],
+    )
+    result = asyncio.run(
+        svc.distribute_skill(
+            "src_a",
+            item.item_id,
+            operator_id="u1",
+            operator_name="User",
+            req=DistributeRequest(target_type="all"),
+        ),
+    )
+    assert result.distributed_count == 1
+    assert result.conflict_count == 0
+
+    workspace_dir = get_user_skills_dir(
+        tmp_path / "swe",
+        "user1",
+        "default",
+        "src_a",
+    ).parent
+    manifest_path = workspace_dir / "skill.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    assert manifest["skills"]["skill_z"]["source"] == (
+        f"marketplace:{item.item_id}"
+    )
+    assert manifest["skills"]["skill_z"]["metadata"]["distributed_by"] == (
+        "u1"
+    )
+    assert not (workspace_dir / ".skill_state" / "manifest.json").exists()
 
 
 def test_publish_skill_missing_source_id_returns_400(tmp_path):

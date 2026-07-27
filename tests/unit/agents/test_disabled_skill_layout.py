@@ -3,24 +3,162 @@ from __future__ import annotations
 
 import io
 import json
+import multiprocessing
 import zipfile
 from pathlib import Path
+from typing import Any
 
 import pytest
 
 from swe.agents import skills_manager
 from swe.agents.skills_manager import (
     _default_workspace_manifest,
-    get_legacy_workspace_skill_manifest_path,
     get_workspace_disabled_skills_dir,
     get_workspace_skill_manifest_path,
-    get_workspace_skill_state_dir,
     get_workspace_skills_dir,
     reconcile_workspace_manifest,
     resolve_effective_skills,
     resolve_workspace_managed_skill_dir,
 )
 from swe.utils.fs_text import SanitizedFsText
+
+
+def _enable_with_manifest_write_paused(
+    workspace: Path,
+    manifest_written: object,
+    release_manifest_write: object,
+    results: object,
+) -> None:
+    original_write = skills_manager._write_json_atomic
+    manifest_path = get_workspace_skill_manifest_path(workspace)
+
+    def pause_after_manifest_write(
+        path: Path,
+        payload: dict[str, Any],
+    ) -> None:
+        original_write(path, payload)
+        if path == manifest_path:
+            manifest_written.set()
+            if not release_manifest_write.wait(timeout=10):
+                raise TimeoutError("enable manifest write was not released")
+
+    skills_manager._write_json_atomic = pause_after_manifest_write
+    try:
+        result = skills_manager.SkillService(workspace).enable_skill("demo")
+        results.put(("enable", result))
+    except Exception as exc:
+        results.put(("enable_error", repr(exc)))
+
+
+def _disable_with_transition_observed(
+    workspace: Path,
+    worker_started: object,
+    transition_entered: object,
+    results: object,
+) -> None:
+    original_registered_dir = skills_manager.SkillService._registered_skill_dir
+
+    def observe_transition(
+        self: skills_manager.SkillService,
+        skill_name: str,
+        entry: dict[str, Any],
+    ) -> Path:
+        transition_entered.set()
+        return original_registered_dir(self, skill_name, entry)
+
+    skills_manager.SkillService._registered_skill_dir = observe_transition
+    worker_started.set()
+    try:
+        result = skills_manager.SkillService(workspace).disable_skill("demo")
+        results.put(("disable", result))
+    except Exception as exc:
+        results.put(("disable_error", repr(exc)))
+
+
+def _reconcile_with_move_paused(
+    workspace: Path,
+    move_completed: object,
+    release_move: object,
+    results: object,
+) -> None:
+    original_move = skills_manager._move_skill_dir
+
+    def pause_after_move(source: Path, target: Path) -> None:
+        original_move(source, target)
+        move_completed.set()
+        if not release_move.wait(timeout=10):
+            raise TimeoutError("reconcile move was not released")
+
+    skills_manager._move_skill_dir = pause_after_move
+    try:
+        result = reconcile_workspace_manifest(workspace)
+        results.put(("reconcile", result))
+    except Exception as exc:
+        results.put(("reconcile_error", repr(exc)))
+
+
+def _enable_with_transition_observed(
+    workspace: Path,
+    worker_started: object,
+    transition_entered: object,
+    results: object,
+) -> None:
+    original_registered_dir = skills_manager.SkillService._registered_skill_dir
+
+    def observe_transition(
+        self: skills_manager.SkillService,
+        skill_name: str,
+        entry: dict[str, Any],
+    ) -> Path:
+        transition_entered.set()
+        return original_registered_dir(self, skill_name, entry)
+
+    skills_manager.SkillService._registered_skill_dir = observe_transition
+    worker_started.set()
+    try:
+        result = skills_manager.SkillService(workspace).enable_skill("demo")
+        results.put(("enable", result))
+    except Exception as exc:
+        results.put(("enable_error", repr(exc)))
+
+
+def _cleanup_process_workers(
+    *,
+    processes: list[Any],
+    release_events: list[Any],
+    queues: list[Any],
+) -> None:
+    """Release and reap test workers without hiding an earlier assertion."""
+    for release_event in release_events:
+        try:
+            release_event.set()
+        except Exception:
+            pass
+
+    for process in processes:
+        try:
+            process.join(timeout=1)
+        except Exception:
+            pass
+        try:
+            if process.is_alive():
+                process.terminate()
+                process.join(timeout=1)
+            if process.is_alive():
+                process.kill()
+                process.join(timeout=1)
+        except Exception:
+            pass
+
+    for queue in queues:
+        try:
+            queue.close()
+        except Exception:
+            pass
+        try:
+            queue.join_thread()
+        except Exception:
+            pass
 
 
 def _write_skill(path: Path, marker: str) -> None:
@@ -77,6 +215,21 @@ def _skill_zip(name: str, marker: str) -> bytes:
     return buffer.getvalue()
 
 
+def _snapshot_workspace_skill_roots(
+    workspace: Path,
+) -> dict[str, bytes | None]:
+    snapshot: dict[str, bytes | None] = {}
+    for root_name in ("skills", ".disabled_skills"):
+        root = workspace / root_name
+        if not root.exists():
+            continue
+        snapshot[root_name] = None
+        for path in sorted(root.rglob("*")):
+            relative = path.relative_to(workspace).as_posix()
+            snapshot[relative] = path.read_bytes() if path.is_file() else None
+    return snapshot
+
+
 def test_workspace_skill_layout_paths(tmp_path: Path) -> None:
     workspace_dir = tmp_path / "workspace"
 
@@ -84,15 +237,10 @@ def test_workspace_skill_layout_paths(tmp_path: Path) -> None:
     assert get_workspace_disabled_skills_dir(workspace_dir) == (
         workspace_dir / ".disabled_skills"
     )
-    assert get_workspace_skill_state_dir(workspace_dir) == (
-        workspace_dir / ".skill_state"
-    )
     assert get_workspace_skill_manifest_path(workspace_dir) == (
-        workspace_dir / ".skill_state" / "manifest.json"
-    )
-    assert get_legacy_workspace_skill_manifest_path(workspace_dir) == (
         workspace_dir / "skill.json"
     )
+    assert not (workspace_dir / ".skill_state").exists()
 
 
 def test_default_workspace_manifest_declares_layout_v2() -> None:
@@ -157,6 +305,42 @@ def test_reconcile_moves_registered_enabled_skill_into_runtime_root(
     assert resolve_effective_skills(workspace, "console") == ["demo"]
 
 
+def test_reconcile_preserves_external_manifest_edits_and_moves_package(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "workspace"
+    disabled = workspace / ".disabled_skills" / "demo"
+    active = workspace / "skills" / "demo"
+    _write_skill(disabled, "disabled-copy")
+    _write_manifest(workspace, {"demo": _entry(enabled=False)})
+
+    manifest_path = workspace / "skill.json"
+    external_payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+    external_payload["external_manifest_field"] = {"kept": True}
+    external_payload["skills"]["demo"]["enabled"] = True
+    external_payload["skills"]["demo"]["config"] = {"token": "external"}
+    external_payload["skills"]["demo"].setdefault("metadata", {})[
+        "external_note"
+    ] = "preserved"
+    manifest_path.write_text(
+        json.dumps(external_payload, indent=2),
+        encoding="utf-8",
+    )
+
+    reconciled = reconcile_workspace_manifest(workspace)
+
+    assert active.exists()
+    assert not disabled.exists()
+    assert reconciled["external_manifest_field"] == {"kept": True}
+    assert reconciled["skills"]["demo"]["enabled"] is True
+    assert reconciled["skills"]["demo"]["config"] == {
+        "token": "external",
+    }
+    assert reconciled["skills"]["demo"]["metadata"]["external_note"] == (
+        "preserved"
+    )
+
+
 def test_reconcile_prefers_runtime_copy_when_both_registered_copies_exist(
     tmp_path: Path,
 ) -> None:
@@ -169,13 +353,38 @@ def test_reconcile_prefers_runtime_copy_when_both_registered_copies_exist(
 
     reconcile_workspace_manifest(workspace)
 
-    assert not active.exists()
-    assert "runtime-wins" in (disabled / "SKILL.md").read_text(
+    manifest = json.loads(
+        (workspace / "skill.json").read_text(encoding="utf-8"),
+    )
+    assert active.exists()
+    assert "runtime-wins" in (active / "SKILL.md").read_text(
         encoding="utf-8",
     )
-    assert "discard-me" not in (disabled / "SKILL.md").read_text(
-        encoding="utf-8",
+    assert not disabled.exists()
+    assert manifest["skills"]["demo"]["enabled"] is True
+
+
+def test_reconcile_keeps_runtime_copy_when_enabled_skill_has_both_copies(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "workspace"
+    active = workspace / "skills" / "demo"
+    disabled = workspace / ".disabled_skills" / "demo"
+    _write_skill(active, "runtime-wins")
+    _write_skill(disabled, "discard-me")
+    _write_manifest(workspace, {"demo": _entry(enabled=True)})
+
+    reconciled = reconcile_workspace_manifest(workspace)
+
+    assert (
+        (active / "SKILL.md")
+        .read_text(encoding="utf-8")
+        .endswith(
+            "runtime-wins\n",
+        )
     )
+    assert not disabled.exists()
+    assert reconciled["skills"]["demo"]["enabled"] is True
 
 
 def test_reconcile_ignores_unmanaged_runtime_content(tmp_path: Path) -> None:
@@ -352,6 +561,417 @@ def test_reconcile_rejects_malformed_workspace_manifest_without_mutation(
     assert disabled.exists()
 
 
+@pytest.mark.parametrize(
+    ("layout_version", "include_layout_version"),
+    [
+        pytest.param(None, False, id="missing"),
+        pytest.param(1, True, id="v1"),
+        pytest.param(None, True, id="null"),
+        pytest.param(3, True, id="future"),
+        pytest.param(2.0, True, id="float"),
+        pytest.param("2", True, id="string"),
+        pytest.param(False, True, id="false"),
+        pytest.param(True, True, id="true"),
+    ],
+)
+def test_reconcile_requires_existing_manifest_layout_v2_before_mutation(
+    tmp_path: Path,
+    layout_version: object,
+    include_layout_version: bool,
+) -> None:
+    workspace = tmp_path / "workspace"
+    active = workspace / "skills" / "demo"
+    disabled = workspace / ".disabled_skills" / "demo"
+    _write_skill(active, "active-copy")
+    _write_skill(disabled, "disabled-copy")
+    manifest_path = get_workspace_skill_manifest_path(workspace)
+    payload: dict[str, object] = {
+        "schema_version": "workspace-skill-manifest.v1",
+        "version": 17,
+        "skills": {"demo": _entry(enabled=False)},
+    }
+    if include_layout_version:
+        payload["layout_version"] = layout_version
+    manifest_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+    original_manifest = manifest_path.read_bytes()
+    original_active = (active / "SKILL.md").read_bytes()
+    original_disabled = (disabled / "SKILL.md").read_bytes()
+
+    with pytest.raises(
+        ValueError,
+        match=(
+            r"skills migrate-layout --check.*" r"skills migrate-layout --apply"
+        ),
+    ):
+        reconcile_workspace_manifest(workspace)
+
+    assert manifest_path.read_bytes() == original_manifest
+    assert (active / "SKILL.md").read_bytes() == original_active
+    assert (disabled / "SKILL.md").read_bytes() == original_disabled
+
+
+@pytest.mark.parametrize(
+    ("payload", "expected_problem"),
+    [
+        pytest.param(
+            [],
+            r"must contain a JSON object",
+            id="top-list",
+        ),
+        pytest.param(
+            "invalid",
+            r"must contain a JSON object",
+            id="top-string",
+        ),
+        pytest.param(
+            7,
+            r"must contain a JSON object",
+            id="top-number",
+        ),
+        pytest.param(
+            None,
+            r"must contain a JSON object",
+            id="top-null",
+        ),
+        pytest.param(
+            {"layout_version": 2, "skills": []},
+            r"field 'skills' must be a JSON object",
+            id="skills-list",
+        ),
+        pytest.param(
+            {"layout_version": 2, "skills": None},
+            r"field 'skills' must be a JSON object",
+            id="skills-null",
+        ),
+        pytest.param(
+            {"layout_version": 2, "skills": "invalid"},
+            r"field 'skills' must be a JSON object",
+            id="skills-string",
+        ),
+        pytest.param(
+            {"layout_version": 2, "skills": 7},
+            r"field 'skills' must be a JSON object",
+            id="skills-number",
+        ),
+    ],
+)
+@pytest.mark.parametrize("operation", ["reconcile", "enable", "disable"])
+def test_runtime_skill_operations_reject_invalid_manifest_structure(
+    tmp_path: Path,
+    payload: object,
+    expected_problem: str,
+    operation: str,
+) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir(parents=True)
+    manifest_path = get_workspace_skill_manifest_path(workspace)
+    manifest_path.write_text(json.dumps(payload), encoding="utf-8")
+    original_manifest = manifest_path.read_bytes()
+    original_business_state = _snapshot_workspace_skill_roots(workspace)
+
+    with pytest.raises(
+        ValueError,
+        match=rf"Workspace manifest .*skill\.json.*{expected_problem}",
+    ):
+        if operation == "reconcile":
+            reconcile_workspace_manifest(workspace)
+        elif operation == "enable":
+            skills_manager.SkillService(workspace).enable_skill("demo")
+        else:
+            skills_manager.SkillService(workspace).disable_skill("demo")
+
+    assert manifest_path.read_bytes() == original_manifest
+    assert (
+        _snapshot_workspace_skill_roots(workspace) == original_business_state
+    )
+
+
+def test_reconcile_rejects_string_enabled_before_activating_disabled_skill(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "workspace"
+    active = workspace / "skills" / "demo"
+    disabled = workspace / ".disabled_skills" / "demo"
+    _write_skill(disabled, "disabled-copy")
+    manifest_path = get_workspace_skill_manifest_path(workspace)
+    payload = {
+        "layout_version": 2,
+        "skills": {"demo": {"enabled": "false"}},
+    }
+    manifest_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+    original_manifest = manifest_path.read_bytes()
+    original_business_state = _snapshot_workspace_skill_roots(workspace)
+
+    with pytest.raises(
+        ValueError,
+        match=(
+            r"Workspace manifest .*skill\.json.*skill 'demo'.*"
+            r"field 'enabled'.*boolean"
+        ),
+    ):
+        reconcile_workspace_manifest(workspace)
+
+    assert manifest_path.read_bytes() == original_manifest
+    assert (
+        _snapshot_workspace_skill_roots(workspace) == original_business_state
+    )
+    assert not active.exists()
+    assert (
+        (disabled / "SKILL.md")
+        .read_text(encoding="utf-8")
+        .endswith(
+            "disabled-copy\n",
+        )
+    )
+
+
+@pytest.mark.parametrize(
+    ("payload", "offending_field", "requirement"),
+    [
+        pytest.param(
+            {"layout_version": 2, "skills": {"demo": []}},
+            "skill 'demo' entry",
+            "JSON object",
+            id="entry-list",
+        ),
+        pytest.param(
+            {"layout_version": 2, "skills": {"demo": None}},
+            "skill 'demo' entry",
+            "JSON object",
+            id="entry-null",
+        ),
+        pytest.param(
+            {"layout_version": 2, "skills": {"demo": "invalid"}},
+            "skill 'demo' entry",
+            "JSON object",
+            id="entry-string",
+        ),
+        pytest.param(
+            {"layout_version": 2, "skills": {"demo": 7}},
+            "skill 'demo' entry",
+            "JSON object",
+            id="entry-number",
+        ),
+        *[
+            pytest.param(
+                {
+                    "layout_version": 2,
+                    "skills": {"demo": {"enabled": enabled}},
+                },
+                "skill 'demo' field 'enabled'",
+                "JSON boolean",
+                id=f"enabled-{label}",
+            )
+            for label, enabled in (
+                ("string", "false"),
+                ("zero", 0),
+                ("one", 1),
+                ("null", None),
+                ("list", []),
+                ("object", {}),
+            )
+        ],
+        *[
+            pytest.param(
+                {"layout_version": 2, "skills": {skill_name: {}}},
+                f"skill name {skill_name!r}",
+                requirement,
+                id=f"name-{label}",
+            )
+            for label, skill_name, requirement in (
+                ("empty", "", "non-empty string"),
+                ("dot", ".", "safe single path segment"),
+                ("dot-dot", "..", "safe single path segment"),
+                ("forward-slash", "nested/demo", "safe single path segment"),
+                (
+                    "backslash",
+                    "nested\\demo",
+                    "safe single path segment",
+                ),
+                ("nul", "bad\x00name", "safe single path segment"),
+            )
+        ],
+    ],
+)
+@pytest.mark.parametrize("operation", ["reconcile", "enable", "disable"])
+def test_runtime_skill_operations_reject_invalid_manifest_entries(
+    tmp_path: Path,
+    payload: object,
+    offending_field: str,
+    requirement: str,
+    operation: str,
+) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir(parents=True)
+    manifest_path = get_workspace_skill_manifest_path(workspace)
+    manifest_path.write_text(json.dumps(payload), encoding="utf-8")
+    original_manifest = manifest_path.read_bytes()
+    original_business_state = _snapshot_workspace_skill_roots(workspace)
+
+    with pytest.raises(ValueError) as exc_info:
+        if operation == "reconcile":
+            reconcile_workspace_manifest(workspace)
+        elif operation == "enable":
+            skills_manager.SkillService(workspace).enable_skill("target")
+        else:
+            skills_manager.SkillService(workspace).disable_skill("target")
+
+    error_message = str(exc_info.value)
+    assert str(manifest_path) in error_message
+    assert offending_field in error_message
+    assert requirement in error_message
+    assert manifest_path.read_bytes() == original_manifest
+    assert (
+        _snapshot_workspace_skill_roots(workspace) == original_business_state
+    )
+
+
+def test_reconcile_new_workspace_uses_default_layout_v2(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "workspace"
+    unmanaged = workspace / "skills" / "manual"
+    _write_skill(unmanaged, "manual-copy")
+    manifest_path = get_workspace_skill_manifest_path(workspace)
+    assert not manifest_path.exists()
+
+    state = reconcile_workspace_manifest(workspace)
+
+    assert state["layout_version"] == 2
+    assert (
+        json.loads(manifest_path.read_text(encoding="utf-8"))["layout_version"]
+        == 2
+    )
+    assert unmanaged.exists()
+
+
+@pytest.mark.filterwarnings(
+    "ignore:This process .* is multi-threaded.*:DeprecationWarning",
+)
+def test_enable_disable_transition_uses_one_cross_process_lock(
+    tmp_path: Path,
+) -> None:
+    if "fork" not in multiprocessing.get_all_start_methods():
+        pytest.skip("requires fork to instrument independent workers")
+
+    workspace = tmp_path / "workspace"
+    active = workspace / "skills" / "demo"
+    disabled = workspace / ".disabled_skills" / "demo"
+    _write_skill(disabled, "disabled-copy")
+    _write_manifest(workspace, {"demo": _entry(enabled=False)})
+    context = multiprocessing.get_context("fork")
+    manifest_written = context.Event()
+    release_manifest_write = context.Event()
+    disable_started = context.Event()
+    disable_entered = context.Event()
+    results = context.Queue()
+    enable_process = context.Process(
+        target=_enable_with_manifest_write_paused,
+        args=(
+            workspace,
+            manifest_written,
+            release_manifest_write,
+            results,
+        ),
+    )
+    disable_process = context.Process(
+        target=_disable_with_transition_observed,
+        args=(workspace, disable_started, disable_entered, results),
+    )
+
+    try:
+        enable_process.start()
+        assert manifest_written.wait(timeout=10)
+        disable_process.start()
+        assert disable_started.wait(timeout=10)
+        disable_was_blocked = not disable_entered.wait(timeout=0.5)
+        release_manifest_write.set()
+        enable_process.join(timeout=10)
+        disable_process.join(timeout=10)
+
+        assert disable_was_blocked
+        assert enable_process.exitcode == 0
+        assert disable_process.exitcode == 0
+        operation_results = dict(results.get(timeout=2) for _ in range(2))
+        assert operation_results["enable"]["success"] is True
+        assert operation_results["disable"]["success"] is True
+        assert not active.exists()
+        assert disabled.exists()
+        manifest = json.loads(
+            get_workspace_skill_manifest_path(workspace).read_text(
+                encoding="utf-8",
+            ),
+        )
+        assert manifest["skills"]["demo"]["enabled"] is False
+    finally:
+        _cleanup_process_workers(
+            processes=[enable_process, disable_process],
+            release_events=[release_manifest_write],
+            queues=[results],
+        )
+
+
+@pytest.mark.filterwarnings(
+    "ignore:This process .* is multi-threaded.*:DeprecationWarning",
+)
+def test_reconcile_and_enable_share_workspace_cross_process_lock(
+    tmp_path: Path,
+) -> None:
+    if "fork" not in multiprocessing.get_all_start_methods():
+        pytest.skip("requires fork to instrument independent workers")
+
+    workspace = tmp_path / "workspace"
+    active = workspace / "skills" / "demo"
+    disabled = workspace / ".disabled_skills" / "demo"
+    _write_skill(active, "active-copy")
+    _write_manifest(workspace, {"demo": _entry(enabled=False)})
+    context = multiprocessing.get_context("fork")
+    move_completed = context.Event()
+    release_move = context.Event()
+    enable_started = context.Event()
+    enable_entered = context.Event()
+    results = context.Queue()
+    reconcile_process = context.Process(
+        target=_reconcile_with_move_paused,
+        args=(workspace, move_completed, release_move, results),
+    )
+    enable_process = context.Process(
+        target=_enable_with_transition_observed,
+        args=(workspace, enable_started, enable_entered, results),
+    )
+
+    try:
+        reconcile_process.start()
+        assert move_completed.wait(timeout=10)
+        enable_process.start()
+        assert enable_started.wait(timeout=10)
+        enable_was_blocked = not enable_entered.wait(timeout=0.5)
+        release_move.set()
+        reconcile_process.join(timeout=10)
+        enable_process.join(timeout=10)
+
+        assert enable_was_blocked
+        assert reconcile_process.exitcode == 0
+        assert enable_process.exitcode == 0
+        operation_results = dict(results.get(timeout=2) for _ in range(2))
+        assert "reconcile" in operation_results
+        assert operation_results["enable"]["success"] is True
+        assert active.exists()
+        assert not disabled.exists()
+        manifest = json.loads(
+            get_workspace_skill_manifest_path(workspace).read_text(
+                encoding="utf-8",
+            ),
+        )
+        assert manifest["skills"]["demo"]["enabled"] is True
+    finally:
+        _cleanup_process_workers(
+            processes=[reconcile_process, enable_process],
+            release_events=[release_move],
+            queues=[results],
+        )
+
+
 def test_disable_moves_package_before_committing_disabled_state(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -370,26 +990,26 @@ def test_disable_moves_package_before_committing_disabled_state(
     disabled = workspace / ".disabled_skills" / "demo"
     _write_skill(disabled, "stale-hidden-copy")
     manifest_path = get_workspace_skill_manifest_path(workspace)
-    original_mutate = skills_manager._mutate_json
+    original_write = skills_manager._write_json_atomic
 
     def assert_move_precedes_manifest(
         path: Path,
-        default: dict,
-        mutator,
-    ):
+        payload: dict[str, Any],
+    ) -> None:
         assert path == manifest_path
         current = json.loads(path.read_text(encoding="utf-8"))
         assert current["skills"]["demo"]["enabled"] is True
+        assert payload["skills"]["demo"]["enabled"] is False
         assert not active.exists()
         assert disabled.exists()
         assert "active-copy" in (disabled / "SKILL.md").read_text(
             encoding="utf-8",
         )
-        return original_mutate(path, default, mutator)
+        original_write(path, payload)
 
     monkeypatch.setattr(
         skills_manager,
-        "_mutate_json",
+        "_write_json_atomic",
         assert_move_precedes_manifest,
     )
 
@@ -412,7 +1032,7 @@ def test_enable_scans_then_commits_state_then_moves_package(
     manifest_path = get_workspace_skill_manifest_path(workspace)
     service = skills_manager.SkillService(workspace)
     observed: list[str] = []
-    original_mutate = skills_manager._mutate_json
+    original_write = skills_manager._write_json_atomic
     original_move = skills_manager._move_skill_dir
 
     def record_scan(skill_dir: Path, skill_name: str) -> None:
@@ -429,14 +1049,13 @@ def test_enable_scans_then_commits_state_then_moves_package(
 
     def record_manifest(
         path: Path,
-        default: dict,
-        mutator,
-    ):
+        payload: dict[str, Any],
+    ) -> None:
         assert observed == ["scan"]
         assert disabled.exists()
-        result = original_mutate(path, default, mutator)
+        assert payload["skills"]["demo"]["enabled"] is True
+        original_write(path, payload)
         observed.append("manifest")
-        return result
 
     def record_move(source: Path, target: Path) -> None:
         assert observed == ["scan", "manifest"]
@@ -456,7 +1075,11 @@ def test_enable_scans_then_commits_state_then_moves_package(
         "_scan_skill_dir_or_raise",
         record_scan,
     )
-    monkeypatch.setattr(skills_manager, "_mutate_json", record_manifest)
+    monkeypatch.setattr(
+        skills_manager,
+        "_write_json_atomic",
+        record_manifest,
+    )
     monkeypatch.setattr(skills_manager, "_move_skill_dir", record_move)
 
     result = service.enable_skill("demo")

@@ -95,6 +95,34 @@ async def test_upsert_governance_record_uses_source_user_agent_record_key(
 
 
 @pytest.mark.asyncio
+async def test_list_archive_items_page_counts_and_limits_in_database(
+    store,
+    mock_db,
+) -> None:
+    """归档列表必须在数据库中统计总数并按窗口读取。"""
+    mock_db.fetch_one.return_value = {"total": 50001}
+
+    rows, total = await store.list_archive_items_page(
+        "source-a",
+        target_user_ids=["alice"],
+        target_agent_id="default",
+        expired=True,
+        limit=20,
+        offset=40,
+    )
+
+    assert rows == []
+    assert total == 50001
+    count_query, count_params = mock_db.fetch_one.await_args.args
+    page_query, page_params = mock_db.fetch_all.await_args.args
+    assert "COUNT(*) AS total" in count_query
+    assert "expired = %s" in count_query
+    assert count_params == ("source-a", "alice", "default", 1)
+    assert "LIMIT %s OFFSET %s" in page_query
+    assert page_params == ("source-a", "alice", "default", 1, 20, 40)
+
+
+@pytest.mark.asyncio
 async def test_mark_rollback_updates_original_record(store, mock_db) -> None:
     """回滚更新原治理记录，不生成新记录。"""
     await store.mark_governance_record_rollback(

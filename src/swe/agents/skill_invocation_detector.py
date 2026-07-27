@@ -258,7 +258,7 @@ class SkillInvocationDetector:
         """Set the list of enabled skills and cache their descriptions.
 
         Reads skill descriptions from the workspace management manifest at
-        ``.skill_state/manifest.json`` during setup time, so they're ready
+        ``skill.json`` during setup time, so they're ready
         when start_skill is called.
 
         Args:

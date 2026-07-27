@@ -95,6 +95,7 @@ const initialState: IframeContext = {
   userChange: false,
   sessionId: null,
   taskId: null,
+  hideChat: false,
 };
 
 export const useIframeStore = create<IframeStore>()(
@@ -143,6 +144,7 @@ export const useIframeStore = create<IframeStore>()(
         orgLvl: state.orgLvl,
         positionId: state.positionId,
         userChange: state.userChange,
+        hideChat: state.hideChat,
         // 导航参数不需要持久化，只在首次加载时使用
       }),
       storage: {

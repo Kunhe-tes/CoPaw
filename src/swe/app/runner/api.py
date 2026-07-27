@@ -485,7 +485,7 @@ async def list_chats(
     ),
     cursor: Optional[str] = Query(
         None,
-        description="Opaque cursor for stable chat pagination",
+        description="Opaque cursor for live best-effort chat pagination",
     ),
     mgr: ChatManager = Depends(get_chat_manager),
     workspace=Depends(get_workspace),
@@ -494,6 +494,8 @@ async def list_chats(
 
     Omitting both pagination parameters preserves the legacy array response.
     Providing both returns a ``ChatPage`` ordered by latest update first.
+    Cursor pages are live and best-effort: updates between requests can move
+    records across the cursor boundary.
 
     Args:
         user_id: Optional user ID to filter chats

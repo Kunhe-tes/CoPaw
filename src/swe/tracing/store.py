@@ -123,14 +123,15 @@ class TraceStore:
 
         query = """
             INSERT INTO swe_tracing_traces (
-                trace_id, source_id, user_id, session_id, session_name, channel, start_time,
+                trace_id, b3_trace_id, source_id, user_id, session_id, session_name, channel, start_time,
                 end_time, duration_ms, model_name, total_input_tokens,
                 total_output_tokens, total_tokens, tools_used, skills_used,
                 status, error, user_message, user_name, bbk_id
-            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
         """
         params = (
             trace.trace_id,
+            trace.b3_trace_id,
             trace.source_id,
             trace.user_id,
             trace.session_id,
@@ -2901,6 +2902,7 @@ class TraceStore:
         """Convert database row to Trace model."""
         return Trace(
             trace_id=row["trace_id"],
+            b3_trace_id=row.get("b3_trace_id"),
             source_id=row["source_id"],
             user_id=row["user_id"],
             session_id=row["session_id"],

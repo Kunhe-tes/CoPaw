@@ -9,6 +9,7 @@ import asyncio
 
 from swe.app.crons.monitor_sync_client import (
     MonitorSyncClient,
+    _has_dispatch_execution_meta,
     get_monitor_sync_client,
     get_monitor_api_url,
 )
@@ -172,6 +173,61 @@ class TestSyncRequestFormat:
 class TestExecutionRecordFormat:
     """Tests for execution record format."""
 
+    @pytest.mark.parametrize(
+        "cron_dispatch",
+        [
+            {"b3_trace_id": "abc123"},
+            {"intent_id": 7, "batch_id": "batch-1"},
+            {"intent_id": 0, "batch_id": "batch-1", "dispatch_attempt": 1},
+            {"intent_id": -1, "batch_id": "batch-1", "dispatch_attempt": 1},
+            {"intent_id": True, "batch_id": "batch-1", "dispatch_attempt": 1},
+            {"intent_id": 7, "batch_id": "", "dispatch_attempt": 1},
+            {"intent_id": 7, "batch_id": "   ", "dispatch_attempt": 1},
+            {"intent_id": 7, "batch_id": None, "dispatch_attempt": 1},
+            {"intent_id": 7, "batch_id": 123, "dispatch_attempt": 1},
+            {"intent_id": 7, "batch_id": True, "dispatch_attempt": 1},
+            {"intent_id": 7, "batch_id": "batch-1", "dispatch_attempt": 0},
+            {"intent_id": 7, "batch_id": "batch-1", "dispatch_attempt": -1},
+            {"intent_id": 7, "batch_id": "batch-1", "dispatch_attempt": True},
+        ],
+    )
+    def test_dispatch_execution_meta_rejects_incomplete_or_invalid_identity(
+        self,
+        cron_dispatch,
+    ):
+        exec_data = {"meta": json.dumps({"cron_dispatch": cron_dispatch})}
+
+        assert _has_dispatch_execution_meta(exec_data) is False
+
+    @pytest.mark.parametrize(
+        "raw_meta",
+        [
+            "{",
+            json.dumps([]),
+            json.dumps(None),
+            json.dumps(7),
+            json.dumps({"cron_dispatch": "invalid"}),
+        ],
+    )
+    def test_dispatch_execution_meta_rejects_malformed_metadata(self, raw_meta):
+        assert _has_dispatch_execution_meta({"meta": raw_meta}) is False
+
+    def test_dispatch_execution_meta_accepts_complete_identity(self):
+        exec_data = {
+            "meta": json.dumps(
+                {
+                    "cron_dispatch": {
+                        "intent_id": 7,
+                        "batch_id": "batch-1",
+                        "dispatch_attempt": 1,
+                        "b3_trace_id": "abc123",
+                    },
+                },
+            ),
+        }
+
+        assert _has_dispatch_execution_meta(exec_data) is True
+
     @pytest.mark.asyncio
     async def test_record_execution_disabled(self):
         """Test record_execution when disabled."""
@@ -187,6 +243,67 @@ class TestExecutionRecordFormat:
             status="success",
             actual_time=datetime.now(timezone.utc),
         )
+
+    @pytest.mark.asyncio
+    async def test_b3_only_execution_routes_to_monitor(self):
+        """B3 tracing metadata must not be mistaken for dispatch identity."""
+        client = MonitorSyncClient("http://monitor/api")
+        job = MagicMock()
+        job.id = "job-1"
+        job.name = "Job"
+        job.tenant_id = "tenant-a"
+        job.source_id = "source-a"
+        job.task_type = "agent"
+        job.meta = {}
+
+        monitor_call = object()
+        client._do_record_execution = MagicMock(return_value=monitor_call)
+        client._sync_fire_and_forget = MagicMock()
+        client._record_dispatch_execution_with_retry = AsyncMock()
+
+        await client.record_execution(
+            job=job,
+            status="success",
+            actual_time=datetime(2026, 7, 1, tzinfo=timezone.utc),
+            meta={"cron_dispatch": {"b3_trace_id": "abc123"}},
+        )
+
+        client._record_dispatch_execution_with_retry.assert_not_awaited()
+        client._do_record_execution.assert_called_once()
+        client._sync_fire_and_forget.assert_called_once_with(monitor_call)
+
+    @pytest.mark.asyncio
+    async def test_complete_dispatch_identity_routes_only_to_scheduler(self):
+        """A complete dispatch identity must use only Scheduler feedback."""
+        client = MonitorSyncClient("http://monitor/api")
+        job = MagicMock()
+        job.id = "child-1"
+        job.name = "Child"
+        job.tenant_id = "tenant-a"
+        job.source_id = "source-a"
+        job.task_type = "agent"
+        job.meta = {}
+
+        client._record_dispatch_execution_with_retry = AsyncMock()
+        client._do_record_execution = MagicMock()
+        client._sync_fire_and_forget = MagicMock()
+
+        await client.record_execution(
+            job=job,
+            status="success",
+            actual_time=datetime(2026, 7, 1, tzinfo=timezone.utc),
+            meta={
+                "cron_dispatch": {
+                    "intent_id": 7,
+                    "batch_id": "batch-1",
+                    "dispatch_attempt": 1,
+                },
+            },
+        )
+
+        client._record_dispatch_execution_with_retry.assert_awaited_once()
+        client._do_record_execution.assert_not_called()
+        client._sync_fire_and_forget.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_dispatch_execution_sync_retries_until_monitor_ack(
@@ -225,7 +342,13 @@ class TestExecutionRecordFormat:
             job=job,
             status="success",
             actual_time=datetime(2026, 7, 1, tzinfo=timezone.utc),
-            meta={"cron_dispatch": {"intent_id": 7, "batch_id": "batch-1"}},
+            meta={
+                "cron_dispatch": {
+                    "intent_id": 7,
+                    "batch_id": "batch-1",
+                    "dispatch_attempt": 1,
+                },
+            },
         )
 
         assert len(attempts) == 3

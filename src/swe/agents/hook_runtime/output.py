@@ -14,6 +14,7 @@ _PROMPT_JUDGMENT_DECISIONS = {
     "allow": HookDecision.ALLOW,
     "deny": HookDecision.DENY,
     "block": HookDecision.BLOCK,
+    "stop": HookDecision.STOP,
 }
 _BEFORE_STOP_PROMPT_JUDGMENT_DECISIONS = {
     "allow": HookDecision.ALLOW,
@@ -96,6 +97,9 @@ def normalize_hook_output(
     elif output.continue_ is False:
         decision = HookDecision.STOP
         reason = output.stop_reason or reason or "Hook requested stop"
+    elif output.decision == "stop":
+        decision = HookDecision.STOP
+        reason = reason or "Hook requested stop"
     elif output.decision == "block":
         decision = HookDecision.BLOCK
         reason = reason or "Hook blocked the event"

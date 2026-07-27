@@ -1,4 +1,4 @@
-# -*- coding: utf-8 -*-
+﻿# -*- coding: utf-8 -*-
 """Query service for cron job and execution data.
 
 Provides methods to query job definitions and execution history
@@ -52,6 +52,7 @@ from ...models.cron import (
     CronJobQueryParams,
     ExecutionModel,
     ExecutionQueryParams,
+    LatestExecutionSubtaskCountResponse,
     PaginatedResponse,
     SubscriptionDetailItem,
     SubscriptionOverviewItem,
@@ -104,6 +105,7 @@ DISPATCH_INTENT_TIME_FIELDS = [
 DISPATCH_EVENT_TIME_FIELDS = ["created_at"]
 DISPATCH_CAPACITY_TIME_FIELDS = ["created_at"]
 DISPATCH_POLICY_TIME_FIELDS = ["created_at", "updated_at"]
+DISPATCH_CAPACITY_EVENT_LIMIT = 100
 
 
 def convert_row_times_direct(row: dict, time_fields: List[str]) -> dict:
@@ -167,6 +169,8 @@ class QueryService:
         "黄金持仓客户陪伴技能",
         "query-fund-plus-cust",
         "固收+基金营销技能",
+        "query-insu-expand-cust",
+        "分行保险潜客技能",
     }
 
     def __init__(self) -> None:
@@ -310,20 +314,49 @@ class QueryService:
         start_time: Optional[datetime] = None,
         end_time: Optional[datetime] = None,
         status: Optional[str] = None,
+        query: Optional[str] = None,
     ) -> tuple[str, list[Any]]:
         """构建批调度 batch 查询条件。"""
-        conditions = ["source_id = %s"]
+        conditions = ["b.source_id = %s"]
         sql_params: list[Any] = [source_id]
 
         if start_time:
-            conditions.append("scheduled_fire_at >= %s")
+            conditions.append("b.scheduled_fire_at >= %s")
             sql_params.append(start_time)
         if end_time:
-            conditions.append("scheduled_fire_at <= %s")
+            conditions.append("b.scheduled_fire_at <= %s")
             sql_params.append(end_time)
         if status and status != "all":
-            conditions.append("status = %s")
+            conditions.append("b.status = %s")
             sql_params.append(status)
+        normalized_query = (query or "").strip().lower()
+        if normalized_query:
+            escaped_query = (
+                normalized_query.replace("\\", "\\\\")
+                .replace("%", "\\%")
+                .replace("_", "\\_")
+            )
+            searchable_fields = (
+                "b.batch_id",
+                "b.parent_job_id",
+                "b.parent_external_job_id",
+                "b.tenant_id",
+                "b.provider_id",
+                "b.model_id",
+                "b.agent_id",
+                "j.name",
+            )
+            conditions.append(
+                "("
+                + " OR ".join(
+                    f"LOWER(COALESCE({field}, '')) LIKE %s ESCAPE '\\\\'"
+                    for field in searchable_fields
+                )
+                + ")"
+            )
+            sql_params.extend(
+                [f"%{escaped_query}%"] * len(searchable_fields),
+            )
 
         return " AND ".join(conditions), sql_params
 
@@ -350,15 +383,25 @@ class QueryService:
 
     def _map_dispatch_policy(self, row: dict) -> CronDispatchPolicyItem:
         item = convert_row_times_direct(row, DISPATCH_POLICY_TIME_FIELDS)
+        strategy_schedule = _parse_json_field(item.get("strategy_schedule"))
+        if isinstance(strategy_schedule, list):
+            strategy_schedule = [
+                entry for entry in strategy_schedule if isinstance(entry, dict)
+            ]
+        else:
+            strategy_schedule = None
         strategy = {
-            "strategy_id": item.get("strategy_id") or item.get("default_strategy_id"),
+            "strategy_id": item.get("strategy_id")
+            or item.get("default_strategy_id"),
             "min_workers": item.get("min_workers"),
             "baseline_workers": item.get("baseline_workers"),
             "max_workers": item.get("max_workers"),
             "adjust_interval_seconds": item.get("adjust_interval_seconds"),
             "feedback_window_seconds": item.get("feedback_window_seconds"),
             "stale_execution_seconds": item.get("stale_execution_seconds"),
-            "error_rate_rules": _parse_json_field(item.get("error_rate_rules")),
+            "error_rate_rules": _parse_json_field(
+                item.get("error_rate_rules"),
+            ),
             "description": item.get("description") or "",
             "enabled": bool(item.get("strategy_enabled", True)),
         }
@@ -367,11 +410,102 @@ class QueryService:
             provider_id=str(item.get("provider_id") or ""),
             model_id=str(item.get("model_id") or ""),
             default_strategy_id=str(item.get("default_strategy_id") or ""),
-            strategy_schedule=_parse_json_field(item.get("strategy_schedule")),
+            strategy_schedule=strategy_schedule,
             enabled=bool(item.get("enabled", True)),
             strategy=strategy,
             created_at=item.get("created_at"),
             updated_at=item.get("updated_at"),
+        )
+
+    async def _fetch_dispatch_worker_policy_rows(
+        self,
+        db: DatabaseConnection,
+        source_id: str,
+    ) -> List[dict]:
+        return await db.fetch_all(
+            """
+            SELECT
+                p.source_id, p.provider_id, p.model_id,
+                p.default_strategy_id, p.strategy_schedule, p.enabled,
+                p.created_at, p.updated_at,
+                s.strategy_id, s.min_workers, s.baseline_workers, s.max_workers,
+                s.adjust_interval_seconds, s.feedback_window_seconds,
+                s.stale_execution_seconds, s.error_rate_rules,
+                s.enabled AS strategy_enabled, s.description
+            FROM swe_cron_dispatch_model_worker_policy p
+            LEFT JOIN swe_cron_dispatch_worker_strategy s
+                ON p.default_strategy_id = s.strategy_id
+            WHERE p.source_id = %s
+            ORDER BY p.provider_id, p.model_id
+            """,
+            (source_id,),
+        )
+
+    async def _fetch_current_dispatch_capacity_rows(
+        self,
+        db: DatabaseConnection,
+        source_id: str,
+    ) -> List[dict]:
+        return await db.fetch_all(
+            """
+            SELECT
+                c.id,
+                COALESCE(NULLIF(scope_lease.lock_owner, ''), c.worker_id)
+                    AS worker_id,
+                c.source_id, c.provider_id, c.model_id, c.strategy_id,
+                c.previous_workers, c.baseline_workers, c.min_workers,
+                c.max_workers, c.effective_workers, c.pending_count,
+                c.claimed_count, c.running_count, c.success_count,
+                c.failure_count, c.error_rate, c.matched_rule,
+                c.avg_latency_ms, c.decision_reason, c.created_at
+            FROM swe_cron_dispatch_worker_capacity c
+            INNER JOIN (
+                SELECT source_id, provider_id, model_id, MAX(id) AS id
+                FROM swe_cron_dispatch_worker_capacity
+                WHERE source_id = %s
+                GROUP BY source_id, provider_id, model_id
+            ) latest ON c.id = latest.id
+            LEFT JOIN swe_cron_dispatch_scope_leases scope_lease
+                ON scope_lease.source_id = c.source_id
+                AND scope_lease.provider_id = c.provider_id
+                AND scope_lease.model_id = c.model_id
+                AND scope_lease.lease_expires_at >= NOW()
+            ORDER BY c.provider_id, c.model_id
+            """,
+            (source_id,),
+        )
+
+    async def _fetch_dispatch_capacity_event_rows(
+        self,
+        db: DatabaseConnection,
+        *,
+        source_id: str,
+        start_time: Optional[datetime],
+        end_time: Optional[datetime],
+    ) -> List[dict]:
+        conditions = ["source_id = %s"]
+        params: List[Any] = [source_id]
+        if start_time:
+            conditions.append("created_at >= %s")
+            params.append(start_time)
+        if end_time:
+            conditions.append("created_at <= %s")
+            params.append(end_time)
+
+        return await db.fetch_all(
+            f"""
+            SELECT
+                id, worker_id, source_id, provider_id, model_id, strategy_id,
+                previous_workers, baseline_workers, min_workers, max_workers,
+                effective_workers, pending_count, claimed_count, running_count,
+                success_count, failure_count, error_rate, matched_rule,
+                avg_latency_ms, decision_reason, created_at
+            FROM swe_cron_dispatch_worker_capacity
+            WHERE {" AND ".join(conditions)}
+            ORDER BY created_at DESC, id DESC
+            LIMIT {DISPATCH_CAPACITY_EVENT_LIMIT}
+            """,
+            tuple(params),
         )
 
     async def get_dispatch_batches(
@@ -381,6 +515,7 @@ class QueryService:
         start_time: Optional[datetime] = None,
         end_time: Optional[datetime] = None,
         status: Optional[str] = None,
+        query: Optional[str] = None,
         page: int = 1,
         page_size: int = 20,
     ) -> CronDispatchBatchesResponse:
@@ -391,20 +526,24 @@ class QueryService:
             start_time=start_time,
             end_time=end_time,
             status=status,
+            query=query,
         )
         stats_sql = f"""
             SELECT
                 COUNT(*) AS total_batches,
-                COALESCE(SUM(CASE WHEN status = 'running' THEN 1 ELSE 0 END), 0)
+                COALESCE(SUM(CASE WHEN b.status = 'running' THEN 1 ELSE 0 END), 0)
                     AS running_batches,
-                COALESCE(SUM(CASE WHEN status = 'completed' THEN 1 ELSE 0 END), 0)
+                COALESCE(SUM(CASE WHEN b.status = 'completed' THEN 1 ELSE 0 END), 0)
                     AS completed_batches,
-                COALESCE(SUM(CASE WHEN status = 'failed' THEN 1 ELSE 0 END), 0)
+                COALESCE(SUM(CASE WHEN b.status = 'failed' THEN 1 ELSE 0 END), 0)
                     AS failed_batches,
-                COALESCE(SUM(total_count), 0) AS total_intents,
-                COALESCE(SUM(completed_count), 0) AS completed_intents,
-                COALESCE(SUM(failed_count), 0) AS failed_intents
-            FROM swe_cron_dispatch_batches
+                COALESCE(SUM(b.total_count), 0) AS total_intents,
+                COALESCE(SUM(b.completed_count), 0) AS completed_intents,
+                COALESCE(SUM(b.failed_count), 0) AS failed_intents
+            FROM swe_cron_dispatch_batches b
+            LEFT JOIN swe_cron_jobs j
+                ON b.parent_job_id = j.id
+                AND b.source_id = j.source_id
             WHERE {where_clause}
         """
         stats_row = await db.fetch_one(stats_sql, tuple(sql_params)) or {}
@@ -419,7 +558,10 @@ class QueryService:
             total_intents=total_intents,
             completed_intents=completed_intents,
             failed_intents=failed_intents,
-            pending_intents=max(total_intents - completed_intents - failed_intents, 0),
+            pending_intents=max(
+                total_intents - completed_intents - failed_intents,
+                0,
+            ),
         )
 
         total = stats.total_batches
@@ -427,14 +569,20 @@ class QueryService:
         rows = await db.fetch_all(
             f"""
             SELECT
-                batch_id, parent_job_id, parent_external_job_id, tenant_id,
-                source_id, provider_id, model_id, agent_id,
-                scheduled_fire_at, callback_received_at, status,
-                lock_owner, locked_at, total_count, completed_count,
-                failed_count, error_message, completed_at, created_at, updated_at
-            FROM swe_cron_dispatch_batches
+                b.batch_id, b.parent_job_id,
+                COALESCE(j.name, '') AS parent_job_name,
+                b.parent_external_job_id, b.tenant_id,
+                b.source_id, b.provider_id, b.model_id, b.agent_id,
+                b.scheduled_fire_at, b.callback_received_at, b.status,
+                b.lock_owner, b.locked_at, b.total_count, b.completed_count,
+                b.failed_count, b.error_message, b.completed_at,
+                b.created_at, b.updated_at
+            FROM swe_cron_dispatch_batches b
+            LEFT JOIN swe_cron_jobs j
+                ON b.parent_job_id = j.id
+                AND b.source_id = j.source_id
             WHERE {where_clause}
-            ORDER BY scheduled_fire_at DESC, created_at DESC
+            ORDER BY b.scheduled_fire_at DESC, b.created_at DESC
             LIMIT %s OFFSET %s
             """,
             tuple(sql_params) + (page_size, offset),
@@ -463,13 +611,19 @@ class QueryService:
         batch_row = await db.fetch_one(
             """
             SELECT
-                batch_id, parent_job_id, parent_external_job_id, tenant_id,
-                source_id, provider_id, model_id, agent_id,
-                scheduled_fire_at, callback_received_at, status,
-                lock_owner, locked_at, total_count, completed_count,
-                failed_count, error_message, completed_at, created_at, updated_at
-            FROM swe_cron_dispatch_batches
-            WHERE source_id = %s AND batch_id = %s
+                b.batch_id, b.parent_job_id,
+                COALESCE(j.name, '') AS parent_job_name,
+                b.parent_external_job_id, b.tenant_id,
+                b.source_id, b.provider_id, b.model_id, b.agent_id,
+                b.scheduled_fire_at, b.callback_received_at, b.status,
+                b.lock_owner, b.locked_at, b.total_count, b.completed_count,
+                b.failed_count, b.error_message, b.completed_at,
+                b.created_at, b.updated_at
+            FROM swe_cron_dispatch_batches b
+            LEFT JOIN swe_cron_jobs j
+                ON b.parent_job_id = j.id
+                AND b.source_id = j.source_id
+            WHERE b.source_id = %s AND b.batch_id = %s
             """,
             (source_id, batch_id),
         )
@@ -530,64 +684,29 @@ class QueryService:
     ) -> CronDispatchWorkersResponse:
         """查询当前渠道下模型策略和 worker capacity 变动。"""
         db = get_db_connection()
-        policy_rows = await db.fetch_all(
-            """
-            SELECT
-                p.source_id, p.provider_id, p.model_id,
-                p.default_strategy_id, p.strategy_schedule, p.enabled,
-                p.created_at, p.updated_at,
-                s.strategy_id, s.min_workers, s.baseline_workers, s.max_workers,
-                s.adjust_interval_seconds, s.feedback_window_seconds,
-                s.stale_execution_seconds, s.error_rate_rules,
-                s.enabled AS strategy_enabled, s.description
-            FROM swe_cron_dispatch_model_worker_policy p
-            LEFT JOIN swe_cron_dispatch_worker_strategy s
-                ON p.default_strategy_id = s.strategy_id
-            WHERE p.source_id = %s
-            ORDER BY p.provider_id, p.model_id
-            """,
-            (source_id,),
+        policy_rows = await self._fetch_dispatch_worker_policy_rows(
+            db,
+            source_id,
         )
-
-        capacity_conditions = ["source_id = %s"]
-        capacity_params: list[Any] = [source_id]
-        if start_time:
-            capacity_conditions.append("created_at >= %s")
-            capacity_params.append(start_time)
-        if end_time:
-            capacity_conditions.append("created_at <= %s")
-            capacity_params.append(end_time)
-        capacity_where = " AND ".join(capacity_conditions)
-
-        latest_rows = await db.fetch_all(
-            """
-            SELECT c.*
-            FROM swe_cron_dispatch_worker_capacity c
-            INNER JOIN (
-                SELECT source_id, provider_id, model_id, strategy_id, MAX(id) AS id
-                FROM swe_cron_dispatch_worker_capacity
-                WHERE source_id = %s
-                GROUP BY source_id, provider_id, model_id, strategy_id
-            ) latest ON c.id = latest.id
-            ORDER BY c.provider_id, c.model_id, c.strategy_id
-            """,
-            (source_id,),
+        latest_rows = await self._fetch_current_dispatch_capacity_rows(
+            db,
+            source_id,
         )
-        event_rows = await db.fetch_all(
-            f"""
-            SELECT *
-            FROM swe_cron_dispatch_worker_capacity
-            WHERE {capacity_where}
-            ORDER BY created_at DESC, id DESC
-            LIMIT 100
-            """,
-            tuple(capacity_params),
+        event_rows = await self._fetch_dispatch_capacity_event_rows(
+            db,
+            source_id=source_id,
+            start_time=start_time,
+            end_time=end_time,
         )
         return CronDispatchWorkersResponse(
             source_id=source_id,
             policies=[self._map_dispatch_policy(row) for row in policy_rows],
-            current_capacity=[self._map_dispatch_capacity(row) for row in latest_rows],
-            capacity_events=[self._map_dispatch_capacity(row) for row in event_rows],
+            current_capacity=[
+                self._map_dispatch_capacity(row) for row in latest_rows
+            ],
+            capacity_events=[
+                self._map_dispatch_capacity(row) for row in event_rows
+            ],
         )
 
     async def list_jobs(
@@ -679,6 +798,67 @@ class QueryService:
         # 直接读取，不做时区转换（数据库已是东八区时间）
         return CronJobModel.model_validate(
             convert_row_times_direct(row, JOB_TIME_FIELDS),
+        )
+
+    async def get_latest_execution_subtask_count(
+        self,
+        job_id: str,
+        source_id: str,
+    ) -> Optional[LatestExecutionSubtaskCountResponse]:
+        """Return the latest execution identity and its subtask count.
+
+        The job lookup is source-scoped. The execution lookup also uses the
+        job's stored tenant ID so a caller cannot cross tenant boundaries by
+        providing a job ID alone.
+        """
+        db = get_db_connection()
+        job_row = await db.fetch_one(
+            """
+            SELECT id, tenant_id
+            FROM swe_cron_jobs
+            WHERE id = %s
+              AND source_id = %s
+              AND deleted_at IS NULL
+            LIMIT 1
+            """,
+            (job_id, source_id),
+        )
+        if not job_row:
+            return None
+
+        tenant_id = str(job_row.get("tenant_id") or "")
+        execution_row = await db.fetch_one(
+            """
+            SELECT
+                e.id AS execution_id,
+                e.trace_id,
+                CASE
+                    WHEN e.trace_id IS NULL OR e.trace_id = '' THEN 0
+                    ELSE (
+                        SELECT COUNT(*)
+                        FROM swe_cron_subtasks s
+                        WHERE s.trace_id = e.trace_id
+                    )
+                END AS subtask_count
+            FROM swe_cron_executions e
+            WHERE e.job_id = %s
+              AND e.tenant_id = %s
+            ORDER BY e.actual_time DESC, e.id DESC
+            LIMIT 1
+            """,
+            (job_id, tenant_id),
+        )
+        if not execution_row:
+            return LatestExecutionSubtaskCountResponse(job_id=job_id)
+
+        trace_id = str(execution_row.get("trace_id") or "").strip() or None
+        return LatestExecutionSubtaskCountResponse(
+            job_id=job_id,
+            execution_id=execution_row.get("execution_id"),
+            trace_id=trace_id,
+            subtask_count=(
+                int(execution_row.get("subtask_count") or 0) if trace_id else 0
+            ),
         )
 
     async def list_executions(
@@ -3052,6 +3232,88 @@ class QueryService:
             result[btn] = self._row_int(row, "customer_count")
         return result
 
+    async def _fetch_branch_contact_stats(
+        self,
+        db: Any,
+        start_time: datetime,
+        end_time: datetime,
+        bbk_filter_sql: str,
+        bbk_filter_params: List[Any],
+        source_filter_sql: str,
+        source_filter_params: List[Any],
+    ) -> dict[str, dict[str, Any]]:
+        """统计技能视角下各分行的接触客户数和客户接触率."""
+        allowed_skills = list(self._ALLOWED_BRANCH_SKILLS)
+        allowed_placeholders = ", ".join(["%s"] * len(allowed_skills))
+        contact_sql = f"""
+            SELECT
+                a.bbk_id,
+                COUNT(DISTINCT a.customer_id) AS clicked_customers,
+                COUNT(
+                    DISTINCT CASE
+                        WHEN b.cust_uid IS NOT NULL THEN b.cust_uid
+                    END
+                ) AS contacted_customers,
+                CASE
+                    WHEN COUNT(DISTINCT a.customer_id) = 0 THEN 0
+                    ELSE COUNT(
+                        DISTINCT CASE
+                            WHEN b.cust_uid IS NOT NULL THEN b.cust_uid
+                        END
+                    ) * 1.0 / COUNT(DISTINCT a.customer_id)
+                END AS contact_rate
+            FROM swe_html_preview_click_events a
+            LEFT JOIN swe_skill_contact_detail b ON a.id = b.click_id
+            WHERE a.customer_id IS NOT NULL
+              AND (
+                a.clicked_at >= %s AND a.clicked_at <= %s
+                OR b.clicked_at >= %s AND b.clicked_at <= %s
+              )
+              AND a.bbk_id IS NOT NULL
+              AND a.bbk_id != ''
+              {bbk_filter_sql.replace('j.bbk_id', 'a.bbk_id')}
+              {source_filter_sql.replace('j.source_id', 'a.source_id')}
+              AND EXISTS (
+                SELECT 1
+                FROM swe_cron_executions e
+                JOIN swe_tracing_traces t ON e.trace_id = t.trace_id
+                CROSS JOIN (
+                    SELECT 0 AS i UNION SELECT 1 UNION SELECT 2 UNION SELECT 3
+                    UNION SELECT 4 UNION SELECT 5 UNION SELECT 6 UNION SELECT 7
+                    UNION SELECT 8 UNION SELECT 9 UNION SELECT 10 UNION SELECT 11
+                ) idx
+                WHERE e.job_id = a.cron_task_id
+                  AND t.skills_used IS NOT NULL
+                  AND t.session_id LIKE 'cron-task%%'
+                  AND JSON_LENGTH(t.skills_used) > idx.i
+                  AND JSON_UNQUOTE(JSON_EXTRACT(t.skills_used, CONCAT('$[', idx.i, ']')))
+                    IN ({allowed_placeholders})
+              )
+            GROUP BY a.bbk_id
+        """
+        params = (
+            [start_time, end_time, start_time, end_time]
+            + bbk_filter_params
+            + source_filter_params
+            + allowed_skills
+        )
+        logger.info(
+            f"[_fetch_branch_contact_stats] SQL: {contact_sql}, params: {params}"
+        )
+        rows = await db.fetch_all(contact_sql, tuple(params))
+        logger.info(f"[_fetch_branch_contact_stats] Result rows: {len(rows)}")
+        return {
+            row["bbk_id"]: {
+                "clicked_customers": self._row_int(row, "clicked_customers"),
+                "contacted_customers": self._row_int(
+                    row,
+                    "contacted_customers",
+                ),
+                "contact_rate": _to_float(row.get("contact_rate")),
+            }
+            for row in rows
+        }
+
     async def _fetch_branch_recommended_customers(
         self,
         db: Any,
@@ -3305,6 +3567,8 @@ class QueryService:
         phone_managers: int,
         recommended_customers: int,
         viewed_customers: int,
+        contacted_customers: int,
+        contact_rate: float,
         insight_customers: int,
         phone_customers: int,
     ) -> CronBranchRankingItem:
@@ -3322,6 +3586,8 @@ class QueryService:
             phone_managers=phone_managers,
             recommended_customers=recommended_customers,
             viewed_customers=viewed_customers,
+            contacted_customers=contacted_customers,
+            contact_rate=contact_rate,
             insight_customers=insight_customers,
             phone_customers=phone_customers,
         )
@@ -3360,6 +3626,15 @@ class QueryService:
         )
 
         branch_ids = await self._fetch_branch_skill_behavior_ids(
+            db,
+            start_time,
+            end_time,
+            bbk_filter_sql,
+            bbk_filter_params,
+            source_filter_sql,
+            source_filter_params,
+        )
+        contact_stats = await self._fetch_branch_contact_stats(
             db,
             start_time,
             end_time,
@@ -3444,6 +3719,7 @@ class QueryService:
                     source_id,
                 )
             )
+            branch_contact_stats = contact_stats.get(bbk_id, {})
             items.append(
                 self._build_branch_ranking_item(
                     bbk_id,
@@ -3458,6 +3734,8 @@ class QueryService:
                     manager_click_counts.get("phone", 0),
                     recommended_customers,
                     customer_click_counts.get("plan", 0),
+                    branch_contact_stats.get("contacted_customers", 0),
+                    branch_contact_stats.get("contact_rate", 0.0),
                     customer_click_counts.get("insight", 0),
                     customer_click_counts.get("phone", 0),
                 ),
@@ -4275,18 +4553,136 @@ class QueryService:
             click_map[user_id][row["button_type"]] = row["customer_count"]
         return click_map
 
+    async def _fetch_manager_contact_stats(
+        self,
+        db: DatabaseConnection,
+        bbk_id: str,
+        start_time: datetime,
+        end_time: datetime,
+        source_id: Optional[str],
+    ) -> dict[str, dict[str, Any]]:
+        """查询客户经理维度的接触客户数和客户接触率."""
+        placeholders, allowed_skills = self._build_allowed_skill_filter()
+        source_where = " AND a.source_id = %s" if source_id else ""
+        sql = f"""
+            SELECT
+                a.user_id,
+                COUNT(DISTINCT a.customer_id) AS clicked_customers,
+                COUNT(
+                    DISTINCT CASE
+                        WHEN b.cust_uid IS NOT NULL THEN b.cust_uid
+                    END
+                ) AS contacted_customers,
+                CASE
+                    WHEN COUNT(DISTINCT a.customer_id) = 0 THEN 0
+                    ELSE COUNT(
+                        DISTINCT CASE
+                            WHEN b.cust_uid IS NOT NULL THEN b.cust_uid
+                        END
+                    ) * 1.0 / COUNT(DISTINCT a.customer_id)
+                END AS contact_rate
+            FROM swe_html_preview_click_events a
+            LEFT JOIN swe_skill_contact_detail b ON a.id = b.click_id
+            WHERE a.bbk_id = %s
+              AND a.customer_id IS NOT NULL
+              AND (
+                a.clicked_at >= %s AND a.clicked_at <= %s
+                OR b.clicked_at >= %s AND b.clicked_at <= %s
+              )
+              {source_where}
+              AND EXISTS (
+                SELECT 1
+                FROM swe_cron_executions e
+                JOIN swe_tracing_traces t ON e.trace_id = t.trace_id
+                CROSS JOIN (
+                    SELECT 0 AS i UNION SELECT 1 UNION SELECT 2 UNION SELECT 3
+                    UNION SELECT 4 UNION SELECT 5 UNION SELECT 6 UNION SELECT 7
+                    UNION SELECT 8 UNION SELECT 9 UNION SELECT 10 UNION SELECT 11
+                ) idx
+                WHERE e.job_id = a.cron_task_id
+                  AND t.skills_used IS NOT NULL
+                  AND t.session_id LIKE 'cron-task%%'
+                  AND JSON_LENGTH(t.skills_used) > idx.i
+                  AND JSON_UNQUOTE(JSON_EXTRACT(t.skills_used, CONCAT('$[', idx.i, ']')))
+                    IN ({placeholders})
+              )
+            GROUP BY a.user_id
+        """
+        params: list = [bbk_id, start_time, end_time, start_time, end_time]
+        if source_id:
+            params.append(source_id)
+        params.extend(allowed_skills)
+        logger.info(
+            f"[_fetch_manager_contact_stats] SQL: {sql}, params: {params}"
+        )
+        # 调试：查EXISTS子查询是否能匹配
+        debug_sql3 = """
+            SELECT COUNT(DISTINCT a.id) as matched_cnt
+            FROM swe_html_preview_click_events a
+            WHERE a.bbk_id = %s AND a.customer_id IS NOT NULL 
+            AND a.clicked_at >= %s AND a.clicked_at <= %s
+            AND EXISTS (
+                SELECT 1
+                FROM swe_cron_executions e
+                JOIN swe_tracing_traces t ON e.trace_id = t.trace_id
+                CROSS JOIN (
+                    SELECT 0 AS i UNION SELECT 1 UNION SELECT 2 UNION SELECT 3
+                    UNION SELECT 4 UNION SELECT 5 UNION SELECT 6 UNION SELECT 7
+                    UNION SELECT 8 UNION SELECT 9 UNION SELECT 10 UNION SELECT 11
+                ) idx
+                WHERE e.job_id = a.cron_task_id
+                  AND t.skills_used IS NOT NULL
+                  AND t.session_id LIKE 'cron-task%%'
+                  AND JSON_LENGTH(t.skills_used) > idx.i
+                  AND JSON_UNQUOTE(JSON_EXTRACT(t.skills_used, CONCAT('$[', idx.i, ']')))
+                    IN ({placeholders})
+            )
+        """
+        debug_row3 = await db.fetch_one(debug_sql3.format(placeholders=placeholders), 
+            (bbk_id, start_time, end_time) + tuple(allowed_skills))
+        logger.info(f"[_fetch_manager_contact_stats] Debug EXISTS match: {debug_row3}")
+        
+        # 调试：查cron_task_id是否匹配
+        debug_sql4 = """
+            SELECT a.id, a.cron_task_id, e.job_id, t.skills_used
+            FROM swe_html_preview_click_events a
+            LEFT JOIN swe_cron_executions e ON e.job_id = a.cron_task_id
+            LEFT JOIN swe_tracing_traces t ON e.trace_id = t.trace_id
+            WHERE a.bbk_id = %s AND a.customer_id IS NOT NULL
+            AND a.clicked_at >= %s AND a.clicked_at <= %s
+            LIMIT 5
+        """
+        debug_rows4 = await db.fetch_all(debug_sql4, (bbk_id, start_time, end_time))
+        logger.info(f"[_fetch_manager_contact_stats] Debug cron_task mapping: {debug_rows4}")
+        
+        rows = await db.fetch_all(sql, tuple(params))
+        logger.info(f"[_fetch_manager_contact_stats] Result rows: {len(rows)}")
+        return {
+            row["user_id"]: {
+                "clicked_customers": self._row_int(row, "clicked_customers"),
+                "contacted_customers": self._row_int(
+                    row,
+                    "contacted_customers",
+                ),
+                "contact_rate": _to_float(row.get("contact_rate")),
+            }
+            for row in rows
+        }
+
     def _build_manager_summary_items(
         self,
         base_rows: list[dict],
         skill_count_map: dict[str, int],
         recommended_map: dict[str, int],
         click_map: dict[str, dict[str, int]],
+        contact_map: dict[str, dict[str, Any]],
     ) -> list[BranchManagerSummaryItem]:
         """构建客户经理汇总结果."""
         items: list[BranchManagerSummaryItem] = []
         for row in base_rows:
             user_id = row["user_id"]
             user_clicks = click_map.get(user_id, {})
+            user_contact = contact_map.get(user_id, {})
             items.append(
                 BranchManagerSummaryItem(
                     user_id=user_id,
@@ -4297,6 +4693,11 @@ class QueryService:
                     read_tasks=row["read_tasks"] or 0,
                     recommended_customers=recommended_map.get(user_id, 0),
                     viewed_customers=user_clicks.get("plan", 0),
+                    contacted_customers=user_contact.get(
+                        "contacted_customers",
+                        0,
+                    ),
+                    contact_rate=user_contact.get("contact_rate", 0.0),
                     insight_customers=user_clicks.get("insight", 0),
                     phone_customers=user_clicks.get("phone", 0),
                 ),
@@ -4321,7 +4722,7 @@ class QueryService:
         end_str = end_date or end_time.strftime("%Y-%m-%d")
 
         # 并行查询各项数据
-        base_rows, skill_count_map, recommended_map, click_map = (
+        base_rows, skill_count_map, recommended_map, click_map, contact_map = (
             await asyncio.gather(
                 self._fetch_manager_base_info(
                     db,
@@ -4351,6 +4752,13 @@ class QueryService:
                     end_time,
                     source_id,
                 ),
+                self._fetch_manager_contact_stats(
+                    db,
+                    bbk_id,
+                    start_time,
+                    end_time,
+                    source_id,
+                ),
             )
         )
 
@@ -4359,6 +4767,7 @@ class QueryService:
             skill_count_map,
             recommended_map,
             click_map,
+            contact_map,
         )
 
         return BranchManagerSummaryResponse(

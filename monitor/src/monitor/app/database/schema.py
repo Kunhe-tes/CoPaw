@@ -133,6 +133,7 @@ CREATE TABLE IF NOT EXISTS swe_cron_executions (
     -- 执行状态
     status          VARCHAR(16) NOT NULL COMMENT '状态: success/error/cancelled/timeout/skipped',
     async_status    VARCHAR(16) DEFAULT NULL COMMENT '异步任务执行状态: success/error',
+    need_notification TINYINT(1) DEFAULT 0 COMMENT '是否需要通知: 0-否, 1-是',
     error_message   VARCHAR(2048) DEFAULT '' COMMENT '错误信息',
 
     -- 执行上下文
@@ -330,6 +331,7 @@ CREATE TABLE IF NOT EXISTS swe_cron_subtasks (
     cust_nm      VARCHAR(255) DEFAULT NULL COMMENT '任务中客户名称',
     notification_content_wplus VARCHAR(5000) DEFAULT NULL COMMENT 'W+渠道通知消息内容',
     notification_content_zhaohu VARCHAR(5000) DEFAULT NULL COMMENT '招乎渠道通知消息内容',
+    need_notification TINYINT(1) DEFAULT 1 COMMENT '是否需要通知: 0-否, 1-是',
     status       VARCHAR(16) DEFAULT NULL COMMENT '子任务状态: SUC/FAIL/PART_SUC/TIMEOUT',
     info         VARCHAR(2048) DEFAULT '' COMMENT '预留扩展信息',
     created_at   DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
@@ -710,7 +712,23 @@ ALTER_CRON_SUBTASKS_NEW_COLUMNS = [
     """,
 ]
 
+# SQL for adding need_notification column
+ALTER_CRON_SUBTASKS_NEED_NOTIFICATION = """
+ALTER TABLE swe_cron_subtasks
+ADD COLUMN need_notification TINYINT(1) DEFAULT 1
+COMMENT '是否需要通知: 0-否, 1-是'
+AFTER notification_content_zhaohu
+"""
 
+ALTER_CRON_EXECUTIONS_NEED_NOTIFICATION = """
+ALTER TABLE swe_cron_executions
+ADD COLUMN need_notification TINYINT(1) DEFAULT 1
+COMMENT '是否需要通知: 0-否, 1-是'
+AFTER async_status
+"""
+
+
+# pylint: disable=too-many-statements
 async def init_database_tables() -> None:
     """Initialize database tables for cron monitoring.
 
@@ -842,6 +860,19 @@ async def init_database_tables() -> None:
                 if "duplicate" not in message and "exists" not in message:
                     raise
         logger.info("Ensured cron subtasks new columns")
+
+        # 添加 need_notification 字段
+        for alter_sql in [
+            ALTER_CRON_SUBTASKS_NEED_NOTIFICATION,
+            ALTER_CRON_EXECUTIONS_NEED_NOTIFICATION,
+        ]:
+            try:
+                await db.execute(alter_sql)
+            except Exception as exc:  # pylint: disable=broad-except
+                message = str(exc).lower()
+                if "duplicate" not in message and "exists" not in message:
+                    raise
+        logger.info("Ensured need_notification columns")
 
         await _ensure_cron_jobs_extra_schema()
 

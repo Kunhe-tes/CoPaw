@@ -1414,11 +1414,13 @@ async def download_my_skill(
     if skill is None:
         raise HTTPException(status_code=404, detail="Skill not found")
 
-    skill_dir = (
-        get_user_skills_dir(svc.swe_root, x_user_id, agent_id, source_id)
-        / skill_name
+    skill_dir = svc.get_registered_skill_dir(
+        x_user_id,
+        skill_name,
+        agent_id,
+        source_id,
     )
-    if not skill_dir.is_dir():
+    if skill_dir is None or not skill_dir.is_dir():
         raise HTTPException(status_code=404, detail="Skill not found")
 
     with tempfile.TemporaryDirectory(
@@ -1932,7 +1934,7 @@ async def migrate_skill_json_to_manifest(
     """迁移技能目录内 skill.json 字段到 workspace manifest.
 
     将以下字段从 skills/<技能名>/skill.json 合并到
-    workspaces/<agent_id>/.skill_state/manifest.json:
+    workspaces/<agent_id>/skill.json:
     - creator_id
     - creator_name
     - bbk_id

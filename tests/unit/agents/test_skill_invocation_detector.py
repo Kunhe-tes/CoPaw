@@ -630,22 +630,6 @@ class TestSkillInvocationDetector:
             ),
             encoding="utf-8",
         )
-        (workspace_dir / "skill.json").write_text(
-            json.dumps(
-                {
-                    "skills": {
-                        "demo": {
-                            "metadata": {
-                                "description": "legacy description",
-                                "skill_id": "legacy-skill",
-                                "cn_name": "旧版技能",
-                            },
-                        },
-                    },
-                },
-            ),
-            encoding="utf-8",
-        )
         detector = SkillInvocationDetector(workspace_dir=workspace_dir)
 
         detector.set_enabled_skills(["demo"])

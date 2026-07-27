@@ -3,7 +3,8 @@ from __future__ import annotations
 
 import copy
 import json
-import shutil
+import os
+import stat
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
@@ -11,32 +12,13 @@ from typing import Any
 
 from .skills_manager import (
     WORKSPACE_SKILL_LAYOUT_VERSION,
-    get_legacy_workspace_skill_manifest_path,
     get_workspace_disabled_skills_dir,
     get_workspace_skill_manifest_path,
-    get_workspace_skill_state_dir,
 )
 
 
 class SkillLayoutMigrationError(RuntimeError):
     """Report an invalid layout or a failed Workspace layout migration."""
-
-
-class SkillLayoutMigrationRollbackError(SkillLayoutMigrationError):
-    """Report a migration failure whose rollback also failed."""
-
-    def __init__(
-        self,
-        migration_error: Exception,
-        rollback_errors: tuple[Exception, ...],
-    ) -> None:
-        super().__init__(
-            "Workspace skill layout migration failed and rollback also "
-            f"failed: {migration_error}; rollback errors: "
-            + "; ".join(str(error) for error in rollback_errors),
-        )
-        self.migration_error = migration_error
-        self.rollback_errors = rollback_errors
 
 
 @dataclass(frozen=True)
@@ -58,12 +40,7 @@ class _WorkspaceMigrationPlan:
     payload: dict[str, Any] | None = None
 
 
-_BACKUP_PATHS = (
-    "skill.json",
-    "skills",
-    ".disabled_skills",
-    ".skill_state",
-)
+_OBSOLETE_V2_MANIFEST = Path(".skill_state") / "manifest.json"
 
 
 def _reject_symbolic_link(path: Path, description: str) -> None:
@@ -73,11 +50,139 @@ def _reject_symbolic_link(path: Path, description: str) -> None:
         )
 
 
+def _validate_managed_root(path: Path, description: str) -> None:
+    _reject_symbolic_link(path, description)
+    if path.exists() and not path.is_dir():
+        raise SkillLayoutMigrationError(
+            f"Workspace {description} must be a directory: {path}",
+        )
+
+
+def _permission_bits_for_effective_user(
+    path: Path,
+) -> tuple[int, int, int]:
+    try:
+        file_stat = path.stat()
+    except OSError as exc:
+        raise SkillLayoutMigrationError(
+            f"Unable to inspect directory permissions: {path}: {exc}",
+        ) from exc
+
+    if not hasattr(os, "geteuid"):
+        return (
+            stat.S_IRUSR | stat.S_IRGRP | stat.S_IROTH,
+            stat.S_IWUSR | stat.S_IWGRP | stat.S_IWOTH,
+            stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH,
+        )
+
+    effective_uid = os.geteuid()
+    if effective_uid == 0:
+        return (
+            stat.S_IRUSR | stat.S_IRGRP | stat.S_IROTH,
+            stat.S_IWUSR | stat.S_IWGRP | stat.S_IWOTH,
+            stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH,
+        )
+    if effective_uid == file_stat.st_uid:
+        return stat.S_IRUSR, stat.S_IWUSR, stat.S_IXUSR
+
+    effective_groups = {os.getegid(), *os.getgroups()}
+    if file_stat.st_gid in effective_groups:
+        return stat.S_IRGRP, stat.S_IWGRP, stat.S_IXGRP
+    return stat.S_IROTH, stat.S_IWOTH, stat.S_IXOTH
+
+
+def _has_directory_access(
+    path: Path,
+    *,
+    require_read: bool,
+    require_write: bool,
+) -> bool:
+    read_bit, write_bit, execute_bit = _permission_bits_for_effective_user(
+        path,
+    )
+    mode = path.stat().st_mode
+    required_access = (
+        os.X_OK
+        | (os.R_OK if require_read else 0)
+        | (os.W_OK if require_write else 0)
+    )
+    try:
+        allowed_by_system = os.access(
+            path,
+            required_access,
+            effective_ids=True,
+        )
+    except (NotImplementedError, TypeError):
+        allowed_by_system = os.access(path, required_access)
+    has_required_bits = (
+        bool(mode & execute_bit)
+        and (not require_read or bool(mode & read_bit))
+        and (not require_write or bool(mode & write_bit))
+    )
+    return allowed_by_system and has_required_bits
+
+
+def _require_directory_access(
+    path: Path,
+    description: str,
+    *,
+    require_read: bool = False,
+    require_write: bool,
+) -> None:
+    if not _has_directory_access(
+        path,
+        require_read=require_read,
+        require_write=require_write,
+    ):
+        if require_read and require_write:
+            access = "read, write, and execute"
+        elif require_read:
+            access = "read and execute"
+        else:
+            access = "write and execute"
+        raise SkillLayoutMigrationError(
+            f"Workspace migration requires {access} access for "
+            f"{description}: {path}",
+        )
+
+
+def _require_file_read_access(path: Path, description: str) -> None:
+    read_bit, _, _ = _permission_bits_for_effective_user(path)
+    mode = path.stat().st_mode
+    try:
+        allowed_by_system = os.access(path, os.R_OK, effective_ids=True)
+    except (NotImplementedError, TypeError):
+        allowed_by_system = os.access(path, os.R_OK)
+    if not allowed_by_system or not bool(mode & read_bit):
+        raise SkillLayoutMigrationError(
+            f"Workspace migration requires read access for {description}: "
+            f"{path}",
+        )
+
+
+def _validate_manifest_metadata_preservation(path: Path) -> None:
+    if not hasattr(os, "geteuid"):
+        return
+    manifest_stat = path.stat(follow_symlinks=False)
+    effective_uid = os.geteuid()
+    if effective_uid == 0:
+        return
+    if manifest_stat.st_uid != effective_uid:
+        raise SkillLayoutMigrationError(
+            f"Workspace migration cannot preserve manifest owner: {path}",
+        )
+    effective_groups = {os.getegid(), *os.getgroups()}
+    if manifest_stat.st_gid not in effective_groups:
+        raise SkillLayoutMigrationError(
+            f"Workspace migration cannot preserve manifest group: {path}",
+        )
+
+
 def _discover_workspaces(working_dir: Path) -> list[Path]:
     release_root = Path(working_dir).expanduser()
+    _reject_symbolic_link(release_root, "release root")
     if not release_root.exists():
         return []
-    _reject_symbolic_link(release_root, "release root")
     if not release_root.is_dir():
         raise SkillLayoutMigrationError(
             f"Release root is not a directory: {release_root}",
@@ -105,6 +210,10 @@ def _read_manifest(path: Path) -> dict[str, Any]:
     except json.JSONDecodeError as exc:
         raise SkillLayoutMigrationError(
             f"Manifest contains invalid JSON: {path}: {exc}",
+        ) from exc
+    except UnicodeError as exc:
+        raise SkillLayoutMigrationError(
+            f"Manifest contains invalid UTF-8: {path}: {exc}",
         ) from exc
     except OSError as exc:
         raise SkillLayoutMigrationError(
@@ -140,31 +249,91 @@ def _read_manifest(path: Path) -> dict[str, Any]:
                 f"Manifest entry for {skill_name!r} must be a JSON object: "
                 f"{path}",
             )
+        if "enabled" in entry and not isinstance(entry["enabled"], bool):
+            raise SkillLayoutMigrationError(
+                f"Manifest entry for {skill_name!r} enabled must be a JSON "
+                f"boolean: {path}",
+            )
     return payload
 
 
-def _validate_ready_workspace(
+def _normalize_legacy_payload(
     workspace: Path,
     payload: dict[str, Any],
-) -> None:
+) -> dict[str, Any]:
+    normalized = copy.deepcopy(payload)
     active_root = workspace / "skills"
-    for skill_name in payload["skills"]:
-        skill_package = active_root / skill_name
-        skill_document = skill_package / "SKILL.md"
-        _reject_symbolic_link(skill_package, "registered skill package")
-        _reject_symbolic_link(skill_document, "registered skill document")
-        if not skill_document.is_file():
-            raise SkillLayoutMigrationError(
-                f"Workspace {workspace} is missing registered skill "
-                f"document: skills/{skill_name}/SKILL.md",
+    disabled_root = get_workspace_disabled_skills_dir(workspace)
+    for skill_name, entry in list(normalized["skills"].items()):
+        active = active_root / skill_name
+        disabled = disabled_root / skill_name
+        active_document = active / "SKILL.md"
+        disabled_document = disabled / "SKILL.md"
+        if active.exists():
+            _require_directory_access(
+                active,
+                "registered active skill package",
+                require_read=True,
+                require_write=False,
             )
+        if disabled.exists():
+            _require_directory_access(
+                disabled,
+                "registered disabled skill package",
+                require_read=True,
+                require_write=False,
+            )
+        _reject_symbolic_link(active, "registered active skill package")
+        _reject_symbolic_link(
+            active_document,
+            "registered active skill document",
+        )
+        _reject_symbolic_link(
+            disabled,
+            "registered disabled skill package",
+        )
+        _reject_symbolic_link(
+            disabled_document,
+            "registered disabled skill document",
+        )
+        active_exists = active_document.is_file()
+        disabled_exists = disabled_document.is_file()
+        if active_exists:
+            _require_file_read_access(
+                active_document,
+                "registered active skill document",
+            )
+        if disabled_exists:
+            _require_file_read_access(
+                disabled_document,
+                "registered disabled skill document",
+            )
+        if not active_exists and not disabled_exists:
+            del normalized["skills"][skill_name]
+            continue
+        if active_exists and disabled_exists:
+            raise SkillLayoutMigrationError(
+                f"Workspace {workspace} has ambiguous registered skill "
+                f"{skill_name!r} in both managed roots",
+            )
+        if entry.get("enabled", False) is True and not active_exists:
+            raise SkillLayoutMigrationError(
+                f"Workspace {workspace} registered enabled skill "
+                f"{skill_name!r} is missing from the active root",
+            )
+    return normalized
 
 
 def _validate_migrated_workspace(
     workspace: Path,
     payload: dict[str, Any],
 ) -> None:
-    if payload.get("layout_version") != WORKSPACE_SKILL_LAYOUT_VERSION:
+    layout_version = payload.get("layout_version")
+    if (
+        not isinstance(layout_version, int)
+        or isinstance(layout_version, bool)
+        or layout_version != WORKSPACE_SKILL_LAYOUT_VERSION
+    ):
         raise SkillLayoutMigrationError(
             f"Workspace {workspace} has unsupported layout_version "
             f"{payload.get('layout_version')!r}",
@@ -191,7 +360,7 @@ def _validate_migrated_workspace(
                 f"{skill_name!r} in both managed roots",
             )
 
-        enabled = bool(entry.get("enabled", False))
+        enabled = entry.get("enabled", False) is True
         desired = active if enabled else disabled
         undesired = disabled if enabled else active
         if not (desired / "SKILL.md").is_file():
@@ -209,37 +378,85 @@ def _validate_migrated_workspace(
 
 def _preflight_workspace(workspace: Path) -> _WorkspaceMigrationPlan:
     _reject_symbolic_link(workspace, "Workspace")
-    legacy_manifest = get_legacy_workspace_skill_manifest_path(workspace)
-    v2_manifest = get_workspace_skill_manifest_path(workspace)
-    state_root = get_workspace_skill_state_dir(workspace)
+    _require_directory_access(
+        workspace,
+        "Workspace root",
+        require_write=False,
+    )
+    manifest = get_workspace_skill_manifest_path(workspace)
+    obsolete_manifest = workspace / _OBSOLETE_V2_MANIFEST
+    state_root = obsolete_manifest.parent
     disabled_root = get_workspace_disabled_skills_dir(workspace)
     active_root = workspace / "skills"
-    _reject_symbolic_link(active_root, "active skills root")
-    _reject_symbolic_link(disabled_root, "disabled skills root")
-    _reject_symbolic_link(state_root, "skill state root")
-    _reject_symbolic_link(legacy_manifest, "legacy skill manifest")
-    _reject_symbolic_link(v2_manifest, "v2 skill manifest")
-    legacy_exists = legacy_manifest.exists()
-    v2_exists = v2_manifest.exists()
+    _validate_managed_root(active_root, "active skills root")
+    _validate_managed_root(disabled_root, "disabled skills root")
+    _validate_managed_root(state_root, "skill state root")
+    _reject_symbolic_link(manifest, "Workspace skill manifest")
+    _reject_symbolic_link(obsolete_manifest, "obsolete v2 skill manifest")
 
-    if legacy_exists and v2_exists:
+    if obsolete_manifest.exists():
         raise SkillLayoutMigrationError(
-            f"Workspace {workspace} has mixed layout: both legacy and v2 "
-            "manifests exist",
+            f"Workspace {workspace} has mixed layout: obsolete manifest "
+            f"exists at {_OBSOLETE_V2_MANIFEST}",
         )
 
-    if legacy_exists:
+    if not manifest.exists():
         if disabled_root.exists():
             raise SkillLayoutMigrationError(
-                f"Workspace {workspace} has mixed layout: legacy manifest "
-                "exists with the disabled skill root",
+                f"Workspace {workspace} has invalid partial skill layout "
+                "state",
             )
-        payload = _read_manifest(legacy_manifest)
-        _validate_ready_workspace(workspace, payload)
+        return _WorkspaceMigrationPlan(workspace, "not_applicable")
+
+    if not stat.S_ISREG(manifest.lstat().st_mode):
+        raise SkillLayoutMigrationError(
+            f"Workspace skill manifest must be a regular file: " f"{manifest}",
+        )
+
+    payload = _read_manifest(manifest)
+    layout_version = payload.get("layout_version")
+    if "layout_version" not in payload:
+        _require_directory_access(
+            workspace,
+            "Workspace root",
+            require_write=True,
+        )
+        if active_root.exists():
+            _require_directory_access(
+                active_root,
+                "active skills root",
+                require_read=True,
+                require_write=any(
+                    entry.get("enabled", False) is not True
+                    for entry in payload["skills"].values()
+                ),
+            )
+        if disabled_root.exists():
+            _require_directory_access(
+                disabled_root,
+                "disabled skills root",
+                require_read=True,
+                require_write=False,
+            )
+        payload = _normalize_legacy_payload(workspace, payload)
+        if disabled_root.exists() and any(
+            entry.get("enabled", False) is not True
+            and not (disabled_root / skill_name / "SKILL.md").is_file()
+            for skill_name, entry in payload["skills"].items()
+        ):
+            _require_directory_access(
+                disabled_root,
+                "disabled skills root",
+                require_write=True,
+            )
+        _validate_manifest_metadata_preservation(manifest)
         return _WorkspaceMigrationPlan(workspace, "ready", payload)
 
-    if v2_exists:
-        payload = _read_manifest(v2_manifest)
+    if (
+        isinstance(layout_version, int)
+        and not isinstance(layout_version, bool)
+        and layout_version == WORKSPACE_SKILL_LAYOUT_VERSION
+    ):
         _validate_migrated_workspace(workspace, payload)
         return _WorkspaceMigrationPlan(
             workspace,
@@ -247,12 +464,10 @@ def _preflight_workspace(workspace: Path) -> _WorkspaceMigrationPlan:
             payload,
         )
 
-    if state_root.exists() or disabled_root.exists():
-        raise SkillLayoutMigrationError(
-            f"Workspace {workspace} has invalid partial skill layout state",
-        )
-
-    return _WorkspaceMigrationPlan(workspace, "not_applicable")
+    raise SkillLayoutMigrationError(
+        f"Workspace {workspace} has unsupported layout_version "
+        f"{layout_version!r}",
+    )
 
 
 def _preflight_workspaces(working_dir: Path) -> list[_WorkspaceMigrationPlan]:
@@ -285,40 +500,9 @@ def check_workspace_skill_layout_migration(
     )
 
 
-def _copy_backup_path(source: Path, target: Path) -> None:
-    if source.is_dir() and not source.is_symlink():
-        shutil.copytree(source, target, symlinks=True)
-        return
-    target.parent.mkdir(parents=True, exist_ok=True)
-    shutil.copy2(source, target, follow_symlinks=False)
-
-
-def _backup_workspace(workspace: Path, backup: Path) -> None:
-    backup.mkdir(parents=True, exist_ok=True)
-    for relative in _BACKUP_PATHS:
-        source = workspace / relative
-        if source.exists() or source.is_symlink():
-            _copy_backup_path(source, backup / relative)
-
-
-def _remove_path(path: Path) -> None:
-    if path.is_symlink() or path.is_file():
-        path.unlink(missing_ok=True)
-    elif path.is_dir():
-        shutil.rmtree(path)
-
-
-def _restore_workspace_backup(workspace: Path, backup: Path) -> None:
-    for relative in _BACKUP_PATHS:
-        _remove_path(workspace / relative)
-    for relative in _BACKUP_PATHS:
-        source = backup / relative
-        if source.exists() or source.is_symlink():
-            _copy_backup_path(source, workspace / relative)
-
-
 def _write_manifest_atomic(path: Path, payload: dict[str, Any]) -> None:
     temp_path: Path | None = None
+    manifest_stat = path.stat(follow_symlinks=False)
     path.parent.mkdir(parents=True, exist_ok=True)
     try:
         with tempfile.NamedTemporaryFile(
@@ -331,6 +515,33 @@ def _write_manifest_atomic(path: Path, payload: dict[str, Any]) -> None:
         ) as handle:
             json.dump(payload, handle, indent=2, ensure_ascii=False)
             temp_path = Path(handle.name)
+        temp_stat = temp_path.stat(follow_symlinks=False)
+        if (
+            temp_stat.st_uid != manifest_stat.st_uid
+            or temp_stat.st_gid != manifest_stat.st_gid
+        ):
+            if not hasattr(os, "chown"):
+                raise SkillLayoutMigrationError(
+                    f"Unable to preserve manifest owner/group: {path}",
+                )
+            try:
+                os.chown(
+                    temp_path,
+                    manifest_stat.st_uid,
+                    manifest_stat.st_gid,
+                    follow_symlinks=False,
+                )
+            except OSError as exc:
+                raise SkillLayoutMigrationError(
+                    f"Unable to preserve manifest owner/group: {path}: "
+                    f"{exc}",
+                ) from exc
+        try:
+            temp_path.chmod(stat.S_IMODE(manifest_stat.st_mode))
+        except OSError as exc:
+            raise SkillLayoutMigrationError(
+                f"Unable to preserve manifest mode: {path}: {exc}",
+            ) from exc
         temp_path.replace(path)
     finally:
         if temp_path is not None:
@@ -341,17 +552,19 @@ def _apply_workspace_migration(
     workspace: Path,
     payload: dict[str, Any],
 ) -> None:
-    """Migrate one preflighted Workspace; callers provide rollback."""
+    """Migrate one preflighted Workspace without creating backups."""
     migrated_payload = copy.deepcopy(payload)
     migrated_payload["layout_version"] = WORKSPACE_SKILL_LAYOUT_VERSION
     active_root = workspace / "skills"
     disabled_root = get_workspace_disabled_skills_dir(workspace)
 
     for skill_name, entry in migrated_payload["skills"].items():
-        if bool(entry.get("enabled", False)):
+        if entry.get("enabled", False) is True:
             continue
         source = active_root / skill_name
         target = disabled_root / skill_name
+        if (target / "SKILL.md").is_file():
+            continue
         target.parent.mkdir(parents=True, exist_ok=True)
         source.replace(target)
 
@@ -359,13 +572,12 @@ def _apply_workspace_migration(
         get_workspace_skill_manifest_path(workspace),
         migrated_payload,
     )
-    get_legacy_workspace_skill_manifest_path(workspace).unlink()
 
 
 def apply_workspace_skill_layout_migration(
     working_dir: Path,
 ) -> SkillLayoutMigrationReport:
-    """Migrate all ready Workspaces atomically as one release operation."""
+    """Migrate ready Workspaces in order without rolling back progress."""
     plans = _preflight_workspaces(working_dir)
     ready = [plan for plan in plans if plan.status == "ready"]
     if not ready:
@@ -377,51 +589,19 @@ def apply_workspace_skill_layout_migration(
             ),
         )
 
-    try:
-        with tempfile.TemporaryDirectory(
-            prefix="workspace-skill-layout-migration-",
-        ) as temporary_directory:
-            backup_root = Path(temporary_directory)
-            backups: dict[Path, Path] = {}
-            for index, plan in enumerate(ready):
-                backup = backup_root / str(index)
-                _backup_workspace(plan.workspace, backup)
-                backups[plan.workspace] = backup
-
-            attempted: list[_WorkspaceMigrationPlan] = []
-            try:
-                for plan in ready:
-                    attempted.append(plan)
-                    if plan.payload is None:  # pragma: no cover - invariant
-                        raise SkillLayoutMigrationError(
-                            f"Missing preflight payload for {plan.workspace}",
-                        )
-                    _apply_workspace_migration(plan.workspace, plan.payload)
-            except Exception as migration_error:
-                rollback_errors: list[Exception] = []
-                for plan in reversed(attempted):
-                    try:
-                        _restore_workspace_backup(
-                            plan.workspace,
-                            backups[plan.workspace],
-                        )
-                    except Exception as rollback_error:
-                        rollback_errors.append(rollback_error)
-                if rollback_errors:
-                    raise SkillLayoutMigrationRollbackError(
-                        migration_error,
-                        tuple(rollback_errors),
-                    ) from migration_error
+    for plan in ready:
+        try:
+            if plan.payload is None:  # pragma: no cover - invariant
                 raise SkillLayoutMigrationError(
-                    "Workspace skill layout migration failed: "
-                    f"{migration_error}",
-                ) from migration_error
-    except SkillLayoutMigrationError:
-        raise
-    except Exception as exc:
-        raise SkillLayoutMigrationError(
-            f"Workspace skill layout migration failed: {exc}",
-        ) from exc
+                    f"Missing preflight payload for {plan.workspace}",
+                )
+            _apply_workspace_migration(plan.workspace, plan.payload)
+        except SkillLayoutMigrationError:
+            raise
+        except Exception as exc:
+            raise SkillLayoutMigrationError(
+                f"Workspace skill layout migration failed: {exc}",
+            ) from exc
 
     return SkillLayoutMigrationReport(
         success=True,

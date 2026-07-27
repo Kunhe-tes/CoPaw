@@ -1,4 +1,10 @@
-## ADDED Requirements
+# chat-welcome-layout Specification
+
+## Purpose
+
+Define the centered welcome-state presentation and its question-entry behavior before a chat has conversation messages.
+
+## Requirements
 
 ### Requirement: Welcome page center-aligned layout
 The welcome page SHALL display a vertically centered layout with the following top-to-bottom order: greeting text, input box card, knowledge base tabs, and featured case cards section.
@@ -57,3 +63,18 @@ The main content area (behind the welcome layout) SHALL use background color #F1
 #### Scenario: Background rendering
 - **WHEN** the chat welcome page is displayed
 - **THEN** the content area background is #F1F2F7
+
+### Requirement: Content-only presentation SHALL hide question-entry surfaces
+
+When content-only presentation is active, the Console SHALL NOT render the normal question composer or its attachment, speech, send, drag-upload, or paste-file surfaces. This visual suppression SHALL NOT change how the existing chat route chooses or loads its welcome, loading, empty, error, message, or streaming state.
+
+#### Scenario: Existing route reaches a welcome or empty surface
+
+- **WHEN** the existing chat state renders without conversation messages while content-only presentation is active
+- **THEN** no question composer, attachment action, speech action, send action, drag-upload overlay, or paste-file input surface is available
+- **AND** no content-only-specific loading, empty, error, or session behavior replaces the existing route behavior
+
+#### Scenario: Preserve the normal welcome experience
+
+- **WHEN** content-only presentation is not active and normal chat has no messages
+- **THEN** the existing welcome greeting, input, tabs, cases, attachment, speech, send, and new-topic behavior remain unchanged

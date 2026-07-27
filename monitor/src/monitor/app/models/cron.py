@@ -184,6 +184,12 @@ class ExecutionModel(BaseModel):
         default=None,
         description="异步任务执行状态: success/error",
     )
+    need_notification: int = Field(
+        default=0,
+        ge=0,
+        le=1,
+        description="是否需要通知: 0-否, 1-是",
+    )
     error_message: str = Field(default="", description="错误信息")
 
     # 执行上下文
@@ -273,6 +279,25 @@ class ExecutionModel(BaseModel):
 # ============================================================
 # Sync Request Models (供 SWE 双写调用)
 # ============================================================
+
+
+class LatestExecutionSubtaskCountResponse(BaseModel):
+    """Latest execution identity and its subtask count for a cron job."""
+
+    job_id: str = Field(..., description="Cron job ID")
+    execution_id: Optional[int] = Field(
+        default=None,
+        description="Latest execution record ID",
+    )
+    trace_id: Optional[str] = Field(
+        default=None,
+        description="Latest execution trace ID",
+    )
+    subtask_count: int = Field(
+        default=0,
+        ge=0,
+        description="Number of subtasks associated with the latest trace",
+    )
 
 
 class CronJobSyncRequest(BaseModel):
@@ -625,7 +650,11 @@ class CronDispatchBatchItem(BaseModel):
 
     batch_id: str = Field(..., description="批调度批次 ID")
     parent_job_id: str = Field(default="", description="父任务 ID")
-    parent_external_job_id: str = Field(default="", description="调度平台任务 ID")
+    parent_job_name: str = Field(default="", description="定时任务名称")
+    parent_external_job_id: str = Field(
+        default="",
+        description="调度平台任务 ID",
+    )
     tenant_id: str = Field(default="", description="父任务租户 ID")
     source_id: str = Field(default="", description="渠道 ID")
     provider_id: str = Field(default="", description="Provider ID")
@@ -646,9 +675,18 @@ class CronDispatchBatchItem(BaseModel):
     completed_count: int = Field(default=0, description="完成数")
     failed_count: int = Field(default=0, description="失败数")
     error_message: str = Field(default="", description="错误摘要")
-    completed_at: Optional[datetime] = Field(default=None, description="完成时间")
-    created_at: Optional[datetime] = Field(default=None, description="创建时间")
-    updated_at: Optional[datetime] = Field(default=None, description="更新时间")
+    completed_at: Optional[datetime] = Field(
+        default=None,
+        description="完成时间",
+    )
+    created_at: Optional[datetime] = Field(
+        default=None,
+        description="创建时间",
+    )
+    updated_at: Optional[datetime] = Field(
+        default=None,
+        description="更新时间",
+    )
 
 
 class CronDispatchIntentItem(BaseModel):
@@ -691,17 +729,28 @@ class CronDispatchEventItem(BaseModel):
     job_id: str = Field(default="", description="任务 ID")
     tenant_id: str = Field(default="", description="租户 ID")
     source_id: str = Field(default="", description="渠道 ID")
-    details: Optional[Dict[str, Any]] = Field(default=None, description="事件详情")
-    created_at: Optional[datetime] = Field(default=None, description="创建时间")
+    details: Optional[Dict[str, Any]] = Field(
+        default=None,
+        description="事件详情",
+    )
+    created_at: Optional[datetime] = Field(
+        default=None,
+        description="创建时间",
+    )
 
 
 class CronDispatchBatchesResponse(BaseModel):
     """Paginated batch-dispatch batch response."""
 
     source_id: str = Field(default="", description="当前渠道 ID")
-    start_time: Optional[datetime] = Field(default=None, description="开始时间")
+    start_time: Optional[datetime] = Field(
+        default=None,
+        description="开始时间",
+    )
     end_time: Optional[datetime] = Field(default=None, description="结束时间")
-    stats: CronDispatchBatchStats = Field(default_factory=CronDispatchBatchStats)
+    stats: CronDispatchBatchStats = Field(
+        default_factory=CronDispatchBatchStats,
+    )
     items: List[CronDispatchBatchItem] = Field(default_factory=list)
     total: int = Field(default=0, description="总数")
     page: int = Field(default=1, description="页码")
@@ -724,9 +773,12 @@ class CronDispatchPolicyItem(BaseModel):
     provider_id: str = Field(default="", description="Provider ID")
     model_id: str = Field(default="", description="模型 ID")
     default_strategy_id: str = Field(default="", description="默认策略 ID")
-    strategy_schedule: Optional[List[Dict[str, Any]]] = Field(default=None)
+    strategy_schedule: Any = Field(default=None)
     enabled: bool = Field(default=True, description="是否启用")
-    strategy: Optional[Dict[str, Any]] = Field(default=None, description="策略详情")
+    strategy: Optional[Dict[str, Any]] = Field(
+        default=None,
+        description="策略详情",
+    )
     created_at: Optional[datetime] = Field(default=None)
     updated_at: Optional[datetime] = Field(default=None)
 
@@ -762,8 +814,12 @@ class CronDispatchWorkersResponse(BaseModel):
 
     source_id: str = Field(default="", description="当前渠道 ID")
     policies: List[CronDispatchPolicyItem] = Field(default_factory=list)
-    current_capacity: List[CronDispatchCapacityItem] = Field(default_factory=list)
-    capacity_events: List[CronDispatchCapacityItem] = Field(default_factory=list)
+    current_capacity: List[CronDispatchCapacityItem] = Field(
+        default_factory=list,
+    )
+    capacity_events: List[CronDispatchCapacityItem] = Field(
+        default_factory=list,
+    )
 
 
 class SubscriptionOverviewItem(BaseModel):
@@ -864,6 +920,8 @@ class CronBranchRankingItem(BaseModel):
         default=0,
         description="被客户经理查看的客户数",
     )
+    contacted_customers: int = Field(default=0, description="接触客户数")
+    contact_rate: float = Field(default=0.0, description="客户接触率")
     insight_customers: int = Field(default=0, description="去洞察客户数")
     phone_customers: int = Field(default=0, description="去电访客户数")
 
@@ -994,6 +1052,8 @@ class BranchManagerSummaryItem(BaseModel):
         default=0,
         description="被客户经理查看的客户数",
     )
+    contacted_customers: int = Field(default=0, description="接触客户数")
+    contact_rate: float = Field(default=0.0, description="客户接触率")
     insight_customers: int = Field(default=0, description="去洞察客户数")
     phone_customers: int = Field(default=0, description="去电访客户数")
 

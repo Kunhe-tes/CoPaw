@@ -3,8 +3,124 @@ import asyncio
 import os
 import signal
 import sys
+from contextlib import asynccontextmanager, nullcontext
+from types import SimpleNamespace
 
 import pytest
+
+
+def test_normalize_tool_output_keeps_utf8_safe_head_and_tail():
+    from swe.app.runner.tool_output_frames import normalize_tool_output
+
+    text = "首段\n" + ("中间数据\n" * 200) + "尾段\n"
+
+    normalized = normalize_tool_output(
+        text,
+        max_bytes=512,
+        max_lines=20,
+    )
+
+    assert normalized.startswith("首段\n")
+    assert normalized.endswith("尾段\n")
+    assert "[工具输出已截断：原始" in normalized
+    assert "省略" in normalized
+    assert len(normalized.encode("utf-8")) <= 512
+    assert normalized.count("\n") <= 20
+
+
+def test_normalize_tool_output_leaves_within_budget_text_unchanged():
+    from swe.app.runner.tool_output_frames import normalize_tool_output
+
+    assert (
+        normalize_tool_output(
+            "stdout\nstderr\n",
+            max_bytes=512,
+            max_lines=20,
+        )
+        == "stdout\nstderr\n"
+    )
+
+
+@pytest.mark.asyncio
+async def test_shell_terminal_result_uses_live_output_budget(
+    monkeypatch,
+    tmp_path,
+):
+    from swe.agents.tools import shell
+    from swe.app.runner.tool_output_frames import normalize_tool_output
+
+    raw_output = "head\n" + ("middle\n" * 20_000) + "tail\n"
+
+    async def fake_subprocess(*_args, **_kwargs):
+        return 0, raw_output, ""
+
+    @asynccontextmanager
+    async def no_execution_slot(_policy):
+        yield
+
+    monkeypatch.setattr(
+        shell,
+        "prepare_shell_command",
+        lambda *_args, **_kwargs: SimpleNamespace(
+            command="echo ignored",
+            working_dir=tmp_path,
+            env=os.environ.copy(),
+            python_runtime_guard=nullcontext(),
+        ),
+    )
+    monkeypatch.setattr(
+        shell,
+        "resolve_current_process_limit_policy",
+        lambda _tool_name: SimpleNamespace(build_preexec_fn=lambda: None),
+    )
+    monkeypatch.setattr(
+        shell,
+        "_tenant_shell_execution_slot",
+        no_execution_slot,
+    )
+    monkeypatch.setattr(shell, "_execute_platform_subprocess", fake_subprocess)
+    monkeypatch.setattr(
+        shell,
+        "_format_process_limit_diagnostic",
+        lambda text, _policy: text,
+    )
+
+    result = await shell.execute_shell_command("echo ignored")
+
+    assert result.content[0]["text"] == normalize_tool_output(raw_output)
+
+
+@pytest.mark.asyncio
+async def test_live_frame_budget_includes_omission_marker():
+    from swe.app.runner.tool_output_frames import (
+        LIVE_TOOL_OUTPUT_MAX_BYTES,
+        bind_tool_output_emitter,
+        emit_tool_output_text,
+        tool_output_invocation,
+    )
+
+    frames = []
+
+    async def collect(frame):
+        frames.append(frame)
+
+    with (
+        bind_tool_output_emitter(collect),
+        tool_output_invocation(
+            tool_call_id="call-1",
+            tool_name="execute_shell_command",
+        ),
+    ):
+        await emit_tool_output_text(
+            "stdout",
+            "x" * (LIVE_TOOL_OUTPUT_MAX_BYTES + 1),
+        )
+
+    assert sum(len(frame["text"].encode("utf-8")) for frame in frames) <= (
+        LIVE_TOOL_OUTPUT_MAX_BYTES
+    )
+    assert frames[-1]["truncated"] is True
+    assert "[早期实时输出已省略]" in frames[-1]["text"]
 
 
 @pytest.mark.asyncio

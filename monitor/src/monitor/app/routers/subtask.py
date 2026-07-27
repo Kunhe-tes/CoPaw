@@ -35,7 +35,7 @@ async def create_subtask(
 
     Creates a new subtask record with trace_id, task_id, filename,
     and optional fields: task_type, custuid, cust_nm,
-    notification_content_wplus, notification_content_zhaohu.
+    notification_content_wplus, notification_content_zhaohu, need_notification.
     The record is initialized with status=NULL, created_at=now(),
     updated_at=NULL.
 
@@ -56,6 +56,7 @@ async def create_subtask(
             cust_nm=request.cust_nm,
             notification_content_wplus=request.notification_content_wplus,
             notification_content_zhaohu=request.notification_content_zhaohu,
+            need_notification=request.need_notification,
         )
     except Exception as e:
         logger.error("Failed to create subtask: %s", e)

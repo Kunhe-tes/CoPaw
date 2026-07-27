@@ -100,6 +100,7 @@ export interface CronBroadcastTarget {
 
 export interface CronBroadcastOptions {
   enable_offset?: boolean;
+  enable_batch_dispatch?: boolean;
   offset_window_hours?: number;
 }
 

@@ -2,9 +2,10 @@
 """Internal reload API source-scope regression tests."""
 
 import base64
+import asyncio
 import json
 from types import SimpleNamespace
-from unittest.mock import call
+from typing import Any
 from unittest.mock import AsyncMock
 
 from fastapi import FastAPI
@@ -21,6 +22,39 @@ def _build_client(manager) -> TestClient:
     app.include_router(router)
     app.state.multi_agent_manager = manager
     return TestClient(app)
+
+
+class FakeAsyncTaskDb:
+    """记录异步任务 SQL 调用的数据库替身。"""
+
+    is_connected = True
+
+    def __init__(self) -> None:
+        self.executed: list[tuple[str, Any]] = []
+        self.executed_many: list[tuple[str, list[tuple]]] = []
+
+    async def execute(self, sql: str, params: Any = None) -> int:
+        self.executed.append((sql, params))
+        return 1
+
+    async def execute_many(self, sql: str, params_list: list[tuple]) -> int:
+        self.executed_many.append((sql, params_list))
+        return len(params_list)
+
+
+def _enable_async_task_submission(
+    client: TestClient,
+    monkeypatch,
+) -> FakeAsyncTaskDb:
+    """让批量初始化接口只提交异步任务，不在测试中执行后台协程。"""
+    db = FakeAsyncTaskDb()
+    client.app.state.db_connection = db
+    monkeypatch.setattr(
+        internal_router.asyncio,
+        "create_task",
+        lambda coro: coro.close() or object(),
+    )
+    return db
 
 
 def test_internal_reload_requires_source_id() -> None:
@@ -234,6 +268,44 @@ def test_internal_cron_callback_skips_batch_parent_direct_external_body(
     assert response.json() == {
         "status": "ok",
         "task_type": "job",
+        "skipped": "batch_managed_external_callback",
+    }
+    cron_manager.run_job.assert_not_awaited()
+
+
+def test_internal_cron_callback_preserves_task_type_when_skipping_batch_parent(
+    monkeypatch,
+) -> None:
+    source_job = SimpleNamespace(
+        meta={"broadcast_dispatch_intents_enabled": True},
+    )
+    cron_manager = SimpleNamespace(
+        run_job=AsyncMock(),
+        get_job=AsyncMock(return_value=source_job),
+    )
+    manager = SimpleNamespace(
+        get_agent=AsyncMock(
+            return_value=SimpleNamespace(cron_manager=cron_manager),
+        ),
+    )
+
+    monkeypatch.setenv("SWE_CRON_DISPATCH_INTENTS_ENABLED", "1")
+    client = _build_client(manager)
+    response = client.post(
+        "/internal/cron/callback",
+        json={
+            "tenant_id": "tenant-a",
+            "source_id": "source-a",
+            "agent_id": "default",
+            "task_type": "legacy_job",
+            "job_id": "job-1",
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "status": "ok",
+        "task_type": "legacy_job",
         "skipped": "batch_managed_external_callback",
     }
     cron_manager.run_job.assert_not_awaited()
@@ -642,6 +714,7 @@ def test_internal_batch_initialize_tenants(monkeypatch) -> None:
     pool = SimpleNamespace(ensure_bootstrap=AsyncMock())
     client = _build_client(SimpleNamespace())
     client.app.state.tenant_workspace_pool = pool
+    db = _enable_async_task_submission(client, monkeypatch)
 
     async def fake_resolve_user_identity(**kwargs):
         tenant_id = kwargs["tenant_id"]
@@ -666,44 +739,153 @@ def test_internal_batch_initialize_tenants(monkeypatch) -> None:
     )
 
     assert response.status_code == 200
-    assert response.json() == {
-        "success": True,
-        "total": 2,
-        "success_count": 2,
-        "fail_count": 0,
-        "results": [
-            {
-                "tenant_id": "111",
-                "tenant_name": "name-111",
-                "bbk_id": "bbk-111",
-                "status": "success",
-                "message": "initialized",
-            },
-            {
-                "tenant_id": "222",
-                "tenant_name": "name-222",
-                "bbk_id": "bbk-222",
-                "status": "success",
-                "message": "initialized",
-            },
-        ],
-    }
-    assert pool.ensure_bootstrap.await_args_list == [
-        call(
-            "111",
-            source_id="RMASSIST",
-            tenant_name="name-111",
-            bbk_id="bbk-111",
-            enable_bootstrap_chat=True,
-        ),
-        call(
-            "222",
-            source_id="RMASSIST",
-            tenant_name="name-222",
-            bbk_id="bbk-222",
-            enable_bootstrap_chat=True,
-        ),
-    ]
+    data = response.json()
+    assert data["status"] == "queued"
+    assert data["task_id"]
+    assert data["total"] == 2
+    assert data["success_count"] == 0
+    assert data["fail_count"] == 0
+    assert "INSERT INTO swe_async_tasks" in db.executed[0][0]
+    assert "INSERT INTO swe_async_task_items" in db.executed_many[0][0]
+    assert [row[1] for row in db.executed_many[0][1]] == ["111", "222"]
+    pool.ensure_bootstrap.assert_not_awaited()
+
+
+def test_internal_batch_initialize_returns_async_task_when_db_available(
+    monkeypatch,
+) -> None:
+    pool = SimpleNamespace(ensure_bootstrap=AsyncMock())
+    client = _build_client(SimpleNamespace())
+    client.app.state.tenant_workspace_pool = pool
+
+    class FakeDb:
+        is_connected = True
+
+        async def execute(self, _sql, _params=None):
+            return 1
+
+        async def execute_many(self, _sql, params_list):
+            return len(params_list)
+
+    client.app.state.db_connection = FakeDb()
+    monkeypatch.setattr(
+        internal_router.asyncio,
+        "create_task",
+        lambda coro: coro.close() or object(),
+    )
+
+    response = client.post(
+        "/internal/tenants/batch-initialize",
+        json={
+            "tenant_ids": "111,222",
+            "source_id": "RMASSIST",
+        },
+    )
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["status"] == "queued"
+    assert data["task_id"]
+    assert data["total"] == 2
+    assert data["success_count"] == 0
+    assert data["fail_count"] == 0
+    pool.ensure_bootstrap.assert_not_awaited()
+
+
+def test_internal_batch_initialize_requires_async_task_db() -> None:
+    """批量初始化必须提交异步任务，缺少任务库时返回明确错误。"""
+    pool = SimpleNamespace(ensure_bootstrap=AsyncMock())
+    client = _build_client(SimpleNamespace())
+    client.app.state.tenant_workspace_pool = pool
+
+    response = client.post(
+        "/internal/tenants/batch-initialize",
+        json={
+            "tenant_ids": "111",
+            "source_id": "RMASSIST",
+        },
+    )
+
+    assert response.status_code == 503
+    assert (
+        response.json()["detail"]
+        == "Async task database connection is not available"
+    )
+    pool.ensure_bootstrap.assert_not_awaited()
+
+
+def test_internal_batch_initialize_lazy_loads_missing_app_db(monkeypatch):
+    """app state 缺少数据库对象时应懒加载异步任务库。"""
+    pool = SimpleNamespace(ensure_bootstrap=AsyncMock())
+    client = _build_client(SimpleNamespace())
+    client.app.state.tenant_workspace_pool = pool
+    db = FakeAsyncTaskDb()
+
+    async def fake_get_db(request):  # noqa: ANN001
+        request.app.state.db_connection = db
+        return db
+
+    monkeypatch.setattr(
+        internal_router,
+        "get_or_create_async_task_db",
+        fake_get_db,
+    )
+    monkeypatch.setattr(
+        internal_router.asyncio,
+        "create_task",
+        lambda coro: coro.close() or object(),
+    )
+
+    response = client.post(
+        "/internal/tenants/batch-initialize",
+        json={
+            "tenant_ids": "111",
+            "source_id": "RMASSIST",
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json()["task_id"]
+    assert client.app.state.db_connection is db
+    assert "INSERT INTO swe_async_tasks" in db.executed[0][0]
+    pool.ensure_bootstrap.assert_not_awaited()
+
+
+def test_internal_batch_initialize_uses_async_task_db_without_connection_check(
+    monkeypatch,
+) -> None:
+    """批量初始化提交任务时不预校验数据库连接状态。"""
+    pool = SimpleNamespace(ensure_bootstrap=AsyncMock())
+    client = _build_client(SimpleNamespace())
+    client.app.state.tenant_workspace_pool = pool
+
+    class FakeDb:
+        is_connected = False
+
+        async def execute(self, _sql, _params=None):
+            return 1
+
+        async def execute_many(self, _sql, params_list):
+            return len(params_list)
+
+    client.app.state.db_connection = FakeDb()
+    monkeypatch.setattr(
+        internal_router.asyncio,
+        "create_task",
+        lambda coro: coro.close() or object(),
+    )
+
+    response = client.post(
+        "/internal/tenants/batch-initialize",
+        json={
+            "tenant_ids": "111",
+            "source_id": "RMASSIST",
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json()["status"] == "queued"
+    pool.ensure_bootstrap.assert_not_awaited()
 
 
 def test_internal_batch_initialize_can_disable_bootstrap_chat(
@@ -712,6 +894,7 @@ def test_internal_batch_initialize_can_disable_bootstrap_chat(
     pool = SimpleNamespace(ensure_bootstrap=AsyncMock())
     client = _build_client(SimpleNamespace())
     client.app.state.tenant_workspace_pool = pool
+    _enable_async_task_submission(client, monkeypatch)
 
     async def fake_resolve_user_identity(**kwargs):
         tenant_id = kwargs["tenant_id"]
@@ -736,13 +919,8 @@ def test_internal_batch_initialize_can_disable_bootstrap_chat(
     )
 
     assert response.status_code == 200
-    pool.ensure_bootstrap.assert_awaited_once_with(
-        "111",
-        source_id="RMASSIST",
-        tenant_name="name-111",
-        bbk_id="bbk-111",
-        enable_bootstrap_chat=False,
-    )
+    assert response.json()["status"] == "queued"
+    pool.ensure_bootstrap.assert_not_awaited()
 
 
 def test_internal_batch_initialize_requires_identity_resolution(
@@ -751,6 +929,7 @@ def test_internal_batch_initialize_requires_identity_resolution(
     pool = SimpleNamespace(ensure_bootstrap=AsyncMock())
     client = _build_client(SimpleNamespace())
     client.app.state.tenant_workspace_pool = pool
+    _enable_async_task_submission(client, monkeypatch)
 
     async def fake_resolve_user_identity(**kwargs):
         del kwargs
@@ -771,21 +950,7 @@ def test_internal_batch_initialize_requires_identity_resolution(
     )
 
     assert response.status_code == 200
-    assert response.json() == {
-        "success": False,
-        "total": 1,
-        "success_count": 0,
-        "fail_count": 1,
-        "results": [
-            {
-                "tenant_id": "111",
-                "tenant_name": None,
-                "bbk_id": None,
-                "status": "failed",
-                "message": "user identity not resolved",
-            },
-        ],
-    }
+    assert response.json()["status"] == "queued"
     pool.ensure_bootstrap.assert_not_awaited()
 
 
@@ -795,6 +960,7 @@ def test_internal_batch_initialize_marks_existing_tenant_as_skipped(
     pool = SimpleNamespace(ensure_bootstrap=AsyncMock())
     client = _build_client(SimpleNamespace())
     client.app.state.tenant_workspace_pool = pool
+    _enable_async_task_submission(client, monkeypatch)
 
     async def fake_resolve_user_identity(**kwargs):
         tenant_id = kwargs["tenant_id"]
@@ -826,35 +992,80 @@ def test_internal_batch_initialize_marks_existing_tenant_as_skipped(
     )
 
     assert response.status_code == 200
-    assert response.json() == {
-        "success": True,
-        "total": 2,
-        "success_count": 2,
-        "fail_count": 0,
-        "results": [
-            {
-                "tenant_id": "111",
-                "tenant_name": "name-111",
-                "bbk_id": "bbk-111",
-                "status": "success",
-                "message": "skipped",
-            },
-            {
-                "tenant_id": "222",
-                "tenant_name": "name-222",
-                "bbk_id": "bbk-222",
-                "status": "success",
-                "message": "initialized",
-            },
-        ],
-    }
-    pool.ensure_bootstrap.assert_awaited_once_with(
-        "222",
-        source_id="RMASSIST",
-        tenant_name="name-222",
-        bbk_id="bbk-222",
-        enable_bootstrap_chat=True,
+    assert response.json()["status"] == "queued"
+    pool.ensure_bootstrap.assert_not_awaited()
+
+
+def test_internal_batch_initialize_task_marks_item_detail_statuses(
+    monkeypatch,
+) -> None:
+    """后台初始化明细应区分已跳过和新创建状态。"""
+
+    class FakeStore:
+        def __init__(self) -> None:
+            self.item_results: list[dict[str, Any]] = []
+            self.finished: dict[str, Any] | None = None
+
+        async def mark_running(self, _task_id: str) -> None:
+            return None
+
+        async def record_item_result(self, **kwargs) -> None:
+            self.item_results.append(kwargs)
+
+        async def finish_task(self, **kwargs) -> None:
+            self.finished = kwargs
+
+    async def fake_resolve_user_identity(**kwargs):
+        tenant_id = kwargs["tenant_id"]
+        return ResolvedIdentity(
+            user_name=f"name-{tenant_id}",
+            bbk_id=f"bbk-{tenant_id}",
+        )
+
+    async def fake_existing_check(_pool, tenant_id, _source_id):
+        return tenant_id == "111"
+
+    monkeypatch.setattr(
+        internal_router,
+        "resolve_user_identity",
+        fake_resolve_user_identity,
     )
+    monkeypatch.setattr(
+        internal_router,
+        "_is_tenant_already_bootstrapped",
+        fake_existing_check,
+    )
+
+    store = FakeStore()
+    pool = SimpleNamespace(ensure_bootstrap=AsyncMock())
+    payload = internal_router.InternalBatchInitializeTenantsRequest(
+        tenant_ids="111,222",
+        source_id="RMASSIST",
+    )
+
+    asyncio.run(
+        internal_router._run_internal_batch_initialize_task(  # noqa: SLF001
+            task_id="task-1",
+            store=store,
+            pool=pool,
+            payload=payload,
+            tenant_ids=["111", "222"],
+            headers={},
+        ),
+    )
+
+    assert [item["item_status"] for item in store.item_results] == [
+        "skipped",
+        "created",
+    ]
+    assert [item["result"]["status"] for item in store.item_results] == [
+        "skipped",
+        "created",
+    ]
+    pool.ensure_bootstrap.assert_awaited_once()
+    assert store.finished is not None
+    assert store.finished["status"] == "succeeded"
+    assert store.finished["done_count"] == 2
 
 
 def test_internal_batch_initialize_marks_existing_tenant_as_skipped_from_fs(
@@ -906,6 +1117,7 @@ def test_internal_batch_initialize_marks_existing_tenant_as_skipped_from_fs(
     )
     client = _build_client(SimpleNamespace())
     client.app.state.tenant_workspace_pool = pool
+    _enable_async_task_submission(client, monkeypatch)
 
     async def fake_resolve_user_identity(**kwargs):
         tenant_id = kwargs["tenant_id"]
@@ -929,21 +1141,7 @@ def test_internal_batch_initialize_marks_existing_tenant_as_skipped_from_fs(
     )
 
     assert response.status_code == 200
-    assert response.json() == {
-        "success": True,
-        "total": 1,
-        "success_count": 1,
-        "fail_count": 0,
-        "results": [
-            {
-                "tenant_id": "111",
-                "tenant_name": "name-111",
-                "bbk_id": "bbk-111",
-                "status": "success",
-                "message": "skipped",
-            },
-        ],
-    }
+    assert response.json()["status"] == "queued"
     pool.ensure_bootstrap.assert_not_awaited()
 
 

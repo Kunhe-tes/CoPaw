@@ -6,12 +6,12 @@
 
 ## 一句话理解
 
-Cron 模块不是“在本进程里用 APScheduler 到点执行”的小功能，而是一套跨 SWE、外部调度平台、Monitor、Console、招呼通知和租户 source 隔离的定时任务运行链路。
+Cron 模块不是“在本进程里用 APScheduler 到点执行”的小功能，而是一套跨 SWE、外部调度平台、独立 Scheduler、Monitor、Console、招呼通知和租户 source 隔离的定时任务运行链路。
 
 可以先记住四句话：
 
 - SWE 保存任务定义、执行业务逻辑，并把任务定义和执行记录同步给 Monitor。
-- 外部调度平台只负责到点回调 `/api/internal/cron/callback`，不直接执行 Agent。
+- 普通模式由外部调度平台回调 SWE；批调度模式由外部平台回调独立 Scheduler，再由 Scheduler 按 intent 回调各 SWE。
 - `CronManager` 管任务生命周期、外部平台同步、任务卡片、Monitor 同步和 source 配置绑定。
 - `CronExecutor` 管单次执行，负责绑定 tenant/source/model/auth 上下文，再调用 runner 或发送固定文本。
 
@@ -24,13 +24,15 @@ Cron 模块覆盖下面这些场景：
 - 到点自动运行 Agent prompt，或发送固定文本。
 - 手动点击“运行一次”，立即触发后台执行。
 - 将一个定时任务广播到多个租户，并按时间错峰执行。
+- 将广播源任务切到批调度，由独立 Scheduler 按模型作用域容量和阅读热度派发。
 - 记录执行结果、trace、输入快照、输出预览到 Monitor。
+- 在 Monitor 查询批调度批次、intent、event、worker，以及最新 execution 的子任务数。
 - 对成功的 Agent 定时任务生成待通知记录，再由 SWE 后台 worker 领取并推送招呼通知。
-- 支持 heartbeat 和 dream 这类系统定时任务。
+- 支持 source 级会话清理、归档维护，以及 workspace 级 heartbeat 和 dream 系统任务。
 
 ## 先看整体链路
 
-普通定时任务从创建到执行，大致是下面这条链路：
+普通调度从创建到执行，大致是下面这条链路：
 
 ```text
 Console / CLI / 外部接入方
@@ -49,6 +51,22 @@ Console / CLI / 外部接入方
   -> CronManager.send_task_success_notification()
   -> zhaohu 通道推送完成提醒
 ```
+
+广播源任务切到批调度后，自动执行改走下面这条链路：
+
+```text
+Console 切换批调度
+  -> SWE 暂停普通 timer，注册提前触发的批调度物理 timer
+  -> 外部平台回调 /api/scheduler/cron/callback
+  -> 独立 Scheduler 创建 batch 和父/子任务 intents
+  -> 按 source/provider/model 容量与阅读热度派发
+  -> Scheduler 回调任务所属 SWE /api/internal/cron/callback
+  -> CronManager.run_job(is_manual=False, dispatch_meta=...)
+  -> SWE 回传 /api/scheduler/cron/execution
+  -> Scheduler 完成、重试并立即补位
+```
+
+批调度详细合同见 [Cron 批调度与独立 Scheduler](cron-batch-dispatch.md)。
 
 手动运行少了外部调度平台这一段：
 
@@ -70,12 +88,16 @@ POST /api/cron/jobs/{job_id}/run
 | 单次执行 | `src/swe/app/crons/executor.py` | 绑定 tenant/source/model/auth，上下文内执行 text 或 agent 任务 |
 | 外部调度适配 | `src/swe/app/crons/scheduler_adapter.py` | `NoopSchedulerAdapter` 与 `RealSchedulerAdapter`，对接外部 job-admin API |
 | 外部回调 | `src/swe/app/routers/internal.py` | `/api/internal/cron/callback` 解码 `jobParam` 并分发 job / heartbeat / dream |
+| 独立 Scheduler API | `scheduler/src/scheduler/app/routers/cron.py` | 接收批调度父 timer 和 SWE execution 回执 |
+| 批调度编排 | `scheduler/src/scheduler/app/services/cron/scheduling_service.py` | intent 派发、模型作用域容量、重试、超时和补位 |
 | 授权状态 | `src/swe/app/crons/auth_state.py` | 保存 `cron_auth.json`，刷新 user_info/auth_token/cookie |
 | 授权 API | `src/swe/app/routers/auth.py` | `/api/auth/cron-auth` 写入 cron 授权，`/api/auth/cron-auth/cleanup` 清理状态 |
 | Monitor 同步客户端 | `src/swe/app/crons/monitor_sync_client.py` | SWE 调用 Monitor 同步 job、execution、通知领取状态 |
 | 完成通知 worker | `src/swe/app/crons/notification_worker.py` | 后台扫描 Monitor pending 通知并推送完成提醒 |
 | Monitor 同步服务 | `monitor/src/monitor/app/services/cron/sync_service.py` | 写入 `swe_cron_jobs`、`swe_cron_executions` |
 | Monitor 通知服务 | `monitor/src/monitor/app/services/cron/notification_service.py` | 原子领取待通知 execution，回写 sent / failed |
+| Monitor 批次查询 | `monitor/src/monitor/app/routers/cron.py` | 查询 dispatch batches、intents、events 和 workers |
+| Source 系统任务 | `src/swe/app/source_system_config/task_scheduler.py` | source 级 task session cleanup 与 archive maintenance |
 | Console API | `console/src/api/modules/cronjob.ts` | 前端调用 `/cron/jobs`、广播、运行、已读等接口 |
 | Console 表单 | `console/src/pages/Control/CronJobs/helpers.ts` | 表单值和 `CronJobSpec` 互转，处理 cron 表达式和 `model_slot` |
 | CLI | `src/swe/cli/cron_cmd.py` | `swe cron list/get/state/create/update/delete/pause/resume/run` |
@@ -98,9 +120,12 @@ POST /api/cron/jobs/{job_id}/run
 | `task_type` | `agent` 或 `text` | `agent` 必须有 `request`，`text` 必须有 `text` |
 | `request` | Agent 请求体 | `extra="allow"`，最终传给 `runner.stream_query()` |
 | `model_slot` | 指定执行模型 | 只对 `agent` 生效；`text` 任务会清空 |
+| `skill_ids` | 任务关联技能 ID | 逗号归一化、去重，最多 200 字符；供技能就绪度治理查询，不会让执行器自动加载技能 |
 | `dispatch` | 输出目标 | 包含 channel、user_id、session_id、mode、meta |
 | `runtime` | 执行限制 | 默认超时 7200 秒，最大并发 1，misfire grace 300 秒 |
 | `meta` | 扩展状态 | 保存 task chat、未读数、external_job_id、广播来源等运行态字段 |
+
+批调度相关状态也放在 `meta`，包括 `broadcast_dispatch_intents_enabled`、`batch_dispatch_external_job_id`、批调度 cron/offset/warning。一次真实派发的 intent/batch/attempt 则写入 execution meta 的 `cron_dispatch`，不反向改写任务定义。
 
 ### cron 表达式规则
 

@@ -366,6 +366,7 @@ class TestDefaultWorkspaceSkillSeeding:
         _write_json_atomic(
             manifest_path,
             {
+                "layout_version": 2,
                 "skills": {
                     "workspace-skill": {
                         "enabled": True,
@@ -425,6 +426,22 @@ class TestDefaultWorkspaceSkillSeeding:
             "---\nname: default-ws-skill\ndescription: Default\n---\n",
             encoding="utf-8",
         )
+        source_manifest_path = get_workspace_skill_manifest_path(
+            default_workspace,
+        )
+        _write_json_atomic(
+            source_manifest_path,
+            {
+                "layout_version": 2,
+                "skills": {
+                    "default-ws-skill": {
+                        "enabled": True,
+                        "channels": ["all"],
+                        "source": "customized",
+                    },
+                },
+            },
+        )
 
         # Create new tenant with existing workspace skills (with manifest)
         new_init = TenantInitializer(tmp_path, "new-tenant")
@@ -445,10 +462,20 @@ class TestDefaultWorkspaceSkillSeeding:
         manifest_path = get_workspace_skill_manifest_path(new_workspace)
         _write_json_atomic(
             manifest_path,
-            {"skills": {"existing-skill": {"name": "existing-skill"}}},
+            {
+                "layout_version": 2,
+                "skills": {
+                    "existing-skill": {
+                        "enabled": True,
+                        "channels": ["all"],
+                        "source": "customized",
+                    },
+                },
+            },
         )
 
         # Try to seed - should be skipped
+        assert new_init._prepare_source_workspace_state(default_workspace)
         result = new_init.seed_default_workspace_skills_from_default()
 
         assert result["seeded"] is False
@@ -927,7 +954,12 @@ class TestFullInitialization:
         ws_manifest_path = get_workspace_skill_manifest_path(default_workspace)
         _write_json_atomic(
             ws_manifest_path,
-            {"skills": {"ws-skill": {"enabled": True, "channels": ["all"]}}},
+            {
+                "layout_version": 2,
+                "skills": {
+                    "ws-skill": {"enabled": True, "channels": ["all"]},
+                },
+            },
         )
 
         # Initialize new tenant

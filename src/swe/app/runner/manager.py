@@ -95,10 +95,11 @@ class ChatManager:
                 f"list_chats: repo path={self._repo.path}, "
                 f"filters: user_id={user_id}, channel={channel}",
             )
-            return await self._repo.filter_chats(
+            chats = await self._repo.filter_chats(
                 user_id=user_id,
                 channel=channel,
             )
+            return self._repo.sort_chats_by_recency(chats)
 
     async def list_chats_page(
         self,
@@ -134,7 +135,7 @@ class ChatManager:
         user_id: Optional[str] = None,
         channel: Optional[str] = None,
     ) -> ChatPage:
-        """List a stable creation-ordered page using an opaque cursor."""
+        """List a live latest-update-ordered page using an opaque cursor."""
         async with self._lock:
             return await self._repo.paginate_chats_cursor(
                 user_id=user_id,
