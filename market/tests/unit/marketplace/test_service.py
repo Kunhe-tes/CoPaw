@@ -389,6 +389,59 @@ async def test_delete_skill_removes_registered_disabled_package(tmp_path):
     )
 
 
+def test_save_skill_file_updates_registered_disabled_package(tmp_path):
+    from market.marketplace.fs import (
+        get_user_disabled_skills_dir,
+        get_user_skill_manifest_path,
+    )
+
+    svc = _make_service(tmp_path)
+    user_id = "user1"
+    source_id = "source_a"
+    skill_name = "demo"
+    disabled = (
+        get_user_disabled_skills_dir(
+            tmp_path / "swe",
+            user_id,
+            source_id=source_id,
+        )
+        / skill_name
+    )
+    disabled.mkdir(parents=True)
+    (disabled / "SKILL.md").write_text(
+        "---\nversion: 1.0.0\n---\n# Demo\n",
+        encoding="utf-8",
+    )
+    (disabled / "notes.txt").write_text("before", encoding="utf-8")
+    manifest_path = get_user_skill_manifest_path(
+        tmp_path / "swe",
+        user_id,
+        source_id=source_id,
+    )
+    manifest_path.write_text(
+        json.dumps(
+            {
+                "schema_version": "workspace-skill-manifest.v1",
+                "layout_version": 2,
+                "version": 0,
+                "skills": {skill_name: {"enabled": False}},
+            },
+        ),
+        encoding="utf-8",
+    )
+
+    success, _ = svc.save_skill_file(
+        user_id,
+        skill_name,
+        "notes.txt",
+        "after",
+        source_id=source_id,
+    )
+
+    assert success is True
+    assert (disabled / "notes.txt").read_text(encoding="utf-8") == "after"
+
+
 @pytest.mark.asyncio
 async def test_batch_delete_skills_removes_package_after_disabling(tmp_path):
     from market.marketplace.fs import (

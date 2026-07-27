@@ -1429,7 +1429,7 @@ class MarketplaceService:
             agent_id,
             source_id,
         ).parent
-        result: list[MySkillItem] = []
+        skill_dirs: dict[str, Path] = {}
         for skill_name, manifest_entry in sorted(manifest_skills.items()):
             if not isinstance(manifest_entry, dict):
                 continue
@@ -1445,14 +1445,27 @@ class MarketplaceService:
                 continue
             if skill_dir is None or not skill_dir.is_dir():
                 continue
-            result.append(
-                self._build_my_skill_item(
-                    skill_dir,
-                    manifest_skills,
-                    market_versions,
-                ),
+            skill_dirs[skill_name] = skill_dir
+
+        active_skills_dir = get_user_skills_dir(
+            self.swe_root,
+            user_id,
+            agent_id,
+            source_id,
+        )
+        if active_skills_dir.is_dir():
+            for skill_dir in active_skills_dir.iterdir():
+                if skill_dir.is_dir() and skill_dir.name not in manifest_skills:
+                    skill_dirs[skill_dir.name] = skill_dir
+
+        return [
+            self._build_my_skill_item(
+                skill_dir,
+                manifest_skills,
+                market_versions,
             )
-        return result
+            for _, skill_dir in sorted(skill_dirs.items())
+        ]
 
     def _get_active_market_versions(self, source_id: str) -> dict[str, str]:
         """读取当前来源下已发布技能的最新版本映射."""
@@ -1982,17 +1995,52 @@ class MarketplaceService:
         source_id: str | None = None,
     ) -> list[dict]:
         """列出技能文件树（不包含 skill.json）."""
-        skills_dir = get_user_skills_dir(
+        skill_dir = self.get_registered_skill_dir(
+            user_id,
+            skill_name,
+            agent_id,
+            source_id,
+        )
+        if skill_dir is None:
+            return []
+        return _build_file_tree_entries(
+            skill_dir,
+            hidden_files={"skill.json"},
+        )
+
+    def get_registered_skill_dir(
+        self,
+        user_id: str,
+        skill_name: str,
+        agent_id: str = "default",
+        source_id: str | None = None,
+    ) -> Path | None:
+        """解析 manifest 注册技能在 active 或 disabled 根目录中的路径."""
+        manifest = read_user_skill_manifest(
             self.swe_root,
             user_id,
             agent_id,
             source_id,
         )
-        skill_dir = skills_dir / skill_name
-        return _build_file_tree_entries(
-            skill_dir,
-            hidden_files={"skill.json"},
-        )
+        manifest_entry = manifest.get("skills", {}).get(skill_name)
+        if not isinstance(manifest_entry, dict):
+            return None
+        entry_for_resolution = dict(manifest_entry)
+        entry_for_resolution.setdefault("enabled", True)
+        workspace_dir = get_user_skill_manifest_path(
+            self.swe_root,
+            user_id,
+            agent_id,
+            source_id,
+        ).parent
+        try:
+            return resolve_registered_skill_path(
+                workspace_dir,
+                skill_name,
+                entry_for_resolution,
+            ).path
+        except ValueError:
+            return None
 
     def read_skill_file(
         self,
@@ -2003,13 +2051,14 @@ class MarketplaceService:
         source_id: str | None = None,
     ) -> tuple[str | None, str]:
         """读取技能文件内容，返回 (content, file_type)."""
-        skills_dir = get_user_skills_dir(
-            self.swe_root,
+        skill_dir = self.get_registered_skill_dir(
             user_id,
+            skill_name,
             agent_id,
             source_id,
         )
-        skill_dir = skills_dir / skill_name
+        if skill_dir is None:
+            return None, "error"
         return _read_preview_file(skill_dir, file_path)
 
     def list_market_skill_files(
@@ -2224,13 +2273,14 @@ class MarketplaceService:
         返回:
             (是否成功, 新版本号或None)
         """
-        skills_dir = get_user_skills_dir(
-            self.swe_root,
+        skill_dir = self.get_registered_skill_dir(
             user_id,
+            skill_name,
             agent_id,
             source_id,
         )
-        skill_dir = skills_dir / skill_name
+        if skill_dir is None:
+            return False, None
         target = skill_dir / file_path
 
         try:
