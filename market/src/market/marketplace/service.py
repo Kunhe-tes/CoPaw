@@ -32,11 +32,13 @@ from .fs import (
     get_mcp_dir,
     get_skill_dir,
     get_user_disabled_skills_dir,
+    get_user_skill_manifest_path,
     get_user_skills_dir,
     load_index,
     migrate_legacy_scope_dir_if_needed,
     mutate_user_skill_manifest,
     read_user_skill_manifest,
+    resolve_registered_skill_path,
     load_mcp_config,
     normalize_mcp_config_data,
     resolve_effective_user_id,
@@ -798,6 +800,37 @@ class MarketplaceService:
             entry = payload.get("skills", {}).get(skill_name)
             if entry is None:
                 return False
+            workspace_dir = get_user_skill_manifest_path(
+                self.swe_root,
+                user_id,
+                agent_id,
+                source_id,
+            ).parent
+            resolved = resolve_registered_skill_path(
+                workspace_dir,
+                skill_name,
+                entry,
+            )
+            skill_dir = resolved.path
+            disabled_dir = (
+                get_user_disabled_skills_dir(
+                    self.swe_root,
+                    user_id,
+                    agent_id,
+                    source_id,
+                )
+                / skill_name
+            )
+            if skill_dir is None:
+                return False
+            if skill_dir != disabled_dir:
+                if disabled_dir.exists():
+                    return False
+                disabled_dir.parent.mkdir(parents=True, exist_ok=True)
+                try:
+                    shutil.move(skill_dir, disabled_dir)
+                except OSError:
+                    return False
             entry["enabled"] = False
             entry["updated_at"] = datetime.now(timezone.utc).isoformat()
             return True

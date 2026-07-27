@@ -202,6 +202,137 @@ async def test_enable_registered_hidden_skill_updates_manifest_and_reloads(
 
 
 @pytest.mark.asyncio
+async def test_disable_skill_moves_registered_package_to_disabled_root(
+    tmp_path,
+):
+    from market.marketplace.fs import (
+        get_user_disabled_skills_dir,
+        get_user_skill_manifest_path,
+        get_user_skills_dir,
+    )
+
+    svc = _make_service(tmp_path)
+    svc._trigger_agent_reload = AsyncMock()
+    svc.skill_registry.update_skill = AsyncMock()
+    user_id = "user1"
+    agent_id = "agent1"
+    source_id = "source_a"
+    skill_name = "demo"
+    active = (
+        get_user_skills_dir(
+            tmp_path / "swe",
+            user_id,
+            agent_id,
+            source_id,
+        )
+        / skill_name
+    )
+    active.mkdir(parents=True)
+    (active / "SKILL.md").write_text("# Demo", encoding="utf-8")
+    manifest_path = get_user_skill_manifest_path(
+        tmp_path / "swe",
+        user_id,
+        agent_id,
+        source_id,
+    )
+    manifest_path.write_text(
+        json.dumps(
+            {
+                "schema_version": "workspace-skill-manifest.v1",
+                "layout_version": 2,
+                "version": 0,
+                "skills": {skill_name: {"enabled": True}},
+            },
+        ),
+        encoding="utf-8",
+    )
+
+    result = await svc.disable_skill(
+        user_id,
+        skill_name,
+        agent_id,
+        source_id,
+    )
+
+    disabled = (
+        get_user_disabled_skills_dir(
+            tmp_path / "swe",
+            user_id,
+            agent_id,
+            source_id,
+        )
+        / skill_name
+    )
+    assert result == {"success": True}
+    assert not active.exists()
+    assert (disabled / "SKILL.md").read_text(encoding="utf-8") == "# Demo"
+    assert (
+        json.loads(manifest_path.read_text(encoding="utf-8"))["skills"][
+            skill_name
+        ]["enabled"]
+        is False
+    )
+    svc._trigger_agent_reload.assert_awaited_once_with(
+        user_id,
+        agent_id,
+        source_id,
+    )
+    svc.skill_registry.update_skill.assert_awaited_once_with(
+        user_id=user_id,
+        skill_name=skill_name,
+        source_id=source_id,
+        enabled=False,
+    )
+
+
+@pytest.mark.asyncio
+async def test_disable_skill_keeps_manifest_enabled_when_move_fails(
+    tmp_path,
+    monkeypatch,
+):
+    from market.marketplace.fs import (
+        get_user_skill_manifest_path,
+        get_user_skills_dir,
+    )
+
+    svc = _make_service(tmp_path)
+    svc._trigger_agent_reload = AsyncMock()
+    svc.skill_registry.update_skill = AsyncMock()
+    active = get_user_skills_dir(tmp_path / "swe", "user1") / "demo"
+    active.mkdir(parents=True)
+    (active / "SKILL.md").write_text("# Demo", encoding="utf-8")
+    manifest_path = get_user_skill_manifest_path(tmp_path / "swe", "user1")
+    manifest_path.write_text(
+        json.dumps(
+            {
+                "schema_version": "workspace-skill-manifest.v1",
+                "layout_version": 2,
+                "version": 0,
+                "skills": {"demo": {"enabled": True}},
+            },
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        "market.marketplace.service.shutil.move",
+        Mock(side_effect=OSError("disk full")),
+    )
+
+    result = await svc.disable_skill("user1", "demo")
+
+    assert result == {"success": False}
+    assert active.exists()
+    assert (
+        json.loads(manifest_path.read_text(encoding="utf-8"))["skills"][
+            "demo"
+        ]["enabled"]
+        is True
+    )
+    svc._trigger_agent_reload.assert_not_awaited()
+    svc.skill_registry.update_skill.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_distribution_preserves_disabled_result_without_reload(
     tmp_path,
     monkeypatch,
