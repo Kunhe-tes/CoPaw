@@ -118,6 +118,7 @@ export default function SystemConfigPage() {
   const [promptSegments, setPromptSegments] = useState<string[]>([]);
   const [databaseGuardDisablePending, setDatabaseGuardDisablePending] =
     useState(false);
+  const [restoreDefaultsPending, setRestoreDefaultsPending] = useState(false);
   const [pendingSourceId, setPendingSourceId] = useState<string | null>(null);
   const requestSeqRef = useRef(0);
   const activeSourceRef = useRef(activeSourceId);
@@ -166,6 +167,7 @@ export default function SystemConfigPage() {
       setRecord(null);
       setDraftConfig({});
       setPromptSegments([]);
+      setRestoreDefaultsPending(false);
       setPendingSourceId(null);
       return;
     }
@@ -659,29 +661,61 @@ export default function SystemConfigPage() {
         }
       />
     ) : selectedCapabilityId === "safety" ? (
-      <div className={styles.switchList}>
-        {CURRENT_SOURCE_SYSTEM_CONFIG_SWITCHES.filter((definition) =>
-          [
-            "feature_switches.database_access_guard_enabled",
-            "approval_notifications.zhaohu_tool_guard_enabled",
-          ].includes(definition.key),
-        ).map((definition) => (
-          <div key={definition.key} className={styles.switchRow}>
-            <div className={styles.switchCopy}>
-              <span className={styles.switchTitle}>{definition.title}</span>
-              <span className={styles.switchDescription}>
-                {definition.description}
-              </span>
-            </div>
-            <Switch
-              checked={readRegisteredSwitchValue(draftConfig, definition)}
-              disabled={formDisabled}
-              onChange={(checked) =>
-                handleSwitchChange(definition.key, checked)
-              }
-            />
+      <div className={styles.drawerEditor}>
+        <section className={styles.drawerSettingSection}>
+          <div className={styles.drawerSettingSectionHeader}>
+            <span>访问防护</span>
+            <span>1 项设置</span>
           </div>
-        ))}
+          {CURRENT_SOURCE_SYSTEM_CONFIG_SWITCHES.filter(
+            (definition) =>
+              definition.key ===
+              "feature_switches.database_access_guard_enabled",
+          ).map((definition) => (
+            <div key={definition.key} className={styles.switchRow}>
+              <div className={styles.switchCopy}>
+                <span className={styles.switchTitle}>{definition.title}</span>
+                <span className={styles.switchDescription}>
+                  {definition.description}
+                </span>
+              </div>
+              <Switch
+                checked={readRegisteredSwitchValue(draftConfig, definition)}
+                disabled={formDisabled}
+                onChange={(checked) =>
+                  handleSwitchChange(definition.key, checked)
+                }
+              />
+            </div>
+          ))}
+        </section>
+        <section className={styles.drawerSettingSection}>
+          <div className={styles.drawerSettingSectionHeader}>
+            <span>审批通知</span>
+            <span>1 项设置</span>
+          </div>
+          {CURRENT_SOURCE_SYSTEM_CONFIG_SWITCHES.filter(
+            (definition) =>
+              definition.key ===
+              "approval_notifications.zhaohu_tool_guard_enabled",
+          ).map((definition) => (
+            <div key={definition.key} className={styles.switchRow}>
+              <div className={styles.switchCopy}>
+                <span className={styles.switchTitle}>{definition.title}</span>
+                <span className={styles.switchDescription}>
+                  {definition.description}
+                </span>
+              </div>
+              <Switch
+                checked={readRegisteredSwitchValue(draftConfig, definition)}
+                disabled={formDisabled}
+                onChange={(checked) =>
+                  handleSwitchChange(definition.key, checked)
+                }
+              />
+            </div>
+          ))}
+        </section>
       </div>
     ) : selectedCapabilityId === "model" ? (
       <div className={styles.drawerEditor}>
@@ -1014,6 +1048,7 @@ export default function SystemConfigPage() {
     if (formDisabled) {
       return;
     }
+    setRestoreDefaultsPending(false);
     const request = beginRequest(activeSourceId);
     setSaving(true);
     setRequestError(null);
@@ -1164,6 +1199,7 @@ export default function SystemConfigPage() {
 
             <ConfigDetailDrawer
               capability={selectedCapability}
+              hasUnsavedChanges={isDirty}
               open={selectedCapabilityId !== null}
               onClose={() => setSelectedCapabilityId(null)}
             >
@@ -1886,6 +1922,19 @@ export default function SystemConfigPage() {
             </Modal>
 
             <Modal
+              cancelText="取消"
+              confirmLoading={saving}
+              okButtonProps={{ danger: true }}
+              okText="恢复默认设置"
+              open={restoreDefaultsPending}
+              title="恢复当前系统的默认设置？"
+              onCancel={() => setRestoreDefaultsPending(false)}
+              onOk={() => void handleDelete()}
+            >
+              这会移除当前系统已保存的全部自定义配置，并丢弃未保存的草稿修改，恢复继承默认值。此操作无法从此页撤销。
+            </Modal>
+
+            <Modal
               cancelText="保留防护"
               okButtonProps={{ danger: true }}
               okText="确认关闭"
@@ -1914,12 +1963,15 @@ export default function SystemConfigPage() {
                   放弃修改
                 </Button>
               ) : null}
+              <span className={styles.restoreDefaultsHint}>
+                清除自定义项并恢复继承默认值
+              </span>
               <Button
                 danger
-                onClick={handleDelete}
                 disabled={formDisabled || record?.is_default}
+                onClick={() => setRestoreDefaultsPending(true)}
               >
-                {t("common.delete")}
+                恢复默认设置
               </Button>
               <Button
                 aria-label={t("common.save")}
