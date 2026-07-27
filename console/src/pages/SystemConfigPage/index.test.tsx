@@ -1009,6 +1009,45 @@ describe("SystemConfigPage", () => {
     expect(screen.getByText("存在未保存修改")).toBeTruthy();
   });
 
+  it("closes default restoration confirmation when the active source changes", async () => {
+    mocks.sourceSystemConfigApi.getCurrent
+      .mockResolvedValueOnce({
+        source_id: "portal",
+        config: {
+          feature_switches: {
+            chat_task_progress_enabled: false,
+          },
+        },
+        version: 2,
+        is_default: false,
+        updated_by: "alice",
+        updated_at: "2026-05-20 22:00:00",
+      })
+      .mockResolvedValueOnce({
+        source_id: "workspace",
+        config: {},
+        version: 0,
+        is_default: true,
+        updated_by: null,
+        updated_at: null,
+      });
+
+    render(<SystemConfigPage />);
+
+    await screen.findByText("存在显式覆盖");
+    fireEvent.click(screen.getByRole("button", { name: "恢复默认设置" }));
+    expect(await screen.findByRole("dialog")).toBeTruthy();
+
+    act(() => {
+      useIframeStore.getState().setContext({ source: "workspace" });
+    });
+
+    await waitFor(() => {
+      expect(screen.queryByRole("dialog")).toBeNull();
+    });
+    expect(mocks.sourceSystemConfigApi.deleteCurrent).not.toHaveBeenCalled();
+  });
+
   it("clears stale draft and blocks save when the next source load fails", async () => {
     mocks.sourceSystemConfigApi.getCurrent
       .mockResolvedValueOnce({

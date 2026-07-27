@@ -119,6 +119,9 @@ export default function SystemConfigPage() {
   const [databaseGuardDisablePending, setDatabaseGuardDisablePending] =
     useState(false);
   const [restoreDefaultsPending, setRestoreDefaultsPending] = useState(false);
+  const [restoreDefaultsSourceId, setRestoreDefaultsSourceId] = useState<
+    string | null
+  >(null);
   const [pendingSourceId, setPendingSourceId] = useState<string | null>(null);
   const requestSeqRef = useRef(0);
   const activeSourceRef = useRef(activeSourceId);
@@ -126,6 +129,16 @@ export default function SystemConfigPage() {
   useEffect(() => {
     activeSourceRef.current = activeSourceId;
   }, [activeSourceId]);
+
+  useEffect(() => {
+    if (
+      restoreDefaultsSourceId !== null &&
+      restoreDefaultsSourceId !== activeSourceId
+    ) {
+      setRestoreDefaultsPending(false);
+      setRestoreDefaultsSourceId(null);
+    }
+  }, [activeSourceId, restoreDefaultsSourceId]);
 
   const beginRequest = (sourceId: string) => {
     requestSeqRef.current += 1;
@@ -168,6 +181,7 @@ export default function SystemConfigPage() {
       setDraftConfig({});
       setPromptSegments([]);
       setRestoreDefaultsPending(false);
+      setRestoreDefaultsSourceId(null);
       setPendingSourceId(null);
       return;
     }
@@ -1045,11 +1059,21 @@ export default function SystemConfigPage() {
       </div>
     ) : null;
   const handleDelete = async () => {
-    if (formDisabled) {
+    const currentSourceId =
+      useIframeStore.getState().source || DEFAULT_SOURCE_ID;
+    if (
+      formDisabled ||
+      restoreDefaultsSourceId === null ||
+      restoreDefaultsSourceId !== activeSourceId ||
+      restoreDefaultsSourceId !== currentSourceId
+    ) {
+      setRestoreDefaultsPending(false);
+      setRestoreDefaultsSourceId(null);
       return;
     }
     setRestoreDefaultsPending(false);
-    const request = beginRequest(activeSourceId);
+    const request = beginRequest(restoreDefaultsSourceId);
+    setRestoreDefaultsSourceId(null);
     setSaving(true);
     setRequestError(null);
     setValidationError(null);
@@ -1928,7 +1952,10 @@ export default function SystemConfigPage() {
               okText="恢复默认设置"
               open={restoreDefaultsPending}
               title="恢复当前系统的默认设置？"
-              onCancel={() => setRestoreDefaultsPending(false)}
+              onCancel={() => {
+                setRestoreDefaultsPending(false);
+                setRestoreDefaultsSourceId(null);
+              }}
               onOk={() => void handleDelete()}
             >
               这会移除当前系统已保存的全部自定义配置，并丢弃未保存的草稿修改，恢复继承默认值。此操作无法从此页撤销。
@@ -1969,7 +1996,10 @@ export default function SystemConfigPage() {
               <Button
                 danger
                 disabled={formDisabled || record?.is_default}
-                onClick={() => setRestoreDefaultsPending(true)}
+                onClick={() => {
+                  setRestoreDefaultsSourceId(activeSourceId);
+                  setRestoreDefaultsPending(true);
+                }}
               >
                 恢复默认设置
               </Button>
