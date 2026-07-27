@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 """危险 shell 命令规则的回归测试。"""
 
+from swe.security.tool_guard.engine import ToolGuardEngine
 from swe.security.tool_guard.guardians.rule_guardian import (
     RuleBasedToolGuardian,
 )
@@ -79,3 +80,56 @@ def test_shell_rules_flag_dd_resource_abuse() -> None:
     assert "TOOL_CMD_DD_RESOURCE_ABUSE" in _rule_ids(
         "dd if=/dev/zero of=/dev/null &",
     )
+
+
+def test_shell_rules_flag_cron_mutations_across_shell_layouts() -> None:
+    """Cron 变更命令不能通过续行或命令链绕过审查。"""
+    risky_commands = (
+        "   swe cron create --name demo",
+        "swe cron create \\\n  --name demo",
+        "swe cron update \\\n  --job-id job-1",
+        "swe cron create \\\r\n  --name demo",
+        "swe \\\n  cron create --name demo",
+        "swe cron \\\n  update --job-id job-1",
+        "cd workspace && swe cron create --name demo",
+        "cd workspace && \\\n  swe cron create --name demo",
+        "echo ready; swe cron update --job-id job-1",
+        "echo ready\nswe cron update --job-id job-1",
+    )
+
+    for tool_name in ("execute_shell_command", "start_background_process"):
+        for command in risky_commands:
+            assert _rule_ids(command, tool_name) == ["cron_security"]
+
+
+def test_shell_rules_allow_safe_cron_commands() -> None:
+    """Cron 帮助和只读命令不应触发变更规则。"""
+    safe_commands = (
+        "swe cron create --help",
+        "swe cron update -h",
+        "swe cron create \\\n  --help",
+        "swe cron update \\\r\n  -h",
+        "swe cron list",
+        "echo swe cron create",
+    )
+
+    for tool_name in ("execute_shell_command", "start_background_process"):
+        for command in safe_commands:
+            assert "cron_security" not in _rule_ids(command, tool_name)
+
+
+def test_multiline_cron_mutation_is_unsafe_at_engine_boundary() -> None:
+    """多行 Cron 变更在 Tool Guard 引擎边界必须保持高风险。"""
+    engine = ToolGuardEngine(
+        guardians=[RuleBasedToolGuardian()],
+        enabled=True,
+    )
+
+    result = engine.guard(
+        "execute_shell_command",
+        {"command": "swe cron create \\\n  --name demo"},
+    )
+
+    assert result is not None
+    assert result.is_safe is False
+    assert result.max_severity == GuardSeverity.HIGH

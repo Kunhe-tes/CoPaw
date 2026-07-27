@@ -87,6 +87,11 @@ const SKILL_NAME_MAP: Record<string, string> = {
   黄金持仓客户陪伴技能: "黄金持仓客户陪伴技能",
   "query-fund-plus-cust": "固收+基金营销技能",
   "query-insu-expand-cust":"分行保险潜客技能",
+  "market-movement": "市场异动",
+  "ncfh-report-review": "如影随影-市场复盘",
+  "query-high-value-transactions": "高价值动账商机盘户",
+  "query-sorted-cust": "Claw精选名单",
+  "global-market-review": "全球市场复盘报告-V2"
 };
 
 const ALLOWED_SKILLS = new Set([
