@@ -15,8 +15,6 @@ from ...agents.skills_manager import (
     resolve_effective_skills,
 )
 
-MAX_SELECTED_SKILLS = 5
-
 
 @dataclass(frozen=True)
 class SkillUseDirective:
@@ -46,14 +44,12 @@ def build_skill_use_directives(
     channel: str,
     selected_skill_names: Iterable[object],
 ) -> list[SkillUseDirective]:
-    """Resolve at most five selected names to readable effective skills."""
+    """Resolve selected names to readable effective skills."""
     effective_names = set(resolve_effective_skills(workspace_dir, channel))
     directives: list[SkillUseDirective] = []
     seen: set[str] = set()
 
     for raw_name in selected_skill_names:
-        if len(directives) >= MAX_SELECTED_SKILLS:
-            break
         if not isinstance(raw_name, str):
             continue
         name = raw_name.strip()
