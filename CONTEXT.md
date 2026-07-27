@@ -20,6 +20,86 @@ _Avoid_: subagent creation
 The user-facing agent that owns global task understanding, user interaction, mode decisions, and final responses.
 _Avoid_: parent bot, orchestrator bot
 
+**Agent Profile**:
+A tenant-owned runtime configuration and workspace identity for one runnable Agent. An **Agent Profile** is distinct from a **SubAgent Definition**, which is a versioned delegation worker description.
+_Avoid_: agent-level config, subagent profile, worker profile
+
+**Default Agent Profile**:
+The tenant's built-in **Agent Profile** with the stable identifier `default`. It is the sole scope of the first Agent Profile Hook console release and remains available rather than being disabled or removed.
+_Avoid_: selected agent, active-agent selector
+
+**Default Agent Profile Hook Access**:
+The ordinary tenant-scoped access boundary for changing Default Agent Profile Hooks and their scripts. The first release adds no separate manager or administrator role requirement.
+_Avoid_: manager-only hook access, global hook administrator
+
+**Default Agent Profile Hook Audit Record**:
+A best-effort structured application-log event for a Default Agent Profile Hook or Hook Script change. It identifies the actor, time, action, affected script and digest when applicable, and a configuration-delta summary without retaining script content or runtime hook payloads; a logging failure does not prevent the action.
+_Avoid_: audit database table, hook execution log, full script archive, hook payload audit
+
+**Agent Profile Hook**:
+A lifecycle-hook configuration owned by exactly one **Agent Profile**. It applies only while that Agent Profile runs, rather than across a tenant or through a reusable Skill.
+_Avoid_: agent-level hook, tenant hook, skill hook
+
+**Agent Profile Hook Handler**:
+One configured action within an **Agent Profile Hook**. It is either a command handler, an HTTP handler, or a prompt handler; only a command handler may reference one or more **Agent Profile Hook Scripts**.
+_Avoid_: shell hook, script hook configuration
+
+**Agent Profile Hook Script**:
+A Python or shell executable asset owned by one **Agent Profile** and referenced through a command handler's ordered arguments. One command handler may reference multiple Agent Profile Hook Scripts; scripts cannot be deleted, but a same-name upload replaces the stored content after an explicit warning.
+_Avoid_: shared hook script, skill hook script, arbitrary binary, disposable script
+
+**Agent Profile Hook Script Replacement**:
+The explicit same-name upload that replaces an Agent Profile Hook Script's content for later Hook events. It records both the prior and replacement script digests and does not interrupt an executing Hook.
+_Avoid_: silent overwrite, script deletion
+
+**Agent Profile Hook Script Path Boundary**:
+The rule that a command handler may reference executable programs and ordinary arguments freely, but every argument used as a script must resolve to an Agent Profile Hook Script owned by the Default Agent Profile. Paths outside that controlled script set are not script references.
+_Avoid_: workspace script reference, absolute script path, path escape
+
+**Agent Profile Hook Script Type Boundary**:
+The first-release upload policy accepts only Python and shell source files with `.py`, `.sh`, `.bash`, or `.zsh` names. It excludes extensionless files and binary assets.
+_Avoid_: extensionless script, binary hook asset
+
+**Agent Profile Hook Script Safety Scan**:
+The application security scan applied to every Agent Profile Hook Script upload or replacement. It follows the active scan policy: disabled, warning-only, or blocking for unsafe findings.
+_Avoid_: unconditional script rejection, unscanned replacement
+
+**Agent Profile Hook Script Upload Batch**:
+One or more Hook Script files submitted together to the script library. Each file is validated and scanned independently, so successful files are retained while failed files report their own reasons.
+_Avoid_: all-or-nothing script upload, silent partial upload
+
+**Agent Profile Hook Script Upload Limit**:
+The first-release storage boundary of at most 1 MB per Hook Script and at most 20 files per Upload Batch.
+_Avoid_: unrestricted script upload, general file storage
+
+**Agent Profile Hook Activation Boundary**:
+The point after a saved Agent Profile Hook configuration has reloaded, from which later Hook events use it. A Hook already executing continues with its prior configuration and scripts.
+_Avoid_: immediate interruption, retroactive Hook update
+
+**Agent Profile Hook Configuration Removal**:
+The saved removal of a Handler or Matcher Group from the Default Agent Profile Hook configuration. It stops later Hook events from resolving that configuration while leaving its Hook Scripts retained in the script library.
+_Avoid_: script deletion, immediate Hook interruption
+
+**Agent Profile Hook Configuration Revision**:
+The version token for the complete Default Agent Profile Hook configuration. A save must name the revision it was based on; a mismatched current revision is a conflict rather than a silent overwrite.
+_Avoid_: last-writer-wins configuration save, invisible concurrent overwrite
+
+**Agent Profile Hook Manual Test**:
+An explicitly confirmed execution of one draft Agent Profile Hook Handler with an editable sample context. It does not save configuration, activate a reload, or consume once-only state; it performs the handler's real external effects, and its result is audited and presented in a redacted, bounded form.
+_Avoid_: full Hook replay, production event replay, unsandboxed preview
+
+**Agent Profile Hook Console**:
+The Default Agent Profile's user interface for maintaining its Hooks, Handlers, Scripts, and manual tests. It is a dedicated Run Center page with configuration and script-library areas; its changes emit audit logs, which are viewed through the application log system rather than the console.
+_Avoid_: raw configuration editor, partial Hook form
+
+**Agent Profile Hook Handler Identifier**:
+The stable identifier of one Agent Profile Hook Handler. It is generated by the console by default, may be edited, and must be unique across the Default Agent Profile Hook configuration.
+_Avoid_: duplicate handler ID, display-only handler name
+
+**Agent Profile Hook Matcher Group Identifier**:
+The stable identifier of one Agent Profile Hook Matcher Group. It is generated by the console by default, may be edited, and must be unique across the Default Agent Profile Hook configuration.
+_Avoid_: duplicate group ID, event-local-only group ID
+
 **Plan Mode**:
 A user-visible planning state where the Main Agent itself runs under reduced planning permissions and interacts with the user through planning cards before execution continues.
 _Avoid_: dry run, planning prompt
@@ -588,6 +668,14 @@ _Avoid_: final answer text, assistant-only bubble, latest response, answer-only 
 The stable conversation identity used to continue chat context across turns. A **Logical Chat Session** is distinct from the persisted chat record used to load or display the conversation.
 _Avoid_: chat UUID, UI session row, temporary frontend id
 
+**Chat Record**:
+The persisted, displayable record for one conversation, identified by a chat UUID and returned by chat-list APIs. A **Chat Record** is distinct from the **Logical Chat Session** that carries conversational continuity.
+_Avoid_: logical chat session, UI session, conversation identity
+
+**Chat Record Last Updated Time**:
+The timestamp of the most recent persisted change to a **Chat Record**. It establishes recency when Chat Records are listed.
+_Avoid_: Chat Record creation time, message timestamp, Logical Chat Session time
+
 ## Flagged Ambiguities
 
 **"Create SubAgent"**:
@@ -878,3 +966,7 @@ Domain Expert: "Yes. In Plan Mode, the Main Agent itself is permission-limited u
 Developer: "Does executing a plan unlock write tools?"
 
 Domain Expert: "`execute` accepts the persisted Proposed Plan and can move the chat back to normal execution, where the Main Agent regains its normal permissions."
+
+Developer: "Is the hook attached to a SubAgent Definition or to an Agent Profile?"
+
+Domain Expert: "It is an Agent Profile Hook. Its script belongs to that Agent Profile and is not a shared Skill asset."
