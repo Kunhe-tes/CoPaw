@@ -74,6 +74,29 @@ describe("Sender skill mentions", () => {
     expect(screen.getByText("未找到匹配的技能")).toBeInTheDocument();
   });
 
+  it("submits an unmatched mention when Enter cannot select a skill", () => {
+    const onSubmit = vi.fn();
+    render(
+      <Sender
+        onSubmit={onSubmit}
+        skillMentions={{
+          items: skills,
+          selected: [],
+          onOpen: vi.fn(),
+          onChange: vi.fn(),
+        }}
+      />,
+    );
+
+    const input = screen.getByRole("textbox");
+    fireEvent.change(input, { target: { value: "@missing" } });
+    fireEvent.keyDown(input, { key: "Enter" });
+
+    expect(onSubmit).toHaveBeenCalledTimes(1);
+    expect(onSubmit).toHaveBeenCalledWith("@missing");
+    expect(input).toHaveValue("@missing");
+  });
+
   it("selects matching mentions by click and Enter", () => {
     const clickSender = renderSender();
 

@@ -581,9 +581,12 @@ const ForwardSender = React.forwardRef<SenderRef, SenderProps>((props, ref) => {
     onKeyDown?: React.KeyboardEventHandler<HTMLTextAreaElement>;
     open?: boolean;
   }) => {
+    const skillMentionBlocksSubmit =
+      skillMentionController.open &&
+      (skillMentionController.loading ||
+        skillMentionController.filteredItems.length > 0);
     suggestionOpenRef.current =
-      !!suggestionProps?.open ||
-      (!!skillMentions && skillMentionController.open);
+      !!suggestionProps?.open || (!!skillMentions && skillMentionBlocksSubmit);
 
     return (
       <InputTextArea
