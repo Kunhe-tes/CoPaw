@@ -863,54 +863,29 @@ class MarketplaceService:
         source_id: str | None = None,
     ) -> dict[str, Any]:
         """批量删除技能."""
-        import shutil
-
-        skills_dir = get_user_skills_dir(
-            self.swe_root,
-            user_id,
-            agent_id,
-            source_id,
-        )
         results: dict[str, Any] = {}
 
         for skill_name in skill_names:
-            skill_dir = skills_dir / skill_name
-            if not skill_dir.exists():
+            disabled = await self.disable_skill(
+                user_id,
+                skill_name,
+                agent_id,
+                source_id,
+            )
+            if not disabled["success"]:
                 results[skill_name] = {"success": False, "reason": "not_found"}
                 continue
 
-            # 先禁用
-            await self.disable_skill(user_id, skill_name, agent_id, source_id)
-
-            # 删除目录
-            try:
-                shutil.rmtree(skill_dir)
-                results[skill_name] = {"success": True}
-            except Exception as e:
-                results[skill_name] = {"success": False, "reason": str(e)}
-                continue
-
-            # 从 manifest 移除
-            name_to_remove = skill_name
-
-            def _remove(payload: dict, _name: str = name_to_remove) -> bool:
-                payload.get("skills", {}).pop(_name, None)
-                return True
-
-            mutate_user_skill_manifest(
-                self.swe_root,
-                user_id,
-                agent_id,
-                _remove,
-                source_id,
-            )
-
-            # 删除数据库记录
-            await self.skill_registry.delete_skill(
+            deleted = await self.delete_skill(
                 user_id,
                 skill_name,
-                source_id or "",
+                agent_id,
+                source_id,
             )
+            if deleted:
+                results[skill_name] = {"success": True}
+                continue
+            results[skill_name] = {"success": False, "reason": "not_found"}
 
         return results
 
@@ -1439,15 +1414,6 @@ class MarketplaceService:
         - source、distributed_by、received_version 等：从 workspace manifest 读取
         - 不再依赖技能目录内的 skill.json 文件
         """
-        skills_dir = get_user_skills_dir(
-            self.swe_root,
-            user_id,
-            agent_id,
-            source_id,
-        )
-        if not skills_dir.exists():
-            return []
-
         # 读取 workspace manifest 获取技能状态和元数据
         manifest = read_user_skill_manifest(
             self.swe_root,
@@ -1457,16 +1423,36 @@ class MarketplaceService:
         )
         manifest_skills = manifest.get("skills", {})
         market_versions = self._get_active_market_versions(source_id)
-
-        return [
-            self._build_my_skill_item(
-                skill_dir,
-                manifest_skills,
-                market_versions,
+        workspace_dir = get_user_skill_manifest_path(
+            self.swe_root,
+            user_id,
+            agent_id,
+            source_id,
+        ).parent
+        result: list[MySkillItem] = []
+        for skill_name, manifest_entry in sorted(manifest_skills.items()):
+            if not isinstance(manifest_entry, dict):
+                continue
+            entry_for_resolution = dict(manifest_entry)
+            entry_for_resolution.setdefault("enabled", True)
+            try:
+                skill_dir = resolve_registered_skill_path(
+                    workspace_dir,
+                    skill_name,
+                    entry_for_resolution,
+                ).path
+            except ValueError:
+                continue
+            if skill_dir is None or not skill_dir.is_dir():
+                continue
+            result.append(
+                self._build_my_skill_item(
+                    skill_dir,
+                    manifest_skills,
+                    market_versions,
+                ),
             )
-            for skill_dir in sorted(skills_dir.iterdir())
-            if skill_dir.is_dir()
-        ]
+        return result
 
     def _get_active_market_versions(self, source_id: str) -> dict[str, str]:
         """读取当前来源下已发布技能的最新版本映射."""
@@ -2422,15 +2408,32 @@ class MarketplaceService:
         """删除用户技能（同时从 manifest 移除条目并删除数据库记录）。"""
         import shutil
 
-        skills_dir = get_user_skills_dir(
+        manifest = read_user_skill_manifest(
             self.swe_root,
             user_id,
             agent_id,
             source_id,
         )
-        skill_dir = skills_dir / skill_name
-
-        if not skill_dir.exists():
+        manifest_entry = manifest.get("skills", {}).get(skill_name)
+        if not isinstance(manifest_entry, dict):
+            return False
+        entry_for_resolution = dict(manifest_entry)
+        entry_for_resolution.setdefault("enabled", True)
+        workspace_dir = get_user_skill_manifest_path(
+            self.swe_root,
+            user_id,
+            agent_id,
+            source_id,
+        ).parent
+        try:
+            skill_dir = resolve_registered_skill_path(
+                workspace_dir,
+                skill_name,
+                entry_for_resolution,
+            ).path
+        except ValueError:
+            return False
+        if skill_dir is None:
             return False
 
         try:
@@ -3865,15 +3868,6 @@ class MarketplaceService:
         reload_source_id: str | None = None,
     ) -> str | None:
         """撤回单个用户的技能，失败时返回原因."""
-        skills_dir = get_user_skills_dir(
-            self.swe_root,
-            user_id,
-            "default",
-            source_id,
-        )
-        skill_dir = skills_dir / skill_name
-        if not skill_dir.exists():
-            return "skill_not_found"
         if expected_source_prefix and not self._skill_source_matches(
             user_id,
             skill_name,
@@ -3882,20 +3876,14 @@ class MarketplaceService:
         ):
             return "not_from_this_marketplace"
 
-        await self.disable_skill(
+        deleted = await self.delete_skill(
             user_id,
             skill_name,
             "default",
             source_id,
         )
-        shutil.rmtree(skill_dir)
-        self._remove_skill_manifest_entry(user_id, skill_name, source_id)
-        # 删除 swe_skills 数据库记录
-        await self.skill_registry.delete_skill(
-            user_id,
-            skill_name,
-            source_id or "",
-        )
+        if not deleted:
+            return "skill_not_found"
         await self._trigger_agent_reload(
             user_id,
             "default",
