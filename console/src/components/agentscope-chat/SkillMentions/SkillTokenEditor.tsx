@@ -62,15 +62,19 @@ function getTokenParts(value: string, selected: string[]): TokenPart[] {
 function previousTokenAtCaret(editor: HTMLDivElement): HTMLElement | null {
   const selection = window.getSelection();
   const range = selection?.rangeCount ? selection.getRangeAt(0) : null;
-  if (
-    !range?.collapsed ||
-    range.startContainer !== editor ||
-    !range.startOffset
-  ) {
+  if (!range?.collapsed) {
     return null;
   }
 
-  const node = editor.childNodes[range.startOffset - 1];
+  let node: ChildNode | null = null;
+  if (range.startContainer === editor && range.startOffset > 0) {
+    node = editor.childNodes[range.startOffset - 1];
+  } else if (
+    range.startContainer.nodeType === Node.TEXT_NODE &&
+    range.startOffset === 0
+  ) {
+    node = range.startContainer.previousSibling;
+  }
   return node instanceof HTMLElement && node.dataset.skillToken === "true"
     ? node
     : null;
@@ -170,6 +174,8 @@ export const SkillTokenEditor = forwardRef<
     value,
     onValueChange,
   });
+  const closeMentionMenu = mentions.close;
+  const mentionMenuOpen = mentions.open;
 
   useLayoutEffect(() => {
     const editor = editorRef.current;
@@ -188,17 +194,17 @@ export const SkillTokenEditor = forwardRef<
   }, [tokenParts, value]);
 
   useEffect(() => {
-    if (!mentions.open) {
+    if (!mentionMenuOpen) {
       return;
     }
     const closeWhenOutside = (event: MouseEvent) => {
       if (!rootRef.current?.contains(event.target as Node)) {
-        mentions.close();
+        closeMentionMenu();
       }
     };
     document.addEventListener("mousedown", closeWhenOutside);
     return () => document.removeEventListener("mousedown", closeWhenOutside);
-  }, [mentions.close, mentions.open]);
+  }, [closeMentionMenu, mentionMenuOpen]);
 
   const removeToken = (token: HTMLElement) => {
     const selectionIndex = Number(token.dataset.selectionIndex);
