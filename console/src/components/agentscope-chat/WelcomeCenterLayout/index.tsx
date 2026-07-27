@@ -27,7 +27,9 @@ const PLACEHOLDER_OPTIONS = [
 
 interface WelcomeCenterLayoutProps {
   greeting?: string;
-  onSubmit: (data: { query: string; fileList?: UploadFile[] }) => void;
+  onSubmit: (
+    data: { query: string; fileList?: UploadFile[] },
+  ) => void | Promise<void>;
   skillMentions?: SkillMentionsData;
   beforeSubmit?: () => Promise<boolean>;
 }
@@ -96,7 +98,7 @@ export default function WelcomeCenterLayout(props: WelcomeCenterLayoutProps) {
       if (beforeSubmit && !(await beforeSubmit())) return;
 
       // Submit with file list
-      onSubmit({ query, fileList: uploadedFiles });
+      await Promise.resolve(onSubmit({ query, fileList: uploadedFiles }));
       if (inputValueRef.current === submittedInputValue) {
         setCurrentInputValue("");
       }
@@ -117,7 +119,8 @@ export default function WelcomeCenterLayout(props: WelcomeCenterLayoutProps) {
         skillMentionController.handleKeyDown(e);
         if (
           !e.nativeEvent.isComposing &&
-          (e.defaultPrevented || skillMentionController.blocksSubmit)
+          (e.defaultPrevented ||
+            (e.key === "Enter" && skillMentionController.blocksSubmit))
         ) {
           e.preventDefault();
           return;

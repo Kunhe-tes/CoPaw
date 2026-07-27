@@ -142,6 +142,28 @@ describe("WelcomeCenterLayout", () => {
     expect(input).toHaveValue(" ");
   });
 
+  it("allows editing the skill query while the skill menu is open", () => {
+    render(
+      <WelcomeCenterLayout
+        greeting="你好"
+        onSubmit={vi.fn()}
+        skillMentions={{
+          items: skills,
+          selected: [],
+          onOpen: vi.fn(),
+          onChange: vi.fn(),
+        }}
+      />,
+    );
+
+    const input = screen.getByRole("textbox");
+    fireEvent.change(input, { target: { value: "@br" } });
+    const event = createEvent.keyDown(input, { key: "Backspace" });
+    fireEvent(input, event);
+
+    expect(event.defaultPrevented).toBe(false);
+  });
+
   it("does not submit while a loading skill menu is open", () => {
     const onSubmit = vi.fn();
 
@@ -161,8 +183,10 @@ describe("WelcomeCenterLayout", () => {
 
     const input = screen.getByRole("textbox");
     fireEvent.change(input, { target: { value: "@missing" } });
-    fireEvent.keyDown(input, { key: "Enter" });
+    const event = createEvent.keyDown(input, { key: "Enter" });
+    fireEvent(input, event);
 
+    expect(event.defaultPrevented).toBe(true);
     expect(onSubmit).not.toHaveBeenCalled();
     expect(input).toHaveValue("@missing");
   });
@@ -307,6 +331,41 @@ describe("WelcomeCenterLayout", () => {
     await waitFor(() => {
       expect(onSubmit).toHaveBeenCalledTimes(1);
     });
+  });
+
+  it("prevents duplicate sends while the submit handoff is pending", async () => {
+    let resolveSubmit!: () => void;
+    const onSubmit = vi.fn(
+      () =>
+        new Promise<void>((resolve) => {
+          resolveSubmit = resolve;
+        }),
+    );
+
+    render(
+      <WelcomeCenterLayout
+        greeting="你好"
+        onSubmit={onSubmit}
+        beforeSubmit={vi.fn().mockResolvedValue(true)}
+      />,
+    );
+
+    const input = screen.getByRole("textbox");
+    const sendButton = screen.getByRole("button", { name: "发送" });
+    fireEvent.change(input, { target: { value: "hello" } });
+    fireEvent.click(sendButton);
+
+    await waitFor(() => expect(onSubmit).toHaveBeenCalledTimes(1));
+    await Promise.resolve();
+
+    expect(input).toBeDisabled();
+    expect(sendButton).toBeDisabled();
+    fireEvent.click(sendButton);
+
+    expect(onSubmit).toHaveBeenCalledTimes(1);
+
+    resolveSubmit();
+    await waitFor(() => expect(input).not.toBeDisabled());
   });
 
   it("does not submit or clear attachments that finish uploading during preflight", async () => {
