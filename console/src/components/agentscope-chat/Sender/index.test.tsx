@@ -192,4 +192,49 @@ describe("Sender skill mentions", () => {
       screen.getByRole("listbox", { name: "可用技能" }),
     ).toBeInTheDocument();
   });
+
+  it("retains read-only, max-length, and shift-enter sender semantics", () => {
+    const onChange = vi.fn();
+    const onSubmit = vi.fn();
+    render(
+      <Sender
+        maxLength={3}
+        onChange={onChange}
+        onSubmit={onSubmit}
+        submitType="shiftEnter"
+        skillMentions={{
+          items: skills,
+          selected: [],
+          onOpen: vi.fn(),
+          onChange: vi.fn(),
+        }}
+      />,
+    );
+
+    const input = screen.getByRole("textbox");
+    setTokenEditorValue(input, "hello");
+    expect(onChange).toHaveBeenCalledWith("hel", undefined);
+
+    fireEvent.keyDown(input, { key: "Enter" });
+    expect(onSubmit).not.toHaveBeenCalled();
+    fireEvent.keyDown(input, { key: "Enter", shiftKey: true });
+    expect(onSubmit).toHaveBeenCalledWith("hel");
+
+    cleanup();
+    render(
+      <Sender
+        readOnly
+        skillMentions={{
+          items: skills,
+          selected: [],
+          onOpen: vi.fn(),
+          onChange: vi.fn(),
+        }}
+      />,
+    );
+    expect(screen.getByRole("textbox")).toHaveAttribute(
+      "contenteditable",
+      "false",
+    );
+  });
 });

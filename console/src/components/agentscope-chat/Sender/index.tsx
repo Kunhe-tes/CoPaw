@@ -379,6 +379,7 @@ const ForwardSender = React.forwardRef<SenderRef, SenderProps>((props, ref) => {
     [`${prefixCls}-disabled`]: disabled,
     [`${prefixCls}-focus`]: focus && enableFocusExpand,
     [`${prefixCls}-blur`]: !focus && enableFocusExpand,
+    [`${prefixCls}-with-skill-editor`]: Boolean(skillMentions),
   });
 
   const actionBtnCls = `${prefixCls}-actions-btn`;
@@ -473,12 +474,14 @@ const ForwardSender = React.forwardRef<SenderRef, SenderProps>((props, ref) => {
     isCompositionRef.current = true;
   };
 
-  const onInternalCompositionEnd = (
-    e: React.CompositionEvent<HTMLTextAreaElement>,
-  ) => {
+  const onInternalCompositionEnd = (e: React.CompositionEvent<HTMLElement>) => {
     isCompositionRef.current = false;
     if (props.maxLength) {
-      const currentValue = (e.target as HTMLTextAreaElement).value;
+      const target = e.target as HTMLElement;
+      const currentValue =
+        target instanceof HTMLTextAreaElement
+          ? target.value
+          : target.textContent || "";
       if (currentValue.length > props.maxLength) {
         triggerValueChange(currentValue.slice(0, props.maxLength));
       }
@@ -594,20 +597,30 @@ const ForwardSender = React.forwardRef<SenderRef, SenderProps>((props, ref) => {
             classNames.input,
           )}
           disabled={!!disabled}
+          readOnly={readOnly}
           onKeyDown={(event) => {
-            if (
+            const shouldSubmit =
               event.key === "Enter" &&
-              !event.shiftKey &&
-              !event.nativeEvent.isComposing
-            ) {
+              !event.nativeEvent.isComposing &&
+              ((submitType === "enter" && !event.shiftKey) ||
+                (submitType === "shiftEnter" && event.shiftKey));
+            if (shouldSubmit) {
               event.preventDefault();
               triggerSend();
               return;
             }
             onKeyDown?.(event);
           }}
+          onCompositionStart={onInternalCompositionStart}
+          onCompositionEnd={onInternalCompositionEnd}
           onPaste={onInternalPaste}
-          onValueChange={triggerValueChange}
+          onValueChange={(nextValue) =>
+            triggerValueChange(
+              props.maxLength && !isCompositionRef.current
+                ? nextValue.slice(0, props.maxLength)
+                : nextValue,
+            )
+          }
           placeholder={placeholder}
           skillMentions={skillMentions}
           style={styles.input}

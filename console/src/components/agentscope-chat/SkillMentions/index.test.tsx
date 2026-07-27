@@ -1,10 +1,7 @@
 import React, { useState } from "react";
 import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import {
-  SkillMentionMenu,
-  SkillMentionTags,
-} from "./index";
+import { SkillMentionMenu, SkillMentionTags } from "./index";
 import { useSkillMentions, type SkillMentionItem } from "./useSkillMentions";
 
 const items: SkillMentionItem[] = [
@@ -41,7 +38,12 @@ function MentionHarness({
       <textarea
         aria-label="消息"
         value={value}
-        onChange={(event) => mentions.handleInputValueChange(event.target.value)}
+        onChange={(event) =>
+          mentions.handleInputValueChange(
+            event.target.value,
+            event.target.selectionStart ?? event.target.value.length,
+          )
+        }
         onKeyDown={mentions.handleKeyDown}
       />
       <output aria-label="输入值">{value}</output>
@@ -68,7 +70,9 @@ describe("SkillMentions", () => {
     fireEvent.change(input, { target: { value: "请用 @app" } });
 
     expect(onOpen).toHaveBeenCalledTimes(1);
-    expect(screen.getByRole("listbox", { name: "可用技能" })).toBeInTheDocument();
+    expect(
+      screen.getByRole("listbox", { name: "可用技能" }),
+    ).toBeInTheDocument();
     expect(screen.getByRole("option", { name: /Build/ })).toHaveAttribute(
       "aria-selected",
       "true",
@@ -82,7 +86,9 @@ describe("SkillMentions", () => {
     expect(screen.getByRole("status", { name: "输入值" }).textContent).toBe(
       "请用 @Build ",
     );
-    expect(screen.queryByRole("listbox", { name: "可用技能" })).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("listbox", { name: "可用技能" }),
+    ).not.toBeInTheDocument();
   });
 
   it("selects a clicked case-insensitive match", () => {
@@ -100,6 +106,20 @@ describe("SkillMentions", () => {
     );
   });
 
+  it("selects the mention at the caret instead of requiring it at the text end", () => {
+    render(<MentionHarness />);
+
+    const input = screen.getByRole("textbox", { name: "消息" });
+    fireEvent.change(input, {
+      target: { selectionStart: 5, value: "请 @br 帮我检查" },
+    });
+    fireEvent.click(screen.getByRole("option", { name: /browser/ }));
+
+    expect(screen.getByRole("status", { name: "输入值" }).textContent).toBe(
+      "请 @browser 帮我检查",
+    );
+  });
+
   it("does not open for an embedded at-sign and closes on Escape", () => {
     const onOpen = vi.fn();
     render(<MentionHarness onOpen={onOpen} />);
@@ -108,13 +128,19 @@ describe("SkillMentions", () => {
     fireEvent.change(input, { target: { value: "email@browser" } });
 
     expect(onOpen).not.toHaveBeenCalled();
-    expect(screen.queryByRole("group", { name: "可用技能" })).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("group", { name: "可用技能" }),
+    ).not.toBeInTheDocument();
 
     fireEvent.change(input, { target: { value: " @" } });
-    expect(screen.getByRole("listbox", { name: "可用技能" })).toBeInTheDocument();
+    expect(
+      screen.getByRole("listbox", { name: "可用技能" }),
+    ).toBeInTheDocument();
 
     fireEvent.keyDown(input, { key: "Escape" });
-    expect(screen.queryByRole("listbox", { name: "可用技能" })).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("listbox", { name: "可用技能" }),
+    ).not.toBeInTheDocument();
   });
 
   it("does not select a skill when Enter is an IME composition commit", () => {
@@ -129,13 +155,18 @@ describe("SkillMentions", () => {
     expect(screen.getByRole("status", { name: "输入值" }).textContent).toBe(
       "@br",
     );
-    expect(screen.getByRole("listbox", { name: "可用技能" })).toBeInTheDocument();
+    expect(
+      screen.getByRole("listbox", { name: "可用技能" }),
+    ).toBeInTheDocument();
   });
 
   it("removes selected tags by their index", () => {
     const onChange = vi.fn();
     render(
-      <MentionHarness initialSelected={["browser", "browser"]} onChange={onChange} />,
+      <MentionHarness
+        initialSelected={["browser", "browser"]}
+        onChange={onChange}
+      />,
     );
 
     fireEvent.click(screen.getAllByLabelText("Close")[1]);

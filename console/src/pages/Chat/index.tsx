@@ -342,7 +342,11 @@ function useIMEComposition(isChatActive: () => boolean) {
     const suppressImeEnter = (e: KeyboardEvent) => {
       if (!isChatActive()) return;
       const target = e.target as HTMLElement;
-      if (target?.tagName === "TEXTAREA" && e.key === "Enter" && !e.shiftKey) {
+      if (
+        (target?.tagName === "TEXTAREA" || target?.isContentEditable) &&
+        e.key === "Enter" &&
+        !e.shiftKey
+      ) {
         // e.isComposing is the standard flag; isComposingRef covers the
         // post-compositionend grace period needed by Safari.
         if (isComposingRef.current || e.isComposing) {
@@ -1395,9 +1399,11 @@ export default function ChatPage() {
         // ==================== userId 统一整改结束 ====================
         stream: true,
         ...biz_params,
-        selected_skill_names: userText.startsWith("/")
-          ? []
-          : pendingSelectedSkillNamesRef.current,
+        selected_skill_names:
+          userText.startsWith("/") &&
+          pendingSelectedSkillNamesRef.current.length === 0
+            ? []
+            : pendingSelectedSkillNamesRef.current,
         file_url_network: resolveCurrentFileUrlNetwork(),
       };
       pendingSelectedSkillNamesRef.current = [];

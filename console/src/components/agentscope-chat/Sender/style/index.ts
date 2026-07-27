@@ -63,6 +63,11 @@ const IndexStyle = createGlobalStyle`
     overflow: hidden;
   }
 
+  &-with-skill-editor,
+  &-with-skill-editor .${(p) => p.theme.prefixCls}-sender-content {
+    overflow: visible;
+  }
+
   &-content-bottom {
     margin-top: 4px;
     display: flex;

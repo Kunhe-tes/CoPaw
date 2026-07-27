@@ -20,6 +20,7 @@ export interface SkillTokenEditorProps
     "children" | "contentEditable" | "onChange" | "onInput" | "value"
   > {
   disabled?: boolean;
+  readOnly?: boolean;
   placeholder?: string;
   skillMentions: SkillMentionsData;
   value: string;
@@ -145,6 +146,17 @@ function replaceEditorContents(editor: HTMLDivElement, parts: TokenPart[]) {
   editor.replaceChildren(fragment);
 }
 
+function selectedNamesVisibleInEditor(
+  editor: HTMLDivElement,
+  selected: string[],
+): string[] {
+  return Array.from(editor.querySelectorAll<HTMLElement>("[data-skill-token]"))
+    .map((token) => Number(token.dataset.selectionIndex))
+    .filter(Number.isInteger)
+    .map((index) => selected[index])
+    .filter((name): name is string => Boolean(name));
+}
+
 export const SkillTokenEditor = forwardRef<
   HTMLDivElement,
   SkillTokenEditorProps
@@ -155,6 +167,7 @@ export const SkillTokenEditor = forwardRef<
     onKeyDown,
     onValueChange,
     placeholder,
+    readOnly = false,
     skillMentions,
     style,
     value,
@@ -236,14 +249,24 @@ export const SkillTokenEditor = forwardRef<
         }}
         aria-multiline="true"
         className={className}
-        contentEditable={!disabled}
+        contentEditable={!disabled && !readOnly}
         data-placeholder={placeholder}
         role="textbox"
         suppressContentEditableWarning
         style={style}
         onInput={(event) => {
+          const editor = event.currentTarget;
+          const nextValue = editor.textContent || "";
+          const nextSelected = selectedNamesVisibleInEditor(
+            editor,
+            skillMentions.selected,
+          );
+          if (nextSelected.length !== skillMentions.selected.length) {
+            skillMentions.onChange(nextSelected);
+          }
           mentions.handleInputValueChange(
-            event.currentTarget.textContent || "",
+            nextValue,
+            getCaretOffset(editor) ?? nextValue.length,
           );
         }}
         onKeyDown={(event) => {

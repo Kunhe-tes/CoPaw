@@ -22,7 +22,27 @@ export interface UseSkillMentionsOptions extends SkillMentionsData {
 }
 
 const trailingSkillMentionPattern = /(?:^|\s)@([^\s@]*)$/;
-const trailingMentionTokenPattern = /@([^\s@]*)$/;
+
+interface MentionRange {
+  end: number;
+  start: number;
+}
+
+function getMentionRange(
+  value: string,
+  caretOffset: number,
+): MentionRange | null {
+  const textBeforeCaret = value.slice(0, caretOffset);
+  const match = textBeforeCaret.match(trailingSkillMentionPattern);
+  if (!match) {
+    return null;
+  }
+
+  return {
+    end: caretOffset,
+    start: caretOffset - match[1].length - 1,
+  };
+}
 
 function compareSkillNames(left: SkillMentionItem, right: SkillMentionItem) {
   return left.name.localeCompare(right.name, undefined, {
@@ -44,6 +64,7 @@ export function useSkillMentions({
   const [query, setQuery] = useState("");
   const [activeIndex, setActiveIndex] = useState(0);
   const openRef = useRef(false);
+  const mentionRangeRef = useRef<MentionRange | null>(null);
 
   const setMenuOpen = useCallback(
     (nextOpen: boolean) => {
@@ -78,16 +99,18 @@ export function useSkillMentions({
   const close = useCallback(() => setMenuOpen(false), [setMenuOpen]);
 
   const handleInputValueChange = useCallback(
-    (nextValue: string) => {
+    (nextValue: string, caretOffset = nextValue.length) => {
       onValueChange(nextValue);
 
-      const match = nextValue.match(trailingSkillMentionPattern);
-      if (!match) {
+      const range = getMentionRange(nextValue, caretOffset);
+      if (!range) {
+        mentionRangeRef.current = null;
         setMenuOpen(false);
         return;
       }
 
-      setQuery(match[1].toLowerCase());
+      mentionRangeRef.current = range;
+      setQuery(nextValue.slice(range.start + 1, range.end).toLowerCase());
       setActiveIndex(0);
       setMenuOpen(true);
     },
@@ -101,8 +124,16 @@ export function useSkillMentions({
       }
 
       onChange([...selected, item.name]);
+      const range = mentionRangeRef.current;
+      if (!range) {
+        return;
+      }
+      const trailingText = value.slice(range.end);
+      const separator = /^\s/.test(trailingText) ? "" : " ";
       onValueChange(
-        value.replace(trailingMentionTokenPattern, `@${item.name} `),
+        `${value.slice(0, range.start)}@${
+          item.name
+        }${separator}${trailingText}`,
       );
       setMenuOpen(false);
     },
