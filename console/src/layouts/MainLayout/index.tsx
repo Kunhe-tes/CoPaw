@@ -18,6 +18,7 @@ import CronJobsPage from "../../pages/Control/CronJobs";
 import FeaturedCasesPage from "../../pages/Control/FeaturedCases";
 import GreetingPage from "../../pages/Control/Greeting";
 import HeartbeatPage from "../../pages/Control/Heartbeat";
+import HookManagementPage from "../../pages/Control/HookManagement";
 import AgentConfigPage from "../../pages/Agent/Config";
 import SystemConfigPage from "../../pages/SystemConfigPage";
 import SystemCheckPage from "../../pages/SystemCheck";
@@ -57,6 +58,7 @@ const pathToKey: Record<string, string> = {
   "/greeting-management": "greeting-management",
   "/featured-cases-management": "featured-cases-management",
   "/heartbeat": "heartbeat",
+  "/hook-management": "hook-management",
   "/skills": "skills",
   "/skill-pool": "skill-pool",
   "/tools": "tools",
@@ -161,6 +163,10 @@ export default function MainLayout() {
                 element={<FeaturedCasesPage />}
               />
               <Route path="/heartbeat" element={<HeartbeatPage />} />
+              <Route
+                path="/hook-management"
+                element={<HookManagementPage />}
+              />
               <Route path="/skills" element={<SkillsPage />} />
               <Route path="/skill-pool" element={<SkillPoolPage />} />
               <Route path="/tools" element={<ToolsPage />} />

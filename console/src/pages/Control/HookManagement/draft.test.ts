@@ -32,7 +32,7 @@ describe("Hook configuration draft helpers", () => {
   it("adds a command Handler without mutating the source draft", () => {
     const next = addHandler(config, "PreToolUse", "tool-guards", "command");
 
-    expect(next.events.PreToolUse[0]?.hooks.at(-1)).toMatchObject({
+    expect(next.events.PreToolUse[0]?.hooks.slice(-1)[0]).toMatchObject({
       type: "command",
       argv: [""],
     });

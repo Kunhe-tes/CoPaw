@@ -43,7 +43,11 @@ describe("hookManagementApi", () => {
   });
 
   it("confirms real execution when submitting a manual test", async () => {
-    const handler = { id: "guard-shell", type: "command", argv: ["echo"] };
+    const handler = {
+      id: "guard-shell",
+      type: "command" as const,
+      argv: ["echo"],
+    };
     const context = { hook_event_name: "PreToolUse" };
 
     await hookManagementApi.manualTest(handler, context);
