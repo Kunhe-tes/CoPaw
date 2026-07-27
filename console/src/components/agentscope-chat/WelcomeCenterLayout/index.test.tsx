@@ -253,7 +253,7 @@ describe("WelcomeCenterLayout", () => {
     });
   });
 
-  it("keeps attachments that finish uploading after preflight begins", async () => {
+  it("does not submit or clear attachments that finish uploading during preflight", async () => {
     const onSubmit = vi.fn();
     let resolveBeforeSubmit!: (result: boolean) => void;
     let resolveUpload!: (result: { url: string; file_name: string }) => void;
@@ -293,14 +293,15 @@ describe("WelcomeCenterLayout", () => {
       expect(screen.getByText("later.txt")).toBeInTheDocument(),
     );
 
+    resolveUpload({ url: "later.txt", file_name: "later.txt" });
+    await waitFor(() =>
+      expect(chatApi.filePreviewUrl).toHaveBeenCalledWith("later.txt"),
+    );
+
     resolveBeforeSubmit(true);
     await waitFor(() => {
       expect(onSubmit).toHaveBeenCalledWith({ query: "hello", fileList: [] });
+      expect(screen.getByText("later.txt")).toBeInTheDocument();
     });
-
-    resolveUpload({ url: "later.txt", file_name: "later.txt" });
-    await waitFor(() =>
-      expect(screen.getByText("later.txt")).toBeInTheDocument(),
-    );
   });
 });

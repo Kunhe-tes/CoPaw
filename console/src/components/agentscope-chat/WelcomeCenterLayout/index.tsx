@@ -82,8 +82,12 @@ export default function WelcomeCenterLayout(props: WelcomeCenterLayoutProps) {
   const handleSend = useCallback(async () => {
     if (isSubmittingRef.current) return;
 
-    const trimmed = inputValueRef.current.trim();
-    if (!trimmed) return;
+    const submittedInputValue = inputValueRef.current;
+    const query = submittedInputValue.trim();
+    if (!query) return;
+    const uploadedFiles = fileListRef.current.filter((file) =>
+      Boolean(file.response?.url),
+    );
 
     isSubmittingRef.current = true;
     setIsSubmitting(true);
@@ -91,15 +95,11 @@ export default function WelcomeCenterLayout(props: WelcomeCenterLayoutProps) {
     try {
       if (beforeSubmit && !(await beforeSubmit())) return;
 
-      const query = inputValueRef.current.trim();
-      if (!query) return;
-
-      // Filter files that have been successfully uploaded (have response.url)
-      const uploadedFiles = fileListRef.current.filter((f) => f.response?.url);
-
       // Submit with file list
       onSubmit({ query, fileList: uploadedFiles });
-      setCurrentInputValue("");
+      if (inputValueRef.current === submittedInputValue) {
+        setCurrentInputValue("");
+      }
       setCurrentFileList((currentFiles) =>
         currentFiles.filter(
           (file) => !uploadedFiles.some(({ uid }) => uid === file.uid),
