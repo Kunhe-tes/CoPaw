@@ -4,9 +4,8 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   SkillMentionMenu,
   SkillMentionTags,
-  useSkillMentions,
-  type SkillMentionItem,
 } from "./index";
+import { useSkillMentions, type SkillMentionItem } from "./useSkillMentions";
 
 const items: SkillMentionItem[] = [
   { name: "browser", description: "Use a browser" },
@@ -69,7 +68,7 @@ describe("SkillMentions", () => {
     fireEvent.change(input, { target: { value: "请用 @br" } });
 
     expect(onOpen).toHaveBeenCalledTimes(1);
-    expect(screen.getByRole("listbox", { name: "可用技能" })).toBeInTheDocument();
+    expect(screen.getByRole("group", { name: "可用技能" })).toBeInTheDocument();
 
     fireEvent.keyDown(input, { key: "Enter" });
 
@@ -77,7 +76,7 @@ describe("SkillMentions", () => {
     expect(screen.getByRole("status", { name: "输入值" }).textContent).toBe(
       "请用  ",
     );
-    expect(screen.queryByRole("listbox", { name: "可用技能" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("group", { name: "可用技能" })).not.toBeInTheDocument();
   });
 
   it("selects a clicked case-insensitive match", () => {
@@ -101,13 +100,28 @@ describe("SkillMentions", () => {
     fireEvent.change(input, { target: { value: "email@browser" } });
 
     expect(onOpen).not.toHaveBeenCalled();
-    expect(screen.queryByRole("listbox", { name: "可用技能" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("group", { name: "可用技能" })).not.toBeInTheDocument();
 
     fireEvent.change(input, { target: { value: " @" } });
-    expect(screen.getByRole("listbox", { name: "可用技能" })).toBeInTheDocument();
+    expect(screen.getByRole("group", { name: "可用技能" })).toBeInTheDocument();
 
     fireEvent.keyDown(input, { key: "Escape" });
-    expect(screen.queryByRole("listbox", { name: "可用技能" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("group", { name: "可用技能" })).not.toBeInTheDocument();
+  });
+
+  it("does not select a skill when Enter is an IME composition commit", () => {
+    const onChange = vi.fn();
+    render(<MentionHarness onChange={onChange} />);
+
+    const input = screen.getByRole("textbox", { name: "消息" });
+    fireEvent.change(input, { target: { value: "@br" } });
+    fireEvent.keyDown(input, { key: "Enter", isComposing: true });
+
+    expect(onChange).not.toHaveBeenCalled();
+    expect(screen.getByRole("status", { name: "输入值" }).textContent).toBe(
+      "@br",
+    );
+    expect(screen.getByRole("group", { name: "可用技能" })).toBeInTheDocument();
   });
 
   it("removes selected tags by their index", () => {
