@@ -1575,6 +1575,14 @@ export default function ChatPage() {
       return true;
     };
 
+    const skillMentions = {
+      items: effectiveSkills,
+      selected: selectedSkillNames,
+      loading: effectiveSkillsLoading,
+      onOpen: loadEffectiveSkills,
+      onChange: (names: string[]) => setSelectedSkillNames(names.slice(0, 5)),
+    };
+
     return {
       ...i18nConfig,
       theme: {
@@ -1612,6 +1620,8 @@ export default function ChatPage() {
               typeof greeting === "string" ? greeting : "你好，有什么可以帮您？"
             }
             onSubmit={(data) => onSubmit(data)}
+            skillMentions={skillMentions}
+            beforeSubmit={handleBeforeSubmit}
           />
         ),
         // ==================== 首页改版结束 ====================
@@ -1648,14 +1658,7 @@ export default function ChatPage() {
           label: renderSuggestionLabel(item.command, item.description),
           value: item.value,
         })),
-        skillMentions: {
-          items: effectiveSkills,
-          selected: selectedSkillNames,
-          loading: effectiveSkillsLoading,
-          onOpen: loadEffectiveSkills,
-          onChange: (names: string[]) =>
-            setSelectedSkillNames(names.slice(0, 5)),
-        },
+        skillMentions,
       },
       session: {
         multiple: true,
