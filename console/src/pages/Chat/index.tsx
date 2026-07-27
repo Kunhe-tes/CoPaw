@@ -69,6 +69,7 @@ import ConversationQuickNav from "@/components/ConversationQuickNav";
 // ==================== 首页改版 (Kun He) ====================
 import WelcomeCenterLayout from "@/components/agentscope-chat/WelcomeCenterLayout";
 import ChatSidebar from "./components/ChatSidebar";
+import { createWelcomeSkillMentions } from "./welcomeSkillMentions";
 // ==================== 首页改版结束 ====================
 // ==================== 自定义工具渲染器 (customToolRenderConfig) ====================
 import CopyFileToStatic from "@/components/agentscope-chat/AgentScopeRuntimeWebUI/customToolRenders/CopyFileToStatic";
@@ -1568,12 +1569,16 @@ export default function ChatPage() {
       | IAgentScopeRuntimeWebUISenderOptions
       | undefined;
 
-    const handleBeforeSubmit = async () => {
-      if (isComposingRef.current) return false;
-      pendingSelectedSkillNamesRef.current = selectedSkillNames;
-      setSelectedSkillNames([]);
-      return true;
-    };
+    const { beforeSubmit: handleBeforeSubmit, skillMentions } =
+      createWelcomeSkillMentions({
+        effectiveSkills,
+        effectiveSkillsLoading,
+        isComposingRef,
+        loadEffectiveSkills,
+        pendingSelectedSkillNamesRef,
+        selectedSkillNames,
+        setSelectedSkillNames,
+      });
 
     return {
       ...i18nConfig,
@@ -1612,6 +1617,8 @@ export default function ChatPage() {
               typeof greeting === "string" ? greeting : "你好，有什么可以帮您？"
             }
             onSubmit={(data) => onSubmit(data)}
+            skillMentions={skillMentions}
+            beforeSubmit={handleBeforeSubmit}
           />
         ),
         // ==================== 首页改版结束 ====================
@@ -1648,14 +1655,7 @@ export default function ChatPage() {
           label: renderSuggestionLabel(item.command, item.description),
           value: item.value,
         })),
-        skillMentions: {
-          items: effectiveSkills,
-          selected: selectedSkillNames,
-          loading: effectiveSkillsLoading,
-          onOpen: loadEffectiveSkills,
-          onChange: (names: string[]) =>
-            setSelectedSkillNames(names.slice(0, 5)),
-        },
+        skillMentions,
       },
       session: {
         multiple: true,
@@ -1755,6 +1755,10 @@ export default function ChatPage() {
     multimodalCaps,
     resolveLogicalRequestSessionId,
     resolveRequestChatId,
+    selectedSkillNames,
+    effectiveSkills,
+    effectiveSkillsLoading,
+    loadEffectiveSkills,
     taskProgress,
     t,
   ]);
