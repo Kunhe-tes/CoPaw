@@ -2024,7 +2024,16 @@ class MarketplaceService:
         )
         manifest_entry = manifest.get("skills", {}).get(skill_name)
         if not isinstance(manifest_entry, dict):
-            return None
+            active_skill_dir = (
+                get_user_skills_dir(
+                    self.swe_root,
+                    user_id,
+                    agent_id,
+                    source_id,
+                )
+                / skill_name
+            )
+            return active_skill_dir if active_skill_dir.is_dir() else None
         entry_for_resolution = dict(manifest_entry)
         entry_for_resolution.setdefault("enabled", True)
         workspace_dir = get_user_skill_manifest_path(

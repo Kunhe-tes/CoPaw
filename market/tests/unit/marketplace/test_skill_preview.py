@@ -188,3 +188,61 @@ def test_disabled_my_skill_file_routes_and_download_use_registered_package(
     )
     assert download_resp.status_code == 200
     assert download_resp.content
+
+
+def test_unregistered_active_my_skill_file_routes_use_active_package(tmp_path):
+    from market.marketplace.fs import get_user_skills_dir
+
+    user_id = "user-1"
+    source_id = "src_a"
+    skill_name = "legacy_skill"
+    skill_dir = (
+        get_user_skills_dir(
+            tmp_path / "swe",
+            user_id,
+            source_id=source_id,
+        )
+        / skill_name
+    )
+    skill_dir.mkdir(parents=True)
+    (skill_dir / "SKILL.md").write_text(
+        "# Legacy Skill\n\ncontents",
+        encoding="utf-8",
+    )
+    (skill_dir / "notes.txt").write_text("before", encoding="utf-8")
+
+    app = _make_app(tmp_path)
+    client = TestClient(app)
+    headers = {"X-Source-Id": source_id, "X-User-Id": user_id}
+
+    tree_resp = client.get(
+        f"/api/market/skills/mine/{skill_name}/files",
+        headers=headers,
+    )
+    assert tree_resp.status_code == 200
+    assert {node["name"] for node in tree_resp.json()} == {
+        "SKILL.md",
+        "notes.txt",
+    }
+
+    read_resp = client.get(
+        f"/api/market/skills/mine/{skill_name}/files/notes.txt",
+        headers=headers,
+    )
+    assert read_resp.status_code == 200
+    assert read_resp.json()["content"] == "before"
+
+    save_resp = client.put(
+        f"/api/market/skills/mine/{skill_name}/files/notes.txt",
+        headers=headers,
+        json={"content": "after"},
+    )
+    assert save_resp.status_code == 200
+    assert (skill_dir / "notes.txt").read_text(encoding="utf-8") == "after"
+
+    download_resp = client.get(
+        f"/api/market/skills/mine/{skill_name}/download",
+        headers=headers,
+    )
+    assert download_resp.status_code == 200
+    assert download_resp.content
