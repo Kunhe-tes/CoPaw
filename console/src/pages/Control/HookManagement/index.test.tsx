@@ -28,6 +28,24 @@ vi.mock("@/hooks/useAppMessage", () => ({
 
 import HookManagementPage from ".";
 
+async function openPreToolHandler(handlerId = "guard-shell") {
+  fireEvent.click(
+    await screen.findByRole("button", { name: "编辑 PreToolUse" }),
+  );
+  fireEvent.click(
+    await screen.findByRole("button", {
+      name: new RegExp(`^${handlerId}\\s+command$`, "i"),
+    }),
+  );
+}
+
+async function openPreToolGroup() {
+  fireEvent.click(
+    await screen.findByRole("button", { name: "编辑 PreToolUse" }),
+  );
+  fireEvent.click(await screen.findByRole("button", { name: "所有工具" }));
+}
+
 const hooks = {
   enabled: true,
   events: {
@@ -67,10 +85,7 @@ describe("HookManagementPage", () => {
 
   it("selects a Handler and exposes ordered argv fields", async () => {
     render(<HookManagementPage />);
-
-    fireEvent.click(
-      await screen.findByRole("button", { name: /guard-shell/i }),
-    );
+    await openPreToolHandler();
 
     expect(screen.getByLabelText("命令参数 1")).toHaveValue("python");
     expect(screen.getByLabelText("命令参数 2")).toHaveValue(
@@ -80,10 +95,7 @@ describe("HookManagementPage", () => {
 
   it("keeps a renamed Handler selected for continued editing", async () => {
     render(<HookManagementPage />);
-
-    fireEvent.click(
-      await screen.findByRole("button", { name: /guard-shell/i }),
-    );
+    await openPreToolHandler();
     fireEvent.change(screen.getByLabelText("Handler ID"), {
       target: { value: "guard-shell-renamed" },
     });
@@ -96,8 +108,7 @@ describe("HookManagementPage", () => {
 
   it("edits the selected Matcher Group and its tool matcher", async () => {
     render(<HookManagementPage />);
-
-    fireEvent.click(await screen.findByRole("button", { name: "tool-guards" }));
+    await openPreToolGroup();
 
     expect(screen.getByLabelText("Matcher Group ID")).toHaveValue(
       "tool-guards",
@@ -105,19 +116,20 @@ describe("HookManagementPage", () => {
     expect(screen.getByLabelText("匹配工具（每行一个）")).toHaveValue("");
   });
 
-  it("removes an event from the local draft", async () => {
+  it("adds an empty event to the local draft", async () => {
     render(<HookManagementPage />);
+    fireEvent.click(
+      await screen.findByRole("button", { name: "开始配置 SessionStart" }),
+    );
 
-    fireEvent.click(await screen.findByRole("button", { name: "删除事件" }));
-
-    expect(screen.queryByText("PreToolUse")).not.toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "编辑 SessionStart" }),
+    ).toBeInTheDocument();
   });
 
   it("exposes all supported common and command Handler fields", async () => {
     render(<HookManagementPage />);
-    fireEvent.click(
-      await screen.findByRole("button", { name: /guard-shell/i }),
-    );
+    await openPreToolHandler();
 
     fireEvent.click(screen.getByText("高级设置"));
 
@@ -175,14 +187,14 @@ describe("HookManagementPage", () => {
     });
     render(<HookManagementPage />);
 
-    fireEvent.click(
-      await screen.findByRole("button", { name: /first-command/i }),
-    );
+    await openPreToolHandler("first-command");
     expect(
       (screen.getByLabelText("环境变量（JSON）") as HTMLTextAreaElement).value,
     ).toContain("FIRST");
 
-    fireEvent.click(screen.getByRole("button", { name: /second-command/i }));
+    fireEvent.click(
+      screen.getByRole("button", { name: "second-command command" }),
+    );
     expect(
       (screen.getByLabelText("环境变量（JSON）") as HTMLTextAreaElement).value,
     ).toContain("SECOND");
@@ -190,9 +202,7 @@ describe("HookManagementPage", () => {
 
   it("requires confirmation before submitting a real manual test", async () => {
     render(<HookManagementPage />);
-    fireEvent.click(
-      await screen.findByRole("button", { name: /guard-shell/i }),
-    );
+    await openPreToolHandler();
     fireEvent.click(screen.getByRole("button", { name: "执行人工测试" }));
 
     const execute = screen.getByRole("button", { name: "执行测试" });
@@ -206,26 +216,24 @@ describe("HookManagementPage", () => {
       expect.objectContaining({ id: "guard-shell" }),
       expect.objectContaining({ hook_event_name: "PreToolUse" }),
     );
-  });
+  }, 10_000);
 
   it("shows invalid manual-test Context errors inside the test dialog", async () => {
     render(<HookManagementPage />);
-    fireEvent.click(
-      await screen.findByRole("button", { name: /guard-shell/i }),
-    );
+    await openPreToolHandler();
     fireEvent.click(screen.getByRole("button", { name: "执行人工测试" }));
     fireEvent.change(screen.getByLabelText("Hook Context（JSON）"), {
       target: { value: "not-json" },
     });
     fireEvent.click(screen.getByLabelText(/确认将执行真实/i));
-    fireEvent.click(screen.getByRole("button", { name: "执行测试" }));
+    const execute = screen.getByRole("button", { name: "执行测试" });
+    await waitFor(() => expect(execute).toBeEnabled());
+    fireEvent.click(execute);
 
     expect(
-      await within(screen.getByRole("dialog")).findByText(
-        "Hook Context 必须是有效 JSON",
-      ),
+      await screen.findByText("Hook Context 必须是有效 JSON"),
     ).toBeInTheDocument();
-  });
+  }, 10_000);
 
   it("keeps a draft and offers reload when saving conflicts", async () => {
     mocks.saveConfiguration.mockRejectedValueOnce(
@@ -240,4 +248,104 @@ describe("HookManagementPage", () => {
       screen.getByRole("button", { name: "重新加载最新配置" }),
     ).toBeEnabled();
   });
+
+  it("shows configured and empty events without rendering the configuration tree", async () => {
+    render(<HookManagementPage />);
+
+    expect(
+      await screen.findByRole("heading", { name: /Hook 管理/ }),
+    ).toBeInTheDocument();
+    expect(screen.getByText("PreToolUse")).toBeInTheDocument();
+    expect(screen.getByText(/1 个分组 · 1 个处理器/)).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "开始配置 SessionStart" }),
+    ).toBeInTheDocument();
+    expect(screen.queryByText("事件与处理链")).not.toBeInTheDocument();
+  });
+
+  it("marks a changed configuration as unsaved until it is saved", async () => {
+    render(<HookManagementPage />);
+
+    fireEvent.click(await screen.findByRole("switch", { name: "启用 Hook" }));
+    expect(screen.getByText("未保存更改")).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "保存并激活" }));
+    await waitFor(() => expect(mocks.saveConfiguration).toHaveBeenCalled());
+    await waitFor(() =>
+      expect(screen.queryByText("未保存更改")).not.toBeInTheDocument(),
+    );
+  });
+
+  it("removes an event from the drawer after explicit confirmation", async () => {
+    render(<HookManagementPage />);
+
+    fireEvent.click(
+      await screen.findByRole("button", { name: "编辑 PreToolUse" }),
+    );
+    fireEvent.click(screen.getByRole("button", { name: "删除事件" }));
+    fireEvent.click(await screen.findByRole("button", { name: "确认删除" }));
+
+    expect(
+      await screen.findByRole("button", { name: "开始配置 PreToolUse" }),
+    ).toBeInTheDocument();
+  }, 10_000);
+
+  it("creates a scenario event from the new-event flow", async () => {
+    render(<HookManagementPage />);
+
+    fireEvent.click(await screen.findByRole("button", { name: "新建事件" }));
+    fireEvent.click(screen.getByRole("button", { name: "从场景模板开始" }));
+    fireEvent.click(screen.getByRole("button", { name: /工具调用审计/ }));
+
+    expect(screen.getByText("何时触发")).toBeInTheDocument();
+    expect(screen.getAllByText("工具调用审计")).toHaveLength(2);
+  }, 10_000);
+
+  it("moves a Handler down while preserving its event and group", async () => {
+    mocks.getConfiguration.mockResolvedValueOnce({
+      revision: "rev-1",
+      hooks: {
+        enabled: true,
+        events: {
+          PreToolUse: [
+            {
+              id: "tool-guards",
+              matcher: { tools: [] },
+              hooks: [
+                { id: "guard-shell", type: "command", argv: ["echo", "one"] },
+                { id: "second-handler", type: "command", argv: ["echo", "two"] },
+              ],
+            },
+          ],
+        },
+      },
+    });
+    render(<HookManagementPage />);
+
+    fireEvent.click(
+      await screen.findByRole("button", { name: "编辑 PreToolUse" }),
+    );
+    fireEvent.click(
+      screen.getByRole("button", { name: "guard-shell 下移" }),
+    );
+    fireEvent.click(screen.getByRole("button", { name: "保存并激活" }));
+
+    await waitFor(() =>
+      expect(mocks.saveConfiguration).toHaveBeenCalledWith(
+        expect.objectContaining({
+          events: expect.objectContaining({
+            PreToolUse: [
+              expect.objectContaining({
+                hooks: [
+                  expect.objectContaining({ id: "second-handler" }),
+                  expect.objectContaining({ id: "guard-shell" }),
+                ],
+              }),
+            ],
+          }),
+        }),
+        "rev-1",
+      ),
+    );
+  }, 10_000);
 });

@@ -24,16 +24,20 @@ import {
   addHandler,
   addEvent,
   addGroup,
+  moveHandler,
+  replaceEvent,
   defaultContext,
   isScriptReference,
   removeGroup,
   removeHandler,
 } from "./draft";
+import { EventEditorDrawer } from "./components/EventEditorDrawer";
+import { EventOverview } from "./components/EventOverview";
+import { createScenarioEvent, scenarioTemplates } from "./scenarioTemplates";
 import type {
   HookConfigDraft,
   HookEventName,
   HookHandlerDraft,
-  HookHandlerType,
   HookMatcherGroupDraft,
   HookTreeSelection,
 } from "./types";
@@ -48,8 +52,6 @@ const events: HookEventName[] = [
   "BeforeStop",
   "Stop",
 ];
-
-const promptEvents = new Set(events);
 
 function findHandler(
   config: HookConfigDraft,
@@ -127,6 +129,10 @@ function removeEvent(
   return { ...config, events: nextEvents };
 }
 
+function serializeDraft(config: HookConfigDraft): string {
+  return JSON.stringify(config);
+}
+
 function parseJsonRecord(value: string): Record<string, string> | null {
   try {
     const parsed: unknown = JSON.parse(value);
@@ -198,12 +204,19 @@ function validateDraft(config: HookConfigDraft): string | null {
 function HookManagementPage() {
   const { message } = useAppMessage();
   const [draft, setDraft] = useState<HookConfigDraft | null>(null);
+  const [savedDraft, setSavedDraft] = useState("");
   const [revision, setRevision] = useState("");
   const [scripts, setScripts] = useState<HookScript[]>([]);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [selected, setSelected] = useState<HookTreeSelection>({ kind: "root" });
+  const [editingEvent, setEditingEvent] = useState<HookEventName | null>(
+    null,
+  );
+  const [createOpen, setCreateOpen] = useState(false);
+  const [templatePickerOpen, setTemplatePickerOpen] = useState(false);
+  const [templateLabel, setTemplateLabel] = useState<string>();
   const [testOpen, setTestOpen] = useState(false);
   const [confirmed, setConfirmed] = useState(false);
   const [testing, setTesting] = useState(false);
@@ -234,6 +247,7 @@ function HookManagementPage() {
         hookManagementApi.listScripts(),
       ]);
       setDraft(snapshot.hooks as HookConfigDraft);
+      setSavedDraft(serializeDraft(snapshot.hooks as HookConfigDraft));
       setRevision(snapshot.revision);
       setScripts(files);
       setSelected({ kind: "root" });
@@ -256,6 +270,7 @@ function HookManagementPage() {
     () => (draft ? findGroup(draft, selected) : null),
     [draft, selected],
   );
+  const dirty = Boolean(draft) && serializeDraft(draft) !== savedDraft;
 
   const save = async () => {
     if (!draft) return;
@@ -272,6 +287,7 @@ function HookManagementPage() {
         revision,
       );
       setDraft(snapshot.hooks as HookConfigDraft);
+      setSavedDraft(serializeDraft(snapshot.hooks as HookConfigDraft));
       setRevision(snapshot.revision);
       message.success("Hook 配置已保存，Default Agent 将异步加载新配置");
     } catch (cause) {
@@ -717,194 +733,30 @@ function HookManagementPage() {
             key: "configuration",
             label: "配置",
             children: (
-              <div className={styles.workspace}>
-                <aside className={styles.tree}>
-                  <div className={styles.treeTop}>
-                    <strong>事件与处理链</strong>
-                    <Select
-                      size="small"
-                      placeholder="添加事件"
-                      options={events
-                        .filter((event) => !draft.events[event])
-                        .map((event) => ({ value: event, label: event }))}
-                      onChange={(event: HookEventName) =>
-                        setDraft(addEvent(draft, event))
-                      }
-                    />
-                  </div>
-                  <Button
-                    className={selected.kind === "root" ? styles.selected : ""}
-                    type="text"
-                    onClick={() => setSelected({ kind: "root" })}
-                  >
-                    全局开关
-                  </Button>
-                  {Object.entries(draft.events).map(([event, groups]) => (
-                    <div key={event}>
-                      <div className={styles.event}>
-                        <span>{event}</span>
-                        <span>
-                          <Button
-                            size="small"
-                            type="link"
-                            onClick={() =>
-                              setDraft(addGroup(draft, event as HookEventName))
-                            }
-                          >
-                            添加组
-                          </Button>
-                          <Button
-                            danger
-                            size="small"
-                            type="text"
-                            onClick={() => {
-                              setDraft(
-                                removeEvent(draft, event as HookEventName),
-                              );
-                              setSelected({ kind: "root" });
-                            }}
-                          >
-                            删除事件
-                          </Button>
-                        </span>
-                      </div>
-                      {groups?.map((group) => (
-                        <div key={group.id} className={styles.group}>
-                          <div>
-                            <Button
-                              className={
-                                selected.kind === "group" &&
-                                selected.groupId === group.id
-                                  ? styles.selected
-                                  : ""
-                              }
-                              type="text"
-                              onClick={() =>
-                                setSelected({
-                                  kind: "group",
-                                  event: event as HookEventName,
-                                  groupId: group.id,
-                                })
-                              }
-                            >
-                              {group.id}
-                            </Button>
-                            <Button
-                              danger
-                              type="text"
-                              size="small"
-                              onClick={() =>
-                                setDraft(
-                                  removeGroup(
-                                    draft,
-                                    event as HookEventName,
-                                    group.id,
-                                  ),
-                                )
-                              }
-                            >
-                              删除
-                            </Button>
-                          </div>
-                          {group.hooks.map((item) => (
-                            <div key={item.id} className={styles.handler}>
-                              <Button
-                                className={
-                                  selected.kind === "handler" &&
-                                  selected.handlerId === item.id
-                                    ? styles.selected
-                                    : ""
-                                }
-                                type="text"
-                                onClick={() =>
-                                  setSelected({
-                                    kind: "handler",
-                                    event: event as HookEventName,
-                                    groupId: group.id,
-                                    handlerId: item.id,
-                                  })
-                                }
-                              >
-                                {item.id} <Tag>{item.type}</Tag>
-                              </Button>
-                              <Button
-                                danger
-                                type="text"
-                                size="small"
-                                onClick={() =>
-                                  setDraft(
-                                    removeHandler(
-                                      draft,
-                                      event as HookEventName,
-                                      group.id,
-                                      item.id,
-                                    ),
-                                  )
-                                }
-                              >
-                                删除
-                              </Button>
-                            </div>
-                          ))}
-                          <Select
-                            className={styles.handlerSelect}
-                            size="small"
-                            placeholder="添加 Handler"
-                            options={(
-                              ["command", "http", "prompt"] as HookHandlerType[]
-                            ).map((type) => ({
-                              value: type,
-                              label: type,
-                              disabled:
-                                type === "prompt" &&
-                                !promptEvents.has(event as HookEventName),
-                            }))}
-                            onChange={(type: HookHandlerType) =>
-                              setDraft(
-                                addHandler(
-                                  draft,
-                                  event as HookEventName,
-                                  group.id,
-                                  type,
-                                ),
-                              )
-                            }
-                          />
-                        </div>
-                      ))}
-                    </div>
-                  ))}
-                </aside>
-                <main className={styles.detail}>
-                  {selected.kind === "root" ? (
-                    <div className={styles.editor}>
-                      <h2>全局设置</h2>
-                      <label className={styles.switchLine}>
-                        启用 Hook
-                        <Switch
-                          checked={draft.enabled}
-                          onChange={(enabled) =>
-                            setDraft({ ...draft, enabled })
-                          }
-                        />
-                      </label>
-                      <p>
-                        关闭后，配置将保留但 Default Agent 不执行任何 Hook。
-                      </p>
-                    </div>
-                  ) : (
-                    renderHandlerEditor() ??
-                    renderGroupEditor() ?? (
-                      <div className={styles.editor}>
-                        <h2>Matcher Group</h2>
-                        <p>
-                          选择一个 Matcher Group 或 Handler 以编辑详细配置。
-                        </p>
-                      </div>
-                    )
-                  )}
-                </main>
-              </div>
+              <>
+                <EventOverview
+                  config={draft}
+                  dirty={dirty}
+                  onEnabledChange={(enabled) =>
+                    setDraft({ ...draft, enabled })
+                  }
+                  onCreate={() => {
+                    setTemplatePickerOpen(false);
+                    setCreateOpen(true);
+                  }}
+                  onEdit={(event) => {
+                    if (!draft.events[event]) setDraft(addEvent(draft, event));
+                    const firstGroup = draft.events[event]?.[0];
+                    setSelected(
+                      firstGroup
+                        ? { kind: "group", event, groupId: firstGroup.id }
+                        : { kind: "root" },
+                    );
+                    setTemplateLabel(undefined);
+                    setEditingEvent(event);
+                  }}
+                />
+              </>
             ),
           },
           {
@@ -978,6 +830,114 @@ function HookManagementPage() {
           },
         ]}
       />
+      <EventEditorDrawer
+        event={editingEvent}
+        groups={editingEvent ? (draft.events[editingEvent] ?? []) : []}
+        templateLabel={templateLabel}
+        details={
+          selected.kind !== "root" && selected.event === editingEvent ? (
+            renderHandlerEditor() ?? renderGroupEditor()
+          ) : (
+            <p>选择一个分组或处理器以编辑详细配置。</p>
+          )
+        }
+        onAddGroup={() => {
+          if (editingEvent) setDraft(addGroup(draft, editingEvent));
+        }}
+        onAddHandler={(groupId, type) => {
+          if (editingEvent) {
+            setDraft(addHandler(draft, editingEvent, groupId, type));
+          }
+        }}
+        onClose={() => setEditingEvent(null)}
+        onMoveHandler={(groupId, fromIndex, toIndex) => {
+          if (editingEvent) {
+            setDraft(
+              moveHandler(draft, editingEvent, groupId, fromIndex, toIndex),
+            );
+          }
+        }}
+        onRemoveEvent={() => {
+          if (!editingEvent) return;
+          setDraft(removeEvent(draft, editingEvent));
+          setSelected({ kind: "root" });
+          setTemplateLabel(undefined);
+          setEditingEvent(null);
+        }}
+        onRemoveGroup={(groupId) => {
+          if (!editingEvent) return;
+          setDraft(removeGroup(draft, editingEvent, groupId));
+          setSelected({ kind: "root" });
+        }}
+        onRemoveHandler={(groupId, handlerId) => {
+          if (!editingEvent) return;
+          setDraft(removeHandler(draft, editingEvent, groupId, handlerId));
+          setSelected({ kind: "root" });
+        }}
+        onSelectGroup={(groupId) => {
+          if (editingEvent) {
+            setSelected({ kind: "group", event: editingEvent, groupId });
+          }
+        }}
+        onSelectHandler={(groupId, handlerId) => {
+          if (editingEvent) {
+            setSelected({
+              kind: "handler",
+              event: editingEvent,
+              groupId,
+              handlerId,
+            });
+          }
+        }}
+      />
+      <Modal
+        footer={null}
+        open={createOpen}
+        title="新建事件"
+        onCancel={() => setCreateOpen(false)}
+      >
+        {templatePickerOpen ? (
+          <div className={styles.templateList}>
+            {scenarioTemplates.map((template) => (
+              <Button
+                key={template.id}
+                block
+                onClick={() => {
+                  const scenario = createScenarioEvent(template.id);
+                  setDraft(replaceEvent(draft, scenario.event, scenario.groups));
+                  setSelected({
+                    kind: "group",
+                    event: scenario.event,
+                    groupId: scenario.groups[0]!.id,
+                  });
+                  setTemplateLabel(template.label);
+                  setEditingEvent(scenario.event);
+                  setCreateOpen(false);
+                }}
+              >
+                <strong>{template.label}</strong>
+                <span>{template.description}</span>
+              </Button>
+            ))}
+          </div>
+        ) : (
+          <div className={styles.createActions}>
+            <Button block onClick={() => setTemplatePickerOpen(true)}>
+              从场景模板开始
+            </Button>
+            <Select
+              placeholder="从空白事件开始"
+              options={events.map((event) => ({ value: event, label: event }))}
+              onChange={(event: HookEventName) => {
+                setDraft(addEvent(draft, event));
+                setTemplateLabel(undefined);
+                setEditingEvent(event);
+                setCreateOpen(false);
+              }}
+            />
+          </div>
+        )}
+      </Modal>
       <Modal
         title="配置已被更新"
         open={conflictOpen}

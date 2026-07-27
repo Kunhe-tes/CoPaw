@@ -5,6 +5,7 @@ import type {
   HookEventName,
   HookHandlerDraft,
   HookHandlerType,
+  HookMatcherGroupDraft,
 } from "./types";
 
 const scriptReferencePattern = /^hooks\/scripts\/[^/]+\.(py|sh|bash|zsh)$/i;
