@@ -1222,7 +1222,70 @@ class ToolGuardMixin:
         finally:
             self._active_tool_guard_acting_tasks.discard(task)
 
-    async def _acting_impl(self, tool_call) -> dict | None:  # noqa: C901
+    async def _apply_pre_tool_hook(
+        self,
+        tool_call: dict[str, Any],
+        tool_name: str,
+        tool_input: dict[str, Any],
+    ) -> tuple[dict[str, Any], dict[str, Any], bool, dict | None]:
+        """Run the pre-tool hook and return an early response if it decides."""
+        pre_hook_result = await self._emit_tool_hook(
+            HookEventName.PRE_TOOL_USE,
+            tool_name=tool_name,
+            tool_input=tool_input,
+            tool_use_id=str(tool_call.get("id") or ""),
+        )
+        if pre_hook_result.updated_input is not None:
+            tool_call = dict(tool_call)
+            tool_call["input"] = pre_hook_result.updated_input
+            tool_input = pre_hook_result.updated_input
+        if pre_hook_result.decision == HookDecision.STOP:
+            await self._stop_pre_tool_hook(
+                tool_call,
+                tool_name,
+                pre_hook_result.reason or "Hook requested stop",
+            )
+        if pre_hook_result.decision in {
+            HookDecision.BLOCK,
+            HookDecision.DENY,
+        }:
+            result = await self._acting_hook_denied(
+                tool_call,
+                tool_name,
+                pre_hook_result.reason,
+            )
+            return tool_call, tool_input, True, result
+        if (
+            pre_hook_result.decision == HookDecision.ASK
+            and not self._approved_hook_ask_replay_matches(
+                tool_call,
+                tool_name,
+                tool_input,
+                pre_hook_result,
+            )
+        ):
+            result = await self._acting_with_approval(
+                tool_call,
+                tool_name,
+                self._hook_guard_result(
+                    tool_name,
+                    tool_input,
+                    pre_hook_result.reason,
+                ),
+                approval_kind=_APPROVAL_KIND_HOOK_PRE_TOOL_USE,
+                hook_ask_handler_ids=self._hook_ask_handler_ids(
+                    pre_hook_result,
+                ),
+            )
+            return tool_call, tool_input, True, result
+        if pre_hook_result.decision == HookDecision.ASK:
+            await self._record_tool_hook_result(
+                pre_hook_result,
+                event_name=HookEventName.PRE_TOOL_USE,
+            )
+        return tool_call, tool_input, False, None
+
+    async def _acting_impl(self, tool_call) -> dict | None:
         """Intercept sensitive tool calls before execution.
 
         1. If tool is in *denied_tools*, auto-deny unconditionally.
@@ -1248,56 +1311,14 @@ class ToolGuardMixin:
         # (agentscope ToolUseBlock) does not carry mcp_server.
         mcp_server = self._resolve_mcp_server(tool_name)
 
-        pre_hook_result = await self._emit_tool_hook(
-            HookEventName.PRE_TOOL_USE,
-            tool_name=tool_name,
-            tool_input=tool_input,
-            tool_use_id=str(tool_call.get("id") or ""),
-        )
-        if pre_hook_result.updated_input is not None:
-            tool_call = dict(tool_call)
-            tool_call["input"] = pre_hook_result.updated_input
-            tool_input = pre_hook_result.updated_input
-        if pre_hook_result.decision == HookDecision.STOP:
-            await self._stop_pre_tool_hook(
-                tool_call,
-                tool_name,
-                pre_hook_result.reason or "Hook requested stop",
-            )
-        if pre_hook_result.decision in {
-            HookDecision.BLOCK,
-            HookDecision.DENY,
-        }:
-            return await self._acting_hook_denied(
-                tool_call,
-                tool_name,
-                pre_hook_result.reason,
-            )
-        if pre_hook_result.decision == HookDecision.ASK:
-            if self._approved_hook_ask_replay_matches(
-                tool_call,
-                tool_name,
-                tool_input,
-                pre_hook_result,
-            ):
-                await self._record_tool_hook_result(
-                    pre_hook_result,
-                    event_name=HookEventName.PRE_TOOL_USE,
-                )
-            else:
-                return await self._acting_with_approval(
-                    tool_call,
-                    tool_name,
-                    self._hook_guard_result(
-                        tool_name,
-                        tool_input,
-                        pre_hook_result.reason,
-                    ),
-                    approval_kind=_APPROVAL_KIND_HOOK_PRE_TOOL_USE,
-                    hook_ask_handler_ids=self._hook_ask_handler_ids(
-                        pre_hook_result,
-                    ),
-                )
+        (
+            tool_call,
+            tool_input,
+            hook_handled,
+            hook_result,
+        ) = await self._apply_pre_tool_hook(tool_call, tool_name, tool_input)
+        if hook_handled:
+            return hook_result
 
         await self._notify_skill_detector_tool_call(
             tool_name,
@@ -1335,6 +1356,23 @@ class ToolGuardMixin:
             await self._emit_tool_trace_end(span_id, result)
             return result
 
+        return await self._run_guarded_tool_call(
+            action,
+            tool_call,
+            tool_name,
+            tool_input,
+            span_id,
+        )
+
+    async def _run_guarded_tool_call(
+        self,
+        action: "_GuardAction | None",
+        tool_call: dict[str, Any],
+        tool_name: str,
+        tool_input: dict[str, Any],
+        span_id: str,
+    ) -> dict | None:
+        """Execute a permitted tool call and emit its terminal hook events."""
         try:
             self._raise_if_pre_tool_terminal_stop_requested()
             result = await self._execute_guard_action_or_tool_call(
