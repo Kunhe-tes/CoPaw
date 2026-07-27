@@ -1,4 +1,4 @@
-﻿# -*- coding: utf-8 -*-
+# -*- coding: utf-8 -*-
 """Query service for cron job and execution data.
 
 Provides methods to query job definitions and execution history
@@ -171,6 +171,16 @@ class QueryService:
         "固收+基金营销技能",
         "query-insu-expand-cust",
         "分行保险潜客技能",
+        "market-movement",
+        "市场异动",
+        "ncfh-report-review",
+        "如影随影-市场复盘",
+        "query-high-value-transactions",
+        "高价值动账商机盘户",
+        "query-sorted-cust",
+        "Claw精选名单",
+        "global-market-review",
+        "全球市场复盘报告-V2",
     }
 
     def __init__(self) -> None:
@@ -352,7 +362,7 @@ class QueryService:
                     f"LOWER(COALESCE({field}, '')) LIKE %s ESCAPE '\\\\'"
                     for field in searchable_fields
                 )
-                + ")"
+                + ")",
             )
             sql_params.extend(
                 [f"%{escaped_query}%"] * len(searchable_fields),
@@ -3298,7 +3308,7 @@ class QueryService:
             + allowed_skills
         )
         logger.info(
-            f"[_fetch_branch_contact_stats] SQL: {contact_sql}, params: {params}"
+            f"[_fetch_branch_contact_stats] SQL: {contact_sql}, params: {params}",
         )
         rows = await db.fetch_all(contact_sql, tuple(params))
         logger.info(f"[_fetch_branch_contact_stats] Result rows: {len(rows)}")
@@ -4613,13 +4623,13 @@ class QueryService:
             params.append(source_id)
         params.extend(allowed_skills)
         logger.info(
-            f"[_fetch_manager_contact_stats] SQL: {sql}, params: {params}"
+            f"[_fetch_manager_contact_stats] SQL: {sql}, params: {params}",
         )
         # 调试：查EXISTS子查询是否能匹配
         debug_sql3 = """
             SELECT COUNT(DISTINCT a.id) as matched_cnt
             FROM swe_html_preview_click_events a
-            WHERE a.bbk_id = %s AND a.customer_id IS NOT NULL 
+            WHERE a.bbk_id = %s AND a.customer_id IS NOT NULL
             AND a.clicked_at >= %s AND a.clicked_at <= %s
             AND EXISTS (
                 SELECT 1
@@ -4638,10 +4648,14 @@ class QueryService:
                     IN ({placeholders})
             )
         """
-        debug_row3 = await db.fetch_one(debug_sql3.format(placeholders=placeholders), 
-            (bbk_id, start_time, end_time) + tuple(allowed_skills))
-        logger.info(f"[_fetch_manager_contact_stats] Debug EXISTS match: {debug_row3}")
-        
+        debug_row3 = await db.fetch_one(
+            debug_sql3.format(placeholders=placeholders),
+            (bbk_id, start_time, end_time) + tuple(allowed_skills),
+        )
+        logger.info(
+            f"[_fetch_manager_contact_stats] Debug EXISTS match: {debug_row3}",
+        )
+
         # 调试：查cron_task_id是否匹配
         debug_sql4 = """
             SELECT a.id, a.cron_task_id, e.job_id, t.skills_used
@@ -4652,9 +4666,14 @@ class QueryService:
             AND a.clicked_at >= %s AND a.clicked_at <= %s
             LIMIT 5
         """
-        debug_rows4 = await db.fetch_all(debug_sql4, (bbk_id, start_time, end_time))
-        logger.info(f"[_fetch_manager_contact_stats] Debug cron_task mapping: {debug_rows4}")
-        
+        debug_rows4 = await db.fetch_all(
+            debug_sql4,
+            (bbk_id, start_time, end_time),
+        )
+        logger.info(
+            f"[_fetch_manager_contact_stats] Debug cron_task mapping: {debug_rows4}",
+        )
+
         rows = await db.fetch_all(sql, tuple(params))
         logger.info(f"[_fetch_manager_contact_stats] Result rows: {len(rows)}")
         return {
