@@ -163,10 +163,7 @@ export default function MainLayout() {
                 element={<FeaturedCasesPage />}
               />
               <Route path="/heartbeat" element={<HeartbeatPage />} />
-              <Route
-                path="/hook-management"
-                element={<HookManagementPage />}
-              />
+              <Route path="/hook-management" element={<HookManagementPage />} />
               <Route path="/skills" element={<SkillsPage />} />
               <Route path="/skill-pool" element={<SkillPoolPage />} />
               <Route path="/tools" element={<ToolsPage />} />

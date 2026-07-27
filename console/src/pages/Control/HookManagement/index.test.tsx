@@ -56,14 +56,20 @@ describe("HookManagementPage", () => {
       { filename: "guard.py", size: 12, sha256: "a".repeat(64) },
     ]);
     mocks.saveConfiguration.mockResolvedValue({ hooks, revision: "rev-2" });
-    mocks.uploadScripts.mockResolvedValue({ accepted: [], warned: [], failed: [] });
+    mocks.uploadScripts.mockResolvedValue({
+      accepted: [],
+      warned: [],
+      failed: [],
+    });
     mocks.manualTest.mockResolvedValue({ redacted_summary: { status: "ok" } });
   });
 
   it("selects a Handler and exposes ordered argv fields", async () => {
     render(<HookManagementPage />);
 
-    fireEvent.click(await screen.findByRole("button", { name: /guard-shell/i }));
+    fireEvent.click(
+      await screen.findByRole("button", { name: /guard-shell/i }),
+    );
 
     expect(screen.getByLabelText("命令参数 1")).toHaveValue("python");
     expect(screen.getByLabelText("命令参数 2")).toHaveValue(
@@ -73,7 +79,9 @@ describe("HookManagementPage", () => {
 
   it("requires confirmation before submitting a real manual test", async () => {
     render(<HookManagementPage />);
-    fireEvent.click(await screen.findByRole("button", { name: /guard-shell/i }));
+    fireEvent.click(
+      await screen.findByRole("button", { name: /guard-shell/i }),
+    );
     fireEvent.click(screen.getByRole("button", { name: "执行人工测试" }));
 
     const execute = screen.getByRole("button", { name: "执行测试" });

@@ -5,7 +5,6 @@ import type {
   HookEventName,
   HookHandlerDraft,
   HookHandlerType,
-  HookMatcherGroupDraft,
 } from "./types";
 
 const scriptReferencePattern = /^hooks\/scripts\/[^/]+\.(py|sh|bash|zsh)$/i;
@@ -42,7 +41,13 @@ export function createHandler(type: HookHandlerType): HookHandlerDraft {
     };
   }
   if (type === "prompt") {
-    return { ...base, id: generatedId("prompt"), type, prompt: "", failPolicy: "block" };
+    return {
+      ...base,
+      id: generatedId("prompt"),
+      type,
+      prompt: "",
+      failPolicy: "block",
+    };
   }
   return {
     ...base,
@@ -55,7 +60,10 @@ export function createHandler(type: HookHandlerType): HookHandlerDraft {
   };
 }
 
-export function addEvent(config: HookConfigDraft, event: HookEventName): HookConfigDraft {
+export function addEvent(
+  config: HookConfigDraft,
+  event: HookEventName,
+): HookConfigDraft {
   return produce(config, (draft) => {
     if (!draft.events[event]) draft.events[event] = [];
   });
@@ -67,7 +75,11 @@ export function addGroup(
 ): HookConfigDraft {
   return produce(config, (draft) => {
     const groups = (draft.events[event] ??= []);
-    groups.push({ id: generatedId("group"), matcher: { tools: [] }, hooks: [] });
+    groups.push({
+      id: generatedId("group"),
+      matcher: { tools: [] },
+      hooks: [],
+    });
   });
 }
 
@@ -91,7 +103,8 @@ export function removeHandler(
 ): HookConfigDraft {
   return produce(config, (draft) => {
     const group = draft.events[event]?.find((item) => item.id === groupId);
-    if (group) group.hooks = group.hooks.filter((handler) => handler.id !== handlerId);
+    if (group)
+      group.hooks = group.hooks.filter((handler) => handler.id !== handlerId);
   });
 }
 
@@ -102,7 +115,8 @@ export function removeGroup(
 ): HookConfigDraft {
   return produce(config, (draft) => {
     const groups = draft.events[event];
-    if (groups) draft.events[event] = groups.filter((group) => group.id !== groupId);
+    if (groups)
+      draft.events[event] = groups.filter((group) => group.id !== groupId);
   });
 }
 

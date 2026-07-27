@@ -20,9 +20,9 @@ describe("hookManagementApi", () => {
     expect(mocks.request).toHaveBeenCalledWith(
       "/hook-management/configuration",
       {
-      method: "PUT",
-      headers: { "If-Match": "rev-1" },
-      body: JSON.stringify({ hooks }),
+        method: "PUT",
+        headers: { "If-Match": "rev-1" },
+        body: JSON.stringify({ hooks }),
       },
     );
   });

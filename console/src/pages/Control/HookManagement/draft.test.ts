@@ -1,10 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import {
-  addHandler,
-  isScriptReference,
-  removeHandler,
-} from "./draft";
+import { addHandler, isScriptReference, removeHandler } from "./draft";
 import type { HookConfigDraft } from "./types";
 
 const emptyConfig: HookConfigDraft = { enabled: true, events: {} };
