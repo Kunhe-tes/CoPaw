@@ -12,7 +12,7 @@ import {
   Tabs,
   Tag,
 } from "antd";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import {
   hookManagementApi,
@@ -25,6 +25,7 @@ import {
   addEvent,
   addGroup,
   defaultContext,
+  isScriptReference,
   removeGroup,
   removeHandler,
 } from "./draft";
@@ -33,6 +34,7 @@ import type {
   HookEventName,
   HookHandlerDraft,
   HookHandlerType,
+  HookMatcherGroupDraft,
   HookTreeSelection,
 } from "./types";
 import styles from "./index.module.less";
@@ -58,6 +60,18 @@ function findHandler(
     config.events[selected.event]
       ?.find((group) => group.id === selected.groupId)
       ?.hooks.find((handler) => handler.id === selected.handlerId) ?? null
+  );
+}
+
+function findGroup(
+  config: HookConfigDraft,
+  selected: HookTreeSelection,
+): HookMatcherGroupDraft | null {
+  if (selected.kind === "root") return null;
+  return (
+    config.events[selected.event]?.find(
+      (group) => group.id === selected.groupId,
+    ) ?? null
   );
 }
 
@@ -87,6 +101,100 @@ function updateHandler(
   };
 }
 
+function updateGroup(
+  config: HookConfigDraft,
+  selected: HookTreeSelection,
+  changes: Partial<HookMatcherGroupDraft>,
+): HookConfigDraft {
+  if (selected.kind === "root") return config;
+  return {
+    ...config,
+    events: {
+      ...config.events,
+      [selected.event]: config.events[selected.event]?.map((group) =>
+        group.id === selected.groupId ? { ...group, ...changes } : group,
+      ),
+    },
+  };
+}
+
+function removeEvent(
+  config: HookConfigDraft,
+  event: HookEventName,
+): HookConfigDraft {
+  const nextEvents = { ...config.events };
+  delete nextEvents[event];
+  return { ...config, events: nextEvents };
+}
+
+function parseJsonRecord(value: string): Record<string, string> | null {
+  try {
+    const parsed: unknown = JSON.parse(value);
+    if (
+      !parsed ||
+      Array.isArray(parsed) ||
+      typeof parsed !== "object" ||
+      Object.values(parsed).some((item) => typeof item !== "string")
+    ) {
+      return null;
+    }
+    return parsed as Record<string, string>;
+  } catch {
+    return null;
+  }
+}
+
+function validateDraft(config: HookConfigDraft): string | null {
+  const groupIds = new Set<string>();
+  const handlerIds = new Set<string>();
+  for (const groups of Object.values(config.events)) {
+    for (const group of groups ?? []) {
+      if (!group.id.trim()) return "Matcher Group ID 不能为空";
+      if (groupIds.has(group.id)) return `Matcher Group ID 重复：${group.id}`;
+      groupIds.add(group.id);
+      for (const handler of group.hooks) {
+        if (!handler.id.trim()) return "Handler ID 不能为空";
+        if (handlerIds.has(handler.id)) return `Handler ID 重复：${handler.id}`;
+        handlerIds.add(handler.id);
+        if (
+          handler.type === "command" &&
+          (!Array.isArray(handler.argv) ||
+            !handler.argv.some((arg) => String(arg).trim()))
+        ) {
+          return `Handler ${handler.id} 至少需要一个非空命令参数`;
+        }
+        const timeout = Number(handler.timeout ?? 10);
+        if (!Number.isFinite(timeout) || timeout <= 0) {
+          return `Handler ${handler.id} 的超时必须大于 0`;
+        }
+        const snapshotLimit = Number(handler.conversationSnapshotLimit ?? 50);
+        if (
+          !Number.isInteger(snapshotLimit) ||
+          snapshotLimit < 1 ||
+          snapshotLimit > 200
+        ) {
+          return `Handler ${handler.id} 的会话快照消息数必须在 1 到 200 之间`;
+        }
+        if (handler.type === "http" && !String(handler.url ?? "").trim()) {
+          return `HTTP Handler ${handler.id} 需要请求地址`;
+        }
+        if (handler.type === "prompt" && !String(handler.prompt ?? "").trim()) {
+          return `Prompt Handler ${handler.id} 需要 Prompt`;
+        }
+        if (
+          handler.type === "command" &&
+          Array.isArray(handler.argv) &&
+          handler.argv.some((arg) => isScriptReference(String(arg))) &&
+          String(handler.cwd ?? "").trim()
+        ) {
+          return `脚本 Handler ${handler.id} 不能同时设置工作目录`;
+        }
+      }
+    }
+  }
+  return null;
+}
+
 function HookManagementPage() {
   const { message } = useAppMessage();
   const [draft, setDraft] = useState<HookConfigDraft | null>(null);
@@ -102,6 +210,11 @@ function HookManagementPage() {
   const [testResult, setTestResult] = useState<Record<string, unknown> | null>(
     null,
   );
+  const [testContext, setTestContext] = useState("");
+  const [formError, setFormError] = useState<string | null>(null);
+  const [testError, setTestError] = useState<string | null>(null);
+  const [jsonError, setJsonError] = useState<string | null>(null);
+  const uploadInputRef = useRef<HTMLInputElement>(null);
   const [conflictOpen, setConflictOpen] = useState(false);
   const [pendingFiles, setPendingFiles] = useState<File[]>([]);
   const [overwriteOpen, setOverwriteOpen] = useState(false);
@@ -139,9 +252,19 @@ function HookManagementPage() {
     () => (draft ? findHandler(draft, selected) : null),
     [draft, selected],
   );
+  const group = useMemo(
+    () => (draft ? findGroup(draft, selected) : null),
+    [draft, selected],
+  );
 
   const save = async () => {
     if (!draft) return;
+    const validationError = validateDraft(draft);
+    if (validationError) {
+      setFormError(validationError);
+      return;
+    }
+    setFormError(null);
     setSaving(true);
     try {
       const snapshot = await hookManagementApi.saveConfiguration(
@@ -154,6 +277,10 @@ function HookManagementPage() {
     } catch (cause) {
       if ((cause as { status?: number }).status === 409) {
         setConflictOpen(true);
+      } else if ((cause as { status?: number }).status === 422) {
+        setFormError(
+          cause instanceof Error ? cause.message : "Hook 配置未通过服务器验证",
+        );
       } else {
         message.error(
           cause instanceof Error ? cause.message : "保存 Hook 配置失败",
@@ -164,14 +291,11 @@ function HookManagementPage() {
     }
   };
 
-  const upload = async (overwrite: string[]) => {
-    if (!pendingFiles.length) return;
+  const upload = async (files: File[], overwrite: string[]) => {
+    if (!files.length) return;
     setUploading(true);
     try {
-      const result = await hookManagementApi.uploadScripts(
-        pendingFiles,
-        overwrite,
-      );
+      const result = await hookManagementApi.uploadScripts(files, overwrite);
       setUploadResult(result);
       setScripts(await hookManagementApi.listScripts());
       setPendingFiles([]);
@@ -190,22 +314,68 @@ function HookManagementPage() {
       scripts.some((script) => script.filename === file.name),
     );
     if (duplicate) setOverwriteOpen(true);
-    else void upload([]);
+    else void upload(next, []);
   };
 
   const runTest = async () => {
     if (!handler || selected.kind !== "handler") return;
+    let context: Record<string, unknown>;
+    try {
+      context = JSON.parse(testContext) as Record<string, unknown>;
+    } catch {
+      setTestError("Hook Context 必须是有效 JSON");
+      return;
+    }
+    const requiredContextFields = [
+      "session_id",
+      "transcript_path",
+      "cwd",
+      "tenant_id",
+      "effective_tenant_id",
+      "user_id",
+      "agent_id",
+      "channel",
+    ];
+    if (
+      requiredContextFields.some(
+        (field) => typeof context[field] !== "string",
+      ) ||
+      context.hook_event_name !== selected.event
+    ) {
+      setTestError("Hook Context 必须保留当前事件及所有必填 Envelope 字段");
+      return;
+    }
+    setTestError(null);
     setTesting(true);
     try {
-      const result = await hookManagementApi.manualTest(
-        handler,
-        defaultContext(selected.event),
-      );
+      const result = await hookManagementApi.manualTest(handler, context);
       setTestResult(result.redacted_summary);
     } catch (cause) {
-      message.error(cause instanceof Error ? cause.message : "人工测试失败");
+      const errorMessage =
+        cause instanceof Error ? cause.message : "人工测试失败";
+      if ((cause as { status?: number }).status === 422) {
+        setTestError(errorMessage);
+      } else {
+        message.error(errorMessage);
+      }
     } finally {
       setTesting(false);
+    }
+  };
+
+  const onHandlerChange = (changes: Partial<HookHandlerDraft>) => {
+    if (!draft || selected.kind !== "handler") return;
+    setDraft(updateHandler(draft, selected, changes));
+    if (typeof changes.id === "string" && changes.id !== selected.handlerId) {
+      setSelected({ ...selected, handlerId: changes.id });
+    }
+  };
+
+  const onGroupChange = (changes: Partial<HookMatcherGroupDraft>) => {
+    if (!draft || selected.kind === "root") return;
+    setDraft(updateGroup(draft, selected, changes));
+    if (typeof changes.id === "string" && changes.id !== selected.groupId) {
+      setSelected({ ...selected, groupId: changes.id });
     }
   };
 
@@ -236,17 +406,25 @@ function HookManagementPage() {
             <h2>{handler.id || "未命名 Handler"}</h2>
             <span>{handler.type} Handler</span>
           </div>
-          <Button onClick={() => setTestOpen(true)}>执行人工测试</Button>
+          <Button
+            onClick={() => {
+              setFormError(null);
+              setTestError(null);
+              setTestResult(null);
+              setTestContext(
+                JSON.stringify(defaultContext(selected.event), null, 2),
+              );
+              setTestOpen(true);
+            }}
+          >
+            执行人工测试
+          </Button>
         </div>
         <label>
           Handler ID
           <Input
             value={handler.id}
-            onChange={(event) =>
-              setDraft(
-                updateHandler(draft, selected, { id: event.target.value }),
-              )
-            }
+            onChange={(event) => onHandlerChange({ id: event.target.value })}
           />
         </label>
         {handler.type === "command" && (
@@ -260,18 +438,14 @@ function HookManagementPage() {
                   onChange={(event) => {
                     const next = [...argv];
                     next[index] = event.target.value;
-                    setDraft(updateHandler(draft, selected, { argv: next }));
+                    onHandlerChange({ argv: next });
                   }}
                 />
               </label>
             ))}
             <Button
               type="dashed"
-              onClick={() =>
-                setDraft(
-                  updateHandler(draft, selected, { argv: [...argv, ""] }),
-                )
-              }
+              onClick={() => onHandlerChange({ argv: [...argv, ""] })}
             >
               添加参数
             </Button>
@@ -280,26 +454,111 @@ function HookManagementPage() {
               <Input
                 value={String(handler.cwd ?? "")}
                 onChange={(event) =>
-                  setDraft(
-                    updateHandler(draft, selected, { cwd: event.target.value }),
-                  )
+                  onHandlerChange({ cwd: event.target.value })
                 }
+              />
+            </label>
+            <label>
+              Shell
+              <Select
+                allowClear
+                value={handler.shell as string | undefined}
+                options={["sh", "bash", "zsh", "cmd", "powershell"].map(
+                  (value) => ({ value, label: value }),
+                )}
+                onChange={(value) => onHandlerChange({ shell: value })}
+              />
+            </label>
+            <label>
+              环境变量（JSON）
+              <Input.TextArea
+                key={`${handler.id}-env`}
+                defaultValue={JSON.stringify(handler.env ?? {}, null, 2)}
+                onBlur={(event) => {
+                  const env = parseJsonRecord(event.target.value);
+                  if (!env) {
+                    setJsonError("环境变量必须是 string → string 的 JSON 对象");
+                    return;
+                  }
+                  setJsonError(null);
+                  onHandlerChange({ env });
+                }}
+                rows={4}
               />
             </label>
           </>
         )}
         {handler.type === "http" && (
-          <label>
-            请求地址
-            <Input
-              value={String(handler.url ?? "")}
-              onChange={(event) =>
-                setDraft(
-                  updateHandler(draft, selected, { url: event.target.value }),
-                )
-              }
-            />
-          </label>
+          <>
+            <label>
+              请求地址
+              <Input
+                value={String(handler.url ?? "")}
+                onChange={(event) =>
+                  onHandlerChange({ url: event.target.value })
+                }
+              />
+            </label>
+            <label>
+              请求头（JSON）
+              <Input.TextArea
+                key={`${handler.id}-headers`}
+                defaultValue={JSON.stringify(handler.headers ?? {}, null, 2)}
+                onBlur={(event) => {
+                  const headers = parseJsonRecord(event.target.value);
+                  if (!headers) {
+                    setJsonError("请求头必须是 string → string 的 JSON 对象");
+                    return;
+                  }
+                  setJsonError(null);
+                  onHandlerChange({ headers });
+                }}
+                rows={4}
+              />
+            </label>
+            <label>
+              请求头密钥引用（JSON）
+              <Input.TextArea
+                key={`${handler.id}-header-secret-refs`}
+                defaultValue={JSON.stringify(
+                  handler.headerSecretRefs ?? {},
+                  null,
+                  2,
+                )}
+                onBlur={(event) => {
+                  const headerSecretRefs = parseJsonRecord(event.target.value);
+                  if (!headerSecretRefs) {
+                    setJsonError(
+                      "请求头密钥引用必须是 string → string 的 JSON 对象",
+                    );
+                    return;
+                  }
+                  setJsonError(null);
+                  onHandlerChange({ headerSecretRefs });
+                }}
+                rows={4}
+              />
+            </label>
+            <label>
+              可用环境变量（每行一个）
+              <Input.TextArea
+                value={
+                  Array.isArray(handler.allowedEnvVars)
+                    ? handler.allowedEnvVars.join("\n")
+                    : ""
+                }
+                onChange={(event) =>
+                  onHandlerChange({
+                    allowedEnvVars: event.target.value
+                      .split("\n")
+                      .map((value) => value.trim())
+                      .filter(Boolean),
+                  })
+                }
+                rows={3}
+              />
+            </label>
+          </>
         )}
         {handler.type === "prompt" && (
           <label>
@@ -307,11 +566,7 @@ function HookManagementPage() {
             <Input.TextArea
               value={String(handler.prompt ?? "")}
               onChange={(event) =>
-                setDraft(
-                  updateHandler(draft, selected, {
-                    prompt: event.target.value,
-                  }),
-                )
+                onHandlerChange({ prompt: event.target.value })
               }
               rows={5}
             />
@@ -329,11 +584,7 @@ function HookManagementPage() {
                     <Input
                       value={String(handler.if ?? "")}
                       onChange={(event) =>
-                        setDraft(
-                          updateHandler(draft, selected, {
-                            if: event.target.value,
-                          }),
-                        )
+                        onHandlerChange({ if: event.target.value })
                       }
                     />
                   </label>
@@ -343,11 +594,7 @@ function HookManagementPage() {
                       type="number"
                       value={String(handler.timeout ?? 10)}
                       onChange={(event) =>
-                        setDraft(
-                          updateHandler(draft, selected, {
-                            timeout: Number(event.target.value),
-                          }),
-                        )
+                        onHandlerChange({ timeout: Number(event.target.value) })
                       }
                     />
                   </label>
@@ -360,17 +607,92 @@ function HookManagementPage() {
                         { value: "block", label: "阻断" },
                       ]}
                       onChange={(value) =>
-                        setDraft(
-                          updateHandler(draft, selected, { failPolicy: value }),
-                        )
+                        onHandlerChange({ failPolicy: value })
                       }
                     />
                   </label>
+                  <label>
+                    状态消息
+                    <Input
+                      value={String(handler.statusMessage ?? "")}
+                      onChange={(event) =>
+                        onHandlerChange({ statusMessage: event.target.value })
+                      }
+                    />
+                  </label>
+                  <label className={styles.switchLine}>
+                    仅执行一次
+                    <Switch
+                      checked={Boolean(handler.once)}
+                      onChange={(once) => onHandlerChange({ once })}
+                    />
+                  </label>
+                  <label className={styles.switchLine}>
+                    附带会话快照
+                    <Switch
+                      checked={Boolean(handler.includeConversationSnapshot)}
+                      onChange={(includeConversationSnapshot) =>
+                        onHandlerChange({ includeConversationSnapshot })
+                      }
+                    />
+                  </label>
+                  <label>
+                    会话快照消息数
+                    <Input
+                      type="number"
+                      min={1}
+                      max={200}
+                      value={String(handler.conversationSnapshotLimit ?? 50)}
+                      onChange={(event) =>
+                        onHandlerChange({
+                          conversationSnapshotLimit: Number(event.target.value),
+                        })
+                      }
+                    />
+                  </label>
+                  {jsonError && (
+                    <p className={styles.fieldError}>{jsonError}</p>
+                  )}
                 </div>
               ),
             },
           ]}
         />
+      </div>
+    );
+  };
+
+  const renderGroupEditor = () => {
+    if (!group || selected.kind === "root") return null;
+    return (
+      <div className={styles.editor}>
+        <h2>Matcher Group</h2>
+        <p>该组内的 Handler 会按顺序执行。</p>
+        <label>
+          Matcher Group ID
+          <Input
+            value={group.id}
+            onChange={(event) => onGroupChange({ id: event.target.value })}
+          />
+        </label>
+        <label>
+          匹配工具（每行一个）
+          <Input.TextArea
+            value={group.matcher.tools.join("\n")}
+            onChange={(event) =>
+              onGroupChange({
+                matcher: {
+                  tools: event.target.value
+                    .split("\n")
+                    .map((tool) => tool.trim())
+                    .filter(Boolean),
+                },
+              })
+            }
+            rows={5}
+          />
+        </label>
+        <p>留空表示匹配该事件的所有工具调用。</p>
       </div>
     );
   };
@@ -388,6 +710,7 @@ function HookManagementPage() {
           保存并激活
         </Button>
       </header>
+      {formError && <p className={styles.formError}>{formError}</p>}
       <Tabs
         items={[
           {
@@ -419,16 +742,31 @@ function HookManagementPage() {
                   {Object.entries(draft.events).map(([event, groups]) => (
                     <div key={event}>
                       <div className={styles.event}>
-                        {event}
-                        <Button
-                          size="small"
-                          type="link"
-                          onClick={() =>
-                            setDraft(addGroup(draft, event as HookEventName))
-                          }
-                        >
-                          添加组
-                        </Button>
+                        <span>{event}</span>
+                        <span>
+                          <Button
+                            size="small"
+                            type="link"
+                            onClick={() =>
+                              setDraft(addGroup(draft, event as HookEventName))
+                            }
+                          >
+                            添加组
+                          </Button>
+                          <Button
+                            danger
+                            size="small"
+                            type="text"
+                            onClick={() => {
+                              setDraft(
+                                removeEvent(draft, event as HookEventName),
+                              );
+                              setSelected({ kind: "root" });
+                            }}
+                          >
+                            删除事件
+                          </Button>
+                        </span>
                       </div>
                       {groups?.map((group) => (
                         <div key={group.id} className={styles.group}>
@@ -555,10 +893,13 @@ function HookManagementPage() {
                       </p>
                     </div>
                   ) : (
-                    renderHandlerEditor() ?? (
+                    renderHandlerEditor() ??
+                    renderGroupEditor() ?? (
                       <div className={styles.editor}>
                         <h2>Matcher Group</h2>
-                        <p>选择一个 Handler 以编辑详细配置。</p>
+                        <p>
+                          选择一个 Matcher Group 或 Handler 以编辑详细配置。
+                        </p>
                       </div>
                     )
                   )}
@@ -572,16 +913,25 @@ function HookManagementPage() {
             children: (
               <div className={styles.scripts}>
                 <div className={styles.scriptActions}>
-                  <label className={styles.uploadLabel}>
+                  <Button
+                    type="primary"
+                    onClick={() => uploadInputRef.current?.click()}
+                  >
                     上传 Hook 脚本
-                    <input
-                      aria-label="上传 Hook 脚本"
-                      type="file"
-                      multiple
-                      accept=".py,.sh,.bash,.zsh"
-                      onChange={(event) => onFiles(event.target.files)}
-                    />
-                  </label>
+                  </Button>
+                  <input
+                    ref={uploadInputRef}
+                    className={styles.uploadInput}
+                    aria-label="选择 Hook 脚本文件"
+                    type="file"
+                    multiple
+                    accept=".py,.sh,.bash,.zsh"
+                    tabIndex={-1}
+                    onChange={(event) => {
+                      onFiles(event.target.files);
+                      event.currentTarget.value = "";
+                    }}
+                  />
                   <span>
                     仅接受 .py、.sh、.bash、.zsh；单文件最多 1 MB，一批最多 20
                     个。
@@ -655,6 +1005,7 @@ function HookManagementPage() {
         onCancel={() => setOverwriteOpen(false)}
         onOk={() =>
           void upload(
+            pendingFiles,
             pendingFiles
               .filter((file) =>
                 scripts.some((script) => script.filename === file.name),
@@ -679,15 +1030,30 @@ function HookManagementPage() {
         title="执行人工测试"
         open={testOpen}
         onCancel={() => {
+          if (testing) return;
           setTestOpen(false);
           setConfirmed(false);
           setTestResult(null);
+          setFormError(null);
+          setTestError(null);
         }}
         onOk={() => void runTest()}
         okText="执行测试"
         okButtonProps={{ disabled: !confirmed, loading: testing }}
+        closable={!testing}
+        maskClosable={!testing}
       >
         <p>这会真实执行当前草稿中的一个 Handler，不会保存草稿或重载 Agent。</p>
+        <label>
+          Hook Context（JSON）
+          <Input.TextArea
+            aria-label="Hook Context（JSON）"
+            value={testContext}
+            onChange={(event) => setTestContext(event.target.value)}
+            rows={10}
+          />
+        </label>
+        {testError && <p className={styles.fieldError}>{testError}</p>}
         <Checkbox
           checked={confirmed}
           onChange={(event) => setConfirmed(event.target.checked)}

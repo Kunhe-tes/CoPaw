@@ -1,8 +1,8 @@
 .page {
   min-width: 0;
   padding: 24px;
-  background: #fff;
-  color: #111827;
+  background: var(--console-management-canvas);
+  color: var(--console-management-text);
 }
 .header {
   display: flex;
@@ -17,20 +17,20 @@
 }
 .header p {
   margin: 8px 0 0;
-  color: #4b5563;
+  color: var(--console-management-text-secondary);
 }
 .workspace {
   display: grid;
   grid-template-columns: minmax(240px, 32%) minmax(0, 1fr);
   min-height: 560px;
-  border: 1px solid #e5e7eb;
+  border: 1px solid var(--console-management-border);
   border-radius: 12px;
   overflow: hidden;
 }
 .tree {
   padding: 12px;
-  border-right: 1px solid #e5e7eb;
-  background: #f7f9fc;
+  border-right: 1px solid var(--console-management-border);
+  background: var(--console-management-surface-subtle);
   min-width: 0;
 }
 .treeTop,
@@ -63,12 +63,12 @@
   margin: 6px 0;
 }
 .selected {
-  background: #eef4ff !important;
-  color: #2957dc !important;
+  background: var(--console-management-primary-soft) !important;
+  color: var(--console-management-primary-hover) !important;
 }
 .detail {
   min-width: 0;
-  background: #fff;
+  background: var(--console-management-surface);
 }
 .editor {
   max-width: 760px;
@@ -77,7 +77,7 @@
 .editor label {
   display: block;
   margin: 0 0 14px;
-  color: #4b5563;
+  color: var(--console-management-text-secondary);
   font-size: 13px;
 }
 .editor label :global(.ant-input),
@@ -94,7 +94,7 @@
   margin: 0;
 }
 .editorHeader span {
-  color: #6b7280;
+  color: var(--console-management-text-muted);
 }
 .sectionTitle {
   margin: 18px 0 8px;
@@ -118,23 +118,23 @@
   gap: 12px;
   align-items: center;
   margin-bottom: 16px;
-  color: #667085;
+  color: var(--console-management-text-muted);
 }
-.uploadLabel {
-  color: #fff;
-  background: #3769fc;
-  border-radius: 6px;
-  padding: 8px 12px;
-  cursor: pointer;
-}
-.uploadLabel input {
-  display: none;
+.uploadInput {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
 }
 .uploadResult {
   margin-top: 16px;
   padding: 12px;
-  background: #f7f9fc;
-  border: 1px solid #e5e7eb;
+  background: var(--console-management-surface-subtle);
+  border: 1px solid var(--console-management-border);
   border-radius: 8px;
 }
 .uploadResult p {
@@ -145,8 +145,16 @@
   overflow: auto;
   margin-top: 16px;
   padding: 12px;
-  background: #f7f9fc;
+  background: var(--console-management-surface-subtle);
   border-radius: 6px;
+}
+.formError,
+.fieldError {
+  margin: 0 0 16px;
+  color: var(--console-management-error);
+}
+.fieldError {
+  margin: 0;
 }
 @media (max-width: 760px) {
   .page {
@@ -161,7 +169,7 @@
   }
   .tree {
     border-right: 0;
-    border-bottom: 1px solid #e5e7eb;
+    border-bottom: 1px solid var(--console-management-border);
   }
   .scriptActions {
     align-items: flex-start;
