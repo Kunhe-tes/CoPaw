@@ -97,6 +97,53 @@ describe("Sender skill mentions", () => {
     expect(input).toHaveValue("@missing");
   });
 
+  it("selects a matching skill instead of submitting on Enter", () => {
+    const onChange = vi.fn();
+    const onSubmit = vi.fn();
+    render(
+      <Sender
+        onSubmit={onSubmit}
+        skillMentions={{
+          items: skills,
+          selected: [],
+          onOpen: vi.fn(),
+          onChange,
+        }}
+      />,
+    );
+
+    const input = screen.getByRole("textbox");
+    fireEvent.change(input, { target: { value: "@br" } });
+    fireEvent.keyDown(input, { key: "Enter" });
+
+    expect(onChange).toHaveBeenCalledWith(["browser"]);
+    expect(onSubmit).not.toHaveBeenCalled();
+    expect(input).toHaveValue(" ");
+  });
+
+  it("does not submit while a loading skill menu has no matches", () => {
+    const onSubmit = vi.fn();
+    render(
+      <Sender
+        onSubmit={onSubmit}
+        skillMentions={{
+          items: [],
+          selected: [],
+          loading: true,
+          onOpen: vi.fn(),
+          onChange: vi.fn(),
+        }}
+      />,
+    );
+
+    const input = screen.getByRole("textbox");
+    fireEvent.change(input, { target: { value: "@missing" } });
+    fireEvent.keyDown(input, { key: "Enter" });
+
+    expect(onSubmit).not.toHaveBeenCalled();
+    expect(input).toHaveValue("@missing");
+  });
+
   it("selects matching mentions by click and Enter", () => {
     const clickSender = renderSender();
 
