@@ -187,30 +187,33 @@ def test_root_and_agent_config_parse_prompt_hook_handlers() -> None:
 
 
 @pytest.mark.parametrize("event_name", ["PostToolUse", "PostToolUseFailure"])
-def test_prompt_hook_handler_rejects_non_blockable_events(
+def test_prompt_hook_handler_accepts_post_tool_events(
     event_name: str,
 ) -> None:
-    with pytest.raises(ValidationError, match="blockable"):
-        Config.model_validate(
-            {
-                "hooks": {
-                    "enabled": True,
-                    "events": {
-                        event_name: [
-                            {
-                                "hooks": [
-                                    {
-                                        "id": "policy",
-                                        "type": "prompt",
-                                        "prompt": "Reject risky output.",
-                                    },
-                                ],
-                            },
-                        ],
-                    },
+    config = Config.model_validate(
+        {
+            "hooks": {
+                "enabled": True,
+                "events": {
+                    event_name: [
+                        {
+                            "hooks": [
+                                {
+                                    "id": "policy",
+                                    "type": "prompt",
+                                    "prompt": "Reject risky output.",
+                                },
+                            ],
+                        },
+                    ],
                 },
             },
-        )
+        },
+    )
+
+    assert config.hooks.events[HookEventName(event_name)][0].hooks[0].type == (
+        "prompt"
+    )
 
 
 @pytest.mark.parametrize(

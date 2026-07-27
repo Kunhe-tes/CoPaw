@@ -182,11 +182,11 @@ class TestEnsureSeededBootstrap:
         assert chats_data == {"version": 1, "chats": []}
         assert token_usage_data == {}
 
-    def test_ensure_seeded_bootstrap_seeds_skills_without_qa_agent(
+    def test_ensure_seeded_bootstrap_seeds_pool_but_ignores_unregistered_workspace(
         self,
         tmp_path,
     ):
-        """Runtime bootstrap seeds skills but does not create QA agent."""
+        """Runtime bootstrap seeds Pool entries but ignores unmanaged content."""
         from swe.agents.skills_manager import (
             get_skill_pool_dir,
             get_pool_skill_manifest_path,
@@ -241,8 +241,12 @@ class TestEnsureSeededBootstrap:
         assert result["pool_seed"]["source"] == "default"
         assert "pool-skill" in result["pool_seed"]["skills"]
 
-        assert result["workspace_seed"]["seeded"] is True
-        assert "ws-skill" in result["workspace_seed"]["skills"]
+        assert result["workspace_seed"]["seeded"] is False
+        assert result["workspace_seed"]["skills"] == []
+        new_default_workspace = new_init.tenant_dir / "workspaces" / "default"
+        assert not (
+            get_workspace_skills_dir(new_default_workspace) / "ws-skill"
+        ).exists()
 
         # Verify QA agent was NOT created (runtime bootstrap boundary)
         assert not (

@@ -635,6 +635,18 @@ def test_prompt_judgment_output_maps_valid_decisions(
     assert result.order == 3
 
 
+def test_prompt_pre_tool_use_stop_is_terminal() -> None:
+    result = normalize_prompt_judgment_output(
+        handler_id="policy",
+        order=3,
+        text='{"decision":"stop","reason":"end this run"}',
+        event_name=HookEventName.PRE_TOOL_USE,
+    )
+
+    assert result.decision == HookDecision.STOP
+    assert result.reason == "end this run"
+
+
 def test_prompt_judgment_output_repairs_malformed_json() -> None:
     result = normalize_prompt_judgment_output(
         handler_id="policy",
@@ -672,6 +684,7 @@ def test_before_stop_prompt_judgment_accepts_gate_decisions(
     "text",
     [
         '{"decision":"deny","reason":"no"}',
+        '{"decision":"stop","reason":"end this run"}',
         '{"decision":"ask","reason":"review"}',
         '{"decision":"allow","reason":"ok","continue":false}',
         (
@@ -753,6 +766,28 @@ def test_before_stop_hook_output_rejects_unsupported_fields(
             raw_output=raw_output,
             event_name=HookEventName.BEFORE_STOP,
         )
+
+
+@pytest.mark.parametrize(
+    ("raw_output", "reason"),
+    [
+        ({"decision": "stop", "reason": "end this run"}, "end this run"),
+        ({"decision": "stop", "reason": ""}, "Hook requested stop"),
+    ],
+)
+def test_generic_canonical_stop_is_terminal(
+    raw_output: dict,
+    reason: str,
+) -> None:
+    result = normalize_hook_output(
+        handler_id="policy",
+        order=0,
+        raw_output=raw_output,
+        event_name=HookEventName.PRE_TOOL_USE,
+    )
+
+    assert result.decision == HookDecision.STOP
+    assert result.reason == reason
 
 
 @pytest.mark.parametrize(
@@ -1443,3 +1478,67 @@ def test_merge_continue_false_overrides_other_decisions() -> None:
 
     assert merged.decision == HookDecision.STOP
     assert merged.reason == "stop now"
+
+
+def test_merge_stop_wins_over_multiple_updated_inputs() -> None:
+    stopper = CommandHookHandlerConfig(id="stopper", command="echo")
+    first_updater = CommandHookHandlerConfig(
+        id="first-updater",
+        command="echo",
+    )
+    second_updater = CommandHookHandlerConfig(
+        id="second-updater",
+        command="echo",
+    )
+    plan = _plan(stopper, first_updater, second_updater)
+
+    merged = merge_hook_results(
+        plan,
+        [
+            plan.handlers[2].success(
+                {"hookSpecificOutput": {"updatedInput": {"cmd": "echo two"}}},
+            ),
+            plan.handlers[0].success(
+                {"decision": "stop", "reason": "first stop reason"},
+            ),
+            plan.handlers[1].success(
+                {"hookSpecificOutput": {"updatedInput": {"cmd": "echo one"}}},
+            ),
+        ],
+    )
+
+    assert merged.decision == HookDecision.STOP
+    assert merged.reason == "first stop reason"
+    assert merged.updated_input is None
+
+
+@pytest.mark.parametrize("stopper_first", [True, False])
+def test_merge_stop_discards_single_updated_input_regardless_of_handler_order(
+    stopper_first: bool,
+) -> None:
+    stopper = CommandHookHandlerConfig(id="stopper", command="echo")
+    updater = CommandHookHandlerConfig(id="updater", command="echo")
+    plan = (
+        _plan(stopper, updater) if stopper_first else _plan(updater, stopper)
+    )
+    handlers = {item.handler.id: item for item in plan.handlers}
+
+    merged = merge_hook_results(
+        plan,
+        [
+            handlers["updater"].success(
+                {
+                    "hookSpecificOutput": {
+                        "updatedInput": {"cmd": "echo changed"},
+                    },
+                },
+            ),
+            handlers["stopper"].success(
+                {"decision": "stop", "reason": "first stop reason"},
+            ),
+        ],
+    )
+
+    assert merged.decision == HookDecision.STOP
+    assert merged.reason == "first stop reason"
+    assert merged.updated_input is None
