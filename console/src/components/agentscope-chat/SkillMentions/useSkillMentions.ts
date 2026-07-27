@@ -9,9 +9,11 @@ export interface SkillMentionItem {
 export interface SkillMentionsData {
   items: SkillMentionItem[];
   selected: string[];
+  error?: boolean;
   loading?: boolean;
   onOpen: () => void;
   onChange: (names: string[]) => void;
+  onRetry?: () => void;
 }
 
 export interface UseSkillMentionsOptions extends SkillMentionsData {
@@ -115,7 +117,7 @@ export function useSkillMentions({
   );
 
   const handleKeyDown = useCallback(
-    (event: KeyboardEvent<HTMLTextAreaElement>) => {
+    (event: KeyboardEvent<HTMLElement>) => {
       if (!open || event.nativeEvent.isComposing) {
         return;
       }
@@ -143,6 +145,11 @@ export function useSkillMentions({
       if (event.key === "Enter" && filteredItems[activeIndex] && !loading) {
         event.preventDefault();
         select(filteredItems[activeIndex]);
+        return;
+      }
+
+      if (event.key === "Enter" && loading) {
+        event.preventDefault();
       }
     },
     [activeIndex, filteredItems, loading, open, select, setMenuOpen],

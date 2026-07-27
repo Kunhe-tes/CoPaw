@@ -527,6 +527,7 @@ export default function ChatPage() {
     { name: string; description: string }[]
   >([]);
   const [effectiveSkillsLoading, setEffectiveSkillsLoading] = useState(false);
+  const [effectiveSkillsError, setEffectiveSkillsError] = useState(false);
   const pendingSelectedSkillNamesRef = useRef<string[]>([]);
   const dragCounterRef = useRef(0);
   const runtimeLoadingBridgeRef = useRef<RuntimeLoadingBridgeApi | null>(null);
@@ -551,10 +552,16 @@ export default function ChatPage() {
 
   const loadEffectiveSkills = useCallback(() => {
     setEffectiveSkillsLoading(true);
+    setEffectiveSkillsError(false);
     void skillApi
       .listEffectiveSkills()
-      .then(setEffectiveSkills)
-      .catch(() => setEffectiveSkills([]))
+      .then((skills) => {
+        setEffectiveSkills(skills);
+      })
+      .catch(() => {
+        setEffectiveSkills([]);
+        setEffectiveSkillsError(true);
+      })
       .finally(() => setEffectiveSkillsLoading(false));
   }, []);
 
@@ -1572,6 +1579,7 @@ export default function ChatPage() {
     const { beforeSubmit: handleBeforeSubmit, skillMentions } =
       createWelcomeSkillMentions({
         effectiveSkills,
+        effectiveSkillsError,
         effectiveSkillsLoading,
         isComposingRef,
         loadEffectiveSkills,
@@ -1757,6 +1765,7 @@ export default function ChatPage() {
     resolveRequestChatId,
     selectedSkillNames,
     effectiveSkills,
+    effectiveSkillsError,
     effectiveSkillsLoading,
     loadEffectiveSkills,
     taskProgress,

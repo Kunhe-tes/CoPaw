@@ -24,15 +24,12 @@ import type {
   GetProps,
 } from "antd";
 import BeforeUIContainer from "./BeforeUIContainer";
-import { SkillMentionMenu, SkillMentionTags } from "../SkillMentions";
-import { useSkillMentions } from "../SkillMentions/useSkillMentions";
+import { SkillTokenEditor } from "../SkillMentions/SkillTokenEditor";
 
 export type SubmitType = "enter" | "shiftEnter" | false;
 
 type TextareaProps = GetProps<typeof Input.TextArea>;
 type SuggestionItems = Exclude<GetProp<typeof Suggestion, "items">, () => void>;
-
-const noop = () => undefined;
 
 export interface SenderComponents {
   input?: React.ComponentType<TextareaProps>;
@@ -290,6 +287,7 @@ const ForwardSender = React.forwardRef<SenderRef, SenderProps>((props, ref) => {
     defaultValue,
     value,
     readOnly,
+    placeholder,
     enableFocusExpand = false,
     sendDisabled = false,
     allowEmptySubmit = false,
@@ -327,11 +325,24 @@ const ForwardSender = React.forwardRef<SenderRef, SenderProps>((props, ref) => {
 
   const containerRef = React.useRef<HTMLDivElement>(null);
   const inputRef = React.useRef<AntdInputRef>(null);
+  const tokenEditorRef = React.useRef<HTMLDivElement>(null);
 
   useProxyImperativeHandle(ref, () => ({
     nativeElement: containerRef.current!,
-    focus: inputRef.current?.focus!,
-    blur: inputRef.current?.blur!,
+    focus: () => {
+      if (tokenEditorRef.current) {
+        tokenEditorRef.current.focus();
+      } else {
+        inputRef.current?.focus();
+      }
+    },
+    blur: () => {
+      if (tokenEditorRef.current) {
+        tokenEditorRef.current.blur();
+      } else {
+        inputRef.current?.blur();
+      }
+    },
   }));
 
   useFocusWithin(containerRef, {
@@ -391,20 +402,8 @@ const ForwardSender = React.forwardRef<SenderRef, SenderProps>((props, ref) => {
     },
     allowSpeech,
   );
-  const hasSuggestions = Array.isArray(suggestions) && suggestions.length > 0;
-  const currentInputEventRef = React.useRef<
-    React.ChangeEvent<HTMLTextAreaElement> | undefined
-  >();
-  const skillMentionController = useSkillMentions({
-    items: skillMentions?.items ?? [],
-    selected: skillMentions?.selected ?? [],
-    loading: skillMentions?.loading,
-    onOpen: skillMentions?.onOpen ?? noop,
-    onChange: skillMentions?.onChange ?? noop,
-    value: innerValue,
-    onValueChange: (nextValue) =>
-      triggerValueChange(nextValue, currentInputEventRef.current),
-  });
+  const hasSuggestions =
+    !skillMentions && Array.isArray(suggestions) && suggestions.length > 0;
   const slashCommandKeyword = React.useMemo(
     () => getSlashCommandKeyword(innerValue),
     [innerValue],
@@ -581,9 +580,44 @@ const ForwardSender = React.forwardRef<SenderRef, SenderProps>((props, ref) => {
     onKeyDown?: React.KeyboardEventHandler<HTMLTextAreaElement>;
     open?: boolean;
   }) => {
-    const skillMentionBlocksSubmit = skillMentionController.blocksSubmit;
-    suggestionOpenRef.current =
-      !!suggestionProps?.open || (!!skillMentions && skillMentionBlocksSubmit);
+    suggestionOpenRef.current = !!suggestionProps?.open;
+
+    if (skillMentions) {
+      return (
+        <SkillTokenEditor
+          {...domProps}
+          ref={tokenEditorRef}
+          aria-label={props.placeholder || "消息"}
+          className={classnames(
+            inputCls,
+            `${prefixCls}-skill-editor`,
+            classNames.input,
+          )}
+          disabled={!!disabled}
+          onKeyDown={(event) => {
+            if (
+              event.key === "Enter" &&
+              !event.shiftKey &&
+              !event.nativeEvent.isComposing
+            ) {
+              event.preventDefault();
+              triggerSend();
+              return;
+            }
+            onKeyDown?.(event);
+          }}
+          onPaste={onInternalPaste}
+          onValueChange={triggerValueChange}
+          placeholder={placeholder}
+          skillMentions={skillMentions}
+          style={styles.input}
+          value={innerValue.slice(
+            0,
+            props.maxLength || Number.MAX_SAFE_INTEGER,
+          )}
+        />
+      );
+    }
 
     return (
       <InputTextArea
@@ -602,17 +636,10 @@ const ForwardSender = React.forwardRef<SenderRef, SenderProps>((props, ref) => {
           ) {
             nextValue = nextValue.slice(0, props.maxLength);
           }
-          if (skillMentions) {
-            currentInputEventRef.current =
-              event as React.ChangeEvent<HTMLTextAreaElement>;
-            skillMentionController.handleInputValueChange(nextValue);
-            currentInputEventRef.current = undefined;
-          } else {
-            triggerValueChange(
-              nextValue,
-              event as React.ChangeEvent<HTMLTextAreaElement>,
-            );
-          }
+          triggerValueChange(
+            nextValue,
+            event as React.ChangeEvent<HTMLTextAreaElement>,
+          );
 
           if (hasSuggestions) {
             const nextSlashCommandKeyword = getSlashCommandKeyword(nextValue);
@@ -641,12 +668,6 @@ const ForwardSender = React.forwardRef<SenderRef, SenderProps>((props, ref) => {
         onCompositionStart={onInternalCompositionStart}
         onCompositionEnd={onInternalCompositionEnd}
         onKeyDown={(event) => {
-          if (skillMentions) {
-            skillMentionController.handleKeyDown(event);
-            if (event.defaultPrevented) {
-              return;
-            }
-          }
           if (
             event.key === "Enter" &&
             suggestionProps?.open &&
@@ -705,23 +726,7 @@ const ForwardSender = React.forwardRef<SenderRef, SenderProps>((props, ref) => {
           </SendHeaderContext.Provider>
         )}
 
-        {skillMentions ? (
-          <SkillMentionTags
-            selected={skillMentions.selected}
-            onRemove={skillMentionController.remove}
-          />
-        ) : null}
-
         <div className={`${prefixCls}-content`}>
-          {skillMentions ? (
-            <SkillMentionMenu
-              activeIndex={skillMentionController.activeIndex}
-              open={skillMentionController.open}
-              items={skillMentionController.filteredItems}
-              loading={skillMentionController.loading}
-              onSelect={skillMentionController.select}
-            />
-          ) : null}
           {hasSuggestions ? (
             <Suggestion
               items={filteredSuggestions}

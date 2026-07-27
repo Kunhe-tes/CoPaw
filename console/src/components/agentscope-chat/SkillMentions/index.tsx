@@ -31,16 +31,20 @@ export interface SkillMentionMenuProps {
   activeIndex: number;
   open: boolean;
   items: SkillMentionItem[];
+  error?: boolean;
   loading?: boolean;
   onSelect: (item: SkillMentionItem) => void;
+  onRetry?: () => void;
 }
 
 export function SkillMentionMenu({
   activeIndex,
+  error = false,
   open,
   items,
   loading = false,
   onSelect,
+  onRetry,
 }: SkillMentionMenuProps) {
   const activeItemRef = useRef<HTMLButtonElement>(null);
 
@@ -69,6 +73,13 @@ export function SkillMentionMenu({
     >
       {loading ? (
         <span role="status">加载技能中…</span>
+      ) : error ? (
+        <Flex align="center" gap={8} justify="space-between">
+          <span role="status">加载技能失败</span>
+          <Button size="small" type="text" onClick={onRetry}>
+            重试
+          </Button>
+        </Flex>
       ) : items.length ? (
         items.map((item, index) => (
           <Button

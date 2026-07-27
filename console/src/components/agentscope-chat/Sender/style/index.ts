@@ -83,6 +83,18 @@ const IndexStyle = createGlobalStyle`
     line-height: 22px;
   }
 
+  &-skill-editor {
+    min-height: 44px;
+    outline: none;
+    white-space: pre-wrap;
+
+    &:empty::before {
+      color: ${(p) => p.theme.colorTextPlaceholder};
+      content: attr(data-placeholder);
+      pointer-events: none;
+    }
+  }
+
   &-actions-list {
     flex: none;
     display: flex;
