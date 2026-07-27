@@ -2,6 +2,7 @@
 """市场技能详情文件预览测试."""
 
 import asyncio
+import json
 from unittest.mock import AsyncMock
 
 from fastapi import FastAPI
@@ -112,3 +113,136 @@ def test_market_skill_preview_routes_return_tree_and_content(tmp_path):
         "content": "",
         "file_type": "binary",
     }
+
+
+def test_disabled_my_skill_file_routes_and_download_use_registered_package(
+    tmp_path,
+):
+    from market.marketplace.fs import (
+        get_user_disabled_skills_dir,
+        get_user_skill_manifest_path,
+    )
+
+    user_id = "user-1"
+    source_id = "src_a"
+    skill_name = "disabled_skill"
+    skill_dir = (
+        get_user_disabled_skills_dir(
+            tmp_path / "swe",
+            user_id,
+            source_id=source_id,
+        )
+        / skill_name
+    )
+    skill_dir.mkdir(parents=True)
+    (skill_dir / "SKILL.md").write_text(
+        "# Disabled Skill\n\ncontents",
+        encoding="utf-8",
+    )
+    manifest_path = get_user_skill_manifest_path(
+        tmp_path / "swe",
+        user_id,
+        source_id=source_id,
+    )
+    manifest_path.write_text(
+        json.dumps(
+            {
+                "schema_version": "workspace-skill-manifest.v1",
+                "layout_version": 2,
+                "version": 1,
+                "skills": {
+                    skill_name: {
+                        "enabled": False,
+                        "source": "customized",
+                    },
+                },
+            },
+        ),
+        encoding="utf-8",
+    )
+
+    app = _make_app(tmp_path)
+    client = TestClient(app)
+    headers = {"X-Source-Id": source_id, "X-User-Id": user_id}
+
+    tree_resp = client.get(
+        f"/api/market/skills/mine/{skill_name}/files",
+        headers=headers,
+    )
+    assert tree_resp.status_code == 200
+    assert [node["name"] for node in tree_resp.json()] == ["SKILL.md"]
+
+    read_resp = client.get(
+        f"/api/market/skills/mine/{skill_name}/files/SKILL.md",
+        headers=headers,
+    )
+    assert read_resp.status_code == 200
+    assert read_resp.json() == {
+        "content": "# Disabled Skill\n\ncontents",
+        "file_type": "markdown",
+    }
+
+    download_resp = client.get(
+        f"/api/market/skills/mine/{skill_name}/download",
+        headers=headers,
+    )
+    assert download_resp.status_code == 200
+    assert download_resp.content
+
+
+def test_unregistered_active_my_skill_file_routes_use_active_package(tmp_path):
+    from market.marketplace.fs import get_user_skills_dir
+
+    user_id = "user-1"
+    source_id = "src_a"
+    skill_name = "legacy_skill"
+    skill_dir = (
+        get_user_skills_dir(
+            tmp_path / "swe",
+            user_id,
+            source_id=source_id,
+        )
+        / skill_name
+    )
+    skill_dir.mkdir(parents=True)
+    (skill_dir / "SKILL.md").write_text(
+        "# Legacy Skill\n\ncontents",
+        encoding="utf-8",
+    )
+    (skill_dir / "notes.txt").write_text("before", encoding="utf-8")
+
+    app = _make_app(tmp_path)
+    client = TestClient(app)
+    headers = {"X-Source-Id": source_id, "X-User-Id": user_id}
+
+    tree_resp = client.get(
+        f"/api/market/skills/mine/{skill_name}/files",
+        headers=headers,
+    )
+    assert tree_resp.status_code == 200
+    assert {node["name"] for node in tree_resp.json()} == {
+        "SKILL.md",
+        "notes.txt",
+    }
+
+    read_resp = client.get(
+        f"/api/market/skills/mine/{skill_name}/files/notes.txt",
+        headers=headers,
+    )
+    assert read_resp.status_code == 200
+    assert read_resp.json()["content"] == "before"
+
+    save_resp = client.put(
+        f"/api/market/skills/mine/{skill_name}/files/notes.txt",
+        headers=headers,
+        json={"content": "after"},
+    )
+    assert save_resp.status_code == 200
+    assert (skill_dir / "notes.txt").read_text(encoding="utf-8") == "after"
+
+    download_resp = client.get(
+        f"/api/market/skills/mine/{skill_name}/download",
+        headers=headers,
+    )
+    assert download_resp.status_code == 200
+    assert download_resp.content

@@ -251,6 +251,43 @@ def _has_unmanaged_workspace_skill_conflict(
     )
 
 
+def _existing_workspace_download_result(
+    entry: dict[str, Any],
+    existing: dict[str, Any],
+    final_name: str,
+    workspace_identity: dict[str, str],
+) -> dict[str, Any]:
+    """Return the outcome when a download targets an existing skill."""
+    if (
+        entry.get("source") == "builtin"
+        and existing.get("source") == "builtin"
+    ):
+        pool_ver = entry.get("version_text", "")
+        ws_ver = (existing.get("metadata") or {}).get("version_text", "")
+        if pool_ver and ws_ver and pool_ver == ws_ver:
+            return {
+                "success": True,
+                "mode": "unchanged",
+                "name": final_name,
+                "workspace_id": workspace_identity["workspace_id"],
+                "workspace_name": workspace_identity["workspace_name"],
+            }
+        return {
+            "success": False,
+            "reason": "builtin_upgrade",
+            "workspace_id": workspace_identity["workspace_id"],
+            "workspace_name": workspace_identity["workspace_name"],
+            "skill_name": final_name,
+        }
+    return {
+        "success": False,
+        "reason": "conflict",
+        "workspace_id": workspace_identity["workspace_id"],
+        "workspace_name": workspace_identity["workspace_name"],
+        "suggested_name": suggest_conflict_name(final_name),
+    }
+
+
 def get_workspace_identity(workspace_dir: Path) -> dict[str, str]:
     """Resolve the workspace id together with its display name."""
     workspace_id = workspace_dir.name
@@ -719,6 +756,15 @@ def _require_workspace_layout_v2(
 ) -> None:
     """Reject malformed or non-v2 existing workspace manifests."""
     manifest_path = get_workspace_skill_manifest_path(workspace_dir)
+    payload = _require_workspace_manifest_object(payload, manifest_path)
+    _require_workspace_layout_version(payload, workspace_dir)
+    _require_workspace_skill_entries(payload["skills"], manifest_path)
+
+
+def _require_workspace_manifest_object(
+    payload: object,
+    manifest_path: Path,
+) -> dict[str, Any]:
     if not isinstance(payload, dict):
         raise ValueError(
             f"Workspace manifest {manifest_path} must contain a JSON object "
@@ -729,7 +775,13 @@ def _require_workspace_layout_v2(
             f"Workspace manifest {manifest_path} field 'skills' must be a "
             "JSON object.",
         )
+    return payload
 
+
+def _require_workspace_layout_version(
+    payload: dict[str, Any],
+    workspace_dir: Path,
+) -> None:
     layout_version = payload.get("layout_version")
     if (
         not isinstance(layout_version, int)
@@ -748,34 +800,53 @@ def _require_workspace_layout_v2(
             "skill operations.",
         )
 
-    skills = payload["skills"]
+
+def _require_workspace_skill_entries(
+    skills: dict[str, Any],
+    manifest_path: Path,
+) -> None:
     for skill_name, entry in skills.items():
-        if not isinstance(skill_name, str) or not skill_name:
-            raise ValueError(
-                f"Workspace manifest {manifest_path} skill name "
-                f"{skill_name!r} must be a non-empty string.",
-            )
-        if (
-            Path(skill_name).name != skill_name
-            or skill_name in {".", ".."}
-            or "/" in skill_name
-            or "\\" in skill_name
-            or "\x00" in skill_name
-        ):
-            raise ValueError(
-                f"Workspace manifest {manifest_path} skill name "
-                f"{skill_name!r} must be a safe single path segment.",
-            )
-        if not isinstance(entry, dict):
-            raise ValueError(
-                f"Workspace manifest {manifest_path} skill "
-                f"{skill_name!r} entry must be a JSON object.",
-            )
-        if "enabled" in entry and not isinstance(entry["enabled"], bool):
-            raise ValueError(
-                f"Workspace manifest {manifest_path} skill "
-                f"{skill_name!r} field 'enabled' must be a JSON boolean.",
-            )
+        _require_workspace_skill_name(skill_name, manifest_path)
+        _require_workspace_skill_entry(skill_name, entry, manifest_path)
+
+
+def _require_workspace_skill_name(
+    skill_name: object,
+    manifest_path: Path,
+) -> None:
+    if not isinstance(skill_name, str) or not skill_name:
+        raise ValueError(
+            f"Workspace manifest {manifest_path} skill name "
+            f"{skill_name!r} must be a non-empty string.",
+        )
+    if (
+        Path(skill_name).name != skill_name
+        or skill_name in {".", ".."}
+        or "/" in skill_name
+        or "\\" in skill_name
+        or "\x00" in skill_name
+    ):
+        raise ValueError(
+            f"Workspace manifest {manifest_path} skill name "
+            f"{skill_name!r} must be a safe single path segment.",
+        )
+
+
+def _require_workspace_skill_entry(
+    skill_name: str,
+    entry: object,
+    manifest_path: Path,
+) -> None:
+    if not isinstance(entry, dict):
+        raise ValueError(
+            f"Workspace manifest {manifest_path} skill "
+            f"{skill_name!r} entry must be a JSON object.",
+        )
+    if "enabled" in entry and not isinstance(entry["enabled"], bool):
+        raise ValueError(
+            f"Workspace manifest {manifest_path} skill "
+            f"{skill_name!r} field 'enabled' must be a JSON boolean.",
+        )
 
 
 def _read_workspace_manifest_strict_unlocked(
@@ -3222,25 +3293,22 @@ class SkillPoolService:
 
         return {"success": True, "name": final_name}
 
-    def download_to_workspace(
+    def _workspace_download_preflight(
         self,
         skill_name: str,
         workspace_dir: Path,
         *,
-        target_name: str | None = None,
-        overwrite: bool = False,
-    ) -> dict[str, Any]:
+        target_name: str | None,
+        overwrite: bool,
+    ) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
         manifest = read_skill_pool_manifest(
             reconcile=False,
             working_dir=self.working_dir,
         )
         entry = manifest.get("skills", {}).get(skill_name)
         if entry is None:
-            return {"success": False, "reason": "not_found"}
+            return None, {"success": False, "reason": "not_found"}
 
-        source_dir = (
-            get_skill_pool_dir(working_dir=self.working_dir) / skill_name
-        )
         final_name = _normalize_skill_dir_name(target_name or skill_name)
         workspace_manifest = read_skill_manifest(
             workspace_dir,
@@ -3253,7 +3321,7 @@ class SkillPoolService:
             final_name,
             workspace_manifest,
         ):
-            return {
+            return None, {
                 "success": False,
                 "reason": "conflict",
                 "workspace_id": workspace_identity["workspace_id"],
@@ -3261,56 +3329,26 @@ class SkillPoolService:
                 "suggested_name": suggest_conflict_name(final_name),
             }
         if existing is not None and not overwrite:
-            # Both builtin: compare version to decide action.
-            if (
-                entry.get("source") == "builtin"
-                and existing.get("source") == "builtin"
-            ):
-                pool_ver = entry.get("version_text", "")
-                ws_ver = (existing.get("metadata") or {}).get(
-                    "version_text",
-                    "",
-                )
-                if pool_ver and ws_ver and pool_ver == ws_ver:
-                    return {
-                        "success": True,
-                        "mode": "unchanged",
-                        "name": final_name,
-                        "workspace_id": workspace_identity["workspace_id"],
-                        "workspace_name": workspace_identity["workspace_name"],
-                    }
-                return {
-                    "success": False,
-                    "reason": "builtin_upgrade",
-                    "workspace_id": workspace_identity["workspace_id"],
-                    "workspace_name": workspace_identity["workspace_name"],
-                    "skill_name": final_name,
-                }
-            return {
-                "success": False,
-                "reason": "conflict",
-                "workspace_id": workspace_identity["workspace_id"],
-                "workspace_name": workspace_identity["workspace_name"],
-                "suggested_name": suggest_conflict_name(
-                    final_name,
-                ),
-            }
+            return None, _existing_workspace_download_result(
+                entry,
+                existing,
+                final_name,
+                workspace_identity,
+            )
+        return {
+            "entry": entry,
+            "existing": existing,
+            "final_name": final_name,
+            "workspace_identity": workspace_identity,
+        }, None
 
-        enabled = (
-            bool(existing.get("enabled", True))
-            if existing is not None
-            else True
-        )
-        target_dir = resolve_workspace_managed_skill_dir(
-            workspace_dir,
-            final_name,
-            enabled=enabled,
-        )
-        other_dir = resolve_workspace_managed_skill_dir(
-            workspace_dir,
-            final_name,
-            enabled=not enabled,
-        )
+    @staticmethod
+    def _install_pool_skill_in_workspace(
+        source_dir: Path,
+        target_dir: Path,
+        other_dir: Path,
+        final_name: str,
+    ) -> None:
         target_dir.parent.mkdir(parents=True, exist_ok=True)
         with _staged_skill_dir(final_name) as staged_dir:
             _copy_skill_dir(source_dir, staged_dir)
@@ -3319,16 +3357,32 @@ class SkillPoolService:
         if other_dir.exists():
             shutil.rmtree(other_dir)
 
-        pool_config = entry.get("config") or {}
-        if existing is not None:
-            workspace_channels = existing.get("channels") or ["all"]
-            workspace_config = dict(existing.get("config") or {})
-            created_at = existing.get("created_at") or _timestamp()
-        else:
-            workspace_channels = ["all"]
-            workspace_config = dict(pool_config)
-            created_at = _timestamp()
+    @staticmethod
+    def _workspace_download_settings(
+        entry: dict[str, Any],
+        existing: dict[str, Any] | None,
+    ) -> tuple[bool, list[str], dict[str, Any], str]:
+        if existing is None:
+            return True, ["all"], dict(entry.get("config") or {}), _timestamp()
+        return (
+            bool(existing.get("enabled", True)),
+            existing.get("channels") or ["all"],
+            dict(existing.get("config") or {}),
+            existing.get("created_at") or _timestamp(),
+        )
 
+    @staticmethod
+    def _write_workspace_download_manifest(
+        workspace_dir: Path,
+        final_name: str,
+        target_dir: Path,
+        entry: dict[str, Any],
+        *,
+        enabled: bool,
+        channels: list[str],
+        config: dict[str, Any],
+        created_at: str,
+    ) -> None:
         def _update(payload: dict[str, Any]) -> None:
             payload.setdefault("skills", {})
             metadata = _build_skill_metadata(
@@ -3343,9 +3397,9 @@ class SkillPoolService:
             )
             payload["skills"][final_name] = {
                 "enabled": enabled,
-                "channels": workspace_channels,
+                "channels": channels,
                 "source": metadata["source"],
-                "config": workspace_config,
+                "config": config,
                 "metadata": metadata,
                 "requirements": metadata["requirements"],
                 "created_at": created_at,
@@ -3356,6 +3410,63 @@ class SkillPoolService:
             get_workspace_skill_manifest_path(workspace_dir),
             _default_workspace_manifest(),
             _update,
+        )
+
+    def download_to_workspace(
+        self,
+        skill_name: str,
+        workspace_dir: Path,
+        *,
+        target_name: str | None = None,
+        overwrite: bool = False,
+    ) -> dict[str, Any]:
+        context, result = self._workspace_download_preflight(
+            skill_name,
+            workspace_dir,
+            target_name=target_name,
+            overwrite=overwrite,
+        )
+        if result is not None:
+            return result
+
+        assert context is not None
+        entry = context["entry"]
+        existing = context["existing"]
+        final_name = context["final_name"]
+        workspace_identity = context["workspace_identity"]
+        settings = self._workspace_download_settings(
+            entry,
+            existing,
+        )
+        enabled, channels, config, created_at = settings
+        source_dir = (
+            get_skill_pool_dir(working_dir=self.working_dir) / skill_name
+        )
+        target_dir = resolve_workspace_managed_skill_dir(
+            workspace_dir,
+            final_name,
+            enabled=enabled,
+        )
+        other_dir = resolve_workspace_managed_skill_dir(
+            workspace_dir,
+            final_name,
+            enabled=not enabled,
+        )
+        self._install_pool_skill_in_workspace(
+            source_dir,
+            target_dir,
+            other_dir,
+            final_name,
+        )
+        self._write_workspace_download_manifest(
+            workspace_dir,
+            final_name,
+            target_dir,
+            entry,
+            enabled=enabled,
+            channels=channels,
+            config=config,
+            created_at=created_at,
         )
         return {
             "success": True,
@@ -3372,70 +3483,19 @@ class SkillPoolService:
         target_name: str | None = None,
         overwrite: bool = False,
     ) -> dict[str, Any]:
-        manifest = read_skill_pool_manifest(
-            reconcile=False,
-            working_dir=self.working_dir,
+        context, result = self._workspace_download_preflight(
+            skill_name,
+            workspace_dir,
+            target_name=target_name,
+            overwrite=overwrite,
         )
-        entry = manifest.get("skills", {}).get(skill_name)
-        if entry is None:
-            return {"success": False, "reason": "not_found"}
+        if result is not None:
+            return result
 
-        final_name = _normalize_skill_dir_name(target_name or skill_name)
-        workspace_manifest = read_skill_manifest(
-            workspace_dir,
-            reconcile=False,
-        )
-        existing = workspace_manifest.get("skills", {}).get(final_name)
-        workspace_identity = get_workspace_identity(workspace_dir)
-        if _has_unmanaged_workspace_skill_conflict(
-            workspace_dir,
-            final_name,
-            workspace_manifest,
-        ):
-            return {
-                "success": False,
-                "reason": "conflict",
-                "workspace_id": workspace_identity["workspace_id"],
-                "workspace_name": workspace_identity["workspace_name"],
-                "suggested_name": suggest_conflict_name(final_name),
-            }
-        if existing is not None and not overwrite:
-            if (
-                entry.get("source") == "builtin"
-                and existing.get("source") == "builtin"
-            ):
-                pool_ver = entry.get("version_text", "")
-                ws_ver = (existing.get("metadata") or {}).get(
-                    "version_text",
-                    "",
-                )
-                if pool_ver and ws_ver and pool_ver == ws_ver:
-                    return {
-                        "success": True,
-                        "mode": "unchanged",
-                        "name": final_name,
-                        "workspace_id": workspace_identity["workspace_id"],
-                        "workspace_name": workspace_identity["workspace_name"],
-                    }
-                return {
-                    "success": False,
-                    "reason": "builtin_upgrade",
-                    "workspace_id": workspace_identity["workspace_id"],
-                    "workspace_name": workspace_identity["workspace_name"],
-                    "skill_name": final_name,
-                }
-            return {
-                "success": False,
-                "reason": "conflict",
-                "workspace_id": workspace_identity["workspace_id"],
-                "workspace_name": workspace_identity["workspace_name"],
-                "suggested_name": suggest_conflict_name(
-                    final_name,
-                ),
-            }
+        assert context is not None
         return {
             "success": True,
-            "workspace_id": workspace_identity["workspace_id"],
-            "workspace_name": workspace_identity["workspace_name"],
-            "name": final_name,
+            "workspace_id": context["workspace_identity"]["workspace_id"],
+            "workspace_name": context["workspace_identity"]["workspace_name"],
+            "name": context["final_name"],
         }
