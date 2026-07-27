@@ -118,11 +118,12 @@ def _require_opencli_credential(
 
 
 def _quote_shell_argument(value: str) -> str:
-    """Quote one argument for the shell used by the shell tool."""
+    """Always quote one argument for the shell used by the shell tool."""
 
     if sys.platform == "win32":
-        return subprocess.list2cmdline([value])
-    return shlex.quote(value)
+        quoted_with_marker = subprocess.list2cmdline([f" {value}"])
+        return f'"{quoted_with_marker[2:]}'
+    return "'" + value.replace("'", "'\"'\"'") + "'"
 
 
 def _intercept_opencli_command(
@@ -146,6 +147,8 @@ def _intercept_opencli_command(
             resolved.token,
             field_name="authorization",
         )
+        if not authorization.lower().startswith("bearer "):
+            authorization = f"Bearer {authorization}"
         inject_parts.extend(
             ["--authorization", _quote_shell_argument(authorization)],
         )
@@ -156,8 +159,7 @@ def _intercept_opencli_command(
         )
         inject_parts.extend(["--cookie", _quote_shell_argument(cookie)])
 
-    command_suffix = command_body[len(tokens[0]) :]
-    return f"{tokens[0]} {' '.join(inject_parts)}{command_suffix}"
+    return f"{command_body} {' '.join(inject_parts)}"
 
 
 def _split_by_shell_and(command: str) -> List[str]:

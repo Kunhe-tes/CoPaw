@@ -889,8 +889,8 @@ class TestExecuteShellCommand:
             )
 
         assert prepared.command == (
-            "opencli --authorization resolved-authorization "
-            "--cookie resolved-cookie apps list"
+            'opencli apps list --authorization "Bearer resolved-authorization" '
+            '--cookie "resolved-cookie"'
         )
         resolve_token.assert_called_once_with(
             tenant_id="test_tenant",

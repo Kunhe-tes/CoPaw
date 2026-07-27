@@ -3,7 +3,6 @@
 
 import logging
 from pathlib import Path
-import shlex
 import subprocess
 import sys
 from types import SimpleNamespace
@@ -13,6 +12,13 @@ import pytest
 from swe.agents.tool_failure import ToolExecutionError
 from swe.agents.tools.shell_interceptor import intercept_command
 from swe.config.context import resolve_scope_id, tenant_context
+
+
+def _force_quoted_shell_argument(value: str) -> str:
+    if sys.platform == "win32":
+        quoted_with_marker = subprocess.list2cmdline([f" {value}"])
+        return f'"{quoted_with_marker[2:]}'
+    return "'" + value.replace("'", "'\"'\"'") + "'"
 
 
 def test_intercept_swe_cron_injects_logical_tenant_and_source():
@@ -134,8 +140,8 @@ def test_intercept_opencli_injects_resolved_credentials_for_effective_tenant(
 
     assert intercepted is True
     assert command == (
-        "opencli --authorization resolved-authorization "
-        "--cookie resolved-cookie apps list"
+        'opencli apps list --authorization "Bearer resolved-authorization" '
+        '--cookie "resolved-cookie"'
     )
     assert calls == [
         {
@@ -186,8 +192,8 @@ def test_intercept_opencli_keeps_both_explicit_credentials(
             None,
             "resolved-cookie",
             (
-                "opencli --cookie resolved-cookie "
-                "--authorization explicit-authorization apps list"
+                'opencli --authorization explicit-authorization apps list '
+                '--cookie "resolved-cookie"'
             ),
         ),
         (
@@ -195,8 +201,8 @@ def test_intercept_opencli_keeps_both_explicit_credentials(
             "resolved-authorization",
             None,
             (
-                "opencli --authorization resolved-authorization "
-                "--cookie explicit-cookie apps list"
+                'opencli --cookie explicit-cookie apps list '
+                '--authorization "Bearer resolved-authorization"'
             ),
         ),
     ],
@@ -241,8 +247,9 @@ def test_intercept_opencli_only_modifies_matching_and_segment(monkeypatch):
 
     assert intercepted is True
     assert command == (
-        "echo ready && opencli --authorization resolved-authorization "
-        "--cookie resolved-cookie apps list && echo done"
+        'echo ready && opencli apps list '
+        '--authorization "Bearer resolved-authorization" '
+        '--cookie "resolved-cookie" && echo done'
     )
 
 
@@ -261,17 +268,60 @@ def test_intercept_opencli_quotes_resolved_credentials_for_platform(monkeypatch)
     with tenant_context(tenant_id="tenant-a", user_id="user-a"):
         command, intercepted = intercept_command("opencli apps list")
 
-    quote = (
-        subprocess.list2cmdline
-        if sys.platform == "win32"
-        else lambda values: shlex.quote(values[0])
-    )
-    quoted_authorization = quote([authorization])
-    quoted_cookie = quote([cookie])
+    quoted_authorization = _force_quoted_shell_argument(f"Bearer {authorization}")
+    quoted_cookie = _force_quoted_shell_argument(cookie)
     assert intercepted is True
     assert command == (
-        f"opencli --authorization {quoted_authorization} "
-        f"--cookie {quoted_cookie} apps list"
+        f"opencli apps list --authorization {quoted_authorization} "
+        f"--cookie {quoted_cookie}"
+    )
+
+
+def test_intercept_opencli_quotes_trailing_backslashes(monkeypatch):
+    authorization = "resolved-authorization\\"
+    cookie = "resolved-cookie\\"
+    monkeypatch.setattr(
+        "swe.agents.tools.shell_interceptor."
+        "resolve_auth_token_for_execution",
+        lambda **_kwargs: SimpleNamespace(
+            token=authorization,
+            cookie_header=cookie,
+        ),
+    )
+
+    with tenant_context(tenant_id="tenant-a", user_id="user-a"):
+        command, intercepted = intercept_command("opencli apps list")
+
+    assert intercepted is True
+    assert command == (
+        "opencli apps list "
+        f"--authorization {_force_quoted_shell_argument(f'Bearer {authorization}')} "
+        f"--cookie {_force_quoted_shell_argument(cookie)}"
+    )
+
+
+@pytest.mark.parametrize("authorization", ["Bearer existing-token", "bearer existing-token"])
+def test_intercept_opencli_does_not_duplicate_bearer_prefix(
+    monkeypatch,
+    authorization: str,
+):
+    monkeypatch.setattr(
+        "swe.agents.tools.shell_interceptor."
+        "resolve_auth_token_for_execution",
+        lambda **_kwargs: SimpleNamespace(
+            token=authorization,
+            cookie_header="resolved-cookie",
+        ),
+    )
+
+    with tenant_context(tenant_id="tenant-a", user_id="user-a"):
+        command, intercepted = intercept_command("opencli apps list")
+
+    assert intercepted is True
+    assert command == (
+        f"opencli apps list "
+        f"--authorization {_force_quoted_shell_argument(authorization)} "
+        '--cookie "resolved-cookie"'
     )
 
 
