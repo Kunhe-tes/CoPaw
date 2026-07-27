@@ -1,6 +1,7 @@
 import React from "react";
 import {
   cleanup,
+  createEvent,
   fireEvent,
   render,
   screen,
@@ -164,6 +165,36 @@ describe("WelcomeCenterLayout", () => {
 
     expect(onSubmit).not.toHaveBeenCalled();
     expect(input).toHaveValue("@missing");
+  });
+
+  it("preserves Enter during IME composition while a matching skill menu is open", () => {
+    const onChange = vi.fn();
+    const onSubmit = vi.fn();
+
+    render(
+      <WelcomeCenterLayout
+        greeting="你好"
+        onSubmit={onSubmit}
+        skillMentions={{
+          items: skills,
+          selected: [],
+          onOpen: vi.fn(),
+          onChange,
+        }}
+      />,
+    );
+
+    const input = screen.getByRole("textbox");
+    fireEvent.change(input, { target: { value: "@br" } });
+    const event = createEvent.keyDown(input, {
+      key: "Enter",
+      isComposing: true,
+    });
+    fireEvent(input, event);
+
+    expect(event.defaultPrevented).toBe(false);
+    expect(onChange).not.toHaveBeenCalled();
+    expect(onSubmit).not.toHaveBeenCalled();
   });
 
   it("removes selected skill tags through the shared tag control", () => {
