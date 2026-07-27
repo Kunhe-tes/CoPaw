@@ -217,4 +217,90 @@ describe("WelcomeCenterLayout", () => {
     expect(onSubmit).not.toHaveBeenCalled();
     expect(input).toHaveValue("hello");
   });
+
+  it("prevents duplicate sends while beforeSubmit is pending", async () => {
+    const onSubmit = vi.fn();
+    let resolveBeforeSubmit!: (result: boolean) => void;
+    const beforeSubmit = vi.fn(
+      () =>
+        new Promise<boolean>((resolve) => {
+          resolveBeforeSubmit = resolve;
+        }),
+    );
+
+    render(
+      <WelcomeCenterLayout
+        greeting="你好"
+        onSubmit={onSubmit}
+        beforeSubmit={beforeSubmit}
+      />,
+    );
+
+    const input = screen.getByRole("textbox");
+    const sendButton = screen.getByRole("button", { name: "发送" });
+    fireEvent.change(input, { target: { value: "hello" } });
+    fireEvent.click(sendButton);
+    fireEvent.click(sendButton);
+
+    expect(beforeSubmit).toHaveBeenCalledTimes(1);
+    expect(input).toBeDisabled();
+    expect(sendButton).toBeDisabled();
+
+    resolveBeforeSubmit(true);
+
+    await waitFor(() => {
+      expect(onSubmit).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  it("keeps attachments that finish uploading after preflight begins", async () => {
+    const onSubmit = vi.fn();
+    let resolveBeforeSubmit!: (result: boolean) => void;
+    let resolveUpload!: (result: { url: string; file_name: string }) => void;
+    const beforeSubmit = vi.fn(
+      () =>
+        new Promise<boolean>((resolve) => {
+          resolveBeforeSubmit = resolve;
+        }),
+    );
+    mockedUploadFile.mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          resolveUpload = resolve;
+        }),
+    );
+
+    render(
+      <WelcomeCenterLayout
+        greeting="你好"
+        onSubmit={onSubmit}
+        beforeSubmit={beforeSubmit}
+      />,
+    );
+
+    fireEvent.change(screen.getByRole("textbox"), {
+      target: { value: "hello" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "发送" }));
+
+    const file = new File(["hello"], "later.txt", { type: "text/plain" });
+    document.dispatchEvent(
+      new CustomEvent("pasteFile", {
+        detail: { file },
+      }),
+    );
+    await waitFor(() =>
+      expect(screen.getByText("later.txt")).toBeInTheDocument(),
+    );
+
+    resolveBeforeSubmit(true);
+    await waitFor(() => {
+      expect(onSubmit).toHaveBeenCalledWith({ query: "hello", fileList: [] });
+    });
+
+    resolveUpload({ url: "later.txt", file_name: "later.txt" });
+    await waitFor(() =>
+      expect(screen.getByText("later.txt")).toBeInTheDocument(),
+    );
+  });
 });

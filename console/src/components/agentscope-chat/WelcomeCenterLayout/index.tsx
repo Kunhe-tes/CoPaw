@@ -37,11 +37,32 @@ export default function WelcomeCenterLayout(props: WelcomeCenterLayoutProps) {
   const { t } = useTranslation();
   const [inputValue, setInputValue] = useState("");
   const [fileList, setFileList] = useState<UploadFile[]>([]);
+  const [isSubmitting, setIsSubmitting] = useState(false);
   const [drawerVisible, setDrawerVisible] = useState(false);
   const [selectedCase, setSelectedCase] = useState<FeaturedCase | null>(null);
   const [randomPlaceholder, setRandomPlaceholder] = useState("");
   const [loadingCase, setLoadingCase] = useState(false);
   const uploadRef = useRef<GetRef<typeof Upload>>(null);
+  const inputValueRef = useRef(inputValue);
+  const fileListRef = useRef(fileList);
+  const isSubmittingRef = useRef(false);
+  const setCurrentInputValue = useCallback((value: string) => {
+    inputValueRef.current = value;
+    setInputValue(value);
+  }, []);
+  const setCurrentFileList = useCallback(
+    (
+      nextFileList: UploadFile[] | ((previous: UploadFile[]) => UploadFile[]),
+    ) => {
+      const next =
+        typeof nextFileList === "function"
+          ? nextFileList(fileListRef.current)
+          : nextFileList;
+      fileListRef.current = next;
+      setFileList(next);
+    },
+    [],
+  );
   const skillMentionController = useSkillMentions({
     items: skillMentions?.items ?? [],
     selected: skillMentions?.selected ?? [],
@@ -49,7 +70,7 @@ export default function WelcomeCenterLayout(props: WelcomeCenterLayoutProps) {
     onOpen: skillMentions?.onOpen ?? (() => undefined),
     onChange: skillMentions?.onChange ?? (() => undefined),
     value: inputValue,
-    onValueChange: setInputValue,
+    onValueChange: setCurrentInputValue,
   });
 
   // 组件挂载时随机选择placeholder文案
@@ -59,19 +80,36 @@ export default function WelcomeCenterLayout(props: WelcomeCenterLayoutProps) {
   }, []);
 
   const handleSend = useCallback(async () => {
-    const trimmed = inputValue.trim();
+    if (isSubmittingRef.current) return;
+
+    const trimmed = inputValueRef.current.trim();
     if (!trimmed) return;
 
-    if (beforeSubmit && !(await beforeSubmit())) return;
+    isSubmittingRef.current = true;
+    setIsSubmitting(true);
 
-    // Filter files that have been successfully uploaded (have response.url)
-    const uploadedFiles = fileList.filter((f) => f.response?.url);
+    try {
+      if (beforeSubmit && !(await beforeSubmit())) return;
 
-    // Submit with file list
-    onSubmit({ query: trimmed, fileList: uploadedFiles });
-    setInputValue("");
-    setFileList([]); // Clear attachment list
-  }, [beforeSubmit, inputValue, fileList, onSubmit]);
+      const query = inputValueRef.current.trim();
+      if (!query) return;
+
+      // Filter files that have been successfully uploaded (have response.url)
+      const uploadedFiles = fileListRef.current.filter((f) => f.response?.url);
+
+      // Submit with file list
+      onSubmit({ query, fileList: uploadedFiles });
+      setCurrentInputValue("");
+      setCurrentFileList((currentFiles) =>
+        currentFiles.filter(
+          (file) => !uploadedFiles.some(({ uid }) => uid === file.uid),
+        ),
+      );
+    } finally {
+      isSubmittingRef.current = false;
+      setIsSubmitting(false);
+    }
+  }, [beforeSubmit, onSubmit, setCurrentFileList, setCurrentInputValue]);
 
   const handleKeyDown = useCallback(
     (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
@@ -90,9 +128,12 @@ export default function WelcomeCenterLayout(props: WelcomeCenterLayoutProps) {
     [handleSend, skillMentionController, skillMentions],
   );
 
-  const handleFillInput = useCallback((text: string) => {
-    setInputValue(text);
-  }, []);
+  const handleFillInput = useCallback(
+    (text: string) => {
+      setCurrentInputValue(text);
+    },
+    [setCurrentInputValue],
+  );
 
   // Handle "看案例" click - fetch detail from API
   const handleViewCase = useCallback(async (id: number) => {
@@ -133,7 +174,7 @@ export default function WelcomeCenterLayout(props: WelcomeCenterLayoutProps) {
         originFileObj: file as UploadFile["originFileObj"],
       };
 
-      setFileList((prev) => [...prev, uploadFile]);
+      setCurrentFileList((prev) => [...prev, uploadFile]);
 
       // If it's an image, generate thumbnail for preview
       if (file.type.startsWith("image/")) {
@@ -141,7 +182,7 @@ export default function WelcomeCenterLayout(props: WelcomeCenterLayoutProps) {
         reader.onload = (e) => {
           const dataUrl = e.target?.result;
           if (typeof dataUrl === "string") {
-            setFileList((prev) =>
+            setCurrentFileList((prev) =>
               prev.map((f) =>
                 f.uid === uid ? { ...f, thumbUrl: dataUrl } : f,
               ),
@@ -156,7 +197,7 @@ export default function WelcomeCenterLayout(props: WelcomeCenterLayoutProps) {
         .uploadFile(file)
         .then((res) => {
           // Upload succeeded, update with URL
-          setFileList((prev) =>
+          setCurrentFileList((prev) =>
             prev.map((f) =>
               f.uid === uid
                 ? {
@@ -173,12 +214,12 @@ export default function WelcomeCenterLayout(props: WelcomeCenterLayoutProps) {
           console.error("File upload failed:", error);
           message.error(t("chat.attachments.uploadFailed"));
           // Mark as error and remove from list
-          setFileList((prev) => prev.filter((f) => f.uid !== uid));
+          setCurrentFileList((prev) => prev.filter((f) => f.uid !== uid));
         });
 
       return false; // Prevent default upload behavior
     },
-    [t],
+    [setCurrentFileList, t],
   );
 
   useEffect(() => {
@@ -224,7 +265,7 @@ export default function WelcomeCenterLayout(props: WelcomeCenterLayoutProps) {
             <div style={{ marginBottom: -8, marginTop: -8, marginLeft: -20 }}>
               <Attachments
                 items={fileList}
-                onChange={(info) => setFileList(info.fileList)}
+                onChange={(info) => setCurrentFileList(info.fileList)}
               />
             </div>
           )}
@@ -236,13 +277,14 @@ export default function WelcomeCenterLayout(props: WelcomeCenterLayoutProps) {
               if (skillMentions) {
                 skillMentionController.handleInputValueChange(e.target.value);
               } else {
-                setInputValue(e.target.value);
+                setCurrentInputValue(e.target.value);
               }
             }}
             onKeyDown={handleKeyDown}
             placeholder={randomPlaceholder}
             autoSize={{ minRows: 1, maxRows: 5 }}
             bordered={false}
+            disabled={isSubmitting}
           />
           <div className="welcome-input-actions">
             <div className="welcome-input-actions-left">
@@ -265,7 +307,7 @@ export default function WelcomeCenterLayout(props: WelcomeCenterLayoutProps) {
             <button
               className="welcome-input-send-btn"
               onClick={handleSend}
-              disabled={!inputValue.trim()}
+              disabled={isSubmitting || !inputValue.trim()}
               type="button"
             >
               <img src={sendIcon} alt="发送" width={28} height={28} />
@@ -289,7 +331,7 @@ export default function WelcomeCenterLayout(props: WelcomeCenterLayoutProps) {
         caseData={selectedCase}
         loading={loadingCase}
         onMakeSimilar={(value) => {
-          setInputValue(value);
+          setCurrentInputValue(value);
           handleCloseDrawer();
         }}
       />
