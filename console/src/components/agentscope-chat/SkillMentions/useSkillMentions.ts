@@ -22,6 +22,13 @@ export interface UseSkillMentionsOptions extends SkillMentionsData {
 const trailingSkillMentionPattern = /(?:^|\s)@([^\s@]*)$/;
 const trailingMentionTokenPattern = /@([^\s@]*)$/;
 
+function compareSkillNames(left: SkillMentionItem, right: SkillMentionItem) {
+  return left.name.localeCompare(right.name, undefined, {
+    numeric: true,
+    sensitivity: "base",
+  });
+}
+
 export function useSkillMentions({
   items,
   selected,
@@ -33,6 +40,7 @@ export function useSkillMentions({
 }: UseSkillMentionsOptions) {
   const [open, setOpen] = useState(false);
   const [query, setQuery] = useState("");
+  const [activeIndex, setActiveIndex] = useState(0);
   const openRef = useRef(false);
 
   const setMenuOpen = useCallback(
@@ -52,9 +60,16 @@ export function useSkillMentions({
 
   const filteredItems = useMemo(() => {
     const normalizedQuery = query.toLowerCase();
-    return items.filter((item) =>
-      item.name.toLowerCase().includes(normalizedQuery),
-    );
+    return items
+      .filter((item) => {
+        const name = item.name.toLowerCase();
+        const description = item.description.toLowerCase();
+        return (
+          name.includes(normalizedQuery) ||
+          description.includes(normalizedQuery)
+        );
+      })
+      .sort(compareSkillNames);
   }, [items, query]);
   const blocksSubmit = open && (loading || filteredItems.length > 0);
 
@@ -71,6 +86,7 @@ export function useSkillMentions({
       }
 
       setQuery(match[1].toLowerCase());
+      setActiveIndex(0);
       setMenuOpen(true);
     },
     [onValueChange, setMenuOpen],
@@ -83,7 +99,9 @@ export function useSkillMentions({
       }
 
       onChange([...selected, item.name]);
-      onValueChange(value.replace(trailingMentionTokenPattern, " "));
+      onValueChange(
+        value.replace(trailingMentionTokenPattern, `@${item.name} `),
+      );
       setMenuOpen(false);
     },
     [loading, onChange, onValueChange, selected, setMenuOpen, value],
@@ -108,15 +126,30 @@ export function useSkillMentions({
         return;
       }
 
-      if (event.key === "Enter" && filteredItems[0] && !loading) {
+      if (event.key === "ArrowDown" && filteredItems.length) {
         event.preventDefault();
-        select(filteredItems[0]);
+        setActiveIndex((current) =>
+          Math.min(current + 1, filteredItems.length - 1),
+        );
+        return;
+      }
+
+      if (event.key === "ArrowUp" && filteredItems.length) {
+        event.preventDefault();
+        setActiveIndex((current) => Math.max(current - 1, 0));
+        return;
+      }
+
+      if (event.key === "Enter" && filteredItems[activeIndex] && !loading) {
+        event.preventDefault();
+        select(filteredItems[activeIndex]);
       }
     },
-    [filteredItems, loading, open, select, setMenuOpen],
+    [activeIndex, filteredItems, loading, open, select, setMenuOpen],
   );
 
   return {
+    activeIndex,
     blocksSubmit,
     close,
     filteredItems,

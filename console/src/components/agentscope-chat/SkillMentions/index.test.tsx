@@ -46,6 +46,7 @@ function MentionHarness({
       />
       <output aria-label="输入值">{value}</output>
       <SkillMentionMenu
+        activeIndex={mentions.activeIndex}
         open={mentions.open}
         items={mentions.filteredItems}
         loading={mentions.loading}
@@ -58,25 +59,30 @@ function MentionHarness({
 describe("SkillMentions", () => {
   afterEach(cleanup);
 
-  it("opens once for a trailing whitespace-boundary mention and selects the first match with Enter", () => {
+  it("filters by description, sorts candidates, and selects the active row with Enter", () => {
     const onOpen = vi.fn();
     const onChange = vi.fn();
     render(<MentionHarness onOpen={onOpen} onChange={onChange} />);
 
     const input = screen.getByRole("textbox", { name: "消息" });
-    fireEvent.change(input, { target: { value: "请用 @b" } });
-    fireEvent.change(input, { target: { value: "请用 @br" } });
+    fireEvent.change(input, { target: { value: "请用 @app" } });
 
     expect(onOpen).toHaveBeenCalledTimes(1);
-    expect(screen.getByRole("group", { name: "可用技能" })).toBeInTheDocument();
+    expect(screen.getByRole("listbox", { name: "可用技能" })).toBeInTheDocument();
+    expect(screen.getByRole("option", { name: /Build/ })).toHaveAttribute(
+      "aria-selected",
+      "true",
+    );
 
+    fireEvent.keyDown(input, { key: "ArrowUp" });
+    fireEvent.keyDown(input, { key: "ArrowDown" });
     fireEvent.keyDown(input, { key: "Enter" });
 
-    expect(onChange).toHaveBeenCalledWith(["browser"]);
+    expect(onChange).toHaveBeenCalledWith(["Build"]);
     expect(screen.getByRole("status", { name: "输入值" }).textContent).toBe(
-      "请用  ",
+      "请用 @Build ",
     );
-    expect(screen.queryByRole("group", { name: "可用技能" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("listbox", { name: "可用技能" })).not.toBeInTheDocument();
   });
 
   it("selects a clicked case-insensitive match", () => {
@@ -86,10 +92,12 @@ describe("SkillMentions", () => {
     fireEvent.change(screen.getByRole("textbox", { name: "消息" }), {
       target: { value: "@BU" },
     });
-    fireEvent.click(screen.getByRole("button", { name: /Build/ }));
+    fireEvent.click(screen.getByRole("option", { name: /Build/ }));
 
     expect(onChange).toHaveBeenCalledWith(["Build"]);
-    expect(screen.getByRole("status", { name: "输入值" }).textContent).toBe(" ");
+    expect(screen.getByRole("status", { name: "输入值" }).textContent).toBe(
+      "@Build ",
+    );
   });
 
   it("does not open for an embedded at-sign and closes on Escape", () => {
@@ -103,10 +111,10 @@ describe("SkillMentions", () => {
     expect(screen.queryByRole("group", { name: "可用技能" })).not.toBeInTheDocument();
 
     fireEvent.change(input, { target: { value: " @" } });
-    expect(screen.getByRole("group", { name: "可用技能" })).toBeInTheDocument();
+    expect(screen.getByRole("listbox", { name: "可用技能" })).toBeInTheDocument();
 
     fireEvent.keyDown(input, { key: "Escape" });
-    expect(screen.queryByRole("group", { name: "可用技能" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("listbox", { name: "可用技能" })).not.toBeInTheDocument();
   });
 
   it("does not select a skill when Enter is an IME composition commit", () => {
@@ -121,7 +129,7 @@ describe("SkillMentions", () => {
     expect(screen.getByRole("status", { name: "输入值" }).textContent).toBe(
       "@br",
     );
-    expect(screen.getByRole("group", { name: "可用技能" })).toBeInTheDocument();
+    expect(screen.getByRole("listbox", { name: "可用技能" })).toBeInTheDocument();
   });
 
   it("removes selected tags by their index", () => {

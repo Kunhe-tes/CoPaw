@@ -1,4 +1,6 @@
+import { ThunderboltOutlined } from "@ant-design/icons";
 import { Button, Flex, Tag } from "antd";
+import { useEffect, useRef } from "react";
 import type { SkillMentionItem } from "./useSkillMentions";
 
 export interface SkillMentionTagsProps {
@@ -26,6 +28,7 @@ export function SkillMentionTags({
 }
 
 export interface SkillMentionMenuProps {
+  activeIndex: number;
   open: boolean;
   items: SkillMentionItem[];
   loading?: boolean;
@@ -33,11 +36,18 @@ export interface SkillMentionMenuProps {
 }
 
 export function SkillMentionMenu({
+  activeIndex,
   open,
   items,
   loading = false,
   onSelect,
 }: SkillMentionMenuProps) {
+  const activeItemRef = useRef<HTMLButtonElement>(null);
+
+  useEffect(() => {
+    activeItemRef.current?.scrollIntoView({ block: "nearest" });
+  }, [activeIndex]);
+
   if (!open) {
     return null;
   }
@@ -45,28 +55,69 @@ export function SkillMentionMenu({
   return (
     <Flex
       vertical
-      role="group"
+      role="listbox"
       aria-label="可用技能"
-      style={{ maxHeight: 220, overflowY: "auto", marginBottom: 8 }}
+      style={{
+        background: "#FFFFFF",
+        borderRadius: 12,
+        boxShadow: "0 14px 36px rgba(35, 31, 27, 0.12)",
+        gap: 4,
+        maxHeight: 420,
+        overflowY: "auto",
+        padding: 8,
+      }}
     >
       {loading ? (
         <span role="status">加载技能中…</span>
       ) : items.length ? (
-        items.map((item) => (
+        items.map((item, index) => (
           <Button
             key={item.name}
+            ref={index === activeIndex ? activeItemRef : undefined}
             block
             type="text"
-            style={{ height: "auto", padding: "6px 8px", textAlign: "left" }}
+            role="option"
+            aria-selected={index === activeIndex}
+            style={{
+              alignItems: "center",
+              background: index === activeIndex ? "#F3F4F6" : undefined,
+              borderRadius: 8,
+              display: "flex",
+              height: "auto",
+              minHeight: 52,
+              padding: "8px 10px",
+              textAlign: "left",
+            }}
             onMouseDown={(event) => event.preventDefault()}
             onClick={() => onSelect(item)}
           >
-            <strong>{item.name}</strong>
-            {item.description ? (
-              <span style={{ color: "#4B5563", display: "block" }}>
-                {item.description}
-              </span>
-            ) : null}
+            <span
+              aria-hidden="true"
+              style={{
+                alignItems: "center",
+                background: ["#EAF2FF", "#EAF8F1", "#FFF3E4", "#F5EEFF"][
+                  item.name.length % 4
+                ],
+                borderRadius: 8,
+                color: "#3769FC",
+                display: "inline-flex",
+                flex: "0 0 auto",
+                height: 30,
+                justifyContent: "center",
+                marginRight: 10,
+                width: 30,
+              }}
+            >
+              <ThunderboltOutlined />
+            </span>
+            <span style={{ minWidth: 0 }}>
+              <strong>{item.name}</strong>
+              {item.description ? (
+                <span style={{ color: "#4B5563", display: "block" }}>
+                  {item.description}
+                </span>
+              ) : null}
+            </span>
           </Button>
         ))
       ) : (

@@ -715,6 +715,7 @@ const ForwardSender = React.forwardRef<SenderRef, SenderProps>((props, ref) => {
         <div className={`${prefixCls}-content`}>
           {skillMentions ? (
             <SkillMentionMenu
+              activeIndex={skillMentionController.activeIndex}
               open={skillMentionController.open}
               items={skillMentionController.filteredItems}
               loading={skillMentionController.loading}

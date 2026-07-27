@@ -256,8 +256,9 @@ export default function WelcomeCenterLayout(props: WelcomeCenterLayoutProps) {
           ) : null}
 
           {skillMentions ? (
-            <SkillMentionMenu
-              open={skillMentionController.open}
+      <SkillMentionMenu
+        activeIndex={skillMentionController.activeIndex}
+        open={skillMentionController.open}
               items={skillMentionController.filteredItems}
               loading={skillMentionController.loading}
               onSelect={skillMentionController.select}
