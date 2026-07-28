@@ -6,11 +6,16 @@ for the frontend overview page.
 """
 
 import asyncio
+import hashlib
 import json
 import logging
-from datetime import datetime, timedelta
-from typing import List, Optional, Tuple, Any, Dict
-from zoneinfo import ZoneInfo
+import os
+from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone, tzinfo
+from typing import Any, Dict, Iterator, List, Optional, Tuple
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
+
+from croniter import CroniterBadCronError, CroniterBadDateError, croniter
 
 from ...database import DatabaseConnection, get_db_connection
 from ...models.cron import (
@@ -50,12 +55,18 @@ from ...models.cron import (
     CronBranchTaskRankingResponse,
     CronJobModel,
     CronJobQueryParams,
+    CronScheduleDistributionBucket,
+    CronScheduleDistributionDetailsResponse,
+    CronScheduleDistributionDiagnostics,
+    CronScheduleDistributionResponse,
+    CronScheduleOccurrenceItem,
     ExecutionModel,
     ExecutionQueryParams,
     LatestExecutionSubtaskCountResponse,
     PaginatedResponse,
     SubscriptionDetailItem,
     SubscriptionOverviewItem,
+    TaskType,
     UnreadCountResponse,
 )
 from ....utils.bbk import get_bbk_name_by_id
@@ -106,6 +117,81 @@ DISPATCH_EVENT_TIME_FIELDS = ["created_at"]
 DISPATCH_CAPACITY_TIME_FIELDS = ["created_at"]
 DISPATCH_POLICY_TIME_FIELDS = ["created_at", "updated_at"]
 DISPATCH_CAPACITY_EVENT_LIMIT = 100
+SCHEDULE_BUCKET_MINUTES = frozenset({5, 10, 15, 30, 60})
+SCHEDULE_RANGE_LIMIT = timedelta(days=7)
+SCHEDULE_OCCURRENCE_LIMIT = 100_000
+SCHEDULE_DISPATCH_INTENTS_ENABLED_ENV = "SWE_CRON_DISPATCH_INTENTS_ENABLED"
+SCHEDULE_BROADCAST_SOURCE_JOB_ID_META_KEY = "broadcast_source_job_id"
+SCHEDULE_BROADCAST_INTENTS_ENABLED_META_KEY = (
+    "broadcast_dispatch_intents_enabled"
+)
+_TRUE_ENV_VALUES = frozenset({"1", "true", "yes", "on"})
+
+
+class ScheduleDistributionError(ValueError):
+    """Base class for typed planned schedule calculation errors."""
+
+    code = "schedule_distribution_error"
+
+    def __init__(self, message: str) -> None:
+        super().__init__(message)
+        self.message = message
+
+
+class ScheduleDistributionValidationError(ScheduleDistributionError):
+    """The requested range, bucket, filter, or pagination is invalid."""
+
+    code = "schedule_distribution_validation_error"
+
+
+class ScheduleCalculationLimitExceededError(ScheduleDistributionError):
+    """The calculation exceeded its bounded occurrence budget."""
+
+    code = "schedule_calculation_limit_exceeded"
+
+
+class ScheduleDefinitionRevisionConflictError(ScheduleDistributionError):
+    """The job definitions changed between paginated detail requests."""
+
+    code = "schedule_definition_revision_conflict"
+
+    def __init__(self, actual_revision: str) -> None:
+        super().__init__(
+            "Scheduled job definitions changed; restart detail pagination "
+            "from page one.",
+        )
+        self.actual_revision = actual_revision
+
+
+@dataclass(frozen=True)
+class _ScheduleOccurrence:
+    scheduled_at: datetime
+    job_id: str
+    job_name: str
+    task_type: TaskType
+    cron_expr: str
+    timezone: str
+
+
+@dataclass(frozen=True)
+class _PreparedScheduleDefinition:
+    job_id: str
+    job_name: str
+    task_type: TaskType
+    cron_expr: str
+    timezone_name: str
+    job_timezone: tzinfo
+
+
+@dataclass(frozen=True)
+class _ScheduleCalculation:
+    start_time: datetime
+    end_time: datetime
+    calculated_at: datetime
+    definition_revision: str
+    eligible_job_count: int
+    occurrences: list[_ScheduleOccurrence]
+    diagnostics: CronScheduleDistributionDiagnostics
 
 
 def convert_row_times_direct(row: dict, time_fields: List[str]) -> dict:
@@ -186,6 +272,542 @@ class QueryService:
     def __init__(self) -> None:
         """Initialize query service."""
         pass
+
+    @staticmethod
+    def _normalize_schedule_range(
+        start_time: datetime,
+        end_time: datetime,
+    ) -> tuple[datetime, datetime]:
+        """Validate a bounded offset-aware range and normalize it to UTC."""
+        if (
+            start_time.tzinfo is None
+            or start_time.utcoffset() is None
+            or end_time.tzinfo is None
+            or end_time.utcoffset() is None
+        ):
+            raise ScheduleDistributionValidationError(
+                "start_time and end_time must include a UTC offset.",
+            )
+        normalized_start = start_time.astimezone(timezone.utc)
+        normalized_end = end_time.astimezone(timezone.utc)
+        if normalized_end <= normalized_start:
+            raise ScheduleDistributionValidationError(
+                "end_time must be later than start_time.",
+            )
+        if normalized_end - normalized_start > SCHEDULE_RANGE_LIMIT:
+            raise ScheduleDistributionValidationError(
+                "Schedule distribution range cannot exceed seven days.",
+            )
+        return normalized_start, normalized_end
+
+    @staticmethod
+    def _schedule_runtime_dispatch_enabled() -> bool:
+        raw_value = os.environ.get(
+            SCHEDULE_DISPATCH_INTENTS_ENABLED_ENV,
+            "",
+        )
+        return raw_value.strip().lower() in _TRUE_ENV_VALUES
+
+    @staticmethod
+    def _parse_schedule_metadata(
+        raw_value: Any,
+    ) -> tuple[dict[str, Any], bool]:
+        """Return parsed metadata and whether a non-empty value was invalid."""
+        if raw_value is None or raw_value == "":
+            return {}, False
+        if isinstance(raw_value, dict):
+            return raw_value, False
+        if isinstance(raw_value, (bytes, bytearray)):
+            raw_value = raw_value.decode("utf-8", errors="ignore")
+        if not isinstance(raw_value, str):
+            return {}, True
+        try:
+            parsed = json.loads(raw_value)
+        except (TypeError, json.JSONDecodeError):
+            return {}, True
+        if not isinstance(parsed, dict):
+            return {}, True
+        return parsed, False
+
+    @staticmethod
+    def _schedule_definition_revision(
+        rows: list[dict[str, Any]],
+        *,
+        runtime_dispatch_enabled: bool,
+    ) -> str:
+        """Hash only definition fields that can change the returned result."""
+        definitions = [
+            {
+                "id": str(row.get("id") or ""),
+                "name": str(row.get("name") or ""),
+                "task_type": str(row.get("task_type") or ""),
+                "cron_expr": str(row.get("cron_expr") or ""),
+                "timezone": str(row.get("timezone") or "UTC"),
+                "meta": row.get("meta"),
+            }
+            for row in sorted(
+                rows,
+                key=lambda item: str(item.get("id") or ""),
+            )
+        ]
+        encoded = json.dumps(
+            {
+                "runtime_dispatch_enabled": runtime_dispatch_enabled,
+                "definitions": definitions,
+            },
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+            default=str,
+        ).encode("utf-8")
+        return hashlib.sha256(encoded).hexdigest()
+
+    async def _load_schedule_definition_rows(
+        self,
+        source_id: str,
+    ) -> list[dict[str, Any]]:
+        """Load only current active schedule definitions for one source."""
+        db = get_db_connection()
+        return await db.fetch_all(
+            """
+            SELECT
+                id, name, source_id, enabled, task_type, cron_expr,
+                timezone, meta, status, updated_at, deleted_at
+            FROM swe_cron_jobs
+            WHERE source_id = %s
+              AND enabled = 1
+              AND status = 'active'
+              AND deleted_at IS NULL
+            ORDER BY id
+            """,
+            (source_id,),
+        )
+
+    @staticmethod
+    def _increment_schedule_diagnostic(
+        diagnostics: CronScheduleDistributionDiagnostics,
+        field_name: str,
+    ) -> None:
+        current = int(getattr(diagnostics, field_name))
+        setattr(diagnostics, field_name, current + 1)
+
+    def _prepare_schedule_definition(
+        self,
+        row: dict[str, Any],
+        *,
+        diagnostics: CronScheduleDistributionDiagnostics,
+        runtime_dispatch_enabled: bool,
+    ) -> _PreparedScheduleDefinition | None:
+        """Validate one definition and preserve existing diagnostic semantics."""
+        task_type_value = str(row.get("task_type") or "")
+        if task_type_value not in {TaskType.TEXT.value, TaskType.AGENT.value}:
+            self._increment_schedule_diagnostic(
+                diagnostics,
+                "unsupported_task_type_jobs",
+            )
+            return None
+        task_type = TaskType(task_type_value)
+
+        metadata, invalid_metadata = self._parse_schedule_metadata(
+            row.get("meta"),
+        )
+        if invalid_metadata:
+            self._increment_schedule_diagnostic(
+                diagnostics,
+                "invalid_metadata_jobs",
+            )
+        if (
+            runtime_dispatch_enabled
+            and metadata.get(SCHEDULE_BROADCAST_SOURCE_JOB_ID_META_KEY)
+            and bool(
+                metadata.get(
+                    SCHEDULE_BROADCAST_INTENTS_ENABLED_META_KEY,
+                ),
+            )
+        ):
+            self._increment_schedule_diagnostic(
+                diagnostics,
+                "managed_child_jobs",
+            )
+            return None
+
+        cron_expr = str(row.get("cron_expr") or "").strip()
+        if len(cron_expr.split()) != 5 or not croniter.is_valid(cron_expr):
+            self._increment_schedule_diagnostic(
+                diagnostics,
+                "invalid_cron_jobs",
+            )
+            return None
+
+        timezone_name = str(row.get("timezone") or "UTC")
+        try:
+            job_timezone: tzinfo = ZoneInfo(timezone_name)
+        except (ValueError, ZoneInfoNotFoundError):
+            job_timezone = timezone.utc
+            self._increment_schedule_diagnostic(
+                diagnostics,
+                "invalid_timezone_jobs",
+            )
+
+        return _PreparedScheduleDefinition(
+            job_id=str(row.get("id") or ""),
+            job_name=str(row.get("name") or ""),
+            task_type=task_type,
+            cron_expr=cron_expr,
+            timezone_name=timezone_name,
+            job_timezone=job_timezone,
+        )
+
+    @staticmethod
+    def _iter_schedule_times(
+        definition: _PreparedScheduleDefinition,
+        *,
+        start_time: datetime,
+        end_time: datetime,
+    ) -> Iterator[datetime]:
+        """Yield UTC firing instants with Scheduler-compatible boundaries."""
+        local_start = start_time.astimezone(definition.job_timezone)
+        iterator = croniter(
+            definition.cron_expr,
+            local_start - timedelta(microseconds=1),
+        )
+        while True:
+            upcoming = iterator.get_next(datetime)
+            if upcoming.tzinfo is None:
+                upcoming = upcoming.replace(
+                    tzinfo=definition.job_timezone,
+                )
+            scheduled_at = upcoming.astimezone(timezone.utc)
+            if scheduled_at >= end_time:
+                break
+            if scheduled_at >= start_time:
+                yield scheduled_at
+
+    def _generate_schedule_occurrences(
+        self,
+        rows: list[dict[str, Any]],
+        *,
+        start_time: datetime,
+        end_time: datetime,
+        runtime_dispatch_enabled: bool,
+    ) -> tuple[
+        list[_ScheduleOccurrence],
+        CronScheduleDistributionDiagnostics,
+    ]:
+        """Expand eligible definitions using Scheduler-compatible semantics."""
+        diagnostics = CronScheduleDistributionDiagnostics()
+        occurrences: list[_ScheduleOccurrence] = []
+        for row in rows:
+            definition = self._prepare_schedule_definition(
+                row,
+                diagnostics=diagnostics,
+                runtime_dispatch_enabled=runtime_dispatch_enabled,
+            )
+            if definition is None:
+                continue
+            job_occurrences: list[_ScheduleOccurrence] = []
+            try:
+                for scheduled_at in self._iter_schedule_times(
+                    definition,
+                    start_time=start_time,
+                    end_time=end_time,
+                ):
+                    if (
+                        len(occurrences) + len(job_occurrences)
+                        >= SCHEDULE_OCCURRENCE_LIMIT
+                    ):
+                        raise ScheduleCalculationLimitExceededError(
+                            "Schedule calculation exceeded 100,000 "
+                            "planned occurrences.",
+                        )
+                    job_occurrences.append(
+                        _ScheduleOccurrence(
+                            scheduled_at=scheduled_at,
+                            job_id=definition.job_id,
+                            job_name=definition.job_name,
+                            task_type=definition.task_type,
+                            cron_expr=definition.cron_expr,
+                            timezone=definition.timezone_name,
+                        ),
+                    )
+            except ScheduleCalculationLimitExceededError:
+                raise
+            except (CroniterBadCronError, CroniterBadDateError, ValueError):
+                self._increment_schedule_diagnostic(
+                    diagnostics,
+                    "invalid_cron_jobs",
+                )
+                continue
+            occurrences.extend(job_occurrences)
+
+        occurrences.sort(key=lambda item: (item.scheduled_at, item.job_id))
+        return occurrences, diagnostics
+
+    def _populate_schedule_distribution_buckets(
+        self,
+        rows: list[dict[str, Any]],
+        *,
+        start_time: datetime,
+        end_time: datetime,
+        bucket_width: timedelta,
+        buckets: list[CronScheduleDistributionBucket],
+        runtime_dispatch_enabled: bool,
+    ) -> CronScheduleDistributionDiagnostics:
+        """Count firing instants directly into buckets without materializing rows."""
+        diagnostics = CronScheduleDistributionDiagnostics()
+        accepted_occurrence_count = 0
+        bucket_width_seconds = bucket_width.total_seconds()
+
+        for row in rows:
+            definition = self._prepare_schedule_definition(
+                row,
+                diagnostics=diagnostics,
+                runtime_dispatch_enabled=runtime_dispatch_enabled,
+            )
+            if definition is None:
+                continue
+
+            job_bucket_counts: dict[int, int] = {}
+            job_occurrence_count = 0
+            try:
+                for scheduled_at in self._iter_schedule_times(
+                    definition,
+                    start_time=start_time,
+                    end_time=end_time,
+                ):
+                    if (
+                        accepted_occurrence_count + job_occurrence_count
+                        >= SCHEDULE_OCCURRENCE_LIMIT
+                    ):
+                        raise ScheduleCalculationLimitExceededError(
+                            "Schedule calculation exceeded 100,000 "
+                            "planned occurrences.",
+                        )
+                    bucket_index = int(
+                        (scheduled_at - start_time).total_seconds()
+                        // bucket_width_seconds,
+                    )
+                    job_bucket_counts[bucket_index] = (
+                        job_bucket_counts.get(bucket_index, 0) + 1
+                    )
+                    job_occurrence_count += 1
+            except ScheduleCalculationLimitExceededError:
+                raise
+            except (CroniterBadCronError, CroniterBadDateError, ValueError):
+                self._increment_schedule_diagnostic(
+                    diagnostics,
+                    "invalid_cron_jobs",
+                )
+                continue
+
+            for bucket_index, count in job_bucket_counts.items():
+                bucket = buckets[bucket_index]
+                if definition.task_type is TaskType.TEXT:
+                    bucket.text_count += count
+                else:
+                    bucket.agent_count += count
+                bucket.total_count += count
+            accepted_occurrence_count += job_occurrence_count
+
+        return diagnostics
+
+    async def _calculate_schedule_occurrences(
+        self,
+        *,
+        source_id: str,
+        start_time: datetime,
+        end_time: datetime,
+    ) -> _ScheduleCalculation:
+        normalized_start, normalized_end = self._normalize_schedule_range(
+            start_time,
+            end_time,
+        )
+        rows = await self._load_schedule_definition_rows(source_id)
+        runtime_dispatch_enabled = self._schedule_runtime_dispatch_enabled()
+        definition_revision = self._schedule_definition_revision(
+            rows,
+            runtime_dispatch_enabled=runtime_dispatch_enabled,
+        )
+        occurrences, diagnostics = self._generate_schedule_occurrences(
+            rows,
+            start_time=normalized_start,
+            end_time=normalized_end,
+            runtime_dispatch_enabled=runtime_dispatch_enabled,
+        )
+        eligible_job_count = max(
+            len(rows)
+            - diagnostics.invalid_cron_jobs
+            - diagnostics.unsupported_task_type_jobs
+            - diagnostics.managed_child_jobs,
+            0,
+        )
+        return _ScheduleCalculation(
+            start_time=normalized_start,
+            end_time=normalized_end,
+            calculated_at=datetime.now(timezone.utc),
+            definition_revision=definition_revision,
+            eligible_job_count=eligible_job_count,
+            occurrences=occurrences,
+            diagnostics=diagnostics,
+        )
+
+    async def get_schedule_distribution(
+        self,
+        *,
+        source_id: str,
+        start_time: datetime,
+        end_time: datetime,
+        bucket_minutes: int,
+    ) -> CronScheduleDistributionResponse:
+        """Return Text/Agent planned firing counts in start-aligned buckets."""
+        if bucket_minutes not in SCHEDULE_BUCKET_MINUTES:
+            raise ScheduleDistributionValidationError(
+                "bucket_minutes must be one of 5, 10, 15, 30, or 60.",
+            )
+        normalized_start, normalized_end = self._normalize_schedule_range(
+            start_time,
+            end_time,
+        )
+        rows = await self._load_schedule_definition_rows(source_id)
+        runtime_dispatch_enabled = self._schedule_runtime_dispatch_enabled()
+        definition_revision = self._schedule_definition_revision(
+            rows,
+            runtime_dispatch_enabled=runtime_dispatch_enabled,
+        )
+        bucket_width = timedelta(minutes=bucket_minutes)
+        bucket_count = (
+            int(
+                (normalized_end - normalized_start).total_seconds()
+                // bucket_width.total_seconds(),
+            )
+            + (
+                1
+                if (
+                    normalized_end - normalized_start
+                ).total_seconds()
+                % bucket_width.total_seconds()
+                else 0
+            )
+        )
+        buckets = [
+            CronScheduleDistributionBucket(
+                start_time=normalized_start + index * bucket_width,
+                end_time=min(
+                    normalized_start + (index + 1) * bucket_width,
+                    normalized_end,
+                ),
+            )
+            for index in range(bucket_count)
+        ]
+        diagnostics = self._populate_schedule_distribution_buckets(
+            rows,
+            start_time=normalized_start,
+            end_time=normalized_end,
+            bucket_width=bucket_width,
+            buckets=buckets,
+            runtime_dispatch_enabled=runtime_dispatch_enabled,
+        )
+        eligible_job_count = max(
+            len(rows)
+            - diagnostics.invalid_cron_jobs
+            - diagnostics.unsupported_task_type_jobs
+            - diagnostics.managed_child_jobs,
+            0,
+        )
+
+        text_count = sum(bucket.text_count for bucket in buckets)
+        agent_count = sum(bucket.agent_count for bucket in buckets)
+        return CronScheduleDistributionResponse(
+            start_time=normalized_start,
+            end_time=normalized_end,
+            bucket_minutes=bucket_minutes,
+            calculated_at=datetime.now(timezone.utc),
+            definition_revision=definition_revision,
+            eligible_job_count=eligible_job_count,
+            text_count=text_count,
+            agent_count=agent_count,
+            total_count=text_count + agent_count,
+            buckets=buckets,
+            diagnostics=diagnostics,
+        )
+
+    async def get_schedule_distribution_details(
+        self,
+        *,
+        source_id: str,
+        start_time: datetime,
+        end_time: datetime,
+        task_type: TaskType | str | None = None,
+        page: int = 1,
+        page_size: int = 20,
+        expected_revision: str | None = None,
+    ) -> CronScheduleDistributionDetailsResponse:
+        """Return stable, paginated, whitelisted planned firing rows."""
+        if page < 1:
+            raise ScheduleDistributionValidationError(
+                "page must be greater than or equal to one.",
+            )
+        if page_size < 1 or page_size > 100:
+            raise ScheduleDistributionValidationError(
+                "page_size must be between one and 100.",
+            )
+        if page > 1 and not expected_revision:
+            raise ScheduleDistributionValidationError(
+                "expected_revision is required after the first page.",
+            )
+        normalized_task_type: TaskType | None = None
+        if task_type is not None:
+            try:
+                normalized_task_type = TaskType(task_type)
+            except ValueError as exc:
+                raise ScheduleDistributionValidationError(
+                    "task_type must be text or agent.",
+                ) from exc
+
+        calculation = await self._calculate_schedule_occurrences(
+            source_id=source_id,
+            start_time=start_time,
+            end_time=end_time,
+        )
+        if (
+            expected_revision
+            and expected_revision != calculation.definition_revision
+        ):
+            raise ScheduleDefinitionRevisionConflictError(
+                calculation.definition_revision,
+            )
+        occurrences = calculation.occurrences
+        if normalized_task_type is not None:
+            occurrences = [
+                item
+                for item in occurrences
+                if item.task_type is normalized_task_type
+            ]
+        total = len(occurrences)
+        offset = (page - 1) * page_size
+        page_occurrences = occurrences[offset : offset + page_size]
+        return CronScheduleDistributionDetailsResponse(
+            start_time=calculation.start_time,
+            end_time=calculation.end_time,
+            task_type=normalized_task_type,
+            calculated_at=calculation.calculated_at,
+            definition_revision=calculation.definition_revision,
+            items=[
+                CronScheduleOccurrenceItem(
+                    scheduled_at=item.scheduled_at,
+                    job_id=item.job_id,
+                    job_name=item.job_name,
+                    task_type=item.task_type,
+                    cron_expr=item.cron_expr,
+                    timezone=item.timezone,
+                )
+                for item in page_occurrences
+            ],
+            total=total,
+            page=page,
+            page_size=page_size,
+            diagnostics=calculation.diagnostics,
+        )
 
     def _build_job_where_clause(
         self,

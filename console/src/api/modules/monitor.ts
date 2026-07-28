@@ -141,6 +141,76 @@ export interface CronOverviewResponse {
   branch_read: CronOverviewBranchReadItem[];
 }
 
+export type CronScheduleBucketMinutes = 5 | 10 | 15 | 30 | 60;
+export type CronScheduleTaskType = "text" | "agent";
+
+export interface CronScheduleDistributionDiagnostics {
+  invalid_cron_jobs: number;
+  invalid_timezone_jobs: number;
+  unsupported_task_type_jobs: number;
+  invalid_metadata_jobs: number;
+  managed_child_jobs: number;
+}
+
+export interface CronScheduleDistributionBucket {
+  start_time: string;
+  end_time: string;
+  text_count: number;
+  agent_count: number;
+  total_count: number;
+}
+
+export interface CronScheduleDistributionResponse {
+  start_time: string;
+  end_time: string;
+  bucket_minutes: CronScheduleBucketMinutes;
+  calculated_at: string;
+  definition_revision: string;
+  eligible_job_count: number;
+  text_count: number;
+  agent_count: number;
+  total_count: number;
+  buckets: CronScheduleDistributionBucket[];
+  diagnostics: CronScheduleDistributionDiagnostics;
+}
+
+export interface CronScheduleOccurrenceItem {
+  scheduled_at: string;
+  job_id: string;
+  job_name: string;
+  task_type: CronScheduleTaskType;
+  cron_expr: string;
+  timezone: string;
+}
+
+export interface CronScheduleDistributionDetailsResponse {
+  start_time: string;
+  end_time: string;
+  task_type: CronScheduleTaskType | null;
+  calculated_at: string;
+  definition_revision: string;
+  items: CronScheduleOccurrenceItem[];
+  total: number;
+  page: number;
+  page_size: number;
+  diagnostics: CronScheduleDistributionDiagnostics;
+}
+
+export interface CronScheduleDistributionParams {
+  start_time: string;
+  end_time: string;
+  bucket_minutes: CronScheduleBucketMinutes;
+}
+
+export interface CronScheduleDistributionDetailsParams {
+  start_time: string;
+  end_time: string;
+  task_type?: CronScheduleTaskType;
+  page?: number;
+  page_size?: number;
+  definition_revision?: string;
+}
+
 export interface CronDispatchBatchStats {
   total_batches: number;
   running_batches: number;
@@ -774,6 +844,35 @@ export const monitorApi = {
     }
     const query = params.toString();
     return request(`/monitor/cron/overview${query ? `?${query}` : ""}`);
+  },
+
+  getScheduleDistribution: async (
+    params: CronScheduleDistributionParams,
+  ): Promise<CronScheduleDistributionResponse> => {
+    const query = new URLSearchParams();
+    query.set("start_time", params.start_time);
+    query.set("end_time", params.end_time);
+    query.set("bucket_minutes", String(params.bucket_minutes));
+    return request(`/monitor/cron/schedule-distribution?${query.toString()}`);
+  },
+
+  getScheduleDistributionDetails: async (
+    params: CronScheduleDistributionDetailsParams,
+  ): Promise<CronScheduleDistributionDetailsResponse> => {
+    const query = new URLSearchParams();
+    query.set("start_time", params.start_time);
+    query.set("end_time", params.end_time);
+    query.set("page", String(params.page ?? 1));
+    query.set("page_size", String(params.page_size ?? 20));
+    if (params.task_type) {
+      query.set("task_type", params.task_type);
+    }
+    if (params.definition_revision) {
+      query.set("expected_revision", params.definition_revision);
+    }
+    return request(
+      `/monitor/cron/schedule-distribution/details?${query.toString()}`,
+    );
   },
 
   getCronDispatchBatches: async (
