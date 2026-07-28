@@ -58,8 +58,8 @@ vi.mock("@/api/modules/featuredCases", () => ({
 
 const mockedUploadFile = vi.mocked(chatApi.uploadFile);
 const skills = [
-  { name: "browser", description: "Use a browser" },
-  { name: "Build", description: "Build an app" },
+  { id: "skill:browser", type: "skill" as const, label: "browser", name: "browser", description: "Use a browser" },
+  { id: "skill:Build", type: "skill" as const, label: "Build", name: "Build", description: "Build an app" },
 ];
 
 function setTokenEditorValue(input: HTMLElement, value: string) {
@@ -115,11 +115,11 @@ describe("WelcomeCenterLayout", () => {
     setTokenEditorValue(input, "请用 @br");
 
     expect(
-      screen.getByRole("listbox", { name: "可用技能" }),
+      screen.getByRole("listbox", { name: "可用上下文引用" }),
     ).toBeInTheDocument();
     fireEvent.click(screen.getByRole("option", { name: /browser/ }));
 
-    expect(onChange).toHaveBeenCalledWith(["browser"]);
+    expect(onChange).toHaveBeenCalledWith([skills[0]]);
     expect(input.textContent).toBe("请用 @browser ");
   });
 
@@ -144,7 +144,7 @@ describe("WelcomeCenterLayout", () => {
     setTokenEditorValue(input, "@BU");
     fireEvent.keyDown(input, { key: "Enter" });
 
-    expect(onChange).toHaveBeenCalledWith(["Build"]);
+    expect(onChange).toHaveBeenCalledWith([skills[1]]);
     expect(onSubmit).not.toHaveBeenCalled();
     expect(input.textContent).toBe("@Build ");
   });

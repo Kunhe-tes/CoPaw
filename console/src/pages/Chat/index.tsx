@@ -31,7 +31,8 @@ import defaultConfig, { getDefaultConfig } from "./OptionsPanel/defaultConfig";
 import { chatApi } from "../../api/modules/chat";
 import { cronJobApi } from "../../api/modules/cronjob";
 import { feedbackApi } from "../../api/modules/feedback";
-import { skillApi } from "../../api/modules/skill";
+import { contextReferencesApi } from "../../api/modules/contextReferences";
+import type { SkillMentionItem } from "../../components/agentscope-chat/SkillMentions/useSkillMentions";
 import { getApiUrl } from "../../api/config";
 import { buildAuthHeaders } from "../../api/authHeaders";
 import type {
@@ -526,13 +527,12 @@ export default function ChatPage() {
   const [feedbackRefreshKey, setFeedbackRefreshKey] = useState(0);
   const [autoPreviewTriggerKey, setAutoPreviewTriggerKey] = useState(0);
   const [isDragging, setIsDragging] = useState(false);
-  const [selectedSkillNames, setSelectedSkillNames] = useState<string[]>([]);
-  const [effectiveSkills, setEffectiveSkills] = useState<
-    { name: string; description: string }[]
-  >([]);
-  const [effectiveSkillsLoading, setEffectiveSkillsLoading] = useState(false);
-  const [effectiveSkillsError, setEffectiveSkillsError] = useState(false);
-  const pendingSelectedSkillNamesRef = useRef<string[]>([]);
+  const [selectedContextReferences, setSelectedContextReferences] = useState<SkillMentionItem[]>([]);
+  const [contextReferences, setContextReferences] = useState<SkillMentionItem[]>([]);
+  const [contextReferencesLoading, setContextReferencesLoading] = useState(false);
+  const [contextReferencesError, setContextReferencesError] = useState(false);
+  const pendingContextReferencesRef = useRef<SkillMentionItem[]>([]);
+  const contextReferencesRequestIdRef = useRef(0);
   const dragCounterRef = useRef(0);
   const runtimeLoadingBridgeRef = useRef<RuntimeLoadingBridgeApi | null>(null);
   const { message } = useAppMessage();
@@ -548,8 +548,8 @@ export default function ChatPage() {
   } = useChatAnywhereSessionsState();
 
   useEffect(() => {
-    setSelectedSkillNames([]);
-    pendingSelectedSkillNamesRef.current = [];
+    setSelectedContextReferences([]);
+    pendingContextReferencesRef.current = [];
   }, [activeSessionId, chatId]);
   const sourceSystemConfig = useSourceSystemConfigStore(
     (state) => state.config,
@@ -559,19 +559,24 @@ export default function ChatPage() {
   );
   const taskProgressEnabled = isChatTaskProgressEnabled(sourceSystemConfig);
 
-  const loadEffectiveSkills = useCallback(() => {
-    setEffectiveSkillsLoading(true);
-    setEffectiveSkillsError(false);
-    void skillApi
-      .listEffectiveSkills()
-      .then((skills) => {
-        setEffectiveSkills(skills);
+  const loadContextReferences = useCallback((query: string) => {
+    const requestId = ++contextReferencesRequestIdRef.current;
+    setContextReferencesLoading(true);
+    setContextReferencesError(false);
+    void contextReferencesApi
+      .discover(query)
+      .then((response) => {
+        if (requestId !== contextReferencesRequestIdRef.current) return;
+        setContextReferences([...response.skills, ...response.mcp_tools, ...response.files]);
       })
       .catch(() => {
-        setEffectiveSkills([]);
-        setEffectiveSkillsError(true);
+        if (requestId !== contextReferencesRequestIdRef.current) return;
+        setContextReferences([]);
+        setContextReferencesError(true);
       })
-      .finally(() => setEffectiveSkillsLoading(false));
+      .finally(() => {
+        if (requestId === contextReferencesRequestIdRef.current) setContextReferencesLoading(false);
+      });
   }, []);
 
   // useTransition for non-urgent state updates (badge clearing)
@@ -1404,14 +1409,13 @@ export default function ChatPage() {
         // ==================== userId 统一整改结束 ====================
         stream: true,
         ...biz_params,
-        selected_skill_names:
-          userText.startsWith("/") &&
-          pendingSelectedSkillNamesRef.current.length === 0
+        context_references:
+          userText.startsWith("/") && pendingContextReferencesRef.current.length === 0
             ? []
-            : pendingSelectedSkillNamesRef.current,
+            : pendingContextReferencesRef.current,
         file_url_network: resolveCurrentFileUrlNetwork(),
       };
-      pendingSelectedSkillNamesRef.current = [];
+      pendingContextReferencesRef.current = [];
 
       const backendChatId = resolveRequestChatId(
         {
@@ -1589,14 +1593,14 @@ export default function ChatPage() {
 
     const { beforeSubmit: handleBeforeSubmit, skillMentions } =
       createWelcomeSkillMentions({
-        effectiveSkills,
-        effectiveSkillsError,
-        effectiveSkillsLoading,
+        contextReferences,
+        contextReferencesError,
+        contextReferencesLoading,
         isComposingRef,
-        loadEffectiveSkills,
-        pendingSelectedSkillNamesRef,
-        selectedSkillNames,
-        setSelectedSkillNames,
+        loadContextReferences,
+        pendingContextReferencesRef,
+        selectedContextReferences,
+        setSelectedContextReferences,
       });
 
     return {
@@ -1774,11 +1778,11 @@ export default function ChatPage() {
     multimodalCaps,
     resolveLogicalRequestSessionId,
     resolveRequestChatId,
-    selectedSkillNames,
-    effectiveSkills,
-    effectiveSkillsError,
-    effectiveSkillsLoading,
-    loadEffectiveSkills,
+    selectedContextReferences,
+    contextReferences,
+    contextReferencesError,
+    contextReferencesLoading,
+    loadContextReferences,
     taskProgress,
     t,
   ]);

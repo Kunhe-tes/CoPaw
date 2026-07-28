@@ -1,191 +1,47 @@
 import React, { useState } from "react";
 import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { SkillMentionMenu, SkillMentionTags } from "./index";
+import { SkillMentionMenu } from "./index";
 import { useSkillMentions, type SkillMentionItem } from "./useSkillMentions";
 
 const items: SkillMentionItem[] = [
-  { name: "browser", description: "Use a browser" },
-  { name: "Build", description: "Build an app" },
+  { id: "skill:browser", type: "skill", label: "browser", name: "browser", description: "Use a browser" },
+  { id: 'mcp_tool:["docs","search"]', type: "mcp_tool", label: "docs / search", server: "docs", name: "search", description: "Search docs" },
+  { id: "workspace_file:media/report.pdf", type: "workspace_file", label: "report.pdf", root: "media", relative_path: "report.pdf", description: "media/report.pdf" },
 ];
 
-function MentionHarness({
-  initialSelected = [],
-  onOpen = vi.fn(),
-  onChange = vi.fn(),
-}: {
-  initialSelected?: string[];
-  onOpen?: () => void;
-  onChange?: (names: string[]) => void;
-}) {
+function MentionHarness({ onOpen = vi.fn(), onChange = vi.fn() }: { onOpen?: (query: string) => void; onChange?: (entries: SkillMentionItem[]) => void }) {
   const [value, setValue] = useState("");
-  const [selected, setSelected] = useState(initialSelected);
-  const mentions = useSkillMentions({
-    items,
-    selected,
-    onOpen,
-    onChange: (names) => {
-      setSelected(names);
-      onChange(names);
-    },
-    value,
-    onValueChange: setValue,
-  });
-
-  return (
-    <>
-      <SkillMentionTags selected={selected} onRemove={mentions.remove} />
-      <textarea
-        aria-label="消息"
-        value={value}
-        onChange={(event) =>
-          mentions.handleInputValueChange(
-            event.target.value,
-            event.target.selectionStart ?? event.target.value.length,
-          )
-        }
-        onKeyDown={mentions.handleKeyDown}
-      />
-      <output aria-label="输入值">{value}</output>
-      <SkillMentionMenu
-        activeIndex={mentions.activeIndex}
-        open={mentions.open}
-        items={mentions.filteredItems}
-        loading={mentions.loading}
-        onSelect={mentions.select}
-      />
-    </>
-  );
+  const [selected, setSelected] = useState<SkillMentionItem[]>([]);
+  const mentions = useSkillMentions({ items, selected, onOpen, onChange: (entries) => { setSelected(entries); onChange(entries); }, value, onValueChange: setValue });
+  return <><textarea aria-label="消息" value={value} onChange={(event) => mentions.handleInputValueChange(event.target.value, event.target.selectionStart ?? event.target.value.length)} onKeyDown={mentions.handleKeyDown} /><output aria-label="输入值">{value}</output><SkillMentionMenu activeIndex={mentions.activeIndex} open={mentions.open} items={mentions.filteredItems} query={mentions.query} loading={mentions.loading} onSelect={mentions.select} /></>;
 }
 
 describe("SkillMentions", () => {
   afterEach(cleanup);
 
-  it("filters by description, sorts candidates, and selects the active row with Enter", () => {
-    const onOpen = vi.fn();
-    const onChange = vi.fn();
-    render(<MentionHarness onOpen={onOpen} onChange={onChange} />);
-
-    const input = screen.getByRole("textbox", { name: "消息" });
-    fireEvent.change(input, { target: { value: "请用 @app" } });
-
-    expect(onOpen).toHaveBeenCalledTimes(1);
-    expect(
-      screen.getByRole("listbox", { name: "可用技能" }),
-    ).toBeInTheDocument();
-    expect(screen.getByRole("option", { name: /Build/ })).toHaveAttribute(
-      "aria-selected",
-      "true",
-    );
-
-    fireEvent.keyDown(input, { key: "ArrowUp" });
-    fireEvent.keyDown(input, { key: "ArrowDown" });
-    fireEvent.keyDown(input, { key: "Enter" });
-
-    expect(onChange).toHaveBeenCalledWith(["Build"]);
-    expect(screen.getByRole("status", { name: "输入值" }).textContent).toBe(
-      "请用 @Build ",
-    );
-    expect(
-      screen.queryByRole("listbox", { name: "可用技能" }),
-    ).not.toBeInTheDocument();
+  it("groups context references in a fixed order and shows the blank-query hint", () => {
+    render(<SkillMentionMenu activeIndex={0} open items={items} onSelect={vi.fn()} />);
+    expect(screen.getByText("技能")).toBeInTheDocument();
+    expect(screen.getByText("MCP 工具")).toBeInTheDocument();
+    expect(screen.getByText("文件")).toBeInTheDocument();
+    expect(screen.getByText("输入以搜索工具和文件")).toBeInTheDocument();
+    expect(screen.getByRole("listbox")).toHaveStyle({ overflowX: "hidden" });
   });
 
-  it("selects a clicked case-insensitive match", () => {
+  it("selects a typed item once and preserves atomic display text", () => {
     const onChange = vi.fn();
     render(<MentionHarness onChange={onChange} />);
-
-    fireEvent.change(screen.getByRole("textbox", { name: "消息" }), {
-      target: { value: "@BU" },
-    });
-    fireEvent.click(screen.getByRole("option", { name: /Build/ }));
-
-    expect(onChange).toHaveBeenCalledWith(["Build"]);
-    expect(screen.getByRole("status", { name: "输入值" }).textContent).toBe(
-      "@Build ",
-    );
-  });
-
-  it("keeps skill descriptions inline to avoid excessive empty panel width", () => {
-    render(
-      <SkillMentionMenu
-        activeIndex={0}
-        open
-        items={[items[0]]}
-        onSelect={vi.fn()}
-      />,
-    );
-
-    expect(screen.getByText("Use a browser")).not.toHaveStyle({
-      display: "block",
-    });
-  });
-
-  it("selects the mention at the caret instead of requiring it at the text end", () => {
-    render(<MentionHarness />);
-
     const input = screen.getByRole("textbox", { name: "消息" });
-    fireEvent.change(input, {
-      target: { selectionStart: 5, value: "请 @br 帮我检查" },
-    });
-    fireEvent.click(screen.getByRole("option", { name: /browser/ }));
-
-    expect(screen.getByRole("status", { name: "输入值" }).textContent).toBe(
-      "请 @browser 帮我检查",
-    );
+    fireEvent.change(input, { target: { value: "请用 @" } });
+    fireEvent.click(screen.getByRole("option", { name: /docs \/ search/ }));
+    expect(onChange).toHaveBeenCalledWith([items[1]]);
+    expect(screen.getByRole("status", { name: "输入值" }).textContent).toBe("请用 @docs/search ");
   });
 
-  it("does not open for an embedded at-sign and closes on Escape", () => {
-    const onOpen = vi.fn();
-    render(<MentionHarness onOpen={onOpen} />);
-
-    const input = screen.getByRole("textbox", { name: "消息" });
-    fireEvent.change(input, { target: { value: "email@browser" } });
-
-    expect(onOpen).not.toHaveBeenCalled();
-    expect(
-      screen.queryByRole("group", { name: "可用技能" }),
-    ).not.toBeInTheDocument();
-
-    fireEvent.change(input, { target: { value: " @" } });
-    expect(
-      screen.getByRole("listbox", { name: "可用技能" }),
-    ).toBeInTheDocument();
-
-    fireEvent.keyDown(input, { key: "Escape" });
-    expect(
-      screen.queryByRole("listbox", { name: "可用技能" }),
-    ).not.toBeInTheDocument();
-  });
-
-  it("does not select a skill when Enter is an IME composition commit", () => {
-    const onChange = vi.fn();
-    render(<MentionHarness onChange={onChange} />);
-
-    const input = screen.getByRole("textbox", { name: "消息" });
-    fireEvent.change(input, { target: { value: "@br" } });
-    fireEvent.keyDown(input, { key: "Enter", isComposing: true });
-
-    expect(onChange).not.toHaveBeenCalled();
-    expect(screen.getByRole("status", { name: "输入值" }).textContent).toBe(
-      "@br",
-    );
-    expect(
-      screen.getByRole("listbox", { name: "可用技能" }),
-    ).toBeInTheDocument();
-  });
-
-  it("removes selected tags by their index", () => {
-    const onChange = vi.fn();
-    render(
-      <MentionHarness
-        initialSelected={["browser", "browser"]}
-        onChange={onChange}
-      />,
-    );
-
-    fireEvent.click(screen.getAllByLabelText("Close")[1]);
-
-    expect(onChange).toHaveBeenCalledWith(["browser"]);
+  it("keeps empty groups out of the menu and renders one unified empty state", () => {
+    render(<SkillMentionMenu activeIndex={0} open items={[]} query="none" onSelect={vi.fn()} />);
+    expect(screen.getByText("未找到匹配的上下文引用")).toBeInTheDocument();
+    expect(screen.queryByText("技能")).toBeNull();
   });
 });

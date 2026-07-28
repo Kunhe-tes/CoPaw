@@ -7,10 +7,16 @@ import React, {
   useState,
 } from "react";
 import { SkillMentionMenu } from "./index";
-import { type SkillMentionsData, useSkillMentions } from "./useSkillMentions";
+import {
+  contextReferenceText,
+  type SkillMentionItem,
+  type SkillMentionsData,
+  useSkillMentions,
+} from "./useSkillMentions";
 
 interface TokenPart {
   kind: "text" | "token";
+  referenceType?: SkillMentionItem["type"];
   value: string;
   selectionIndex?: number;
 }
@@ -28,31 +34,30 @@ export interface SkillTokenEditorProps
   onValueChange: (value: string) => void;
 }
 
-function getTokenParts(value: string, selected: string[]): TokenPart[] {
+function getTokenParts(value: string, selected: SkillMentionItem[]): TokenPart[] {
   const parts: TokenPart[] = [];
-  const tokenPattern = /@([^\s@]+)/g;
   let cursor = 0;
   let selectedIndex = 0;
-  let match = tokenPattern.exec(value);
-
-  while (match) {
-    if (match.index > cursor) {
-      parts.push({ kind: "text", value: value.slice(cursor, match.index) });
+  while (selected[selectedIndex]) {
+    const tokenText = contextReferenceText(selected[selectedIndex]);
+    const tokenIndex = value.indexOf(tokenText, cursor);
+    const tokenEnd = tokenIndex + tokenText.length;
+    if (tokenIndex < 0 || (value[tokenEnd] && !/\s/.test(value[tokenEnd]))) {
+      break;
     }
-
-    const name = match[1];
-    if (selected[selectedIndex] === name) {
+    if (tokenIndex > cursor) {
+      parts.push({ kind: "text", value: value.slice(cursor, tokenIndex) });
+    }
+    if (selected[selectedIndex]) {
       parts.push({
         kind: "token",
         selectionIndex: selectedIndex,
-        value: `@${name}`,
+        referenceType: selected[selectedIndex].type,
+        value: tokenText,
       });
       selectedIndex += 1;
-    } else {
-      parts.push({ kind: "text", value: match[0] });
     }
-    cursor = match.index + match[0].length;
-    match = tokenPattern.exec(value);
+    cursor = tokenEnd;
   }
 
   if (cursor < value.length || !parts.length) {
@@ -134,31 +139,45 @@ function replaceEditorContents(editor: HTMLDivElement, parts: TokenPart[]) {
     }
 
     const token = document.createElement("span");
-    token.setAttribute("aria-label", `已选技能 ${part.value}`);
+    token.setAttribute("aria-label", `已选上下文引用 ${part.value}`);
     token.setAttribute("contenteditable", "false");
     token.dataset.selectionIndex = String(part.selectionIndex);
     token.dataset.skillToken = "true";
+    token.dataset.referenceType = part.referenceType || "skill";
     token.style.background = "#EEF4FF";
     token.style.borderRadius = "6px";
     token.style.color = "#2957DC";
     token.style.display = "inline-block";
     token.style.fontWeight = "500";
     token.style.padding = "0 4px";
-    token.textContent = part.value;
+    const icon = document.createElement("span");
+    icon.setAttribute("aria-hidden", "true");
+    icon.style.background =
+      part.referenceType === "mcp_tool"
+        ? "#2F7D5B"
+        : part.referenceType === "workspace_file"
+          ? "#A56A24"
+          : "#3769FC";
+    icon.style.borderRadius = "50%";
+    icon.style.display = "inline-block";
+    icon.style.height = "5px";
+    icon.style.marginRight = "3px";
+    icon.style.width = "5px";
+    token.append(icon, document.createTextNode(part.value));
     fragment.append(token);
   }
   editor.replaceChildren(fragment);
 }
 
-function selectedNamesVisibleInEditor(
+function selectedReferencesVisibleInEditor(
   editor: HTMLDivElement,
-  selected: string[],
-): string[] {
+  selected: SkillMentionItem[],
+): SkillMentionItem[] {
   return Array.from(editor.querySelectorAll<HTMLElement>("[data-skill-token]"))
     .map((token) => Number(token.dataset.selectionIndex))
     .filter(Number.isInteger)
     .map((index) => selected[index])
-    .filter((name): name is string => Boolean(name));
+    .filter((item): item is SkillMentionItem => Boolean(item));
 }
 
 export const SkillTokenEditor = forwardRef<
@@ -284,7 +303,7 @@ export const SkillTokenEditor = forwardRef<
         onInput={(event) => {
           const editor = event.currentTarget;
           const nextValue = editor.textContent || "";
-          const nextSelected = selectedNamesVisibleInEditor(
+          const nextSelected = selectedReferencesVisibleInEditor(
             editor,
             skillMentions.selected,
           );
@@ -330,6 +349,7 @@ export const SkillTokenEditor = forwardRef<
           loading={mentions.loading}
           onRetry={skillMentions.onRetry}
           open={mentions.open}
+          query={mentions.query}
           onSelect={mentions.select}
         />
       </div>

@@ -1,87 +1,77 @@
 import { describe, expect, it, vi } from "vitest";
 import { createWelcomeSkillMentions } from "./welcomeSkillMentions";
 
-const items = [{ name: "browser", description: "Use a browser" }];
+const items = [
+  { id: "skill:browser", type: "skill" as const, label: "browser", name: "browser", description: "Use a browser" },
+];
 
 describe("createWelcomeSkillMentions", () => {
   it("retains every selected occurrence instead of truncating the UI selection", () => {
-    const setSelectedSkillNames = vi.fn();
+    const setSelectedContextReferences = vi.fn();
     const mentions = createWelcomeSkillMentions({
-      effectiveSkills: items,
-      effectiveSkillsLoading: false,
+      contextReferences: items,
+      contextReferencesLoading: false,
       isComposingRef: { current: false },
-      loadEffectiveSkills: vi.fn(),
-      pendingSelectedSkillNamesRef: { current: [] },
-      selectedSkillNames: [],
-      setSelectedSkillNames,
+      loadContextReferences: vi.fn(),
+      pendingContextReferencesRef: { current: [] },
+      selectedContextReferences: [],
+      setSelectedContextReferences,
     });
 
     mentions.skillMentions.onChange([
-      "browser",
-      "browser",
-      "browser",
-      "browser",
-      "browser",
-      "browser",
+      ...items,
     ]);
 
-    expect(setSelectedSkillNames).toHaveBeenCalledWith([
-      "browser",
-      "browser",
-      "browser",
-      "browser",
-      "browser",
-      "browser",
-    ]);
+    expect(setSelectedContextReferences).toHaveBeenCalledWith(items);
   });
 
   it("reflects updated skill selection in welcome props and stages it before submit", async () => {
-    const pendingSelectedSkillNamesRef = { current: [] as string[] };
-    const setSelectedSkillNames = vi.fn();
-    const loadEffectiveSkills = vi.fn();
+    const pendingContextReferencesRef = { current: [] as typeof items };
+    const setSelectedContextReferences = vi.fn();
+    const loadContextReferences = vi.fn();
 
     const initial = createWelcomeSkillMentions({
-      effectiveSkills: items,
-      effectiveSkillsLoading: false,
+      contextReferences: items,
+      contextReferencesLoading: false,
       isComposingRef: { current: false },
-      loadEffectiveSkills,
-      pendingSelectedSkillNamesRef,
-      selectedSkillNames: [],
-      setSelectedSkillNames,
+      loadContextReferences,
+      pendingContextReferencesRef,
+      selectedContextReferences: [],
+      setSelectedContextReferences,
     });
     const updated = createWelcomeSkillMentions({
-      effectiveSkills: items,
-      effectiveSkillsLoading: false,
+      contextReferences: items,
+      contextReferencesLoading: false,
       isComposingRef: { current: false },
-      loadEffectiveSkills,
-      pendingSelectedSkillNamesRef,
-      selectedSkillNames: ["browser"],
-      setSelectedSkillNames,
+      loadContextReferences,
+      pendingContextReferencesRef,
+      selectedContextReferences: items,
+      setSelectedContextReferences,
     });
 
     expect(initial.skillMentions.selected).toEqual([]);
-    expect(updated.skillMentions.selected).toEqual(["browser"]);
+    expect(updated.skillMentions.selected).toEqual(items);
 
     await expect(updated.beforeSubmit()).resolves.toBe(true);
-    expect(pendingSelectedSkillNamesRef.current).toEqual(["browser"]);
-    expect(setSelectedSkillNames).toHaveBeenCalledWith([]);
+    expect(pendingContextReferencesRef.current).toEqual(items);
+    expect(setSelectedContextReferences).toHaveBeenCalledWith([]);
   });
 
   it("exposes a retry action when the available-skill request failed", () => {
-    const loadEffectiveSkills = vi.fn();
+    const loadContextReferences = vi.fn();
     const mentions = createWelcomeSkillMentions({
-      effectiveSkills: [],
-      effectiveSkillsError: true,
-      effectiveSkillsLoading: false,
+      contextReferences: [],
+      contextReferencesError: true,
+      contextReferencesLoading: false,
       isComposingRef: { current: false },
-      loadEffectiveSkills,
-      pendingSelectedSkillNamesRef: { current: [] },
-      selectedSkillNames: [],
-      setSelectedSkillNames: vi.fn(),
+      loadContextReferences,
+      pendingContextReferencesRef: { current: [] },
+      selectedContextReferences: [],
+      setSelectedContextReferences: vi.fn(),
     });
 
     expect(mentions.skillMentions.error).toBe(true);
     mentions.skillMentions.onRetry?.();
-    expect(loadEffectiveSkills).toHaveBeenCalledOnce();
+    expect(loadContextReferences).toHaveBeenCalledWith("");
   });
 });
