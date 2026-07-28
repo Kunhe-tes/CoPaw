@@ -155,8 +155,7 @@ export function useSkillMentions({
     (item: SkillMentionItem) => {
       if (
         loading ||
-        !mentionRangeRef.current ||
-        selected.some((entry) => entry.id === item.id)
+        !mentionRangeRef.current
       )
         return;
       const range = mentionRangeRef.current;

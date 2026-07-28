@@ -90,9 +90,9 @@ async def test_build_context_reference_directives_validates_and_deduplicates(
 
     rendered = [directive.render() for directive in directives]
     assert len(rendered) == 3
-    assert any("<SKILL-USE-V1>" in value for value in rendered)
-    assert any("<MCP-TOOL-PREFERENCE-V1>" in value for value in rendered)
-    assert any("<WORKSPACE-FILE-REFERENCE-V1>" in value for value in rendered)
+    assert any("<SKILL-USE>" in value for value in rendered)
+    assert any("<TOOL-PREFERENCE>" in value for value in rendered)
+    assert any("<FILE-REFERENCE>" in value for value in rendered)
     assert "private file content" not in "\n".join(rendered)
     assert str((media / "report.txt").resolve()) in "\n".join(rendered)
 

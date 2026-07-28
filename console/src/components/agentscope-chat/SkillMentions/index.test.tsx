@@ -293,18 +293,24 @@ describe("SkillMentions", () => {
     expect(screen.queryByRole("listbox")).toBeNull();
   });
 
-  it("deduplicates identical IDs but allows equal labels across types", () => {
+  it("records each repeated selection while preserving duplicate mention text", () => {
     const onChange = vi.fn();
     render(<MentionHarness onChange={onChange} />);
     const input = screen.getByRole("textbox", { name: "消息" });
-    fireEvent.change(input, { target: { value: "@shared" } });
-    fireEvent.click(screen.getByRole("option", { name: /^shared/ }));
-    fireEvent.change(input, { target: { value: "@remote" } });
-    fireEvent.click(screen.getByRole("option", { name: /remote \/ shared/ }));
-    fireEvent.change(input, { target: { value: "@shared" } });
-    fireEvent.click(screen.getByRole("option", { name: /^shared/ }));
+    fireEvent.change(input, { target: { value: "@browser" } });
+    fireEvent.click(screen.getByRole("option", { name: /^browser/ }));
+    fireEvent.change(input, {
+      target: {
+        value: "@browser @browser",
+        selectionStart: "@browser @browser".length,
+      },
+    });
+    fireEvent.click(screen.getByRole("option", { name: /^browser/ }));
 
-    expect(onChange).toHaveBeenLastCalledWith([items[3], items[4]]);
+    expect(onChange).toHaveBeenLastCalledWith([items[0], items[0]]);
     expect(onChange).toHaveBeenCalledTimes(2);
+    expect(screen.getByRole("status", { name: "输入值" })).toHaveTextContent(
+      "@browser @browser",
+    );
   });
 });
