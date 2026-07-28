@@ -1,4 +1,4 @@
-import { Button, Flex, Input, Tag } from "antd";
+import { Flex, Input } from "antd";
 import { Suggestion } from "@ant-design/x";
 import classnames from "classnames";
 import { useMergedState } from "rc-util";
@@ -24,6 +24,7 @@ import type {
   GetProps,
 } from "antd";
 import BeforeUIContainer from "./BeforeUIContainer";
+import { SkillTokenEditor } from "../SkillMentions/SkillTokenEditor";
 
 export type SubmitType = "enter" | "shiftEnter" | false;
 
@@ -286,6 +287,7 @@ const ForwardSender = React.forwardRef<SenderRef, SenderProps>((props, ref) => {
     defaultValue,
     value,
     readOnly,
+    placeholder,
     enableFocusExpand = false,
     sendDisabled = false,
     allowEmptySubmit = false,
@@ -323,11 +325,24 @@ const ForwardSender = React.forwardRef<SenderRef, SenderProps>((props, ref) => {
 
   const containerRef = React.useRef<HTMLDivElement>(null);
   const inputRef = React.useRef<AntdInputRef>(null);
+  const tokenEditorRef = React.useRef<HTMLDivElement>(null);
 
   useProxyImperativeHandle(ref, () => ({
     nativeElement: containerRef.current!,
-    focus: inputRef.current?.focus!,
-    blur: inputRef.current?.blur!,
+    focus: () => {
+      if (tokenEditorRef.current) {
+        tokenEditorRef.current.focus();
+      } else {
+        inputRef.current?.focus();
+      }
+    },
+    blur: () => {
+      if (tokenEditorRef.current) {
+        tokenEditorRef.current.blur();
+      } else {
+        inputRef.current?.blur();
+      }
+    },
   }));
 
   useFocusWithin(containerRef, {
@@ -364,6 +379,7 @@ const ForwardSender = React.forwardRef<SenderRef, SenderProps>((props, ref) => {
     [`${prefixCls}-disabled`]: disabled,
     [`${prefixCls}-focus`]: focus && enableFocusExpand,
     [`${prefixCls}-blur`]: !focus && enableFocusExpand,
+    [`${prefixCls}-with-skill-editor`]: Boolean(skillMentions),
   });
 
   const actionBtnCls = `${prefixCls}-actions-btn`;
@@ -387,9 +403,8 @@ const ForwardSender = React.forwardRef<SenderRef, SenderProps>((props, ref) => {
     },
     allowSpeech,
   );
-  const hasSuggestions = Array.isArray(suggestions) && suggestions.length > 0;
-  const [skillMenuOpen, setSkillMenuOpen] = useState(false);
-  const [skillQuery, setSkillQuery] = useState("");
+  const hasSuggestions =
+    !skillMentions && Array.isArray(suggestions) && suggestions.length > 0;
   const slashCommandKeyword = React.useMemo(
     () => getSlashCommandKeyword(innerValue),
     [innerValue],
@@ -459,12 +474,14 @@ const ForwardSender = React.forwardRef<SenderRef, SenderProps>((props, ref) => {
     isCompositionRef.current = true;
   };
 
-  const onInternalCompositionEnd = (
-    e: React.CompositionEvent<HTMLTextAreaElement>,
-  ) => {
+  const onInternalCompositionEnd = (e: React.CompositionEvent<HTMLElement>) => {
     isCompositionRef.current = false;
     if (props.maxLength) {
-      const currentValue = (e.target as HTMLTextAreaElement).value;
+      const target = e.target as HTMLElement;
+      const currentValue =
+        target instanceof HTMLTextAreaElement
+          ? target.value
+          : target.textContent || "";
       if (currentValue.length > props.maxLength) {
         triggerValueChange(currentValue.slice(0, props.maxLength));
       }
@@ -566,7 +583,54 @@ const ForwardSender = React.forwardRef<SenderRef, SenderProps>((props, ref) => {
     onKeyDown?: React.KeyboardEventHandler<HTMLTextAreaElement>;
     open?: boolean;
   }) => {
-    suggestionOpenRef.current = !!suggestionProps?.open || skillMenuOpen;
+    suggestionOpenRef.current = !!suggestionProps?.open;
+
+    if (skillMentions) {
+      return (
+        <SkillTokenEditor
+          {...domProps}
+          ref={tokenEditorRef}
+          aria-label={props.placeholder || "消息"}
+          className={classnames(
+            inputCls,
+            `${prefixCls}-skill-editor`,
+            classNames.input,
+          )}
+          disabled={!!disabled}
+          readOnly={readOnly}
+          onKeyDown={(event) => {
+            const shouldSubmit =
+              event.key === "Enter" &&
+              !event.nativeEvent.isComposing &&
+              ((submitType === "enter" && !event.shiftKey) ||
+                (submitType === "shiftEnter" && event.shiftKey));
+            if (shouldSubmit) {
+              event.preventDefault();
+              triggerSend();
+              return;
+            }
+            onKeyDown?.(event);
+          }}
+          onCompositionStart={onInternalCompositionStart}
+          onCompositionEnd={onInternalCompositionEnd}
+          onPaste={onInternalPaste}
+          onValueChange={(nextValue) =>
+            triggerValueChange(
+              props.maxLength && !isCompositionRef.current
+                ? nextValue.slice(0, props.maxLength)
+                : nextValue,
+            )
+          }
+          placeholder={placeholder}
+          skillMentions={skillMentions}
+          style={styles.input}
+          value={innerValue.slice(
+            0,
+            props.maxLength || Number.MAX_SAFE_INTEGER,
+          )}
+        />
+      );
+    }
 
     return (
       <InputTextArea
@@ -589,15 +653,6 @@ const ForwardSender = React.forwardRef<SenderRef, SenderProps>((props, ref) => {
             nextValue,
             event as React.ChangeEvent<HTMLTextAreaElement>,
           );
-
-          const mentionMatch = nextValue.match(/(?:^|\s)@([^\s@]*)$/);
-          if (skillMentions && mentionMatch) {
-            setSkillQuery(mentionMatch[1].toLowerCase());
-            if (!skillMenuOpen) skillMentions.onOpen();
-            setSkillMenuOpen(true);
-          } else {
-            setSkillMenuOpen(false);
-          }
 
           if (hasSuggestions) {
             const nextSlashCommandKeyword = getSlashCommandKeyword(nextValue);
@@ -626,30 +681,6 @@ const ForwardSender = React.forwardRef<SenderRef, SenderProps>((props, ref) => {
         onCompositionStart={onInternalCompositionStart}
         onCompositionEnd={onInternalCompositionEnd}
         onKeyDown={(event) => {
-          if (skillMenuOpen && skillMentions) {
-            if (event.key === "Escape") {
-              event.preventDefault();
-              setSkillMenuOpen(false);
-              return;
-            }
-            if (event.key === "Enter") {
-              const firstMatch = skillMentions.items.find((item) =>
-                item.name.toLowerCase().includes(skillQuery),
-              );
-              if (firstMatch) {
-                event.preventDefault();
-                skillMentions.onChange([
-                  ...skillMentions.selected,
-                  firstMatch.name,
-                ]);
-                triggerValueChange(
-                  innerValue.replace(/(?:^|\s)@[^\s@]*$/, " "),
-                );
-                setSkillMenuOpen(false);
-                return;
-              }
-            }
-          }
           if (
             event.key === "Enter" &&
             suggestionProps?.open &&
@@ -708,48 +739,7 @@ const ForwardSender = React.forwardRef<SenderRef, SenderProps>((props, ref) => {
           </SendHeaderContext.Provider>
         )}
 
-        {skillMentions?.selected.length ? (
-          <Flex gap={8} wrap="wrap" style={{ marginBottom: 8 }}>
-            {skillMentions.selected.map((name, index) => (
-              <Tag
-                key={`${name}-${index}`}
-                closable
-                onClose={() =>
-                  skillMentions.onChange(
-                    skillMentions.selected.filter((_, itemIndex) => itemIndex !== index),
-                  )
-                }
-              >
-                @{name}
-              </Tag>
-            ))}
-          </Flex>
-        ) : null}
-
         <div className={`${prefixCls}-content`}>
-          {skillMenuOpen && skillMentions ? (
-            <div role="listbox" aria-label="可用技能" style={{ maxHeight: 220, overflowY: "auto", marginBottom: 8 }}>
-              {skillMentions.loading ? "加载技能中…" : skillMentions.items
-                .filter((item) => item.name.toLowerCase().includes(skillQuery))
-                .map((item) => (
-                  <Button
-                    key={item.name}
-                    type="text"
-                    block
-                    style={{ height: "auto", textAlign: "left", padding: "6px 8px" }}
-                    onMouseDown={(event) => event.preventDefault()}
-                    onClick={() => {
-                      skillMentions.onChange([...skillMentions.selected, item.name]);
-                      triggerValueChange(innerValue.replace(/(?:^|\s)@[^\s@]*$/, " "));
-                      setSkillMenuOpen(false);
-                    }}
-                  >
-                    <strong>{item.name}</strong>
-                    {item.description ? <span style={{ display: "block", color: "#4B5563" }}>{item.description}</span> : null}
-                  </Button>
-                ))}
-            </div>
-          ) : null}
           {hasSuggestions ? (
             <Suggestion
               items={filteredSuggestions}

@@ -28,16 +28,40 @@
   color: inherit;
   text-align: left;
   background: #fff;
-  border: 1px solid rgba(5, 5, 5, 0.1);
+  border: 1px solid #e5e7eb;
   border-radius: 12px;
   cursor: pointer;
+  transition:
+    background-color 180ms ease,
+    border-color 180ms ease,
+    box-shadow 180ms ease,
+    transform 180ms ease;
 }
 
-.capabilityCard:hover,
+.capabilityCard:hover {
+  background: #f7faff;
+  border-color: #3769fc;
+  box-shadow: 0 4px 12px rgba(55, 105, 252, 0.12);
+  transform: translateY(-1px);
+}
+
+.capabilityCard:active {
+  background: #eef4ff;
+  box-shadow: 0 1px 3px rgba(55, 105, 252, 0.12);
+  transform: translateY(0);
+}
+
 .capabilityCard:focus-visible {
   border-color: #3769fc;
-  outline: none;
-  box-shadow: 0 0 0 3px rgba(55, 105, 252, 0.14);
+  outline: 3px solid rgba(55, 105, 252, 0.22);
+  outline-offset: 2px;
+  box-shadow: 0 4px 12px rgba(55, 105, 252, 0.12);
+}
+
+.capabilityCard:hover .capabilityCardFooter span:last-child::after {
+  margin-left: 6px;
+  color: #3769fc;
+  content: "→";
 }
 
 .capabilityCardHeader,
@@ -72,7 +96,11 @@
   display: grid;
   gap: 8px;
   margin-bottom: 20px;
+  padding: 14px;
   color: rgba(0, 0, 0, 0.65);
+  background: #f7faff;
+  border: 1px solid #dbe5fb;
+  border-radius: 10px;
   font-size: 13px;
   line-height: 1.6;
 }
@@ -84,6 +112,15 @@
 .drawerIntroHeader {
   display: flex;
   gap: 8px;
+}
+
+.drawerFooter {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  color: #4b5563;
+  font-size: 13px;
 }
 
 .drawerSummary {
@@ -99,6 +136,35 @@
   display: grid;
   gap: 12px;
   margin-top: 16px;
+}
+
+.drawerSettingSection {
+  overflow: hidden;
+  border: 1px solid #e5e7eb;
+  border-radius: 10px;
+}
+
+.drawerSettingSectionHeader {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 10px 12px;
+  color: #374151;
+  font-size: 13px;
+  font-weight: 600;
+  background: #f7f9fc;
+  border-bottom: 1px solid #e5e7eb;
+}
+
+.drawerSettingSectionHeader span:last-child {
+  color: #8a94a6;
+  font-size: 12px;
+  font-weight: 500;
+}
+
+.drawerSettingSection .switchRow {
+  padding: 14px 12px;
 }
 
 .advancedParameters {
@@ -289,6 +355,14 @@
   backdrop-filter: blur(8px);
 }
 
+.restoreDefaultsHint {
+  min-width: 0;
+  margin-left: auto;
+  color: #8a5a20;
+  font-size: 12px;
+  line-height: 18px;
+}
+
 .dirtySummary {
   margin-right: auto;
   color: #a56a24;
@@ -321,6 +395,38 @@
     border-color: rgba(255, 255, 255, 0.12);
   }
 
+  .capabilityCard {
+    border-color: rgba(255, 255, 255, 0.12);
+  }
+
+  .capabilityCard:hover,
+  .capabilityCard:active {
+    background: rgba(55, 105, 252, 0.14);
+  }
+
+  .drawerIntro {
+    background: rgba(55, 105, 252, 0.12);
+    border-color: rgba(116, 153, 255, 0.3);
+  }
+
+  .drawerFooter,
+  .drawerSettingSectionHeader {
+    color: rgba(255, 255, 255, 0.88);
+  }
+
+  .drawerSettingSection,
+  .drawerSettingSectionHeader {
+    border-color: rgba(255, 255, 255, 0.12);
+  }
+
+  .drawerSettingSectionHeader {
+    background: rgba(255, 255, 255, 0.06);
+  }
+
+  .restoreDefaultsHint {
+    color: #e0ad6b;
+  }
+
   .toolOutputSection,
   .switchRow {
     border-bottom-color: rgba(255, 255, 255, 0.08);
@@ -332,5 +438,11 @@
 
   .scheduledTaskSection {
     border-top-color: rgba(255, 255, 255, 0.08);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .capabilityCard {
+    transition: none;
   }
 }

@@ -78,9 +78,9 @@ swe skills migrate-layout --check
 swe skills migrate-layout --apply
 ```
 
-`--check` 只读检查发布范围内所有 Workspace：`skill.json` 可解析、技能路径合法、目标目录没有无法解释的混合状态、目录可写且迁移计划完整。如果意外存在 `.skill_state/manifest.json`，按混合布局直接拒绝。任一检查失败时返回非零状态，不修改文件。
+`--check` 只读检查发布范围内所有 Workspace：`skill.json` 可解析、技能路径合法、目标目录没有无法解释的混合状态、目录可写且迁移计划完整。如果意外存在 `.skill_state/manifest.json`，按混合布局直接拒绝。旧布局中两个受管目录都缺少 `SKILL.md` 的已登记技能视为废弃条目：检查允许该状态但不写入。任一其他检查失败时返回非零状态，不修改文件。
 
-`--apply` 在原路径就地升级 `skill.json`：只移动清单中 `enabled=false` 的已登记技能，保留全部清单字段，并写入 `layout_version: 2`。命令不改名、删除或复制 `skill.json`，也不创建 `.skill_state`。已带 `layout_version: 2` 且布局一致的 Workspace 报告 `already_migrated`；失败并成功回滚的 Workspace 可安全重试。执行前创建仅供本次命令使用的临时回滚副本，任一 Workspace 失败则恢复全部已修改 Workspace 的目录与原始 `skill.json`，全部成功则立即删除副本。
+`--apply` 在原路径就地升级 `skill.json`：先从清单移除废弃技能条目，再只移动剩余清单中 `enabled=false` 的已登记技能，保留全部其他清单字段，并写入 `layout_version: 2`。命令不改名或复制 `skill.json`，也不创建 `.skill_state`。已带 `layout_version: 2` 且布局一致的 Workspace 报告 `already_migrated`。命令不会创建完整 Workspace 备份或执行回滚：按确定顺序处理 Workspace，任一 Workspace 失败即返回非零，先前成功的 Workspace 保持已迁移状态。若失败发生在目录移动与最终清单写入之间，下次执行会识别已移动的禁用包并完成剩余迁移。
 
 迁移期间的运行时冻结和并发技能写入协调不在本次范围内，由部署操作规程规避。
 
@@ -102,7 +102,7 @@ swe skills migrate-layout --apply
 - 清单与目录不一致时，技能保持不可用，协调逻辑按清单恢复；同名 active/disabled 双副本是例外，适用 active collision promotion。
 - 管理面不得因禁用包位于隐藏目录而返回“技能不存在”。
 - Market 的 reload 通知失败不回滚已经完成的业务写入；记录可观察告警，后续 SWE 协调或启动收敛运行视图。
-- 迁移 CLI 输出每个 Workspace 的检查、迁移、回滚或跳过结果，并以非零退出码表示任何未恢复错误。
+- 迁移 CLI 输出每个 Workspace 的检查、迁移或跳过结果，并以非零退出码表示首次失败。
 
 ## 测试策略
 

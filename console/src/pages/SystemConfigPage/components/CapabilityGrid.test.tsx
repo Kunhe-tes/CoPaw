@@ -29,7 +29,11 @@ describe("CapabilityGrid", () => {
     );
 
     fireEvent.click(screen.getByRole("radio", { name: "有未保存修改" }));
-    fireEvent.click(screen.getByRole("button", { name: /对话与执行/ }));
+    fireEvent.click(
+      screen.getByRole("button", {
+        name: /对话与执行.*任务进度与系统提示词的可见体验/,
+      }),
+    );
 
     expect(onFilterChange).toHaveBeenCalledWith("unsaved");
     expect(onSelect).toHaveBeenCalledWith("conversation");

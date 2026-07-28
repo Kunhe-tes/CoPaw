@@ -10,11 +10,12 @@ import cls from "classnames";
 import Welcome from "../Welcome";
 import { useChatAnywhereOptions } from "../../Context/ChatAnywhereOptionsContext";
 import React from "react";
-import { Spin } from "antd";
+import { Result, Spin } from "antd";
 import { useChatContentOnly } from "@/components/agentscope-chat/ChatContentOnlyContext";
 
 export default function MessageList(props: {
   onSubmit: (data: IAgentScopeRuntimeWebUIInputData) => void;
+  sessionNotFound?: boolean;
 }) {
   const isContentOnly = useChatContentOnly();
   const messages = useContextSelector(
@@ -57,12 +58,25 @@ export default function MessageList(props: {
     );
   }
 
-  if (safeMessages.length === 0)
+  if (isContentOnly && props.sessionNotFound) {
+    return (
+      <div className={cls(prefixCls, `${prefixCls}-welcome`)}>
+        <Result
+          status="404"
+          title="会话不存在"
+          subTitle="当前会话可能已被删除，请重新选择会话"
+        />
+      </div>
+    );
+  }
+
+  if (safeMessages.length === 0) {
     return (
       <div className={cls(prefixCls, `${prefixCls}-welcome`)}>
         {!isContentOnly && <Welcome onSubmit={props.onSubmit} />}
       </div>
     );
+  }
 
   return (
     <Bubble.List

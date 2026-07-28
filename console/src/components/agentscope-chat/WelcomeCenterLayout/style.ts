@@ -51,6 +51,17 @@ export default createGlobalStyle`
   padding: 4px 0;
 }
 
+.welcome-skill-editor {
+  min-height: 24px;
+  white-space: pre-wrap;
+
+  &:empty::before {
+    color: ${DESIGN_TOKENS.colorTextMuted};
+    content: attr(data-placeholder);
+    pointer-events: none;
+  }
+}
+
 .welcome-input-actions {
   display: flex;
   align-items: center;
