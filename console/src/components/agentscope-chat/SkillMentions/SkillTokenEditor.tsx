@@ -192,6 +192,9 @@ export const SkillTokenEditor = forwardRef<
   );
   const mentions = useSkillMentions({
     ...skillMentions,
+    onBeforeSelect: () => {
+      placeCaretAtEndRef.current = true;
+    },
     value,
     onValueChange,
   });
@@ -326,10 +329,7 @@ export const SkillTokenEditor = forwardRef<
           loading={mentions.loading}
           onRetry={skillMentions.onRetry}
           open={mentions.open}
-          onSelect={(item) => {
-            placeCaretAtEndRef.current = true;
-            mentions.select(item);
-          }}
+          onSelect={mentions.select}
         />
       </div>
     </div>

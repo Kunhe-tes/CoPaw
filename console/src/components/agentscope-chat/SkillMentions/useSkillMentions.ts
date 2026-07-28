@@ -17,6 +17,7 @@ export interface SkillMentionsData {
 }
 
 export interface UseSkillMentionsOptions extends SkillMentionsData {
+  onBeforeSelect?: () => void;
   value: string;
   onValueChange: (value: string) => void;
 }
@@ -57,6 +58,7 @@ export function useSkillMentions({
   loading = false,
   onOpen,
   onChange,
+  onBeforeSelect,
   value,
   onValueChange,
 }: UseSkillMentionsOptions) {
@@ -123,11 +125,13 @@ export function useSkillMentions({
         return;
       }
 
-      onChange([...selected, item.name]);
       const range = mentionRangeRef.current;
       if (!range) {
         return;
       }
+
+      onBeforeSelect?.();
+      onChange([...selected, item.name]);
       const trailingText = value.slice(range.end);
       const separator = /^\s/.test(trailingText) ? "" : " ";
       onValueChange(
@@ -137,7 +141,15 @@ export function useSkillMentions({
       );
       setMenuOpen(false);
     },
-    [loading, onChange, onValueChange, selected, setMenuOpen, value],
+    [
+      loading,
+      onBeforeSelect,
+      onChange,
+      onValueChange,
+      selected,
+      setMenuOpen,
+      value,
+    ],
   );
 
   const remove = useCallback(

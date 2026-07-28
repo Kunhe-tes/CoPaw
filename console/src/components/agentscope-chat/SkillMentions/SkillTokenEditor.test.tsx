@@ -176,6 +176,31 @@ describe("SkillTokenEditor", () => {
     );
   });
 
+  it("keeps the editor focused after selecting a skill with Enter", () => {
+    render(<ControlledTokenEditor />);
+
+    const editor = screen.getByRole("textbox", { name: "消息" });
+    editor.focus();
+    editor.textContent = "@br";
+    const range = document.createRange();
+    range.selectNodeContents(editor);
+    range.collapse(false);
+    const selection = window.getSelection();
+    selection?.removeAllRanges();
+    selection?.addRange(range);
+    fireEvent.input(editor);
+    fireEvent.keyDown(editor, { key: "Enter" });
+
+    expect(document.activeElement).toBe(editor);
+    const token = screen.getByText("@browser");
+    expect(token.contains(window.getSelection()?.anchorNode || null)).toBe(
+      false,
+    );
+    editor.textContent = "@browser 继续输入";
+    fireEvent.input(editor);
+    expect(editor.textContent).toBe("@browser 继续输入");
+  });
+
   it("synchronizes structured selection after a native token deletion", () => {
     const onChange = vi.fn();
     render(
