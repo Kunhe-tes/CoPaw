@@ -13,6 +13,14 @@ const items: SkillMentionItem[] = [
     description: "Use a browser",
   },
   {
+    id: 'mcp_tool:["docs","search"]',
+    type: "mcp_tool",
+    label: "docs / search",
+    server: "docs",
+    name: "search",
+    description: "Search docs",
+  },
+  {
     id: "workspace_file:media/report.pdf",
     type: "workspace_file",
     label: "report.pdf",
@@ -57,7 +65,7 @@ describe("SkillTokenEditor", () => {
         value="请看 @report.pdf "
         skillMentions={{
           items,
-          selected: [items[1]],
+          selected: [items[2]],
           onChange: vi.fn(),
           onOpen: vi.fn(),
         }}
@@ -68,6 +76,26 @@ describe("SkillTokenEditor", () => {
     expect(token).toHaveAttribute("contenteditable", "false");
     expect(token).toHaveAttribute("data-reference-type", "workspace_file");
   });
+  it("renders one distinguishable atomic token for every reference type", () => {
+    render(
+      <SkillTokenEditor
+        aria-label="消息"
+        value="@browser @docs/search @report.pdf "
+        skillMentions={{
+          items,
+          selected: [items[0], items[1], items[2]],
+          onChange: vi.fn(),
+          onOpen: vi.fn(),
+        }}
+        onValueChange={vi.fn()}
+      />,
+    );
+    const tokens = document.querySelectorAll("[data-skill-token=true]");
+    expect(tokens).toHaveLength(3);
+    expect(tokens[0]).toHaveAttribute("data-reference-type", "skill");
+    expect(tokens[1]).toHaveAttribute("data-reference-type", "mcp_tool");
+    expect(tokens[2]).toHaveAttribute("data-reference-type", "workspace_file");
+  });
   it("keeps a file name containing spaces as one atomic token", () => {
     render(
       <SkillTokenEditor
@@ -75,7 +103,7 @@ describe("SkillTokenEditor", () => {
         value="请看 @report file.pdf "
         skillMentions={{
           items,
-          selected: [items[2]],
+          selected: [items[3]],
           onChange: vi.fn(),
           onOpen: vi.fn(),
         }}
@@ -94,7 +122,7 @@ describe("SkillTokenEditor", () => {
         value="@report.pdf @browser "
         skillMentions={{
           items,
-          selected: [items[0], items[1]],
+          selected: [items[0], items[2]],
           onChange: vi.fn(),
           onOpen: vi.fn(),
         }}
@@ -140,6 +168,12 @@ describe("SkillTokenEditor", () => {
     window.getSelection()?.removeAllRanges();
     window.getSelection()?.addRange(range);
     fireEvent.input(editor);
+    expect(editor).toHaveAttribute("aria-controls", "context-reference-menu");
+    expect(editor).toHaveAttribute("aria-haspopup", "listbox");
+    expect(editor).toHaveAttribute(
+      "aria-activedescendant",
+      "context-reference-option-skill%3Abrowser",
+    );
     fireEvent.keyDown(editor, { key: "Enter" });
     expect(document.activeElement).toBe(editor);
     expect(screen.getByText("@browser")).toBeInTheDocument();

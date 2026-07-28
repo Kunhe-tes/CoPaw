@@ -298,6 +298,16 @@ export const SkillTokenEditor = forwardRef<
             ref.current = node;
           }
         }}
+        aria-activedescendant={
+          mentions.open && mentions.activeItemId
+            ? `context-reference-option-${encodeURIComponent(
+                mentions.activeItemId,
+              )}`
+            : undefined
+        }
+        aria-controls={mentions.open ? "context-reference-menu" : undefined}
+        aria-expanded={mentions.open}
+        aria-haspopup="listbox"
         aria-multiline="true"
         className={className}
         contentEditable={!disabled && !readOnly}
@@ -348,6 +358,7 @@ export const SkillTokenEditor = forwardRef<
         }}
       />
       <div
+        id="context-reference-menu"
         style={{
           bottom: "calc(100% + 12px)",
           left: 0,

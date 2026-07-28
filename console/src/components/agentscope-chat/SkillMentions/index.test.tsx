@@ -34,6 +34,21 @@ const items: SkillMentionItem[] = [
     relative_path: "report.pdf",
     description: "media/report.pdf",
   },
+  {
+    id: "skill:shared",
+    type: "skill",
+    label: "shared",
+    name: "shared",
+    description: "A shared skill",
+  },
+  {
+    id: 'mcp_tool:["remote","shared"]',
+    type: "mcp_tool",
+    label: "shared",
+    server: "remote",
+    name: "shared",
+    description: "A shared MCP tool",
+  },
 ];
 
 function MentionHarness({
@@ -137,5 +152,37 @@ describe("SkillMentions", () => {
     fireEvent.change(input, { target: { value: "@" } });
     expect(onOpen).toHaveBeenLastCalledWith("");
     vi.useRealTimers();
+  });
+
+  it("supports keyboard navigation and closes on Escape", () => {
+    render(<MentionHarness />);
+    const input = screen.getByRole("textbox", { name: "消息" });
+    fireEvent.change(input, { target: { value: "@" } });
+    fireEvent.keyDown(input, { key: "ArrowDown" });
+    expect(
+      screen.getByRole("option", { name: /docs \/ search/ }),
+    ).toHaveAttribute("aria-selected", "true");
+    fireEvent.keyDown(input, { key: "ArrowUp" });
+    expect(screen.getByRole("option", { name: /^browser/ })).toHaveAttribute(
+      "aria-selected",
+      "true",
+    );
+    fireEvent.keyDown(input, { key: "Escape" });
+    expect(screen.queryByRole("listbox")).toBeNull();
+  });
+
+  it("deduplicates identical IDs but allows equal labels across types", () => {
+    const onChange = vi.fn();
+    render(<MentionHarness onChange={onChange} />);
+    const input = screen.getByRole("textbox", { name: "消息" });
+    fireEvent.change(input, { target: { value: "@shared" } });
+    fireEvent.click(screen.getByRole("option", { name: /^shared/ }));
+    fireEvent.change(input, { target: { value: "@remote" } });
+    fireEvent.click(screen.getByRole("option", { name: /remote \/ shared/ }));
+    fireEvent.change(input, { target: { value: "@shared" } });
+    fireEvent.click(screen.getByRole("option", { name: /^shared/ }));
+
+    expect(onChange).toHaveBeenLastCalledWith([items[3], items[4]]);
+    expect(onChange).toHaveBeenCalledTimes(2);
   });
 });

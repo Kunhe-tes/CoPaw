@@ -198,6 +198,7 @@ export function useSkillMentions({
 
   return {
     activeIndex,
+    activeItemId: filteredItems[activeIndex]?.id,
     blocksSubmit,
     close,
     filteredItems,

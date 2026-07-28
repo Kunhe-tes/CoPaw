@@ -118,9 +118,13 @@ export function SkillMentionMenu({
             </div>
             {group.items.map((item) => {
               const index = items.indexOf(item);
+              const optionId = `context-reference-option-${encodeURIComponent(
+                item.id,
+              )}`;
               return (
                 <Button
                   key={item.id}
+                  id={optionId}
                   ref={index === activeIndex ? activeItemRef : undefined}
                   block
                   type="text"
