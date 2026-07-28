@@ -138,8 +138,7 @@ export default function Link(props) {
     const toParentMsg = url.searchParams.get("toParentMsg");
     console.log("toParentMsg", toParentMsg);
     if (toParentMsg) {
-      // ==================
-      // const newToParentMsg = JSON.parse(Base64.decode(toParentMsg.replace(/\s/g, "+")))
+      // TODO: 合并代码时需要修改的地方
       const newToParentMsg = JSON.parse(decryptUrl(toParentMsg));
       // 解析为 JavaScript 对象
       if (window.parent !== window) {
@@ -169,7 +168,8 @@ function getHref(href: string) {
   try {
     const url = new URL(href);
     console.log("url", url.host);
-    if (url.host === "cusinsightuixc.paasoa.cmbchina.cn") {
+    // TODO: 合并代码时需要修改的地方
+    if (url.host === "test.xxx.com") {
       return encryptUrl(href);
     } else {
       return href;
@@ -180,7 +180,8 @@ function getHref(href: string) {
 }
 
 function encryptUrl(url) {
-  const key = "RM-CLAW-WEB";
+  // TODO: 合并代码时需要修改的地方
+  const key = "xxxx-web";
   let encrypted = "";
   for (let i = 0; i < url.length; i++) {
     const charCode = url.charCodeAt(i);
@@ -193,7 +194,8 @@ function encryptUrl(url) {
 // 🔓 解密函数
 function decryptUrl(encrypted) {
   const decoded = atob(encrypted);
-  const key = "RM-CLAW-WEB";
+  // TODO: 合并代码时需要修改的地方
+  const key = "xxxx-web";
   let decrypted = "";
   for (let i = 0; i < decoded.length; i++) {
     const charCode = decoded.charCodeAt(i);
@@ -219,7 +221,8 @@ const getHrefId = (href: string) => {
       if (!custUid || !bbkOrgId) return "";
       return `2DF_${bbkOrgId}_${custUid}`;
     }
-    if (url.hostname === "cusinsightuixc.paasoa.cmbchina.cn") {
+    // TODO: 合并代码时需要修改的地方
+    if (url.hostname === "test.bbaaa.cn") {
       const match = hash.match(/\/homepage\/([A-Za-z0-9+\/=]+)/);
       const base64String = match[1];
       let decoded;
