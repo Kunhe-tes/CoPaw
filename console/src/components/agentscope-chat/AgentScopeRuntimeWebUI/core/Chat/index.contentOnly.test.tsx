@@ -3,6 +3,10 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { ChatContentOnlyProvider } from "@/components/agentscope-chat/ChatContentOnlyContext";
 import Chat from ".";
 
+const mocks = vi.hoisted(() => ({
+  useChatAnywhereSessionLoader: vi.fn(() => false),
+}));
+
 vi.mock("@/components/agentscope-chat", () => ({
   useProviderContext: () => ({
     getPrefixCls: (name: string) => `copaw-${name}`,
@@ -21,7 +25,7 @@ vi.mock("../Context/ChatAnywhereMessagesContext", () => ({
 }));
 
 vi.mock("../Context/ChatAnywhereSessionsContext", () => ({
-  useChatAnywhereSessionLoader: vi.fn(),
+  useChatAnywhereSessionLoader: mocks.useChatAnywhereSessionLoader,
 }));
 
 vi.mock("./hooks/useChatController", () => ({
@@ -36,7 +40,11 @@ vi.mock("./Input", () => ({
 }));
 
 vi.mock("./MessageList", () => ({
-  default: () => <div data-testid="message-list" />,
+  default: ({ sessionNotFound }: { sessionNotFound?: boolean }) => (
+    <div data-testid="message-list">
+      {sessionNotFound ? "not-found" : "available"}
+    </div>
+  ),
 }));
 
 vi.mock("./styles", () => ({
@@ -46,6 +54,8 @@ vi.mock("./styles", () => ({
 describe("Chat content-only composition", () => {
   afterEach(() => {
     cleanup();
+    mocks.useChatAnywhereSessionLoader.mockReset();
+    mocks.useChatAnywhereSessionLoader.mockReturnValue(false);
   });
 
   it("keeps the normal input mounted for interactive chat", () => {
@@ -53,16 +63,20 @@ describe("Chat content-only composition", () => {
 
     expect(screen.getByTestId("message-list")).toBeInTheDocument();
     expect(screen.getByTestId("chat-input")).toBeInTheDocument();
+    expect(mocks.useChatAnywhereSessionLoader).toHaveBeenCalledWith(false);
   });
 
   it("does not mount the input or its paste/upload listeners in content-only mode", () => {
+    mocks.useChatAnywhereSessionLoader.mockReturnValue(true);
+
     render(
       <ChatContentOnlyProvider enabled>
         <Chat />
       </ChatContentOnlyProvider>,
     );
 
-    expect(screen.getByTestId("message-list")).toBeInTheDocument();
+    expect(screen.getByTestId("message-list")).toHaveTextContent("not-found");
     expect(screen.queryByTestId("chat-input")).not.toBeInTheDocument();
+    expect(mocks.useChatAnywhereSessionLoader).toHaveBeenCalledWith(true);
   });
 });
