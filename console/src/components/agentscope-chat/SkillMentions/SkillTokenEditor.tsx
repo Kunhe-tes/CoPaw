@@ -4,6 +4,7 @@ import React, {
   useLayoutEffect,
   useMemo,
   useRef,
+  useState,
 } from "react";
 import { SkillMentionMenu } from "./index";
 import { type SkillMentionsData, useSkillMentions } from "./useSkillMentions";
@@ -72,7 +73,10 @@ function previousTokenAtCaret(editor: HTMLDivElement): HTMLElement | null {
     node = editor.childNodes[range.startOffset - 1];
   } else if (
     range.startContainer.nodeType === Node.TEXT_NODE &&
-    range.startOffset === 0
+    range.startOffset <= 1 &&
+    /^\s*$/.test(
+      (range.startContainer.textContent || "").slice(0, range.startOffset),
+    )
   ) {
     node = range.startContainer.previousSibling;
   }
@@ -165,6 +169,8 @@ export const SkillTokenEditor = forwardRef<
     className,
     disabled = false,
     onKeyDown,
+    onCompositionEnd,
+    onCompositionStart,
     onValueChange,
     placeholder,
     readOnly = false,
@@ -178,6 +184,8 @@ export const SkillTokenEditor = forwardRef<
   const editorRef = useRef<HTMLDivElement>(null);
   const rootRef = useRef<HTMLDivElement>(null);
   const placeCaretAtEndRef = useRef(false);
+  const isComposingRef = useRef(false);
+  const [compositionVersion, setCompositionVersion] = useState(0);
   const tokenParts = useMemo(
     () => getTokenParts(value, skillMentions.selected),
     [skillMentions.selected, value],
@@ -192,7 +200,7 @@ export const SkillTokenEditor = forwardRef<
 
   useLayoutEffect(() => {
     const editor = editorRef.current;
-    if (!editor) {
+    if (!editor || isComposingRef.current) {
       return;
     }
 
@@ -204,7 +212,7 @@ export const SkillTokenEditor = forwardRef<
     if (document.activeElement === editor) {
       setCaretOffset(editor, caretOffset ?? value.length);
     }
-  }, [tokenParts, value]);
+  }, [compositionVersion, tokenParts, value]);
 
   useEffect(() => {
     if (!mentionMenuOpen) {
@@ -227,12 +235,19 @@ export const SkillTokenEditor = forwardRef<
     skillMentions.onChange(
       skillMentions.selected.filter((_, index) => index !== selectionIndex),
     );
-    onValueChange(
-      tokenParts
-        .filter((part) => part.selectionIndex !== selectionIndex)
-        .map((part) => part.value)
-        .join(""),
+    const tokenPartIndex = tokenParts.findIndex(
+      (part) => part.selectionIndex === selectionIndex,
     );
+    const nextParts = tokenParts.flatMap((part, index) => {
+      if (part.selectionIndex === selectionIndex) {
+        return [];
+      }
+      if (index === tokenPartIndex + 1 && part.kind === "text") {
+        return [{ ...part, value: part.value.replace(/^\s/, "") }];
+      }
+      return [part];
+    });
+    onValueChange(nextParts.map((part) => part.value).join(""));
   };
 
   return (
@@ -254,6 +269,15 @@ export const SkillTokenEditor = forwardRef<
         role="textbox"
         suppressContentEditableWarning
         style={style}
+        onCompositionStart={(event) => {
+          isComposingRef.current = true;
+          onCompositionStart?.(event);
+        }}
+        onCompositionEnd={(event) => {
+          isComposingRef.current = false;
+          onCompositionEnd?.(event);
+          setCompositionVersion((version) => version + 1);
+        }}
         onInput={(event) => {
           const editor = event.currentTarget;
           const nextValue = editor.textContent || "";

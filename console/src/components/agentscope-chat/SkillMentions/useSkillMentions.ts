@@ -149,7 +149,7 @@ export function useSkillMentions({
 
   const handleKeyDown = useCallback(
     (event: KeyboardEvent<HTMLElement>) => {
-      if (!open || event.nativeEvent.isComposing) {
+      if (!openRef.current || event.nativeEvent.isComposing) {
         return;
       }
 

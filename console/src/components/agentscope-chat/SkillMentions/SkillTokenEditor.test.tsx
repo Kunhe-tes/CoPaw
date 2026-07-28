@@ -1,8 +1,35 @@
+import React, { useState } from "react";
 import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { SkillTokenEditor } from "./SkillTokenEditor";
 
-const items = [{ name: "browser", description: "Use a browser" }];
+const items = [
+  { name: "browser", description: "Use a browser" },
+  { name: "Build", description: "Build an app" },
+];
+
+function ControlledTokenEditor({
+  initialValue = "",
+}: {
+  initialValue?: string;
+}) {
+  const [selected, setSelected] = useState<string[]>([]);
+  const [value, setValue] = useState(initialValue);
+
+  return (
+    <SkillTokenEditor
+      aria-label="消息"
+      value={value}
+      skillMentions={{
+        items,
+        selected,
+        onChange: setSelected,
+        onOpen: () => undefined,
+      }}
+      onValueChange={setValue}
+    />
+  );
+}
 
 describe("SkillTokenEditor", () => {
   afterEach(cleanup);
@@ -85,6 +112,68 @@ describe("SkillTokenEditor", () => {
     fireEvent.keyDown(editor, { key: "Backspace" });
 
     expect(onChange).toHaveBeenCalledWith([]);
+  });
+
+  it("removes an immediately preceding token when the caret follows its trailing space", () => {
+    const onChange = vi.fn();
+    const onValueChange = vi.fn();
+    render(
+      <SkillTokenEditor
+        aria-label="消息"
+        value="@browser "
+        skillMentions={{
+          items,
+          selected: ["browser"],
+          onChange,
+          onOpen: vi.fn(),
+        }}
+        onValueChange={onValueChange}
+      />,
+    );
+
+    const editor = screen.getByRole("textbox", { name: "消息" });
+    const range = document.createRange();
+    range.setStart(editor.lastChild!, 1);
+    range.collapse(true);
+    const selection = window.getSelection();
+    selection?.removeAllRanges();
+    selection?.addRange(range);
+
+    fireEvent.keyDown(editor, { key: "Backspace" });
+
+    expect(onChange).toHaveBeenCalledWith([]);
+    expect(onValueChange).toHaveBeenCalledWith("");
+  });
+
+  it("keeps composed Chinese text intact until IME composition ends", () => {
+    render(<ControlledTokenEditor />);
+
+    const editor = screen.getByRole("textbox", { name: "消息" });
+    fireEvent.compositionStart(editor);
+    editor.textContent = "中文";
+    fireEvent.input(editor);
+
+    expect(editor.textContent).toBe("中文");
+    fireEvent.compositionEnd(editor);
+    expect(editor.textContent).toBe("中文");
+  });
+
+  it("moves the active skill row with ArrowDown while the panel is open", () => {
+    render(<ControlledTokenEditor />);
+
+    const editor = screen.getByRole("textbox", { name: "消息" });
+    editor.textContent = "@";
+    fireEvent.input(editor);
+    fireEvent.keyDown(editor, { key: "ArrowDown" });
+
+    expect(screen.getByRole("option", { name: /browser/ })).toHaveAttribute(
+      "aria-selected",
+      "false",
+    );
+    expect(screen.getByRole("option", { name: /Build/ })).toHaveAttribute(
+      "aria-selected",
+      "true",
+    );
   });
 
   it("synchronizes structured selection after a native token deletion", () => {

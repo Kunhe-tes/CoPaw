@@ -106,6 +106,21 @@ describe("SkillMentions", () => {
     );
   });
 
+  it("keeps skill descriptions inline to avoid excessive empty panel width", () => {
+    render(
+      <SkillMentionMenu
+        activeIndex={0}
+        open
+        items={[items[0]]}
+        onSelect={vi.fn()}
+      />,
+    );
+
+    expect(screen.getByText("Use a browser")).not.toHaveStyle({
+      display: "block",
+    });
+  });
+
   it("selects the mention at the caret instead of requiring it at the text end", () => {
     render(<MentionHarness />);
 

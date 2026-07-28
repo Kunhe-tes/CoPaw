@@ -49,7 +49,7 @@ export function SkillMentionMenu({
   const activeItemRef = useRef<HTMLButtonElement>(null);
 
   useEffect(() => {
-    activeItemRef.current?.scrollIntoView({ block: "nearest" });
+    activeItemRef.current?.scrollIntoView?.({ block: "nearest" });
   }, [activeIndex]);
 
   if (!open) {
@@ -68,7 +68,7 @@ export function SkillMentionMenu({
         gap: 4,
         maxHeight: 420,
         overflowY: "auto",
-        padding: 8,
+        padding: 6,
       }}
     >
       {loading ? (
@@ -96,7 +96,7 @@ export function SkillMentionMenu({
               display: "flex",
               height: "auto",
               minHeight: 52,
-              padding: "8px 10px",
+              padding: "8px 6px",
               textAlign: "left",
             }}
             onMouseDown={(event) => event.preventDefault()}
@@ -124,7 +124,7 @@ export function SkillMentionMenu({
             <span style={{ minWidth: 0 }}>
               <strong>{item.name}</strong>
               {item.description ? (
-                <span style={{ color: "#4B5563", display: "block" }}>
+                <span style={{ color: "#6B7280", marginLeft: 8 }}>
                   {item.description}
                 </span>
               ) : null}

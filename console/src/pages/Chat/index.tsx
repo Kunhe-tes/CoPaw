@@ -546,6 +546,11 @@ export default function ChatPage() {
     setSessionLoading,
     currentSessionId: activeSessionId,
   } = useChatAnywhereSessionsState();
+
+  useEffect(() => {
+    setSelectedSkillNames([]);
+    pendingSelectedSkillNamesRef.current = [];
+  }, [activeSessionId, chatId]);
   const sourceSystemConfig = useSourceSystemConfigStore(
     (state) => state.config,
   );
