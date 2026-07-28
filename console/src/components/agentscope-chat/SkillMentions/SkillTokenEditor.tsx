@@ -394,7 +394,8 @@ export const SkillTokenEditor = forwardRef<
       <div
         id="context-reference-menu"
         style={{
-          bottom: "calc(100% + 12px)",
+          bottom: "calc(100% + 3px)",
+          filter: "drop-shadow(0 5px 7px rgba(35, 31, 27, 0.06))",
           left: 0,
           position: "absolute",
           right: 0,

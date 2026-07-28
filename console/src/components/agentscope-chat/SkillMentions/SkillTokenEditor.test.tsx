@@ -230,6 +230,16 @@ describe("SkillTokenEditor", () => {
     expect(document.activeElement).toBe(editor);
     expect(screen.getByText("@browser")).toBeInTheDocument();
   });
+  it("positions the context-reference menu 3px above the editor", () => {
+    render(<ControlledTokenEditor />);
+    const editor = screen.getByRole("textbox", { name: "消息" });
+    editor.textContent = "@";
+    fireEvent.input(editor);
+
+    expect(document.getElementById("context-reference-menu")).toHaveStyle({
+      bottom: "calc(100% + 3px)",
+    });
+  });
   it("restores editor focus after a clicked option took focus", () => {
     render(<ControlledTokenEditor />);
     const editor = screen.getByRole("textbox", { name: "消息" });
