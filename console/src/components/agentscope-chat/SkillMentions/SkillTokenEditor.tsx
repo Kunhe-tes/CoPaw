@@ -22,9 +22,12 @@ interface TokenPart {
 }
 
 const tokenIcons = {
-  mcp_tool: { label: "MCP 工具", text: "⌘" },
-  skill: { label: "技能", text: "⚡" },
-  workspace_file: { label: "文件", text: "▣" },
+  mcp_tool: {
+    label: "MCP 工具",
+    path: "M5 2.5a2.5 2.5 0 0 0 0 5h6a2.5 2.5 0 1 1 0 5H5a2.5 2.5 0 1 1 0-5h6a2.5 2.5 0 1 0 0-5z",
+  },
+  skill: { label: "技能", path: "M9.3 1 2.7 9H7l-1.2 6 7.5-9H9z" },
+  workspace_file: { label: "文件", path: "M4 1.5h5l3 3v10H4zM9 1.5v3h3" },
 } as const;
 
 export interface SkillTokenEditorProps
@@ -174,7 +177,6 @@ function replaceEditorContents(editor: HTMLDivElement, parts: TokenPart[]) {
     const iconDetails = tokenIcons[part.referenceType || "skill"];
     icon.setAttribute("aria-label", iconDetails.label);
     icon.setAttribute("role", "img");
-    icon.textContent = iconDetails.text;
     icon.style.color =
       part.referenceType === "mcp_tool"
         ? "#2F7D5B"
@@ -182,10 +184,23 @@ function replaceEditorContents(editor: HTMLDivElement, parts: TokenPart[]) {
         ? "#A56A24"
         : "#3769FC";
     icon.style.display = "inline-flex";
-    icon.style.fontSize = "11px";
-    icon.style.fontWeight = "700";
-    icon.style.lineHeight = "1";
+    icon.style.height = "11px";
     icon.style.marginRight = "3px";
+    icon.style.width = "11px";
+    const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+    svg.setAttribute("aria-hidden", "true");
+    svg.setAttribute("fill", "none");
+    svg.setAttribute("height", "11");
+    svg.setAttribute("stroke", "currentColor");
+    svg.setAttribute("stroke-linecap", "round");
+    svg.setAttribute("stroke-linejoin", "round");
+    svg.setAttribute("stroke-width", "1.5");
+    svg.setAttribute("viewBox", "0 0 16 16");
+    svg.setAttribute("width", "11");
+    const path = document.createElementNS("http://www.w3.org/2000/svg", "path");
+    path.setAttribute("d", iconDetails.path);
+    svg.append(path);
+    icon.append(svg);
     token.append(icon, document.createTextNode(part.value));
     fragment.append(token);
   }
@@ -249,12 +264,16 @@ export const SkillTokenEditor = forwardRef<
       return;
     }
 
-    const caretOffset = placeCaretAtEndRef.current
+    const shouldPlaceCaretAtEnd = placeCaretAtEndRef.current;
+    const caretOffset = shouldPlaceCaretAtEnd
       ? value.length
       : getCaretOffset(editor);
     placeCaretAtEndRef.current = false;
     replaceEditorContents(editor, tokenParts);
-    if (document.activeElement === editor) {
+    if (shouldPlaceCaretAtEnd) {
+      editor.focus({ preventScroll: true });
+    }
+    if (shouldPlaceCaretAtEnd || document.activeElement === editor) {
       setCaretOffset(editor, caretOffset ?? value.length);
     }
   }, [compositionVersion, tokenParts, value]);

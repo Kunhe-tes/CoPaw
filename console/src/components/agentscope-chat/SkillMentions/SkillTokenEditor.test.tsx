@@ -56,6 +56,24 @@ function ControlledTokenEditor() {
   );
 }
 
+function SelectedTokenEditor() {
+  const [selected, setSelected] = useState<SkillMentionItem[]>([items[1]]);
+  const [value, setValue] = useState("@docs/search ");
+  return (
+    <SkillTokenEditor
+      aria-label="消息"
+      value={value}
+      skillMentions={{
+        items,
+        selected,
+        onChange: setSelected,
+        onOpen: () => undefined,
+      }}
+      onValueChange={setValue}
+    />
+  );
+}
+
 describe("SkillTokenEditor", () => {
   afterEach(cleanup);
   it("renders typed references as atomic tokens", () => {
@@ -111,6 +129,19 @@ describe("SkillTokenEditor", () => {
       />,
     );
     expect(screen.getByRole("img", { name: "MCP 工具" })).toBeInTheDocument();
+  });
+  it("keeps a token icon out of editor text while ordinary text is entered", () => {
+    render(<SelectedTokenEditor />);
+    const editor = screen.getByRole("textbox", { name: "消息" });
+    expect(editor.textContent).toBe("@docs/search ");
+
+    editor.append(document.createTextNode("后续文本"));
+    fireEvent.input(editor);
+
+    expect(editor).toHaveTextContent("@docs/search 后续文本");
+    expect(document.querySelectorAll("[data-skill-token=true]")).toHaveLength(
+      1,
+    );
   });
   it("keeps a file name containing spaces as one atomic token", () => {
     render(
@@ -193,5 +224,22 @@ describe("SkillTokenEditor", () => {
     fireEvent.keyDown(editor, { key: "Enter" });
     expect(document.activeElement).toBe(editor);
     expect(screen.getByText("@browser")).toBeInTheDocument();
+  });
+  it("restores editor focus after a clicked option took focus", () => {
+    render(<ControlledTokenEditor />);
+    const editor = screen.getByRole("textbox", { name: "消息" });
+    editor.focus();
+    editor.textContent = "@";
+    const range = document.createRange();
+    range.selectNodeContents(editor);
+    range.collapse(false);
+    window.getSelection()?.removeAllRanges();
+    window.getSelection()?.addRange(range);
+    fireEvent.input(editor);
+    const option = screen.getByRole("option", { name: /^browser/ });
+    option.focus();
+    fireEvent.click(option);
+
+    expect(document.activeElement).toBe(editor);
   });
 });
