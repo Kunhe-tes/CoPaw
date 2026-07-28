@@ -173,9 +173,51 @@ describe("SkillMentions", () => {
     expect(
       screen.getByRole("option", { name: /^browser/ }),
     ).toBeInTheDocument();
+    expect(screen.getByRole("listbox")).toHaveAttribute("aria-busy", "true");
+  });
+
+  it("delays the loading indicator and keeps it visible briefly", () => {
+    vi.useFakeTimers();
+    const { rerender } = render(
+      <SkillMentionMenu
+        activeIndex={0}
+        open
+        items={items}
+        loading
+        onSelect={vi.fn()}
+      />,
+    );
+
+    expect(
+      screen.queryByRole("status", { name: "加载上下文引用中…" }),
+    ).toBeNull();
+    act(() => vi.advanceTimersByTime(249));
+    expect(
+      screen.queryByRole("status", { name: "加载上下文引用中…" }),
+    ).toBeNull();
+
+    act(() => vi.advanceTimersByTime(1));
     expect(
       screen.getByRole("status", { name: "加载上下文引用中…" }),
     ).toBeInTheDocument();
+
+    rerender(
+      <SkillMentionMenu
+        activeIndex={0}
+        open
+        items={items}
+        onSelect={vi.fn()}
+      />,
+    );
+    act(() => vi.advanceTimersByTime(149));
+    expect(
+      screen.getByRole("status", { name: "加载上下文引用中…" }),
+    ).toBeInTheDocument();
+    act(() => vi.advanceTimersByTime(1));
+    expect(
+      screen.queryByRole("status", { name: "加载上下文引用中…" }),
+    ).toBeNull();
+    vi.useRealTimers();
   });
 
   it("keeps the no-results layout mounted through a non-matching refresh", () => {

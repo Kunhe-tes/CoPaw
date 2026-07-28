@@ -6,7 +6,7 @@ import {
   ThunderboltOutlined,
 } from "@ant-design/icons";
 import { Button, Flex, Tag } from "antd";
-import { useEffect, useMemo, useRef } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import {
   contextReferenceText,
   type SkillMentionItem,
@@ -54,6 +54,41 @@ function ReferenceIcon({ type }: { type: SkillMentionItem["type"] }) {
   return <ThunderboltOutlined />;
 }
 
+const LOADING_INDICATOR_DELAY_MS = 250;
+const LOADING_INDICATOR_MIN_VISIBLE_MS = 150;
+
+function useDelayedLoadingIndicator(loading: boolean) {
+  const [visible, setVisible] = useState(false);
+  const visibleSinceRef = useRef<number | null>(null);
+
+  useEffect(() => {
+    let timer: ReturnType<typeof window.setTimeout> | undefined;
+    if (loading) {
+      if (!visible) {
+        timer = window.setTimeout(() => {
+          visibleSinceRef.current = Date.now();
+          setVisible(true);
+        }, LOADING_INDICATOR_DELAY_MS);
+      }
+    } else if (visible) {
+      const elapsed = Date.now() - (visibleSinceRef.current ?? Date.now());
+      timer = window.setTimeout(
+        () => {
+          visibleSinceRef.current = null;
+          setVisible(false);
+        },
+        Math.max(0, LOADING_INDICATOR_MIN_VISIBLE_MS - elapsed),
+      );
+    }
+
+    return () => {
+      if (timer) window.clearTimeout(timer);
+    };
+  }, [loading, visible]);
+
+  return visible;
+}
+
 export function SkillMentionMenu({
   activeIndex,
   error = false,
@@ -65,6 +100,7 @@ export function SkillMentionMenu({
   onRetry,
 }: SkillMentionMenuProps) {
   const activeItemRef = useRef<HTMLButtonElement>(null);
+  const delayedLoading = useDelayedLoadingIndicator(loading);
   useEffect(() => {
     activeItemRef.current?.scrollIntoView?.({ block: "nearest" });
   }, [activeIndex]);
@@ -79,7 +115,8 @@ export function SkillMentionMenu({
     [items],
   );
   const showEmptyState = !grouped.length && (!loading || Boolean(query));
-  const showLoadingIndicator = loading && !error && (grouped.length || !query);
+  const showLoadingIndicator =
+    delayedLoading && !error && (grouped.length || !query);
   if (!open) return null;
   return (
     <Flex
