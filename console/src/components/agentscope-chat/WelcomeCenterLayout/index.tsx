@@ -10,11 +10,8 @@ import FeaturedCases from "../FeaturedCases";
 import CaseDetailDrawer from "../CaseDetailDrawer";
 import { featuredCasesApi } from "@/api/modules/featuredCases";
 import type { FeaturedCase } from "@/api/types/featuredCases";
-import { SkillMentionMenu, SkillMentionTags } from "../SkillMentions";
-import {
-  useSkillMentions,
-  type SkillMentionsData,
-} from "../SkillMentions/useSkillMentions";
+import type { SkillMentionsData } from "../SkillMentions/useSkillMentions";
+import { SkillTokenEditor } from "../SkillMentions/SkillTokenEditor";
 import sendIcon from "../../../assets/icons/send_highlight.svg";
 import { useTranslation } from "react-i18next";
 
@@ -65,15 +62,6 @@ export default function WelcomeCenterLayout(props: WelcomeCenterLayoutProps) {
     },
     [],
   );
-  const skillMentionController = useSkillMentions({
-    items: skillMentions?.items ?? [],
-    selected: skillMentions?.selected ?? [],
-    loading: skillMentions?.loading,
-    onOpen: skillMentions?.onOpen ?? (() => undefined),
-    onChange: skillMentions?.onChange ?? (() => undefined),
-    value: inputValue,
-    onValueChange: setCurrentInputValue,
-  });
 
   // 组件挂载时随机选择placeholder文案
   useEffect(() => {
@@ -114,25 +102,13 @@ export default function WelcomeCenterLayout(props: WelcomeCenterLayoutProps) {
   }, [beforeSubmit, onSubmit, setCurrentFileList, setCurrentInputValue]);
 
   const handleKeyDown = useCallback(
-    (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
-      if (skillMentions) {
-        skillMentionController.handleKeyDown(e);
-        if (
-          !e.nativeEvent.isComposing &&
-          (e.defaultPrevented ||
-            (e.key === "Enter" && skillMentionController.blocksSubmit))
-        ) {
-          e.preventDefault();
-          return;
-        }
-      }
-
+    (e: React.KeyboardEvent<HTMLElement>) => {
       if (e.key === "Enter" && !e.shiftKey && !e.nativeEvent.isComposing) {
         e.preventDefault();
         handleSend();
       }
     },
-    [handleSend, skillMentionController, skillMentions],
+    [handleSend],
   );
 
   const handleFillInput = useCallback(
@@ -251,22 +227,6 @@ export default function WelcomeCenterLayout(props: WelcomeCenterLayoutProps) {
 
         {/* Input Card with upload */}
         <div className="welcome-input-card">
-          {skillMentions ? (
-            <SkillMentionTags
-              selected={skillMentions.selected}
-              onRemove={skillMentionController.remove}
-            />
-          ) : null}
-
-          {skillMentions ? (
-            <SkillMentionMenu
-              open={skillMentionController.open}
-              items={skillMentionController.filteredItems}
-              loading={skillMentionController.loading}
-              onSelect={skillMentionController.select}
-            />
-          ) : null}
-
           {/* Attachment preview area */}
           {fileList.length > 0 && (
             <div style={{ marginBottom: -8, marginTop: -8, marginLeft: -20 }}>
@@ -277,22 +237,29 @@ export default function WelcomeCenterLayout(props: WelcomeCenterLayoutProps) {
             </div>
           )}
 
-          <Input.TextArea
-            className="welcome-input-placeholder"
-            value={inputValue}
-            onChange={(e) => {
-              if (skillMentions) {
-                skillMentionController.handleInputValueChange(e.target.value);
-              } else {
-                setCurrentInputValue(e.target.value);
-              }
-            }}
-            onKeyDown={handleKeyDown}
-            placeholder={randomPlaceholder}
-            autoSize={{ minRows: 1, maxRows: 5 }}
-            bordered={false}
-            disabled={isSubmitting}
-          />
+          {skillMentions ? (
+            <SkillTokenEditor
+              aria-label="消息"
+              className="welcome-input-placeholder welcome-skill-editor"
+              disabled={isSubmitting}
+              onKeyDown={handleKeyDown}
+              onValueChange={setCurrentInputValue}
+              placeholder={randomPlaceholder}
+              skillMentions={skillMentions}
+              value={inputValue}
+            />
+          ) : (
+            <Input.TextArea
+              className="welcome-input-placeholder"
+              value={inputValue}
+              onChange={(e) => setCurrentInputValue(e.target.value)}
+              onKeyDown={handleKeyDown}
+              placeholder={randomPlaceholder}
+              autoSize={{ minRows: 1, maxRows: 5 }}
+              bordered={false}
+              disabled={isSubmitting}
+            />
+          )}
           <div className="welcome-input-actions">
             <div className="welcome-input-actions-left">
               <Tooltip title="上传附件">

@@ -51,26 +51,33 @@ function renderSender() {
   return { input: screen.getByRole("textbox"), onChange, onOpen };
 }
 
+function setTokenEditorValue(input: HTMLElement, value: string) {
+  input.textContent = value;
+  fireEvent.input(input);
+}
+
 describe("Sender skill mentions", () => {
   afterEach(cleanup);
 
   it("does not select a mention when Enter commits an IME composition", () => {
     const { input, onChange } = renderSender();
 
-    fireEvent.change(input, { target: { value: "@br" } });
+    setTokenEditorValue(input, "@br");
     fireEvent.keyDown(input, { key: "Enter", isComposing: true });
 
     expect(onChange).not.toHaveBeenCalled();
-    expect(input).toHaveValue("@br");
+    expect(input).toHaveTextContent("@br");
   });
 
   it("uses the shared accessible menu and shows its no-match state", () => {
     const { input, onOpen } = renderSender();
 
-    fireEvent.change(input, { target: { value: "@missing" } });
+    setTokenEditorValue(input, "@missing");
 
     expect(onOpen).toHaveBeenCalledTimes(1);
-    expect(screen.getByRole("group", { name: "可用技能" })).toBeInTheDocument();
+    expect(
+      screen.getByRole("listbox", { name: "可用技能" }),
+    ).toBeInTheDocument();
     expect(screen.getByText("未找到匹配的技能")).toBeInTheDocument();
   });
 
@@ -89,12 +96,12 @@ describe("Sender skill mentions", () => {
     );
 
     const input = screen.getByRole("textbox");
-    fireEvent.change(input, { target: { value: "@missing" } });
+    setTokenEditorValue(input, "@missing");
     fireEvent.keyDown(input, { key: "Enter" });
 
     expect(onSubmit).toHaveBeenCalledTimes(1);
     expect(onSubmit).toHaveBeenCalledWith("@missing");
-    expect(input).toHaveValue("@missing");
+    expect(input).toHaveTextContent("@missing");
   });
 
   it("selects a matching skill instead of submitting on Enter", () => {
@@ -113,12 +120,12 @@ describe("Sender skill mentions", () => {
     );
 
     const input = screen.getByRole("textbox");
-    fireEvent.change(input, { target: { value: "@br" } });
+    setTokenEditorValue(input, "@br");
     fireEvent.keyDown(input, { key: "Enter" });
 
     expect(onChange).toHaveBeenCalledWith(["browser"]);
     expect(onSubmit).not.toHaveBeenCalled();
-    expect(input).toHaveValue(" ");
+    expect(input.textContent).toBe("@browser ");
   });
 
   it("does not submit while a loading skill menu has no matches", () => {
@@ -137,30 +144,97 @@ describe("Sender skill mentions", () => {
     );
 
     const input = screen.getByRole("textbox");
-    fireEvent.change(input, { target: { value: "@missing" } });
+    setTokenEditorValue(input, "@missing");
     fireEvent.keyDown(input, { key: "Enter" });
 
     expect(onSubmit).not.toHaveBeenCalled();
-    expect(input).toHaveValue("@missing");
+    expect(input).toHaveTextContent("@missing");
   });
 
   it("selects matching mentions by click and Enter", () => {
     const clickSender = renderSender();
 
-    fireEvent.change(clickSender.input, { target: { value: "请用 @br" } });
-    fireEvent.click(screen.getByRole("button", { name: /browser/ }));
+    setTokenEditorValue(clickSender.input, "请用 @br");
+    fireEvent.click(screen.getByRole("option", { name: /browser/ }));
 
     expect(clickSender.onOpen).toHaveBeenCalledTimes(1);
     expect(clickSender.onChange).toHaveBeenCalledWith(["browser"]);
-    expect(clickSender.input).toHaveValue("请用  ");
+    expect(clickSender.input.textContent).toBe("请用 @browser ");
 
     cleanup();
     const enterSender = renderSender();
-    fireEvent.change(enterSender.input, { target: { value: "@BU" } });
+    setTokenEditorValue(enterSender.input, "@BU");
     fireEvent.keyDown(enterSender.input, { key: "Enter" });
 
     expect(enterSender.onOpen).toHaveBeenCalledTimes(1);
     expect(enterSender.onChange).toHaveBeenCalledWith(["Build"]);
-    expect(enterSender.input).toHaveValue(" ");
+    expect(enterSender.input.textContent).toBe("@Build ");
+  });
+
+  it("does not activate slash-command suggestions while skill tags are enabled", () => {
+    render(
+      <Sender
+        suggestions={[{ label: "Help", value: "help" }]}
+        skillMentions={{
+          items: skills,
+          selected: [],
+          onOpen: vi.fn(),
+          onChange: vi.fn(),
+        }}
+      />,
+    );
+
+    const input = screen.getByRole("textbox");
+    setTokenEditorValue(input, "/help @");
+
+    expect(screen.queryByText("Help")).toBeNull();
+    expect(
+      screen.getByRole("listbox", { name: "可用技能" }),
+    ).toBeInTheDocument();
+  });
+
+  it("retains read-only, max-length, and shift-enter sender semantics", () => {
+    const onChange = vi.fn();
+    const onSubmit = vi.fn();
+    render(
+      <Sender
+        maxLength={3}
+        onChange={onChange}
+        onSubmit={onSubmit}
+        submitType="shiftEnter"
+        skillMentions={{
+          items: skills,
+          selected: [],
+          onOpen: vi.fn(),
+          onChange: vi.fn(),
+        }}
+      />,
+    );
+
+    const input = screen.getByRole("textbox");
+    setTokenEditorValue(input, "hello");
+    expect(onChange).toHaveBeenCalledWith("hel", undefined);
+
+    fireEvent.keyDown(input, { key: "Enter" });
+    expect(onSubmit).not.toHaveBeenCalled();
+    fireEvent.keyDown(input, { key: "Enter", shiftKey: true });
+    expect(onSubmit).toHaveBeenCalledWith("hel");
+
+    cleanup();
+    render(
+      <Sender
+        readOnly
+        skillMentions={{
+          items: skills,
+          selected: [],
+          onOpen: vi.fn(),
+          onChange: vi.fn(),
+        }}
+      />,
+    );
+    expect(screen.getByRole("textbox")).toHaveAttribute(
+      "contenteditable",
+      "false",
+    );
   });
 });

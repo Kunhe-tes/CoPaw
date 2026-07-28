@@ -5,6 +5,7 @@ import type {
 
 interface CreateWelcomeSkillMentionsOptions {
   effectiveSkills: SkillMentionItem[];
+  effectiveSkillsError?: boolean;
   effectiveSkillsLoading: boolean;
   isComposingRef: { current: boolean };
   loadEffectiveSkills: () => void;
@@ -15,6 +16,7 @@ interface CreateWelcomeSkillMentionsOptions {
 
 export function createWelcomeSkillMentions({
   effectiveSkills,
+  effectiveSkillsError,
   effectiveSkillsLoading,
   isComposingRef,
   loadEffectiveSkills,
@@ -36,10 +38,12 @@ export function createWelcomeSkillMentions({
     beforeSubmit,
     skillMentions: {
       items: effectiveSkills,
+      error: effectiveSkillsError ?? false,
       selected: selectedSkillNames,
       loading: effectiveSkillsLoading,
       onOpen: loadEffectiveSkills,
-      onChange: (names: string[]) => setSelectedSkillNames(names.slice(0, 5)),
+      onChange: setSelectedSkillNames,
+      onRetry: loadEffectiveSkills,
     },
   };
 }

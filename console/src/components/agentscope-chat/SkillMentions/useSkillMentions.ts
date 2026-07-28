@@ -9,9 +9,11 @@ export interface SkillMentionItem {
 export interface SkillMentionsData {
   items: SkillMentionItem[];
   selected: string[];
+  error?: boolean;
   loading?: boolean;
   onOpen: () => void;
   onChange: (names: string[]) => void;
+  onRetry?: () => void;
 }
 
 export interface UseSkillMentionsOptions extends SkillMentionsData {
@@ -20,7 +22,34 @@ export interface UseSkillMentionsOptions extends SkillMentionsData {
 }
 
 const trailingSkillMentionPattern = /(?:^|\s)@([^\s@]*)$/;
-const trailingMentionTokenPattern = /@([^\s@]*)$/;
+
+interface MentionRange {
+  end: number;
+  start: number;
+}
+
+function getMentionRange(
+  value: string,
+  caretOffset: number,
+): MentionRange | null {
+  const textBeforeCaret = value.slice(0, caretOffset);
+  const match = textBeforeCaret.match(trailingSkillMentionPattern);
+  if (!match) {
+    return null;
+  }
+
+  return {
+    end: caretOffset,
+    start: caretOffset - match[1].length - 1,
+  };
+}
+
+function compareSkillNames(left: SkillMentionItem, right: SkillMentionItem) {
+  return left.name.localeCompare(right.name, undefined, {
+    numeric: true,
+    sensitivity: "base",
+  });
+}
 
 export function useSkillMentions({
   items,
@@ -33,7 +62,9 @@ export function useSkillMentions({
 }: UseSkillMentionsOptions) {
   const [open, setOpen] = useState(false);
   const [query, setQuery] = useState("");
+  const [activeIndex, setActiveIndex] = useState(0);
   const openRef = useRef(false);
+  const mentionRangeRef = useRef<MentionRange | null>(null);
 
   const setMenuOpen = useCallback(
     (nextOpen: boolean) => {
@@ -52,25 +83,35 @@ export function useSkillMentions({
 
   const filteredItems = useMemo(() => {
     const normalizedQuery = query.toLowerCase();
-    return items.filter((item) =>
-      item.name.toLowerCase().includes(normalizedQuery),
-    );
+    return items
+      .filter((item) => {
+        const name = item.name.toLowerCase();
+        const description = item.description.toLowerCase();
+        return (
+          name.includes(normalizedQuery) ||
+          description.includes(normalizedQuery)
+        );
+      })
+      .sort(compareSkillNames);
   }, [items, query]);
   const blocksSubmit = open && (loading || filteredItems.length > 0);
 
   const close = useCallback(() => setMenuOpen(false), [setMenuOpen]);
 
   const handleInputValueChange = useCallback(
-    (nextValue: string) => {
+    (nextValue: string, caretOffset = nextValue.length) => {
       onValueChange(nextValue);
 
-      const match = nextValue.match(trailingSkillMentionPattern);
-      if (!match) {
+      const range = getMentionRange(nextValue, caretOffset);
+      if (!range) {
+        mentionRangeRef.current = null;
         setMenuOpen(false);
         return;
       }
 
-      setQuery(match[1].toLowerCase());
+      mentionRangeRef.current = range;
+      setQuery(nextValue.slice(range.start + 1, range.end).toLowerCase());
+      setActiveIndex(0);
       setMenuOpen(true);
     },
     [onValueChange, setMenuOpen],
@@ -83,7 +124,17 @@ export function useSkillMentions({
       }
 
       onChange([...selected, item.name]);
-      onValueChange(value.replace(trailingMentionTokenPattern, " "));
+      const range = mentionRangeRef.current;
+      if (!range) {
+        return;
+      }
+      const trailingText = value.slice(range.end);
+      const separator = /^\s/.test(trailingText) ? "" : " ";
+      onValueChange(
+        `${value.slice(0, range.start)}@${
+          item.name
+        }${separator}${trailingText}`,
+      );
       setMenuOpen(false);
     },
     [loading, onChange, onValueChange, selected, setMenuOpen, value],
@@ -97,7 +148,7 @@ export function useSkillMentions({
   );
 
   const handleKeyDown = useCallback(
-    (event: KeyboardEvent<HTMLTextAreaElement>) => {
+    (event: KeyboardEvent<HTMLElement>) => {
       if (!open || event.nativeEvent.isComposing) {
         return;
       }
@@ -108,15 +159,35 @@ export function useSkillMentions({
         return;
       }
 
-      if (event.key === "Enter" && filteredItems[0] && !loading) {
+      if (event.key === "ArrowDown" && filteredItems.length) {
         event.preventDefault();
-        select(filteredItems[0]);
+        setActiveIndex((current) =>
+          Math.min(current + 1, filteredItems.length - 1),
+        );
+        return;
+      }
+
+      if (event.key === "ArrowUp" && filteredItems.length) {
+        event.preventDefault();
+        setActiveIndex((current) => Math.max(current - 1, 0));
+        return;
+      }
+
+      if (event.key === "Enter" && filteredItems[activeIndex] && !loading) {
+        event.preventDefault();
+        select(filteredItems[activeIndex]);
+        return;
+      }
+
+      if (event.key === "Enter" && loading) {
+        event.preventDefault();
       }
     },
-    [filteredItems, loading, open, select, setMenuOpen],
+    [activeIndex, filteredItems, loading, open, select, setMenuOpen],
   );
 
   return {
+    activeIndex,
     blocksSubmit,
     close,
     filteredItems,

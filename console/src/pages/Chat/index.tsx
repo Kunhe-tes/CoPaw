@@ -342,7 +342,11 @@ function useIMEComposition(isChatActive: () => boolean) {
     const suppressImeEnter = (e: KeyboardEvent) => {
       if (!isChatActive()) return;
       const target = e.target as HTMLElement;
-      if (target?.tagName === "TEXTAREA" && e.key === "Enter" && !e.shiftKey) {
+      if (
+        (target?.tagName === "TEXTAREA" || target?.isContentEditable) &&
+        e.key === "Enter" &&
+        !e.shiftKey
+      ) {
         // e.isComposing is the standard flag; isComposingRef covers the
         // post-compositionend grace period needed by Safari.
         if (isComposingRef.current || e.isComposing) {
@@ -527,6 +531,7 @@ export default function ChatPage() {
     { name: string; description: string }[]
   >([]);
   const [effectiveSkillsLoading, setEffectiveSkillsLoading] = useState(false);
+  const [effectiveSkillsError, setEffectiveSkillsError] = useState(false);
   const pendingSelectedSkillNamesRef = useRef<string[]>([]);
   const dragCounterRef = useRef(0);
   const runtimeLoadingBridgeRef = useRef<RuntimeLoadingBridgeApi | null>(null);
@@ -551,10 +556,16 @@ export default function ChatPage() {
 
   const loadEffectiveSkills = useCallback(() => {
     setEffectiveSkillsLoading(true);
+    setEffectiveSkillsError(false);
     void skillApi
       .listEffectiveSkills()
-      .then(setEffectiveSkills)
-      .catch(() => setEffectiveSkills([]))
+      .then((skills) => {
+        setEffectiveSkills(skills);
+      })
+      .catch(() => {
+        setEffectiveSkills([]);
+        setEffectiveSkillsError(true);
+      })
       .finally(() => setEffectiveSkillsLoading(false));
   }, []);
 
@@ -1388,9 +1399,11 @@ export default function ChatPage() {
         // ==================== userId 统一整改结束 ====================
         stream: true,
         ...biz_params,
-        selected_skill_names: userText.startsWith("/")
-          ? []
-          : pendingSelectedSkillNamesRef.current,
+        selected_skill_names:
+          userText.startsWith("/") &&
+          pendingSelectedSkillNamesRef.current.length === 0
+            ? []
+            : pendingSelectedSkillNamesRef.current,
         file_url_network: resolveCurrentFileUrlNetwork(),
       };
       pendingSelectedSkillNamesRef.current = [];
@@ -1572,6 +1585,7 @@ export default function ChatPage() {
     const { beforeSubmit: handleBeforeSubmit, skillMentions } =
       createWelcomeSkillMentions({
         effectiveSkills,
+        effectiveSkillsError,
         effectiveSkillsLoading,
         isComposingRef,
         loadEffectiveSkills,
@@ -1757,6 +1771,7 @@ export default function ChatPage() {
     resolveRequestChatId,
     selectedSkillNames,
     effectiveSkills,
+    effectiveSkillsError,
     effectiveSkillsLoading,
     loadEffectiveSkills,
     taskProgress,

@@ -62,6 +62,11 @@ const skills = [
   { name: "Build", description: "Build an app" },
 ];
 
+function setTokenEditorValue(input: HTMLElement, value: string) {
+  input.textContent = value;
+  fireEvent.input(input);
+}
+
 describe("WelcomeCenterLayout", () => {
   afterEach(cleanup);
 
@@ -107,13 +112,15 @@ describe("WelcomeCenterLayout", () => {
     );
 
     const input = screen.getByRole("textbox");
-    fireEvent.change(input, { target: { value: "请用 @br" } });
+    setTokenEditorValue(input, "请用 @br");
 
-    expect(screen.getByRole("group", { name: "可用技能" })).toBeInTheDocument();
-    fireEvent.click(screen.getByRole("button", { name: /browser/ }));
+    expect(
+      screen.getByRole("listbox", { name: "可用技能" }),
+    ).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("option", { name: /browser/ }));
 
     expect(onChange).toHaveBeenCalledWith(["browser"]);
-    expect(input).toHaveValue("请用  ");
+    expect(input.textContent).toBe("请用 @browser ");
   });
 
   it("selects a matching skill with Enter without submitting", () => {
@@ -134,12 +141,12 @@ describe("WelcomeCenterLayout", () => {
     );
 
     const input = screen.getByRole("textbox");
-    fireEvent.change(input, { target: { value: "@BU" } });
+    setTokenEditorValue(input, "@BU");
     fireEvent.keyDown(input, { key: "Enter" });
 
     expect(onChange).toHaveBeenCalledWith(["Build"]);
     expect(onSubmit).not.toHaveBeenCalled();
-    expect(input).toHaveValue(" ");
+    expect(input.textContent).toBe("@Build ");
   });
 
   it("allows editing the skill query while the skill menu is open", () => {
@@ -157,7 +164,7 @@ describe("WelcomeCenterLayout", () => {
     );
 
     const input = screen.getByRole("textbox");
-    fireEvent.change(input, { target: { value: "@br" } });
+    setTokenEditorValue(input, "@br");
     const event = createEvent.keyDown(input, { key: "Backspace" });
     fireEvent(input, event);
 
@@ -182,13 +189,13 @@ describe("WelcomeCenterLayout", () => {
     );
 
     const input = screen.getByRole("textbox");
-    fireEvent.change(input, { target: { value: "@missing" } });
+    setTokenEditorValue(input, "@missing");
     const event = createEvent.keyDown(input, { key: "Enter" });
     fireEvent(input, event);
 
     expect(event.defaultPrevented).toBe(true);
     expect(onSubmit).not.toHaveBeenCalled();
-    expect(input).toHaveValue("@missing");
+    expect(input.textContent).toBe("@missing");
   });
 
   it("preserves Enter during IME composition while a matching skill menu is open", () => {
@@ -209,7 +216,7 @@ describe("WelcomeCenterLayout", () => {
     );
 
     const input = screen.getByRole("textbox");
-    fireEvent.change(input, { target: { value: "@br" } });
+    setTokenEditorValue(input, "@br");
     const event = createEvent.keyDown(input, {
       key: "Enter",
       isComposing: true,
@@ -219,28 +226,6 @@ describe("WelcomeCenterLayout", () => {
     expect(event.defaultPrevented).toBe(false);
     expect(onChange).not.toHaveBeenCalled();
     expect(onSubmit).not.toHaveBeenCalled();
-  });
-
-  it("removes selected skill tags through the shared tag control", () => {
-    const onChange = vi.fn();
-
-    render(
-      <WelcomeCenterLayout
-        greeting="你好"
-        onSubmit={vi.fn()}
-        skillMentions={{
-          items: skills,
-          selected: ["browser"],
-          onOpen: vi.fn(),
-          onChange,
-        }}
-      />,
-    );
-
-    expect(screen.getByText("@browser")).toBeInTheDocument();
-    fireEvent.click(screen.getByLabelText("Close"));
-
-    expect(onChange).toHaveBeenCalledWith([]);
   });
 
   it("awaits beforeSubmit before sending and clearing the welcome input", async () => {
