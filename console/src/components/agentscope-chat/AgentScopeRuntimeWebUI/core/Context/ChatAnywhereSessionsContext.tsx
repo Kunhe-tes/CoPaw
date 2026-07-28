@@ -15,6 +15,7 @@ import { useAsyncEffect } from "ahooks";
 import useChatAnywhereEventEmitter, {
   emit,
 } from "./useChatAnywhereEventEmitter";
+import { shouldShowContentOnlySessionNotFound } from "./contentOnlySessionError";
 import { getInitialSessionId } from "@/pages/Chat/sessionApi/initialSessionSelection";
 import { shouldApplySessionLoadResult } from "@/pages/Chat/sessionApi/sessionRaceGuard";
 
@@ -302,7 +303,9 @@ export function ChatAnywhereSessionsContextProvider(props: {
 /**
  * 会话切换时加载消息和判断重连的 hook，必须保证只挂载一次
  */
-export const useChatAnywhereSessionLoader = () => {
+export const useChatAnywhereSessionLoader = (
+  showContentOnlyNotFound = false,
+) => {
   const currentSessionId = useContextSelector(
     ChatAnywhereSessionsContext,
     (v) => v.currentSessionId,
@@ -320,17 +323,40 @@ export const useChatAnywhereSessionLoader = () => {
     ChatAnywhereSessionsContext,
     (v) => v.setSessionLoading,
   );
+  const [notFoundSessionId, setNotFoundSessionId] = React.useState<
+    string | undefined
+  >();
 
   useAsyncEffect(async () => {
-    await loadSessionMessages({
-      requestedSessionId: currentSessionId,
-      clearBeforeLoad: true,
-      options,
-      setMessages,
-      getCurrentSessionId,
-      setSessionLoading,
-    });
-  }, [currentSessionId]);
+    setNotFoundSessionId(undefined);
+
+    try {
+      await loadSessionMessages({
+        requestedSessionId: currentSessionId,
+        clearBeforeLoad: true,
+        options,
+        setMessages,
+        getCurrentSessionId,
+        setSessionLoading,
+      });
+    } catch (error) {
+      if (
+        shouldShowContentOnlySessionNotFound({
+          enabled: showContentOnlyNotFound,
+          error,
+          requestedSessionId: currentSessionId,
+          currentSessionId: getCurrentSessionId(),
+        })
+      ) {
+        setNotFoundSessionId(currentSessionId);
+        return;
+      }
+
+      throw error;
+    }
+  }, [currentSessionId, showContentOnlyNotFound]);
+
+  return Boolean(currentSessionId && notFoundSessionId === currentSessionId);
 };
 
 /**

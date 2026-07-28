@@ -12,7 +12,7 @@ export default function Chat() {
   const isContentOnly = useChatContentOnly();
   const prefixCls = useProviderContext().getPrefixCls("chat-anywhere-chat");
   const { handleSubmit, handleCancel } = useChatController();
-  useChatAnywhereSessionLoader();
+  const sessionNotFound = useChatAnywhereSessionLoader(isContentOnly);
   // ==================== 首页改版 (Kun He) ====================
   // 当无消息时（欢迎态），隐藏底部输入框，因为欢迎页自带输入卡片
   const messages = useContextSelector(
@@ -26,7 +26,10 @@ export default function Chat() {
     <>
       <Style />
       <div className={prefixCls}>
-        <MessageList onSubmit={handleSubmit} />
+        <MessageList
+          onSubmit={handleSubmit}
+          sessionNotFound={sessionNotFound}
+        />
         {/* Input always rendered to handle pasteFile events, visually hidden when no messages */}
         {!isContentOnly && (
           <div style={{ display: hasMessages ? "block" : "none" }}>
