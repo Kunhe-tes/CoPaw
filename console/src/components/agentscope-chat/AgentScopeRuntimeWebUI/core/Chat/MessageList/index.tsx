@@ -64,18 +64,19 @@ export default function MessageList(props: {
         <Result
           status="404"
           title="会话不存在"
-          subTitle="当前会话可能已被删除，或访问链接已经失效。"
+          subTitle="当前会话可能已被删除，请重新选择会话"
         />
       </div>
     );
   }
 
-  if (safeMessages.length === 0)
+  if (safeMessages.length === 0) {
     return (
       <div className={cls(prefixCls, `${prefixCls}-welcome`)}>
         {!isContentOnly && <Welcome onSubmit={props.onSubmit} />}
       </div>
     );
+  }
 
   return (
     <Bubble.List
