@@ -113,6 +113,11 @@ describe("SkillTokenEditor", () => {
     expect(tokens[0]).toHaveAttribute("data-reference-type", "skill");
     expect(tokens[1]).toHaveAttribute("data-reference-type", "mcp_tool");
     expect(tokens[2]).toHaveAttribute("data-reference-type", "workspace_file");
+    expect(
+      tokens[0].querySelector("svg[data-icon=thunderbolt]"),
+    ).not.toBeNull();
+    expect(tokens[1].querySelector("svg[data-icon=api]")).not.toBeNull();
+    expect(tokens[2].querySelector("svg[data-icon=file]")).not.toBeNull();
   });
   it("uses a named icon instead of a dot before an MCP token", () => {
     render(
