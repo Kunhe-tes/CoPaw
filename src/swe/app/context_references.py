@@ -257,7 +257,7 @@ async def _list_client_tools(
     tools = getattr(result, "tools", result) or []
     return [
         MCPToolContextReference(
-            id=_mcp_tool_reference_id(
+            id=build_mcp_tool_reference_id(
                 server,
                 str(getattr(tool, "name", "")),
             ),
@@ -271,7 +271,7 @@ async def _list_client_tools(
     ]
 
 
-def _mcp_tool_reference_id(server: str, name: str) -> str:
+def build_mcp_tool_reference_id(server: str, name: str) -> str:
     """Encode the two independently user-controlled identity parts safely."""
     return "mcp_tool:" + json.dumps(
         [server, name],

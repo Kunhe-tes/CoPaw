@@ -451,6 +451,19 @@ def _extract_payload_fields_from_mapping(
     )
 
 
+def _extract_context_references(
+    request_data: Union[AgentRequest, dict],
+) -> Any:
+    """Keep structured one-turn context references intact for the runner."""
+    if isinstance(request_data, AgentRequest):
+        channel_meta = getattr(request_data, "channel_meta", None) or {}
+        value = getattr(request_data, "context_references", None)
+        if value is None and isinstance(channel_meta, dict):
+            value = channel_meta.get("context_references")
+        return value
+    return request_data.get("context_references")
+
+
 def _extract_session_and_payload(request_data: Union[AgentRequest, dict]):
     """Extract run_key (ChatSpec.id), session_id, and native payload.
 
@@ -503,6 +516,9 @@ def _extract_session_and_payload(request_data: Union[AgentRequest, dict]):
         native_payload["meta"]["file_url_network"] = file_url_network
     if selected_skill_names is not None:
         native_payload["meta"]["selected_skill_names"] = selected_skill_names
+    context_references = _extract_context_references(request_data)
+    if context_references is not None:
+        native_payload["meta"]["context_references"] = context_references
     if user_name:
         native_payload["meta"]["user_name"] = user_name
     if bbk_id:

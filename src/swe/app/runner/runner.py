@@ -1624,6 +1624,15 @@ def _request_selected_skill_names(request: AgentRequest) -> list[object]:
     return list(value) if isinstance(value, list) else []
 
 
+def _request_context_references(request: AgentRequest) -> list[object]:
+    """Read the Console's typed, one-turn context references."""
+    channel_meta = getattr(request, "channel_meta", None) or {}
+    value = getattr(request, "context_references", None)
+    if value is None and isinstance(channel_meta, dict):
+        value = channel_meta.get("context_references")
+    return list(value) if isinstance(value, list) else []
+
+
 def _request_file_url_network(request: AgentRequest) -> str:
     """从请求属性和 channel_meta 中读取静态文件访问网络。"""
     from ...config.context import normalize_file_url_network
@@ -2950,24 +2959,10 @@ class AgentRunner(Runner):
         from ..source_system_config.runtime import (
             get_system_prompt_injections,
         )
-        from .skill_selection import build_skill_use_directives
-
-        selected_skill_directives = build_skill_use_directives(
-            workspace_dir=Path(self.workspace_dir or WORKING_DIR),
-            channel=channel,
-            selected_skill_names=_request_selected_skill_names(request),
-        )
-
-        env_context = _with_system_prompt_injections(
-            env_context,
-            _merge_system_prompt_injections(
-                get_system_prompt_injections(),
-                _request_system_prompt_injections(request),
-                [
-                    directive.render()
-                    for directive in selected_skill_directives
-                ],
-            ),
+        from .context_references import build_context_reference_directives
+        from .skill_selection import (
+            SkillUseDirective,
+            build_skill_use_directives,
         )
 
         agent_config = (
@@ -2977,6 +2972,43 @@ class AgentRunner(Runner):
                 self.agent_id,
                 tenant_id=self.tenant_id,
             )
+        )
+        context_reference_directives = (
+            await build_context_reference_directives(
+                workspace_dir=Path(self.workspace_dir or WORKING_DIR),
+                channel=channel,
+                agent_config=agent_config,
+                references=_request_context_references(request),
+            )
+        )
+        selected_context_skill_names = {
+            directive.name
+            for directive in context_reference_directives
+            if isinstance(directive, SkillUseDirective)
+        }
+        selected_skill_directives = build_skill_use_directives(
+            workspace_dir=Path(self.workspace_dir or WORKING_DIR),
+            channel=channel,
+            selected_skill_names=[
+                name
+                for name in _request_selected_skill_names(request)
+                if name not in selected_context_skill_names
+            ],
+        )
+
+        env_context = _with_system_prompt_injections(
+            env_context,
+            _merge_system_prompt_injections(
+                get_system_prompt_injections(),
+                _request_system_prompt_injections(request),
+                [
+                    directive.render()
+                    for directive in [
+                        *selected_skill_directives,
+                        *context_reference_directives,
+                    ]
+                ],
+            ),
         )
         tenant_hooks = (
             preflight.tenant_hooks
