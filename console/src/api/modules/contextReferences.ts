@@ -10,6 +10,8 @@ export interface ContextReferencesResponse {
 export const contextReferencesApi = {
   discover: (query = "") =>
     request<ContextReferencesResponse>(
-      `/console/context-references${query ? `?q=${encodeURIComponent(query)}` : ""}`,
+      `/console/context-references${
+        query ? `?q=${encodeURIComponent(query)}` : ""
+      }`,
     ),
 };
