@@ -153,8 +153,43 @@ describe("SkillMentions", () => {
         onSelect={vi.fn()}
       />,
     );
+    expect(screen.getByTestId("context-reference-empty-state")).toHaveStyle({
+      justifyContent: "center",
+    });
     expect(screen.getByText("未找到匹配的上下文引用")).toBeInTheDocument();
     expect(screen.queryByText("技能")).toBeNull();
+  });
+
+  it("keeps result rows mounted while a refresh is loading", () => {
+    render(
+      <SkillMentionMenu
+        activeIndex={0}
+        open
+        items={items}
+        loading
+        onSelect={vi.fn()}
+      />,
+    );
+    expect(
+      screen.getByRole("option", { name: /^browser/ }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("status", { name: "加载上下文引用中…" }),
+    ).toBeInTheDocument();
+  });
+
+  it("left-aligns every compact result row", () => {
+    render(
+      <SkillMentionMenu
+        activeIndex={0}
+        open
+        items={items}
+        onSelect={vi.fn()}
+      />,
+    );
+    expect(screen.getByRole("option", { name: /^browser/ })).toHaveStyle({
+      justifyContent: "flex-start",
+    });
   });
 
   it("debounces a search and reloads the blank default after the query is cleared", () => {

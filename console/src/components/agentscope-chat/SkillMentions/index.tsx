@@ -1,6 +1,8 @@
 import {
   ApiOutlined,
   FileOutlined,
+  LoadingOutlined,
+  SearchOutlined,
   ThunderboltOutlined,
 } from "@ant-design/icons";
 import { Button, Flex, Tag } from "antd";
@@ -88,14 +90,13 @@ export function SkillMentionMenu({
         boxShadow: "0 14px 36px rgba(35, 31, 27, 0.12)",
         gap: 4,
         maxHeight: 300,
+        minHeight: 64,
         overflowX: "hidden",
         overflowY: "auto",
         padding: 6,
       }}
     >
-      {loading ? (
-        <span role="status">加载上下文引用中…</span>
-      ) : error ? (
+      {error ? (
         <Flex align="center" gap={8} justify="space-between">
           <span role="status">加载上下文引用失败</span>
           <Button size="small" type="text" onClick={onRetry}>
@@ -136,6 +137,7 @@ export function SkillMentionMenu({
                     borderRadius: 6,
                     display: "flex",
                     height: 40,
+                    justifyContent: "flex-start",
                     minHeight: 40,
                     minWidth: 0,
                     overflow: "hidden",
@@ -165,6 +167,7 @@ export function SkillMentionMenu({
                   <span
                     style={{
                       display: "block",
+                      flex: "1 1 auto",
                       minWidth: 0,
                       overflow: "hidden",
                       textAlign: "left",
@@ -206,9 +209,47 @@ export function SkillMentionMenu({
             })}
           </div>
         ))
-      ) : (
-        <span role="status">未找到匹配的上下文引用</span>
-      )}
+      ) : !loading ? (
+        <Flex
+          align="center"
+          data-testid="context-reference-empty-state"
+          justify="center"
+          role="status"
+          style={{
+            color: "#7A8494",
+            minHeight: 112,
+            padding: "14px 10px",
+            textAlign: "center",
+          }}
+          vertical
+        >
+          <SearchOutlined style={{ color: "#9AA4B2", fontSize: 18 }} />
+          <strong style={{ color: "#4B5563", fontSize: 13, marginTop: 6 }}>
+            未找到匹配的上下文引用
+          </strong>
+          <span style={{ fontSize: 12, marginTop: 2 }}>
+            尝试更换关键词，或仅输入 @ 查看技能和 MCP 工具
+          </span>
+        </Flex>
+      ) : null}
+      {loading && !error ? (
+        <Flex
+          align="center"
+          aria-label="加载上下文引用中…"
+          gap={6}
+          justify="center"
+          role="status"
+          style={{
+            color: "#7A8494",
+            fontSize: 12,
+            minHeight: grouped.length ? 0 : 52,
+            padding: grouped.length ? "4px 6px" : "12px 6px",
+          }}
+        >
+          <LoadingOutlined />
+          加载上下文引用中…
+        </Flex>
+      ) : null}
       {!query && !loading && !error ? (
         <span
           style={{

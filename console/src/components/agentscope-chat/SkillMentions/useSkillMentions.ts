@@ -133,8 +133,10 @@ export function useSkillMentions({
       if (
         selectedMention &&
         range.start === selectedMention.start &&
-        nextValue.slice(range.start, range.start + selectedMention.text.length) ===
-          selectedMention.text
+        nextValue.slice(
+          range.start,
+          range.start + selectedMention.text.length,
+        ) === selectedMention.text
       ) {
         mentionRangeRef.current = null;
         setMenuOpen(false);
@@ -164,7 +166,10 @@ export function useSkillMentions({
       const trailingText = value.slice(range.end);
       const separator = /^\s/.test(trailingText) ? "" : " ";
       onValueChange(
-        `${value.slice(0, range.start)}${referenceText}${separator}${trailingText}`,
+        `${value.slice(
+          0,
+          range.start,
+        )}${referenceText}${separator}${trailingText}`,
       );
       mentionRangeRef.current = null;
       selectedMentionRef.current = { start: range.start, text: referenceText };
