@@ -41,6 +41,32 @@ export interface GeneratedFilesResponse {
   files: GeneratedFileItem[];
 }
 
+interface ChatNotFoundResponse {
+  detail: string;
+}
+
+function isChatNotFoundResponse(
+  response: unknown,
+  chatId: string,
+): response is ChatNotFoundResponse {
+  return (
+    typeof response === "object" &&
+    response !== null &&
+    "detail" in response &&
+    response.detail === `Chat not found: ${chatId}`
+  );
+}
+
+function createChatNotFoundError(response: ChatNotFoundResponse): Error {
+  const error = new Error(response.detail) as Error & {
+    status?: number;
+    data?: unknown;
+  };
+  error.status = 404;
+  error.data = response;
+  return error;
+}
+
 const FILES_PREVIEW = "/files/preview";
 
 export const chatApi = {
@@ -113,8 +139,17 @@ export const chatApi = {
       body: JSON.stringify(chat),
     }),
 
-  getChat: (chatId: string) =>
-    request<ChatHistory>(`/chats/${encodeURIComponent(chatId)}`),
+  getChat: async (chatId: string): Promise<ChatHistory> => {
+    const response = await request<ChatHistory | ChatNotFoundResponse>(
+      `/chats/${encodeURIComponent(chatId)}`,
+    );
+
+    if (isChatNotFoundResponse(response, chatId)) {
+      throw createChatNotFoundError(response);
+    }
+
+    return response;
+  },
 
   updateChat: (chatId: string, chat: Partial<ChatSpec>) =>
     request<ChatSpec>(`/chats/${encodeURIComponent(chatId)}`, {

@@ -112,7 +112,7 @@ describe("MessageList content-only composition", () => {
     );
 
     expect(screen.getByTestId("not-found")).toHaveTextContent(
-      "会话不存在当前会话可能已被删除，或访问链接已经失效。",
+      "会话不存在当前会话可能已被删除，请重新选择会话",
     );
     expect(screen.queryByTestId("welcome")).not.toBeInTheDocument();
   });
