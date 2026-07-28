@@ -63,6 +63,11 @@ const IndexStyle = createGlobalStyle`
     overflow: hidden;
   }
 
+  &-with-skill-editor,
+  &-with-skill-editor .${(p) => p.theme.prefixCls}-sender-content {
+    overflow: visible;
+  }
+
   &-content-bottom {
     margin-top: 4px;
     display: flex;
@@ -81,6 +86,18 @@ const IndexStyle = createGlobalStyle`
     align-self: center;
     font-size: 14px;
     line-height: 22px;
+  }
+
+  &-skill-editor {
+    min-height: 44px;
+    outline: none;
+    white-space: pre-wrap;
+
+    &:empty::before {
+      color: ${(p) => p.theme.colorTextPlaceholder};
+      content: attr(data-placeholder);
+      pointer-events: none;
+    }
   }
 
   &-actions-list {

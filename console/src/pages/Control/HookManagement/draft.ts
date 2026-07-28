@@ -5,6 +5,7 @@ import type {
   HookEventName,
   HookHandlerDraft,
   HookHandlerType,
+  HookMatcherGroupDraft,
 } from "./types";
 
 const scriptReferencePattern = /^hooks\/scripts\/[^/]+\.(py|sh|bash|zsh)$/i;
@@ -117,6 +118,40 @@ export function removeGroup(
     const groups = draft.events[event];
     if (groups)
       draft.events[event] = groups.filter((group) => group.id !== groupId);
+  });
+}
+
+export function moveHandler(
+  config: HookConfigDraft,
+  event: HookEventName,
+  groupId: string,
+  fromIndex: number,
+  toIndex: number,
+): HookConfigDraft {
+  return produce(config, (draft) => {
+    const group = draft.events[event]?.find((item) => item.id === groupId);
+    if (
+      !group ||
+      fromIndex === toIndex ||
+      fromIndex < 0 ||
+      toIndex < 0 ||
+      fromIndex >= group.hooks.length ||
+      toIndex >= group.hooks.length
+    ) {
+      return;
+    }
+    const [handler] = group.hooks.splice(fromIndex, 1);
+    group.hooks.splice(toIndex, 0, handler!);
+  });
+}
+
+export function replaceEvent(
+  config: HookConfigDraft,
+  event: HookEventName,
+  groups: HookMatcherGroupDraft[],
+): HookConfigDraft {
+  return produce(config, (draft) => {
+    draft.events[event] = structuredClone(groups);
   });
 }
 

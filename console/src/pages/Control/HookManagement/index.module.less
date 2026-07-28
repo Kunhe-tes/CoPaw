@@ -19,57 +19,6 @@
   margin: 8px 0 0;
   color: var(--console-management-text-secondary);
 }
-.workspace {
-  display: grid;
-  grid-template-columns: minmax(240px, 32%) minmax(0, 1fr);
-  min-height: 560px;
-  border: 1px solid var(--console-management-border);
-  border-radius: 12px;
-  overflow: hidden;
-}
-.tree {
-  padding: 12px;
-  border-right: 1px solid var(--console-management-border);
-  background: var(--console-management-surface-subtle);
-  min-width: 0;
-}
-.treeTop,
-.event {
-  display: flex;
-  justify-content: space-between;
-  gap: 8px;
-  align-items: center;
-}
-.event {
-  margin-top: 12px;
-  font-weight: 600;
-}
-.tree :global(.ant-btn) {
-  text-align: left;
-  max-width: 100%;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-.group {
-  margin-left: 12px;
-}
-.handler {
-  margin-left: 20px;
-  display: flex;
-  align-items: center;
-}
-.handlerSelect {
-  width: 100%;
-  margin: 6px 0;
-}
-.selected {
-  background: var(--console-management-primary-soft) !important;
-  color: var(--console-management-primary-hover) !important;
-}
-.detail {
-  min-width: 0;
-  background: var(--console-management-surface);
-}
 .editor {
   max-width: 760px;
   padding: 24px;
@@ -156,6 +105,119 @@
 .fieldError {
   margin: 0;
 }
+.overview {
+  display: grid;
+  gap: 20px;
+}
+.overviewHeader,
+.overviewActions,
+.globalSwitch,
+.eventCard :global(.ant-card-head-title),
+.createActions,
+.templateList,
+.groupSummary {
+  display: flex;
+  align-items: center;
+}
+.overviewHeader {
+  justify-content: space-between;
+  gap: 16px;
+}
+.overviewHeader h2,
+.drawerSection h3 {
+  margin: 0;
+}
+.overviewHeader p,
+.eventCard p,
+.drawerSection p {
+  color: var(--console-management-text-secondary);
+}
+.overviewActions {
+  flex-wrap: wrap;
+  gap: 12px;
+}
+.globalSwitch {
+  gap: 8px;
+}
+.eventGrid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
+  gap: 16px;
+}
+.eventCard {
+  min-height: 220px;
+}
+.eventCard :global(.ant-card-body) {
+  display: grid;
+  align-content: start;
+  gap: 10px;
+}
+.eventLabel {
+  margin-left: 8px;
+  color: var(--console-management-text-muted);
+  font-weight: 400;
+}
+.eventStats {
+  font-weight: 600;
+}
+.eventEmpty {
+  margin: 0;
+}
+.eventEmpty :global(.ant-empty-image) {
+  height: 26px;
+  margin-bottom: 4px;
+}
+.drawerSection {
+  margin-bottom: 24px;
+}
+.groupSummary {
+  justify-content: space-between;
+  margin-top: 8px;
+  padding: 12px;
+  border: 1px solid var(--console-management-border);
+  border-radius: 8px;
+}
+.groupSummary span {
+  color: var(--console-management-text-muted);
+}
+.groupPanel {
+  margin-top: 8px;
+}
+.handlerCards {
+  display: grid;
+  gap: 6px;
+  padding: 8px 12px;
+  border: 1px solid var(--console-management-border);
+  border-top: 0;
+  border-radius: 0 0 8px 8px;
+}
+.handlerCard {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+.handlerTypeSelect {
+  width: 180px;
+}
+.createActions,
+.templateList {
+  align-items: stretch;
+  flex-direction: column;
+  gap: 12px;
+}
+.templateList :global(.ant-btn) {
+  height: auto;
+  padding: 12px;
+  text-align: left;
+}
+.templateList :global(.ant-btn span) {
+  display: block;
+}
+.templateList :global(.ant-btn span + span) {
+  margin-top: 4px;
+  color: var(--console-management-text-secondary);
+  white-space: normal;
+}
 @media (max-width: 760px) {
   .page {
     padding: 16px;
@@ -164,15 +226,12 @@
     align-items: stretch;
     flex-direction: column;
   }
-  .workspace {
-    grid-template-columns: 1fr;
-  }
-  .tree {
-    border-right: 0;
-    border-bottom: 1px solid var(--console-management-border);
-  }
   .scriptActions {
     align-items: flex-start;
+    flex-direction: column;
+  }
+  .overviewHeader {
+    align-items: stretch;
     flex-direction: column;
   }
 }

@@ -40,14 +40,14 @@ def test_build_skill_use_directives_keeps_first_effective_readable_name(
     assert str(directives[0].path) in directives[0].render()
 
 
-def test_build_skill_use_directives_limits_to_five_and_skips_unreadable(
+def test_build_skill_use_directives_keeps_all_unique_readable_names(
     monkeypatch,
     tmp_path: Path,
 ) -> None:
     from swe.app.runner import skill_selection
 
     names = [f"skill-{index}" for index in range(6)]
-    for name in names[:-1]:
+    for name in names:
         _write_skill(tmp_path, name, name)
     monkeypatch.setattr(
         skill_selection,
@@ -61,7 +61,7 @@ def test_build_skill_use_directives_limits_to_five_and_skips_unreadable(
         selected_skill_names=names,
     )
 
-    assert [directive.name for directive in directives] == names[:5]
+    assert [directive.name for directive in directives] == names
 
 
 def test_build_skill_use_directives_skips_invalid_utf8_and_escapes_metadata(
