@@ -316,10 +316,11 @@ export const SkillTokenEditor = forwardRef<
       />
       <div
         style={{
-          bottom: "calc(100% + 8px)",
+          bottom: "calc(100% + 12px)",
           left: 0,
           position: "absolute",
           right: 0,
+          zIndex: 10,
         }}
       >
         <SkillMentionMenu

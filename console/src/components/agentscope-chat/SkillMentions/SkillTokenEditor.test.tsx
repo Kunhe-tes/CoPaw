@@ -176,6 +176,25 @@ describe("SkillTokenEditor", () => {
     );
   });
 
+  it("keeps the skill panel clear of the chat input", () => {
+    render(<ControlledTokenEditor />);
+
+    const editor = screen.getByRole("textbox", { name: "消息" });
+    editor.textContent = "@";
+    const range = document.createRange();
+    range.selectNodeContents(editor);
+    range.collapse(false);
+    const selection = window.getSelection();
+    selection?.removeAllRanges();
+    selection?.addRange(range);
+    fireEvent.input(editor);
+
+    expect(screen.getByRole("listbox").parentElement).toHaveStyle({
+      bottom: "calc(100% + 12px)",
+      zIndex: 10,
+    });
+  });
+
   it("keeps the editor focused after selecting a skill with Enter", () => {
     render(<ControlledTokenEditor />);
 
