@@ -25,7 +25,14 @@ from pydantic import BaseModel, Field
 from starlette.responses import StreamingResponse
 
 from agentscope_runtime.engine.schemas.agent_schemas import AgentRequest
-from ..agent_context import get_agent_for_request
+from ..agent_context import (
+    get_agent_and_config_for_request,
+    get_agent_for_request,
+)
+from ..context_references import (
+    ContextReferencesResponse,
+    context_reference_directory,
+)
 from ...config.context import resolve_request_effective_tenant_id
 
 logger = logging.getLogger(__name__)
@@ -831,6 +838,26 @@ async def get_console_generated_files(
     items.sort(key=lambda item: item.modified_at, reverse=reverse)
     return GeneratedFilesResponse(
         files=items[:_CHAT_FILE_LIST_LIMIT],
+    )
+
+
+@router.get(
+    "/context-references",
+    response_model=ContextReferencesResponse,
+    summary="Discover context references for the Console composer",
+)
+async def get_context_references(
+    request: Request,
+    q: str = Query("", max_length=512),
+) -> ContextReferencesResponse:
+    """Return cached, scope-bound Skills, MCP tools, and matching files."""
+    workspace, agent_config = await get_agent_and_config_for_request(request)
+    workspace_dir = Path(workspace.workspace_dir)
+    return await context_reference_directory.discover(
+        workspace=workspace,
+        agent_config=agent_config,
+        query=q,
+        media_dir=await _resolve_console_media_dir(workspace, workspace_dir),
     )
 
 
