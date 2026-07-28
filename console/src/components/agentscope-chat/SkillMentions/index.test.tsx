@@ -178,6 +178,36 @@ describe("SkillMentions", () => {
     ).toBeInTheDocument();
   });
 
+  it("keeps the no-results layout mounted through a non-matching refresh", () => {
+    const { rerender } = render(
+      <SkillMentionMenu
+        activeIndex={0}
+        open
+        items={[]}
+        loading
+        query="not-found"
+        onSelect={vi.fn()}
+      />,
+    );
+    expect(screen.getByTestId("context-reference-empty-state")).toHaveStyle({
+      minHeight: "112px",
+    });
+    expect(screen.getByRole("listbox")).toHaveAttribute("aria-busy", "true");
+
+    rerender(
+      <SkillMentionMenu
+        activeIndex={0}
+        open
+        items={[]}
+        query="not-found-more"
+        onSelect={vi.fn()}
+      />,
+    );
+    expect(screen.getByTestId("context-reference-empty-state")).toHaveStyle({
+      minHeight: "112px",
+    });
+  });
+
   it("left-aligns every compact result row", () => {
     render(
       <SkillMentionMenu

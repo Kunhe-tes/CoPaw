@@ -78,12 +78,15 @@ export function SkillMentionMenu({
         .filter((group) => group.items.length),
     [items],
   );
+  const showEmptyState = !grouped.length && (!loading || Boolean(query));
+  const showLoadingIndicator = loading && !error && (grouped.length || !query);
   if (!open) return null;
   return (
     <Flex
       vertical
       role="listbox"
       aria-label="可用上下文引用"
+      aria-busy={loading}
       style={{
         background: "#FFFFFF",
         borderRadius: 8,
@@ -209,7 +212,7 @@ export function SkillMentionMenu({
             })}
           </div>
         ))
-      ) : !loading ? (
+      ) : showEmptyState ? (
         <Flex
           align="center"
           data-testid="context-reference-empty-state"
@@ -232,7 +235,7 @@ export function SkillMentionMenu({
           </span>
         </Flex>
       ) : null}
-      {loading && !error ? (
+      {showLoadingIndicator ? (
         <Flex
           align="center"
           aria-label="加载上下文引用中…"
