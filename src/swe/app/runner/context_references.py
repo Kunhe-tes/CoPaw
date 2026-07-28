@@ -27,13 +27,13 @@ class MCPToolPreferenceDirective:
     name: str
 
     def render(self) -> str:
-        return f"""<MCP-TOOL-PREFERENCE-V1>
+        return f"""<TOOL-PREFERENCE>
 <instruction>
 用户显式选择了此 MCP 工具。若它与当前任务相关，请优先考虑调用；但不要仅因被选择而强制调用。
 </instruction>
 <server>{escape(self.server)}</server>
 <tool>{escape(self.name)}</tool>
-</MCP-TOOL-PREFERENCE-V1>"""
+</TOOL-PREFERENCE>"""
 
 
 @dataclass(frozen=True)
@@ -43,14 +43,12 @@ class WorkspaceFileReferenceDirective:
     path: Path
 
     def render(self) -> str:
-        return f"""<WORKSPACE-FILE-REFERENCE-V1>
+        return f"""<FILE-REFERENCE>
 <instruction>
-用户显式引用了这个工作区文件。文件内容未注入；仅在任务需要时使用 read_file 工具按需读取该绝对路径。
+用户显式引用了这个工作区文件。在任务需要时使用 read_file 工具按需读取该绝对路径。
 </instruction>
-<root>{self.root}</root>
-<relative-path>{escape(self.relative_path)}</relative-path>
 <path>{escape(str(self.path))}</path>
-</WORKSPACE-FILE-REFERENCE-V1>"""
+</FILE-REFERENCE>"""
 
 
 ContextReferenceDirective: TypeAlias = (
