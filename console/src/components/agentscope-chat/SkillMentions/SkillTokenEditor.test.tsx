@@ -96,6 +96,22 @@ describe("SkillTokenEditor", () => {
     expect(tokens[1]).toHaveAttribute("data-reference-type", "mcp_tool");
     expect(tokens[2]).toHaveAttribute("data-reference-type", "workspace_file");
   });
+  it("uses a named icon instead of a dot before an MCP token", () => {
+    render(
+      <SkillTokenEditor
+        aria-label="消息"
+        value="@docs/search "
+        skillMentions={{
+          items,
+          selected: [items[1]],
+          onChange: vi.fn(),
+          onOpen: vi.fn(),
+        }}
+        onValueChange={vi.fn()}
+      />,
+    );
+    expect(screen.getByRole("img", { name: "MCP 工具" })).toBeInTheDocument();
+  });
   it("keeps a file name containing spaces as one atomic token", () => {
     render(
       <SkillTokenEditor

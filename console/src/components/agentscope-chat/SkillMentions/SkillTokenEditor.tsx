@@ -21,6 +21,12 @@ interface TokenPart {
   selectionIndex?: number;
 }
 
+const tokenIcons = {
+  mcp_tool: { label: "MCP 工具", text: "⌘" },
+  skill: { label: "技能", text: "⚡" },
+  workspace_file: { label: "文件", text: "▣" },
+} as const;
+
 export interface SkillTokenEditorProps
   extends Omit<
     React.HTMLAttributes<HTMLDivElement>,
@@ -165,18 +171,21 @@ function replaceEditorContents(editor: HTMLDivElement, parts: TokenPart[]) {
     token.style.fontWeight = "500";
     token.style.padding = "0 4px";
     const icon = document.createElement("span");
-    icon.setAttribute("aria-hidden", "true");
-    icon.style.background =
+    const iconDetails = tokenIcons[part.referenceType || "skill"];
+    icon.setAttribute("aria-label", iconDetails.label);
+    icon.setAttribute("role", "img");
+    icon.textContent = iconDetails.text;
+    icon.style.color =
       part.referenceType === "mcp_tool"
         ? "#2F7D5B"
         : part.referenceType === "workspace_file"
         ? "#A56A24"
         : "#3769FC";
-    icon.style.borderRadius = "50%";
-    icon.style.display = "inline-block";
-    icon.style.height = "5px";
+    icon.style.display = "inline-flex";
+    icon.style.fontSize = "11px";
+    icon.style.fontWeight = "700";
+    icon.style.lineHeight = "1";
     icon.style.marginRight = "3px";
-    icon.style.width = "5px";
     token.append(icon, document.createTextNode(part.value));
     fragment.append(token);
   }

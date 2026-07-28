@@ -37,6 +37,11 @@ interface MentionRange {
   start: number;
 }
 
+interface SelectedMention {
+  start: number;
+  text: string;
+}
+
 export function contextReferenceText(item: SkillMentionItem) {
   if (item.type === "mcp_tool") return `@${item.server}/${item.name}`;
   return `@${item.name || item.label}`;
@@ -68,6 +73,7 @@ export function useSkillMentions({
   const openRef = useRef(false);
   const requestedQueryRef = useRef<string | null>(null);
   const mentionRangeRef = useRef<MentionRange | null>(null);
+  const selectedMentionRef = useRef<SelectedMention | null>(null);
 
   const setMenuOpen = useCallback(
     (nextOpen: boolean) => {
@@ -119,9 +125,22 @@ export function useSkillMentions({
       const range = getMentionRange(nextValue, caretOffset);
       if (!range) {
         mentionRangeRef.current = null;
+        selectedMentionRef.current = null;
         setMenuOpen(false);
         return;
       }
+      const selectedMention = selectedMentionRef.current;
+      if (
+        selectedMention &&
+        range.start === selectedMention.start &&
+        nextValue.slice(range.start, range.start + selectedMention.text.length) ===
+          selectedMention.text
+      ) {
+        mentionRangeRef.current = null;
+        setMenuOpen(false);
+        return;
+      }
+      selectedMentionRef.current = null;
       mentionRangeRef.current = range;
       setQuery(nextValue.slice(range.start + 1, range.end));
       setActiveIndex(0);
@@ -139,15 +158,18 @@ export function useSkillMentions({
       )
         return;
       const range = mentionRangeRef.current;
+      const referenceText = contextReferenceText(item);
       onBeforeSelect?.();
       onChange([...selected, item]);
       const trailingText = value.slice(range.end);
       const separator = /^\s/.test(trailingText) ? "" : " ";
       onValueChange(
-        `${value.slice(0, range.start)}${contextReferenceText(
-          item,
-        )}${separator}${trailingText}`,
+        `${value.slice(0, range.start)}${referenceText}${separator}${trailingText}`,
       );
+      mentionRangeRef.current = null;
+      selectedMentionRef.current = { start: range.start, text: referenceText };
+      setQuery("");
+      setActiveIndex(0);
       setMenuOpen(false);
     },
     [

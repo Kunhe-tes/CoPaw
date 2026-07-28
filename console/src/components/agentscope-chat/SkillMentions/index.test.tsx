@@ -128,6 +128,21 @@ describe("SkillMentions", () => {
     );
   });
 
+  it("does not reopen the menu when ordinary text follows a selected reference", () => {
+    const onOpen = vi.fn();
+    render(<MentionHarness onOpen={onOpen} />);
+    const input = screen.getByRole("textbox", { name: "消息" });
+    fireEvent.change(input, { target: { value: "请用 @" } });
+    fireEvent.click(screen.getByRole("option", { name: /docs \/ search/ }));
+
+    fireEvent.change(input, {
+      target: { value: "请用 @docs/search 后续文本" },
+    });
+
+    expect(onOpen).toHaveBeenCalledTimes(1);
+    expect(screen.queryByRole("listbox")).toBeNull();
+  });
+
   it("keeps empty groups out of the menu and renders one unified empty state", () => {
     render(
       <SkillMentionMenu
