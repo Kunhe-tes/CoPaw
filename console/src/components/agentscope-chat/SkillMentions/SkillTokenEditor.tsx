@@ -34,29 +34,43 @@ export interface SkillTokenEditorProps
   onValueChange: (value: string) => void;
 }
 
-function getTokenParts(value: string, selected: SkillMentionItem[]): TokenPart[] {
+function getTokenParts(
+  value: string,
+  selected: SkillMentionItem[],
+): TokenPart[] {
   const parts: TokenPart[] = [];
   let cursor = 0;
-  let selectedIndex = 0;
-  while (selected[selectedIndex]) {
+  const usedSelectionIndexes = new Set<number>();
+  while (true) {
+    let selectedIndex = -1;
+    let tokenIndex = Number.POSITIVE_INFINITY;
+    selected.forEach((item, index) => {
+      if (usedSelectionIndexes.has(index)) return;
+      const tokenText = contextReferenceText(item);
+      const candidate = value.indexOf(tokenText, cursor);
+      const candidateEnd = candidate + tokenText.length;
+      if (
+        candidate >= 0 &&
+        (!value[candidateEnd] || /\s/.test(value[candidateEnd])) &&
+        candidate < tokenIndex
+      ) {
+        selectedIndex = index;
+        tokenIndex = candidate;
+      }
+    });
+    if (selectedIndex < 0) break;
     const tokenText = contextReferenceText(selected[selectedIndex]);
-    const tokenIndex = value.indexOf(tokenText, cursor);
     const tokenEnd = tokenIndex + tokenText.length;
-    if (tokenIndex < 0 || (value[tokenEnd] && !/\s/.test(value[tokenEnd]))) {
-      break;
-    }
     if (tokenIndex > cursor) {
       parts.push({ kind: "text", value: value.slice(cursor, tokenIndex) });
     }
-    if (selected[selectedIndex]) {
-      parts.push({
-        kind: "token",
-        selectionIndex: selectedIndex,
-        referenceType: selected[selectedIndex].type,
-        value: tokenText,
-      });
-      selectedIndex += 1;
-    }
+    parts.push({
+      kind: "token",
+      selectionIndex: selectedIndex,
+      referenceType: selected[selectedIndex].type,
+      value: tokenText,
+    });
+    usedSelectionIndexes.add(selectedIndex);
     cursor = tokenEnd;
   }
 
@@ -156,8 +170,8 @@ function replaceEditorContents(editor: HTMLDivElement, parts: TokenPart[]) {
       part.referenceType === "mcp_tool"
         ? "#2F7D5B"
         : part.referenceType === "workspace_file"
-          ? "#A56A24"
-          : "#3769FC";
+        ? "#A56A24"
+        : "#3769FC";
     icon.style.borderRadius = "50%";
     icon.style.display = "inline-block";
     icon.style.height = "5px";

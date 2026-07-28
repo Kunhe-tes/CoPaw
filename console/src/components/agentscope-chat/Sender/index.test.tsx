@@ -29,8 +29,20 @@ vi.mock("./components/LoadingButton", () => ({ default: () => null }));
 vi.mock("./components/SendButton", () => ({ default: () => null }));
 
 const skills = [
-  { id: "skill:browser", type: "skill" as const, label: "browser", name: "browser", description: "Use a browser" },
-  { id: "skill:Build", type: "skill" as const, label: "Build", name: "Build", description: "Build an app" },
+  {
+    id: "skill:browser",
+    type: "skill" as const,
+    label: "browser",
+    name: "browser",
+    description: "Use a browser",
+  },
+  {
+    id: "skill:Build",
+    type: "skill" as const,
+    label: "Build",
+    name: "Build",
+    description: "Build an app",
+  },
 ];
 
 function renderSender() {

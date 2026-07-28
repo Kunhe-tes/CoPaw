@@ -58,8 +58,20 @@ vi.mock("@/api/modules/featuredCases", () => ({
 
 const mockedUploadFile = vi.mocked(chatApi.uploadFile);
 const skills = [
-  { id: "skill:browser", type: "skill" as const, label: "browser", name: "browser", description: "Use a browser" },
-  { id: "skill:Build", type: "skill" as const, label: "Build", name: "Build", description: "Build an app" },
+  {
+    id: "skill:browser",
+    type: "skill" as const,
+    label: "browser",
+    name: "browser",
+    description: "Use a browser",
+  },
+  {
+    id: "skill:Build",
+    type: "skill" as const,
+    label: "Build",
+    name: "Build",
+    description: "Build an app",
+  },
 ];
 
 function setTokenEditorValue(input: HTMLElement, value: string) {

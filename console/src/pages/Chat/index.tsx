@@ -527,9 +527,14 @@ export default function ChatPage() {
   const [feedbackRefreshKey, setFeedbackRefreshKey] = useState(0);
   const [autoPreviewTriggerKey, setAutoPreviewTriggerKey] = useState(0);
   const [isDragging, setIsDragging] = useState(false);
-  const [selectedContextReferences, setSelectedContextReferences] = useState<SkillMentionItem[]>([]);
-  const [contextReferences, setContextReferences] = useState<SkillMentionItem[]>([]);
-  const [contextReferencesLoading, setContextReferencesLoading] = useState(false);
+  const [selectedContextReferences, setSelectedContextReferences] = useState<
+    SkillMentionItem[]
+  >([]);
+  const [contextReferences, setContextReferences] = useState<
+    SkillMentionItem[]
+  >([]);
+  const [contextReferencesLoading, setContextReferencesLoading] =
+    useState(false);
   const [contextReferencesError, setContextReferencesError] = useState(false);
   const pendingContextReferencesRef = useRef<SkillMentionItem[]>([]);
   const contextReferencesRequestIdRef = useRef(0);
@@ -567,7 +572,11 @@ export default function ChatPage() {
       .discover(query)
       .then((response) => {
         if (requestId !== contextReferencesRequestIdRef.current) return;
-        setContextReferences([...response.skills, ...response.mcp_tools, ...response.files]);
+        setContextReferences([
+          ...response.skills,
+          ...response.mcp_tools,
+          ...response.files,
+        ]);
       })
       .catch(() => {
         if (requestId !== contextReferencesRequestIdRef.current) return;
@@ -575,7 +584,8 @@ export default function ChatPage() {
         setContextReferencesError(true);
       })
       .finally(() => {
-        if (requestId === contextReferencesRequestIdRef.current) setContextReferencesLoading(false);
+        if (requestId === contextReferencesRequestIdRef.current)
+          setContextReferencesLoading(false);
       });
   }, []);
 
@@ -1410,7 +1420,8 @@ export default function ChatPage() {
         stream: true,
         ...biz_params,
         context_references:
-          userText.startsWith("/") && pendingContextReferencesRef.current.length === 0
+          userText.startsWith("/") &&
+          pendingContextReferencesRef.current.length === 0
             ? []
             : pendingContextReferencesRef.current,
         file_url_network: resolveCurrentFileUrlNetwork(),

@@ -2,7 +2,13 @@ import { describe, expect, it, vi } from "vitest";
 import { createWelcomeSkillMentions } from "./welcomeSkillMentions";
 
 const items = [
-  { id: "skill:browser", type: "skill" as const, label: "browser", name: "browser", description: "Use a browser" },
+  {
+    id: "skill:browser",
+    type: "skill" as const,
+    label: "browser",
+    name: "browser",
+    description: "Use a browser",
+  },
 ];
 
 describe("createWelcomeSkillMentions", () => {
@@ -18,9 +24,7 @@ describe("createWelcomeSkillMentions", () => {
       setSelectedContextReferences,
     });
 
-    mentions.skillMentions.onChange([
-      ...items,
-    ]);
+    mentions.skillMentions.onChange([...items]);
 
     expect(setSelectedContextReferences).toHaveBeenCalledWith(items);
   });
