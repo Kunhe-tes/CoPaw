@@ -34,6 +34,7 @@ const mocks = vi.hoisted(() => {
     getCurrentCronBroadcastTask: vi.fn(),
     getCronBroadcastTask: vi.fn(),
     getCronJob: vi.fn(),
+    listSweSkills: vi.fn(),
     broadcastCronJob: vi.fn(),
     enableCronBatchDispatch: vi.fn(),
     disableCronBatchDispatch: vi.fn(),
@@ -54,6 +55,7 @@ vi.mock("../../../api", () => ({
     getCurrentCronBroadcastTask: mocks.getCurrentCronBroadcastTask,
     getCronBroadcastTask: mocks.getCronBroadcastTask,
     getCronJob: mocks.getCronJob,
+    listSweSkills: mocks.listSweSkills,
     broadcastCronJob: mocks.broadcastCronJob,
     enableCronBatchDispatch: mocks.enableCronBatchDispatch,
     disableCronBatchDispatch: mocks.disableCronBatchDispatch,
@@ -156,6 +158,11 @@ describe("CronJobsPage broadcast task refresh", () => {
     vi.clearAllMocks();
     mocks.getUserTimezone.mockResolvedValue({ timezone: "UTC" });
     mocks.getCronJob.mockResolvedValue({ spec: mocks.job });
+    mocks.listSweSkills.mockResolvedValue({
+      source_id: "default",
+      count: 0,
+      skills: [],
+    });
     mocks.job.meta = {};
     mocks.getCurrentCronBroadcastTask.mockResolvedValue({
       task: {
