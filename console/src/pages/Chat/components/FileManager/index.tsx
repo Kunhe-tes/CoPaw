@@ -24,6 +24,7 @@ import styles from "./index.module.less";
 
 type Columns = [FileManagerDirectoryListing | null, FileManagerDirectoryListing | null, FileManagerDirectoryListing | null];
 type Selected = [string | null, string | null, string | null];
+type ColumnQueries = [string, string, string];
 type PendingAction = (() => void) | null;
 
 const shortcutRoots: Array<{ root: FileManagerRoot; label: string; icon: React.ReactNode }> = [
@@ -63,6 +64,7 @@ export default function FileManager() {
   const [open, setOpen] = useState(false);
   const [root, setRoot] = useState<FileManagerRoot>("working");
   const [columns, setColumns] = useState<Columns>([null, null, null]);
+  const [columnQueries, setColumnQueries] = useState<ColumnQueries>(["", "", ""]);
   const [selected, setSelected] = useState<Selected>([null, null, null]);
   const [detail, setDetail] = useState<FileManagerItem | null>(null);
   const [preview, setPreview] = useState<FileManagerTextPreview | null>(null);
@@ -108,6 +110,7 @@ export default function FileManager() {
     setPreview(null);
     revokeBinaryPreview();
     setDetailError(null);
+    setColumnQueries(["", "", ""]);
     try {
       const rootPage = await loadDirectory(targetRoot, "");
       const firstFolder = rootPage.items.find((item) => item.kind === "directory");
@@ -174,12 +177,15 @@ export default function FileManager() {
           const page = await loadDirectory(root, entry.path);
           if (index === 2) {
             setColumns((previous) => [previous[1], previous[2], page]);
+            setColumnQueries((previous) => [previous[1], previous[2], ""]);
             setSelected((previous) => [previous[1], entry.path, null]);
           } else if (index === 1) {
             setColumns((previous) => [previous[0], previous[1], page]);
+            setColumnQueries((previous) => [previous[0], previous[1], ""]);
             setSelected((previous) => [previous[0], entry.path, null]);
           } else {
             setColumns((previous) => [previous[0], page, null]);
+            setColumnQueries(["", "", ""]);
             setSelected([entry.path, null, null]);
           }
         } catch (error) {
@@ -191,6 +197,7 @@ export default function FileManager() {
       }
       if (index === 2) {
         setColumns((previous) => [previous[1], previous[2], null]);
+        setColumnQueries((previous) => [previous[1], previous[2], ""]);
         setSelected((previous) => [previous[1], entry.path, null]);
       } else {
         setSelected((previous) => previous.map((path, position) => position === index ? entry.path : position > index ? null : path) as Selected);
@@ -206,24 +213,24 @@ export default function FileManager() {
     if (!page?.next_cursor || loadingColumns[index]) return;
     setColumnLoading(index, true);
     try {
-      const next = await loadDirectory(root, page.path, page.next_cursor, index === 1 ? search : undefined);
+      const next = await loadDirectory(root, page.path, page.next_cursor, columnQueries[index] || undefined);
       setColumns((previous) => previous.map((item, position) => position === index && item ? { ...next, items: [...item.items, ...next.items] } : item) as Columns);
     } catch (error) {
       setColumnError(index, requestError(error));
     } finally {
       setColumnLoading(index, false);
     }
-  }, [columns, loadDirectory, loadingColumns, root, search, setColumnError, setColumnLoading]);
+  }, [columnQueries, columns, loadDirectory, loadingColumns, root, setColumnError, setColumnLoading]);
 
   const retryColumn = useCallback(async (index: 0 | 1 | 2) => {
     const page = columns[index];
     if (!page) { await loadInitial(root); return; }
     setColumnLoading(index, true); setColumnError(index, null);
     try {
-      const refreshed = await loadDirectory(root, page.path);
+      const refreshed = await loadDirectory(root, page.path, null, columnQueries[index] || undefined);
       setColumns((previous) => previous.map((item, position) => position === index ? refreshed : item) as Columns);
     } catch (error) { setColumnError(index, requestError(error)); } finally { setColumnLoading(index, false); }
-  }, [columns, loadDirectory, loadInitial, root, setColumnError, setColumnLoading]);
+  }, [columnQueries, columns, loadDirectory, loadInitial, root, setColumnError, setColumnLoading]);
 
   const submitSearch = useCallback(async () => {
     const targetIndex = columns[1] ? 1 : 0;
@@ -231,8 +238,10 @@ export default function FileManager() {
     if (!target) return;
     setColumnLoading(targetIndex, true);
     try {
-      const results = await loadDirectory(root, target.path, null, search.trim());
+      const query = search.trim();
+      const results = await loadDirectory(root, target.path, null, query || undefined);
       setColumns((previous) => previous.map((item, index) => index === targetIndex ? results : item) as Columns);
+      setColumnQueries((previous) => previous.map((value, index) => index === targetIndex ? query : value) as ColumnQueries);
     } catch (error) {
       setColumnError(targetIndex, requestError(error));
     } finally {
@@ -254,6 +263,8 @@ export default function FileManager() {
       const firstChild = middle.items.find((item) => item.kind === "directory");
       const right = firstChild ? await loadDirectory(root, firstChild.path) : null;
       setColumns([rootPage, middle, right]);
+      setColumnQueries(["", "", ""]);
+      setSearch("");
       setSelected([path.split("/")[0] || null, firstChild?.path || null, null]);
       setDetail(null); setPreview(null); revokeBinaryPreview();
     } catch (error) {
