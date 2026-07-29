@@ -10,12 +10,11 @@ import cls from "classnames";
 import Welcome from "../Welcome";
 import { useChatAnywhereOptions } from "../../Context/ChatAnywhereOptionsContext";
 import React from "react";
-import { Result, Spin } from "antd";
+import { Spin } from "antd";
 import { useChatContentOnly } from "@/components/agentscope-chat/ChatContentOnlyContext";
 
 export default function MessageList(props: {
   onSubmit: (data: IAgentScopeRuntimeWebUIInputData) => void;
-  sessionNotFound?: boolean;
 }) {
   const isContentOnly = useChatContentOnly();
   const messages = useContextSelector(
@@ -54,18 +53,6 @@ export default function MessageList(props: {
     return (
       <div className={cls(prefixCls, `${prefixCls}-loading`)}>
         <Spin size="large" />
-      </div>
-    );
-  }
-
-  if (isContentOnly && props.sessionNotFound) {
-    return (
-      <div className={cls(prefixCls, `${prefixCls}-welcome`)}>
-        <Result
-          status="404"
-          title="会话不存在"
-          subTitle="当前会话可能已被删除，请重新选择会话"
-        />
       </div>
     );
   }

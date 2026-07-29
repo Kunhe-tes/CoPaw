@@ -55,18 +55,6 @@ vi.mock("../Welcome", () => ({
 }));
 
 vi.mock("antd", () => ({
-  Result: ({
-    title,
-    subTitle,
-  }: {
-    title: React.ReactNode;
-    subTitle: React.ReactNode;
-  }) => (
-    <div data-testid="not-found">
-      {title}
-      {subTitle}
-    </div>
-  ),
   Spin: () => <div data-testid="spin">loading</div>,
 }));
 
@@ -95,26 +83,6 @@ describe("MessageList content-only composition", () => {
 
     expect(screen.queryByTestId("welcome")).not.toBeInTheDocument();
     expect(screen.queryByTestId("bubble-list")).not.toBeInTheDocument();
-  });
-
-  it("shows a friendly not-found state only in content-only mode", () => {
-    const { rerender } = render(
-      <MessageList onSubmit={vi.fn()} sessionNotFound />,
-    );
-
-    expect(screen.queryByTestId("not-found")).not.toBeInTheDocument();
-    expect(screen.getByTestId("welcome")).toBeInTheDocument();
-
-    rerender(
-      <ChatContentOnlyProvider enabled>
-        <MessageList onSubmit={vi.fn()} sessionNotFound />
-      </ChatContentOnlyProvider>,
-    );
-
-    expect(screen.getByTestId("not-found")).toHaveTextContent(
-      "会话不存在当前会话可能已被删除，或访问链接已经失效。",
-    );
-    expect(screen.queryByTestId("welcome")).not.toBeInTheDocument();
   });
 
   it("keeps the existing session loading state unchanged", () => {
