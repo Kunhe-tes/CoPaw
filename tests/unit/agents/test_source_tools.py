@@ -3,6 +3,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from anyio import ClosedResourceError
 
 from swe.app.source_tools.models import SourceToolVersion
 from swe.agents.react_agent import SWEAgent
@@ -245,3 +246,57 @@ async def test_mcp_registration_fails_when_it_collides_with_source_tool(
 
     with pytest.raises(RuntimeError, match="collides"):
         await agent.register_mcp_clients()
+
+
+@pytest.mark.asyncio
+async def test_mcp_registration_recovers_when_collision_preflight_is_interrupted(
+    tmp_path: Path,
+):
+    class InterruptedClient:
+        name = "interrupted-mcp"
+
+        async def list_tools(self):
+            raise ClosedResourceError()
+
+    class RecoveredClient:
+        name = "recovered-mcp"
+
+    class Toolkit:
+        tools: dict[str, object] = {}
+
+        def __init__(self):
+            self.registered_clients: list[object] = []
+
+        async def register_mcp_client(
+            self,
+            client: object,
+            *,
+            namesake_strategy: str,
+        ) -> None:
+            assert namesake_strategy == "skip"
+            self.registered_clients.append(client)
+
+    interrupted = InterruptedClient()
+    recovered = RecoveredClient()
+    toolkit = Toolkit()
+    agent = object.__new__(SWEAgent)
+    agent._mcp_clients = [interrupted]
+    agent._source_tool_versions = ()
+    agent._agent_config = SimpleNamespace(
+        tools=SimpleNamespace(builtin_tools={}),
+    )
+    agent._workspace_dir = tmp_path
+    agent.toolkit = toolkit
+
+    async def recover(client: object) -> object:
+        assert client is interrupted
+        return recovered
+
+    agent._recover_mcp_client = recover
+    agent._wire_mcp_progress_callbacks = lambda _client: None
+    agent._normalize_registered_tool_functions = lambda _toolkit, _names: None
+
+    await agent.register_mcp_clients()
+
+    assert agent._mcp_clients == [recovered]
+    assert toolkit.registered_clients == [recovered]

@@ -1,4 +1,10 @@
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import {
+  fireEvent,
+  render,
+  screen,
+  waitFor,
+  within,
+} from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import { SourceToolLibrary } from "./SourceToolLibrary";
@@ -9,6 +15,7 @@ const mocks = vi.hoisted(() => ({
   uploadDraft: vi.fn(),
   publishDraft: vi.fn(),
   manualTest: vi.fn(),
+  audit: vi.fn(),
 }));
 
 vi.mock("@/api/modules/sourceTools", () => ({
@@ -21,7 +28,7 @@ vi.mock("@/api/modules/sourceTools", () => ({
     discardDraft: vi.fn(),
     deactivate: vi.fn(),
     history: vi.fn(),
-    audit: vi.fn(),
+    audit: mocks.audit,
     downloadVersion: vi.fn(),
   },
 }));
@@ -48,6 +55,7 @@ describe("SourceToolLibrary", () => {
         status: "draft",
       },
     ]);
+    mocks.audit.mockResolvedValue([]);
   });
 
   it("loads drafts and requires explicit confirmation before a manual test", async () => {
@@ -75,5 +83,14 @@ describe("SourceToolLibrary", () => {
         id: "42",
       });
     });
+  });
+
+  it("shows an empty state when the audit request returns no events", async () => {
+    const { container } = render(<SourceToolLibrary sourceId="portal" />);
+    const library = within(container);
+
+    fireEvent.click(await library.findByRole("button", { name: "审计记录" }));
+
+    expect(await screen.findByText("暂无审计记录")).toBeTruthy();
   });
 });

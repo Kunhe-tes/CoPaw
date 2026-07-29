@@ -769,34 +769,34 @@ class SWEAgent(ToolGuardMixin, ReActAgent):
                 if configured_tools.get(version.name, None) is None
                 or configured_tools[version.name].enabled
             }
-            client_tools = await client.list_tools()
-            if hasattr(client_tools, "tools"):
-                client_tools = client_tools.tools
-            collisions = sorted(
-                source_tool_names
-                & {str(getattr(tool, "name", "")) for tool in client_tools},
-            )
-            if collisions:
-                raise RuntimeError(
-                    "MCP tool collides with an active source tool: "
-                    + ", ".join(collisions),
-                )
-            # Set progress callback so MCP notifications reset the watchdog.
-            if hasattr(client, "on_progress_callback"):
-                client.on_progress_callback = self._reset_watchdog
+            collisions: list[str] = []
             try:
-                existing_tool_names = set(self.toolkit.tools)
-                await self.toolkit.register_mcp_client(
-                    client,
-                    namesake_strategy=namesake_strategy,
+                client_tools = await client.list_tools()
+                if hasattr(client_tools, "tools"):
+                    client_tools = client_tools.tools
+                collisions = sorted(
+                    source_tool_names
+                    & {
+                        str(getattr(tool, "name", "")) for tool in client_tools
+                    },
                 )
-                # Wire watchdog callback into MCPToolFunction instances
-                # registered by this client.
-                self._wire_mcp_progress_callbacks(client)
-                self._normalize_registered_tool_functions(
-                    self.toolkit,
-                    sorted(set(self.toolkit.tools) - existing_tool_names),
-                )
+                if not collisions:
+                    # Set progress callback so MCP notifications reset the
+                    # watchdog.
+                    if hasattr(client, "on_progress_callback"):
+                        client.on_progress_callback = self._reset_watchdog
+                    existing_tool_names = set(self.toolkit.tools)
+                    await self.toolkit.register_mcp_client(
+                        client,
+                        namesake_strategy=namesake_strategy,
+                    )
+                    # Wire watchdog callback into MCPToolFunction instances
+                    # registered by this client.
+                    self._wire_mcp_progress_callbacks(client)
+                    self._normalize_registered_tool_functions(
+                        self.toolkit,
+                        sorted(set(self.toolkit.tools) - existing_tool_names),
+                    )
             except (ClosedResourceError, asyncio.CancelledError) as error:
                 if self._should_propagate_cancelled_error(error):
                     raise
@@ -854,6 +854,11 @@ class SWEAgent(ToolGuardMixin, ReActAgent):
                     client_name,
                     e,
                     exc_info=True,
+                )
+            if collisions:
+                raise RuntimeError(
+                    "MCP tool collides with an active source tool: "
+                    + ", ".join(collisions),
                 )
 
     def _wire_mcp_progress_callbacks(self, client: Any) -> None:

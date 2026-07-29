@@ -41,6 +41,7 @@ export function SourceToolLibrary({ sourceId }: SourceToolLibraryProps) {
   const [history, setHistory] = useState<SourceToolVersion[]>([]);
   const [historyToolName, setHistoryToolName] = useState<string | null>(null);
   const [audit, setAudit] = useState<SourceToolAuditEvent[]>([]);
+  const [auditOpen, setAuditOpen] = useState(false);
   const [scriptContent, setScriptContent] = useState<string | null>(null);
   const [manualResult, setManualResult] = useState<string | null>(null);
   const [manualTestName, setManualTestName] = useState<string | null>(null);
@@ -112,6 +113,7 @@ export function SourceToolLibrary({ sourceId }: SourceToolLibraryProps) {
   const showAudit = async () => {
     try {
       setAudit(await sourceToolsApi.audit());
+      setAuditOpen(true);
     } catch {
       message.error("无法加载审计记录");
     }
@@ -300,18 +302,22 @@ export function SourceToolLibrary({ sourceId }: SourceToolLibraryProps) {
       </Modal>
       <Modal
         footer={null}
-        open={audit.length > 0}
+        open={auditOpen}
         title="系统工具审计记录"
-        onCancel={() => setAudit([])}
+        onCancel={() => setAuditOpen(false)}
       >
-        <div className={styles.history}>
-          {audit.map((event) => (
-            <div className={styles.historyRow} key={event.timestamp + event.event}>
-              <span>{event.event} · {event.tool_name}</span>
-              <span>{event.actor || "unknown"}</span>
-            </div>
-          ))}
-        </div>
+        {audit.length === 0 ? (
+          <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="暂无审计记录" />
+        ) : (
+          <div className={styles.history}>
+            {audit.map((event) => (
+              <div className={styles.historyRow} key={event.timestamp + event.event}>
+                <span>{event.event} · {event.tool_name}</span>
+                <span>{event.actor || "unknown"}</span>
+              </div>
+            ))}
+          </div>
+        )}
       </Modal>
       <Modal
         footer={null}
