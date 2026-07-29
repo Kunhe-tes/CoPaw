@@ -128,6 +128,19 @@ def test_cursor_rejects_forgery_and_context_mismatches(tmp_path: Path) -> None:
             service.list_directory(root, path, cursor=candidate, query=query)
 
 
+def test_missing_root_validates_a_cross_context_cursor_before_returning_empty(
+    tmp_path: Path,
+) -> None:
+    for index in range(FILE_MANAGER_PAGE_SIZE + 1):
+        (tmp_path / f"item{index:03d}.txt").write_text("x", encoding="utf-8")
+    service = _service(tmp_path)
+    cursor = service.list_directory(FileManagerRoot.WORKING).next_cursor
+    assert cursor is not None
+
+    with pytest.raises(FileManagerPathError):
+        service.list_directory(FileManagerRoot.UPLOAD, cursor=cursor)
+
+
 def test_listing_filters_direct_children_case_insensitively(
     tmp_path: Path,
 ) -> None:
@@ -157,6 +170,22 @@ def test_rejects_absolute_and_escaping_paths(
 ) -> None:
     with pytest.raises(FileManagerPathError):
         _service(tmp_path).resolve_path(FileManagerRoot.WORKING, path)
+
+
+def test_rejects_backslash_paths(tmp_path: Path) -> None:
+    with pytest.raises(FileManagerPathError):
+        _service(tmp_path).resolve_path(
+            FileManagerRoot.WORKING,
+            r"folder\\file.txt",
+        )
+
+
+def test_rejects_recycle_paths_in_this_service(tmp_path: Path) -> None:
+    with pytest.raises(FileManagerPathError):
+        _service(tmp_path).resolve_path(
+            FileManagerRoot.RECYCLE,
+            "archived-file",
+        )
 
 
 @pytest.mark.parametrize(
@@ -236,6 +265,17 @@ def test_conversation_root_is_read_and_download_only(tmp_path: Path) -> None:
         "download": True,
         "archive": False,
     }
+
+
+def test_file_items_do_not_expose_directory_browse_or_upload_actions(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "document.txt").write_text("text", encoding="utf-8")
+
+    item = _service(tmp_path).list_directory(FileManagerRoot.WORKING).items[0]
+
+    assert item.capabilities.browse is False
+    assert item.capabilities.upload is False
 
 
 @pytest.mark.parametrize(
@@ -344,3 +384,39 @@ def test_large_text_rejects_invalid_utf8_instead_of_ignoring_it(
     assert preview.is_text is False
     assert preview.content is None
     assert preview.editable is False
+
+
+def test_large_utf8_with_codepoint_started_after_sample_is_still_text(
+    tmp_path: Path,
+) -> None:
+    prefix = b"a" * (1024 * 1024 + 3)
+    (tmp_path / "boundary.txt").write_bytes(
+        prefix + "😀".encode("utf-8") + b"tail",
+    )
+
+    preview = _service(tmp_path).read_text_preview(
+        FileManagerRoot.WORKING,
+        "boundary.txt",
+    )
+
+    assert preview.is_text is True
+    assert preview.is_truncated is True
+    assert preview.editable is False
+    assert preview.content == "a" * (1024 * 1024)
+
+
+def test_large_invalid_utf8_after_sample_boundary_is_rejected(
+    tmp_path: Path,
+) -> None:
+    prefix = b"a" * (1024 * 1024 + 3)
+    (tmp_path / "invalid-boundary.txt").write_bytes(
+        prefix + b"\xf0\x28invalid",
+    )
+
+    preview = _service(tmp_path).read_text_preview(
+        FileManagerRoot.WORKING,
+        "invalid-boundary.txt",
+    )
+
+    assert preview.is_text is False
+    assert preview.content is None

@@ -23,6 +23,7 @@ from pydantic import BaseModel
 
 FILE_MANAGER_PAGE_SIZE = 100
 TEXT_PREVIEW_LIMIT_BYTES = 1024 * 1024
+_TEXT_UTF8_VALIDATION_BYTES = 7
 _WORKING_HIDDEN_TOP_LEVEL = frozenset({"sessions", "governance"})
 _NATURAL_PARTS = re.compile(r"(\d+)")
 
@@ -168,6 +169,12 @@ class FileManagerService:
             relative_path,
         )
         if not directory.exists() and normalised_path == "":
+            self._validate_cursor_context(
+                cursor,
+                resolved_root,
+                normalised_path,
+                query,
+            )
             return self._listing(resolved_root, normalised_path, [])
         if not directory.is_dir():
             raise FileManagerPathError("Path is not a directory")
@@ -207,10 +214,14 @@ class FileManagerService:
 
         size_bytes = target.stat().st_size
         with target.open("rb") as handle:
-            sample = handle.read(TEXT_PREVIEW_LIMIT_BYTES + 4)
-        try:
-            decoded_sample = sample.decode("utf-8")
-        except UnicodeDecodeError:
+            sample = handle.read(
+                TEXT_PREVIEW_LIMIT_BYTES + _TEXT_UTF8_VALIDATION_BYTES,
+            )
+        decoded_sample = self._decode_text_sample(
+            sample,
+            sample_is_truncated=size_bytes > len(sample),
+        )
+        if decoded_sample is None:
             return FileManagerTextPreview(
                 path=normalised_path,
                 size_bytes=size_bytes,
@@ -384,6 +395,25 @@ class FileManagerService:
     ) -> int:
         if cursor is None:
             return 0
+        last_path = self._validate_cursor_context(cursor, root, path, query)
+        try:
+            return next(
+                index + 1
+                for index, item in enumerate(items)
+                if item.path == last_path
+            )
+        except StopIteration as exc:
+            raise FileManagerPathError("Invalid directory cursor") from exc
+
+    def _validate_cursor_context(
+        self,
+        cursor: str | None,
+        root: FileManagerRoot,
+        path: str,
+        query: str | None,
+    ) -> str | None:
+        if cursor is None:
+            return None
         try:
             encoded_payload = base64.b64decode(
                 cursor.encode("ascii"),
@@ -405,11 +435,10 @@ class FileManagerService:
                 "last_path": cursor_payload["last_path"],
             }:
                 raise ValueError
-            return next(
-                index + 1
-                for index, item in enumerate(items)
-                if item.path == cursor_payload["last_path"]
-            )
+            last_path = cursor_payload["last_path"]
+            if not isinstance(last_path, str):
+                raise ValueError
+            return last_path
         except (
             AttributeError,
             binascii.Error,
@@ -421,6 +450,23 @@ class FileManagerService:
             json.JSONDecodeError,
         ) as exc:
             raise FileManagerPathError("Invalid directory cursor") from exc
+
+    @staticmethod
+    def _decode_text_sample(
+        sample: bytes,
+        *,
+        sample_is_truncated: bool,
+    ) -> str | None:
+        try:
+            return sample.decode("utf-8")
+        except UnicodeDecodeError as exc:
+            if (
+                not sample_is_truncated
+                or exc.reason != "unexpected end of data"
+                or exc.end != len(sample)
+            ):
+                return None
+            return sample[: exc.start].decode("utf-8")
 
     def _encode_cursor(
         self,
