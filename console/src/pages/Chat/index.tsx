@@ -117,7 +117,7 @@ import { isResponseFeedbackUserAllowed } from "./components/ResponseFeedbackCard
 import ApprovalActionCard from "./components/ApprovalActionCard";
 import TaskRunGroupCard from "./components/TaskRunGroupCard";
 import TaskProgressFloatingCard from "./components/TaskProgressFloatingCard";
-import GeneratedFilesDrawer from "./components/GeneratedFilesDrawer";
+import FileManager from "./components/FileManager";
 import { AutoPreviewHtmlProvider } from "@/components/agentscope-chat/AutoPreviewHtmlContext";
 import { HtmlPreviewTrackingProvider } from "@/components/agentscope-chat/HtmlPreviewTrackingContext";
 import { ChatContentOnlyProvider } from "@/components/agentscope-chat/ChatContentOnlyContext";
@@ -1628,7 +1628,7 @@ export default function ChatPage() {
             <RuntimeLoadingBridge bridgeRef={runtimeLoadingBridgeRef} />
             <ChatHeaderTitle />
             <span style={{ flex: 1 }} />
-            {!isContentOnly && <GeneratedFilesDrawer />}
+            {!isContentOnly && <FileManager />}
             {!isContentOnly && <ModelSelector />}
             {/* <ChatActionGroup /> */}
           </>
