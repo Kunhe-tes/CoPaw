@@ -7,7 +7,7 @@ import json
 import logging
 import os
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, AsyncGenerator, Callable, Collection
@@ -32,6 +32,9 @@ from .command_dispatch import (
     _get_last_user_text,
     _is_command,
     run_command_path,
+)
+from .hidden_context_injection import (
+    append_hidden_context_to_user_message,
 )
 from .model_call_error_detail import (
     MODEL_CALL_FAILED_MESSAGES_STATE_KEY,
@@ -173,6 +176,7 @@ class _QueryRuntime:
     channel: str
     skip_history: bool
     pending_confirmed_skill_snapshots: dict[str, dict[str, Any]]
+    selected_context_directives: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -2996,18 +3000,18 @@ class AgentRunner(Runner):
             ],
         )
 
+        selected_context_directives = [
+            directive.render()
+            for directive in [
+                *selected_skill_directives,
+                *context_reference_directives,
+            ]
+        ]
         env_context = _with_system_prompt_injections(
             env_context,
             _merge_system_prompt_injections(
                 get_system_prompt_injections(),
                 _request_system_prompt_injections(request),
-                [
-                    directive.render()
-                    for directive in [
-                        *selected_skill_directives,
-                        *context_reference_directives,
-                    ]
-                ],
             ),
         )
         tenant_hooks = (
@@ -3107,6 +3111,7 @@ class AgentRunner(Runner):
                 channel=channel,
                 skip_history=skip_history,
                 pending_confirmed_skill_snapshots={},
+                selected_context_directives=selected_context_directives,
             )
             self._attach_session_skill_detector(
                 runtime=runtime,
@@ -3134,11 +3139,21 @@ class AgentRunner(Runner):
         query: str | None,
     ) -> _TurnPlan:
         """根据普通请求构建本轮输入。"""
-        del runtime, request
+        del request
         original_user_message = query or _get_last_user_text(msgs) or ""
+        turn_msgs = list(msgs)
+        if (
+            turn_msgs
+            and runtime.selected_context_directives
+            and getattr(turn_msgs[-1], "role", None) == "user"
+        ):
+            turn_msgs[-1] = append_hidden_context_to_user_message(
+                turn_msgs[-1],
+                runtime.selected_context_directives,
+            )
         return _TurnPlan(
             original_user_message=original_user_message,
-            turn_msgs=list(msgs),
+            turn_msgs=turn_msgs,
         )
 
     async def _stream_agent_turns(

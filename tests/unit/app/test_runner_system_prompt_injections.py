@@ -4,10 +4,14 @@
 from __future__ import annotations
 
 from types import SimpleNamespace
+from typing import Any
 from unittest.mock import AsyncMock
 
 import pytest
+from agentscope.message import Msg
 
+from swe.app.runner import context_references, skill_selection
+from swe.app.runner.context_references import MCPToolPreferenceDirective
 from swe.app.runner.runner import AgentRunner
 from swe.app.source_system_config.models import (
     EffectiveSourceSystemConfig,
@@ -39,7 +43,12 @@ def _request(**extra):
     return SimpleNamespace(**payload)
 
 
-async def _run_query(monkeypatch, request):
+async def _run_query(
+    monkeypatch,
+    request,
+    captured=None,
+    context_directives=None,
+):
     runner = AgentRunner(agent_id="test-agent")
     runner.session = SimpleNamespace(
         load_session_state=AsyncMock(),
@@ -47,7 +56,7 @@ async def _run_query(monkeypatch, request):
     )
     setattr(runner, "_chat_manager", None)
 
-    captured: dict[str, str] = {}
+    captured = captured if captured is not None else {}
 
     class FakeAgent:
         def __init__(self, **kwargs):
@@ -62,7 +71,8 @@ async def _run_query(monkeypatch, request):
         def rebuild_sys_prompt(self):
             return
 
-        async def __call__(self, _msgs):
+        async def __call__(self, msgs):
+            captured["msgs"] = msgs
             return []
 
     async def fake_stream_printing_messages(*, agents, coroutine_task):
@@ -92,8 +102,18 @@ async def _run_query(monkeypatch, request):
         "swe.app.runner.runner._cleanup_mcp_clients",
         AsyncMock(),
     )
+    monkeypatch.setattr(
+        context_references,
+        "build_context_reference_directives",
+        AsyncMock(return_value=context_directives or []),
+    )
+    monkeypatch.setattr(
+        skill_selection,
+        "build_skill_use_directives",
+        lambda **kwargs: [],
+    )
 
-    msgs = [SimpleNamespace(get_text_content=lambda: "hello")]
+    msgs = [Msg(name="alice", role="user", content="hello")]
     results = []
     async for item in runner.query_handler(msgs, request=request):
         results.append(item)
@@ -167,3 +187,19 @@ async def test_query_handler_omits_empty_system_prompt_injection_block(
     env_context = await _run_query(monkeypatch, _request())
 
     assert "[System prompt injections]" not in env_context
+
+
+@pytest.mark.asyncio
+async def test_selected_context_directives_append_to_user_turn_not_system_prompt(
+    monkeypatch,
+) -> None:
+    captured: dict[str, Any] = {}
+    env_context = await _run_query(
+        monkeypatch,
+        _request(context_references=[{"type": "mcp_tool"}]),
+        captured,
+        [MCPToolPreferenceDirective(server="docs", name="search")],
+    )
+
+    assert "<TOOL-PREFERENCE>" not in env_context
+    assert "<TOOL-PREFERENCE>" in captured["msgs"][-1].get_text_content()
