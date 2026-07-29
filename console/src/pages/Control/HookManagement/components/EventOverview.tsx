@@ -47,7 +47,12 @@ export function EventOverview({
         </div>
         <div className={styles.overviewActions}>
           {dirty && <Tag color="processing">未保存更改</Tag>}
-          <Button icon={<PlusOutlined />} type="primary" onClick={onCreate}>
+          <Button
+            aria-label="新建 Hook 规则"
+            icon={<PlusOutlined />}
+            type="primary"
+            onClick={onCreate}
+          >
             新建 Hook 规则
           </Button>
         </div>

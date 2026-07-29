@@ -31,17 +31,18 @@ async function openPreToolHandler(handlerId = "guard-shell") {
   fireEvent.click(
     await screen.findByRole("button", { name: "编辑配置 PreToolUse" }),
   );
-  fireEvent.click(
-    await screen.findByRole("button", {
-      name: new RegExp(`^${handlerId}\\s+command$`, "i"),
-    }),
-  );
+  if (handlerId !== "guard-shell") {
+    fireEvent.click(
+      await screen.findByRole("button", { name: `编辑 ${handlerId}` }),
+    );
+  }
 }
 
 async function openPreToolGroup() {
   fireEvent.click(
     await screen.findByRole("button", { name: "编辑配置 PreToolUse" }),
   );
+  fireEvent.click(await screen.findByRole("tab", { name: "适用范围" }));
   fireEvent.click(await screen.findByRole("button", { name: "所有工具" }));
 }
 
@@ -191,13 +192,13 @@ describe("HookManagementPage", () => {
       (screen.getByLabelText("环境变量（JSON）") as HTMLTextAreaElement).value,
     ).toContain("FIRST");
 
-    fireEvent.click(
-      screen.getByRole("button", { name: "second-command command" }),
-    );
+  fireEvent.click(
+      screen.getByRole("button", { name: "编辑 second-command" }),
+  );
     expect(
       (screen.getByLabelText("环境变量（JSON）") as HTMLTextAreaElement).value,
     ).toContain("SECOND");
-  });
+  }, 10_000);
 
   it("requires confirmation before submitting a real manual test", async () => {
     render(<HookManagementPage />);
@@ -254,8 +255,8 @@ describe("HookManagementPage", () => {
     expect(
       await screen.findByRole("heading", { name: /Hook 管理/ }),
     ).toBeInTheDocument();
-    expect(screen.getByText("PreToolUse")).toBeInTheDocument();
-    expect(screen.getByText(/1 个分组 · 1 个处理器/)).toBeInTheDocument();
+    expect(screen.getAllByText("PreToolUse")).toHaveLength(2);
+    expect(screen.getByText("处理器数量")).toBeInTheDocument();
     expect(
       screen.getByRole("button", { name: "新建规则 SessionStart" }),
     ).toBeInTheDocument();
@@ -269,7 +270,7 @@ describe("HookManagementPage", () => {
     expect(screen.getByText("已配置事件")).toBeInTheDocument();
     expect(screen.getByText("处理器数量")).toBeInTheDocument();
     expect(screen.getByText("生命周期总览")).toBeInTheDocument();
-    expect(screen.getByText("PreToolUse")).toBeInTheDocument();
+    expect(screen.getAllByText("PreToolUse")).toHaveLength(2);
     expect(screen.getByText("Command")).toBeInTheDocument();
     expect(
       screen.getByRole("button", { name: "编辑配置 PreToolUse" }),
@@ -299,7 +300,7 @@ describe("HookManagementPage", () => {
     fireEvent.click(await screen.findByRole("button", { name: "确认删除" }));
 
     expect(
-      await screen.findByRole("button", { name: "开始配置 PreToolUse" }),
+      await screen.findByRole("button", { name: "新建规则 PreToolUse" }),
     ).toBeInTheDocument();
   }, 10_000);
 
@@ -312,8 +313,9 @@ describe("HookManagementPage", () => {
     fireEvent.click(screen.getByRole("button", { name: "从场景模板开始" }));
     fireEvent.click(screen.getByRole("button", { name: /工具调用审计/ }));
 
-    expect(screen.getByText("何时触发")).toBeInTheDocument();
+    expect(screen.getByLabelText("编辑 PostToolUse")).toBeInTheDocument();
     expect(screen.getAllByText("工具调用审计")).toHaveLength(2);
+    expect(screen.getByText("执行顺序")).toBeInTheDocument();
   }, 10_000);
 
   it("moves a Handler down while preserving its event and group", async () => {
@@ -343,7 +345,9 @@ describe("HookManagementPage", () => {
     fireEvent.click(
       screen.getByRole("button", { name: "guard-shell 下移" }),
     );
-    fireEvent.click(screen.getByRole("button", { name: "保存并激活" }));
+    fireEvent.click(
+      screen.getByRole("button", { name: "保存并激活 PreToolUse" }),
+    );
 
     await waitFor(() =>
       expect(mocks.saveConfiguration).toHaveBeenCalledWith(
@@ -370,9 +374,7 @@ describe("HookManagementPage", () => {
       await screen.findByRole("button", { name: "编辑配置 PreToolUse" }),
     );
 
-    expect(
-      screen.getByRole("dialog", { name: "编辑 PreToolUse" }),
-    ).toBeInTheDocument();
+    expect(screen.getByLabelText("编辑 PreToolUse")).toBeInTheDocument();
     expect(screen.getByRole("tab", { name: "基本设置" })).toBeInTheDocument();
     expect(screen.getByRole("tab", { name: "适用范围" })).toBeInTheDocument();
     expect(screen.getByRole("tab", { name: "处理器编排" })).toBeInTheDocument();

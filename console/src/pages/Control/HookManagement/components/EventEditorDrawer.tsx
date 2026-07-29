@@ -15,6 +15,7 @@ import {
   Tag,
 } from "antd";
 import type { ReactNode } from "react";
+import { useState } from "react";
 
 import { eventMetadata } from "../eventMetadata";
 import type {
@@ -84,6 +85,7 @@ export function EventEditorDrawer({
   onSelectGroup,
   onSelectHandler,
 }: EventEditorDrawerProps) {
+  const [activeTab, setActiveTab] = useState("pipeline");
   if (!event) return null;
   const metadata = eventMetadata[event];
 
@@ -97,7 +99,13 @@ export function EventEditorDrawer({
         groups.map((group) => (
           <div key={group.id} className={styles.groupPanel}>
             <div className={styles.groupSummary}>
-              <Button type="text" onClick={() => onSelectGroup(group.id)}>
+              <Button
+                type="text"
+                onClick={() => {
+                  onSelectGroup(group.id);
+                  setActiveTab("pipeline");
+                }}
+              >
                 <strong>{describeMatcher(group)}</strong>
               </Button>
               <span>{group.hooks.length} 个处理器</span>
@@ -140,6 +148,7 @@ export function EventEditorDrawer({
                 <div className={styles.pipelineStep} key={handler.id}>
                   <span className={styles.pipelineStepNumber}>{index + 1}</span>
                   <Button
+                    aria-label={`编辑 ${handler.id}`}
                     className={styles.pipelineStepButton}
                     type="text"
                     onClick={() => onSelectHandler(group.id, handler.id)}
@@ -221,21 +230,27 @@ export function EventEditorDrawer({
           >
             <Button danger>删除事件</Button>
           </Popconfirm>
-          <Button type="primary" loading={saving} onClick={onSave}>
+          <Button
+            aria-label={`保存并激活 ${event}`}
+            type="primary"
+            loading={saving}
+            onClick={onSave}
+          >
             保存并激活
           </Button>
         </Space>
       }
     >
       <Tabs
+        activeKey={activeTab}
         className={styles.drawerTabs}
-        defaultActiveKey="pipeline"
         items={[
           { key: "basic", label: "基本设置", children: basicDetails },
           { key: "scope", label: "适用范围", children: scopeContent },
           { key: "pipeline", label: "处理器编排", children: pipelineContent },
           { key: "test", label: "测试与发布", children: testDetails },
         ]}
+        onChange={setActiveTab}
       />
     </Drawer>
   );

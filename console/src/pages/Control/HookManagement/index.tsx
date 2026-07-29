@@ -871,6 +871,7 @@ function HookManagementPage() {
         ]}
       />
       <EventEditorDrawer
+        key={editingEvent ?? "closed"}
         event={editingEvent}
         groups={editingEvent ? (draft.events[editingEvent] ?? []) : []}
         templateLabel={templateLabel}
