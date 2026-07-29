@@ -111,6 +111,7 @@ export default function FileManager() {
     revokeBinaryPreview();
     setDetailError(null);
     setColumnQueries(["", "", ""]);
+    setSearch("");
     try {
       const rootPage = await loadDirectory(targetRoot, "");
       const firstFolder = rootPage.items.find((item) => item.kind === "directory");
@@ -185,7 +186,7 @@ export default function FileManager() {
             setSelected((previous) => [previous[0], entry.path, null]);
           } else {
             setColumns((previous) => [previous[0], page, null]);
-            setColumnQueries(["", "", ""]);
+            setColumnQueries((previous) => [previous[0], "", ""]);
             setSelected([entry.path, null, null]);
           }
         } catch (error) {
@@ -289,9 +290,14 @@ export default function FileManager() {
     const targetIndex = columns[1] ? 1 : 0;
     const target = columns[targetIndex];
     if (!target) return;
-    const refreshed = await loadDirectory(root, target.path);
+    const refreshed = await loadDirectory(
+      root,
+      target.path,
+      null,
+      columnQueries[targetIndex] || undefined,
+    );
     setColumns((previous) => previous.map((page, index) => index === targetIndex ? refreshed : page) as Columns);
-  }, [columns, loadDirectory, root]);
+  }, [columnQueries, columns, loadDirectory, root]);
 
   const upload = async (event: React.ChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0];
