@@ -12,6 +12,7 @@ from typing import Any, Optional
 
 from .config import TracingConfig
 from ..database import DatabaseConnection
+from ..utils.bbk import normalize_bbk_id_to_primary
 from .models import (
     EventType,
     MCPToolUsage,
@@ -154,7 +155,7 @@ class TraceStore:
             trace.error,
             trace.user_message,
             trace.user_name,
-            trace.bbk_id,
+            normalize_bbk_id_to_primary(trace.bbk_id),
         )
         await self.db.execute(query, params)
 
@@ -391,7 +392,7 @@ class TraceStore:
             span.tool_output,
             span.error,
             span.user_name,
-            span.bbk_id,
+            normalize_bbk_id_to_primary(span.bbk_id),
         )
         await self.db.execute(query, params)
 
@@ -505,7 +506,7 @@ class TraceStore:
                     span.tool_output,
                     span.error,
                     span.user_name,
-                    span.bbk_id,
+                    normalize_bbk_id_to_primary(span.bbk_id),
                 ),
             )
         rowcount = await self.db.execute_many(query, params_list)
