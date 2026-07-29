@@ -403,6 +403,11 @@ export default function Sidebar({ selectedKey }: SidebarProps) {
           icon: <SparkModifyLine size={16} />,
         },
         {
+          key: "hook-management",
+          label: collapsed ? null : t("nav.hookManagement"),
+          icon: <ShieldCheck size={16} />,
+        },
+        {
           key: "heartbeat",
           label: collapsed ? null : t("nav.heartbeat"),
           icon: <SparkVoiceChat01Line size={16} />,

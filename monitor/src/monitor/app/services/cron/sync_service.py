@@ -16,7 +16,11 @@ import httpx
 
 from ...database import get_db_connection
 from ...models.cron import CronJobSyncRequest, ExecutionSyncRequest
-from ....utils.bbk import get_bbk_id_by_name, get_bbk_name_by_id
+from ....utils.bbk import (
+    get_bbk_id_by_name,
+    get_bbk_name_by_id,
+    normalize_bbk_id_to_primary,
+)
 from ....utils.scope_decode import (
     is_encoded_scope_id,
     try_decode_tenant_id,
@@ -137,6 +141,18 @@ def _extract_bbk_id_from_path_name(path_name: Optional[str]) -> Optional[str]:
     return None
 
 
+def _normalize_request_bbk_id(
+    request: CronJobSyncRequest,
+) -> CronJobSyncRequest:
+    if not str(request.bbk_id or "").strip():
+        return request
+
+    normalized_bbk_id = normalize_bbk_id_to_primary(request.bbk_id)
+    if normalized_bbk_id == request.bbk_id:
+        return request
+    return request.model_copy(update={"bbk_id": normalized_bbk_id or ""})
+
+
 async def _fetch_user_info(
     tenant_id: str,
 ) -> Tuple[Optional[str], Optional[str]]:
@@ -253,12 +269,12 @@ async def _enrich_sync_request(
                 not request.bbk_id
                 or not get_bbk_name_by_id(str(request.bbk_id).strip())
             ):
-                update_fields["bbk_id"] = bbk_id
+                update_fields["bbk_id"] = normalize_bbk_id_to_primary(bbk_id)
 
             if update_fields:
                 request = request.model_copy(update=update_fields)
 
-        return request
+        return _normalize_request_bbk_id(request)
 
     except Exception as e:
         # 任何异常都返回原始请求，确保数据不丢失

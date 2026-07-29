@@ -1414,11 +1414,13 @@ async def download_my_skill(
     if skill is None:
         raise HTTPException(status_code=404, detail="Skill not found")
 
-    skill_dir = (
-        get_user_skills_dir(svc.swe_root, x_user_id, agent_id, source_id)
-        / skill_name
+    skill_dir = svc.get_registered_skill_dir(
+        x_user_id,
+        skill_name,
+        agent_id,
+        source_id,
     )
-    if not skill_dir.is_dir():
+    if skill_dir is None or not skill_dir.is_dir():
         raise HTTPException(status_code=404, detail="Skill not found")
 
     with tempfile.TemporaryDirectory(

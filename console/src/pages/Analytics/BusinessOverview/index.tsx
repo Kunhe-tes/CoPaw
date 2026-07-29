@@ -310,6 +310,31 @@ function buildDonutSegments(items: SummaryLegendItem[]) {
   });
 }
 
+function renderModelErrorCodeTooltip(summary: ErrorSummary | null) {
+  const rows = summary?.model_error_codes || [];
+
+  if (rows.length === 0) {
+    return (
+      <div className={styles.errorCodeTooltip}>
+        <div className={styles.errorCodeTooltipEmpty}>暂无可识别错误码</div>
+      </div>
+    );
+  }
+
+  return (
+    <div className={styles.errorCodeTooltip}>
+      {rows.map((row) => (
+        <div key={row.code} className={styles.errorCodeTooltipRow}>
+          <span className={styles.errorCodeTooltipCode}>{row.code}</span>
+          <span className={styles.errorCodeTooltipCount}>
+            {formatNumber(row.count)}个
+          </span>
+        </div>
+      ))}
+    </div>
+  );
+}
+
 /** 漏斗图组件：使用 echarts 展示任务执行转化率 */
 function TaskFunnel({ taskStatusSummary }: { taskStatusSummary: TaskStatusSummary | null }) {
   const totalTasks = safeNumber(taskStatusSummary?.total_tasks);
@@ -1730,13 +1755,31 @@ export default function BusinessOverviewPage() {
                       errorSummaryItems.reduce((sum, row) => sum + row.value, 0),
                       1,
                     );
+                    const label = (
+                      <span
+                        className={`${styles.legendLabel} ${
+                          item.key === "model-error" && item.value > 0
+                            ? styles.legendLabelHoverable
+                            : ""
+                        }`}
+                      >
+                        <i style={{ background: item.color }} />
+                        {item.label}
+                      </span>
+                    );
 
                     return (
                       <div key={item.key} className={styles.legendRow}>
-                        <span className={styles.legendLabel}>
-                          <i style={{ background: item.color }} />
-                          {item.label}
-                        </span>
+                        {item.key === "model-error" && item.value > 0 ? (
+                          <Tooltip
+                            placement="top"
+                            title={renderModelErrorCodeTooltip(errorSummaryData)}
+                          >
+                            {label}
+                          </Tooltip>
+                        ) : (
+                          label
+                        )}
                         <span className={styles.legendValue}>
                           {formatNumber(item.value)} (
                           {formatPercent((item.value / total) * 100)})

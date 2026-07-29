@@ -1,3 +1,4 @@
+// TODO: 合并代码时需要修改的地方
 export const COOKIE_KEYS = {
   userId: "",
   sysId: "",
@@ -50,6 +51,7 @@ export const KEY_TO_PATH: Record<string, string> = {
   models: "/models",
   environments: "/environments",
   "agent-config": "/agent-config",
+  "hook-management": "/hook-management",
   "system-config-page": "/system-config-page",
   "system-check": "/system-check",
   security: "/security",
@@ -87,6 +89,7 @@ export const KEY_TO_LABEL: Record<string, string> = {
   tools: "nav.tools",
   mcp: "nav.mcp",
   "agent-config": "nav.agentConfig",
+  "hook-management": "nav.hookManagement",
   "system-config-page": "nav.currentSourceConfig",
   "system-check": "nav.systemCheck",
   workspace: "nav.workspace",

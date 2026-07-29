@@ -57,12 +57,13 @@ export default function MessageList(props: {
     );
   }
 
-  if (safeMessages.length === 0)
+  if (safeMessages.length === 0) {
     return (
       <div className={cls(prefixCls, `${prefixCls}-welcome`)}>
         {!isContentOnly && <Welcome onSubmit={props.onSubmit} />}
       </div>
     );
+  }
 
   return (
     <Bubble.List

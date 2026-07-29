@@ -1,0 +1,237 @@
+.page {
+  min-width: 0;
+  padding: 24px;
+  background: var(--console-management-canvas);
+  color: var(--console-management-text);
+}
+.header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+  margin-bottom: 20px;
+}
+.header h1 {
+  margin: 0;
+  font-size: 20px;
+}
+.header p {
+  margin: 8px 0 0;
+  color: var(--console-management-text-secondary);
+}
+.editor {
+  max-width: 760px;
+  padding: 24px;
+}
+.editor label {
+  display: block;
+  margin: 0 0 14px;
+  color: var(--console-management-text-secondary);
+  font-size: 13px;
+}
+.editor label :global(.ant-input),
+.editor label :global(.ant-select) {
+  margin-top: 5px;
+}
+.editorHeader {
+  display: flex;
+  justify-content: space-between;
+  gap: 16px;
+  margin-bottom: 20px;
+}
+.editorHeader h2 {
+  margin: 0;
+}
+.editorHeader span {
+  color: var(--console-management-text-muted);
+}
+.sectionTitle {
+  margin: 18px 0 8px;
+  font-weight: 600;
+}
+.advanced {
+  display: grid;
+  gap: 10px;
+}
+.switchLine {
+  display: flex !important;
+  justify-content: space-between;
+  align-items: center;
+  max-width: 360px;
+}
+.scripts {
+  max-width: 980px;
+}
+.scriptActions {
+  display: flex;
+  gap: 12px;
+  align-items: center;
+  margin-bottom: 16px;
+  color: var(--console-management-text-muted);
+}
+.uploadInput {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+.uploadResult {
+  margin-top: 16px;
+  padding: 12px;
+  background: var(--console-management-surface-subtle);
+  border: 1px solid var(--console-management-border);
+  border-radius: 8px;
+}
+.uploadResult p {
+  margin: 4px 0;
+}
+.summary {
+  max-height: 240px;
+  overflow: auto;
+  margin-top: 16px;
+  padding: 12px;
+  background: var(--console-management-surface-subtle);
+  border-radius: 6px;
+}
+.formError,
+.fieldError {
+  margin: 0 0 16px;
+  color: var(--console-management-error);
+}
+.fieldError {
+  margin: 0;
+}
+.overview {
+  display: grid;
+  gap: 20px;
+}
+.overviewHeader,
+.overviewActions,
+.globalSwitch,
+.eventCard :global(.ant-card-head-title),
+.createActions,
+.templateList,
+.groupSummary {
+  display: flex;
+  align-items: center;
+}
+.overviewHeader {
+  justify-content: space-between;
+  gap: 16px;
+}
+.overviewHeader h2,
+.drawerSection h3 {
+  margin: 0;
+}
+.overviewHeader p,
+.eventCard p,
+.drawerSection p {
+  color: var(--console-management-text-secondary);
+}
+.overviewActions {
+  flex-wrap: wrap;
+  gap: 12px;
+}
+.globalSwitch {
+  gap: 8px;
+}
+.eventGrid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
+  gap: 16px;
+}
+.eventCard {
+  min-height: 220px;
+}
+.eventCard :global(.ant-card-body) {
+  display: grid;
+  align-content: start;
+  gap: 10px;
+}
+.eventLabel {
+  margin-left: 8px;
+  color: var(--console-management-text-muted);
+  font-weight: 400;
+}
+.eventStats {
+  font-weight: 600;
+}
+.eventEmpty {
+  margin: 0;
+}
+.eventEmpty :global(.ant-empty-image) {
+  height: 26px;
+  margin-bottom: 4px;
+}
+.drawerSection {
+  margin-bottom: 24px;
+}
+.groupSummary {
+  justify-content: space-between;
+  margin-top: 8px;
+  padding: 12px;
+  border: 1px solid var(--console-management-border);
+  border-radius: 8px;
+}
+.groupSummary span {
+  color: var(--console-management-text-muted);
+}
+.groupPanel {
+  margin-top: 8px;
+}
+.handlerCards {
+  display: grid;
+  gap: 6px;
+  padding: 8px 12px;
+  border: 1px solid var(--console-management-border);
+  border-top: 0;
+  border-radius: 0 0 8px 8px;
+}
+.handlerCard {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+.handlerTypeSelect {
+  width: 180px;
+}
+.createActions,
+.templateList {
+  align-items: stretch;
+  flex-direction: column;
+  gap: 12px;
+}
+.templateList :global(.ant-btn) {
+  height: auto;
+  padding: 12px;
+  text-align: left;
+}
+.templateList :global(.ant-btn span) {
+  display: block;
+}
+.templateList :global(.ant-btn span + span) {
+  margin-top: 4px;
+  color: var(--console-management-text-secondary);
+  white-space: normal;
+}
+@media (max-width: 760px) {
+  .page {
+    padding: 16px;
+  }
+  .header {
+    align-items: stretch;
+    flex-direction: column;
+  }
+  .scriptActions {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+  .overviewHeader {
+    align-items: stretch;
+    flex-direction: column;
+  }
+}
