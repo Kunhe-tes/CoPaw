@@ -92,7 +92,7 @@ export default createGlobalStyle`
   &-item-title {
     font-size: 14px;
     line-height: 20px;
-    font-weight: 500;
+    //font-weight: 500;
     color: ${DESIGN_TOKENS.colorTextPrimary};
     white-space: nowrap;
     overflow: hidden;

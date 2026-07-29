@@ -3,8 +3,10 @@ import { useLocation, useNavigate } from "react-router-dom";
 // ==================== 组件引入方式变更 (Kun He) ====================
 import { useChatAnywhereSessionsState } from "@/components/agentscope-chat";
 // ==================== 组件引入方式变更结束 ====================
+import { useChatContentOnly } from "@/components/agentscope-chat/ChatContentOnlyContext";
 import { useAgentStore } from "@/stores/agentStore";
 import { getInitialSessionSelection } from "../../sessionApi/initialSessionSelection";
+import { getResolvedChatId } from "../../sessionApi/resolvedSessionMapping";
 import { getSessionAgentId } from "../../sessionApi/sessionAgent";
 
 function matchesRequestedSession(
@@ -37,18 +39,34 @@ function isLocalTimestampSessionId(sessionId: string | undefined): boolean {
 const ChatSessionInitializer: React.FC = () => {
   const location = useLocation();
   const navigate = useNavigate();
+  const isContentOnly = useChatContentOnly();
 
-  const { sessions, currentSessionId, setCurrentSessionId } =
-    useChatAnywhereSessionsState();
+  const {
+    sessions,
+    currentSessionId,
+    setCurrentSessionId,
+    setSessionNotFound,
+  } = useChatAnywhereSessionsState();
   const { selectedAgent, setSelectedAgent } = useAgentStore();
 
   const currentSessionIdRef = useRef(currentSessionId);
   currentSessionIdRef.current = currentSessionId;
 
   useEffect(() => {
+    const requestedSessionId = location.pathname.match(/^\/chat\/(.+)$/)?.[1];
+    if (
+      isContentOnly &&
+      isLocalTimestampSessionId(requestedSessionId) &&
+      !getResolvedChatId(requestedSessionId)
+    ) {
+      setCurrentSessionId(undefined);
+      setSessionNotFound(true);
+      return;
+    }
+
     if (!sessions.length) return;
 
-    const { requestedSessionId, resolvedSessionId } = getInitialSessionSelection({
+    const { resolvedSessionId } = getInitialSessionSelection({
       pathname: location.pathname,
       sessionList: sessions,
     });
@@ -84,11 +102,13 @@ const ChatSessionInitializer: React.FC = () => {
     // Intentionally exclude currentSessionId from deps: only react to URL / session list changes.
     // currentSessionId is read via ref to avoid circular triggers.
   }, [
+    isContentOnly,
     location.pathname,
     navigate,
     selectedAgent,
     sessions,
     setCurrentSessionId,
+    setSessionNotFound,
     setSelectedAgent,
   ]);
 

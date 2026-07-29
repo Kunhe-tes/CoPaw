@@ -66,7 +66,7 @@ The main content area (behind the welcome layout) SHALL use background color #F1
 
 ### Requirement: Content-only presentation SHALL hide question-entry surfaces
 
-When content-only presentation is active, the Console SHALL NOT render the normal question composer or its attachment, speech, send, drag-upload, or paste-file surfaces. This visual suppression SHALL preserve how the existing chat route chooses and loads its welcome, loading, empty, message, and streaming states. When the active chat detail request returns HTTP 404, the content-only surface SHALL replace the otherwise blank empty region with the defined unavailable result.
+When content-only presentation is active, the Console SHALL NOT render the normal question composer or its attachment, speech, send, drag-upload, or paste-file surfaces. This visual suppression SHALL preserve how the existing chat route chooses and loads its welcome, loading, empty, message, and streaming states. When the active chat detail request returns HTTP 404 or the fixed route target is an unmapped temporary local session ID, the content-only surface SHALL replace the otherwise blank empty region with the defined unavailable result.
 
 #### Scenario: Existing route reaches a valid empty surface
 
@@ -74,10 +74,16 @@ When content-only presentation is active, the Console SHALL NOT render the norma
 - **THEN** no question composer, attachment action, speech action, send action, drag-upload overlay, or paste-file input surface is available
 - **AND** no 404 result is displayed
 
-#### Scenario: Missing content-only chat does not show Welcome
+#### Scenario: Missing persisted content-only chat does not show Welcome
 
 - **WHEN** the active content-only chat detail request returns HTTP 404
 - **THEN** the unavailable result is displayed instead of the Welcome surface
+- **AND** no question-entry or upload surface is mounted
+
+#### Scenario: Unmapped temporary content-only chat does not show Welcome
+
+- **WHEN** content-only presentation starts on a temporary local session ID that has no persisted chat mapping
+- **THEN** the unavailable result is displayed instead of the blank empty region or Welcome surface
 - **AND** no question-entry or upload surface is mounted
 
 #### Scenario: Preserve the normal welcome experience
