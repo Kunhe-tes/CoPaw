@@ -396,6 +396,7 @@ def _process_skill_upload_single(
     cn_name: Optional[str] = None,
     skill_id: Optional[str] = None,
     bbk_ids: Optional[list[str]] = None,
+    include_in_statistics: bool = False,
 ) -> tuple[Optional[str], Optional[dict], Optional[str], str, bool]:
     """处理单个技能的上架逻辑.
 
@@ -404,6 +405,7 @@ def _process_skill_upload_single(
         cn_name: 用户输入的中文展示名
         skill_id: parse-zip 生成的 skill_id，前端传入确保一致性
         bbk_ids: 所属分行 ID 列表
+        include_in_statistics: 是否纳入排行榜统计
 
     Returns:
         (imported_name, conflict_info, parsed_name_for_first, resolved_cn_name, version_unchanged)
@@ -461,6 +463,7 @@ def _process_skill_upload_single(
             category_id,
             bbk_ids,
         )
+        existing.include_in_statistics = include_in_statistics
         item = existing
     else:
         # 创建新市场条目，市场首发版本固定为 1.0.0
@@ -475,6 +478,7 @@ def _process_skill_upload_single(
             skill_id=final_skill_id,
             bbk_ids=bbk_ids or [],
         )
+        item.include_in_statistics = include_in_statistics
         items.append(item)
 
     # 复制技能文件到市场目录
@@ -566,6 +570,10 @@ async def publish_skill_upload(
     cn_name: str = Query(default=""),
     skill_id: str = Query(default=""),
     bbk_ids: str = Query(default=""),
+    include_in_statistics: bool = Query(
+        default=False,
+        description="是否纳入排行榜统计",
+    ),
     x_source_id: Optional[str] = Header(default=None, alias="X-Source-Id"),
     x_manager: Optional[str] = Header(default=None, alias="X-Manager"),
     x_user_id: Optional[str] = Header(default=None, alias="X-User-Id"),
@@ -636,6 +644,7 @@ async def publish_skill_upload(
                 cn_name,
                 skill_id,  # 传递 parse-zip 生成的 skill_id
                 parsed_bbk_ids,  # 传递所属分行
+                include_in_statistics,  # 传递是否纳入统计
             )
 
             if conflict:
