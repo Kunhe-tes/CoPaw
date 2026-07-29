@@ -10,7 +10,7 @@ import cls from "classnames";
 import Welcome from "../Welcome";
 import { useChatAnywhereOptions } from "../../Context/ChatAnywhereOptionsContext";
 import React from "react";
-import { Spin } from "antd";
+import { Result, Spin } from "antd";
 import { useChatContentOnly } from "@/components/agentscope-chat/ChatContentOnlyContext";
 
 export default function MessageList(props: {
@@ -36,6 +36,10 @@ export default function MessageList(props: {
     ChatAnywhereSessionsContext,
     (v) => v.isSessionLoading,
   );
+  const sessionNotFound = useContextSelector(
+    ChatAnywhereSessionsContext,
+    (v) => v.sessionNotFound,
+  );
   const bubbleListOptions = useChatAnywhereOptions((v) => v.theme?.bubbleList);
   const listRef = React.useRef<{ scrollToBottom: () => void } | null>(null);
   const prevMessagesLengthRef = React.useRef(safeMessages.length);
@@ -53,6 +57,18 @@ export default function MessageList(props: {
     return (
       <div className={cls(prefixCls, `${prefixCls}-loading`)}>
         <Spin size="large" />
+      </div>
+    );
+  }
+
+  if (isContentOnly && sessionNotFound) {
+    return (
+      <div className={cls(prefixCls, `${prefixCls}-welcome`)}>
+        <Result
+          status="404"
+          title="会话不存在"
+          subTitle="该会话不存在或已被删除"
+        />
       </div>
     );
   }
